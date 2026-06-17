@@ -15,9 +15,11 @@ Use when Rajrupesh asks "how was <TICKER>'s earnings?" or pastes an earnings cal
    the call. Full transcripts are paid via API, so this mode relies on the owner pasting one — if
    asked for a call digest without a transcript, do the results digest and offer the paste option.
 
-## Data (read-only): yfinance primary, Finnhub secondary, Alpha Vantage backup
-Prefer the read-only MCP tools; fall back to direct read-only HTTPS calls with the keys in
-`config/secrets.local.json` if the tools aren't available. Never use a write/order endpoint.
+## Data (read-only): use the helper library
+Use `lib.fundamentals` (Finnhub `metric` / `company_news` / `earnings_dates`) and `lib.marketdata`
+(`quote` / `history` / `indicators`) — they read keys via `lib.config.secret()` (env-first) and use
+read-only HTTPS only. A read-only MCP / `yfinance` library may be used if available, but the helpers are
+the reliable baseline. Never use a write/order endpoint.
 
 ## Produce (ONE screen, plain English, no jargon)
 **📞 Earnings review — <TICKER> (quarter, date)**
@@ -34,6 +36,17 @@ Prefer the read-only MCP tools; fall back to direct read-only HTTPS calls with t
 - **So what** — Hold / Buy more / Trim / Avoid lean + confidence + what to watch next quarter.
 - *Footer:* "Not financial advice — you decide and place trades."
 
+## Record the earnings reaction (per-stock memory)
+After the digest, write ONE `stock_observations` row so the agent remembers how this name behaved at
+earnings (re-read by `market-briefing` when it next analyzes the stock):
+```python
+lib.db.insert_observation({"ticker":T,"obs_date":"YYYY-MM-DD","event_type":"earnings",
+  "summary":"Q_ beat/miss EPS x vs y, rev …; guidance …","price_reaction":"+6.2% next day",
+  "confidence":"high","source":"finnhub+earnings-review"})
+```
+Keep it factual and short; never invent the numbers. This builds the seasonality/event memory over time.
+
 ## Rules
 - Never invent numbers; if the free API lacks the latest quarter, say so and offer the paste option.
-- Prices ~15-min delayed. If the lean is actionable, log it to `data/suggestions-log.jsonl` (same fields).
+- Prices ~15-min delayed. If the lean is actionable, persist it via `lib.db.insert_suggestion({...})`
+  (same fields as `market-briefing`'s Logging section).
