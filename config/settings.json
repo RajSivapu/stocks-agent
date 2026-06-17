@@ -45,7 +45,17 @@
     "monthly_money_moves_on_first_brief_of_month": true,
     "market_open_et": "09:30",
     "market_close_et": "16:00",
-    "_cadence_note": "Owner chose a DAILY weekday brief (07:30 ET) for the learning habit. Actionable money moves stay MONTHLY (full block on the first brief of the calendar month; a 1-line reminder otherwise). Free data APIs are fine — Alpha Vantage's 25/day budget resets each day. Cost: daily uses ~5x the Claude (Pro) usage of weekly; no separate API bill. v2 may add an intraday mode."
+    "_cadence_note": "Owner chose a DAILY weekday brief (07:30 ET) for the learning habit. Actionable money moves stay MONTHLY (full block on the first brief of the calendar month; a 1-line reminder otherwise). Free data APIs are fine — Alpha Vantage's 25/day budget resets each day. Cost: daily uses ~5x the Claude (Pro) usage of weekly; no separate API bill. v2 adds intraday + post-market runs (see cadence block)."
+  },
+  "cadence": {
+    "timezone": "America/Chicago",
+    "runs": [
+      { "kind": "pre-market", "time_ct": "06:30", "weight": "heavy", "quiet_unless_triggered": false, "note": "Full brief; monthly-plan on the 1st weekday of the month, else daily-status. Runs the full Rigorous-Mode pipeline (scan + watchlist + debates + scoring)." },
+      { "kind": "intraday", "time_ct": "10:30", "weight": "light", "quiet_unless_triggered": true, "note": "Scoped to open entry-zones + current holdings ONLY. Message only if a buy zone triggered or a holding hit invalidation. Silent otherwise." },
+      { "kind": "intraday", "time_ct": "13:30", "weight": "light", "quiet_unless_triggered": true, "note": "Same as 10:30." },
+      { "kind": "post-market", "time_ct": "15:10", "weight": "medium", "quiet_unless_triggered": true, "note": "Post-market analysis: record how each watched/held name behaved -> stock_observations + daily_snapshots; append a lessons.md regime line. Quiet unless something needs the owner." }
+    ],
+    "_note": "Owner-chosen weekday cadence (Central time; 06:30 CT = 07:30 ET). Intraday (10:30/13:30) and post-market (15:10) runs are TOKEN-LEAN: they read only the relevant slice (open zones + holdings), so total cadence is ~2.5-3x one full run, not 4x. Start on Pro, measure ~2 weeks, then tune dials (drop to morning + 1 intraday + EOD) or upgrade to Max only if tight."
   },
   "delivery": {
     "telegram": { "enabled": true },
