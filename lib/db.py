@@ -1,4 +1,5 @@
 import psycopg, pathlib
+from psycopg import sql
 from lib import config
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 
@@ -11,8 +12,11 @@ def init_schema():
         c.execute(sql); c.commit()
 
 def _insert(table, row) -> int:
-    cols = ",".join(row); ph = ",".join(["%s"] * len(row))
-    q = f"INSERT INTO {table} ({cols}) VALUES ({ph}) RETURNING id"
+    cols = list(row)
+    q = sql.SQL("INSERT INTO {t} ({c}) VALUES ({v}) RETURNING id").format(
+        t=sql.Identifier(table),
+        c=sql.SQL(",").join(map(sql.Identifier, cols)),
+        v=sql.SQL(",").join([sql.Placeholder()] * len(cols)))
     with conn() as c:
         cur = c.execute(q, list(row.values())); c.commit()
         r = cur.fetchone()
