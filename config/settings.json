@@ -25,6 +25,19 @@
     "income_goal_realistic_from": "year_2_to_3",
     "_note": "Owner starts at $500/mo (first buy by end of June 2026) and will scale toward $1,000/mo, building slowly. Each run, read monthly_investment_usd_current AND the actual portfolio size, then split by the 70/20/10 allocation (so $500 -> 350/100/50; $1000 -> 700/200/100) and ADAPT emphasis as the portfolio grows. $200/mo income stays a Year-2/3 target once the speculative bucket is real money — NOT Year-1. Until the opportunities fund reaches $500, speculative ideas are LEARNING/paper-trade only."
   },
+  "deployment": {
+    "core_mix": { "VOO": 0.80, "VXUS": 0.10, "SCHD": 0.10 },
+    "core_mix_note": "Default Core DCA split (config-driven). Mostly VOO (US S&P 500) + a small VXUS (international) + SCHD (dividend) tilt — justified in the monthly brief so it isn't 'why only VOO'. Owner may set pure VOO ({\"VOO\":1.0}). Core is AUTO-DCA: buy the fixed monthly Core amount across this mix every month regardless of price; lean MORE on red days.",
+    "dry_powder": {
+      "rollover_months": 2,
+      "_note": "Growth + speculative money is HELD AS CASH (dry powder), tracked in the dry_powder Postgres table per month (columns month, growth_available, spec_available, rolled_months). Deploy ONLY when a candidate clears the Rigorous-Mode gate (Medium+ conviction, risk gate passed) AND price is inside its entry zone — NOT just because a new month started. If no qualifying setup appears, growth cash waits up to rollover_months (2); after that, suggest DCA'ing it into Core so money isn't idle forever."
+    }
+  },
+  "entry_zones": {
+    "enabled": true,
+    "default_valid_until_days": 5,
+    "_note": "Every buy idea carries a buy ZONE (entry_zone_low/high), a VALID-UNTIL (default 5 trading days, or a stated condition like 'until it closes above $215'), and an INVALIDATION/stop (= the Bear-Case invalidation level). Late-look-friendly: the 10:30/13:30 intraday checks re-evaluate open zones against the live price and tell the owner if he's still in range. All three are persisted on the suggestions row (entry_zone_low, entry_zone_high, valid_until, invalidation_level)."
+  },
   "schedule": {
     "cadence": "daily_weekdays",
     "brief_days": ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday"],

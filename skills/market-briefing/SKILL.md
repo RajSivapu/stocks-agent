@@ -295,6 +295,41 @@ Give **dollar amounts** (recompute for the current monthly amount), not just per
 valuable things you give him now: the right month to DCA, the one best growth add, and teaching him
 to read catalysts so he's ready when the speculative bucket is real.
 
+## Money deployment — Core auto-DCA + dry powder + entry zones (v2; `settings.json.deployment` / `entry_zones`)
+This is HOW the monthly amounts actually get deployed — it refines the bucket split above. It is the
+heart of the v2 change: **stop pitching the whole plan every day; deploy growth money when a good setup
+appears, not all on day one.**
+
+**Core (~70%) = auto-DCA across a fund mix.** Each month, put the Core amount into the configured
+`deployment.core_mix` (default ~80% `<b>VOO</b>` + 10% `<b>VXUS</b>` + 10% `<b>SCHD</b>`; owner may set
+pure VOO). Buy regardless of price; lean to buy MORE on red days. In the **monthly-plan brief**, justify
+the mix in ONE plain line (VOO = US market, VXUS = international diversification, SCHD = dividends) so it
+isn't "why only VOO." Core is autopilot — not a conviction call.
+
+**Growth + speculative (~30%) = DRY POWDER (held as cash, deployed only on a real setup).** Do NOT
+deploy growth/spec money just because it's a new month. Track it in the `dry_powder` Postgres table by
+month: read with `lib.db.get_dry_powder(month)`, write with `lib.db.set_dry_powder(row)` (columns:
+`month, growth_available, spec_available, rolled_months`). On the monthly-plan brief, add that month's
+growth/spec budget to the available cash. Deploy a chunk **only when** a candidate clears the
+Rigorous-Mode gate (Medium+ conviction, risk gate passed) **AND** its price is inside its entry zone.
+Until then the cash waits — and the **daily-status brief says nothing to buy** rather than re-pitching.
+
+**Roll ≤2 months, then DCA to Core.** If growth dry powder sits `deployment.dry_powder.rollover_months`
+(=2) months with no qualifying setup, tell the owner (in the monthly-plan brief) to move that idle cash
+into Core so money isn't idle forever; track/reset `rolled_months` on the dry_powder row.
+
+**Entry zones on EVERY buy idea (`entry_zones.enabled`).** Every buy suggestion carries three things,
+persisted on its `suggestions` row and shown in plain English in the brief:
+- **buy zone** — `entry_zone_low` / `entry_zone_high` (e.g. "buy under $210, ideal near $195").
+- **valid-until** — `valid_until` (default `entry_zones.default_valid_until_days` trading days, or a
+  stated condition like "good through Friday or until it closes above $215").
+- **invalidation/stop** — the Bear-Case invalidation level (the price/condition where the thesis breaks).
+Late-look-friendly by design: the **intraday checks re-evaluate open zones** against the live price and
+tell the owner if he's still in range (see "Intraday check"). Compute the zone from the analysis
+(support / recent range) and the invalidation from the bear case — **never invent round numbers**; base
+them on the data you actually pulled. If `entry_zones.enabled` is false, fall back to a single rough
+entry price (legacy behavior).
+
 ## How you decide something is a buy (selection strategy — apply PER BUCKET)
 Use a **multi-factor (Quality–Value–Momentum + catalyst)** approach, matched to each bucket. This
 mirrors how the best services work (Seeking Alpha's quant factors, Motley Fool's quality/value,
