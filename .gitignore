@@ -1,0 +1,6 @@
+config/secrets.local.json
+__pycache__/
+*.pyc
+.env
+.venv/
+data/*.local

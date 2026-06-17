@@ -1,0 +1,16 @@
+{
+  "_comment": "Tickers covered in DETAIL daily, sector-diversified. The agent ALSO scans the WHOLE US market (all sectors) for opportunities beyond this list — see settings.json market_scan. Edit freely.",
+  "core": [
+    "VOO", "VTI", "QQQ", "SCHD", "DIA", "IWM", "VXUS",
+    "AAPL", "MSFT", "GOOGL", "AMZN", "BRK.B",
+    "JPM", "V", "MA", "UNH", "JNJ", "LLY",
+    "PG", "KO", "WMT", "COST", "HD",
+    "XOM", "CVX", "CAT", "HON", "LIN", "NEE", "PLD", "AMT"
+  ],
+  "growth": [
+    "NVDA", "AMD", "META", "TSLA", "AVGO", "CRM",
+    "NFLX", "ORCL", "ADBE", "NOW", "SHOP", "UBER"
+  ],
+  "_speculative_note": "Seeded with liquid, diversified HIGHER-VOLATILITY thematic/sector ETFs (watch, not buy). This is the character of the bucket without single-stock blow-up risk. Individual speculative names come from the daily scanner + the owner's own conviction. Per-position sizing stays small (see settings.json risk).",
+  "speculative": ["SMH", "ARKK", "XBI"]
+}

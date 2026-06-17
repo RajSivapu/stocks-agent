@@ -1,0 +1,125 @@
+{
+  "owner": {
+    "name": "Rajrupesh",
+    "email": "rupesh.sivapu@gmail.com",
+    "timezone": "America/Chicago"
+  },
+  "strategy": {
+    "style": "long-term core + some swing",
+    "allocation": { "core": 0.70, "growth": 0.20, "speculative": 0.10 },
+    "core_prefers_dollar_cost_averaging": true,
+    "stage": "year1_foundation"
+  },
+  "capital": {
+    "monthly_investment_usd_min": 500,
+    "monthly_investment_usd_max": 1000,
+    "monthly_investment_usd_current": 500,
+    "scale_with_portfolio": true,
+    "split_by_allocation": true,
+    "monthly_split_usd_at_500": { "core": 350, "growth": 100, "opportunities_fund": 50 },
+    "speculative_mode": "learning",
+    "speculative_go_live_when_bucket_usd": 500,
+    "speculative_learning_redirect": "core_or_growth",
+    "_redirect_note": "Owner preference: while speculative is in LEARNING mode (no live spec buy this month), DON'T leave the $50 idle — recommend deploying it into Core or Growth this month (agent picks the better spot, leaning Core/VOO for safety unless there's a strong Growth conviction). Still TEACH one speculative setup to study. Money working > an idle opportunities fund.",
+    "income_goal_usd_per_month": 200,
+    "income_goal_realistic_from": "year_2_to_3",
+    "_note": "Owner starts at $500/mo (first buy by end of June 2026) and will scale toward $1,000/mo, building slowly. Each run, read monthly_investment_usd_current AND the actual portfolio size, then split by the 70/20/10 allocation (so $500 -> 350/100/50; $1000 -> 700/200/100) and ADAPT emphasis as the portfolio grows. $200/mo income stays a Year-2/3 target once the speculative bucket is real money — NOT Year-1. Until the opportunities fund reaches $500, speculative ideas are LEARNING/paper-trade only."
+  },
+  "schedule": {
+    "cadence": "daily_weekdays",
+    "brief_days": ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday"],
+    "brief_time_et": "07:30",
+    "monthly_money_moves_on_first_brief_of_month": true,
+    "market_open_et": "09:30",
+    "market_close_et": "16:00",
+    "_cadence_note": "Owner chose a DAILY weekday brief (07:30 ET) for the learning habit. Actionable money moves stay MONTHLY (full block on the first brief of the calendar month; a 1-line reminder otherwise). Free data APIs are fine — Alpha Vantage's 25/day budget resets each day. Cost: daily uses ~5x the Claude (Pro) usage of weekly; no separate API bill. v2 may add an intraday mode."
+  },
+  "delivery": {
+    "telegram": { "enabled": true },
+    "email": { "enabled": false, "to": "rupesh.sivapu@gmail.com", "note": "optional fallback; needs Gmail sign-in, may not work in scheduled cloud runs" }
+  },
+  "risk": {
+    "max_position_pct_of_bucket": { "core": 25, "growth": 20, "speculative": 10 },
+    "always_require_stop_loss": true,
+    "loud_warning_on_speculative": true,
+    "daily_loss_limit_pct": 3,
+    "circuit_breaker_consecutive_losses": 3
+  },
+  "data": {
+    "primary": "yfinance",
+    "secondary": "finnhub",
+    "fallback": "alphavantage",
+    "compute_indicators_locally": true,
+    "indicators_from": "yfinance_price_history",
+    "price_delay_minutes": 15,
+    "_note": "DATA SWAP (2026-06-17 Rigorous Mode): yfinance is now PRIMARY (quotes, full price history, fundamentals, predefined screeners — no hard daily cap). Technical indicators (RSI-14, MACD 12/26/9, SMA/EMA 50 & 200) are COMPUTED LOCALLY in-session from yfinance price history, removing the old Alpha Vantage indicator dependency. Finnhub is SECONDARY (stock/metric fundamentals, company news+sentiment, earnings dates, insider Form 4; 60/min free). Alpha Vantage is an OPTIONAL last-resort BACKUP only (its 25/day cap was the binding limit, so it is demoted). Works in a cloud schedule (no local server)."
+  },
+  "rigor": {
+    "enabled": true,
+    "structured_debate": true,
+    "depth": {
+      "full": ["money_moves", "holdings"],
+      "compact": ["watchlist", "scan_shortlist"],
+      "_note": "FULL multi-round debate runs on money-moves (the month's growth pick + 2-3 runner-ups), any buy/trim/sell, any watchlist promote/retire, and EVERY name the owner holds (portfolio.json). COMPACT one-round structured pass (1 bull / 1 bear / 1 risk flag, reusing data already pulled, no extra API calls) runs on every other watchlist + scan-shortlist name. Nothing is skipped; depth concentrates where real money is at stake."
+    },
+    "confidence_gate": {
+      "min_conviction_to_suggest_buy": "medium",
+      "below_threshold_action": "watch",
+      "_note": "A BUY is suggested only at Medium-or-higher conviction AFTER the debate. Low conviction is demoted to 'watch', never suggested as a buy."
+    },
+    "risk_gate_can_veto": true,
+    "full_depth_checklists": ["deep_dive", "peer_relative_valuation", "bear_case"],
+    "_note": "RIGOROUS MODE (spec 2026-06-17): formalizes the TradingAgents-style deliberation already used loosely. Each analyzed name gets a structured, logged Bull-vs-Bear + risk-veto pass; the risk gate can override the debate (veto/downgrade). Full-depth names additionally run three reel-sourced checklists (Deep Dive / Peer relative-valuation / Bear Case). Suggestion-only and brief format are UNCHANGED — all of this runs behind the scenes and is enriched into data/suggestions-log.jsonl."
+  },
+  "market_scan": {
+    "enabled": true,
+    "universe": "all_us_stocks_all_sectors",
+    "method": "broad free screeners narrow the whole market to a shortlist, then deep-analyze only the shortlist + watchlist (respects API rate limits). NEVER iterate the full ticker list.",
+    "universe_filters": {
+      "min_price": 5,
+      "min_avg_daily_volume": 1000000,
+      "min_market_cap": 2000000000,
+      "note": "Quality/liquidity floor — removes penny stocks & illiquid junk before scoring. Eliminates most noise and keeps the scan cheap. (~$2B = mid-cap and up.)"
+    },
+    "screens": [
+      "top_gainers", "top_losers", "most_active", "unusual_volume",
+      "near_52w_high_quality", "oversold_quality", "insider_buying_clusters"
+    ],
+    "max_candidates_surfaced": 10,
+    "sectors": "all"
+  },
+  "radar": {
+    "enabled": true,
+    "max_size": 15,
+    "auto_prune_after_days_inactive": 7,
+    "promote_to_watchlist_after_days_relevant": 5,
+    "promotion_requires_owner_approval": false,
+    "auto_manage_watchlist": true,
+    "report_watchlist_changes_in_brief": true,
+    "never_remove_held_or_owner_added": true,
+    "watchlist_max_per_bucket": { "core": 35, "growth": 20, "speculative": 6 },
+    "note": "DYNAMIC watchlist (owner opted into autonomous management). The agent self-curates data/radar.json from scanner/news finds, then AUTO-PROMOTES persistently-strong names into watchlist.json and RETIRES stale/broken ones it previously added — reporting every change in the brief (transparent + reversible). It NEVER removes a name the owner holds or manually added (only names IT added), respects watchlist_max_per_bucket, and the owner can veto/revert anytime."
+  },
+  "learning": {
+    "enabled": true,
+    "memory_file": "data/learning.md",
+    "_note": "The agent keeps a running 'learning memory': distilled lessons + trend observations (e.g. 'my biotech calls underperform', 'growth picks do better bought on red days', 'market regime shifted from X to Y'). It READS this back every run and APPLIES it, and UPDATES it with new lessons + a compare of the latest trend vs the prior trend. This is the honest, robust version of 'learn from day 1 / get smarter over time' — memory + self-review over an LLM agent, NOT a trained price-prediction model (deliberately out of scope; such models overfit and mislead at this stage)."
+  },
+  "scoring": {
+    "enabled": true,
+    "model": "health_score_0_100",
+    "weights": { "growth": 35, "financial_health": 35, "valuation": 30 },
+    "risk_bands": { "lower_risk_min": 70, "medium_risk_min": 50 },
+    "_note": "Transparent 0-100 stock quality/risk score, shown as a small tag (e.g. '76/100 low-med risk'). It is a SUMMARY of quality+risk, NOT a buy signal — the multi-role lens still makes the call. Valuation forgives a high P/E when growth is strong (PEG-style), like NVDA. Broad ETFs are diversified, so the score is skipped/noted rather than computed like a single stock. Qualitative risk flags (e.g. customer concentration) are best-effort from news; the score records which inputs it had and degrades gracefully when one is missing."
+  },
+  "deep_dives": {
+    "weekly_catchup_in_brief": true,
+    "catchup_day": "Monday",
+    "on_demand_skills": ["equity-research", "earnings-review"],
+    "_note": "Inspired by the Anthropic-finance reel, built on FREE data ($0). Weekly catch-up = the first brief of each week (Monday) summarizes last week's news/ratings/filings + this week's earnings dates for watchlist + holdings. Two deeper checks are ON-DEMAND skills: 'equity-research' (plain-English research note re-checking a stock's thesis) and 'earnings-review' (earnings results digest; paste a transcript for a fuller call digest — full transcripts are paid, so the free version covers actual-vs-expected, guidance, and reaction). Most useful once you own stocks; usable now on watchlist names for learning."
+  },
+  "guardrails": {
+    "execution_allowed": false,
+    "rule": "Suggestion-only. The agent must never place, modify, or cancel a trade."
+  }
+}
