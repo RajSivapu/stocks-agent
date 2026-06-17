@@ -1,3 +1,5 @@
+import sys, pathlib
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))
 import json, ssl, urllib.request, urllib.parse
 from lib import config, db
 ctx = ssl.create_default_context(); UA={"User-Agent":"Mozilla/5.0"}
