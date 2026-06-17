@@ -56,7 +56,7 @@ slice only — NOT the whole universe):
    "price_reaction":…,"confidence":…,"source":…})`. Keep observations sparse and meaningful — this is
    the per-stock behavior/seasonality memory re-read when that name is next analyzed (treated as a
    hypothesis, n=1; stay skeptical of patterns that may already be priced in).
-3. **Regime line** — append ONE dated line to the "Market regime log" in `data/learning.md` (today's
+3. **Regime line** — append ONE dated line to the "Market regime log" in `data/lessons.md` (today's
    direction, sector leadership, volatility, theme) so tomorrow's run can compare trend-vs-prior-trend.
 
 **Quiet unless something needs the owner** (e.g. a holding broke down): usually this run writes to the
@@ -94,7 +94,7 @@ lessons/grades, and the per-stock observations for the specific names you're ana
 history into context. Token-per-run must stay roughly flat as the database grows.
 
 **Still files (human-edited / human-read):** `config/settings.json`, `config/watchlist.json`, and the
-narrative `data/learning.md`. Everything else — holdings, transactions, suggestions, grades,
+narrative `data/lessons.md`. Everything else — holdings, transactions, suggestions, grades,
 observations, daily snapshots, dry-powder, radar — is Postgres.
 
 ## Inputs (read these first, every run)
@@ -253,6 +253,13 @@ deliberation method above concrete. They also power the on-demand `equity-resear
 guardrail, and they run **behind the scenes** (results are logged; the brief format is unchanged).
 Honesty note: the source reel's performance claims are survivorship-bias marketing — these are kept
 purely as analysis *structure*, and they suit the Growth pick + holdings mindset, NOT the Core 70% DCA.
+
+**First, recall what you've learned about this stock.** Before the checklists, query the per-stock
+memory: `lib.db.get_observations(ticker)`. Apply any prior **seasonal / event patterns** (e.g. "AAPL
+tends to firm up around the Sept iPhone launch", "NVDA runs into GTC/earnings") as **hypotheses, not
+facts** — n=1 memory that strengthens over years. Stay **skeptical of well-known patterns that may
+already be priced in**; let an observation raise or lower a flag, never make the call by itself. (The
+post-market run is what RECORDS new observations — see "Post-market analysis".)
 
 1. **Deep Dive** (feeds the specialist + bull passes):
    - **Business model** — how they make money / core product, in plain beginner English.
@@ -508,8 +515,14 @@ removals of names the owner holds or added (those are never auto-removed).
 **💼 Your money** — holdings from `lib.db.get_holdings()`, each: up/down 🟢/🔴 + one note. If none yet:
 "No holdings added yet — tell me when you buy and I'll track them."
 
-**📊 My track record** — running accuracy from the self-review (below), e.g. "Last month: right on
+**📊 My track record** — running accuracy from the grading pass (above), e.g. "Last month: right on
 6 of 10 calls (60%); being more careful on risky picks." Show "building track record" until ≥1 month.
+
+**🏁 Monthly scorecard** (MONTHLY-PLAN brief ONLY — the 1st weekday of the month; OMIT on daily-status
+briefs) — a few plain lines from the grading pass + lessons: **accuracy by bucket** last month (e.g.
+"Growth 4/5, Speculative 1/4"), the **biggest lesson learned** (from `data/lessons.md`), and **what's
+changing** this month because of it (e.g. "leaning more cautious on chip names after two faded"). Honest
+and short; this is the only brief that carries it.
 
 **💡 Tip of the day** — ONE tiny beginner concept in ONE plain sentence (every day).
 
@@ -523,7 +536,7 @@ For each action line you produced, persist ONE `suggestions` row via `lib.db.ins
 with the full internal fields (even though the message showed only the simple line). Rigorous Mode adds
 the debate fields — `depth`, `bull`, `bear`, `decisive_factor`, `risk_verdict`, `invalidation_level` —
 alongside the confidence/score fields, plus the v2 entry-zone fields (`entry_zone_low`,
-`entry_zone_high`, `valid_until`), so the grading pass + `data/learning.md` compound from richer
+`entry_zone_high`, `valid_until`), so the grading pass + `data/lessons.md` compound from richer
 history. The row dict (columns map 1:1 to the `suggestions` table):
 ```python
 db.insert_suggestion({"date":"YYYY-MM-DD","ticker":"XXX","action":"Buy","bucket":"growth",
@@ -542,25 +555,37 @@ ETFs and when the score couldn't be computed. Omit fields you don't have rather 
 (The delivered Telegram message itself is not separately archived — Telegram keeps it, and the
 structured reasoning lives in the `suggestions` row.)
 
-## Track record + self-review (learn from past calls — show in the brief)
-Every run, BEFORE writing suggestions:
-1. Read the relevant slice of past calls from Postgres (e.g. `db._rows("SELECT * FROM suggestions
-   WHERE date >= CURRENT_DATE - 30")` and `db.recent_lessons_rows()`). For past calls old enough to
-   judge, compare the price then (`price_at_suggestion`) vs now (`lib.marketdata.quote`) to mark each
-   roughly right/wrong. (Slice 5 adds the formal grading pass writing `suggestion_grades`.)
-2. Compute a simple **accuracy %** (e.g. last 30 days) and note where you've been weak (e.g.
-   "speculative calls mostly wrong").
-3. **Adjust this run accordingly** — lower confidence / be more cautious in the buckets where you've
-   been wrong. This is the "learn from mistakes" loop (review + recalibrate; not model retraining).
-4. Surface the headline number in the "📊 My track record" line. Show "building track record" until
+## Grading pass + track-record self-review (learn from past calls — run BEFORE writing suggestions)
+This is the **grading pass** (spec §11): score the agent's own past calls against what the stock
+actually did, so confidence is earned, not assumed.
+1. **Find ungraded calls old enough to judge.** Query the relevant slice from Postgres — past
+   `suggestions` that have reached a grading horizon (`settings.learning.grading_horizons_days`, ≈
+   5/21/63 days) and don't yet have a `suggestion_grades` row at that horizon. Keep it lean (a bounded
+   query, not the whole table).
+2. **Grade each.** Compare the price then (`price_at_suggestion`) vs now (`lib.marketdata.quote`), in
+   the direction of the call (a Buy is "right" if it rose, etc.). Write a row:
+   `lib.db.insert_grade({"suggestion_id":sid,"result":"right|wrong|partial","price_then":…,
+   "price_later":…,"horizon_days":…,"note":"…"})`.
+3. **Compute accuracy by bucket** from recent grades (`lib.db.recent_lessons_rows()`); note where
+   you've been weak (e.g. "speculative calls mostly wrong").
+4. **Adjust this run accordingly** — lower confidence / be more cautious in the buckets where you've
+   been wrong. Review + recalibrate; this is NOT model retraining. **Gated auto-tuning** of numeric
+   parameters (sizing, score weights) is allowed ONLY after `settings.learning.auto_tune_after_graded_calls`
+   (≈50) graded calls in a bucket — until then, judgment-only (documented, not yet active).
+5. Surface the headline number in the "📊 My track record" line. Show "building track record" until
    there is ≥1 month of data. Be honest — never inflate the score.
 
-## Learning memory — get smarter from day 1 (read + update `data/learning.md`, settings.json `learning`)
+**Invalidation-triggered reassessment.** When a holding or open idea **hits its `invalidation_level`**
+(detected here or in an intraday check), STOP defending the old thesis. Reason fresh from the stock's
+actual behavior and decide trim / exit / hold — and record the reassessment (a grade + an observation).
+A broken thesis is data, not a failure to argue around.
+
+## Learning memory — get smarter from day 1 (read + update `data/lessons.md`, settings.json `learning`)
 This is the honest version of "learn over time and compare trends" — **memory + self-review over an
 LLM agent, NOT a trained price-prediction model** (deliberately out of scope; such models overfit and
-mislead at this stage). If `data/learning.md` is missing, create it with "Lessons learned" and
+mislead at this stage). If `data/lessons.md` is missing, create it with "Lessons learned" and
 "Market regime log" sections. Each run:
-1. **Read** `data/learning.md` and let its lessons temper today's calls (be more cautious in buckets
+1. **Read** `data/lessons.md` and let its lessons temper today's calls (be more cautious in buckets
    where past lessons say you've been wrong; lean into what's worked).
 2. **Compare** today's market backdrop to the **previous "Market regime log" entry** — note what
    changed (direction, sector leadership, volatility, rates/news theme). This is the "latest trend vs
