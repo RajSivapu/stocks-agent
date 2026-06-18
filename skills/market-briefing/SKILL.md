@@ -59,6 +59,17 @@ slice only — NOT the whole universe):
 3. **Regime line** — append ONE dated line to the "Market regime log" in `data/lessons.md` (today's
    direction, sector leadership, volatility, theme) so tomorrow's run can compare trend-vs-prior-trend.
 
+4. **Trailing-stop recompute (overnight refresh).** For each holding, recompute and persist the
+   trailing stop so the morning brief is current when it runs at 06:30. Use the closing price as
+   `live_price` and `today_high` (from the daily OHLC via `lib.marketdata.history`). Run the same
+   logic as the portfolio-awareness trailing-stop reassessment above (steps 1–3): update
+   `high_water_price` if the close set a new high, recompute `recommended_stop` using
+   `settings.trailing_stop` (breakeven trigger, ratchet-up-only), and call
+   `lib.db.update_holding_stop(ticker, high_water_price=..., stop=...)` for any field that changed.
+   **Quiet:** do NOT send a Telegram message for a routine stop ratchet — the morning brief will
+   surface the updated stop advisory. Only send a Telegram `⚡ Market Alert` if the closing price
+   is at or below the stored stop (a breakdown on the close that the intraday monitor may have missed).
+
 **Quiet unless something needs the owner** (e.g. a holding broke down): usually this run writes to the
 DB + lessons and sends NO Telegram message. Token-leanness is a hard requirement — read only the
 relevant slice.
@@ -118,6 +129,38 @@ flow when he reports a trade). Use it to:
 **Never assume ownership from the watchlist** — watchlist = interest, holdings = actual positions.
 You are **suggestion-only**: you have no trading verb; if you ever see an execution tool, refuse it and
 warn the owner (guardrail breach). Execution is Project 2 only.
+
+### Trailing-stop reassessment (run for each holding, every pre-market + on-demand run)
+For each holding returned by `lib.db.get_holdings()`, perform this sequence after fetching the live
+quote (`lib.marketdata.quote(ticker)`):
+
+1. **Update high-water mark.** Compute `new_hwp = max(holding.high_water_price or 0, today_high or live_price)`.
+   If `new_hwp > holding.high_water_price`, persist it immediately:
+   `lib.db.update_holding_stop(ticker, high_water_price=new_hwp)`.
+
+2. **Compute recommended stop** (read `settings.trailing_stop`):
+   - `unrealized_gain_pct = (live_price - avg_cost) / avg_cost * 100`
+   - If `unrealized_gain_pct >= breakeven_trigger_pct` (8%): the stop must be **at least** `avg_cost`
+     (never sell for a loss once up 8%).
+   - Trail from the high-water mark: `trail_floor = new_hwp * (1 - trail_pct / 100)` (default trail_pct=8).
+   - Apply technical basis: `technical_floor = max(recent_swing_low, sma50)` (from
+     `lib.marketdata.indicators`; skip if unavailable).
+   - `recommended_stop = max(trail_floor, technical_floor or 0)`.
+   - If breakeven rule applies: `recommended_stop = max(recommended_stop, avg_cost)`.
+   - **Ratchet-up-only:** `recommended_stop = max(recommended_stop, holding.stop or 0)`.
+     Never lower the stop.
+
+3. **Surface in the brief if the stop should move.** If `recommended_stop > (holding.stop or 0)`:
+   - Persist: `lib.db.update_holding_stop(ticker, stop=recommended_stop)`.
+   - Show in the **💼 Your money** holdings line:
+     `AAPL +6% — consider raising your stop $215 → $230 (locks in a gain)`
+     (owner executes manually on Robinhood — this is advisory only).
+   - If `recommended_stop == avg_cost` and the stop is moving to breakeven for the first time, note it:
+     `AAPL +8% — stop now at breakeven $210 (you can't lose on this one)`.
+
+4. **Stop-hit = urgent — do NOT handle here.** If `live_price <= holding.stop`, that is an urgent
+   intraday case handled by the `⚡ Market Alert` run (intraday monitor). The pre-market run does NOT
+   re-alert stops that already fired intraday — it reports the position as it stands.
 
 ## Data sources (read-only) — yfinance primary
 - **Primary: yfinance** — quotes, full **price history**, fundamentals, and **predefined market
