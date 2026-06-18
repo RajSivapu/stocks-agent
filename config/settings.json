@@ -50,12 +50,36 @@
   "cadence": {
     "timezone": "America/Chicago",
     "runs": [
-      { "kind": "pre-market", "time_ct": "06:30", "weight": "heavy", "quiet_unless_triggered": false, "note": "Full brief; monthly-plan on the 1st weekday of the month, else daily-status. Runs the full Rigorous-Mode pipeline (scan + watchlist + debates + scoring)." },
-      { "kind": "intraday", "time_ct": "10:30", "weight": "light", "quiet_unless_triggered": true, "note": "Scoped to open entry-zones + current holdings ONLY. Message only if a buy zone triggered or a holding hit invalidation. Silent otherwise." },
-      { "kind": "intraday", "time_ct": "13:30", "weight": "light", "quiet_unless_triggered": true, "note": "Same as 10:30." },
-      { "kind": "post-market", "time_ct": "15:10", "weight": "medium", "quiet_unless_triggered": true, "note": "Post-market analysis: record how each watched/held name behaved -> stock_observations + daily_snapshots; append a lessons.md regime line. Quiet unless something needs the owner." }
+      {"kind":"pre-market","time_ct":"06:30","weight":"heavy","quiet_unless_triggered":false,
+       "note":"Full brief; monthly-plan on the 1st weekday of the month, else daily-status. Full Rigorous-Mode pipeline."},
+      {"kind":"intraday","time_ct":"12:00","weight":"light-medium","quiet_unless_triggered":true,
+       "note":"Monitor open zones + holdings AND a bounded opportunity scan. Telegram only on a new buy, a zone trigger, or a holding stop/invalidation hit."},
+      {"kind":"post-market","time_ct":"15:10","weight":"medium","quiet_unless_triggered":true,
+       "note":"Analysis/learning + paper-watch mark-to-market + trailing-stop recompute. Quiet unless a holding broke down."}
     ],
-    "_note": "Owner-chosen weekday cadence (Central time; 06:30 CT = 07:30 ET). Intraday (10:30/13:30) and post-market (15:10) runs are TOKEN-LEAN: they read only the relevant slice (open zones + holdings), so total cadence is ~2.5-3x one full run, not 4x. Start on Pro, measure ~2 weeks, then tune dials (drop to morning + 1 intraday + EOD) or upgrade to Max only if tight."
+    "_note": "Owner-chosen weekday cadence (Central time; 06:30 CT = 07:30 ET, ~12:00 intraday, 15:10 post-market). 3 runs, measure ~2 weeks."
+  },
+  "intraday": {
+    "max_data_api_calls": 25,
+    "max_deep_candidates": 3,
+    "depth": "compact",
+    "discovery_enabled": true,
+    "_note": "Bounded mid-day opportunity check: refresh radar (<=15), one cheap movers/news pull, deep-analyze <=3 promising names at COMPACT depth, alert only on a real buy / zone trigger / holding stop-hit. Full debates stay in the 06:30 brief."
+  },
+  "trailing_stop": {
+    "enabled": true,
+    "breakeven_trigger_pct": 8,
+    "trail_pct": 8,
+    "technical_basis": "max(recent_swing_low, sma50)",
+    "ratchet_up_only": true,
+    "_note": "Advisory only (owner moves the stop on Robinhood). Once up >=breakeven_trigger_pct, move stop to >= avg_cost; then trail to the higher of the technical level and price*(1-trail_pct/100). NEVER lower an existing stop."
+  },
+  "paper_watches": {
+    "enabled": true,
+    "default_horizon": "weeks",
+    "report_in": "every_daily_brief",
+    "you_vs_agent": true,
+    "_note": "Owner-driven hypotheses, separate from radar/holdings. Marked-to-market each post-market run; shown in every daily-status brief with a you-vs-agent line."
   },
   "delivery": {
     "telegram": { "enabled": true },
