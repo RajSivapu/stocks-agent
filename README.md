@@ -34,7 +34,7 @@ Claude (Pro plan, Cloud Routines)
   ├── skills/reconcile-trade/SKILL.md   ← record trades you placed ("bought 1 NVDA @207")
   └── skills/paper-watch/SKILL.md       ← track your own hypotheses separately from the agent's calls
 
-lib/                    Python helpers (no third-party deps except psycopg)
+lib/                    Python helpers (no third-party deps except supabase-py)
   ├── config.py         secrets (env-var first, file fallback)
   ├── db.py             Postgres helpers (holdings, suggestions, lessons, observations, ...)
   ├── marketdata.py     Yahoo Finance — quotes, history, indicators (RSI/MACD/SMA, pure Python)
@@ -79,11 +79,11 @@ snapshots, and radar are all DB tables.
 ```bash
 git clone https://github.com/YOUR_USERNAME/stocks-agent.git
 cd stocks-agent
-pip install "psycopg[binary]"
+pip install supabase
 ```
 
 > Python 3.14 on macOS is externally managed (PEP 668). Use a venv:
-> `python3 -m venv .venv && source .venv/bin/activate && pip install "psycopg[binary]" pytest`
+> `python3 -m venv .venv && source .venv/bin/activate && pip install supabase pytest`
 
 ### 2. Provision Postgres
 
@@ -102,7 +102,8 @@ psql "$POSTGRES_URL" -f sql/schema.sql
 | `FINNHUB_API_KEY` | [finnhub.io](https://finnhub.io) — free tier, 60 calls/min |
 | `ALPHAVANTAGE_API_KEY` | [alphavantage.co](https://www.alphavantage.co/support/#api-key) — free, 25 calls/day |
 | `TELEGRAM_BOT_TOKEN` + `TELEGRAM_CHAT_ID` | Create a bot with [@BotFather](https://t.me/BotFather), then message it and call `getUpdates` to find your chat id |
-| `POSTGRES_URL` | From your Supabase/Neon project dashboard |
+| `SUPABASE_URL` | `https://<project-ref>.supabase.co` — from Supabase dashboard |
+| `SUPABASE_SERVICE_ROLE_KEY` | Supabase → Settings → API → `service_role` key |
 
 ### 4. Configure secrets
 
@@ -116,7 +117,8 @@ cp config/secrets.local.json.example config/secrets.local.json
 Or set environment variables directly (env takes precedence over the file — required for cloud runs):
 
 ```
-POSTGRES_URL=postgresql://USER:PASS@HOST:5432/DB?sslmode=require
+SUPABASE_URL=https://<project-ref>.supabase.co
+SUPABASE_SERVICE_ROLE_KEY=eyJ...
 FINNHUB_API_KEY=...
 ALPHAVANTAGE_API_KEY=...
 TELEGRAM_BOT_TOKEN=...
