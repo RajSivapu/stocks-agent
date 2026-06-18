@@ -113,8 +113,8 @@ slice only — NOT the whole universe):
 
 5. **Paper-watch mark-to-market (end-of-day close check).** Call `lib.db.get_active_paper_watches()`
    and for each active watch:
-   a. Fetch the closing price via `lib.marketdata.quote(ticker)` (use the day's close field).
-   b. Compute `return_pct = (close - flagged_price) / flagged_price * 100`.
+   a. Fetch the last price via `close_price = lib.marketdata.quote(ticker)["price"]` (`quote()` returns a dict; there is no separate close field — use `history()` for actual OHLC closes).
+   b. Compute `return_pct = (close_price - entry_ref_price) / entry_ref_price * 100`.
    c. If `hypothetical_amount` is set, compute `return_usd = hypothetical_amount * return_pct / 100`.
    d. **Target check:** if `target_price` is set AND `close >= target_price`, treat it as a
       hypothetical win — call `lib.db.close_paper_watch(watch_id, close_price=close, closed_date=today)`
@@ -665,10 +665,10 @@ removals of names the owner holds or added (those are never auto-removed).
 "No holdings added yet — tell me when you buy and I'll track them."
 
 **🧪 Your paper watches** (daily-status + on-demand runs only; omit entirely if no active watches):
-Call `lib.db.get_active_paper_watches()` — returns rows with `ticker`, `flagged_price`, `created`,
+Call `lib.db.get_active_paper_watches()` — returns rows with `ticker`, `entry_ref_price`, `created`,
 `hypothetical_amount`, `target_price`, `agent_view_at_open`, `agent_score_at_open`. For each:
-1. Fetch the live quote via `lib.marketdata.quote(ticker)`.
-2. Compute `return_pct = (live - flagged_price) / flagged_price * 100` (+ or –).
+1. Fetch the live quote via `current_price = lib.marketdata.quote(ticker)["price"]`.
+2. Compute `return_pct = (current_price - entry_ref_price) / entry_ref_price * 100` (+ or –).
 3. If `hypothetical_amount` is set, compute `return_usd = hypothetical_amount * return_pct / 100`.
 4. Compute `days = (today - created).days`.
 5. Map `agent_view_at_open` + your own current view to a you-vs-agent summary:

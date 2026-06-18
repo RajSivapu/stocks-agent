@@ -37,6 +37,11 @@ def test_paper_watch_lifecycle():
         "thesis":"t","horizon":"weeks","agent_view_at_open":"Watch","agent_score_at_open":80})
     assert isinstance(pid, int)
     assert any(r["id"]==pid for r in db.get_active_paper_watches())
+    active = [r for r in db.get_active_paper_watches() if r["id"]==pid][0]
+    assert float(active["entry_ref_price"]) == 100
+    assert active["agent_view_at_open"] == "Watch"
     db.close_paper_watch(pid, close_price=120, closed_date="2026-06-25")
+    closed = db._rows("SELECT * FROM paper_watches WHERE id=%s", (pid,))[0]
+    assert float(closed["close_price"]) == 120
     assert not any(r["id"]==pid for r in db.get_active_paper_watches())
     with db.conn() as c: c.execute("DELETE FROM paper_watches WHERE id=%s",(pid,)); c.commit()
