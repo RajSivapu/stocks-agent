@@ -15,7 +15,7 @@ Work out the **run kind** from how/when you were invoked, then tailor the output
 | Run kind | Time (CT) | What you produce |
 |---|---|---|
 | **pre-market** | 06:30 | A FULL brief. Pick the brief TYPE below. Runs the full Rigorous-Mode pipeline (scan + watchlist + debates + scoring). |
-| **intraday** | 10:30 & 13:30 | A QUIET check scoped to open entry-zones + current holdings ONLY. Send Telegram **only if** a buy zone triggered or a holding hit its invalidation. Silent otherwise. (See "Intraday check".) |
+| **intraday** | ~12:00 CT (single run) | Two-part run under `settings.intraday` budget (≤25 API calls, ≤3 deep, compact depth). **Part A — Monitor (first, cheap):** check open entry-zones + holdings for triggers/invalidations → `⚡ Market Alert` if anything fires. **Part B — Bounded discovery:** refresh radar (≤15), one movers/news pull, deep-analyze top ≤3 promising names (compact deliberation + gate) → alert if a new buy clears the gate, otherwise silent DB writes. Never an "all-clear" message. (See "Intraday check".) |
 | **post-market** | 15:10 | Post-market analysis: record how each watched/held name actually behaved → observations + snapshots; update the regime line. Quiet unless something needs the owner. (See "Post-market analysis".) |
 | **on-demand** | any | The owner asked → produce a full brief (**daily-status** type) for "now". |
 
@@ -32,17 +32,58 @@ If you cannot tell the run kind, assume **pre-market** + **daily-status**.
   quiet" + ONE teaching line. It **does NOT repeat the monthly buy-pitch** — the monthly plan is
   carried only by the monthly-plan brief (this is the whole point: stop pitching the same plan daily).
 
-## Intraday check (10:30 & 13:30 CT — `kind: intraday`, quiet-unless-triggered)
-A LIGHT, token-lean run. Do **NOT** run the full scan or the watchlist debates. Scope strictly to:
+## Intraday check (~12:00 CT — `kind: intraday`, single daily run, budget-capped)
+A TWO-PART run under `settings.intraday` budget: **≤25 API calls total, ≤3 deep-analyzed names,
+compact depth only.** Do NOT run the full scan or full watchlist debates. Part A fires first so urgent
+alerts go out early; Part B runs only after Part A completes.
+
+### Part A — Monitor (runs first, cheap)
 1. **Open entry-zones** — read open buy ideas via `lib.db.get_open_suggestions()` (Buy, `valid_until`
    not past). For each, fetch the live price (`lib.marketdata.quote`) and check: is it now INSIDE its
-   entry zone (`entry_zone_low`–`entry_zone_high`)? has it hit/closed past its `invalidation_level`?
-2. **Current holdings** — `lib.db.get_holdings()`; fetch each live price and check its invalidation/stop.
+   entry zone (`entry_zone_low`–`entry_zone_high`)? Has it hit/closed past its `invalidation_level`?
+2. **Current holdings** — `lib.db.get_holdings()`; fetch each live price and check its
+   invalidation/stop, including the trailing-stop HIT case (live price ≤ stored stop).
 
-**Send Telegram ONLY if** a buy zone just became active (he's in range — a late-look-friendly nudge) or
-a holding/idea hit its invalidation (trim / exit / reassess). Use the `⚡ Market Alert` title. **If
-nothing triggered, send nothing at all** — silence is correct and saves tokens. Never re-pitch the
-monthly plan here. Keep the message to the one or two names that actually triggered.
+If a zone triggered, an invalidation was hit, or a holding's stop was breached → send `⚡ Market Alert`
+immediately (one message per event or grouped if several fire). **If nothing triggered, send nothing** —
+silence is correct and saves tokens. Never re-pitch the monthly plan here.
+
+### Part B — Bounded opportunity discovery
+Runs under the remaining `settings.intraday` budget after Part A's API calls are counted.
+
+1. **Refresh radar** (≤15 names): for each radar row, re-quote (`lib.marketdata.quote`) and call
+   `db._rows` / `db.conn()` to `upsert_radar` — update `last_seen=today` and increment `days_relevant`.
+   Apply the same prune/cap rules as the morning scan (inactive rows drop; over-cap = keep strongest).
+
+2. **One cheap movers + news pull**: call the same endpoints as the morning broad screener
+   (yfinance predefined screens + Finnhub market news) — this is a SINGLE batch, not a per-ticker loop.
+   Apply `market_scan.universe_filters` quality floor (min price/volume/market-cap); drop junk.
+
+3. **Identify the top ≤3 promising names** from the combined radar + movers/news output: radar names
+   acting well (price up, catalyst) + new catalyst movers that cleared the quality floor.
+
+4. **Deep-analyze each** (compact deliberation, not full multi-round):
+   - Historical check: `lib.db.get_observations(ticker)`; self-seed via `preload` if empty (same
+     one-time snippet used at full depth — one extra yfinance history call, idempotent).
+   - **Compact** one-round deliberation: 1 bull · 1 bear · 1 risk flag — exactly the "compact" depth
+     defined in `rigor.depth`. No full specialist passes, no peer table.
+   - Confidence / risk gate: same gate as morning scan (Medium+ conviction to suggest a buy;
+     gate can veto or downgrade).
+
+5. **Decide each candidate** (one of three outcomes):
+   - **Clears the gate (Medium+ conviction, risk gate pass)** → send `⚡ Market Alert` buy idea
+     (entry zone + target + stop + valid-until, in the standard buy-line format) AND log a Buy
+     suggestion row via `lib.db.insert_suggestion` (depth="compact").
+   - **Promising but below the buy gate** → add/refresh the radar row (upsert, `last_seen=today`)
+     AND log a **Watch** suggestion row with today's price (`action="Watch"`, depth="compact") for
+     later grading at the 5/21/63-day horizons. **No Telegram message.**
+   - **Not worth it** → drop; let the normal prune cycle clean the radar row when it goes stale.
+
+### Notification policy (intraday)
+Telegram ONLY for: **(a)** a new buy idea that cleared the gate, **(b)** an open entry-zone trigger,
+or **(c)** a holding stop/invalidation hit. **Never send an "all-clear" message.** All other outcomes
+are silent DB writes — the morning brief will surface any relevant radar/watch updates. Keep each alert
+to the one or two names that actually triggered; don't bundle unrelated watch adds.
 
 ## Post-market analysis (15:10 CT — `kind: post-market`, the "learn the stock" run)
 A MEDIUM, mostly-silent run that builds the agent's memory. For each watched + held name (the relevant
@@ -235,6 +276,7 @@ Candidates that survive become suggestions; the rest are listed as "watch" ideas
 If a screener source is unavailable, note it and scan with whatever sources remain.
 
 ## Self-curated radar + DYNAMIC watchlist (do this every run, controlled by settings.json `radar`)
+**Note:** the intraday run also feeds the radar — Part B refreshes radar names and adds promising new movers as Watch candidates (see "Intraday check — Part B").
 The agent maintains the **`radar` table in Postgres** — a capped, auto-pruned candidate list of names
 discovered from the scan/news — and, when `radar.auto_manage_watchlist` is true, **actively manages
 `config/watchlist.json`** (the owner opted into autonomous management). The watchlist is therefore
@@ -681,6 +723,7 @@ ETFs and when the score couldn't be computed. Omit fields you don't have rather 
 structured reasoning lives in the `suggestions` row.)
 
 ## Grading pass + track-record self-review (learn from past calls — run BEFORE writing suggestions)
+**Note:** Watch suggestions logged by the intraday run (Part B promising-not-buy) are graded here at the 5/21/63-day horizons alongside morning-scan suggestions — the same `insert_grade` flow applies.
 This is the **grading pass** (spec §11): score the agent's own past calls against what the stock
 actually did, so confidence is earned, not assumed.
 1. **Find ungraded calls old enough to judge.** Query the relevant slice from Postgres — past
