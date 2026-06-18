@@ -27,6 +27,13 @@ def insert_transaction(row): return _insert("transactions", row)
 def insert_observation(row): return _insert("stock_observations", row)
 def insert_grade(row): return _insert("suggestion_grades", row)
 
+def insert_paper_watch(row): return _insert("paper_watches", row)
+def get_active_paper_watches():
+    return _rows("SELECT * FROM paper_watches WHERE status='active' ORDER BY created DESC")
+def close_paper_watch(pid, close_price, closed_date):
+    q = "UPDATE paper_watches SET status='closed', close_price=%s, closed_date=%s WHERE id=%s"
+    with conn() as c: c.execute(q, (close_price, closed_date, pid)); c.commit()
+
 def upsert_holding(row):
     row = {**{"stop":None,"target":None,"high_water_price":None}, **row}
     q = """INSERT INTO holdings (ticker,shares,avg_cost,bucket,opened_at,notes,stop,target,high_water_price)

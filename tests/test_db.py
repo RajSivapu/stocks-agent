@@ -29,3 +29,14 @@ def test_holding_stop_roundtrip():
     assert float(h["stop"]) == 110 and float(h["high_water_price"]) == 125
     # cleanup
     with db.conn() as c: c.execute("DELETE FROM holdings WHERE ticker='TSTH'"); c.commit()
+
+def test_paper_watch_lifecycle():
+    db.init_schema()
+    pid = db.insert_paper_watch({"ticker":"TSTP","created":"2026-06-18",
+        "entry_ref_price":100,"target_price":130,"hypothetical_amount":100,
+        "thesis":"t","horizon":"weeks","agent_view_at_open":"Watch","agent_score_at_open":80})
+    assert isinstance(pid, int)
+    assert any(r["id"]==pid for r in db.get_active_paper_watches())
+    db.close_paper_watch(pid, close_price=120, closed_date="2026-06-25")
+    assert not any(r["id"]==pid for r in db.get_active_paper_watches())
+    with db.conn() as c: c.execute("DELETE FROM paper_watches WHERE id=%s",(pid,)); c.commit()
