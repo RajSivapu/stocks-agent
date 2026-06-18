@@ -28,11 +28,25 @@ def insert_observation(row): return _insert("stock_observations", row)
 def insert_grade(row): return _insert("suggestion_grades", row)
 
 def upsert_holding(row):
-    q = """INSERT INTO holdings (ticker,shares,avg_cost,bucket,opened_at,notes)
-           VALUES (%(ticker)s,%(shares)s,%(avg_cost)s,%(bucket)s,%(opened_at)s,%(notes)s)
+    row = {**{"stop":None,"target":None,"high_water_price":None}, **row}
+    q = """INSERT INTO holdings (ticker,shares,avg_cost,bucket,opened_at,notes,stop,target,high_water_price)
+           VALUES (%(ticker)s,%(shares)s,%(avg_cost)s,%(bucket)s,%(opened_at)s,%(notes)s,%(stop)s,%(target)s,%(high_water_price)s)
            ON CONFLICT (ticker) DO UPDATE SET shares=EXCLUDED.shares,
-           avg_cost=EXCLUDED.avg_cost, bucket=EXCLUDED.bucket, notes=EXCLUDED.notes"""
+           avg_cost=EXCLUDED.avg_cost, bucket=EXCLUDED.bucket, notes=EXCLUDED.notes,
+           stop=COALESCE(EXCLUDED.stop, holdings.stop),
+           target=COALESCE(EXCLUDED.target, holdings.target),
+           high_water_price=COALESCE(EXCLUDED.high_water_price, holdings.high_water_price)"""
     with conn() as c: c.execute(q, row); c.commit()
+
+def update_holding_stop(ticker, stop=None, target=None, high_water_price=None):
+    sets, args = [], {"ticker": ticker}
+    for k, v in (("stop",stop),("target",target),("high_water_price",high_water_price)):
+        if v is not None:
+            sets.append(f"{k}=%({k})s"); args[k] = v
+    if not sets:
+        return
+    q = f"UPDATE holdings SET {','.join(sets)} WHERE ticker=%(ticker)s"
+    with conn() as c: c.execute(q, args); c.commit()
 
 def upsert_daily_snapshot(row):
     q = """INSERT INTO daily_snapshots (snap_date,ticker,close,day_move_pct,rsi14,sma50,sma200,macd_hist)
