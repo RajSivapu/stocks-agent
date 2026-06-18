@@ -1,90 +1,95 @@
-import psycopg, pathlib
-from psycopg import sql
+from supabase import create_client, Client
 from lib import config
-ROOT = pathlib.Path(__file__).resolve().parents[1]
+from datetime import date as _date
 
-def conn():
-    return psycopg.connect(config.secret("postgres_url"))
+
+def _sb() -> Client:
+    return create_client(
+        config.secret("supabase_url"),
+        config.secret("supabase_service_role_key"),
+    )
+
 
 def init_schema():
-    sql = (ROOT / "sql" / "schema.sql").read_text()
-    with conn() as c:
-        c.execute(sql); c.commit()
+    _sb().table("holdings").select("ticker").limit(1).execute()
+
 
 def _insert(table, row) -> int:
-    cols = list(row)
-    q = sql.SQL("INSERT INTO {t} ({c}) VALUES ({v}) RETURNING id").format(
-        t=sql.Identifier(table),
-        c=sql.SQL(",").join(map(sql.Identifier, cols)),
-        v=sql.SQL(",").join([sql.Placeholder()] * len(cols)))
-    with conn() as c:
-        cur = c.execute(q, list(row.values())); c.commit()
-        r = cur.fetchone()
-        return r[0] if r else None
+    res = _sb().table(table).insert(row).execute()
+    return res.data[0]["id"] if res.data else None
+
 
 def insert_suggestion(row): return _insert("suggestions", row)
 def insert_transaction(row): return _insert("transactions", row)
 def insert_observation(row): return _insert("stock_observations", row)
 def insert_grade(row): return _insert("suggestion_grades", row)
-
 def insert_paper_watch(row): return _insert("paper_watches", row)
+
+
 def get_active_paper_watches():
-    return _rows("SELECT * FROM paper_watches WHERE status='active' ORDER BY created DESC")
+    return _sb().table("paper_watches").select("*").eq("status", "active").order("created", desc=True).execute().data
+
+
 def close_paper_watch(pid, close_price, closed_date):
-    q = "UPDATE paper_watches SET status='closed', close_price=%s, closed_date=%s WHERE id=%s"
-    with conn() as c: c.execute(q, (close_price, closed_date, pid)); c.commit()
+    _sb().table("paper_watches").update({
+        "status": "closed",
+        "close_price": close_price,
+        "closed_date": str(closed_date),
+    }).eq("id", pid).execute()
+
 
 def upsert_holding(row):
-    row = {**{"stop":None,"target":None,"high_water_price":None}, **row}
-    q = """INSERT INTO holdings (ticker,shares,avg_cost,bucket,opened_at,notes,stop,target,high_water_price)
-           VALUES (%(ticker)s,%(shares)s,%(avg_cost)s,%(bucket)s,%(opened_at)s,%(notes)s,%(stop)s,%(target)s,%(high_water_price)s)
-           ON CONFLICT (ticker) DO UPDATE SET shares=EXCLUDED.shares,
-           avg_cost=EXCLUDED.avg_cost, bucket=EXCLUDED.bucket, notes=EXCLUDED.notes,
-           stop=COALESCE(EXCLUDED.stop, holdings.stop),
-           target=COALESCE(EXCLUDED.target, holdings.target),
-           high_water_price=COALESCE(EXCLUDED.high_water_price, holdings.high_water_price)"""
-    with conn() as c: c.execute(q, row); c.commit()
+    row = {**{"stop": None, "target": None, "high_water_price": None}, **row}
+    sb = _sb()
+    existing = sb.table("holdings").select("stop,target,high_water_price").eq("ticker", row["ticker"]).execute().data
+    if existing:
+        ex = existing[0]
+        row["stop"] = row["stop"] if row["stop"] is not None else ex.get("stop")
+        row["target"] = row["target"] if row["target"] is not None else ex.get("target")
+        row["high_water_price"] = row["high_water_price"] if row["high_water_price"] is not None else ex.get("high_water_price")
+    sb.table("holdings").upsert(row, on_conflict="ticker").execute()
+
 
 def update_holding_stop(ticker, stop=None, target=None, high_water_price=None):
-    sets, args = [], {"ticker": ticker}
-    for k, v in (("stop",stop),("target",target),("high_water_price",high_water_price)):
-        if v is not None:
-            sets.append(f"{k}=%({k})s"); args[k] = v
-    if not sets:
+    updates = {k: v for k, v in (("stop", stop), ("target", target), ("high_water_price", high_water_price)) if v is not None}
+    if not updates:
         return
-    q = f"UPDATE holdings SET {','.join(sets)} WHERE ticker=%(ticker)s"
-    with conn() as c: c.execute(q, args); c.commit()
+    _sb().table("holdings").update(updates).eq("ticker", ticker).execute()
+
 
 def upsert_daily_snapshot(row):
-    q = """INSERT INTO daily_snapshots (snap_date,ticker,close,day_move_pct,rsi14,sma50,sma200,macd_hist)
-           VALUES (%(snap_date)s,%(ticker)s,%(close)s,%(day_move_pct)s,%(rsi14)s,%(sma50)s,%(sma200)s,%(macd_hist)s)
-           ON CONFLICT (snap_date,ticker) DO UPDATE SET close=EXCLUDED.close,
-           day_move_pct=EXCLUDED.day_move_pct, rsi14=EXCLUDED.rsi14, sma50=EXCLUDED.sma50,
-           sma200=EXCLUDED.sma200, macd_hist=EXCLUDED.macd_hist"""
-    with conn() as c: c.execute(q, row); c.commit()
+    _sb().table("daily_snapshots").upsert(row, on_conflict="snap_date,ticker").execute()
 
-def _rows(q, args=()):
-    with conn() as c:
-        cur = c.execute(q, args); cols = [d[0] for d in cur.description]
-        return [dict(zip(cols, r)) for r in cur.fetchall()]
 
 def insert_lesson(row):
-    q = "INSERT INTO lessons (entry_date, category, content) VALUES (%(entry_date)s, %(category)s, %(content)s)"
-    with conn() as c: c.execute(q, row); c.commit()
+    _sb().table("lessons").insert(row).execute()
+
 
 def get_lessons(limit=20):
-    return _rows("SELECT * FROM lessons ORDER BY entry_date DESC, id DESC LIMIT %s", (limit,))
+    return _sb().table("lessons").select("*").order("entry_date", desc=True).order("id", desc=True).limit(limit).execute().data
 
-def get_holdings(): return _rows("SELECT * FROM holdings ORDER BY ticker")
+
+def get_holdings():
+    return _sb().table("holdings").select("*").order("ticker").execute().data
+
+
 def get_open_suggestions():
-    return _rows("SELECT * FROM suggestions WHERE valid_until >= CURRENT_DATE AND action='Buy' ORDER BY date DESC")
-def get_observations(ticker): return _rows("SELECT * FROM stock_observations WHERE ticker=%s ORDER BY obs_date DESC", (ticker,))
-def recent_lessons_rows(): return _rows("SELECT * FROM suggestion_grades ORDER BY graded_at DESC LIMIT 50")
+    today = str(_date.today())
+    return _sb().table("suggestions").select("*").gte("valid_until", today).eq("action", "Buy").order("date", desc=True).execute().data
+
+
+def get_observations(ticker):
+    return _sb().table("stock_observations").select("*").eq("ticker", ticker).order("obs_date", desc=True).execute().data
+
+
+def recent_lessons_rows():
+    return _sb().table("suggestion_grades").select("*").order("graded_at", desc=True).limit(50).execute().data
+
+
 def get_dry_powder(month):
-    r = _rows("SELECT * FROM dry_powder WHERE month=%s", (month,)); return r[0] if r else None
+    res = _sb().table("dry_powder").select("*").eq("month", month).execute()
+    return res.data[0] if res.data else None
+
+
 def set_dry_powder(row):
-    q = """INSERT INTO dry_powder (month,growth_available,spec_available,rolled_months)
-           VALUES (%(month)s,%(growth_available)s,%(spec_available)s,%(rolled_months)s)
-           ON CONFLICT (month) DO UPDATE SET growth_available=EXCLUDED.growth_available,
-           spec_available=EXCLUDED.spec_available, rolled_months=EXCLUDED.rolled_months"""
-    with conn() as c: c.execute(q, row); c.commit()
+    _sb().table("dry_powder").upsert(row, on_conflict="month").execute()

@@ -15,6 +15,8 @@ def secret(name: str) -> str:
         "telegram_bot_token": "TELEGRAM_BOT_TOKEN",
         "telegram_chat_id": "TELEGRAM_CHAT_ID",
         "postgres_url": "POSTGRES_URL",
+        "supabase_url": "SUPABASE_URL",
+        "supabase_service_role_key": "SUPABASE_SERVICE_ROLE_KEY",
     }
     v = os.environ.get(env_map.get(name, name.upper()))
     if v:
