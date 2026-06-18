@@ -261,6 +261,32 @@ facts** — n=1 memory that strengthens over years. Stay **skeptical of well-kno
 already be priced in**; let an observation raise or lower a flag, never make the call by itself. (The
 post-market run is what RECORDS new observations — see "Post-market analysis".)
 
+**Self-seed history for names that have none.** The one-time preload only seeded the original
+watchlist. The market scan + radar surface names that were never in it, so a freshly-discovered or
+newly-promoted ticker will have **no historical memory**. So: **if `get_observations(ticker)` comes
+back empty for a name you are analyzing at full depth, seed it on the fly before continuing** — this
+is the same computation `scripts/run_preload.py` does, run for one ticker:
+```python
+from lib import db, preload
+if not db.get_observations(sym):
+    dated = preload.dated_history(sym.replace(".", "-"))   # Yahoo uses BRK-B, not BRK.B
+    closes = [c for _, c in dated]
+    if closes:
+        db.insert_observation({"ticker": sym, "obs_date": __import__("time").strftime("%Y-%m-%d"),
+            "event_type": "stats", "summary": f"vol={preload.volatility(closes)} "
+            f"mdd={preload.max_drawdown(closes)} seasonality={preload.seasonality(dated)}",
+            "price_reaction": None, "confidence": "high", "source": "yfinance-preload"})
+        for mv in preload.notable_moves(dated)[:20]:
+            db.insert_observation({"ticker": sym, "obs_date": mv["date"], "event_type": "big-move",
+                "summary": f"{mv['change_pct']}% day move", "price_reaction": str(mv["change_pct"]),
+                "confidence": "medium", "source": "yfinance-preload"})
+```
+It is one extra Yahoo history call (yfinance has no daily cap — cheap) and **idempotent**: the
+`get_observations` guard means an already-seeded name is never re-seeded. Do this **only when you
+commit to full-depth analysis** of the name (not for every scanned ticker) so cost stays bounded.
+This closes the gap so the agent's per-stock memory covers **any** name it seriously considers, not
+just the preloaded 46.
+
 1. **Deep Dive** (feeds the specialist + bull passes):
    - **Business model** — how they make money / core product, in plain beginner English.
    - **Moat** — top ~3 competitors; is the edge durable? (patent · switching cost · network effect ·
