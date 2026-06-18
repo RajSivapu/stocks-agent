@@ -34,14 +34,42 @@ persists in the runtime between runs.**
 
 ## Scheduled runs (Slice 7 — go-live)
 
-Four weekday Routines, owner's local Central time (brief reference = 07:30 ET = 06:30 CT). Set each
-schedule in the Routine UI using the appropriate UTC offset for the season (CDT = UTC−5, CST = UTC−6):
+Create **four weekday (Mon–Fri) Routines** on the private repo, all reusing the same Custom-network
+allowlist + 5 env-var secrets above. Each one's prompt **must name its run kind** so the skill's "Run
+types & brief selection" logic picks the right behavior.
 
-| Run | Time (CT) | Prompt names the run kind |
-|---|---|---|
-| Pre-market full brief | 06:30 | "pre-market full brief" (monthly-plan on 1st weekday, else daily-status) |
-| Intraday check | 10:30 | "intraday check — quiet unless a buy zone triggered or a holding hit invalidation" |
-| Intraday check | 13:30 | same as 10:30 |
-| Post-market analysis | 15:10 | "post-market analysis — record how each watched/held name behaved; quiet unless action needed" |
+**Timezone (do this the easy way):** if the Routine scheduler lets you pick a timezone, set it to
+**America/Chicago** and just use the CT times below — the platform then handles DST for you. If it only
+accepts UTC cron, use the season-correct column (the US switches CDT↔CST on the 2nd Sun of March / 1st
+Sun of Nov), and re-check twice a year.
 
-(Detailed go-live steps + how to pause/adjust cadence are filled in at Slice 7 / Task 19.)
+| Run | Time (CT) | Cron (CDT = summer, UTC−5) | Cron (CST = winter, UTC−6) | Prompt to paste |
+|---|---|---|---|---|
+| **Pre-market full brief** | 06:30 | `30 11 * * 1-5` | `30 12 * * 1-5` | `Run the market-briefing skill as the pre-market full brief for today. First: pip install "psycopg[binary]". On the 1st weekday of the month produce the monthly-plan brief, otherwise the daily-status brief. Read state from Postgres via lib/, run the full pipeline, send the brief to Telegram, and log every suggestion. Suggestion-only — never execute trades.` |
+| **Intraday check** | 10:30 | `30 15 * * 1-5` | `30 16 * * 1-5` | `Run the market-briefing skill as an intraday check. First: pip install "psycopg[binary]". Scope strictly to open entry-zones (lib.db.get_open_suggestions) + current holdings (lib.db.get_holdings). Send Telegram ONLY if a buy zone triggered or a holding hit its invalidation — otherwise send nothing. Suggestion-only.` |
+| **Intraday check** | 13:30 | `30 18 * * 1-5` | `30 19 * * 1-5` | *(same prompt as the 10:30 intraday check)* |
+| **Post-market analysis** | 15:10 | `10 20 * * 1-5` | `10 21 * * 1-5` | `Run the market-briefing skill as the post-market analysis. First: pip install "psycopg[binary]". For the relevant slice (watched + held names) write daily_snapshots + notable stock_observations and append one regime line to data/lessons.md. Stay quiet (no Telegram) unless a holding broke down. Suggestion-only.` |
+
+**Verify go-live (trigger each once, manually):**
+1. Pre-market → a full brief posts to Telegram (one screen, correct type for the date) and new
+   `suggestions` rows appear for today.
+2. Intraday → stays **silent** when nothing triggered (correct), or posts a `⚡ Market Alert` if a
+   zone/invalidation fired.
+3. Post-market → **no** Telegram (unless a breakdown); `daily_snapshots` + `stock_observations` rows
+   for today appear and `data/lessons.md` got a new regime line (the cloud run commits/pushes the
+   file change, or writes via the repo — confirm the regime line landed).
+
+## Pause / adjust cadence
+
+- **Pause** any Routine from its page in claude.ai → Code → Routines (toggle off) — e.g. pause both
+  intraday checks first if Pro usage runs tight.
+- **Lighten** by deleting one intraday Routine (keep 06:30 + one intraday + 15:10) — the cheapest way
+  to cut ~25% of runs.
+- **Change times** by editing the cron; keep the prompt's run-kind wording intact.
+
+## Budget / measurement plan (~2 weeks)
+
+The four runs ≈ 2.5–3× one full daily run. Start on **Pro** and watch the daily run-cap + token
+budget for ~2 weeks. If it's tight, in order: (1) drop to morning + one intraday + post-market;
+(2) lighten the morning scan (smaller shortlist); (3) only then consider Max. Record the decision
+here once measured.
