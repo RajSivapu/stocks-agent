@@ -2,6 +2,11 @@ CREATE TABLE IF NOT EXISTS holdings (
   ticker TEXT PRIMARY KEY, shares NUMERIC NOT NULL, avg_cost NUMERIC NOT NULL,
   bucket TEXT, opened_at DATE, notes TEXT);
 
+-- v2.1: trailing-stop fields on holdings
+ALTER TABLE holdings ADD COLUMN IF NOT EXISTS stop NUMERIC;
+ALTER TABLE holdings ADD COLUMN IF NOT EXISTS target NUMERIC;
+ALTER TABLE holdings ADD COLUMN IF NOT EXISTS high_water_price NUMERIC;
+
 CREATE TABLE IF NOT EXISTS transactions (
   id BIGSERIAL PRIMARY KEY, ts TIMESTAMPTZ NOT NULL DEFAULT now(),
   ticker TEXT NOT NULL, side TEXT NOT NULL CHECK (side IN ('buy','sell')),
