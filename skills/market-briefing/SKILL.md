@@ -382,12 +382,30 @@ Until then the cash waits — and the **daily-status brief says nothing to buy**
 (=2) months with no qualifying setup, tell the owner (in the monthly-plan brief) to move that idle cash
 into Core so money isn't idle forever; track/reset `rolled_months` on the dry_powder row.
 
-**Entry zones on EVERY buy idea (`entry_zones.enabled`).** Every buy suggestion carries three things,
+**Entry zones on EVERY buy idea (`entry_zones.enabled`).** Every buy suggestion carries FIVE things,
 persisted on its `suggestions` row and shown in plain English in the brief:
 - **buy zone** — `entry_zone_low` / `entry_zone_high` (e.g. "buy under $210, ideal near $195").
 - **valid-until** — `valid_until` (default `entry_zones.default_valid_until_days` trading days, or a
   stated condition like "good through Friday or until it closes above $215").
 - **invalidation/stop** — the Bear-Case invalidation level (the price/condition where the thesis breaks).
+- **target** — `target` (take-profit price). Compute from the analysis: a nearby resistance level, a
+  valuation cap (e.g. fair-value P/S), or a measured technical move. State the brief rationale in one
+  phrase (e.g. "prior resistance", "fair-value cap", "1:2 measured move"). **Never invent a round
+  number**; derive it from the data you pulled.
+- **stop** — `stop` (downside protection price). Align with `invalidation_level` — the price where the
+  thesis breaks. For speculative ideas also size the position so a full stop-out is a tolerable loss.
+
+**Late-look safety (intraday re-check and delayed-viewer rule):** after computing the zone, fetch the
+live price (`lib.marketdata.quote`). If `live_price > entry_zone_high`, do NOT imply the zone is still
+actionable. Instead, the buy line must say:
+`⚠️ price has run past the buy zone — wait for a pullback / re-check`
+The intraday checks enforce the same rule: if a zone is open but the live price has already exceeded
+`entry_zone_high`, send the above warning rather than a "zone triggered" alert.
+
+**Strategy note:** Core DCA and the monthly growth pick are buy-and-hold — entry precision matters less
+for them. Explicit target + stop matter most for the shorter-horizon speculative bucket, where a
+pre-defined exit prevents small losses from becoming large ones.
+
 Late-look-friendly by design: the **intraday checks re-evaluate open zones** against the live price and
 tell the owner if he's still in range (see "Intraday check"). Compute the zone from the analysis
 (support / recent range) and the invalidation from the bear case — **never invent round numbers**; base
@@ -509,10 +527,14 @@ amount (split by 70/20/10; example shows $500). Bold the sub-labels and tickers:
   late in the month and repeat it, OR buy on the next clearly-red day), and say if today is green/red
   so he knows there's no rush. Don't drop this explanation — the owner values it.
 - ✅ **Growth — add $100 to your best pick `<b>TICKER</b>`** (~$price · **score/100 + risk band**) —
-  one plain reason + a `<b>Why it matters:</b>` teaching clause. Then **Runner-ups to learn** (NOT for
-  splitting the $100): list 2–3, **each with its ticker bolded `<b>TICKER</b>` + score/100 + one
-  phrase** (same visual weight as the main pick). If NO growth idea cleared the Medium-conviction gate
-  this month, say so plainly here and move the best candidates to "What I'd watch" (no forced buy).
+  one plain reason + a `<b>Why it matters:</b>` teaching clause. Buy line format (Telegram HTML):
+  `<b>TICKER</b> — Buy zone: $low–$high · Target: $tgt · Stop: $stp · valid until Mon DD`
+  If the live price is already above the buy zone high, show instead:
+  `<b>TICKER</b> — ⚠️ price has run past the buy zone — wait for a pullback / re-check`
+  Then **Runner-ups to learn** (NOT for splitting the $100): list 2–3, **each with its ticker bolded
+  `<b>TICKER</b>` + score/100 + one phrase** (same visual weight as the main pick). If NO growth idea
+  cleared the Medium-conviction gate this month, say so plainly here and move the best candidates to
+  "What I'd watch" (no forced buy).
 - 🧪 **Speculative — learning mode.** Do NOT recommend buying a speculative stock yet. **Redirect the
   $50** (per `capital.speculative_learning_redirect`): instead of idling it, recommend adding it to
   **Core** (`<b>VOO</b>`, safe default) or to the **Growth** pick — pick the better spot this month
