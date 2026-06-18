@@ -46,3 +46,13 @@ CREATE TABLE IF NOT EXISTS dry_powder (
 CREATE TABLE IF NOT EXISTS radar (
   ticker TEXT PRIMARY KEY, added DATE, last_seen DATE, days_relevant INT,
   reason TEXT, bucket_guess TEXT, promoted BOOLEAN DEFAULT false, promoted_on DATE);
+
+-- v2.1: owner's personal paper-watch hypotheses (separate from radar + holdings)
+CREATE TABLE IF NOT EXISTS paper_watches (
+  id BIGSERIAL PRIMARY KEY, ticker TEXT NOT NULL, created DATE NOT NULL,
+  entry_ref_price NUMERIC, target_price NUMERIC, hypothetical_amount NUMERIC,
+  thesis TEXT, horizon TEXT, status TEXT NOT NULL DEFAULT 'active',
+  closed_date DATE, close_price NUMERIC,
+  agent_view_at_open TEXT, agent_score_at_open INT,
+  created_at TIMESTAMPTZ DEFAULT now());
+CREATE INDEX IF NOT EXISTS idx_paper_status ON paper_watches(status);
