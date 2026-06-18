@@ -1,6 +1,6 @@
 ---
 name: reconcile-trade
-description: Use when Rajrupesh reports a trade he actually placed — e.g. "bought 1 NVDA @ 207", "sold 2 AMD", "sold half my VOO @ 681", or "skipped NVDA". Parses it, records the transaction + updates holdings in Postgres, and confirms the new position with P&L in plain English. Suggestion-only; NEVER places, modifies, or cancels a trade.
+description: Use when Rajrupesh reports a trade he actually placed — e.g. "bought 1 NVDA @ 207", "sold 2 AMD", "sold half my VOO @ 681", or "skipped NVDA" — or when he updates a stop ("moved my AAPL stop to 230"). Parses it, records the transaction + updates holdings (including stop/target/high_water_price) in Postgres, and confirms the new position with P&L in plain English. Suggestion-only; NEVER places, modifies, or cancels a trade.
 ---
 
 # Reconcile a Trade — keep holdings & P&L accurate
@@ -30,11 +30,20 @@ Read the current position first: `cur = next((h for h in lib.db.get_holdings() i
 **Buy** (add shares, weighted-average the cost):
 - `new_shares = old_shares + qty` (or just `qty` if no prior position).
 - `new_avg = (old_shares*old_avg + qty*price) / new_shares` (or `price` if new position).
+- Look up the suggestion that prompted this buy:
+  ```python
+  rows = db._rows("SELECT stop,target FROM suggestions WHERE ticker=%s AND action='Buy' ORDER BY date DESC LIMIT 1", (T,))
+  sugg_stop   = float(rows[0]["stop"])   if rows and rows[0]["stop"]   else None
+  sugg_target = float(rows[0]["target"]) if rows and rows[0]["target"] else None
+  ```
+  - If no suggestion exists, compute a default stop: `default_stop = round(price * (1 - settings.trailing_stop["trail_pct"]/100), 2)`. Note in the confirmation: "No prior suggestion found — defaulted stop to `settings.trailing_stop.trail_pct`% below entry."
 - `lib.db.insert_transaction({"ticker":T,"side":"buy","qty":qty,"price":price})`
 - `lib.db.upsert_holding({"ticker":T,"shares":new_shares,"avg_cost":round(new_avg,4),
-   "bucket":bucket,"opened_at":opened_at,"notes":notes})`
+   "bucket":bucket,"opened_at":opened_at,"notes":notes,
+   "stop":(sugg_stop or default_stop),"target":sugg_target,"high_water_price":price})`
   - `bucket`: keep the existing one; for a NEW position infer it from `config/watchlist.json` (which
     bucket the ticker sits in), else ask. `opened_at`: keep existing, else today. `notes`: keep/None.
+  - `high_water_price` is always set to the buy price on a new buy (it ratchets up later via trailing-stop logic).
 
 **Sell** (reduce shares; avg cost stays; realize P&L):
 - `new_shares = old_shares - qty`. If `new_shares <= 0` it's a full exit.
@@ -49,25 +58,48 @@ Read the current position first: `cur = next((h for h in lib.db.get_holdings() i
 acknowledge it plainly and, if it was an open suggestion, note that the entry zone is still open if
 `valid_until` hasn't passed.
 
+**Moved-my-stop** ("moved my AAPL stop to 230" / "set my X stop at $Y" / "update my TSLA stop to 180"):
+- Parse: `ticker`, `new_stop` (numeric).
+- `lib.db.update_holding_stop(ticker, stop=new_stop)`
+- Confirm: "Got it — your **{ticker}** stop is now set at **${new_stop}**. No trade was placed; this is a record-only update."
+- Do NOT touch `target` or `high_water_price` unless the owner explicitly mentions them.
+
 ## Worked example
 > Owner: "bought 1 NVDA @ 207"
 
 ```python
 from lib import db, marketdata
+import json
+
 T, side, qty, price = "NVDA", "buy", 1, 207.0
 cur = next((h for h in db.get_holdings() if h["ticker"]==T), None)
 old_shares = float(cur["shares"]) if cur else 0.0
 old_avg    = float(cur["avg_cost"]) if cur else 0.0
 new_shares = old_shares + qty
 new_avg    = (old_shares*old_avg + qty*price)/new_shares
+
+# look up the suggestion that prompted this buy
+rows = db._rows("SELECT stop,target FROM suggestions WHERE ticker=%s AND action='Buy' ORDER BY date DESC LIMIT 1", (T,))
+settings   = json.load(open("config/settings.json"))
+if rows and rows[0]["stop"]:
+    sugg_stop   = float(rows[0]["stop"])
+    sugg_target = float(rows[0]["target"]) if rows[0]["target"] else None
+    stop_note   = f"stop ${sugg_stop}"
+else:
+    trail_pct   = settings["trailing_stop"]["trail_pct"]
+    sugg_stop   = round(price * (1 - trail_pct/100), 2)
+    sugg_target = None
+    stop_note   = f"defaulted stop to {trail_pct}% below entry (${sugg_stop}) — no prior suggestion found"
+
 db.insert_transaction({"ticker":T,"side":side,"qty":qty,"price":price})
 db.upsert_holding({"ticker":T,"shares":new_shares,"avg_cost":round(new_avg,4),
                    "bucket":(cur["bucket"] if cur else "growth"),
-                   "opened_at":(cur["opened_at"] if cur else None),"notes":None})
+                   "opened_at":(cur["opened_at"] if cur else None),"notes":None,
+                   "stop":sugg_stop,"target":sugg_target,"high_water_price":price})
 print(db.get_holdings())
 ```
 Then confirm: "Got it — recorded **1 NVDA at $207**. You now hold **1 share, avg cost $207**. At the
-current ~$210 that's about **+$3 (+1.5%)** on paper. Not financial advice — you placed this trade."
+current ~$210 that's about **+$3 (+1.5%)** on paper. {stop_note}. Not financial advice — you placed this trade."
 
 ## Guardrails
 - **Suggestion-only / read-only on the market.** You only write to your own database (transactions +
