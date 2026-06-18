@@ -70,6 +70,22 @@ slice only — NOT the whole universe):
    surface the updated stop advisory. Only send a Telegram `⚡ Market Alert` if the closing price
    is at or below the stored stop (a breakdown on the close that the intraday monitor may have missed).
 
+5. **Paper-watch mark-to-market (end-of-day close check).** Call `lib.db.get_active_paper_watches()`
+   and for each active watch:
+   a. Fetch the closing price via `lib.marketdata.quote(ticker)` (use the day's close field).
+   b. Compute `return_pct = (close - flagged_price) / flagged_price * 100`.
+   c. If `hypothetical_amount` is set, compute `return_usd = hypothetical_amount * return_pct / 100`.
+   d. **Target check:** if `target_price` is set AND `close >= target_price`, treat it as a
+      hypothetical win — call `lib.db.close_paper_watch(watch_id, close_price=close, closed_date=today)`
+      and note it in the post-market log (e.g. "🧪 NVDA paper watch closed — hit $220 target, +10%
+      (+$10 on $100). Nice call!"). Compare final result to `agent_view_at_open`/`agent_score_at_open`
+      and record whether the owner's read matched or beat the agent's view at open.
+   e. For watches that did NOT hit their target, log the current mark-to-market in an observation row
+      (`lib.db.insert_observation`) only if the day's move was notable (≥2% intraday or a meaningful
+      reversal) — keep observations sparse and meaningful. Routine small moves are silent.
+   **Quiet:** this step writes to DB only; do NOT send a Telegram message unless a target was hit
+   (that merits a brief `⚡ Market Alert` noting the hypothetical win).
+
 **Quiet unless something needs the owner** (e.g. a holding broke down): usually this run writes to the
 DB + lessons and sends NO Telegram message. Token-leanness is a hard requirement — read only the
 relevant slice.
@@ -605,6 +621,24 @@ removals of names the owner holds or added (those are never auto-removed).
 
 **💼 Your money** — holdings from `lib.db.get_holdings()`, each: up/down 🟢/🔴 + one note. If none yet:
 "No holdings added yet — tell me when you buy and I'll track them."
+
+**🧪 Your paper watches** (daily-status + on-demand runs only; omit entirely if no active watches):
+Call `lib.db.get_active_paper_watches()` — returns rows with `ticker`, `flagged_price`, `created`,
+`hypothetical_amount`, `target_price`, `agent_view_at_open`, `agent_score_at_open`. For each:
+1. Fetch the live quote via `lib.marketdata.quote(ticker)`.
+2. Compute `return_pct = (live - flagged_price) / flagged_price * 100` (+ or –).
+3. If `hypothetical_amount` is set, compute `return_usd = hypothetical_amount * return_pct / 100`.
+4. Compute `days = (today - created).days`.
+5. Map `agent_view_at_open` + your own current view to a you-vs-agent summary:
+   - both bullish → "you both called it"
+   - you bullish, agent cautious → "you were ahead of the agent"
+   - agent bullish, you now bearish (thesis broke) → "agent was early, thesis stalled"
+   - etc. — keep it one plain phrase.
+Show one line per watch, format (Telegram HTML):
+`🧪 <b>NVDA</b> — flagged $200, now $214, +7.0% (+$7 on $100), 9 days · agent then: Watch → you both called it`
+Horizon-aware: short-horizon watches always surface here; longer-term watches surface if they have
+moved ≥2% intraday. If `target_price` is set and `live >= target_price`, flag it: "(⚡ hit target!)"
+If there are **no active watches**, omit this block entirely — no empty section.
 
 **📊 My track record** — running accuracy from the grading pass (above), e.g. "Last month: right on
 6 of 10 calls (60%); being more careful on risky picks." Show "building track record" until ≥1 month.
