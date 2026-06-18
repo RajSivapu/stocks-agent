@@ -47,7 +47,7 @@ Sun of Nov), and re-check twice a year.
 |---|---|---|---|---|
 | **Pre-market full brief** | 06:30 | `30 11 * * 1-5` | `30 12 * * 1-5` | `Run the market-briefing skill as the pre-market full brief for today. First: pip install "psycopg[binary]". On the 1st weekday of the month produce the monthly-plan brief, otherwise the daily-status brief. Read state from Postgres via lib/, run the full pipeline, send the brief to Telegram, and log every suggestion. Suggestion-only — never execute trades.` |
 | **Intraday check** | ~12:00 | `00 17 * * 1-5` | `00 18 * * 1-5` | `Run the market-briefing skill as an intraday check. First: pip install "psycopg[binary]". Do BOTH: (A) monitor open entry-zones (lib.db.get_open_suggestions) + holdings (lib.db.get_holdings) for zone triggers / stop / invalidation; (B) a BOUNDED opportunity scan within settings.intraday (<=25 data calls, deep-analyze <=3 names, compact depth) — refresh the radar, pull today's movers + breaking news, run promising names through the historical check + buy-gate. Send Telegram ONLY if a new buy cleared the gate, a buy zone triggered, or a holding hit its stop/invalidation — otherwise log to the radar/Watch suggestions silently. Suggestion-only.` |
-| **Post-market analysis** | 15:10 | `10 20 * * 1-5` | `10 21 * * 1-5` | `Run the market-briefing skill as the post-market analysis. First: pip install "psycopg[binary]". For the relevant slice (watched + held names) write daily_snapshots + notable stock_observations and append one regime line to data/lessons.md. Stay quiet (no Telegram) unless a holding broke down. Suggestion-only.` |
+| **Post-market analysis** | 15:10 | `10 20 * * 1-5` | `10 21 * * 1-5` | `Run the market-briefing skill as the post-market analysis. First: pip install "psycopg[binary]". For the relevant slice (watched + held names) write daily_snapshots + notable stock_observations and insert one regime line via lib.db.insert_lesson(). Stay quiet (no Telegram) unless a holding broke down. Suggestion-only.` |
 
 **Verify go-live (trigger each once, manually):**
 1. Pre-market → a full brief posts to Telegram (one screen, correct type for the date) and new
@@ -55,8 +55,7 @@ Sun of Nov), and re-check twice a year.
 2. Intraday → stays **silent** when nothing triggered (correct), or posts a `⚡ Market Alert` if a
    new buy cleared the gate, a buy zone triggered, or a holding hit its stop/invalidation.
 3. Post-market → **no** Telegram (unless a breakdown); `daily_snapshots` + `stock_observations` rows
-   for today appear and `data/lessons.md` got a new regime line (the cloud run commits/pushes the
-   file change, or writes via the repo — confirm the regime line landed).
+   for today appear and a new `lessons` row with `category='regime'` exists in Postgres for today.
 
 ## Pause / adjust cadence
 

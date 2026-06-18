@@ -47,6 +47,15 @@ CREATE TABLE IF NOT EXISTS radar (
   ticker TEXT PRIMARY KEY, added DATE, last_seen DATE, days_relevant INT,
   reason TEXT, bucket_guess TEXT, promoted BOOLEAN DEFAULT false, promoted_on DATE);
 
+CREATE TABLE IF NOT EXISTS lessons (
+  id BIGSERIAL PRIMARY KEY,
+  entry_date DATE NOT NULL,
+  category TEXT NOT NULL DEFAULT 'regime',
+  content TEXT NOT NULL,
+  created_at TIMESTAMPTZ DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS idx_lessons_date ON lessons(entry_date DESC, id DESC);
+
 -- v2.1: owner's personal paper-watch hypotheses (separate from radar + holdings)
 CREATE TABLE IF NOT EXISTS paper_watches (
   id BIGSERIAL PRIMARY KEY, ticker TEXT NOT NULL, created DATE NOT NULL,

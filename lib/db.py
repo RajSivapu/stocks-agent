@@ -68,6 +68,13 @@ def _rows(q, args=()):
         cur = c.execute(q, args); cols = [d[0] for d in cur.description]
         return [dict(zip(cols, r)) for r in cur.fetchall()]
 
+def insert_lesson(row):
+    q = "INSERT INTO lessons (entry_date, category, content) VALUES (%(entry_date)s, %(category)s, %(content)s)"
+    with conn() as c: c.execute(q, row); c.commit()
+
+def get_lessons(limit=20):
+    return _rows("SELECT * FROM lessons ORDER BY entry_date DESC, id DESC LIMIT %s", (limit,))
+
 def get_holdings(): return _rows("SELECT * FROM holdings ORDER BY ticker")
 def get_open_suggestions():
     return _rows("SELECT * FROM suggestions WHERE valid_until >= CURRENT_DATE AND action='Buy' ORDER BY date DESC")

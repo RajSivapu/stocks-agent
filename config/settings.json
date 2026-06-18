@@ -1,7 +1,7 @@
 {
   "owner": {
     "name": "Rajrupesh",
-    "email": "rupesh.sivapu@gmail.com",
+    "email": "your@email.com",
     "timezone": "America/Chicago"
   },
   "strategy": {
@@ -83,7 +83,7 @@
   },
   "delivery": {
     "telegram": { "enabled": true },
-    "email": { "enabled": false, "to": "rupesh.sivapu@gmail.com", "note": "optional fallback; needs Gmail sign-in, may not work in scheduled cloud runs" }
+    "email": { "enabled": false, "to": "your@email.com", "note": "optional fallback; needs Gmail sign-in, may not work in scheduled cloud runs" }
   },
   "risk": {
     "max_position_pct_of_bucket": { "core": 25, "growth": 20, "speculative": 10 },
@@ -149,11 +149,11 @@
   },
   "learning": {
     "enabled": true,
-    "memory_file": "data/lessons.md",
+    "memory_backend": "postgres",
     "grading_horizons_days": [5, 21, 63],
     "observations_enabled": true,
     "auto_tune_after_graded_calls": 50,
-    "_note": "The agent keeps a running 'learning memory': distilled lessons + trend observations (e.g. 'my biotech calls underperform', 'growth picks do better bought on red days', 'market regime shifted from X to Y'). It READS this back every run and APPLIES it, and UPDATES it with new lessons + a compare of the latest trend vs the prior trend. v2: structured grades live in the suggestion_grades Postgres table; the grading pass judges past suggestions at the grading_horizons_days (~1wk/1mo/1qtr); per-stock observations/seasonality live in stock_observations. GATED numeric auto-tuning (sizing/score weights) is allowed ONLY after auto_tune_after_graded_calls (50) graded calls in a bucket — until then judgment-only, documented not active. This is the honest version of 'learn from day 1 / get smarter over time' — memory + self-review over an LLM agent, NOT a trained price-prediction model (deliberately out of scope; such models overfit and mislead at this stage)."
+    "_note": "The agent keeps a running learning memory in the Postgres `lessons` table (lib.db.insert_lesson / get_lessons). It reads recent regime lines + lessons each run and applies them, and after post-market inserts one new regime line. Structured grades live in suggestion_grades; per-stock observations in stock_observations. GATED numeric auto-tuning (sizing/score weights) is allowed ONLY after auto_tune_after_graded_calls (50) graded calls in a bucket — until then judgment-only. This is memory + self-review over an LLM agent, NOT a trained price-prediction model."
   },
   "scoring": {
     "enabled": true,

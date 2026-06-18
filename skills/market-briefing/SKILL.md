@@ -1,6 +1,6 @@
 ---
 name: market-briefing
-description: Use to generate Rajrupesh's US stock market briefing and suggestion-only trade ideas for his watchlist. Runs on a weekday cadence (06:30 pre-market full brief, 10:30/13:30 intraday checks, 15:10 post-market analysis) and on-demand. Reads config + watchlist (files) + holdings/suggestions/observations (Postgres), pulls market data/news from read-only sources, scores each stock, sends the briefing to Telegram, and persists every suggestion. NEVER executes trades.
+description: Use to generate Rajrupesh's US stock market briefing and suggestion-only trade ideas for his watchlist. Runs on a weekday cadence (06:30 pre-market full brief, ~12:00 intraday check, 15:10 post-market analysis) and on-demand. Reads config + watchlist (files) + holdings/suggestions/observations/lessons (Postgres), pulls market data/news from read-only sources, scores each stock, sends the briefing to Telegram, and persists every suggestion. NEVER executes trades.
 ---
 
 # Market Briefing — Personal Investing Assistant
@@ -97,8 +97,7 @@ slice only — NOT the whole universe):
    "price_reaction":…,"confidence":…,"source":…})`. Keep observations sparse and meaningful — this is
    the per-stock behavior/seasonality memory re-read when that name is next analyzed (treated as a
    hypothesis, n=1; stay skeptical of patterns that may already be priced in).
-3. **Regime line** — append ONE dated line to the "Market regime log" in `data/lessons.md` (today's
-   direction, sector leadership, volatility, theme) so tomorrow's run can compare trend-vs-prior-trend.
+3. **Regime line** — call `lib.db.insert_lesson({"entry_date": today, "category": "regime", "content": "<one-line regime summary>"})` (today's direction, sector leadership, volatility, theme) so tomorrow's run can compare trend-vs-prior-trend.
 
 4. **Trailing-stop recompute (overnight refresh).** For each holding, recompute and persist the
    trailing stop so the morning brief is current when it runs at 06:30. Use the closing price as
@@ -161,9 +160,7 @@ the **relevant slice**: the names in scope this run (holdings + watchlist + scan
 lessons/grades, and the per-stock observations for the specific names you're analyzing. NEVER load full
 history into context. Token-per-run must stay roughly flat as the database grows.
 
-**Still files (human-edited / human-read):** `config/settings.json`, `config/watchlist.json`, and the
-narrative `data/lessons.md`. Everything else — holdings, transactions, suggestions, grades,
-observations, daily snapshots, dry-powder, radar — is Postgres.
+**Still files (human-edited / human-read):** `config/settings.json` and `config/watchlist.json`. Everything else — holdings, transactions, suggestions, grades, observations, lessons, daily snapshots, dry-powder, radar — is Postgres.
 
 ## Inputs (read these first, every run)
 1. `config/settings.json` — strategy, allocation (70/20/10), cadence, deployment, risk, scoring, learning, delivery.
@@ -687,7 +684,7 @@ If there are **no active watches**, omit this block entirely — no empty sectio
 
 **🏁 Monthly scorecard** (MONTHLY-PLAN brief ONLY — the 1st weekday of the month; OMIT on daily-status
 briefs) — a few plain lines from the grading pass + lessons: **accuracy by bucket** last month (e.g.
-"Growth 4/5, Speculative 1/4"), the **biggest lesson learned** (from `data/lessons.md`), and **what's
+"Growth 4/5, Speculative 1/4"), the **biggest lesson learned** (from `lib.db.get_lessons(limit=5)`), and **what's
 changing** this month because of it (e.g. "leaning more cautious on chip names after two faded"). Honest
 and short; this is the only brief that carries it.
 
@@ -703,7 +700,7 @@ For each action line you produced, persist ONE `suggestions` row via `lib.db.ins
 with the full internal fields (even though the message showed only the simple line). Rigorous Mode adds
 the debate fields — `depth`, `bull`, `bear`, `decisive_factor`, `risk_verdict`, `invalidation_level` —
 alongside the confidence/score fields, plus the v2 entry-zone fields (`entry_zone_low`,
-`entry_zone_high`, `valid_until`), so the grading pass + `data/lessons.md` compound from richer
+`entry_zone_high`, `valid_until`), so the grading pass + lessons (Postgres) compound from richer
 history. The row dict (columns map 1:1 to the `suggestions` table):
 ```python
 db.insert_suggestion({"date":"YYYY-MM-DD","ticker":"XXX","action":"Buy","bucket":"growth",
@@ -748,20 +745,20 @@ actually did, so confidence is earned, not assumed.
 actual behavior and decide trim / exit / hold — and record the reassessment (a grade + an observation).
 A broken thesis is data, not a failure to argue around.
 
-## Learning memory — get smarter from day 1 (read + update `data/lessons.md`, settings.json `learning`)
+## Learning memory — get smarter from day 1 (Postgres `lessons` table, settings.json `learning`)
 This is the honest version of "learn over time and compare trends" — **memory + self-review over an
 LLM agent, NOT a trained price-prediction model** (deliberately out of scope; such models overfit and
-mislead at this stage). If `data/lessons.md` is missing, create it with "Lessons learned" and
-"Market regime log" sections. Each run:
-1. **Read** `data/lessons.md` and let its lessons temper today's calls (be more cautious in buckets
-   where past lessons say you've been wrong; lean into what's worked).
-2. **Compare** today's market backdrop to the **previous "Market regime log" entry** — note what
-   changed (direction, sector leadership, volatility, rates/news theme). This is the "latest trend vs
-   old trend" comparison the owner wants; let it inform the brief's 📈 Today + 💡 Why lines.
-3. **Update** the file: append one dated regime line; add or revise lessons when the track-record
-   review (above) teaches something new, citing evidence from the `suggestions` / `suggestion_grades`
-   tables in Postgres. Keep entries short and falsifiable; prune lessons that prove wrong. Never invent
-   results to look smart.
+mislead at this stage). Each run:
+1. **Read** `lib.db.get_lessons(limit=20)` — fetch the most recent regime lines and lessons. Let them
+   temper today's calls (be more cautious in buckets where past lessons say you've been wrong; lean
+   into what's worked).
+2. **Compare** today's market backdrop to the most recent `category='regime'` row — note what changed
+   (direction, sector leadership, volatility, rates/news theme). This is the "latest trend vs old
+   trend" comparison; let it inform the brief's 📈 Today + 💡 Why lines.
+3. **Update** (post-market run): call `lib.db.insert_lesson({"entry_date": today, "category": "regime",
+   "content": "<one-line summary>"})`. Add a `category='lesson'` row when the track-record review
+   teaches something new, citing evidence from `suggestions` / `suggestion_grades`. Keep entries short
+   and falsifiable. Never invent results to look smart.
 
 ## Delivery — Telegram (via `lib.telegram.send`)
 Send the rendered message with **`lib.telegram.send(html)`** — it reads the bot token + chat id from

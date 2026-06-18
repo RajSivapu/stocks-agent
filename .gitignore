@@ -1,8 +1,26 @@
+# Secrets — never commit
 config/secrets.local.json
 .mcp.json
+.env
+
+# Claude Code local config
 .claude/
+
+# Python
 __pycache__/
 *.pyc
-.env
 .venv/
+
+# Personal data — lives in Postgres or local only
+data/lessons.md
+data/learning.md
+data/suggestions-log.jsonl
+data/briefings/*.md
 data/*.local
+
+# Internal implementation docs (personal paths + context)
+docs/superpowers/
+docs/HANDOFF.md
+
+# Test cache
+.pytest_cache/

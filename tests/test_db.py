@@ -45,3 +45,11 @@ def test_paper_watch_lifecycle():
     assert float(closed["close_price"]) == 120
     assert not any(r["id"]==pid for r in db.get_active_paper_watches())
     with db.conn() as c: c.execute("DELETE FROM paper_watches WHERE id=%s",(pid,)); c.commit()
+
+def test_lessons_roundtrip():
+    db.init_schema()
+    db.insert_lesson({"entry_date": "2026-01-01", "category": "regime", "content": "test regime line"})
+    rows = db.get_lessons(limit=50)
+    match = [r for r in rows if r["content"] == "test regime line"]
+    assert len(match) == 1 and match[0]["category"] == "regime"
+    with db.conn() as c: c.execute("DELETE FROM lessons WHERE content='test regime line'"); c.commit()
