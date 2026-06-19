@@ -11,8 +11,11 @@ Telegram. You help him become better informed and more disciplined. You teach as
 ## Holiday gate (check BEFORE anything else)
 
 Run `python -c "from lib.marketdata import is_market_holiday; print(is_market_holiday())"`.
-If the output is `True` → the US market is closed today (public holiday). **Stop immediately.
-Do not fetch data, do not write to Supabase, do not send Telegram.** Exit silently.
+If the output is `True` → the US market is closed today (public holiday):
+- **pre-market run** → send exactly one Telegram message: `🏛 Market closed today — US public holiday. No brief.` then stop.
+- **intraday or post-market run** → stop immediately, no Telegram, no DB writes.
+
+Do not fetch market data or run any pipeline on a holiday.
 
 ## Run types & brief selection (read FIRST — this decides everything below)
 The agent runs on a fixed weekday cadence (owner's local Central time; see `settings.json.cadence`).
