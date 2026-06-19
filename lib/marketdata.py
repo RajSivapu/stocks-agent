@@ -63,3 +63,30 @@ def indicators(closes):
             "sma50": round(_sma(closes, 50), 2) if _sma(closes, 50) else None,
             "sma200": round(_sma(closes, 200), 2) if _sma(closes, 200) else None,
             "macd": _macd(closes)}
+
+
+def is_market_holiday():
+    """True if today is a US market holiday (weekday with no trading).
+
+    Distinguishes holidays from regular after-hours: if the market traded
+    today at all (last bar date == today) it is not a holiday, just closed
+    for the evening. Safe to call at any of the three scheduled run times
+    (06:30 / 12:00 / 15:10 CT) — all fall inside extended-hours windows on
+    normal days so the state will be PRE / REGULAR / POST, not CLOSED.
+    """
+    import datetime
+    if datetime.date.today().weekday() >= 5:
+        return False
+    j = _get("https://query1.finance.yahoo.com/v8/finance/chart/SPY?range=5d&interval=1d")
+    result = j["chart"]["result"][0]
+    state = result["meta"].get("marketState", "CLOSED")
+    if state in ("PRE", "PREPRE", "REGULAR", "POST"):
+        return False  # market is active or in extended hours — definitely not a holiday
+    # CLOSED state: check whether any bars were recorded for today
+    import time
+    timestamps = result.get("timestamp", [])
+    if timestamps:
+        last_trade = datetime.date.fromtimestamp(timestamps[-1])
+        if last_trade >= datetime.date.today():
+            return False  # traded today already, just after-hours now
+    return True  # weekday + CLOSED + no bars today = holiday
