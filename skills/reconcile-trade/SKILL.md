@@ -32,7 +32,7 @@ Read the current position first: `cur = next((h for h in lib.db.get_holdings() i
 - `new_avg = (old_shares*old_avg + qty*price) / new_shares` (or `price` if new position).
 - Look up the suggestion that prompted this buy:
   ```python
-  rows = db._rows("SELECT stop,target FROM suggestions WHERE ticker=%s AND action='Buy' ORDER BY date DESC LIMIT 1", (T,))
+  rows = db._sb().table("suggestions").select("stop,target").eq("ticker", T).eq("action", "Buy").order("date", desc=True).limit(1).execute().data
   sugg_stop   = float(rows[0]["stop"])   if rows and rows[0]["stop"]   else None
   sugg_target = float(rows[0]["target"]) if rows and rows[0]["target"] else None
   ```
@@ -52,7 +52,7 @@ Read the current position first: `cur = next((h for h in lib.db.get_holdings() i
 - If `new_shares > 0`: `lib.db.upsert_holding({...,"shares":new_shares,"avg_cost":old_avg, ...})`
   (avg cost unchanged on a sell).
 - If `new_shares <= 0`: **delete the holding row** (upsert won't remove it):
-  `with lib.db.conn() as c: c.execute("DELETE FROM holdings WHERE ticker=%s",(T,)); c.commit()`
+  `db._sb().table("holdings").delete().eq("ticker", T).execute()`
 
 **Skip** ("skipped it" / "didn't buy"): record NOTHING (no transaction, no holding change). Just
 acknowledge it plainly and, if it was an open suggestion, note that the entry zone is still open if
@@ -79,7 +79,7 @@ new_shares = old_shares + qty
 new_avg    = (old_shares*old_avg + qty*price)/new_shares
 
 # look up the suggestion that prompted this buy
-rows = db._rows("SELECT stop,target FROM suggestions WHERE ticker=%s AND action='Buy' ORDER BY date DESC LIMIT 1", (T,))
+rows = db._sb().table("suggestions").select("stop,target").eq("ticker", T).eq("action", "Buy").order("date", desc=True).limit(1).execute().data
 settings   = json.load(open("config/settings.json"))
 if rows and rows[0]["stop"]:
     sugg_stop   = float(rows[0]["stop"])
