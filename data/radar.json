@@ -1,0 +1,22 @@
+{
+  "candidates": [
+    {
+      "ticker": "MU",
+      "added": "2026-06-17",
+      "last_seen": "2026-06-17",
+      "days_relevant": 2,
+      "reason": "Memory-chip super-cycle, rev+85% eps+412%, scored 85; semis theme hot",
+      "bucket_guess": "growth",
+      "promoted": false
+    },
+    {
+      "ticker": "TSM",
+      "added": "2026-06-17",
+      "last_seen": "2026-06-17",
+      "days_relevant": 2,
+      "reason": "Dominant chip foundry, 47% margin, scored 84; semis theme hot",
+      "bucket_guess": "growth",
+      "promoted": false
+    }
+  ]
+}

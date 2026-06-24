@@ -2,12 +2,16 @@
 One-time migration: parse data/lessons.md and insert each entry into the lessons table.
 Idempotent — skips rows that already exist (same entry_date + category + content).
 Run once: python scripts/migrate_lessons_to_pg.py
+
+NOTE: This migration has already been run. Script kept for reference only.
 """
 import sys, os, re
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from lib.db import conn
+from lib import db, config
+from supabase import create_client
 
 LESSONS_FILE = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "data", "lessons.md")
+
 
 def parse_lessons(path):
     rows = []
@@ -33,26 +37,22 @@ def parse_lessons(path):
             rows.append({"entry_date": entry_date, "category": current_category, "content": content})
     return rows
 
+
 def run():
     rows = parse_lessons(LESSONS_FILE)
     if not rows:
         print("No entries parsed — done.")
         return
+    sb = create_client(config.secret("supabase_url"), config.secret("supabase_service_role_key"))
     inserted = 0
-    with conn() as c:
-        for row in rows:
-            existing = c.execute(
-                "SELECT id FROM lessons WHERE entry_date=%s AND category=%s AND content=%s",
-                (row["entry_date"], row["category"], row["content"])
-            ).fetchone()
-            if not existing:
-                c.execute(
-                    "INSERT INTO lessons (entry_date, category, content) VALUES (%s, %s, %s)",
-                    (row["entry_date"], row["category"], row["content"])
-                )
-                inserted += 1
-        c.commit()
+    for row in rows:
+        existing = sb.table("lessons").select("id").eq("entry_date", row["entry_date"]) \
+            .eq("category", row["category"]).eq("content", row["content"]).execute().data
+        if not existing:
+            db.insert_lesson(row)
+            inserted += 1
     print(f"Migrated {inserted} entries ({len(rows) - inserted} already existed).")
+
 
 if __name__ == "__main__":
     run()

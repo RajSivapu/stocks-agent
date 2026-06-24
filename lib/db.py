@@ -93,3 +93,15 @@ def get_dry_powder(month):
 
 def set_dry_powder(row):
     _sb().table("dry_powder").upsert(row, on_conflict="month").execute()
+
+
+def get_radar():
+    return _sb().table("radar").select("*").execute().data
+
+
+def upsert_radar(row):
+    _sb().table("radar").upsert(row, on_conflict="ticker").execute()
+
+
+def delete_radar(ticker):
+    _sb().table("radar").delete().eq("ticker", ticker).execute()

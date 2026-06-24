@@ -5,7 +5,7 @@ It sends plain-English market briefs to Telegram, tracks a live watchlist, learn
 and never executes trades. Built and maintained by **Rajrupesh**.
 
 > **Guardrail:** zero trade-execution tools. The agent can only read market data, reason, and write
-> to its own Postgres database. Every trade is placed by you.
+> to its own Supabase database. Every trade is placed by you.
 
 ---
 
@@ -36,8 +36,8 @@ Claude (Pro plan, Cloud Routines)
 
 lib/                    Python helpers (no third-party deps except supabase-py)
   ├── config.py         secrets (env-var first, file fallback)
-  ├── db.py             Postgres helpers (holdings, suggestions, lessons, observations, ...)
-  ├── marketdata.py     Yahoo Finance — quotes, history, indicators (RSI/MACD/SMA, pure Python)
+  ├── db.py             Supabase helpers via HTTPS (holdings, suggestions, lessons, radar, ...)
+  ├── marketdata.py     Yahoo Finance — quotes, history, indicators (RSI/MACD/SMA) + holiday detection
   ├── fundamentals.py   Finnhub — metrics, news, earnings dates
   ├── telegram.py       Telegram delivery (HTML, auto-split)
   └── preload.py        Historical backfill — volatility, seasonality, notable moves
@@ -54,9 +54,10 @@ scripts/
   └── migrate_lessons_to_pg.py  One-time: move data/lessons.md → lessons table
 ```
 
-**All growing state lives in Postgres.** The only files the agent reads at runtime are
+**All growing state lives in Supabase.** The only files the agent reads at runtime are
 `config/settings.json` and `config/watchlist.json`. Lessons, suggestions, grades, observations,
-snapshots, and radar are all DB tables.
+snapshots, and radar are all DB tables. **US market holidays are detected automatically** —
+all three runs exit silently (pre-market sends one Telegram notification) when the market is closed.
 
 ---
 
@@ -166,11 +167,10 @@ Open Claude Code in this folder and invoke the `market-briefing` skill, or any o
 
 See [routines/README.md](routines/README.md) for the complete step-by-step:
 
-1. Connect this repo in **claude.ai → Code → Routines**
-2. Set **Network = Custom** — allowlist the 7 hosts listed in routines/README.md
-3. Add the 5 environment variable secrets
-4. Create the three weekday Routines (crons + exact prompts are in the README)
-5. Run the Healthcheck Routine once to verify the cloud reaches all services
+1. In **claude.ai → Code → Routines**, click the cloud icon (bottom-right of the Instructions editor) → **Add environment**
+2. Name it `stocks-agent`, set **Network = Full**, add the 6 env var secrets (`SUPABASE_URL`, `SUPABASE_SERVICE_ROLE_KEY`, `FINNHUB_API_KEY`, `ALPHAVANTAGE_API_KEY`, `TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID`), and set setup script to `pip install supabase --ignore-installed`
+3. Create 4 Routines (Healthcheck + Pre-market + Intraday + Post-market), each connected to this repo and using the `stocks-agent` environment
+4. Run the **Healthcheck** Routine once — expect `{"postgres":"ok","finnhub":"ok","yahoo":"ok","telegram":"ok"}` in Telegram
 
 Your laptop does not need to be on.
 

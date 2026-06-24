@@ -65,3 +65,15 @@ CREATE TABLE IF NOT EXISTS paper_watches (
   agent_view_at_open TEXT, agent_score_at_open INT,
   created_at TIMESTAMPTZ DEFAULT now());
 CREATE INDEX IF NOT EXISTS idx_paper_status ON paper_watches(status);
+
+-- RLS: block anon-key access on all tables; service role key bypasses this automatically
+ALTER TABLE holdings          ENABLE ROW LEVEL SECURITY;
+ALTER TABLE transactions      ENABLE ROW LEVEL SECURITY;
+ALTER TABLE suggestions       ENABLE ROW LEVEL SECURITY;
+ALTER TABLE suggestion_grades ENABLE ROW LEVEL SECURITY;
+ALTER TABLE stock_observations ENABLE ROW LEVEL SECURITY;
+ALTER TABLE daily_snapshots   ENABLE ROW LEVEL SECURITY;
+ALTER TABLE dry_powder        ENABLE ROW LEVEL SECURITY;
+ALTER TABLE radar              ENABLE ROW LEVEL SECURITY;
+ALTER TABLE lessons            ENABLE ROW LEVEL SECURITY;
+ALTER TABLE paper_watches      ENABLE ROW LEVEL SECURITY;

@@ -1,0 +1,5 @@
+{
+  "_comment": "Your ACTUAL holdings (not the watchlist). Robinhood has no API, so update this manually after trades — or tell the agent 'I bought 10 NVDA at 210' and it edits this file. Leave holdings [] if you own nothing yet.",
+  "cash_available_usd": 0,
+  "holdings": []
+}

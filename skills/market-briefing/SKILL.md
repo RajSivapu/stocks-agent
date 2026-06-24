@@ -61,7 +61,7 @@ silence is correct and saves tokens. Never re-pitch the monthly plan here.
 Runs under the remaining `settings.intraday` budget after Part A's API calls are counted.
 
 1. **Refresh radar** (≤15 names): for each radar row, re-quote (`lib.marketdata.quote`) and call
-   `db._rows` / `db.conn()` to `upsert_radar` — update `last_seen=today` and increment `days_relevant`.
+   `lib.db.upsert_radar({...})` to update `last_seen=today` and increment `days_relevant`.
    Apply the same prune/cap rules as the morning scan (inactive rows drop; over-cap = keep strongest).
 
 2. **One cheap movers + news pull**: call the same endpoints as the morning broad screener
@@ -150,13 +150,12 @@ Structured, growing state now lives in **managed Postgres**, not local JSON file
 it by running the project's Python helpers via Bash (they own the connection + secrets). Use the
 repo's Python interpreter: **`python` in the cloud Routine; `.venv/bin/python` when running locally.**
 The modules and the exact helpers you call:
-- **`lib.db`** — Postgres access.
+- **`lib.db`** — Supabase access (HTTPS, no raw SQL).
   - read: `get_holdings()` · `get_open_suggestions()` · `get_observations(ticker)` ·
-    `recent_lessons_rows()` · `get_dry_powder(month)` · ad-hoc `db._rows(sql, args)`.
+    `recent_lessons_rows()` · `get_dry_powder(month)` · `get_lessons(limit)` · `get_radar()`.
   - write: `insert_suggestion(row)` · `insert_transaction(row)` · `upsert_holding(row)` ·
-    `insert_observation(row)` · `insert_grade(row)` · `upsert_daily_snapshot(row)` · `set_dry_powder(row)`.
-  - the **`radar` table** holds the self-curated candidate list (query/update via `db._rows(...)` /
-    `db.conn()`).
+    `insert_observation(row)` · `insert_grade(row)` · `upsert_daily_snapshot(row)` ·
+    `set_dry_powder(row)` · `insert_lesson(row)` · `upsert_radar(row)` · `delete_radar(ticker)`.
 - **`lib.marketdata`** — `quote(sym)` · `history(sym, range_)` · `indicators(closes)` (RSI-14, MACD
   12/26/9, SMA 50/200 — computed locally, `None` where history is too short).
 - **`lib.fundamentals`** — `metric(sym)` · `company_news(sym)` · `market_news()` · `earnings_dates(sym)`
@@ -292,8 +291,9 @@ respect `radar.watchlist_max_per_bucket`; and **report every add/retire in the b
 Watchlist update"). The owner can veto/revert anytime. To know which names it added, set the radar
 row's `promoted=true, promoted_on='YYYY-MM-DD'`; treat all other watchlist names as owner-owned and
 never auto-remove them.
-Read the radar with `db._rows("SELECT * FROM radar")`; insert/update rows with `db.conn()` (the table
-columns are `ticker, added, last_seen, days_relevant, reason, bucket_guess, promoted, promoted_on`).
+Read the radar with `lib.db.get_radar()`; insert/update rows with `lib.db.upsert_radar(row)`; remove
+stale rows with `lib.db.delete_radar(ticker)`. Row columns: `ticker, added, last_seen, days_relevant,
+reason, bucket_guess, promoted, promoted_on`.
 Each run:
 1. **Add:** for strong scan/news finds NOT already in the watchlist or radar, insert a row
    (`ticker, added=today, last_seen=today, days_relevant=1, reason, bucket_guess` ∈ core|growth|speculative).
