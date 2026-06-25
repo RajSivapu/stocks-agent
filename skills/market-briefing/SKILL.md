@@ -135,9 +135,60 @@ slice only — NOT the whole universe):
    **Quiet:** this step writes to DB only; do NOT send a Telegram message unless a target was hit
    (that merits a brief `⚡ Market Alert` noting the hypothetical win).
 
-**Quiet unless something needs the owner** (e.g. a holding broke down): usually this run writes to the
-DB + lessons and sends NO Telegram message. Token-leanness is a hard requirement — read only the
-relevant slice.
+**6. EOD Holdings Summary** — after all DB writes above are complete, check `holdings = lib.db.get_holdings()`.
+
+- **If holdings is empty:** stay fully silent — no Telegram, the DB writes are enough.
+- **If holdings has rows:** send one `📊 <b>EOD — {Mon DD}</b>` message via `lib.telegram.send(html)`.
+
+**Per-holding state** (compute for each row):
+```python
+price          = lib.marketdata.quote(ticker)["price"]
+avg            = float(h["avg_cost"])
+stop           = float(h["stop"]) if h.get("stop") else None
+target         = float(h["target"]) if h.get("target") else None
+pnl            = (price - avg) * float(h["shares"])
+pnl_pct        = (price / avg - 1) * 100
+cushion_pct    = (price / stop - 1) * 100 if stop else None
+
+# urgency emoji
+if   stop and price <= stop:                   emoji = "🔴"
+elif stop and cushion_pct < 4:                 emoji = "🟡"
+elif pnl_pct > 3:                              emoji = "🟢"
+else:                                          emoji = "⚪"
+```
+
+**Cushion phrase** (inline after Stop value):
+- 🔴 → `⚠️ <b>STOP HIT</b>`
+- 🟡 → `⚠️ <b>${abs(price−stop):.2f} gap — watch open</b>`
+- 🟢/⚪ → `${abs(price−stop):.2f} cushion`
+
+**Urgency note** — one line below the stop line, ONLY for 🟡 and 🔴:
+- 🟡 → `<i>Heads up: one weak open tests your stop. No action needed tonight — just stay aware.</i>`
+- 🔴 → `⚡ <b>Stop hit at close — consider exiting if tomorrow opens below ${stop}.</b>`
+
+**Message format:**
+```
+📊 <b>EOD — {Mon DD}</b>
+
+<b>Portfolio</b>
+{emoji} <b>{TICKER}</b> ${price:.2f} · avg ${avg:.2f} · {+/−}${abs(pnl):.0f} ({pnl_pct:+.1f}%)
+Stop <b>${stop}</b> · {cushion_phrase} · Target ${target}
+{urgency_note — only 🟡/🔴}
+
+<b>Market</b>
+{up to 3 index lines from daily_snapshots: SPY/QQQ/IWM close + day_move_pct}
+{today's regime sentence — pull from the lessons row written in step 3}
+
+<b>Open zones</b>
+{one line per suggestion where valid_until >= tomorrow AND ticker NOT IN holdings — omit section if none}
+<b>{TICKER}</b> ${low}–${high} · stop ${stop} · valid {date}
+
+<b>Tomorrow:</b> {one concrete watch item from today's snapshots — e.g. an index near SMA50, a held
+ticker with RSI below 35, or the sector with the biggest swing. One sentence. Omit if nothing stands out.}
+```
+
+**Omit "Open zones" section entirely** if no qualifying zones exist (keeps the message tight).
+Token-leanness still applies — read only the relevant slice.
 
 ## ABSOLUTE RULE — READ FIRST
 You are **suggestion-only**. You may **NEVER place, modify, or cancel any trade**, and you have
@@ -778,7 +829,7 @@ Send the rendered message with **`lib.telegram.send(html)`** — it reads the bo
 text (`&amp; &lt; &gt;`). Use `•` for bullet lists (not `-`), and `·` to separate inline items. Do
 NOT use Markdown `**`/`*` (Telegram HTML won't render them). Keep it phone-friendly. Title line by run kind:
 pre-market → `🌅 <b>Your Market Brief — <date></b>`; intraday → `⚡ <b>Market Alert — <topic></b>`;
-on-demand → `🌅 <b>Market Brief — <date HH:MM></b>`.
+post-market → `📊 <b>EOD — <date></b>`; on-demand → `🌅 <b>Market Brief — <date HH:MM></b>`.
 Email via Gmail is an OPTIONAL fallback only if `delivery.email.enabled` is true AND Gmail is
 authenticated (it needs a one-time Google sign-in; may be unavailable in scheduled runs).
 
