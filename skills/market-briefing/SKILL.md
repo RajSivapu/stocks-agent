@@ -326,6 +326,11 @@ setup" block. Other days: skip it. Cover, in a few plain lines, for the watchlis
 - **What happened last week** — the biggest moves, notable analyst rating/price-target changes, and
   any important filings (8-K/major news). Keep it to what actually matters.
 - **What's coming this week** — which of these names report **earnings** or have known events, with dates.
+- **Macro calendar** — flag any major economic releases this week: CPI (usually 2nd week of month),
+  NFP/Jobs (first Friday of month), Fed meeting (8 per year — check FOMC calendar). These cause sharp
+  moves in growth stocks. If a major event is within 3 days, note it prominently:
+  `⚠️ CPI/NFP/Fed meeting in N days — hold off new growth buys until after the event.`
+  If web tools available: check investing.com/economic-calendar for the week. If unavailable, note gap.
 This is the "what did I miss?" check, done for you. Free data only; note anything you couldn't pull.
 
 ## Macro pulse — check FIRST, every run (gates growth-stock confidence)
@@ -333,21 +338,33 @@ Before scanning any individual names, pull three macro signals via `lib.marketda
 record them as daily snapshots. These gate the entire run:
 
 ```python
-vix  = lib.marketdata.quote("^VIX")["price"]   # fear gauge — CBOE VIX
-tnx  = lib.marketdata.quote("^TNX")["price"]   # 10-year Treasury yield (%)
-dxy  = lib.marketdata.quote("DX-Y.NYB")["price"] # US Dollar Index
+vix   = lib.marketdata.quote("^VIX")["price"]       # fear gauge — CBOE VIX
+tnx   = lib.marketdata.quote("^TNX")["price"]       # 10-year Treasury yield (%)
+irx   = lib.marketdata.quote("^IRX")["price"]       # 3-month T-bill (short end of yield curve)
+dxy   = lib.marketdata.quote("DX-Y.NYB")["price"]   # US Dollar Index
+spread = tnx - irx                                   # yield curve: positive = normal, negative = inverted
 ```
 
 | Signal | Normal | Caution | Action |
 |--------|--------|---------|--------|
-| VIX | < 18 | 18–25 | > 25: reduce ALL growth picks one confidence level |
+| VIX | < 18 | 18–25 | > 25: reduce ALL growth picks one confidence level; label "Extreme Fear" |
+| VIX label | < 15 = Greed | 15–20 = Neutral | 20–25 = Fear · > 25 = Extreme Fear |
 | TNX (10yr) | < 4.0% | 4.0–4.5% | > 4.5% rising: add to bear case on any P/E > 25 stock |
+| Yield curve spread | > +0.5% | 0 – +0.5% | < 0 (inverted): recession signal within 12–18 months → defensive posture |
 | DXY | < 102 | 102–106 | > 106: headwind for US multinationals / global demand |
 
-Apply these BEFORE setting confidence on any name. If VIX > 25, the whole brief shifts defensive:
-growth picks become "Watch" unless the company-specific thesis is overwhelming. Note the levels
-in the market context block so Rajrupesh sees what regime he's investing in.
-Save as `upsert_daily_snapshot` rows (ticker=`^VIX`, `^TNX`, `DX-Y.NYB`) for trend comparison.
+**Internal market breadth** — after daily_snapshots are loaded, compute from DB:
+```python
+snaps = db._sb().table("daily_snapshots").select("ticker,close,sma50,sma200").eq("snap_date", today).execute().data
+stocks = [s for s in snaps if not s["ticker"].startswith("^") and s.get("sma50") and s.get("close")]
+pct_above_sma50  = sum(1 for s in stocks if s["close"] > s["sma50"])  / len(stocks) * 100 if stocks else None
+pct_above_sma200 = sum(1 for s in stocks if s["close"] > s["sma200"]) / len(stocks) * 100 if stocks else None
+```
+- `pct_above_sma50 > 60%` = healthy breadth · 40–60% = neutral · < 40% = weak (narrow leadership, bearish)
+- Weak breadth + rising index = dangerous (few stocks holding up the market) → add caution
+
+Apply these BEFORE setting confidence on any name. If VIX > 25, the whole brief shifts defensive.
+Note all macro levels in the market context block. Save VIX/TNX/IRX/DXY as daily_snapshots rows.
 
 ## Market scan — cover the WHOLE market, all sectors (do this every run)
 The owner wants opportunities from across the entire US market, not just the watchlist. You CANNOT
@@ -432,15 +449,29 @@ This is how past mistakes lower future confidence on the same name in the same c
 step, every analysis starts from scratch and repeats the same overconfidence.
 
 Four steps per name:
-1. **Specialist passes** — quick explicit reads of: **fundamentals** · **technicals** (the
-   locally-computed RSI/MACD/moving averages) · **news/sentiment** (+ insider activity).
+1. **Specialist passes** — quick explicit reads of:
+   - **Fundamentals** (via `lib.fundamentals.metric`) + **analyst consensus** via
+     `lib.fundamentals.analyst_recommendations(ticker)` → compute `bull_pct = (strongBuy+buy) / total`.
+     `bull_pct > 80%` = strong professional consensus (validates thesis); `< 40%` = wall street skeptical
+     (flag in bear case). NVDA example: 63/68 analysts bullish = 93% bull consensus.
+   - **Technicals** (locally-computed RSI/MACD/SMA — `lib.marketdata.indicators`)
+   - **Sector relative strength**: compare the stock's `day_pct` to its sector ETF's snapshot from
+     `daily_snapshots`. Semis → SMH; mega-cap tech → QQQ; industrials → XLI; etc. If the stock is
+     down MORE than its sector → relative weakness (bearish signal). Down LESS → relative strength
+     (bullish — institutional buying or company-specific resilience). Note explicitly in bull/bear pass.
+   - **News/sentiment** (+ insider activity via `lib.fundamentals.insider_sentiment`)
 2. **Bull vs Bear** — state the strongest point on each side, then name the single **decisive factor**
    that breaks the tie.
-3. **Risk gate (can VETO — `rigor.risk_gate_can_veto`)** — check position size vs
-   `risk.max_position_pct_of_bucket`, a mandatory stop-loss, daily-loss-limit + circuit-breaker
-   status (`risk.daily_loss_limit_pct`, `risk.circuit_breaker_consecutive_losses`), and concentration
-   vs the 70/20/10 target. **A weak idea dies here** — the gate can veto or downgrade the debate's
-   outcome entirely.
+3. **Risk gate (can VETO — `rigor.risk_gate_can_veto`)** — check:
+   - Position size vs `risk.max_position_pct_of_bucket`
+   - Mandatory stop-loss attached (no buy without a stop)
+   - Daily-loss-limit + circuit-breaker (`risk.daily_loss_limit_pct`, `risk.circuit_breaker_consecutive_losses`)
+   - Concentration vs the 70/20/10 target
+   - **Position risk concentration**: if the suggested buy would put more than 15% of the owner's
+     total monthly investment ($500) into a single stock, add a warning: "Note: this puts ${amount}
+     ({pct}%) of your monthly capital in one name — that's concentrated. Consider a smaller initial
+     position." Research shows beginners should risk max 1% of capital per trade on the stop distance.
+   **A weak idea dies here** — the gate can veto or downgrade the debate's outcome entirely.
 4. **Verdict + conviction (Low / Medium / High) + "what would prove me wrong"** (the invalidation
    level / stop). Only ideas that survive all four steps — and clear the confidence gate below — can
    become buy suggestions.

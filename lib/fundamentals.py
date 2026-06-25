@@ -45,6 +45,20 @@ def earnings_dates(sym):
     return j.get("earningsCalendar", [])
 
 
+def analyst_recommendations(sym):
+    """Latest analyst Buy/Hold/Sell consensus from Finnhub.
+
+    Returns dict with keys: strongBuy, buy, hold, sell, strongSell, period.
+    Returns {} if unavailable. Free tier includes this endpoint.
+    Use: total_bull = strongBuy+buy; total_bear = sell+strongSell; consensus = bull/(bull+bear+hold).
+    """
+    try:
+        data = _get(f"https://finnhub.io/api/v1/stock/recommendation?symbol={sym}")
+        return data[0] if data else {}
+    except Exception:
+        return {}
+
+
 def insider_sentiment(sym, months=3):
     """Finnhub insider sentiment (MSPR) for the last `months` months.
 
