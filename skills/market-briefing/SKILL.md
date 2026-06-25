@@ -144,11 +144,15 @@ slice only — NOT the whole universe):
 ```python
 price          = lib.marketdata.quote(ticker)["price"]
 avg            = float(h["avg_cost"])
+shares         = float(h["shares"])
 stop           = float(h["stop"]) if h.get("stop") else None
 target         = float(h["target"]) if h.get("target") else None
-pnl            = (price - avg) * float(h["shares"])
+invested       = avg * shares
+current_value  = price * shares
+pnl            = current_value - invested
 pnl_pct        = (price / avg - 1) * 100
 cushion_pct    = (price / stop - 1) * 100 if stop else None
+pnl_emoji      = "📈" if pnl >= 0 else "📉"
 
 # urgency emoji
 if   stop and price <= stop:                   emoji = "🔴"
@@ -171,7 +175,8 @@ else:                                          emoji = "⚪"
 📊 <b>EOD — {Mon DD}</b>
 
 <b>Portfolio</b>
-{emoji} <b>{TICKER}</b> ${price:.2f} · avg ${avg:.2f} · {+/−}${abs(pnl):.0f} ({pnl_pct:+.1f}%)
+{emoji} <b>{TICKER}</b> ${price:.2f} · avg ${avg:.2f} · {shares:.4f} shares
+{pnl_emoji} <b>{+/−}${abs(pnl):.2f} ({pnl_pct:+.1f}%)</b> · invested ${invested:.0f} → now ${current_value:.0f}
 Stop <b>${stop}</b> · {cushion_phrase} · Target ${target}
 {urgency_note — only 🟡/🔴}
 
