@@ -43,3 +43,18 @@ def earnings_dates(sym):
     """Upcoming/recent earnings calendar entries for `sym`."""
     j = _get(f"https://finnhub.io/api/v1/calendar/earnings?symbol={sym}")
     return j.get("earningsCalendar", [])
+
+
+def insider_sentiment(sym, months=3):
+    """Finnhub insider sentiment (MSPR) for the last `months` months.
+
+    MSPR ranges -100 (pure selling) to +100 (pure buying).
+    Returns list of {year, month, change (net shares), mspr} dicts, newest first.
+    Strong negative MSPR (<-50) is a bear flag; strong positive (>50) is a mild bull signal.
+    Note: individual 10b5-1 scheduled sales are included — treat as directional, not absolute.
+    """
+    frm = time.strftime("%Y-%m-%d", time.localtime(time.time() - months * 31 * 86400))
+    to  = time.strftime("%Y-%m-%d")
+    data = _get(f"https://finnhub.io/api/v1/stock/insider-sentiment?symbol={sym}&from={frm}&to={to}")
+    rows = data.get("data", [])
+    return sorted(rows, key=lambda r: (r.get("year", 0), r.get("month", 0)), reverse=True)

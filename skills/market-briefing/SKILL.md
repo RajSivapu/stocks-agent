@@ -192,6 +192,12 @@ Stop <b>${stop}</b> · {cushion_phrase} · Target ${target}
 ticker with RSI below 35, or the sector with the biggest swing. One sentence. Omit if nothing stands out.}
 ```
 
+**Earnings warning** — after building the portfolio block, for each held ticker run
+`lib.fundamentals.earnings_dates(ticker)`. If any earnings date falls within 7 calendar days,
+append a warning line to the portfolio block (below the stop line):
+`⚠️ <b>{TICKER} earnings in {N} days</b> — position carries binary event risk (gap up or down).`
+This is the most important heads-up a position-holder can get — never omit it.
+
 **Omit "Open zones" section entirely** if no qualifying zones exist (keeps the message tight).
 Token-leanness still applies — read only the relevant slice.
 
@@ -321,6 +327,27 @@ setup" block. Other days: skip it. Cover, in a few plain lines, for the watchlis
   any important filings (8-K/major news). Keep it to what actually matters.
 - **What's coming this week** — which of these names report **earnings** or have known events, with dates.
 This is the "what did I miss?" check, done for you. Free data only; note anything you couldn't pull.
+
+## Macro pulse — check FIRST, every run (gates growth-stock confidence)
+Before scanning any individual names, pull three macro signals via `lib.marketdata.quote()` and
+record them as daily snapshots. These gate the entire run:
+
+```python
+vix  = lib.marketdata.quote("^VIX")["price"]   # fear gauge — CBOE VIX
+tnx  = lib.marketdata.quote("^TNX")["price"]   # 10-year Treasury yield (%)
+dxy  = lib.marketdata.quote("DX-Y.NYB")["price"] # US Dollar Index
+```
+
+| Signal | Normal | Caution | Action |
+|--------|--------|---------|--------|
+| VIX | < 18 | 18–25 | > 25: reduce ALL growth picks one confidence level |
+| TNX (10yr) | < 4.0% | 4.0–4.5% | > 4.5% rising: add to bear case on any P/E > 25 stock |
+| DXY | < 102 | 102–106 | > 106: headwind for US multinationals / global demand |
+
+Apply these BEFORE setting confidence on any name. If VIX > 25, the whole brief shifts defensive:
+growth picks become "Watch" unless the company-specific thesis is overwhelming. Note the levels
+in the market context block so Rajrupesh sees what regime he's investing in.
+Save as `upsert_daily_snapshot` rows (ticker=`^VIX`, `^TNX`, `DX-Y.NYB`) for trend comparison.
 
 ## Market scan — cover the WHOLE market, all sectors (do this every run)
 The owner wants opportunities from across the entire US market, not just the watchlist. You CANNOT
@@ -479,12 +506,32 @@ just the preloaded 46.
    more growth per dollar of valuation). Affordable because it is full-depth-only (the name + ~2
    peers). Data from **yfinance** (Finnhub backup); **mark partial / note gaps** — never invent.
 3. **Bear Case** (supercharges the bear pass + risk gate) — adopt a skeptical short-seller stance and
-   surface the **3 most serious red flags, ranked by severity, with sources**, checking: customer
-   concentration (>25% of revenue, from the latest 10-K), margin compression, unusual insider selling,
-   a widening GAAP-vs-non-GAAP gap, and guidance cuts in the last 12 months. Produce an explicit
-   **invalidation level** (the price/condition where the thesis breaks) → this IS the stop-loss /
-   "what would prove me wrong." Filings-derived items (10-K concentration, GAAP gap) are **best-effort
-   on free data**: cite the source, and **note honestly when an item can't be verified.**
+   surface the **3 most serious red flags, ranked by severity, with sources**, checking:
+   - Customer concentration (>25% of revenue, from the latest 10-K)
+   - Margin compression / GAAP-vs-non-GAAP widening gap
+   - Guidance cuts in the last 12 months
+   - **Insider sentiment — run this explicitly:**
+     ```python
+     rows = lib.fundamentals.insider_sentiment(ticker)  # newest first
+     latest = rows[0] if rows else {}
+     mspr = latest.get("mspr", 0); net_shares = latest.get("change", 0)
+     ```
+     If `mspr < -50` in the most recent month → flag as a RANKED bear signal:
+     *"Insiders: MSPR {mspr:.0f}, net {net_shares:,} shares sold in {month} — management reducing
+     exposure."* This is a tier-1 red flag (executives know the business best). Push `risk_verdict`
+     toward `"downgrade"` unless the selling has an obvious innocent explanation (10b5-1 scheduled
+     plan already in place before recent price moves). Strong buying (`mspr > 50`) is a mild bull
+     signal — worth noting but not a decisive factor on its own.
+   - **Earnings collision (for any name you're about to issue a Buy):** call
+     `lib.fundamentals.earnings_dates(ticker)` — if earnings are within 5 calendar days, do NOT
+     issue a Buy. Log it as `"Watch: earnings in N days — binary event risk, wait for report."`
+     If web tools are available: spot-check Barchart.com/options/unusual-activity for the ticker —
+     heavy unusual PUT buying (large OTM contracts, volume >> open interest) is an institutional
+     hedge/short signal and should push the bear case heavier.
+   Produce an explicit **invalidation level** (the price/condition where the thesis breaks) → this
+   IS the stop-loss / "what would prove me wrong." Filings-derived items (10-K concentration, GAAP
+   gap) are **best-effort on free data**: cite the source, and **note honestly when an item can't
+   be verified.**
 
 ## Confidence / risk gate (the "rigid" dial — `rigor.confidence_gate`)
 After the deliberation, apply the gate before anything is suggested as a buy:
