@@ -10,7 +10,7 @@ or "does my reason to own <TICKER> still hold?". Produce a SHORT, plain-English 
 can act on. **Suggestion-only — you have no trade tools and must never place/modify/cancel a trade.**
 
 ## Inputs
-- The ticker(s) the owner names. If it's a holding, read `config/portfolio.json` for shares + avg cost.
+- The ticker(s) the owner names. If it's a holding, read holdings via `lib.db.get_holdings()` for shares + avg cost.
 - `config/settings.json` (buckets, risk, scoring) and `config/secrets.local.json` (keys via the MCPs).
 
 ## Data (read-only): yfinance primary, Finnhub secondary, Alpha Vantage backup

@@ -39,11 +39,11 @@ print("imported holdings:", h_n)
 rd = ROOT / "data" / "radar.json"; r_n = 0
 if rd.exists():
     for c in json.loads(rd.read_text()).get("candidates", []):
-        with db.conn() as cx:
-            cx.execute("""INSERT INTO radar (ticker,added,last_seen,days_relevant,reason,bucket_guess,promoted)
-              VALUES (%s,%s,%s,%s,%s,%s,%s) ON CONFLICT (ticker) DO NOTHING""",
-                       (c["ticker"], c.get("added"), c.get("last_seen"), c.get("days_relevant"),
-                        c.get("reason"), c.get("bucket_guess"), c.get("promoted", False))); cx.commit()
+        db.upsert_radar({
+            "ticker": c["ticker"], "added": c.get("added"), "last_seen": c.get("last_seen"),
+            "days_relevant": c.get("days_relevant"), "reason": c.get("reason"),
+            "bucket_guess": c.get("bucket_guess"), "promoted": c.get("promoted", False),
+        })
         r_n += 1
 print("imported radar candidates:", r_n)
 print("migration done")

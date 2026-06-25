@@ -32,7 +32,7 @@ Lets the owner add, check, and close hypothetical stock ideas. Writes only to `p
    ```python
    import sys, os; sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)).replace('/skills/paper-watch',''))
    import lib.db as db
-   rows = db._rows("SELECT action,score FROM suggestions WHERE ticker=%s ORDER BY date DESC LIMIT 1", (ticker,))
+   rows = db._sb().table("suggestions").select("action,score").eq("ticker", ticker).order("date", desc=True).limit(1).execute().data
    agent_view_at_open = rows[0]["action"] if rows else "no prior view"
    agent_score_at_open = rows[0]["score"] if rows else None
    ```
@@ -102,7 +102,7 @@ Lets the owner add, check, and close hypothetical stock ideas. Writes only to `p
 
 2. Fetch the current price and close the watch:
    ```python
-   close_price = mkt.quote(row["ticker"])
+   close_price = mkt.quote(row["ticker"])["price"]
    db.close_paper_watch(row["id"], close_price=close_price, closed_date=date.today().isoformat())
    ```
 
