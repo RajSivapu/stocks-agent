@@ -387,6 +387,23 @@ Formalized from the TradingAgents multi-role method. For each analyzed name, run
 **internal + logged** deliberation. This replaces the old quick mental "bull vs bear" with an explicit,
 recorded one. It runs **behind the scenes** — the brief format does not change.
 
+**Pre-flight — retrieve past failures for this ticker** before the four steps below. Query:
+```python
+all_lessons = lib.db.get_lessons(limit=40)
+post_mortems = [l for l in all_lessons if l["category"] == "post-mortem" and ticker in l["content"]]
+```
+If post-mortems exist for this ticker:
+- Read each. What did the previous call get wrong? Which bear case proved true?
+- If the current regime TODAY shows the same condition that caused the prior failure (same bear flag,
+  same rotation, same macro pressure) → **cap confidence at Medium** for this run, regardless of the
+  Health Score. Log it explicitly in the suggestion's `bear` field: `"[Prior post-mortem: …]"`.
+- If today's regime is materially different from the post-mortem's regime → the penalty may not apply;
+  briefly note why you're overriding it. Regime difference must be explicit and specific, not assumed.
+- If no post-mortems exist for this ticker → proceed normally.
+
+This is how past mistakes lower future confidence on the same name in the same conditions. Without this
+step, every analysis starts from scratch and repeats the same overconfidence.
+
 Four steps per name:
 1. **Specialist passes** — quick explicit reads of: **fundamentals** · **technicals** (the
    locally-computed RSI/MACD/moving averages) · **news/sentiment** (+ insider activity).
@@ -796,6 +813,32 @@ actually did, so confidence is earned, not assumed.
    the direction of the call (a Buy is "right" if it rose, etc.). Write a row:
    `lib.db.insert_grade({"suggestion_id":sid,"result":"right|wrong|partial","price_then":…,
    "price_later":…,"horizon_days":…,"note":"…"})`.
+
+   **Reflexion step — ONLY when `result='wrong'` and `horizon_days=5`** (the first and most actionable
+   grading point). Immediately after inserting the wrong grade, look back at the suggestion row's `bear`,
+   `decisive_factor`, `date`, and `ticker` fields. Look up the regime lesson closest to that suggestion's
+   date. Then write a `category='post-mortem'` lesson in plain English:
+   ```python
+   lib.db.insert_lesson({
+       "entry_date": today,
+       "category": "post-mortem",
+       "content": (
+           f"{ticker} {action} ({suggestion_date}, ${price_then:.2f}) → wrong at 5d "
+           f"(${price_later:.2f}, {pct_chg:+.1f}%). "
+           f"I bet on: {decisive_factor}. "
+           f"Bear case logged: {bear}. "
+           f"Regime then: {regime_then_one_line}. "
+           f"Root cause: {which_bear_argument_proved_true_or_what_I_missed}. "
+           f"Revised rule: {one_conditional_heuristic_for_next_time}."
+       )
+   })
+   ```
+   Be honest and specific — not "macro was bad" but "sector rotation to small-caps overwhelmed chip
+   fundamentals even though PEG was exceptional; the IWM/QQQ divergence was the signal I under-weighted."
+   The revised rule must be **conditional**: "Next time [regime/setup condition], [concrete adjustment
+   to confidence or analysis]." This is the agent's explicit verbal self-correction — the Reflexion
+   pattern. Without it, wrong grades are just numbers; with it, they become durable heuristics.
+
 3. **Compute accuracy by bucket** from recent grades (`lib.db.recent_lessons_rows()`); note where
    you've been weak (e.g. "speculative calls mostly wrong").
 4. **Adjust this run accordingly** — lower confidence / be more cautious in the buckets where you've
