@@ -27,6 +27,20 @@ the only one that ever executes trades — and only paper-first, much later.**
    AND you've run it in paper mode — brainstorm Project 2 and build the auto-trader (paper first,
    then the $100).
 
+## Open ideas (not yet scoped)
+
+- **Independent "checker" pass before Telegram send** (noted 2026-07-02, while evaluating the
+  `loop-engineering` repo's maker/checker sub-agent pattern against stocks-agent's architecture).
+  Today every skill run (`market-briefing`, intraday, etc.) is a single self-reviewing agent pass —
+  the "Analyst→Researcher→Risk→Portfolio" multi-role lens is one agent structuring its own
+  reasoning, not an independent verification step by a separate process. Both real production bugs
+  so far (false-holiday brief-skip, the pre-edge-triggered stop alert firing 9+ times) shipped and
+  were only caught because the owner noticed the Telegram output — exactly the class of bug an
+  independent pre-send checker (does this alert invent a number? does it violate suggestion-only?
+  is it a duplicate of something already sent?) could plausibly have caught before it went out.
+  Not scoped or built — open question whether a Cloud Routine's tool config even permits dispatching
+  a sub-agent mid-run. Candidate for a future brainstorm, not urgent.
+
 ## Unchanging guardrails across everything
 - Suggestion-only / read-only until Project 2; no trade-execution tools installed in v1 or v2.
 - Every output carries the "educational, not financial advice" disclaimer.
