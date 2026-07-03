@@ -17,6 +17,7 @@ data/learning.md
 data/suggestions-log.jsonl
 data/briefings/*.md
 data/*.local
+data/edgar_cik_map.json
 
 # Internal implementation docs (personal paths + context)
 docs/superpowers/
