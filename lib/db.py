@@ -57,6 +57,17 @@ def update_holding_stop(ticker, stop=None, target=None, high_water_price=None):
     _sb().table("holdings").update(updates).eq("ticker", ticker).execute()
 
 
+def set_stop_alert_active(ticker, active):
+    _sb().table("holdings").update({"stop_alert_active": active}).eq("ticker", ticker).execute()
+
+
+def set_hold_override(ticker, until_date, reason=None):
+    updates = {"hold_override_until": str(until_date)}
+    if reason:
+        updates["notes"] = reason
+    _sb().table("holdings").update(updates).eq("ticker", ticker).execute()
+
+
 def upsert_daily_snapshot(row):
     _sb().table("daily_snapshots").upsert(row, on_conflict="snap_date,ticker").execute()
 

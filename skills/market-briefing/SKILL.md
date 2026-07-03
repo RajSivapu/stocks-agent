@@ -69,9 +69,27 @@ alerts go out early; Part B runs only after Part A completes.
 2. **Current holdings** — `lib.db.get_holdings()`; fetch each live price and check its
    invalidation/stop, including the trailing-stop HIT case (live price ≤ stored stop).
 
-If a zone triggered, an invalidation was hit, or a holding's stop was breached → send `⚡ Market Alert`
-immediately (one message per event or grouped if several fire). **If nothing triggered, send nothing** —
-silence is correct and saves tokens. Never re-pitch the monthly plan here.
+If a zone triggered or an invalidation was hit → send `⚡ Market Alert` immediately (one message per
+event or grouped if several fire). **If nothing triggered, send nothing** — silence is correct and
+saves tokens. Never re-pitch the monthly plan here.
+
+**Stop-hit alerts are edge-triggered, not level-triggered — de-dup via `stop_alert_active`.** A stop
+breach is a single fact; re-sending it every run it stays true is noise, not new information (this
+also applies to the post-market close-check below — they share the same flag):
+- Price **recovers above** the stored stop → `lib.db.set_stop_alert_active(ticker, False)` (re-arms
+  the alert — a future breach is a fresh edge and alerts again).
+- Price **breaches** the stop (live price ≤ stop) and `stop_alert_active` is not already `True` → a
+  NEW breach. If `hold_override_until` is set and `today <= hold_override_until`, suppress the push
+  (the owner already said they're holding through this — log a silent `stock_observations` row
+  instead). Otherwise send `⚡ Market Alert` and call `lib.db.set_stop_alert_active(ticker, True)`.
+- Price is **still** below the stop and `stop_alert_active` is already `True` → **suppress the push,
+  no matter how many days this has been true.** The EOD digest and next brief's 💼 Your money section
+  already show current status; a repeated push adds nothing.
+- **Escape hatch — invalidation always alerts.** If the holding's linked suggestion's
+  `invalidation_level` (the harder, thesis-breaking line — see "Invalidation-triggered reassessment")
+  is breached, that is categorically new information even mid-suppression or mid-override — send
+  `⚡ Market Alert` regardless. A hold-override covers "the soft stop is hit, I'm staying in"; it does
+  not cover "the thesis itself just broke."
 
 ### Part B — Bounded opportunity discovery
 Runs under the remaining `settings.intraday` budget after Part A's API calls are counted.
@@ -132,8 +150,11 @@ slice only — NOT the whole universe):
    `settings.trailing_stop` (breakeven trigger, ratchet-up-only), and call
    `lib.db.update_holding_stop(ticker, high_water_price=..., stop=...)` for any field that changed.
    **Quiet:** do NOT send a Telegram message for a routine stop ratchet — the morning brief will
-   surface the updated stop advisory. Only send a Telegram `⚡ Market Alert` if the closing price
-   is at or below the stored stop (a breakdown on the close that the intraday monitor may have missed).
+   surface the updated stop advisory. If the closing price is at or below the stored stop, apply the
+   same `stop_alert_active` edge-trigger + `hold_override_until` + invalidation-escape-hatch logic as
+   the intraday monitor (see "Intraday check" — they share the flag) before sending anything: only
+   send `⚡ Market Alert` if this is a fresh breach the intraday run may have missed, not a repeat of
+   one already alerted today.
 
 5. **Paper-watch mark-to-market (end-of-day close check).** Call `lib.db.get_active_paper_watches()`
    and for each active watch:

@@ -1,6 +1,6 @@
 ---
 name: reconcile-trade
-description: Use when Rajrupesh reports a trade he actually placed — e.g. "bought 1 NVDA @ 207", "sold 2 AMD", "sold half my VOO @ 681", or "skipped NVDA" — or when he updates a stop ("moved my AAPL stop to 230"). Parses it, records the transaction + updates holdings (including stop/target/high_water_price) in Postgres, and confirms the new position with P&L in plain English. Suggestion-only; NEVER places, modifies, or cancels a trade.
+description: Use when Rajrupesh reports a trade he actually placed — e.g. "bought 1 NVDA @ 207", "sold 2 AMD", "sold half my VOO @ 681", or "skipped NVDA" — or when he updates a stop ("moved my AAPL stop to 230") or tells the agent to hold a position through a stop hit without alerting him ("I'm holding NVDA through end of July, don't alert me on the stop"). Parses it, records the transaction + updates holdings (including stop/target/high_water_price/hold_override_until) in Postgres, and confirms the new position with P&L in plain English. Suggestion-only; NEVER places, modifies, or cancels a trade.
 ---
 
 # Reconcile a Trade — keep holdings & P&L accurate
@@ -63,6 +63,21 @@ acknowledge it plainly and, if it was an open suggestion, note that the entry zo
 - `lib.db.update_holding_stop(ticker, stop=new_stop)`
 - Confirm: "Got it — your **{ticker}** stop is now set at **${new_stop}**. No trade was placed; this is a record-only update."
 - Do NOT touch `target` or `high_water_price` unless the owner explicitly mentions them.
+
+**Hold override** ("I'm holding NVDA through end of July, don't alert me on the stop" / "leave {ticker}
+alone for a month" / "stop bugging me about {ticker}, I know the stop is hit"):
+- Parse: `ticker`, `until_date` (resolve relative phrasing like "a month" / "end of July" to an actual
+  date), and a short `reason` in the owner's own words.
+- `lib.db.set_hold_override(ticker, until_date, reason=f"owner: {reason}")`
+- Confirm plainly, and be explicit about what still gets through: "Got it — I'll stay quiet on routine
+  stop pushes for **{ticker}** through **{until_date}**. I'll still alert you if the deeper thesis
+  breaks (`invalidation_level`), not just the trailing stop. This isn't a recommendation to hold —
+  just recording that you've made the call."
+- Do NOT silently agree that holding is a good idea — a hold-override is a record-only instruction,
+  not a signal that the thesis is intact. If the current data already suggests real risk (e.g. a
+  flagged invalidation, heavy insider selling, or a monthly-scorecard lesson this pattern already hit
+  before), say so plainly in the same reply — you're recording the instruction, not staying silent
+  about a risk you can see.
 
 ## Worked example
 > Owner: "bought 1 NVDA @ 207"

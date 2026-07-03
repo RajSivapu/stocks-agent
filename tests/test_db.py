@@ -38,6 +38,18 @@ def test_holding_stop_roundtrip():
     db.update_holding_stop("TSTH", stop=110, high_water_price=125)
     h = {r["ticker"]: r for r in db.get_holdings()}["TSTH"]
     assert float(h["stop"]) == 110 and float(h["high_water_price"]) == 125
+    # stop-alert de-dup flag: starts unset, can be set and cleared (edge-triggered cooldown)
+    db.set_stop_alert_active("TSTH", True)
+    h = {r["ticker"]: r for r in db.get_holdings()}["TSTH"]
+    assert h["stop_alert_active"] is True
+    db.set_stop_alert_active("TSTH", False)
+    h = {r["ticker"]: r for r in db.get_holdings()}["TSTH"]
+    assert h["stop_alert_active"] is False
+    # owner hold-override: sets an expiry date and (optionally) a reason in notes
+    db.set_hold_override("TSTH", "2026-07-31", reason="owner: holding through July, ignore routine stop pushes")
+    h = {r["ticker"]: r for r in db.get_holdings()}["TSTH"]
+    assert h["hold_override_until"] == "2026-07-31"
+    assert "holding through July" in h["notes"]
     # cleanup
     _sb().table("holdings").delete().eq("ticker", "TSTH").execute()
 
