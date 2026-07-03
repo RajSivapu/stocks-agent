@@ -67,6 +67,24 @@ Create **three weekday (Mon–Fri) Routines**, all using the `stocks-agent` envi
 
 ---
 
+## Manual / dry-run testing
+
+**"Run now" on a saved Routine always runs live** — it uses the Routine's fixed Instructions verbatim
+(Telegram sends + Supabase writes happen for real), and there's no prompt to override it. Don't use
+"Run now" to poke at a Routine out of curiosity.
+
+To test safely, start a **new session** (not "Run now") in the `stocks-agent` environment and ask for
+a dry run, e.g.:
+
+> Run the market-briefing skill as a dry-run pre-market brief for today — preview only, don't send
+> Telegram or write anything to Supabase.
+
+The skill's dry-run gate (see `skills/market-briefing/SKILL.md`) runs the full pipeline for real but
+prints what it *would* have sent/written instead of actually sending or writing. Only activates when
+the request says "dry run" / "test mode" / "preview" — scheduled runs never trigger it.
+
+---
+
 ## Pause / adjust cadence
 
 - **Pause** any Routine from its page in claude.ai → Code → Routines (toggle off).

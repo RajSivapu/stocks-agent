@@ -17,6 +17,22 @@ If the output is `True` → the US market is closed today (public holiday):
 
 Do not fetch market data or run any pipeline on a holiday.
 
+## Dry-run gate (check SECOND, right after the holiday gate)
+
+Trigger: the invoking request explicitly asks for a dry run (contains "dry run", "dry-run", "test
+mode", or "preview" — case-insensitive). Scheduled Routine runs never use this wording, so dry-run
+only activates when a human asks for it in a manual session — it is the safe way to test a run
+without touching Telegram or Supabase.
+
+If dry-run is requested:
+- Run the full pipeline for real — all data pulls, scoring, and deliberation happen normally.
+- Do **not** call `lib.telegram.send` and do **not** call any `lib.db.insert_*` / update function.
+  Instead print what each call *would have* sent/written: the composed message HTML in full, and one
+  line per DB write naming the table + key fields (e.g. `[dry-run] would insert suggestions: NVDA Buy
+  entry $195-207`).
+- Prefix the final output with `🧪 DRY RUN — nothing sent, nothing written to Supabase.`
+- Everything else (brief structure, gates, format) stays identical to a live run.
+
 ## Run types & brief selection (read FIRST — this decides everything below)
 The agent runs on a fixed weekday cadence (owner's local Central time; see `settings.json.cadence`).
 Work out the **run kind** from how/when you were invoked, then tailor the output. Four run kinds:
