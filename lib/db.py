@@ -57,8 +57,24 @@ def update_holding_stop(ticker, stop=None, target=None, high_water_price=None):
     _sb().table("holdings").update(updates).eq("ticker", ticker).execute()
 
 
+def _set_holding_flag(ticker, field, active):
+    _sb().table("holdings").update({field: active}).eq("ticker", ticker).execute()
+
+
 def set_stop_alert_active(ticker, active):
-    _sb().table("holdings").update({"stop_alert_active": active}).eq("ticker", ticker).execute()
+    _set_holding_flag(ticker, "stop_alert_active", active)
+
+
+def set_stop_near_alert_active(ticker, active):
+    _set_holding_flag(ticker, "stop_near_alert_active", active)
+
+
+def set_target_near_alert_active(ticker, active):
+    _set_holding_flag(ticker, "target_near_alert_active", active)
+
+
+def set_target_alert_active(ticker, active):
+    _set_holding_flag(ticker, "target_alert_active", active)
 
 
 def set_hold_override(ticker, until_date, reason=None):

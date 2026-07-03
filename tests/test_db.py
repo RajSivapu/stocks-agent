@@ -45,6 +45,12 @@ def test_holding_stop_roundtrip():
     db.set_stop_alert_active("TSTH", False)
     h = {r["ticker"]: r for r in db.get_holdings()}["TSTH"]
     assert h["stop_alert_active"] is False
+    # approaching-stop / approaching-target / target-hit flags: same roundtrip
+    db.set_stop_near_alert_active("TSTH", True)
+    db.set_target_near_alert_active("TSTH", True)
+    db.set_target_alert_active("TSTH", True)
+    h = {r["ticker"]: r for r in db.get_holdings()}["TSTH"]
+    assert h["stop_near_alert_active"] is True and h["target_near_alert_active"] is True and h["target_alert_active"] is True
     # owner hold-override: sets an expiry date and (optionally) a reason in notes
     db.set_hold_override("TSTH", "2026-07-31", reason="owner: holding through July, ignore routine stop pushes")
     h = {r["ticker"]: r for r in db.get_holdings()}["TSTH"]

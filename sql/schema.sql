@@ -11,6 +11,11 @@ ALTER TABLE holdings ADD COLUMN IF NOT EXISTS high_water_price NUMERIC;
 ALTER TABLE holdings ADD COLUMN IF NOT EXISTS stop_alert_active BOOLEAN DEFAULT false;
 ALTER TABLE holdings ADD COLUMN IF NOT EXISTS hold_override_until DATE;
 
+-- v2.2: approaching-stop / approaching-target / target-hit alert de-dup (same edge-triggered pattern)
+ALTER TABLE holdings ADD COLUMN IF NOT EXISTS stop_near_alert_active BOOLEAN DEFAULT false;
+ALTER TABLE holdings ADD COLUMN IF NOT EXISTS target_near_alert_active BOOLEAN DEFAULT false;
+ALTER TABLE holdings ADD COLUMN IF NOT EXISTS target_alert_active BOOLEAN DEFAULT false;
+
 CREATE TABLE IF NOT EXISTS transactions (
   id BIGSERIAL PRIMARY KEY, ts TIMESTAMPTZ NOT NULL DEFAULT now(),
   ticker TEXT NOT NULL, side TEXT NOT NULL CHECK (side IN ('buy','sell')),

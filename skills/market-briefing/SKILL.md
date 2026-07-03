@@ -91,6 +91,31 @@ also applies to the post-market close-check below — they share the same flag):
   `⚡ Market Alert` regardless. A hold-override covers "the soft stop is hit, I'm staying in"; it does
   not cover "the thesis itself just broke."
 
+**Approaching stop / target — a lighter, one-time heads-up before the hard hit.** Same edge-triggered
+shape as above, same 4% band as the EOD cushion color (`cushion_pct < 4` — see EOD Holdings Summary),
+each side de-duped by its own flag so it fires once per approach, not every run:
+- `stop_cushion_pct = (price / stop - 1) * 100`. First run where `0 <= stop_cushion_pct < 4` (still
+  above the stop, but inside the 4% band) AND `stop_near_alert_active` is not `True` AND
+  `stop_alert_active` is not `True` (don't also send this once the hard stop-hit alert has already
+  fired) → send a shorter, calmer `⚡ Market Alert` ("NVDA is $X (Y%) above your stop — no action
+  needed, just a heads-up") and call `lib.db.set_stop_near_alert_active(ticker, True)`. Reset to
+  `False` (`lib.db.set_stop_near_alert_active(ticker, False)`) once price moves back out of the band
+  (`stop_cushion_pct >= 4`) or the stop is actually hit (the hit alert supersedes it). Respects
+  `hold_override_until` the same way the stop-hit alert does — a heads-up about something the owner
+  already said they're holding through isn't useful either.
+- `target_cushion_pct = (target / price - 1) * 100` (symmetric, upside). First run where
+  `0 <= target_cushion_pct < 4` AND `target_near_alert_active` is not `True` AND `target_alert_active`
+  is not `True` → send a heads-up ("NVDA is closing in on your $X target — worth deciding now whether
+  you'll take profit, trim, or let it run") and call `lib.db.set_target_near_alert_active(ticker,
+  True)`. Reset the same way once price moves back out of the band or the target is hit.
+  **Never suppressed by `hold_override_until`** — that flag mutes downside noise the owner already
+  accepted, not good news.
+- **Target hit** (`price >= target`) mirrors the stop-hit block exactly, using `target_alert_active`:
+  fire once on the crossing ("🎯 NVDA hit your $X target — consider taking profit or raising your
+  stop"), reset the flag if price drops back under target (a later re-crossing is a fresh edge), never
+  suppressed by `hold_override_until`. This is currently the only place a real (non-paper-watch)
+  holding gets a target-hit signal at all — there wasn't one before.
+
 ### Part B — Bounded opportunity discovery
 Runs under the remaining `settings.intraday` budget after Part A's API calls are counted.
 
@@ -150,11 +175,11 @@ slice only — NOT the whole universe):
    `settings.trailing_stop` (breakeven trigger, ratchet-up-only), and call
    `lib.db.update_holding_stop(ticker, high_water_price=..., stop=...)` for any field that changed.
    **Quiet:** do NOT send a Telegram message for a routine stop ratchet — the morning brief will
-   surface the updated stop advisory. If the closing price is at or below the stored stop, apply the
-   same `stop_alert_active` edge-trigger + `hold_override_until` + invalidation-escape-hatch logic as
-   the intraday monitor (see "Intraday check" — they share the flag) before sending anything: only
-   send `⚡ Market Alert` if this is a fresh breach the intraday run may have missed, not a repeat of
-   one already alerted today.
+   surface the updated stop advisory. Apply the same edge-triggered logic as the intraday monitor
+   (see "Intraday check" — stop/target hit and approaching-stop/target all share their flags across
+   both runs) before sending anything: only alert on a fresh crossing the intraday run may have
+   missed (stop hit, target hit, entered the 4% approach band on either side), never a repeat of one
+   already alerted today.
 
 5. **Paper-watch mark-to-market (end-of-day close check).** Call `lib.db.get_active_paper_watches()`
    and for each active watch:
@@ -189,11 +214,13 @@ current_value  = price * shares
 pnl            = current_value - invested
 pnl_pct        = (price / avg - 1) * 100
 cushion_pct    = (price / stop - 1) * 100 if stop else None
+target_cushion_pct = (target / price - 1) * 100 if target else None
 pnl_emoji      = "📈" if pnl >= 0 else "📉"
 
 # urgency emoji
 if   stop and price <= stop:                   emoji = "🔴"
 elif stop and cushion_pct < 4:                 emoji = "🟡"
+elif target and target_cushion_pct < 4:        emoji = "🎯"
 elif pnl_pct > 3:                              emoji = "🟢"
 else:                                          emoji = "⚪"
 ```
@@ -201,11 +228,17 @@ else:                                          emoji = "⚪"
 **Cushion phrase** (inline after Stop value):
 - 🔴 → `⚠️ <b>STOP HIT</b>`
 - 🟡 → `⚠️ <b>${abs(price−stop):.2f} gap — watch open</b>`
-- 🟢/⚪ → `${abs(price−stop):.2f} cushion`
+- 🟢/⚪/🎯 → `${abs(price−stop):.2f} cushion`
 
-**Urgency note** — one line below the stop line, ONLY for 🟡 and 🔴:
+**Target phrase** (inline after Target value, symmetric to the cushion phrase):
+- 🎯 (within 4% of target, not yet hit) → `⚠️ <b>${abs(target−price):.2f} away — near target</b>`
+- target already hit (`price >= target`) → `🎯 <b>TARGET HIT</b>`
+- otherwise → `${abs(target−price):.2f} to go`
+
+**Urgency note** — one line below the stop line, for 🟡, 🔴, and 🎯:
 - 🟡 → `<i>Heads up: one weak open tests your stop. No action needed tonight — just stay aware.</i>`
 - 🔴 → `⚡ <b>Stop hit at close — consider exiting if tomorrow opens below ${stop}.</b>`
+- 🎯 → `<i>Closing in on target — worth deciding now whether you'll take profit, trim, or let it run.</i>`
 
 **Message format:**
 ```
@@ -214,8 +247,8 @@ else:                                          emoji = "⚪"
 <b>Portfolio</b>
 {emoji} <b>{TICKER}</b> ${price:.2f} · avg ${avg:.2f} · {shares:.4f} shares
 {pnl_emoji} <b>{+/−}${abs(pnl):.2f} ({pnl_pct:+.1f}%)</b> · invested ${invested:.0f} → now ${current_value:.0f}
-Stop <b>${stop}</b> · {cushion_phrase} · Target ${target}
-{urgency_note — only 🟡/🔴}
+Stop <b>${stop}</b> · {cushion_phrase} · Target ${target} · {target_phrase}
+{urgency_note — only 🟡/🔴/🎯}
 
 <b>Market</b>
 {up to 3 index lines from daily_snapshots: SPY/QQQ/IWM close + day_move_pct}
