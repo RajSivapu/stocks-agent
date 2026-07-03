@@ -1,5 +1,33 @@
 """Pure-math tests for the local indicators (no network)."""
+import datetime
 from lib import marketdata as m
+
+
+def test_is_market_holiday_known_holiday():
+    assert m.is_market_holiday(datetime.date(2026, 6, 19)) is True  # Juneteenth
+
+
+def test_is_market_holiday_day_after_holiday_not_flagged():
+    # Regression: the weekday right after a Monday holiday must NOT be flagged — this
+    # is the exact scenario that produced a false "market closed" brief in production.
+    assert m.is_market_holiday(datetime.date(2026, 1, 20)) is False  # Tue after MLK Day
+
+
+def test_is_market_holiday_friday_holiday_then_monday_after_weekend():
+    # A holiday on Friday (Good Friday) must still flag correctly, and the next real
+    # trading day (Monday, across the weekend) must NOT be flagged — no adjacency
+    # reasoning is involved, so this holds for any day-of-week the holiday falls on.
+    assert m.is_market_holiday(datetime.date(2026, 4, 3)) is True   # Good Friday
+    assert m.is_market_holiday(datetime.date(2026, 4, 4)) is False  # Saturday (weekend, not a "holiday")
+    assert m.is_market_holiday(datetime.date(2026, 4, 6)) is False  # Monday after
+
+
+def test_is_market_holiday_ordinary_weekday():
+    assert m.is_market_holiday(datetime.date(2026, 6, 17)) is False
+
+
+def test_is_market_holiday_weekend():
+    assert m.is_market_holiday(datetime.date(2026, 6, 20)) is False  # Saturday
 
 
 def test_sma():

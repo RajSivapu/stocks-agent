@@ -65,28 +65,36 @@ def indicators(closes):
             "macd": _macd(closes)}
 
 
-def is_market_holiday():
-    """True if today is a US market holiday (weekday with no trading).
+# NYSE full-day closures. Static and authoritative — a pre-market call can never see
+# "today's" bar yet (trading hasn't started), so inferring holidays from live intraday
+# state defaulted to "holiday" whenever Yahoo's marketState was ambiguously CLOSED at
+# 06:30 CT, even on ordinary trading days — this fired live on the weekday right after
+# a real holiday and sent a false "market closed" brief. Update this each December for
+# the coming year; if the current year is missing, fail OPEN (assume trading day) —
+# missing a real morning brief is worse than one harmless extra run on an unlisted day.
+_NYSE_HOLIDAYS = {
+    "2026-01-01",  # New Year's Day
+    "2026-01-19",  # Martin Luther King Jr. Day
+    "2026-02-16",  # Washington's Birthday (Presidents' Day)
+    "2026-04-03",  # Good Friday
+    "2026-05-25",  # Memorial Day
+    "2026-06-19",  # Juneteenth National Independence Day
+    "2026-07-03",  # Independence Day (observed; Jul 4 falls on a Saturday)
+    "2026-09-07",  # Labor Day
+    "2026-11-26",  # Thanksgiving Day
+    "2026-12-25",  # Christmas Day
+}
 
-    Distinguishes holidays from regular after-hours: if the market traded
-    today at all (last bar date == today) it is not a holiday, just closed
-    for the evening. Safe to call at any of the three scheduled run times
-    (06:30 / 12:00 / 15:10 CT) — all fall inside extended-hours windows on
-    normal days so the state will be PRE / REGULAR / POST, not CLOSED.
+
+def is_market_holiday(today=None):
+    """True if today is a full US market closure (weekday, no trading at all).
+
+    `today` is injectable for tests; defaults to the real date. Checks a static NYSE
+    calendar rather than live intraday state — see `_NYSE_HOLIDAYS` above for why.
     """
     import datetime
-    if datetime.date.today().weekday() >= 5:
+    if today is None:
+        today = datetime.date.today()
+    if today.weekday() >= 5:
         return False
-    j = _get("https://query1.finance.yahoo.com/v8/finance/chart/SPY?range=5d&interval=1d")
-    result = j["chart"]["result"][0]
-    state = result["meta"].get("marketState", "CLOSED")
-    if state in ("PRE", "PREPRE", "REGULAR", "POST"):
-        return False  # market is active or in extended hours — definitely not a holiday
-    # CLOSED state: check whether any bars were recorded for today
-    import time
-    timestamps = result.get("timestamp", [])
-    if timestamps:
-        last_trade = datetime.date.fromtimestamp(timestamps[-1])
-        if last_trade >= datetime.date.today():
-            return False  # traded today already, just after-hours now
-    return True  # weekday + CLOSED + no bars today = holiday
+    return str(today) in _NYSE_HOLIDAYS
