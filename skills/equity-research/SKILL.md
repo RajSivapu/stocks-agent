@@ -19,16 +19,31 @@ news + sentiment, analyst ratings/price targets, insider activity, next earnings
 read-only MCP tools; fall back to direct read-only HTTPS calls with the keys in
 `config/secrets.local.json` if the tools aren't available. Never use a write/order endpoint.
 
+Also pull `lib.edgar.recent_filings(ticker)` and `lib.edgar.ownership_filings(ticker)` (SEC EDGAR
+— free, no key). Both degrade to `[]` silently on any lookup failure (unmapped ticker, network
+issue) — never invent a filing or treat an empty list as "nothing has happened," just omit the
+note (see Produce section below for exactly when to surface each).
+
 ## Produce (ONE screen, plain English, no jargon)
 **🔎 Research note — <TICKER> (~$price)**
 - **What they do** — one kid-simple sentence.
 - **Health score** — the 0–100 score + risk band (compute exactly as in the `market-briefing` skill).
-- **Bull case** — 2–3 plain reasons it could go up.
-- **Bear case** — 2–3 plain reasons it could go down (be honest; never hide the downside).
+- **Bull case** — 2–3 plain reasons it could go up. If `ownership_filings()`'s newest entry is an
+  INITIAL filing (`SC 13D` or `SC 13G`, not an amendment) within ~90 days of today, add it as a
+  bull point: "New 5%+ stake disclosed via [form] on [date]" (13D = investor stated intent to
+  influence, often an activist catalyst; 13G = passive institution accumulating). Otherwise say
+  nothing about ownership.
+- **Bear case** — 2–3 plain reasons it could go down (be honest; never hide the downside). If
+  `ownership_filings()`'s newest entry is an AMENDMENT (`SC 13D/A` or `SC 13G/A`) within ~90 days,
+  add a neutral note (not framed as bullish or bearish — direction isn't in the raw data): "A
+  previously disclosed 5%+ holder amended their filing on [date]." Always caveat any EDGAR-derived
+  note as a periodic, lagging disclosure — never present it as a timing signal.
 - **Deep Dive** — in plain beginner English: **Business model** (how they make money), **Moat** (top
   ~3 competitors + is the edge durable: patent / switching cost / network effect / cost structure),
-  **Catalyst** (concrete events in the next 12 months), **Asymmetry** (valuation floor vs growth
-  ceiling — is risk/reward skewed up, and why/why not?).
+  **Catalyst** (concrete events in the next 12 months — if `recent_filings()`'s newest entry is
+  within ~10 days of today, note it here, e.g. "8-K filed 3 days ago — check for material news";
+  otherwise say nothing about filings), **Asymmetry** (valuation floor vs growth ceiling — is
+  risk/reward skewed up, and why/why not?).
 - **Peer relative-valuation** — pick ~2 sensible same-sector peers (say which) and show a small table:
   P/S (TTM + forward), P/FCF, EV/EBITDA, gross margin, YoY revenue growth, plus the **value/growth
   ratio = P/S TTM ÷ revenue growth %** (lower = more growth per dollar). Data from yfinance (Finnhub
