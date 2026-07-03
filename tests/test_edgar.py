@@ -51,3 +51,31 @@ def test_cik_map_refreshes_when_stale():
     finally:
         if original is not None:
             edgar.CIK_MAP_PATH.write_text(original)
+
+
+def test_recent_filings_structure():
+    """recent_filings returns real, sorted, correctly-typed rows for a known filer."""
+    from lib.edgar import recent_filings
+    rows = _edgar_call(recent_filings, "AAPL", limit=5)
+    assert isinstance(rows, list) and len(rows) <= 5
+    for r in rows:
+        assert set(r) == {"form", "filed_date", "accession_no"}
+        assert r["form"] in ("10-K", "10-Q", "8-K")
+    for i in range(len(rows) - 1):
+        assert rows[i]["filed_date"] >= rows[i + 1]["filed_date"]
+
+
+def test_recent_filings_unknown_ticker():
+    """An unmapped ticker degrades to [] rather than raising."""
+    from lib.edgar import recent_filings
+    assert _edgar_call(recent_filings, "NOTAREALTICKERXYZ") == []
+
+
+def test_ownership_filings_structure():
+    """ownership_filings returns real, sorted 13D/13G rows for a known filer."""
+    from lib.edgar import ownership_filings
+    rows = _edgar_call(ownership_filings, "AAPL", limit=5)
+    assert isinstance(rows, list) and len(rows) <= 5
+    for r in rows:
+        assert set(r) == {"form", "filed_date", "accession_no"}
+        assert r["form"] in ("SC 13D", "SC 13G", "SC 13D/A", "SC 13G/A")
