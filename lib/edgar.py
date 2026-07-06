@@ -33,12 +33,19 @@ def _fetch_cik_map():
 
 
 def _load_cik_map():
-    """Ticker->10-digit-CIK map, cached to disk and refreshed if >30 days old."""
+    """Ticker->10-digit-CIK map, cached to disk and refreshed if >30 days old.
+
+    A corrupted or partially-written cache file (e.g. process killed mid-write) is
+    treated the same as a missing one: self-heal by refetching rather than raising.
+    """
     if CIK_MAP_PATH.exists():
-        cached = json.loads(CIK_MAP_PATH.read_text())
-        fetched = datetime.date.fromisoformat(cached["fetched"])
-        if (datetime.date.today() - fetched).days <= CIK_MAP_MAX_AGE_DAYS:
-            return cached["map"]
+        try:
+            cached = json.loads(CIK_MAP_PATH.read_text())
+            fetched = datetime.date.fromisoformat(cached["fetched"])
+            if (datetime.date.today() - fetched).days <= CIK_MAP_MAX_AGE_DAYS:
+                return cached["map"]
+        except (json.JSONDecodeError, KeyError, ValueError):
+            pass
     return _fetch_cik_map()
 
 
@@ -50,21 +57,25 @@ def _cik(sym):
 def _get_filings(sym, forms, limit):
     """Up to `limit` most-recent filings of any type in `forms` for `sym`, newest first.
 
-    Returns [] if `sym` has no CIK mapping or no matching filings. Only inspects the
-    submissions API's inline `filings.recent` page (see module docstring).
+    Returns [] if `sym` has no CIK mapping, no matching filings, or any lookup step
+    (CIK resolution, HTTP fetch) fails — never raises. Only inspects the submissions
+    API's inline `filings.recent` page (see module docstring).
     """
-    cik10 = _cik(sym)
-    if not cik10:
+    try:
+        cik10 = _cik(sym)
+        if not cik10:
+            return []
+        j = _get(f"https://data.sec.gov/submissions/CIK{cik10}.json")
+        recent = j.get("filings", {}).get("recent", {})
+        rows = [
+            {"form": f, "filed_date": d, "accession_no": a}
+            for f, d, a in zip(recent.get("form", []), recent.get("filingDate", []), recent.get("accessionNumber", []))
+            if f in forms
+        ]
+        rows.sort(key=lambda r: r["filed_date"], reverse=True)
+        return rows[:limit]
+    except Exception:
         return []
-    j = _get(f"https://data.sec.gov/submissions/CIK{cik10}.json")
-    recent = j.get("filings", {}).get("recent", {})
-    rows = [
-        {"form": f, "filed_date": d, "accession_no": a}
-        for f, d, a in zip(recent.get("form", []), recent.get("filingDate", []), recent.get("accessionNumber", []))
-        if f in forms
-    ]
-    rows.sort(key=lambda r: r["filed_date"], reverse=True)
-    return rows[:limit]
 
 
 def recent_filings(sym, forms=("10-K", "10-Q", "8-K"), limit=5):

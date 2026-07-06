@@ -53,6 +53,19 @@ def test_cik_map_refreshes_when_stale():
             edgar.CIK_MAP_PATH.write_text(original)
 
 
+def test_cik_map_self_heals_from_corrupt_cache():
+    """A corrupted/unparseable cache file is refetched, not raised."""
+    from lib import edgar
+    original = edgar.CIK_MAP_PATH.read_text() if edgar.CIK_MAP_PATH.exists() else None
+    edgar.CIK_MAP_PATH.write_text("not valid json{{{")
+    try:
+        result = _edgar_call(edgar._cik, "AAPL")
+        assert result == "0000320193"  # corrupt cache was ignored, real map was fetched
+    finally:
+        if original is not None:
+            edgar.CIK_MAP_PATH.write_text(original)
+
+
 def test_recent_filings_structure():
     """recent_filings returns real, sorted, correctly-typed rows for a known filer."""
     from lib.edgar import recent_filings
