@@ -54,16 +54,52 @@ Create **three weekday (Mon–Fri) Routines**, all using the `stocks-agent` envi
 
 **Timezone:** crons below are UTC. US switches CDT↔CST on the 2nd Sun of March / 1st Sun of Nov — update the UTC offset twice a year.
 
-| Run | Time (CT) | Cron (CDT = summer, UTC−5) | Cron (CST = winter, UTC−6) | Instructions to paste |
-|---|---|---|---|---|
-| **Pre-market full brief** | 06:30 | `30 11 * * 1-5` | `30 12 * * 1-5` | `Run the market-briefing skill as the pre-market full brief for today. On the 1st weekday of the month produce the monthly-plan brief, otherwise the daily-status brief. Read state from Supabase via lib/, run the full pipeline, send the brief to Telegram, and log every suggestion. Suggestion-only — never execute trades.` |
-| **Intraday check** | ~12:00 | `00 17 * * 1-5` | `00 18 * * 1-5` | `Run the market-briefing skill as an intraday check. Do BOTH: (A) monitor open entry-zones (lib.db.get_open_suggestions) + holdings (lib.db.get_holdings) for zone triggers / stop / invalidation; (B) a BOUNDED opportunity scan within settings.intraday (<=25 data calls, deep-analyze <=3 names, compact depth) — refresh the radar, pull today's movers + breaking news, run promising names through the historical check + buy-gate. Send Telegram ONLY if a new buy cleared the gate, a buy zone triggered, or a holding hit its stop/invalidation — otherwise log to the radar/Watch suggestions silently. Suggestion-only.` |
-| **Post-market analysis** | 15:10 | `10 20 * * 1-5` | `10 21 * * 1-5` | `Run the market-briefing skill as the post-market analysis. For the relevant slice (watched + held names) write daily_snapshots + notable stock_observations and insert one regime line via lib.db.insert_lesson(). Stay quiet (no Telegram) unless a holding broke down. Suggestion-only.` |
+| Run | Time (CT) | Cron (CDT = summer, UTC−5) | Cron (CST = winter, UTC−6) |
+|---|---|---|---|
+| **Pre-market full brief** | 06:30 | `30 11 * * 1-5` | `30 12 * * 1-5` |
+| **Intraday check** | ~12:00 | `00 17 * * 1-5` | `00 18 * * 1-5` |
+| **Post-market analysis** | 15:10 | `10 20 * * 1-5` | `10 21 * * 1-5` |
+
+### Pre-market instructions to paste
+
+> Run the market-briefing skill with run kind `pre-market`. Start and finalize one analysis_runs
+> lifecycle row and keep an evidence-backed ledger of actual DB writes and returned Telegram message
+> IDs. Build a fresh packet for this run; run Analyst then Checker before every actionable
+> conclusion. Label prior-session quotes as prior close/provisional with their as_of timestamps and
+> never call a prior-close zone a live trigger. On the first weekday of the month produce the
+> monthly-plan brief; otherwise produce daily-status. Send/log only what the skill's notification
+> policy requires. Suggestion-only: never place, modify, or cancel a trade, and never edit or commit
+> repository files.
+
+### Intraday instructions to paste
+
+> Run the market-briefing skill with run kind `intraday`. Start and finalize one analysis_runs row.
+> Treat morning suggestions and entry zones only as historical candidate seeds. Independently fetch
+> current holdings, macro, timestamped quotes, relevant company/market news, earnings/events, and
+> technical context within settings.intraday (at most 25 data calls and 3 compact-depth names).
+> Recompute zone, stop, target, invalidation, and sizing; run Analyst then Checker. A quote older than
+> settings.data.max_actionable_quote_age_minutes, missing freshness, conflicting prices, or prior-plan
+> leakage vetoes a Buy/Add/Trim/Exit alert. Send Telegram only when the freshly checked result meets
+> the notification policy; otherwise perform only the permitted silent DB writes. Record actual
+> writes/sends in the run row. Suggestion-only; never execute trades or write to git files.
+
+### Post-market instructions to paste
+
+> Run the market-briefing skill with run kind `post-market`. Start and finalize one analysis_runs
+> row and build a fresh close packet for watched and held names; do not inherit the intraday verdict.
+> Write snapshots, sparse notable observations with run_id, and one regime lesson. Any new
+> Trim/Exit/breakdown alert requires a quote no older than the configured 20-minute maximum,
+> recomputed levels, Analyst pass, and Checker approval. Keep Telegram quiet except for the skill's
+> explicit fresh-crossing/breakdown policy. The final summary must match actual successful DB calls
+> and returned Telegram message IDs. Suggestion-only; never execute trades or write to git files.
 
 **Verify go-live (trigger each once, manually):**
-1. Pre-market → a full brief posts to Telegram and new `suggestions` rows appear for today.
+1. Pre-market → a full brief posts to Telegram, prior-close data is labeled provisional, and the
+   `analysis_runs` row matches its suggestions/message IDs.
 2. Intraday → stays **silent** when nothing triggered (correct), or posts a `⚡ Market Alert` if something fires.
-3. Post-market → **no** Telegram (unless a breakdown); `daily_snapshots` + `stock_observations` rows for today appear and a new `lessons` row with `category='regime'` exists in Supabase for today.
+3. Post-market → **no** Telegram (unless a freshly checked breakdown); `daily_snapshots` +
+   `stock_observations` rows for today appear, a new `lessons` row with `category='regime'` exists,
+   and the run row records actual write counts.
 
 ---
 

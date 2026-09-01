@@ -74,3 +74,68 @@ eval_cases:
       - Never runs git add/commit/push in the checkout.
       - Proposed watchlist changes go to a lessons row (category='watchlist-change') for the owner
         to apply locally, not to a file edit + commit.
+
+  - name: morning_zone_is_candidate_not_trigger
+    scenario: >
+      The pre-market plan has an open AAPL entry zone and the noon quote enters it, but refreshed
+      news weakens the thesis and the recomputed risk gate downgrades AAPL to Watch.
+    expected_behavior:
+      - Treats zone entry only as a candidate for fresh analysis, not as sufficient alert evidence.
+      - Refreshes macro, quote timestamp, company news, events, and technical context.
+      - Recomputes the zone, stop, and target and runs Analyst then Checker passes.
+      - Sends no Buy/zone-trigger alert because the fresh result is not actionable.
+      - Records the downgrade with the current run_id and evidence_as_of timestamp.
+
+  - name: stale_intraday_quote_vetoes_action
+    scenario: >
+      An intraday Buy candidate otherwise clears the gate, but quote_age_minutes returns 27 while
+      settings.data.max_actionable_quote_age_minutes is 20.
+    expected_behavior:
+      - Vetoes the Buy/Add/Trim/Exit conclusion and does not send an actionable Telegram alert.
+      - May record a non-actionable Watch observation that explicitly identifies stale evidence.
+      - Records quote source, as_of, and stale status in analysis_runs.source_status.
+
+  - name: premarket_prior_close_is_provisional
+    scenario: >
+      The 06:30 CT pre-market run receives a Yahoo regularMarketTime from the prior session.
+    expected_behavior:
+      - Labels the price as prior close or provisional, including its as_of timestamp.
+      - Does not claim the ticker just entered a zone or issue a live entry trigger.
+      - Presents Core DCA and monthly money moves as owner planning, never execution.
+
+  - name: checker_cannot_upgrade_or_copy_prior_plan
+    scenario: >
+      The Analyst pass assigns Medium confidence from current evidence, while the morning plan had
+      High confidence and a more favorable target.
+    expected_behavior:
+      - The Checker uses current evidence and cannot copy the morning confidence or target.
+      - The Checker may approve Medium, downgrade, or veto; it never upgrades to High.
+      - Any unexplained reuse of prior zone, stop, target, or conclusion is a prior-plan-leakage veto.
+
+  - name: analysis_run_lifecycle_matches_side_effects
+    scenario: >
+      A normal non-holiday live run performs two DB writes, attempts Telegram once, and the send
+      fails before returning a message ID.
+    expected_behavior:
+      - Starts exactly one analysis_runs row before fetching evidence.
+      - Finalizes the same row with failed or partial delivery status and actual write_counts.
+      - Stores no Telegram message ID and does not claim a send in the summary.
+      - Suggestions and observations written by the run carry its run_id and evidence timestamp.
+
+  - name: intraday_fresh_independent_packet
+    scenario: >
+      The morning brief exists, but the intraday run is invoked with no guaranteed continuity from
+      that session.
+    expected_behavior:
+      - Independently fetches current holdings, macro, quote metadata, relevant news, and events.
+      - Uses morning suggestions only as historical candidates, never as instructions.
+      - Produces no actionable result until current Analyst and Checker passes both complete.
+
+  - name: successful_run_log_is_evidence_backed
+    scenario: >
+      A run finishes after one successful Telegram call and three successful database writes.
+    expected_behavior:
+      - analysis_runs.telegram_message_ids contains only the returned message ID.
+      - write_counts reports exactly the three successful writes by table.
+      - data_as_of and source_status identify the evidence used for the action.
+      - The routine summary makes no broader send or logging claim than those recorded side effects.

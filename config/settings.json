@@ -36,7 +36,7 @@
   "entry_zones": {
     "enabled": true,
     "default_valid_until_days": 5,
-    "_note": "Every buy idea carries a buy ZONE (entry_zone_low/high), a VALID-UNTIL (default 5 trading days, or a stated condition like 'until it closes above $215'), and an INVALIDATION/stop (= the Bear-Case invalidation level). Late-look-friendly: the 10:30/13:30 intraday checks re-evaluate open zones against the live price and tell the owner if he's still in range. All three are persisted on the suggestions row (entry_zone_low, entry_zone_high, valid_until, invalidation_level)."
+    "_note": "Every buy idea carries a buy ZONE (entry_zone_low/high), a VALID-UNTIL (default 5 trading days, or a stated condition like 'until it closes above $215'), and an INVALIDATION/stop (= the Bear-Case invalidation level). At 12:00 CT, an open zone only adds a candidate: the intraday run must fetch a fresh evidence packet, recompute the thesis/levels, and pass the checker before any alert. All fields are persisted on the suggestions row."
   },
   "schedule": {
     "cadence": "daily_weekdays",
@@ -53,7 +53,7 @@
       {"kind":"pre-market","time_ct":"06:30","weight":"heavy","quiet_unless_triggered":false,
        "note":"Full brief; monthly-plan on the 1st weekday of the month, else daily-status. Full Rigorous-Mode pipeline."},
       {"kind":"intraday","time_ct":"12:00","weight":"light-medium","quiet_unless_triggered":true,
-       "note":"Monitor open zones + holdings AND a bounded opportunity scan. Telegram only on a new buy, a zone trigger, or a holding stop/invalidation hit."},
+       "note":"Fresh independent re-underwrite of open zones + holdings and a bounded opportunity scan. Telegram only after current evidence and checker approval."},
       {"kind":"post-market","time_ct":"15:10","weight":"medium","quiet_unless_triggered":true,
        "note":"Analysis/learning + paper-watch mark-to-market + trailing-stop recompute. Quiet unless a holding broke down."}
     ],
@@ -64,7 +64,7 @@
     "max_deep_candidates": 3,
     "depth": "compact",
     "discovery_enabled": true,
-    "_note": "Bounded mid-day opportunity check: refresh radar (<=15), one cheap movers/news pull, deep-analyze <=3 promising names at COMPACT depth, alert only on a real buy / zone trigger / holding stop-hit. Full debates stay in the 06:30 brief."
+    "_note": "Bounded mid-day opportunity check: independently refresh macro, holdings, quote timestamps, relevant news/events, and radar (<=15); deep-analyze <=3 names at COMPACT depth. A morning zone is only a candidate. Alert only when the current thesis, recomputed levels, freshness gate, and checker all pass."
   },
   "trailing_stop": {
     "enabled": true,
@@ -99,7 +99,8 @@
     "compute_indicators_locally": true,
     "indicators_from": "yfinance_price_history",
     "price_delay_minutes": 15,
-    "_note": "DATA SWAP (2026-06-17 Rigorous Mode): yfinance is now PRIMARY (quotes, full price history, fundamentals, predefined screeners — no hard daily cap). Technical indicators (RSI-14, MACD 12/26/9, SMA/EMA 50 & 200) are COMPUTED LOCALLY in-session from yfinance price history, removing the old Alpha Vantage indicator dependency. Finnhub is SECONDARY (stock/metric fundamentals, company news+sentiment, earnings dates, insider Form 4; 60/min free). Alpha Vantage is an OPTIONAL last-resort BACKUP only (its 25/day cap was the binding limit, so it is demoted). Works in a cloud schedule (no local server)."
+    "max_actionable_quote_age_minutes": 20,
+    "_note": "yfinance/Yahoo is PRIMARY and exposes exchange timestamps for freshness checks. Intraday and post-market Buy/Add/Trim/Exit conclusions require a quote no older than max_actionable_quote_age_minutes; missing or conflicting freshness is a veto. Technical indicators are computed locally. Finnhub is secondary for fundamentals/news/events; Alpha Vantage is last-resort backup."
   },
   "rigor": {
     "enabled": true,
@@ -140,12 +141,12 @@
     "max_size": 15,
     "auto_prune_after_days_inactive": 7,
     "promote_to_watchlist_after_days_relevant": 5,
-    "promotion_requires_owner_approval": false,
-    "auto_manage_watchlist": true,
+    "promotion_requires_owner_approval": true,
+    "auto_manage_watchlist": false,
     "report_watchlist_changes_in_brief": true,
     "never_remove_held_or_owner_added": true,
     "watchlist_max_per_bucket": { "core": 35, "growth": 20, "speculative": 6 },
-    "note": "DYNAMIC watchlist (owner opted into autonomous management). The agent self-curates data/radar.json from scanner/news finds, then AUTO-PROMOTES persistently-strong names into watchlist.json and RETIRES stale/broken ones it previously added — reporting every change in the brief (transparent + reversible). It NEVER removes a name the owner holds or manually added (only names IT added), respects watchlist_max_per_bucket, and the owner can veto/revert anytime."
+    "note": "The agent self-curates the Postgres radar. It never edits config/watchlist.json in a Cloud Routine. Persistently strong or stale names become category='watchlist-change' lesson proposals for the owner to review and apply locally. It never proposes removing a held or owner-added name."
   },
   "learning": {
     "enabled": true,

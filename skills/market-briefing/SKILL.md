@@ -39,12 +39,57 @@ Work out the **run kind** from how/when you were invoked, then tailor the output
 
 | Run kind | Time (CT) | What you produce |
 |---|---|---|
-| **pre-market** | 06:30 | A FULL brief. Pick the brief TYPE below. Runs the full Rigorous-Mode pipeline (scan + watchlist + debates + scoring). |
-| **intraday** | ~12:00 CT (single run) | Two-part run under `settings.intraday` budget (≤25 API calls, ≤3 deep, compact depth). **Part A — Monitor (first, cheap):** check open entry-zones + holdings for triggers/invalidations → `⚡ Market Alert` if anything fires. **Part B — Bounded discovery:** refresh radar (≤15), one movers/news pull, deep-analyze top ≤3 promising names (compact deliberation + gate) → alert if a new buy clears the gate, otherwise silent DB writes. Never an "all-clear" message. (See "Intraday check".) |
+| **pre-market** | 06:30 | A FULL brief. Pick the brief TYPE below. Runs the full Rigorous-Mode pipeline, but labels prior-close prices provisional and never presents them as a live entry trigger. |
+| **intraday** | ~12:00 CT (single run) | A fresh, independent re-underwrite under `settings.intraday` budget (≤25 API calls, ≤3 deep, compact depth). Morning zones and prior suggestions only seed candidates. Current macro/quotes/news/events, recomputed levels, Analyst pass, and Checker approval determine whether an alert exists. Never an "all-clear" message. |
 | **post-market** | 15:10 | Post-market analysis: record how each watched/held name actually behaved → observations + snapshots; update the regime line. Quiet unless something needs the owner. (See "Post-market analysis".) |
 | **on-demand** | any | The owner asked → produce a full brief (**daily-status** type) for "now". |
 
 If you cannot tell the run kind, assume **pre-market** + **daily-status**.
+
+## Run lifecycle + evidence freshness (mandatory for every non-holiday live run)
+
+After resolving the run kind and before fetching evidence, call
+`run_id = lib.db.start_analysis_run(kind)`. A dry run prints the row it would create but performs no
+write. Maintain an in-memory ledger of successful side effects: write counts by table, Telegram
+message IDs returned by `lib.telegram.send`, symbols analyzed, source status, and the evidence
+timestamps used. Earlier runs are historical context only; they are never permission to reuse an old
+conclusion.
+
+Every call to `lib.marketdata.quote()` returns `as_of`, `market_state`, and `source`. Calculate age
+with `lib.marketdata.quote_age_minutes(quote)`. Apply this contract:
+
+- **Pre-market:** a prior-session timestamp is expected. Label it "prior close" / "provisional" with
+  `as_of`; it may support scenarios but cannot prove that a zone is currently triggered. Monthly
+  Core DCA is owner planning, never execution.
+- **Intraday and post-market:** before a new Buy/Add/Trim/Exit conclusion, require a timestamp and
+  age ≤ `settings.data.max_actionable_quote_age_minutes` (20). Missing, unparseable, older, or
+  materially conflicting primary/fallback prices are a data-quality veto. A factual stop/target
+  crossing also needs a fresh quote.
+- Store the quote timestamp that supports a suggestion in `evidence_as_of`; attach `run_id` to every
+  suggestion and observation written by this run. Never substitute the HTTP request time for the
+  exchange timestamp.
+
+Finalize the same run exactly once with `lib.db.finish_analysis_run(...)`, including actual
+`write_counts`, actual returned `telegram_message_ids`, `source_status`, `symbols`, `data_as_of`, and
+a concise summary. On an exception, attempt a finalization with `status="failed"` and bounded error
+text. A send/write counts only after its helper returned success. Never claim "sent" or "logged" in
+the routine summary unless that exact successful side effect appears in the run ledger. Holiday and
+dry-run gates retain their no-write behavior and therefore do not create a real run row.
+
+## Analyst then Checker (required for every actionable conclusion)
+
+Use two explicit passes in the same session. This is a disciplined second pass, not a claim that two
+independent models were used.
+
+1. **Analyst:** build the current bull case, bear case, catalyst/event risk, valuation/technical
+   context, concentration and sizing, confidence, invalidation, and freshly derived zone/stop/target.
+2. **Checker:** independently verify quote freshness, evidence dates, arithmetic, ownership,
+   concentration, earnings/macro collisions, notification policy, and that the proposed levels and
+   conclusion come from this run's evidence rather than the morning plan.
+
+The Checker may approve, downgrade to Watch/Hold, or veto. It can never increase the Analyst's
+confidence. Any unexplained copying of a prior run's confidence, zone, stop, target, or verdict is
+**prior-plan leakage** and forces a veto until those fields are recomputed from current evidence.
 
 **Two FULL-brief types (pre-market / on-demand only):**
 - **monthly-plan brief** — produced on the **first weekday of the calendar month** ONLY. The one brief
@@ -59,18 +104,27 @@ If you cannot tell the run kind, assume **pre-market** + **daily-status**.
 
 ## Intraday check (~12:00 CT — `kind: intraday`, single daily run, budget-capped)
 A TWO-PART run under `settings.intraday` budget: **≤25 API calls total, ≤3 deep-analyzed names,
-compact depth only.** Do NOT run the full scan or full watchlist debates. Part A fires first so urgent
-alerts go out early; Part B runs only after Part A completes.
+compact depth only.** Do NOT run the full scan or full watchlist debates. Build a new evidence packet
+from current holdings, macro quotes, ticker quotes + timestamps, relevant news, technicals, and known
+events. The morning brief may identify what to inspect; it cannot supply the noon verdict.
 
 ### Part A — Monitor (runs first, cheap)
-1. **Open entry-zones** — read open buy ideas via `lib.db.get_open_suggestions()` (Buy, `valid_until`
-   not past). For each, fetch the live price (`lib.marketdata.quote`) and check: is it now INSIDE its
-   entry zone (`entry_zone_low`–`entry_zone_high`)? Has it hit/closed past its `invalidation_level`?
-2. **Current holdings** — `lib.db.get_holdings()`; fetch each live price and check its
-   invalidation/stop, including the trailing-stop HIT case (live price ≤ stored stop).
+1. **Seed candidates** — read open ideas via `lib.db.get_open_suggestions()` and current positions via
+   `lib.db.get_holdings()`. Entering a stored morning zone adds the ticker to the candidate set; it is
+   **not** itself a Buy alert.
+2. **Refresh evidence** — fetch current macro signals, a timestamped quote, relevant company/market
+   news, earnings/events, and technical context for each candidate. Reject an actionable conclusion
+   if quote age exceeds 20 minutes or freshness cannot be established.
+3. **Recompute** — derive today's zone, stop, target, invalidation, and position-size/concentration
+   impact from the refreshed packet. Do not copy stored levels merely because price touched them.
+4. **Re-underwrite** — run the Analyst pass and then the Checker. The Checker must explicitly test
+   for prior-plan leakage and can only approve, downgrade, or veto.
+5. **Act on the fresh result** — alert only when the current checked result is independently
+   actionable. If the thesis weakened, levels moved, data is stale, or the Checker vetoed, record a
+   Watch/invalidated observation with `run_id` + `evidence_as_of` and stay silent unless a separate
+   fresh stop/target fact needs the owner.
 
-If a zone triggered or an invalidation was hit → send `⚡ Market Alert` immediately (one message per
-event or grouped if several fire). **If nothing triggered, send nothing** — silence is correct and
+If nothing survives the fresh evidence and Checker gates, send nothing — silence is correct and
 saves tokens. Never re-pitch the monthly plan here.
 
 **Stop-hit alerts are edge-triggered, not level-triggered — de-dup via `stop_alert_active`.** A stop
@@ -78,7 +132,7 @@ breach is a single fact; re-sending it every run it stays true is noise, not new
 also applies to the post-market close-check below — they share the same flag):
 - Price **recovers above** the stored stop → `lib.db.set_stop_alert_active(ticker, False)` (re-arms
   the alert — a future breach is a fresh edge and alerts again).
-- Price **breaches** the stop (live price ≤ stop) and `stop_alert_active` is not already `True` → a
+- Price **breaches** the stop (fresh price ≤ stop) and `stop_alert_active` is not already `True` → a
   NEW breach. If `hold_override_until` is set and `today <= hold_override_until`, suppress the push
   (the owner already said they're holding through this — log a silent `stock_observations` row
   instead). Otherwise send `⚡ Market Alert` and call `lib.db.set_stop_alert_active(ticker, True)`.
@@ -138,8 +192,9 @@ Runs under the remaining `settings.intraday` budget after Part A's API calls are
    - Confidence / risk gate: same gate as morning scan (Medium+ conviction to suggest a buy;
      gate can veto or downgrade).
 
-5. **Decide each candidate** (one of three outcomes):
-   - **Clears the gate (Medium+ conviction, risk gate pass)** → send `⚡ Market Alert` buy idea
+5. **Decide each candidate from the refreshed packet** (one of three outcomes). Recompute its
+   zone/stop/target, run Analyst then Checker, and apply the 20-minute quote gate before choosing:
+   - **Clears every gate (Medium+ Analyst conviction, risk gate pass, Checker approval)** → send `⚡ Market Alert` buy idea
      (entry zone + target + stop + valid-until, in the standard buy-line format) AND log a Buy
      suggestion row via `lib.db.insert_suggestion` (depth="compact").
    - **Promising but below the buy gate** → add/refresh the radar row (upsert, `last_seen=today`)
@@ -153,16 +208,22 @@ or **(c)** a holding stop/invalidation hit. **Never send an "all-clear" message.
 are silent DB writes — the morning brief will surface any relevant radar/watch updates. Keep each alert
 to the one or two names that actually triggered; don't bundle unrelated watch adds.
 
+Here, an "entry-zone trigger" means the **freshly recomputed** zone still contains the fresh quote and
+both Analyst and Checker approve. A stored morning zone crossing by itself never satisfies (b).
+
 ## Post-market analysis (15:10 CT — `kind: post-market`, the "learn the stock" run)
 A MEDIUM, mostly-silent run that builds the agent's memory. For each watched + held name (the relevant
-slice only — NOT the whole universe):
+slice only — NOT the whole universe), fetch a fresh close/quote packet rather than inheriting the
+intraday conclusion. A new Trim/Exit or breakdown alert requires quote age ≤20 minutes, recomputed
+levels, Analyst pass, and Checker approval. If freshness fails, record the gap and do not issue the
+action:
 1. **Daily snapshot** — record close + indicators: `lib.db.upsert_daily_snapshot({"snap_date":today,
    "ticker":sym,"close":…,"day_move_pct":…,"rsi14":…,"sma50":…,"sma200":…,"macd_hist":…})` (values from
    `lib.marketdata`). Raw OHLC is NOT stored — it's re-fetched when needed.
 2. **Observation when notable** — when something is genuinely notable (a big move, an earnings
    reaction, a zone trigger, an invalidation hit), write a `stock_observations` row via
    `lib.db.insert_observation({"ticker":sym,"obs_date":today,"event_type":…,"summary":…,
-   "price_reaction":…,"confidence":…,"source":…})`. Keep observations sparse and meaningful — this is
+   "price_reaction":…,"confidence":…,"source":…,"run_id":run_id})`. Keep observations sparse and meaningful — this is
    the per-stock behavior/seasonality memory re-read when that name is next analyzed (treated as a
    hypothesis, n=1; stay skeptical of patterns that may already be priced in).
 3. **Regime line** — call `lib.db.insert_lesson({"entry_date": today, "category": "regime", "content": "<one-line regime summary>"})` (today's direction, sector leadership, volatility, theme) so tomorrow's run can compare trend-vs-prior-trend.
@@ -280,9 +341,9 @@ him that a guardrail has been violated.
 
 **No git operations.** You run in a read-only repo checkout. **NEVER run `git add`, `git commit`, or `git push`.**
 The Cloud Routine filesystem is ephemeral — file edits do not persist between runs. All persistent state
-goes to Supabase via `lib.db`, not to the git repo. This applies to `config/watchlist.json` too:
-when `radar.auto_manage_watchlist` is true, **do NOT edit `watchlist.json` directly** — instead,
-log the proposed change as a `lessons` row (`category='watchlist-change'`, content describes the add/retire)
+goes to Supabase via `lib.db`, not to the git repo. Treat `config/watchlist.json` as read-only. When
+the radar identifies a possible change, log it as a `lessons` row (`category='watchlist-change'`,
+content describes the proposed add/retire)
 and report it in the brief's "📋 Watchlist update" block so the owner can apply it manually. The owner
 will commit the file change from their local machine.
 
@@ -296,8 +357,9 @@ The modules and the exact helpers you call:
     `recent_lessons_rows()` · `get_dry_powder(month)` · `get_lessons(limit)` · `get_radar()`.
   - write: `insert_suggestion(row)` · `insert_transaction(row)` · `upsert_holding(row)` ·
     `insert_observation(row)` · `insert_grade(row)` · `upsert_daily_snapshot(row)` ·
-    `set_dry_powder(row)` · `insert_lesson(row)` · `upsert_radar(row)` · `delete_radar(ticker)`.
-- **`lib.marketdata`** — `quote(sym)` · `history(sym, range_)` · `indicators(closes)` (RSI-14, MACD
+    `set_dry_powder(row)` · `insert_lesson(row)` · `upsert_radar(row)` · `delete_radar(ticker)` ·
+    `start_analysis_run(kind)` · `finish_analysis_run(run_id, ...)`.
+- **`lib.marketdata`** — `quote(sym)` · `quote_age_minutes(quote)` · `history(sym, range_)` · `indicators(closes)` (RSI-14, MACD
   12/26/9, SMA 50/200 — computed locally, `None` where history is too short).
 - **`lib.fundamentals`** — `metric(sym)` · `company_news(sym)` · `market_news()` · `earnings_dates(sym)`
   (Finnhub; the API key is sent in the `X-Finnhub-Token` header, never in a URL).
@@ -309,7 +371,7 @@ the **relevant slice**: the names in scope this run (holdings + watchlist + scan
 lessons/grades, and the per-stock observations for the specific names you're analyzing. NEVER load full
 history into context. Token-per-run must stay roughly flat as the database grows.
 
-**Still files (human-edited / human-read):** `config/settings.json` and `config/watchlist.json`. Everything else — holdings, transactions, suggestions, grades, observations, lessons, daily snapshots, dry-powder, radar — is Postgres.
+**Still files (human-maintained):** `config/settings.json` and `config/watchlist.json`. Everything else — holdings, transactions, suggestions, grades, observations, lessons, daily snapshots, dry-powder, radar — is Postgres.
 
 ## Inputs (read these first, every run)
 1. `config/settings.json` — strategy, allocation (70/20/10), cadence, deployment, risk, scoring, learning, delivery.
@@ -378,7 +440,9 @@ quote (`lib.marketdata.quote(ticker)`):
   earnings calendar/dates, and **insider (Form 4) transactions**. Free tier is 60 req/min — pace within it.
 - **Optional backup: Alpha Vantage** — use ONLY if yfinance AND Finnhub both fail for a needed field.
   Its `TOP_GAINERS_LOSERS` is a fine 1-call movers backup. Demoted because of the 25/day cap.
-Prices may be delayed ~15 min — fine for long-term/swing, never present them as live.
+Prices may be delayed ~15 min — fine for long-term/swing, never present them as live. Use the
+exchange-provided `quote.as_of` and `quote_age_minutes`, not an assumed delay. The 20-minute maximum
+is a hard actionable gate, not a freshness claim.
 
 **Access method (v2):** the **default path is the helper library** — `lib.marketdata` (Yahoo quotes/
 history + local indicators) and `lib.fundamentals` (Finnhub metric/news/earnings). These wrap the same
@@ -459,17 +523,15 @@ pull deep data on all ~6,000 stocks (rate limits). Use this funnel, controlled b
 Candidates that survive become suggestions; the rest are listed as "watch" ideas in the scan section.
 If a screener source is unavailable, note it and scan with whatever sources remain.
 
-## Self-curated radar + DYNAMIC watchlist (do this every run, controlled by settings.json `radar`)
+## Self-curated radar + watchlist-change proposals (do this every run, controlled by settings.json `radar`)
 **Note:** the intraday run also feeds the radar — Part B refreshes radar names and adds promising new movers as Watch candidates (see "Intraday check — Part B").
 The agent maintains the **`radar` table in Postgres** — a capped, auto-pruned candidate list of names
-discovered from the scan/news — and, when `radar.auto_manage_watchlist` is true, **actively manages
-`config/watchlist.json`** (the owner opted into autonomous management). The watchlist is therefore
-**dynamic**: it evolves as the market does. Guardrails (NON-NEGOTIABLE): never remove a name the owner
-**holds** (`lib.db.get_holdings()`) or **manually added** — only retire names the agent itself added;
-respect `radar.watchlist_max_per_bucket`; and **report every add/retire in the brief** (see "📋
-Watchlist update"). The owner can veto/revert anytime. To know which names it added, set the radar
-row's `promoted=true, promoted_on='YYYY-MM-DD'`; treat all other watchlist names as owner-owned and
-never auto-remove them.
+discovered from the scan/news. The Cloud Routine **never changes `config/watchlist.json`** because its
+checkout is ephemeral and read-only. When a name deserves promotion or retirement, write one
+`lessons` row with `category='watchlist-change'` and a concise proposed add/retire + reason, then
+report it as a proposal in the "📋 Watchlist update" block. The owner reviews and applies file changes
+locally. Never propose removing a held or owner-added name; only suggest retiring a name documented
+as agent-added, and respect `radar.watchlist_max_per_bucket`.
 Read the radar with `lib.db.get_radar()`; insert/update rows with `lib.db.upsert_radar(row)`; remove
 stale rows with `lib.db.delete_radar(ticker)`. Row columns: `ticker, added, last_seen, days_relevant,
 reason, bucket_guess, promoted, promoted_on`.
@@ -480,16 +542,14 @@ Each run:
    increment `days_relevant`.
 3. **Prune:** delete any row whose `last_seen` is older than `auto_prune_after_days_inactive` days.
 4. **Cap:** if over `max_size`, keep the most relevant and drop the weakest.
-5. **Auto-promote (dynamic watchlist):** any candidate with `days_relevant >=`
-   `promote_to_watchlist_after_days_relevant` → **add it to the right bucket in `watchlist.json`**
-   (since `promotion_requires_owner_approval` is false), set its radar row `promoted=true,
-   promoted_on=today`, and note the add in the brief's "📋 Watchlist update" line. If a bucket is at
-   `watchlist_max_per_bucket`, only add if it's stronger than the weakest agent-added name there (and
-   retire that one).
-6. **Auto-retire:** any **agent-added** watchlist name that has gone stale (no relevance for
-   `auto_prune_after_days_inactive` days) or whose thesis broke → remove it from `watchlist.json` and
-   note it in "📋 Watchlist update". **Never** retire an owner-held or owner-added name — flag it for
-   the owner instead. If `auto_manage_watchlist` is false, fall back to PROPOSING changes only (don't edit).
+5. **Propose promotion:** any candidate with `days_relevant >=`
+   `promote_to_watchlist_after_days_relevant` → insert a `category='watchlist-change'` lesson naming
+   the proposed bucket and evidence. Do not mark it promoted until the owner has actually applied the
+   change locally. If the bucket is full, identify the weakest eligible agent-added name in the same
+   proposal; make no file edit.
+6. **Propose retirement:** when an agent-added watchlist name is stale or its thesis broke, insert a
+   `category='watchlist-change'` lesson proposing retirement and explain why. Never alter a held or
+   owner-added name; flag it for review instead.
 
 ## API + quota budget per run (HARD RULES — do not exceed)
 Read these as constraints, not suggestions:
@@ -943,6 +1003,7 @@ alongside the confidence/score fields, plus the v2 entry-zone fields (`entry_zon
 history. The row dict (columns map 1:1 to the `suggestions` table):
 ```python
 db.insert_suggestion({"date":"YYYY-MM-DD","ticker":"XXX","action":"Buy","bucket":"growth",
+  "run_id":run_id,"evidence_as_of":"YYYY-MM-DDTHH:MM:SS+00:00",
   "depth":"full","entry_zone_low":195.0,"entry_zone_high":210.0,"valid_until":"YYYY-MM-DD",
   "stop":110.0,"target":150.0,"confidence":"Medium","bull":"AI demand + margin expansion",
   "bear":"customer concentration; rich multiple","decisive_factor":"backlog beats valuation worry",
@@ -953,7 +1014,9 @@ db.insert_suggestion({"date":"YYYY-MM-DD","ticker":"XXX","action":"Buy","bucket"
 ```
 Field rules: `depth` is `"full"` or `"compact"`; `risk_verdict` is `"pass"`, `"veto"`, or `"downgrade"`
 (record veto/downgrade even when no buy was suggested, so the gate is auditable); `invalidation_level`
-mirrors the Bear-Case invalidation / stop. Omit the `score_*` fields, or set `score`:None, for broad
+mirrors the Bear-Case invalidation / stop. `run_id` is the current lifecycle row and
+`evidence_as_of` is the exchange timestamp for the quote that supported this conclusion. Omit the
+`score_*` fields, or set `score`:None, for broad
 ETFs and when the score couldn't be computed. Omit fields you don't have rather than inventing them.
 (The delivered Telegram message itself is not separately archived — Telegram keeps it, and the
 structured reasoning lives in the `suggestions` row.)
