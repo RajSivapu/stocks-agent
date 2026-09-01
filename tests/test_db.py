@@ -36,6 +36,10 @@ class _RecordingQuery:
         self.calls.append((self.table, "update", payload))
         return self
 
+    def delete(self):
+        self.calls.append((self.table, "delete"))
+        return self
+
     def eq(self, column, value):
         self.calls.append((self.table, "eq", column, value))
         return self
@@ -192,3 +196,20 @@ def test_finish_analysis_run_bounds_free_text(monkeypatch):
     payload = next(call[2] for call in client.calls if call[1] == "update")
     assert len(payload["summary"]) == 2000
     assert len(payload["error"]) == 1000
+
+
+def test_public_reconciliation_helpers_build_scoped_queries(monkeypatch):
+    client = _RecordingClient()
+    monkeypatch.setattr(db, "_sb", lambda: client)
+
+    assert db.get_latest_suggestion("AAPL") is None
+    assert db.get_latest_buy_levels("AAPL") is None
+    db.delete_holding("AAPL")
+
+    assert ("suggestions", "select", "stop,target") in client.calls
+    assert ("suggestions", "select", "*") in client.calls
+    assert ("suggestions", "eq", "ticker", "AAPL") in client.calls
+    assert ("suggestions", "eq", "action", "Buy") in client.calls
+    assert ("suggestions", "limit", 1) in client.calls
+    assert ("holdings", "delete") in client.calls
+    assert ("holdings", "eq", "ticker", "AAPL") in client.calls

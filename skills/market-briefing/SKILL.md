@@ -377,8 +377,8 @@ history into context. Token-per-run must stay roughly flat as the database grows
 1. `config/settings.json` — strategy, allocation (70/20/10), cadence, deployment, risk, scoring, learning, delivery.
 2. `config/watchlist.json` — tickers to WATCH (interest), grouped by bucket.
 3. **Holdings from Postgres** — `lib.db.get_holdings()`: what the owner ACTUALLY OWNS (ticker, shares,
-   avg_cost, bucket). Distinct from the watchlist. See "Portfolio awareness". (No more `portfolio.json`;
-   the reconciliation flow writes holdings to the DB when the owner reports a trade.)
+   avg_cost, bucket). Distinct from the watchlist. See "Portfolio awareness". The Telegram recorder
+   and reconciliation fallback write holdings to Supabase after the owner confirms what happened.
 4. Secrets (data API keys + Telegram token/chat id) are read **for you** by the helpers via
    `lib.config.secret()` — **env-var first** (cloud Routine secret store), local file only as a dev
    fallback. You never read the secrets file directly.

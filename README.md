@@ -1,8 +1,10 @@
 # stocks-agent
 
-A **suggestion-only** AI investing assistant that runs as scheduled cloud jobs on Anthropic's platform.
-It sends plain-English market briefs to Telegram, tracks a live watchlist, learns from its own call
-history, and never executes trades. Built and maintained by **Rajrupesh**.
+A **suggestion-only** investing assistant that runs scheduled analyses on Anthropic's platform. Each
+run builds a fresh evidence packet and records what it actually read, wrote, and sent. Telegram
+delivers briefs and accepts deterministic, confirmation-based portfolio records; a bounded weekly
+ChatGPT task audits process/data quality. No component executes trades. Built and maintained by
+**Rajrupesh**.
 
 > **Guardrail:** zero trade-execution tools. The agent can only read market data, reason, and write
 > to its own Supabase database. Every trade is placed by you.
@@ -15,9 +17,9 @@ Three weekday runs, all headless on Anthropic Cloud Routines:
 
 | Run | Time (CT) | What happens |
 |---|---|---|
-| **Pre-market brief** | 06:30 | Macro pulse check → full market scan → Telegram brief with Buy/Watch/Avoid calls, entry zones, targets, stops |
-| **Intraday check** | ~12:00 | Monitors open zones + holdings; bounded opportunity scan; Telegram alert only if something fires |
-| **Post-market analysis** | 15:10 | Records daily snapshots + observations + regime line; sends EOD Holdings Summary to Telegram when positions exist |
+| **Pre-market brief** | 06:30 | Fresh overnight/macro packet → full scan → provisional scenarios and Telegram brief |
+| **Intraday check** | ~12:00 | Independently refreshes macro/quotes/news/events and re-underwrites candidates; alerts only after freshness + Checker gates |
+| **Post-market analysis** | 15:10 | Fresh close review → snapshots/observations/learning; only freshly checked breakdown alerts |
 
 The **1st weekday of each month** the pre-market run switches to a monthly-plan brief with a 🏁 scorecard
 (accuracy by bucket, biggest lesson, what's changing).
@@ -45,34 +47,46 @@ Tomorrow: SPY SMA50 barely held — watch the open.
 
 ```
 Claude (Pro plan, Cloud Routines)
-  ├── skills/market-briefing/SKILL.md   ← reasoning brain (pre-market / intraday / post-market)
+  ├── skills/market-briefing/SKILL.md   ← fresh Analyst → Checker runs (pre / intra / post)
   ├── skills/equity-research/SKILL.md   ← on-demand deep-dive ("is NVDA still a good hold?")
   ├── skills/earnings-review/SKILL.md   ← on-demand earnings digest
-  ├── skills/reconcile-trade/SKILL.md   ← record trades you placed ("bought 1 NVDA @207")
+  ├── skills/reconcile-trade/SKILL.md   ← Claude-chat fallback for recordkeeping
   └── skills/paper-watch/SKILL.md       ← track your own hypotheses separately from agent calls
+
+Telegram Bot API → Supabase Edge Function (no model)
+  ├── deterministic /buy, /sell, /stop, /portfolio parser
+  ├── owner chat + user verification and update-id deduplication
+  └── Confirm/Cancel → atomic PostgreSQL RPC → holdings + transactions
+
+ChatGPT desktop (Friday 16:30 CT, included account usage)
+  └── skills/weekly-portfolio-audit/SKILL.md ← bounded, read-only process/data audit
 
 lib/                    Python helpers (stdlib urllib only + supabase-py)
   ├── config.py         secrets (env-var first, file fallback)
-  ├── db.py             Supabase helpers via HTTPS (holdings, suggestions, lessons, radar, ...)
-  ├── marketdata.py     Yahoo Finance — quotes, history, indicators (RSI/MACD/SMA) + holiday detection
+  ├── db.py             Supabase helpers + auditable analysis-run lifecycle
+  ├── marketdata.py     Yahoo quotes + exchange timestamps, history, indicators, holiday detection
   ├── fundamentals.py   Finnhub — metrics, news, earnings dates, insider MSPR, analyst consensus
   ├── telegram.py       Telegram delivery (HTML, auto-split)
-  └── preload.py        Historical backfill — volatility, seasonality, notable moves
+  ├── preload.py        Historical backfill — volatility, seasonality, notable moves
+  └── weekly_audit.py   Redacted, bounded packet builder
 
 config/
   ├── settings.json     Strategy, allocation (70/20/10), cadence, scoring, risk — edit to personalise
   └── watchlist.json    Tickers to watch (Core / Growth / Speculative buckets)
 
-sql/schema.sql          Supabase schema (10 tables — apply via Supabase SQL editor)
+supabase/functions/telegram-portfolio/  Secure two-way Telegram webhook
+sql/schema.sql          Canonical Supabase schema (13 tables + atomic RPCs)
 scripts/
   ├── healthcheck.py           Verify cloud can reach all services
   ├── run_preload.py           One-time historical backfill for watchlist names
-  └── migrate_lessons_to_pg.py One-time: move data/lessons.md → lessons table (already run)
+  ├── weekly_audit_packet.py   Print one read-only weekly JSON packet
+  ├── register_telegram_webhook.py Register/verify the Telegram webhook
+  └── verify_portfolio_command_rpc.py Verify atomic commands using disposable TSTTG rows
 ```
 
 **All growing state lives in Supabase.** The only files the agent reads at runtime are
 `config/settings.json` and `config/watchlist.json`. Holdings, suggestions, grades, observations,
-snapshots, lessons, and radar are all Supabase tables. **US market holidays are detected
+snapshots, lessons, radar, analysis runs, and Telegram command receipts are Supabase tables. **US market holidays are detected
 automatically** — all three runs exit silently (pre-market sends one Telegram notification).
 
 ---
@@ -111,8 +125,8 @@ rule for next time. Future analyses of the same stock start by reading these pos
 | Yahoo Finance (stdlib urllib) | Quotes, OHLC history, locally-computed RSI/MACD/SMA, macro symbols (VIX/TNX/DXY) |
 | Finnhub (free tier, 60 req/min) | Fundamentals, company news, earnings dates, insider MSPR, analyst consensus |
 | Alpha Vantage (free tier, 25/day) | Top movers / sector snapshot (backup) |
-| Telegram Bot API | Delivery — HTML briefs and EOD summaries to your Telegram chat |
-| Supabase (free tier) | Postgres — all persistent state via HTTPS (no raw TCP needed) |
+| Telegram Bot API | Brief delivery + deterministic portfolio-record messages and buttons |
+| Supabase (existing free-tier project) | Postgres + Edge Function; no Cloud Run project required |
 
 ---
 
@@ -130,8 +144,9 @@ cd stocks-agent
 
 ### 2. Provision Supabase
 
-Sign up at [supabase.com](https://supabase.com) (free tier). Create a project, then apply the schema
-via the **Supabase SQL Editor** (Dashboard → SQL Editor → paste `sql/schema.sql` → Run).
+Sign up at [supabase.com](https://supabase.com) and create a project. For a new project, apply
+`sql/schema.sql` in the **Supabase SQL Editor**. For an existing installation, apply the additive,
+idempotent `sql/migrations/20260901_reliable_stock_agent.sql` instead.
 
 ### 3. Get free API keys
 
@@ -139,7 +154,8 @@ via the **Supabase SQL Editor** (Dashboard → SQL Editor → paste `sql/schema.
 |---|---|
 | `FINNHUB_API_KEY` | [finnhub.io](https://finnhub.io) — free tier, 60 calls/min |
 | `ALPHAVANTAGE_API_KEY` | [alphavantage.co](https://www.alphavantage.co/support/#api-key) — free, 25 calls/day |
-| `TELEGRAM_BOT_TOKEN` + `TELEGRAM_CHAT_ID` | Create a bot with [@BotFather](https://t.me/BotFather), message it once, then call `getUpdates` to get your chat id |
+| `TELEGRAM_BOT_TOKEN`, owner chat ID, owner user ID | Create a bot with [@BotFather](https://t.me/BotFather), message it once, then inspect `getUpdates` before registering a webhook |
+| `TELEGRAM_WEBHOOK_SECRET` | Generate a new high-entropy ASCII value (letters, digits, `_`, `-`); this is separate from the bot token |
 | `SUPABASE_URL` | `https://<project-ref>.supabase.co` — from Supabase Dashboard → Settings → API |
 | `SUPABASE_SERVICE_ROLE_KEY` | Supabase → Settings → API → `service_role` key |
 
@@ -150,7 +166,32 @@ cp config/secrets.local.json.example config/secrets.local.json
 # edit config/secrets.local.json — gitignored, never committed
 ```
 
-### 5. Verify everything works
+If a token/key has ever appeared in a terminal transcript, screenshot, chat, or tracked file, rotate
+it before deployment. In particular, rotate the Telegram bot token, Finnhub key, and Alpha Vantage
+key before enabling this webhook.
+
+### 5. Deploy the Telegram recorder
+
+The webhook has no model and no brokerage integration. It only writes this Supabase project after
+an owner-authenticated Confirm button.
+
+```bash
+cp supabase/.env.example supabase/.env.local
+# fill the ignored file with the ROTATED token, new webhook secret, and owner IDs
+npx supabase login
+npx supabase link --project-ref <project-ref>
+npx supabase secrets set --env-file supabase/.env.local
+npx supabase functions deploy telegram-portfolio --no-verify-jwt
+.venv/bin/python scripts/verify_portfolio_command_rpc.py
+.venv/bin/python scripts/register_telegram_webhook.py
+```
+
+JWT verification is disabled only for this function because Telegram cannot send a Supabase JWT.
+The function instead requires Telegram's secret header plus the exact configured chat and user IDs.
+Supabase injects `SUPABASE_URL` and `SUPABASE_SERVICE_ROLE_KEY` into its function runtime. RLS stays
+enabled, and the atomic RPCs are executable only by `service_role`.
+
+### 6. Verify everything works
 
 ```bash
 .venv/bin/python scripts/healthcheck.py
@@ -158,7 +199,7 @@ cp config/secrets.local.json.example config/secrets.local.json
 # + a Telegram DM from your bot
 ```
 
-### 6. Backfill historical data (one-time)
+### 7. Backfill historical data (one-time)
 
 Loads 5-year volatility, seasonality, and notable moves for every ticker in your watchlist:
 
@@ -166,7 +207,7 @@ Loads 5-year volatility, seasonality, and notable moves for every ticker in your
 .venv/bin/python scripts/run_preload.py
 ```
 
-### 7. Personalise
+### 8. Personalise
 
 - `config/settings.json` — monthly amount, allocation (70/20/10), risk settings, scoring weights
 - `config/watchlist.json` — tickers grouped by bucket (Core / Growth / Speculative)
@@ -183,7 +224,21 @@ Open Claude Code in this folder and invoke any skill directly:
 > How was NVDA's earnings?               (triggers earnings-review)
 > Bought 4.68 NVDA at 213.37            (triggers reconcile-trade)
 > Paper-watch SHOP from $80, thesis: breakout (triggers paper-watch)
+> Run the weekly-portfolio-audit skill.      (read-only process audit)
 ```
+
+For ordinary portfolio updates, Telegram is easier and safer than Claude chat:
+
+```text
+/buy AAPL 2 210 growth
+/sell AAPL 1.5 225
+/sell NVDA all 210
+/stop AAPL 195
+/portfolio
+```
+
+Buy/Sell/Stop first returns a preview with **Confirm** and **Cancel**. Nothing changes before
+Confirm. Commands expire after 15 minutes and are rejected if the recorded shares changed.
 
 ---
 
@@ -196,16 +251,25 @@ See [routines/README.md](routines/README.md) for the full step-by-step:
 3. Create 4 Routines (Healthcheck + Pre-market + Intraday + Post-market), each using the `stocks-agent` environment
 4. Run **Healthcheck** once — expect `{"postgres":"ok","finnhub":"ok","yahoo":"ok","telegram":"ok"}` in Telegram
 
-Your laptop does not need to be on.
+Your laptop does not need to be on for Claude Routines or Telegram/Supabase handling.
+
+### Weekly ChatGPT audit
+
+The optional Friday 16:30 CT audit runs locally in the ChatGPT/Codex desktop app using the included
+account allowance—there is no OpenAI API key or per-call API charge in this repo. It reads one
+bounded JSON packet and never writes Supabase or Telegram. The computer and desktop app must be
+running when the local scheduled task fires; missing the audit does not affect the three Claude
+runs. Use GPT-5.6 Sol manually only when you deliberately want a separate opinion before acting on
+a real-money decision; do not duplicate all three daily runs in ChatGPT.
 
 ---
 
-## Supabase schema (10 tables)
+## Supabase schema (13 tables)
 
 | Table | What it stores |
 |---|---|
 | `holdings` | What you actually own (shares, avg cost, stop, target, high-water price) |
-| `transactions` | Every buy/sell you reported via reconcile-trade |
+| `transactions` | Every recorded buy/sell, including source=`telegram` confirmed events |
 | `suggestions` | Every Buy/Watch/Avoid call the agent made, with full bull/bear/decisive-factor fields |
 | `suggestion_grades` | Outcomes at 5/21/63-day horizons + Reflexion post-mortems on wrong calls |
 | `stock_observations` | Per-stock behavioral memory — seasonality, earnings reactions, big moves |
@@ -214,6 +278,9 @@ Your laptop does not need to be on.
 | `radar` | Agent's self-curated discovery queue (promising names not yet on watchlist) |
 | `paper_watches` | Your own hypotheses (separate from agent calls and real holdings) |
 | `lessons` | Regime lines, learned lessons, and Reflexion post-mortems (category: regime/lesson/post-mortem) |
+| `analysis_runs` | Per-run status, evidence time/source health, actual writes, and Telegram message IDs |
+| `portfolio_commands` | Owner-authenticated pending/confirmed/cancelled Telegram mutations and results |
+| `telegram_updates` | Update IDs used to suppress duplicate Telegram deliveries before side effects |
 
 ---
 
@@ -226,6 +293,7 @@ Your laptop does not need to be on.
 | `earnings-review` | "How was X's earnings?" — results + reaction + guidance digest |
 | `reconcile-trade` | You placed a trade → records it in Supabase (holdings + transactions) |
 | `paper-watch` | Track a hypothesis ("I think SHOP breaks out next week") |
+| `weekly-portfolio-audit` | Friday read-only audit of portfolio data and analysis process |
 
 ---
 
@@ -233,25 +301,30 @@ Your laptop does not need to be on.
 
 ```bash
 .venv/bin/python -m pytest tests/ -v
-# 16 tests: DB roundtrips, marketdata math, preload math, fundamentals (insider MSPR, analyst consensus, macro symbols)
+node --test tests/test_telegram_parser.mjs tests/test_telegram_webhook_utils.mjs
+npx --yes deno check supabase/functions/telegram-portfolio/index.ts
 ```
 
 ---
 
 ## Cost
 
-Cloud runs use your Claude **Pro plan** token budget — no separate API bill. Data APIs and Telegram are
-free. The three daily runs consume roughly 2–2.5× one full run. If your Pro budget runs tight, pause
-the intraday check first (keeps 06:30 + 15:10) — that cuts ~33% with the least information loss.
+Cloud runs use your Claude plan allowance—there is no Anthropic model API key in this repo. The
+weekly ChatGPT audit uses the desktop account allowance—there is no OpenAI model API key. Telegram's
+Bot API, free data tiers, and the existing Supabase project avoid Cloud Run and a separate Google
+Cloud project. Provider plan limits still apply. The three Claude runs consume roughly 2–2.5× one
+full run; if allowance gets tight, pause intraday first.
 
 ---
 
 ## Safety
 
 - **No execution tools** — the agent has no tools to place, modify, or cancel orders. You execute every trade yourself on Robinhood.
-- **Secrets never in repo** — `config/secrets.local.json` and `.mcp.json` are gitignored. All keys go into the Supabase environment in the cloud Routine.
+- **Telegram writes records, not orders** — identity + webhook-secret checks happen before parsing; Buy/Sell/Stop require Confirm and an atomic stale-safe RPC.
+- **Secrets never in repo** — local secret files, `.codex/`, and Supabase local env files are gitignored. Routine secrets stay in its environment; webhook secrets stay in Supabase.
+- **Rotate exposed values** — rotate any bot/API key that has appeared in a transcript or local plaintext configuration before live deployment.
 - **Suggestion-only** guardrail is stated in every skill's frontmatter and reinforced throughout.
-- **RLS enabled** on all 10 Supabase tables — service role key bypasses for the agent; anon key is blocked.
+- **RLS enabled** on all 13 Supabase tables; atomic RPC execution is revoked from public/anon/authenticated and granted only to `service_role`.
 
 ---
 

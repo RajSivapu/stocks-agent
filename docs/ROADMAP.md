@@ -1,49 +1,68 @@
-# Stocks Agent — Roadmap (all phases, one place)
+# Stocks Agent — Roadmap and Deployment Status
 
-Last updated: 2026-06-15. Covers both projects: `stocks-agent` (advisor) and `stock-trader-bot`
-(future auto-trader). **Every phase below is suggestion-only/read-only EXCEPT Project 2, which is
-the only one that ever executes trades — and only paper-first, much later.**
+Last updated: 2026-09-01.
 
-| Stage | What | Status | Gate to start | Docs |
-|---|---|---|---|---|
-| **v1** | Morning brief + suggestions, emailed, scheduled 07:30 ET; 70/20/10; insider "smart money"; multi-role reasoning; risk limits; suggestion logging | **Planned, ready to build** | none — build now | spec `…/specs/2026-06-15-stocks-agent-design.md`, plan `…/plans/2026-06-15-stocks-agent-morning-brief.md` |
-| **v2 · Phase 3** | Intraday breaking-news watch (alerts only on material events) | Scope locked; plan deferred | v1 has run ~1–2 wks (need quota data) | v2 spec `…/specs/2026-06-15-stocks-agent-v2-design.md` §2 |
-| ~~v2 · Phase 4a~~ Telegram delivery | **MOVED INTO v1** (primary delivery channel) | ✅ in v1 | — | plan + v2 spec §3 |
-| **v2 · Phase 4b** | DEEPER monthly accuracy report (lightweight track-record already in v1) | Scope locked; plan deferred | ≥1 month of v1 logs | v2 spec §4 |
-| **v2 · Phase 5** | Social sentiment (Reddit/X/RSS) lens | Scope locked; plan deferred | after core v2 works | v2 spec §5 |
-| **v2 · Phase 6** | Congressional + 13F smart-money digest | Scope locked; plan deferred | after core v2 works | v2 spec §6 |
-| **v2 · `valuation`** | On-demand DCF + comps ("cheap or overpriced?"). Zero daily quota | Scope locked; plan deferred | evaluate official plugins first | v2 spec §7a |
-| **v2 · `earnings-review`** | On-demand: transcript → plain English + thesis re-check (hold/trim/sell lean) | Scope locked; plan deferred | evaluate official plugins first | v2 spec §7b |
-| **v2 · CAN SLIM lens** | Replicate IBD/O'Neil CAN SLIM criteria (free) as a scorecard for swing/growth ideas | Scope locked; plan deferred | refinement, after core v2 | v2 spec §8 |
-| **Project 2** | Real auto-trader, $100, paper-first | **Charter only** | ~Sept 2026 AND v1 accuracy report is good | `../../stock-trader-bot/docs/PROJECT-CHARTER.md` |
+This repository is suggestion-only decision support plus portfolio recordkeeping. It has no
+brokerage integration and never places, modifies, or cancels a trade. Any future execution project
+is separate, paper-first, and outside this codebase.
 
-## Sequencing logic
-1. **Build v1, run it ~1–2 weeks.** Collect: per-run Pro-quota cost, what "material" means to you,
-   and real suggestion logs.
-2. **Brainstorm the 3 calibration items** (intraday cadence, alert thresholds, accuracy metrics —
-   see v2 spec §7), then write the v2 implementation plan and build Phases 3 → 4a → 4b.
-3. **Add Phases 5–6** (social + congressional/13F) once core v2 is stable.
-4. **Only if** the accuracy report shows the suggestions are genuinely good, AND it's ~Sept 2026,
-   AND you've run it in paper mode — brainstorm Project 2 and build the auto-trader (paper first,
-   then the $100).
+## Current system
 
-## Open ideas (not yet scoped)
+| Capability | Code status | Live status |
+|---|---|---|
+| Pre-market, intraday, and post-market Claude Routines | Implemented | Existing routines live; revised prompts still need to be pasted after this branch is merged |
+| Fresh independent packet on every run | Implemented | Pending revised Routine rollout + three manual dry/live checks |
+| Analyst → Checker pass with stale/prior-plan veto | Implemented | Pending revised Routine rollout |
+| Quote exchange timestamps + 20-minute action gate | Implemented and tested | Available after updated repo is used by Routines |
+| `analysis_runs` audit trail | Implemented and migration ready | Pending Supabase migration |
+| Deterministic Telegram Buy/Sell/Stop recorder | Implemented, tested, Deno type-checked | Pending credential rotation, migration, function deploy, and webhook registration |
+| Atomic Confirm/Cancel RPCs | Implemented with disposable verification script | Pending Supabase migration + live TSTTG verification |
+| Friday ChatGPT weekly process audit | Packet + skill implemented and tested | Pending local Codex scheduled-task creation |
+| Watchlist changes as owner-reviewed proposals | Implemented in settings/skill | Available after revised Routine rollout |
 
-- **Independent "checker" pass before Telegram send** (noted 2026-07-02, while evaluating the
-  `loop-engineering` repo's maker/checker sub-agent pattern against stocks-agent's architecture).
-  Today every skill run (`market-briefing`, intraday, etc.) is a single self-reviewing agent pass —
-  the "Analyst→Researcher→Risk→Portfolio" multi-role lens is one agent structuring its own
-  reasoning, not an independent verification step by a separate process. Both real production bugs
-  so far (false-holiday brief-skip, the pre-edge-triggered stop alert firing 9+ times) shipped and
-  were only caught because the owner noticed the Telegram output — exactly the class of bug an
-  independent pre-send checker (does this alert invent a number? does it violate suggestion-only?
-  is it a duplicate of something already sent?) could plausibly have caught before it went out.
-  Not scoped or built — open question whether a Cloud Routine's tool config even permits dispatching
-  a sub-agent mid-run. Candidate for a future brainstorm, not urgent.
+"Implemented" means committed code and local verification on the feature branch. It does not mean
+the external Supabase/Telegram/Claude/ChatGPT configuration has been changed.
 
-## Unchanging guardrails across everything
-- Suggestion-only / read-only until Project 2; no trade-execution tools installed in v1 or v2.
-- Every output carries the "educational, not financial advice" disclaimer.
-- Rejected for good: self-optimizing backtest loops (overfitting), day-trading/scalping,
-  autonomous execution of real money without the Project 2 safety stack, gambling/prediction
-  markets.
+## Go-live sequence
+
+1. Rotate the exposed Telegram bot token, Finnhub key, and Alpha Vantage key.
+2. Apply `sql/migrations/20260901_reliable_stock_agent.sql` in Supabase.
+3. Run `.venv/bin/python scripts/verify_portfolio_command_rpc.py`; confirm all disposable TSTTG rows
+   are removed.
+4. Set the four Telegram Edge Function secrets, deploy `telegram-portfolio`, and run
+   `scripts/register_telegram_webhook.py`.
+5. Test `/help`, `/portfolio`, a Cancelled disposable command, and one confirmed disposable command.
+6. Merge/push the branch, update the three Claude Routine prompts from `routines/README.md`, and
+   manually verify pre-market, intraday, and post-market behavior.
+7. Create the Friday 16:30 America/Chicago local ChatGPT audit task and inspect its first report.
+
+## Next reliability work
+
+- Add retention/cleanup policy for old `telegram_updates` and expired `portfolio_commands` after
+  observing real volume.
+- Add a deploy-time integration test fixture for the Edge Function once a safe isolated Supabase test
+  project exists.
+- Review the static NYSE holiday calendar each December and add the next year's dates before January.
+- After two weeks, inspect `analysis_runs` for data-source failures, stale veto frequency, notification
+  noise, and Claude allowance usage; adjust cadence only from evidence.
+- Before sharing with friends, redesign holdings/commands around `owner_id`, add per-owner RLS and bot
+  onboarding, separate secrets/configuration, and threat-model tenant isolation. The current release
+  is intentionally single-owner.
+
+## Deferred research features
+
+- Deeper monthly accuracy reporting after enough graded calls exist.
+- Social sentiment as context only, never a standalone signal.
+- Congressional/13F digest.
+- On-demand valuation models with explicit assumptions and no false precision.
+- A genuinely separate-model manual second opinion for high-stakes decisions. The in-Routine Checker
+  is a structured second pass by the same model and is not represented as independent validation.
+
+## Unchanging guardrails
+
+- No brokerage credentials or order endpoints in this repository.
+- No autonomous real-money execution.
+- Missing/stale/conflicting evidence cannot produce a new actionable conclusion.
+- Telegram records only owner-reported events after explicit Confirm.
+- Weekly ChatGPT audit is read-only and makes no fresh trade recommendation.
+- Every owner still makes and places every trade personally.

@@ -32,9 +32,9 @@ Lets the owner add, check, and close hypothetical stock ideas. Writes only to `p
    ```python
    import sys, os; sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)).replace('/skills/paper-watch',''))
    import lib.db as db
-   rows = db._sb().table("suggestions").select("action,score").eq("ticker", ticker).order("date", desc=True).limit(1).execute().data
-   agent_view_at_open = rows[0]["action"] if rows else "no prior view"
-   agent_score_at_open = rows[0]["score"] if rows else None
+   latest = db.get_latest_suggestion(ticker)
+   agent_view_at_open = latest["action"] if latest else "no prior view"
+   agent_score_at_open = latest.get("score") if latest else None
    ```
 
 3. **Insert the row:**

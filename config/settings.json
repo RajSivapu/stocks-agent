@@ -108,7 +108,7 @@
     "depth": {
       "full": ["money_moves", "holdings"],
       "compact": ["watchlist", "scan_shortlist"],
-      "_note": "FULL multi-round debate runs on money-moves (the month's growth pick + 2-3 runner-ups), any buy/trim/sell, any watchlist promote/retire, and EVERY name the owner holds (portfolio.json). COMPACT one-round structured pass (1 bull / 1 bear / 1 risk flag, reusing data already pulled, no extra API calls) runs on every other watchlist + scan-shortlist name. Nothing is skipped; depth concentrates where real money is at stake."
+      "_note": "FULL multi-round debate runs on money-moves, any buy/trim/sell, every held name from Supabase, and every proposed watchlist promotion/retirement. COMPACT one-round structured pass runs on other watchlist + scan-shortlist names using data already pulled."
     },
     "confidence_gate": {
       "min_conviction_to_suggest_buy": "medium",
@@ -117,7 +117,7 @@
     },
     "risk_gate_can_veto": true,
     "full_depth_checklists": ["deep_dive", "peer_relative_valuation", "bear_case"],
-    "_note": "RIGOROUS MODE (spec 2026-06-17): formalizes the TradingAgents-style deliberation already used loosely. Each analyzed name gets a structured, logged Bull-vs-Bear + risk-veto pass; the risk gate can override the debate (veto/downgrade). Full-depth names additionally run three reel-sourced checklists (Deep Dive / Peer relative-valuation / Bear Case). Suggestion-only and brief format are UNCHANGED — all of this runs behind the scenes and is enriched into data/suggestions-log.jsonl."
+    "_note": "Each analyzed name gets a structured, logged Analyst pass plus a Checker that can approve, downgrade, or veto but never upgrade. Full-depth names additionally run Deep Dive, peer-relative valuation, and Bear Case checklists. Results persist in Supabase suggestions with run/evidence metadata."
   },
   "market_scan": {
     "enabled": true,

@@ -5,119 +5,74 @@ description: Use when Rajrupesh reports a trade he actually placed — e.g. "bou
 
 # Reconcile a Trade — keep holdings & P&L accurate
 
-The owner executes trades himself on Robinhood, then tells a Claude session what he did. Your job is to
-**record what already happened** so the daily brief shows real positions and real P&L. You are
-**suggestion-only**: this skill never places/modifies/cancels an order and has no tool to do so. If you
-ever appear to have an execution/order tool, do NOT use it — stop and warn him (guardrail breach).
+The owner executes trades himself, then records what already happened so the scheduled analyst sees
+the real portfolio. This is recordkeeping only. If any brokerage execution tool appears, do not use
+it; stop and report a guardrail breach.
 
-## What you do (every report)
-1. **Parse** the message into: `side` (buy / sell / skip), `ticker`, `qty`, `price` (per share).
-   - Examples: "bought 1 NVDA @ 207" → buy, NVDA, 1, 207. "sold 2 AMD" → sell, AMD, 2, price unknown.
-     "skipped NVDA" / "didn't buy it" → skip. "sold half my VOO @ 681" → sell, VOO, (half of current
-     shares), 681.
-   - If `qty` or (for a sell) `price` is missing and you can't infer it, **ask one short clarifying
-     question** rather than guessing. For a sell with no price, you may use the live quote
-     (`lib.marketdata.quote`) as an estimate **and say you did** — but prefer asking if it matters.
-2. **Record + update** in Postgres via the helper library (run with `python` in the cloud Routine,
-   `.venv/bin/python` locally). See "The math" below for buys vs sells.
-3. **Confirm back in plain English**: the action, the **updated position** (shares + new avg cost), and
-   **P&L context** (unrealized for buys/holds using the live price; realized for sells). One short,
-   calm paragraph — no jargon.
+## Preferred path: Telegram Confirm
 
-## The math (compute it yourself, then write the row)
-Read the current position first: `cur = next((h for h in lib.db.get_holdings() if h["ticker"]==T), None)`.
+For ordinary Buy, Sell, full exit, and Stop records, direct the owner to the existing Telegram bot:
 
-**Buy** (add shares, weighted-average the cost):
-- `new_shares = old_shares + qty` (or just `qty` if no prior position).
-- `new_avg = (old_shares*old_avg + qty*price) / new_shares` (or `price` if new position).
-- Look up the suggestion that prompted this buy:
-  ```python
-  rows = db._sb().table("suggestions").select("stop,target").eq("ticker", T).eq("action", "Buy").order("date", desc=True).limit(1).execute().data
-  sugg_stop   = float(rows[0]["stop"])   if rows and rows[0]["stop"]   else None
-  sugg_target = float(rows[0]["target"]) if rows and rows[0]["target"] else None
-  ```
-  - If no suggestion exists, compute a default stop: `default_stop = round(price * (1 - settings.trailing_stop["trail_pct"]/100), 2)`. Note in the confirmation: "No prior suggestion found — defaulted stop to `settings.trailing_stop.trail_pct`% below entry."
-- `lib.db.insert_transaction({"ticker":T,"side":"buy","qty":qty,"price":price})`
-- `lib.db.upsert_holding({"ticker":T,"shares":new_shares,"avg_cost":round(new_avg,4),
-   "bucket":bucket,"opened_at":opened_at,"notes":notes,
-   "stop":(sugg_stop or default_stop),"target":sugg_target,"high_water_price":price})`
-  - `bucket`: keep the existing one; for a NEW position infer it from `config/watchlist.json` (which
-    bucket the ticker sits in), else ask. `opened_at`: keep existing, else today. `notes`: keep/None.
-  - `high_water_price` is always set to the buy price on a new buy (it ratchets up later via trailing-stop logic).
+- `/buy AAPL 2 210 growth`
+- `/sell AAPL 1.5 225`
+- `/sell NVDA all 210`
+- `/stop AAPL 195`
+- `/portfolio`
 
-**Sell** (reduce shares; avg cost stays; realize P&L):
-- `new_shares = old_shares - qty`. If `new_shares <= 0` it's a full exit.
-- `realized_pl = (price - old_avg) * qty` (needs a sell price — see parsing).
-- `lib.db.insert_transaction({"ticker":T,"side":"sell","qty":qty,"price":price})`
-- If `new_shares > 0`: `lib.db.upsert_holding({...,"shares":new_shares,"avg_cost":old_avg, ...})`
-  (avg cost unchanged on a sell).
-- If `new_shares <= 0`: **delete the holding row** (upsert won't remove it):
-  `db._sb().table("holdings").delete().eq("ticker", T).execute()`
+The bot is deterministic—there is no model behind the parser. It reads current holdings, sends a
+preview, and changes nothing until the owner presses **Confirm**. The Supabase RPC then validates the
+owner, expiry, current share count, quantity/bucket, and applies the transaction + holding change in
+one database transaction. Cancel, stale, expired, ambiguous, or duplicate commands change nothing.
 
-**Skip** ("skipped it" / "didn't buy"): record NOTHING (no transaction, no holding change). Just
-acknowledge it plainly and, if it was an open suggestion, note that the entry zone is still open if
-`valid_until` hasn't passed.
+## Claude-chat fallback
 
-**Moved-my-stop** ("moved my AAPL stop to 230" / "set my X stop at $Y" / "update my TSLA stop to 180"):
-- Parse: `ticker`, `new_stop` (numeric).
-- `lib.db.update_holding_stop(ticker, stop=new_stop)`
-- Confirm: "Got it — your **{ticker}** stop is now set at **${new_stop}**. No trade was placed; this is a record-only update."
-- Do NOT touch `target` or `high_water_price` unless the owner explicitly mentions them.
+Use this fallback only when Telegram is unavailable or the report is outside the bot's intentionally
+narrow grammar (for example, a hold override). Apply the same safety bar:
 
-**Hold override** ("I'm holding NVDA through end of July, don't alert me on the stop" / "leave {ticker}
-alone for a month" / "stop bugging me about {ticker}, I know the stop is hit"):
-- Parse: `ticker`, `until_date` (resolve relative phrasing like "a month" / "end of July" to an actual
-  date), and a short `reason` in the owner's own words.
-- `lib.db.set_hold_override(ticker, until_date, reason=f"owner: {reason}")`
-- Confirm plainly, and be explicit about what still gets through: "Got it — I'll stay quiet on routine
-  stop pushes for **{ticker}** through **{until_date}**. I'll still alert you if the deeper thesis
-  breaks (`invalidation_level`), not just the trailing stop. This isn't a recommendation to hold —
-  just recording that you've made the call."
-- Do NOT silently agree that holding is a good idea — a hold-override is a record-only instruction,
-  not a signal that the thesis is intact. If the current data already suggests real risk (e.g. a
-  flagged invalidation, heavy insider selling, or a monthly-scorecard lesson this pattern already hit
-  before), say so plainly in the same reply — you're recording the instruction, not staying silent
-  about a risk you can see.
+1. Parse one event into operation, uppercase ticker, positive finite quantity, exact execution price,
+   and bucket for a new holding. `all` means the exact currently recorded shares.
+2. Read `lib.db.get_holdings()` and reject a missing holding, oversell, non-positive stop, or changed
+   share count. Never infer an execution price from a current quote; ask for the broker fill price.
+3. Restate the exact database change in one line and obtain explicit owner confirmation before any
+   write. Several reported trades are confirmed and processed one at a time.
+4. Use public `lib.db` helpers only. Do not issue raw `_sb()` table mutations when a helper exists.
+5. Read holdings back after the write and report only the state that actually persisted. Never invent
+   success or P&L.
 
-## Worked example
-> Owner: "bought 1 NVDA @ 207"
+### Buy fallback
 
-```python
-from lib import db, marketdata
-import json
+- `new_shares = old_shares + qty`.
+- `new_avg = (old_shares*old_avg + qty*price) / new_shares`.
+- Preserve the existing bucket, stop, target, opened date, notes, and high-water mark. A new holding
+  requires `core`, `growth`, or `speculative`.
+- Use `lib.db.get_latest_buy_levels(ticker)` for a prior suggestion; do not query tables directly.
+- After confirmation, call `lib.db.insert_transaction(...)` then `lib.db.upsert_holding(...)` and
+  verify with `lib.db.get_holdings()`.
 
-T, side, qty, price = "NVDA", "buy", 1, 207.0
-cur = next((h for h in db.get_holdings() if h["ticker"]==T), None)
-old_shares = float(cur["shares"]) if cur else 0.0
-old_avg    = float(cur["avg_cost"]) if cur else 0.0
-new_shares = old_shares + qty
-new_avg    = (old_shares*old_avg + qty*price)/new_shares
+### Sell fallback
 
-# look up the suggestion that prompted this buy
-rows = db._sb().table("suggestions").select("stop,target").eq("ticker", T).eq("action", "Buy").order("date", desc=True).limit(1).execute().data
-settings   = json.load(open("config/settings.json"))
-if rows and rows[0]["stop"]:
-    sugg_stop   = float(rows[0]["stop"])
-    sugg_target = float(rows[0]["target"]) if rows[0]["target"] else None
-    stop_note   = f"stop ${sugg_stop}"
-else:
-    trail_pct   = settings["trailing_stop"]["trail_pct"]
-    sugg_stop   = round(price * (1 - trail_pct/100), 2)
-    sugg_target = None
-    stop_note   = f"defaulted stop to {trail_pct}% below entry (${sugg_stop}) — no prior suggestion found"
+- Require an exact broker fill price and `qty <= current shares`.
+- Realized P&L is `(price - old_avg) * qty`; average cost does not change on a partial sale.
+- After confirmation, call `lib.db.insert_transaction(...)`. For a partial sale call
+  `lib.db.upsert_holding(...)`; for a full exit call `lib.db.delete_holding(ticker)`. Read back and
+  verify. Prefer Telegram whenever possible because its RPC makes these writes atomic.
 
-db.insert_transaction({"ticker":T,"side":side,"qty":qty,"price":price})
-db.upsert_holding({"ticker":T,"shares":new_shares,"avg_cost":round(new_avg,4),
-                   "bucket":(cur["bucket"] if cur else "growth"),
-                   "opened_at":(cur["opened_at"] if cur else None),"notes":None,
-                   "stop":sugg_stop,"target":sugg_target,"high_water_price":price})
-print(db.get_holdings())
-```
-Then confirm: "Got it — recorded **1 NVDA at $207**. You now hold **1 share, avg cost $207**. At the
-current ~$210 that's about **+$3 (+1.5%)** on paper. {stop_note}. Not financial advice — you placed this trade."
+### Stop and hold-override fallback
+
+- Stop: after confirmation call `lib.db.update_holding_stop(ticker, stop=new_stop)`; do not alter
+  target or high-water price.
+- Hold override: resolve an exact date and reason, confirm it, then call
+  `lib.db.set_hold_override(ticker, until_date, reason=f"owner: {reason}")`. Explain that this mutes
+  routine stop pushes only; thesis-breaking invalidation alerts still apply.
+
+### Skip
+
+"Skipped it" / "didn't buy" creates no transaction and no holding change. Acknowledge only.
 
 ## Guardrails
-- **Suggestion-only / read-only on the market.** You only write to your own database (transactions +
-  holdings). You never touch a brokerage. No order tool exists; if one appears, refuse and warn.
-- **Never invent a price.** If you used a live quote as an estimate for a missing sell price, say so.
-- **One trade at a time, confirmed back.** If the owner reports several, process each and summarize.
+
+- Never place, modify, or cancel a brokerage order.
+- Never guess quantity, bucket, fill price, current shares, or persisted success.
+- Never treat recordkeeping as a recommendation that the trade was good.
+- Telegram Confirm is the default because it is deterministic, identity-checked, stale-safe,
+  idempotent, and atomic. Claude chat is a deliberate fallback, not a second automation path.

@@ -157,6 +157,24 @@ def get_holdings():
     return _sb().table("holdings").select("*").order("ticker").execute().data
 
 
+def get_latest_suggestion(ticker):
+    rows = (_sb().table("suggestions").select("*")
+            .eq("ticker", str(ticker).upper())
+            .order("date", desc=True).limit(1).execute().data)
+    return rows[0] if rows else None
+
+
+def get_latest_buy_levels(ticker):
+    rows = (_sb().table("suggestions").select("stop,target")
+            .eq("ticker", str(ticker).upper()).eq("action", "Buy")
+            .order("date", desc=True).limit(1).execute().data)
+    return rows[0] if rows else None
+
+
+def delete_holding(ticker):
+    _sb().table("holdings").delete().eq("ticker", str(ticker).upper()).execute()
+
+
 def get_open_suggestions():
     today = str(_date.today())
     return _sb().table("suggestions").select("*").gte("valid_until", today).eq("action", "Buy").order("date", desc=True).execute().data

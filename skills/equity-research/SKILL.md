@@ -11,13 +11,14 @@ can act on. **Suggestion-only — you have no trade tools and must never place/m
 
 ## Inputs
 - The ticker(s) the owner names. If it's a holding, read holdings via `lib.db.get_holdings()` for shares + avg cost.
-- `config/settings.json` (buckets, risk, scoring) and `config/secrets.local.json` (keys via the MCPs).
+- `config/settings.json` (buckets, risk, scoring). Data helpers read credentials from environment;
+  never open a local secrets file directly.
 
 ## Data (read-only): yfinance primary, Finnhub secondary, Alpha Vantage backup
 Pull: current quote (note ~15-min delay), key fundamentals (growth, margins, debt/cash, P/E), latest
 news + sentiment, analyst ratings/price targets, insider activity, next earnings date. Prefer the
-read-only MCP tools; fall back to direct read-only HTTPS calls with the keys in
-`config/secrets.local.json` if the tools aren't available. Never use a write/order endpoint.
+project helper library; use another read-only source only when available and never expose a key.
+Never use a write/order endpoint.
 
 Also pull `lib.edgar.recent_filings(ticker)` and `lib.edgar.ownership_filings(ticker)` (SEC EDGAR
 — free, no key). Both degrade to `[]` silently on any lookup failure (unmapped ticker, network
@@ -56,5 +57,6 @@ note (see Produce section below for exactly when to surface each).
 ## Rules
 - Never invent numbers or news; note any missing data + the fallback used.
 - Context + reasoning, not a guarantee; always show what would prove the idea wrong.
-- If the verdict is actionable, append a line to `data/suggestions-log.jsonl` (same fields as
-  `market-briefing`, including the score fields).
+- If the verdict is actionable, persist one row with `lib.db.insert_suggestion({...})` using the
+  `market-briefing` Logging fields, including `evidence_as_of` from the quote. Never write a local
+  suggestion log file.
