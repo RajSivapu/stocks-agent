@@ -5,8 +5,11 @@ Indicators (RSI-14, MACD 12/26/9, SMA 50/200) are computed locally so we never d
 on a paid/rate-limited indicator API. Functions return None where there's insufficient
 data rather than raising, so callers can mark partials.
 """
+import datetime
 import json, ssl, urllib.request
 ctx = ssl.create_default_context(); UA = {"User-Agent": "Mozilla/5.0"}
+
+_MAX_FUTURE_CLOCK_SKEW_MINUTES = 5
 
 
 def _get(u, t=20):
@@ -21,12 +24,39 @@ def history(sym, range_="1y"):
 
 
 def quote(sym):
-    """Latest price, previous close, and day % move."""
+    """Latest quote plus exchange-provided freshness metadata."""
     j = _get(f"https://query1.finance.yahoo.com/v8/finance/chart/{sym}?range=5d&interval=1d")
     m = j["chart"]["result"][0]["meta"]
     px = m.get("regularMarketPrice"); pc = m.get("previousClose") or m.get("chartPreviousClose")
+    timestamp = m.get("regularMarketTime")
+    try:
+        as_of = datetime.datetime.fromtimestamp(timestamp, datetime.timezone.utc).isoformat() if timestamp is not None else None
+    except (OverflowError, OSError, TypeError, ValueError):
+        as_of = None
     return {"price": px, "prev_close": pc,
-            "day_pct": (round((px - pc) / pc * 100, 2) if px and pc else None)}
+            "day_pct": (round((px - pc) / pc * 100, 2) if px and pc else None),
+            "as_of": as_of, "market_state": m.get("marketState"), "source": "yahoo-chart"}
+
+
+def quote_age_minutes(quote_data, now=None):
+    """Age of an exchange-timestamped quote, or None when freshness is unknown."""
+    raw = quote_data.get("as_of") if isinstance(quote_data, dict) else None
+    if not raw:
+        return None
+    try:
+        as_of = datetime.datetime.fromisoformat(str(raw).replace("Z", "+00:00"))
+        if as_of.tzinfo is None:
+            as_of = as_of.replace(tzinfo=datetime.timezone.utc)
+    except (TypeError, ValueError):
+        return None
+
+    now = now or datetime.datetime.now(datetime.timezone.utc)
+    if now.tzinfo is None:
+        now = now.replace(tzinfo=datetime.timezone.utc)
+    age = (now.astimezone(datetime.timezone.utc) - as_of.astimezone(datetime.timezone.utc)).total_seconds() / 60
+    if age < -_MAX_FUTURE_CLOCK_SKEW_MINUTES:
+        return None
+    return round(max(age, 0.0), 2)
 
 
 def _sma(v, n):

@@ -3,6 +3,47 @@ import datetime
 from lib import marketdata as m
 
 
+def test_quote_includes_exchange_freshness_metadata(monkeypatch):
+    monkeypatch.setattr(m, "_get", lambda _: {"chart": {"result": [{"meta": {
+        "regularMarketPrice": 101.0,
+        "previousClose": 100.0,
+        "regularMarketTime": 1788296400,
+        "marketState": "REGULAR",
+    }}]}})
+
+    q = m.quote("TEST")
+
+    assert q == {
+        "price": 101.0,
+        "prev_close": 100.0,
+        "day_pct": 1.0,
+        "as_of": "2026-09-01T21:00:00+00:00",
+        "market_state": "REGULAR",
+        "source": "yahoo-chart",
+    }
+
+
+def test_quote_age_minutes_uses_exchange_timestamp():
+    q = {"as_of": "2026-09-01T19:30:00+00:00"}
+    now = datetime.datetime(2026, 9, 1, 21, 0, tzinfo=datetime.timezone.utc)
+
+    assert m.quote_age_minutes(q, now=now) == 90.0
+
+
+def test_quote_age_minutes_returns_none_without_parseable_timestamp():
+    now = datetime.datetime(2026, 9, 1, 21, 0, tzinfo=datetime.timezone.utc)
+
+    assert m.quote_age_minutes({}, now=now) is None
+    assert m.quote_age_minutes({"as_of": "not-a-timestamp"}, now=now) is None
+
+
+def test_quote_age_minutes_clamps_small_future_clock_skew():
+    q = {"as_of": "2026-09-01T21:02:00+00:00"}
+    now = datetime.datetime(2026, 9, 1, 21, 0, tzinfo=datetime.timezone.utc)
+
+    assert m.quote_age_minutes(q, now=now) == 0.0
+
+
 def test_is_market_holiday_known_holiday():
     assert m.is_market_holiday(datetime.date(2026, 6, 19)) is True  # Juneteenth
 
