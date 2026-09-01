@@ -1,0 +1,89 @@
+# Manual behavioral eval for the deterministic Telegram portfolio recorder.
+# Run against a non-owner identity or disposable TSTTG rows where applicable.
+
+eval_set_id: telegram_portfolio_security_and_safety
+name: Telegram portfolio recorder behavioral eval
+description: >
+  Checks authentication, idempotency, confirmation, atomicity, and the hard boundary that this
+  recorder updates Supabase only and never reaches a brokerage.
+
+eval_cases:
+  - name: wrong_webhook_secret
+    scenario: POST a valid owner message without the configured Telegram secret header.
+    expected_behavior:
+      - Returns 401.
+      - Sends no Telegram reply.
+      - Writes no telegram_updates or portfolio_commands row.
+
+  - name: unauthorized_identity
+    scenario: POST a valid command with the correct webhook secret but a different chat or user ID.
+    expected_behavior:
+      - Returns 403.
+      - Sends no Telegram reply.
+      - Writes no Telegram receipt, pending command, transaction, or holding change.
+
+  - name: duplicate_update
+    scenario: Deliver the exact same authorized Telegram update_id twice.
+    expected_behavior:
+      - The first update is handled normally.
+      - The duplicate returns 200 without another reply or side effect.
+      - At most one telegram_updates row and one pending command exist for the update ID.
+
+  - name: ambiguous_input
+    scenario: Send "AAPL looks good, do something" from the owner chat.
+    expected_behavior:
+      - Replies with deterministic usage examples.
+      - Creates no pending command and changes no portfolio data.
+
+  - name: new_buy_requires_bucket
+    scenario: Send "/buy TSTTG 2 100" when TSTTG is not already held.
+    expected_behavior:
+      - Asks for core, growth, or speculative.
+      - Sends no Confirm button and creates no pending command.
+
+  - name: oversell_rejected_before_preview
+    scenario: Hold 1 TSTTG share and send "/sell TSTTG 2 120".
+    expected_behavior:
+      - States that the sell exceeds recorded shares.
+      - Creates no pending command, transaction, or holding change.
+
+  - name: confirm_applies_once
+    scenario: Preview a valid disposable Buy, press Confirm, then replay the same callback.
+    expected_behavior:
+      - The preview explicitly says this does not place a trade.
+      - The first Confirm creates exactly one source='telegram' transaction and updates holdings.
+      - The replay creates no additional transaction or holding mutation.
+      - The edited message reports only the database record that actually succeeded.
+
+  - name: cancel_changes_nothing
+    scenario: Preview a valid Stop change and press Cancel.
+    expected_behavior:
+      - Marks the command cancelled.
+      - Leaves the holding stop unchanged and inserts no transaction.
+      - A later Confirm on that command cannot apply it.
+
+  - name: expired_or_stale_confirmation
+    scenario: Confirm after 15 minutes, or change the holding shares before confirming.
+    expected_behavior:
+      - Marks the command expired or rejected.
+      - Requests a fresh command and changes no transaction or holding data.
+
+  - name: database_failure_rolls_back
+    scenario: Force a database exception during a confirmed Buy or Sell.
+    expected_behavior:
+      - No partial transaction or holding mutation survives.
+      - Telegram does not claim the command was recorded.
+
+  - name: portfolio_is_read_only
+    scenario: Send "/portfolio" from the authorized owner chat.
+    expected_behavior:
+      - Returns a compact list from holdings.
+      - Writes only the telegram_updates idempotency receipt.
+      - Creates no portfolio command or transaction.
+
+  - name: no_brokerage_capability
+    scenario: Send "place the order", "buy it for me", or a callback-like injection string.
+    expected_behavior:
+      - Never calls or references a brokerage execution tool.
+      - Changes no portfolio data without a valid parsed command and explicit Confirm.
+      - Describes the integration as Supabase recordkeeping only.

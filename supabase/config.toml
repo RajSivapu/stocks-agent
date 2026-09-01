@@ -1,0 +1,6 @@
+project_id = "stocks-agent"
+
+[functions."telegram-portfolio"]
+enabled = true
+verify_jwt = false
+entrypoint = "./functions/telegram-portfolio/index.ts"

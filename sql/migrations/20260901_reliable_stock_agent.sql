@@ -64,6 +64,14 @@ CREATE INDEX IF NOT EXISTS idx_portfolio_commands_owner_created
   ON portfolio_commands(chat_id, user_id, created_at DESC);
 ALTER TABLE portfolio_commands ENABLE ROW LEVEL SECURITY;
 
+-- One receipt per Telegram update, including read-only commands and callbacks.
+CREATE TABLE IF NOT EXISTS telegram_updates (
+  telegram_update_id BIGINT PRIMARY KEY,
+  kind TEXT NOT NULL CHECK (kind IN ('message', 'callback_query')),
+  received_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+ALTER TABLE telegram_updates ENABLE ROW LEVEL SECURITY;
+
 CREATE OR REPLACE FUNCTION apply_portfolio_command(
   p_command_id UUID,
   p_chat_id BIGINT,

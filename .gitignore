@@ -2,6 +2,8 @@
 config/secrets.local.json
 .mcp.json
 .env
+supabase/.env.local
+supabase/.temp/
 
 # Claude Code local config
 .claude/

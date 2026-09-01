@@ -73,6 +73,12 @@ CREATE INDEX IF NOT EXISTS idx_portfolio_commands_status_expiry
 CREATE INDEX IF NOT EXISTS idx_portfolio_commands_owner_created
   ON portfolio_commands(chat_id, user_id, created_at DESC);
 
+CREATE TABLE IF NOT EXISTS telegram_updates (
+  telegram_update_id BIGINT PRIMARY KEY,
+  kind TEXT NOT NULL CHECK (kind IN ('message', 'callback_query')),
+  received_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
 CREATE TABLE IF NOT EXISTS suggestions (
   id BIGSERIAL PRIMARY KEY, ts TIMESTAMPTZ NOT NULL DEFAULT now(),
   date DATE NOT NULL, ticker TEXT NOT NULL, action TEXT NOT NULL, bucket TEXT,
@@ -145,6 +151,7 @@ ALTER TABLE lessons            ENABLE ROW LEVEL SECURITY;
 ALTER TABLE paper_watches      ENABLE ROW LEVEL SECURITY;
 ALTER TABLE analysis_runs      ENABLE ROW LEVEL SECURITY;
 ALTER TABLE portfolio_commands ENABLE ROW LEVEL SECURITY;
+ALTER TABLE telegram_updates    ENABLE ROW LEVEL SECURITY;
 
 CREATE OR REPLACE FUNCTION apply_portfolio_command(
   p_command_id UUID,
