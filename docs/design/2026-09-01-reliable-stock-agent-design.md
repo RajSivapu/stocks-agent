@@ -1,7 +1,7 @@
 # Reliable Stock Agent Design
 
-**Date:** 2026-09-01  
-**Status:** Approved for implementation  
+**Date:** 2026-09-01
+**Status:** Approved for implementation
 **Owner:** Rajrupesh
 
 ## Objective
