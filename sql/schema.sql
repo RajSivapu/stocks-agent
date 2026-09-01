@@ -153,7 +153,7 @@ ALTER TABLE analysis_runs      ENABLE ROW LEVEL SECURITY;
 ALTER TABLE portfolio_commands ENABLE ROW LEVEL SECURITY;
 ALTER TABLE telegram_updates    ENABLE ROW LEVEL SECURITY;
 
-CREATE OR REPLACE FUNCTION apply_portfolio_command(
+CREATE OR REPLACE FUNCTION public.apply_portfolio_command(
   p_command_id UUID,
   p_chat_id BIGINT,
   p_user_id BIGINT
@@ -315,7 +315,7 @@ BEGIN
 END;
 $$;
 
-CREATE OR REPLACE FUNCTION cancel_portfolio_command(
+CREATE OR REPLACE FUNCTION public.cancel_portfolio_command(
   p_command_id UUID,
   p_chat_id BIGINT,
   p_user_id BIGINT
@@ -358,7 +358,7 @@ BEGIN
 END;
 $$;
 
-REVOKE ALL ON FUNCTION apply_portfolio_command(UUID, BIGINT, BIGINT) FROM PUBLIC, anon, authenticated;
-REVOKE ALL ON FUNCTION cancel_portfolio_command(UUID, BIGINT, BIGINT) FROM PUBLIC, anon, authenticated;
-GRANT EXECUTE ON FUNCTION apply_portfolio_command(UUID, BIGINT, BIGINT) TO service_role;
-GRANT EXECUTE ON FUNCTION cancel_portfolio_command(UUID, BIGINT, BIGINT) TO service_role;
+REVOKE ALL ON FUNCTION public.apply_portfolio_command(UUID, BIGINT, BIGINT) FROM PUBLIC, anon, authenticated;
+REVOKE ALL ON FUNCTION public.cancel_portfolio_command(UUID, BIGINT, BIGINT) FROM PUBLIC, anon, authenticated;
+GRANT EXECUTE ON FUNCTION public.apply_portfolio_command(UUID, BIGINT, BIGINT) TO service_role;
+GRANT EXECUTE ON FUNCTION public.cancel_portfolio_command(UUID, BIGINT, BIGINT) TO service_role;

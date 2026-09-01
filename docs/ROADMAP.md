@@ -17,7 +17,7 @@ is separate, paper-first, and outside this codebase.
 | `analysis_runs` audit trail | Implemented and migration ready | Pending Supabase migration |
 | Deterministic Telegram Buy/Sell/Stop recorder | Implemented, tested, Deno type-checked | Pending credential rotation, migration, function deploy, and webhook registration |
 | Atomic Confirm/Cancel RPCs | Implemented with disposable verification script | Pending Supabase migration + live TSTTG verification |
-| Friday ChatGPT weekly process audit | Packet + skill implemented and tested | Pending local Codex scheduled-task creation |
+| Friday ChatGPT weekly process audit | Packet + skill implemented and tested | Active Fridays at 16:30 CT; first scheduled report still needs review |
 | Watchlist changes as owner-reviewed proposals | Implemented in settings/skill | Available after revised Routine rollout |
 
 "Implemented" means committed code and local verification on the feature branch. It does not mean
@@ -34,7 +34,7 @@ the external Supabase/Telegram/Claude/ChatGPT configuration has been changed.
 5. Test `/help`, `/portfolio`, a Cancelled disposable command, and one confirmed disposable command.
 6. Merge/push the branch, update the three Claude Routine prompts from `routines/README.md`, and
    manually verify pre-market, intraday, and post-market behavior.
-7. Create the Friday 16:30 America/Chicago local ChatGPT audit task and inspect its first report.
+7. Inspect the first Friday 16:30 America/Chicago ChatGPT audit report and confirm it stayed read-only.
 
 ## Next reliability work
 

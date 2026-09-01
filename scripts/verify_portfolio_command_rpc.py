@@ -61,6 +61,11 @@ def _rpc(sb, name, command_id):
     }).execute().data
 
 
+def _require(condition, message):
+    if not condition:
+        raise RuntimeError(message)
+
+
 def main():
     sb = db._sb()
     try:
@@ -69,39 +74,40 @@ def main():
         buy_id = _pending(sb, operation="buy", expected_shares=0, qty=2, price=100, bucket="growth")
         buy = _rpc(sb, "apply_portfolio_command", buy_id)
         holding = _holding(sb)
-        assert buy["ok"] is True
-        assert Decimal(str(holding["shares"])) == Decimal("2")
-        assert Decimal(str(holding["avg_cost"])) == Decimal("100")
-        assert _transaction_count(sb) == 1
+        _require(buy["ok"] is True, "confirmed Buy RPC did not succeed")
+        _require(holding is not None, "confirmed Buy did not create a holding")
+        _require(Decimal(str(holding["shares"])) == Decimal("2"), "confirmed Buy recorded wrong shares")
+        _require(Decimal(str(holding["avg_cost"])) == Decimal("100"), "confirmed Buy recorded wrong average cost")
+        _require(_transaction_count(sb) == 1, "confirmed Buy did not create exactly one transaction")
         print("PASS: confirmed Buy is atomic")
 
         duplicate = _rpc(sb, "apply_portfolio_command", buy_id)
-        assert duplicate["ok"] is True
-        assert _transaction_count(sb) == 1
+        _require(duplicate["ok"] is True, "repeated Confirm was not idempotently accepted")
+        _require(_transaction_count(sb) == 1, "repeated Confirm created a duplicate transaction")
         print("PASS: repeated Confirm is idempotent")
 
         stale_id = _pending(sb, operation="buy", expected_shares=1, qty=1, price=105, bucket="growth")
         stale = _rpc(sb, "apply_portfolio_command", stale_id)
-        assert stale["ok"] is False and stale["status"] == "rejected"
-        assert Decimal(str(_holding(sb)["shares"])) == Decimal("2")
-        assert _transaction_count(sb) == 1
+        _require(stale["ok"] is False and stale["status"] == "rejected", "stale command was not rejected")
+        _require(Decimal(str(_holding(sb)["shares"])) == Decimal("2"), "stale command changed the holding")
+        _require(_transaction_count(sb) == 1, "stale command created a transaction")
         print("PASS: stale expected shares are rejected")
 
         sell_id = _pending(sb, operation="sell", expected_shares=2, qty=1, price=120)
         sell = _rpc(sb, "apply_portfolio_command", sell_id)
-        assert sell["ok"] is True
-        assert Decimal(str(sell["realized_pnl"])) == Decimal("20")
-        assert Decimal(str(_holding(sb)["shares"])) == Decimal("1")
-        assert _transaction_count(sb) == 2
+        _require(sell["ok"] is True, "confirmed Sell RPC did not succeed")
+        _require(Decimal(str(sell["realized_pnl"])) == Decimal("20"), "confirmed Sell recorded wrong P&L")
+        _require(Decimal(str(_holding(sb)["shares"])) == Decimal("1"), "confirmed Sell recorded wrong shares")
+        _require(_transaction_count(sb) == 2, "confirmed Sell did not create exactly one transaction")
         print("PASS: confirmed Sell records realized P&L")
 
         cancel_id = _pending(sb, operation="stop", expected_shares=1, stop=90)
         cancelled = _rpc(sb, "cancel_portfolio_command", cancel_id)
         after_cancel = _rpc(sb, "apply_portfolio_command", cancel_id)
-        assert cancelled["ok"] is True and cancelled["status"] == "cancelled"
-        assert after_cancel["ok"] is False and after_cancel["status"] == "cancelled"
-        assert _holding(sb)["stop"] is None
-        assert _transaction_count(sb) == 2
+        _require(cancelled["ok"] is True and cancelled["status"] == "cancelled", "Cancel RPC did not succeed")
+        _require(after_cancel["ok"] is False and after_cancel["status"] == "cancelled", "cancelled command was applied")
+        _require(_holding(sb)["stop"] is None, "cancelled stop command changed the holding")
+        _require(_transaction_count(sb) == 2, "cancelled command created a transaction")
         print("PASS: Cancel prevents mutation")
         return 0
     except Exception as exc:
