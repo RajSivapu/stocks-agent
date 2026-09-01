@@ -15,6 +15,45 @@ def _sb():
     return create_client(config.secret("supabase_url"), config.secret("supabase_service_role_key"))
 
 
+class _RecordingQuery:
+    def __init__(self, calls, table):
+        self.calls = calls
+        self.table = table
+
+    def select(self, columns):
+        self.calls.append((self.table, "select", columns))
+        return self
+
+    def order(self, column, desc=False):
+        self.calls.append((self.table, "order", column, desc))
+        return self
+
+    def limit(self, value):
+        self.calls.append((self.table, "limit", value))
+        return self
+
+    def update(self, payload):
+        self.calls.append((self.table, "update", payload))
+        return self
+
+    def eq(self, column, value):
+        self.calls.append((self.table, "eq", column, value))
+        return self
+
+    def execute(self):
+        self.calls.append((self.table, "execute"))
+        return type("Response", (), {"data": []})()
+
+
+class _RecordingClient:
+    def __init__(self):
+        self.calls = []
+
+    def table(self, name):
+        self.calls.append((name, "table"))
+        return _RecordingQuery(self.calls, name)
+
+
 def test_schema_and_suggestion_roundtrip():
     db.init_schema()
     sid = db.insert_suggestion({"date": "2026-06-17", "ticker": "TEST", "action": "Buy",
@@ -89,3 +128,67 @@ def test_lessons_roundtrip():
         assert len(match) == 1 and match[0]["category"] == "regime"
     finally:
         _sb().table("lessons").delete().eq("content", content).execute()
+
+
+def test_analysis_run_lifecycle_roundtrip():
+    run_id = None
+    try:
+        run_id = db.start_analysis_run("test", started_at="2026-09-01T15:00:00+00:00")
+        running = _sb().table("analysis_runs").select("*").eq("id", run_id).execute().data[0]
+        assert running["kind"] == "test"
+        assert running["status"] == "running"
+        assert running["finished_at"] is None
+
+        db.finish_analysis_run(
+            run_id,
+            status="completed",
+            data_as_of="2026-09-01T15:04:00+00:00",
+            source_status={"quotes": "fresh", "news": "partial"},
+            symbols=["AAPL", "MSFT"],
+            write_counts={"suggestions": 1, "observations": 2},
+            telegram_message_ids=[12345],
+            summary="test run complete",
+        )
+        completed = _sb().table("analysis_runs").select("*").eq("id", run_id).execute().data[0]
+        assert completed["status"] == "completed"
+        assert completed["finished_at"] is not None
+        assert completed["source_status"] == {"quotes": "fresh", "news": "partial"}
+        assert completed["symbols"] == ["AAPL", "MSFT"]
+        assert completed["write_counts"] == {"suggestions": 1, "observations": 2}
+        assert completed["telegram_message_ids"] == [12345]
+    finally:
+        if run_id:
+            _sb().table("analysis_runs").delete().eq("id", run_id).execute()
+
+
+@pytest.mark.parametrize(("function_name", "table", "order_column", "limit"), [
+    ("get_recent_transactions", "transactions", "ts", 17),
+    ("get_recent_suggestions", "suggestions", "ts", 18),
+    ("get_recent_grades", "suggestion_grades", "graded_at", 19),
+    ("get_recent_snapshots", "daily_snapshots", "snap_date", 20),
+])
+def test_recent_queries_apply_requested_bound(monkeypatch, function_name, table, order_column, limit):
+    client = _RecordingClient()
+    monkeypatch.setattr(db, "_sb", lambda: client)
+
+    assert getattr(db, function_name)(limit=limit) == []
+    assert (table, "select", "*") in client.calls
+    assert (table, "order", order_column, True) in client.calls
+    assert (table, "limit", limit) in client.calls
+
+
+@pytest.mark.parametrize("limit", [0, 501, True, 1.5])
+def test_recent_queries_reject_invalid_bounds(limit):
+    with pytest.raises(ValueError):
+        db.get_recent_transactions(limit=limit)
+
+
+def test_finish_analysis_run_bounds_free_text(monkeypatch):
+    client = _RecordingClient()
+    monkeypatch.setattr(db, "_sb", lambda: client)
+
+    db.finish_analysis_run("run-id", status="failed", summary="s" * 2001, error="e" * 1001)
+
+    payload = next(call[2] for call in client.calls if call[1] == "update")
+    assert len(payload["summary"]) == 2000
+    assert len(payload["error"]) == 1000

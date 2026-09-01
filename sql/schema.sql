@@ -2,6 +2,25 @@ CREATE TABLE IF NOT EXISTS holdings (
   ticker TEXT PRIMARY KEY, shares NUMERIC NOT NULL, avg_cost NUMERIC NOT NULL,
   bucket TEXT, opened_at DATE, notes TEXT);
 
+CREATE EXTENSION IF NOT EXISTS pgcrypto;
+
+CREATE TABLE IF NOT EXISTS analysis_runs (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  kind TEXT NOT NULL,
+  started_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  finished_at TIMESTAMPTZ,
+  status TEXT NOT NULL DEFAULT 'running',
+  data_as_of TIMESTAMPTZ,
+  source_status JSONB NOT NULL DEFAULT '{}'::jsonb,
+  symbols JSONB NOT NULL DEFAULT '[]'::jsonb,
+  write_counts JSONB NOT NULL DEFAULT '{}'::jsonb,
+  telegram_message_ids JSONB NOT NULL DEFAULT '[]'::jsonb,
+  summary TEXT,
+  error TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_analysis_runs_started ON analysis_runs(started_at DESC);
+CREATE INDEX IF NOT EXISTS idx_analysis_runs_kind_started ON analysis_runs(kind, started_at DESC);
+
 -- v2.1: trailing-stop fields on holdings
 ALTER TABLE holdings ADD COLUMN IF NOT EXISTS stop NUMERIC;
 ALTER TABLE holdings ADD COLUMN IF NOT EXISTS target NUMERIC;
@@ -30,6 +49,9 @@ CREATE TABLE IF NOT EXISTS suggestions (
   score INT, score_growth INT, score_health INT, score_valuation INT,
   risk_band TEXT, score_inputs TEXT, score_partial BOOLEAN DEFAULT false,
   price_at_suggestion NUMERIC);
+ALTER TABLE suggestions ADD COLUMN IF NOT EXISTS run_id UUID REFERENCES analysis_runs(id) ON DELETE SET NULL;
+ALTER TABLE suggestions ADD COLUMN IF NOT EXISTS evidence_as_of TIMESTAMPTZ;
+CREATE INDEX IF NOT EXISTS idx_suggestions_run_id ON suggestions(run_id);
 
 CREATE TABLE IF NOT EXISTS suggestion_grades (
   id BIGSERIAL PRIMARY KEY, suggestion_id BIGINT REFERENCES suggestions(id),
@@ -40,7 +62,9 @@ CREATE TABLE IF NOT EXISTS stock_observations (
   id BIGSERIAL PRIMARY KEY, ticker TEXT NOT NULL, obs_date DATE NOT NULL,
   event_type TEXT, summary TEXT, price_reaction TEXT, confidence TEXT,
   source TEXT, created_at TIMESTAMPTZ DEFAULT now());
+ALTER TABLE stock_observations ADD COLUMN IF NOT EXISTS run_id UUID REFERENCES analysis_runs(id) ON DELETE SET NULL;
 CREATE INDEX IF NOT EXISTS idx_obs_ticker ON stock_observations(ticker);
+CREATE INDEX IF NOT EXISTS idx_observations_run_id ON stock_observations(run_id);
 
 CREATE TABLE IF NOT EXISTS daily_snapshots (
   id BIGSERIAL PRIMARY KEY, snap_date DATE NOT NULL, ticker TEXT NOT NULL,
@@ -86,3 +110,4 @@ ALTER TABLE dry_powder        ENABLE ROW LEVEL SECURITY;
 ALTER TABLE radar              ENABLE ROW LEVEL SECURITY;
 ALTER TABLE lessons            ENABLE ROW LEVEL SECURITY;
 ALTER TABLE paper_watches      ENABLE ROW LEVEL SECURITY;
+ALTER TABLE analysis_runs      ENABLE ROW LEVEL SECURITY;

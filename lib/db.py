@@ -1,6 +1,7 @@
 from supabase import create_client, Client
 from lib import config
-from datetime import date as _date
+from datetime import date as _date, datetime as _datetime, timezone as _timezone
+from uuid import uuid4
 
 
 def _sb() -> Client:
@@ -24,6 +25,62 @@ def insert_transaction(row): return _insert("transactions", row)
 def insert_observation(row): return _insert("stock_observations", row)
 def insert_grade(row): return _insert("suggestion_grades", row)
 def insert_paper_watch(row): return _insert("paper_watches", row)
+
+
+def start_analysis_run(kind, started_at=None):
+    if not isinstance(kind, str) or not kind.strip():
+        raise ValueError("analysis run kind must be a non-empty string")
+    run_id = str(uuid4())
+    row = {"id": run_id, "kind": kind.strip(), "status": "running"}
+    if started_at is not None:
+        row["started_at"] = str(started_at)
+    _sb().table("analysis_runs").insert(row).execute()
+    return run_id
+
+
+def finish_analysis_run(run_id, *, status, data_as_of=None, source_status=None, symbols=None,
+                        write_counts=None, telegram_message_ids=None, summary=None, error=None):
+    if not run_id:
+        raise ValueError("run_id is required")
+    if not isinstance(status, str) or not status.strip():
+        raise ValueError("status must be a non-empty string")
+    updates = {
+        "status": status.strip(),
+        "finished_at": _datetime.now(_timezone.utc).isoformat(),
+    }
+    optional = {
+        "data_as_of": str(data_as_of) if data_as_of is not None else None,
+        "source_status": source_status,
+        "symbols": symbols,
+        "write_counts": write_counts,
+        "telegram_message_ids": telegram_message_ids,
+        "summary": str(summary)[:2000] if summary is not None else None,
+        "error": str(error)[:1000] if error is not None else None,
+    }
+    updates.update({key: value for key, value in optional.items() if value is not None})
+    _sb().table("analysis_runs").update(updates).eq("id", str(run_id)).execute()
+
+
+def _bounded_recent(table, order_column, limit):
+    if type(limit) is not int or not 1 <= limit <= 500:
+        raise ValueError("limit must be an integer between 1 and 500")
+    return _sb().table(table).select("*").order(order_column, desc=True).limit(limit).execute().data
+
+
+def get_recent_transactions(limit=50):
+    return _bounded_recent("transactions", "ts", limit)
+
+
+def get_recent_suggestions(limit=50):
+    return _bounded_recent("suggestions", "ts", limit)
+
+
+def get_recent_grades(limit=100):
+    return _bounded_recent("suggestion_grades", "graded_at", limit)
+
+
+def get_recent_snapshots(limit=100):
+    return _bounded_recent("daily_snapshots", "snap_date", limit)
 
 
 def get_active_paper_watches():
