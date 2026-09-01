@@ -5,6 +5,10 @@ config/secrets.local.json
 
 # Claude Code local config
 .claude/
+.codex/
+
+# macOS metadata
+.DS_Store
 
 # Python
 __pycache__/

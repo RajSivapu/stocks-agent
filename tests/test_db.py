@@ -1,4 +1,6 @@
 import os, pytest
+from datetime import date
+from uuid import uuid4
 from lib import db, config
 from supabase import create_client
 
@@ -79,8 +81,11 @@ def test_paper_watch_lifecycle():
 
 def test_lessons_roundtrip():
     db.init_schema()
-    db.insert_lesson({"entry_date": "2026-01-01", "category": "regime", "content": "test regime line"})
-    rows = db.get_lessons(limit=50)
-    match = [r for r in rows if r["content"] == "test regime line"]
-    assert len(match) == 1 and match[0]["category"] == "regime"
-    _sb().table("lessons").delete().eq("content", "test regime line").execute()
+    content = f"test regime line {uuid4()}"
+    try:
+        db.insert_lesson({"entry_date": str(date.today()), "category": "regime", "content": content})
+        rows = db.get_lessons(limit=50)
+        match = [r for r in rows if r["content"] == content]
+        assert len(match) == 1 and match[0]["category"] == "regime"
+    finally:
+        _sb().table("lessons").delete().eq("content", content).execute()
