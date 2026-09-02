@@ -4,3 +4,8 @@ project_id = "stocks-agent"
 enabled = true
 verify_jwt = false
 entrypoint = "./functions/telegram-portfolio/index.ts"
+
+[functions."market-briefing-gateway"]
+enabled = true
+verify_jwt = false
+entrypoint = "./functions/market-briefing-gateway/index.ts"

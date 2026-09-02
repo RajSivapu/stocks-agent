@@ -1,5 +1,6 @@
 import ast
 from pathlib import Path
+import re
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -83,6 +84,8 @@ def test_gateway_migration_preflights_legacy_values_before_normalizing_and_backf
         assert "WHEN 'trim' THEN 'reduce'" in sql
         assert "WHEN 'exit' THEN 'sell'" in sql
         assert "decision_source TEXT NOT NULL DEFAULT 'legacy'" in sql
+        assert "decision_mode TEXT NOT NULL DEFAULT 'discretionary'" in sql
+        assert "decision_mode = 'owner_plan' AND bucket = 'core'" in sql
 
 
 def test_gateway_schema_records_server_owned_artifact_provenance():
@@ -106,3 +109,67 @@ def test_gateway_security_definer_functions_use_fixed_search_path_and_no_dynamic
         assert sql.count("SECURITY DEFINER\nSET search_path = pg_catalog") >= len(GATEWAY_RPCS)
         assert "EXECUTE format(" not in sql
         assert "EXECUTE p_" not in sql
+
+
+def test_gateway_entrypoint_uses_only_pinned_dependencies_and_scoped_secrets():
+    source = (
+        ROOT / "supabase" / "functions" / "market-briefing-gateway" / "index.ts"
+    ).read_text()
+    assert 'from "npm:@supabase/supabase-js@2.112.4"' in source
+    assert set(re.findall(r'requiredEnvironment\("([A-Z0-9_]+)"\)', source)) == {
+        "SUPABASE_URL",
+        "SUPABASE_SERVICE_ROLE_KEY",
+        "MARKET_AGENT_SECRET",
+        "TELEGRAM_BOT_TOKEN",
+        "TELEGRAM_OWNER_CHAT_ID",
+    }
+    config = (ROOT / "supabase" / "config.toml").read_text()
+    assert '[functions."market-briefing-gateway"]' in config
+    assert 'verify_jwt = false' in config
+
+
+def test_gateway_repository_uses_only_fixed_tables_and_named_rpcs():
+    source = (
+        ROOT / "supabase" / "functions" / "market-briefing-gateway" / "_shared" / "repository.ts"
+    ).read_text()
+    tables = set(re.findall(r'\.from\("([a-z_]+)"\)', source))
+    assert tables == {
+        "analysis_runs",
+        "decision_evaluations",
+        "dry_powder",
+        "holdings",
+        "lessons",
+        "market_gateway_requests",
+        "market_policy_config",
+        "market_publications",
+        "owner_investment_plans",
+        "paper_watches",
+        "portfolio_commands",
+        "radar",
+        "stock_observations",
+        "suggestion_grades",
+        "suggestions",
+        "transactions",
+    }
+    assert set(re.findall(r'\.rpc\("([a-z_]+)"', source)) == {
+        "apply_market_artifacts",
+        "apply_market_decision_bundle",
+        "claim_market_gateway_request",
+        "claim_market_publication",
+        "complete_market_gateway_request",
+        "finish_market_publication",
+        "start_market_analysis_run",
+    }
+    assert not re.search(r"client\.from\((?!\")[^)]+\)", source)
+    assert not re.search(r"client\.rpc\((?!\")[^)]+\)", source)
+
+
+def test_gateway_authentication_precedes_body_parsing():
+    source = (
+        ROOT / "supabase" / "functions" / "market-briefing-gateway" / "_shared" / "handler.ts"
+    ).read_text()
+    handler_start = source.index("return async (request: Request)")
+    secret_check = source.index("await secureEqual", handler_start)
+    body_read = source.index("await readBody(request)", handler_start)
+    assert secret_check < body_read
+    assert "access-control-allow-origin" not in source.lower()

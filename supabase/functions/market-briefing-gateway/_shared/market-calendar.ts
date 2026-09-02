@@ -61,7 +61,15 @@ export function isRegularSession(now: Date, holidays: readonly string[]): boolea
 }
 
 export function ownerLocalDate(now: Date): string {
-  return localParts(now).date;
+  const parts = new Intl.DateTimeFormat("en-CA", {
+    timeZone: "America/Chicago",
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+  }).formatToParts(now);
+  const get = (type: Intl.DateTimeFormatPartTypes) =>
+    parts.find((part) => part.type === type)?.value ?? "";
+  return `${get("year")}-${get("month")}-${get("day")}`;
 }
 
 export function quoteAllowedForPhase(
@@ -99,4 +107,3 @@ export function quoteAllowedForPhase(
     : previousSession(local.date, holidays);
   return quote.market_state !== "REGULAR" && quoteDate === latestCompleted;
 }
-

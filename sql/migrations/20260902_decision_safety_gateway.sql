@@ -111,6 +111,8 @@ ALTER TABLE public.suggestions ADD COLUMN IF NOT EXISTS invalidation_price NUMER
 ALTER TABLE public.suggestions ADD COLUMN IF NOT EXISTS evaluation_id UUID;
 ALTER TABLE public.suggestions
   ADD COLUMN IF NOT EXISTS decision_source TEXT NOT NULL DEFAULT 'legacy';
+ALTER TABLE public.suggestions
+  ADD COLUMN IF NOT EXISTS decision_mode TEXT NOT NULL DEFAULT 'discretionary';
 
 -- Fail closed before changing historical labels. No unrecognized legacy row is guessed.
 DO $$
@@ -158,6 +160,9 @@ FROM public.suggestions AS s
 LEFT JOIN public.decision_evaluations AS e ON e.id = s.evaluation_id
 WHERE e.id IS NULL;
 
+ALTER TABLE public.suggestions
+  DROP CONSTRAINT IF EXISTS suggestions_gateway_actionable_complete;
+
 DO $$
 BEGIN
   IF NOT EXISTS (SELECT 1 FROM pg_catalog.pg_constraint WHERE conname = 'suggestions_evaluation_id_fkey') THEN
@@ -180,9 +185,14 @@ BEGIN
     ALTER TABLE public.suggestions ADD CONSTRAINT suggestions_decision_source_canonical
       CHECK (decision_source IN ('legacy','gateway'));
   END IF;
+  IF NOT EXISTS (SELECT 1 FROM pg_catalog.pg_constraint WHERE conname = 'suggestions_decision_mode_canonical') THEN
+    ALTER TABLE public.suggestions ADD CONSTRAINT suggestions_decision_mode_canonical
+      CHECK (decision_mode IN ('discretionary','owner_plan'));
+  END IF;
   IF NOT EXISTS (SELECT 1 FROM pg_catalog.pg_constraint WHERE conname = 'suggestions_gateway_actionable_complete') THEN
     ALTER TABLE public.suggestions ADD CONSTRAINT suggestions_gateway_actionable_complete CHECK (
-      decision_source = 'legacy' OR action NOT IN ('buy','add') OR (
+      decision_source = 'legacy' OR action NOT IN ('buy','add')
+      OR (decision_mode = 'owner_plan' AND bucket = 'core') OR (
         bucket IS NOT NULL AND confidence IS NOT NULL AND entry_zone_low > 0
         AND entry_zone_high >= entry_zone_low AND stop > 0 AND target > entry_zone_high
         AND valid_until IS NOT NULL AND price_at_suggestion > 0
@@ -238,6 +248,11 @@ BEGIN
   SELECT * INTO v_request FROM public.market_gateway_requests
   WHERE request_id = p_request_id FOR UPDATE;
   IF NOT FOUND THEN
+    PERFORM pg_advisory_xact_lock(hashtextextended('market_gateway_rate', 0));
+    IF (SELECT count(*) FROM public.market_gateway_requests WHERE created_at >= now()-interval '1 hour') >= 100
+       OR (p_run_id IS NOT NULL AND (SELECT count(*) FROM public.market_gateway_requests WHERE run_id=p_run_id) >= 20) THEN
+      RAISE EXCEPTION 'gateway rate limit exceeded' USING ERRCODE = '54000';
+    END IF;
     v_lease := gen_random_uuid();
     INSERT INTO public.market_gateway_requests(request_id, operation, run_id, status, lease_token)
     VALUES (p_request_id, p_operation, p_run_id, 'claimed', v_lease);
@@ -429,22 +444,38 @@ DECLARE
   v_request public.market_gateway_requests%ROWTYPE; v_existing public.market_publications%ROWTYPE;
   v_item JSONB; v_eval public.decision_evaluations%ROWTYPE; v_pub_id UUID := gen_random_uuid();
   v_holding JSONB; v_rows INT; v_eval_count INT := 0; v_suggestion_count INT := 0;
+  v_is_holiday BOOLEAN := false;
 BEGIN
+  IF jsonb_typeof(p_evaluations)<>'array' OR jsonb_typeof(p_suggestions)<>'array'
+     OR jsonb_typeof(p_publication)<>'object' THEN
+    RAISE EXCEPTION 'invalid decision transaction' USING ERRCODE = '22023';
+  END IF;
+  v_is_holiday := COALESCE(p_publication->>'kind'='holiday' AND p_publication->>'phase'='pre-market'
+    AND p_run_id IS NULL AND jsonb_array_length(p_evaluations)=0
+    AND jsonb_array_length(p_suggestions)=0, false);
   SELECT * INTO v_request FROM public.market_gateway_requests WHERE request_id=p_request_id FOR UPDATE;
-  IF NOT FOUND OR v_request.operation <> 'evaluate_and_publish' OR v_request.run_id <> p_run_id
-     OR v_request.lease_token <> p_lease_token OR v_request.status <> 'claimed' THEN
+  IF NOT FOUND OR v_request.lease_token <> p_lease_token OR v_request.status <> 'claimed'
+     OR (v_is_holiday AND (v_request.operation <> 'start_run' OR v_request.run_id IS NOT NULL))
+     OR (NOT v_is_holiday AND (v_request.operation <> 'evaluate_and_publish'
+       OR v_request.run_id IS DISTINCT FROM p_run_id OR p_run_id IS NULL)) THEN
     RAISE EXCEPTION 'request lease unavailable' USING ERRCODE = '40001';
   END IF;
   PERFORM pg_advisory_xact_lock(hashtextextended(p_request_id::text, 0));
   SELECT * INTO v_existing FROM public.market_publications WHERE idempotency_key=p_request_id;
   IF FOUND THEN RETURN jsonb_build_object('publication_id',v_existing.id,'status',v_existing.status,'duplicate',true); END IF;
-  SELECT * INTO v_existing FROM public.market_publications WHERE run_id=p_run_id;
-  IF FOUND THEN RETURN jsonb_build_object('code','RUN_ALREADY_EVALUATED','publication_id',v_existing.id,'status',v_existing.status); END IF;
+  IF v_is_holiday THEN
+    SELECT * INTO v_existing FROM public.market_publications
+    WHERE market_date=(p_publication->>'market_date')::date AND phase='pre-market' AND kind='holiday';
+    IF FOUND THEN RETURN jsonb_build_object('publication_id',v_existing.id,'status',v_existing.status,'duplicate',true); END IF;
+  ELSE
+    PERFORM 1 FROM public.analysis_runs WHERE id=p_run_id AND status='running' FOR UPDATE;
+    IF NOT FOUND THEN RAISE EXCEPTION 'run unavailable' USING ERRCODE = '22023'; END IF;
+    SELECT * INTO v_existing FROM public.market_publications WHERE run_id=p_run_id;
+    IF FOUND THEN RETURN jsonb_build_object('code','RUN_ALREADY_EVALUATED','publication_id',v_existing.id,'status',v_existing.status); END IF;
+  END IF;
   PERFORM 1 FROM public.market_policy_config WHERE version=p_policy_version AND active;
   IF NOT FOUND THEN RAISE EXCEPTION 'active policy unavailable' USING ERRCODE = '22023'; END IF;
-  IF jsonb_typeof(p_evaluations)<>'array' OR jsonb_array_length(p_evaluations)>80
-     OR jsonb_typeof(p_suggestions)<>'array' OR jsonb_array_length(p_suggestions)>80
-     OR jsonb_typeof(p_publication)<>'object' THEN
+  IF jsonb_array_length(p_evaluations)>80 OR jsonb_array_length(p_suggestions)>80 THEN
     RAISE EXCEPTION 'invalid decision transaction' USING ERRCODE = '22023';
   END IF;
   FOR v_item IN SELECT value FROM jsonb_array_elements(p_evaluations) LOOP
@@ -462,10 +493,10 @@ BEGIN
     v_eval_count := v_eval_count + 1;
   END LOOP;
   FOR v_item IN SELECT value FROM jsonb_array_elements(p_suggestions) LOOP
-    IF NOT (v_item ?& ARRAY['evaluation_id','candidate_id','date','ticker','action','bucket','depth',
+    IF NOT (v_item ?& ARRAY['evaluation_id','candidate_id','date','ticker','action','decision_mode','bucket','depth',
       'entry_zone_low','entry_zone_high','valid_until','stop','target','confidence','bull','bear',
       'decisive_factor','risk_verdict','reason','score','price_at_suggestion','evidence_as_of','invalidation_price'])
-       OR (v_item - ARRAY['evaluation_id','candidate_id','date','ticker','action','bucket','depth',
+       OR (v_item - ARRAY['evaluation_id','candidate_id','date','ticker','action','decision_mode','bucket','depth',
       'entry_zone_low','entry_zone_high','valid_until','stop','target','confidence','bull','bear',
       'decisive_factor','risk_verdict','reason','score','price_at_suggestion','evidence_as_of','invalidation_price']) <> '{}'::jsonb THEN
       RAISE EXCEPTION 'invalid suggestion' USING ERRCODE = '22023';
@@ -478,10 +509,10 @@ BEGIN
        OR v_eval.normalized->>'ticker' IS DISTINCT FROM v_item->>'ticker' THEN
       RAISE EXCEPTION 'suggestion evaluation mismatch' USING ERRCODE = '22023';
     END IF;
-    INSERT INTO public.suggestions(date,ticker,action,bucket,depth,entry_zone_low,entry_zone_high,
+    INSERT INTO public.suggestions(date,ticker,action,decision_mode,bucket,depth,entry_zone_low,entry_zone_high,
       valid_until,stop,target,confidence,bull,bear,decisive_factor,risk_verdict,reason,score,
       price_at_suggestion,run_id,evidence_as_of,invalidation_price,evaluation_id,decision_source)
-    VALUES ((v_item->>'date')::date,v_item->>'ticker',v_item->>'action',v_item->>'bucket',v_item->>'depth',
+    VALUES ((v_item->>'date')::date,v_item->>'ticker',v_item->>'action',v_item->>'decision_mode',v_item->>'bucket',v_item->>'depth',
       (v_item->>'entry_zone_low')::numeric,(v_item->>'entry_zone_high')::numeric,(v_item->>'valid_until')::date,
       (v_item->>'stop')::numeric,(v_item->>'target')::numeric,v_item->>'confidence',v_item->>'bull',v_item->>'bear',
       v_item->>'decisive_factor',v_item->>'risk_verdict',v_item->>'reason',(v_item->>'score')::int,

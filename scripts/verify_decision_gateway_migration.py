@@ -85,6 +85,7 @@ def _suggestion(candidate_id, evaluation_id):
         "date": str(date.today()),
         "ticker": TICKER,
         "action": "watch",
+        "decision_mode": "discretionary",
         "bucket": "growth",
         "depth": "compact",
         "entry_zone_low": None,
@@ -389,6 +390,68 @@ def _verify_publication_and_immutability(cur, request_id, evaluation_id):
     )
 
 
+def _verify_holiday_without_run(cur):
+    market_date = "2099-12-31"
+    publication = {
+        "market_date": market_date,
+        "phase": "pre-market",
+        "kind": "holiday",
+        "template_version": 1,
+        "rendered_body": "🏛 Market closed today — US public holiday. No brief.",
+        "rendered_hash": "c" * 64,
+        "status": "ready",
+        "holding_state": [],
+    }
+    first_request, first_lease = _claim(cur, "start_run")
+    first = _call(
+        cur, "apply_market_decision_bundle", first_request, None, first_lease,
+        POLICY_VERSION, Jsonb([]), Jsonb([]), Jsonb(publication),
+    )
+    second_request, second_lease = _claim(cur, "start_run")
+    second = _call(
+        cur, "apply_market_decision_bundle", second_request, None, second_lease,
+        POLICY_VERSION, Jsonb([]), Jsonb([]), Jsonb(publication),
+    )
+    _require(first["publication_id"] == second["publication_id"], "holiday publication was duplicated")
+    cur.execute(
+        "SELECT run_id FROM public.market_publications WHERE id=%s",
+        (first["publication_id"],),
+    )
+    _require(cur.fetchone()[0] is None, "holiday publication created a run")
+
+
+def _verify_rate_limits(cur):
+    cur.execute("INSERT INTO public.analysis_runs(kind,status) VALUES ('intraday','running') RETURNING id")
+    run_id = cur.fetchone()[0]
+    cur.execute(
+        """
+        INSERT INTO public.market_gateway_requests(request_id,operation,run_id,status,lease_token)
+        SELECT gen_random_uuid(),'read_context',%s,'completed',gen_random_uuid()
+        FROM generate_series(1,20)
+        """,
+        (run_id,),
+    )
+    _expect_db_error(
+        cur,
+        lambda: _call(cur, "claim_market_gateway_request", uuid4(), "read_context", run_id),
+    )
+    cur.execute("SELECT count(*) FROM public.market_gateway_requests WHERE created_at>=now()-interval '1 hour'")
+    needed = max(0, 100 - cur.fetchone()[0])
+    if needed:
+        cur.execute(
+            """
+            INSERT INTO public.market_gateway_requests(request_id,operation,status,lease_token)
+            SELECT gen_random_uuid(),'start_run','completed',gen_random_uuid()
+            FROM generate_series(1,%s)
+            """,
+            (needed,),
+        )
+    _expect_db_error(
+        cur,
+        lambda: _call(cur, "claim_market_gateway_request", uuid4(), "start_run", None),
+    )
+
+
 def _verify_rls_owners_and_grants(cur):
     cur.execute(
         """
@@ -437,7 +500,9 @@ def main():
             request_id, _publication_id, evaluation_id = _verify_decision_transaction(cur, run_id)
             _verify_artifacts(cur, run_id)
             _verify_publication_and_immutability(cur, request_id, evaluation_id)
+            _verify_holiday_without_run(cur)
             _verify_rls_owners_and_grants(cur)
+            _verify_rate_limits(cur)
         print("PASS: decision gateway migration is atomic and idempotent")
         return 0
     except Exception as exc:
