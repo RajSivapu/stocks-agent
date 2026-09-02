@@ -283,3 +283,32 @@ def test_outcome_migration_is_bounded_idempotent_and_service_role_only():
         assert fragment in sql
         assert fragment in schema
     assert sql in schema
+
+
+def test_routine_documentation_exposes_only_scoped_cloud_credentials():
+    routines = (ROOT / "routines" / "README.md").read_text()
+    for forbidden in (
+        "SUPABASE_SERVICE_ROLE_KEY",
+        "TELEGRAM_BOT_TOKEN",
+        "TELEGRAM_CHAT_ID",
+        "TELEGRAM_OWNER_CHAT_ID",
+    ):
+        assert forbidden not in routines
+    for required in (
+        "SUPABASE_URL",
+        "MARKET_AGENT_SECRET",
+        "FINNHUB_API_KEY",
+        "ALPHAVANTAGE_API_KEY",
+        "evaluate_and_publish",
+        "delivery_unknown",
+        "status: suppressed",
+    ):
+        assert required in routines
+    assert '{"gateway":"ok","finnhub":"ok","yahoo":"ok"}' in routines
+
+
+def test_behavioral_evals_use_gateway_receipts_not_privileged_helpers():
+    evaluation = (ROOT / "docs" / "eval" / "market-briefing-eval.yaml").read_text()
+    assert "lib.telegram" not in evaluation
+    assert "lib.db" not in evaluation
+    assert "gateway" in evaluation.lower()

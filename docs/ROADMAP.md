@@ -10,14 +10,16 @@ is separate, paper-first, and outside this codebase.
 
 | Capability | Code status | Live status |
 |---|---|---|
-| Pre-market, intraday, and post-market Claude Routines | Implemented | Existing routines live; revised prompts still need to be pasted after this branch is merged |
-| Fresh independent packet on every run | Implemented | Pending revised Routine rollout + three manual dry/live checks |
-| Analyst → Checker pass with stale/prior-plan veto | Implemented | Pending revised Routine rollout |
-| Quote exchange timestamps + 20-minute action gate | Implemented and tested | Available after updated repo is used by Routines |
-| `analysis_runs` audit trail | Implemented and migrated | Routine writes remain pending revised Routine rollout |
+| Pre-market, intraday, and post-market Claude Routines | Receipt-driven prompts implemented locally | Existing routines remain on the prior workflow until production cutover |
+| Scoped market gateway and least-privilege Routine client | Implemented and tested locally | Migration, secret, function deploy, and Routine credential replacement pending |
+| Fresh independent packet on every run | Implemented locally | Pending gateway rollout plus dry/live phase checks |
+| Analyst → Checker pass with stale/prior-plan veto | Implemented locally | Pending gateway rollout |
+| Server-refetched quotes + deterministic sizing/risk policy | Implemented and tested locally | Pending gateway migration/function/policy activation |
+| Atomic decision/evidence/publication audit trail | Implemented and rollback-tested locally | Pending production migration |
 | Deterministic Telegram Buy/Sell/Stop recorder, including delayed trade dates | Implemented, tested, Deno type-checked | Live; owner-confirmed Buy/Sell/Portfolio flows are working |
-| Atomic Confirm/Cancel RPCs | Implemented and verified | Live in the Telegram recorder |
-| Friday ChatGPT weekly process audit | Packet + skill implemented and tested | Active Fridays at 16:30 CT; first scheduled report still needs review |
+| Confirmed `/plan`, `/cancelplan`, and read-only `/plans` reminders | Implemented and rollback-tested locally | Pending owner-plan migration and Telegram function deployment |
+| Deterministic 5/21/63-session outcome grading | Implemented and rollback-tested locally | Pending outcome migration and gateway deployment |
+| Friday ChatGPT weekly process audit v2 | Packet + skill implemented and tested locally | Existing scheduled task needs the merged v2 packet and first-report review |
 | Watchlist changes as owner-reviewed proposals | Implemented in settings/skill | Available after revised Routine rollout |
 
 "Implemented" means committed code and local verification on the feature branch. It does not mean
@@ -25,24 +27,25 @@ the external Supabase/Telegram/Claude/ChatGPT configuration has been changed.
 
 ## Remaining rollout checks
 
-The Supabase migration, credential rotation, Edge Function deployment, webhook registration, and
-live portfolio-command checks are complete. Remaining checks:
+The original Telegram recorder is live. The decision-safety release remains local until this exact
+cutover completes:
 
-1. Confirm the three Claude Routine prompts match `routines/README.md`, then manually verify
-   pre-market, intraday, and post-market behavior.
-2. Confirm each Routine creates and completes an `analysis_runs` row with accurate source, write,
-   and Telegram-send metadata.
-3. Inspect the first Friday 16:30 America/Chicago ChatGPT audit report and confirm it stayed read-only.
+1. Capture a Supabase backup/recovery point and review the legacy suggestion preflight mappings.
+2. Apply migrations `20260902`, `20260903`, and `20260904` in order, then run both RPC verifiers.
+3. Set a new `MARKET_AGENT_SECRET`, deploy both Edge Functions, publish policy version 1, and retain
+   only scoped/read-only credentials in the Routine environment.
+4. Replace the three saved prompts from `routines/README.md`; run non-notifying healthcheck and
+   start/context dry-run checks.
+5. Verify one controlled live pre-market, quiet intraday, and post-market run. Confirm request/run,
+   evaluation, suggestion, publication, artifact/grade, and delivery receipts agree.
+6. Inspect the first Friday v2 audit and confirm it is bounded, segmented, and read-only.
 
 ## Next reliability work
 
-- Add deterministic recurring-investment plans and Telegram reminders. Scheduling and reminders use
-  Supabase Cron/Edge Functions with no model call and never assume that a scheduled purchase filled.
-  An actual fill still enters through the existing preview-and-Confirm Buy workflow.
-- Add a deterministic portfolio-risk checker outside the language-model prompt. Before a new Buy can
-  be presented as actionable, calculate projected bucket size, single-position concentration, and
-  stop-distance risk from current holdings; fail closed when required values are missing. This is a
-  suggestion veto only and never becomes a brokerage control or execution feature.
+- Observe how owner plan records appear in real briefs before deciding whether a separate proactive
+  due-reminder job is useful. Any future reminder remains non-trading and never assumes a fill.
+- Review policy/outcome samples after enough complete 5/21/63-session grades exist; do not change
+  thresholds automatically or infer improvement from a small sample.
 - Add retention/cleanup policy for old `telegram_updates` and expired `portfolio_commands` after
   observing real volume.
 - Add a deploy-time integration test fixture for the Edge Function once a safe isolated Supabase test
