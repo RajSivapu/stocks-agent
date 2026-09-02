@@ -178,7 +178,9 @@ trade. The scheduled task requires the computer and ChatGPT desktop app to be ru
 
 ### 8. Failure behavior
 
-- **Telegram authentication failure:** return a generic 401/403; no Telegram reply and no DB write.
+- **Telegram authentication failure:** return 401 for a bad webhook secret; acknowledge a valid
+  Telegram delivery from a non-owner with 200/`ignored=true` so Telegram does not retry it. In both
+  cases send no Telegram reply and make no DB write.
 - **Duplicate Telegram update:** return success without repeating the command or reply.
 - **Parser ambiguity:** send help text; no pending command.
 - **DB failure before confirmation:** send a temporary-error reply; no portfolio mutation.

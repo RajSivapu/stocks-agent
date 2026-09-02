@@ -18,7 +18,7 @@ eval_cases:
   - name: unauthorized_identity
     scenario: POST a valid command with the correct webhook secret but a different chat or user ID.
     expected_behavior:
-      - Returns 403.
+      - Returns 200 with ignored=true so Telegram does not retry the rejected update.
       - Sends no Telegram reply.
       - Writes no Telegram receipt, pending command, transaction, or holding change.
 

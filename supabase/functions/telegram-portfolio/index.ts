@@ -303,7 +303,9 @@ Deno.serve(async (request: Request): Promise<Response> => {
     return jsonResponse(200, { ok: true });
   }
   if (!ownerMatches(chatId, userId, OWNER_CHAT_ID, OWNER_USER_ID)) {
-    return jsonResponse(403, { ok: false });
+    // Telegram retries every non-2xx webhook response. Acknowledge untrusted identities while
+    // doing no work so a stranger cannot create an unbounded retry stream for the owner bot.
+    return jsonResponse(200, { ok: true, ignored: true });
   }
 
   try {

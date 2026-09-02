@@ -23,3 +23,9 @@ def test_live_rpc_verifier_cannot_be_disabled_with_python_optimization():
     path = ROOT / "scripts" / "verify_portfolio_command_rpc.py"
     tree = ast.parse(path.read_text(), filename=str(path))
     assert not any(isinstance(node, ast.Assert) for node in ast.walk(tree))
+
+
+def test_webhook_acknowledges_non_owner_updates_without_processing_them():
+    source = (ROOT / "supabase" / "functions" / "telegram-portfolio" / "index.ts").read_text()
+    assert "return jsonResponse(200, { ok: true, ignored: true });" in source
+    assert "return jsonResponse(403, { ok: false });" not in source

@@ -333,7 +333,9 @@ The function must still reject requests without the Telegram secret header and e
 
 - [ ] **Step 2: Implement authentication and idempotency first**
 
-Use constant-time byte comparison for the secret. Reject unauthorized calls before parsing. Insert
+Use constant-time byte comparison for the secret. Reject unauthorized calls before parsing; after a
+valid Telegram secret, acknowledge non-owner updates with 200/`ignored=true` so Telegram does not
+retry them. Insert
 the unique update ID before side effects; duplicate inserts return HTTP 200 without another reply.
 
 - [ ] **Step 3: Implement message handling**
