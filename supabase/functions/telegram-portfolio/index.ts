@@ -1,7 +1,8 @@
 import { createClient } from "npm:@supabase/supabase-js@2.112.4";
 
 import { parsePortfolioCommand } from "./parser.mjs";
-import { ownerMatches, parseCallbackData, resolveExecutionDate, secureEqual } from "./webhook-utils.mjs";
+import { planPreviewText, planResultText, plansText, planTickerAllowed } from "./plan-utils.mjs";
+import { ownerMatches, parseCallbackData, resolveExecutionDate, resolvePlanDate, secureEqual } from "./webhook-utils.mjs";
 
 type TelegramMessage = {
   message_id: number;
@@ -31,6 +32,16 @@ type Holding = {
   bucket: string | null;
   stop: string | number | null;
   target: string | number | null;
+};
+
+type InvestmentPlan = {
+  ticker: string;
+  amount: string | number;
+  cadence: string;
+  next_due_on: string;
+  bucket: string;
+  active: boolean;
+  updated_at: string;
 };
 
 const mustEnv = (name: string): string => {
@@ -70,6 +81,9 @@ const HELP_TEXT = [
   "/sell NVDA all 210 on 2026-08-28",
   "/stop AAPL 195",
   "/portfolio",
+  "/plan VTI 300 monthly 2026-09-21 core",
+  "/cancelplan VTI",
+  "/plans",
 ].join("\n");
 
 function jsonResponse(status: number, body: Record<string, unknown>): Response {
@@ -141,6 +155,32 @@ async function portfolioText(): Promise<string> {
   ].join("\n");
 }
 
+async function getInvestmentPlan(ticker: string): Promise<InvestmentPlan | null> {
+  const { data, error } = await supabase.from("owner_investment_plans").select(
+    "ticker,amount,cadence,next_due_on,bucket,active,updated_at",
+  ).eq("ticker", ticker).maybeSingle();
+  if (error) throw new Error("Could not read investment reminder");
+  return data as InvestmentPlan | null;
+}
+
+async function activePolicy(): Promise<Record<string, unknown> | null> {
+  const { data, error } = await supabase.from("market_policy_config").select("config")
+    .eq("active", true).order("version", { ascending: false }).limit(2);
+  if (error || !Array.isArray(data) || data.length !== 1) return null;
+  const policy = data[0]?.config;
+  return policy && typeof policy === "object" && !Array.isArray(policy)
+    ? policy as Record<string, unknown>
+    : null;
+}
+
+async function investmentPlansText(): Promise<string> {
+  const { data, error } = await supabase.from("owner_investment_plans").select(
+    "ticker,amount,cadence,next_due_on,bucket",
+  ).eq("active", true).order("next_due_on").limit(20);
+  if (error) throw new Error("Could not read investment reminders");
+  return plansText(data ?? []);
+}
+
 function previewText(command: Record<string, unknown>, holding: Holding | null, resolvedQty?: number): string {
   const executionDate = command.executed_on ? ` on ${String(command.executed_on)}` : "";
   if (command.operation === "buy") {
@@ -157,6 +197,46 @@ function previewText(command: Record<string, unknown>, holding: Holding | null, 
 
 async function handleMutation(updateId: number, chatId: number, command: Record<string, unknown>) {
   const ticker = String(command.ticker);
+  if (command.operation === "plan" || command.operation === "cancel_plan") {
+    const existingPlan = await getInvestmentPlan(ticker);
+    if (command.operation === "cancel_plan" && !existingPlan?.active) {
+      await sendText(chatId, `${ticker} has no active recurring reminder. Nothing changed.`);
+      return;
+    }
+    const preview = planPreviewText(command);
+    const row = {
+      telegram_update_id: updateId,
+      chat_id: OWNER_CHAT_ID_NUMBER,
+      user_id: OWNER_USER_ID_NUMBER,
+      operation: command.operation,
+      ticker,
+      qty: null,
+      price: null,
+      executed_on: null,
+      bucket: command.operation === "plan" ? command.bucket : null,
+      expected_shares: null,
+      stop: null,
+      amount: command.operation === "plan" ? command.amount : null,
+      cadence: command.operation === "plan" ? command.cadence : null,
+      next_due_on: command.operation === "plan" ? command.next_due_on : null,
+      expected_plan_updated_at: existingPlan?.updated_at ?? null,
+      preview: { text: preview, parsed: command },
+    };
+    const { data, error } = await supabase.from("portfolio_commands").insert(row).select("id").single();
+    if (error || !data?.id) throw new Error("Could not create pending reminder command");
+    const result = await sendText(chatId, preview, {
+      inline_keyboard: [[
+        { text: "Confirm", callback_data: `pc:confirm:${data.id}` },
+        { text: "Cancel", callback_data: `pc:cancel:${data.id}` },
+      ]],
+    });
+    const messageId = Number(result.message_id);
+    if (Number.isSafeInteger(messageId)) {
+      await supabase.from("portfolio_commands").update({ confirmation_message_id: messageId }).eq("id", data.id);
+    }
+    return;
+  }
+
   const holding = await getHolding(ticker);
   const expectedShares = holding ? finiteNumber(holding.shares) : 0;
   if (expectedShares === null) throw new Error("Recorded shares are invalid");
@@ -226,6 +306,8 @@ async function handleMessage(updateId: number, message: TelegramMessage) {
     await sendText(message.chat.id, HELP_TEXT);
   } else if (command.operation === "portfolio") {
     await sendText(message.chat.id, await portfolioText());
+  } else if (command.operation === "plans") {
+    await sendText(message.chat.id, await investmentPlansText());
   } else {
     if (command.operation === "buy" || command.operation === "sell") {
       const execution = resolveExecutionDate(command.executed_on, message.date);
@@ -234,6 +316,18 @@ async function handleMessage(updateId: number, message: TelegramMessage) {
         return;
       }
       command.executed_on = execution.executedOn;
+    }
+    if (command.operation === "plan") {
+      const due = resolvePlanDate(command.next_due_on, message.date);
+      if (!due.ok) {
+        await sendText(message.chat.id, "Use a real due date on or after this message date as YYYY-MM-DD. Nothing changed.");
+        return;
+      }
+      command.next_due_on = due.nextDueOn;
+      if (!planTickerAllowed(String(command.ticker), await activePolicy())) {
+        await sendText(message.chat.id, "Only an approved broad Core ETF can use a recurring plan. Nothing changed.");
+        return;
+      }
     }
     await handleMutation(updateId, message.chat.id, command);
   }
@@ -246,6 +340,9 @@ function callbackResultText(result: Record<string, unknown>): string {
   }
   if (result.operation === "stop") {
     return `Recorded ${result.ticker} stop at $${formatNumber(result.stop, 2)}. No brokerage order was placed or modified.`;
+  }
+  if (result.operation === "plan" || result.operation === "cancel_plan") {
+    return planResultText(result);
   }
   const pnl = result.operation === "sell" ? ` · realized P&L $${formatNumber(result.realized_pnl, 2)}` : "";
   const executionDate = result.executed_on ? ` · executed ${String(result.executed_on)}` : "";

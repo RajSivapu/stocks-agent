@@ -17,6 +17,11 @@ const okCases = [
   ["/stop aapl 195", { operation: "stop", ticker: "AAPL", stop: 195 }],
   ["move brk.b stop to $390.50", { operation: "stop", ticker: "BRK.B", stop: 390.5 }],
   ["/portfolio", { operation: "portfolio" }],
+  ["/plan VTI 300 monthly 2026-09-21 core", { operation: "plan", ticker: "VTI", amount: 300, cadence: "monthly", next_due_on: "2026-09-21", bucket: "core" }],
+  ["plan VTI $300 monthly next 2026-09-21 core", { operation: "plan", ticker: "VTI", amount: 300, cadence: "monthly", next_due_on: "2026-09-21", bucket: "core" }],
+  ["/cancelplan VTI", { operation: "cancel_plan", ticker: "VTI" }],
+  ["cancel plan VTI", { operation: "cancel_plan", ticker: "VTI" }],
+  ["/plans", { operation: "plans" }],
   ["/help", { operation: "help" }],
 ];
 
@@ -42,6 +47,15 @@ const rejected = [
   "/sell AAPL all 225 on 08/28/2026",
   "/sell AAPL all 225 on 1999-12-31",
   "/stop AAPL 0",
+  "/plan VTI 0 monthly 2026-09-21 core",
+  "/plan VTI -300 monthly 2026-09-21 core",
+  "/plan VTI NaN monthly 2026-09-21 core",
+  "/plan VTI Infinity monthly 2026-09-21 core",
+  "/plan VTI 300 weekly 2026-09-21 core",
+  "/plan VTI 300 monthly 2026-02-30 core",
+  "/plan VTI 300 monthly 1999-12-31 core",
+  "/plan VTI 300 monthly 2026-09-21 growth",
+  "/cancelplan VTI extra",
   "move AAPL stop to -5",
   "AAPL is a buy",
   "/buy AAPL;DROP TABLE holdings 1 210 growth",
@@ -52,7 +66,7 @@ for (const input of rejected) {
   test(`rejects unsupported or unsafe input: ${input || "empty"}`, () => {
     const parsed = parsePortfolioCommand(input);
     assert.equal(parsed.ok, false);
-    assert.match(parsed.error, /Try \/buy, \/sell, \/stop, \/portfolio, or \/help\./);
+    assert.match(parsed.error, /Try \/buy/);
     assert.doesNotMatch(parsed.error, /DROP TABLE|Infinity|NaN/);
   });
 }
@@ -60,4 +74,15 @@ for (const input of rejected) {
 test("rejects non-string input without throwing", () => {
   assert.equal(parsePortfolioCommand(null).ok, false);
   assert.equal(parsePortfolioCommand({ text: "/portfolio" }).ok, false);
+});
+
+test("plan commands addressed to the bot retain the exact grammar", () => {
+  assert.deepEqual(parsePortfolioCommand("/plans@my_portfolio_bot"), {
+    ok: true,
+    command: { operation: "plans" },
+  });
+  assert.deepEqual(parsePortfolioCommand("/plan@my_portfolio_bot VTI 300 monthly 2026-09-21 core"), {
+    ok: true,
+    command: { operation: "plan", ticker: "VTI", amount: 300, cadence: "monthly", next_due_on: "2026-09-21", bucket: "core" },
+  });
 });

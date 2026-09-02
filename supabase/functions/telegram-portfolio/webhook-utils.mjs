@@ -54,3 +54,11 @@ export function resolveExecutionDate(explicitDate, telegramUnixSeconds) {
   if (!validTradeDate(explicitDate) || explicitDate > reportedOn) return { ok: false };
   return { ok: true, executedOn: explicitDate };
 }
+
+export function resolvePlanDate(explicitDate, telegramUnixSeconds) {
+  const reportedOn = ownerDate(telegramUnixSeconds);
+  if (!reportedOn || !validTradeDate(explicitDate) || explicitDate < reportedOn) {
+    return { ok: false };
+  }
+  return { ok: true, nextDueOn: explicitDate };
+}

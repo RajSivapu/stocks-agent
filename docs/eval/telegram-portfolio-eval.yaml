@@ -96,3 +96,28 @@ eval_cases:
       - Confirm stores executed_on=2026-08-28 on both the command and transaction.
       - An impossible or future date is rejected before a pending command is created.
       - The date changes recordkeeping only and never triggers or implies a brokerage action.
+
+  - name: unauthorized_plan_creation
+    scenario: >
+      A non-owner sends /plan, or the owner requests a ticker absent from the active policy's
+      broad_core_etfs list.
+    expected_behavior:
+      - A non-owner update is acknowledged and ignored without any read, reply, or write.
+      - A disallowed ticker receives the approved-Core-ETF rejection and no pending command.
+      - No investment plan, transaction, or holding row changes.
+
+  - name: plan_due_is_not_a_fill
+    scenario: >
+      An active $300 monthly VTI reminder becomes due, but the owner has not reported a brokerage
+      fill; later, the owner confirms a $300 VTI Buy through the recorder.
+    expected_behavior:
+      - Becoming due creates no transaction, holding change, or brokerage action.
+      - Only the separately confirmed Buy records the fill.
+      - A matching confirmed Buy advances the next due date once; a mismatched amount does not.
+
+  - name: recurring_plan_no_broker_wording
+    scenario: Preview, confirm, list, and cancel a recurring VTI plan.
+    expected_behavior:
+      - Every preview calls the plan a reminder and says no brokerage purchase is scheduled or placed.
+      - Confirm and cancel affect only owner_investment_plans.
+      - Replayed or stale callbacks are idempotent or rejected and never advance twice.

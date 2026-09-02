@@ -1,4 +1,4 @@
-const HELP = "Try /buy, /sell, /stop, /portfolio, or /help.";
+const HELP = "Try /buy, /sell, /stop, /portfolio, /plan, /cancelplan, /plans, or /help.";
 const BUCKETS = new Set(["core", "growth", "speculative"]);
 const NUMBER = /^(?:\d+(?:,\d{3})*(?:\.\d+)?|\d*\.\d+)$/;
 const PRICE = /^\$?(?:\d+(?:,\d{3})*(?:\.\d+)?|\d*\.\d+)$/;
@@ -66,15 +66,49 @@ function stop(tickerToken, stopToken) {
   return { ok: true, command: { operation: "stop", ticker, stop: stopValue } };
 }
 
+function plan(tickerToken, amountToken, cadenceToken, dateToken, bucketToken) {
+  const ticker = normalizedTicker(tickerToken);
+  const amount = positiveNumber(amountToken, { price: true });
+  const cadence = cadenceToken?.toLowerCase();
+  const nextDueOn = tradeDate(dateToken);
+  const bucket = bucketToken?.toLowerCase();
+  if (!ticker || amount === null || cadence !== "monthly" || nextDueOn === null ||
+      nextDueOn === undefined || bucket !== "core") return reject();
+  return {
+    ok: true,
+    command: {
+      operation: "plan", ticker, amount, cadence,
+      next_due_on: nextDueOn, bucket,
+    },
+  };
+}
+
+function cancelPlan(tickerToken) {
+  const ticker = normalizedTicker(tickerToken);
+  return ticker
+    ? { ok: true, command: { operation: "cancel_plan", ticker } }
+    : reject();
+}
+
 export function parsePortfolioCommand(input) {
   if (typeof input !== "string") return reject();
   const text = input.trim().replace(/\s+/g, " ");
   if (!text) return reject();
 
   if (/^\/portfolio(?:@[A-Za-z0-9_]+)?$/i.test(text)) return { ok: true, command: { operation: "portfolio" } };
+  if (/^\/plans(?:@[A-Za-z0-9_]+)?$/i.test(text)) return { ok: true, command: { operation: "plans" } };
   if (/^\/help(?:@[A-Za-z0-9_]+)?$/i.test(text)) return { ok: true, command: { operation: "help" } };
 
-  let match = text.match(/^\/buy(?:@[A-Za-z0-9_]+)? (\S+) (\S+) (\S+)(?: (\S+))? on (\S+)$/i);
+  let match = text.match(/^\/plan(?:@[A-Za-z0-9_]+)? (\S+) (\S+) (\S+) (\S+) (\S+)$/i);
+  if (match) return plan(match[1], match[2], match[3], match[4], match[5]);
+  match = text.match(/^plan (\S+) (\S+) (\S+) next (\S+) (\S+)$/i);
+  if (match) return plan(match[1], match[2], match[3], match[4], match[5]);
+  match = text.match(/^\/cancelplan(?:@[A-Za-z0-9_]+)? (\S+)$/i);
+  if (match) return cancelPlan(match[1]);
+  match = text.match(/^cancel plan (\S+)$/i);
+  if (match) return cancelPlan(match[1]);
+
+  match = text.match(/^\/buy(?:@[A-Za-z0-9_]+)? (\S+) (\S+) (\S+)(?: (\S+))? on (\S+)$/i);
   if (match) return buy(match[1], match[2], match[3], match[4], match[5]);
   match = text.match(/^bought (\S+) (\S+) (?:at|@) (\S+)(?: (\S+))? on (\S+)$/i);
   if (match) return buy(match[2], match[1], match[3], match[4], match[5]);

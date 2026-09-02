@@ -5,8 +5,15 @@ import {
   ownerMatches,
   parseCallbackData,
   resolveExecutionDate,
+  resolvePlanDate,
   secureEqual,
 } from "../supabase/functions/telegram-portfolio/webhook-utils.mjs";
+import {
+  planPreviewText,
+  planResultText,
+  plansText,
+  planTickerAllowed,
+} from "../supabase/functions/telegram-portfolio/plan-utils.mjs";
 
 test("secureEqual accepts only an exact secret", async () => {
   assert.equal(await secureEqual("correct-secret", "correct-secret"), true);
@@ -49,4 +56,55 @@ test("resolveExecutionDate rejects future and malformed explicit dates", () => {
   const reportedAt = Date.UTC(2026, 8, 2, 17, 0, 0) / 1000;
   assert.deepEqual(resolveExecutionDate("2026-09-03", reportedAt), { ok: false });
   assert.deepEqual(resolveExecutionDate("2026-02-30", reportedAt), { ok: false });
+});
+
+test("resolvePlanDate accepts today or a future owner-local due date", () => {
+  const reportedAt = Date.UTC(2026, 8, 2, 2, 0, 0) / 1000;
+  assert.deepEqual(resolvePlanDate("2026-09-01", reportedAt), {
+    ok: true,
+    nextDueOn: "2026-09-01",
+  });
+  assert.deepEqual(resolvePlanDate("2026-09-21", reportedAt), {
+    ok: true,
+    nextDueOn: "2026-09-21",
+  });
+});
+
+test("resolvePlanDate rejects past, malformed, and invalid Telegram dates", () => {
+  const reportedAt = Date.UTC(2026, 8, 2, 2, 0, 0) / 1000;
+  assert.deepEqual(resolvePlanDate("2026-08-31", reportedAt), { ok: false });
+  assert.deepEqual(resolvePlanDate("2026-02-30", reportedAt), { ok: false });
+  assert.deepEqual(resolvePlanDate("2026-09-21", 0), { ok: false });
+});
+
+test("planTickerAllowed uses only a valid active policy broad-core list", () => {
+  assert.equal(planTickerAllowed("VTI", { broad_core_etfs: ["VTI", "VOO"] }), true);
+  assert.equal(planTickerAllowed("QQQ", { broad_core_etfs: ["VTI", "VOO"] }), false);
+  assert.equal(planTickerAllowed("VTI", { broad_core_etfs: "VTI" }), false);
+  assert.equal(planTickerAllowed("VTI", null), false);
+  assert.equal(planTickerAllowed("vti", { broad_core_etfs: ["VTI"] }), false);
+});
+
+test("plan preview and callback wording cannot imply a brokerage order", () => {
+  const preview = planPreviewText({
+    operation: "plan", ticker: "VTI", amount: 300, cadence: "monthly",
+    next_due_on: "2026-09-21", bucket: "core",
+  });
+  assert.match(preview, /Preview — record monthly VTI reminder/);
+  assert.match(preview, /This records a reminder only; it does not schedule or place a brokerage purchase\./);
+  assert.match(planResultText({
+    operation: "plan", ticker: "VTI", amount: 300, cadence: "monthly",
+    next_due_on: "2026-09-21", bucket: "core",
+  }), /Recorded monthly VTI reminder/);
+  assert.match(planResultText({ operation: "cancel_plan", ticker: "VTI" }), /Cancelled VTI recurring reminder/);
+});
+
+test("plansText is bounded by its caller and labels reminders", () => {
+  assert.equal(plansText([]), "No active recurring investment reminders are recorded.");
+  const text = plansText([{
+    ticker: "VTI", amount: 300, cadence: "monthly", next_due_on: "2026-09-21", bucket: "core",
+  }]);
+  assert.match(text, /Recurring investment reminders/);
+  assert.match(text, /VTI: \$300 monthly · next due 2026-09-21 · core/);
+  assert.match(text, /do not place brokerage orders/);
 });

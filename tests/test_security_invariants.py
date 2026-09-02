@@ -230,3 +230,34 @@ def test_market_briefing_eval_covers_gateway_failure_pressure_cases():
     )
     for case_name in required:
         assert f"name: {case_name}" in evaluation
+
+
+def test_owner_plan_migration_is_rls_protected_and_stale_safe():
+    migration = ROOT / "sql" / "migrations" / "20260903_owner_investment_plans.sql"
+    assert migration.exists()
+    sql = migration.read_text()
+    schema = (ROOT / "sql" / "schema.sql").read_text()
+    for fragment in (
+        "CREATE TABLE IF NOT EXISTS public.owner_investment_plans",
+        "ALTER TABLE public.owner_investment_plans ENABLE ROW LEVEL SECURITY",
+        "expected_plan_updated_at",
+        "operation IN ('buy', 'sell', 'stop', 'plan', 'cancel_plan')",
+        "GREATEST(1, v_plan.amount * 0.02)",
+        "v_command.expected_plan_updated_at",
+        "REVOKE ALL ON FUNCTION public.apply_portfolio_command(UUID, BIGINT, BIGINT) FROM PUBLIC, anon, authenticated",
+        "GRANT EXECUTE ON FUNCTION public.apply_portfolio_command(UUID, BIGINT, BIGINT) TO service_role",
+    ):
+        assert fragment in sql
+        assert fragment in schema
+    assert sql in schema
+
+
+def test_telegram_plan_handler_uses_policy_allowlist_and_bounded_listing():
+    source = (ROOT / "supabase" / "functions" / "telegram-portfolio" / "index.ts").read_text()
+    assert 'from("market_policy_config").select("config")' in source
+    assert 'planTickerAllowed(String(command.ticker), await activePolicy())' in source
+    assert "Only an approved broad Core ETF can use a recurring plan. Nothing changed." in source
+    listing = source[source.index("async function investmentPlansText"):source.index("function previewText")]
+    assert '.eq("active", true).order("next_due_on").limit(20)' in listing
+    assert "planPreviewText(command)" in source
+    assert "planResultText(result)" in source
