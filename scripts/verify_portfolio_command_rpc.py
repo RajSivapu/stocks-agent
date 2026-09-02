@@ -89,6 +89,8 @@ def main():
         _require(holding is not None, "confirmed Buy did not create a holding")
         _require(Decimal(str(holding["shares"])) == Decimal("2"), "confirmed Buy recorded wrong shares")
         _require(Decimal(str(holding["avg_cost"])) == Decimal("100"), "confirmed Buy recorded wrong average cost")
+        _require(holding["opened_at"] == historical_date,
+                 "confirmed Buy did not preserve the holding open date")
         _require(_transaction_count(sb) == 1, "confirmed Buy did not create exactly one transaction")
         _require(_transactions(sb)[0]["executed_on"] == historical_date,
                  "confirmed Buy did not preserve its execution date")
@@ -132,6 +134,25 @@ def main():
         _require(_holding(sb)["stop"] is None, "cancelled stop command changed the holding")
         _require(_transaction_count(sb) == 2, "cancelled command created a transaction")
         print("PASS: Cancel prevents mutation")
+
+        _cleanup(sb)
+        later_date = str(date.today() - timedelta(days=2))
+        earlier_date = str(date.today() - timedelta(days=5))
+        later_buy_id = _pending(
+            sb, operation="buy", expected_shares=0, qty=1, price=100, bucket="growth",
+            executed_on=later_date,
+        )
+        _require(_rpc(sb, "apply_portfolio_command", later_buy_id)["ok"] is True,
+                 "later historical Buy did not succeed")
+        earlier_buy_id = _pending(
+            sb, operation="buy", expected_shares=1, qty=1, price=90, bucket="growth",
+            executed_on=earlier_date,
+        )
+        _require(_rpc(sb, "apply_portfolio_command", earlier_buy_id)["ok"] is True,
+                 "earlier historical Buy did not succeed")
+        _require(_holding(sb)["opened_at"] == earlier_date,
+                 "out-of-order Buy did not preserve the earliest holding open date")
+        print("PASS: out-of-order Buys preserve the earliest open date")
         return 0
     except Exception as exc:
         print(f"FAIL: portfolio RPC verification ({type(exc).__name__})")

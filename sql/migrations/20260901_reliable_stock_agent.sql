@@ -23,6 +23,63 @@ ALTER TABLE suggestions ADD COLUMN IF NOT EXISTS evidence_as_of TIMESTAMPTZ;
 ALTER TABLE stock_observations ADD COLUMN IF NOT EXISTS run_id UUID REFERENCES analysis_runs(id) ON DELETE SET NULL;
 ALTER TABLE transactions ADD COLUMN IF NOT EXISTS executed_on DATE;
 
+-- Repair only holdings whose complete transaction ledger can be reconstructed safely.
+-- The latest zero balance marks the start of the currently open position lifecycle.
+WITH eligible_tickers AS (
+  SELECT holding.ticker
+  FROM public.holdings AS holding
+  JOIN public.transactions AS transaction ON transaction.ticker = holding.ticker
+  GROUP BY holding.ticker, holding.shares
+  HAVING BOOL_AND(
+      COALESCE(transaction.source = 'telegram', FALSE)
+      AND transaction.executed_on IS NOT NULL
+      AND transaction.qty > 0
+    )
+    AND SUM(CASE WHEN transaction.side = 'buy' THEN transaction.qty ELSE -transaction.qty END)
+      = holding.shares
+),
+ordered_ledger AS (
+  SELECT
+    transaction.ticker,
+    transaction.executed_on,
+    ROW_NUMBER() OVER ledger_order AS sequence_number,
+    SUM(CASE WHEN transaction.side = 'buy' THEN transaction.qty ELSE -transaction.qty END)
+      OVER ledger_order AS running_shares
+  FROM public.transactions AS transaction
+  JOIN eligible_tickers ON eligible_tickers.ticker = transaction.ticker
+  WINDOW ledger_order AS (
+    PARTITION BY transaction.ticker
+    ORDER BY transaction.executed_on, transaction.id
+    ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW
+  )
+),
+valid_ledgers AS (
+  SELECT ticker
+  FROM ordered_ledger
+  GROUP BY ticker
+  HAVING MIN(running_shares) >= 0
+),
+last_zero_balance AS (
+  SELECT ledger.ticker, MAX(ledger.sequence_number) AS sequence_number
+  FROM ordered_ledger AS ledger
+  JOIN valid_ledgers ON valid_ledgers.ticker = ledger.ticker
+  WHERE ledger.running_shares = 0
+  GROUP BY ledger.ticker
+),
+current_lifecycle AS (
+  SELECT ledger.ticker, MIN(ledger.executed_on) AS opened_at
+  FROM ordered_ledger AS ledger
+  JOIN valid_ledgers ON valid_ledgers.ticker = ledger.ticker
+  LEFT JOIN last_zero_balance ON last_zero_balance.ticker = ledger.ticker
+  WHERE ledger.sequence_number > COALESCE(last_zero_balance.sequence_number, 0)
+  GROUP BY ledger.ticker
+)
+UPDATE public.holdings AS holding
+SET opened_at = current_lifecycle.opened_at
+FROM current_lifecycle
+WHERE holding.ticker = current_lifecycle.ticker
+  AND (holding.opened_at IS NULL OR holding.opened_at > current_lifecycle.opened_at);
+
 CREATE INDEX IF NOT EXISTS idx_analysis_runs_started ON analysis_runs(started_at DESC);
 CREATE INDEX IF NOT EXISTS idx_analysis_runs_kind_started ON analysis_runs(kind, started_at DESC);
 CREATE INDEX IF NOT EXISTS idx_suggestions_run_id ON suggestions(run_id);
@@ -168,6 +225,7 @@ BEGIN
       UPDATE public.holdings
       SET shares = v_new_shares,
           avg_cost = v_new_avg,
+          opened_at = LEAST(COALESCE(opened_at, v_executed_on), v_executed_on),
           high_water_price = GREATEST(COALESCE(high_water_price, v_command.price), v_command.price)
       WHERE ticker = v_command.ticker;
     ELSE
@@ -179,7 +237,7 @@ BEGIN
       INSERT INTO public.holdings (
         ticker, shares, avg_cost, bucket, opened_at, high_water_price
       ) VALUES (
-        v_command.ticker, v_new_shares, v_new_avg, v_command.bucket, current_date,
+        v_command.ticker, v_new_shares, v_new_avg, v_command.bucket, v_executed_on,
         v_command.price
       );
     END IF;

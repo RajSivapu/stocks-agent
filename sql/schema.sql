@@ -250,6 +250,7 @@ BEGIN
       UPDATE public.holdings
       SET shares = v_new_shares,
           avg_cost = v_new_avg,
+          opened_at = LEAST(COALESCE(opened_at, v_executed_on), v_executed_on),
           high_water_price = GREATEST(COALESCE(high_water_price, v_command.price), v_command.price)
       WHERE ticker = v_command.ticker;
     ELSE
@@ -261,7 +262,7 @@ BEGIN
       INSERT INTO public.holdings (
         ticker, shares, avg_cost, bucket, opened_at, high_water_price
       ) VALUES (
-        v_command.ticker, v_new_shares, v_new_avg, v_command.bucket, current_date,
+        v_command.ticker, v_new_shares, v_new_avg, v_command.bucket, v_executed_on,
         v_command.price
       );
     END IF;

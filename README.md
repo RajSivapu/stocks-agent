@@ -140,7 +140,7 @@ cd stocks-agent
 ```
 
 > Python 3.14 on macOS is externally managed (PEP 668). Use a venv:
-> `python3 -m venv .venv && source .venv/bin/activate && pip install supabase pytest`
+> `python3 -m venv .venv && source .venv/bin/activate && pip install supabase pytest "psycopg[binary]"`
 
 ### 2. Provision Supabase
 
@@ -158,6 +158,7 @@ idempotent `sql/migrations/20260901_reliable_stock_agent.sql` instead.
 | `TELEGRAM_WEBHOOK_SECRET` | Generate a new high-entropy ASCII value (letters, digits, `_`, `-`); this is separate from the bot token |
 | `SUPABASE_URL` | `https://<project-ref>.supabase.co` — from Supabase Dashboard → Settings → API |
 | `SUPABASE_SERVICE_ROLE_KEY` | Supabase → Settings → API → `service_role` key |
+| `POSTGRES_URL` | Supabase → Connect → transaction-pooler URI; used by migration verification |
 
 ### 4. Configure secrets locally
 
@@ -182,6 +183,7 @@ npx supabase login
 npx supabase link --project-ref <project-ref>
 npx supabase secrets set --env-file supabase/.env.local
 npx supabase functions deploy telegram-portfolio --no-verify-jwt
+.venv/bin/python scripts/verify_holding_open_date_migration.py
 .venv/bin/python scripts/verify_portfolio_command_rpc.py
 .venv/bin/python scripts/register_telegram_webhook.py
 ```
