@@ -20,7 +20,10 @@ def _insert(table, row) -> int:
     return res.data[0]["id"] if res.data else None
 
 
-def insert_suggestion(row): return _insert("suggestions", row)
+def import_legacy_suggestion(row):
+    """Local-admin-only import path for pre-gateway historical suggestions."""
+    response = _sb().rpc("import_legacy_suggestion", {"p_row": row}).execute()
+    return response.data
 def insert_transaction(row): return _insert("transactions", row)
 def insert_observation(row): return _insert("stock_observations", row)
 def insert_grade(row): return _insert("suggestion_grades", row)
@@ -166,7 +169,7 @@ def get_latest_suggestion(ticker):
 
 def get_latest_buy_levels(ticker):
     rows = (_sb().table("suggestions").select("stop,target")
-            .eq("ticker", str(ticker).upper()).eq("action", "Buy")
+            .eq("ticker", str(ticker).upper()).eq("action", "buy")
             .order("date", desc=True).limit(1).execute().data)
     return rows[0] if rows else None
 
@@ -177,7 +180,7 @@ def delete_holding(ticker):
 
 def get_open_suggestions():
     today = str(_date.today())
-    return _sb().table("suggestions").select("*").gte("valid_until", today).eq("action", "Buy").order("date", desc=True).execute().data
+    return _sb().table("suggestions").select("*").gte("valid_until", today).eq("action", "buy").order("date", desc=True).execute().data
 
 
 def get_observations(ticker):

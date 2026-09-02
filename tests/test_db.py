@@ -57,15 +57,20 @@ class _RecordingClient:
         self.calls.append((name, "table"))
         return _RecordingQuery(self.calls, name)
 
+    def rpc(self, name, params):
+        self.calls.append(("rpc", name, params))
+        return _RecordingQuery(self.calls, "rpc-result")
 
-def test_schema_and_suggestion_roundtrip():
-    db.init_schema()
-    sid = db.insert_suggestion({"date": "2026-06-17", "ticker": "TEST", "action": "Buy",
-        "bucket": "growth", "depth": "full", "confidence": "High", "risk_verdict": "pass",
-        "score": 90, "risk_band": "lower"})
-    assert isinstance(sid, int)
-    rows = db.get_open_suggestions()
-    assert any(r["ticker"] == "TEST" for r in rows) or True  # valid_until null -> not "open"; insert worked
+
+def test_legacy_suggestion_import_uses_only_named_rpc(monkeypatch):
+    client = _RecordingClient()
+    monkeypatch.setattr(db, "_sb", lambda: client)
+    row = {"date": "2026-06-17", "ticker": "TEST", "action": "buy"}
+
+    db.import_legacy_suggestion(row)
+
+    assert ("rpc", "import_legacy_suggestion", {"p_row": row}) in client.calls
+    assert not any(call[1] == "table" and call[0] == "suggestions" for call in client.calls)
 
 
 def test_holding_stop_roundtrip():
@@ -209,7 +214,7 @@ def test_public_reconciliation_helpers_build_scoped_queries(monkeypatch):
     assert ("suggestions", "select", "stop,target") in client.calls
     assert ("suggestions", "select", "*") in client.calls
     assert ("suggestions", "eq", "ticker", "AAPL") in client.calls
-    assert ("suggestions", "eq", "action", "Buy") in client.calls
+    assert ("suggestions", "eq", "action", "buy") in client.calls
     assert ("suggestions", "limit", 1) in client.calls
     assert ("holdings", "delete") in client.calls
     assert ("holdings", "eq", "ticker", "AAPL") in client.calls

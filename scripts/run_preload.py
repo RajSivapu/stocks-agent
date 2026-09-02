@@ -1,4 +1,4 @@
-"""One-time historical backfill: per-watchlist seasonality / volatility / drawdown +
+"""local-admin-only historical backfill: seasonality / volatility / drawdown +
 notable big-move days -> stock_observations.
 
 Idempotent per ticker: if a ticker already has a yfinance-preload observation, it is skipped,
@@ -8,8 +8,10 @@ Best-effort catalyst labeling: notable moves landing within ~3 calendar days of 
 Finnhub earnings date are tagged 'earnings-reaction'; the rest stay 'big-move'. Earnings
 lookup is wrapped in try/except so a Finnhub gap never aborts the preload.
 
-Run via:  .venv/bin/python scripts/run_preload.py   (local)
-          python scripts/run_preload.py             (cloud Routine)
+Run only from a trusted local checkout with:
+    .venv/bin/python scripts/run_preload.py
+
+Scheduled and on-demand cloud workflows submit observations through the scoped gateway instead.
 """
 import sys, pathlib
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))

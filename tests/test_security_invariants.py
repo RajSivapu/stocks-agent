@@ -173,3 +173,60 @@ def test_gateway_authentication_precedes_body_parsing():
     body_read = source.index("await readBody(request)", handler_start)
     assert secret_check < body_read
     assert "access-control-allow-origin" not in source.lower()
+
+
+def test_cloud_market_skills_have_only_bounded_gateway_authority():
+    skill_names = (
+        "market-briefing",
+        "equity-research",
+        "earnings-review",
+        "paper-watch",
+        "reconcile-trade",
+    )
+    skills = {
+        name: (ROOT / "skills" / name / "SKILL.md").read_text()
+        for name in skill_names
+    }
+    for skill in skills.values():
+        assert "lib.telegram" not in skill
+        assert "lib.db" not in skill
+        assert "from lib import db" not in skill
+        assert "SUPABASE_SERVICE_ROLE_KEY" not in skill
+    for name in ("market-briefing", "equity-research", "earnings-review", "paper-watch"):
+        assert "scripts/market_gateway.py" in skills[name]
+    for name in ("equity-research", "earnings-review", "paper-watch"):
+        assert "phase: on-demand" in skills[name]
+        assert "status: suppressed" in skills[name]
+        assert "no Telegram" in skills[name]
+    assert "paper_watch_create" in skills["paper-watch"]
+    assert "paper_watch_close" in skills["paper-watch"]
+    assert "/buy" in skills["reconcile-trade"]
+    assert "/sell" in skills["reconcile-trade"]
+    assert "local-admin" in skills["reconcile-trade"]
+
+
+def test_cloud_market_support_scripts_do_not_restore_privileged_paths():
+    preload = (ROOT / "scripts" / "run_preload.py").read_text()
+    assert "local-admin-only" in preload
+    assert "cloud Routine" not in preload
+    assert "Cloud Routine" not in preload
+    assert not hasattr(__import__("lib.db", fromlist=["insert_suggestion"]), "insert_suggestion")
+
+
+def test_market_briefing_eval_covers_gateway_failure_pressure_cases():
+    evaluation = (ROOT / "docs" / "eval" / "market-briefing-eval.yaml").read_text()
+    required = (
+        "stale_plan_reuse",
+        "prompt_injected_source_text",
+        "impossible_prices",
+        "oversized_position",
+        "policy_downgrade_or_veto",
+        "on_demand_suppression",
+        "duplicate_request_id",
+        "renderer_smuggling",
+        "database_failure",
+        "definitive_telegram_failure",
+        "ambiguous_delivery",
+    )
+    for case_name in required:
+        assert f"name: {case_name}" in evaluation

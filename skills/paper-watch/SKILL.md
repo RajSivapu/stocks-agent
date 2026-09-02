@@ -1,123 +1,46 @@
 ---
 name: paper-watch
-description: Use when the owner wants to track his OWN hypothetical stock idea (paper trade) separately from real holdings and the agent's radar — "paper-watch X from $P", "how are my paper watches doing", "close my X paper watch".
+description: Use when the owner wants to create, inspect, or close a hypothetical stock idea without changing his real portfolio.
 ---
 
-# Paper Watch — track owner hypotheses (suggestion-only)
+# Paper watch
 
-Lets the owner add, check, and close hypothetical stock ideas. Writes only to `paper_watches` — never to `holdings` or `transactions`, never places an order.
+Paper watches are hypothetical research records. They never place or simulate an order and can never
+mutate holdings or transactions.
 
-## ABSOLUTE RULE
+## Required lifecycle
 
-**Suggestion-only.** This skill is hypothesis tracking only. It writes ONLY to `paper_watches` — never to the `holdings` or `transactions` tables, and never executes or simulates an order. All entries are hypothetical.
+Use only `python scripts/market_gateway.py` for context and mutations. Never call a database,
+Supabase endpoint, messaging endpoint, or brokerage endpoint directly.
 
----
+1. Call `start_run` with `phase: on-demand` and then `read_context` using its run ID.
+2. For a status request, display only active paper watches from bounded context. Fetch current prices
+   from read-only sources, show their provider timestamps, and calculate clearly labeled hypothetical
+   return. Do not write a mark simply because the owner viewed status.
+3. For a create request, require an uppercase ticker and owner thesis. Use the stated reference price
+   or fetch a current timestamped quote; never guess. Submit one `paper_watch_create` mutation through
+   `record_artifacts`, with optional target, hypothetical amount, and horizon. The gateway supplies
+   server-owned dates and validates the latest evaluated view.
+4. For a close request, identify exactly one active watch from context and fetch its current quote.
+   Submit one `paper_watch_close` mutation with the watch ID. The gateway rechecks active identity and
+   owns the close date/price fields; do not trust caller-supplied historical state.
+5. Call `finish_run` after the read or mutation. Report only its actual receipt. Expect
+   `status: suppressed`; paper-watch activity stays in this session with no Telegram notification.
 
-## Add a paper watch
+Each operation has a new UUID request ID, reused only for an uncertain identical retry. If any
+gateway operation fails, stop; do not fall back to direct storage or claim success. If a run exists
+and the gateway remains reachable, call `finish_run`.
 
-**Trigger:** owner says things like "paper-watch NVDA from $200, thesis: GPU cycle has legs, track a month."
+In a dry run, pass `--dry-run` to every operation, execute all reads/calculations, and label the
+artifact as would-write only. Temporary JSON, if needed, belongs under `mktemp -d`, never the
+checkout.
 
-**Steps:**
+## Response
 
-1. **Parse inputs** from the owner's message:
-   - `ticker` — uppercased stock symbol
-   - `entry_ref_price` — use the stated price; if none stated, fetch live via `lib.marketdata.quote(ticker)`
-   - `target_price` — optional, from message
-   - `hypothetical_amount` — optional dollar amount (e.g. "$500 hypothetical")
-   - `thesis` — the owner's reason/idea (required; ask if missing)
-   - `horizon` — from message (e.g. "a month", "6 weeks"); if not stated, use `settings.paper_watches.default_horizon` from `config/settings.json`
-   - `created` — today's date (YYYY-MM-DD)
+For create/close, state ticker, reference price, thesis/horizon, hypothetical return where relevant,
+and the gateway-confirmed artifact receipt. For status, state entry/current price, hypothetical
+percentage and dollars (if an amount exists), days open, thesis, and view at opening. Mark stale or
+missing quotes rather than computing a misleading return.
 
-2. **Snapshot the agent's current stance** for this ticker:
-   ```python
-   import sys, os; sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)).replace('/skills/paper-watch',''))
-   import lib.db as db
-   latest = db.get_latest_suggestion(ticker)
-   agent_view_at_open = latest["action"] if latest else "no prior view"
-   agent_score_at_open = latest.get("score") if latest else None
-   ```
-
-3. **Insert the row:**
-   ```python
-   pid = db.insert_paper_watch({
-       "ticker": ticker,
-       "created": created,
-       "entry_ref_price": entry_ref_price,
-       "target_price": target_price,          # None if not stated
-       "hypothetical_amount": hypothetical_amount,  # None if not stated
-       "thesis": thesis,
-       "horizon": horizon,
-       "agent_view_at_open": agent_view_at_open,
-       "agent_score_at_open": agent_score_at_open,
-   })
-   ```
-
-4. **Confirm in plain English** — one short paragraph: what was tracked, at what price, the thesis, the horizon, and whether the agent had a prior view on it.
-
----
-
-## Status check
-
-**Trigger:** "how are my paper watches doing" or "show paper watches."
-
-**Steps:**
-
-1. Fetch all open hypotheses:
-   ```python
-   import sys, os; sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)).replace('/skills/paper-watch',''))
-   import lib.db as db
-   import lib.marketdata as mkt
-   watches = db.get_active_paper_watches()
-   ```
-
-2. Mark-to-market each entry:
-   - Fetch `current_price = mkt.quote(row["ticker"])`
-   - Compute `return_pct = (current_price - row["entry_ref_price"]) / row["entry_ref_price"] * 100`
-   - If `hypothetical_amount` is set, compute `return_dollars = hypothetical_amount * return_pct / 100`
-
-3. **Report** as a plain-English list (one entry per watch):
-   - Ticker, entry price, current price, return % (and $ if amount set)
-   - Thesis (brief)
-   - Agent's view at open vs agent's current view (fetch the most recent suggestion row again if wanted, or just show what was stored)
-   - Days open (today minus `created`)
-   - You vs agent: whether the move so far agrees or disagrees with the agent's view at open
-
----
-
-## Close a paper watch
-
-**Trigger:** "close my NVDA paper watch" or "close paper watch X."
-
-**Steps:**
-
-1. Fetch active watches and find the matching ticker:
-   ```python
-   import sys, os; sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)).replace('/skills/paper-watch',''))
-   import lib.db as db
-   import lib.marketdata as mkt
-   from datetime import date
-   watches = db.get_active_paper_watches()
-   row = next((w for w in watches if w["ticker"] == ticker.upper()), None)
-   ```
-
-2. Fetch the current price and close the watch:
-   ```python
-   close_price = mkt.quote(row["ticker"])["price"]
-   db.close_paper_watch(row["id"], close_price=close_price, closed_date=date.today().isoformat())
-   ```
-
-3. **Report final hypothetical P&L** in plain English:
-   - Entry price → close price → return %
-   - If `hypothetical_amount` was set, show the dollar gain/loss
-   - Whether the outcome matched or contradicted the agent's view at open
-   - One-sentence takeaway (did the thesis play out?)
-
----
-
-## Interpreter / sys.path
-
-- **Locally:** `.venv/bin/python`
-- **Cloud Routine:** `python`
-- All inline code snippets include the `sys.path` bootstrap:
-  `import sys, os; sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)).replace('/skills/paper-watch',''))`
-  so `lib.*` imports resolve correctly from any working directory.
+Always call the records “hypothetical.” Never characterize a paper result as real P&L or permission
+to trade.
