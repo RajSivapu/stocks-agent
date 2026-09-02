@@ -35,7 +35,13 @@ export interface GatewayDependencies {
 const MAX_BODY_BYTES = 262_144;
 
 function response(status: number, body: Record<string, unknown>): Response {
-  return Response.json(body, {
+  const rendered = body.ok === true && !("data" in body)
+    ? {
+      ...body,
+      data: Object.fromEntries(Object.entries(body).filter(([key]) => key !== "ok")),
+    }
+    : body;
+  return Response.json(rendered, {
     status,
     headers: { "cache-control": "no-store", "x-content-type-options": "nosniff" },
   });

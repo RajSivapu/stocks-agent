@@ -287,6 +287,7 @@ Deno.test("dry-run operations are write-free and report only their own effects",
   const { handler, repository, sent } = makeHandler();
   const start = await json(await handler(request("start_run", { phase: "intraday", market_date: "2026-09-02" }, { dry: true })));
   assert(typeof start.run_id === "string", "dry run id absent");
+  assertEquals((start.data as Record<string, unknown>).run_id, start.run_id);
   const artifacts = await json(await handler(request("record_artifacts", { mutations: [{ kind: "lesson", entry_date: "2026-09-02", category: "test", content: "test" }] }, { dry: true })));
   assertEquals((artifacts.receipt as Record<string, unknown>).would_write, 1);
   const bundle = { phase: "intraday", market_date: "2026-09-02", title: "ignored", candidates: [candidate("intraday", "brief")] };
