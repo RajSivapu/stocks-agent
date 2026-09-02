@@ -9,6 +9,18 @@ ChatGPT task audits process/data quality. No component executes trades. Built an
 > **Guardrail:** zero trade-execution tools. The agent can only read market data, reason, and write
 > to its own Supabase database. Every trade is placed by you.
 
+## Project continuity
+
+Before planning or implementing the next version, read
+[`docs/ROADMAP.md`](docs/ROADMAP.md) for current deployment state, priorities, deferred work, and
+guardrails. Also read the roadmap's linked decision notes—including
+[`docs/research/2026-09-02-external-stock-agent-ideas-review.md`](docs/research/2026-09-02-external-stock-agent-ideas-review.md)—so
+evaluated external ideas are reconsidered only under their recorded conditions and rejected ideas are
+not accidentally reintroduced.
+
+Supabase remains the source of truth for changing portfolio data; do not copy current holdings into
+planning documents where they will become stale.
+
 ---
 
 ## What it does
