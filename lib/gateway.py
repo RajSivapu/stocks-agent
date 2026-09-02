@@ -128,24 +128,23 @@ def call(
 
     try:
         base_url = config.secret("supabase_url").rstrip("/")
-        scoped_secret = config.secret("market_agent_secret")
+        scoped_secret = config.optional_secret("market_agent_secret")
     except Exception:
         raise GatewayError("GATEWAY_CONFIGURATION_MISSING") from None
     endpoint = base_url + "/functions/v1/market-briefing-gateway"
     parsed = urllib.parse.urlparse(endpoint)
     if _opener is None and (parsed.scheme != "https" or not parsed.netloc):
         raise ValueError("gateway URL must use HTTPS")
-    if not scoped_secret:
-        raise GatewayError("GATEWAY_CONFIGURATION_MISSING")
+
+    headers = {"Content-Type": "application/json"}
+    if scoped_secret:
+        headers["X-Market-Agent-Secret"] = scoped_secret
 
     request = urllib.request.Request(
         endpoint,
         data=encoded,
         method="POST",
-        headers={
-            "Content-Type": "application/json",
-            "X-Market-Agent-Secret": scoped_secret,
-        },
+        headers=headers,
     )
     opener = _opener or urllib.request.urlopen
     try:

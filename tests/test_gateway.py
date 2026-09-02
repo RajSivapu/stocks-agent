@@ -101,6 +101,33 @@ def test_call_sends_only_scoped_header_and_compact_decimal_payload(monkeypatch):
     assert b"SUPABASE_SERVICE_ROLE_KEY" not in request.data
 
 
+def test_call_allows_credential_proxy_to_inject_scoped_header(monkeypatch):
+    def proxy_configuration(name):
+        if name == "supabase_url":
+            return "https://project.supabase.co"
+        raise KeyError(name)
+
+    monkeypatch.setattr(gateway.config, "secret", proxy_configuration)
+    captured = {}
+
+    def opener(request, **_kwargs):
+        captured["request"] = request
+        return FakeResponse({"ok": True, "data": {"run_id": RUN_ID}})
+
+    result = gateway.call(
+        "start_run",
+        {"phase": "intraday"},
+        request_id=REQUEST_ID,
+        _opener=opener,
+    )
+
+    assert result["ok"] is True
+    request = captured["request"]
+    assert request.full_url == "https://project.supabase.co/functions/v1/market-briefing-gateway"
+    assert "X-market-agent-secret" not in request.headers
+    assert set(request.headers) == {"Content-type"}
+
+
 def test_call_generates_uuid_and_passes_run_identity(monkeypatch):
     configured(monkeypatch)
     captured = {}
@@ -233,3 +260,28 @@ def test_cli_is_bounded_and_never_prints_raw_errors(monkeypatch, capsys):
     monkeypatch.setattr(market_gateway.gateway, "call", lambda *_args, **_kwargs: (_ for _ in ()).throw(gateway.GatewayError("RATE_LIMITED")))
     assert market_gateway.main(["start_run", "--dry-run"]) == 1
     assert json.loads(capsys.readouterr().out) == {"code": "RATE_LIMITED", "ok": False}
+
+
+def test_healthcheck_allows_finnhub_proxy_to_inject_header(monkeypatch, capsys):
+    requests = []
+
+    def fake_gateway_call(_operation, _payload, **_kwargs):
+        return {"data": {"run_id": RUN_ID}}
+
+    def missing_secret(name):
+        raise KeyError(name)
+
+    def fake_urlopen(request, **_kwargs):
+        requests.append(request)
+        return FakeResponse(b"{}")
+
+    monkeypatch.setattr(gateway, "call", fake_gateway_call)
+    monkeypatch.setattr(config, "secret", missing_secret)
+    monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
+
+    runpy.run_path(str(ROOT / "scripts" / "healthcheck.py"), run_name="__main__")
+    result = json.loads(capsys.readouterr().out)
+
+    assert result == {"gateway": "ok", "finnhub": "ok", "yahoo": "ok"}
+    finnhub_request = next(r for r in requests if "finnhub.io" in r.full_url)
+    assert "X-finnhub-token" not in finnhub_request.headers

@@ -6,24 +6,34 @@ and delivery remain inside Supabase.
 
 ## One-time environment
 
-In claude.ai → Code → Routines, create one environment:
+In claude.ai → Code → Routines, create one personal cloud environment:
 
 - Name: `stocks-agent`
-- Network: Full (required for Supabase gateway and market-data HTTPS)
+- Network: Custom
+- Allowed domains: `<project-ref>.supabase.co`, `finnhub.io`, `query1.finance.yahoo.com`,
+  `query2.finance.yahoo.com`, `www.sec.gov`, `data.sec.gov`, `www.federalreserve.gov`,
+  `www.bls.gov`, and `www.bea.gov`
 - Repository: `RajSivapu/stocks-agent`
 - Unrestricted git push: off
-- Environment values:
+- Environment variables:
 
 ```text
 SUPABASE_URL=https://<project-ref>.supabase.co
 MARKET_AGENT_SECRET=<dedicated-random-gateway-secret>
-FINNHUB_API_KEY=<read-only-plan-key>
-ALPHAVANTAGE_API_KEY=<read-only-plan-key>
+FINNHUB_API_KEY=<read-only-key>
 ```
 
-Do not add database administrator credentials, messaging credentials, brokerage credentials, or an
-LLM API key. There are four environment values, not six. No package install is required for the
-bounded standard-library gateway client.
+Environment variables are readable inside every session. This personal environment therefore uses
+only two deliberately limited credentials: the narrowly scoped market-gateway secret and a
+read-only Finnhub key. The gateway can invoke only allow-listed analysis operations and remains
+subject to deterministic policy, rate limits, idempotency, audit receipts, and server-side market
+data checks. It cannot call arbitrary database tables, mutate portfolio holdings, access Telegram
+credentials, or execute trades.
+
+Never share this environment. Do not add Alpha Vantage, database administrator, service-role,
+messaging, brokerage, or LLM credentials. The current code does not call Alpha Vantage. If Claude's
+protected API-credential proxy is available for this account later, migrate the two HTTP headers to
+that store and remove their environment variables. No package install or setup script is required.
 
 ## Non-notifying healthcheck
 

@@ -106,14 +106,19 @@ Supabase Edge Function secrets/runtime contain:
   `TELEGRAM_OWNER_USER_ID`;
 - Supabase's injected `SUPABASE_URL` and `SUPABASE_SERVICE_ROLE_KEY`.
 
-Anthropic Routine secrets contain only:
+Anthropic's personal `stocks-agent` cloud environment contains exactly these variables:
 
-- `SUPABASE_URL` and `MARKET_AGENT_SECRET`;
-- `FINNHUB_API_KEY` and `ALPHAVANTAGE_API_KEY` (read-only market-data plans).
+- `SUPABASE_URL`;
+- the narrowly scoped `MARKET_AGENT_SECRET`;
+- a read-only `FINNHUB_API_KEY`.
 
-The Routine must never receive the service-role key or Telegram credentials. Generate independent
-high-entropy gateway and webhook secrets. Rotate any value exposed in a transcript, screenshot,
-chat, terminal output, or tracked file.
+The environment uses a custom domain allowlist, no Gmail/Drive connectors, and no setup script. Its
+gateway credential authorizes only the bounded analysis API; server policy remains final. Do not
+configure Alpha Vantage because the current code does not call it. The Routine must never receive
+the service-role key, Telegram credentials, brokerage credentials, or an LLM API key. Prefer
+Claude's protected API-credential proxy if its controls become available, then remove both keys
+from ordinary variables. Generate independent high-entropy gateway and webhook secrets. Rotate any
+value exposed in a transcript, screenshot, chat, terminal output, or tracked file.
 
 ### 4. Deploy and initialize Supabase
 

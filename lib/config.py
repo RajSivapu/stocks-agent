@@ -25,3 +25,11 @@ def secret(name: str) -> str:
     if f.exists():
         return json.loads(f.read_text()).get(name, "")
     raise KeyError(f"secret {name!r} not found in env or secrets.local.json")
+
+
+def optional_secret(name: str) -> str:
+    """Return a local secret when present, or allow an outbound proxy to inject it."""
+    try:
+        return secret(name)
+    except KeyError:
+        return ""

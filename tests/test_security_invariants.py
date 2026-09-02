@@ -314,11 +314,25 @@ def test_routine_documentation_exposes_only_scoped_cloud_credentials():
         "TELEGRAM_OWNER_CHAT_ID",
     ):
         assert forbidden not in routines
-    for required in (
-        "SUPABASE_URL",
-        "MARKET_AGENT_SECRET",
-        "FINNHUB_API_KEY",
+    env_heading = re.search(r"Environment (?:variables|values):\s*\n\n```text\n(.*?)```", routines, re.S)
+    assert env_heading is not None
+    env_block = env_heading.group(1)
+    assert env_block.strip().splitlines() == [
+        "SUPABASE_URL=https://<project-ref>.supabase.co",
+        "MARKET_AGENT_SECRET=<dedicated-random-gateway-secret>",
+        "FINNHUB_API_KEY=<read-only-key>",
+    ]
+    for readable_secret in (
         "ALPHAVANTAGE_API_KEY",
+        "SUPABASE_SERVICE_ROLE_KEY",
+        "TELEGRAM_BOT_TOKEN",
+    ):
+        assert readable_secret not in env_block
+    assert "ALPHAVANTAGE_API_KEY" not in routines
+    for required in (
+        "narrowly scoped",
+        "read-only",
+        "personal",
         "evaluate_and_publish",
         "delivery_unknown",
         "status: suppressed",

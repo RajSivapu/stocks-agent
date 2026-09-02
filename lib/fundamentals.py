@@ -12,7 +12,10 @@ UA = {"User-Agent": "Mozilla/5.0"}
 
 
 def _get(u, t=20):
-    h = {"X-Finnhub-Token": config.secret("finnhub_api_key"), **UA}
+    h = dict(UA)
+    key = config.optional_secret("finnhub_api_key")
+    if key:
+        h["X-Finnhub-Token"] = key
     return json.loads(urllib.request.urlopen(urllib.request.Request(u, headers=h), timeout=t, context=ctx).read())
 
 
