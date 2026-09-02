@@ -37,6 +37,9 @@ def test_build_packet_is_stable_relevant_redacted_and_non_mutating():
         {"id": 40, "ticker": "AAPL", "close": 110},
         {"id": 41, "ticker": "NVDA", "close": 205},
         {"id": 42, "ticker": "TSLA", "close": 300},
+        {"id": 43, "ticker": "^VIX", "close": 15},
+        {"id": 44, "ticker": "^TNX", "close": 4.2},
+        {"id": 45, "ticker": "^IRX", "close": 3.8},
     ]
     original = deepcopy((holdings, transactions, suggestions, grades, lessons, snapshots))
 

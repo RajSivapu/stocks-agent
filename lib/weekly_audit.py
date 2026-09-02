@@ -15,6 +15,7 @@ LIMITS = {
 }
 _SENSITIVE_KEY_FRAGMENTS = ("token", "secret", "key", "authorization")
 _TICKER = re.compile(r"^[A-Z][A-Z0-9]*(?:[.-][A-Z0-9]+)*$")
+_SNAPSHOT_MACRO_TICKERS = frozenset({"^IRX", "^TNX", "^VIX"})
 _EVALUATION_FIELDS = {
     "id", "request_id", "run_id", "candidate_id", "policy_version", "raw_action",
     "final_action", "policy_status", "reason_codes", "created_at",
@@ -46,7 +47,7 @@ def _ticker(value):
     return normalized if len(normalized) <= 12 and _TICKER.fullmatch(normalized) else None
 
 
-def _ticker_rows(rows, name, invalid_counts, limit=None):
+def _ticker_rows(rows, name, invalid_counts, limit=None, allowed_tickers=frozenset()):
     clean = []
     invalid = 0
     for original in rows:
@@ -54,6 +55,9 @@ def _ticker_rows(rows, name, invalid_counts, limit=None):
             invalid += 1
             continue
         ticker = _ticker(original.get("ticker"))
+        if ticker is None and isinstance(original.get("ticker"), str):
+            candidate = original["ticker"].strip().upper()
+            ticker = candidate if candidate in allowed_tickers else None
         if not ticker:
             invalid += 1
             continue
@@ -212,7 +216,10 @@ def build_packet(*, holdings, transactions, suggestions, grades, lessons, snapsh
         row["ticker"] for rows in (clean_holdings, clean_transactions, clean_suggestions) for row in rows
     })
     clean_snapshots = [
-        row for row in _ticker_rows(snapshots, "snapshots", invalid_counts)
+        row for row in _ticker_rows(
+            snapshots, "snapshots", invalid_counts,
+            allowed_tickers=_SNAPSHOT_MACRO_TICKERS,
+        )
         if row["ticker"] in relevant_tickers
     ][:LIMITS["snapshots"]]
 

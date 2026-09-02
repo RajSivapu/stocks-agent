@@ -10,35 +10,37 @@ is separate, paper-first, and outside this codebase.
 
 | Capability | Code status | Live status |
 |---|---|---|
-| Pre-market, intraday, and post-market Claude Routines | Receipt-driven prompts implemented locally | Existing routines remain on the prior workflow until production cutover |
-| Scoped market gateway and least-privilege Routine client | Implemented and tested locally | Migration, secret, function deploy, and Routine credential replacement pending |
-| Fresh independent packet on every run | Implemented locally | Pending gateway rollout plus dry/live phase checks |
-| Analyst → Checker pass with stale/prior-plan veto | Implemented locally | Pending gateway rollout |
-| Server-refetched quotes + deterministic sizing/risk policy | Implemented and tested locally | Pending gateway migration/function/policy activation |
-| Atomic decision/evidence/publication audit trail | Implemented and rollback-tested locally | Pending production migration |
+| Pre-market, intraday, and post-market Claude Routines | Receipt-driven prompts implemented | Live on `main` in the restricted `stocks-agent` environment; first new scheduled receipts pending observation |
+| Scoped market gateway and least-privilege Routine client | Implemented and tested | Live; Routine has only Supabase URL, scoped gateway secret, and read-only Finnhub key |
+| Fresh independent packet on every run | Implemented | Full production dry run completed with zero writes; first scheduled phase pending observation |
+| Analyst → Checker pass with stale/prior-plan veto | Implemented | Production dry run completed through both records and gateway evaluation |
+| Server-refetched quotes + deterministic sizing/risk policy | Implemented and tested | Live with policy v1; Yahoo's omitted `marketState` is handled from validated provider trading windows |
+| Atomic decision/evidence/publication audit trail | Implemented and rollback-tested | Migrations `20260902`–`20260904` applied and production verifiers passed |
 | Deterministic Telegram Buy/Sell/Stop recorder, including delayed trade dates | Implemented, tested, Deno type-checked | Live; owner-confirmed Buy/Sell/Portfolio flows are working |
-| Confirmed `/plan`, `/cancelplan`, and read-only `/plans` reminders | Implemented and rollback-tested locally | Pending owner-plan migration and Telegram function deployment |
-| Deterministic 5/21/63-session outcome grading | Implemented and rollback-tested locally | Pending outcome migration and gateway deployment |
-| Friday ChatGPT weekly process audit v2 | Packet + skill implemented and tested locally | Existing scheduled task needs the merged v2 packet and first-report review |
-| Watchlist changes as owner-reviewed proposals | Implemented in settings/skill | Available after revised Routine rollout |
+| Confirmed `/plan`, `/cancelplan`, and read-only `/plans` reminders | Implemented and rollback-tested | Live; owner-confirmed plan flow was exercised end to end and read back |
+| Deterministic 5/21/63-session outcome grading | Implemented and rollback-tested | Live; results remain empty until eligible gateway decisions reach their horizons |
+| Friday ChatGPT weekly process audit v2 | Packet + skill implemented and tested | Active Fridays 16:30 local on `gpt-5.6-terra`; live packet smoke test passed, first scheduled report pending |
+| Watchlist changes as owner-reviewed proposals | Implemented in settings/skill | Live through the revised Routine; never edits/pushes the checkout |
 
-"Implemented" means committed code and local verification on the feature branch. It does not mean
-the external Supabase/Telegram/Claude/ChatGPT configuration has been changed.
+All code through the current release is on GitHub `main`. "Live" means the corresponding external
+Supabase, Telegram, Claude, or ChatGPT configuration was checked directly; pending observation is
+called out separately.
 
 ## Remaining rollout checks
 
-The original Telegram recorder is live. The decision-safety release remains local until this exact
-cutover completes:
+The fail-closed cutover is deployed. Migrations/verifiers, policy activation, both Edge Functions,
+webhook health, secret rotation, Routine isolation, cloud healthcheck, Telegram owner flows, and two
+production dry-run lifecycles are complete. Both dry runs reported empty writes/message IDs, and
+independent before/after counts across eleven protected tables were unchanged.
 
-1. Capture a Supabase backup/recovery point and review the legacy suggestion preflight mappings.
-2. Apply migrations `20260902`, `20260903`, and `20260904` in order, then run both RPC verifiers.
-3. Set a new `MARKET_AGENT_SECRET`, deploy both Edge Functions, publish policy version 1, and retain
-   only scoped/read-only credentials in the Routine environment.
-4. Replace the three saved prompts from `routines/README.md`; run non-notifying healthcheck and
-   start/context dry-run checks.
-5. Verify one controlled live pre-market, quiet intraday, and post-market run. Confirm request/run,
-   evaluation, suggestion, publication, artifact/grade, and delivery receipts agree.
-6. Inspect the first Friday v2 audit and confirm it is bounded, segmented, and read-only.
+The remaining checks are observation rather than implementation:
+
+1. Inspect the first new scheduled pre-market, quiet intraday, and post-market receipts. Confirm
+   request/run, evaluation, suggestion, publication, artifact/grade, and delivery claims agree.
+2. Inspect the first Friday v2 audit and confirm it remains bounded, segmented, and read-only.
+3. After the first scheduled cycle, decide whether synthetic-looking legacy suggestions need a
+   separately approved archival cleanup. Do not mix that destructive data cleanup into this
+   release.
 
 ## Next reliability work
 

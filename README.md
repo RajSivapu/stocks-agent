@@ -53,7 +53,8 @@ research, Analyst/Checker, `evaluate_and_publish`, permitted artifacts/grading, 
 
 - Yahoo Finance chart endpoints: quotes and adjusted/raw OHLC history.
 - Finnhub free tier: fundamentals, news, earnings/events, insider and analyst context.
-- Alpha Vantage free tier: backup mover/sector context.
+- Alpha Vantage is not used by the current release and is intentionally absent from the Routine
+  environment.
 - Supabase free-tier project: Postgres and two Edge Functions.
 - Telegram Bot API: fixed brief delivery and deterministic recordkeeping chat.
 - Anthropic plan allowance: scheduled model reasoning; no Anthropic API key in this repo.
@@ -152,7 +153,7 @@ sends no Telegram message.
 ### 6. Configure Routines
 
 Follow [`routines/README.md`](routines/README.md). The saved prompts are receipt-driven and the cloud
-environment has only the four scoped/read-only values listed above.
+environment has only the three scoped/read-only values listed above.
 
 ## Gateway client
 
@@ -224,7 +225,8 @@ every gateway operation and begins with:
 Reviewed policy comes from `config/settings.json`, is validated and versioned by
 `scripts/publish_market_policy.py`, and has self-tuning disabled. The gateway independently fetches
 quotes, checks session freshness, reconciles sizing, enforces stop/reward-risk/concentration/loss
-limits, and owns holding-alert transitions.
+limits, and owns holding-alert transitions. If Yahoo omits `marketState`, the gateway derives the
+session only from Yahoo's validated epoch trading windows; missing or malformed windows fail closed.
 
 Final gateway suggestions are graded after 5/21/63 trading sessions using adjusted closes, a fixed
 VOO benchmark (VXUS for VXUS), excess return, MFE/MAE, and raw threshold hits. Splits require review;
