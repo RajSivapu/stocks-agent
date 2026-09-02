@@ -1,6 +1,11 @@
 #!/usr/bin/env python3
 """Publish and activate the checked-in owner-reviewed market policy."""
 
+from pathlib import Path
+import sys
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
 from lib import db
 from lib.config import load_settings
 from lib.policy_config import build_policy_config, validate_policy_config

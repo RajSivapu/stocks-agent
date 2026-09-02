@@ -1,6 +1,8 @@
 import sys, pathlib
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))
 import json, ssl, urllib.request
+from datetime import datetime
+from zoneinfo import ZoneInfo
 from lib import config, gateway
 ctx = ssl.create_default_context(); UA={"User-Agent":"Mozilla/5.0"}
 def get(u,h=None,t=15):
@@ -10,7 +12,10 @@ def get(u,h=None,t=15):
 # carry secrets (Finnhub token in a URL, Postgres password in the DSN). Run locally for detail.
 results = {}
 try:
-    started = gateway.call("start_run", {"phase": "on-demand"}, dry_run=True)
+    market_date = datetime.now(ZoneInfo("America/Chicago")).date().isoformat()
+    started = gateway.call(
+        "start_run", {"phase": "on-demand", "market_date": market_date}, dry_run=True
+    )
     gateway.call("read_context", {}, run_id=started["data"]["run_id"], dry_run=True)
     results["gateway"]="ok"
 except Exception as e: results["gateway"]=f"FAIL {type(e).__name__}"

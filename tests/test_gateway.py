@@ -1,14 +1,20 @@
 import io
 import json
+from datetime import datetime
+from pathlib import Path
+import runpy
 import urllib.error
+from zoneinfo import ZoneInfo
 
 import pytest
 
 from lib import gateway
+from lib import config
 
 
 REQUEST_ID = "00000000-0000-4000-8000-000000000001"
 RUN_ID = "00000000-0000-4000-8000-000000000002"
+ROOT = Path(__file__).resolve().parents[1]
 
 
 class FakeResponse:
@@ -25,6 +31,28 @@ class FakeResponse:
 
     def __exit__(self, *_args):
         return False
+
+
+def test_healthcheck_supplies_owner_market_date_to_gateway(monkeypatch, capsys):
+    calls = []
+
+    def fake_gateway_call(operation, payload, **kwargs):
+        calls.append((operation, payload, kwargs))
+        return {"data": {"run_id": RUN_ID}}
+
+    monkeypatch.setattr(gateway, "call", fake_gateway_call)
+    monkeypatch.setattr(config, "secret", lambda _name: "test-value")
+    monkeypatch.setattr(urllib.request, "urlopen", lambda *_args, **_kwargs: FakeResponse(b"{}"))
+
+    before = datetime.now(ZoneInfo("America/Chicago")).date().isoformat()
+    runpy.run_path(str(ROOT / "scripts" / "healthcheck.py"), run_name="__main__")
+    after = datetime.now(ZoneInfo("America/Chicago")).date().isoformat()
+    capsys.readouterr()
+
+    assert calls[0][0] == "start_run"
+    assert calls[0][1]["phase"] == "on-demand"
+    assert calls[0][1]["market_date"] in {before, after}
+    assert calls[0][2]["dry_run"] is True
 
 
 def configured(monkeypatch):
@@ -205,4 +233,3 @@ def test_cli_is_bounded_and_never_prints_raw_errors(monkeypatch, capsys):
     monkeypatch.setattr(market_gateway.gateway, "call", lambda *_args, **_kwargs: (_ for _ in ()).throw(gateway.GatewayError("RATE_LIMITED")))
     assert market_gateway.main(["start_run", "--dry-run"]) == 1
     assert json.loads(capsys.readouterr().out) == {"code": "RATE_LIMITED", "ok": False}
-
