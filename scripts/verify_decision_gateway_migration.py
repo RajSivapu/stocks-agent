@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Rollback-only verification of the decision gateway migration and RPC invariants."""
+"""Rollback-only verification of the complete decision gateway migration chain."""
 
 from datetime import date
 from pathlib import Path
@@ -15,7 +15,9 @@ from lib import config
 
 
 ROOT = Path(__file__).resolve().parents[1]
-MIGRATION = ROOT / "sql" / "migrations" / "20260902_decision_safety_gateway.sql"
+GATEWAY_MIGRATION = ROOT / "sql" / "migrations" / "20260902_decision_safety_gateway.sql"
+OWNER_PLAN_MIGRATION = ROOT / "sql" / "migrations" / "20260903_owner_investment_plans.sql"
+OUTCOME_MIGRATION = ROOT / "sql" / "migrations" / "20260904_outcome_evaluation.sql"
 TICKER = "TSTGW"
 POLICY_VERSION = 2_147_483_000
 RPC_SIGNATURES = (
@@ -28,6 +30,8 @@ RPC_SIGNATURES = (
     "import_legacy_suggestion(jsonb)",
     "claim_market_publication(uuid)",
     "finish_market_publication(uuid,uuid,text,jsonb,text)",
+    "get_due_market_decisions(integer)",
+    "upsert_market_outcome_grades(jsonb)",
 )
 
 
@@ -325,7 +329,76 @@ def _verify_decision_transaction(cur, run_id):
     _require(second.get("duplicate") is True, "decision retry was not idempotent")
     cur.execute("SELECT count(*) FROM public.suggestions WHERE evaluation_id=%s", (evaluation_id,))
     _require(cur.fetchone()[0] == 1, "decision retry duplicated suggestion")
-    return request_id, first["publication_id"], evaluation_id
+    cur.execute("SELECT id FROM public.suggestions WHERE evaluation_id=%s", (evaluation_id,))
+    suggestion_id = cur.fetchone()[0]
+    return request_id, first["publication_id"], evaluation_id, suggestion_id
+
+
+def _outcome_grade(suggestion_id, *, status, sessions, stock_return=None):
+    return {
+        "suggestion_id": suggestion_id,
+        "horizon_days": 5,
+        "horizon_sessions": sessions,
+        "coverage_status": status,
+        "benchmark_ticker": "VOO",
+        "stock_return_pct": stock_return,
+        "benchmark_return_pct": None,
+        "excess_return_pct": None,
+        "mfe_pct": None,
+        "mae_pct": None,
+        "entry_hit_at": None,
+        "stop_hit_at": None,
+        "target_hit_at": None,
+        "invalidation_hit_at": None,
+        "policy_version": POLICY_VERSION,
+        "final_action": "watch",
+        "direction_success": None,
+    }
+
+
+def _verify_outcome_grades(cur, suggestion_id):
+    due = _call(cur, "get_due_market_decisions", 50)
+    _require(
+        any(int(item["suggestion_id"]) == suggestion_id for item in due),
+        "gateway suggestion was not exposed for deterministic grading",
+    )
+    _expect_db_error(cur, lambda: _call(cur, "get_due_market_decisions", 0))
+
+    incomplete = _call(
+        cur,
+        "upsert_market_outcome_grades",
+        Jsonb([_outcome_grade(suggestion_id, status="incomplete", sessions=4)]),
+    )
+    _require(incomplete.get("incomplete") == 1, "incomplete grade was not recorded")
+    complete = _call(
+        cur,
+        "upsert_market_outcome_grades",
+        Jsonb([_outcome_grade(
+            suggestion_id, status="complete", sessions=5, stock_return="1.0000"
+        )]),
+    )
+    _require(complete.get("updated") == 1, "complete grade did not replace incomplete grade")
+    ignored = _call(
+        cur,
+        "upsert_market_outcome_grades",
+        Jsonb([_outcome_grade(
+            suggestion_id, status="complete", sessions=5, stock_return="99.0000"
+        )]),
+    )
+    _require(
+        ignored.get("inserted") == 0 and ignored.get("updated") == 0,
+        "complete grade was not immutable",
+    )
+    cur.execute(
+        "SELECT coverage_status,stock_return_pct FROM public.suggestion_grades "
+        "WHERE suggestion_id=%s AND horizon_days=5",
+        (suggestion_id,),
+    )
+    status, stock_return = cur.fetchone()
+    _require(
+        status == "complete" and str(stock_return) == "1.0000",
+        "complete outcome grade changed after retry",
+    )
 
 
 def _verify_artifacts(cur, run_id):
@@ -459,10 +532,16 @@ def _verify_rls_owners_and_grants(cur):
         JOIN pg_catalog.pg_namespace n ON n.oid=c.relnamespace
         WHERE n.nspname='public' AND relname=ANY(%s)
         """,
-        (["market_gateway_requests", "market_policy_config", "decision_evaluations", "market_publications"],),
+        ([
+            "market_gateway_requests",
+            "market_policy_config",
+            "decision_evaluations",
+            "market_publications",
+            "owner_investment_plans",
+        ],),
     )
     rows = cur.fetchall()
-    _require(len(rows) == 4 and all(row[1] for row in rows), "gateway RLS is incomplete")
+    _require(len(rows) == 5 and all(row[1] for row in rows), "gateway RLS is incomplete")
     for signature in RPC_SIGNATURES:
         cur.execute("SELECT to_regprocedure(%s)::oid", (f"public.{signature}",))
         oid = cur.fetchone()[0]
@@ -492,18 +571,25 @@ def main():
     try:
         connection = psycopg.connect(config.secret("postgres_url"))
         with connection.cursor() as cur:
-            migration = MIGRATION.read_text()
-            _verify_preflight_and_apply_twice(cur, migration)
+            gateway_migration = GATEWAY_MIGRATION.read_text()
+            _verify_preflight_and_apply_twice(cur, gateway_migration)
+            for path in (OWNER_PLAN_MIGRATION, OUTCOME_MIGRATION):
+                migration = path.read_text()
+                cur.execute(migration)
+                cur.execute(migration)
             _verify_legacy_import(cur)
             _verify_request_leases(cur)
             run_id = _verify_start_run(cur)
-            request_id, _publication_id, evaluation_id = _verify_decision_transaction(cur, run_id)
+            request_id, _publication_id, evaluation_id, suggestion_id = (
+                _verify_decision_transaction(cur, run_id)
+            )
             _verify_artifacts(cur, run_id)
+            _verify_outcome_grades(cur, suggestion_id)
             _verify_publication_and_immutability(cur, request_id, evaluation_id)
             _verify_holiday_without_run(cur)
             _verify_rls_owners_and_grants(cur)
             _verify_rate_limits(cur)
-        print("PASS: decision gateway migration is atomic and idempotent")
+        print("PASS: complete decision gateway migration chain is atomic and idempotent")
         return 0
     except Exception as exc:
         print(f"FAIL: decision gateway migration verification ({type(exc).__name__})")

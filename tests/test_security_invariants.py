@@ -45,6 +45,23 @@ def test_live_rpc_verifier_cannot_be_disabled_with_python_optimization():
         assert not any(isinstance(node, ast.Assert) for node in ast.walk(tree))
 
 
+def test_gateway_migration_verifier_covers_the_full_release_chain():
+    source = (ROOT / "scripts" / "verify_decision_gateway_migration.py").read_text()
+    for migration in (
+        "20260902_decision_safety_gateway.sql",
+        "20260903_owner_investment_plans.sql",
+        "20260904_outcome_evaluation.sql",
+    ):
+        assert migration in source
+    for invariant in (
+        "owner_investment_plans",
+        "get_due_market_decisions(integer)",
+        "upsert_market_outcome_grades(jsonb)",
+        "_verify_outcome_grades",
+    ):
+        assert invariant in source
+
+
 def test_webhook_acknowledges_non_owner_updates_without_processing_them():
     source = (ROOT / "supabase" / "functions" / "telegram-portfolio" / "index.ts").read_text()
     assert "return jsonResponse(200, { ok: true, ignored: true });" in source
