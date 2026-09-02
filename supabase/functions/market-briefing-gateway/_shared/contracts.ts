@@ -151,6 +151,7 @@ export interface HoldingState {
   bucket: Bucket | null;
   stop: string | null;
   target: string | null;
+  high_water_price: string | null;
   hold_override_until: string | null;
   stop_alert_active: boolean;
   stop_near_alert_active: boolean;
