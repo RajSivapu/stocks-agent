@@ -13,6 +13,20 @@ from lib import config
 
 
 CTX = ssl.create_default_context()
+EDGE_ENV_FILE = Path(__file__).resolve().parents[1] / "supabase" / ".env.local"
+
+
+def _edge_env_secret(name):
+    if not EDGE_ENV_FILE.exists():
+        return ""
+    for raw_line in EDGE_ENV_FILE.read_text().splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, value = line.split("=", 1)
+        if key.strip() == name:
+            return value.strip().strip('"').strip("'")
+    return ""
 
 
 def _telegram(token, method, fields=None):
@@ -31,7 +45,11 @@ def _telegram(token, method, fields=None):
 
 def main():
     token = config.secret("telegram_bot_token")
-    webhook_secret = config.secret("telegram_webhook_secret")
+    try:
+        webhook_secret = config.secret("telegram_webhook_secret")
+    except KeyError:
+        webhook_secret = ""
+    webhook_secret = webhook_secret or _edge_env_secret("TELEGRAM_WEBHOOK_SECRET")
     supabase_url = config.secret("supabase_url").rstrip("/")
     webhook_url = f"{supabase_url}/functions/v1/telegram-portfolio"
 
