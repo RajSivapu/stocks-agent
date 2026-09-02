@@ -158,7 +158,9 @@ def test_gateway_repository_uses_only_fixed_tables_and_named_rpcs():
         "claim_market_publication",
         "complete_market_gateway_request",
         "finish_market_publication",
+        "get_due_market_decisions",
         "start_market_analysis_run",
+        "upsert_market_outcome_grades",
     }
     assert not re.search(r"client\.from\((?!\")[^)]+\)", source)
     assert not re.search(r"client\.rpc\((?!\")[^)]+\)", source)
@@ -261,3 +263,23 @@ def test_telegram_plan_handler_uses_policy_allowlist_and_bounded_listing():
     assert '.eq("active", true).order("next_due_on").limit(20)' in listing
     assert "planPreviewText(command)" in source
     assert "planResultText(result)" in source
+
+
+def test_outcome_migration_is_bounded_idempotent_and_service_role_only():
+    migration = ROOT / "sql" / "migrations" / "20260904_outcome_evaluation.sql"
+    assert migration.exists()
+    sql = migration.read_text()
+    schema = (ROOT / "sql" / "schema.sql").read_text()
+    for fragment in (
+        "duplicate suggestion grades require review before outcome migration",
+        "idx_suggestion_grades_suggestion_horizon",
+        "CREATE OR REPLACE FUNCTION public.get_due_market_decisions(p_limit INT)",
+        "CREATE OR REPLACE FUNCTION public.upsert_market_outcome_grades(p_grades JSONB)",
+        "jsonb_array_length(p_grades) > 150",
+        "v_existing.coverage_status = 'complete'",
+        "REVOKE ALL ON FUNCTION public.get_due_market_decisions(INT) FROM PUBLIC, anon, authenticated",
+        "REVOKE ALL ON FUNCTION public.upsert_market_outcome_grades(JSONB) FROM PUBLIC, anon, authenticated",
+    ):
+        assert fragment in sql
+        assert fragment in schema
+    assert sql in schema

@@ -17,6 +17,7 @@ import type {
 } from "./repository.ts";
 import { GatewayRepositoryError } from "./repository.ts";
 import { TelegramDeliveryError } from "./telegram.ts";
+import type { DueDecision, OutcomeGrade } from "./outcomes.ts";
 
 function assert(value: boolean, message: string): void {
   if (!value) throw new Error(message);
@@ -141,6 +142,9 @@ class FakeRepository implements GatewayRepository {
   context = readContext();
   lastArtifacts: PersistableArtifactMutationBatch | null = null;
   lastBundle: PersistedBundle | null = null;
+  due: DueDecision[] = [];
+  graded: OutcomeGrade[] = [];
+  dueLimit: number | null = null;
 
   claimRequest(envelope: GatewayEnvelope): Promise<GatewayRequestClaim> {
     this.mutationCalls += 1;
@@ -203,6 +207,15 @@ class FakeRepository implements GatewayRepository {
     this.mutationCalls += 1;
     this.finishRunCalls += 1;
     return Promise.resolve({ run_id: RUN_ID, status: "completed", write_counts: { evaluations: 1 }, publication_statuses: ["delivered"], telegram_message_ids: [77] });
+  }
+  dueDecisions(limit: number): Promise<DueDecision[]> {
+    this.dueLimit = limit;
+    return Promise.resolve(structuredClone(this.due));
+  }
+  upsertGrades(grades: OutcomeGrade[]): Promise<{ inserted: number; updated: number; incomplete: number }> {
+    this.mutationCalls += 1;
+    this.graded = structuredClone(grades);
+    return Promise.resolve({ inserted: grades.length, updated: 0, incomplete: grades.filter((grade) => grade.coverage_status !== "complete").length });
   }
 }
 
@@ -420,7 +433,7 @@ Deno.test("a second request for an evaluated run reuses the publication without 
   assertEquals(setup.repository.applyCalls, 2);
 });
 
-Deno.test("holiday, inactive grading, and server-derived finish behavior", async () => {
+Deno.test("holiday, bounded grading, and server-derived finish behavior", async () => {
   const holidayNow = () => new Date("2026-09-07T11:00:00.000Z");
   const pre = makeHandler(new FakeRepository(), { now: holidayNow });
   const preResponse = await json(await pre.handler(request("start_run", { phase: "pre-market", market_date: "2026-09-07" })));
@@ -431,10 +444,15 @@ Deno.test("holiday, inactive grading, and server-derived finish behavior", async
   assertEquals(midResponse.status, "suppressed");
   assertEquals(midday.sent, []);
 
-  const inactive = makeHandler();
-  const grade = await inactive.handler(request("grade_due_decisions", {}));
-  assertEquals(grade.status, 409);
-  assertEquals((await json(grade)).code, "FEATURE_NOT_ACTIVE");
+  const grading = makeHandler();
+  const grade = await grading.handler(request("grade_due_decisions", { limit: 10 }));
+  assertEquals(grade.status, 200);
+  assertEquals((await json(grade)).counts, { inserted: 0, updated: 0, incomplete: 0 });
+  assertEquals(grading.repository.dueLimit, 10);
+  for (const invalid of [{}, { limit: 0 }, { limit: 51 }, { limit: 1, returns: [99] }]) {
+    const response = await grading.handler(request("grade_due_decisions", invalid));
+    assertEquals(response.status, 400);
+  }
 
   const finish = makeHandler();
   const receipt = await json(await finish.handler(request("finish_run", { write_counts: { invented: 999 } })));

@@ -8,7 +8,8 @@ import {
   type VerifiedQuote,
 } from "./contracts.ts";
 import { isNyseHoliday } from "./market-calendar.ts";
-import { fetchVerifiedQuote } from "./market-data.ts";
+import { fetchAdjustedHistory, fetchVerifiedQuote, type AdjustedBar } from "./market-data.ts";
+import { gradeDecision, type DueDecision } from "./outcomes.ts";
 import { evaluateCandidate, type PolicyEvaluation } from "./policy.ts";
 import { renderPublication } from "./renderer.ts";
 import {
@@ -29,6 +30,7 @@ export interface GatewayDependencies {
   now?: () => Date;
   newId?: () => string;
   fetchQuote?: (ticker: string, now: Date) => Promise<VerifiedQuote>;
+  fetchHistory?: (ticker: string) => Promise<AdjustedBar[]>;
   sendTelegram?: (parts: string[], chatId: string, token: string) => Promise<number[]>;
 }
 
@@ -116,6 +118,16 @@ function exactKeys(row: Record<string, unknown>, required: readonly string[]): v
     required.some((key) => !(key in row))) {
     throw new GatewayHttpError(400, "INVALID_REQUEST");
   }
+}
+
+function parseGradePayload(value: unknown): { limit: number } {
+  const row = objectValue(value);
+  exactKeys(row, ["limit"]);
+  if (typeof row.limit !== "number" || !Number.isSafeInteger(row.limit) ||
+      row.limit < 1 || row.limit > 50) {
+    throw new GatewayHttpError(400, "INVALID_REQUEST");
+  }
+  return { limit: row.limit };
 }
 
 function chicagoDate(now: Date): string {
@@ -224,6 +236,7 @@ export function createGatewayHandler(dependencies: GatewayDependencies) {
     now: dependencies.now ?? (() => new Date()),
     newId: dependencies.newId ?? (() => crypto.randomUUID()),
     fetchQuote: dependencies.fetchQuote ?? ((ticker: string, now: Date) => fetchVerifiedQuote(ticker, fetch, now)),
+    fetchHistory: dependencies.fetchHistory ?? ((ticker: string) => fetchAdjustedHistory(ticker, "1y", fetch)),
     sendTelegram: dependencies.sendTelegram ?? sendTelegramParts,
   };
 
@@ -249,8 +262,10 @@ export function createGatewayHandler(dependencies: GatewayDependencies) {
         const row = objectValue(envelope.payload);
         if (row.market_date !== currentDate) throw new GatewayHttpError(400, "INVALID_REQUEST");
         prepared = parseDecisionBundle(row, row.phase as Phase);
-      } else if (envelope.operation === "read_context" || envelope.operation === "finish_run" ||
-        envelope.operation === "grade_due_decisions") {
+      } else if (envelope.operation === "grade_due_decisions") {
+        requireRun(envelope);
+        prepared = parseGradePayload(envelope.payload);
+      } else if (envelope.operation === "read_context" || envelope.operation === "finish_run") {
         requireRun(envelope);
         const row = objectValue(envelope.payload);
         if (envelope.operation !== "finish_run") exactKeys(row, []);
@@ -283,7 +298,12 @@ export function createGatewayHandler(dependencies: GatewayDependencies) {
           return response(200, { ok: true, dry_run: true, status: "completed", write_counts: {}, publication_statuses: [], telegram_message_ids: [] });
         }
         if (envelope.operation === "grade_due_decisions") {
-          return response(409, { ok: false, code: "FEATURE_NOT_ACTIVE" });
+          const receipt = await gradeDueDecisions(
+            (prepared as { limit: number }).limit,
+            false,
+            deps,
+          );
+          return response(200, { ok: true, dry_run: true, ...receipt });
         }
         return await evaluateAndPublish(envelope, prepared as ReturnType<typeof parseDecisionBundle>, null, deps);
       } catch (error) {
@@ -362,9 +382,12 @@ export function createGatewayHandler(dependencies: GatewayDependencies) {
         return response(200, { ok: true, receipt });
       }
       if (envelope.operation === "grade_due_decisions") {
-        const result = { ok: false, code: "FEATURE_NOT_ACTIVE" };
+        const result = {
+          ok: true,
+          ...await gradeDueDecisions((prepared as { limit: number }).limit, true, deps),
+        };
         await deps.repository.completeRequest(envelope.request_id, leaseToken, result);
-        return response(409, result);
+        return response(200, result);
       }
       if (envelope.operation === "finish_run") {
         const receipt = await deps.repository.finishRun(requireRun(envelope));
@@ -396,8 +419,46 @@ type ResolvedDependencies = GatewayDependencies & {
   now: () => Date;
   newId: () => string;
   fetchQuote: (ticker: string, now: Date) => Promise<VerifiedQuote>;
+  fetchHistory: (ticker: string) => Promise<AdjustedBar[]>;
   sendTelegram: (parts: string[], chatId: string, token: string) => Promise<number[]>;
 };
+
+async function gradeDueDecisions(
+  limit: number,
+  persist: boolean,
+  deps: ResolvedDependencies,
+): Promise<Record<string, unknown>> {
+  const decisions = await deps.repository.dueDecisions(limit);
+  const histories = new Map<string, Promise<AdjustedBar[]>>();
+  const history = (ticker: string): Promise<AdjustedBar[]> => {
+    if (!histories.has(ticker)) {
+      histories.set(ticker, deps.fetchHistory(ticker).catch(() => []));
+    }
+    return histories.get(ticker)!;
+  };
+  const grades = [];
+  for (const decision of decisions as DueDecision[]) {
+    const stockBars = await history(decision.ticker);
+    const benchmarkTicker = decision.ticker === "VXUS" ? "VXUS" : "VOO";
+    const benchmarkBars = await history(benchmarkTicker);
+    for (const horizon of [5, 21, 63] as const) {
+      if (!decision.completed_horizons.includes(horizon)) {
+        grades.push(gradeDecision(decision, stockBars, benchmarkBars, horizon));
+      }
+    }
+  }
+  if (!persist) {
+    return {
+      counts: {
+        inserted: 0,
+        updated: 0,
+        incomplete: grades.filter((grade) => grade.coverage_status !== "complete").length,
+      },
+      would_grade: grades.length,
+    };
+  }
+  return { counts: await deps.repository.upsertGrades(grades) };
+}
 
 async function deliverReadyPublication(
   persisted: PublicationReceipt,

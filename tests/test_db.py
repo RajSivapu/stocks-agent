@@ -192,6 +192,20 @@ def test_recent_queries_reject_invalid_bounds(limit):
         db.get_recent_transactions(limit=limit)
 
 
+def test_weekly_audit_queries_exclude_heavy_or_sensitive_columns(monkeypatch):
+    client = _RecordingClient()
+    monkeypatch.setattr(db, "_sb", lambda: client)
+
+    db.get_recent_decision_evaluations(limit=21)
+    db.get_recent_market_publications(limit=22)
+
+    selects = [call[2] for call in client.calls if call[1] == "select"]
+    assert any("policy_status" in columns and "evidence" not in columns and "analyst" not in columns
+               for columns in selects)
+    assert any("telegram_message_ids" in columns and "rendered_body" not in columns and "error" not in columns
+               for columns in selects)
+
+
 def test_finish_analysis_run_bounds_free_text(monkeypatch):
     client = _RecordingClient()
     monkeypatch.setattr(db, "_sb", lambda: client)

@@ -8,6 +8,7 @@ import type {
   PolicyConfig,
 } from "./contracts.ts";
 import type { PolicyEvaluation } from "./policy.ts";
+import type { DueDecision, OutcomeGrade } from "./outcomes.ts";
 import { formatFixed, parseFixed } from "./fixed-point.ts";
 
 export interface PersistedBundle {
@@ -105,6 +106,12 @@ export interface GatewayRepository {
     error: string | null,
   ): Promise<PublicationReceipt>;
   finishRun(runId: string): Promise<RunReceipt>;
+  dueDecisions(limit: number): Promise<DueDecision[]>;
+  upsertGrades(grades: OutcomeGrade[]): Promise<{
+    inserted: number;
+    updated: number;
+    incomplete: number;
+  }>;
 }
 
 export class GatewayRepositoryError extends Error {
@@ -420,6 +427,38 @@ export function createSupabaseGatewayRepository(
         created_paper_watch_ids: Array.isArray(row.paper_watch_ids)
           ? row.paper_watch_ids.map(integer)
           : [],
+      };
+    },
+
+    async dueDecisions(limit) {
+      const result = await client.rpc("get_due_market_decisions", { p_limit: limit });
+      return rows(result).map((row) => ({
+        suggestion_id: integer(row.suggestion_id),
+        decision_date: text(row.decision_date, 10),
+        ticker: text(row.ticker, 15),
+        bucket: text(row.bucket, 20) as DueDecision["bucket"],
+        final_action: text(row.final_action, 10) as DueDecision["final_action"],
+        confidence: text(row.confidence, 10) as DueDecision["confidence"],
+        policy_version: integer(row.policy_version),
+        decision_price: decimal(row.decision_price),
+        entry_zone_low: nullableDecimal(row.entry_zone_low),
+        entry_zone_high: nullableDecimal(row.entry_zone_high),
+        stop: nullableDecimal(row.stop),
+        target: nullableDecimal(row.target),
+        invalidation_price: nullableDecimal(row.invalidation_price),
+        completed_horizons: Array.isArray(row.completed_horizons)
+          ? row.completed_horizons.map(integer)
+          : [],
+      }));
+    },
+
+    async upsertGrades(grades) {
+      if (grades.length > 150) throw new GatewayRepositoryError("CONTEXT_TOO_LARGE");
+      const row = oneObject(await client.rpc("upsert_market_outcome_grades", { p_grades: grades }));
+      return {
+        inserted: integer(row.inserted),
+        updated: integer(row.updated),
+        incomplete: integer(row.incomplete),
       };
     },
 

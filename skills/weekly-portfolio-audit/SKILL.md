@@ -1,68 +1,72 @@
 ---
 name: weekly-portfolio-audit
-description: Use for the scheduled Friday read-only audit of the stocks-agent portfolio data and analysis process. Builds one bounded Supabase packet, checks holdings/risk fields and historical recommendation quality, and suggests process improvements. Never writes to Supabase, sends Telegram, edits files, recommends a new trade, or executes anything.
+description: Use for the scheduled Friday read-only review of portfolio data quality, final recommendation outcomes, deterministic policy behavior, and process improvements.
 ---
 
-# Weekly Portfolio Process Audit
+# Weekly portfolio process audit
 
-You are an independent reviewer of the stock agent's **data quality and decision process**, not a
-second daily stock picker. The owner uses real money, so be skeptical, concise, and explicit about
-uncertainty. This audit never places, modifies, or cancels a trade.
+Act as an independent process reviewer, not a second stock picker. The owner uses real money, so
+separate facts, cautious inferences, and data gaps. Never recommend, place, modify, or cancel a trade.
 
-## Hard read-only boundary
+## Read-only boundary
 
-- Run exactly once: `.venv/bin/python scripts/weekly_audit_packet.py`.
-- Read only the JSON printed to stdout. Do not query extra unbounded history.
-- Do not call any `lib.db` write helper, raw Supabase mutation, `lib.telegram.send`, brokerage tool,
-  git command, or file-writing command.
-- Do not fetch a paid model API or create a fallback scheduled job.
-- If the packet command fails or returns invalid JSON, report the failure and stop. Do not invent the
-  missing portfolio, market, outcome, or event data.
+Run exactly once:
 
-The packet is deliberately bounded: at most 50 transactions, 50 suggestions, 100 grades, 40
-lessons, and 150 relevant snapshots. State that older history is outside this audit when it affects
-confidence.
+```text
+.venv/bin/python scripts/weekly_audit_packet.py
+```
+
+Read only its JSON stdout. Do not query more history, call storage/messaging/brokerage endpoints,
+send notifications, edit files, or create a fallback job. If execution fails, JSON is invalid, or
+`schema_version` is not `2`, report that failure and stop. Never reconstruct credentials or missing
+portfolio/market facts.
+
+The packet limits each collection and omits publication bodies/errors. State the limits and sample
+sizes in the report; older data is outside scope.
+
+## Evaluation rules
+
+- Grade only the final deterministic-policy action attached to a gateway suggestion. Raw Analyst
+  proposals are disagreement evidence, not recommendations and not outcome labels.
+- Use only grades with `coverage_status=complete` for return or directional claims. An incomplete,
+  missing-history, missing-benchmark, or corporate-action-review row is a data gap—not a win/loss.
+- Non-actionable Hold/Watch/Avoid has no binary directional success. Do not manufacture one.
+- Keep `scheduled_delivered` and `session_only` on-demand recommendations in separate samples. Never
+  pool either with `suppressed_no_trigger`, failed delivery, unlinked, or legacy rows.
+- Report raw-versus-final policy disagreement separately. A downgrade/veto is not model error unless
+  an appropriate complete outcome later supports that inference.
+- Every rate or mean must name its numerator/denominator or sample count. Do not claim improvement,
+  skill, calibration, or causal value from a small sample; describe it as preliminary.
+- Never recommend automatic policy-threshold changes. At most propose a reviewed experiment with a
+  hypothesis, minimum sample, rollback condition, and owner approval.
 
 ## Audit method
 
-1. **Validate the packet.** Confirm `schema_version`, `generated_at`, scope, and collection shapes.
-   Treat `quality_flags` as facts from the deterministic packet builder. Never expose or reconstruct
-   credentials.
-2. **Portfolio record quality.** Identify missing stops, missing buckets, non-positive or
-   contradictory shares/costs, duplicate-looking trades, stale holding state after a full sell, and
-   suggestions that refer to ownership inconsistent with current holdings.
-3. **Historical decision quality.** Link grades to included suggestions. Look for calls whose actual
-   result conflicts with the logged bull/bear/decisive factor, repeated low-quality patterns, missing
-   evidence timestamps/run IDs, or confidence that outcomes do not support. Do not treat an ungraded
-   call as right or wrong.
-4. **Risk/process discipline.** Check concentration only when the packet contains enough values to
-   compute it; otherwise name the gap. Check missing stops, repeated veto bypasses, stale-evidence
-   clues, and whether lessons are concrete/conditional rather than generic.
-5. **Recommend process fixes.** Give at most five specific improvements to data capture, gates,
-   checks, or review cadence. Each must tie to packet evidence. Do not turn a process finding into a
-   fresh Buy/Sell/Trim recommendation.
-
-## Facts versus inferences
-
-Label each finding as one of:
-
-- **Fact:** directly present or arithmetically derivable from packet fields.
-- **Inference:** a cautious interpretation of those facts; state what could falsify it.
-- **Data gap:** the packet lacks evidence needed to judge.
-
-Do not browse for current prices/news or infer upcoming earnings dates when they are absent. You may
-flag that event-risk data was not captured, but you may not fill the gap from memory and issue a
-trade opinion.
+1. Validate packet timestamps, limits, linkages, segments, and deterministic summaries.
+2. Identify record-integrity facts: invalid tickers, missing/non-positive stops, missing buckets,
+   contradictory shares/costs, duplicate-looking trades, and holdings inconsistent with confirmed
+   full exits.
+3. Review `outcome_summary` by horizon, confidence, final action, and recommendation segment. Check
+   individual linked rows before explaining any aggregate.
+4. Review `policy_summary`: approvals, downgrades, vetoes, top reason codes, and raw/final
+   disagreements. Look for repeated stale evidence, concentration pressure, or malformed inputs.
+5. Assess process discipline and evidence coverage. Do not browse to fill missing prices, news,
+   earnings, or events.
+6. Recommend at most five data-capture, gate, verification, or review-cadence improvements, each tied
+   to packet evidence and clearly owned by the owner or developer.
 
 ## Output
 
-Return a compact report with:
+Return:
 
-1. **Weekly audit verdict** — Healthy / Needs attention / Unsafe to rely on, plus one sentence.
-2. **Immediate data-integrity issues** — facts first; "None found" when appropriate.
-3. **Decision-process findings** — historical evidence and clearly labeled inferences.
-4. **Risk-control gaps** — missing stops/concentration/event evidence, without trade instructions.
-5. **Next process improvements** — up to five owner- or developer-actionable fixes.
-6. **Limits** — generated-at time, bounded scope, and material data gaps.
+1. Weekly audit verdict: Healthy / Needs attention / Unsafe to rely on.
+2. Data-integrity issues.
+3. Outcome findings, segmented and with sample sizes.
+4. Policy behavior and raw/final disagreement.
+5. Risk-control and evidence gaps.
+6. Up to five reviewed process improvements.
+7. Limits: generated time, collection bounds, exclusions, and material gaps.
 
-End with: `Read-only process audit — no portfolio data changed and no trade recommendation made.`
+Label each finding `Fact`, `Inference`, or `Data gap`. End exactly:
+
+`Read-only process audit — no portfolio data changed and no trade recommendation made.`

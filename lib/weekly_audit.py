@@ -10,9 +10,15 @@ LIMITS = {
     "grades": 100,
     "lessons": 40,
     "snapshots": 150,
+    "evaluations": 50,
+    "publications": 50,
 }
 _SENSITIVE_KEY_FRAGMENTS = ("token", "secret", "key", "authorization")
 _TICKER = re.compile(r"^[A-Z][A-Z0-9]*(?:[.-][A-Z0-9]+)*$")
+_EVALUATION_FIELDS = {
+    "id", "request_id", "run_id", "candidate_id", "policy_version", "raw_action",
+    "final_action", "policy_status", "reason_codes", "created_at",
+}
 
 
 def _safe(value):
@@ -68,7 +74,100 @@ def _missing_stop(holding):
         return True
 
 
-def build_packet(*, holdings, transactions, suggestions, grades, lessons, snapshots, generated_at):
+def _segment(suggestion, publications_by_run):
+    if suggestion.get("decision_source") != "gateway":
+        return "legacy"
+    publication = publications_by_run.get(suggestion.get("run_id"))
+    if not publication:
+        return "unlinked"
+    if publication.get("phase") == "on-demand" and publication.get("status") == "suppressed":
+        return "session_only"
+    if publication.get("status") == "delivered":
+        return "scheduled_delivered"
+    if publication.get("status") == "suppressed":
+        return "suppressed_no_trigger"
+    return "scheduled_not_delivered"
+
+
+def _mean(values):
+    if not values:
+        return None
+    value = sum(values, Decimal("0")) / Decimal(len(values))
+    rendered = format(value.quantize(Decimal("0.0001")), "f").rstrip("0").rstrip(".")
+    return rendered or "0"
+
+
+def _summaries(suggestions, grades, evaluations):
+    suggestion_by_id = {row.get("id"): row for row in suggestions}
+    eligible_segments = {"scheduled_delivered", "session_only"}
+    complete = {"5": 0, "21": 0, "63": 0}
+    confidence = {}
+    excess_by_action = {}
+    gaps = {}
+    for grade in grades:
+        suggestion = suggestion_by_id.get(grade.get("suggestion_id"))
+        if not suggestion or suggestion.get("decision_source") != "gateway" or \
+                suggestion.get("delivery_segment") not in eligible_segments:
+            continue
+        status = grade.get("coverage_status")
+        horizon = grade.get("horizon_days")
+        if status == "complete" and str(horizon) in complete:
+            complete[str(horizon)] += 1
+            outcome = grade.get("direction_success")
+            level = suggestion.get("confidence")
+            if isinstance(outcome, bool) and isinstance(level, str):
+                row = confidence.setdefault(level, {"successful": 0, "total": 0})
+                row["total"] += 1
+                row["successful"] += int(outcome)
+            try:
+                excess = Decimal(str(grade["excess_return_pct"]))
+            except (KeyError, TypeError, ValueError, ArithmeticError):
+                pass
+            else:
+                action = grade.get("final_action")
+                if excess.is_finite() and isinstance(action, str):
+                    excess_by_action.setdefault(action, []).append(excess)
+        elif status != "complete":
+            key = (str(status), horizon)
+            gaps[key] = gaps.get(key, 0) + 1
+
+    policy = {"approved": 0, "downgraded": 0, "vetoed": 0}
+    disagreements = 0
+    reasons = {}
+    eligible_evaluations = {row.get("evaluation_id") for row in suggestions
+                            if row.get("decision_source") == "gateway"
+                            and row.get("delivery_segment") in eligible_segments}
+    for evaluation in evaluations:
+        if evaluation.get("id") not in eligible_evaluations:
+            continue
+        status = evaluation.get("policy_status")
+        if status in policy:
+            policy[status] += 1
+        if evaluation.get("raw_action") != evaluation.get("final_action"):
+            disagreements += 1
+        for code in evaluation.get("reason_codes") or []:
+            if isinstance(code, str):
+                reasons[code] = reasons.get(code, 0) + 1
+    policy["raw_final_disagreements"] = disagreements
+    policy["top_reason_codes"] = [
+        {"code": code, "count": count}
+        for code, count in sorted(reasons.items(), key=lambda item: (-item[1], item[0]))[:10]
+    ]
+    return {
+        "complete_by_horizon": complete,
+        "direction_success_by_confidence": dict(sorted(confidence.items())),
+        "mean_excess_return_by_action": {
+            action: _mean(values) for action, values in sorted(excess_by_action.items())
+        },
+        "coverage_gaps": [
+            {"coverage_status": status, "horizon_days": horizon, "count": count}
+            for (status, horizon), count in sorted(gaps.items(), key=lambda item: (str(item[0][0]), item[0][1] or 0))
+        ],
+    }, policy
+
+
+def build_packet(*, holdings, transactions, suggestions, grades, lessons, snapshots, generated_at,
+                 evaluations=(), publications=()):
     """Return a bounded packet without changing any caller-owned input objects."""
     invalid_counts = {}
     clean_holdings = _ticker_rows(holdings, "holdings", invalid_counts)
@@ -81,6 +180,26 @@ def build_packet(*, holdings, transactions, suggestions, grades, lessons, snapsh
     clean_suggestions = _ticker_rows(
         suggestions, "suggestions", invalid_counts, LIMITS["suggestions"]
     )
+
+    evaluation_ids = {row.get("evaluation_id") for row in clean_suggestions if row.get("evaluation_id")}
+    clean_evaluations = [
+        _safe({key: value for key, value in row.items() if key in _EVALUATION_FIELDS})
+        for row in evaluations
+        if isinstance(row, dict) and row.get("id") in evaluation_ids
+    ][:LIMITS["evaluations"]]
+    run_ids = {row.get("run_id") for row in clean_suggestions if row.get("run_id")}
+    publication_fields = {
+        "id", "idempotency_key", "run_id", "market_date", "phase", "kind", "template_version",
+        "status", "telegram_message_ids", "attempt_count", "created_at", "updated_at",
+    }
+    clean_publications = [
+        _safe({key: value for key, value in row.items() if key in publication_fields})
+        for row in publications
+        if isinstance(row, dict) and row.get("run_id") in run_ids
+    ][:LIMITS["publications"]]
+    publications_by_run = {row.get("run_id"): row for row in clean_publications}
+    for suggestion in clean_suggestions:
+        suggestion["delivery_segment"] = _segment(suggestion, publications_by_run)
 
     suggestion_ids = {row.get("id") for row in clean_suggestions if row.get("id") is not None}
     clean_grades = [
@@ -100,9 +219,12 @@ def build_packet(*, holdings, transactions, suggestions, grades, lessons, snapsh
     missing_stops = sorted(row["ticker"] for row in clean_holdings if row["missing_stop"])
     unbucketed = sorted(row["ticker"] for row in clean_holdings if not row.get("bucket"))
     generated = generated_at.isoformat() if isinstance(generated_at, (datetime, date)) else str(generated_at)
+    outcome_summary, policy_summary = _summaries(
+        clean_suggestions, clean_grades, clean_evaluations
+    )
 
     return {
-        "schema_version": 1,
+        "schema_version": 2,
         "generated_at": generated,
         "scope": {"tickers": relevant_tickers, "limits": dict(LIMITS)},
         "quality_flags": {
@@ -114,6 +236,10 @@ def build_packet(*, holdings, transactions, suggestions, grades, lessons, snapsh
         "transactions": clean_transactions,
         "suggestions": clean_suggestions,
         "grades": clean_grades,
+        "evaluations": clean_evaluations,
+        "publications": clean_publications,
+        "outcome_summary": outcome_summary,
+        "policy_summary": policy_summary,
         "lessons": clean_lessons,
         "snapshots": clean_snapshots,
     }

@@ -18,6 +18,8 @@ def main():
         grades=db.get_recent_grades(limit=100),
         lessons=db.get_lessons(limit=40),
         snapshots=db.get_recent_snapshots(limit=150),
+        evaluations=db.get_recent_decision_evaluations(limit=50),
+        publications=db.get_recent_market_publications(limit=50),
         generated_at=datetime.now(timezone.utc),
     )
     print(json.dumps(packet, separators=(",", ":"), sort_keys=False))

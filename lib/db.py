@@ -86,6 +86,22 @@ def get_recent_snapshots(limit=100):
     return _bounded_recent("daily_snapshots", "snap_date", limit)
 
 
+def get_recent_decision_evaluations(limit=50):
+    if type(limit) is not int or not 1 <= limit <= 500:
+        raise ValueError("limit must be an integer between 1 and 500")
+    return (_sb().table("decision_evaluations")
+            .select("id,request_id,run_id,candidate_id,policy_version,raw_action,final_action,policy_status,reason_codes,created_at")
+            .order("created_at", desc=True).limit(limit).execute().data)
+
+
+def get_recent_market_publications(limit=50):
+    if type(limit) is not int or not 1 <= limit <= 500:
+        raise ValueError("limit must be an integer between 1 and 500")
+    return (_sb().table("market_publications")
+            .select("id,idempotency_key,run_id,market_date,phase,kind,template_version,status,telegram_message_ids,attempt_count,created_at,updated_at")
+            .order("created_at", desc=True).limit(limit).execute().data)
+
+
 def get_active_paper_watches():
     return _sb().table("paper_watches").select("*").eq("status", "active").order("created", desc=True).execute().data
 
