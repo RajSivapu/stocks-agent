@@ -142,8 +142,14 @@ def _verify_preflight_and_apply_twice(cur, migration):
         cur.execute(
             """
             SELECT count(*) FROM public.suggestions
-            WHERE lower(trim(action)) NOT IN ('buy','add','hold','reduce','trim','sell','exit','watch','avoid')
-               OR (confidence IS NOT NULL AND lower(trim(confidence)) NOT IN ('low','medium','high'))
+            WHERE lower(trim(action)) NOT IN (
+              'buy','add','add slowly','add/dca','dca','dca/add slowly',
+              'hold','hold/wait','reduce','trim','sell','exit','study','watch',
+              'watch - alert at $285','watch - alert at $610','watch/add on pullback','avoid'
+            )
+               OR (confidence IS NOT NULL AND lower(trim(confidence)) NOT IN (
+                 'low','low-medium','medium','medium-high','high'
+               ))
                OR (bucket IS NOT NULL AND lower(trim(bucket)) NOT IN ('core','growth','speculative'))
             """
         )

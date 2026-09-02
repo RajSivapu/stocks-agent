@@ -100,6 +100,9 @@ def test_gateway_migration_preflights_legacy_values_before_normalizing_and_backf
         assert backfill < not_null
         assert "WHEN 'trim' THEN 'reduce'" in sql
         assert "WHEN 'exit' THEN 'sell'" in sql
+        assert "WHEN lower(trim(action)) IN ('add slowly','add/dca','dca','dca/add slowly') THEN 'add'" in sql
+        assert "WHEN lower(trim(action)) IN ('study','watch - alert at $285','watch - alert at $610','watch/add on pullback') THEN 'watch'" in sql
+        assert "WHEN lower(trim(confidence)) IN ('low-medium','medium-high') THEN 'medium'" in sql
         assert "decision_source TEXT NOT NULL DEFAULT 'legacy'" in sql
         assert "decision_mode TEXT NOT NULL DEFAULT 'discretionary'" in sql
         assert "decision_mode = 'owner_plan' AND bucket = 'core'" in sql

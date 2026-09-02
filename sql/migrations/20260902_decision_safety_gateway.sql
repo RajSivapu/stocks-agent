@@ -120,9 +120,13 @@ BEGIN
   IF EXISTS (
     SELECT 1 FROM public.suggestions
     WHERE lower(trim(action)) NOT IN (
-      'buy','add','hold','reduce','trim','sell','exit','watch','avoid'
+      'buy','add','add slowly','add/dca','dca','dca/add slowly',
+      'hold','hold/wait','reduce','trim','sell','exit','study','watch',
+      'watch - alert at $285','watch - alert at $610','watch/add on pullback','avoid'
     )
-       OR (confidence IS NOT NULL AND lower(trim(confidence)) NOT IN ('low','medium','high'))
+       OR (confidence IS NOT NULL AND lower(trim(confidence)) NOT IN (
+         'low','low-medium','medium','medium-high','high'
+       ))
        OR (bucket IS NOT NULL AND lower(trim(bucket)) NOT IN ('core','growth','speculative'))
   ) THEN
     RAISE EXCEPTION 'legacy suggestion preflight failed';
@@ -131,12 +135,21 @@ END;
 $$;
 
 UPDATE public.suggestions
-SET action = CASE lower(trim(action))
-  WHEN 'trim' THEN 'reduce'
-  WHEN 'exit' THEN 'sell'
-  ELSE lower(trim(action))
+SET action = CASE
+  WHEN lower(trim(action)) IN ('add slowly','add/dca','dca','dca/add slowly') THEN 'add'
+  WHEN lower(trim(action)) = 'hold/wait' THEN 'hold'
+  WHEN lower(trim(action)) IN ('study','watch - alert at $285','watch - alert at $610','watch/add on pullback') THEN 'watch'
+  ELSE CASE lower(trim(action))
+    WHEN 'trim' THEN 'reduce'
+    WHEN 'exit' THEN 'sell'
+    ELSE lower(trim(action))
+  END
 END,
-confidence = CASE WHEN confidence IS NULL THEN NULL ELSE lower(trim(confidence)) END,
+confidence = CASE
+  WHEN confidence IS NULL THEN NULL
+  WHEN lower(trim(confidence)) IN ('low-medium','medium-high') THEN 'medium'
+  ELSE lower(trim(confidence))
+END,
 bucket = CASE WHEN bucket IS NULL THEN NULL ELSE lower(trim(bucket)) END;
 
 UPDATE public.suggestions
