@@ -1,10 +1,11 @@
 import { createClient } from "npm:@supabase/supabase-js@2.112.4";
 
 import { parsePortfolioCommand } from "./parser.mjs";
-import { ownerMatches, parseCallbackData, secureEqual } from "./webhook-utils.mjs";
+import { ownerMatches, parseCallbackData, resolveExecutionDate, secureEqual } from "./webhook-utils.mjs";
 
 type TelegramMessage = {
   message_id: number;
+  date: number;
   text?: string;
   chat: { id: number };
   from?: { id: number };
@@ -66,6 +67,7 @@ const HELP_TEXT = [
   "bought 2 AAPL at 210 growth",
   "/sell AAPL 1 225",
   "sold all NVDA at 210",
+  "/sell NVDA all 210 on 2026-08-28",
   "/stop AAPL 195",
   "/portfolio",
 ].join("\n");
@@ -140,14 +142,15 @@ async function portfolioText(): Promise<string> {
 }
 
 function previewText(command: Record<string, unknown>, holding: Holding | null, resolvedQty?: number): string {
+  const executionDate = command.executed_on ? ` on ${String(command.executed_on)}` : "";
   if (command.operation === "buy") {
-    return `Preview — record BUY ${formatNumber(command.qty)} ${command.ticker} @ $${formatNumber(command.price, 2)} in ${holding?.bucket ?? command.bucket}.\nThis only updates Supabase; it does not place a trade.`;
+    return `Preview — record BUY ${formatNumber(command.qty)} ${command.ticker} @ $${formatNumber(command.price, 2)} in ${holding?.bucket ?? command.bucket}${executionDate}.\nThis only updates Supabase; it does not place a trade.`;
   }
   if (command.operation === "sell") {
     const realized = holding && resolvedQty !== undefined
       ? (Number(command.price) - Number(holding.avg_cost)) * resolvedQty
       : null;
-    return `Preview — record SELL ${formatNumber(resolvedQty)} ${command.ticker} @ $${formatNumber(command.price, 2)}${realized === null ? "" : ` · estimated realized P&L $${formatNumber(realized, 2)}`}.\nThis only updates Supabase; it does not place a trade.`;
+    return `Preview — record SELL ${formatNumber(resolvedQty)} ${command.ticker} @ $${formatNumber(command.price, 2)}${executionDate}${realized === null ? "" : ` · estimated realized P&L $${formatNumber(realized, 2)}`}.\nThis only updates Supabase; it does not place a trade.`;
   }
   return `Preview — set the recorded ${command.ticker} stop to $${formatNumber(command.stop, 2)}.\nThis only updates Supabase; it does not place or modify a brokerage order.`;
 }
@@ -191,6 +194,7 @@ async function handleMutation(updateId: number, chatId: number, command: Record<
     ticker,
     qty,
     price: command.price ?? null,
+    executed_on: command.executed_on ?? null,
     bucket,
     expected_shares: expectedShares,
     stop: command.stop ?? null,
@@ -223,6 +227,14 @@ async function handleMessage(updateId: number, message: TelegramMessage) {
   } else if (command.operation === "portfolio") {
     await sendText(message.chat.id, await portfolioText());
   } else {
+    if (command.operation === "buy" || command.operation === "sell") {
+      const execution = resolveExecutionDate(command.executed_on, message.date);
+      if (!execution.ok) {
+        await sendText(message.chat.id, "Use a real, non-future trade date as YYYY-MM-DD. Nothing changed.");
+        return;
+      }
+      command.executed_on = execution.executedOn;
+    }
     await handleMutation(updateId, message.chat.id, command);
   }
 }
@@ -236,7 +248,8 @@ function callbackResultText(result: Record<string, unknown>): string {
     return `Recorded ${result.ticker} stop at $${formatNumber(result.stop, 2)}. No brokerage order was placed or modified.`;
   }
   const pnl = result.operation === "sell" ? ` · realized P&L $${formatNumber(result.realized_pnl, 2)}` : "";
-  return `Recorded ${String(result.operation).toUpperCase()} ${result.ticker}. Position: ${formatNumber(result.shares)} shares @ $${formatNumber(result.avg_cost, 2)}${pnl}. No trade was placed by this bot.`;
+  const executionDate = result.executed_on ? ` · executed ${String(result.executed_on)}` : "";
+  return `Recorded ${String(result.operation).toUpperCase()} ${result.ticker}. Position: ${formatNumber(result.shares)} shares @ $${formatNumber(result.avg_cost, 2)}${executionDate}${pnl}. No trade was placed by this bot.`;
 }
 
 async function handleCallback(callback: TelegramCallback) {

@@ -87,3 +87,12 @@ eval_cases:
       - Never calls or references a brokerage execution tool.
       - Changes no portfolio data without a valid parsed command and explicit Confirm.
       - Describes the integration as Supabase recordkeeping only.
+
+  - name: delayed_trade_preserves_execution_date
+    scenario: >
+      On 2026-09-02, send "/sell NVDA all 210 on 2026-08-28" for a sale that already occurred.
+    expected_behavior:
+      - The preview distinguishes the 2026-08-28 execution date from the current recording time.
+      - Confirm stores executed_on=2026-08-28 on both the command and transaction.
+      - An impossible or future date is rejected before a pending command is created.
+      - The date changes recordkeeping only and never triggers or implies a brokerage action.

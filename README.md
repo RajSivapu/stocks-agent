@@ -233,12 +233,15 @@ For ordinary portfolio updates, Telegram is easier and safer than Claude chat:
 /buy AAPL 2 210 growth
 /sell AAPL 1.5 225
 /sell NVDA all 210
+/sell NVDA all 210 on 2026-08-28
 /stop AAPL 195
 /portfolio
 ```
 
 Buy/Sell/Stop first returns a preview with **Confirm** and **Cancel**. Nothing changes before
-Confirm. Commands expire after 15 minutes and are rejected if the recorded shares changed.
+Confirm. Commands expire after 15 minutes and are rejected if the recorded shares changed. For an
+older trade, append `on YYYY-MM-DD`; otherwise the bot uses the Telegram message date in
+America/Chicago. The immutable record time and actual execution date remain separate.
 
 ---
 
@@ -269,7 +272,7 @@ a real-money decision; do not duplicate all three daily runs in ChatGPT.
 | Table | What it stores |
 |---|---|
 | `holdings` | What you actually own (shares, avg cost, stop, target, high-water price) |
-| `transactions` | Every recorded buy/sell, including source=`telegram` confirmed events |
+| `transactions` | Every recorded buy/sell, with separate record and actual execution dates |
 | `suggestions` | Every Buy/Watch/Avoid call the agent made, with full bull/bear/decisive-factor fields |
 | `suggestion_grades` | Outcomes at 5/21/63-day horizons + Reflexion post-mortems on wrong calls |
 | `stock_observations` | Per-stock behavioral memory — seasonality, earnings reactions, big moves |

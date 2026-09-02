@@ -106,6 +106,7 @@ The function has no model. A deterministic parser accepts these operations:
 - `sold 1.5 AAPL at 225`
 - `sold all NVDA at 210`
 - `/sell NVDA all 210`
+- `/sell NVDA all 210 on 2026-08-28` for a delayed report
 - `move AAPL stop to 195`
 - `/stop AAPL 195`
 - `/portfolio`
@@ -113,8 +114,9 @@ The function has no model. A deterministic parser accepts these operations:
 
 Ticker symbols are normalized to uppercase. Quantities and prices must be positive finite decimals.
 A new holding requires `core`, `growth`, or `speculative`; an existing holding keeps its current
-bucket. A sell cannot exceed the recorded shares. Ambiguous or unsupported text changes nothing and
-returns a short usage example.
+bucket. A sell cannot exceed the recorded shares. A delayed Buy/Sell may include `on YYYY-MM-DD`;
+impossible and future dates are rejected. Otherwise, the Telegram message date in America/Chicago is
+used. Ambiguous or unsupported text changes nothing and returns a short usage example.
 
 ### 5. Confirmation and atomic mutation
 
@@ -202,12 +204,13 @@ error text.
 
 One row per accepted Telegram mutation with UUID primary key, unique Telegram update ID, owner
 identifiers, operation, ticker, quantity, price, bucket, expected shares, stop, status, preview JSON,
-confirmation message ID, expiry, application timestamp, realized P&L, result JSON, and bounded error
-text.
+execution date, confirmation message ID, expiry, application timestamp, realized P&L, result JSON,
+and bounded error text.
 
 ### Existing tables
 
-- `transactions` receives `source='telegram'` for applied Telegram trades.
+- `transactions` receives `source='telegram'` and the actual `executed_on` date for applied Telegram
+  trades; `ts` remains the immutable record timestamp.
 - `suggestions` gains nullable `run_id` and `evidence_as_of`.
 - `stock_observations` gains nullable `run_id`.
 - `holdings` remains the current-position source of truth.

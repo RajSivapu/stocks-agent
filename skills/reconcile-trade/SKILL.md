@@ -1,6 +1,6 @@
 ---
 name: reconcile-trade
-description: Use when Rajrupesh reports a trade he actually placed — e.g. "bought 1 NVDA @ 207", "sold 2 AMD", "sold half my VOO @ 681", or "skipped NVDA" — or when he updates a stop ("moved my AAPL stop to 230") or tells the agent to hold a position through a stop hit without alerting him ("I'm holding NVDA through end of July, don't alert me on the stop"). Parses it, records the transaction + updates holdings (including stop/target/high_water_price/hold_override_until) in Postgres, and confirms the new position with P&L in plain English. Suggestion-only; NEVER places, modifies, or cancels a trade.
+description: Use when Rajrupesh reports a completed buy, sell, skipped trade, stop change, or hold override that must be reconciled into the recorded portfolio, including a trade reported after its execution date.
 ---
 
 # Reconcile a Trade — keep holdings & P&L accurate
@@ -16,6 +16,7 @@ For ordinary Buy, Sell, full exit, and Stop records, direct the owner to the exi
 - `/buy AAPL 2 210 growth`
 - `/sell AAPL 1.5 225`
 - `/sell NVDA all 210`
+- `/sell NVDA all 210 on 2026-08-28` for a trade reported later
 - `/stop AAPL 195`
 - `/portfolio`
 
@@ -24,13 +25,19 @@ preview, and changes nothing until the owner presses **Confirm**. The Supabase R
 owner, expiry, current share count, quantity/bucket, and applies the transaction + holding change in
 one database transaction. Cancel, stale, expired, ambiguous, or duplicate commands change nothing.
 
+For an immediate Buy/Sell without `on YYYY-MM-DD`, the bot records the Telegram message date in
+America/Chicago as `executed_on`. For a delayed report, include the exact broker execution date.
+Impossible and future dates are rejected before a pending command exists. The transaction `ts`
+continues to mean when the event was recorded; it is never backdated.
+
 ## Claude-chat fallback
 
 Use this fallback only when Telegram is unavailable or the report is outside the bot's intentionally
 narrow grammar (for example, a hold override). Apply the same safety bar:
 
 1. Parse one event into operation, uppercase ticker, positive finite quantity, exact execution price,
-   and bucket for a new holding. `all` means the exact currently recorded shares.
+   actual execution date, and bucket for a new holding. `all` means the exact currently recorded
+   shares. If a delayed report omits its date, ask; never substitute today's date.
 2. Read `lib.db.get_holdings()` and reject a missing holding, oversell, non-positive stop, or changed
    share count. Never infer an execution price from a current quote; ask for the broker fill price.
 3. Restate the exact database change in one line and obtain explicit owner confirmation before any
@@ -72,7 +79,7 @@ narrow grammar (for example, a hold override). Apply the same safety bar:
 ## Guardrails
 
 - Never place, modify, or cancel a brokerage order.
-- Never guess quantity, bucket, fill price, current shares, or persisted success.
+- Never guess quantity, bucket, fill price, execution date, current shares, or persisted success.
 - Never treat recordkeeping as a recommendation that the trade was good.
 - Telegram Confirm is the default because it is deterministic, identity-checked, stale-safe,
   idempotent, and atomic. Claude chat is a deliberate fallback, not a second automation path.

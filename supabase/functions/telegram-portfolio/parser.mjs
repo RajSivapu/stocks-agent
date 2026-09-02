@@ -3,6 +3,7 @@ const BUCKETS = new Set(["core", "growth", "speculative"]);
 const NUMBER = /^(?:\d+(?:,\d{3})*(?:\.\d+)?|\d*\.\d+)$/;
 const PRICE = /^\$?(?:\d+(?:,\d{3})*(?:\.\d+)?|\d*\.\d+)$/;
 const TICKER = /^[A-Z][A-Z0-9]*(?:[.-][A-Z0-9]+)*$/;
+const ISO_DATE = /^\d{4}-\d{2}-\d{2}$/;
 
 function reject() {
   return { ok: false, error: HELP };
@@ -20,21 +21,42 @@ function normalizedTicker(token) {
   return ticker.length <= 12 && TICKER.test(ticker) ? ticker : null;
 }
 
-function buy(tickerToken, qtyToken, priceToken, bucketToken) {
+function tradeDate(token) {
+  if (token === undefined) return undefined;
+  if (typeof token !== "string" || !ISO_DATE.test(token) || token < "2000-01-01") return null;
+  const parsed = new Date(`${token}T00:00:00Z`);
+  return Number.isNaN(parsed.valueOf()) || parsed.toISOString().slice(0, 10) !== token ? null : token;
+}
+
+function buy(tickerToken, qtyToken, priceToken, bucketToken, dateToken) {
   const ticker = normalizedTicker(tickerToken);
   const qty = positiveNumber(qtyToken);
   const price = positiveNumber(priceToken, { price: true });
   const bucket = bucketToken?.toLowerCase() ?? null;
-  if (!ticker || qty === null || price === null || (bucket !== null && !BUCKETS.has(bucket))) return reject();
-  return { ok: true, command: { operation: "buy", ticker, qty, price, bucket } };
+  const executedOn = tradeDate(dateToken);
+  if (!ticker || qty === null || price === null || (bucket !== null && !BUCKETS.has(bucket)) || executedOn === null) return reject();
+  return {
+    ok: true,
+    command: {
+      operation: "buy", ticker, qty, price, bucket,
+      ...(executedOn ? { executed_on: executedOn } : {}),
+    },
+  };
 }
 
-function sell(tickerToken, qtyToken, priceToken) {
+function sell(tickerToken, qtyToken, priceToken, dateToken) {
   const ticker = normalizedTicker(tickerToken);
   const qty = qtyToken?.toLowerCase() === "all" ? "all" : positiveNumber(qtyToken);
   const price = positiveNumber(priceToken, { price: true });
-  if (!ticker || qty === null || qty === undefined || price === null) return reject();
-  return { ok: true, command: { operation: "sell", ticker, qty, price } };
+  const executedOn = tradeDate(dateToken);
+  if (!ticker || qty === null || qty === undefined || price === null || executedOn === null) return reject();
+  return {
+    ok: true,
+    command: {
+      operation: "sell", ticker, qty, price,
+      ...(executedOn ? { executed_on: executedOn } : {}),
+    },
+  };
 }
 
 function stop(tickerToken, stopToken) {
@@ -52,11 +74,19 @@ export function parsePortfolioCommand(input) {
   if (/^\/portfolio(?:@[A-Za-z0-9_]+)?$/i.test(text)) return { ok: true, command: { operation: "portfolio" } };
   if (/^\/help(?:@[A-Za-z0-9_]+)?$/i.test(text)) return { ok: true, command: { operation: "help" } };
 
-  let match = text.match(/^\/buy(?:@[A-Za-z0-9_]+)? (\S+) (\S+) (\S+)(?: (\S+))?$/i);
+  let match = text.match(/^\/buy(?:@[A-Za-z0-9_]+)? (\S+) (\S+) (\S+)(?: (\S+))? on (\S+)$/i);
+  if (match) return buy(match[1], match[2], match[3], match[4], match[5]);
+  match = text.match(/^bought (\S+) (\S+) (?:at|@) (\S+)(?: (\S+))? on (\S+)$/i);
+  if (match) return buy(match[2], match[1], match[3], match[4], match[5]);
+  match = text.match(/^\/buy(?:@[A-Za-z0-9_]+)? (\S+) (\S+) (\S+)(?: (\S+))?$/i);
   if (match) return buy(match[1], match[2], match[3], match[4]);
   match = text.match(/^bought (\S+) (\S+) (?:at|@) (\S+)(?: (\S+))?$/i);
   if (match) return buy(match[2], match[1], match[3], match[4]);
 
+  match = text.match(/^\/sell(?:@[A-Za-z0-9_]+)? (\S+) (\S+) (\S+) on (\S+)$/i);
+  if (match) return sell(match[1], match[2], match[3], match[4]);
+  match = text.match(/^sold (\S+) (\S+) (?:at|@) (\S+) on (\S+)$/i);
+  if (match) return sell(match[2], match[1], match[3], match[4]);
   match = text.match(/^\/sell(?:@[A-Za-z0-9_]+)? (\S+) (\S+) (\S+)$/i);
   if (match) return sell(match[1], match[2], match[3]);
   match = text.match(/^sold (\S+) (\S+) (?:at|@) (\S+)$/i);

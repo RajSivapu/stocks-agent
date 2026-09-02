@@ -38,7 +38,9 @@ ALTER TABLE holdings ADD COLUMN IF NOT EXISTS target_alert_active BOOLEAN DEFAUL
 CREATE TABLE IF NOT EXISTS transactions (
   id BIGSERIAL PRIMARY KEY, ts TIMESTAMPTZ NOT NULL DEFAULT now(),
   ticker TEXT NOT NULL, side TEXT NOT NULL CHECK (side IN ('buy','sell')),
-  qty NUMERIC NOT NULL, price NUMERIC NOT NULL, source TEXT DEFAULT 'owner');
+  qty NUMERIC NOT NULL, price NUMERIC NOT NULL, source TEXT DEFAULT 'owner',
+  executed_on DATE);
+ALTER TABLE transactions ADD COLUMN IF NOT EXISTS executed_on DATE;
 
 CREATE TABLE IF NOT EXISTS portfolio_commands (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -49,6 +51,7 @@ CREATE TABLE IF NOT EXISTS portfolio_commands (
   ticker TEXT NOT NULL CHECK (ticker ~ '^[A-Z][A-Z0-9]*([.-][A-Z0-9]+)*$'),
   qty NUMERIC,
   price NUMERIC,
+  executed_on DATE CHECK (executed_on IS NULL OR executed_on >= DATE '2000-01-01'),
   bucket TEXT CHECK (bucket IS NULL OR bucket IN ('core', 'growth', 'speculative')),
   expected_shares NUMERIC NOT NULL CHECK (expected_shares >= 0),
   stop NUMERIC,
@@ -68,6 +71,7 @@ CREATE TABLE IF NOT EXISTS portfolio_commands (
     OR (operation = 'stop' AND qty IS NULL AND price IS NULL AND stop > 0)
   )
 );
+ALTER TABLE portfolio_commands ADD COLUMN IF NOT EXISTS executed_on DATE;
 CREATE INDEX IF NOT EXISTS idx_portfolio_commands_status_expiry
   ON portfolio_commands(status, expires_at);
 CREATE INDEX IF NOT EXISTS idx_portfolio_commands_owner_created
@@ -171,6 +175,7 @@ DECLARE
   v_new_avg NUMERIC;
   v_realized NUMERIC;
   v_transaction_id BIGINT;
+  v_executed_on DATE;
   v_result JSONB;
 BEGIN
   SELECT * INTO v_command
@@ -220,6 +225,23 @@ BEGIN
     RETURN v_result;
   END IF;
 
+  IF v_command.operation IN ('buy', 'sell') THEN
+    v_executed_on := COALESCE(
+      v_command.executed_on,
+      (CURRENT_TIMESTAMP AT TIME ZONE 'America/Chicago')::date
+    );
+    IF v_executed_on < DATE '2000-01-01'
+        OR v_executed_on > (CURRENT_TIMESTAMP AT TIME ZONE 'America/Chicago')::date THEN
+      v_result := jsonb_build_object(
+        'ok', false, 'status', 'rejected', 'reason', 'invalid or future execution date'
+      );
+      UPDATE public.portfolio_commands
+      SET status = 'rejected', updated_at = now(), error = 'invalid execution date', result = v_result
+      WHERE id = v_command.id;
+      RETURN v_result;
+    END IF;
+  END IF;
+
   IF v_command.operation = 'buy' THEN
     IF v_has_holding THEN
       v_new_shares := v_holding.shares + v_command.qty;
@@ -244,14 +266,15 @@ BEGIN
       );
     END IF;
 
-    INSERT INTO public.transactions (ticker, side, qty, price, source)
-    VALUES (v_command.ticker, 'buy', v_command.qty, v_command.price, 'telegram')
+    INSERT INTO public.transactions (ticker, side, qty, price, source, executed_on)
+    VALUES (v_command.ticker, 'buy', v_command.qty, v_command.price, 'telegram', v_executed_on)
     RETURNING id INTO v_transaction_id;
 
     v_result := jsonb_build_object(
       'ok', true, 'status', 'applied', 'operation', 'buy', 'ticker', v_command.ticker,
       'shares', v_new_shares, 'avg_cost', v_new_avg,
       'bucket', CASE WHEN v_has_holding THEN v_holding.bucket ELSE v_command.bucket END,
+      'executed_on', v_executed_on,
       'transaction_id', v_transaction_id
     );
 
@@ -273,8 +296,8 @@ BEGIN
     v_new_shares := v_holding.shares - v_command.qty;
     v_realized := (v_command.price - v_holding.avg_cost) * v_command.qty;
 
-    INSERT INTO public.transactions (ticker, side, qty, price, source)
-    VALUES (v_command.ticker, 'sell', v_command.qty, v_command.price, 'telegram')
+    INSERT INTO public.transactions (ticker, side, qty, price, source, executed_on)
+    VALUES (v_command.ticker, 'sell', v_command.qty, v_command.price, 'telegram', v_executed_on)
     RETURNING id INTO v_transaction_id;
 
     IF v_new_shares = 0 THEN
@@ -286,7 +309,8 @@ BEGIN
     v_result := jsonb_build_object(
       'ok', true, 'status', 'applied', 'operation', 'sell', 'ticker', v_command.ticker,
       'shares', v_new_shares, 'avg_cost', CASE WHEN v_new_shares > 0 THEN v_holding.avg_cost ELSE NULL END,
-      'realized_pnl', v_realized, 'transaction_id', v_transaction_id
+      'realized_pnl', v_realized, 'executed_on', v_executed_on,
+      'transaction_id', v_transaction_id
     );
 
   ELSIF v_command.operation = 'stop' THEN

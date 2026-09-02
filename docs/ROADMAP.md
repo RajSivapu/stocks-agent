@@ -15,7 +15,7 @@ is separate, paper-first, and outside this codebase.
 | Analyst → Checker pass with stale/prior-plan veto | Implemented | Pending revised Routine rollout |
 | Quote exchange timestamps + 20-minute action gate | Implemented and tested | Available after updated repo is used by Routines |
 | `analysis_runs` audit trail | Implemented and migration ready | Pending Supabase migration |
-| Deterministic Telegram Buy/Sell/Stop recorder | Implemented, tested, Deno type-checked | Pending credential rotation, migration, function deploy, and webhook registration |
+| Deterministic Telegram Buy/Sell/Stop recorder, including delayed trade dates | Implemented, tested, Deno type-checked | Pending credential rotation, migration, function deploy, and webhook registration |
 | Atomic Confirm/Cancel RPCs | Implemented with disposable verification script | Pending Supabase migration + live TSTTG verification |
 | Friday ChatGPT weekly process audit | Packet + skill implemented and tested | Active Fridays at 16:30 CT; first scheduled report still needs review |
 | Watchlist changes as owner-reviewed proposals | Implemented in settings/skill | Available after revised Routine rollout |
