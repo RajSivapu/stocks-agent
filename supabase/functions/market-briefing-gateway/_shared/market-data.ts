@@ -22,13 +22,19 @@ const DECIMAL_PATTERN = /^(?:0|[1-9]\d*)(?:\.\d+)?$/;
 class MarketDataError extends Error {}
 
 function canonicalTicker(ticker: string): string {
-  if (typeof ticker !== "string" || ticker.length > 15 || !TICKER_PATTERN.test(ticker)) {
+  if (
+    typeof ticker !== "string" || ticker.length > 15 ||
+    !TICKER_PATTERN.test(ticker)
+  ) {
     throw new MarketDataError("invalid ticker");
   }
   return ticker;
 }
 
-function decimal(value: unknown, { nullable = false }: { nullable?: boolean } = {}): string | null {
+function decimal(
+  value: unknown,
+  { nullable = false }: { nullable?: boolean } = {},
+): string | null {
   if (value === null && nullable) return null;
   if (typeof value !== "number" && typeof value !== "string") {
     throw new MarketDataError("invalid provider decimal");
@@ -55,7 +61,9 @@ function objectValue(value: unknown): Record<string, unknown> {
 }
 
 function arrayValue(value: unknown): unknown[] {
-  if (!Array.isArray(value)) throw new MarketDataError("invalid provider array");
+  if (!Array.isArray(value)) {
+    throw new MarketDataError("invalid provider array");
+  }
   return value;
 }
 
@@ -93,7 +101,10 @@ async function boundedJson(response: Response): Promise<unknown> {
   }
 }
 
-async function fetchProviderJson(url: string, fetchImpl: FetchLike): Promise<unknown> {
+async function fetchProviderJson(
+  url: string,
+  fetchImpl: FetchLike,
+): Promise<unknown> {
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
   try {
@@ -111,7 +122,10 @@ async function fetchProviderJson(url: string, fetchImpl: FetchLike): Promise<unk
   }
 }
 
-function chartResult(payload: unknown, kind: "quote" | "history"): Record<string, unknown> {
+function chartResult(
+  payload: unknown,
+  kind: "quote" | "history",
+): Record<string, unknown> {
   try {
     const chart = objectValue(objectValue(payload).chart);
     const results = arrayValue(chart.result);
@@ -122,35 +136,87 @@ function chartResult(payload: unknown, kind: "quote" | "history"): Record<string
   }
 }
 
+function providerEpoch(value: unknown): number {
+  if (typeof value !== "number" || !Number.isSafeInteger(value) || value <= 0) {
+    throw new MarketDataError("invalid quote response");
+  }
+  return value;
+}
+
+function quoteMarketState(meta: Record<string, unknown>, now: Date): string {
+  if (meta.marketState !== undefined && meta.marketState !== null) {
+    if (
+      typeof meta.marketState !== "string" ||
+      !/^[A-Z_]{2,24}$/.test(meta.marketState)
+    ) {
+      throw new MarketDataError("invalid quote response");
+    }
+    return meta.marketState;
+  }
+
+  if (Number.isNaN(now.valueOf())) {
+    throw new MarketDataError("invalid quote response");
+  }
+  const periods = objectValue(meta.currentTradingPeriod);
+  const window = (name: "pre" | "regular" | "post") => {
+    const period = objectValue(periods[name]);
+    const start = providerEpoch(period.start);
+    const end = providerEpoch(period.end);
+    if (start >= end) throw new MarketDataError("invalid quote response");
+    return { start, end };
+  };
+  const pre = window("pre");
+  const regular = window("regular");
+  const post = window("post");
+  if (pre.end > regular.start || regular.end > post.start) {
+    throw new MarketDataError("invalid quote response");
+  }
+
+  const current = Math.floor(now.valueOf() / 1000);
+  if (current >= regular.start && current < regular.end) return "REGULAR";
+  if (current >= pre.start && current < pre.end) return "PRE";
+  if (current >= post.start && current < post.end) return "POST";
+  return "CLOSED";
+}
+
 export async function fetchVerifiedQuote(
   ticker: string,
   fetchImpl: FetchLike = fetch,
   now: Date = new Date(),
 ): Promise<VerifiedQuote> {
   const symbol = canonicalTicker(ticker);
-  const url = `https://query1.finance.yahoo.com/v8/finance/chart/${encodeURIComponent(symbol)}?range=5d&interval=1d`;
+  const url = `https://query1.finance.yahoo.com/v8/finance/chart/${
+    encodeURIComponent(symbol)
+  }?range=5d&interval=1d`;
   const payload = await fetchProviderJson(url, fetchImpl);
   try {
     const meta = objectValue(chartResult(payload, "quote").meta);
     const price = decimal(meta.regularMarketPrice);
-    const previousClose = decimal(meta.previousClose ?? meta.chartPreviousClose ?? null, { nullable: true });
-    if (typeof meta.regularMarketTime !== "number" ||
-      !Number.isSafeInteger(meta.regularMarketTime) || meta.regularMarketTime <= 0) {
+    const previousClose = decimal(
+      meta.previousClose ?? meta.chartPreviousClose ?? null,
+      { nullable: true },
+    );
+    if (
+      typeof meta.regularMarketTime !== "number" ||
+      !Number.isSafeInteger(meta.regularMarketTime) ||
+      meta.regularMarketTime <= 0
+    ) {
       throw new Error();
     }
     const asOf = new Date(meta.regularMarketTime * 1000);
-    if (Number.isNaN(asOf.valueOf()) || asOf.valueOf() > now.valueOf() + 5 * 60_000) {
+    if (
+      Number.isNaN(asOf.valueOf()) ||
+      asOf.valueOf() > now.valueOf() + 5 * 60_000
+    ) {
       throw new Error();
     }
-    if (typeof meta.marketState !== "string" || !/^[A-Z_]{2,24}$/.test(meta.marketState)) {
-      throw new Error();
-    }
+    const marketState = quoteMarketState(meta, now);
     return {
       ticker: symbol,
       price: price!,
       previous_close: previousClose,
       as_of: asOf.toISOString(),
-      market_state: meta.marketState,
+      market_state: marketState,
       source: "yahoo-chart",
     };
   } catch {
@@ -163,7 +229,9 @@ function exchangeDate(epochSeconds: number): string {
     throw new MarketDataError("invalid history response");
   }
   const date = new Date(epochSeconds * 1000);
-  if (Number.isNaN(date.valueOf())) throw new MarketDataError("invalid history response");
+  if (Number.isNaN(date.valueOf())) {
+    throw new MarketDataError("invalid history response");
+  }
   const parts = new Intl.DateTimeFormat("en-CA", {
     timeZone: "America/New_York",
     year: "numeric",
@@ -181,11 +249,16 @@ function splitRatio(value: unknown): string {
   const denominator = decimal(split.denominator);
   const numeratorNumber = Number(numerator);
   const denominatorNumber = Number(denominator);
-  if (!Number.isSafeInteger(numeratorNumber) || !Number.isSafeInteger(denominatorNumber)) {
+  if (
+    !Number.isSafeInteger(numeratorNumber) ||
+    !Number.isSafeInteger(denominatorNumber)
+  ) {
     throw new MarketDataError("invalid history response");
   }
   const ratio = numeratorNumber / denominatorNumber;
-  if (!Number.isFinite(ratio) || ratio <= 0) throw new MarketDataError("invalid history response");
+  if (!Number.isFinite(ratio) || ratio <= 0) {
+    throw new MarketDataError("invalid history response");
+  }
   return ratio.toFixed(8).replace(/\.?0+$/, "");
 }
 
@@ -196,7 +269,9 @@ export async function fetchAdjustedHistory(
 ): Promise<AdjustedBar[]> {
   const symbol = canonicalTicker(ticker);
   if (range !== "1y") throw new MarketDataError("invalid history range");
-  const url = `https://query1.finance.yahoo.com/v8/finance/chart/${encodeURIComponent(symbol)}?range=1y&interval=1d&events=div%2Csplits`;
+  const url = `https://query1.finance.yahoo.com/v8/finance/chart/${
+    encodeURIComponent(symbol)
+  }?range=1y&interval=1d&events=div%2Csplits`;
   const payload = await fetchProviderJson(url, fetchImpl);
   try {
     const result = chartResult(payload, "history");
@@ -212,13 +287,21 @@ export async function fetchAdjustedHistory(
     const highs = arrayValue(quote.high);
     const lows = arrayValue(quote.low);
     const adjustedCloses = arrayValue(adjustment.adjclose);
-    if ([closes, highs, lows, adjustedCloses].some((values) => values.length !== timestamps.length)) {
+    if (
+      [closes, highs, lows, adjustedCloses].some((values) =>
+        values.length !== timestamps.length
+      )
+    ) {
       throw new Error();
     }
 
     const splitByDate = new Map<string, string>();
-    const events = result.events === undefined ? {} : objectValue(result.events);
-    const splits = events.splits === undefined ? {} : objectValue(events.splits);
+    const events = result.events === undefined
+      ? {}
+      : objectValue(result.events);
+    const splits = events.splits === undefined
+      ? {}
+      : objectValue(events.splits);
     if (Object.keys(splits).length > 20) throw new Error();
     for (const event of Object.values(splits)) {
       const row = objectValue(event);
@@ -234,7 +317,9 @@ export async function fetchAdjustedHistory(
       const adjustedClose = decimal(adjustedCloses[index]);
       const rawHigh = decimal(highs[index]);
       const rawLow = decimal(lows[index]);
-      if (Number(rawLow) > Number(rawClose) || Number(rawClose) > Number(rawHigh)) throw new Error();
+      if (
+        Number(rawLow) > Number(rawClose) || Number(rawClose) > Number(rawHigh)
+      ) throw new Error();
       bars.set(date, {
         date,
         raw_close: rawClose!,
@@ -244,7 +329,9 @@ export async function fetchAdjustedHistory(
         split_ratio: splitByDate.get(date) ?? null,
       });
     }
-    return [...bars.values()].sort((left, right) => left.date.localeCompare(right.date));
+    return [...bars.values()].sort((left, right) =>
+      left.date.localeCompare(right.date)
+    );
   } catch {
     throw new MarketDataError("invalid history response");
   }
