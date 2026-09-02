@@ -2,7 +2,7 @@
 
 **Date:** 2026-09-02
 
-**Status:** Approved direction; pending written-spec review
+**Status:** Approved
 
 **Owner:** Rajrupesh
 
@@ -94,19 +94,27 @@ the quote used for policy; it never trusts the candidate's claimed current price
 Production routine configuration must not contain `TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID`, or
 `SUPABASE_SERVICE_ROLE_KEY`.
 
+On-demand equity research and earnings-review sessions use the same candidate, Analyst/Checker,
+quote, policy, persistence, and receipt contracts with phase `on-demand`. Their publications are
+always session-only (`suppressed`) and are returned to the requesting session; they do not send a
+Telegram message. This closes a direct-write bypass without turning ad hoc research into another
+notification source.
+
 ### `market-briefing-gateway` Edge Function
 
 The gateway owns authorization and effects. Its request operation is one of:
 
 - `start_run`: create and return an idempotent analysis run;
-- `read_context`: return bounded holdings, dry powder, active suggestions, relevant observations,
-  lessons, radar entries, and recent grades;
-- `record_artifacts`: validate and write bounded observations, snapshots, lessons, and radar updates
-  that do not represent an actionable recommendation;
+- `read_context`: return bounded holdings, dry powder, recent final-policy suggestions, relevant observations,
+  lessons, radar entries, active paper watches, and recent grades;
+- `record_artifacts`: validate and write an explicit union of bounded observations, snapshots,
+  lessons, radar updates, and hypothetical paper-watch create/close records that do not represent
+  an actionable recommendation or a real portfolio transaction;
 - `grade_due_decisions`: load due final-policy decisions and provider history, then compute outcome
   metrics server-side; model-supplied returns or hit/miss labels are not accepted;
-- `evaluate_and_publish`: evaluate a complete pre-market bundle or one intraday/post-market alert,
-  persist the decision audit and permitted suggestions, render the message, and conditionally send;
+- `evaluate_and_publish`: evaluate a complete pre-market or on-demand bundle, or one
+  intraday/post-market alert, persist the decision audit and permitted suggestions, render the
+  message, and conditionally send;
 - `finish_run`: derive final counts and delivery status from gateway-owned rows, then close the run;
   caller-supplied counts are not authoritative.
 
@@ -210,14 +218,26 @@ accepts a normalized candidate plus authoritative context and returns:
 Policy may preserve, downgrade, or veto. It may never upgrade `watch`, `hold`, or `avoid` into
 `buy`, `add`, `reduce`, or `sell`.
 
+The policy engine may derive alert-edge flags and a high-water mark from authoritative quotes. It
+may not silently change an owner's recorded stop or target. A proposed stop ratchet is a
+recommendation; changing the portfolio record still requires the existing owner-confirmed Telegram
+Stop command or an explicit local-admin reconciliation.
+
+Legacy `dry_powder` rows are informational in version 1 because they are not an owner-confirmed cash
+ledger. Cloud sessions cannot mutate them, and deterministic risk sizing uses the owner-reviewed
+monthly contribution from active policy rather than model-maintained dry-powder balances.
+
 ### Checks applied to every candidate
 
 1. Validate schema, canonical enums, ticker format, phase, numeric ranges, and date relationships.
+   Reject all runs outside the active policy's explicitly covered market-calendar year.
 2. Independently retrieve the policy quote server-side, then verify its exchange timestamp. For
-   intraday/post-market actionable decisions, it may be no older than
+   intraday/post-market actionable decisions and on-demand decisions during the regular session,
+   it may be no older than
    `data.max_actionable_quote_age_minutes` (currently 20). In pre-market, the latest official close
    must belong to the immediately preceding regular session; it may support a conditional plan but
-   never an `entry_trigger`.
+   never an `entry_trigger`. On-demand research outside the regular session uses the latest official
+   close and must label actionable conclusions as conditional.
 3. Reject conflicting required prices and verify
    `stop < entry_zone_low <= entry_zone_high < target` for a long Buy/Add.
 4. Require complete Analyst and Checker records; an actionable result requires Checker approval.
@@ -315,6 +335,10 @@ automatically retried because Telegram provides no end-to-end idempotency guaran
 transaction fails, the gateway does not send. The routine reports `delivery_failed` or
 `delivery_unknown` exactly and never claims delivery without a returned Telegram message ID.
 
+Each non-holiday run may create at most one publication, even if a caller changes request IDs. An
+intraday run combines all approved triggers into that one bounded message and assigns a
+server-derived highest-priority notification kind.
+
 The model never supplies the final HTML. Templates own headings, action labels, numeric formatting,
 risk warnings, and delivery wording. The model supplies bounded plain-text summaries and evidence
 references. Decision-related summaries must be declarative and pass a deterministic directive
@@ -323,6 +347,14 @@ gateway's structured template fields reject the publication. Rejected free text 
 the decision audit but is not sent. This prevents an unapproved Buy sentence from being smuggled
 into a free-form section.
 
+For a downgraded or non-actionable final result, the renderer omits model-authored factor prose and
+shows only server-owned reason labels, factor kind/stance, and evidence references. Approved
+actionable results may include validated declarative factor prose, but never caller-authored action,
+quantity, price-level, or delivery language.
+
+Caller-supplied evidence references are audit data, not trusted links. Telegram/session templates
+show escaped source labels and evidence IDs only; they do not create clickable URLs from model input.
+
 ### Notification policy
 
 - Pre-market normally publishes one full brief containing only final policy results.
@@ -330,6 +362,8 @@ into a free-form section.
   stop/target edge, a thesis break, or a material data warning. It sends no all-clear message.
 - Post-market publishes only the configured status/learning output and newly approved holding
   alerts; it does not repeat an intraday edge already marked active.
+- On-demand research persists its final policy result and returns a server-rendered session preview,
+  but its publication is always `suppressed` and it never sends Telegram.
 - A pre-market holiday publishes exactly one fixed holiday message and performs no research or
   suggestion/snapshot writes. Intraday/post-market holidays are silent.
 - `watch`, `hold`, and `avoid` may be persisted without creating an intraday notification.
@@ -481,8 +515,8 @@ Mock Supabase and Telegram boundaries to prove:
 2. Add a Python gateway client and update market-briefing code paths to use it while production
    routines remain paused.
 3. Run historical fixture replays and dry-run sessions for pre-market, intraday, post-market,
-   holiday, stale-data, and Telegram-failure scenarios. Compare raw model verdicts with final policy
-   results and inspect every downgrade/veto.
+   on-demand, holiday, stale-data, and Telegram-failure scenarios. Compare raw model verdicts with
+   final policy results and inspect every downgrade/veto.
 4. Deploy the function and database migration, configure `MARKET_AGENT_SECRET`, and run live dry
    runs that cannot write or send.
 5. Rotate the Telegram bot token and store the replacement only in Supabase. Remove Telegram and
@@ -503,8 +537,13 @@ Expected implementation areas:
 - `supabase/functions/market-briefing-gateway/`: bounded API, policy, renderer, and delivery;
 - `lib/gateway.py`: authenticated client and typed request/receipt helpers;
 - `skills/market-briefing/SKILL.md`: structured candidate and receipt-driven process;
-- `lib/db.py` and `lib/telegram.py`: retain local/admin compatibility but remove them from production
-  market publication paths;
+- `skills/equity-research/SKILL.md` and `skills/earnings-review/SKILL.md`: on-demand candidates use
+  the same deterministic policy and session-only receipt path;
+- `skills/paper-watch/SKILL.md`: hypothetical watch mutations use bounded artifact variants;
+- `skills/reconcile-trade/SKILL.md`: Cloud sessions direct real portfolio mutations to the existing
+  owner-confirmed Telegram command path; any exceptional local reconciliation remains admin-only;
+- `lib/db.py` and `lib/telegram.py`: retain only explicit local/admin compatibility and remove them
+  from production market publication and Cloud-session mutation paths;
 - `telegram-portfolio` and its RPC/parser tests: add confirmed owner-plan create/cancel handling
   without any broker action;
 - `config/settings.json` plus versioned `market_policy_config`: explicit risk-at-stop, reward/risk,
@@ -541,6 +580,7 @@ The implementation is complete only when all of the following are demonstrated:
 - a production market routine has no Telegram token, chat ID, or Supabase service-role key;
 - no actionable Telegram text can be rendered or sent without an approved policy result;
 - no actionable suggestion can be persisted without a linked immutable evaluation;
+- no on-demand recommendation can bypass the gateway, and on-demand research cannot send Telegram;
 - stale prior-plan reuse, missing current evidence, and Checker failure cannot survive as Buy/Add;
 - portfolio concentration and stop risk use authoritative current holdings and deterministic math;
 - external content cannot choose tools, operations, HTML, or final actions;
