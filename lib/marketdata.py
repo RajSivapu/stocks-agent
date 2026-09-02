@@ -102,18 +102,27 @@ def indicators(closes):
 # a real holiday and sent a false "market closed" brief. Update this each December for
 # the coming year; if the current year is missing, fail OPEN (assume trading day) —
 # missing a real morning brief is worse than one harmless extra run on an unlisted day.
-_NYSE_HOLIDAYS = {
-    "2026-01-01",  # New Year's Day
-    "2026-01-19",  # Martin Luther King Jr. Day
-    "2026-02-16",  # Washington's Birthday (Presidents' Day)
-    "2026-04-03",  # Good Friday
-    "2026-05-25",  # Memorial Day
-    "2026-06-19",  # Juneteenth National Independence Day
-    "2026-07-03",  # Independence Day (observed; Jul 4 falls on a Saturday)
-    "2026-09-07",  # Labor Day
-    "2026-11-26",  # Thanksgiving Day
-    "2026-12-25",  # Christmas Day
+_NYSE_HOLIDAYS_BY_YEAR = {
+    2026: frozenset({
+        "2026-01-01",  # New Year's Day
+        "2026-01-19",  # Martin Luther King Jr. Day
+        "2026-02-16",  # Washington's Birthday (Presidents' Day)
+        "2026-04-03",  # Good Friday
+        "2026-05-25",  # Memorial Day
+        "2026-06-19",  # Juneteenth National Independence Day
+        "2026-07-03",  # Independence Day (observed; Jul 4 falls on a Saturday)
+        "2026-09-07",  # Labor Day
+        "2026-11-26",  # Thanksgiving Day
+        "2026-12-25",  # Christmas Day
+    }),
 }
+
+
+def nyse_holidays(year):
+    """Return the reviewed full-day NYSE closures for ``year`` as a new tuple."""
+    if type(year) is not int:
+        raise ValueError("year must be an integer")
+    return tuple(sorted(_NYSE_HOLIDAYS_BY_YEAR.get(year, ())))
 
 
 def is_market_holiday(today=None):
@@ -127,4 +136,4 @@ def is_market_holiday(today=None):
         today = datetime.date.today()
     if today.weekday() >= 5:
         return False
-    return str(today) in _NYSE_HOLIDAYS
+    return str(today) in _NYSE_HOLIDAYS_BY_YEAR.get(today.year, ())

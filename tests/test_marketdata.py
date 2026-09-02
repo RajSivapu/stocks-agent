@@ -71,6 +71,18 @@ def test_is_market_holiday_weekend():
     assert m.is_market_holiday(datetime.date(2026, 6, 20)) is False  # Saturday
 
 
+def test_nyse_holidays_returns_copy_safe_known_year():
+    holidays = m.nyse_holidays(2026)
+
+    assert isinstance(holidays, tuple)
+    assert "2026-09-07" in holidays
+    assert holidays == tuple(sorted(holidays))
+
+
+def test_nyse_holidays_unknown_year_is_empty():
+    assert m.nyse_holidays(2027) == ()
+
+
 def test_sma():
     assert m._sma([1, 2, 3, 4], 2) == 3.5
 

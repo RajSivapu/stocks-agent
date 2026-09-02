@@ -87,6 +87,10 @@
   },
   "risk": {
     "max_position_pct_of_bucket": { "core": 25, "growth": 20, "speculative": 10 },
+    "max_trade_risk_pct_of_portfolio": { "core": 1.0, "growth": 1.0, "speculative": 0.5 },
+    "min_reward_to_risk": 2.0,
+    "alert_near_pct": 4.0,
+    "broad_core_etfs": ["VOO", "VTI", "VXUS", "SCHD"],
     "always_require_stop_loss": true,
     "loud_warning_on_speculative": true,
     "daily_loss_limit_pct": 3,
@@ -153,8 +157,8 @@
     "memory_backend": "postgres",
     "grading_horizons_days": [5, 21, 63],
     "observations_enabled": true,
-    "auto_tune_after_graded_calls": 50,
-    "_note": "The agent keeps a running learning memory in the Postgres `lessons` table (lib.db.insert_lesson / get_lessons). It reads recent regime lines + lessons each run and applies them, and after post-market inserts one new regime line. Structured grades live in suggestion_grades; per-stock observations in stock_observations. GATED numeric auto-tuning (sizing/score weights) is allowed ONLY after auto_tune_after_graded_calls (50) graded calls in a bucket — until then judgment-only. This is memory + self-review over an LLM agent, NOT a trained price-prediction model."
+    "self_tuning_enabled": false,
+    "_note": "The agent keeps a running learning memory in Postgres. Structured grades and observations inform owner review only. The agent must never automatically change sizing limits, policy thresholds, allocation, or score weights; reviewed configuration changes are published explicitly by the owner."
   },
   "scoring": {
     "enabled": true,
