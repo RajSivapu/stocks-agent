@@ -10,22 +10,23 @@ is separate, paper-first, and outside this codebase.
 
 | Capability | Code status | Live status |
 |---|---|---|
-| Pre-market, intraday, and post-market Claude Routines | Receipt-driven prompts implemented | Live on `main` in the restricted `stocks-agent` environment; first new scheduled receipts pending observation |
+| Pre-market, intraday, and post-market Claude Routines | Receipt-driven prompts implemented | Live in the restricted `stocks-agent` environment; the 2026-09-03 intraday database and Telegram receipts passed, while transcript and post-market observation remain pending |
 | Scoped market gateway and least-privilege Routine client | Implemented and tested | Live; Routine has only Supabase URL, scoped gateway secret, and read-only Finnhub key |
-| Fresh independent packet on every run | Implemented | Full production dry run completed with zero writes; first scheduled phase pending observation |
-| Analyst → Checker pass with stale/prior-plan veto | Implemented | Production dry run completed through both records and gateway evaluation |
-| Server-refetched quotes + deterministic sizing/risk policy | Implemented and tested | Live with policy v1; Yahoo's omitted `marketState` is handled from validated provider trading windows |
-| Atomic decision/evidence/publication audit trail | Implemented and rollback-tested | Migrations `20260902`–`20260904` applied and production verifiers passed |
+| Fresh independent packet on every run | Implemented | The first observed scheduled intraday run used same-run quote/history/news evidence instead of mechanically reusing the morning conclusion |
+| Analyst → Checker pass with stale/prior-plan veto | Implemented | Five new intraday Analyst and Checker records were accepted by the gateway on 2026-09-03 |
+| Server-refetched quotes + deterministic sizing/risk policy | Implemented and tested | Live with policy v2; Yahoo's omitted `marketState` is handled from validated provider trading windows |
+| Atomic decision/evidence/publication audit trail | Implemented and rollback-tested | Migrations `20260902`–`20260905` applied and production verifiers passed |
 | Deterministic Telegram Buy/Sell/Stop recorder, including delayed trade dates | Implemented, tested, Deno type-checked | Live; owner-confirmed Buy/Sell/Portfolio flows are working |
 | Confirmed `/plan`, `/cancelplan`, and read-only `/plans` reminders | Implemented and rollback-tested | Live; owner-confirmed plan flow was exercised end to end and read back |
 | Deterministic 5/21/63-session outcome grading | Implemented and rollback-tested | Live; results remain empty until eligible gateway decisions reach their horizons |
 | Friday ChatGPT weekly process audit v2 | Packet + skill implemented and tested | Active Fridays 16:30 local on `gpt-5.6-terra`; live packet smoke test passed, first scheduled report pending |
 | Watchlist changes as owner-reviewed proposals | Implemented in settings/skill | Live through the revised Routine; never edits/pushes the checkout |
-| Owner-only alert v3 | Implemented, reviewed, and rollback-tested locally | Production remains on renderer v2/policy v1; v3 migration, functions, policy v2, and shadow receipt are pending deployment |
+| Owner-only alert v3 | Implemented, reviewed, and rollback-tested | Live in shadow-only mode with gateway v8, Telegram v12, and policy v2; a protected dry-run rendered stop/target details with zero lifecycle writes and no Telegram send |
 
-All code through the current release is on GitHub `main`. "Live" means the corresponding external
-Supabase, Telegram, Claude, or ChatGPT configuration was checked directly; pending observation is
-called out separately.
+The reliability release is on GitHub `main`. Alert v3 is deployed from
+`codex/owner-alert-v3` for shadow verification and is not yet merged. "Live" means the corresponding
+external Supabase, Telegram, Claude, or ChatGPT configuration was checked directly; pending
+observation is called out separately.
 
 ## Remaining rollout checks
 
@@ -36,14 +37,18 @@ independent before/after counts across eleven protected tables were unchanged.
 
 The remaining checks are observation rather than implementation:
 
-1. Inspect the first new scheduled pre-market, quiet intraday, and post-market receipts. Confirm
+1. Complete the Claude transcript check for the 2026-09-03 intraday run after the owner unlocks the
+   Mac. Its database chain and delivered Telegram message `17` already reconcile: four completed
+   gateway operations, five new Analyst/Checker evaluations, five linked suggestions, one v2
+   publication, and a completed run receipt.
+2. Inspect the first new scheduled post-market receipt and any alert-v3 shadow previews. Confirm
    request/run, evaluation, suggestion, publication, artifact/grade, and delivery claims agree.
-2. Inspect the first Friday v2 audit and confirm it remains bounded, segmented, and read-only.
-3. After the first scheduled cycle, decide whether synthetic-looking legacy suggestions need a
+3. Inspect the first Friday v2 audit and confirm it remains bounded, segmented, and read-only.
+4. After the first scheduled cycle, decide whether synthetic-looking legacy suggestions need a
    separately approved archival cleanup. Do not mix that destructive data cleanup into this
    release.
-4. Deploy alert v3 with sends disabled and shadow enabled, then reconcile a protected dry-run and
-   scheduled shadow previews before enabling any one-class canary.
+5. Review the owner-visible v3 shadow wording, then enable at most one explicitly approved alert
+   class as a canary. Do not enable the canary from a synthetic preview alone.
 
 ## Next reliability work
 
