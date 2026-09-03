@@ -21,9 +21,9 @@ is separate, paper-first, and outside this codebase.
 | Deterministic 5/21/63-session outcome grading | Implemented and rollback-tested | Live; results remain empty until eligible gateway decisions reach their horizons |
 | Friday ChatGPT weekly process audit v2 | Packet + skill implemented and tested | Active Fridays 16:30 local on `gpt-5.6-terra`; live packet smoke test passed, first scheduled report pending |
 | Watchlist changes as owner-reviewed proposals | Implemented in settings/skill | Live through the revised Routine; never edits/pushes the checkout |
-| Owner-only alert v3 | Implemented, reviewed, and rollback-tested | Live in shadow-only mode with gateway v16, Telegram v12, and policy v3; protected dry-runs remain write-free and send-free |
-| Owner portfolio alternatives review | Gateway-computed history, evidence gate, renderer, and routine contract implemented and tested | Live in gateway v16; protected five-pair VTI review returned complete coverage, a suppressed preview, zero writes/sends, and left VTI as the unchanged recurring baseline |
-| Long-Term Companion research | Strict nomination contract, gateway-owned role policy, 3/5/10-year analytics, rolling contribution scenarios, and compact renderer implemented locally | Deployment and protected write-free/send-free proof pending; VTI remains unchanged |
+| Owner-only alert v3 | Implemented, reviewed, and rollback-tested | Live in shadow-only mode with gateway v17, Telegram v12, and policy v3; protected dry-runs remain write-free and send-free |
+| Owner portfolio alternatives review | Gateway-computed history, evidence gate, renderer, and routine contract implemented and tested | Live in gateway v17; protected five-pair VTI review returned complete coverage, a suppressed preview, zero writes/sends, and left VTI as the unchanged recurring baseline |
+| Long-Term Companion research | Strict nomination contract, gateway-owned role policy, 3/5/10-year analytics, rolling contribution scenarios, and compact renderer implemented and independently reviewed | Live in gateway v17; protected VTI/VXUS preview qualified VXUS only as a diversifier for owner review, was suppressed with zero writes/sends, and left the VTI reminder unchanged |
 
 The reliability release is on GitHub `main`. Alert v3 is deployed from
 `codex/owner-alert-v3` for shadow verification and is not yet merged. "Live" means the corresponding
@@ -46,7 +46,7 @@ tables were unchanged.
 
 The remaining checks are scheduled observation followed by an explicitly approved one-class canary:
 
-1. Inspect the first scheduled pre-market, intraday, and post-market cycle after gateway v16 and
+1. Inspect the first scheduled pre-market, intraday, and post-market cycle after gateway v17 and
    reconcile the improved messages with their receipts.
 2. Inspect the first Friday v2 audit and confirm it remains bounded, segmented, and read-only.
 3. After the first scheduled cycle, decide whether synthetic-looking legacy suggestions need a

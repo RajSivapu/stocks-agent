@@ -185,6 +185,51 @@ VT, and VXUS because their different portfolio roles do not establish a durable 
 edge. The preview explicitly left the `$300` monthly VTI plan unchanged and labeled hypothetical
 history as not a forecast. Gateway v16 health and source parity passed after this receipt.
 
+## Long-Term Companion protected release
+
+The owner-approved Long-Term Companion layer was deployed only to the gateway from implementation
+commits `9837ef4` through `3f0b920`. Independent review found no remaining Critical or Important
+issue after the implementation was hardened to require calendar-contiguous contribution windows,
+actual 3/5/10-year calendar coverage, gateway-enforced monthly cadence, dry-run-only on-demand
+companion requests, visibly unqualified rejected roles, and broader no-promises language checks.
+
+- `market-briefing-gateway` version 17 is active at deployment epoch milliseconds `1788474633641`;
+  `telegram-portfolio` remained version 12.
+- A management-plane download of gateway v17 compared equal to every local runtime file; test files
+  were intentionally excluded because Supabase does not deploy them.
+- Post-deployment health returned `ok` for the gateway, standalone alert path, Finnhub, and Yahoo.
+- The live secret-name inventory remained limited to the gateway, Supabase-provided, and owner
+  Telegram names. It contained no brokerage, order, invitation, or tenant credential name.
+- The final local gate passed 132 Python tests, 60 Node/Telegram tests, 147 Deno gateway tests, both
+  Edge Function type-checks, and `git diff --check`.
+
+Protected on-demand dry-run `67bf943f-6593-4606-a857-0832f011d64f` read the live owner context and
+confirmed the active VTI reminder remained `$300` monthly with next due date `2026-09-21`. The
+evaluation receipt reported `dry_run=true`, two evaluations, one complete comparison, companion
+status `qualified`, publication `suppressed`, two would-be suggestions, and zero alert drafts. Its
+finish receipt reported `status=completed`, `write_counts={}`, `publication_statuses=[]`, and
+`telegram_message_ids=[]`. Independent before/after counts had zero deltas for all twelve inspected
+tables: runs, gateway requests, evaluations, suggestions, publications, five alert-lifecycle
+tables, holdings, and owner plans. This was not a saved Routine or a Telegram test send.
+
+The gateway classified VXUS only as a `DIVERSIFIER` eligible for later owner review, not as a trade
+instruction or expected-return claim. The preview kept VTI as the recorded core, stated that no
+reminder was added or changed, and rendered these gateway-computed historical planning figures:
+
+- 3Y annualized history: VTI `+21.1%`, VXUS `+20.3%`, correlation `0.79`, and drawdowns `19.3%` /
+  `13.6%` across 753 common sessions;
+- 5Y: VTI `+11.8%`, VXUS `+9.0%`, correlation `0.81`, and drawdowns `25.4%` / `29.4%` across 1,255
+  common sessions;
+- 10Y: VTI `+14.8%`, VXUS `+9.4%`, correlation `0.86`, and drawdowns `35.0%` / `36.0%` across 2,513
+  common sessions; and
+- normalized rolling one-year `$100` monthly history: `$1,200` contributed, weak `$1,103.43`,
+  middle `$1,259.93`, and strong `$1,378.07` across 110 calendar-contiguous windows.
+
+The preview explicitly labels these as historical scenarios rather than forecasts and warns that
+future loss is possible. The existing one-time Friday receipt heartbeat remains active. It now
+targets gateway v17 or a verified successor and requires the non-month-opening pre-market run to
+omit both `comparisons` and `companion_proposal`; no duplicate automation was created.
+
 ## Live security checkpoint
 
 Direct Postgres inspection confirmed RLS enabled on all five alert lifecycle tables:
