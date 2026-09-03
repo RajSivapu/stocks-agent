@@ -10,7 +10,7 @@ is separate, paper-first, and outside this codebase.
 
 | Capability | Code status | Live status |
 |---|---|---|
-| Pre-market, intraday, and post-market Claude Routines | Receipt-driven prompts implemented | Live in the restricted `stocks-agent` environment; the 2026-09-03 intraday database and Telegram receipts passed, while transcript and post-market observation remain pending |
+| Pre-market, intraday, and post-market Claude Routines | Receipt-driven prompts implemented | Live in the restricted `stocks-agent` environment; the 2026-09-03 intraday Routine transcript, database chain, and Telegram receipt reconcile, while post-market observation remains pending |
 | Scoped market gateway and least-privilege Routine client | Implemented and tested | Live; Routine has only Supabase URL, scoped gateway secret, and read-only Finnhub key |
 | Fresh independent packet on every run | Implemented | The first observed scheduled intraday run used same-run quote/history/news evidence instead of mechanically reusing the morning conclusion |
 | Analyst → Checker pass with stale/prior-plan veto | Implemented | Five new intraday Analyst and Checker records were accepted by the gateway on 2026-09-03 |
@@ -37,17 +37,13 @@ independent before/after counts across eleven protected tables were unchanged.
 
 The remaining checks are observation rather than implementation:
 
-1. Complete the Claude transcript check for the 2026-09-03 intraday run after the owner unlocks the
-   Mac. Its database chain and delivered Telegram message `17` already reconcile: four completed
-   gateway operations, five new Analyst/Checker evaluations, five linked suggestions, one v2
-   publication, and a completed run receipt.
-2. Inspect the first new scheduled post-market receipt and any alert-v3 shadow previews. Confirm
+1. Inspect the first new scheduled post-market receipt and any alert-v3 shadow previews. Confirm
    request/run, evaluation, suggestion, publication, artifact/grade, and delivery claims agree.
-3. Inspect the first Friday v2 audit and confirm it remains bounded, segmented, and read-only.
-4. After the first scheduled cycle, decide whether synthetic-looking legacy suggestions need a
+2. Inspect the first Friday v2 audit and confirm it remains bounded, segmented, and read-only.
+3. After the first scheduled cycle, decide whether synthetic-looking legacy suggestions need a
    separately approved archival cleanup. Do not mix that destructive data cleanup into this
    release.
-5. Review the owner-visible v3 shadow wording, then enable at most one explicitly approved alert
+4. Review the owner-visible v3 shadow wording, then enable at most one explicitly approved alert
    class as a canary. Do not enable the canary from a synthetic preview alone.
 
 ## Next reliability work

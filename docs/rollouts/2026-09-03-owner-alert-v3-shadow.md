@@ -98,8 +98,30 @@ The 2026-09-03 intraday run started at `2026-09-03T17:02:43.216398Z` and finishe
 - Rendered hash: `b7d54d409d90926970b20a2bf07faea9cd0496a646a6365d48de2d87ab5ef459`.
 - Telegram message ID: `17`.
 
-The Claude Routine transcript still requires direct UI inspection; the Mac was locked during this
-checkpoint. This receipt therefore does not claim transcript verification.
+The corresponding Claude Routine session was inspected directly at
+`session_01Gucsv6Xk63FCaAF6gn8aXP` after the Mac was unlocked. The Routine detail page identified it
+as the scheduled `Intraday` cloud run at 12:01 PM CDT and showed a completed session that cloned only
+the `stocks-agent` repository. The transcript then reconciled with the receipts above:
+
+- it attempted the repository's `market-briefing` skill, found the committed skill file, and read it
+  directly after Claude's skill registry did not resolve it;
+- it called `start_run`, then `read_context`, and treated the morning plan only as historical context;
+- it fetched new quotes and one-year history/indicators for holdings, morning candidates, indices,
+  and VIX, with provider observations around `17:03Z`;
+- it independently checked current news and history-based day moves, detected stale Yahoo
+  `previousClose` values, and used the history-derived moves instead;
+- it built five new candidates whose payloads each contained completed Analyst and Checker records;
+- it submitted exactly one `evaluate_and_publish` request for run
+  `1a89f988-fede-49d3-b4d2-7beefe73ebcd`, whose gateway response reported five evaluations, five
+  suggestions, publication `045a290c-6362-4f24-9d6d-3cfbf16bfca8`, status `delivered`, and Telegram
+  message ID `17`; and
+- it then called `finish_run`, whose response reported `completed`, the same write counts,
+  publication status, and Telegram message ID.
+
+Its final response limited write/send claims to that `finish_run` receipt and said that no trade was
+executed and no repository change was made. This transcript verification does not endorse the v2
+message wording; the owner's dissatisfaction with that compact message is the reason v3 remains in
+shadow review.
 
 ## Remaining gates
 
