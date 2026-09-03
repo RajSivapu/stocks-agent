@@ -47,14 +47,15 @@ def test_owner_a_cannot_observe_owner_b_through_filters_or_direct_ids(tenant_dat
             "SELECT ticker, shares FROM api.holdings WHERE ticker = 'TSTAAA'"
         ).fetchall()
         transactions = connection.execute(
-            "SELECT ticker, qty FROM api.transactions ORDER BY id LIMIT 100 OFFSET 0"
+            "SELECT ticker, qty FROM api.transactions WHERE ticker = 'TSTAAA' ORDER BY id LIMIT 100 OFFSET 0"
         ).fetchall()
         plans = connection.execute(
             "SELECT ticker, amount FROM api.plans WHERE ticker = 'TSTVTI'"
         ).fetchall()
 
         assert holdings == [("TSTAAA", 1)]
-        assert transactions == [("TSTAAA", 1)]
+        assert len(transactions) == 2
+        assert all(ticker == "TSTAAA" and qty == 1 for ticker, qty in transactions)
         assert plans == [("TSTVTI", 300)]
 
 

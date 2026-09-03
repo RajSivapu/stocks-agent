@@ -24,6 +24,7 @@ OWNER_TABLES = {
     "telegram_links",
     "single_owner_migration_receipts",
     "owner_policy_overrides",
+    "owner_ledger_counters",
     "holdings",
     "analysis_runs",
     "transactions",

@@ -469,36 +469,36 @@ git commit -m "security: add least privilege runtime boundaries"
 - Consumes: owner-scoped holdings and transactions.
 - Produces: `app.fold_holding(owner_id, ticker)`, immutable ledger events, and deterministic holdings with `projection_sequence`.
 
-- [ ] **Step 1: Write failing ledger property fixtures**
+- [x] **Step 1: Write failing ledger property fixtures**
 
 Cover concurrent first buys, partial/full sells, fractional shares, buy/sell fees, same-day order by
 ledger sequence, back-dated buys and sells, void-and-replace corrections, zero-balance lifecycle reset,
 and negative historical balance rejection. Compare SQL output with a pure Python average-cost fold.
 
-- [ ] **Step 2: Tighten numeric domains**
+- [x] **Step 2: Tighten numeric domains**
 
 Use `NUMERIC(20,8)` for shares, `NUMERIC(20,4)` for prices, and `NUMERIC(20,2)` for money. Add checks
 for positive quantity/price, non-negative fees, maximum one million shares per transaction, and exact
 side/event enums. Existing values that cannot cast safely stop the migration preflight.
 
-- [ ] **Step 3: Make the ledger immutable**
+- [x] **Step 3: Make the ledger immutable**
 
 Reject ordinary `UPDATE`/`DELETE` on transactions. Corrections append `void` plus replacement events
 linked through `corrects_transaction_id`; audit fields include source channel, actor, command, execution
 date, created time, and monotonic owner ledger sequence.
 
-- [ ] **Step 4: Implement projection rebuild**
+- [x] **Step 4: Implement projection rebuild**
 
 Acquire `pg_advisory_xact_lock(hashtextextended(owner_id::text || ':' || ticker, 0))`, fold the complete
 ordered ticker ledger, reject any negative intermediate balance, and upsert/delete the holding in the
 same transaction. Realized P&L includes allocated fees and is computed, never supplied by the caller.
 
-- [ ] **Step 5: Add nightly invariant verification**
+- [x] **Step 5: Add nightly invariant verification**
 
 `verify_ledger_projection.py` compares every holding to the SQL fold and writes only owner hash,
 ticker hash, sequence, status, and checked time to the operational result.
 
-- [ ] **Step 6: Verify and commit**
+- [x] **Step 6: Verify and commit**
 
 Run property tests with at least 500 generated interleavings plus the legacy migration verifier. Commit:
 
