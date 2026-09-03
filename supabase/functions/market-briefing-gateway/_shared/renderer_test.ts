@@ -1,6 +1,14 @@
-import type { AlertEvaluation, AlertRuleSnapshot, PolicyContext } from "./contracts.ts";
+import type {
+  AlertEvaluation,
+  AlertRuleSnapshot,
+  PolicyContext,
+} from "./contracts.ts";
 import type { PolicyEvaluation } from "./policy.ts";
-import { FORBIDDEN_DECISION_TEXT, renderAlertV3, renderPublication } from "./renderer.ts";
+import {
+  FORBIDDEN_DECISION_TEXT,
+  renderAlertV3,
+  renderPublication,
+} from "./renderer.ts";
 
 function assert(value: boolean, message: string): void {
   if (!value) throw new Error(message);
@@ -437,7 +445,7 @@ Deno.test("post-market uses the compact closing brief instead of audit blocks", 
     context: context(),
   });
   assert(
-    rendered.body.startsWith("<b>🌙 CLOSING BRIEF — 2026-09-03</b>"),
+    rendered.body.startsWith("<b>🌙 EOD — Sep 03</b>"),
     "closing heading absent",
   );
   assert(
@@ -448,6 +456,268 @@ Deno.test("post-market uses the compact closing brief instead of audit blocks", 
     !rendered.body.includes("Status: APPROVED"),
     "legacy audit block leaked",
   );
+});
+
+Deno.test("post-market restores the owner-approved visual portfolio hierarchy", async () => {
+  const cenx = evaluation("CENX", { raw_action: "hold", final_action: "hold" });
+  cenx.candidate.action = "hold";
+  cenx.candidate.phase = "post-market";
+  const vti = evaluation("VTI", { raw_action: "hold", final_action: "hold" });
+  vti.candidate.action = "hold";
+  vti.candidate.phase = "post-market";
+  vti.candidate.factors[0].text =
+    "Broad tape was mixed: SPY +0.3%, QQQ -0.5%, and IWM -1.5%.";
+  vti.candidate.evidence.push({
+    id: "news-gap",
+    kind: "news",
+    source: "finnhub-company-news",
+    status: "missing",
+    observed_at: null,
+    retrieved_at: "2026-09-03T20:15:10.000Z",
+    reference: null,
+    claims: ["No company-news response was available."],
+  });
+  const closingContext = context({
+    holdings: context().holdings.map((holding) =>
+      holding.ticker === "VTI"
+        ? { ...holding, stop_near_alert_active: true }
+        : { ...holding, stop_near_alert_active: false }
+    ),
+    holding_quotes: {
+      CENX: {
+        ticker: "CENX",
+        price: "47.51",
+        previous_close: "45.89",
+        as_of: "2026-09-03T20:00:01.000Z",
+        market_state: "POST",
+        source: "yahoo-chart",
+      },
+      VTI: {
+        ticker: "VTI",
+        price: "376.94",
+        previous_close: "380.63",
+        as_of: "2026-09-03T20:00:00.000Z",
+        market_state: "POST",
+        source: "yahoo-chart",
+      },
+    },
+  });
+  const rendered = await renderPublication({
+    phase: "post-market",
+    market_date: "2026-09-03",
+    evaluations: [cenx, vti],
+    context: closingContext,
+  });
+
+  for (
+    const expected of [
+      "<b>🟢 CENX</b> $47.51 · avg $47.02 · 43.7482 shares",
+      "📈 +$21.44 (+1.0%) · invested $2057.04 → now $2078.48",
+      "<b>Stop $45.58</b> · $1.93 gap (4.1%)",
+      "<b>🔴 VTI</b> $376.94 · avg $380.16 · 0.7891 shares",
+      "📉 -$2.54 (-0.8%) · invested $300.00 → now $297.46",
+      "⚠️ <b>Stop $375.17</b> · $1.77 gap (0.5%) — watch open",
+      "<b>➡️ NEXT REVIEW</b>",
+      "VTI: recorded stop $375.17 remains flagged for follow-up.",
+      "Data gap: VTI · news evidence unavailable from Finnhub.",
+    ]
+  ) {
+    assert(
+      rendered.body.includes(expected),
+      `owner-style field absent: ${expected}`,
+    );
+  }
+  assert(
+    !rendered.body.includes("Stock Agent app"),
+    "unsupported app availability claim remained",
+  );
+  assert(
+    !rendered.body.includes("👀 WATCHING"),
+    "empty watching section added noise to the close",
+  );
+});
+
+Deno.test("post-market supports the policy contract's eight-decimal holdings", async () => {
+  const rendered = await renderPublication({
+    phase: "post-market",
+    market_date: "2026-09-03",
+    evaluations: [],
+    context: context({
+      holdings: [{
+        ...context().holdings[1],
+        shares: "0.12345678",
+        avg_cost: "100",
+        stop: "90",
+      }],
+      holding_quotes: {
+        VTI: {
+          ticker: "VTI",
+          price: "110",
+          previous_close: "109",
+          as_of: "2026-09-03T20:00:00.000Z",
+          market_state: "POST",
+          source: "yahoo-chart",
+        },
+      },
+    }),
+  });
+  assert(
+    rendered.body.includes("0.1235 shares"),
+    "eight-decimal shares were not rounded safely for display",
+  );
+  assert(
+    rendered.body.includes("📈 +$1.23 (+10.0%) · invested $12.35 → now $13.58"),
+    "eight-decimal holding valuation was not computed safely",
+  );
+});
+
+Deno.test("post-market keeps one complete market takeaway instead of duplicate truncation", async () => {
+  const a = evaluation("AAA");
+  a.candidate.phase = "post-market";
+  a.candidate.factors[0].text =
+    "Broad tape was mixed and narrow at the close; large caps held up while small caps lagged.";
+  const b = evaluation("BBB");
+  b.candidate.phase = "post-market";
+  b.candidate.factors[0].text =
+    "Broad tape was mixed and narrow at the close; this second redundant paragraph must not appear.";
+  const rendered = await renderPublication({
+    phase: "post-market",
+    market_date: "2026-09-03",
+    evaluations: [a, b],
+    context: context(),
+  });
+  assert(
+    rendered.body.includes(
+      "Broad tape was mixed and narrow at the close; large caps held up while small caps lagged.",
+    ),
+    "complete market takeaway absent",
+  );
+  assert(
+    !rendered.body.includes("second redundant paragraph"),
+    "redundant market paragraph remained",
+  );
+  assert(!rendered.body.includes("…"), "market takeaway was visibly truncated");
+});
+
+Deno.test("pre-market comparison separates matched history from the forward evidence view", async () => {
+  const vti = evaluation("VTI", { raw_action: "hold", final_action: "hold" });
+  vti.candidate.action = "hold";
+  const itot = evaluation("ITOT", {
+    raw_action: "watch",
+    final_action: "watch",
+  });
+  itot.candidate.action = "watch";
+  const rendered = await renderPublication({
+    phase: "pre-market",
+    market_date: "2026-09-03",
+    evaluations: [vti, itot],
+    context: context({
+      owner_plans: [{
+        id: "00000000-0000-4000-8000-000000000088",
+        ticker: "VTI",
+        bucket: "core",
+        amount: "300",
+        cadence: "monthly",
+        next_due_on: "2026-09-21",
+        active: true,
+        updated_at: "2026-09-03T12:00:00.000Z",
+      }],
+    }),
+    comparisons: [{
+      baseline_ticker: "VTI",
+      alternative_ticker: "ITOT",
+      relationship: "like_for_like",
+      prospective_view: "similar",
+      reason:
+        "Both cover the broad U.S. equity market; current evidence shows no durable forward edge.",
+      evidence_ids: ["itot-profile"],
+      coverage_status: "complete",
+      period_start: "2025-09-03",
+      period_end: "2026-09-02",
+      common_sessions: 252,
+      contribution_count: 12,
+      baseline_lump_sum_return_pct: "12.5",
+      alternative_lump_sum_return_pct: "12.7",
+      lump_sum_excess_pct: "0.2",
+      baseline_monthly_return_pct: "6.1",
+      alternative_monthly_return_pct: "6.2",
+      monthly_excess_pct: "0.1",
+      baseline_max_drawdown_pct: "14.2",
+      alternative_max_drawdown_pct: "14.1",
+    }],
+  });
+  for (
+    const expected of [
+      "<b>🔄 CURRENT VS ALTERNATIVES</b>",
+      "<b>VTI ↔ ITOT · LIKE-FOR-LIKE</b>",
+      "Past year, equal monthly contributions: VTI +6.1% · ITOT +6.2% · ITOT ahead by 0.1 points.",
+      "Max drawdown: VTI 14.2% · ITOT 14.1%.",
+      "Forward evidence: SIMILAR — Both cover the broad U.S. equity market; current evidence shows no durable forward edge.",
+      "Your recorded VTI monthly plan is unchanged.",
+      "Hypothetical history is not a forecast.",
+    ]
+  ) {
+    assert(
+      rendered.body.includes(expected),
+      `comparison field absent: ${expected}`,
+    );
+  }
+});
+
+Deno.test("comparison rejects plan-switch prose and does not invent a winner on a tie", async () => {
+  const tied = {
+    baseline_ticker: "VTI",
+    alternative_ticker: "ITOT",
+    relationship: "like_for_like" as const,
+    prospective_view: "similar" as const,
+    reason: "Both cover the same broad role.",
+    evidence_ids: ["e"],
+    coverage_status: "complete" as const,
+    period_start: "2025-09-03",
+    period_end: "2026-09-02",
+    common_sessions: 252,
+    contribution_count: 12,
+    baseline_lump_sum_return_pct: "10",
+    alternative_lump_sum_return_pct: "10",
+    lump_sum_excess_pct: "0",
+    baseline_monthly_return_pct: "5",
+    alternative_monthly_return_pct: "5",
+    monthly_excess_pct: "0",
+    baseline_max_drawdown_pct: "12",
+    alternative_max_drawdown_pct: "12",
+  };
+  const rendered = await renderPublication({
+    phase: "pre-market",
+    market_date: "2026-09-03",
+    evaluations: [evaluation("VTI"), evaluation("ITOT")],
+    context: context(),
+    comparisons: [tied],
+  });
+  assert(
+    rendered.body.includes("matched to 0.0 points"),
+    "a tied comparison invented a leader",
+  );
+  for (
+    const reason of [
+      "Buy ITOT immediately.",
+      "I recommend buying ITOT now.",
+      "Consider replacing VTI with ITOT.",
+      "Move the monthly plan to ITOT.",
+      "Reallocate the contribution to ITOT.",
+    ]
+  ) {
+    await assertRejects(
+      () =>
+        renderPublication({
+          phase: "pre-market",
+          market_date: "2026-09-03",
+          evaluations: [evaluation("VTI"), evaluation("ITOT")],
+          context: context(),
+          comparisons: [{ ...tied, reason }],
+        }),
+      "forbidden decision directive",
+    );
+  }
 });
 
 Deno.test("approved held-position reductions remain visible in portfolio risks", async () => {
@@ -544,6 +814,56 @@ Deno.test("intraday entry and new-idea alerts retain complete policy levels", as
   }
 });
 
+Deno.test("intraday watch idea explains missing levels instead of sending a hollow alert", async () => {
+  const item = evaluation("HOOD", {
+    raw_action: "watch",
+    final_action: "watch",
+  });
+  item.candidate.phase = "intraday";
+  item.candidate.action = "watch";
+  item.candidate.notification_kind = "new_idea";
+  item.candidate.confidence = "low";
+  item.candidate.entry_zone_low = null;
+  item.candidate.entry_zone_high = null;
+  item.candidate.stop = null;
+  item.candidate.target = null;
+  item.candidate.valid_until = null;
+  item.candidate.factors[1].text =
+    "Confirmed catalysts surfaced, but price is extended and an entry cannot be defended.";
+  item.normalized.verified_price = "123.17";
+  item.normalized.quote_as_of = "2026-09-03T17:09:11.000Z";
+
+  const rendered = await renderPublication({
+    phase: "intraday",
+    market_date: "2026-09-03",
+    evaluations: [item],
+    context: context(),
+  });
+  for (
+    const expected of [
+      "<b>👀 HOOD — WATCH IDEA</b>",
+      "$123.17 · 12:09:11 PM CT",
+      "No policy-approved entry, stop, or target — watch only.",
+      "Why now: Confirmed catalysts surfaced, but price is extended and an entry cannot be defended.",
+      "Confidence LOW",
+      "Suggestion only — no order was placed.",
+    ]
+  ) {
+    assert(
+      rendered.body.includes(expected),
+      `useful watch detail absent: ${expected}`,
+    );
+  }
+  assert(
+    !rendered.body.includes("— NEW IDEA"),
+    "watch was mislabeled as an entry idea",
+  );
+  assert(
+    !rendered.body.includes("2026-09-03T17:09:11.000Z"),
+    "raw UTC timestamp made the alert hard to scan",
+  );
+});
+
 Deno.test("non-holiday rendering fails closed without authoritative portfolio context", async () => {
   await assertRejects(
     () =>
@@ -556,7 +876,9 @@ Deno.test("non-holiday rendering fails closed without authoritative portfolio co
   );
 });
 
-function alertRule(overrides: Partial<AlertRuleSnapshot> = {}): AlertRuleSnapshot {
+function alertRule(
+  overrides: Partial<AlertRuleSnapshot> = {},
+): AlertRuleSnapshot {
   return {
     rule_id: "7f7f70bf-5cec-4f1e-9de8-ec8823d99fc7",
     version: 3,
@@ -566,7 +888,13 @@ function alertRule(overrides: Partial<AlertRuleSnapshot> = {}): AlertRuleSnapsho
     severity: "review",
     session: "regular",
     confirmation: "two_quote",
-    conditions: [{ kind: "price_zone", operator: "inside", left: "41.8", right: "42.3", timeframe: "quote" }],
+    conditions: [{
+      kind: "price_zone",
+      operator: "inside",
+      left: "41.8",
+      right: "42.3",
+      timeframe: "quote",
+    }],
     cooldown_seconds: 14_400,
     fire_limit: 3,
     valid_until: "2026-09-09T21:00:00.000Z",
@@ -575,7 +903,9 @@ function alertRule(overrides: Partial<AlertRuleSnapshot> = {}): AlertRuleSnapsho
   };
 }
 
-function alertEvaluation(overrides: Partial<AlertEvaluation> = {}): AlertEvaluation {
+function alertEvaluation(
+  overrides: Partial<AlertEvaluation> = {},
+): AlertEvaluation {
   const rule = overrides.rule ?? alertRule();
   return {
     rule,
@@ -622,19 +952,53 @@ Deno.test("alert v3 renders trigger-first details, approved levels, receipts, an
     source_evaluation: alertSource(),
     context: context(),
   });
-  const sections = ["🟠 REVIEW • ABC • BALANCED", "Triggered 12:15:04 PM CT", "Conditions 1/1", "Why now:", "Risk:", "Confidence MEDIUM", "Receipt AL-7F2C"];
+  const sections = [
+    "🟠 REVIEW • ABC • BALANCED",
+    "Triggered 12:15:04 PM CT",
+    "Conditions 1/1",
+    "Why now:",
+    "Risk:",
+    "Confidence MEDIUM",
+    "Receipt AL-7F2C",
+  ];
   for (let index = 1; index < sections.length; index += 1) {
-    assert(rendered.body.indexOf(sections[index - 1]) < rendered.body.indexOf(sections[index]), `${sections[index - 1]} did not precede ${sections[index]}`);
+    assert(
+      rendered.body.indexOf(sections[index - 1]) <
+        rendered.body.indexOf(sections[index]),
+      `${sections[index - 1]} did not precede ${sections[index]}`,
+    );
   }
-  assert(rendered.body.includes("suggestion only; no order was placed"), "suggestion-only boundary absent");
-  assert(rendered.body.includes("quote 12:14:51 PM CT • age 13s • REGULAR"), "receipt timing absent");
-  assert(rendered.body.includes("inside $41.80–$42.30"), "condition facts absent");
-  assert(rendered.body.includes("invalidation below $39.90 • policy-approved stop $39.75 • target $47.20"), "approved stop/target absent");
-  assert(rendered.body.includes("evidence 1/1 • valid through 2026-09-09"), "coverage or horizon absent");
+  assert(
+    rendered.body.includes("suggestion only; no order was placed"),
+    "suggestion-only boundary absent",
+  );
+  assert(
+    rendered.body.includes("quote 12:14:51 PM CT • age 13s • REGULAR"),
+    "receipt timing absent",
+  );
+  assert(
+    rendered.body.includes("inside $41.80–$42.30"),
+    "condition facts absent",
+  );
+  assert(
+    rendered.body.includes(
+      "invalidation below $39.90 • policy-approved stop $39.75 • target $47.20",
+    ),
+    "approved stop/target absent",
+  );
+  assert(
+    rendered.body.includes("evidence 1/1 • valid through 2026-09-09"),
+    "coverage or horizon absent",
+  );
   assertEquals(rendered.template_version, 3);
   assertEquals(rendered.status, "ready");
   assertEquals(rendered.parts, [rendered.body]);
-  assertEquals(rendered.reply_markup.inline_keyboard.map((row) => row.map((button) => button.text)), [["Acknowledge", "Snooze 1d", "Dismiss"]]);
+  assertEquals(
+    rendered.reply_markup.inline_keyboard.map((row) =>
+      row.map((button) => button.text)
+    ),
+    [["Acknowledge", "Snooze 1d", "Dismiss"]],
+  );
   assertEquals(
     rendered.reply_markup.inline_keyboard[0][0].callback_data,
     "al:ack:7f2c70bf-5cec-4f1e-9de8-ec8823d99fc7:3",
@@ -645,8 +1009,14 @@ Deno.test("alert v3 renders trigger-first details, approved levels, receipts, an
   );
   for (const row of rendered.reply_markup.inline_keyboard) {
     for (const button of row) {
-      assert(button.callback_data.length <= 64, "callback exceeds Telegram limit");
-      assert(!/buy|sell|order/i.test(button.text), "execution-like button leaked");
+      assert(
+        button.callback_data.length <= 64,
+        "callback exceeds Telegram limit",
+      );
+      assert(
+        !/buy|sell|order/i.test(button.text),
+        "execution-like button leaked",
+      );
     }
   }
 });
@@ -655,7 +1025,13 @@ Deno.test("critical recorded-stop alert uses recorded levels and manual-review l
   const rule = alertRule({
     version: 2,
     severity: "critical",
-    conditions: [{ kind: "recorded_stop", operator: "below", left: "45.58", right: null, timeframe: "quote" }],
+    conditions: [{
+      kind: "recorded_stop",
+      operator: "below",
+      left: "45.58",
+      right: null,
+      timeframe: "quote",
+    }],
   });
   const source = alertSource();
   source.final_action = "hold";
@@ -671,21 +1047,54 @@ Deno.test("critical recorded-stop alert uses recorded levels and manual-review l
       rule,
       observed_at: "2026-09-03T15:42:01.000Z",
       evaluated_at: "2026-09-03T15:42:18.000Z",
-      condition_results: [{ condition: rule.conditions[0], passed: true, observed_value: "45.4", evidence_ids: ["quote-1"] }],
+      condition_results: [{
+        condition: rule.conditions[0],
+        passed: true,
+        observed_value: "45.4",
+        evidence_ids: ["quote-1"],
+      }],
     }),
     source_evaluation: source,
-    context: context({ holdings: [{ ...context().holdings[0], ticker: "ABC", stop: "44", target: "52" }] }),
+    context: context({
+      holdings: [{
+        ...context().holdings[0],
+        ticker: "ABC",
+        stop: "44",
+        target: "52",
+      }],
+    }),
   });
-  assert(rendered.body.startsWith("<b>🔴 RISK REVIEW • ABC • BALANCED</b>"), "critical heading absent");
-  assert(rendered.body.includes("review manually"), "manual review boundary absent");
-  assert(rendered.body.includes("recorded stop $45.58"), "immutable rule stop absent");
-  assert(!rendered.body.includes("recorded stop $44.00"), "new holding stop replaced the fired rule version");
-  assert(rendered.body.includes("The bot did not sell and cannot access a brokerage."), "broker boundary absent");
+  assert(
+    rendered.body.startsWith("<b>🔴 RISK REVIEW • ABC • BALANCED</b>"),
+    "critical heading absent",
+  );
+  assert(
+    rendered.body.includes("review manually"),
+    "manual review boundary absent",
+  );
+  assert(
+    rendered.body.includes("recorded stop $45.58"),
+    "immutable rule stop absent",
+  );
+  assert(
+    !rendered.body.includes("recorded stop $44.00"),
+    "new holding stop replaced the fired rule version",
+  );
+  assert(
+    rendered.body.includes(
+      "The bot did not sell and cannot access a brokerage.",
+    ),
+    "broker boundary absent",
+  );
   assertEquals(rendered.reply_markup.inline_keyboard[0][1].text, "Snooze 20m");
 });
 
 Deno.test("alert v3 renders inert drafts and unsafe evaluations without inventing a decision", async () => {
-  const draftRule = alertRule({ state: "draft", version: 1, severity: "watch" });
+  const draftRule = alertRule({
+    state: "draft",
+    version: 1,
+    severity: "watch",
+  });
   const draft = await renderAlertV3({
     event_id: draftRule.rule_id,
     evaluation: alertEvaluation({
@@ -703,13 +1112,31 @@ Deno.test("alert v3 renders inert drafts and unsafe evaluations without inventin
     mode: "draft",
   });
   assert(draft.body.includes("DRAFT • ABC • BALANCED"), "draft label absent");
-  assert(draft.body.includes("inert until you arm it"), "draft lifecycle boundary absent");
-  assert(draft.body.includes("Proposed from quote"), "draft source timing absent");
+  assert(
+    draft.body.includes("inert until you arm it"),
+    "draft lifecycle boundary absent",
+  );
+  assert(
+    draft.body.includes("Proposed from quote"),
+    "draft source timing absent",
+  );
   assert(!draft.body.includes("Triggered"), "inert draft was called triggered");
-  assert(draft.body.includes("Proposed conditions 1: inside $41.80–$42.30"), "draft condition wording absent");
-  assert(!draft.body.includes("Conditions 1/1"), "draft claimed an evaluated pass count");
-  assert(draft.body.includes("evidence 2/2"), "draft source evidence coverage absent");
-  assertEquals(draft.reply_markup.inline_keyboard[0].map((button) => button.text), ["Arm", "Dismiss"]);
+  assert(
+    draft.body.includes("Proposed conditions 1: inside $41.80–$42.30"),
+    "draft condition wording absent",
+  );
+  assert(
+    !draft.body.includes("Conditions 1/1"),
+    "draft claimed an evaluated pass count",
+  );
+  assert(
+    draft.body.includes("evidence 2/2"),
+    "draft source evidence coverage absent",
+  );
+  assertEquals(
+    draft.reply_markup.inline_keyboard[0].map((button) => button.text),
+    ["Arm", "Dismiss"],
+  );
 
   const unsafeRule = alertRule({ severity: "system" });
   const unsafe = await renderAlertV3({
@@ -718,15 +1145,31 @@ Deno.test("alert v3 renders inert drafts and unsafe evaluations without inventin
       rule: unsafeRule,
       status: "unsafe_to_evaluate",
       reason_codes: ["EVIDENCE_STALE", "SESSION_MISMATCH"],
-      condition_results: [{ condition: unsafeRule.conditions[0], passed: null, observed_value: null, evidence_ids: [] }],
+      condition_results: [{
+        condition: unsafeRule.conditions[0],
+        passed: null,
+        observed_value: null,
+        evidence_ids: [],
+      }],
     }),
     source_evaluation: null,
     context: null,
   });
-  assert(unsafe.body.includes("was not evaluated safely"), "unsafe label absent");
+  assert(
+    unsafe.body.includes("was not evaluated safely"),
+    "unsafe label absent",
+  );
   assert(unsafe.body.includes("Unavailable"), "unavailable condition absent");
-  assert(unsafe.body.includes("No safe conclusion was produced because required evidence was unavailable."), "unsafe explanation absent");
-  assert(!unsafe.body.includes("conditions passed"), "unsafe evaluation claimed conditions passed");
+  assert(
+    unsafe.body.includes(
+      "No safe conclusion was produced because required evidence was unavailable.",
+    ),
+    "unsafe explanation absent",
+  );
+  assert(
+    !unsafe.body.includes("conditions passed"),
+    "unsafe evaluation claimed conditions passed",
+  );
   assert(!/\bHOLD\b/.test(unsafe.body), "unsafe evaluation invented Hold");
 });
 
@@ -738,7 +1181,11 @@ Deno.test("alert v3 draft coverage counts its source packet without widening eve
     id: "fallback-1",
     status: "fallback",
   });
-  const draftRule = alertRule({ state: "draft", version: 1, severity: "watch" });
+  const draftRule = alertRule({
+    state: "draft",
+    version: 1,
+    severity: "watch",
+  });
   const draft = await renderAlertV3({
     event_id: draftRule.rule_id,
     evaluation: alertEvaluation({
@@ -755,7 +1202,10 @@ Deno.test("alert v3 draft coverage counts its source packet without widening eve
     context: null,
     mode: "draft",
   });
-  assert(draft.body.includes("evidence 2/3"), "draft source evidence coverage is inaccurate");
+  assert(
+    draft.body.includes("evidence 2/3"),
+    "draft source evidence coverage is inaccurate",
+  );
 
   const event = await renderAlertV3({
     event_id: "7f2c70bf-5cec-4f1e-9de8-ec8823d99fc7",
@@ -763,7 +1213,10 @@ Deno.test("alert v3 draft coverage counts its source packet without widening eve
     source_evaluation: source,
     context: context(),
   });
-  assert(event.body.includes("evidence 1/1"), "event coverage included evidence unrelated to the trigger");
+  assert(
+    event.body.includes("evidence 1/1"),
+    "event coverage included evidence unrelated to the trigger",
+  );
 });
 
 Deno.test("alert v3 suppresses unmet rules and omits unsafe model narrative", async () => {
@@ -777,7 +1230,12 @@ Deno.test("alert v3 suppresses unmet rules and omits unsafe model narrative", as
     context: null,
   });
   assert(!safe.body.includes("Buy now"), "unsafe factor leaked");
-  assert(safe.body.includes("Deterministic conditions passed; no safe thesis summary was available."), "safe fallback absent");
+  assert(
+    safe.body.includes(
+      "Deterministic conditions passed; no safe thesis summary was available.",
+    ),
+    "safe fallback absent",
+  );
   assert(safe.body.length <= 3500, "alert exceeds Telegram bound");
 
   const unmet = await renderAlertV3({

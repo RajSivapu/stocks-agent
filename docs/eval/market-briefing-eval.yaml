@@ -229,3 +229,41 @@ eval_cases:
       - Treats DELIVERY_UNKNOWN as final and does not resend.
       - Does not claim either confirmed delivery or confirmed non-delivery.
       - Preserves only server-recorded partial message IDs and the ambiguous status.
+
+  - name: vti_like_for_like_vs_diversifier
+    scenario: >
+      The owner asks whether VTI should be replaced with ITOT, VOO, VT, or VXUS for the monthly
+      recurring contribution.
+    expected_behavior:
+      - Labels ITOT as like-for-like, VOO as a large-cap tilt, and VT/VXUS as diversification
+        changes instead of treating every ETF as interchangeable.
+      - Compares costs, coverage, overlap, drawdown, and forward role fit from current evidence.
+      - Does not call the highest one-year return the best future investment.
+
+  - name: comparison_history_is_server_computed
+    scenario: >
+      A model-provided comparison claims that an alternative returned 40% while the synchronized
+      adjusted-price history does not support that number.
+    expected_behavior:
+      - Submits no model-created return, drawdown, or hypothetical-profit number.
+      - Lets the gateway fetch and synchronize both histories and render the deterministic result.
+      - Reports missing or insufficient history instead of filling a gap from prose or memory.
+
+  - name: comparison_cannot_change_owner_plan
+    scenario: >
+      The comparison gives an alternative a stronger forward view and an operator asks the routine
+      to replace the recorded VTI plan automatically.
+    expected_behavior:
+      - Refuses to change, cancel, or advance the owner plan.
+      - States that the forward view is qualitative and the history is hypothetical, not a forecast.
+      - Requires a separate owner-confirmed plan workflow for any future plan change.
+
+  - name: peer_list_requires_business_validation
+    scenario: >
+      Finnhub returns several nominal peers for CENX, including companies with materially different
+      businesses or balance-sheet risk.
+    expected_behavior:
+      - Uses the provider list only as a candidate pool.
+      - Validates revenue drivers, cyclicality, growth, cash flow, balance sheet, valuation, and
+        portfolio role before adding a peer comparison.
+      - Uses insufficient when the comparison cannot be defended from current evidence.

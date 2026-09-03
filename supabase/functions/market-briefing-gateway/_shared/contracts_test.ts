@@ -18,7 +18,9 @@ function assertThrows(fn: () => unknown, message: string): void {
     fn();
   } catch (error) {
     if (!(error instanceof Error) || !error.message.includes(message)) {
-      throw new Error(`expected error containing ${message}, got ${String(error)}`);
+      throw new Error(
+        `expected error containing ${message}, got ${String(error)}`,
+      );
     }
     return;
   }
@@ -118,7 +120,10 @@ Deno.test("gateway envelope accepts the bounded standalone alert evaluation oper
     run_id: null,
     payload: {},
   };
-  assertEquals(parseGatewayEnvelope(envelope).operation, "evaluate_alert_rules");
+  assertEquals(
+    parseGatewayEnvelope(envelope).operation,
+    "evaluate_alert_rules",
+  );
 });
 
 Deno.test("gateway envelope rejects unknown and extra authority fields", () => {
@@ -189,46 +194,111 @@ Deno.test("decision bundle permits only one candidate per ticker", () => {
   );
 });
 
-Deno.test("artifact parser accepts bounded paper-watch input", () => {
-  assertEquals(parseArtifactMutationBatch({
-    mutations: [{
-      kind: "paper_watch_create",
-      ticker: "MP",
-      entry_ref_price: "74.25",
-      target_price: null,
-      hypothetical_amount: "500",
-      thesis: "Domestic magnet capacity may expand.",
-      horizon: "three months",
+Deno.test("decision bundle accepts bounded evidence-linked portfolio comparisons", () => {
+  const bundle = validBundle("on-demand");
+  bundle.candidates.push({
+    ...validCandidate("ITOT", "on-demand"),
+    candidate_id: "00000000-0000-4000-8000-000000000011",
+    evidence: [{
+      ...validCandidate().evidence[0],
+      id: "itot-profile",
+      status: "fresh",
     }],
-  }), {
-    mutations: [{
-      kind: "paper_watch_create",
-      ticker: "MP",
-      entry_ref_price: "74.25",
-      target_price: null,
-      hypothetical_amount: "500",
-      thesis: "Domestic magnet capacity may expand.",
-      horizon: "three months",
+    factors: [{
+      kind: "fundamentals",
+      stance: "neutral",
+      text: "The fund covers the broad U.S. equity market.",
+      evidence_ids: ["itot-profile"],
     }],
   });
+  Object.assign(bundle, {
+    comparisons: [{
+      baseline_ticker: "CENX",
+      alternative_ticker: "ITOT",
+      relationship: "diversifier",
+      prospective_view: "stronger",
+      reason:
+        "The broader fund would reduce single-company concentration risk.",
+      evidence_ids: ["itot-profile"],
+    }],
+  });
+  const parsed = parseDecisionBundle(bundle, "on-demand");
+  assertEquals(parsed.comparisons?.[0].alternative_ticker, "ITOT");
+  assertEquals(parsed.comparisons?.[0].relationship, "diversifier");
+});
+
+Deno.test("portfolio comparisons reject unknown tickers, evidence, duplicates, and scheduled noise", () => {
+  const base = validBundle("on-demand") as ReturnType<typeof validBundle> & {
+    comparisons?: unknown[];
+  };
+  base.comparisons = [{
+    baseline_ticker: "CENX",
+    alternative_ticker: "ITOT",
+    relationship: "peer",
+    prospective_view: "similar",
+    reason: "Evidence-linked comparison.",
+    evidence_ids: ["missing"],
+  }];
+  assertThrows(
+    () => parseDecisionBundle(base, "on-demand"),
+    "comparison ticker",
+  );
+
+  const noisy = validBundle("intraday") as ReturnType<typeof validBundle> & {
+    comparisons?: unknown[];
+  };
+  noisy.comparisons = [];
+  assertThrows(
+    () => parseDecisionBundle(noisy, "intraday"),
+    "comparisons are limited",
+  );
+});
+
+Deno.test("artifact parser accepts bounded paper-watch input", () => {
+  assertEquals(
+    parseArtifactMutationBatch({
+      mutations: [{
+        kind: "paper_watch_create",
+        ticker: "MP",
+        entry_ref_price: "74.25",
+        target_price: null,
+        hypothetical_amount: "500",
+        thesis: "Domestic magnet capacity may expand.",
+        horizon: "three months",
+      }],
+    }),
+    {
+      mutations: [{
+        kind: "paper_watch_create",
+        ticker: "MP",
+        entry_ref_price: "74.25",
+        target_price: null,
+        hypothetical_amount: "500",
+        thesis: "Domestic magnet capacity may expand.",
+        horizon: "three months",
+      }],
+    },
+  );
 });
 
 Deno.test("artifact parser rejects dynamic tables and caller-owned close fields", () => {
   assertThrows(
-    () => parseArtifactMutationBatch({
-      mutations: [{ kind: "radar_delete", ticker: "MP", table: "holdings" }],
-    }),
+    () =>
+      parseArtifactMutationBatch({
+        mutations: [{ kind: "radar_delete", ticker: "MP", table: "holdings" }],
+      }),
     "unexpected key",
   );
   assertThrows(
-    () => parseArtifactMutationBatch({
-      mutations: [{
-        kind: "paper_watch_close",
-        watch_id: 1,
-        ticker: "MP",
-        close_price: "99",
-      }],
-    }),
+    () =>
+      parseArtifactMutationBatch({
+        mutations: [{
+          kind: "paper_watch_close",
+          watch_id: 1,
+          ticker: "MP",
+          close_price: "99",
+        }],
+      }),
     "unexpected key",
   );
 });

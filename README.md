@@ -221,6 +221,13 @@ every gateway operation and begins with:
 🧪 DRY RUN — nothing sent, nothing written to Supabase.
 ```
 
+Portfolio-alternative research is available on demand and in the first pre-market brief of each
+month. It compares only an existing holding or active owner plan with at most six evidence-validated
+alternatives. The gateway computes synchronized one-year adjusted-history results using the same
+equal monthly contributions and reports max drawdown; the model cannot submit return numbers. VTI
+remains the recorded recurring baseline unless the owner separately confirms another plan. These
+comparisons never change a plan or holding, and on-demand previews never send Telegram.
+
 ## Deterministic policy and outcomes
 
 Reviewed policy comes from `config/settings.json`, is validated and versioned by

@@ -1,25 +1,72 @@
-export type Operation = "start_run" | "read_context" | "record_artifacts" |
-  "grade_due_decisions" | "evaluate_and_publish" | "evaluate_alert_rules" |
-  "finish_run";
+export type Operation =
+  | "start_run"
+  | "read_context"
+  | "record_artifacts"
+  | "grade_due_decisions"
+  | "evaluate_and_publish"
+  | "evaluate_alert_rules"
+  | "finish_run";
 export type Phase = "pre-market" | "intraday" | "post-market" | "on-demand";
-export type Action = "buy" | "add" | "hold" | "reduce" | "sell" | "watch" | "avoid";
-export type NotificationKind = "brief" | "new_idea" | "entry_trigger" | "stop_near" |
-  "stop_breach" | "target_near" | "target_hit" | "thesis_break" | "data_warning" |
-  "holiday";
+export type Action =
+  | "buy"
+  | "add"
+  | "hold"
+  | "reduce"
+  | "sell"
+  | "watch"
+  | "avoid";
+export type NotificationKind =
+  | "brief"
+  | "new_idea"
+  | "entry_trigger"
+  | "stop_near"
+  | "stop_breach"
+  | "target_near"
+  | "target_hit"
+  | "thesis_break"
+  | "data_warning"
+  | "holiday";
 export type DecisionMode = "discretionary" | "owner_plan";
 export type Confidence = "low" | "medium" | "high";
 export type Bucket = "core" | "growth" | "speculative";
-export type EvidenceStatus = "fresh" | "stale" | "fallback" | "missing" |
-  "failed" | "conflicting" | "unsupported";
-export type PolicyStatus = "approved" | "downgraded" | "vetoed" | "legacy_unverified";
+export type EvidenceStatus =
+  | "fresh"
+  | "stale"
+  | "fallback"
+  | "missing"
+  | "failed"
+  | "conflicting"
+  | "unsupported";
+export type PolicyStatus =
+  | "approved"
+  | "downgraded"
+  | "vetoed"
+  | "legacy_unverified";
 export type AlertProfile = "long_term" | "balanced" | "active";
 export type AlertV3Class = "entry_trigger" | "stop_breach" | "target_hit";
-export type AlertRuleKind = "price_cross" | "price_zone" | "sma_cross" |
-  "rsi_range" | "volume_multiple" | "recorded_stop" | "recorded_target" |
-  "screen_entry" | "event_window";
-export type AlertRuleState = "draft" | "active" | "paused" | "snoozed" |
-  "dismissed" | "expired";
-export type AlertSeverity = "critical" | "review" | "update" | "watch" | "system";
+export type AlertRuleKind =
+  | "price_cross"
+  | "price_zone"
+  | "sma_cross"
+  | "rsi_range"
+  | "volume_multiple"
+  | "recorded_stop"
+  | "recorded_target"
+  | "screen_entry"
+  | "event_window";
+export type AlertRuleState =
+  | "draft"
+  | "active"
+  | "paused"
+  | "snoozed"
+  | "dismissed"
+  | "expired";
+export type AlertSeverity =
+  | "critical"
+  | "review"
+  | "update"
+  | "watch"
+  | "system";
 export type AlertSession = "regular" | "pre_market" | "post_market" | "all";
 export type ConfirmationMode = "bar_close" | "two_quote";
 export type AlertTimeframe = "quote" | "15m" | "1h" | "1d";
@@ -111,7 +158,14 @@ export interface GatewayEnvelope {
 
 export interface EvidenceBlock {
   id: string;
-  kind: "quote" | "fundamentals" | "technicals" | "news" | "event" | "macro" | "sector";
+  kind:
+    | "quote"
+    | "fundamentals"
+    | "technicals"
+    | "news"
+    | "event"
+    | "macro"
+    | "sector";
   source: string;
   status: EvidenceStatus;
   observed_at: string | null;
@@ -144,12 +198,25 @@ export interface DecisionCandidate {
   valid_until: string | null;
   evidence: EvidenceBlock[];
   factors: Array<{
-    kind: "fundamentals" | "valuation" | "technicals" | "news" | "event" | "macro" | "sector" | "risk";
+    kind:
+      | "fundamentals"
+      | "valuation"
+      | "technicals"
+      | "news"
+      | "event"
+      | "macro"
+      | "sector"
+      | "risk";
     stance: "bull" | "bear" | "neutral";
     text: string;
     evidence_ids: string[];
   }>;
-  analyst: { completed: boolean; action: Action; confidence: Confidence; reason: string };
+  analyst: {
+    completed: boolean;
+    action: Action;
+    confidence: Confidence;
+    reason: string;
+  };
   checker: {
     completed: boolean;
     verdict: "approve" | "downgrade" | "veto";
@@ -166,6 +233,23 @@ export interface DecisionBundle {
   market_date: string;
   title: string;
   candidates: DecisionCandidate[];
+  comparisons?: PortfolioAlternativeRequest[];
+}
+
+export type AlternativeRelationship = "like_for_like" | "diversifier" | "peer";
+export type ProspectiveView =
+  | "stronger"
+  | "similar"
+  | "weaker"
+  | "insufficient";
+
+export interface PortfolioAlternativeRequest {
+  baseline_ticker: string;
+  alternative_ticker: string;
+  relationship: AlternativeRelationship;
+  prospective_view: ProspectiveView;
+  reason: string;
+  evidence_ids: string[];
 }
 
 export type ArtifactMutation =
@@ -307,7 +391,9 @@ export interface GatewayReadContext extends PolicyContext {
     confidence: string | null;
     source: string | null;
   }>;
-  lessons: Array<{ id: number; entry_date: string; category: string; content: string }>;
+  lessons: Array<
+    { id: number; entry_date: string; category: string; content: string }
+  >;
   radar: Array<{
     ticker: string;
     added: string | null;
@@ -375,8 +461,21 @@ const OPERATIONS: readonly Operation[] = [
   "evaluate_alert_rules",
   "finish_run",
 ];
-const PHASES: readonly Phase[] = ["pre-market", "intraday", "post-market", "on-demand"];
-const ACTIONS: readonly Action[] = ["buy", "add", "hold", "reduce", "sell", "watch", "avoid"];
+const PHASES: readonly Phase[] = [
+  "pre-market",
+  "intraday",
+  "post-market",
+  "on-demand",
+];
+const ACTIONS: readonly Action[] = [
+  "buy",
+  "add",
+  "hold",
+  "reduce",
+  "sell",
+  "watch",
+  "avoid",
+];
 const NOTIFICATION_KINDS: readonly NotificationKind[] = [
   "brief",
   "new_idea",
@@ -422,13 +521,25 @@ const FACTOR_KINDS = [
 ] as const;
 const STANCES = ["bull", "bear", "neutral"] as const;
 const CHECKER_VERDICTS = ["approve", "downgrade", "veto"] as const;
+const ALTERNATIVE_RELATIONSHIPS = [
+  "like_for_like",
+  "diversifier",
+  "peer",
+] as const;
+const PROSPECTIVE_VIEWS = [
+  "stronger",
+  "similar",
+  "weaker",
+  "insufficient",
+] as const;
 const CANDIDATE_LIMITS: Record<Phase, number> = {
   "pre-market": 80,
   intraday: 20,
   "post-market": 80,
   "on-demand": 10,
 };
-const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+const UUID_PATTERN =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const TICKER_PATTERN = /^[A-Z][A-Z0-9]*([.-][A-Z0-9]+)*$/;
 const DECIMAL_PATTERN = /^(?:0|[1-9]\d*)(?:\.\d+)?$/;
 const SIGNED_DECIMAL_PATTERN = /^-?(?:0|[1-9]\d*)(?:\.\d+)?$/;
@@ -447,7 +558,9 @@ function exactKeys(
 ): void {
   const allowedSet = new Set(allowed);
   for (const key of Object.keys(value)) {
-    if (!allowedSet.has(key)) throw new Error(`${path} has unexpected key: ${key}`);
+    if (!allowedSet.has(key)) {
+      throw new Error(`${path} has unexpected key: ${key}`);
+    }
   }
   for (const key of allowed) {
     if (!(key in value)) throw new Error(`${path} is missing key: ${key}`);
@@ -499,7 +612,10 @@ function integerValue(
   min = 0,
   max = Number.MAX_SAFE_INTEGER,
 ): number {
-  if (typeof value !== "number" || !Number.isSafeInteger(value) || value < min || value > max) {
+  if (
+    typeof value !== "number" || !Number.isSafeInteger(value) || value < min ||
+    value > max
+  ) {
     throw new Error(`${path} must be a bounded integer`);
   }
   return value;
@@ -513,7 +629,10 @@ function uuidValue(value: unknown, path: string): string {
 }
 
 function tickerValue(value: unknown, path: string): string {
-  if (typeof value !== "string" || value.length > 15 || !TICKER_PATTERN.test(value)) {
+  if (
+    typeof value !== "string" || value.length > 15 ||
+    !TICKER_PATTERN.test(value)
+  ) {
     throw new Error(`${path} must be a canonical ticker`);
   }
   return value;
@@ -524,7 +643,10 @@ function dateValue(value: unknown, path: string): string {
     throw new Error(`${path} must be an ISO date`);
   }
   const parsed = new Date(`${value}T00:00:00.000Z`);
-  if (Number.isNaN(parsed.valueOf()) || parsed.toISOString().slice(0, 10) !== value) {
+  if (
+    Number.isNaN(parsed.valueOf()) ||
+    parsed.toISOString().slice(0, 10) !== value
+  ) {
     throw new Error(`${path} must be a valid ISO date`);
   }
   return value;
@@ -535,7 +657,9 @@ function timestampValue(value: unknown, path: string): string {
     throw new Error(`${path} must be an ISO timestamp`);
   }
   const parsed = Date.parse(value);
-  if (!Number.isFinite(parsed)) throw new Error(`${path} must be a valid ISO timestamp`);
+  if (!Number.isFinite(parsed)) {
+    throw new Error(`${path} must be a valid ISO timestamp`);
+  }
   return value;
 }
 
@@ -568,7 +692,11 @@ function decimalValue(
   return value;
 }
 
-function arrayValue(value: unknown, path: string, maxLength: number): unknown[] {
+function arrayValue(
+  value: unknown,
+  path: string,
+  maxLength: number,
+): unknown[] {
   if (!Array.isArray(value) || value.length > maxLength) {
     throw new Error(`${path} must be an array with at most ${maxLength} items`);
   }
@@ -579,7 +707,14 @@ export function parseGatewayEnvelope(value: unknown): GatewayEnvelope {
   const row = objectValue(value, "envelope");
   exactKeys(
     row,
-    ["schema_version", "operation", "request_id", "run_id", "dry_run", "payload"],
+    [
+      "schema_version",
+      "operation",
+      "request_id",
+      "run_id",
+      "dry_run",
+      "payload",
+    ],
     "envelope",
   );
   if (row.schema_version !== 1) throw new Error("schema_version must be 1");
@@ -597,7 +732,16 @@ function parseEvidence(value: unknown, path: string): EvidenceBlock {
   const row = objectValue(value, path);
   exactKeys(
     row,
-    ["id", "kind", "source", "status", "observed_at", "retrieved_at", "reference", "claims"],
+    [
+      "id",
+      "kind",
+      "source",
+      "status",
+      "observed_at",
+      "retrieved_at",
+      "reference",
+      "claims",
+    ],
     path,
   );
   return {
@@ -653,41 +797,54 @@ function parseCandidate(
   exactKeys(row, keys, path);
 
   const phase = enumValue(row.phase, PHASES, `${path}.phase`);
-  if (phase !== expectedPhase) throw new Error(`${path}.phase does not match bundle phase`);
+  if (phase !== expectedPhase) {
+    throw new Error(`${path}.phase does not match bundle phase`);
+  }
 
-  const evidence = arrayValue(row.evidence, `${path}.evidence`, 100).map((item, index) =>
-    parseEvidence(item, `${path}.evidence[${index}]`)
-  );
+  const evidence = arrayValue(row.evidence, `${path}.evidence`, 100).map((
+    item,
+    index,
+  ) => parseEvidence(item, `${path}.evidence[${index}]`));
   const evidenceIds = new Set<string>();
   for (const item of evidence) {
-    if (evidenceIds.has(item.id)) throw new Error(`${path} has duplicate evidence id`);
+    if (evidenceIds.has(item.id)) {
+      throw new Error(`${path} has duplicate evidence id`);
+    }
     evidenceIds.add(item.id);
   }
 
-  const factors = arrayValue(row.factors, `${path}.factors`, 20).map((item, index) => {
-    const factorPath = `${path}.factors[${index}]`;
-    const factor = objectValue(item, factorPath);
-    exactKeys(factor, ["kind", "stance", "text", "evidence_ids"], factorPath);
-    const factorEvidenceIds = arrayValue(
-      factor.evidence_ids,
-      `${factorPath}.evidence_ids`,
-      20,
-    ).map((id, evidenceIndex) =>
-      stringValue(id, `${factorPath}.evidence_ids[${evidenceIndex}]`, 100)
-    );
-    for (const id of factorEvidenceIds) {
-      if (!evidenceIds.has(id)) throw new Error(`${factorPath} references unknown evidence id`);
-    }
-    return {
-      kind: enumValue(factor.kind, FACTOR_KINDS, `${factorPath}.kind`),
-      stance: enumValue(factor.stance, STANCES, `${factorPath}.stance`),
-      text: stringValue(factor.text, `${factorPath}.text`, 500),
-      evidence_ids: factorEvidenceIds,
-    };
-  });
+  const factors = arrayValue(row.factors, `${path}.factors`, 20).map(
+    (item, index) => {
+      const factorPath = `${path}.factors[${index}]`;
+      const factor = objectValue(item, factorPath);
+      exactKeys(factor, ["kind", "stance", "text", "evidence_ids"], factorPath);
+      const factorEvidenceIds = arrayValue(
+        factor.evidence_ids,
+        `${factorPath}.evidence_ids`,
+        20,
+      ).map((id, evidenceIndex) =>
+        stringValue(id, `${factorPath}.evidence_ids[${evidenceIndex}]`, 100)
+      );
+      for (const id of factorEvidenceIds) {
+        if (!evidenceIds.has(id)) {
+          throw new Error(`${factorPath} references unknown evidence id`);
+        }
+      }
+      return {
+        kind: enumValue(factor.kind, FACTOR_KINDS, `${factorPath}.kind`),
+        stance: enumValue(factor.stance, STANCES, `${factorPath}.stance`),
+        text: stringValue(factor.text, `${factorPath}.text`, 500),
+        evidence_ids: factorEvidenceIds,
+      };
+    },
+  );
 
   const analystRow = objectValue(row.analyst, `${path}.analyst`);
-  exactKeys(analystRow, ["completed", "action", "confidence", "reason"], `${path}.analyst`);
+  exactKeys(
+    analystRow,
+    ["completed", "action", "confidence", "reason"],
+    `${path}.analyst`,
+  );
   const checkerRow = objectValue(row.checker, `${path}.checker`);
   exactKeys(
     checkerRow,
@@ -708,31 +865,65 @@ function parseCandidate(
       NOTIFICATION_KINDS,
       `${path}.notification_kind`,
     ),
-    decision_mode: enumValue(row.decision_mode, DECISION_MODES, `${path}.decision_mode`),
+    decision_mode: enumValue(
+      row.decision_mode,
+      DECISION_MODES,
+      `${path}.decision_mode`,
+    ),
     bucket: enumValue(row.bucket, BUCKETS, `${path}.bucket`),
     depth: enumValue(row.depth, ["full", "compact"] as const, `${path}.depth`),
     confidence: enumValue(row.confidence, CONFIDENCES, `${path}.confidence`),
-    confidence_reason: stringValue(row.confidence_reason, `${path}.confidence_reason`),
-    health_score: decimalValue(row.health_score, `${path}.health_score`, 6, { nullable: true }),
-    observed_price: decimalValue(row.observed_price, `${path}.observed_price`, 6, {
+    confidence_reason: stringValue(
+      row.confidence_reason,
+      `${path}.confidence_reason`,
+    ),
+    health_score: decimalValue(row.health_score, `${path}.health_score`, 6, {
       nullable: true,
     }),
+    observed_price: decimalValue(
+      row.observed_price,
+      `${path}.observed_price`,
+      6,
+      {
+        nullable: true,
+      },
+    ),
     observed_quote_as_of: nullableTimestamp(
       row.observed_quote_as_of,
       `${path}.observed_quote_as_of`,
     ),
-    proposed_amount: decimalValue(row.proposed_amount, `${path}.proposed_amount`, 6, {
-      nullable: true,
-    }),
-    proposed_shares: decimalValue(row.proposed_shares, `${path}.proposed_shares`, 8, {
-      nullable: true,
-    }),
-    entry_zone_low: decimalValue(row.entry_zone_low, `${path}.entry_zone_low`, 6, {
-      nullable: true,
-    }),
-    entry_zone_high: decimalValue(row.entry_zone_high, `${path}.entry_zone_high`, 6, {
-      nullable: true,
-    }),
+    proposed_amount: decimalValue(
+      row.proposed_amount,
+      `${path}.proposed_amount`,
+      6,
+      {
+        nullable: true,
+      },
+    ),
+    proposed_shares: decimalValue(
+      row.proposed_shares,
+      `${path}.proposed_shares`,
+      8,
+      {
+        nullable: true,
+      },
+    ),
+    entry_zone_low: decimalValue(
+      row.entry_zone_low,
+      `${path}.entry_zone_low`,
+      6,
+      {
+        nullable: true,
+      },
+    ),
+    entry_zone_high: decimalValue(
+      row.entry_zone_high,
+      `${path}.entry_zone_high`,
+      6,
+      {
+        nullable: true,
+      },
+    ),
     stop: decimalValue(row.stop, `${path}.stop`, 6, { nullable: true }),
     target: decimalValue(row.target, `${path}.target`, 6, { nullable: true }),
     invalidation_price: decimalValue(
@@ -745,7 +936,10 @@ function parseCandidate(
     evidence,
     factors,
     analyst: {
-      completed: booleanValue(analystRow.completed, `${path}.analyst.completed`),
+      completed: booleanValue(
+        analystRow.completed,
+        `${path}.analyst.completed`,
+      ),
       action: enumValue(analystRow.action, ACTIONS, `${path}.analyst.action`),
       confidence: enumValue(
         analystRow.confidence,
@@ -755,7 +949,10 @@ function parseCandidate(
       reason: stringValue(analystRow.reason, `${path}.analyst.reason`),
     },
     checker: {
-      completed: booleanValue(checkerRow.completed, `${path}.checker.completed`),
+      completed: booleanValue(
+        checkerRow.completed,
+        `${path}.checker.completed`,
+      ),
       verdict: enumValue(
         checkerRow.verdict,
         CHECKER_VERDICTS,
@@ -770,7 +967,10 @@ function parseCandidate(
       ),
       reason: stringValue(checkerRow.reason, `${path}.checker.reason`),
     },
-    decisive_factor: stringValue(row.decisive_factor, `${path}.decisive_factor`),
+    decisive_factor: stringValue(
+      row.decisive_factor,
+      `${path}.decisive_factor`,
+    ),
     invalidation: stringValue(row.invalidation, `${path}.invalidation`),
     prior_suggestion_ids: arrayValue(
       row.prior_suggestion_ids,
@@ -782,11 +982,23 @@ function parseCandidate(
   };
 }
 
-export function parseDecisionBundle(value: unknown, phase: Phase): DecisionBundle {
+export function parseDecisionBundle(
+  value: unknown,
+  phase: Phase,
+): DecisionBundle {
   const row = objectValue(value, "bundle");
-  exactKeys(row, ["phase", "market_date", "title", "candidates"], "bundle");
+  const hasComparisons = Object.hasOwn(row, "comparisons");
+  exactKeys(
+    row,
+    hasComparisons
+      ? ["phase", "market_date", "title", "candidates", "comparisons"]
+      : ["phase", "market_date", "title", "candidates"],
+    "bundle",
+  );
   const parsedPhase = enumValue(row.phase, PHASES, "bundle.phase");
-  if (parsedPhase !== phase) throw new Error("bundle phase does not match requested phase");
+  if (parsedPhase !== phase) {
+    throw new Error("bundle phase does not match requested phase");
+  }
   const marketDate = dateValue(row.market_date, "bundle.market_date");
   if (!Array.isArray(row.candidates)) {
     throw new Error("bundle.candidates must be an array");
@@ -802,8 +1014,12 @@ export function parseDecisionBundle(value: unknown, phase: Phase): DecisionBundl
   const tickers = new Set<string>();
   let evidenceCount = 0;
   for (const candidate of candidates) {
-    if (candidateIds.has(candidate.candidate_id)) throw new Error("bundle has duplicate candidate id");
-    if (tickers.has(candidate.ticker)) throw new Error("bundle has duplicate ticker");
+    if (candidateIds.has(candidate.candidate_id)) {
+      throw new Error("bundle has duplicate candidate id");
+    }
+    if (tickers.has(candidate.ticker)) {
+      throw new Error("bundle has duplicate ticker");
+    }
     candidateIds.add(candidate.candidate_id);
     tickers.add(candidate.ticker);
     evidenceCount += candidate.evidence.length;
@@ -812,11 +1028,100 @@ export function parseDecisionBundle(value: unknown, phase: Phase): DecisionBundl
     }
   }
   if (evidenceCount > 100) throw new Error("bundle exceeds evidence limit");
+  if (hasComparisons && phase !== "pre-market" && phase !== "on-demand") {
+    throw new Error(
+      "portfolio comparisons are limited to pre-market and on-demand reviews",
+    );
+  }
+  const comparisons = hasComparisons
+    ? arrayValue(row.comparisons, "bundle.comparisons", 6).map(
+      (item, index) => {
+        const path = `bundle.comparisons[${index}]`;
+        const comparison = objectValue(item, path);
+        exactKeys(
+          comparison,
+          [
+            "baseline_ticker",
+            "alternative_ticker",
+            "relationship",
+            "prospective_view",
+            "reason",
+            "evidence_ids",
+          ],
+          path,
+        );
+        const baselineTicker = tickerValue(
+          comparison.baseline_ticker,
+          `${path}.baseline_ticker`,
+        );
+        const alternativeTicker = tickerValue(
+          comparison.alternative_ticker,
+          `${path}.alternative_ticker`,
+        );
+        if (
+          baselineTicker === alternativeTicker ||
+          !tickers.has(baselineTicker) ||
+          !tickers.has(alternativeTicker)
+        ) {
+          throw new Error(`${path} has an invalid comparison ticker`);
+        }
+        const alternative = candidates.find((candidate) =>
+          candidate.ticker === alternativeTicker
+        )!;
+        const evidenceIds = arrayValue(
+          comparison.evidence_ids,
+          `${path}.evidence_ids`,
+          10,
+        ).map((id, evidenceIndex) =>
+          stringValue(id, `${path}.evidence_ids[${evidenceIndex}]`, 100)
+        );
+        if (
+          evidenceIds.length === 0 ||
+          evidenceIds.some((id) =>
+            !alternative.evidence.some((evidence) => evidence.id === id) ||
+            !alternative.factors.some((factor) =>
+              factor.evidence_ids.includes(id)
+            )
+          )
+        ) {
+          throw new Error(`${path} references unknown comparison evidence`);
+        }
+        return {
+          baseline_ticker: baselineTicker,
+          alternative_ticker: alternativeTicker,
+          relationship: enumValue(
+            comparison.relationship,
+            ALTERNATIVE_RELATIONSHIPS,
+            `${path}.relationship`,
+          ),
+          prospective_view: enumValue(
+            comparison.prospective_view,
+            PROSPECTIVE_VIEWS,
+            `${path}.prospective_view`,
+          ),
+          reason: stringValue(comparison.reason, `${path}.reason`, 300),
+          evidence_ids: evidenceIds,
+        };
+      },
+    )
+    : undefined;
+  if (comparisons) {
+    const pairs = new Set<string>();
+    for (const comparison of comparisons) {
+      const pair =
+        `${comparison.baseline_ticker}:${comparison.alternative_ticker}`;
+      if (pairs.has(pair)) {
+        throw new Error("bundle has duplicate portfolio comparison");
+      }
+      pairs.add(pair);
+    }
+  }
   return {
     phase,
     market_date: marketDate,
     title: stringValue(row.title, "bundle.title"),
     candidates,
+    ...(comparisons ? { comparisons } : {}),
   };
 }
 
@@ -827,7 +1132,16 @@ function parseArtifact(value: unknown, path: string): ArtifactMutation {
     case "observation":
       exactKeys(
         row,
-        ["kind", "ticker", "obs_date", "event_type", "summary", "price_reaction", "confidence", "source"],
+        [
+          "kind",
+          "ticker",
+          "obs_date",
+          "event_type",
+          "summary",
+          "price_reaction",
+          "confidence",
+          "source",
+        ],
         path,
       );
       return {
@@ -836,28 +1150,55 @@ function parseArtifact(value: unknown, path: string): ArtifactMutation {
         obs_date: dateValue(row.obs_date, `${path}.obs_date`),
         event_type: stringValue(row.event_type, `${path}.event_type`, 100),
         summary: stringValue(row.summary, `${path}.summary`),
-        price_reaction: nullableString(row.price_reaction, `${path}.price_reaction`, 100),
-        confidence: enumValue(row.confidence, CONFIDENCES, `${path}.confidence`),
+        price_reaction: nullableString(
+          row.price_reaction,
+          `${path}.price_reaction`,
+          100,
+        ),
+        confidence: enumValue(
+          row.confidence,
+          CONFIDENCES,
+          `${path}.confidence`,
+        ),
         source: stringValue(row.source, `${path}.source`, 200),
       };
     case "snapshot":
       exactKeys(
         row,
-        ["kind", "snap_date", "ticker", "close", "day_move_pct", "rsi14", "sma50", "sma200", "macd_hist"],
+        [
+          "kind",
+          "snap_date",
+          "ticker",
+          "close",
+          "day_move_pct",
+          "rsi14",
+          "sma50",
+          "sma200",
+          "macd_hist",
+        ],
         path,
       );
       return {
         kind,
         snap_date: dateValue(row.snap_date, `${path}.snap_date`),
         ticker: tickerValue(row.ticker, `${path}.ticker`),
-        close: decimalValue(row.close, `${path}.close`, 6, { positive: true }) as string,
-        day_move_pct: decimalValue(row.day_move_pct, `${path}.day_move_pct`, 6, {
-          nullable: true,
-          signed: true,
-        }),
+        close: decimalValue(row.close, `${path}.close`, 6, {
+          positive: true,
+        }) as string,
+        day_move_pct: decimalValue(
+          row.day_move_pct,
+          `${path}.day_move_pct`,
+          6,
+          {
+            nullable: true,
+            signed: true,
+          },
+        ),
         rsi14: decimalValue(row.rsi14, `${path}.rsi14`, 6, { nullable: true }),
         sma50: decimalValue(row.sma50, `${path}.sma50`, 6, { nullable: true }),
-        sma200: decimalValue(row.sma200, `${path}.sma200`, 6, { nullable: true }),
+        sma200: decimalValue(row.sma200, `${path}.sma200`, 6, {
+          nullable: true,
+        }),
         macd_hist: decimalValue(row.macd_hist, `${path}.macd_hist`, 6, {
           nullable: true,
           signed: true,
@@ -874,7 +1215,17 @@ function parseArtifact(value: unknown, path: string): ArtifactMutation {
     case "radar_upsert":
       exactKeys(
         row,
-        ["kind", "ticker", "added", "last_seen", "days_relevant", "reason", "bucket_guess", "promoted", "promoted_on"],
+        [
+          "kind",
+          "ticker",
+          "added",
+          "last_seen",
+          "days_relevant",
+          "reason",
+          "bucket_guess",
+          "promoted",
+          "promoted_on",
+        ],
         path,
       );
       return {
@@ -882,9 +1233,18 @@ function parseArtifact(value: unknown, path: string): ArtifactMutation {
         ticker: tickerValue(row.ticker, `${path}.ticker`),
         added: dateValue(row.added, `${path}.added`),
         last_seen: dateValue(row.last_seen, `${path}.last_seen`),
-        days_relevant: integerValue(row.days_relevant, `${path}.days_relevant`, 0, 3650),
+        days_relevant: integerValue(
+          row.days_relevant,
+          `${path}.days_relevant`,
+          0,
+          3650,
+        ),
         reason: stringValue(row.reason, `${path}.reason`),
-        bucket_guess: enumValue(row.bucket_guess, BUCKETS, `${path}.bucket_guess`),
+        bucket_guess: enumValue(
+          row.bucket_guess,
+          BUCKETS,
+          `${path}.bucket_guess`,
+        ),
         promoted: booleanValue(row.promoted, `${path}.promoted`),
         promoted_on: row.promoted_on === null
           ? null
@@ -896,7 +1256,15 @@ function parseArtifact(value: unknown, path: string): ArtifactMutation {
     case "paper_watch_create":
       exactKeys(
         row,
-        ["kind", "ticker", "entry_ref_price", "target_price", "hypothetical_amount", "thesis", "horizon"],
+        [
+          "kind",
+          "ticker",
+          "entry_ref_price",
+          "target_price",
+          "hypothetical_amount",
+          "thesis",
+          "horizon",
+        ],
         path,
       );
       return {
@@ -908,10 +1276,15 @@ function parseArtifact(value: unknown, path: string): ArtifactMutation {
           6,
           { positive: true },
         ) as string,
-        target_price: decimalValue(row.target_price, `${path}.target_price`, 6, {
-          nullable: true,
-          positive: true,
-        }),
+        target_price: decimalValue(
+          row.target_price,
+          `${path}.target_price`,
+          6,
+          {
+            nullable: true,
+            positive: true,
+          },
+        ),
         hypothetical_amount: decimalValue(
           row.hypothetical_amount,
           `${path}.hypothetical_amount`,
@@ -933,11 +1306,15 @@ function parseArtifact(value: unknown, path: string): ArtifactMutation {
   }
 }
 
-export function parseArtifactMutationBatch(value: unknown): ArtifactMutationBatch {
+export function parseArtifactMutationBatch(
+  value: unknown,
+): ArtifactMutationBatch {
   const row = objectValue(value, "artifact batch");
   exactKeys(row, ["mutations"], "artifact batch");
   const mutations = arrayValue(row.mutations, "artifact batch.mutations", 100);
-  if (mutations.length === 0) throw new Error("artifact batch must not be empty");
+  if (mutations.length === 0) {
+    throw new Error("artifact batch must not be empty");
+  }
   return {
     mutations: mutations.map((mutation, index) =>
       parseArtifact(mutation, `artifact batch.mutations[${index}]`)

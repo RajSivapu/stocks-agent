@@ -173,3 +173,18 @@ def test_owner_only_access_and_no_brokerage_remain_explicit_in_settings():
         "friend_invitations_enabled": False,
     }
     assert settings["guardrails"]["execution_allowed"] is False
+
+
+def test_portfolio_alternative_review_is_bounded_and_cannot_change_the_plan():
+    settings = load_settings()
+    assert settings["deployment"]["core_mix"] == {"VTI": 1.0}
+    assert settings["portfolio_alternatives"] == {
+        "enabled": True,
+        "cadence": "first_pre_market_of_month_and_on_demand",
+        "max_pairs": 6,
+        "history_method": "gateway_adjusted_equal_monthly_contributions_1y",
+        "recurring_core_candidates": ["ITOT", "SCHB", "VOO", "VT", "VXUS"],
+        "peer_discovery": "finnhub_then_business_model_validation",
+        "automatic_plan_changes": False,
+        "automatic_holding_changes": False,
+    }

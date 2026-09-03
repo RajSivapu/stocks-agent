@@ -133,6 +133,9 @@ and the watchlist. Do deeper work only where evidence can change a decision. Ran
 quality and risk, not novelty. The gateway renders the full brief and chooses whether it is eligible
 for delivery.
 
+On the first pre-market brief of each calendar month, run the bounded portfolio-alternatives review
+below. Omit the `comparisons` key entirely on every other scheduled run. Do not add an empty key.
+
 ### Intraday
 
 Start from a new quote and current facts. Revalidate any entry zone, invalidation, stop/target edge,
@@ -149,6 +152,53 @@ decisions via the gateway. A stop ratchet remains a recommendation until owner c
 
 Apply the same freshness, Analyst/Checker, policy, and risk process. Expect `status: suppressed` and
 show the gateway-rendered preview in the current session only: no Telegram notification.
+
+If the owner asks whether a holding or recurring investment has a better alternative, include the
+bounded portfolio-alternatives review below. It remains session-only unless it is the scheduled
+first pre-market brief of the month.
+
+## Portfolio alternatives review
+
+This is a research comparison, not an auto-replacement engine. It may compare an existing holding
+or active owner plan only. It must never change or cancel an owner plan, edit a holding, assume a
+trade, or turn relative performance into an order instruction.
+
+Use at most the configured `max_pairs`. Include both the current ticker and every alternative as
+ordinary candidates in the same bundle, with separate Analyst and Checker records. Then add a
+top-level `comparisons` array. Each item has exactly:
+
+```json
+{
+  "baseline_ticker": "VTI",
+  "alternative_ticker": "ITOT",
+  "relationship": "like_for_like",
+  "prospective_view": "similar",
+  "reason": "Evidence-linked role and forward-risk comparison.",
+  "evidence_ids": ["official-fund-profile"]
+}
+```
+
+Allowed relationships are `like_for_like`, `diversifier`, and `peer`. Allowed prospective views are
+`stronger`, `similar`, `weaker`, and `insufficient`. The evidence IDs must belong to the alternative
+candidate and have current `fresh` or explicitly justified `fallback` status. A provider's peer list
+is only a discovery pool: validate business model, revenue drivers, growth, balance sheet, cash
+flow, valuation, volatility, and portfolio role before calling a stock a peer.
+
+For a VTI plan, first compare like-for-like broad-U.S. funds such as ITOT or SCHB. Evaluate VOO as a
+large-cap tilt and VT or VXUS as a diversification change, not as interchangeable copies of VTI.
+For an individual holding such as CENX, compare only genuinely similar businesses and at least one
+broad or sector benchmark when evidence is available. Do not select a winner from one return window.
+
+Never calculate or submit performance numbers. The gateway fetches synchronized adjusted history
+and computes the same one-year lump-sum window, equal monthly contributions, and max drawdown for
+both tickers. Explain that this is hypothetical, includes only the available synchronized history,
+and does not reproduce the owner's exact tax, fill, or cash-flow history. The rendered message must
+retain: `Hypothetical history is not a forecast`.
+
+The forward view is a qualitative, evidence-linked judgment—not a probability or prediction. State
+what would invalidate it, distinguish a substitute from a diversifier, and use `insufficient` when
+fees, holdings overlap, fundamentals, valuation, or current risk evidence cannot be verified. The
+gateway may downgrade the view to `insufficient`; its result is final.
 
 ## Dry-run output
 

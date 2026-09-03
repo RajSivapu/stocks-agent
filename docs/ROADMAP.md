@@ -22,6 +22,7 @@ is separate, paper-first, and outside this codebase.
 | Friday ChatGPT weekly process audit v2 | Packet + skill implemented and tested | Active Fridays 16:30 local on `gpt-5.6-terra`; live packet smoke test passed, first scheduled report pending |
 | Watchlist changes as owner-reviewed proposals | Implemented in settings/skill | Live through the revised Routine; never edits/pushes the checkout |
 | Owner-only alert v3 | Implemented, reviewed, and rollback-tested | Live in shadow-only mode with gateway v11, Telegram v12, and policy v3; the corrected protected dry-run rendered policy-validated stop/target and `1/1` source-evidence coverage with zero lifecycle, gateway-request, suggestion, publication, or Telegram writes |
+| Owner portfolio alternatives review | Gateway-computed history, evidence gate, renderer, and routine contract implemented and tested | Pending protected deployment and a send-free on-demand dry-run; VTI remains the unchanged recurring baseline |
 
 The reliability release is on GitHub `main`. Alert v3 is deployed from
 `codex/owner-alert-v3` for shadow verification and is not yet merged. "Live" means the corresponding
@@ -66,6 +67,17 @@ The remaining checks are scheduled observation followed by an explicitly approve
 - Before sharing with friends, redesign holdings/commands around `owner_id`, add per-owner RLS and bot
   onboarding, separate secrets/configuration, and threat-model tenant isolation. The current release
   is intentionally single-owner.
+
+## Personal portfolio research
+
+- On demand and on the first pre-market brief of each month, compare active owner plans and selected
+  holdings with at most six evidence-validated alternatives.
+- The gateway, not model prose, computes synchronized adjusted-history lump-sum, equal-monthly, and
+  max-drawdown figures. History is hypothetical and never represented as a forecast.
+- VTI is the current baseline. ITOT/SCHB are like-for-like candidates; VOO is a large-cap tilt;
+  VT/VXUS are diversification changes. Individual-stock peers require business-model validation.
+- Forward views remain qualitative and are forced to `insufficient` when the alternative fails
+  gateway policy or cited evidence is unavailable. The review never changes a holding or plan.
 
 ## Deferred research features
 

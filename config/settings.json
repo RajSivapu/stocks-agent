@@ -30,12 +30,22 @@
     "_note": "Owner starts at $500/mo (first buy by end of June 2026) and will scale toward $1,000/mo, building slowly. Each run, read monthly_investment_usd_current AND the actual portfolio size, then split by the 70/20/10 allocation (so $500 -> 350/100/50; $1000 -> 700/200/100) and ADAPT emphasis as the portfolio grows. $200/mo income stays a Year-2/3 target once the speculative bucket is real money — NOT Year-1. Until the opportunities fund reaches $500, speculative ideas are LEARNING/paper-trade only."
   },
   "deployment": {
-    "core_mix": { "VOO": 0.80, "VXUS": 0.10, "SCHD": 0.10 },
-    "core_mix_note": "Default Core DCA split (config-driven). Mostly VOO (US S&P 500) + a small VXUS (international) + SCHD (dividend) tilt — justified in the monthly brief so it isn't 'why only VOO'. Owner may set pure VOO ({\"VOO\":1.0}). Core is AUTO-DCA: buy the fixed monthly Core amount across this mix every month regardless of price; lean MORE on red days.",
+    "core_mix": { "VTI": 1.0 },
+    "core_mix_note": "Current personal baseline only: the owner recorded a VTI monthly reminder. The database plan is the source of truth and remains unchanged until the owner confirms a different plan. The monthly alternatives review may compare VTI with like-for-like funds, tilts, and diversifiers but cannot switch, cancel, or advance the reminder.",
     "dry_powder": {
       "rollover_months": 2,
       "_note": "Growth + speculative money is HELD AS CASH (dry powder), tracked in the dry_powder Postgres table per month (columns month, growth_available, spec_available, rolled_months). Deploy ONLY when a candidate clears the Rigorous-Mode gate (Medium+ conviction, risk gate passed) AND price is inside its entry zone — NOT just because a new month started. If no qualifying setup appears, growth cash waits up to rollover_months (2); after that, suggest DCA'ing it into Core so money isn't idle forever."
     }
+  },
+  "portfolio_alternatives": {
+    "enabled": true,
+    "cadence": "first_pre_market_of_month_and_on_demand",
+    "max_pairs": 6,
+    "history_method": "gateway_adjusted_equal_monthly_contributions_1y",
+    "recurring_core_candidates": ["ITOT", "SCHB", "VOO", "VT", "VXUS"],
+    "peer_discovery": "finnhub_then_business_model_validation",
+    "automatic_plan_changes": false,
+    "automatic_holding_changes": false
   },
   "entry_zones": {
     "enabled": true,

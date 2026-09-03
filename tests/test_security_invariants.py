@@ -257,6 +257,17 @@ def test_cloud_market_skills_have_only_bounded_gateway_authority():
     assert "/buy" in skills["reconcile-trade"]
     assert "/sell" in skills["reconcile-trade"]
     assert "local-admin" in skills["reconcile-trade"]
+    market_skill = skills["market-briefing"]
+    for boundary in (
+        "comparisons",
+        "equal monthly contributions",
+        "Hypothetical history is not a forecast",
+        "never change or cancel an owner plan",
+        "like-for-like",
+        "diversifier",
+        "peer",
+    ):
+        assert boundary in market_skill
 
 
 def test_cloud_market_support_scripts_do_not_restore_privileged_paths():
@@ -281,6 +292,10 @@ def test_market_briefing_eval_covers_gateway_failure_pressure_cases():
         "database_failure",
         "definitive_telegram_failure",
         "ambiguous_delivery",
+        "vti_like_for_like_vs_diversifier",
+        "comparison_history_is_server_computed",
+        "comparison_cannot_change_owner_plan",
+        "peer_list_requires_business_validation",
     )
     for case_name in required:
         assert f"name: {case_name}" in evaluation
