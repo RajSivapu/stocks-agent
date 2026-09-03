@@ -389,7 +389,7 @@ REVOKE ALL ON FUNCTION public.cancel_portfolio_command(UUID, BIGINT, BIGINT) FRO
 GRANT EXECUTE ON FUNCTION public.apply_portfolio_command(UUID, BIGINT, BIGINT) TO service_role;
 
 GRANT EXECUTE ON FUNCTION public.cancel_portfolio_command(UUID, BIGINT, BIGINT) TO service_role;
-\n+-- Deterministic market-decision safety gateway, audit ledger, and transactional outbox.
+-- Deterministic market-decision safety gateway, audit ledger, and transactional outbox.
 -- Additive and idempotent. Apply only after 20260901_reliable_stock_agent.sql.
 
 CREATE SCHEMA IF NOT EXISTS extensions;

@@ -273,25 +273,25 @@ git commit -m "feat: define provider and portfolio contracts"
 - Consumes: the current 18-table public schema.
 - Produces: private `app`, machine-only `machine`, and exposed `api` schemas; identity and consent tables; nullable migration-stage owner columns.
 
-- [ ] **Step 1: Write the failing catalog test**
+- [x] **Step 1: Write the failing catalog test**
 
 Connect only to staging and assert `app.profiles`, `app.app_admins`, `app.user_consents`,
 `app.notification_preferences`, `app.analysis_schedules`, `app.agent_connections`, and
 `app.telegram_links` exist; `public` is absent from PostgREST exposed schemas; every user-specific
 legacy table has an `owner_id uuid` column.
 
-- [ ] **Step 2: Run against a disposable staging reset**
+- [x] **Step 2: Run against a disposable staging reset**
 
 Apply current migrations, run the test, and expect failures for missing `app` schema and owner columns.
 
-- [ ] **Step 3: Implement the foundation migration**
+- [x] **Step 3: Implement the foundation migration**
 
 Create schemas owned by a non-login migration owner. Identity rows use
 `profiles.id REFERENCES auth.users(id) ON DELETE CASCADE`; consent stores immutable document version,
 timestamp, and source. Create owner columns without defaults so accidental writes cannot inherit a
 global owner. Create composite unique candidates needed by owner-preserving foreign keys.
 
-- [ ] **Step 4: Configure the API surface**
+- [x] **Step 4: Configure the API surface**
 
 Set local Supabase API schemas to `api` only, with `public,extensions` used only as explicit extra
 search paths where required. Revoke schema creation from ordinary roles.
