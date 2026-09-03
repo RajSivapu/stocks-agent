@@ -1,5 +1,6 @@
 import type {
   Action,
+  AlertRuleSnapshot,
   ArtifactMutation,
   GatewayEnvelope,
   GatewayReadContext,
@@ -52,6 +53,18 @@ export interface ArtifactReceipt {
   created_paper_watch_ids: number[];
 }
 
+export interface PersistableAlertDraft {
+  id: string;
+  source_evaluation_id: string;
+  rule_snapshot: AlertRuleSnapshot;
+  fingerprint: string;
+}
+
+export interface AlertDraftReceipt {
+  created_count: number;
+  draft_ids: string[];
+}
+
 export type PersistableArtifactMutation =
   | Exclude<ArtifactMutation, { kind: "paper_watch_create" | "paper_watch_close" }>
   | (Extract<ArtifactMutation, { kind: "paper_watch_create" }> & {
@@ -96,6 +109,7 @@ export interface GatewayRepository {
     payload: PersistableArtifactMutationBatch,
   ): Promise<ArtifactReceipt>;
   activePolicy(): Promise<PolicyConfig>;
+  createAlertDrafts(requestId: string, drafts: PersistableAlertDraft[]): Promise<AlertDraftReceipt>;
   applyDecisionBundle(input: PersistedBundle): Promise<PublicationReceipt>;
   claimPublication(idempotencyKey: string): Promise<PublicationClaim>;
   finishPublication(
@@ -301,6 +315,18 @@ export function createSupabaseGatewayRepository(
         throw new GatewayRepositoryError("POLICY_REJECTED");
       }
       return validatePolicy(policyRows[0].config);
+    },
+
+    async createAlertDrafts(requestId, drafts) {
+      if (drafts.length > 5) throw new GatewayRepositoryError("CONTEXT_TOO_LARGE");
+      const row = oneObject(await client.rpc("create_market_alert_drafts", {
+        p_request_id: requestId,
+        p_drafts: drafts,
+      }));
+      return {
+        created_count: integer(row.created_count),
+        draft_ids: Array.isArray(row.draft_ids) ? row.draft_ids.map((id) => text(id, 36)) : [],
+      };
     },
 
     async readContext(_runId) {

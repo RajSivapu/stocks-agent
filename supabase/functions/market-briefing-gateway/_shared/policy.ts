@@ -1,5 +1,7 @@
 import type {
   Action,
+  AlertCondition,
+  AlertRuleSnapshot,
   DecisionCandidate,
   HoldingState,
   PolicyConfig,
@@ -64,6 +66,91 @@ const VETO_CODES = new Set<PolicyReasonCode>([
   "SELL_EXCEEDS_HOLDING", "CHECKER_VETO", "OWNER_PLAN_MISMATCH",
 ]);
 const INFORMATIONAL_CODES = new Set<PolicyReasonCode>(["OUTSIDE_SESSION_CONDITIONAL"]);
+
+function alertSession(phase: DecisionCandidate["phase"]): AlertRuleSnapshot["session"] {
+  if (phase === "pre-market") return "pre_market";
+  if (phase === "post-market") return "post_market";
+  return "regular";
+}
+
+function draftValidity(candidate: DecisionCandidate, now: Date): string {
+  if (candidate.valid_until !== null) {
+    return new Date(`${candidate.valid_until}T21:00:00.000Z`).toISOString();
+  }
+  return new Date(now.valueOf() + 24 * 60 * 60 * 1000).toISOString();
+}
+
+export function draftFromEvaluation(
+  evaluation: PolicyEvaluation,
+  context: PolicyContext,
+  config: PolicyConfig,
+  now: Date,
+  newId: () => string = () => crypto.randomUUID(),
+): AlertRuleSnapshot | null {
+  if (!config.alerts_v3 || (!config.alerts_v3.enabled && !config.alerts_v3.shadow) ||
+    evaluation.status !== "approved" || evaluation.final_action === null ||
+    !evaluation.candidate.analyst.completed || !evaluation.candidate.checker.completed ||
+    evaluation.candidate.checker.verdict !== "approve" ||
+    !evaluation.candidate.evidence.some((item) =>
+      item.status === "fresh" && item.observed_at !== null
+    )) return null;
+
+  const candidate = evaluation.candidate;
+  let conditions: AlertCondition[] | null = null;
+  let severity: AlertRuleSnapshot["severity"] = "review";
+  let confirmation: AlertRuleSnapshot["confirmation"] = "bar_close";
+  if (candidate.notification_kind === "entry_trigger" &&
+    candidate.entry_zone_low !== null && candidate.entry_zone_high !== null) {
+    conditions = [{
+      kind: "price_zone", operator: "inside", left: candidate.entry_zone_low,
+      right: candidate.entry_zone_high, timeframe: "quote",
+    }];
+    confirmation = "two_quote";
+  } else if (candidate.notification_kind === "new_idea") {
+    conditions = [{
+      kind: "screen_entry", operator: "above", left: "0", right: null,
+      timeframe: "1d",
+    }];
+    severity = "watch";
+  } else if (candidate.notification_kind === "stop_breach") {
+    const holding = context.holdings.find((item) => item.ticker === candidate.ticker);
+    if (holding?.stop !== null && holding?.stop !== undefined) {
+      conditions = [{
+        kind: "recorded_stop", operator: "below", left: holding.stop, right: null,
+        timeframe: "quote",
+      }];
+      severity = "critical";
+      confirmation = "two_quote";
+    }
+  } else if (candidate.notification_kind === "target_hit") {
+    const holding = context.holdings.find((item) => item.ticker === candidate.ticker);
+    if (holding?.target !== null && holding?.target !== undefined) {
+      conditions = [{
+        kind: "recorded_target", operator: "above", left: holding.target, right: null,
+        timeframe: "quote",
+      }];
+      severity = "update";
+      confirmation = "two_quote";
+    }
+  }
+  if (conditions === null) return null;
+  const ruleId = newId();
+  return {
+    rule_id: ruleId,
+    version: 1,
+    state: "draft",
+    ticker: candidate.ticker,
+    profile: config.alerts_v3.profile,
+    severity,
+    session: alertSession(candidate.phase),
+    confirmation,
+    conditions,
+    cooldown_seconds: severity === "critical" ? 1_200 : severity === "watch" ? 900 : 14_400,
+    fire_limit: 3,
+    valid_until: draftValidity(candidate, now),
+    owner_note: "",
+  };
+}
 
 function signedFixed(value: string, scale: number): bigint {
   if (value.startsWith("-")) return -parseFixed(value.slice(1), scale);

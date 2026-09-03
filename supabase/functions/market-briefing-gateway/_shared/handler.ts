@@ -11,12 +11,15 @@ import { isNyseHoliday } from "./market-calendar.ts";
 import { fetchAdjustedHistory, fetchVerifiedQuote, type AdjustedBar } from "./market-data.ts";
 import { gradeDecision, type DueDecision } from "./outcomes.ts";
 import { evaluateCandidate, type PolicyEvaluation } from "./policy.ts";
+import { draftFromEvaluation } from "./policy.ts";
+import { alertRuleFingerprint } from "./alerts.ts";
 import { renderPublication } from "./renderer.ts";
 import {
   GatewayRepositoryError,
   type GatewayRepository,
   type PersistableArtifactMutation,
   type PersistableArtifactMutationBatch,
+  type PersistableAlertDraft,
   type PersistedBundle,
   type PublicationReceipt,
 } from "./repository.ts";
@@ -525,6 +528,19 @@ async function evaluateAndPublish(
   );
   const suggestions = evaluations.map((evaluation) => suggestionFromEvaluation(evaluation, bundle.market_date))
     .filter((item): item is Record<string, unknown> => item !== null);
+  const alertDrafts: PersistableAlertDraft[] = [];
+  for (const evaluation of evaluations) {
+    if (alertDrafts.length >= (activePolicy.alerts_v3?.drafts_per_hour ?? 0)) break;
+    const snapshot = draftFromEvaluation(evaluation, context, activePolicy, deps.now(), deps.newId);
+    if (snapshot) {
+      alertDrafts.push({
+        id: snapshot.rule_id,
+        source_evaluation_id: evaluation.evaluation_id,
+        rule_snapshot: snapshot,
+        fingerprint: await alertRuleFingerprint(snapshot),
+      });
+    }
+  }
   let rendered;
   try {
     rendered = await renderPublication({
@@ -542,6 +558,7 @@ async function evaluateAndPublish(
       dry_run: true,
       evaluation_count: evaluations.length,
       would_write_suggestions: suggestions.length,
+      would_create_alert_drafts: alertDrafts.length,
       publication_status: rendered.status,
       preview: rendered.body,
     });
@@ -570,6 +587,16 @@ async function evaluateAndPublish(
     },
   };
   const persisted = await deps.repository.applyDecisionBundle(persistedInput);
+  let alertDraftsCreated = 0;
+  let alertDraftStatus = alertDrafts.length === 0 ? "not_applicable" : "created";
+  if (alertDrafts.length > 0) {
+    try {
+      const draftReceipt = await deps.repository.createAlertDrafts(envelope.request_id, alertDrafts);
+      alertDraftsCreated = draftReceipt.created_count;
+    } catch {
+      alertDraftStatus = "failed";
+    }
+  }
   const delivered = await deliverReadyPublication(persisted, rendered.parts, deps);
   const result = {
     ok: delivered.status !== "delivery_failed" && delivered.status !== "delivery_unknown",
@@ -578,6 +605,8 @@ async function evaluateAndPublish(
     telegram_message_ids: delivered.telegram_message_ids,
     evaluation_count: evaluations.length,
     suggestion_count: suggestions.length,
+    alert_drafts_created: alertDraftsCreated,
+    alert_draft_status: alertDraftStatus,
     preview: bundle.phase === "on-demand" ? rendered.body : undefined,
     ...(delivered.status === "delivery_unknown" ? { code: "DELIVERY_UNKNOWN" } : {}),
     ...(delivered.status === "delivery_failed" ? { code: "DELIVERY_FAILED" } : {}),

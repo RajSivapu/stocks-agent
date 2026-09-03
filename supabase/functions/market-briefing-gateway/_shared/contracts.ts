@@ -341,6 +341,13 @@ export interface PolicyConfig {
     max_requests_per_run: 20;
     max_authenticated_requests_per_hour: 100;
   };
+  alerts_v3?: {
+    enabled: boolean;
+    shadow: boolean;
+    profile: AlertProfile;
+    draft_ttl_hours: 24;
+    drafts_per_hour: 5;
+  };
 }
 
 const OPERATIONS: readonly Operation[] = [

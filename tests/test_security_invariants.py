@@ -177,6 +177,7 @@ def test_gateway_repository_uses_only_fixed_tables_and_named_rpcs():
         "claim_market_gateway_request",
         "claim_market_publication",
         "complete_market_gateway_request",
+        "create_market_alert_drafts",
         "finish_market_publication",
         "get_due_market_decisions",
         "start_market_analysis_run",

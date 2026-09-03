@@ -6,7 +6,7 @@ import type {
   PolicyContext,
   VerifiedQuote,
 } from "./contracts.ts";
-import { evaluateCandidate } from "./policy.ts";
+import { draftFromEvaluation, evaluateCandidate } from "./policy.ts";
 
 function assert(value: boolean, message: string): void {
   if (!value) throw new Error(message);
@@ -143,6 +143,75 @@ Deno.test("non-actionable actions are never upgraded", () => {
     });
     assertEquals(evaluate(c).final_action, action);
   }
+});
+
+Deno.test("only approved fresh policy evaluations project inert alert drafts", () => {
+  const enabled = config();
+  enabled.alerts_v3 = {
+    enabled: false,
+    shadow: true,
+    profile: "balanced",
+    draft_ttl_hours: 24,
+    drafts_per_hour: 5,
+  };
+  const approved = evaluate(candidate({ notification_kind: "entry_trigger" }));
+  const projected = draftFromEvaluation(
+    approved,
+    context(),
+    enabled,
+    NOW,
+    () => "00000000-0000-4000-8000-000000000123",
+  );
+  if (projected === null) throw new Error("approved trigger did not project a draft");
+  assertEquals(projected.state, "draft");
+  assertEquals(projected.profile, "balanced");
+  assertEquals(projected.conditions, [{
+    kind: "price_zone",
+    operator: "inside",
+    left: "45",
+    right: "47.02",
+    timeframe: "quote",
+  }]);
+  assertEquals(projected.confirmation, "two_quote");
+
+  const stale = evaluate(candidate({ notification_kind: "entry_trigger" }), context(),
+    quote("CENX", "47.02", "2026-09-02T16:30:00.000Z"));
+  assertEquals(draftFromEvaluation(stale, context(), enabled, NOW), null);
+  const vetoed = evaluate(candidate({
+    notification_kind: "entry_trigger",
+    checker: { completed: true, verdict: "veto", reason_codes: [], reason: "No." },
+  }));
+  assertEquals(draftFromEvaluation(vetoed, context(), enabled, NOW), null);
+  enabled.alerts_v3.shadow = false;
+  assertEquals(draftFromEvaluation(approved, context(), enabled, NOW), null);
+});
+
+Deno.test("approved new ideas become watch-only screen drafts without fabricated levels", () => {
+  const enabled = config();
+  enabled.alerts_v3 = {
+    enabled: false,
+    shadow: true,
+    profile: "balanced",
+    draft_ttl_hours: 24,
+    drafts_per_hour: 5,
+  };
+  const idea = candidate({
+    action: "watch",
+    notification_kind: "new_idea",
+    proposed_amount: null,
+    proposed_shares: null,
+    entry_zone_low: null,
+    entry_zone_high: null,
+    stop: null,
+    target: null,
+    invalidation_price: null,
+    analyst: { completed: true, action: "watch", confidence: "low", reason: "Track only." },
+  });
+  const projected = draftFromEvaluation(evaluate(idea), context(), enabled, NOW);
+  if (projected === null) throw new Error("new idea did not create a research draft");
+  assertEquals(projected.severity, "watch");
+  assertEquals(projected.conditions[0].kind, "screen_entry");
+  assertEquals(projected.owner_note, "");
 });
 
 Deno.test("stale live quote downgrades Buy and on-demand cannot bypass it", () => {

@@ -1809,7 +1809,8 @@ BEGIN
   END IF;
   SELECT * INTO v_request FROM public.market_gateway_requests
   WHERE request_id=p_request_id;
-  IF NOT FOUND OR v_request.operation <> 'evaluate_and_publish' OR v_request.status <> 'completed' THEN
+  IF NOT FOUND OR v_request.operation <> 'evaluate_and_publish'
+     OR v_request.status NOT IN ('claimed','completed') THEN
     RAISE EXCEPTION 'approved evaluation request unavailable' USING ERRCODE = '22023';
   END IF;
   UPDATE public.market_alert_drafts SET state='expired',updated_at=now()

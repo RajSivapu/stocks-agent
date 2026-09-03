@@ -132,6 +132,7 @@ class FakeRepository implements GatewayRepository {
   startCalls = 0;
   recordCalls = 0;
   applyCalls = 0;
+  createDraftCalls = 0;
   finishPublicationCalls: Array<{ status: string; ids: number[] }> = [];
   finishRunCalls = 0;
   readCalls = 0;
@@ -142,6 +143,7 @@ class FakeRepository implements GatewayRepository {
   context = readContext();
   lastArtifacts: PersistableArtifactMutationBatch | null = null;
   lastBundle: PersistedBundle | null = null;
+  lastDrafts: unknown[] = [];
   due: DueDecision[] = [];
   graded: OutcomeGrade[] = [];
   dueLimit: number | null = null;
@@ -174,7 +176,17 @@ class FakeRepository implements GatewayRepository {
     return Promise.resolve(structuredClone(this.context));
   }
   activePolicy(): Promise<PolicyConfig> {
-    return Promise.resolve(policy());
+    return Promise.resolve(this.policyValue);
+  }
+  policyValue = policy();
+  createAlertDrafts(_requestId: string, drafts: unknown[]): Promise<{ created_count: number; draft_ids: string[] }> {
+    this.mutationCalls += 1;
+    this.createDraftCalls += 1;
+    this.lastDrafts = structuredClone(drafts);
+    return Promise.resolve({
+      created_count: drafts.length,
+      draft_ids: drafts.map((item) => (item as { id: string }).id),
+    });
   }
   recordArtifacts(_request: string, _run: string, _lease: string, payload: PersistableArtifactMutationBatch): Promise<ArtifactReceipt> {
     this.mutationCalls += 1;
@@ -310,6 +322,31 @@ Deno.test("dry-run operations are write-free and report only their own effects",
   assertEquals(finished.write_counts, {});
   assertEquals(repository.mutationCalls, 0);
   assertEquals(sent, []);
+});
+
+Deno.test("shadow alert drafts are previewed without writes and persisted only after policy evaluation", async () => {
+  const dryRepository = new FakeRepository();
+  dryRepository.policyValue.alerts_v3 = {
+    enabled: false, shadow: true, profile: "balanced", draft_ttl_hours: 24, drafts_per_hour: 5,
+  };
+  const dry = makeHandler(dryRepository);
+  const bundle = { phase: "intraday", market_date: "2026-09-02", title: "ignored", candidates: [candidate()] };
+  const dryReceipt = await json(await dry.handler(request("evaluate_and_publish", bundle, { dry: true })));
+  assertEquals(dryReceipt.would_create_alert_drafts, 1);
+  assertEquals(dryRepository.createDraftCalls, 0);
+  assertEquals(dry.sent, []);
+
+  const liveRepository = new FakeRepository();
+  liveRepository.policyValue.alerts_v3 = structuredClone(dryRepository.policyValue.alerts_v3);
+  const live = makeHandler(liveRepository);
+  const liveReceipt = await json(await live.handler(request("evaluate_and_publish", bundle)));
+  assertEquals(liveReceipt.alert_drafts_created, 1);
+  assertEquals(liveRepository.createDraftCalls, 1);
+  const stored = liveRepository.lastDrafts[0] as Record<string, unknown>;
+  assert(typeof stored.fingerprint === "string" && /^[0-9a-f]{64}$/.test(stored.fingerprint),
+    "draft fingerprint absent");
+  assertEquals(stored.source_evaluation_id,
+    liveRepository.lastBundle!.evaluations[0].evaluation_id);
 });
 
 Deno.test("live start_run is idempotent", async () => {
