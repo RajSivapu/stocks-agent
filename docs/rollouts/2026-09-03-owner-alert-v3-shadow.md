@@ -1,0 +1,118 @@
+# Owner Alert v3 Shadow Rollout Receipt
+
+Observed on 2026-09-03 in `America/Chicago`. This receipt records only checks supported by the
+repository, Supabase, Telegram publication ledger, or protected gateway responses. It contains no
+secret values and makes no investment recommendation.
+
+## Scope boundaries
+
+- Owner-only personal deployment.
+- `access.mode` remains `owner_only`; friend invitations remain disabled.
+- `guardrails.execution_allowed` remains false.
+- No brokerage, order, invitation, or tenant credential name was present in the live Supabase
+  secret inventory.
+- Alert actions change monitoring state only. They cannot place, modify, or cancel a trade.
+
+## Code and review checkpoint
+
+- Branch: `codex/owner-alert-v3`.
+- Shadow deployment documentation: `6764d41`.
+- Draft evidence-coverage correction: `a54945a`.
+- Corrected shadow receipt documentation: `c0e377f`.
+- Focused review after the receipt-hardening changes found no Critical or Important issue.
+- Final local gate at the code checkpoint:
+  - 128 Python tests passed;
+  - 63 Node tests passed;
+  - 109 Deno tests passed before the additional mixed-evidence regression case;
+  - the renderer suite then passed 17/17 with that additional case;
+  - both Edge Function entrypoints passed Deno type-check; and
+  - `git diff --check` passed.
+
+## Production deployment checkpoint
+
+- Migration `20260905_owner_alert_lifecycle.sql` applied.
+- Active market policy: version 2, activated at `2026-09-03T18:50:16.300978Z`.
+- Alert flags: `enabled=false`, `shadow=true`, profile `balanced`, 24-hour draft TTL, maximum five
+  projected drafts per hour.
+- `market-briefing-gateway`: version 9, active, deployed at epoch milliseconds `1788462308074`.
+- `telegram-portfolio`: version 12, active, deployed at epoch milliseconds `1788461409606`.
+- Live healthcheck after gateway v9: gateway, standalone alerts, Finnhub, and Yahoo all returned
+  `ok`.
+
+The rollback-only production verifier returned all required booleans true, including duplicate
+suppression, owner mismatch rejection, stale-version rejection, expired-draft rejection,
+event/publication-bound acknowledgement, Telegram acceptance storage, versioned expiry, and hourly
+cap rejection. It finished with `remaining_test_rows=0`.
+
+## Protected shadow preview
+
+The corrected protected `on-demand` dry-run used a synthetic `Watch` packet solely to inspect the
+renderer. The gateway independently refreshed the quote, returned `dry_run=true`, kept the normal
+publication `suppressed`, and reported one would-be inert alert draft.
+
+- Preview receipt: `AL-C511`.
+- Preview draft ID: `c511d386-cf76-4a9e-8a48-3a544f42afc5`.
+- Rendered hash: `524491bcb1610001fbf0ab4cc2e5191a7e3fe7a43b20f8407c2fc624f0b7fd01`.
+- Displayed fields included condition, quote/evaluation times, age, session, reason, invalidation,
+  policy-approved stop, target, confidence, `evidence 1/1`, validity date, expiry, and receipt.
+- The preview was labeled `DRAFT`, `suggestion only`, and `inert until you arm it`.
+- Its local deterministic button fixture contained only `Arm` and `Dismiss`; no execution button.
+- After the dry-run, live counts remained zero for alert rules, events, drafts, actions, and
+  template-v3 publications. No Telegram send was attempted.
+
+## Live security checkpoint
+
+Direct Postgres inspection confirmed RLS enabled on all five alert lifecycle tables:
+
+- `market_alert_drafts`;
+- `market_alert_rules`;
+- `market_alert_rule_versions`;
+- `market_alert_events`; and
+- `market_alert_actions`.
+
+Direct grant inspection confirmed the six alert mutation RPCs were executable only by `postgres`
+and `service_role`, not `PUBLIC`, `anon`, or `authenticated`:
+
+- `create_market_alert_drafts`;
+- `apply_market_alert_action`;
+- `record_market_alert_evaluations`;
+- `create_market_alert_publication`;
+- `expire_market_alert_rules`; and
+- `finish_market_alert_publication`.
+
+The focused owner-only, no-brokerage, RPC, RLS, and migration security suite passed 46 tests.
+
+## Scheduled v2 receipt observed before v3 deployment
+
+The 2026-09-03 intraday run started at `2026-09-03T17:02:43.216398Z` and finished at
+`2026-09-03T17:09:21.808Z` with status `completed`.
+
+- Run ID: `1a89f988-fede-49d3-b4d2-7beefe73ebcd`.
+- Four gateway operations completed once: `start_run`, `read_context`, `evaluate_and_publish`, and
+  `finish_run`.
+- Five new policy-v1 Analyst and Checker evaluations were stored with fresh same-run quote/history
+  evidence.
+- Five suggestions linked to those evaluation IDs.
+- One renderer-v2 intraday `new_idea` publication was delivered.
+- Publication ID: `045a290c-6362-4f24-9d6d-3cfbf16bfca8`.
+- Rendered hash: `b7d54d409d90926970b20a2bf07faea9cd0496a646a6365d48de2d87ab5ef459`.
+- Telegram message ID: `17`.
+
+The Claude Routine transcript still requires direct UI inspection; the Mac was locked during this
+checkpoint. This receipt therefore does not claim transcript verification.
+
+## Remaining gates
+
+1. Reconcile the first scheduled post-market run after the v3 shadow deployment, including its
+   Routine transcript, policy-v2 evaluations, normal renderer-v2 Telegram outcome, shadow preview
+   response, and zero v3 lifecycle writes/sends.
+2. Reconcile the first Friday process-audit receipt and confirm it remains bounded and read-only.
+3. Present at least one real scheduled v3 shadow example to the owner. Do not infer approval from
+   silence or from the synthetic preview.
+4. After explicit owner approval, enable only the owner-recorded stop-near/stop-breach canary class.
+   Do not enable entry suggestions, screening alerts, or the optional 15-minute monitor in the same
+   change.
+5. Verify one canary end to end: rule version, provider observation time, evaluation/event IDs,
+   publication hash, Telegram API acceptance/message ID, and any acknowledgement receipt.
+6. Keep the optional faster monitor and owner-only read-first dashboard behind their later evidence
+   and security-design gates.
