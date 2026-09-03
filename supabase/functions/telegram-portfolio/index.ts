@@ -377,7 +377,11 @@ async function handleAlertCallback(
   const result = data as Record<string, unknown>;
   await telegram("answerCallbackQuery", {
     callback_query_id: callback.id,
-    text: result.duplicate ? "Already recorded." : "Alert updated.",
+    text: result.ok !== true
+      ? "Alert action rejected. Nothing changed."
+      : result.duplicate
+      ? "Already recorded."
+      : "Alert updated.",
   });
   await telegram("editMessageText", {
     chat_id: callback.message.chat.id,

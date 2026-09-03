@@ -333,9 +333,20 @@ export async function alertFingerprint(
 
 export async function alertRuleFingerprint(rule: AlertRuleSnapshot): Promise<string> {
   const parsed = parseAlertDraft(rule);
+  const semanticRule = {
+    ticker: parsed.ticker,
+    profile: parsed.profile,
+    severity: parsed.severity,
+    session: parsed.session,
+    confirmation: parsed.confirmation,
+    conditions: parsed.conditions,
+    cooldown_seconds: parsed.cooldown_seconds,
+    fire_limit: parsed.fire_limit,
+    owner_note: parsed.owner_note,
+  };
   const digest = await crypto.subtle.digest(
     "SHA-256",
-    new TextEncoder().encode(canonical(parsed)),
+    new TextEncoder().encode(canonical(semanticRule)),
   );
   return [...new Uint8Array(digest)]
     .map((byte) => byte.toString(16).padStart(2, "0")).join("");

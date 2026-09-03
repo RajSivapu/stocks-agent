@@ -9,6 +9,9 @@ ALTER TABLE public.market_gateway_requests
     'evaluate_and_publish','evaluate_alert_rules','finish_run'
   ));
 
+ALTER TABLE public.market_publications
+  ADD COLUMN IF NOT EXISTS telegram_accepted_at TIMESTAMPTZ;
+
 CREATE TABLE IF NOT EXISTS public.market_alert_drafts (
   id UUID PRIMARY KEY,
   request_id UUID NOT NULL REFERENCES public.market_gateway_requests(request_id) ON DELETE RESTRICT,
@@ -101,6 +104,8 @@ CREATE TABLE IF NOT EXISTS public.market_alert_actions (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   draft_id UUID REFERENCES public.market_alert_drafts(id) ON DELETE RESTRICT,
   rule_id UUID REFERENCES public.market_alert_rules(id) ON DELETE RESTRICT,
+  event_id UUID REFERENCES public.market_alert_events(id) ON DELETE RESTRICT,
+  publication_id UUID REFERENCES public.market_publications(id) ON DELETE RESTRICT,
   telegram_update_id BIGINT NOT NULL,
   owner_chat_id BIGINT NOT NULL,
   owner_user_id BIGINT NOT NULL,
@@ -114,7 +119,26 @@ CREATE TABLE IF NOT EXISTS public.market_alert_actions (
   snoozed_until TIMESTAMPTZ,
   received_at TIMESTAMPTZ NOT NULL DEFAULT now(),
   UNIQUE (telegram_update_id),
-  CHECK ((draft_id IS NOT NULL)::int + (rule_id IS NOT NULL)::int = 1)
+  CONSTRAINT market_alert_action_target CHECK (
+    (action='acknowledge' AND draft_id IS NULL AND rule_id IS NOT NULL
+      AND event_id IS NOT NULL AND publication_id IS NOT NULL)
+    OR
+    (action<>'acknowledge' AND event_id IS NULL AND publication_id IS NULL
+      AND ((draft_id IS NOT NULL)::int + (rule_id IS NOT NULL)::int = 1))
+  )
+);
+ALTER TABLE public.market_alert_actions
+  ADD COLUMN IF NOT EXISTS event_id UUID REFERENCES public.market_alert_events(id) ON DELETE RESTRICT;
+ALTER TABLE public.market_alert_actions
+  ADD COLUMN IF NOT EXISTS publication_id UUID REFERENCES public.market_publications(id) ON DELETE RESTRICT;
+ALTER TABLE public.market_alert_actions DROP CONSTRAINT IF EXISTS market_alert_actions_check;
+ALTER TABLE public.market_alert_actions DROP CONSTRAINT IF EXISTS market_alert_action_target;
+ALTER TABLE public.market_alert_actions ADD CONSTRAINT market_alert_action_target CHECK (
+  (action='acknowledge' AND draft_id IS NULL AND rule_id IS NOT NULL
+    AND event_id IS NOT NULL AND publication_id IS NOT NULL)
+  OR
+  (action<>'acknowledge' AND event_id IS NULL AND publication_id IS NULL
+    AND ((draft_id IS NOT NULL)::int + (rule_id IS NOT NULL)::int = 1))
 );
 
 CREATE OR REPLACE FUNCTION public.reject_market_alert_ledger_mutation()
@@ -168,6 +192,7 @@ BEGIN
   END IF;
   UPDATE public.market_alert_drafts SET state='expired',updated_at=now()
   WHERE state='draft' AND expires_at<=now();
+  PERFORM pg_advisory_xact_lock(hashtextextended('market_alert_draft_rate', 0));
   SELECT count(*) INTO v_existing FROM public.market_alert_drafts
   WHERE created_at>=now()-interval '1 hour';
   IF v_existing + jsonb_array_length(p_drafts) > 5 THEN
@@ -212,6 +237,11 @@ BEGIN
          OR v_condition->>'timeframe' NOT IN ('quote','15m','1h','1d') THEN
         RAISE EXCEPTION 'invalid alert condition' USING ERRCODE = '22023';
       END IF;
+      IF v_condition->>'kind' NOT IN (
+           'price_cross','price_zone','recorded_stop','recorded_target'
+         ) OR v_condition->>'timeframe'<>'quote' THEN
+        RAISE EXCEPTION 'unsupported alert condition adapter' USING ERRCODE = '22023';
+      END IF;
     END LOOP;
     PERFORM 1 FROM public.decision_evaluations
     WHERE id=(v_item->>'source_evaluation_id')::uuid AND request_id=p_request_id
@@ -243,6 +273,7 @@ DECLARE
   v_duplicate public.market_alert_actions%ROWTYPE;
   v_draft public.market_alert_drafts%ROWTYPE;
   v_rule public.market_alert_rules%ROWTYPE;
+  v_event public.market_alert_events%ROWTYPE;
   v_snapshot JSONB; v_prior TEXT; v_new TEXT; v_version INT; v_action_id UUID;
 BEGIN
   IF p_update_id<=0 OR p_chat_id<=0 OR p_user_id<=0 OR p_expected_version<=0 THEN
@@ -252,13 +283,40 @@ BEGIN
   WHERE telegram_update_id=p_update_id;
   IF FOUND THEN
     IF v_duplicate.action IS DISTINCT FROM p_action
-       OR COALESCE(v_duplicate.draft_id,v_duplicate.rule_id) IS DISTINCT FROM p_draft_or_rule_id
+       OR COALESCE(v_duplicate.event_id,v_duplicate.draft_id,v_duplicate.rule_id)
+          IS DISTINCT FROM p_draft_or_rule_id
        OR v_duplicate.owner_chat_id IS DISTINCT FROM p_chat_id
-       OR v_duplicate.owner_user_id IS DISTINCT FROM p_user_id THEN
+       OR v_duplicate.owner_user_id IS DISTINCT FROM p_user_id
+       OR v_duplicate.expected_version IS DISTINCT FROM p_expected_version
+       OR v_duplicate.snoozed_until IS DISTINCT FROM p_snooze_until THEN
       RAISE EXCEPTION 'telegram update replay mismatch' USING ERRCODE = '22023';
     END IF;
     RETURN jsonb_build_object('ok',true,'duplicate',true,'state',v_duplicate.new_state,
       'version',v_duplicate.resulting_version,'action_id',v_duplicate.id);
+  END IF;
+
+  IF p_action='acknowledge' THEN
+    SELECT * INTO v_event FROM public.market_alert_events
+    WHERE id=p_draft_or_rule_id AND publication_id IS NOT NULL FOR UPDATE;
+    IF NOT FOUND THEN RAISE EXCEPTION 'alert event unavailable' USING ERRCODE = '42501'; END IF;
+    SELECT * INTO v_rule FROM public.market_alert_rules WHERE id=v_event.rule_id FOR UPDATE;
+    IF NOT FOUND OR v_rule.owner_chat_id IS DISTINCT FROM p_chat_id
+       OR v_rule.owner_user_id IS DISTINCT FROM p_user_id THEN
+      RAISE EXCEPTION 'alert owner mismatch' USING ERRCODE = '42501';
+    END IF;
+    IF v_event.rule_version IS DISTINCT FROM p_expected_version THEN
+      RAISE EXCEPTION 'stale alert version' USING ERRCODE = '40001';
+    END IF;
+    INSERT INTO public.market_alert_actions(
+      rule_id,event_id,publication_id,telegram_update_id,owner_chat_id,owner_user_id,
+      action,prior_state,new_state,expected_version,resulting_version
+    ) VALUES (
+      v_rule.id,v_event.id,v_event.publication_id,p_update_id,p_chat_id,p_user_id,
+      p_action,v_rule.state,v_rule.state,p_expected_version,v_event.rule_version
+    ) RETURNING id INTO v_action_id;
+    RETURN jsonb_build_object('ok',true,'duplicate',false,'state',v_rule.state,
+      'version',v_event.rule_version,'rule_id',v_rule.id,'event_id',v_event.id,
+      'publication_id',v_event.publication_id,'action_id',v_action_id);
   END IF;
 
   SELECT * INTO v_draft FROM public.market_alert_drafts
@@ -311,10 +369,23 @@ BEGIN
   IF v_rule.owner_chat_id IS DISTINCT FROM p_chat_id OR v_rule.owner_user_id IS DISTINCT FROM p_user_id THEN
     RAISE EXCEPTION 'alert owner mismatch' USING ERRCODE = '42501';
   END IF;
+  IF v_rule.valid_until<=now() AND v_rule.state IN ('active','paused','snoozed') THEN
+    v_version := v_rule.current_version+1;
+    SELECT snapshot INTO v_snapshot FROM public.market_alert_rule_versions
+    WHERE rule_id=v_rule.id AND version=v_rule.current_version;
+    v_snapshot := jsonb_set(jsonb_set(v_snapshot,'{state}','"expired"'::jsonb),
+      '{version}',to_jsonb(v_version));
+    UPDATE public.market_alert_rules SET state='expired',current_version=v_version,
+      snoozed_until=NULL,updated_at=now() WHERE id=v_rule.id;
+    INSERT INTO public.market_alert_rule_versions(rule_id,version,snapshot)
+    VALUES (v_rule.id,v_version,v_snapshot);
+    RETURN jsonb_build_object('ok',false,'duplicate',false,'state','expired',
+      'version',v_version,'rule_id',v_rule.id,'reason','alert expired');
+  END IF;
   IF v_rule.current_version IS DISTINCT FROM p_expected_version THEN
     RAISE EXCEPTION 'stale alert version' USING ERRCODE = '40001';
   END IF;
-  IF NOT p_action IN ('pause','resume','snooze','acknowledge','dismiss') THEN
+  IF NOT p_action IN ('pause','resume','snooze','dismiss') THEN
     RAISE EXCEPTION 'invalid alert transition' USING ERRCODE = '22023';
   END IF;
   v_prior := v_rule.state; v_new := v_prior; v_version := v_rule.current_version;
@@ -327,21 +398,18 @@ BEGIN
     END IF;
     v_new := 'snoozed';
   ELSIF p_action='dismiss' AND v_prior IN ('active','paused','snoozed') THEN v_new := 'dismissed';
-  ELSIF p_action='acknowledge' AND v_prior IN ('active','paused','snoozed') THEN v_new := v_prior;
   ELSE RAISE EXCEPTION 'invalid alert transition' USING ERRCODE = '22023';
   END IF;
-  IF p_action<>'acknowledge' THEN
-    v_version := v_version+1;
-    SELECT snapshot INTO v_snapshot FROM public.market_alert_rule_versions
-    WHERE rule_id=v_rule.id AND version=v_rule.current_version;
-    v_snapshot := jsonb_set(jsonb_set(v_snapshot,'{state}',to_jsonb(v_new)),
-      '{version}',to_jsonb(v_version));
-    UPDATE public.market_alert_rules SET state=v_new,current_version=v_version,
-      snoozed_until=CASE WHEN p_action='snooze' THEN p_snooze_until ELSE NULL END,
-      updated_at=now() WHERE id=v_rule.id;
-    INSERT INTO public.market_alert_rule_versions(rule_id,version,snapshot)
-    VALUES (v_rule.id,v_version,v_snapshot);
-  END IF;
+  v_version := v_version+1;
+  SELECT snapshot INTO v_snapshot FROM public.market_alert_rule_versions
+  WHERE rule_id=v_rule.id AND version=v_rule.current_version;
+  v_snapshot := jsonb_set(jsonb_set(v_snapshot,'{state}',to_jsonb(v_new)),
+    '{version}',to_jsonb(v_version));
+  UPDATE public.market_alert_rules SET state=v_new,current_version=v_version,
+    snoozed_until=CASE WHEN p_action='snooze' THEN p_snooze_until ELSE NULL END,
+    updated_at=now() WHERE id=v_rule.id;
+  INSERT INTO public.market_alert_rule_versions(rule_id,version,snapshot)
+  VALUES (v_rule.id,v_version,v_snapshot);
   INSERT INTO public.market_alert_actions(rule_id,telegram_update_id,owner_chat_id,owner_user_id,
     action,prior_state,new_state,expected_version,resulting_version,snoozed_until)
   VALUES (v_rule.id,p_update_id,p_chat_id,p_user_id,p_action,v_prior,v_new,
@@ -349,6 +417,35 @@ BEGIN
   RETURNING id INTO v_action_id;
   RETURN jsonb_build_object('ok',true,'duplicate',false,'state',v_new,'version',v_version,
     'rule_id',v_rule.id,'action_id',v_action_id);
+END;
+$$;
+
+CREATE OR REPLACE FUNCTION public.expire_market_alert_rules()
+RETURNS JSONB LANGUAGE plpgsql SECURITY DEFINER
+SET search_path = pg_catalog AS $$
+DECLARE
+  v_rule public.market_alert_rules%ROWTYPE;
+  v_snapshot JSONB;
+  v_version INT;
+  v_count INT := 0;
+BEGIN
+  FOR v_rule IN
+    SELECT * FROM public.market_alert_rules
+    WHERE state IN ('active','paused','snoozed') AND valid_until<=now()
+    ORDER BY id FOR UPDATE
+  LOOP
+    v_version := v_rule.current_version+1;
+    SELECT snapshot INTO v_snapshot FROM public.market_alert_rule_versions
+    WHERE rule_id=v_rule.id AND version=v_rule.current_version;
+    v_snapshot := jsonb_set(jsonb_set(v_snapshot,'{state}','"expired"'::jsonb),
+      '{version}',to_jsonb(v_version));
+    UPDATE public.market_alert_rules SET state='expired',current_version=v_version,
+      snoozed_until=NULL,updated_at=now() WHERE id=v_rule.id;
+    INSERT INTO public.market_alert_rule_versions(rule_id,version,snapshot)
+    VALUES (v_rule.id,v_version,v_snapshot);
+    v_count := v_count+1;
+  END LOOP;
+  RETURN jsonb_build_object('expired_count',v_count);
 END;
 $$;
 
@@ -474,36 +571,52 @@ BEGIN
 END;
 $$;
 
-CREATE OR REPLACE FUNCTION public.link_market_alert_publication(
-  p_event_ids UUID[], p_publication_id UUID
+CREATE OR REPLACE FUNCTION public.finish_market_alert_publication(
+  p_request_id UUID, p_lease_token UUID, p_status TEXT, p_message_ids JSONB,
+  p_error TEXT, p_accepted_at TIMESTAMPTZ
 ) RETURNS JSONB LANGUAGE plpgsql SECURITY DEFINER
 SET search_path = pg_catalog AS $$
-DECLARE v_expected INT; v_rows INT;
+DECLARE v_valid_ids BOOLEAN;
 BEGIN
-  v_expected := COALESCE(array_length(p_event_ids,1),0);
-  IF v_expected<1 OR v_expected>20 OR p_publication_id IS NULL THEN
-    RAISE EXCEPTION 'invalid alert publication link' USING ERRCODE = '22023';
+  IF p_status NOT IN ('delivered','delivery_failed','delivery_unknown')
+     OR jsonb_typeof(p_message_ids)<>'array' OR jsonb_array_length(p_message_ids)>1
+     OR (p_status='delivered' AND (jsonb_array_length(p_message_ids)<>1 OR p_accepted_at IS NULL))
+     OR (p_status<>'delivered' AND p_accepted_at IS NOT NULL)
+     OR (p_accepted_at IS NOT NULL AND p_accepted_at>now()+interval '1 minute') THEN
+    RAISE EXCEPTION 'invalid alert publication completion' USING ERRCODE = '22023';
   END IF;
-  PERFORM 1 FROM public.market_publications
-  WHERE id=p_publication_id AND template_version=3;
-  IF NOT FOUND THEN RAISE EXCEPTION 'alert publication unavailable' USING ERRCODE = '22023'; END IF;
-  UPDATE public.market_alert_events SET publication_id=p_publication_id
-  WHERE id=ANY(p_event_ids) AND status='triggered' AND publication_id IS NULL;
-  GET DIAGNOSTICS v_rows = ROW_COUNT;
-  IF v_rows<>v_expected THEN
-    RAISE EXCEPTION 'alert event link mismatch' USING ERRCODE = '22023';
+  SELECT COALESCE(bool_and(jsonb_typeof(value)='number' AND value::text ~ '^[0-9]+$'),true)
+    INTO v_valid_ids FROM jsonb_array_elements(p_message_ids);
+  IF NOT v_valid_ids THEN
+    RAISE EXCEPTION 'invalid telegram message ids' USING ERRCODE = '22023';
   END IF;
-  RETURN jsonb_build_object('linked_count',v_rows,'publication_id',p_publication_id);
+  UPDATE public.market_publications SET status=p_status,telegram_message_ids=p_message_ids,
+    telegram_accepted_at=CASE WHEN p_status='delivered' THEN p_accepted_at ELSE NULL END,
+    delivered_at=CASE WHEN p_status='delivered' THEN now() ELSE NULL END,
+    error=CASE WHEN p_error IS NULL THEN NULL ELSE regexp_replace(
+      left(p_error,1000),'[^A-Za-z0-9_ .:-]','?','g') END,
+    lease_token=NULL,updated_at=now()
+  WHERE idempotency_key=p_request_id AND lease_token=p_lease_token
+    AND status='sending' AND template_version=3;
+  IF NOT FOUND THEN
+    RAISE EXCEPTION 'alert publication lease unavailable' USING ERRCODE = '40001';
+  END IF;
+  RETURN jsonb_build_object('status',p_status,'telegram_message_ids',p_message_ids,
+    'telegram_accepted_at',p_accepted_at);
 END;
 $$;
+
+DROP FUNCTION IF EXISTS public.link_market_alert_publication(UUID[], UUID);
 
 REVOKE ALL ON FUNCTION public.create_market_alert_drafts(UUID, JSONB) FROM PUBLIC, anon, authenticated;
 REVOKE ALL ON FUNCTION public.apply_market_alert_action(UUID, TEXT, BIGINT, BIGINT, BIGINT, INT, TIMESTAMPTZ) FROM PUBLIC, anon, authenticated;
 REVOKE ALL ON FUNCTION public.record_market_alert_evaluations(UUID, JSONB) FROM PUBLIC, anon, authenticated;
 REVOKE ALL ON FUNCTION public.create_market_alert_publication(UUID, UUID, DATE, TEXT, TEXT, TEXT, UUID[], UUID) FROM PUBLIC, anon, authenticated;
-REVOKE ALL ON FUNCTION public.link_market_alert_publication(UUID[], UUID) FROM PUBLIC, anon, authenticated;
+REVOKE ALL ON FUNCTION public.expire_market_alert_rules() FROM PUBLIC, anon, authenticated;
+REVOKE ALL ON FUNCTION public.finish_market_alert_publication(UUID, UUID, TEXT, JSONB, TEXT, TIMESTAMPTZ) FROM PUBLIC, anon, authenticated;
 GRANT EXECUTE ON FUNCTION public.create_market_alert_drafts(UUID, JSONB) TO service_role;
 GRANT EXECUTE ON FUNCTION public.apply_market_alert_action(UUID, TEXT, BIGINT, BIGINT, BIGINT, INT, TIMESTAMPTZ) TO service_role;
 GRANT EXECUTE ON FUNCTION public.record_market_alert_evaluations(UUID, JSONB) TO service_role;
 GRANT EXECUTE ON FUNCTION public.create_market_alert_publication(UUID, UUID, DATE, TEXT, TEXT, TEXT, UUID[], UUID) TO service_role;
-GRANT EXECUTE ON FUNCTION public.link_market_alert_publication(UUID[], UUID) TO service_role;
+GRANT EXECUTE ON FUNCTION public.expire_market_alert_rules() TO service_role;
+GRANT EXECUTE ON FUNCTION public.finish_market_alert_publication(UUID, UUID, TEXT, JSONB, TEXT, TIMESTAMPTZ) TO service_role;

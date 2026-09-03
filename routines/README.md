@@ -82,7 +82,8 @@ update daylight-saving offsets in March and November.
 > timestamps, relevant news/events, and technical context. Rebuild Analyst and Checker records and
 > submit the current bundle through `evaluate_and_publish`; never mechanically reuse morning action,
 > levels, or confidence. `status: suppressed` means no Telegram and must remain silent. Finish the
-> run and report only server receipts. While the checked-in v3 policy is in shadow mode, then call
+> run and report only server receipts, including any `alert_draft_previews` returned by
+> `evaluate_and_publish` as shadow-only. While the checked-in v3 policy is in shadow mode, then call
 > standalone `evaluate_alert_rules` exactly once with `--dry-run`, an empty JSON object, and no run
 > ID. Label its output preview-only and quote only its returned counts and hashes. Suggestion-only:
 > never execute a trade or edit the repository.
@@ -95,7 +96,8 @@ update daylight-saving offsets in March and November.
 > `evaluate_and_publish`. Submit only supported snapshot/observation/lesson/radar/paper-watch
 > artifacts through `record_artifacts`, call `grade_due_decisions` with a limit no greater than 50,
 > and finish the run. Never supply model-created prices, returns, outcomes, or success counts.
-> While the checked-in v3 policy is in shadow mode, then call standalone `evaluate_alert_rules`
+> Report any `alert_draft_previews` returned by `evaluate_and_publish` as shadow-only. While the
+> checked-in v3 policy is in shadow mode, then call standalone `evaluate_alert_rules`
 > exactly once with `--dry-run`, an empty JSON object, and no run ID. Label its output preview-only
 > and quote only its returned counts and hashes. Report only server receipts. Suggestion-only: never
 > execute a trade or edit the repository.

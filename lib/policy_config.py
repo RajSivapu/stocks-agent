@@ -211,7 +211,7 @@ def build_policy_config(settings: dict) -> dict:
 
 
 def validate_policy_config(policy: dict) -> None:
-    """Reject any policy that is not the exact version-1 immutable contract."""
+    """Reject any policy that is not the exact immutable v2 contract."""
     if not isinstance(policy, dict):
         raise ValueError("policy must be an object")
     unexpected = set(policy) - _POLICY_KEYS

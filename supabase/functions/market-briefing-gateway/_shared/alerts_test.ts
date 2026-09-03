@@ -1,5 +1,6 @@
 import {
   alertFingerprint,
+  alertRuleFingerprint,
   evaluateAlertRule,
   parseAlertDraft,
   shouldPublishAlert,
@@ -220,6 +221,27 @@ Deno.test("alert fingerprints are stable and bind rule version plus condition re
   assert(first === await alertFingerprint(reordered, evaluated), "key order changed fingerprint");
   assert(first !== await alertFingerprint(rule({ version: 4 }), evaluated), "version did not bind fingerprint");
   assert(/^[0-9a-f]{64}$/.test(first), "fingerprint is not sha256 hex");
+});
+
+Deno.test("equivalent draft proposals share one semantic fingerprint", async () => {
+  const first = rule({
+    rule_id: "11111111-1111-4111-8111-111111111111",
+    version: 1,
+    state: "draft",
+    valid_until: "2026-09-09T21:00:00.000Z",
+  });
+  const repeated = rule({
+    rule_id: "22222222-2222-4222-8222-222222222222",
+    version: 1,
+    state: "draft",
+    valid_until: "2026-09-10T21:00:00.000Z",
+  });
+  assert(await alertRuleFingerprint(first) === await alertRuleFingerprint(repeated),
+    "generated identity or rolling expiry defeated draft deduplication");
+  assert(await alertRuleFingerprint(first) !== await alertRuleFingerprint({
+    ...repeated,
+    conditions: [{ ...repeated.conditions[0], left: "41.9" }],
+  }), "different conditions shared a fingerprint");
 });
 
 Deno.test("publication gate enforces state, expiry, fire limit, and cooldown", () => {

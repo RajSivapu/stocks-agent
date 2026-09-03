@@ -285,13 +285,16 @@ export async function fetchIntradayQuoteEvidence(
     const available: Array<IntradayQuoteEvidence["points"][number] & {
       session: IntradayQuoteEvidence["market_session"];
     }> = [];
+    let previousEpoch = 0;
     for (let index = 0; index < timestamps.length; index += 1) {
-      if (closes[index] === null) continue;
       const epoch = providerEpoch(timestamps[index]);
+      if (epoch <= previousEpoch) throw new Error();
+      previousEpoch = epoch;
       const observed = new Date(epoch * 1_000);
       if (Number.isNaN(observed.valueOf()) || observed.valueOf() > now.valueOf() + 5 * 60_000) {
         throw new Error();
       }
+      if (closes[index] === null || observed.valueOf() + 60_000 > now.valueOf()) continue;
       const session = providerSessionAt(meta, epoch);
       if (!session) continue;
       available.push({

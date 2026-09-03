@@ -1,7 +1,7 @@
 # Owner-Only Alert Intelligence Design
 
-**Date:** 2026-09-03  
-**Status:** Approved by the owner on 2026-09-03 for implementation and receipt-gated rollout.  
+**Date:** 2026-09-03
+**Status:** Approved by the owner on 2026-09-03 for implementation and receipt-gated rollout.
 **Owner:** Rajrupesh
 
 ## Decision

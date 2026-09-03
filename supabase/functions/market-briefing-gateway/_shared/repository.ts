@@ -44,6 +44,7 @@ export interface PublicationReceipt {
   status: "ready" | "sending" | "delivered" | "delivery_failed" |
     "delivery_unknown" | "suppressed";
   telegram_message_ids: number[];
+  telegram_accepted_at: string | null;
   lease_token: string | null;
 }
 
@@ -155,6 +156,7 @@ export interface GatewayRepository {
   ): Promise<ArtifactReceipt>;
   activePolicy(): Promise<PolicyConfig>;
   createAlertDrafts(requestId: string, drafts: PersistableAlertDraft[]): Promise<AlertDraftReceipt>;
+  expireAlertRules(): Promise<number>;
   readAlertWork(limit: number): Promise<AlertWork>;
   recordAlertEvaluations(requestId: string, events: PersistableAlertEvent[]): Promise<AlertEventReceipt>;
   createAlertPublication(requestId: string, publication: PersistableAlertPublication): Promise<PublicationReceipt>;
@@ -166,6 +168,14 @@ export interface GatewayRepository {
     status: "delivered" | "delivery_failed" | "delivery_unknown",
     messageIds: number[],
     error: string | null,
+  ): Promise<PublicationReceipt>;
+  finishAlertPublication(
+    idempotencyKey: string,
+    leaseToken: string,
+    status: "delivered" | "delivery_failed" | "delivery_unknown",
+    messageIds: number[],
+    error: string | null,
+    acceptedAt: string | null,
   ): Promise<PublicationReceipt>;
   finishRun(runId: string): Promise<RunReceipt>;
   dueDecisions(limit: number): Promise<DueDecision[]>;
@@ -342,7 +352,7 @@ export function createSupabaseGatewayRepository(
 
   async function publication(id: string): Promise<PublicationReceipt> {
     const row = oneObject(await client.from("market_publications")
-      .select("id,idempotency_key,status,telegram_message_ids,lease_token")
+      .select("id,idempotency_key,status,telegram_message_ids,telegram_accepted_at,lease_token")
       .eq("id", id).single());
     const ids = Array.isArray(row.telegram_message_ids)
       ? row.telegram_message_ids.map(integer)
@@ -352,6 +362,7 @@ export function createSupabaseGatewayRepository(
       idempotency_key: text(row.idempotency_key, 36),
       status: text(row.status, 30) as PublicationReceipt["status"],
       telegram_message_ids: ids,
+      telegram_accepted_at: nullableText(row.telegram_accepted_at, 40),
       lease_token: nullableText(row.lease_token, 36),
     };
   }
@@ -431,6 +442,11 @@ export function createSupabaseGatewayRepository(
         created_count: integer(row.created_count),
         draft_ids: Array.isArray(row.draft_ids) ? row.draft_ids.map((id) => text(id, 36)) : [],
       };
+    },
+
+    async expireAlertRules() {
+      const row = oneObject(await client.rpc("expire_market_alert_rules"));
+      return integer(row.expired_count);
     },
 
     async readAlertWork(limit) {
@@ -747,6 +763,29 @@ export function createSupabaseGatewayRepository(
       const rowsResult = rows(await client.from("market_publications")
         .select("id,idempotency_key,status,telegram_message_ids,lease_token")
         .eq("idempotency_key", idempotencyKey).limit(1));
+      if (rowsResult.length !== 1) throw new GatewayRepositoryError("PERSISTENCE_FAILED");
+      return await publication(text(rowsResult[0].id, 36));
+    },
+
+    async finishAlertPublication(
+      idempotencyKey,
+      leaseToken,
+      status,
+      messageIds,
+      error,
+      acceptedAt,
+    ) {
+      const result = await client.rpc("finish_market_alert_publication", {
+        p_request_id: idempotencyKey,
+        p_lease_token: leaseToken,
+        p_status: status,
+        p_message_ids: messageIds,
+        p_error: error,
+        p_accepted_at: acceptedAt,
+      });
+      if (result.error) throw new GatewayRepositoryError("PERSISTENCE_FAILED");
+      const rowsResult = rows(await client.from("market_publications")
+        .select("id").eq("idempotency_key", idempotencyKey).limit(1));
       if (rowsResult.length !== 1) throw new GatewayRepositoryError("PERSISTENCE_FAILED");
       return await publication(text(rowsResult[0].id, 36));
     },

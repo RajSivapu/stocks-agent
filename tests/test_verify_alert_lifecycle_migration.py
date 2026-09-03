@@ -19,7 +19,8 @@ RPCS = (
     "apply_market_alert_action(UUID, TEXT, BIGINT, BIGINT, BIGINT, INT, TIMESTAMPTZ)",
     "record_market_alert_evaluations(UUID, JSONB)",
     "create_market_alert_publication(UUID, UUID, DATE, TEXT, TEXT, TEXT, UUID[], UUID)",
-    "link_market_alert_publication(UUID[], UUID)",
+    "expire_market_alert_rules()",
+    "finish_market_alert_publication(UUID, UUID, TEXT, JSONB, TEXT, TIMESTAMPTZ)",
 )
 
 
@@ -34,8 +35,11 @@ def test_alert_lifecycle_schema_is_owner_only_append_only_and_bounded():
         assert "UNIQUE (telegram_update_id)" in sql
         assert "interval '24 hours'" in sql
         assert "jsonb_array_length(p_drafts) > 5" in sql
+        assert "pg_advisory_xact_lock(hashtextextended('market_alert_draft_rate', 0))" in sql
         assert "octet_length(rule_snapshot::text) <= 32768" in sql
         assert "publication_id UUID REFERENCES public.market_publications" in sql
+        assert "event_id UUID REFERENCES public.market_alert_events" in sql
+        assert "telegram_accepted_at TIMESTAMPTZ" in sql
         assert "CHECK (version > 0)" in sql
         assert "CHECK (cooldown_seconds BETWEEN 60 AND 604800)" in sql
         assert "CHECK (fire_limit BETWEEN 1 AND 100)" in sql
@@ -66,6 +70,9 @@ def test_alert_publication_rpc_is_request_bound_and_links_before_delivery():
         "template_version,rendered_body,rendered_hash,status",
     ):
         assert marker in sql
+    assert "CREATE OR REPLACE FUNCTION public.link_market_alert_publication" not in sql
+    assert "GRANT EXECUTE ON FUNCTION public.link_market_alert_publication" not in sql
+    assert "p_accepted_at" in sql
 
 
 def test_owner_action_rpc_rejects_expiry_replay_stale_version_and_wrong_owner():
@@ -81,7 +88,17 @@ def test_owner_action_rpc_rejects_expiry_replay_stale_version_and_wrong_owner():
         assert marker in sql
     assert "FOR UPDATE" in sql
     assert "p_action IN ('arm','dismiss')" in sql
-    assert "p_action IN ('pause','resume','snooze','acknowledge','dismiss')" in sql
+    assert "IF p_action='acknowledge'" in sql
+    assert "p_action IN ('pause','resume','snooze','dismiss')" in sql
+    assert "v_event.publication_id" in sql
+    assert "event_id,publication_id" in sql
+
+
+def test_unsupported_rule_kinds_are_not_persisted_and_expiry_is_versioned():
+    sql = MIGRATION.read_text()
+    assert "unsupported alert condition adapter" in sql
+    assert "CREATE OR REPLACE FUNCTION public.expire_market_alert_rules()" in sql
+    assert "'{state}','\"expired\"'::jsonb" in sql
 
 
 def test_verifier_is_rollback_only_and_does_not_use_python_asserts():
@@ -95,6 +112,10 @@ def test_verifier_is_rollback_only_and_does_not_use_python_asserts():
         "stale_version_rejected",
         "expired_draft_rejected",
         "draft_publication_linked",
+        "acknowledgement_bound",
+        "telegram_acceptance_stored",
+        "expiry_versioned",
+        "hourly_cap_rejected",
         "remaining_test_rows",
     ):
         assert marker in source

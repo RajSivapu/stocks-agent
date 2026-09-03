@@ -186,7 +186,7 @@ Deno.test("only approved fresh policy evaluations project inert alert drafts", (
   assertEquals(draftFromEvaluation(approved, context(), enabled, NOW), null);
 });
 
-Deno.test("approved new ideas become watch-only screen drafts without fabricated levels", () => {
+Deno.test("new ideas do not create rules until screen evidence has a protected adapter", () => {
   const enabled = config();
   enabled.alerts_v3 = {
     enabled: false,
@@ -208,10 +208,7 @@ Deno.test("approved new ideas become watch-only screen drafts without fabricated
     analyst: { completed: true, action: "watch", confidence: "low", reason: "Track only." },
   });
   const projected = draftFromEvaluation(evaluate(idea), context(), enabled, NOW);
-  if (projected === null) throw new Error("new idea did not create a research draft");
-  assertEquals(projected.severity, "watch");
-  assertEquals(projected.conditions[0].kind, "screen_entry");
-  assertEquals(projected.owner_note, "");
+  assertEquals(projected, null);
 });
 
 Deno.test("stale live quote downgrades Buy and on-demand cannot bypass it", () => {

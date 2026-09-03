@@ -635,6 +635,14 @@ Deno.test("alert v3 renders trigger-first details, approved levels, receipts, an
   assertEquals(rendered.status, "ready");
   assertEquals(rendered.parts, [rendered.body]);
   assertEquals(rendered.reply_markup.inline_keyboard.map((row) => row.map((button) => button.text)), [["Acknowledge", "Snooze 1d", "Dismiss"]]);
+  assertEquals(
+    rendered.reply_markup.inline_keyboard[0][0].callback_data,
+    "al:ack:7f2c70bf-5cec-4f1e-9de8-ec8823d99fc7:3",
+  );
+  assertEquals(
+    rendered.reply_markup.inline_keyboard[0][2].callback_data,
+    "al:dismiss:7f7f70bf-5cec-4f1e-9de8-ec8823d99fc7:3",
+  );
   for (const row of rendered.reply_markup.inline_keyboard) {
     for (const button of row) {
       assert(button.callback_data.length <= 64, "callback exceeds Telegram limit");
@@ -666,11 +674,12 @@ Deno.test("critical recorded-stop alert uses recorded levels and manual-review l
       condition_results: [{ condition: rule.conditions[0], passed: true, observed_value: "45.4", evidence_ids: ["quote-1"] }],
     }),
     source_evaluation: source,
-    context: context({ holdings: [{ ...context().holdings[0], ticker: "ABC", stop: "45.58", target: "52" }] }),
+    context: context({ holdings: [{ ...context().holdings[0], ticker: "ABC", stop: "44", target: "52" }] }),
   });
   assert(rendered.body.startsWith("<b>🔴 RISK REVIEW • ABC • BALANCED</b>"), "critical heading absent");
   assert(rendered.body.includes("review manually"), "manual review boundary absent");
-  assert(rendered.body.includes("recorded stop $45.58 • recorded target $52.00"), "recorded risk levels absent");
+  assert(rendered.body.includes("recorded stop $45.58"), "immutable rule stop absent");
+  assert(!rendered.body.includes("recorded stop $44.00"), "new holding stop replaced the fired rule version");
   assert(rendered.body.includes("The bot did not sell and cannot access a brokerage."), "broker boundary absent");
   assertEquals(rendered.reply_markup.inline_keyboard[0][1].text, "Snooze 20m");
 });

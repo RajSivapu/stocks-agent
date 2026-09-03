@@ -508,10 +508,19 @@ interface AlertOperationResult {
   alert_events_recorded: number;
   publication_status: AlertOperationPublicationStatus;
   telegram_message_ids: number[];
+  telegram_accepted_at: string | null;
   draft_previews: Array<{ draft_id: string; body: string; hash: string }>;
   alert_previews: Array<{ event_id: string; status: AlertEvaluation["status"]; body: string; hash: string }>;
   suppression_reason?: string;
 }
+
+const ALERT_SEVERITY_PRIORITY: Record<AlertRuleSnapshot["severity"], number> = {
+  critical: 0,
+  system: 1,
+  review: 2,
+  update: 3,
+  watch: 4,
+};
 
 function evidenceForAlertRule(
   rule: AlertRuleSnapshot,
@@ -589,23 +598,25 @@ async function deliverReadyAlert(
       deps.telegramChatId,
       deps.telegramToken,
     );
-    return await deps.repository.finishPublication(
+    return await deps.repository.finishAlertPublication(
       persisted.idempotency_key,
       claim.lease_token,
       "delivered",
       [accepted.message_id],
       null,
+      accepted.accepted_at,
     );
   } catch (error) {
     const delivery = error instanceof TelegramDeliveryError
       ? error
       : new TelegramDeliveryError("ambiguous", []);
-    return await deps.repository.finishPublication(
+    return await deps.repository.finishAlertPublication(
       persisted.idempotency_key,
       claim.lease_token,
       delivery.kind === "definitive" ? "delivery_failed" : "delivery_unknown",
       delivery.partialMessageIds,
       delivery.kind === "definitive" ? "TELEGRAM_REJECTED" : "TELEGRAM_OUTCOME_UNKNOWN",
+      null,
     );
   }
 }
@@ -629,9 +640,15 @@ async function evaluateAlertRules(
       alert_events_recorded: 0,
       publication_status: "not_created",
       telegram_message_ids: [],
+      telegram_accepted_at: null,
       draft_previews: [],
       alert_previews: [],
     };
+  }
+
+  if (!envelope.dry_run && alertPolicy.enabled) {
+    if (!leaseToken) throw new GatewayRepositoryError("PERSISTENCE_FAILED");
+    await deps.repository.expireAlertRules();
   }
 
   const [work, context] = await Promise.all([
@@ -697,10 +714,18 @@ async function evaluateAlertRules(
     return { item, rendered };
   }));
 
-  const persistables = evaluated.filter((item) => item.recordable).map((item) =>
-    persistableAlertEvent(item.eventId, item.evaluation, item.fingerprint)
-  );
-  const publishable = evaluated.filter((item) => item.publishable && item.rendered?.status === "ready");
+  const publishable = evaluated
+    .filter((item) => item.publishable && item.rendered?.status === "ready")
+    .sort((left, right) =>
+      ALERT_SEVERITY_PRIORITY[left.item.rule.severity] - ALERT_SEVERITY_PRIORITY[right.item.rule.severity] ||
+      left.item.rule.ticker.localeCompare(right.item.rule.ticker) ||
+      left.item.rule.rule_id.localeCompare(right.item.rule.rule_id)
+    );
+  const chosenEvent = publishable[0] ?? null;
+  const persistables = evaluated
+    .filter((item) => item.recordable &&
+      (item.evaluation.status === "unsafe_to_evaluate" || item === chosenEvent))
+    .map((item) => persistableAlertEvent(item.eventId, item.evaluation, item.fingerprint));
   const alertPreviews = evaluated.flatMap((item) => item.rendered
     ? [{ event_id: item.eventId, status: item.evaluation.status, body: item.rendered.body, hash: item.rendered.hash }]
     : []);
@@ -708,12 +733,12 @@ async function evaluateAlertRules(
     evaluated_rules: evaluated.length,
     unsafe_evaluations: evaluated.filter((item) => item.evaluation.status === "unsafe_to_evaluate").length,
     would_write_events: persistables.length,
-    would_publish: alertPolicy.enabled && (publishable.length === 1 ||
-        (publishable.length === 0 && draftPreviews.length > 0)) ? 1 : 0,
+    would_publish: alertPolicy.enabled && (chosenEvent !== null || draftPreviews.length > 0) ? 1 : 0,
     shadow_publish_candidates: publishable.length,
     alert_events_recorded: 0,
     publication_status: "not_created" as AlertOperationPublicationStatus,
     telegram_message_ids: [] as number[],
+    telegram_accepted_at: null as string | null,
     draft_previews: draftPreviews.map(({ item, rendered }) => ({
       draft_id: item.rule.rule_id,
       body: rendered.body,
@@ -729,16 +754,6 @@ async function evaluateAlertRules(
   const eventReceipt = persistables.length > 0
     ? await deps.repository.recordAlertEvaluations(envelope.request_id, persistables)
     : { event_count: 0, event_ids: [] };
-  if (publishable.length > 1) {
-    return {
-      status: "evaluated",
-      ...base,
-      alert_events_recorded: eventReceipt.event_count,
-      suppression_reason: "MULTIPLE_ALERTS_REQUIRE_COALESCING",
-    };
-  }
-
-  const chosenEvent = publishable[0] ?? null;
   const chosenDraft = chosenEvent ? null : draftPreviews[0] ?? null;
   const rendered = chosenEvent?.rendered ?? chosenDraft?.rendered ?? null;
   if (!rendered || rendered.status !== "ready") {
@@ -761,6 +776,7 @@ async function evaluateAlertRules(
     alert_events_recorded: eventReceipt.event_count,
     publication_status: delivered.status,
     telegram_message_ids: delivered.telegram_message_ids,
+    telegram_accepted_at: delivered.telegram_accepted_at,
   };
 }
 
@@ -879,6 +895,36 @@ async function evaluateAndPublish(
       });
     }
   }
+  const alertDraftPreviews = await Promise.all(alertDrafts.map(async (draft) => {
+    const source = evaluations.find((evaluation) =>
+      evaluation.evaluation_id === draft.source_evaluation_id
+    );
+    if (!source) throw new GatewayRepositoryError("POLICY_REJECTED");
+    const previewEvaluation: AlertEvaluation = {
+      rule: draft.rule_snapshot,
+      status: "not_triggered",
+      reason_codes: [],
+      observed_at: source.normalized.quote_as_of,
+      evaluated_at: deps.now().toISOString(),
+      market_session: draft.rule_snapshot.session === "all"
+        ? "regular"
+        : draft.rule_snapshot.session,
+      condition_results: draft.rule_snapshot.conditions.map((condition) => ({
+        condition,
+        passed: null,
+        observed_value: null,
+        evidence_ids: [],
+      })),
+    };
+    const preview = await renderAlertV3({
+      event_id: draft.id,
+      evaluation: previewEvaluation,
+      source_evaluation: source,
+      context,
+      mode: "draft",
+    });
+    return { draft_id: draft.id, body: preview.body, hash: preview.hash };
+  }));
   let rendered;
   try {
     rendered = await renderPublication({
@@ -897,6 +943,7 @@ async function evaluateAndPublish(
       evaluation_count: evaluations.length,
       would_write_suggestions: suggestions.length,
       would_create_alert_drafts: alertDrafts.length,
+      alert_draft_previews: alertDraftPreviews,
       publication_status: rendered.status,
       preview: rendered.body,
     });
@@ -926,8 +973,12 @@ async function evaluateAndPublish(
   };
   const persisted = await deps.repository.applyDecisionBundle(persistedInput);
   let alertDraftsCreated = 0;
-  let alertDraftStatus = alertDrafts.length === 0 ? "not_applicable" : "created";
-  if (alertDrafts.length > 0) {
+  let alertDraftStatus = alertDrafts.length === 0
+    ? "not_applicable"
+    : activePolicy.alerts_v3?.enabled
+    ? "created"
+    : "shadow_preview";
+  if (alertDrafts.length > 0 && activePolicy.alerts_v3?.enabled) {
     try {
       const draftReceipt = await deps.repository.createAlertDrafts(envelope.request_id, alertDrafts);
       alertDraftsCreated = draftReceipt.created_count;
@@ -945,6 +996,7 @@ async function evaluateAndPublish(
     suggestion_count: suggestions.length,
     alert_drafts_created: alertDraftsCreated,
     alert_draft_status: alertDraftStatus,
+    alert_draft_previews: activePolicy.alerts_v3?.shadow ? alertDraftPreviews : [],
     preview: bundle.phase === "on-demand" ? rendered.body : undefined,
     ...(delivered.status === "delivery_unknown" ? { code: "DELIVERY_UNKNOWN" } : {}),
     ...(delivered.status === "delivery_failed" ? { code: "DELIVERY_FAILED" } : {}),

@@ -1,6 +1,6 @@
 # Stocks Agent — Roadmap and Deployment Status
 
-Last updated: 2026-09-02.
+Last updated: 2026-09-03.
 
 This repository is suggestion-only decision support plus portfolio recordkeeping. It has no
 brokerage integration and never places, modifies, or cancels a trade. Any future execution project
@@ -21,6 +21,7 @@ is separate, paper-first, and outside this codebase.
 | Deterministic 5/21/63-session outcome grading | Implemented and rollback-tested | Live; results remain empty until eligible gateway decisions reach their horizons |
 | Friday ChatGPT weekly process audit v2 | Packet + skill implemented and tested | Active Fridays 16:30 local on `gpt-5.6-terra`; live packet smoke test passed, first scheduled report pending |
 | Watchlist changes as owner-reviewed proposals | Implemented in settings/skill | Live through the revised Routine; never edits/pushes the checkout |
+| Owner-only alert v3 | Implemented, reviewed, and rollback-tested locally | Production remains on renderer v2/policy v1; v3 migration, functions, policy v2, and shadow receipt are pending deployment |
 
 All code through the current release is on GitHub `main`. "Live" means the corresponding external
 Supabase, Telegram, Claude, or ChatGPT configuration was checked directly; pending observation is
@@ -41,6 +42,8 @@ The remaining checks are observation rather than implementation:
 3. After the first scheduled cycle, decide whether synthetic-looking legacy suggestions need a
    separately approved archival cleanup. Do not mix that destructive data cleanup into this
    release.
+4. Deploy alert v3 with sends disabled and shadow enabled, then reconcile a protected dry-run and
+   scheduled shadow previews before enabling any one-class canary.
 
 ## Next reliability work
 

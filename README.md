@@ -88,6 +88,7 @@ sql/migrations/20260901_reliable_stock_agent.sql
 sql/migrations/20260902_decision_safety_gateway.sql
 sql/migrations/20260903_owner_investment_plans.sql
 sql/migrations/20260904_outcome_evaluation.sql
+sql/migrations/20260905_owner_alert_lifecycle.sql
 ```
 
 The gateway migration intentionally stops on unknown legacy action/confidence/bucket labels. Review
@@ -147,8 +148,8 @@ the exact owner chat and user IDs. RLS remains enabled, and privileged RPC execu
 .venv/bin/python scripts/healthcheck.py
 ```
 
-Expected keys are `gateway`, `finnhub`, and `yahoo`. Healthcheck uses dry-run gateway operations and
-sends no Telegram message.
+Expected keys are `alerts`, `gateway`, `finnhub`, and `yahoo`. Healthcheck uses dry-run gateway
+operations and sends no Telegram message.
 
 ### 6. Configure Routines
 
@@ -227,6 +228,8 @@ Reviewed policy comes from `config/settings.json`, is validated and versioned by
 quotes, checks session freshness, reconciles sizing, enforces stop/reward-risk/concentration/loss
 limits, and owns holding-alert transitions. If Yahoo omits `marketState`, the gateway derives the
 session only from Yahoo's validated epoch trading windows; missing or malformed windows fail closed.
+Policy v2 adds owner-only alert v3 controls. Its initial deployment is shadow-only: projected drafts
+are rendered in the gateway receipt but no alert lifecycle row or Telegram alert is created.
 
 Final gateway suggestions are graded after 5/21/63 trading sessions using adjusted closes, a fixed
 VOO benchmark (VXUS for VXUS), excess return, MFE/MAE, and raw threshold hits. Splits require review;
@@ -234,7 +237,7 @@ non-actionable decisions get no binary success label. Complete grades are immuta
 audit reports sample sizes and separates scheduled delivered recommendations from session-only
 research.
 
-## Supabase schema (18 tables)
+## Supabase schema (23 tables)
 
 Core portfolio/research tables:
 
@@ -244,6 +247,8 @@ Core portfolio/research tables:
 - `market_gateway_requests`, `market_policy_config`, `decision_evaluations`, and
   `market_publications`;
 - `owner_investment_plans`.
+- `market_alert_drafts`, `market_alert_rules`, `market_alert_rule_versions`,
+  `market_alert_events`, and `market_alert_actions`.
 
 Privileged RPCs are fixed-name, fixed-search-path, and service-role-only:
 
@@ -253,6 +258,9 @@ Privileged RPCs are fixed-name, fixed-search-path, and service-role-only:
   `apply_market_decision_bundle`, `import_legacy_suggestion`, `claim_market_publication`, and
   `finish_market_publication`;
 - outcomes: `get_due_market_decisions`, `upsert_market_outcome_grades`.
+- owner alerts: `create_market_alert_drafts`, `apply_market_alert_action`,
+  `expire_market_alert_rules`, `record_market_alert_evaluations`,
+  `create_market_alert_publication`, and `finish_market_alert_publication`.
 
 ## Tests
 

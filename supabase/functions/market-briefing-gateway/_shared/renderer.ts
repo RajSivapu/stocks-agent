@@ -805,16 +805,16 @@ function alertRiskLine(
   const hasRecordedTarget = rule.conditions.some((item) => item.kind === "recorded_target");
   const parts: string[] = [];
   if (hasRecordedStop) {
-    const stop = holding?.stop ?? rule.conditions.find((item) => item.kind === "recorded_stop")?.left;
+    const stop = rule.conditions.find((item) => item.kind === "recorded_stop")?.left;
     if (stop) parts.push(`recorded stop ${formatMoney(stop)}`);
   } else if (source?.invalidation_price) {
     parts.push(`invalidation below ${formatMoney(source.invalidation_price)}`);
   }
   if (hasRecordedTarget) {
-    const target = holding?.target ?? rule.conditions.find((item) => item.kind === "recorded_target")?.left;
+    const target = rule.conditions.find((item) => item.kind === "recorded_target")?.left;
     if (target) parts.push(`recorded target ${formatMoney(target)}`);
   } else if (hasRecordedStop && holding?.target) {
-    parts.push(`recorded target ${formatMoney(holding.target)}`);
+    parts.push(`current portfolio target ${formatMoney(holding.target)}`);
   }
   if (!hasRecordedStop && source?.stop) {
     parts.push(`policy-approved stop ${formatMoney(source.stop)}`);
@@ -842,8 +842,13 @@ function alertExposure(source: AlertSourceSummary | null): string {
   }
 }
 
-function alertButtons(rule: AlertRuleSnapshot, mode: "draft" | "event"): AlertButton[][] {
-  const prefix = (action: string) => `al:${action}:${rule.rule_id}:${rule.version}`;
+function alertButtons(
+  rule: AlertRuleSnapshot,
+  mode: "draft" | "event",
+  eventId: string,
+): AlertButton[][] {
+  const prefix = (action: string) =>
+    `al:${action}:${action === "ack" && mode === "event" ? eventId : rule.rule_id}:${rule.version}`;
   const buttons = mode === "draft"
     ? [{ text: "Arm", callback_data: prefix("arm") }, { text: "Dismiss", callback_data: prefix("dismiss") }]
     : [
@@ -926,7 +931,7 @@ export async function renderAlertV3(input: RenderAlertV3Input): Promise<Rendered
     parts: [body],
     hash: await sha256(body),
     template_version: 3,
-    reply_markup: { inline_keyboard: alertButtons(rule, mode) },
+    reply_markup: { inline_keyboard: alertButtons(rule, mode, input.event_id) },
   };
 }
 

@@ -178,6 +178,8 @@ class FakeRepository implements GatewayRepository {
   recordAlertEventCalls = 0;
   createAlertPublicationCalls = 0;
   finishPublicationCalls: Array<{ status: string; ids: number[] }> = [];
+  finishAlertPublicationCalls: Array<{ status: string; ids: number[]; acceptedAt: string | null }> = [];
+  expireAlertRuleCalls = 0;
   finishRunCalls = 0;
   readCalls = 0;
   events: string[] = [];
@@ -257,8 +259,14 @@ class FakeRepository implements GatewayRepository {
       idempotency_key: requestId,
       status: "ready",
       telegram_message_ids: [],
+      telegram_accepted_at: null,
       lease_token: null,
     });
+  }
+  expireAlertRules(): Promise<number> {
+    this.mutationCalls += 1;
+    this.expireAlertRuleCalls += 1;
+    return Promise.resolve(0);
   }
   recordArtifacts(_request: string, _run: string, _lease: string, payload: PersistableArtifactMutationBatch): Promise<ArtifactReceipt> {
     this.mutationCalls += 1;
@@ -271,21 +279,41 @@ class FakeRepository implements GatewayRepository {
     this.mutationCalls += 1;
     this.applyCalls += 1;
     this.lastBundle = input;
-    return Promise.resolve({ id: "00000000-0000-4000-8000-000000000050", idempotency_key: input.request_id, status: input.publication.status, telegram_message_ids: [], lease_token: null });
+    return Promise.resolve({ id: "00000000-0000-4000-8000-000000000050", idempotency_key: input.request_id, status: input.publication.status, telegram_message_ids: [], telegram_accepted_at: null, lease_token: null });
   }
   claimPublication(idempotencyKey: string): Promise<PublicationClaim> {
     this.events.push("claim-publication");
     return Promise.resolve({
       claimed: this.publicationStatus === "ready" || this.publicationStatus === "delivery_failed",
       lease_token: "00000000-0000-4000-8000-000000000051",
-      receipt: { id: "00000000-0000-4000-8000-000000000050", idempotency_key: idempotencyKey, status: this.publicationStatus, telegram_message_ids: [], lease_token: null },
+      receipt: { id: "00000000-0000-4000-8000-000000000050", idempotency_key: idempotencyKey, status: this.publicationStatus, telegram_message_ids: [], telegram_accepted_at: null, lease_token: null },
     });
   }
   finishPublication(_key: string, _lease: string, status: "delivered" | "delivery_failed" | "delivery_unknown", ids: number[]): Promise<PublicationReceipt> {
     this.mutationCalls += 1;
     this.finishPublicationCalls.push({ status, ids });
     this.publicationStatus = status;
-    return Promise.resolve({ id: "00000000-0000-4000-8000-000000000050", idempotency_key: _key, status, telegram_message_ids: ids, lease_token: null });
+    return Promise.resolve({ id: "00000000-0000-4000-8000-000000000050", idempotency_key: _key, status, telegram_message_ids: ids, telegram_accepted_at: null, lease_token: null });
+  }
+  finishAlertPublication(
+    key: string,
+    _lease: string,
+    status: "delivered" | "delivery_failed" | "delivery_unknown",
+    ids: number[],
+    _error: string | null,
+    acceptedAt: string | null,
+  ): Promise<PublicationReceipt> {
+    this.mutationCalls += 1;
+    this.finishAlertPublicationCalls.push({ status, ids, acceptedAt });
+    this.publicationStatus = status;
+    return Promise.resolve({
+      id: "00000000-0000-4000-8000-000000000050",
+      idempotency_key: key,
+      status,
+      telegram_message_ids: ids,
+      lease_token: null,
+      telegram_accepted_at: acceptedAt,
+    });
   }
   finishRun(): Promise<RunReceipt> {
     this.mutationCalls += 1;
@@ -415,7 +443,7 @@ Deno.test("dry-run operations are write-free and report only their own effects",
   assertEquals(sent, []);
 });
 
-Deno.test("shadow alert drafts are previewed without writes and persisted only after policy evaluation", async () => {
+Deno.test("shadow alert drafts are rendered but never persisted", async () => {
   const dryRepository = new FakeRepository();
   dryRepository.policyValue.alerts_v3 = {
     enabled: false, shadow: true, profile: "balanced", draft_ttl_hours: 24, drafts_per_hour: 5,
@@ -431,13 +459,10 @@ Deno.test("shadow alert drafts are previewed without writes and persisted only a
   liveRepository.policyValue.alerts_v3 = structuredClone(dryRepository.policyValue.alerts_v3);
   const live = makeHandler(liveRepository);
   const liveReceipt = await json(await live.handler(request("evaluate_and_publish", bundle)));
-  assertEquals(liveReceipt.alert_drafts_created, 1);
-  assertEquals(liveRepository.createDraftCalls, 1);
-  const stored = liveRepository.lastDrafts[0] as Record<string, unknown>;
-  assert(typeof stored.fingerprint === "string" && /^[0-9a-f]{64}$/.test(stored.fingerprint),
-    "draft fingerprint absent");
-  assertEquals(stored.source_evaluation_id,
-    liveRepository.lastBundle!.evaluations[0].evaluation_id);
+  assertEquals(liveReceipt.alert_drafts_created, 0);
+  assertEquals(liveReceipt.alert_draft_status, "shadow_preview");
+  assertEquals((liveReceipt.alert_draft_previews as unknown[]).length, 1);
+  assertEquals(liveRepository.createDraftCalls, 0);
 });
 
 Deno.test("alert evaluation dry-run uses server evidence and remains write-free and send-free", async () => {
@@ -475,6 +500,11 @@ Deno.test("enabled alert evaluation persists receipts before one Telegram alert"
   assertEquals(result.publication_status, "delivered");
   assertEquals(result.telegram_message_ids, [78]);
   assertEquals(repository.events, ["persist-alert-events", "persist-alert-publication", "claim-publication", "send-alert"]);
+  assertEquals(repository.expireAlertRuleCalls, 1);
+  assertEquals(repository.finishAlertPublicationCalls, [{
+    status: "delivered", ids: [78], acceptedAt: NOW.toISOString(),
+  }]);
+  assertEquals(repository.finishPublicationCalls, []);
   assertEquals(setup.sentAlerts.length, 1);
 });
 
@@ -515,6 +545,7 @@ Deno.test("alert evaluation records no-trigger, unsafe, shadow, and cooldown out
   assertEquals(shadowResult.alert_events_recorded, 0);
   assertEquals(shadowRepository.recordAlertEventCalls, 0);
   assertEquals(shadowRepository.createAlertPublicationCalls, 0);
+  assertEquals(shadowRepository.expireAlertRuleCalls, 0);
   assertEquals(shadow.sentAlerts, []);
 
   const cooldownRepository = new FakeRepository();
@@ -550,7 +581,7 @@ Deno.test("enabled draft proposal is persisted before Telegram and remains monit
   assertEquals(sent.reply_markup.inline_keyboard[0].map((button) => button.text), ["Arm", "Dismiss"]);
 });
 
-Deno.test("multiple simultaneous alert triggers fail closed before publication", async () => {
+Deno.test("multiple simultaneous triggers publish one deterministically without consuming the rest", async () => {
   const repository = new FakeRepository();
   repository.policyValue.alerts_v3 = {
     enabled: true, shadow: false, profile: "balanced", draft_ttl_hours: 24, drafts_per_hour: 5,
@@ -563,10 +594,11 @@ Deno.test("multiple simultaneous alert triggers fail closed before publication",
   repository.alertWorkValue = { rules: [first, second], drafts: [] };
   const setup = makeHandler(repository);
   const result = await json(await setup.handler(request("evaluate_alert_rules", {})));
-  assertEquals(result.alert_events_recorded, 2);
-  assertEquals(result.suppression_reason, "MULTIPLE_ALERTS_REQUIRE_COALESCING");
-  assertEquals(repository.createAlertPublicationCalls, 0);
-  assertEquals(setup.sentAlerts, []);
+  assertEquals(result.alert_events_recorded, 1);
+  assertEquals(result.publication_status, "delivered");
+  assertEquals(repository.createAlertPublicationCalls, 1);
+  assertEquals(setup.sentAlerts.length, 1);
+  assertEquals((repository.lastAlertEvents[0] as { rule_id: string }).rule_id, first.rule.rule_id);
 });
 
 Deno.test("live start_run is idempotent", async () => {
@@ -677,6 +709,7 @@ Deno.test("a second request for an evaluated run reuses the publication without 
           idempotency_key: "00000000-0000-4000-8000-000000000090",
           status: "delivered",
           telegram_message_ids: [77],
+          telegram_accepted_at: "2026-09-02T17:00:00.000Z",
           lease_token: null,
         });
       }

@@ -349,3 +349,32 @@ Deno.test("intraday evidence fails closed on mixed, missing, or future latest da
     );
   }
 });
+
+Deno.test("intraday evidence rejects nonincreasing timestamps and excludes a forming minute", async () => {
+  const periods = {
+    pre: { start: Date.parse("2026-09-02T08:00:00.000Z") / 1000, end: Date.parse("2026-09-02T13:30:00.000Z") / 1000 },
+    regular: { start: Date.parse("2026-09-02T13:30:00.000Z") / 1000, end: Date.parse("2026-09-02T20:00:00.000Z") / 1000 },
+    post: { start: Date.parse("2026-09-02T20:00:00.000Z") / 1000, end: Date.parse("2026-09-03T00:00:00.000Z") / 1000 },
+  };
+  const make = (timestamps: number[]) => ({
+    chart: { result: [{
+      meta: { marketState: "REGULAR", currentTradingPeriod: periods },
+      timestamp: timestamps,
+      indicators: { quote: [{ close: timestamps.map((_, index) => 41 + index) }] },
+    }], error: null },
+  });
+  const at = (value: string) => Date.parse(value) / 1000;
+  await assertRejects(
+    () => fetchIntradayQuoteEvidence("ABC", fixtureFetch(make([
+      at("2026-09-02T16:59:00.000Z"), at("2026-09-02T16:58:00.000Z"),
+    ])), new Date("2026-09-02T17:01:00.000Z")),
+    "invalid intraday response",
+  );
+  const evidence = await fetchIntradayQuoteEvidence("ABC", fixtureFetch(make([
+    at("2026-09-02T16:58:00.000Z"), at("2026-09-02T16:59:00.000Z"),
+    at("2026-09-02T17:00:00.000Z"),
+  ])), new Date("2026-09-02T17:00:30.000Z"));
+  assertEquals(evidence.points.map((point) => point.observed_at), [
+    "2026-09-02T16:58:00.000Z", "2026-09-02T16:59:00.000Z",
+  ]);
+});

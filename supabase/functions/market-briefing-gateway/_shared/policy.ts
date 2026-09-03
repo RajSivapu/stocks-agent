@@ -106,12 +106,6 @@ export function draftFromEvaluation(
       right: candidate.entry_zone_high, timeframe: "quote",
     }];
     confirmation = "two_quote";
-  } else if (candidate.notification_kind === "new_idea") {
-    conditions = [{
-      kind: "screen_entry", operator: "above", left: "0", right: null,
-      timeframe: "1d",
-    }];
-    severity = "watch";
   } else if (candidate.notification_kind === "stop_breach") {
     const holding = context.holdings.find((item) => item.ticker === candidate.ticker);
     if (holding?.stop !== null && holding?.stop !== undefined) {
@@ -145,7 +139,7 @@ export function draftFromEvaluation(
     session: alertSession(candidate.phase),
     confirmation,
     conditions,
-    cooldown_seconds: severity === "critical" ? 1_200 : severity === "watch" ? 900 : 14_400,
+    cooldown_seconds: severity === "critical" ? 1_200 : 14_400,
     fire_limit: 3,
     valid_until: draftValidity(candidate, now),
     owner_note: "",

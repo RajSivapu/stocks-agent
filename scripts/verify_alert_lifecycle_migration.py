@@ -2,6 +2,7 @@
 """Rollback-only verification for the owner-only market alert lifecycle."""
 
 import argparse
+from datetime import datetime
 import json
 from pathlib import Path
 import sys
@@ -57,7 +58,7 @@ def _snapshot(rule_id):
             "operator": "inside",
             "left": "10",
             "right": "11",
-            "timeframe": "15m",
+            "timeframe": "quote",
         }],
         "cooldown_seconds": 1200,
         "fire_limit": 3,
@@ -123,8 +124,23 @@ def _draft(cur, request_id, evaluation_id, fingerprint):
 
 def verify(cur):
     cur.execute(MIGRATION.read_text())
+    cur.execute(MIGRATION.read_text())
     request_id, evaluation_id = _insert_source_evaluation(cur)
     draft_id = _draft(cur, request_id, evaluation_id, "a" * 64)
+    duplicate_id = uuid4()
+    duplicate_draft = _call(
+        cur,
+        "create_market_alert_drafts",
+        request_id,
+        Jsonb([{
+            "id": str(duplicate_id),
+            "source_evaluation_id": str(evaluation_id),
+            "rule_snapshot": _snapshot(duplicate_id),
+            "fingerprint": "a" * 64,
+        }]),
+    )
+    _require(duplicate_draft["created_count"] == 0,
+             "equivalent draft fingerprint was not deduplicated")
     owner_chat = 9_000_000_001
     owner_user = 9_000_000_002
     arm_update = 9_000_000_003
@@ -227,6 +243,60 @@ def verify(cur):
     ).fetchone()
     _require(linked_event and linked_event[0] == publication_id,
              "event publication receipt was not stored")
+    claim = _call(cur, "claim_market_publication", event_request)
+    accepted_at = cur.execute("SELECT now()").fetchone()[0]
+    finished = _call(
+        cur,
+        "finish_market_alert_publication",
+        event_request,
+        UUID(str(claim["lease_token"])),
+        "delivered",
+        Jsonb([9_000_000_010]),
+        None,
+        accepted_at,
+    )
+    returned_acceptance = datetime.fromisoformat(finished["telegram_accepted_at"])
+    _require(returned_acceptance == accepted_at,
+             "Telegram acceptance timestamp was not returned exactly")
+    stored_acceptance = cur.execute(
+        "SELECT telegram_accepted_at=%s FROM public.market_publications WHERE id=%s",
+        (accepted_at, publication_id),
+    ).fetchone()[0]
+    _require(stored_acceptance, "Telegram acceptance timestamp was not stored exactly")
+    acknowledgement = _call(
+        cur, "apply_market_alert_action", event_id, "acknowledge", arm_update + 6,
+        owner_chat, owner_user, 3, None,
+    )
+    _require(UUID(str(acknowledgement["event_id"])) == event_id
+             and UUID(str(acknowledgement["publication_id"])) == publication_id,
+             "acknowledgement was not bound to its event and publication")
+    acknowledgement_bound = cur.execute(
+        """
+        SELECT event_id=%s AND publication_id=%s
+        FROM public.market_alert_actions WHERE telegram_update_id=%s
+        """,
+        (event_id, publication_id, arm_update + 6),
+    ).fetchone()[0]
+    _require(acknowledgement_bound, "acknowledgement linkage was not persisted")
+
+    cur.execute(
+        "UPDATE public.market_alert_rules SET valid_until=now()-interval '1 minute' WHERE id=%s",
+        (draft_id,),
+    )
+    expired = _call(cur, "expire_market_alert_rules")
+    _require(expired["expired_count"] == 1, "due rule was not expired")
+    expiry_versioned = cur.execute(
+        """
+        SELECT r.state='expired' AND r.current_version=4
+          AND v.snapshot->>'state'='expired' AND (v.snapshot->>'version')::int=4
+        FROM public.market_alert_rules r
+        JOIN public.market_alert_rule_versions v
+          ON v.rule_id=r.id AND v.version=r.current_version
+        WHERE r.id=%s
+        """,
+        (draft_id,),
+    ).fetchone()[0]
+    _require(expiry_versioned, "rule expiry did not create an immutable version")
 
     publish_draft_id = _draft(cur, request_id, evaluation_id, "e" * 64)
     draft_publication_request = uuid4()
@@ -257,6 +327,21 @@ def verify(cur):
         (draft_publication_id, publish_draft_id),
     ).fetchone()[0]
     _require(draft_publication_linked, "draft publication receipt was not stored")
+    overflow_drafts = []
+    for index in range(3):
+        overflow_id = uuid4()
+        overflow_drafts.append({
+            "id": str(overflow_id),
+            "source_evaluation_id": str(evaluation_id),
+            "rule_snapshot": _snapshot(overflow_id),
+            "fingerprint": str(index + 1) * 64,
+        })
+    hourly_cap_rejected = _expect_db_error(
+        cur,
+        lambda: _call(
+            cur, "create_market_alert_drafts", request_id, Jsonb(overflow_drafts)
+        ),
+    )
     _expect_db_error(
         cur,
         lambda: cur.execute("UPDATE public.market_alert_events SET status='unsafe_to_evaluate' WHERE id=%s", (event_id,)),
@@ -267,10 +352,15 @@ def verify(cur):
         "events_recorded": 1,
         "publications_linked": 1,
         "draft_publication_linked": draft_publication_linked,
+        "duplicate_draft_suppressed": True,
         "duplicate_update_rejected": duplicate_update_rejected,
         "wrong_owner_rejected": wrong_owner_rejected,
         "stale_version_rejected": stale_version_rejected,
         "expired_draft_rejected": expired_draft_rejected,
+        "acknowledgement_bound": acknowledgement_bound,
+        "telegram_acceptance_stored": stored_acceptance,
+        "expiry_versioned": expiry_versioned,
+        "hourly_cap_rejected": hourly_cap_rejected,
     }
 
 
