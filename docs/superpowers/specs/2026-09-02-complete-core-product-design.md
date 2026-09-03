@@ -1,10 +1,11 @@
-# Complete Core Product: Multi-User, Multi-Provider Stock Agent
+# Complete Core Product: Multi-User, Provider-Neutral Stock Agent
 
 **Date:** 2026-09-02
 
-**Status:** Draft for Rajrupesh and external Claude review
+**Status:** Revision 2 after external Claude review; pending Rajrupesh's final design approval
 
-**Release target:** One complete core-product release, built through internal security gates
+**Release target:** One complete core-product release with one proven launch provider and an additive
+provider protocol, built through internal security gates
 
 **Implementation status:** Not approved; this document authorizes no code or production change
 
@@ -15,18 +16,20 @@ turning it into a brokerage or autonomous trading system.
 
 The product will have four durable layers:
 
-1. **Product layer:** a responsive React/TypeScript progressive web application (PWA) hosted as
-   static assets on Cloudflare Workers.
+1. **Product layer:** a responsive, installable React/TypeScript web application with a manifest,
+   hosted as static assets on Cloudflare Workers without a service worker.
 2. **State and control layer:** Supabase Auth, Postgres, Row-Level Security (RLS), authenticated Edge
    Functions, database RPCs, scheduling metadata, and audit records.
-3. **Provider-neutral analysis layer:** Claude, ChatGPT, and future model runtimes communicate through
-   one versioned, narrowly scoped analysis protocol. Claude is no longer embedded as an architectural
-   assumption.
+3. **Provider-neutral analysis layer:** model runtimes communicate through one versioned, narrowly
+   scoped protocol. Release one ships the verified Claude Routines adapter. A future ChatGPT adapter
+   uses a public MCP server and OAuth 2.1; it is additive but not promised until a separate capability
+   and security gate passes. Grok remains outside the product until a supported subscription route
+   exists.
 4. **Deterministic safety layer:** the existing market gateway remains authoritative for quotes,
    freshness, policy, portfolio state transitions, persistence, rendering, and delivery.
 
 The first release is complete for its intended use: accounts, tenant isolation, portfolio
-recordkeeping, recommendations, run health, provider connection, Telegram pairing, notifications,
+recordkeeping, recommendations, run health, Claude connection, Telegram pairing, notifications,
 export/recovery, and invite-only onboarding. It excludes brokerage connectivity, order execution,
 autonomous trading, a strategy marketplace, social features, and unvalidated research laboratories.
 
@@ -81,13 +84,19 @@ read-context queries before friend accounts are enabled.
 
 #### Accounts and onboarding
 
-- Invite-only Supabase Auth accounts.
-- Email magic-link or one-time-password sign-in.
-- A default profile, timezone, base currency, and notification preferences per user.
+- Invite-only Supabase Auth accounts created through a trusted operator CLI; there is no admin mutation
+  screen in release one.
+- Six-digit email OTP sign-in as the primary flow. Magic link is a desktop fallback only.
+- Custom SMTP must deliver through a verified operator-controlled domain before the first friend is
+  invited; the Supabase default mailer is development-only.
+- A default profile, IANA timezone, USD base currency, and notification preferences per user. Release
+  one supports US-listed equities and ETFs only and does not perform FX conversion.
 - Required acknowledgement of the privacy notice, model-provider data flow, record-only trade
   semantics, and decision-support risk disclosure before connecting a provider.
-- Owner/admin invitation management without portfolio impersonation.
 - A guided provider-connection and Telegram-pairing checklist.
+- Consent states that provider run transcripts may contain the bounded portfolio packet; the operator
+  can access production data and encrypted backups; quote vendors receive requested ticker symbols;
+  and users must delete historical Telegram messages themselves when the bot can no longer do so.
 
 #### Portfolio recordkeeping
 
@@ -97,23 +106,32 @@ read-context queries before friend accounts are enabled.
 - Preview, explicit confirmation, expiry, idempotency, stale-state detection, and atomic application.
 - Correction workflow that voids and replaces an erroneous transaction; no silent row editing or
   deletion. The preview shows every resulting holding and cost-basis change.
-- Arithmetic reconciliation between entered amount, quantity, and fill price. Material mismatches,
-  implausible share counts, unknown symbols, and unsupported decimal precision block confirmation and
-  ask the user to correct the source record; the system never silently guesses which value is right.
+- Every Buy/Sell records quantity, fill price, optional non-negative fees, and an optional
+  broker-reported cash total. The server computes gross trade value (`quantity * price`) and expected
+  net cash (`gross + fees` for a Buy, `gross - fees` for a Sell). A supplied cash total outside
+  `max($0.05, 0.1% of the expected total)` blocks confirmation and echoes all inputs. A recurring-plan
+  deposit is a separate field and is never treated as the trade's cash total.
+- Shares use `NUMERIC(20,8)`, prices `NUMERIC(20,4)`, and money `NUMERIC(20,2)`. More than eight share
+  decimals, more than 1,000,000 shares, a price outside `[0.0001, 1,000,000]`, unknown symbols, or
+  implausible values block confirmation; the system never silently guesses which value is right.
+- Holdings are a deterministic average-cost projection of the append-only transaction ledger. Apply
+  and correction RPCs rebuild the affected owner/ticker projection inside the same transaction, and a
+  nightly invariant job compares every projection with a fold over its ledger.
+- A back-dated transaction is rejected if it would make the historical share balance negative at any
+  point.
 - Canonical portfolio buckets with an explicit `unclassified` state. A model may suggest a bucket,
   but only the user can confirm or change it through the audited command workflow.
 - Recurring plans remain reminders only. They never assume a fill or initiate an order.
 
 #### Analysis and decision support
 
-- Pre-market, intraday, post-market, and user-initiated runs submitted from a connected provider.
-  The web app does not claim it can wake a consumer subscription unless that provider exposes a
-  documented, verified capability.
+- Pre-market, intraday, post-market, and user-initiated runs submitted from a connected provider. The
+  server derives phase from its exchange calendar and the trigger time; provider prose cannot assert
+  a phase.
 - Independent fresh evidence for every intraday run; morning levels are context, not instructions.
 - Recommendation inbox and history with action, confidence, levels, evidence time, provider, model,
   policy decision, notification status, and outcome grades.
 - Provider-neutral primary analyst connection.
-- Optional explicit second-opinion run. No automatic provider voting or hidden fallback.
 - Run-health timeline showing incomplete, vetoed, suppressed, delivered, failed, and unknown-delivery
   states accurately.
 
@@ -133,7 +151,8 @@ read-context queries before friend accounts are enabled.
   Deactivation immediately revokes provider connections, Telegram delivery, and sign-in. A 72-hour
   cancellation window precedes deletion, and the deletion runbook removes active owner data no later
   than seven days after the original request.
-- Encrypted off-site application-data backups, documented restore steps, and a tested restore drill.
+- Daily encrypted application-data backups to private Cloudflare R2, 14 daily plus 4 weekly copies,
+  an independent backup-age alert, documented restore/rotation steps, and a tested restore drill.
 - No advertising, tracking pixels, or third-party behavioral analytics.
 
 ### 4.2 Explicitly excluded
@@ -147,6 +166,8 @@ read-context queries before friend accounts are enabled.
 - Automatic risk-policy tuning or thresholds changed from model output.
 - A production backtesting/Monte Carlo laboratory. That remains a separately isolated future project.
 - Puter, Claude Artifacts, or another prototype runtime as the production host.
+- ChatGPT/Grok adapters, second-opinion runs, user-editable model risk policy, FX/base-currency
+  conversion, an admin mutation UI, and a PWA service worker. These are separate post-launch projects.
 
 ## 5. Proposed architecture
 
@@ -161,32 +182,36 @@ Cloudflare Workers Static Assets
   v
 Supabase
   |-- Auth: invite-only identity
-  |-- Postgres: owner-scoped data + RLS
+  |-- Postgres: private app schema + exposed api views + forced RLS
   |-- Quote cache: server-fetched market facts with source/as-of metadata
-  |-- Authenticated Edge Functions: previews, confirmations, pairing, export, invitations
-  |-- Provider Gateway: scoped external-runner protocol
+  |-- Authenticated app-api: user-JWT previews, confirmations, export; no privileged key
+  |-- Run Scheduler: claims market slots and calls each user's Routine /fire endpoint
+  |-- Provider Gateway: validates the separate inbound Routine credential
   |-- Deterministic Market Gateway: evidence validation, quote refresh, policy, persistence
-  |-- Cron: maintenance, expected-run monitoring, expiry, bounded reminders
+  |-- Cron: market-aware trigger claims, maintenance, expected-run monitoring, expiry
   |
   +-----------------------------> Telegram Bot API
-  ^
-  |
-  | versioned, owner-scoped analysis protocol
-  |
-  +-- Claude Cloud Routine
-  +-- ChatGPT web scheduled task + stock-agent plugin
-  +-- Future verified Grok/provider adapter
-  +-- Optional future BYOK API runner
+
+Supabase Run Scheduler -- scoped /fire bearer --> User-owned Claude Routine
+Supabase Agent Gateway  <-- scoped callback ---- User-owned Claude Routine
+
+Private GitHub backup workflow -- backup_reader --> Supabase session pooler
+Private GitHub backup workflow -- age ciphertext --> Private Cloudflare R2
+Cloudflare scheduled monitor --------------------> R2 age check + Telegram ops alert
+
+Future public OAuth 2.1 MCP host <---------------> ChatGPT plugin (separate gated project)
 ```
 
 There is no dedicated VM, VPS, Docker host, Cloud Run service, or always-on Mac in the production
 request path. Local development, deployment, and the optional existing Friday Codex audit can still
 use the Mac without making the live product dependent on it.
 
-The initial frontend should be a static React/TypeScript/Vite SPA. Cloudflare handles only static
-assets in release one; business logic remains in Supabase. Static application assets may be cached,
-but authentication responses and portfolio/analysis data must use `no-store` and must never enter the
-PWA service-worker cache.
+The initial frontend is a static React/TypeScript/Vite SPA with a web-app manifest and reviewed
+`_headers` file. Its Cloudflare project handles only static assets; business logic remains in Supabase.
+A separate minimal scheduled Worker reads only R2 object metadata and can send an operational Telegram
+alert; it never receives user portfolio data or browser traffic. There is no service worker or offline
+shell. Static application assets may be cached, but authentication responses and portfolio/analysis
+data use `no-store`.
 
 ## 6. Trust boundaries
 
@@ -202,10 +227,10 @@ The browser receives only:
 It never receives a service-role/secret key, Telegram bot token, gateway master secret, database
 password, provider API key, or another user's identifier as an authority claim.
 
-Read-only screens may query narrowly defined owner-scoped views directly through Supabase. Those
-views use invoker security or have browser grants revoked; a default security-definer view must not
-silently bypass RLS. User-specific base tables are not browser-writable. Every mutation uses an
-authenticated Edge Function and a purpose-specific RPC. There is no generic CRUD proxy.
+Read-only screens query narrowly defined `security_invoker` views in the exposed `api` schema.
+User-specific base tables live in the non-exposed `app` schema with forced RLS. Every browser mutation
+calls `app-api`, which uses the user's JWT and `SECURITY INVOKER` RPCs; `app-api` contains no service
+role or database password. There is no generic CRUD proxy.
 
 ### 6.2 Authenticated application functions
 
@@ -214,18 +239,27 @@ Each authenticated Edge Function must:
 1. validate method, content type, body size, schema, origin, and user JWT;
 2. derive the owner from the verified JWT, never from a request body;
 3. apply rate and replay limits;
-4. use a user-context client for ordinary RLS-protected operations;
-5. use privileged access only for a fixed RPC after authorization;
+4. use a user-context client for every owner operation;
+5. derive ownership from `auth.uid()` inside SQL, never from an owner argument;
 6. return `Cache-Control: no-store` and sanitized error codes; and
 7. avoid logging request bodies or financial values.
 
 ### 6.3 External model runtimes
 
-Each provider connection gets one high-entropy random, revocable credential in the form
-`connection_id.secret`. Store only the public lookup identifier and a keyed digest of the secret using
-a server-held pepper; compare digests in constant time and show the plaintext once during setup. Send
-it only in an authorization header, never a URL. The credential resolves to one owner and a capability
-list. A caller cannot choose an owner in its request.
+The Claude adapter has two separately scoped credentials:
+
+1. **Outbound Routine trigger:** the user pastes the per-Routine `/fire` URL and bearer token once.
+   Validate that the URL is an exact allowed Anthropic Routine endpoint, then store the token encrypted
+   in Supabase Vault. Only the scheduler function can read it, and it may use it only to trigger that
+   one Routine. The response session URL is recorded for run diagnostics.
+2. **Inbound gateway token:** generate `connection_id.secret` with a 256-bit random secret. Store the
+   public lookup identifier and `SHA-256(secret)`; high entropy makes an additional pepper unnecessary
+   and avoids a recovery-only secret dependency. Compare digests in constant time, show the plaintext
+   once, and bind it in Claude as an API credential for the exact Supabase Functions host. It is sent
+   only in an authorization header and resolves to one owner and capability set.
+
+The trigger token and gateway token cannot substitute for each other. Both are independently
+rotatable/revocable. A caller cannot choose an owner in its request.
 
 Allowed capabilities are versioned operations such as:
 
@@ -239,23 +273,36 @@ Allowed capabilities are versioned operations such as:
 The connection cannot query tables, mutate holdings, manage users, read another owner, obtain
 Telegram credentials, change policy, or invoke a broker.
 
+Per-connection limits are stored in Postgres: at most 12 gateway operations per run, 6 runs per owner
+per market day, and 1 user-initiated run per owner per hour. An internal monthly invocation budget
+counts this product's own calls and disables non-operator triggers before the configured free-tier
+budget is exhausted; it raises an operational alert and never relies on per-isolate memory.
+
 ### 6.4 Service-role use
 
-The service role remains server-only and is treated as a bypass of RLS, not as an authorization
-mechanism. Code using it must resolve owner identity first and call fixed, owner-aware RPCs. Every RPC
-uses a fixed `search_path`, validates ownership internally, and has execution revoked from `anon` and
-`authenticated` unless intentionally exposed through a wrapper.
+The runtime product does not use Supabase's service-role key. Machine Edge Functions connect through
+the session-mode pooler with separate least-privilege database logins whose only grants are `EXECUTE`
+on named root RPCs for their boundary (scheduler/gateway or Telegram). They have no direct table access
+and no generic PostgREST credential.
+
+Each root RPC receives the credential/update identity rather than `p_owner_id`, resolves exactly one
+owner internally, and performs the entire operation in one database transaction. The caller cannot
+set or override owner context. Functions use fixed `search_path`, explicit schema qualification,
+non-superuser owners, and minimum table grants. Static tests reject generic table queries or unexpected
+RPC names in machine functions. Supabase service-role access remains limited to offline operator
+administration/migration and is never an application authorization mechanism.
 
 ## 7. Identity and tenancy model
 
-Use one Supabase project and one shared schema. A separate database per friend is rejected because it
-multiplies deployments, credentials, backup processes, migrations, and free-tier projects.
+Use one Supabase project with a private `app` schema for base tables and an exposed `api` schema for
+owner-scoped views/wrappers. A separate database per friend is rejected because it multiplies
+deployments, credentials, backup processes, migrations, and free-tier projects.
 
 ### 7.1 Identity tables
 
 - `profiles`
   - `id UUID PRIMARY KEY REFERENCES auth.users(id)`
-  - display name, timezone, base currency, status, onboarding state, timestamps
+  - display name, timezone, status, onboarding/consent state, timestamps
 - `app_admins`
   - user ID and narrow administrative role
   - managed only through trusted SQL/admin tooling
@@ -266,10 +313,10 @@ multiplies deployments, credentials, backup processes, migrations, and free-tier
 - `notification_preferences`
   - `owner_id`, phase/channel settings, operational-alert settings
 - `analysis_schedules`
-  - `owner_id`, primary connection, timezone, enabled phases, expected run windows
+  - `owner_id`, primary connection, enabled phases, expected server-owned run windows
 - `agent_connections`
-  - `owner_id`, provider, connection mode, capability set, token digest or Vault reference,
-    lifecycle state, last-seen timestamp
+  - `owner_id`, provider, credential type, capability set, inbound token digest, outbound trigger Vault
+    reference, lifecycle state, last-seen timestamp
 
 Release one supports exactly one portfolio per user. Use `owner_id` directly rather than introducing
 organizations, teams, households, or shared portfolios before a real requirement exists.
@@ -281,9 +328,11 @@ Add immutable, non-null `owner_id` foreign keys to every user-specific table, in
 - holdings and transactions;
 - portfolio commands and investment plans;
 - analysis runs and gateway requests;
+- scheduled run slots, trigger attempts, and connection quotas;
 - decision evaluations, suggestions, publications, and grades;
 - observations, snapshots, radar, lessons, and paper watches;
-- notification and operational receipts.
+- notification receipts, auth/webhook events, deletion/reset receipts, and schema-only stricter policy
+  overrides.
 
 Convert single-owner uniqueness to composite uniqueness, for example:
 
@@ -292,6 +341,7 @@ Convert single-owner uniqueness to composite uniqueness, for example:
 - snapshots: `(owner_id, snap_date, ticker)`
 - active investment plans: `(owner_id, ticker)`
 - publication idempotency: includes `owner_id`, market date, phase, and kind
+- scheduled run claim: at most one active `(owner_id, market_date, phase)` lease
 
 Foreign keys must preserve ownership across relationships. Where Postgres cannot express the full
 invariant with one existing key, add composite unique constraints and composite foreign keys rather
@@ -308,16 +358,20 @@ context reveal portfolio information.
 
 ### 7.4 RLS policy shape
 
-For authenticated reads and any intentionally exposed owner-scoped operation:
+Every user-specific table is in `app`, has RLS enabled and forced, and uses explicit authenticated
+policies:
 
 ```sql
-owner_id = auth.uid()
+USING (auth.uid() IS NOT NULL AND owner_id = (SELECT auth.uid()))
+WITH CHECK (auth.uid() IS NOT NULL AND owner_id = (SELECT auth.uid()))
 ```
 
 `USING` and `WITH CHECK` policies are both required. Grants and RLS policies are tested together.
 There are no permissive catch-all policies, no owner ID sourced from mutable user metadata, and no
-browser-writable user data, admin, or provider-credential base tables. All exposed views use invoker
-security; otherwise their grants are revoked and access is wrapped in an owner-aware function.
+browser-writable base tables, admin tables, or provider credentials. PostgREST exposes `api`, not
+`app`; every exposed view uses invoker security. Machine root RPCs are not exposed through PostgREST.
+Tests run through PostgREST with real user JWTs, and staging must pass the Supabase security advisor
+without an unresolved security-category finding.
 
 ## 8. Existing-data migration and cutover
 
@@ -327,15 +381,21 @@ The production migration is additive and fail-closed:
 2. Pause all Claude Routines and Telegram mutation handling.
 3. Capture encrypted logical backup, table counts, relationship checks, and deterministic row
    digests. Verify that the backup can be decrypted before changing schema.
-4. Add nullable `owner_id` columns and new identity/connection tables.
+4. Create private `app` and exposed `api` schemas, then add nullable `owner_id` columns and new
+   identity/connection tables.
 5. Backfill every current user-specific row to the owner's UUID inside a transaction.
 6. Reject the migration if any current row remains unowned, any relationship crosses owners, or any
    canonical label/precondition is unknown.
-7. Add composite keys, foreign keys, indexes, and owner-aware RPC versions.
-8. Deploy tenant-aware gateway and Telegram functions while old entry points remain paused.
-9. Replace the owner's broad legacy routine secret with a connection-scoped token.
-10. Add and test RLS policies with two synthetic users and the anonymous role.
-11. Set owner columns `NOT NULL`, revoke obsolete RPCs, and remove single-owner environment variables.
+7. Add composite keys, foreign keys, indexes, forced RLS, API views, restricted machine roles, and
+   owner-resolving root RPC versions.
+8. Deploy tenant-aware scheduler, gateway, app API, and Telegram functions while old entry points
+   remain paused.
+9. Replace the owner's broad legacy routine secret with separate inbound gateway and outbound Routine
+   trigger credentials; revoke the legacy secret.
+10. Test every exposed view/RPC through PostgREST with two synthetic users, the anonymous role,
+    revoked sessions, and forged tokens; run the security advisor.
+11. Set owner columns `NOT NULL`, limit PostgREST to `api`, revoke obsolete RPCs, and remove
+    single-owner environment variables and runtime service-role keys.
 12. Run non-writing provider dry runs, web mutation previews, Telegram pairing, and before/after data
     parity checks.
 13. Resume one controlled pre-market-equivalent run, inspect receipts, and then resume the schedule.
@@ -348,49 +408,55 @@ destructive down-migration.
 
 ### 9.1 Connection modes
 
-The architecture supports three modes behind one contract:
+Two adapter shapes sit behind one analysis contract:
 
-1. **Subscription-hosted runtime:** the provider schedules and executes the task, then calls the stock
-   agent's scoped gateway. Claude Routines and eligible ChatGPT web scheduled tasks use this mode.
-2. **User-funded API runtime:** a future server scheduler calls a provider API using a user-owned key
-   stored in Supabase Vault. This mode is disabled in release one unless separately security-reviewed.
-3. **Local/self-hosted runtime:** a future connector can submit the same contract from a local model.
-   It requires the user's computer or server to be online and is not a release-one dependency.
+1. **Claude Routine adapter (release one):** the application invokes a user-owned Routine through its
+   documented `/fire` trigger, then the Routine calls the scoped gateway. This is not the paid Claude
+   inference API; runs consume the user's eligible Claude subscription usage and Routine allowance.
+2. **OAuth/MCP adapter (future):** a public streamable-HTTP MCP server authenticates users with OAuth
+   2.1. This is the appropriate shape for a future ChatGPT plugin and is a separately reviewed project.
+
+User-funded model APIs and local/self-hosted runtimes remain outside release one.
 
 ### 9.2 Launch provider support
 
-- **Claude:** supported through the existing Cloud Routine workflow after converting it to an
-  owner-scoped connection.
-- **ChatGPT:** targeted through a stock-agent plugin plus a ChatGPT web scheduled task. This is marked
-  `experimental` until an end-to-end task proves that the user's eligible plan can run the plugin on
-  schedule and return the full receipt without a local machine.
-- **Grok/xAI:** the schema and contract are adapter-ready, but release-one production support is not
-  promised. The documented xAI inference route requires an API key and paid credits; any
-  subscription-backed Grok cloud-agent route requires its own capability, security, and reliability
-  spike.
+- **Claude:** the only release-one allow-listed provider. One API-triggered Routine per user replaces
+  three user-managed schedules. The connection kit configures Custom network access, a host-bound
+  inbound API credential, the reviewed prompt, and the outbound `/fire` trigger.
+- **ChatGPT:** not available in release one. Current OpenAI documentation allows web scheduled tasks to
+  use plugins available to the chat, but authenticated plugins require a public MCP server and OAuth
+  2.1. A post-launch spike must prove an unattended scheduled plugin run on the user's actual eligible
+  plan before this adapter can be promised.
+- **Grok/xAI:** not available. No verified subscription-backed scheduled route exists; the documented
+  inference route uses separately billed API credits.
 - **Other providers:** unsupported providers cannot be selected merely by typing a model name. Each
   adapter needs contract tests, current official documentation review, and an explicit allow-list.
 
 ### 9.3 Per-user connection lifecycle
 
 Each user connects their own eligible provider account; the application does not lend or pool the
-owner's Claude/ChatGPT subscription. Setup follows one provider-neutral state machine:
+owner's Claude subscription. Setup follows one provider-neutral state machine:
 
 1. The signed-in user chooses an allow-listed provider and acknowledges exactly which bounded
    portfolio/research fields will leave Supabase for that provider.
-2. The server creates a disabled connection and shows its endpoint, provider-specific task template,
-   and one-time scoped credential. It never shows a database, service-role, or Telegram secret.
-3. The user installs/configures the task in the provider's supported interface.
+2. The server creates a disabled connection and shows a versioned, screenshot-level setup kit. It
+   includes the exact Routine prompt, Custom-network domain list, one-time inbound gateway credential,
+   and instructions for adding an API trigger. It never shows a database or Telegram secret.
+3. The user creates one unscheduled Claude Routine, binds the gateway token as an API credential to the
+   Functions host only, enables the API trigger, and pastes the trigger URL/token into the app once.
 4. The provider performs a version/capability handshake. The server records capability claims but
    trusts only operations that pass the allow-list and conformance test.
-5. A no-write test run proves authentication, owner isolation, current contract version, receipt
-   handling, and provider scheduling behavior.
-6. The user explicitly activates the connection as primary or second-opinion-only.
+5. A no-write handshake fired by the application—not curl—proves outbound triggering, the returned
+   provider session URL, network access to allowed research/market hosts, inbound authentication,
+   owner isolation, contract version, and receipt handling. Green provider status alone is not success.
+6. The user explicitly activates the connection as primary.
 7. Disconnect/revoke invalidates the credential immediately and suppresses future expected-run alerts
    for that connection. Reconnection always creates a new secret.
 
-No shared master provider credential is copied to friends. A provider that cannot safely store/use the
-scoped credential or cannot complete the test remains unavailable while the rest of the product works.
+No shared master provider credential is copied to friends. A provider that cannot safely complete the
+full handshake remains unavailable while recordkeeping and Telegram continue to work. The Connections
+screen states that Routines are research preview, use the user's subscription allowance, have a daily
+run cap, and can fail even when the provider run appears green.
 
 ### 9.4 Standard analysis submission
 
@@ -405,7 +471,15 @@ Every provider submits the same versioned envelope:
 - a declaration that the output is suggestion-only.
 
 The gateway rejects extra fields, unknown enum values, oversized inputs, stale timestamps,
-duplicate/replayed identities with different payloads, and cross-run references.
+duplicate/replayed identities with different payloads, and undeclared cross-run references.
+
+Freshness is enforced through verification events, not by forcing stable facts to acquire fake-new
+identifiers. Every actionable run requires a server market snapshot retrieved after `run.started_at`
+and a current-run source-search receipt recording which news/filing sources were checked, including an
+explicit no-new-material-evidence result. Older filings/fundamentals may be cited only with a
+current-run revalidation event and a category-specific freshness window. Previous recommendations are
+referenced only through `prior_suggestion_ids`. Reusing an old market snapshot or merely copying the
+morning evidence packet into an intraday run is rejected as `evidence_stale`.
 
 ### 9.5 Analytical-quality contract
 
@@ -436,6 +510,13 @@ events must be normalized before stop/target comparisons so an unadjusted series
 false alert. Primary filings and issuer/exchange notices take precedence for company facts; secondary
 news and social posts can supply leads but not establish a decisive fact alone.
 
+Until an allowed corporate-action source is verified in a release gate, a held ticker with a detected
+or suspected corporate action enters `needs_review`. New stop/target alerts for it are suppressed with
+`corporate_action_pending`; the user confirms adjusted quantity and levels through the normal command
+workflow. Gate 0 first tests Finnhub's split endpoint under the actual account entitlement. If it is
+unavailable, a large discontinuity/adjustment mismatch plus a current issuer/exchange-news check can
+only mark `suspected`; it cannot clear the state or adjust the ledger automatically.
+
 Free data sources provide no reliability guarantee. The app displays source and `as_of`, tracks source
 health, and distinguishes `fresh`, `delayed`, `stale`, `conflicting`, and `unavailable`. A provider run
 cannot convert an unavailable server quote into a fresh one by citing its own browsing result.
@@ -455,11 +536,10 @@ The provider proposes; the server decides what is eligible to persist or publish
 
 Changing provider cannot change these rules.
 
-### 9.8 Primary provider and second opinion
+### 9.8 Primary provider and deferred second opinions
 
-Each user chooses one primary scheduled provider. A second provider may be invoked explicitly for a
-second opinion, stored separately, and compared in the UI. The system does not average, vote, or
-automatically choose between model recommendations.
+Each user has one primary Claude connection in release one. Second-opinion runs are deferred until the
+first month of production outcomes and provider-contract evidence has been reviewed.
 
 There is no silent provider failover. A missed or failed run is shown as failed and may generate an
 operational alert. Automatic failover could change cost, privacy terms, model behavior, and advice
@@ -467,8 +547,11 @@ without informed consent.
 
 ## 10. Scheduling and run lifecycle
 
-Subscription-hosted providers own their model schedule. The application stores expected schedules
-and observes receipts; it does not pretend it can trigger a consumer subscription through an API.
+The application owns market timing but not model inference. A Supabase Cron scheduler checks due
+market-session slots every five minutes and invokes each active user's documented Claude Routine
+`/fire` endpoint. It sends only an opaque run-request identifier in the untrusted fire payload; phase,
+owner, and market date are derived by the server when the Routine calls `start_run`. This trigger is a
+Claude Routine subscription feature, not the separately billed Claude inference API.
 
 The canonical exchange calendar and session calculations use `America/New_York`; the user's IANA
 timezone is for display and scheduler setup. Default anchors match the current cadence:
@@ -478,17 +561,16 @@ timezone is for display and scheduler setup. Default anchors match the current c
 - post-market: 10 minutes after the regular close (normally 16:10 Eastern / 15:10 Central).
 
 Anchors are resolved against the actual market session so holidays, early closes, and daylight-saving
-changes do not rely on provider prose or a fixed UTC offset. A subscription provider's schedule is
-configured in its supported timezone and verified against expected receipt windows. A fresh intraday
-run gathers and evaluates current evidence; it never republishes the morning recommendation as the
-midday decision.
+changes do not rely on provider prose or fixed provider schedules. On an early-close day, intraday runs
+at open + 120 minutes and post-market at close + 10 minutes. A fresh intraday run gathers and verifies
+current evidence; it never republishes the morning recommendation as the midday decision.
 
 Each run follows:
 
 ```text
 provider wakes
   -> start_run
-  -> server resolves owner, phase, market calendar, and idempotency
+  -> server resolves connection, run slot, owner, phase, market calendar, and idempotency
   -> read_bounded_context
   -> provider gathers fresh evidence and creates Analyst + Checker output
   -> submit_analysis
@@ -499,19 +581,28 @@ provider wakes
   -> finish_run
 ```
 
+`scheduled_run_slots` has a unique `(owner_id, market_date, phase)` key. The scheduler first claims the
+slot and a trigger-attempt idempotency key, then calls Claude. An uncertain `/fire` response is recorded
+as `trigger_unknown` and is not blindly retried. `start_run` leases the matching slot; a concurrent or
+duplicate start receives the canonical run ID and cannot create another analysis or alert-state
+transition. A lease expires at the phase window end so a crashed run can be retried explicitly. Runs
+outside a scheduled window are `on-demand`, limited to one per owner per hour.
+
 Supabase Cron performs deterministic, model-free maintenance:
 
 - expire pending commands and pairing codes;
 - detect missed expected run windows;
 - clean old operational rows under the retention policy;
-- issue due recurring-plan reminders without assuming a purchase;
+- invoke due Routine trigger slots and record trigger receipts;
+- verify nightly holding projections; and
 - trigger bounded backup/health metadata jobs where appropriate.
 
 Cron never generates investment advice.
 
-Market holidays are checked before external research. Duplicate schedules, delayed provider starts,
-and daylight-saving transitions must not produce duplicate publications. The market date and session
-come from the server's configured timezone/calendar, not provider prose.
+Market holidays are checked before any Routine trigger. The scheduler emits the one deterministic
+holiday publication itself and performs no model research. Duplicate scheduler ticks, delayed provider
+starts, manual runs, and daylight-saving transitions cannot produce duplicate analysis or publications.
+The market date and phase come from the server's exchange calendar, not provider prose.
 
 ## 11. Portfolio mutation model
 
@@ -525,18 +616,21 @@ submitted -> previewed -> confirmed -> applied
                     +-- cancelled/expired
 ```
 
-Each command stores owner, operation, normalized input, expected holding version, preview digest,
+Each command stores owner, operation, normalized input, expected ledger sequence, preview digest,
 expiry, idempotency key, status, and result. Confirmation must match the owner, channel identity,
 command ID, and preview digest.
 
-The atomic RPC locks the owner/ticker pair, rechecks the expected version, updates the holding,
-appends the transaction, advances a matching recurring plan at most once, and records the command
-receipt in one transaction. A retry with the same idempotency key returns the original receipt.
+The atomic RPC takes a transaction-scoped advisory lock derived from `(owner_id, ticker)` before
+checking for a holding, so concurrent first buys are serialized. It rechecks the owner's ledger
+sequence, appends the transaction, rebuilds the owner/ticker average-cost projection from the full
+ordered ledger, advances a matching recurring plan at most once, and records the receipt in one
+transaction. A retry with the same idempotency key returns the original receipt.
 
 Corrections do not rewrite history. The correction RPC previews and then records a compensating void
 event linked to the original transaction plus a replacement transaction. It recomputes the affected
-holding lifecycle deterministically and refuses corrections that would create a negative historical
-balance or ambiguous ledger.
+projection deterministically and refuses corrections or back-dated ordinary commands that create a
+negative historical balance or ambiguous ledger. Realized P&L is derived by the projection, not copied
+from command prose.
 
 ## 12. Telegram multi-user design
 
@@ -552,7 +646,9 @@ Use one bot for the invite-only product.
 5. The code is consumed once. Existing conflicting links require explicit unlink/relink confirmation.
 
 The code is 10 random base32 characters, expires after 10 minutes, and permits at most five failed
-attempts before invalidation. Store a keyed digest rather than a plain hash. Rate limits apply per
+attempts before invalidation. Store an HMAC digest under a rotation-capable pairing secret; this
+short-lived secret is not part of disaster recovery because all pending codes are invalidated after a
+restore. Pairing is accepted only in a private chat where `chat.id = from.id`. Rate limits apply per
 source and globally; error messages never reveal whether a code or account exists.
 
 ### Commands
@@ -561,9 +657,13 @@ The existing Buy, Sell, Stop, Portfolio, Plan, Plans, and Cancel Plan commands r
 Status, and Unlink. Every mutation previews first and requires an inline Confirm button. Callback
 confirmation must come from the same paired Telegram user and chat before expiry.
 
-`telegram_update_id` remains an idempotency boundary. Commands and messages carry `owner_id`; all
-holding and plan reads filter by that resolved owner. The old static owner-ID environment variables
-are removed after migration.
+`telegram_updates(update_id PRIMARY KEY, received_at)` is a 30-day set-based idempotency boundary;
+ordering is never assumed because Telegram may choose a random next ID after a quiet week. Group and
+channel messages receive a fixed private-chat-only refusal and never create commands. Callback data is
+an opaque token no longer than 64 bytes. The handler answers the callback promptly, then idempotently
+applies `(command_id, action)` only if the link is still active at callback time. `/unlink` cancels all
+pending commands. Commands and messages carry the internally resolved owner; the old static owner-ID
+environment variables are removed after migration.
 
 ### Notifications
 
@@ -583,11 +683,13 @@ operational logs or admin alerts.
 4. **Research:** recommendation history, evidence time, Analyst/Checker views, server policy result,
    notification receipt, and deterministic outcomes.
 5. **Runs:** phase timeline, provider/model, source health, vetoes, failures, and receipt counts.
-6. **Connections:** provider status, setup instructions, token rotation/revocation, Telegram pairing,
-   and last successful handshake.
-7. **Settings:** timezone, base currency display, stricter personal risk preferences, schedules, and
-   notifications.
-8. **Admin:** invitations and service health only; no cross-user portfolio browser.
+6. **Connections:** Claude setup kit, Routine/session status, token rotation/revocation, Telegram
+   pairing, and last successful handshake.
+7. **Settings:** timezone, notification preferences, and expected phases. Provider timing is
+   server-owned and is not presented as a user-editable cron schedule.
+
+Operator invitations use a trusted CLI. A separate aggregate health view contains no per-user ticker,
+position, recommendation, or identifiable missed-run table; there is no admin mutation UI.
 
 ### 13.2 UX safeguards
 
@@ -603,8 +705,7 @@ operational logs or admin alerts.
 - No green/red color is the only status signal; all statuses have text and icons.
 - The application remains useful when no model provider is connected: portfolio recordkeeping,
   plans, history, export, and Telegram continue to work.
-- The app shell may work offline, but private data and mutations do not. Offline submissions are not
-  queued for later automatic execution.
+- The app deliberately has no offline shell or queued mutation behavior.
 
 ### 13.3 Browser security
 
@@ -612,26 +713,21 @@ operational logs or admin alerts.
 - HSTS, `frame-ancestors 'none'`, no MIME sniffing, strict referrer policy, and restrictive browser
   permissions.
 - Exact production CORS allow-list on Edge Functions.
-- Supabase PKCE sign-in with callback URLs allow-listed, auth parameters removed from the visible URL
-  after exchange, and no session token in logs. Browser mutations attach a bearer JWT explicitly;
-  cookie-authenticated mutation endpoints are not introduced.
+- Email OTP is primary. Desktop magic-link fallback uses PKCE and allow-listed callbacks. Access-token
+  lifetime is 15 minutes with refresh-token rotation; browser mutations attach the bearer JWT
+  explicitly, and no token is written to URLs or logs.
 - Dependency lockfile, automated dependency audit, and no unreviewed remote scripts.
 - Sanitize all model and database prose before rendering; render as text by default, never raw HTML.
-- Do not put portfolio data in URLs, local analytics, error trackers, or service-worker caches.
-- Reauthentication is required for account deletion, provider-token rotation, and Telegram relinking.
+- Do not put portfolio data in URLs, local analytics, error trackers, or browser caches.
+- Account deletion, Routine-token rotation, and Telegram relinking require a fresh email OTP. The
+  server records a session-bound step-up receipt with a five-minute expiry; destructive RPCs check it.
+  Account deletion revokes every active session.
 
 ## 14. Personal policy and platform safety
 
-Split policy into two layers:
-
-1. **Platform hard limits:** immutable/versioned ceilings controlled by reviewed deployment. Users and
-   models cannot weaken them.
-2. **Personal preferences:** owner-scoped allocations and limits that may be stricter than the
-   platform ceiling.
-
-The effective rule is always the safer value. Personal changes use preview/confirm, create an audit
-record, and apply only to future evaluations. Historical decisions retain the policy version used at
-the time.
+Release one applies immutable, versioned platform hard limits. Users and models cannot weaken them.
+The schema reserves owner-scoped overrides that may only be stricter, but release one exposes no UI or
+command that writes them. Historical decisions retain the policy version used at the time.
 
 Self-tuning remains disabled. Outcome grades and model commentary may suggest a policy review, but no
 automated process activates a new policy.
@@ -646,6 +742,11 @@ without payloads.
 - Stale command: reject and require a new preview.
 - Duplicate request: return the original receipt when payload identity matches; reject mismatches.
 - Provider timeout/missed run: mark failed or missed; never reuse the previous run as current.
+- Claude `/fire` definite rejection: mark `trigger_failed`; timeout/ambiguous acceptance:
+  `trigger_unknown`, do not automatically retry, and wait for an inbound `start_run` before offering a
+  manual retry.
+- Claude run that never completes the inbound handshake: mark `provider_incomplete` and link its
+  provider session when available; provider green status is not treated as application success.
 - Market-data failure: fail closed for new actionable advice.
 - Telegram definite failure: mark `delivery_failed`; do not claim delivery.
 - Telegram uncertain acceptance: mark `delivery_unknown`; do not automatically retry.
@@ -661,48 +762,69 @@ without payloads.
 - Holdings, transactions, policy decisions, evaluations, suggestions, and outcome grades: retained
   while the account is active.
 - Analysis-run summaries and publication receipts: retained for auditability.
-- Full bounded model evidence: retain 12 months, then compact to citations, hashes, and decision
-  records unless a legal/product requirement changes this.
+- Full bounded model evidence: retain 12 months. The compaction job may ship later but must exist before
+  the first record reaches 12 months; it preserves citations, hashes, and decision records.
 - Expired pairing codes: delete after 24 hours.
 - Expired/cancelled portfolio commands: retain 90 days, then preserve only non-sensitive audit facts.
 - Telegram update deduplication records: retain enough IDs/timestamps for reliable replay protection,
   without storing unnecessary message text.
-- Account deletion removes active data under the deletion runbook. Existing encrypted backups expire
-  under the 14-day rotation; a minimal non-financial deletion tombstone ensures an emergency restore
+- Account deletion removes active data under the deletion runbook. Daily/weekly encrypted backups may
+  retain deleted data for at most 35 days; a minimal non-financial deletion tombstone ensures a restore
   does not resurrect a deleted account before those archives age out.
+
+Deletion first disables sign-in and trigger claims, revokes both Claude credentials, unlinks Telegram,
+cancels pending commands, and offers an export. After the 72-hour cancellation window it removes
+owner-scoped rows—including rendered publication bodies—in a documented dependency order, deletes the
+Auth identity last, records only the non-financial tombstone, and confirms completion. The bot attempts
+to delete recent messages where Telegram permits it and instructs the user to clear older chat history.
+
+A full-ledger reset is an operator runbook, not an ordinary UI button: fresh OTP, mandatory export,
+previewed row counts, explicit owner confirmation, owner-only purge, projection verification, and an
+immutable non-financial reset receipt.
 
 ### Free-tier backup plan
 
 Supabase Free does not include downloadable automatic backups. Release one therefore requires an
 encrypted logical backup outside Supabase before friend onboarding.
 
-Proposed no-model workflow:
+The backup controller is a scheduled workflow in a separate private GitHub repository, not this public
+source repository. Private-repository schedules avoid the public-repository 60-day inactivity disable,
+and no backup is stored as a GitHub artifact.
 
-1. Versioned migrations reconstruct the schema. A scheduled GitHub Action exports application data
-   with a least-privilege backup credential that can read only the schemas/tables being backed up and
-   cannot mutate production or read Vault plaintext.
-2. The runner encrypts the archive to an offline-held public key before upload.
-3. Only ciphertext is retained as a private GitHub Actions artifact. Run daily and retain the latest
-   14 daily archives for 14 days; fail the launch gate if current account limits cannot support this
-   at zero additional cost.
-4. Provider secrets and Vault plaintext are excluded; their rotation/recreation is documented.
-5. Backup success metadata, not data, is reported to the admin health view.
-6. The encrypted backup includes a minimal identity-recovery map needed to rebind old owner UUIDs to
-   newly invited Auth users without exporting passwords or provider secrets.
-7. A restore into the second Supabase project applies migrations, recreates invited identities,
-   explicitly remaps old-to-new owner UUIDs, restores data, and verifies relationship/row digests.
-   It is exercised before launch and quarterly thereafter; staging returns to synthetic data after
-   the drill.
+1. Versioned migrations reconstruct the schema. The workflow connects through the Supavisor
+   session-mode pooler over IPv4 with a dedicated `backup_reader` database login.
+2. `backup_reader` has no direct table grants and no `BYPASSRLS`. It may execute only purpose-built,
+   fixed-`search_path` backup export RPCs owned by a non-superuser role. Those RPCs expose an
+   enumerated set of `app` data plus an encrypted identity-recovery map and cannot mutate data or read
+   Auth secrets, Vault, or unrelated schemas.
+3. The runner exports schema-version metadata and application data, computes row/relationship digests,
+   and encrypts the archive with `age` to an offline-held public key before any upload.
+4. Ciphertext is uploaded to a private Cloudflare R2 bucket. Retain 14 daily and 4 weekly archives;
+   enforce lifecycle cleanup and alert before stored bytes approach the free allowance.
+5. The workflow records success metadata in the application and reports failures through the
+   operational channel. A small independent Cloudflare scheduled monitor checks the newest R2 object
+   and alerts if backup age exceeds 36 hours, so a Supabase outage cannot hide backup failure.
+6. Vault plaintext, Telegram/SMTP/R2 tokens, database passwords, and other reusable secrets are never
+   placed in the data backup. Their inventory and rotation/reconnection procedure is versioned without
+   values; recoverable values are held in the operator's offline password manager.
+7. The restored high-entropy inbound gateway-token digests remain valid without a pepper. Claude
+   outbound Routine trigger tokens stored in Vault are deliberately reconnected after a full disaster.
+   Pending Telegram pairing codes are invalidated; existing Telegram links restore, and the webhook is
+   re-registered with rotated server secrets.
+8. Restore into staging applies migrations, recreates invited identities, explicitly remaps old-to-new
+   owner UUIDs, applies deletion tombstones, restores data, and verifies digests and ledger projections.
+   It is exercised before launch and quarterly; staging returns to synthetic data afterward.
 
-Friend onboarding remains disabled until a restore has succeeded. If current quotas cannot retain 14
-encrypted daily backups at zero additional cost, this specification must be amended and re-approved
-with a different explicit retention target or disclosed paid storage; implementation must not silently
-omit backups.
+Friend onboarding remains disabled until a restore has succeeded from only the R2 archive, offline
+`age` private key, and documented operator secret store. If current GitHub/R2 limits cannot support the
+workflow at zero additional usage cost, this specification must be amended and re-approved; backups
+must not silently move to the public repository or disappear.
 
 Target launch objectives:
 
 - Recovery point objective: 24 hours.
-- Recovery time objective: one business day for an invite-only pilot.
+- Recovery time objective: three business days for a complete project loss, including identity remap,
+  provider reconnection, Telegram webhook registration, and user verification.
 
 ## 17. Deployment and environments
 
@@ -710,11 +832,23 @@ Use the two Supabase Free projects deliberately:
 
 - **Production:** real owner and invited-user data.
 - **Test/staging:** synthetic users and data only; used for migrations, RLS attacks, Edge Function
-  integration tests, provider contract tests, and restore drills.
+  integration tests, provider contract tests, and restore drills. A disaster restore may temporarily
+  sacrifice staging because the free plan provides no third project.
+
+Before the web gate closes, both projects expose only the `api` schema through PostgREST, use current
+asymmetric JWT signing keys, and deliver OTP through custom SMTP. Authenticated Edge Functions deploy
+without legacy platform JWT verification and validate access tokens in code against the project JWKS;
+forged or wrong-project tokens are rejected. Availability of Cron/`pg_net` on the actual free projects
+is proven rather than assumed.
 
 Cloudflare deploys the static frontend from Git after tests pass. Preview deployments use staging or
 mock data and never receive production secrets. The frontend build contains only public Supabase
 configuration.
+
+Supabase Free may pause an insufficiently active project. The external Cloudflare health/backup-age
+monitor reports unavailability but does not generate fake traffic merely to defeat plan limits. One
+observed production pause or sustained quota pressure triggers an explicit Supabase Pro decision before
+additional friends are invited.
 
 GitHub Actions performs deterministic CI and deployment only; no model API is used in CI. Production
 database migrations and Edge Function deployments require a protected manual gate until the process
@@ -723,29 +857,44 @@ has enough evidence to automate safely.
 Suggested repository additions after design approval:
 
 ```text
-apps/web/                         React/TypeScript/Vite PWA
+apps/web/                         React/TypeScript/Vite SPA + web manifest
 supabase/functions/app-api/      authenticated product mutations and export
-supabase/functions/agent-gateway/provider-neutral model protocol
+supabase/functions/run-scheduler/market-aware Claude Routine triggers
+supabase/functions/agent-gateway/owner-scoped analysis protocol
 supabase/functions/telegram-portfolio/
 sql/migrations/                  additive tenancy and product migrations
 packages/contracts/              shared schemas and generated types
 tests/security/                  RLS and cross-tenant attack tests
 tests/contracts/                 provider conformance fixtures
 docs/runbooks/                   onboarding, incident, backup, restore, rollback
+docs/connection-kits/             versioned Claude setup instructions and screenshots
 ```
 
 Exact file boundaries may be refined in the implementation plan, but security domains must not be
 collapsed into one large Edge Function.
 
+Runbooks cover rotation of each separate credential (Claude trigger, inbound connection, Telegram bot,
+SMTP, R2, database roles), provider-account loss, wrong-tenant disclosure, trigger pause, ledger reset,
+backup/restore, and rollback. This is a single-operator pilot: if Rajrupesh is unavailable, no hidden
+administrator can pause providers or restore service. That limitation is disclosed before friend
+onboarding.
+
 ## 18. Testing strategy
 
 ### Database and RLS
 
-- Anonymous, authenticated owner A, authenticated owner B, revoked user, and service-role cases.
+- Anonymous, authenticated owner A, authenticated owner B, revoked user, restricted machine-role,
+  and offline-operator misuse cases.
 - Cross-user reads, inserts, updates, deletes, RPC calls, foreign-key substitutions, and guessed IDs.
 - Composite ownership constraints and attempts to create cross-owner relationships.
 - Security-definer search paths, grants, function ownership, and RLS on every exposed table/view.
 - Security-definer-view bypass attempts; every browser-readable view must prove invoker-context RLS.
+- PostgREST tests with real owner A/B JWTs, revoked sessions, and forged/wrong-project JWTs for every
+  exposed view/RPC. Staging's security advisor must be clean.
+- Machine database roles can execute only their named root RPCs, cannot select base tables, and have
+  no service-role/PostgREST credential.
+- The backup role has no direct table or `BYPASSRLS` grant; its export RPC allow-list cannot reach
+  Vault, Auth secrets, or a non-enumerated schema/table.
 - Migration tests from a realistic copy of the current single-owner schema.
 
 ### Portfolio invariants
@@ -755,36 +904,51 @@ collapsed into one large Edge Function.
   historical dates, correction chains, negative-balance attempts, and exact decimal behavior.
 - Amount/quantity/price mismatch, implausible share count, unsupported precision, symbol ambiguity,
   and explicit unclassified-bucket cases.
+- Two simultaneous first buys yield one applied idempotency receipt per distinct command without lost
+  ledger entries. Property tests compare every admitted buy/sell/correction interleaving with a pure
+  average-cost fold over the final ledger.
+- Buy/sell fee reconciliation, separate recurring deposits, eight-decimal fractional shares, and
+  back-dated negative historical balance rejection.
 - Web and Telegram produce equivalent previews and receipts.
 
 ### Provider contracts
 
-- One conformance suite runs against Claude, ChatGPT, and future adapters.
+- The conformance suite runs against Claude at launch and is mandatory for every future adapter.
 - Unknown fields, bad enum values, oversized payloads, stale evidence, replayed request IDs, switched
   owners, missing Analyst/Checker records, and fabricated receipts are rejected.
 - Provider outputs cannot affect deterministic quote, policy, persistence, or delivery fields.
 - Prompt-injection strings in news, database prose, and user notes remain inert data.
 - Each provider receives only one owner's bounded packet after consent; cross-owner batch prompts and
   undeclared context fields fail contract tests.
+- A morning packet copied into an intraday run fails; a stable filing with a new current-run
+  revalidation receipt passes; a fresh search reporting no material news passes without invented news.
+- Edge CPU/wall-time budgets are tested with 40 holdings and 20 submitted candidates.
 
 ### Publication and scheduling
 
 - Holiday gate, daylight-saving boundaries, delayed runs, duplicate schedules, missed windows,
   silent intraday behavior, Telegram failure/unknown states, and exactly-once claims.
+- Concurrent scheduler ticks, concurrent `start_run`, uncertain Routine-fire acceptance, lease expiry,
+  early-close windows, and a manual run overlapping a scheduled slot.
 - No prior recommendation is shown as current after a failed fresh run.
+- Split-day fixtures suppress stop/target alerts and create `corporate_action_pending`.
 
 ### Frontend
 
-- Authentication lifecycle, invite acceptance, route protection, session expiry, reauthentication,
+- OTP authentication on iOS/Android phone mail clients, desktop magic-link fallback, route protection,
+  session expiry, step-up expiry,
   loading/error/empty states, mobile layout, keyboard use, screen readers, and no private-data caching.
 - Model prose XSS payloads and content-security-policy regression tests.
 - Two-browser end-to-end cross-tenant tests using synthetic users.
+- No service worker is registered and static security headers match the reviewed policy.
 
 ### Recovery and operations
 
-- Backup encryption/decryption, staged restore, row-count/digest parity, user-identity rebinding,
-  credential rotation, provider revocation, Telegram relinking, and rollback while routines are
-  paused.
+- Backup encryption/decryption, R2 lifecycle, disabled-job backup-age alert, staged restore from R2 and
+  the offline key, row/digest/projection parity, user-identity rebinding, Routine reconnection,
+  credential rotation, Telegram webhook restoration, and rollback while triggers are paused.
+- Telegram tests cover random lower `update_id` after inactivity, group chats, callback after unlink,
+  callback replay, and the 64-byte callback-data limit.
 
 ## 19. Threat model summary
 
@@ -795,8 +959,9 @@ collapsed into one large Edge Function.
 | View bypasses RLS despite safe-looking SQL | Invoker-security views, revoked grants, owner A/B attack tests |
 | External model asks for another owner | Owner resolved from token; no owner selector; bounded context operation |
 | Model provider receives excess or mixed-user context | Explicit connection consent, minimum packet, one owner per run, field allow-list |
-| Provider token leaks | Digest-only storage, least capability, rate limits, rotation/revocation, no DB access |
-| Service role bypass causes IDOR | Resolve owner before privileged call; fixed owner-aware RPCs; code/tests prohibit generic queries |
+| Inbound provider token leaks | High-entropy digest, one-owner capability, quotas, rotation/revocation, no DB access |
+| Claude trigger token leaks | Vault encryption, one-Routine scope, no portfolio access, trigger quotas, provider-side revocation |
+| Machine function chooses wrong owner | Separate execute-only DB roles; root RPC resolves owner from credential/link; no owner parameter |
 | Telegram account hijack or guessed code | Webhook secret, short single-use digest, attempt limit, same-user callback checks, relink reauth |
 | Duplicate webhook/request | Update ID and idempotency claims; atomic original-receipt return |
 | Model prompt injection | Treat all external/stored prose as data; fixed contract; no direct tools for side effects |
@@ -805,6 +970,10 @@ collapsed into one large Edge Function.
 | Free provider misses a run | Expected-run monitor, explicit missed state, no stale-plan reuse |
 | Backup exposes portfolios or API keys | Encrypt before upload, offline private key, exclude Vault plaintext, restore test |
 | Admin UI becomes surveillance surface | Invitations and health only; no impersonation/cross-user portfolio browser |
+| Friend's Claude account is compromised | Blast radius limited to one owner; bounded context; revoke connection and Routine tokens |
+| Telegram bot token leaks | Rotate webhook/bot token, cancel pending commands, audit sends, notify affected users |
+| Operator laptop/account is compromised | No live backup key in repo; scoped credentials; rotation runbook; audit and incident notification |
+| Wrong-tenant disclosure occurs | Contain/rotate, preserve audit facts, identify affected users, notify within 72 hours |
 | Product drifts toward execution | No broker dependency or endpoint; security tests and copy invariants enforce record-only language |
 
 ## 20. Observability without leaking financial data
@@ -812,9 +981,10 @@ collapsed into one large Edge Function.
 Operational records include request ID, owner pseudonymous ID/hash where needed, component, operation,
 status code, duration, provider/model identifier, contract version, and bounded error code.
 
-Logs exclude holdings, quantities, cost basis, recommendations, chat text, tokens, full URLs containing
-codes, and request/response bodies. User-facing run receipts in Postgres retain the necessary private
-details under RLS.
+Platform logs are a one-day debugging convenience on the free tier. Incident-relevant bounded facts
+live under retention in owner-scoped Postgres records such as gateway requests, auth events, webhook
+events, trigger attempts, and backup status. They exclude holdings, quantities, cost basis,
+recommendations, chat text, tokens, full URLs containing codes, and request/response bodies.
 
 The admin health view shows aggregate component health, missed-run counts, backup age, deployed
 versions, and provider adapter status without exposing which ticker or position belongs to a user.
@@ -826,17 +996,23 @@ Expected pilot infrastructure:
 - Cloudflare Workers Static Assets: free static delivery within current platform terms.
 - Supabase Free: database, Auth, Edge Functions, and Cron within current quotas.
 - Telegram Bot API: no separate application hosting cost.
-- Claude/ChatGPT subscription-hosted runs: charged against each participating user's eligible plan
-  allowance, subject to provider availability and limits.
+- Claude Routine runs: charged against each participating user's eligible Claude plan allowance and
+  daily Routine cap, subject to research-preview availability and limits.
 - No model API charge in the default launch path.
 
-Potential future costs must be visible before activation:
+Known launch cost and free-tier conditions:
+
+- An operator-controlled domain for authenticated email is the likely unavoidable non-zero launch
+  cost. Custom SMTP may use a transactional provider's free allowance.
+- R2 requires enabling its usage-based subscription. The pilot must remain below its included storage
+  and operation allowances, with lifecycle enforcement and usage alerts; “free” is not a hard cap.
+
+Pre-agreed future escalations must be visible before activation:
 
 - Supabase Pro for guaranteed non-pausing behavior, downloadable automatic backups, greater limits,
   logs, and support.
-- Custom domain registration.
-- Custom SMTP for reliable invitation delivery at wider scale.
-- OpenAI, Anthropic, xAI, or another API when a user explicitly enables a BYOK connector.
+- A paid transactional-email tier if invitations exceed the free allowance.
+- A separately approved OpenAI, Anthropic, xAI, or other model API; none exists in release one.
 - Object storage if encrypted backup retention exceeds included quotas.
 
 The product must show provider connection health and last-run time; it must not promise unlimited or
@@ -846,38 +1022,56 @@ guaranteed analysis based on a consumer subscription.
 
 The release is built incrementally but launched only after all gates pass.
 
+### Gate 0: external capability proofs
+
+- Staging sends an OTP through custom SMTP to a non-team phone email client.
+- A second Claude account completes the setup kit, accepts an application-fired `/fire` trigger, and
+  calls the staging gateway without a model API key or running computer.
+- The actual free Supabase projects prove Cron/`pg_net`, asymmetric JWT validation, session-pooler
+  access for custom database roles, and documented pause behavior.
+- A private backup workflow writes and reads an `age`-encrypted R2 test object; the independent age
+  monitor alerts when it becomes stale.
+- At least one allowed corporate-action source is tested. Until it passes, suspected events always
+  enter `needs_review` and cannot produce price-level alerts.
+
 ### Gate A: tenancy foundation
 
-- New identity tables, owner columns, composite constraints, RLS, and migration verifier.
+- Private `app`/exposed `api` schemas, identity tables, owner columns, composite constraints, forced
+  RLS, restricted machine roles, and migration verifier.
 - Existing owner data backfills with exact parity.
-- Two-user cross-tenant attack suite passes.
+- PostgREST two-user, forged-token, RPC-grant, and security-advisor suites pass.
 
 ### Gate B: owner-aware control plane
 
-- Portfolio RPCs, gateway, grading, publications, policy, and Telegram are owner-aware.
+- Ledger-projection RPCs, advisory locking, fees, back-dated checks, run-slot exclusivity,
+  server-derived phase, evidence verification, quotas, gateway, publications, and Telegram are
+  owner-aware.
+- Telegram private-chat, set-based dedupe, callback-after-unlink, and replay tests pass.
 - Legacy single-owner secrets and assumptions are removed.
 - Existing owner workflows pass regression and dry-run tests.
 
-### Gate C: provider-neutral bridge
+### Gate C: Claude connection lifecycle
 
-- Versioned contract, scoped connection lifecycle, Claude adapter, provider conformance suite.
-- ChatGPT connector spike either passes and ships as experimental/supported, or is visibly unavailable;
-  failure does not block Claude-backed core-product operation.
-- Grok remains adapter-ready unless its separate spike passes.
+- Versioned contract, one-Routine connection kit, separate trigger/gateway credentials, real scheduler
+  handshake, returned provider session URL, source access, and provider conformance suite.
+- A non-Raj Claude account completes setup without live technical intervention.
+- ChatGPT, Grok, second-opinion, and BYOK paths are rejected server-side and absent from the UI.
 
 ### Gate D: complete web product
 
-- All release-one screens, recordkeeping workflows, provider/Telegram setup, export, and settings.
-- Mobile/accessibility/security verification passes.
+- Seven release-one screens, OTP/custom-SMTP auth, recordkeeping workflows, Claude/Telegram setup,
+  consent, export, deletion request, step-up, and settings.
+- Mobile/accessibility/CSP/no-cache/no-service-worker verification passes on iOS and Android.
 
 ### Gate E: operations and recovery
 
-- Staging environment, deployment runbooks, monitoring, encrypted backup, successful restore drill,
-  incident response, and rollback drill.
+- Staging environment, deployment runbooks, source/quota/backup monitoring, private R2 retention,
+  backup-age failure alert, successful restore from R2 plus offline key/operator secret store, incident
+  response, secret rotation, and rollback drill.
 
 ### Gate F: controlled production cutover
 
-- Pause routines and Telegram mutations.
+- Pause Routine triggers and Telegram mutations.
 - Back up, migrate, verify, deploy, pair owner, connect Claude, and run no-write tests.
 - Exercise one owner web mutation and one Telegram mutation with explicit confirmation.
 - Observe one complete scheduled market cycle.
@@ -885,8 +1079,9 @@ The release is built incrementally but launched only after all gates pass.
 
 ### Gate G: invite-only launch
 
-- Invite one synthetic/test account and then one trusted friend.
-- Re-run isolation and deletion/export checks.
+- Reconfirm backup age under 36 hours and a successful restore within the last 30 days.
+- Invite one synthetic/test account and then one trusted friend only after the unassisted Claude kit,
+  phone OTP, consent, isolation, deletion/export, and ledger-projection checks pass.
 - Enable additional invitations only after reviewing errors, provider usage, notification noise, and
   support burden.
 
@@ -899,92 +1094,126 @@ The complete core product is ready only when all are true:
 - Anonymous access returns no private rows.
 - Two authenticated test users cannot infer, read, mutate, link to, notify, or analyze each other's
   records through any table, view, RPC, Edge Function, Telegram callback, or provider operation.
-- No client artifact contains a secret/service-role key.
+- No client artifact or runtime product function contains a service-role key; machine roles can invoke
+  only their named root RPCs.
 - Every mutation requires a matching unexpired preview and returns an idempotent atomic receipt.
 - Material amount/quantity/price mismatches and ambiguous symbols cannot reach confirmation.
-- Every provider passes the same contract tests; unsupported providers cannot be selected.
+- Holdings exactly match the average-cost fold over the ledger after concurrent first buys, sells,
+  fees, back-dated operations, and corrections.
+- One scheduled run slot can produce at most one canonical analysis/alert transition per owner, market
+  date, and phase.
+- Claude passes the contract and real `/fire` handshake; every unsupported provider is rejected.
 - A model cannot override server prices, freshness, policy, notification suppression, or send status.
-- Failed/missed runs do not reuse stale advice as current.
-- Telegram pairing, unlinking, replay defense, and same-user confirmation pass.
-- The web application works on a phone and does not cache private API data offline.
-- Encrypted backup and staging restore succeed within the stated recovery objectives.
+- Failed/missed runs do not reuse stale advice as current, and intraday requires a fresh market snapshot
+  plus a current-run source-check receipt.
+- Telegram pairing, private-chat enforcement, set-based dedupe, unlink cancellation, replay defense,
+  and same-user confirmation pass.
+- OTP/custom-SMTP authentication and five-minute step-up work on a phone; the app registers no service
+  worker and does not cache private API data.
+- Encrypted R2 backup, backup-age alert, and staging restore succeed within the stated recovery
+  objectives using only the documented recovery inputs.
+- Consent discloses provider transcript retention, operator access, quote-vendor ticker disclosure, and
+  Telegram deletion limits.
 - Deployment and rollback instructions have been exercised.
 - There is still no brokerage credential, dependency, endpoint, or executable trade action anywhere
   in the system.
 
-## 24. Decisions to validate during external review
+## 24. Resolved product decisions
 
-The proposed default decisions are:
+1. One shared Supabase project with a private `app` schema, exposed `api` schema, owner IDs, forced RLS,
+   and PostgREST attack tests—not one database per user.
+2. Exactly one USD portfolio per user for US-listed equities/ETFs in release one.
+3. Invite-only onboarding through operator CLI, custom SMTP, and OTP-first authentication.
+4. Claude Routines are the sole release-one model adapter. One API-triggered Routine per user is
+   scheduled by the application; no inference API or always-on Mac is involved.
+5. ChatGPT is a future public MCP/OAuth 2.1 adapter and Grok is unavailable. Neither is selectable in
+   release one; there is no second-opinion, failover, voting, or BYOK path.
+6. The frontend is a static Cloudflare-hosted SPA with no service worker; Supabase owns business logic.
+7. Browser, Claude, and Telegram use separate least-privilege trust paths but converge on the same
+   deterministic ledger and policy invariants.
+8. Release one exposes platform hard safety limits only. Stricter personal overrides are schema-only.
+9. Backups run from a private automation repository to private R2; reusable secrets are excluded and
+   full-disaster recovery deliberately reconnects outbound provider triggers.
+10. The product launches once after internal gates and an owner soak. Friend onboarding is blocked by
+    any isolation failure, stale backup, failed restore, failed phone OTP, failed unassisted Claude
+    setup, ledger mismatch, missing consent, or brokerage-capable path.
 
-1. One shared Supabase project with `owner_id` and RLS, not one database per user.
-2. Exactly one portfolio per user in release one.
-3. Invite-only onboarding.
-4. Claude and ChatGPT as targeted subscription-hosted connectors; Grok adapter-ready but not promised.
-5. One primary scheduled provider and explicit second opinions; no hidden failover or model voting.
-6. Static Cloudflare frontend with Supabase as the only business-logic backend.
-7. Web and Telegram share the same deterministic command/RPC layer.
-8. Platform hard safety ceilings plus user preferences that may only become stricter.
-9. One complete launch after internal gates and an owner-only soak period.
-10. Friend onboarding blocked until cross-tenant attacks and a real restore drill pass.
+## 25. External-review reconciliation
 
-These are concrete recommendations, not unresolved placeholders. Reviewer objections should include a
-specific threat, failure mode, operational constraint, or simpler alternative.
+The complete external review is preserved at
+[`docs/reviews/2026-09-03-complete-core-product-adversarial-review.md`](../../reviews/2026-09-03-complete-core-product-adversarial-review.md).
 
-## 25. External-review checklist for Claude
+Accepted findings:
 
-Ask the reviewer to challenge the design rather than summarize it:
+- custom SMTP and OTP-first authentication;
+- a real, unassisted Claude onboarding/handshake test;
+- run-slot exclusivity, average-cost ledger projection, first-buy advisory lock, fee-aware inputs, and
+  back-dated balance validation;
+- private/exposed schema split, PostgREST-level RLS tests, no privileged browser mutation path;
+- Telegram set-based dedupe, private-chat-only commands, callback/link revalidation, and unlink cancel;
+- explicit rate limits, operational tables, corporate-action suppression, privacy disclosures, phone
+  step-up, free-tier limitations, and a three-business-day full-loss RTO;
+- scope cuts for second opinions, Grok, admin mutation UI, FX, service worker, and editable schedules.
 
-1. Identify every path where service-role access could cause an owner-ID authorization bypass.
-2. Check whether all current tables, RPCs, unique keys, foreign keys, gateway operations, grades, and
-   publications are covered by the tenancy migration.
-3. Find cross-user leaks through timing, errors, IDs, Telegram callbacks, provider context, exports,
-   logs, caches, or admin screens.
-4. Challenge the provider-authentication assumptions, especially subscription-backed ChatGPT tasks
-   and any future Grok route.
-5. Check replay, duplicate delivery, stale-command, concurrent mutation, and uncertain-delivery
-   handling.
-6. Challenge the backup plan, Vault handling, identity restoration, recovery objectives, and free-tier
-   assumptions.
-7. Look for ways model-controlled prose could become code, HTML, SQL, a tool instruction, or a policy
-   input.
-8. Check whether the release is too broad to verify safely and recommend scope cuts only when tied to
-   a concrete risk or dependency.
-9. Identify claims that need a capability spike or current provider documentation before they become
-   acceptance criteria.
-10. Propose missing tests and release gates; do not propose brokerage execution or autonomous trading.
+Adjusted findings:
 
-Suggested review prompt:
-
-> Perform an adversarial architecture, security, privacy, reliability, and operability review of this
-> design for an invite-only multi-user stock decision-support application. Treat financial data as
-> sensitive and model output as untrusted. Verify that tenant isolation survives service-role use,
-> Telegram callbacks, provider connectors, exports, and backups. Separate blocking findings from
-> optional improvements. Flag any unsupported assumptions about Claude, ChatGPT, Grok, Supabase,
-> Cloudflare, or free-tier behavior. Do not expand the product into brokerage execution.
+- **ChatGPT:** the OAuth/MCP requirement is correct, but current official OpenAI documentation says web
+  scheduled tasks can use plugins available to the chat. The adapter is therefore not declared
+  impossible; it is deferred until an OAuth/MCP unattended capability spike passes on the target plan.
+- **Recovery secrets:** backing reusable peppers and service tokens up beside portfolio archives would
+  enlarge the compromise blast radius. High-entropy inbound tokens use an unkeyed SHA-256 digest so
+  they have no pepper dependency; low-entropy pairing codes expire; Vault trigger tokens are
+  reconnected after full loss; live secrets remain in platform stores plus the operator's offline
+  password manager.
+- **Evidence freshness:** stable filings and fundamentals do not need fake-new evidence IDs. The server
+  instead requires a current-run retrieval/revalidation event, a fresh server market snapshot, and a
+  current source-search receipt. Copying a prior run without current verification is rejected.
+- **Machine authorization:** a service-role session setting is not a meaningful RLS boundary because
+  the service role bypasses RLS, and separate PostgREST calls would not share one transaction. Runtime
+  machine functions instead use distinct execute-only database roles and root RPCs that resolve owner
+  internally without accepting `p_owner_id`.
+- **Claude scheduling:** official Anthropic documentation now exposes a per-Routine `/fire` trigger.
+  One application-triggered Routine per user replaces three provider schedules and lets the server
+  handle DST, holidays, and early closes. This beta capability is a Gate 0 proof, not an assumption.
 
 ## 26. Research references
 
 - [Cloudflare Workers Static Assets](https://developers.cloudflare.com/workers/static-assets/)
 - [Cloudflare static-assets billing and limitations](https://developers.cloudflare.com/workers/static-assets/billing-and-limitations/)
+- [Cloudflare static-asset headers](https://developers.cloudflare.com/workers/static-assets/headers/)
+- [Cloudflare R2 pricing](https://developers.cloudflare.com/r2/pricing/)
 - [Supabase Auth](https://supabase.com/docs/guides/auth)
 - [Supabase user invitations](https://supabase.com/docs/guides/auth/users)
+- [Supabase custom SMTP](https://supabase.com/docs/guides/auth/auth-smtp)
+- [Supabase passwordless email](https://supabase.com/docs/guides/auth/auth-email-passwordless)
+- [Supabase OAuth 2.1 server](https://supabase.com/docs/guides/auth/oauth-server)
 - [Supabase Row-Level Security](https://supabase.com/docs/guides/database/postgres/row-level-security)
 - [Supabase data security](https://supabase.com/docs/guides/database/secure-data)
+- [Supabase database advisors](https://supabase.com/docs/guides/database/database-advisors)
+- [Supabase database connections](https://supabase.com/docs/guides/database/connecting-to-postgres)
+- [Supabase API keys](https://supabase.com/docs/guides/api/api-keys)
+- [Supabase Edge Function limits](https://supabase.com/docs/guides/functions/limits)
 - [Supabase scheduling Edge Functions](https://supabase.com/docs/guides/functions/schedule-functions)
 - [Supabase Vault](https://supabase.com/docs/guides/database/vault)
 - [Supabase database backups](https://supabase.com/docs/guides/platform/backups)
+- [Supabase free-project pausing](https://supabase.com/docs/guides/platform/free-project-pausing)
 - [Telegram Bot API webhooks](https://core.telegram.org/bots/api#setwebhook)
 - [OpenAI Docs: scheduled tasks](https://learn.chatgpt.com/docs/automations)
 - [OpenAI Docs: authentication](https://learn.chatgpt.com/docs/auth)
 - [OpenAI plugin architecture](https://developers.openai.com/plugins)
+- [OpenAI: build a plugin MCP server](https://developers.openai.com/plugins/build/mcp-server)
+- [OpenAI plugin OAuth authentication](https://developers.openai.com/plugins/build/auth)
+- [Anthropic Claude Routines](https://code.claude.com/docs/en/routines)
+- [Anthropic Claude cloud environments](https://code.claude.com/docs/en/cloud-environments)
 - [Anthropic: subscription and API billing are separate](https://support.anthropic.com/en/articles/9876003-i-subscribe-to-a-paid-claude-ai-plan-why-do-i-have-to-pay-separately-for-api-usage-on-console)
+- [GitHub scheduled workflow behavior](https://docs.github.com/en/actions/reference/workflows-and-actions/events-that-trigger-workflows)
+- [GitHub artifact access](https://docs.github.com/en/actions/how-tos/manage-workflow-runs/download-workflow-artifacts)
 - [xAI inference API](https://docs.x.ai/developers/rest-api-reference/inference)
 - [xAI API billing](https://docs.x.ai/console/billing)
 
 ## 27. Next step after review
 
-No implementation starts from this draft. Rajrupesh reviews it with Claude and returns the complete
-findings. We reconcile accepted changes into this specification, run the placeholder/consistency/
-scope/ambiguity self-review again, and request final design approval. Only then do we create a
-task-level implementation plan and begin test-driven implementation through the internal release
-gates.
+No implementation starts from this revision until Rajrupesh gives final design approval. After
+approval, create a task-level implementation plan that begins with Gate 0 capability proofs and uses
+test-driven implementation through Gates A-G. Any failed Gate 0 assumption returns the design to review
+instead of being worked around silently.
