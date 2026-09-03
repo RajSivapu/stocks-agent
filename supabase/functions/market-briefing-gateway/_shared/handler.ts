@@ -15,6 +15,7 @@ import {
 import { isNyseHoliday } from "./market-calendar.ts";
 import {
   type AdjustedBar,
+  type AdjustedHistoryRange,
   fetchAdjustedHistory,
   fetchIntradayQuoteEvidence,
   fetchVerifiedQuote,
@@ -38,6 +39,12 @@ import {
   comparePortfolioAlternative,
   type PortfolioAlternativeComparison,
 } from "./alternatives.ts";
+import {
+  analyzeLongTermCompanion,
+  type CompanionRoleDecision,
+  type LongTermCompanionAnalysis,
+  qualifyCompanionRole,
+} from "./companion.ts";
 import {
   type GatewayRepository,
   GatewayRepositoryError,
@@ -65,7 +72,10 @@ export interface GatewayDependencies {
   now?: () => Date;
   newId?: () => string;
   fetchQuote?: (ticker: string, now: Date) => Promise<VerifiedQuote>;
-  fetchHistory?: (ticker: string) => Promise<AdjustedBar[]>;
+  fetchHistory?: (
+    ticker: string,
+    range?: AdjustedHistoryRange,
+  ) => Promise<AdjustedBar[]>;
   fetchAlertEvidence?: (
     ticker: string,
     now: Date,
@@ -341,7 +351,8 @@ export function createGatewayHandler(dependencies: GatewayDependencies) {
     fetchQuote: dependencies.fetchQuote ??
       ((ticker: string, now: Date) => fetchVerifiedQuote(ticker, fetch, now)),
     fetchHistory: dependencies.fetchHistory ??
-      ((ticker: string) => fetchAdjustedHistory(ticker, "1y", fetch)),
+      ((ticker: string, range: AdjustedHistoryRange = "1y") =>
+        fetchAdjustedHistory(ticker, range, fetch)),
     fetchAlertEvidence: dependencies.fetchAlertEvidence ??
       ((ticker: string, now: Date) =>
         fetchIntradayQuoteEvidence(ticker, fetch, now)),
@@ -701,7 +712,10 @@ type ResolvedDependencies = GatewayDependencies & {
   now: () => Date;
   newId: () => string;
   fetchQuote: (ticker: string, now: Date) => Promise<VerifiedQuote>;
-  fetchHistory: (ticker: string) => Promise<AdjustedBar[]>;
+  fetchHistory: (
+    ticker: string,
+    range?: AdjustedHistoryRange,
+  ) => Promise<AdjustedBar[]>;
   sendTelegram: (
     parts: string[],
     chatId: string,
@@ -1138,7 +1152,7 @@ async function gradeDueDecisions(
   const histories = new Map<string, Promise<AdjustedBar[]>>();
   const history = (ticker: string): Promise<AdjustedBar[]> => {
     if (!histories.has(ticker)) {
-      histories.set(ticker, deps.fetchHistory(ticker).catch(() => []));
+      histories.set(ticker, deps.fetchHistory(ticker, "1y").catch(() => []));
     }
     return histories.get(ticker)!;
   };
@@ -1256,6 +1270,13 @@ async function evaluateAndPublish(
     context,
     deps,
   );
+  const companion = await buildLongTermCompanion(
+    bundle.companion_proposal,
+    bundle.comparisons ?? [],
+    evaluations,
+    context,
+    deps,
+  );
   const suggestions = evaluations.map((evaluation) =>
     suggestionFromEvaluation(evaluation, bundle.market_date)
   )
@@ -1335,6 +1356,9 @@ async function evaluateAndPublish(
       alert_draft_previews: alertDraftPreviews,
       comparison_count: comparisons.length,
       comparison_coverage: comparisonCoverage(comparisons),
+      companion_status: companion?.qualification_status ??
+        (bundle.comparisons ? "not_nominated" : "not_reviewed"),
+      companion_analysis: companion,
       publication_status: rendered.status,
       preview: rendered.body,
     });
@@ -1400,6 +1424,9 @@ async function evaluateAndPublish(
       : [],
     comparison_count: comparisons.length,
     comparison_coverage: comparisonCoverage(comparisons),
+    companion_status: companion?.qualification_status ??
+      (bundle.comparisons ? "not_nominated" : "not_reviewed"),
+    companion_analysis: companion,
     preview: bundle.phase === "on-demand" ? rendered.body : undefined,
     ...(delivered.status === "delivery_unknown"
       ? { code: "DELIVERY_UNKNOWN" }
@@ -1452,7 +1479,7 @@ async function buildPortfolioComparisons(
   const histories = new Map(
     await Promise.all(tickers.map(async (ticker) => {
       try {
-        return [ticker, await deps.fetchHistory(ticker)] as const;
+        return [ticker, await deps.fetchHistory(ticker, "1y")] as const;
       } catch {
         return [ticker, [] as AdjustedBar[]] as const;
       }
@@ -1482,6 +1509,65 @@ async function buildPortfolioComparisons(
       histories.get(request.alternative_ticker) ?? [],
     );
   });
+}
+
+async function buildLongTermCompanion(
+  request: ReturnType<typeof parseDecisionBundle>["companion_proposal"],
+  comparisonRequests: NonNullable<
+    ReturnType<typeof parseDecisionBundle>["comparisons"]
+  >,
+  evaluations: PolicyEvaluation[],
+  context: PolicyContext,
+  deps: ResolvedDependencies,
+): Promise<LongTermCompanionAnalysis | undefined> {
+  if (!request) return undefined;
+  const ownerTickers = new Set([
+    ...context.holdings.map((holding) => holding.ticker),
+    ...context.owner_plans.filter((plan) => plan.active).map((plan) =>
+      plan.ticker
+    ),
+  ]);
+  if (!ownerTickers.has(request.baseline_ticker)) {
+    throw new GatewayRepositoryError("POLICY_REJECTED");
+  }
+  const comparison = comparisonRequests.find((item) =>
+    item.baseline_ticker === request.baseline_ticker &&
+    item.alternative_ticker === request.companion_ticker
+  );
+  if (!comparison) throw new GatewayRepositoryError("POLICY_REJECTED");
+  const rolePolicy = qualifyCompanionRole(request, comparison.relationship);
+  if (!rolePolicy.allowed) {
+    return analyzeLongTermCompanion(request, [], [], rolePolicy);
+  }
+  const evaluation = evaluations.find((item) =>
+    item.candidate.ticker === request.companion_ticker
+  );
+  const evidenceAvailable = evaluation !== undefined &&
+    request.evidence_ids.every((id) => {
+      const evidence = evaluation.candidate.evidence.find((item) =>
+        item.id === id
+      );
+      return evidence?.status === "fresh" || evidence?.status === "fallback";
+    });
+  if (evaluation?.status !== "approved" || !evidenceAvailable) {
+    const denied: CompanionRoleDecision = {
+      allowed: false,
+      reason:
+        "Gateway policy or current evidence did not support a long-term companion conclusion.",
+      recurring_plan_review_eligible: false,
+    };
+    return analyzeLongTermCompanion(request, [], [], denied);
+  }
+  const [baselineBars, companionBars] = await Promise.all([
+    deps.fetchHistory(request.baseline_ticker, "10y").catch(() => []),
+    deps.fetchHistory(request.companion_ticker, "10y").catch(() => []),
+  ]);
+  return analyzeLongTermCompanion(
+    request,
+    baselineBars,
+    companionBars,
+    rolePolicy,
+  );
 }
 
 function comparisonCoverage(

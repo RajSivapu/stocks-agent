@@ -107,6 +107,29 @@ function comparisonHistory(ticker: string): AdjustedBar[] {
   return rows;
 }
 
+function longTermHistory(ticker: string): AdjustedBar[] {
+  const rows: AdjustedBar[] = [];
+  const date = new Date("2016-09-01T12:00:00.000Z");
+  const end = new Date("2026-09-01T12:00:00.000Z");
+  while (date <= end) {
+    if (date.getUTCDay() !== 0 && date.getUTCDay() !== 6) {
+      const progress = rows.length / 2_610;
+      const base = ticker === "VXUS" ? 55 : 100;
+      const price = base * (1 + progress) + (rows.length % 20);
+      rows.push({
+        date: date.toISOString().slice(0, 10),
+        raw_close: price.toFixed(6),
+        adjusted_close: price.toFixed(6),
+        raw_high: price.toFixed(6),
+        raw_low: price.toFixed(6),
+        split_ratio: null,
+      });
+    }
+    date.setUTCDate(date.getUTCDate() + 1);
+  }
+  return rows;
+}
+
 function readContext(): GatewayReadContext {
   return {
     holdings: [{
@@ -753,6 +776,170 @@ Deno.test("on-demand alternatives are history-computed by the gateway and remain
       result.preview.includes("VTI ↔ ITOT · LIKE-FOR-LIKE"),
     "server-computed comparison preview absent",
   );
+  assertEquals(repository.mutationCalls, 0);
+  assertEquals(setup.sent, []);
+});
+
+Deno.test("on-demand long-term companion is range-computed and remains write-free and send-free", async () => {
+  const repository = new FakeRepository();
+  repository.context.owner_plans = [{
+    id: "00000000-0000-4000-8000-000000000088",
+    ticker: "VTI",
+    bucket: "core",
+    amount: "300",
+    cadence: "monthly",
+    next_due_on: "2026-09-21",
+    active: true,
+    updated_at: "2026-09-02T12:00:00.000Z",
+  }];
+  const historyRequests: string[] = [];
+  const setup = makeHandler(repository, {
+    fetchHistory: (ticker: string, range = "1y") => {
+      historyRequests.push(`${ticker}:${range}`);
+      return Promise.resolve(
+        range === "10y" ? longTermHistory(ticker) : comparisonHistory(ticker),
+      );
+    },
+  });
+  const vti = {
+    ...candidate("on-demand", "brief"),
+    ticker: "VTI",
+    candidate_id: "00000000-0000-4000-8000-000000000020",
+    action: "watch",
+    proposed_amount: null,
+    proposed_shares: null,
+    entry_zone_low: null,
+    entry_zone_high: null,
+    stop: null,
+    target: null,
+    invalidation_price: null,
+    valid_until: null,
+    analyst: {
+      completed: true,
+      action: "watch",
+      confidence: "medium",
+      reason: "Recorded baseline research only.",
+    },
+  };
+  const vxus = {
+    ...vti,
+    ticker: "VXUS",
+    candidate_id: "00000000-0000-4000-8000-000000000021",
+    evidence: [{
+      id: "vxus-profile",
+      kind: "fundamentals",
+      source: "vanguard",
+      status: "fresh",
+      observed_at: "2026-09-02T16:00:00.000Z",
+      retrieved_at: "2026-09-02T16:01:00.000Z",
+      reference: "https://investor.vanguard.com/investment-products/etfs/profile/vxus",
+      claims: ["The fund covers developed and emerging non-U.S. equity markets."],
+    }],
+    factors: [{
+      kind: "fundamentals",
+      stance: "neutral",
+      text: "Non-U.S. exposure adds a distinct geographic role.",
+      evidence_ids: ["vxus-profile"],
+    }],
+  };
+  const bundle = {
+    phase: "on-demand",
+    market_date: "2026-09-02",
+    title: "Long-term companion review",
+    candidates: [vti, vxus],
+    comparisons: [{
+      baseline_ticker: "VTI",
+      alternative_ticker: "VXUS",
+      relationship: "diversifier",
+      prospective_view: "similar",
+      reason: "The candidate adds a distinct geographic role.",
+      evidence_ids: ["vxus-profile"],
+    }],
+    companion_proposal: {
+      baseline_ticker: "VTI",
+      companion_ticker: "VXUS",
+      role: "diversifier",
+      thesis: "Non-U.S. exposure adds a distinct geographic role.",
+      risk_note:
+        "Currency and foreign-market risks can cause long periods of lagging U.S. stocks.",
+      evidence_ids: ["vxus-profile"],
+    },
+  };
+  const result = await json(
+    await setup.handler(request("evaluate_and_publish", bundle, { dry: true })),
+  );
+
+  assertEquals(result.publication_status, "suppressed");
+  assertEquals(result.companion_status, "qualified");
+  assertEquals(
+    (result.companion_analysis as { recurring_plan_review_eligible: boolean })
+      .recurring_plan_review_eligible,
+    true,
+  );
+  assertEquals(historyRequests.sort(), [
+    "VTI:10y",
+    "VTI:1y",
+    "VXUS:10y",
+    "VXUS:1y",
+  ]);
+  assertEquals(repository.mutationCalls, 0);
+  assertEquals(setup.sent, []);
+});
+
+Deno.test("stale companion evidence fails closed without long-term history or side effects", async () => {
+  const repository = new FakeRepository();
+  let historyCalls = 0;
+  const setup = makeHandler(repository, {
+    fetchHistory: (ticker: string) => {
+      historyCalls += 1;
+      return Promise.resolve(comparisonHistory(ticker));
+    },
+  });
+  const vti = {
+    ...candidate("on-demand", "brief"),
+    ticker: "VTI",
+    candidate_id: "00000000-0000-4000-8000-000000000020",
+  };
+  const vxus = {
+    ...candidate("on-demand", "brief"),
+    ticker: "VXUS",
+    candidate_id: "00000000-0000-4000-8000-000000000021",
+    evidence: [{
+      ...candidate().evidence[0],
+      id: "vxus-stale",
+      status: "stale",
+    }],
+    factors: [{
+      kind: "risk",
+      stance: "neutral",
+      text: "Stale geographic exposure evidence.",
+      evidence_ids: ["vxus-stale"],
+    }],
+  };
+  const result = await json(await setup.handler(request("evaluate_and_publish", {
+    phase: "on-demand",
+    market_date: "2026-09-02",
+    title: "Long-term companion review",
+    candidates: [vti, vxus],
+    comparisons: [{
+      baseline_ticker: "VTI",
+      alternative_ticker: "VXUS",
+      relationship: "diversifier",
+      prospective_view: "stronger",
+      reason: "Stale evidence cannot support this view.",
+      evidence_ids: ["vxus-stale"],
+    }],
+    companion_proposal: {
+      baseline_ticker: "VTI",
+      companion_ticker: "VXUS",
+      role: "diversifier",
+      thesis: "Stale evidence must fail closed.",
+      risk_note: "Current risks are unavailable.",
+      evidence_ids: ["vxus-stale"],
+    },
+  }, { dry: true })));
+  assertEquals(result.companion_status, "insufficient");
+  assertEquals(historyCalls, 2);
   assertEquals(repository.mutationCalls, 0);
   assertEquals(setup.sent, []);
 });
