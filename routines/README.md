@@ -46,10 +46,11 @@ Run `python scripts/healthcheck.py` and report only its JSON result.
 Expected successful shape:
 
 ```json
-{"gateway":"ok","finnhub":"ok","yahoo":"ok"}
+{"alerts":"ok","gateway":"ok","finnhub":"ok","yahoo":"ok"}
 ```
 
-It performs dry-run gateway start/context calls and sends no Telegram healthcheck.
+It performs dry-run gateway start/context and owner-alert evaluation calls. It writes nothing and
+sends no Telegram healthcheck or alert.
 
 ## Schedule
 
@@ -81,7 +82,10 @@ update daylight-saving offsets in March and November.
 > timestamps, relevant news/events, and technical context. Rebuild Analyst and Checker records and
 > submit the current bundle through `evaluate_and_publish`; never mechanically reuse morning action,
 > levels, or confidence. `status: suppressed` means no Telegram and must remain silent. Finish the
-> run and report only server receipts. Suggestion-only: never execute a trade or edit the repository.
+> run and report only server receipts. While the checked-in v3 policy is in shadow mode, then call
+> standalone `evaluate_alert_rules` exactly once with `--dry-run`, an empty JSON object, and no run
+> ID. Label its output preview-only and quote only its returned counts and hashes. Suggestion-only:
+> never execute a trade or edit the repository.
 
 ### Post-market prompt
 
@@ -91,7 +95,10 @@ update daylight-saving offsets in March and November.
 > `evaluate_and_publish`. Submit only supported snapshot/observation/lesson/radar/paper-watch
 > artifacts through `record_artifacts`, call `grade_due_decisions` with a limit no greater than 50,
 > and finish the run. Never supply model-created prices, returns, outcomes, or success counts.
-> Report only server receipts. Suggestion-only: never execute a trade or edit the repository.
+> While the checked-in v3 policy is in shadow mode, then call standalone `evaluate_alert_rules`
+> exactly once with `--dry-run`, an empty JSON object, and no run ID. Label its output preview-only
+> and quote only its returned counts and hashes. Report only server receipts. Suggestion-only: never
+> execute a trade or edit the repository.
 
 ## Receipt rules
 
@@ -103,6 +110,12 @@ update daylight-saving offsets in March and November.
 - A policy `downgraded` or `vetoed` action is final and cannot be reworded as Buy/Add.
 - A persistence failure produces no delivery claim and has no direct-storage fallback.
 - `finish_run` owns write counts and message IDs; prompts never supply them.
+- `evaluate_alert_rules` is standalone and deterministic. Pass no run ID, quote, price, condition
+  result, Telegram input, or model prose. In shadow mode it uses `--dry-run`, writes no alert
+  lifecycle row, and sends no message.
+- A Telegram message ID proves only that Telegram accepted a send. An owner callback proves only the
+  recorded alert-lifecycle action; neither proves that the owner viewed it or that any brokerage
+  action occurred.
 
 ## Manual verification and dry runs
 
@@ -127,6 +140,8 @@ After deployment, manually verify one run per phase:
 2. Intraday: a no-trigger case returns suppressed and stays silent.
 3. Post-market: artifact/grade counts come only from gateway receipts.
 4. For each, the matching `analysis_runs` row finishes and no summary overstates writes or sends.
+5. V3 shadow: reconcile `evaluated_rules`, unsafe counts, shadow-candidate counts, and fingerprints
+   with the standalone dry-run receipt. Require zero alert events, publications, and Telegram sends.
 
 ## On-demand workflows
 

@@ -17,10 +17,10 @@ python scripts/market_gateway.py OPERATION [--run-id UUID] [--request-id UUID] [
 ```
 
 Send exactly one JSON object on stdin. Use only `start_run`, `read_context`, `record_artifacts`,
-`grade_due_decisions`, `evaluate_and_publish`, and `finish_run`. Never call a database client,
-Supabase table/REST endpoint, messaging endpoint, brokerage endpoint, or order tool directly. Never
-read broad database credentials or messaging credentials. `config/settings.json` and
-`config/watchlist.json` are read-only.
+`grade_due_decisions`, `evaluate_and_publish`, `evaluate_alert_rules`, and `finish_run`. Never call a
+database client, Supabase table/REST endpoint, messaging endpoint, brokerage endpoint, or order tool
+directly. Never read broad database credentials or messaging credentials. `config/settings.json`
+and `config/watchlist.json` are read-only.
 
 If scratch files are necessary, create a directory with `mktemp -d`, keep every temporary JSON file
 there, and remove it when done. Do not edit the checkout, watchlist, or data files during a run.
@@ -51,6 +51,10 @@ not JSON numbers or exponent notation. Follow the exact structures and bounds in
    `grade_due_decisions`; never supply model-created returns.
 7. Call `finish_run`. Describe only its actual receipt: server-derived status, write counts,
    publication statuses, and message IDs. Never invent a send, log, write, or success claim.
+8. When the checked-in alert policy is in shadow mode, a scheduled intraday or post-market run calls
+   standalone `evaluate_alert_rules` exactly once after `finish_run`, with `--dry-run`, an empty JSON
+   object, and no run ID. Never supply a quote, price, condition result, Telegram input, or model
+   prose. Report it only as a preview receipt; it writes no alert lifecycle row and sends nothing.
 
 On any stable gateway error, stop the affected workflow. Do not bypass it with another write/send
 path. If a run ID exists and the gateway remains reachable, call `finish_run`; its status is
@@ -113,6 +117,11 @@ Recorded stops never change from an analyst recommendation. Show a proposed ratc
 the owner must confirm a supported `/stop TICKER PRICE` command separately. A hold override suppresses
 only eligible mechanical alerts, not an evidenced thesis break. Legacy dry-powder rows are
 display-only and may not enlarge the risk denominator or be mutated here.
+
+An alert draft is inert until the owner arms it. Telegram buttons can only arm, dismiss, pause,
+resume, acknowledge, or snooze monitoring state; they can never trade. A Telegram message ID means
+only that Telegram accepted the message, and a callback receipt proves only the lifecycle action—not
+that the owner read the alert or that a brokerage action happened.
 
 ## Phase focus
 

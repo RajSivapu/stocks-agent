@@ -11,7 +11,7 @@ from lib.config import load_settings
 from lib.policy_config import build_policy_config, validate_policy_config
 
 
-def publish() -> None:
+def publish() -> int:
     policy = build_policy_config(load_settings())
     validate_policy_config(policy)
     client = db._sb()
@@ -23,12 +23,13 @@ def publish() -> None:
         "activate_market_policy_config",
         {"p_version": policy["version"]},
     ).execute()
+    return policy["version"]
 
 
 if __name__ == "__main__":
     try:
-        publish()
+        version = publish()
     except Exception as exc:
         print(f"FAIL: {type(exc).__name__}")
         raise SystemExit(1)
-    print("PASS: activated market policy version 1")
+    print(f"PASS: activated market policy version {version}")

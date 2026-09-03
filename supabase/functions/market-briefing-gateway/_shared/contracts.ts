@@ -334,7 +334,7 @@ export interface GatewayReadContext extends PolicyContext {
 }
 
 export interface PolicyConfig {
-  version: 1;
+  version: 1 | 2;
   allocation_bps: Record<Bucket, number>;
   max_position_bps_of_bucket: Record<Bucket, number>;
   max_trade_risk_bps: Record<Bucket, number>;

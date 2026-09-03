@@ -11,7 +11,7 @@ from lib.policy_config import build_policy_config, validate_policy_config
 def test_build_policy_config_uses_reviewed_safety_values():
     policy = build_policy_config(load_settings())
 
-    assert policy["version"] == 1
+    assert policy["version"] == 2
     assert policy["allocation_bps"] == {
         "core": 7000,
         "growth": 2000,
@@ -48,6 +48,13 @@ def test_build_policy_config_uses_reviewed_safety_values():
         },
         "max_requests_per_run": 20,
         "max_authenticated_requests_per_hour": 100,
+    }
+    assert policy["alerts_v3"] == {
+        "enabled": False,
+        "shadow": True,
+        "profile": "balanced",
+        "draft_ttl_hours": 24,
+        "drafts_per_hour": 5,
     }
 
 
@@ -127,3 +134,28 @@ def test_validate_policy_config_rejects_extra_keys_and_boolean_integer():
     with pytest.raises(ValueError, match="alert_near_bps"):
         validate_policy_config(policy)
 
+
+@pytest.mark.parametrize(
+    ("key", "value", "message"),
+    [
+        ("enabled", 1, "enabled"),
+        ("shadow", "yes", "shadow"),
+        ("profile", "aggressive", "profile"),
+        ("draft_ttl_hours", 48, "draft_ttl_hours"),
+        ("drafts_per_hour", 6, "drafts_per_hour"),
+    ],
+)
+def test_alert_v3_policy_rejects_unreviewed_authority_or_bounds(key, value, message):
+    policy = build_policy_config(load_settings())
+    policy["alerts_v3"][key] = value
+    with pytest.raises(ValueError, match=message):
+        validate_policy_config(policy)
+
+
+def test_owner_only_access_and_no_brokerage_remain_explicit_in_settings():
+    settings = load_settings()
+    assert settings["access"] == {
+        "mode": "owner_only",
+        "friend_invitations_enabled": False,
+    }
+    assert settings["guardrails"]["execution_allowed"] is False

@@ -190,6 +190,7 @@ type DbResult = { data: unknown; error: DbError | null };
 interface QueryBuilder extends PromiseLike<DbResult> {
   select(columns: string): QueryBuilder;
   eq(column: string, value: unknown): QueryBuilder;
+  is(column: string, value: null): QueryBuilder;
   gte(column: string, value: unknown): QueryBuilder;
   in(column: string, values: unknown[]): QueryBuilder;
   order(column: string, options?: { ascending?: boolean }): QueryBuilder;
@@ -299,16 +300,31 @@ function ownerDate(now: Date): string {
   return `${get("year")}-${get("month")}-${get("day")}`;
 }
 
-function validatePolicy(value: unknown): PolicyConfig {
+export function validatePolicy(value: unknown): PolicyConfig {
   if (typeof value !== "object" || value === null || Array.isArray(value)) {
     throw new GatewayRepositoryError("POLICY_REJECTED");
   }
   const policy = value as Partial<PolicyConfig>;
-  if (policy.version !== 1 || policy.self_tuning_enabled !== false ||
+  if ((policy.version !== 1 && policy.version !== 2) || policy.self_tuning_enabled !== false ||
     !policy.allocation_bps || !policy.max_position_bps_of_bucket ||
     !policy.max_trade_risk_bps || !policy.request_limits ||
     !Array.isArray(policy.nyse_holidays) || !Array.isArray(policy.broad_core_etfs)) {
     throw new GatewayRepositoryError("POLICY_REJECTED");
+  }
+  if (policy.alerts_v3 !== undefined) {
+    const alerts = policy.alerts_v3 as unknown;
+    if (typeof alerts !== "object" || alerts === null || Array.isArray(alerts)) {
+      throw new GatewayRepositoryError("POLICY_REJECTED");
+    }
+    const row = alerts as Record<string, unknown>;
+    const expected = ["enabled", "shadow", "profile", "draft_ttl_hours", "drafts_per_hour"];
+    if (Object.keys(row).length !== expected.length || expected.some((key) => !(key in row)) ||
+      typeof row.enabled !== "boolean" || typeof row.shadow !== "boolean" ||
+      (row.enabled === true && row.shadow === true) ||
+      !["long_term", "balanced", "active"].includes(String(row.profile)) ||
+      row.draft_ttl_hours !== 24 || row.drafts_per_hour !== 5) {
+      throw new GatewayRepositoryError("POLICY_REJECTED");
+    }
   }
   return policy as PolicyConfig;
 }
@@ -395,10 +411,14 @@ export function createSupabaseGatewayRepository(
     async activePolicy() {
       const policyRows = rows(await client.from("market_policy_config")
         .select("version,config").eq("active", true).limit(2), "POLICY_REJECTED");
-      if (policyRows.length !== 1 || policyRows[0].version !== 1) {
+      if (policyRows.length !== 1) {
         throw new GatewayRepositoryError("POLICY_REJECTED");
       }
-      return validatePolicy(policyRows[0].config);
+      const policy = validatePolicy(policyRows[0].config);
+      if (policyRows[0].version !== policy.version) {
+        throw new GatewayRepositoryError("POLICY_REJECTED");
+      }
+      return policy;
     },
 
     async createAlertDrafts(requestId, drafts) {
@@ -425,12 +445,11 @@ export function createSupabaseGatewayRepository(
           .order("updated_at", { ascending: true }).limit(limit + 1),
         client.from("market_alert_drafts")
           .select("id,source_evaluation_id,rule_snapshot,state,expires_at,publication_id")
-          .eq("state", "draft").gte("expires_at", current.toISOString())
+          .eq("state", "draft").is("publication_id", null).gte("expires_at", current.toISOString())
           .order("created_at", { ascending: true }).limit(limit + 1),
       ]);
       const ruleRows = rows(ruleResult, "CONTEXT_TOO_LARGE");
-      const pendingDrafts = rows(pendingDraftResult, "CONTEXT_TOO_LARGE")
-        .filter((row) => row.publication_id === null || row.publication_id === undefined);
+      const pendingDrafts = rows(pendingDraftResult, "CONTEXT_TOO_LARGE");
       if (ruleRows.length > limit || pendingDrafts.length > limit) {
         throw new GatewayRepositoryError("CONTEXT_TOO_LARGE");
       }

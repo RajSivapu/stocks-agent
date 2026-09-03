@@ -4,6 +4,10 @@
     "email": "your@email.com",
     "timezone": "America/Chicago"
   },
+  "access": {
+    "mode": "owner_only",
+    "friend_invitations_enabled": false
+  },
   "strategy": {
     "style": "long-term core + some swing",
     "allocation": { "core": 0.70, "growth": 0.20, "speculative": 0.10 },
@@ -65,6 +69,17 @@
     "depth": "compact",
     "discovery_enabled": true,
     "_note": "Bounded mid-day opportunity check: independently refresh macro, holdings, quote timestamps, relevant news/events, and radar (<=15); deep-analyze <=3 names at COMPACT depth. A morning zone is only a candidate. Alert only when the current thesis, recomputed levels, freshness gate, and checker all pass."
+  },
+  "alerts_v3": {
+    "enabled": false,
+    "shadow": true,
+    "default_profile": "balanced",
+    "allowed_profiles": ["long_term", "balanced", "active"],
+    "max_conditions": 5,
+    "draft_ttl_hours": 24,
+    "drafts_per_hour": 5,
+    "monitor_interval_minutes": 15,
+    "_note": "Approved owner-only hybrid alert design. Shadow mode renders previews but sends nothing. The 15-minute interval is a future option, not an active schedule. Only the verified owner may arm or change a rule; every alert remains suggestion-only and has no brokerage authority."
   },
   "trailing_stop": {
     "enabled": true,
