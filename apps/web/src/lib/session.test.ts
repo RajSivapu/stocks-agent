@@ -141,4 +141,30 @@ describe("session verification", () => {
       type: "email",
     });
   });
+
+  it("defers auth listeners until Supabase releases its auth callback lock", async () => {
+    vi.useFakeTimers();
+    const listener = vi.fn();
+    const unsubscribe = vi.fn();
+    let authCallback: (() => void) | undefined;
+    const value = client({
+      auth: {
+        onAuthStateChange: (callback: () => void) => {
+          authCallback = callback;
+          return { data: { subscription: { unsubscribe } } };
+        },
+      },
+    });
+    const service = createSessionService(value, "https://stocks.example");
+
+    const stop = service.subscribe(listener);
+    authCallback?.();
+
+    expect(listener).not.toHaveBeenCalled();
+    await vi.runAllTimersAsync();
+    expect(listener).toHaveBeenCalledOnce();
+    stop();
+    expect(unsubscribe).toHaveBeenCalledOnce();
+    vi.useRealTimers();
+  });
 });

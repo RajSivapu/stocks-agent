@@ -8,7 +8,7 @@ export type LoadState<T> =
 export function useRepositoryData<T>(loader: () => Promise<T>) {
   const [state, setState] = useState<LoadState<T>>({ kind: "loading" });
   const load = useCallback(async () => {
-    setState({ kind: "loading" });
+    setState((current) => current.kind === "ready" ? current : { kind: "loading" });
     try {
       setState({ kind: "ready", data: await loader() });
     } catch {

@@ -47,15 +47,17 @@ function harness(initial = snapshot()) {
     code: "ABCD234567",
     expiresAt: "2026-09-03T18:10:00Z",
   };
+  const beginConnectionHandshake = vi.fn(() => Promise.resolve({
+    connectionId,
+    status: "testing" as const,
+    handshakeId: "44444444-4444-4444-8444-444444444444",
+    triggerRequestId: "55555555-5555-4555-8555-555555555555",
+    duplicate: false,
+  }));
+  const requestOtp = vi.fn(() => Promise.resolve());
   const client = {
     createConnection: vi.fn(() => Promise.resolve(created)),
-    beginConnectionHandshake: vi.fn(() => Promise.resolve({
-      connectionId,
-      status: "testing" as const,
-      handshakeId: "44444444-4444-4444-8444-444444444444",
-      triggerRequestId: "55555555-5555-4555-8555-555555555555",
-      duplicate: false,
-    })),
+    beginConnectionHandshake,
     activateConnection: vi.fn(() => Promise.resolve({ connectionId, status: "active" as const })),
     revokeConnection: vi.fn(() => Promise.resolve({ connectionId, status: "revoked" as const })),
     requestPairingCode: vi.fn(() => Promise.resolve(paired)),
@@ -69,10 +71,14 @@ function harness(initial = snapshot()) {
     })),
   } as unknown as AppApiClient;
   const session = {
-    requestOtp: vi.fn(() => Promise.resolve()),
+    requestOtp,
     verifyOtp: vi.fn(() => Promise.resolve()),
   } as unknown as SessionService;
-  return { repository, client, session, created, paired, setCurrent(value: ConnectionsSnapshot) { current = value; } };
+  return {
+    repository, client, session, created, paired,
+    calls: { beginConnectionHandshake, requestOtp },
+    setCurrent(value: ConnectionsSnapshot) { current = value; },
+  };
 }
 
 describe("provider and Telegram setup", () => {
@@ -90,7 +96,7 @@ describe("provider and Telegram setup", () => {
   });
 
   it("shows the inbound credential once and never displays the trigger token", async () => {
-    const { repository, client, session, created } = harness();
+    const { repository, client, session, created, calls } = harness();
     const user = userEvent.setup();
     render(<ConnectionsScreen repository={repository} connectionClient={client}
       accountClient={client} session={session} viewer={viewer} />);
@@ -107,11 +113,11 @@ describe("provider and Telegram setup", () => {
     expect(screen.getByLabelText(/one-time routine token/i)).toHaveAttribute("type", "password");
     expect(document.body.textContent).not.toContain(token);
     await user.click(screen.getByRole("button", { name: /test connection/i }));
-    expect(session.requestOtp).toHaveBeenCalledWith(viewer.email);
+    expect(calls.requestOtp).toHaveBeenCalledWith(viewer.email);
     await user.type(await screen.findByLabelText(/fresh six-digit code/i), "123456");
     await user.click(screen.getByRole("button", { name: /verify fresh code/i }));
     await waitFor(() => {
-      expect(client.beginConnectionHandshake).toHaveBeenCalledWith(
+      expect(calls.beginConnectionHandshake).toHaveBeenCalledWith(
         connectionId,
         "https://api.anthropic.com/v1/claude_code/routines/trig_ABC123/fire",
         token,

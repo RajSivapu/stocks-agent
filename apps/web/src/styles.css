@@ -19,6 +19,7 @@
 }
 
 body {
+  max-width: 100%;
   min-width: 320px;
   min-height: 100vh;
   margin: 0;
@@ -356,6 +357,9 @@ button:disabled {
 }
 
 .app-shell {
+  width: 100%;
+  min-width: 0;
+  max-width: 100%;
   min-height: 100vh;
   display: grid;
   grid-template-columns: 16rem minmax(0, 1fr);
@@ -364,6 +368,7 @@ button:disabled {
 
 .sidebar {
   display: flex;
+  min-width: 0;
   flex-direction: column;
   min-height: 100vh;
   padding: 1.25rem;
@@ -428,10 +433,12 @@ button:disabled {
 }
 
 .workspace {
+  min-width: 0;
   padding: clamp(1.25rem, 4vw, 4rem);
 }
 
 .workspace-card {
+  min-width: 0;
   min-height: calc(100vh - 8rem);
   padding: clamp(2rem, 5vw, 4rem);
   border: 1px solid var(--line);
@@ -457,6 +464,7 @@ button:disabled {
 
 .feature-stack {
   display: grid;
+  min-width: 0;
   gap: 1.25rem;
 }
 
@@ -681,6 +689,7 @@ button:disabled {
 
 .record-panel {
   position: relative;
+  min-width: 0;
   padding: clamp(1.4rem, 3vw, 2.5rem);
   border: 1px solid var(--line);
   border-radius: 1.25rem;
@@ -1435,6 +1444,9 @@ button:disabled {
   }
 
   .sidebar nav {
+    width: 100%;
+    min-width: 0;
+    max-width: calc(100vw - 1.6rem);
     grid-auto-columns: minmax(5.4rem, 1fr);
     grid-auto-flow: column;
     grid-template-columns: none;

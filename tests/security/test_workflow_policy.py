@@ -47,8 +47,10 @@ def test_pull_requests_run_tests_without_any_secret_context():
     for required in (
         "scan-secrets", "dependency-audit", "sql-lint", "migration-current",
         "fresh-schema", "surface-allowlist", "build-output-scan", "npm run test:all",
+        "playwright install --with-deps chromium",
     ):
         assert required in text
+    assert "npm --workspace apps/web run lint" in (ROOT / "scripts/test_all.sh").read_text(encoding="utf-8")
 
 
 def test_staging_is_after_ci_and_deploys_only_the_four_release_functions():
@@ -64,6 +66,10 @@ def test_staging_is_after_ci_and_deploys_only_the_four_release_functions():
     assert "deploy_and_verify.py staging-preflight" in text
     assert "deploy_and_verify.py staging-verify" in text
     assert "create_security_test_users.py" in text
+    assert "E2E_LIVE: 1" in text
+    assert "npm --workspace apps/web run test:e2e" in text
+    assert text.index("create-security-test-users") < text.index("live-browser-security-acceptance")
+    assert text.index("live-browser-security-acceptance") < text.index("staging-verify")
 
 
 def test_production_is_manual_protected_and_cannot_enable_invitations():

@@ -219,7 +219,10 @@ describe("browser app API", () => {
     );
 
     expect(deleted.status).toBe("pending");
-    const bodies = fetcher.mock.calls.map((call) => String((call[1] as RequestInit).body ?? ""));
+    const bodies = fetcher.mock.calls.map((call) => {
+      const body = (call[1] as RequestInit).body;
+      return typeof body === "string" ? body : "";
+    });
     expect(bodies.join(" ")).not.toMatch(/session_digest|authenticated_at|auth_method|owner_id/);
     expect(bodies).toEqual([
       "{}",

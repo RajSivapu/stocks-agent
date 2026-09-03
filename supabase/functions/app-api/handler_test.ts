@@ -425,6 +425,7 @@ Deno.test("exports return raw bounded attachments instead of JSON envelopes", as
   const response = await handler(request("/export/ledger.csv", {}, { method: "GET" }));
   assertEquals(response.status, 200);
   assertEquals(response.headers.get("content-disposition"), 'attachment; filename="stock-agent-ledger.csv"');
+  assertEquals(response.headers.get("access-control-expose-headers"), "Content-Disposition");
   assertEquals(response.headers.get("cache-control"), "no-store");
   assertEquals(await response.text(), "transaction_id\n");
 });

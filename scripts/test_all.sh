@@ -31,6 +31,8 @@ fi
 if [[ -f apps/web/package.json ]]; then
   npm --workspace apps/web run test
   npm --workspace apps/web run typecheck
+  npm --workspace apps/web run lint
+  npm --workspace apps/web run test:e2e
   VITE_SUPABASE_URL=https://test-project.supabase.co \
     VITE_SUPABASE_PUBLISHABLE_KEY=sb_publishable_test_only_0000000000000000 \
     npm --workspace apps/web run build

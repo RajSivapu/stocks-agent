@@ -2,6 +2,7 @@ import { readFileSync, writeFileSync } from "node:fs";
 import { resolve } from "node:path";
 import react from "@vitejs/plugin-react";
 import { defineConfig, loadEnv, type Plugin } from "vite";
+import { configDefaults } from "vitest/config";
 
 const HTTPS_MARKER = "__SUPABASE_HTTPS_ORIGIN__";
 const WSS_MARKER = "__SUPABASE_WSS_ORIGIN__";
@@ -53,6 +54,7 @@ export default defineConfig(({ command, mode }) => {
     },
     test: {
       environment: "jsdom",
+      exclude: [...configDefaults.exclude, "e2e/**"],
       setupFiles: ["./src/test/setup.ts"],
       restoreMocks: true,
     },

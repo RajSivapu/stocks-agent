@@ -116,6 +116,7 @@ export function exportResponse(
   const headers = new Headers(inheritedHeaders);
   headers.set("content-type", mediaType);
   headers.set("content-disposition", `attachment; filename="${filename}"`);
+  headers.set("access-control-expose-headers", "Content-Disposition");
   headers.set("cache-control", "no-store");
   headers.set("pragma", "no-cache");
   headers.set("x-content-type-options", "nosniff");

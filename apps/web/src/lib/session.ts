@@ -163,8 +163,19 @@ export function createSessionService(
       if (result.error) throw new Error("SIGN_OUT_UNAVAILABLE");
     },
     subscribe(listener) {
-      const { data } = client.auth.onAuthStateChange(() => { listener(); });
-      return () => { data.subscription.unsubscribe(); };
+      const pending = new Set<ReturnType<typeof setTimeout>>();
+      const { data } = client.auth.onAuthStateChange(() => {
+        const handle = setTimeout(() => {
+          pending.delete(handle);
+          listener();
+        }, 0);
+        pending.add(handle);
+      });
+      return () => {
+        for (const handle of pending) clearTimeout(handle);
+        pending.clear();
+        data.subscription.unsubscribe();
+      };
     },
   };
 }

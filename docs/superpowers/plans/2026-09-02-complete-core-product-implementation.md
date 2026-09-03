@@ -1444,7 +1444,7 @@ git commit -m "ci: gate staging and production delivery"
 - Consumes: fully deployed staging, two synthetic owners, synthetic Telegram updates, test Claude connection, and latest restore receipt.
 - Produces: one machine-readable Gate A-G acceptance report with evidence hashes and no private data.
 
-- [ ] **Step 1: Encode every release criterion**
+- [x] **Step 1: Encode every release criterion**
 
 Map each bullet in spec section 23 to a named automated or signed-manual assertion. The release report
 must fail for any missing result; `skipped`, `unknown`, and stale evidence are not passes.
@@ -1455,7 +1455,7 @@ Sign in with OTP fixtures, accept consent, read each screen, record/cancel/corre
 manage plan/settings, pair/unlink Telegram, connect/revoke Claude, export, step up, and request/cancel
 deletion. Attempt every cross-owner ID through browser and raw PostgREST.
 
-- [ ] **Step 3: Exercise scheduling and provider failures**
+- [x] **Step 3: Exercise scheduling and provider failures**
 
 Simulate holiday, early close, DST, duplicate tick, Run Now overlap, trigger rejection/unknown, stale
 evidence, copied morning packet, quote conflict, split quarantine, quiet intraday, delivery unknown, and
@@ -1467,7 +1467,7 @@ Use the latest encrypted R2 archive to restore staging, verify identities/ledger
 reconnect provider triggers, restore Telegram webhook with rotated secrets, and roll back one staged
 application release while triggers remain paused.
 
-- [ ] **Step 5: Verify and commit**
+- [x] **Step 5: Verify and commit**
 
 Run Playwright on desktop/mobile projects, full security suite, and `npm run test:all`. Commit:
 

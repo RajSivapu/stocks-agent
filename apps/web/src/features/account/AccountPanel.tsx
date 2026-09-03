@@ -175,7 +175,7 @@ export function DeletionPendingGate({ viewer, session, accountClient, onCancelle
   useEffect(() => {
     let active = true;
     accountClient.loadAccountStatus().then((value) => { if (active) setStatus(value); })
-      .catch((caught) => { if (active) setError(lifecycleError(caught)); });
+      .catch((caught: unknown) => { if (active) setError(lifecycleError(caught)); });
     return () => { active = false; };
   }, [accountClient]);
   const startCancel = async () => {

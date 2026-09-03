@@ -14,31 +14,42 @@ const viewer = {
 };
 
 function harness() {
+  const requestOtp = vi.fn(() => Promise.resolve());
+  const verifyOtp = vi.fn(() => Promise.resolve());
+  const signOut = vi.fn(() => Promise.resolve());
   const session = {
-    requestOtp: vi.fn(() => Promise.resolve()),
-    verifyOtp: vi.fn(() => Promise.resolve()),
-    signOut: vi.fn(() => Promise.resolve()),
+    requestOtp,
+    verifyOtp,
+    signOut,
   } as unknown as SessionService;
+  const beginStepUp = vi.fn(() => Promise.resolve({
+    challengeId: "22222222-2222-4222-8222-222222222222",
+    expiresAt: "2026-09-03T16:10:00Z",
+  }));
+  const completeStepUp = vi.fn(() => Promise.resolve({
+    receiptId: "33333333-3333-4333-8333-333333333333",
+    expiresAt: "2026-09-03T16:05:00Z",
+  }));
+  const requestDeletion = vi.fn(() => Promise.resolve({
+    deletionRequestId: "44444444-4444-4444-8444-444444444444",
+    confirmationPhrase: "DELETE MY ACCOUNT" as const,
+    confirmationExpiresAt: "2026-09-03T16:05:00Z",
+  }));
+  const confirmDeletion = vi.fn(() => Promise.resolve({
+    deletionRequestId: "44444444-4444-4444-8444-444444444444",
+    status: "pending" as const,
+    cancelUntil: "2026-09-06T16:00:00Z",
+    deleteBy: "2026-09-10T16:00:00Z",
+  }));
+  const downloadExport = vi.fn(() => Promise.resolve({
+    filename: "stock-agent-ledger.csv", mediaType: "text/csv; charset=utf-8",
+    blob: new Blob(["ledger"]),
+  }));
   const client = {
-    beginStepUp: vi.fn(() => Promise.resolve({
-      challengeId: "22222222-2222-4222-8222-222222222222",
-      expiresAt: "2026-09-03T16:10:00Z",
-    })),
-    completeStepUp: vi.fn(() => Promise.resolve({
-      receiptId: "33333333-3333-4333-8333-333333333333",
-      expiresAt: "2026-09-03T16:05:00Z",
-    })),
-    requestDeletion: vi.fn(() => Promise.resolve({
-      deletionRequestId: "44444444-4444-4444-8444-444444444444",
-      confirmationPhrase: "DELETE MY ACCOUNT" as const,
-      confirmationExpiresAt: "2026-09-03T16:05:00Z",
-    })),
-    confirmDeletion: vi.fn(() => Promise.resolve({
-      deletionRequestId: "44444444-4444-4444-8444-444444444444",
-      status: "pending" as const,
-      cancelUntil: "2026-09-06T16:00:00Z",
-      deleteBy: "2026-09-10T16:00:00Z",
-    })),
+    beginStepUp,
+    completeStepUp,
+    requestDeletion,
+    confirmDeletion,
     cancelDeletion: vi.fn(() => Promise.resolve({
       deletionRequestId: "44444444-4444-4444-8444-444444444444",
       status: "cancelled" as const,
@@ -51,29 +62,30 @@ function harness() {
       deleteBy: "2026-09-10T16:00:00Z",
       olderTelegramHistoryRequiresManualRemoval: true,
     })),
-    downloadExport: vi.fn(() => Promise.resolve({
-      filename: "stock-agent-ledger.csv", mediaType: "text/csv; charset=utf-8",
-      blob: new Blob(["ledger"]),
-    })),
+    downloadExport,
   } as unknown as AppApiClient;
-  return { session, client };
+  return {
+    session,
+    client,
+    calls: { requestOtp, verifyOtp, signOut, beginStepUp, completeStepUp, requestDeletion, confirmDeletion, downloadExport },
+  };
 }
 
 describe("private account lifecycle", () => {
   it("requires a new OTP session and exact typed phrase before deletion", async () => {
-    const { session, client } = harness();
+    const { session, client, calls } = harness();
     const user = userEvent.setup();
     render(<AccountPanel viewer={viewer} session={session} accountClient={client} />);
 
     await user.click(screen.getByRole("button", { name: /start account deletion/i }));
-    expect(client.beginStepUp).toHaveBeenCalledOnce();
-    expect(session.requestOtp).toHaveBeenCalledWith("owner@example.com");
+    expect(calls.beginStepUp).toHaveBeenCalledOnce();
+    expect(calls.requestOtp).toHaveBeenCalledWith("owner@example.com");
     const otp = await screen.findByLabelText(/fresh six-digit code/i);
     await user.type(otp, "123456");
     await user.click(screen.getByRole("button", { name: /verify fresh code/i }));
-    await waitFor(() => expect(session.verifyOtp).toHaveBeenCalledWith("owner@example.com", "123456"));
-    expect(client.completeStepUp).toHaveBeenCalledWith("22222222-2222-4222-8222-222222222222");
-    expect(client.requestDeletion).toHaveBeenCalledWith("33333333-3333-4333-8333-333333333333");
+    await waitFor(() => { expect(calls.verifyOtp).toHaveBeenCalledWith("owner@example.com", "123456"); });
+    expect(calls.completeStepUp).toHaveBeenCalledWith("22222222-2222-4222-8222-222222222222");
+    expect(calls.requestDeletion).toHaveBeenCalledWith("33333333-3333-4333-8333-333333333333");
 
     const phrase = await screen.findByLabelText(/type delete my account/i);
     await user.type(phrase, "delete my account");
@@ -81,16 +93,18 @@ describe("private account lifecycle", () => {
     await user.clear(phrase);
     await user.type(phrase, "DELETE MY ACCOUNT");
     await user.click(screen.getByRole("button", { name: /confirm account deletion/i }));
-    await waitFor(() => expect(client.confirmDeletion).toHaveBeenCalledWith(
-      "44444444-4444-4444-8444-444444444444",
-      "33333333-3333-4333-8333-333333333333",
-      "DELETE MY ACCOUNT",
-    ));
-    expect(session.signOut).toHaveBeenCalledOnce();
+    await waitFor(() => {
+      expect(calls.confirmDeletion).toHaveBeenCalledWith(
+        "44444444-4444-4444-8444-444444444444",
+        "33333333-3333-4333-8333-333333333333",
+        "DELETE MY ACCOUNT",
+      );
+    });
+    expect(calls.signOut).toHaveBeenCalledOnce();
   });
 
   it("offers both secret-free exports without treating a download as deletion consent", async () => {
-    const { session, client } = harness();
+    const { session, client, calls } = harness();
     const user = userEvent.setup();
     const createObjectURL = vi.fn(() => "blob:test");
     const revokeObjectURL = vi.fn();
@@ -99,8 +113,8 @@ describe("private account lifecycle", () => {
     render(<AccountPanel viewer={viewer} session={session} accountClient={client} />);
 
     await user.click(screen.getByRole("button", { name: /download ledger csv/i }));
-    await waitFor(() => expect(client.downloadExport).toHaveBeenCalledWith("ledger"));
-    expect(client.beginStepUp).not.toHaveBeenCalled();
+    await waitFor(() => { expect(calls.downloadExport).toHaveBeenCalledWith("ledger"); });
+    expect(calls.beginStepUp).not.toHaveBeenCalled();
   });
 
   it("deletion-pending gate exposes only export, fresh-OTP cancellation, and manual Telegram cleanup", async () => {
