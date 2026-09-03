@@ -212,12 +212,53 @@ export type RunTimelineItem = {
 
 export type RunSnapshot = { runs: RunTimelineItem[] };
 
+export type AgentConnection = {
+  id: string;
+  publicId: string;
+  provider: "claude";
+  credentialType: "claude_routine_v1";
+  capabilities: Record<string, unknown>;
+  contractVersion: number;
+  status: "disabled" | "testing" | "ready" | "active" | "revoked";
+  lastHandshakeAt: string | null;
+  createdAt: string;
+  updatedAt: string;
+};
+
+export type TelegramLinkStatus = {
+  status: "active" | "revoked";
+  linkedAt: string;
+  revokedAt: string | null;
+};
+
+export type ConnectionsSnapshot = {
+  connections: AgentConnection[];
+  telegram: TelegramLinkStatus | null;
+  handshakeRuns: RunTimelineItem[];
+};
+
+export type SettingsSnapshot = {
+  displayName: string;
+  timezone: string;
+  notifyPreMarket: boolean;
+  notifyIntraday: boolean;
+  notifyPostMarket: boolean;
+  notifyOperational: boolean;
+  primaryConnectionId: string | null;
+  scheduleTimezone: string;
+  schedulePreMarket: boolean;
+  scheduleIntraday: boolean;
+  schedulePostMarket: boolean;
+};
+
 export interface DashboardRepository {
   loadToday(): Promise<TodaySnapshot>;
   loadPortfolio(): Promise<PortfolioSnapshot>;
   loadActivity(): Promise<ActivitySnapshot>;
   loadResearch(): Promise<ResearchSnapshot>;
   loadRuns(): Promise<RunSnapshot>;
+  loadConnections(): Promise<ConnectionsSnapshot>;
+  loadSettings(): Promise<SettingsSnapshot>;
   lookupCommand(commandId: string): Promise<CommandReceipt | null>;
 }
 
@@ -291,6 +332,11 @@ function nullableSafeInteger(value: unknown): number | null {
   if (value === null) return null;
   if (!Number.isSafeInteger(value)) throw new Error("INVALID_DATA");
   return value as number;
+}
+
+function boolean(value: unknown): boolean {
+  if (typeof value !== "boolean") throw new Error("INVALID_DATA");
+  return value;
 }
 
 function holding(value: Record<string, unknown>): Holding {
@@ -482,6 +528,51 @@ function runTimeline(value: Record<string, unknown>): RunTimelineItem {
   };
 }
 
+function connection(value: Record<string, unknown>): AgentConnection {
+  const provider = text(value.provider);
+  const credentialType = text(value.credential_type);
+  const status = text(value.status);
+  const contractVersion = value.contract_version;
+  if (provider !== "claude" || credentialType !== "claude_routine_v1" ||
+      !["disabled", "testing", "ready", "active", "revoked"].includes(status) ||
+      !Number.isSafeInteger(contractVersion) || (contractVersion as number) < 1) {
+    throw new Error("INVALID_DATA");
+  }
+  return {
+    id: text(value.id), publicId: text(value.public_id), provider: "claude",
+    credentialType: "claude_routine_v1", capabilities: object(value.capabilities),
+    contractVersion: contractVersion as number,
+    status: status as AgentConnection["status"],
+    lastHandshakeAt: nullableText(value.last_handshake_at),
+    createdAt: text(value.created_at), updatedAt: text(value.updated_at),
+  };
+}
+
+function telegramStatus(value: Record<string, unknown>): TelegramLinkStatus {
+  const status = text(value.status);
+  if (!['active', 'revoked'].includes(status)) throw new Error("INVALID_DATA");
+  return {
+    status: status as TelegramLinkStatus["status"],
+    linkedAt: text(value.linked_at), revokedAt: nullableText(value.revoked_at),
+  };
+}
+
+function settings(value: Record<string, unknown>): SettingsSnapshot {
+  return {
+    displayName: nullableText(value.display_name) ?? "Stock Agent owner",
+    timezone: text(value.timezone),
+    notifyPreMarket: boolean(value.notify_pre_market),
+    notifyIntraday: boolean(value.notify_intraday),
+    notifyPostMarket: boolean(value.notify_post_market),
+    notifyOperational: boolean(value.notify_operational),
+    primaryConnectionId: nullableText(value.primary_connection_id),
+    scheduleTimezone: text(value.schedule_timezone),
+    schedulePreMarket: boolean(value.schedule_pre_market),
+    scheduleIntraday: boolean(value.schedule_intraday),
+    schedulePostMarket: boolean(value.schedule_post_market),
+  };
+}
+
 export function createDashboardRepository(client: SupabaseClient): DashboardRepository {
   const api = (client as unknown as ApiReader).schema("api");
   const holdings = () => api.from("holdings").select("*").order("ticker", { ascending: true }).limit(100);
@@ -527,6 +618,26 @@ export function createDashboardRepository(client: SupabaseClient): DashboardRepo
       const result = await api.from("run_timeline").select("*")
         .order("market_date", { ascending: false }).limit(200);
       return { runs: rows(result).map(runTimeline) };
+    },
+    async loadConnections() {
+      const [connectionRows, telegramRows, runRows] = await Promise.all([
+        api.from("connections").select("*").order("created_at", { ascending: false }).limit(20),
+        api.from("telegram_status").select("*").order("linked_at", { ascending: false }).limit(1),
+        api.from("run_timeline").select("*").order("expected_at", { ascending: false }).limit(50),
+      ]);
+      const telegramValues = rows(telegramRows);
+      const telegramValue = telegramValues.at(0);
+      return {
+        connections: rows(connectionRows).map(connection),
+        telegram: telegramValue ? telegramStatus(telegramValue) : null,
+        handshakeRuns: rows(runRows).map(runTimeline).filter((value) => value.purpose === "handshake"),
+      };
+    },
+    async loadSettings() {
+      const result = rows(await api.from("settings").select("*").limit(1));
+      const value = result.at(0);
+      if (result.length !== 1 || !value) throw new Error("DATA_UNAVAILABLE");
+      return settings(value);
     },
     async lookupCommand(commandId) {
       const response = await api.from("commands").select("*").eq("id", commandId).maybeSingle();

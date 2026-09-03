@@ -69,6 +69,8 @@ function repository(overrides: Partial<DashboardRepository> = {}): DashboardRepo
     loadActivity: () => Promise.resolve(activity),
     loadResearch: () => Promise.resolve({ items: [] }),
     loadRuns: () => Promise.resolve({ runs: [] }),
+    loadConnections: () => Promise.resolve({ connections: [], telegram: null, handshakeRuns: [] }),
+    loadSettings: () => Promise.reject(new Error("unused")),
     lookupCommand: () => Promise.resolve(null),
     ...overrides,
   };

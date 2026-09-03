@@ -16,6 +16,8 @@ import { PortfolioScreen } from "./features/portfolio/PortfolioScreen";
 import { TodayScreen } from "./features/today/TodayScreen";
 import { ResearchScreen } from "./features/research/ResearchScreen";
 import { RunsScreen } from "./features/runs/RunsScreen";
+import { ConnectionsScreen } from "./features/connections/ConnectionsScreen";
+import { SettingsScreen } from "./features/settings/SettingsScreen";
 import "./styles.css";
 
 type AppProps = {
@@ -62,7 +64,8 @@ function Workspace({ viewer, repository, commands }: {
           <Route path="/activity" element={<ActivityScreen repository={repository} />} />
           <Route path="/research" element={<ResearchScreen repository={repository} />} />
           <Route path="/runs" element={<RunsScreen repository={repository} runClient={commands} />} />
-          {ROUTES.slice(5).map(([path, label]) => <Route key={path} path={path} element={<section className="workspace-card"><p className="eyebrow">Private workspace</p><h1>{label}</h1><p>{label} workspace</p></section>} />)}
+          <Route path="/connections" element={<ConnectionsScreen repository={repository} connectionClient={commands} />} />
+          <Route path="/settings" element={<SettingsScreen repository={repository} settingsClient={commands} />} />
           <Route path="*" element={<Navigate to="/" replace />} />
         </Routes>
       </main>

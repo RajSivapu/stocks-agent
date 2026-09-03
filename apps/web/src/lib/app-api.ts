@@ -53,7 +53,63 @@ export interface RunControlClient {
   requestRun(): Promise<RunRequestReceipt>;
 }
 
-export type AppApiClient = CommandClient & RunControlClient;
+export type ConnectionCreateReceipt = {
+  connectionId: string;
+  publicId: string;
+  provider: "claude";
+  status: "disabled";
+  contractVersion: 2;
+  gatewayCredential: string;
+  gatewayUrl: string;
+  credentialDisplay: "once";
+};
+
+export type ConnectionHandshakeReceipt = {
+  connectionId: string;
+  status: "testing";
+  handshakeId: string;
+  triggerRequestId: string;
+  duplicate: boolean;
+};
+
+export type ConnectionStatusReceipt = {
+  connectionId: string;
+  status: "active" | "revoked";
+};
+
+export type PairingCodeReceipt = {
+  pairingId: string;
+  status: "issued";
+  code: string;
+  expiresAt: string;
+};
+
+export type SettingsUpdate = {
+  display_name: string;
+  timezone: string;
+  notify_pre_market: boolean;
+  notify_intraday: boolean;
+  notify_post_market: boolean;
+  notify_operational: boolean;
+  schedule_pre_market: boolean;
+  schedule_intraday: boolean;
+  schedule_post_market: boolean;
+};
+
+export interface ConnectionClient {
+  createConnection: (consentVersion: string) => Promise<ConnectionCreateReceipt>;
+  beginConnectionHandshake: (connectionId: string, triggerUrl: string, triggerToken: string) => Promise<ConnectionHandshakeReceipt>;
+  activateConnection: (connectionId: string) => Promise<ConnectionStatusReceipt>;
+  revokeConnection: (connectionId: string) => Promise<ConnectionStatusReceipt>;
+  requestPairingCode: () => Promise<PairingCodeReceipt>;
+  unlinkTelegram: () => Promise<{ status: "unlinked" }>;
+}
+
+export interface SettingsClient {
+  updateSettings: (settings: SettingsUpdate) => Promise<{ status: "updated" }>;
+}
+
+export type AppApiClient = CommandClient & RunControlClient & ConnectionClient & SettingsClient;
 
 export class AppApiError extends Error {
   constructor(readonly code: string) {
@@ -145,6 +201,65 @@ function parseRunReceipt(value: unknown): RunRequestReceipt {
   };
 }
 
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+
+function uuid(value: unknown): string {
+  if (typeof value !== "string" || !UUID_RE.test(value)) throw new AppApiError("INVALID_RESPONSE");
+  return value;
+}
+
+function isoDateTime(value: unknown): string {
+  if (typeof value !== "string" || !Number.isFinite(Date.parse(value))) {
+    throw new AppApiError("INVALID_RESPONSE");
+  }
+  return value;
+}
+
+function parseConnectionCreate(value: unknown, gatewayUrl: string): ConnectionCreateReceipt {
+  const row = record(value);
+  const connectionId = uuid(row.connection_id);
+  const publicId = uuid(row.public_id);
+  if (row.provider !== "claude" || row.status !== "disabled" || row.contract_version !== 2 ||
+      row.credential_display !== "once" || typeof row.gateway_credential !== "string" ||
+      row.gateway_credential !== `${publicId}.${row.gateway_credential.split(".").at(-1) ?? ""}` ||
+      !new RegExp(`^${publicId.replaceAll("-", "\\-")}\\.[A-Za-z0-9_-]{43}$`, "i").test(row.gateway_credential)) {
+    throw new AppApiError("INVALID_RESPONSE");
+  }
+  return {
+    connectionId, publicId, provider: "claude", status: "disabled", contractVersion: 2,
+    gatewayCredential: row.gateway_credential, gatewayUrl, credentialDisplay: "once",
+  };
+}
+
+function parseHandshake(value: unknown): ConnectionHandshakeReceipt {
+  const row = record(value);
+  if (row.status !== "testing" || typeof row.duplicate !== "boolean") {
+    throw new AppApiError("INVALID_RESPONSE");
+  }
+  return {
+    connectionId: uuid(row.connection_id), status: "testing",
+    handshakeId: uuid(row.handshake_id), triggerRequestId: uuid(row.trigger_request_id),
+    duplicate: row.duplicate,
+  };
+}
+
+function parseConnectionStatus(value: unknown, expected: "active" | "revoked"): ConnectionStatusReceipt {
+  const row = record(value);
+  if (row.status !== expected) throw new AppApiError("INVALID_RESPONSE");
+  return { connectionId: uuid(row.connection_id), status: expected };
+}
+
+function parsePairingCode(value: unknown): PairingCodeReceipt {
+  const row = record(value);
+  if (row.status !== "issued" || typeof row.code !== "string" || !/^[A-HJ-NP-Z2-9]{10}$/.test(row.code)) {
+    throw new AppApiError("INVALID_RESPONSE");
+  }
+  return {
+    pairingId: uuid(row.pairing_id), status: "issued", code: row.code,
+    expiresAt: isoDateTime(row.expires_at),
+  };
+}
+
 export function createCommandClient(
   client: SupabaseClient,
   projectUrl: string,
@@ -156,9 +271,9 @@ export function createCommandClient(
     throw new Error("PUBLIC_CONFIG_UNAVAILABLE");
   }
   const endpoint = `${parsed.origin}/functions/v1/app-api`;
-  const post = async (path: string, body: Record<string, unknown>) => {
+  const send = async (method: "PATCH" | "POST", path: string, body: Record<string, unknown>) => {
     const response = await fetcher(`${endpoint}${path}`, {
-      method: "POST",
+      method,
       headers: {
         authorization: `Bearer ${await accessToken(client)}`,
         "content-type": "application/json",
@@ -171,6 +286,7 @@ export function createCommandClient(
     });
     return readEnvelope(response);
   };
+  const post = (path: string, body: Record<string, unknown>) => send("POST", path, body);
   return {
     async preview(command) {
       const value = await post(commandPath(command.operation), {
@@ -191,6 +307,39 @@ export function createCommandClient(
     },
     async requestRun() {
       return parseRunReceipt(await post("/runs/on-demand", {}));
+    },
+    async createConnection(consentVersion) {
+      return parseConnectionCreate(await post("/connections/create", {
+        provider: "claude", consent_version: consentVersion,
+      }), `${parsed.origin}/functions/v1/agent-gateway`);
+    },
+    async beginConnectionHandshake(connectionId, triggerUrl, triggerToken) {
+      return parseHandshake(await post("/connections/handshake", {
+        connection_id: connectionId, trigger_url: triggerUrl, trigger_token: triggerToken,
+      }));
+    },
+    async activateConnection(connectionId) {
+      return parseConnectionStatus(await post("/connections/activate", {
+        connection_id: connectionId,
+      }), "active");
+    },
+    async revokeConnection(connectionId) {
+      return parseConnectionStatus(await post("/connections/revoke", {
+        connection_id: connectionId,
+      }), "revoked");
+    },
+    async requestPairingCode() {
+      return parsePairingCode(await post("/telegram/pairing-code", {}));
+    },
+    async unlinkTelegram() {
+      const value = await post("/telegram/unlink", {});
+      if (value.status !== "unlinked") throw new AppApiError("INVALID_RESPONSE");
+      return { status: "unlinked" };
+    },
+    async updateSettings(settings) {
+      const value = await send("PATCH", "/settings", settings);
+      if (value.status !== "updated") throw new AppApiError("INVALID_RESPONSE");
+      return { status: "updated" };
     },
     lookup,
   };

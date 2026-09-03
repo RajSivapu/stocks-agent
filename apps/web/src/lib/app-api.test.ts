@@ -121,4 +121,66 @@ describe("browser app API", () => {
     expect(rawOptions.body).toBe("{}");
     expect(JSON.stringify(rawOptions)).not.toContain("owner_id");
   });
+
+  it("parses one-time connection and pairing credentials without adding owner authority", async () => {
+    const publicId = "22222222-2222-4222-8222-222222222222";
+    const credential = `${publicId}.${"A".repeat(43)}`;
+    const fetcher = vi.fn()
+      .mockResolvedValueOnce(response({
+        connection_id: "11111111-1111-4111-8111-111111111111",
+        public_id: publicId, provider: "claude", status: "disabled", contract_version: 2,
+        gateway_credential: credential, credential_display: "once",
+      }))
+      .mockResolvedValueOnce(response({
+        pairing_id: "33333333-3333-4333-8333-333333333333", status: "issued",
+        code: "ABCD234567", expires_at: "2026-09-03T16:20:00Z",
+      }));
+    const api = createCommandClient(client(), "https://test-project.supabase.co", () => Promise.resolve(null), fetcher);
+
+    const connection = await api.createConnection("provider-data-v1");
+    const pairing = await api.requestPairingCode();
+
+    expect(connection.gatewayCredential).toBe(credential);
+    expect(connection.gatewayUrl).toBe("https://test-project.supabase.co/functions/v1/agent-gateway");
+    expect(pairing.code).toBe("ABCD234567");
+    const createOptions = fetcher.mock.calls[0]?.[1] as RequestInit;
+    const pairingOptions = fetcher.mock.calls[1]?.[1] as RequestInit;
+    expect(JSON.stringify(createOptions.body)).not.toContain("owner_id");
+    expect(pairingOptions.body).toBe("{}");
+  });
+
+  it("uses exact lifecycle routes and PATCH settings without schedule expressions", async () => {
+    const connectionId = "11111111-1111-4111-8111-111111111111";
+    const fetcher = vi.fn()
+      .mockResolvedValueOnce(response({
+        connection_id: connectionId, status: "testing",
+        handshake_id: "22222222-2222-4222-8222-222222222222",
+        trigger_request_id: "33333333-3333-4333-8333-333333333333", duplicate: false,
+      }))
+      .mockResolvedValueOnce(response({ status: "updated" }))
+      .mockResolvedValueOnce(response({ status: "unlinked" }));
+    const api = createCommandClient(client(), "https://test-project.supabase.co", () => Promise.resolve(null), fetcher);
+
+    await api.beginConnectionHandshake(
+      connectionId,
+      "https://api.anthropic.com/v1/claude_code/routines/trig_ABC123/fire",
+      "t".repeat(32),
+    );
+    await api.updateSettings({
+      display_name: "Raj", timezone: "America/Chicago",
+      notify_pre_market: true, notify_intraday: true, notify_post_market: true,
+      notify_operational: true, schedule_pre_market: true,
+      schedule_intraday: true, schedule_post_market: true,
+    });
+    await api.unlinkTelegram();
+
+    const fetchCalls = fetcher.mock.calls as unknown as Array<[string, RequestInit]>;
+    expect(fetchCalls.map(([url]) => url)).toEqual([
+      "https://test-project.supabase.co/functions/v1/app-api/connections/handshake",
+      "https://test-project.supabase.co/functions/v1/app-api/settings",
+      "https://test-project.supabase.co/functions/v1/app-api/telegram/unlink",
+    ]);
+    expect(fetchCalls[1]?.[1].method).toBe("PATCH");
+    expect(JSON.stringify(fetchCalls[1]?.[1].body)).not.toContain("cron");
+  });
 });

@@ -69,6 +69,8 @@ function repository(loadRuns = () => Promise.resolve(runs)): DashboardRepository
     loadActivity: () => Promise.reject(new Error("unused")),
     loadResearch: () => Promise.reject(new Error("unused")),
     loadRuns,
+    loadConnections: () => Promise.reject(new Error("unused")),
+    loadSettings: () => Promise.reject(new Error("unused")),
     lookupCommand: () => Promise.resolve(null),
   };
 }

@@ -43,6 +43,27 @@ CREATE POLICY scheduled_run_slots_owner_select ON app.scheduled_run_slots
 CREATE POLICY routine_trigger_attempts_owner_select ON app.routine_trigger_attempts
   FOR SELECT TO authenticated
   USING (auth.uid() IS NOT NULL AND owner_id = (SELECT auth.uid()));
+CREATE POLICY profiles_executor_all ON app.profiles
+  FOR ALL TO stock_agent_migration_owner USING (true) WITH CHECK (true);
+
+CREATE OR REPLACE VIEW api.settings WITH (security_invoker = true) AS
+SELECT profile.display_name,
+       profile.timezone,
+       coalesce(notification.pre_market_enabled, true) AS notify_pre_market,
+       coalesce(notification.intraday_enabled, true) AS notify_intraday,
+       coalesce(notification.post_market_enabled, true) AS notify_post_market,
+       coalesce(notification.operational_enabled, true) AS notify_operational,
+       schedule.primary_connection_id,
+       coalesce(schedule.timezone, profile.timezone) AS schedule_timezone,
+       coalesce(schedule.pre_market_enabled, true) AS schedule_pre_market,
+       coalesce(schedule.intraday_enabled, true) AS schedule_intraday,
+       coalesce(schedule.post_market_enabled, true) AS schedule_post_market
+FROM app.profiles AS profile
+LEFT JOIN app.notification_preferences AS notification ON notification.owner_id = profile.id
+LEFT JOIN app.analysis_schedules AS schedule ON schedule.owner_id = profile.id;
+ALTER VIEW api.settings OWNER TO stock_agent_migration_owner;
+REVOKE ALL ON api.settings FROM PUBLIC, anon, authenticated, service_role;
+GRANT SELECT ON api.settings TO authenticated;
 
 GRANT SELECT (owner_id, id, run_id, ts, date, ticker, action, bucket, depth,
               entry_zone_low, entry_zone_high, valid_until, stop, target,
@@ -375,6 +396,165 @@ REVOKE ALL ON FUNCTION app.create_on_demand_run_slot(UUID, JSONB)
   FROM PUBLIC, anon, authenticated, service_role,
        stock_agent_gateway, stock_agent_scheduler, stock_agent_telegram, stock_agent_backup;
 
+CREATE OR REPLACE FUNCTION app.read_owner_settings(
+  p_owner_id UUID,
+  p_request JSONB
+) RETURNS JSONB
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = pg_catalog
+AS $$
+DECLARE
+  result_value JSONB;
+BEGIN
+  IF p_owner_id IS NULL OR NOT app.jsonb_has_exact_keys(p_request, ARRAY[]::text[]) THEN
+    RAISE EXCEPTION 'invalid settings request' USING ERRCODE = '22023';
+  END IF;
+  SELECT jsonb_build_object(
+    'display_name', coalesce(profile.display_name, 'Stock Agent owner'),
+    'timezone', profile.timezone,
+    'notify_pre_market', coalesce(notification.pre_market_enabled, true),
+    'notify_intraday', coalesce(notification.intraday_enabled, true),
+    'notify_post_market', coalesce(notification.post_market_enabled, true),
+    'notify_operational', coalesce(notification.operational_enabled, true),
+    'primary_connection_id', schedule.primary_connection_id,
+    'schedule_timezone', coalesce(schedule.timezone, profile.timezone),
+    'schedule_pre_market', coalesce(schedule.pre_market_enabled, true),
+    'schedule_intraday', coalesce(schedule.intraday_enabled, true),
+    'schedule_post_market', coalesce(schedule.post_market_enabled, true)
+  ) INTO result_value
+  FROM app.profiles AS profile
+  LEFT JOIN app.notification_preferences AS notification ON notification.owner_id = profile.id
+  LEFT JOIN app.analysis_schedules AS schedule ON schedule.owner_id = profile.id
+  WHERE profile.id = p_owner_id AND profile.status = 'active';
+  IF result_value IS NULL THEN
+    RAISE EXCEPTION 'settings unavailable' USING ERRCODE = '42501';
+  END IF;
+  RETURN result_value;
+END
+$$;
+
+CREATE OR REPLACE FUNCTION app.update_owner_settings(
+  p_owner_id UUID,
+  p_request JSONB
+) RETURNS JSONB
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = pg_catalog
+AS $$
+DECLARE
+  allowed_keys CONSTANT TEXT[] := ARRAY[
+    'display_name','timezone','notify_pre_market','notify_intraday','notify_post_market',
+    'notify_operational','schedule_pre_market','schedule_intraday','schedule_post_market'
+  ];
+  request_key TEXT;
+  timezone_value TEXT;
+BEGIN
+  IF p_owner_id IS NULL OR jsonb_typeof(p_request) <> 'object'
+     OR p_request = '{}'::jsonb THEN
+    RAISE EXCEPTION 'invalid settings request' USING ERRCODE = '22023';
+  END IF;
+  FOR request_key IN SELECT jsonb_object_keys(p_request) LOOP
+    IF NOT request_key = ANY(allowed_keys) THEN
+      RAISE EXCEPTION 'invalid settings request' USING ERRCODE = '22023';
+    END IF;
+    IF request_key = 'display_name' THEN
+      IF jsonb_typeof(p_request->request_key) <> 'string'
+         OR char_length(btrim(p_request->>request_key)) NOT BETWEEN 1 AND 120 THEN
+        RAISE EXCEPTION 'invalid settings request' USING ERRCODE = '22023';
+      END IF;
+    ELSIF request_key = 'timezone' THEN
+      IF jsonb_typeof(p_request->request_key) <> 'string'
+         OR char_length(p_request->>request_key) NOT BETWEEN 1 AND 100 THEN
+        RAISE EXCEPTION 'invalid settings request' USING ERRCODE = '22023';
+      END IF;
+    ELSIF jsonb_typeof(p_request->request_key) <> 'boolean' THEN
+      RAISE EXCEPTION 'invalid settings request' USING ERRCODE = '22023';
+    END IF;
+  END LOOP;
+
+  SELECT timezone INTO timezone_value
+  FROM app.profiles WHERE id = p_owner_id AND status = 'active' FOR UPDATE;
+  IF NOT FOUND THEN RAISE EXCEPTION 'settings unavailable' USING ERRCODE = '42501'; END IF;
+  IF p_request ? 'timezone' AND NOT EXISTS (
+    SELECT 1 FROM pg_catalog.pg_timezone_names WHERE name = p_request->>'timezone'
+  ) THEN
+    RAISE EXCEPTION 'invalid settings request' USING ERRCODE = '22023';
+  END IF;
+  IF p_request ? 'timezone' THEN timezone_value := p_request->>'timezone'; END IF;
+
+  UPDATE app.profiles SET
+    display_name = CASE WHEN p_request ? 'display_name' THEN btrim(p_request->>'display_name') ELSE display_name END,
+    timezone = timezone_value,
+    updated_at = clock_timestamp()
+  WHERE id = p_owner_id;
+
+  INSERT INTO app.notification_preferences(
+    owner_id, pre_market_enabled, intraday_enabled, post_market_enabled, operational_enabled
+  ) VALUES (
+    p_owner_id,
+    coalesce((p_request->>'notify_pre_market')::boolean, true),
+    coalesce((p_request->>'notify_intraday')::boolean, true),
+    coalesce((p_request->>'notify_post_market')::boolean, true),
+    coalesce((p_request->>'notify_operational')::boolean, true)
+  ) ON CONFLICT (owner_id) DO UPDATE SET
+    pre_market_enabled = CASE WHEN p_request ? 'notify_pre_market' THEN (p_request->>'notify_pre_market')::boolean ELSE app.notification_preferences.pre_market_enabled END,
+    intraday_enabled = CASE WHEN p_request ? 'notify_intraday' THEN (p_request->>'notify_intraday')::boolean ELSE app.notification_preferences.intraday_enabled END,
+    post_market_enabled = CASE WHEN p_request ? 'notify_post_market' THEN (p_request->>'notify_post_market')::boolean ELSE app.notification_preferences.post_market_enabled END,
+    operational_enabled = CASE WHEN p_request ? 'notify_operational' THEN (p_request->>'notify_operational')::boolean ELSE app.notification_preferences.operational_enabled END,
+    updated_at = clock_timestamp();
+
+  INSERT INTO app.analysis_schedules(
+    owner_id, timezone, pre_market_enabled, intraday_enabled, post_market_enabled
+  ) VALUES (
+    p_owner_id,
+    timezone_value,
+    coalesce((p_request->>'schedule_pre_market')::boolean, true),
+    coalesce((p_request->>'schedule_intraday')::boolean, true),
+    coalesce((p_request->>'schedule_post_market')::boolean, true)
+  ) ON CONFLICT (owner_id) DO UPDATE SET
+    timezone = CASE WHEN p_request ? 'timezone' THEN timezone_value ELSE app.analysis_schedules.timezone END,
+    pre_market_enabled = CASE WHEN p_request ? 'schedule_pre_market' THEN (p_request->>'schedule_pre_market')::boolean ELSE app.analysis_schedules.pre_market_enabled END,
+    intraday_enabled = CASE WHEN p_request ? 'schedule_intraday' THEN (p_request->>'schedule_intraday')::boolean ELSE app.analysis_schedules.intraday_enabled END,
+    post_market_enabled = CASE WHEN p_request ? 'schedule_post_market' THEN (p_request->>'schedule_post_market')::boolean ELSE app.analysis_schedules.post_market_enabled END,
+    updated_at = clock_timestamp();
+  RETURN jsonb_build_object('status', 'updated');
+END
+$$;
+
+CREATE OR REPLACE FUNCTION app.unlink_owner_telegram(
+  p_owner_id UUID,
+  p_request JSONB
+) RETURNS JSONB
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = pg_catalog
+AS $$
+BEGIN
+  IF p_owner_id IS NULL OR NOT app.jsonb_has_exact_keys(p_request, ARRAY[]::text[]) THEN
+    RAISE EXCEPTION 'invalid unlink request' USING ERRCODE = '22023';
+  END IF;
+  PERFORM pg_advisory_xact_lock(hashtextextended('telegram-link:' || p_owner_id::text, 0));
+  UPDATE app.telegram_links SET status = 'revoked', revoked_at = coalesce(revoked_at, clock_timestamp())
+  WHERE owner_id = p_owner_id AND status = 'active';
+  UPDATE app.telegram_pairing_codes SET consumed_at = coalesce(consumed_at, clock_timestamp())
+  WHERE owner_id = p_owner_id AND consumed_at IS NULL;
+  UPDATE app.portfolio_commands SET status = 'cancelled', updated_at = clock_timestamp()
+  WHERE owner_id = p_owner_id AND channel = 'telegram' AND status = 'previewed';
+  UPDATE app.telegram_callback_tokens SET invalidated_at = clock_timestamp()
+  WHERE owner_id = p_owner_id AND consumed_at IS NULL AND invalidated_at IS NULL;
+  RETURN jsonb_build_object('status', 'unlinked');
+END
+$$;
+
+ALTER FUNCTION app.read_owner_settings(UUID, JSONB) OWNER TO stock_agent_migration_owner;
+ALTER FUNCTION app.update_owner_settings(UUID, JSONB) OWNER TO stock_agent_migration_owner;
+ALTER FUNCTION app.unlink_owner_telegram(UUID, JSONB) OWNER TO stock_agent_migration_owner;
+REVOKE ALL ON FUNCTION app.read_owner_settings(UUID, JSONB),
+  app.update_owner_settings(UUID, JSONB), app.unlink_owner_telegram(UUID, JSONB)
+  FROM PUBLIC, anon, authenticated, service_role,
+       stock_agent_gateway, stock_agent_scheduler, stock_agent_telegram, stock_agent_backup;
+
 -- Replace the browser dispatcher to include the reviewed run-now route. The Edge layer
 -- authenticates and validates an exact empty body before entering this function.
 CREATE OR REPLACE FUNCTION api.app_dispatch(
@@ -415,6 +595,8 @@ BEGIN
       scope_value := 'command_confirm'; limit_value := 20; window_value := 60;
     WHEN 'POST /telegram/pairing-code' THEN
       scope_value := 'telegram_pairing'; limit_value := 5; window_value := 600;
+    WHEN 'POST /telegram/unlink' THEN
+      scope_value := 'telegram_change'; limit_value := 10; window_value := 3600;
     WHEN 'POST /connections/create',
          'POST /connections/handshake',
          'POST /connections/activate',
@@ -477,6 +659,8 @@ BEGIN
         data_value := app.issue_telegram_pairing_code(
           owner_value, p_request->>'code_digest'
         );
+      WHEN 'POST /telegram/unlink' THEN
+        data_value := app.unlink_owner_telegram(owner_value, p_request);
       WHEN 'POST /connections/create' THEN
         data_value := app.create_agent_connection(owner_value, p_request);
       WHEN 'POST /connections/handshake' THEN
@@ -487,6 +671,10 @@ BEGIN
         data_value := app.revoke_agent_connection(owner_value, p_request);
       WHEN 'POST /runs/on-demand' THEN
         data_value := app.create_on_demand_run_slot(owner_value, p_request);
+      WHEN 'GET /settings' THEN
+        data_value := app.read_owner_settings(owner_value, p_request);
+      WHEN 'PATCH /settings' THEN
+        data_value := app.update_owner_settings(owner_value, p_request);
       ELSE
         INSERT INTO app.app_api_audit_events(owner_id, request_id, route, result_code)
         VALUES (owner_value, p_request_id, p_route, 'NOT_READY');

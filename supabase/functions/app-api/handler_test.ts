@@ -182,12 +182,24 @@ Deno.test("future lifecycle routes reject unreviewed fields before dispatch", as
     trigger_token: "t".repeat(32),
   }))).status, 200);
   assertEquals((await handler(request("/connections/activate", { connection_id: OWNER }))).status, 200);
+  assertEquals((await handler(request("/telegram/unlink", {}))).status, 200);
+  assertEquals((await handler(request("/settings", {
+    display_name: "Raj", timezone: "America/Chicago",
+    notify_pre_market: true, notify_intraday: true, notify_post_market: true,
+    notify_operational: true, schedule_pre_market: true,
+    schedule_intraday: true, schedule_post_market: true,
+  }, { method: "PATCH" }))).status, 200);
+  assertEquals((await handler(request("/settings", {
+    cron: "* * * * *",
+  }, { method: "PATCH" }))).status, 400);
   assertEquals((await handler(request("/telegram/pairing-code", { owner_id: OWNER }))).status, 400);
-  assertEquals(repository.calls.length, 4);
+  assertEquals(repository.calls.length, 6);
   const connectionBody = repository.calls[0].body as Record<string, unknown>;
   assertEquals(String(connectionBody.inbound_token_digest).length, 64);
   assertEquals(JSON.stringify(connectionBody).includes("A".repeat(43)), false);
   assertEquals(repository.calls[1].body, { code_digest: "a43255350a50f61e0b614e953291560250a8d824c7a919ea1dab9504cfa35d7b" });
+  assertEquals(repository.calls[4].route, "POST /telegram/unlink");
+  assertEquals(repository.calls[4].body, {});
 });
 
 Deno.test("pairing code is returned once and only its HMAC reaches persistence", async () => {

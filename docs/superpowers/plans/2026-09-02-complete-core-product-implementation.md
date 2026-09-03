@@ -1167,24 +1167,24 @@ git commit -m "feat: add research and run transparency"
 - Consumes: Claude lifecycle, Telegram pairing status/code, timezone, phases, notification preferences.
 - Produces: guided connection setup with no unsupported provider choices or editable provider cron.
 
-- [ ] **Step 1: Write failing scope and credential tests**
+- [x] **Step 1: Write failing scope and credential tests**
 
 Ensure only Claude is selectable, ChatGPT/Grok/BYOK/second opinion are absent, inbound secret is shown
 once, trigger token cannot be read back, revoked connection cannot run, pairing code has expiry, and
 settings cannot weaken platform policy.
 
-- [ ] **Step 2: Implement Connections**
+- [x] **Step 2: Implement Connections**
 
 Guide consent, kit download, gateway credential copy, `/fire` token submission, real handshake,
 activation, health/session link, rotation, disconnect, Telegram code, unlink, and relink. State Routine
 research-preview/plan/daily-cap limitations visibly.
 
-- [ ] **Step 3: Implement Settings**
+- [x] **Step 3: Implement Settings**
 
 Allow valid IANA display timezone, phase enablement, market versus operational notification preferences,
 and no model-owned schedule expression. Show Eastern market anchors converted for display.
 
-- [ ] **Step 4: Verify and commit**
+- [x] **Step 4: Verify and commit**
 
 Run component tests, mobile/accessibility checks, typecheck, and build. Commit:
 

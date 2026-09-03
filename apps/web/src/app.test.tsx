@@ -55,6 +55,13 @@ const repository: DashboardRepository = {
   loadActivity: () => Promise.resolve({ transactions: [], plans: [], commands: [] }),
   loadResearch: () => Promise.resolve({ items: [] }),
   loadRuns: () => Promise.resolve({ runs: [] }),
+  loadConnections: () => Promise.resolve({ connections: [], telegram: null, handshakeRuns: [] }),
+  loadSettings: () => Promise.resolve({
+    displayName: "Raj", timezone: "America/Chicago", notifyPreMarket: true,
+    notifyIntraday: true, notifyPostMarket: true, notifyOperational: true,
+    primaryConnectionId: null, scheduleTimezone: "America/Chicago",
+    schedulePreMarket: true, scheduleIntraday: true, schedulePostMarket: true,
+  }),
   lookupCommand: () => Promise.resolve(null),
 };
 
@@ -63,6 +70,13 @@ const commands: AppApiClient = {
   confirm: () => Promise.reject(new Error("not used")),
   lookup: () => Promise.resolve(null),
   requestRun: () => Promise.reject(new Error("not used")),
+  createConnection: () => Promise.reject(new Error("not used")),
+  beginConnectionHandshake: () => Promise.reject(new Error("not used")),
+  activateConnection: () => Promise.reject(new Error("not used")),
+  revokeConnection: () => Promise.reject(new Error("not used")),
+  requestPairingCode: () => Promise.reject(new Error("not used")),
+  unlinkTelegram: () => Promise.reject(new Error("not used")),
+  updateSettings: () => Promise.reject(new Error("not used")),
 };
 
 function app(session: SessionService) {

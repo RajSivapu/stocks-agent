@@ -142,6 +142,7 @@ def test_policies_are_authenticated_and_bind_both_owner_checks(tenant_database):
             assert "auth.uid()" in using
     assert executor_tables == {
         "portfolio_commands",
+        "profiles",
         "transactions",
         "holdings",
         "owner_ledger_counters",
