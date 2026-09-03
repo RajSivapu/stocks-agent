@@ -138,6 +138,7 @@ BEGIN
       scope_value := 'telegram_pairing'; limit_value := 5; window_value := 600;
     WHEN 'POST /connections/create',
          'POST /connections/handshake',
+         'POST /connections/activate',
          'POST /connections/revoke' THEN
       scope_value := 'connection_change'; limit_value := 10; window_value := 3600;
     WHEN 'GET /settings', 'PATCH /settings' THEN
@@ -195,6 +196,14 @@ BEGIN
         data_value := app.issue_telegram_pairing_code(
           owner_value, p_request->>'code_digest'
         );
+      WHEN 'POST /connections/create' THEN
+        data_value := app.create_agent_connection(owner_value, p_request);
+      WHEN 'POST /connections/handshake' THEN
+        data_value := app.begin_agent_connection_handshake(owner_value, p_request);
+      WHEN 'POST /connections/activate' THEN
+        data_value := app.activate_agent_connection(owner_value, p_request);
+      WHEN 'POST /connections/revoke' THEN
+        data_value := app.revoke_agent_connection(owner_value, p_request);
       ELSE
         INSERT INTO app.app_api_audit_events(owner_id, request_id, route, result_code)
         VALUES (owner_value, p_request_id, p_route, 'NOT_READY');
@@ -220,10 +229,10 @@ BEGIN
           THEN 'CONFLICT'
         ELSE 'INTERNAL_ERROR'
       END;
+  END;
     INSERT INTO app.app_api_audit_events(owner_id, request_id, route, result_code)
     VALUES (owner_value, p_request_id, p_route, result_code);
     RETURN jsonb_build_object('ok', false, 'error', jsonb_build_object('code', result_code));
-  END;
 END
 $$;
 

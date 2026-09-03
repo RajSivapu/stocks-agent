@@ -143,10 +143,7 @@ def test_provider_start_resolves_trigger_to_one_canonical_run(tenant_database):
             (slot["slot_id"],),
         ).fetchone()
         secret = "aa" * 32 if str(owner_id) == OWNER_A else "bb" * 32
-        payload = {
-            "phase": slot["phase"], "market_date": slot["market_date"],
-            "trigger_request_id": slot["trigger_request_id"],
-        }
+        payload = {"trigger_request_id": slot["trigger_request_id"]}
         first = agent_rpc(tenant_database, "agent_start_run", agent_request(
             public_id, secret, "start_run", payload=payload,
         ))
@@ -155,6 +152,12 @@ def test_provider_start_resolves_trigger_to_one_canonical_run(tenant_database):
         ))
         assert first["run_id"] == second["run_id"]
         assert second["canonical"] is True
+        context = agent_rpc(tenant_database, "agent_read_bounded_context", agent_request(
+            public_id, secret, "read_bounded_context", first["run_id"],
+        ))
+        assert context["phase"] == slot["phase"]
+        assert context["market_date"] == slot["market_date"]
+        assert context["contract_version"] == 2
         slot_status = tenant_database.execute(
             "SELECT status, canonical_run_id FROM app.scheduled_run_slots WHERE id = %s",
             (slot["slot_id"],),

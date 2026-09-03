@@ -59,7 +59,7 @@ Deno.test("all six V2 operations dispatch only to their named machine RPC", asyn
   const repository = new FakeRepository();
   const handler = createAgentGatewayHandler({ repository });
   const cases: Array<[string, unknown]> = [
-    ["start_run", { phase: "intraday", market_date: "2026-09-02", trigger_request_id: null }],
+    ["start_run", { trigger_request_id: null }],
     ["read_bounded_context", {}],
     ["submit_analysis", validSubmission()],
     ["record_permitted_artifacts", { mutations: [{
@@ -73,6 +73,46 @@ Deno.test("all six V2 operations dispatch only to their named machine RPC", asyn
     assertEquals(response.status, 200);
   }
   assertEquals(repository.calls.map((call) => call.operation), cases.map(([operation]) => operation));
+});
+
+Deno.test("start_run accepts only server-resolved opaque trigger authority", async () => {
+  const repository = new FakeRepository();
+  const handler = createAgentGatewayHandler({ repository });
+  const accepted = await handler(request(envelope("start_run", {
+    trigger_request_id: "44444444-4444-4444-8444-444444444444",
+  })));
+  assertEquals(accepted.status, 200);
+  for (const body of [
+    { phase: "intraday", market_date: "2026-09-03", trigger_request_id: null },
+    { trigger_request_id: null, phase: "on-demand" },
+  ]) {
+    assertEquals((await handler(request(envelope("start_run", body)))).status, 400);
+  }
+  assertEquals(repository.calls.length, 1);
+});
+
+Deno.test("handshake finish accepts only exact bounded source-check receipts", async () => {
+  const repository = new FakeRepository();
+  const handler = createAgentGatewayHandler({ repository });
+  const valid = {
+    contract_version: 2,
+    challenge: "a".repeat(64),
+    source_checks: [
+      { host: "query1.finance.yahoo.com", status: "reachable", content_hash: "b".repeat(64), observed_at: "2026-09-03T12:00:00Z" },
+      { host: "www.sec.gov", status: "reachable", content_hash: "c".repeat(64), observed_at: "2026-09-03T12:00:01Z" },
+      { host: "finnhub.io", status: "reachable", content_hash: "d".repeat(64), observed_at: "2026-09-03T12:00:02Z" },
+    ],
+  };
+  assertEquals((await handler(request(envelope("finish_run", valid)))).status, 200);
+  for (const malformed of [
+    { ...valid, challenge: "not-a-hash" },
+    { ...valid, source_checks: valid.source_checks.slice(0, 2) },
+    { ...valid, source_checks: [{ ...valid.source_checks[0], extra: true }, ...valid.source_checks.slice(1)] },
+    { ...valid, source_checks: [{ ...valid.source_checks[0], status: "invented" }, ...valid.source_checks.slice(1)] },
+  ]) {
+    assertEquals((await handler(request(envelope("finish_run", malformed)))).status, 400);
+  }
+  assertEquals(repository.calls.length, 1);
 });
 
 Deno.test("model authority fields and arbitrary artifact kinds fail before repository access", async () => {

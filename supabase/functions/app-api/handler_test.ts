@@ -18,6 +18,9 @@ class FakeRepository implements AppApiRepository {
 
   dispatch(input: Record<string, unknown>): Promise<Record<string, unknown>> {
     this.calls.push(structuredClone(input));
+    if (input.route === "POST /connections/create") {
+      return Promise.resolve({ ok: true, data: { public_id: OWNER, status: "disabled" } });
+    }
     return Promise.resolve(structuredClone(this.response));
   }
 }
@@ -39,6 +42,7 @@ function makeHandler() {
     },
     newId: () => "33333333-3333-4333-8333-333333333333",
     newPairingCode: () => "ABCD234567",
+    newConnectionSecret: () => "A".repeat(43),
   });
   return { handler, repository, events };
 }
@@ -140,11 +144,26 @@ Deno.test("confirmation schema and route table are exact", async () => {
 
 Deno.test("future lifecycle routes reject unreviewed fields before dispatch", async () => {
   const { handler, repository } = makeHandler();
-  assertEquals((await handler(request("/connections/create", { provider: "claude" }))).status, 200);
+  const created = await handler(request("/connections/create", {
+    provider: "claude", consent_version: "provider-data-v1",
+  }));
+  assertEquals(created.status, 200);
+  assertEquals((await created.json()).data.gateway_credential, `${OWNER}.${"A".repeat(43)}`);
   assertEquals((await handler(request("/telegram/pairing-code", {}))).status, 200);
-  assertEquals((await handler(request("/connections/create", { provider: "grok" }))).status, 400);
+  assertEquals((await handler(request("/connections/create", {
+    provider: "grok", consent_version: "provider-data-v1",
+  }))).status, 400);
+  assertEquals((await handler(request("/connections/handshake", {
+    connection_id: OWNER,
+    trigger_url: "https://api.anthropic.com/v1/claude_code/routines/trig_ABCDEF/fire",
+    trigger_token: "t".repeat(32),
+  }))).status, 200);
+  assertEquals((await handler(request("/connections/activate", { connection_id: OWNER }))).status, 200);
   assertEquals((await handler(request("/telegram/pairing-code", { owner_id: OWNER }))).status, 400);
-  assertEquals(repository.calls.length, 2);
+  assertEquals(repository.calls.length, 4);
+  const connectionBody = repository.calls[0].body as Record<string, unknown>;
+  assertEquals(String(connectionBody.inbound_token_digest).length, 64);
+  assertEquals(JSON.stringify(connectionBody).includes("A".repeat(43)), false);
   assertEquals(repository.calls[1].body, { code_digest: "a43255350a50f61e0b614e953291560250a8d824c7a919ea1dab9504cfa35d7b" });
 });
 

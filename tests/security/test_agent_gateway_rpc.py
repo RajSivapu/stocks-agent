@@ -60,7 +60,6 @@ def start(tenant_database, owner=OWNER_A, phase="intraday", secret="aa" * 32):
         )
     result = rpc(tenant_database, "agent_start_run", request(
         public_id, secret, "start_run", payload={
-            "phase": phase, "market_date": "2026-09-03",
             "trigger_request_id": str(trigger_request_id) if trigger_request_id else None,
         },
     ))
@@ -156,7 +155,7 @@ def test_dry_run_authenticates_but_creates_no_gateway_or_run_rows(tenant_databas
         ).fetchone()[0]
         result = rpc(tenant_database, "agent_start_run", request(
             public_id, "aa" * 32, "start_run", dry_run=True,
-            payload={"phase": "intraday", "market_date": "2026-09-03", "trigger_request_id": None},
+            payload={"trigger_request_id": None},
         ))
         after = tenant_database.execute(
             "SELECT count(*) FROM app.market_gateway_requests WHERE owner_id = %s", (OWNER_A,)
@@ -213,8 +212,7 @@ def test_gateway_limits_six_runs_per_day_and_one_on_demand_per_hour(tenant_datab
         with pytest.raises(Exception, match="daily run limit reached"):
             rpc(tenant_database, "agent_start_run", request(
                 public_id, "aa" * 32, "start_run",
-                payload={"phase": "post-market", "market_date": "2026-09-03",
-                         "trigger_request_id": str(trigger_request_id)},
+                payload={"trigger_request_id": str(trigger_request_id)},
             ))
 
     with tenant_database.transaction(force_rollback=True):
@@ -222,7 +220,7 @@ def test_gateway_limits_six_runs_per_day_and_one_on_demand_per_hour(tenant_datab
         with pytest.raises(Exception, match="on-demand run limit reached"):
             rpc(tenant_database, "agent_start_run", request(
                 public_id, "aa" * 32, "start_run",
-                payload={"phase": "on-demand", "market_date": "2026-09-03", "trigger_request_id": None},
+                payload={"trigger_request_id": None},
             ))
 
 

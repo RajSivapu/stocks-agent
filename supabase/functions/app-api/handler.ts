@@ -6,6 +6,7 @@ import {
   digestPairingValue,
   generatePairingCode,
 } from "../telegram-portfolio/pairing.mjs";
+import { attachGatewayCredential, generateInboundConnectionSecret, prepareConnectionCreate } from "./connections.ts";
 
 
 const MAX_BODY_BYTES = 64 * 1024;
@@ -23,6 +24,7 @@ export type AppApiHandlerDependencies = {
   authenticate(request: Request): Promise<{ sub: string; role: "authenticated" }>;
   newId?: () => string;
   newPairingCode?: () => string;
+  newConnectionSecret?: () => string;
 };
 
 function errorResponse(error: unknown, request: Request, allowedOrigins: readonly string[]): Response {
@@ -75,6 +77,7 @@ function responseStatus(value: Record<string, unknown>): number {
 export function createAppApiHandler(dependencies: AppApiHandlerDependencies) {
   const newId = dependencies.newId ?? crypto.randomUUID;
   const newPairingCode = dependencies.newPairingCode ?? generatePairingCode;
+  const newConnectionSecret = dependencies.newConnectionSecret ?? generateInboundConnectionSecret;
   return async (request: Request): Promise<Response> => {
     try {
       const url = new URL(request.url);
@@ -110,6 +113,12 @@ export function createAppApiHandler(dependencies: AppApiHandlerDependencies) {
           code_digest: await digestPairingValue(pairingCode, dependencies.pairingHashPepper),
         };
       }
+      let inboundConnectionSecret: string | undefined;
+      if (route.key === "connection_create") {
+        const connection = await prepareConnectionCreate(validated, newConnectionSecret);
+        validated = connection.request;
+        inboundConnectionSecret = connection.secret;
+      }
       const result = await dependencies.repository.dispatch({
         route: `${route.method} ${route.path}`,
         requestId: newId(),
@@ -117,13 +126,16 @@ export function createAppApiHandler(dependencies: AppApiHandlerDependencies) {
         bearerToken: bearerToken(request),
         body: validated,
       });
-      const responseValue = pairingCode && result.ok === true && result.data &&
+      let responseValue = pairingCode && result.ok === true && result.data &&
           typeof result.data === "object" && !Array.isArray(result.data)
         ? {
           ...result,
           data: { ...(result.data as Record<string, unknown>), code: pairingCode },
         }
         : result;
+      if (inboundConnectionSecret) {
+        responseValue = attachGatewayCredential(responseValue, inboundConnectionSecret);
+      }
       return jsonResponse(
         responseStatus(responseValue),
         responseValue,

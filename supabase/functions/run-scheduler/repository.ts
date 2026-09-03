@@ -4,7 +4,7 @@ import type { FireReceipt } from "./claude-fire.ts";
 export type ClaimedSlot = {
   slot_id: string;
   trigger_request_id: string;
-  phase: "pre-market" | "intraday" | "post-market";
+  phase: "pre-market" | "intraday" | "post-market" | "on-demand";
   market_date: string;
   holiday: boolean;
   attempt_id: string | null;

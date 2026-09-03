@@ -151,6 +151,7 @@ def test_policies_are_authenticated_and_bind_both_owner_checks(tenant_database):
         "market_quote_cache",
         "corporate_action_states",
         "agent_analysis_submissions",
+        "user_consents",
         "scheduled_run_slots",
         "routine_trigger_attempts",
         "owner_run_allowances",

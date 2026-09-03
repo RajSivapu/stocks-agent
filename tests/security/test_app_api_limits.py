@@ -151,3 +151,40 @@ def test_app_api_runtime_has_no_privileged_database_credential_dependency():
     assert "SUPABASE_SERVICE_ROLE_KEY" not in source
     assert "DATABASE_URL" not in source
     assert "SUPABASE_ANON_KEY" in source
+
+
+def test_connection_routes_use_authenticated_owner_and_require_completed_handshake(tenant_database):
+    with tenant_database.transaction(force_rollback=True):
+        tenant_database.execute(
+            """
+            INSERT INTO app.user_consents(owner_id, document_version, source)
+            VALUES (%s, 'provider-data-v1', 'web')
+            ON CONFLICT (owner_id, document_version) DO NOTHING
+            """,
+            (OWNER_A,),
+        )
+        created = dispatch(tenant_database, "POST /connections/create", {
+            "provider": "claude",
+            "consent_version": "provider-data-v1",
+            "inbound_token_digest": "e" * 64,
+        })
+        assert created["ok"] is True
+        connection_id = created["data"]["connection_id"]
+        handshake = dispatch(tenant_database, "POST /connections/handshake", {
+            "connection_id": connection_id,
+            "trigger_url": "https://api.anthropic.com/v1/claude_code/routines/trig_APITEST/fire",
+            "trigger_token": "api-route-routine-token-12345",
+        })
+        assert handshake["ok"] is True
+        assert handshake["data"]["status"] == "testing"
+        premature = dispatch(tenant_database, "POST /connections/activate", {
+            "connection_id": connection_id,
+        })
+        assert premature == {"ok": False, "error": {"code": "NOT_FOUND"}}
+        cross_owner = dispatch(
+            tenant_database,
+            "POST /connections/revoke",
+            {"connection_id": connection_id},
+            owner=OWNER_B,
+        )
+        assert cross_owner == {"ok": False, "error": {"code": "NOT_FOUND"}}

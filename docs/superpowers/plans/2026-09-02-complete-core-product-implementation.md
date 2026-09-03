@@ -929,25 +929,25 @@ git commit -m "feat: schedule canonical claude runs"
 - Consumes: signed-in owner, one-time inbound gateway secret, exact `/fire` URL/token, and consent version.
 - Produces: `disabled -> testing -> ready -> active -> revoked` connection state and a no-write handshake receipt.
 
-- [ ] **Step 1: Write failing lifecycle tests**
+- [x] **Step 1: Write failing lifecycle tests**
 
 Reject activation without current consent, unverified trigger URL, missing callback, source-network
 failure, wrong contract version, invented receipt, owner switch, or green provider status without
 application completion. Reconnect always creates new credentials.
 
-- [ ] **Step 2: Create separate credentials**
+- [x] **Step 2: Create separate credentials**
 
 Generate a 256-bit inbound secret, store only SHA-256 digest, display plaintext once, and bind one
 capability set. Validate and store the outbound trigger token in Vault. Rotation/revocation operates on
 each credential independently.
 
-- [ ] **Step 3: Implement application-fired no-write handshake**
+- [x] **Step 3: Implement application-fired no-write handshake**
 
 The app creates a handshake run, invokes `/fire`, records the returned session URL, and requires the
 Routine to authenticate inbound, read synthetic bounded context, prove allow-listed source access,
 submit contract version, and finish with zero writes/notifications.
 
-- [ ] **Step 4: Write the screenshot-level kit**
+- [x] **Step 4: Write the screenshot-level kit**
 
 Document every Claude screen, exact Custom network domains, API credential host binding, reviewed
 prompt, trigger creation, token paste, expected statuses, allowance/daily-cap caveats, and disconnect

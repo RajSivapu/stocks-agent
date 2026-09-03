@@ -270,6 +270,8 @@ CREATE INDEX agent_analysis_submissions_run_idx
 -- to the non-login migration owner used by reviewed SECURITY DEFINER functions.
 CREATE POLICY agent_connections_executor_all ON app.agent_connections
   FOR ALL TO stock_agent_migration_owner USING (true) WITH CHECK (true);
+CREATE POLICY user_consents_executor_all ON app.user_consents
+  FOR ALL TO stock_agent_migration_owner USING (true) WITH CHECK (true);
 CREATE POLICY analysis_schedules_executor_all ON app.analysis_schedules
   FOR ALL TO stock_agent_migration_owner USING (true) WITH CHECK (true);
 CREATE POLICY analysis_runs_executor_all ON app.analysis_runs
@@ -367,7 +369,7 @@ BEGIN
     coalesce(connection_row.inbound_token_digest, decode(repeat('00', 32), 'hex')),
     presented_digest
   );
-  IF NOT connection_found OR NOT digest_matches OR connection_row.status <> 'active'
+  IF NOT connection_found OR NOT digest_matches OR connection_row.status NOT IN ('testing','active')
      OR connection_row.contract_version <> 2 THEN
     RAISE EXCEPTION 'agent credential or run unavailable' USING ERRCODE = '42501';
   END IF;
@@ -391,7 +393,7 @@ BEGIN
         'duplicate', true, 'response', existing_request.response,
         'owner_id', connection_row.owner_id, 'connection_id', connection_row.id,
         'request_id', request_uuid, 'run_id', existing_request.run_id,
-        'dry_run', false
+        'dry_run', false, 'connection_status', connection_row.status
       );
     END IF;
     RAISE EXCEPTION 'request replay conflict' USING ERRCODE = '23505';
@@ -413,7 +415,8 @@ BEGIN
     RETURN jsonb_build_object(
       'duplicate', false, 'owner_id', connection_row.owner_id,
       'connection_id', connection_row.id, 'request_id', request_uuid,
-      'run_id', run_uuid, 'dry_run', true, 'provider', connection_row.provider
+      'run_id', run_uuid, 'dry_run', true, 'provider', connection_row.provider,
+      'connection_status', connection_row.status
     );
   END IF;
 
@@ -435,7 +438,8 @@ BEGIN
   RETURN jsonb_build_object(
     'duplicate', false, 'owner_id', connection_row.owner_id,
     'connection_id', connection_row.id, 'request_id', request_uuid,
-    'run_id', run_uuid, 'dry_run', false, 'provider', connection_row.provider
+    'run_id', run_uuid, 'dry_run', false, 'provider', connection_row.provider,
+    'connection_status', connection_row.status
   );
 END
 $$;
@@ -483,17 +487,12 @@ DECLARE
   slot_found BOOLEAN;
   response JSONB;
 BEGIN
-  IF NOT app.jsonb_has_exact_keys(payload, ARRAY['phase','market_date','trigger_request_id'])
-     OR jsonb_typeof(payload->'phase') <> 'string'
-     OR jsonb_typeof(payload->'market_date') <> 'string'
-     OR payload->>'phase' NOT IN ('pre-market','intraday','post-market','on-demand')
-     OR payload->>'market_date' !~ '^\d{4}-\d{2}-\d{2}$'
+  IF NOT app.jsonb_has_exact_keys(payload, ARRAY['trigger_request_id'])
      OR (payload->'trigger_request_id' <> 'null'::jsonb
          AND jsonb_typeof(payload->'trigger_request_id') <> 'string') THEN
     RAISE EXCEPTION 'invalid agent request' USING ERRCODE = '22023';
   END IF;
   BEGIN
-    market_day := (payload->>'market_date')::date;
     IF payload->'trigger_request_id' <> 'null'::jsonb THEN
       trigger_uuid := (payload->>'trigger_request_id')::uuid;
     END IF;
@@ -509,19 +508,16 @@ BEGIN
   owner_uuid := (claim->>'owner_id')::uuid;
   connection_uuid := (claim->>'connection_id')::uuid;
   request_uuid := (claim->>'request_id')::uuid;
-  phase_value := payload->>'phase';
 
   IF trigger_uuid IS NULL THEN
-    IF phase_value <> 'on-demand' THEN
-      RAISE EXCEPTION 'agent credential or run unavailable' USING ERRCODE = '42501';
-    END IF;
+    phase_value := 'on-demand';
+    market_day := (clock_timestamp() AT TIME ZONE 'America/New_York')::date;
   ELSE
     SELECT * INTO slot_row FROM app.scheduled_run_slots
     WHERE owner_id = owner_uuid AND connection_id = connection_uuid
       AND trigger_request_id = trigger_uuid FOR UPDATE;
     slot_found := FOUND;
-    IF NOT slot_found OR slot_row.holiday OR slot_row.phase <> phase_value
-       OR slot_row.market_date <> market_day
+    IF NOT slot_found OR slot_row.holiday
        OR slot_row.status NOT IN ('claimed','triggered','trigger_unknown','provider_started') THEN
       RAISE EXCEPTION 'agent credential or run unavailable' USING ERRCODE = '42501';
     END IF;
@@ -537,6 +533,10 @@ BEGIN
       );
       RETURN machine.agent_complete_operation(owner_uuid, request_uuid, response);
     END IF;
+  END IF;
+  IF claim->>'connection_status' = 'testing'
+     AND (trigger_uuid IS NULL OR slot_row.purpose <> 'handshake') THEN
+    RAISE EXCEPTION 'agent credential or run unavailable' USING ERRCODE = '42501';
   END IF;
 
   PERFORM pg_advisory_xact_lock(hashtextextended(owner_uuid::text || ':' || connection_uuid::text || ':' || market_day::text, 0));
@@ -591,6 +591,10 @@ DECLARE
   run_uuid UUID;
   request_uuid UUID;
   response JSONB;
+  handshake_run BOOLEAN;
+  challenge_value TEXT;
+  phase_value TEXT;
+  market_day DATE;
 BEGIN
   claim := machine.agent_claim_operation(p_request, 'read_bounded_context');
   IF (claim->>'duplicate')::boolean THEN RETURN claim->'response'; END IF;
@@ -600,9 +604,31 @@ BEGIN
   owner_uuid := (claim->>'owner_id')::uuid;
   run_uuid := (claim->>'run_id')::uuid;
   request_uuid := (claim->>'request_id')::uuid;
+  SELECT kind, market_date INTO phase_value, market_day
+  FROM app.analysis_runs WHERE owner_id = owner_uuid AND id = run_uuid;
+
+  SELECT encode(handshake_challenge, 'hex') INTO challenge_value
+  FROM app.scheduled_run_slots
+  WHERE owner_id = owner_uuid AND canonical_run_id = run_uuid AND purpose = 'handshake';
+  handshake_run := FOUND;
+  IF handshake_run THEN
+    response := jsonb_build_object(
+      'run_id', run_uuid, 'handshake', true, 'contract_version', 2,
+      'challenge', challenge_value, 'phase', phase_value, 'market_date', market_day,
+      'holdings', '[]'::jsonb, 'plans', '[]'::jsonb,
+      'recent_suggestions', '[]'::jsonb, 'radar', '[]'::jsonb,
+      'evidence', '[]'::jsonb, 'quotes', '[]'::jsonb,
+      'allowed_source_hosts', jsonb_build_array(
+        'query1.finance.yahoo.com', 'www.sec.gov', 'finnhub.io'
+      )
+    );
+    IF (claim->>'dry_run')::boolean THEN RETURN response || jsonb_build_object('dry_run', true); END IF;
+    RETURN machine.agent_complete_operation(owner_uuid, request_uuid, response);
+  END IF;
 
   SELECT jsonb_build_object(
-    'run_id', run_uuid,
+    'run_id', run_uuid, 'contract_version', 2,
+    'phase', phase_value, 'market_date', market_day,
     'holdings', (SELECT coalesce(jsonb_agg(to_jsonb(row_value)), '[]'::jsonb) FROM (
       SELECT ticker, shares::text AS shares, avg_cost::text AS avg_cost, bucket,
              stop::text AS stop, target::text AS target,
@@ -674,6 +700,12 @@ BEGIN
   owner_uuid := (claim->>'owner_id')::uuid;
   run_uuid := (claim->>'run_id')::uuid;
   request_uuid := (claim->>'request_id')::uuid;
+  IF EXISTS (
+    SELECT 1 FROM app.scheduled_run_slots
+    WHERE owner_id = owner_uuid AND canonical_run_id = run_uuid AND purpose = 'handshake'
+  ) THEN
+    RAISE EXCEPTION 'handshake operation is not permitted' USING ERRCODE = '42501';
+  END IF;
   SELECT started_at INTO run_started FROM app.analysis_runs
   WHERE owner_id = owner_uuid AND id = run_uuid;
 
@@ -760,6 +792,12 @@ BEGIN
   owner_uuid := (claim->>'owner_id')::uuid;
   run_uuid := (claim->>'run_id')::uuid;
   request_uuid := (claim->>'request_id')::uuid;
+  IF EXISTS (
+    SELECT 1 FROM app.scheduled_run_slots
+    WHERE owner_id = owner_uuid AND canonical_run_id = run_uuid AND purpose = 'handshake'
+  ) THEN
+    RAISE EXCEPTION 'handshake operation is not permitted' USING ERRCODE = '42501';
+  END IF;
 
   FOR item IN SELECT value FROM jsonb_array_elements(payload->'mutations') LOOP
     item_kind := item->>'kind';
@@ -892,6 +930,12 @@ BEGIN
   owner_uuid := (claim->>'owner_id')::uuid;
   run_uuid := (claim->>'run_id')::uuid;
   request_uuid := (claim->>'request_id')::uuid;
+  IF EXISTS (
+    SELECT 1 FROM app.scheduled_run_slots
+    WHERE owner_id = owner_uuid AND canonical_run_id = run_uuid AND purpose = 'handshake'
+  ) THEN
+    RAISE EXCEPTION 'handshake operation is not permitted' USING ERRCODE = '42501';
+  END IF;
   SELECT jsonb_build_object(
     'status', CASE WHEN (claim->>'dry_run')::boolean THEN 'dry_run' ELSE 'due_returned' END,
     'run_id', run_uuid,
@@ -930,10 +974,12 @@ DECLARE
   claimed_count INT;
   final_status TEXT;
   response JSONB;
+  handshake_run BOOLEAN;
+  handshake_challenge_value BYTEA;
+  check_row JSONB;
+  check_observed_at TIMESTAMPTZ;
+  required_host TEXT;
 BEGIN
-  IF NOT app.jsonb_has_exact_keys(p_request->'payload', ARRAY[]::text[]) THEN
-    RAISE EXCEPTION 'invalid agent request' USING ERRCODE = '22023';
-  END IF;
   claim := machine.agent_claim_operation(p_request, 'finish_run');
   IF (claim->>'duplicate')::boolean THEN RETURN claim->'response'; END IF;
   owner_uuid := (claim->>'owner_id')::uuid;
@@ -946,6 +992,62 @@ BEGIN
   FROM app.market_gateway_requests
   WHERE owner_id = owner_uuid AND run_id = run_uuid;
   final_status := CASE WHEN failed_count > 0 OR claimed_count > 0 THEN 'partial' ELSE 'completed' END;
+  SELECT handshake_challenge INTO handshake_challenge_value
+  FROM app.scheduled_run_slots
+  WHERE owner_id = owner_uuid AND canonical_run_id = run_uuid AND purpose = 'handshake'
+  FOR UPDATE;
+  handshake_run := FOUND;
+  IF handshake_run THEN
+    IF NOT app.jsonb_has_exact_keys(
+         p_request->'payload', ARRAY['contract_version','challenge','source_checks']
+       ) OR p_request->'payload'->>'contract_version' <> '2'
+       OR p_request->'payload'->>'challenge' <> encode(handshake_challenge_value, 'hex')
+       OR jsonb_typeof(p_request->'payload'->'source_checks') <> 'array'
+       OR jsonb_array_length(p_request->'payload'->'source_checks') <> 3 THEN
+      RAISE EXCEPTION 'handshake verification failed' USING ERRCODE = '42501';
+    END IF;
+    FOREACH required_host IN ARRAY ARRAY[
+      'query1.finance.yahoo.com', 'www.sec.gov', 'finnhub.io'
+    ] LOOP
+      IF (
+        SELECT count(*) FROM jsonb_array_elements(p_request->'payload'->'source_checks') item
+        WHERE item->>'host' = required_host
+      ) <> 1 THEN
+        RAISE EXCEPTION 'handshake verification failed' USING ERRCODE = '42501';
+      END IF;
+    END LOOP;
+    FOR check_row IN
+      SELECT value FROM jsonb_array_elements(p_request->'payload'->'source_checks')
+    LOOP
+      IF NOT app.jsonb_has_exact_keys(
+           check_row, ARRAY['host','status','content_hash','observed_at']
+         ) OR check_row->>'host' NOT IN (
+           'query1.finance.yahoo.com', 'www.sec.gov', 'finnhub.io'
+         ) OR check_row->>'status' <> 'reachable'
+         OR check_row->>'content_hash' !~ '^[0-9a-f]{64}$'
+         OR jsonb_typeof(check_row->'observed_at') <> 'string' THEN
+        RAISE EXCEPTION 'handshake verification failed' USING ERRCODE = '42501';
+      END IF;
+      BEGIN
+        check_observed_at := (check_row->>'observed_at')::timestamptz;
+      EXCEPTION WHEN invalid_text_representation OR datetime_field_overflow THEN
+        RAISE EXCEPTION 'handshake verification failed' USING ERRCODE = '42501';
+      END;
+      IF check_observed_at < clock_timestamp() - interval '15 minutes'
+         OR check_observed_at > clock_timestamp() + interval '5 minutes' THEN
+        RAISE EXCEPTION 'handshake verification failed' USING ERRCODE = '42501';
+      END IF;
+    END LOOP;
+  ELSIF NOT app.jsonb_has_exact_keys(p_request->'payload', ARRAY[]::text[]) THEN
+    RAISE EXCEPTION 'invalid agent request' USING ERRCODE = '22023';
+  END IF;
+  IF handshake_run AND NOT EXISTS (
+    SELECT 1 FROM app.market_gateway_requests
+    WHERE owner_id = owner_uuid AND run_id = run_uuid
+      AND operation = 'read_bounded_context' AND status = 'completed'
+  ) THEN
+    final_status := 'partial';
+  END IF;
   response := jsonb_build_object(
     'status', CASE WHEN (claim->>'dry_run')::boolean THEN 'dry_run' ELSE final_status END,
     'run_id', run_uuid,
@@ -961,6 +1063,14 @@ BEGIN
     summary = CASE WHEN final_status = 'completed' THEN 'Run completed; no Telegram send was recorded.'
                    ELSE 'Run finished partially; no Telegram send was recorded.' END
   WHERE owner_id = owner_uuid AND id = run_uuid;
+  IF handshake_run AND final_status = 'completed' THEN
+    UPDATE app.scheduled_run_slots SET status = 'completed',
+      handshake_receipt = p_request->'payload', updated_at = clock_timestamp()
+    WHERE owner_id = owner_uuid AND canonical_run_id = run_uuid AND purpose = 'handshake';
+    UPDATE app.agent_connections SET status = 'ready', last_handshake_at = clock_timestamp(),
+      updated_at = clock_timestamp()
+    WHERE owner_id = owner_uuid AND id = (claim->>'connection_id')::uuid AND status = 'testing';
+  END IF;
   RETURN machine.agent_complete_operation(owner_uuid, request_uuid, response);
 END
 $$;
@@ -1003,7 +1113,10 @@ CREATE TABLE app.scheduled_run_slots (
   owner_id UUID NOT NULL REFERENCES auth.users(id) ON DELETE CASCADE,
   connection_id UUID NOT NULL,
   market_date DATE NOT NULL,
-  phase TEXT NOT NULL CHECK (phase IN ('pre-market','intraday','post-market')),
+  phase TEXT NOT NULL CHECK (phase IN ('pre-market','intraday','post-market','on-demand')),
+  purpose TEXT NOT NULL DEFAULT 'scheduled' CHECK (purpose IN ('scheduled','handshake')),
+  handshake_challenge BYTEA,
+  handshake_receipt JSONB,
   due_at TIMESTAMPTZ NOT NULL,
   window_ends_at TIMESTAMPTZ NOT NULL,
   holiday BOOLEAN NOT NULL DEFAULT false,
@@ -1017,7 +1130,6 @@ CREATE TABLE app.scheduled_run_slots (
   lease_expires_at TIMESTAMPTZ,
   created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
   updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-  UNIQUE (owner_id, market_date, phase),
   UNIQUE (owner_id, trigger_request_id),
   UNIQUE (owner_id, id),
   FOREIGN KEY (owner_id, connection_id)
@@ -1025,7 +1137,12 @@ CREATE TABLE app.scheduled_run_slots (
   FOREIGN KEY (owner_id, canonical_run_id)
     REFERENCES app.analysis_runs(owner_id, id) ON DELETE RESTRICT,
   CHECK (window_ends_at > due_at),
-  CHECK ((status = 'pending' AND lease_token IS NULL) OR status <> 'pending')
+  CHECK ((status = 'pending' AND lease_token IS NULL) OR status <> 'pending'),
+  CHECK ((purpose = 'handshake' AND phase = 'on-demand' AND NOT holiday)
+      OR (purpose = 'scheduled' AND phase <> 'on-demand')),
+  CHECK ((purpose = 'handshake' AND octet_length(handshake_challenge) = 32)
+      OR (purpose = 'scheduled' AND handshake_challenge IS NULL)),
+  CHECK (handshake_receipt IS NULL OR purpose = 'handshake')
 );
 
 CREATE TABLE app.routine_trigger_attempts (
@@ -1108,6 +1225,8 @@ REVOKE ALL ON app.scheduled_run_slots, app.routine_trigger_attempts,
   FROM PUBLIC, anon, authenticated, service_role,
        stock_agent_gateway, stock_agent_scheduler, stock_agent_telegram, stock_agent_backup;
 CREATE INDEX scheduled_run_slots_due_idx ON app.scheduled_run_slots(status, due_at, window_ends_at);
+CREATE UNIQUE INDEX scheduled_run_slots_canonical_idx
+  ON app.scheduled_run_slots(owner_id, market_date, phase) WHERE purpose = 'scheduled';
 CREATE INDEX routine_trigger_attempts_status_idx ON app.routine_trigger_attempts(status, claimed_at);
 CREATE INDEX operational_events_status_idx ON app.operational_events(status, created_at);
 
@@ -1158,6 +1277,7 @@ DECLARE
   claim_limit INT;
   market_day DATE;
   calendar_row machine.market_calendar_days%ROWTYPE;
+  calendar_available BOOLEAN;
   candidate app.scheduled_run_slots%ROWTYPE;
   budget_limit INT;
   usage_month_value DATE;
@@ -1182,9 +1302,9 @@ BEGIN
   market_day := (effective_now AT TIME ZONE 'America/New_York')::date;
   SELECT * INTO calendar_row FROM machine.market_calendar_days
   WHERE market_date = market_day AND reviewed;
-  IF NOT FOUND THEN RETURN jsonb_build_object('slots', slots, 'calendar_status', 'unavailable'); END IF;
+  calendar_available := FOUND;
 
-  IF calendar_row.status = 'holiday' THEN
+  IF calendar_available AND calendar_row.status = 'holiday' THEN
     INSERT INTO app.scheduled_run_slots(
       owner_id, connection_id, market_date, phase, due_at, window_ends_at, holiday
     )
@@ -1196,8 +1316,8 @@ BEGIN
       ON connection.owner_id = schedule.owner_id AND connection.id = schedule.primary_connection_id
     WHERE schedule.pre_market_enabled AND connection.status = 'active'
       AND connection.provider = 'claude' AND connection.trigger_url IS NOT NULL
-    ON CONFLICT (owner_id, market_date, phase) DO NOTHING;
-  ELSE
+    ON CONFLICT (owner_id, market_date, phase) WHERE purpose = 'scheduled' DO NOTHING;
+  ELSIF calendar_available THEN
     INSERT INTO app.scheduled_run_slots(
       owner_id, connection_id, market_date, phase, due_at, window_ends_at, holiday
     )
@@ -1225,7 +1345,7 @@ BEGIN
       AND connection.trigger_url IS NOT NULL
       AND CASE phase_value WHEN 'pre-market' THEN schedule.pre_market_enabled
           WHEN 'intraday' THEN schedule.intraday_enabled ELSE schedule.post_market_enabled END
-    ON CONFLICT (owner_id, market_date, phase) DO NOTHING;
+    ON CONFLICT (owner_id, market_date, phase) WHERE purpose = 'scheduled' DO NOTHING;
   END IF;
 
   SELECT monthly_limit INTO budget_limit FROM machine.routine_budget_config WHERE singleton;
@@ -1233,6 +1353,7 @@ BEGIN
   FOR candidate IN
     SELECT * FROM app.scheduled_run_slots
     WHERE market_date = market_day AND status = 'pending'
+      AND (purpose = 'handshake' OR calendar_available)
       AND due_at <= effective_now AND window_ends_at >= effective_now
     ORDER BY due_at, owner_id
     LIMIT claim_limit FOR UPDATE SKIP LOCKED
@@ -1300,7 +1421,10 @@ BEGIN
       'holiday', false, 'attempt_id', attempt_uuid
     ));
   END LOOP;
-  RETURN jsonb_build_object('slots', slots, 'calendar_status', calendar_row.status);
+  RETURN jsonb_build_object(
+    'slots', slots,
+    'calendar_status', CASE WHEN calendar_available THEN calendar_row.status ELSE 'unavailable' END
+  );
 END
 $$;
 
@@ -1332,7 +1456,11 @@ BEGIN
     ON connection.owner_id = attempt.owner_id AND connection.id = attempt.connection_id
   JOIN vault.decrypted_secrets AS secret ON secret.id = connection.outbound_trigger_secret_id
   WHERE attempt.id = attempt_uuid AND attempt.status = 'claimed'
-    AND slot.status = 'claimed' AND connection.status = 'active';
+    AND slot.status = 'claimed'
+    AND (
+      connection.status = 'active'
+      OR (connection.status = 'testing' AND slot.purpose = 'handshake')
+    );
   IF NOT FOUND OR endpoint_value !~
     '^https://api\.anthropic\.com/v1/claude_code/routines/trig_[A-Za-z0-9]{6,128}/fire$'
     OR token_value IS NULL OR char_length(token_value) NOT BETWEEN 24 AND 500
@@ -1480,3 +1608,236 @@ GRANT EXECUTE ON FUNCTION machine.scheduler_claim_due_slots(JSONB) TO stock_agen
 GRANT EXECUTE ON FUNCTION machine.scheduler_read_trigger_secret(JSONB) TO stock_agent_scheduler;
 GRANT EXECUTE ON FUNCTION machine.scheduler_record_trigger_result(JSONB) TO stock_agent_scheduler;
 GRANT EXECUTE ON FUNCTION machine.scheduler_publish_holiday(JSONB) TO stock_agent_scheduler;
+
+-- User-owned provider connection lifecycle. Plain inbound secrets never enter SQL; the
+-- outbound Routine token is accepted once and immediately moved into Vault.
+
+CREATE TABLE machine.connection_policy (
+  singleton BOOLEAN PRIMARY KEY DEFAULT true CHECK (singleton),
+  current_consent_version TEXT NOT NULL CHECK (char_length(current_consent_version) BETWEEN 3 AND 100),
+  contract_version INT NOT NULL CHECK (contract_version = 2)
+);
+ALTER TABLE machine.connection_policy OWNER TO stock_agent_migration_owner;
+REVOKE ALL ON machine.connection_policy FROM PUBLIC, anon, authenticated, service_role,
+  stock_agent_gateway, stock_agent_scheduler, stock_agent_telegram, stock_agent_backup;
+INSERT INTO machine.connection_policy(singleton, current_consent_version, contract_version)
+VALUES (true, 'provider-data-v1', 2);
+
+GRANT EXECUTE ON FUNCTION vault.create_secret(TEXT, TEXT, TEXT) TO stock_agent_migration_owner;
+GRANT EXECUTE ON FUNCTION vault.delete_secret(UUID) TO stock_agent_migration_owner;
+
+CREATE OR REPLACE FUNCTION app.create_agent_connection(p_owner_id UUID, p_request JSONB)
+RETURNS JSONB
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = pg_catalog
+AS $$
+DECLARE
+  consent_version_value TEXT;
+  connection_uuid UUID := extensions.gen_random_uuid();
+  public_uuid UUID := extensions.gen_random_uuid();
+BEGIN
+  IF NOT app.jsonb_has_exact_keys(
+    p_request, ARRAY['provider','consent_version','inbound_token_digest']
+  ) OR p_request->>'provider' <> 'claude'
+     OR p_request->>'inbound_token_digest' !~ '^[0-9a-f]{64}$' THEN
+    RAISE EXCEPTION 'invalid connection request' USING ERRCODE = '22023';
+  END IF;
+  SELECT current_consent_version INTO consent_version_value
+  FROM machine.connection_policy WHERE singleton;
+  IF p_request->>'consent_version' <> consent_version_value
+     OR NOT EXISTS (
+       SELECT 1 FROM app.user_consents
+       WHERE owner_id = p_owner_id AND document_version = consent_version_value
+     ) OR NOT EXISTS (
+       SELECT 1 FROM app.profiles WHERE id = p_owner_id AND status = 'active'
+     ) THEN
+    RAISE EXCEPTION 'current provider consent is required' USING ERRCODE = '42501';
+  END IF;
+  INSERT INTO app.agent_connections(
+    id, owner_id, public_id, provider, credential_type, inbound_token_digest,
+    capabilities, contract_version, status
+  ) VALUES (
+    connection_uuid, p_owner_id, public_uuid, 'claude', 'claude_routine_v1',
+    decode(p_request->>'inbound_token_digest', 'hex'),
+    jsonb_build_object(
+      'suggestion_only', true, 'bounded_context', true,
+      'analyst_checker', true, 'contract_version', 2
+    ), 2, 'disabled'
+  );
+  RETURN jsonb_build_object(
+    'connection_id', connection_uuid, 'public_id', public_uuid,
+    'provider', 'claude', 'status', 'disabled', 'contract_version', 2
+  );
+END
+$$;
+
+CREATE OR REPLACE FUNCTION app.begin_agent_connection_handshake(p_owner_id UUID, p_request JSONB)
+RETURNS JSONB
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = pg_catalog
+AS $$
+DECLARE
+  connection_uuid UUID;
+  connection_row app.agent_connections%ROWTYPE;
+  vault_uuid UUID;
+  previous_vault_uuid UUID;
+  slot_uuid UUID;
+  trigger_uuid UUID;
+  consent_version_value TEXT;
+BEGIN
+  IF NOT app.jsonb_has_exact_keys(
+    p_request, ARRAY['connection_id','trigger_url','trigger_token']
+  ) OR p_request->>'trigger_url' !~
+       '^https://api\.anthropic\.com/v1/claude_code/routines/trig_[A-Za-z0-9]{6,128}/fire$'
+     OR char_length(p_request->>'trigger_token') NOT BETWEEN 24 AND 500
+     OR p_request->>'trigger_token' ~ '\s' THEN
+    RAISE EXCEPTION 'invalid connection request' USING ERRCODE = '22023';
+  END IF;
+  BEGIN connection_uuid := (p_request->>'connection_id')::uuid;
+  EXCEPTION WHEN invalid_text_representation THEN
+    RAISE EXCEPTION 'invalid connection request' USING ERRCODE = '22023';
+  END;
+  SELECT * INTO connection_row FROM app.agent_connections
+  WHERE owner_id = p_owner_id AND id = connection_uuid FOR UPDATE;
+  IF NOT FOUND OR connection_row.status NOT IN ('disabled','testing') THEN
+    RAISE EXCEPTION 'connection unavailable' USING ERRCODE = '42501';
+  END IF;
+  IF connection_row.status = 'testing' THEN
+    SELECT id, trigger_request_id INTO slot_uuid, trigger_uuid
+    FROM app.scheduled_run_slots
+    WHERE owner_id = p_owner_id AND connection_id = connection_uuid
+      AND purpose = 'handshake'
+      AND status IN ('pending','claimed','triggered','trigger_unknown','provider_started')
+    ORDER BY created_at DESC LIMIT 1;
+    IF FOUND THEN
+      RETURN jsonb_build_object('connection_id', connection_uuid, 'status', 'testing',
+        'handshake_id', slot_uuid, 'trigger_request_id', trigger_uuid, 'duplicate', true);
+    END IF;
+  END IF;
+  SELECT current_consent_version INTO consent_version_value
+  FROM machine.connection_policy WHERE singleton;
+  IF NOT EXISTS (
+    SELECT 1 FROM app.user_consents
+    WHERE owner_id = p_owner_id AND document_version = consent_version_value
+  ) THEN
+    RAISE EXCEPTION 'current provider consent is required' USING ERRCODE = '42501';
+  END IF;
+  vault_uuid := vault.create_secret(
+    p_request->>'trigger_token', 'routine-trigger-' || connection_uuid::text,
+    'User-owned Claude Routine trigger token'
+  );
+  previous_vault_uuid := connection_row.outbound_trigger_secret_id;
+  UPDATE app.agent_connections SET
+    outbound_trigger_secret_id = vault_uuid,
+    trigger_url = p_request->>'trigger_url', status = 'testing',
+    updated_at = clock_timestamp()
+  WHERE owner_id = p_owner_id AND id = connection_uuid;
+  IF previous_vault_uuid IS NOT NULL THEN
+    PERFORM vault.delete_secret(previous_vault_uuid);
+  END IF;
+  slot_uuid := extensions.gen_random_uuid();
+  trigger_uuid := extensions.gen_random_uuid();
+  INSERT INTO app.scheduled_run_slots(
+    id, owner_id, connection_id, market_date, phase, purpose, handshake_challenge, due_at,
+    window_ends_at, trigger_request_id, status
+  ) VALUES (
+    slot_uuid, p_owner_id, connection_uuid,
+    (clock_timestamp() AT TIME ZONE 'America/New_York')::date,
+    'on-demand', 'handshake', extensions.gen_random_bytes(32), clock_timestamp(),
+    clock_timestamp() + interval '1 hour', trigger_uuid, 'pending'
+  );
+  RETURN jsonb_build_object('connection_id', connection_uuid, 'status', 'testing',
+    'handshake_id', slot_uuid, 'trigger_request_id', trigger_uuid, 'duplicate', false);
+END
+$$;
+
+CREATE OR REPLACE FUNCTION app.activate_agent_connection(p_owner_id UUID, p_request JSONB)
+RETURNS JSONB
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = pg_catalog
+AS $$
+DECLARE
+  connection_uuid UUID;
+  consent_version_value TEXT;
+BEGIN
+  IF NOT app.jsonb_has_exact_keys(p_request, ARRAY['connection_id']) THEN
+    RAISE EXCEPTION 'invalid connection request' USING ERRCODE = '22023';
+  END IF;
+  BEGIN connection_uuid := (p_request->>'connection_id')::uuid;
+  EXCEPTION WHEN invalid_text_representation THEN
+    RAISE EXCEPTION 'invalid connection request' USING ERRCODE = '22023';
+  END;
+  SELECT current_consent_version INTO consent_version_value
+  FROM machine.connection_policy WHERE singleton;
+  IF NOT EXISTS (
+    SELECT 1 FROM app.user_consents
+    WHERE owner_id = p_owner_id AND document_version = consent_version_value
+  ) OR NOT EXISTS (
+    SELECT 1 FROM app.agent_connections
+    WHERE owner_id = p_owner_id AND id = connection_uuid AND status = 'ready'
+      AND last_handshake_at IS NOT NULL
+  ) THEN
+    RAISE EXCEPTION 'connection unavailable' USING ERRCODE = '42501';
+  END IF;
+  UPDATE app.agent_connections SET status = 'ready', updated_at = clock_timestamp()
+  WHERE owner_id = p_owner_id AND id <> connection_uuid AND status = 'active';
+  UPDATE app.agent_connections SET status = 'active', updated_at = clock_timestamp()
+  WHERE owner_id = p_owner_id AND id = connection_uuid;
+  INSERT INTO app.analysis_schedules(owner_id, primary_connection_id)
+  VALUES (p_owner_id, connection_uuid)
+  ON CONFLICT (owner_id) DO UPDATE SET primary_connection_id = excluded.primary_connection_id,
+    updated_at = clock_timestamp();
+  RETURN jsonb_build_object('connection_id', connection_uuid, 'status', 'active');
+END
+$$;
+
+CREATE OR REPLACE FUNCTION app.revoke_agent_connection(p_owner_id UUID, p_request JSONB)
+RETURNS JSONB
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = pg_catalog
+AS $$
+DECLARE
+  connection_uuid UUID;
+  vault_uuid UUID;
+BEGIN
+  IF NOT app.jsonb_has_exact_keys(p_request, ARRAY['connection_id']) THEN
+    RAISE EXCEPTION 'invalid connection request' USING ERRCODE = '22023';
+  END IF;
+  BEGIN connection_uuid := (p_request->>'connection_id')::uuid;
+  EXCEPTION WHEN invalid_text_representation THEN
+    RAISE EXCEPTION 'invalid connection request' USING ERRCODE = '22023';
+  END;
+  SELECT outbound_trigger_secret_id INTO vault_uuid
+  FROM app.agent_connections WHERE owner_id = p_owner_id AND id = connection_uuid FOR UPDATE;
+  IF NOT FOUND THEN RAISE EXCEPTION 'connection unavailable' USING ERRCODE = '42501'; END IF;
+  UPDATE app.analysis_schedules SET primary_connection_id = NULL, updated_at = clock_timestamp()
+  WHERE owner_id = p_owner_id AND primary_connection_id = connection_uuid;
+  UPDATE app.scheduled_run_slots SET status = 'missed', updated_at = clock_timestamp()
+  WHERE owner_id = p_owner_id AND connection_id = connection_uuid
+    AND status IN ('pending','claimed','triggered','trigger_unknown');
+  UPDATE app.routine_trigger_attempts SET status = 'trigger_failed', finished_at = clock_timestamp()
+  WHERE owner_id = p_owner_id AND connection_id = connection_uuid AND status = 'claimed';
+  UPDATE app.agent_connections SET status = 'revoked', inbound_token_digest = NULL,
+    outbound_trigger_secret_id = NULL, trigger_url = NULL, updated_at = clock_timestamp()
+  WHERE owner_id = p_owner_id AND id = connection_uuid;
+  IF vault_uuid IS NOT NULL THEN PERFORM vault.delete_secret(vault_uuid); END IF;
+  RETURN jsonb_build_object('connection_id', connection_uuid, 'status', 'revoked');
+END
+$$;
+
+ALTER FUNCTION app.create_agent_connection(UUID, JSONB) OWNER TO stock_agent_migration_owner;
+ALTER FUNCTION app.begin_agent_connection_handshake(UUID, JSONB) OWNER TO stock_agent_migration_owner;
+ALTER FUNCTION app.activate_agent_connection(UUID, JSONB) OWNER TO stock_agent_migration_owner;
+ALTER FUNCTION app.revoke_agent_connection(UUID, JSONB) OWNER TO stock_agent_migration_owner;
+REVOKE ALL ON FUNCTION app.create_agent_connection(UUID, JSONB) FROM PUBLIC, anon, authenticated,
+  service_role, stock_agent_gateway, stock_agent_scheduler, stock_agent_telegram, stock_agent_backup;
+REVOKE ALL ON FUNCTION app.begin_agent_connection_handshake(UUID, JSONB) FROM PUBLIC, anon, authenticated,
+  service_role, stock_agent_gateway, stock_agent_scheduler, stock_agent_telegram, stock_agent_backup;
+REVOKE ALL ON FUNCTION app.activate_agent_connection(UUID, JSONB) FROM PUBLIC, anon, authenticated,
+  service_role, stock_agent_gateway, stock_agent_scheduler, stock_agent_telegram, stock_agent_backup;
+REVOKE ALL ON FUNCTION app.revoke_agent_connection(UUID, JSONB) FROM PUBLIC, anon, authenticated,
+  service_role, stock_agent_gateway, stock_agent_scheduler, stock_agent_telegram, stock_agent_backup;

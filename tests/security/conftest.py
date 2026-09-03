@@ -99,6 +99,17 @@ def foundation_database(tmp_path_factory):
         )
         connection.execute("CREATE TABLE vault.secrets (id uuid PRIMARY KEY, secret text)")
         connection.execute("CREATE VIEW vault.decrypted_secrets AS SELECT id, secret FROM vault.secrets")
+        connection.execute(
+            """
+            CREATE FUNCTION vault.create_secret(new_secret text, new_name text, new_description text)
+            RETURNS uuid LANGUAGE plpgsql SECURITY DEFINER AS $$
+            DECLARE secret_id uuid := gen_random_uuid();
+            BEGIN INSERT INTO vault.secrets(id, secret) VALUES (secret_id, new_secret); RETURN secret_id; END
+            $$;
+            CREATE FUNCTION vault.delete_secret(secret_id uuid)
+            RETURNS void LANGUAGE sql SECURITY DEFINER AS $$ DELETE FROM vault.secrets WHERE id = secret_id $$;
+            """
+        )
         connection.execute((ROOT / "sql/schema.sql").read_text())
         if FOUNDATION_MIGRATION.exists():
             connection.execute(FOUNDATION_MIGRATION.read_text())
@@ -172,6 +183,17 @@ def tenant_database(tmp_path_factory):
         )
         connection.execute("CREATE TABLE vault.secrets (id uuid PRIMARY KEY, secret text)")
         connection.execute("CREATE VIEW vault.decrypted_secrets AS SELECT id, secret FROM vault.secrets")
+        connection.execute(
+            """
+            CREATE FUNCTION vault.create_secret(new_secret text, new_name text, new_description text)
+            RETURNS uuid LANGUAGE plpgsql SECURITY DEFINER AS $$
+            DECLARE secret_id uuid := gen_random_uuid();
+            BEGIN INSERT INTO vault.secrets(id, secret) VALUES (secret_id, new_secret); RETURN secret_id; END
+            $$;
+            CREATE FUNCTION vault.delete_secret(secret_id uuid)
+            RETURNS void LANGUAGE sql SECURITY DEFINER AS $$ DELETE FROM vault.secrets WHERE id = secret_id $$;
+            """
+        )
         connection.execute(
             """
             CREATE FUNCTION auth.uid() RETURNS uuid

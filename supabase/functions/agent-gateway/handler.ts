@@ -26,25 +26,47 @@ function exactObject(value: unknown, keys: readonly string[]): Record<string, un
   return row;
 }
 
-function calendarDate(value: unknown): value is string {
-  if (typeof value !== "string" || !/^\d{4}-\d{2}-\d{2}$/.test(value)) return false;
-  const date = new Date(`${value}T00:00:00Z`);
-  return !Number.isNaN(date.valueOf()) && date.toISOString().slice(0, 10) === value;
-}
-
 function uuidOrNull(value: unknown): boolean {
   return value === null || (typeof value === "string" && new RegExp(`^${UUID}$`, "i").test(value));
 }
 
+function handshakeFinishPayload(value: unknown): Record<string, unknown> {
+  const row = exactObject(value, ["contract_version", "challenge", "source_checks"]);
+  if (row.contract_version !== 2 || typeof row.challenge !== "string" ||
+    !/^[0-9a-f]{64}$/.test(row.challenge) || !Array.isArray(row.source_checks) ||
+    row.source_checks.length !== 3) throw new Error("invalid handshake receipt");
+  const allowedHosts = new Set(["query1.finance.yahoo.com", "www.sec.gov", "finnhub.io"]);
+  const observedHosts = new Set<string>();
+  const checks = row.source_checks.map((value) => {
+    const check = exactObject(value, ["host", "status", "content_hash", "observed_at"]);
+    if (typeof check.host !== "string" || !allowedHosts.has(check.host) || observedHosts.has(check.host) ||
+      !["reachable", "unreachable"].includes(String(check.status)) ||
+      typeof check.observed_at !== "string" || check.observed_at.length > 40 ||
+      Number.isNaN(Date.parse(check.observed_at)) ||
+      (check.status === "reachable" && (typeof check.content_hash !== "string" ||
+        !/^[0-9a-f]{64}$/.test(check.content_hash))) ||
+      (check.status === "unreachable" && check.content_hash !== null)) {
+      throw new Error("invalid handshake receipt");
+    }
+    observedHosts.add(check.host);
+    return check;
+  });
+  return { contract_version: 2, challenge: row.challenge, source_checks: checks };
+}
+
 function preparePayload(operation: ProviderOperation, payload: unknown): unknown {
   if (operation === "start_run") {
-    const row = exactObject(payload, ["phase", "market_date", "trigger_request_id"]);
-    if (!["pre-market", "intraday", "post-market", "on-demand"].includes(String(row.phase)) ||
-      !calendarDate(row.market_date) || !uuidOrNull(row.trigger_request_id)) throw new Error("invalid payload");
+    const row = exactObject(payload, ["trigger_request_id"]);
+    if (!uuidOrNull(row.trigger_request_id)) throw new Error("invalid payload");
     return row;
   }
-  if (operation === "read_bounded_context" || operation === "finish_run") {
+  if (operation === "read_bounded_context") {
     return exactObject(payload, []);
+  }
+  if (operation === "finish_run") {
+    if (payload && typeof payload === "object" && !Array.isArray(payload) &&
+      Object.keys(payload as Record<string, unknown>).length === 0) return payload;
+    return handshakeFinishPayload(payload);
   }
   if (operation === "submit_analysis") return parseAnalysisSubmissionV2(payload);
   if (operation === "record_permitted_artifacts") return parseArtifactMutationBatch(payload);

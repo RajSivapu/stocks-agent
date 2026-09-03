@@ -214,7 +214,8 @@ def test_cloud_market_skills_have_only_bounded_gateway_authority():
         assert "lib.db" not in skill
         assert "from lib import db" not in skill
         assert "SUPABASE_SERVICE_ROLE_KEY" not in skill
-    for name in ("market-briefing", "equity-research", "earnings-review", "paper-watch"):
+    assert "scripts/agent_gateway_v2.py" in skills["market-briefing"]
+    for name in ("equity-research", "earnings-review", "paper-watch"):
         assert "scripts/market_gateway.py" in skills[name]
     for name in ("equity-research", "earnings-review", "paper-watch"):
         assert "phase: on-demand" in skills[name]

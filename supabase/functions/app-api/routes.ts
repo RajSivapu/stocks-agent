@@ -23,6 +23,7 @@ export const APP_ROUTES: readonly AppRoute[] = [
   { method: "POST", path: "/telegram/pairing-code", key: "telegram_pairing", body: "object" },
   { method: "POST", path: "/connections/create", key: "connection_create", body: "object" },
   { method: "POST", path: "/connections/handshake", key: "connection_handshake", body: "object" },
+  { method: "POST", path: "/connections/activate", key: "connection_activate", body: "object" },
   { method: "POST", path: "/connections/revoke", key: "connection_revoke", body: "object" },
   { method: "GET", path: "/settings", key: "settings_read", body: "none" },
   { method: "PATCH", path: "/settings", key: "settings_update", body: "object" },
@@ -49,11 +50,24 @@ function validateObjectRoute(route: AppRoute, body: Record<string, unknown>): vo
     return;
   }
   if (route.key === "connection_create") {
-    exactKeys(body, ["provider"]);
+    exactKeys(body, ["provider", "consent_version"]);
     if (body.provider !== "claude") throw new HttpError(400, "INVALID_REQUEST", "provider is invalid");
+    if (typeof body.consent_version !== "string" || !/^[a-z0-9][a-z0-9.-]{2,99}$/.test(body.consent_version)) {
+      throw new HttpError(400, "INVALID_REQUEST", "consent version is invalid");
+    }
     return;
   }
-  if (route.key === "connection_handshake" || route.key === "connection_revoke") {
+  if (route.key === "connection_handshake") {
+    exactKeys(body, ["connection_id", "trigger_url", "trigger_token"]);
+    uuidField(body, "connection_id");
+    if (typeof body.trigger_url !== "string" || body.trigger_url.length > 300 ||
+      typeof body.trigger_token !== "string" || body.trigger_token.length < 24 ||
+      body.trigger_token.length > 500 || /\s/.test(body.trigger_token)) {
+      throw new HttpError(400, "INVALID_REQUEST", "trigger credential is invalid");
+    }
+    return;
+  }
+  if (route.key === "connection_activate" || route.key === "connection_revoke") {
     exactKeys(body, ["connection_id"]);
     uuidField(body, "connection_id");
     return;
