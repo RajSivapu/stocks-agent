@@ -150,7 +150,7 @@ def publish_secrets(
             [
                 "npx",
                 "--yes",
-                "supabase",
+                "supabase@2.116.0",
                 "secrets",
                 "set",
                 "--env-file",

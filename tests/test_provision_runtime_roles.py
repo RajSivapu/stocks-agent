@@ -87,4 +87,5 @@ def test_secret_file_is_0600_passed_by_path_and_removed(monkeypatch, tmp_path):
     assert observed["mode"] == 0o600
     assert "contains-secret" in observed["contents"]
     assert "contains-secret" not in " ".join(observed["command"])
+    assert observed["command"][:3] == ["npx", "--yes", "supabase@2.116.0"]
     assert not observed["path"].exists()

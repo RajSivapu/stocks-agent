@@ -1,0 +1,8 @@
+bandit==1.9.4
+pip-audit==2.10.1
+pglast==8.4
+psycopg[binary]==3.3.4
+PyJWT==2.13.0
+pytest==9.1.0
+PyYAML==6.0.3
+supabase==2.31.0

@@ -1394,24 +1394,24 @@ git commit -m "feat: add privacy bounded operations"
 - Consumes: committed lockfiles, staging/production environments, protected GitHub environments.
 - Produces: deterministic CI, automatic staging deployment, manual protected production deployment, and rollback evidence.
 
-- [ ] **Step 1: Write workflow policy tests**
+- [x] **Step 1: Write workflow policy tests**
 
 Add a Python YAML test asserting pinned action major versions, least-privilege permissions, no pull-request
 access to production secrets, no model API keys, no public backup artifacts, staging-before-production,
 manual production environment, and explicit migration/Edge/web verification.
 
-- [ ] **Step 2: Implement CI**
+- [x] **Step 2: Implement CI**
 
 Run secret scan, dependency audit, Python/Node/Deno/web tests, Edge checks, SQL lint, migration-from-current
 fixture, fresh-schema equivalence, exposed-surface allow-list, and build-output secret/service-worker scan.
 
-- [ ] **Step 3: Implement staging deployment**
+- [x] **Step 3: Implement staging deployment**
 
 Apply migrations to staging, provision/revoke test runtime roles, deploy four Edge Functions, publish
 static assets, create synthetic users, run PostgREST attacks, execute Claude no-write handshake when
 credentials are available, and run browser smoke tests.
 
-- [ ] **Step 4: Implement protected production deployment**
+- [x] **Step 4: Implement protected production deployment**
 
 Require GitHub environment approval, fresh encrypted backup under 36 hours, successful restore under 30
 days, clean staging acceptance, explicit trigger pause, migration verifier, deploy, owner-only smoke,
