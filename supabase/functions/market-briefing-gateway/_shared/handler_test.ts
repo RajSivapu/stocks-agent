@@ -465,6 +465,27 @@ Deno.test("shadow alert drafts are rendered but never persisted", async () => {
   assertEquals(liveRepository.createDraftCalls, 0);
 });
 
+Deno.test("shadow preview cannot label watch-only entry levels as policy approved", async () => {
+  const repository = new FakeRepository();
+  repository.policyValue.alerts_v3 = {
+    enabled: false, shadow: true, enabled_classes: [], profile: "balanced", draft_ttl_hours: 24, drafts_per_hour: 5,
+  };
+  const setup = makeHandler(repository);
+  const watch = {
+    ...candidate(),
+    action: "watch",
+    proposed_amount: null,
+    proposed_shares: null,
+    analyst: { completed: true, action: "watch", confidence: "medium", reason: "Watch only." },
+  };
+  const bundle = { phase: "intraday", market_date: "2026-09-02", title: "ignored", candidates: [watch] };
+  const result = await json(await setup.handler(request("evaluate_and_publish", bundle, { dry: true })));
+  assertEquals(result.would_create_alert_drafts, 0);
+  assertEquals(result.alert_draft_previews, []);
+  assertEquals(repository.createDraftCalls, 0);
+  assertEquals(setup.sentAlerts, []);
+});
+
 Deno.test("enabled canary creates drafts only for an allowlisted alert class", async () => {
   const repository = new FakeRepository();
   repository.policyValue.version = 3;

@@ -95,6 +95,7 @@ export function draftFromEvaluation(
     config.alerts_v3.enabled_classes.includes(supportedClass);
   if (!config.alerts_v3 || (!config.alerts_v3.shadow && !classEnabled) ||
     evaluation.status !== "approved" || evaluation.final_action === null ||
+    (candidate.notification_kind === "entry_trigger" && !BUY_SIDE.has(candidate.action)) ||
     !evaluation.candidate.analyst.completed || !evaluation.candidate.checker.completed ||
     evaluation.candidate.checker.verdict !== "approve" ||
     !evaluation.candidate.evidence.some((item) =>

@@ -220,6 +220,28 @@ Deno.test("enabled alert policy projects only its explicit canary class", () => 
   assertEquals(projected.conditions[0].kind, "recorded_stop");
 });
 
+Deno.test("watch evaluations cannot project unreviewed entry levels", () => {
+  const shadow = config();
+  shadow.alerts_v3 = {
+    enabled: false,
+    shadow: true,
+    enabled_classes: [],
+    profile: "balanced",
+    draft_ttl_hours: 24,
+    drafts_per_hour: 5,
+  };
+  const watch = candidate({
+    action: "watch",
+    notification_kind: "entry_trigger",
+    proposed_amount: null,
+    proposed_shares: null,
+    analyst: { completed: true, action: "watch", confidence: "medium", reason: "Watch only." },
+  });
+  const evaluated = evaluate(watch);
+  assertEquals(evaluated.status, "approved");
+  assertEquals(draftFromEvaluation(evaluated, context(), shadow, NOW), null);
+});
+
 Deno.test("new ideas do not create rules until screen evidence has a protected adapter", () => {
   const enabled = config();
   enabled.alerts_v3 = {
