@@ -21,8 +21,8 @@ is separate, paper-first, and outside this codebase.
 | Deterministic 5/21/63-session outcome grading | Implemented and rollback-tested | Live; results remain empty until eligible gateway decisions reach their horizons |
 | Friday ChatGPT weekly process audit v2 | Packet + skill implemented and tested | Active Fridays 16:30 local on `gpt-5.6-terra`; live packet smoke test passed, first scheduled report pending |
 | Watchlist changes as owner-reviewed proposals | Implemented in settings/skill | Live through the revised Routine; never edits/pushes the checkout |
-| Owner-only alert v3 | Implemented, reviewed, and rollback-tested | Live in shadow-only mode with gateway v11, Telegram v12, and policy v3; the corrected protected dry-run rendered policy-validated stop/target and `1/1` source-evidence coverage with zero lifecycle, gateway-request, suggestion, publication, or Telegram writes |
-| Owner portfolio alternatives review | Gateway-computed history, evidence gate, renderer, and routine contract implemented and tested | Pending protected deployment and a send-free on-demand dry-run; VTI remains the unchanged recurring baseline |
+| Owner-only alert v3 | Implemented, reviewed, and rollback-tested | Live in shadow-only mode with gateway v15, Telegram v12, and policy v3; protected dry-runs remain write-free and send-free |
+| Owner portfolio alternatives review | Gateway-computed history, evidence gate, renderer, and routine contract implemented and tested | Live in gateway v15; protected VTI/ITOT dry-run returned complete coverage, a suppressed preview, zero writes/sends, and left VTI as the unchanged recurring baseline |
 
 The reliability release is on GitHub `main`. Alert v3 is deployed from
 `codex/owner-alert-v3` for shadow verification and is not yet merged. "Live" means the corresponding

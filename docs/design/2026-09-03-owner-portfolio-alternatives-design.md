@@ -1,7 +1,7 @@
 # Owner Portfolio Alternatives Review
 
 **Date:** 2026-09-03
-**Status:** Approved direction; implemented behind the protected gateway and pending rollout proof.
+**Status:** Deployed behind the protected gateway with a write-free, send-free rollout proof.
 **Scope:** Personal, owner-only, suggestion-only research.
 
 ## Decision

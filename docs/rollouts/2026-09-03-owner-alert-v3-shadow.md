@@ -123,6 +123,48 @@ treated as investment research or a recommendation.
   also zero gateway-request, suggestion, or market-publication rows created after policy-v3
   activation, proving the post-cutover dry-run and healthchecks were write-free.
 
+## Owner alternatives protected release
+
+The owner-approved current-versus-alternatives review was released without changing alert-v3
+activation or the Telegram function. The implementation commits were `7e9cbd2`, `3c2ff7f`,
+`8f637bf`, and `f9c1e60`. The last two fixes were found by inspecting protected previews: Yahoo
+daily-history values required bounded six-decimal normalization, and a sub-display-precision lead
+could not truthfully be described as “ahead by 0.0 points.”
+
+- `market-briefing-gateway` version 15 is active at deployment epoch milliseconds `1788471136469`;
+  `telegram-portfolio` remained version 12.
+- The active policy remained version 3 with `enabled=false`, `shadow=true`, and
+  `enabled_classes=[]`.
+- Post-deployment health returned `ok` for the gateway, standalone alert path, Finnhub, and Yahoo.
+- A management-plane download of gateway v15 compared equal to every local runtime file; test
+  files were intentionally excluded because Supabase does not deploy them.
+- The post-deployment secret-name inventory remained owner/gateway/Supabase/Telegram only. It
+  contained no brokerage or friend-invitation credential.
+- The final local gate passed 132 Python tests, 63 Node/Telegram tests, 132 Deno gateway tests, both
+  Edge Function type-checks, and `git diff --check`.
+
+Protected on-demand dry-run `c2c2ff90-3676-403b-94f2-f143379c8d04` read the live owner context and
+confirmed the existing `$300` monthly VTI plan. Its evaluation receipt reported `dry_run=true`, two
+evaluations, one comparison with `complete` history coverage, publication `suppressed`, two
+would-be suggestions, and zero alert drafts. The gateway-computed preview showed:
+
+- equal-monthly one-year results of `+10.0%` for both VTI and ITOT, with the difference below `0.1`
+  percentage point;
+- max drawdown of `8.9%` for both over the synchronized window;
+- a qualitative `SIMILAR` forward view, official Vanguard and iShares profile links, and an explicit
+  statement that the VTI plan was unchanged; and
+- the required warning that hypothetical history is not a forecast.
+
+The final dry-run finish receipt reported `status=completed`, `write_counts={}`,
+`publication_statuses=[]`, and `telegram_message_ids=[]`. Independent before/after counts had zero
+deltas for all twelve inspected tables: runs, gateway requests, evaluations, suggestions,
+publications, five alert-lifecycle tables, holdings, and owner plans. This was not a live Routine or
+a Telegram test send.
+
+The earlier protected preview returned `missing_history` and also had zero writes and sends. That
+fail-closed receipt led to the provider-decimal fix; the final receipt above supersedes it for
+comparison-coverage evidence.
+
 ## Live security checkpoint
 
 Direct Postgres inspection confirmed RLS enabled on all five alert lifecycle tables:
