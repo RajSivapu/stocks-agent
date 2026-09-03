@@ -25,7 +25,7 @@ export interface PersistedBundle {
     market_date: string;
     phase: Phase;
     kind: NotificationKind;
-    template_version: 1;
+    template_version: number;
     rendered_body: string;
     rendered_hash: string;
     status: "ready" | "suppressed";

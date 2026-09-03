@@ -261,6 +261,7 @@ export async function prepareDecision(
     phase: server.phase,
     market_date: server.market_date,
     evaluations,
+    context: policyContext,
   });
   const persistedEvaluations = await Promise.all(
     evaluations.map(async (evaluation) => ({
@@ -297,7 +298,7 @@ export async function prepareDecision(
       market_date: server.market_date,
       phase: server.phase,
       kind: rendered.kind,
-      template_version: 1,
+      template_version: rendered.template_version,
       rendered_body: rendered.body,
       rendered_parts: rendered.parts,
       rendered_hash: rendered.hash,

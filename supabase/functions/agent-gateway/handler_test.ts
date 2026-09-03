@@ -298,6 +298,9 @@ Deno.test("analysis is persisted before Telegram and actual delivery is finalize
   })(request(envelope("submit_analysis", await validSignedSubmission())));
   assertEquals(response.status, 200);
   assertEquals(repository.events.slice(-4), ["invoke:submit_analysis", "apply", "send", "finish"]);
+  const decision = repository.applyCalls[0].decision as Record<string, unknown>;
+  const publication = decision.publication as Record<string, unknown>;
+  assertEquals(publication.template_version, 2);
   assertEquals(repository.finishCalls[0].status, "delivered");
   assertEquals(repository.finishCalls[0].message_ids, [321]);
 });

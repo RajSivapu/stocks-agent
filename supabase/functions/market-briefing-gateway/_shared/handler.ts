@@ -343,7 +343,7 @@ export function createGatewayHandler(dependencies: GatewayDependencies) {
             holding_state_changes: [],
             publication: {
               id: deps.newId(), idempotency_key: envelope.request_id, market_date: currentDate,
-              phase: start.phase, kind: rendered.kind, template_version: 1,
+              phase: start.phase, kind: rendered.kind, template_version: rendered.template_version,
               rendered_body: rendered.body, rendered_hash: rendered.hash, status: rendered.status,
             },
           });
@@ -531,6 +531,7 @@ async function evaluateAndPublish(
       phase: bundle.phase,
       market_date: bundle.market_date,
       evaluations,
+      context,
     });
   } catch {
     throw new GatewayRepositoryError("POLICY_REJECTED");
@@ -562,7 +563,7 @@ async function evaluateAndPublish(
       market_date: bundle.market_date,
       phase: bundle.phase,
       kind: rendered.kind,
-      template_version: 1,
+      template_version: rendered.template_version,
       rendered_body: rendered.body,
       rendered_hash: rendered.hash,
       status: rendered.status,

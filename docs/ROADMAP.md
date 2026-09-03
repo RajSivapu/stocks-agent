@@ -13,7 +13,8 @@ The provider-neutral, multi-user candidate is implemented locally on
 owner-scoped ledger/projection model, RLS and machine-role boundaries, provider V2 contract, Claude
 Routine adapter, DST-aware scheduling, server-owned evidence/policy/publication flow, seven-screen web
 product, OTP/consent/account lifecycle, Telegram pairing, encrypted-recovery tooling, protected
-deployment workflows, browser acceptance, and the guarded owner-cutover controller.
+deployment workflows, browser acceptance, the guarded owner-cutover controller, and a compact,
+server-context-backed Telegram renderer v2. Renderer v2 is local only and is not deployed.
 The canonical schema is now generated from the same `supabase/migrations/` directory used by deployment,
 and disposable tests prove both a from-empty replay and the existing-owner upgrade reach that catalog.
 
@@ -31,16 +32,17 @@ new candidate was built and must not be read as evidence for the candidate.
 
 | Capability | Code status | Live status |
 |---|---|---|
-| Pre-market, intraday, and post-market Claude Routines | Receipt-driven prompts implemented | Live on `main` in the restricted `stocks-agent` environment; first new scheduled receipts pending observation |
-| Scoped market gateway and least-privilege Routine client | Implemented and tested | Live; Routine has only Supabase URL, scoped gateway secret, and read-only Finnhub key |
-| Fresh independent packet on every run | Implemented | Full production dry run completed with zero writes; first scheduled phase pending observation |
-| Analyst → Checker pass with stale/prior-plan veto | Implemented | Production dry run completed through both records and gateway evaluation |
+| Pre-market, intraday, and post-market Claude Routines | Receipt-driven prompts implemented | Live on `main` in the restricted `stocks-agent` environment; 2026-09-03 pre-market receipts passed, intraday/post-market observations remain |
+| Scoped market gateway and least-privilege Routine client | Implemented and tested | Live; Routine has only Supabase URL, scoped gateway secret, and read-only Finnhub key; transcript-level environment proof was not available for the observed run |
+| Fresh independent packet on every run | Implemented | Full production dry run completed with zero writes; first scheduled pre-market run produced four fresh evaluations |
+| Analyst → Checker pass with stale/prior-plan veto | Implemented | Scheduled pre-market receipts contain four Analyst/Checker-backed policy evaluations |
 | Server-refetched quotes + deterministic sizing/risk policy | Implemented and tested | Live with policy v1; Yahoo's omitted `marketState` is handled from validated provider trading windows |
 | Atomic decision/evidence/publication audit trail | Implemented and rollback-tested | Migrations `20260902`–`20260904` applied and production verifiers passed |
 | Deterministic Telegram Buy/Sell/Stop recorder, including delayed trade dates | Implemented, tested, Deno type-checked | Live; owner-confirmed Buy/Sell/Portfolio flows are working |
 | Confirmed `/plan`, `/cancelplan`, and read-only `/plans` reminders | Implemented and rollback-tested | Live; owner-confirmed plan flow was exercised end to end and read back |
 | Deterministic 5/21/63-session outcome grading | Implemented and rollback-tested | Live; results remain empty until eligible gateway decisions reach their horizons |
-| Friday ChatGPT weekly process audit v2 | Packet + skill implemented and tested | Active Fridays 16:30 local on `gpt-5.6-terra`; live packet smoke test passed, first scheduled report pending |
+| Compact Telegram publication renderer v2 | Implemented and integration-tested locally | Not deployed; groups portfolio/market/zones/risks/watch/read-more and keeps quiet intraday semantics |
+| Friday ChatGPT weekly process audit v2 | Packet + skill implemented and tested | Manual production packet passed on 2026-09-03; Friday 16:30 task remains to verify scheduler/delivery only |
 | Watchlist changes as owner-reviewed proposals | Implemented in settings/skill | Live through the revised Routine; never edits/pushes the checkout |
 
 All code through this legacy release is on GitHub `main`. "Live" means the corresponding external
@@ -66,17 +68,22 @@ webhook health, secret rotation, Routine isolation, cloud healthcheck, Telegram 
 production dry-run lifecycles are complete. Both dry runs reported empty writes/message IDs, and
 independent before/after counts across eleven protected tables were unchanged.
 
-The remaining checks are observation rather than implementation:
+The remaining legacy checks are observation rather than implementation:
 
-1. Inspect the first new scheduled pre-market, quiet intraday, and post-market receipts. Confirm
-   request/run, evaluation, suggestion, publication, artifact/grade, and delivery claims agree.
-2. Inspect the first Friday v2 audit and confirm it remains bounded, segmented, and read-only.
+1. Inspect the quiet intraday and post-market receipts. Confirm request/run, evaluation, suggestion,
+   publication, artifact/grade, and delivery claims agree. The 2026-09-03 pre-market receipt check
+   passed, subject to the documented Claude-transcript evidence gap.
+2. Inspect the first Friday scheduled v2 audit and confirm scheduler delivery remains bounded,
+   segmented, and read-only. The audit packet itself has already been run successfully.
 3. After the first scheduled cycle, decide whether synthetic-looking legacy suggestions need a
    separately approved archival cleanup. Do not mix that destructive data cleanup into this
    release.
 
 ## Next reliability work
 
+- Review the renderer-v2 diff, deploy it through the protected legacy release path, use a dry-run
+  preview to inspect the exact Telegram HTML, and then let the next scheduled phase provide the first
+  live receipt. Do not trigger a duplicate live run for visual testing.
 - Observe how owner plan records appear in real briefs before deciding whether a separate proactive
   due-reminder job is useful. Any future reminder remains non-trading and never assumes a fill.
 - Review policy/outcome samples after enough complete 5/21/63-session grades exist; do not change
