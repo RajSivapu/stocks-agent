@@ -42,7 +42,9 @@ function decimal(
   if (typeof value === "number" && (!Number.isFinite(value) || value <= 0)) {
     throw new MarketDataError("invalid provider decimal");
   }
-  const text = typeof value === "number" ? value.toString() : value;
+  const text = typeof value === "number"
+    ? value.toFixed(6).replace(/\.?0+$/, "")
+    : value;
   if (!DECIMAL_PATTERN.test(text) || text.length > 40 || Number(text) <= 0) {
     throw new MarketDataError("invalid provider decimal");
   }

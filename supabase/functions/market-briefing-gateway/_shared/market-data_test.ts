@@ -282,6 +282,25 @@ Deno.test("adjusted history keeps raw ranges and split ratios, sorted and dedupl
   ]);
 });
 
+Deno.test("history normalizes provider floating-point noise to six decimals", async () => {
+  const noisy = structuredClone(historyFixture);
+  noisy.chart.result[0].indicators.quote[0].close[1] = 320.1400146484375;
+  noisy.chart.result[0].indicators.quote[0].high[1] = 320.2300109863281;
+  noisy.chart.result[0].indicators.quote[0].low[1] = 317.32000732421875;
+  noisy.chart.result[0].indicators.adjclose[0].adjclose[1] =
+    316.4450378417969;
+
+  const bars = await fetchAdjustedHistory("VTI", "1y", fixtureFetch(noisy));
+  assertEquals(bars[0], {
+    date: "2026-09-01",
+    raw_close: "320.140015",
+    adjusted_close: "316.445038",
+    raw_high: "320.230011",
+    raw_low: "317.320007",
+    split_ratio: "2",
+  });
+});
+
 Deno.test("history rejects missing adjusted values and arbitrary ranges", async () => {
   const missing = structuredClone(historyFixture);
   missing.chart.result[0].indicators.adjclose[0].adjclose[1] =
