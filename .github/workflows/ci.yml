@@ -57,7 +57,9 @@ jobs:
       - name: fresh-schema
         env:
           POSTGRES_BIN: /usr/lib/postgresql/17/bin
-        run: python -m pytest tests/security/test_rls_catalog.py -q
+        run: |
+          python scripts/verify_schema_parity.py --verify
+          python -m pytest tests/security/test_rls_catalog.py -q
       - name: surface-allowlist
         env:
           POSTGRES_BIN: /usr/lib/postgresql/17/bin

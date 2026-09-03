@@ -11,16 +11,16 @@ import pytest
 
 
 ROOT = Path(__file__).resolve().parents[2]
-FOUNDATION_MIGRATION = ROOT / "sql/migrations/20260905_multitenancy_foundation.sql"
-RLS_MIGRATION = ROOT / "sql/migrations/20260906_owner_api_and_machine_roles.sql"
-LEDGER_MIGRATION = ROOT / "sql/migrations/20260907_ledger_projection_commands.sql"
-COMMAND_MIGRATION = ROOT / "sql/migrations/20260908_portfolio_command_state_machine.sql"
-APP_API_MIGRATION = ROOT / "sql/migrations/20260908_app_api_limits.sql"
-TELEGRAM_MIGRATION = ROOT / "sql/migrations/20260909_telegram_multitenancy.sql"
-TELEGRAM_WEBHOOK_MIGRATION = ROOT / "sql/migrations/20260909_telegram_webhook_runtime.sql"
-PROVIDER_EVIDENCE_MIGRATION = ROOT / "sql/migrations/20260908_provider_runs_and_evidence.sql"
-RESEARCH_RUN_MIGRATION = ROOT / "sql/migrations/20260909_research_run_api.sql"
-RETENTION_RECOVERY_MIGRATION = ROOT / "sql/migrations/20260910_retention_recovery.sql"
+FOUNDATION_MIGRATION = ROOT / "sql/migrations/20260905000000_multitenancy_foundation.sql"
+RLS_MIGRATION = ROOT / "sql/migrations/20260906000000_owner_api_and_machine_roles.sql"
+LEDGER_MIGRATION = ROOT / "sql/migrations/20260907000000_ledger_projection_commands.sql"
+COMMAND_MIGRATION = ROOT / "sql/migrations/20260908000000_portfolio_command_state_machine.sql"
+APP_API_MIGRATION = ROOT / "sql/migrations/20260908010000_app_api_limits.sql"
+TELEGRAM_MIGRATION = ROOT / "sql/migrations/20260908020000_telegram_multitenancy.sql"
+TELEGRAM_WEBHOOK_MIGRATION = ROOT / "sql/migrations/20260908030000_telegram_webhook_runtime.sql"
+PROVIDER_EVIDENCE_MIGRATION = ROOT / "sql/migrations/20260908040000_provider_runs_and_evidence.sql"
+RESEARCH_RUN_MIGRATION = ROOT / "sql/migrations/20260909000000_research_run_api.sql"
+RETENTION_RECOVERY_MIGRATION = ROOT / "sql/migrations/20260910000000_retention_recovery.sql"
 
 
 def _postgres_bin(name: str) -> str:
@@ -112,7 +112,7 @@ def foundation_database(tmp_path_factory):
             RETURNS void LANGUAGE sql SECURITY DEFINER AS $$ DELETE FROM vault.secrets WHERE id = secret_id $$;
             """
         )
-        connection.execute((ROOT / "sql/schema.sql").read_text())
+        connection.execute((ROOT / "sql/legacy_schema.sql").read_text())
         if FOUNDATION_MIGRATION.exists():
             connection.execute(FOUNDATION_MIGRATION.read_text())
         yield connection
@@ -207,7 +207,7 @@ def tenant_database(tmp_path_factory):
         )
         connection.execute("GRANT USAGE ON SCHEMA auth TO authenticated, anon")
         connection.execute("GRANT EXECUTE ON FUNCTION auth.uid() TO authenticated, anon")
-        connection.execute((ROOT / "sql/schema.sql").read_text())
+        connection.execute((ROOT / "sql/legacy_schema.sql").read_text())
         connection.execute(FOUNDATION_MIGRATION.read_text())
 
         owner_a = "11111111-1111-4111-8111-111111111111"

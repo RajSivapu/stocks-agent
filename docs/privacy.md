@@ -10,6 +10,11 @@ The service stores your account profile, consent receipts, notification and sche
 
 The operator can access production records and encrypted recovery archives when necessary to operate, secure, restore, export, or delete the service. Access must use the documented operator procedures and must not be performed through the public web application.
 
+Each owner uses a **separate provider account**, environment, Routine, and credentials. Owners are not
+batched into provider prompts or support evidence. The operator can access only what is necessary for
+operation and incident response; this is a technical capability, not permission to inspect a
+portfolio casually. Stock Agent does not sell portfolio or identity data or use it for advertising.
+
 ## Other services
 
 - Supabase hosts authentication, database records, server functions, schedules, and server-side secrets.
@@ -30,5 +35,7 @@ Failed or unidentified Telegram pairing-attempt receipts are not associated with
 
 ## Your responsibilities
 
-Keep your email and provider accounts secure, review exports before relying on them, and remove older Telegram messages manually when desired. Contact the service operator through the invitation channel for privacy requests that cannot be completed in the application.
-
+Keep your email, Telegram, and separate provider account secure, review exports before relying on
+them, and remove older Telegram messages manually when desired. Never send the operator your OTP or
+provider credential. Contact the service operator through the invitation channel for privacy
+requests that cannot be completed in the application.

@@ -30,7 +30,7 @@ from scripts.migrate_single_owner_to_tenant import (
 )
 
 
-FOUNDATION_SQL = ROOT / "sql/migrations/20260905_multitenancy_foundation.sql"
+FOUNDATION_SQL = ROOT / "sql/migrations/20260905000000_multitenancy_foundation.sql"
 SYNTHETIC_OWNER_ID = UUID("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa")
 SYNTHETIC_OWNER_EMAIL = "tst-migration@invalid.example"
 
@@ -113,7 +113,7 @@ class DisposablePostgres:
         self.connection.execute(
             "CREATE TABLE auth.users (id uuid PRIMARY KEY, email text UNIQUE)"
         )
-        self.connection.execute((ROOT / "sql/schema.sql").read_text())
+        self.connection.execute((ROOT / "sql/legacy_schema.sql").read_text())
         return self
 
     def __exit__(

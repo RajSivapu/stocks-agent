@@ -1,293 +1,189 @@
-# stocks-agent
+# Stock Agent
 
-A suggestion-only US-stock research assistant for Rajrupesh. Three Anthropic Cloud Routines gather
-fresh evidence; a deterministic Supabase gateway independently verifies quotes, enforces reviewed
-risk policy, persists an audit trail, renders messages, and controls Telegram delivery. A separate
-owner-authenticated Telegram recorder updates portfolio records after Confirm. Nothing in this
-repository can reach a broker or place, modify, or cancel an order.
+Stock Agent is an invite-only, provider-neutral US-stock research and portfolio-recordkeeping
+product. It can suggest, explain, and record an owner-reported fill after explicit preview and
+confirmation. It **cannot place, modify, or cancel** a brokerage order, and it has no brokerage
+connector or credential surface.
 
-Read [`docs/ROADMAP.md`](docs/ROADMAP.md) before changing the system. It records current deployment
-state and links the external-project research backlog. Supabase is the source of truth for changing
-portfolio state; never copy live holdings into planning documents.
+## Release status
 
-## Safety architecture
+The complete multi-user candidate is implemented on `codex/stock-agent-reliability` but is **not
+deployed to staging or production**. Local automated tests are not substitutes for custom SMTP,
+live two-owner isolation, a real provider handshake, encrypted R2 restore, protected rollback, or the
+owner market-cycle soak. **Friend invitations remain disabled** until those external gates pass.
+
+See [the roadmap](docs/ROADMAP.md), [release acceptance](docs/runbooks/release-acceptance.md), and
+[owner cutover](docs/runbooks/owner-cutover.md) before changing rollout status.
+
+## Architecture
 
 ```text
-Anthropic Routine or on-demand research
-  | scoped secret only; no database or Telegram credential
-  v
-market-briefing-gateway Edge Function
-  | authenticate -> validate -> refresh quotes -> deterministic policy
-  | -> atomic audit persistence -> fixed renderer -> Telegram delivery
-  v
-Supabase Postgres (RLS)                    Telegram Bot API
+Cloudflare static web app
+  -> Supabase email OTP + current consent
+  -> owner-scoped API views / Edge command boundary
+  -> preview -> explicit Confirm -> immutable ledger -> derived holdings
 
-Owner Telegram message
-  v
-telegram-portfolio Edge Function (no model)
-  | webhook secret + exact owner IDs -> preview -> Confirm/Cancel
-  v
-atomic portfolio RPC -> records only, never brokerage execution
+Telegram private chat
+  -> secret webhook + paired chat/user digest
+  -> same preview/confirm command state machine
+  -> recordkeeping only
 
-Friday ChatGPT/Codex desktop task
-  -> one bounded read-only audit packet; no writes or notifications
+Supabase five-minute scheduler
+  -> DST/holiday-aware owner run slot
+  -> owner connection in Vault
+  -> one unscheduled provider Routine
+  -> scoped agent-gateway contract
+  -> fresh evidence + Analyst + same-model Checker
+  -> server quote refresh + deterministic policy
+  -> atomic decision/publication receipts -> eligible Telegram notification
+
+Supabase Cron backup
+  -> age encryption before upload -> private Cloudflare R2
+  -> independent backup-age monitor
 ```
 
-The language model proposes structured evidence, an Analyst view, and a separate Checker view. It
-does not own prices, policy, state transitions, message HTML, success counts, or delivery claims.
-On-demand work is always session-only. A policy downgrade/veto is final.
+The application owns the schedule, run identity, market calendar, financial state, quote authority,
+policy result, message rendering, and delivery receipts. Model output can only propose bounded
+analysis. A downgrade or veto cannot be upgraded by prose, and a send/write is never claimed without
+the server receipt that proves it.
 
-## Scheduled analysis
+The hosted runtime uses Supabase, Cloudflare static assets/R2, Telegram, and each owner's provider
+subscription. **Your Mac can be off.** There is no Cloud Run requirement and no model API key in the
+product runtime. Free-tier and subscription allowances still apply; availability is not guaranteed.
 
-| Run | Time (America/Chicago) | Behavior |
-|---|---:|---|
-| Pre-market | 06:30 weekdays | Fresh macro/portfolio/watchlist review and full brief |
-| Intraday | about 12:00 weekdays | New evidence packet; never executes the morning plan mechanically; silent if no edge fires |
-| Post-market | 15:10 weekdays | Verified close, bounded artifacts, and deterministic outcome grading |
+## Provider support
 
-Holiday decisions happen before research. Pre-market can publish one market-closed notice;
-intraday/post-market remain silent. Every non-holiday run follows `start_run`, `read_context`, fresh
-research, Analyst/Checker, `evaluate_and_publish`, permitted artifacts/grading, and `finish_run`.
+The V2 contract is provider-neutral, but **Claude Routines is the only release-one provider adapter**.
+Each owner connects a separate Claude account and **one unscheduled Routine per owner**. The
+application owns the schedule and fires the provider's API trigger. The owner-scoped inbound
+credential is stored in Claude's host-bound API-credential proxy; the outbound trigger secret is
+stored in Supabase Vault. Neither is a model API key.
 
-## Free data and hosting
+ChatGPT, Grok, and bring-your-own-key connectors are not release-one features. Adding one requires a
+separate adapter, real handshake proof, capability/usage semantics, threat review, and the same
+server-owned safety boundaries. See the [Claude connection kit](docs/connection-kits/claude-routine-v1.md)
+and [Routine setup summary](routines/README.md).
 
-- Yahoo Finance chart endpoints: quotes and adjusted/raw OHLC history.
-- Finnhub free tier: fundamentals, news, earnings/events, insider and analyst context.
-- Alpha Vantage is not used by the current release and is intentionally absent from the Routine
-  environment.
-- Supabase free-tier project: Postgres and two Edge Functions.
-- Telegram Bot API: fixed brief delivery and deterministic recordkeeping chat.
-- Anthropic plan allowance: scheduled model reasoning; no Anthropic API key in this repo.
-- ChatGPT/Codex desktop allowance: optional Friday audit; no OpenAI API key in this repo.
+## Analysis lifecycle
 
-Provider and account usage limits still apply. There is no Cloud Run or separate Google Cloud
-project requirement.
+For every market date and phase, the scheduler permits one active slot per owner. Weekends have no
+slots. A holiday pre-market slot publishes fixed market-closed copy without invoking a model;
+later phases remain silent. Early closes and daylight-saving transitions are computed from the New
+York market calendar rather than fixed UTC cron times.
 
-## Setup
+A non-holiday run:
 
-### 1. Install locally
+1. claims a server-generated slot and bounded owner context;
+2. creates a signed evidence packet with current quote/source receipts;
+3. requires fresh Analyst and same-model Checker submissions;
+4. refetches authoritative quotes and applies deterministic policy;
+5. persists analysis before any notification attempt;
+6. classifies delivery as delivered, failed, unknown, or suppressed; and
+7. finishes with server-derived write counts and message IDs.
+
+Intraday never treats the morning plan as current evidence. It independently refreshes the phase and
+stays completely silent when no eligible edge fires. On-demand research uses the same safety path but
+is always session-only and suppressed from Telegram.
+
+## Portfolio recordkeeping
+
+Web and Telegram accept strict string decimals—never JSON floating-point financial values—and share
+one server-side state machine. Supported operations include buy, sell/sell-all, stop update,
+recurring-plan create/cancel, and transaction correction. Each mutation is:
+
+```text
+normalized input -> private preview receipt -> explicit confirmation -> immutable ledger event
+                 -> locked deterministic projection -> result receipt
+```
+
+Holdings are projections of the append-only ledger, not an independent mutable source of truth.
+Fees are recorded explicitly. Concurrent first buys are serialized, stale previews fail, duplicate
+idempotency keys reuse the original receipt, and corrections preserve the original event.
+Recurring investments are reminders only; they never schedule a brokerage purchase.
+
+## Identity, isolation, and lifecycle
+
+- Email OTP and current disclosure consent protect every private screen.
+- PostgreSQL RLS is forced on every owner table; API views are security-invoker allow-lists.
+- Edge runtimes receive separate least-privilege database roles and fixed RPC surfaces.
+- Provider connections, Telegram pairing, schedules, evidence, ledger events, and exports are
+  owner-scoped.
+- Sensitive lifecycle actions require a fresh OTP step-up.
+- Owners can export account JSON and ledger CSV, request deletion, cancel during a 72-hour window,
+  and receive truthful Telegram-cleanup status.
+- Deletion tombstones are restored before owner data so backups cannot resurrect a deleted account.
+
+Read [privacy](docs/privacy.md), [risk disclosure](docs/risk-disclosure.md), and the
+[account lifecycle runbook](docs/runbooks/account-lifecycle.md).
+
+## Fresh install and migration
+
+Install local test dependencies from the pinned project manifests, then use a disposable PostgreSQL
+17 instance for migration work. Never point a local test command at production.
+
+`sql/schema.sql` is the generated canonical fresh-install schema. It contains the reviewed legacy
+baseline, migrations through 20260910, and a data-free bootstrap at the multitenancy boundary. Do not
+edit it directly. Regenerate and prove catalog equivalence with:
 
 ```bash
-git clone https://github.com/RajSivapu/stocks-agent.git
-cd stocks-agent
-python3 -m venv .venv
-source .venv/bin/activate
-pip install supabase pytest "psycopg[binary]" pyyaml
+.venv/bin/python scripts/verify_schema_parity.py --write
+.venv/bin/python scripts/verify_schema_parity.py --verify
 ```
 
-Copy `config/secrets.local.json.example` to the ignored `config/secrets.local.json` for local-admin
-commands. Never commit or paste that file.
+`sql/legacy_schema.sql` exists only to test the real upgrade path. Existing single-owner data must go
+through `scripts/migrate_single_owner_to_tenant.py`; never run the fresh bootstrap over non-empty
+tables. Migration filenames use unique sortable versions in dependency order.
 
-### 2. Apply the database schema
+## Deployment and operations
 
-For a new Supabase project, apply `sql/schema.sql` in the SQL Editor. For an existing installation,
-apply these additive migrations in order:
+Pull requests run without environment secrets. CI performs secret/dependency/SQL checks, legacy and
+fresh migration parity, RLS/surface attacks, all language/UI/browser tests, a production build, and a
+build-output scan. Successful `main` CI may deploy isolated staging. Production remains a manually
+approved workflow requiring a fresh encrypted backup, recent restore, passing staging evidence,
+paused triggers, a distinct rollback commit, and post-deploy owner smoke.
 
-```text
-sql/migrations/20260901_reliable_stock_agent.sql
-sql/migrations/20260902_decision_safety_gateway.sql
-sql/migrations/20260903_owner_investment_plans.sql
-sql/migrations/20260904_outcome_evaluation.sql
-```
+Start here:
 
-The gateway migration intentionally stops on unknown legacy action/confidence/bucket labels. Review
-and map those rows explicitly; do not weaken the preflight. Before a live migration, run the
-rollback-only verifier:
+- [Gate 0 capabilities](docs/runbooks/gate-0-capabilities.md)
+- [Deployment](docs/runbooks/deployment.md)
+- [Backup and restore](docs/runbooks/backup-restore.md)
+- [Release acceptance](docs/runbooks/release-acceptance.md)
+- [Credential rotation](docs/runbooks/credential-rotation.md)
+- [Incident response](docs/runbooks/incident-response.md)
+- [Rollback](docs/runbooks/rollback.md)
+- [Friend onboarding](docs/runbooks/friend-onboarding.md)
+
+No test, workflow, report, or screenshot may contain reusable credentials, owner identity, holdings,
+tickers, model content, or Telegram identifiers. Release reports contain fixed statuses and evidence
+hashes only.
+
+## Verification
+
+Run the complete local gate:
 
 ```bash
-.venv/bin/python scripts/verify_decision_gateway_migration.py
+npm run test:all
+.venv/bin/python scripts/verify_schema_parity.py --verify
+.venv/bin/python scripts/verify_multitenancy_migration.py --rollback-only
+.venv/bin/python scripts/ci_policy_checks.py scan-secrets
+git diff --check
 ```
 
-### 3. Separate credentials by trust boundary
-
-Supabase Edge Function secrets/runtime contain:
-
-- `MARKET_AGENT_SECRET` (new random scoped gateway secret);
-- `TELEGRAM_BOT_TOKEN`, `TELEGRAM_WEBHOOK_SECRET`, `TELEGRAM_OWNER_CHAT_ID`, and
-  `TELEGRAM_OWNER_USER_ID`;
-- Supabase's injected `SUPABASE_URL` and `SUPABASE_SERVICE_ROLE_KEY`.
-
-Anthropic's personal `stocks-agent` cloud environment contains exactly these variables:
-
-- `SUPABASE_URL`;
-- the narrowly scoped `MARKET_AGENT_SECRET`;
-- a read-only `FINNHUB_API_KEY`.
-
-The environment uses a custom domain allowlist, no Gmail/Drive connectors, and no setup script. Its
-gateway credential authorizes only the bounded analysis API; server policy remains final. Do not
-configure Alpha Vantage because the current code does not call it. The Routine must never receive
-the service-role key, Telegram credentials, brokerage credentials, or an LLM API key. Prefer
-Claude's protected API-credential proxy if its controls become available, then remove both keys
-from ordinary variables. Generate independent high-entropy gateway and webhook secrets. Rotate any
-value exposed in a transcript, screenshot, chat, terminal output, or tracked file.
-
-### 4. Deploy and initialize Supabase
-
-```bash
-cp supabase/.env.example supabase/.env.local
-# fill the ignored file; never print it
-npx supabase login
-npx supabase link --project-ref <project-ref>
-npx supabase secrets set --env-file supabase/.env.local
-npx supabase functions deploy market-briefing-gateway --no-verify-jwt
-npx supabase functions deploy telegram-portfolio --no-verify-jwt
-.venv/bin/python scripts/publish_market_policy.py
-.venv/bin/python scripts/verify_portfolio_command_rpc.py
-.venv/bin/python scripts/register_telegram_webhook.py
-```
-
-JWT verification is disabled because the Routine and Telegram cannot supply user JWTs. Each
-function instead verifies its dedicated secret before parsing a body; the recorder also requires
-the exact owner chat and user IDs. RLS remains enabled, and privileged RPC execution is limited to
-`service_role`.
-
-### 5. Verify connectivity
-
-```bash
-.venv/bin/python scripts/healthcheck.py
-```
-
-Expected keys are `gateway`, `finnhub`, and `yahoo`. Healthcheck uses dry-run gateway operations and
-sends no Telegram message.
-
-### 6. Configure Routines
-
-Follow [`routines/README.md`](routines/README.md). The saved prompts are receipt-driven and the cloud
-environment has only the three scoped/read-only values listed above.
-
-## Gateway client
-
-All cloud-capable market skills use:
-
-```text
-python scripts/market_gateway.py OPERATION [--run-id UUID] [--request-id UUID] [--dry-run]
-```
-
-It reads one bounded JSON object from stdin and supports only `start_run`, `read_context`,
-`record_artifacts`, `grade_due_decisions`, `evaluate_and_publish`, and `finish_run`. Each new
-operation gets a new request UUID. Retry an uncertain operation only with the identical UUID and
-payload.
-
-Receipt rules:
-
-- `suppressed`: no Telegram delivery occurred;
-- `delivery_failed`: definite failure; do not retry inside the run;
-- `delivery_unknown`: acceptance may have occurred; never retry automatically;
-- dry-run: complete analysis and rendering, but no request/run/data row and no Telegram send;
-- final summaries quote only server-reported writes, publication status, and message IDs.
-
-## Telegram portfolio recorder
-
-Supported commands:
-
-```text
-/buy AAPL 2 210 growth
-/sell AAPL 1.5 225
-/sell NVDA all 210 on 2026-08-28
-/stop AAPL 195
-/portfolio
-/plan VTI 300 monthly 2026-09-21 core
-/plans
-/cancelplan VTI
-```
-
-Buy/Sell/Stop/Plan/Cancel-plan first returns a preview with Confirm and Cancel. Nothing changes
-before Confirm; commands expire after 15 minutes and stale state is rejected. A recurring plan is a
-reminder record only. It does not schedule or place a brokerage purchase. A later confirmed Buy is
-a separate record; only a due, same-ticker Buy within the fixed amount tolerance advances the next
-date, once.
-
-Cloud chat reconciliation only explains these commands. Unsupported changes require an explicit
-trusted local-admin workflow; there is no direct cloud database fallback.
-
-## On-demand and dry-run use
-
-Examples:
-
-```text
-Run the market-briefing skill as a pre-market dry run.
-Is NVDA still a good hold?                 # equity-research, on-demand
-How was NVDA's latest earnings?            # earnings-review, on-demand
-Paper-watch SHOP from $80; thesis: ...     # hypothetical only
-Run the weekly-portfolio-audit skill.       # local read-only packet
-```
-
-On-demand research uses `phase: on-demand`, passes through the same deterministic policy, and must
-return a suppressed session preview rather than Telegram delivery. A dry run adds `--dry-run` to
-every gateway operation and begins with:
-
-```text
-🧪 DRY RUN — nothing sent, nothing written to Supabase.
-```
-
-## Deterministic policy and outcomes
-
-Reviewed policy comes from `config/settings.json`, is validated and versioned by
-`scripts/publish_market_policy.py`, and has self-tuning disabled. The gateway independently fetches
-quotes, checks session freshness, reconciles sizing, enforces stop/reward-risk/concentration/loss
-limits, and owns holding-alert transitions. If Yahoo omits `marketState`, the gateway derives the
-session only from Yahoo's validated epoch trading windows; missing or malformed windows fail closed.
-
-Final gateway suggestions are graded after 5/21/63 trading sessions using adjusted closes, a fixed
-VOO benchmark (VXUS for VXUS), excess return, MFE/MAE, and raw threshold hits. Splits require review;
-non-actionable decisions get no binary success label. Complete grades are immutable. The weekly
-audit reports sample sizes and separates scheduled delivered recommendations from session-only
-research.
-
-## Supabase schema (18 tables)
-
-Core portfolio/research tables:
-
-- `holdings`, `transactions`, `suggestions`, `suggestion_grades`, `stock_observations`,
-  `daily_snapshots`, `dry_powder`, `radar`, `paper_watches`, and `lessons`;
-- `analysis_runs`, `portfolio_commands`, and `telegram_updates`;
-- `market_gateway_requests`, `market_policy_config`, `decision_evaluations`, and
-  `market_publications`;
-- `owner_investment_plans`.
-
-Privileged RPCs are fixed-name, fixed-search-path, and service-role-only:
-
-- portfolio: `apply_portfolio_command`, `cancel_portfolio_command`;
-- policy/gateway: `activate_market_policy_config`, `claim_market_gateway_request`,
-  `complete_market_gateway_request`, `start_market_analysis_run`, `apply_market_artifacts`,
-  `apply_market_decision_bundle`, `import_legacy_suggestion`, `claim_market_publication`, and
-  `finish_market_publication`;
-- outcomes: `get_due_market_decisions`, `upsert_market_outcome_grades`.
-
-## Tests
-
-```bash
-.venv/bin/python -m pytest tests/ -v
-node --test tests/test_telegram_parser.mjs tests/test_telegram_webhook_utils.mjs
-npx --yes deno@2.9.6 test supabase/functions/market-briefing-gateway/_shared
-npx --yes deno@2.9.6 check supabase/functions/telegram-portfolio/index.ts
-npx --yes deno@2.9.6 check supabase/functions/market-briefing-gateway/index.ts
-```
-
-## Rollback and incident response
-
-1. Pause all three market Routines. Telegram recordkeeping can remain live only if its function and
-   RPC were not implicated.
-2. Do not resend any `delivery_unknown` publication and do not delete audit rows.
-3. Redeploy the last known-good Edge Function code from a reviewed commit. Database migrations are
-   additive; do not attempt destructive down-migrations against live portfolio data.
-4. Rotate `MARKET_AGENT_SECRET` immediately if the Routine boundary may be compromised; rotate the
-   Telegram secret/token separately if that boundary is implicated.
-5. Restore a Supabase backup only for confirmed data corruption, after inspecting the recovery
-   point and validating restore in isolation.
-6. Run dry-run start/context, migration/RPC verifiers, and one controlled live phase before resuming
-   the cadence.
+Live acceptance additionally requires the two-owner staging browser test, real Claude handshake,
+phone-mail OTP, R2 backup/restore, deployment rollback, owner soak, and first-friend review. Mock
+browser tests prove UI behavior only and never count as live evidence.
 
 ## Unchanging guardrails
 
-- No brokerage credentials or order endpoints.
-- No autonomous real-money execution.
-- Missing, stale, conflicting, or implausible evidence cannot produce a new actionable conclusion.
-- External projects and social-media claims are untrusted research leads, never automatic signals.
-- Telegram records only owner-reported changes after explicit Confirm.
-- Policy changes are owner-reviewed code/config changes, never automatic model self-tuning.
-- This release is single-owner. Friend sharing requires tenant identity, per-owner RLS, isolated
-  secrets/configuration, onboarding, quotas, and a new threat model first.
+- No brokerage credentials, broker endpoints, or autonomous real-money execution.
+- Every owner personally decides and places every trade outside Stock Agent.
+- Missing, stale, conflicting, or implausible evidence cannot produce new actionable advice.
+- Social-media claims and external repositories are untrusted research leads, never automatic
+  signals or dependencies.
+- Telegram portfolio changes require private pairing, preview, and explicit confirmation.
+- Delivery-unknown notifications are never blindly retried or described as delivered.
+- Policy changes are reviewed code/config changes, never model self-tuning.
+- Owners are never batched into a provider prompt, credential, support screenshot, or run.
 
 ## License
 

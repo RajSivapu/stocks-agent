@@ -6,6 +6,9 @@ Use this only from a trusted operator machine. Never paste service-role, databas
 
 Prerequisites:
 
+- Gate 0 through Gate F, the owner-soak receipt, and every prerequisite in
+  `docs/runbooks/friend-onboarding.md` are current for the exact production commit. The
+  `--smtp-verified` flag is an operator acknowledgement, not an automated substitute for evidence.
 - Custom SMTP is configured and a real OTP delivery test passed. Supabase's default mailer is not accepted for friend onboarding.
 - The intended email was verified out of band.
 - `STOCK_AGENT_SUPABASE_URL`, `STOCK_AGENT_SERVICE_ROLE_KEY`, and `INVITE_RECEIPT_PEPPER` are supplied through the operator's secret manager.
@@ -84,4 +87,3 @@ The encrypted export must exist with mode `0600` before any ledger row is delete
 - If account purge fails, the transaction rolls back; do not delete the Auth identity.
 - If Auth deletion fails after purge, rerun the same deletion command. The tombstone makes the database step idempotent.
 - Never bypass the grace period by editing timestamps in production.
-

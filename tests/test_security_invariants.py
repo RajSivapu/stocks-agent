@@ -5,11 +5,11 @@ import re
 
 ROOT = Path(__file__).resolve().parents[1]
 SQL_FILES = (
-    ROOT / "sql" / "schema.sql",
+    ROOT / "sql" / "legacy_schema.sql",
     ROOT / "sql" / "migrations" / "20260901_reliable_stock_agent.sql",
 )
 GATEWAY_SQL_FILES = (
-    ROOT / "sql" / "schema.sql",
+    ROOT / "sql" / "legacy_schema.sql",
     ROOT / "sql" / "migrations" / "20260902_decision_safety_gateway.sql",
 )
 GATEWAY_RPCS = (
@@ -280,7 +280,7 @@ def test_telegram_handler_uses_only_machine_database_authority_and_bounded_listi
     entrypoint = (directory / "index.ts").read_text()
     handler = (directory / "handler.ts").read_text()
     repository = (directory / "repository.ts").read_text()
-    migration = (ROOT / "sql" / "migrations" / "20260909_telegram_webhook_runtime.sql").read_text()
+    migration = (ROOT / "sql" / "migrations" / "20260908030000_telegram_webhook_runtime.sql").read_text()
     assert set(re.findall(r'requiredEnvironment\("([A-Z0-9_]+)"\)', entrypoint)) == {
         "TELEGRAM_WEBHOOK_SECRET",
         "TELEGRAM_PAIRING_PEPPER",
@@ -326,31 +326,25 @@ def test_routine_documentation_exposes_only_scoped_cloud_credentials():
         "TELEGRAM_OWNER_CHAT_ID",
     ):
         assert forbidden not in routines
-    env_heading = re.search(r"Environment (?:variables|values):\s*\n\n```text\n(.*?)```", routines, re.S)
-    assert env_heading is not None
-    env_block = env_heading.group(1)
-    assert env_block.strip().splitlines() == [
-        "SUPABASE_URL=https://<project-ref>.supabase.co",
-        "MARKET_AGENT_SECRET=<dedicated-random-gateway-secret>",
-        "FINNHUB_API_KEY=<read-only-key>",
-    ]
+    normalized = " ".join(routines.lower().split())
+    assert "environment variables empty" in normalized
+    assert "host-bound api credential" in normalized
+    assert "one unscheduled routine per owner" in normalized
+    assert "schedule off" in normalized
     for readable_secret in (
         "ALPHAVANTAGE_API_KEY",
         "SUPABASE_SERVICE_ROLE_KEY",
         "TELEGRAM_BOT_TOKEN",
     ):
-        assert readable_secret not in env_block
-    assert "ALPHAVANTAGE_API_KEY" not in routines
+        assert readable_secret not in routines
     for required in (
-        "narrowly scoped",
-        "read-only",
-        "personal",
-        "evaluate_and_publish",
-        "delivery_unknown",
-        "status: suppressed",
+        "application owns every market schedule",
+        "same-model Checker",
+        "Quiet intraday is silent",
+        "server owns all message text",
+        "never reactivate a revoked connection",
     ):
-        assert required in routines
-    assert '{"gateway":"ok","finnhub":"ok","yahoo":"ok"}' in routines
+        assert required.lower() in normalized
 
 
 def test_behavioral_evals_use_gateway_receipts_not_privileged_helpers():

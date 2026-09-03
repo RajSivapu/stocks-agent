@@ -166,6 +166,6 @@ def test_supabase_exposes_only_api_schema():
 
 
 def test_foundation_migration_is_idempotent(foundation_database):
-    migration = ROOT / "sql/migrations/20260905_multitenancy_foundation.sql"
+    migration = ROOT / "sql/migrations/20260905000000_multitenancy_foundation.sql"
 
     foundation_database.execute(migration.read_text())

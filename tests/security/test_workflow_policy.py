@@ -47,7 +47,7 @@ def test_pull_requests_run_tests_without_any_secret_context():
     for required in (
         "scan-secrets", "dependency-audit", "sql-lint", "migration-current",
         "fresh-schema", "surface-allowlist", "build-output-scan", "npm run test:all",
-        "playwright install --with-deps chromium",
+        "playwright install --with-deps chromium", "verify_schema_parity.py --verify",
     ):
         assert required in text
     assert "npm --workspace apps/web run lint" in (ROOT / "scripts/test_all.sh").read_text(encoding="utf-8")
