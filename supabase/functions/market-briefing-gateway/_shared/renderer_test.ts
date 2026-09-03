@@ -688,7 +688,16 @@ Deno.test("alert v3 renders inert drafts and unsafe evaluations without inventin
   const draftRule = alertRule({ state: "draft", version: 1, severity: "watch" });
   const draft = await renderAlertV3({
     event_id: draftRule.rule_id,
-    evaluation: alertEvaluation({ rule: draftRule, status: "not_triggered" }),
+    evaluation: alertEvaluation({
+      rule: draftRule,
+      status: "not_triggered",
+      condition_results: [{
+        condition: draftRule.conditions[0],
+        passed: null,
+        observed_value: null,
+        evidence_ids: [],
+      }],
+    }),
     source_evaluation: alertSource(),
     context: null,
     mode: "draft",
@@ -699,6 +708,7 @@ Deno.test("alert v3 renders inert drafts and unsafe evaluations without inventin
   assert(!draft.body.includes("Triggered"), "inert draft was called triggered");
   assert(draft.body.includes("Proposed conditions 1: inside $41.80–$42.30"), "draft condition wording absent");
   assert(!draft.body.includes("Conditions 1/1"), "draft claimed an evaluated pass count");
+  assert(draft.body.includes("evidence 2/2"), "draft source evidence coverage absent");
   assertEquals(draft.reply_markup.inline_keyboard[0].map((button) => button.text), ["Arm", "Dismiss"]);
 
   const unsafeRule = alertRule({ severity: "system" });
@@ -718,6 +728,42 @@ Deno.test("alert v3 renders inert drafts and unsafe evaluations without inventin
   assert(unsafe.body.includes("No safe conclusion was produced because required evidence was unavailable."), "unsafe explanation absent");
   assert(!unsafe.body.includes("conditions passed"), "unsafe evaluation claimed conditions passed");
   assert(!/\bHOLD\b/.test(unsafe.body), "unsafe evaluation invented Hold");
+});
+
+Deno.test("alert v3 draft coverage counts its source packet without widening event evidence", async () => {
+  const source = alertSource();
+  source.candidate.evidence[1].status = "stale";
+  source.candidate.evidence.push({
+    ...source.candidate.evidence[0],
+    id: "fallback-1",
+    status: "fallback",
+  });
+  const draftRule = alertRule({ state: "draft", version: 1, severity: "watch" });
+  const draft = await renderAlertV3({
+    event_id: draftRule.rule_id,
+    evaluation: alertEvaluation({
+      rule: draftRule,
+      status: "not_triggered",
+      condition_results: [{
+        condition: draftRule.conditions[0],
+        passed: null,
+        observed_value: null,
+        evidence_ids: [],
+      }],
+    }),
+    source_evaluation: source,
+    context: null,
+    mode: "draft",
+  });
+  assert(draft.body.includes("evidence 2/3"), "draft source evidence coverage is inaccurate");
+
+  const event = await renderAlertV3({
+    event_id: "7f2c70bf-5cec-4f1e-9de8-ec8823d99fc7",
+    evaluation: alertEvaluation(),
+    source_evaluation: source,
+    context: context(),
+  });
+  assert(event.body.includes("evidence 1/1"), "event coverage included evidence unrelated to the trigger");
 });
 
 Deno.test("alert v3 suppresses unmet rules and omits unsafe model narrative", async () => {

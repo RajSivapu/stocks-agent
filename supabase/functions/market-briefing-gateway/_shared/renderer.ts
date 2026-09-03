@@ -784,9 +784,13 @@ function alertNarratives(source: AlertSourceSummary | null): string[] {
 function alertEvidenceCoverage(
   evaluation: AlertEvaluation,
   source: AlertSourceSummary | null,
+  mode: "draft" | "event",
 ): string {
-  const ids = new Set(evaluation.condition_results.flatMap((result) => result.evidence_ids));
-  if (ids.size === 0 || !source) return "0/0";
+  if (!source) return "0/0";
+  const ids = mode === "draft"
+    ? new Set(source.evidence.map((item) => item.id))
+    : new Set(evaluation.condition_results.flatMap((result) => result.evidence_ids));
+  if (ids.size === 0) return "0/0";
   const evidence = new Map(source.evidence.map((item) => [item.id, item.status]));
   const available = [...ids].filter((id) => {
     const status = evidence.get(id);
@@ -917,7 +921,7 @@ export async function renderAlertV3(input: RenderAlertV3Input): Promise<Rendered
     ...evidenceLines,
     alertRiskLine(rule, source, input.context),
     alertExposure(source),
-    `Confidence ${confidence} • evidence ${alertEvidenceCoverage(input.evaluation, source)} • ${validThrough}`,
+    `Confidence ${confidence} • evidence ${alertEvidenceCoverage(input.evaluation, source, mode)} • ${validThrough}`,
     ...(rule.owner_note ? [`Owner note: ${escapeHtml(compactText(rule.owner_note, 160))}`] : []),
     "",
     ...(rule.severity === "critical" ? ["The bot did not sell and cannot access a brokerage."] : []),
