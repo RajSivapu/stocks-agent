@@ -4,6 +4,7 @@ import type {
   PolicyContext,
 } from "./contracts.ts";
 import type { PolicyEvaluation } from "./policy.ts";
+import type { LongTermCompanionAnalysis } from "./companion.ts";
 import {
   FORBIDDEN_DECISION_TEXT,
   renderAlertV3,
@@ -672,12 +673,169 @@ Deno.test("pre-market comparison separates matched history from the forward evid
       "Forward evidence: SIMILAR — Both cover the broad U.S. equity market; current evidence shows no durable forward edge.",
       "Your recorded VTI monthly plan is unchanged.",
       "Hypothetical history is not a forecast.",
+      "<b>🧠 LONG-TERM COMPANION</b>",
+      "No additive companion cleared current evidence. Your recorded plan is unchanged.",
       '<a href="https://www.ishares.com/us/products/239724/ishares-core-sp-total-us-stock-market-etf">iShares fund profile</a>',
     ]
   ) {
     assert(
       rendered.body.includes(expected),
       `comparison field absent: ${expected}`,
+    );
+  }
+});
+
+function companionAnalysis(
+  overrides: Partial<LongTermCompanionAnalysis> = {},
+): LongTermCompanionAnalysis {
+  return {
+    baseline_ticker: "VTI",
+    companion_ticker: "VXUS",
+    role: "diversifier",
+    thesis: "Non-U.S. exposure adds a distinct geographic role.",
+    risk_note:
+      "Currency and foreign-market risks can cause long periods of lagging U.S. stocks.",
+    evidence_ids: ["vxus-profile"],
+    qualification_status: "qualified",
+    qualification_reason:
+      "Gateway role policy accepted the candidate for long-term research.",
+    recurring_plan_review_eligible: true,
+    horizons: [3, 5, 10].map((years) => ({
+      years: years as 3 | 5 | 10,
+      period_start: `${2026 - years}-09-01`,
+      period_end: "2026-09-01",
+      common_sessions: years * 252,
+      baseline_annualized_return_pct: "8",
+      companion_annualized_return_pct: "6",
+      baseline_max_drawdown_pct: "20",
+      companion_max_drawdown_pct: "24",
+      daily_return_correlation: "0.72",
+    })),
+    rolling_one_year: {
+      monthly_contribution_usd: "100",
+      total_contributed_usd: "1200",
+      sample_windows: 109,
+      weak_ending_value_usd: "980",
+      middle_ending_value_usd: "1260",
+      strong_ending_value_usd: "1490",
+    },
+    ...overrides,
+  };
+}
+
+Deno.test("long-term companion renders the core, role, long horizons, scenario, and unchanged plan", async () => {
+  const rendered = await renderPublication({
+    phase: "pre-market",
+    market_date: "2026-09-03",
+    evaluations: [evaluation("VTI"), evaluation("VXUS")],
+    context: context({
+      owner_plans: [{
+        id: "00000000-0000-4000-8000-000000000088",
+        ticker: "VTI",
+        bucket: "core",
+        amount: "300",
+        cadence: "monthly",
+        next_due_on: "2026-09-21",
+        active: true,
+        updated_at: "2026-09-03T12:00:00.000Z",
+      }],
+    }),
+    comparisons: [{
+      baseline_ticker: "VTI",
+      alternative_ticker: "VXUS",
+      relationship: "diversifier",
+      prospective_view: "similar",
+      reason: "The candidate adds a distinct geographic role.",
+      evidence_ids: ["vxus-profile"],
+      coverage_status: "complete",
+      period_start: "2025-09-03",
+      period_end: "2026-09-02",
+      common_sessions: 252,
+      contribution_count: 12,
+      baseline_lump_sum_return_pct: "10",
+      alternative_lump_sum_return_pct: "9",
+      lump_sum_excess_pct: "-1",
+      baseline_monthly_return_pct: "5",
+      alternative_monthly_return_pct: "4",
+      monthly_excess_pct: "-1",
+      baseline_max_drawdown_pct: "12",
+      alternative_max_drawdown_pct: "14",
+    }],
+    companion: companionAnalysis(),
+  });
+  for (const expected of [
+    "<b>🧠 LONG-TERM COMPANION</b>",
+    "Core stays: <b>VTI</b> · $300.00/month reminder",
+    "Research candidate: <b>VXUS</b> · DIVERSIFIER",
+    "Why it adds something: Non-U.S. exposure adds a distinct geographic role.",
+    "Main risk: Currency and foreign-market risks can cause long periods of lagging U.S. stocks.",
+    "3Y annualized: VTI +8.0% · VXUS +6.0% · corr 0.72 · drawdown 20.0% / 24.0%.",
+    "5Y annualized: VTI +8.0% · VXUS +6.0% · corr 0.72 · drawdown 20.0% / 24.0%.",
+    "10Y annualized: VTI +8.0% · VXUS +6.0% · corr 0.72 · drawdown 20.0% / 24.0%.",
+    "Per $100.00/month, rolling 1Y history: $1200.00 contributed → weak $980.00 · middle $1260.00 · strong $1490.00 (109 windows).",
+    "Plan status: eligible for owner review; no reminder was added or changed.",
+    "Historical scenarios are not forecasts. Future loss is possible.",
+  ]) {
+    assert(rendered.body.includes(expected), `companion field absent: ${expected}`);
+  }
+});
+
+Deno.test("satellite companion remains research-only and unsafe proposal prose is rejected", async () => {
+  const comparison = {
+    baseline_ticker: "VTI",
+    alternative_ticker: "MSFT",
+    relationship: "satellite" as const,
+    prospective_view: "similar" as const,
+    reason: "This is a concentrated company-specific research sleeve.",
+    evidence_ids: ["msft-filing"],
+    coverage_status: "complete" as const,
+    period_start: "2025-09-03",
+    period_end: "2026-09-02",
+    common_sessions: 252,
+    contribution_count: 12,
+    baseline_lump_sum_return_pct: "10",
+    alternative_lump_sum_return_pct: "12",
+    lump_sum_excess_pct: "2",
+    baseline_monthly_return_pct: "5",
+    alternative_monthly_return_pct: "6",
+    monthly_excess_pct: "1",
+    baseline_max_drawdown_pct: "12",
+    alternative_max_drawdown_pct: "18",
+  };
+  const base = {
+    phase: "pre-market" as const,
+    market_date: "2026-09-03",
+    evaluations: [evaluation("VTI"), evaluation("MSFT")],
+    context: context(),
+    comparisons: [comparison],
+  };
+  const satellite = companionAnalysis({
+    companion_ticker: "MSFT",
+    role: "satellite",
+    recurring_plan_review_eligible: false,
+  });
+  const rendered = await renderPublication({ ...base, companion: satellite });
+  assert(
+    rendered.body.includes(
+      "Plan status: research-only; not eligible for a recurring core reminder.",
+    ),
+    "satellite recurring-plan restriction absent",
+  );
+
+  for (const unsafe of [
+    "Allocate more money here.",
+    "This will outperform VTI.",
+    "Guaranteed profit next year.",
+    "$500 per month is appropriate.",
+    "Buy 10 shares.",
+  ]) {
+    await assertRejects(
+      () =>
+        renderPublication({
+          ...base,
+          companion: companionAnalysis({ thesis: unsafe }),
+        }),
+      "forbidden decision directive",
     );
   }
 });

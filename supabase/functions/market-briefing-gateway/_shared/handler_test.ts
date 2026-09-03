@@ -933,7 +933,7 @@ Deno.test("stale companion evidence fails closed without long-term history or si
       baseline_ticker: "VTI",
       companion_ticker: "VXUS",
       role: "diversifier",
-      thesis: "Stale evidence must fail closed.",
+      thesis: "Stale evidence cannot support a current conclusion.",
       risk_note: "Current risks are unavailable.",
       evidence_ids: ["vxus-stale"],
     },

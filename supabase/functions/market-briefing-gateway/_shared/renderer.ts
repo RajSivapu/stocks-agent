@@ -13,11 +13,14 @@ import { parseAlertDraft } from "./alerts.ts";
 import { parseFixed } from "./fixed-point.ts";
 import type { PolicyEvaluation, PolicyReasonCode } from "./policy.ts";
 import type { PortfolioAlternativeComparison } from "./alternatives.ts";
+import type { LongTermCompanionAnalysis } from "./companion.ts";
 
 export const FORBIDDEN_DECISION_TEXT =
   /\b(buy|purchase|accumulate|sell|dump|unload|liquidate|add|reduce|trim|exit|enter|short|cover)\b|\b\d+(?:\.\d+)?\s+shares?\b|\$\s*\d|\b(entry|stop|target)\s*(?:at|=|:)/i;
 const FORBIDDEN_COMPARISON_TEXT =
   /\b(?:buy|buying|sell|selling|switch|switching|replace|replacing|move|moving|redirect|redirecting|reallocate|reallocated|reallocating|recommend|recommends|recommended|recommending|consider|should|must|cancel|trade|order)\b/i;
+const FORBIDDEN_COMPANION_PROMISE =
+  /\b(?:allocate|allocating|guarantee|guaranteed|guarantees|guaranteeing|sure profit|will (?:rise|gain|outperform|make|earn|return|profit)|predict(?:ed|s|ing)? returns?)\b/i;
 
 export interface RenderPublicationInput {
   phase: Phase;
@@ -25,6 +28,7 @@ export interface RenderPublicationInput {
   evaluations: PolicyEvaluation[];
   context?: PolicyContext;
   comparisons?: PortfolioAlternativeComparison[];
+  companion?: LongTermCompanionAnalysis;
   holiday?: boolean;
 }
 
@@ -782,6 +786,94 @@ function comparisonRows(
   return rows;
 }
 
+function formatCorrelation(value: string): string {
+  const negative = value.startsWith("-");
+  const magnitude = parseFixed(negative ? value.slice(1) : value, 4);
+  const hundredths = (magnitude + 50n) / 100n;
+  return `${negative ? "-" : ""}${hundredths / 100n}.${
+    (hundredths % 100n).toString().padStart(2, "0")
+  }`;
+}
+
+function companionRows(
+  context: PolicyContext,
+  companion?: LongTermCompanionAnalysis,
+): string[] {
+  if (!companion) {
+    return [
+      "No additive companion cleared current evidence. Your recorded plan is unchanged.",
+    ];
+  }
+  for (const text of [companion.thesis, companion.risk_note]) {
+    if (
+      FORBIDDEN_COMPARISON_TEXT.test(text) ||
+      FORBIDDEN_DECISION_TEXT.test(text) ||
+      FORBIDDEN_COMPANION_PROMISE.test(text)
+    ) {
+      throw new Error("forbidden decision directive in companion summary");
+    }
+  }
+  const role = companion.role === "satellite"
+    ? "CONCENTRATED SATELLITE"
+    : companion.role.toUpperCase();
+  const plan = context.owner_plans.find((item) =>
+    item.active && item.ticker === companion.baseline_ticker
+  );
+  const rows = [
+    plan
+      ? `Core stays: <b>${escapeHtml(companion.baseline_ticker)}</b> · ${
+        formatMoney(plan.amount)
+      }/month reminder`
+      : `Core reference: <b>${escapeHtml(companion.baseline_ticker)}</b> · recorded holding/plan unchanged`,
+    `Research candidate: <b>${escapeHtml(companion.companion_ticker)}</b> · ${role}`,
+  ];
+  if (companion.qualification_status !== "qualified") {
+    rows.push(
+      `Did not qualify: ${escapeHtml(companion.qualification_reason)}`,
+      "No reminder was added or changed.",
+    );
+    return rows;
+  }
+  rows.push(
+    `Why it adds something: ${escapeHtml(companion.thesis)}`,
+    `Main risk: ${escapeHtml(companion.risk_note)}`,
+  );
+  for (
+    const horizon of [...companion.horizons].sort((left, right) =>
+      left.years - right.years
+    )
+  ) {
+    rows.push(
+      `${horizon.years}Y annualized: ${
+        escapeHtml(companion.baseline_ticker)
+      } ${comparisonPercent(horizon.baseline_annualized_return_pct, true)} · ${
+        escapeHtml(companion.companion_ticker)
+      } ${comparisonPercent(horizon.companion_annualized_return_pct, true)} · corr ${
+        formatCorrelation(horizon.daily_return_correlation)
+      } · drawdown ${comparisonPercent(horizon.baseline_max_drawdown_pct)} / ${
+        comparisonPercent(horizon.companion_max_drawdown_pct)
+      }.`,
+    );
+  }
+  if (companion.rolling_one_year) {
+    const scenario = companion.rolling_one_year;
+    rows.push(
+      `Per ${formatMoney(scenario.monthly_contribution_usd)}/month, rolling 1Y history: ${
+        formatMoney(scenario.total_contributed_usd)
+      } contributed → weak ${formatMoney(scenario.weak_ending_value_usd)} · middle ${
+        formatMoney(scenario.middle_ending_value_usd)
+      } · strong ${formatMoney(scenario.strong_ending_value_usd)} (${scenario.sample_windows} windows).`,
+    );
+  }
+  rows.push(
+    companion.recurring_plan_review_eligible
+      ? "Plan status: eligible for owner review; no reminder was added or changed."
+      : "Plan status: research-only; not eligible for a recurring core reminder.",
+    "<i>Historical scenarios are not forecasts. Future loss is possible.</i>",
+  );
+  return rows;
+}
+
 function section(
   title: string,
   rows: readonly string[],
@@ -895,6 +987,10 @@ function renderFullBrief(
           "🔄 CURRENT VS ALTERNATIVES",
           comparisonRows(context, input.comparisons),
           "\n\n",
+        ),
+        section(
+          "🧠 LONG-TERM COMPANION",
+          companionRows(context, input.companion),
         ),
       ]
       : []),

@@ -1342,6 +1342,7 @@ async function evaluateAndPublish(
       evaluations,
       context,
       comparisons,
+      companion,
     });
   } catch {
     throw new GatewayRepositoryError("POLICY_REJECTED");
