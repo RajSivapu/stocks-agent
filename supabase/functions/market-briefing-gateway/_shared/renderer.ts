@@ -20,7 +20,7 @@ export const FORBIDDEN_DECISION_TEXT =
 const FORBIDDEN_COMPARISON_TEXT =
   /\b(?:buy|buying|sell|selling|switch|switching|replace|replacing|move|moving|redirect|redirecting|reallocate|reallocated|reallocating|recommend|recommends|recommended|recommending|consider|should|must|cancel|trade|order)\b/i;
 const FORBIDDEN_COMPANION_PROMISE =
-  /\b(?:allocate|allocating|guarantee|guaranteed|guarantees|guaranteeing|sure profits?|assured profits?|profits? (?:are|is) assured|certain(?:ly)? to (?:rise|gain|outperform|make|earn|return|profit)|risk[- ]free|will (?:rise|gain|outperform|make|earn|return|profit)|outperform(?:s|ed|ing)?|returns? (?:are|is) expected|predict(?:ed|s|ing)? returns?)\b/i;
+  /\b(?:allocate|allocating|guarantee|guaranteed|guarantees|guaranteeing|sure profits?|assured (?:profits?|returns?|gains?)|(?:profits?|returns?|gains?) (?:are|is) (?:assured|guaranteed|certain|expected)|(?:certain|certainly|sure) to (?:beat|rise|gain|outperform|make|earn|return|profit|win)|(?:cannot|can not|can't|will not|won't) (?:lose|decline|fall)(?: money| value)?|risk[- ]free|will (?:beat|rise|gain|outperform|make|earn|return|profit|win)|outperform(?:s|ed|ing)?|predict(?:ed|s|ing)? returns?)\b/i;
 
 export interface RenderPublicationInput {
   phase: Phase;

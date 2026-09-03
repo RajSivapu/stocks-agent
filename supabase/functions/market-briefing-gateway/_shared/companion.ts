@@ -145,6 +145,12 @@ function cutoffDate(endDate: string, years: number): string {
   return cutoff.toISOString().slice(0, 10);
 }
 
+function addCalendarDays(date: string, days: number): string {
+  const instant = new Date(`${date}T00:00:00.000Z`);
+  instant.setUTCDate(instant.getUTCDate() + days);
+  return instant.toISOString().slice(0, 10);
+}
+
 function annualizedReturn(
   prices: readonly number[],
   start: string,
@@ -204,10 +210,12 @@ function horizon(
   years: 3 | 5 | 10,
 ): CompanionHorizon | null {
   const periodEnd = rows.at(-1)!.date;
-  const periodRows = rows.filter((row) =>
-    row.date >= cutoffDate(periodEnd, years)
-  );
-  if (periodRows.length < years * MIN_SESSIONS_PER_YEAR) return null;
+  const requestedStart = cutoffDate(periodEnd, years);
+  const periodRows = rows.filter((row) => row.date >= requestedStart);
+  if (
+    periodRows.length < years * MIN_SESSIONS_PER_YEAR ||
+    periodRows[0].date > addCalendarDays(requestedStart, 10)
+  ) return null;
   const baseline = periodRows.map((row) => row.baseline);
   const companion = periodRows.map((row) => row.companion);
   const pairedCorrelation = correlation(baseline, companion);

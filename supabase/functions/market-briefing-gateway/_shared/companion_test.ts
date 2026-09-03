@@ -227,6 +227,27 @@ Deno.test("partial history emits only supported horizons with nonzero paired met
   }
 });
 
+Deno.test("dense observations cannot substitute for the requested calendar-year span", () => {
+  const underThreeYears = bars(
+    "2023-01-02",
+    "2025-10-03",
+    (monthIndex) => monthIndex % 2 === 0 ? 100 : 200,
+  );
+  assert(
+    underThreeYears.length >= 720,
+    "fixture must exceed the raw three-year session threshold",
+  );
+  const result = analyzeLongTermCompanion(
+    request(),
+    underThreeYears,
+    underThreeYears,
+    qualifyCompanionRole(request(), "diversifier"),
+  );
+
+  assertEquals(result.qualification_status, "insufficient");
+  assertEquals(result.horizons, []);
+});
+
 Deno.test("long-term companion fails closed without three years or valid policy", () => {
   const short = bars("2025-01-01", "2026-09-01", () => 100);
   const insufficient = analyzeLongTermCompanion(
