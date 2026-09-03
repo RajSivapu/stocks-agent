@@ -717,7 +717,13 @@ function comparisonRows(
       const excess = comparison.monthly_excess_pct.startsWith("-")
         ? -parseFixed(comparison.monthly_excess_pct.slice(1), 4)
         : parseFixed(comparison.monthly_excess_pct, 4);
-      const leader = excess > 0n
+      const excessMagnitude = excess < 0n ? -excess : excess;
+      const roundedExcessTenths = (excessMagnitude + 500n) / 1_000n;
+      const leader = excess === 0n
+        ? "matched to 0.0 points"
+        : roundedExcessTenths === 0n
+        ? "difference under 0.1 point"
+        : excess > 0n
         ? `${comparison.alternative_ticker} ahead by ${
           comparisonPercent(comparison.monthly_excess_pct).replace(
             "%",

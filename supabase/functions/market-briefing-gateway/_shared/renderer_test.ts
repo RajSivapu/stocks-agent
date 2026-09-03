@@ -715,6 +715,21 @@ Deno.test("comparison rejects plan-switch prose and does not invent a winner on 
     rendered.body.includes("matched to 0.0 points"),
     "a tied comparison invented a leader",
   );
+  const roundedTie = await renderPublication({
+    phase: "pre-market",
+    market_date: "2026-09-03",
+    evaluations: [evaluation("VTI"), evaluation("ITOT")],
+    context: context(),
+    comparisons: [{ ...tied, monthly_excess_pct: "0.01" }],
+  });
+  assert(
+    roundedTie.body.includes("difference under 0.1 point"),
+    "a sub-display-precision comparison invented a visible winner",
+  );
+  assert(
+    !roundedTie.body.includes("ahead by 0.0 points"),
+    "a rounded comparison claimed a zero-point lead",
+  );
   for (
     const reason of [
       "Buy ITOT immediately.",
