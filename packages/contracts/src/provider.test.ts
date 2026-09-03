@@ -33,6 +33,7 @@ export function analysisSubmission(): Record<string, any> {
       summary: `${name} was reviewed.`,
       evidence_ids: ["quote-current", "search-current"],
     }])),
+    evidence_packets: [{ payload: {}, signature: "a".repeat(64) }],
     evidence_refs: [
       { evidence_id: "quote-current", run_id: RUN_ID, content_hash: "a".repeat(64) },
       { evidence_id: "search-current", run_id: RUN_ID, content_hash: "b".repeat(64) },

@@ -227,6 +227,13 @@ def test_gateway_limits_six_runs_per_day_and_one_on_demand_per_hour(tenant_datab
 def test_analysis_submission_requires_server_owned_current_run_evidence(tenant_database):
     with tenant_database.transaction(force_rollback=True):
         public_id, run_id = start(tenant_database)
+        request_id = uuid4()
+        observed_at = tenant_database.execute(
+            "SELECT clock_timestamp()::text"
+        ).fetchone()[0]
+        tenant_database.execute(
+            "INSERT INTO public.market_policy_config(version, config, active) VALUES (1, '{}'::jsonb, true)"
+        )
         dimensions = {
             name: {"status": "supported", "summary": "Reviewed.", "evidence_ids": ["quote"]}
             for name in (
@@ -240,35 +247,77 @@ def test_analysis_submission_requires_server_owned_current_run_evidence(tenant_d
             "analyst": {"completed": True, "action": "watch", "confidence": "medium", "thesis": "Mixed."},
             "checker": {"completed": True, "verdict": "approve", "reason": "Bounded."},
             "dimensions": dimensions,
+            "evidence_packets": [{"payload": {}, "signature": "server-verified-by-edge"}],
             "evidence_refs": [{"evidence_id": "quote", "run_id": run_id, "content_hash": "c" * 64}],
             "prior_suggestion_ids": [], "candidates": [],
         }
-        with pytest.raises(Exception, match="evidence_missing"):
-            rpc(tenant_database, "agent_submit_analysis", request(
-                public_id, "aa" * 32, "submit_analysis", run_id, payload=payload,
-            ))
-        tenant_database.execute(
-            """
-            INSERT INTO app.run_evidence(
-              owner_id, run_id, evidence_id, category, source_identifier,
-              retrieved_at, content_hash, status
-            ) VALUES (%s, %s, 'quote', 'market_snapshot', 'server', now(), %s, 'fresh')
-            """,
-            (OWNER_A, run_id, "c" * 64),
-        )
-        tenant_database.execute(
-            """
-            INSERT INTO app.source_search_receipts(
-              owner_id, run_id, searched_at, categories, sources, result_status, content_hash
-            ) VALUES (%s, %s, now(), ARRAY['news'], '["issuer"]',
-                      'no_new_material_evidence', %s)
-            """,
-            (OWNER_A, run_id, "d" * 64),
-        )
-        receipt = rpc(tenant_database, "agent_submit_analysis", request(
-            public_id, "aa" * 32, "submit_analysis", run_id, payload=payload,
+        claim = rpc(tenant_database, "agent_submit_analysis", request(
+            public_id, "aa" * 32, "submit_analysis", run_id,
+            payload=payload, request_id=request_id,
         ))
-        assert receipt["status"] == "accepted"
+        assert claim["status"] == "claimed"
+        assert tenant_database.execute(
+            "SELECT count(*) FROM app.agent_analysis_submissions WHERE owner_id = %s AND run_id = %s",
+            (OWNER_A, run_id),
+        ).fetchone()[0] == 0
+
+        empty_decision = {
+            "provider_submission": payload,
+            "evidence": [],
+            "search_receipts": [],
+            "policy_quotes": [],
+            "policy_version": claim["policy"]["version"],
+            "evaluations": [],
+            "suggestions": [],
+            "holding_state": [],
+            "publication": {
+                "market_date": "2026-09-03", "phase": "intraday", "kind": "brief",
+                "template_version": 1, "rendered_body": "No actionable change.",
+                "rendered_hash": "a" * 64, "status": "suppressed",
+            },
+        }
+        with pytest.raises(Exception, match="evidence_missing"):
+            rpc(tenant_database, "agent_apply_analysis", {
+                "connection_id": str(public_id), "secret_digest": "aa" * 32,
+                "request_id": str(request_id), "run_id": run_id,
+                "lease_token": claim["lease_token"], "decision": empty_decision,
+            })
+        assert tenant_database.execute(
+            "SELECT count(*) FROM app.run_evidence WHERE owner_id = %s AND run_id = %s",
+            (OWNER_A, run_id),
+        ).fetchone()[0] == 0
+
+        complete_decision = dict(empty_decision)
+        complete_decision["evidence"] = [
+            {
+                "evidence_id": "quote", "source_run_id": None,
+                "category": "market_snapshot", "source_identifier": "yahoo-chart",
+                "reference_identifier": "https://query1.finance.yahoo.com/v8/finance/chart/SPY",
+                "observed_at": observed_at, "retrieved_at": observed_at,
+                "revalidated_at": None, "content_hash": "c" * 64,
+                "claims": ["SPY server quote"], "status": "fresh",
+            },
+            {
+                "evidence_id": "source-search", "source_run_id": None,
+                "category": "source_search", "source_identifier": "server-source-fetch",
+                "reference_identifier": "https://www.sec.gov/Archives/edgar/data/1/index.json",
+                "observed_at": None, "retrieved_at": observed_at,
+                "revalidated_at": None, "content_hash": "d" * 64,
+                "claims": [], "status": "no_new_material_evidence",
+            },
+        ]
+        complete_decision["search_receipts"] = [{
+            "searched_at": observed_at, "categories": ["news"],
+            "sources": ["www.sec.gov"],
+            "result_status": "no_new_material_evidence", "content_hash": "d" * 64,
+        }]
+        receipt = rpc(tenant_database, "agent_apply_analysis", {
+            "connection_id": str(public_id), "secret_digest": "aa" * 32,
+            "request_id": str(request_id), "run_id": run_id,
+            "lease_token": claim["lease_token"], "decision": complete_decision,
+        })
+        assert receipt["delivery_required"] is False
+        assert receipt["response"]["status"] == "accepted"
         assert tenant_database.execute(
             "SELECT count(*) FROM app.agent_analysis_submissions WHERE owner_id = %s AND run_id = %s",
             (OWNER_A, run_id),

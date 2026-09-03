@@ -21,5 +21,11 @@ export function createAgentGatewayRepository(
     invoke(operation: ProviderOperation, request: Record<string, unknown>) {
       return database(databaseUrl, (client) => client.callJsonRpc(RPC_BY_OPERATION[operation], request));
     },
+    applyAnalysis(request: Record<string, unknown>) {
+      return database(databaseUrl, (client) => client.callJsonRpc("agent_apply_analysis", request));
+    },
+    finishAnalysisDelivery(request: Record<string, unknown>) {
+      return database(databaseUrl, (client) => client.callJsonRpc("agent_finish_analysis_delivery", request));
+    },
   };
 }

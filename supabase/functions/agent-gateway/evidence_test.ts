@@ -27,6 +27,7 @@ function analysisSubmission(): Record<string, any> {
       status: "supported", summary: `${name} was reviewed.`,
       evidence_ids: ["quote-current", "search-current"],
     }])) as Record<typeof DIMENSIONS[number], { status: string; summary: string; evidence_ids: string[] }>,
+    evidence_packets: [{ payload: {}, signature: "f".repeat(64) }],
     evidence_refs: [
       { evidence_id: "quote-current", run_id: RUN.runId, content_hash: "a".repeat(64) },
       { evidence_id: "search-current", run_id: RUN.runId, content_hash: "b".repeat(64) },

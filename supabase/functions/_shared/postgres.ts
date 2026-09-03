@@ -8,6 +8,8 @@ export const RPC_ALLOWLIST = [
   "agent_record_permitted_artifacts",
   "agent_grade_due_decisions",
   "agent_finish_run",
+  "agent_apply_analysis",
+  "agent_finish_analysis_delivery",
   "scheduler_claim_due_slots",
   "scheduler_read_trigger_secret",
   "scheduler_record_trigger_result",
@@ -84,6 +86,8 @@ async function executeRpc(
     case "agent_record_permitted_artifacts": rows = await transaction`SELECT machine.agent_record_permitted_artifacts(${value}::jsonb) AS result`; break;
     case "agent_grade_due_decisions": rows = await transaction`SELECT machine.agent_grade_due_decisions(${value}::jsonb) AS result`; break;
     case "agent_finish_run": rows = await transaction`SELECT machine.agent_finish_run(${value}::jsonb) AS result`; break;
+    case "agent_apply_analysis": rows = await transaction`SELECT machine.agent_apply_analysis(${value}::jsonb) AS result`; break;
+    case "agent_finish_analysis_delivery": rows = await transaction`SELECT machine.agent_finish_analysis_delivery(${value}::jsonb) AS result`; break;
     case "scheduler_claim_due_slots": rows = await transaction`SELECT machine.scheduler_claim_due_slots(${value}::jsonb) AS result`; break;
     case "scheduler_read_trigger_secret": rows = await transaction`SELECT machine.scheduler_read_trigger_secret(${value}::jsonb) AS result`; break;
     case "scheduler_record_trigger_result": rows = await transaction`SELECT machine.scheduler_record_trigger_result(${value}::jsonb) AS result`; break;

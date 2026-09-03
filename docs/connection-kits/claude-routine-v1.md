@@ -140,7 +140,10 @@ python scripts/agent_gateway_v2.py invoke \
 
 If the result is kind=handshake, report only its receipt and stop. If it is kind=analysis, use only
 the returned server-owned run_id, phase, market_date, and bounded context. Re-research the current
-phase from fresh evidence; an intraday run must not reuse a morning conclusion. Use only
+phase from fresh evidence; an intraday run must not reuse a morning conclusion. Preserve the initial
+signed evidence_packet. For each exact allow-listed source used, call read_bounded_context again with
+the bounded research request documented in skills/market-briefing/SKILL.md, and preserve the returned
+signed packet. Submit those packets unchanged and cite only their exact fact IDs and hashes. Use only
 scripts/agent_gateway_v2.py for subsequent submit_analysis, record_permitted_artifacts,
 grade_due_decisions, and finish_run calls. Give each operation a fresh UUID; reuse one only for an
 uncertain retry of the exact same request. The server's policy, persistence, publication, and

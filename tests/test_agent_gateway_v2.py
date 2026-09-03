@@ -29,6 +29,9 @@ class FakeResponse:
     def __exit__(self, *_args):
         return False
 
+    def close(self):
+        pass
+
 
 def test_gateway_call_uses_v2_envelope_and_relies_on_proxy_credential():
     captured = {}
@@ -164,3 +167,28 @@ def test_network_errors_and_server_details_are_redacted():
         )
     assert str(captured.value) == "GATEWAY_UNAVAILABLE"
     assert "secret" not in repr(captured.value)
+
+
+@pytest.mark.parametrize("code", [
+    "EVIDENCE_STALE",
+    "EVIDENCE_MISSING",
+    "EVIDENCE_CONFLICTING",
+    "CORPORATE_ACTION_PENDING",
+    "POLICY_REJECTED",
+])
+def test_analysis_guardrail_errors_are_preserved_without_server_details(code):
+    body = {"ok": False, "error": {"code": code, "detail": "private database detail"}}
+    error = urllib.error.HTTPError(URL, 409, "conflict", {}, FakeResponse(body))
+
+    def opener(*_args, **_kwargs):
+        raise error
+
+    with pytest.raises(agent_gateway_v2.ClientError, match=f"^{code}$"):
+        agent_gateway_v2.call_gateway(
+            URL,
+            "submit_analysis",
+            {},
+            run_id=RUN_ID,
+            request_id=REQUEST_ID,
+            _opener=opener,
+        )

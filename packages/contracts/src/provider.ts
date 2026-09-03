@@ -174,6 +174,7 @@ export interface ProviderAnalysisSubmissionV2 {
     summary: string;
     evidence_ids: string[];
   }>;
+  evidence_packets: unknown[];
   evidence_refs: ProviderEvidenceReference[];
   prior_suggestion_ids: string[];
   candidates: unknown[];
@@ -210,7 +211,7 @@ export function parseAnalysisSubmissionV2(value: unknown): ProviderAnalysisSubmi
   const row = record(value, "analysis submission");
   exactKeys(row, [
     "phase", "market_date", "title", "suggestion_only", "provider", "model", "analyst",
-    "checker", "dimensions", "evidence_refs", "prior_suggestion_ids", "candidates",
+    "checker", "dimensions", "evidence_packets", "evidence_refs", "prior_suggestion_ids", "candidates",
   ]);
   const analyst = record(row.analyst, "analyst");
   exactKeys(analyst, ["completed", "action", "confidence", "thesis"]);
@@ -230,6 +231,9 @@ export function parseAnalysisSubmissionV2(value: unknown): ProviderAnalysisSubmi
   }
   if (!Array.isArray(row.evidence_refs) || row.evidence_refs.length > 100) {
     throw new Error("evidence_refs must be a bounded array");
+  }
+  if (!Array.isArray(row.evidence_packets) || row.evidence_packets.length < 1 || row.evidence_packets.length > 4) {
+    throw new Error("evidence_packets must be a bounded array");
   }
   const evidenceRefs = row.evidence_refs.map((item, index) => {
     const reference = record(item, `evidence_refs[${index}]`);
@@ -277,6 +281,7 @@ export function parseAnalysisSubmissionV2(value: unknown): ProviderAnalysisSubmi
       reason: boundedString(checker.reason, "checker.reason", 2_000),
     },
     dimensions,
+    evidence_packets: structuredClone(row.evidence_packets),
     evidence_refs: evidenceRefs,
     prior_suggestion_ids: stringArray(row.prior_suggestion_ids, "prior_suggestion_ids", 20),
     candidates: structuredClone(row.candidates),

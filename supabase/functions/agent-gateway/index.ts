@@ -1,5 +1,6 @@
 import { createAgentGatewayHandler } from "./handler.ts";
 import { createAgentGatewayRepository } from "./repository.ts";
+import { decodeSigningKey } from "./evidence-packet.ts";
 
 function requiredEnvironment(name: string): string {
   const value = Deno.env.get(name);
@@ -9,4 +10,6 @@ function requiredEnvironment(name: string): string {
 
 Deno.serve(createAgentGatewayHandler({
   repository: createAgentGatewayRepository(requiredEnvironment("AGENT_DATABASE_URL")),
+  evidenceSigningKey: decodeSigningKey(requiredEnvironment("EVIDENCE_SIGNING_KEY")),
+  telegramToken: requiredEnvironment("TELEGRAM_BOT_TOKEN"),
 }));

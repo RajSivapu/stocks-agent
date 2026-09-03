@@ -60,6 +60,8 @@ def test_machine_roles_have_no_cross_role_membership_or_unreviewed_execute(tenan
             "machine.agent_start_run(jsonb)",
             "machine.agent_read_bounded_context(jsonb)",
             "machine.agent_submit_analysis(jsonb)",
+            "machine.agent_apply_analysis(jsonb)",
+            "machine.agent_finish_analysis_delivery(jsonb)",
             "machine.agent_record_permitted_artifacts(jsonb)",
             "machine.agent_grade_due_decisions(jsonb)",
             "machine.agent_finish_run(jsonb)",

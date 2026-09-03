@@ -268,6 +268,13 @@ CREATE INDEX agent_analysis_submissions_run_idx
 
 -- FORCE RLS also applies to the table owner. These policies are intentionally granted only
 -- to the non-login migration owner used by reviewed SECURITY DEFINER functions.
+ALTER TABLE public.market_policy_config OWNER TO stock_agent_migration_owner;
+ALTER TABLE public.market_policy_config FORCE ROW LEVEL SECURITY;
+CREATE POLICY market_policy_config_executor_all ON public.market_policy_config
+  FOR ALL TO stock_agent_migration_owner USING (true) WITH CHECK (true);
+REVOKE ALL ON public.market_policy_config
+  FROM PUBLIC, anon, authenticated, service_role,
+       stock_agent_gateway, stock_agent_scheduler, stock_agent_telegram, stock_agent_backup;
 CREATE POLICY agent_connections_executor_all ON app.agent_connections
   FOR ALL TO stock_agent_migration_owner USING (true) WITH CHECK (true);
 CREATE POLICY user_consents_executor_all ON app.user_consents
@@ -277,6 +284,12 @@ CREATE POLICY analysis_schedules_executor_all ON app.analysis_schedules
 CREATE POLICY analysis_runs_executor_all ON app.analysis_runs
   FOR ALL TO stock_agent_migration_owner USING (true) WITH CHECK (true);
 CREATE POLICY market_gateway_requests_executor_all ON app.market_gateway_requests
+  FOR ALL TO stock_agent_migration_owner USING (true) WITH CHECK (true);
+CREATE POLICY decision_evaluations_executor_all ON app.decision_evaluations
+  FOR ALL TO stock_agent_migration_owner USING (true) WITH CHECK (true);
+CREATE POLICY notification_preferences_executor_all ON app.notification_preferences
+  FOR ALL TO stock_agent_migration_owner USING (true) WITH CHECK (true);
+CREATE POLICY dry_powder_executor_all ON app.dry_powder
   FOR ALL TO stock_agent_migration_owner USING (true) WITH CHECK (true);
 CREATE POLICY suggestions_executor_all ON app.suggestions
   FOR ALL TO stock_agent_migration_owner USING (true) WITH CHECK (true);
@@ -329,6 +342,7 @@ DECLARE
   run_uuid UUID;
   digest_matches BOOLEAN;
   connection_found BOOLEAN;
+  operation_lease UUID;
 BEGIN
   IF NOT app.jsonb_has_exact_keys(
     p_request,
@@ -399,7 +413,7 @@ BEGIN
     RAISE EXCEPTION 'request replay conflict' USING ERRCODE = '23505';
   END IF;
 
-  IF p_expected <> 'start_run' THEN
+  IF p_expected <> 'start_run' AND NOT (p_request->>'dry_run')::boolean THEN
     SELECT * INTO run_row
     FROM app.analysis_runs
     WHERE owner_id = connection_row.owner_id
@@ -416,7 +430,7 @@ BEGIN
       'duplicate', false, 'owner_id', connection_row.owner_id,
       'connection_id', connection_row.id, 'request_id', request_uuid,
       'run_id', run_uuid, 'dry_run', true, 'provider', connection_row.provider,
-      'connection_status', connection_row.status
+      'connection_status', connection_row.status, 'lease_token', extensions.gen_random_uuid()
     );
   END IF;
 
@@ -428,18 +442,19 @@ BEGIN
     RAISE EXCEPTION 'run operation limit reached' USING ERRCODE = '54000';
   END IF;
 
+  operation_lease := extensions.gen_random_uuid();
   INSERT INTO app.market_gateway_requests(
     owner_id, request_id, operation, run_id, connection_id, input_digest,
     status, lease_token
   ) VALUES (
     connection_row.owner_id, request_uuid, p_expected, run_uuid,
-    connection_row.id, request_digest, 'claimed', extensions.gen_random_uuid()
+    connection_row.id, request_digest, 'claimed', operation_lease
   );
   RETURN jsonb_build_object(
     'duplicate', false, 'owner_id', connection_row.owner_id,
     'connection_id', connection_row.id, 'request_id', request_uuid,
     'run_id', run_uuid, 'dry_run', false, 'provider', connection_row.provider,
-    'connection_status', connection_row.status
+    'connection_status', connection_row.status, 'lease_token', operation_lease
   );
 END
 $$;
@@ -503,7 +518,11 @@ BEGIN
   claim := machine.agent_claim_operation(p_request, 'start_run');
   IF (claim->>'duplicate')::boolean THEN RETURN claim->'response'; END IF;
   IF (claim->>'dry_run')::boolean THEN
-    RETURN jsonb_build_object('status', 'dry_run', 'run_id', null, 'writes', 0);
+    RETURN jsonb_build_object(
+      'status', 'dry_run', 'run_id', run_uuid, 'phase', 'on-demand',
+      'market_date', (clock_timestamp() AT TIME ZONE 'America/New_York')::date,
+      'writes', 0
+    );
   END IF;
   owner_uuid := (claim->>'owner_id')::uuid;
   connection_uuid := (claim->>'connection_id')::uuid;
@@ -579,6 +598,121 @@ BEGIN
 END
 $$;
 
+CREATE OR REPLACE FUNCTION machine.agent_build_owner_context(
+  p_owner_id UUID, p_run_id UUID, p_phase TEXT, p_market_date DATE, p_started_at TIMESTAMPTZ
+) RETURNS JSONB
+LANGUAGE sql
+STABLE
+SECURITY DEFINER
+SET search_path = pg_catalog
+AS $$
+  SELECT jsonb_build_object(
+    'run_id', p_run_id,
+    'contract_version', 2,
+    'phase', p_phase,
+    'market_date', p_market_date,
+    'started_at', p_started_at,
+    'holdings', (SELECT coalesce(jsonb_agg(to_jsonb(row_value)), '[]'::jsonb) FROM (
+      SELECT ticker, shares::text AS shares, avg_cost::text AS avg_cost, bucket,
+             stop::text AS stop, target::text AS target,
+             high_water_price::text AS high_water_price, hold_override_until,
+             stop_alert_active, stop_near_alert_active,
+             target_near_alert_active, target_alert_active
+      FROM app.holdings WHERE owner_id = p_owner_id ORDER BY ticker LIMIT 100
+    ) row_value),
+    'holding_quotes', '{}'::jsonb,
+    'realized_pnl_today', (
+      SELECT coalesce(sum((result->>'realized_pnl')::numeric), 0)::text
+      FROM app.portfolio_commands
+      WHERE owner_id = p_owner_id AND status = 'applied'
+        AND operation IN ('sell','sell_all')
+        AND (applied_at AT TIME ZONE 'America/New_York')::date = p_market_date
+        AND result->>'realized_pnl' ~ '^-?[0-9]+(?:\.[0-9]+)?$'
+    ),
+    'portfolio_command_coverage_complete', NOT EXISTS (
+      SELECT 1 FROM app.portfolio_commands
+      WHERE owner_id = p_owner_id AND status = 'applied'
+        AND operation IN ('sell','sell_all')
+        AND (applied_at AT TIME ZONE 'America/New_York')::date = p_market_date
+        AND coalesce(result->>'realized_pnl', '') !~ '^-?[0-9]+(?:\.[0-9]+)?$'
+    ),
+    'consecutive_completed_losses', (
+      SELECT count(*) FROM (
+        SELECT direction_success,
+               sum(CASE WHEN direction_success THEN 1 ELSE 0 END)
+                 OVER (ORDER BY graded_at DESC, id DESC ROWS UNBOUNDED PRECEDING) AS prior_successes
+        FROM app.suggestion_grades
+        WHERE owner_id = p_owner_id AND coverage_status = 'complete'
+          AND direction_success IS NOT NULL
+        ORDER BY graded_at DESC, id DESC LIMIT 50
+      ) recent WHERE NOT direction_success AND prior_successes = 0
+    ),
+    'owner_plans', (SELECT coalesce(jsonb_agg(to_jsonb(row_value)), '[]'::jsonb) FROM (
+      SELECT id, ticker, bucket, amount::text AS amount, cadence, next_due_on, active,
+             updated_at
+      FROM app.owner_investment_plans WHERE owner_id = p_owner_id AND active
+      ORDER BY next_due_on, ticker LIMIT 20
+    ) row_value),
+    'plans', (SELECT coalesce(jsonb_agg(to_jsonb(row_value)), '[]'::jsonb) FROM (
+      SELECT id, ticker, bucket, amount::text AS amount, cadence, next_due_on, active,
+             updated_at
+      FROM app.owner_investment_plans WHERE owner_id = p_owner_id AND active
+      ORDER BY next_due_on, ticker LIMIT 20
+    ) row_value),
+    'recent_suggestions', (SELECT coalesce(jsonb_agg(to_jsonb(row_value)), '[]'::jsonb) FROM (
+      SELECT id, date, ticker, action, bucket, confidence, score,
+             stop::text AS stop, target::text AS target,
+             invalidation_price::text AS invalidation_price,
+             valid_until, evidence_as_of
+      FROM app.suggestions WHERE owner_id = p_owner_id
+      ORDER BY ts DESC, id DESC LIMIT 100
+    ) row_value),
+    'observations', (SELECT coalesce(jsonb_agg(to_jsonb(row_value)), '[]'::jsonb) FROM (
+      SELECT id, ticker, obs_date, event_type, summary, price_reaction, confidence, source
+      FROM app.stock_observations WHERE owner_id = p_owner_id
+      ORDER BY obs_date DESC, id DESC LIMIT 100
+    ) row_value),
+    'lessons', (SELECT coalesce(jsonb_agg(to_jsonb(row_value)), '[]'::jsonb) FROM (
+      SELECT id, entry_date, category, content FROM app.lessons
+      WHERE owner_id = p_owner_id ORDER BY entry_date DESC, id DESC LIMIT 40
+    ) row_value),
+    'radar', (SELECT coalesce(jsonb_agg(to_jsonb(row_value)), '[]'::jsonb) FROM (
+      SELECT ticker, added, last_seen, days_relevant, reason, bucket_guess, promoted, promoted_on
+      FROM app.radar WHERE owner_id = p_owner_id ORDER BY last_seen DESC NULLS LAST, ticker LIMIT 20
+    ) row_value),
+    'recent_grades', (SELECT coalesce(jsonb_agg(to_jsonb(row_value)), '[]'::jsonb) FROM (
+      SELECT suggestion_id, horizon_days, coverage_status, excess_return_pct::text AS excess_return_pct,
+             direction_success
+      FROM app.suggestion_grades WHERE owner_id = p_owner_id
+      ORDER BY graded_at DESC, id DESC LIMIT 150
+    ) row_value),
+    'dry_powder', (SELECT coalesce(jsonb_agg(to_jsonb(row_value)), '[]'::jsonb) FROM (
+      SELECT month, growth_available::text AS growth_available,
+             spec_available::text AS spec_available, rolled_months
+      FROM app.dry_powder WHERE owner_id = p_owner_id ORDER BY month DESC LIMIT 12
+    ) row_value),
+    'paper_watches', (SELECT coalesce(jsonb_agg(to_jsonb(row_value)), '[]'::jsonb) FROM (
+      SELECT id, ticker, created, entry_ref_price::text AS entry_ref_price,
+             target_price::text AS target_price, hypothetical_amount::text AS hypothetical_amount,
+             thesis, horizon, agent_view_at_open, agent_score_at_open
+      FROM app.paper_watches WHERE owner_id = p_owner_id AND status = 'active'
+      ORDER BY created DESC, id DESC LIMIT 50
+    ) row_value),
+    'evidence', (SELECT coalesce(jsonb_agg(to_jsonb(row_value)), '[]'::jsonb) FROM (
+      SELECT evidence_id, category, source_identifier, reference_identifier, observed_at,
+             retrieved_at, revalidated_at, content_hash, claims, status
+      FROM app.run_evidence WHERE owner_id = p_owner_id AND run_id = p_run_id
+      ORDER BY retrieved_at DESC, evidence_id LIMIT 100
+    ) row_value),
+    'quotes', (SELECT coalesce(jsonb_agg(to_jsonb(row_value)), '[]'::jsonb) FROM (
+      SELECT ticker, price::text AS price, previous_close::text AS previous_close,
+             provider, source_timestamp, retrieved_at, session, adjustment_status,
+             status, conflict_basis_points
+      FROM app.market_quote_cache WHERE owner_id = p_owner_id ORDER BY ticker LIMIT 60
+    ) row_value)
+  )
+$$;
+
 CREATE OR REPLACE FUNCTION machine.agent_read_bounded_context(p_request JSONB)
 RETURNS JSONB
 LANGUAGE plpgsql
@@ -595,17 +729,30 @@ DECLARE
   challenge_value TEXT;
   phase_value TEXT;
   market_day DATE;
+  started_value TIMESTAMPTZ;
 BEGIN
   claim := machine.agent_claim_operation(p_request, 'read_bounded_context');
   IF (claim->>'duplicate')::boolean THEN RETURN claim->'response'; END IF;
-  IF NOT app.jsonb_has_exact_keys(p_request->'payload', ARRAY[]::text[]) THEN
+  IF NOT (
+    app.jsonb_has_exact_keys(p_request->'payload', ARRAY[]::text[])
+    OR (
+      app.jsonb_has_exact_keys(p_request->'payload', ARRAY['research'])
+      AND jsonb_typeof(p_request->'payload'->'research') = 'object'
+      AND octet_length((p_request->'payload'->'research')::text) <= 12000
+    )
+  ) THEN
     RAISE EXCEPTION 'invalid agent request' USING ERRCODE = '22023';
   END IF;
   owner_uuid := (claim->>'owner_id')::uuid;
   run_uuid := (claim->>'run_id')::uuid;
   request_uuid := (claim->>'request_id')::uuid;
-  SELECT kind, market_date INTO phase_value, market_day
+  SELECT kind, market_date, started_at INTO phase_value, market_day, started_value
   FROM app.analysis_runs WHERE owner_id = owner_uuid AND id = run_uuid;
+  IF (claim->>'dry_run')::boolean THEN
+    phase_value := 'on-demand';
+    market_day := (clock_timestamp() AT TIME ZONE 'America/New_York')::date;
+    started_value := clock_timestamp();
+  END IF;
 
   SELECT encode(handshake_challenge, 'hex') INTO challenge_value
   FROM app.scheduled_run_slots
@@ -626,44 +773,9 @@ BEGIN
     RETURN machine.agent_complete_operation(owner_uuid, request_uuid, response);
   END IF;
 
-  SELECT jsonb_build_object(
-    'run_id', run_uuid, 'contract_version', 2,
-    'phase', phase_value, 'market_date', market_day,
-    'holdings', (SELECT coalesce(jsonb_agg(to_jsonb(row_value)), '[]'::jsonb) FROM (
-      SELECT ticker, shares::text AS shares, avg_cost::text AS avg_cost, bucket,
-             stop::text AS stop, target::text AS target,
-             high_water_price::text AS high_water_price, hold_override_until
-      FROM app.holdings WHERE owner_id = owner_uuid ORDER BY ticker LIMIT 40
-    ) row_value),
-    'plans', (SELECT coalesce(jsonb_agg(to_jsonb(row_value)), '[]'::jsonb) FROM (
-      SELECT id, ticker, bucket, amount::text AS amount, cadence, next_due_on, active
-      FROM app.owner_investment_plans WHERE owner_id = owner_uuid AND active
-      ORDER BY next_due_on, ticker LIMIT 20
-    ) row_value),
-    'recent_suggestions', (SELECT coalesce(jsonb_agg(to_jsonb(row_value)), '[]'::jsonb) FROM (
-      SELECT id, date, ticker, action, bucket, confidence, score, stop::text AS stop,
-             target::text AS target, invalidation_price::text AS invalidation_price,
-             valid_until, evidence_as_of
-      FROM app.suggestions WHERE owner_id = owner_uuid ORDER BY ts DESC, id DESC LIMIT 20
-    ) row_value),
-    'radar', (SELECT coalesce(jsonb_agg(to_jsonb(row_value)), '[]'::jsonb) FROM (
-      SELECT ticker, added, last_seen, days_relevant, reason, bucket_guess, promoted, promoted_on
-      FROM app.radar WHERE owner_id = owner_uuid ORDER BY last_seen DESC NULLS LAST, ticker LIMIT 20
-    ) row_value),
-    'evidence', (SELECT coalesce(jsonb_agg(to_jsonb(row_value)), '[]'::jsonb) FROM (
-      SELECT evidence_id, category, source_identifier, reference_identifier, observed_at,
-             retrieved_at, revalidated_at, content_hash, claims, status
-      FROM app.run_evidence WHERE owner_id = owner_uuid AND run_id = run_uuid
-      ORDER BY retrieved_at DESC, evidence_id LIMIT 100
-    ) row_value),
-    'quotes', (SELECT coalesce(jsonb_agg(to_jsonb(row_value)), '[]'::jsonb) FROM (
-      SELECT ticker, price::text AS price, previous_close::text AS previous_close,
-             provider, source_timestamp, retrieved_at, session, adjustment_status,
-             status, conflict_basis_points
-      FROM app.market_quote_cache WHERE owner_id = owner_uuid
-      ORDER BY ticker LIMIT 60
-    ) row_value)
-  ) INTO response;
+  response := machine.agent_build_owner_context(
+    owner_uuid, run_uuid, phase_value, market_day, started_value
+  );
   IF (claim->>'dry_run')::boolean THEN RETURN response || jsonb_build_object('dry_run', true); END IF;
   RETURN machine.agent_complete_operation(owner_uuid, request_uuid, response);
 END
@@ -680,15 +792,20 @@ DECLARE
   payload JSONB := p_request->'payload';
   owner_uuid UUID;
   run_uuid UUID;
-  request_uuid UUID;
   run_started TIMESTAMPTZ;
-  response JSONB;
+  phase_value TEXT;
+  market_day DATE;
+  policy_value JSONB;
+  context_value JSONB;
+  corporate_value JSONB;
 BEGIN
   IF NOT app.jsonb_has_exact_keys(payload, ARRAY[
       'phase','market_date','title','suggestion_only','provider','model','analyst',
-      'checker','dimensions','evidence_refs','prior_suggestion_ids','candidates'
+      'checker','dimensions','evidence_packets','evidence_refs','prior_suggestion_ids','candidates'
     ]) OR payload->>'suggestion_only' <> 'true'
        OR octet_length(payload::text) > 65536
+       OR jsonb_typeof(payload->'evidence_packets') <> 'array'
+       OR jsonb_array_length(payload->'evidence_packets') NOT BETWEEN 1 AND 4
        OR jsonb_typeof(payload->'evidence_refs') <> 'array'
        OR jsonb_array_length(payload->'evidence_refs') > 100
        OR jsonb_typeof(payload->'candidates') <> 'array'
@@ -697,36 +814,222 @@ BEGIN
   END IF;
   claim := machine.agent_claim_operation(p_request, 'submit_analysis');
   IF (claim->>'duplicate')::boolean THEN RETURN claim->'response'; END IF;
+  IF claim->>'connection_status' <> 'active' THEN
+    RAISE EXCEPTION 'agent credential or run unavailable' USING ERRCODE = '42501';
+  END IF;
   owner_uuid := (claim->>'owner_id')::uuid;
   run_uuid := (claim->>'run_id')::uuid;
-  request_uuid := (claim->>'request_id')::uuid;
-  IF EXISTS (
+  IF NOT (claim->>'dry_run')::boolean AND EXISTS (
     SELECT 1 FROM app.scheduled_run_slots
     WHERE owner_id = owner_uuid AND canonical_run_id = run_uuid AND purpose = 'handshake'
   ) THEN
     RAISE EXCEPTION 'handshake operation is not permitted' USING ERRCODE = '42501';
   END IF;
-  SELECT started_at INTO run_started FROM app.analysis_runs
-  WHERE owner_id = owner_uuid AND id = run_uuid;
+  IF (claim->>'dry_run')::boolean THEN
+    phase_value := 'on-demand';
+    market_day := (clock_timestamp() AT TIME ZONE 'America/New_York')::date;
+    run_started := clock_timestamp();
+  ELSE
+    SELECT kind, market_date, started_at INTO phase_value, market_day, run_started
+    FROM app.analysis_runs
+    WHERE owner_id = owner_uuid AND id = run_uuid AND status = 'running';
+    IF NOT FOUND THEN
+      RAISE EXCEPTION 'agent credential or run unavailable' USING ERRCODE = '42501';
+    END IF;
+  END IF;
+  SELECT config || jsonb_build_object('version', version) INTO policy_value
+  FROM public.market_policy_config WHERE active ORDER BY version DESC LIMIT 1;
+  IF policy_value IS NULL THEN
+    RAISE EXCEPTION 'active policy unavailable' USING ERRCODE = '22023';
+  END IF;
+  context_value := machine.agent_build_owner_context(
+    owner_uuid, run_uuid, phase_value, market_day, run_started
+  );
+  SELECT coalesce(jsonb_agg(jsonb_build_object('ticker', ticker, 'state', state) ORDER BY ticker), '[]'::jsonb)
+  INTO corporate_value FROM app.corporate_action_states WHERE owner_id = owner_uuid;
+  RETURN jsonb_build_object(
+    'status', CASE WHEN (claim->>'dry_run')::boolean THEN 'dry_run' ELSE 'claimed' END,
+    'lease_token', claim->>'lease_token',
+    'run_id', run_uuid,
+    'phase', phase_value,
+    'market_date', market_day,
+    'started_at', run_started,
+    'policy', policy_value,
+    'context', context_value,
+    'corporate_actions', corporate_value
+  );
+END
+$$;
+
+CREATE OR REPLACE FUNCTION machine.agent_apply_analysis(p_request JSONB)
+RETURNS JSONB
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = pg_catalog
+AS $$
+DECLARE
+  connection_row app.agent_connections%ROWTYPE;
+  request_row app.market_gateway_requests%ROWTYPE;
+  run_row app.analysis_runs%ROWTYPE;
+  decision JSONB := p_request->'decision';
+  submission JSONB;
+  publication JSONB;
+  item JSONB;
+  evaluation_row app.decision_evaluations%ROWTYPE;
+  owner_uuid UUID;
+  request_uuid UUID;
+  run_uuid UUID;
+  lease_uuid UUID;
+  publication_uuid UUID := extensions.gen_random_uuid();
+  delivery_lease UUID;
+  chat_value BIGINT;
+  notify_enabled BOOLEAN := false;
+  final_publication_status TEXT;
+  evaluation_count INT := 0;
+  suggestion_count INT := 0;
+  updated_rows INT;
+  run_started TIMESTAMPTZ;
+  response JSONB;
+  presented_digest BYTEA;
+BEGIN
+  IF NOT app.jsonb_has_exact_keys(p_request, ARRAY[
+      'connection_id','secret_digest','request_id','run_id','lease_token','decision'
+    ]) OR jsonb_typeof(decision) <> 'object'
+       OR NOT app.jsonb_has_exact_keys(decision, ARRAY[
+         'provider_submission','evidence','search_receipts','policy_quotes','policy_version',
+         'evaluations','suggestions','holding_state','publication'
+       ]) OR octet_length(decision::text) > 262144 THEN
+    RAISE EXCEPTION 'invalid analysis transaction' USING ERRCODE = '22023';
+  END IF;
+  BEGIN
+    request_uuid := (p_request->>'request_id')::uuid;
+    run_uuid := (p_request->>'run_id')::uuid;
+    lease_uuid := (p_request->>'lease_token')::uuid;
+    presented_digest := decode(p_request->>'secret_digest', 'hex');
+  EXCEPTION WHEN invalid_text_representation THEN
+    RAISE EXCEPTION 'invalid analysis transaction' USING ERRCODE = '22023';
+  END;
+  SELECT * INTO connection_row FROM app.agent_connections
+  WHERE public_id = (p_request->>'connection_id')::uuid;
+  IF NOT FOUND OR connection_row.status <> 'active'
+     OR NOT machine.agent_constant_time_equal(connection_row.inbound_token_digest, presented_digest) THEN
+    RAISE EXCEPTION 'agent credential or run unavailable' USING ERRCODE = '42501';
+  END IF;
+  owner_uuid := connection_row.owner_id;
+  SELECT * INTO request_row FROM app.market_gateway_requests
+  WHERE owner_id = owner_uuid AND request_id = request_uuid FOR UPDATE;
+  IF NOT FOUND OR request_row.connection_id <> connection_row.id
+     OR request_row.run_id <> run_uuid OR request_row.operation <> 'submit_analysis'
+     OR request_row.status <> 'claimed' OR request_row.lease_token <> lease_uuid THEN
+    RAISE EXCEPTION 'analysis request unavailable' USING ERRCODE = '42501';
+  END IF;
+  SELECT * INTO run_row FROM app.analysis_runs
+  WHERE owner_id = owner_uuid AND id = run_uuid AND connection_id = connection_row.id
+    AND status = 'running' FOR UPDATE;
+  IF NOT FOUND THEN
+    RAISE EXCEPTION 'analysis run unavailable' USING ERRCODE = '42501';
+  END IF;
+  run_started := run_row.started_at;
+  submission := decision->'provider_submission';
+  publication := decision->'publication';
+  IF jsonb_typeof(submission) <> 'object'
+     OR submission->>'phase' IS DISTINCT FROM run_row.kind
+     OR submission->>'market_date' IS DISTINCT FROM run_row.market_date::text
+     OR submission->>'suggestion_only' <> 'true'
+     OR jsonb_typeof(decision->'evidence') <> 'array'
+     OR jsonb_array_length(decision->'evidence') > 100
+     OR jsonb_typeof(decision->'search_receipts') <> 'array'
+     OR jsonb_array_length(decision->'search_receipts') > 4
+     OR jsonb_typeof(decision->'policy_quotes') <> 'array'
+     OR jsonb_array_length(decision->'policy_quotes') > 60
+     OR jsonb_typeof(decision->'evaluations') <> 'array'
+     OR jsonb_array_length(decision->'evaluations') > 20
+     OR jsonb_typeof(decision->'suggestions') <> 'array'
+     OR jsonb_array_length(decision->'suggestions') > 20
+     OR jsonb_typeof(decision->'holding_state') <> 'array'
+     OR jsonb_array_length(decision->'holding_state') > 100
+     OR jsonb_typeof(publication) <> 'object' THEN
+    RAISE EXCEPTION 'invalid analysis transaction' USING ERRCODE = '22023';
+  END IF;
+  PERFORM 1 FROM public.market_policy_config
+  WHERE active AND version = (decision->>'policy_version')::int;
+  IF NOT FOUND THEN
+    RAISE EXCEPTION 'active policy unavailable' USING ERRCODE = '22023';
+  END IF;
+
+  FOR item IN SELECT value FROM jsonb_array_elements(decision->'evidence') LOOP
+    IF NOT app.jsonb_has_exact_keys(item, ARRAY[
+        'evidence_id','source_run_id','category','source_identifier','reference_identifier',
+        'observed_at','retrieved_at','revalidated_at','content_hash','claims','status'
+      ]) OR item->>'evidence_id' !~ '^[a-z0-9][a-z0-9._:-]{0,99}$'
+         OR item->>'category' NOT IN (
+           'market_snapshot','source_search','filing','fundamentals','news','technicals',
+           'corporate_action','issuer','exchange'
+         ) OR item->>'content_hash' !~ '^[0-9a-f]{64}$'
+         OR jsonb_typeof(item->'claims') <> 'array'
+         OR jsonb_array_length(item->'claims') > 10
+         OR item->>'status' NOT IN (
+           'fresh','stale','conflicting','missing','no_new_material_evidence',
+           'suspected','needs_review','clear'
+         ) THEN
+      RAISE EXCEPTION 'invalid evidence' USING ERRCODE = '22023';
+    END IF;
+    IF (item->>'retrieved_at')::timestamptz < run_started
+       OR (item->>'retrieved_at')::timestamptz > clock_timestamp() + interval '5 minutes'
+       OR (item->>'revalidated_at') IS NOT NULL
+          AND (item->>'revalidated_at')::timestamptz < run_started THEN
+      RAISE EXCEPTION 'evidence_stale' USING ERRCODE = '22023';
+    END IF;
+    INSERT INTO app.run_evidence(
+      owner_id, run_id, evidence_id, source_run_id, category, source_identifier,
+      reference_identifier, observed_at, retrieved_at, revalidated_at,
+      content_hash, claims, status
+    ) VALUES (
+      owner_uuid, run_uuid, item->>'evidence_id',
+      CASE WHEN item->'source_run_id' = 'null'::jsonb THEN NULL ELSE (item->>'source_run_id')::uuid END,
+      item->>'category', item->>'source_identifier', item->>'reference_identifier',
+      (item->>'observed_at')::timestamptz, (item->>'retrieved_at')::timestamptz,
+      (item->>'revalidated_at')::timestamptz, item->>'content_hash', item->'claims', item->>'status'
+    );
+  END LOOP;
+
+  FOR item IN SELECT value FROM jsonb_array_elements(decision->'search_receipts') LOOP
+    IF NOT app.jsonb_has_exact_keys(item, ARRAY[
+        'searched_at','categories','sources','result_status','content_hash'
+      ]) OR jsonb_typeof(item->'categories') <> 'array'
+         OR jsonb_typeof(item->'sources') <> 'array'
+         OR item->>'result_status' NOT IN (
+           'material_evidence_found','no_new_material_evidence','source_unavailable'
+         ) OR item->>'content_hash' !~ '^[0-9a-f]{64}$'
+         OR (item->>'searched_at')::timestamptz < run_started
+         OR (item->>'searched_at')::timestamptz > clock_timestamp() + interval '5 minutes' THEN
+      RAISE EXCEPTION 'invalid source receipt' USING ERRCODE = '22023';
+    END IF;
+    INSERT INTO app.source_search_receipts(
+      owner_id, run_id, searched_at, categories, sources, result_status, content_hash
+    ) VALUES (
+      owner_uuid, run_uuid, (item->>'searched_at')::timestamptz,
+      ARRAY(SELECT jsonb_array_elements_text(item->'categories')),
+      item->'sources', item->>'result_status', item->>'content_hash'
+    );
+  END LOOP;
 
   IF NOT EXISTS (
-    SELECT 1 FROM app.run_evidence
-    WHERE owner_id = owner_uuid AND run_id = run_uuid
-      AND category = 'market_snapshot' AND status = 'fresh'
+    SELECT 1 FROM app.run_evidence WHERE owner_id = owner_uuid AND run_id = run_uuid
+      AND category = 'market_snapshot' AND status = 'fresh' AND retrieved_at >= run_started
+  ) OR NOT EXISTS (
+    SELECT 1 FROM app.source_search_receipts WHERE owner_id = owner_uuid AND run_id = run_uuid
+      AND searched_at >= run_started AND result_status <> 'source_unavailable'
+  ) OR NOT EXISTS (
+    SELECT 1 FROM app.run_evidence WHERE owner_id = owner_uuid AND run_id = run_uuid
+      AND category = 'source_search' AND status IN ('fresh','no_new_material_evidence')
       AND retrieved_at >= run_started
   ) THEN
     RAISE EXCEPTION 'evidence_missing' USING ERRCODE = '22023';
   END IF;
-  IF NOT EXISTS (
-    SELECT 1 FROM app.source_search_receipts
-    WHERE owner_id = owner_uuid AND run_id = run_uuid
-      AND searched_at >= run_started AND result_status <> 'source_unavailable'
-  ) THEN
-    RAISE EXCEPTION 'evidence_missing' USING ERRCODE = '22023';
-  END IF;
   IF EXISTS (
-    SELECT 1 FROM jsonb_array_elements(payload->'evidence_refs') AS reference
-    LEFT JOIN app.run_evidence AS evidence
+    SELECT 1 FROM jsonb_array_elements(submission->'evidence_refs') reference
+    LEFT JOIN app.run_evidence evidence
       ON evidence.owner_id = owner_uuid AND evidence.run_id = run_uuid
      AND evidence.evidence_id = reference->>'evidence_id'
      AND evidence.content_hash = reference->>'content_hash'
@@ -734,34 +1037,283 @@ BEGIN
   ) THEN
     RAISE EXCEPTION 'evidence_conflicting' USING ERRCODE = '22023';
   END IF;
-  IF EXISTS (
-    SELECT 1 FROM jsonb_array_elements(payload->'candidates') AS candidate
-    JOIN app.corporate_action_states AS action
-      ON action.owner_id = owner_uuid AND action.ticker = upper(candidate->>'ticker')
-    WHERE action.state IN ('suspected','needs_review')
-  ) THEN
-    RAISE EXCEPTION 'corporate_action_pending' USING ERRCODE = '22023';
-  END IF;
 
-  response := jsonb_build_object('status', 'accepted', 'run_id', run_uuid, 'submission_id', extensions.gen_random_uuid());
-  IF (claim->>'dry_run')::boolean THEN
-    RETURN response - 'submission_id' || jsonb_build_object('status', 'dry_run', 'writes', 0);
-  END IF;
+  FOR item IN SELECT value FROM jsonb_array_elements(decision->'policy_quotes') LOOP
+    IF NOT app.jsonb_has_exact_keys(item, ARRAY[
+        'ticker','price','previous_close','as_of','market_state','source','retrieved_at'
+      ]) OR item->>'ticker' !~ '^[A-Z][A-Z0-9]*([.-][A-Z0-9]+)*$'
+         OR item->>'price' !~ '^(0|[1-9][0-9]*)(\.[0-9]+)?$'
+         OR item->>'market_state' NOT IN ('PRE','REGULAR','POST','CLOSED')
+         OR item->>'source' <> 'yahoo-chart'
+         OR (item->>'as_of')::timestamptz > (item->>'retrieved_at')::timestamptz + interval '5 minutes'
+         OR (item->>'retrieved_at')::timestamptz < run_started THEN
+      RAISE EXCEPTION 'invalid server quote' USING ERRCODE = '22023';
+    END IF;
+    INSERT INTO app.market_quote_cache(
+      owner_id, ticker, price, previous_close, provider, source_timestamp,
+      retrieved_at, session, adjustment_status, status, content_digest, conflict_basis_points
+    ) VALUES (
+      owner_uuid, item->>'ticker', (item->>'price')::numeric,
+      CASE WHEN item->'previous_close' = 'null'::jsonb THEN NULL ELSE (item->>'previous_close')::numeric END,
+      item->>'source', (item->>'as_of')::timestamptz, (item->>'retrieved_at')::timestamptz,
+      item->>'market_state', 'raw',
+      CASE
+        WHEN run_row.kind IN ('intraday','on-demand')
+             AND item->>'market_state' = 'REGULAR'
+             AND (item->>'as_of')::timestamptz >= (item->>'retrieved_at')::timestamptz - interval '20 minutes'
+          THEN 'fresh'
+        WHEN run_row.kind IN ('pre-market','post-market')
+             AND (item->>'as_of')::timestamptz >= (item->>'retrieved_at')::timestamptz - interval '18 hours'
+          THEN 'fresh'
+        ELSE 'stale'
+      END,
+      encode(extensions.digest(convert_to(item::text, 'UTF8'), 'sha256'), 'hex'), NULL
+    ) ON CONFLICT (owner_id, ticker) DO UPDATE SET
+      price = excluded.price, previous_close = excluded.previous_close,
+      provider = excluded.provider, source_timestamp = excluded.source_timestamp,
+      retrieved_at = excluded.retrieved_at, session = excluded.session,
+      adjustment_status = excluded.adjustment_status, status = excluded.status,
+      content_digest = excluded.content_digest, conflict_basis_points = NULL,
+      updated_at = clock_timestamp();
+  END LOOP;
+
   INSERT INTO app.agent_analysis_submissions(
-    id, owner_id, run_id, request_id, provider, model, phase, market_date,
+    owner_id, run_id, request_id, provider, model, phase, market_date,
     payload, payload_digest, status
   ) VALUES (
-    (response->>'submission_id')::uuid, owner_uuid, run_uuid, request_uuid,
-    payload->>'provider', payload->>'model', payload->>'phase', (payload->>'market_date')::date,
-    payload, encode(extensions.digest(convert_to(payload::text, 'UTF8'), 'sha256'), 'hex'), 'accepted'
+    owner_uuid, run_uuid, request_uuid, submission->>'provider', submission->>'model',
+    submission->>'phase', (submission->>'market_date')::date, submission,
+    encode(extensions.digest(convert_to(submission::text, 'UTF8'), 'sha256'), 'hex'), 'accepted'
   );
-  UPDATE app.analysis_runs
-  SET provider = payload->>'provider', model = payload->>'model',
-      data_as_of = (SELECT max(retrieved_at) FROM app.run_evidence
-                    WHERE owner_id = owner_uuid AND run_id = run_uuid),
-      source_status = jsonb_build_object('analysis', 'accepted')
+
+  FOR item IN SELECT value FROM jsonb_array_elements(decision->'evaluations') LOOP
+    IF NOT app.jsonb_has_exact_keys(item, ARRAY[
+        'id','candidate_id','input_digest','raw_action','final_action','policy_status',
+        'reason_codes','explanations','normalized','evidence','analyst','checker'
+      ]) OR item->>'policy_status' NOT IN ('approved','downgraded','vetoed')
+         OR item->>'input_digest' !~ '^[0-9a-f]{64}$' THEN
+      RAISE EXCEPTION 'invalid evaluation' USING ERRCODE = '22023';
+    END IF;
+    INSERT INTO app.decision_evaluations(
+      owner_id, id, request_id, run_id, candidate_id, policy_version, input_digest,
+      raw_action, final_action, policy_status, reason_codes, explanations,
+      normalized, evidence, analyst, checker
+    ) VALUES (
+      owner_uuid, (item->>'id')::uuid, request_uuid, run_uuid,
+      (item->>'candidate_id')::uuid, (decision->>'policy_version')::int,
+      item->>'input_digest', item->>'raw_action', NULLIF(item->>'final_action',''),
+      item->>'policy_status', item->'reason_codes', item->'explanations',
+      item->'normalized', item->'evidence', item->'analyst', item->'checker'
+    );
+    evaluation_count := evaluation_count + 1;
+  END LOOP;
+
+  FOR item IN SELECT value FROM jsonb_array_elements(decision->'suggestions') LOOP
+    IF NOT app.jsonb_has_exact_keys(item, ARRAY[
+        'evaluation_id','candidate_id','date','ticker','action','decision_mode','bucket','depth',
+        'entry_zone_low','entry_zone_high','valid_until','stop','target','confidence','bull','bear',
+        'decisive_factor','risk_verdict','reason','score','price_at_suggestion','evidence_as_of',
+        'invalidation_price'
+      ]) THEN
+      RAISE EXCEPTION 'invalid suggestion' USING ERRCODE = '22023';
+    END IF;
+    SELECT * INTO evaluation_row FROM app.decision_evaluations
+    WHERE owner_id = owner_uuid AND id = (item->>'evaluation_id')::uuid
+      AND request_id = request_uuid AND run_id = run_uuid;
+    IF NOT FOUND OR evaluation_row.candidate_id <> (item->>'candidate_id')::uuid
+       OR evaluation_row.final_action IS DISTINCT FROM item->>'action'
+       OR evaluation_row.policy_status NOT IN ('approved','downgraded')
+       OR evaluation_row.normalized->>'ticker' IS DISTINCT FROM item->>'ticker' THEN
+      RAISE EXCEPTION 'suggestion evaluation mismatch' USING ERRCODE = '22023';
+    END IF;
+    INSERT INTO app.suggestions(
+      owner_id, date, ticker, action, decision_mode, bucket, depth,
+      entry_zone_low, entry_zone_high, valid_until, stop, target, confidence,
+      bull, bear, decisive_factor, risk_verdict, reason, score, price_at_suggestion,
+      run_id, evidence_as_of, invalidation_price, evaluation_id, decision_source
+    ) VALUES (
+      owner_uuid, (item->>'date')::date, item->>'ticker', item->>'action',
+      item->>'decision_mode', item->>'bucket', item->>'depth',
+      (item->>'entry_zone_low')::numeric, (item->>'entry_zone_high')::numeric,
+      (item->>'valid_until')::date, (item->>'stop')::numeric, (item->>'target')::numeric,
+      item->>'confidence', item->>'bull', item->>'bear', item->>'decisive_factor',
+      item->>'risk_verdict', item->>'reason', (item->>'score')::int,
+      (item->>'price_at_suggestion')::numeric, run_uuid,
+      (item->>'evidence_as_of')::timestamptz, (item->>'invalidation_price')::numeric,
+      evaluation_row.id, 'gateway'
+    );
+    suggestion_count := suggestion_count + 1;
+  END LOOP;
+
+  FOR item IN SELECT value FROM jsonb_array_elements(decision->'holding_state') LOOP
+    IF NOT app.jsonb_has_exact_keys(item, ARRAY[
+        'ticker','high_water_price','stop_alert_active','stop_near_alert_active',
+        'target_near_alert_active','target_alert_active'
+      ]) THEN
+      RAISE EXCEPTION 'invalid holding state' USING ERRCODE = '22023';
+    END IF;
+    UPDATE app.holdings SET
+      high_water_price = greatest(coalesce(high_water_price, 0), (item->>'high_water_price')::numeric),
+      stop_alert_active = (item->>'stop_alert_active')::boolean,
+      stop_near_alert_active = (item->>'stop_near_alert_active')::boolean,
+      target_near_alert_active = (item->>'target_near_alert_active')::boolean,
+      target_alert_active = (item->>'target_alert_active')::boolean
+    WHERE owner_id = owner_uuid AND ticker = item->>'ticker';
+    GET DIAGNOSTICS updated_rows = ROW_COUNT;
+    IF updated_rows <> 1 THEN
+      RAISE EXCEPTION 'holding state target unavailable' USING ERRCODE = '22023';
+    END IF;
+  END LOOP;
+
+  IF NOT app.jsonb_has_exact_keys(publication, ARRAY[
+      'market_date','phase','kind','template_version','rendered_body','rendered_hash','status'
+    ]) OR publication->>'market_date' IS DISTINCT FROM run_row.market_date::text
+       OR publication->>'phase' IS DISTINCT FROM run_row.kind
+       OR publication->>'status' NOT IN ('ready','suppressed')
+       OR publication->>'rendered_hash' !~ '^[0-9a-f]{64}$'
+       OR char_length(publication->>'rendered_body') > 14000 THEN
+    RAISE EXCEPTION 'invalid publication' USING ERRCODE = '22023';
+  END IF;
+  SELECT CASE run_row.kind
+      WHEN 'pre-market' THEN pre_market_enabled
+      WHEN 'intraday' THEN intraday_enabled
+      WHEN 'post-market' THEN post_market_enabled
+      ELSE false
+    END INTO notify_enabled
+  FROM app.notification_preferences WHERE owner_id = owner_uuid;
+  SELECT telegram_chat_id INTO chat_value FROM app.telegram_links
+  WHERE owner_id = owner_uuid AND status = 'active';
+  final_publication_status := CASE
+    WHEN publication->>'status' = 'ready' AND coalesce(notify_enabled, false) AND chat_value IS NOT NULL
+      THEN 'sending'
+    ELSE 'suppressed'
+  END;
+  IF final_publication_status = 'sending' THEN delivery_lease := extensions.gen_random_uuid(); END IF;
+  INSERT INTO app.market_publications(
+    owner_id, id, idempotency_key, run_id, market_date, phase, kind,
+    template_version, rendered_body, rendered_hash, status, lease_token,
+    sending_started_at, attempt_count
+  ) VALUES (
+    owner_uuid, publication_uuid, request_uuid, run_uuid, run_row.market_date,
+    run_row.kind, publication->>'kind', (publication->>'template_version')::int,
+    publication->>'rendered_body', publication->>'rendered_hash', final_publication_status,
+    delivery_lease, CASE WHEN delivery_lease IS NULL THEN NULL ELSE clock_timestamp() END,
+    CASE WHEN delivery_lease IS NULL THEN 0 ELSE 1 END
+  );
+  UPDATE app.analysis_runs SET
+    provider = submission->>'provider', model = submission->>'model',
+    data_as_of = (SELECT max(retrieved_at) FROM app.run_evidence
+                  WHERE owner_id = owner_uuid AND run_id = run_uuid),
+    source_status = jsonb_build_object(
+      'analysis', 'accepted', 'evidence', 'server_verified',
+      'publication', final_publication_status
+    )
   WHERE owner_id = owner_uuid AND id = run_uuid;
-  RETURN machine.agent_complete_operation(owner_uuid, request_uuid, response);
+  response := jsonb_build_object(
+    'status', 'accepted', 'run_id', run_uuid, 'publication_id', publication_uuid,
+    'publication_status', final_publication_status,
+    'evaluation_count', evaluation_count, 'suggestion_count', suggestion_count,
+    'telegram_message_ids', '[]'::jsonb
+  );
+  IF run_row.kind = 'on-demand' THEN
+    response := response || jsonb_build_object('preview', publication->>'rendered_body');
+  END IF;
+  IF final_publication_status = 'suppressed' THEN
+    RETURN jsonb_build_object(
+      'delivery_required', false,
+      'response', machine.agent_complete_operation(owner_uuid, request_uuid, response)
+    );
+  END IF;
+  RETURN jsonb_build_object(
+    'delivery_required', true,
+    'chat_id', chat_value::text,
+    'delivery_lease', delivery_lease,
+    'response', response
+  );
+END
+$$;
+
+CREATE OR REPLACE FUNCTION machine.agent_finish_analysis_delivery(p_request JSONB)
+RETURNS JSONB
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = pg_catalog
+AS $$
+DECLARE
+  connection_row app.agent_connections%ROWTYPE;
+  request_row app.market_gateway_requests%ROWTYPE;
+  publication_row app.market_publications%ROWTYPE;
+  owner_uuid UUID;
+  request_uuid UUID;
+  run_uuid UUID;
+  delivery_lease UUID;
+  status_value TEXT;
+  message_ids JSONB;
+  response JSONB;
+  presented_digest BYTEA;
+BEGIN
+  IF NOT app.jsonb_has_exact_keys(p_request, ARRAY[
+      'connection_id','secret_digest','request_id','run_id','delivery_lease','status','message_ids'
+    ]) OR p_request->>'status' NOT IN ('delivered','delivery_failed','delivery_unknown')
+       OR jsonb_typeof(p_request->'message_ids') <> 'array'
+       OR jsonb_array_length(p_request->'message_ids') > 4 THEN
+    RAISE EXCEPTION 'invalid delivery completion' USING ERRCODE = '22023';
+  END IF;
+  BEGIN
+    request_uuid := (p_request->>'request_id')::uuid;
+    run_uuid := (p_request->>'run_id')::uuid;
+    delivery_lease := (p_request->>'delivery_lease')::uuid;
+    presented_digest := decode(p_request->>'secret_digest', 'hex');
+  EXCEPTION WHEN invalid_text_representation THEN
+    RAISE EXCEPTION 'invalid delivery completion' USING ERRCODE = '22023';
+  END;
+  status_value := p_request->>'status';
+  message_ids := p_request->'message_ids';
+  IF EXISTS (
+    SELECT 1 FROM jsonb_array_elements(message_ids) item
+    WHERE jsonb_typeof(item) <> 'number' OR (item::text)::bigint <= 0
+  ) OR (status_value = 'delivered' AND jsonb_array_length(message_ids) = 0)
+     OR (status_value = 'delivery_failed' AND jsonb_array_length(message_ids) <> 0) THEN
+    RAISE EXCEPTION 'invalid delivery completion' USING ERRCODE = '22023';
+  END IF;
+  SELECT * INTO connection_row FROM app.agent_connections
+  WHERE public_id = (p_request->>'connection_id')::uuid;
+  IF NOT FOUND OR NOT machine.agent_constant_time_equal(connection_row.inbound_token_digest, presented_digest) THEN
+    RAISE EXCEPTION 'agent credential or run unavailable' USING ERRCODE = '42501';
+  END IF;
+  owner_uuid := connection_row.owner_id;
+  SELECT * INTO request_row FROM app.market_gateway_requests
+  WHERE owner_id = owner_uuid AND request_id = request_uuid FOR UPDATE;
+  IF NOT FOUND OR request_row.connection_id <> connection_row.id
+     OR request_row.run_id <> run_uuid OR request_row.operation <> 'submit_analysis'
+     OR request_row.status <> 'claimed' THEN
+    RAISE EXCEPTION 'analysis request unavailable' USING ERRCODE = '42501';
+  END IF;
+  SELECT * INTO publication_row FROM app.market_publications
+  WHERE owner_id = owner_uuid AND idempotency_key = request_uuid AND run_id = run_uuid FOR UPDATE;
+  IF NOT FOUND OR publication_row.status <> 'sending' OR publication_row.lease_token <> delivery_lease THEN
+    RAISE EXCEPTION 'publication lease unavailable' USING ERRCODE = '42501';
+  END IF;
+  UPDATE app.market_publications SET
+    status = status_value,
+    telegram_message_ids = message_ids,
+    lease_token = NULL,
+    delivered_at = CASE WHEN status_value = 'delivered' THEN clock_timestamp() ELSE NULL END,
+    error = CASE status_value
+      WHEN 'delivery_failed' THEN 'TELEGRAM_REJECTED'
+      WHEN 'delivery_unknown' THEN 'TELEGRAM_OUTCOME_UNKNOWN'
+      ELSE NULL
+    END,
+    updated_at = clock_timestamp()
+  WHERE owner_id = owner_uuid AND id = publication_row.id;
+  response := jsonb_build_object(
+    'status', 'accepted', 'run_id', run_uuid,
+    'publication_id', publication_row.id, 'publication_status', status_value,
+    'telegram_message_ids', message_ids
+  );
+  RETURN jsonb_build_object(
+    'response', machine.agent_complete_operation(owner_uuid, request_uuid, response)
+  );
 END
 $$;
 
@@ -1079,8 +1631,11 @@ ALTER FUNCTION machine.agent_constant_time_equal(BYTEA, BYTEA) OWNER TO stock_ag
 ALTER FUNCTION machine.agent_claim_operation(JSONB, TEXT) OWNER TO stock_agent_migration_owner;
 ALTER FUNCTION machine.agent_complete_operation(UUID, UUID, JSONB) OWNER TO stock_agent_migration_owner;
 ALTER FUNCTION machine.agent_start_run(JSONB) OWNER TO stock_agent_migration_owner;
+ALTER FUNCTION machine.agent_build_owner_context(UUID, UUID, TEXT, DATE, TIMESTAMPTZ) OWNER TO stock_agent_migration_owner;
 ALTER FUNCTION machine.agent_read_bounded_context(JSONB) OWNER TO stock_agent_migration_owner;
 ALTER FUNCTION machine.agent_submit_analysis(JSONB) OWNER TO stock_agent_migration_owner;
+ALTER FUNCTION machine.agent_apply_analysis(JSONB) OWNER TO stock_agent_migration_owner;
+ALTER FUNCTION machine.agent_finish_analysis_delivery(JSONB) OWNER TO stock_agent_migration_owner;
 ALTER FUNCTION machine.agent_record_permitted_artifacts(JSONB) OWNER TO stock_agent_migration_owner;
 ALTER FUNCTION machine.agent_grade_due_decisions(JSONB) OWNER TO stock_agent_migration_owner;
 ALTER FUNCTION machine.agent_finish_run(JSONB) OWNER TO stock_agent_migration_owner;
@@ -1089,14 +1644,19 @@ REVOKE ALL ON FUNCTION machine.agent_constant_time_equal(BYTEA, BYTEA) FROM PUBL
 REVOKE ALL ON FUNCTION machine.agent_claim_operation(JSONB, TEXT) FROM PUBLIC;
 REVOKE ALL ON FUNCTION machine.agent_complete_operation(UUID, UUID, JSONB) FROM PUBLIC;
 REVOKE ALL ON FUNCTION machine.agent_start_run(JSONB) FROM PUBLIC;
+REVOKE ALL ON FUNCTION machine.agent_build_owner_context(UUID, UUID, TEXT, DATE, TIMESTAMPTZ) FROM PUBLIC;
 REVOKE ALL ON FUNCTION machine.agent_read_bounded_context(JSONB) FROM PUBLIC;
 REVOKE ALL ON FUNCTION machine.agent_submit_analysis(JSONB) FROM PUBLIC;
+REVOKE ALL ON FUNCTION machine.agent_apply_analysis(JSONB) FROM PUBLIC;
+REVOKE ALL ON FUNCTION machine.agent_finish_analysis_delivery(JSONB) FROM PUBLIC;
 REVOKE ALL ON FUNCTION machine.agent_record_permitted_artifacts(JSONB) FROM PUBLIC;
 REVOKE ALL ON FUNCTION machine.agent_grade_due_decisions(JSONB) FROM PUBLIC;
 REVOKE ALL ON FUNCTION machine.agent_finish_run(JSONB) FROM PUBLIC;
 GRANT EXECUTE ON FUNCTION machine.agent_start_run(JSONB) TO stock_agent_gateway;
 GRANT EXECUTE ON FUNCTION machine.agent_read_bounded_context(JSONB) TO stock_agent_gateway;
 GRANT EXECUTE ON FUNCTION machine.agent_submit_analysis(JSONB) TO stock_agent_gateway;
+GRANT EXECUTE ON FUNCTION machine.agent_apply_analysis(JSONB) TO stock_agent_gateway;
+GRANT EXECUTE ON FUNCTION machine.agent_finish_analysis_delivery(JSONB) TO stock_agent_gateway;
 GRANT EXECUTE ON FUNCTION machine.agent_record_permitted_artifacts(JSONB) TO stock_agent_gateway;
 GRANT EXECUTE ON FUNCTION machine.agent_grade_due_decisions(JSONB) TO stock_agent_gateway;
 GRANT EXECUTE ON FUNCTION machine.agent_finish_run(JSONB) TO stock_agent_gateway;
