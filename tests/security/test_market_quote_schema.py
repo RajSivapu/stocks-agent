@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-from decimal import Decimal
-
 from tests.security.test_postgrest_isolation import OWNER_A, OWNER_B, as_user
 
 
@@ -31,12 +29,12 @@ def test_market_quote_view_exposes_only_owner_holding_or_radar_symbols(tenant_da
             rows = connection.execute(
                 "SELECT ticker, price FROM api.market_quotes ORDER BY ticker"
             ).fetchall()
-            assert rows == [("TSTAAA", Decimal("11.25")), ("WATCHA", Decimal("21.50"))]
+            assert rows == [("TSTAAA", "11.25000000"), ("WATCHA", "21.50000000")]
         with as_user(tenant_database, OWNER_B) as connection:
             rows = connection.execute(
                 "SELECT ticker, price FROM api.market_quotes ORDER BY ticker"
             ).fetchall()
-            assert rows == [("TSTAAA", Decimal("99.99"))]
+            assert rows == [("TSTAAA", "99.99000000")]
 
 
 def test_corporate_action_state_is_owner_bound_and_alert_suppressing(tenant_database):

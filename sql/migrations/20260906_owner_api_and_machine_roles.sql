@@ -139,7 +139,7 @@ GRANT SELECT (owner_id, id, ts, ticker, side, qty, price, source, executed_on)
 GRANT SELECT (owner_id, id, ticker, bucket, amount, cadence, next_due_on, due_day,
               active, created_at, updated_at)
   ON app.owner_investment_plans TO authenticated;
-GRANT SELECT (owner_id, id, ts, date, ticker, action, bucket, depth, entry_zone_low,
+GRANT SELECT (owner_id, id, run_id, ts, date, ticker, action, bucket, depth, entry_zone_low,
               entry_zone_high, valid_until, stop, target, confidence, decisive_factor,
               risk_verdict, invalidation_level, reason, score, risk_band,
               price_at_suggestion, evidence_as_of, decision_mode)
@@ -187,13 +187,13 @@ FROM app.transactions;
 
 DROP VIEW IF EXISTS api.plans;
 CREATE VIEW api.plans WITH (security_invoker = true) AS
-SELECT id, ticker, bucket, amount, cadence, next_due_on, due_day,
+SELECT id, ticker, bucket, amount::text AS amount, cadence, next_due_on, due_day,
        active, created_at, updated_at
 FROM app.owner_investment_plans;
 
 DROP VIEW IF EXISTS api.recommendations;
 CREATE VIEW api.recommendations WITH (security_invoker = true) AS
-SELECT id, ts, date, ticker, action, bucket, depth, entry_zone_low,
+SELECT id, run_id, ts, date, ticker, action, bucket, depth, entry_zone_low,
        entry_zone_high, valid_until, stop, target, confidence, decisive_factor,
        risk_verdict, invalidation_level, reason, score, risk_band,
        price_at_suggestion, evidence_as_of, decision_mode

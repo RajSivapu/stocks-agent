@@ -19,7 +19,7 @@ function parseDecimal(value: unknown, rules: DecimalRules): string {
   if (fraction.length > rules.scale) {
     throw new Error(`${rules.field} supports at most ${rules.scale} decimals`);
   }
-  const whole = BigInt(match[1]);
+  const whole = BigInt(match[1]!);
   const nonzeroFraction = /[1-9]/.test(fraction);
   if (!rules.allowZero && whole === 0n && !nonzeroFraction) {
     throw new Error(`${rules.field} must be positive`);

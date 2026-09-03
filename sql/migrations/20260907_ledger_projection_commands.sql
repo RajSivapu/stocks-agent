@@ -506,16 +506,19 @@ GRANT SELECT (
   ledger_sequence, bucket, source_channel, actor_id, command_id, corrects_transaction_id
 ) ON app.transactions TO authenticated;
 CREATE VIEW api.holdings WITH (security_invoker = true) AS
-SELECT ticker, shares, avg_cost, bucket, opened_at, stop, target,
-       high_water_price, hold_override_until, projection_sequence
+SELECT ticker, shares::text AS shares, avg_cost::text AS avg_cost, bucket, opened_at,
+       stop::text AS stop, target::text AS target,
+       high_water_price::text AS high_water_price, hold_override_until,
+       projection_sequence::text AS projection_sequence
 FROM app.holdings;
 ALTER VIEW api.holdings OWNER TO stock_agent_migration_owner;
 REVOKE ALL ON api.holdings FROM PUBLIC, anon, authenticated, service_role;
 GRANT SELECT ON api.holdings TO authenticated;
 
 CREATE VIEW api.transactions WITH (security_invoker = true) AS
-SELECT id, ts AS created_at, ticker, event_type, side, qty, price, fees,
-       executed_on, ledger_sequence, bucket, source_channel,
+SELECT id, ts AS created_at, ticker, event_type, side, qty::text AS qty,
+       price::text AS price, fees::text AS fees,
+       executed_on, ledger_sequence::text AS ledger_sequence, bucket, source_channel,
        corrects_transaction_id
 FROM app.transactions;
 ALTER VIEW api.transactions OWNER TO stock_agent_migration_owner;

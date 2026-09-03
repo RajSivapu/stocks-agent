@@ -77,6 +77,15 @@ def test_preview_confirm_apply_is_the_only_success_path_and_replay_is_idempotent
     assert receipt["status"] == "previewed"
     assert receipt["before"]["shares"] == 0
     assert receipt["after"]["shares"] == 2
+    assert receipt["after"]["fill_price"] == "10.0000"
+    assert receipt["after"]["fees"] == "1.00"
+    assert receipt["after"]["cash_total"] == "21.00"
+    assert receipt["after"]["expected_cash_total"] == "21.00"
+    assert receipt["after"]["cash_reconciled"] is True
+    assert receipt["after"]["executed_on"] == "2026-09-02"
+    assert receipt["after"]["estimated_realized_pnl"] == "0.00"
+    assert receipt["after"]["bucket"] == "unclassified"
+    assert receipt["after"]["plan_impact"] == "none"
     assert receipt["warnings"] == ["UNCLASSIFIED_BUCKET"]
     assert tenant_database.execute(
         "SELECT expires_at <= created_at + interval '15 minutes 1 second' FROM app.portfolio_commands WHERE id = %s",
@@ -205,6 +214,7 @@ def test_plan_is_non_trading_and_advances_once_from_separate_deposit_amount(tena
     command["executed_on"] = today.isoformat()
     command["plan_deposit_amount"] = "300.00"
     receipt = preview(tenant_database, command)
+    assert receipt["after"]["plan_impact"] == "advance_if_confirmed"
     first = confirm(tenant_database, receipt)
     second = confirm(tenant_database, receipt)
 

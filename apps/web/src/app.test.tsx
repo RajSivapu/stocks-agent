@@ -2,6 +2,8 @@ import { render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { App } from "./app";
+import type { CommandClient } from "./lib/app-api";
+import type { DashboardRepository } from "./lib/dashboard";
 import type { SessionService, ViewerState } from "./lib/session";
 
 class FakeSession implements SessionService {
@@ -47,6 +49,23 @@ class FakeSession implements SessionService {
   }
 }
 
+const repository: DashboardRepository = {
+  loadToday: () => Promise.resolve({ holdings: [], quotes: [], plans: [], runs: [], recommendations: [] }),
+  loadPortfolio: () => Promise.resolve({ holdings: [], quotes: [], plans: [] }),
+  loadActivity: () => Promise.resolve({ transactions: [], plans: [], commands: [] }),
+  lookupCommand: () => Promise.resolve(null),
+};
+
+const commands: CommandClient = {
+  preview: () => Promise.reject(new Error("not used")),
+  confirm: () => Promise.reject(new Error("not used")),
+  lookup: () => Promise.resolve(null),
+};
+
+function app(session: SessionService) {
+  return <App session={session} repository={repository} commands={commands} />;
+}
+
 beforeEach(() => {
   window.history.replaceState({}, "", "/");
 });
@@ -54,7 +73,7 @@ beforeEach(() => {
 describe("secure session shell", () => {
   it("keeps a protected route private while signed out", async () => {
     window.history.replaceState({}, "", "/portfolio");
-    render(<App session={new FakeSession()} />);
+    render(app(new FakeSession()));
 
     expect(await screen.findByRole("heading", { name: /sign in/i })).toBeVisible();
     expect(screen.queryByText("Portfolio workspace")).not.toBeInTheDocument();
@@ -63,7 +82,7 @@ describe("secure session shell", () => {
   it("requests and verifies only a six-digit email OTP", async () => {
     const session = new FakeSession();
     const user = userEvent.setup();
-    render(<App session={session} />);
+    render(app(session));
 
     await user.type(await screen.findByLabelText(/email/i), " Raj@Example.COM ");
     await user.click(screen.getByRole("button", { name: /send secure code/i }));
@@ -76,7 +95,7 @@ describe("secure session shell", () => {
     await user.click(screen.getByRole("button", { name: /verify/i }));
 
     expect(session.verified).toEqual([{ email: "raj@example.com", token: "123456" }]);
-    expect(await screen.findByRole("heading", { name: /today/i })).toBeVisible();
+    expect(await screen.findByRole("heading", { name: /^today$/i })).toBeVisible();
   });
 
   it("gates every private route until current consent is confirmed", async () => {
@@ -88,7 +107,7 @@ describe("secure session shell", () => {
       displayName: "Friend",
     };
     window.history.replaceState({}, "", "/runs");
-    render(<App session={session} />);
+    render(app(session));
 
     expect(await screen.findByRole("heading", { name: /review before continuing/i })).toBeVisible();
     expect(screen.queryByRole("navigation")).not.toBeInTheDocument();
@@ -98,7 +117,7 @@ describe("secure session shell", () => {
   it("offers a desktop PKCE link without creating an account", async () => {
     const session = new FakeSession();
     const user = userEvent.setup();
-    render(<App session={session} />);
+    render(app(session));
 
     await user.type(await screen.findByLabelText(/email/i), "friend@example.com");
     await user.click(screen.getByRole("button", { name: /desktop sign-in link/i }));
@@ -115,7 +134,7 @@ describe("secure session shell", () => {
       configurable: true,
       value: { register },
     });
-    render(<App session={new FakeSession()} />);
+    render(app(new FakeSession()));
     await screen.findByRole("heading", { name: /sign in/i });
     expect(register).not.toHaveBeenCalled();
   });
@@ -128,8 +147,8 @@ describe("secure session shell", () => {
       email: "raj@example.com",
       displayName: "Raj",
     };
-    render(<App session={session} />);
-    expect(await screen.findByRole("heading", { name: /today/i })).toBeVisible();
+    render(app(session));
+    expect(await screen.findByRole("heading", { name: /^today$/i })).toBeVisible();
 
     session.viewer = { kind: "signed-out", reason: "SESSION_REVOKED" };
     session.listeners.forEach((listener) => { listener(); });

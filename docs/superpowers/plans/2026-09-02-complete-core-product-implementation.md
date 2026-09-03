@@ -1079,30 +1079,30 @@ git commit -m "feat: add secure otp web shell"
 - Consumes: `api.today`, `api.holdings`, `api.transactions`, `api.plans`, and app-api command previews.
 - Produces: sourced portfolio display and record-only command/correction workflows.
 
-- [ ] **Step 1: Write failing screen tests**
+- [x] **Step 1: Write failing screen tests**
 
 Cover loading/error/empty states, stale/delayed/conflicting prices, USD formatting, unclassified bucket,
 keyboard/screen-reader labels, textual status independent of color, mobile layout, and no financial data
 in URL/local storage.
 
-- [ ] **Step 2: Implement read views**
+- [x] **Step 2: Implement read views**
 
 Today shows value, freshness, actionable/suppressed state, reminders, and run health. Portfolio shows
 shares, average cost, current value, allocation, P&L, stops, targets, and source time. Activity shows
 append-only transactions, corrections, plans, commands, and receipts.
 
-- [ ] **Step 3: Implement record-action previews**
+- [x] **Step 3: Implement record-action previews**
 
 Label actions `Record Buy`, `Record Sell`, `Record Sell All`, `Update Stop`, and `Record Correction`.
 Preview before/after shares, average cost, estimated realized P&L, bucket, execution date, fees, cash
 reconciliation, recurring-plan impact, digest, and expiry.
 
-- [ ] **Step 4: Implement safe confirmation refresh**
+- [x] **Step 4: Implement safe confirmation refresh**
 
 On network loss or unknown state, fetch the server receipt before enabling another confirm. Stale or
 expired previews require regeneration; the browser never optimistically mutates holdings.
 
-- [ ] **Step 5: Verify and commit**
+- [x] **Step 5: Verify and commit**
 
 Run component tests, axe checks, typecheck, and production build. Commit:
 

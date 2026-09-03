@@ -173,8 +173,8 @@ GRANT SELECT (owner_id, ticker) ON app.radar TO authenticated;
 
 CREATE VIEW api.market_quotes WITH (security_invoker = true) AS
 SELECT quote.ticker,
-       quote.price,
-       quote.previous_close,
+       quote.price::text AS price,
+       quote.previous_close::text AS previous_close,
        quote.provider,
        quote.source_timestamp AS as_of,
        quote.retrieved_at,
@@ -233,6 +233,32 @@ ALTER TABLE app.analysis_runs
   ADD CONSTRAINT analysis_runs_owner_connection_fkey
   FOREIGN KEY (owner_id, connection_id)
   REFERENCES app.agent_connections(owner_id, id) ON DELETE RESTRICT;
+
+-- A run belongs to its New York market date, not the calendar date implied by
+-- when its provider happened to start. This keeps delayed/retried routines on
+-- the correct Today screen and avoids a Chicago-specific owner assumption.
+GRANT SELECT (owner_id, id, kind, started_at, finished_at, status, data_as_of,
+              source_status, symbols, write_counts, summary, market_date, provider, model)
+  ON app.analysis_runs TO authenticated;
+CREATE OR REPLACE VIEW api.today WITH (security_invoker = true) AS
+SELECT id AS run_id,
+       kind,
+       started_at,
+       finished_at,
+       status,
+       data_as_of,
+       source_status,
+       symbols,
+       write_counts,
+       summary,
+       market_date,
+       provider,
+       model
+FROM app.analysis_runs
+WHERE market_date = (now() AT TIME ZONE 'America/New_York')::date;
+ALTER VIEW api.today OWNER TO stock_agent_migration_owner;
+REVOKE ALL ON api.today FROM PUBLIC, anon, authenticated, service_role;
+GRANT SELECT ON api.today TO authenticated;
 
 CREATE TABLE app.agent_analysis_submissions (
   id UUID PRIMARY KEY DEFAULT extensions.gen_random_uuid(),

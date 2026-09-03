@@ -7,6 +7,7 @@ API_VIEWS = {
     "today",
     "holdings",
     "transactions",
+    "commands",
     "plans",
     "recommendations",
     "runs",

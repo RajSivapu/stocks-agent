@@ -3,8 +3,9 @@
   "version": "0.0.0",
   "private": true,
   "type": "module",
+  "exports": "./src/index.ts",
   "scripts": {
-    "test": "npx --yes deno@2.9.6 test src",
-    "typecheck": "npx --yes deno@2.9.6 check src/index.ts"
+    "test": "npx --yes deno@2.9.6 test --config ../../supabase/functions/deno.json src",
+    "typecheck": "npx --yes deno@2.9.6 check --config ../../supabase/functions/deno.json src/index.ts"
   }
 }

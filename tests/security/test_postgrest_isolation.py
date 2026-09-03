@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from contextlib import contextmanager
+from uuid import uuid4
 
 import pytest
 
@@ -27,6 +28,7 @@ def as_user(connection, owner_id: str | None, role: str = "authenticated"):
         "today",
         "holdings",
         "transactions",
+        "commands",
         "plans",
         "recommendations",
         "runs",
@@ -43,6 +45,9 @@ def test_anonymous_cannot_read_any_api_view(tenant_database, view_name):
 
 
 def test_owner_a_cannot_observe_owner_b_through_filters_or_direct_ids(tenant_database):
+    owner_command_count = tenant_database.execute(
+        "SELECT count(*) FROM app.portfolio_commands WHERE owner_id = %s", (OWNER_A,)
+    ).fetchone()[0]
     with as_user(tenant_database, OWNER_A) as connection:
         holdings = connection.execute(
             "SELECT ticker, shares FROM api.holdings WHERE ticker = 'TSTAAA'"
@@ -54,20 +59,84 @@ def test_owner_a_cannot_observe_owner_b_through_filters_or_direct_ids(tenant_dat
             "SELECT ticker, amount FROM api.plans WHERE ticker = 'TSTVTI'"
         ).fetchall()
 
-        assert holdings == [("TSTAAA", 1)]
+        assert holdings == [("TSTAAA", "1.00000000")]
         assert len(transactions) == 2
-        assert all(ticker == "TSTAAA" and qty == 1 for ticker, qty in transactions)
-        assert plans == [("TSTVTI", 300)]
+        assert all(ticker == "TSTAAA" and qty == "1.00000000" for ticker, qty in transactions)
+        assert plans == [("TSTVTI", "300")]
+        assert connection.execute(
+            "SELECT count(*) FROM api.commands"
+        ).fetchone() == (owner_command_count,)
 
 
 def test_owner_b_sees_only_owner_b_even_with_same_natural_keys(tenant_database):
     with as_user(tenant_database, OWNER_B) as connection:
         assert connection.execute(
             "SELECT ticker, shares FROM api.holdings WHERE ticker = 'TSTAAA'"
-        ).fetchall() == [("TSTAAA", 9)]
+        ).fetchall() == [("TSTAAA", "9.00000000")]
         assert connection.execute(
             "SELECT ticker, amount FROM api.plans WHERE ticker = 'TSTVTI'"
-        ).fetchall() == [("TSTVTI", 500)]
+        ).fetchall() == [("TSTVTI", "500")]
+
+
+def test_today_uses_canonical_new_york_market_date_not_run_start_date(tenant_database):
+    run_id = uuid4()
+    with tenant_database.transaction(force_rollback=True):
+        tenant_database.execute(
+            """
+            INSERT INTO app.analysis_runs(
+              owner_id, id, kind, started_at, market_date, provider, model
+            ) VALUES (
+              %s, %s, 'intraday', TIMESTAMPTZ '2000-01-01 00:00:00+00',
+              (now() AT TIME ZONE 'America/New_York')::date, 'claude', 'configured'
+            )
+            """,
+            (OWNER_A, run_id),
+        )
+        with as_user(tenant_database, OWNER_A) as connection:
+            assert connection.execute(
+                "SELECT market_date, provider, model FROM api.today WHERE run_id = %s",
+                (run_id,),
+            ).fetchone() == (
+                connection.execute(
+                    "SELECT (now() AT TIME ZONE 'America/New_York')::date"
+                ).fetchone()[0],
+                "claude",
+                "configured",
+            )
+
+
+def test_command_receipts_are_owner_only_and_omit_replayable_input(tenant_database):
+    columns = tenant_database.execute(
+        """
+        SELECT column_name
+        FROM information_schema.columns
+        WHERE table_schema = 'api' AND table_name = 'commands'
+        ORDER BY ordinal_position
+        """
+    ).fetchall()
+    names = {name for (name,) in columns}
+    assert "normalized_input" not in names
+    assert "actor_key" not in names
+    assert "idempotency_key" not in names
+
+    owner_a_ids = {
+        command_id for (command_id,) in tenant_database.execute(
+            "SELECT id FROM app.portfolio_commands WHERE owner_id = %s", (OWNER_A,)
+        ).fetchall()
+    }
+    owner_b_ids = {
+        command_id for (command_id,) in tenant_database.execute(
+            "SELECT id FROM app.portfolio_commands WHERE owner_id = %s", (OWNER_B,)
+        ).fetchall()
+    }
+    with as_user(tenant_database, OWNER_A) as connection:
+        observed = {
+            command_id for (command_id,) in connection.execute(
+                "SELECT id FROM api.commands"
+            ).fetchall()
+        }
+    assert observed == owner_a_ids
+    assert observed.isdisjoint(owner_b_ids)
 
 
 def test_credential_and_telegram_identifiers_are_not_selectable(tenant_database):

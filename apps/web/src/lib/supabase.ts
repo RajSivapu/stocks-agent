@@ -35,11 +35,17 @@ function publishableKey(rawValue: string | undefined): string {
   return value;
 }
 
+export function supabaseProjectUrl(
+  environment: PublicEnvironment = import.meta.env,
+): string {
+  return exactSupabaseUrl(environment.VITE_SUPABASE_URL, environment.DEV === true);
+}
+
 export function createBrowserSupabaseClient(
   environment: PublicEnvironment = import.meta.env,
 ) {
   return createClient(
-    exactSupabaseUrl(environment.VITE_SUPABASE_URL, environment.DEV === true),
+    supabaseProjectUrl(environment),
     publishableKey(environment.VITE_SUPABASE_PUBLISHABLE_KEY),
     {
       auth: {

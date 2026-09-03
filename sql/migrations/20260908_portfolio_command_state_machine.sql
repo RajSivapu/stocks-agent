@@ -178,6 +178,9 @@ CREATE TRIGGER reject_confirmed_command_rewrite
 
 CREATE POLICY portfolio_commands_executor_all ON app.portfolio_commands
   FOR ALL TO stock_agent_migration_owner USING (true) WITH CHECK (true);
+CREATE POLICY portfolio_commands_owner_select ON app.portfolio_commands
+  FOR SELECT TO authenticated
+  USING (auth.uid() IS NOT NULL AND owner_id = (SELECT auth.uid()));
 CREATE POLICY transactions_executor_all ON app.transactions
   FOR ALL TO stock_agent_migration_owner USING (true) WITH CHECK (true);
 CREATE POLICY holdings_executor_all ON app.holdings
@@ -199,6 +202,11 @@ GRANT EXECUTE ON FUNCTION extensions.digest(BYTEA, TEXT), extensions.digest(TEXT
 
 REVOKE ALL ON app.portfolio_commands FROM PUBLIC, anon, authenticated, service_role,
   stock_agent_gateway, stock_agent_scheduler, stock_agent_telegram, stock_agent_backup;
+GRANT SELECT (
+  owner_id, id, operation, before_projection, after_projection, warnings,
+  preview_digest, status, expires_at, confirmed_at, applied_at, result,
+  error_code, created_at
+) ON app.portfolio_commands TO authenticated;
 
 CREATE OR REPLACE FUNCTION app.jsonb_has_exact_keys(
   p_value JSONB,
@@ -587,6 +595,35 @@ BEGIN
       'bucket', normalized->>'bucket'
     );
     after_value := app.fold_holding_with_candidate(p_owner_id, ticker_value, candidate);
+    after_value := after_value || jsonb_build_object(
+      'fill_price', normalized->>'fill_price',
+      'fees', normalized->>'fees',
+      'executed_on', normalized->>'executed_on',
+      'cash_total', CASE WHEN normalized->'cash_total' = 'null'::jsonb
+                         THEN NULL ELSE normalized->>'cash_total' END,
+      'expected_cash_total', round(
+        (candidate->>'qty')::numeric * (candidate->>'price')::numeric
+        + CASE WHEN operation_value = 'buy'
+               THEN (candidate->>'fees')::numeric
+               ELSE -(candidate->>'fees')::numeric END,
+        2
+      )::text,
+      'cash_reconciled', normalized->'cash_total' <> 'null'::jsonb,
+      'estimated_realized_pnl', after_value->>'realized_pnl',
+      'plan_impact', CASE
+        WHEN operation_value = 'buy' AND normalized ? 'plan_deposit_amount'
+          AND EXISTS (
+            SELECT 1 FROM app.owner_investment_plans AS active_plan
+            WHERE active_plan.owner_id = p_owner_id
+              AND active_plan.ticker = ticker_value
+              AND active_plan.active
+              AND (normalized->>'executed_on')::date >= active_plan.next_due_on
+              AND abs(active_plan.amount - (normalized->>'plan_deposit_amount')::numeric)
+                <= greatest(0.05, active_plan.amount * 0.001)
+          ) THEN 'advance_if_confirmed'
+        ELSE 'none'
+      END
+    );
     IF operation_value = 'buy' AND normalized->>'bucket' = 'unclassified' THEN
       warnings_value := jsonb_build_array('UNCLASSIFIED_BUCKET');
     END IF;
@@ -1271,11 +1308,11 @@ SELECT transaction_row.public_id AS id,
        transaction_row.ticker,
        transaction_row.event_type,
        transaction_row.side,
-       transaction_row.qty,
-       transaction_row.price,
-       transaction_row.fees,
+       transaction_row.qty::text AS qty,
+       transaction_row.price::text AS price,
+       transaction_row.fees::text AS fees,
        transaction_row.executed_on,
-       transaction_row.ledger_sequence,
+       transaction_row.ledger_sequence::text AS ledger_sequence,
        transaction_row.bucket,
        transaction_row.source_channel,
        corrected.public_id AS corrects_transaction_id
@@ -1286,3 +1323,22 @@ LEFT JOIN app.transactions AS corrected
 ALTER VIEW api.transactions OWNER TO stock_agent_migration_owner;
 REVOKE ALL ON api.transactions FROM PUBLIC, anon, authenticated, service_role;
 GRANT SELECT ON api.transactions TO authenticated;
+
+CREATE VIEW api.commands WITH (security_invoker = true) AS
+SELECT id,
+       operation,
+       before_projection AS before,
+       after_projection AS after,
+       warnings,
+       preview_digest,
+       status,
+       expires_at,
+       confirmed_at,
+       applied_at,
+       result,
+       error_code,
+       created_at
+FROM app.portfolio_commands;
+ALTER VIEW api.commands OWNER TO stock_agent_migration_owner;
+REVOKE ALL ON api.commands FROM PUBLIC, anon, authenticated, service_role;
+GRANT SELECT ON api.commands TO authenticated;

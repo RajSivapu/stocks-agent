@@ -8,10 +8,19 @@ import {
 } from "react-router-dom";
 import { ConsentGate } from "./auth/ConsentGate";
 import { SignIn } from "./auth/SignIn";
+import type { CommandClient } from "./lib/app-api";
+import type { DashboardRepository } from "./lib/dashboard";
 import type { SessionService, ViewerState } from "./lib/session";
+import { ActivityScreen } from "./features/activity/ActivityScreen";
+import { PortfolioScreen } from "./features/portfolio/PortfolioScreen";
+import { TodayScreen } from "./features/today/TodayScreen";
 import "./styles.css";
 
-type AppProps = { session: SessionService };
+type AppProps = {
+  session: SessionService;
+  repository: DashboardRepository;
+  commands: CommandClient;
+};
 
 const ROUTES = [
   ["/", "Today"],
@@ -23,7 +32,11 @@ const ROUTES = [
   ["/settings", "Settings"],
 ] as const;
 
-function Workspace({ viewer }: { viewer: Extract<ViewerState, { kind: "ready" }> }) {
+function Workspace({ viewer, repository, commands }: {
+  viewer: Extract<ViewerState, { kind: "ready" }>;
+  repository: DashboardRepository;
+  commands: CommandClient;
+}) {
   return (
     <div className="app-shell">
       <aside className="sidebar">
@@ -42,15 +55,10 @@ function Workspace({ viewer }: { viewer: Extract<ViewerState, { kind: "ready" }>
       </aside>
       <main className="workspace">
         <Routes>
-          {ROUTES.map(([path, label]) => (
-            <Route key={path} path={path} element={
-              <section className="workspace-card">
-                <p className="eyebrow">Private workspace</p>
-                <h1>{label}</h1>
-                <p>{label} workspace</p>
-              </section>
-            } />
-          ))}
+          <Route path="/" element={<TodayScreen repository={repository} />} />
+          <Route path="/portfolio" element={<PortfolioScreen repository={repository} commands={commands} />} />
+          <Route path="/activity" element={<ActivityScreen repository={repository} />} />
+          {ROUTES.slice(3).map(([path, label]) => <Route key={path} path={path} element={<section className="workspace-card"><p className="eyebrow">Private workspace</p><h1>{label}</h1><p>{label} workspace</p></section>} />)}
           <Route path="*" element={<Navigate to="/" replace />} />
         </Routes>
       </main>
@@ -58,7 +66,7 @@ function Workspace({ viewer }: { viewer: Extract<ViewerState, { kind: "ready" }>
   );
 }
 
-function SessionBoundary({ session }: AppProps) {
+function SessionBoundary({ session, repository, commands }: AppProps) {
   const [viewer, setViewer] = useState<ViewerState | { kind: "loading" }>({ kind: "loading" });
   const refresh = useCallback(async () => {
     setViewer(await session.loadViewer());
@@ -86,9 +94,9 @@ function SessionBoundary({ session }: AppProps) {
   if (viewer.kind === "unavailable") {
     return <main className="loading-screen"><p role="alert">Your private workspace is temporarily unavailable.</p></main>;
   }
-  return <Workspace viewer={viewer} />;
+  return <Workspace viewer={viewer} repository={repository} commands={commands} />;
 }
 
-export function App({ session }: AppProps) {
-  return <BrowserRouter><SessionBoundary session={session} /></BrowserRouter>;
+export function App({ session, repository, commands }: AppProps) {
+  return <BrowserRouter><SessionBoundary session={session} repository={repository} commands={commands} /></BrowserRouter>;
 }
