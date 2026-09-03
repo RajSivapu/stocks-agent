@@ -92,6 +92,9 @@ DATASET_SPECS: Mapping[str, DatasetSpec] = {
     "owner_ledger_reset_receipts": DatasetSpec(
         frozenset({"id", "owner_id", "step_up_receipt_id", "export_digest", "row_counts", "reset_at"})
     ),
+    "command_retention_receipts": DatasetSpec(
+        frozenset({"id", "owner_digest", "command_digest", "operation", "terminal_status", "command_created_at", "compacted_at"})
+    ),
 }
 
 

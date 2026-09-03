@@ -26,6 +26,7 @@ API_FUNCTIONS = {
     "api.cancel_portfolio_command(uuid,text)",
     "api.app_dispatch(text,uuid,text,jsonb)",
     "api.operator_initialize_invited_user(uuid)",
+    "api.public_health()",
 }
 
 OWNER_TABLES = {
@@ -62,6 +63,8 @@ OWNER_TABLES = {
     "deletion_tombstones",
     "owner_ledger_reset_receipts",
     "backup_restore_receipts",
+    "backup_status",
+    "command_retention_receipts",
     "holdings",
     "analysis_runs",
     "transactions",
@@ -201,6 +204,8 @@ def test_policies_are_authenticated_and_bind_both_owner_checks(tenant_database):
         "single_owner_migration_receipts",
         "owner_policy_overrides",
         "backup_restore_receipts",
+        "backup_status",
+        "command_retention_receipts",
     }
 
 

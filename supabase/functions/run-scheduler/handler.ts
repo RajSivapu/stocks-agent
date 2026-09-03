@@ -8,6 +8,7 @@ import {
   fetchAdjustedHistory,
 } from "../market-briefing-gateway/_shared/market-data.ts";
 import type { SchedulerRepository } from "./repository.ts";
+import { runRetentionCycle } from "./retention.ts";
 
 type Fire = (
   endpoint: string,
@@ -81,6 +82,7 @@ export function createRunSchedulerHandler(dependencies: SchedulerDependencies) {
     }
     try {
       const observedAt = now();
+      const retention = await runRetentionCycle(dependencies.repository);
       const maintenance = await runMaintenanceCycle(
         dependencies.repository,
         observedAt,
@@ -127,6 +129,13 @@ export function createRunSchedulerHandler(dependencies: SchedulerDependencies) {
         ok: true,
         claimed: slots.length,
         counts,
+        retention: {
+          status: retention.status,
+          affected: retention.pairing_codes + retention.callback_tokens +
+            retention.telegram_updates + retention.pairing_deliveries +
+            retention.commands_compacted + retention.evidence_compacted +
+            retention.submissions_compacted + retention.tombstones_expired,
+        },
         maintenance,
       });
     } catch {

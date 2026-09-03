@@ -50,7 +50,8 @@ map is rejected.
    independent 36-hour monitor is the actual freshness alarm.
 6. Provision the `stock_agent_backup_runtime` login with `scripts/provision_runtime_roles.py`. Store
    only its Supavisor session-mode URL in the private repository as `BACKUP_DATABASE_URL`. This login
-   can execute the two export RPCs and cannot select any app, Auth, or Vault table directly.
+   can execute the two export RPCs plus the bounded success-receipt RPC and cannot select any app,
+   Auth, or Vault table directly.
 7. Add these private-repository secrets:
 
    - `BACKUP_DATABASE_URL`
@@ -81,7 +82,9 @@ credentials, R2 keys, or object names. Success means all of the following occurr
 2. archive verification passed;
 3. application data and key material were separately encrypted with pinned `age`;
 4. R2 `PUT` and `HEAD` length/digest checks passed;
-5. count retention completed without a truncated list.
+5. count retention completed without a truncated list;
+6. only after those remote checks, the exporter recorded ciphertext time, size, and digest for the
+   aggregate operator-health view.
 
 The age monitor sends fixed operational text if no daily ciphertext is newer than 36 hours. To test
 the alert without touching production data, deploy a test Worker with an empty, test-only prefix and

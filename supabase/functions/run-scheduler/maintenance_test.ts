@@ -26,6 +26,13 @@ class MaintenanceRepository implements SchedulerRepository {
   finishedAlerts: Array<{ status: DeliveryStatus; ids: number[] }> = [];
   appliedGrades: OwnerOutcomeGrade[] = [];
   due: OwnerDueDecision[] = [];
+  applyRetention() {
+    return Promise.resolve({
+      status: "completed", pairing_codes: 0, callback_tokens: 0,
+      telegram_updates: 0, pairing_deliveries: 0, commands_compacted: 0,
+      evidence_compacted: 0, submissions_compacted: 0, tombstones_expired: 0,
+    });
+  }
   claimDueSlots() {
     return Promise.resolve([]);
   }

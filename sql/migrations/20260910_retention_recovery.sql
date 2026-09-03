@@ -147,6 +147,10 @@ LANGUAGE plpgsql
 SET search_path = pg_catalog
 AS $$
 BEGIN
+  IF TG_OP = 'DELETE' AND TG_TABLE_NAME = 'deletion_tombstones'
+     AND current_setting('stock_agent.retention_tombstones', true) = 'on' THEN
+    RETURN OLD;
+  END IF;
   IF TG_OP = 'DELETE' AND TG_TABLE_NAME = 'owner_ledger_reset_receipts'
      AND current_setting('stock_agent.account_purge_owner', true) = OLD.owner_id::text THEN
     RETURN OLD;
@@ -1279,6 +1283,7 @@ BEGIN
   END IF;
   IF p_route NOT IN (
     'POST /consents/accept','GET /account/status','GET /export/account.json',
+    'GET /health/operator',
     'GET /export/ledger.csv','POST /account/step-up/challenge','POST /account/step-up/complete',
     'POST /account/delete/request','POST /account/delete/confirm','POST /account/delete/cancel',
     'POST /account/delete/cleanup-result'
@@ -1289,16 +1294,17 @@ BEGIN
   scope_value := CASE
     WHEN p_route = 'POST /consents/accept' THEN 'consent'
     WHEN p_route = 'GET /account/status' THEN 'account_status'
+    WHEN p_route = 'GET /health/operator' THEN 'operator_health'
     WHEN p_route LIKE 'GET /export/%' THEN 'export'
     WHEN p_route LIKE 'POST /account/step-up/%' THEN 'account_step_up'
     ELSE 'account_delete'
   END;
   owner_limit := app.consume_rate_limit(owner_value, scope_value, 'owner',
-    CASE scope_value WHEN 'account_status' THEN 60 WHEN 'account_step_up' THEN 10 WHEN 'export' THEN 4 ELSE 5 END,
-    CASE scope_value WHEN 'account_status' THEN 60 WHEN 'account_step_up' THEN 600 ELSE 86400 END);
+    CASE scope_value WHEN 'account_status' THEN 60 WHEN 'operator_health' THEN 30 WHEN 'account_step_up' THEN 10 WHEN 'export' THEN 4 ELSE 5 END,
+    CASE scope_value WHEN 'account_status' THEN 60 WHEN 'operator_health' THEN 60 WHEN 'account_step_up' THEN 600 ELSE 86400 END);
   client_limit := app.consume_rate_limit(owner_value, scope_value, p_ip_digest,
-    CASE scope_value WHEN 'account_status' THEN 60 WHEN 'account_step_up' THEN 10 WHEN 'export' THEN 4 ELSE 5 END,
-    CASE scope_value WHEN 'account_status' THEN 60 WHEN 'account_step_up' THEN 600 ELSE 86400 END);
+    CASE scope_value WHEN 'account_status' THEN 60 WHEN 'operator_health' THEN 30 WHEN 'account_step_up' THEN 10 WHEN 'export' THEN 4 ELSE 5 END,
+    CASE scope_value WHEN 'account_status' THEN 60 WHEN 'operator_health' THEN 60 WHEN 'account_step_up' THEN 600 ELSE 86400 END);
   IF NOT (owner_limit->>'allowed')::boolean OR NOT (client_limit->>'allowed')::boolean THEN
     INSERT INTO app.app_api_audit_events(owner_id, request_id, route, result_code)
     VALUES (owner_value, p_request_id, p_route, 'RATE_LIMITED');
@@ -1319,6 +1325,7 @@ BEGIN
           'telegram_cleanup_status', coalesce(telegram_cleanup_status, '{}'::jsonb),
           'cancelled_at', cancelled_at, 'completed_at', completed_at
         ) INTO data_value FROM api.account_status;
+      WHEN 'GET /health/operator' THEN data_value := app.read_operator_health(owner_value);
       WHEN 'GET /export/account.json' THEN data_value := app.export_owner_account(owner_value, p_request);
       WHEN 'GET /export/ledger.csv' THEN data_value := app.export_owner_ledger(owner_value, p_request);
       WHEN 'POST /account/step-up/challenge' THEN
@@ -1611,3 +1618,402 @@ REVOKE ALL ON FUNCTION machine.backup_export_catalog(JSONB),
 GRANT USAGE ON SCHEMA machine TO stock_agent_backup;
 GRANT EXECUTE ON FUNCTION machine.backup_export_catalog(JSONB),
   machine.backup_export_dataset(JSONB) TO stock_agent_backup;
+
+-- Bounded operations and retention. Health never returns an owner identifier or portfolio fact.
+-- Backup status is rebuilt by the successful off-site exporter and is not itself recovery data.
+CREATE TABLE app.backup_status (
+  singleton BOOLEAN PRIMARY KEY DEFAULT true CHECK (singleton),
+  last_success_at TIMESTAMPTZ NOT NULL,
+  schema_version INT NOT NULL CHECK (schema_version = 1),
+  ciphertext_bytes BIGINT NOT NULL CHECK (ciphertext_bytes BETWEEN 1 AND 537919488),
+  ciphertext_digest TEXT NOT NULL CHECK (ciphertext_digest ~ '^[0-9a-f]{64}$'),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+-- This is intentionally hash-only and carries no owner UUID or command payload. It proves that a
+-- terminal command existed after its replay-bearing row reaches the 90-day retention boundary.
+CREATE TABLE app.command_retention_receipts (
+  id UUID PRIMARY KEY DEFAULT extensions.gen_random_uuid(),
+  owner_digest TEXT NOT NULL CHECK (owner_digest ~ '^[0-9a-f]{64}$'),
+  command_digest TEXT NOT NULL UNIQUE CHECK (command_digest ~ '^[0-9a-f]{64}$'),
+  operation TEXT NOT NULL CHECK (
+    operation IN ('buy','sell','sell_all','stop','plan','cancel_plan','correct_transaction')
+  ),
+  terminal_status TEXT NOT NULL CHECK (terminal_status IN ('cancelled','expired')),
+  command_created_at TIMESTAMPTZ NOT NULL,
+  compacted_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+ALTER TABLE app.run_evidence
+  ADD COLUMN claims_compacted_at TIMESTAMPTZ;
+ALTER TABLE app.agent_analysis_submissions
+  ADD COLUMN payload_compacted_at TIMESTAMPTZ;
+
+ALTER TABLE app.backup_status OWNER TO stock_agent_migration_owner;
+ALTER TABLE app.command_retention_receipts OWNER TO stock_agent_migration_owner;
+ALTER TABLE app.backup_status ENABLE ROW LEVEL SECURITY;
+ALTER TABLE app.backup_status FORCE ROW LEVEL SECURITY;
+ALTER TABLE app.command_retention_receipts ENABLE ROW LEVEL SECURITY;
+ALTER TABLE app.command_retention_receipts FORCE ROW LEVEL SECURITY;
+CREATE POLICY backup_status_executor_all ON app.backup_status
+  FOR ALL TO stock_agent_migration_owner USING (true) WITH CHECK (true);
+CREATE POLICY command_retention_receipts_executor_all ON app.command_retention_receipts
+  FOR ALL TO stock_agent_migration_owner USING (true) WITH CHECK (true);
+CREATE TRIGGER prevent_command_retention_receipt_mutation
+  BEFORE UPDATE OR DELETE ON app.command_retention_receipts
+  FOR EACH ROW EXECUTE FUNCTION app.prevent_immutable_receipt_mutation();
+REVOKE ALL ON app.backup_status, app.command_retention_receipts
+  FROM PUBLIC, anon, authenticated, service_role, stock_agent_gateway,
+       stock_agent_scheduler, stock_agent_telegram, stock_agent_backup;
+
+INSERT INTO machine.backup_dataset_contract(
+  name, disposition, excluded_columns, reason_code
+) VALUES
+  ('backup_status', 'exclude_rebuildable', '{}', 'REBUILD_BACKUP_STATUS'),
+  ('command_retention_receipts', 'include', '{}', 'DURABLE_BOUNDED_COMMAND_AUDIT');
+
+-- Refresh every reviewed source-column snapshot after the two compaction-marker additions and the
+-- new operations tables. Any later schema change will again make backup export fail closed.
+UPDATE machine.backup_dataset_contract AS contract
+SET source_columns = catalog.columns
+FROM (
+  SELECT c.relname AS name, array_agg(a.attname::text ORDER BY a.attnum) AS columns
+  FROM pg_catalog.pg_class AS c
+  JOIN pg_catalog.pg_namespace AS n ON n.oid = c.relnamespace
+  JOIN pg_catalog.pg_attribute AS a ON a.attrelid = c.oid
+  WHERE n.nspname = 'app' AND c.relkind = 'r'
+    AND a.attnum > 0 AND NOT a.attisdropped
+  GROUP BY c.relname
+) AS catalog
+WHERE contract.name = catalog.name;
+
+CREATE OR REPLACE FUNCTION api.public_health()
+RETURNS JSONB
+LANGUAGE sql
+STABLE
+SECURITY DEFINER
+SET search_path = pg_catalog
+AS $$
+  SELECT jsonb_build_object('status', 'ok', 'schema_version', 1)
+$$;
+ALTER FUNCTION api.public_health() OWNER TO stock_agent_migration_owner;
+REVOKE ALL ON FUNCTION api.public_health()
+  FROM PUBLIC, service_role, stock_agent_gateway, stock_agent_scheduler,
+       stock_agent_telegram, stock_agent_backup;
+GRANT EXECUTE ON FUNCTION api.public_health() TO anon, authenticated;
+
+CREATE OR REPLACE FUNCTION app.read_operator_health(p_owner_id UUID)
+RETURNS JSONB
+LANGUAGE plpgsql
+STABLE
+SECURITY DEFINER
+SET search_path = pg_catalog
+AS $$
+DECLARE provider_active INT;
+DECLARE provider_unavailable INT;
+DECLARE missed_24 INT;
+DECLARE missed_7 INT;
+DECLARE usage_count INT;
+DECLARE usage_limit INT;
+DECLARE projection_checked INT;
+DECLARE projection_failed INT;
+DECLARE projection_paused INT;
+DECLARE backup_at TIMESTAMPTZ;
+DECLARE restore_at TIMESTAMPTZ;
+DECLARE backup_age INT;
+DECLARE restore_age INT;
+DECLARE scheduler_status TEXT;
+DECLARE provider_status TEXT;
+DECLARE backup_status_value TEXT;
+DECLARE restore_status_value TEXT;
+DECLARE projection_status TEXT;
+DECLARE overall_status TEXT;
+BEGIN
+  IF p_owner_id IS NULL OR NOT EXISTS (
+    SELECT 1 FROM app.app_admins WHERE user_id = p_owner_id AND role IN ('operator','admin')
+  ) THEN
+    RAISE EXCEPTION 'operator unavailable' USING ERRCODE = '42501';
+  END IF;
+
+  SELECT count(*) FILTER (WHERE connection.status = 'active'),
+         count(*) FILTER (WHERE connection.status <> 'active')
+    INTO provider_active, provider_unavailable
+  FROM app.agent_connections AS connection
+  JOIN app.profiles AS profile ON profile.id = connection.owner_id
+  WHERE profile.status = 'active' AND connection.provider = 'claude'
+    AND connection.status <> 'revoked';
+
+  SELECT count(*) FILTER (WHERE slot.updated_at >= clock_timestamp() - interval '24 hours'),
+         count(*) FILTER (WHERE slot.updated_at >= clock_timestamp() - interval '7 days')
+    INTO missed_24, missed_7
+  FROM app.scheduled_run_slots AS slot
+  WHERE slot.status = 'missed';
+
+  SELECT coalesce(usage.invocation_count, 0), config.monthly_limit
+    INTO usage_count, usage_limit
+  FROM machine.routine_budget_config AS config
+  LEFT JOIN machine.routine_monthly_usage AS usage
+    ON usage.usage_month = date_trunc('month', clock_timestamp())::date
+  WHERE config.singleton;
+
+  SELECT count(*) FILTER (WHERE state.last_projection_check_at IS NOT NULL),
+         count(*) FILTER (WHERE state.last_projection_ok = false),
+         count(*) FILTER (WHERE state.mutations_paused)
+    INTO projection_checked, projection_failed, projection_paused
+  FROM app.owner_operational_state AS state;
+
+  SELECT last_success_at INTO backup_at FROM app.backup_status WHERE singleton;
+  SELECT max(restored_at) INTO restore_at FROM app.backup_restore_receipts WHERE status = 'verified';
+  backup_age := CASE WHEN backup_at IS NULL THEN NULL ELSE
+    greatest(0, floor(extract(epoch FROM (clock_timestamp() - backup_at)) / 3600)::int) END;
+  restore_age := CASE WHEN restore_at IS NULL THEN NULL ELSE
+    greatest(0, floor(extract(epoch FROM (clock_timestamp() - restore_at)) / 86400)::int) END;
+
+  scheduler_status := CASE WHEN missed_24 > 0 THEN 'degraded' ELSE 'ok' END;
+  provider_status := CASE WHEN provider_unavailable > 0 THEN 'degraded' ELSE 'ok' END;
+  backup_status_value := CASE
+    WHEN backup_at IS NULL THEN 'missing'
+    WHEN backup_at < clock_timestamp() - interval '36 hours' THEN 'stale'
+    ELSE 'ok'
+  END;
+  restore_status_value := CASE
+    WHEN restore_at IS NULL THEN 'missing'
+    WHEN restore_at < clock_timestamp() - interval '30 days' THEN 'stale'
+    ELSE 'ok'
+  END;
+  projection_status := CASE
+    WHEN projection_failed > 0 OR projection_paused > 0 THEN 'degraded' ELSE 'ok'
+  END;
+  overall_status := CASE WHEN scheduler_status = 'ok' AND provider_status = 'ok'
+      AND backup_status_value = 'ok' AND restore_status_value = 'ok'
+      AND projection_status = 'ok'
+    THEN 'ok' ELSE 'degraded' END;
+
+  RETURN jsonb_build_object(
+    'status', overall_status,
+    'component_status', jsonb_build_object(
+      'database', 'ok',
+      'scheduler', scheduler_status,
+      'provider_adapter', provider_status,
+      'backup', backup_status_value,
+      'restore', restore_status_value,
+      'projections', projection_status
+    ),
+    'deployed_versions', jsonb_build_object(
+      'database_schema', 20260910,
+      'provider_contract', 2
+    ),
+    'provider_adapter', jsonb_build_object(
+      'provider', 'claude',
+      'active', provider_active,
+      'unavailable', provider_unavailable
+    ),
+    'missed_runs', jsonb_build_object(
+      'last_24_hours', missed_24,
+      'last_7_days', missed_7
+    ),
+    'quota_pressure', jsonb_build_object(
+      'month_invocations', usage_count,
+      'configured_limit', usage_limit
+    ),
+    'backup', jsonb_build_object(
+      'age_hours', backup_age,
+      'last_success_at', backup_at
+    ),
+    'restore', jsonb_build_object(
+      'age_days', restore_age,
+      'last_verified_at', restore_at
+    ),
+    'projection', jsonb_build_object(
+      'checked', projection_checked,
+      'failed', projection_failed,
+      'paused', projection_paused
+    )
+  );
+END
+$$;
+ALTER FUNCTION app.read_operator_health(UUID) OWNER TO stock_agent_migration_owner;
+REVOKE ALL ON FUNCTION app.read_operator_health(UUID)
+  FROM PUBLIC, anon, authenticated, service_role, stock_agent_gateway,
+       stock_agent_scheduler, stock_agent_telegram, stock_agent_backup;
+
+CREATE OR REPLACE FUNCTION machine.backup_record_success(p_request JSONB)
+RETURNS JSONB
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = pg_catalog
+AS $$
+DECLARE exported_at_value TIMESTAMPTZ;
+BEGIN
+  IF NOT app.jsonb_has_exact_keys(
+       p_request, ARRAY['schema_version','exported_at','ciphertext_bytes','ciphertext_digest']
+     ) OR jsonb_typeof(p_request->'schema_version') <> 'number'
+     OR (p_request->>'schema_version')::int <> 1
+     OR jsonb_typeof(p_request->'ciphertext_bytes') <> 'number'
+     OR (p_request->>'ciphertext_bytes')::bigint NOT BETWEEN 1 AND 537919488
+     OR p_request->>'ciphertext_digest' !~ '^[0-9a-f]{64}$' THEN
+    RAISE EXCEPTION 'invalid backup success receipt' USING ERRCODE = '22023';
+  END IF;
+  BEGIN
+    exported_at_value := (p_request->>'exported_at')::timestamptz;
+  EXCEPTION WHEN OTHERS THEN
+    RAISE EXCEPTION 'invalid backup success receipt' USING ERRCODE = '22023';
+  END;
+  IF exported_at_value > clock_timestamp() + interval '5 minutes'
+     OR exported_at_value < clock_timestamp() - interval '7 days' THEN
+    RAISE EXCEPTION 'invalid backup success receipt' USING ERRCODE = '22023';
+  END IF;
+  INSERT INTO app.backup_status(
+    singleton, last_success_at, schema_version, ciphertext_bytes, ciphertext_digest, updated_at
+  ) VALUES (
+    true, exported_at_value, 1, (p_request->>'ciphertext_bytes')::bigint,
+    p_request->>'ciphertext_digest', clock_timestamp()
+  )
+  ON CONFLICT (singleton) DO UPDATE
+  SET last_success_at = EXCLUDED.last_success_at,
+      schema_version = EXCLUDED.schema_version,
+      ciphertext_bytes = EXCLUDED.ciphertext_bytes,
+      ciphertext_digest = EXCLUDED.ciphertext_digest,
+      updated_at = clock_timestamp()
+  WHERE app.backup_status.last_success_at <= EXCLUDED.last_success_at;
+  RETURN jsonb_build_object('status', 'recorded', 'last_success_at', exported_at_value);
+END
+$$;
+ALTER FUNCTION machine.backup_record_success(JSONB) OWNER TO stock_agent_migration_owner;
+REVOKE ALL ON FUNCTION machine.backup_record_success(JSONB)
+  FROM PUBLIC, anon, authenticated, service_role, stock_agent_gateway,
+       stock_agent_scheduler, stock_agent_telegram, stock_agent_backup;
+GRANT EXECUTE ON FUNCTION machine.backup_record_success(JSONB) TO stock_agent_backup;
+
+CREATE OR REPLACE FUNCTION machine.scheduler_apply_retention(p_request JSONB)
+RETURNS JSONB
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = pg_catalog
+AS $$
+DECLARE retention_now TIMESTAMPTZ := clock_timestamp();
+DECLARE pairing_count INT := 0;
+DECLARE callback_count INT := 0;
+DECLARE update_count INT := 0;
+DECLARE pairing_delivery_count INT := 0;
+DECLARE command_count INT := 0;
+DECLARE evidence_count INT := 0;
+DECLARE submission_count INT := 0;
+DECLARE tombstone_count INT := 0;
+BEGIN
+  IF NOT app.jsonb_has_exact_keys(p_request, ARRAY['maintenance_id'])
+     OR p_request->>'maintenance_id' !~
+       '^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-5][0-9a-fA-F]{3}-[89aAbB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}$' THEN
+    RAISE EXCEPTION 'invalid retention request' USING ERRCODE = '22023';
+  END IF;
+  PERFORM pg_catalog.pg_advisory_xact_lock(86190260910);
+
+  WITH candidates AS MATERIALIZED (
+    SELECT code_digest FROM app.telegram_pairing_codes
+    WHERE expires_at < retention_now - interval '24 hours'
+    ORDER BY expires_at LIMIT 500 FOR UPDATE SKIP LOCKED
+  )
+  DELETE FROM app.telegram_pairing_codes AS target
+  USING candidates WHERE target.code_digest = candidates.code_digest;
+  GET DIAGNOSTICS pairing_count = ROW_COUNT;
+
+  WITH candidates AS MATERIALIZED (
+    SELECT id FROM app.telegram_callback_tokens
+    WHERE expires_at < retention_now - interval '24 hours'
+    ORDER BY expires_at LIMIT 500 FOR UPDATE SKIP LOCKED
+  )
+  DELETE FROM app.telegram_callback_tokens AS target
+  USING candidates WHERE target.id = candidates.id;
+  GET DIAGNOSTICS callback_count = ROW_COUNT;
+
+  WITH candidates AS MATERIALIZED (
+    SELECT telegram_update_id FROM app.telegram_pairing_deliveries
+    WHERE recorded_at < retention_now - interval '30 days'
+    ORDER BY recorded_at LIMIT 500 FOR UPDATE SKIP LOCKED
+  )
+  DELETE FROM app.telegram_pairing_deliveries AS target
+  USING candidates WHERE target.telegram_update_id = candidates.telegram_update_id;
+  GET DIAGNOSTICS pairing_delivery_count = ROW_COUNT;
+
+  WITH candidates AS MATERIALIZED (
+    SELECT owner_id, telegram_update_id FROM app.telegram_updates
+    WHERE received_at < retention_now - interval '30 days'
+    ORDER BY received_at LIMIT 500 FOR UPDATE SKIP LOCKED
+  )
+  DELETE FROM app.telegram_updates AS target
+  USING candidates
+  WHERE target.owner_id = candidates.owner_id
+    AND target.telegram_update_id = candidates.telegram_update_id;
+  GET DIAGNOSTICS update_count = ROW_COUNT;
+
+  WITH candidates AS MATERIALIZED (
+    SELECT id, owner_id, operation, status, created_at
+    FROM app.portfolio_commands
+    WHERE status IN ('cancelled','expired')
+      AND created_at < retention_now - interval '90 days'
+    ORDER BY created_at LIMIT 500 FOR UPDATE SKIP LOCKED
+  ), deleted AS (
+    DELETE FROM app.portfolio_commands AS target
+    USING candidates WHERE target.id = candidates.id
+    RETURNING target.id, target.owner_id, target.operation, target.status, target.created_at
+  )
+  INSERT INTO app.command_retention_receipts(
+    owner_digest, command_digest, operation, terminal_status, command_created_at, compacted_at
+  )
+  SELECT encode(extensions.digest(owner_id::text, 'sha256'), 'hex'),
+         encode(extensions.digest(id::text, 'sha256'), 'hex'),
+         operation, status, created_at, retention_now
+  FROM deleted
+  ON CONFLICT (command_digest) DO NOTHING;
+  GET DIAGNOSTICS command_count = ROW_COUNT;
+
+  WITH candidates AS MATERIALIZED (
+    SELECT id FROM app.run_evidence
+    WHERE claims_compacted_at IS NULL
+      AND created_at < retention_now - interval '11 months'
+    ORDER BY created_at LIMIT 500 FOR UPDATE SKIP LOCKED
+  )
+  UPDATE app.run_evidence AS target
+  SET claims = '[]'::jsonb, claims_compacted_at = retention_now
+  FROM candidates WHERE target.id = candidates.id;
+  GET DIAGNOSTICS evidence_count = ROW_COUNT;
+
+  WITH candidates AS MATERIALIZED (
+    SELECT id FROM app.agent_analysis_submissions
+    WHERE payload_compacted_at IS NULL
+      AND created_at < retention_now - interval '11 months'
+    ORDER BY created_at LIMIT 500 FOR UPDATE SKIP LOCKED
+  )
+  UPDATE app.agent_analysis_submissions AS target
+  SET payload = '{"compacted":true}'::jsonb, payload_compacted_at = retention_now
+  FROM candidates WHERE target.id = candidates.id;
+  GET DIAGNOSTICS submission_count = ROW_COUNT;
+
+  PERFORM pg_catalog.set_config('stock_agent.retention_tombstones', 'on', true);
+  WITH candidates AS MATERIALIZED (
+    SELECT owner_id FROM app.deletion_tombstones
+    WHERE archives_expire_after < retention_now
+    ORDER BY archives_expire_after LIMIT 500 FOR UPDATE SKIP LOCKED
+  )
+  DELETE FROM app.deletion_tombstones AS target
+  USING candidates WHERE target.owner_id = candidates.owner_id;
+  GET DIAGNOSTICS tombstone_count = ROW_COUNT;
+
+  RETURN jsonb_build_object(
+    'status', 'completed',
+    'pairing_codes', pairing_count,
+    'callback_tokens', callback_count,
+    'telegram_updates', update_count,
+    'pairing_deliveries', pairing_delivery_count,
+    'commands_compacted', command_count,
+    'evidence_compacted', evidence_count,
+    'submissions_compacted', submission_count,
+    'tombstones_expired', tombstone_count
+  );
+END
+$$;
+ALTER FUNCTION machine.scheduler_apply_retention(JSONB) OWNER TO stock_agent_migration_owner;
+REVOKE ALL ON FUNCTION machine.scheduler_apply_retention(JSONB)
+  FROM PUBLIC, anon, authenticated, service_role, stock_agent_gateway,
+       stock_agent_scheduler, stock_agent_telegram, stock_agent_backup;
+GRANT EXECUTE ON FUNCTION machine.scheduler_apply_retention(JSONB) TO stock_agent_scheduler;

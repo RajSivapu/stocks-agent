@@ -16,12 +16,14 @@ import {
   sanitizeDeletionResponse,
 } from "./account.ts";
 import type { AuthenticatedClaims } from "../_shared/jwt.ts";
+import { parseOperatorHealth, parsePublicHealth } from "./health.ts";
 
 
 const MAX_BODY_BYTES = 64 * 1024;
 const TOKEN_RE = /^Bearer ([A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+)$/;
 
 export type AppApiRepository = {
+  publicHealth(): Promise<Record<string, unknown>>;
   dispatch(input: Record<string, unknown>): Promise<Record<string, unknown>>;
 };
 
@@ -106,6 +108,10 @@ export function createAppApiHandler(dependencies: AppApiHandlerDependencies) {
       }
       const route = resolveRoute(request.method, url.pathname);
       assertAllowedOrigin(request, dependencies.allowedOrigins);
+      if (route.key === "public_health") {
+        const health = parsePublicHealth(await dependencies.repository.publicHealth());
+        return jsonResponse(200, { ok: true, data: health }, corsHeaders(request, dependencies.allowedOrigins));
+      }
       let claims: AuthenticatedClaims;
       try {
         claims = await dependencies.authenticate(request);
@@ -162,6 +168,12 @@ export function createAppApiHandler(dependencies: AppApiHandlerDependencies) {
           data: { ...(result.data as Record<string, unknown>), code: pairingCode },
         }
         : result;
+      if (route.key === "operator_health" && responseValue.ok === true) {
+        responseValue = {
+          ...responseValue,
+          data: parseOperatorHealth(responseValue.data),
+        };
+      }
       if (inboundConnectionSecret) {
         responseValue = attachGatewayCredential(responseValue, inboundConnectionSecret);
       }

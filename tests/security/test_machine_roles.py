@@ -78,6 +78,7 @@ def test_machine_roles_have_no_cross_role_membership_or_unreviewed_execute(tenan
             "machine.scheduler_finish_operational_alert(jsonb)",
             "machine.scheduler_read_due_decisions(jsonb)",
             "machine.scheduler_apply_outcome_grades(jsonb)",
+            "machine.scheduler_apply_retention(jsonb)",
         },
         "stock_agent_telegram": {
             "machine.telegram_prepare_command(jsonb)",
@@ -94,6 +95,7 @@ def test_machine_roles_have_no_cross_role_membership_or_unreviewed_execute(tenan
         "stock_agent_backup": {
             "machine.backup_export_catalog(jsonb)",
             "machine.backup_export_dataset(jsonb)",
+            "machine.backup_record_success(jsonb)",
         },
     }
     for role in MACHINE_ROLES:

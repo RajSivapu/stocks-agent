@@ -2,7 +2,7 @@ import { assertEquals } from "https://deno.land/std@0.224.0/assert/mod.ts";
 import type { RpcClient } from "../_shared/postgres.ts";
 import { createSchedulerRepository } from "./repository.ts";
 
-Deno.test("scheduler repository exposes only eleven reviewed scheduler RPCs", async () => {
+Deno.test("scheduler repository exposes only twelve reviewed scheduler RPCs", async () => {
   const calls: Array<{ name: string; args: Record<string, unknown> }> = [];
   const runner = async <T>(
     _url: string,
@@ -23,6 +23,7 @@ Deno.test("scheduler repository exposes only eleven reviewed scheduler RPCs", as
       },
     });
   const repository = createSchedulerRepository("opaque-database-url", runner);
+  await repository.applyRetention("77777777-7777-4777-8777-777777777777");
   await repository.claimDueSlots("2026-09-03T11:31:00.000Z", 10);
   await repository.readTriggerSecret("11111111-1111-4111-8111-111111111111");
   await repository.recordTriggerResult("11111111-1111-4111-8111-111111111111", {
@@ -50,6 +51,7 @@ Deno.test("scheduler repository exposes only eleven reviewed scheduler RPCs", as
   await repository.readDueDecisions("2026-09-03T12:00:00.000Z", 10);
   await repository.applyOutcomeGrades([]);
   assertEquals(calls.map((call) => call.name), [
+    "scheduler_apply_retention",
     "scheduler_claim_due_slots",
     "scheduler_read_trigger_secret",
     "scheduler_record_trigger_result",

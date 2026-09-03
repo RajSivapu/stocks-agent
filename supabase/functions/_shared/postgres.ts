@@ -20,6 +20,7 @@ export const RPC_ALLOWLIST = [
   "scheduler_finish_operational_alert",
   "scheduler_read_due_decisions",
   "scheduler_apply_outcome_grades",
+  "scheduler_apply_retention",
   "telegram_claim_update",
   "telegram_resolve_link",
   "telegram_consume_pairing",
@@ -172,6 +173,10 @@ async function executeRpc(
     case "scheduler_apply_outcome_grades":
       rows =
         await transaction`SELECT machine.scheduler_apply_outcome_grades(${value}::jsonb) AS result`;
+      break;
+    case "scheduler_apply_retention":
+      rows =
+        await transaction`SELECT machine.scheduler_apply_retention(${value}::jsonb) AS result`;
       break;
     case "telegram_claim_update":
       rows =

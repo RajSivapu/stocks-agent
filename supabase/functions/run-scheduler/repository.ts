@@ -39,6 +39,7 @@ export type OwnerDueDecision = DueDecision & { owner_id: string };
 export type OwnerOutcomeGrade = OutcomeGrade & { owner_id: string };
 
 export interface SchedulerRepository {
+  applyRetention(maintenanceId: string): Promise<Record<string, unknown>>;
   claimDueSlots(now: string, limit: number): Promise<ClaimedSlot[]>;
   readTriggerSecret(attemptId: string): Promise<TriggerSecret>;
   recordTriggerResult(
@@ -100,6 +101,13 @@ export function createSchedulerRepository(
   database: DatabaseRunner = withDatabase,
 ): SchedulerRepository {
   return {
+    applyRetention(maintenanceId) {
+      return database(databaseUrl, (client) =>
+        client.callJsonRpc(
+          "scheduler_apply_retention",
+          { maintenance_id: maintenanceId },
+        ));
+    },
     claimDueSlots(now, limit) {
       return database(
         databaseUrl,

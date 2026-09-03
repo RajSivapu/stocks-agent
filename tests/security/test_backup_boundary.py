@@ -13,6 +13,7 @@ from ops.backup.verify_archive import DATASET_SPECS, verify_archive
 BACKUP_FUNCTIONS = {
     "machine.backup_export_catalog(jsonb)",
     "machine.backup_export_dataset(jsonb)",
+    "machine.backup_record_success(jsonb)",
 }
 
 
@@ -49,7 +50,7 @@ def test_backup_role_is_execute_only_and_cannot_bypass_private_schemas(tenant_da
                     tenant_database.execute(f"SELECT * FROM {relation}").fetchall()
 
 
-def test_backup_role_has_only_the_two_enumerated_export_rpcs(tenant_database):
+def test_backup_role_has_only_the_three_enumerated_backup_rpcs(tenant_database):
     executable = tenant_database.execute(
         """
         SELECT p.oid::regprocedure::text
@@ -60,6 +61,41 @@ def test_backup_role_has_only_the_two_enumerated_export_rpcs(tenant_database):
         """
     ).fetchall()
     assert {row[0] for row in executable} == BACKUP_FUNCTIONS
+
+
+def test_backup_status_is_recorded_only_after_an_explicit_ciphertext_receipt(tenant_database):
+    observed_at = datetime.now(timezone.utc)
+    with tenant_database.transaction(force_rollback=True):
+        tenant_database.execute("SET LOCAL ROLE stock_agent_backup")
+        result = tenant_database.execute(
+            "SELECT machine.backup_record_success(%s::jsonb)",
+            (json.dumps({
+                "schema_version": 1,
+                "exported_at": observed_at.isoformat(),
+                "ciphertext_bytes": 1234,
+                "ciphertext_digest": "f" * 64,
+            }),),
+        ).fetchone()[0]
+        assert result["status"] == "recorded"
+        tenant_database.execute("RESET ROLE")
+        row = tenant_database.execute(
+            "SELECT schema_version, ciphertext_bytes, ciphertext_digest FROM app.backup_status"
+        ).fetchone()
+        assert row == (1, 1234, "f" * 64)
+
+        tenant_database.execute("SET LOCAL ROLE stock_agent_backup")
+        with pytest.raises(Exception, match="invalid backup success receipt"):
+            with tenant_database.transaction(force_rollback=True):
+                tenant_database.execute(
+                    "SELECT machine.backup_record_success(%s::jsonb)",
+                    (json.dumps({
+                        "schema_version": 1,
+                        "exported_at": observed_at.isoformat(),
+                        "ciphertext_bytes": 1234,
+                        "ciphertext_digest": "f" * 64,
+                        "object_key": "private/path",
+                    }),),
+                ).fetchone()
 
 
 def test_backup_catalog_accounts_for_every_app_table(tenant_database):

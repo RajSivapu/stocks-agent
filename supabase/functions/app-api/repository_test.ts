@@ -6,6 +6,24 @@ import {
 import { createAppApiRepository } from "./repository.ts";
 
 
+Deno.test("public health repository sends only the anon key to the exact bounded RPC", async () => {
+  let observed: Request | undefined;
+  const repository = createAppApiRepository(
+    "https://project.supabase.co",
+    "public-anon-key",
+    ((input: string | URL | Request, init?: RequestInit) => {
+      observed = new Request(input, init);
+      return Promise.resolve(Response.json({ status: "ok", schema_version: 1 }));
+    }) as typeof fetch,
+  );
+  assertEquals(await repository.publicHealth(), { status: "ok", schema_version: 1 });
+  assertEquals(observed?.url, "https://project.supabase.co/rest/v1/rpc/public_health");
+  assertEquals(observed?.headers.get("apikey"), "public-anon-key");
+  assertEquals(observed?.headers.has("authorization"), false);
+  assertEquals(await observed?.text(), "{}");
+});
+
+
 Deno.test("repository forwards only anon key, original bearer, and bounded dispatch arguments", async () => {
   let observed: Request | undefined;
   const fetcher = (input: string | URL | Request, init?: RequestInit) => {

@@ -1339,13 +1339,13 @@ git commit -m "feat: add encrypted disaster recovery"
 - Consumes: bounded operational tables, admin membership, retention policy.
 - Produces: aggregate health only; deterministic cleanup; credential and wrong-tenant incident procedures.
 
-- [ ] **Step 1: Write failing disclosure tests**
+- [x] **Step 1: Write failing disclosure tests**
 
 Assert operator health excludes email, Telegram IDs, tickers, positions, quantities, cost basis,
 recommendation text, rendered messages, prompts, tokens, and per-owner missed-run listings. Verify logs
 exclude bodies and authorization headers.
 
-- [ ] **Step 2: Implement aggregate health**
+- [x] **Step 2: Implement aggregate health**
 
 Return component status, deployed versions, provider-adapter state, aggregate missed-run counts, quota
 pressure, backup age, restore age, and projection-check state. No admin mutation or impersonation route
@@ -1355,20 +1355,20 @@ Deploy an independent Cloudflare scheduled monitor that checks a public redacted
 endpoint and sends a fixed operational alert on unavailability. It must not carry a Supabase key,
 portfolio data, or generate synthetic traffic intended to defeat free-project pausing.
 
-- [ ] **Step 3: Implement retention**
+- [x] **Step 3: Implement retention**
 
 Delete expired pairing codes after 24 hours, Telegram update IDs after 30 days, cancelled/expired
 commands after 90 days while preserving bounded audit facts, and backup-deleted data by 35 days. Keep
 decision records and active-account ledger/history. Compact full evidence only when its first row nears
 12 months, preserving citations/hashes/decisions.
 
-- [ ] **Step 4: Document incident and rotation paths**
+- [x] **Step 4: Document incident and rotation paths**
 
 Cover each Claude credential separately, Telegram bot/webhook, SMTP, R2, runtime DB roles, wrong-tenant
 disclosure, operator-account compromise, provider-account loss, trigger pause, rollback, and user notice
 within 72 hours for confirmed disclosure.
 
-- [ ] **Step 5: Verify and commit**
+- [x] **Step 5: Verify and commit**
 
 Run redaction, retention, and authorization tests. Commit:
 

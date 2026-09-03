@@ -1,0 +1,13 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "stock-agent-public-health-monitor",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-08-01",
+  "workers_dev": false,
+  "triggers": {
+    "crons": ["23 */6 * * *"]
+  },
+  "vars": {
+    "HEALTH_URL": "https://REPLACE_WITH_PROJECT_REF.supabase.co/functions/v1/app-api/healthz"
+  }
+}

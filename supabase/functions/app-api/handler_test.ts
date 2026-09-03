@@ -18,6 +18,11 @@ class FakeRepository implements AppApiRepository {
   };
   cleanupResponse: Record<string, unknown> = { ok: true, data: { status: "recorded" } };
 
+  publicHealth(): Promise<Record<string, unknown>> {
+    this.calls.push({ route: "PUBLIC_HEALTH" });
+    return Promise.resolve({ status: "ok", schema_version: 1 });
+  }
+
   dispatch(input: Record<string, unknown>): Promise<Record<string, unknown>> {
     this.calls.push(structuredClone(input));
     if (input.route === "POST /connections/create") {
@@ -82,6 +87,48 @@ function request(
     body: options.method === "GET" ? undefined : JSON.stringify(body),
   });
 }
+
+Deno.test("public health is exact and bypasses authentication without accepting private data", async () => {
+  const { handler, repository, events } = makeHandler();
+  const response = await handler(new Request("https://edge.example.test/healthz", {
+    method: "GET",
+  }));
+  assertEquals(response.status, 200);
+  assertEquals(await response.json(), {
+    ok: true,
+    data: { status: "ok", schema_version: 1 },
+  });
+  assertEquals(events, []);
+  assertEquals(repository.calls, [{ route: "PUBLIC_HEALTH" }]);
+});
+
+Deno.test("operator health is authenticated and response-validated", async () => {
+  const { handler, repository } = makeHandler();
+  repository.response = {
+    ok: true,
+    data: {
+      status: "degraded",
+      component_status: {
+        database: "ok", scheduler: "ok", provider_adapter: "ok",
+        backup: "missing", restore: "missing", projections: "ok",
+      },
+      deployed_versions: { database_schema: 20260910, provider_contract: 2 },
+      provider_adapter: { provider: "claude", active: 1, unavailable: 0 },
+      missed_runs: { last_24_hours: 0, last_7_days: 0 },
+      quota_pressure: { month_invocations: 0, configured_limit: 1000 },
+      backup: { age_hours: null, last_success_at: null },
+      restore: { age_days: null, last_verified_at: null },
+      projection: { checked: 0, failed: 0, paused: 0 },
+    },
+  };
+  const response = await handler(request("/health/operator", {}, { method: "GET" }));
+  assertEquals(response.status, 200);
+  assertEquals(repository.calls[0].route, "GET /health/operator");
+  assertEquals((await response.json()).data.status, "degraded");
+
+  repository.response = { ok: true, data: { ...repository.response.data as object, ticker: "NVDA" } };
+  assertEquals((await handler(request("/health/operator", {}, { method: "GET" }))).status, 500);
+});
 
 Deno.test("method and origin are rejected before authentication or body parsing", async () => {
   const { handler, repository, events } = makeHandler();

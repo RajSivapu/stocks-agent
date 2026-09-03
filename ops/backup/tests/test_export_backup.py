@@ -46,6 +46,34 @@ def test_collect_archive_calls_only_enumerated_rpcs():
     assert set(archive["datasets"]) == set(DATASET_SPECS)
 
 
+def test_backup_success_receipt_contains_only_ciphertext_metadata():
+    observed = {}
+
+    class ReceiptConnection:
+        def execute(self, query, parameters):
+            observed["query"] = query
+            observed["request"] = json.loads(parameters[0])
+
+            class Cursor:
+                def fetchone(self):
+                    return ({"status": "recorded", "last_success_at": "2026-09-03T12:00:00Z"},)
+
+            return Cursor()
+
+    export_backup.record_backup_success(
+        ReceiptConnection(),
+        exported_at=datetime(2026, 9, 3, 12, 0, tzinfo=timezone.utc),
+        metadata={"bytes": 123, "ciphertext_sha256": "a" * 64},
+    )
+    assert "backup_record_success" in observed["query"]
+    assert observed["request"] == {
+        "schema_version": 1,
+        "exported_at": "2026-09-03T12:00:00Z",
+        "ciphertext_bytes": 123,
+        "ciphertext_digest": "a" * 64,
+    }
+
+
 def test_encrypt_payload_uses_private_temp_dir_and_removes_plaintext(tmp_path):
     observed = {}
 

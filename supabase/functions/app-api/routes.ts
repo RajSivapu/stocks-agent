@@ -14,6 +14,8 @@ export type AppRoute = {
 };
 
 export const APP_ROUTES: readonly AppRoute[] = [
+  { method: "GET", path: "/healthz", key: "public_health", body: "none" },
+  { method: "GET", path: "/health/operator", key: "operator_health", body: "none" },
   { method: "POST", path: "/portfolio/preview", key: "portfolio_preview", body: "command" },
   { method: "POST", path: "/portfolio/confirm", key: "portfolio_confirm", body: "confirmation" },
   { method: "POST", path: "/portfolio/correction/preview", key: "correction_preview", body: "command" },

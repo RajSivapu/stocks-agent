@@ -285,6 +285,23 @@ def key_material_object_key(now: datetime) -> str:
     return f"stock-agent/key-material/{value:%Y/%m}/{value:%Y-%m-%dT%H-%M-%SZ}.age"
 
 
+def record_backup_success(
+    connection: psycopg.Connection,
+    *,
+    exported_at: datetime,
+    metadata: Mapping[str, Any],
+) -> dict[str, Any]:
+    receipt = _rpc(connection, "backup_record_success", {
+        "schema_version": SCHEMA_VERSION,
+        "exported_at": exported_at.astimezone(timezone.utc).isoformat().replace("+00:00", "Z"),
+        "ciphertext_bytes": metadata["bytes"],
+        "ciphertext_digest": metadata["ciphertext_sha256"],
+    })
+    if receipt.get("status") != "recorded" or set(receipt) != {"status", "last_success_at"}:
+        raise BackupFailed("backup success receipt was rejected")
+    return receipt
+
+
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--output", type=Path, required=True)
@@ -359,6 +376,14 @@ def main(argv: list[str] | None = None) -> int:
             prune_objects(client, bucket=bucket, prefix="stock-agent/daily/", keep=14)
             prune_objects(client, bucket=bucket, prefix="stock-agent/weekly/", keep=4)
             prune_objects(client, bucket=bucket, prefix="stock-agent/key-material/", keep=14)
+            with psycopg.connect(database_url, autocommit=False) as connection:
+                connection.execute("SET LOCAL statement_timeout = '10s'")
+                record_backup_success(
+                    connection,
+                    exported_at=observed_at,
+                    metadata=metadata,
+                )
+                connection.commit()
         print(json.dumps({
             "status": "encrypted_and_verified",
             "schema_version": SCHEMA_VERSION,

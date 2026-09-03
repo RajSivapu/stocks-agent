@@ -13,6 +13,14 @@ const ATTEMPT_ID = "22222222-2222-4222-8222-222222222222";
 class FakeRepository implements SchedulerRepository {
   slots: ClaimedSlot[] = [];
   calls: string[] = [];
+  applyRetention() {
+    this.calls.push("retain");
+    return Promise.resolve({
+      status: "completed", pairing_codes: 0, callback_tokens: 0,
+      telegram_updates: 0, pairing_deliveries: 0, commands_compacted: 0,
+      evidence_compacted: 0, submissions_compacted: 0, tombstones_expired: 0,
+    });
+  }
   claimDueSlots(_now: string, _limit: number) {
     this.calls.push("claim");
     return Promise.resolve(this.slots);
@@ -115,6 +123,7 @@ Deno.test("one claimed slot causes one fire and one terminal trigger receipt", a
   assertEquals(response.status, 200);
   assertEquals(fires, 1);
   assertEquals(repository.calls, [
+    "retain",
     "maintain",
     "read-due",
     "claim-publications",
@@ -144,6 +153,7 @@ Deno.test("holiday slots publish deterministic copy without reading a provider s
   })(request('{"limit":10}'));
   assertEquals(response.status, 200);
   assertEquals(repository.calls, [
+    "retain",
     "maintain",
     "read-due",
     "claim-publications",

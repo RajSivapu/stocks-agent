@@ -21,11 +21,27 @@ export function createAppApiRepository(
   anonKey: string,
   fetcher: typeof fetch = fetch,
 ): AppApiRepository {
-  const endpoint = `${projectUrl.replace(/\/$/, "")}/rest/v1/rpc/app_dispatch`;
+  const baseUrl = projectUrl.replace(/\/$/, "");
+  const endpoint = `${baseUrl}/rest/v1/rpc/app_dispatch`;
   if (!projectUrl.startsWith("https://") || !anonKey || anonKey.length > 16_384) {
     throw new Error("app API repository configuration is invalid");
   }
   return {
+    async publicHealth() {
+      const response = await fetcher(`${baseUrl}/rest/v1/rpc/public_health`, {
+        method: "POST",
+        headers: {
+          apikey: anonKey,
+          "content-type": "application/json",
+          "content-profile": "api",
+          accept: "application/vnd.pgrst.object+json",
+          "accept-profile": "api",
+        },
+        body: "{}",
+        signal: AbortSignal.timeout(5_000),
+      });
+      return await boundedResult(response, 1024);
+    },
     async dispatch(input) {
       const bearer = input.bearerToken;
       if (typeof bearer !== "string") throw new Error("app API bearer token is missing");
