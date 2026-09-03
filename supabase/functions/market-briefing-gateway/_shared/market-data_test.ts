@@ -1,4 +1,4 @@
-import { fetchAdjustedHistory, fetchVerifiedQuote } from "./market-data.ts";
+import { fetchAdjustedHistory, fetchIntradayQuoteEvidence, fetchVerifiedQuote } from "./market-data.ts";
 
 function assert(value: boolean, message: string): void {
   if (!value) throw new Error(message);
@@ -295,4 +295,57 @@ Deno.test("history rejects missing adjusted values and arbitrary ranges", async 
       fetchAdjustedHistory("VTI", "max" as "1y", fixtureFetch(historyFixture)),
     "invalid history range",
   );
+});
+
+Deno.test("intraday evidence returns bounded same-session quote points with provider timestamps", async () => {
+  const timestamps = [
+    "2026-09-02T13:29:00.000Z",
+    "2026-09-02T16:58:00.000Z",
+    "2026-09-02T16:59:00.000Z",
+    "2026-09-02T17:00:00.000Z",
+  ].map((value) => Date.parse(value) / 1000);
+  const payload = {
+    chart: { result: [{
+      meta: {
+        marketState: "REGULAR",
+        currentTradingPeriod: {
+          pre: { start: Date.parse("2026-09-02T08:00:00.000Z") / 1000, end: Date.parse("2026-09-02T13:30:00.000Z") / 1000 },
+          regular: { start: Date.parse("2026-09-02T13:30:00.000Z") / 1000, end: Date.parse("2026-09-02T20:00:00.000Z") / 1000 },
+          post: { start: Date.parse("2026-09-02T20:00:00.000Z") / 1000, end: Date.parse("2026-09-03T00:00:00.000Z") / 1000 },
+        },
+      },
+      timestamp: timestamps,
+      indicators: { quote: [{ close: [40, 41.9, 42.05, 42.1] }] },
+    }], error: null },
+  };
+  let requested = "";
+  const evidence = await fetchIntradayQuoteEvidence("ABC", (input) => {
+    requested = String(input);
+    return Promise.resolve(new Response(JSON.stringify(payload)));
+  }, new Date("2026-09-02T17:01:00.000Z"));
+  assertEquals(evidence, {
+    ticker: "ABC",
+    market_session: "regular",
+    source: "yahoo-chart",
+    points: [
+      { value: "41.9", comparison_value: null, observed_at: "2026-09-02T16:58:00.000Z", bar_complete: true },
+      { value: "42.05", comparison_value: null, observed_at: "2026-09-02T16:59:00.000Z", bar_complete: true },
+      { value: "42.1", comparison_value: null, observed_at: "2026-09-02T17:00:00.000Z", bar_complete: true },
+    ],
+  });
+  assert(requested.endsWith("/ABC?range=1d&interval=1m&includePrePost=true"), "unexpected intraday URL");
+});
+
+Deno.test("intraday evidence fails closed on mixed, missing, or future latest data", async () => {
+  const now = new Date("2026-09-02T17:01:00.000Z");
+  for (const result of [
+    { meta: { marketState: "REGULAR" }, timestamp: [], indicators: { quote: [{ close: [] }] } },
+    { meta: { marketState: "REGULAR" }, timestamp: [Date.parse("2026-09-02T17:07:00.000Z") / 1000], indicators: { quote: [{ close: [42] }] } },
+    { meta: { marketState: "CLOSED" }, timestamp: [Date.parse("2026-09-02T17:00:00.000Z") / 1000], indicators: { quote: [{ close: [42] }] } },
+  ]) {
+    await assertRejects(
+      () => fetchIntradayQuoteEvidence("ABC", fixtureFetch({ chart: { result: [result] } }), now),
+      "invalid intraday response",
+    );
+  }
 });

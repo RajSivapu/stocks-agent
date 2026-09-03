@@ -209,26 +209,64 @@ def verify(cur):
     )
     _require(event_receipt["event_count"] == 1, "alert event was not recorded")
     publication_id = uuid4()
+    linked = _call(
+        cur,
+        "create_market_alert_publication",
+        event_request,
+        publication_id,
+        evaluated_at.date(),
+        "entry_trigger",
+        "rollback event preview",
+        "d" * 64,
+        [event_id],
+        None,
+    )
+    _require(linked["linked_event_count"] == 1, "alert publication was not linked")
+    linked_event = cur.execute(
+        "SELECT publication_id FROM public.market_alert_events WHERE id=%s", (event_id,)
+    ).fetchone()
+    _require(linked_event and linked_event[0] == publication_id,
+             "event publication receipt was not stored")
+
+    publish_draft_id = _draft(cur, request_id, evaluation_id, "e" * 64)
+    draft_publication_request = uuid4()
     cur.execute(
         """
-        INSERT INTO public.market_publications(
-          id,idempotency_key,market_date,phase,kind,template_version,rendered_body,
-          rendered_hash,status
-        ) VALUES (%s,%s,current_date,'intraday','new_idea',3,'rollback preview',%s,'suppressed')
+        INSERT INTO public.market_gateway_requests(request_id,operation,status,lease_token)
+        VALUES (%s,'evaluate_alert_rules','claimed',%s)
         """,
-        (publication_id, event_request, "d" * 64),
+        (draft_publication_request, uuid4()),
     )
-    linked = _call(cur, "link_market_alert_publication", [event_id], publication_id)
-    _require(linked["linked_count"] == 1, "alert publication was not linked")
+    draft_publication_id = uuid4()
+    draft_linked = _call(
+        cur,
+        "create_market_alert_publication",
+        draft_publication_request,
+        draft_publication_id,
+        evaluated_at.date(),
+        "new_idea",
+        "rollback draft preview",
+        "f" * 64,
+        [],
+        publish_draft_id,
+    )
+    _require(UUID(str(draft_linked["linked_draft_id"])) == publish_draft_id,
+             "draft publication was not linked")
+    draft_publication_linked = cur.execute(
+        "SELECT publication_id=%s FROM public.market_alert_drafts WHERE id=%s",
+        (draft_publication_id, publish_draft_id),
+    ).fetchone()[0]
+    _require(draft_publication_linked, "draft publication receipt was not stored")
     _expect_db_error(
         cur,
         lambda: cur.execute("UPDATE public.market_alert_events SET status='unsafe_to_evaluate' WHERE id=%s", (event_id,)),
     )
     return {
-        "drafts_created": 2,
+        "drafts_created": 3,
         "rules_armed": 1,
         "events_recorded": 1,
         "publications_linked": 1,
+        "draft_publication_linked": draft_publication_linked,
         "duplicate_update_rejected": duplicate_update_rejected,
         "wrong_owner_rejected": wrong_owner_rejected,
         "stale_version_rejected": stale_version_rejected,

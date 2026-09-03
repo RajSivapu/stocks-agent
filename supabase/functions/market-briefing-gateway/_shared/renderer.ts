@@ -2,6 +2,7 @@ import type {
   AlertCondition,
   AlertEvaluation,
   AlertRuleSnapshot,
+  AlertSourceSummary,
   EvidenceBlock,
   HoldingState,
   NotificationKind,
@@ -643,6 +644,7 @@ export interface RenderAlertV3Input {
   event_id: string;
   evaluation: AlertEvaluation;
   source_evaluation: PolicyEvaluation | null;
+  source_summary?: AlertSourceSummary | null;
   context: PolicyContext | null;
   mode?: "draft" | "event";
 }
@@ -727,7 +729,12 @@ function alertConditionText(condition: AlertCondition): string {
   return `event window ${condition.operator} ${escapeHtml(condition.left)}–${escapeHtml(condition.right!)}`;
 }
 
-function conditionLine(evaluation: AlertEvaluation): string {
+function conditionLine(evaluation: AlertEvaluation, mode: "draft" | "event"): string {
+  if (mode === "draft") {
+    return `Proposed conditions ${evaluation.condition_results.length}: ${
+      evaluation.condition_results.map((result) => alertConditionText(result.condition)).join("; ")
+    }`;
+  }
   const passed = evaluation.condition_results.filter((result) => result.passed === true).length;
   const details = evaluation.condition_results.map((result) => {
     const status = result.passed === true ? "✅" : result.passed === false ? "❌" : "⚪ Unavailable —";
@@ -736,30 +743,51 @@ function conditionLine(evaluation: AlertEvaluation): string {
   return `Conditions ${passed}/${evaluation.condition_results.length}: ${details.join("; ")}`;
 }
 
-function trustedAlertSource(input: RenderAlertV3Input): PolicyEvaluation | null {
+function sourceSummaryFromEvaluation(source: PolicyEvaluation): AlertSourceSummary {
+  return {
+    ticker: source.candidate.ticker,
+    confidence: source.candidate.confidence,
+    valid_until: source.candidate.valid_until,
+    invalidation_price: source.candidate.invalidation_price,
+    stop: source.candidate.stop,
+    target: source.candidate.target,
+    position_value_after: source.normalized.position_value_after,
+    total_investable_value: source.normalized.total_investable_value,
+    evidence: source.candidate.evidence.map((item) => ({ id: item.id, status: item.status })),
+    reasons: source.candidate.factors
+      .filter((factor) => factorHasVerifiedEvidence(source, factor.evidence_ids))
+      .map((factor) => factor.text),
+  };
+}
+
+function trustedAlertSource(input: RenderAlertV3Input): AlertSourceSummary | null {
+  if (input.source_summary) {
+    return input.source_summary.ticker === input.evaluation.rule.ticker
+      ? input.source_summary
+      : null;
+  }
   const source = input.source_evaluation;
   if (!source || source.status !== "approved" || source.candidate.ticker !== input.evaluation.rule.ticker ||
     !source.candidate.analyst.completed || !source.candidate.checker.completed ||
     source.candidate.checker.verdict !== "approve") return null;
-  return source;
+  return sourceSummaryFromEvaluation(source);
 }
 
-function alertNarratives(source: PolicyEvaluation | null): string[] {
+function alertNarratives(source: AlertSourceSummary | null): string[] {
   if (!source) return [];
-  return source.candidate.factors
-    .filter((factor) => factorHasVerifiedEvidence(source, factor.evidence_ids))
-    .map((factor) => compactText(factor.text, 220))
+  return source.reasons
+    .map((text) => compactText(text, 220))
     .filter((text) => text.length > 0 && !FORBIDDEN_DECISION_TEXT.test(text))
     .slice(0, 3);
 }
 
 function alertEvidenceCoverage(
   evaluation: AlertEvaluation,
-  source: PolicyEvaluation | null,
+  source: AlertSourceSummary | null,
 ): string {
   const ids = new Set(evaluation.condition_results.flatMap((result) => result.evidence_ids));
   if (ids.size === 0 || !source) return "0/0";
-  const evidence = new Map(source.candidate.evidence.map((item) => [item.id, item.status]));
+  const evidence = new Map(source.evidence.map((item) => [item.id, item.status]));
   const available = [...ids].filter((id) => {
     const status = evidence.get(id);
     return status === "fresh" || status === "fallback";
@@ -769,7 +797,7 @@ function alertEvidenceCoverage(
 
 function alertRiskLine(
   rule: AlertRuleSnapshot,
-  source: PolicyEvaluation | null,
+  source: AlertSourceSummary | null,
   context: PolicyContext | null,
 ): string {
   const holding = context?.holdings.find((item) => item.ticker === rule.ticker) ?? null;
@@ -779,8 +807,8 @@ function alertRiskLine(
   if (hasRecordedStop) {
     const stop = holding?.stop ?? rule.conditions.find((item) => item.kind === "recorded_stop")?.left;
     if (stop) parts.push(`recorded stop ${formatMoney(stop)}`);
-  } else if (source?.candidate.invalidation_price) {
-    parts.push(`invalidation below ${formatMoney(source.candidate.invalidation_price)}`);
+  } else if (source?.invalidation_price) {
+    parts.push(`invalidation below ${formatMoney(source.invalidation_price)}`);
   }
   if (hasRecordedTarget) {
     const target = holding?.target ?? rule.conditions.find((item) => item.kind === "recorded_target")?.left;
@@ -788,25 +816,25 @@ function alertRiskLine(
   } else if (hasRecordedStop && holding?.target) {
     parts.push(`recorded target ${formatMoney(holding.target)}`);
   }
-  if (!hasRecordedStop && source?.candidate.stop) {
-    parts.push(`policy-approved stop ${formatMoney(source.candidate.stop)}`);
+  if (!hasRecordedStop && source?.stop) {
+    parts.push(`policy-approved stop ${formatMoney(source.stop)}`);
   }
-  if (!hasRecordedTarget && !hasRecordedStop && source?.candidate.target) {
-    parts.push(`target ${formatMoney(source.candidate.target)}`);
+  if (!hasRecordedTarget && !hasRecordedStop && source?.target) {
+    parts.push(`target ${formatMoney(source.target)}`);
   }
   return parts.length > 0
     ? `Risk: ${parts.join(" • ")}`
     : "Risk: no recorded or policy-approved stop/target was available.";
 }
 
-function alertExposure(source: PolicyEvaluation | null): string {
-  if (!source || source.normalized.position_value_after === null ||
-    source.normalized.total_investable_value === null) {
+function alertExposure(source: AlertSourceSummary | null): string {
+  if (!source || source.position_value_after === null ||
+    source.total_investable_value === null) {
     return "Portfolio exposure unavailable from this alert receipt.";
   }
   try {
-    const position = parseFixed(source.normalized.position_value_after, 6);
-    const total = parseFixed(source.normalized.total_investable_value, 6);
+    const position = parseFixed(source.position_value_after, 6);
+    const total = parseFixed(source.total_investable_value, 6);
     if (total <= 0n) throw new Error("invalid total");
     return `Portfolio exposure ${formatTenthsPercent(roundedRatioTenths(position, total))}`;
   } catch {
@@ -858,11 +886,13 @@ export async function renderAlertV3(input: RenderAlertV3Input): Promise<Rendered
       : unsafe
       ? `Evaluated ${centralTime(input.evaluation.evaluated_at)} • latest quote ${centralTime(input.evaluation.observed_at)} • age ${ageSeconds}s • ${input.evaluation.market_session.toUpperCase()}`
       : `Triggered ${centralTime(input.evaluation.evaluated_at)} • quote ${centralTime(input.evaluation.observed_at)} • age ${ageSeconds}s • ${input.evaluation.market_session.toUpperCase()}`
+    : mode === "draft"
+    ? `Proposed at ${centralTime(input.evaluation.evaluated_at)} • source quote timestamp unavailable • ${input.evaluation.market_session.toUpperCase()}`
     : `Evaluated ${centralTime(input.evaluation.evaluated_at)} • quote unavailable • ${input.evaluation.market_session.toUpperCase()}`;
-  const validThrough = source?.candidate.valid_until
-    ? `valid through ${escapeHtml(source.candidate.valid_until)}`
+  const validThrough = source?.valid_until
+    ? `valid through ${escapeHtml(source.valid_until)}`
     : `expires ${escapeHtml(alertExpiry(rule.valid_until))}`;
-  const confidence = source ? source.candidate.confidence.toUpperCase() : "NOT SCORED";
+  const confidence = source ? source.confidence.toUpperCase() : "NOT SCORED";
   const receipt = input.event_id.replaceAll("-", "").slice(0, 4).toUpperCase();
   const why = narratives[0] ?? (unsafe
     ? "No safe conclusion was produced because required evidence was unavailable."
@@ -876,7 +906,7 @@ export async function renderAlertV3(input: RenderAlertV3Input): Promise<Rendered
     triggerSummary(rule, input.evaluation.status, mode),
     "",
     timing,
-    conditionLine(input.evaluation),
+    conditionLine(input.evaluation, mode),
     "",
     `${explanationLabel}: ${escapeHtml(why)}`,
     ...evidenceLines,

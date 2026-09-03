@@ -1,4 +1,5 @@
 import type {
+  AlertRuleSnapshot,
   GatewayEnvelope,
   GatewayReadContext,
   PolicyConfig,
@@ -6,6 +7,8 @@ import type {
 } from "./contracts.ts";
 import { createGatewayHandler } from "./handler.ts";
 import type {
+  AlertEventReceipt,
+  AlertWork,
   ArtifactReceipt,
   GatewayRepository,
   GatewayRequestClaim,
@@ -18,6 +21,7 @@ import type {
 import { GatewayRepositoryError } from "./repository.ts";
 import { TelegramDeliveryError } from "./telegram.ts";
 import type { DueDecision, OutcomeGrade } from "./outcomes.ts";
+import type { IntradayQuoteEvidence } from "./market-data.ts";
 
 function assert(value: boolean, message: string): void {
   if (!value) throw new Error(message);
@@ -127,12 +131,52 @@ function candidate(phase = "intraday", notification = "entry_trigger") {
   };
 }
 
+function alertRule(state: AlertRuleSnapshot["state"] = "active"): AlertRuleSnapshot {
+  return {
+    rule_id: "7f7f70bf-5cec-4f1e-9de8-ec8823d99fc7",
+    version: 1,
+    state,
+    ticker: "CENX",
+    profile: "balanced",
+    severity: "review",
+    session: "regular",
+    confirmation: "two_quote",
+    conditions: [{ kind: "price_zone", operator: "inside", left: "45", right: "48", timeframe: "quote" }],
+    cooldown_seconds: 14_400,
+    fire_limit: 3,
+    valid_until: "2026-09-09T21:00:00.000Z",
+    owner_note: "Review only",
+  };
+}
+
+function alertWork(options: { rule?: boolean; draft?: boolean } = { rule: true }): AlertWork {
+  const source_summary = {
+    ticker: "CENX",
+    confidence: "medium" as const,
+    valid_until: "2026-09-09",
+    invalidation_price: "42",
+    stop: "42",
+    target: "58",
+    position_value_after: null,
+    total_investable_value: null,
+    evidence: [],
+    reasons: [],
+  };
+  return {
+    rules: options.rule ? [{ rule: alertRule(), recent_events: [], source_summary }] : [],
+    drafts: options.draft ? [{ rule: alertRule("draft"), recent_events: [], source_summary }] : [],
+  };
+}
+
 class FakeRepository implements GatewayRepository {
   mutationCalls = 0;
   startCalls = 0;
   recordCalls = 0;
   applyCalls = 0;
   createDraftCalls = 0;
+  readAlertWorkCalls = 0;
+  recordAlertEventCalls = 0;
+  createAlertPublicationCalls = 0;
   finishPublicationCalls: Array<{ status: string; ids: number[] }> = [];
   finishRunCalls = 0;
   readCalls = 0;
@@ -144,6 +188,8 @@ class FakeRepository implements GatewayRepository {
   lastArtifacts: PersistableArtifactMutationBatch | null = null;
   lastBundle: PersistedBundle | null = null;
   lastDrafts: unknown[] = [];
+  alertWorkValue: AlertWork = { rules: [], drafts: [] };
+  lastAlertEvents: unknown[] = [];
   due: DueDecision[] = [];
   graded: OutcomeGrade[] = [];
   dueLimit: number | null = null;
@@ -186,6 +232,32 @@ class FakeRepository implements GatewayRepository {
     return Promise.resolve({
       created_count: drafts.length,
       draft_ids: drafts.map((item) => (item as { id: string }).id),
+    });
+  }
+  readAlertWork(): Promise<AlertWork> {
+    this.readAlertWorkCalls += 1;
+    return Promise.resolve(structuredClone(this.alertWorkValue));
+  }
+  recordAlertEvaluations(_requestId: string, events: unknown[]): Promise<AlertEventReceipt> {
+    this.events.push("persist-alert-events");
+    this.mutationCalls += 1;
+    this.recordAlertEventCalls += 1;
+    this.lastAlertEvents = structuredClone(events);
+    return Promise.resolve({
+      event_count: events.length,
+      event_ids: events.map((event) => (event as { id: string }).id),
+    });
+  }
+  createAlertPublication(requestId: string): Promise<PublicationReceipt> {
+    this.events.push("persist-alert-publication");
+    this.mutationCalls += 1;
+    this.createAlertPublicationCalls += 1;
+    return Promise.resolve({
+      id: "00000000-0000-4000-8000-000000000050",
+      idempotency_key: requestId,
+      status: "ready",
+      telegram_message_ids: [],
+      lease_token: null,
     });
   }
   recordArtifacts(_request: string, _run: string, _lease: string, payload: PersistableArtifactMutationBatch): Promise<ArtifactReceipt> {
@@ -235,6 +307,8 @@ function makeHandler(repository = new FakeRepository(), overrides: Record<string
   let ids = 100;
   const sent: string[][] = [];
   const fetched: string[] = [];
+  const alertFetches: string[] = [];
+  const sentAlerts: unknown[] = [];
   const handler = createGatewayHandler({
     repository,
     marketAgentSecret: SECRET,
@@ -246,14 +320,31 @@ function makeHandler(repository = new FakeRepository(), overrides: Record<string
       fetched.push(ticker);
       return Promise.resolve(verifiedQuote(ticker));
     },
+    fetchAlertEvidence: (ticker: string): Promise<IntradayQuoteEvidence> => {
+      alertFetches.push(ticker);
+      return Promise.resolve({
+        ticker,
+        market_session: "regular",
+        source: "yahoo-chart",
+        points: [
+          { value: "46", comparison_value: null, observed_at: "2026-09-02T16:54:00.000Z", bar_complete: true },
+          { value: "47.02", comparison_value: null, observed_at: "2026-09-02T16:55:00.000Z", bar_complete: true },
+        ],
+      });
+    },
     sendTelegram: (parts: string[]) => {
       repository.events.push("send");
       sent.push(parts);
       return Promise.resolve([77]);
     },
+    sendTelegramAlert: (alert: unknown) => {
+      repository.events.push("send-alert");
+      sentAlerts.push(alert);
+      return Promise.resolve({ status: "accepted_by_telegram", message_id: 78, accepted_at: NOW.toISOString() });
+    },
     ...overrides,
   });
-  return { handler, repository, sent, fetched };
+  return { handler, repository, sent, fetched, alertFetches, sentAlerts };
 }
 
 function nextRequestId(): string {
@@ -268,7 +359,7 @@ function request(operation: GatewayEnvelope["operation"], payload: unknown, opti
       schema_version: 1,
       operation,
       request_id: options.requestId ?? nextRequestId(),
-      run_id: options.runId === undefined ? (operation === "start_run" ? null : RUN_ID) : options.runId,
+      run_id: options.runId === undefined ? (operation === "start_run" || operation === "evaluate_alert_rules" ? null : RUN_ID) : options.runId,
       dry_run: options.dry ?? false,
       payload,
     }),
@@ -347,6 +438,135 @@ Deno.test("shadow alert drafts are previewed without writes and persisted only a
     "draft fingerprint absent");
   assertEquals(stored.source_evaluation_id,
     liveRepository.lastBundle!.evaluations[0].evaluation_id);
+});
+
+Deno.test("alert evaluation dry-run uses server evidence and remains write-free and send-free", async () => {
+  const repository = new FakeRepository();
+  repository.policyValue.alerts_v3 = {
+    enabled: false, shadow: true, profile: "balanced", draft_ttl_hours: 24, drafts_per_hour: 5,
+  };
+  repository.alertWorkValue = alertWork({ rule: true, draft: true });
+  const setup = makeHandler(repository);
+  const result = await json(await setup.handler(request("evaluate_alert_rules", {}, { dry: true })));
+  assertEquals(result.evaluated_rules, 1);
+  assertEquals(result.would_write_events, 1);
+  assertEquals(result.would_publish, 0);
+  assertEquals(result.shadow_publish_candidates, 1);
+  assertEquals((result.draft_previews as unknown[]).length, 1);
+  assertEquals((result.alert_previews as unknown[]).length, 1);
+  assertEquals(repository.mutationCalls, 0);
+  assertEquals(setup.alertFetches, ["CENX"]);
+  assertEquals(setup.sentAlerts, []);
+
+  const injected = await setup.handler(request("evaluate_alert_rules", { quote: { price: "1" } }, { dry: true }));
+  assertEquals(injected.status, 400);
+  assertEquals(setup.alertFetches, ["CENX"]);
+});
+
+Deno.test("enabled alert evaluation persists receipts before one Telegram alert", async () => {
+  const repository = new FakeRepository();
+  repository.policyValue.alerts_v3 = {
+    enabled: true, shadow: false, profile: "balanced", draft_ttl_hours: 24, drafts_per_hour: 5,
+  };
+  repository.alertWorkValue = alertWork({ rule: true, draft: false });
+  const setup = makeHandler(repository);
+  const result = await json(await setup.handler(request("evaluate_alert_rules", {})));
+  assertEquals(result.alert_events_recorded, 1);
+  assertEquals(result.publication_status, "delivered");
+  assertEquals(result.telegram_message_ids, [78]);
+  assertEquals(repository.events, ["persist-alert-events", "persist-alert-publication", "claim-publication", "send-alert"]);
+  assertEquals(setup.sentAlerts.length, 1);
+});
+
+Deno.test("alert evaluation records no-trigger, unsafe, shadow, and cooldown outcomes narrowly", async () => {
+  const noRules = new FakeRepository();
+  noRules.policyValue.alerts_v3 = {
+    enabled: false, shadow: true, profile: "balanced", draft_ttl_hours: 24, drafts_per_hour: 5,
+  };
+  const quiet = makeHandler(noRules);
+  const quietResult = await json(await quiet.handler(request("evaluate_alert_rules", {}, { dry: true })));
+  assertEquals(quietResult.evaluated_rules, 0);
+  assertEquals(quietResult.would_write_events, 0);
+  assertEquals(quietResult.would_publish, 0);
+  assertEquals(quiet.alertFetches, []);
+
+  const unsafeRepository = new FakeRepository();
+  unsafeRepository.policyValue.alerts_v3 = structuredClone(noRules.policyValue.alerts_v3);
+  const unsupported = alertRule();
+  unsupported.confirmation = "bar_close";
+  unsupported.conditions = [{ kind: "volume_multiple", operator: "above", left: "1.5", right: null, timeframe: "1d" }];
+  unsafeRepository.alertWorkValue = {
+    rules: [{ rule: unsupported, recent_events: [], source_summary: null }],
+    drafts: [],
+  };
+  const unsafe = makeHandler(unsafeRepository);
+  const unsafeResult = await json(await unsafe.handler(request("evaluate_alert_rules", {}, { dry: true })));
+  assertEquals(unsafeResult.unsafe_evaluations, 1);
+  assertEquals(unsafeResult.would_write_events, 1);
+  assertEquals(unsafeResult.shadow_publish_candidates, 0);
+  assertEquals(unsafe.sentAlerts, []);
+
+  const shadowRepository = new FakeRepository();
+  shadowRepository.policyValue.alerts_v3 = structuredClone(noRules.policyValue.alerts_v3);
+  shadowRepository.alertWorkValue = alertWork({ rule: true, draft: false });
+  const shadow = makeHandler(shadowRepository);
+  const shadowResult = await json(await shadow.handler(request("evaluate_alert_rules", {})));
+  assertEquals(shadowResult.status, "shadow");
+  assertEquals(shadowResult.alert_events_recorded, 0);
+  assertEquals(shadowRepository.recordAlertEventCalls, 0);
+  assertEquals(shadowRepository.createAlertPublicationCalls, 0);
+  assertEquals(shadow.sentAlerts, []);
+
+  const cooldownRepository = new FakeRepository();
+  cooldownRepository.policyValue.alerts_v3 = structuredClone(noRules.policyValue.alerts_v3);
+  cooldownRepository.alertWorkValue = alertWork({ rule: true, draft: false });
+  cooldownRepository.alertWorkValue.rules[0].recent_events = [{
+    fingerprint: "a".repeat(64),
+    status: "triggered",
+    evaluated_at: "2026-09-02T16:59:00.000Z",
+    severity: "review",
+  }];
+  const cooldown = makeHandler(cooldownRepository);
+  const cooldownResult = await json(await cooldown.handler(request("evaluate_alert_rules", {}, { dry: true })));
+  assertEquals(cooldownResult.would_write_events, 0);
+  assertEquals(cooldownResult.shadow_publish_candidates, 0);
+});
+
+Deno.test("enabled draft proposal is persisted before Telegram and remains monitoring-only", async () => {
+  const repository = new FakeRepository();
+  repository.policyValue.alerts_v3 = {
+    enabled: true, shadow: false, profile: "balanced", draft_ttl_hours: 24, drafts_per_hour: 5,
+  };
+  repository.alertWorkValue = alertWork({ rule: false, draft: true });
+  const setup = makeHandler(repository);
+  const result = await json(await setup.handler(request("evaluate_alert_rules", {})));
+  assertEquals(result.alert_events_recorded, 0);
+  assertEquals(result.publication_status, "delivered");
+  assertEquals(repository.events, ["persist-alert-publication", "claim-publication", "send-alert"]);
+  const sent = setup.sentAlerts[0] as { body: string; reply_markup: { inline_keyboard: Array<Array<{ text: string }>> } };
+  assert(sent.body.includes("policy-approved stop $42.00 • target $58.00"), "draft levels absent");
+  assert(sent.body.includes("inert until you arm it"), "draft authority boundary absent");
+  assert(sent.body.includes("Proposed at"), "draft without a quote used event timing language");
+  assertEquals(sent.reply_markup.inline_keyboard[0].map((button) => button.text), ["Arm", "Dismiss"]);
+});
+
+Deno.test("multiple simultaneous alert triggers fail closed before publication", async () => {
+  const repository = new FakeRepository();
+  repository.policyValue.alerts_v3 = {
+    enabled: true, shadow: false, profile: "balanced", draft_ttl_hours: 24, drafts_per_hour: 5,
+  };
+  const first = alertWork({ rule: true, draft: false }).rules[0];
+  const second = structuredClone(first);
+  second.rule.rule_id = "8f7f70bf-5cec-4f1e-9de8-ec8823d99fc7";
+  second.rule.ticker = "XYZ";
+  second.source_summary!.ticker = "XYZ";
+  repository.alertWorkValue = { rules: [first, second], drafts: [] };
+  const setup = makeHandler(repository);
+  const result = await json(await setup.handler(request("evaluate_alert_rules", {})));
+  assertEquals(result.alert_events_recorded, 2);
+  assertEquals(result.suppression_reason, "MULTIPLE_ALERTS_REQUIRE_COALESCING");
+  assertEquals(repository.createAlertPublicationCalls, 0);
+  assertEquals(setup.sentAlerts, []);
 });
 
 Deno.test("live start_run is idempotent", async () => {

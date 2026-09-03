@@ -111,6 +111,16 @@ Deno.test("gateway envelope accepts one complete decision bundle", () => {
   );
 });
 
+Deno.test("gateway envelope accepts the bounded standalone alert evaluation operation", () => {
+  const envelope = {
+    ...validEnvelope(),
+    operation: "evaluate_alert_rules",
+    run_id: null,
+    payload: {},
+  };
+  assertEquals(parseGatewayEnvelope(envelope).operation, "evaluate_alert_rules");
+});
+
 Deno.test("gateway envelope rejects unknown and extra authority fields", () => {
   const unknownOperation = validEnvelope();
   unknownOperation.operation = "send_telegram";

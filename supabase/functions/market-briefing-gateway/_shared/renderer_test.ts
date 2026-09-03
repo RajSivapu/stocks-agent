@@ -688,6 +688,8 @@ Deno.test("alert v3 renders inert drafts and unsafe evaluations without inventin
   assert(draft.body.includes("inert until you arm it"), "draft lifecycle boundary absent");
   assert(draft.body.includes("Proposed from quote"), "draft source timing absent");
   assert(!draft.body.includes("Triggered"), "inert draft was called triggered");
+  assert(draft.body.includes("Proposed conditions 1: inside $41.80–$42.30"), "draft condition wording absent");
+  assert(!draft.body.includes("Conditions 1/1"), "draft claimed an evaluated pass count");
   assertEquals(draft.reply_markup.inline_keyboard[0].map((button) => button.text), ["Arm", "Dismiss"]);
 
   const unsafeRule = alertRule({ severity: "system" });

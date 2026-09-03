@@ -20,6 +20,10 @@ try:
     results["gateway"]="ok"
 except Exception as e: results["gateway"]=f"FAIL {type(e).__name__}"
 try:
+    gateway.call("evaluate_alert_rules", {}, dry_run=True)
+    results["alerts"]="ok"
+except Exception as e: results["alerts"]=f"FAIL {type(e).__name__}"
+try:
     k=config.optional_secret("finnhub_api_key")
     headers=dict(UA)
     if k: headers["X-Finnhub-Token"]=k

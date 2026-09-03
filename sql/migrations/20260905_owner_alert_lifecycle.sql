@@ -20,6 +20,7 @@ CREATE TABLE IF NOT EXISTS public.market_alert_drafts (
   state TEXT NOT NULL DEFAULT 'draft' CHECK (state IN ('draft','armed','dismissed','expired')),
   owner_chat_id BIGINT,
   owner_user_id BIGINT,
+  publication_id UUID REFERENCES public.market_publications(id) ON DELETE RESTRICT,
   expires_at TIMESTAMPTZ NOT NULL,
   created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
   updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
@@ -27,6 +28,8 @@ CREATE TABLE IF NOT EXISTS public.market_alert_drafts (
 );
 CREATE INDEX IF NOT EXISTS idx_market_alert_drafts_state_expiry
   ON public.market_alert_drafts(state, expires_at);
+ALTER TABLE public.market_alert_drafts ADD COLUMN IF NOT EXISTS publication_id UUID
+  REFERENCES public.market_publications(id) ON DELETE RESTRICT;
 
 CREATE TABLE IF NOT EXISTS public.market_alert_rules (
   id UUID PRIMARY KEY,
@@ -413,6 +416,64 @@ BEGIN
 END;
 $$;
 
+CREATE OR REPLACE FUNCTION public.create_market_alert_publication(
+  p_request_id UUID, p_publication_id UUID, p_market_date DATE, p_kind TEXT,
+  p_rendered_body TEXT, p_rendered_hash TEXT, p_event_ids UUID[], p_draft_id UUID
+) RETURNS JSONB LANGUAGE plpgsql SECURITY DEFINER
+SET search_path = pg_catalog AS $$
+DECLARE
+  v_request public.market_gateway_requests%ROWTYPE;
+  v_expected INT := COALESCE(array_length(p_event_ids,1),0);
+  v_rows INT;
+BEGIN
+  SELECT * INTO v_request FROM public.market_gateway_requests
+  WHERE request_id=p_request_id FOR UPDATE;
+  IF NOT FOUND OR v_request.operation<>'evaluate_alert_rules' OR v_request.status<>'claimed' THEN
+    RAISE EXCEPTION 'alert publication request unavailable' USING ERRCODE = '40001';
+  END IF;
+  IF p_publication_id IS NULL OR p_market_date IS NULL
+     OR p_kind NOT IN ('new_idea','entry_trigger','stop_near','stop_breach',
+       'target_near','target_hit','thesis_break','data_warning')
+     OR p_rendered_body IS NULL OR char_length(p_rendered_body) NOT BETWEEN 1 AND 3500
+     OR p_rendered_hash !~ '^[0-9a-f]{64}$'
+     OR ((v_expected>0)::int + (p_draft_id IS NOT NULL)::int) <> 1
+     OR v_expected>20 THEN
+    RAISE EXCEPTION 'alert publication target mismatch' USING ERRCODE = '22023';
+  END IF;
+  IF v_expected>0 THEN
+    SELECT count(*) INTO v_rows FROM public.market_alert_events
+    WHERE id=ANY(p_event_ids) AND request_id=p_request_id
+      AND status='triggered' AND publication_id IS NULL;
+    IF v_rows<>v_expected THEN
+      RAISE EXCEPTION 'alert event publication mismatch' USING ERRCODE = '22023';
+    END IF;
+  ELSE
+    PERFORM 1 FROM public.market_alert_drafts
+    WHERE id=p_draft_id AND state='draft' AND expires_at>now() AND publication_id IS NULL
+    FOR UPDATE;
+    IF NOT FOUND THEN
+      RAISE EXCEPTION 'alert draft publication mismatch' USING ERRCODE = '22023';
+    END IF;
+  END IF;
+  INSERT INTO public.market_publications(
+    id,idempotency_key,run_id,market_date,phase,kind,
+    template_version,rendered_body,rendered_hash,status
+  ) VALUES (
+    p_publication_id,p_request_id,NULL,p_market_date,'intraday',p_kind,
+    3,p_rendered_body,p_rendered_hash,'ready'
+  );
+  IF v_expected>0 THEN
+    UPDATE public.market_alert_events SET publication_id=p_publication_id
+    WHERE id=ANY(p_event_ids);
+  ELSE
+    UPDATE public.market_alert_drafts SET publication_id=p_publication_id,updated_at=now()
+    WHERE id=p_draft_id;
+  END IF;
+  RETURN jsonb_build_object('publication_id',p_publication_id,
+    'linked_event_count',v_expected,'linked_draft_id',p_draft_id);
+END;
+$$;
+
 CREATE OR REPLACE FUNCTION public.link_market_alert_publication(
   p_event_ids UUID[], p_publication_id UUID
 ) RETURNS JSONB LANGUAGE plpgsql SECURITY DEFINER
@@ -439,8 +500,10 @@ $$;
 REVOKE ALL ON FUNCTION public.create_market_alert_drafts(UUID, JSONB) FROM PUBLIC, anon, authenticated;
 REVOKE ALL ON FUNCTION public.apply_market_alert_action(UUID, TEXT, BIGINT, BIGINT, BIGINT, INT, TIMESTAMPTZ) FROM PUBLIC, anon, authenticated;
 REVOKE ALL ON FUNCTION public.record_market_alert_evaluations(UUID, JSONB) FROM PUBLIC, anon, authenticated;
+REVOKE ALL ON FUNCTION public.create_market_alert_publication(UUID, UUID, DATE, TEXT, TEXT, TEXT, UUID[], UUID) FROM PUBLIC, anon, authenticated;
 REVOKE ALL ON FUNCTION public.link_market_alert_publication(UUID[], UUID) FROM PUBLIC, anon, authenticated;
 GRANT EXECUTE ON FUNCTION public.create_market_alert_drafts(UUID, JSONB) TO service_role;
 GRANT EXECUTE ON FUNCTION public.apply_market_alert_action(UUID, TEXT, BIGINT, BIGINT, BIGINT, INT, TIMESTAMPTZ) TO service_role;
 GRANT EXECUTE ON FUNCTION public.record_market_alert_evaluations(UUID, JSONB) TO service_role;
+GRANT EXECUTE ON FUNCTION public.create_market_alert_publication(UUID, UUID, DATE, TEXT, TEXT, TEXT, UUID[], UUID) TO service_role;
 GRANT EXECUTE ON FUNCTION public.link_market_alert_publication(UUID[], UUID) TO service_role;

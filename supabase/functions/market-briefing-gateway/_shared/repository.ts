@@ -1,6 +1,10 @@
 import type {
   Action,
+  AlertConditionResult,
+  AlertRecentEvent,
   AlertRuleSnapshot,
+  AlertSession,
+  AlertSourceSummary,
   ArtifactMutation,
   GatewayEnvelope,
   GatewayReadContext,
@@ -8,6 +12,7 @@ import type {
   Phase,
   PolicyConfig,
 } from "./contracts.ts";
+import { parseAlertDraft } from "./alerts.ts";
 import type { PolicyEvaluation } from "./policy.ts";
 import type { DueDecision, OutcomeGrade } from "./outcomes.ts";
 import { formatFixed, parseFixed } from "./fixed-point.ts";
@@ -65,6 +70,46 @@ export interface AlertDraftReceipt {
   draft_ids: string[];
 }
 
+export interface AlertWorkItem {
+  rule: AlertRuleSnapshot;
+  recent_events: AlertRecentEvent[];
+  source_summary: AlertSourceSummary | null;
+}
+
+export interface AlertWork {
+  rules: AlertWorkItem[];
+  drafts: AlertWorkItem[];
+}
+
+export interface PersistableAlertEvent {
+  id: string;
+  rule_id: string;
+  rule_version: number;
+  fingerprint: string;
+  status: "triggered" | "unsafe_to_evaluate";
+  reason_codes: string[];
+  observed_at: string | null;
+  evaluated_at: string;
+  market_session: Exclude<AlertSession, "all">;
+  condition_results: AlertConditionResult[];
+  evidence_ids: string[];
+}
+
+export interface AlertEventReceipt {
+  event_count: number;
+  event_ids: string[];
+}
+
+export interface PersistableAlertPublication {
+  id: string;
+  market_date: string;
+  kind: NotificationKind;
+  rendered_body: string;
+  rendered_hash: string;
+  event_ids: string[];
+  draft_id: string | null;
+}
+
 export type PersistableArtifactMutation =
   | Exclude<ArtifactMutation, { kind: "paper_watch_create" | "paper_watch_close" }>
   | (Extract<ArtifactMutation, { kind: "paper_watch_create" }> & {
@@ -110,6 +155,9 @@ export interface GatewayRepository {
   ): Promise<ArtifactReceipt>;
   activePolicy(): Promise<PolicyConfig>;
   createAlertDrafts(requestId: string, drafts: PersistableAlertDraft[]): Promise<AlertDraftReceipt>;
+  readAlertWork(limit: number): Promise<AlertWork>;
+  recordAlertEvaluations(requestId: string, events: PersistableAlertEvent[]): Promise<AlertEventReceipt>;
+  createAlertPublication(requestId: string, publication: PersistableAlertPublication): Promise<PublicationReceipt>;
   applyDecisionBundle(input: PersistedBundle): Promise<PublicationReceipt>;
   claimPublication(idempotencyKey: string): Promise<PublicationClaim>;
   finishPublication(
@@ -143,6 +191,7 @@ interface QueryBuilder extends PromiseLike<DbResult> {
   select(columns: string): QueryBuilder;
   eq(column: string, value: unknown): QueryBuilder;
   gte(column: string, value: unknown): QueryBuilder;
+  in(column: string, values: unknown[]): QueryBuilder;
   order(column: string, options?: { ascending?: boolean }): QueryBuilder;
   limit(count: number): QueryBuilder;
   update(values: Record<string, unknown>): QueryBuilder;
@@ -201,6 +250,41 @@ function signedMicros(value: string): bigint {
 function boole(value: unknown): boolean {
   if (typeof value !== "boolean") throw new GatewayRepositoryError("INVALID_PERSISTED_DATA");
   return value;
+}
+
+function alertSourceSummary(row: Record<string, unknown>): AlertSourceSummary | null {
+  const confidence = nullableText(row.confidence, 10);
+  if (confidence !== "low" && confidence !== "medium" && confidence !== "high") return null;
+  return {
+    ticker: text(row.ticker, 15),
+    confidence,
+    valid_until: nullableText(row.valid_until, 10),
+    invalidation_price: nullableDecimal(row.invalidation_price),
+    stop: nullableDecimal(row.stop),
+    target: nullableDecimal(row.target),
+    position_value_after: null,
+    total_investable_value: null,
+    evidence: [],
+    reasons: [],
+  };
+}
+
+function alertRuleFromRow(row: Record<string, unknown>): AlertRuleSnapshot {
+  return parseAlertDraft({
+    rule_id: text(row.id, 36),
+    version: integer(row.current_version),
+    state: text(row.state, 20),
+    ticker: text(row.ticker, 15),
+    profile: text(row.profile, 20),
+    severity: text(row.severity, 20),
+    session: text(row.session, 20),
+    confirmation: text(row.confirmation, 20),
+    conditions: row.conditions,
+    cooldown_seconds: integer(row.cooldown_seconds),
+    fire_limit: integer(row.fire_limit),
+    valid_until: text(row.valid_until, 40),
+    owner_note: text(row.owner_note, 500),
+  });
 }
 
 function ownerDate(now: Date): string {
@@ -327,6 +411,103 @@ export function createSupabaseGatewayRepository(
         created_count: integer(row.created_count),
         draft_ids: Array.isArray(row.draft_ids) ? row.draft_ids.map((id) => text(id, 36)) : [],
       };
+    },
+
+    async readAlertWork(limit) {
+      if (!Number.isSafeInteger(limit) || limit < 1 || limit > 20) {
+        throw new GatewayRepositoryError("CONTEXT_TOO_LARGE");
+      }
+      const current = now();
+      const [ruleResult, pendingDraftResult] = await Promise.all([
+        client.from("market_alert_rules")
+          .select("id,source_draft_id,current_version,state,ticker,profile,severity,session,confirmation,conditions,cooldown_seconds,fire_limit,valid_until,owner_note")
+          .eq("state", "active").gte("valid_until", current.toISOString())
+          .order("updated_at", { ascending: true }).limit(limit + 1),
+        client.from("market_alert_drafts")
+          .select("id,source_evaluation_id,rule_snapshot,state,expires_at,publication_id")
+          .eq("state", "draft").gte("expires_at", current.toISOString())
+          .order("created_at", { ascending: true }).limit(limit + 1),
+      ]);
+      const ruleRows = rows(ruleResult, "CONTEXT_TOO_LARGE");
+      const pendingDrafts = rows(pendingDraftResult, "CONTEXT_TOO_LARGE")
+        .filter((row) => row.publication_id === null || row.publication_id === undefined);
+      if (ruleRows.length > limit || pendingDrafts.length > limit) {
+        throw new GatewayRepositoryError("CONTEXT_TOO_LARGE");
+      }
+      const ruleDraftIds = ruleRows.map((row) => text(row.source_draft_id, 36));
+      const sourceDrafts = ruleDraftIds.length === 0
+        ? []
+        : rows(await client.from("market_alert_drafts")
+          .select("id,source_evaluation_id,rule_snapshot,state,expires_at,publication_id")
+          .in("id", ruleDraftIds).limit(limit), "CONTEXT_TOO_LARGE");
+      const allDrafts = new Map<string, Record<string, unknown>>();
+      for (const row of [...sourceDrafts, ...pendingDrafts]) allDrafts.set(text(row.id, 36), row);
+      const evaluationIds = [...new Set([...allDrafts.values()].map((row) => text(row.source_evaluation_id, 36)))];
+      const suggestionRows = evaluationIds.length === 0
+        ? []
+        : rows(await client.from("suggestions")
+          .select("evaluation_id,ticker,confidence,valid_until,invalidation_price,stop,target")
+          .in("evaluation_id", evaluationIds).order("date", { ascending: false })
+          .limit(evaluationIds.length + 1), "CONTEXT_TOO_LARGE");
+      if (suggestionRows.length > evaluationIds.length) throw new GatewayRepositoryError("CONTEXT_TOO_LARGE");
+      const summaries = new Map<string, AlertSourceSummary>();
+      for (const row of suggestionRows) {
+        const summary = alertSourceSummary(row);
+        if (summary && typeof row.evaluation_id === "string") summaries.set(row.evaluation_id, summary);
+      }
+      const ruleIds = ruleRows.map((row) => text(row.id, 36));
+      const eventRows = ruleIds.length === 0
+        ? []
+        : rows(await client.from("market_alert_events")
+          .select("rule_id,fingerprint,status,evaluated_at")
+          .in("rule_id", ruleIds)
+          .gte("evaluated_at", new Date(current.valueOf() - 7 * 24 * 60 * 60_000).toISOString())
+          .order("evaluated_at", { ascending: false }).limit(201), "CONTEXT_TOO_LARGE");
+      if (eventRows.length > 200) throw new GatewayRepositoryError("CONTEXT_TOO_LARGE");
+      const workItem = (alertRule: AlertRuleSnapshot, draft: Record<string, unknown>): AlertWorkItem => ({
+        rule: alertRule,
+        recent_events: eventRows.filter((event) => event.rule_id === alertRule.rule_id).map((event) => ({
+          fingerprint: text(event.fingerprint, 64),
+          status: text(event.status, 30) as AlertRecentEvent["status"],
+          evaluated_at: text(event.evaluated_at, 40),
+          severity: alertRule.severity,
+        })),
+        source_summary: summaries.get(text(draft.source_evaluation_id, 36)) ?? null,
+      });
+      return {
+        rules: ruleRows.map((row) => {
+          const draft = allDrafts.get(text(row.source_draft_id, 36));
+          if (!draft) throw new GatewayRepositoryError("INVALID_PERSISTED_DATA");
+          return workItem(alertRuleFromRow(row), draft);
+        }),
+        drafts: pendingDrafts.map((draft) => workItem(parseAlertDraft(draft.rule_snapshot), draft)),
+      };
+    },
+
+    async recordAlertEvaluations(requestId, events) {
+      if (events.length > 20) throw new GatewayRepositoryError("CONTEXT_TOO_LARGE");
+      const row = oneObject(await client.rpc("record_market_alert_evaluations", {
+        p_request_id: requestId,
+        p_evaluations: events,
+      }));
+      return {
+        event_count: integer(row.event_count),
+        event_ids: Array.isArray(row.event_ids) ? row.event_ids.map((id) => text(id, 36)) : [],
+      };
+    },
+
+    async createAlertPublication(requestId, input) {
+      const row = oneObject(await client.rpc("create_market_alert_publication", {
+        p_request_id: requestId,
+        p_publication_id: input.id,
+        p_market_date: input.market_date,
+        p_kind: input.kind,
+        p_rendered_body: input.rendered_body,
+        p_rendered_hash: input.rendered_hash,
+        p_event_ids: input.event_ids,
+        p_draft_id: input.draft_id,
+      }));
+      return await publication(text(row.publication_id, 36));
     },
 
     async readContext(_runId) {

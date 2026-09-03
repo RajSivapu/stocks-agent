@@ -2,28 +2,45 @@ import {
   parseArtifactMutationBatch,
   parseDecisionBundle,
   parseGatewayEnvelope,
+  type AlertConditionEvidence,
+  type AlertEvaluation,
+  type AlertRuleSnapshot,
   type ArtifactMutation,
   type GatewayEnvelope,
   type Phase,
   type VerifiedQuote,
 } from "./contracts.ts";
 import { isNyseHoliday } from "./market-calendar.ts";
-import { fetchAdjustedHistory, fetchVerifiedQuote, type AdjustedBar } from "./market-data.ts";
+import {
+  fetchAdjustedHistory,
+  fetchIntradayQuoteEvidence,
+  fetchVerifiedQuote,
+  type AdjustedBar,
+  type IntradayQuoteEvidence,
+} from "./market-data.ts";
 import { gradeDecision, type DueDecision } from "./outcomes.ts";
 import { evaluateCandidate, type PolicyEvaluation } from "./policy.ts";
 import { draftFromEvaluation } from "./policy.ts";
-import { alertRuleFingerprint } from "./alerts.ts";
-import { renderPublication } from "./renderer.ts";
+import { alertFingerprint, alertRuleFingerprint, evaluateAlertRule, shouldPublishAlert } from "./alerts.ts";
+import { renderAlertV3, renderPublication, type RenderedAlert } from "./renderer.ts";
 import {
   GatewayRepositoryError,
   type GatewayRepository,
   type PersistableArtifactMutation,
   type PersistableArtifactMutationBatch,
   type PersistableAlertDraft,
+  type PersistableAlertEvent,
+  type PersistableAlertPublication,
   type PersistedBundle,
   type PublicationReceipt,
 } from "./repository.ts";
-import { sendTelegramParts, TelegramDeliveryError } from "./telegram.ts";
+import {
+  sendTelegramAlert,
+  sendTelegramParts,
+  TelegramDeliveryError,
+  type TelegramAlertInput,
+  type TelegramAlertReceipt,
+} from "./telegram.ts";
 
 export interface GatewayDependencies {
   repository: GatewayRepository;
@@ -34,7 +51,13 @@ export interface GatewayDependencies {
   newId?: () => string;
   fetchQuote?: (ticker: string, now: Date) => Promise<VerifiedQuote>;
   fetchHistory?: (ticker: string) => Promise<AdjustedBar[]>;
+  fetchAlertEvidence?: (ticker: string, now: Date) => Promise<IntradayQuoteEvidence>;
   sendTelegram?: (parts: string[], chatId: string, token: string) => Promise<number[]>;
+  sendTelegramAlert?: (
+    alert: TelegramAlertInput,
+    chatId: string,
+    token: string,
+  ) => Promise<TelegramAlertReceipt>;
 }
 
 const MAX_BODY_BYTES = 262_144;
@@ -128,6 +151,18 @@ function parseGradePayload(value: unknown): { limit: number } {
   exactKeys(row, ["limit"]);
   if (typeof row.limit !== "number" || !Number.isSafeInteger(row.limit) ||
       row.limit < 1 || row.limit > 50) {
+    throw new GatewayHttpError(400, "INVALID_REQUEST");
+  }
+  return { limit: row.limit };
+}
+
+function parseAlertPayload(value: unknown): { limit: number } {
+  const row = objectValue(value);
+  if (Object.keys(row).some((key) => key !== "limit")) {
+    throw new GatewayHttpError(400, "INVALID_REQUEST");
+  }
+  if (row.limit === undefined) return { limit: 20 };
+  if (typeof row.limit !== "number" || !Number.isSafeInteger(row.limit) || row.limit < 1 || row.limit > 20) {
     throw new GatewayHttpError(400, "INVALID_REQUEST");
   }
   return { limit: row.limit };
@@ -240,7 +275,10 @@ export function createGatewayHandler(dependencies: GatewayDependencies) {
     newId: dependencies.newId ?? (() => crypto.randomUUID()),
     fetchQuote: dependencies.fetchQuote ?? ((ticker: string, now: Date) => fetchVerifiedQuote(ticker, fetch, now)),
     fetchHistory: dependencies.fetchHistory ?? ((ticker: string) => fetchAdjustedHistory(ticker, "1y", fetch)),
+    fetchAlertEvidence: dependencies.fetchAlertEvidence ?? ((ticker: string, now: Date) =>
+      fetchIntradayQuoteEvidence(ticker, fetch, now)),
     sendTelegram: dependencies.sendTelegram ?? sendTelegramParts,
+    sendTelegramAlert: dependencies.sendTelegramAlert ?? sendTelegramAlert,
   };
 
   return async (request: Request): Promise<Response> => {
@@ -268,6 +306,9 @@ export function createGatewayHandler(dependencies: GatewayDependencies) {
       } else if (envelope.operation === "grade_due_decisions") {
         requireRun(envelope);
         prepared = parseGradePayload(envelope.payload);
+      } else if (envelope.operation === "evaluate_alert_rules") {
+        if (envelope.run_id !== null) throw new GatewayHttpError(400, "INVALID_REQUEST");
+        prepared = parseAlertPayload(envelope.payload);
       } else if (envelope.operation === "read_context" || envelope.operation === "finish_run") {
         requireRun(envelope);
         const row = objectValue(envelope.payload);
@@ -307,6 +348,13 @@ export function createGatewayHandler(dependencies: GatewayDependencies) {
             deps,
           );
           return response(200, { ok: true, dry_run: true, ...receipt });
+        }
+        if (envelope.operation === "evaluate_alert_rules") {
+          return response(200, {
+            ok: true,
+            dry_run: true,
+            ...await evaluateAlertRules(envelope, (prepared as { limit: number }).limit, null, deps),
+          });
         }
         return await evaluateAndPublish(envelope, prepared as ReturnType<typeof parseDecisionBundle>, null, deps);
       } catch (error) {
@@ -398,6 +446,22 @@ export function createGatewayHandler(dependencies: GatewayDependencies) {
         await deps.repository.completeRequest(envelope.request_id, leaseToken, result);
         return response(200, result);
       }
+      if (envelope.operation === "evaluate_alert_rules") {
+        const result = await evaluateAlertRules(
+          envelope,
+          (prepared as { limit: number }).limit,
+          leaseToken,
+          deps,
+        );
+        if (result.publication_status === "delivery_failed" || result.publication_status === "delivery_unknown") {
+          const code = result.publication_status === "delivery_unknown" ? "DELIVERY_UNKNOWN" : "DELIVERY_FAILED";
+          await deps.repository.failRequest(envelope.request_id, leaseToken, code);
+          return response(502, { ok: false, ...result, code });
+        }
+        const completed = { ok: true, ...result };
+        await deps.repository.completeRequest(envelope.request_id, leaseToken, completed);
+        return response(200, completed);
+      }
       return await evaluateAndPublish(
         envelope,
         prepared as ReturnType<typeof parseDecisionBundle>,
@@ -424,7 +488,281 @@ type ResolvedDependencies = GatewayDependencies & {
   fetchQuote: (ticker: string, now: Date) => Promise<VerifiedQuote>;
   fetchHistory: (ticker: string) => Promise<AdjustedBar[]>;
   sendTelegram: (parts: string[], chatId: string, token: string) => Promise<number[]>;
+  fetchAlertEvidence: (ticker: string, now: Date) => Promise<IntradayQuoteEvidence>;
+  sendTelegramAlert: (
+    alert: TelegramAlertInput,
+    chatId: string,
+    token: string,
+  ) => Promise<TelegramAlertReceipt>;
 };
+
+type AlertOperationPublicationStatus = PublicationReceipt["status"] | "not_created";
+
+interface AlertOperationResult {
+  status: "disabled" | "shadow" | "evaluated";
+  evaluated_rules: number;
+  unsafe_evaluations: number;
+  would_write_events: number;
+  would_publish: number;
+  shadow_publish_candidates: number;
+  alert_events_recorded: number;
+  publication_status: AlertOperationPublicationStatus;
+  telegram_message_ids: number[];
+  draft_previews: Array<{ draft_id: string; body: string; hash: string }>;
+  alert_previews: Array<{ event_id: string; status: AlertEvaluation["status"]; body: string; hash: string }>;
+  suppression_reason?: string;
+}
+
+function evidenceForAlertRule(
+  rule: AlertRuleSnapshot,
+  intraday: IntradayQuoteEvidence | null,
+): AlertConditionEvidence[] {
+  const quoteKinds = new Set(["price_cross", "price_zone", "recorded_stop", "recorded_target"]);
+  return rule.conditions.map((condition, conditionIndex) => {
+    const supported = condition.timeframe === "quote" && quoteKinds.has(condition.kind);
+    const marketSession = intraday?.market_session ?? (rule.session === "all" ? "regular" : rule.session);
+    return {
+      condition_index: conditionIndex,
+      status: supported && intraday ? "fresh" : supported ? "missing" : "unsupported",
+      market_session: marketSession,
+      evidence_ids: supported && intraday
+        ? intraday.points.map((point) => `${intraday.source}:${point.observed_at}`)
+        : [],
+      points: supported && intraday ? intraday.points : [],
+    };
+  });
+}
+
+function persistableAlertEvent(
+  id: string,
+  evaluation: AlertEvaluation,
+  fingerprint: string,
+): PersistableAlertEvent {
+  const session = evaluation.market_session === "all" ? "regular" : evaluation.market_session;
+  return {
+    id,
+    rule_id: evaluation.rule.rule_id,
+    rule_version: evaluation.rule.version,
+    fingerprint,
+    status: evaluation.status as PersistableAlertEvent["status"],
+    reason_codes: [...evaluation.reason_codes],
+    observed_at: evaluation.observed_at,
+    evaluated_at: evaluation.evaluated_at,
+    market_session: session,
+    condition_results: evaluation.condition_results,
+    evidence_ids: [...new Set(evaluation.condition_results.flatMap((result) => result.evidence_ids))],
+  };
+}
+
+function alertKind(rule: AlertRuleSnapshot, evaluation?: AlertEvaluation): PersistableAlertPublication["kind"] {
+  if (evaluation?.status === "unsafe_to_evaluate" || rule.severity === "system") return "data_warning";
+  if (rule.conditions.some((condition) => condition.kind === "recorded_stop")) return "stop_breach";
+  if (rule.conditions.some((condition) => condition.kind === "recorded_target")) return "target_hit";
+  if (rule.severity === "watch") return "new_idea";
+  return "entry_trigger";
+}
+
+function unsafeOutsideCooldown(
+  work: Awaited<ReturnType<GatewayRepository["readAlertWork"]>>["rules"][number],
+  evaluation: AlertEvaluation,
+): boolean {
+  if (evaluation.status !== "unsafe_to_evaluate") return false;
+  const evaluated = Date.parse(evaluation.evaluated_at);
+  return !work.recent_events.some((event) =>
+    event.status === "unsafe_to_evaluate" && evaluated - Date.parse(event.evaluated_at) >= 0 &&
+    evaluated - Date.parse(event.evaluated_at) < work.rule.cooldown_seconds * 1_000
+  );
+}
+
+async function deliverReadyAlert(
+  persisted: PublicationReceipt,
+  alert: RenderedAlert,
+  deps: ResolvedDependencies,
+): Promise<PublicationReceipt> {
+  if (persisted.status === "suppressed" || persisted.status === "delivered" ||
+    persisted.status === "delivery_unknown" || persisted.status === "sending") return persisted;
+  const claim = await deps.repository.claimPublication(persisted.idempotency_key);
+  if (!claim.claimed || !claim.lease_token) return claim.receipt;
+  try {
+    const accepted = await deps.sendTelegramAlert(
+      { body: alert.body, reply_markup: alert.reply_markup },
+      deps.telegramChatId,
+      deps.telegramToken,
+    );
+    return await deps.repository.finishPublication(
+      persisted.idempotency_key,
+      claim.lease_token,
+      "delivered",
+      [accepted.message_id],
+      null,
+    );
+  } catch (error) {
+    const delivery = error instanceof TelegramDeliveryError
+      ? error
+      : new TelegramDeliveryError("ambiguous", []);
+    return await deps.repository.finishPublication(
+      persisted.idempotency_key,
+      claim.lease_token,
+      delivery.kind === "definitive" ? "delivery_failed" : "delivery_unknown",
+      delivery.partialMessageIds,
+      delivery.kind === "definitive" ? "TELEGRAM_REJECTED" : "TELEGRAM_OUTCOME_UNKNOWN",
+    );
+  }
+}
+
+async function evaluateAlertRules(
+  envelope: GatewayEnvelope,
+  limit: number,
+  leaseToken: string | null,
+  deps: ResolvedDependencies,
+): Promise<AlertOperationResult> {
+  const activePolicy = await deps.repository.activePolicy();
+  const alertPolicy = activePolicy.alerts_v3;
+  if (!alertPolicy || (!alertPolicy.enabled && !alertPolicy.shadow)) {
+    return {
+      status: "disabled",
+      evaluated_rules: 0,
+      unsafe_evaluations: 0,
+      would_write_events: 0,
+      would_publish: 0,
+      shadow_publish_candidates: 0,
+      alert_events_recorded: 0,
+      publication_status: "not_created",
+      telegram_message_ids: [],
+      draft_previews: [],
+      alert_previews: [],
+    };
+  }
+
+  const [work, context] = await Promise.all([
+    deps.repository.readAlertWork(limit),
+    deps.repository.readContext(null),
+  ]);
+  const now = deps.now();
+  const evidenceByTicker = new Map<string, Promise<IntradayQuoteEvidence | null>>();
+  const evidence = (ticker: string) => {
+    if (!evidenceByTicker.has(ticker)) {
+      evidenceByTicker.set(ticker, deps.fetchAlertEvidence(ticker, now).catch(() => null));
+    }
+    return evidenceByTicker.get(ticker)!;
+  };
+
+  const evaluated = await Promise.all(work.rules.map(async (item) => {
+    const providerEvidence = await evidence(item.rule.ticker);
+    const evaluation = evaluateAlertRule(
+      item.rule,
+      evidenceForAlertRule(item.rule, providerEvidence),
+      now,
+      activePolicy.max_actionable_quote_age_minutes,
+    );
+    const fingerprint = await alertFingerprint(item.rule, evaluation);
+    const publishable = shouldPublishAlert(item.rule, evaluation, item.recent_events);
+    const recordable = publishable || unsafeOutsideCooldown(item, evaluation);
+    const eventId = deps.newId();
+    const rendered = evaluation.status === "not_triggered"
+      ? null
+      : await renderAlertV3({
+        event_id: eventId,
+        evaluation,
+        source_evaluation: null,
+        source_summary: item.source_summary,
+        context,
+      });
+    return { item, evaluation, fingerprint, publishable, recordable, eventId, rendered };
+  }));
+
+  const draftPreviews = await Promise.all(work.drafts.map(async (item) => {
+    const draftEvaluation: AlertEvaluation = {
+      rule: item.rule,
+      status: "not_triggered",
+      reason_codes: [],
+      observed_at: null,
+      evaluated_at: now.toISOString(),
+      market_session: item.rule.session === "all" ? "regular" : item.rule.session,
+      condition_results: item.rule.conditions.map((condition) => ({
+        condition,
+        passed: null,
+        observed_value: null,
+        evidence_ids: [],
+      })),
+    };
+    const rendered = await renderAlertV3({
+      event_id: item.rule.rule_id,
+      evaluation: draftEvaluation,
+      source_evaluation: null,
+      source_summary: item.source_summary,
+      context,
+      mode: "draft",
+    });
+    return { item, rendered };
+  }));
+
+  const persistables = evaluated.filter((item) => item.recordable).map((item) =>
+    persistableAlertEvent(item.eventId, item.evaluation, item.fingerprint)
+  );
+  const publishable = evaluated.filter((item) => item.publishable && item.rendered?.status === "ready");
+  const alertPreviews = evaluated.flatMap((item) => item.rendered
+    ? [{ event_id: item.eventId, status: item.evaluation.status, body: item.rendered.body, hash: item.rendered.hash }]
+    : []);
+  const base = {
+    evaluated_rules: evaluated.length,
+    unsafe_evaluations: evaluated.filter((item) => item.evaluation.status === "unsafe_to_evaluate").length,
+    would_write_events: persistables.length,
+    would_publish: alertPolicy.enabled && (publishable.length === 1 ||
+        (publishable.length === 0 && draftPreviews.length > 0)) ? 1 : 0,
+    shadow_publish_candidates: publishable.length,
+    alert_events_recorded: 0,
+    publication_status: "not_created" as AlertOperationPublicationStatus,
+    telegram_message_ids: [] as number[],
+    draft_previews: draftPreviews.map(({ item, rendered }) => ({
+      draft_id: item.rule.rule_id,
+      body: rendered.body,
+      hash: rendered.hash,
+    })),
+    alert_previews: alertPreviews,
+  };
+  if (envelope.dry_run || !alertPolicy.enabled) {
+    return { status: alertPolicy.enabled ? "evaluated" : "shadow", ...base };
+  }
+  if (!leaseToken) throw new GatewayRepositoryError("PERSISTENCE_FAILED");
+
+  const eventReceipt = persistables.length > 0
+    ? await deps.repository.recordAlertEvaluations(envelope.request_id, persistables)
+    : { event_count: 0, event_ids: [] };
+  if (publishable.length > 1) {
+    return {
+      status: "evaluated",
+      ...base,
+      alert_events_recorded: eventReceipt.event_count,
+      suppression_reason: "MULTIPLE_ALERTS_REQUIRE_COALESCING",
+    };
+  }
+
+  const chosenEvent = publishable[0] ?? null;
+  const chosenDraft = chosenEvent ? null : draftPreviews[0] ?? null;
+  const rendered = chosenEvent?.rendered ?? chosenDraft?.rendered ?? null;
+  if (!rendered || rendered.status !== "ready") {
+    return { status: "evaluated", ...base, alert_events_recorded: eventReceipt.event_count };
+  }
+  const publicationId = deps.newId();
+  const persisted = await deps.repository.createAlertPublication(envelope.request_id, {
+    id: publicationId,
+    market_date: chicagoDate(now),
+    kind: chosenEvent ? alertKind(chosenEvent.item.rule, chosenEvent.evaluation) : alertKind(chosenDraft!.item.rule),
+    rendered_body: rendered.body,
+    rendered_hash: rendered.hash,
+    event_ids: chosenEvent ? [chosenEvent.eventId] : [],
+    draft_id: chosenDraft?.item.rule.rule_id ?? null,
+  });
+  const delivered = await deliverReadyAlert(persisted, rendered, deps);
+  return {
+    status: "evaluated",
+    ...base,
+    alert_events_recorded: eventReceipt.event_count,
+    publication_status: delivered.status,
+    telegram_message_ids: delivered.telegram_message_ids,
+  };
+}
 
 async function gradeDueDecisions(
   limit: number,

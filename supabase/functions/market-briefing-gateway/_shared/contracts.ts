@@ -1,5 +1,6 @@
 export type Operation = "start_run" | "read_context" | "record_artifacts" |
-  "grade_due_decisions" | "evaluate_and_publish" | "finish_run";
+  "grade_due_decisions" | "evaluate_and_publish" | "evaluate_alert_rules" |
+  "finish_run";
 export type Phase = "pre-market" | "intraday" | "post-market" | "on-demand";
 export type Action = "buy" | "add" | "hold" | "reduce" | "sell" | "watch" | "avoid";
 export type NotificationKind = "brief" | "new_idea" | "entry_trigger" | "stop_near" |
@@ -83,6 +84,19 @@ export interface AlertRecentEvent {
   status: "triggered" | "unsafe_to_evaluate";
   evaluated_at: string;
   severity: AlertSeverity;
+}
+
+export interface AlertSourceSummary {
+  ticker: string;
+  confidence: Confidence;
+  valid_until: string | null;
+  invalidation_price: string | null;
+  stop: string | null;
+  target: string | null;
+  position_value_after: string | null;
+  total_investable_value: string | null;
+  evidence: Array<{ id: string; status: EvidenceStatus }>;
+  reasons: string[];
 }
 
 export interface GatewayEnvelope {
@@ -356,6 +370,7 @@ const OPERATIONS: readonly Operation[] = [
   "record_artifacts",
   "grade_due_decisions",
   "evaluate_and_publish",
+  "evaluate_alert_rules",
   "finish_run",
 ];
 const PHASES: readonly Phase[] = ["pre-market", "intraday", "post-market", "on-demand"];
