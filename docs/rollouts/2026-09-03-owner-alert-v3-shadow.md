@@ -20,13 +20,12 @@ secret values and makes no investment recommendation.
 - Draft evidence-coverage correction: `a54945a`.
 - Corrected shadow receipt documentation: `c0e377f`.
 - Focused review after the receipt-hardening changes found no Critical or Important issue.
-- Final local gate at the code checkpoint:
+- Final coherent local gate at commit `af0c7e6`:
   - 128 Python tests passed;
   - 63 Node tests passed;
-  - 109 Deno tests passed before the additional mixed-evidence regression case;
-  - the renderer suite then passed 17/17 with that additional case;
+  - 110 Deno tests passed, including the additional mixed-evidence regression case;
   - both Edge Function entrypoints passed Deno type-check; and
-  - `git diff --check` passed.
+  - `git diff --check` passed with a clean worktree before this receipt-only update.
 
 ## Production deployment checkpoint
 
