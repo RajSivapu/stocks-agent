@@ -44,19 +44,17 @@ def as_owner(connection):
 
 
 def preview(connection, command, *, key=None):
-    request = {"idempotency_key": str(key or uuid4()), "command": command}
-    with as_owner(connection) as owner_connection:
-        return owner_connection.execute(
-            "SELECT api.preview_portfolio_command(%s::jsonb)", (Jsonb(request),)
-        ).fetchone()[0]
+    return connection.execute(
+        "SELECT app.preview_portfolio_command(%s, 'web', %s, %s, %s::jsonb)",
+        (OWNER_A, OWNER_A, key or uuid4(), Jsonb(command)),
+    ).fetchone()[0]
 
 
 def confirm(connection, receipt, *, digest=None):
-    with as_owner(connection) as owner_connection:
-        return owner_connection.execute(
-            "SELECT api.confirm_portfolio_command(%s, %s)",
-            (receipt["command_id"], digest or receipt["preview_digest"]),
-        ).fetchone()[0]
+    return connection.execute(
+        "SELECT app.confirm_portfolio_command(%s, 'web', %s, %s, %s)",
+        (OWNER_A, OWNER_A, receipt["command_id"], digest or receipt["preview_digest"]),
+    ).fetchone()[0]
 
 
 def buy_command(ticker, *, qty="2", price="10", fees="1", cash="21.00", bucket="unclassified"):
@@ -101,11 +99,10 @@ def test_mismatched_digest_cancellation_expiry_and_illegal_transition_fail(tenan
         confirm(tenant_database, mismatch, digest="b" * 64)
 
     cancelled = preview(tenant_database, buy_command("CMDCAN"))
-    with as_owner(tenant_database) as connection:
-        result = connection.execute(
-            "SELECT api.cancel_portfolio_command(%s, %s)",
-            (cancelled["command_id"], cancelled["preview_digest"]),
-        ).fetchone()[0]
+    result = tenant_database.execute(
+        "SELECT app.cancel_portfolio_command(%s, 'web', %s, %s, %s)",
+        (OWNER_A, OWNER_A, cancelled["command_id"], cancelled["preview_digest"]),
+    ).fetchone()[0]
     assert result["status"] == "cancelled"
     with pytest.raises(Exception, match="cancelled"):
         confirm(tenant_database, cancelled)
@@ -226,16 +223,12 @@ def test_sell_all_stop_plan_cancel_and_cross_owner_confirmation(tenant_database)
     stop_receipt = preview(
         tenant_database, {"operation": "stop", "ticker": "CMDOPS", "stop": "8.50"}
     )
-    with tenant_database.transaction(force_rollback=True):
-        tenant_database.execute("SET LOCAL ROLE authenticated")
+    with pytest.raises(Exception, match="command unavailable"):
         tenant_database.execute(
-            "SELECT set_config('request.jwt.claim.sub', %s, true)", (OWNER_B,)
+            "SELECT app.confirm_portfolio_command(%s, 'web', %s, %s, %s)",
+            (OWNER_B, OWNER_B, stop_receipt["command_id"], stop_receipt["preview_digest"]),
         )
-        with pytest.raises(Exception, match="command unavailable"):
-            tenant_database.execute(
-                "SELECT api.confirm_portfolio_command(%s, %s)",
-                (stop_receipt["command_id"], stop_receipt["preview_digest"]),
-            )
+    tenant_database.rollback()
     confirm(tenant_database, stop_receipt)
     assert tenant_database.execute(
         "SELECT stop FROM app.holdings WHERE owner_id = %s AND ticker = 'CMDOPS'", (OWNER_A,)

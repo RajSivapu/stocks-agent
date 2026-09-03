@@ -574,30 +574,30 @@ git commit -m "feat: unify previewed portfolio commands"
 `/portfolio/correction/confirm`, `/plans/preview`, `/telegram/pairing-code`, `/connections/*`,
 `/settings`, `/export`, and `/account/*` routes.
 
-- [ ] **Step 1: Write failing handler tests**
+- [x] **Step 1: Write failing handler tests**
 
 Test method/content-type/origin/body/JWT rejection order; owner derived only from JWT; route-specific
 schemas; 64 KiB maximum body; no caching; sanitized errors; replay keys; and absence of service-role or
 database-password access.
 
-- [ ] **Step 2: Add database-backed rate limits**
+- [x] **Step 2: Add database-backed rate limits**
 
 Create `app.consume_rate_limit(owner_id, scope, limit, window)` and apply per-owner/per-IP limits for
 OTP-sensitive operations, previews, confirmations, pairing, connection changes, exports, and deletion.
 The app API calls it through the user's JWT, not an in-memory map.
 
-- [ ] **Step 3: Implement explicit route dispatch**
+- [x] **Step 3: Implement explicit route dispatch**
 
 Use an exact `(method,path)` table and per-route validators. The user-context Supabase client forwards
 the original bearer JWT and calls only allow-listed `api` RPCs. Unknown routes return 404 without
 listing valid operations.
 
-- [ ] **Step 4: Add audit-safe receipts**
+- [x] **Step 4: Add audit-safe receipts**
 
 Every mutation returns command/connection/request ID, status, expiry, and stable error code only.
 Audit rows store actor, route, result, and timestamps without request body or financial values.
 
-- [ ] **Step 5: Verify and commit**
+- [x] **Step 5: Verify and commit**
 
 Run Deno tests, wrong-project JWT integration tests, and typecheck. Commit:
 

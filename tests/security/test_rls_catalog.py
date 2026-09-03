@@ -18,6 +18,7 @@ API_FUNCTIONS = {
     "api.preview_portfolio_command(jsonb)",
     "api.confirm_portfolio_command(uuid,text)",
     "api.cancel_portfolio_command(uuid,text)",
+    "api.app_dispatch(text,uuid,text,jsonb)",
 }
 
 OWNER_TABLES = {
@@ -31,6 +32,8 @@ OWNER_TABLES = {
     "single_owner_migration_receipts",
     "owner_policy_overrides",
     "owner_ledger_counters",
+    "app_api_rate_limits",
+    "app_api_audit_events",
     "holdings",
     "analysis_runs",
     "transactions",
@@ -125,6 +128,8 @@ def test_policies_are_authenticated_and_bind_both_owner_checks(tenant_database):
         "owner_investment_plans",
         "profiles",
         "telegram_links",
+        "app_api_rate_limits",
+        "app_api_audit_events",
     }
 
 

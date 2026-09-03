@@ -16,3 +16,8 @@ entrypoint = "./functions/telegram-portfolio/index.ts"
 enabled = true
 verify_jwt = false
 entrypoint = "./functions/market-briefing-gateway/index.ts"
+
+[functions."app-api"]
+enabled = true
+verify_jwt = false
+entrypoint = "./functions/app-api/index.ts"
