@@ -61,6 +61,7 @@ OWNER_TABLES = {
     "account_deletion_requests",
     "deletion_tombstones",
     "owner_ledger_reset_receipts",
+    "backup_restore_receipts",
     "holdings",
     "analysis_runs",
     "transactions",
@@ -199,6 +200,7 @@ def test_policies_are_authenticated_and_bind_both_owner_checks(tenant_database):
         "app_admins",
         "single_owner_migration_receipts",
         "owner_policy_overrides",
+        "backup_restore_receipts",
     }
 
 

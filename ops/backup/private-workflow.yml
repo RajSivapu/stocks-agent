@@ -1,0 +1,64 @@
+# Copy this file to .github/workflows/backup.yml in a separate private repository.
+name: encrypted-stock-agent-backup
+
+on:
+  schedule:
+    # Avoid the top of the hour, when scheduled Actions are commonly delayed.
+    - cron: "23 8 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: encrypted-stock-agent-backup
+  cancel-in-progress: false
+
+jobs:
+  backup:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - name: Check out reviewed private backup source
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+
+      - name: Install pinned Python dependencies
+        run: |
+          python3 -m venv "$RUNNER_TEMP/backup-venv"
+          "$RUNNER_TEMP/backup-venv/bin/python" -m pip install --disable-pip-version-check \
+            -r ops/backup/requirements.txt
+
+      - name: Install verified age v1.3.2
+        env:
+          AGE_SHA256: cbe24006683f8eb669266162894b9a522a1af52f2665fbc63a4bb032ed26ac10
+        run: |
+          curl --fail --silent --show-error --location --proto '=https' --tlsv1.2 \
+            --output "$RUNNER_TEMP/age.tar.gz" \
+            https://github.com/FiloSottile/age/releases/download/v1.3.2/age-v1.3.2-linux-amd64.tar.gz
+          echo "$AGE_SHA256  $RUNNER_TEMP/age.tar.gz" | sha256sum --check --strict
+          tar --extract --gzip --file "$RUNNER_TEMP/age.tar.gz" --directory "$RUNNER_TEMP"
+          install -m 0755 "$RUNNER_TEMP/age/age" "$RUNNER_TEMP/backup-venv/bin/age"
+
+      - name: Export, encrypt, verify, and upload
+        env:
+          BACKUP_DATABASE_URL: ${{ secrets.BACKUP_DATABASE_URL }}
+          BACKUP_AGE_RECIPIENT: ${{ secrets.BACKUP_AGE_RECIPIENT }}
+          BACKUP_KEY_MATERIAL_JSON: ${{ secrets.BACKUP_KEY_MATERIAL_JSON }}
+          R2_ENDPOINT: ${{ secrets.R2_ENDPOINT }}
+          R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+          R2_BACKUP_BUCKET: ${{ secrets.R2_BACKUP_BUCKET }}
+        run: |
+          PATH="$RUNNER_TEMP/backup-venv/bin:$PATH" \
+            "$RUNNER_TEMP/backup-venv/bin/python" -m ops.backup.export_backup \
+              --output "$RUNNER_TEMP/stock-agent-backup.age"
+
+      - name: Remove local ciphertext and downloaded tools
+        if: always()
+        run: |
+          rm -f "$RUNNER_TEMP/stock-agent-backup.age" "$RUNNER_TEMP/stock-agent-key-material.age"
+          rm -rf "$RUNNER_TEMP/age" "$RUNNER_TEMP/age.tar.gz" "$RUNNER_TEMP/backup-venv"
+
+# This workflow intentionally never publishes a GitHub Actions artifact. Configure the R2 token for one
+# private bucket only. Configure 35-day bucket lifecycle expiry in addition to the count retention
+# enforced by export_backup.py.

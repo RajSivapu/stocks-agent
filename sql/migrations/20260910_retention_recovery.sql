@@ -1364,3 +1364,250 @@ GRANT EXECUTE ON FUNCTION api.app_dispatch(TEXT, UUID, TEXT, JSONB) TO authentic
 
 ALTER DEFAULT PRIVILEGES FOR ROLE stock_agent_migration_owner IN SCHEMA app
   REVOKE ALL ON TABLES FROM PUBLIC, anon, authenticated, service_role;
+
+-- Execute-only disaster-recovery export contract. The contract snapshots every app table's
+-- columns at migration time, so a later unreviewed table or column makes export fail closed.
+CREATE TABLE app.backup_restore_receipts (
+  id UUID PRIMARY KEY DEFAULT extensions.gen_random_uuid(),
+  archive_digest TEXT NOT NULL CHECK (archive_digest ~ '^[0-9a-f]{64}$'),
+  source_exported_at TIMESTAMPTZ NOT NULL,
+  row_counts JSONB NOT NULL CHECK (
+    jsonb_typeof(row_counts) = 'object' AND octet_length(row_counts::text) <= 10000
+  ),
+  relationship_digest TEXT NOT NULL CHECK (relationship_digest ~ '^[0-9a-f]{64}$'),
+  projection_digest TEXT NOT NULL CHECK (projection_digest ~ '^[0-9a-f]{64}$'),
+  status TEXT NOT NULL CHECK (status = 'verified'),
+  restored_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+ALTER TABLE app.backup_restore_receipts OWNER TO stock_agent_migration_owner;
+ALTER TABLE app.backup_restore_receipts ENABLE ROW LEVEL SECURITY;
+ALTER TABLE app.backup_restore_receipts FORCE ROW LEVEL SECURITY;
+CREATE POLICY backup_restore_receipts_executor_all ON app.backup_restore_receipts
+  FOR ALL TO stock_agent_migration_owner USING (true) WITH CHECK (true);
+CREATE TRIGGER prevent_backup_restore_receipt_mutation
+  BEFORE UPDATE OR DELETE ON app.backup_restore_receipts
+  FOR EACH ROW EXECUTE FUNCTION app.prevent_immutable_receipt_mutation();
+REVOKE ALL ON app.backup_restore_receipts
+  FROM PUBLIC, anon, authenticated, service_role, stock_agent_gateway,
+       stock_agent_scheduler, stock_agent_telegram, stock_agent_backup;
+
+CREATE TABLE machine.backup_dataset_contract (
+  name TEXT PRIMARY KEY CHECK (name ~ '^[a-z][a-z0-9_]{1,62}$'),
+  disposition TEXT NOT NULL CHECK (
+    disposition IN ('include','exclude_transient','exclude_rebuildable')
+  ),
+  excluded_columns TEXT[] NOT NULL DEFAULT '{}'::text[],
+  source_columns TEXT[] NOT NULL DEFAULT '{}'::text[],
+  reason_code TEXT NOT NULL CHECK (reason_code ~ '^[A-Z][A-Z0-9_]{2,63}$'),
+  CHECK (disposition = 'include' OR cardinality(excluded_columns) = 0)
+);
+ALTER TABLE machine.backup_dataset_contract OWNER TO stock_agent_migration_owner;
+REVOKE ALL ON machine.backup_dataset_contract
+  FROM PUBLIC, anon, authenticated, service_role, stock_agent_gateway,
+       stock_agent_scheduler, stock_agent_telegram, stock_agent_backup;
+
+INSERT INTO machine.backup_dataset_contract(name, disposition, excluded_columns, reason_code)
+VALUES
+  ('profiles', 'include', '{}', 'DURABLE_IDENTITY_PROFILE'),
+  ('app_admins', 'include', '{}', 'DURABLE_OPERATOR_ROLE'),
+  ('user_consents', 'include', '{}', 'DURABLE_CONSENT'),
+  ('notification_preferences', 'include', '{}', 'DURABLE_OWNER_SETTING'),
+  ('agent_connections', 'include', ARRAY['inbound_token_digest','outbound_trigger_secret_id','trigger_url'], 'SANITIZED_PROVIDER_CONNECTION'),
+  ('analysis_schedules', 'include', '{}', 'DURABLE_OWNER_SETTING'),
+  ('telegram_links', 'include', '{}', 'ENCRYPTED_OWNER_LINK'),
+  ('single_owner_migration_receipts', 'exclude_rebuildable', '{}', 'LEGACY_MIGRATION_RECEIPT'),
+  ('owner_policy_overrides', 'include', '{}', 'DURABLE_POLICY'),
+  ('holdings', 'include', '{}', 'DURABLE_PORTFOLIO_PROJECTION'),
+  ('analysis_runs', 'include', '{}', 'DURABLE_RUN_AUDIT'),
+  ('transactions', 'include', '{}', 'DURABLE_LEDGER'),
+  ('portfolio_commands', 'include', '{}', 'DURABLE_COMMAND_AUDIT'),
+  ('telegram_updates', 'include', '{}', 'BOUNDED_REPLAY_AUDIT'),
+  ('suggestions', 'include', '{}', 'DURABLE_RECOMMENDATION'),
+  ('suggestion_grades', 'include', '{}', 'DURABLE_OUTCOME_GRADE'),
+  ('stock_observations', 'include', '{}', 'DURABLE_RESEARCH'),
+  ('daily_snapshots', 'include', '{}', 'DURABLE_MARKET_SNAPSHOT'),
+  ('dry_powder', 'include', '{}', 'DURABLE_OWNER_SETTING'),
+  ('radar', 'include', '{}', 'DURABLE_WATCHLIST'),
+  ('lessons', 'include', '{}', 'DURABLE_RESEARCH'),
+  ('paper_watches', 'include', '{}', 'DURABLE_OWNER_RESEARCH'),
+  ('market_gateway_requests', 'include', '{}', 'DURABLE_GATEWAY_AUDIT'),
+  ('decision_evaluations', 'include', '{}', 'DURABLE_POLICY_AUDIT'),
+  ('market_publications', 'include', ARRAY['lease_token'], 'SANITIZED_PUBLICATION_AUDIT'),
+  ('owner_investment_plans', 'include', '{}', 'DURABLE_INVESTMENT_PLAN'),
+  ('owner_ledger_counters', 'include', '{}', 'DURABLE_LEDGER_SEQUENCE'),
+  ('app_api_rate_limits', 'exclude_transient', '{}', 'TRANSIENT_RATE_LIMIT'),
+  ('app_api_audit_events', 'include', '{}', 'BOUNDED_REQUEST_AUDIT'),
+  ('run_evidence', 'include', '{}', 'DURABLE_EVIDENCE'),
+  ('source_search_receipts', 'include', '{}', 'DURABLE_SOURCE_AUDIT'),
+  ('market_quote_cache', 'exclude_rebuildable', '{}', 'REFETCH_MARKET_QUOTE'),
+  ('corporate_action_states', 'include', '{}', 'DURABLE_SAFETY_STATE'),
+  ('agent_analysis_submissions', 'include', '{}', 'DURABLE_PROVIDER_AUDIT'),
+  ('scheduled_run_slots', 'exclude_transient', '{}', 'REBUILD_RUN_SLOTS'),
+  ('routine_trigger_attempts', 'exclude_transient', '{}', 'TRANSIENT_PROVIDER_TRIGGER'),
+  ('owner_run_allowances', 'exclude_transient', '{}', 'TRANSIENT_DAILY_ALLOWANCE'),
+  ('operational_events', 'include', '{}', 'DURABLE_OPERATIONAL_AUDIT'),
+  ('owner_operational_state', 'include', '{}', 'DURABLE_SAFETY_STATE'),
+  ('operational_alerts', 'include', ARRAY['lease_token'], 'SANITIZED_ALERT_AUDIT'),
+  ('telegram_pairing_codes', 'exclude_transient', '{}', 'SECRET_PAIRING_CLAIM'),
+  ('telegram_callback_tokens', 'exclude_transient', '{}', 'SECRET_CALLBACK_CLAIM'),
+  ('telegram_deliveries', 'include', '{}', 'DURABLE_DELIVERY_AUDIT'),
+  ('telegram_pairing_deliveries', 'exclude_transient', '{}', 'TRANSIENT_PAIRING_DELIVERY'),
+  ('account_step_up_challenges', 'exclude_transient', '{}', 'SECRET_SESSION_CHALLENGE'),
+  ('account_step_up_receipts', 'exclude_transient', '{}', 'SECRET_SESSION_RECEIPT'),
+  ('account_deletion_requests', 'exclude_transient', '{}', 'REBUILD_DELETION_WORKFLOW'),
+  ('deletion_tombstones', 'include', '{}', 'DURABLE_DELETION_TOMBSTONE'),
+  ('owner_ledger_reset_receipts', 'include', '{}', 'DURABLE_RESET_AUDIT'),
+  ('backup_restore_receipts', 'exclude_rebuildable', '{}', 'TARGET_RESTORE_RECEIPT');
+
+UPDATE machine.backup_dataset_contract AS contract
+SET source_columns = catalog.columns
+FROM (
+  SELECT c.relname AS name, array_agg(a.attname::text ORDER BY a.attnum) AS columns
+  FROM pg_catalog.pg_class AS c
+  JOIN pg_catalog.pg_namespace AS n ON n.oid = c.relnamespace
+  JOIN pg_catalog.pg_attribute AS a ON a.attrelid = c.oid
+  WHERE n.nspname = 'app' AND c.relkind = 'r'
+    AND a.attnum > 0 AND NOT a.attisdropped
+  GROUP BY c.relname
+) AS catalog
+WHERE contract.name = catalog.name;
+
+DO $$
+DECLARE target_table TEXT;
+BEGIN
+  FOR target_table IN SELECT name FROM machine.backup_dataset_contract LOOP
+    EXECUTE format('DROP POLICY IF EXISTS backup_export_executor_all ON app.%I', target_table);
+    EXECUTE format(
+      'CREATE POLICY backup_export_executor_all ON app.%I FOR SELECT '
+      'TO stock_agent_migration_owner USING (true)', target_table
+    );
+  END LOOP;
+END
+$$;
+
+GRANT SELECT (id, email) ON auth.users TO stock_agent_migration_owner;
+
+CREATE OR REPLACE FUNCTION machine.backup_export_catalog(p_request JSONB)
+RETURNS JSONB
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = pg_catalog
+AS $$
+DECLARE expected_tables TEXT[];
+DECLARE actual_tables TEXT[];
+DECLARE drifted_table TEXT;
+DECLARE table_manifest JSONB;
+BEGIN
+  IF NOT app.jsonb_has_exact_keys(p_request, ARRAY['schema_version'])
+     OR jsonb_typeof(p_request->'schema_version') <> 'number'
+     OR (p_request->>'schema_version')::int <> 1 THEN
+    RAISE EXCEPTION 'backup contract unavailable' USING ERRCODE = '22023';
+  END IF;
+  SELECT array_agg(name ORDER BY name) INTO expected_tables
+  FROM machine.backup_dataset_contract;
+  SELECT array_agg(c.relname ORDER BY c.relname) INTO actual_tables
+  FROM pg_catalog.pg_class AS c
+  JOIN pg_catalog.pg_namespace AS n ON n.oid = c.relnamespace
+  WHERE n.nspname = 'app' AND c.relkind = 'r';
+  IF expected_tables IS DISTINCT FROM actual_tables THEN
+    RAISE EXCEPTION 'backup contract unavailable: app table drift' USING ERRCODE = '55000';
+  END IF;
+  SELECT contract.name INTO drifted_table
+  FROM machine.backup_dataset_contract AS contract
+  WHERE contract.source_columns IS DISTINCT FROM (
+    SELECT array_agg(a.attname::text ORDER BY a.attnum)
+    FROM pg_catalog.pg_class AS c
+    JOIN pg_catalog.pg_namespace AS n ON n.oid = c.relnamespace
+    JOIN pg_catalog.pg_attribute AS a ON a.attrelid = c.oid
+    WHERE n.nspname = 'app' AND c.relname = contract.name
+      AND c.relkind = 'r' AND a.attnum > 0 AND NOT a.attisdropped
+  )
+  LIMIT 1;
+  IF drifted_table IS NOT NULL THEN
+    RAISE EXCEPTION 'backup contract unavailable: app column drift' USING ERRCODE = '55000';
+  END IF;
+  SELECT jsonb_agg(jsonb_build_object(
+    'name', name,
+    'disposition', disposition,
+    'columns', source_columns,
+    'excluded_columns', excluded_columns,
+    'reason_code', reason_code
+  ) ORDER BY name) INTO table_manifest
+  FROM machine.backup_dataset_contract;
+  RETURN jsonb_build_object('schema_version', 1, 'tables', table_manifest);
+END
+$$;
+ALTER FUNCTION machine.backup_export_catalog(JSONB) OWNER TO stock_agent_migration_owner;
+
+CREATE OR REPLACE FUNCTION machine.backup_export_dataset(p_request JSONB)
+RETURNS JSONB
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = pg_catalog
+AS $$
+DECLARE dataset_name TEXT;
+DECLARE contract machine.backup_dataset_contract%ROWTYPE;
+DECLARE exported_rows JSONB;
+DECLARE exported_columns TEXT[];
+DECLARE row_patch JSONB := '{}'::jsonb;
+BEGIN
+  IF NOT app.jsonb_has_exact_keys(p_request, ARRAY['schema_version','dataset'])
+     OR jsonb_typeof(p_request->'schema_version') <> 'number'
+     OR jsonb_typeof(p_request->'dataset') <> 'string'
+     OR (p_request->>'schema_version')::int <> 1 THEN
+    RAISE EXCEPTION 'backup contract unavailable' USING ERRCODE = '22023';
+  END IF;
+  PERFORM machine.backup_export_catalog(jsonb_build_object('schema_version', 1));
+  dataset_name := p_request->>'dataset';
+  IF dataset_name = 'identity_recovery' THEN
+    SELECT coalesce(jsonb_agg(jsonb_build_object(
+      'email', lower(auth_user.email), 'owner_id', profile.id
+    ) ORDER BY profile.id), '[]'::jsonb)
+    INTO exported_rows
+    FROM app.profiles AS profile
+    JOIN auth.users AS auth_user ON auth_user.id = profile.id
+    WHERE auth_user.email IS NOT NULL
+      AND NOT EXISTS (
+        SELECT 1 FROM app.deletion_tombstones AS tombstone
+        WHERE tombstone.owner_id = profile.id
+      );
+    RETURN jsonb_build_object(
+      'dataset', dataset_name,
+      'columns', jsonb_build_array('email','owner_id'),
+      'rows', exported_rows
+    );
+  END IF;
+  SELECT * INTO contract
+  FROM machine.backup_dataset_contract
+  WHERE name = dataset_name AND disposition = 'include';
+  IF NOT FOUND THEN
+    RAISE EXCEPTION 'backup dataset unavailable' USING ERRCODE = '42501';
+  END IF;
+  IF dataset_name = 'agent_connections' THEN
+    row_patch := jsonb_build_object('status', 'disabled', 'last_handshake_at', NULL);
+  END IF;
+  EXECUTE format(
+    'SELECT coalesce(jsonb_agg(row_value ORDER BY row_value::text), ''[]''::jsonb) '
+    'FROM (SELECT (to_jsonb(source_row) - $1::text[]) || $2::jsonb AS row_value '
+    'FROM app.%I AS source_row) AS exported',
+    contract.name
+  ) INTO exported_rows USING contract.excluded_columns, row_patch;
+  SELECT array_agg(column_name ORDER BY column_name) INTO exported_columns
+  FROM unnest(contract.source_columns) AS column_name
+  WHERE NOT (column_name = ANY(contract.excluded_columns));
+  RETURN jsonb_build_object(
+    'dataset', dataset_name,
+    'columns', to_jsonb(exported_columns),
+    'rows', exported_rows
+  );
+END
+$$;
+ALTER FUNCTION machine.backup_export_dataset(JSONB) OWNER TO stock_agent_migration_owner;
+
+REVOKE ALL ON FUNCTION machine.backup_export_catalog(JSONB),
+  machine.backup_export_dataset(JSONB)
+  FROM PUBLIC, anon, authenticated, service_role, stock_agent_gateway,
+       stock_agent_scheduler, stock_agent_telegram, stock_agent_backup;
+GRANT USAGE ON SCHEMA machine TO stock_agent_backup;
+GRANT EXECUTE ON FUNCTION machine.backup_export_catalog(JSONB),
+  machine.backup_export_dataset(JSONB) TO stock_agent_backup;

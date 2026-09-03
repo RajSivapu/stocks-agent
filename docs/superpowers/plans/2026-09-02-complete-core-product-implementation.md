@@ -1276,32 +1276,32 @@ git commit -m "feat: add private account lifecycle"
 - Consumes: backup execute-only login, offline `age` public key, private R2 credentials, enumerated export RPCs.
 - Produces: 14 daily plus 4 weekly ciphertext archives, 36-hour stale alert, and a verified staging restore receipt.
 
-- [ ] **Step 1: Write failing archive and privilege tests**
+- [x] **Step 1: Write failing archive and privilege tests**
 
 Prove the backup login has no table, `BYPASSRLS`, Auth-secret, or Vault access; export RPCs return only
 enumerated application data and encrypted identity-recovery map. Reject missing tables, schema-version
 mismatch, relationship digest mismatch, plaintext tokens, and deleted-owner resurrection.
 
-- [ ] **Step 2: Implement deterministic export**
+- [x] **Step 2: Implement deterministic export**
 
 Export schema version, ordered rows, counts, relationship digests, projection digests, and deletion
 tombstones. Write plaintext only to an ephemeral mode-0700 directory, `age`-encrypt before upload,
 verify ciphertext, then delete the temporary directory in `finally`.
 
-- [ ] **Step 3: Implement private workflow template**
+- [x] **Step 3: Implement private workflow template**
 
 The workflow runs daily in a separate private repository, installs pinned dependencies and `age`, uses
 GitHub OIDC or scoped secrets, uploads no artifact, writes only ciphertext to private R2, applies
 lifecycle retention, records sanitized success metadata, and fails closed.
 
-- [ ] **Step 4: Implement independent Cloudflare monitor**
+- [x] **Step 4: Implement independent Cloudflare monitor**
 
 The scheduled Worker can list only the backup prefix and send one fixed Telegram operational alert
 when newest-object age exceeds 36 hours. It receives no Supabase or portfolio credential.
 It also alerts before object bytes or operation counts approach the configured R2 free allowances;
 the R2 usage-based subscription is documented as an allowance, not a hard zero-cost cap.
 
-- [ ] **Step 5: Implement restore**
+- [x] **Step 5: Implement restore**
 
 Restore only into staging while production triggers are paused. Apply versioned schema, recreate invited
 identities, remap old/new UUIDs, apply tombstones, load rows, verify digests and projections, rotate

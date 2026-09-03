@@ -1,0 +1,10 @@
+{
+  "Rules": [
+    {
+      "ID": "expire-stock-agent-recovery-after-35-days",
+      "Status": "Enabled",
+      "Filter": { "Prefix": "stock-agent/" },
+      "Expiration": { "Days": 35 }
+    }
+  ]
+}

@@ -91,7 +91,10 @@ def test_machine_roles_have_no_cross_role_membership_or_unreviewed_execute(tenan
             "machine.telegram_record_delivery(jsonb)",
             "machine.telegram_record_pairing_delivery(jsonb)",
         },
-        "stock_agent_backup": set(),
+        "stock_agent_backup": {
+            "machine.backup_export_catalog(jsonb)",
+            "machine.backup_export_dataset(jsonb)",
+        },
     }
     for role in MACHINE_ROLES:
         executable = tenant_database.execute(

@@ -1,0 +1,25 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "stock-agent-backup-age-monitor",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-08-01",
+  "workers_dev": false,
+  "triggers": {
+    "crons": ["17 9 * * *"]
+  },
+  "r2_buckets": [
+    {
+      "binding": "BACKUP_BUCKET",
+      "bucket_name": "REPLACE_WITH_PRIVATE_BACKUP_BUCKET"
+    }
+  ],
+  "vars": {
+    "BACKUP_PREFIX": "stock-agent/daily/",
+    "MAX_AGE_HOURS": "36",
+    "STORAGE_ALERT_BYTES": "8589934592",
+    "PLANNED_MONTHLY_CLASS_A_OPS": "250",
+    "PLANNED_MONTHLY_CLASS_B_OPS": "100",
+    "CLASS_A_ALERT_OPS": "800000",
+    "CLASS_B_ALERT_OPS": "8000000"
+  }
+}
