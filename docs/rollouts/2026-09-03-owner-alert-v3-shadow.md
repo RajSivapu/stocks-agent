@@ -225,6 +225,22 @@ draft suppression, active-rule suppression, and Watch-level rejection. The full 
 `git diff --check`. Gateway v11 and shadow-only policy v3 are now active, but the live allowlist is
 still empty.
 
+## Friday audit preflight
+
+The scheduled `weekly-portfolio-process-audit` automation was re-inspected without running it. It is
+active for Fridays at 16:30 America/Chicago, uses `gpt-5.6-terra` with high reasoning, and targets
+the saved Git project `stocks-agent` at `/Users/rajrupesh/Documents/Raj/stocks-agent` (project ID
+`81e05586-ea52-46ac-97f9-ffd2b4ad2413`).
+
+The saved prompt requires exactly one bounded packet and forbids Supabase writes, Telegram sends,
+file edits, brokerage capabilities, and fresh trade recommendations. The referenced skill repeats
+that read-only boundary, requires schema version 2, separates scheduled-delivered from session-only
+samples, treats incomplete grades as data gaps, and forbids automatic threshold changes. Static
+inspection confirmed the packet calls only the eight bounded read helpers for holdings,
+transactions, suggestions, grades, lessons, snapshots, evaluations, and publications. SHA-256
+comparison confirmed the packet script, audit library, database helper, and skill are identical in
+the rollout worktree and the saved project used by the automation. The audit was not run early.
+
 ## Remaining gates
 
 1. Reconcile the first Friday process-audit receipt and confirm it remains bounded and read-only.
