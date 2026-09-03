@@ -68,6 +68,30 @@ def test_webhook_acknowledges_non_owner_updates_without_processing_them():
     assert "return jsonResponse(403, { ok: false });" not in source
 
 
+def test_alert_callbacks_use_the_owner_gate_fixed_rpc_and_telegram_receipt():
+    source = (ROOT / "supabase" / "functions" / "telegram-portfolio" / "index.ts").read_text()
+    owner_gate = source.index("if (!ownerMatches(chatId, userId")
+    dispatch = source.index("await handleCallback(updateId as number")
+    assert owner_gate < dispatch
+    assert '"apply_market_alert_action"' in source
+    assert "alertActionPayload(parsed, updateId, OWNER_CHAT_ID_NUMBER, OWNER_USER_ID_NUMBER)" in source
+    assert "No brokerage order was placed or modified." in (
+        ROOT / "supabase" / "functions" / "telegram-portfolio" / "alert-utils.mjs"
+    ).read_text()
+
+
+def test_telegram_eval_covers_owner_only_alert_transitions():
+    evaluation = (ROOT / "docs" / "eval" / "telegram-portfolio-eval.yaml").read_text()
+    for case_name in (
+        "alert_wrong_owner",
+        "alert_arm_once",
+        "alert_stale_version",
+        "alert_snooze_and_resume",
+        "alert_no_brokerage_capability",
+    ):
+        assert f"name: {case_name}" in evaluation
+
+
 def test_gateway_tables_have_rls_append_only_evaluations_and_service_role_rpcs():
     for path in GATEWAY_SQL_FILES:
         sql = path.read_text()

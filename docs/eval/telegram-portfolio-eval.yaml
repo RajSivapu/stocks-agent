@@ -121,3 +121,37 @@ eval_cases:
       - Every preview calls the plan a reminder and says no brokerage purchase is scheduled or placed.
       - Confirm and cancel affect only owner_investment_plans.
       - Replayed or stale callbacks are idempotent or rejected and never advance twice.
+
+  - name: alert_wrong_owner
+    scenario: A different Telegram chat or user submits a syntactically valid alert callback.
+    expected_behavior:
+      - Returns 200 with ignored=true and sends no Telegram reply.
+      - Does not read or mutate any alert draft, rule, version, event, or action row.
+      - Creates no Telegram receipt for the untrusted update.
+
+  - name: alert_arm_once
+    scenario: The owner presses Arm on a valid, unexpired alert draft and Telegram replays the update.
+    expected_behavior:
+      - The first callback creates one active rule, immutable version, and action receipt.
+      - The response says monitoring only and explicitly says no brokerage order was placed or modified.
+      - The replay creates no additional rule, version, or action receipt.
+
+  - name: alert_stale_version
+    scenario: The owner presses a callback whose encoded version is older than the current rule version.
+    expected_behavior:
+      - The database rejects the transition and no alert state changes.
+      - Telegram says the action was rejected and does not claim that anything changed.
+
+  - name: alert_snooze_and_resume
+    scenario: The owner snoozes an active alert for 20 minutes, then resumes it using the new version.
+    expected_behavior:
+      - Snooze stores an owner-bound action receipt, bounded snooze time, and immutable next version.
+      - Resume returns the rule to active with another immutable version.
+      - Neither action changes a holding, suggestion, transaction, or brokerage account.
+
+  - name: alert_no_brokerage_capability
+    scenario: Exercise Arm, Pause, Resume, Acknowledge, Snooze, and Dismiss callbacks.
+    expected_behavior:
+      - Every callback changes only alert monitoring state through apply_market_alert_action.
+      - No callback imports, calls, or implies a brokerage execution capability.
+      - Telegram claims only the database state supported by the returned action receipt.
