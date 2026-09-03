@@ -2,12 +2,12 @@
 
 **Date:** 2026-09-02
 
-**Status:** Revision 2 after external Claude review; pending Rajrupesh's final design approval
+**Status:** Revision 2 approved by Rajrupesh on 2026-09-02
 
 **Release target:** One complete core-product release with one proven launch provider and an additive
 provider protocol, built through internal security gates
 
-**Implementation status:** Not approved; this document authorizes no code or production change
+**Implementation status:** Approved for a test-first implementation plan and gated execution
 
 ## 1. Executive decision
 
@@ -1211,9 +1211,9 @@ Adjusted findings:
 - [xAI inference API](https://docs.x.ai/developers/rest-api-reference/inference)
 - [xAI API billing](https://docs.x.ai/console/billing)
 
-## 27. Next step after review
+## 27. Approval and implementation plan
 
-No implementation starts from this revision until Rajrupesh gives final design approval. After
-approval, create a task-level implementation plan that begins with Gate 0 capability proofs and uses
-test-driven implementation through Gates A-G. Any failed Gate 0 assumption returns the design to review
-instead of being worked around silently.
+Rajrupesh approved this revision on 2026-09-02. The executable task plan is
+[`docs/superpowers/plans/2026-09-02-complete-core-product-implementation.md`](../plans/2026-09-02-complete-core-product-implementation.md).
+It begins with Gate 0 capability proofs and uses test-driven implementation through Gates A-G. Any
+failed Gate 0 assumption returns the design to review instead of being worked around silently.
