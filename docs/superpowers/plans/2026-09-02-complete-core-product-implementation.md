@@ -319,25 +319,25 @@ git commit -m "feat: add tenant identity foundation"
 - Consumes: an operator-confirmed Auth UUID and paused current functions.
 - Produces: `MigrationReceipt(owner_id_hash, before_counts, after_counts, relationship_digest, passed)`; all user data moved under `app` with non-null immutable owner IDs.
 
-- [ ] **Step 1: Write failing dry-run tests**
+- [x] **Step 1: Write failing dry-run tests**
 
 Fixture a current-schema database with holdings, ledger, plans, suggestions, grades, runs, commands,
 and publications. Assert the verifier rejects unknown owner rows, orphaned relations, duplicate
 owner/ticker keys, unsupported labels, count changes, and digest changes.
 
-- [ ] **Step 2: Implement transactional backfill**
+- [x] **Step 2: Implement transactional backfill**
 
 The operator script accepts `--owner-email`, resolves exactly one Auth UUID through offline admin
 credentials, and invokes one migration-only transaction. It never accepts a raw owner UUID from a web
 or model request. Move user tables from `public` to `app`, qualify every foreign key, backfill owner,
 create composite keys, set owner columns `NOT NULL`, and install a trigger that rejects owner changes.
 
-- [ ] **Step 3: Remove the migration authority**
+- [x] **Step 3: Remove the migration authority**
 
 At successful commit, revoke and drop the temporary backfill RPC. A second run must return the stored
 migration receipt without changing rows.
 
-- [ ] **Step 4: Prove rollback safety**
+- [x] **Step 4: Prove rollback safety**
 
 `verify_multitenancy_migration.py --rollback-only` applies migration and backfill inside a transaction,
 runs all parity checks, then rolls back. It uses synthetic `TST*` records and refuses the production
