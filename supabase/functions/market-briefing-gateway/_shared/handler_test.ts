@@ -345,6 +345,7 @@ Deno.test("evaluation refetches every quote, persists before sending, and ignore
   assertEquals(repository.events, ["persist", "claim-publication", "send"]);
   assertEquals(repository.lastBundle!.evaluations[0].normalized.verified_price, "47.02");
   assertEquals(repository.lastBundle!.evaluations[0].normalized.total_investable_value, "40500");
+  assertEquals(repository.lastBundle!.publication.template_version, 2);
   assertEquals(sent.length, 1);
   assertEquals(repository.finishPublicationCalls, [{ status: "delivered", ids: [77] }]);
 });
@@ -384,7 +385,7 @@ Deno.test("suppressed intraday and on-demand outputs never call Telegram", async
   const onDemandBundle = { phase: "on-demand", market_date: "2026-09-02", title: "x", candidates: [candidate("on-demand", "brief")] };
   const output = await json(await onDemand.handler(request("evaluate_and_publish", onDemandBundle)));
   assertEquals(onDemand.sent, []);
-  assert(typeof output.preview === "string" && output.preview.includes("On-demand"), "session preview absent");
+  assert(typeof output.preview === "string" && output.preview.includes("ON-DEMAND"), "session preview absent");
 });
 
 Deno.test("delivered and ambiguous duplicate requests never resend", async () => {
