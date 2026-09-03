@@ -9,6 +9,8 @@ export interface AdjustedBar {
   split_ratio: string | null;
 }
 
+export type AdjustedHistoryRange = "1y" | "10y";
+
 export type FetchLike = (
   input: RequestInfo | URL,
   init?: RequestInit,
@@ -357,19 +359,24 @@ function splitRatio(value: unknown): string {
 
 export async function fetchAdjustedHistory(
   ticker: string,
-  range: "1y",
+  range: AdjustedHistoryRange,
   fetchImpl: FetchLike = fetch,
 ): Promise<AdjustedBar[]> {
   const symbol = canonicalTicker(ticker);
-  if (range !== "1y") throw new MarketDataError("invalid history range");
+  if (range !== "1y" && range !== "10y") {
+    throw new MarketDataError("invalid history range");
+  }
   const url = `https://query1.finance.yahoo.com/v8/finance/chart/${
     encodeURIComponent(symbol)
-  }?range=1y&interval=1d&events=div%2Csplits`;
+  }?range=${range}&interval=1d&events=div%2Csplits`;
   const payload = await fetchProviderJson(url, fetchImpl);
   try {
     const result = chartResult(payload, "history");
     const timestamps = arrayValue(result.timestamp);
-    if (timestamps.length === 0 || timestamps.length > 400) throw new Error();
+    const maxObservations = range === "1y" ? 400 : 3_000;
+    if (
+      timestamps.length === 0 || timestamps.length > maxObservations
+    ) throw new Error();
     const indicators = objectValue(result.indicators);
     const quotes = arrayValue(indicators.quote);
     const adjusted = arrayValue(indicators.adjclose);

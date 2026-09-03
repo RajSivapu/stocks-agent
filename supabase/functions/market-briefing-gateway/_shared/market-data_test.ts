@@ -282,6 +282,49 @@ Deno.test("adjusted history keeps raw ranges and split ratios, sorted and dedupl
   ]);
 });
 
+Deno.test("adjusted history accepts only bounded one-year and ten-year ranges", async () => {
+  let requested = "";
+  const bars = await fetchAdjustedHistory(
+    "VTI",
+    "10y",
+    (input: RequestInfo | URL) => {
+      requested = String(input);
+      return fixtureFetch(historyFixture)(input);
+    },
+  );
+  assertEquals(bars.length, 2);
+  assert(
+    requested.endsWith("/VTI?range=10y&interval=1d&events=div%2Csplits"),
+    "ten-year history used the wrong provider URL",
+  );
+
+  const oversized = structuredClone(historyFixture);
+  const timestamps = Array.from(
+    { length: 3_001 },
+    (_, index) => Date.parse("2010-01-01T20:00:00.000Z") / 1000 + index * 86_400,
+  );
+  oversized.chart.result[0].timestamp = timestamps;
+  oversized.chart.result[0].indicators.quote[0].close = timestamps.map(() => 100);
+  oversized.chart.result[0].indicators.quote[0].high = timestamps.map(() => 101);
+  oversized.chart.result[0].indicators.quote[0].low = timestamps.map(() => 99);
+  oversized.chart.result[0].indicators.adjclose[0].adjclose = timestamps.map(() => 100);
+  await assertRejects(
+    () => fetchAdjustedHistory("VTI", "10y", fixtureFetch(oversized)),
+    "invalid history response",
+  );
+
+  const oneYearOversized = structuredClone(oversized);
+  oneYearOversized.chart.result[0].timestamp = timestamps.slice(0, 401);
+  oneYearOversized.chart.result[0].indicators.quote[0].close = timestamps.slice(0, 401).map(() => 100);
+  oneYearOversized.chart.result[0].indicators.quote[0].high = timestamps.slice(0, 401).map(() => 101);
+  oneYearOversized.chart.result[0].indicators.quote[0].low = timestamps.slice(0, 401).map(() => 99);
+  oneYearOversized.chart.result[0].indicators.adjclose[0].adjclose = timestamps.slice(0, 401).map(() => 100);
+  await assertRejects(
+    () => fetchAdjustedHistory("VTI", "1y", fixtureFetch(oneYearOversized)),
+    "invalid history response",
+  );
+});
+
 Deno.test("history normalizes provider floating-point noise to six decimals", async () => {
   const noisy = structuredClone(historyFixture);
   noisy.chart.result[0].indicators.quote[0].close[1] = 320.1400146484375;
@@ -311,7 +354,11 @@ Deno.test("history rejects missing adjusted values and arbitrary ranges", async 
   );
   await assertRejects(
     () =>
-      fetchAdjustedHistory("VTI", "max" as "1y", fixtureFetch(historyFixture)),
+      fetchAdjustedHistory(
+        "VTI",
+        "max" as "1y" | "10y",
+        fixtureFetch(historyFixture),
+      ),
     "invalid history range",
   );
 });
