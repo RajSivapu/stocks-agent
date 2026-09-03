@@ -35,6 +35,8 @@ alert lifecycle is stable. Do not merge `codex/stock-agent-reliability` wholesal
 - Shadow deployment documentation: `6764d41`.
 - Draft evidence-coverage correction: `a54945a`.
 - Corrected shadow receipt documentation: `c0e377f`.
+- Explicit canary-class allowlist: `3eb5837`.
+- Entry-level policy-validation correction: `fba1575`.
 - Focused review after the receipt-hardening changes found no Critical or Important issue.
 - Final coherent local gate at commit `af0c7e6`:
   - 128 Python tests passed;
@@ -42,6 +44,8 @@ alert lifecycle is stable. Do not merge `codex/stock-agent-reliability` wholesal
   - 110 Deno tests passed, including the additional mixed-evidence regression case;
   - both Edge Function entrypoints passed Deno type-check; and
   - `git diff --check` passed with a clean worktree before this receipt-only update.
+- The final gate after both canary corrections passed 131 Python tests, 63 Node tests, 115 Deno
+  tests, both Edge Function type-checks, and `git diff --check`.
 
 ## Production deployment checkpoint
 
@@ -54,14 +58,22 @@ alert lifecycle is stable. Do not merge `codex/stock-agent-reliability` wholesal
 - Live healthcheck after gateway v9: gateway, standalone alerts, Finnhub, and Yahoo all returned
   `ok`.
 
+After the scheduled post-market baseline below was reconciled, the backward-compatible gateway was
+deployed in two protected steps. Gateway v10 first passed all four health probes while policy v2
+remained active. Policy v3 was then activated at `2026-09-03T20:22:36.480034Z` with
+`enabled=false`, `shadow=true`, `enabled_classes=[]`, profile `balanced`, a 24-hour draft TTL, and a
+five-draft hourly cap. The entry-level correction was deployed as gateway v11 at epoch milliseconds
+`1788467115992`; Telegram remained unchanged at v12. The final healthcheck again returned `ok` for
+gateway, standalone alerts, Finnhub, and Yahoo.
+
 The rollback-only production verifier returned all required booleans true, including duplicate
 suppression, owner mismatch rejection, stale-version rejection, expired-draft rejection,
 event/publication-bound acknowledgement, Telegram acceptance storage, versioned expiry, and hourly
 cap rejection. It finished with `remaining_test_rows=0`.
 
-## Protected shadow preview
+## Superseded formatting-only shadow preview
 
-The corrected protected `on-demand` dry-run used a synthetic `Watch` packet solely to inspect the
+The earlier protected `on-demand` dry-run used a synthetic `Watch` packet solely to inspect the
 renderer. The gateway independently refreshed the quote, returned `dry_run=true`, kept the normal
 publication `suppressed`, and reported one would-be inert alert draft.
 
@@ -69,11 +81,36 @@ publication `suppressed`, and reported one would-be inert alert draft.
 - Preview draft ID: `c511d386-cf76-4a9e-8a48-3a544f42afc5`.
 - Rendered hash: `524491bcb1610001fbf0ab4cc2e5191a7e3fe7a43b20f8407c2fc624f0b7fd01`.
 - Displayed fields included condition, quote/evaluation times, age, session, reason, invalidation,
-  policy-approved stop, target, confidence, `evidence 1/1`, validity date, expiry, and receipt.
+  stop, target, confidence, `evidence 1/1`, validity date, expiry, and receipt.
 - The preview was labeled `DRAFT`, `suggestion only`, and `inert until you arm it`.
 - Its local deterministic button fixture contained only `Arm` and `Dismiss`; no execution button.
 - After the dry-run, live counts remained zero for alert rules, events, drafts, actions, and
   template-v3 publications. No Telegram send was attempted.
+
+Receipt `AL-C511` is formatting evidence only and is superseded for level-validation purposes. A
+later review proved that a `Watch` evaluation did not pass through Buy/Add stop, target, and
+reward-risk validation even though the renderer labeled its levels policy-approved. Shadow mode
+prevented any lifecycle write or Telegram send. Gateway v11 now rejects Watch-only entry-draft
+projection, and regression tests cover both the policy function and full handler response.
+
+## Corrected policy-v3 protected preview
+
+After gateway v11 and shadow-only policy v3 were active, a protected post-market dry-run used a
+tiny synthetic `Buy` fixture solely to exercise deterministic sizing, entry, stop, target,
+reward-risk, and renderer checks. It was labeled test-only in the candidate evidence and was not
+treated as investment research or a recommendation.
+
+- Preview receipt: `AL-9B78`.
+- Preview draft ID: `9b78332b-8c27-4a29-bfdb-a5236655f424`.
+- Rendered hash: `72d8cde944e0f17564b550f495c5a6ac141028ce054702d5f1246995f9a3a0b4`.
+- The body displayed the `$326.57–$329.85` test condition, `$311.80` policy-approved stop,
+  `$367.60` target, quote/evaluation time, age, post-market session, confidence, `evidence 1/1`,
+  validity, expiry, and the inert-until-armed boundary.
+- The gateway receipt reported `dry_run=true`, one evaluation, one would-be suggestion, one
+  would-be draft, publication `ready`, and an empty Telegram-message-ID list.
+- Afterward, all alert lifecycle counts and template-v3 publication count remained zero. There were
+  also zero gateway-request, suggestion, or market-publication rows created after policy-v3
+  activation, proving the post-cutover dry-run and healthchecks were write-free.
 
 ## Live security checkpoint
 
@@ -145,35 +182,58 @@ connectors, and disabled auto-fix behavior. Its instructions restrict the run to
 Checker records, require a suppressed outcome to stay silent, allow only server-receipt claims, and
 prohibit trade execution and repository edits.
 
-## Canary-class safety fix staged after review
+## Scheduled post-market baseline
+
+The 2026-09-03 scheduled post-market Routine completed under Claude session
+`session_01EKUSqXrSGW38x68VsMsKKZ` and production run
+`667c89db-7d12-4c04-9a0d-8e230d561b8f`. The Routine UI marked it Scheduled, running at 15:10
+America/Chicago, then Completed; no manual run was triggered.
+
+- The run started at `2026-09-03T20:12:44.337804Z` and finished at
+  `2026-09-03T20:20:24.913Z` with status `completed` and no recorded error.
+- Six distinct gateway requests completed with one attempt each: `start_run`, `read_context`, one
+  `evaluate_and_publish`, one `record_artifacts`, `grade_due_decisions` with limit 50, and
+  `finish_run`.
+- Two new policy-v2 evaluations stored completed Analyst and Checker records. Their official-close
+  quote evidence was observed at `20:00:01Z` for CENX and `19:59:57Z` for VTI, with same-run
+  retrieval at `20:15:10Z`; both final actions were Hold.
+- Two linked suggestions, two daily snapshots, one observation, and one lesson were stored. The
+  grading receipt reported 33 inserted rows, all incomplete rather than claimed successes.
+- Publication `dc0d1aeb-0b42-44cb-9d26-d406665f3e99` used renderer template v2, hash
+  `84e943a23ea2ba123a7b95ee15da8849eeaf62a9d0706b8f16a88d8d0eee0fca`, status `delivered`, and
+  Telegram message ID `18`.
+- The evaluation receipt reported `alert_draft_status=not_applicable`, zero drafts created, and no
+  shadow preview because neither recorded stop was breached. All four alert lifecycle tables and
+  template-v3 publications remained at zero.
+- The transcript's final write/send claims reconcile with `finish_run`; it explicitly described the
+  run as suggestion-only with no repository changes and made no trade-execution claim.
+
+## Canary-class safety controls
 
 A pre-canary review found that the original `alerts_v3.enabled` switch would have enabled every
-eligible v3 draft class together. No canary was enabled and no production setting was changed.
-The staged policy-v3 contract adds a server-validated `enabled_classes` allowlist limited to
+eligible v3 draft class together. No canary was enabled. The policy-v3 contract adds a
+server-validated `enabled_classes` allowlist limited to
 `entry_trigger`, `stop_breach`, and `target_hit`. Shadow mode may still preview all supported
 classes, while enabled mode creates or evaluates only explicitly listed classes. A live policy is
 rejected when the list is empty, duplicated, or contains an unsupported value. Gateway code remains
-backward-compatible with the deployed disabled/shadow policy v2 so it can be upgraded safely before
-policy v3 is activated.
+backward-compatible with disabled/shadow policy v2; that compatibility was verified in production
+before policy v3 was activated.
 
 The focused red/green tests cover policy projection, backward-compatible repository validation,
-draft suppression, and active-rule suppression. The full local gate then passed 131 Python tests,
-63 Node tests, 113 Deno tests, both Edge Function type-checks, and `git diff --check`. This code is
-staged locally and must not be deployed until the scheduled 2026-09-03 post-market run has been
-reconciled against the unchanged gateway v9 and policy v2 baseline.
+draft suppression, active-rule suppression, and Watch-level rejection. The full local gate passed
+131 Python tests, 63 Node tests, 115 Deno tests, both Edge Function type-checks, and
+`git diff --check`. Gateway v11 and shadow-only policy v3 are now active, but the live allowlist is
+still empty.
 
 ## Remaining gates
 
-1. Reconcile the first scheduled post-market run after the v3 shadow deployment, including its
-   Routine transcript, policy-v2 evaluations, normal renderer-v2 Telegram outcome, shadow preview
-   response, and zero v3 lifecycle writes/sends.
-2. Reconcile the first Friday process-audit receipt and confirm it remains bounded and read-only.
-3. Present at least one real scheduled v3 shadow example to the owner. Do not infer approval from
+1. Reconcile the first Friday process-audit receipt and confirm it remains bounded and read-only.
+2. Present at least one real scheduled v3 shadow example to the owner. Do not infer approval from
    silence or from the synthetic preview.
-4. After explicit owner approval of a real example, enable only the owner-recorded `stop_breach`
+3. After explicit owner approval of a real example, enable only the owner-recorded `stop_breach`
    canary class. Do not enable entry suggestions, target alerts, screening alerts, or the optional
    15-minute monitor in the same change.
-5. Verify one canary end to end: rule version, provider observation time, evaluation/event IDs,
+4. Verify one canary end to end: rule version, provider observation time, evaluation/event IDs,
    publication hash, Telegram API acceptance/message ID, and any acknowledgement receipt.
-6. Keep the optional faster monitor and owner-only read-first dashboard behind their later evidence
+5. Keep the optional faster monitor and owner-only read-first dashboard behind their later evidence
    and security-design gates.

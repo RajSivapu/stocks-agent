@@ -10,18 +10,18 @@ is separate, paper-first, and outside this codebase.
 
 | Capability | Code status | Live status |
 |---|---|---|
-| Pre-market, intraday, and post-market Claude Routines | Receipt-driven prompts implemented | Live in the restricted `stocks-agent` environment; the 2026-09-03 intraday Routine transcript, database chain, and Telegram receipt reconcile, while post-market observation remains pending |
+| Pre-market, intraday, and post-market Claude Routines | Receipt-driven prompts implemented | Live in the restricted `stocks-agent` environment; the 2026-09-03 intraday and post-market Routine transcripts, database chains, and Telegram receipts reconcile |
 | Scoped market gateway and least-privilege Routine client | Implemented and tested | Live; Routine has only Supabase URL, scoped gateway secret, and read-only Finnhub key |
 | Fresh independent packet on every run | Implemented | The first observed scheduled intraday run used same-run quote/history/news evidence instead of mechanically reusing the morning conclusion |
 | Analyst → Checker pass with stale/prior-plan veto | Implemented | Five new intraday Analyst and Checker records were accepted by the gateway on 2026-09-03 |
-| Server-refetched quotes + deterministic sizing/risk policy | Implemented and tested | Live with policy v2; Yahoo's omitted `marketState` is handled from validated provider trading windows |
+| Server-refetched quotes + deterministic sizing/risk policy | Implemented and tested | Live with shadow-only policy v3; Yahoo's omitted `marketState` is handled from validated provider trading windows |
 | Atomic decision/evidence/publication audit trail | Implemented and rollback-tested | Migrations `20260902`–`20260905` applied and production verifiers passed |
 | Deterministic Telegram Buy/Sell/Stop recorder, including delayed trade dates | Implemented, tested, Deno type-checked | Live; owner-confirmed Buy/Sell/Portfolio flows are working |
 | Confirmed `/plan`, `/cancelplan`, and read-only `/plans` reminders | Implemented and rollback-tested | Live; owner-confirmed plan flow was exercised end to end and read back |
 | Deterministic 5/21/63-session outcome grading | Implemented and rollback-tested | Live; results remain empty until eligible gateway decisions reach their horizons |
 | Friday ChatGPT weekly process audit v2 | Packet + skill implemented and tested | Active Fridays 16:30 local on `gpt-5.6-terra`; live packet smoke test passed, first scheduled report pending |
 | Watchlist changes as owner-reviewed proposals | Implemented in settings/skill | Live through the revised Routine; never edits/pushes the checkout |
-| Owner-only alert v3 | Implemented, reviewed, and rollback-tested | Live in shadow-only mode with gateway v9, Telegram v12, and policy v2; a protected dry-run rendered stop/target and `1/1` source-evidence coverage with zero lifecycle writes and no Telegram send; a policy-v3 one-class canary allowlist is tested locally but deliberately not deployed before the scheduled post-market check |
+| Owner-only alert v3 | Implemented, reviewed, and rollback-tested | Live in shadow-only mode with gateway v11, Telegram v12, and policy v3; the corrected protected dry-run rendered policy-validated stop/target and `1/1` source-evidence coverage with zero lifecycle, gateway-request, suggestion, publication, or Telegram writes |
 
 The reliability release is on GitHub `main`. Alert v3 is deployed from
 `codex/owner-alert-v3` for shadow verification and is not yet merged. "Live" means the corresponding
@@ -41,17 +41,14 @@ webhook health, secret rotation, Routine isolation, cloud healthcheck, Telegram 
 production dry-run lifecycles are complete. Both dry runs reported empty writes/message IDs, and
 independent before/after counts across eleven protected tables were unchanged.
 
-The remaining checks are scheduled observation followed by a protected policy/gateway update:
+The remaining checks are scheduled observation followed by an explicitly approved one-class canary:
 
-1. Inspect the first new scheduled post-market receipt and any alert-v3 shadow previews. Confirm
-   request/run, evaluation, suggestion, publication, artifact/grade, and delivery claims agree.
-2. Inspect the first Friday v2 audit and confirm it remains bounded, segmented, and read-only.
-3. After the first scheduled cycle, decide whether synthetic-looking legacy suggestions need a
+1. Inspect the first Friday v2 audit and confirm it remains bounded, segmented, and read-only.
+2. After the first scheduled cycle, decide whether synthetic-looking legacy suggestions need a
    separately approved archival cleanup. Do not mix that destructive data cleanup into this
    release.
-4. Deploy the backward-compatible gateway change and shadow-only policy v3 after the post-market
-   baseline is reconciled. Review a real owner-visible v3 shadow example, then enable only the
-   explicitly approved `stop_breach` class as a canary. Do not enable from a synthetic preview.
+3. Review a real owner-visible v3 shadow example, then enable only the explicitly approved
+   `stop_breach` class as a canary. Do not enable from a synthetic preview.
 
 ## Next reliability work
 
