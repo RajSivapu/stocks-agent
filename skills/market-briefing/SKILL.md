@@ -178,7 +178,7 @@ top-level `comparisons` array. Each item has exactly:
 }
 ```
 
-Allowed relationships are `like_for_like`, `diversifier`, and `peer`. Allowed prospective views are
+Allowed relationships are `like_for_like`, `tilt`, `diversifier`, and `peer`. Allowed prospective views are
 `stronger`, `similar`, `weaker`, and `insufficient`. The evidence IDs must belong to the alternative
 candidate and have current `fresh` or explicitly justified `fallback` status. A provider's peer list
 is only a discovery pool: validate business model, revenue drivers, growth, balance sheet, cash

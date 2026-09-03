@@ -236,7 +236,11 @@ export interface DecisionBundle {
   comparisons?: PortfolioAlternativeRequest[];
 }
 
-export type AlternativeRelationship = "like_for_like" | "diversifier" | "peer";
+export type AlternativeRelationship =
+  | "like_for_like"
+  | "tilt"
+  | "diversifier"
+  | "peer";
 export type ProspectiveView =
   | "stronger"
   | "similar"
@@ -523,6 +527,7 @@ const STANCES = ["bull", "bear", "neutral"] as const;
 const CHECKER_VERDICTS = ["approve", "downgrade", "veto"] as const;
 const ALTERNATIVE_RELATIONSHIPS = [
   "like_for_like",
+  "tilt",
   "diversifier",
   "peer",
 ] as const;

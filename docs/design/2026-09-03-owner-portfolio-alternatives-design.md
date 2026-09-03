@@ -30,6 +30,9 @@ research.
 The initial candidate set is deliberately small. Adding a fund to the research set does not make it
 eligible for an owner recurring plan; plan eligibility remains separately reviewed policy.
 
+The structured relationship vocabulary is `like_for_like`, `tilt`, `diversifier`, and `peer` so a
+large-cap concentration choice such as VOO is not mislabeled as a total-market substitute.
+
 ## Historical method
 
 The model never supplies return numbers. The gateway fetches one year of adjusted daily history for

@@ -215,7 +215,7 @@ Deno.test("decision bundle accepts bounded evidence-linked portfolio comparisons
     comparisons: [{
       baseline_ticker: "CENX",
       alternative_ticker: "ITOT",
-      relationship: "diversifier",
+      relationship: "tilt",
       prospective_view: "stronger",
       reason:
         "The broader fund would reduce single-company concentration risk.",
@@ -224,7 +224,7 @@ Deno.test("decision bundle accepts bounded evidence-linked portfolio comparisons
   });
   const parsed = parseDecisionBundle(bundle, "on-demand");
   assertEquals(parsed.comparisons?.[0].alternative_ticker, "ITOT");
-  assertEquals(parsed.comparisons?.[0].relationship, "diversifier");
+  assertEquals(parsed.comparisons?.[0].relationship, "tilt");
 });
 
 Deno.test("portfolio comparisons reject unknown tickers, evidence, duplicates, and scheduled noise", () => {
