@@ -12,6 +12,7 @@ export type CommandInput =
     fill_price: Price;
     fees: Money;
     cash_total: Money | null;
+    plan_deposit_amount?: Money;
     executed_on: string;
     bucket?: Bucket;
   }
@@ -94,7 +95,7 @@ export function parseCommandInput(value: unknown): CommandInput {
     exactKeys(
       row,
       ["operation", "ticker", "quantity", "fill_price", "fees", "cash_total", "executed_on"],
-      operation === "buy" ? ["bucket"] : [],
+      operation === "buy" ? ["bucket", "plan_deposit_amount"] : [],
     );
     const parsed: Extract<CommandInput, { operation: "buy" | "sell" }> = {
       operation,
@@ -105,8 +106,14 @@ export function parseCommandInput(value: unknown): CommandInput {
       cash_total: nullableMoney(row.cash_total),
       executed_on: calendarDate(row.executed_on, "executed_on"),
     };
-    if (operation === "buy" && row.bucket !== undefined) {
-      return { ...parsed, bucket: bucket(row.bucket) };
+    if (operation === "buy") {
+      return {
+        ...parsed,
+        ...(row.bucket === undefined ? {} : { bucket: bucket(row.bucket) }),
+        ...(row.plan_deposit_amount === undefined
+          ? {}
+          : { plan_deposit_amount: parseMoney(row.plan_deposit_amount) }),
+      };
     }
     return parsed;
   }
@@ -149,8 +156,8 @@ export function parseCommandInput(value: unknown): CommandInput {
       throw new Error("transaction_id must be a UUID");
     }
     const replacement = parseCommandInput(row.replacement);
-    if (replacement.operation === "correct_transaction") {
-      throw new Error("replacement cannot be another correction");
+    if (replacement.operation !== "buy" && replacement.operation !== "sell") {
+      throw new Error("replacement must be a buy or sell");
     }
     return { operation, transaction_id: row.transaction_id, replacement };
   }

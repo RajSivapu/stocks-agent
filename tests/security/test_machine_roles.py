@@ -54,6 +54,16 @@ def test_machine_roles_have_no_cross_role_membership_or_unreviewed_execute(tenan
     ).fetchall()
     assert memberships == []
 
+    expected = {
+        "stock_agent_gateway": set(),
+        "stock_agent_scheduler": set(),
+        "stock_agent_telegram": {
+            "machine.telegram_preview_command(jsonb)",
+            "machine.telegram_confirm_command(jsonb)",
+            "machine.telegram_cancel_command(jsonb)",
+        },
+        "stock_agent_backup": set(),
+    }
     for role in MACHINE_ROLES:
         executable = tenant_database.execute(
             """
@@ -65,4 +75,4 @@ def test_machine_roles_have_no_cross_role_membership_or_unreviewed_execute(tenan
             """,
             (role,),
         ).fetchall()
-        assert executable == []
+        assert {row[0] for row in executable} == expected[role]

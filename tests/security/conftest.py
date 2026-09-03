@@ -14,6 +14,7 @@ ROOT = Path(__file__).resolve().parents[2]
 FOUNDATION_MIGRATION = ROOT / "sql/migrations/20260905_multitenancy_foundation.sql"
 RLS_MIGRATION = ROOT / "sql/migrations/20260906_owner_api_and_machine_roles.sql"
 LEDGER_MIGRATION = ROOT / "sql/migrations/20260907_ledger_projection_commands.sql"
+COMMAND_MIGRATION = ROOT / "sql/migrations/20260908_portfolio_command_state_machine.sql"
 
 
 def _postgres_bin(name: str) -> str:
@@ -270,6 +271,8 @@ def tenant_database(tmp_path_factory):
             connection.execute(RLS_MIGRATION.read_text())
         if LEDGER_MIGRATION.exists():
             connection.execute(LEDGER_MIGRATION.read_text())
+        if COMMAND_MIGRATION.exists():
+            connection.execute(COMMAND_MIGRATION.read_text())
         yield connection
     finally:
         if connection is not None:

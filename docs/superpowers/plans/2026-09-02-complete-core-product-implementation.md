@@ -522,32 +522,32 @@ git commit -m "feat: derive holdings from immutable ledger"
 - Produces: `api.preview_portfolio_command(jsonb)`, `api.confirm_portfolio_command(uuid,text)`,
 `machine.telegram_preview_command(...)`, and `machine.telegram_confirm_command(...)`, all delegating to one private state machine.
 
-- [ ] **Step 1: Write failing state-transition tests**
+- [x] **Step 1: Write failing state-transition tests**
 
 Assert only `submitted -> previewed -> confirmed -> applied` succeeds. Cover cancellation, 15-minute
 expiry, stale ledger sequence, mismatched preview digest, callback replay, same idempotency key with
 different input, amount/quantity/price disagreement, unknown ticker, unclassified first buy, and plan
 advancement at most once.
 
-- [ ] **Step 2: Implement normalized command input**
+- [x] **Step 2: Implement normalized command input**
 
 Buy/sell input carries quantity, fill price, fees, optional broker cash total, execution date, and
 optional bucket. Block confirmation when cash differs from expected by more than
 `max($0.05, 0.1% of expected total)`. Recurring deposit remains a separate plan field.
 
-- [ ] **Step 3: Implement preview digest and optimistic sequence**
+- [x] **Step 3: Implement preview digest and optimistic sequence**
 
 Canonicalize normalized input, before/after projection, warnings, owner, actor, and expected ledger
 sequence; hash with SHA-256. Confirmation re-derives and compares the digest inside the same locked
 transaction.
 
-- [ ] **Step 4: Implement corrections and plans**
+- [x] **Step 4: Implement corrections and plans**
 
 Corrections append void/replacement events. Plans remain reminders, only support USD monthly VTI-style
 core contributions in release one, and advance only after a confirmed same-ticker buy within the
 fixed amount tolerance.
 
-- [ ] **Step 5: Verify and commit**
+- [x] **Step 5: Verify and commit**
 
 Run SQL integration tests, existing verifier, and contract tests. Commit:
 

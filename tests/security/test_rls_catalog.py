@@ -14,6 +14,12 @@ API_VIEWS = {
     "settings",
 }
 
+API_FUNCTIONS = {
+    "api.preview_portfolio_command(jsonb)",
+    "api.confirm_portfolio_command(uuid,text)",
+    "api.cancel_portfolio_command(uuid,text)",
+}
+
 OWNER_TABLES = {
     "profiles",
     "app_admins",
@@ -73,13 +79,18 @@ def test_api_schema_is_an_exact_invoker_view_allowlist(tenant_database):
     assert {name for name, _, _ in rows} == API_VIEWS
     assert all(kind == "v" for _, kind, _ in rows)
     assert all("security_invoker=true" in options for _, _, options in rows)
-    assert tenant_database.execute(
+    functions = tenant_database.execute(
         """
-        SELECT count(*) = 0
+        SELECT p.oid::regprocedure::text, p.prosecdef, p.proowner::regrole::text,
+               p.proconfig
         FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace
         WHERE n.nspname = 'api'
         """
-    ).fetchone()[0]
+    ).fetchall()
+    assert {signature for signature, *_ in functions} == API_FUNCTIONS
+    assert all(security_definer for _, security_definer, _, _ in functions)
+    assert all(owner == "stock_agent_migration_owner" for _, _, owner, _ in functions)
+    assert all("search_path=pg_catalog" in settings for *_, settings in functions)
 
 
 def test_policies_are_authenticated_and_bind_both_owner_checks(tenant_database):
@@ -92,13 +103,29 @@ def test_policies_are_authenticated_and_bind_both_owner_checks(tenant_database):
     ).fetchall()
 
     assert rows
-    for _table, roles, command, using, check in rows:
+    executor_tables = set()
+    for table, roles, command, using, check in rows:
+        if roles == ["stock_agent_migration_owner"]:
+            executor_tables.add(table)
+            assert using == "true"
+            if command == "ALL":
+                assert check == "true"
+            continue
         assert roles == ["authenticated"]
         assert "auth.uid() IS NOT NULL" in (using + check)
         if command in ("INSERT", "UPDATE"):
             assert "auth.uid()" in check
         if command in ("SELECT", "UPDATE", "DELETE"):
             assert "auth.uid()" in using
+    assert executor_tables == {
+        "portfolio_commands",
+        "transactions",
+        "holdings",
+        "owner_ledger_counters",
+        "owner_investment_plans",
+        "profiles",
+        "telegram_links",
+    }
 
 
 def test_base_tables_and_sensitive_columns_are_not_directly_exposed(tenant_database):
