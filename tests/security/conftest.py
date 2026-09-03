@@ -98,6 +98,7 @@ def foundation_database(tmp_path_factory):
             "CREATE TABLE auth.users (id uuid PRIMARY KEY, email text UNIQUE)"
         )
         connection.execute("CREATE TABLE vault.secrets (id uuid PRIMARY KEY, secret text)")
+        connection.execute("CREATE VIEW vault.decrypted_secrets AS SELECT id, secret FROM vault.secrets")
         connection.execute((ROOT / "sql/schema.sql").read_text())
         if FOUNDATION_MIGRATION.exists():
             connection.execute(FOUNDATION_MIGRATION.read_text())
@@ -170,6 +171,7 @@ def tenant_database(tmp_path_factory):
             "CREATE TABLE auth.users (id uuid PRIMARY KEY, email text UNIQUE)"
         )
         connection.execute("CREATE TABLE vault.secrets (id uuid PRIMARY KEY, secret text)")
+        connection.execute("CREATE VIEW vault.decrypted_secrets AS SELECT id, secret FROM vault.secrets")
         connection.execute(
             """
             CREATE FUNCTION auth.uid() RETURNS uuid

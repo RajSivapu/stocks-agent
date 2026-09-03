@@ -42,9 +42,26 @@ def request(public_id, secret, operation, run_id=None, payload=None, request_id=
 
 def start(tenant_database, owner=OWNER_A, phase="intraday", secret="aa" * 32):
     public_id = connection(tenant_database, owner)
+    trigger_request_id = None
+    if phase != "on-demand":
+        connection_id = tenant_database.execute(
+            "SELECT id FROM app.agent_connections WHERE owner_id = %s", (owner,)
+        ).fetchone()[0]
+        trigger_request_id = uuid4()
+        tenant_database.execute(
+            """
+            INSERT INTO app.scheduled_run_slots(
+              owner_id, connection_id, market_date, phase, due_at, window_ends_at,
+              trigger_request_id, status, lease_token
+            ) VALUES (%s, %s, DATE '2026-09-03', %s, now() - interval '1 minute',
+                      now() + interval '1 hour', %s, 'triggered', %s)
+            """,
+            (owner, connection_id, phase, trigger_request_id, uuid4()),
+        )
     result = rpc(tenant_database, "agent_start_run", request(
         public_id, secret, "start_run", payload={
-            "phase": phase, "market_date": "2026-09-03", "trigger_request_id": None,
+            "phase": phase, "market_date": "2026-09-03",
+            "trigger_request_id": str(trigger_request_id) if trigger_request_id else None,
         },
     ))
     return public_id, result["run_id"]
@@ -172,15 +189,32 @@ def test_artifact_rpc_writes_only_allowlisted_owner_rows(tenant_database):
 def test_gateway_limits_six_runs_per_day_and_one_on_demand_per_hour(tenant_database):
     with tenant_database.transaction(force_rollback=True):
         public_id = connection(tenant_database, OWNER_A)
-        for _ in range(6):
-            rpc(tenant_database, "agent_start_run", request(
-                public_id, "aa" * 32, "start_run",
-                payload={"phase": "intraday", "market_date": "2026-09-03", "trigger_request_id": None},
-            ))
+        connection_id = tenant_database.execute(
+            "SELECT id FROM app.agent_connections WHERE owner_id = %s", (OWNER_A,)
+        ).fetchone()[0]
+        tenant_database.execute(
+            """
+            INSERT INTO app.analysis_runs(owner_id, kind, connection_id, market_date)
+            SELECT %s, 'maintenance', %s, DATE '2026-09-03' FROM generate_series(1, 6)
+            """,
+            (OWNER_A, connection_id),
+        )
+        trigger_request_id = uuid4()
+        tenant_database.execute(
+            """
+            INSERT INTO app.scheduled_run_slots(
+              owner_id, connection_id, market_date, phase, due_at, window_ends_at,
+              trigger_request_id, status, lease_token
+            ) VALUES (%s, %s, DATE '2026-09-03', 'post-market', now(), now() + interval '1 hour',
+                      %s, 'triggered', %s)
+            """,
+            (OWNER_A, connection_id, trigger_request_id, uuid4()),
+        )
         with pytest.raises(Exception, match="daily run limit reached"):
             rpc(tenant_database, "agent_start_run", request(
                 public_id, "aa" * 32, "start_run",
-                payload={"phase": "post-market", "market_date": "2026-09-03", "trigger_request_id": None},
+                payload={"phase": "post-market", "market_date": "2026-09-03",
+                         "trigger_request_id": str(trigger_request_id)},
             ))
 
     with tenant_database.transaction(force_rollback=True):

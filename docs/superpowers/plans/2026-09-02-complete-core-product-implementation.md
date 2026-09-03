@@ -869,13 +869,13 @@ git commit -m "feat: add owner scoped analysis gateway"
 - Consumes: five-minute Supabase Cron tick and active Claude connection Vault references.
 - Produces: unique run-slot claims and classified `/fire` trigger attempts containing only an opaque run-request ID.
 
-- [ ] **Step 1: Write failing calendar/lease tests**
+- [x] **Step 1: Write failing calendar/lease tests**
 
 Cover New York DST transitions, 2026-11-01 display behavior, weekends, holidays, early closes,
 pre-market/open-minus-120, intraday/open-plus-210 or early-close open-plus-120, post-close-plus-10,
 duplicate ticks, overlapping Run Now, lease expiry, and delayed starts.
 
-- [ ] **Step 2: Implement canonical slot claims**
+- [x] **Step 2: Implement canonical slot claims**
 
 Create unique `(owner_id, market_date, phase)` rows. `machine.scheduler_claim_due_slots(now, limit)`
 returns only claimed active Claude connections and exact allow-listed trigger endpoints. A canonical run
@@ -885,23 +885,23 @@ Before claiming a slot, atomically consume the owner's daily run allowance and t
 monthly Routine invocation budget in Postgres. Reaching the monthly budget disables non-operator
 triggers and emits one fixed operational alert; an Edge-isolate restart cannot reset either counter.
 
-- [ ] **Step 3: Trigger Claude safely**
+- [x] **Step 3: Trigger Claude safely**
 
 Read the one Routine token through a scheduler-only Vault RPC. Require exact HTTPS host/path validation.
 Send only the opaque request ID wrapped as untrusted text. Record response status and provider session
 URL; redact authorization and URL query data.
 
-- [ ] **Step 4: Classify ambiguity without blind retry**
+- [x] **Step 4: Classify ambiguity without blind retry**
 
 Definite rejection is `trigger_failed`; timeout or disconnect is `trigger_unknown`; neither creates a
 second trigger attempt automatically. A later matching `start_run` resolves an unknown attempt.
 
-- [ ] **Step 5: Handle holidays without a model**
+- [x] **Step 5: Handle holidays without a model**
 
 Before any `/fire`, claim one deterministic pre-market holiday publication per owner. Intraday and
 post-market remain silent; no provider or market research call occurs.
 
-- [ ] **Step 6: Verify and commit**
+- [x] **Step 6: Verify and commit**
 
 Run scheduler tests and a staging Cron/`pg_net` invocation. Commit:
 

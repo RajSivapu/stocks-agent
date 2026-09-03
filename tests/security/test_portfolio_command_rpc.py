@@ -181,12 +181,16 @@ def test_correction_appends_void_and_replacement_through_command(tenant_database
 
 
 def test_plan_is_non_trading_and_advances_once_from_separate_deposit_amount(tenant_database):
+    today = tenant_database.execute("SELECT current_date").fetchone()[0]
+    next_month = tenant_database.execute(
+        "SELECT (%s::date + interval '1 month')::date", (today,)
+    ).fetchone()[0].isoformat()
     plan = preview(tenant_database, {
         "operation": "plan",
         "ticker": "VTI",
         "deposit_amount": "300.00",
         "cadence": "monthly",
-        "next_due_on": "2026-09-02",
+        "next_due_on": today.isoformat(),
         "bucket": "core",
     })
     confirm(tenant_database, plan)
@@ -198,17 +202,18 @@ def test_plan_is_non_trading_and_advances_once_from_separate_deposit_amount(tena
     command = buy_command(
         "VTI", qty="0.789142", price="376.63", fees="0", cash="297.21", bucket="core"
     )
+    command["executed_on"] = today.isoformat()
     command["plan_deposit_amount"] = "300.00"
     receipt = preview(tenant_database, command)
     first = confirm(tenant_database, receipt)
     second = confirm(tenant_database, receipt)
 
-    assert first["result"]["plan_advanced_to"] == "2026-10-02"
-    assert second["result"]["plan_advanced_to"] == "2026-10-02"
+    assert first["result"]["plan_advanced_to"] == next_month
+    assert second["result"]["plan_advanced_to"] == next_month
     assert tenant_database.execute(
         "SELECT next_due_on FROM app.owner_investment_plans WHERE owner_id = %s AND ticker = 'VTI'",
         (OWNER_A,),
-    ).fetchone()[0].isoformat() == "2026-10-02"
+    ).fetchone()[0].isoformat() == next_month
     assert tenant_database.execute(
         "SELECT count(*) FROM app.transactions WHERE owner_id = %s AND ticker = 'VTI'",
         (OWNER_A,),
@@ -216,6 +221,7 @@ def test_plan_is_non_trading_and_advances_once_from_separate_deposit_amount(tena
 
 
 def test_sell_all_stop_plan_cancel_and_cross_owner_confirmation(tenant_database):
+    today = tenant_database.execute("SELECT current_date").fetchone()[0].isoformat()
     buy = confirm(
         tenant_database,
         preview(tenant_database, buy_command("CMDOPS", qty="3", price="10", cash="31.00")),
@@ -250,7 +256,7 @@ def test_sell_all_stop_plan_cancel_and_cross_owner_confirmation(tenant_database)
         "ticker": "ITOT",
         "deposit_amount": "200",
         "cadence": "monthly",
-        "next_due_on": "2026-09-02",
+        "next_due_on": today,
         "bucket": "core",
     }))
     assert plan["result"]["operation"] == "plan"

@@ -270,6 +270,8 @@ CREATE INDEX agent_analysis_submissions_run_idx
 -- to the non-login migration owner used by reviewed SECURITY DEFINER functions.
 CREATE POLICY agent_connections_executor_all ON app.agent_connections
   FOR ALL TO stock_agent_migration_owner USING (true) WITH CHECK (true);
+CREATE POLICY analysis_schedules_executor_all ON app.analysis_schedules
+  FOR ALL TO stock_agent_migration_owner USING (true) WITH CHECK (true);
 CREATE POLICY analysis_runs_executor_all ON app.analysis_runs
   FOR ALL TO stock_agent_migration_owner USING (true) WITH CHECK (true);
 CREATE POLICY market_gateway_requests_executor_all ON app.market_gateway_requests
@@ -476,6 +478,9 @@ DECLARE
   run_uuid UUID := extensions.gen_random_uuid();
   phase_value TEXT;
   market_day DATE;
+  trigger_uuid UUID;
+  slot_row RECORD;
+  slot_found BOOLEAN;
   response JSONB;
 BEGIN
   IF NOT app.jsonb_has_exact_keys(payload, ARRAY['phase','market_date','trigger_request_id'])
@@ -490,7 +495,7 @@ BEGIN
   BEGIN
     market_day := (payload->>'market_date')::date;
     IF payload->'trigger_request_id' <> 'null'::jsonb THEN
-      PERFORM (payload->>'trigger_request_id')::uuid;
+      trigger_uuid := (payload->>'trigger_request_id')::uuid;
     END IF;
   EXCEPTION WHEN invalid_text_representation OR datetime_field_overflow THEN
     RAISE EXCEPTION 'invalid agent request' USING ERRCODE = '22023';
@@ -505,6 +510,34 @@ BEGIN
   connection_uuid := (claim->>'connection_id')::uuid;
   request_uuid := (claim->>'request_id')::uuid;
   phase_value := payload->>'phase';
+
+  IF trigger_uuid IS NULL THEN
+    IF phase_value <> 'on-demand' THEN
+      RAISE EXCEPTION 'agent credential or run unavailable' USING ERRCODE = '42501';
+    END IF;
+  ELSE
+    SELECT * INTO slot_row FROM app.scheduled_run_slots
+    WHERE owner_id = owner_uuid AND connection_id = connection_uuid
+      AND trigger_request_id = trigger_uuid FOR UPDATE;
+    slot_found := FOUND;
+    IF NOT slot_found OR slot_row.holiday OR slot_row.phase <> phase_value
+       OR slot_row.market_date <> market_day
+       OR slot_row.status NOT IN ('claimed','triggered','trigger_unknown','provider_started') THEN
+      RAISE EXCEPTION 'agent credential or run unavailable' USING ERRCODE = '42501';
+    END IF;
+    phase_value := slot_row.phase;
+    market_day := slot_row.market_date;
+    IF slot_row.canonical_run_id IS NOT NULL THEN
+      run_uuid := slot_row.canonical_run_id;
+      UPDATE app.market_gateway_requests SET run_id = run_uuid
+      WHERE owner_id = owner_uuid AND request_id = request_uuid;
+      response := jsonb_build_object(
+        'status', 'running', 'run_id', run_uuid, 'phase', phase_value,
+        'market_date', market_day, 'canonical', true
+      );
+      RETURN machine.agent_complete_operation(owner_uuid, request_uuid, response);
+    END IF;
+  END IF;
 
   PERFORM pg_advisory_xact_lock(hashtextextended(owner_uuid::text || ':' || connection_uuid::text || ':' || market_day::text, 0));
   IF (SELECT count(*) FROM app.analysis_runs
@@ -530,6 +563,14 @@ BEGIN
   UPDATE app.market_gateway_requests
   SET run_id = run_uuid
   WHERE owner_id = owner_uuid AND request_id = request_uuid;
+  IF trigger_uuid IS NOT NULL THEN
+    UPDATE app.scheduled_run_slots SET canonical_run_id = run_uuid,
+      status = 'provider_started', updated_at = clock_timestamp()
+    WHERE owner_id = owner_uuid AND id = slot_row.id;
+    UPDATE app.routine_trigger_attempts SET status = 'provider_started'
+    WHERE owner_id = owner_uuid AND slot_id = slot_row.id
+      AND status IN ('claimed','triggered','trigger_unknown');
+  END IF;
   response := jsonb_build_object(
     'status', 'running', 'run_id', run_uuid, 'phase', phase_value,
     'market_date', market_day
@@ -949,3 +990,493 @@ GRANT EXECUTE ON FUNCTION machine.agent_submit_analysis(JSONB) TO stock_agent_ga
 GRANT EXECUTE ON FUNCTION machine.agent_record_permitted_artifacts(JSONB) TO stock_agent_gateway;
 GRANT EXECUTE ON FUNCTION machine.agent_grade_due_decisions(JSONB) TO stock_agent_gateway;
 GRANT EXECUTE ON FUNCTION machine.agent_finish_run(JSONB) TO stock_agent_gateway;
+
+-- Canonical market-session slots and the release-one Claude Routine trigger adapter.
+
+ALTER TABLE app.agent_connections ADD COLUMN trigger_url TEXT CHECK (
+  trigger_url IS NULL OR trigger_url ~
+    '^https://api\.anthropic\.com/v1/claude_code/routines/trig_[A-Za-z0-9]{6,128}/fire$'
+);
+
+CREATE TABLE app.scheduled_run_slots (
+  id UUID PRIMARY KEY DEFAULT extensions.gen_random_uuid(),
+  owner_id UUID NOT NULL REFERENCES auth.users(id) ON DELETE CASCADE,
+  connection_id UUID NOT NULL,
+  market_date DATE NOT NULL,
+  phase TEXT NOT NULL CHECK (phase IN ('pre-market','intraday','post-market')),
+  due_at TIMESTAMPTZ NOT NULL,
+  window_ends_at TIMESTAMPTZ NOT NULL,
+  holiday BOOLEAN NOT NULL DEFAULT false,
+  trigger_request_id UUID NOT NULL DEFAULT extensions.gen_random_uuid(),
+  canonical_run_id UUID,
+  status TEXT NOT NULL DEFAULT 'pending' CHECK (status IN (
+    'pending','claimed','triggered','trigger_failed','trigger_unknown',
+    'provider_started','completed','missed','holiday_ready','budget_suppressed'
+  )),
+  lease_token UUID,
+  lease_expires_at TIMESTAMPTZ,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  UNIQUE (owner_id, market_date, phase),
+  UNIQUE (owner_id, trigger_request_id),
+  UNIQUE (owner_id, id),
+  FOREIGN KEY (owner_id, connection_id)
+    REFERENCES app.agent_connections(owner_id, id) ON DELETE RESTRICT,
+  FOREIGN KEY (owner_id, canonical_run_id)
+    REFERENCES app.analysis_runs(owner_id, id) ON DELETE RESTRICT,
+  CHECK (window_ends_at > due_at),
+  CHECK ((status = 'pending' AND lease_token IS NULL) OR status <> 'pending')
+);
+
+CREATE TABLE app.routine_trigger_attempts (
+  id UUID PRIMARY KEY DEFAULT extensions.gen_random_uuid(),
+  owner_id UUID NOT NULL REFERENCES auth.users(id) ON DELETE CASCADE,
+  slot_id UUID NOT NULL,
+  connection_id UUID NOT NULL,
+  trigger_request_id UUID NOT NULL,
+  status TEXT NOT NULL DEFAULT 'claimed' CHECK (status IN (
+    'claimed','triggered','trigger_failed','trigger_unknown','provider_started'
+  )),
+  response_status INT CHECK (response_status IS NULL OR response_status BETWEEN 100 AND 599),
+  provider_session_url TEXT CHECK (
+    provider_session_url IS NULL OR provider_session_url ~
+      '^https://claude\.ai/code/session_[A-Za-z0-9_-]{6,200}$'
+  ),
+  response_digest TEXT CHECK (response_digest IS NULL OR response_digest ~ '^[0-9a-f]{64}$'),
+  claimed_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  finished_at TIMESTAMPTZ,
+  UNIQUE (owner_id, slot_id),
+  UNIQUE (owner_id, id),
+  FOREIGN KEY (owner_id, slot_id)
+    REFERENCES app.scheduled_run_slots(owner_id, id) ON DELETE CASCADE,
+  FOREIGN KEY (owner_id, connection_id)
+    REFERENCES app.agent_connections(owner_id, id) ON DELETE RESTRICT
+);
+
+CREATE TABLE app.owner_run_allowances (
+  owner_id UUID NOT NULL REFERENCES auth.users(id) ON DELETE CASCADE,
+  allowance_date DATE NOT NULL,
+  invocation_count INT NOT NULL DEFAULT 0 CHECK (invocation_count BETWEEN 0 AND 6),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  PRIMARY KEY (owner_id, allowance_date)
+);
+
+CREATE TABLE app.operational_events (
+  id UUID PRIMARY KEY DEFAULT extensions.gen_random_uuid(),
+  owner_id UUID NOT NULL REFERENCES auth.users(id) ON DELETE CASCADE,
+  code TEXT NOT NULL CHECK (code ~ '^[A-Z][A-Z0-9_]{2,63}$'),
+  period_key TEXT NOT NULL CHECK (char_length(period_key) BETWEEN 1 AND 32),
+  status TEXT NOT NULL DEFAULT 'open' CHECK (status IN ('open','notified','resolved')),
+  detail JSONB NOT NULL DEFAULT '{}'::jsonb CHECK (
+    jsonb_typeof(detail) = 'object' AND octet_length(detail::text) <= 2000
+  ),
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  UNIQUE (owner_id, code, period_key)
+);
+
+ALTER TABLE app.scheduled_run_slots OWNER TO stock_agent_migration_owner;
+ALTER TABLE app.routine_trigger_attempts OWNER TO stock_agent_migration_owner;
+ALTER TABLE app.owner_run_allowances OWNER TO stock_agent_migration_owner;
+ALTER TABLE app.operational_events OWNER TO stock_agent_migration_owner;
+CREATE TRIGGER reject_owner_id_mutation BEFORE UPDATE OF owner_id ON app.scheduled_run_slots
+  FOR EACH ROW EXECUTE FUNCTION app.reject_owner_id_mutation();
+CREATE TRIGGER reject_owner_id_mutation BEFORE UPDATE OF owner_id ON app.routine_trigger_attempts
+  FOR EACH ROW EXECUTE FUNCTION app.reject_owner_id_mutation();
+CREATE TRIGGER reject_owner_id_mutation BEFORE UPDATE OF owner_id ON app.owner_run_allowances
+  FOR EACH ROW EXECUTE FUNCTION app.reject_owner_id_mutation();
+CREATE TRIGGER reject_owner_id_mutation BEFORE UPDATE OF owner_id ON app.operational_events
+  FOR EACH ROW EXECUTE FUNCTION app.reject_owner_id_mutation();
+ALTER TABLE app.scheduled_run_slots ENABLE ROW LEVEL SECURITY;
+ALTER TABLE app.scheduled_run_slots FORCE ROW LEVEL SECURITY;
+ALTER TABLE app.routine_trigger_attempts ENABLE ROW LEVEL SECURITY;
+ALTER TABLE app.routine_trigger_attempts FORCE ROW LEVEL SECURITY;
+ALTER TABLE app.owner_run_allowances ENABLE ROW LEVEL SECURITY;
+ALTER TABLE app.owner_run_allowances FORCE ROW LEVEL SECURITY;
+ALTER TABLE app.operational_events ENABLE ROW LEVEL SECURITY;
+ALTER TABLE app.operational_events FORCE ROW LEVEL SECURITY;
+CREATE POLICY scheduled_run_slots_executor_all ON app.scheduled_run_slots
+  FOR ALL TO stock_agent_migration_owner USING (true) WITH CHECK (true);
+CREATE POLICY routine_trigger_attempts_executor_all ON app.routine_trigger_attempts
+  FOR ALL TO stock_agent_migration_owner USING (true) WITH CHECK (true);
+CREATE POLICY owner_run_allowances_executor_all ON app.owner_run_allowances
+  FOR ALL TO stock_agent_migration_owner USING (true) WITH CHECK (true);
+CREATE POLICY operational_events_executor_all ON app.operational_events
+  FOR ALL TO stock_agent_migration_owner USING (true) WITH CHECK (true);
+REVOKE ALL ON app.scheduled_run_slots, app.routine_trigger_attempts,
+  app.owner_run_allowances, app.operational_events
+  FROM PUBLIC, anon, authenticated, service_role,
+       stock_agent_gateway, stock_agent_scheduler, stock_agent_telegram, stock_agent_backup;
+CREATE INDEX scheduled_run_slots_due_idx ON app.scheduled_run_slots(status, due_at, window_ends_at);
+CREATE INDEX routine_trigger_attempts_status_idx ON app.routine_trigger_attempts(status, claimed_at);
+CREATE INDEX operational_events_status_idx ON app.operational_events(status, created_at);
+
+CREATE TABLE machine.market_calendar_days (
+  market_date DATE PRIMARY KEY,
+  status TEXT NOT NULL CHECK (status IN ('open','holiday')),
+  early_close BOOLEAN NOT NULL DEFAULT false,
+  reviewed BOOLEAN NOT NULL DEFAULT false,
+  CHECK (status = 'open' OR NOT early_close)
+);
+CREATE TABLE machine.routine_budget_config (
+  singleton BOOLEAN PRIMARY KEY DEFAULT true CHECK (singleton),
+  monthly_limit INT NOT NULL CHECK (monthly_limit BETWEEN 1 AND 100000),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE TABLE machine.routine_monthly_usage (
+  usage_month DATE PRIMARY KEY CHECK (usage_month = date_trunc('month', usage_month)::date),
+  invocation_count INT NOT NULL DEFAULT 0 CHECK (invocation_count >= 0),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+ALTER TABLE machine.market_calendar_days OWNER TO stock_agent_migration_owner;
+ALTER TABLE machine.routine_budget_config OWNER TO stock_agent_migration_owner;
+ALTER TABLE machine.routine_monthly_usage OWNER TO stock_agent_migration_owner;
+REVOKE ALL ON machine.market_calendar_days, machine.routine_budget_config,
+  machine.routine_monthly_usage FROM PUBLIC, anon, authenticated, service_role,
+  stock_agent_gateway, stock_agent_scheduler, stock_agent_telegram, stock_agent_backup;
+INSERT INTO machine.routine_budget_config(singleton, monthly_limit) VALUES (true, 1000);
+INSERT INTO machine.market_calendar_days(market_date, status, early_close, reviewed)
+SELECT day_value::date,
+       CASE WHEN day_value::date = ANY(ARRAY[
+         DATE '2026-01-01', DATE '2026-01-19', DATE '2026-02-16', DATE '2026-04-03',
+         DATE '2026-05-25', DATE '2026-06-19', DATE '2026-07-03', DATE '2026-09-07',
+         DATE '2026-11-26', DATE '2026-12-25'
+       ]) THEN 'holiday' ELSE 'open' END,
+       day_value::date = ANY(ARRAY[DATE '2026-07-02', DATE '2026-11-27', DATE '2026-12-24']),
+       true
+FROM generate_series(DATE '2026-01-01', DATE '2026-12-31', interval '1 day') AS day_value
+WHERE extract(isodow FROM day_value) BETWEEN 1 AND 5;
+
+CREATE OR REPLACE FUNCTION machine.scheduler_claim_due_slots(p_request JSONB)
+RETURNS JSONB
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = pg_catalog
+AS $$
+DECLARE
+  effective_now TIMESTAMPTZ;
+  claim_limit INT;
+  market_day DATE;
+  calendar_row machine.market_calendar_days%ROWTYPE;
+  candidate app.scheduled_run_slots%ROWTYPE;
+  budget_limit INT;
+  usage_month_value DATE;
+  owner_consumed BOOLEAN;
+  product_consumed BOOLEAN;
+  attempt_uuid UUID;
+  slots JSONB := '[]'::jsonb;
+BEGIN
+  IF NOT app.jsonb_has_exact_keys(p_request, ARRAY['now','limit'])
+     OR jsonb_typeof(p_request->'now') <> 'string'
+     OR p_request->>'limit' !~ '^\d{1,2}$' THEN
+    RAISE EXCEPTION 'invalid scheduler request' USING ERRCODE = '22023';
+  END IF;
+  BEGIN effective_now := (p_request->>'now')::timestamptz;
+  EXCEPTION WHEN invalid_text_representation OR datetime_field_overflow THEN
+    RAISE EXCEPTION 'invalid scheduler request' USING ERRCODE = '22023';
+  END;
+  claim_limit := (p_request->>'limit')::int;
+  IF claim_limit NOT BETWEEN 1 AND 20 THEN
+    RAISE EXCEPTION 'invalid scheduler request' USING ERRCODE = '22023';
+  END IF;
+  market_day := (effective_now AT TIME ZONE 'America/New_York')::date;
+  SELECT * INTO calendar_row FROM machine.market_calendar_days
+  WHERE market_date = market_day AND reviewed;
+  IF NOT FOUND THEN RETURN jsonb_build_object('slots', slots, 'calendar_status', 'unavailable'); END IF;
+
+  IF calendar_row.status = 'holiday' THEN
+    INSERT INTO app.scheduled_run_slots(
+      owner_id, connection_id, market_date, phase, due_at, window_ends_at, holiday
+    )
+    SELECT schedule.owner_id, connection.id, market_day, 'pre-market',
+      (market_day + TIME '09:30') AT TIME ZONE 'America/New_York' - interval '120 minutes',
+      (market_day + TIME '09:30') AT TIME ZONE 'America/New_York' - interval '60 minutes', true
+    FROM app.analysis_schedules AS schedule
+    JOIN app.agent_connections AS connection
+      ON connection.owner_id = schedule.owner_id AND connection.id = schedule.primary_connection_id
+    WHERE schedule.pre_market_enabled AND connection.status = 'active'
+      AND connection.provider = 'claude' AND connection.trigger_url IS NOT NULL
+    ON CONFLICT (owner_id, market_date, phase) DO NOTHING;
+  ELSE
+    INSERT INTO app.scheduled_run_slots(
+      owner_id, connection_id, market_date, phase, due_at, window_ends_at, holiday
+    )
+    SELECT schedule.owner_id, connection.id, market_day, phase_value,
+      CASE phase_value
+        WHEN 'pre-market' THEN (market_day + TIME '09:30') AT TIME ZONE 'America/New_York' - interval '120 minutes'
+        WHEN 'intraday' THEN (market_day + TIME '09:30') AT TIME ZONE 'America/New_York'
+          + CASE WHEN calendar_row.early_close THEN interval '120 minutes' ELSE interval '210 minutes' END
+        ELSE (market_day + CASE WHEN calendar_row.early_close THEN TIME '13:00' ELSE TIME '16:00' END)
+          AT TIME ZONE 'America/New_York' + interval '10 minutes'
+      END,
+      CASE phase_value
+        WHEN 'pre-market' THEN (market_day + TIME '09:30') AT TIME ZONE 'America/New_York' - interval '60 minutes'
+        WHEN 'intraday' THEN (market_day + TIME '09:30') AT TIME ZONE 'America/New_York'
+          + CASE WHEN calendar_row.early_close THEN interval '180 minutes' ELSE interval '270 minutes' END
+        ELSE (market_day + CASE WHEN calendar_row.early_close THEN TIME '13:00' ELSE TIME '16:00' END)
+          AT TIME ZONE 'America/New_York' + interval '70 minutes'
+      END,
+      false
+    FROM app.analysis_schedules AS schedule
+    JOIN app.agent_connections AS connection
+      ON connection.owner_id = schedule.owner_id AND connection.id = schedule.primary_connection_id
+    CROSS JOIN unnest(ARRAY['pre-market','intraday','post-market']) AS phase_value
+    WHERE connection.status = 'active' AND connection.provider = 'claude'
+      AND connection.trigger_url IS NOT NULL
+      AND CASE phase_value WHEN 'pre-market' THEN schedule.pre_market_enabled
+          WHEN 'intraday' THEN schedule.intraday_enabled ELSE schedule.post_market_enabled END
+    ON CONFLICT (owner_id, market_date, phase) DO NOTHING;
+  END IF;
+
+  SELECT monthly_limit INTO budget_limit FROM machine.routine_budget_config WHERE singleton;
+  usage_month_value := date_trunc('month', market_day)::date;
+  FOR candidate IN
+    SELECT * FROM app.scheduled_run_slots
+    WHERE market_date = market_day AND status = 'pending'
+      AND due_at <= effective_now AND window_ends_at >= effective_now
+    ORDER BY due_at, owner_id
+    LIMIT claim_limit FOR UPDATE SKIP LOCKED
+  LOOP
+    IF candidate.holiday THEN
+      UPDATE app.scheduled_run_slots SET status = 'claimed', lease_token = extensions.gen_random_uuid(),
+        lease_expires_at = candidate.window_ends_at, updated_at = clock_timestamp()
+      WHERE owner_id = candidate.owner_id AND id = candidate.id;
+      slots := slots || jsonb_build_array(jsonb_build_object(
+        'slot_id', candidate.id, 'trigger_request_id', candidate.trigger_request_id,
+        'phase', candidate.phase, 'market_date', candidate.market_date,
+        'holiday', true, 'attempt_id', null
+      ));
+      CONTINUE;
+    END IF;
+
+    INSERT INTO machine.routine_monthly_usage(usage_month) VALUES (usage_month_value)
+      ON CONFLICT (usage_month) DO NOTHING;
+    UPDATE machine.routine_monthly_usage SET invocation_count = invocation_count + 1,
+      updated_at = clock_timestamp()
+    WHERE routine_monthly_usage.usage_month = usage_month_value
+      AND invocation_count < budget_limit;
+    product_consumed := FOUND;
+    IF NOT product_consumed THEN
+      UPDATE app.scheduled_run_slots SET status = 'budget_suppressed', updated_at = clock_timestamp()
+      WHERE owner_id = candidate.owner_id AND id = candidate.id;
+      INSERT INTO app.operational_events(owner_id, code, period_key)
+      VALUES (candidate.owner_id, 'ROUTINE_MONTHLY_BUDGET_REACHED', to_char(usage_month_value, 'YYYY-MM'))
+      ON CONFLICT (owner_id, code, period_key) DO NOTHING;
+      CONTINUE;
+    END IF;
+
+    INSERT INTO app.owner_run_allowances(owner_id, allowance_date)
+    VALUES (candidate.owner_id, market_day)
+    ON CONFLICT (owner_id, allowance_date) DO NOTHING;
+    UPDATE app.owner_run_allowances SET invocation_count = invocation_count + 1,
+      updated_at = clock_timestamp()
+    WHERE owner_id = candidate.owner_id AND allowance_date = market_day
+      AND invocation_count < 6;
+    owner_consumed := FOUND;
+    IF NOT owner_consumed THEN
+      UPDATE machine.routine_monthly_usage SET invocation_count = invocation_count - 1,
+        updated_at = clock_timestamp() WHERE routine_monthly_usage.usage_month = usage_month_value;
+      UPDATE app.scheduled_run_slots SET status = 'budget_suppressed', updated_at = clock_timestamp()
+      WHERE owner_id = candidate.owner_id AND id = candidate.id;
+      INSERT INTO app.operational_events(owner_id, code, period_key)
+      VALUES (candidate.owner_id, 'OWNER_DAILY_RUN_LIMIT_REACHED', market_day::text)
+      ON CONFLICT (owner_id, code, period_key) DO NOTHING;
+      CONTINUE;
+    END IF;
+
+    attempt_uuid := extensions.gen_random_uuid();
+    UPDATE app.scheduled_run_slots SET status = 'claimed', lease_token = extensions.gen_random_uuid(),
+      lease_expires_at = candidate.window_ends_at, updated_at = clock_timestamp()
+    WHERE owner_id = candidate.owner_id AND id = candidate.id;
+    INSERT INTO app.routine_trigger_attempts(
+      id, owner_id, slot_id, connection_id, trigger_request_id
+    ) VALUES (
+      attempt_uuid, candidate.owner_id, candidate.id, candidate.connection_id,
+      candidate.trigger_request_id
+    );
+    slots := slots || jsonb_build_array(jsonb_build_object(
+      'slot_id', candidate.id, 'trigger_request_id', candidate.trigger_request_id,
+      'phase', candidate.phase, 'market_date', candidate.market_date,
+      'holiday', false, 'attempt_id', attempt_uuid
+    ));
+  END LOOP;
+  RETURN jsonb_build_object('slots', slots, 'calendar_status', calendar_row.status);
+END
+$$;
+
+CREATE OR REPLACE FUNCTION machine.scheduler_read_trigger_secret(p_request JSONB)
+RETURNS JSONB
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = pg_catalog
+AS $$
+DECLARE
+  attempt_uuid UUID;
+  endpoint_value TEXT;
+  token_value TEXT;
+  request_uuid UUID;
+BEGIN
+  IF NOT app.jsonb_has_exact_keys(p_request, ARRAY['attempt_id']) THEN
+    RAISE EXCEPTION 'invalid scheduler request' USING ERRCODE = '22023';
+  END IF;
+  BEGIN attempt_uuid := (p_request->>'attempt_id')::uuid;
+  EXCEPTION WHEN invalid_text_representation THEN
+    RAISE EXCEPTION 'invalid scheduler request' USING ERRCODE = '22023';
+  END;
+  SELECT connection.trigger_url, secret.secret, attempt.trigger_request_id
+  INTO endpoint_value, token_value, request_uuid
+  FROM app.routine_trigger_attempts AS attempt
+  JOIN app.scheduled_run_slots AS slot
+    ON slot.owner_id = attempt.owner_id AND slot.id = attempt.slot_id
+  JOIN app.agent_connections AS connection
+    ON connection.owner_id = attempt.owner_id AND connection.id = attempt.connection_id
+  JOIN vault.decrypted_secrets AS secret ON secret.id = connection.outbound_trigger_secret_id
+  WHERE attempt.id = attempt_uuid AND attempt.status = 'claimed'
+    AND slot.status = 'claimed' AND connection.status = 'active';
+  IF NOT FOUND OR endpoint_value !~
+    '^https://api\.anthropic\.com/v1/claude_code/routines/trig_[A-Za-z0-9]{6,128}/fire$'
+    OR token_value IS NULL OR char_length(token_value) NOT BETWEEN 24 AND 500
+    OR token_value ~ '\s' THEN
+    RAISE EXCEPTION 'scheduler trigger unavailable' USING ERRCODE = '42501';
+  END IF;
+  RETURN jsonb_build_object('endpoint', endpoint_value, 'token', token_value,
+    'trigger_request_id', request_uuid);
+END
+$$;
+
+GRANT USAGE ON SCHEMA vault TO stock_agent_migration_owner;
+GRANT SELECT ON vault.decrypted_secrets TO stock_agent_migration_owner;
+
+CREATE OR REPLACE FUNCTION machine.scheduler_record_trigger_result(p_request JSONB)
+RETURNS JSONB
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = pg_catalog
+AS $$
+DECLARE
+  attempt_uuid UUID;
+  attempt_row app.routine_trigger_attempts%ROWTYPE;
+  status_value TEXT;
+  response_code INT;
+BEGIN
+  IF NOT app.jsonb_has_exact_keys(
+    p_request, ARRAY['attempt_id','status','response_status','session_url','response_digest']
+  ) OR p_request->>'status' NOT IN ('triggered','trigger_failed','trigger_unknown')
+     OR p_request->>'response_digest' !~ '^[0-9a-f]{64}$' THEN
+    RAISE EXCEPTION 'invalid scheduler request' USING ERRCODE = '22023';
+  END IF;
+  BEGIN
+    attempt_uuid := (p_request->>'attempt_id')::uuid;
+    response_code := CASE WHEN p_request->'response_status' = 'null'::jsonb THEN NULL
+      ELSE (p_request->>'response_status')::int END;
+  EXCEPTION WHEN invalid_text_representation THEN
+    RAISE EXCEPTION 'invalid scheduler request' USING ERRCODE = '22023';
+  END;
+  IF response_code IS NOT NULL AND response_code NOT BETWEEN 100 AND 599 THEN
+    RAISE EXCEPTION 'invalid scheduler request' USING ERRCODE = '22023';
+  END IF;
+  IF p_request->'session_url' <> 'null'::jsonb AND p_request->>'session_url' !~
+    '^https://claude\.ai/code/session_[A-Za-z0-9_-]{6,200}$' THEN
+    RAISE EXCEPTION 'invalid scheduler request' USING ERRCODE = '22023';
+  END IF;
+  SELECT * INTO attempt_row FROM app.routine_trigger_attempts
+  WHERE id = attempt_uuid FOR UPDATE;
+  IF NOT FOUND THEN RAISE EXCEPTION 'scheduler trigger unavailable' USING ERRCODE = '42501'; END IF;
+  status_value := p_request->>'status';
+  IF attempt_row.status <> 'claimed' THEN
+    IF attempt_row.status = 'provider_started' AND attempt_row.response_digest IS NULL THEN
+      UPDATE app.routine_trigger_attempts SET
+        response_status = response_code,
+        provider_session_url = CASE WHEN p_request->'session_url' = 'null'::jsonb THEN NULL ELSE p_request->>'session_url' END,
+        response_digest = p_request->>'response_digest', finished_at = clock_timestamp()
+      WHERE id = attempt_uuid;
+      RETURN jsonb_build_object('status', 'provider_started', 'duplicate', false);
+    END IF;
+    IF attempt_row.status = status_value
+       AND attempt_row.response_status IS NOT DISTINCT FROM response_code
+       AND attempt_row.provider_session_url IS NOT DISTINCT FROM nullif(p_request->>'session_url', '')
+       AND attempt_row.response_digest = p_request->>'response_digest' THEN
+      RETURN jsonb_build_object('status', attempt_row.status, 'duplicate', true);
+    END IF;
+    RAISE EXCEPTION 'scheduler result conflict' USING ERRCODE = '23505';
+  END IF;
+  UPDATE app.routine_trigger_attempts SET status = status_value,
+    response_status = response_code,
+    provider_session_url = CASE WHEN p_request->'session_url' = 'null'::jsonb THEN NULL ELSE p_request->>'session_url' END,
+    response_digest = p_request->>'response_digest', finished_at = clock_timestamp()
+  WHERE id = attempt_uuid;
+  UPDATE app.scheduled_run_slots SET status = status_value, updated_at = clock_timestamp()
+  WHERE owner_id = attempt_row.owner_id AND id = attempt_row.slot_id AND status = 'claimed';
+  RETURN jsonb_build_object('status', status_value, 'duplicate', false);
+END
+$$;
+
+CREATE OR REPLACE FUNCTION machine.scheduler_publish_holiday(p_request JSONB)
+RETURNS JSONB
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = pg_catalog
+AS $$
+DECLARE
+  slot_uuid UUID;
+  slot_row app.scheduled_run_slots%ROWTYPE;
+  publication_uuid UUID;
+  body_value TEXT := '🏛 Market closed today — US public holiday. No brief.';
+  body_digest TEXT;
+BEGIN
+  IF NOT app.jsonb_has_exact_keys(p_request, ARRAY['slot_id']) THEN
+    RAISE EXCEPTION 'invalid scheduler request' USING ERRCODE = '22023';
+  END IF;
+  BEGIN slot_uuid := (p_request->>'slot_id')::uuid;
+  EXCEPTION WHEN invalid_text_representation THEN
+    RAISE EXCEPTION 'invalid scheduler request' USING ERRCODE = '22023';
+  END;
+  SELECT * INTO slot_row FROM app.scheduled_run_slots
+  WHERE id = slot_uuid AND holiday AND phase = 'pre-market' FOR UPDATE;
+  IF NOT FOUND THEN RAISE EXCEPTION 'scheduler slot unavailable' USING ERRCODE = '42501'; END IF;
+  SELECT id INTO publication_uuid FROM app.market_publications
+  WHERE owner_id = slot_row.owner_id AND market_date = slot_row.market_date
+    AND phase = 'pre-market' AND kind = 'holiday';
+  IF FOUND THEN RETURN jsonb_build_object('status', 'ready', 'publication_id', publication_uuid, 'duplicate', true); END IF;
+  IF slot_row.status <> 'claimed' THEN
+    RAISE EXCEPTION 'scheduler slot unavailable' USING ERRCODE = '42501';
+  END IF;
+  body_digest := encode(extensions.digest(convert_to(body_value, 'UTF8'), 'sha256'), 'hex');
+  INSERT INTO app.market_gateway_requests(
+    owner_id, request_id, operation, connection_id, input_digest, status,
+    lease_token, response, response_digest, finished_at
+  ) VALUES (
+    slot_row.owner_id, slot_row.trigger_request_id, 'start_run', slot_row.connection_id,
+    encode(extensions.digest(convert_to(slot_row.id::text, 'UTF8'), 'sha256'), 'hex'),
+    'completed', extensions.gen_random_uuid(), jsonb_build_object('holiday', true),
+    encode(extensions.digest(convert_to('{"holiday": true}', 'UTF8'), 'sha256'), 'hex'), clock_timestamp()
+  );
+  publication_uuid := extensions.gen_random_uuid();
+  INSERT INTO app.market_publications(
+    owner_id, id, idempotency_key, run_id, market_date, phase, kind,
+    template_version, rendered_body, rendered_hash, status
+  ) VALUES (
+    slot_row.owner_id, publication_uuid, slot_row.trigger_request_id, NULL,
+    slot_row.market_date, 'pre-market', 'holiday', 1, body_value, body_digest, 'ready'
+  );
+  UPDATE app.scheduled_run_slots SET status = 'holiday_ready', updated_at = clock_timestamp()
+  WHERE owner_id = slot_row.owner_id AND id = slot_uuid;
+  RETURN jsonb_build_object('status', 'ready', 'publication_id', publication_uuid, 'duplicate', false);
+END
+$$;
+
+CREATE POLICY market_publications_executor_all ON app.market_publications
+  FOR ALL TO stock_agent_migration_owner USING (true) WITH CHECK (true);
+
+ALTER FUNCTION machine.scheduler_claim_due_slots(JSONB) OWNER TO stock_agent_migration_owner;
+ALTER FUNCTION machine.scheduler_read_trigger_secret(JSONB) OWNER TO stock_agent_migration_owner;
+ALTER FUNCTION machine.scheduler_record_trigger_result(JSONB) OWNER TO stock_agent_migration_owner;
+ALTER FUNCTION machine.scheduler_publish_holiday(JSONB) OWNER TO stock_agent_migration_owner;
+REVOKE ALL ON FUNCTION machine.scheduler_claim_due_slots(JSONB) FROM PUBLIC;
+REVOKE ALL ON FUNCTION machine.scheduler_read_trigger_secret(JSONB) FROM PUBLIC;
+REVOKE ALL ON FUNCTION machine.scheduler_record_trigger_result(JSONB) FROM PUBLIC;
+REVOKE ALL ON FUNCTION machine.scheduler_publish_holiday(JSONB) FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION machine.scheduler_claim_due_slots(JSONB) TO stock_agent_scheduler;
+GRANT EXECUTE ON FUNCTION machine.scheduler_read_trigger_secret(JSONB) TO stock_agent_scheduler;
+GRANT EXECUTE ON FUNCTION machine.scheduler_record_trigger_result(JSONB) TO stock_agent_scheduler;
+GRANT EXECUTE ON FUNCTION machine.scheduler_publish_holiday(JSONB) TO stock_agent_scheduler;

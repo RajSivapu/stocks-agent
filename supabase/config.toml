@@ -26,3 +26,8 @@ entrypoint = "./functions/app-api/index.ts"
 enabled = true
 verify_jwt = false
 entrypoint = "./functions/agent-gateway/index.ts"
+
+[functions."run-scheduler"]
+enabled = true
+verify_jwt = false
+entrypoint = "./functions/run-scheduler/index.ts"

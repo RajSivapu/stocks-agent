@@ -64,7 +64,12 @@ def test_machine_roles_have_no_cross_role_membership_or_unreviewed_execute(tenan
             "machine.agent_grade_due_decisions(jsonb)",
             "machine.agent_finish_run(jsonb)",
         },
-        "stock_agent_scheduler": set(),
+        "stock_agent_scheduler": {
+            "machine.scheduler_claim_due_slots(jsonb)",
+            "machine.scheduler_read_trigger_secret(jsonb)",
+            "machine.scheduler_record_trigger_result(jsonb)",
+            "machine.scheduler_publish_holiday(jsonb)",
+        },
         "stock_agent_telegram": {
             "machine.telegram_prepare_command(jsonb)",
             "machine.telegram_consume_pairing(jsonb)",
