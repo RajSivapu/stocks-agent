@@ -33,6 +33,7 @@ def as_user(connection, owner_id: str | None, role: str = "authenticated"):
         "connections",
         "telegram_status",
         "settings",
+        "market_quotes",
     ],
 )
 def test_anonymous_cannot_read_any_api_view(tenant_database, view_name):

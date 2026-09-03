@@ -12,6 +12,7 @@ API_VIEWS = {
     "connections",
     "telegram_status",
     "settings",
+    "market_quotes",
 }
 
 API_FUNCTIONS = {
@@ -35,6 +36,8 @@ OWNER_TABLES = {
     "telegram_pairing_deliveries",
     "run_evidence",
     "source_search_receipts",
+    "market_quote_cache",
+    "corporate_action_states",
     "single_owner_migration_receipts",
     "owner_policy_overrides",
     "owner_ledger_counters",
@@ -140,6 +143,8 @@ def test_policies_are_authenticated_and_bind_both_owner_checks(tenant_database):
         "telegram_pairing_deliveries",
         "run_evidence",
         "source_search_receipts",
+        "market_quote_cache",
+        "corporate_action_states",
         "telegram_updates",
         "app_api_rate_limits",
         "app_api_audit_events",

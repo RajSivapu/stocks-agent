@@ -764,26 +764,26 @@ git commit -m "feat: require current run evidence"
 - Produces: `ServerQuote(status: fresh|delayed|stale|conflicting|unavailable)` and
 `CorporateActionState(clear|suspected|needs_review)`.
 
-- [ ] **Step 1: Port current quote/history tests**
+- [x] **Step 1: Port current quote/history tests**
 
 Retain provider timestamp, trading-window-derived state, response-size bounds, split ratios, adjusted
 history, and fail-closed malformed data. Add cross-source conflict, early-close, and owner-watchlist
 quote-cache tests.
 
-- [ ] **Step 2: Implement server quote cache**
+- [x] **Step 2: Implement server quote cache**
 
 Persist provider, source timestamp, retrieval time, session, raw/adjusted status, and content digest.
 Browser views expose only tickers belonging to that owner's holdings/watchlist and never call Yahoo
 directly.
 
-- [ ] **Step 3: Implement corporate-action quarantine**
+- [x] **Step 3: Implement corporate-action quarantine**
 
 Confirmed split/symbol/merger/delisting events normalize comparisons. If the Gate 0 source is missing,
 a large discontinuity plus issuer/exchange check may set `suspected` only. Held symbols in `suspected`
 or `needs_review` suppress stop/target alerts until an audited user confirmation updates quantities and
 levels.
 
-- [ ] **Step 4: Verify and commit**
+- [x] **Step 4: Verify and commit**
 
 Run market-data, policy, outcome, and corporate-action tests. Commit:
 
