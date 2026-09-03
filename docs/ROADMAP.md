@@ -14,7 +14,8 @@ owner-scoped ledger/projection model, RLS and machine-role boundaries, provider 
 Routine adapter, DST-aware scheduling, server-owned evidence/policy/publication flow, seven-screen web
 product, OTP/consent/account lifecycle, Telegram pairing, encrypted-recovery tooling, protected
 deployment workflows, browser acceptance, the guarded owner-cutover controller, and a compact,
-server-context-backed Telegram renderer v2. Renderer v2 is local only and is not deployed.
+server-context-backed Telegram renderer v2. The complete candidate remains undeployed, but renderer
+v2 alone is live on the legacy production gateway from `main` commit `1bdb490`.
 The canonical schema is now generated from the same `supabase/migrations/` directory used by deployment,
 and disposable tests prove both a from-empty replay and the existing-owner upgrade reach that catalog.
 
@@ -41,7 +42,7 @@ new candidate was built and must not be read as evidence for the candidate.
 | Deterministic Telegram Buy/Sell/Stop recorder, including delayed trade dates | Implemented, tested, Deno type-checked | Live; owner-confirmed Buy/Sell/Portfolio flows are working |
 | Confirmed `/plan`, `/cancelplan`, and read-only `/plans` reminders | Implemented and rollback-tested | Live; owner-confirmed plan flow was exercised end to end and read back |
 | Deterministic 5/21/63-session outcome grading | Implemented and rollback-tested | Live; results remain empty until eligible gateway decisions reach their horizons |
-| Compact Telegram publication renderer v2 | Implemented and integration-tested locally | Not deployed; groups portfolio/market/zones/risks/watch/read-more and keeps quiet intraday semantics |
+| Compact Telegram publication renderer v2 | Implemented and integration-tested | Deployed alone to the legacy gateway from `main` commit `1bdb490`; a production dry-run rendered the grouped portfolio/market/zones/risks/watch/read-more preview with empty write counts, no Telegram IDs, and unchanged protected-table counts; the next scheduled phase remains the first live publication receipt |
 | Friday ChatGPT weekly process audit v2 | Packet + skill implemented and tested | Manual production packet passed on 2026-09-03; Friday 16:30 task remains to verify scheduler/delivery only |
 | Watchlist changes as owner-reviewed proposals | Implemented in settings/skill | Live through the revised Routine; never edits/pushes the checkout |
 
@@ -81,9 +82,9 @@ The remaining legacy checks are observation rather than implementation:
 
 ## Next reliability work
 
-- Review the renderer-v2 diff, deploy it through the protected legacy release path, use a dry-run
-  preview to inspect the exact Telegram HTML, and then let the next scheduled phase provide the first
-  live receipt. Do not trigger a duplicate live run for visual testing.
+- Inspect renderer v2's first scheduled publication receipt. The code review, narrow legacy deploy,
+  and exact production dry-run HTML inspection are complete; do not trigger a duplicate live run for
+  visual testing.
 - Observe how owner plan records appear in real briefs before deciding whether a separate proactive
   due-reminder job is useful. Any future reminder remains non-trading and never assumes a fill.
 - Review policy/outcome samples after enough complete 5/21/63-session grades exist; do not change
