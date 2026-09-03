@@ -14,12 +14,14 @@ export const RPC_ALLOWLIST = [
   "scheduler_publish_holiday",
   "telegram_claim_update",
   "telegram_resolve_link",
-  "telegram_preview_command",
-  "telegram_confirm_command",
-  "telegram_cancel_command",
+  "telegram_consume_pairing",
+  "telegram_prepare_command",
+  "telegram_apply_callback",
+  "telegram_unlink",
   "telegram_portfolio",
   "telegram_plans",
   "telegram_record_delivery",
+  "telegram_record_pairing_delivery",
   "backup_export_bundle",
 ] as const;
 
@@ -88,12 +90,14 @@ async function executeRpc(
     case "scheduler_publish_holiday": rows = await transaction`SELECT machine.scheduler_publish_holiday(${value}::jsonb) AS result`; break;
     case "telegram_claim_update": rows = await transaction`SELECT machine.telegram_claim_update(${value}::jsonb) AS result`; break;
     case "telegram_resolve_link": rows = await transaction`SELECT machine.telegram_resolve_link(${value}::jsonb) AS result`; break;
-    case "telegram_preview_command": rows = await transaction`SELECT machine.telegram_preview_command(${value}::jsonb) AS result`; break;
-    case "telegram_confirm_command": rows = await transaction`SELECT machine.telegram_confirm_command(${value}::jsonb) AS result`; break;
-    case "telegram_cancel_command": rows = await transaction`SELECT machine.telegram_cancel_command(${value}::jsonb) AS result`; break;
+    case "telegram_consume_pairing": rows = await transaction`SELECT machine.telegram_consume_pairing(${value}::jsonb) AS result`; break;
+    case "telegram_prepare_command": rows = await transaction`SELECT machine.telegram_prepare_command(${value}::jsonb) AS result`; break;
+    case "telegram_apply_callback": rows = await transaction`SELECT machine.telegram_apply_callback(${value}::jsonb) AS result`; break;
+    case "telegram_unlink": rows = await transaction`SELECT machine.telegram_unlink(${value}::jsonb) AS result`; break;
     case "telegram_portfolio": rows = await transaction`SELECT machine.telegram_portfolio(${value}::jsonb) AS result`; break;
     case "telegram_plans": rows = await transaction`SELECT machine.telegram_plans(${value}::jsonb) AS result`; break;
     case "telegram_record_delivery": rows = await transaction`SELECT machine.telegram_record_delivery(${value}::jsonb) AS result`; break;
+    case "telegram_record_pairing_delivery": rows = await transaction`SELECT machine.telegram_record_pairing_delivery(${value}::jsonb) AS result`; break;
     case "backup_export_bundle": rows = await transaction`SELECT machine.backup_export_bundle(${value}::jsonb) AS result`; break;
   }
   const result = rows[0]?.result;

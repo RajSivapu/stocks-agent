@@ -96,13 +96,13 @@ test("planTickerAllowed uses only a valid active policy broad-core list", () => 
 
 test("plan preview and callback wording cannot imply a brokerage order", () => {
   const preview = planPreviewText({
-    operation: "plan", ticker: "VTI", amount: 300, cadence: "monthly",
+    operation: "plan", ticker: "VTI", deposit_amount: "300", cadence: "monthly",
     next_due_on: "2026-09-21", bucket: "core",
   });
   assert.match(preview, /Preview — record monthly VTI reminder/);
   assert.match(preview, /This records a reminder only; it does not schedule or place a brokerage purchase\./);
   assert.match(planResultText({
-    operation: "plan", ticker: "VTI", amount: 300, cadence: "monthly",
+    operation: "plan", ticker: "VTI", deposit_amount: "300", cadence: "monthly",
     next_due_on: "2026-09-21", bucket: "core",
   }), /Recorded monthly VTI reminder/);
   assert.match(planResultText({ operation: "cancel_plan", ticker: "VTI" }), /Cancelled VTI recurring reminder/);

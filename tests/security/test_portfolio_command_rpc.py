@@ -270,30 +270,39 @@ def test_read_only_command_verifier_accepts_the_migrated_database(tenant_databas
 def test_telegram_machine_role_resolves_owner_and_uses_the_same_state_machine(tenant_database):
     request = {
         "chat_id": 1001,
-        "user_id": 2001,
+        "user_id": 1001,
+        "update_id": 7001,
         "idempotency_key": str(uuid4()),
         "command": buy_command("CMDTG"),
+        "confirm_digest": "a" * 64,
+        "cancel_digest": "b" * 64,
     }
-    with tenant_database.transaction():
+    with tenant_database.transaction(force_rollback=True):
+        tenant_database.execute(
+            "UPDATE app.telegram_links SET telegram_user_id = telegram_chat_id "
+            "WHERE telegram_chat_id = 1001"
+        )
         tenant_database.execute("SET LOCAL ROLE stock_agent_telegram")
         receipt = tenant_database.execute(
-            "SELECT machine.telegram_preview_command(%s::jsonb)", (Jsonb(request),)
+            "SELECT machine.telegram_prepare_command(%s::jsonb)", (Jsonb(request),)
         ).fetchone()[0]
+        assert receipt["claimed"] is True
         applied = tenant_database.execute(
-            "SELECT machine.telegram_confirm_command(%s::jsonb)",
+            "SELECT machine.telegram_apply_callback(%s::jsonb)",
             (Jsonb({
                 "chat_id": 1001,
-                "user_id": 2001,
-                "command_id": receipt["command_id"],
-                "preview_digest": receipt["preview_digest"],
+                "user_id": 1001,
+                "update_id": 7002,
+                "action": "confirm",
+                "token_digest": "a" * 64,
             }),),
         ).fetchone()[0]
-    assert applied["status"] == "applied"
+        assert applied["status"] == "applied"
 
     with tenant_database.transaction(force_rollback=True):
         tenant_database.execute("SET LOCAL ROLE stock_agent_telegram")
         with pytest.raises(Exception, match="telegram link unavailable"):
             tenant_database.execute(
-                "SELECT machine.telegram_preview_command(%s::jsonb)",
-                (Jsonb({**request, "chat_id": 1002}),),
+                "SELECT machine.telegram_prepare_command(%s::jsonb)",
+                (Jsonb({**request, "chat_id": 1002, "user_id": 1002, "update_id": 7003}),),
             )

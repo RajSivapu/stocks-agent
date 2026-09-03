@@ -668,30 +668,30 @@ git commit -m "feat: add secure telegram account pairing"
 - Consumes: Telegram webhook secret, Telegram machine database URL, shared command RPCs, paired chat identity.
 - Produces: fixed previews/confirmations/portfolio/plan/status/help/unlink replies with truthful Telegram receipts.
 
-- [ ] **Step 1: Write failing handler tests**
+- [x] **Step 1: Write failing handler tests**
 
 Prove webhook secret is checked before body parsing, bot token never reaches SQL, no owner environment
 variables remain, one update produces one receipt, unknown acceptance is not retried, private-chat-only
 rules apply, and record-only copy cannot imply order execution.
 
-- [ ] **Step 2: Replace the service-role client**
+- [x] **Step 2: Replace the service-role client**
 
 Use `withDatabase(TELEGRAM_DATABASE_URL, ...)` and only the Telegram role's named machine RPCs. Delete
 `SUPABASE_SERVICE_ROLE_KEY`, `TELEGRAM_OWNER_CHAT_ID`, and `TELEGRAM_OWNER_USER_ID` dependencies.
 
-- [ ] **Step 3: Route all writes through the shared state machine**
+- [x] **Step 3: Route all writes through the shared state machine**
 
 The handler parses text, resolves the active link in SQL, asks for a preview, renders fixed copy, and
 stores the callback token. Confirmation calls the common atomic command RPC; it never writes holdings
 or transactions directly.
 
-- [ ] **Step 4: Classify Telegram delivery**
+- [x] **Step 4: Classify Telegram delivery**
 
 Definite HTTP rejection becomes `delivery_failed`; timeout, disconnect after send, or malformed success
 becomes `delivery_unknown`; neither is blindly retried. Store only Telegram message IDs and bounded
 status facts.
 
-- [ ] **Step 5: Verify and commit**
+- [x] **Step 5: Verify and commit**
 
 Run Deno/Node tests and a staging webhook simulation. Commit:
 

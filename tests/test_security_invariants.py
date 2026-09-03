@@ -63,8 +63,8 @@ def test_gateway_migration_verifier_covers_the_full_release_chain():
 
 
 def test_webhook_acknowledges_non_owner_updates_without_processing_them():
-    source = (ROOT / "supabase" / "functions" / "telegram-portfolio" / "index.ts").read_text()
-    assert "return jsonResponse(200, { ok: true, ignored: true });" in source
+    source = (ROOT / "supabase" / "functions" / "telegram-portfolio" / "handler.ts").read_text()
+    assert "if (!identity) return jsonResponse(200, { ok: true });" in source
     assert "return jsonResponse(403, { ok: false });" not in source
 
 
@@ -274,15 +274,26 @@ def test_owner_plan_migration_is_rls_protected_and_stale_safe():
     assert sql in schema
 
 
-def test_telegram_plan_handler_uses_policy_allowlist_and_bounded_listing():
-    source = (ROOT / "supabase" / "functions" / "telegram-portfolio" / "index.ts").read_text()
-    assert 'from("market_policy_config").select("config")' in source
-    assert 'planTickerAllowed(String(command.ticker), await activePolicy())' in source
-    assert "Only an approved broad Core ETF can use a recurring plan. Nothing changed." in source
-    listing = source[source.index("async function investmentPlansText"):source.index("function previewText")]
-    assert '.eq("active", true).order("next_due_on").limit(20)' in listing
-    assert "planPreviewText(command)" in source
-    assert "planResultText(result)" in source
+def test_telegram_handler_uses_only_machine_database_authority_and_bounded_listing():
+    directory = ROOT / "supabase" / "functions" / "telegram-portfolio"
+    entrypoint = (directory / "index.ts").read_text()
+    handler = (directory / "handler.ts").read_text()
+    repository = (directory / "repository.ts").read_text()
+    migration = (ROOT / "sql" / "migrations" / "20260909_telegram_webhook_runtime.sql").read_text()
+    assert set(re.findall(r'requiredEnvironment\("([A-Z0-9_]+)"\)', entrypoint)) == {
+        "TELEGRAM_WEBHOOK_SECRET",
+        "TELEGRAM_PAIRING_PEPPER",
+        "TELEGRAM_DATABASE_URL",
+        "TELEGRAM_BOT_TOKEN",
+    }
+    for forbidden in ("SUPABASE_SERVICE_ROLE_KEY", "TELEGRAM_OWNER_CHAT_ID", "TELEGRAM_OWNER_USER_ID"):
+        assert forbidden not in entrypoint + handler + repository
+    assert ".from(" not in entrypoint + handler + repository
+    assert "telegram_prepare_command" in repository
+    assert "telegram_apply_callback" in repository
+    assert "telegram_record_pairing_delivery" in repository
+    assert "LIMIT 20" in migration
+    assert "planResultText(value)" in handler
 
 
 def test_outcome_migration_is_bounded_idempotent_and_service_role_only():

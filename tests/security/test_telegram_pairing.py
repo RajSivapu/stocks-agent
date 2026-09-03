@@ -156,24 +156,19 @@ def test_unlink_invalidates_callbacks_and_cancels_pending_commands(tenant_databa
         (OWNER_C, command["command_id"], "d" * 64, "e" * 64),
     )
 
-    with tenant_database.transaction():
-        tenant_database.execute("SET LOCAL ROLE stock_agent_telegram")
-        callback = tenant_database.execute(
-            "SELECT machine.telegram_resolve_callback(%s::jsonb)",
-            (Jsonb({
-                "chat_id": 3001,
-                "user_id": 3001,
-                "token_digest": "d" * 64,
-            }),),
-        ).fetchone()[0]
-    assert callback["action"] == "confirm"
-    assert callback["command_id"] == command["command_id"]
+    callback = tenant_database.execute(
+        "SELECT action, command_id FROM app.telegram_callback_tokens "
+        "WHERE token_digest = decode(%s, 'hex')",
+        ("d" * 64,),
+    ).fetchone()
+    assert callback[0] == "confirm"
+    assert str(callback[1]) == command["command_id"]
 
     with tenant_database.transaction():
         tenant_database.execute("SET LOCAL ROLE stock_agent_telegram")
         result = tenant_database.execute(
             "SELECT machine.telegram_unlink(%s::jsonb)",
-            (Jsonb({"chat_id": 3001, "user_id": 3001}),),
+            (Jsonb({"chat_id": 3001, "user_id": 3001, "update_id": 701}),),
         ).fetchone()[0]
     assert result["status"] == "unlinked"
     assert tenant_database.execute(
@@ -185,12 +180,14 @@ def test_unlink_invalidates_callbacks_and_cancels_pending_commands(tenant_databa
     ).fetchone()[0] == 2
     with tenant_database.transaction(force_rollback=True):
         tenant_database.execute("SET LOCAL ROLE stock_agent_telegram")
-        with pytest.raises(Exception, match="callback unavailable"):
+        with pytest.raises(Exception, match="telegram link unavailable"):
             tenant_database.execute(
-                "SELECT machine.telegram_resolve_callback(%s::jsonb)",
+                "SELECT machine.telegram_apply_callback(%s::jsonb)",
                 (Jsonb({
                     "chat_id": 3001,
                     "user_id": 3001,
+                    "update_id": 702,
+                    "action": "confirm",
                     "token_digest": "d" * 64,
                 }),),
             )
