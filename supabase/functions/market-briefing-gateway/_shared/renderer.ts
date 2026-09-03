@@ -93,6 +93,12 @@ const SOURCE_HOSTS: Array<{ domain: string; label: string }> = [
   { domain: "sec.gov", label: "SEC filings" },
   { domain: "finance.yahoo.com", label: "Yahoo Finance" },
   { domain: "finnhub.io", label: "Finnhub" },
+  { domain: "investor.vanguard.com", label: "Vanguard fund profile" },
+  { domain: "ishares.com", label: "iShares fund profile" },
+  {
+    domain: "schwabassetmanagement.com",
+    label: "Schwab Asset Management",
+  },
   { domain: "federalreserve.gov", label: "Federal Reserve" },
   { domain: "bls.gov", label: "U.S. BLS" },
   { domain: "bea.gov", label: "U.S. BEA" },

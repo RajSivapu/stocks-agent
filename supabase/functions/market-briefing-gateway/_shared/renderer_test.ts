@@ -607,6 +607,23 @@ Deno.test("pre-market comparison separates matched history from the forward evid
     final_action: "watch",
   });
   itot.candidate.action = "watch";
+  itot.candidate.evidence.push({
+    id: "itot-profile",
+    kind: "fundamentals",
+    source: "ishares-fund-profile",
+    status: "fresh",
+    observed_at: "2026-09-03T10:00:00.000Z",
+    retrieved_at: "2026-09-03T10:01:00.000Z",
+    reference:
+      "https://www.ishares.com/us/products/239724/ishares-core-sp-total-us-stock-market-etf",
+    claims: ["Broad U.S. stock-market exposure."],
+  });
+  itot.candidate.factors.push({
+    kind: "fundamentals",
+    stance: "neutral",
+    text: "ITOT covers the broad U.S. stock market.",
+    evidence_ids: ["itot-profile"],
+  });
   const rendered = await renderPublication({
     phase: "pre-market",
     market_date: "2026-09-03",
@@ -655,6 +672,7 @@ Deno.test("pre-market comparison separates matched history from the forward evid
       "Forward evidence: SIMILAR — Both cover the broad U.S. equity market; current evidence shows no durable forward edge.",
       "Your recorded VTI monthly plan is unchanged.",
       "Hypothetical history is not a forecast.",
+      '<a href="https://www.ishares.com/us/products/239724/ishares-core-sp-total-us-stock-market-etf">iShares fund profile</a>',
     ]
   ) {
     assert(
