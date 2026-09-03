@@ -372,14 +372,14 @@ For anonymous, owner A, owner B, revoked A, malformed JWT, wrong-project JWT, an
 every exposed view. Try direct row IDs, alternate owner foreign keys, filters, embeds, range headers,
 and RPC calls. Owner A must receive zero evidence that owner B's rows exist.
 
-- [ ] **Step 2: Implement exact RLS policies**
+- [x] **Step 2: Implement exact RLS policies**
 
 For each owner table, enable and force RLS and install authenticated `SELECT`, `INSERT`, `UPDATE`, and
 `DELETE` policies only where the product needs them. Use
 `owner_id = (SELECT auth.uid())` in both `USING` and `WITH CHECK`; revoke base-table grants from
 `anon` and `authenticated`.
 
-- [ ] **Step 3: Create invoker-only API views**
+- [x] **Step 3: Create invoker-only API views**
 
 Create `api.profile`, `api.today`, `api.holdings`, `api.transactions`, `api.plans`,
 `api.recommendations`, `api.runs`, `api.connections`, `api.telegram_status`, and `api.settings` with
@@ -390,7 +390,7 @@ Create `app.owner_policy_overrides` as schema-only storage for stricter future l
 provider, and Telegram roles no insert/update/delete path; a constraint must reject any value that is
 weaker than the versioned platform ceiling.
 
-- [ ] **Step 4: Lock schema exposure**
+- [x] **Step 4: Lock schema exposure**
 
 Revoke all unexpected functions from `PUBLIC`, `anon`, and `authenticated`; grant only view selects
 and named user RPCs. Add a catalog allow-list test so a new exposed table/function fails CI.
