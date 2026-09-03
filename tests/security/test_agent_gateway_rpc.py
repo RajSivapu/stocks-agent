@@ -272,8 +272,10 @@ def test_analysis_submission_requires_server_owned_current_run_evidence(tenant_d
             "holding_state": [],
             "publication": {
                 "market_date": "2026-09-03", "phase": "intraday", "kind": "brief",
-                "template_version": 1, "rendered_body": "No actionable change.",
-                "rendered_hash": "a" * 64, "status": "suppressed",
+                "template_version": 1, "rendered_body": "",
+                "rendered_parts": [],
+                "rendered_hash": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+                "status": "suppressed",
             },
         }
         with pytest.raises(Exception, match="evidence_missing"):
@@ -322,3 +324,56 @@ def test_analysis_submission_requires_server_owned_current_run_evidence(tenant_d
             "SELECT count(*) FROM app.agent_analysis_submissions WHERE owner_id = %s AND run_id = %s",
             (OWNER_A, run_id),
         ).fetchone()[0] == 1
+
+
+def test_delivery_and_finish_receipts_report_only_persisted_telegram_ids(tenant_database):
+    with tenant_database.transaction(force_rollback=True):
+        public_id, run_id = start(tenant_database)
+        connection_id = tenant_database.execute(
+            "SELECT id FROM app.agent_connections WHERE owner_id = %s", (OWNER_A,)
+        ).fetchone()[0]
+        submit_request_id = uuid4()
+        submit_lease = uuid4()
+        publication_id = uuid4()
+        delivery_lease = uuid4()
+        tenant_database.execute(
+            """
+            INSERT INTO app.market_gateway_requests(
+              owner_id, request_id, operation, run_id, connection_id,
+              input_digest, status, lease_token
+            ) VALUES (%s, %s, 'submit_analysis', %s, %s, repeat('a',64), 'claimed', %s)
+            """,
+            (OWNER_A, submit_request_id, run_id, connection_id, submit_lease),
+        )
+        tenant_database.execute(
+            """
+            INSERT INTO app.market_publications(
+              owner_id, id, idempotency_key, run_id, market_date, phase, kind,
+              template_version, rendered_body, rendered_parts, rendered_hash,
+              status, lease_token, sending_started_at, attempt_count
+            ) VALUES (
+              %s, %s, %s, %s, DATE '2026-09-03', 'intraday', 'entry_trigger',
+              1, 'server-rendered', '["server-rendered"]', repeat('b',64),
+              'sending', %s, now(), 1
+            )
+            """,
+            (OWNER_A, publication_id, submit_request_id, run_id, delivery_lease),
+        )
+        delivered = rpc(tenant_database, "agent_finish_analysis_delivery", {
+            "connection_id": str(public_id), "secret_digest": "aa" * 32,
+            "request_id": str(submit_request_id), "run_id": run_id,
+            "delivery_lease": str(delivery_lease), "status": "delivered",
+            "message_ids": [701],
+        })["response"]
+        assert delivered["publication_status"] == "delivered"
+        assert delivered["telegram_message_ids"] == [701]
+
+        finished = rpc(tenant_database, "agent_finish_run", request(
+            public_id, "aa" * 32, "finish_run", run_id, payload={},
+        ))
+        assert finished["status"] == "completed"
+        assert finished["telegram"] == {"status": "delivered", "message_ids": [701]}
+        assert tenant_database.execute(
+            "SELECT telegram_message_ids, summary FROM app.analysis_runs WHERE owner_id = %s AND id = %s",
+            (OWNER_A, run_id),
+        ).fetchone() == ([701], "Run completed with a recorded Telegram delivery.")

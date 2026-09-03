@@ -6,14 +6,20 @@ import type {
   VerifiedQuote,
 } from "../market-briefing-gateway/_shared/contracts.ts";
 import { evaluateCandidate, type PolicyEvaluation } from "./policy.ts";
-import { applyCorporateActionQuarantine, outcomeDoesNotUpgrade } from "./policy.ts";
+import {
+  applyCorporateActionQuarantine,
+  outcomeDoesNotUpgrade,
+} from "./policy.ts";
 import { renderPublication } from "./renderer.ts";
 import {
-  validateEvidence,
   type EvidenceFailureCode,
   type ServerEvidenceFact,
+  validateEvidence,
 } from "./evidence.ts";
-import type { PacketEvidenceFact, PacketSearchReceipt } from "./evidence-packet.ts";
+import type {
+  PacketEvidenceFact,
+  PacketSearchReceipt,
+} from "./evidence-packet.ts";
 
 export class DecisionError extends Error {
   readonly code: EvidenceFailureCode | "POLICY_REJECTED";
@@ -30,7 +36,9 @@ export type ServerDecisionContext = {
   started_at: string;
   policy: PolicyConfig;
   context: GatewayReadContext;
-  corporate_actions: Array<{ ticker: string; state: "clear" | "suspected" | "needs_review" }>;
+  corporate_actions: Array<
+    { ticker: string; state: "clear" | "suspected" | "needs_review" }
+  >;
 };
 
 export type PreparedDecision = {
@@ -48,29 +56,42 @@ export type PreparedDecision = {
     kind: string;
     template_version: number;
     rendered_body: string;
+    rendered_parts: string[];
     rendered_hash: string;
     status: "ready" | "suppressed";
   };
   parts: string[];
 };
 
-function evidenceKind(category: PacketEvidenceFact["category"]): DecisionCandidate["evidence"][number]["kind"] {
+function evidenceKind(
+  category: PacketEvidenceFact["category"],
+): DecisionCandidate["evidence"][number]["kind"] {
   if (category === "market_snapshot") return "quote";
-  if (category === "filing" || category === "fundamentals") return "fundamentals";
+  if (category === "filing" || category === "fundamentals") {
+    return "fundamentals";
+  }
   if (category === "technicals") return "technicals";
   if (category === "news" || category === "source_search") return "news";
   return "event";
 }
 
-function evidenceStatus(status: PacketEvidenceFact["status"]): DecisionCandidate["evidence"][number]["status"] {
-  if (status === "fresh" || status === "clear" || status === "no_new_material_evidence") return "fresh";
+function evidenceStatus(
+  status: PacketEvidenceFact["status"],
+): DecisionCandidate["evidence"][number]["status"] {
+  if (
+    status === "fresh" || status === "clear" ||
+    status === "no_new_material_evidence"
+  ) return "fresh";
   if (status === "stale") return "stale";
   if (status === "conflicting") return "conflicting";
   if (status === "missing") return "missing";
   return "unsupported";
 }
 
-function validationFacts(runId: string, facts: PacketEvidenceFact[]): ServerEvidenceFact[] {
+function validationFacts(
+  runId: string,
+  facts: PacketEvidenceFact[],
+): ServerEvidenceFact[] {
   return facts.map((fact) => ({
     evidenceId: fact.evidence_id,
     runId,
@@ -87,7 +108,10 @@ function validationFacts(runId: string, facts: PacketEvidenceFact[]): ServerEvid
   }));
 }
 
-function verifiedCandidate(candidate: DecisionCandidate, facts: Map<string, PacketEvidenceFact>): DecisionCandidate {
+function verifiedCandidate(
+  candidate: DecisionCandidate,
+  facts: Map<string, PacketEvidenceFact>,
+): DecisionCandidate {
   const evidence = [...facts.values()].map((fact) => ({
     id: fact.evidence_id,
     kind: evidenceKind(fact.category),
@@ -99,17 +123,27 @@ function verifiedCandidate(candidate: DecisionCandidate, facts: Map<string, Pack
     claims: fact.claims,
   }));
   const known = new Set(evidence.map((item) => item.id));
-  if (candidate.factors.some((factor) => factor.evidence_ids.some((id) => !known.has(id)))) {
+  if (
+    candidate.factors.some((factor) =>
+      factor.evidence_ids.some((id) => !known.has(id))
+    )
+  ) {
     throw new DecisionError("evidence_missing");
   }
   return { ...structuredClone(candidate), evidence };
 }
 
-function suggestion(evaluation: PolicyEvaluation, marketDate: string): Record<string, unknown> | null {
-  if (evaluation.final_action === null || evaluation.status === "vetoed") return null;
+function suggestion(
+  evaluation: PolicyEvaluation,
+  marketDate: string,
+): Record<string, unknown> | null {
+  if (evaluation.final_action === null || evaluation.status === "vetoed") {
+    return null;
+  }
   const candidate = evaluation.candidate;
   const joined = (stance: "bull" | "bear") => {
-    const text = candidate.factors.filter((factor) => factor.stance === stance).map((factor) => factor.text).join(" ");
+    const text = candidate.factors.filter((factor) => factor.stance === stance)
+      .map((factor) => factor.text).join(" ");
     return text || null;
   };
   return {
@@ -132,7 +166,9 @@ function suggestion(evaluation: PolicyEvaluation, marketDate: string): Record<st
     decisive_factor: candidate.decisive_factor,
     risk_verdict: evaluation.status,
     reason: evaluation.reason_codes.join(","),
-    score: candidate.health_score === null ? null : Math.round(Number(candidate.health_score)),
+    score: candidate.health_score === null
+      ? null
+      : Math.round(Number(candidate.health_score)),
     price_at_suggestion: evaluation.normalized.verified_price,
     evidence_as_of: evaluation.normalized.quote_as_of,
     invalidation_price: candidate.invalidation_price,
@@ -141,8 +177,10 @@ function suggestion(evaluation: PolicyEvaluation, marketDate: string): Record<st
 
 async function sha256(value: unknown): Promise<string> {
   const bytes = new TextEncoder().encode(JSON.stringify(value));
-  return Array.from(new Uint8Array(await crypto.subtle.digest("SHA-256", bytes)),
-    (byte) => byte.toString(16).padStart(2, "0")).join("");
+  return Array.from(
+    new Uint8Array(await crypto.subtle.digest("SHA-256", bytes)),
+    (byte) => byte.toString(16).padStart(2, "0"),
+  ).join("");
 }
 
 export async function prepareDecision(
@@ -155,23 +193,37 @@ export async function prepareDecision(
   now: Date,
   newId: () => string = () => crypto.randomUUID(),
 ): Promise<PreparedDecision> {
-  if (submission.phase !== server.phase || submission.market_date !== server.market_date) {
+  if (
+    submission.phase !== server.phase ||
+    submission.market_date !== server.market_date
+  ) {
     throw new DecisionError("evidence_stale");
   }
-  const validation = validateEvidence({
-    runId: server.run_id,
-    phase: server.phase,
-    marketDate: server.market_date,
-    startedAt: server.started_at,
-  }, submission, validationFacts(server.run_id, facts), now.toISOString());
+  const validation = validateEvidence(
+    {
+      runId: server.run_id,
+      phase: server.phase,
+      marketDate: server.market_date,
+      startedAt: server.started_at,
+    },
+    submission,
+    validationFacts(server.run_id, facts),
+    now.toISOString(),
+  );
   if (!validation.ok) throw new DecisionError(validation.code);
-  if (!searchReceipts.some((receipt) => receipt.result_status !== "source_unavailable" &&
-    Date.parse(receipt.searched_at) >= Date.parse(server.started_at))) {
+  if (
+    !searchReceipts.some((receipt) =>
+      receipt.result_status !== "source_unavailable" &&
+      Date.parse(receipt.searched_at) >= Date.parse(server.started_at)
+    )
+  ) {
     throw new DecisionError("evidence_missing");
   }
   const factMap = new Map(facts.map((fact) => [fact.evidence_id, fact]));
   const quoteMap = new Map(quotes.map((quote) => [quote.ticker, quote]));
-  const corporateActions = new Map(server.corporate_actions.map((item) => [item.ticker, item.state]));
+  const corporateActions = new Map(
+    server.corporate_actions.map((item) => [item.ticker, item.state]),
+  );
   const policyContext = structuredClone(server.context);
   policyContext.holding_quotes = Object.fromEntries(
     policyContext.holdings.flatMap((holding) => {
@@ -181,51 +233,73 @@ export async function prepareDecision(
   );
   const evaluations = strictCandidates.map((candidate) => {
     let checked = verifiedCandidate(candidate, factMap);
-    checked = applyCorporateActionQuarantine(checked, corporateActions.get(checked.ticker) ?? "clear");
-    const evaluated = evaluateCandidate(checked, policyContext, server.policy,
-      quoteMap.get(checked.ticker) ?? null, now, newId);
-    if (evaluated.final_action !== null && !outcomeDoesNotUpgrade(candidate.action, evaluated.final_action)) {
+    checked = applyCorporateActionQuarantine(
+      checked,
+      corporateActions.get(checked.ticker) ?? "clear",
+    );
+    const evaluated = evaluateCandidate(
+      checked,
+      policyContext,
+      server.policy,
+      quoteMap.get(checked.ticker) ?? null,
+      now,
+      newId,
+    );
+    if (
+      evaluated.final_action !== null &&
+      !outcomeDoesNotUpgrade(candidate.action, evaluated.final_action)
+    ) {
       throw new DecisionError("POLICY_REJECTED");
     }
     return evaluated;
   });
-  const suggestions = evaluations.map((item) => suggestion(item, server.market_date))
+  const suggestions = evaluations.map((item) =>
+    suggestion(item, server.market_date)
+  )
     .filter((item): item is Record<string, unknown> => item !== null);
   const rendered = await renderPublication({
     phase: server.phase,
     market_date: server.market_date,
     evaluations,
   });
-  const persistedEvaluations = await Promise.all(evaluations.map(async (evaluation) => ({
-    id: evaluation.evaluation_id,
-    candidate_id: evaluation.candidate_id,
-    input_digest: await sha256(evaluation.candidate),
-    raw_action: evaluation.raw_action,
-    final_action: evaluation.final_action,
-    policy_status: evaluation.status,
-    reason_codes: evaluation.reason_codes,
-    explanations: evaluation.explanations,
-    normalized: evaluation.normalized,
-    evidence: evaluation.candidate.evidence,
-    analyst: evaluation.candidate.analyst,
-    checker: evaluation.candidate.checker,
-  })));
+  const persistedEvaluations = await Promise.all(
+    evaluations.map(async (evaluation) => ({
+      id: evaluation.evaluation_id,
+      candidate_id: evaluation.candidate_id,
+      input_digest: await sha256(evaluation.candidate),
+      raw_action: evaluation.raw_action,
+      final_action: evaluation.final_action,
+      policy_status: evaluation.status,
+      reason_codes: evaluation.reason_codes,
+      explanations: evaluation.explanations,
+      normalized: evaluation.normalized,
+      evidence: evaluation.candidate.evidence,
+      analyst: evaluation.candidate.analyst,
+      checker: evaluation.candidate.checker,
+    })),
+  );
   const { evidence_packets: _packets, ...providerSubmission } = submission;
   return {
     provider_submission: providerSubmission,
     evidence: facts,
     search_receipts: searchReceipts,
-    policy_quotes: quotes.map((quote) => ({ ...quote, retrieved_at: now.toISOString() })),
+    policy_quotes: quotes.map((quote) => ({
+      ...quote,
+      retrieved_at: now.toISOString(),
+    })),
     policy_version: server.policy.version,
     evaluations: persistedEvaluations,
     suggestions,
-    holding_state: evaluations.flatMap((item) => item.holding_state_change ? [item.holding_state_change] : []),
+    holding_state: evaluations.flatMap((item) =>
+      item.holding_state_change ? [item.holding_state_change] : []
+    ),
     publication: {
       market_date: server.market_date,
       phase: server.phase,
       kind: rendered.kind,
       template_version: 1,
       rendered_body: rendered.body,
+      rendered_parts: rendered.parts,
       rendered_hash: rendered.hash,
       status: rendered.status,
     },

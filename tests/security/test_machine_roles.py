@@ -71,6 +71,13 @@ def test_machine_roles_have_no_cross_role_membership_or_unreviewed_execute(tenan
             "machine.scheduler_read_trigger_secret(jsonb)",
             "machine.scheduler_record_trigger_result(jsonb)",
             "machine.scheduler_publish_holiday(jsonb)",
+            "machine.scheduler_run_maintenance(jsonb)",
+            "machine.scheduler_claim_publications(jsonb)",
+            "machine.scheduler_finish_publication(jsonb)",
+            "machine.scheduler_claim_operational_alerts(jsonb)",
+            "machine.scheduler_finish_operational_alert(jsonb)",
+            "machine.scheduler_read_due_decisions(jsonb)",
+            "machine.scheduler_apply_outcome_grades(jsonb)",
         },
         "stock_agent_telegram": {
             "machine.telegram_prepare_command(jsonb)",

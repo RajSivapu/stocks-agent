@@ -12,6 +12,8 @@ CREATE TABLE app.telegram_pairing_codes (
 );
 CREATE UNIQUE INDEX telegram_pairing_codes_one_active_owner_idx
   ON app.telegram_pairing_codes(owner_id) WHERE consumed_at IS NULL;
+CREATE INDEX telegram_pairing_codes_expiry_idx
+  ON app.telegram_pairing_codes(expires_at) WHERE consumed_at IS NULL;
 ALTER TABLE app.telegram_pairing_codes OWNER TO stock_agent_migration_owner;
 ALTER TABLE app.telegram_pairing_codes ENABLE ROW LEVEL SECURITY;
 ALTER TABLE app.telegram_pairing_codes FORCE ROW LEVEL SECURITY;
@@ -37,6 +39,11 @@ CREATE TABLE app.telegram_callback_tokens (
   CHECK (expires_at > created_at),
   CHECK (consumed_at IS NULL OR invalidated_at IS NULL)
 );
+CREATE INDEX telegram_callback_tokens_expiry_idx
+  ON app.telegram_callback_tokens(expires_at)
+  WHERE consumed_at IS NULL AND invalidated_at IS NULL;
+CREATE INDEX telegram_updates_retention_idx
+  ON app.telegram_updates(received_at);
 ALTER TABLE app.telegram_callback_tokens OWNER TO stock_agent_migration_owner;
 ALTER TABLE app.telegram_callback_tokens ENABLE ROW LEVEL SECURITY;
 ALTER TABLE app.telegram_callback_tokens FORCE ROW LEVEL SECURITY;

@@ -978,28 +978,28 @@ git commit -m "feat: add claude connection handshake"
 - Consumes: run slots, publications, commands, links, quote status, and retention cutoffs.
 - Produces: truthful run health, missed-run alerts, expiry cleanup, nightly projection verification, and exactly-once owner notifications.
 
-- [ ] **Step 1: Write failing exactly-once tests**
+- [x] **Step 1: Write failing exactly-once tests**
 
 Cover duplicate publication claims, quiet intraday, failed/unknown Telegram, missed slot, disconnected
 provider, revoked Telegram link, partial run, provider green/application incomplete, corporate-action
 suppression, and projection mismatch.
 
-- [ ] **Step 2: Implement one publication state machine**
+- [x] **Step 2: Implement one publication state machine**
 
 Use `ready -> sending -> delivered|suppressed|delivery_failed|delivery_unknown`. Only the server renderer
 creates message text; only a successful Telegram response may produce `delivered` and message IDs.
 
-- [ ] **Step 3: Implement deterministic maintenance**
+- [x] **Step 3: Implement deterministic maintenance**
 
 Expire commands/pairing codes, delete 30-day Telegram dedupe rows, detect missed windows, verify
 holdings, refresh bounded run health, and invoke outcome grading. Cron never generates investment prose.
 
-- [ ] **Step 4: Separate operational alerts**
+- [x] **Step 4: Separate operational alerts**
 
 Missed runs, disconnected providers, backup age, and projection failures use fixed operational copy
 without tickers, quantities, cost basis, recommendation text, or owner identity.
 
-- [ ] **Step 5: Verify and commit**
+- [x] **Step 5: Verify and commit**
 
 Run scheduling/publication tests and existing behavioral eval cases. Commit:
 

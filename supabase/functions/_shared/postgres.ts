@@ -1,6 +1,5 @@
 import postgres from "npm:postgres@3.4.9";
 
-
 export const RPC_ALLOWLIST = [
   "agent_start_run",
   "agent_read_bounded_context",
@@ -14,6 +13,13 @@ export const RPC_ALLOWLIST = [
   "scheduler_read_trigger_secret",
   "scheduler_record_trigger_result",
   "scheduler_publish_holiday",
+  "scheduler_run_maintenance",
+  "scheduler_claim_publications",
+  "scheduler_finish_publication",
+  "scheduler_claim_operational_alerts",
+  "scheduler_finish_operational_alert",
+  "scheduler_read_due_decisions",
+  "scheduler_apply_outcome_grades",
   "telegram_claim_update",
   "telegram_resolve_link",
   "telegram_consume_pairing",
@@ -29,17 +35,26 @@ export const RPC_ALLOWLIST = [
 
 export type RpcName = typeof RPC_ALLOWLIST[number];
 export type RpcClient = {
-  callJsonRpc(name: RpcName, args: Record<string, unknown>): Promise<Record<string, unknown>>;
+  callJsonRpc(
+    name: RpcName,
+    args: Record<string, unknown>,
+  ): Promise<Record<string, unknown>>;
 };
 
 type TaggedSql = {
-  (strings: TemplateStringsArray, ...values: unknown[]): Promise<Array<Record<string, unknown>>>;
+  (
+    strings: TemplateStringsArray,
+    ...values: unknown[]
+  ): Promise<Array<Record<string, unknown>>>;
   begin<T>(callback: (transaction: TaggedSql) => Promise<T>): Promise<T>;
   end(options?: { timeout?: number }): Promise<void>;
   json(value: unknown): unknown;
 };
 
-type PostgresFactory = (url: string, options: Record<string, unknown>) => TaggedSql;
+type PostgresFactory = (
+  url: string,
+  options: Record<string, unknown>,
+) => TaggedSql;
 
 export function validateDatabaseUrl(databaseUrl: string): string {
   let url: URL;
@@ -54,7 +69,9 @@ export function validateDatabaseUrl(databaseUrl: string): string {
     url.port !== "5432" || !url.username.includes(".") || !url.password ||
     url.pathname !== "/postgres" || url.search || url.hash
   ) {
-    throw new Error("database URL must use the IPv4 Supavisor session endpoint on port 5432");
+    throw new Error(
+      "database URL must use the IPv4 Supavisor session endpoint on port 5432",
+    );
   }
   return databaseUrl;
 }
@@ -80,32 +97,132 @@ async function executeRpc(
   let rows: Array<Record<string, unknown>>;
   const value = transaction.json(args);
   switch (name) {
-    case "agent_start_run": rows = await transaction`SELECT machine.agent_start_run(${value}::jsonb) AS result`; break;
-    case "agent_read_bounded_context": rows = await transaction`SELECT machine.agent_read_bounded_context(${value}::jsonb) AS result`; break;
-    case "agent_submit_analysis": rows = await transaction`SELECT machine.agent_submit_analysis(${value}::jsonb) AS result`; break;
-    case "agent_record_permitted_artifacts": rows = await transaction`SELECT machine.agent_record_permitted_artifacts(${value}::jsonb) AS result`; break;
-    case "agent_grade_due_decisions": rows = await transaction`SELECT machine.agent_grade_due_decisions(${value}::jsonb) AS result`; break;
-    case "agent_finish_run": rows = await transaction`SELECT machine.agent_finish_run(${value}::jsonb) AS result`; break;
-    case "agent_apply_analysis": rows = await transaction`SELECT machine.agent_apply_analysis(${value}::jsonb) AS result`; break;
-    case "agent_finish_analysis_delivery": rows = await transaction`SELECT machine.agent_finish_analysis_delivery(${value}::jsonb) AS result`; break;
-    case "scheduler_claim_due_slots": rows = await transaction`SELECT machine.scheduler_claim_due_slots(${value}::jsonb) AS result`; break;
-    case "scheduler_read_trigger_secret": rows = await transaction`SELECT machine.scheduler_read_trigger_secret(${value}::jsonb) AS result`; break;
-    case "scheduler_record_trigger_result": rows = await transaction`SELECT machine.scheduler_record_trigger_result(${value}::jsonb) AS result`; break;
-    case "scheduler_publish_holiday": rows = await transaction`SELECT machine.scheduler_publish_holiday(${value}::jsonb) AS result`; break;
-    case "telegram_claim_update": rows = await transaction`SELECT machine.telegram_claim_update(${value}::jsonb) AS result`; break;
-    case "telegram_resolve_link": rows = await transaction`SELECT machine.telegram_resolve_link(${value}::jsonb) AS result`; break;
-    case "telegram_consume_pairing": rows = await transaction`SELECT machine.telegram_consume_pairing(${value}::jsonb) AS result`; break;
-    case "telegram_prepare_command": rows = await transaction`SELECT machine.telegram_prepare_command(${value}::jsonb) AS result`; break;
-    case "telegram_apply_callback": rows = await transaction`SELECT machine.telegram_apply_callback(${value}::jsonb) AS result`; break;
-    case "telegram_unlink": rows = await transaction`SELECT machine.telegram_unlink(${value}::jsonb) AS result`; break;
-    case "telegram_portfolio": rows = await transaction`SELECT machine.telegram_portfolio(${value}::jsonb) AS result`; break;
-    case "telegram_plans": rows = await transaction`SELECT machine.telegram_plans(${value}::jsonb) AS result`; break;
-    case "telegram_record_delivery": rows = await transaction`SELECT machine.telegram_record_delivery(${value}::jsonb) AS result`; break;
-    case "telegram_record_pairing_delivery": rows = await transaction`SELECT machine.telegram_record_pairing_delivery(${value}::jsonb) AS result`; break;
-    case "backup_export_bundle": rows = await transaction`SELECT machine.backup_export_bundle(${value}::jsonb) AS result`; break;
+    case "agent_start_run":
+      rows =
+        await transaction`SELECT machine.agent_start_run(${value}::jsonb) AS result`;
+      break;
+    case "agent_read_bounded_context":
+      rows =
+        await transaction`SELECT machine.agent_read_bounded_context(${value}::jsonb) AS result`;
+      break;
+    case "agent_submit_analysis":
+      rows =
+        await transaction`SELECT machine.agent_submit_analysis(${value}::jsonb) AS result`;
+      break;
+    case "agent_record_permitted_artifacts":
+      rows =
+        await transaction`SELECT machine.agent_record_permitted_artifacts(${value}::jsonb) AS result`;
+      break;
+    case "agent_grade_due_decisions":
+      rows =
+        await transaction`SELECT machine.agent_grade_due_decisions(${value}::jsonb) AS result`;
+      break;
+    case "agent_finish_run":
+      rows =
+        await transaction`SELECT machine.agent_finish_run(${value}::jsonb) AS result`;
+      break;
+    case "agent_apply_analysis":
+      rows =
+        await transaction`SELECT machine.agent_apply_analysis(${value}::jsonb) AS result`;
+      break;
+    case "agent_finish_analysis_delivery":
+      rows =
+        await transaction`SELECT machine.agent_finish_analysis_delivery(${value}::jsonb) AS result`;
+      break;
+    case "scheduler_claim_due_slots":
+      rows =
+        await transaction`SELECT machine.scheduler_claim_due_slots(${value}::jsonb) AS result`;
+      break;
+    case "scheduler_read_trigger_secret":
+      rows =
+        await transaction`SELECT machine.scheduler_read_trigger_secret(${value}::jsonb) AS result`;
+      break;
+    case "scheduler_record_trigger_result":
+      rows =
+        await transaction`SELECT machine.scheduler_record_trigger_result(${value}::jsonb) AS result`;
+      break;
+    case "scheduler_publish_holiday":
+      rows =
+        await transaction`SELECT machine.scheduler_publish_holiday(${value}::jsonb) AS result`;
+      break;
+    case "scheduler_run_maintenance":
+      rows =
+        await transaction`SELECT machine.scheduler_run_maintenance(${value}::jsonb) AS result`;
+      break;
+    case "scheduler_claim_publications":
+      rows =
+        await transaction`SELECT machine.scheduler_claim_publications(${value}::jsonb) AS result`;
+      break;
+    case "scheduler_finish_publication":
+      rows =
+        await transaction`SELECT machine.scheduler_finish_publication(${value}::jsonb) AS result`;
+      break;
+    case "scheduler_claim_operational_alerts":
+      rows =
+        await transaction`SELECT machine.scheduler_claim_operational_alerts(${value}::jsonb) AS result`;
+      break;
+    case "scheduler_finish_operational_alert":
+      rows =
+        await transaction`SELECT machine.scheduler_finish_operational_alert(${value}::jsonb) AS result`;
+      break;
+    case "scheduler_read_due_decisions":
+      rows =
+        await transaction`SELECT machine.scheduler_read_due_decisions(${value}::jsonb) AS result`;
+      break;
+    case "scheduler_apply_outcome_grades":
+      rows =
+        await transaction`SELECT machine.scheduler_apply_outcome_grades(${value}::jsonb) AS result`;
+      break;
+    case "telegram_claim_update":
+      rows =
+        await transaction`SELECT machine.telegram_claim_update(${value}::jsonb) AS result`;
+      break;
+    case "telegram_resolve_link":
+      rows =
+        await transaction`SELECT machine.telegram_resolve_link(${value}::jsonb) AS result`;
+      break;
+    case "telegram_consume_pairing":
+      rows =
+        await transaction`SELECT machine.telegram_consume_pairing(${value}::jsonb) AS result`;
+      break;
+    case "telegram_prepare_command":
+      rows =
+        await transaction`SELECT machine.telegram_prepare_command(${value}::jsonb) AS result`;
+      break;
+    case "telegram_apply_callback":
+      rows =
+        await transaction`SELECT machine.telegram_apply_callback(${value}::jsonb) AS result`;
+      break;
+    case "telegram_unlink":
+      rows =
+        await transaction`SELECT machine.telegram_unlink(${value}::jsonb) AS result`;
+      break;
+    case "telegram_portfolio":
+      rows =
+        await transaction`SELECT machine.telegram_portfolio(${value}::jsonb) AS result`;
+      break;
+    case "telegram_plans":
+      rows =
+        await transaction`SELECT machine.telegram_plans(${value}::jsonb) AS result`;
+      break;
+    case "telegram_record_delivery":
+      rows =
+        await transaction`SELECT machine.telegram_record_delivery(${value}::jsonb) AS result`;
+      break;
+    case "telegram_record_pairing_delivery":
+      rows =
+        await transaction`SELECT machine.telegram_record_pairing_delivery(${value}::jsonb) AS result`;
+      break;
+    case "backup_export_bundle":
+      rows =
+        await transaction`SELECT machine.backup_export_bundle(${value}::jsonb) AS result`;
+      break;
   }
   const result = rows[0]?.result;
-  if (rows.length !== 1 || result === null || typeof result !== "object" || Array.isArray(result)) {
+  if (
+    rows.length !== 1 || result === null || typeof result !== "object" ||
+    Array.isArray(result)
+  ) {
     throw new Error("database RPC returned an unexpected result");
   }
   return result as Record<string, unknown>;

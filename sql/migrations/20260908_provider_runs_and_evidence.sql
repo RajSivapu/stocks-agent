@@ -266,6 +266,27 @@ REVOKE ALL ON app.agent_analysis_submissions
 CREATE INDEX agent_analysis_submissions_run_idx
   ON app.agent_analysis_submissions(owner_id, run_id, created_at DESC);
 
+ALTER TABLE app.market_publications
+  ADD COLUMN rendered_parts JSONB NOT NULL DEFAULT '[]'::jsonb CHECK (
+    jsonb_typeof(rendered_parts) = 'array'
+    AND jsonb_array_length(rendered_parts) <= 4
+    AND octet_length(rendered_parts::text) <= 15000
+  );
+-- Preserve deliverable legacy rows without guessing prior multipart boundaries. An in-flight
+-- legacy send is irrecoverably ambiguous and must never be retried after the migration.
+UPDATE app.market_publications
+SET rendered_parts = jsonb_build_array(rendered_body)
+WHERE rendered_parts = '[]'::jsonb
+  AND char_length(rendered_body) BETWEEN 1 AND 3500;
+UPDATE app.market_publications
+SET status = 'delivery_unknown', lease_token = NULL,
+    error = 'MIGRATION_IN_FLIGHT_DELIVERY_UNKNOWN', updated_at = clock_timestamp()
+WHERE status = 'sending';
+UPDATE app.market_publications
+SET status = 'suppressed', lease_token = NULL,
+    error = 'MIGRATION_PUBLICATION_NOT_DELIVERABLE', updated_at = clock_timestamp()
+WHERE status = 'ready' AND jsonb_array_length(rendered_parts) = 0;
+
 -- FORCE RLS also applies to the table owner. These policies are intentionally granted only
 -- to the non-login migration owner used by reviewed SECURITY DEFINER functions.
 ALTER TABLE public.market_policy_config OWNER TO stock_agent_migration_owner;
@@ -1166,11 +1187,27 @@ BEGIN
   END LOOP;
 
   IF NOT app.jsonb_has_exact_keys(publication, ARRAY[
-      'market_date','phase','kind','template_version','rendered_body','rendered_hash','status'
+      'market_date','phase','kind','template_version','rendered_body','rendered_parts','rendered_hash','status'
     ]) OR publication->>'market_date' IS DISTINCT FROM run_row.market_date::text
        OR publication->>'phase' IS DISTINCT FROM run_row.kind
        OR publication->>'status' NOT IN ('ready','suppressed')
        OR publication->>'rendered_hash' !~ '^[0-9a-f]{64}$'
+       OR jsonb_typeof(publication->'rendered_parts') <> 'array'
+       OR jsonb_array_length(publication->'rendered_parts') > 4
+       OR EXISTS (
+         SELECT 1 FROM jsonb_array_elements(publication->'rendered_parts') part
+         WHERE jsonb_typeof(part) <> 'string' OR char_length(part #>> '{}') NOT BETWEEN 1 AND 3500
+       )
+       OR (publication->>'status' = 'ready' AND jsonb_array_length(publication->'rendered_parts') = 0)
+       OR (publication->>'status' = 'suppressed' AND jsonb_array_length(publication->'rendered_parts') <> 0)
+       OR publication->>'rendered_hash' IS DISTINCT FROM encode(
+         extensions.digest(convert_to(publication->>'rendered_body', 'UTF8'), 'sha256'), 'hex'
+       )
+       OR publication->>'rendered_body' IS DISTINCT FROM coalesce((
+         SELECT string_agg(part.value, E'\n\n' ORDER BY part.ordinality)
+         FROM jsonb_array_elements_text(publication->'rendered_parts')
+           WITH ORDINALITY AS part(value, ordinality)
+       ), '')
        OR char_length(publication->>'rendered_body') > 14000 THEN
     RAISE EXCEPTION 'invalid publication' USING ERRCODE = '22023';
   END IF;
@@ -1191,12 +1228,12 @@ BEGIN
   IF final_publication_status = 'sending' THEN delivery_lease := extensions.gen_random_uuid(); END IF;
   INSERT INTO app.market_publications(
     owner_id, id, idempotency_key, run_id, market_date, phase, kind,
-    template_version, rendered_body, rendered_hash, status, lease_token,
+    template_version, rendered_body, rendered_parts, rendered_hash, status, lease_token,
     sending_started_at, attempt_count
   ) VALUES (
     owner_uuid, publication_uuid, request_uuid, run_uuid, run_row.market_date,
     run_row.kind, publication->>'kind', (publication->>'template_version')::int,
-    publication->>'rendered_body', publication->>'rendered_hash', final_publication_status,
+    publication->>'rendered_body', publication->'rendered_parts', publication->>'rendered_hash', final_publication_status,
     delivery_lease, CASE WHEN delivery_lease IS NULL THEN NULL ELSE clock_timestamp() END,
     CASE WHEN delivery_lease IS NULL THEN 0 ELSE 1 END
   );
@@ -1306,6 +1343,10 @@ BEGIN
     END,
     updated_at = clock_timestamp()
   WHERE owner_id = owner_uuid AND id = publication_row.id;
+  UPDATE app.analysis_runs SET
+    telegram_message_ids = message_ids,
+    source_status = source_status || jsonb_build_object('publication', status_value)
+  WHERE owner_id = owner_uuid AND id = run_uuid;
   response := jsonb_build_object(
     'status', 'accepted', 'run_id', run_uuid,
     'publication_id', publication_row.id, 'publication_status', status_value,
@@ -1531,6 +1572,9 @@ DECLARE
   check_row JSONB;
   check_observed_at TIMESTAMPTZ;
   required_host TEXT;
+  telegram_status TEXT;
+  telegram_ids JSONB;
+  publication_incomplete_count INT;
 BEGIN
   claim := machine.agent_claim_operation(p_request, 'finish_run');
   IF (claim->>'duplicate')::boolean THEN RETURN claim->'response'; END IF;
@@ -1543,7 +1587,27 @@ BEGIN
   INTO completed_count, failed_count, claimed_count
   FROM app.market_gateway_requests
   WHERE owner_id = owner_uuid AND run_id = run_uuid;
-  final_status := CASE WHEN failed_count > 0 OR claimed_count > 0 THEN 'partial' ELSE 'completed' END;
+  SELECT CASE
+      WHEN bool_or(status = 'delivery_unknown') THEN 'delivery_unknown'
+      WHEN bool_or(status = 'delivery_failed') THEN 'delivery_failed'
+      WHEN bool_or(status = 'delivered') THEN 'delivered'
+      ELSE 'not_sent'
+    END,
+    coalesce((
+      SELECT jsonb_agg(message_id ORDER BY publication.created_at, message_id::text)
+      FROM app.market_publications AS publication
+      CROSS JOIN LATERAL jsonb_array_elements(publication.telegram_message_ids) AS message_id
+      WHERE publication.owner_id = owner_uuid AND publication.run_id = run_uuid
+    ), '[]'::jsonb),
+    count(*) FILTER (WHERE status IN ('ready','sending','delivery_failed','delivery_unknown'))
+  INTO telegram_status, telegram_ids, publication_incomplete_count
+  FROM app.market_publications
+  WHERE owner_id = owner_uuid AND run_id = run_uuid;
+  final_status := CASE
+    WHEN failed_count > 0 OR claimed_count > 0 OR publication_incomplete_count > 0
+      THEN 'partial'
+    ELSE 'completed'
+  END;
   SELECT handshake_challenge INTO handshake_challenge_value
   FROM app.scheduled_run_slots
   WHERE owner_id = owner_uuid AND canonical_run_id = run_uuid AND purpose = 'handshake'
@@ -1606,14 +1670,19 @@ BEGIN
     'operations', jsonb_build_object(
       'completed', completed_count, 'failed', failed_count, 'in_progress', claimed_count
     ),
-    'telegram', jsonb_build_object('status', 'not_sent', 'message_ids', '[]'::jsonb)
+    'telegram', jsonb_build_object('status', telegram_status, 'message_ids', telegram_ids)
   );
   IF (claim->>'dry_run')::boolean THEN RETURN response; END IF;
   UPDATE app.analysis_runs SET status = final_status, finished_at = clock_timestamp(),
     write_counts = jsonb_build_object('gateway_operations', completed_count),
-    telegram_message_ids = '[]'::jsonb,
-    summary = CASE WHEN final_status = 'completed' THEN 'Run completed; no Telegram send was recorded.'
-                   ELSE 'Run finished partially; no Telegram send was recorded.' END
+    telegram_message_ids = telegram_ids,
+    summary = CASE
+      WHEN telegram_status = 'delivered' THEN 'Run completed with a recorded Telegram delivery.'
+      WHEN telegram_status = 'delivery_failed' THEN 'Run finished partially; Telegram rejected the message.'
+      WHEN telegram_status = 'delivery_unknown' THEN 'Run finished partially; Telegram delivery is unknown.'
+      WHEN final_status = 'completed' THEN 'Run completed; no Telegram send was recorded.'
+      ELSE 'Run finished partially; no Telegram send was recorded.'
+    END
   WHERE owner_id = owner_uuid AND id = run_uuid;
   IF handshake_run AND final_status = 'completed' THEN
     UPDATE app.scheduled_run_slots SET status = 'completed',
@@ -1749,13 +1818,63 @@ CREATE TABLE app.operational_events (
   ),
   created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
   updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-  UNIQUE (owner_id, code, period_key)
+  UNIQUE (owner_id, code, period_key),
+  UNIQUE (owner_id, id)
+);
+
+CREATE TABLE app.owner_operational_state (
+  owner_id UUID PRIMARY KEY REFERENCES auth.users(id) ON DELETE CASCADE,
+  mutations_paused BOOLEAN NOT NULL DEFAULT false,
+  reason_code TEXT CHECK (
+    reason_code IS NULL OR reason_code IN ('LEDGER_PROJECTION_MISMATCH')
+  ),
+  last_projection_check_at TIMESTAMPTZ,
+  last_projection_ok BOOLEAN,
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  CHECK (mutations_paused = (reason_code IS NOT NULL))
+);
+
+CREATE TABLE app.operational_alerts (
+  id UUID PRIMARY KEY DEFAULT extensions.gen_random_uuid(),
+  owner_id UUID NOT NULL REFERENCES auth.users(id) ON DELETE CASCADE,
+  event_id UUID NOT NULL,
+  code TEXT NOT NULL CHECK (code IN (
+    'EXPECTED_RUN_MISSED','PROVIDER_DISCONNECTED','LEDGER_PROJECTION_MISMATCH',
+    'RUN_PARTIAL','BACKUP_STALE'
+  )),
+  status TEXT NOT NULL DEFAULT 'ready' CHECK (status IN (
+    'ready','sending','delivered','suppressed','delivery_failed','delivery_unknown'
+  )),
+  telegram_message_ids JSONB NOT NULL DEFAULT '[]'::jsonb CHECK (
+    jsonb_typeof(telegram_message_ids) = 'array'
+    AND jsonb_array_length(telegram_message_ids) <= 4
+  ),
+  attempt_count INT NOT NULL DEFAULT 0 CHECK (attempt_count BETWEEN 0 AND 3),
+  lease_token UUID,
+  sending_started_at TIMESTAMPTZ,
+  delivered_at TIMESTAMPTZ,
+  error_code TEXT CHECK (error_code IS NULL OR error_code IN (
+    'TELEGRAM_REJECTED','TELEGRAM_OUTCOME_UNKNOWN','DELIVERY_LEASE_EXPIRED'
+  )),
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  UNIQUE (owner_id, event_id),
+  UNIQUE (owner_id, id),
+  FOREIGN KEY (owner_id, event_id)
+    REFERENCES app.operational_events(owner_id, id) ON DELETE CASCADE,
+  CHECK ((status = 'sending') = (lease_token IS NOT NULL)),
+  CHECK (status <> 'sending' OR sending_started_at IS NOT NULL),
+  CHECK (status <> 'delivered' OR (
+    delivered_at IS NOT NULL AND jsonb_array_length(telegram_message_ids) > 0
+  ))
 );
 
 ALTER TABLE app.scheduled_run_slots OWNER TO stock_agent_migration_owner;
 ALTER TABLE app.routine_trigger_attempts OWNER TO stock_agent_migration_owner;
 ALTER TABLE app.owner_run_allowances OWNER TO stock_agent_migration_owner;
 ALTER TABLE app.operational_events OWNER TO stock_agent_migration_owner;
+ALTER TABLE app.owner_operational_state OWNER TO stock_agent_migration_owner;
+ALTER TABLE app.operational_alerts OWNER TO stock_agent_migration_owner;
 CREATE TRIGGER reject_owner_id_mutation BEFORE UPDATE OF owner_id ON app.scheduled_run_slots
   FOR EACH ROW EXECUTE FUNCTION app.reject_owner_id_mutation();
 CREATE TRIGGER reject_owner_id_mutation BEFORE UPDATE OF owner_id ON app.routine_trigger_attempts
@@ -1763,6 +1882,10 @@ CREATE TRIGGER reject_owner_id_mutation BEFORE UPDATE OF owner_id ON app.routine
 CREATE TRIGGER reject_owner_id_mutation BEFORE UPDATE OF owner_id ON app.owner_run_allowances
   FOR EACH ROW EXECUTE FUNCTION app.reject_owner_id_mutation();
 CREATE TRIGGER reject_owner_id_mutation BEFORE UPDATE OF owner_id ON app.operational_events
+  FOR EACH ROW EXECUTE FUNCTION app.reject_owner_id_mutation();
+CREATE TRIGGER reject_owner_id_mutation BEFORE UPDATE OF owner_id ON app.owner_operational_state
+  FOR EACH ROW EXECUTE FUNCTION app.reject_owner_id_mutation();
+CREATE TRIGGER reject_owner_id_mutation BEFORE UPDATE OF owner_id ON app.operational_alerts
   FOR EACH ROW EXECUTE FUNCTION app.reject_owner_id_mutation();
 ALTER TABLE app.scheduled_run_slots ENABLE ROW LEVEL SECURITY;
 ALTER TABLE app.scheduled_run_slots FORCE ROW LEVEL SECURITY;
@@ -1772,6 +1895,10 @@ ALTER TABLE app.owner_run_allowances ENABLE ROW LEVEL SECURITY;
 ALTER TABLE app.owner_run_allowances FORCE ROW LEVEL SECURITY;
 ALTER TABLE app.operational_events ENABLE ROW LEVEL SECURITY;
 ALTER TABLE app.operational_events FORCE ROW LEVEL SECURITY;
+ALTER TABLE app.owner_operational_state ENABLE ROW LEVEL SECURITY;
+ALTER TABLE app.owner_operational_state FORCE ROW LEVEL SECURITY;
+ALTER TABLE app.operational_alerts ENABLE ROW LEVEL SECURITY;
+ALTER TABLE app.operational_alerts FORCE ROW LEVEL SECURITY;
 CREATE POLICY scheduled_run_slots_executor_all ON app.scheduled_run_slots
   FOR ALL TO stock_agent_migration_owner USING (true) WITH CHECK (true);
 CREATE POLICY routine_trigger_attempts_executor_all ON app.routine_trigger_attempts
@@ -1780,8 +1907,13 @@ CREATE POLICY owner_run_allowances_executor_all ON app.owner_run_allowances
   FOR ALL TO stock_agent_migration_owner USING (true) WITH CHECK (true);
 CREATE POLICY operational_events_executor_all ON app.operational_events
   FOR ALL TO stock_agent_migration_owner USING (true) WITH CHECK (true);
+CREATE POLICY owner_operational_state_executor_all ON app.owner_operational_state
+  FOR ALL TO stock_agent_migration_owner USING (true) WITH CHECK (true);
+CREATE POLICY operational_alerts_executor_all ON app.operational_alerts
+  FOR ALL TO stock_agent_migration_owner USING (true) WITH CHECK (true);
 REVOKE ALL ON app.scheduled_run_slots, app.routine_trigger_attempts,
-  app.owner_run_allowances, app.operational_events
+  app.owner_run_allowances, app.operational_events, app.owner_operational_state,
+  app.operational_alerts
   FROM PUBLIC, anon, authenticated, service_role,
        stock_agent_gateway, stock_agent_scheduler, stock_agent_telegram, stock_agent_backup;
 CREATE INDEX scheduled_run_slots_due_idx ON app.scheduled_run_slots(status, due_at, window_ends_at);
@@ -1789,6 +1921,37 @@ CREATE UNIQUE INDEX scheduled_run_slots_canonical_idx
   ON app.scheduled_run_slots(owner_id, market_date, phase) WHERE purpose = 'scheduled';
 CREATE INDEX routine_trigger_attempts_status_idx ON app.routine_trigger_attempts(status, claimed_at);
 CREATE INDEX operational_events_status_idx ON app.operational_events(status, created_at);
+CREATE INDEX operational_alerts_status_idx ON app.operational_alerts(status, created_at);
+
+CREATE OR REPLACE FUNCTION app.enforce_owner_mutation_safety()
+RETURNS TRIGGER
+LANGUAGE plpgsql
+SET search_path = pg_catalog
+AS $$
+BEGIN
+  IF EXISTS (
+    SELECT 1 FROM app.owner_operational_state
+    WHERE owner_id = NEW.owner_id AND mutations_paused
+  ) THEN
+    RAISE EXCEPTION 'owner mutations are paused' USING ERRCODE = '55000';
+  END IF;
+  RETURN NEW;
+END
+$$;
+ALTER FUNCTION app.enforce_owner_mutation_safety() OWNER TO stock_agent_migration_owner;
+REVOKE ALL ON FUNCTION app.enforce_owner_mutation_safety()
+  FROM PUBLIC, anon, authenticated, service_role,
+       stock_agent_gateway, stock_agent_scheduler, stock_agent_telegram, stock_agent_backup;
+CREATE TRIGGER enforce_owner_mutation_safety
+  BEFORE UPDATE OF status ON app.portfolio_commands
+  FOR EACH ROW
+  WHEN (NEW.status IN ('confirmed','applied'))
+  EXECUTE FUNCTION app.enforce_owner_mutation_safety();
+CREATE TRIGGER enforce_owner_ledger_safety
+  BEFORE INSERT ON app.transactions
+  FOR EACH ROW
+  WHEN (NEW.event_type IN ('trade','void') AND NEW.source_channel <> 'migration')
+  EXECUTE FUNCTION app.enforce_owner_mutation_safety();
 
 CREATE TABLE machine.market_calendar_days (
   market_date DATE PRIMARY KEY,
@@ -2142,14 +2305,815 @@ BEGIN
   publication_uuid := extensions.gen_random_uuid();
   INSERT INTO app.market_publications(
     owner_id, id, idempotency_key, run_id, market_date, phase, kind,
-    template_version, rendered_body, rendered_hash, status
+    template_version, rendered_body, rendered_parts, rendered_hash, status
   ) VALUES (
     slot_row.owner_id, publication_uuid, slot_row.trigger_request_id, NULL,
-    slot_row.market_date, 'pre-market', 'holiday', 1, body_value, body_digest, 'ready'
+    slot_row.market_date, 'pre-market', 'holiday', 1, body_value,
+    jsonb_build_array(body_value), body_digest, 'ready'
   );
   UPDATE app.scheduled_run_slots SET status = 'holiday_ready', updated_at = clock_timestamp()
   WHERE owner_id = slot_row.owner_id AND id = slot_uuid;
   RETURN jsonb_build_object('status', 'ready', 'publication_id', publication_uuid, 'duplicate', false);
+END
+$$;
+
+CREATE OR REPLACE FUNCTION machine.scheduler_run_maintenance(p_request JSONB)
+RETURNS JSONB
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = pg_catalog
+AS $$
+DECLARE
+  effective_now TIMESTAMPTZ;
+  expired_commands INT := 0;
+  expired_pairing_codes INT := 0;
+  expired_callback_tokens INT := 0;
+  deleted_updates INT := 0;
+  missed_slots INT := 0;
+  stale_publications INT := 0;
+  stale_operational_alerts INT := 0;
+  projection_failures INT := 0;
+  alerts_created INT := 0;
+  publication_row app.market_publications%ROWTYPE;
+  slot_row app.scheduled_run_slots%ROWTYPE;
+  owner_row RECORD;
+  identity_row RECORD;
+  holding_row app.holdings%ROWTYPE;
+  folded JSONB;
+  mismatch BOOLEAN;
+  event_uuid UUID;
+  final_response JSONB;
+BEGIN
+  IF NOT app.jsonb_has_exact_keys(p_request, ARRAY['now'])
+     OR jsonb_typeof(p_request->'now') <> 'string' THEN
+    RAISE EXCEPTION 'invalid scheduler request' USING ERRCODE = '22023';
+  END IF;
+  BEGIN effective_now := (p_request->>'now')::timestamptz;
+  EXCEPTION WHEN invalid_text_representation OR datetime_field_overflow THEN
+    RAISE EXCEPTION 'invalid scheduler request' USING ERRCODE = '22023';
+  END;
+  IF effective_now < clock_timestamp() - interval '1 day'
+     OR effective_now > clock_timestamp() + interval '5 minutes' THEN
+    RAISE EXCEPTION 'invalid scheduler request' USING ERRCODE = '22023';
+  END IF;
+
+  WITH expired AS (
+    SELECT owner_id, id FROM app.portfolio_commands
+    WHERE status IN ('submitted','previewed') AND expires_at <= effective_now
+    ORDER BY expires_at, id LIMIT 200 FOR UPDATE SKIP LOCKED
+  )
+  UPDATE app.portfolio_commands AS command SET
+    status = 'expired',
+    preview_digest = coalesce(
+      command.preview_digest,
+      encode(extensions.digest(convert_to('expired-unpreviewed:' || command.id::text, 'UTF8'), 'sha256'), 'hex')
+    ),
+    updated_at = effective_now
+  FROM expired
+  WHERE command.owner_id = expired.owner_id AND command.id = expired.id;
+  GET DIAGNOSTICS expired_commands = ROW_COUNT;
+
+  WITH expired AS (
+    SELECT owner_id, id FROM app.telegram_pairing_codes
+    WHERE consumed_at IS NULL AND expires_at <= effective_now
+    ORDER BY expires_at, id LIMIT 200 FOR UPDATE SKIP LOCKED
+  )
+  UPDATE app.telegram_pairing_codes AS code SET consumed_at = effective_now
+  FROM expired WHERE code.owner_id = expired.owner_id AND code.id = expired.id;
+  GET DIAGNOSTICS expired_pairing_codes = ROW_COUNT;
+  WITH expired AS (
+    SELECT owner_id, id FROM app.telegram_callback_tokens
+    WHERE consumed_at IS NULL AND invalidated_at IS NULL AND expires_at <= effective_now
+    ORDER BY expires_at, id LIMIT 400 FOR UPDATE SKIP LOCKED
+  )
+  UPDATE app.telegram_callback_tokens AS token SET invalidated_at = effective_now
+  FROM expired WHERE token.owner_id = expired.owner_id AND token.id = expired.id;
+  GET DIAGNOSTICS expired_callback_tokens = ROW_COUNT;
+  WITH expired AS (
+    SELECT owner_id, telegram_update_id FROM app.telegram_updates
+    WHERE received_at < effective_now - interval '30 days'
+    ORDER BY received_at, owner_id, telegram_update_id LIMIT 500
+  )
+  DELETE FROM app.telegram_updates AS update_row USING expired
+  WHERE update_row.owner_id = expired.owner_id
+    AND update_row.telegram_update_id = expired.telegram_update_id;
+  GET DIAGNOSTICS deleted_updates = ROW_COUNT;
+
+  FOR publication_row IN
+    SELECT * FROM app.market_publications
+    WHERE status = 'sending'
+      AND sending_started_at < effective_now - interval '5 minutes'
+    ORDER BY sending_started_at, id LIMIT 100
+    FOR UPDATE
+  LOOP
+    UPDATE app.market_publications SET
+      status = 'delivery_unknown', lease_token = NULL,
+      error = 'DELIVERY_LEASE_EXPIRED', updated_at = effective_now
+    WHERE owner_id = publication_row.owner_id AND id = publication_row.id;
+    IF publication_row.run_id IS NOT NULL THEN
+      final_response := jsonb_build_object(
+        'status', 'accepted', 'run_id', publication_row.run_id,
+        'publication_id', publication_row.id,
+        'publication_status', 'delivery_unknown',
+        'telegram_message_ids', publication_row.telegram_message_ids
+      );
+      UPDATE app.market_gateway_requests SET
+        status = 'completed', response = final_response,
+        response_digest = encode(extensions.digest(convert_to(final_response::text, 'UTF8'), 'sha256'), 'hex'),
+        finished_at = effective_now
+      WHERE owner_id = publication_row.owner_id
+        AND request_id = publication_row.idempotency_key AND status = 'claimed';
+      UPDATE app.analysis_runs SET
+        telegram_message_ids = publication_row.telegram_message_ids,
+        source_status = source_status || jsonb_build_object('publication', 'delivery_unknown')
+      WHERE owner_id = publication_row.owner_id AND id = publication_row.run_id;
+    END IF;
+    stale_publications := stale_publications + 1;
+  END LOOP;
+
+  WITH stale AS (
+    SELECT owner_id, id FROM app.operational_alerts
+    WHERE status = 'sending'
+      AND sending_started_at < effective_now - interval '5 minutes'
+    ORDER BY sending_started_at, id LIMIT 100 FOR UPDATE SKIP LOCKED
+  )
+  UPDATE app.operational_alerts AS alert SET
+    status = 'delivery_unknown', lease_token = NULL,
+    error_code = 'DELIVERY_LEASE_EXPIRED', updated_at = effective_now
+  FROM stale WHERE alert.owner_id = stale.owner_id AND alert.id = stale.id;
+  GET DIAGNOSTICS stale_operational_alerts = ROW_COUNT;
+
+  FOR slot_row IN
+    SELECT * FROM app.scheduled_run_slots
+    WHERE status IN (
+      'pending','claimed','triggered','trigger_failed','trigger_unknown','provider_started'
+    ) AND window_ends_at < effective_now
+    ORDER BY window_ends_at, id LIMIT 100
+    FOR UPDATE
+  LOOP
+    UPDATE app.scheduled_run_slots SET
+      status = 'missed', lease_token = NULL, lease_expires_at = NULL,
+      updated_at = effective_now
+    WHERE owner_id = slot_row.owner_id AND id = slot_row.id;
+    missed_slots := missed_slots + 1;
+    IF slot_row.purpose = 'scheduled' THEN
+      INSERT INTO app.operational_events(owner_id, code, period_key)
+      VALUES (
+        slot_row.owner_id, 'EXPECTED_RUN_MISSED',
+        slot_row.market_date::text || ':' || slot_row.phase
+      ) ON CONFLICT (owner_id, code, period_key) DO NOTHING;
+    END IF;
+  END LOOP;
+
+  INSERT INTO app.operational_events(owner_id, code, period_key)
+  SELECT schedule.owner_id, 'PROVIDER_DISCONNECTED',
+         (effective_now AT TIME ZONE 'America/New_York')::date::text
+  FROM app.analysis_schedules AS schedule
+  JOIN app.agent_connections AS connection
+    ON connection.owner_id = schedule.owner_id AND connection.id = schedule.primary_connection_id
+  JOIN app.profiles AS profile ON profile.id = schedule.owner_id AND profile.status = 'active'
+  WHERE connection.status <> 'active'
+    AND NOT EXISTS (
+      SELECT 1 FROM app.operational_events AS existing
+      WHERE existing.owner_id = schedule.owner_id
+        AND existing.code = 'PROVIDER_DISCONNECTED'
+        AND existing.period_key = (effective_now AT TIME ZONE 'America/New_York')::date::text
+    )
+  ORDER BY schedule.owner_id LIMIT 100
+  ON CONFLICT (owner_id, code, period_key) DO NOTHING;
+
+  INSERT INTO app.operational_events(owner_id, code, period_key)
+  SELECT run.owner_id, 'RUN_PARTIAL', substr(md5(run.id::text), 1, 32)
+  FROM app.analysis_runs AS run
+  WHERE run.status = 'partial'
+    AND NOT EXISTS (
+      SELECT 1 FROM app.operational_events AS existing
+      WHERE existing.owner_id = run.owner_id AND existing.code = 'RUN_PARTIAL'
+        AND existing.period_key = substr(md5(run.id::text), 1, 32)
+    )
+  ORDER BY run.finished_at NULLS FIRST, run.id LIMIT 100
+  ON CONFLICT (owner_id, code, period_key) DO NOTHING;
+
+  FOR owner_row IN
+    SELECT profile.id
+    FROM app.profiles AS profile
+    LEFT JOIN app.owner_operational_state AS state ON state.owner_id = profile.id
+    WHERE profile.status = 'active'
+      AND (
+        state.last_projection_check_at IS NULL
+        OR (state.last_projection_check_at AT TIME ZONE 'America/New_York')::date
+           < (effective_now AT TIME ZONE 'America/New_York')::date
+    )
+    ORDER BY profile.id LIMIT 20
+  LOOP
+    mismatch := false;
+    BEGIN
+      FOR identity_row IN
+        SELECT ticker FROM app.holdings WHERE owner_id = owner_row.id
+        UNION
+        SELECT ticker FROM app.transactions
+        WHERE owner_id = owner_row.id AND event_type IN ('opening','trade','void')
+        ORDER BY ticker
+      LOOP
+        folded := app.fold_holding(owner_row.id, identity_row.ticker);
+        SELECT * INTO holding_row FROM app.holdings
+        WHERE owner_id = owner_row.id AND ticker = identity_row.ticker;
+        IF (folded->>'shares')::numeric = 0 THEN
+          IF FOUND THEN mismatch := true; EXIT; END IF;
+        ELSIF NOT FOUND
+           OR holding_row.shares IS DISTINCT FROM (folded->>'shares')::numeric
+           OR holding_row.avg_cost IS DISTINCT FROM (folded->>'avg_cost')::numeric
+           OR holding_row.projection_sequence IS DISTINCT FROM (folded->>'projection_sequence')::bigint THEN
+          mismatch := true;
+          EXIT;
+        END IF;
+      END LOOP;
+    EXCEPTION WHEN OTHERS THEN
+      mismatch := true;
+    END;
+    INSERT INTO app.owner_operational_state(
+      owner_id, mutations_paused, reason_code, last_projection_check_at,
+      last_projection_ok, updated_at
+    ) VALUES (
+      owner_row.id, mismatch,
+      CASE WHEN mismatch THEN 'LEDGER_PROJECTION_MISMATCH' ELSE NULL END,
+      effective_now, NOT mismatch, effective_now
+    ) ON CONFLICT (owner_id) DO UPDATE SET
+      mutations_paused = excluded.mutations_paused,
+      reason_code = excluded.reason_code,
+      last_projection_check_at = excluded.last_projection_check_at,
+      last_projection_ok = excluded.last_projection_ok,
+      updated_at = excluded.updated_at;
+    IF mismatch THEN
+      projection_failures := projection_failures + 1;
+      INSERT INTO app.operational_events(owner_id, code, period_key)
+      VALUES (
+        owner_row.id, 'LEDGER_PROJECTION_MISMATCH',
+        (effective_now AT TIME ZONE 'America/New_York')::date::text
+      ) ON CONFLICT (owner_id, code, period_key) DO NOTHING;
+    ELSE
+      UPDATE app.operational_events SET status = 'resolved', updated_at = effective_now
+      WHERE owner_id = owner_row.id AND code = 'LEDGER_PROJECTION_MISMATCH' AND status = 'open';
+      UPDATE app.operational_alerts SET status = 'suppressed', updated_at = effective_now
+      WHERE owner_id = owner_row.id AND code = 'LEDGER_PROJECTION_MISMATCH' AND status = 'ready';
+    END IF;
+  END LOOP;
+
+  INSERT INTO app.operational_alerts(owner_id, event_id, code)
+  SELECT event.owner_id, event.id, event.code
+  FROM app.operational_events AS event
+  WHERE event.status = 'open' AND event.code IN (
+    'EXPECTED_RUN_MISSED','PROVIDER_DISCONNECTED','LEDGER_PROJECTION_MISMATCH',
+    'RUN_PARTIAL','BACKUP_STALE'
+  )
+    AND NOT EXISTS (
+      SELECT 1 FROM app.operational_alerts AS existing
+      WHERE existing.owner_id = event.owner_id AND existing.event_id = event.id
+    )
+  ORDER BY event.created_at, event.id LIMIT 100
+  ON CONFLICT (owner_id, event_id) DO NOTHING;
+  GET DIAGNOSTICS alerts_created = ROW_COUNT;
+
+  RETURN jsonb_build_object(
+    'expired_commands', expired_commands,
+    'expired_pairing_codes', expired_pairing_codes,
+    'expired_callback_tokens', expired_callback_tokens,
+    'deleted_telegram_updates', deleted_updates,
+    'missed_slots', missed_slots,
+    'stale_publications', stale_publications,
+    'stale_operational_alerts', stale_operational_alerts,
+    'projection_failures', projection_failures,
+    'alerts_created', alerts_created
+  );
+END
+$$;
+
+CREATE OR REPLACE FUNCTION machine.scheduler_claim_publications(p_request JSONB)
+RETURNS JSONB
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = pg_catalog
+AS $$
+DECLARE
+  effective_now TIMESTAMPTZ;
+  claim_limit INT;
+  publication_row app.market_publications%ROWTYPE;
+  lease_uuid UUID;
+  chat_value BIGINT;
+  enabled_value BOOLEAN;
+  publications JSONB := '[]'::jsonb;
+BEGIN
+  IF NOT app.jsonb_has_exact_keys(p_request, ARRAY['now','limit'])
+     OR p_request->>'limit' !~ '^\d{1,2}$' THEN
+    RAISE EXCEPTION 'invalid scheduler request' USING ERRCODE = '22023';
+  END IF;
+  BEGIN
+    effective_now := (p_request->>'now')::timestamptz;
+    claim_limit := (p_request->>'limit')::int;
+  EXCEPTION WHEN invalid_text_representation OR datetime_field_overflow THEN
+    RAISE EXCEPTION 'invalid scheduler request' USING ERRCODE = '22023';
+  END;
+  IF claim_limit NOT BETWEEN 1 AND 20 THEN
+    RAISE EXCEPTION 'invalid scheduler request' USING ERRCODE = '22023';
+  END IF;
+  FOR publication_row IN
+    SELECT * FROM app.market_publications
+    WHERE status = 'ready'
+    ORDER BY created_at, id LIMIT claim_limit FOR UPDATE SKIP LOCKED
+  LOOP
+    SELECT telegram_chat_id INTO chat_value FROM app.telegram_links
+    WHERE owner_id = publication_row.owner_id AND status = 'active';
+    SELECT CASE publication_row.phase
+      WHEN 'pre-market' THEN pre_market_enabled
+      WHEN 'intraday' THEN intraday_enabled
+      WHEN 'post-market' THEN post_market_enabled
+      ELSE false END
+    INTO enabled_value FROM app.notification_preferences
+    WHERE owner_id = publication_row.owner_id;
+    IF chat_value IS NULL OR NOT coalesce(enabled_value, false) THEN
+      UPDATE app.market_publications SET status = 'suppressed', updated_at = effective_now
+      WHERE owner_id = publication_row.owner_id AND id = publication_row.id;
+      CONTINUE;
+    END IF;
+    lease_uuid := extensions.gen_random_uuid();
+    UPDATE app.market_publications SET
+      status = 'sending', lease_token = lease_uuid,
+      sending_started_at = effective_now, attempt_count = attempt_count + 1,
+      error = NULL, updated_at = effective_now
+    WHERE owner_id = publication_row.owner_id AND id = publication_row.id;
+    publications := publications || jsonb_build_array(jsonb_build_object(
+      'publication_id', publication_row.id, 'lease_token', lease_uuid,
+      'chat_id', chat_value::text, 'parts', publication_row.rendered_parts
+    ));
+  END LOOP;
+  RETURN jsonb_build_object('publications', publications);
+END
+$$;
+
+CREATE OR REPLACE FUNCTION machine.scheduler_finish_publication(p_request JSONB)
+RETURNS JSONB
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = pg_catalog
+AS $$
+DECLARE
+  publication_uuid UUID;
+  lease_uuid UUID;
+  status_value TEXT;
+  message_ids JSONB;
+  publication_row app.market_publications%ROWTYPE;
+BEGIN
+  IF NOT app.jsonb_has_exact_keys(
+       p_request, ARRAY['publication_id','lease_token','status','message_ids']
+     ) OR p_request->>'status' NOT IN ('delivered','delivery_failed','delivery_unknown')
+       OR jsonb_typeof(p_request->'message_ids') <> 'array'
+       OR jsonb_array_length(p_request->'message_ids') > 4 THEN
+    RAISE EXCEPTION 'invalid scheduler request' USING ERRCODE = '22023';
+  END IF;
+  BEGIN
+    publication_uuid := (p_request->>'publication_id')::uuid;
+    lease_uuid := (p_request->>'lease_token')::uuid;
+  EXCEPTION WHEN invalid_text_representation THEN
+    RAISE EXCEPTION 'invalid scheduler request' USING ERRCODE = '22023';
+  END;
+  status_value := p_request->>'status';
+  message_ids := p_request->'message_ids';
+  IF EXISTS (
+    SELECT 1 FROM jsonb_array_elements(message_ids) item
+    WHERE jsonb_typeof(item) <> 'number' OR (item::text)::bigint <= 0
+  ) OR (status_value = 'delivered' AND jsonb_array_length(message_ids) = 0)
+     OR (status_value = 'delivery_failed' AND jsonb_array_length(message_ids) <> 0) THEN
+    RAISE EXCEPTION 'invalid scheduler request' USING ERRCODE = '22023';
+  END IF;
+  SELECT * INTO publication_row FROM app.market_publications
+  WHERE id = publication_uuid FOR UPDATE;
+  IF NOT FOUND OR publication_row.status <> 'sending'
+     OR publication_row.lease_token <> lease_uuid THEN
+    RAISE EXCEPTION 'publication lease unavailable' USING ERRCODE = '42501';
+  END IF;
+  UPDATE app.market_publications SET
+    status = status_value, telegram_message_ids = message_ids, lease_token = NULL,
+    delivered_at = CASE WHEN status_value = 'delivered' THEN clock_timestamp() ELSE NULL END,
+    error = CASE status_value
+      WHEN 'delivery_failed' THEN 'TELEGRAM_REJECTED'
+      WHEN 'delivery_unknown' THEN 'TELEGRAM_OUTCOME_UNKNOWN'
+      ELSE NULL END,
+    updated_at = clock_timestamp()
+  WHERE owner_id = publication_row.owner_id AND id = publication_uuid;
+  RETURN jsonb_build_object(
+    'status', status_value, 'publication_id', publication_uuid,
+    'telegram_message_ids', message_ids
+  );
+END
+$$;
+
+CREATE OR REPLACE FUNCTION machine.scheduler_claim_operational_alerts(p_request JSONB)
+RETURNS JSONB
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = pg_catalog
+AS $$
+DECLARE
+  effective_now TIMESTAMPTZ;
+  claim_limit INT;
+  alert_row app.operational_alerts%ROWTYPE;
+  lease_uuid UUID;
+  chat_value BIGINT;
+  enabled_value BOOLEAN;
+  alerts JSONB := '[]'::jsonb;
+BEGIN
+  IF NOT app.jsonb_has_exact_keys(p_request, ARRAY['now','limit'])
+     OR p_request->>'limit' !~ '^\d{1,2}$' THEN
+    RAISE EXCEPTION 'invalid scheduler request' USING ERRCODE = '22023';
+  END IF;
+  BEGIN
+    effective_now := (p_request->>'now')::timestamptz;
+    claim_limit := (p_request->>'limit')::int;
+  EXCEPTION WHEN invalid_text_representation OR datetime_field_overflow THEN
+    RAISE EXCEPTION 'invalid scheduler request' USING ERRCODE = '22023';
+  END;
+  IF claim_limit NOT BETWEEN 1 AND 20 THEN
+    RAISE EXCEPTION 'invalid scheduler request' USING ERRCODE = '22023';
+  END IF;
+  FOR alert_row IN
+    SELECT * FROM app.operational_alerts
+    WHERE status = 'ready'
+    ORDER BY created_at, id LIMIT claim_limit FOR UPDATE SKIP LOCKED
+  LOOP
+    SELECT operational_enabled INTO enabled_value FROM app.notification_preferences
+    WHERE owner_id = alert_row.owner_id;
+    SELECT telegram_chat_id INTO chat_value FROM app.telegram_links
+    WHERE owner_id = alert_row.owner_id AND status = 'active';
+    IF chat_value IS NULL OR NOT coalesce(enabled_value, false) THEN
+      UPDATE app.operational_alerts SET status = 'suppressed', updated_at = effective_now
+      WHERE owner_id = alert_row.owner_id AND id = alert_row.id;
+      UPDATE app.operational_events SET status = 'resolved', updated_at = effective_now
+      WHERE owner_id = alert_row.owner_id AND id = alert_row.event_id;
+      CONTINUE;
+    END IF;
+    lease_uuid := extensions.gen_random_uuid();
+    UPDATE app.operational_alerts SET
+      status = 'sending', lease_token = lease_uuid,
+      sending_started_at = effective_now, attempt_count = attempt_count + 1,
+      error_code = NULL, updated_at = effective_now
+    WHERE owner_id = alert_row.owner_id AND id = alert_row.id;
+    alerts := alerts || jsonb_build_array(jsonb_build_object(
+      'alert_id', alert_row.id, 'lease_token', lease_uuid,
+      'chat_id', chat_value::text, 'code', alert_row.code
+    ));
+  END LOOP;
+  RETURN jsonb_build_object('alerts', alerts);
+END
+$$;
+
+CREATE OR REPLACE FUNCTION machine.scheduler_finish_operational_alert(p_request JSONB)
+RETURNS JSONB
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = pg_catalog
+AS $$
+DECLARE
+  alert_uuid UUID;
+  lease_uuid UUID;
+  status_value TEXT;
+  message_ids JSONB;
+  alert_row app.operational_alerts%ROWTYPE;
+BEGIN
+  IF NOT app.jsonb_has_exact_keys(
+       p_request, ARRAY['alert_id','lease_token','status','message_ids']
+     ) OR p_request->>'status' NOT IN ('delivered','delivery_failed','delivery_unknown')
+       OR jsonb_typeof(p_request->'message_ids') <> 'array'
+       OR jsonb_array_length(p_request->'message_ids') > 1 THEN
+    RAISE EXCEPTION 'invalid scheduler request' USING ERRCODE = '22023';
+  END IF;
+  BEGIN
+    alert_uuid := (p_request->>'alert_id')::uuid;
+    lease_uuid := (p_request->>'lease_token')::uuid;
+  EXCEPTION WHEN invalid_text_representation THEN
+    RAISE EXCEPTION 'invalid scheduler request' USING ERRCODE = '22023';
+  END;
+  status_value := p_request->>'status';
+  message_ids := p_request->'message_ids';
+  IF EXISTS (
+    SELECT 1 FROM jsonb_array_elements(message_ids) item
+    WHERE jsonb_typeof(item) <> 'number' OR (item::text)::bigint <= 0
+  ) OR (status_value = 'delivered' AND jsonb_array_length(message_ids) <> 1)
+     OR (status_value = 'delivery_failed' AND jsonb_array_length(message_ids) <> 0) THEN
+    RAISE EXCEPTION 'invalid scheduler request' USING ERRCODE = '22023';
+  END IF;
+  SELECT * INTO alert_row FROM app.operational_alerts
+  WHERE id = alert_uuid FOR UPDATE;
+  IF NOT FOUND OR alert_row.status <> 'sending' OR alert_row.lease_token <> lease_uuid THEN
+    RAISE EXCEPTION 'operational alert lease unavailable' USING ERRCODE = '42501';
+  END IF;
+  UPDATE app.operational_alerts SET
+    status = status_value, telegram_message_ids = message_ids, lease_token = NULL,
+    delivered_at = CASE WHEN status_value = 'delivered' THEN clock_timestamp() ELSE NULL END,
+    error_code = CASE status_value
+      WHEN 'delivery_failed' THEN 'TELEGRAM_REJECTED'
+      WHEN 'delivery_unknown' THEN 'TELEGRAM_OUTCOME_UNKNOWN'
+      ELSE NULL END,
+    updated_at = clock_timestamp()
+  WHERE owner_id = alert_row.owner_id AND id = alert_uuid;
+  UPDATE app.operational_events SET
+    status = CASE WHEN status_value = 'delivered' THEN 'notified' ELSE 'open' END,
+    updated_at = clock_timestamp()
+  WHERE owner_id = alert_row.owner_id AND id = alert_row.event_id;
+  RETURN jsonb_build_object(
+    'status', status_value, 'alert_id', alert_uuid,
+    'telegram_message_ids', message_ids
+  );
+END
+$$;
+
+CREATE OR REPLACE FUNCTION machine.scheduler_read_due_decisions(p_request JSONB)
+RETURNS JSONB
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = pg_catalog
+AS $$
+DECLARE
+  effective_now TIMESTAMPTZ;
+  claim_limit INT;
+  due_rows JSONB;
+BEGIN
+  IF NOT app.jsonb_has_exact_keys(p_request, ARRAY['now','limit'])
+     OR p_request->>'limit' !~ '^\d{1,2}$' THEN
+    RAISE EXCEPTION 'invalid scheduler request' USING ERRCODE = '22023';
+  END IF;
+  BEGIN
+    effective_now := (p_request->>'now')::timestamptz;
+    claim_limit := (p_request->>'limit')::int;
+  EXCEPTION WHEN invalid_text_representation OR datetime_field_overflow THEN
+    RAISE EXCEPTION 'invalid scheduler request' USING ERRCODE = '22023';
+  END;
+  IF claim_limit NOT BETWEEN 1 AND 20
+     OR effective_now < clock_timestamp() - interval '1 day'
+     OR effective_now > clock_timestamp() + interval '5 minutes' THEN
+    RAISE EXCEPTION 'invalid scheduler request' USING ERRCODE = '22023';
+  END IF;
+  SELECT coalesce(jsonb_agg(row_value ORDER BY decision_date, suggestion_id), '[]'::jsonb)
+  INTO due_rows
+  FROM (
+    SELECT suggestion.date AS decision_date, suggestion.id AS suggestion_id,
+      jsonb_build_object(
+        'owner_id', suggestion.owner_id,
+        'suggestion_id', suggestion.id,
+        'decision_date', suggestion.date,
+        'ticker', suggestion.ticker,
+        'bucket', suggestion.bucket,
+        'final_action', evaluation.final_action,
+        'confidence', suggestion.confidence,
+        'policy_version', evaluation.policy_version,
+        'decision_price', suggestion.price_at_suggestion::text,
+        'entry_zone_low', suggestion.entry_zone_low::text,
+        'entry_zone_high', suggestion.entry_zone_high::text,
+        'stop', suggestion.stop::text,
+        'target', suggestion.target::text,
+        'invalidation_price', suggestion.invalidation_price::text,
+        'completed_horizons', coalesce(
+          to_jsonb(array_agg(DISTINCT grade.horizon_days ORDER BY grade.horizon_days)
+            FILTER (WHERE grade.coverage_status = 'complete'
+              OR (grade.graded_at AT TIME ZONE 'America/New_York')::date
+                 = (effective_now AT TIME ZONE 'America/New_York')::date)),
+          '[]'::jsonb
+        )
+      ) AS row_value
+    FROM app.suggestions AS suggestion
+    JOIN app.decision_evaluations AS evaluation
+      ON evaluation.owner_id = suggestion.owner_id AND evaluation.id = suggestion.evaluation_id
+    LEFT JOIN app.suggestion_grades AS grade
+      ON grade.owner_id = suggestion.owner_id AND grade.suggestion_id = suggestion.id
+    JOIN app.profiles AS profile
+      ON profile.id = suggestion.owner_id AND profile.status = 'active'
+    WHERE suggestion.decision_source = 'gateway'
+      AND evaluation.policy_version IS NOT NULL
+      AND suggestion.bucket IN ('core','growth','speculative')
+      AND suggestion.confidence IN ('low','medium','high')
+      AND suggestion.price_at_suggestion IS NOT NULL
+      AND evaluation.final_action IN ('buy','add','hold','reduce','sell','watch','avoid')
+      AND suggestion.date >= (effective_now AT TIME ZONE 'America/New_York')::date - 370
+    GROUP BY suggestion.owner_id, suggestion.id, suggestion.date, suggestion.ticker,
+      suggestion.bucket, evaluation.final_action, suggestion.confidence,
+      evaluation.policy_version, suggestion.price_at_suggestion,
+      suggestion.entry_zone_low, suggestion.entry_zone_high, suggestion.stop,
+      suggestion.target, suggestion.invalidation_price
+    HAVING count(DISTINCT grade.horizon_days)
+      FILTER (WHERE grade.coverage_status = 'complete' AND grade.horizon_days IN (5,21,63)) < 3
+      AND count(DISTINCT grade.horizon_days)
+      FILTER (WHERE grade.coverage_status <> 'complete'
+        AND (grade.graded_at AT TIME ZONE 'America/New_York')::date
+          = (effective_now AT TIME ZONE 'America/New_York')::date) < 3
+    ORDER BY suggestion.date, suggestion.id
+    LIMIT claim_limit
+  ) due;
+  RETURN jsonb_build_object('due', due_rows);
+END
+$$;
+
+CREATE OR REPLACE FUNCTION machine.scheduler_apply_outcome_grades(p_request JSONB)
+RETURNS JSONB
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = pg_catalog
+AS $$
+DECLARE
+  grade_item JSONB;
+  owner_uuid UUID;
+  suggestion_value BIGINT;
+  existing_grade app.suggestion_grades%ROWTYPE;
+  ticker_value TEXT;
+  decision_price_value NUMERIC;
+  policy_version_value INT;
+  final_action_value TEXT;
+  horizon_value INT;
+  sessions_value INT;
+  status_value TEXT;
+  expected_benchmark TEXT;
+  numeric_key TEXT;
+  had_existing BOOLEAN;
+  inserted_count INT := 0;
+  updated_count INT := 0;
+  incomplete_count INT := 0;
+BEGIN
+  IF NOT app.jsonb_has_exact_keys(p_request, ARRAY['grades'])
+     OR jsonb_typeof(p_request->'grades') <> 'array'
+     OR jsonb_array_length(p_request->'grades') > 60 THEN
+    RAISE EXCEPTION 'invalid scheduler request' USING ERRCODE = '22023';
+  END IF;
+  FOR grade_item IN SELECT value FROM jsonb_array_elements(p_request->'grades')
+  LOOP
+    IF jsonb_typeof(grade_item) <> 'object'
+       OR NOT app.jsonb_has_exact_keys(grade_item, ARRAY[
+         'owner_id','suggestion_id','horizon_days','horizon_sessions','coverage_status',
+         'benchmark_ticker','stock_return_pct','benchmark_return_pct','excess_return_pct',
+         'mfe_pct','mae_pct','entry_hit_at','stop_hit_at','target_hit_at',
+         'invalidation_hit_at','policy_version','final_action','direction_success'
+       ])
+       OR grade_item->>'suggestion_id' !~ '^[1-9][0-9]*$' THEN
+      RAISE EXCEPTION 'invalid scheduler request' USING ERRCODE = '22023';
+    END IF;
+    BEGIN
+      owner_uuid := (grade_item->>'owner_id')::uuid;
+      suggestion_value := (grade_item->>'suggestion_id')::bigint;
+      horizon_value := (grade_item->>'horizon_days')::int;
+      sessions_value := (grade_item->>'horizon_sessions')::int;
+      policy_version_value := (grade_item->>'policy_version')::int;
+    EXCEPTION WHEN invalid_text_representation OR numeric_value_out_of_range OR null_value_not_allowed THEN
+      RAISE EXCEPTION 'invalid outcome grade' USING ERRCODE = '22023';
+    END;
+    status_value := grade_item->>'coverage_status';
+    IF horizon_value NOT IN (5, 21, 63)
+       OR sessions_value NOT BETWEEN 0 AND horizon_value
+       OR status_value NOT IN (
+         'incomplete','complete','missing_history','missing_benchmark','corporate_action_review'
+       )
+       OR (status_value = 'complete' AND sessions_value <> horizon_value)
+       OR grade_item->>'benchmark_ticker' NOT IN ('VOO','VXUS')
+       OR jsonb_typeof(grade_item->'direction_success') NOT IN ('boolean','null')
+       OR policy_version_value < 1
+       OR grade_item->>'final_action' NOT IN ('buy','add','hold','reduce','sell','watch','avoid')
+       OR EXISTS (
+         SELECT 1 FROM unnest(ARRAY[
+           grade_item->>'entry_hit_at', grade_item->>'stop_hit_at',
+           grade_item->>'target_hit_at', grade_item->>'invalidation_hit_at'
+         ]) date_text
+         WHERE date_text IS NOT NULL AND date_text !~ '^\d{4}-\d{2}-\d{2}$'
+       ) THEN
+      RAISE EXCEPTION 'invalid outcome grade' USING ERRCODE = '22023';
+    END IF;
+    FOREACH numeric_key IN ARRAY ARRAY[
+      'stock_return_pct','benchmark_return_pct','excess_return_pct','mfe_pct','mae_pct'
+    ]
+    LOOP
+      IF grade_item->>numeric_key IS NOT NULL
+         AND (grade_item->>numeric_key !~ '^-?(0|[1-9][0-9]*)(\.[0-9]{1,4})?$'
+           OR char_length(grade_item->>numeric_key) > 40) THEN
+        RAISE EXCEPTION 'invalid outcome decimal' USING ERRCODE = '22023';
+      END IF;
+    END LOOP;
+
+    SELECT suggestion.ticker, suggestion.price_at_suggestion,
+           evaluation.policy_version, evaluation.final_action
+    INTO ticker_value, decision_price_value, policy_version_value, final_action_value
+    FROM app.suggestions AS suggestion
+    JOIN app.decision_evaluations AS evaluation
+      ON evaluation.owner_id = suggestion.owner_id
+     AND evaluation.id = suggestion.evaluation_id
+    WHERE suggestion.owner_id = owner_uuid
+      AND suggestion.id = suggestion_value
+      AND suggestion.decision_source = 'gateway';
+    IF NOT FOUND
+       OR policy_version_value IS DISTINCT FROM (grade_item->>'policy_version')::int
+       OR final_action_value IS DISTINCT FROM grade_item->>'final_action' THEN
+      RAISE EXCEPTION 'outcome provenance mismatch' USING ERRCODE = '22023';
+    END IF;
+    expected_benchmark := CASE WHEN ticker_value = 'VXUS' THEN 'VXUS' ELSE 'VOO' END;
+    IF grade_item->>'benchmark_ticker' <> expected_benchmark THEN
+      RAISE EXCEPTION 'outcome benchmark mismatch' USING ERRCODE = '22023';
+    END IF;
+    IF status_value = 'corporate_action_review' AND (
+      grade_item->>'entry_hit_at' IS NOT NULL OR grade_item->>'stop_hit_at' IS NOT NULL
+      OR grade_item->>'target_hit_at' IS NOT NULL
+      OR grade_item->>'invalidation_hit_at' IS NOT NULL
+    ) THEN
+      RAISE EXCEPTION 'split outcome contains raw threshold result' USING ERRCODE = '22023';
+    END IF;
+    IF status_value IN ('missing_history','missing_benchmark') AND (
+      grade_item->>'stock_return_pct' IS NOT NULL
+      OR grade_item->>'benchmark_return_pct' IS NOT NULL
+      OR grade_item->>'excess_return_pct' IS NOT NULL
+      OR grade_item->>'mfe_pct' IS NOT NULL OR grade_item->>'mae_pct' IS NOT NULL
+      OR grade_item->>'entry_hit_at' IS NOT NULL OR grade_item->>'stop_hit_at' IS NOT NULL
+      OR grade_item->>'target_hit_at' IS NOT NULL
+      OR grade_item->>'invalidation_hit_at' IS NOT NULL
+      OR grade_item->'direction_success' <> 'null'::jsonb
+    ) THEN
+      RAISE EXCEPTION 'missing outcome contains result' USING ERRCODE = '22023';
+    END IF;
+    IF status_value = 'complete' AND (
+      grade_item->>'stock_return_pct' IS NULL
+      OR grade_item->>'benchmark_return_pct' IS NULL
+      OR grade_item->>'excess_return_pct' IS NULL
+      OR grade_item->>'mfe_pct' IS NULL OR grade_item->>'mae_pct' IS NULL
+    ) THEN
+      RAISE EXCEPTION 'complete outcome missing result' USING ERRCODE = '22023';
+    END IF;
+    IF grade_item->'direction_success' <> 'null'::jsonb AND (
+      status_value <> 'complete' OR final_action_value NOT IN ('buy','add','reduce','sell')
+    ) THEN
+      RAISE EXCEPTION 'invalid directional outcome' USING ERRCODE = '22023';
+    END IF;
+
+    PERFORM pg_advisory_xact_lock(suggestion_value);
+    SELECT * INTO existing_grade
+    FROM app.suggestion_grades
+    WHERE owner_id = owner_uuid AND suggestion_id = suggestion_value
+      AND horizon_days = horizon_value
+    FOR UPDATE;
+    had_existing := FOUND;
+    IF had_existing AND existing_grade.coverage_status = 'complete' THEN
+      CONTINUE;
+    END IF;
+
+    INSERT INTO app.suggestion_grades(
+      owner_id, suggestion_id, graded_at, result, price_then, horizon_days,
+      benchmark_ticker, stock_return_pct, benchmark_return_pct, excess_return_pct,
+      mfe_pct, mae_pct, entry_hit_at, stop_hit_at, target_hit_at,
+      invalidation_hit_at, coverage_status, horizon_sessions, policy_version,
+      final_action, direction_success, note
+    ) VALUES (
+      owner_uuid, suggestion_value, clock_timestamp(),
+      CASE WHEN grade_item->'direction_success' = 'true'::jsonb THEN 'right'
+           WHEN grade_item->'direction_success' = 'false'::jsonb THEN 'wrong'
+           ELSE NULL END,
+      decision_price_value, horizon_value, expected_benchmark,
+      NULLIF(grade_item->>'stock_return_pct','')::numeric,
+      NULLIF(grade_item->>'benchmark_return_pct','')::numeric,
+      NULLIF(grade_item->>'excess_return_pct','')::numeric,
+      NULLIF(grade_item->>'mfe_pct','')::numeric,
+      NULLIF(grade_item->>'mae_pct','')::numeric,
+      NULLIF(grade_item->>'entry_hit_at','')::date,
+      NULLIF(grade_item->>'stop_hit_at','')::date,
+      NULLIF(grade_item->>'target_hit_at','')::date,
+      NULLIF(grade_item->>'invalidation_hit_at','')::date,
+      status_value, sessions_value, policy_version_value, final_action_value,
+      CASE WHEN grade_item->'direction_success' = 'null'::jsonb THEN NULL
+           ELSE (grade_item->>'direction_success')::boolean END,
+      'deterministic scheduler outcome'
+    )
+    ON CONFLICT (suggestion_id, horizon_days) DO UPDATE SET
+      graded_at = EXCLUDED.graded_at,
+      result = EXCLUDED.result,
+      price_then = EXCLUDED.price_then,
+      benchmark_ticker = EXCLUDED.benchmark_ticker,
+      stock_return_pct = EXCLUDED.stock_return_pct,
+      benchmark_return_pct = EXCLUDED.benchmark_return_pct,
+      excess_return_pct = EXCLUDED.excess_return_pct,
+      mfe_pct = EXCLUDED.mfe_pct,
+      mae_pct = EXCLUDED.mae_pct,
+      entry_hit_at = EXCLUDED.entry_hit_at,
+      stop_hit_at = EXCLUDED.stop_hit_at,
+      target_hit_at = EXCLUDED.target_hit_at,
+      invalidation_hit_at = EXCLUDED.invalidation_hit_at,
+      coverage_status = EXCLUDED.coverage_status,
+      horizon_sessions = EXCLUDED.horizon_sessions,
+      policy_version = EXCLUDED.policy_version,
+      final_action = EXCLUDED.final_action,
+      direction_success = EXCLUDED.direction_success,
+      note = EXCLUDED.note;
+    IF had_existing THEN
+      updated_count := updated_count + 1;
+    ELSE
+      inserted_count := inserted_count + 1;
+    END IF;
+    IF status_value <> 'complete' THEN
+      incomplete_count := incomplete_count + 1;
+    END IF;
+  END LOOP;
+  RETURN jsonb_build_object(
+    'inserted', inserted_count, 'updated', updated_count, 'incomplete', incomplete_count
+  );
 END
 $$;
 
@@ -2160,14 +3124,35 @@ ALTER FUNCTION machine.scheduler_claim_due_slots(JSONB) OWNER TO stock_agent_mig
 ALTER FUNCTION machine.scheduler_read_trigger_secret(JSONB) OWNER TO stock_agent_migration_owner;
 ALTER FUNCTION machine.scheduler_record_trigger_result(JSONB) OWNER TO stock_agent_migration_owner;
 ALTER FUNCTION machine.scheduler_publish_holiday(JSONB) OWNER TO stock_agent_migration_owner;
+ALTER FUNCTION machine.scheduler_run_maintenance(JSONB) OWNER TO stock_agent_migration_owner;
+ALTER FUNCTION machine.scheduler_claim_publications(JSONB) OWNER TO stock_agent_migration_owner;
+ALTER FUNCTION machine.scheduler_finish_publication(JSONB) OWNER TO stock_agent_migration_owner;
+ALTER FUNCTION machine.scheduler_claim_operational_alerts(JSONB) OWNER TO stock_agent_migration_owner;
+ALTER FUNCTION machine.scheduler_finish_operational_alert(JSONB) OWNER TO stock_agent_migration_owner;
+ALTER FUNCTION machine.scheduler_read_due_decisions(JSONB) OWNER TO stock_agent_migration_owner;
+ALTER FUNCTION machine.scheduler_apply_outcome_grades(JSONB) OWNER TO stock_agent_migration_owner;
 REVOKE ALL ON FUNCTION machine.scheduler_claim_due_slots(JSONB) FROM PUBLIC;
 REVOKE ALL ON FUNCTION machine.scheduler_read_trigger_secret(JSONB) FROM PUBLIC;
 REVOKE ALL ON FUNCTION machine.scheduler_record_trigger_result(JSONB) FROM PUBLIC;
 REVOKE ALL ON FUNCTION machine.scheduler_publish_holiday(JSONB) FROM PUBLIC;
+REVOKE ALL ON FUNCTION machine.scheduler_run_maintenance(JSONB) FROM PUBLIC;
+REVOKE ALL ON FUNCTION machine.scheduler_claim_publications(JSONB) FROM PUBLIC;
+REVOKE ALL ON FUNCTION machine.scheduler_finish_publication(JSONB) FROM PUBLIC;
+REVOKE ALL ON FUNCTION machine.scheduler_claim_operational_alerts(JSONB) FROM PUBLIC;
+REVOKE ALL ON FUNCTION machine.scheduler_finish_operational_alert(JSONB) FROM PUBLIC;
+REVOKE ALL ON FUNCTION machine.scheduler_read_due_decisions(JSONB) FROM PUBLIC;
+REVOKE ALL ON FUNCTION machine.scheduler_apply_outcome_grades(JSONB) FROM PUBLIC;
 GRANT EXECUTE ON FUNCTION machine.scheduler_claim_due_slots(JSONB) TO stock_agent_scheduler;
 GRANT EXECUTE ON FUNCTION machine.scheduler_read_trigger_secret(JSONB) TO stock_agent_scheduler;
 GRANT EXECUTE ON FUNCTION machine.scheduler_record_trigger_result(JSONB) TO stock_agent_scheduler;
 GRANT EXECUTE ON FUNCTION machine.scheduler_publish_holiday(JSONB) TO stock_agent_scheduler;
+GRANT EXECUTE ON FUNCTION machine.scheduler_run_maintenance(JSONB) TO stock_agent_scheduler;
+GRANT EXECUTE ON FUNCTION machine.scheduler_claim_publications(JSONB) TO stock_agent_scheduler;
+GRANT EXECUTE ON FUNCTION machine.scheduler_finish_publication(JSONB) TO stock_agent_scheduler;
+GRANT EXECUTE ON FUNCTION machine.scheduler_claim_operational_alerts(JSONB) TO stock_agent_scheduler;
+GRANT EXECUTE ON FUNCTION machine.scheduler_finish_operational_alert(JSONB) TO stock_agent_scheduler;
+GRANT EXECUTE ON FUNCTION machine.scheduler_read_due_decisions(JSONB) TO stock_agent_scheduler;
+GRANT EXECUTE ON FUNCTION machine.scheduler_apply_outcome_grades(JSONB) TO stock_agent_scheduler;
 
 -- User-owned provider connection lifecycle. Plain inbound secrets never enter SQL; the
 -- outbound Routine token is accepted once and immediately moved into Vault.

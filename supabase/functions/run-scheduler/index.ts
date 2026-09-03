@@ -8,6 +8,9 @@ function requiredEnvironment(name: string): string {
 }
 
 Deno.serve(createRunSchedulerHandler({
-  repository: createSchedulerRepository(requiredEnvironment("SCHEDULER_DATABASE_URL")),
+  repository: createSchedulerRepository(
+    requiredEnvironment("SCHEDULER_DATABASE_URL"),
+  ),
   schedulerSecret: requiredEnvironment("SCHEDULER_WEBHOOK_SECRET"),
+  telegramToken: requiredEnvironment("TELEGRAM_BOT_TOKEN"),
 }));
