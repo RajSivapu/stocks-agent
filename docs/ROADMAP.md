@@ -28,6 +28,12 @@ The reliability release is on GitHub `main`. Alert v3 is deployed from
 external Supabase, Telegram, Claude, or ChatGPT configuration was checked directly; pending
 observation is called out separately.
 
+The owner-only line contains the same `renderer.ts` v2 patch as checkpoint `386da6f`, applied to
+`main` as `1bdb490`. The additional multi-user/web stack on `codex/stock-agent-reliability` remains a
+separate deferred branch and must not be merged wholesale: it conflicts with the current personal,
+friend-invitations-disabled product boundary. A future owner-only dashboard starts from a new
+security design after alert stability, not by reactivating the deferred multi-tenant application.
+
 ## Remaining rollout checks
 
 The fail-closed cutover is deployed. Migrations/verifiers, policy activation, both Edge Functions,

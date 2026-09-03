@@ -13,6 +13,22 @@ secret values and makes no investment recommendation.
   secret inventory.
 - Alert actions change monitoring state only. They cannot place, modify, or cancel a trade.
 
+## Branch-lineage boundary
+
+Alert v3 intentionally follows the owner-only production line rather than merging the deferred
+multi-user/web product branch. Git inspection on 2026-09-03 established:
+
+- renderer-v2 commit `386da6f` exists on `codex/stock-agent-reliability`, where it also touched the
+  separate multi-user/web stack;
+- the exact `renderer.ts` v2 patch is present on owner-only `main` as `1bdb490` (identical SHA-256
+  for the file patch); and
+- `codex/owner-alert-v3` descends from `1bdb490`.
+
+Therefore the absence of the multi-user web application on this branch is not an alert-v3 deletion.
+It preserves the owner's later decision to keep this a personal agent, leave friend invitations and
+multi-tenant identity disabled, and design a new read-first owner dashboard only after the Telegram
+alert lifecycle is stable. Do not merge `codex/stock-agent-reliability` wholesale into this rollout.
+
 ## Code and review checkpoint
 
 - Branch: `codex/owner-alert-v3`.
