@@ -1,4 +1,5 @@
 -- Fee-aware immutable ledger and deterministic holdings projection.
+-- Supabase CLI migration.
 -- Legacy transaction rows remain visible as history but do not pretend to be a complete ledger;
 -- each current holding becomes one explicit migration opening event.
 

@@ -1,4 +1,5 @@
 -- Multi-user Telegram webhook runtime: atomic callbacks, bounded reads, and body-free receipts.
+-- Supabase CLI migration.
 
 CREATE TABLE app.telegram_deliveries (
   id BIGSERIAL PRIMARY KEY,

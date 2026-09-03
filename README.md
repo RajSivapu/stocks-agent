@@ -121,18 +121,21 @@ Read [privacy](docs/privacy.md), [risk disclosure](docs/risk-disclosure.md), and
 Install local test dependencies from the pinned project manifests, then use a disposable PostgreSQL
 17 instance for migration work. Never point a local test command at production.
 
-`sql/schema.sql` is the generated canonical fresh-install schema. It contains the reviewed legacy
-baseline, migrations through 20260910, and a data-free bootstrap at the multitenancy boundary. Do not
-edit it directly. Regenerate and prove catalog equivalence with:
+`supabase/migrations/` is the deployable source of truth used by `supabase db push` and includes the
+captured data-free legacy baseline. `sql/schema.sql` is a generated canonical fresh-install artifact;
+do not edit it directly. Regenerate it and prove that a true from-empty migration replay, an
+existing-data owner upgrade, and the canonical catalog are identical with:
 
 ```bash
 .venv/bin/python scripts/verify_schema_parity.py --write
 .venv/bin/python scripts/verify_schema_parity.py --verify
 ```
 
-`sql/legacy_schema.sql` exists only to test the real upgrade path. Existing single-owner data must go
-through `scripts/migrate_single_owner_to_tenant.py`; never run the fresh bootstrap over non-empty
-tables. Migration filenames use unique sortable versions in dependency order.
+`sql/legacy_schema.sql` exists only to test the real upgrade path. Existing single-owner data must use
+the protected workflow's one-time `owner-cutover` operation; it applies only through the additive
+foundation, runs the verified owner backfill, marks the data-free bootstrap as satisfied, and then
+continues the ordered migrations. Never run the fresh bootstrap over non-empty tables. Migration
+filenames use unique sortable versions in dependency order.
 
 ## Deployment and operations
 
@@ -140,7 +143,8 @@ Pull requests run without environment secrets. CI performs secret/dependency/SQL
 fresh migration parity, RLS/surface attacks, all language/UI/browser tests, a production build, and a
 build-output scan. Successful `main` CI may deploy isolated staging. Production remains a manually
 approved workflow requiring a fresh encrypted backup, recent restore, passing staging evidence,
-paused triggers, a distinct rollback commit, and post-deploy owner smoke.
+paused triggers, a distinct rollback commit, a live static release marker for the exact commit, and
+post-deploy owner smoke.
 
 Start here:
 

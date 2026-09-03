@@ -1,4 +1,5 @@
 -- Multi-tenant identity and schema foundation.
+-- Supabase CLI migration; existing data must be backfilled before the next migration.
 --
 -- This migration is deliberately additive. Legacy owner rows remain nullable until the
 -- operator-confirmed, fail-closed backfill in the next release gate has proved parity.
@@ -484,6 +485,9 @@ BEGIN
   INSERT INTO app.profiles (id, status)
   VALUES (p_owner_id, 'active')
   ON CONFLICT (id) DO NOTHING;
+  INSERT INTO app.app_admins (user_id, role)
+  VALUES (p_owner_id, 'operator')
+  ON CONFLICT (user_id) DO NOTHING;
   INSERT INTO app.notification_preferences (owner_id)
   VALUES (p_owner_id)
   ON CONFLICT (owner_id) DO NOTHING;

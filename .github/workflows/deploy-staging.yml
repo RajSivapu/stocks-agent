@@ -20,19 +20,6 @@ jobs:
     environment: staging
     runs-on: ubuntu-24.04
     timeout-minutes: 45
-    env:
-      STAGING_PROJECT_REF: ${{ secrets.STAGING_PROJECT_REF }}
-      STAGING_POSTGRES_URL: ${{ secrets.STAGING_POSTGRES_URL }}
-      STAGING_SUPAVISOR_SESSION_URL: ${{ secrets.STAGING_SUPAVISOR_SESSION_URL }}
-      STAGING_SUPABASE_URL: ${{ vars.STAGING_SUPABASE_URL }}
-      STAGING_SUPABASE_PUBLISHABLE_KEY: ${{ vars.STAGING_SUPABASE_PUBLISHABLE_KEY }}
-      STAGING_SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.STAGING_SUPABASE_SERVICE_ROLE_KEY }}
-      STAGING_OPERATOR_ID: ${{ secrets.STAGING_OPERATOR_ID }}
-      STAGING_CONNECTION_PUBLIC_ID: ${{ secrets.STAGING_CONNECTION_PUBLIC_ID }}
-      STAGING_WEB_URL: ${{ vars.STAGING_WEB_URL }}
-      SUPABASE_ACCESS_TOKEN: ${{ secrets.SUPABASE_ACCESS_TOKEN }}
-      CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
-      CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
     steps:
       - name: checkout
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
@@ -56,22 +43,50 @@ jobs:
           npm ci
           npx playwright install --with-deps chromium
       - name: staging-preflight
+        env:
+          STAGING_PROJECT_REF: ${{ secrets.STAGING_PROJECT_REF }}
         run: >-
           python scripts/deploy_and_verify.py staging-preflight
           --project-ref "$STAGING_PROJECT_REF"
           --confirm "DEPLOY STAGING $STAGING_PROJECT_REF"
       - name: apply-staging-migrations
+        env:
+          STAGING_PROJECT_REF: ${{ secrets.STAGING_PROJECT_REF }}
+          SUPABASE_ACCESS_TOKEN: ${{ secrets.SUPABASE_ACCESS_TOKEN }}
         run: |
           npx --yes supabase@2.116.0 link --project-ref "$STAGING_PROJECT_REF"
           npx --yes supabase@2.116.0 db push --linked --include-all
+      - name: provision-staging-operator
+        env:
+          STAGING_PROJECT_REF: ${{ secrets.STAGING_PROJECT_REF }}
+          STAGING_POSTGRES_URL: ${{ secrets.STAGING_POSTGRES_URL }}
+          STAGING_OPERATOR_ID: ${{ secrets.STAGING_OPERATOR_ID }}
+        run: >-
+          python scripts/provision_operator.py
+          --project-ref "$STAGING_PROJECT_REF"
+          --environment staging
+          --confirm "PROVISION STAGING OPERATOR $STAGING_PROJECT_REF"
       - name: provision-runtime-roles
+        env:
+          STAGING_PROJECT_REF: ${{ secrets.STAGING_PROJECT_REF }}
+          STAGING_POSTGRES_URL: ${{ secrets.STAGING_POSTGRES_URL }}
+          STAGING_SUPAVISOR_SESSION_URL: ${{ secrets.STAGING_SUPAVISOR_SESSION_URL }}
         run: python scripts/provision_runtime_roles.py --project-ref "$STAGING_PROJECT_REF"
       - name: deploy-edge-functions
+        env:
+          STAGING_PROJECT_REF: ${{ secrets.STAGING_PROJECT_REF }}
+          SUPABASE_ACCESS_TOKEN: ${{ secrets.SUPABASE_ACCESS_TOKEN }}
         run: |
           npx --yes supabase@2.116.0 functions deploy app-api --project-ref "$STAGING_PROJECT_REF"
           npx --yes supabase@2.116.0 functions deploy telegram-portfolio --project-ref "$STAGING_PROJECT_REF"
           npx --yes supabase@2.116.0 functions deploy agent-gateway --project-ref "$STAGING_PROJECT_REF"
           npx --yes supabase@2.116.0 functions deploy run-scheduler --project-ref "$STAGING_PROJECT_REF"
+      - name: write-release-marker
+        run: >-
+          python scripts/write_release_marker.py
+          --output apps/web/public/release.json
+          --commit "$(git rev-parse HEAD)"
+          --environment staging
       - name: build-static-web
         env:
           VITE_SUPABASE_URL: ${{ vars.STAGING_SUPABASE_URL }}
@@ -80,11 +95,17 @@ jobs:
       - name: build-output-scan
         run: python scripts/deploy_and_verify.py scan-build --dist apps/web/dist
       - name: deploy-static-web
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
         run: >-
           npx --yes wrangler@4.128.0 deploy
           --config apps/web/wrangler.jsonc
           --name stocks-agent-staging-web
       - name: create-security-test-users
+        env:
+          STAGING_SUPABASE_URL: ${{ vars.STAGING_SUPABASE_URL }}
+          STAGING_SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.STAGING_SUPABASE_SERVICE_ROLE_KEY }}
         run: >-
           python scripts/create_security_test_users.py
           --email-a "security-a-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}@tests.invalid"
@@ -110,6 +131,13 @@ jobs:
           E2E_SUPABASE_PUBLISHABLE_KEY: ${{ vars.STAGING_SUPABASE_PUBLISHABLE_KEY }}
         run: npm --workspace apps/web run test:e2e
       - name: staging-verify
+        env:
+          STAGING_POSTGRES_URL: ${{ secrets.STAGING_POSTGRES_URL }}
+          STAGING_SUPABASE_URL: ${{ vars.STAGING_SUPABASE_URL }}
+          STAGING_SUPABASE_PUBLISHABLE_KEY: ${{ vars.STAGING_SUPABASE_PUBLISHABLE_KEY }}
+          STAGING_OPERATOR_ID: ${{ secrets.STAGING_OPERATOR_ID }}
+          STAGING_CONNECTION_PUBLIC_ID: ${{ secrets.STAGING_CONNECTION_PUBLIC_ID }}
+          STAGING_WEB_URL: ${{ vars.STAGING_WEB_URL }}
         run: >-
           python scripts/deploy_and_verify.py staging-verify
           --commit "$(git rev-parse HEAD)"
@@ -117,6 +145,9 @@ jobs:
           --report "$RUNNER_TEMP/staging-report.json"
       - name: cleanup-security-test-users
         if: always()
+        env:
+          STAGING_SUPABASE_URL: ${{ vars.STAGING_SUPABASE_URL }}
+          STAGING_SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.STAGING_SUPABASE_SERVICE_ROLE_KEY }}
         run: |
           if [[ -f "$RUNNER_TEMP/security-users.json" ]]; then
             python scripts/create_security_test_users.py --cleanup-bundle "$RUNNER_TEMP/security-users.json"

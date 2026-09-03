@@ -39,6 +39,26 @@ def test_all_actions_are_immutable_and_workflows_are_least_privilege():
         assert "R2_SECRET_ACCESS_KEY" not in text
 
 
+def test_workflow_shell_never_interpolates_untrusted_context_or_secrets_directly():
+    for path in sorted(WORKFLOWS.glob("*.yml")):
+        parsed = yaml.load(path.read_text(encoding="utf-8"), Loader=yaml.BaseLoader)
+        for job in parsed["jobs"].values():
+            for step in job.get("steps", []):
+                command = step.get("run", "")
+                assert "${{ inputs." not in command
+                assert "${{ github.event.inputs" not in command
+                assert "${{ secrets." not in command
+                assert "${{ needs." not in command
+
+
+def test_deployment_secrets_are_scoped_to_the_step_that_uses_them():
+    for name in ("deploy-staging.yml", "deploy-production.yml"):
+        parsed = _yaml(name)
+        for job in parsed["jobs"].values():
+            for value in job.get("env", {}).values():
+                assert "secrets." not in value
+
+
 def test_pull_requests_run_tests_without_any_secret_context():
     text = _text("ci.yml")
     parsed = _yaml("ci.yml")
@@ -66,10 +86,15 @@ def test_staging_is_after_ci_and_deploys_only_the_four_release_functions():
     assert "deploy_and_verify.py staging-preflight" in text
     assert "deploy_and_verify.py staging-verify" in text
     assert "create_security_test_users.py" in text
+    assert "provision_operator.py" in text
+    assert "write_release_marker.py" in text
     assert "E2E_LIVE: 1" in text
     assert "npm --workspace apps/web run test:e2e" in text
+    assert text.index("provision-staging-operator") < text.index("create-security-test-users")
     assert text.index("create-security-test-users") < text.index("live-browser-security-acceptance")
     assert text.index("live-browser-security-acceptance") < text.index("staging-verify")
+    assert "supabase/migrations" in (ROOT / "scripts/verify_schema_parity.py").read_text(encoding="utf-8")
+    assert not (ROOT / "sql/migrations").exists()
 
 
 def test_production_is_manual_protected_and_cannot_enable_invitations():
@@ -88,7 +113,16 @@ def test_production_is_manual_protected_and_cannot_enable_invitations():
     assert "rollback-ref" in text
     assert "operation=verify" in text
     assert "production-health" in text
+    assert "write_release_marker.py" in text
+    assert '--commit "$REQUESTED_COMMIT"' in text
     assert "if: inputs.operation == 'verify'" in text
+    assert "owner-cutover" in text
+    assert "CUTOVER OWNER" in text
+    assert "migrate_single_owner_to_tenant.py" in text
+    assert "migration repair 20260905500000 --status applied" in text
+    assert text.index("owner-cutover-preflight") < text.index("apply-owner-foundation")
+    assert text.index("apply-owner-foundation") < text.index("backfill-owner-data")
+    assert text.index("backfill-owner-data") < text.index("apply-remaining-owner-migrations")
 
 
 def test_static_hosting_is_spa_only_and_has_no_server_binding():

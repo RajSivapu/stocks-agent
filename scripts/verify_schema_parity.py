@@ -22,13 +22,11 @@ import psycopg
 ROOT = Path(__file__).resolve().parents[1]
 LEGACY_SCHEMA = ROOT / "sql/legacy_schema.sql"
 CANONICAL_SCHEMA = ROOT / "sql/schema.sql"
-MIGRATIONS = tuple(sorted((ROOT / "sql/migrations").glob("*.sql")))
-POST_LEGACY_MIGRATIONS = tuple(
-    path for path in MIGRATIONS if path.name > "20260904_outcome_evaluation.sql"
-)
-FRESH_BOOTSTRAP = ROOT / "sql/bootstrap/fresh_multitenancy.sql"
+MIGRATIONS = tuple(sorted((ROOT / "supabase/migrations").glob("*.sql")))
+FOUNDATION_MIGRATION = ROOT / "supabase/migrations/20260905000000_multitenancy_foundation.sql"
+FRESH_BOOTSTRAP = ROOT / "supabase/migrations/20260905500000_fresh_multitenancy.sql"
 HEADER = """-- GENERATED CANONICAL FRESH-INSTALL SCHEMA.
--- Source of truth: sql/legacy_schema.sql followed by every reviewed migration after 20260904.
+-- Source of truth: every reviewed file in supabase/migrations, in lexical order.
 -- Regenerate with: python scripts/verify_schema_parity.py --write
 -- Do not add credentials, data rows, or platform-owned Auth definitions here.
 """
@@ -39,23 +37,21 @@ class SchemaParityRejected(RuntimeError):
 
 
 def render_canonical_schema() -> str:
-    if not LEGACY_SCHEMA.is_file() or not FRESH_BOOTSTRAP.is_file() or not POST_LEGACY_MIGRATIONS:
+    if (
+        not LEGACY_SCHEMA.is_file()
+        or not FOUNDATION_MIGRATION.is_file()
+        or not FRESH_BOOTSTRAP.is_file()
+        or not MIGRATIONS
+    ):
         raise SchemaParityRejected("schema sources are incomplete")
-    sections = [HEADER.rstrip(), LEGACY_SCHEMA.read_text(encoding="utf-8").rstrip()]
-    for path in POST_LEGACY_MIGRATIONS:
+    sections = [HEADER.rstrip()]
+    for path in MIGRATIONS:
         relative = path.relative_to(ROOT).as_posix()
         sections.extend((
             f"-- BEGIN REVIEWED MIGRATION: {relative}",
             path.read_text(encoding="utf-8").rstrip(),
             f"-- END REVIEWED MIGRATION: {relative}",
         ))
-        if path.name == "20260905000000_multitenancy_foundation.sql":
-            bootstrap_relative = FRESH_BOOTSTRAP.relative_to(ROOT).as_posix()
-            sections.extend((
-                f"-- BEGIN FRESH-INSTALL BOOTSTRAP: {bootstrap_relative}",
-                FRESH_BOOTSTRAP.read_text(encoding="utf-8").rstrip(),
-                f"-- END FRESH-INSTALL BOOTSTRAP: {bootstrap_relative}",
-            ))
     rendered = "\n\n".join(sections) + "\n"
     lowered = rendered.lower()
     for forbidden in (
@@ -220,26 +216,34 @@ def verify_disposable_catalog_parity() -> dict[str, str | bool]:
                 for role in ("anon", "authenticated", "service_role"):
                     admin.execute(f"CREATE ROLE {role} NOLOGIN")
                 admin.execute("CREATE DATABASE migration_path TEMPLATE template0")
+                admin.execute("CREATE DATABASE upgrade_path TEMPLATE template0")
                 admin.execute("CREATE DATABASE canonical_path TEMPLATE template0")
 
             with _connect(port, "migration_path") as migrated:
                 _platform_stubs(migrated)
-                migrated.execute(LEGACY_SCHEMA.read_text(encoding="utf-8"))
-                for path in POST_LEGACY_MIGRATIONS:
+                for path in MIGRATIONS:
                     migrated.execute(path.read_text(encoding="utf-8"))
-                    if path.name == "20260905000000_multitenancy_foundation.sql":
-                        migrated.execute(
+
+            with _connect(port, "upgrade_path") as upgraded:
+                _platform_stubs(upgraded)
+                upgraded.execute(LEGACY_SCHEMA.read_text(encoding="utf-8"))
+                for path in MIGRATIONS:
+                    if path == FRESH_BOOTSTRAP:
+                        continue
+                    upgraded.execute(path.read_text(encoding="utf-8"))
+                    if path == FOUNDATION_MIGRATION:
+                        upgraded.execute(
                             "INSERT INTO auth.users (id, email) VALUES (%s, %s)",
                             (
                                 "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
                                 "schema-parity@invalid.example",
                             ),
                         )
-                        migrated.execute(
+                        upgraded.execute(
                             "SELECT machine.backfill_single_owner_to_tenant(%s)",
                             ("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",),
                         )
-                        migrated.execute(
+                        upgraded.execute(
                             """
                             DROP FUNCTION machine.backfill_single_owner_to_tenant(UUID);
                             DROP FUNCTION machine.single_owner_relationship_digest(NAME);
@@ -253,16 +257,19 @@ def verify_disposable_catalog_parity() -> dict[str, str | bool]:
                 canonical.execute(rendered)
 
             migrated_dump = _dump(port, "migration_path")
+            upgrade_dump = _dump(port, "upgrade_path")
             canonical_dump = _dump(port, "canonical_path")
     except (psycopg.Error, OSError, subprocess.SubprocessError) as error:
         raise SchemaParityRejected("disposable schema verification failed") from error
     migration_digest = hashlib.sha256(migrated_dump).hexdigest()
+    upgrade_digest = hashlib.sha256(upgrade_dump).hexdigest()
     canonical_digest = hashlib.sha256(canonical_dump).hexdigest()
-    if not migration_digest == canonical_digest:
-        raise SchemaParityRejected("canonical and migration catalogs differ")
+    if not migration_digest == canonical_digest == upgrade_digest:
+        raise SchemaParityRejected("fresh, upgrade, and canonical catalogs differ")
     return {
         "status": "passed",
         "migration_digest": migration_digest,
+        "upgrade_digest": upgrade_digest,
         "canonical_digest": canonical_digest,
         "private_data": False,
     }

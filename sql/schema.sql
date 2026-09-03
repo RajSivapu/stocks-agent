@@ -1,11 +1,103 @@
 -- GENERATED CANONICAL FRESH-INSTALL SCHEMA.
--- Source of truth: sql/legacy_schema.sql followed by every reviewed migration after 20260904.
+-- Source of truth: every reviewed file in supabase/migrations, in lexical order.
 -- Regenerate with: python scripts/verify_schema_parity.py --write
 -- Do not add credentials, data rows, or platform-owned Auth definitions here.
+
+-- BEGIN REVIEWED MIGRATION: supabase/migrations/20260831_legacy_baseline.sql
+
+-- Captured legacy schema baseline before the auditable analysis-run migrations.
+-- Its eight-digit version intentionally precedes the repository's existing 20260901 version.
+-- Contains structure only: no owner data, credentials, Auth rows, or runtime configuration.
 
 CREATE TABLE IF NOT EXISTS holdings (
   ticker TEXT PRIMARY KEY, shares NUMERIC NOT NULL, avg_cost NUMERIC NOT NULL,
   bucket TEXT, opened_at DATE, notes TEXT);
+
+ALTER TABLE holdings ADD COLUMN IF NOT EXISTS stop NUMERIC;
+ALTER TABLE holdings ADD COLUMN IF NOT EXISTS target NUMERIC;
+ALTER TABLE holdings ADD COLUMN IF NOT EXISTS high_water_price NUMERIC;
+ALTER TABLE holdings ADD COLUMN IF NOT EXISTS stop_alert_active BOOLEAN DEFAULT false;
+ALTER TABLE holdings ADD COLUMN IF NOT EXISTS hold_override_until DATE;
+ALTER TABLE holdings ADD COLUMN IF NOT EXISTS stop_near_alert_active BOOLEAN DEFAULT false;
+ALTER TABLE holdings ADD COLUMN IF NOT EXISTS target_near_alert_active BOOLEAN DEFAULT false;
+ALTER TABLE holdings ADD COLUMN IF NOT EXISTS target_alert_active BOOLEAN DEFAULT false;
+
+CREATE TABLE IF NOT EXISTS transactions (
+  id BIGSERIAL PRIMARY KEY, ts TIMESTAMPTZ NOT NULL DEFAULT now(),
+  ticker TEXT NOT NULL, side TEXT NOT NULL CHECK (side IN ('buy','sell')),
+  qty NUMERIC NOT NULL, price NUMERIC NOT NULL, source TEXT DEFAULT 'owner');
+
+CREATE TABLE IF NOT EXISTS suggestions (
+  id BIGSERIAL PRIMARY KEY, ts TIMESTAMPTZ NOT NULL DEFAULT now(),
+  date DATE NOT NULL, ticker TEXT NOT NULL, action TEXT NOT NULL, bucket TEXT,
+  depth TEXT, entry_zone_low NUMERIC, entry_zone_high NUMERIC, valid_until DATE,
+  stop NUMERIC, target NUMERIC, confidence TEXT, bull TEXT, bear TEXT,
+  decisive_factor TEXT, risk_verdict TEXT, invalidation_level TEXT, reason TEXT,
+  score INT, score_growth INT, score_health INT, score_valuation INT,
+  risk_band TEXT, score_inputs TEXT, score_partial BOOLEAN DEFAULT false,
+  price_at_suggestion NUMERIC);
+
+CREATE TABLE IF NOT EXISTS suggestion_grades (
+  id BIGSERIAL PRIMARY KEY, suggestion_id BIGINT REFERENCES suggestions(id),
+  graded_at TIMESTAMPTZ DEFAULT now(), result TEXT, price_then NUMERIC,
+  price_later NUMERIC, horizon_days INT, note TEXT);
+
+CREATE TABLE IF NOT EXISTS stock_observations (
+  id BIGSERIAL PRIMARY KEY, ticker TEXT NOT NULL, obs_date DATE NOT NULL,
+  event_type TEXT, summary TEXT, price_reaction TEXT, confidence TEXT,
+  source TEXT, created_at TIMESTAMPTZ DEFAULT now());
+CREATE INDEX IF NOT EXISTS idx_obs_ticker ON stock_observations(ticker);
+
+CREATE TABLE IF NOT EXISTS daily_snapshots (
+  id BIGSERIAL PRIMARY KEY, snap_date DATE NOT NULL, ticker TEXT NOT NULL,
+  close NUMERIC, day_move_pct NUMERIC, rsi14 NUMERIC, sma50 NUMERIC,
+  sma200 NUMERIC, macd_hist NUMERIC,
+  UNIQUE(snap_date, ticker));
+
+CREATE TABLE IF NOT EXISTS dry_powder (
+  month TEXT PRIMARY KEY, growth_available NUMERIC DEFAULT 0,
+  spec_available NUMERIC DEFAULT 0, rolled_months INT DEFAULT 0);
+
+CREATE TABLE IF NOT EXISTS radar (
+  ticker TEXT PRIMARY KEY, added DATE, last_seen DATE, days_relevant INT,
+  reason TEXT, bucket_guess TEXT, promoted BOOLEAN DEFAULT false, promoted_on DATE);
+
+CREATE TABLE IF NOT EXISTS lessons (
+  id BIGSERIAL PRIMARY KEY,
+  entry_date DATE NOT NULL,
+  category TEXT NOT NULL DEFAULT 'regime',
+  content TEXT NOT NULL,
+  created_at TIMESTAMPTZ DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS idx_lessons_date ON lessons(entry_date DESC, id DESC);
+
+CREATE TABLE IF NOT EXISTS paper_watches (
+  id BIGSERIAL PRIMARY KEY, ticker TEXT NOT NULL, created DATE NOT NULL,
+  entry_ref_price NUMERIC, target_price NUMERIC, hypothetical_amount NUMERIC,
+  thesis TEXT, horizon TEXT, status TEXT NOT NULL DEFAULT 'active',
+  closed_date DATE, close_price NUMERIC,
+  agent_view_at_open TEXT, agent_score_at_open INT,
+  created_at TIMESTAMPTZ DEFAULT now());
+CREATE INDEX IF NOT EXISTS idx_paper_status ON paper_watches(status);
+
+ALTER TABLE holdings ENABLE ROW LEVEL SECURITY;
+ALTER TABLE transactions ENABLE ROW LEVEL SECURITY;
+ALTER TABLE suggestions ENABLE ROW LEVEL SECURITY;
+ALTER TABLE suggestion_grades ENABLE ROW LEVEL SECURITY;
+ALTER TABLE stock_observations ENABLE ROW LEVEL SECURITY;
+ALTER TABLE daily_snapshots ENABLE ROW LEVEL SECURITY;
+ALTER TABLE dry_powder ENABLE ROW LEVEL SECURITY;
+ALTER TABLE radar ENABLE ROW LEVEL SECURITY;
+ALTER TABLE lessons ENABLE ROW LEVEL SECURITY;
+ALTER TABLE paper_watches ENABLE ROW LEVEL SECURITY;
+
+-- END REVIEWED MIGRATION: supabase/migrations/20260831_legacy_baseline.sql
+
+-- BEGIN REVIEWED MIGRATION: supabase/migrations/20260901_reliable_stock_agent.sql
+
+-- Reliable stock-agent audit and Telegram portfolio workflow.
+-- Supabase CLI migration; replay-safe on the captured legacy baseline.
+-- This migration is intentionally additive and safe to re-run.
 
 CREATE SCHEMA IF NOT EXISTS extensions;
 CREATE EXTENSION IF NOT EXISTS pgcrypto WITH SCHEMA extensions;
@@ -24,29 +116,75 @@ CREATE TABLE IF NOT EXISTS analysis_runs (
   summary TEXT,
   error TEXT
 );
+
+ALTER TABLE suggestions ADD COLUMN IF NOT EXISTS run_id UUID REFERENCES analysis_runs(id) ON DELETE SET NULL;
+ALTER TABLE suggestions ADD COLUMN IF NOT EXISTS evidence_as_of TIMESTAMPTZ;
+ALTER TABLE stock_observations ADD COLUMN IF NOT EXISTS run_id UUID REFERENCES analysis_runs(id) ON DELETE SET NULL;
+ALTER TABLE transactions ADD COLUMN IF NOT EXISTS executed_on DATE;
+
+-- Repair only holdings whose complete transaction ledger can be reconstructed safely.
+-- The latest zero balance marks the start of the currently open position lifecycle.
+WITH eligible_tickers AS (
+  SELECT holding.ticker
+  FROM public.holdings AS holding
+  JOIN public.transactions AS transaction ON transaction.ticker = holding.ticker
+  GROUP BY holding.ticker, holding.shares
+  HAVING BOOL_AND(
+      COALESCE(transaction.source = 'telegram', FALSE)
+      AND transaction.executed_on IS NOT NULL
+      AND transaction.qty > 0
+    )
+    AND SUM(CASE WHEN transaction.side = 'buy' THEN transaction.qty ELSE -transaction.qty END)
+      = holding.shares
+),
+ordered_ledger AS (
+  SELECT
+    transaction.ticker,
+    transaction.executed_on,
+    ROW_NUMBER() OVER ledger_order AS sequence_number,
+    SUM(CASE WHEN transaction.side = 'buy' THEN transaction.qty ELSE -transaction.qty END)
+      OVER ledger_order AS running_shares
+  FROM public.transactions AS transaction
+  JOIN eligible_tickers ON eligible_tickers.ticker = transaction.ticker
+  WINDOW ledger_order AS (
+    PARTITION BY transaction.ticker
+    ORDER BY transaction.executed_on, transaction.id
+    ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW
+  )
+),
+valid_ledgers AS (
+  SELECT ticker
+  FROM ordered_ledger
+  GROUP BY ticker
+  HAVING MIN(running_shares) >= 0
+),
+last_zero_balance AS (
+  SELECT ledger.ticker, MAX(ledger.sequence_number) AS sequence_number
+  FROM ordered_ledger AS ledger
+  JOIN valid_ledgers ON valid_ledgers.ticker = ledger.ticker
+  WHERE ledger.running_shares = 0
+  GROUP BY ledger.ticker
+),
+current_lifecycle AS (
+  SELECT ledger.ticker, MIN(ledger.executed_on) AS opened_at
+  FROM ordered_ledger AS ledger
+  JOIN valid_ledgers ON valid_ledgers.ticker = ledger.ticker
+  LEFT JOIN last_zero_balance ON last_zero_balance.ticker = ledger.ticker
+  WHERE ledger.sequence_number > COALESCE(last_zero_balance.sequence_number, 0)
+  GROUP BY ledger.ticker
+)
+UPDATE public.holdings AS holding
+SET opened_at = current_lifecycle.opened_at
+FROM current_lifecycle
+WHERE holding.ticker = current_lifecycle.ticker
+  AND (holding.opened_at IS NULL OR holding.opened_at > current_lifecycle.opened_at);
+
 CREATE INDEX IF NOT EXISTS idx_analysis_runs_started ON analysis_runs(started_at DESC);
 CREATE INDEX IF NOT EXISTS idx_analysis_runs_kind_started ON analysis_runs(kind, started_at DESC);
+CREATE INDEX IF NOT EXISTS idx_suggestions_run_id ON suggestions(run_id);
+CREATE INDEX IF NOT EXISTS idx_observations_run_id ON stock_observations(run_id);
 
--- v2.1: trailing-stop fields on holdings
-ALTER TABLE holdings ADD COLUMN IF NOT EXISTS stop NUMERIC;
-ALTER TABLE holdings ADD COLUMN IF NOT EXISTS target NUMERIC;
-ALTER TABLE holdings ADD COLUMN IF NOT EXISTS high_water_price NUMERIC;
-
--- v2.2: stop-hit alert de-dup (edge-triggered, not level-triggered) + owner hold-override
-ALTER TABLE holdings ADD COLUMN IF NOT EXISTS stop_alert_active BOOLEAN DEFAULT false;
-ALTER TABLE holdings ADD COLUMN IF NOT EXISTS hold_override_until DATE;
-
--- v2.2: approaching-stop / approaching-target / target-hit alert de-dup (same edge-triggered pattern)
-ALTER TABLE holdings ADD COLUMN IF NOT EXISTS stop_near_alert_active BOOLEAN DEFAULT false;
-ALTER TABLE holdings ADD COLUMN IF NOT EXISTS target_near_alert_active BOOLEAN DEFAULT false;
-ALTER TABLE holdings ADD COLUMN IF NOT EXISTS target_alert_active BOOLEAN DEFAULT false;
-
-CREATE TABLE IF NOT EXISTS transactions (
-  id BIGSERIAL PRIMARY KEY, ts TIMESTAMPTZ NOT NULL DEFAULT now(),
-  ticker TEXT NOT NULL, side TEXT NOT NULL CHECK (side IN ('buy','sell')),
-  qty NUMERIC NOT NULL, price NUMERIC NOT NULL, source TEXT DEFAULT 'owner',
-  executed_on DATE);
-ALTER TABLE transactions ADD COLUMN IF NOT EXISTS executed_on DATE;
+ALTER TABLE analysis_runs ENABLE ROW LEVEL SECURITY;
 
 CREATE TABLE IF NOT EXISTS portfolio_commands (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -78,90 +216,20 @@ CREATE TABLE IF NOT EXISTS portfolio_commands (
   )
 );
 ALTER TABLE portfolio_commands ADD COLUMN IF NOT EXISTS executed_on DATE;
+
 CREATE INDEX IF NOT EXISTS idx_portfolio_commands_status_expiry
   ON portfolio_commands(status, expires_at);
 CREATE INDEX IF NOT EXISTS idx_portfolio_commands_owner_created
   ON portfolio_commands(chat_id, user_id, created_at DESC);
+ALTER TABLE portfolio_commands ENABLE ROW LEVEL SECURITY;
 
+-- One receipt per Telegram update, including read-only commands and callbacks.
 CREATE TABLE IF NOT EXISTS telegram_updates (
   telegram_update_id BIGINT PRIMARY KEY,
   kind TEXT NOT NULL CHECK (kind IN ('message', 'callback_query')),
   received_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
-
-CREATE TABLE IF NOT EXISTS suggestions (
-  id BIGSERIAL PRIMARY KEY, ts TIMESTAMPTZ NOT NULL DEFAULT now(),
-  date DATE NOT NULL, ticker TEXT NOT NULL, action TEXT NOT NULL, bucket TEXT,
-  depth TEXT, entry_zone_low NUMERIC, entry_zone_high NUMERIC, valid_until DATE,
-  stop NUMERIC, target NUMERIC, confidence TEXT, bull TEXT, bear TEXT,
-  decisive_factor TEXT, risk_verdict TEXT, invalidation_level TEXT, reason TEXT,
-  score INT, score_growth INT, score_health INT, score_valuation INT,
-  risk_band TEXT, score_inputs TEXT, score_partial BOOLEAN DEFAULT false,
-  price_at_suggestion NUMERIC);
-ALTER TABLE suggestions ADD COLUMN IF NOT EXISTS run_id UUID REFERENCES analysis_runs(id) ON DELETE SET NULL;
-ALTER TABLE suggestions ADD COLUMN IF NOT EXISTS evidence_as_of TIMESTAMPTZ;
-CREATE INDEX IF NOT EXISTS idx_suggestions_run_id ON suggestions(run_id);
-
-CREATE TABLE IF NOT EXISTS suggestion_grades (
-  id BIGSERIAL PRIMARY KEY, suggestion_id BIGINT REFERENCES suggestions(id),
-  graded_at TIMESTAMPTZ DEFAULT now(), result TEXT, price_then NUMERIC,
-  price_later NUMERIC, horizon_days INT, note TEXT);
-
-CREATE TABLE IF NOT EXISTS stock_observations (
-  id BIGSERIAL PRIMARY KEY, ticker TEXT NOT NULL, obs_date DATE NOT NULL,
-  event_type TEXT, summary TEXT, price_reaction TEXT, confidence TEXT,
-  source TEXT, created_at TIMESTAMPTZ DEFAULT now());
-ALTER TABLE stock_observations ADD COLUMN IF NOT EXISTS run_id UUID REFERENCES analysis_runs(id) ON DELETE SET NULL;
-CREATE INDEX IF NOT EXISTS idx_obs_ticker ON stock_observations(ticker);
-CREATE INDEX IF NOT EXISTS idx_observations_run_id ON stock_observations(run_id);
-
-CREATE TABLE IF NOT EXISTS daily_snapshots (
-  id BIGSERIAL PRIMARY KEY, snap_date DATE NOT NULL, ticker TEXT NOT NULL,
-  close NUMERIC, day_move_pct NUMERIC, rsi14 NUMERIC, sma50 NUMERIC,
-  sma200 NUMERIC, macd_hist NUMERIC,
-  UNIQUE(snap_date, ticker));
-
-CREATE TABLE IF NOT EXISTS dry_powder (
-  month TEXT PRIMARY KEY, growth_available NUMERIC DEFAULT 0,
-  spec_available NUMERIC DEFAULT 0, rolled_months INT DEFAULT 0);
-
-CREATE TABLE IF NOT EXISTS radar (
-  ticker TEXT PRIMARY KEY, added DATE, last_seen DATE, days_relevant INT,
-  reason TEXT, bucket_guess TEXT, promoted BOOLEAN DEFAULT false, promoted_on DATE);
-
-CREATE TABLE IF NOT EXISTS lessons (
-  id BIGSERIAL PRIMARY KEY,
-  entry_date DATE NOT NULL,
-  category TEXT NOT NULL DEFAULT 'regime',
-  content TEXT NOT NULL,
-  created_at TIMESTAMPTZ DEFAULT now()
-);
-CREATE INDEX IF NOT EXISTS idx_lessons_date ON lessons(entry_date DESC, id DESC);
-
--- v2.1: owner's personal paper-watch hypotheses (separate from radar + holdings)
-CREATE TABLE IF NOT EXISTS paper_watches (
-  id BIGSERIAL PRIMARY KEY, ticker TEXT NOT NULL, created DATE NOT NULL,
-  entry_ref_price NUMERIC, target_price NUMERIC, hypothetical_amount NUMERIC,
-  thesis TEXT, horizon TEXT, status TEXT NOT NULL DEFAULT 'active',
-  closed_date DATE, close_price NUMERIC,
-  agent_view_at_open TEXT, agent_score_at_open INT,
-  created_at TIMESTAMPTZ DEFAULT now());
-CREATE INDEX IF NOT EXISTS idx_paper_status ON paper_watches(status);
-
--- RLS: block anon-key access on all tables; service role key bypasses this automatically
-ALTER TABLE holdings          ENABLE ROW LEVEL SECURITY;
-ALTER TABLE transactions      ENABLE ROW LEVEL SECURITY;
-ALTER TABLE suggestions       ENABLE ROW LEVEL SECURITY;
-ALTER TABLE suggestion_grades ENABLE ROW LEVEL SECURITY;
-ALTER TABLE stock_observations ENABLE ROW LEVEL SECURITY;
-ALTER TABLE daily_snapshots   ENABLE ROW LEVEL SECURITY;
-ALTER TABLE dry_powder        ENABLE ROW LEVEL SECURITY;
-ALTER TABLE radar              ENABLE ROW LEVEL SECURITY;
-ALTER TABLE lessons            ENABLE ROW LEVEL SECURITY;
-ALTER TABLE paper_watches      ENABLE ROW LEVEL SECURITY;
-ALTER TABLE analysis_runs      ENABLE ROW LEVEL SECURITY;
-ALTER TABLE portfolio_commands ENABLE ROW LEVEL SECURITY;
-ALTER TABLE telegram_updates    ENABLE ROW LEVEL SECURITY;
+ALTER TABLE telegram_updates ENABLE ROW LEVEL SECURITY;
 
 CREATE OR REPLACE FUNCTION public.apply_portfolio_command(
   p_command_id UUID,
@@ -392,9 +460,14 @@ $$;
 REVOKE ALL ON FUNCTION public.apply_portfolio_command(UUID, BIGINT, BIGINT) FROM PUBLIC, anon, authenticated;
 REVOKE ALL ON FUNCTION public.cancel_portfolio_command(UUID, BIGINT, BIGINT) FROM PUBLIC, anon, authenticated;
 GRANT EXECUTE ON FUNCTION public.apply_portfolio_command(UUID, BIGINT, BIGINT) TO service_role;
-
 GRANT EXECUTE ON FUNCTION public.cancel_portfolio_command(UUID, BIGINT, BIGINT) TO service_role;
+
+-- END REVIEWED MIGRATION: supabase/migrations/20260901_reliable_stock_agent.sql
+
+-- BEGIN REVIEWED MIGRATION: supabase/migrations/20260902_decision_safety_gateway.sql
+
 -- Deterministic market-decision safety gateway, audit ledger, and transactional outbox.
+-- Supabase CLI migration; replay-safe on the captured legacy baseline.
 -- Additive and idempotent. Apply only after 20260901_reliable_stock_agent.sql.
 
 CREATE SCHEMA IF NOT EXISTS extensions;
@@ -1072,7 +1145,12 @@ GRANT EXECUTE ON FUNCTION public.import_legacy_suggestion(JSONB) TO service_role
 GRANT EXECUTE ON FUNCTION public.claim_market_publication(UUID) TO service_role;
 GRANT EXECUTE ON FUNCTION public.finish_market_publication(UUID, UUID, TEXT, JSONB, TEXT) TO service_role;
 
+-- END REVIEWED MIGRATION: supabase/migrations/20260902_decision_safety_gateway.sql
+
+-- BEGIN REVIEWED MIGRATION: supabase/migrations/20260903_owner_investment_plans.sql
+
 -- Confirmed recurring investment reminders. These records never place brokerage orders.
+-- Supabase CLI migration; replay-safe on the captured legacy baseline.
 
 CREATE TABLE IF NOT EXISTS public.owner_investment_plans (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -1399,7 +1477,12 @@ $$;
 REVOKE ALL ON FUNCTION public.apply_portfolio_command(UUID, BIGINT, BIGINT) FROM PUBLIC, anon, authenticated;
 GRANT EXECUTE ON FUNCTION public.apply_portfolio_command(UUID, BIGINT, BIGINT) TO service_role;
 
+-- END REVIEWED MIGRATION: supabase/migrations/20260903_owner_investment_plans.sql
+
+-- BEGIN REVIEWED MIGRATION: supabase/migrations/20260904_outcome_evaluation.sql
+
 -- Deterministic grading of final policy-evaluated suggestions.
+-- Supabase CLI migration; replay-safe on the captured legacy baseline.
 
 DO $$
 BEGIN
@@ -1653,9 +1736,12 @@ REVOKE ALL ON FUNCTION public.upsert_market_outcome_grades(JSONB) FROM PUBLIC, a
 GRANT EXECUTE ON FUNCTION public.get_due_market_decisions(INT) TO service_role;
 GRANT EXECUTE ON FUNCTION public.upsert_market_outcome_grades(JSONB) TO service_role;
 
--- BEGIN REVIEWED MIGRATION: sql/migrations/20260905000000_multitenancy_foundation.sql
+-- END REVIEWED MIGRATION: supabase/migrations/20260904_outcome_evaluation.sql
+
+-- BEGIN REVIEWED MIGRATION: supabase/migrations/20260905000000_multitenancy_foundation.sql
 
 -- Multi-tenant identity and schema foundation.
+-- Supabase CLI migration; existing data must be backfilled before the next migration.
 --
 -- This migration is deliberately additive. Legacy owner rows remain nullable until the
 -- operator-confirmed, fail-closed backfill in the next release gate has proved parity.
@@ -2141,6 +2227,9 @@ BEGIN
   INSERT INTO app.profiles (id, status)
   VALUES (p_owner_id, 'active')
   ON CONFLICT (id) DO NOTHING;
+  INSERT INTO app.app_admins (user_id, role)
+  VALUES (p_owner_id, 'operator')
+  ON CONFLICT (user_id) DO NOTHING;
   INSERT INTO app.notification_preferences (owner_id)
   VALUES (p_owner_id)
   ON CONFLICT (owner_id) DO NOTHING;
@@ -2285,11 +2374,12 @@ REVOKE ALL ON FUNCTION machine.single_owner_row_digest(NAME) FROM PUBLIC, anon, 
 REVOKE ALL ON FUNCTION machine.single_owner_relationship_digest(NAME) FROM PUBLIC, anon, authenticated, service_role;
 REVOKE ALL ON FUNCTION machine.backfill_single_owner_to_tenant(UUID) FROM PUBLIC, anon, authenticated, service_role;
 
--- END REVIEWED MIGRATION: sql/migrations/20260905000000_multitenancy_foundation.sql
+-- END REVIEWED MIGRATION: supabase/migrations/20260905000000_multitenancy_foundation.sql
 
--- BEGIN FRESH-INSTALL BOOTSTRAP: sql/bootstrap/fresh_multitenancy.sql
+-- BEGIN REVIEWED MIGRATION: supabase/migrations/20260905500000_fresh_multitenancy.sql
 
 -- Fresh-install-only structural transition after 20260905.
+-- Supabase CLI migration; existing installations mark this applied after reviewed owner backfill.
 -- Every legacy table must be empty. Existing installations use the reviewed owner backfill instead.
 
 DO $$
@@ -2423,11 +2513,12 @@ DROP FUNCTION machine.single_owner_relationship_digest(NAME);
 DROP FUNCTION machine.single_owner_row_digest(NAME);
 DROP FUNCTION machine.single_owner_table_counts(NAME);
 
--- END FRESH-INSTALL BOOTSTRAP: sql/bootstrap/fresh_multitenancy.sql
+-- END REVIEWED MIGRATION: supabase/migrations/20260905500000_fresh_multitenancy.sql
 
--- BEGIN REVIEWED MIGRATION: sql/migrations/20260906000000_owner_api_and_machine_roles.sql
+-- BEGIN REVIEWED MIGRATION: supabase/migrations/20260906000000_owner_api_and_machine_roles.sql
 
 -- Forced row isolation and the release-one browser API allow-list.
+-- Supabase CLI migration.
 -- Apply only after the single-owner backfill has moved owner tables into app.
 
 REVOKE CREATE ON SCHEMA public FROM PUBLIC, anon, authenticated, service_role;
@@ -2732,11 +2823,12 @@ BEGIN
 END
 $$;
 
--- END REVIEWED MIGRATION: sql/migrations/20260906000000_owner_api_and_machine_roles.sql
+-- END REVIEWED MIGRATION: supabase/migrations/20260906000000_owner_api_and_machine_roles.sql
 
--- BEGIN REVIEWED MIGRATION: sql/migrations/20260907000000_ledger_projection_commands.sql
+-- BEGIN REVIEWED MIGRATION: supabase/migrations/20260907000000_ledger_projection_commands.sql
 
 -- Fee-aware immutable ledger and deterministic holdings projection.
+-- Supabase CLI migration.
 -- Legacy transaction rows remain visible as history but do not pretend to be a complete ledger;
 -- each current holding becomes one explicit migration opening event.
 
@@ -3263,11 +3355,12 @@ ALTER VIEW api.transactions OWNER TO stock_agent_migration_owner;
 REVOKE ALL ON api.transactions FROM PUBLIC, anon, authenticated, service_role;
 GRANT SELECT ON api.transactions TO authenticated;
 
--- END REVIEWED MIGRATION: sql/migrations/20260907000000_ledger_projection_commands.sql
+-- END REVIEWED MIGRATION: supabase/migrations/20260907000000_ledger_projection_commands.sql
 
--- BEGIN REVIEWED MIGRATION: sql/migrations/20260908000000_portfolio_command_state_machine.sql
+-- BEGIN REVIEWED MIGRATION: supabase/migrations/20260908000000_portfolio_command_state_machine.sql
 
 -- Provider-neutral, preview-before-confirm portfolio commands.
+-- Supabase CLI migration.
 -- Browser callers derive identity from auth.uid(); machine adapters must resolve their
 -- own authenticated link before entering the private app functions below.
 
@@ -4612,11 +4705,12 @@ ALTER VIEW api.commands OWNER TO stock_agent_migration_owner;
 REVOKE ALL ON api.commands FROM PUBLIC, anon, authenticated, service_role;
 GRANT SELECT ON api.commands TO authenticated;
 
--- END REVIEWED MIGRATION: sql/migrations/20260908000000_portfolio_command_state_machine.sql
+-- END REVIEWED MIGRATION: supabase/migrations/20260908000000_portfolio_command_state_machine.sql
 
--- BEGIN REVIEWED MIGRATION: sql/migrations/20260908010000_app_api_limits.sql
+-- BEGIN REVIEWED MIGRATION: supabase/migrations/20260908010000_app_api_limits.sql
 
 -- One browser RPC boundary: authenticated dispatch, database-backed limits, and body-free audit.
+-- Supabase CLI migration.
 
 CREATE TABLE app.app_api_rate_limits (
   owner_id UUID NOT NULL REFERENCES auth.users(id) ON DELETE CASCADE,
@@ -4869,11 +4963,12 @@ REVOKE ALL ON FUNCTION api.app_dispatch(TEXT, UUID, TEXT, JSONB)
        stock_agent_gateway, stock_agent_scheduler, stock_agent_telegram, stock_agent_backup;
 GRANT EXECUTE ON FUNCTION api.app_dispatch(TEXT, UUID, TEXT, JSONB) TO authenticated;
 
--- END REVIEWED MIGRATION: sql/migrations/20260908010000_app_api_limits.sql
+-- END REVIEWED MIGRATION: supabase/migrations/20260908010000_app_api_limits.sql
 
--- BEGIN REVIEWED MIGRATION: sql/migrations/20260908020000_telegram_multitenancy.sql
+-- BEGIN REVIEWED MIGRATION: supabase/migrations/20260908020000_telegram_multitenancy.sql
 
 -- Private-chat pairing, opaque callbacks, and update replay membership.
+-- Supabase CLI migration.
 
 CREATE TABLE app.telegram_pairing_codes (
   id UUID PRIMARY KEY DEFAULT extensions.gen_random_uuid(),
@@ -5258,11 +5353,12 @@ GRANT EXECUTE ON FUNCTION machine.telegram_consume_pairing(JSONB),
 
 CREATE INDEX telegram_updates_received_idx ON app.telegram_updates(received_at);
 
--- END REVIEWED MIGRATION: sql/migrations/20260908020000_telegram_multitenancy.sql
+-- END REVIEWED MIGRATION: supabase/migrations/20260908020000_telegram_multitenancy.sql
 
--- BEGIN REVIEWED MIGRATION: sql/migrations/20260908030000_telegram_webhook_runtime.sql
+-- BEGIN REVIEWED MIGRATION: supabase/migrations/20260908030000_telegram_webhook_runtime.sql
 
 -- Multi-user Telegram webhook runtime: atomic callbacks, bounded reads, and body-free receipts.
+-- Supabase CLI migration.
 
 CREATE TABLE app.telegram_deliveries (
   id BIGSERIAL PRIMARY KEY,
@@ -5870,11 +5966,12 @@ CREATE INDEX telegram_deliveries_recorded_idx ON app.telegram_deliveries(recorde
 CREATE INDEX telegram_pairing_deliveries_recorded_idx
   ON app.telegram_pairing_deliveries(recorded_at);
 
--- END REVIEWED MIGRATION: sql/migrations/20260908030000_telegram_webhook_runtime.sql
+-- END REVIEWED MIGRATION: supabase/migrations/20260908030000_telegram_webhook_runtime.sql
 
--- BEGIN REVIEWED MIGRATION: sql/migrations/20260908040000_provider_runs_and_evidence.sql
+-- BEGIN REVIEWED MIGRATION: supabase/migrations/20260908040000_provider_runs_and_evidence.sql
 
 -- Provider-neutral run evidence. Model submissions reference these server-owned facts by digest.
+-- Supabase CLI migration.
 
 CREATE TABLE app.run_evidence (
   id UUID PRIMARY KEY DEFAULT extensions.gen_random_uuid(),
@@ -9289,11 +9386,12 @@ REVOKE ALL ON FUNCTION app.activate_agent_connection(UUID, JSONB) FROM PUBLIC, a
 REVOKE ALL ON FUNCTION app.revoke_agent_connection(UUID, JSONB) FROM PUBLIC, anon, authenticated,
   service_role, stock_agent_gateway, stock_agent_scheduler, stock_agent_telegram, stock_agent_backup;
 
--- END REVIEWED MIGRATION: sql/migrations/20260908040000_provider_runs_and_evidence.sql
+-- END REVIEWED MIGRATION: supabase/migrations/20260908040000_provider_runs_and_evidence.sql
 
--- BEGIN REVIEWED MIGRATION: sql/migrations/20260909000000_research_run_api.sql
+-- BEGIN REVIEWED MIGRATION: supabase/migrations/20260909000000_research_run_api.sql
 
 -- Owner-visible research/run transparency and a rate-limited on-demand trigger request.
+-- Supabase CLI migration.
 
 -- Web-requested runs are distinct from canonical scheduled slots and connection handshakes.
 ALTER TABLE app.scheduled_run_slots
@@ -10007,11 +10105,12 @@ REVOKE ALL ON FUNCTION api.app_dispatch(TEXT, UUID, TEXT, JSONB)
        stock_agent_gateway, stock_agent_scheduler, stock_agent_telegram, stock_agent_backup;
 GRANT EXECUTE ON FUNCTION api.app_dispatch(TEXT, UUID, TEXT, JSONB) TO authenticated;
 
--- END REVIEWED MIGRATION: sql/migrations/20260909000000_research_run_api.sql
+-- END REVIEWED MIGRATION: supabase/migrations/20260909000000_research_run_api.sql
 
--- BEGIN REVIEWED MIGRATION: sql/migrations/20260910000000_retention_recovery.sql
+-- BEGIN REVIEWED MIGRATION: supabase/migrations/20260910000000_retention_recovery.sql
 
 -- Private account lifecycle, step-up receipts, secret-free exports, and operator reset controls.
+-- Supabase CLI migration.
 
 CREATE TABLE app.account_step_up_challenges (
   id UUID PRIMARY KEY DEFAULT extensions.gen_random_uuid(),
@@ -12031,4 +12130,4 @@ REVOKE ALL ON FUNCTION machine.scheduler_apply_retention(JSONB)
        stock_agent_scheduler, stock_agent_telegram, stock_agent_backup;
 GRANT EXECUTE ON FUNCTION machine.scheduler_apply_retention(JSONB) TO stock_agent_scheduler;
 
--- END REVIEWED MIGRATION: sql/migrations/20260910000000_retention_recovery.sql
+-- END REVIEWED MIGRATION: supabase/migrations/20260910000000_retention_recovery.sql

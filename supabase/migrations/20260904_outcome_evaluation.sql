@@ -1,4 +1,5 @@
 -- Deterministic grading of final policy-evaluated suggestions.
+-- Supabase CLI migration; replay-safe on the captured legacy baseline.
 
 DO $$
 BEGIN

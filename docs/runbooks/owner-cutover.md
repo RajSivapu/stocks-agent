@@ -61,6 +61,15 @@ The controller enforces this sequence:
 Do not interpret a controller state as proof that an external operation happened. Each passing step
 requires evidence from the actual target environment, and every state is protected by a digest.
 
+For `migrate_and_backfill_owner`, dispatch the protected production workflow with
+`operation=owner-cutover`. Use the exact staging-tested commit and rollback commit, enter
+`CUTOVER OWNER` and `TRIGGERS PAUSED`, and provide only the private backup evidence's UTC timestamp and
+SHA-256 digest. The protected `PRODUCTION_OWNER_EMAIL` secret must resolve to exactly one Auth user.
+Do not run `supabase migration repair` by hand: the workflow marks only
+`20260905500000_fresh_multitenancy` applied after the verified backfill has completed the identical
+structural transition. Record the successful workflow run as this step's private evidence; a failed
+run forces the controller into rollback-required state.
+
 ## Immediate rollback
 
 If any step fails, the next controller state is `rollback_required` and every mutation/scheduled path

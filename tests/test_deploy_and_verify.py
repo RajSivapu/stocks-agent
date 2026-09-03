@@ -28,6 +28,13 @@ class Response:
         return False
 
 
+class RawResponse(Response):
+    def __init__(self, payload: bytes):
+        self.body = payload
+        self.headers = {"Content-Length": str(len(self.body))}
+        self.stream = BytesIO(self.body)
+
+
 def health(*, backup_hours: int = 1, restore_days: int = 1) -> dict:
     return {
         "status": "ok",
@@ -102,6 +109,50 @@ def test_production_preflight_requires_fresh_clean_evidence_and_exact_confirmati
                 rollback_ref="c" * 40,
                 now=NOW,
             )
+
+
+def test_owner_cutover_preflight_requires_staging_backup_pause_and_distinct_rollback():
+    staging_report = deploy.build_release_report(
+        {
+            "environment": "staging",
+            "commit": "a" * 40,
+            "checks": {name: "passed" for name in deploy.STAGING_CHECKS},
+            "restore_age_days": 1,
+        },
+        now=NOW,
+    )
+    result = deploy.validate_owner_cutover_evidence(
+        expected_commit="a" * 40,
+        staging_report=staging_report,
+        backup_checked_at=(NOW - timedelta(hours=1)).isoformat(),
+        backup_evidence_hash="b" * 64,
+        deployment_confirmation="CUTOVER OWNER",
+        pause_confirmation="TRIGGERS PAUSED",
+        rollback_ref="c" * 40,
+        now=NOW,
+    )
+    assert result == {"status": "ready", "rollback_ref": "c" * 40}
+
+    rejected = (
+        {"backup_checked_at": (NOW - timedelta(hours=37)).isoformat()},
+        {"backup_evidence_hash": "not-a-digest"},
+        {"deployment_confirmation": "DEPLOY PRODUCTION"},
+        {"pause_confirmation": "not paused"},
+        {"rollback_ref": "a" * 40},
+    )
+    defaults = {
+        "expected_commit": "a" * 40,
+        "staging_report": staging_report,
+        "backup_checked_at": (NOW - timedelta(hours=1)).isoformat(),
+        "backup_evidence_hash": "b" * 64,
+        "deployment_confirmation": "CUTOVER OWNER",
+        "pause_confirmation": "TRIGGERS PAUSED",
+        "rollback_ref": "c" * 40,
+        "now": NOW,
+    }
+    for change in rejected:
+        with pytest.raises(deploy.DeploymentRejected):
+            deploy.validate_owner_cutover_evidence(**(defaults | change))
 
 
 def test_release_report_is_exact_hash_only_and_rejects_private_or_skipped_results(tmp_path):
@@ -214,6 +265,32 @@ def test_staging_postgrest_attack_rejects_a_cross_owner_row():
                 },
             },
             opener=lambda *_args, **_kwargs: next(responses),
+        )
+
+
+def test_web_health_binds_the_live_static_bundle_to_the_expected_commit():
+    commit = "a" * 40
+    responses = iter([
+        RawResponse(b'<main><div id="root"></div></main>'),
+        Response({"environment": "staging", "commit": commit}),
+    ])
+    deploy._web_health(
+        "https://stocks-staging.example.com",
+        expected_commit=commit,
+        environment="staging",
+        opener=lambda *_args, **_kwargs: next(responses),
+    )
+
+    wrong = iter([
+        RawResponse(b'<div id="root"></div>'),
+        Response({"environment": "staging", "commit": "b" * 40}),
+    ])
+    with pytest.raises(deploy.DeploymentRejected, match="release marker"):
+        deploy._web_health(
+            "https://stocks-staging.example.com",
+            expected_commit=commit,
+            environment="staging",
+            opener=lambda *_args, **_kwargs: next(wrong),
         )
 
 

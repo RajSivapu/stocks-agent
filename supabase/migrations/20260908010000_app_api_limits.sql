@@ -1,4 +1,5 @@
 -- One browser RPC boundary: authenticated dispatch, database-backed limits, and body-free audit.
+-- Supabase CLI migration.
 
 CREATE TABLE app.app_api_rate_limits (
   owner_id UUID NOT NULL REFERENCES auth.users(id) ON DELETE CASCADE,

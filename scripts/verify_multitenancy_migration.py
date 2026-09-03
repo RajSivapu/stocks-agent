@@ -30,7 +30,7 @@ from scripts.migrate_single_owner_to_tenant import (
 )
 
 
-FOUNDATION_SQL = ROOT / "sql/migrations/20260905000000_multitenancy_foundation.sql"
+FOUNDATION_SQL = ROOT / "supabase/migrations/20260905000000_multitenancy_foundation.sql"
 SYNTHETIC_OWNER_ID = UUID("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa")
 SYNTHETIC_OWNER_EMAIL = "tst-migration@invalid.example"
 

@@ -138,6 +138,9 @@ def test_backfill_moves_all_owner_tables_and_is_idempotent(foundation_database):
             "SELECT count(*) FROM app.holdings WHERE owner_id = %s", (OWNER_ID,)
         ).fetchone()[0] == 1
         assert foundation_database.execute(
+            "SELECT role FROM app.app_admins WHERE user_id = %s", (OWNER_ID,)
+        ).fetchone()[0] == "operator"
+        assert foundation_database.execute(
             "SELECT to_regprocedure('machine.backfill_single_owner_to_tenant(uuid)') IS NULL"
         ).fetchone()[0]
         assert foundation_database.execute(

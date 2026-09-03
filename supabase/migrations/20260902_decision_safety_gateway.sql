@@ -1,4 +1,5 @@
 -- Deterministic market-decision safety gateway, audit ledger, and transactional outbox.
+-- Supabase CLI migration; replay-safe on the captured legacy baseline.
 -- Additive and idempotent. Apply only after 20260901_reliable_stock_agent.sql.
 
 CREATE SCHEMA IF NOT EXISTS extensions;

@@ -533,7 +533,7 @@ routines stay paused during credential cutover, preventing duplicate or bypassed
 
 Expected implementation areas:
 
-- `sql/migrations/`: decision audit, canonical actions, constraints, publication receipts;
+- `supabase/migrations/`: decision audit, canonical actions, constraints, publication receipts;
 - `supabase/functions/market-briefing-gateway/`: bounded API, policy, renderer, and delivery;
 - `lib/gateway.py`: authenticated client and typed request/receipt helpers;
 - `skills/market-briefing/SKILL.md`: structured candidate and receipt-driven process;

@@ -41,3 +41,10 @@ def test_sql_lint_parses_every_supplied_file(tmp_path):
     assert policy.lint_sql_files([valid]) == 1
     with pytest.raises(policy.PolicyFailure, match="invalid.sql"):
         policy.lint_sql_files([invalid])
+
+
+def test_repository_sql_selection_includes_canonical_and_supabase_migrations():
+    selected = {path.relative_to(policy.ROOT).as_posix() for path in policy.repository_sql_files()}
+    assert "sql/schema.sql" in selected
+    assert "supabase/migrations/20260831_legacy_baseline.sql" in selected
+    assert "supabase/migrations/20260910000000_retention_recovery.sql" in selected

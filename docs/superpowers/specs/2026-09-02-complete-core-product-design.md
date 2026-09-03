@@ -862,7 +862,7 @@ supabase/functions/app-api/      authenticated product mutations and export
 supabase/functions/run-scheduler/market-aware Claude Routine triggers
 supabase/functions/agent-gateway/owner-scoped analysis protocol
 supabase/functions/telegram-portfolio/
-sql/migrations/                  additive tenancy and product migrations
+supabase/migrations/                  additive tenancy and product migrations
 packages/contracts/              shared schemas and generated types
 tests/security/                  RLS and cross-tenant attack tests
 tests/contracts/                 provider conformance fixtures

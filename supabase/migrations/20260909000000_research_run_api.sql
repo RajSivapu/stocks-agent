@@ -1,4 +1,5 @@
 -- Owner-visible research/run transparency and a rate-limited on-demand trigger request.
+-- Supabase CLI migration.
 
 -- Web-requested runs are distinct from canonical scheduled slots and connection handshakes.
 ALTER TABLE app.scheduled_run_slots

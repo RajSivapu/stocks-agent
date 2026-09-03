@@ -47,9 +47,9 @@
 - `supabase/functions/market-briefing-gateway/_shared/repository.ts` — bounded Supabase reads and named RPC calls only.
 - `supabase/functions/market-briefing-gateway/_shared/handler.ts` — authenticated HTTP operation orchestration with dependency injection for tests.
 - `supabase/functions/market-briefing-gateway/index.ts` — production dependency wiring and `Deno.serve` only.
-- `sql/migrations/20260902_decision_safety_gateway.sql` — canonical decisions, policy, idempotency, immutable audit, outbox, and atomic RPCs.
-- `sql/migrations/20260903_owner_investment_plans.sql` — confirmed recurring-plan commands and stale-safe plan updates.
-- `sql/migrations/20260904_outcome_evaluation.sql` — deterministic 5/21/63-session outcome metrics.
+- `supabase/migrations/20260902_decision_safety_gateway.sql` — canonical decisions, policy, idempotency, immutable audit, outbox, and atomic RPCs.
+- `supabase/migrations/20260903_owner_investment_plans.sql` — confirmed recurring-plan commands and stale-safe plan updates.
+- `supabase/migrations/20260904_outcome_evaluation.sql` — deterministic 5/21/63-session outcome metrics.
 - `sql/schema.sql` — fresh-install equivalent of all migrations.
 - `lib/policy_config.py` — validates and projects owner-reviewed JSON settings into gateway policy version 1.
 - `lib/gateway.py` — bounded authenticated stdlib HTTP client with redacted errors.
@@ -486,7 +486,7 @@ git commit -m "feat: define reviewed market policy config"
 ### Task 3: Add the Atomic Gateway Schema, Canonical Actions, and Outbox RPCs
 
 **Files:**
-- Create: `sql/migrations/20260902_decision_safety_gateway.sql`
+- Create: `supabase/migrations/20260902_decision_safety_gateway.sql`
 - Modify: `sql/schema.sql`
 - Create: `scripts/verify_decision_gateway_migration.py`
 - Modify: `tests/test_security_invariants.py`
@@ -777,7 +777,7 @@ the verifier as a required pre-deployment checkpoint rather than weakening it.
 - [ ] **Step 6: Commit**
 
 ```bash
-git add sql/migrations/20260902_decision_safety_gateway.sql sql/schema.sql scripts/verify_decision_gateway_migration.py tests/test_security_invariants.py
+git add supabase/migrations/20260902_decision_safety_gateway.sql sql/schema.sql scripts/verify_decision_gateway_migration.py tests/test_security_invariants.py
 git commit -m "feat: add atomic market decision audit schema"
 ```
 
@@ -1596,7 +1596,7 @@ git commit -m "refactor: route all market skills through bounded gateways"
 ### Task 10: Add Confirmed Owner Investment Plans to Telegram
 
 **Files:**
-- Create: `sql/migrations/20260903_owner_investment_plans.sql`
+- Create: `supabase/migrations/20260903_owner_investment_plans.sql`
 - Modify: `sql/schema.sql`
 - Modify: `supabase/functions/telegram-portfolio/parser.mjs`
 - Create: `supabase/functions/telegram-portfolio/plan-utils.mjs`
@@ -1703,14 +1703,14 @@ Expected: PASS and all reserved rows cleaned up.
 - [ ] **Step 7: Commit**
 
 ```bash
-git add sql/migrations/20260903_owner_investment_plans.sql sql/schema.sql supabase/functions/telegram-portfolio/parser.mjs supabase/functions/telegram-portfolio/plan-utils.mjs supabase/functions/telegram-portfolio/index.ts tests/test_telegram_parser.mjs tests/test_telegram_webhook_utils.mjs scripts/verify_portfolio_command_rpc.py tests/test_security_invariants.py docs/eval/telegram-portfolio-eval.yaml
+git add supabase/migrations/20260903_owner_investment_plans.sql sql/schema.sql supabase/functions/telegram-portfolio/parser.mjs supabase/functions/telegram-portfolio/plan-utils.mjs supabase/functions/telegram-portfolio/index.ts tests/test_telegram_parser.mjs tests/test_telegram_webhook_utils.mjs scripts/verify_portfolio_command_rpc.py tests/test_security_invariants.py docs/eval/telegram-portfolio-eval.yaml
 git commit -m "feat: add confirmed recurring investment plans"
 ```
 
 ### Task 11: Add Deterministic Outcome Evaluation and Audit Reporting
 
 **Files:**
-- Create: `sql/migrations/20260904_outcome_evaluation.sql`
+- Create: `supabase/migrations/20260904_outcome_evaluation.sql`
 - Modify: `sql/schema.sql`
 - Create: `supabase/functions/market-briefing-gateway/_shared/outcomes.ts`
 - Create: `supabase/functions/market-briefing-gateway/_shared/outcomes_test.ts`
@@ -1872,7 +1872,7 @@ Expected: PASS.
 - [ ] **Step 7: Commit**
 
 ```bash
-git add sql/migrations/20260904_outcome_evaluation.sql sql/schema.sql supabase/functions/market-briefing-gateway/_shared/outcomes.ts supabase/functions/market-briefing-gateway/_shared/outcomes_test.ts supabase/functions/market-briefing-gateway/_shared/handler.ts supabase/functions/market-briefing-gateway/_shared/handler_test.ts supabase/functions/market-briefing-gateway/_shared/repository.ts lib/weekly_audit.py tests/test_weekly_audit.py skills/weekly-portfolio-audit/SKILL.md
+git add supabase/migrations/20260904_outcome_evaluation.sql sql/schema.sql supabase/functions/market-briefing-gateway/_shared/outcomes.ts supabase/functions/market-briefing-gateway/_shared/outcomes_test.ts supabase/functions/market-briefing-gateway/_shared/handler.ts supabase/functions/market-briefing-gateway/_shared/handler_test.ts supabase/functions/market-briefing-gateway/_shared/repository.ts lib/weekly_audit.py tests/test_weekly_audit.py skills/weekly-portfolio-audit/SKILL.md
 git commit -m "feat: grade final policy decisions deterministically"
 ```
 
@@ -2019,9 +2019,9 @@ notes without copying credentials.
 Apply these exact files in Supabase SQL Editor with stop-on-error behavior:
 
 ```text
-sql/migrations/20260902_decision_safety_gateway.sql
-sql/migrations/20260903_owner_investment_plans.sql
-sql/migrations/20260904_outcome_evaluation.sql
+supabase/migrations/20260902_decision_safety_gateway.sql
+supabase/migrations/20260903_owner_investment_plans.sql
+supabase/migrations/20260904_outcome_evaluation.sql
 ```
 
 Then run:

@@ -1,4 +1,5 @@
 -- Provider-neutral run evidence. Model submissions reference these server-owned facts by digest.
+-- Supabase CLI migration.
 
 CREATE TABLE app.run_evidence (
   id UUID PRIMARY KEY DEFAULT extensions.gen_random_uuid(),

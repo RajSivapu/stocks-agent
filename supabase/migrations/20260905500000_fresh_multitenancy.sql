@@ -1,4 +1,5 @@
 -- Fresh-install-only structural transition after 20260905.
+-- Supabase CLI migration; existing installations mark this applied after reviewed owner backfill.
 -- Every legacy table must be empty. Existing installations use the reviewed owner backfill instead.
 
 DO $$

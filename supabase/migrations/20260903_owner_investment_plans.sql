@@ -1,4 +1,5 @@
 -- Confirmed recurring investment reminders. These records never place brokerage orders.
+-- Supabase CLI migration; replay-safe on the captured legacy baseline.
 
 CREATE TABLE IF NOT EXISTS public.owner_investment_plans (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),

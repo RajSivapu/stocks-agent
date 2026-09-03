@@ -6,11 +6,11 @@ import re
 ROOT = Path(__file__).resolve().parents[1]
 SQL_FILES = (
     ROOT / "sql" / "legacy_schema.sql",
-    ROOT / "sql" / "migrations" / "20260901_reliable_stock_agent.sql",
+    ROOT / "supabase" / "migrations" / "20260901_reliable_stock_agent.sql",
 )
 GATEWAY_SQL_FILES = (
     ROOT / "sql" / "legacy_schema.sql",
-    ROOT / "sql" / "migrations" / "20260902_decision_safety_gateway.sql",
+    ROOT / "supabase" / "migrations" / "20260902_decision_safety_gateway.sql",
 )
 GATEWAY_RPCS = (
     "activate_market_policy_config(INT)",
@@ -256,7 +256,7 @@ def test_market_briefing_eval_covers_gateway_failure_pressure_cases():
 
 
 def test_owner_plan_migration_is_rls_protected_and_stale_safe():
-    migration = ROOT / "sql" / "migrations" / "20260903_owner_investment_plans.sql"
+    migration = ROOT / "supabase" / "migrations" / "20260903_owner_investment_plans.sql"
     assert migration.exists()
     sql = migration.read_text()
     schema = (ROOT / "sql" / "schema.sql").read_text()
@@ -280,7 +280,7 @@ def test_telegram_handler_uses_only_machine_database_authority_and_bounded_listi
     entrypoint = (directory / "index.ts").read_text()
     handler = (directory / "handler.ts").read_text()
     repository = (directory / "repository.ts").read_text()
-    migration = (ROOT / "sql" / "migrations" / "20260908030000_telegram_webhook_runtime.sql").read_text()
+    migration = (ROOT / "supabase" / "migrations" / "20260908030000_telegram_webhook_runtime.sql").read_text()
     assert set(re.findall(r'requiredEnvironment\("([A-Z0-9_]+)"\)', entrypoint)) == {
         "TELEGRAM_WEBHOOK_SECRET",
         "TELEGRAM_PAIRING_PEPPER",
@@ -298,7 +298,7 @@ def test_telegram_handler_uses_only_machine_database_authority_and_bounded_listi
 
 
 def test_outcome_migration_is_bounded_idempotent_and_service_role_only():
-    migration = ROOT / "sql" / "migrations" / "20260904_outcome_evaluation.sql"
+    migration = ROOT / "supabase" / "migrations" / "20260904_outcome_evaluation.sql"
     assert migration.exists()
     sql = migration.read_text()
     schema = (ROOT / "sql" / "schema.sql").read_text()

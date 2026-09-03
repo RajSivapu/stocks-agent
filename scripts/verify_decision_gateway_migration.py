@@ -15,9 +15,9 @@ from lib import config
 
 
 ROOT = Path(__file__).resolve().parents[1]
-GATEWAY_MIGRATION = ROOT / "sql" / "migrations" / "20260902_decision_safety_gateway.sql"
-OWNER_PLAN_MIGRATION = ROOT / "sql" / "migrations" / "20260903_owner_investment_plans.sql"
-OUTCOME_MIGRATION = ROOT / "sql" / "migrations" / "20260904_outcome_evaluation.sql"
+GATEWAY_MIGRATION = ROOT / "supabase" / "migrations" / "20260902_decision_safety_gateway.sql"
+OWNER_PLAN_MIGRATION = ROOT / "supabase" / "migrations" / "20260903_owner_investment_plans.sql"
+OUTCOME_MIGRATION = ROOT / "supabase" / "migrations" / "20260904_outcome_evaluation.sql"
 TICKER = "TSTGW"
 POLICY_VERSION = 2_147_483_000
 RPC_SIGNATURES = (

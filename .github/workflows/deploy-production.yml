@@ -4,10 +4,10 @@ on:
   workflow_dispatch:
     inputs:
       operation:
-        description: Deploy first; verify only after the owner smoke is complete
+        description: Run the one-time owner cutover, normal deploys, or post-smoke verification
         required: true
         type: choice
-        options: [deploy, verify]
+        options: [owner-cutover, deploy, verify]
       commit:
         description: Exact tested 40-character commit SHA
         required: true
@@ -17,7 +17,7 @@ on:
         required: false
         type: string
       deploy_confirmation:
-        description: Type DEPLOY PRODUCTION
+        description: Type CUTOVER OWNER for first migration or DEPLOY PRODUCTION later
         required: false
         type: string
       pause_confirmation:
@@ -26,6 +26,14 @@ on:
         type: string
       owner_smoke_confirmation:
         description: Type OWNER SMOKE PASSED after the owner-only smoke
+        required: false
+        type: string
+      backup_checked_at:
+        description: UTC timestamp of the verified encrypted production backup (cutover only)
+        required: false
+        type: string
+      backup_evidence_hash:
+        description: SHA-256 digest of private backup evidence (cutover only)
         required: false
         type: string
 
@@ -38,25 +46,17 @@ concurrency:
 
 jobs:
   staging-gate:
-    if: inputs.operation == 'deploy'
+    if: inputs.operation == 'deploy' || inputs.operation == 'owner-cutover'
     environment: staging
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     outputs:
       release-report: ${{ steps.release.outputs.report }}
     env:
-      STAGING_POSTGRES_URL: ${{ secrets.STAGING_POSTGRES_URL }}
-      STAGING_SUPABASE_URL: ${{ vars.STAGING_SUPABASE_URL }}
-      STAGING_SUPABASE_PUBLISHABLE_KEY: ${{ vars.STAGING_SUPABASE_PUBLISHABLE_KEY }}
-      STAGING_SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.STAGING_SUPABASE_SERVICE_ROLE_KEY }}
-      STAGING_OPERATOR_ID: ${{ secrets.STAGING_OPERATOR_ID }}
-      STAGING_CONNECTION_PUBLIC_ID: ${{ secrets.STAGING_CONNECTION_PUBLIC_ID }}
-      STAGING_WEB_URL: ${{ vars.STAGING_WEB_URL }}
+      REQUESTED_COMMIT: ${{ inputs.commit }}
+      REQUESTED_ROLLBACK: ${{ inputs.rollback_ref }}
     steps:
       - name: validate-release-identities
-        env:
-          REQUESTED_COMMIT: ${{ inputs.commit }}
-          REQUESTED_ROLLBACK: ${{ inputs.rollback_ref }}
         run: |
           [[ "$REQUESTED_COMMIT" =~ ^[0-9a-f]{40}$ ]] || exit 2
           [[ "$REQUESTED_ROLLBACK" =~ ^[0-9a-f]{40}$ ]] || exit 2
@@ -68,9 +68,6 @@ jobs:
           fetch-depth: 0
           persist-credentials: false
       - name: select-tested-main-commit
-        env:
-          REQUESTED_COMMIT: ${{ inputs.commit }}
-          REQUESTED_ROLLBACK: ${{ inputs.rollback_ref }}
         run: |
           git cat-file -e "$REQUESTED_COMMIT^{commit}"
           git cat-file -e "$REQUESTED_ROLLBACK^{commit}"
@@ -86,6 +83,9 @@ jobs:
       - name: install-dependencies
         run: python -m pip install --requirement requirements-ci.txt
       - name: create-security-test-users
+        env:
+          STAGING_SUPABASE_URL: ${{ vars.STAGING_SUPABASE_URL }}
+          STAGING_SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.STAGING_SUPABASE_SERVICE_ROLE_KEY }}
         run: >-
           python scripts/create_security_test_users.py
           --email-a "security-a-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}@tests.invalid"
@@ -104,9 +104,16 @@ jobs:
           PY
       - name: staging-verify
         id: release
+        env:
+          STAGING_POSTGRES_URL: ${{ secrets.STAGING_POSTGRES_URL }}
+          STAGING_SUPABASE_URL: ${{ vars.STAGING_SUPABASE_URL }}
+          STAGING_SUPABASE_PUBLISHABLE_KEY: ${{ vars.STAGING_SUPABASE_PUBLISHABLE_KEY }}
+          STAGING_OPERATOR_ID: ${{ secrets.STAGING_OPERATOR_ID }}
+          STAGING_CONNECTION_PUBLIC_ID: ${{ secrets.STAGING_CONNECTION_PUBLIC_ID }}
+          STAGING_WEB_URL: ${{ vars.STAGING_WEB_URL }}
         run: |
           python scripts/deploy_and_verify.py staging-verify \
-            --commit "${{ inputs.commit }}" \
+            --commit "$REQUESTED_COMMIT" \
             --security-users "$RUNNER_TEMP/security-users.json" \
             --report "$RUNNER_TEMP/staging-report.json" >/dev/null
           python - "$RUNNER_TEMP/staging-report.json" "$GITHUB_OUTPUT" <<'PY'
@@ -119,6 +126,9 @@ jobs:
           PY
       - name: cleanup-security-test-users
         if: always()
+        env:
+          STAGING_SUPABASE_URL: ${{ vars.STAGING_SUPABASE_URL }}
+          STAGING_SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.STAGING_SUPABASE_SERVICE_ROLE_KEY }}
         run: |
           if [[ -f "$RUNNER_TEMP/security-users.json" ]]; then
             python scripts/create_security_test_users.py --cleanup-bundle "$RUNNER_TEMP/security-users.json"
@@ -126,26 +136,20 @@ jobs:
 
   deploy:
     needs: staging-gate
-    if: inputs.operation == 'deploy'
+    if: inputs.operation == 'deploy' || inputs.operation == 'owner-cutover'
     environment: production
     runs-on: ubuntu-24.04
     timeout-minutes: 45
     env:
-      PRODUCTION_PROJECT_REF: ${{ secrets.PRODUCTION_PROJECT_REF }}
-      PRODUCTION_POSTGRES_URL: ${{ secrets.PRODUCTION_POSTGRES_URL }}
-      PRODUCTION_SUPAVISOR_SESSION_URL: ${{ secrets.PRODUCTION_SUPAVISOR_SESSION_URL }}
-      PRODUCTION_SUPABASE_URL: ${{ vars.PRODUCTION_SUPABASE_URL }}
-      PRODUCTION_SUPABASE_PUBLISHABLE_KEY: ${{ vars.PRODUCTION_SUPABASE_PUBLISHABLE_KEY }}
-      PRODUCTION_OPERATOR_ID: ${{ secrets.PRODUCTION_OPERATOR_ID }}
-      PRODUCTION_WEB_URL: ${{ vars.PRODUCTION_WEB_URL }}
-      SUPABASE_ACCESS_TOKEN: ${{ secrets.SUPABASE_ACCESS_TOKEN }}
-      CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
-      CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+      REQUESTED_COMMIT: ${{ inputs.commit }}
+      REQUESTED_ROLLBACK: ${{ inputs.rollback_ref }}
+      REQUESTED_DEPLOY_CONFIRMATION: ${{ inputs.deploy_confirmation }}
+      REQUESTED_PAUSE_CONFIRMATION: ${{ inputs.pause_confirmation }}
+      REQUESTED_BACKUP_CHECKED_AT: ${{ inputs.backup_checked_at }}
+      REQUESTED_BACKUP_EVIDENCE_HASH: ${{ inputs.backup_evidence_hash }}
+      STAGING_RELEASE_REPORT: ${{ needs.staging-gate.outputs.release-report }}
     steps:
       - name: validate-release-identities
-        env:
-          REQUESTED_COMMIT: ${{ inputs.commit }}
-          REQUESTED_ROLLBACK: ${{ inputs.rollback_ref }}
         run: |
           [[ "$REQUESTED_COMMIT" =~ ^[0-9a-f]{40}$ ]] || exit 2
           [[ "$REQUESTED_ROLLBACK" =~ ^[0-9a-f]{40}$ ]] || exit 2
@@ -157,9 +161,6 @@ jobs:
           fetch-depth: 0
           persist-credentials: false
       - name: select-tested-main-commit
-        env:
-          REQUESTED_COMMIT: ${{ inputs.commit }}
-          REQUESTED_ROLLBACK: ${{ inputs.rollback_ref }}
         run: |
           git cat-file -e "$REQUESTED_COMMIT^{commit}"
           git cat-file -e "$REQUESTED_ROLLBACK^{commit}"
@@ -182,31 +183,103 @@ jobs:
           python -m pip install --requirement requirements-ci.txt
           npm ci
       - name: production-preflight
+        if: inputs.operation == 'deploy'
+        env:
+          PRODUCTION_POSTGRES_URL: ${{ secrets.PRODUCTION_POSTGRES_URL }}
+          PRODUCTION_OPERATOR_ID: ${{ secrets.PRODUCTION_OPERATOR_ID }}
         run: >-
           python scripts/deploy_and_verify.py production-preflight
-          --commit "${{ inputs.commit }}"
-          --staging-report-json '${{ needs.staging-gate.outputs.release-report }}'
-          --rollback-ref "${{ inputs.rollback_ref }}"
-          --confirm "${{ inputs.deploy_confirmation }}"
-          --pause-confirm "${{ inputs.pause_confirmation }}"
+          --commit "$REQUESTED_COMMIT"
+          --staging-report-json "$STAGING_RELEASE_REPORT"
+          --rollback-ref "$REQUESTED_ROLLBACK"
+          --confirm "$REQUESTED_DEPLOY_CONFIRMATION"
+          --pause-confirm "$REQUESTED_PAUSE_CONFIRMATION"
           --max-backup-hours 36
           --max-restore-days 30
+      - name: owner-cutover-preflight
+        if: inputs.operation == 'owner-cutover'
+        run: >-
+          python scripts/deploy_and_verify.py owner-cutover-preflight
+          --commit "$REQUESTED_COMMIT"
+          --staging-report-json "$STAGING_RELEASE_REPORT"
+          --rollback-ref "$REQUESTED_ROLLBACK"
+          --confirm "$REQUESTED_DEPLOY_CONFIRMATION"
+          --pause-confirm "$REQUESTED_PAUSE_CONFIRMATION"
+          --backup-checked-at "$REQUESTED_BACKUP_CHECKED_AT"
+          --backup-evidence-hash "$REQUESTED_BACKUP_EVIDENCE_HASH"
+      - name: apply-owner-foundation
+        if: inputs.operation == 'owner-cutover'
+        env:
+          PRODUCTION_PROJECT_REF: ${{ secrets.PRODUCTION_PROJECT_REF }}
+          SUPABASE_ACCESS_TOKEN: ${{ secrets.SUPABASE_ACCESS_TOKEN }}
+        run: |
+          npx --yes supabase@2.116.0 link --project-ref "$PRODUCTION_PROJECT_REF"
+          mkdir "$RUNNER_TEMP/post-foundation-migrations"
+          for migration in supabase/migrations/*.sql; do
+            version="$(basename "$migration")"
+            version="${version%%_*}"
+            if [[ "$version" > "20260905000000" ]]; then
+              mv "$migration" "$RUNNER_TEMP/post-foundation-migrations/"
+            fi
+          done
+          push_status=0
+          npx --yes supabase@2.116.0 db push --linked --include-all || push_status=$?
+          mv "$RUNNER_TEMP/post-foundation-migrations/"*.sql supabase/migrations/
+          [[ "$push_status" -eq 0 ]] || exit "$push_status"
+      - name: backfill-owner-data
+        if: inputs.operation == 'owner-cutover'
+        env:
+          PRODUCTION_PROJECT_REF: ${{ secrets.PRODUCTION_PROJECT_REF }}
+          PRODUCTION_POSTGRES_URL: ${{ secrets.PRODUCTION_POSTGRES_URL }}
+          PRODUCTION_OWNER_EMAIL: ${{ secrets.PRODUCTION_OWNER_EMAIL }}
+        run: >-
+          python scripts/migrate_single_owner_to_tenant.py
+          --owner-email "$PRODUCTION_OWNER_EMAIL"
+          --project-ref "$PRODUCTION_PROJECT_REF"
+          --db-url-env PRODUCTION_POSTGRES_URL
+          --production-project-ref "$PRODUCTION_PROJECT_REF"
+          --production-cutover
+          --confirm "MIGRATE $PRODUCTION_PROJECT_REF FOR $PRODUCTION_OWNER_EMAIL"
+      - name: apply-remaining-owner-migrations
+        if: inputs.operation == 'owner-cutover'
+        env:
+          SUPABASE_ACCESS_TOKEN: ${{ secrets.SUPABASE_ACCESS_TOKEN }}
+        run: |
+          npx --yes supabase@2.116.0 migration repair 20260905500000 --status applied --linked
+          npx --yes supabase@2.116.0 db push --linked --include-all
       - name: apply-production-migrations
+        if: inputs.operation == 'deploy'
+        env:
+          PRODUCTION_PROJECT_REF: ${{ secrets.PRODUCTION_PROJECT_REF }}
+          SUPABASE_ACCESS_TOKEN: ${{ secrets.SUPABASE_ACCESS_TOKEN }}
         run: |
           npx --yes supabase@2.116.0 link --project-ref "$PRODUCTION_PROJECT_REF"
           npx --yes supabase@2.116.0 db push --linked --include-all
       - name: provision-runtime-roles
+        env:
+          PRODUCTION_PROJECT_REF: ${{ secrets.PRODUCTION_PROJECT_REF }}
+          PRODUCTION_POSTGRES_URL: ${{ secrets.PRODUCTION_POSTGRES_URL }}
+          PRODUCTION_SUPAVISOR_SESSION_URL: ${{ secrets.PRODUCTION_SUPAVISOR_SESSION_URL }}
         run: >-
           python scripts/provision_runtime_roles.py
           --project-ref "$PRODUCTION_PROJECT_REF"
           --admin-db-url-env PRODUCTION_POSTGRES_URL
           --session-url-template-env PRODUCTION_SUPAVISOR_SESSION_URL
       - name: deploy-edge-functions
+        env:
+          PRODUCTION_PROJECT_REF: ${{ secrets.PRODUCTION_PROJECT_REF }}
+          SUPABASE_ACCESS_TOKEN: ${{ secrets.SUPABASE_ACCESS_TOKEN }}
         run: |
           npx --yes supabase@2.116.0 functions deploy app-api --project-ref "$PRODUCTION_PROJECT_REF"
           npx --yes supabase@2.116.0 functions deploy telegram-portfolio --project-ref "$PRODUCTION_PROJECT_REF"
           npx --yes supabase@2.116.0 functions deploy agent-gateway --project-ref "$PRODUCTION_PROJECT_REF"
           npx --yes supabase@2.116.0 functions deploy run-scheduler --project-ref "$PRODUCTION_PROJECT_REF"
+      - name: write-release-marker
+        run: >-
+          python scripts/write_release_marker.py
+          --output apps/web/public/release.json
+          --commit "$REQUESTED_COMMIT"
+          --environment production
       - name: build-production-web
         env:
           VITE_SUPABASE_URL: ${{ vars.PRODUCTION_SUPABASE_URL }}
@@ -215,17 +288,33 @@ jobs:
       - name: build-output-scan
         run: python scripts/deploy_and_verify.py scan-build --dist apps/web/dist
       - name: deploy-production-web
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
         run: >-
           npx --yes wrangler@4.128.0 deploy
           --config apps/web/wrangler.jsonc
           --name stocks-agent-production-web
       - name: automated-post-deploy-health
+        if: inputs.operation == 'deploy'
+        env:
+          PRODUCTION_PROJECT_REF: ${{ secrets.PRODUCTION_PROJECT_REF }}
+          PRODUCTION_POSTGRES_URL: ${{ secrets.PRODUCTION_POSTGRES_URL }}
+          PRODUCTION_SUPABASE_URL: ${{ vars.PRODUCTION_SUPABASE_URL }}
+          PRODUCTION_OPERATOR_ID: ${{ secrets.PRODUCTION_OPERATOR_ID }}
+          PRODUCTION_WEB_URL: ${{ vars.PRODUCTION_WEB_URL }}
         run: >-
           python scripts/deploy_and_verify.py production-health
           --project-ref "$PRODUCTION_PROJECT_REF"
+          --commit "$REQUESTED_COMMIT"
+      - name: owner-cutover-next-gates
+        if: inputs.operation == 'owner-cutover'
+        run: |
+          echo "Owner schema migration and candidate deployment completed with TRIGGERS PAUSED." >> "$GITHUB_STEP_SUMMARY"
+          echo "Run the private encrypted backup, staging restore, provider handshake, and owner smoke before operation=deploy." >> "$GITHUB_STEP_SUMMARY"
       - name: record-rollback-command
         run: |
-          echo "Rollback reference verified: ${{ inputs.rollback_ref }}" >> "$GITHUB_STEP_SUMMARY"
+          echo "Rollback reference verified: $REQUESTED_ROLLBACK" >> "$GITHUB_STEP_SUMMARY"
           echo "Keep TRIGGERS PAUSED and rerun this workflow using that exact reference." >> "$GITHUB_STEP_SUMMARY"
           echo "After the owner-only smoke, rerun this workflow with operation=verify and OWNER SMOKE PASSED." >> "$GITHUB_STEP_SUMMARY"
 
@@ -235,15 +324,10 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     env:
-      PRODUCTION_PROJECT_REF: ${{ secrets.PRODUCTION_PROJECT_REF }}
-      PRODUCTION_POSTGRES_URL: ${{ secrets.PRODUCTION_POSTGRES_URL }}
-      PRODUCTION_SUPABASE_URL: ${{ vars.PRODUCTION_SUPABASE_URL }}
-      PRODUCTION_OPERATOR_ID: ${{ secrets.PRODUCTION_OPERATOR_ID }}
-      PRODUCTION_WEB_URL: ${{ vars.PRODUCTION_WEB_URL }}
+      REQUESTED_COMMIT: ${{ inputs.commit }}
+      REQUESTED_OWNER_SMOKE: ${{ inputs.owner_smoke_confirmation }}
     steps:
       - name: validate-release-identity
-        env:
-          REQUESTED_COMMIT: ${{ inputs.commit }}
         run: '[[ "$REQUESTED_COMMIT" =~ ^[0-9a-f]{40}$ ]] || exit 2'
       - name: checkout
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
@@ -252,8 +336,6 @@ jobs:
           fetch-depth: 0
           persist-credentials: false
       - name: select-tested-main-commit
-        env:
-          REQUESTED_COMMIT: ${{ inputs.commit }}
         run: |
           git cat-file -e "$REQUESTED_COMMIT^{commit}"
           git merge-base --is-ancestor "$REQUESTED_COMMIT" HEAD
@@ -267,7 +349,14 @@ jobs:
       - name: install-dependencies
         run: python -m pip install --requirement requirements-ci.txt
       - name: production-verify
+        env:
+          PRODUCTION_PROJECT_REF: ${{ secrets.PRODUCTION_PROJECT_REF }}
+          PRODUCTION_POSTGRES_URL: ${{ secrets.PRODUCTION_POSTGRES_URL }}
+          PRODUCTION_SUPABASE_URL: ${{ vars.PRODUCTION_SUPABASE_URL }}
+          PRODUCTION_OPERATOR_ID: ${{ secrets.PRODUCTION_OPERATOR_ID }}
+          PRODUCTION_WEB_URL: ${{ vars.PRODUCTION_WEB_URL }}
         run: >-
           python scripts/deploy_and_verify.py production-verify
           --project-ref "$PRODUCTION_PROJECT_REF"
-          --confirm "${{ inputs.owner_smoke_confirmation }}"
+          --commit "$REQUESTED_COMMIT"
+          --confirm "$REQUESTED_OWNER_SMOKE"

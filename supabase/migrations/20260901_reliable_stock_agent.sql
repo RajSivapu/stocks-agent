@@ -1,7 +1,9 @@
 -- Reliable stock-agent audit and Telegram portfolio workflow.
+-- Supabase CLI migration; replay-safe on the captured legacy baseline.
 -- This migration is intentionally additive and safe to re-run.
 
-CREATE EXTENSION IF NOT EXISTS pgcrypto;
+CREATE SCHEMA IF NOT EXISTS extensions;
+CREATE EXTENSION IF NOT EXISTS pgcrypto WITH SCHEMA extensions;
 
 CREATE TABLE IF NOT EXISTS analysis_runs (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),

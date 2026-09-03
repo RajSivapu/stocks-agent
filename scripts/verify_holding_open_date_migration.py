@@ -12,7 +12,7 @@ from lib import config
 TICKERS = (
     "TSTOD1", "TSTOD2", "TSTOD3", "TSTOD4", "TSTOD5", "TSTOD6", "TSTOD7"
 )
-MIGRATION = Path(__file__).resolve().parents[1] / "sql" / "migrations" / "20260901_reliable_stock_agent.sql"
+MIGRATION = Path(__file__).resolve().parents[1] / "supabase" / "migrations" / "20260901_reliable_stock_agent.sql"
 
 
 def _require(condition, message):

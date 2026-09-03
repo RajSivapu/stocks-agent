@@ -14,6 +14,8 @@ owner-scoped ledger/projection model, RLS and machine-role boundaries, provider 
 Routine adapter, DST-aware scheduling, server-owned evidence/policy/publication flow, seven-screen web
 product, OTP/consent/account lifecycle, Telegram pairing, encrypted-recovery tooling, protected
 deployment workflows, browser acceptance, and the guarded owner-cutover controller.
+The canonical schema is now generated from the same `supabase/migrations/` directory used by deployment,
+and disposable tests prove both a from-empty replay and the existing-owner upgrade reach that catalog.
 
 No owner-cutover or soak receipt exists. The remaining work needs real external infrastructure and
 evidence: credential rotation, custom SMTP/phone-mail OTP, private staging and production Supabase,

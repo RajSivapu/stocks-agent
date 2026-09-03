@@ -153,6 +153,38 @@ def secrets_compare(left: str, right: str) -> bool:
     return hmac.compare_digest(left, right)
 
 
+def validate_owner_cutover_evidence(
+    *,
+    expected_commit: str,
+    staging_report: Mapping[str, Any],
+    backup_checked_at: str,
+    backup_evidence_hash: str,
+    deployment_confirmation: str,
+    pause_confirmation: str,
+    rollback_ref: str,
+    now: datetime | None = None,
+) -> dict[str, str]:
+    """Validate the one-time legacy cutover without assuming the new health API exists."""
+    if deployment_confirmation != "CUTOVER OWNER" or pause_confirmation != "TRIGGERS PAUSED":
+        raise DeploymentRejected("owner cutover confirmation is invalid")
+    if not SHA_RE.fullmatch(rollback_ref) or rollback_ref == expected_commit:
+        raise DeploymentRejected("rollback reference is invalid")
+    if not isinstance(backup_evidence_hash, str) or not DIGEST_RE.fullmatch(
+        backup_evidence_hash
+    ):
+        raise DeploymentRejected("backup evidence digest is invalid")
+    report = validate_release_report(
+        staging_report, expected_commit=expected_commit, now=now
+    )
+    if _bounded_integer(report["recovery"]["restore_age_days"], "restore age") > 30:
+        raise DeploymentRejected("restore evidence is stale")
+    observed_at = (now or datetime.now(timezone.utc)).astimezone(timezone.utc)
+    checked_at = _parse_time(backup_checked_at, "backup evidence time")
+    if checked_at > observed_at + _hours(1) or checked_at < observed_at - _hours(36):
+        raise DeploymentRejected("backup evidence is stale")
+    return {"status": "ready", "rollback_ref": rollback_ref}
+
+
 def validate_production_evidence(
     operator_health: Mapping[str, Any],
     *,
@@ -267,10 +299,10 @@ def _bounded_request(request: Request, *, opener: Callable[..., Any] = urlopen) 
     return body
 
 
-def _bounded_get(url: str) -> bytes:
+def _bounded_get(url: str, *, opener: Callable[..., Any] = urlopen) -> bytes:
     return _bounded_request(Request(
         url, method="GET", headers={"User-Agent": "stock-agent-release-verifier/1"}
-    ))
+    ), opener=opener)
 
 
 def verify_postgrest_tenant_isolation(
@@ -341,12 +373,29 @@ def _public_health(project_url: str) -> None:
         raise DeploymentRejected("public health response is not exact")
 
 
-def _web_health(web_url: str) -> None:
+def _web_health(
+    web_url: str,
+    *,
+    expected_commit: str,
+    environment: str,
+    opener: Callable[..., Any] = urlopen,
+) -> None:
     parsed = urlparse(web_url)
     if parsed.scheme != "https" or not parsed.hostname or parsed.path not in ("", "/"):
         raise DeploymentRejected("web URL is invalid")
-    if b'<div id="root"></div>' not in _bounded_get(web_url.rstrip("/") + "/"):
+    if SHA_RE.fullmatch(expected_commit) is None or environment not in {
+        "staging", "production"
+    }:
+        raise DeploymentRejected("expected web release is invalid")
+    root = web_url.rstrip("/")
+    if b'<div id="root"></div>' not in _bounded_get(root + "/", opener=opener):
         raise DeploymentRejected("web root is malformed")
+    try:
+        marker = json.loads(_bounded_get(root + "/release.json", opener=opener))
+    except (UnicodeDecodeError, json.JSONDecodeError) as error:
+        raise DeploymentRejected("web release marker is malformed") from error
+    if marker != {"commit": expected_commit, "environment": environment}:
+        raise DeploymentRejected("web release marker does not match")
 
 
 def _database_release_checks(
@@ -424,7 +473,7 @@ def verify_staging(
     )
     _public_health(project_url)
     checks["edge"] = "passed"
-    _web_health(web_url)
+    _web_health(web_url, expected_commit=commit, environment="staging")
     checks["web"] = "passed"
     health = _operator_health(database_url, operator_id)
     restore = health.get("restore")
@@ -480,11 +529,21 @@ def _parser() -> argparse.ArgumentParser:
     prod.add_argument("--pause-confirm", required=True)
     prod.add_argument("--max-backup-hours", type=int, default=36)
     prod.add_argument("--max-restore-days", type=int, default=30)
+    cutover = sub.add_parser("owner-cutover-preflight")
+    cutover.add_argument("--commit", required=True)
+    cutover.add_argument("--staging-report-json", required=True)
+    cutover.add_argument("--rollback-ref", required=True)
+    cutover.add_argument("--confirm", required=True)
+    cutover.add_argument("--pause-confirm", required=True)
+    cutover.add_argument("--backup-checked-at", required=True)
+    cutover.add_argument("--backup-evidence-hash", required=True)
     health = sub.add_parser("production-health")
     health.add_argument("--project-ref", required=True)
+    health.add_argument("--commit", required=True)
     verify = sub.add_parser("production-verify")
     verify.add_argument("--project-ref", required=True)
     verify.add_argument("--confirm", required=True)
+    verify.add_argument("--commit", required=True)
     return parser
 
 
@@ -537,13 +596,27 @@ def main(argv: list[str] | None = None) -> int:
                 pause_confirmation=args.pause_confirm,
                 rollback_ref=args.rollback_ref,
             )
+        elif args.command == "owner-cutover-preflight":
+            result = validate_owner_cutover_evidence(
+                expected_commit=args.commit,
+                staging_report=_report_from_argument(args.staging_report_json),
+                backup_checked_at=args.backup_checked_at,
+                backup_evidence_hash=args.backup_evidence_hash,
+                deployment_confirmation=args.confirm,
+                pause_confirmation=args.pause_confirm,
+                rollback_ref=args.rollback_ref,
+            )
         else:
             if not PROJECT_RE.fullmatch(args.project_ref):
                 raise DeploymentRejected("production verification project is invalid")
             if args.command == "production-verify" and args.confirm != "OWNER SMOKE PASSED":
                 raise DeploymentRejected("production verification confirmation is invalid")
             _public_health(_required_environment("PRODUCTION_SUPABASE_URL"))
-            _web_health(_required_environment("PRODUCTION_WEB_URL"))
+            _web_health(
+                _required_environment("PRODUCTION_WEB_URL"),
+                expected_commit=args.commit,
+                environment="production",
+            )
             health = _operator_health(
                 _required_environment("PRODUCTION_POSTGRES_URL"),
                 _required_environment("PRODUCTION_OPERATOR_ID"),

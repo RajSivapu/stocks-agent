@@ -1,4 +1,5 @@
 -- Provider-neutral, preview-before-confirm portfolio commands.
+-- Supabase CLI migration.
 -- Browser callers derive identity from auth.uid(); machine adapters must resolve their
 -- own authenticated link before entering the private app functions below.
 

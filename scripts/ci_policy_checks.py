@@ -108,6 +108,13 @@ def lint_sql_files(paths: list[Path]) -> int:
     return len(paths)
 
 
+def repository_sql_files() -> list[Path]:
+    return sorted({
+        *(ROOT / "sql").rglob("*.sql"),
+        *(ROOT / "supabase/migrations").glob("*.sql"),
+    })
+
+
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("command", choices=("scan-secrets", "sql-lint"))
@@ -118,7 +125,7 @@ def main(argv: list[str] | None = None) -> int:
     args = _parser().parse_args(argv)
     try:
         count = scan_tracked_files() if args.command == "scan-secrets" else lint_sql_files(
-            sorted((ROOT / "sql").rglob("*.sql"))
+            repository_sql_files()
         )
         print(f"{args.command}: passed ({count} files)")
         return 0

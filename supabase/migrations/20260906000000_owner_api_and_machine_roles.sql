@@ -1,4 +1,5 @@
 -- Forced row isolation and the release-one browser API allow-list.
+-- Supabase CLI migration.
 -- Apply only after the single-owner backfill has moved owner tables into app.
 
 REVOKE CREATE ON SCHEMA public FROM PUBLIC, anon, authenticated, service_role;

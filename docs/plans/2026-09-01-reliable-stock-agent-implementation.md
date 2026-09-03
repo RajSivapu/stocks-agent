@@ -157,7 +157,7 @@ git commit -m "feat: expose market quote freshness"
 ### Task 3: Auditable Analysis Runs and Bounded Weekly Queries
 
 **Files:**
-- Create: `sql/migrations/20260901_reliable_stock_agent.sql`
+- Create: `supabase/migrations/20260901_reliable_stock_agent.sql`
 - Modify: `sql/schema.sql`
 - Modify: `lib/db.py`
 - Modify: `tests/test_db.py`
@@ -205,7 +205,7 @@ idempotent.
 - [ ] **Step 7: Commit**
 
 ```bash
-git add sql/migrations/20260901_reliable_stock_agent.sql sql/schema.sql lib/db.py tests/test_db.py
+git add supabase/migrations/20260901_reliable_stock_agent.sql sql/schema.sql lib/db.py tests/test_db.py
 git commit -m "feat: add auditable analysis runs"
 ```
 
@@ -259,7 +259,7 @@ git commit -m "feat: parse Telegram portfolio commands"
 ### Task 5: Atomic Portfolio Command Database Workflow
 
 **Files:**
-- Modify: `sql/migrations/20260901_reliable_stock_agent.sql`
+- Modify: `supabase/migrations/20260901_reliable_stock_agent.sql`
 - Modify: `sql/schema.sql`
 - Add tests/verification script: `scripts/verify_portfolio_command_rpc.py`
 
@@ -308,7 +308,7 @@ Expected: all checks pass and no `TSTTG` rows remain.
 - [ ] **Step 6: Commit**
 
 ```bash
-git add sql/migrations/20260901_reliable_stock_agent.sql sql/schema.sql scripts/verify_portfolio_command_rpc.py
+git add supabase/migrations/20260901_reliable_stock_agent.sql sql/schema.sql scripts/verify_portfolio_command_rpc.py
 git commit -m "feat: apply confirmed portfolio commands atomically"
 ```
 

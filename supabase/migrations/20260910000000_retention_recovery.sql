@@ -1,4 +1,5 @@
 -- Private account lifecycle, step-up receipts, secret-free exports, and operator reset controls.
+-- Supabase CLI migration.
 
 CREATE TABLE app.account_step_up_challenges (
   id UUID PRIMARY KEY DEFAULT extensions.gen_random_uuid(),

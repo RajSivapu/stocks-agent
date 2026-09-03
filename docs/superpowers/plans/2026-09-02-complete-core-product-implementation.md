@@ -45,7 +45,7 @@ The implementation uses these boundaries. Do not collapse them into one Edge Fun
 | Scheduler | `supabase/functions/run-scheduler/*` | Market-calendar slot claims, Claude `/fire`, expected-run monitoring, and deterministic holiday notices |
 | Telegram | `supabase/functions/telegram-portfolio/*` | Webhook validation, private-chat pairing, owner-resolved commands, callbacks, and fixed replies |
 | Web product | `apps/web/src/*` | Seven approved screens, OTP auth, consent, safe recordkeeping, run status, and connection setup |
-| Database | `sql/migrations/20260905000000_*.sql` through `20260910000000_*.sql` | Private/exposed schemas, tenancy, ledger, provider control plane, Telegram, retention, and recovery |
+| Database | `supabase/migrations/20260905000000_*.sql` through `20260910000000_*.sql` | Private/exposed schemas, tenancy, ledger, provider control plane, Telegram, retention, and recovery |
 | Security verification | `tests/security/*` | Remote staging PostgREST/JWT/RPC/role/tenant attack suite |
 | Operations | `scripts/*`, `docs/runbooks/*`, `ops/backup/*` | Capability probes, migration verification, invitation, deployment, backup, restore, and incident response |
 
@@ -264,7 +264,7 @@ git commit -m "feat: define provider and portfolio contracts"
 ### Task 4: Private schemas and identity foundation
 
 **Files:**
-- Create: `sql/migrations/20260905000000_multitenancy_foundation.sql`
+- Create: `supabase/migrations/20260905000000_multitenancy_foundation.sql`
 - Create: `tests/security/test_multitenancy_schema.py`
 - Create: `tests/security/conftest.py`
 - Modify: `supabase/config.toml`
@@ -301,7 +301,7 @@ search paths where required. Revoke schema creation from ordinary roles.
 Run the catalog test and `supabase db lint` against staging. Commit:
 
 ```bash
-git add sql/migrations/20260905000000_multitenancy_foundation.sql tests/security/conftest.py tests/security/test_multitenancy_schema.py supabase/config.toml
+git add supabase/migrations/20260905000000_multitenancy_foundation.sql tests/security/conftest.py tests/security/test_multitenancy_schema.py supabase/config.toml
 git commit -m "feat: add tenant identity foundation"
 ```
 
@@ -313,7 +313,7 @@ git commit -m "feat: add tenant identity foundation"
 - Create: `scripts/migrate_single_owner_to_tenant.py`
 - Create: `scripts/verify_multitenancy_migration.py`
 - Create: `tests/test_migrate_single_owner_to_tenant.py`
-- Modify: `sql/migrations/20260905000000_multitenancy_foundation.sql`
+- Modify: `supabase/migrations/20260905000000_multitenancy_foundation.sql`
 
 **Interfaces:**
 - Consumes: an operator-confirmed Auth UUID and paused current functions.
@@ -348,7 +348,7 @@ project reference unless `--production-cutover` and an exact typed confirmation 
 Run unit tests plus the rollback-only staging verifier. Commit:
 
 ```bash
-git add scripts/migrate_single_owner_to_tenant.py scripts/verify_multitenancy_migration.py tests/test_migrate_single_owner_to_tenant.py sql/migrations/20260905000000_multitenancy_foundation.sql
+git add scripts/migrate_single_owner_to_tenant.py scripts/verify_multitenancy_migration.py tests/test_migrate_single_owner_to_tenant.py supabase/migrations/20260905000000_multitenancy_foundation.sql
 git commit -m "feat: add verified owner data migration"
 ```
 
@@ -357,7 +357,7 @@ git commit -m "feat: add verified owner data migration"
 ### Task 6: Forced RLS, invoker views, and owner-A/owner-B attack suite
 
 **Files:**
-- Create: `sql/migrations/20260906000000_owner_api_and_machine_roles.sql`
+- Create: `supabase/migrations/20260906000000_owner_api_and_machine_roles.sql`
 - Create: `tests/security/test_postgrest_isolation.py`
 - Create: `tests/security/test_rls_catalog.py`
 - Create: `scripts/create_security_test_users.py`
@@ -400,7 +400,7 @@ and named user RPCs. Add a catalog allow-list test so a new exposed table/functi
 Run the staging PostgREST suite and Supabase security advisor. Commit:
 
 ```bash
-git add sql/migrations/20260906000000_owner_api_and_machine_roles.sql tests/security scripts/create_security_test_users.py
+git add supabase/migrations/20260906000000_owner_api_and_machine_roles.sql tests/security scripts/create_security_test_users.py
 git commit -m "security: enforce cross-tenant isolation"
 ```
 
@@ -417,7 +417,7 @@ git commit -m "security: enforce cross-tenant isolation"
 - Create: `supabase/functions/_shared/security_test.ts`
 - Create: `scripts/provision_runtime_roles.py`
 - Create: `tests/security/test_machine_roles.py`
-- Modify: `sql/migrations/20260906000000_owner_api_and_machine_roles.sql`
+- Modify: `supabase/migrations/20260906000000_owner_api_and_machine_roles.sql`
 
 **Interfaces:**
 - Consumes: private schemas and staging project JWKS.
@@ -452,7 +452,7 @@ timeout, use parameterized SQL only, and close the session in `finally`. Do not 
 Run Deno security tests and staging role attacks. Commit:
 
 ```bash
-git add supabase/functions/_shared scripts/provision_runtime_roles.py tests/security/test_machine_roles.py sql/migrations/20260906000000_owner_api_and_machine_roles.sql
+git add supabase/functions/_shared scripts/provision_runtime_roles.py tests/security/test_machine_roles.py supabase/migrations/20260906000000_owner_api_and_machine_roles.sql
 git commit -m "security: add least privilege runtime boundaries"
 ```
 
@@ -461,7 +461,7 @@ git commit -m "security: add least privilege runtime boundaries"
 ### Task 8: Fee-aware append-only ledger and holding projection
 
 **Files:**
-- Create: `sql/migrations/20260907000000_ledger_projection_commands.sql`
+- Create: `supabase/migrations/20260907000000_ledger_projection_commands.sql`
 - Create: `tests/security/test_ledger_projection.py`
 - Create: `scripts/verify_ledger_projection.py`
 
@@ -503,7 +503,7 @@ ticker hash, sequence, status, and checked time to the operational result.
 Run property tests with at least 500 generated interleavings plus the legacy migration verifier. Commit:
 
 ```bash
-git add sql/migrations/20260907000000_ledger_projection_commands.sql tests/security/test_ledger_projection.py scripts/verify_ledger_projection.py
+git add supabase/migrations/20260907000000_ledger_projection_commands.sql tests/security/test_ledger_projection.py scripts/verify_ledger_projection.py
 git commit -m "feat: derive holdings from immutable ledger"
 ```
 
@@ -512,7 +512,7 @@ git commit -m "feat: derive holdings from immutable ledger"
 ### Task 9: Shared portfolio command state machine
 
 **Files:**
-- Modify: `sql/migrations/20260907000000_ledger_projection_commands.sql`
+- Modify: `supabase/migrations/20260907000000_ledger_projection_commands.sql`
 - Create: `packages/contracts/src/command-preview.test.ts`
 - Create: `tests/security/test_portfolio_command_rpc.py`
 - Modify: `scripts/verify_portfolio_command_rpc.py`
@@ -552,7 +552,7 @@ fixed amount tolerance.
 Run SQL integration tests, existing verifier, and contract tests. Commit:
 
 ```bash
-git add sql/migrations/20260907000000_ledger_projection_commands.sql packages/contracts/src/command-preview.test.ts tests/security/test_portfolio_command_rpc.py scripts/verify_portfolio_command_rpc.py
+git add supabase/migrations/20260907000000_ledger_projection_commands.sql packages/contracts/src/command-preview.test.ts tests/security/test_portfolio_command_rpc.py scripts/verify_portfolio_command_rpc.py
 git commit -m "feat: unify previewed portfolio commands"
 ```
 
@@ -566,7 +566,7 @@ git commit -m "feat: unify previewed portfolio commands"
 - Create: `supabase/functions/app-api/routes.ts`
 - Create: `supabase/functions/app-api/handler_test.ts`
 - Modify: `supabase/config.toml`
-- Modify: `sql/migrations/20260906000000_owner_api_and_machine_roles.sql`
+- Modify: `supabase/migrations/20260906000000_owner_api_and_machine_roles.sql`
 
 **Interfaces:**
 - Consumes: verified user JWT and invoker-context `api` RPCs.
@@ -602,7 +602,7 @@ Audit rows store actor, route, result, and timestamps without request body or fi
 Run Deno tests, wrong-project JWT integration tests, and typecheck. Commit:
 
 ```bash
-git add supabase/functions/app-api supabase/config.toml sql/migrations/20260906000000_owner_api_and_machine_roles.sql
+git add supabase/functions/app-api supabase/config.toml supabase/migrations/20260906000000_owner_api_and_machine_roles.sql
 git commit -m "feat: add authenticated product api"
 ```
 
@@ -611,7 +611,7 @@ git commit -m "feat: add authenticated product api"
 ### Task 11: Telegram private-chat pairing and replay boundary
 
 **Files:**
-- Create: `sql/migrations/20260908020000_telegram_multitenancy.sql`
+- Create: `supabase/migrations/20260908020000_telegram_multitenancy.sql`
 - Modify: `supabase/functions/telegram-portfolio/parser.mjs`
 - Modify: `supabase/functions/telegram-portfolio/webhook-utils.mjs`
 - Create: `supabase/functions/telegram-portfolio/pairing.mjs`
@@ -649,7 +649,7 @@ server-side to command/owner/link. Confirm only when the same paired user/chat i
 Run Node tests and staging SQL integration tests. Commit:
 
 ```bash
-git add sql/migrations/20260908020000_telegram_multitenancy.sql supabase/functions/telegram-portfolio/parser.mjs supabase/functions/telegram-portfolio/webhook-utils.mjs supabase/functions/telegram-portfolio/pairing.mjs tests/test_telegram_parser.mjs tests/test_telegram_webhook_utils.mjs
+git add supabase/migrations/20260908020000_telegram_multitenancy.sql supabase/functions/telegram-portfolio/parser.mjs supabase/functions/telegram-portfolio/webhook-utils.mjs supabase/functions/telegram-portfolio/pairing.mjs tests/test_telegram_parser.mjs tests/test_telegram_webhook_utils.mjs
 git commit -m "feat: add secure telegram account pairing"
 ```
 
@@ -707,7 +707,7 @@ git commit -m "feat: make telegram recorder multi user"
 **Files:**
 - Modify: `packages/contracts/src/provider.ts`
 - Create: `packages/contracts/src/provider.test.ts`
-- Create: `sql/migrations/20260908040000_provider_runs_and_evidence.sql`
+- Create: `supabase/migrations/20260908040000_provider_runs_and_evidence.sql`
 - Create: `supabase/functions/agent-gateway/evidence.ts`
 - Create: `supabase/functions/agent-gateway/evidence_test.ts`
 
@@ -744,7 +744,7 @@ and decisive factor. Missing data lowers confidence or vetoes; the server never 
 Run shared-contract and evidence tests. Commit:
 
 ```bash
-git add packages/contracts/src/provider.ts packages/contracts/src/provider.test.ts sql/migrations/20260908040000_provider_runs_and_evidence.sql supabase/functions/agent-gateway/evidence.ts supabase/functions/agent-gateway/evidence_test.ts
+git add packages/contracts/src/provider.ts packages/contracts/src/provider.test.ts supabase/migrations/20260908040000_provider_runs_and_evidence.sql supabase/functions/agent-gateway/evidence.ts supabase/functions/agent-gateway/evidence_test.ts
 git commit -m "feat: require current run evidence"
 ```
 
@@ -757,7 +757,7 @@ git commit -m "feat: require current run evidence"
 - Create: `supabase/functions/agent-gateway/market-data_test.ts`
 - Create: `supabase/functions/agent-gateway/corporate-actions.ts`
 - Create: `supabase/functions/agent-gateway/corporate-actions_test.ts`
-- Modify: `sql/migrations/20260908040000_provider_runs_and_evidence.sql`
+- Modify: `supabase/migrations/20260908040000_provider_runs_and_evidence.sql`
 
 **Interfaces:**
 - Consumes: Yahoo quote/history and an allowed corporate-action source proven in Gate 0.
@@ -788,7 +788,7 @@ levels.
 Run market-data, policy, outcome, and corporate-action tests. Commit:
 
 ```bash
-git add supabase/functions/agent-gateway/market-data.ts supabase/functions/agent-gateway/market-data_test.ts supabase/functions/agent-gateway/corporate-actions.ts supabase/functions/agent-gateway/corporate-actions_test.ts sql/migrations/20260908040000_provider_runs_and_evidence.sql
+git add supabase/functions/agent-gateway/market-data.ts supabase/functions/agent-gateway/market-data_test.ts supabase/functions/agent-gateway/corporate-actions.ts supabase/functions/agent-gateway/corporate-actions_test.ts supabase/migrations/20260908040000_provider_runs_and_evidence.sql
 git commit -m "feat: quarantine uncertain corporate actions"
 ```
 
@@ -805,7 +805,7 @@ git commit -m "feat: quarantine uncertain corporate actions"
 - Create: `supabase/functions/agent-gateway/telegram.ts`
 - Create: `supabase/functions/agent-gateway/handler_test.ts`
 - Modify: `supabase/config.toml`
-- Modify: `sql/migrations/20260908040000_provider_runs_and_evidence.sql`
+- Modify: `supabase/migrations/20260908040000_provider_runs_and_evidence.sql`
 
 **Interfaces:**
 - Consumes: `Authorization: Bearer <connection_id>.<256-bit-secret>` and V2 operations
@@ -848,7 +848,7 @@ contract validation.
 Run all Deno tests, role attacks, and two-owner staging gateway simulations. Commit:
 
 ```bash
-git add supabase/functions/agent-gateway supabase/config.toml sql/migrations/20260908040000_provider_runs_and_evidence.sql
+git add supabase/functions/agent-gateway supabase/config.toml supabase/migrations/20260908040000_provider_runs_and_evidence.sql
 git commit -m "feat: add owner scoped analysis gateway"
 ```
 
@@ -863,7 +863,7 @@ git commit -m "feat: add owner scoped analysis gateway"
 - Create: `supabase/functions/run-scheduler/claude-fire.ts`
 - Create: `supabase/functions/run-scheduler/handler_test.ts`
 - Modify: `supabase/config.toml`
-- Modify: `sql/migrations/20260908040000_provider_runs_and_evidence.sql`
+- Modify: `supabase/migrations/20260908040000_provider_runs_and_evidence.sql`
 
 **Interfaces:**
 - Consumes: five-minute Supabase Cron tick and active Claude connection Vault references.
@@ -906,7 +906,7 @@ post-market remain silent; no provider or market research call occurs.
 Run scheduler tests and a staging Cron/`pg_net` invocation. Commit:
 
 ```bash
-git add supabase/functions/run-scheduler supabase/config.toml sql/migrations/20260908040000_provider_runs_and_evidence.sql
+git add supabase/functions/run-scheduler supabase/config.toml supabase/migrations/20260908040000_provider_runs_and_evidence.sql
 git commit -m "feat: schedule canonical claude runs"
 ```
 
@@ -923,7 +923,7 @@ git commit -m "feat: schedule canonical claude runs"
 - Create: `docs/connection-kits/images/claude-03-trigger.png`
 - Create: `docs/connection-kits/images/claude-04-handshake.png`
 - Create: `scripts/verify_claude_connection.py`
-- Modify: `sql/migrations/20260908040000_provider_runs_and_evidence.sql`
+- Modify: `supabase/migrations/20260908040000_provider_runs_and_evidence.sql`
 
 **Interfaces:**
 - Consumes: signed-in owner, one-time inbound gateway secret, exact `/fire` URL/token, and consent version.
@@ -959,7 +959,7 @@ emails, owner IDs, and personal data visibly absent.
 Run unit tests and Gate 0's second-account unassisted setup. Commit:
 
 ```bash
-git add supabase/functions/app-api/connections.ts supabase/functions/app-api/connections_test.ts docs/connection-kits scripts/verify_claude_connection.py sql/migrations/20260908040000_provider_runs_and_evidence.sql
+git add supabase/functions/app-api/connections.ts supabase/functions/app-api/connections_test.ts docs/connection-kits scripts/verify_claude_connection.py supabase/migrations/20260908040000_provider_runs_and_evidence.sql
 git commit -m "feat: add claude connection handshake"
 ```
 
@@ -971,8 +971,8 @@ git commit -m "feat: add claude connection handshake"
 - Create: `supabase/functions/run-scheduler/maintenance.ts`
 - Create: `supabase/functions/run-scheduler/maintenance_test.ts`
 - Modify: `supabase/functions/agent-gateway/renderer.ts`
-- Modify: `sql/migrations/20260908040000_provider_runs_and_evidence.sql`
-- Modify: `sql/migrations/20260908020000_telegram_multitenancy.sql`
+- Modify: `supabase/migrations/20260908040000_provider_runs_and_evidence.sql`
+- Modify: `supabase/migrations/20260908020000_telegram_multitenancy.sql`
 
 **Interfaces:**
 - Consumes: run slots, publications, commands, links, quote status, and retention cutoffs.
@@ -1004,7 +1004,7 @@ without tickers, quantities, cost basis, recommendation text, or owner identity.
 Run scheduling/publication tests and existing behavioral eval cases. Commit:
 
 ```bash
-git add supabase/functions/run-scheduler supabase/functions/agent-gateway/renderer.ts sql/migrations/20260908040000_provider_runs_and_evidence.sql sql/migrations/20260908020000_telegram_multitenancy.sql
+git add supabase/functions/run-scheduler supabase/functions/agent-gateway/renderer.ts supabase/migrations/20260908040000_provider_runs_and_evidence.sql supabase/migrations/20260908020000_telegram_multitenancy.sql
 git commit -m "feat: add truthful run operations"
 ```
 
@@ -1204,7 +1204,7 @@ git commit -m "feat: add provider and notification setup"
 - Create: `scripts/invite_user.py`
 - Create: `scripts/reset_owner_ledger.py`
 - Create: `tests/test_reset_owner_ledger.py`
-- Create: `sql/migrations/20260910000000_retention_recovery.sql`
+- Create: `supabase/migrations/20260910000000_retention_recovery.sql`
 - Create: `docs/runbooks/account-lifecycle.md`
 - Create: `docs/privacy.md`
 - Create: `docs/risk-disclosure.md`
@@ -1252,7 +1252,7 @@ It is unavailable to browser, provider, Telegram, and ordinary runtime roles.
 Run account tests, staging deletion/restore fixture, and CLI dry run. Commit:
 
 ```bash
-git add apps/web/src/features/account supabase/functions/app-api/account.ts supabase/functions/app-api/account_test.ts scripts/invite_user.py scripts/reset_owner_ledger.py tests/test_reset_owner_ledger.py sql/migrations/20260910000000_retention_recovery.sql docs/runbooks/account-lifecycle.md docs/privacy.md docs/risk-disclosure.md
+git add apps/web/src/features/account supabase/functions/app-api/account.ts supabase/functions/app-api/account_test.ts scripts/invite_user.py scripts/reset_owner_ledger.py tests/test_reset_owner_ledger.py supabase/migrations/20260910000000_retention_recovery.sql docs/runbooks/account-lifecycle.md docs/privacy.md docs/risk-disclosure.md
 git commit -m "feat: add private account lifecycle"
 ```
 
@@ -1270,7 +1270,7 @@ git commit -m "feat: add private account lifecycle"
 - Create: `ops/backup/r2-age-monitor/src/index.ts`
 - Create: `ops/backup/tests/*`
 - Create: `docs/runbooks/backup-restore.md`
-- Modify: `sql/migrations/20260910000000_retention_recovery.sql`
+- Modify: `supabase/migrations/20260910000000_retention_recovery.sql`
 
 **Interfaces:**
 - Consumes: backup execute-only login, offline `age` public key, private R2 credentials, enumerated export RPCs.
@@ -1315,7 +1315,7 @@ the staging fixture, and restore it from R2 plus offline key/operator secret sto
 secret-free templates and runbook:
 
 ```bash
-git add ops/backup docs/runbooks/backup-restore.md sql/migrations/20260910000000_retention_recovery.sql
+git add ops/backup docs/runbooks/backup-restore.md supabase/migrations/20260910000000_retention_recovery.sql
 git commit -m "feat: add encrypted disaster recovery"
 ```
 
@@ -1331,7 +1331,7 @@ git commit -m "feat: add encrypted disaster recovery"
 - Create: `ops/health-monitor/wrangler.jsonc`
 - Create: `ops/health-monitor/src/index.ts`
 - Create: `ops/health-monitor/src/index.test.ts`
-- Modify: `sql/migrations/20260910000000_retention_recovery.sql`
+- Modify: `supabase/migrations/20260910000000_retention_recovery.sql`
 - Create: `docs/runbooks/incident-response.md`
 - Create: `docs/runbooks/credential-rotation.md`
 
@@ -1373,7 +1373,7 @@ within 72 hours for confirmed disclosure.
 Run redaction, retention, and authorization tests. Commit:
 
 ```bash
-git add supabase/functions/app-api/health.ts supabase/functions/app-api/health_test.ts supabase/functions/run-scheduler/retention.ts supabase/functions/run-scheduler/retention_test.ts ops/health-monitor sql/migrations/20260910000000_retention_recovery.sql docs/runbooks/incident-response.md docs/runbooks/credential-rotation.md
+git add supabase/functions/app-api/health.ts supabase/functions/app-api/health_test.ts supabase/functions/run-scheduler/retention.ts supabase/functions/run-scheduler/retention_test.ts ops/health-monitor supabase/migrations/20260910000000_retention_recovery.sql docs/runbooks/incident-response.md docs/runbooks/credential-rotation.md
 git commit -m "feat: add privacy bounded operations"
 ```
 
@@ -1540,7 +1540,7 @@ git commit -m "ops: complete owner only cutover"
 - Modify: `docs/ROADMAP.md`
 - Modify: `sql/schema.sql`
 - Create: `sql/legacy_schema.sql`
-- Create: `sql/bootstrap/fresh_multitenancy.sql`
+- Create: `supabase/migrations/20260905500000_fresh_multitenancy.sql`
 - Create: `scripts/verify_schema_parity.py`
 
 **Interfaces:**
@@ -1554,8 +1554,10 @@ platform-owned definitions, apply it to a fresh disposable database, and compare
 ordered migration result.
 
 Local status: the deterministic generator, data-free bootstrap, unique dependency-ordered migration
-versions, non-empty-table rejection, and disposable PostgreSQL catalog comparison pass. Comparison
-against a real applied staging project remains part of the unchecked live gate.
+versions, non-empty-table rejection, and disposable PostgreSQL catalog comparison pass. The pinned
+Supabase CLI also replayed all 16 files from `supabase/migrations/` against an empty disposable
+PostgreSQL database in release order. Comparison against a real applied staging project remains part
+of the unchecked live gate.
 
 - [x] **Step 2: Write the onboarding checklist**
 
@@ -1598,7 +1600,7 @@ restore, rollback, owner soak, and friend-cycle commands remain unchecked.
 - [x] **Step 6: Commit the release documentation**
 
 ```bash
-git add README.md routines/README.md docs/ROADMAP.md docs/runbooks/friend-onboarding.md docs/privacy.md docs/risk-disclosure.md sql/schema.sql sql/legacy_schema.sql sql/bootstrap/fresh_multitenancy.sql scripts/verify_schema_parity.py
+git add README.md routines/README.md docs/ROADMAP.md docs/runbooks/friend-onboarding.md docs/privacy.md docs/risk-disclosure.md sql/schema.sql sql/legacy_schema.sql supabase/migrations/20260905500000_fresh_multitenancy.sql scripts/verify_schema_parity.py
 git commit -m "docs: complete invite only product launch"
 ```
 

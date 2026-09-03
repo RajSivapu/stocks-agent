@@ -1,4 +1,5 @@
 -- Private-chat pairing, opaque callbacks, and update replay membership.
+-- Supabase CLI migration.
 
 CREATE TABLE app.telegram_pairing_codes (
   id UUID PRIMARY KEY DEFAULT extensions.gen_random_uuid(),
