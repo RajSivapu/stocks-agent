@@ -1,10 +1,14 @@
 import type {
+  AlertCondition,
+  AlertEvaluation,
+  AlertRuleSnapshot,
   EvidenceBlock,
   HoldingState,
   NotificationKind,
   Phase,
   PolicyContext,
 } from "./contracts.ts";
+import { parseAlertDraft } from "./alerts.ts";
 import { parseFixed } from "./fixed-point.ts";
 import type { PolicyEvaluation, PolicyReasonCode } from "./policy.ts";
 
@@ -628,6 +632,272 @@ async function sha256(value: string): Promise<string> {
   return Array.from(new Uint8Array(digest))
     .map((byte) => byte.toString(16).padStart(2, "0"))
     .join("");
+}
+
+export interface AlertButton {
+  text: string;
+  callback_data: string;
+}
+
+export interface RenderAlertV3Input {
+  event_id: string;
+  evaluation: AlertEvaluation;
+  source_evaluation: PolicyEvaluation | null;
+  context: PolicyContext | null;
+  mode?: "draft" | "event";
+}
+
+export interface RenderedAlert {
+  status: "ready" | "suppressed";
+  body: string;
+  parts: string[];
+  hash: string;
+  template_version: 3;
+  reply_markup: { inline_keyboard: AlertButton[][] };
+}
+
+const ALERT_EVENT_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+
+function centralTime(value: string): string {
+  const instant = new Date(value);
+  if (Number.isNaN(instant.valueOf())) return "unavailable";
+  return `${new Intl.DateTimeFormat("en-US", {
+    timeZone: "America/Chicago",
+    hour: "numeric",
+    minute: "2-digit",
+    second: "2-digit",
+    hour12: true,
+  }).format(instant)} CT`;
+}
+
+function alertExpiry(value: string): string {
+  const instant = new Date(value);
+  if (Number.isNaN(instant.valueOf())) return "unavailable";
+  return new Intl.DateTimeFormat("en-US", {
+    timeZone: "America/Chicago",
+    month: "short",
+    day: "numeric",
+    year: "numeric",
+  }).format(instant);
+}
+
+function alertHeading(rule: AlertRuleSnapshot, mode: "draft" | "event", unsafe: boolean): string {
+  const profile = rule.profile.replaceAll("_", " ").toUpperCase();
+  if (mode === "draft") return `🔵 DRAFT • ${escapeHtml(rule.ticker)} • ${profile}`;
+  if (unsafe || rule.severity === "system") return `⚪ DATA CHECK • ${escapeHtml(rule.ticker)} • ${profile}`;
+  if (rule.severity === "critical") return `🔴 RISK REVIEW • ${escapeHtml(rule.ticker)} • ${profile}`;
+  if (rule.severity === "review") return `🟠 REVIEW • ${escapeHtml(rule.ticker)} • ${profile}`;
+  if (rule.severity === "update") return `🟡 UPDATE • ${escapeHtml(rule.ticker)} • ${profile}`;
+  return `🔵 WATCH • ${escapeHtml(rule.ticker)} • ${profile}`;
+}
+
+function triggerSummary(
+  rule: AlertRuleSnapshot,
+  status: AlertEvaluation["status"],
+  mode: "draft" | "event",
+): string {
+  if (mode === "draft") return "Proposed monitoring rule — suggestion only; inert until you arm it";
+  if (status === "unsafe_to_evaluate") {
+    return "This rule was not evaluated safely — no investment conclusion was made";
+  }
+  const kinds = new Set(rule.conditions.map((condition) => condition.kind));
+  if (kinds.has("recorded_stop")) {
+    return "Verified price is at/below your recorded stop — review manually";
+  }
+  if (kinds.has("recorded_target")) {
+    return "Verified price reached your recorded target — review manually";
+  }
+  if (kinds.has("screen_entry")) {
+    return "A reviewed screen condition changed — research watch only; not a buy signal";
+  }
+  return "Entry setup confirmed — suggestion only; no order was placed";
+}
+
+function alertConditionText(condition: AlertCondition): string {
+  if (condition.kind === "price_zone") {
+    return `${condition.operator} ${formatMoney(condition.left)}–${formatMoney(condition.right!)}`;
+  }
+  if (condition.kind === "recorded_stop") return `price at/below recorded stop ${formatMoney(condition.left)}`;
+  if (condition.kind === "recorded_target") return `price at/above recorded target ${formatMoney(condition.left)}`;
+  if (condition.kind === "price_cross") return `price crossed ${condition.operator} ${formatMoney(condition.left)}`;
+  if (condition.kind === "sma_cross") return `close crossed ${condition.operator} SMA ${escapeHtml(condition.left)}`;
+  if (condition.kind === "rsi_range") return `RSI 14 ${condition.operator} ${escapeHtml(condition.left)}–${escapeHtml(condition.right!)}`;
+  if (condition.kind === "volume_multiple") return `volume ${condition.operator} ${escapeHtml(condition.left)}x its 20-session average`;
+  if (condition.kind === "screen_entry") return "approved screen-entry condition met";
+  return `event window ${condition.operator} ${escapeHtml(condition.left)}–${escapeHtml(condition.right!)}`;
+}
+
+function conditionLine(evaluation: AlertEvaluation): string {
+  const passed = evaluation.condition_results.filter((result) => result.passed === true).length;
+  const details = evaluation.condition_results.map((result) => {
+    const status = result.passed === true ? "✅" : result.passed === false ? "❌" : "⚪ Unavailable —";
+    return `${status} ${alertConditionText(result.condition)}`;
+  });
+  return `Conditions ${passed}/${evaluation.condition_results.length}: ${details.join("; ")}`;
+}
+
+function trustedAlertSource(input: RenderAlertV3Input): PolicyEvaluation | null {
+  const source = input.source_evaluation;
+  if (!source || source.status !== "approved" || source.candidate.ticker !== input.evaluation.rule.ticker ||
+    !source.candidate.analyst.completed || !source.candidate.checker.completed ||
+    source.candidate.checker.verdict !== "approve") return null;
+  return source;
+}
+
+function alertNarratives(source: PolicyEvaluation | null): string[] {
+  if (!source) return [];
+  return source.candidate.factors
+    .filter((factor) => factorHasVerifiedEvidence(source, factor.evidence_ids))
+    .map((factor) => compactText(factor.text, 220))
+    .filter((text) => text.length > 0 && !FORBIDDEN_DECISION_TEXT.test(text))
+    .slice(0, 3);
+}
+
+function alertEvidenceCoverage(
+  evaluation: AlertEvaluation,
+  source: PolicyEvaluation | null,
+): string {
+  const ids = new Set(evaluation.condition_results.flatMap((result) => result.evidence_ids));
+  if (ids.size === 0 || !source) return "0/0";
+  const evidence = new Map(source.candidate.evidence.map((item) => [item.id, item.status]));
+  const available = [...ids].filter((id) => {
+    const status = evidence.get(id);
+    return status === "fresh" || status === "fallback";
+  }).length;
+  return `${available}/${ids.size}`;
+}
+
+function alertRiskLine(
+  rule: AlertRuleSnapshot,
+  source: PolicyEvaluation | null,
+  context: PolicyContext | null,
+): string {
+  const holding = context?.holdings.find((item) => item.ticker === rule.ticker) ?? null;
+  const hasRecordedStop = rule.conditions.some((item) => item.kind === "recorded_stop");
+  const hasRecordedTarget = rule.conditions.some((item) => item.kind === "recorded_target");
+  const parts: string[] = [];
+  if (hasRecordedStop) {
+    const stop = holding?.stop ?? rule.conditions.find((item) => item.kind === "recorded_stop")?.left;
+    if (stop) parts.push(`recorded stop ${formatMoney(stop)}`);
+  } else if (source?.candidate.invalidation_price) {
+    parts.push(`invalidation below ${formatMoney(source.candidate.invalidation_price)}`);
+  }
+  if (hasRecordedTarget) {
+    const target = holding?.target ?? rule.conditions.find((item) => item.kind === "recorded_target")?.left;
+    if (target) parts.push(`recorded target ${formatMoney(target)}`);
+  } else if (hasRecordedStop && holding?.target) {
+    parts.push(`recorded target ${formatMoney(holding.target)}`);
+  }
+  if (!hasRecordedStop && source?.candidate.stop) {
+    parts.push(`policy-approved stop ${formatMoney(source.candidate.stop)}`);
+  }
+  if (!hasRecordedTarget && !hasRecordedStop && source?.candidate.target) {
+    parts.push(`target ${formatMoney(source.candidate.target)}`);
+  }
+  return parts.length > 0
+    ? `Risk: ${parts.join(" • ")}`
+    : "Risk: no recorded or policy-approved stop/target was available.";
+}
+
+function alertExposure(source: PolicyEvaluation | null): string {
+  if (!source || source.normalized.position_value_after === null ||
+    source.normalized.total_investable_value === null) {
+    return "Portfolio exposure unavailable from this alert receipt.";
+  }
+  try {
+    const position = parseFixed(source.normalized.position_value_after, 6);
+    const total = parseFixed(source.normalized.total_investable_value, 6);
+    if (total <= 0n) throw new Error("invalid total");
+    return `Portfolio exposure ${formatTenthsPercent(roundedRatioTenths(position, total))}`;
+  } catch {
+    return "Portfolio exposure unavailable from this alert receipt.";
+  }
+}
+
+function alertButtons(rule: AlertRuleSnapshot, mode: "draft" | "event"): AlertButton[][] {
+  const prefix = (action: string) => `al:${action}:${rule.rule_id}:${rule.version}`;
+  const buttons = mode === "draft"
+    ? [{ text: "Arm", callback_data: prefix("arm") }, { text: "Dismiss", callback_data: prefix("dismiss") }]
+    : [
+      { text: "Acknowledge", callback_data: prefix("ack") },
+      { text: rule.severity === "critical" ? "Snooze 20m" : "Snooze 1d", callback_data: prefix(rule.severity === "critical" ? "snooze20m" : "snooze1d") },
+      { text: "Dismiss", callback_data: prefix("dismiss") },
+    ];
+  if (buttons.some((button) => button.callback_data.length > 64)) {
+    throw new Error("alert callback exceeds Telegram limit");
+  }
+  return [buttons];
+}
+
+export async function renderAlertV3(input: RenderAlertV3Input): Promise<RenderedAlert> {
+  if (!ALERT_EVENT_ID.test(input.event_id)) throw new Error("alert event id must be a UUID");
+  const rule = parseAlertDraft(input.evaluation.rule);
+  const mode = input.mode ?? "event";
+  if (mode === "draft" && rule.state !== "draft") throw new Error("draft alert requires draft rule state");
+  if (mode === "event" && input.evaluation.status === "not_triggered") {
+    return {
+      status: "suppressed",
+      body: "",
+      parts: [],
+      hash: await sha256(""),
+      template_version: 3,
+      reply_markup: { inline_keyboard: [] },
+    };
+  }
+  if (mode === "event" && rule.state !== "active") throw new Error("event alert requires active rule state");
+
+  const source = trustedAlertSource(input);
+  const narratives = alertNarratives(source);
+  const unsafe = input.evaluation.status === "unsafe_to_evaluate";
+  const ageSeconds = input.evaluation.observed_at
+    ? Math.max(0, Math.floor((Date.parse(input.evaluation.evaluated_at) - Date.parse(input.evaluation.observed_at)) / 1000))
+    : null;
+  const timing = input.evaluation.observed_at
+    ? mode === "draft"
+      ? `Proposed from quote ${centralTime(input.evaluation.observed_at)} • evaluated ${centralTime(input.evaluation.evaluated_at)} • age ${ageSeconds}s • ${input.evaluation.market_session.toUpperCase()}`
+      : unsafe
+      ? `Evaluated ${centralTime(input.evaluation.evaluated_at)} • latest quote ${centralTime(input.evaluation.observed_at)} • age ${ageSeconds}s • ${input.evaluation.market_session.toUpperCase()}`
+      : `Triggered ${centralTime(input.evaluation.evaluated_at)} • quote ${centralTime(input.evaluation.observed_at)} • age ${ageSeconds}s • ${input.evaluation.market_session.toUpperCase()}`
+    : `Evaluated ${centralTime(input.evaluation.evaluated_at)} • quote unavailable • ${input.evaluation.market_session.toUpperCase()}`;
+  const validThrough = source?.candidate.valid_until
+    ? `valid through ${escapeHtml(source.candidate.valid_until)}`
+    : `expires ${escapeHtml(alertExpiry(rule.valid_until))}`;
+  const confidence = source ? source.candidate.confidence.toUpperCase() : "NOT SCORED";
+  const receipt = input.event_id.replaceAll("-", "").slice(0, 4).toUpperCase();
+  const why = narratives[0] ?? (unsafe
+    ? "No safe conclusion was produced because required evidence was unavailable."
+    : mode === "draft"
+    ? "Rule projected from an approved source evaluation; review it before arming."
+    : "Deterministic conditions passed; no safe thesis summary was available.");
+  const evidenceLines = narratives.slice(1).map((text) => `• ${escapeHtml(text)}`);
+  const explanationLabel = unsafe ? "Why unavailable" : mode === "draft" ? "Why proposed" : "Why now";
+  const lines = [
+    `<b>${alertHeading(rule, mode, unsafe)}</b>`,
+    triggerSummary(rule, input.evaluation.status, mode),
+    "",
+    timing,
+    conditionLine(input.evaluation),
+    "",
+    `${explanationLabel}: ${escapeHtml(why)}`,
+    ...evidenceLines,
+    alertRiskLine(rule, source, input.context),
+    alertExposure(source),
+    `Confidence ${confidence} • evidence ${alertEvidenceCoverage(input.evaluation, source)} • ${validThrough}`,
+    ...(rule.owner_note ? [`Owner note: ${escapeHtml(compactText(rule.owner_note, 160))}`] : []),
+    "",
+    ...(rule.severity === "critical" ? ["The bot did not sell and cannot access a brokerage."] : []),
+    `Receipt AL-${receipt} • rule v${rule.version} • expires ${escapeHtml(alertExpiry(rule.valid_until))}`,
+  ];
+  const body = lines.join("\n");
+  if (body.length > 3_500) throw new Error("rendered alert exceeds Telegram limit");
+  return {
+    status: "ready",
+    body,
+    parts: [body],
+    hash: await sha256(body),
+    template_version: 3,
+    reply_markup: { inline_keyboard: alertButtons(rule, mode) },
+  };
 }
 
 export async function renderPublication(

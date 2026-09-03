@@ -1,4 +1,4 @@
-import { sendTelegramParts, TelegramDeliveryError } from "./telegram.ts";
+import { sendTelegramAlert, sendTelegramParts, TelegramDeliveryError } from "./telegram.ts";
 
 function assert(value: boolean, message: string): void {
   if (!value) throw new Error(message);
@@ -69,4 +69,49 @@ Deno.test("malformed success response is ambiguous", async () => {
     Promise.resolve(new Response(JSON.stringify({ ok: true, result: {} })))));
   assertEquals(error.kind, "ambiguous");
   assert(error.message === "telegram delivery outcome is unknown", "unexpected error detail");
+});
+
+Deno.test("Telegram alert sender includes owner actions and returns API-acceptance receipt", async () => {
+  const requests: Array<Record<string, unknown>> = [];
+  const receipt = await sendTelegramAlert({
+    body: "<b>v3 alert</b>",
+    reply_markup: { inline_keyboard: [[
+      { text: "Acknowledge", callback_data: "al:ack:7f7f70bf-5cec-4f1e-9de8-ec8823d99fc7:3" },
+      { text: "Dismiss", callback_data: "al:dismiss:7f7f70bf-5cec-4f1e-9de8-ec8823d99fc7:3" },
+    ]] },
+  }, "123", "secret-token", (_input, init) => {
+    requests.push(JSON.parse(String(init?.body)));
+    return Promise.resolve(new Response(JSON.stringify({ ok: true, result: { message_id: 77 } })));
+  }, () => new Date("2026-09-03T17:15:06.000Z"));
+  assertEquals(receipt, {
+    status: "accepted_by_telegram",
+    message_id: 77,
+    accepted_at: "2026-09-03T17:15:06.000Z",
+  });
+  assertEquals(requests, [{
+    chat_id: "123",
+    text: "<b>v3 alert</b>",
+    parse_mode: "HTML",
+    disable_web_page_preview: true,
+    reply_markup: { inline_keyboard: [[
+      { text: "Acknowledge", callback_data: "al:ack:7f7f70bf-5cec-4f1e-9de8-ec8823d99fc7:3" },
+      { text: "Dismiss", callback_data: "al:dismiss:7f7f70bf-5cec-4f1e-9de8-ec8823d99fc7:3" },
+    ]] },
+  }]);
+});
+
+Deno.test("Telegram alert sender rejects unsafe markup before any network call", async () => {
+  let called = false;
+  const error = await capture(() => sendTelegramAlert({
+    body: "alert",
+    reply_markup: { inline_keyboard: [[{
+      text: "Buy",
+      callback_data: "not-an-alert-action",
+    }]] },
+  }, "123", "secret-token", () => {
+    called = true;
+    return Promise.resolve(new Response("{}"));
+  }));
+  assertEquals(error.kind, "definitive");
+  assert(!called, "invalid alert made a network call");
 });

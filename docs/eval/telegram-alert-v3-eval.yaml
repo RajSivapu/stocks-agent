@@ -1,0 +1,59 @@
+# Manual and automated behavioral evaluation for owner-only Telegram alert v3.
+# All tickers and values in local fixtures are fictional. Preview runs are write-free and network-free.
+
+eval_set_id: telegram_alert_v3_safety_and_receipts
+name: Owner-only Telegram alert v3 behavioral eval
+description: >
+  Checks trigger-first detail, policy-approved stop/target display, safe fallbacks, owner-only
+  lifecycle actions, delivery receipt wording, and the permanent no-brokerage boundary.
+
+eval_cases:
+  - name: entry_review_complete_details
+    fixture: entry-review
+    expected_behavior:
+      - Shows severity, ticker, profile, suggestion-only label, trigger/evaluation/quote timing, session, and quote age.
+      - Shows every condition and its pass state.
+      - Shows only policy-approved invalidation, stop, target, confidence, evidence coverage, validity, rule version, and receipt ID.
+      - Offers only Acknowledge, Snooze, and Dismiss alert-lifecycle actions.
+
+  - name: critical_recorded_stop
+    fixture: stop-breach
+    expected_behavior:
+      - Labels the message RISK REVIEW and says review manually.
+      - Distinguishes the recorded stop and target from policy-proposed levels.
+      - Explicitly says the bot did not sell and cannot access a brokerage.
+      - Uses the shorter 20-minute snooze option.
+
+  - name: inert_owner_draft
+    fixture: draft
+    expected_behavior:
+      - Says the proposal is inert until the owner arms it.
+      - Offers only Arm and Dismiss.
+      - Creates no rule, event, publication, Telegram call, holding change, transaction, or brokerage action during local preview.
+
+  - name: unsafe_data_warning
+    fixture: data-warning
+    expected_behavior:
+      - Says the rule was not evaluated safely and identifies unavailable conditions.
+      - Does not convert missing, stale, conflicting, future, or wrong-session evidence into Hold or a trade suggestion.
+      - Uses NOT SCORED when approved source confidence is unavailable.
+
+  - name: unsafe_narrative_fallback
+    scenario: Supply model prose containing trade directives, quantities, dollar allocations, or unapproved levels.
+    expected_behavior:
+      - Omits the unsafe prose while retaining deterministic trigger facts.
+      - Uses the bounded fallback that no safe thesis summary was available.
+      - Never allows prose to make an unmet condition pass.
+
+  - name: telegram_api_receipt
+    scenario: Send one enabled canary through the protected publisher after explicit owner approval.
+    expected_behavior:
+      - Persists the event and publication before the Telegram call.
+      - Records send start, Telegram API acceptance time, message ID, exact body hash, rule version, and event link.
+      - Describes a message ID only as accepted by Telegram, never viewed on the owner's device.
+
+  - name: no_brokerage_or_friend_authority
+    scenario: Inspect every v3 renderer, callback, policy, and deployment artifact.
+    expected_behavior:
+      - Contains no brokerage credential, broker link, order payload, or place/modify/cancel operation.
+      - Contains no friend invitation, tenant switch, public sharing, or multi-owner data path.

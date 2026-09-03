@@ -1,6 +1,6 @@
-import type { PolicyContext } from "./contracts.ts";
+import type { AlertEvaluation, AlertRuleSnapshot, PolicyContext } from "./contracts.ts";
 import type { PolicyEvaluation } from "./policy.ts";
-import { FORBIDDEN_DECISION_TEXT, renderPublication } from "./renderer.ts";
+import { FORBIDDEN_DECISION_TEXT, renderAlertV3, renderPublication } from "./renderer.ts";
 
 function assert(value: boolean, message: string): void {
   if (!value) throw new Error(message);
@@ -554,4 +554,182 @@ Deno.test("non-holiday rendering fails closed without authoritative portfolio co
       }),
     "render context is required",
   );
+});
+
+function alertRule(overrides: Partial<AlertRuleSnapshot> = {}): AlertRuleSnapshot {
+  return {
+    rule_id: "7f7f70bf-5cec-4f1e-9de8-ec8823d99fc7",
+    version: 3,
+    state: "active",
+    ticker: "ABC",
+    profile: "balanced",
+    severity: "review",
+    session: "regular",
+    confirmation: "two_quote",
+    conditions: [{ kind: "price_zone", operator: "inside", left: "41.8", right: "42.3", timeframe: "quote" }],
+    cooldown_seconds: 14_400,
+    fire_limit: 3,
+    valid_until: "2026-09-09T21:00:00.000Z",
+    owner_note: "Owner-reviewed setup",
+    ...overrides,
+  };
+}
+
+function alertEvaluation(overrides: Partial<AlertEvaluation> = {}): AlertEvaluation {
+  const rule = overrides.rule ?? alertRule();
+  return {
+    rule,
+    status: "triggered",
+    reason_codes: [],
+    observed_at: "2026-09-03T17:14:51.000Z",
+    evaluated_at: "2026-09-03T17:15:04.000Z",
+    market_session: "regular",
+    condition_results: [{
+      condition: rule.conditions[0],
+      passed: true,
+      observed_value: "42.1",
+      evidence_ids: ["quote-1"],
+    }],
+    ...overrides,
+  };
+}
+
+function alertSource(): PolicyEvaluation {
+  const source = evaluation("ABC");
+  source.candidate.phase = "intraday";
+  source.candidate.notification_kind = "entry_trigger";
+  source.candidate.entry_zone_low = "41.8";
+  source.candidate.entry_zone_high = "42.3";
+  source.candidate.stop = "39.75";
+  source.candidate.invalidation_price = "39.9";
+  source.candidate.target = "47.2";
+  source.candidate.valid_until = "2026-09-09";
+  source.candidate.factors = [{
+    kind: "technicals",
+    stance: "bull",
+    text: "Price and participation confirm the previously reviewed setup.",
+    evidence_ids: ["quote-1"],
+  }];
+  source.normalized.verified_price = "42.1";
+  source.normalized.quote_as_of = "2026-09-03T17:14:51.000Z";
+  return source;
+}
+
+Deno.test("alert v3 renders trigger-first details, approved levels, receipts, and inert owner actions", async () => {
+  const rendered = await renderAlertV3({
+    event_id: "7f2c70bf-5cec-4f1e-9de8-ec8823d99fc7",
+    evaluation: alertEvaluation(),
+    source_evaluation: alertSource(),
+    context: context(),
+  });
+  const sections = ["🟠 REVIEW • ABC • BALANCED", "Triggered 12:15:04 PM CT", "Conditions 1/1", "Why now:", "Risk:", "Confidence MEDIUM", "Receipt AL-7F2C"];
+  for (let index = 1; index < sections.length; index += 1) {
+    assert(rendered.body.indexOf(sections[index - 1]) < rendered.body.indexOf(sections[index]), `${sections[index - 1]} did not precede ${sections[index]}`);
+  }
+  assert(rendered.body.includes("suggestion only; no order was placed"), "suggestion-only boundary absent");
+  assert(rendered.body.includes("quote 12:14:51 PM CT • age 13s • REGULAR"), "receipt timing absent");
+  assert(rendered.body.includes("inside $41.80–$42.30"), "condition facts absent");
+  assert(rendered.body.includes("invalidation below $39.90 • policy-approved stop $39.75 • target $47.20"), "approved stop/target absent");
+  assert(rendered.body.includes("evidence 1/1 • valid through 2026-09-09"), "coverage or horizon absent");
+  assertEquals(rendered.template_version, 3);
+  assertEquals(rendered.status, "ready");
+  assertEquals(rendered.parts, [rendered.body]);
+  assertEquals(rendered.reply_markup.inline_keyboard.map((row) => row.map((button) => button.text)), [["Acknowledge", "Snooze 1d", "Dismiss"]]);
+  for (const row of rendered.reply_markup.inline_keyboard) {
+    for (const button of row) {
+      assert(button.callback_data.length <= 64, "callback exceeds Telegram limit");
+      assert(!/buy|sell|order/i.test(button.text), "execution-like button leaked");
+    }
+  }
+});
+
+Deno.test("critical recorded-stop alert uses recorded levels and manual-review language", async () => {
+  const rule = alertRule({
+    version: 2,
+    severity: "critical",
+    conditions: [{ kind: "recorded_stop", operator: "below", left: "45.58", right: null, timeframe: "quote" }],
+  });
+  const source = alertSource();
+  source.final_action = "hold";
+  source.candidate.action = "hold";
+  source.candidate.notification_kind = "stop_breach";
+  source.candidate.stop = null;
+  source.candidate.target = null;
+  source.normalized.verified_price = "45.4";
+  source.normalized.quote_as_of = "2026-09-03T15:42:01.000Z";
+  const rendered = await renderAlertV3({
+    event_id: "91d070bf-5cec-4f1e-9de8-ec8823d99fc7",
+    evaluation: alertEvaluation({
+      rule,
+      observed_at: "2026-09-03T15:42:01.000Z",
+      evaluated_at: "2026-09-03T15:42:18.000Z",
+      condition_results: [{ condition: rule.conditions[0], passed: true, observed_value: "45.4", evidence_ids: ["quote-1"] }],
+    }),
+    source_evaluation: source,
+    context: context({ holdings: [{ ...context().holdings[0], ticker: "ABC", stop: "45.58", target: "52" }] }),
+  });
+  assert(rendered.body.startsWith("<b>🔴 RISK REVIEW • ABC • BALANCED</b>"), "critical heading absent");
+  assert(rendered.body.includes("review manually"), "manual review boundary absent");
+  assert(rendered.body.includes("recorded stop $45.58 • recorded target $52.00"), "recorded risk levels absent");
+  assert(rendered.body.includes("The bot did not sell and cannot access a brokerage."), "broker boundary absent");
+  assertEquals(rendered.reply_markup.inline_keyboard[0][1].text, "Snooze 20m");
+});
+
+Deno.test("alert v3 renders inert drafts and unsafe evaluations without inventing a decision", async () => {
+  const draftRule = alertRule({ state: "draft", version: 1, severity: "watch" });
+  const draft = await renderAlertV3({
+    event_id: draftRule.rule_id,
+    evaluation: alertEvaluation({ rule: draftRule, status: "not_triggered" }),
+    source_evaluation: alertSource(),
+    context: null,
+    mode: "draft",
+  });
+  assert(draft.body.includes("DRAFT • ABC • BALANCED"), "draft label absent");
+  assert(draft.body.includes("inert until you arm it"), "draft lifecycle boundary absent");
+  assert(draft.body.includes("Proposed from quote"), "draft source timing absent");
+  assert(!draft.body.includes("Triggered"), "inert draft was called triggered");
+  assertEquals(draft.reply_markup.inline_keyboard[0].map((button) => button.text), ["Arm", "Dismiss"]);
+
+  const unsafeRule = alertRule({ severity: "system" });
+  const unsafe = await renderAlertV3({
+    event_id: "aa2c70bf-5cec-4f1e-9de8-ec8823d99fc7",
+    evaluation: alertEvaluation({
+      rule: unsafeRule,
+      status: "unsafe_to_evaluate",
+      reason_codes: ["EVIDENCE_STALE", "SESSION_MISMATCH"],
+      condition_results: [{ condition: unsafeRule.conditions[0], passed: null, observed_value: null, evidence_ids: [] }],
+    }),
+    source_evaluation: null,
+    context: null,
+  });
+  assert(unsafe.body.includes("was not evaluated safely"), "unsafe label absent");
+  assert(unsafe.body.includes("Unavailable"), "unavailable condition absent");
+  assert(unsafe.body.includes("No safe conclusion was produced because required evidence was unavailable."), "unsafe explanation absent");
+  assert(!unsafe.body.includes("conditions passed"), "unsafe evaluation claimed conditions passed");
+  assert(!/\bHOLD\b/.test(unsafe.body), "unsafe evaluation invented Hold");
+});
+
+Deno.test("alert v3 suppresses unmet rules and omits unsafe model narrative", async () => {
+  const source = alertSource();
+  source.candidate.factors[0].text = "Buy now at $42 and sell at target";
+  source.candidate.decisive_factor = "Buy immediately";
+  const safe = await renderAlertV3({
+    event_id: "7f2c70bf-5cec-4f1e-9de8-ec8823d99fc7",
+    evaluation: alertEvaluation(),
+    source_evaluation: source,
+    context: null,
+  });
+  assert(!safe.body.includes("Buy now"), "unsafe factor leaked");
+  assert(safe.body.includes("Deterministic conditions passed; no safe thesis summary was available."), "safe fallback absent");
+  assert(safe.body.length <= 3500, "alert exceeds Telegram bound");
+
+  const unmet = await renderAlertV3({
+    event_id: "7f2c70bf-5cec-4f1e-9de8-ec8823d99fc7",
+    evaluation: alertEvaluation({ status: "not_triggered" }),
+    source_evaluation: source,
+    context: null,
+  });
+  assertEquals(unmet.status, "suppressed");
+  assertEquals(unmet.parts, []);
+  assertEquals(unmet.reply_markup.inline_keyboard, []);
 });
