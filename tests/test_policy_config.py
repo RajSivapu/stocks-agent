@@ -11,7 +11,7 @@ from lib.policy_config import build_policy_config, validate_policy_config
 def test_build_policy_config_uses_reviewed_safety_values():
     policy = build_policy_config(load_settings())
 
-    assert policy["version"] == 2
+    assert policy["version"] == 3
     assert policy["allocation_bps"] == {
         "core": 7000,
         "growth": 2000,
@@ -52,6 +52,7 @@ def test_build_policy_config_uses_reviewed_safety_values():
     assert policy["alerts_v3"] == {
         "enabled": False,
         "shadow": True,
+        "enabled_classes": [],
         "profile": "balanced",
         "draft_ttl_hours": 24,
         "drafts_per_hour": 5,
@@ -140,6 +141,8 @@ def test_validate_policy_config_rejects_extra_keys_and_boolean_integer():
     [
         ("enabled", 1, "enabled"),
         ("shadow", "yes", "shadow"),
+        ("enabled_classes", ["stop_near"], "enabled_classes"),
+        ("enabled_classes", ["stop_breach", "stop_breach"], "enabled_classes"),
         ("profile", "aggressive", "profile"),
         ("draft_ttl_hours", 48, "draft_ttl_hours"),
         ("drafts_per_hour", 6, "drafts_per_hour"),
@@ -150,6 +153,17 @@ def test_alert_v3_policy_rejects_unreviewed_authority_or_bounds(key, value, mess
     policy["alerts_v3"][key] = value
     with pytest.raises(ValueError, match=message):
         validate_policy_config(policy)
+
+
+def test_alert_v3_enabled_policy_requires_an_explicit_canary_class():
+    policy = build_policy_config(load_settings())
+    policy["alerts_v3"]["enabled"] = True
+    policy["alerts_v3"]["shadow"] = False
+    with pytest.raises(ValueError, match="enabled_classes"):
+        validate_policy_config(policy)
+
+    policy["alerts_v3"]["enabled_classes"] = ["stop_breach"]
+    validate_policy_config(policy)
 
 
 def test_owner_only_access_and_no_brokerage_remain_explicit_in_settings():

@@ -315,7 +315,7 @@ export function validatePolicy(value: unknown): PolicyConfig {
     throw new GatewayRepositoryError("POLICY_REJECTED");
   }
   const policy = value as Partial<PolicyConfig>;
-  if ((policy.version !== 1 && policy.version !== 2) || policy.self_tuning_enabled !== false ||
+  if ((policy.version !== 1 && policy.version !== 2 && policy.version !== 3) || policy.self_tuning_enabled !== false ||
     !policy.allocation_bps || !policy.max_position_bps_of_bucket ||
     !policy.max_trade_risk_bps || !policy.request_limits ||
     !Array.isArray(policy.nyse_holidays) || !Array.isArray(policy.broad_core_etfs)) {
@@ -327,14 +327,27 @@ export function validatePolicy(value: unknown): PolicyConfig {
       throw new GatewayRepositoryError("POLICY_REJECTED");
     }
     const row = alerts as Record<string, unknown>;
-    const expected = ["enabled", "shadow", "profile", "draft_ttl_hours", "drafts_per_hour"];
+    const legacyExpected = ["enabled", "shadow", "profile", "draft_ttl_hours", "drafts_per_hour"];
+    const expected = policy.version === 3
+      ? [...legacyExpected, "enabled_classes"]
+      : legacyExpected;
+    const enabledClasses = policy.version === 3 ? row.enabled_classes : [];
+    const supportedClasses = new Set(["entry_trigger", "stop_breach", "target_hit"]);
     if (Object.keys(row).length !== expected.length || expected.some((key) => !(key in row)) ||
       typeof row.enabled !== "boolean" || typeof row.shadow !== "boolean" ||
       (row.enabled === true && row.shadow === true) ||
+      !Array.isArray(enabledClasses) ||
+      enabledClasses.some((value) => typeof value !== "string" || !supportedClasses.has(value)) ||
+      new Set(enabledClasses).size !== enabledClasses.length ||
+      (row.enabled === true && enabledClasses.length === 0) ||
       !["long_term", "balanced", "active"].includes(String(row.profile)) ||
       row.draft_ttl_hours !== 24 || row.drafts_per_hour !== 5) {
       throw new GatewayRepositoryError("POLICY_REJECTED");
     }
+    return {
+      ...policy,
+      alerts_v3: { ...row, enabled_classes: enabledClasses },
+    } as PolicyConfig;
   }
   return policy as PolicyConfig;
 }

@@ -13,6 +13,7 @@ export type EvidenceStatus = "fresh" | "stale" | "fallback" | "missing" |
   "failed" | "conflicting" | "unsupported";
 export type PolicyStatus = "approved" | "downgraded" | "vetoed" | "legacy_unverified";
 export type AlertProfile = "long_term" | "balanced" | "active";
+export type AlertV3Class = "entry_trigger" | "stop_breach" | "target_hit";
 export type AlertRuleKind = "price_cross" | "price_zone" | "sma_cross" |
   "rsi_range" | "volume_multiple" | "recorded_stop" | "recorded_target" |
   "screen_entry" | "event_window";
@@ -334,7 +335,7 @@ export interface GatewayReadContext extends PolicyContext {
 }
 
 export interface PolicyConfig {
-  version: 1 | 2;
+  version: 1 | 2 | 3;
   allocation_bps: Record<Bucket, number>;
   max_position_bps_of_bucket: Record<Bucket, number>;
   max_trade_risk_bps: Record<Bucket, number>;
@@ -358,6 +359,7 @@ export interface PolicyConfig {
   alerts_v3?: {
     enabled: boolean;
     shadow: boolean;
+    enabled_classes: AlertV3Class[];
     profile: AlertProfile;
     draft_ttl_hours: 24;
     drafts_per_hour: 5;

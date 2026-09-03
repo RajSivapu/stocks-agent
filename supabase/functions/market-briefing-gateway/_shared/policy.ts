@@ -2,6 +2,7 @@ import type {
   Action,
   AlertCondition,
   AlertRuleSnapshot,
+  AlertV3Class,
   DecisionCandidate,
   HoldingState,
   PolicyConfig,
@@ -87,7 +88,12 @@ export function draftFromEvaluation(
   now: Date,
   newId: () => string = () => crypto.randomUUID(),
 ): AlertRuleSnapshot | null {
-  if (!config.alerts_v3 || (!config.alerts_v3.enabled && !config.alerts_v3.shadow) ||
+  const candidate = evaluation.candidate;
+  const supportedClass = (["entry_trigger", "stop_breach", "target_hit"] as AlertV3Class[])
+    .find((value) => value === candidate.notification_kind) ?? null;
+  const classEnabled = supportedClass !== null && config.alerts_v3?.enabled === true &&
+    config.alerts_v3.enabled_classes.includes(supportedClass);
+  if (!config.alerts_v3 || (!config.alerts_v3.shadow && !classEnabled) ||
     evaluation.status !== "approved" || evaluation.final_action === null ||
     !evaluation.candidate.analyst.completed || !evaluation.candidate.checker.completed ||
     evaluation.candidate.checker.verdict !== "approve" ||
@@ -95,7 +101,6 @@ export function draftFromEvaluation(
       item.status === "fresh" && item.observed_at !== null
     )) return null;
 
-  const candidate = evaluation.candidate;
   let conditions: AlertCondition[] | null = null;
   let severity: AlertRuleSnapshot["severity"] = "review";
   let confirmation: AlertRuleSnapshot["confirmation"] = "bar_close";

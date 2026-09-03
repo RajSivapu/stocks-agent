@@ -5,6 +5,7 @@ import {
   type AlertConditionEvidence,
   type AlertEvaluation,
   type AlertRuleSnapshot,
+  type AlertV3Class,
   type ArtifactMutation,
   type GatewayEnvelope,
   type Phase,
@@ -571,6 +572,23 @@ function alertKind(rule: AlertRuleSnapshot, evaluation?: AlertEvaluation): Persi
   return "entry_trigger";
 }
 
+function alertRuleClass(rule: AlertRuleSnapshot): AlertV3Class | null {
+  if (rule.conditions.length === 0) return null;
+  if (rule.conditions.every((condition) => condition.kind === "recorded_stop")) return "stop_breach";
+  if (rule.conditions.every((condition) => condition.kind === "recorded_target")) return "target_hit";
+  if (rule.conditions.every((condition) => condition.kind === "price_zone")) return "entry_trigger";
+  return null;
+}
+
+function alertRuleAllowed(
+  rule: AlertRuleSnapshot,
+  policy: NonNullable<import("./contracts.ts").PolicyConfig["alerts_v3"]>,
+): boolean {
+  if (policy.shadow) return true;
+  const alertClass = alertRuleClass(rule);
+  return policy.enabled && alertClass !== null && policy.enabled_classes.includes(alertClass);
+}
+
 function unsafeOutsideCooldown(
   work: Awaited<ReturnType<GatewayRepository["readAlertWork"]>>["rules"][number],
   evaluation: AlertEvaluation,
@@ -664,7 +682,9 @@ async function evaluateAlertRules(
     return evidenceByTicker.get(ticker)!;
   };
 
-  const evaluated = await Promise.all(work.rules.map(async (item) => {
+  const allowedRules = work.rules.filter((item) => alertRuleAllowed(item.rule, alertPolicy));
+  const allowedDrafts = work.drafts.filter((item) => alertRuleAllowed(item.rule, alertPolicy));
+  const evaluated = await Promise.all(allowedRules.map(async (item) => {
     const providerEvidence = await evidence(item.rule.ticker);
     const evaluation = evaluateAlertRule(
       item.rule,
@@ -688,7 +708,7 @@ async function evaluateAlertRules(
     return { item, evaluation, fingerprint, publishable, recordable, eventId, rendered };
   }));
 
-  const draftPreviews = await Promise.all(work.drafts.map(async (item) => {
+  const draftPreviews = await Promise.all(allowedDrafts.map(async (item) => {
     const draftEvaluation: AlertEvaluation = {
       rule: item.rule,
       status: "not_triggered",

@@ -446,7 +446,7 @@ Deno.test("dry-run operations are write-free and report only their own effects",
 Deno.test("shadow alert drafts are rendered but never persisted", async () => {
   const dryRepository = new FakeRepository();
   dryRepository.policyValue.alerts_v3 = {
-    enabled: false, shadow: true, profile: "balanced", draft_ttl_hours: 24, drafts_per_hour: 5,
+    enabled: false, shadow: true, enabled_classes: [], profile: "balanced", draft_ttl_hours: 24, drafts_per_hour: 5,
   };
   const dry = makeHandler(dryRepository);
   const bundle = { phase: "intraday", market_date: "2026-09-02", title: "ignored", candidates: [candidate()] };
@@ -465,10 +465,42 @@ Deno.test("shadow alert drafts are rendered but never persisted", async () => {
   assertEquals(liveRepository.createDraftCalls, 0);
 });
 
+Deno.test("enabled canary creates drafts only for an allowlisted alert class", async () => {
+  const repository = new FakeRepository();
+  repository.policyValue.version = 3;
+  repository.policyValue.alerts_v3 = {
+    enabled: true, shadow: false, enabled_classes: ["stop_breach"], profile: "balanced", draft_ttl_hours: 24, drafts_per_hour: 5,
+  };
+  const setup = makeHandler(repository);
+  const bundle = { phase: "intraday", market_date: "2026-09-02", title: "ignored", candidates: [candidate()] };
+  const result = await json(await setup.handler(request("evaluate_and_publish", bundle)));
+  assertEquals(result.alert_drafts_created, 0);
+  assertEquals(result.alert_draft_status, "not_applicable");
+  assertEquals(repository.createDraftCalls, 0);
+  assertEquals(setup.sentAlerts, []);
+});
+
+Deno.test("enabled canary does not evaluate active rules outside its allowlist", async () => {
+  const repository = new FakeRepository();
+  repository.policyValue.version = 3;
+  repository.policyValue.alerts_v3 = {
+    enabled: true, shadow: false, enabled_classes: ["stop_breach"], profile: "balanced", draft_ttl_hours: 24, drafts_per_hour: 5,
+  };
+  repository.alertWorkValue = alertWork({ rule: true, draft: true });
+  const setup = makeHandler(repository);
+  const result = await json(await setup.handler(request("evaluate_alert_rules", {}, { dry: true })));
+  assertEquals(result.evaluated_rules, 0);
+  assertEquals(result.would_write_events, 0);
+  assertEquals(result.would_publish, 0);
+  assertEquals(result.draft_previews, []);
+  assertEquals(setup.alertFetches, []);
+  assertEquals(setup.sentAlerts, []);
+});
+
 Deno.test("alert evaluation dry-run uses server evidence and remains write-free and send-free", async () => {
   const repository = new FakeRepository();
   repository.policyValue.alerts_v3 = {
-    enabled: false, shadow: true, profile: "balanced", draft_ttl_hours: 24, drafts_per_hour: 5,
+    enabled: false, shadow: true, enabled_classes: [], profile: "balanced", draft_ttl_hours: 24, drafts_per_hour: 5,
   };
   repository.alertWorkValue = alertWork({ rule: true, draft: true });
   const setup = makeHandler(repository);
@@ -491,7 +523,7 @@ Deno.test("alert evaluation dry-run uses server evidence and remains write-free 
 Deno.test("enabled alert evaluation persists receipts before one Telegram alert", async () => {
   const repository = new FakeRepository();
   repository.policyValue.alerts_v3 = {
-    enabled: true, shadow: false, profile: "balanced", draft_ttl_hours: 24, drafts_per_hour: 5,
+    enabled: true, shadow: false, enabled_classes: ["entry_trigger"], profile: "balanced", draft_ttl_hours: 24, drafts_per_hour: 5,
   };
   repository.alertWorkValue = alertWork({ rule: true, draft: false });
   const setup = makeHandler(repository);
@@ -511,7 +543,7 @@ Deno.test("enabled alert evaluation persists receipts before one Telegram alert"
 Deno.test("alert evaluation records no-trigger, unsafe, shadow, and cooldown outcomes narrowly", async () => {
   const noRules = new FakeRepository();
   noRules.policyValue.alerts_v3 = {
-    enabled: false, shadow: true, profile: "balanced", draft_ttl_hours: 24, drafts_per_hour: 5,
+    enabled: false, shadow: true, enabled_classes: [], profile: "balanced", draft_ttl_hours: 24, drafts_per_hour: 5,
   };
   const quiet = makeHandler(noRules);
   const quietResult = await json(await quiet.handler(request("evaluate_alert_rules", {}, { dry: true })));
@@ -566,7 +598,7 @@ Deno.test("alert evaluation records no-trigger, unsafe, shadow, and cooldown out
 Deno.test("enabled draft proposal is persisted before Telegram and remains monitoring-only", async () => {
   const repository = new FakeRepository();
   repository.policyValue.alerts_v3 = {
-    enabled: true, shadow: false, profile: "balanced", draft_ttl_hours: 24, drafts_per_hour: 5,
+    enabled: true, shadow: false, enabled_classes: ["entry_trigger"], profile: "balanced", draft_ttl_hours: 24, drafts_per_hour: 5,
   };
   repository.alertWorkValue = alertWork({ rule: false, draft: true });
   const setup = makeHandler(repository);
@@ -584,7 +616,7 @@ Deno.test("enabled draft proposal is persisted before Telegram and remains monit
 Deno.test("multiple simultaneous triggers publish one deterministically without consuming the rest", async () => {
   const repository = new FakeRepository();
   repository.policyValue.alerts_v3 = {
-    enabled: true, shadow: false, profile: "balanced", draft_ttl_hours: 24, drafts_per_hour: 5,
+    enabled: true, shadow: false, enabled_classes: ["entry_trigger"], profile: "balanced", draft_ttl_hours: 24, drafts_per_hour: 5,
   };
   const first = alertWork({ rule: true, draft: false }).rules[0];
   const second = structuredClone(first);

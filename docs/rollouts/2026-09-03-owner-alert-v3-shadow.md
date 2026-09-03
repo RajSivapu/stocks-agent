@@ -145,6 +145,23 @@ connectors, and disabled auto-fix behavior. Its instructions restrict the run to
 Checker records, require a suppressed outcome to stay silent, allow only server-receipt claims, and
 prohibit trade execution and repository edits.
 
+## Canary-class safety fix staged after review
+
+A pre-canary review found that the original `alerts_v3.enabled` switch would have enabled every
+eligible v3 draft class together. No canary was enabled and no production setting was changed.
+The staged policy-v3 contract adds a server-validated `enabled_classes` allowlist limited to
+`entry_trigger`, `stop_breach`, and `target_hit`. Shadow mode may still preview all supported
+classes, while enabled mode creates or evaluates only explicitly listed classes. A live policy is
+rejected when the list is empty, duplicated, or contains an unsupported value. Gateway code remains
+backward-compatible with the deployed disabled/shadow policy v2 so it can be upgraded safely before
+policy v3 is activated.
+
+The focused red/green tests cover policy projection, backward-compatible repository validation,
+draft suppression, and active-rule suppression. The full local gate then passed 131 Python tests,
+63 Node tests, 113 Deno tests, both Edge Function type-checks, and `git diff --check`. This code is
+staged locally and must not be deployed until the scheduled 2026-09-03 post-market run has been
+reconciled against the unchanged gateway v9 and policy v2 baseline.
+
 ## Remaining gates
 
 1. Reconcile the first scheduled post-market run after the v3 shadow deployment, including its
@@ -153,9 +170,9 @@ prohibit trade execution and repository edits.
 2. Reconcile the first Friday process-audit receipt and confirm it remains bounded and read-only.
 3. Present at least one real scheduled v3 shadow example to the owner. Do not infer approval from
    silence or from the synthetic preview.
-4. After explicit owner approval, enable only the owner-recorded stop-near/stop-breach canary class.
-   Do not enable entry suggestions, screening alerts, or the optional 15-minute monitor in the same
-   change.
+4. After explicit owner approval of a real example, enable only the owner-recorded `stop_breach`
+   canary class. Do not enable entry suggestions, target alerts, screening alerts, or the optional
+   15-minute monitor in the same change.
 5. Verify one canary end to end: rule version, provider observation time, evaluation/event IDs,
    publication hash, Telegram API acceptance/message ID, and any acknowledgement receipt.
 6. Keep the optional faster monitor and owner-only read-first dashboard behind their later evidence

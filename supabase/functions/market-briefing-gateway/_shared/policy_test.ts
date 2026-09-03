@@ -150,6 +150,7 @@ Deno.test("only approved fresh policy evaluations project inert alert drafts", (
   enabled.alerts_v3 = {
     enabled: false,
     shadow: true,
+    enabled_classes: [],
     profile: "balanced",
     draft_ttl_hours: 24,
     drafts_per_hour: 5,
@@ -186,11 +187,45 @@ Deno.test("only approved fresh policy evaluations project inert alert drafts", (
   assertEquals(draftFromEvaluation(approved, context(), enabled, NOW), null);
 });
 
+Deno.test("enabled alert policy projects only its explicit canary class", () => {
+  const enabled = config();
+  enabled.alerts_v3 = {
+    enabled: true,
+    shadow: false,
+    enabled_classes: ["stop_breach"],
+    profile: "balanced",
+    draft_ttl_hours: 24,
+    drafts_per_hour: 5,
+  };
+  const entry = evaluate(candidate({ notification_kind: "entry_trigger" }));
+  assertEquals(draftFromEvaluation(entry, context(), enabled, NOW), null);
+
+  const owned = holding({ ticker: "CENX", shares: "10", bucket: "growth", stop: "45" });
+  const ctx = context({ holdings: [owned], holding_quotes: { CENX: quote("CENX", "44") } });
+  const stopCandidate = candidate({
+    action: "hold",
+    notification_kind: "stop_breach",
+    proposed_amount: null,
+    proposed_shares: null,
+    entry_zone_low: null,
+    entry_zone_high: null,
+    stop: null,
+    target: null,
+    invalidation_price: null,
+    analyst: { completed: true, action: "hold", confidence: "high", reason: "Recorded stop breached." },
+  });
+  const stop = evaluate(stopCandidate, ctx, quote("CENX", "44"));
+  const projected = draftFromEvaluation(stop, ctx, enabled, NOW);
+  if (projected === null) throw new Error("allowlisted stop breach did not project");
+  assertEquals(projected.conditions[0].kind, "recorded_stop");
+});
+
 Deno.test("new ideas do not create rules until screen evidence has a protected adapter", () => {
   const enabled = config();
   enabled.alerts_v3 = {
     enabled: false,
     shadow: true,
+    enabled_classes: [],
     profile: "balanced",
     draft_ttl_hours: 24,
     drafts_per_hour: 5,

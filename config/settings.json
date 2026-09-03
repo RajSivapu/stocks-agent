@@ -73,6 +73,7 @@
   "alerts_v3": {
     "enabled": false,
     "shadow": true,
+    "enabled_classes": [],
     "default_profile": "balanced",
     "allowed_profiles": ["long_term", "balanced", "active"],
     "max_conditions": 5,

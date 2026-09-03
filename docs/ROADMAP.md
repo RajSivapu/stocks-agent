@@ -21,7 +21,7 @@ is separate, paper-first, and outside this codebase.
 | Deterministic 5/21/63-session outcome grading | Implemented and rollback-tested | Live; results remain empty until eligible gateway decisions reach their horizons |
 | Friday ChatGPT weekly process audit v2 | Packet + skill implemented and tested | Active Fridays 16:30 local on `gpt-5.6-terra`; live packet smoke test passed, first scheduled report pending |
 | Watchlist changes as owner-reviewed proposals | Implemented in settings/skill | Live through the revised Routine; never edits/pushes the checkout |
-| Owner-only alert v3 | Implemented, reviewed, and rollback-tested | Live in shadow-only mode with gateway v9, Telegram v12, and policy v2; a protected dry-run rendered stop/target and `1/1` source-evidence coverage with zero lifecycle writes and no Telegram send |
+| Owner-only alert v3 | Implemented, reviewed, and rollback-tested | Live in shadow-only mode with gateway v9, Telegram v12, and policy v2; a protected dry-run rendered stop/target and `1/1` source-evidence coverage with zero lifecycle writes and no Telegram send; a policy-v3 one-class canary allowlist is tested locally but deliberately not deployed before the scheduled post-market check |
 
 The reliability release is on GitHub `main`. Alert v3 is deployed from
 `codex/owner-alert-v3` for shadow verification and is not yet merged. "Live" means the corresponding
@@ -41,7 +41,7 @@ webhook health, secret rotation, Routine isolation, cloud healthcheck, Telegram 
 production dry-run lifecycles are complete. Both dry runs reported empty writes/message IDs, and
 independent before/after counts across eleven protected tables were unchanged.
 
-The remaining checks are observation rather than implementation:
+The remaining checks are scheduled observation followed by a protected policy/gateway update:
 
 1. Inspect the first new scheduled post-market receipt and any alert-v3 shadow previews. Confirm
    request/run, evaluation, suggestion, publication, artifact/grade, and delivery claims agree.
@@ -49,8 +49,9 @@ The remaining checks are observation rather than implementation:
 3. After the first scheduled cycle, decide whether synthetic-looking legacy suggestions need a
    separately approved archival cleanup. Do not mix that destructive data cleanup into this
    release.
-4. Review the owner-visible v3 shadow wording, then enable at most one explicitly approved alert
-   class as a canary. Do not enable the canary from a synthetic preview alone.
+4. Deploy the backward-compatible gateway change and shadow-only policy v3 after the post-market
+   baseline is reconciled. Review a real owner-visible v3 shadow example, then enable only the
+   explicitly approved `stop_breach` class as a canary. Do not enable from a synthetic preview.
 
 ## Next reliability work
 
