@@ -31,3 +31,11 @@ docs/HANDOFF.md
 
 # Test cache
 .pytest_cache/
+
+# Generated capability and browser-test evidence
+artifacts/
+node_modules/
+.env.*.local
+apps/web/.env.local
+apps/web/playwright-report/
+apps/web/test-results/

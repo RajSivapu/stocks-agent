@@ -1,0 +1,14 @@
+{
+  "name": "stocks-agent",
+  "private": true,
+  "workspaces": [
+    "packages/contracts"
+  ],
+  "scripts": {
+    "test:python": ".venv/bin/python -m pytest tests/ -q",
+    "test:node": "node --test tests/test_telegram_parser.mjs tests/test_telegram_webhook_utils.mjs",
+    "test:deno": "npx --yes deno@2.9.6 test supabase/functions/market-briefing-gateway/_shared",
+    "check:edge": "npx --yes deno@2.9.6 check supabase/functions/market-briefing-gateway/index.ts && npx --yes deno@2.9.6 check supabase/functions/telegram-portfolio/index.ts",
+    "test:all": "bash scripts/test_all.sh"
+  }
+}

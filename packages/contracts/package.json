@@ -1,0 +1,10 @@
+{
+  "name": "@stocks-agent/contracts",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "test": "npx --yes deno@2.9.6 test src",
+    "typecheck": "npx --yes deno@2.9.6 check src/index.ts"
+  }
+}

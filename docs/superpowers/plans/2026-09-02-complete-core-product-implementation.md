@@ -93,6 +93,8 @@ provider tokens, owner UUIDs belonging to another user, or raw upstream bodies.
 
 **Files:**
 - Create: `package.json`
+- Create: `deno.json`
+- Create: `deno.lock`
 - Create: `packages/contracts/package.json`
 - Create: `packages/contracts/tsconfig.json`
 - Create: `scripts/test_all.sh`
@@ -101,43 +103,46 @@ provider tokens, owner UUIDs belonging to another user, or raw upstream bodies.
 
 **Interfaces:**
 - Consumes: current Python virtualenv, Node test files, Deno 2.9.6 tests.
-- Produces: `npm run test:all`; ignored generated evidence under `artifacts/`; an npm workspace for the web app and shared contracts.
+- Produces: `npm run test:all`; ignored generated evidence under `artifacts/`; a locked Deno npm-dependency graph; an npm workspace for shared contracts. Task 19 adds the web workspace when it exists.
 
-- [ ] **Step 1: Record the clean baseline**
+- [x] **Step 1: Record the clean baseline**
 
 Run the three existing suites exactly as documented in `docs/HANDOFF.md`. Expected: 113 Python,
 60 Node, and 77 Deno tests pass before any migration work.
 
-- [ ] **Step 2: Add the root workspace and commands**
+- [x] **Step 2: Add the root workspace and commands**
 
-Create `package.json` with `private: true`, workspaces `apps/web` and `packages/contracts`, and scripts
+Create `package.json` with `private: true`, workspace `packages/contracts`, and scripts
 `test:python`, `test:node`, `test:deno`, `check:edge`, and `test:all`. `test:deno` must pin
-`npx --yes deno@2.9.6`; `test:all` invokes `bash scripts/test_all.sh`.
+`npx --yes deno@2.9.6`; `test:all` invokes `bash scripts/test_all.sh`. Add `deno.json` with
+`nodeModulesDir: "auto"` so the existing `npm:` Edge imports remain resolvable after introducing the
+npm workspace, and commit the resulting `deno.lock`.
 
-- [ ] **Step 3: Add the fail-fast test runner**
+- [x] **Step 3: Add the fail-fast test runner**
 
 `scripts/test_all.sh` must contain `set -euo pipefail`, run Python, Node, Deno tests, Edge entrypoint
 checks, shared-contract typecheck, and web checks only when `apps/web/package.json` exists. It must not
 source `.env` files or print environment values.
 
-- [ ] **Step 4: Protect generated and local security material**
+- [x] **Step 4: Protect generated and local security material**
 
 Add these ignore rules:
 
 ```gitignore
 artifacts/
+node_modules/
 .env.*.local
 apps/web/.env.local
 apps/web/playwright-report/
 apps/web/test-results/
 ```
 
-- [ ] **Step 5: Verify and commit**
+- [x] **Step 5: Verify and commit**
 
 Run `npm run test:all`, `git diff --check`, then commit:
 
 ```bash
-git add package.json packages/contracts/package.json packages/contracts/tsconfig.json scripts/test_all.sh .gitignore
+git add package.json deno.json deno.lock packages/contracts/package.json packages/contracts/tsconfig.json scripts/test_all.sh .gitignore docs/superpowers/plans/2026-09-02-complete-core-product-implementation.md
 git commit -m "build: add complete product test entrypoint"
 ```
 
