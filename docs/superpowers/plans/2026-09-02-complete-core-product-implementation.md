@@ -1491,13 +1491,13 @@ git commit -m "test: prove complete product acceptance"
 - Consumes: passing Gate 0-E report, fresh backup, paused legacy Routines/webhook mutations, owner Auth identity.
 - Produces: reversible owner migration receipt and an owner-only complete scheduled-cycle soak.
 
-- [ ] **Step 1: Write failing precondition tests**
+- [x] **Step 1: Write failing precondition tests**
 
 Reject cutover for stale backup, old restore drill, failed capability, unpaused legacy routines,
 unverified owner identity, count/digest mismatch, active old webhook mutation path, or missing rollback
 version.
 
-- [ ] **Step 2: Implement the guarded cutover controller**
+- [x] **Step 2: Implement the guarded cutover controller**
 
 Sequence: pause triggers/mutations; backup and verify; migrate/backfill; provision scoped roles; deploy;
 register new webhook; connect one Claude Routine; run no-write handshake; verify all views; record one web
@@ -1507,7 +1507,7 @@ After replacement paths pass, revoke and remove the old runtime service-role sec
 owner IDs, legacy broad Routine gateway secret, three legacy schedules, and obsolete public RPC grants.
 Keep the reviewed previous function bundle available only as rollback code, not as a reachable endpoint.
 
-- [ ] **Step 3: Preserve immediate rollback**
+- [x] **Step 3: Preserve immediate rollback**
 
 On any failure, pause new triggers, restore reviewed previous functions, retain additive owner columns,
 and never destructively down-migrate. Data-integrity uncertainty keeps all mutation paths paused.
@@ -1518,7 +1518,7 @@ Verify pre-market, quiet/active intraday, post-market, maintenance, backup, and 
 Compare actual writes, publications, message IDs, and run summaries. Keep invitations disabled for the
 documented owner soak.
 
-- [ ] **Step 5: Verify and commit**
+- [x] **Step 5: Verify and commit**
 
 Store only sanitized receipt hashes in docs, update roadmap/handoff with exact live status, and commit:
 

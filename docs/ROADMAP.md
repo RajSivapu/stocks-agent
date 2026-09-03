@@ -1,12 +1,31 @@
 # Stocks Agent — Roadmap and Deployment Status
 
-Last updated: 2026-09-02.
+Last updated: 2026-09-03.
 
 This repository is suggestion-only decision support plus portfolio recordkeeping. It has no
 brokerage integration and never places, modifies, or cancels a trade. Any future execution project
 is separate, paper-first, and outside this codebase.
 
-## Current system
+## Complete core product candidate
+
+The provider-neutral, multi-user candidate is implemented locally on
+`codex/stock-agent-reliability`; it is **not deployed to staging or production**. It includes the
+owner-scoped ledger/projection model, RLS and machine-role boundaries, provider V2 contract, Claude
+Routine adapter, DST-aware scheduling, server-owned evidence/policy/publication flow, seven-screen web
+product, OTP/consent/account lifecycle, Telegram pairing, encrypted-recovery tooling, protected
+deployment workflows, browser acceptance, and the guarded owner-cutover controller.
+
+No owner-cutover or soak receipt exists. The remaining work needs real external infrastructure and
+evidence: credential rotation, custom SMTP/phone-mail OTP, private staging and production Supabase,
+Cloudflare static hosting and private R2, a real encrypted backup/restore, live two-owner isolation,
+Claude API-trigger handshake, protected production deployment/rollback, and a complete owner market
+cycle. **Friend invitations remain disabled** until those gates pass and one trusted-friend cycle is
+reviewed.
+
+## Legacy production snapshot
+
+The following is the 2026-09-02 single-owner production snapshot. It was not re-verified while the
+new candidate was built and must not be read as evidence for the candidate.
 
 | Capability | Code status | Live status |
 |---|---|---|
@@ -22,13 +41,25 @@ is separate, paper-first, and outside this codebase.
 | Friday ChatGPT weekly process audit v2 | Packet + skill implemented and tested | Active Fridays 16:30 local on `gpt-5.6-terra`; live packet smoke test passed, first scheduled report pending |
 | Watchlist changes as owner-reviewed proposals | Implemented in settings/skill | Live through the revised Routine; never edits/pushes the checkout |
 
-All code through the current release is on GitHub `main`. "Live" means the corresponding external
+All code through this legacy release is on GitHub `main`. "Live" means the corresponding external
 Supabase, Telegram, Claude, or ChatGPT configuration was checked directly; pending observation is
 called out separately.
 
-## Remaining rollout checks
+## Complete-product release sequence
 
-The fail-closed cutover is deployed. Migrations/verifiers, policy activation, both Edge Functions,
+1. Pass Gate 0 with rotated market-data credentials and real external capability evidence.
+2. Deploy the candidate to isolated staging; prove phone OTP, two-owner isolation, Claude handshake,
+   scheduler behavior, encrypted R2 recovery, and rollback.
+3. Produce the fail-closed Gate A-E acceptance evidence and use `scripts/cutover_owner.py` to move the
+   current owner with all old mutation paths paused.
+4. Complete the pre-market/intraday/post-market/maintenance/backup/alert owner soak. Any mismatch
+   pauses all paths and invokes application rollback without destructive down-migration.
+5. Configure custom SMTP and onboard one trusted friend only after Gate F is current. Review that
+   entire cycle before enabling another invitation.
+
+## Legacy decision-safety observations
+
+The legacy decision-safety cutover is deployed. Migrations/verifiers, policy activation, both Edge Functions,
 webhook health, secret rotation, Routine isolation, cloud healthcheck, Telegram owner flows, and two
 production dry-run lifecycles are complete. Both dry runs reported empty writes/message IDs, and
 independent before/after counts across eleven protected tables were unchanged.
@@ -55,9 +86,8 @@ The remaining checks are observation rather than implementation:
 - Review the static NYSE holiday calendar each December and add the next year's dates before January.
 - After two weeks, inspect `analysis_runs` for data-source failures, stale veto frequency, notification
   noise, and Claude allowance usage; adjust cadence only from evidence.
-- Before sharing with friends, redesign holdings/commands around `owner_id`, add per-owner RLS and bot
-  onboarding, separate secrets/configuration, and threat-model tenant isolation. The current release
-  is intentionally single-owner.
+- The multi-user redesign is implemented in the local candidate, but sharing remains prohibited until
+  its live isolation, recovery, provider, SMTP, cutover, and owner-soak gates pass.
 
 ## Deferred research features
 
