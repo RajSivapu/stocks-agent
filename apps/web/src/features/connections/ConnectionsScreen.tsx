@@ -2,12 +2,16 @@ import { useCallback, useState } from "react";
 import { StatusBadge } from "../../components/StatusBadge";
 import {
   AppApiError,
+  type AccountClient,
   type ConnectionClient,
   type PairingCodeReceipt,
+  type StepUpChallenge,
 } from "../../lib/app-api";
 import type { AgentConnection, DashboardRepository } from "../../lib/dashboard";
 import { dateTime } from "../../lib/format";
+import type { SessionService, ViewerState } from "../../lib/session";
 import { useRepositoryData } from "../../lib/useRepositoryData";
+import { StepUpCode } from "../account/AccountPanel";
 import claudeKit from "../../../../../docs/connection-kits/claude-routine-v1.md?raw";
 
 const CONSENT_VERSION = "provider-data-v1";
@@ -62,9 +66,16 @@ function ConnectionCard({ connection, sessionUrl, busy, onActivate, onRevoke }: 
   );
 }
 
-export function ConnectionsScreen({ repository, connectionClient }: {
+type SecureAction =
+  | { kind: "handshake"; connectionId: string }
+  | { kind: "pairing" };
+
+export function ConnectionsScreen({ repository, connectionClient, accountClient, session, viewer }: {
   repository: DashboardRepository;
   connectionClient: ConnectionClient;
+  accountClient: AccountClient;
+  session: SessionService;
+  viewer: Extract<ViewerState, { kind: "ready" }>;
 }) {
   const loader = useCallback(() => repository.loadConnections(), [repository]);
   const { state, reload } = useRepositoryData(loader);
@@ -73,6 +84,7 @@ export function ConnectionsScreen({ repository, connectionClient }: {
   const [triggerUrl, setTriggerUrl] = useState("");
   const [triggerToken, setTriggerToken] = useState("");
   const [pairing, setPairing] = useState<PairingCodeReceipt | null>(null);
+  const [stepUp, setStepUp] = useState<{ challenge: StepUpChallenge; action: SecureAction } | null>(null);
   const [busy, setBusy] = useState(false);
   const [notice, setNotice] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -100,17 +112,37 @@ export function ConnectionsScreen({ repository, connectionClient }: {
     setNotice("Disabled connection created. Save the gateway credential before leaving this page.");
   });
 
-  const beginHandshake = (connectionId: string) => act(async () => {
-    await connectionClient.beginConnectionHandshake(connectionId, triggerUrl.trim(), triggerToken);
-    setTriggerToken("");
-    setTriggerUrl("");
-    setNotice("Real application-fired handshake queued. Reload after the Claude session finishes.");
-  });
+  const beginSecureAction = async (action: SecureAction) => {
+    setBusy(true); setError(null); setNotice(null);
+    try {
+      const challenge = await accountClient.beginStepUp();
+      await session.requestOtp(viewer.email);
+      setStepUp({ challenge, action });
+    } catch (caught) {
+      setError(caught instanceof AppApiError
+        ? "Fresh authentication could not be started. Try again with a new code."
+        : "The secure request is unavailable. No credential change was made.");
+    } finally {
+      setBusy(false);
+    }
+  };
 
-  const requestPairing = () => act(async () => {
-    setPairing(await connectionClient.requestPairingCode());
-    setNotice("Pairing code issued for one private Telegram chat.");
-  });
+  const completeSecureAction = async (receiptId: string) => {
+    if (!stepUp) return;
+    if (stepUp.action.kind === "handshake") {
+      await connectionClient.beginConnectionHandshake(
+        stepUp.action.connectionId, triggerUrl.trim(), triggerToken, receiptId,
+      );
+      setTriggerToken("");
+      setTriggerUrl("");
+      setNotice("Real application-fired handshake queued. Reload after the Claude session finishes.");
+    } else {
+      setPairing(await connectionClient.requestPairingCode(receiptId));
+      setNotice("Pairing code issued for one private Telegram chat.");
+    }
+    setStepUp(null);
+    await reload();
+  };
 
   if (state.kind === "loading") return <section className="workspace-card" aria-busy="true"><div role="status">Loading connections…</div></section>;
   if (state.kind === "error") return <section className="workspace-card"><h1>Connections</h1><p role="alert">Connection status is unavailable. No connection is being treated as active.</p><button type="button" className="secondary-button" onClick={() => { void reload(); }}>Try again</button></section>;
@@ -147,7 +179,7 @@ export function ConnectionsScreen({ repository, connectionClient }: {
         </div>}
         {current && current.status === "disabled" && !oneTimeCredential && !created && <p className="error">The one-time credential is unavailable. Revoke this disabled connection and start again.</p>}
 
-        {canConfigure && configurableConnectionId && <form className="trigger-form" onSubmit={(event) => { event.preventDefault(); void beginHandshake(configurableConnectionId); }}>
+        {canConfigure && configurableConnectionId && <form className="trigger-form" onSubmit={(event) => { event.preventDefault(); void beginSecureAction({ kind: "handshake", connectionId: configurableConnectionId }); }}>
           <h3>Test the production path</h3>
           <label>Routine fire URL<input required aria-label="Routine fire URL" type="url" autoComplete="off" value={triggerUrl} onChange={(event) => { setTriggerUrl(event.target.value); }} placeholder="https://api.anthropic.com/v1/claude_code/routines/trig_…/fire" /></label>
           <label>One-time Routine token<input required minLength={24} maxLength={500} aria-label="One-time Routine token" type="password" autoComplete="new-password" value={triggerToken} onChange={(event) => { setTriggerToken(event.target.value); }} /></label>
@@ -161,11 +193,17 @@ export function ConnectionsScreen({ repository, connectionClient }: {
         <div className="section-heading"><div><p className="eyebrow">Private recordkeeping channel</p><h2>Telegram</h2></div><StatusBadge status={telegramActive ? "active" : "not linked"} /></div>
         <p>Pair one private chat to record portfolio changes through the same preview-and-confirm workflow used by the web app.</p>
         <div className="button-row">
-          <button type="button" className="primary-button compact-button" disabled={busy} onClick={() => { void requestPairing(); }}>New pairing code</button>
+          <button type="button" className="primary-button compact-button" disabled={busy} onClick={() => { void beginSecureAction({ kind: "pairing" }); }}>New pairing code</button>
           {telegramActive && <button type="button" className="danger-button compact-button" disabled={busy} onClick={() => { void act(async () => { await connectionClient.unlinkTelegram(); setPairing(null); setNotice("Telegram unlinked and pending Telegram confirmations cancelled."); }); }}>Unlink Telegram</button>}
         </div>
         {pairing && <div className="pairing-code" role="status"><span>Send <strong>/pair {pairing.code}</strong> to the bot in a private chat.</span><small>Expires {dateTime(pairing.expiresAt)}. A new code invalidates this one.</small></div>}
       </section>
+      {stepUp && <section className="workspace-card">
+        <h2>Fresh authentication required</h2>
+        <StepUpCode identity={viewer} challenge={stepUp.challenge} session={session}
+          accountClient={accountClient} onVerified={completeSecureAction}
+          onCancel={() => { setStepUp(null); }} />
+      </section>}
       {notice && <p className="success" role="status">{notice}</p>}
       {error && <p className="error" role="alert">{error}</p>}
     </div>

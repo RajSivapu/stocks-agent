@@ -1213,19 +1213,19 @@ git commit -m "feat: add provider and notification setup"
 - Consumes: current consent document, fresh five-minute OTP step-up receipt, owner JWT, offline operator invitation authority.
 - Produces: CSV ledger, JSON account export, deactivation/deletion workflow, tombstone, and invite-only account creation.
 
-- [ ] **Step 1: Write failing privacy and lifecycle tests**
+- [x] **Step 1: Write failing privacy and lifecycle tests**
 
 Require disclosure of provider transcripts, operator access, quote-vendor ticker requests, and Telegram
 deletion limits. Test stale/missing step-up, 72-hour cancellation, seven-day active deletion deadline,
 session revocation, trigger/link revocation, pending-command cancellation, and cross-owner export denial.
 
-- [ ] **Step 2: Implement exports**
+- [x] **Step 2: Implement exports**
 
 CSV contains immutable ledger fields and correction links. JSON contains profile, consent, preferences,
 portfolio, commands/receipts, recommendations/evidence metadata, runs, connections without secrets, and
 Telegram link status without raw IDs. Stream with `Content-Disposition` and `no-store`.
 
-- [ ] **Step 3: Implement step-up and deletion**
+- [x] **Step 3: Implement step-up and deletion**
 
 Fresh email OTP creates a session-bound five-minute receipt. Deletion disables sign-in/triggers/links,
 offers export, waits 72 hours, deletes owner rows in documented order, deletes Auth identity last, and
@@ -1234,20 +1234,20 @@ keeps only a non-financial tombstone so restore cannot resurrect the account.
 The Telegram cleanup path attempts deletion only for recent message IDs still eligible under Telegram's
 rules, records bounded outcomes, and tells the owner to remove older chat history manually.
 
-- [ ] **Step 4: Implement trusted invitations**
+- [x] **Step 4: Implement trusted invitations**
 
 `invite_user.py --email` uses ignored offline service-role configuration, creates exactly one Auth user
 plus profile/preferences, sends no default Supabase invite email, and relies on custom-SMTP OTP sign-in.
 It prints only a pseudonymous receipt.
 
-- [ ] **Step 5: Implement the operator-only ledger reset runbook**
+- [x] **Step 5: Implement the operator-only ledger reset runbook**
 
 `reset_owner_ledger.py` requires a fresh five-minute owner OTP step-up receipt, writes a mandatory
 encrypted export, previews exact row counts, requires typed owner confirmation, purges only that owner's
 ledger-dependent rows, verifies empty projections, and records one non-financial immutable reset receipt.
 It is unavailable to browser, provider, Telegram, and ordinary runtime roles.
 
-- [ ] **Step 6: Verify and commit**
+- [x] **Step 6: Verify and commit**
 
 Run account tests, staging deletion/restore fixture, and CLI dry run. Commit:
 

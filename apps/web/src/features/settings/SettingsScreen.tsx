@@ -1,7 +1,9 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { AppApiError, type SettingsClient, type SettingsUpdate } from "../../lib/app-api";
+import { AppApiError, type AccountClient, type SettingsClient, type SettingsUpdate } from "../../lib/app-api";
 import type { DashboardRepository, SettingsSnapshot } from "../../lib/dashboard";
 import { useRepositoryData } from "../../lib/useRepositoryData";
+import type { SessionService, ViewerState } from "../../lib/session";
+import { AccountPanel } from "../account/AccountPanel";
 
 const TIMEZONES = [
   "America/Chicago", "America/New_York", "America/Denver", "America/Los_Angeles",
@@ -73,10 +75,16 @@ function SettingsForm({ initial, settingsClient, onSaved }: {
   </form>;
 }
 
-export function SettingsScreen({ repository, settingsClient }: { repository: DashboardRepository; settingsClient: SettingsClient }) {
+export function SettingsScreen({ repository, settingsClient, accountClient, session, viewer }: {
+  repository: DashboardRepository;
+  settingsClient: SettingsClient;
+  accountClient?: AccountClient;
+  session?: SessionService;
+  viewer?: Extract<ViewerState, { kind: "ready" }>;
+}) {
   const loader = useCallback(() => repository.loadSettings(), [repository]);
   const { state, reload } = useRepositoryData(loader);
   if (state.kind === "loading") return <section className="workspace-card" aria-busy="true"><div role="status">Loading settings…</div></section>;
   if (state.kind === "error") return <section className="workspace-card"><h1>Settings</h1><p role="alert">Settings are unavailable. No defaults are being assumed.</p><button className="secondary-button" type="button" onClick={() => { void reload(); }}>Try again</button></section>;
-  return <div className="feature-stack"><section className="workspace-card settings-intro"><p className="eyebrow">Owner preferences</p><h1>Settings</h1><p>Choose when analysis runs and which server-approved messages reach Telegram. These controls never change market anchors or investment-safety rules.</p></section><section className="workspace-card"><SettingsForm initial={state.data} settingsClient={settingsClient} onSaved={reload} /></section></div>;
+  return <div className="feature-stack"><section className="workspace-card settings-intro"><p className="eyebrow">Owner preferences</p><h1>Settings</h1><p>Choose when analysis runs and which server-approved messages reach Telegram. These controls never change market anchors or investment-safety rules.</p></section><section className="workspace-card"><SettingsForm initial={state.data} settingsClient={settingsClient} onSaved={reload} />{session && viewer && accountClient && <AccountPanel viewer={viewer} session={session} accountClient={accountClient} />}</section></div>;
 }

@@ -237,6 +237,66 @@ button:disabled {
   opacity: 0.48;
 }
 
+.account-panel {
+  margin-top: 2rem;
+  padding-top: 1.7rem;
+  border-top: 1px solid var(--line);
+}
+
+.account-actions,
+.disclosure-links {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.75rem;
+  margin-top: 1rem;
+}
+
+.disclosure-links a {
+  color: var(--teal);
+  font-weight: 700;
+}
+
+.danger-zone,
+.step-up-box {
+  margin-top: 1.3rem;
+  padding: 1rem;
+  border: 1px solid #dfb0aa;
+  border-radius: 0.75rem;
+  background: #fff8f6;
+}
+
+.danger-zone h3 {
+  margin-top: 0;
+  color: #74261e;
+}
+
+.danger-button {
+  min-height: 3rem;
+  padding: 0.65rem 1rem;
+  border: 0;
+  border-radius: 0.7rem;
+  color: #fff;
+  background: #8d2e26;
+  cursor: pointer;
+  font-weight: 800;
+}
+
+.step-up-box label,
+.consent-check {
+  display: grid;
+  gap: 0.45rem;
+  margin-top: 1rem;
+}
+
+.consent-check {
+  grid-template-columns: auto 1fr;
+  align-items: start;
+}
+
+.deletion-gate {
+  max-width: 48rem;
+}
+
 .notice,
 .error {
   margin: 1rem 0 0;

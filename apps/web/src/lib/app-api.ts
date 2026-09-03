@@ -98,10 +98,10 @@ export type SettingsUpdate = {
 
 export interface ConnectionClient {
   createConnection: (consentVersion: string) => Promise<ConnectionCreateReceipt>;
-  beginConnectionHandshake: (connectionId: string, triggerUrl: string, triggerToken: string) => Promise<ConnectionHandshakeReceipt>;
+  beginConnectionHandshake: (connectionId: string, triggerUrl: string, triggerToken: string, stepUpReceiptId: string) => Promise<ConnectionHandshakeReceipt>;
   activateConnection: (connectionId: string) => Promise<ConnectionStatusReceipt>;
   revokeConnection: (connectionId: string) => Promise<ConnectionStatusReceipt>;
-  requestPairingCode: () => Promise<PairingCodeReceipt>;
+  requestPairingCode: (stepUpReceiptId: string) => Promise<PairingCodeReceipt>;
   unlinkTelegram: () => Promise<{ status: "unlinked" }>;
 }
 
@@ -109,7 +109,41 @@ export interface SettingsClient {
   updateSettings: (settings: SettingsUpdate) => Promise<{ status: "updated" }>;
 }
 
-export type AppApiClient = CommandClient & RunControlClient & ConnectionClient & SettingsClient;
+export type StepUpChallenge = { challengeId: string; expiresAt: string };
+export type StepUpReceipt = { receiptId: string; expiresAt: string };
+export type DeletionPreview = {
+  deletionRequestId: string;
+  confirmationPhrase: "DELETE MY ACCOUNT";
+  confirmationExpiresAt: string;
+};
+export type DeletionReceipt = {
+  deletionRequestId: string;
+  status: "pending" | "cancelled";
+  cancelUntil?: string;
+  deleteBy?: string;
+};
+export type AccountStatus = {
+  accountStatus: "invited" | "active" | "deletion_pending";
+  deletionStatus: "confirmation_pending" | "pending" | "cancelled" | "processing" | "completed" | null;
+  requestedAt: string | null;
+  cancelUntil: string | null;
+  deleteBy: string | null;
+  olderTelegramHistoryRequiresManualRemoval: boolean;
+};
+export type ExportDownload = { filename: string; mediaType: string; blob: Blob };
+
+export interface AccountClient {
+  acceptConsent(documentVersion: string): Promise<{ status: "accepted"; documentVersion: string }>;
+  beginStepUp(): Promise<StepUpChallenge>;
+  completeStepUp(challengeId: string): Promise<StepUpReceipt>;
+  requestDeletion(receiptId: string): Promise<DeletionPreview>;
+  confirmDeletion(deletionRequestId: string, receiptId: string, phrase: string): Promise<DeletionReceipt>;
+  cancelDeletion(receiptId: string): Promise<DeletionReceipt>;
+  loadAccountStatus(): Promise<AccountStatus>;
+  downloadExport(kind: "account" | "ledger"): Promise<ExportDownload>;
+}
+
+export type AppApiClient = CommandClient & RunControlClient & ConnectionClient & SettingsClient & AccountClient;
 
 export class AppApiError extends Error {
   constructor(readonly code: string) {
@@ -260,6 +294,59 @@ function parsePairingCode(value: unknown): PairingCodeReceipt {
   };
 }
 
+function parseStepUpChallenge(value: unknown): StepUpChallenge {
+  const row = record(value);
+  if (row.status !== "challenge_created") throw new AppApiError("INVALID_RESPONSE");
+  return { challengeId: uuid(row.challenge_id), expiresAt: isoDateTime(row.expires_at) };
+}
+
+function parseStepUpReceipt(value: unknown): StepUpReceipt {
+  const row = record(value);
+  if (row.status !== "verified") throw new AppApiError("INVALID_RESPONSE");
+  return { receiptId: uuid(row.step_up_receipt_id), expiresAt: isoDateTime(row.expires_at) };
+}
+
+function parseDeletionPreview(value: unknown): DeletionPreview {
+  const row = record(value);
+  if (row.status !== "confirmation_pending" || row.confirmation_phrase !== "DELETE MY ACCOUNT") {
+    throw new AppApiError("INVALID_RESPONSE");
+  }
+  return {
+    deletionRequestId: uuid(row.deletion_request_id),
+    confirmationPhrase: "DELETE MY ACCOUNT",
+    confirmationExpiresAt: isoDateTime(row.confirmation_expires_at),
+  };
+}
+
+function parseDeletionReceipt(value: unknown): DeletionReceipt {
+  const row = record(value);
+  if (row.status !== "pending" && row.status !== "cancelled") throw new AppApiError("INVALID_RESPONSE");
+  return {
+    deletionRequestId: uuid(row.deletion_request_id),
+    status: row.status,
+    ...(row.cancel_until === undefined ? {} : { cancelUntil: isoDateTime(row.cancel_until) }),
+    ...(row.delete_by === undefined ? {} : { deleteBy: isoDateTime(row.delete_by) }),
+  };
+}
+
+function parseAccountStatus(value: unknown): AccountStatus {
+  const row = record(value);
+  if (!["invited", "active", "deletion_pending"].includes(String(row.account_status)) ||
+      ![null, "confirmation_pending", "pending", "cancelled", "processing", "completed"].includes(
+        row.deletion_status as null | string,
+      )) throw new AppApiError("INVALID_RESPONSE");
+  const cleanup = row.telegram_cleanup_status === null ? {} : record(row.telegram_cleanup_status);
+  return {
+    accountStatus: row.account_status as AccountStatus["accountStatus"],
+    deletionStatus: row.deletion_status as AccountStatus["deletionStatus"],
+    requestedAt: row.requested_at === null ? null : isoDateTime(row.requested_at),
+    cancelUntil: row.cancel_until === null ? null : isoDateTime(row.cancel_until),
+    deleteBy: row.delete_by === null ? null : isoDateTime(row.delete_by),
+    olderTelegramHistoryRequiresManualRemoval:
+      cleanup.older_history_requires_manual_removal === true,
+  };
+}
+
 export function createCommandClient(
   client: SupabaseClient,
   projectUrl: string,
@@ -271,14 +358,14 @@ export function createCommandClient(
     throw new Error("PUBLIC_CONFIG_UNAVAILABLE");
   }
   const endpoint = `${parsed.origin}/functions/v1/app-api`;
-  const send = async (method: "PATCH" | "POST", path: string, body: Record<string, unknown>) => {
+  const send = async (method: "GET" | "PATCH" | "POST", path: string, body: Record<string, unknown>) => {
     const response = await fetcher(`${endpoint}${path}`, {
       method,
       headers: {
         authorization: `Bearer ${await accessToken(client)}`,
         "content-type": "application/json",
       },
-      body: JSON.stringify(body),
+      ...(method === "GET" ? {} : { body: JSON.stringify(body) }),
       cache: "no-store",
       credentials: "omit",
       referrerPolicy: "no-referrer",
@@ -287,6 +374,26 @@ export function createCommandClient(
     return readEnvelope(response);
   };
   const post = (path: string, body: Record<string, unknown>) => send("POST", path, body);
+  const get = (path: string) => send("GET", path, {});
+  const download = async (path: string, filename: string, mediaType: string): Promise<ExportDownload> => {
+    const response = await fetcher(`${endpoint}${path}`, {
+      method: "GET",
+      headers: { authorization: `Bearer ${await accessToken(client)}` },
+      cache: "no-store",
+      credentials: "omit",
+      referrerPolicy: "no-referrer",
+      signal: AbortSignal.timeout(15_000),
+    });
+    const declared = response.headers.get("content-length");
+    if (!response.ok || response.headers.get("content-disposition") !== `attachment; filename="${filename}"` ||
+        response.headers.get("content-type") !== mediaType || response.headers.get("cache-control") !== "no-store" ||
+        (declared !== null && (!/^\d+$/.test(declared) || Number(declared) > 5 * 1024 * 1024))) {
+      throw new AppApiError("EXPORT_UNAVAILABLE");
+    }
+    const bytes = await response.arrayBuffer();
+    if (bytes.byteLength > 5 * 1024 * 1024) throw new AppApiError("EXPORT_UNAVAILABLE");
+    return { filename, mediaType, blob: new Blob([bytes], { type: mediaType }) };
+  };
   return {
     async preview(command) {
       const value = await post(commandPath(command.operation), {
@@ -313,9 +420,10 @@ export function createCommandClient(
         provider: "claude", consent_version: consentVersion,
       }), `${parsed.origin}/functions/v1/agent-gateway`);
     },
-    async beginConnectionHandshake(connectionId, triggerUrl, triggerToken) {
+    async beginConnectionHandshake(connectionId, triggerUrl, triggerToken, stepUpReceiptId) {
       return parseHandshake(await post("/connections/handshake", {
         connection_id: connectionId, trigger_url: triggerUrl, trigger_token: triggerToken,
+        step_up_receipt_id: stepUpReceiptId,
       }));
     },
     async activateConnection(connectionId) {
@@ -328,8 +436,10 @@ export function createCommandClient(
         connection_id: connectionId,
       }), "revoked");
     },
-    async requestPairingCode() {
-      return parsePairingCode(await post("/telegram/pairing-code", {}));
+    async requestPairingCode(stepUpReceiptId) {
+      return parsePairingCode(await post("/telegram/pairing-code", {
+        step_up_receipt_id: stepUpReceiptId,
+      }));
     },
     async unlinkTelegram() {
       const value = await post("/telegram/unlink", {});
@@ -340,6 +450,44 @@ export function createCommandClient(
       const value = await send("PATCH", "/settings", settings);
       if (value.status !== "updated") throw new AppApiError("INVALID_RESPONSE");
       return { status: "updated" };
+    },
+    async acceptConsent(documentVersion) {
+      const value = await post("/consents/accept", { document_version: documentVersion });
+      if (value.status !== "accepted" || value.document_version !== documentVersion) {
+        throw new AppApiError("INVALID_RESPONSE");
+      }
+      return { status: "accepted", documentVersion };
+    },
+    async beginStepUp() {
+      return parseStepUpChallenge(await post("/account/step-up/challenge", {}));
+    },
+    async completeStepUp(challengeId) {
+      return parseStepUpReceipt(await post("/account/step-up/complete", { challenge_id: challengeId }));
+    },
+    async requestDeletion(receiptId) {
+      return parseDeletionPreview(await post("/account/delete/request", {
+        step_up_receipt_id: receiptId,
+      }));
+    },
+    async confirmDeletion(deletionRequestId, receiptId, phrase) {
+      return parseDeletionReceipt(await post("/account/delete/confirm", {
+        deletion_request_id: deletionRequestId,
+        step_up_receipt_id: receiptId,
+        confirmation_phrase: phrase,
+      }));
+    },
+    async cancelDeletion(receiptId) {
+      return parseDeletionReceipt(await post("/account/delete/cancel", {
+        step_up_receipt_id: receiptId,
+      }));
+    },
+    async loadAccountStatus() {
+      return parseAccountStatus(await get("/account/status"));
+    },
+    async downloadExport(kind) {
+      return kind === "account"
+        ? await download("/export/account.json", "stock-agent-account.json", "application/json; charset=utf-8")
+        : await download("/export/ledger.csv", "stock-agent-ledger.csv", "text/csv; charset=utf-8");
     },
     lookup,
   };

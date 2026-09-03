@@ -7,6 +7,15 @@ import {
   generatePairingCode,
 } from "../telegram-portfolio/pairing.mjs";
 import { attachGatewayCredential, generateInboundConnectionSecret, prepareConnectionCreate } from "./connections.ts";
+import {
+  accountRequestAttestation,
+  attachCleanupTokenDigest,
+  deleteRecentTelegramMessages,
+  exportResponse,
+  generateCleanupToken,
+  sanitizeDeletionResponse,
+} from "./account.ts";
+import type { AuthenticatedClaims } from "../_shared/jwt.ts";
 
 
 const MAX_BODY_BYTES = 64 * 1024;
@@ -20,11 +29,16 @@ export type AppApiHandlerDependencies = {
   allowedOrigins: readonly string[];
   ipHashPepper: string;
   pairingHashPepper: string;
+  stepUpHashPepper: string;
   repository: AppApiRepository;
-  authenticate(request: Request): Promise<{ sub: string; role: "authenticated" }>;
+  authenticate(request: Request): Promise<AuthenticatedClaims>;
+  revokeAllSessions(bearerToken: string): Promise<void>;
+  telegramBotToken: string;
+  telegramFetch?: typeof fetch;
   newId?: () => string;
   newPairingCode?: () => string;
   newConnectionSecret?: () => string;
+  newCleanupToken?: () => string;
 };
 
 function errorResponse(error: unknown, request: Request, allowedOrigins: readonly string[]): Response {
@@ -78,6 +92,7 @@ export function createAppApiHandler(dependencies: AppApiHandlerDependencies) {
   const newId = dependencies.newId ?? crypto.randomUUID;
   const newPairingCode = dependencies.newPairingCode ?? generatePairingCode;
   const newConnectionSecret = dependencies.newConnectionSecret ?? generateInboundConnectionSecret;
+  const newCleanupToken = dependencies.newCleanupToken ?? generateCleanupToken;
   return async (request: Request): Promise<Response> => {
     try {
       const url = new URL(request.url);
@@ -91,7 +106,7 @@ export function createAppApiHandler(dependencies: AppApiHandlerDependencies) {
       }
       const route = resolveRoute(request.method, url.pathname);
       assertAllowedOrigin(request, dependencies.allowedOrigins);
-      let claims: { sub: string; role: "authenticated" };
+      let claims: AuthenticatedClaims;
       try {
         claims = await dependencies.authenticate(request);
       } catch (error) {
@@ -106,18 +121,32 @@ export function createAppApiHandler(dependencies: AppApiHandlerDependencies) {
         ? {}
         : await readBoundedJson(request, MAX_BODY_BYTES);
       let validated = validateRouteBody(route, body);
+      try {
+        validated = await accountRequestAttestation(
+          route.key, validated, claims, dependencies.stepUpHashPepper,
+        );
+      } catch (_error) {
+        throw new HttpError(401, "STEP_UP_REQUIRED", "fresh OTP step up is required");
+      }
       let pairingCode: string | undefined;
       if (route.key === "telegram_pairing") {
         pairingCode = newPairingCode();
         validated = {
+          ...validated,
           code_digest: await digestPairingValue(pairingCode, dependencies.pairingHashPepper),
         };
       }
       let inboundConnectionSecret: string | undefined;
+      let cleanupToken: string | undefined;
       if (route.key === "connection_create") {
         const connection = await prepareConnectionCreate(validated, newConnectionSecret);
         validated = connection.request;
         inboundConnectionSecret = connection.secret;
+      }
+      if (route.key === "account_delete_confirm") {
+        const cleanup = await attachCleanupTokenDigest(validated, newCleanupToken);
+        validated = cleanup.request;
+        cleanupToken = cleanup.token;
       }
       const result = await dependencies.repository.dispatch({
         route: `${route.method} ${route.path}`,
@@ -136,10 +165,50 @@ export function createAppApiHandler(dependencies: AppApiHandlerDependencies) {
       if (inboundConnectionSecret) {
         responseValue = attachGatewayCredential(responseValue, inboundConnectionSecret);
       }
+      if (route.key === "account_delete_confirm" && responseValue.ok === true) {
+        const cleanup = await deleteRecentTelegramMessages(
+          responseValue,
+          dependencies.telegramBotToken,
+          dependencies.telegramFetch,
+        );
+        if (cleanupToken && cleanup.recordRequired) {
+          const data = responseValue.data as Record<string, unknown>;
+          const cleanupReceipt = await dependencies.repository.dispatch({
+            route: "POST /account/delete/cleanup-result",
+            requestId: newId(),
+            ipDigest: await clientDigest(request, dependencies.ipHashPepper),
+            bearerToken: bearerToken(request),
+            body: {
+              deletion_request_id: data.deletion_request_id,
+              cleanup_token: cleanupToken,
+              attempted: cleanup.attempted,
+              deleted: cleanup.deleted,
+              failed: cleanup.failed,
+              status: cleanup.status,
+            },
+          });
+          if (cleanupReceipt.ok !== true ||
+              !cleanupReceipt.data || typeof cleanupReceipt.data !== "object" ||
+              Array.isArray(cleanupReceipt.data) ||
+              (cleanupReceipt.data as Record<string, unknown>).status !== "recorded") {
+            cleanup.status = "unavailable";
+          }
+        }
+        responseValue = sanitizeDeletionResponse(responseValue, cleanup);
+        try {
+          await dependencies.revokeAllSessions(bearerToken(request));
+        } catch (_error) {
+          throw new HttpError(503, "SESSION_REVOCATION_FAILED", "session revocation failed");
+        }
+      }
+      const responseHeaders = corsHeaders(request, dependencies.allowedOrigins);
+      if (route.key === "export_account" || route.key === "export_ledger") {
+        return exportResponse(responseValue, responseHeaders);
+      }
       return jsonResponse(
         responseStatus(responseValue),
         responseValue,
-        corsHeaders(request, dependencies.allowedOrigins),
+        responseHeaders,
       );
     } catch (error) {
       return errorResponse(error, request, dependencies.allowedOrigins);

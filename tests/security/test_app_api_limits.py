@@ -53,6 +53,30 @@ def buy_request(ticker, key=None):
     }
 
 
+def fresh_step_up(connection, owner=OWNER_A):
+    connection.execute("RESET ROLE")
+    challenge_id = uuid4()
+    receipt_id = uuid4()
+    session_digest = "f" * 64
+    connection.execute(
+        """
+        INSERT INTO app.account_step_up_challenges(
+          id, owner_id, initial_session_digest, expires_at
+        ) VALUES (%s, %s, decode(%s, 'hex'), now() + interval '10 minutes')
+        """,
+        (challenge_id, owner, "e" * 64),
+    )
+    connection.execute(
+        """
+        INSERT INTO app.account_step_up_receipts(
+          id, owner_id, challenge_id, session_digest, authenticated_at, expires_at
+        ) VALUES (%s, %s, %s, decode(%s, 'hex'), now(), now() + interval '5 minutes')
+        """,
+        (receipt_id, owner, challenge_id, session_digest),
+    )
+    return str(receipt_id), session_digest
+
+
 def test_dispatch_rate_limits_previews_and_confirms_without_direct_rpc_bypass(tenant_database):
     preview = dispatch(tenant_database, "POST /portfolio/preview", buy_request("APIONE"))
     assert preview["ok"] is True
@@ -170,10 +194,13 @@ def test_connection_routes_use_authenticated_owner_and_require_completed_handsha
         })
         assert created["ok"] is True
         connection_id = created["data"]["connection_id"]
+        receipt_id, session_digest = fresh_step_up(tenant_database)
         handshake = dispatch(tenant_database, "POST /connections/handshake", {
             "connection_id": connection_id,
             "trigger_url": "https://api.anthropic.com/v1/claude_code/routines/trig_APITEST/fire",
             "trigger_token": "api-route-routine-token-12345",
+            "step_up_receipt_id": receipt_id,
+            "session_digest": session_digest,
         })
         assert handshake["ok"] is True
         assert handshake["data"]["status"] == "testing"

@@ -10,6 +10,7 @@ OWNER_C = "33333333-3333-4333-8333-333333333333"
 CODE_DIGEST = "a" * 64
 OTHER_CODE_DIGEST = "b" * 64
 IDENTITY_DIGEST = "c" * 64
+SESSION_DIGEST = "d" * 64
 
 
 @pytest.fixture(autouse=True)
@@ -28,6 +29,9 @@ def fresh_unpaired_owner(tenant_database):
     ):
         tenant_database.execute(f"DELETE FROM app.{table} WHERE owner_id = %s", (OWNER_C,))
     tenant_database.execute("DELETE FROM machine.telegram_pairing_attempts")
+    tenant_database.execute("DELETE FROM app.account_deletion_requests WHERE owner_id = %s", (OWNER_C,))
+    tenant_database.execute("DELETE FROM app.account_step_up_receipts WHERE owner_id = %s", (OWNER_C,))
+    tenant_database.execute("DELETE FROM app.account_step_up_challenges WHERE owner_id = %s", (OWNER_C,))
     yield
     for table in (
         "telegram_callback_tokens", "portfolio_commands", "telegram_pairing_codes",
@@ -35,6 +39,31 @@ def fresh_unpaired_owner(tenant_database):
     ):
         tenant_database.execute(f"DELETE FROM app.{table} WHERE owner_id = %s", (OWNER_C,))
     tenant_database.execute("DELETE FROM machine.telegram_pairing_attempts")
+    tenant_database.execute("DELETE FROM app.account_deletion_requests WHERE owner_id = %s", (OWNER_C,))
+    tenant_database.execute("DELETE FROM app.account_step_up_receipts WHERE owner_id = %s", (OWNER_C,))
+    tenant_database.execute("DELETE FROM app.account_step_up_challenges WHERE owner_id = %s", (OWNER_C,))
+
+
+def fresh_step_up(connection):
+    challenge_id = uuid4()
+    receipt_id = uuid4()
+    connection.execute(
+        """
+        INSERT INTO app.account_step_up_challenges(
+          id, owner_id, initial_session_digest, expires_at
+        ) VALUES (%s, %s, decode(%s, 'hex'), now() + interval '10 minutes')
+        """,
+        (challenge_id, OWNER_C, "e" * 64),
+    )
+    connection.execute(
+        """
+        INSERT INTO app.account_step_up_receipts(
+          id, owner_id, challenge_id, session_digest, authenticated_at, expires_at
+        ) VALUES (%s, %s, %s, decode(%s, 'hex'), now(), now() + interval '5 minutes')
+        """,
+        (receipt_id, OWNER_C, challenge_id, SESSION_DIGEST),
+    )
+    return str(receipt_id)
 
 
 def issue(connection, digest=CODE_DIGEST):
@@ -84,6 +113,7 @@ def test_pairing_stores_only_digest_and_consumes_once_in_a_private_identity(tena
 
 
 def test_authenticated_app_dispatch_issues_only_a_digest_receipt(tenant_database):
+    receipt_id = fresh_step_up(tenant_database)
     with tenant_database.transaction():
         tenant_database.execute("SET LOCAL ROLE authenticated")
         tenant_database.execute(
@@ -95,7 +125,11 @@ def test_authenticated_app_dispatch_issues_only_a_digest_receipt(tenant_database
                 "POST /telegram/pairing-code",
                 uuid4(),
                 "9" * 64,
-                Jsonb({"code_digest": CODE_DIGEST}),
+                Jsonb({
+                    "code_digest": CODE_DIGEST,
+                    "step_up_receipt_id": receipt_id,
+                    "session_digest": SESSION_DIGEST,
+                }),
             ),
         ).fetchone()[0]
     assert result["ok"] is True

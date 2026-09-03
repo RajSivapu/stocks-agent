@@ -138,7 +138,7 @@ describe("browser app API", () => {
     const api = createCommandClient(client(), "https://test-project.supabase.co", () => Promise.resolve(null), fetcher);
 
     const connection = await api.createConnection("provider-data-v1");
-    const pairing = await api.requestPairingCode();
+    const pairing = await api.requestPairingCode("44444444-4444-4444-8444-444444444444");
 
     expect(connection.gatewayCredential).toBe(credential);
     expect(connection.gatewayUrl).toBe("https://test-project.supabase.co/functions/v1/agent-gateway");
@@ -146,7 +146,9 @@ describe("browser app API", () => {
     const createOptions = fetcher.mock.calls[0]?.[1] as RequestInit;
     const pairingOptions = fetcher.mock.calls[1]?.[1] as RequestInit;
     expect(JSON.stringify(createOptions.body)).not.toContain("owner_id");
-    expect(pairingOptions.body).toBe("{}");
+    expect(pairingOptions.body).toBe(JSON.stringify({
+      step_up_receipt_id: "44444444-4444-4444-8444-444444444444",
+    }));
   });
 
   it("uses exact lifecycle routes and PATCH settings without schedule expressions", async () => {
@@ -165,6 +167,7 @@ describe("browser app API", () => {
       connectionId,
       "https://api.anthropic.com/v1/claude_code/routines/trig_ABC123/fire",
       "t".repeat(32),
+      "44444444-4444-4444-8444-444444444444",
     );
     await api.updateSettings({
       display_name: "Raj", timezone: "America/Chicago",
@@ -182,5 +185,69 @@ describe("browser app API", () => {
     ]);
     expect(fetchCalls[1]?.[1].method).toBe("PATCH");
     expect(JSON.stringify(fetchCalls[1]?.[1].body)).not.toContain("cron");
+  });
+
+  it("performs step-up and deletion without placing session proof in public bodies", async () => {
+    const challengeId = "11111111-1111-4111-8111-111111111111";
+    const receiptId = "22222222-2222-4222-8222-222222222222";
+    const deletionId = "33333333-3333-4333-8333-333333333333";
+    const fetcher = vi.fn()
+      .mockResolvedValueOnce(response({
+        status: "challenge_created", challenge_id: challengeId,
+        expires_at: "2026-09-03T16:10:00Z",
+      }))
+      .mockResolvedValueOnce(response({
+        status: "verified", step_up_receipt_id: receiptId,
+        expires_at: "2026-09-03T16:05:00Z",
+      }))
+      .mockResolvedValueOnce(response({
+        status: "confirmation_pending", deletion_request_id: deletionId,
+        confirmation_phrase: "DELETE MY ACCOUNT",
+        confirmation_expires_at: "2026-09-03T16:05:00Z",
+      }))
+      .mockResolvedValueOnce(response({
+        status: "pending", deletion_request_id: deletionId,
+        cancel_until: "2026-09-06T16:00:00Z", delete_by: "2026-09-10T16:00:00Z",
+      }));
+    const api = createCommandClient(client(), "https://test-project.supabase.co", () => Promise.resolve(null), fetcher);
+
+    const challenge = await api.beginStepUp();
+    const receipt = await api.completeStepUp(challenge.challengeId);
+    const preview = await api.requestDeletion(receipt.receiptId);
+    const deleted = await api.confirmDeletion(
+      preview.deletionRequestId, receipt.receiptId, preview.confirmationPhrase,
+    );
+
+    expect(deleted.status).toBe("pending");
+    const bodies = fetcher.mock.calls.map((call) => String((call[1] as RequestInit).body ?? ""));
+    expect(bodies.join(" ")).not.toMatch(/session_digest|authenticated_at|auth_method|owner_id/);
+    expect(bodies).toEqual([
+      "{}",
+      JSON.stringify({ challenge_id: challengeId }),
+      JSON.stringify({ step_up_receipt_id: receiptId }),
+      JSON.stringify({
+        deletion_request_id: deletionId,
+        step_up_receipt_id: receiptId,
+        confirmation_phrase: "DELETE MY ACCOUNT",
+      }),
+    ]);
+  });
+
+  it("accepts only exact no-store export attachments within five MiB", async () => {
+    const fetcher = vi.fn().mockResolvedValue(new Response("transaction_id\n", {
+      status: 200,
+      headers: {
+        "content-type": "text/csv; charset=utf-8",
+        "content-disposition": 'attachment; filename="stock-agent-ledger.csv"',
+        "cache-control": "no-store",
+      },
+    }));
+    const api = createCommandClient(client(), "https://test-project.supabase.co", () => Promise.resolve(null), fetcher);
+
+    const result = await api.downloadExport("ledger");
+
+    expect(result.filename).toBe("stock-agent-ledger.csv");
+    expect(result.blob.size).toBeGreaterThan(0);
+    expect((fetcher.mock.calls[0]?.[1] as RequestInit).body).toBeUndefined();
   });
 });

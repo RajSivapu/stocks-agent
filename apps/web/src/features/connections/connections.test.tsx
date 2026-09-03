@@ -8,8 +8,14 @@ import type {
   PairingCodeReceipt,
 } from "../../lib/app-api";
 import type { ConnectionsSnapshot, DashboardRepository } from "../../lib/dashboard";
+import type { SessionService, ViewerState } from "../../lib/session";
 
 const connectionId = "11111111-1111-4111-8111-111111111111";
+const receiptId = "66666666-6666-4666-8666-666666666666";
+const viewer: Extract<ViewerState, { kind: "ready" }> = {
+  kind: "ready", userId: "77777777-7777-4777-8777-777777777777",
+  email: "owner@example.test", displayName: "Owner",
+};
 
 function snapshot(overrides: Partial<ConnectionsSnapshot> = {}): ConnectionsSnapshot {
   return {
@@ -54,14 +60,26 @@ function harness(initial = snapshot()) {
     revokeConnection: vi.fn(() => Promise.resolve({ connectionId, status: "revoked" as const })),
     requestPairingCode: vi.fn(() => Promise.resolve(paired)),
     unlinkTelegram: vi.fn(() => Promise.resolve({ status: "unlinked" as const })),
+    beginStepUp: vi.fn(() => Promise.resolve({
+      challengeId: "88888888-8888-4888-8888-888888888888",
+      expiresAt: "2026-09-03T18:10:00Z",
+    })),
+    completeStepUp: vi.fn(() => Promise.resolve({
+      receiptId, expiresAt: "2026-09-03T18:05:00Z",
+    })),
   } as unknown as AppApiClient;
-  return { repository, client, created, paired, setCurrent(value: ConnectionsSnapshot) { current = value; } };
+  const session = {
+    requestOtp: vi.fn(() => Promise.resolve()),
+    verifyOtp: vi.fn(() => Promise.resolve()),
+  } as unknown as SessionService;
+  return { repository, client, session, created, paired, setCurrent(value: ConnectionsSnapshot) { current = value; } };
 }
 
 describe("provider and Telegram setup", () => {
   it("offers only the proven Claude Routine adapter and states its limits", async () => {
-    const { repository, client } = harness();
-    render(<ConnectionsScreen repository={repository} connectionClient={client} />);
+    const { repository, client, session } = harness();
+    render(<ConnectionsScreen repository={repository} connectionClient={client}
+      accountClient={client} session={session} viewer={viewer} />);
 
     expect(await screen.findByRole("heading", { name: /claude routines/i })).toBeVisible();
     expect(screen.queryByText(/chatgpt|grok|bring your own key|second opinion/i)).not.toBeInTheDocument();
@@ -72,9 +90,10 @@ describe("provider and Telegram setup", () => {
   });
 
   it("shows the inbound credential once and never displays the trigger token", async () => {
-    const { repository, client, created } = harness();
+    const { repository, client, session, created } = harness();
     const user = userEvent.setup();
-    render(<ConnectionsScreen repository={repository} connectionClient={client} />);
+    render(<ConnectionsScreen repository={repository} connectionClient={client}
+      accountClient={client} session={session} viewer={viewer} />);
 
     await user.click(await screen.findByRole("button", { name: /start claude setup/i }));
     expect(await screen.findByText(created.gatewayCredential)).toBeVisible();
@@ -88,18 +107,22 @@ describe("provider and Telegram setup", () => {
     expect(screen.getByLabelText(/one-time routine token/i)).toHaveAttribute("type", "password");
     expect(document.body.textContent).not.toContain(token);
     await user.click(screen.getByRole("button", { name: /test connection/i }));
+    expect(session.requestOtp).toHaveBeenCalledWith(viewer.email);
+    await user.type(await screen.findByLabelText(/fresh six-digit code/i), "123456");
+    await user.click(screen.getByRole("button", { name: /verify fresh code/i }));
     await waitFor(() => {
       expect(client.beginConnectionHandshake).toHaveBeenCalledWith(
         connectionId,
         "https://api.anthropic.com/v1/claude_code/routines/trig_ABC123/fire",
         token,
+        receiptId,
       );
     });
     expect(screen.getByLabelText(/one-time routine token/i)).toHaveValue("");
   });
 
   it("activates only a ready connection, links to the handshake session, and supports rotation", async () => {
-    const { repository, client } = harness(snapshot({
+    const { repository, client, session } = harness(snapshot({
       connections: [{
         id: connectionId,
         publicId: "22222222-2222-4222-8222-222222222222",
@@ -126,10 +149,11 @@ describe("provider and Telegram setup", () => {
       }],
     }));
     const user = userEvent.setup();
-    render(<ConnectionsScreen repository={repository} connectionClient={client} />);
+    render(<ConnectionsScreen repository={repository} connectionClient={client}
+      accountClient={client} session={session} viewer={viewer} />);
 
-    const session = await screen.findByRole("link", { name: /open handshake session/i });
-    expect(session).toHaveAttribute("href", "https://claude.ai/code/session_abcdef123");
+    const sessionLink = await screen.findByRole("link", { name: /open handshake session/i });
+    expect(sessionLink).toHaveAttribute("href", "https://claude.ai/code/session_abcdef123");
     await user.click(screen.getByRole("button", { name: /activate as primary/i }));
     expect(client.activateConnection).toHaveBeenCalledWith(connectionId);
     await user.click(screen.getByRole("button", { name: /revoke connection/i }));
@@ -138,16 +162,20 @@ describe("provider and Telegram setup", () => {
   });
 
   it("issues an expiring private-chat pairing code and can unlink", async () => {
-    const { repository, client } = harness(snapshot({
+    const { repository, client, session } = harness(snapshot({
       telegram: { status: "active", linkedAt: "2026-09-03T17:00:00Z", revokedAt: null },
     }));
     const user = userEvent.setup();
-    render(<ConnectionsScreen repository={repository} connectionClient={client} />);
+    render(<ConnectionsScreen repository={repository} connectionClient={client}
+      accountClient={client} session={session} viewer={viewer} />);
 
     await user.click(await screen.findByRole("button", { name: /unlink telegram/i }));
     expect(client.unlinkTelegram).toHaveBeenCalledTimes(1);
     await user.click(screen.getByRole("button", { name: /new pairing code/i }));
+    await user.type(await screen.findByLabelText(/fresh six-digit code/i), "123456");
+    await user.click(screen.getByRole("button", { name: /verify fresh code/i }));
     expect(await screen.findByText(/\/pair ABCD234567/i)).toBeVisible();
+    expect(client.requestPairingCode).toHaveBeenCalledWith(receiptId);
     expect(screen.getByText(/expires/i)).toBeVisible();
   });
 });

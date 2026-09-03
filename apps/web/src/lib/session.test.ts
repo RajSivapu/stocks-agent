@@ -64,6 +64,29 @@ describe("session verification", () => {
     expect(events).toEqual(["verified", "profile", "consents"]);
   });
 
+  it("routes a deletion-pending identity to the restricted lifecycle gate", async () => {
+    const value = client({
+      auth: {
+        getUser: vi.fn().mockResolvedValue({
+          data: { user: { id: "owner", email: "owner@example.com" } }, error: null,
+        }),
+      },
+      schema: () => ({
+        from: (table: string) => ({
+          select: () => table === "profile"
+            ? { maybeSingle: () => Promise.resolve({
+              data: { display_name: "Owner", status: "deletion_pending" }, error: null,
+            }) }
+            : { order: () => Promise.resolve({ data: [], error: null }) },
+        }),
+      }),
+    });
+
+    await expect(loadVerifiedViewer(value)).resolves.toMatchObject({
+      kind: "deletion-pending", userId: "owner", email: "owner@example.com",
+    });
+  });
+
   it("clears auth parameters before exchanging a captured PKCE code and logs no token", async () => {
     const events: string[] = [];
     const replaceState = vi.fn(() => events.push("cleared"));

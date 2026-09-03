@@ -29,9 +29,15 @@ export const APP_ROUTES: readonly AppRoute[] = [
   { method: "POST", path: "/runs/on-demand", key: "run_on_demand", body: "object" },
   { method: "GET", path: "/settings", key: "settings_read", body: "none" },
   { method: "PATCH", path: "/settings", key: "settings_update", body: "object" },
-  { method: "GET", path: "/export", key: "export", body: "none" },
+  { method: "POST", path: "/consents/accept", key: "consent_accept", body: "object" },
+  { method: "GET", path: "/account/status", key: "account_status", body: "none" },
+  { method: "GET", path: "/export/account.json", key: "export_account", body: "none" },
+  { method: "GET", path: "/export/ledger.csv", key: "export_ledger", body: "none" },
+  { method: "POST", path: "/account/step-up/challenge", key: "account_step_up_challenge", body: "object" },
+  { method: "POST", path: "/account/step-up/complete", key: "account_step_up_complete", body: "object" },
   { method: "POST", path: "/account/delete/request", key: "account_delete_request", body: "object" },
   { method: "POST", path: "/account/delete/confirm", key: "account_delete_confirm", body: "object" },
+  { method: "POST", path: "/account/delete/cancel", key: "account_delete_cancel", body: "object" },
 ] as const;
 
 function exactKeys(row: Record<string, unknown>, required: readonly string[]): void {
@@ -47,10 +53,32 @@ function uuidField(row: Record<string, unknown>, field: string): void {
 }
 
 function validateObjectRoute(route: AppRoute, body: Record<string, unknown>): void {
-  if (route.key === "telegram_pairing" || route.key === "telegram_unlink" ||
-      route.key === "run_on_demand" ||
-      route.key === "account_delete_request") {
+  if (route.key === "telegram_unlink" ||
+      route.key === "run_on_demand" || route.key === "account_step_up_challenge") {
     exactKeys(body, []);
+    return;
+  }
+  if (route.key === "telegram_pairing") {
+    exactKeys(body, ["step_up_receipt_id"]);
+    uuidField(body, "step_up_receipt_id");
+    return;
+  }
+  if (route.key === "consent_accept") {
+    exactKeys(body, ["document_version"]);
+    if (typeof body.document_version !== "string" ||
+      !/^[a-z0-9][a-z0-9.-]{2,99}$/.test(body.document_version)) {
+      throw new HttpError(400, "INVALID_REQUEST", "consent version is invalid");
+    }
+    return;
+  }
+  if (route.key === "account_step_up_complete") {
+    exactKeys(body, ["challenge_id"]);
+    uuidField(body, "challenge_id");
+    return;
+  }
+  if (route.key === "account_delete_request" || route.key === "account_delete_cancel") {
+    exactKeys(body, ["step_up_receipt_id"]);
+    uuidField(body, "step_up_receipt_id");
     return;
   }
   if (route.key === "connection_create") {
@@ -62,8 +90,9 @@ function validateObjectRoute(route: AppRoute, body: Record<string, unknown>): vo
     return;
   }
   if (route.key === "connection_handshake") {
-    exactKeys(body, ["connection_id", "trigger_url", "trigger_token"]);
+    exactKeys(body, ["connection_id", "trigger_url", "trigger_token", "step_up_receipt_id"]);
     uuidField(body, "connection_id");
+    uuidField(body, "step_up_receipt_id");
     if (typeof body.trigger_url !== "string" || body.trigger_url.length > 300 ||
       typeof body.trigger_token !== "string" || body.trigger_token.length < 24 ||
       body.trigger_token.length > 500 || /\s/.test(body.trigger_token)) {
@@ -77,10 +106,11 @@ function validateObjectRoute(route: AppRoute, body: Record<string, unknown>): vo
     return;
   }
   if (route.key === "account_delete_confirm") {
-    exactKeys(body, ["confirmation_id", "otp"]);
-    uuidField(body, "confirmation_id");
-    if (typeof body.otp !== "string" || !/^\d{6}$/.test(body.otp)) {
-      throw new HttpError(400, "INVALID_REQUEST", "OTP is invalid");
+    exactKeys(body, ["deletion_request_id", "step_up_receipt_id", "confirmation_phrase"]);
+    uuidField(body, "deletion_request_id");
+    uuidField(body, "step_up_receipt_id");
+    if (body.confirmation_phrase !== "DELETE MY ACCOUNT") {
+      throw new HttpError(400, "INVALID_REQUEST", "confirmation phrase is invalid");
     }
     return;
   }

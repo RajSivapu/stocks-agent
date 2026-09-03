@@ -16,6 +16,12 @@ export type ViewerState =
     email: string;
     displayName: string;
   }
+  | {
+    kind: "deletion-pending";
+    userId: string;
+    email: string;
+    displayName: string;
+  }
   | { kind: "unavailable"; code: "PROFILE_UNAVAILABLE" };
 
 export interface SessionService {
@@ -79,7 +85,7 @@ export async function loadVerifiedViewer(
     .select("display_name,status").maybeSingle();
   if (
     profileResult.error || !profileResult.data ||
-    !["invited", "active"].includes(profileResult.data.status)
+    !["invited", "active", "deletion_pending"].includes(profileResult.data.status)
   ) {
     return { kind: "unavailable", code: "PROFILE_UNAVAILABLE" };
   }
@@ -94,6 +100,9 @@ export async function loadVerifiedViewer(
     email: user.email,
     displayName: safeDisplayName(profileResult.data.display_name, user.email),
   };
+  if (profileResult.data.status === "deletion_pending") {
+    return { kind: "deletion-pending", ...identity };
+  }
   return consentResult.data.some((row) =>
       row.document_version === CURRENT_CONSENT_VERSION &&
       typeof row.accepted_at === "string"

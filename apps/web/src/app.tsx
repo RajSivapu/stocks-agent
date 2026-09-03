@@ -18,6 +18,7 @@ import { ResearchScreen } from "./features/research/ResearchScreen";
 import { RunsScreen } from "./features/runs/RunsScreen";
 import { ConnectionsScreen } from "./features/connections/ConnectionsScreen";
 import { SettingsScreen } from "./features/settings/SettingsScreen";
+import { DeletionPendingGate } from "./features/account/AccountPanel";
 import "./styles.css";
 
 type AppProps = {
@@ -36,10 +37,11 @@ const ROUTES = [
   ["/settings", "Settings"],
 ] as const;
 
-function Workspace({ viewer, repository, commands }: {
+function Workspace({ viewer, repository, commands, session }: {
   viewer: Extract<ViewerState, { kind: "ready" }>;
   repository: DashboardRepository;
   commands: AppApiClient;
+  session: SessionService;
 }) {
   return (
     <div className="app-shell">
@@ -64,8 +66,9 @@ function Workspace({ viewer, repository, commands }: {
           <Route path="/activity" element={<ActivityScreen repository={repository} />} />
           <Route path="/research" element={<ResearchScreen repository={repository} />} />
           <Route path="/runs" element={<RunsScreen repository={repository} runClient={commands} />} />
-          <Route path="/connections" element={<ConnectionsScreen repository={repository} connectionClient={commands} />} />
-          <Route path="/settings" element={<SettingsScreen repository={repository} settingsClient={commands} />} />
+          <Route path="/connections" element={<ConnectionsScreen repository={repository} connectionClient={commands}
+            accountClient={commands} session={session} viewer={viewer} />} />
+          <Route path="/settings" element={<SettingsScreen repository={repository} settingsClient={commands} accountClient={commands} session={session} viewer={viewer} />} />
           <Route path="*" element={<Navigate to="/" replace />} />
         </Routes>
       </main>
@@ -97,11 +100,14 @@ function SessionBoundary({ session, repository, commands }: AppProps) {
     return <main className="loading-screen"><p role="status">Confirming your session…</p></main>;
   }
   if (viewer.kind === "signed-out") return <SignIn session={session} onVerified={refresh} />;
-  if (viewer.kind === "consent-required") return <ConsentGate viewer={viewer} />;
+  if (viewer.kind === "consent-required") return <ConsentGate viewer={viewer} accountClient={commands} onAccepted={refresh} />;
+  if (viewer.kind === "deletion-pending") {
+    return <DeletionPendingGate viewer={viewer} session={session} accountClient={commands} onCancelled={refresh} />;
+  }
   if (viewer.kind === "unavailable") {
     return <main className="loading-screen"><p role="alert">Your private workspace is temporarily unavailable.</p></main>;
   }
-  return <Workspace viewer={viewer} repository={repository} commands={commands} />;
+  return <Workspace viewer={viewer} repository={repository} commands={commands} session={session} />;
 }
 
 export function App({ session, repository, commands }: AppProps) {

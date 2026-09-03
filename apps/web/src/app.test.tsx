@@ -77,6 +77,14 @@ const commands: AppApiClient = {
   requestPairingCode: () => Promise.reject(new Error("not used")),
   unlinkTelegram: () => Promise.reject(new Error("not used")),
   updateSettings: () => Promise.reject(new Error("not used")),
+  acceptConsent: () => Promise.reject(new Error("not used")),
+  beginStepUp: () => Promise.reject(new Error("not used")),
+  completeStepUp: () => Promise.reject(new Error("not used")),
+  requestDeletion: () => Promise.reject(new Error("not used")),
+  confirmDeletion: () => Promise.reject(new Error("not used")),
+  cancelDeletion: () => Promise.reject(new Error("not used")),
+  loadAccountStatus: () => Promise.reject(new Error("not used")),
+  downloadExport: () => Promise.reject(new Error("not used")),
 };
 
 function app(session: SessionService) {

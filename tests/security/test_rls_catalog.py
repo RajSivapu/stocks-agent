@@ -17,6 +17,7 @@ API_VIEWS = {
     "market_quotes",
     "research",
     "run_timeline",
+    "account_status",
 }
 
 API_FUNCTIONS = {
@@ -24,6 +25,7 @@ API_FUNCTIONS = {
     "api.confirm_portfolio_command(uuid,text)",
     "api.cancel_portfolio_command(uuid,text)",
     "api.app_dispatch(text,uuid,text,jsonb)",
+    "api.operator_initialize_invited_user(uuid)",
 }
 
 OWNER_TABLES = {
@@ -54,6 +56,11 @@ OWNER_TABLES = {
     "owner_ledger_counters",
     "app_api_rate_limits",
     "app_api_audit_events",
+    "account_step_up_challenges",
+    "account_step_up_receipts",
+    "account_deletion_requests",
+    "deletion_tombstones",
+    "owner_ledger_reset_receipts",
     "holdings",
     "analysis_runs",
     "transactions",
@@ -184,6 +191,14 @@ def test_policies_are_authenticated_and_bind_both_owner_checks(tenant_database):
         "telegram_updates",
         "app_api_rate_limits",
         "app_api_audit_events",
+        "account_step_up_challenges",
+        "account_step_up_receipts",
+        "account_deletion_requests",
+        "deletion_tombstones",
+        "owner_ledger_reset_receipts",
+        "app_admins",
+        "single_owner_migration_receipts",
+        "owner_policy_overrides",
     }
 
 

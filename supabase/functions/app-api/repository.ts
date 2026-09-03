@@ -1,14 +1,14 @@
 import type { AppApiRepository } from "./handler.ts";
 
 
-async function boundedResult(response: Response): Promise<Record<string, unknown>> {
+async function boundedResult(response: Response, maxBytes: number): Promise<Record<string, unknown>> {
   if (!response.ok || response.body === null) throw new Error("app API database request failed");
   const declared = response.headers.get("content-length");
-  if (declared !== null && (!/^\d+$/.test(declared) || Number(declared) > 64 * 1024)) {
+  if (declared !== null && (!/^\d+$/.test(declared) || Number(declared) > maxBytes)) {
     throw new Error("app API database response is too large");
   }
   const bytes = new Uint8Array(await response.arrayBuffer());
-  if (bytes.byteLength > 64 * 1024) throw new Error("app API database response is too large");
+  if (bytes.byteLength > maxBytes) throw new Error("app API database response is too large");
   const value: unknown = JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(bytes));
   if (!value || typeof value !== "object" || Array.isArray(value)) {
     throw new Error("app API database response is invalid");
@@ -47,7 +47,11 @@ export function createAppApiRepository(
         }),
         signal: AbortSignal.timeout(5_000),
       });
-      return await boundedResult(response);
+      const maxBytes = input.route === "GET /export/account.json" ||
+          input.route === "GET /export/ledger.csv"
+        ? 5 * 1024 * 1024 + 16 * 1024
+        : 64 * 1024;
+      return await boundedResult(response, maxBytes);
     },
   };
 }
