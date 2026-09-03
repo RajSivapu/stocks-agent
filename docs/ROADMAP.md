@@ -39,16 +39,19 @@ security design after alert stability, not by reactivating the deferred multi-te
 
 The fail-closed cutover is deployed. Migrations/verifiers, policy activation, both Edge Functions,
 webhook health, secret rotation, Routine isolation, cloud healthcheck, Telegram owner flows, and two
-production dry-run lifecycles are complete. Both dry runs reported empty writes/message IDs, and
-independent before/after counts across eleven protected tables were unchanged.
+initial production dry-run lifecycles are complete. Subsequent protected comparison dry-runs also
+reported empty writes/message IDs, and independent before/after counts across twelve protected
+tables were unchanged.
 
 The remaining checks are scheduled observation followed by an explicitly approved one-class canary:
 
-1. Inspect the first Friday v2 audit and confirm it remains bounded, segmented, and read-only.
-2. After the first scheduled cycle, decide whether synthetic-looking legacy suggestions need a
+1. Inspect the first scheduled pre-market, intraday, and post-market cycle after gateway v16 and
+   reconcile the improved messages with their receipts.
+2. Inspect the first Friday v2 audit and confirm it remains bounded, segmented, and read-only.
+3. After the first scheduled cycle, decide whether synthetic-looking legacy suggestions need a
    separately approved archival cleanup. Do not mix that destructive data cleanup into this
    release.
-3. Review a real owner-visible v3 shadow example, then enable only the explicitly approved
+4. Review a real owner-visible v3 shadow example, then enable only the explicitly approved
    `stop_breach` class as a canary. Do not enable from a synthetic preview.
 
 ## Next reliability work
