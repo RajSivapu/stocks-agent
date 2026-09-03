@@ -716,30 +716,30 @@ git commit -m "feat: make telegram recorder multi user"
 - Produces: `validateEvidence(run, submission, serverFacts)` returning accepted facts or stable
 `evidence_stale`, `evidence_missing`, `evidence_conflicting`, or `corporate_action_pending` codes.
 
-- [ ] **Step 1: Write failing freshness tests**
+- [x] **Step 1: Write failing freshness tests**
 
 Reject a copied morning packet at intraday, model-supplied quote as authoritative, old search receipt,
 filing outside its category TTL without revalidation, missing Analyst/Checker, undeclared cross-run
 reference, duplicate evidence ID with changed payload, and fabricated persistence/delivery fields.
 
-- [ ] **Step 2: Add run/source evidence tables**
+- [x] **Step 2: Add run/source evidence tables**
 
 Store source category, source/reference identifier, observed/retrieved/revalidated times, content hash,
 claims, status, and run. Require one server market snapshot after `run.started_at` and one current-run
 search receipt, including an explicit `no_new_material_evidence` result.
 
-- [ ] **Step 3: Implement category TTLs and stable-fact reuse**
+- [x] **Step 3: Implement category TTLs and stable-fact reuse**
 
 Filings and fundamentals may reference an older stable source only when a current retrieval event
 revalidates it. News, quotes, and technicals use phase-specific freshness. Prior recommendations enter
 only through `prior_suggestion_ids`.
 
-- [ ] **Step 4: Enforce analytical dimensions**
+- [x] **Step 4: Enforce analytical dimensions**
 
 Require fundamentals, valuation, catalyst, technical, portfolio-fit, downside, bear case, invalidation,
 and decisive factor. Missing data lowers confidence or vetoes; the server never upgrades a model action.
 
-- [ ] **Step 5: Verify and commit**
+- [x] **Step 5: Verify and commit**
 
 Run shared-contract and evidence tests. Commit:
 
