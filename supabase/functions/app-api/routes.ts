@@ -25,6 +25,7 @@ export const APP_ROUTES: readonly AppRoute[] = [
   { method: "POST", path: "/connections/handshake", key: "connection_handshake", body: "object" },
   { method: "POST", path: "/connections/activate", key: "connection_activate", body: "object" },
   { method: "POST", path: "/connections/revoke", key: "connection_revoke", body: "object" },
+  { method: "POST", path: "/runs/on-demand", key: "run_on_demand", body: "object" },
   { method: "GET", path: "/settings", key: "settings_read", body: "none" },
   { method: "PATCH", path: "/settings", key: "settings_update", body: "object" },
   { method: "GET", path: "/export", key: "export", body: "none" },
@@ -45,7 +46,8 @@ function uuidField(row: Record<string, unknown>, field: string): void {
 }
 
 function validateObjectRoute(route: AppRoute, body: Record<string, unknown>): void {
-  if (route.key === "telegram_pairing" || route.key === "account_delete_request") {
+  if (route.key === "telegram_pairing" || route.key === "run_on_demand" ||
+      route.key === "account_delete_request") {
     exactKeys(body, []);
     return;
   }

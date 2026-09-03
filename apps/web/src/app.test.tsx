@@ -2,7 +2,7 @@ import { render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { App } from "./app";
-import type { CommandClient } from "./lib/app-api";
+import type { AppApiClient } from "./lib/app-api";
 import type { DashboardRepository } from "./lib/dashboard";
 import type { SessionService, ViewerState } from "./lib/session";
 
@@ -53,13 +53,16 @@ const repository: DashboardRepository = {
   loadToday: () => Promise.resolve({ holdings: [], quotes: [], plans: [], runs: [], recommendations: [] }),
   loadPortfolio: () => Promise.resolve({ holdings: [], quotes: [], plans: [] }),
   loadActivity: () => Promise.resolve({ transactions: [], plans: [], commands: [] }),
+  loadResearch: () => Promise.resolve({ items: [] }),
+  loadRuns: () => Promise.resolve({ runs: [] }),
   lookupCommand: () => Promise.resolve(null),
 };
 
-const commands: CommandClient = {
+const commands: AppApiClient = {
   preview: () => Promise.reject(new Error("not used")),
   confirm: () => Promise.reject(new Error("not used")),
   lookup: () => Promise.resolve(null),
+  requestRun: () => Promise.reject(new Error("not used")),
 };
 
 function app(session: SessionService) {

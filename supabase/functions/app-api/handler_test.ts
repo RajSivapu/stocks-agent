@@ -142,6 +142,29 @@ Deno.test("confirmation schema and route table are exact", async () => {
   assertEquals(repository.calls.length, 1);
 });
 
+Deno.test("on-demand run accepts only an empty authority-free request", async () => {
+  const { handler, repository } = makeHandler();
+  repository.response = {
+    ok: true,
+    data: {
+      status: "queued",
+      slot_id: "22222222-2222-4222-8222-222222222222",
+      phase: "on-demand",
+      telegram: "suppressed",
+    },
+  };
+
+  const accepted = await handler(request("/runs/on-demand", {}));
+  assertEquals(accepted.status, 200);
+  assertEquals(repository.calls[0].route, "POST /runs/on-demand");
+  assertEquals(repository.calls[0].body, {});
+  assertEquals((await accepted.json()).data.telegram, "suppressed");
+
+  const rejected = await handler(request("/runs/on-demand", { owner_id: OWNER }));
+  assertEquals(rejected.status, 400);
+  assertEquals(repository.calls.length, 1);
+});
+
 Deno.test("future lifecycle routes reject unreviewed fields before dispatch", async () => {
   const { handler, repository } = makeHandler();
   const created = await handler(request("/connections/create", {

@@ -40,6 +40,21 @@ export interface CommandClient {
   lookup(commandId: string): Promise<CommandReceipt | null>;
 }
 
+export type RunRequestReceipt = {
+  status: "queued";
+  slotId: string;
+  phase: "on-demand";
+  marketDate: string;
+  expectedBy: string;
+  telegram: "suppressed";
+};
+
+export interface RunControlClient {
+  requestRun(): Promise<RunRequestReceipt>;
+}
+
+export type AppApiClient = CommandClient & RunControlClient;
+
 export class AppApiError extends Error {
   constructor(readonly code: string) {
     super("Stock Agent request was not completed");
@@ -115,12 +130,27 @@ function parseApplied(value: unknown): AppliedCommand {
   };
 }
 
+function parseRunReceipt(value: unknown): RunRequestReceipt {
+  const row = record(value);
+  if (
+    row.status !== "queued" || row.phase !== "on-demand" || row.telegram !== "suppressed" ||
+    typeof row.slot_id !== "string" ||
+    !/^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(row.slot_id) ||
+    typeof row.market_date !== "string" || !/^\d{4}-\d{2}-\d{2}$/.test(row.market_date) ||
+    typeof row.expected_by !== "string" || !Number.isFinite(Date.parse(row.expected_by))
+  ) throw new AppApiError("INVALID_RESPONSE");
+  return {
+    status: "queued", slotId: row.slot_id, phase: "on-demand",
+    marketDate: row.market_date, expectedBy: row.expected_by, telegram: "suppressed",
+  };
+}
+
 export function createCommandClient(
   client: SupabaseClient,
   projectUrl: string,
   lookup: (commandId: string) => Promise<CommandReceipt | null>,
   fetcher: typeof fetch = fetch,
-): CommandClient {
+): AppApiClient {
   const parsed = new URL(projectUrl);
   if (parsed.protocol !== "https:" || !/^[a-z0-9-]+\.supabase\.co$/.test(parsed.hostname)) {
     throw new Error("PUBLIC_CONFIG_UNAVAILABLE");
@@ -158,6 +188,9 @@ export function createCommandClient(
         command_id: commandId,
         preview_digest: previewDigest,
       }));
+    },
+    async requestRun() {
+      return parseRunReceipt(await post("/runs/on-demand", {}));
     },
     lookup,
   };

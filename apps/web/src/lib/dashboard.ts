@@ -101,10 +101,123 @@ export type TodaySnapshot = PortfolioSnapshot & {
   recommendations: Recommendation[];
 };
 
+export type EvidenceItem = {
+  evidenceId: string;
+  category: string;
+  source: string;
+  reference: string | null;
+  observedAt: string | null;
+  retrievedAt: string;
+  revalidatedAt: string | null;
+  claims: string[];
+  status: string;
+};
+
+export type Outcome = {
+  horizonSessions: 5 | 21 | 63;
+  coverageStatus: string;
+  stockReturnPct: string | null;
+  benchmark: string | null;
+  benchmarkReturnPct: string | null;
+  excessReturnPct: string | null;
+  mfePct: string | null;
+  maePct: string | null;
+  entryHitAt: string | null;
+  stopHitAt: string | null;
+  targetHitAt: string | null;
+  invalidationHitAt: string | null;
+  directionSuccess: boolean | null;
+  gradedAt: string | null;
+};
+
+export type ResearchItem = {
+  id: string;
+  runId: string | null;
+  marketDate: string | null;
+  phase: string | null;
+  runStatus: string | null;
+  provider: string | null;
+  model: string | null;
+  createdAt: string;
+  ticker: string;
+  action: string;
+  rawAction: string | null;
+  policyStatus: string | null;
+  policyReasonCodes: string[];
+  policyExplanations: string[];
+  analyst: Record<string, unknown>;
+  checker: Record<string, unknown>;
+  confidence: string | null;
+  verifiedPrice: string | null;
+  evidenceAsOf: string | null;
+  entryZoneLow: string | null;
+  entryZoneHigh: string | null;
+  stop: string | null;
+  target: string | null;
+  invalidationPrice: string | null;
+  validUntil: string | null;
+  horizon: string | null;
+  bucket: string | null;
+  riskVerdict: string | null;
+  decisiveFactor: string | null;
+  reason: string | null;
+  bullCase: string | null;
+  bearCase: string | null;
+  evidenceStatus: "fresh" | "stale" | "source_conflict" | "corporate_action_pending" | "missing";
+  evidence: EvidenceItem[];
+  publicationKind: string | null;
+  notificationStatus: string | null;
+  deliveredAt: string | null;
+  telegramMessageIds: string[];
+  deliveryErrorCode: string | null;
+  outcomes: Outcome[];
+};
+
+export type ResearchSnapshot = { items: ResearchItem[] };
+
+export type RunTimelineItem = {
+  slotId: string | null;
+  marketDate: string | null;
+  phase: string;
+  purpose: string;
+  expectedAt: string | null;
+  windowEndsAt: string | null;
+  holiday: boolean;
+  slotStatus: string;
+  triggerStatus: string | null;
+  triggerResponseStatus: number | null;
+  providerSessionUrl: string | null;
+  triggerStartedAt: string | null;
+  triggerFinishedAt: string | null;
+  runId: string | null;
+  startedAt: string | null;
+  finishedAt: string | null;
+  runStatus: string | null;
+  dataAsOf: string | null;
+  sourceStatus: Record<string, unknown>;
+  symbols: string[];
+  writeCounts: Record<string, unknown>;
+  summary: string | null;
+  provider: string | null;
+  model: string | null;
+  submissionStatus: string | null;
+  policyStates: string[];
+  evidenceStatus: "fresh" | "stale" | "source_conflict" | "missing" | "not_started";
+  publicationKind: string | null;
+  publicationStatus: string | null;
+  deliveredAt: string | null;
+  telegramMessageIds: string[];
+  errorCode: string | null;
+};
+
+export type RunSnapshot = { runs: RunTimelineItem[] };
+
 export interface DashboardRepository {
   loadToday(): Promise<TodaySnapshot>;
   loadPortfolio(): Promise<PortfolioSnapshot>;
   loadActivity(): Promise<ActivitySnapshot>;
+  loadResearch(): Promise<ResearchSnapshot>;
+  loadRuns(): Promise<RunSnapshot>;
   lookupCommand(commandId: string): Promise<CommandReceipt | null>;
 }
 
@@ -154,6 +267,10 @@ function object(value: unknown): Record<string, unknown> {
   return row(value);
 }
 
+function objectOrEmpty(value: unknown): Record<string, unknown> {
+  return value === null ? {} : object(value);
+}
+
 function stringList(value: unknown): string[] {
   if (!Array.isArray(value)) throw new Error("INVALID_DATA");
   const result: string[] = [];
@@ -163,6 +280,17 @@ function stringList(value: unknown): string[] {
     result.push(item);
   }
   return result;
+}
+
+function nullableBoolean(value: unknown): boolean | null {
+  if (value === null || typeof value === "boolean") return value;
+  throw new Error("INVALID_DATA");
+}
+
+function nullableSafeInteger(value: unknown): number | null {
+  if (value === null) return null;
+  if (!Number.isSafeInteger(value)) throw new Error("INVALID_DATA");
+  return value as number;
 }
 
 function holding(value: Record<string, unknown>): Holding {
@@ -269,6 +397,91 @@ function recommendation(value: Record<string, unknown>): Recommendation {
   };
 }
 
+function evidence(value: unknown): EvidenceItem {
+  const item = row(value);
+  return {
+    evidenceId: text(item.evidence_id), category: text(item.category),
+    source: text(item.source), reference: nullableText(item.reference),
+    observedAt: nullableText(item.observed_at), retrievedAt: text(item.retrieved_at),
+    revalidatedAt: nullableText(item.revalidated_at), claims: stringList(item.claims),
+    status: text(item.status),
+  };
+}
+
+function outcome(value: unknown): Outcome {
+  const item = row(value);
+  const horizon = item.horizon_sessions;
+  if (![5, 21, 63].includes(horizon as number)) throw new Error("INVALID_DATA");
+  return {
+    horizonSessions: horizon as Outcome["horizonSessions"],
+    coverageStatus: text(item.coverage_status),
+    stockReturnPct: decimal(item.stock_return_pct, true),
+    benchmark: nullableText(item.benchmark),
+    benchmarkReturnPct: decimal(item.benchmark_return_pct, true),
+    excessReturnPct: decimal(item.excess_return_pct, true),
+    mfePct: decimal(item.mfe_pct, true), maePct: decimal(item.mae_pct, true),
+    entryHitAt: nullableText(item.entry_hit_at), stopHitAt: nullableText(item.stop_hit_at),
+    targetHitAt: nullableText(item.target_hit_at), invalidationHitAt: nullableText(item.invalidation_hit_at),
+    directionSuccess: nullableBoolean(item.direction_success), gradedAt: nullableText(item.graded_at),
+  };
+}
+
+function objectList<T>(value: unknown, parser: (item: unknown) => T): T[] {
+  if (!Array.isArray(value)) throw new Error("INVALID_DATA");
+  return value.map(parser);
+}
+
+function researchItem(value: Record<string, unknown>): ResearchItem {
+  const evidenceStatus = text(value.evidence_status) as ResearchItem["evidenceStatus"];
+  if (!["fresh", "stale", "source_conflict", "corporate_action_pending", "missing"].includes(evidenceStatus)) {
+    throw new Error("INVALID_DATA");
+  }
+  return {
+    id: text(value.id), runId: nullableText(value.run_id), marketDate: nullableText(value.market_date),
+    phase: nullableText(value.phase), runStatus: nullableText(value.run_status),
+    provider: nullableText(value.provider), model: nullableText(value.model), createdAt: text(value.created_at),
+    ticker: text(value.ticker), action: text(value.action), rawAction: nullableText(value.raw_action),
+    policyStatus: nullableText(value.policy_status), policyReasonCodes: stringList(value.policy_reason_codes),
+    policyExplanations: stringList(value.policy_explanations), analyst: object(value.analyst), checker: object(value.checker),
+    confidence: nullableText(value.confidence), verifiedPrice: decimal(value.verified_price, true),
+    evidenceAsOf: nullableText(value.evidence_as_of), entryZoneLow: decimal(value.entry_zone_low, true),
+    entryZoneHigh: decimal(value.entry_zone_high, true), stop: decimal(value.stop, true),
+    target: decimal(value.target, true), invalidationPrice: decimal(value.invalidation_price, true),
+    validUntil: nullableText(value.valid_until), horizon: nullableText(value.horizon),
+    bucket: nullableText(value.bucket), riskVerdict: nullableText(value.risk_verdict),
+    decisiveFactor: nullableText(value.decisive_factor), reason: nullableText(value.reason),
+    bullCase: nullableText(value.bull_case), bearCase: nullableText(value.bear_case), evidenceStatus,
+    evidence: objectList(value.evidence, evidence), publicationKind: nullableText(value.publication_kind),
+    notificationStatus: nullableText(value.notification_status), deliveredAt: nullableText(value.delivered_at),
+    telegramMessageIds: stringList(value.telegram_message_ids),
+    deliveryErrorCode: nullableText(value.delivery_error_code), outcomes: objectList(value.outcomes, outcome),
+  };
+}
+
+function runTimeline(value: Record<string, unknown>): RunTimelineItem {
+  const evidenceStatus = text(value.evidence_status) as RunTimelineItem["evidenceStatus"];
+  if (!["fresh", "stale", "source_conflict", "missing", "not_started"].includes(evidenceStatus) ||
+      typeof value.holiday !== "boolean") throw new Error("INVALID_DATA");
+  return {
+    slotId: nullableText(value.slot_id), marketDate: nullableText(value.market_date),
+    phase: text(value.phase), purpose: text(value.purpose), expectedAt: nullableText(value.expected_at),
+    windowEndsAt: nullableText(value.window_ends_at), holiday: value.holiday,
+    slotStatus: text(value.slot_status), triggerStatus: nullableText(value.trigger_status),
+    triggerResponseStatus: nullableSafeInteger(value.trigger_response_status),
+    providerSessionUrl: nullableText(value.provider_session_url),
+    triggerStartedAt: nullableText(value.trigger_started_at), triggerFinishedAt: nullableText(value.trigger_finished_at),
+    runId: nullableText(value.run_id), startedAt: nullableText(value.started_at), finishedAt: nullableText(value.finished_at),
+    runStatus: nullableText(value.run_status), dataAsOf: nullableText(value.data_as_of),
+    sourceStatus: objectOrEmpty(value.source_status), symbols: value.symbols === null ? [] : stringList(value.symbols),
+    writeCounts: objectOrEmpty(value.write_counts), summary: nullableText(value.summary),
+    provider: nullableText(value.provider), model: nullableText(value.model),
+    submissionStatus: nullableText(value.submission_status), policyStates: stringList(value.policy_states),
+    evidenceStatus, publicationKind: nullableText(value.publication_kind),
+    publicationStatus: nullableText(value.publication_status), deliveredAt: nullableText(value.delivered_at),
+    telegramMessageIds: stringList(value.telegram_message_ids), errorCode: nullableText(value.error_code),
+  };
+}
+
 export function createDashboardRepository(client: SupabaseClient): DashboardRepository {
   const api = (client as unknown as ApiReader).schema("api");
   const holdings = () => api.from("holdings").select("*").order("ticker", { ascending: true }).limit(100);
@@ -304,6 +517,16 @@ export function createDashboardRepository(client: SupabaseClient): DashboardRepo
         transactions: rows(transactionRows).map(transaction), plans: rows(planRows).map(plan),
         commands: rows(commandRows).map(command),
       };
+    },
+    async loadResearch() {
+      const result = await api.from("research").select("*")
+        .order("created_at", { ascending: false }).limit(200);
+      return { items: rows(result).map(researchItem) };
+    },
+    async loadRuns() {
+      const result = await api.from("run_timeline").select("*")
+        .order("market_date", { ascending: false }).limit(200);
+      return { runs: rows(result).map(runTimeline) };
     },
     async lookupCommand(commandId) {
       const response = await api.from("commands").select("*").eq("id", commandId).maybeSingle();

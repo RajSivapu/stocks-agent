@@ -19,6 +19,7 @@ APP_API_MIGRATION = ROOT / "sql/migrations/20260908_app_api_limits.sql"
 TELEGRAM_MIGRATION = ROOT / "sql/migrations/20260909_telegram_multitenancy.sql"
 TELEGRAM_WEBHOOK_MIGRATION = ROOT / "sql/migrations/20260909_telegram_webhook_runtime.sql"
 PROVIDER_EVIDENCE_MIGRATION = ROOT / "sql/migrations/20260908_provider_runs_and_evidence.sql"
+RESEARCH_RUN_MIGRATION = ROOT / "sql/migrations/20260909_research_run_api.sql"
 
 
 def _postgres_bin(name: str) -> str:
@@ -309,6 +310,8 @@ def tenant_database(tmp_path_factory):
             connection.execute(TELEGRAM_WEBHOOK_MIGRATION.read_text())
         if PROVIDER_EVIDENCE_MIGRATION.exists():
             connection.execute(PROVIDER_EVIDENCE_MIGRATION.read_text())
+        if RESEARCH_RUN_MIGRATION.exists():
+            connection.execute(RESEARCH_RUN_MIGRATION.read_text())
         yield connection
     finally:
         if connection is not None:

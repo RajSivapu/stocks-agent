@@ -15,6 +15,8 @@ API_VIEWS = {
     "telegram_status",
     "settings",
     "market_quotes",
+    "research",
+    "run_timeline",
 }
 
 API_FUNCTIONS = {

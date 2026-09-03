@@ -1125,26 +1125,26 @@ git commit -m "feat: add portfolio recordkeeping screens"
 - Consumes: owner-scoped recommendations, evidence metadata, Analyst/Checker records, policy decisions, publications, outcomes, and run health.
 - Produces: non-chat research history and truthful phase timeline.
 
-- [ ] **Step 1: Write failing decision-state tests**
+- [x] **Step 1: Write failing decision-state tests**
 
 Cover approved, downgraded, vetoed, suppressed, delivered, failed, delivery-unknown, trigger-unknown,
 missed, partial, stale evidence, source conflict, and corporate-action pending. No failed prior run may
 appear as current advice.
 
-- [ ] **Step 2: Implement Research**
+- [x] **Step 2: Implement Research**
 
 Show action, confidence, server-verified price/source/as-of, levels, horizon, provider/model, evidence
 dates/links, separate Analyst and Checker views, deterministic policy result, notification receipt, and
 5/21/63-session outcomes. Render all prose as text, never raw HTML.
 
-- [ ] **Step 3: Implement Runs**
+- [x] **Step 3: Implement Runs**
 
 Show expected slot, trigger attempt, returned provider session link, inbound start, evidence status,
 policy/persistence/publication states, actual write counts, message IDs when delivered, and stable error
 codes. A `Run analysis now` control creates a rate-limited on-demand slot and never reuses a scheduled
 slot or sends Telegram. Do not display credentials or raw prompts.
 
-- [ ] **Step 4: Verify and commit**
+- [x] **Step 4: Verify and commit**
 
 Run tests, XSS fixtures, accessibility checks, typecheck, and build. Commit:
 

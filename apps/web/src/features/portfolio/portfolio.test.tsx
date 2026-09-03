@@ -67,6 +67,8 @@ function repository(overrides: Partial<DashboardRepository> = {}): DashboardRepo
     } satisfies TodaySnapshot),
     loadPortfolio: () => Promise.resolve(portfolio),
     loadActivity: () => Promise.resolve(activity),
+    loadResearch: () => Promise.resolve({ items: [] }),
+    loadRuns: () => Promise.resolve({ runs: [] }),
     lookupCommand: () => Promise.resolve(null),
     ...overrides,
   };

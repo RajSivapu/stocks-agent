@@ -101,4 +101,24 @@ describe("browser app API", () => {
 
     await expect(api.preview(command)).rejects.toHaveProperty("code", "INVALID_RESPONSE");
   });
+
+  it("queues an on-demand run with an empty authority-free body", async () => {
+    const fetcher = vi.fn().mockResolvedValue(response({
+      status: "queued",
+      slot_id: "55555555-5555-4555-8555-555555555555",
+      phase: "on-demand",
+      market_date: "2026-09-03",
+      expected_by: "2026-09-03T16:20:00Z",
+      telegram: "suppressed",
+    }));
+    const api = createCommandClient(client(), "https://test-project.supabase.co", () => Promise.resolve(null), fetcher);
+
+    const receipt = await api.requestRun();
+
+    expect(receipt.telegram).toBe("suppressed");
+    const [url, rawOptions] = fetcher.mock.calls[0] as [string, RequestInit];
+    expect(url).toBe("https://test-project.supabase.co/functions/v1/app-api/runs/on-demand");
+    expect(rawOptions.body).toBe("{}");
+    expect(JSON.stringify(rawOptions)).not.toContain("owner_id");
+  });
 });

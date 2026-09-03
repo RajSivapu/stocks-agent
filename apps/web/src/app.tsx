@@ -8,18 +8,20 @@ import {
 } from "react-router-dom";
 import { ConsentGate } from "./auth/ConsentGate";
 import { SignIn } from "./auth/SignIn";
-import type { CommandClient } from "./lib/app-api";
+import type { AppApiClient } from "./lib/app-api";
 import type { DashboardRepository } from "./lib/dashboard";
 import type { SessionService, ViewerState } from "./lib/session";
 import { ActivityScreen } from "./features/activity/ActivityScreen";
 import { PortfolioScreen } from "./features/portfolio/PortfolioScreen";
 import { TodayScreen } from "./features/today/TodayScreen";
+import { ResearchScreen } from "./features/research/ResearchScreen";
+import { RunsScreen } from "./features/runs/RunsScreen";
 import "./styles.css";
 
 type AppProps = {
   session: SessionService;
   repository: DashboardRepository;
-  commands: CommandClient;
+  commands: AppApiClient;
 };
 
 const ROUTES = [
@@ -35,7 +37,7 @@ const ROUTES = [
 function Workspace({ viewer, repository, commands }: {
   viewer: Extract<ViewerState, { kind: "ready" }>;
   repository: DashboardRepository;
-  commands: CommandClient;
+  commands: AppApiClient;
 }) {
   return (
     <div className="app-shell">
@@ -58,7 +60,9 @@ function Workspace({ viewer, repository, commands }: {
           <Route path="/" element={<TodayScreen repository={repository} />} />
           <Route path="/portfolio" element={<PortfolioScreen repository={repository} commands={commands} />} />
           <Route path="/activity" element={<ActivityScreen repository={repository} />} />
-          {ROUTES.slice(3).map(([path, label]) => <Route key={path} path={path} element={<section className="workspace-card"><p className="eyebrow">Private workspace</p><h1>{label}</h1><p>{label} workspace</p></section>} />)}
+          <Route path="/research" element={<ResearchScreen repository={repository} />} />
+          <Route path="/runs" element={<RunsScreen repository={repository} runClient={commands} />} />
+          {ROUTES.slice(5).map(([path, label]) => <Route key={path} path={path} element={<section className="workspace-card"><p className="eyebrow">Private workspace</p><h1>{label}</h1><p>{label} workspace</p></section>} />)}
           <Route path="*" element={<Navigate to="/" replace />} />
         </Routes>
       </main>
