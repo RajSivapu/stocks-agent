@@ -127,16 +127,17 @@ treated as investment research or a recommendation.
 
 The owner-approved current-versus-alternatives review was released without changing alert-v3
 activation or the Telegram function. The implementation commits were `7e9cbd2`, `3c2ff7f`,
-`8f637bf`, and `f9c1e60`. The last two fixes were found by inspecting protected previews: Yahoo
+`8f637bf`, `f9c1e60`, and `cafd044`. The last three fixes were found by inspecting protected previews: Yahoo
 daily-history values required bounded six-decimal normalization, and a sub-display-precision lead
-could not truthfully be described as “ahead by 0.0 points.”
+could not truthfully be described as “ahead by 0.0 points,” while VOO required an explicit `tilt`
+relationship instead of being mislabeled as a total-market substitute or diversifier.
 
-- `market-briefing-gateway` version 15 is active at deployment epoch milliseconds `1788471136469`;
+- `market-briefing-gateway` version 16 is active at deployment epoch milliseconds `1788471499180`;
   `telegram-portfolio` remained version 12.
 - The active policy remained version 3 with `enabled=false`, `shadow=true`, and
   `enabled_classes=[]`.
 - Post-deployment health returned `ok` for the gateway, standalone alert path, Finnhub, and Yahoo.
-- A management-plane download of gateway v15 compared equal to every local runtime file; test
+- A management-plane download of gateway v16 compared equal to every local runtime file; test
   files were intentionally excluded because Supabase does not deploy them.
 - The post-deployment secret-name inventory remained owner/gateway/Supabase/Telegram only. It
   contained no brokerage or friend-invitation credential.
@@ -155,7 +156,7 @@ would-be suggestions, and zero alert drafts. The gateway-computed preview showed
   statement that the VTI plan was unchanged; and
 - the required warning that hypothetical history is not a forecast.
 
-The final dry-run finish receipt reported `status=completed`, `write_counts={}`,
+The pair dry-run finish receipt reported `status=completed`, `write_counts={}`,
 `publication_statuses=[]`, and `telegram_message_ids=[]`. Independent before/after counts had zero
 deltas for all twelve inspected tables: runs, gateway requests, evaluations, suggestions,
 publications, five alert-lifecycle tables, holdings, and owner plans. This was not a live Routine or
@@ -164,6 +165,25 @@ a Telegram test send.
 The earlier protected preview returned `missing_history` and also had zero writes and sends. That
 fail-closed receipt led to the provider-decimal fix; the final receipt above supersedes it for
 comparison-coverage evidence.
+
+A broader protected on-demand dry-run, `b809f384-354f-45a3-9649-f543a13f2035`, then evaluated the
+full initial role set: ITOT and SCHB as like-for-like funds, VOO as a large-cap tilt, and VT and VXUS
+as diversification changes. Its receipt reported six evaluations, five comparisons, `complete`
+coverage for all five, publication `suppressed`, six would-be suggestions, zero alert drafts,
+`write_counts={}`, and `telegram_message_ids=[]`. All twelve before/after table deltas again remained
+zero. The gateway-computed equal-monthly one-year results were:
+
+- VTI `+10.0%`, max drawdown `8.9%`;
+- ITOT `+10.0%`, max drawdown `8.9%`, difference from VTI below `0.1` point;
+- SCHB `+9.9%`, max drawdown `8.9%`, difference from VTI below `0.1` point;
+- VOO `+10.0%`, max drawdown `8.9%`, difference from VTI below `0.1` point;
+- VT `+10.2%`, max drawdown `9.7%`, ahead of VTI by `0.2` points; and
+- VXUS `+10.6%`, max drawdown `11.3%`, ahead of VTI by `0.7` points.
+
+The forward result remained `SIMILAR` for the two like-for-like funds and `INSUFFICIENT` for VOO,
+VT, and VXUS because their different portfolio roles do not establish a durable forward-return
+edge. The preview explicitly left the `$300` monthly VTI plan unchanged and labeled hypothetical
+history as not a forecast. Gateway v16 health and source parity passed after this receipt.
 
 ## Live security checkpoint
 
