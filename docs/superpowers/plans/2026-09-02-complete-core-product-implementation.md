@@ -813,37 +813,37 @@ git commit -m "feat: quarantine uncertain corporate actions"
 `grade_due_decisions`, and `finish_run`.
 - Produces: server-owned run, policy, persistence, publication, and delivery receipts for exactly one owner.
 
-- [ ] **Step 1: Port and extend current gateway tests**
+- [x] **Step 1: Port and extend current gateway tests**
 
 Retain dry-run, idempotency, server-refetched quotes, silent intraday, holiday, persistence-before-send,
 delivery classification, grading, fixed rendering, and truthful finish receipts. Add two connections,
 cross-owner run IDs, revoked token, rotated token, 12-operation limit, six-run/day limit, and one
 on-demand run/hour.
 
-- [ ] **Step 2: Authenticate high-entropy connection tokens**
+- [x] **Step 2: Authenticate high-entropy connection tokens**
 
 Parse exact public ID plus secret, SHA-256 the secret, and pass both identity and digest to every named
 gateway machine RPC. Compare digest in constant time in SQL. Never accept `owner_id`; unknown and
 revoked credentials return the same 401.
 
-- [ ] **Step 3: Replace direct table access**
+- [x] **Step 3: Replace direct table access**
 
 The repository calls only `machine.agent_*` RPCs through `AGENT_DATABASE_URL`. Each RPC resolves the
 connection and owner inside one transaction. Remove service-role, generic PostgREST, and table-name
 selection from the replacement gateway.
 
-- [ ] **Step 4: Apply deterministic policy and rendering**
+- [x] **Step 4: Apply deterministic policy and rendering**
 
 Port current fixed-point policy, renderer, Telegram delivery, and outcome logic. Policy may downgrade
 or veto but never upgrade. Messages use fixed templates and persist actual Telegram message IDs.
 
-- [ ] **Step 5: Keep artifact writes allow-listed**
+- [x] **Step 5: Keep artifact writes allow-listed**
 
 Only observation, snapshot, lesson, radar, and paper-watch operations are permitted. Watchlist file or
 Git writes, arbitrary table names, provider-selected owner fields, and provider delivery claims fail
 contract validation.
 
-- [ ] **Step 6: Verify and commit**
+- [x] **Step 6: Verify and commit**
 
 Run all Deno tests, role attacks, and two-owner staging gateway simulations. Commit:
 

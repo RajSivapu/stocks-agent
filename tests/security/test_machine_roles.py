@@ -56,7 +56,14 @@ def test_machine_roles_have_no_cross_role_membership_or_unreviewed_execute(tenan
     assert memberships == []
 
     expected = {
-        "stock_agent_gateway": set(),
+        "stock_agent_gateway": {
+            "machine.agent_start_run(jsonb)",
+            "machine.agent_read_bounded_context(jsonb)",
+            "machine.agent_submit_analysis(jsonb)",
+            "machine.agent_record_permitted_artifacts(jsonb)",
+            "machine.agent_grade_due_decisions(jsonb)",
+            "machine.agent_finish_run(jsonb)",
+        },
         "stock_agent_scheduler": set(),
         "stock_agent_telegram": {
             "machine.telegram_prepare_command(jsonb)",

@@ -21,3 +21,8 @@ entrypoint = "./functions/market-briefing-gateway/index.ts"
 enabled = true
 verify_jwt = false
 entrypoint = "./functions/app-api/index.ts"
+
+[functions."agent-gateway"]
+enabled = true
+verify_jwt = false
+entrypoint = "./functions/agent-gateway/index.ts"
