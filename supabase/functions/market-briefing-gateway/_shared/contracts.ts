@@ -11,6 +11,79 @@ export type Bucket = "core" | "growth" | "speculative";
 export type EvidenceStatus = "fresh" | "stale" | "fallback" | "missing" |
   "failed" | "conflicting" | "unsupported";
 export type PolicyStatus = "approved" | "downgraded" | "vetoed" | "legacy_unverified";
+export type AlertProfile = "long_term" | "balanced" | "active";
+export type AlertRuleKind = "price_cross" | "price_zone" | "sma_cross" |
+  "rsi_range" | "volume_multiple" | "recorded_stop" | "recorded_target" |
+  "screen_entry" | "event_window";
+export type AlertRuleState = "draft" | "active" | "paused" | "snoozed" |
+  "dismissed" | "expired";
+export type AlertSeverity = "critical" | "review" | "update" | "watch" | "system";
+export type AlertSession = "regular" | "pre_market" | "post_market" | "all";
+export type ConfirmationMode = "bar_close" | "two_quote";
+export type AlertTimeframe = "quote" | "15m" | "1h" | "1d";
+
+export interface AlertCondition {
+  kind: AlertRuleKind;
+  operator: "above" | "below" | "inside" | "outside";
+  left: string;
+  right: string | null;
+  timeframe: AlertTimeframe;
+}
+
+export interface AlertRuleSnapshot {
+  rule_id: string;
+  version: number;
+  state: AlertRuleState;
+  ticker: string;
+  profile: AlertProfile;
+  severity: AlertSeverity;
+  session: AlertSession;
+  confirmation: ConfirmationMode;
+  conditions: AlertCondition[];
+  cooldown_seconds: number;
+  fire_limit: number;
+  valid_until: string;
+  owner_note: string;
+}
+
+export interface AlertEvidencePoint {
+  value: string;
+  comparison_value: string | null;
+  observed_at: string;
+  bar_complete: boolean;
+}
+
+export interface AlertConditionEvidence {
+  condition_index: number;
+  status: EvidenceStatus;
+  market_session: AlertSession;
+  evidence_ids: string[];
+  points: AlertEvidencePoint[];
+}
+
+export interface AlertConditionResult {
+  condition: AlertCondition;
+  passed: boolean | null;
+  observed_value: string | null;
+  evidence_ids: string[];
+}
+
+export interface AlertEvaluation {
+  rule: AlertRuleSnapshot;
+  status: "triggered" | "not_triggered" | "unsafe_to_evaluate";
+  reason_codes: string[];
+  observed_at: string | null;
+  evaluated_at: string;
+  market_session: AlertSession;
+  condition_results: AlertConditionResult[];
+}
+
+export interface AlertRecentEvent {
+  fingerprint: string;
+  status: "triggered" | "unsafe_to_evaluate";
+  evaluated_at: string;
+  severity: AlertSeverity;
+}
 
 export interface GatewayEnvelope {
   schema_version: 1;
