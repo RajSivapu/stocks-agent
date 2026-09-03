@@ -122,6 +122,13 @@ executed and no repository change was made. This transcript verification does no
 message wording; the owner's dissatisfaction with that compact message is the reason v3 remains in
 shadow review.
 
+The saved Routine configuration was also opened read-only and closed without saving. It contained
+one repository (`RajSivapu/stocks-agent`), the `stocks-agent` cloud environment, no included
+connectors, and disabled auto-fix behavior. Its instructions restrict the run to
+`python scripts/market_gateway.py`, require independently refreshed evidence plus rebuilt Analyst and
+Checker records, require a suppressed outcome to stay silent, allow only server-receipt claims, and
+prohibit trade execution and repository edits.
+
 ## Remaining gates
 
 1. Reconcile the first scheduled post-market run after the v3 shadow deployment, including its
