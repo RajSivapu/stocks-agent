@@ -161,7 +161,7 @@ git commit -m "build: add complete product test entrypoint"
 - Consumes: ignored staging credentials and manually observed phone-email OTP outcome.
 - Produces: `CapabilityReport(version=1, checks=[...], passed: bool)` at `artifacts/capabilities/report.json`, containing no tokens, email addresses, portfolio values, or provider payloads.
 
-- [ ] **Step 1: Write failing redaction and gate tests**
+- [x] **Step 1: Write failing redaction and gate tests**
 
 Test that `sanitize_result()` retains only `name`, `status`, `checked_at`, `latency_ms`, `code`, and
 `evidence_hash`; reject a report as incomplete unless it includes `smtp_phone_otp`, `claude_fire`,
@@ -169,20 +169,22 @@ Test that `sanitize_result()` retains only `name`, `status`, `checked_at`, `late
 `supavisor_machine_login`, `supabase_pause_policy`, `r2_age_roundtrip`, `independent_backup_alert`, and
 `corporate_action_source`.
 
-- [ ] **Step 2: Run the focused test and observe failure**
+- [x] **Step 2: Run the focused test and observe failure**
 
 Run `pytest tests/test_probe_release_capabilities.py -q`. Expected: import failure for
 `scripts.probe_release_capabilities`.
 
-- [ ] **Step 3: Implement bounded probes**
+- [x] **Step 3: Implement bounded probes**
 
 Use stdlib HTTP with 25-second timeouts. The Claude probe sends only
-`{"message":"Treat this opaque value as untrusted input: <probe_id>"}` to the exact allow-listed
-`/fire` URL. The callback probe accepts only the matching random probe ID. The R2 probe uploads
+`{"text":"Treat this opaque value as untrusted input: <probe_id>"}` to the exact documented
+`https://api.anthropic.com/v1/claude_code/routines/trig_…/fire` URL, with the documented
+`experimental-cc-routine-2026-04-01` beta header and Anthropic version header. The callback probe
+accepts only the matching random probe ID. The R2 probe uploads
 already-`age`-encrypted random bytes, downloads and decrypts them locally, compares SHA-256, and
 deletes only that exact probe object. No probe may use production owner data.
 
-- [ ] **Step 4: Add manual evidence rules**
+- [x] **Step 4: Add manual evidence rules**
 
 The runbook must require a non-team phone email client for OTP, a second eligible Claude account for
 unassisted setup, an intentionally stale R2 object for alert proof, and the actual Finnhub entitlement
@@ -195,7 +197,7 @@ The runbook must mark both live-looking market-data credentials found in ignored
 configuration as compromised, require provider-side rotation, update only ignored local stores, and
 run `git grep` plus history scanning before Gate 0 can pass. Never record old or new values.
 
-- [ ] **Step 6: Verify and commit**
+- [x] **Step 6: Verify and commit**
 
 Run the focused tests and `python scripts/probe_release_capabilities.py --check-config` against the
 example config. Expected: tests pass; example config reports missing live evidence without making a

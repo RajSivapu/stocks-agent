@@ -1,0 +1,14 @@
+{
+  "claude": {
+    "fire_url": "",
+    "fire_token": ""
+  },
+  "staging": {
+    "supabase_url": ""
+  },
+  "r2": {
+    "account_id": "",
+    "bucket": ""
+  },
+  "manual_evidence_directory": "artifacts/capabilities/evidence"
+}
