@@ -368,7 +368,8 @@ def test_routine_documentation_exposes_only_scoped_cloud_credentials():
         "status: suppressed",
     ):
         assert required in routines
-    assert '{"gateway":"ok","finnhub":"ok","yahoo":"ok"}' in routines
+    assert '{"alerts":"ok","gateway":"ok","finnhub":"ok","yahoo":"ok"}' in routines
+    assert "sends no Telegram healthcheck or alert" in routines
 
 
 def test_behavioral_evals_use_gateway_receipts_not_privileged_helpers():
