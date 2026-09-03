@@ -3,6 +3,7 @@ from __future__ import annotations
 
 API_VIEWS = {
     "profile",
+    "consents",
     "today",
     "holdings",
     "transactions",

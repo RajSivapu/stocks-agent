@@ -116,6 +116,8 @@ GRANT SELECT (id, display_name, timezone, status, onboarding_completed_at, creat
   ON app.profiles TO authenticated;
 GRANT UPDATE (display_name, timezone)
   ON app.profiles TO authenticated;
+GRANT SELECT (owner_id, document_version, accepted_at)
+  ON app.user_consents TO authenticated;
 GRANT SELECT (owner_id, pre_market_enabled, intraday_enabled, post_market_enabled,
               operational_enabled, created_at, updated_at)
   ON app.notification_preferences TO authenticated;
@@ -150,6 +152,11 @@ DROP VIEW IF EXISTS api.profile;
 CREATE VIEW api.profile WITH (security_invoker = true) AS
 SELECT id, display_name, timezone, status, onboarding_completed_at, created_at, updated_at
 FROM app.profiles;
+
+DROP VIEW IF EXISTS api.consents;
+CREATE VIEW api.consents WITH (security_invoker = true) AS
+SELECT document_version, accepted_at
+FROM app.user_consents;
 
 DROP VIEW IF EXISTS api.today;
 CREATE VIEW api.today WITH (security_invoker = true) AS
@@ -227,6 +234,7 @@ LEFT JOIN app.notification_preferences AS n ON n.owner_id = p.id
 LEFT JOIN app.analysis_schedules AS s ON s.owner_id = p.id;
 
 ALTER VIEW api.profile OWNER TO stock_agent_migration_owner;
+ALTER VIEW api.consents OWNER TO stock_agent_migration_owner;
 ALTER VIEW api.today OWNER TO stock_agent_migration_owner;
 ALTER VIEW api.holdings OWNER TO stock_agent_migration_owner;
 ALTER VIEW api.transactions OWNER TO stock_agent_migration_owner;
@@ -238,7 +246,7 @@ ALTER VIEW api.telegram_status OWNER TO stock_agent_migration_owner;
 ALTER VIEW api.settings OWNER TO stock_agent_migration_owner;
 
 REVOKE ALL ON ALL TABLES IN SCHEMA api FROM PUBLIC, anon, authenticated, service_role;
-GRANT SELECT ON api.profile, api.today, api.holdings, api.transactions, api.plans,
+GRANT SELECT ON api.profile, api.consents, api.today, api.holdings, api.transactions, api.plans,
   api.recommendations, api.runs, api.connections, api.telegram_status, api.settings
   TO authenticated;
 

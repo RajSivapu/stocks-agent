@@ -1,0 +1,5 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" role="img" aria-label="Stock Agent">
+  <rect width="512" height="512" rx="112" fill="#081d1a"/>
+  <path d="M106 349h300M132 307l78-82 58 46 112-127" fill="none" stroke="#e8c56b" stroke-linecap="round" stroke-linejoin="round" stroke-width="34"/>
+  <circle cx="380" cy="144" r="26" fill="#f7f1df"/>
+</svg>

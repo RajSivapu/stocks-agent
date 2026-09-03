@@ -1030,30 +1030,30 @@ git commit -m "feat: add truthful run operations"
 - Consumes: Supabase publishable URL/key, email OTP, user JWT, and current consent state.
 - Produces: installable static shell with authenticated routes, no service worker, and no private-data caching.
 
-- [ ] **Step 1: Scaffold with exact dependencies and lockfile**
+- [x] **Step 1: Scaffold with exact dependencies and lockfile**
 
 Use npm workspaces and install React, React DOM, React Router, Supabase JS, and the shared contract
 package; install Vite, TypeScript, Vitest, jsdom, Testing Library, ESLint, and Playwright as development
 dependencies with exact versions resolved into `package-lock.json`.
 
-- [ ] **Step 2: Write failing auth/security tests**
+- [x] **Step 2: Write failing auth/security tests**
 
 Test signed-out routing, six-digit OTP request/verify, session expiry, revoked session, protected route,
 consent gate, magic-link desktop fallback, no token in URL/logs, and no `navigator.serviceWorker.register`.
 
-- [ ] **Step 3: Implement the session shell**
+- [x] **Step 3: Implement the session shell**
 
 Use Supabase Auth with 15-minute access-token policy configured server-side and refresh rotation.
 Normalize callback URLs, clear auth fragments immediately, and render private screens only after a
 server-confirmed session and profile/consent read.
 
-- [ ] **Step 4: Add static security headers**
+- [x] **Step 4: Add static security headers**
 
 Set CSP with self-only scripts, exact Supabase connect origins, `frame-ancestors 'none'`, HSTS,
 `nosniff`, strict referrer policy, restrictive permissions, and no-cache rules for `index.html`.
 Private API responses already use `no-store`.
 
-- [ ] **Step 5: Verify and commit**
+- [x] **Step 5: Verify and commit**
 
 Run unit tests, typecheck, build, and assert the build contains no service worker or secret names. Commit:
 

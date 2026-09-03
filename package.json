@@ -2,13 +2,14 @@
   "name": "stocks-agent",
   "private": true,
   "workspaces": [
-    "packages/contracts"
+    "packages/contracts",
+    "apps/web"
   ],
   "scripts": {
     "test:python": ".venv/bin/python -m pytest tests/ -q",
     "test:node": "node --test tests/test_telegram_parser.mjs tests/test_telegram_webhook_utils.mjs tests/test_telegram_pairing.mjs",
-    "test:deno": "npx --yes deno@2.9.6 test supabase/functions/market-briefing-gateway/_shared supabase/functions/_shared supabase/functions/app-api supabase/functions/telegram-portfolio supabase/functions/agent-gateway supabase/functions/run-scheduler",
-    "check:edge": "npx --yes deno@2.9.6 check supabase/functions/market-briefing-gateway/index.ts supabase/functions/telegram-portfolio/index.ts supabase/functions/app-api/index.ts supabase/functions/agent-gateway/index.ts supabase/functions/run-scheduler/index.ts",
+    "test:deno": "npx --yes deno@2.9.6 test --config supabase/functions/deno.json supabase/functions/market-briefing-gateway/_shared supabase/functions/_shared supabase/functions/app-api supabase/functions/telegram-portfolio supabase/functions/agent-gateway supabase/functions/run-scheduler",
+    "check:edge": "npx --yes deno@2.9.6 check --config supabase/functions/deno.json supabase/functions/market-briefing-gateway/index.ts supabase/functions/telegram-portfolio/index.ts supabase/functions/app-api/index.ts supabase/functions/agent-gateway/index.ts supabase/functions/run-scheduler/index.ts",
     "test:all": "bash scripts/test_all.sh"
   }
 }
