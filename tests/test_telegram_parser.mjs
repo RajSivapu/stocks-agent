@@ -4,6 +4,9 @@ import test from "node:test";
 import { parsePortfolioCommand } from "../supabase/functions/telegram-portfolio/parser.mjs";
 
 const okCases = [
+  ["/start ABCD234567", { operation: "pair", code: "ABCD234567" }],
+  ["/status", { operation: "status" }],
+  ["/unlink", { operation: "unlink" }],
   ["/buy aapl 2 210 growth", { operation: "buy", ticker: "AAPL", qty: 2, price: 210, bucket: "growth" }],
   ["bought 2.5 aapl at $1,210.50 speculative", { operation: "buy", ticker: "AAPL", qty: 2.5, price: 1210.5, bucket: "speculative" }],
   ["  bought   1   brk.b   @   450.25   core  ", { operation: "buy", ticker: "BRK.B", qty: 1, price: 450.25, bucket: "core" }],
@@ -56,6 +59,9 @@ const rejected = [
   "/plan VTI 300 monthly 1999-12-31 core",
   "/plan VTI 300 monthly 2026-09-21 growth",
   "/cancelplan VTI extra",
+  "/start ABCD123456",
+  "/start ABCD234567 extra",
+  "/unlink now",
   "move AAPL stop to -5",
   "AAPL is a buy",
   "/buy AAPL;DROP TABLE holdings 1 210 growth",
@@ -66,7 +72,7 @@ for (const input of rejected) {
   test(`rejects unsupported or unsafe input: ${input || "empty"}`, () => {
     const parsed = parsePortfolioCommand(input);
     assert.equal(parsed.ok, false);
-    assert.match(parsed.error, /Try \/buy/);
+    assert.match(parsed.error, /Try .*\/buy/);
     assert.doesNotMatch(parsed.error, /DROP TABLE|Infinity|NaN/);
   });
 }

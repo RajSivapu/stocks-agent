@@ -28,6 +28,7 @@ function makeHandler() {
   const handler = createAppApiHandler({
     allowedOrigins: ["https://app.example.test"],
     ipHashPepper: "a-secure-test-pepper-with-32-bytes",
+    pairingHashPepper: "a-pairing-test-pepper-with-at-least-32-bytes",
     repository,
     authenticate: (request) => {
       events.push("authenticate");
@@ -37,6 +38,7 @@ function makeHandler() {
       return Promise.resolve({ sub: OWNER, role: "authenticated" });
     },
     newId: () => "33333333-3333-4333-8333-333333333333",
+    newPairingCode: () => "ABCD234567",
   });
   return { handler, repository, events };
 }
@@ -143,6 +145,20 @@ Deno.test("future lifecycle routes reject unreviewed fields before dispatch", as
   assertEquals((await handler(request("/connections/create", { provider: "grok" }))).status, 400);
   assertEquals((await handler(request("/telegram/pairing-code", { owner_id: OWNER }))).status, 400);
   assertEquals(repository.calls.length, 2);
+  assertEquals(repository.calls[1].body, { code_digest: "a43255350a50f61e0b614e953291560250a8d824c7a919ea1dab9504cfa35d7b" });
+});
+
+Deno.test("pairing code is returned once and only its HMAC reaches persistence", async () => {
+  const { handler, repository } = makeHandler();
+  repository.response = { ok: true, data: { status: "issued", expires_at: "2026-09-02T20:10:00Z" } };
+  const response = await handler(request("/telegram/pairing-code", {}));
+  const value = await response.json();
+  assertEquals(value.data.code, "ABCD234567");
+  assertEquals(Object.hasOwn(repository.calls[0].body as object, "code"), false);
+  assertEquals(
+    (repository.calls[0].body as Record<string, unknown>).code_digest,
+    "a43255350a50f61e0b614e953291560250a8d824c7a919ea1dab9504cfa35d7b",
+  );
 });
 
 Deno.test("oversized bodies and repository failures are bounded and sanitized", async () => {

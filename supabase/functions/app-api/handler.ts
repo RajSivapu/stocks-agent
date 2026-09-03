@@ -2,6 +2,10 @@ import { readBoundedJson } from "../_shared/bounded-json.ts";
 import { assertAllowedOrigin, corsHeaders, preflightResponse } from "../_shared/cors.ts";
 import { HttpError, jsonResponse } from "../_shared/errors.ts";
 import { resolveRoute, validateRouteBody } from "./routes.ts";
+import {
+  digestPairingValue,
+  generatePairingCode,
+} from "../telegram-portfolio/pairing.mjs";
 
 
 const MAX_BODY_BYTES = 64 * 1024;
@@ -14,9 +18,11 @@ export type AppApiRepository = {
 export type AppApiHandlerDependencies = {
   allowedOrigins: readonly string[];
   ipHashPepper: string;
+  pairingHashPepper: string;
   repository: AppApiRepository;
   authenticate(request: Request): Promise<{ sub: string; role: "authenticated" }>;
   newId?: () => string;
+  newPairingCode?: () => string;
 };
 
 function errorResponse(error: unknown, request: Request, allowedOrigins: readonly string[]): Response {
@@ -68,6 +74,7 @@ function responseStatus(value: Record<string, unknown>): number {
 
 export function createAppApiHandler(dependencies: AppApiHandlerDependencies) {
   const newId = dependencies.newId ?? crypto.randomUUID;
+  const newPairingCode = dependencies.newPairingCode ?? generatePairingCode;
   return async (request: Request): Promise<Response> => {
     try {
       const url = new URL(request.url);
@@ -95,7 +102,14 @@ export function createAppApiHandler(dependencies: AppApiHandlerDependencies) {
       const body = route.body === "none"
         ? {}
         : await readBoundedJson(request, MAX_BODY_BYTES);
-      const validated = validateRouteBody(route, body);
+      let validated = validateRouteBody(route, body);
+      let pairingCode: string | undefined;
+      if (route.key === "telegram_pairing") {
+        pairingCode = newPairingCode();
+        validated = {
+          code_digest: await digestPairingValue(pairingCode, dependencies.pairingHashPepper),
+        };
+      }
       const result = await dependencies.repository.dispatch({
         route: `${route.method} ${route.path}`,
         requestId: newId(),
@@ -103,9 +117,16 @@ export function createAppApiHandler(dependencies: AppApiHandlerDependencies) {
         bearerToken: bearerToken(request),
         body: validated,
       });
+      const responseValue = pairingCode && result.ok === true && result.data &&
+          typeof result.data === "object" && !Array.isArray(result.data)
+        ? {
+          ...result,
+          data: { ...(result.data as Record<string, unknown>), code: pairingCode },
+        }
+        : result;
       return jsonResponse(
-        responseStatus(result),
-        result,
+        responseStatus(responseValue),
+        responseValue,
         corsHeaders(request, dependencies.allowedOrigins),
       );
     } catch (error) {

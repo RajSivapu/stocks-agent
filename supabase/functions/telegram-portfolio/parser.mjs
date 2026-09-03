@@ -1,9 +1,10 @@
-const HELP = "Try /buy, /sell, /stop, /portfolio, /plan, /cancelplan, /plans, or /help.";
+const HELP = "Try /start, /status, /unlink, /buy, /sell, /stop, /portfolio, /plan, /cancelplan, /plans, or /help.";
 const BUCKETS = new Set(["core", "growth", "speculative"]);
 const NUMBER = /^(?:\d+(?:,\d{3})*(?:\.\d+)?|\d*\.\d+)$/;
 const PRICE = /^\$?(?:\d+(?:,\d{3})*(?:\.\d+)?|\d*\.\d+)$/;
 const TICKER = /^[A-Z][A-Z0-9]*(?:[.-][A-Z0-9]+)*$/;
 const ISO_DATE = /^\d{4}-\d{2}-\d{2}$/;
+const PAIRING_CODE = /^[A-HJ-NP-Z2-9]{10}$/;
 
 function reject() {
   return { ok: false, error: HELP };
@@ -95,11 +96,21 @@ export function parsePortfolioCommand(input) {
   const text = input.trim().replace(/\s+/g, " ");
   if (!text) return reject();
 
+  let match = text.match(/^\/start(?:@[A-Za-z0-9_]+)? (\S+)$/i);
+  if (match) {
+    const code = match[1].toUpperCase();
+    return PAIRING_CODE.test(code)
+      ? { ok: true, command: { operation: "pair", code } }
+      : reject();
+  }
+  if (/^\/status(?:@[A-Za-z0-9_]+)?$/i.test(text)) return { ok: true, command: { operation: "status" } };
+  if (/^\/unlink(?:@[A-Za-z0-9_]+)?$/i.test(text)) return { ok: true, command: { operation: "unlink" } };
+
   if (/^\/portfolio(?:@[A-Za-z0-9_]+)?$/i.test(text)) return { ok: true, command: { operation: "portfolio" } };
   if (/^\/plans(?:@[A-Za-z0-9_]+)?$/i.test(text)) return { ok: true, command: { operation: "plans" } };
   if (/^\/help(?:@[A-Za-z0-9_]+)?$/i.test(text)) return { ok: true, command: { operation: "help" } };
 
-  let match = text.match(/^\/plan(?:@[A-Za-z0-9_]+)? (\S+) (\S+) (\S+) (\S+) (\S+)$/i);
+  match = text.match(/^\/plan(?:@[A-Za-z0-9_]+)? (\S+) (\S+) (\S+) (\S+) (\S+)$/i);
   if (match) return plan(match[1], match[2], match[3], match[4], match[5]);
   match = text.match(/^plan (\S+) (\S+) (\S+) next (\S+) (\S+)$/i);
   if (match) return plan(match[1], match[2], match[3], match[4], match[5]);

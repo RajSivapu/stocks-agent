@@ -622,29 +622,29 @@ git commit -m "feat: add authenticated product api"
 - Consumes: 10-character one-time base32 pairing code and Telegram private-chat update.
 - Produces: `/start <code>`, `/status`, `/unlink`, opaque callback tokens no longer than 64 bytes, and owner-resolved link receipts.
 
-- [ ] **Step 1: Write failing parser and pairing tests**
+- [x] **Step 1: Write failing parser and pairing tests**
 
 Cover valid private pairing, group/channel rejection, `chat.id !== from.id`, expired/consumed code,
 five failed attempts, conflicting links, relink confirmation, `/unlink`, callback after unlink, and a
 random lower `update_id` after inactivity.
 
-- [ ] **Step 2: Implement pairing-code security**
+- [x] **Step 2: Implement pairing-code security**
 
 Generate codes server-side, store HMAC digest only, expire after 10 minutes, invalidate after five
 failures, and consume atomically. Pairing responses never reveal whether a guessed account exists.
 
-- [ ] **Step 3: Replace monotonic update assumptions**
+- [x] **Step 3: Replace monotonic update assumptions**
 
 Use `app.telegram_updates(update_id PRIMARY KEY, received_at)` as a 30-day set membership boundary.
 Do not compare with a last-seen maximum.
 
-- [ ] **Step 4: Implement opaque callbacks**
+- [x] **Step 4: Implement opaque callbacks**
 
 Callback data is a random lookup token plus action, remains under Telegram's 64-byte limit, and maps
 server-side to command/owner/link. Confirm only when the same paired user/chat is still active.
 `/unlink` atomically cancels all pending commands.
 
-- [ ] **Step 5: Verify and commit**
+- [x] **Step 5: Verify and commit**
 
 Run Node tests and staging SQL integration tests. Commit:
 

@@ -187,6 +187,14 @@ BEGIN
           (p_request->>'command_id')::uuid,
           p_request->>'preview_digest'
         );
+      WHEN 'POST /telegram/pairing-code' THEN
+        IF NOT app.jsonb_has_exact_keys(p_request, ARRAY['code_digest'])
+           OR p_request->>'code_digest' !~ '^[0-9a-f]{64}$' THEN
+          RAISE EXCEPTION 'invalid pairing code request';
+        END IF;
+        data_value := app.issue_telegram_pairing_code(
+          owner_value, p_request->>'code_digest'
+        );
       ELSE
         INSERT INTO app.app_api_audit_events(owner_id, request_id, route, result_code)
         VALUES (owner_value, p_request_id, p_route, 'NOT_READY');

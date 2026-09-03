@@ -16,6 +16,7 @@ RLS_MIGRATION = ROOT / "sql/migrations/20260906_owner_api_and_machine_roles.sql"
 LEDGER_MIGRATION = ROOT / "sql/migrations/20260907_ledger_projection_commands.sql"
 COMMAND_MIGRATION = ROOT / "sql/migrations/20260908_portfolio_command_state_machine.sql"
 APP_API_MIGRATION = ROOT / "sql/migrations/20260908_app_api_limits.sql"
+TELEGRAM_MIGRATION = ROOT / "sql/migrations/20260909_telegram_multitenancy.sql"
 
 
 def _postgres_bin(name: str) -> str:
@@ -276,6 +277,8 @@ def tenant_database(tmp_path_factory):
             connection.execute(COMMAND_MIGRATION.read_text())
         if APP_API_MIGRATION.exists():
             connection.execute(APP_API_MIGRATION.read_text())
+        if TELEGRAM_MIGRATION.exists():
+            connection.execute(TELEGRAM_MIGRATION.read_text())
         yield connection
     finally:
         if connection is not None:

@@ -14,6 +14,7 @@ const jwks = new ProjectJwksCache(projectUrl);
 const handler = createAppApiHandler({
   allowedOrigins: requiredEnvironment("APP_ALLOWED_ORIGINS").split(",").map((value) => value.trim()),
   ipHashPepper: requiredEnvironment("APP_RATE_LIMIT_PEPPER"),
+  pairingHashPepper: requiredEnvironment("TELEGRAM_PAIRING_PEPPER"),
   repository: createAppApiRepository(projectUrl, requiredEnvironment("SUPABASE_ANON_KEY")),
   authenticate: async (request) => verifyUserJwt(request, await jwks.get(), { projectUrl }),
 });

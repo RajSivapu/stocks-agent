@@ -1,5 +1,5 @@
 const encoder = new TextEncoder();
-const CALLBACK = /^pc:(confirm|cancel):([0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12})$/i;
+const CALLBACK = /^pc:(c|x):([A-Za-z0-9_-]{32})$/;
 const ISO_DATE = /^\d{4}-\d{2}-\d{2}$/;
 const OWNER_TIME_ZONE = "America/Chicago";
 
@@ -24,7 +24,20 @@ export function ownerMatches(chatId, userId, expectedChatId, expectedUserId) {
 export function parseCallbackData(value) {
   if (typeof value !== "string") return null;
   const match = value.match(CALLBACK);
-  return match ? { action: match[1].toLowerCase(), commandId: match[2].toLowerCase() } : null;
+  return match ? { action: match[1] === "c" ? "confirm" : "cancel", token: match[2] } : null;
+}
+
+export function isPrivateTelegramIdentity(message) {
+  if (!message || typeof message !== "object" || Array.isArray(message)) return false;
+  const chat = message.chat;
+  const from = message.from;
+  return Boolean(
+    chat && typeof chat === "object" && !Array.isArray(chat) &&
+    from && typeof from === "object" && !Array.isArray(from) &&
+    chat.type === "private" &&
+    Number.isSafeInteger(chat.id) && chat.id > 0 &&
+    Number.isSafeInteger(from.id) && from.id === chat.id
+  );
 }
 
 function validTradeDate(value) {

@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
+  isPrivateTelegramIdentity,
   ownerMatches,
   parseCallbackData,
   resolveExecutionDate,
@@ -27,13 +28,21 @@ test("ownerMatches compares both Telegram identifiers exactly", () => {
   assert.equal(ownerMatches(999, 456, "123", "456"), false);
 });
 
-test("parseCallbackData accepts only a command action and UUID", () => {
-  const id = "7f7f70bf-5cec-4f1e-9de8-ec8823d99fc7";
-  assert.deepEqual(parseCallbackData(`pc:confirm:${id}`), { action: "confirm", commandId: id });
-  assert.deepEqual(parseCallbackData(`pc:cancel:${id.toUpperCase()}`), { action: "cancel", commandId: id });
-  assert.equal(parseCallbackData(`pc:apply:${id}`), null);
-  assert.equal(parseCallbackData(`pc:confirm:${id};DROP TABLE holdings`), null);
-  assert.equal(parseCallbackData("pc:confirm:not-a-uuid"), null);
+test("parseCallbackData accepts only an opaque command action token", () => {
+  const token = "Bf3S4xq0Vn2_6CYwPRtHd8AkLm9jZeXu";
+  assert.deepEqual(parseCallbackData(`pc:c:${token}`), { action: "confirm", token });
+  assert.deepEqual(parseCallbackData(`pc:x:${token}`), { action: "cancel", token });
+  assert.equal(parseCallbackData(`pc:a:${token}`), null);
+  assert.equal(parseCallbackData(`pc:c:${token};DROP`), null);
+  assert.equal(parseCallbackData("pc:c:short"), null);
+  assert(Buffer.byteLength(`pc:c:${token}`, "utf8") <= 64);
+});
+
+test("private Telegram identity requires a private chat and matching safe integer IDs", () => {
+  assert.equal(isPrivateTelegramIdentity({ chat: { id: 123, type: "private" }, from: { id: 123 } }), true);
+  assert.equal(isPrivateTelegramIdentity({ chat: { id: 123, type: "group" }, from: { id: 123 } }), false);
+  assert.equal(isPrivateTelegramIdentity({ chat: { id: 123, type: "private" }, from: { id: 456 } }), false);
+  assert.equal(isPrivateTelegramIdentity({ chat: { id: 1.5, type: "private" }, from: { id: 1.5 } }), false);
 });
 
 test("resolveExecutionDate defaults to the Telegram message date in Chicago", () => {

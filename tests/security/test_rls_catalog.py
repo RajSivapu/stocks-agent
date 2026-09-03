@@ -29,6 +29,8 @@ OWNER_TABLES = {
     "analysis_schedules",
     "agent_connections",
     "telegram_links",
+    "telegram_pairing_codes",
+    "telegram_callback_tokens",
     "single_owner_migration_receipts",
     "owner_policy_overrides",
     "owner_ledger_counters",
@@ -128,6 +130,9 @@ def test_policies_are_authenticated_and_bind_both_owner_checks(tenant_database):
         "owner_investment_plans",
         "profiles",
         "telegram_links",
+        "telegram_pairing_codes",
+        "telegram_callback_tokens",
+        "telegram_updates",
         "app_api_rate_limits",
         "app_api_audit_events",
     }

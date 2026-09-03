@@ -34,6 +34,7 @@ def test_machine_roles_cannot_select_private_auth_or_vault_tables(tenant_databas
             "app.agent_connections",
             "auth.users",
             "vault.secrets",
+            "machine.telegram_pairing_attempts",
         ):
             with tenant_database.transaction(force_rollback=True):
                 with pytest.raises(Exception, match="permission denied"):
@@ -61,6 +62,11 @@ def test_machine_roles_have_no_cross_role_membership_or_unreviewed_execute(tenan
             "machine.telegram_preview_command(jsonb)",
             "machine.telegram_confirm_command(jsonb)",
             "machine.telegram_cancel_command(jsonb)",
+            "machine.telegram_consume_pairing(jsonb)",
+            "machine.telegram_claim_update(jsonb)",
+            "machine.telegram_resolve_link(jsonb)",
+            "machine.telegram_unlink(jsonb)",
+            "machine.telegram_resolve_callback(jsonb)",
         },
         "stock_agent_backup": set(),
     }

@@ -5,7 +5,7 @@ repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)"
 cd "$repo_root"
 
 .venv/bin/python -m pytest tests/ -q
-node --test tests/test_telegram_parser.mjs tests/test_telegram_webhook_utils.mjs
+node --test tests/test_telegram_parser.mjs tests/test_telegram_webhook_utils.mjs tests/test_telegram_pairing.mjs
 npx --yes deno@2.9.6 test supabase/functions/market-briefing-gateway/_shared
 npx --yes deno@2.9.6 test --allow-env --allow-net supabase/functions/_shared
 npx --yes deno@2.9.6 test supabase/functions/app-api
