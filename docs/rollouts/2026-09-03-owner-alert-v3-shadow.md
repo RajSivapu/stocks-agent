@@ -71,6 +71,17 @@ suppression, owner mismatch rejection, stale-version rejection, expired-draft re
 event/publication-bound acknowledgement, Telegram acceptance storage, versioned expiry, and hourly
 cap rejection. It finished with `remaining_test_rows=0`.
 
+A later management-plane parity check used the live project referenced by the configured Supabase
+URL and downloaded both active function bundles without deploying them. Every downloaded runtime
+file matched the corresponding file on `codex/owner-alert-v3` byte-for-byte: 12 gateway files and
+five Telegram files. The management receipts independently reported gateway v11 and Telegram v12
+as active. The deployed secret-name inventory contained only the gateway secret, Supabase-provided
+keys, and the Telegram bot, webhook, and two owner-identity secrets; it contained no brokerage,
+friend-invitation, multi-owner, or LLM credential. Telegram's read-only `getWebhookInfo` receipt
+matched the expected HTTPS Edge Function URL, allowed only `message` and `callback_query` updates,
+reported zero pending updates, and exposed no last-error condition. No webhook was reset and no
+Telegram message was sent during these checks.
+
 ## Superseded formatting-only shadow preview
 
 The earlier protected `on-demand` dry-run used a synthetic `Watch` packet solely to inspect the
