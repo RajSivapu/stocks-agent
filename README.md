@@ -228,8 +228,11 @@ Reviewed policy comes from `config/settings.json`, is validated and versioned by
 quotes, checks session freshness, reconciles sizing, enforces stop/reward-risk/concentration/loss
 limits, and owns holding-alert transitions. If Yahoo omits `marketState`, the gateway derives the
 session only from Yahoo's validated epoch trading windows; missing or malformed windows fail closed.
-Policy v2 adds owner-only alert v3 controls. Its initial deployment is shadow-only: projected drafts
-are rendered in the gateway receipt but no alert lifecycle row or Telegram alert is created.
+Policy v3 adds an explicit owner-reviewed alert-class allowlist to the owner-only alert v3 controls.
+Its initial deployment is shadow-only with an empty allowlist: projected drafts are rendered in the
+gateway receipt but no alert lifecycle row or Telegram alert is created. Live enablement requires a
+non-empty list containing only the reviewed `entry_trigger`, `stop_breach`, or `target_hit` classes;
+the rollout begins with `stop_breach` alone only after the owner approves a real shadow example.
 
 Final gateway suggestions are graded after 5/21/63 trading sessions using adjusted closes, a fixed
 VOO benchmark (VXUS for VXUS), excess return, MFE/MAE, and raw threshold hits. Splits require review;
