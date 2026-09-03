@@ -198,6 +198,8 @@ companion requests, visibly unqualified rejected roles, and broader no-promises 
 - A management-plane download of gateway v17 compared equal to every local runtime file; test files
   were intentionally excluded because Supabase does not deploy them.
 - Post-deployment health returned `ok` for the gateway, standalone alert path, Finnhub, and Yahoo.
+- The active policy remained version 3 with `enabled=false`, `shadow=true`, and
+  `enabled_classes=[]`.
 - The live secret-name inventory remained limited to the gateway, Supabase-provided, and owner
   Telegram names. It contained no brokerage, order, invitation, or tenant credential name.
 - The final local gate passed 132 Python tests, 60 Node/Telegram tests, 147 Deno gateway tests, both
