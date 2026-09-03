@@ -254,6 +254,95 @@ Deno.test("portfolio comparisons reject unknown tickers, evidence, duplicates, a
   );
 });
 
+function companionBundle(phase: Phase = "on-demand") {
+  const bundle = validBundle(phase);
+  bundle.candidates[0].ticker = "VTI";
+  bundle.candidates.push({
+    ...validCandidate("VXUS", phase),
+    candidate_id: "00000000-0000-4000-8000-000000000012",
+    evidence: [{
+      ...validCandidate().evidence[0],
+      id: "vxus-profile",
+      kind: "fundamentals",
+      status: "fresh",
+    }],
+    factors: [{
+      kind: "fundamentals",
+      stance: "neutral",
+      text: "The fund covers developed and emerging non-U.S. equity markets.",
+      evidence_ids: ["vxus-profile"],
+    }],
+  });
+  return Object.assign(bundle, {
+    comparisons: [{
+      baseline_ticker: "VTI",
+      alternative_ticker: "VXUS",
+      relationship: "diversifier",
+      prospective_view: "similar",
+      reason: "The candidate adds a distinct geographic role.",
+      evidence_ids: ["vxus-profile"],
+    }],
+    companion_proposal: {
+      baseline_ticker: "VTI",
+      companion_ticker: "VXUS",
+      role: "diversifier",
+      thesis: "Non-U.S. exposure adds a distinct geographic role.",
+      risk_note:
+        "Currency and foreign-market risks can cause long periods of lagging U.S. stocks.",
+      evidence_ids: ["vxus-profile"],
+    },
+  });
+}
+
+Deno.test("decision bundle accepts one evidence-linked long-term companion nomination", () => {
+  const parsed = parseDecisionBundle(companionBundle(), "on-demand");
+  assertEquals(parsed.companion_proposal, {
+    baseline_ticker: "VTI",
+    companion_ticker: "VXUS",
+    role: "diversifier",
+    thesis: "Non-U.S. exposure adds a distinct geographic role.",
+    risk_note:
+      "Currency and foreign-market risks can cause long periods of lagging U.S. stocks.",
+    evidence_ids: ["vxus-profile"],
+  });
+});
+
+Deno.test("long-term companion requires a valid pair, evidence, phase, and additive role", () => {
+  const unknownTicker = companionBundle();
+  unknownTicker.companion_proposal.companion_ticker = "UNKNOWN";
+  assertThrows(
+    () => parseDecisionBundle(unknownTicker, "on-demand"),
+    "companion ticker",
+  );
+
+  const absentPair = companionBundle();
+  absentPair.comparisons = [];
+  assertThrows(
+    () => parseDecisionBundle(absentPair, "on-demand"),
+    "matching portfolio comparison",
+  );
+
+  const unknownEvidence = companionBundle();
+  unknownEvidence.companion_proposal.evidence_ids = ["missing"];
+  assertThrows(
+    () => parseDecisionBundle(unknownEvidence, "on-demand"),
+    "companion evidence",
+  );
+
+  const intraday = companionBundle("intraday");
+  assertThrows(
+    () => parseDecisionBundle(intraday, "intraday"),
+    "comparisons are limited",
+  );
+
+  const substitute = companionBundle();
+  substitute.companion_proposal.role = "like_for_like";
+  assertThrows(
+    () => parseDecisionBundle(substitute, "on-demand"),
+    "companion role",
+  );
+});
+
 Deno.test("artifact parser accepts bounded paper-watch input", () => {
   assertEquals(
     parseArtifactMutationBatch({

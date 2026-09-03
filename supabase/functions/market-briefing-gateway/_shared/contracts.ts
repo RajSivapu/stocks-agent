@@ -234,12 +234,14 @@ export interface DecisionBundle {
   title: string;
   candidates: DecisionCandidate[];
   comparisons?: PortfolioAlternativeRequest[];
+  companion_proposal?: LongTermCompanionRequest;
 }
 
 export type AlternativeRelationship =
   | "like_for_like"
   | "tilt"
   | "diversifier"
+  | "satellite"
   | "peer";
 export type ProspectiveView =
   | "stronger"
@@ -253,6 +255,17 @@ export interface PortfolioAlternativeRequest {
   relationship: AlternativeRelationship;
   prospective_view: ProspectiveView;
   reason: string;
+  evidence_ids: string[];
+}
+
+export type CompanionRole = "diversifier" | "tilt" | "satellite";
+
+export interface LongTermCompanionRequest {
+  baseline_ticker: string;
+  companion_ticker: string;
+  role: CompanionRole;
+  thesis: string;
+  risk_note: string;
   evidence_ids: string[];
 }
 
@@ -529,8 +542,10 @@ const ALTERNATIVE_RELATIONSHIPS = [
   "like_for_like",
   "tilt",
   "diversifier",
+  "satellite",
   "peer",
 ] as const;
+const COMPANION_ROLES = ["diversifier", "tilt", "satellite"] as const;
 const PROSPECTIVE_VIEWS = [
   "stronger",
   "similar",
@@ -993,11 +1008,13 @@ export function parseDecisionBundle(
 ): DecisionBundle {
   const row = objectValue(value, "bundle");
   const hasComparisons = Object.hasOwn(row, "comparisons");
+  const hasCompanionProposal = Object.hasOwn(row, "companion_proposal");
+  const bundleKeys = ["phase", "market_date", "title", "candidates"];
+  if (hasComparisons) bundleKeys.push("comparisons");
+  if (hasCompanionProposal) bundleKeys.push("companion_proposal");
   exactKeys(
     row,
-    hasComparisons
-      ? ["phase", "market_date", "title", "candidates", "comparisons"]
-      : ["phase", "market_date", "title", "candidates"],
+    bundleKeys,
     "bundle",
   );
   const parsedPhase = enumValue(row.phase, PHASES, "bundle.phase");
@@ -1036,6 +1053,14 @@ export function parseDecisionBundle(
   if (hasComparisons && phase !== "pre-market" && phase !== "on-demand") {
     throw new Error(
       "portfolio comparisons are limited to pre-market and on-demand reviews",
+    );
+  }
+  if (
+    hasCompanionProposal &&
+    (phase !== "pre-market" && phase !== "on-demand")
+  ) {
+    throw new Error(
+      "long-term companion is limited to pre-market and on-demand reviews",
     );
   }
   const comparisons = hasComparisons
@@ -1121,12 +1146,90 @@ export function parseDecisionBundle(
       pairs.add(pair);
     }
   }
+  const companionProposal = hasCompanionProposal
+    ? (() => {
+      if (!comparisons) {
+        throw new Error(
+          "bundle.companion_proposal requires a matching portfolio comparison",
+        );
+      }
+      const path = "bundle.companion_proposal";
+      const proposal = objectValue(row.companion_proposal, path);
+      exactKeys(
+        proposal,
+        [
+          "baseline_ticker",
+          "companion_ticker",
+          "role",
+          "thesis",
+          "risk_note",
+          "evidence_ids",
+        ],
+        path,
+      );
+      const baselineTicker = tickerValue(
+        proposal.baseline_ticker,
+        `${path}.baseline_ticker`,
+      );
+      const companionTicker = tickerValue(
+        proposal.companion_ticker,
+        `${path}.companion_ticker`,
+      );
+      if (
+        baselineTicker === companionTicker || !tickers.has(baselineTicker) ||
+        !tickers.has(companionTicker)
+      ) {
+        throw new Error(`${path} has an invalid companion ticker`);
+      }
+      const role = enumValue(
+        proposal.role,
+        COMPANION_ROLES,
+        `${path}.companion role`,
+      );
+      const pair = comparisons.find((comparison) =>
+        comparison.baseline_ticker === baselineTicker &&
+        comparison.alternative_ticker === companionTicker &&
+        comparison.relationship === role
+      );
+      if (!pair) {
+        throw new Error(`${path} requires a matching portfolio comparison`);
+      }
+      const candidate = candidates.find((item) =>
+        item.ticker === companionTicker
+      )!;
+      const evidenceIds = arrayValue(
+        proposal.evidence_ids,
+        `${path}.evidence_ids`,
+        10,
+      ).map((id, index) =>
+        stringValue(id, `${path}.evidence_ids[${index}]`, 100)
+      );
+      if (
+        evidenceIds.length === 0 ||
+        evidenceIds.some((id) =>
+          !candidate.evidence.some((evidence) => evidence.id === id) ||
+          !candidate.factors.some((factor) => factor.evidence_ids.includes(id))
+        )
+      ) {
+        throw new Error(`${path} references unknown companion evidence`);
+      }
+      return {
+        baseline_ticker: baselineTicker,
+        companion_ticker: companionTicker,
+        role,
+        thesis: stringValue(proposal.thesis, `${path}.thesis`, 500),
+        risk_note: stringValue(proposal.risk_note, `${path}.risk_note`, 500),
+        evidence_ids: evidenceIds,
+      };
+    })()
+    : undefined;
   return {
     phase,
     market_date: marketDate,
     title: stringValue(row.title, "bundle.title"),
     candidates,
     ...(comparisons ? { comparisons } : {}),
+    ...(companionProposal ? { companion_proposal: companionProposal } : {}),
   };
 }
 
