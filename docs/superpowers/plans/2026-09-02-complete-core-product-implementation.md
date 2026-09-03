@@ -218,7 +218,9 @@ git commit -m "test: add release capability gate"
 - Create: `packages/contracts/src/provider.ts`
 - Create: `packages/contracts/src/api.ts`
 - Create: `packages/contracts/src/index.ts`
-- Create: `packages/contracts/src/contracts.test.ts`
+- Create: `packages/contracts/src/decimal_test.ts`
+- Create: `packages/contracts/src/portfolio_test.ts`
+- Create: `packages/contracts/src/provider_test.ts`
 - Modify: `packages/contracts/package.json`
 
 **Interfaces:**
@@ -226,29 +228,29 @@ git commit -m "test: add release capability gate"
 - Produces: `parseMoney`, `parseShares`, `parsePrice`, `parseCommandInput`,
 `parseProviderEnvelopeV2`, and public response types importable by web and Edge code.
 
-- [ ] **Step 1: Write failing precision and authority tests**
+- [x] **Step 1: Write failing precision and authority tests**
 
 Cover eight share decimals, four price decimals, two persisted money decimals, one-million-share cap,
 no exponent notation, no JSON numeric financial inputs, exact object keys, and rejection of
 `owner_id`, `telegram_message_id`, `policy_status`, `verified_price`, or `delivery_status` in model
 input.
 
-- [ ] **Step 2: Run the package tests and observe failure**
+- [x] **Step 2: Run the package tests and observe failure**
 
 Run `npx --yes deno@2.9.6 test packages/contracts/src`. Expected: missing module/function failures.
 
-- [ ] **Step 3: Implement pure validators**
+- [x] **Step 3: Implement pure validators**
 
 Use string parsing and `bigint`; never coerce a financial value through JavaScript `Number`. Export
 discriminated unions for all command, provider, and receipt states. Enforce 64 KiB provider envelopes,
 40 holdings, 20 candidates, 12 gateway operations per run, and exact UUID/date/timestamp formats.
 
-- [ ] **Step 4: Port compatibility tests**
+- [x] **Step 4: Port compatibility tests**
 
 Import representative current gateway fixtures and prove V1 can be converted by an explicit
 `legacyEnvelopeToV2()` function used only during owner migration. Unknown V1 fields fail closed.
 
-- [ ] **Step 5: Verify and commit**
+- [x] **Step 5: Verify and commit**
 
 Run package and existing fixed-point/contract tests. Commit:
 
