@@ -423,25 +423,25 @@ git commit -m "security: enforce cross-tenant isolation"
 - Consumes: private schemas and staging project JWKS.
 - Produces: `withDatabase(databaseUrl, fn)`, `verifyUserJwt(request, jwks)`, `readBoundedJson(request, bytes)`, and four execute-only roles: gateway, scheduler, Telegram, and backup.
 
-- [ ] **Step 1: Write failing role and HTTP-boundary tests**
+- [x] **Step 1: Write failing role and HTTP-boundary tests**
 
 Each machine role must fail `SELECT` on every base table, fail access to Auth/Vault, fail all other
 machine RPCs, and succeed only on its exact allow-list. JWT tests cover wrong issuer, audience,
 signature, project, expiry, and algorithm confusion. CORS accepts only configured exact origins.
 
-- [ ] **Step 2: Implement role creation without passwords in Git**
+- [x] **Step 2: Implement role creation without passwords in Git**
 
 Migrations create non-login privilege roles. `provision_runtime_roles.py` creates random login roles,
 grants exactly one privilege role, writes a mode-0600 temporary Supabase secrets env file, invokes the
 CLI, securely removes the temporary file, and prints only credential names plus success/failure.
 
-- [ ] **Step 3: Implement shared HTTP primitives**
+- [x] **Step 3: Implement shared HTTP primitives**
 
 Bound request bodies before JSON parsing, normalize stable errors, add `Cache-Control: no-store`,
 reject unexpected methods/content types/origins, and verify asymmetric JWTs from cached project JWKS.
 No helper may log request bodies or authorization headers.
 
-- [ ] **Step 4: Implement direct database sessions**
+- [x] **Step 4: Implement direct database sessions**
 
 Use the Supavisor session-mode IPv4 URL. Start one transaction per root RPC call, set a short statement
 timeout, use parameterized SQL only, and close the session in `finally`. Do not include a generic

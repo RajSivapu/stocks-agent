@@ -7,8 +7,14 @@ cd "$repo_root"
 .venv/bin/python -m pytest tests/ -q
 node --test tests/test_telegram_parser.mjs tests/test_telegram_webhook_utils.mjs
 npx --yes deno@2.9.6 test supabase/functions/market-briefing-gateway/_shared
+npx --yes deno@2.9.6 test --allow-env --allow-net supabase/functions/_shared
 npx --yes deno@2.9.6 check supabase/functions/market-briefing-gateway/index.ts
 npx --yes deno@2.9.6 check supabase/functions/telegram-portfolio/index.ts
+npx --yes deno@2.9.6 check supabase/functions/_shared/bounded-json.ts \
+  supabase/functions/_shared/cors.ts \
+  supabase/functions/_shared/errors.ts \
+  supabase/functions/_shared/jwt.ts \
+  supabase/functions/_shared/postgres.ts
 
 if [[ -f packages/contracts/src/index.ts ]]; then
   npx --yes deno@2.9.6 test packages/contracts/src

@@ -87,9 +87,11 @@ def foundation_database(tmp_path_factory):
         connection.execute("CREATE ROLE authenticated NOLOGIN")
         connection.execute("CREATE ROLE service_role NOLOGIN")
         connection.execute("CREATE SCHEMA auth")
+        connection.execute("CREATE SCHEMA vault")
         connection.execute(
             "CREATE TABLE auth.users (id uuid PRIMARY KEY, email text UNIQUE)"
         )
+        connection.execute("CREATE TABLE vault.secrets (id uuid PRIMARY KEY, secret text)")
         connection.execute((ROOT / "sql/schema.sql").read_text())
         if FOUNDATION_MIGRATION.exists():
             connection.execute(FOUNDATION_MIGRATION.read_text())
@@ -157,9 +159,11 @@ def tenant_database(tmp_path_factory):
         connection.execute("CREATE ROLE authenticated NOLOGIN")
         connection.execute("CREATE ROLE service_role NOLOGIN")
         connection.execute("CREATE SCHEMA auth")
+        connection.execute("CREATE SCHEMA vault")
         connection.execute(
             "CREATE TABLE auth.users (id uuid PRIMARY KEY, email text UNIQUE)"
         )
+        connection.execute("CREATE TABLE vault.secrets (id uuid PRIMARY KEY, secret text)")
         connection.execute(
             """
             CREATE FUNCTION auth.uid() RETURNS uuid

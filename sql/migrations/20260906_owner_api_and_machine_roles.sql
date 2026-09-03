@@ -268,3 +268,29 @@ ALTER DEFAULT PRIVILEGES FOR ROLE stock_agent_migration_owner IN SCHEMA app
   REVOKE ALL ON TABLES FROM PUBLIC, anon, authenticated, service_role;
 ALTER DEFAULT PRIVILEGES FOR ROLE stock_agent_migration_owner IN SCHEMA api
   REVOKE ALL ON TABLES FROM PUBLIC, anon, authenticated, service_role;
+
+DO $$
+DECLARE
+  role_name TEXT;
+BEGIN
+  FOREACH role_name IN ARRAY ARRAY[
+    'stock_agent_gateway',
+    'stock_agent_scheduler',
+    'stock_agent_telegram',
+    'stock_agent_backup'
+  ]
+  LOOP
+    IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = role_name) THEN
+      EXECUTE format('CREATE ROLE %I NOLOGIN NOINHERIT NOSUPERUSER NOCREATEDB NOCREATEROLE NOBYPASSRLS', role_name);
+    END IF;
+    EXECUTE format('REVOKE ALL ON SCHEMA public, app, api, auth FROM %I', role_name);
+    IF EXISTS (SELECT 1 FROM pg_namespace WHERE nspname = 'vault') THEN
+      EXECUTE format('REVOKE ALL ON SCHEMA vault FROM %I', role_name);
+    END IF;
+    EXECUTE format('REVOKE ALL ON ALL TABLES IN SCHEMA app FROM %I', role_name);
+    EXECUTE format('REVOKE ALL ON ALL SEQUENCES IN SCHEMA app FROM %I', role_name);
+    EXECUTE format('REVOKE ALL ON ALL FUNCTIONS IN SCHEMA machine FROM %I', role_name);
+    EXECUTE format('GRANT USAGE ON SCHEMA machine TO %I', role_name);
+  END LOOP;
+END
+$$;
