@@ -296,6 +296,11 @@ def test_market_briefing_eval_covers_gateway_failure_pressure_cases():
         "comparison_history_is_server_computed",
         "comparison_cannot_change_owner_plan",
         "peer_list_requires_business_validation",
+        "companion_substitute_rejected",
+        "vxus_diversifier_companion",
+        "satellite_not_recurring",
+        "no_companion_qualified",
+        "companion_history_is_server_computed",
     )
     for case_name in required:
         assert f"name: {case_name}" in evaluation

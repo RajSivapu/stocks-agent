@@ -228,6 +228,14 @@ equal monthly contributions and reports max drawdown; the model cannot submit re
 remains the recorded recurring baseline unless the owner separately confirms another plan. These
 comparisons never change a plan or holding, and on-demand previews never send Telegram.
 
+The optional Long-Term Companion layer then selects at most one additive research candidate or says
+that none qualified. It separates duplicate core substitutes from diversifiers, tilts, and
+concentrated satellites. The gateway computes available 3/5/10-year annualized history, drawdowns,
+daily-return correlation, and weak/middle/strong rolling one-year outcomes for a normalized
+$100/month contribution. Those outcomes are historical planning illustrations, not forecasts. Only
+the initial VTI/VXUS pair can be marked eligible for a later owner-reviewed recurring-reminder
+discussion; no reminder, holding, or brokerage order is created or changed by the review.
+
 ## Deterministic policy and outcomes
 
 Reviewed policy comes from `config/settings.json`, is validated and versioned by

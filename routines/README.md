@@ -75,7 +75,12 @@ update daylight-saving offsets in March and November.
 > trade or edit the repository. On the first pre-market brief of each calendar month, add the
 > bounded owner-holding/plan alternatives review defined by the skill; omit `comparisons` entirely
 > on other scheduled runs. The gateway alone calculates synchronized hypothetical history. Never
-> change a holding or recurring plan.
+> change a holding or recurring plan. After the monthly comparisons, nominate at most one
+> evidence-cleared `companion_proposal`, or omit it so the gateway reports that no additive
+> companion qualified. Treat ITOT/SCHB as VTI substitutes, VT as a replacement, VXUS as a possible
+> diversifier, VOO/SCHD as overlapping tilts, and any individual company as a research-only
+> satellite. Never submit performance, allocation, or forecast numbers; the gateway owns the
+> 3/5/10-year history and normalized rolling one-year scenario.
 
 ### Intraday prompt
 

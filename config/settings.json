@@ -42,8 +42,22 @@
     "cadence": "first_pre_market_of_month_and_on_demand",
     "max_pairs": 6,
     "history_method": "gateway_adjusted_equal_monthly_contributions_1y",
-    "recurring_core_candidates": ["ITOT", "SCHB", "VOO", "VT", "VXUS"],
+    "recurring_core_candidates": ["ITOT", "SCHB", "VOO", "VT", "VXUS", "SCHD"],
     "peer_discovery": "finnhub_then_business_model_validation",
+    "long_term_companion": {
+      "enabled": true,
+      "max_proposals": 1,
+      "history_years": [3, 5, 10],
+      "scenario_monthly_usd": 100,
+      "substitutes": ["ITOT", "SCHB"],
+      "tilts": ["VOO", "SCHD"],
+      "global_core_replacements": ["VT"],
+      "diversifiers": ["VXUS"],
+      "recurring_plan_review_pairs": ["VTI:VXUS"],
+      "individual_stocks_research_only": true,
+      "automatic_plan_changes": false,
+      "automatic_holding_changes": false
+    },
     "automatic_plan_changes": false,
     "automatic_holding_changes": false
   },

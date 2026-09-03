@@ -23,6 +23,7 @@ is separate, paper-first, and outside this codebase.
 | Watchlist changes as owner-reviewed proposals | Implemented in settings/skill | Live through the revised Routine; never edits/pushes the checkout |
 | Owner-only alert v3 | Implemented, reviewed, and rollback-tested | Live in shadow-only mode with gateway v16, Telegram v12, and policy v3; protected dry-runs remain write-free and send-free |
 | Owner portfolio alternatives review | Gateway-computed history, evidence gate, renderer, and routine contract implemented and tested | Live in gateway v16; protected five-pair VTI review returned complete coverage, a suppressed preview, zero writes/sends, and left VTI as the unchanged recurring baseline |
+| Long-Term Companion research | Strict nomination contract, gateway-owned role policy, 3/5/10-year analytics, rolling contribution scenarios, and compact renderer implemented locally | Deployment and protected write-free/send-free proof pending; VTI remains unchanged |
 
 The reliability release is on GitHub `main`. Alert v3 is deployed from
 `codex/owner-alert-v3` for shadow verification and is not yet merged. "Live" means the corresponding
@@ -81,6 +82,11 @@ The remaining checks are scheduled observation followed by an explicitly approve
   VT/VXUS are diversification changes. Individual-stock peers require business-model validation.
 - Forward views remain qualitative and are forced to `insufficient` when the alternative fails
   gateway policy or cited evidence is unavailable. The review never changes a holding or plan.
+- The Long-Term Companion layer may nominate at most one additive candidate after the comparison
+  screen. ITOT/SCHB remain substitutes, VT a global-core replacement, VXUS a possible diversifier,
+  VOO/SCHD tilts, and individual companies research-only concentrated satellites.
+- Gateway-computed 3/5/10-year annualized return, drawdown, correlation, and normalized rolling
+  one-year contribution history are planning evidence, never a future-profit forecast.
 
 ## Deferred research features
 

@@ -178,7 +178,7 @@ top-level `comparisons` array. Each item has exactly:
 }
 ```
 
-Allowed relationships are `like_for_like`, `tilt`, `diversifier`, and `peer`. Allowed prospective views are
+Allowed relationships are `like_for_like`, `tilt`, `diversifier`, `satellite`, and `peer`. Allowed prospective views are
 `stronger`, `similar`, `weaker`, and `insufficient`. The evidence IDs must belong to the alternative
 candidate and have current `fresh` or explicitly justified `fallback` status. A provider's peer list
 is only a discovery pool: validate business model, revenue drivers, growth, balance sheet, cash
@@ -199,6 +199,56 @@ The forward view is a qualitative, evidence-linked judgment—not a probability 
 what would invalidate it, distinguish a substitute from a diversifier, and use `insufficient` when
 fees, holdings overlap, fundamentals, valuation, or current risk evidence cannot be verified. The
 gateway may downgrade the view to `insufficient`; its result is final.
+
+### Long-Term Companion nomination
+
+After completing all comparison work, decide whether exactly one candidate adds a distinct,
+defensible long-term role beside the recorded baseline. This is not a highest-return contest. Screen
+coverage, holdings overlap, cost, concentration, valuation, current risks, and evidence quality.
+Nominate at most one; omit `companion_proposal` when none qualifies. The gateway will then render
+an explicit no-qualified-companion conclusion.
+
+For the recorded VTI baseline:
+
+- ITOT and SCHB are substitutes that duplicate the same broad-U.S. core job; never nominate either
+  as a companion.
+- VT is a possible global-core replacement whose U.S. holdings overlap VTI; never nominate it as a
+  companion beside VTI.
+- VXUS is a possible `diversifier` because it adds non-U.S. exposure. It is the only initial
+  VTI pair eligible for a later owner-reviewed recurring-reminder discussion.
+- VOO and SCHD are `tilt` research candidates. Disclose their U.S. overlap and concentration/factor
+  change; never call either broader diversification.
+- An individual company or unsupported fund is a `satellite`: concentrated, research-only, and not
+  eligible for a recurring core reminder. It is never “similar to VTI.”
+
+Every nomination needs the companion as an ordinary candidate with its own current evidence,
+Analyst, Checker, and approved gateway evaluation. It also needs a matching comparison relationship
+and fresh or justified-fallback evidence. Add exactly:
+
+```json
+{
+  "companion_proposal": {
+    "baseline_ticker": "VTI",
+    "companion_ticker": "VXUS",
+    "role": "diversifier",
+    "thesis": "Non-U.S. exposure adds a distinct geographic role.",
+    "risk_note": "Currency and foreign-market risks can cause long periods of lagging U.S. stocks.",
+    "evidence_ids": ["vxus-official-profile", "vxus-current-risk"]
+  }
+}
+```
+
+Allowed roles are `diversifier`, `tilt`, and `satellite`. Never put a like-for-like substitute in
+this object. Do not include a contribution amount, allocation, shares, stop, target, expected
+return, price forecast, or instruction. Never calculate or submit the 3/5/10-year rows, correlation,
+drawdowns, or rolling one-year contribution scenarios; the gateway fetches ten-year adjusted
+history and owns every number. The normalized per-$100 history is not an assumption about the
+owner's available budget.
+
+The result remains a research proposal. Do not create, change, cancel, or advance a reminder; do
+not edit a holding; do not infer a fill; and do not tell the owner that a candidate will make money.
+An on-demand result stays in the current session. A scheduled nomination is allowed only in the
+first pre-market brief of a calendar month.
 
 ## Dry-run output
 

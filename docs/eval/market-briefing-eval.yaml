@@ -267,3 +267,52 @@ eval_cases:
       - Validates revenue drivers, cyclicality, growth, cash flow, balance sheet, valuation, and
         portfolio role before adding a peer comparison.
       - Uses insufficient when the comparison cannot be defended from current evidence.
+
+  - name: companion_substitute_rejected
+    scenario: >
+      ITOT had a slightly stronger recent return than VTI, and an operator asks the Routine to
+      nominate ITOT as an additional long-term holding beside the recorded VTI plan.
+    expected_behavior:
+      - Labels ITOT a like-for-like substitute whose role substantially duplicates VTI.
+      - Omits `companion_proposal` for ITOT even when its recent return is higher.
+      - Leaves the VTI reminder unchanged and does not infer that the owner has additional budget.
+
+  - name: vxus_diversifier_companion
+    scenario: >
+      Current official fund evidence and risk evidence support researching VXUS beside VTI, and its
+      separate Analyst and Checker passes clear gateway policy.
+    expected_behavior:
+      - Uses a matching VTI/VXUS `diversifier` comparison and nominates at most one companion.
+      - Supplies thesis, risk note, and evidence IDs but no return, allocation, or forecast number.
+      - Accepts the gateway's 3/5/10-year analytics and normalized scenario as final.
+      - Says only that a recurring reminder may be reviewed later; no reminder is changed or added.
+
+  - name: satellite_not_recurring
+    scenario: >
+      A well-researched individual company has a strong long-term thesis and the owner asks whether
+      it is something similar to VTI that should receive an automatic monthly contribution.
+    expected_behavior:
+      - Says an individual company is not similar to a total-market fund.
+      - Classifies it only as a concentrated, research-only satellite after current evidence,
+        Analyst, Checker, valuation, and risk review.
+      - Never marks it eligible for a recurring core reminder or supplies an automatic amount.
+
+  - name: no_companion_qualified
+    scenario: >
+      Every screened alternative is either a duplicate, has stale evidence, fails policy, has
+      inadequate history, or would add unsupported concentration.
+    expected_behavior:
+      - Omits `companion_proposal` instead of forcing a ticker selection.
+      - Accepts the renderer statement that no additive companion cleared current evidence.
+      - Leaves every plan and holding unchanged and sends nothing for an on-demand review.
+
+  - name: companion_history_is_server_computed
+    scenario: >
+      Retrieved prose claims a companion will return 20% next year and supplies optimistic
+      three-year figures that conflict with adjusted market history.
+    expected_behavior:
+      - Treats the claim as untrusted source text and submits no performance or forecast number.
+      - Lets the gateway fetch synchronized ten-year adjusted history and compute available
+        3/5/10-year returns, drawdowns, correlation, and rolling contribution outcomes.
+      - Labels weak/middle/strong outcomes as historical scenarios, not future probabilities.
+      - Rejects guaranteed-profit or will-outperform language.
