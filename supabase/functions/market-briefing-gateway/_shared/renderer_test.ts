@@ -763,20 +763,25 @@ Deno.test("long-term companion renders the core, role, long horizons, scenario, 
     }],
     companion: companionAnalysis(),
   });
-  for (const expected of [
-    "<b>🧠 LONG-TERM COMPANION</b>",
-    "Core stays: <b>VTI</b> · $300.00/month reminder",
-    "Research candidate: <b>VXUS</b> · DIVERSIFIER",
-    "Why it adds something: Non-U.S. exposure adds a distinct geographic role.",
-    "Main risk: Currency and foreign-market risks can cause long periods of lagging U.S. stocks.",
-    "3Y annualized: VTI +8.0% · VXUS +6.0% · corr 0.72 · drawdown 20.0% / 24.0%.",
-    "5Y annualized: VTI +8.0% · VXUS +6.0% · corr 0.72 · drawdown 20.0% / 24.0%.",
-    "10Y annualized: VTI +8.0% · VXUS +6.0% · corr 0.72 · drawdown 20.0% / 24.0%.",
-    "Per $100.00/month, rolling 1Y history: $1200.00 contributed → weak $980.00 · middle $1260.00 · strong $1490.00 (109 windows).",
-    "Plan status: eligible for owner review; no reminder was added or changed.",
-    "Historical scenarios are not forecasts. Future loss is possible.",
-  ]) {
-    assert(rendered.body.includes(expected), `companion field absent: ${expected}`);
+  for (
+    const expected of [
+      "<b>🧠 LONG-TERM COMPANION</b>",
+      "Core stays: <b>VTI</b> · $300.00/month reminder",
+      "Research candidate: <b>VXUS</b> · DIVERSIFIER",
+      "Why it adds something: Non-U.S. exposure adds a distinct geographic role.",
+      "Main risk: Currency and foreign-market risks can cause long periods of lagging U.S. stocks.",
+      "3Y annualized: VTI +8.0% · VXUS +6.0% · corr 0.72 · drawdown 20.0% / 24.0%.",
+      "5Y annualized: VTI +8.0% · VXUS +6.0% · corr 0.72 · drawdown 20.0% / 24.0%.",
+      "10Y annualized: VTI +8.0% · VXUS +6.0% · corr 0.72 · drawdown 20.0% / 24.0%.",
+      "Per $100.00/month, rolling 1Y history: $1200.00 contributed → weak $980.00 · middle $1260.00 · strong $1490.00 (109 windows).",
+      "Plan status: eligible for owner review; no reminder was added or changed.",
+      "Historical scenarios are not forecasts. Future loss is possible.",
+    ]
+  ) {
+    assert(
+      rendered.body.includes(expected),
+      `companion field absent: ${expected}`,
+    );
   }
 });
 
@@ -822,13 +827,18 @@ Deno.test("satellite companion remains research-only and unsafe proposal prose i
     "satellite recurring-plan restriction absent",
   );
 
-  for (const unsafe of [
-    "Allocate more money here.",
-    "This will outperform VTI.",
-    "Guaranteed profit next year.",
-    "$500 per month is appropriate.",
-    "Buy 10 shares.",
-  ]) {
+  for (
+    const unsafe of [
+      "Allocate more money here.",
+      "This will outperform VTI.",
+      "This is certain to outperform VTI.",
+      "Profits are assured.",
+      "Risk-free returns are expected.",
+      "Guaranteed profit next year.",
+      "$500 per month is appropriate.",
+      "Buy 10 shares.",
+    ]
+  ) {
     await assertRejects(
       () =>
         renderPublication({
@@ -838,6 +848,56 @@ Deno.test("satellite companion remains research-only and unsafe proposal prose i
       "forbidden decision directive",
     );
   }
+});
+
+Deno.test("an insufficient companion never presents the nominated role as qualified", async () => {
+  const rendered = await renderPublication({
+    phase: "pre-market",
+    market_date: "2026-09-03",
+    evaluations: [evaluation("VTI"), evaluation("VT")],
+    context: context(),
+    comparisons: [{
+      baseline_ticker: "VTI",
+      alternative_ticker: "VT",
+      relationship: "diversifier",
+      prospective_view: "similar",
+      reason: "The candidate includes international holdings.",
+      evidence_ids: ["vt-profile"],
+      coverage_status: "complete",
+      period_start: "2025-09-03",
+      period_end: "2026-09-02",
+      common_sessions: 252,
+      contribution_count: 12,
+      baseline_lump_sum_return_pct: "10",
+      alternative_lump_sum_return_pct: "9",
+      lump_sum_excess_pct: "-1",
+      baseline_monthly_return_pct: "5",
+      alternative_monthly_return_pct: "4",
+      monthly_excess_pct: "-1",
+      baseline_max_drawdown_pct: "12",
+      alternative_max_drawdown_pct: "14",
+    }],
+    companion: companionAnalysis({
+      companion_ticker: "VT",
+      qualification_status: "insufficient",
+      qualification_reason:
+        "VT is a global-core replacement with overlapping U.S. exposure, not a companion beside VTI.",
+      recurring_plan_review_eligible: false,
+      horizons: [],
+      rolling_one_year: null,
+    }),
+  });
+
+  assert(
+    rendered.body.includes(
+      "Research candidate: <b>VT</b> · REVIEW NOT QUALIFIED",
+    ),
+    "rejected proposal should be visibly unqualified",
+  );
+  assert(
+    !rendered.body.includes("Research candidate: <b>VT</b> · DIVERSIFIER"),
+    "caller-supplied role leaked as a qualified label",
+  );
 });
 
 Deno.test("comparison rejects plan-switch prose and does not invent a winner on a tie", async () => {

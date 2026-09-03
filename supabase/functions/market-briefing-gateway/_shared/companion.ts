@@ -59,13 +59,21 @@ export function qualifyCompanionRole(
     recurring_plan_review_eligible: false,
   });
   if (relationship !== request.role) {
-    return deny("The nominated role does not match the validated comparison relationship.");
+    return deny(
+      "The nominated role does not match the validated comparison relationship.",
+    );
   }
-  if (request.companion_ticker === "ITOT" || request.companion_ticker === "SCHB") {
-    return deny("This is a like-for-like U.S. core substitute, not an additive companion.");
+  if (
+    request.companion_ticker === "ITOT" || request.companion_ticker === "SCHB"
+  ) {
+    return deny(
+      "This is a like-for-like U.S. core substitute, not an additive companion.",
+    );
   }
   if (request.companion_ticker === "VT") {
-    return deny("VT is a global-core replacement with overlapping U.S. exposure, not a companion beside VTI.");
+    return deny(
+      "VT is a global-core replacement with overlapping U.S. exposure, not a companion beside VTI.",
+    );
   }
   const expectedRole = request.companion_ticker === "VXUS"
     ? "diversifier"
@@ -81,9 +89,9 @@ export function qualifyCompanionRole(
   }
   return {
     allowed: true,
-    reason: "Gateway role policy accepted the candidate for long-term research.",
-    recurring_plan_review_eligible:
-      request.baseline_ticker === "VTI" &&
+    reason:
+      "Gateway role policy accepted the candidate for long-term research.",
+    recurring_plan_review_eligible: request.baseline_ticker === "VTI" &&
       request.companion_ticker === "VXUS" && request.role === "diversifier",
   };
 }
@@ -94,7 +102,9 @@ function format(value: number, decimals = 4): string {
   return rounded.toFixed(decimals).replace(/\.?0+$/, "");
 }
 
-function pricesByDate(bars: readonly AdjustedBar[]): Map<string, number> | null {
+function pricesByDate(
+  bars: readonly AdjustedBar[],
+): Map<string, number> | null {
   const output = new Map<string, number>();
   for (const bar of bars) {
     const price = Number(bar.adjusted_close);
@@ -135,12 +145,17 @@ function cutoffDate(endDate: string, years: number): string {
   return cutoff.toISOString().slice(0, 10);
 }
 
-function annualizedReturn(prices: readonly number[], start: string, end: string): number {
-  const elapsedDays =
-    (Date.parse(`${end}T00:00:00.000Z`) - Date.parse(`${start}T00:00:00.000Z`)) /
+function annualizedReturn(
+  prices: readonly number[],
+  start: string,
+  end: string,
+): number {
+  const elapsedDays = (Date.parse(`${end}T00:00:00.000Z`) -
+    Date.parse(`${start}T00:00:00.000Z`)) /
     86_400_000;
   if (elapsedDays <= 0) throw new Error("invalid history period");
-  return (Math.pow(prices.at(-1)! / prices[0], 365.2425 / elapsedDays) - 1) * 100;
+  return (Math.pow(prices.at(-1)! / prices[0], 365.2425 / elapsedDays) - 1) *
+    100;
 }
 
 function maxDrawdown(prices: readonly number[]): number {
@@ -153,7 +168,10 @@ function maxDrawdown(prices: readonly number[]): number {
   return largest * 100;
 }
 
-function correlation(leftPrices: readonly number[], rightPrices: readonly number[]): number | null {
+function correlation(
+  leftPrices: readonly number[],
+  rightPrices: readonly number[],
+): number | null {
   const left: number[] = [];
   const right: number[] = [];
   for (let index = 1; index < leftPrices.length; index += 1) {
@@ -174,7 +192,9 @@ function correlation(leftPrices: readonly number[], rightPrices: readonly number
     rightVariance += rightDelta * rightDelta;
   }
   const denominator = Math.sqrt(leftVariance * rightVariance);
-  if (!Number.isFinite(denominator) || denominator <= Number.EPSILON) return null;
+  if (!Number.isFinite(denominator) || denominator <= Number.EPSILON) {
+    return null;
+  }
   const value = covariance / denominator;
   return Number.isFinite(value) ? Math.max(-1, Math.min(1, value)) : null;
 }
@@ -184,7 +204,9 @@ function horizon(
   years: 3 | 5 | 10,
 ): CompanionHorizon | null {
   const periodEnd = rows.at(-1)!.date;
-  const periodRows = rows.filter((row) => row.date >= cutoffDate(periodEnd, years));
+  const periodRows = rows.filter((row) =>
+    row.date >= cutoffDate(periodEnd, years)
+  );
   if (periodRows.length < years * MIN_SESSIONS_PER_YEAR) return null;
   const baseline = periodRows.map((row) => row.baseline);
   const companion = periodRows.map((row) => row.companion);
@@ -224,16 +246,28 @@ function rollingContribution(
     const month = row.date.slice(0, 7);
     if (!firstByMonth.has(month)) firstByMonth.set(month, row.companion);
   }
-  const monthly = [...firstByMonth.values()];
+  const monthly = [...firstByMonth.entries()].map(([month, price]) => ({
+    month,
+    price,
+  }));
   if (monthly.length < 24) return null;
   const endingValues: number[] = [];
   for (let start = 0; start <= monthly.length - 12; start += 1) {
     const window = monthly.slice(start, start + 12);
-    const shares = window.reduce((sum, price) => sum + 100 / price, 0);
-    const endingValue = shares * window.at(-1)!;
+    const consecutive = window.every((item, index) => {
+      if (index === 0) return true;
+      const [previousYear, previousMonth] = window[index - 1].month
+        .split("-").map(Number);
+      const [year, month] = item.month.split("-").map(Number);
+      return year * 12 + month === previousYear * 12 + previousMonth + 1;
+    });
+    if (!consecutive) continue;
+    const shares = window.reduce((sum, item) => sum + 100 / item.price, 0);
+    const endingValue = shares * window.at(-1)!.price;
     if (!Number.isFinite(endingValue) || endingValue <= 0) return null;
     endingValues.push(endingValue);
   }
+  if (endingValues.length === 0) return null;
   endingValues.sort((left, right) => left - right);
   return {
     monthly_contribution_usd: "100",
@@ -269,7 +303,11 @@ export function analyzeLongTermCompanion(
   if (!policy.allowed) return insufficient(request, policy, policy.reason);
   const rows = synchronize(baselineBars, companionBars);
   if (!rows || rows.length === 0) {
-    return insufficient(request, policy, "Synchronized adjusted history was missing or malformed.");
+    return insufficient(
+      request,
+      policy,
+      "Synchronized adjusted history was missing or malformed.",
+    );
   }
   const horizons = HORIZONS.flatMap((years) => {
     const result = horizon(rows, years);
@@ -277,7 +315,11 @@ export function analyzeLongTermCompanion(
   });
   const rolling = rollingContribution(rows);
   if (!horizons.some((row) => row.years === 3) || !rolling) {
-    return insufficient(request, policy, "At least three years of synchronized adjusted history is required.");
+    return insufficient(
+      request,
+      policy,
+      "At least three years of synchronized adjusted history is required.",
+    );
   }
   return {
     ...request,

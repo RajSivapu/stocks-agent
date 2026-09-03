@@ -12,7 +12,7 @@ import {
   type PolicyContext,
   type VerifiedQuote,
 } from "./contracts.ts";
-import { isNyseHoliday } from "./market-calendar.ts";
+import { isFirstNyseSessionOfMonth, isNyseHoliday } from "./market-calendar.ts";
 import {
   type AdjustedBar,
   type AdjustedHistoryRange,
@@ -386,6 +386,15 @@ export function createGatewayHandler(dependencies: GatewayDependencies) {
           throw new GatewayHttpError(400, "INVALID_REQUEST");
         }
         prepared = parseDecisionBundle(row, row.phase as Phase);
+        if (
+          (prepared as ReturnType<typeof parseDecisionBundle>).phase ===
+            "on-demand" &&
+          (prepared as ReturnType<typeof parseDecisionBundle>)
+            .companion_proposal &&
+          !envelope.dry_run
+        ) {
+          throw new GatewayHttpError(400, "INVALID_REQUEST");
+        }
       } else if (envelope.operation === "grade_due_decisions") {
         requireRun(envelope);
         prepared = parseGradePayload(envelope.payload);
@@ -1234,6 +1243,15 @@ async function evaluateAndPublish(
     deps.repository.readContext(envelope.run_id),
     deps.repository.activePolicy(),
   ]);
+  if (
+    bundle.companion_proposal && bundle.phase === "pre-market" &&
+    !isFirstNyseSessionOfMonth(
+      bundle.market_date,
+      activePolicy.nyse_holidays,
+    )
+  ) {
+    throw new GatewayRepositoryError("POLICY_REJECTED");
+  }
   const tickers = [
     ...new Set([
       ...bundle.candidates.map((candidate) => candidate.ticker),

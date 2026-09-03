@@ -1,10 +1,7 @@
-import {
-  analyzeLongTermCompanion,
-  qualifyCompanionRole,
-} from "./companion.ts";
+import { analyzeLongTermCompanion, qualifyCompanionRole } from "./companion.ts";
 import type {
-  LongTermCompanionRequest,
   AlternativeRelationship,
+  LongTermCompanionRequest,
 } from "./contracts.ts";
 import type { AdjustedBar } from "./market-data.ts";
 
@@ -48,8 +45,7 @@ function bars(
   while (cursor <= last) {
     const day = cursor.getUTCDay();
     if (day !== 0 && day !== 6) {
-      const monthIndex =
-        (cursor.getUTCFullYear() - startYear) * 12 +
+      const monthIndex = (cursor.getUTCFullYear() - startYear) * 12 +
         cursor.getUTCMonth() - startMonth;
       const value = String(priceForMonth(monthIndex));
       output.push({
@@ -74,14 +70,62 @@ Deno.test("gateway-owned companion roles reject duplicate and mislabeled exposur
     allowed: boolean;
     recurring: boolean;
   }> = [
-    { ticker: "ITOT", role: "tilt", relationship: "tilt", allowed: false, recurring: false },
-    { ticker: "SCHB", role: "satellite", relationship: "satellite", allowed: false, recurring: false },
-    { ticker: "VT", role: "diversifier", relationship: "diversifier", allowed: false, recurring: false },
-    { ticker: "VOO", role: "tilt", relationship: "tilt", allowed: true, recurring: false },
-    { ticker: "SCHD", role: "tilt", relationship: "tilt", allowed: true, recurring: false },
-    { ticker: "VXUS", role: "diversifier", relationship: "diversifier", allowed: true, recurring: true },
-    { ticker: "MSFT", role: "satellite", relationship: "satellite", allowed: true, recurring: false },
-    { ticker: "MSFT", role: "diversifier", relationship: "diversifier", allowed: false, recurring: false },
+    {
+      ticker: "ITOT",
+      role: "tilt",
+      relationship: "tilt",
+      allowed: false,
+      recurring: false,
+    },
+    {
+      ticker: "SCHB",
+      role: "satellite",
+      relationship: "satellite",
+      allowed: false,
+      recurring: false,
+    },
+    {
+      ticker: "VT",
+      role: "diversifier",
+      relationship: "diversifier",
+      allowed: false,
+      recurring: false,
+    },
+    {
+      ticker: "VOO",
+      role: "tilt",
+      relationship: "tilt",
+      allowed: true,
+      recurring: false,
+    },
+    {
+      ticker: "SCHD",
+      role: "tilt",
+      relationship: "tilt",
+      allowed: true,
+      recurring: false,
+    },
+    {
+      ticker: "VXUS",
+      role: "diversifier",
+      relationship: "diversifier",
+      allowed: true,
+      recurring: true,
+    },
+    {
+      ticker: "MSFT",
+      role: "satellite",
+      relationship: "satellite",
+      allowed: true,
+      recurring: false,
+    },
+    {
+      ticker: "MSFT",
+      role: "diversifier",
+      relationship: "diversifier",
+      allowed: false,
+      recurring: false,
+    },
   ];
   for (const item of cases) {
     const result = qualifyCompanionRole(
@@ -125,6 +169,62 @@ Deno.test("long-term companion computes complete synchronized horizons and rolli
     middle_ending_value_usd: "900",
     strong_ending_value_usd: "1800",
   });
+});
+
+Deno.test("rolling contribution windows skip a missing calendar month", () => {
+  const complete = bars(
+    "2016-09-01",
+    "2026-09-01",
+    (monthIndex) => monthIndex % 2 === 0 ? 100 : 200,
+  );
+  const missingJune2022 = complete.filter((bar) =>
+    !bar.date.startsWith("2022-06")
+  );
+  const result = analyzeLongTermCompanion(
+    request(),
+    missingJune2022,
+    missingJune2022,
+    qualifyCompanionRole(request(), "diversifier"),
+  );
+
+  assertEquals(result.qualification_status, "qualified");
+  assertEquals(result.rolling_one_year?.sample_windows, 98);
+});
+
+Deno.test("partial history emits only supported horizons with nonzero paired metrics", () => {
+  const baseline = bars(
+    "2021-09-01",
+    "2026-09-01",
+    (monthIndex) => 100 + monthIndex,
+  );
+  const companion = bars(
+    "2021-09-01",
+    "2026-09-01",
+    (monthIndex) => 200 - monthIndex,
+  );
+  const result = analyzeLongTermCompanion(
+    request(),
+    baseline,
+    companion,
+    qualifyCompanionRole(request(), "diversifier"),
+  );
+
+  assertEquals(result.qualification_status, "qualified");
+  assertEquals(result.horizons.map((row) => row.years), [3, 5]);
+  for (const row of result.horizons) {
+    assert(
+      Number(row.baseline_annualized_return_pct) > 0,
+      "rising baseline should have positive annualized history",
+    );
+    assert(
+      Number(row.companion_annualized_return_pct) < 0,
+      "falling companion should have negative annualized history",
+    );
+    assert(
+      Number(row.daily_return_correlation) < 0,
+      "opposed monthly movements should not be reported as perfectly correlated",
+    );
+  }
 });
 
 Deno.test("long-term companion fails closed without three years or valid policy", () => {

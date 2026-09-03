@@ -155,7 +155,9 @@ show the gateway-rendered preview in the current session only: no Telegram notif
 
 If the owner asks whether a holding or recurring investment has a better alternative, include the
 bounded portfolio-alternatives review below. It remains session-only unless it is the scheduled
-first pre-market brief of the month.
+first pre-market brief of the month. If that on-demand review includes a `companion_proposal`, call
+`evaluate_and_publish` with `dry_run: true`; the gateway rejects a non-dry-run companion review
+before any repository read, write, market-data fetch, or Telegram send.
 
 ## Portfolio alternatives review
 

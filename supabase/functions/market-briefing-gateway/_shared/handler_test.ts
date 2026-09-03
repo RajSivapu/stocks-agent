@@ -780,7 +780,7 @@ Deno.test("on-demand alternatives are history-computed by the gateway and remain
   assertEquals(setup.sent, []);
 });
 
-Deno.test("on-demand long-term companion is range-computed and remains write-free and send-free", async () => {
+Deno.test("long-term companion is range-computed and enforces dry-run and monthly cadence", async () => {
   const repository = new FakeRepository();
   repository.context.owner_plans = [{
     id: "00000000-0000-4000-8000-000000000088",
@@ -832,8 +832,11 @@ Deno.test("on-demand long-term companion is range-computed and remains write-fre
       status: "fresh",
       observed_at: "2026-09-02T16:00:00.000Z",
       retrieved_at: "2026-09-02T16:01:00.000Z",
-      reference: "https://investor.vanguard.com/investment-products/etfs/profile/vxus",
-      claims: ["The fund covers developed and emerging non-U.S. equity markets."],
+      reference:
+        "https://investor.vanguard.com/investment-products/etfs/profile/vxus",
+      claims: [
+        "The fund covers developed and emerging non-U.S. equity markets.",
+      ],
     }],
     factors: [{
       kind: "fundamentals",
@@ -884,6 +887,32 @@ Deno.test("on-demand long-term companion is range-computed and remains write-fre
   ]);
   assertEquals(repository.mutationCalls, 0);
   assertEquals(setup.sent, []);
+
+  const liveRepository = new FakeRepository();
+  const live = makeHandler(liveRepository);
+  const liveResponse = await live.handler(
+    request("evaluate_and_publish", bundle),
+  );
+  assertEquals(liveResponse.status, 400);
+  assertEquals((await json(liveResponse)).code, "INVALID_REQUEST");
+  assertEquals(liveRepository.mutationCalls, 0);
+  assertEquals(liveRepository.readCalls, 0);
+  assertEquals(live.fetched, []);
+  assertEquals(live.sent, []);
+
+  const cadenceRepository = new FakeRepository();
+  const cadence = makeHandler(cadenceRepository);
+  const premarketBundle = structuredClone(bundle);
+  premarketBundle.phase = "pre-market";
+  for (const item of premarketBundle.candidates) item.phase = "pre-market";
+  const cadenceResponse = await cadence.handler(
+    request("evaluate_and_publish", premarketBundle, { dry: true }),
+  );
+  assertEquals(cadenceResponse.status, 409);
+  assertEquals((await json(cadenceResponse)).code, "POLICY_REJECTED");
+  assertEquals(cadenceRepository.mutationCalls, 0);
+  assertEquals(cadence.fetched, []);
+  assertEquals(cadence.sent, []);
 });
 
 Deno.test("stale companion evidence fails closed without long-term history or side effects", async () => {
@@ -916,28 +945,30 @@ Deno.test("stale companion evidence fails closed without long-term history or si
       evidence_ids: ["vxus-stale"],
     }],
   };
-  const result = await json(await setup.handler(request("evaluate_and_publish", {
-    phase: "on-demand",
-    market_date: "2026-09-02",
-    title: "Long-term companion review",
-    candidates: [vti, vxus],
-    comparisons: [{
-      baseline_ticker: "VTI",
-      alternative_ticker: "VXUS",
-      relationship: "diversifier",
-      prospective_view: "stronger",
-      reason: "Stale evidence cannot support this view.",
-      evidence_ids: ["vxus-stale"],
-    }],
-    companion_proposal: {
-      baseline_ticker: "VTI",
-      companion_ticker: "VXUS",
-      role: "diversifier",
-      thesis: "Stale evidence cannot support a current conclusion.",
-      risk_note: "Current risks are unavailable.",
-      evidence_ids: ["vxus-stale"],
-    },
-  }, { dry: true })));
+  const result = await json(
+    await setup.handler(request("evaluate_and_publish", {
+      phase: "on-demand",
+      market_date: "2026-09-02",
+      title: "Long-term companion review",
+      candidates: [vti, vxus],
+      comparisons: [{
+        baseline_ticker: "VTI",
+        alternative_ticker: "VXUS",
+        relationship: "diversifier",
+        prospective_view: "stronger",
+        reason: "Stale evidence cannot support this view.",
+        evidence_ids: ["vxus-stale"],
+      }],
+      companion_proposal: {
+        baseline_ticker: "VTI",
+        companion_ticker: "VXUS",
+        role: "diversifier",
+        thesis: "Stale evidence cannot support a current conclusion.",
+        risk_note: "Current risks are unavailable.",
+        evidence_ids: ["vxus-stale"],
+      },
+    }, { dry: true })),
+  );
   assertEquals(result.companion_status, "insufficient");
   assertEquals(historyCalls, 2);
   assertEquals(repository.mutationCalls, 0);

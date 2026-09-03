@@ -20,7 +20,7 @@ export const FORBIDDEN_DECISION_TEXT =
 const FORBIDDEN_COMPARISON_TEXT =
   /\b(?:buy|buying|sell|selling|switch|switching|replace|replacing|move|moving|redirect|redirecting|reallocate|reallocated|reallocating|recommend|recommends|recommended|recommending|consider|should|must|cancel|trade|order)\b/i;
 const FORBIDDEN_COMPANION_PROMISE =
-  /\b(?:allocate|allocating|guarantee|guaranteed|guarantees|guaranteeing|sure profit|will (?:rise|gain|outperform|make|earn|return|profit)|predict(?:ed|s|ing)? returns?)\b/i;
+  /\b(?:allocate|allocating|guarantee|guaranteed|guarantees|guaranteeing|sure profits?|assured profits?|profits? (?:are|is) assured|certain(?:ly)? to (?:rise|gain|outperform|make|earn|return|profit)|risk[- ]free|will (?:rise|gain|outperform|make|earn|return|profit)|outperform(?:s|ed|ing)?|returns? (?:are|is) expected|predict(?:ed|s|ing)? returns?)\b/i;
 
 export interface RenderPublicationInput {
   phase: Phase;
@@ -813,7 +813,9 @@ function companionRows(
       throw new Error("forbidden decision directive in companion summary");
     }
   }
-  const role = companion.role === "satellite"
+  const role = companion.qualification_status !== "qualified"
+    ? "REVIEW NOT QUALIFIED"
+    : companion.role === "satellite"
     ? "CONCENTRATED SATELLITE"
     : companion.role.toUpperCase();
   const plan = context.owner_plans.find((item) =>
@@ -824,8 +826,12 @@ function companionRows(
       ? `Core stays: <b>${escapeHtml(companion.baseline_ticker)}</b> · ${
         formatMoney(plan.amount)
       }/month reminder`
-      : `Core reference: <b>${escapeHtml(companion.baseline_ticker)}</b> · recorded holding/plan unchanged`,
-    `Research candidate: <b>${escapeHtml(companion.companion_ticker)}</b> · ${role}`,
+      : `Core reference: <b>${
+        escapeHtml(companion.baseline_ticker)
+      }</b> · recorded holding/plan unchanged`,
+    `Research candidate: <b>${
+      escapeHtml(companion.companion_ticker)
+    }</b> · ${role}`,
   ];
   if (companion.qualification_status !== "qualified") {
     rows.push(
@@ -844,11 +850,11 @@ function companionRows(
     )
   ) {
     rows.push(
-      `${horizon.years}Y annualized: ${
-        escapeHtml(companion.baseline_ticker)
-      } ${comparisonPercent(horizon.baseline_annualized_return_pct, true)} · ${
-        escapeHtml(companion.companion_ticker)
-      } ${comparisonPercent(horizon.companion_annualized_return_pct, true)} · corr ${
+      `${horizon.years}Y annualized: ${escapeHtml(companion.baseline_ticker)} ${
+        comparisonPercent(horizon.baseline_annualized_return_pct, true)
+      } · ${escapeHtml(companion.companion_ticker)} ${
+        comparisonPercent(horizon.companion_annualized_return_pct, true)
+      } · corr ${
         formatCorrelation(horizon.daily_return_correlation)
       } · drawdown ${comparisonPercent(horizon.baseline_max_drawdown_pct)} / ${
         comparisonPercent(horizon.companion_max_drawdown_pct)
@@ -858,11 +864,15 @@ function companionRows(
   if (companion.rolling_one_year) {
     const scenario = companion.rolling_one_year;
     rows.push(
-      `Per ${formatMoney(scenario.monthly_contribution_usd)}/month, rolling 1Y history: ${
+      `Per ${
+        formatMoney(scenario.monthly_contribution_usd)
+      }/month, rolling 1Y history: ${
         formatMoney(scenario.total_contributed_usd)
-      } contributed → weak ${formatMoney(scenario.weak_ending_value_usd)} · middle ${
-        formatMoney(scenario.middle_ending_value_usd)
-      } · strong ${formatMoney(scenario.strong_ending_value_usd)} (${scenario.sample_windows} windows).`,
+      } contributed → weak ${
+        formatMoney(scenario.weak_ending_value_usd)
+      } · middle ${formatMoney(scenario.middle_ending_value_usd)} · strong ${
+        formatMoney(scenario.strong_ending_value_usd)
+      } (${scenario.sample_windows} windows).`,
     );
   }
   rows.push(

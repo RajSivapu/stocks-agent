@@ -1,7 +1,7 @@
 # Owner-Only Long-Term Companion
 
-**Date:** 2026-09-03  
-**Status:** Approved for implementation by the owner.  
+**Date:** 2026-09-03
+**Status:** Approved for implementation by the owner.
 **Scope:** Personal, owner-only, suggestion-only research beside an existing holding or recurring reminder.
 
 ## Decision
@@ -134,7 +134,9 @@ or commands. Those belong to separately evaluated action proposals and owner-con
 commands.
 
 On-demand output remains visible only in the current Codex task and is suppressed from Telegram.
-The scheduled version may appear only in the first pre-market brief of a calendar month.
+The scheduled version may appear only in the first pre-market brief of a calendar month, enforced
+by the gateway's configured NYSE calendar. An on-demand bundle containing a companion proposal must
+be a dry run and is rejected before repository or market-data work otherwise.
 
 ## Research basis
 

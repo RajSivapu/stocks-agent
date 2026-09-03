@@ -235,6 +235,9 @@ daily-return correlation, and weak/middle/strong rolling one-year outcomes for a
 $100/month contribution. Those outcomes are historical planning illustrations, not forecasts. Only
 the initial VTI/VXUS pair can be marked eligible for a later owner-reviewed recurring-reminder
 discussion; no reminder, holding, or brokerage order is created or changed by the review.
+An on-demand companion proposal must be a protected dry run and is rejected before persistence or
+delivery otherwise. Scheduled companion review is accepted only on the first configured NYSE
+session of the month.
 
 ## Deterministic policy and outcomes
 
