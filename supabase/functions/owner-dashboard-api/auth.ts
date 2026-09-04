@@ -1,7 +1,7 @@
 import {
   jwtVerify,
   type JWTVerifyGetKey,
-} from "jose";
+} from "npm:jose@6.2.2";
 
 import { DashboardHttpError } from "./errors.ts";
 
