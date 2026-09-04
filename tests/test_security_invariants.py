@@ -45,6 +45,36 @@ def test_live_rpc_verifier_cannot_be_disabled_with_python_optimization():
         assert not any(isinstance(node, ast.Assert) for node in ast.walk(tree))
 
 
+def test_dashboard_role_tools_cannot_be_disabled_with_python_optimization():
+    for name in (
+        "provision_dashboard_runtime_role.py",
+        "verify_owner_dashboard_role.py",
+    ):
+        path = ROOT / "scripts" / name
+        tree = ast.parse(path.read_text(), filename=str(path))
+        assert not any(isinstance(node, ast.Assert) for node in ast.walk(tree))
+
+
+def test_dashboard_role_migration_is_select_only_and_excludes_sensitive_tables():
+    path = ROOT / "sql" / "migrations" / "20260906_owner_dashboard_read_role.sql"
+    sql = path.read_text()
+    assert "CREATE ROLE stock_agent_dashboard" in sql
+    assert "NOBYPASSRLS" in sql
+    assert "FOR SELECT TO stock_agent_dashboard" in sql
+    assert "GRANT SELECT" in sql
+    for forbidden in (
+        "GRANT INSERT",
+        "GRANT UPDATE",
+        "GRANT DELETE",
+        "GRANT EXECUTE",
+        "auth.users",
+        "portfolio_commands",
+        "telegram_updates",
+        "vault.decrypted_secrets",
+    ):
+        assert forbidden not in sql
+
+
 def test_gateway_migration_verifier_covers_the_full_release_chain():
     source = (ROOT / "scripts" / "verify_decision_gateway_migration.py").read_text()
     for migration in (

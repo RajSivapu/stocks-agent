@@ -170,7 +170,7 @@ git commit -m "feat: scaffold secure owner dashboard"
   evidence.
 - Consumes: the tables and columns enumerated in spec section 12.
 
-- [ ] **Step 1: Write failing migration/provisioning/verifier tests**
+- [x] **Step 1: Write failing migration/provisioning/verifier tests**
 
 ```python
 def test_dashboard_migration_is_select_only():
@@ -190,13 +190,13 @@ def test_verifier_rejects_write_privilege(fake_connection):
         verify_dashboard_role(fake_connection)
 ```
 
-- [ ] **Step 2: Run the focused Python tests and verify RED**
+- [x] **Step 2: Run the focused Python tests and verify RED**
 
 Run: `.venv/bin/python -m pytest tests/test_provision_dashboard_runtime_role.py tests/test_verify_owner_dashboard_role.py tests/test_security_invariants.py -q`
 
 Expected: FAIL because the migration and scripts do not exist.
 
-- [ ] **Step 3: Add the role migration and schema mirror**
+- [x] **Step 3: Add the role migration and schema mirror**
 
 The migration must create the NOLOGIN privilege role idempotently, revoke inherited schema/object
 privileges, grant `USAGE` on `public`, grant only required columns on the 14 dashboard source tables,
@@ -224,20 +224,20 @@ The complete allowlist covers 15 dashboard source tables: `holdings` plus `trans
 `market_alert_rules`, `market_alert_rule_versions`, `market_alert_events`, and
 `market_alert_actions`. Mirror the migration exactly in `sql/schema.sql`.
 
-- [ ] **Step 4: Implement credential provisioning and structural verification**
+- [x] **Step 4: Implement credential provisioning and structural verification**
 
 Adapt only the URL-validation and secret-publication mechanics from the deferred branch. Create one
 random 36-byte-or-longer password, one runtime login, and publish only `DASHBOARD_DATABASE_URL`.
 The verifier must check `rolsuper`, `rolcreatedb`, `rolcreaterole`, `rolbypassrls`, memberships,
 schema privileges, table/column grants, application-function execution, and object ownership.
 
-- [ ] **Step 5: Run focused and full Python security tests and verify GREEN**
+- [x] **Step 5: Run focused and full Python security tests and verify GREEN**
 
 Run: `.venv/bin/python -m pytest tests/test_provision_dashboard_runtime_role.py tests/test_verify_owner_dashboard_role.py tests/test_security_invariants.py -q`
 
 Expected: all tests pass with no secret value in captured output.
 
-- [ ] **Step 6: Commit Task 2**
+- [x] **Step 6: Commit Task 2**
 
 ```bash
 git add sql scripts tests supabase/.env.example
