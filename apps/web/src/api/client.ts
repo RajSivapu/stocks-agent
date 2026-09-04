@@ -6,7 +6,7 @@ import {
 
 type Fetcher = (input: string, init: RequestInit) => Promise<Response>;
 
-const PATH = /^\/v1\/(?:meta|today|portfolio|transactions|ideas|companion|alerts|runs(?:\/[0-9a-f-]{36})?|system)(?:\?[A-Za-z0-9_%=&-]{0,600})?$/;
+const PATH = /^\/v1\/(?:meta|today|portfolio|transactions|ideas|companion|alerts|intelligence|reports(?:\/[0-9a-f-]{36})?|runs(?:\/[0-9a-f-]{36})?|system)(?:\?[A-Za-z0-9_%=&-]{0,600})?$/;
 
 export class DashboardApiError extends Error {
   constructor(readonly status: number, readonly code: string, message: string) {

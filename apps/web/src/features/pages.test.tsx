@@ -52,6 +52,7 @@ it("portfolio omits unsupported market value and labels the recurring reminder",
     transactions: [],
     totals: { cost_basis: "200", value: null, unrealized_amount: null },
     comparison_availability: "structured_companion",
+    latest_intelligence_run_id: null,
   };
   render(<PortfolioPage data={data} />);
   expect(screen.getByText(/market value withheld/i)).toBeVisible();
@@ -69,6 +70,7 @@ it("labels closed-session prices with their receipt time and source", () => {
     holdings: [holding], plans: [], transactions: [],
     totals: { cost_basis: "200", value: "220", unrealized_amount: "20" },
     comparison_availability: "structured_companion",
+    latest_intelligence_run_id: null,
   } as PortfolioView;
   const todayWithClose = {
     ...today,
@@ -93,12 +95,32 @@ it("labels closed-session prices with their receipt time and source", () => {
 });
 
 it("renders policy evidence separately from analyst and checker", () => {
-  const data: IdeasView = { ideas: [{ id: "idea", ticker: "MSFT", profile: "balanced", final_action: "watch", policy_status: "approved", policy_version: 17, confidence: "medium", entry_zone_low: "410", entry_zone_high: "420", stop: "395", target: "455", valid_until: "2026-09-10", bull_case: "Revenue held up.", bear_case: "Valuation remains high.", decisive_factor: "Fresh evidence", invalidation: "Close below 395", reason_codes: [], analyst_complete: true, checker_complete: true, sources: [] }] };
+  const data: IdeasView = { ideas: [{ id: "idea", ticker: "MSFT", profile: "balanced", final_action: "watch", policy_status: "approved", policy_version: 17, confidence: "medium", entry_zone_low: "410", entry_zone_high: "420", stop: "395", target: "455", valid_until: "2026-09-10", bull_case: "Revenue held up.", bear_case: "Valuation remains high.", decisive_factor: "Fresh evidence", invalidation: "Close below 395", reason_codes: [], analyst_complete: true, checker_complete: true, sources: [], intelligence_run_id: "7d834dbd-75bb-4313-931f-09732f003932", evidence_as_of: "2026-09-04T13:00:00.000Z", outcome: { result: "open", horizon_days: 21, graded_at: "2026-09-04T13:30:00.000Z" } }] };
   render(<IdeasPage data={data} />);
   expect(screen.getByRole("heading", { name: /analyst/i })).toBeVisible();
   expect(screen.getByRole("heading", { name: /checker/i })).toBeVisible();
   expect(screen.getByRole("heading", { name: /deterministic policy/i })).toBeVisible();
+  expect(screen.getByRole("heading", { name: /relationship and exposure evidence/i })).toBeVisible();
+  expect(screen.getByRole("heading", { name: /conditional scenarios/i })).toBeVisible();
+  expect(screen.getByText(/21-session outcome/i)).toBeVisible();
   expect(screen.getByText(/suggestion only/i)).toBeVisible();
+});
+
+it("portfolio absorbs today's owner summary and companion context", () => {
+  const portfolio: PortfolioView = {
+    holdings: [], plans: [], transactions: [], totals: { cost_basis: "2000", value: "2200", unrealized_amount: "200" },
+    comparison_availability: "structured_companion", latest_intelligence_run_id: "7d834dbd-75bb-4313-931f-09732f003932",
+  };
+  const companion: CompanionView = {
+    status: "qualified", baseline_ticker: "VTI", companion_ticker: "VXUS", role: "diversifier",
+    thesis: "Adds non-U.S. exposure.", risk_note: "Currency risk.", plan_unchanged: true,
+    recurring_plan_review_eligible: true, horizons: [], contribution_history: null, evidence: [],
+    disclaimer: "Historical scenarios are not forecasts.",
+  };
+  render(<PortfolioPage data={portfolio} overview={today} companion={companion} />);
+  expect(screen.getByRole("heading", { name: /needs attention/i })).toBeVisible();
+  expect(screen.getByRole("heading", { name: /companion review/i })).toBeVisible();
+  expect(screen.getByText(/current plan remains unchanged/i)).toBeVisible();
 });
 
 it("companion uses historical scenario language and preserves the current plan", () => {
@@ -120,7 +142,7 @@ it("companion uses historical scenario language and preserves the current plan",
 it("alerts, runs, and system expose receipt and immutable-boundary language", () => {
   const alerts: AlertsView = { alerts: [{ id: "a", kind: "brief", phase: "intraday", state: "suppressed", rendered_text: "No trigger", rendered_hash: "f".repeat(64), template_version: "3", telegram_message_ids: [], attempt_count: 0, created_at: "2026-09-03T18:00:00.000Z", delivered_at: null, suppression_reason: "no_trigger", rule_ticker: null, rule_state: null, event_status: null, owner_action: null, sources: [] }] };
   const runs: RunsView = { runs: [{ id: "7d834dbd-75bb-4313-931f-09732f003932", kind: "intraday", status: "completed", started_at: "2026-09-03T17:00:00.000Z", finished_at: "2026-09-03T17:02:00.000Z", data_as_of: "2026-09-03T17:01:00.000Z", policy_version: 17, evaluation_count: 2, suggestion_count: 0, publication_status: "suppressed" }] };
-  const system: SystemView = { product_version: "v1", api_version: "v1", policy_version: 17, alert_mode: "shadow", latest_by_kind: {}, latest_publication_status: "suppressed", boundaries };
+  const system: SystemView = { product_version: "v1", api_version: "v1", policy_version: 17, alert_mode: "shadow", latest_by_kind: {}, latest_publication_status: "suppressed", boundaries, source_coverage: [{ provider: "gdelt", status: "partial", retrieved_at: null, accepted_count: 2, dropped_count: 1 }], latest_report: null, latest_intelligence_run_id: null };
   const { rerender } = render(<AlertsPage data={alerts} />);
   expect(screen.getByText(/no telegram message was sent/i)).toBeVisible();
   rerender(<MemoryRouter><RunsPage data={runs} /></MemoryRouter>);
@@ -128,4 +150,6 @@ it("alerts, runs, and system expose receipt and immutable-boundary language", ()
   rerender(<SystemPage data={system} />);
   expect(screen.getByText(/friend invitations disabled/i)).toBeVisible();
   expect(screen.getByText(/brokerage authority none/i)).toBeVisible();
+  expect(screen.getByRole("heading", { name: /write, send, and deploy boundaries/i })).toBeVisible();
+  expect(screen.getByText(/no browser write route/i)).toBeVisible();
 });

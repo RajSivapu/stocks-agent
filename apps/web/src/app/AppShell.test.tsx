@@ -5,7 +5,7 @@ import { expect, it } from "vitest";
 import { ThemeProvider } from "../theme/theme";
 import { AppShell } from "./AppShell";
 
-it("exposes all seven pages and an explicit freshness bar", () => {
+it("shows exactly five primary owner surfaces and an explicit freshness bar", () => {
   render(
     <MemoryRouter>
       <ThemeProvider>
@@ -16,8 +16,13 @@ it("exposes all seven pages and an explicit freshness bar", () => {
     </MemoryRouter>,
   );
   expect(screen.getByRole("navigation", { name: /primary/i })).toBeVisible();
-  for (const label of ["Today", "Portfolio", "Ideas", "Companion", "Alerts", "Runs", "System"]) {
+  const primaryLinks = screen.getAllByRole("link");
+  expect(primaryLinks).toHaveLength(5);
+  for (const label of ["Portfolio", "Ideas", "Intelligence", "Reports", "System / Receipts"]) {
     expect(screen.getByRole("link", { name: label })).toBeVisible();
+  }
+  for (const retiredLabel of ["Today", "Companion", "Alerts", "Runs"]) {
+    expect(screen.queryByRole("link", { name: retiredLabel })).not.toBeInTheDocument();
   }
   expect(screen.getByRole("status")).toHaveTextContent(/data through/i);
   expect(screen.getByText(/suggestion only/i)).toBeVisible();

@@ -6,13 +6,11 @@ import type { Freshness } from "@stocks-agent/dashboard-contracts";
 import { ThemeControl } from "../theme/ThemeControl";
 
 const pages = [
-  ["Today", "/"],
   ["Portfolio", "/portfolio"],
   ["Ideas", "/ideas"],
-  ["Companion", "/companion"],
-  ["Alerts", "/alerts"],
-  ["Runs", "/runs"],
-  ["System", "/system"],
+  ["Intelligence", "/intelligence"],
+  ["Reports", "/reports"],
+  ["System / Receipts", "/system"],
 ] as const;
 
 const freshnessLabels: Record<Freshness, string> = {
@@ -38,7 +36,7 @@ export function AppShell({
         </div>
         <nav aria-label="Primary">
           {pages.map(([label, path]) => (
-            <NavLink key={path} end={path === "/"} to={path}>{label}</NavLink>
+            <NavLink key={path} to={path}>{label}</NavLink>
           ))}
         </nav>
         <div className="sidebar-footer">

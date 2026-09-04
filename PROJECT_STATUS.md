@@ -3,7 +3,7 @@
 Last updated: 2026-09-04
 Canonical release: Personal Stock Agent V1
 Source baseline: `167ce06` on `codex/owner-alert-v3`
-Current state: subagent-driven implementation active; V1-C4 done; V1-C5 in progress after Task 10
+Current state: subagent-driven implementation active; V1-C5 complete locally and awaiting full-suite and independent review
 
 This file is the version-controlled source of truth for the Personal Stock Agent V1 rollout.
 `docs/ROADMAP.md` retains historical capability and deployment detail. Notion may later mirror this
@@ -92,13 +92,32 @@ delivery, production migration, or deployment.
 
 ### V1-C5 — Reports, dashboard, and delivery
 
-- [ ] Existing dashboard and Telegram v3 foundations are implemented but are not the complete V1
-  scope and are not claimed live.
+- [x] Immutable reports, quiet Telegram delivery, owner-only report/intelligence read contracts, and
+  the five-surface owner dashboard are implemented locally.
 
 Task 10 immutable reports and quiet Telegram delivery is complete locally. Immutable canonical
 report hashes, deterministic SHA-256 idempotency, sorted source references, concise morning and
 summary/link periodic delivery, urgent/no-trigger gates, and unknown-outcome-safe replay are focused
 verified. The report migration remains local-only and no Telegram message was sent.
+
+Task 11 added bounded receipt-derived Intelligence, Reports, report-detail, Portfolio, Ideas, and
+System read contracts plus authenticated owner-only GET routes and least-privilege direct-SELECT
+access. Task 12 now presents exactly five primary surfaces: Portfolio, Ideas, Intelligence, Reports,
+and System / Receipts. Portfolio absorbs Today and Companion context; System absorbs run and alert
+receipt summaries; immutable report versions retain subordinate deep links and exact publication
+timelines. External text is rendered as text, unsafe links remain non-clickable, source coverage is
+explicitly bounded/partial, and no exhaustive-news, delivery, write, send, or deployment claim is
+inferred.
+
+The Task 12 web gate passed locally on 2026-09-04: 31 unit tests, TypeScript typecheck, ESLint,
+production build, dashboard bundle security/size verification, and 17 Playwright browser checks
+passed; the opt-in live read-only canary was skipped. The browser checks covered both themes,
+keyboard access, axe accessibility, 300–1440 CSS pixel widths including 320, five primary routes,
+report deep links, hostile stored content, and stale/owner-denied/expired states.
+
+V1-C5 is awaiting only the consolidated full suite and exact-head independent review. Nothing in
+this checkpoint claims a live API, production migration, Telegram send, Site deployment, or owner
+view receipt.
 
 ### V1-C6 — Independent review and protected rollout
 
@@ -107,7 +126,7 @@ verified. The report migration remains local-only and no Telegram message was se
 
 ## Next
 
-1. Complete Task 11 dashboard report contracts, read API, and least-privilege access.
+1. Run the consolidated full suite and exact-head independent review at the release gate.
 2. Continue checkpoint by checkpoint with task-scoped review gates and status updates.
 3. Preserve scheduled production capacity and inspect only scheduled receipts at their established
    times.
@@ -160,5 +179,5 @@ live run is requested.
 
 ## Last Commit
 
-Task 9 started from `25cfcc1` (`fix: close discovery gateway authority gaps`). The Task 9
-implementation commit is the current Git `HEAD` after the scoped changes are committed.
+Task 12 started from `b892fa6` (`fix: link report delivery receipts`). The Task 12 implementation
+commit becomes the current Git `HEAD` after the scoped changes are committed.

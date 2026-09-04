@@ -92,17 +92,27 @@ th small, td small { display: block; margin-top: .25rem; color: var(--muted); fo
 .receipt-timeline .badge { margin-left: .6rem; }
 .boundary-list { display: grid; grid-template-columns: repeat(auto-fit, minmax(13rem, 1fr)); gap: .75rem; padding: 0; list-style: none; }
 .boundary-list li { padding: .8rem; border: 1px solid var(--line); border-radius: .6rem; }
+.summary-strip { margin-top: 1rem; padding-top: 1rem; border-top: 1px solid var(--line); }
+.summary-strip p { margin: .35rem 0 0; color: var(--muted); }
+.coverage-metrics { margin: 1rem 0; }
+.report-list { display: grid; }
+.report-row { display: grid; grid-template-columns: minmax(0, 1.5fr) minmax(14rem, 1fr); gap: 1.5rem; padding: 1.25rem 0; border-bottom: 1px solid var(--line); }
+.report-row:last-child { padding-bottom: 0; border-bottom: 0; }
+.report-row h3 { margin-bottom: .4rem; }
+.report-row p:last-child { margin-bottom: 0; }
+.report-copy p { white-space: pre-wrap; overflow-wrap: anywhere; }
 .error-card { border-color: var(--negative); }
 
 @media (max-width: 760px) {
   .app-shell { display: block; }
   .sidebar { position: static; width: 100%; height: auto; padding: 1rem; }
-  .sidebar nav { grid-template-columns: repeat(4, minmax(0, 1fr)); margin: 1rem 0; }
+  .sidebar nav { grid-template-columns: repeat(2, minmax(0, 1fr)); margin: 1rem 0; }
   .sidebar nav a { min-width: 0; padding: .55rem .3rem; overflow-wrap: anywhere; text-align: center; font-size: .78rem; }
   .sidebar-footer { grid-template-columns: 1fr auto; align-items: end; }
   .sidebar-footer > p { display: none; }
   .data-bar { align-items: flex-start; flex-wrap: wrap; }
   .review-grid { grid-template-columns: 1fr; }
+  .report-row { grid-template-columns: 1fr; gap: .5rem; }
   .section-block, .state-card { border-radius: .75rem; }
 }
 

@@ -32,6 +32,15 @@ it("rejects unknown contracts and non-allowlisted paths", async () => {
   await expect(client.get("https://attacker.example", "owner-token")).rejects.toThrow(/path/i);
 });
 
+it("allows only the Task 11 intelligence and immutable report read paths", async () => {
+  const fetcher = vi.fn().mockImplementation(() => Promise.resolve(Response.json(envelope)));
+  const client = createDashboardClient("https://test-project.supabase.co/functions/v1/owner-dashboard-api", fetcher);
+  for (const path of ["/v1/intelligence", "/v1/reports", "/v1/reports/7d834dbd-75bb-4313-931f-09732f003932"]) {
+    await expect(client.get(path, "owner-token")).resolves.toMatchObject(envelope);
+  }
+  await expect(client.get("/v1/reports/not-a-uuid", "owner-token")).rejects.toThrow(/path/i);
+});
+
 it("does not include credentials and aborts at the configured timeout", async () => {
   vi.useFakeTimers();
   const fetcher = vi.fn((_url: string, init: RequestInit) => new Promise<Response>((_resolve, reject) => {
