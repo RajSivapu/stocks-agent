@@ -8,7 +8,9 @@ from datetime import datetime, timezone
 import hashlib
 import json
 import os
+from pathlib import Path
 import re
+import sys
 from typing import Callable, Mapping
 from urllib.error import HTTPError
 from urllib.parse import urlparse
@@ -16,6 +18,11 @@ from urllib.request import Request, urlopen
 
 import psycopg
 from psycopg.rows import dict_row
+
+ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT))
+
+from scripts.provision_owner_dashboard_auth import validate_configuration as validate_auth_admin_configuration
 
 
 CANARY_METHOD = "GET"
@@ -47,6 +54,83 @@ def normalize_receipt_timestamp(value: object) -> str | None:
     if parsed.tzinfo is None:
         return None
     return parsed.astimezone(timezone.utc).isoformat(timespec="milliseconds").replace("+00:00", "Z")
+
+
+def _auth_request(method: str, url: str, headers: Mapping[str, str], body: bytes | None):
+    request = Request(url, method=method, headers=dict(headers), data=body)
+    try:
+        with urlopen(request, timeout=20) as response:
+            return response.status, response.read()
+    except HTTPError as error:
+        return error.code, error.read()
+
+
+def _auth_json(status: int, body: bytes) -> dict[str, object]:
+    if status < 200 or status >= 300:
+        raise RuntimeError("ephemeral owner session request failed")
+    try:
+        value = json.loads(body)
+    except (json.JSONDecodeError, UnicodeDecodeError) as error:
+        raise RuntimeError("ephemeral owner session response is malformed") from error
+    if not isinstance(value, dict):
+        raise RuntimeError("ephemeral owner session response is malformed")
+    return value
+
+
+def obtain_ephemeral_owner_access_token(
+    project_url: str,
+    owner_email: str,
+    redirect_origin: str,
+    service_key: str,
+    publishable_key: str,
+    *,
+    requester: Callable[[str, str, Mapping[str, str], bytes | None], tuple[int, bytes]] = _auth_request,
+) -> str:
+    """Generate and directly verify an owner link without sending an email or logging the token."""
+    project_url, owner_email, service_key = validate_auth_admin_configuration(
+        project_url, owner_email, service_key,
+    )
+    validate_api_boundary(f"{project_url}/functions/v1/owner-dashboard-api", redirect_origin)
+    if not re.fullmatch(r"sb_publishable_[A-Za-z0-9_-]{24,128}", publishable_key):
+        raise ValueError("Supabase publishable key is invalid")
+    admin_headers = {
+        "apikey": service_key,
+        "authorization": f"Bearer {service_key}",
+        "content-type": "application/json",
+    }
+    link_body = json.dumps({
+        "type": "magiclink",
+        "email": owner_email,
+        "options": {"redirect_to": redirect_origin},
+    }, separators=(",", ":")).encode()
+    link_status, link_response = requester(
+        "POST", f"{project_url}/auth/v1/admin/generate_link", admin_headers, link_body,
+    )
+    link = _auth_json(link_status, link_response)
+    properties = link.get("properties")
+    token_hash = properties.get("hashed_token") if isinstance(properties, dict) else None
+    if not isinstance(token_hash, str) or not 8 <= len(token_hash) <= 512 or any(character.isspace() for character in token_hash):
+        raise RuntimeError("ephemeral owner session link receipt is malformed")
+
+    public_headers = {
+        "apikey": publishable_key,
+        "authorization": f"Bearer {publishable_key}",
+        "content-type": "application/json",
+    }
+    verify_body = json.dumps({"type": "magiclink", "token_hash": token_hash}, separators=(",", ":")).encode()
+    verify_status, verify_response = requester(
+        "POST", f"{project_url}/auth/v1/verify", public_headers, verify_body,
+    )
+    session = _auth_json(verify_status, verify_response)
+    access_token = session.get("access_token")
+    if (
+        not isinstance(access_token, str)
+        or len(access_token) < 40
+        or len(access_token) > 8_192
+        or any(character.isspace() for character in access_token)
+    ):
+        raise RuntimeError("ephemeral owner session receipt is malformed")
+    return access_token
 
 
 def validate_source_database_url(database_url: str, api_url: str) -> str:
@@ -434,6 +518,16 @@ def main() -> int:
     parser.add_argument("--origin", required=True)
     arguments = parser.parse_args()
     token = os.environ.get("DASHBOARD_OWNER_ACCESS_TOKEN", "").strip()
+    if not token:
+        parsed_api = urlparse(arguments.api_url)
+        project_url = f"{parsed_api.scheme}://{parsed_api.netloc}"
+        token = obtain_ephemeral_owner_access_token(
+            project_url,
+            os.environ.get("DASHBOARD_OWNER_EMAIL", ""),
+            arguments.origin,
+            os.environ.get("SUPABASE_SERVICE_ROLE_KEY", ""),
+            os.environ.get("SUPABASE_PUBLISHABLE_KEY", ""),
+        )
     database_url = os.environ.get("DASHBOARD_DATABASE_URL", "").strip()
     if not database_url:
         raise SystemExit("DASHBOARD_DATABASE_URL is required")

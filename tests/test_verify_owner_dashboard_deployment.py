@@ -233,3 +233,45 @@ def test_source_timestamp_normalization_fails_closed():
     assert verify.normalize_receipt_timestamp("2026-09-03T20:00:00.123456+00:00") == "2026-09-03T20:00:00.123Z"
     assert verify.normalize_receipt_timestamp("not-a-date") is None
     assert verify.normalize_receipt_timestamp(None) is None
+
+
+def test_ephemeral_owner_session_uses_admin_link_without_sending_email_or_returning_secrets():
+    service_key = "sb_secret_" + "s" * 40
+    public_key = "sb_publishable_" + "p" * 32
+    access_token = "eyJ" + "t" * 80
+    calls = []
+
+    def requester(method, url, headers, body):
+        calls.append((method, url, headers, body))
+        if url.endswith("/auth/v1/admin/generate_link"):
+            return 200, json.dumps({"properties": {"hashed_token": "hash-token-value"}}).encode()
+        return 200, json.dumps({"access_token": access_token}).encode()
+
+    token = verify.obtain_ephemeral_owner_access_token(
+        "https://hlxpxbxhqctwsqizwjjy.supabase.co",
+        "owner@example.com",
+        ORIGIN,
+        service_key,
+        public_key,
+        requester=requester,
+    )
+    assert token == access_token
+    assert [call[0] for call in calls] == ["POST", "POST"]
+    assert json.loads(calls[0][3]) == {
+        "type": "magiclink", "email": "owner@example.com", "options": {"redirect_to": ORIGIN},
+    }
+    assert json.loads(calls[1][3]) == {"type": "magiclink", "token_hash": "hash-token-value"}
+    assert service_key not in calls[0][3].decode()
+    assert public_key not in calls[1][3].decode()
+
+
+def test_ephemeral_owner_session_errors_are_bounded():
+    def requester(_method, _url, _headers, _body):
+        return 500, b'{"message":"private auth detail"}'
+
+    with pytest.raises(RuntimeError, match="ephemeral owner session") as error:
+        verify.obtain_ephemeral_owner_access_token(
+            "https://hlxpxbxhqctwsqizwjjy.supabase.co", "owner@example.com", ORIGIN,
+            "sb_secret_" + "s" * 40, "sb_publishable_" + "p" * 32, requester=requester,
+        )
+    assert "private auth detail" not in str(error.value)
