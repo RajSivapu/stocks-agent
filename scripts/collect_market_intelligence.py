@@ -92,7 +92,7 @@ def _context(path: str | None) -> dict[str, object]:
     if not isinstance(value, dict):
         raise ValueError("context must be an object")
     allowed = {
-        "holdings", "plans", "qualified_candidates", "urgent_events",
+        "holdings", "owner_plans", "qualified_candidates", "urgent_events",
         "high_materiality_themes", "requested_topics",
     }
     return {key: value[key] for key in sorted(value) if key in allowed}

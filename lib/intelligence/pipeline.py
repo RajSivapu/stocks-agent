@@ -6,7 +6,7 @@ import hashlib
 import json
 import uuid
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
 
@@ -80,6 +80,7 @@ class PipelineRequest:
     market_date: date
     now: datetime
     dry_run: bool = False
+    request_id: str = field(default_factory=lambda: str(uuid.uuid4()))
 
     def __post_init__(self) -> None:
         if self.phase not in PHASES:
@@ -89,6 +90,11 @@ class PipelineRequest:
         _utc(self.now)
         if not isinstance(self.dry_run, bool):
             raise ValueError("dry_run must be boolean")
+        try:
+            if str(uuid.UUID(self.request_id)) != self.request_id:
+                raise ValueError
+        except (AttributeError, TypeError, ValueError):
+            raise ValueError("request_id must be a canonical UUID") from None
 
     def collection_plan(self, providers: Sequence[str], targets: Sequence[str]) -> dict[str, object]:
         request_counts = {provider: 0 for provider in providers}
@@ -97,7 +103,7 @@ class PipelineRequest:
             request_counts[providers[index % len(providers)]] += 1
         reservations = [
             {
-                "id": _uuid("reservation", self.phase, self.market_date.isoformat(), provider),
+                "id": _uuid("reservation", self.request_id, provider),
                 "provider": provider,
                 "requests": request_counts[provider],
                 "cache_keys": [],
@@ -202,7 +208,7 @@ class IntelligencePipeline:
         if not providers:
             raise ValueError("at least one adapter is required for live collection")
         start_payload = request.collection_plan(providers, targets)
-        start = self._start(start_payload)
+        start = self._start(start_payload, request.request_id)
         run_id = str(start.get("run_id") or "")
         if not run_id:
             raise ValueError("gateway start receipt is missing run_id")
@@ -213,8 +219,9 @@ class IntelligencePipeline:
         return self._complete(request, run_id, targets, results)
 
     def _targets(self, phase: str) -> tuple[str, ...]:
-        holdings = sorted(str(key).upper() for key in _mapping(self.context.get("holdings")))
-        plans = sorted(_active_plan_tickers(self.context.get("plans")))
+        holdings = sorted(_holding_tickers(self.context.get("holdings")))
+        plan_context = self.context.get("owner_plans", self.context.get("plans"))
+        plans = sorted(_active_plan_tickers(plan_context))
         candidates = sorted(_strings(self.context.get("qualified_candidates")))
         if phase == "pre-market":
             return tuple(SEED_THEMES)
@@ -352,7 +359,9 @@ class IntelligencePipeline:
             "packet": packet_row,
             "error": None,
         }
-        final = self._record(run_id, payload)
+        final = self._record(
+            run_id, payload, _uuid("completion-request", request.request_id)
+        )
         collection_drops = tuple(
             {
                 "candidate_key": "",
@@ -411,15 +420,21 @@ class IntelligencePipeline:
             limitations=("fixture_only_no_external_coverage",),
         )
 
-    def _start(self, payload: dict[str, object]) -> Mapping[str, object]:
+    def _start(
+        self, payload: dict[str, object], request_id: str
+    ) -> Mapping[str, object]:
         method = getattr(self.gateway, "start_intelligence_run", None)
-        result = method(payload) if callable(method) else self.gateway.call("start_intelligence_run", payload)
+        result = method(payload) if callable(method) else self.gateway.call(
+            "start_intelligence_run", payload, request_id=request_id
+        )
         return _gateway_data(result)
 
-    def _record(self, run_id: str, payload: dict[str, object]) -> Mapping[str, object]:
+    def _record(
+        self, run_id: str, payload: dict[str, object], request_id: str
+    ) -> Mapping[str, object]:
         method = getattr(self.gateway, "record_intelligence", None)
         result = method(run_id, payload) if callable(method) else self.gateway.call(
-            "record_intelligence", payload, run_id=run_id
+            "record_intelligence", payload, run_id=run_id, request_id=request_id
         )
         return _gateway_data(result)
 
@@ -433,6 +448,24 @@ def _gateway_data(result: object) -> Mapping[str, object]:
 
 def _mapping(value: object) -> Mapping[object, object]:
     return value if isinstance(value, Mapping) else {}
+
+
+def _holding_tickers(value: object) -> set[str]:
+    if isinstance(value, Mapping):
+        return {
+            str(ticker).strip().upper()
+            for ticker in value
+            if str(ticker).strip()
+        }
+    if not isinstance(value, Sequence) or isinstance(value, (str, bytes, bytearray)):
+        return set()
+    tickers = set()
+    for row in value:
+        if isinstance(row, Mapping):
+            ticker = str(row.get("ticker") or "").strip().upper()
+            if ticker:
+                tickers.add(ticker)
+    return tickers
 
 
 def _strings(value: object) -> set[str]:
@@ -541,8 +574,9 @@ def _discover(
             exposure_strength=Decimal("1") if relation.eligible_for_ranking else Decimal("0"),
             recency=Decimal("1"), portfolio_relevance=Decimal("0.5"), liquidity=Decimal("0.5"),
         ))
-    ranked = rank_candidates(candidates, holdings=_mapping(context.get("holdings")),
-                             plans=context.get("plans"))
+    holdings = {ticker: "0" for ticker in _holding_tickers(context.get("holdings"))}
+    plans = context.get("owner_plans", context.get("plans"))
+    ranked = rank_candidates(candidates, holdings=holdings, plans=plans)
     return events, relations, ranked
 
 
