@@ -6,7 +6,7 @@ Status: **release candidate; independent exact-head verdict pending**.
 
 - Branch: `codex/owner-alert-v3`
 - Review base: `d4e0c3ddd5a032fd4a41599aa6ad1966c9d7594f`
-- Current implementation candidate: `869b8616252e33037a15977f0abd82181899629c`
+- Current implementation candidate: `9ad6633536f3ed1ab016f91ac444c17c34c1c821`
 - Design: `docs/design/2026-09-03-owner-only-personal-stock-agent-web-app-plan.md`
 - Plan: `docs/superpowers/plans/2026-09-03-owner-only-personal-stock-agent-web-v1-implementation.md`
 
@@ -61,10 +61,16 @@ was not explicitly revoked after use. Commit `869b861` adds an unconditional glo
 the canary `finally` path. A revocation failure fails the canary and therefore activates the same
 initial-deployment rollback. Tests cover both successful and failed reconciliation paths.
 
+The final deployment-boundary pass also found that administrator and session-pooler URLs needed to
+be bound to the requested project before any database connection. Commit `9ad6633` validates the
+exact direct administrator hostname, port, login, database, TLS parameter, and the session-pooler
+project suffix before migration or role provisioning. A cross-project URL now fails before any
+mutation.
+
 ## Verification receipts before independent review
 
-- `npm run test:all` exited 0 on candidate `869b861` at 2026-09-04T12:45Z.
-- Python: 203 passed.
+- `npm run test:all` exited 0 on candidate `9ad6633` at 2026-09-04T12:55Z.
+- Python: 204 passed.
 - Telegram/command Node tests: 63 passed.
 - Edge/Deno: 187 passed.
 - Dashboard contracts: 4 passed.

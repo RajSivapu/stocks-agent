@@ -14,7 +14,7 @@ Status: **not live; protected deployment pending independent review**.
 ## Candidate source receipts
 
 - GitHub branch: `codex/owner-alert-v3`
-- Implementation candidate SHA: `869b8616252e33037a15977f0abd82181899629c`
+- Implementation candidate SHA: `9ad6633536f3ed1ab016f91ac444c17c34c1c821`
 - Private Site source repository: verified at the same SHA before version creation.
 - Working tree: clean after push.
 - Site version: none.
@@ -53,7 +53,8 @@ explicitly approved multi-user redesign.
 
 1. Obtain a no-material-findings independent review for the exact candidate.
 2. Create or idempotently verify the sole Supabase Auth owner without logging identity or secrets.
-3. Reverify no existing `owner-dashboard-api` function.
+3. Reverify no existing `owner-dashboard-api` function and bind both administrator and session
+   database URLs to the exact target project before opening a connection.
 4. Apply the direct-column `SELECT` role migration and provision the scoped session-pooler login.
 5. Structurally prove zero writes, zero application-function execution, zero object ownership, exact
    membership, and exact column allowlists.
