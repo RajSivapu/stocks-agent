@@ -29,6 +29,7 @@ TABLES = (
 RPCS = (
     "start_market_intelligence_run(uuid,text,date,integer,jsonb)",
     "record_market_intelligence(uuid,uuid,jsonb)",
+    "read_market_evidence_packet(uuid,uuid)",
     "record_market_report(uuid,uuid,jsonb)",
     "record_market_learning(uuid,jsonb)",
 )
@@ -93,7 +94,7 @@ def test_intelligence_tables_are_append_only_and_gateway_scoped():
     receipt = evaluate_snapshot(complete_snapshot())
     assert receipt["append_only_tables"] == 12
     assert receipt["rls_tables"] == 12
-    assert receipt["gateway_only_rpcs"] == 4
+    assert receipt["gateway_only_rpcs"] == 5
     assert receipt["public_execute_grants"] == 0
     assert receipt["brokerage_columns"] == 0
 

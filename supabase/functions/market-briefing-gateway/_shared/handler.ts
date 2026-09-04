@@ -1336,7 +1336,7 @@ async function evaluateAndPublish(
     deps.repository.readContext(envelope.run_id),
     deps.repository.activePolicy(),
   ]);
-  if (packet !== null && packet.policy_version !== activePolicy.version) {
+  if (packet !== null && packet.packet.policy_version !== activePolicy.version) {
     throw new GatewayRepositoryError("INTELLIGENCE_PACKET_MISMATCH");
   }
   if (
@@ -1377,6 +1377,7 @@ async function evaluateAndPublish(
       deps.now(),
       deps.newId,
       bundle.intelligence_packet?.id ?? null,
+      packet?.qualifiedExposureIds.get(candidate.ticker) ?? new Set(),
     )
   );
   const comparisons = await buildPortfolioComparisons(
@@ -1574,7 +1575,10 @@ async function resolveIntelligencePacket(
   envelope: GatewayEnvelope,
   bundle: ReturnType<typeof parseDecisionBundle>,
   deps: ResolvedDependencies,
-): Promise<EvidencePacket | null> {
+): Promise<{
+  packet: EvidencePacket;
+  qualifiedExposureIds: Map<string, Set<string>>;
+} | null> {
   const reference = bundle.intelligence_packet;
   const scheduled = bundle.phase !== "on-demand";
   if (!reference) {
@@ -1591,11 +1595,21 @@ async function resolveIntelligencePacket(
   }
 
   let packet: EvidencePacket;
+  const qualifiedExposureIds = new Map<string, Set<string>>();
   if (reference.packet) {
     if (!envelope.dry_run || reference.coverage !== "fixture_dry_run") {
       throw new GatewayRepositoryError("INTELLIGENCE_PACKET_INVALID");
     }
     packet = reference.packet;
+    for (const candidate of bundle.candidates) {
+      qualifiedExposureIds.set(
+        candidate.ticker,
+        new Set(candidate.evidence.filter((item) =>
+          item.exposure_kind != null && item.status === "fresh" &&
+          item.observed_at !== null
+        ).map((item) => item.id)),
+      );
+    }
   } else {
     if (envelope.dry_run || reference.coverage === "fixture_dry_run") {
       throw new GatewayRepositoryError("INTELLIGENCE_PACKET_INVALID");
@@ -1612,6 +1626,12 @@ async function resolveIntelligencePacket(
       throw new GatewayRepositoryError("INTELLIGENCE_PACKET_MISMATCH");
     }
     packet = persisted.packet;
+    for (const fact of persisted.exposure_facts) {
+      if (fact.status !== "fresh" || fact.observed_at === null) continue;
+      const ids = qualifiedExposureIds.get(fact.candidate_key) ?? new Set();
+      ids.add(fact.evidence_id);
+      qualifiedExposureIds.set(fact.candidate_key, ids);
+    }
   }
 
   if (sha256Hex(canonicalJson(packet)) !== reference.content_hash) {
@@ -1622,7 +1642,7 @@ async function resolveIntelligencePacket(
       throw new GatewayRepositoryError("EVIDENCE_NOT_IN_PACKET");
     }
   }
-  return packet;
+  return { packet, qualifiedExposureIds };
 }
 
 async function buildPortfolioComparisons(

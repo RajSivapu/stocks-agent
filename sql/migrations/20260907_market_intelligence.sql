@@ -1010,6 +1010,80 @@ BEGIN
 END;
 $$;
 
+CREATE OR REPLACE FUNCTION public.read_market_evidence_packet(
+  p_packet_id UUID,
+  p_run_id UUID
+) RETURNS JSONB LANGUAGE plpgsql SECURITY DEFINER
+SET search_path = pg_catalog AS $$
+DECLARE
+  v_result JSONB;
+BEGIN
+  IF p_packet_id IS NULL OR p_run_id IS NULL THEN
+    RAISE EXCEPTION 'packet and run identifiers are required' USING ERRCODE = '22023';
+  END IF;
+
+  SELECT jsonb_build_object(
+    'id',packet.id,
+    'run_id',packet.run_id,
+    'packet_hash',packet.packet_hash,
+    'packet',packet.packet,
+    'exposure_facts',COALESCE((
+      SELECT jsonb_agg(jsonb_build_object(
+        'candidate_key',fact.candidate_key,
+        'evidence_id',fact.evidence_id,
+        'exposure_kind',fact.exposure_kind,
+        'status',fact.freshness,
+        'observed_at',fact.observed_at,
+        'retrieved_at',fact.retrieved_at
+      ) ORDER BY fact.candidate_key,fact.evidence_id)
+      FROM (
+        SELECT DISTINCT ranking.candidate_key,
+          item.id AS evidence_id,
+          item.metadata->>'exposure_kind' AS exposure_kind,
+          CASE WHEN receipt.expires_at>statement_timestamp()
+                    AND COALESCE(item.effective_at,item.published_at) IS NOT NULL
+            THEN 'fresh' ELSE 'stale' END AS freshness,
+          COALESCE(item.effective_at,item.published_at) AS observed_at,
+          receipt.retrieved_at
+        FROM public.market_candidate_rankings ranking
+        CROSS JOIN LATERAL jsonb_array_elements_text(ranking.exposure_item_ids)
+          AS exposure_id(value)
+        JOIN public.market_intelligence_run_items run_item
+          ON run_item.run_id=ranking.run_id
+          AND run_item.source_item_id=exposure_id.value::uuid
+          AND run_item.disposition='accepted'
+        JOIN public.market_source_items item
+          ON item.id=run_item.source_item_id
+          AND item.source_receipt_id=run_item.source_receipt_id
+        JOIN public.market_source_receipts receipt
+          ON receipt.id=run_item.source_receipt_id
+          AND receipt.run_id=ranking.run_id
+          AND receipt.status IN ('succeeded','cache_hit')
+        WHERE ranking.run_id=packet.run_id AND ranking.qualified
+          AND item.metadata->>'authority'='official'
+          AND item.metadata->>'exposure_kind' IN (
+            'filing','contract','backlog','revenue','capacity','official_fund'
+          )
+          AND EXISTS (
+            SELECT 1 FROM jsonb_array_elements(packet.packet->'candidates') candidate
+            WHERE candidate->>'candidate_key'=ranking.candidate_key
+              AND candidate->'evidence_ids' ? item.id::text
+          )
+      ) fact
+    ),'[]'::jsonb)
+  ) INTO v_result
+  FROM public.market_evidence_packets packet
+  JOIN public.market_intelligence_run_events event
+    ON event.run_id=packet.run_id AND event.status='completed'
+  WHERE packet.id=p_packet_id AND packet.run_id=p_run_id AND packet.status='completed';
+
+  IF v_result IS NOT NULL AND octet_length(v_result::text)>131072 THEN
+    RAISE EXCEPTION 'packet read exceeds bound' USING ERRCODE = '22023';
+  END IF;
+  RETURN v_result;
+END;
+$$;
+
 CREATE OR REPLACE FUNCTION public.record_market_report(
   p_run_id UUID,
   p_idempotency_key UUID,
@@ -1161,9 +1235,11 @@ REVOKE ALL ON FUNCTION public.market_canonical_jsonb(JSONB)
   FROM PUBLIC, anon, authenticated, service_role;
 REVOKE ALL ON FUNCTION public.start_market_intelligence_run(UUID, TEXT, DATE, INT, JSONB) FROM PUBLIC, anon, authenticated;
 REVOKE ALL ON FUNCTION public.record_market_intelligence(UUID, UUID, JSONB) FROM PUBLIC, anon, authenticated;
+REVOKE ALL ON FUNCTION public.read_market_evidence_packet(UUID, UUID) FROM PUBLIC, anon, authenticated;
 REVOKE ALL ON FUNCTION public.record_market_report(UUID, UUID, JSONB) FROM PUBLIC, anon, authenticated;
 REVOKE ALL ON FUNCTION public.record_market_learning(UUID, JSONB) FROM PUBLIC, anon, authenticated;
 GRANT EXECUTE ON FUNCTION public.start_market_intelligence_run(UUID, TEXT, DATE, INT, JSONB) TO service_role;
 GRANT EXECUTE ON FUNCTION public.record_market_intelligence(UUID, UUID, JSONB) TO service_role;
+GRANT EXECUTE ON FUNCTION public.read_market_evidence_packet(UUID, UUID) TO service_role;
 GRANT EXECUTE ON FUNCTION public.record_market_report(UUID, UUID, JSONB) TO service_role;
 GRANT EXECUTE ON FUNCTION public.record_market_learning(UUID, JSONB) TO service_role;

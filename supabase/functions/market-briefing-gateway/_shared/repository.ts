@@ -167,6 +167,22 @@ export interface PersistedIntelligencePacket {
   run_id: string;
   content_hash: string;
   packet: EvidencePacket;
+  exposure_facts: PersistedExposureFact[];
+}
+
+export interface PersistedExposureFact {
+  candidate_key: string;
+  evidence_id: string;
+  exposure_kind:
+    | "filing"
+    | "contract"
+    | "backlog"
+    | "revenue"
+    | "capacity"
+    | "official_fund";
+  status: "fresh" | "stale";
+  observed_at: string | null;
+  retrieved_at: string;
 }
 
 export interface GatewayRepository {
@@ -529,23 +545,48 @@ export function createSupabaseGatewayRepository(
     },
 
     async loadIntelligencePacket(packetId, runId) {
-      const packetRows = rows(
-        await client.from("market_evidence_packets")
-          .select("id,run_id,packet_hash,packet")
-          .eq("id", packetId)
-          .eq("run_id", runId)
-          .limit(2),
-      );
-      if (packetRows.length !== 1) {
+      const result = await client.rpc("read_market_evidence_packet", {
+        p_packet_id: packetId,
+        p_run_id: runId,
+      });
+      if (result.error || result.data === null) {
         throw new GatewayRepositoryError("INTELLIGENCE_PACKET_MISMATCH");
       }
-      const packetRow = packetRows[0];
       try {
+        const packetRow = oneObject(result, "INTELLIGENCE_PACKET_MISMATCH");
+        if (!Array.isArray(packetRow.exposure_facts) || packetRow.exposure_facts.length > 96) {
+          throw new Error("invalid exposure facts");
+        }
+        const exposureKinds = new Set([
+          "filing", "contract", "backlog", "revenue", "capacity", "official_fund",
+        ]);
+        const exposure_facts = packetRow.exposure_facts.map((value) => {
+          if (typeof value !== "object" || value === null || Array.isArray(value)) {
+            throw new Error("invalid exposure fact");
+          }
+          const fact = value as Record<string, unknown>;
+          if (
+            Object.keys(fact).length !== 6 ||
+            !["candidate_key", "evidence_id", "exposure_kind", "status", "observed_at", "retrieved_at"]
+              .every((key) => key in fact) ||
+            !exposureKinds.has(String(fact.exposure_kind)) ||
+            !["fresh", "stale"].includes(String(fact.status))
+          ) throw new Error("invalid exposure fact");
+          return {
+            candidate_key: text(fact.candidate_key, 80),
+            evidence_id: text(fact.evidence_id, 36),
+            exposure_kind: String(fact.exposure_kind) as PersistedExposureFact["exposure_kind"],
+            status: String(fact.status) as PersistedExposureFact["status"],
+            observed_at: nullableText(fact.observed_at, 40),
+            retrieved_at: text(fact.retrieved_at, 40),
+          };
+        });
         return {
           id: text(packetRow.id, 36),
           run_id: text(packetRow.run_id, 36),
           content_hash: text(packetRow.packet_hash, 64),
           packet: parseEvidencePacket(packetRow.packet),
+          exposure_facts,
         };
       } catch {
         throw new GatewayRepositoryError("INTELLIGENCE_PACKET_MISMATCH");

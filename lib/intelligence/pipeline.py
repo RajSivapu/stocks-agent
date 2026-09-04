@@ -16,7 +16,7 @@ from lib.intelligence.packet import EvidencePacket, build_evidence_packet
 from lib.intelligence.providers import CollectionQuery, CollectionResult, RequestReceipt
 from lib.intelligence.quota import QuotaSession
 from lib.intelligence.ranking import CandidateInput, RankedCandidate, rank_candidates
-from lib.intelligence.relationships import EventRelationship, propose_relation
+from lib.intelligence.relationships import EventRelationship, exposure_kind, propose_relation
 from lib.intelligence.themes import SEED_THEMES, MarketEvent, build_market_event, evidence_key
 from lib.intelligence.types import PacketLimits
 
@@ -535,6 +535,15 @@ def _item_row(
     run_id: str, value: RunItemDisposition, receipt_id: str, ordinal: int
 ) -> dict[str, object]:
     item = value.item
+    metadata = dict(item.metadata)
+    metadata["authority"] = item.authority
+    item_exposure_kind = exposure_kind(item)
+    if item_exposure_kind is not None:
+        metadata["exposure_kind"] = item_exposure_kind
+    if len(_canonical(metadata).encode("utf-8")) > 8_192:
+        metadata = {"authority": item.authority}
+        if item_exposure_kind is not None:
+            metadata["exposure_kind"] = item_exposure_kind
     return {
         "id": evidence_key(item),
         "run_item_id": _uuid("run-item", run_id, evidence_key(item), receipt_id, ordinal),
@@ -542,7 +551,7 @@ def _item_row(
         "canonical_url": item.canonical_url, "published_at": _timestamp(item.published_at),
         "effective_at": _timestamp(item.effective_at), "title": item.title,
         "normalized_text": item.summary, "canonical_content": item.canonical_content,
-        "content_hash": item.content_hash, "metadata": dict(item.metadata),
+        "content_hash": item.content_hash, "metadata": metadata,
         "disposition": value.disposition, "drop_reason": value.reason,
     }
 

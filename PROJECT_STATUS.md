@@ -70,8 +70,10 @@ production migration remain protected V1-C6 rollout gates and are not implied by
   fixtures.
 
 V1-C3 is complete based on the exact Task 8 focused gate: 159 Deno gateway tests and 26 Python
-security-invariant tests passed on 2026-09-04. This local evidence does not claim a production
-migration, provider/model call, database write, Telegram delivery, or deployment.
+security-invariant tests passed on 2026-09-04. The bounded fix verification also passed 55 focused
+migration/security checks and the rollback-only local PostgreSQL verifier with 5 gateway-only RPCs,
+0 public execute grants, and 0 remaining verifier rows. This local evidence does not claim a
+production migration, provider/model call, database write, Telegram delivery, or deployment.
 
 ### V1-C4 — Personal comparison brain
 

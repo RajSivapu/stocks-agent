@@ -394,7 +394,20 @@ class FakeRepository implements GatewayRepository {
     return Promise.resolve(structuredClone(this.context));
   }
   loadIntelligencePacket(): Promise<
-    { id: string; run_id: string; content_hash: string; packet: EvidencePacket }
+    {
+      id: string;
+      run_id: string;
+      content_hash: string;
+      packet: EvidencePacket;
+      exposure_facts: Array<{
+        candidate_key: string;
+        evidence_id: string;
+        exposure_kind: "filing";
+        status: "fresh";
+        observed_at: string;
+        retrieved_at: string;
+      }>;
+    }
   > {
     this.packetReadCalls += 1;
     return Promise.resolve({
@@ -402,6 +415,14 @@ class FakeRepository implements GatewayRepository {
       run_id: RUN_ID,
       content_hash: PACKET_HASH,
       packet: evidencePacket(),
+      exposure_facts: [{
+        candidate_key: "CENX",
+        evidence_id: "q",
+        exposure_kind: "filing",
+        status: "fresh",
+        observed_at: "2026-09-02T16:55:00.000Z",
+        retrieved_at: "2026-09-02T16:56:00.000Z",
+      }],
     });
   }
   activePolicy(): Promise<PolicyConfig> {
@@ -712,6 +733,7 @@ Deno.test("scheduled discovery requires the persisted packet hash before market 
         run_id: string;
         content_hash: string;
         packet: EvidencePacket;
+        exposure_facts: [];
       }
     > {
       this.packetReadCalls += 1;
@@ -720,6 +742,7 @@ Deno.test("scheduled discovery requires the persisted packet hash before market 
         run_id: RUN_ID,
         content_hash: "b".repeat(64),
         packet: evidencePacket(),
+        exposure_facts: [],
       });
     }
   }

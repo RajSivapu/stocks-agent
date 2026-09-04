@@ -41,6 +41,7 @@ INTELLIGENCE_TABLES = (
 INTELLIGENCE_RPCS = (
     "start_market_intelligence_run(UUID, TEXT, DATE, INT, JSONB)",
     "record_market_intelligence(UUID, UUID, JSONB)",
+    "read_market_evidence_packet(UUID, UUID)",
     "record_market_report(UUID, UUID, JSONB)",
     "record_market_learning(UUID, JSONB)",
 )
@@ -289,7 +290,6 @@ def test_gateway_repository_uses_only_fixed_tables_and_named_rpcs():
         "market_alert_drafts",
         "market_alert_events",
         "market_alert_rules",
-        "market_evidence_packets",
         "market_gateway_requests",
         "market_policy_config",
         "market_publications",
@@ -316,6 +316,7 @@ def test_gateway_repository_uses_only_fixed_tables_and_named_rpcs():
         "get_due_market_decisions",
         "record_market_alert_evaluations",
         "record_market_intelligence",
+        "read_market_evidence_packet",
         "start_market_analysis_run",
         "start_market_intelligence_run",
         "upsert_market_outcome_grades",

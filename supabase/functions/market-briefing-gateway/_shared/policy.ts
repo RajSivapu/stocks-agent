@@ -278,6 +278,7 @@ export function evaluateCandidate(
   now: Date,
   newId: () => string = () => crypto.randomUUID(),
   packetId: string | null = null,
+  qualifyingExposureEvidenceIds: ReadonlySet<string> = new Set(),
 ): PolicyEvaluation {
   const reasons: PolicyReasonCode[] = [];
   const explanations: string[] = [];
@@ -389,20 +390,21 @@ export function evaluateCandidate(
     candidate.relationship_type !== null &&
     candidate.relationship_type !== undefined
   ) {
+    const hasQualifiedExposure = candidate.evidence.some((item) =>
+      qualifyingExposureEvidenceIds.has(item.id)
+    );
     if (
-      !candidate.evidence.some((item) =>
-        item.exposure_kind != null && item.status === "fresh" &&
-        item.observed_at !== null
-      )
+      !hasQualifiedExposure
     ) {
       add(
         "EXPOSURE_EVIDENCE_MISSING",
         "Direct and second-order candidates require approved exposure evidence.",
       );
     }
+  }
+  if (packetId !== null) {
     if (
-      candidate.analyst.id == null || candidate.analyst.packet_id == null ||
-      (packetId !== null && candidate.analyst.packet_id !== packetId) ||
+      candidate.analyst.id == null || candidate.analyst.packet_id !== packetId ||
       candidate.checker.id == null || candidate.checker.analyst_id == null ||
       candidate.checker.analyst_id !== candidate.analyst.id ||
       candidate.checker.id === candidate.analyst.id ||
