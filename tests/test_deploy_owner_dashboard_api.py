@@ -338,16 +338,43 @@ def test_post_deploy_canary_keeps_runtime_database_url_and_auth_token_out_of_rec
             "friend_invitations": "disabled",
         }
 
+    def session_revoker(project_url, token, publishable_key):
+        observed["revoked"] = (project_url, token, publishable_key)
+
     receipt = deploy.run_post_deploy_canary(
         PROJECT_REF, ORIGIN, DATABASE_URL, OWNER_EMAIL := "owner@example.com",
         "sb_secret_" + "s" * 40, "sb_publishable_" + "p" * 32,
         token_factory=token_factory, source_collector=source_collector, canary=canary,
+        session_revoker=session_revoker,
     )
     assert receipt["status"] == "verified"
     assert DATABASE_URL not in str(receipt)
     assert OWNER_EMAIL not in str(receipt)
     assert "owner-access-token" not in str(receipt)
     assert observed["source"][0] == DATABASE_URL
+    assert observed["revoked"][1] == "owner-access-token"
+
+
+def test_post_deploy_canary_revokes_owner_session_when_canary_fails():
+    events = []
+
+    def canary(*_args, **_kwargs):
+        events.append("canary")
+        raise RuntimeError("receipt mismatch")
+
+    def session_revoker(*_args):
+        events.append("revoke")
+
+    with pytest.raises(RuntimeError, match="receipt mismatch"):
+        deploy.run_post_deploy_canary(
+            PROJECT_REF, ORIGIN, DATABASE_URL, "owner@example.com",
+            "sb_secret_" + "s" * 40, "sb_publishable_" + "p" * 32,
+            token_factory=lambda *_args: "owner-access-token",
+            source_collector=lambda *_args: {},
+            canary=canary,
+            session_revoker=session_revoker,
+        )
+    assert events == ["canary", "revoke"]
 
 
 def test_post_deploy_canary_rejects_an_incomplete_receipt():
@@ -358,4 +385,5 @@ def test_post_deploy_canary_rejects_an_incomplete_receipt():
             token_factory=lambda *_args: "owner-token",
             source_collector=lambda *_args: {},
             canary=lambda *_args, **_kwargs: {"status": "verified", "source_reconciliation": "missing"},
+            session_revoker=lambda *_args: None,
         )

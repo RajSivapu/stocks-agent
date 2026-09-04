@@ -275,3 +275,24 @@ def test_ephemeral_owner_session_errors_are_bounded():
             "sb_secret_" + "s" * 40, "sb_publishable_" + "p" * 32, requester=requester,
         )
     assert "private auth detail" not in str(error.value)
+
+
+def test_ephemeral_owner_session_revocation_uses_global_logout_without_leaking_token():
+    observed = {}
+
+    def requester(method, url, headers, body):
+        observed.update(method=method, url=url, headers=headers, body=body)
+        return 204, b""
+
+    receipt = verify.revoke_ephemeral_owner_session(
+        "https://hlxpxbxhqctwsqizwjjy.supabase.co",
+        "owner-access-token-" + "x" * 40,
+        "sb_publishable_" + "p" * 32,
+        requester=requester,
+    )
+
+    assert receipt == {"status": "revoked", "scope": "global"}
+    assert observed["method"] == "POST"
+    assert observed["url"].endswith("/auth/v1/logout?scope=global")
+    assert observed["body"] is None
+    assert "owner-access-token" not in str(receipt)

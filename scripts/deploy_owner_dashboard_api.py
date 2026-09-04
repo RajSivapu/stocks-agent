@@ -30,6 +30,7 @@ from scripts.verify_owner_dashboard_role import verify_dashboard_role
 from scripts.verify_owner_dashboard_deployment import (
     collect_source_receipts,
     obtain_ephemeral_owner_access_token,
+    revoke_ephemeral_owner_session,
     run_http_canary,
 )
 
@@ -369,28 +370,32 @@ def run_post_deploy_canary(
     token_factory: Callable[..., str] = obtain_ephemeral_owner_access_token,
     source_collector: Callable[..., Mapping[str, object]] = collect_source_receipts,
     canary: Callable[..., Mapping[str, object]] = run_http_canary,
+    session_revoker: Callable[..., Mapping[str, str] | None] = revoke_ephemeral_owner_session,
 ) -> dict[str, object]:
     project_url = f"https://{project_ref}.supabase.co"
     api_url = f"{project_url}/functions/v1/{FUNCTION_NAME}"
     _validate_origin(allowed_origin)
     _validate_database_url(database_url, project_ref)
     token = token_factory(project_url, owner_email, allowed_origin, service_key, publishable_key)
-    result = dict(canary(
-        api_url,
-        allowed_origin,
-        token,
-        source_reader=lambda run_id: source_collector(database_url, api_url, run_id),
-    ))
-    expected = {
-        "status": "verified",
-        "source_reconciliation": "verified",
-        "financial_write_routes": 0,
-        "brokerage_authority": "none",
-        "friend_invitations": "disabled",
-    }
-    if any(result.get(key) != value for key, value in expected.items()):
-        raise RuntimeError("production canary receipt is incomplete")
-    return result
+    try:
+        result = dict(canary(
+            api_url,
+            allowed_origin,
+            token,
+            source_reader=lambda run_id: source_collector(database_url, api_url, run_id),
+        ))
+        expected = {
+            "status": "verified",
+            "source_reconciliation": "verified",
+            "financial_write_routes": 0,
+            "brokerage_authority": "none",
+            "friend_invitations": "disabled",
+        }
+        if any(result.get(key) != value for key, value in expected.items()):
+            raise RuntimeError("production canary receipt is incomplete")
+        return result
+    finally:
+        session_revoker(project_url, token, publishable_key)
 
 
 def verify_initial_deployment_or_rollback(

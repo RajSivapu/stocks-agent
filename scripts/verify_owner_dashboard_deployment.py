@@ -133,6 +133,42 @@ def obtain_ephemeral_owner_access_token(
     return access_token
 
 
+def revoke_ephemeral_owner_session(
+    project_url: str,
+    access_token: str,
+    publishable_key: str,
+    *,
+    requester: Callable[[str, str, Mapping[str, str], bytes | None], tuple[int, bytes]] = _auth_request,
+) -> dict[str, str]:
+    """Globally revoke the temporary canary session without returning its token."""
+    parsed = urlparse(project_url)
+    if (
+        parsed.scheme != "https"
+        or not re.fullmatch(r"[a-z0-9]{20}\.supabase\.co", parsed.hostname or "")
+        or project_url != f"https://{parsed.netloc}"
+    ):
+        raise ValueError("project URL must be an exact Supabase origin")
+    if (
+        len(access_token) < 40
+        or len(access_token) > 8_192
+        or any(character.isspace() for character in access_token)
+        or not re.fullmatch(r"sb_publishable_[A-Za-z0-9_-]{24,128}", publishable_key)
+    ):
+        raise ValueError("ephemeral session revocation configuration is invalid")
+    status, _body = requester(
+        "POST",
+        f"{project_url}/auth/v1/logout?scope=global",
+        {
+            "apikey": publishable_key,
+            "authorization": f"Bearer {access_token}",
+        },
+        None,
+    )
+    if status < 200 or status >= 300:
+        raise RuntimeError("ephemeral owner session revocation failed")
+    return {"status": "revoked", "scope": "global"}
+
+
 def validate_source_database_url(database_url: str, api_url: str) -> str:
     api = urlparse(api_url)
     project_ref = (api.hostname or "").split(".", 1)[0]
