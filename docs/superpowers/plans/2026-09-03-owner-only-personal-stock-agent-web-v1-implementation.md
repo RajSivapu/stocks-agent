@@ -502,7 +502,7 @@ git commit -m "feat: add owner dashboard auth and visual shell"
 - Produces: safe text/link rendering without `dangerouslySetInnerHTML`.
 - Consumes: only typed `dashboardClient` responses.
 
-- [ ] **Step 1: Write failing page semantics and hostile-content tests**
+- [x] **Step 1: Write failing page semantics and hostile-content tests**
 
 ```tsx
 it("renders attention first and collapses empty optional blocks", async () => {
@@ -518,34 +518,34 @@ it("renders stored markup as text and disables unsafe links", () => {
 });
 ```
 
-- [ ] **Step 2: Run page tests and verify RED**
+- [x] **Step 2: Run page tests and verify RED**
 
 Run: `npm test --workspace @stocks-agent/web -- --run src/features/pages.test.tsx src/components/SafeTelegramPreview.test.tsx`
 
 Expected: FAIL because the pages and safe renderers do not exist.
 
-- [ ] **Step 3: Implement Today, Portfolio, Ideas, and Companion**
+- [x] **Step 3: Implement Today, Portfolio, Ideas, and Companion**
 
 Keep attention first; collapse empty optional blocks. Use tabular numerals for money but omit value
 and P&L when price support is missing. Separate observed evidence, Analyst, Checker, deterministic
 policy, and outcome grade. Use only past-tense historical wording; show no “best/top/winner” label.
 Show wider comparisons unavailable when only count/coverage exists.
 
-- [ ] **Step 4: Implement Alerts, Runs, Run Detail, and System**
+- [x] **Step 4: Implement Alerts, Runs, Run Detail, and System**
 
 Alerts show delivery/suppression state, hash, template, attempts, event/rule history, and message IDs
 only from receipts. Runs connect stages by IDs and label missing stages incomplete. System shows
 receipt-derived phase status and immutable owner-only/suggestion-only/friends-disabled/no-brokerage
 boundaries; it never calls page-load success system health.
 
-- [ ] **Step 5: Run page, accessibility-unit, type, lint, and build checks and verify GREEN**
+- [x] **Step 5: Run page, accessibility-unit, type, lint, and build checks and verify GREEN**
 
 Run: `npm test --workspace @stocks-agent/web -- --run && npm run typecheck --workspace @stocks-agent/web && npm run lint --workspace @stocks-agent/web && VITE_SUPABASE_URL=https://test-project.supabase.co VITE_DASHBOARD_API_URL=https://test-project.supabase.co/functions/v1/owner-dashboard-api VITE_SUPABASE_PUBLISHABLE_KEY=sb_publishable_test npm run build --workspace @stocks-agent/web`
 
 Expected: all commands exit 0 and the compressed initial application JavaScript remains below the
 250 KB target.
 
-- [ ] **Step 6: Commit Task 6**
+- [x] **Step 6: Commit Task 6**
 
 ```bash
 git add apps/web packages/dashboard-contracts

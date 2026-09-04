@@ -65,6 +65,8 @@ export function createDashboardClient(
   };
 }
 
+export type DashboardClient = ReturnType<typeof createDashboardClient>;
+
 export function createBrowserDashboardClient() {
   const url = import.meta.env.VITE_DASHBOARD_API_URL?.trim();
   if (!url) throw new Error("Dashboard API configuration is unavailable.");

@@ -2,11 +2,12 @@ import { StrictMode } from "react";
 import { createRoot } from "react-dom/client";
 
 import { App } from "./app/App";
+import { createBrowserDashboardClient } from "./api/client";
 import { createBrowserAuthClient } from "./auth/AuthProvider";
 import "./styles.css";
 
 const root = document.getElementById("root");
 if (!root) throw new Error("application root is missing");
 createRoot(root).render(
-  <StrictMode><App authClient={createBrowserAuthClient()} /></StrictMode>,
+  <StrictMode><App authClient={createBrowserAuthClient()} dashboardClient={createBrowserDashboardClient()} /></StrictMode>,
 );
