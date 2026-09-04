@@ -3,6 +3,7 @@ import { resolveDashboardRoute } from "./routes.ts";
 
 const OWNER = "6903b3cc-05b7-4f90-bbc2-7e80a3a59e22";
 const ORIGIN = "https://dashboard.example";
+const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
 
 function assert(condition: boolean, message = "assertion failed"): void {
   if (!condition) throw new Error(message);
@@ -130,6 +131,14 @@ Deno.test("every GET route including meta authenticates before reading", async (
   assertEquals(observed, ["auth", "read"]);
   assertEquals(response.headers.get("cache-control"), "no-store");
   assertEquals((await response.json()).contract_version, 1);
+});
+
+Deno.test("the default request id generator remains bound to Web Crypto", async () => {
+  const { requestId: _requestId, ...defaults } = dependencies();
+  const response = await createOwnerDashboardHandler(defaults)(request("/v1/meta"));
+  const body = await response.json();
+  assertEquals(response.status, 200);
+  assert(UUID.test(body.request_id));
 });
 
 Deno.test("authentication and internal errors use bounded public envelopes", async () => {

@@ -49,7 +49,7 @@ export function createOwnerDashboardHandler(
   dependencies: DashboardHandlerDependencies,
 ): (request: Request) => Promise<Response> {
   const now = dependencies.now ?? (() => new Date());
-  const requestId = dependencies.requestId ?? crypto.randomUUID;
+  const requestId = dependencies.requestId ?? (() => crypto.randomUUID());
   const rateLimiter = dependencies.rateLimiter ?? createDashboardRateLimiter();
 
   return async (request: Request): Promise<Response> => {
