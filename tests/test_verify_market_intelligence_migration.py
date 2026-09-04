@@ -234,6 +234,7 @@ def test_schema_declares_complete_bounded_append_only_ledgers_and_rpcs():
         assert "'morning','urgent','weekly','monthly','theme','on-demand'" in sql
         assert "LIMIT 50" in sql
         assert "expires_at > statement_timestamp()" in sql
+        assert "'retrieved_at',receipt.retrieved_at" in sql
         assert "~ '^[0-9a-f]{64}$'" in sql
         for lock_key in (
             "market-intelligence-run:",

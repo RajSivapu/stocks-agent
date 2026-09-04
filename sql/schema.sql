@@ -2911,6 +2911,7 @@ BEGIN
       'item_id',item.id,
       'provider',receipt.provider,
       'cache_key',receipt.cache_key,
+      'retrieved_at',receipt.retrieved_at,
       'expires_at',receipt.expires_at,
       'content_hash',item.content_hash,
       'title',item.title,

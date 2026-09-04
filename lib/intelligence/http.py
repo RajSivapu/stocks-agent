@@ -8,7 +8,7 @@ import socket
 import zlib
 from collections.abc import Callable, Iterable, Mapping
 from copy import deepcopy
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from datetime import datetime, timedelta, timezone
 from email.utils import parsedate_to_datetime
 from types import MappingProxyType
@@ -22,6 +22,12 @@ from xml.etree import ElementTree
 _REDIRECT_STATUSES = frozenset({301, 302, 303, 307, 308})
 _MAX_REDIRECTS = 5
 _READ_CHUNK_BYTES = 64 * 1024
+_HTTP_VALIDATION_PROVENANCE = object()
+_SENSITIVE_REDIRECT_HEADERS = frozenset({
+    "authorization",
+    "proxy-authorization",
+    "cookie",
+})
 
 
 class SourceFailure(RuntimeError):
@@ -52,8 +58,12 @@ class HttpResult:
     body: bytes
     retrieved_at: datetime
     observed_at: datetime | None
-    validated: bool = True
     cache_hit: bool = False
+    _validation_provenance: object | None = field(default=None, repr=False, compare=False)
+
+    @property
+    def validated(self) -> bool:
+        return self._validation_provenance is _HTTP_VALIDATION_PROVENANCE
 
 
 class _NoRedirect(HTTPRedirectHandler):
@@ -95,6 +105,9 @@ class CacheStore:
             or not key
             or not isinstance(entry.get("provider"), str)
             or not isinstance(entry.get("normalized_text"), str)
+            or not isinstance(entry.get("retrieved_at"), str)
+            or "published_at" not in entry
+            or "effective_at" not in entry
             or not isinstance(content_hash, str)
             or len(content_hash) != 64
             or any(character not in "0123456789abcdef" for character in content_hash)
@@ -139,10 +152,15 @@ class BoundedHttpClient:
 
     def get(self, request: HttpRequest) -> HttpResult:
         current_url = request.url
+        current_headers = dict(request.headers or {})
         for redirect_count in range(_MAX_REDIRECTS + 1):
             self._validate_url(current_url)
             try:
-                response = self._open(current_url, request)
+                response = self._open(
+                    current_url,
+                    headers=current_headers,
+                    timeout_seconds=request.timeout_seconds,
+                )
             except HTTPError as exc:
                 if exc.code in _REDIRECT_STATUSES:
                     response = exc
@@ -169,7 +187,11 @@ class BoundedHttpClient:
                     location = headers.get("location")
                     if redirect_count == _MAX_REDIRECTS or not location:
                         raise SourceFailure("UNSAFE_URL")
-                    current_url = urljoin(current_url, location)
+                    redirected_url = urljoin(current_url, location)
+                    self._validate_url(redirected_url)
+                    if self._origin(current_url) != self._origin(redirected_url):
+                        current_headers = self._without_sensitive_headers(current_headers)
+                    current_url = redirected_url
                     continue
                 if status < 200 or status >= 300:
                     raise SourceFailure("SOURCE_UNAVAILABLE")
@@ -196,11 +218,29 @@ class BoundedHttpClient:
             return result
         raise SourceFailure("UNSAFE_URL")
 
-    def _open(self, url: str, request: HttpRequest):
-        outgoing = Request(url, headers=dict(request.headers or {}), method="GET")
+    def _open(self, url: str, *, headers: Mapping[str, str], timeout_seconds: float):
+        outgoing = Request(url, headers=dict(headers), method="GET")
         if hasattr(self._opener, "open"):
-            return self._opener.open(outgoing, timeout=request.timeout_seconds)
-        return self._opener(outgoing, timeout=request.timeout_seconds)
+            return self._opener.open(outgoing, timeout=timeout_seconds)
+        return self._opener(outgoing, timeout=timeout_seconds)
+
+    @staticmethod
+    def _origin(url: str) -> tuple[str, str, int]:
+        parsed = urlsplit(url)
+        return parsed.scheme.lower(), (parsed.hostname or "").lower().rstrip("."), parsed.port or 443
+
+    @staticmethod
+    def _without_sensitive_headers(headers: Mapping[str, str]) -> dict[str, str]:
+        def sensitive(name: str) -> bool:
+            normalized = name.lower().replace("_", "-")
+            return (
+                normalized in _SENSITIVE_REDIRECT_HEADERS
+                or "api-key" in normalized
+                or "apikey" in normalized
+                or "token" in normalized
+            )
+
+        return {name: value for name, value in headers.items() if not sensitive(name)}
 
     def _validate_url(self, url: str) -> None:
         try:
@@ -246,6 +286,7 @@ class BoundedHttpClient:
             body=body,
             retrieved_at=retrieved_at,
             observed_at=observed_at,
+            _validation_provenance=_HTTP_VALIDATION_PROVENANCE,
         )
 
     @staticmethod
@@ -302,14 +343,19 @@ class BoundedHttpClient:
             raise SourceFailure("INVALID_RESPONSE") from None
         if len(output) > max_bytes:
             raise SourceFailure("RESPONSE_TOO_LARGE")
+        if not decompressor.eof or decompressor.unused_data or decompressor.unconsumed_tail:
+            raise SourceFailure("INVALID_RESPONSE")
         return bytes(output)
 
     @staticmethod
     def _validate_document(body: bytes, document_type: str) -> None:
         try:
             if document_type == "json":
-                json.loads(body)
+                json.loads(
+                    body,
+                    parse_constant=lambda _value: (_ for _ in ()).throw(ValueError()),
+                )
             else:
                 ElementTree.fromstring(body)
-        except (UnicodeDecodeError, json.JSONDecodeError, ElementTree.ParseError):
+        except (UnicodeDecodeError, ValueError, ElementTree.ParseError):
             raise SourceFailure("INVALID_RESPONSE") from None

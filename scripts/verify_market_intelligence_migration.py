@@ -4,7 +4,7 @@
 from __future__ import annotations
 
 import argparse
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
 import hashlib
 import json
 import os
@@ -565,7 +565,11 @@ def verify(cursor) -> tuple[dict[str, object], list[UUID]]:
         policy_version,
         Jsonb({"reservations": [_reservation(current_reservation, "gdelt", 1, [cache_key])]}),
     )
-    bounded_cache_returned = len(started["cache_entries"]) == 1
+    bounded_cache_returned = (
+        len(started["cache_entries"]) == 1
+        and datetime.fromisoformat(started["cache_entries"][0]["retrieved_at"])
+        == datetime.fromisoformat(payload["receipts"][0]["retrieved_at"])
+    )
     _require(bounded_cache_returned, "valid requested cache entry was not returned")
     start_replay = _call(
         cursor,

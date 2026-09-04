@@ -49,7 +49,7 @@ class FakeOpener:
         self.requests = []
 
     def open(self, request, timeout):
-        self.requests.append((request.full_url, timeout))
+        self.requests.append((request.full_url, timeout, tuple(request.header_items())))
         response = self.responses.pop(0)
         if isinstance(response, BaseException):
             raise response
@@ -105,9 +105,38 @@ def test_http_follows_an_approved_https_redirect():
     assert result.body == b'{"ok":true}'
     assert result.url == "https://data.example.gov/feed"
     assert opener.requests == [
-        ("https://api.gdeltproject.org/start", 3),
-        ("https://data.example.gov/feed", 3),
+        ("https://api.gdeltproject.org/start", 3, ()),
+        ("https://data.example.gov/feed", 3, ()),
     ]
+
+
+def test_http_strips_sensitive_headers_on_cross_origin_redirect():
+    opener = FakeOpener(
+        FakeResponse(status=302, headers={"Location": "https://data.example.gov/feed"}),
+        FakeResponse(body=b'{"ok":true}', url="https://data.example.gov/feed"),
+    )
+    transport = BoundedHttpClient(
+        opener=opener,
+        allowed_hosts={"api.gdeltproject.org", "data.example.gov"},
+        clock=lambda: NOW,
+    )
+
+    transport.get(HttpRequest(
+        "https://api.gdeltproject.org/start",
+        headers={
+            "Authorization": "Bearer secret",
+            "Proxy-Authorization": "Basic secret",
+            "Cookie": "session=secret",
+            "X-API-Key": "api-secret",
+            "X-Access-Token": "token-secret",
+            "Accept-Language": "en-US",
+        },
+    ))
+
+    first_headers = {key.lower(): value for key, value in opener.requests[0][2]}
+    redirected_headers = {key.lower(): value for key, value in opener.requests[1][2]}
+    assert first_headers["authorization"] == "Bearer secret"
+    assert redirected_headers == {"accept-language": "en-US"}
 
 
 def test_http_enforces_the_limit_after_gzip_decompression():
@@ -119,6 +148,24 @@ def test_http_enforces_the_limit_after_gzip_decompression():
             "Content-Encoding": "gzip",
             "Date": format_datetime(NOW, usegmt=True),
         })).get(HttpRequest("https://api.gdeltproject.org/feed", max_bytes=1_000_000))
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        gzip.compress(b'{"ok":true}')[:-2],
+        gzip.compress(b'{"first":true}') + gzip.compress(b'{"second":true}'),
+    ],
+)
+def test_http_rejects_incomplete_or_concatenated_gzip_streams(body):
+    response = FakeResponse(body=body, headers={
+        "Content-Type": "application/json",
+        "Content-Encoding": "gzip",
+        "Date": format_datetime(NOW, usegmt=True),
+    })
+
+    with pytest.raises(SourceFailure, match="INVALID_RESPONSE"):
+        client(response).get(HttpRequest("https://api.gdeltproject.org/feed"))
 
 
 @pytest.mark.parametrize(
@@ -139,6 +186,14 @@ def test_http_rejects_invalid_content_types_and_malformed_documents(content_type
         client(response).get(HttpRequest("https://api.gdeltproject.org/feed"))
 
     assert failure.value.code in {"INVALID_CONTENT_TYPE", "INVALID_RESPONSE"}
+
+
+@pytest.mark.parametrize("constant", ["NaN", "Infinity", "-Infinity"])
+def test_http_rejects_non_finite_json_constants(constant):
+    response = FakeResponse(body=f'{{"value":{constant}}}'.encode())
+
+    with pytest.raises(SourceFailure, match="INVALID_RESPONSE"):
+        client(response).get(HttpRequest("https://api.gdeltproject.org/feed"))
 
 
 def test_http_rejects_a_date_beyond_the_future_tolerance():
@@ -185,34 +240,30 @@ def test_cache_key_is_deterministic_for_query_order():
 def test_cache_accepts_only_validated_results_and_preserves_original_timestamps():
     retrieved_at = NOW - timedelta(hours=1)
     observed_at = NOW - timedelta(hours=2)
-    original = HttpResult(
+    manual = HttpResult(
         url="https://api.gdeltproject.org/feed",
         status=200,
         headers={"content-type": "application/json"},
         body=json.dumps({"ok": True}).encode(),
         retrieved_at=retrieved_at,
         observed_at=observed_at,
-        validated=True,
     )
     store = CacheStore()
+    with pytest.raises(ValueError, match="validated"):
+        store.put("manual", manual)
+
+    original = client(FakeResponse(body=b'{"ok":true}', headers={
+        "Content-Type": "application/json",
+        "Date": format_datetime(observed_at, usegmt=True),
+    })).get(HttpRequest("https://api.gdeltproject.org/feed"))
     store.put("key", original)
 
     hit = store.get("key")
 
     assert hit is not original
     assert hit.cache_hit is True
-    assert hit.retrieved_at == retrieved_at
+    assert hit.retrieved_at == NOW
     assert hit.observed_at == observed_at
-    with pytest.raises(ValueError, match="validated"):
-        store.put("bad", HttpResult(
-            url=original.url,
-            status=200,
-            headers=original.headers,
-            body=original.body,
-            retrieved_at=retrieved_at,
-            observed_at=observed_at,
-            validated=False,
-        ))
 
 
 def test_cache_loads_validated_gateway_entries_without_mutating_them():
@@ -221,6 +272,7 @@ def test_cache_loads_validated_gateway_entries_without_mutating_them():
         "cache_key": "key",
         "retrieved_at": "2026-09-04T11:00:00+00:00",
         "published_at": "2026-09-04T10:00:00+00:00",
+        "effective_at": None,
         "normalized_text": "validated source item",
         "content_hash": "a" * 64,
     }
@@ -232,3 +284,17 @@ def test_cache_loads_validated_gateway_entries_without_mutating_them():
     assert hit["cache_hit"] is True
     assert hit["retrieved_at"] == gateway_entry["retrieved_at"]
     assert hit["published_at"] == gateway_entry["published_at"]
+
+
+def test_gateway_cache_rejects_missing_original_timestamp_metadata():
+    entry = {
+        "provider": "gdelt",
+        "cache_key": "key",
+        "published_at": "2026-09-04T10:00:00+00:00",
+        "effective_at": None,
+        "normalized_text": "validated source item",
+        "content_hash": "a" * 64,
+    }
+
+    with pytest.raises(ValueError, match="validated"):
+        CacheStore.from_gateway_entries([entry])
