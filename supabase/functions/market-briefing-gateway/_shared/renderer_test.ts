@@ -2,6 +2,7 @@ import type { AlertEvaluation, AlertRuleSnapshot, PolicyContext } from "./contra
 import type { PolicyEvaluation } from "./policy.ts";
 import type { LongTermCompanionAnalysis } from "./companion.ts";
 import { canonicalJson, sha256Hex } from "./intelligence.ts";
+import { reportIdFromKey } from "./reports.ts";
 import { FORBIDDEN_DECISION_TEXT, renderAlertV3, renderPublication, renderReportDelivery } from "./renderer.ts";
 
 Deno.test("renderer report delivery surface excludes full private content", () => {
@@ -9,8 +10,8 @@ Deno.test("renderer report delivery surface excludes full private content", () =
     title: "Monthly review",
     summary: "Review the latest evidence.",
     full_markdown: "FULL PRIVATE DETAIL",
-    source_ids: [],
-    policy_decision_ids: [],
+    source_ids: ["00000000-0000-4000-8000-000000000001"],
+    policy_decision_ids: ["00000000-0000-4000-8000-000000000002"],
     comparison_ids: [],
     actionable_risk: false,
     material_thesis_change: false,
@@ -18,7 +19,7 @@ Deno.test("renderer report delivery surface excludes full private content", () =
     suggestion_only: true,
   };
   const input = {
-    id: "00000000-0000-4000-8000-000000000040",
+    id: reportIdFromKey("a".repeat(64)),
     idempotency_key: "a".repeat(64),
     packet_id: "00000000-0000-4000-8000-000000000020",
     market_date: "2026-09-04",
