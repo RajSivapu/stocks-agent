@@ -24,6 +24,7 @@ is separate, paper-first, and outside this codebase.
 | Owner-only alert v3 | Implemented, reviewed, and rollback-tested | Live in shadow-only mode with gateway v17, Telegram v12, and policy v3; protected dry-runs remain write-free and send-free |
 | Owner portfolio alternatives review | Gateway-computed history, evidence gate, renderer, and routine contract implemented and tested | Live in gateway v17; protected five-pair VTI review returned complete coverage, a suppressed preview, zero writes/sends, and left VTI as the unchanged recurring baseline |
 | Long-Term Companion research | Strict nomination contract, gateway-owned role policy, 3/5/10-year analytics, rolling contribution scenarios, and compact renderer implemented and independently reviewed | Live in gateway v17; protected VTI/VXUS preview qualified VXUS only as a diversifier for owner review, was suppressed with zero writes/sends, and left the VTI reminder unchanged |
+| Owner-only Personal Stock Agent Web v1 | Read-only API, direct-column database role, owner OTP auth, seven responsive views, receipt/staleness semantics, hostile-content isolation, and browser/bundle verification implemented on `codex/owner-alert-v3` | Protected deployment and owner/denial canaries pending; no web version is claimed live until those receipts exist |
 
 The reliability release is on GitHub `main`. Alert v3 is deployed from
 `codex/owner-alert-v3` for shadow verification and is not yet merged. "Live" means the corresponding
@@ -33,8 +34,9 @@ observation is called out separately.
 The owner-only line contains the same `renderer.ts` v2 patch as checkpoint `386da6f`, applied to
 `main` as `1bdb490`. The additional multi-user/web stack on `codex/stock-agent-reliability` remains a
 separate deferred branch and must not be merged wholesale: it conflicts with the current personal,
-friend-invitations-disabled product boundary. A future owner-only dashboard starts from a new
-security design after alert stability, not by reactivating the deferred multi-tenant application.
+friend-invitations-disabled product boundary. The new owner-only Web v1 is instead built from an
+independent least-privilege design and adds no tenant, invitation, brokerage, or financial-write
+authority.
 
 ## Remaining rollout checks
 

@@ -569,7 +569,7 @@ git commit -m "feat: add receipt-driven owner dashboard pages"
 - Produces: built-asset secret/fixture/CSP scan and unified `npm run test:all`.
 - Consumes: fixture-mode frontend and mocked/local API only unless `E2E_LIVE=1` is explicitly set.
 
-- [ ] **Step 1: Write failing browser and bundle-security checks**
+- [x] **Step 1: Write failing browser and bundle-security checks**
 
 ```ts
 test("owner dashboard is keyboard usable in light and dark modes", async ({ page }) => {
@@ -586,27 +586,27 @@ The bundle checker must fail on service-role/JWT/provider/Telegram secret patter
 fixture ticker data in production assets, source maps, unresolved header markers, inline scripts, or
 `unsafe-inline`.
 
-- [ ] **Step 2: Run browser/security checks and verify RED**
+- [x] **Step 2: Run browser/security checks and verify RED**
 
 Run: `npm run test:e2e --workspace @stocks-agent/web && node scripts/check_dashboard_bundle.mjs apps/web/dist`
 
 Expected: FAIL because the browser configuration and bundle checker do not exist.
 
-- [ ] **Step 3: Implement deterministic browser fixtures and full checks**
+- [x] **Step 3: Implement deterministic browser fixtures and full checks**
 
 Exercise 320, 390, 768, 1024, and 1440 CSS-pixel layouts; keyboard navigation; visible focus;
 System/Light/Dark persistence; hostile Telegram/source content; stale/partial/unavailable states;
 owner-only denial; expired session; direct run-detail links; and suppressed/no-send alerts. Use
 `axe-core` on every route and major state.
 
-- [ ] **Step 4: Run the complete local verification suite and verify GREEN**
+- [x] **Step 4: Run the complete local verification suite and verify GREEN**
 
 Run: `npm run test:all`
 
 Expected: Python, Node, Deno, contracts, frontend unit, accessibility, type, lint, build, bundle scan,
 and Playwright checks all exit 0.
 
-- [ ] **Step 5: Commit Task 7**
+- [x] **Step 5: Commit Task 7**
 
 ```bash
 git add apps/web scripts package.json README.md docs/ROADMAP.md

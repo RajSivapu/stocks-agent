@@ -8,6 +8,14 @@ import "./styles.css";
 
 const root = document.getElementById("root");
 if (!root) throw new Error("application root is missing");
-createRoot(root).render(
-  <StrictMode><App authClient={createBrowserAuthClient()} dashboardClient={createBrowserDashboardClient()} /></StrictMode>,
-);
+const reactRoot = createRoot(root);
+
+if (import.meta.env.DEV && import.meta.env.VITE_E2E_FIXTURES === "1") {
+  void import("./test/FixtureApp").then(({ FixtureApp }) => {
+    reactRoot.render(<StrictMode><FixtureApp /></StrictMode>);
+  });
+} else {
+  reactRoot.render(
+    <StrictMode><App authClient={createBrowserAuthClient()} dashboardClient={createBrowserDashboardClient()} /></StrictMode>,
+  );
+}

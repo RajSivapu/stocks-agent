@@ -15,6 +15,13 @@ const pages = [
   ["System", "/system"],
 ] as const;
 
+const freshnessLabels: Record<Freshness, string> = {
+  fresh: "Receipt current",
+  partial: "Partial receipt",
+  stale: "Stale evidence",
+  unavailable: "Unavailable",
+};
+
 export function AppShell({
   dataTime,
   freshness,
@@ -41,11 +48,11 @@ export function AppShell({
         </div>
       </aside>
       <div className="workspace">
-        <header className="data-bar" role="status">
+        <div className="data-bar" role="status">
           <span className={`freshness-dot freshness-${freshness}`} aria-hidden="true" />
-          <strong>{freshness === "fresh" ? "Receipt current" : freshness}</strong>
+          <strong>{freshnessLabels[freshness]}</strong>
           <span>{dataTime ? `Data through ${new Date(dataTime).toLocaleString()}` : "No supported data time"}</span>
-        </header>
+        </div>
         <main id="main-content" className="page-content">{children}</main>
       </div>
     </div>
