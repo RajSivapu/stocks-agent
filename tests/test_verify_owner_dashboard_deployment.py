@@ -23,7 +23,8 @@ def envelope(data, *, freshness="fresh", market_state="regular", data_as_of="202
 
 def test_canary_routes_are_get_only_and_bounded():
     assert verify.CANARY_ROUTES == (
-        "/v1/today", "/v1/portfolio", "/v1/companion", "/v1/alerts", "/v1/runs", "/v1/system",
+        "/v1/today", "/v1/portfolio", "/v1/ideas", "/v1/companion", "/v1/alerts",
+        "/v1/runs", "/v1/system", "/v1/intelligence", "/v1/reports",
     )
     assert verify.CANARY_METHOD == "GET"
 
@@ -47,7 +48,7 @@ def test_owner_payload_requires_immutable_boundaries_and_receipt_fields():
     payloads["/v1/today"]["data"].update({"portfolio": {"data_as_of": "2026-09-03T20:00:00.000Z", "market_state": "as_of_close", "price_sources": ["yahoo-chart"]}})
     payloads["/v1/runs"]["data"].update({"runs": [{"id": "6903b3cc-05b7-4f90-bbc2-7e80a3a59e22", "status": "completed"}]})
     result = verify.validate_owner_payloads(payloads)
-    assert result["route_count"] == 6
+    assert result["route_count"] == 9
     assert result["financial_write_routes"] == 0
     assert result["brokerage_authority"] == "none"
 
@@ -64,13 +65,16 @@ def test_owner_payload_rejects_an_unsupported_send_claim():
         verify.validate_owner_payloads(payloads)
 
 
-def test_http_canary_uses_only_get_and_checks_unauthenticated_denial():
+def test_http_canary_uses_only_get_and_checks_anonymous_and_non_owner_denial():
     calls = []
 
     def requester(method, url, headers):
         calls.append((method, url, headers))
-        if "authorization" not in {key.lower() for key in headers}:
+        authorization = headers.get("authorization", "")
+        if not authorization:
             return 401, {"access-control-allow-origin": ORIGIN}, json.dumps({"error": {"code": "unauthorized"}}).encode()
+        if authorization == "Bearer non-owner-token":
+            return 403, {"access-control-allow-origin": ORIGIN}, json.dumps({"error": {"code": "forbidden"}}).encode()
         route = url.removeprefix(API_URL)
         data = {"boundaries": {"owner_only": True, "suggestion_only": True, "friend_invitations": "disabled", "brokerage_authority": "none"}}
         if route == "/v1/today": data["portfolio"] = {"data_as_of": None, "market_state": "unknown", "price_sources": [], "holdings": []}
@@ -119,10 +123,11 @@ def test_http_canary_uses_only_get_and_checks_unauthenticated_denial():
         }
 
     receipt = verify.run_http_canary(
-        API_URL, ORIGIN, "owner-token", requester=requester, source_reader=source_reader,
+        API_URL, ORIGIN, "owner-token", "non-owner-token", requester=requester, source_reader=source_reader,
     )
     assert receipt["unauthenticated_status"] == 401
-    assert receipt["owner_route_count"] == 7
+    assert receipt["non_owner_status"] == 403
+    assert receipt["owner_route_count"] == 10
     assert receipt["source_reconciliation"] == "verified"
     assert receipt["source_database_role"] == verify.RUNTIME_ROLE
     assert {method for method, _url, _headers in calls} == {"GET"}

@@ -18,6 +18,8 @@ jobs:
     timeout-minutes: 25
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+      - name: Bind verification to the workflow SHA
+        run: test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
       - uses: actions/setup-python@42375524e23c412d93fb67b49958b491fce71c38
         with:
           python-version: "3.14"
@@ -31,4 +33,5 @@ jobs:
       - run: npm audit --audit-level=high --omit=optional --ignore-scripts
       - run: node scripts/check_dependency_licenses.mjs
       - run: npx playwright install --with-deps chromium
+      - run: .venv/bin/python -m pytest tests/test_verify_personal_stock_agent_v1.py -q
       - run: npm run test:all

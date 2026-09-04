@@ -28,18 +28,26 @@ from scripts.provision_dashboard_runtime_role import (
     provision_dashboard_role,
     runtime_url,
 )
+from scripts.build_owner_dashboard_static import build_static_release
 from scripts.verify_owner_dashboard_role import verify_dashboard_role
 from scripts.verify_owner_dashboard_deployment import (
     collect_source_receipts,
     obtain_ephemeral_owner_access_token,
     revoke_ephemeral_owner_session,
     run_http_canary,
+    verify_release_artifact_receipts,
 )
 
 
 MIGRATION = ROOT / "sql/migrations/20260906_owner_dashboard_read_role.sql"
+RELEASE_MIGRATIONS = (
+    ROOT / "sql/migrations/20260907_market_intelligence.sql",
+    ROOT / "sql/migrations/20260908_owner_dashboard_intelligence_read_role.sql",
+)
 SUPABASE_CLI_VERSION = "2.116.0"
 FUNCTION_NAME = "owner-dashboard-api"
+CHANGED_FUNCTIONS = ("market-briefing-gateway", FUNCTION_NAME)
+V1_SURFACES = ("portfolio", "ideas", "intelligence", "reports", "system")
 DASHBOARD_SECRET_NAMES = (
     "DASHBOARD_ALLOWED_ORIGINS",
     "DASHBOARD_DATABASE_URL",
@@ -185,10 +193,50 @@ def verify_git_release(repo_root: Path = ROOT, runner: Callable[..., object] = s
     return local_sha
 
 
+def verify_reviewed_sha(candidate_sha: str, reviewed_sha: str) -> str:
+    if not re.fullmatch(r"[0-9a-f]{40}", reviewed_sha) or reviewed_sha != candidate_sha:
+        raise RuntimeError("deployment requires independent review of the exact candidate SHA")
+    return candidate_sha
+
+
 def run_local_verification(repo_root: Path = ROOT, runner: Callable[..., object] = subprocess.run) -> None:
     result = _run(["npm", "run", "test:all"], cwd=repo_root, runner=runner)
     if getattr(result, "returncode", 1) != 0:
         raise RuntimeError("local verification suite failed")
+
+
+def verify_v1_dashboard_source(repo_root: Path = ROOT) -> dict[str, object]:
+    """Refuse the superseded thin dashboard before any protected mutation."""
+    try:
+        source = (repo_root / "apps/web/src/app/App.tsx").read_text()
+    except OSError as error:
+        raise RuntimeError("superseded thin dashboard source is not deployable") from error
+    if any(f'path="/{surface}"' not in source for surface in V1_SURFACES):
+        raise RuntimeError("superseded thin dashboard source is not deployable")
+    return {"status": "verified", "primary_surfaces": list(V1_SURFACES)}
+
+
+def _tree_sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    for entry in sorted(candidate for candidate in path.rglob("*") if candidate.is_file()):
+        digest.update(entry.relative_to(path).as_posix().encode())
+        digest.update(b"\0")
+        digest.update(entry.read_bytes())
+        digest.update(b"\0")
+    return digest.hexdigest()
+
+
+def apply_release_migrations(cursor) -> list[dict[str, str]]:
+    """Apply the two V1 migrations in fixed order and bind receipts to their bytes."""
+    receipts = []
+    for path in RELEASE_MIGRATIONS:
+        sql = path.read_text()
+        cursor.execute(sql)
+        receipts.append({
+            "version": path.name.split("_", 1)[0],
+            "sha256": hashlib.sha256(sql.encode()).hexdigest(),
+        })
+    return receipts
 
 
 def publish_dashboard_secrets(
@@ -226,8 +274,9 @@ def publish_dashboard_secrets(
                 path.unlink(missing_ok=True)
 
 
-def dashboard_function_version(
+def function_version(
     project_ref: str,
+    function_name: str,
     repo_root: Path = ROOT,
     runner: Callable[..., object] = subprocess.run,
 ) -> int | None:
@@ -243,10 +292,75 @@ def dashboard_function_version(
         raise RuntimeError("dashboard function version receipt is unavailable")
     try:
         functions = json.loads(str(getattr(listing, "stdout", "")))
-        row = next((item for item in functions if item.get("name") == FUNCTION_NAME), None)
+        row = next((item for item in functions if item.get("name") == function_name), None)
         return None if row is None else int(row["version"])
     except (json.JSONDecodeError, KeyError, TypeError, ValueError) as error:
         raise RuntimeError("dashboard function version receipt is malformed") from error
+
+
+def dashboard_function_version(
+    project_ref: str,
+    repo_root: Path = ROOT,
+    runner: Callable[..., object] = subprocess.run,
+) -> int | None:
+    return function_version(project_ref, FUNCTION_NAME, repo_root, runner)
+
+
+def _deploy_named_function(
+    project_ref: str,
+    function_name: str,
+    git_sha: str,
+    repo_root: Path,
+    runner: Callable[..., object],
+    *,
+    require_existing: bool,
+) -> dict[str, object]:
+    prior = function_version(project_ref, function_name, repo_root, runner)
+    if require_existing and prior is None:
+        raise RuntimeError(f"required existing function is missing: {function_name}")
+    if not require_existing and prior is not None:
+        raise RuntimeError("initial dashboard function already exists")
+    deployed = _run(
+        [
+            "npx", "--yes", f"supabase@{SUPABASE_CLI_VERSION}", "functions", "deploy",
+            function_name, "--project-ref", project_ref, "--no-verify-jwt", "--use-api",
+        ],
+        cwd=repo_root,
+        runner=runner,
+    )
+    if getattr(deployed, "returncode", 1) != 0:
+        raise RuntimeError(f"Supabase rejected function deployment: {function_name}")
+    version = function_version(project_ref, function_name, repo_root, runner)
+    if version is None or (prior is not None and version <= prior):
+        raise RuntimeError(f"function version did not advance: {function_name}")
+    return {
+        "status": "deployed",
+        "function": function_name,
+        "function_version": version,
+        "rollback_function_version": prior,
+        "git_sha": git_sha,
+        "source_sha256": _tree_sha256(repo_root / "supabase/functions" / function_name),
+        "project_ref_digest": _project_digest(project_ref),
+        "cli_version": SUPABASE_CLI_VERSION,
+        "deployed_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+    }
+
+
+def deploy_changed_functions(
+    project_ref: str,
+    git_sha: str,
+    repo_root: Path = ROOT,
+    runner: Callable[..., object] = subprocess.run,
+) -> list[dict[str, object]]:
+    if not PROJECT_REF_PATTERN.fullmatch(project_ref) or not re.fullmatch(r"[0-9a-f]{40}", git_sha):
+        raise ValueError("canonical project and git receipts are required")
+    return [
+        _deploy_named_function(
+            project_ref, function_name, git_sha, repo_root, runner,
+            require_existing=function_name != FUNCTION_NAME,
+        )
+        for function_name in CHANGED_FUNCTIONS
+    ]
 
 
 def ensure_initial_function_absent(
@@ -266,32 +380,9 @@ def deploy_function(
 ) -> dict[str, object]:
     if not PROJECT_REF_PATTERN.fullmatch(project_ref) or not re.fullmatch(r"[0-9a-f]{40}", git_sha):
         raise ValueError("canonical project and git receipts are required")
-    rollback_version = dashboard_function_version(project_ref, repo_root, runner)
-    if rollback_version is not None:
-        raise RuntimeError("initial dashboard function already exists")
-    deploy = _run(
-        [
-            "npx", "--yes", f"supabase@{SUPABASE_CLI_VERSION}", "functions", "deploy",
-            FUNCTION_NAME, "--project-ref", project_ref, "--no-verify-jwt", "--use-api",
-        ],
-        cwd=repo_root,
-        runner=runner,
+    return _deploy_named_function(
+        project_ref, FUNCTION_NAME, git_sha, repo_root, runner, require_existing=False,
     )
-    if getattr(deploy, "returncode", 1) != 0:
-        raise RuntimeError("Supabase rejected the dashboard function deployment")
-    version = dashboard_function_version(project_ref, repo_root, runner)
-    if version is None or (rollback_version is not None and version <= rollback_version):
-        raise RuntimeError("dashboard function version did not advance")
-    return {
-        "status": "deployed",
-        "function": FUNCTION_NAME,
-        "function_version": version,
-        "rollback_function_version": rollback_version,
-        "git_sha": git_sha,
-        "project_ref_digest": _project_digest(project_ref),
-        "cli_version": SUPABASE_CLI_VERSION,
-        "deployed_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
-    }
 
 
 def rollback_initial_function(
@@ -377,13 +468,40 @@ def publish_and_deploy_or_rollback(
     preflight(project_ref)
     try:
         publisher(project_ref, values)
-        return dict(deployer(project_ref, git_sha))
+        deployed = deployer(project_ref, git_sha)
+        if isinstance(deployed, Mapping):
+            return dict(deployed)
+        return {"status": "deployed", "functions": list(deployed)}
     except Exception as error:
         try:
             rollback(project_ref, admin_url)
         except Exception as rollback_error:
             raise RuntimeError(
                 "dashboard function deployment failed and the initial dashboard rollback also failed"
+            ) from rollback_error
+        raise error
+
+
+def build_static_or_rollback(
+    project_ref: str,
+    site_origin: str,
+    git_sha: str,
+    admin_url: str,
+    *,
+    builder: Callable[..., Mapping[str, object]] = build_static_release,
+    rollback: Callable[..., Mapping[str, object]] = rollback_initial_deployment,
+) -> dict[str, object]:
+    try:
+        receipt = dict(builder(project_ref, site_origin))
+        if receipt.get("status") != "verified" or not receipt.get("asset_hashes"):
+            raise RuntimeError("static asset receipt is incomplete")
+        return {**receipt, "candidate_sha": git_sha}
+    except Exception as error:
+        try:
+            rollback(project_ref, admin_url)
+        except Exception as rollback_error:
+            raise RuntimeError(
+                "static build failed and the initial dashboard rollback also failed"
             ) from rollback_error
         raise error
 
@@ -395,6 +513,7 @@ def run_post_deploy_canary(
     owner_email: str,
     service_key: str,
     publishable_key: str,
+    non_owner_access_token: str | None = None,
     *,
     token_factory: Callable[..., str] = obtain_ephemeral_owner_access_token,
     source_collector: Callable[..., Mapping[str, object]] = collect_source_receipts,
@@ -407,11 +526,13 @@ def run_post_deploy_canary(
     _validate_database_url(database_url, project_ref)
     token = token_factory(project_url, owner_email, allowed_origin, service_key, publishable_key)
     try:
+        canary_arguments = {}
+        if non_owner_access_token is not None:
+            canary_arguments["non_owner_access_token"] = non_owner_access_token
         result = dict(canary(
-            api_url,
-            allowed_origin,
-            token,
+            api_url, allowed_origin, token,
             source_reader=lambda run_id: source_collector(database_url, api_url, run_id),
+            **canary_arguments,
         ))
         expected = {
             "status": "verified",
@@ -422,6 +543,8 @@ def run_post_deploy_canary(
         }
         if any(result.get(key) != value for key, value in expected.items()):
             raise RuntimeError("production canary receipt is incomplete")
+        if non_owner_access_token is not None and result.get("non_owner_status") != 403:
+            raise RuntimeError("production non-owner denial receipt is incomplete")
         return result
     finally:
         session_revoker(project_url, token, publishable_key)
@@ -434,6 +557,7 @@ def verify_initial_deployment_or_rollback(
     owner_email: str,
     service_key: str,
     publishable_key: str,
+    non_owner_access_token: str | None = None,
     *,
     verifier: Callable[..., dict[str, object]] = run_post_deploy_canary,
     rollback: Callable[..., dict[str, object]] = rollback_initial_function,
@@ -441,6 +565,7 @@ def verify_initial_deployment_or_rollback(
     try:
         return verifier(
             project_ref, allowed_origin, database_url, owner_email, service_key, publishable_key,
+            non_owner_access_token,
         )
     except Exception as error:
         try:
@@ -454,17 +579,21 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--project-ref", required=True)
     parser.add_argument("--allowed-origin", required=True)
+    parser.add_argument("--site-origin", required=True)
+    parser.add_argument("--reviewed-sha", required=True)
     arguments = parser.parse_args()
     owner_user_id = os.environ.get("DASHBOARD_OWNER_USER_ID", "").strip()
     owner_email = os.environ.get("DASHBOARD_OWNER_EMAIL", "").strip()
     service_key = os.environ.get("SUPABASE_SERVICE_ROLE_KEY", "").strip()
     publishable_key = os.environ.get("SUPABASE_PUBLISHABLE_KEY", "").strip()
+    non_owner_access_token = os.environ.get("DASHBOARD_NON_OWNER_ACCESS_TOKEN", "").strip()
     admin_url = os.environ.get("POSTGRES_URL", "").strip()
     session_template = os.environ.get("SUPAVISOR_SESSION_URL", "").strip()
-    if not admin_url or not session_template or not owner_email or not service_key or not publishable_key:
+    if not admin_url or not session_template or not owner_email or not service_key or not publishable_key or not non_owner_access_token:
         raise SystemExit(
             "POSTGRES_URL, SUPAVISOR_SESSION_URL, DASHBOARD_OWNER_EMAIL, "
-            "SUPABASE_SERVICE_ROLE_KEY, and SUPABASE_PUBLISHABLE_KEY are required"
+            "SUPABASE_SERVICE_ROLE_KEY, SUPABASE_PUBLISHABLE_KEY, and "
+            "DASHBOARD_NON_OWNER_ACCESS_TOKEN are required"
         )
 
     validate_release_database_endpoints(arguments.project_ref, admin_url, session_template)
@@ -476,11 +605,14 @@ def main() -> int:
         DASHBOARD_SECRET_NAMES,
     )
     git_sha = verify_git_release()
+    verify_reviewed_sha(git_sha, arguments.reviewed_sha)
     run_local_verification()
+    dashboard_source = verify_v1_dashboard_source()
     ensure_initial_function_absent(arguments.project_ref)
     with psycopg.connect(admin_url) as connection:
         with connection.cursor() as cursor:
             cursor.execute(MIGRATION.read_text())
+            migration_receipts = apply_release_migrations(cursor)
         database_secret = provision_dashboard_role(connection, session_template)
         role_receipt = verify_dashboard_role(connection)
     database_url = database_secret["DASHBOARD_DATABASE_URL"]
@@ -501,7 +633,11 @@ def main() -> int:
         },
         git_sha,
         admin_url,
+        deployer=deploy_changed_functions,
     )
+    receipt["candidate_sha"] = git_sha
+    receipt["migrations"] = migration_receipts
+    receipt["dashboard_source"] = dashboard_source
     receipt["configuration"] = safe_configuration
     receipt["role"] = role_receipt
     receipt["canary"] = verify_initial_deployment_or_rollback(
@@ -511,8 +647,25 @@ def main() -> int:
         owner_email,
         service_key,
         publishable_key,
+        non_owner_access_token,
         rollback=lambda project_ref: rollback_initial_deployment(project_ref, admin_url),
     )
+    receipt["static_assets"] = build_static_or_rollback(
+        arguments.project_ref,
+        arguments.site_origin,
+        git_sha,
+        admin_url,
+    )
+    try:
+        receipt["artifact_verification"] = verify_release_artifact_receipts(git_sha, receipt)
+    except Exception as error:
+        try:
+            rollback_initial_deployment(arguments.project_ref, admin_url)
+        except Exception as rollback_error:
+            raise RuntimeError(
+                "artifact verification failed and the initial dashboard rollback also failed"
+            ) from rollback_error
+        raise error
     print(json.dumps(receipt, sort_keys=True, separators=(",", ":")))
     return 0
 

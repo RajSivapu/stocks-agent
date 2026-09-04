@@ -29,10 +29,13 @@ CANARY_METHOD = "GET"
 CANARY_ROUTES = (
     "/v1/today",
     "/v1/portfolio",
+    "/v1/ideas",
     "/v1/companion",
     "/v1/alerts",
     "/v1/runs",
     "/v1/system",
+    "/v1/intelligence",
+    "/v1/reports",
 )
 BOUNDARIES = {
     "owner_only": True,
@@ -40,6 +43,8 @@ BOUNDARIES = {
     "friend_invitations": "disabled",
     "brokerage_authority": "none",
 }
+RELEASE_MIGRATION_VERSIONS = ("20260907", "20260908")
+RELEASE_FUNCTIONS = ("market-briefing-gateway", "owner-dashboard-api")
 RUNTIME_ROLE = "stock_agent_dashboard_runtime"
 UUID_PATTERN = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$", re.IGNORECASE)
 
@@ -54,6 +59,48 @@ def normalize_receipt_timestamp(value: object) -> str | None:
     if parsed.tzinfo is None:
         return None
     return parsed.astimezone(timezone.utc).isoformat(timespec="milliseconds").replace("+00:00", "Z")
+
+
+def verify_release_artifact_receipts(
+    candidate_sha: str,
+    deployment: Mapping[str, object],
+) -> dict[str, object]:
+    """Bind migrations, changed functions, and static assets to one reviewed candidate."""
+    if not re.fullmatch(r"[0-9a-f]{40}", candidate_sha):
+        raise RuntimeError("release candidate SHA receipt is malformed")
+    migrations = deployment.get("migrations")
+    functions = deployment.get("functions")
+    static = deployment.get("static_assets")
+    if not isinstance(migrations, list) or tuple(row.get("version") for row in migrations if isinstance(row, dict)) != RELEASE_MIGRATION_VERSIONS:
+        raise RuntimeError("release migration receipts are incomplete")
+    if any(not re.fullmatch(r"[0-9a-f]{64}", str(row.get("sha256", ""))) for row in migrations):
+        raise RuntimeError("release migration hash receipt is malformed")
+    if not isinstance(functions, list) or tuple(row.get("function") for row in functions if isinstance(row, dict)) != RELEASE_FUNCTIONS:
+        raise RuntimeError("changed function receipts are incomplete")
+    for row in functions:
+        if (
+            row.get("git_sha") != candidate_sha
+            or isinstance(row.get("function_version"), bool)
+            or not isinstance(row.get("function_version"), int)
+            or int(row["function_version"]) <= 0
+            or not re.fullmatch(r"[0-9a-f]{64}", str(row.get("source_sha256", "")))
+        ):
+            raise RuntimeError("changed function source receipt is incomplete")
+    if (
+        not isinstance(static, Mapping)
+        or static.get("status") != "verified"
+        or static.get("candidate_sha") != candidate_sha
+        or not isinstance(static.get("asset_hashes"), list)
+        or not static["asset_hashes"]
+    ):
+        raise RuntimeError("immutable static asset receipt is incomplete")
+    return {
+        "status": "verified",
+        "candidate_sha": candidate_sha,
+        "migration_version": ",".join(RELEASE_MIGRATION_VERSIONS),
+        "function_count": len(RELEASE_FUNCTIONS),
+        "static_asset_count": len(static["asset_hashes"]),
+    }
 
 
 def _auth_request(method: str, url: str, headers: Mapping[str, str], body: bytes | None):
@@ -463,6 +510,7 @@ def run_http_canary(
     api_url: str,
     origin: str,
     owner_access_token: str,
+    non_owner_access_token: str | None = None,
     *,
     requester: Callable[[str, str, Mapping[str, str]], tuple[int, Mapping[str, str], bytes]] = _request,
     source_reader: Callable[[str], Mapping[str, object]] | None = None,
@@ -480,6 +528,23 @@ def run_http_canary(
         raise RuntimeError("unauthenticated request was not denied")
     if denied_headers.get("access-control-allow-origin") != origin:
         raise RuntimeError("unauthenticated response CORS is not exact")
+
+    non_owner_status = None
+    if non_owner_access_token is not None:
+        non_owner_status, non_owner_headers, non_owner_body = requester(
+            CANARY_METHOD,
+            f"{api_url}/v1/meta",
+            {"origin": origin, "authorization": f"Bearer {non_owner_access_token}"},
+        )
+        non_owner_headers = {key.lower(): value for key, value in non_owner_headers.items()}
+        try:
+            non_owner = json.loads(non_owner_body)
+        except json.JSONDecodeError as error:
+            raise RuntimeError("non-owner denial body is malformed") from error
+        if non_owner_status != 403 or non_owner.get("error", {}).get("code") != "forbidden":
+            raise RuntimeError("non-owner request was not denied")
+        if non_owner_headers.get("access-control-allow-origin") != origin:
+            raise RuntimeError("non-owner response CORS is not exact")
 
     payloads = {}
     for route in CANARY_ROUTES:
@@ -537,6 +602,7 @@ def run_http_canary(
     return {
         "status": "verified",
         "unauthenticated_status": denied_status,
+        "non_owner_status": non_owner_status,
         "owner_route_count": validated["route_count"] + 1,
         "run_id_digest": hashlib.sha256(run_id.encode()).hexdigest()[:16],
         "method": CANARY_METHOD,
@@ -552,6 +618,8 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--api-url", required=True)
     parser.add_argument("--origin", required=True)
+    parser.add_argument("--candidate-sha")
+    parser.add_argument("--deployment-receipt", type=Path)
     arguments = parser.parse_args()
     token = os.environ.get("DASHBOARD_OWNER_ACCESS_TOKEN", "").strip()
     if not token:
@@ -567,12 +635,25 @@ def main() -> int:
     database_url = os.environ.get("DASHBOARD_DATABASE_URL", "").strip()
     if not database_url:
         raise SystemExit("DASHBOARD_DATABASE_URL is required")
+    non_owner_token = os.environ.get("DASHBOARD_NON_OWNER_ACCESS_TOKEN", "").strip()
+    if not non_owner_token:
+        raise SystemExit("DASHBOARD_NON_OWNER_ACCESS_TOKEN is required")
     receipt = run_http_canary(
-        arguments.api_url,
-        arguments.origin,
-        token,
+        arguments.api_url, arguments.origin, token, non_owner_token,
         source_reader=lambda run_id: collect_source_receipts(database_url, arguments.api_url, run_id),
     )
+    if bool(arguments.candidate_sha) != bool(arguments.deployment_receipt):
+        raise SystemExit("candidate SHA and deployment receipt must be supplied together")
+    if arguments.candidate_sha and arguments.deployment_receipt:
+        try:
+            deployment = json.loads(arguments.deployment_receipt.read_text())
+        except (OSError, json.JSONDecodeError) as error:
+            raise SystemExit("deployment receipt is unavailable or malformed") from error
+        if not isinstance(deployment, dict):
+            raise SystemExit("deployment receipt must be a JSON object")
+        receipt["artifact_verification"] = verify_release_artifact_receipts(
+            arguments.candidate_sha, deployment,
+        )
     print(json.dumps(receipt, sort_keys=True, separators=(",", ":")))
     return 0
 

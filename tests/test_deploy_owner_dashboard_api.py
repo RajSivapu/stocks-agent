@@ -115,6 +115,70 @@ def test_local_suite_failure_stops_deployment(tmp_path):
         deploy.run_local_verification(tmp_path, runner)
 
 
+def test_release_manifest_contains_only_new_migrations_and_changed_functions():
+    assert tuple(path.name for path in deploy.RELEASE_MIGRATIONS) == (
+        "20260907_market_intelligence.sql",
+        "20260908_owner_dashboard_intelligence_read_role.sql",
+    )
+    assert deploy.CHANGED_FUNCTIONS == ("market-briefing-gateway", "owner-dashboard-api")
+
+
+def test_release_source_refuses_the_superseded_thin_dashboard(tmp_path):
+    app = tmp_path / "apps/web/src/app/App.tsx"
+    app.parent.mkdir(parents=True)
+    app.write_text('<Route path="/portfolio" />')
+    with pytest.raises(RuntimeError, match="superseded thin dashboard"):
+        deploy.verify_v1_dashboard_source(tmp_path)
+
+    app.write_text("\n".join(f'<Route path="/{surface}" />' for surface in deploy.V1_SURFACES))
+    assert deploy.verify_v1_dashboard_source(tmp_path) == {
+        "status": "verified", "primary_surfaces": list(deploy.V1_SURFACES),
+    }
+
+
+def test_release_migrations_are_applied_in_order_with_immutable_receipts(tmp_path, monkeypatch):
+    migrations = []
+    for name in ("20260907_market_intelligence.sql", "20260908_owner_dashboard_intelligence_read_role.sql"):
+        path = tmp_path / name
+        path.write_text(f"-- {name}\nSELECT 1;\n")
+        migrations.append(path)
+    monkeypatch.setattr(deploy, "RELEASE_MIGRATIONS", tuple(migrations))
+
+    class Cursor:
+        def __init__(self):
+            self.statements = []
+
+        def execute(self, statement):
+            self.statements.append(statement)
+
+    cursor = Cursor()
+    receipt = deploy.apply_release_migrations(cursor)
+    assert cursor.statements == [path.read_text() for path in migrations]
+    assert [row["version"] for row in receipt] == ["20260907", "20260908"]
+    assert all(len(row["sha256"]) == 64 for row in receipt)
+
+
+def test_changed_function_deploy_updates_gateway_and_creates_dashboard(tmp_path):
+    commands = []
+    inventories = iter([
+        '[{"name":"market-briefing-gateway","version":17}]',
+        '[{"name":"market-briefing-gateway","version":18}]',
+        '[{"name":"market-briefing-gateway","version":18}]',
+        '[{"name":"market-briefing-gateway","version":18},{"name":"owner-dashboard-api","version":1}]',
+    ])
+
+    def runner(command, **_options):
+        commands.append(command)
+        output = next(inventories) if "list" in command else "ok"
+        return type("Result", (), {"returncode": 0, "stdout": output, "stderr": ""})()
+
+    receipt = deploy.deploy_changed_functions(PROJECT_REF, "a" * 40, tmp_path, runner)
+    assert [row["function"] for row in receipt] == list(deploy.CHANGED_FUNCTIONS)
+    deployed = [command[command.index("deploy") + 1] for command in commands if "deploy" in command]
+    assert deployed == list(deploy.CHANGED_FUNCTIONS)
+    assert "telegram-portfolio" not in str(commands)
+
+
 def test_secret_manifest_uses_a_private_file_and_never_command_arguments(tmp_path, monkeypatch):
     observed = {}
     monkeypatch.setattr(deploy.tempfile, "gettempdir", lambda: str(tmp_path))

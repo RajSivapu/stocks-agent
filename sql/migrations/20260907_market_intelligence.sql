@@ -1268,6 +1268,17 @@ BEGIN
        AND char_length(p_observation->>'benchmark')>100)
      OR jsonb_typeof(p_observation->'observation')<>'object'
      OR octet_length((p_observation->'observation')::text)>32768
+     OR (p_observation->'observation') ?| ARRAY[
+       'apply','update','activate_policy','change_weights','add_provider',
+       'mutate_holdings','mutate_plans','change_delivery'
+     ]
+     OR (
+       jsonb_typeof(p_observation->'observation'->'proposed_change')='object'
+       AND (p_observation->'observation'->'proposed_change') ?| ARRAY[
+         'operation','rpc','apply','update','activate','provider_endpoint',
+         'holding_mutation','plan_mutation','delivery_mutation'
+       ]
+     )
      OR p_observation->>'content_hash' !~ '^[0-9a-f]{64}$'
      OR p_observation->>'content_hash' <> encode(extensions.digest(convert_to(
        public.market_canonical_jsonb(p_observation->'observation'),'UTF8'

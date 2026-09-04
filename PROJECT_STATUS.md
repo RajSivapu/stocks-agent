@@ -3,7 +3,7 @@
 Last updated: 2026-09-04
 Canonical release: Personal Stock Agent V1
 Source baseline: `167ce06` on `codex/owner-alert-v3`
-Current state: subagent-driven implementation active; V1-C5 complete locally and awaiting full-suite and independent review
+Current state: V1-C5 complete locally; V1-C6 release infrastructure implemented locally and protected external gates pending
 
 This file is the version-controlled source of truth for the Personal Stock Agent V1 rollout.
 `docs/ROADMAP.md` retains historical capability and deployment detail. Notion may later mirror this
@@ -138,13 +138,28 @@ view receipt.
 
 ### V1-C6 — Independent review and protected rollout
 
+- [x] Fail-closed V1 receipt verifier and fixed local/CI release-gate wiring implemented.
+- [x] Protected scripts cover the two V1 migrations, only the changed gateway/dashboard functions,
+  reviewed-SHA source/static receipts, five dashboard surfaces, anonymous/non-owner denial, and
+  cleanup of newly introduced dashboard secrets/function/runtime login on initial failure.
 - [ ] Existing dashboard exact-head independent verdict is pending.
 - [ ] Consolidated V1 exact-head review, protected deployment, and receipt verification are pending.
 
+Task 14 release infrastructure is local-only. The canonical review and rollout records are pending
+templates and make no production claim. V1-C6 remains incomplete until exact-head CI, independent
+review, dry-run, both migration/function/static deployments, source parity, owner and denial
+canaries, rollback evidence, and the next existing scheduled receipts are all present.
+
+The consolidated local gate passed on 2026-09-04: 364 Python, 63 Node, 218 Deno, 6 dashboard
+contract, 31 web-unit, and 17 Playwright tests passed (699 total); 19 Python and one opt-in live
+Playwright check skipped. Typecheck, lint, license, production build, and bundle scan also passed.
+The first run exposed migration/schema drift in the learning authority rejection clause; the fixed
+`20260907` migration now mirrors the already-reviewed schema defense and the complete gate passed.
+
 ## Next
 
-1. Run the consolidated full suite and exact-head independent review at the release gate.
-2. Continue checkpoint by checkpoint with task-scoped review gates and status updates.
+1. Commit this local release-infrastructure checkpoint and obtain exact-head independent review.
+2. Run the protected dry-run/deployment only after exact-head CI and review pass.
 3. Preserve scheduled production capacity and inspect only scheduled receipts at their established
    times.
 
@@ -189,6 +204,9 @@ live run is requested.
   `docs/rollouts/2026-09-03-owner-alert-v3-shadow.md`.
 - Owner dashboard protected rollout is not live; pending gates and empty production receipt fields
   are recorded in `docs/rollouts/2026-09-03-owner-dashboard-web-v1.md`.
+- Consolidated V1 review and rollout gates remain empty and fail-closed in
+  `docs/reviews/2026-09-04-personal-stock-agent-v1-review.md` and
+  `docs/rollouts/2026-09-04-personal-stock-agent-v1.md`.
 - The Sep 4 intraday, post-market, and Friday audit checks remain scheduled. No duplicate live run
   will be triggered to inspect them.
 - This documentation checkpoint creates no database write, report publication, Telegram send, Site
@@ -196,5 +214,6 @@ live run is requested.
 
 ## Last Commit
 
-Task 13 started from `f2148bf` (`fix: preserve dashboard receipt state boundaries`). The Task 13
-implementation commit becomes the current Git `HEAD` after the scoped changes are committed.
+Task 14 started from `1155327` (`fix: reject mixed learning provenance`). The release-infrastructure
+checkpoint commit becomes the candidate for exact-head CI and independent review; it is not a C6
+completion or production receipt.
