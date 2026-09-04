@@ -17,15 +17,36 @@ import {
 } from "./market-calendar.ts";
 
 export type PolicyReasonCode =
-  | "INVALID_SCHEMA" | "QUOTE_MISSING" | "QUOTE_STALE" | "QUOTE_SESSION_MISMATCH"
-  | "PRICE_RELATION_INVALID" | "AMOUNT_SHARES_MISMATCH" | "CURRENT_EVIDENCE_MISSING"
-  | "ANALYST_INCOMPLETE" | "CHECKER_INCOMPLETE" | "CHECKER_DOWNGRADE" | "CHECKER_VETO"
-  | "LOW_CONFIDENCE" | "ACTION_HOLDING_MISMATCH" | "SELL_EXCEEDS_HOLDING"
-  | "POSITION_CAP_EXCEEDED" | "STOP_REQUIRED" | "TRADE_RISK_EXCEEDED"
-  | "REWARD_RISK_TOO_LOW" | "PORTFOLIO_VALUE_INCOMPLETE" | "DAILY_LOSS_LOCKOUT"
-  | "CONSECUTIVE_LOSS_LOCKOUT" | "SPECULATIVE_LEARNING_ONLY" | "OWNER_PLAN_MISMATCH"
-  | "ALERT_ALREADY_ACTIVE" | "NARRATIVE_REJECTED" | "OUTSIDE_SESSION_CONDITIONAL"
-  | "CALENDAR_COVERAGE_MISSING";
+  | "INVALID_SCHEMA"
+  | "QUOTE_MISSING"
+  | "QUOTE_STALE"
+  | "QUOTE_SESSION_MISMATCH"
+  | "PRICE_RELATION_INVALID"
+  | "AMOUNT_SHARES_MISMATCH"
+  | "CURRENT_EVIDENCE_MISSING"
+  | "ANALYST_INCOMPLETE"
+  | "CHECKER_INCOMPLETE"
+  | "CHECKER_DOWNGRADE"
+  | "CHECKER_VETO"
+  | "LOW_CONFIDENCE"
+  | "ACTION_HOLDING_MISMATCH"
+  | "SELL_EXCEEDS_HOLDING"
+  | "POSITION_CAP_EXCEEDED"
+  | "STOP_REQUIRED"
+  | "TRADE_RISK_EXCEEDED"
+  | "REWARD_RISK_TOO_LOW"
+  | "PORTFOLIO_VALUE_INCOMPLETE"
+  | "DAILY_LOSS_LOCKOUT"
+  | "CONSECUTIVE_LOSS_LOCKOUT"
+  | "SPECULATIVE_LEARNING_ONLY"
+  | "OWNER_PLAN_MISMATCH"
+  | "ALERT_ALREADY_ACTIVE"
+  | "NARRATIVE_REJECTED"
+  | "OUTSIDE_SESSION_CONDITIONAL"
+  | "CALENDAR_COVERAGE_MISSING"
+  | "EXPOSURE_EVIDENCE_MISSING"
+  | "CHECKER_COPIED"
+  | "ANALYSIS_CHAIN_INVALID";
 
 export interface PolicyEvaluation {
   evaluation_id: string;
@@ -61,15 +82,30 @@ const ACTIONABLE = new Set<Action>(["buy", "add", "reduce", "sell"]);
 const BUY_SIDE = new Set<Action>(["buy", "add"]);
 const SELL_SIDE = new Set<Action>(["reduce", "sell"]);
 const PURE_ALERTS = new Set([
-  "stop_near", "stop_breach", "target_near", "target_hit", "thesis_break",
+  "stop_near",
+  "stop_breach",
+  "target_near",
+  "target_hit",
+  "thesis_break",
 ]);
 const VETO_CODES = new Set<PolicyReasonCode>([
-  "INVALID_SCHEMA", "PRICE_RELATION_INVALID", "ACTION_HOLDING_MISMATCH",
-  "SELL_EXCEEDS_HOLDING", "CHECKER_VETO", "OWNER_PLAN_MISMATCH",
+  "INVALID_SCHEMA",
+  "PRICE_RELATION_INVALID",
+  "ACTION_HOLDING_MISMATCH",
+  "SELL_EXCEEDS_HOLDING",
+  "CHECKER_INCOMPLETE",
+  "CHECKER_VETO",
+  "CHECKER_COPIED",
+  "ANALYSIS_CHAIN_INVALID",
+  "OWNER_PLAN_MISMATCH",
 ]);
-const INFORMATIONAL_CODES = new Set<PolicyReasonCode>(["OUTSIDE_SESSION_CONDITIONAL"]);
+const INFORMATIONAL_CODES = new Set<PolicyReasonCode>([
+  "OUTSIDE_SESSION_CONDITIONAL",
+]);
 
-function alertSession(phase: DecisionCandidate["phase"]): AlertRuleSnapshot["session"] {
+function alertSession(
+  phase: DecisionCandidate["phase"],
+): AlertRuleSnapshot["session"] {
   if (phase === "pre-market") return "pre_market";
   if (phase === "post-market") return "post_market";
   return "regular";
@@ -90,44 +126,65 @@ export function draftFromEvaluation(
   newId: () => string = () => crypto.randomUUID(),
 ): AlertRuleSnapshot | null {
   const candidate = evaluation.candidate;
-  const supportedClass = (["entry_trigger", "stop_breach", "target_hit"] as AlertV3Class[])
-    .find((value) => value === candidate.notification_kind) ?? null;
-  const classEnabled = supportedClass !== null && config.alerts_v3?.enabled === true &&
+  const supportedClass =
+    (["entry_trigger", "stop_breach", "target_hit"] as AlertV3Class[])
+      .find((value) => value === candidate.notification_kind) ?? null;
+  const classEnabled = supportedClass !== null &&
+    config.alerts_v3?.enabled === true &&
     config.alerts_v3.enabled_classes.includes(supportedClass);
-  if (!config.alerts_v3 || (!config.alerts_v3.shadow && !classEnabled) ||
+  if (
+    !config.alerts_v3 || (!config.alerts_v3.shadow && !classEnabled) ||
     evaluation.status !== "approved" || evaluation.final_action === null ||
-    (candidate.notification_kind === "entry_trigger" && !BUY_SIDE.has(candidate.action)) ||
-    !evaluation.candidate.analyst.completed || !evaluation.candidate.checker.completed ||
+    (candidate.notification_kind === "entry_trigger" &&
+      !BUY_SIDE.has(candidate.action)) ||
+    !evaluation.candidate.analyst.completed ||
+    !evaluation.candidate.checker.completed ||
     evaluation.candidate.checker.verdict !== "approve" ||
     !evaluation.candidate.evidence.some((item) =>
       item.status === "fresh" && item.observed_at !== null
-    )) return null;
+    )
+  ) return null;
 
   let conditions: AlertCondition[] | null = null;
   let severity: AlertRuleSnapshot["severity"] = "review";
   let confirmation: AlertRuleSnapshot["confirmation"] = "bar_close";
-  if (candidate.notification_kind === "entry_trigger" &&
-    candidate.entry_zone_low !== null && candidate.entry_zone_high !== null) {
+  if (
+    candidate.notification_kind === "entry_trigger" &&
+    candidate.entry_zone_low !== null && candidate.entry_zone_high !== null
+  ) {
     conditions = [{
-      kind: "price_zone", operator: "inside", left: candidate.entry_zone_low,
-      right: candidate.entry_zone_high, timeframe: "quote",
+      kind: "price_zone",
+      operator: "inside",
+      left: candidate.entry_zone_low,
+      right: candidate.entry_zone_high,
+      timeframe: "quote",
     }];
     confirmation = "two_quote";
   } else if (candidate.notification_kind === "stop_breach") {
-    const holding = context.holdings.find((item) => item.ticker === candidate.ticker);
+    const holding = context.holdings.find((item) =>
+      item.ticker === candidate.ticker
+    );
     if (holding?.stop !== null && holding?.stop !== undefined) {
       conditions = [{
-        kind: "recorded_stop", operator: "below", left: holding.stop, right: null,
+        kind: "recorded_stop",
+        operator: "below",
+        left: holding.stop,
+        right: null,
         timeframe: "quote",
       }];
       severity = "critical";
       confirmation = "two_quote";
     }
   } else if (candidate.notification_kind === "target_hit") {
-    const holding = context.holdings.find((item) => item.ticker === candidate.ticker);
+    const holding = context.holdings.find((item) =>
+      item.ticker === candidate.ticker
+    );
     if (holding?.target !== null && holding?.target !== undefined) {
       conditions = [{
-        kind: "recorded_target", operator: "above", left: holding.target, right: null,
+        kind: "recorded_target",
+        operator: "above",
+        left: holding.target,
+        right: null,
         timeframe: "quote",
       }];
       severity = "update";
@@ -191,7 +248,9 @@ function deriveHoldingState(
       ? 0n
       : parseFixed(holding.high_water_price, 6);
     const stop = holding.stop === null ? null : validPositive(holding.stop, 6);
-    const target = holding.target === null ? null : validPositive(holding.target, 6);
+    const target = holding.target === null
+      ? null
+      : validPositive(holding.target, 6);
     const stopBreach = stop !== null && price <= stop;
     const stopNear = stop !== null && price >= stop &&
       (price - stop) * 10_000n < stop * BigInt(alertNearBps);
@@ -218,6 +277,7 @@ export function evaluateCandidate(
   verifiedQuote: VerifiedQuote | null,
   now: Date,
   newId: () => string = () => crypto.randomUUID(),
+  packetId: string | null = null,
 ): PolicyEvaluation {
   const reasons: PolicyReasonCode[] = [];
   const explanations: string[] = [];
@@ -228,7 +288,9 @@ export function evaluateCandidate(
     }
   };
   const marketDate = ownerLocalDate(now);
-  const holding = context.holdings.find((item) => item.ticker === candidate.ticker);
+  const holding = context.holdings.find((item) =>
+    item.ticker === candidate.ticker
+  );
   let candidateQuoteAllowed = false;
   let positionValueAfter: bigint | null = null;
   let totalInvestable: bigint | null = null;
@@ -237,24 +299,52 @@ export function evaluateCandidate(
   let schemaInvalid = false;
 
   if (marketDate.slice(0, 4) !== String(config.market_calendar_year)) {
-    add("CALENDAR_COVERAGE_MISSING", "The owner-local market date is outside the reviewed calendar year.");
+    add(
+      "CALENDAR_COVERAGE_MISSING",
+      "The owner-local market date is outside the reviewed calendar year.",
+    );
   }
   if (!verifiedQuote || verifiedQuote.ticker !== candidate.ticker) {
-    add("QUOTE_MISSING", "An independent quote for the candidate is unavailable.");
-  } else if (!(candidateQuoteAllowed = quoteAllowedForPhase(
-    candidate.phase, verifiedQuote, now, config.nyse_holidays,
-    config.max_actionable_quote_age_minutes,
-  ))) {
-    if ((candidate.phase === "intraday" || candidate.phase === "on-demand") &&
-      verifiedQuote.market_state === "REGULAR") {
-      add("QUOTE_STALE", "The regular-session quote exceeds the reviewed freshness limit.");
+    add(
+      "QUOTE_MISSING",
+      "An independent quote for the candidate is unavailable.",
+    );
+  } else if (
+    !(candidateQuoteAllowed = quoteAllowedForPhase(
+      candidate.phase,
+      verifiedQuote,
+      now,
+      config.nyse_holidays,
+      config.max_actionable_quote_age_minutes,
+    ))
+  ) {
+    if (
+      (candidate.phase === "intraday" || candidate.phase === "on-demand") &&
+      verifiedQuote.market_state === "REGULAR"
+    ) {
+      add(
+        "QUOTE_STALE",
+        "The regular-session quote exceeds the reviewed freshness limit.",
+      );
     } else {
-      add("QUOTE_SESSION_MISMATCH", "The quote does not belong to the phase's authoritative session.");
+      add(
+        "QUOTE_SESSION_MISMATCH",
+        "The quote does not belong to the phase's authoritative session.",
+      );
     }
-  } else if (candidate.phase === "on-demand" && !isRegularSession(now, config.nyse_holidays)) {
-    add("OUTSIDE_SESSION_CONDITIONAL", "Outside-session conclusions are conditional on the latest official close.");
+  } else if (
+    candidate.phase === "on-demand" &&
+    !isRegularSession(now, config.nyse_holidays)
+  ) {
+    add(
+      "OUTSIDE_SESSION_CONDITIONAL",
+      "Outside-session conclusions are conditional on the latest official close.",
+    );
     if (candidate.notification_kind === "entry_trigger") {
-      add("QUOTE_SESSION_MISMATCH", "Entry triggers require a live regular session.");
+      add(
+        "QUOTE_SESSION_MISMATCH",
+        "Entry triggers require a live regular session.",
+      );
     }
   }
   const holdingState = deriveHoldingState(
@@ -262,59 +352,160 @@ export function evaluateCandidate(
     candidateQuoteAllowed ? verifiedQuote : null,
     config.alert_near_bps,
   );
-  if (candidate.phase === "pre-market" && candidate.notification_kind === "entry_trigger") {
-    add("QUOTE_SESSION_MISMATCH", "Pre-market data cannot authorize an entry trigger.");
+  if (
+    candidate.phase === "pre-market" &&
+    candidate.notification_kind === "entry_trigger"
+  ) {
+    add(
+      "QUOTE_SESSION_MISMATCH",
+      "Pre-market data cannot authorize an entry trigger.",
+    );
   }
 
-  const hasCurrentEvidence = candidate.evidence.some((item) => item.status === "fresh" && item.observed_at !== null);
-  if ((ACTIONABLE.has(candidate.action) || candidate.prior_suggestion_ids.length > 0 || PURE_ALERTS.has(candidate.notification_kind)) &&
-    !hasCurrentEvidence) {
-    add("CURRENT_EVIDENCE_MISSING", "The candidate has no current, timestamped evidence.");
+  const hasCurrentEvidence = candidate.evidence.some((item) =>
+    item.status === "fresh" && item.observed_at !== null
+  );
+  if (
+    (ACTIONABLE.has(candidate.action) ||
+      candidate.prior_suggestion_ids.length > 0 ||
+      PURE_ALERTS.has(candidate.notification_kind)) &&
+    !hasCurrentEvidence
+  ) {
+    add(
+      "CURRENT_EVIDENCE_MISSING",
+      "The candidate has no current, timestamped evidence.",
+    );
   }
-  if (!candidate.analyst.completed || candidate.analyst.action !== candidate.action) {
-    add("ANALYST_INCOMPLETE", "The Analyst pass is incomplete or does not match the proposed action.");
+  if (
+    !candidate.analyst.completed ||
+    candidate.analyst.action !== candidate.action
+  ) {
+    add(
+      "ANALYST_INCOMPLETE",
+      "The Analyst pass is incomplete or does not match the proposed action.",
+    );
+  }
+  if (
+    candidate.relationship_type !== null &&
+    candidate.relationship_type !== undefined
+  ) {
+    if (
+      !candidate.evidence.some((item) =>
+        item.exposure_kind != null && item.status === "fresh" &&
+        item.observed_at !== null
+      )
+    ) {
+      add(
+        "EXPOSURE_EVIDENCE_MISSING",
+        "Direct and second-order candidates require approved exposure evidence.",
+      );
+    }
+    if (
+      candidate.analyst.id == null || candidate.analyst.packet_id == null ||
+      (packetId !== null && candidate.analyst.packet_id !== packetId) ||
+      candidate.checker.id == null || candidate.checker.analyst_id == null ||
+      candidate.checker.analyst_id !== candidate.analyst.id ||
+      candidate.checker.id === candidate.analyst.id ||
+      candidate.analyst.id === candidate.analyst.packet_id
+    ) {
+      add(
+        "ANALYSIS_CHAIN_INVALID",
+        "The packet, Analyst, and Checker receipt chain is incomplete.",
+      );
+    }
   }
   if (!candidate.checker.completed) {
     add("CHECKER_INCOMPLETE", "The independent Checker pass is incomplete.");
+  } else if (
+    candidate.checker.reason.trim().toLocaleLowerCase() ===
+      candidate.analyst.reason.trim().toLocaleLowerCase()
+  ) {
+    add("CHECKER_COPIED", "The Checker record duplicates the Analyst record.");
   } else if (candidate.checker.verdict === "downgrade") {
     add("CHECKER_DOWNGRADE", "The Checker downgraded the proposal.");
   } else if (candidate.checker.verdict === "veto") {
     add("CHECKER_VETO", "The Checker vetoed the proposal.");
   }
   if (BUY_SIDE.has(candidate.action) && candidate.confidence === "low") {
-    add("LOW_CONFIDENCE", "Buy-side actions require at least medium confidence.");
+    add(
+      "LOW_CONFIDENCE",
+      "Buy-side actions require at least medium confidence.",
+    );
   }
 
-  if ((candidate.action === "buy" && holding) ||
-    ((candidate.action === "add" || SELL_SIDE.has(candidate.action)) && !holding) ||
-    (candidate.action === "add" && holding?.bucket !== candidate.bucket)) {
-    add("ACTION_HOLDING_MISMATCH", "The action does not match authoritative ownership state.");
+  if (
+    (candidate.action === "buy" && holding) ||
+    ((candidate.action === "add" || SELL_SIDE.has(candidate.action)) &&
+      !holding) ||
+    (candidate.action === "add" && holding?.bucket !== candidate.bucket)
+  ) {
+    add(
+      "ACTION_HOLDING_MISMATCH",
+      "The action does not match authoritative ownership state.",
+    );
   }
 
   const isPureAlert = PURE_ALERTS.has(candidate.notification_kind);
   try {
-    const amount = candidate.proposed_amount === null ? null : validPositive(candidate.proposed_amount, 6);
-    const shares = candidate.proposed_shares === null ? null : validPositive(candidate.proposed_shares, 8);
-    if (BUY_SIDE.has(candidate.action) && !isPureAlert && (amount === null || shares === null)) {
-      add("AMOUNT_SHARES_MISMATCH", "Buy-side proposals require positive amount and share values.");
+    const amount = candidate.proposed_amount === null
+      ? null
+      : validPositive(candidate.proposed_amount, 6);
+    const shares = candidate.proposed_shares === null
+      ? null
+      : validPositive(candidate.proposed_shares, 8);
+    if (
+      BUY_SIDE.has(candidate.action) && !isPureAlert &&
+      (amount === null || shares === null)
+    ) {
+      add(
+        "AMOUNT_SHARES_MISMATCH",
+        "Buy-side proposals require positive amount and share values.",
+      );
     }
-    if (SELL_SIDE.has(candidate.action) && !isPureAlert && (candidate.proposed_amount !== null || shares === null)) {
-      add("AMOUNT_SHARES_MISMATCH", "Sell-side proposals require shares and forbid a proposed amount.");
+    if (
+      SELL_SIDE.has(candidate.action) && !isPureAlert &&
+      (candidate.proposed_amount !== null || shares === null)
+    ) {
+      add(
+        "AMOUNT_SHARES_MISMATCH",
+        "Sell-side proposals require shares and forbid a proposed amount.",
+      );
     }
-    if ((!ACTIONABLE.has(candidate.action) || isPureAlert) &&
-      (candidate.proposed_amount !== null || candidate.proposed_shares !== null)) {
-      add("INVALID_SCHEMA", "This action or alert cannot carry trade sizing fields.");
+    if (
+      (!ACTIONABLE.has(candidate.action) || isPureAlert) &&
+      (candidate.proposed_amount !== null || candidate.proposed_shares !== null)
+    ) {
+      add(
+        "INVALID_SCHEMA",
+        "This action or alert cannot carry trade sizing fields.",
+      );
       schemaInvalid = true;
     }
-    if (candidate.action === "sell" && holding && shares !== null &&
-      shares > parseFixed(holding.shares, 8)) {
-      add("SELL_EXCEEDS_HOLDING", "Sell shares exceed the authoritative holding.");
+    if (
+      candidate.action === "sell" && holding && shares !== null &&
+      shares > parseFixed(holding.shares, 8)
+    ) {
+      add(
+        "SELL_EXCEEDS_HOLDING",
+        "Sell shares exceed the authoritative holding.",
+      );
     }
-    if (BUY_SIDE.has(candidate.action) && amount !== null && shares !== null && verifiedQuote) {
-      const calculated = money(parseFixed(verifiedQuote.price, 6), candidate.proposed_shares!);
-      const difference = calculated > amount ? calculated - amount : amount - calculated;
+    if (
+      BUY_SIDE.has(candidate.action) && amount !== null && shares !== null &&
+      verifiedQuote
+    ) {
+      const calculated = money(
+        parseFixed(verifiedQuote.price, 6),
+        candidate.proposed_shares!,
+      );
+      const difference = calculated > amount
+        ? calculated - amount
+        : amount - calculated;
       if (difference > 10_000n) {
-        add("AMOUNT_SHARES_MISMATCH", "Amount and shares differ by more than one cent at the verified quote.");
+        add(
+          "AMOUNT_SHARES_MISMATCH",
+          "Amount and shares differ by more than one cent at the verified quote.",
+        );
       }
     }
   } catch {
@@ -324,46 +515,73 @@ export function evaluateCandidate(
 
   let ownerPlanMatched = false;
   if (candidate.decision_mode === "owner_plan") {
-    const plans = context.owner_plans.filter((plan) => plan.active && plan.ticker === candidate.ticker);
+    const plans = context.owner_plans.filter((plan) =>
+      plan.active && plan.ticker === candidate.ticker
+    );
     try {
       const plan = plans.length === 1 ? plans[0] : undefined;
       const expectedAction = holding ? "add" : "buy";
-      ownerPlanMatched = Boolean(plan && plan.cadence === "monthly" && plan.bucket === "core" &&
-        candidate.bucket === "core" && candidate.action === expectedAction &&
-        config.broad_core_etfs.includes(candidate.ticker) && marketDate >= plan.next_due_on &&
-        candidate.proposed_amount !== null &&
-        parseFixed(candidate.proposed_amount, 6) === parseFixed(plan.amount, 6));
+      ownerPlanMatched = Boolean(
+        plan && plan.cadence === "monthly" && plan.bucket === "core" &&
+          candidate.bucket === "core" && candidate.action === expectedAction &&
+          config.broad_core_etfs.includes(candidate.ticker) &&
+          marketDate >= plan.next_due_on &&
+          candidate.proposed_amount !== null &&
+          parseFixed(candidate.proposed_amount, 6) ===
+            parseFixed(plan.amount, 6),
+      );
     } catch {
       ownerPlanMatched = false;
     }
-    if (!ownerPlanMatched) add("OWNER_PLAN_MISMATCH", "The proposal does not match one unique due owner plan.");
+    if (!ownerPlanMatched) {
+      add(
+        "OWNER_PLAN_MISMATCH",
+        "The proposal does not match one unique due owner plan.",
+      );
+    }
   }
 
   let entryHigh: bigint | null = null;
   let candidateStop: bigint | null = null;
   let candidateTarget: bigint | null = null;
   if (BUY_SIDE.has(candidate.action) && !ownerPlanMatched) {
-    if (candidate.entry_zone_low === null || candidate.entry_zone_high === null ||
-      candidate.stop === null || candidate.target === null) {
-      add("STOP_REQUIRED", "Discretionary Buy/Add requires entry, stop, and target levels.");
+    if (
+      candidate.entry_zone_low === null || candidate.entry_zone_high === null ||
+      candidate.stop === null || candidate.target === null
+    ) {
+      add(
+        "STOP_REQUIRED",
+        "Discretionary Buy/Add requires entry, stop, and target levels.",
+      );
     } else {
       try {
         const low = validPositive(candidate.entry_zone_low, 6);
         entryHigh = validPositive(candidate.entry_zone_high, 6);
         candidateStop = validPositive(candidate.stop, 6);
         candidateTarget = validPositive(candidate.target, 6);
-        if (low === null || entryHigh === null || candidateStop === null || candidateTarget === null ||
-          !(candidateStop < low && low <= entryHigh && entryHigh < candidateTarget)) {
-          add("PRICE_RELATION_INVALID", "Required long levels must satisfy stop < low <= high < target.");
+        if (
+          low === null || entryHigh === null || candidateStop === null ||
+          candidateTarget === null ||
+          !(candidateStop < low && low <= entryHigh &&
+            entryHigh < candidateTarget)
+        ) {
+          add(
+            "PRICE_RELATION_INVALID",
+            "Required long levels must satisfy stop < low <= high < target.",
+          );
         }
       } catch {
-        add("PRICE_RELATION_INVALID", "Required long price levels are invalid.");
+        add(
+          "PRICE_RELATION_INVALID",
+          "Required long price levels are invalid.",
+        );
       }
     }
   }
 
   if (BUY_SIDE.has(candidate.action)) {
-    let portfolioComplete = context.portfolio_command_coverage_complete && context.realized_pnl_today !== null;
+    let portfolioComplete = context.portfolio_command_coverage_complete &&
+      context.realized_pnl_today !== null;
     let holdingsValue = 0n;
     const holdingValues = new Map<string, bigint>();
     for (const item of context.holdings) {
@@ -371,8 +589,16 @@ export function evaluateCandidate(
         ? verifiedQuote
         : context.holding_quotes[item.ticker];
       try {
-        if (!itemQuote || itemQuote.ticker !== item.ticker ||
-          !quoteAllowedForPhase(candidate.phase, itemQuote, now, config.nyse_holidays, config.max_actionable_quote_age_minutes)) {
+        if (
+          !itemQuote || itemQuote.ticker !== item.ticker ||
+          !quoteAllowedForPhase(
+            candidate.phase,
+            itemQuote,
+            now,
+            config.nyse_holidays,
+            config.max_actionable_quote_age_minutes,
+          )
+        ) {
           portfolioComplete = false;
           continue;
         }
@@ -384,107 +610,209 @@ export function evaluateCandidate(
       }
     }
     if (!portfolioComplete) {
-      add("PORTFOLIO_VALUE_INCOMPLETE", "Portfolio value or realized-loss coverage is incomplete.");
+      add(
+        "PORTFOLIO_VALUE_INCOMPLETE",
+        "Portfolio value or realized-loss coverage is incomplete.",
+      );
     } else {
       try {
-        totalInvestable = holdingsValue + BigInt(config.monthly_investment_micros);
-        const bucketBudget = totalInvestable * BigInt(config.allocation_bps[candidate.bucket]) / 10_000n;
-        const positionCap = bucketBudget * BigInt(config.max_position_bps_of_bucket[candidate.bucket]) / 10_000n;
+        totalInvestable = holdingsValue +
+          BigInt(config.monthly_investment_micros);
+        const bucketBudget = totalInvestable *
+          BigInt(config.allocation_bps[candidate.bucket]) / 10_000n;
+        const positionCap = bucketBudget *
+          BigInt(config.max_position_bps_of_bucket[candidate.bucket]) / 10_000n;
         const quotePrice = parseFixed(verifiedQuote!.price, 6);
-        const sizingPrice = entryHigh === null ? quotePrice : max(quotePrice, entryHigh);
+        const sizingPrice = entryHigh === null
+          ? quotePrice
+          : max(quotePrice, entryHigh);
         const newTradeValue = money(sizingPrice, candidate.proposed_shares!);
-        positionValueAfter = (holdingValues.get(candidate.ticker) ?? 0n) + newTradeValue;
+        positionValueAfter = (holdingValues.get(candidate.ticker) ?? 0n) +
+          newTradeValue;
         if (positionValueAfter > positionCap) {
-          add("POSITION_CAP_EXCEEDED", "The resulting position exceeds the reviewed bucket cap.");
+          add(
+            "POSITION_CAP_EXCEEDED",
+            "The resulting position exceeds the reviewed bucket cap.",
+          );
         }
-        if (!ownerPlanMatched && entryHigh !== null && candidateStop !== null && candidateTarget !== null) {
+        if (
+          !ownerPlanMatched && entryHigh !== null && candidateStop !== null &&
+          candidateTarget !== null
+        ) {
           let existingRisk = 0n;
           if (candidate.action === "add" && holding) {
-            const recordedStop = holding.stop === null ? null : validPositive(holding.stop, 6);
+            const recordedStop = holding.stop === null
+              ? null
+              : validPositive(holding.stop, 6);
             if (recordedStop === null) {
-              add("STOP_REQUIRED", "An Add requires a positive recorded holding stop.");
+              add(
+                "STOP_REQUIRED",
+                "An Add requires a positive recorded holding stop.",
+              );
             } else {
               const average = parseFixed(holding.avg_cost, 6);
-              existingRisk = money(average > recordedStop ? average - recordedStop : 0n, holding.shares);
+              existingRisk = money(
+                average > recordedStop ? average - recordedStop : 0n,
+                holding.shares,
+              );
             }
           }
-          const newRisk = money(entryHigh - candidateStop, candidate.proposed_shares!);
+          const newRisk = money(
+            entryHigh - candidateStop,
+            candidate.proposed_shares!,
+          );
           dollarsAtRisk = existingRisk + newRisk;
-          if (dollarsAtRisk * 10_000n > totalInvestable * BigInt(config.max_trade_risk_bps[candidate.bucket])) {
-            add("TRADE_RISK_EXCEEDED", "Conservative dollars at risk exceed the reviewed portfolio limit.");
+          if (
+            dollarsAtRisk * 10_000n >
+              totalInvestable *
+                BigInt(config.max_trade_risk_bps[candidate.bucket])
+          ) {
+            add(
+              "TRADE_RISK_EXCEEDED",
+              "Conservative dollars at risk exceed the reviewed portfolio limit.",
+            );
           }
-          rewardRiskMilli = (candidateTarget - entryHigh) * 1_000n / (entryHigh - candidateStop);
+          rewardRiskMilli = (candidateTarget - entryHigh) * 1_000n /
+            (entryHigh - candidateStop);
           if (rewardRiskMilli < BigInt(config.min_reward_risk_milli)) {
-            add("REWARD_RISK_TOO_LOW", "Reward-to-risk is below the reviewed minimum.");
+            add(
+              "REWARD_RISK_TOO_LOW",
+              "Reward-to-risk is below the reviewed minimum.",
+            );
           }
         }
         if (context.realized_pnl_today !== null) {
           const pnl = signedFixed(context.realized_pnl_today, 6);
-          if (pnl < 0n && -pnl * 10_000n >= totalInvestable * BigInt(config.daily_loss_limit_bps)) {
-            add("DAILY_LOSS_LOCKOUT", "The confirmed daily loss limit is active.");
+          if (
+            pnl < 0n &&
+            -pnl * 10_000n >=
+              totalInvestable * BigInt(config.daily_loss_limit_bps)
+          ) {
+            add(
+              "DAILY_LOSS_LOCKOUT",
+              "The confirmed daily loss limit is active.",
+            );
           }
         }
         if (candidate.bucket === "speculative") {
           let speculativeValue = 0n;
           for (const item of context.holdings) {
-            if (item.bucket === "speculative") speculativeValue += holdingValues.get(item.ticker) ?? 0n;
+            if (item.bucket === "speculative") {
+              speculativeValue += holdingValues.get(item.ticker) ?? 0n;
+            }
           }
-          if (speculativeValue < BigInt(config.speculative_go_live_bucket_micros)) {
-            add("SPECULATIVE_LEARNING_ONLY", "The speculative bucket remains paper-only.");
+          if (
+            speculativeValue < BigInt(config.speculative_go_live_bucket_micros)
+          ) {
+            add(
+              "SPECULATIVE_LEARNING_ONLY",
+              "The speculative bucket remains paper-only.",
+            );
           }
         }
       } catch {
-        add("PORTFOLIO_VALUE_INCOMPLETE", "Required portfolio arithmetic could not be completed.");
+        add(
+          "PORTFOLIO_VALUE_INCOMPLETE",
+          "Required portfolio arithmetic could not be completed.",
+        );
       }
     }
-    if (context.consecutive_completed_losses >= config.circuit_breaker_consecutive_losses) {
-      add("CONSECUTIVE_LOSS_LOCKOUT", "The confirmed-loss circuit breaker is active.");
+    if (
+      context.consecutive_completed_losses >=
+        config.circuit_breaker_consecutive_losses
+    ) {
+      add(
+        "CONSECUTIVE_LOSS_LOCKOUT",
+        "The confirmed-loss circuit breaker is active.",
+      );
     }
   }
 
   let alertSuppressed = false;
   if (PURE_ALERTS.has(candidate.notification_kind)) {
-    if (!holding || !holdingState || !verifiedQuote || reasons.includes("QUOTE_STALE") ||
-      reasons.includes("QUOTE_MISSING") || reasons.includes("QUOTE_SESSION_MISMATCH")) {
-      add("ACTION_HOLDING_MISMATCH", "A holding alert requires a holding and authoritative quote.");
+    if (
+      !holding || !holdingState || !verifiedQuote ||
+      reasons.includes("QUOTE_STALE") ||
+      reasons.includes("QUOTE_MISSING") ||
+      reasons.includes("QUOTE_SESSION_MISMATCH")
+    ) {
+      add(
+        "ACTION_HOLDING_MISMATCH",
+        "A holding alert requires a holding and authoritative quote.",
+      );
       alertSuppressed = true;
     } else {
       const flags = {
-        stop_near: [holding.stop, holdingState.stop_near_alert_active, holding.stop_near_alert_active],
-        stop_breach: [holding.stop, holdingState.stop_alert_active, holding.stop_alert_active],
-        target_near: [holding.target, holdingState.target_near_alert_active, holding.target_near_alert_active],
-        target_hit: [holding.target, holdingState.target_alert_active, holding.target_alert_active],
+        stop_near: [
+          holding.stop,
+          holdingState.stop_near_alert_active,
+          holding.stop_near_alert_active,
+        ],
+        stop_breach: [
+          holding.stop,
+          holdingState.stop_alert_active,
+          holding.stop_alert_active,
+        ],
+        target_near: [
+          holding.target,
+          holdingState.target_near_alert_active,
+          holding.target_near_alert_active,
+        ],
+        target_hit: [
+          holding.target,
+          holdingState.target_alert_active,
+          holding.target_alert_active,
+        ],
       } as const;
       if (candidate.notification_kind === "thesis_break") {
         const independentlyEvidenced = candidate.evidence.some((item) =>
-          item.status === "fresh" && ["fundamentals", "news", "event"].includes(item.kind)
+          item.status === "fresh" &&
+          ["fundamentals", "news", "event"].includes(item.kind)
         );
         if (!independentlyEvidenced) {
-          add("CURRENT_EVIDENCE_MISSING", "Thesis breaks require fresh non-price evidence.");
+          add(
+            "CURRENT_EVIDENCE_MISSING",
+            "Thesis breaks require fresh non-price evidence.",
+          );
           alertSuppressed = true;
         }
       } else {
-        const mechanicalKind = candidate.notification_kind as keyof typeof flags;
+        const mechanicalKind = candidate
+          .notification_kind as keyof typeof flags;
         const [threshold, condition, active] = flags[mechanicalKind];
         if (threshold === null || !condition) {
-          add("PRICE_RELATION_INVALID", "The authoritative alert threshold has not fired.");
+          add(
+            "PRICE_RELATION_INVALID",
+            "The authoritative alert threshold has not fired.",
+          );
           alertSuppressed = true;
         } else if (active) {
           add("ALERT_ALREADY_ACTIVE", "This alert edge is already active.");
           alertSuppressed = true;
         }
-        if ((candidate.notification_kind === "stop_near" || candidate.notification_kind === "stop_breach") &&
-          holding.hold_override_until !== null && holding.hold_override_until >= marketDate) {
-          add("ALERT_ALREADY_ACTIVE", "The owner's unexpired hold override suppresses mechanical stop alerts.");
+        if (
+          (candidate.notification_kind === "stop_near" ||
+            candidate.notification_kind === "stop_breach") &&
+          holding.hold_override_until !== null &&
+          holding.hold_override_until >= marketDate
+        ) {
+          add(
+            "ALERT_ALREADY_ACTIVE",
+            "The owner's unexpired hold override suppresses mechanical stop alerts.",
+          );
           alertSuppressed = true;
         }
       }
     }
   }
 
-  const blockingReasons = reasons.filter((reason) => !INFORMATIONAL_CODES.has(reason));
-  const vetoed = schemaInvalid || blockingReasons.some((reason) => VETO_CODES.has(reason)) ||
-    (candidate.notification_kind === "entry_trigger" && reasons.includes("QUOTE_SESSION_MISMATCH"));
+  const blockingReasons = reasons.filter((reason) =>
+    !INFORMATIONAL_CODES.has(reason)
+  );
+  const vetoed = schemaInvalid ||
+    blockingReasons.some((reason) => VETO_CODES.has(reason)) ||
+    (candidate.notification_kind === "entry_trigger" &&
+      reasons.includes("QUOTE_SESSION_MISMATCH"));
   let finalAction: Action | null = candidate.action;
   if (vetoed) {
     finalAction = null;
@@ -496,7 +824,9 @@ export function evaluateCandidate(
   }
   const status = finalAction === null
     ? "vetoed"
-    : (finalAction !== candidate.action || blockingReasons.length > 0 ? "downgraded" : "approved");
+    : (finalAction !== candidate.action || blockingReasons.length > 0
+      ? "downgraded"
+      : "approved");
 
   return {
     evaluation_id: newId(),
@@ -512,10 +842,18 @@ export function evaluateCandidate(
       quote_as_of: verifiedQuote?.as_of ?? "",
       quote_source: verifiedQuote?.source ?? "",
       quote_market_state: verifiedQuote?.market_state ?? "",
-      position_value_after: positionValueAfter === null ? null : formatFixed(positionValueAfter, 6),
-      total_investable_value: totalInvestable === null ? null : formatFixed(totalInvestable, 6),
-      dollars_at_risk: dollarsAtRisk === null ? null : formatFixed(dollarsAtRisk, 6),
-      reward_risk_milli: rewardRiskMilli === null ? null : rewardRiskMilli.toString(),
+      position_value_after: positionValueAfter === null
+        ? null
+        : formatFixed(positionValueAfter, 6),
+      total_investable_value: totalInvestable === null
+        ? null
+        : formatFixed(totalInvestable, 6),
+      dollars_at_risk: dollarsAtRisk === null
+        ? null
+        : formatFixed(dollarsAtRisk, 6),
+      reward_risk_milli: rewardRiskMilli === null
+        ? null
+        : rewardRiskMilli.toString(),
     },
     holding_state_change: holdingState,
     candidate,

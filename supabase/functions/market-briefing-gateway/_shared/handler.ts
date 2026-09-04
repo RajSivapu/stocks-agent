@@ -4,12 +4,14 @@ import {
   type AlertRuleSnapshot,
   type AlertV3Class,
   type ArtifactMutation,
+  type EvidencePacket,
   type GatewayEnvelope,
   parseArtifactMutationBatch,
   parseDecisionBundle,
   parseGatewayEnvelope,
   type Phase,
   type PolicyContext,
+  validatePacketEvidence,
   type VerifiedQuote,
 } from "./contracts.ts";
 import { isFirstNyseSessionOfMonth, isNyseHoliday } from "./market-calendar.ts";
@@ -64,7 +66,9 @@ import {
   TelegramDeliveryError,
 } from "./telegram.ts";
 import {
+  canonicalJson,
   type RecordIntelligencePayload,
+  sha256Hex,
   type StartIntelligencePayload,
   summarizeIntelligencePayload,
 } from "./intelligence.ts";
@@ -265,6 +269,11 @@ function errorStatus(code: string): number {
   if (code === "POLICY_REJECTED" || code === "CALENDAR_COVERAGE_MISSING") {
     return 409;
   }
+  if (
+    code === "INTELLIGENCE_PACKET_MISMATCH" ||
+    code === "INTELLIGENCE_PACKET_INVALID" ||
+    code === "EVIDENCE_NOT_IN_PACKET"
+  ) return 409;
   return 500;
 }
 
@@ -1322,10 +1331,14 @@ async function evaluateAndPublish(
   leaseToken: string | null,
   deps: ResolvedDependencies,
 ): Promise<Response> {
+  const packet = await resolveIntelligencePacket(envelope, bundle, deps);
   const [context, activePolicy] = await Promise.all([
     deps.repository.readContext(envelope.run_id),
     deps.repository.activePolicy(),
   ]);
+  if (packet !== null && packet.policy_version !== activePolicy.version) {
+    throw new GatewayRepositoryError("INTELLIGENCE_PACKET_MISMATCH");
+  }
   if (
     bundle.companion_proposal && bundle.phase === "pre-market" &&
     !isFirstNyseSessionOfMonth(
@@ -1363,6 +1376,7 @@ async function evaluateAndPublish(
       quotes.get(candidate.ticker) ?? null,
       deps.now(),
       deps.newId,
+      bundle.intelligence_packet?.id ?? null,
     )
   );
   const comparisons = await buildPortfolioComparisons(
@@ -1554,6 +1568,61 @@ async function evaluateAndPublish(
     result,
   );
   return response(200, result);
+}
+
+async function resolveIntelligencePacket(
+  envelope: GatewayEnvelope,
+  bundle: ReturnType<typeof parseDecisionBundle>,
+  deps: ResolvedDependencies,
+): Promise<EvidencePacket | null> {
+  const reference = bundle.intelligence_packet;
+  const scheduled = bundle.phase !== "on-demand";
+  if (!reference) {
+    if (scheduled) {
+      throw new GatewayRepositoryError("INTELLIGENCE_PACKET_INVALID");
+    }
+    return null;
+  }
+  if (
+    bundle.candidates.length > 12 ||
+    bundle.candidates.some((candidate) => candidate.evidence.length > 8)
+  ) {
+    throw new GatewayRepositoryError("INTELLIGENCE_PACKET_INVALID");
+  }
+
+  let packet: EvidencePacket;
+  if (reference.packet) {
+    if (!envelope.dry_run || reference.coverage !== "fixture_dry_run") {
+      throw new GatewayRepositoryError("INTELLIGENCE_PACKET_INVALID");
+    }
+    packet = reference.packet;
+  } else {
+    if (envelope.dry_run || reference.coverage === "fixture_dry_run") {
+      throw new GatewayRepositoryError("INTELLIGENCE_PACKET_INVALID");
+    }
+    const persisted = await deps.repository.loadIntelligencePacket(
+      reference.id,
+      requireRun(envelope),
+    );
+    if (
+      persisted.id !== reference.id ||
+      persisted.run_id !== requireRun(envelope) ||
+      persisted.content_hash !== reference.content_hash
+    ) {
+      throw new GatewayRepositoryError("INTELLIGENCE_PACKET_MISMATCH");
+    }
+    packet = persisted.packet;
+  }
+
+  if (sha256Hex(canonicalJson(packet)) !== reference.content_hash) {
+    throw new GatewayRepositoryError("INTELLIGENCE_PACKET_MISMATCH");
+  }
+  for (const candidate of bundle.candidates) {
+    if (validatePacketEvidence(candidate, packet).length > 0) {
+      throw new GatewayRepositoryError("EVIDENCE_NOT_IN_PACKET");
+    }
+  }
+  return packet;
 }
 
 async function buildPortfolioComparisons(

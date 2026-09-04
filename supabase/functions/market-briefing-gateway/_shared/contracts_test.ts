@@ -59,6 +59,7 @@ function validCandidate(ticker = "CENX", phase: Phase = "on-demand") {
       retrieved_at: "2026-09-02T17:00:01.000Z",
       reference: "https://example.invalid/untrusted",
       claims: ["Price observed at 47.02."],
+      exposure_kind: "filing",
     }],
     factors: [{
       kind: "risk",
@@ -67,20 +68,38 @@ function validCandidate(ticker = "CENX", phase: Phase = "on-demand") {
       evidence_ids: ["quote-1"],
     }],
     analyst: {
+      id: "00000000-0000-4000-8000-000000000020",
+      packet_id: "00000000-0000-4000-8000-000000000030",
       completed: true,
       action: "buy",
       confidence: "medium",
       reason: "Valuation and demand support the thesis.",
     },
     checker: {
+      id: "00000000-0000-4000-8000-000000000021",
+      analyst_id: "00000000-0000-4000-8000-000000000020",
       completed: true,
       verdict: "approve",
       reason_codes: [],
       reason: "Required evidence is present.",
     },
+    relationship_type: "direct",
     decisive_factor: "Demand durability.",
     invalidation: "Demand or margins weaken materially.",
     prior_suggestion_ids: [],
+  };
+}
+
+function fixturePacket() {
+  return {
+    candidates: [{ candidate_key: "CENX", evidence_ids: ["quote-1"] }],
+    evidence: [{
+      item_id: "quote-1",
+      normalized_text: "Price observed at 47.02.",
+    }],
+    coverage: { mode: "fixture_dry_run", complete_market_coverage: false },
+    limitations: ["fixture_only_no_external_coverage"],
+    policy_version: 1,
   };
 }
 
@@ -111,6 +130,56 @@ Deno.test("gateway envelope accepts one complete decision bundle", () => {
     parseDecisionBundle(parsed.payload, "on-demand").candidates[0].ticker,
     "CENX",
   );
+});
+
+Deno.test("decision bundle parses an exact intelligence packet reference and bounded fixture", () => {
+  const live = Object.assign(validBundle("intraday"), {
+    intelligence_packet: {
+      id: "00000000-0000-4000-8000-000000000030",
+      content_hash: "a".repeat(64),
+      coverage: "complete_for_plan",
+    },
+  });
+  assertEquals(
+    parseDecisionBundle(live, "intraday").intelligence_packet!.coverage,
+    "complete_for_plan",
+  );
+
+  const dry = Object.assign(validBundle("intraday"), {
+    intelligence_packet: {
+      id: "00000000-0000-4000-8000-000000000030",
+      content_hash: "a".repeat(64),
+      coverage: "fixture_dry_run",
+      packet: fixturePacket(),
+    },
+  });
+  assertEquals(
+    parseDecisionBundle(dry, "intraday").intelligence_packet!.packet?.candidates
+      .length,
+    1,
+  );
+});
+
+Deno.test("inline intelligence packet enforces candidate, evidence, and byte bounds", () => {
+  const bundle = Object.assign(validBundle("intraday"), {
+    intelligence_packet: {
+      id: "00000000-0000-4000-8000-000000000030",
+      content_hash: "a".repeat(64),
+      coverage: "fixture_dry_run",
+      packet: fixturePacket(),
+    },
+  });
+  bundle.intelligence_packet.packet.candidates[0].evidence_ids = Array.from({
+    length: 9,
+  }, (_, index) => `e-${index}`);
+  assertThrows(() => parseDecisionBundle(bundle, "intraday"), "at most 8");
+
+  const oversized = structuredClone(bundle);
+  oversized.intelligence_packet.packet.candidates[0].evidence_ids = ["quote-1"];
+  (oversized.intelligence_packet.packet as {
+    coverage: Record<string, unknown>;
+  }).coverage = { padding: "x".repeat(98_304) };
+  assertThrows(() => parseDecisionBundle(oversized, "intraday"), "96 KiB");
 });
 
 Deno.test("gateway envelope accepts the bounded standalone alert evaluation operation", () => {

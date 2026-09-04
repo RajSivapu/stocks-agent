@@ -46,6 +46,13 @@ export type EvidenceStatus =
   | "failed"
   | "conflicting"
   | "unsupported";
+export type ExposureKind =
+  | "filing"
+  | "contract"
+  | "backlog"
+  | "revenue"
+  | "capacity"
+  | "official_fund";
 export type PolicyStatus =
   | "approved"
   | "downgraded"
@@ -181,6 +188,22 @@ export interface EvidenceBlock {
   retrieved_at: string;
   reference: string | null;
   claims: string[];
+  exposure_kind?: ExposureKind | null;
+}
+
+export interface EvidencePacket {
+  candidates: Array<{ candidate_key: string; evidence_ids: string[] }>;
+  evidence: Array<{ item_id: string; normalized_text: string }>;
+  coverage: Record<string, unknown>;
+  limitations: string[];
+  policy_version: number;
+}
+
+export interface IntelligencePacketRef {
+  id: string;
+  content_hash: string;
+  coverage: "complete_for_plan" | "partial" | "fixture_dry_run";
+  packet?: EvidencePacket;
 }
 
 export interface DecisionCandidate {
@@ -206,6 +229,7 @@ export interface DecisionCandidate {
   invalidation_price: string | null;
   valid_until: string | null;
   evidence: EvidenceBlock[];
+  relationship_type?: "direct" | "second_order" | null;
   factors: Array<{
     kind:
       | "fundamentals"
@@ -221,12 +245,16 @@ export interface DecisionCandidate {
     evidence_ids: string[];
   }>;
   analyst: {
+    id?: string | null;
+    packet_id?: string | null;
     completed: boolean;
     action: Action;
     confidence: Confidence;
     reason: string;
   };
   checker: {
+    id?: string | null;
+    analyst_id?: string | null;
     completed: boolean;
     verdict: "approve" | "downgrade" | "veto";
     reason_codes: string[];
@@ -242,6 +270,7 @@ export interface DecisionBundle {
   market_date: string;
   title: string;
   candidates: DecisionCandidate[];
+  intelligence_packet?: IntelligencePacketRef;
   comparisons?: PortfolioAlternativeRequest[];
   companion_proposal?: LongTermCompanionRequest;
 }
@@ -537,6 +566,14 @@ const EVIDENCE_KINDS = [
   "macro",
   "sector",
 ] as const;
+const EXPOSURE_KINDS = [
+  "filing",
+  "contract",
+  "backlog",
+  "revenue",
+  "capacity",
+  "official_fund",
+] as const;
 const FACTOR_KINDS = [
   "fundamentals",
   "valuation",
@@ -774,6 +811,7 @@ export function parseGatewayEnvelope(value: unknown): GatewayEnvelope {
 
 function parseEvidence(value: unknown, path: string): EvidenceBlock {
   const row = objectValue(value, path);
+  const hasExposureKind = Object.hasOwn(row, "exposure_kind");
   exactKeys(
     row,
     [
@@ -785,6 +823,7 @@ function parseEvidence(value: unknown, path: string): EvidenceBlock {
       "retrieved_at",
       "reference",
       "claims",
+      ...(hasExposureKind ? ["exposure_kind"] : []),
     ],
     path,
   );
@@ -799,6 +838,9 @@ function parseEvidence(value: unknown, path: string): EvidenceBlock {
     claims: arrayValue(row.claims, `${path}.claims`, 10).map((claim, index) =>
       stringValue(claim, `${path}.claims[${index}]`, 500)
     ),
+    exposure_kind: !hasExposureKind || row.exposure_kind === null
+      ? null
+      : enumValue(row.exposure_kind, EXPOSURE_KINDS, `${path}.exposure_kind`),
   };
 }
 
@@ -808,6 +850,7 @@ function parseCandidate(
   path: string,
 ): DecisionCandidate {
   const row = objectValue(value, path);
+  const hasRelationshipType = Object.hasOwn(row, "relationship_type");
   const keys = [
     "candidate_id",
     "ticker",
@@ -831,6 +874,7 @@ function parseCandidate(
     "invalidation_price",
     "valid_until",
     "evidence",
+    ...(hasRelationshipType ? ["relationship_type"] : []),
     "factors",
     "analyst",
     "checker",
@@ -884,15 +928,23 @@ function parseCandidate(
   );
 
   const analystRow = objectValue(row.analyst, `${path}.analyst`);
+  const hasAnalystReceipt = Object.hasOwn(analystRow, "id") ||
+    Object.hasOwn(analystRow, "packet_id");
   exactKeys(
     analystRow,
-    ["completed", "action", "confidence", "reason"],
+    hasAnalystReceipt
+      ? ["id", "packet_id", "completed", "action", "confidence", "reason"]
+      : ["completed", "action", "confidence", "reason"],
     `${path}.analyst`,
   );
   const checkerRow = objectValue(row.checker, `${path}.checker`);
+  const hasCheckerReceipt = Object.hasOwn(checkerRow, "id") ||
+    Object.hasOwn(checkerRow, "analyst_id");
   exactKeys(
     checkerRow,
-    ["completed", "verdict", "reason_codes", "reason"],
+    hasCheckerReceipt
+      ? ["id", "analyst_id", "completed", "verdict", "reason_codes", "reason"]
+      : ["completed", "verdict", "reason_codes", "reason"],
     `${path}.checker`,
   );
 
@@ -978,8 +1030,21 @@ function parseCandidate(
     ),
     valid_until: validUntil,
     evidence,
+    relationship_type: !hasRelationshipType || row.relationship_type === null
+      ? null
+      : enumValue(
+        row.relationship_type,
+        ["direct", "second_order"] as const,
+        `${path}.relationship_type`,
+      ),
     factors,
     analyst: {
+      id: !hasAnalystReceipt || analystRow.id === null
+        ? null
+        : uuidValue(analystRow.id, `${path}.analyst.id`),
+      packet_id: !hasAnalystReceipt || analystRow.packet_id === null
+        ? null
+        : uuidValue(analystRow.packet_id, `${path}.analyst.packet_id`),
       completed: booleanValue(
         analystRow.completed,
         `${path}.analyst.completed`,
@@ -993,6 +1058,12 @@ function parseCandidate(
       reason: stringValue(analystRow.reason, `${path}.analyst.reason`),
     },
     checker: {
+      id: !hasCheckerReceipt || checkerRow.id === null
+        ? null
+        : uuidValue(checkerRow.id, `${path}.checker.id`),
+      analyst_id: !hasCheckerReceipt || checkerRow.analyst_id === null
+        ? null
+        : uuidValue(checkerRow.analyst_id, `${path}.checker.analyst_id`),
       completed: booleanValue(
         checkerRow.completed,
         `${path}.checker.completed`,
@@ -1026,6 +1097,133 @@ function parseCandidate(
   };
 }
 
+export function parseEvidencePacket(value: unknown): EvidencePacket {
+  const path = "intelligence packet";
+  const row = objectValue(value, path);
+  if (new TextEncoder().encode(JSON.stringify(row)).byteLength > 98_304) {
+    throw new Error(`${path} exceeds 96 KiB`);
+  }
+  exactKeys(
+    row,
+    ["candidates", "evidence", "coverage", "limitations", "policy_version"],
+    path,
+  );
+  const evidence = arrayValue(row.evidence, `${path}.evidence`, 96).map(
+    (value, index) => {
+      const evidencePath = `${path}.evidence[${index}]`;
+      const item = objectValue(value, evidencePath);
+      exactKeys(item, ["item_id", "normalized_text"], evidencePath);
+      return {
+        item_id: stringValue(item.item_id, `${evidencePath}.item_id`, 100),
+        normalized_text: stringValue(
+          item.normalized_text,
+          `${evidencePath}.normalized_text`,
+          2_000,
+          true,
+        ),
+      };
+    },
+  );
+  const knownEvidence = new Set(evidence.map((item) => item.item_id));
+  if (knownEvidence.size !== evidence.length) {
+    throw new Error(`${path} has duplicate evidence id`);
+  }
+  const candidates = arrayValue(row.candidates, `${path}.candidates`, 12).map(
+    (value, index) => {
+      const candidatePath = `${path}.candidates[${index}]`;
+      const item = objectValue(value, candidatePath);
+      exactKeys(item, ["candidate_key", "evidence_ids"], candidatePath);
+      const evidenceIds = arrayValue(
+        item.evidence_ids,
+        `${candidatePath}.evidence_ids`,
+        8,
+      ).map((id, evidenceIndex) =>
+        stringValue(id, `${candidatePath}.evidence_ids[${evidenceIndex}]`, 100)
+      );
+      if (
+        new Set(evidenceIds).size !== evidenceIds.length ||
+        evidenceIds.some((id) => !knownEvidence.has(id))
+      ) {
+        throw new Error(`${candidatePath} references unknown evidence id`);
+      }
+      return {
+        candidate_key: tickerValue(
+          item.candidate_key,
+          `${candidatePath}.candidate_key`,
+        ),
+        evidence_ids: evidenceIds,
+      };
+    },
+  );
+  if (
+    new Set(candidates.map((item) => item.candidate_key)).size !==
+      candidates.length
+  ) {
+    throw new Error(`${path} has duplicate candidate key`);
+  }
+  const coverage = objectValue(row.coverage, `${path}.coverage`);
+  const limitations = arrayValue(row.limitations, `${path}.limitations`, 100)
+    .map((item, index) =>
+      stringValue(item, `${path}.limitations[${index}]`, 500)
+    );
+  return {
+    candidates,
+    evidence,
+    coverage,
+    limitations,
+    policy_version: integerValue(
+      row.policy_version,
+      `${path}.policy_version`,
+      1,
+    ),
+  };
+}
+
+function parseIntelligencePacketRef(value: unknown): IntelligencePacketRef {
+  const path = "bundle.intelligence_packet";
+  const row = objectValue(value, path);
+  const hasPacket = Object.hasOwn(row, "packet");
+  exactKeys(
+    row,
+    hasPacket
+      ? ["id", "content_hash", "coverage", "packet"]
+      : ["id", "content_hash", "coverage"],
+    path,
+  );
+  const contentHash = stringValue(row.content_hash, `${path}.content_hash`, 64);
+  if (!/^[0-9a-f]{64}$/.test(contentHash)) {
+    throw new Error(`${path}.content_hash must be a SHA-256 hash`);
+  }
+  const coverage = enumValue(
+    row.coverage,
+    ["complete_for_plan", "partial", "fixture_dry_run"] as const,
+    `${path}.coverage`,
+  );
+  if (hasPacket !== (coverage === "fixture_dry_run")) {
+    throw new Error(`${path} fixture coverage and inline packet must match`);
+  }
+  return {
+    id: uuidValue(row.id, `${path}.id`),
+    content_hash: contentHash,
+    coverage,
+    ...(hasPacket ? { packet: parseEvidencePacket(row.packet) } : {}),
+  };
+}
+
+export function validatePacketEvidence(
+  candidate: DecisionCandidate,
+  packet: EvidencePacket,
+): string[] {
+  const packetCandidate = packet.candidates.find((row) =>
+    row.candidate_key === candidate.ticker
+  );
+  if (!packetCandidate) return ["EVIDENCE_NOT_IN_PACKET"];
+  const allowed = new Set(packetCandidate.evidence_ids);
+  return candidate.evidence.every((item) => allowed.has(item.id))
+    ? []
+    : ["EVIDENCE_NOT_IN_PACKET"];
+}
+
 export function parseDecisionBundle(
   value: unknown,
   phase: Phase,
@@ -1033,7 +1231,9 @@ export function parseDecisionBundle(
   const row = objectValue(value, "bundle");
   const hasComparisons = Object.hasOwn(row, "comparisons");
   const hasCompanionProposal = Object.hasOwn(row, "companion_proposal");
+  const hasIntelligencePacket = Object.hasOwn(row, "intelligence_packet");
   const bundleKeys = ["phase", "market_date", "title", "candidates"];
+  if (hasIntelligencePacket) bundleKeys.push("intelligence_packet");
   if (hasComparisons) bundleKeys.push("comparisons");
   if (hasCompanionProposal) bundleKeys.push("companion_proposal");
   exactKeys(
@@ -1074,6 +1274,9 @@ export function parseDecisionBundle(
     }
   }
   if (evidenceCount > 100) throw new Error("bundle exceeds evidence limit");
+  const intelligencePacket = hasIntelligencePacket
+    ? parseIntelligencePacketRef(row.intelligence_packet)
+    : undefined;
   if (hasComparisons && phase !== "pre-market" && phase !== "on-demand") {
     throw new Error(
       "portfolio comparisons are limited to pre-market and on-demand reviews",
@@ -1252,6 +1455,7 @@ export function parseDecisionBundle(
     market_date: marketDate,
     title: stringValue(row.title, "bundle.title"),
     candidates,
+    ...(intelligencePacket ? { intelligence_packet: intelligencePacket } : {}),
     ...(comparisons ? { comparisons } : {}),
     ...(companionProposal ? { companion_proposal: companionProposal } : {}),
   };

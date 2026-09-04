@@ -91,6 +91,9 @@ const REASON_LABELS: Record<PolicyReasonCode, string> = {
   OUTSIDE_SESSION_CONDITIONAL:
     "Based on the latest official close; conditional until the next session",
   CALENDAR_COVERAGE_MISSING: "Reviewed market-calendar coverage is missing",
+  EXPOSURE_EVIDENCE_MISSING: "Approved exposure evidence is missing",
+  CHECKER_COPIED: "Checker review duplicates the Analyst record",
+  ANALYSIS_CHAIN_INVALID: "Packet and review receipt chain is invalid",
 };
 
 const SOURCE_HOSTS: Array<{ domain: string; label: string }> = [

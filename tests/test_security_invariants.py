@@ -289,6 +289,7 @@ def test_gateway_repository_uses_only_fixed_tables_and_named_rpcs():
         "market_alert_drafts",
         "market_alert_events",
         "market_alert_rules",
+        "market_evidence_packets",
         "market_gateway_requests",
         "market_policy_config",
         "market_publications",

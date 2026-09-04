@@ -1,5 +1,6 @@
 import type {
   AlertRuleSnapshot,
+  EvidencePacket,
   GatewayEnvelope,
   GatewayReadContext,
   PolicyConfig,
@@ -22,6 +23,7 @@ import { GatewayRepositoryError } from "./repository.ts";
 import { TelegramDeliveryError } from "./telegram.ts";
 import type { DueDecision, OutcomeGrade } from "./outcomes.ts";
 import type { AdjustedBar, IntradayQuoteEvidence } from "./market-data.ts";
+import { canonicalJson, sha256Hex } from "./intelligence.ts";
 
 function assert(value: boolean, message: string): void {
   if (!value) throw new Error(message);
@@ -193,6 +195,7 @@ function candidate(phase = "intraday", notification = "entry_trigger") {
       retrieved_at: "2026-09-02T16:56:00.000Z",
       reference: null,
       claims: ["Current quote."],
+      exposure_kind: "filing",
     }],
     factors: [{
       kind: "risk",
@@ -201,21 +204,71 @@ function candidate(phase = "intraday", notification = "entry_trigger") {
       evidence_ids: ["q"],
     }],
     analyst: {
+      id: "00000000-0000-4000-8000-000000000020",
+      packet_id: "00000000-0000-4000-8000-000000000030",
       completed: true,
       action: "buy",
       confidence: "medium",
-      reason: "Pass.",
+      reason: "Analyst pass.",
     },
     checker: {
+      id: "00000000-0000-4000-8000-000000000021",
+      analyst_id: "00000000-0000-4000-8000-000000000020",
       completed: true,
       verdict: "approve",
       reason_codes: [],
-      reason: "Pass.",
+      reason: "Checker pass.",
     },
+    relationship_type: null,
     decisive_factor: "Risk-adjusted setup.",
     invalidation: "Support fails.",
     prior_suggestion_ids: [],
   };
+}
+
+const PACKET_ID = "00000000-0000-4000-8000-000000000030";
+
+function evidencePacket(): EvidencePacket {
+  return {
+    candidates: [{ candidate_key: "CENX", evidence_ids: ["q"] }],
+    evidence: [{ item_id: "q", normalized_text: "Current quote." }],
+    coverage: { mode: "bounded", complete_market_coverage: false },
+    limitations: [],
+    policy_version: 1,
+  };
+}
+
+function packetForCandidates(
+  values: Array<Record<string, unknown>>,
+): EvidencePacket {
+  const evidence = new Map<string, string>();
+  const candidates = values.map((value) => {
+    const items = value.evidence as Array<{ id: string; claims: string[] }>;
+    for (const item of items) evidence.set(item.id, item.claims.join(" "));
+    return {
+      candidate_key: String(value.ticker),
+      evidence_ids: items.map((item) => item.id),
+    };
+  });
+  return {
+    candidates,
+    evidence: [...evidence].map(([item_id, normalized_text]) => ({
+      item_id,
+      normalized_text,
+    })),
+    coverage: { mode: "fixture_dry_run", complete_market_coverage: false },
+    limitations: [],
+    policy_version: 1,
+  };
+}
+
+const PACKET_HASH = sha256Hex(canonicalJson(evidencePacket()));
+
+function packetRef(
+  coverage: "complete_for_plan" | "partial" | "fixture_dry_run" =
+    "complete_for_plan",
+) {
+  return { id: PACKET_ID, content_hash: PACKET_HASH, coverage };
 }
 
 function alertRule(
@@ -285,6 +338,7 @@ class FakeRepository implements GatewayRepository {
   expireAlertRuleCalls = 0;
   finishRunCalls = 0;
   readCalls = 0;
+  packetReadCalls = 0;
   events: string[] = [];
   claims = new Map<string, unknown>();
   failCode: string | null = null;
@@ -338,6 +392,17 @@ class FakeRepository implements GatewayRepository {
   readContext(): Promise<GatewayReadContext> {
     this.readCalls += 1;
     return Promise.resolve(structuredClone(this.context));
+  }
+  loadIntelligencePacket(): Promise<
+    { id: string; run_id: string; content_hash: string; packet: EvidencePacket }
+  > {
+    this.packetReadCalls += 1;
+    return Promise.resolve({
+      id: PACKET_ID,
+      run_id: RUN_ID,
+      content_hash: PACKET_HASH,
+      packet: evidencePacket(),
+    });
   }
   activePolicy(): Promise<PolicyConfig> {
     return Promise.resolve(this.policyValue);
@@ -580,6 +645,41 @@ function request(
     method?: string;
   } = {},
 ) {
+  const payloadValue = structuredClone(payload);
+  if (
+    operation === "evaluate_and_publish" && typeof payloadValue === "object" &&
+    payloadValue !== null
+  ) {
+    const row = payloadValue as Record<string, unknown>;
+    const phase = row.phase;
+    if (phase !== "on-demand" && !("intelligence_packet" in row)) {
+      if (options.dry) {
+        const packet = packetForCandidates(
+          row.candidates as Array<Record<string, unknown>>,
+        );
+        row.intelligence_packet = {
+          id: PACKET_ID,
+          content_hash: sha256Hex(canonicalJson(packet)),
+          coverage: "fixture_dry_run",
+          packet,
+        };
+      } else {
+        row.intelligence_packet = packetRef();
+      }
+    }
+    if (phase !== "on-demand" && Array.isArray(row.candidates)) {
+      for (const value of row.candidates) {
+        const item = value as Record<string, unknown>;
+        const analyst = item.analyst as Record<string, unknown>;
+        const checker = item.checker as Record<string, unknown>;
+        item.relationship_type ??= "direct";
+        analyst.id ??= "00000000-0000-4000-8000-000000000020";
+        analyst.packet_id ??= PACKET_ID;
+        checker.id ??= "00000000-0000-4000-8000-000000000021";
+        checker.analyst_id ??= analyst.id;
+      }
+    }
+  }
   return new Request(
     "https://example.invalid/functions/v1/market-briefing-gateway",
     {
@@ -598,11 +698,89 @@ function request(
             : RUN_ID)
           : options.runId,
         dry_run: options.dry ?? false,
-        payload,
+        payload: payloadValue,
       }),
     },
   );
 }
+
+Deno.test("scheduled discovery requires the persisted packet hash before market work", async () => {
+  class MismatchedPacketRepository extends FakeRepository {
+    override loadIntelligencePacket(): Promise<
+      {
+        id: string;
+        run_id: string;
+        content_hash: string;
+        packet: EvidencePacket;
+      }
+    > {
+      this.packetReadCalls += 1;
+      return Promise.resolve({
+        id: PACKET_ID,
+        run_id: RUN_ID,
+        content_hash: "b".repeat(64),
+        packet: evidencePacket(),
+      });
+    }
+  }
+  const setup = makeHandler(new MismatchedPacketRepository());
+  const response = await setup.handler(request("evaluate_and_publish", {
+    phase: "intraday",
+    market_date: "2026-09-02",
+    title: "bounded discovery",
+    candidates: [candidate()],
+    intelligence_packet: packetRef(),
+  }));
+  assertEquals((await json(response)).code, "INTELLIGENCE_PACKET_MISMATCH");
+  assertEquals(setup.fetched, []);
+});
+
+Deno.test("scheduled discovery rejects evidence outside the immutable packet", async () => {
+  const setup = makeHandler();
+  const outside = candidate();
+  outside.evidence[0].id = "outside";
+  outside.factors[0].evidence_ids = ["outside"];
+  const response = await setup.handler(request("evaluate_and_publish", {
+    phase: "intraday",
+    market_date: "2026-09-02",
+    title: "bounded discovery",
+    candidates: [outside],
+    intelligence_packet: packetRef(),
+  }));
+  assertEquals((await json(response)).code, "EVIDENCE_NOT_IN_PACKET");
+  assertEquals(setup.fetched, []);
+});
+
+Deno.test("dry-run fixture packet is validated without a repository packet read", async () => {
+  const setup = makeHandler();
+  const response = await setup.handler(request("evaluate_and_publish", {
+    phase: "intraday",
+    market_date: "2026-09-02",
+    title: "fixture",
+    candidates: [candidate()],
+    intelligence_packet: {
+      ...packetRef("fixture_dry_run"),
+      packet: evidencePacket(),
+    },
+  }, { dry: true }));
+  assertEquals(response.status, 200);
+  assertEquals(setup.repository.packetReadCalls, 0);
+});
+
+Deno.test("accepted discovery persists the packet to Analyst to Checker chain", async () => {
+  const setup = makeHandler();
+  const response = await setup.handler(request("evaluate_and_publish", {
+    phase: "intraday",
+    market_date: "2026-09-02",
+    title: "bounded discovery",
+    candidates: [candidate("intraday", "brief")],
+    intelligence_packet: packetRef(),
+  }));
+  assertEquals(response.status, 200);
+  const persisted = setup.repository.lastBundle!.evaluations[0].candidate;
+  assertEquals(persisted.analyst.packet_id, PACKET_ID);
+  assertEquals(persisted.checker.analyst_id, persisted.analyst.id);
+});
 
 async function json(response: Response): Promise<Record<string, unknown>> {
   return await response.json();
@@ -1053,7 +1231,6 @@ Deno.test("shadow preview cannot label watch-only entry levels as policy approve
 
 Deno.test("enabled canary creates drafts only for an allowlisted alert class", async () => {
   const repository = new FakeRepository();
-  repository.policyValue.version = 3;
   repository.policyValue.alerts_v3 = {
     enabled: true,
     shadow: false,

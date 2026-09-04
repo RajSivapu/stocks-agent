@@ -3,7 +3,7 @@
 Last updated: 2026-09-04
 Canonical release: Personal Stock Agent V1
 Source baseline: `167ce06` on `codex/owner-alert-v3`
-Current state: subagent-driven implementation active; V1-C2 done; V1-C3 in progress
+Current state: subagent-driven implementation active; V1-C3 done; V1-C4 in progress
 
 This file is the version-controlled source of truth for the Personal Stock Agent V1 rollout.
 `docs/ROADMAP.md` retains historical capability and deployment detail. Notion may later mirror this
@@ -64,12 +64,22 @@ production migration remain protected V1-C6 rollout gates and are not implied by
 - [x] Receipt-backed phase orchestration and scheduled routine integration are implemented and
   focused-tested with one start, one atomic record, explicit partial failures, and write-free dry
   fixtures.
-- [ ] The Analyst/Checker gateway binding remains the next checkpoint.
+- [x] Scheduled Analyst and Checker records are bound to the exact immutable evidence packet before
+  policy evaluation, with canonical hash verification, candidate-scoped evidence membership,
+  exposure gating, distinct receipt linkage, copied/missing Checker vetoes, and dry-run-only inline
+  fixtures.
+
+V1-C3 is complete based on the exact Task 8 focused gate: 159 Deno gateway tests and 26 Python
+security-invariant tests passed on 2026-09-04. This local evidence does not claim a production
+migration, provider/model call, database write, Telegram delivery, or deployment.
 
 ### V1-C4 — Personal comparison brain
 
 - [ ] Existing alternatives and Companion logic form a foundation; complete V1 integration is not
   started and depends on C3 candidate records.
+
+V1-C4 is in progress; Task 9 personal holdings and recurring-investment comparison is the next
+checkpoint.
 
 ### V1-C5 — Reports, dashboard, and delivery
 
@@ -83,7 +93,7 @@ production migration remain protected V1-C6 rollout gates and are not implied by
 
 ## Next
 
-1. Complete V1-C3 Analyst/Checker and deterministic gateway binding.
+1. Complete V1-C4 personal holdings and recurring-investment comparison.
 2. Continue checkpoint by checkpoint with task-scoped review gates and status updates.
 3. Preserve scheduled production capacity and inspect only scheduled receipts at their established
    times.
@@ -136,6 +146,5 @@ live run is requested.
 
 ## Last Commit
 
-The source baseline reviewed for this documentation checkpoint is `c5886f5` (`docs: normalize
-dashboard design formatting`). The documentation checkpoint commit is the current Git `HEAD` after
-this file and the written specification are committed.
+Task 8 started from `68dd556` (`fix: bind intelligence runs to real context`). The Task 8
+implementation commit is the current Git `HEAD` after the scoped changes are committed.
