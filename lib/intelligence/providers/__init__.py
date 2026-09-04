@@ -137,6 +137,7 @@ def publisher_reference(url: object) -> dict[str, str]:
         return {}
     try:
         parsed = urlsplit(url)
+        port = parsed.port
     except ValueError:
         return {}
     if (
@@ -144,7 +145,7 @@ def publisher_reference(url: object) -> dict[str, str]:
         or not parsed.hostname
         or parsed.username is not None
         or parsed.password is not None
-        or parsed.port not in (None, 443)
+        or port not in (None, 443)
     ):
         return {}
     return {
