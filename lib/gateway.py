@@ -24,6 +24,7 @@ OPERATIONS = (
     "finish_run",
     "start_intelligence_run",
     "record_intelligence",
+    "record_report",
 )
 MAX_REQUEST_BYTES = 262_144
 MAX_RESPONSE_BYTES = 1_048_576

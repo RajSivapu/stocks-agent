@@ -37,7 +37,7 @@ RPCS = (
     "start_market_intelligence_run(uuid,text,date,integer,jsonb)",
     "record_market_intelligence(uuid,uuid,jsonb)",
     "read_market_evidence_packet(uuid,uuid)",
-    "record_market_report(uuid,uuid,jsonb)",
+    "record_market_report(uuid,text,jsonb)",
     "record_market_learning(uuid,jsonb)",
 )
 BEHAVIOR_ERRORS = {
@@ -499,7 +499,7 @@ def verify(cursor) -> tuple[dict[str, object], list[UUID]]:
     duplicate_idempotency = recorded["duplicate"] is False and replay["duplicate"] is True
 
     report_id = uuid4()
-    report_key = uuid4()
+    report_key = hashlib.sha256(b"rollback-only-report-key").hexdigest()
     report_payload = {
         "id": str(report_id),
         "packet_id": payload["packet"]["id"],
@@ -778,11 +778,11 @@ def verify(cursor) -> tuple[dict[str, object], list[UUID]]:
                               uuid4(), Jsonb(packet_hash_payload))))
     bad_report_hash = {**report_payload, "id": str(uuid4()), "report_hash": "0" * 64}
     semantic_results.append(_expect_db_error(
-        cursor, lambda: _call(cursor, "record_market_report", prior_run, uuid4(),
+        cursor, lambda: _call(cursor, "record_market_report", prior_run, hashlib.sha256(b"bad-report-hash").hexdigest(),
                               Jsonb(bad_report_hash))))
     bad_rendered_hash = {**report_payload, "id": str(uuid4()), "rendered_hash": "0" * 64}
     semantic_results.append(_expect_db_error(
-        cursor, lambda: _call(cursor, "record_market_report", prior_run, uuid4(),
+        cursor, lambda: _call(cursor, "record_market_report", prior_run, hashlib.sha256(b"bad-rendered-hash").hexdigest(),
                               Jsonb(bad_rendered_hash))))
     bad_learning_hash = {**observation_payload, "id": str(uuid4()),
                          "content_hash": "0" * 64}
@@ -796,7 +796,7 @@ def verify(cursor) -> tuple[dict[str, object], list[UUID]]:
         "report": {"theme": "policy", "limitations": []},
     }
     theme_payload["report_hash"] = _canonical_hash(theme_payload["report"])
-    theme_result = _call(cursor, "record_market_report", prior_run, uuid4(),
+    theme_result = _call(cursor, "record_market_report", prior_run, hashlib.sha256(b"theme-report-key").hexdigest(),
                          Jsonb(theme_payload))
     theme_report_recorded = theme_result["duplicate"] is False
 

@@ -42,7 +42,7 @@ INTELLIGENCE_RPCS = (
     "start_market_intelligence_run(UUID, TEXT, DATE, INT, JSONB)",
     "record_market_intelligence(UUID, UUID, JSONB)",
     "read_market_evidence_packet(UUID, UUID)",
-    "record_market_report(UUID, UUID, JSONB)",
+    "record_market_report(UUID, TEXT, JSONB)",
     "record_market_learning(UUID, JSONB)",
 )
 
@@ -267,8 +267,10 @@ def test_gateway_entrypoint_uses_only_pinned_dependencies_and_scoped_secrets():
     assert set(re.findall(r'requiredEnvironment\("([A-Z0-9_]+)"\)', source)) == {
         "SUPABASE_URL",
         "SUPABASE_SERVICE_ROLE_KEY",
-        "MARKET_AGENT_SECRET",
-        "TELEGRAM_BOT_TOKEN",
+            "MARKET_AGENT_SECRET",
+            "OWNER_DASHBOARD_ORIGIN",
+            "OWNER_DASHBOARD_URL",
+            "TELEGRAM_BOT_TOKEN",
         "TELEGRAM_OWNER_CHAT_ID",
     }
     config = (ROOT / "supabase" / "config.toml").read_text()
@@ -315,7 +317,8 @@ def test_gateway_repository_uses_only_fixed_tables_and_named_rpcs():
         "finish_market_publication",
         "get_due_market_decisions",
         "record_market_alert_evaluations",
-        "record_market_intelligence",
+            "record_market_intelligence",
+            "record_market_report",
         "read_market_evidence_packet",
         "start_market_analysis_run",
         "start_market_intelligence_run",

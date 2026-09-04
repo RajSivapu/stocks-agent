@@ -30,7 +30,7 @@ RPCS = (
     "start_market_intelligence_run(uuid,text,date,integer,jsonb)",
     "record_market_intelligence(uuid,uuid,jsonb)",
     "read_market_evidence_packet(uuid,uuid)",
-    "record_market_report(uuid,uuid,jsonb)",
+    "record_market_report(uuid,text,jsonb)",
     "record_market_learning(uuid,jsonb)",
 )
 
@@ -119,7 +119,7 @@ def test_any_non_owner_table_or_function_grant_fails_closed():
 
     function_grant = complete_snapshot()
     function_grant["function_grants"].append({
-        "signature": "record_market_report(uuid,uuid,jsonb)",
+        "signature": "record_market_report(uuid,text,jsonb)",
         "grantee": "surprise_executor",
         "privilege": "EXECUTE",
         "is_owner": False,

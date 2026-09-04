@@ -14,7 +14,13 @@ function requiredEnvironment(name: string): string {
 const supabase = createClient(
   requiredEnvironment("SUPABASE_URL"),
   requiredEnvironment("SUPABASE_SERVICE_ROLE_KEY"),
-  { auth: { persistSession: false, autoRefreshToken: false, detectSessionInUrl: false } },
+  {
+    auth: {
+      persistSession: false,
+      autoRefreshToken: false,
+      detectSessionInUrl: false,
+    },
+  },
 );
 
 const handler = createGatewayHandler({
@@ -22,6 +28,8 @@ const handler = createGatewayHandler({
   marketAgentSecret: requiredEnvironment("MARKET_AGENT_SECRET"),
   telegramToken: requiredEnvironment("TELEGRAM_BOT_TOKEN"),
   telegramChatId: requiredEnvironment("TELEGRAM_OWNER_CHAT_ID"),
+  dashboardBaseUrl: requiredEnvironment("OWNER_DASHBOARD_URL"),
+  dashboardAllowedOrigins: [requiredEnvironment("OWNER_DASHBOARD_ORIGIN")],
   fetchQuote: (ticker, now) => fetchVerifiedQuote(ticker, fetch, now),
   sendTelegram: (parts, chatId, token) => sendTelegramParts(parts, chatId, token, fetch),
 });

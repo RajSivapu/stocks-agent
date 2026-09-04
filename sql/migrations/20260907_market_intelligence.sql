@@ -1,6 +1,67 @@
 -- Immutable, receipt-backed market-intelligence and report ledgers.
 -- Additive and idempotent. This migration is local-only until the V1-C6 gate.
 
+ALTER TABLE public.market_gateway_requests
+  DROP CONSTRAINT IF EXISTS market_gateway_requests_operation_check;
+ALTER TABLE public.market_gateway_requests
+  ADD CONSTRAINT market_gateway_requests_operation_check CHECK (operation IN (
+    'start_run','read_context','record_artifacts','grade_due_decisions',
+    'evaluate_and_publish','evaluate_alert_rules','finish_run','record_report'
+  ));
+
+CREATE OR REPLACE FUNCTION public.claim_market_gateway_request(
+  p_request_id UUID, p_operation TEXT, p_run_id UUID
+) RETURNS JSONB LANGUAGE plpgsql SECURITY DEFINER
+SET search_path = pg_catalog AS $$
+DECLARE
+  v_request public.market_gateway_requests%ROWTYPE;
+  v_lease UUID;
+  v_stored_run UUID := CASE WHEN p_operation='record_report' THEN NULL ELSE p_run_id END;
+BEGIN
+  IF p_operation NOT IN (
+       'start_run','read_context','record_artifacts','grade_due_decisions',
+       'evaluate_and_publish','evaluate_alert_rules','finish_run','record_report'
+     )
+     OR (p_operation = 'start_run' AND p_run_id IS NOT NULL)
+     OR (p_operation <> 'start_run' AND p_run_id IS NULL) THEN
+    RAISE EXCEPTION 'invalid request identity' USING ERRCODE = '22023';
+  END IF;
+  SELECT * INTO v_request FROM public.market_gateway_requests
+  WHERE request_id=p_request_id FOR UPDATE;
+  IF NOT FOUND THEN
+    PERFORM pg_advisory_xact_lock(hashtextextended('market_gateway_rate',0));
+    IF (SELECT count(*) FROM public.market_gateway_requests
+        WHERE created_at >= now()-interval '1 hour') >= 100
+       OR (v_stored_run IS NOT NULL AND (
+         SELECT count(*) FROM public.market_gateway_requests WHERE run_id=v_stored_run
+       ) >= 20) THEN
+      RAISE EXCEPTION 'gateway rate limit exceeded' USING ERRCODE = '54000';
+    END IF;
+    v_lease := gen_random_uuid();
+    INSERT INTO public.market_gateway_requests(request_id,operation,run_id,status,lease_token)
+    VALUES (p_request_id,p_operation,v_stored_run,'claimed',v_lease);
+    RETURN jsonb_build_object('claimed',true,'lease_token',v_lease,'attempt_count',1);
+  END IF;
+  IF v_request.operation<>p_operation
+     OR v_request.run_id IS DISTINCT FROM v_stored_run THEN
+    RAISE EXCEPTION 'request identity mismatch' USING ERRCODE = '22023';
+  END IF;
+  IF v_request.status IN ('completed','failed') THEN
+    RETURN jsonb_build_object('claimed',false,'status',v_request.status,
+      'response',v_request.response,'response_digest',v_request.response_digest);
+  END IF;
+  IF v_request.claimed_at > now()-interval '5 minutes' THEN
+    RETURN jsonb_build_object('claimed',false,'status','REQUEST_IN_PROGRESS');
+  END IF;
+  v_lease := gen_random_uuid();
+  UPDATE public.market_gateway_requests SET lease_token=v_lease,claimed_at=now(),
+    attempt_count=attempt_count+1 WHERE request_id=p_request_id;
+  RETURN jsonb_build_object('claimed',true,'lease_token',v_lease,
+    'attempt_count',v_request.attempt_count+1);
+END;
+$$;
+
+
 CREATE TABLE IF NOT EXISTS public.market_intelligence_runs (
   id UUID PRIMARY KEY,
   phase TEXT NOT NULL CHECK (phase IN ('pre-market','intraday','post-market','on-demand')),
@@ -215,7 +276,7 @@ CREATE TABLE IF NOT EXISTS public.market_evidence_packets (
 
 CREATE TABLE IF NOT EXISTS public.market_reports (
   id UUID PRIMARY KEY,
-  idempotency_key UUID NOT NULL UNIQUE,
+  idempotency_key TEXT NOT NULL UNIQUE CHECK (idempotency_key ~ '^[0-9a-f]{64}$'),
   run_id UUID NOT NULL REFERENCES public.market_intelligence_runs(id) ON DELETE RESTRICT,
   packet_id UUID NOT NULL REFERENCES public.market_evidence_packets(id) ON DELETE RESTRICT,
   market_date DATE NOT NULL,
@@ -230,6 +291,21 @@ CREATE TABLE IF NOT EXISTS public.market_reports (
 );
 CREATE INDEX IF NOT EXISTS idx_market_reports_date_kind
   ON public.market_reports(market_date DESC, kind, created_at DESC);
+
+ALTER TABLE public.market_reports
+  ALTER COLUMN idempotency_key TYPE TEXT USING idempotency_key::text;
+DO $$
+BEGIN
+  IF NOT EXISTS (
+    SELECT 1 FROM pg_catalog.pg_constraint
+    WHERE conrelid='public.market_reports'::regclass
+      AND conname='market_reports_idempotency_key_sha256'
+  ) THEN
+    ALTER TABLE public.market_reports ADD CONSTRAINT market_reports_idempotency_key_sha256
+      CHECK (idempotency_key ~ '^[0-9a-f]{64}$');
+  END IF;
+END;
+$$;
 
 CREATE TABLE IF NOT EXISTS public.market_learning_observations (
   id UUID PRIMARY KEY,
@@ -1084,9 +1160,10 @@ BEGIN
 END;
 $$;
 
+DROP FUNCTION IF EXISTS public.record_market_report(UUID, UUID, JSONB);
 CREATE OR REPLACE FUNCTION public.record_market_report(
   p_run_id UUID,
-  p_idempotency_key UUID,
+  p_idempotency_key TEXT,
   p_report JSONB
 ) RETURNS JSONB LANGUAGE plpgsql SECURITY DEFINER
 SET search_path = pg_catalog AS $$
@@ -1094,7 +1171,8 @@ DECLARE
   v_existing public.market_reports%ROWTYPE;
   v_packet public.market_evidence_packets%ROWTYPE;
 BEGIN
-  IF p_run_id IS NULL OR p_idempotency_key IS NULL OR jsonb_typeof(p_report)<>'object'
+  IF p_run_id IS NULL OR p_idempotency_key IS NULL
+     OR p_idempotency_key !~ '^[0-9a-f]{64}$' OR jsonb_typeof(p_report)<>'object'
      OR octet_length(p_report::text)>196608
      OR NOT (p_report ?& ARRAY[
        'id','packet_id','market_date','kind','report','report_hash','rendered_text','rendered_hash'
@@ -1236,10 +1314,10 @@ REVOKE ALL ON FUNCTION public.market_canonical_jsonb(JSONB)
 REVOKE ALL ON FUNCTION public.start_market_intelligence_run(UUID, TEXT, DATE, INT, JSONB) FROM PUBLIC, anon, authenticated;
 REVOKE ALL ON FUNCTION public.record_market_intelligence(UUID, UUID, JSONB) FROM PUBLIC, anon, authenticated;
 REVOKE ALL ON FUNCTION public.read_market_evidence_packet(UUID, UUID) FROM PUBLIC, anon, authenticated;
-REVOKE ALL ON FUNCTION public.record_market_report(UUID, UUID, JSONB) FROM PUBLIC, anon, authenticated;
+REVOKE ALL ON FUNCTION public.record_market_report(UUID, TEXT, JSONB) FROM PUBLIC, anon, authenticated;
 REVOKE ALL ON FUNCTION public.record_market_learning(UUID, JSONB) FROM PUBLIC, anon, authenticated;
 GRANT EXECUTE ON FUNCTION public.start_market_intelligence_run(UUID, TEXT, DATE, INT, JSONB) TO service_role;
 GRANT EXECUTE ON FUNCTION public.record_market_intelligence(UUID, UUID, JSONB) TO service_role;
 GRANT EXECUTE ON FUNCTION public.read_market_evidence_packet(UUID, UUID) TO service_role;
-GRANT EXECUTE ON FUNCTION public.record_market_report(UUID, UUID, JSONB) TO service_role;
+GRANT EXECUTE ON FUNCTION public.record_market_report(UUID, TEXT, JSONB) TO service_role;
 GRANT EXECUTE ON FUNCTION public.record_market_learning(UUID, JSONB) TO service_role;

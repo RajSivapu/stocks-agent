@@ -3,7 +3,7 @@
 Last updated: 2026-09-04
 Canonical release: Personal Stock Agent V1
 Source baseline: `167ce06` on `codex/owner-alert-v3`
-Current state: subagent-driven implementation active; V1-C4 done; V1-C5 in progress
+Current state: subagent-driven implementation active; V1-C4 done; V1-C5 in progress after Task 10
 
 This file is the version-controlled source of truth for the Personal Stock Agent V1 rollout.
 `docs/ROADMAP.md` retains historical capability and deployment detail. Notion may later mirror this
@@ -95,7 +95,10 @@ delivery, production migration, or deployment.
 - [ ] Existing dashboard and Telegram v3 foundations are implemented but are not the complete V1
   scope and are not claimed live.
 
-V1-C5 is in progress; Task 10 immutable reports and quiet Telegram delivery is the next checkpoint.
+Task 10 immutable reports and quiet Telegram delivery is complete locally. Immutable canonical
+report hashes, deterministic SHA-256 idempotency, sorted source references, concise morning and
+summary/link periodic delivery, urgent/no-trigger gates, and unknown-outcome-safe replay are focused
+verified. The report migration remains local-only and no Telegram message was sent.
 
 ### V1-C6 — Independent review and protected rollout
 
@@ -104,7 +107,7 @@ V1-C5 is in progress; Task 10 immutable reports and quiet Telegram delivery is t
 
 ## Next
 
-1. Complete V1-C5 immutable reports and quiet Telegram delivery.
+1. Complete Task 11 dashboard report contracts, read API, and least-privilege access.
 2. Continue checkpoint by checkpoint with task-scoped review gates and status updates.
 3. Preserve scheduled production capacity and inspect only scheduled receipts at their established
    times.

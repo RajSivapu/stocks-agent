@@ -1,15 +1,43 @@
-import type {
-  AlertEvaluation,
-  AlertRuleSnapshot,
-  PolicyContext,
-} from "./contracts.ts";
+import type { AlertEvaluation, AlertRuleSnapshot, PolicyContext } from "./contracts.ts";
 import type { PolicyEvaluation } from "./policy.ts";
 import type { LongTermCompanionAnalysis } from "./companion.ts";
-import {
-  FORBIDDEN_DECISION_TEXT,
-  renderAlertV3,
-  renderPublication,
-} from "./renderer.ts";
+import { canonicalJson, sha256Hex } from "./intelligence.ts";
+import { FORBIDDEN_DECISION_TEXT, renderAlertV3, renderPublication, renderReportDelivery } from "./renderer.ts";
+
+Deno.test("renderer report delivery surface excludes full private content", () => {
+  const body = {
+    title: "Monthly review",
+    summary: "Review the latest evidence.",
+    full_markdown: "FULL PRIVATE DETAIL",
+    source_ids: [],
+    policy_decision_ids: [],
+    comparison_ids: [],
+    actionable_risk: false,
+    material_thesis_change: false,
+    intraday_triggered: true,
+    suggestion_only: true,
+  };
+  const input = {
+    id: "00000000-0000-4000-8000-000000000040",
+    idempotency_key: "a".repeat(64),
+    packet_id: "00000000-0000-4000-8000-000000000020",
+    market_date: "2026-09-04",
+    kind: "monthly" as const,
+    report: body,
+    report_hash: sha256Hex(canonicalJson(body)),
+    rendered_text: body.full_markdown,
+    rendered_hash: sha256Hex(body.full_markdown),
+  };
+  const rendered = renderReportDelivery(input, {
+    dashboardBaseUrl: "https://stocks.example.test",
+    allowedDashboardOrigins: ["https://stocks.example.test"],
+  });
+  assert(rendered.body.includes("/reports/"), "private link absent");
+  assert(
+    !rendered.body.includes(input.report.full_markdown),
+    "full report leaked",
+  );
+});
 
 function assert(value: boolean, message: string): void {
   if (!value) throw new Error(message);
@@ -43,9 +71,7 @@ function evaluation(
   overrides: Partial<PolicyEvaluation> = {},
 ): PolicyEvaluation {
   const candidate = {
-    candidate_id: `00000000-0000-4000-8000-${
-      ticker.padEnd(12, "0").slice(0, 12)
-    }`,
+    candidate_id: `00000000-0000-4000-8000-${ticker.padEnd(12, "0").slice(0, 12)}`,
     ticker,
     phase: "pre-market" as const,
     action: "buy" as const,
@@ -292,8 +318,7 @@ Deno.test("brief explicitly says when no policy-approved entry zone exists", asy
     final_action: "watch",
     reason_codes: ["QUOTE_STALE"],
   });
-  item.candidate.factors[1].text =
-    "This private model explanation must not appear.";
+  item.candidate.factors[1].text = "This private model explanation must not appear.";
   const rendered = await renderPublication({
     phase: "pre-market",
     market_date: "2026-09-03",
@@ -467,8 +492,7 @@ Deno.test("post-market restores the owner-approved visual portfolio hierarchy", 
   const vti = evaluation("VTI", { raw_action: "hold", final_action: "hold" });
   vti.candidate.action = "hold";
   vti.candidate.phase = "post-market";
-  vti.candidate.factors[0].text =
-    "Broad tape was mixed: SPY +0.3%, QQQ -0.5%, and IWM -1.5%.";
+  vti.candidate.factors[0].text = "Broad tape was mixed: SPY +0.3%, QQQ -0.5%, and IWM -1.5%.";
   vti.candidate.evidence.push({
     id: "news-gap",
     kind: "news",
@@ -616,8 +640,7 @@ Deno.test("pre-market comparison separates matched history from the forward evid
     status: "fresh",
     observed_at: "2026-09-03T10:00:00.000Z",
     retrieved_at: "2026-09-03T10:01:00.000Z",
-    reference:
-      "https://www.ishares.com/us/products/239724/ishares-core-sp-total-us-stock-market-etf",
+    reference: "https://www.ishares.com/us/products/239724/ishares-core-sp-total-us-stock-market-etf",
     claims: ["Broad U.S. stock-market exposure."],
   });
   itot.candidate.factors.push({
@@ -647,8 +670,7 @@ Deno.test("pre-market comparison separates matched history from the forward evid
       alternative_ticker: "ITOT",
       relationship: "like_for_like",
       prospective_view: "similar",
-      reason:
-        "Both cover the broad U.S. equity market; current evidence shows no durable forward edge.",
+      reason: "Both cover the broad U.S. equity market; current evidence shows no durable forward edge.",
       evidence_ids: ["itot-profile"],
       coverage_status: "complete",
       period_start: "2025-09-03",
@@ -663,6 +685,7 @@ Deno.test("pre-market comparison separates matched history from the forward evid
       monthly_excess_pct: "0.1",
       baseline_max_drawdown_pct: "14.2",
       alternative_max_drawdown_pct: "14.1",
+      daily_return_correlation: null,
     }],
   });
   for (
@@ -694,12 +717,10 @@ function companionAnalysis(
     companion_ticker: "VXUS",
     role: "diversifier",
     thesis: "Non-U.S. exposure adds a distinct geographic role.",
-    risk_note:
-      "Currency and foreign-market risks can cause long periods of lagging U.S. stocks.",
+    risk_note: "Currency and foreign-market risks can cause long periods of lagging U.S. stocks.",
     evidence_ids: ["vxus-profile"],
     qualification_status: "qualified",
-    qualification_reason:
-      "Gateway role policy accepted the candidate for long-term research.",
+    qualification_reason: "Gateway role policy accepted the candidate for long-term research.",
     recurring_plan_review_eligible: true,
     horizons: [3, 5, 10].map((years) => ({
       years: years as 3 | 5 | 10,
@@ -761,6 +782,7 @@ Deno.test("long-term companion renders the core, role, long horizons, scenario, 
       monthly_excess_pct: "-1",
       baseline_max_drawdown_pct: "12",
       alternative_max_drawdown_pct: "14",
+      daily_return_correlation: null,
     }],
     companion: companionAnalysis(),
   });
@@ -807,6 +829,7 @@ Deno.test("satellite companion remains research-only and unsafe proposal prose i
     monthly_excess_pct: "1",
     baseline_max_drawdown_pct: "12",
     alternative_max_drawdown_pct: "18",
+    daily_return_correlation: null,
   };
   const base = {
     phase: "pre-market" as const,
@@ -881,6 +904,7 @@ Deno.test("an insufficient companion never presents the nominated role as qualif
       monthly_excess_pct: "-1",
       baseline_max_drawdown_pct: "12",
       alternative_max_drawdown_pct: "14",
+      daily_return_correlation: null,
     }],
     companion: companionAnalysis({
       companion_ticker: "VT",
@@ -926,6 +950,7 @@ Deno.test("comparison rejects plan-switch prose and does not invent a winner on 
     monthly_excess_pct: "0",
     baseline_max_drawdown_pct: "12",
     alternative_max_drawdown_pct: "12",
+    daily_return_correlation: null,
   };
   const rendered = await renderPublication({
     phase: "pre-market",
@@ -1250,9 +1275,7 @@ Deno.test("alert v3 renders trigger-first details, approved levels, receipts, an
   assertEquals(rendered.status, "ready");
   assertEquals(rendered.parts, [rendered.body]);
   assertEquals(
-    rendered.reply_markup.inline_keyboard.map((row) =>
-      row.map((button) => button.text)
-    ),
+    rendered.reply_markup.inline_keyboard.map((row) => row.map((button) => button.text)),
     [["Acknowledge", "Snooze 1d", "Dismiss"]],
   );
   assertEquals(

@@ -26,6 +26,14 @@ import {
   type RecordIntelligencePayload,
   type StartIntelligencePayload,
 } from "./intelligence.ts";
+import type { RecordReportPayload } from "./reports.ts";
+
+export interface ReportRecordReceipt {
+  report_id: string;
+  report_hash: string;
+  rendered_hash: string;
+  duplicate: boolean;
+}
 
 export interface PersistedBundle {
   request_id: string;
@@ -186,6 +194,10 @@ export interface PersistedExposureFact {
 }
 
 export interface GatewayRepository {
+  recordReport?(
+    runId: string,
+    payload: RecordReportPayload,
+  ): Promise<ReportRecordReceipt>;
   startIntelligenceRun?(
     runId: string,
     payload: StartIntelligencePayload,
@@ -323,9 +335,7 @@ function text(value: unknown, max = 1000): string {
 }
 
 function nullableText(value: unknown, max = 1000): string | null {
-  return value === null || value === undefined
-    ? null
-    : text(String(value), max);
+  return value === null || value === undefined ? null : text(String(value), max);
 }
 
 function integer(value: unknown): number {
@@ -349,9 +359,7 @@ function nullableDecimal(value: unknown): string | null {
 }
 
 function signedMicros(value: string): bigint {
-  return value.startsWith("-")
-    ? -parseFixed(value.slice(1), 6)
-    : parseFixed(value, 6);
+  return value.startsWith("-") ? -parseFixed(value.slice(1), 6) : parseFixed(value, 6);
 }
 
 function boole(value: unknown): boolean {
@@ -407,8 +415,7 @@ function ownerDate(now: Date): string {
     month: "2-digit",
     day: "2-digit",
   }).formatToParts(now);
-  const get = (type: Intl.DateTimeFormatPartTypes) =>
-    values.find((part) => part.type === type)?.value ?? "";
+  const get = (type: Intl.DateTimeFormatPartTypes) => values.find((part) => part.type === type)?.value ?? "";
   return `${get("year")}-${get("month")}-${get("day")}`;
 }
 
@@ -442,9 +449,7 @@ export function validatePolicy(value: unknown): PolicyConfig {
       "draft_ttl_hours",
       "drafts_per_hour",
     ];
-    const expected = policy.version === 3
-      ? [...legacyExpected, "enabled_classes"]
-      : legacyExpected;
+    const expected = policy.version === 3 ? [...legacyExpected, "enabled_classes"] : legacyExpected;
     const enabledClasses = policy.version === 3 ? row.enabled_classes : [];
     const supportedClasses = new Set([
       "entry_trigger",
@@ -452,15 +457,11 @@ export function validatePolicy(value: unknown): PolicyConfig {
       "target_hit",
     ]);
     if (
-      Object.keys(row).length !== expected.length || expected.some((key) =>
-        !(key in row)
-      ) ||
+      Object.keys(row).length !== expected.length || expected.some((key) => !(key in row)) ||
       typeof row.enabled !== "boolean" || typeof row.shadow !== "boolean" ||
       (row.enabled === true && row.shadow === true) ||
       !Array.isArray(enabledClasses) ||
-      enabledClasses.some((value) =>
-        typeof value !== "string" || !supportedClasses.has(value)
-      ) ||
+      enabledClasses.some((value) => typeof value !== "string" || !supportedClasses.has(value)) ||
       new Set(enabledClasses).size !== enabledClasses.length ||
       (row.enabled === true && enabledClasses.length === 0) ||
       !["long_term", "balanced", "active"].includes(String(row.profile)) ||
@@ -481,9 +482,7 @@ async function digestCandidate(value: unknown): Promise<string> {
     "SHA-256",
     new TextEncoder().encode(JSON.stringify(value)),
   );
-  return Array.from(new Uint8Array(digest)).map((byte) =>
-    byte.toString(16).padStart(2, "0")
-  ).join("");
+  return Array.from(new Uint8Array(digest)).map((byte) => byte.toString(16).padStart(2, "0")).join("");
 }
 
 export function createSupabaseGatewayRepository(
@@ -500,9 +499,7 @@ export function createSupabaseGatewayRepository(
         )
         .eq("id", id).single(),
     );
-    const ids = Array.isArray(row.telegram_message_ids)
-      ? row.telegram_message_ids.map(integer)
-      : [];
+    const ids = Array.isArray(row.telegram_message_ids) ? row.telegram_message_ids.map(integer) : [];
     return {
       id: text(row.id, 36),
       idempotency_key: text(row.idempotency_key, 36),
@@ -514,6 +511,30 @@ export function createSupabaseGatewayRepository(
   }
 
   return {
+    async recordReport(runId, payload) {
+      const result = await client.rpc("record_market_report", {
+        p_run_id: runId,
+        p_idempotency_key: payload.idempotency_key,
+        p_report: {
+          id: payload.id,
+          packet_id: payload.packet_id,
+          market_date: payload.market_date,
+          kind: payload.kind,
+          report: payload.report,
+          report_hash: payload.report_hash,
+          rendered_text: payload.rendered_text,
+          rendered_hash: payload.rendered_hash,
+        },
+      });
+      const row = oneObject(result);
+      return {
+        report_id: text(row.report_id, 36),
+        report_hash: text(row.report_hash, 64),
+        rendered_hash: text(row.rendered_hash, 64),
+        duplicate: boole(row.duplicate),
+      };
+    },
+
     async startIntelligenceRun(runId, payload) {
       const result = await client.rpc("start_market_intelligence_run", {
         p_run_id: runId,
@@ -554,20 +575,37 @@ export function createSupabaseGatewayRepository(
       }
       try {
         const packetRow = oneObject(result, "INTELLIGENCE_PACKET_MISMATCH");
-        if (!Array.isArray(packetRow.exposure_facts) || packetRow.exposure_facts.length > 96) {
+        if (
+          !Array.isArray(packetRow.exposure_facts) ||
+          packetRow.exposure_facts.length > 96
+        ) {
           throw new Error("invalid exposure facts");
         }
         const exposureKinds = new Set([
-          "filing", "contract", "backlog", "revenue", "capacity", "official_fund",
+          "filing",
+          "contract",
+          "backlog",
+          "revenue",
+          "capacity",
+          "official_fund",
         ]);
         const exposure_facts = packetRow.exposure_facts.map((value) => {
-          if (typeof value !== "object" || value === null || Array.isArray(value)) {
+          if (
+            typeof value !== "object" || value === null || Array.isArray(value)
+          ) {
             throw new Error("invalid exposure fact");
           }
           const fact = value as Record<string, unknown>;
           if (
             Object.keys(fact).length !== 6 ||
-            !["candidate_key", "evidence_id", "exposure_kind", "status", "observed_at", "retrieved_at"]
+            ![
+              "candidate_key",
+              "evidence_id",
+              "exposure_kind",
+              "status",
+              "observed_at",
+              "retrieved_at",
+            ]
               .every((key) => key in fact) ||
             !exposureKinds.has(String(fact.exposure_kind)) ||
             !["fresh", "stale"].includes(String(fact.status))
@@ -575,7 +613,9 @@ export function createSupabaseGatewayRepository(
           return {
             candidate_key: text(fact.candidate_key, 80),
             evidence_id: text(fact.evidence_id, 36),
-            exposure_kind: String(fact.exposure_kind) as PersistedExposureFact["exposure_kind"],
+            exposure_kind: String(
+              fact.exposure_kind,
+            ) as PersistedExposureFact["exposure_kind"],
             status: String(fact.status) as PersistedExposureFact["status"],
             observed_at: nullableText(fact.observed_at, 40),
             retrieved_at: text(fact.retrieved_at, 40),
@@ -684,9 +724,7 @@ export function createSupabaseGatewayRepository(
       );
       return {
         created_count: integer(row.created_count),
-        draft_ids: Array.isArray(row.draft_ids)
-          ? row.draft_ids.map((id) => text(id, 36))
-          : [],
+        draft_ids: Array.isArray(row.draft_ids) ? row.draft_ids.map((id) => text(id, 36)) : [],
       };
     },
 
@@ -737,9 +775,7 @@ export function createSupabaseGatewayRepository(
       }
       const evaluationIds = [
         ...new Set(
-          [...allDrafts.values()].map((row) =>
-            text(row.source_evaluation_id, 36)
-          ),
+          [...allDrafts.values()].map((row) => text(row.source_evaluation_id, 36)),
         ),
       ];
       const suggestionRows = evaluationIds.length === 0 ? [] : rows(
@@ -783,9 +819,7 @@ export function createSupabaseGatewayRepository(
         draft: Record<string, unknown>,
       ): AlertWorkItem => ({
         rule: alertRule,
-        recent_events: eventRows.filter((event) =>
-          event.rule_id === alertRule.rule_id
-        ).map((event) => ({
+        recent_events: eventRows.filter((event) => event.rule_id === alertRule.rule_id).map((event) => ({
           fingerprint: text(event.fingerprint, 64),
           status: text(event.status, 30) as AlertRecentEvent["status"],
           evaluated_at: text(event.evaluated_at, 40),
@@ -802,9 +836,7 @@ export function createSupabaseGatewayRepository(
           }
           return workItem(alertRuleFromRow(row), draft);
         }),
-        drafts: pendingDrafts.map((draft) =>
-          workItem(parseAlertDraft(draft.rule_snapshot), draft)
-        ),
+        drafts: pendingDrafts.map((draft) => workItem(parseAlertDraft(draft.rule_snapshot), draft)),
       };
     },
 
@@ -820,9 +852,7 @@ export function createSupabaseGatewayRepository(
       );
       return {
         event_count: integer(row.event_count),
-        event_ids: Array.isArray(row.event_ids)
-          ? row.event_ids.map((id) => text(id, 36))
-          : [],
+        event_ids: Array.isArray(row.event_ids) ? row.event_ids.map((id) => text(id, 36)) : [],
       };
     },
 
@@ -995,9 +1025,7 @@ export function createSupabaseGatewayRepository(
           ticker: text(row.ticker, 15),
           added: nullableText(row.added, 10),
           last_seen: nullableText(row.last_seen, 10),
-          days_relevant: row.days_relevant === null
-            ? null
-            : integer(row.days_relevant),
+          days_relevant: row.days_relevant === null ? null : integer(row.days_relevant),
           reason: nullableText(row.reason, 1000),
           bucket_guess: nullableText(
             row.bucket_guess,
@@ -1011,9 +1039,7 @@ export function createSupabaseGatewayRepository(
           horizon_days: integer(row.horizon_days),
           coverage_status: nullableText(row.coverage_status, 30),
           excess_return_pct: nullableDecimal(row.excess_return_pct),
-          direction_success: row.direction_success === null
-            ? null
-            : boole(row.direction_success),
+          direction_success: row.direction_success === null ? null : boole(row.direction_success),
         })),
         dry_powder: rows(results[8], "CONTEXT_TOO_LARGE").map((row) => ({
           month: text(row.month, 7),
@@ -1036,9 +1062,7 @@ export function createSupabaseGatewayRepository(
           ) as GatewayReadContext["paper_watches"][number][
             "agent_view_at_open"
           ],
-          agent_score_at_open: row.agent_score_at_open === null
-            ? null
-            : integer(row.agent_score_at_open),
+          agent_score_at_open: row.agent_score_at_open === null ? null : integer(row.agent_score_at_open),
         })),
       };
       if (
@@ -1063,9 +1087,7 @@ export function createSupabaseGatewayRepository(
           data: row.counts,
           error: null,
         }) as ArtifactReceipt["counts"],
-        created_paper_watch_ids: Array.isArray(row.paper_watch_ids)
-          ? row.paper_watch_ids.map(integer)
-          : [],
+        created_paper_watch_ids: Array.isArray(row.paper_watch_ids) ? row.paper_watch_ids.map(integer) : [],
       };
     },
 
@@ -1087,9 +1109,7 @@ export function createSupabaseGatewayRepository(
         stop: nullableDecimal(row.stop),
         target: nullableDecimal(row.target),
         invalidation_price: nullableDecimal(row.invalidation_price),
-        completed_horizons: Array.isArray(row.completed_horizons)
-          ? row.completed_horizons.map(integer)
-          : [],
+        completed_horizons: Array.isArray(row.completed_horizons) ? row.completed_horizons.map(integer) : [],
       }));
     },
 
@@ -1261,17 +1281,13 @@ export function createSupabaseGatewayRepository(
       }
       const statuses = publicationRows.map((row) => text(row.status, 30));
       const ids = publicationRows.flatMap((row) =>
-        Array.isArray(row.telegram_message_ids)
-          ? row.telegram_message_ids.map(integer)
-          : []
+        Array.isArray(row.telegram_message_ids) ? row.telegram_message_ids.map(integer) : []
       );
       const partial = requestRows.some((row) =>
         row.status === "failed" ||
         (row.status === "claimed" && row.operation !== "finish_run")
       ) ||
-        statuses.some((status) =>
-          status === "delivery_failed" || status === "delivery_unknown"
-        );
+        statuses.some((status) => status === "delivery_failed" || status === "delivery_unknown");
       const status: RunReceipt["status"] = partial ? "partial" : "completed";
       const update = await client.from("analysis_runs").update({
         status,

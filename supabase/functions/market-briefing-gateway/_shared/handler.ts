@@ -26,21 +26,9 @@ import {
 import { type DueDecision, gradeDecision } from "./outcomes.ts";
 import { evaluateCandidate, type PolicyEvaluation } from "./policy.ts";
 import { draftFromEvaluation } from "./policy.ts";
-import {
-  alertFingerprint,
-  alertRuleFingerprint,
-  evaluateAlertRule,
-  shouldPublishAlert,
-} from "./alerts.ts";
-import {
-  renderAlertV3,
-  type RenderedAlert,
-  renderPublication,
-} from "./renderer.ts";
-import {
-  comparePortfolioAlternative,
-  type PortfolioAlternativeComparison,
-} from "./alternatives.ts";
+import { alertFingerprint, alertRuleFingerprint, evaluateAlertRule, shouldPublishAlert } from "./alerts.ts";
+import { renderAlertV3, type RenderedAlert, renderPublication } from "./renderer.ts";
+import { comparePortfolioAlternative, type PortfolioAlternativeComparison } from "./alternatives.ts";
 import {
   analyzeLongTermCompanion,
   type CompanionRoleDecision,
@@ -72,6 +60,7 @@ import {
   type StartIntelligencePayload,
   summarizeIntelligencePayload,
 } from "./intelligence.ts";
+import { parseRecordReportPayload, type RecordReportPayload, renderReportDelivery } from "./reports.ts";
 
 export interface GatewayDependencies {
   repository: GatewayRepository;
@@ -99,6 +88,8 @@ export interface GatewayDependencies {
     chatId: string,
     token: string,
   ) => Promise<TelegramAlertReceipt>;
+  dashboardBaseUrl?: string;
+  dashboardAllowedOrigins?: string[];
 }
 
 const MAX_BODY_BYTES = 262_144;
@@ -234,8 +225,7 @@ function chicagoDate(now: Date): string {
     month: "2-digit",
     day: "2-digit",
   }).formatToParts(now);
-  const get = (type: Intl.DateTimeFormatPartTypes) =>
-    parts.find((part) => part.type === type)?.value ?? "";
+  const get = (type: Intl.DateTimeFormatPartTypes) => parts.find((part) => part.type === type)?.value ?? "";
   return `${get("year")}-${get("month")}-${get("day")}`;
 }
 
@@ -326,16 +316,13 @@ async function normalizeArtifacts(
     & Pick<GatewayDependencies, "repository">,
 ): Promise<PersistableArtifactMutationBatch> {
   const currentDate = chicagoDate(deps.now());
-  let context: Awaited<ReturnType<GatewayRepository["readContext"]>> | null =
-    null;
+  let context: Awaited<ReturnType<GatewayRepository["readContext"]>> | null = null;
   const output: PersistableArtifactMutation[] = [];
   for (const mutation of mutations) {
     if (mutation.kind === "paper_watch_create") {
       context ??= await deps.repository.readContext(runId);
       const quote = await deps.fetchQuote(mutation.ticker, deps.now());
-      const latest = context.recent_suggestions.find((item) =>
-        item.ticker === mutation.ticker
-      );
+      const latest = context.recent_suggestions.find((item) => item.ticker === mutation.ticker);
       output.push({
         ...mutation,
         entry_ref_price: quote.price,
@@ -365,11 +352,9 @@ export function createGatewayHandler(dependencies: GatewayDependencies) {
     fetchQuote: dependencies.fetchQuote ??
       ((ticker: string, now: Date) => fetchVerifiedQuote(ticker, fetch, now)),
     fetchHistory: dependencies.fetchHistory ??
-      ((ticker: string, range: AdjustedHistoryRange = "1y") =>
-        fetchAdjustedHistory(ticker, range, fetch)),
+      ((ticker: string, range: AdjustedHistoryRange = "1y") => fetchAdjustedHistory(ticker, range, fetch)),
     fetchAlertEvidence: dependencies.fetchAlertEvidence ??
-      ((ticker: string, now: Date) =>
-        fetchIntradayQuoteEvidence(ticker, fetch, now)),
+      ((ticker: string, now: Date) => fetchIntradayQuoteEvidence(ticker, fetch, now)),
     sendTelegram: dependencies.sendTelegram ?? sendTelegramParts,
     sendTelegramAlert: dependencies.sendTelegramAlert ?? sendTelegramAlert,
   };
@@ -390,9 +375,12 @@ export function createGatewayHandler(dependencies: GatewayDependencies) {
       envelope = parseGatewayEnvelope(await readBody(request));
       if (
         envelope.operation === "start_intelligence_run" ||
-        envelope.operation === "record_intelligence"
+        envelope.operation === "record_intelligence" ||
+        envelope.operation === "record_report"
       ) {
-        prepared = envelope.payload;
+        prepared = envelope.operation === "record_report"
+          ? parseRecordReportPayload(envelope.payload)
+          : envelope.payload;
       } else if (envelope.operation === "start_run") {
         prepared = parseStartPayload(envelope.payload, currentDate);
       } else if (envelope.operation === "record_artifacts") {
@@ -467,6 +455,27 @@ export function createGatewayHandler(dependencies: GatewayDependencies) {
             telegram_message_ids: [],
           });
         }
+        if (envelope.operation === "record_report") {
+          const delivery = renderReportDelivery(
+            prepared as RecordReportPayload,
+            {
+              dashboardBaseUrl: dependencies.dashboardBaseUrl ??
+                "https://invalid.local",
+              allowedDashboardOrigins: dependencies.dashboardAllowedOrigins ??
+                [],
+            },
+          );
+          return response(200, {
+            ok: true,
+            dry_run: true,
+            report_id: (prepared as RecordReportPayload).id,
+            publication_receipt: {
+              status: delivery.status,
+              telegram_message_ids: [],
+            },
+            telegram_message_ids: [],
+          });
+        }
         if (envelope.operation === "start_run") {
           return response(200, {
             ok: true,
@@ -536,9 +545,7 @@ export function createGatewayHandler(dependencies: GatewayDependencies) {
           deps,
         );
       } catch (error) {
-        const code = error instanceof GatewayRepositoryError
-          ? error.code
-          : "POLICY_REJECTED";
+        const code = error instanceof GatewayRepositoryError ? error.code : "POLICY_REJECTED";
         return response(errorStatus(code), { ok: false, code });
       }
     }
@@ -558,9 +565,7 @@ export function createGatewayHandler(dependencies: GatewayDependencies) {
           telegram_message_ids: [],
         });
       } catch (error) {
-        const code = error instanceof GatewayRepositoryError
-          ? error.code
-          : "PERSISTENCE_FAILED";
+        const code = error instanceof GatewayRepositoryError ? error.code : "PERSISTENCE_FAILED";
         return response(errorStatus(code), { ok: false, code });
       }
     }
@@ -582,13 +587,10 @@ export function createGatewayHandler(dependencies: GatewayDependencies) {
           telegram_message_ids: [],
         });
       } catch (error) {
-        const code = error instanceof GatewayRepositoryError
-          ? error.code
-          : "PERSISTENCE_FAILED";
+        const code = error instanceof GatewayRepositoryError ? error.code : "PERSISTENCE_FAILED";
         return response(errorStatus(code), { ok: false, code });
       }
     }
-
     let leaseToken: string | null = null;
     try {
       const claim = await deps.repository.claimRequest(envelope);
@@ -598,6 +600,84 @@ export function createGatewayHandler(dependencies: GatewayDependencies) {
       if (claim.duplicate) return response(200, objectValue(claim.response));
       leaseToken = claim.lease_token;
       if (!leaseToken) throw new GatewayRepositoryError("PERSISTENCE_FAILED");
+
+      if (envelope.operation === "record_report") {
+        if (!deps.repository.recordReport) {
+          throw new GatewayRepositoryError("PERSISTENCE_FAILED");
+        }
+        const payload = prepared as RecordReportPayload;
+        const delivery = renderReportDelivery(payload, {
+          dashboardBaseUrl: dependencies.dashboardBaseUrl ??
+            "https://invalid.local",
+          allowedDashboardOrigins: dependencies.dashboardAllowedOrigins ?? [],
+        });
+        let result: Record<string, unknown>;
+        if (delivery.status === "suppressed") {
+          result = {
+            ok: true,
+            report_id: null,
+            publication_receipt: {
+              status: "suppressed",
+              telegram_message_ids: [],
+            },
+            telegram_message_ids: [],
+          };
+        } else {
+          const receipt = await deps.repository.recordReport(
+            requireRun(envelope),
+            payload,
+          );
+          if (receipt.duplicate) {
+            result = {
+              ok: true,
+              ...receipt,
+              publication_receipt: {
+                status: "duplicate",
+                telegram_message_ids: [],
+              },
+              telegram_message_ids: [],
+            };
+          } else {
+            try {
+              const ids = await deps.sendTelegram(
+                delivery.parts,
+                deps.telegramChatId,
+                deps.telegramToken,
+              );
+              result = {
+                ok: true,
+                ...receipt,
+                publication_receipt: {
+                  status: "accepted_by_telegram",
+                  telegram_message_ids: ids,
+                },
+                telegram_message_ids: ids,
+              };
+            } catch (error) {
+              const deliveryError = error instanceof TelegramDeliveryError
+                ? error
+                : new TelegramDeliveryError("ambiguous", []);
+              const code = deliveryError.kind === "definitive" ? "DELIVERY_FAILED" : "DELIVERY_UNKNOWN";
+              result = {
+                ok: false,
+                code,
+                ...receipt,
+                publication_receipt: {
+                  status: deliveryError.kind === "definitive" ? "delivery_failed" : "delivery_unknown",
+                  telegram_message_ids: deliveryError.partialMessageIds,
+                },
+                telegram_message_ids: deliveryError.partialMessageIds,
+              };
+            }
+          }
+        }
+        await deps.repository.completeRequest(
+          envelope.request_id,
+          leaseToken,
+          result,
+        );
+        return response(result.ok === true ? 200 : 502, result);
+      }
 
       if (envelope.operation === "start_run") {
         const start = prepared as { phase: Phase; market_date: string };
@@ -667,9 +747,7 @@ export function createGatewayHandler(dependencies: GatewayDependencies) {
             delivered.status === "delivery_failed" ||
             delivered.status === "delivery_unknown"
           ) {
-            const code = delivered.status === "delivery_unknown"
-              ? "DELIVERY_UNKNOWN"
-              : "DELIVERY_FAILED";
+            const code = delivered.status === "delivery_unknown" ? "DELIVERY_UNKNOWN" : "DELIVERY_FAILED";
             await deps.repository.failRequest(
               envelope.request_id,
               leaseToken,
@@ -765,9 +843,7 @@ export function createGatewayHandler(dependencies: GatewayDependencies) {
           result.publication_status === "delivery_failed" ||
           result.publication_status === "delivery_unknown"
         ) {
-          const code = result.publication_status === "delivery_unknown"
-            ? "DELIVERY_UNKNOWN"
-            : "DELIVERY_FAILED";
+          const code = result.publication_status === "delivery_unknown" ? "DELIVERY_UNKNOWN" : "DELIVERY_FAILED";
           await deps.repository.failRequest(
             envelope.request_id,
             leaseToken,
@@ -790,9 +866,7 @@ export function createGatewayHandler(dependencies: GatewayDependencies) {
         deps,
       );
     } catch (error) {
-      const code = error instanceof GatewayRepositoryError
-        ? error.code
-        : "PERSISTENCE_FAILED";
+      const code = error instanceof GatewayRepositoryError ? error.code : "PERSISTENCE_FAILED";
       if (leaseToken) {
         try {
           await deps.repository.failRequest(
@@ -885,16 +959,10 @@ function evidenceForAlertRule(
       (rule.session === "all" ? "regular" : rule.session);
     return {
       condition_index: conditionIndex,
-      status: supported && intraday
-        ? "fresh"
-        : supported
-        ? "missing"
-        : "unsupported",
+      status: supported && intraday ? "fresh" : supported ? "missing" : "unsupported",
       market_session: marketSession,
       evidence_ids: supported && intraday
-        ? intraday.points.map((point) =>
-          `${intraday.source}:${point.observed_at}`
-        )
+        ? intraday.points.map((point) => `${intraday.source}:${point.observed_at}`)
         : [],
       points: supported && intraday ? intraday.points : [],
     };
@@ -906,9 +974,7 @@ function persistableAlertEvent(
   evaluation: AlertEvaluation,
   fingerprint: string,
 ): PersistableAlertEvent {
-  const session = evaluation.market_session === "all"
-    ? "regular"
-    : evaluation.market_session;
+  const session = evaluation.market_session === "all" ? "regular" : evaluation.market_session;
   return {
     id,
     rule_id: evaluation.rule.rule_id,
@@ -1013,17 +1079,13 @@ async function deliverReadyAlert(
       accepted.accepted_at,
     );
   } catch (error) {
-    const delivery = error instanceof TelegramDeliveryError
-      ? error
-      : new TelegramDeliveryError("ambiguous", []);
+    const delivery = error instanceof TelegramDeliveryError ? error : new TelegramDeliveryError("ambiguous", []);
     return await deps.repository.finishAlertPublication(
       persisted.idempotency_key,
       claim.lease_token,
       delivery.kind === "definitive" ? "delivery_failed" : "delivery_unknown",
       delivery.partialMessageIds,
-      delivery.kind === "definitive"
-        ? "TELEGRAM_REJECTED"
-        : "TELEGRAM_OUTCOME_UNKNOWN",
+      delivery.kind === "definitive" ? "TELEGRAM_REJECTED" : "TELEGRAM_OUTCOME_UNKNOWN",
       null,
     );
   }
@@ -1078,12 +1140,8 @@ async function evaluateAlertRules(
     return evidenceByTicker.get(ticker)!;
   };
 
-  const allowedRules = work.rules.filter((item) =>
-    alertRuleAllowed(item.rule, alertPolicy)
-  );
-  const allowedDrafts = work.drafts.filter((item) =>
-    alertRuleAllowed(item.rule, alertPolicy)
-  );
+  const allowedRules = work.rules.filter((item) => alertRuleAllowed(item.rule, alertPolicy));
+  const allowedDrafts = work.drafts.filter((item) => alertRuleAllowed(item.rule, alertPolicy));
   const evaluated = await Promise.all(allowedRules.map(async (item) => {
     const providerEvidence = await evidence(item.rule.ticker);
     const evaluation = evaluateAlertRule(
@@ -1100,15 +1158,13 @@ async function evaluateAlertRules(
     );
     const recordable = publishable || unsafeOutsideCooldown(item, evaluation);
     const eventId = deps.newId();
-    const rendered = evaluation.status === "not_triggered"
-      ? null
-      : await renderAlertV3({
-        event_id: eventId,
-        evaluation,
-        source_evaluation: null,
-        source_summary: item.source_summary,
-        context,
-      });
+    const rendered = evaluation.status === "not_triggered" ? null : await renderAlertV3({
+      event_id: eventId,
+      evaluation,
+      source_evaluation: null,
+      source_summary: item.source_summary,
+      context,
+    });
     return {
       item,
       evaluation,
@@ -1127,9 +1183,7 @@ async function evaluateAlertRules(
       reason_codes: [],
       observed_at: null,
       evaluated_at: now.toISOString(),
-      market_session: item.rule.session === "all"
-        ? "regular"
-        : item.rule.session,
+      market_session: item.rule.session === "all" ? "regular" : item.rule.session,
       condition_results: item.rule.conditions.map((condition) => ({
         condition,
         passed: null,
@@ -1162,9 +1216,7 @@ async function evaluateAlertRules(
       item.recordable &&
       (item.evaluation.status === "unsafe_to_evaluate" || item === chosenEvent)
     )
-    .map((item) =>
-      persistableAlertEvent(item.eventId, item.evaluation, item.fingerprint)
-    );
+    .map((item) => persistableAlertEvent(item.eventId, item.evaluation, item.fingerprint));
   const alertPreviews = evaluated.flatMap((item) =>
     item.rendered
       ? [{
@@ -1177,15 +1229,9 @@ async function evaluateAlertRules(
   );
   const base = {
     evaluated_rules: evaluated.length,
-    unsafe_evaluations:
-      evaluated.filter((item) =>
-        item.evaluation.status === "unsafe_to_evaluate"
-      ).length,
+    unsafe_evaluations: evaluated.filter((item) => item.evaluation.status === "unsafe_to_evaluate").length,
     would_write_events: persistables.length,
-    would_publish:
-      alertPolicy.enabled && (chosenEvent !== null || draftPreviews.length > 0)
-        ? 1
-        : 0,
+    would_publish: alertPolicy.enabled && (chosenEvent !== null || draftPreviews.length > 0) ? 1 : 0,
     shadow_publish_candidates: publishable.length,
     alert_events_recorded: 0,
     publication_status: "not_created" as AlertOperationPublicationStatus,
@@ -1224,9 +1270,7 @@ async function evaluateAlertRules(
     {
       id: publicationId,
       market_date: chicagoDate(now),
-      kind: chosenEvent
-        ? alertKind(chosenEvent.item.rule, chosenEvent.evaluation)
-        : alertKind(chosenDraft!.item.rule),
+      kind: chosenEvent ? alertKind(chosenEvent.item.rule, chosenEvent.evaluation) : alertKind(chosenDraft!.item.rule),
       rendered_body: rendered.body,
       rendered_hash: rendered.hash,
       event_ids: chosenEvent ? [chosenEvent.eventId] : [],
@@ -1273,9 +1317,7 @@ async function gradeDueDecisions(
       counts: {
         inserted: 0,
         updated: 0,
-        incomplete: grades.filter((grade) =>
-          grade.coverage_status !== "complete"
-        ).length,
+        incomplete: grades.filter((grade) => grade.coverage_status !== "complete").length,
       },
       would_grade: grades.length,
     };
@@ -1310,17 +1352,13 @@ async function deliverReadyPublication(
       null,
     );
   } catch (error) {
-    const delivery = error instanceof TelegramDeliveryError
-      ? error
-      : new TelegramDeliveryError("ambiguous", []);
+    const delivery = error instanceof TelegramDeliveryError ? error : new TelegramDeliveryError("ambiguous", []);
     return await deps.repository.finishPublication(
       persisted.idempotency_key,
       claim.lease_token,
       delivery.kind === "definitive" ? "delivery_failed" : "delivery_unknown",
       delivery.partialMessageIds,
-      delivery.kind === "definitive"
-        ? "TELEGRAM_REJECTED"
-        : "TELEGRAM_OUTCOME_UNKNOWN",
+      delivery.kind === "definitive" ? "TELEGRAM_REJECTED" : "TELEGRAM_OUTCOME_UNKNOWN",
     );
   }
 }
@@ -1336,7 +1374,9 @@ async function evaluateAndPublish(
     deps.repository.readContext(envelope.run_id),
     deps.repository.activePolicy(),
   ]);
-  if (packet !== null && packet.packet.policy_version !== activePolicy.version) {
+  if (
+    packet !== null && packet.packet.policy_version !== activePolicy.version
+  ) {
     throw new GatewayRepositoryError("INTELLIGENCE_PACKET_MISMATCH");
   }
   if (
@@ -1393,9 +1433,7 @@ async function evaluateAndPublish(
     context,
     deps,
   );
-  const suggestions = evaluations.map((evaluation) =>
-    suggestionFromEvaluation(evaluation, bundle.market_date)
-  )
+  const suggestions = evaluations.map((evaluation) => suggestionFromEvaluation(evaluation, bundle.market_date))
     .filter((item): item is Record<string, unknown> => item !== null);
   const alertDrafts: PersistableAlertDraft[] = [];
   for (const evaluation of evaluations) {
@@ -1420,9 +1458,7 @@ async function evaluateAndPublish(
   }
   const alertDraftPreviews = await Promise.all(
     alertDrafts.map(async (draft) => {
-      const source = evaluations.find((evaluation) =>
-        evaluation.evaluation_id === draft.source_evaluation_id
-      );
+      const source = evaluations.find((evaluation) => evaluation.evaluation_id === draft.source_evaluation_id);
       if (!source) throw new GatewayRepositoryError("POLICY_REJECTED");
       const previewEvaluation: AlertEvaluation = {
         rule: draft.rule_snapshot,
@@ -1430,9 +1466,7 @@ async function evaluateAndPublish(
         reason_codes: [],
         observed_at: source.normalized.quote_as_of,
         evaluated_at: deps.now().toISOString(),
-        market_session: draft.rule_snapshot.session === "all"
-          ? "regular"
-          : draft.rule_snapshot.session,
+        market_session: draft.rule_snapshot.session === "all" ? "regular" : draft.rule_snapshot.session,
         condition_results: draft.rule_snapshot.conditions.map((condition) => ({
           condition,
           passed: null,
@@ -1536,21 +1570,15 @@ async function evaluateAndPublish(
     suggestion_count: suggestions.length,
     alert_drafts_created: alertDraftsCreated,
     alert_draft_status: alertDraftStatus,
-    alert_draft_previews: activePolicy.alerts_v3?.shadow
-      ? alertDraftPreviews
-      : [],
+    alert_draft_previews: activePolicy.alerts_v3?.shadow ? alertDraftPreviews : [],
     comparison_count: comparisons.length,
     comparison_coverage: comparisonCoverage(comparisons),
     companion_status: companion?.qualification_status ??
       (bundle.comparisons ? "not_nominated" : "not_reviewed"),
     companion_analysis: companion,
     preview: bundle.phase === "on-demand" ? rendered.body : undefined,
-    ...(delivered.status === "delivery_unknown"
-      ? { code: "DELIVERY_UNKNOWN" }
-      : {}),
-    ...(delivered.status === "delivery_failed"
-      ? { code: "DELIVERY_FAILED" }
-      : {}),
+    ...(delivered.status === "delivery_unknown" ? { code: "DELIVERY_UNKNOWN" } : {}),
+    ...(delivered.status === "delivery_failed" ? { code: "DELIVERY_FAILED" } : {}),
   };
   if (
     delivered.status === "delivery_failed" ||
@@ -1575,10 +1603,12 @@ async function resolveIntelligencePacket(
   envelope: GatewayEnvelope,
   bundle: ReturnType<typeof parseDecisionBundle>,
   deps: ResolvedDependencies,
-): Promise<{
-  packet: EvidencePacket;
-  qualifiedExposureIds: Map<string, Set<string>>;
-} | null> {
+): Promise<
+  {
+    packet: EvidencePacket;
+    qualifiedExposureIds: Map<string, Set<string>>;
+  } | null
+> {
   const reference = bundle.intelligence_packet;
   const scheduled = bundle.phase !== "on-demand";
   if (!reference) {
@@ -1604,10 +1634,12 @@ async function resolveIntelligencePacket(
     for (const candidate of bundle.candidates) {
       qualifiedExposureIds.set(
         candidate.ticker,
-        new Set(candidate.evidence.filter((item) =>
-          item.exposure_kind != null && item.status === "fresh" &&
-          item.observed_at !== null
-        ).map((item) => item.id)),
+        new Set(
+          candidate.evidence.filter((item) =>
+            item.exposure_kind != null && item.status === "fresh" &&
+            item.observed_at !== null
+          ).map((item) => item.id),
+        ),
       );
     }
   } else {
@@ -1654,9 +1686,7 @@ async function buildPortfolioComparisons(
   if (requests.length === 0) return [];
   const ownerTickers = new Set([
     ...context.holdings.map((holding) => holding.ticker),
-    ...context.owner_plans.filter((plan) => plan.active).map((plan) =>
-      plan.ticker
-    ),
+    ...context.owner_plans.filter((plan) => plan.active).map((plan) => plan.ticker),
   ]);
   if (requests.some((request) => !ownerTickers.has(request.baseline_ticker))) {
     throw new GatewayRepositoryError("POLICY_REJECTED");
@@ -1677,23 +1707,17 @@ async function buildPortfolioComparisons(
     })),
   );
   return requests.map((request) => {
-    const alternative = evaluations.find((evaluation) =>
-      evaluation.candidate.ticker === request.alternative_ticker
-    );
+    const alternative = evaluations.find((evaluation) => evaluation.candidate.ticker === request.alternative_ticker);
     const evidenceAvailable = alternative !== undefined &&
       request.evidence_ids.every((id) => {
-        const evidence = alternative.candidate.evidence.find((item) =>
-          item.id === id
-        );
+        const evidence = alternative.candidate.evidence.find((item) => item.id === id);
         return evidence?.status === "fresh" || evidence?.status === "fallback";
       });
-    const checkedRequest =
-      alternative?.status === "approved" && evidenceAvailable ? request : {
-        ...request,
-        prospective_view: "insufficient" as const,
-        reason:
-          "Gateway policy or current evidence did not support a forward comparison conclusion.",
-      };
+    const checkedRequest = alternative?.status === "approved" && evidenceAvailable ? request : {
+      ...request,
+      prospective_view: "insufficient" as const,
+      reason: "Gateway policy or current evidence did not support a forward comparison conclusion.",
+    };
     return comparePortfolioAlternative(
       checkedRequest,
       histories.get(request.baseline_ticker) ?? [],
@@ -1714,9 +1738,7 @@ async function buildLongTermCompanion(
   if (!request) return undefined;
   const ownerTickers = new Set([
     ...context.holdings.map((holding) => holding.ticker),
-    ...context.owner_plans.filter((plan) => plan.active).map((plan) =>
-      plan.ticker
-    ),
+    ...context.owner_plans.filter((plan) => plan.active).map((plan) => plan.ticker),
   ]);
   if (!ownerTickers.has(request.baseline_ticker)) {
     throw new GatewayRepositoryError("POLICY_REJECTED");
@@ -1730,21 +1752,16 @@ async function buildLongTermCompanion(
   if (!rolePolicy.allowed) {
     return analyzeLongTermCompanion(request, [], [], rolePolicy);
   }
-  const evaluation = evaluations.find((item) =>
-    item.candidate.ticker === request.companion_ticker
-  );
+  const evaluation = evaluations.find((item) => item.candidate.ticker === request.companion_ticker);
   const evidenceAvailable = evaluation !== undefined &&
     request.evidence_ids.every((id) => {
-      const evidence = evaluation.candidate.evidence.find((item) =>
-        item.id === id
-      );
+      const evidence = evaluation.candidate.evidence.find((item) => item.id === id);
       return evidence?.status === "fresh" || evidence?.status === "fallback";
     });
   if (evaluation?.status !== "approved" || !evidenceAvailable) {
     const denied: CompanionRoleDecision = {
       allowed: false,
-      reason:
-        "Gateway policy or current evidence did not support a long-term companion conclusion.",
+      reason: "Gateway policy or current evidence did not support a long-term companion conclusion.",
       recurring_plan_review_eligible: false,
     };
     return analyzeLongTermCompanion(request, [], [], denied);
@@ -1766,8 +1783,7 @@ function comparisonCoverage(
 ): Record<string, number> {
   const counts: Record<string, number> = {};
   for (const comparison of comparisons) {
-    counts[comparison.coverage_status] =
-      (counts[comparison.coverage_status] ?? 0) + 1;
+    counts[comparison.coverage_status] = (counts[comparison.coverage_status] ?? 0) + 1;
   }
   return counts;
 }

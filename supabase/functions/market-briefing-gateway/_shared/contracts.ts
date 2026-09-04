@@ -4,6 +4,7 @@ import {
   type RecordIntelligencePayload,
   type StartIntelligencePayload,
 } from "./intelligence.ts";
+import { parseRecordReportPayload, type RecordReportPayload } from "./reports.ts";
 
 export type Operation =
   | "start_run"
@@ -14,7 +15,8 @@ export type Operation =
   | "evaluate_alert_rules"
   | "finish_run"
   | "start_intelligence_run"
-  | "record_intelligence";
+  | "record_intelligence"
+  | "record_report";
 export type Phase = "pre-market" | "intraday" | "post-market" | "on-demand";
 export type Action =
   | "buy"
@@ -517,6 +519,7 @@ const OPERATIONS: readonly Operation[] = [
   "finish_run",
   "start_intelligence_run",
   "record_intelligence",
+  "record_report",
 ];
 const PHASES: readonly Phase[] = [
   "pre-market",
@@ -606,8 +609,7 @@ const CANDIDATE_LIMITS: Record<Phase, number> = {
   "post-market": 80,
   "on-demand": 10,
 };
-const UUID_PATTERN =
-  /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const TICKER_PATTERN = /^[A-Z][A-Z0-9]*([.-][A-Z0-9]+)*$/;
 const DECIMAL_PATTERN = /^(?:0|[1-9]\d*)(?:\.\d+)?$/;
 const SIGNED_DECIMAL_PATTERN = /^-?(?:0|[1-9]\d*)(?:\.\d+)?$/;
@@ -798,6 +800,11 @@ export function parseGatewayEnvelope(value: unknown): GatewayEnvelope {
       throw new Error("run_id is required for record_intelligence");
     }
     payload = parseRecordIntelligencePayload(row.payload);
+  } else if (operation === "record_report") {
+    if (row.run_id === null) {
+      throw new Error("run_id is required for record_report");
+    }
+    payload = parseRecordReportPayload(row.payload);
   }
   return {
     schema_version: 1,
@@ -805,7 +812,11 @@ export function parseGatewayEnvelope(value: unknown): GatewayEnvelope {
     request_id: uuidValue(row.request_id, "request_id"),
     run_id: row.run_id === null ? null : uuidValue(row.run_id, "run_id"),
     dry_run: booleanValue(row.dry_run, "dry_run"),
-    payload,
+    payload: payload as
+      | unknown
+      | StartIntelligencePayload
+      | RecordIntelligencePayload
+      | RecordReportPayload,
   };
 }
 
@@ -910,9 +921,7 @@ function parseCandidate(
         factor.evidence_ids,
         `${factorPath}.evidence_ids`,
         20,
-      ).map((id, evidenceIndex) =>
-        stringValue(id, `${factorPath}.evidence_ids[${evidenceIndex}]`, 100)
-      );
+      ).map((id, evidenceIndex) => stringValue(id, `${factorPath}.evidence_ids[${evidenceIndex}]`, 100));
       for (const id of factorEvidenceIds) {
         if (!evidenceIds.has(id)) {
           throw new Error(`${factorPath} references unknown evidence id`);
@@ -948,9 +957,7 @@ function parseCandidate(
     `${path}.checker`,
   );
 
-  const validUntil = row.valid_until === null
-    ? null
-    : dateValue(row.valid_until, `${path}.valid_until`);
+  const validUntil = row.valid_until === null ? null : dateValue(row.valid_until, `${path}.valid_until`);
   return {
     candidate_id: uuidValue(row.candidate_id, `${path}.candidate_id`),
     ticker: tickerValue(row.ticker, `${path}.ticker`),
@@ -1030,18 +1037,14 @@ function parseCandidate(
     ),
     valid_until: validUntil,
     evidence,
-    relationship_type: !hasRelationshipType || row.relationship_type === null
-      ? null
-      : enumValue(
-        row.relationship_type,
-        ["direct", "second_order"] as const,
-        `${path}.relationship_type`,
-      ),
+    relationship_type: !hasRelationshipType || row.relationship_type === null ? null : enumValue(
+      row.relationship_type,
+      ["direct", "second_order"] as const,
+      `${path}.relationship_type`,
+    ),
     factors,
     analyst: {
-      id: !hasAnalystReceipt || analystRow.id === null
-        ? null
-        : uuidValue(analystRow.id, `${path}.analyst.id`),
+      id: !hasAnalystReceipt || analystRow.id === null ? null : uuidValue(analystRow.id, `${path}.analyst.id`),
       packet_id: !hasAnalystReceipt || analystRow.packet_id === null
         ? null
         : uuidValue(analystRow.packet_id, `${path}.analyst.packet_id`),
@@ -1058,9 +1061,7 @@ function parseCandidate(
       reason: stringValue(analystRow.reason, `${path}.analyst.reason`),
     },
     checker: {
-      id: !hasCheckerReceipt || checkerRow.id === null
-        ? null
-        : uuidValue(checkerRow.id, `${path}.checker.id`),
+      id: !hasCheckerReceipt || checkerRow.id === null ? null : uuidValue(checkerRow.id, `${path}.checker.id`),
       analyst_id: !hasCheckerReceipt || checkerRow.analyst_id === null
         ? null
         : uuidValue(checkerRow.analyst_id, `${path}.checker.analyst_id`),
@@ -1077,9 +1078,7 @@ function parseCandidate(
         checkerRow.reason_codes,
         `${path}.checker.reason_codes`,
         20,
-      ).map((code, index) =>
-        stringValue(code, `${path}.checker.reason_codes[${index}]`, 100)
-      ),
+      ).map((code, index) => stringValue(code, `${path}.checker.reason_codes[${index}]`, 100)),
       reason: stringValue(checkerRow.reason, `${path}.checker.reason`),
     },
     decisive_factor: stringValue(
@@ -1091,9 +1090,7 @@ function parseCandidate(
       row.prior_suggestion_ids,
       `${path}.prior_suggestion_ids`,
       20,
-    ).map((id, index) =>
-      stringValue(id, `${path}.prior_suggestion_ids[${index}]`, 100)
-    ),
+    ).map((id, index) => stringValue(id, `${path}.prior_suggestion_ids[${index}]`, 100)),
   };
 }
 
@@ -1137,9 +1134,7 @@ export function parseEvidencePacket(value: unknown): EvidencePacket {
         item.evidence_ids,
         `${candidatePath}.evidence_ids`,
         8,
-      ).map((id, evidenceIndex) =>
-        stringValue(id, `${candidatePath}.evidence_ids[${evidenceIndex}]`, 100)
-      );
+      ).map((id, evidenceIndex) => stringValue(id, `${candidatePath}.evidence_ids[${evidenceIndex}]`, 100));
       if (
         new Set(evidenceIds).size !== evidenceIds.length ||
         evidenceIds.some((id) => !knownEvidence.has(id))
@@ -1163,9 +1158,7 @@ export function parseEvidencePacket(value: unknown): EvidencePacket {
   }
   const coverage = objectValue(row.coverage, `${path}.coverage`);
   const limitations = arrayValue(row.limitations, `${path}.limitations`, 100)
-    .map((item, index) =>
-      stringValue(item, `${path}.limitations[${index}]`, 500)
-    );
+    .map((item, index) => stringValue(item, `${path}.limitations[${index}]`, 500));
   return {
     candidates,
     evidence,
@@ -1185,9 +1178,7 @@ function parseIntelligencePacketRef(value: unknown): IntelligencePacketRef {
   const hasPacket = Object.hasOwn(row, "packet");
   exactKeys(
     row,
-    hasPacket
-      ? ["id", "content_hash", "coverage", "packet"]
-      : ["id", "content_hash", "coverage"],
+    hasPacket ? ["id", "content_hash", "coverage", "packet"] : ["id", "content_hash", "coverage"],
     path,
   );
   const contentHash = stringValue(row.content_hash, `${path}.content_hash`, 64);
@@ -1214,14 +1205,10 @@ export function validatePacketEvidence(
   candidate: DecisionCandidate,
   packet: EvidencePacket,
 ): string[] {
-  const packetCandidate = packet.candidates.find((row) =>
-    row.candidate_key === candidate.ticker
-  );
+  const packetCandidate = packet.candidates.find((row) => row.candidate_key === candidate.ticker);
   if (!packetCandidate) return ["EVIDENCE_NOT_IN_PACKET"];
   const allowed = new Set(packetCandidate.evidence_ids);
-  return candidate.evidence.every((item) => allowed.has(item.id))
-    ? []
-    : ["EVIDENCE_NOT_IN_PACKET"];
+  return candidate.evidence.every((item) => allowed.has(item.id)) ? [] : ["EVIDENCE_NOT_IN_PACKET"];
 }
 
 export function parseDecisionBundle(
@@ -1274,9 +1261,7 @@ export function parseDecisionBundle(
     }
   }
   if (evidenceCount > 100) throw new Error("bundle exceeds evidence limit");
-  const intelligencePacket = hasIntelligencePacket
-    ? parseIntelligencePacketRef(row.intelligence_packet)
-    : undefined;
+  const intelligencePacket = hasIntelligencePacket ? parseIntelligencePacketRef(row.intelligence_packet) : undefined;
   if (hasComparisons && phase !== "pre-market" && phase !== "on-demand") {
     throw new Error(
       "portfolio comparisons are limited to pre-market and on-demand reviews",
@@ -1322,23 +1307,17 @@ export function parseDecisionBundle(
         ) {
           throw new Error(`${path} has an invalid comparison ticker`);
         }
-        const alternative = candidates.find((candidate) =>
-          candidate.ticker === alternativeTicker
-        )!;
+        const alternative = candidates.find((candidate) => candidate.ticker === alternativeTicker)!;
         const evidenceIds = arrayValue(
           comparison.evidence_ids,
           `${path}.evidence_ids`,
           10,
-        ).map((id, evidenceIndex) =>
-          stringValue(id, `${path}.evidence_ids[${evidenceIndex}]`, 100)
-        );
+        ).map((id, evidenceIndex) => stringValue(id, `${path}.evidence_ids[${evidenceIndex}]`, 100));
         if (
           evidenceIds.length === 0 ||
           evidenceIds.some((id) =>
             !alternative.evidence.some((evidence) => evidence.id === id) ||
-            !alternative.factors.some((factor) =>
-              factor.evidence_ids.includes(id)
-            )
+            !alternative.factors.some((factor) => factor.evidence_ids.includes(id))
           )
         ) {
           throw new Error(`${path} references unknown comparison evidence`);
@@ -1365,8 +1344,7 @@ export function parseDecisionBundle(
   if (comparisons) {
     const pairs = new Set<string>();
     for (const comparison of comparisons) {
-      const pair =
-        `${comparison.baseline_ticker}:${comparison.alternative_ticker}`;
+      const pair = `${comparison.baseline_ticker}:${comparison.alternative_ticker}`;
       if (pairs.has(pair)) {
         throw new Error("bundle has duplicate portfolio comparison");
       }
@@ -1421,16 +1399,12 @@ export function parseDecisionBundle(
       if (!pair) {
         throw new Error(`${path} requires a matching portfolio comparison`);
       }
-      const candidate = candidates.find((item) =>
-        item.ticker === companionTicker
-      )!;
+      const candidate = candidates.find((item) => item.ticker === companionTicker)!;
       const evidenceIds = arrayValue(
         proposal.evidence_ids,
         `${path}.evidence_ids`,
         10,
-      ).map((id, index) =>
-        stringValue(id, `${path}.evidence_ids[${index}]`, 100)
-      );
+      ).map((id, index) => stringValue(id, `${path}.evidence_ids[${index}]`, 100));
       if (
         evidenceIds.length === 0 ||
         evidenceIds.some((id) =>
@@ -1582,9 +1556,7 @@ function parseArtifact(value: unknown, path: string): ArtifactMutation {
           `${path}.bucket_guess`,
         ),
         promoted: booleanValue(row.promoted, `${path}.promoted`),
-        promoted_on: row.promoted_on === null
-          ? null
-          : dateValue(row.promoted_on, `${path}.promoted_on`),
+        promoted_on: row.promoted_on === null ? null : dateValue(row.promoted_on, `${path}.promoted_on`),
       };
     case "radar_delete":
       exactKeys(row, ["kind", "ticker"], path);
@@ -1652,8 +1624,6 @@ export function parseArtifactMutationBatch(
     throw new Error("artifact batch must not be empty");
   }
   return {
-    mutations: mutations.map((mutation, index) =>
-      parseArtifact(mutation, `artifact batch.mutations[${index}]`)
-    ),
+    mutations: mutations.map((mutation, index) => parseArtifact(mutation, `artifact batch.mutations[${index}]`)),
   };
 }
