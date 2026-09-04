@@ -346,7 +346,7 @@ git commit -m "feat: enforce owner-only dashboard API boundary"
 - Produces: allowlisted contract mappers consumed by the API handler.
 - Consumes: `@stocks-agent/dashboard-contracts` and no gateway/Telegram/provider module.
 
-- [ ] **Step 1: Write failing repository and freshness tests**
+- [x] **Step 1: Write failing repository and freshness tests**
 
 ```ts
 Deno.test("repository issues only fixed parameterized SELECT statements", async () => {
@@ -365,20 +365,20 @@ Deno.test("Friday close remains as-of-close over a weekend", () => {
 });
 ```
 
-- [ ] **Step 2: Run focused repository tests and verify RED**
+- [x] **Step 2: Run focused repository tests and verify RED**
 
 Run: `npx --yes deno@2.9.6 test --config supabase/functions/deno.json supabase/functions/owner-dashboard-api/repository_test.ts supabase/functions/owner-dashboard-api/freshness_test.ts supabase/functions/owner-dashboard-api/mappers_test.ts`
 
 Expected: FAIL because repository, freshness, and mappers are missing.
 
-- [ ] **Step 3: Implement the bounded database adapter and repository**
+- [x] **Step 3: Implement the bounded database adapter and repository**
 
 Use `npm:postgres@3.4.9`, one connection, five-second connect/statement timeouts, TLS required,
 prepared queries, and a validated Supavisor port-5432 URL. Write fixed tagged-template queries only;
 allow cursor and enum parameters but never table, column, sort, or SQL-fragment input. Cap holdings
 and plans at 100, list pages at 50, source arrays at 20, and raw text at contract limits.
 
-- [ ] **Step 4: Implement calendar-aware freshness and claim mappers**
+- [x] **Step 4: Implement calendar-aware freshness and claim mappers**
 
 Reuse the current NYSE holiday list and session helpers without calling the gateway. Apply the spec
 section 13 rules. Map `market_publications.status='delivered'` to sent only when message IDs exist;
@@ -386,14 +386,14 @@ map `suppressed` to an explicit no-send state; show policy approval only from th
 specific policy version; map only structured `companion_analysis`; and omit portfolio totals when a
 required price is absent or stale.
 
-- [ ] **Step 5: Wire all GET routes and verify GREEN**
+- [x] **Step 5: Wire all GET routes and verify GREEN**
 
 Run: `npx --yes deno@2.9.6 test --config supabase/functions/deno.json supabase/functions/owner-dashboard-api && npx --yes deno@2.9.6 check --config supabase/functions/deno.json supabase/functions/owner-dashboard-api/index.ts`
 
 Expected: all routes return contract version 1, bounded data, and `Cache-Control: no-store`; all tests
 and checks exit 0.
 
-- [ ] **Step 6: Commit Task 4**
+- [x] **Step 6: Commit Task 4**
 
 ```bash
 git add supabase/functions/owner-dashboard-api packages/dashboard-contracts

@@ -110,26 +110,36 @@ def collect_dashboard_privileges(connection) -> dict[str, Any]:
         row[0]
         for row in _fetch_all(
             connection,
-            """SELECT privilege_type FROM information_schema.usage_privileges
-                WHERE grantee = %s AND object_type = 'SCHEMA' AND object_name = 'public'""",
-            (PRIVILEGE_ROLE,),
+            """SELECT privilege
+                 FROM unnest(ARRAY['USAGE','CREATE']) privilege
+                WHERE pg_catalog.has_schema_privilege(%s, 'public', privilege)""",
+            (RUNTIME_ROLE,),
         )
     }
     table_privileges: dict[str, set[str]] = {}
     for table, privilege in _fetch_all(
         connection,
-        """SELECT table_name, privilege_type FROM information_schema.table_privileges
-            WHERE grantee = %s AND table_schema = 'public'""",
-        (PRIVILEGE_ROLE,),
+            """SELECT class.relname, privilege
+                 FROM pg_catalog.pg_class class
+                 JOIN pg_catalog.pg_namespace namespace ON namespace.oid = class.relnamespace
+                 CROSS JOIN unnest(ARRAY['SELECT','INSERT','UPDATE','DELETE','TRUNCATE','REFERENCES','TRIGGER']) privilege
+                WHERE namespace.nspname = 'public' AND class.relkind IN ('r','p','v','m')
+                  AND pg_catalog.has_table_privilege(%s, class.oid, privilege)""",
+        (RUNTIME_ROLE,),
     ):
         table_privileges.setdefault(table, set()).add(privilege)
     column_privileges: dict[str, set[str]] = {}
     for table, column, privilege in _fetch_all(
         connection,
-        """SELECT table_name, column_name, privilege_type
-             FROM information_schema.column_privileges
-            WHERE grantee = %s AND table_schema = 'public'""",
-        (PRIVILEGE_ROLE,),
+            """SELECT class.relname, attribute.attname, privilege
+                 FROM pg_catalog.pg_class class
+                 JOIN pg_catalog.pg_namespace namespace ON namespace.oid = class.relnamespace
+                 JOIN pg_catalog.pg_attribute attribute ON attribute.attrelid = class.oid
+                 CROSS JOIN unnest(ARRAY['SELECT','INSERT','UPDATE','REFERENCES']) privilege
+                WHERE namespace.nspname = 'public' AND class.relkind IN ('r','p','v','m')
+                  AND attribute.attnum > 0 AND NOT attribute.attisdropped
+                  AND pg_catalog.has_column_privilege(%s, class.oid, attribute.attnum, privilege)""",
+        (RUNTIME_ROLE,),
     ):
         if privilege != "SELECT":
             table_privileges.setdefault(table, set()).add(privilege)
@@ -139,10 +149,13 @@ def collect_dashboard_privileges(connection) -> dict[str, Any]:
         row[0]
         for row in _fetch_all(
             connection,
-            """SELECT routine_name FROM information_schema.routine_privileges
-                WHERE grantee IN (%s, %s) AND routine_schema = 'public'
-                  AND privilege_type = 'EXECUTE' ORDER BY routine_name""",
-            (PRIVILEGE_ROLE, RUNTIME_ROLE),
+            """SELECT procedure.oid::regprocedure::text
+                 FROM pg_catalog.pg_proc procedure
+                 JOIN pg_catalog.pg_namespace namespace ON namespace.oid = procedure.pronamespace
+                WHERE namespace.nspname = 'public'
+                  AND pg_catalog.has_function_privilege(%s, procedure.oid, 'EXECUTE')
+                ORDER BY procedure.oid::regprocedure::text""",
+            (RUNTIME_ROLE,),
         )
     ]
     owned_objects = [

@@ -5,6 +5,7 @@
     "lib": ["deno.ns", "dom", "dom.iterable", "esnext"]
   },
   "imports": {
-    "jose": "npm:jose@6.2.2"
+    "jose": "npm:jose@6.2.2",
+    "postgres": "npm:postgres@3.4.9"
   }
 }

@@ -5,7 +5,7 @@ import { DashboardHttpError, errorEnvelope } from "./errors.ts";
 import { resolveDashboardRoute, type DashboardRoute } from "./routes.ts";
 
 export interface DashboardReadResult {
-  data: Record<string, unknown>;
+  data: object;
   dataAsOf: string | null;
   freshness: Freshness;
   marketState: MarketState;
