@@ -11,6 +11,7 @@ export class DashboardHttpError extends Error {
     readonly status: number,
     readonly code: DashboardErrorCode,
     readonly publicMessage: string,
+    readonly retryAfterSeconds: number | null = null,
   ) {
     super(publicMessage);
     this.name = "DashboardHttpError";

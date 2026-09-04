@@ -2,6 +2,7 @@ import type { Freshness, MarketState } from "../../../packages/dashboard-contrac
 
 import { corsHeaders, preflightResponse, requireAllowedOrigin } from "./cors.ts";
 import { DashboardHttpError, errorEnvelope } from "./errors.ts";
+import { clientNetworkSignal, createDashboardRateLimiter, type DashboardRateLimiter } from "./rate-limit.ts";
 import { resolveDashboardRoute, type DashboardRoute } from "./routes.ts";
 
 export interface DashboardReadResult {
@@ -24,6 +25,7 @@ export interface DashboardHandlerDependencies {
   repository: DashboardReader;
   now?: () => Date;
   requestId?: () => string;
+  rateLimiter?: DashboardRateLimiter;
 }
 
 const OWNER_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
@@ -36,8 +38,10 @@ function baseHeaders(origin: string | null): Headers {
   return headers;
 }
 
-function jsonResponse(body: unknown, status: number, origin: string | null): Response {
-  return new Response(JSON.stringify(body), { status, headers: baseHeaders(origin) });
+function jsonResponse(body: unknown, status: number, origin: string | null, retryAfterSeconds: number | null = null): Response {
+  const headers = baseHeaders(origin);
+  if (retryAfterSeconds !== null) headers.set("retry-after", String(retryAfterSeconds));
+  return new Response(JSON.stringify(body), { status, headers });
 }
 
 export function createOwnerDashboardHandler(
@@ -45,6 +49,7 @@ export function createOwnerDashboardHandler(
 ): (request: Request) => Promise<Response> {
   const now = dependencies.now ?? (() => new Date());
   const requestId = dependencies.requestId ?? crypto.randomUUID;
+  const rateLimiter = dependencies.rateLimiter ?? createDashboardRateLimiter();
 
   return async (request: Request): Promise<Response> => {
     const id = requestId();
@@ -53,7 +58,6 @@ export function createOwnerDashboardHandler(
       if (request.method === "OPTIONS") {
         return preflightResponse(request, dependencies.allowedOrigins);
       }
-      origin = requireAllowedOrigin(request, dependencies.allowedOrigins);
       if (!OWNER_PATTERN.test(dependencies.ownerUserId) || dependencies.allowedOrigins.length === 0) {
         throw new DashboardHttpError(
           503,
@@ -61,11 +65,26 @@ export function createOwnerDashboardHandler(
           "Dashboard access is unavailable.",
         );
       }
+      origin = requireAllowedOrigin(request, dependencies.allowedOrigins);
+      const instant = now();
+      const preAuthRetry = rateLimiter.check(
+        "pre_auth",
+        `${origin}|${clientNetworkSignal(request)}`,
+        instant,
+      );
+      if (preAuthRetry !== null) {
+        throw new DashboardHttpError(429, "rate_limited", "Too many requests. Try again shortly.", preAuthRetry);
+      }
+      let verified: { subject: string };
       try {
-        await dependencies.verifyOwner(request);
+        verified = await dependencies.verifyOwner(request);
       } catch (cause) {
         if (cause instanceof DashboardHttpError) throw cause;
         throw new DashboardHttpError(401, "unauthorized", "Your session is invalid or expired.");
+      }
+      const ownerRetry = rateLimiter.check("owner", `${verified.subject}|${origin}`, instant);
+      if (ownerRetry !== null) {
+        throw new DashboardHttpError(429, "rate_limited", "Too many requests. Try again shortly.", ownerRetry);
       }
       const url = new URL(request.url);
       const route = resolveDashboardRoute(request.method, url.pathname, url.searchParams);
@@ -85,7 +104,7 @@ export function createOwnerDashboardHandler(
       const error = cause instanceof DashboardHttpError
         ? cause
         : new DashboardHttpError(503, "temporarily_unavailable", "Dashboard data is temporarily unavailable.");
-      return jsonResponse(errorEnvelope(id, error), error.status, origin);
+      return jsonResponse(errorEnvelope(id, error), error.status, origin, error.retryAfterSeconds);
     }
   };
 }

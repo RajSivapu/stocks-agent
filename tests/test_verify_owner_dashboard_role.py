@@ -1,7 +1,10 @@
+from pathlib import Path
+
 import pytest
 
 from scripts.verify_owner_dashboard_role import (
     EXPECTED_COLUMNS,
+    collect_dashboard_privileges,
     evaluate_dashboard_privileges,
 )
 
@@ -62,3 +65,39 @@ def test_privilege_verifier_rejects_every_authority_expansion(mutation, message)
     mutation(snapshot)
     with pytest.raises(RuntimeError, match=message):
         evaluate_dashboard_privileges(snapshot)
+
+
+def test_privilege_collector_executes_static_queries_without_empty_parameter_tuple():
+    calls = []
+
+    class Cursor:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        def execute(self, *args):
+            calls.append(args)
+
+        def fetchall(self):
+            return []
+
+    class Connection:
+        def cursor(self):
+            return Cursor()
+
+    collect_dashboard_privileges(Connection())
+    policy_calls = [args for args in calls if "pg_policies" in args[0]]
+    assert len(policy_calls) == 1
+    assert len(policy_calls[0]) == 1
+
+
+def test_dashboard_migration_revokes_trigger_function_execution_and_future_public_defaults():
+    migration = (
+        Path(__file__).parents[1]
+        / "sql/migrations/20260906_owner_dashboard_read_role.sql"
+    ).read_text()
+    assert "reject_decision_evaluation_mutation() FROM PUBLIC" in migration
+    assert "reject_market_alert_ledger_mutation() FROM PUBLIC" in migration
+    assert "ALTER DEFAULT PRIVILEGES IN SCHEMA public REVOKE EXECUTE ON FUNCTIONS FROM PUBLIC" in migration

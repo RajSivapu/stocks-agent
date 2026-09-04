@@ -2287,6 +2287,10 @@ ALTER ROLE stock_agent_dashboard
 REVOKE ALL PRIVILEGES ON SCHEMA public FROM stock_agent_dashboard;
 GRANT USAGE ON SCHEMA public TO stock_agent_dashboard;
 
+REVOKE ALL ON FUNCTION public.reject_decision_evaluation_mutation() FROM PUBLIC, stock_agent_dashboard;
+REVOKE ALL ON FUNCTION public.reject_market_alert_ledger_mutation() FROM PUBLIC, stock_agent_dashboard;
+ALTER DEFAULT PRIVILEGES IN SCHEMA public REVOKE EXECUTE ON FUNCTIONS FROM PUBLIC;
+
 REVOKE ALL PRIVILEGES ON TABLE
   public.holdings,
   public.transactions,
@@ -2330,7 +2334,7 @@ GRANT SELECT (id, suggestion_id, graded_at, result, price_then, price_later, hor
   ON public.suggestion_grades TO stock_agent_dashboard;
 GRANT SELECT (id, idempotency_key, run_id, market_date, phase, kind, template_version,
               rendered_body, rendered_hash, status, telegram_message_ids, attempt_count,
-              sending_started_at, delivered_at, error, created_at, updated_at,
+              sending_started_at, delivered_at, created_at, updated_at,
               telegram_accepted_at)
   ON public.market_publications TO stock_agent_dashboard;
 GRANT SELECT (version, config, active, created_at, activated_at)

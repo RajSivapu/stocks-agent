@@ -125,6 +125,7 @@ function evaluation(
       verified_price: "47.02",
       quote_as_of: "2026-09-03T11:00:00.000Z",
       quote_source: "yahoo-chart",
+      quote_market_state: "PRE",
       position_value_after: "470.2",
       total_investable_value: "40500",
       dollars_at_risk: "50.2",

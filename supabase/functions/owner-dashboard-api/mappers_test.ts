@@ -3,6 +3,7 @@ import {
   mapIdea,
   mapPortfolio,
   mapPublicationReceipt,
+  mapRun,
 } from "./mappers.ts";
 
 function assertEquals(actual: unknown, expected: unknown): void {
@@ -86,4 +87,33 @@ Deno.test("portfolio omits derived totals when any required price is missing or 
   assertEquals(mapPortfolio(holdings, [], []).totals.value, "220");
   assertEquals(mapPortfolio([{ ...holdings[0], price_freshness: "stale" }], [], []).totals.value, null);
   assertEquals(mapPortfolio([{ ...holdings[0], price: null }], [], []).totals.unrealized_amount, null);
+});
+
+Deno.test("publication errors are never forwarded as suppression copy", () => {
+  const mapped = mapPublicationReceipt({
+    id: "alert-1",
+    kind: "brief",
+    phase: "intraday",
+    status: "suppressed",
+    rendered_body: "No trigger.",
+    rendered_hash: "a".repeat(64),
+    template_version: "3",
+    telegram_message_ids: [],
+    attempt_count: 0,
+    created_at: "2026-09-03T18:00:00.000Z",
+    error: "https://api.telegram.org/bot-secret/sendMessage?chat_id=123",
+  });
+  assertEquals(mapped.suppression_reason, null);
+  assertEquals(JSON.stringify(mapped).includes("bot-secret"), false);
+});
+
+Deno.test("unknown run values remain unknown rather than inventing receipt attributes", () => {
+  const mapped = mapRun({
+    id: "7d834dbd-75bb-4313-931f-09732f003932",
+    kind: "future-phase",
+    status: "future-status",
+    started_at: "2026-09-03T18:00:00.000Z",
+  });
+  assertEquals(mapped.kind, "unknown");
+  assertEquals(mapped.status, "unknown");
 });

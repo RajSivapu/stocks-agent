@@ -39,7 +39,7 @@ function optionalBounded(
   if (value === undefined) return undefined;
   if (
     value.length < 1 || value.length > 512 ||
-    (name === "cursor" && !/^\d{1,5}$/.test(value)) ||
+    (name === "cursor" && !/^[A-Za-z0-9_-]{8,512}$/.test(value)) ||
     (allowed && !allowed.has(value))
   ) {
     throw new DashboardHttpError(400, "invalid_request", `Invalid ${name}.`);

@@ -52,3 +52,25 @@ Deno.test("missing or future evidence is unavailable", () => {
     sourceMarketState: "REGULAR",
   }, new Date("2026-09-03T18:00:00.000Z"), calendar).freshness, "unavailable");
 });
+
+Deno.test("scheduled receipts remain current across a closed weekend and holiday", () => {
+  const result = classifyFreshness({
+    kind: "brief",
+    phase: "post-market",
+    status: "delivered",
+    dataAsOf: "2026-09-04T20:10:00.000Z",
+  }, new Date("2026-09-07T17:00:00.000Z"), calendar);
+  assertEquals(result.freshness, "fresh");
+  assertEquals(result.marketState, "holiday");
+});
+
+Deno.test("the prior close becomes stale after the next pre-market deadline", () => {
+  const result = classifyFreshness({
+    kind: "run",
+    phase: "post-market",
+    status: "completed",
+    dataAsOf: "2026-09-04T20:10:00.000Z",
+  }, new Date("2026-09-08T12:05:00.000Z"), calendar);
+  assertEquals(result.freshness, "stale");
+  assertEquals(result.marketState, "pre_market");
+});

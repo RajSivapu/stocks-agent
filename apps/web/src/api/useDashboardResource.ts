@@ -13,6 +13,7 @@ export function useDashboardResource<T>(
   client: DashboardClient,
   path: string,
   token: string,
+  onError?: (error: Error) => void,
 ): ResourceState<T> {
   const [state, setState] = useState<ResourceState<T>>({ status: "loading", envelope: null, error: null });
   useEffect(() => {
@@ -21,12 +22,16 @@ export function useDashboardResource<T>(
     void client.get<T>(path, token).then((envelope) => {
       if (active) setState({ status: "ready", envelope, error: null });
     }).catch((error: unknown) => {
-      if (active) setState({ status: "error", envelope: null, error: error instanceof Error ? error : new Error("Dashboard unavailable.") });
+      if (active) {
+        const bounded = error instanceof Error ? error : new Error("Dashboard unavailable.");
+        setState({ status: "error", envelope: null, error: bounded });
+        onError?.(bounded);
+      }
     });
     return () => {
       active = false;
       setState({ status: "loading", envelope: null, error: null });
     };
-  }, [client, path, token]);
+  }, [client, onError, path, token]);
   return state;
 }

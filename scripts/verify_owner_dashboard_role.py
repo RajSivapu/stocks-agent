@@ -22,7 +22,7 @@ EXPECTED_COLUMNS: dict[str, set[str]] = {
     "decision_evaluations": {"id", "request_id", "run_id", "candidate_id", "policy_version", "raw_action", "final_action", "policy_status", "reason_codes", "explanations", "normalized", "evidence", "analyst", "checker", "created_at"},
     "suggestions": {"id", "ts", "date", "ticker", "action", "bucket", "depth", "entry_zone_low", "entry_zone_high", "valid_until", "stop", "target", "confidence", "bull", "bear", "decisive_factor", "risk_verdict", "invalidation_level", "reason", "score", "risk_band", "price_at_suggestion", "run_id", "evidence_as_of", "invalidation_price", "evaluation_id", "decision_source", "decision_mode"},
     "suggestion_grades": {"id", "suggestion_id", "graded_at", "result", "price_then", "price_later", "horizon_days", "note"},
-    "market_publications": {"id", "idempotency_key", "run_id", "market_date", "phase", "kind", "template_version", "rendered_body", "rendered_hash", "status", "telegram_message_ids", "attempt_count", "sending_started_at", "delivered_at", "error", "created_at", "updated_at", "telegram_accepted_at"},
+    "market_publications": {"id", "idempotency_key", "run_id", "market_date", "phase", "kind", "template_version", "rendered_body", "rendered_hash", "status", "telegram_message_ids", "attempt_count", "sending_started_at", "delivered_at", "created_at", "updated_at", "telegram_accepted_at"},
     "market_policy_config": {"version", "config", "active", "created_at", "activated_at"},
     "market_alert_drafts": {"id", "request_id", "source_evaluation_id", "rule_snapshot", "fingerprint", "state", "publication_id", "expires_at", "created_at", "updated_at"},
     "market_alert_rules": {"id", "source_draft_id", "current_version", "state", "ticker", "profile", "severity", "session", "confirmation", "conditions", "cooldown_seconds", "fire_limit", "trigger_count", "valid_until", "snoozed_until", "owner_note", "armed_at", "last_triggered_at", "updated_at"},
@@ -78,7 +78,10 @@ def evaluate_dashboard_privileges(snapshot: dict[str, Any]) -> dict[str, object]
 
 def _fetch_all(connection, query: str, parameters: tuple[object, ...] = ()):
     with connection.cursor() as cursor:
-        cursor.execute(query, parameters)
+        if parameters:
+            cursor.execute(query, parameters)
+        else:
+            cursor.execute(query)
         return cursor.fetchall()
 
 

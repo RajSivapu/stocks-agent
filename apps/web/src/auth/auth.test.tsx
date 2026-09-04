@@ -42,6 +42,18 @@ it("requests OTP with account creation disabled", async () => {
   expect(await screen.findByLabelText(/six-digit code/i)).toBeVisible();
 });
 
+it("uses the same neutral code step when the OTP request fails", async () => {
+  const authClient = client();
+  authClient.signInWithOtp.mockResolvedValue({ error: new Error("user not found") });
+  const user = userEvent.setup();
+  render(<AuthProvider client={authClient}><Screen /></AuthProvider>);
+  await user.type(screen.getByLabelText(/email/i), "unknown@example.com");
+  await user.click(screen.getByRole("button", { name: /send code/i }));
+  expect(await screen.findByLabelText(/six-digit code/i)).toBeVisible();
+  expect(screen.getByText(/if this is the owner account/i)).toBeVisible();
+  expect(screen.queryByText(/user not found|could not be sent/i)).not.toBeInTheDocument();
+});
+
 it("verifies the emailed code and signs out globally", async () => {
   const session = { access_token: "owner-token", user: { id: "owner-id" } };
   const authClient = client(session);

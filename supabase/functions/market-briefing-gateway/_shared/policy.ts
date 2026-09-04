@@ -40,6 +40,7 @@ export interface PolicyEvaluation {
     verified_price: string;
     quote_as_of: string;
     quote_source: string;
+    quote_market_state: string;
     position_value_after: string | null;
     total_investable_value: string | null;
     dollars_at_risk: string | null;
@@ -510,6 +511,7 @@ export function evaluateCandidate(
       verified_price: verifiedQuote?.price ?? "0",
       quote_as_of: verifiedQuote?.as_of ?? "",
       quote_source: verifiedQuote?.source ?? "",
+      quote_market_state: verifiedQuote?.market_state ?? "",
       position_value_after: positionValueAfter === null ? null : formatFixed(positionValueAfter, 6),
       total_investable_value: totalInvestable === null ? null : formatFixed(totalInvestable, 6),
       dollars_at_risk: dollarsAtRisk === null ? null : formatFixed(dollarsAtRisk, 6),

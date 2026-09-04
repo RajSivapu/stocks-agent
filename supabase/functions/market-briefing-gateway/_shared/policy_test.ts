@@ -293,6 +293,11 @@ Deno.test("outside-session research is conditional and cannot emit an entry trig
   assert(trigger.reason_codes.includes("QUOTE_SESSION_MISMATCH"), "outside entry trigger was not vetoed");
 });
 
+Deno.test("normalized decisions preserve the verified provider market state", () => {
+  const result = evaluate(candidate(), context(), quote("CENX", "47.02", "2026-09-02T16:55:00.000Z", "REGULAR"));
+  assertEquals(result.normalized.quote_market_state, "REGULAR");
+});
+
 Deno.test("calendar coverage and pre-market entry triggers fail closed", () => {
   const missingCalendar = config();
   missingCalendar.market_calendar_year = 2025;

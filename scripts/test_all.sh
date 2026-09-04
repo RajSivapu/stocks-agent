@@ -18,6 +18,7 @@ npm test --workspace @stocks-agent/web -- --run
 npm run typecheck --workspace @stocks-agent/dashboard-contracts
 npm run typecheck --workspace @stocks-agent/web
 npm run lint --workspace @stocks-agent/web
+node scripts/check_dependency_licenses.mjs
 VITE_SUPABASE_URL=https://test-project.supabase.co \
 VITE_DASHBOARD_API_URL=https://test-project.supabase.co/functions/v1/owner-dashboard-api \
 VITE_SUPABASE_PUBLISHABLE_KEY=sb_publishable_test \

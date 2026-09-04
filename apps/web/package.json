@@ -6,6 +6,7 @@
   "scripts": {
     "dev": "vite",
     "test": "vitest run",
+    "pretest:e2e": "VITE_SUPABASE_URL=https://test-project.supabase.co VITE_DASHBOARD_API_URL=https://test-project.supabase.co/functions/v1/owner-dashboard-api VITE_SUPABASE_PUBLISHABLE_KEY=sb_publishable_test vite build",
     "test:e2e": "playwright test",
     "typecheck": "tsc --noEmit",
     "lint": "eslint .",

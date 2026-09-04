@@ -53,6 +53,25 @@ function tradingDay(date: string, calendar: MarketCalendar): boolean {
   return DATE_PATTERN.test(date) && !weekend(date) && !calendar.holidays.includes(date);
 }
 
+const SCHEDULED_PHASES = ["pre-market", "intraday", "post-market"] as const;
+
+function phaseRank(phase: string | null | undefined): number {
+  return SCHEDULED_PHASES.indexOf(phase as typeof SCHEDULED_PHASES[number]);
+}
+
+function expectedPhase(now: Date, calendar: MarketCalendar): { date: string; minimumRank: number } {
+  const local = localParts(now);
+  if (!tradingDay(local.date, calendar)) {
+    return { date: previousTradingDay(local.date, calendar), minimumRank: 2 };
+  }
+  if (local.minutes < 8 * 60) {
+    return { date: previousTradingDay(local.date, calendar), minimumRank: 2 };
+  }
+  if (local.minutes < 13 * 60 + 30) return { date: local.date, minimumRank: 0 };
+  if (local.minutes < 16 * 60 + 40) return { date: local.date, minimumRank: 1 };
+  return { date: local.date, minimumRank: 2 };
+}
+
 function previousTradingDay(date: string, calendar: MarketCalendar): string {
   let cursor = addDays(date, -1);
   for (let count = 0; count < 12; count += 1) {
@@ -104,6 +123,9 @@ export function classifyFreshness(
         dataAsOf: canonical,
       };
     }
+    if (sourceState !== "CLOSED") {
+      return { freshness: "unavailable", marketState: state, dataAsOf: canonical };
+    }
     const expectedClose = latestCompletedSession(now, calendar);
     const stillBeforeNextOpen = sourceDate === expectedClose && state !== "regular";
     return {
@@ -116,10 +138,19 @@ export function classifyFreshness(
   if (input.status && !["completed", "suppressed", "delivered"].includes(input.status)) {
     return { freshness: "partial", marketState: state, dataAsOf: canonical };
   }
-  const ageHours = (now.valueOf() - instant.valueOf()) / 3_600_000;
-  const limit = input.kind === "brief" ? 24 : 18;
+  if (input.phase === "on-demand") {
+    const ageDays = (now.valueOf() - instant.valueOf()) / 86_400_000;
+    return { freshness: ageDays <= 30 ? "fresh" : "stale", marketState: state, dataAsOf: canonical };
+  }
+  if (input.phase === "weekly-audit") {
+    const ageDays = (now.valueOf() - instant.valueOf()) / 86_400_000;
+    return { freshness: ageDays <= 8 ? "fresh" : "stale", marketState: state, dataAsOf: canonical };
+  }
+  const expected = expectedPhase(now, calendar);
+  const receiptDate = localParts(instant).date;
+  const receiptRank = phaseRank(input.phase);
   return {
-    freshness: ageHours <= limit ? "fresh" : "stale",
+    freshness: receiptDate === expected.date && receiptRank >= expected.minimumRank ? "fresh" : "stale",
     marketState: state,
     dataAsOf: canonical,
   };

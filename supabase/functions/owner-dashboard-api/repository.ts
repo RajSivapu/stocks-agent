@@ -27,6 +27,7 @@ const HOLDINGS = `SELECT h.ticker, h.shares, h.avg_cost, h.bucket, h.opened_at, 
        latest.normalized->>'verified_price' AS price,
        latest.normalized->>'quote_as_of' AS price_as_of,
        latest.normalized->>'quote_source' AS price_source,
+       latest.normalized->>'quote_market_state' AS price_market_state,
        latest.created_at AS price_receipt_at
   FROM public.holdings h
   LEFT JOIN LATERAL (
@@ -42,7 +43,8 @@ const PLANS = `SELECT id, ticker, bucket, amount, cadence, next_due_on, due_day,
   FROM public.owner_investment_plans ORDER BY active DESC, next_due_on, ticker LIMIT 100`;
 
 const TRANSACTIONS = `SELECT id, ts, ticker, side, qty, price, source, executed_on
-  FROM public.transactions ORDER BY id DESC OFFSET $1 LIMIT 51`;
+  FROM public.transactions WHERE ($1::bigint IS NULL OR id < $1::bigint)
+ ORDER BY id DESC LIMIT 51`;
 
 const IDEAS = `SELECT s.id, s.ticker, s.action, s.bucket, s.depth AS profile, s.entry_zone_low,
        s.entry_zone_high, s.valid_until, s.stop, s.target, s.confidence, s.bull, s.bear,
@@ -52,7 +54,8 @@ const IDEAS = `SELECT s.id, s.ticker, s.action, s.bucket, s.depth AS profile, s.
   FROM public.suggestions s
   LEFT JOIN public.decision_evaluations de ON de.id = s.evaluation_id
  WHERE ($1::text IS NULL OR de.policy_status = $1)
- ORDER BY s.id DESC OFFSET $2 LIMIT 51`;
+   AND ($2::bigint IS NULL OR s.id < $2::bigint)
+ ORDER BY s.id DESC LIMIT 51`;
 
 const COMPANION = `SELECT request_id, response, finished_at
   FROM public.market_gateway_requests
@@ -62,7 +65,7 @@ const COMPANION = `SELECT request_id, response, finished_at
 
 const ALERTS = `SELECT p.id, p.kind, p.phase, p.status, p.rendered_body, p.rendered_hash,
        p.template_version, p.telegram_message_ids, p.attempt_count, p.created_at,
-       p.delivered_at, p.error AS suppression_reason,
+       p.delivered_at,
        (SELECT r.ticker FROM public.market_alert_drafts d
           JOIN public.market_alert_rules r ON r.source_draft_id = d.id
          WHERE d.publication_id = p.id LIMIT 1) AS rule_ticker,
@@ -72,10 +75,21 @@ const ALERTS = `SELECT p.id, p.kind, p.phase, p.status, p.rendered_body, p.rende
        (SELECT e.status FROM public.market_alert_events e
          WHERE e.publication_id = p.id ORDER BY e.persisted_at DESC LIMIT 1) AS event_status,
        (SELECT a.action FROM public.market_alert_actions a
-         WHERE a.publication_id = p.id ORDER BY a.received_at DESC LIMIT 1) AS owner_action
+         WHERE a.publication_id = p.id ORDER BY a.received_at DESC LIMIT 1) AS owner_action,
+       COALESCE(
+         (SELECT de.evidence FROM public.market_alert_drafts d
+            JOIN public.decision_evaluations de ON de.id = d.source_evaluation_id
+           WHERE d.publication_id = p.id LIMIT 1),
+         (SELECT de.evidence FROM public.market_alert_events e
+            JOIN public.market_alert_rules r ON r.id = e.rule_id
+            JOIN public.market_alert_drafts d ON d.id = r.source_draft_id
+            JOIN public.decision_evaluations de ON de.id = d.source_evaluation_id
+           WHERE e.publication_id = p.id ORDER BY e.persisted_at DESC LIMIT 1)
+       ) AS sources
   FROM public.market_publications p
  WHERE ($1::text IS NULL OR p.status = $1)
- ORDER BY p.created_at DESC OFFSET $2 LIMIT 51`;
+   AND ($2::timestamptz IS NULL OR (p.created_at, p.id) < ($2::timestamptz, $3::uuid))
+ ORDER BY p.created_at DESC, p.id DESC LIMIT 51`;
 
 const RUNS = `SELECT r.id, r.kind, r.status, r.started_at, r.finished_at, r.data_as_of,
        r.summary, r.write_counts, r.telegram_message_ids,
@@ -86,7 +100,8 @@ const RUNS = `SELECT r.id, r.kind, r.status, r.started_at, r.finished_at, r.data
        (SELECT p.telegram_message_ids FROM public.market_publications p WHERE p.run_id = r.id LIMIT 1) AS publication_message_ids
   FROM public.analysis_runs r
  WHERE ($1::text IS NULL OR r.kind = $1)
- ORDER BY r.started_at DESC OFFSET $2 LIMIT 51`;
+   AND ($2::timestamptz IS NULL OR (r.started_at, r.id) < ($2::timestamptz, $3::uuid))
+ ORDER BY r.started_at DESC, r.id DESC LIMIT 51`;
 
 const RUN_DETAIL = `SELECT r.id, r.kind, r.status, r.started_at, r.finished_at, r.data_as_of,
        r.summary, r.write_counts, r.telegram_message_ids,
@@ -113,18 +128,50 @@ const RUN_EVALUATIONS = `SELECT s.id, s.ticker, s.action, s.bucket, s.depth AS p
 const ACTIVE_POLICY = `SELECT version, config, activated_at FROM public.market_policy_config
  WHERE active = true ORDER BY version DESC LIMIT 1`;
 
-function offset(cursor: string | undefined): number {
-  if (cursor === undefined) return 0;
-  if (!/^\d{1,5}$/.test(cursor)) throw new Error("invalid cursor");
-  const parsed = Number(cursor);
-  if (!Number.isSafeInteger(parsed) || parsed < 0 || parsed > 10_000) throw new Error("invalid cursor");
-  return parsed;
+const STATEMENTS = new Set([
+  HOLDINGS, PLANS, TRANSACTIONS, IDEAS, COMPANION, ALERTS, RUNS, RUN_DETAIL,
+  RUN_REQUESTS, RUN_EVALUATIONS, ACTIVE_POLICY,
+]);
+
+type PageKind = "transactions" | "ideas" | "alerts" | "runs";
+interface PageCursor { v: 1; k: PageKind; id: string; at?: string }
+
+function invalidCursor(): never {
+  throw new DashboardHttpError(400, "invalid_request", "Invalid cursor.");
 }
 
-function page(rows: Row[], start: number): { rows: Row[]; nextCursor: string | null } {
+function decodeCursor(value: string | undefined, kind: PageKind): PageCursor | null {
+  if (!value) return null;
+  try {
+    const base64 = value.replaceAll("-", "+").replaceAll("_", "/");
+    const padded = base64.padEnd(Math.ceil(base64.length / 4) * 4, "=");
+    const parsed = JSON.parse(atob(padded)) as Partial<PageCursor>;
+    if (parsed.v !== 1 || parsed.k !== kind || typeof parsed.id !== "string") invalidCursor();
+    if (kind === "transactions" || kind === "ideas") {
+      if (!/^\d{1,20}$/.test(parsed.id)) invalidCursor();
+    } else if (!/^[0-9a-f]{8}-[0-9a-f-]{27}$/.test(parsed.id) || !iso(parsed.at)) {
+      invalidCursor();
+    }
+    return parsed as PageCursor;
+  } catch (error) {
+    if (error instanceof DashboardHttpError) throw error;
+    return invalidCursor();
+  }
+}
+
+function encodeCursor(kind: PageKind, row: Row): string {
+  const payload: PageCursor = { v: 1, k: kind, id: String(row.id ?? "") };
+  if (kind === "alerts") payload.at = iso(row.created_at) ?? invalidCursor();
+  if (kind === "runs") payload.at = iso(row.started_at) ?? invalidCursor();
+  const value = btoa(JSON.stringify(payload));
+  return value.replaceAll("+", "-").replaceAll("/", "_").replace(/=+$/, "");
+}
+
+function page(rows: Row[], kind: PageKind): { rows: Row[]; nextCursor: string | null } {
+  const visible = rows.slice(0, 50);
   return {
-    rows: rows.slice(0, 50),
-    nextCursor: rows.length > 50 ? String(start + 50) : null,
+    rows: visible,
+    nextCursor: rows.length > 50 && visible[49] ? encodeCursor(kind, visible[49]) : null,
   };
 }
 
@@ -146,6 +193,17 @@ function latestTimestamp(rows: readonly Row[], fields: readonly string[]): strin
   return latest;
 }
 
+function oldestTimestamp(values: readonly (string | null)[]): string | null {
+  return values.filter((value): value is string => Boolean(value)).sort().at(0) ?? null;
+}
+
+function combinedFreshness(results: readonly DashboardReadResult[]): DashboardReadResult["freshness"] {
+  if (results.every((item) => item.freshness === "unavailable")) return "unavailable";
+  if (results.some((item) => item.freshness === "stale")) return "stale";
+  if (results.some((item) => item.freshness === "partial" || item.freshness === "unavailable")) return "partial";
+  return "fresh";
+}
+
 const boundaries: TodayView["boundaries"] = {
   owner_only: true,
   suggestion_only: true,
@@ -160,8 +218,10 @@ export function createDashboardRepository(
 ): DashboardReader {
   validateDashboardDatabaseUrl(databaseUrl);
   const database = databaseFactory(databaseUrl);
-  const query = (statement: string, parameters: readonly unknown[] = []) =>
-    database.query(statement, parameters);
+  const query = (statement: string, parameters: readonly unknown[] = []) => {
+    if (!STATEMENTS.has(statement)) throw new Error("dashboard query is not allowlisted");
+    return database.query(statement, parameters);
+  };
   const calendar = { holidays: NYSE_HOLIDAYS_2026 };
 
   async function holdings(): Promise<Row[]> {
@@ -171,14 +231,13 @@ export function createDashboardRepository(
       const classified = classifyFreshness({
         kind: "price",
         dataAsOf: iso(row.price_as_of),
-        sourceMarketState: String(row.price_source ?? "").toUpperCase() === "FINNHUB"
-          ? "REGULAR"
-          : "CLOSED",
+        sourceMarketState: typeof row.price_market_state === "string" ? row.price_market_state : null,
       }, current, calendar);
       return {
         ...row,
         price_as_of: classified.dataAsOf,
         price_freshness: classified.freshness,
+        price_display_state: classified.marketState,
       };
     });
   }
@@ -187,23 +246,23 @@ export function createDashboardRepository(
     const [holdingRows, planRows, transactionRows] = await Promise.all([
       holdings(),
       query(PLANS),
-      query(TRANSACTIONS, [0]),
+      query(TRANSACTIONS, [null]),
     ]);
     const dataAsOf = latestTimestamp(holdingRows, ["price_as_of"]);
-    const state = classifyFreshness({ kind: "price", dataAsOf, sourceMarketState: "REGULAR" }, now(), calendar);
     const mapped = mapPortfolio(holdingRows, planRows, transactionRows);
-    const freshness = mapped.holdings.some((item) => item.freshness !== "fresh")
-      ? (mapped.holdings.length === 0 ? "unavailable" : "partial")
-      : "fresh";
-    return { data: mapped, dataAsOf, freshness, marketState: state.marketState };
+    const freshness = mapped.holdings.length === 0
+      ? "unavailable"
+      : mapped.holdings.some((item) => item.freshness !== "fresh") ? "partial" : "fresh";
+    const marketState = holdingRows.find((row) => typeof row.price_display_state === "string")?.price_display_state;
+    return { data: mapped, dataAsOf, freshness, marketState: typeof marketState === "string" ? marketState as DashboardReadResult["marketState"] : "unknown" };
   }
 
   async function ideas(route: DashboardRoute): Promise<DashboardReadResult> {
-    const start = offset(route.cursor);
-    const result = page(await query(IDEAS, [route.status ?? null, start]), start);
+    const cursor = decodeCursor(route.cursor, "ideas");
+    const result = page(await query(IDEAS, [route.status ?? null, cursor?.id ?? null]), "ideas");
     const mapped: IdeasView = { ideas: result.rows.map(mapIdea) };
     const dataAsOf = latestTimestamp(result.rows, ["created_at"]);
-    const state = classifyFreshness({ kind: "run", dataAsOf }, now(), calendar);
+    const state = classifyFreshness({ kind: "run", phase: "on-demand", dataAsOf }, now(), calendar);
     return { data: mapped, dataAsOf, freshness: state.freshness, marketState: state.marketState, nextCursor: result.nextCursor };
   }
 
@@ -224,25 +283,25 @@ export function createDashboardRepository(
       disclaimer: "No structured companion receipt is available. This is suggestion only.",
     };
     const dataAsOf = iso(rows[0]?.finished_at);
-    const state = classifyFreshness({ kind: "run", dataAsOf }, now(), calendar);
+    const state = classifyFreshness({ kind: "run", phase: "on-demand", dataAsOf }, now(), calendar);
     return { data, dataAsOf, freshness: state.freshness, marketState: state.marketState };
   }
 
   async function alerts(route: DashboardRoute): Promise<DashboardReadResult> {
-    const start = offset(route.cursor);
-    const result = page(await query(ALERTS, [route.state ?? null, start]), start);
+    const cursor = decodeCursor(route.cursor, "alerts");
+    const result = page(await query(ALERTS, [route.state ?? null, cursor?.at ?? null, cursor?.id ?? null]), "alerts");
     const mapped: AlertsView = { alerts: result.rows.map(mapPublicationReceipt) };
     const dataAsOf = latestTimestamp(result.rows, ["delivered_at", "created_at"]);
-    const state = classifyFreshness({ kind: "brief", dataAsOf }, now(), calendar);
+    const state = classifyFreshness({ kind: "brief", dataAsOf, phase: String(result.rows[0]?.phase ?? ""), status: String(result.rows[0]?.status ?? "") }, now(), calendar);
     return { data: mapped, dataAsOf, freshness: state.freshness, marketState: state.marketState, nextCursor: result.nextCursor };
   }
 
   async function runs(route: DashboardRoute): Promise<DashboardReadResult> {
-    const start = offset(route.cursor);
-    const result = page(await query(RUNS, [route.kind ?? null, start]), start);
+    const cursor = decodeCursor(route.cursor, "runs");
+    const result = page(await query(RUNS, [route.kind ?? null, cursor?.at ?? null, cursor?.id ?? null]), "runs");
     const mapped: RunsView = { runs: result.rows.map(mapRun) };
     const dataAsOf = latestTimestamp(result.rows, ["data_as_of", "finished_at", "started_at"]);
-    const state = classifyFreshness({ kind: "run", dataAsOf, status: String(result.rows[0]?.status ?? "") }, now(), calendar);
+    const state = classifyFreshness({ kind: "run", dataAsOf, phase: String(result.rows[0]?.kind ?? ""), status: String(result.rows[0]?.status ?? "") }, now(), calendar);
     return { data: mapped, dataAsOf, freshness: state.freshness, marketState: state.marketState, nextCursor: result.nextCursor };
   }
 
@@ -280,14 +339,14 @@ export function createDashboardRepository(
       telegram_message_ids: ids,
       incomplete_stages: incomplete,
     };
-    const state = classifyFreshness({ kind: "run", dataAsOf: run.data_as_of ?? run.finished_at, status: run.status }, now(), calendar);
+    const state = classifyFreshness({ kind: "run", dataAsOf: run.data_as_of ?? run.finished_at, phase: run.kind, status: run.status }, now(), calendar);
     return { data, dataAsOf: state.dataAsOf, freshness: state.freshness, marketState: state.marketState };
   }
 
   async function system(): Promise<DashboardReadResult> {
     const [runRows, alertRows, policyRows] = await Promise.all([
-      query(RUNS, [null, 0]),
-      query(ALERTS, [null, 0]),
+      query(RUNS, [null, null, null]),
+      query(ALERTS, [null, null, null]),
       query(ACTIVE_POLICY),
     ]);
     const latestByKind: SystemView["latest_by_kind"] = {};
@@ -316,7 +375,7 @@ export function createDashboardRepository(
       boundaries,
     };
     const dataAsOf = latestTimestamp(runRows, ["data_as_of", "finished_at"]);
-    const state = classifyFreshness({ kind: "run", dataAsOf, status: String(runRows[0]?.status ?? "") }, now(), calendar);
+    const state = classifyFreshness({ kind: "run", dataAsOf, phase: String(runRows[0]?.kind ?? ""), status: String(runRows[0]?.status ?? "") }, now(), calendar);
     return { data, dataAsOf, freshness: state.freshness, marketState: state.marketState };
   }
 
@@ -333,8 +392,8 @@ export function createDashboardRepository(
       }
       if (route.name === "portfolio") return await portfolio();
       if (route.name === "transactions") {
-        const start = offset(route.cursor);
-        const result = page(await query(TRANSACTIONS, [start]), start);
+        const cursor = decodeCursor(route.cursor, "transactions");
+        const result = page(await query(TRANSACTIONS, [cursor?.id ?? null]), "transactions");
         return {
           data: { transactions: mapTransactions(result.rows) },
           dataAsOf: latestTimestamp(result.rows, ["ts"]),
@@ -397,11 +456,11 @@ export function createDashboardRepository(
           entry_zones: ideasData.ideas.filter((item) => item.entry_zone_low && item.entry_zone_high).slice(0, 10),
           companion: companionData,
         };
-        const timestamps = [portfolioResult.dataAsOf, runsResult.dataAsOf, ideasResult.dataAsOf].filter((value): value is string => Boolean(value));
+        const supporting = [portfolioResult, runsResult, ideasResult, companionResult, alertsResult];
         return {
           data,
-          dataAsOf: timestamps.sort().at(-1) ?? null,
-          freshness: [portfolioResult, runsResult, ideasResult].some((item) => item.freshness === "unavailable") ? "partial" : "fresh",
+          dataAsOf: oldestTimestamp(supporting.map((item) => item.dataAsOf)),
+          freshness: combinedFreshness(supporting),
           marketState: runsResult.marketState,
         };
       }

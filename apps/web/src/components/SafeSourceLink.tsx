@@ -1,6 +1,6 @@
 import type { SourceLink } from "@stocks-agent/dashboard-contracts";
 
-function safeHttps(value: string | null): string | null {
+export function safeHttpsUrl(value: string | null): string | null {
   if (!value) return null;
   try {
     const parsed = new URL(value);
@@ -11,7 +11,7 @@ function safeHttps(value: string | null): string | null {
 }
 
 export function SafeSourceLink({ source }: { source: SourceLink }) {
-  const url = safeHttps(source.url);
+  const url = safeHttpsUrl(source.url);
   return url
     ? <a href={url} target="_blank" rel="noreferrer noopener">{source.label}</a>
     : <span>{source.label}</span>;

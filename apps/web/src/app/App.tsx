@@ -1,4 +1,4 @@
-import { lazy, type ComponentType, Suspense } from "react";
+import { lazy, type ComponentType, Suspense, useCallback, useState } from "react";
 import { BrowserRouter, Route, Routes, useParams } from "react-router-dom";
 
 import type {
@@ -12,7 +12,7 @@ import type {
   TodayView,
 } from "@stocks-agent/dashboard-contracts";
 
-import type { DashboardClient } from "../api/client";
+import { DashboardApiError, type DashboardClient } from "../api/client";
 import { useDashboardResource } from "../api/useDashboardResource";
 import { AuthProvider, type AuthClient, useAuth } from "../auth/AuthProvider";
 import { SignInPage } from "../auth/SignInPage";
@@ -35,42 +35,53 @@ function ResourceRoute<T>({
   token,
   path,
   component: Component,
+  onError,
 }: {
   client: DashboardClient;
   token: string;
   path: string;
   component: ComponentType<{ data: T }>;
+  onError(error: Error): void;
 }) {
-  const state = useDashboardResource<T>(client, path, token);
+  const state = useDashboardResource<T>(client, path, token, onError);
   return <AsyncView state={state}>{(data) => <Component data={data} />}</AsyncView>;
 }
 
-function RunRoute({ client, token }: { client: DashboardClient; token: string }) {
+function RunRoute({ client, token, onError }: { client: DashboardClient; token: string; onError(error: Error): void }) {
   const { id } = useParams();
-  return <ResourceRoute<RunDetailView> client={client} token={token} path={`/v1/runs/${id ?? "invalid"}`} component={RunDetailPage} />;
+  return <ResourceRoute<RunDetailView> client={client} token={token} path={`/v1/runs/${id ?? "invalid"}`} component={RunDetailPage} onError={onError} />;
 }
 
 function ProtectedApplication({ dashboardClient }: { dashboardClient: DashboardClient }) {
   const auth = useAuth();
   if (auth.loading) return <main className="initial-shell"><p>Opening private workspace…</p></main>;
   if (!auth.session || auth.locked) return <SignInPage />;
-  return <AuthenticatedApplication dashboardClient={dashboardClient} token={auth.session.access_token} onSignOut={() => void auth.signOut()} />;
+  return <AuthenticatedApplication dashboardClient={dashboardClient} token={auth.session.access_token} onSignOut={auth.signOut} />;
 }
 
-function AuthenticatedApplication({ dashboardClient, token, onSignOut }: { dashboardClient: DashboardClient; token: string; onSignOut(): void }) {
-  const today = useDashboardResource<TodayView>(dashboardClient, "/v1/today", token);
+function AuthenticatedApplication({ dashboardClient, token, onSignOut }: { dashboardClient: DashboardClient; token: string; onSignOut(): Promise<void> }) {
+  const [ownerDenied, setOwnerDenied] = useState(false);
+  const onResourceError = useCallback((error: Error) => {
+    if (!(error instanceof DashboardApiError)) return;
+    if (error.status === 401) void onSignOut();
+    if (error.status === 403 && error.code === "owner_only") setOwnerDenied(true);
+  }, [onSignOut]);
+  const today = useDashboardResource<TodayView>(dashboardClient, "/v1/today", token, onResourceError);
+  if (ownerDenied) {
+    return <main className="auth-layout"><section className="auth-card"><p className="eyebrow">Private workspace</p><h1>Owner-only access</h1><p>This dashboard is restricted to its owner.</p><button className="text-button" onClick={() => void onSignOut()}>Sign out</button></section></main>;
+  }
   return (
-    <AppShell dataTime={today.envelope?.data_as_of ?? null} freshness={today.envelope?.freshness ?? "unavailable"} onSignOut={onSignOut}>
+    <AppShell dataTime={today.envelope?.data_as_of ?? null} freshness={today.envelope?.freshness ?? "unavailable"} onSignOut={() => void onSignOut()}>
       <Suspense fallback={<section className="state-card">Loading view…</section>}>
         <Routes>
           <Route path="/" element={<AsyncView state={today}>{(data) => <TodayPage data={data} />}</AsyncView>} />
-          <Route path="/portfolio" element={<ResourceRoute<PortfolioView> client={dashboardClient} token={token} path="/v1/portfolio" component={PortfolioPage} />} />
-          <Route path="/ideas" element={<ResourceRoute<IdeasView> client={dashboardClient} token={token} path="/v1/ideas" component={IdeasPage} />} />
-          <Route path="/companion" element={<ResourceRoute<CompanionView> client={dashboardClient} token={token} path="/v1/companion" component={CompanionPage} />} />
-          <Route path="/alerts" element={<ResourceRoute<AlertsView> client={dashboardClient} token={token} path="/v1/alerts" component={AlertsPage} />} />
-          <Route path="/runs" element={<ResourceRoute<RunsView> client={dashboardClient} token={token} path="/v1/runs" component={RunsPage} />} />
-          <Route path="/runs/:id" element={<RunRoute client={dashboardClient} token={token} />} />
-          <Route path="/system" element={<ResourceRoute<SystemView> client={dashboardClient} token={token} path="/v1/system" component={SystemPage} />} />
+          <Route path="/portfolio" element={<ResourceRoute<PortfolioView> client={dashboardClient} token={token} path="/v1/portfolio" component={PortfolioPage} onError={onResourceError} />} />
+          <Route path="/ideas" element={<ResourceRoute<IdeasView> client={dashboardClient} token={token} path="/v1/ideas" component={IdeasPage} onError={onResourceError} />} />
+          <Route path="/companion" element={<ResourceRoute<CompanionView> client={dashboardClient} token={token} path="/v1/companion" component={CompanionPage} onError={onResourceError} />} />
+          <Route path="/alerts" element={<ResourceRoute<AlertsView> client={dashboardClient} token={token} path="/v1/alerts" component={AlertsPage} onError={onResourceError} />} />
+          <Route path="/runs" element={<ResourceRoute<RunsView> client={dashboardClient} token={token} path="/v1/runs" component={RunsPage} onError={onResourceError} />} />
+          <Route path="/runs/:id" element={<RunRoute client={dashboardClient} token={token} onError={onResourceError} />} />
+          <Route path="/system" element={<ResourceRoute<SystemView> client={dashboardClient} token={token} path="/v1/system" component={SystemPage} onError={onResourceError} />} />
           <Route path="*" element={<section className="state-card"><h1>Page not found</h1><p>This route is not part of the owner dashboard.</p></section>} />
         </Routes>
       </Suspense>

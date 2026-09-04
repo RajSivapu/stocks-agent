@@ -99,8 +99,8 @@ export interface AttentionItemView {
 
 export interface RunSummaryView {
   id: string;
-  kind: "pre-market" | "intraday" | "post-market" | "on-demand" | "weekly-audit";
-  status: "running" | "completed" | "partial" | "failed";
+  kind: "pre-market" | "intraday" | "post-market" | "on-demand" | "weekly-audit" | "unknown";
+  status: "running" | "completed" | "partial" | "failed" | "unknown";
   started_at: string;
   finished_at: string | null;
   data_as_of: string | null;

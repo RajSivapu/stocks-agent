@@ -1,0 +1,34 @@
+name: Owner dashboard verification
+
+on:
+  push:
+    branches: [main, codex/owner-alert-v3]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: owner-dashboard-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  verify:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+      - uses: actions/setup-python@42375524e23c412d93fb67b49958b491fce71c38
+        with:
+          python-version: "3.14"
+      - uses: actions/setup-node@1e60f620b9541dca151540d0c130c864bf30edb
+        with:
+          node-version: "24"
+          cache: npm
+      - run: python -m venv .venv
+      - run: .venv/bin/pip install supabase pytest "psycopg[binary]" pyyaml
+      - run: npm ci --ignore-scripts
+      - run: npm audit --audit-level=high --omit=optional --ignore-scripts
+      - run: node scripts/check_dependency_licenses.mjs
+      - run: npx playwright install --with-deps chromium
+      - run: npm run test:all

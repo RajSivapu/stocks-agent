@@ -305,7 +305,7 @@ export function mapPublicationReceipt(row: Row): AlertView {
     attempt_count: integer(row.attempt_count) ?? 0,
     created_at: text(row.created_at, 40) ?? "",
     delivered_at: state === "delivered" ? text(row.delivered_at, 40) : null,
-    suppression_reason: state === "suppressed" ? text(row.suppression_reason ?? row.error, 500) : null,
+    suppression_reason: null,
     rule_ticker: text(row.rule_ticker, 24),
     rule_state: text(row.rule_state, 40),
     event_status: text(row.event_status, 40),
@@ -325,8 +325,8 @@ export function mapRun(row: Row): RunSummaryView {
   if (publication === "delivered") receiptStatus = publicationIds.length > 0 ? "delivered" : "incomplete";
   return {
     id: text(row.id, 64) ?? "unknown",
-    kind: (allowedKinds.includes(String(row.kind)) ? row.kind : "on-demand") as RunSummaryView["kind"],
-    status: (allowedStatus.includes(String(row.status)) ? row.status : "partial") as RunSummaryView["status"],
+    kind: (allowedKinds.includes(String(row.kind)) ? row.kind : "unknown") as RunSummaryView["kind"],
+    status: (allowedStatus.includes(String(row.status)) ? row.status : "unknown") as RunSummaryView["status"],
     started_at: text(row.started_at, 40) ?? "",
     finished_at: text(row.finished_at, 40),
     data_as_of: text(row.data_as_of, 40),

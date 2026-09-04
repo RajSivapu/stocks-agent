@@ -76,7 +76,7 @@ def provision_dashboard_role(
     if privilege[1] or any(privilege[2:]):
         raise RuntimeError("dashboard privilege role has unsafe attributes")
 
-    password = password_factory(32)
+    password = password_factory(36)
     if len(password) < 24:
         raise RuntimeError("generated dashboard password is too short")
 

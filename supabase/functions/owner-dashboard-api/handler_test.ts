@@ -57,6 +57,15 @@ Deno.test("missing owner configuration fails before repository access", async ()
   assertEquals(accessed, false);
 });
 
+Deno.test("missing owner configuration fails closed before origin disclosure", async () => {
+  const handler = createOwnerDashboardHandler(dependencies({ ownerUserId: "" }));
+  const response = await handler(new Request("https://api.example/v1/meta", {
+    headers: { origin: "https://attacker.example", authorization: "Bearer invalid" },
+  }));
+  assertEquals(response.status, 503);
+  assertEquals((await response.json()).error.code, "temporarily_unavailable");
+});
+
 Deno.test("exact-origin OPTIONS succeeds without authorization", async () => {
   let verified = false;
   const handler = createOwnerDashboardHandler(dependencies({
@@ -128,16 +137,33 @@ Deno.test("authentication and internal errors use bounded public envelopes", asy
   assert(!JSON.stringify(body).includes("database detail"));
 });
 
+Deno.test("rate limits stop work before authentication and emit retry timing", async () => {
+  let verified = false;
+  const handler = createOwnerDashboardHandler(dependencies({
+    verifyOwner: async () => {
+      verified = true;
+      return { subject: OWNER };
+    },
+    rateLimiter: {
+      check: (stage: string) => stage === "pre_auth" ? 12 : null,
+    },
+  }));
+  const response = await handler(request("/v1/today"));
+  assertEquals(response.status, 429);
+  assertEquals(response.headers.get("retry-after"), "12");
+  assertEquals(verified, false);
+});
+
 Deno.test("route resolver exposes only documented bounded GET routes", () => {
   const routes = [
     "/v1/meta",
     "/v1/today",
     "/v1/portfolio",
-    "/v1/transactions?cursor=25",
-    "/v1/ideas?status=approved&cursor=25",
+    "/v1/transactions?cursor=eyJ2IjoxLCJpZCI6IjUwIn0",
+    "/v1/ideas?status=approved&cursor=eyJ2IjoxLCJpZCI6IjUwIn0",
     "/v1/companion",
-    "/v1/alerts?state=delivered&cursor=25",
-    "/v1/runs?kind=intraday&cursor=25",
+    "/v1/alerts?state=delivered&cursor=eyJ2IjoxLCJpZCI6IjUwIn0",
+    "/v1/runs?kind=intraday&cursor=eyJ2IjoxLCJpZCI6IjUwIn0",
     "/v1/runs/7d834dbd-75bb-4313-931f-09732f003932",
     "/v1/system",
   ];
