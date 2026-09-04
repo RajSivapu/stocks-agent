@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import re
 from abc import ABC, abstractmethod
 from collections.abc import Callable, Mapping, Sequence
@@ -25,6 +26,11 @@ from lib.intelligence.quota import QuotaSession
 
 
 _MAX_TEXT_CHARACTERS = 2_000
+_MAX_METADATA_BYTES = 8_192
+_MAX_METADATA_DEPTH = 4
+_MAX_METADATA_ENTRIES = 32
+_MAX_METADATA_STRING_CHARACTERS = 500
+_MAX_RECEIPT_COUNT = 10_000
 _CACHE_TTL = timedelta(minutes=15)
 
 
@@ -35,6 +41,8 @@ class CollectionQuery:
     start: datetime
     end: datetime
     limit: int = 20
+    cik: str | None = None
+    series_id: str | None = None
 
     def __post_init__(self) -> None:
         if not isinstance(self.text, str) or not self.text.strip():
@@ -123,6 +131,68 @@ def bounded_text(value: object) -> str:
     return re.sub(r"\s+", " ", str(value or "")).strip()[:_MAX_TEXT_CHARACTERS]
 
 
+def publisher_reference(url: object) -> dict[str, str]:
+    """Retain a bounded publisher link as untrusted metadata, never as source authority."""
+    if not isinstance(url, str) or len(url) > 2_048:
+        return {}
+    try:
+        parsed = urlsplit(url)
+    except ValueError:
+        return {}
+    if (
+        parsed.scheme.lower() != "https"
+        or not parsed.hostname
+        or parsed.username is not None
+        or parsed.password is not None
+        or parsed.port not in (None, 443)
+    ):
+        return {}
+    return {
+        "publisher_url": url,
+        "publisher_url_authority": "untrusted_reference",
+    }
+
+
+def _bounded_metadata_value(value: object, depth: int = 0) -> object:
+    if depth >= _MAX_METADATA_DEPTH:
+        return None
+    if value is None or isinstance(value, (bool, int)):
+        return value
+    if isinstance(value, float):
+        return value if math.isfinite(value) else None
+    if isinstance(value, str):
+        return value[:_MAX_METADATA_STRING_CHARACTERS]
+    if isinstance(value, Mapping):
+        bounded = {}
+        entries = sorted(value.items(), key=lambda entry: str(entry[0]))
+        for key, nested in entries[:_MAX_METADATA_ENTRIES]:
+            bounded[str(key)[:100]] = _bounded_metadata_value(nested, depth + 1)
+        return bounded
+    if isinstance(value, (list, tuple)):
+        return [
+            _bounded_metadata_value(nested, depth + 1)
+            for nested in value[:_MAX_METADATA_ENTRIES]
+        ]
+    return bounded_text(value)[:_MAX_METADATA_STRING_CHARACTERS]
+
+
+def bounded_metadata(value: object) -> Mapping[str, object]:
+    if not isinstance(value, Mapping):
+        return MappingProxyType({})
+    bounded = _bounded_metadata_value(value)
+    if not isinstance(bounded, dict):
+        return MappingProxyType({})
+    try:
+        encoded = json.dumps(
+            bounded, allow_nan=False, ensure_ascii=False, separators=(",", ":"), sort_keys=True,
+        ).encode()
+    except (TypeError, ValueError):
+        return MappingProxyType({})
+    if len(encoded) > _MAX_METADATA_BYTES:
+        return MappingProxyType({})
+    return MappingProxyType(bounded)
+
+
 class SourceAdapter(ABC):
     provider: str
     allowed_hosts: frozenset[str]
@@ -163,11 +233,18 @@ class SourceAdapter(ABC):
         })
         receipt_cache_key = cache_key(
             self.provider,
-            {"query": query.text, "symbols": ",".join(query.symbols), "limit": str(query.limit)},
+            {
+                "query": query.text,
+                "symbols": ",".join(query.symbols),
+                "cik": query.cik or "",
+                "series_id": query.series_id or "",
+                "limit": str(query.limit),
+            },
             json.dumps(dict(requested_window), separators=(",", ":"), sort_keys=True),
             1,
         )
         reservation_id = self.quota.consume_next(self.provider)
+        response: HttpResult | None = None
         try:
             response = self.http.get(request)
             payload = json.loads(
@@ -177,6 +254,8 @@ class SourceAdapter(ABC):
             records = self._records(payload, query, response)
             if not isinstance(records, Sequence) or isinstance(records, (str, bytes, bytearray)):
                 raise ValueError("records must be a sequence")
+            if len(records) > _MAX_RECEIPT_COUNT:
+                raise ValueError("provider result count exceeds persistence bound")
             items: list[SourceItem] = []
             dropped = 0
             bound = min(query.limit, self.max_items_per_request)
@@ -184,7 +263,7 @@ class SourceAdapter(ABC):
                 if len(items) >= bound:
                     dropped += 1
                     continue
-                item = self._normalize_record(record, response.retrieved_at)
+                item = self._normalize_record(record, query, response.retrieved_at)
                 if item is None:
                     dropped += 1
                 else:
@@ -210,6 +289,7 @@ class SourceAdapter(ABC):
             )
             return CollectionResult(tuple(items), receipt, query.limit)
         except (SourceFailure, UnicodeDecodeError, ValueError, TypeError, KeyError) as exc:
+            cached_failure = response is not None and response.cache_hit
             receipt = RequestReceipt(
                 provider=self.provider,
                 reservation_id=reservation_id,
@@ -217,10 +297,10 @@ class SourceAdapter(ABC):
                 cache_key=receipt_cache_key,
                 requested_window=requested_window,
                 requested_limit=query.limit,
-                retrieved_at=_utc(self.clock()),
-                observed_at=None,
+                retrieved_at=response.retrieved_at if response is not None else _utc(self.clock()),
+                observed_at=response.observed_at if response is not None else None,
                 expires_at=None,
-                request_cost=1,
+                request_cost=0 if cached_failure else 1,
                 upstream_remaining=None,
                 returned_count=0,
                 accepted_count=0,
@@ -234,6 +314,7 @@ class SourceAdapter(ABC):
     def _normalize_record(
         self,
         record: Mapping[str, object],
+        query: CollectionQuery,
         retrieved_at: datetime,
     ) -> SourceItem | None:
         if not isinstance(record, Mapping):
@@ -256,10 +337,18 @@ class SourceAdapter(ABC):
             return None
         text = bounded_text(record.get("text"))
         upstream_id = record.get("upstream_item_id")
-        metadata = record.get("metadata") if isinstance(record.get("metadata"), Mapping) else {}
+        metadata = bounded_metadata(record.get("metadata"))
         published_at = parse_timestamp(record.get("published_at"))
         effective_at = parse_timestamp(record.get("effective_at"))
         if published_at is None and effective_at is None:
+            return None
+        item_times = tuple(
+            timestamp for timestamp in (published_at, effective_at) if timestamp is not None
+        )
+        if any(
+            not _utc(query.start) <= timestamp <= _utc(query.end)
+            for timestamp in item_times
+        ):
             return None
         canonical = json.dumps(
             {
@@ -285,7 +374,7 @@ class SourceAdapter(ABC):
             effective_at=effective_at,
             retrieved_at=retrieved_at,
             authority=self.authority,
-            metadata=MappingProxyType(dict(metadata)),
+            metadata=metadata,
         )
 
 

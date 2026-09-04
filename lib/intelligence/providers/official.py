@@ -1,7 +1,8 @@
+import re
 from urllib.parse import quote, urlencode
 
 from lib.edgar import parse_submissions
-from lib.intelligence.http import HttpRequest
+from lib.intelligence.http import HttpRequest, SourceFailure
 
 from . import CollectionQuery, SourceAdapter
 
@@ -13,9 +14,34 @@ class OfficialAdapter(SourceAdapter):
 
     def _request(self, query: CollectionQuery) -> HttpRequest:
         if self.provider == "sec_edgar":
-            identifier = "".join(character for character in query.text if character.isdigit())
-            identifier = (identifier or query.symbols[0] if query.symbols else identifier).zfill(10)
+            if (
+                not isinstance(query.cik, str)
+                or re.fullmatch(r"[0-9]{1,10}", query.cik) is None
+                or int(query.cik) == 0
+            ):
+                raise SourceFailure("INVALID_QUERY")
+            identifier = query.cik.zfill(10)
             return HttpRequest(f"https://data.sec.gov/submissions/CIK{quote(identifier)}.json")
+        if self.provider == "fred":
+            try:
+                key = self.secret_getter("fred_api_key")
+            except (KeyError, OSError, ValueError):
+                raise SourceFailure("CONFIGURATION_MISSING") from None
+            if not isinstance(key, str) or not key.strip():
+                raise SourceFailure("CONFIGURATION_MISSING")
+            if not isinstance(query.series_id, str) or re.fullmatch(
+                r"[A-Za-z0-9._-]{1,120}", query.series_id,
+            ) is None:
+                raise SourceFailure("INVALID_QUERY")
+            params = urlencode({
+                "series_id": query.series_id,
+                "api_key": key,
+                "file_type": "json",
+                "observation_start": query.start.date().isoformat(),
+                "observation_end": query.end.date().isoformat(),
+                "limit": min(query.limit, self.max_items_per_request),
+            })
+            return HttpRequest(f"{self.endpoint}?{params}")
         params = urlencode({
             "query": query.text,
             "limit": min(query.limit, self.max_items_per_request),
@@ -53,7 +79,7 @@ class OfficialAdapter(SourceAdapter):
         observations = payload.get("observations") if isinstance(payload, dict) else None
         if not isinstance(observations, list):
             raise ValueError("invalid FRED response")
-        series_id = query.symbols[0] if query.symbols else query.text
+        series_id = query.series_id
         return [{
             "upstream_item_id": f"{series_id}:{item.get('date')}",
             "source_url": f"https://fred.stlouisfed.org/series/{quote(series_id)}",
