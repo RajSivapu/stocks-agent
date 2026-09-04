@@ -130,12 +130,12 @@ it("companion uses historical scenario language and preserves the current plan",
     plan_unchanged: true, recurring_plan_review_eligible: true,
     horizons: [{ years: 3, baseline_annualized_percent: "7", companion_annualized_percent: "5", baseline_max_drawdown_percent: "20", companion_max_drawdown_percent: "25", correlation: "0.7" }],
     contribution_history: { contributed: "1200", lower_ending_value: "980", median_ending_value: "1240", higher_ending_value: "1410", sample_count: 50 },
-    evidence: [{ label: "Gateway evidence", url: "https://example.com/evidence" }], disclaimer: "Historical scenarios are not forecasts.",
+    evidence: [{ label: "Gateway evidence", url: "https://www.sec.gov/evidence" }], disclaimer: "Historical scenarios are not forecasts.",
   };
   render(<CompanionPage data={data} />);
   expect(screen.getByText(/current plan remains unchanged/i)).toBeVisible();
   expect(screen.getByText(/historical scenarios are not forecasts/i)).toBeVisible();
-  expect(screen.getByRole("link", { name: /gateway evidence/i })).toHaveAttribute("href", "https://example.com/evidence");
+  expect(screen.getByRole("link", { name: /gateway evidence/i })).toHaveAttribute("href", "https://www.sec.gov/evidence");
   expect(screen.queryByText(/winner|best stock|guaranteed/i)).not.toBeInTheDocument();
 });
 

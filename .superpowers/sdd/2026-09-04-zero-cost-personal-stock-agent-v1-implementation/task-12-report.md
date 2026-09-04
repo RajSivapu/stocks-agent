@@ -55,3 +55,23 @@ execution occurred.
 - Task 11 intentionally exposes bounded source status rather than raw quota reservations and no
   deployment receipt in the current read model; the UI labels those limitations instead of
   reconstructing or inferring unavailable state.
+
+## Fix round 1
+
+- Moved the shell banner boundary from the always-loaded Today resource to each active route's own
+  resource state. Intelligence, Reports, report detail, Ideas, System, Portfolio, and run detail now
+  report their own loading, error, freshness, and `data_as_of` truth. Portfolio and System aggregate
+  child freshness and label a child failure as partial rather than upgrading the route.
+- Preserved Today/Companion and Runs/Alerts as full resource states through their absorbed parent
+  surfaces. Their loading and error cards now remain distinct from ready-but-empty content; partial
+  and unavailable ready envelopes remain visible in the route banner.
+- Tightened the shared web source-link boundary to the exact approved Task 2 provider and official
+  hosts. It accepts only HTTPS without credentials and without a non-443 explicit port; malformed,
+  arbitrary, lookalike, and unapproved hosts remain inert text.
+- No tests were added. Two existing positive-link fixtures were pointed from arbitrary
+  `example.com` to the approved `www.sec.gov` host so their original assertions continue to exercise
+  an accepted source link under the corrected policy.
+
+The bounded fix gate passed once: 31/31 existing web unit tests, TypeScript typecheck, and ESLint.
+Build, bundle, browser, full-suite, live, migration, Telegram, and deployment checks were not run in
+this fix round, as directed.

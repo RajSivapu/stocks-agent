@@ -20,12 +20,22 @@ const freshnessLabels: Record<Freshness, string> = {
   unavailable: "Unavailable",
 };
 
+export type ViewStatus = "loading" | "ready" | "error" | "partial-error";
+
 export function AppShell({
   dataTime,
   freshness,
+  viewStatus = "ready",
   onSignOut,
   children,
-}: PropsWithChildren<{ dataTime: string | null; freshness: Freshness; onSignOut?: () => void }>) {
+}: PropsWithChildren<{ dataTime: string | null; freshness: Freshness; viewStatus?: ViewStatus; onSignOut?: () => void }>) {
+  const statusLabel = viewStatus === "loading"
+    ? "Loading route data"
+    : viewStatus === "error"
+      ? "Route unavailable"
+      : viewStatus === "partial-error"
+        ? "Partial route data · child unavailable"
+        : freshnessLabels[freshness];
   return (
     <div className="app-shell">
       <aside className="sidebar">
@@ -48,8 +58,8 @@ export function AppShell({
       <div className="workspace">
         <div className="data-bar" role="status">
           <span className={`freshness-dot freshness-${freshness}`} aria-hidden="true" />
-          <strong>{freshnessLabels[freshness]}</strong>
-          <span>{dataTime ? `Data through ${new Date(dataTime).toLocaleString()}` : "No supported data time"}</span>
+          <strong>{statusLabel}</strong>
+          <span>{viewStatus === "loading" ? "Waiting for this view's receipt" : dataTime ? `Data through ${new Date(dataTime).toLocaleString()}` : "No supported data time for this view"}</span>
         </div>
         <main id="main-content" className="page-content">{children}</main>
       </div>
