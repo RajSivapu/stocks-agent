@@ -14,7 +14,7 @@ Status: **not live; protected deployment pending independent review**.
 ## Candidate source receipts
 
 - GitHub branch: `codex/owner-alert-v3`
-- Candidate SHA: `7b36feaf9ef29090e17ae488d97f04ebec6d8a84`
+- Implementation candidate SHA: `869b8616252e33037a15977f0abd82181899629c`
 - Private Site source repository: verified at the same SHA before version creation.
 - Working tree: clean after push.
 - Site version: none.
@@ -58,7 +58,8 @@ explicitly approved multi-user redesign.
 5. Structurally prove zero writes, zero application-function execution, zero object ownership, exact
    membership, and exact column allowlists.
 6. Publish only `DASHBOARD_ALLOWED_ORIGINS`, `DASHBOARD_DATABASE_URL`, and
-   `DASHBOARD_OWNER_USER_ID`; deploy the pinned function; run the GET-only reconciled canary.
+   `DASHBOARD_OWNER_USER_ID`; deploy the pinned function; run the GET-only reconciled canary; and
+   globally revoke the temporary Auth session in every outcome.
 7. If any post-publication step fails, remove the three dashboard secrets, remove only the new
    dashboard function, and disable the runtime login.
 8. Build and scan immutable static assets from the deployed SHA, save a private Site version, deploy
@@ -86,4 +87,3 @@ Telegram message.
 
 Pending successful deployment. The final instructions will provide the private Site URL and OTP
 sign-in flow without exposing the owner email or any credential in this receipt.
-

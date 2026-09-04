@@ -6,7 +6,7 @@ Status: **release candidate; independent exact-head verdict pending**.
 
 - Branch: `codex/owner-alert-v3`
 - Review base: `d4e0c3ddd5a032fd4a41599aa6ad1966c9d7594f`
-- Current candidate: `7b36feaf9ef29090e17ae488d97f04ebec6d8a84`
+- Current implementation candidate: `869b8616252e33037a15977f0abd82181899629c`
 - Design: `docs/design/2026-09-03-owner-only-personal-stock-agent-web-app-plan.md`
 - Plan: `docs/superpowers/plans/2026-09-03-owner-only-personal-stock-agent-web-v1-implementation.md`
 
@@ -56,10 +56,15 @@ naive cleanup could target a function that predated the rollout. Commit `7b36fea
 Regression tests cover pre-publication failure, post-publication failure, an existing function,
 function absence during rollback, and runtime-login invalidation.
 
+A subsequent session-lifecycle pass found that the canary's directly verified magic-link session
+was not explicitly revoked after use. Commit `869b861` adds an unconditional global Auth logout in
+the canary `finally` path. A revocation failure fails the canary and therefore activates the same
+initial-deployment rollback. Tests cover both successful and failed reconciliation paths.
+
 ## Verification receipts before independent review
 
-- `npm run test:all` exited 0 on candidate `7b36fea` at 2026-09-04T12:34Z.
-- Python: 201 passed.
+- `npm run test:all` exited 0 on candidate `869b861` at 2026-09-04T12:45Z.
+- Python: 203 passed.
 - Telegram/command Node tests: 63 passed.
 - Edge/Deno: 187 passed.
 - Dashboard contracts: 4 passed.
@@ -80,4 +85,3 @@ is a platform boundary, not a claim that those values are absent from every othe
 ## Final independent verdict
 
 Pending. Do not infer approval from this placeholder.
-
