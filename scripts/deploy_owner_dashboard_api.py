@@ -220,6 +220,8 @@ def deploy_function(
             raise RuntimeError("dashboard function version receipt is malformed") from error
 
     rollback_version = function_version()
+    if rollback_version is not None:
+        raise RuntimeError("initial dashboard function already exists")
     deploy = _run(
         [
             "npx", "--yes", f"supabase@{SUPABASE_CLI_VERSION}", "functions", "deploy",
@@ -242,6 +244,40 @@ def deploy_function(
         "project_ref_digest": _project_digest(project_ref),
         "cli_version": SUPABASE_CLI_VERSION,
         "deployed_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+    }
+
+
+def rollback_initial_function(
+    project_ref: str,
+    repo_root: Path = ROOT,
+    runner: Callable[..., object] = subprocess.run,
+) -> dict[str, object]:
+    if not PROJECT_REF_PATTERN.fullmatch(project_ref):
+        raise ValueError("a canonical Supabase project reference is required")
+    unset = _run(
+        [
+            "npx", "--yes", f"supabase@{SUPABASE_CLI_VERSION}", "secrets", "unset",
+            *DASHBOARD_SECRET_NAMES, "--project-ref", project_ref, "--yes",
+        ],
+        cwd=repo_root,
+        runner=runner,
+    )
+    if getattr(unset, "returncode", 1) != 0:
+        raise RuntimeError("dashboard rollback could not activate the configuration kill switch")
+    deletion = _run(
+        [
+            "npx", "--yes", f"supabase@{SUPABASE_CLI_VERSION}", "functions", "delete",
+            FUNCTION_NAME, "--project-ref", project_ref, "--yes",
+        ],
+        cwd=repo_root,
+        runner=runner,
+    )
+    if getattr(deletion, "returncode", 1) != 0:
+        raise RuntimeError("dashboard rollback could not remove the initial function")
+    return {
+        "status": "rolled_back",
+        "function": FUNCTION_NAME,
+        "dashboard_secrets_unset": list(DASHBOARD_SECRET_NAMES),
     }
 
 
@@ -278,6 +314,29 @@ def run_post_deploy_canary(
     if any(result.get(key) != value for key, value in expected.items()):
         raise RuntimeError("production canary receipt is incomplete")
     return result
+
+
+def verify_initial_deployment_or_rollback(
+    project_ref: str,
+    allowed_origin: str,
+    database_url: str,
+    owner_email: str,
+    service_key: str,
+    publishable_key: str,
+    *,
+    verifier: Callable[..., dict[str, object]] = run_post_deploy_canary,
+    rollback: Callable[..., dict[str, object]] = rollback_initial_function,
+) -> dict[str, object]:
+    try:
+        return verifier(
+            project_ref, allowed_origin, database_url, owner_email, service_key, publishable_key,
+        )
+    except Exception as error:
+        try:
+            rollback(project_ref)
+        except Exception as rollback_error:
+            raise RuntimeError("production canary failed and the initial dashboard rollback also failed") from rollback_error
+        raise error
 
 
 def main() -> int:
@@ -330,7 +389,7 @@ def main() -> int:
     receipt = deploy_function(arguments.project_ref, git_sha)
     receipt["configuration"] = safe_configuration
     receipt["role"] = role_receipt
-    receipt["canary"] = run_post_deploy_canary(
+    receipt["canary"] = verify_initial_deployment_or_rollback(
         arguments.project_ref,
         arguments.allowed_origin,
         database_url,

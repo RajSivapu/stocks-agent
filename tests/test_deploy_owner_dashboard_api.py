@@ -125,17 +125,77 @@ def test_function_deploy_is_pinned_and_returns_a_bounded_receipt(tmp_path):
         commands.append(command)
         if "list" in command:
             list_count += 1
-            output = f'[{ {"name": "owner-dashboard-api", "version": list_count + 1} }]'.replace("'", '"')
+            output = "[]" if list_count == 1 else '[{"name":"owner-dashboard-api","version":1}]'
         else:
             output = "ok"
         return type("Result", (), {"returncode": 0, "stdout": output, "stderr": ""})()
 
     receipt = deploy.deploy_function(PROJECT_REF, "a" * 40, tmp_path, runner)
     assert receipt["git_sha"] == "a" * 40
-    assert receipt["function_version"] == 3
-    assert receipt["rollback_function_version"] == 2
+    assert receipt["function_version"] == 1
+    assert receipt["rollback_function_version"] is None
     assert any(command[-2:] == ["--no-verify-jwt", "--use-api"] for command in commands)
     assert all("service_role" not in " ".join(command).lower() for command in commands)
+
+
+def test_initial_deploy_refuses_to_overwrite_an_existing_function(tmp_path):
+    commands = []
+
+    def runner(command, **_options):
+        commands.append(command)
+        return type("Result", (), {
+            "returncode": 0,
+            "stdout": '[{"name":"owner-dashboard-api","version":4}]',
+            "stderr": "",
+        })()
+
+    with pytest.raises(RuntimeError, match="already exists"):
+        deploy.deploy_function(PROJECT_REF, "a" * 40, tmp_path, runner)
+    assert not any("deploy" in command for command in commands)
+
+
+def test_failed_initial_canary_deletes_only_the_new_dashboard_function(tmp_path):
+    commands = []
+
+    def runner(command, **_options):
+        commands.append(command)
+        return type("Result", (), {"returncode": 0, "stdout": "ok", "stderr": ""})()
+
+    receipt = deploy.rollback_initial_function(PROJECT_REF, tmp_path, runner)
+    assert receipt == {
+        "status": "rolled_back", "function": "owner-dashboard-api",
+        "dashboard_secrets_unset": list(deploy.DASHBOARD_SECRET_NAMES),
+    }
+    assert commands == [
+        [
+            "npx", "--yes", f"supabase@{deploy.SUPABASE_CLI_VERSION}", "secrets", "unset",
+            *deploy.DASHBOARD_SECRET_NAMES, "--project-ref", PROJECT_REF, "--yes",
+        ],
+        [
+            "npx", "--yes", f"supabase@{deploy.SUPABASE_CLI_VERSION}", "functions", "delete",
+            "owner-dashboard-api", "--project-ref", PROJECT_REF, "--yes",
+        ],
+    ]
+
+
+def test_canary_failure_invokes_rollback_before_propagating():
+    events = []
+
+    def verifier(*_args):
+        events.append("canary")
+        raise RuntimeError("production canary failed")
+
+    def rollback(*_args):
+        events.append("rollback")
+        return {"status": "rolled_back"}
+
+    with pytest.raises(RuntimeError, match="production canary failed"):
+        deploy.verify_initial_deployment_or_rollback(
+            PROJECT_REF, ORIGIN, DATABASE_URL, "owner@example.com",
+            "sb_secret_" + "s" * 40, "sb_publishable_" + "p" * 32,
+            verifier=verifier, rollback=rollback,
+        )
+    assert events == ["canary", "rollback"]
 
 
 def test_post_deploy_canary_keeps_runtime_database_url_and_auth_token_out_of_receipt():
