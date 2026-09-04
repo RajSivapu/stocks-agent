@@ -3,7 +3,7 @@
 Last updated: 2026-09-04
 Canonical release: Personal Stock Agent V1
 Source baseline: `c5886f5` on `codex/owner-alert-v3`
-Current state: documentation checkpoint; written-spec approval required before planning or code
+Current state: written specification approved; implementation plan complete; execution workflow selection required
 
 This file is the version-controlled source of truth for the Personal Stock Agent V1 rollout.
 `docs/ROADMAP.md` retains historical capability and deployment detail. Notion may later mirror this
@@ -30,19 +30,24 @@ scope is not renamed V1.1.
 - Reserved the private one-account Site; the dashboard is not claimed live.
 - Approved the zero-cost V1 provider and product architecture in owner chat.
 - Wrote the consolidated V1 specification and this canonical checkpoint document.
-
-## In Progress
+- Owner approved the written specification on 2026-09-04.
+- Wrote the single checkpointed implementation plan at
+  `docs/superpowers/plans/2026-09-04-zero-cost-personal-stock-agent-v1-implementation.md`.
 
 ### V1-C1 — Release control
 
 - [x] Consolidated architecture written.
 - [x] Root canonical status created.
-- [ ] Owner approves the written specification.
-- [ ] Detailed implementation plan is written only after that approval.
+- [x] Owner approved the written specification on 2026-09-04.
+- [x] Detailed implementation plan written after approval.
+
+V1-C1 is complete.
+
+## In Progress
 
 ### V1-C2 — Free intelligence ingestion
 
-- [ ] Not started; blocked by the written-spec approval gate.
+- [ ] Not started; awaiting implementation workflow selection.
 
 ### V1-C3 — Market-discovery brain
 
@@ -65,19 +70,17 @@ scope is not renamed V1.1.
 
 ## Next
 
-1. Owner reviews and approves or revises the written specification.
-2. Invoke the writing-plans workflow and produce one implementation plan decomposed by V1-C1 through
-   V1-C6.
-3. Implement checkpoint by checkpoint with tests, internal review, and status updates.
-4. Preserve scheduled production capacity and inspect only scheduled receipts at their established
+1. Select the implementation workflow: subagent-driven development or inline execution.
+2. Implement checkpoint by checkpoint with tests, internal review, and status updates.
+3. Preserve scheduled production capacity and inspect only scheduled receipts at their established
    times.
 
 ## Owner Action
 
-Review
-`docs/superpowers/specs/2026-09-04-zero-cost-personal-stock-agent-v1-design.md` and explicitly approve
-it or request changes. No implementation plan or product code will start before written-spec
-approval.
+Review the committed
+`docs/superpowers/plans/2026-09-04-zero-cost-personal-stock-agent-v1-implementation.md` and select
+the execution workflow: subagent-driven development or inline execution. Product code begins only
+after that selection.
 
 No provider purchase, paid trial, card signup, brokerage credential, friend invitation, or duplicate
 live run is requested.
@@ -101,7 +104,7 @@ live run is requested.
 
 ## Blockers
 
-- Written-spec approval blocks implementation planning and code.
+- Implementation execution waits for the post-plan workflow selection.
 - Production dashboard deployment remains blocked by its exact-head independent review gate and
   must not deploy the superseded thin dashboard.
 - Any unavailable free-provider entitlement, quota, or official-source access must fail closed and

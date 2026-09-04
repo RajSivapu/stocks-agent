@@ -1,7 +1,7 @@
 # Zero-Cost Personal Stock Agent V1 Design
 
 **Date:** 2026-09-04
-**Status:** Written specification awaiting owner approval
+**Status:** Approved by the owner on 2026-09-04
 **Release:** Personal Stock Agent V1
 **Release control:** `PROJECT_STATUS.md`
 
