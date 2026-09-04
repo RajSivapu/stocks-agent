@@ -24,6 +24,11 @@ sys.path.insert(0, str(ROOT))
 
 from scripts.provision_dashboard_runtime_role import provision_dashboard_role
 from scripts.verify_owner_dashboard_role import verify_dashboard_role
+from scripts.verify_owner_dashboard_deployment import (
+    collect_source_receipts,
+    obtain_ephemeral_owner_access_token,
+    run_http_canary,
+)
 
 
 MIGRATION = ROOT / "sql/migrations/20260906_owner_dashboard_read_role.sql"
@@ -240,16 +245,57 @@ def deploy_function(
     }
 
 
+def run_post_deploy_canary(
+    project_ref: str,
+    allowed_origin: str,
+    database_url: str,
+    owner_email: str,
+    service_key: str,
+    publishable_key: str,
+    *,
+    token_factory: Callable[..., str] = obtain_ephemeral_owner_access_token,
+    source_collector: Callable[..., Mapping[str, object]] = collect_source_receipts,
+    canary: Callable[..., Mapping[str, object]] = run_http_canary,
+) -> dict[str, object]:
+    project_url = f"https://{project_ref}.supabase.co"
+    api_url = f"{project_url}/functions/v1/{FUNCTION_NAME}"
+    _validate_origin(allowed_origin)
+    _validate_database_url(database_url, project_ref)
+    token = token_factory(project_url, owner_email, allowed_origin, service_key, publishable_key)
+    result = dict(canary(
+        api_url,
+        allowed_origin,
+        token,
+        source_reader=lambda run_id: source_collector(database_url, api_url, run_id),
+    ))
+    expected = {
+        "status": "verified",
+        "source_reconciliation": "verified",
+        "financial_write_routes": 0,
+        "brokerage_authority": "none",
+        "friend_invitations": "disabled",
+    }
+    if any(result.get(key) != value for key, value in expected.items()):
+        raise RuntimeError("production canary receipt is incomplete")
+    return result
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--project-ref", required=True)
     parser.add_argument("--allowed-origin", required=True)
     arguments = parser.parse_args()
     owner_user_id = os.environ.get("DASHBOARD_OWNER_USER_ID", "").strip()
+    owner_email = os.environ.get("DASHBOARD_OWNER_EMAIL", "").strip()
+    service_key = os.environ.get("SUPABASE_SERVICE_ROLE_KEY", "").strip()
+    publishable_key = os.environ.get("SUPABASE_PUBLISHABLE_KEY", "").strip()
     admin_url = os.environ.get("POSTGRES_URL", "").strip()
     session_template = os.environ.get("SUPAVISOR_SESSION_URL", "").strip()
-    if not admin_url or not session_template:
-        raise SystemExit("POSTGRES_URL and SUPAVISOR_SESSION_URL are required")
+    if not admin_url or not session_template or not owner_email or not service_key or not publishable_key:
+        raise SystemExit(
+            "POSTGRES_URL, SUPAVISOR_SESSION_URL, DASHBOARD_OWNER_EMAIL, "
+            "SUPABASE_SERVICE_ROLE_KEY, and SUPABASE_PUBLISHABLE_KEY are required"
+        )
 
     validate_static_configuration(
         arguments.project_ref,
@@ -284,6 +330,14 @@ def main() -> int:
     receipt = deploy_function(arguments.project_ref, git_sha)
     receipt["configuration"] = safe_configuration
     receipt["role"] = role_receipt
+    receipt["canary"] = run_post_deploy_canary(
+        arguments.project_ref,
+        arguments.allowed_origin,
+        database_url,
+        owner_email,
+        service_key,
+        publishable_key,
+    )
     print(json.dumps(receipt, sort_keys=True, separators=(",", ":")))
     return 0
 

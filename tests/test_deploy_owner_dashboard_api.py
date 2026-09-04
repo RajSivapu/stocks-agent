@@ -136,3 +136,46 @@ def test_function_deploy_is_pinned_and_returns_a_bounded_receipt(tmp_path):
     assert receipt["rollback_function_version"] == 2
     assert any(command[-2:] == ["--no-verify-jwt", "--use-api"] for command in commands)
     assert all("service_role" not in " ".join(command).lower() for command in commands)
+
+
+def test_post_deploy_canary_keeps_runtime_database_url_and_auth_token_out_of_receipt():
+    observed = {}
+
+    def token_factory(project_url, owner_email, redirect_origin, service_key, publishable_key):
+        observed["auth"] = (project_url, owner_email, redirect_origin, service_key, publishable_key)
+        return "owner-access-token"
+
+    def source_collector(database_url, api_url, run_id):
+        observed["source"] = (database_url, api_url, run_id)
+        return {"source": "receipt"}
+
+    def canary(api_url, origin, token, *, source_reader):
+        observed["canary"] = (api_url, origin, token)
+        assert source_reader(OWNER_ID) == {"source": "receipt"}
+        return {
+            "status": "verified", "source_reconciliation": "verified",
+            "financial_write_routes": 0, "brokerage_authority": "none",
+            "friend_invitations": "disabled",
+        }
+
+    receipt = deploy.run_post_deploy_canary(
+        PROJECT_REF, ORIGIN, DATABASE_URL, OWNER_EMAIL := "owner@example.com",
+        "sb_secret_" + "s" * 40, "sb_publishable_" + "p" * 32,
+        token_factory=token_factory, source_collector=source_collector, canary=canary,
+    )
+    assert receipt["status"] == "verified"
+    assert DATABASE_URL not in str(receipt)
+    assert OWNER_EMAIL not in str(receipt)
+    assert "owner-access-token" not in str(receipt)
+    assert observed["source"][0] == DATABASE_URL
+
+
+def test_post_deploy_canary_rejects_an_incomplete_receipt():
+    with pytest.raises(RuntimeError, match="production canary"):
+        deploy.run_post_deploy_canary(
+            PROJECT_REF, ORIGIN, DATABASE_URL, "owner@example.com",
+            "sb_secret_" + "s" * 40, "sb_publishable_" + "p" * 32,
+            token_factory=lambda *_args: "owner-token",
+            source_collector=lambda *_args: {},
+            canary=lambda *_args, **_kwargs: {"status": "verified", "source_reconciliation": "missing"},
+        )
