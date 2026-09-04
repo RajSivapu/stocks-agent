@@ -13,6 +13,14 @@ DATABASE_URL = (
     "postgresql://stock_agent_dashboard_runtime.hlxpxbxhqctwsqizwjjy:"
     "dashboard-password-longer-than-24@aws-0-us-east-1.pooler.supabase.com:5432/postgres"
 )
+ADMIN_URL = (
+    "postgresql://postgres:admin-password-longer-than-24@"
+    "db.hlxpxbxhqctwsqizwjjy.supabase.co:5432/postgres?sslmode=require"
+)
+SESSION_TEMPLATE = (
+    "postgresql://postgres.hlxpxbxhqctwsqizwjjy:admin-password-longer-than-24@"
+    "aws-0-us-east-1.pooler.supabase.com:5432/postgres"
+)
 ROLE_RECEIPT = {
     "status": "verified", "runtime_role": "stock_agent_dashboard_runtime",
     "privilege_role": "stock_agent_dashboard", "table_count": 15,
@@ -47,6 +55,24 @@ def test_static_configuration_can_be_validated_before_database_mutation():
     assert result["allowed_origin"] == ORIGIN
     with pytest.raises(ValueError, match="owner UUID"):
         deploy.validate_static_configuration(PROJECT_REF, "", ORIGIN, deploy.DASHBOARD_SECRET_NAMES)
+
+
+def test_database_endpoints_are_bound_to_the_exact_project_before_mutation():
+    result = deploy.validate_release_database_endpoints(PROJECT_REF, ADMIN_URL, SESSION_TEMPLATE)
+    assert result == {"admin_database": "verified", "session_pooler": "verified"}
+
+    with pytest.raises(ValueError, match="project-matched administrator"):
+        deploy.validate_release_database_endpoints(
+            PROJECT_REF,
+            ADMIN_URL.replace(PROJECT_REF, "aaaaaaaaaaaaaaaaaaaa"),
+            SESSION_TEMPLATE,
+        )
+    with pytest.raises(ValueError, match="project-matched scoped"):
+        deploy.validate_release_database_endpoints(
+            PROJECT_REF,
+            ADMIN_URL,
+            SESSION_TEMPLATE.replace(PROJECT_REF, "aaaaaaaaaaaaaaaaaaaa"),
+        )
 
 
 @pytest.mark.parametrize(
@@ -248,7 +274,7 @@ def test_post_publication_deploy_failure_rolls_back_before_propagating():
     assert events == ["preflight", "publish", "deploy", "rollback"]
 
 
-def test_pre_publication_failure_does_not_run_destructive_rollback():
+def test_secret_publication_failure_runs_fail_closed_rollback():
     events = []
 
     def publisher(*_args, **_kwargs):
@@ -270,7 +296,7 @@ def test_pre_publication_failure_does_not_run_destructive_rollback():
             deployer=lambda *_args, **_kwargs: events.append("deploy"),
             rollback=lambda *_args, **_kwargs: events.append("rollback"),
         )
-    assert events == ["preflight", "publish"]
+    assert events == ["preflight", "publish", "rollback"]
 
 
 def test_existing_function_stops_before_secret_publication_or_rollback():

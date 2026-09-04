@@ -15,7 +15,7 @@ import subprocess
 import sys
 import tempfile
 from typing import Callable, Mapping, Sequence
-from urllib.parse import unquote, urlparse
+from urllib.parse import parse_qsl, unquote, urlparse
 
 import psycopg
 
@@ -23,8 +23,10 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
 from scripts.provision_dashboard_runtime_role import (
+    RUNTIME_ROLE,
     disable_dashboard_runtime_login,
     provision_dashboard_role,
+    runtime_url,
 )
 from scripts.verify_owner_dashboard_role import verify_dashboard_role
 from scripts.verify_owner_dashboard_deployment import (
@@ -85,6 +87,33 @@ def _validate_database_url(value: str, project_ref: str) -> None:
         or parsed.fragment
     ):
         raise ValueError("a project-matched scoped Supavisor session URL on port 5432 is required")
+
+
+def validate_release_database_endpoints(
+    project_ref: str,
+    admin_url: str,
+    session_template: str,
+) -> dict[str, str]:
+    """Bind both privileged database endpoints to the requested project before mutation."""
+    if not PROJECT_REF_PATTERN.fullmatch(project_ref):
+        raise ValueError("a canonical Supabase project reference is required")
+    parsed = urlparse(admin_url)
+    query = parse_qsl(parsed.query, keep_blank_values=True)
+    if (
+        parsed.scheme not in {"postgres", "postgresql"}
+        or parsed.hostname != f"db.{project_ref}.supabase.co"
+        or parsed.port != 5432
+        or unquote(parsed.username or "") != "postgres"
+        or len(unquote(parsed.password or "")) < 24
+        or parsed.path != "/postgres"
+        or parsed.params
+        or parsed.fragment
+        or query not in ([], [("sslmode", "require")])
+    ):
+        raise ValueError("a project-matched administrator database URL is required")
+    candidate = runtime_url(session_template, RUNTIME_ROLE, "x" * 32)
+    _validate_database_url(candidate, project_ref)
+    return {"admin_database": "verified", "session_pooler": "verified"}
 
 
 def _validate_role_receipt(value: Mapping[str, object]) -> None:
@@ -346,8 +375,8 @@ def publish_and_deploy_or_rollback(
 ) -> dict[str, object]:
     """Publish the exact secret manifest and clean it up if deployment fails."""
     preflight(project_ref)
-    publisher(project_ref, values)
     try:
+        publisher(project_ref, values)
         return dict(deployer(project_ref, git_sha))
     except Exception as error:
         try:
@@ -437,6 +466,8 @@ def main() -> int:
             "POSTGRES_URL, SUPAVISOR_SESSION_URL, DASHBOARD_OWNER_EMAIL, "
             "SUPABASE_SERVICE_ROLE_KEY, and SUPABASE_PUBLISHABLE_KEY are required"
         )
+
+    validate_release_database_endpoints(arguments.project_ref, admin_url, session_template)
 
     validate_static_configuration(
         arguments.project_ref,
