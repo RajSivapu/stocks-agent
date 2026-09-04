@@ -27,29 +27,34 @@ def _near_duplicate(left: SourceItem, right: SourceItem) -> bool:
 
 def deduplicate(items: Iterable[SourceItem]) -> list[RunItemDisposition]:
     accepted: list[SourceItem] = []
+    seen_urls: set[str] = set()
+    seen_upstream_ids: set[tuple[str, str]] = set()
+    seen_hashes: set[str] = set()
     output: list[RunItemDisposition] = []
     for item in items:
         reason: str | None = None
         disposition: Disposition = "accepted"
-        for canonical in accepted:
-            if item.canonical_url and item.canonical_url == canonical.canonical_url:
-                disposition, reason = "duplicate", "same_canonical_url"
-                break
-            if (
-                item.provider == canonical.provider
-                and item.upstream_item_id
-                and item.upstream_item_id == canonical.upstream_item_id
-            ):
-                disposition, reason = "duplicate", "same_upstream_item_id"
-                break
-            if item.content_hash == canonical.content_hash:
-                disposition, reason = "duplicate", "same_content_hash"
-                break
-            if _near_duplicate(item, canonical):
-                disposition, reason = "near_duplicate", "similar_normalized_content"
-                break
+        upstream_identity = (
+            (item.provider, item.upstream_item_id) if item.upstream_item_id else None
+        )
+        if item.canonical_url and item.canonical_url in seen_urls:
+            disposition, reason = "duplicate", "same_canonical_url"
+        elif upstream_identity and upstream_identity in seen_upstream_ids:
+            disposition, reason = "duplicate", "same_upstream_item_id"
+        elif item.content_hash in seen_hashes:
+            disposition, reason = "duplicate", "same_content_hash"
+        else:
+            for canonical in accepted:
+                if _near_duplicate(item, canonical):
+                    disposition, reason = "near_duplicate", "similar_normalized_content"
+                    break
         if disposition == "accepted":
             accepted.append(item)
+        if item.canonical_url:
+            seen_urls.add(item.canonical_url)
+        if upstream_identity:
+            seen_upstream_ids.add(upstream_identity)
+        seen_hashes.add(item.content_hash)
         output.append(RunItemDisposition(item=item, disposition=disposition, reason=reason))
     return output
 

@@ -215,6 +215,65 @@ function assertHash(actual: unknown, canonical: string, path: string): string {
   return calculated;
 }
 
+function percentEncodePath(value: string): string {
+  const safe = new Set(
+    "/%:@!$&'()*+,;=-._~".split(""),
+  );
+  let encoded = "";
+  for (const character of value) {
+    if (/^[A-Za-z0-9]$/.test(character) || safe.has(character)) {
+      encoded += character;
+    } else {
+      encoded += encodeURIComponent(character);
+    }
+  }
+  return encoded;
+}
+
+function percentEncodeQuery(value: string): string {
+  return encodeURIComponent(value)
+    .replace(/[!'()*]/g, (character) =>
+      `%${character.charCodeAt(0).toString(16).toUpperCase()}`
+    )
+    .replace(/%20/g, "+");
+}
+
+function compareText(left: string, right: string): number {
+  return left < right ? -1 : left > right ? 1 : 0;
+}
+
+function canonicalizeUrl(value: string, path: string): string {
+  let parsed: URL;
+  try {
+    parsed = new URL(value);
+  } catch {
+    throw new Error(`${path} must be HTTPS`);
+  }
+  if (
+    parsed.protocol.toLowerCase() !== "https:" || !parsed.hostname ||
+    parsed.username || parsed.password || (parsed.port && parsed.port !== "443")
+  ) {
+    throw new Error(`${path} must be HTTPS`);
+  }
+  let decodedPath: string;
+  try {
+    decodedPath = decodeURIComponent(parsed.pathname || "/");
+  } catch {
+    throw new Error(`${path} must contain valid URL encoding`);
+  }
+  const queryPairs = [...parsed.searchParams.entries()].sort((left, right) =>
+    compareText(left[0], right[0]) || compareText(left[1], right[1])
+  );
+  const query = queryPairs.map(([key, item]) =>
+    `${percentEncodeQuery(key)}=${percentEncodeQuery(item)}`
+  ).join("&");
+  const canonical = `https://${parsed.hostname.toLowerCase().replace(/\.$/, "")}${
+    percentEncodePath(decodedPath)
+  }${query ? `?${query}` : ""}`;
+  if (canonical.length > 2_048) throw new Error(`${path} exceeds URL limit`);
+  return canonical;
+}
+
 function canonicalValue(value: unknown): unknown {
   if (
     value === null || typeof value === "string" || typeof value === "boolean"
@@ -437,6 +496,19 @@ function parseItem(value: unknown, index: number): JsonObject {
   if ((disposition === "accepted") !== (dropReason === null)) {
     throw new Error(`${path}.drop_reason does not match disposition`);
   }
+  const exactDuplicateReasons = [
+    "same_canonical_url",
+    "same_upstream_item_id",
+    "same_content_hash",
+  ];
+  if (
+    (disposition === "duplicate" &&
+      (dropReason === null || !exactDuplicateReasons.includes(dropReason))) ||
+    (disposition === "near_duplicate" &&
+      dropReason !== "similar_normalized_content")
+  ) {
+    throw new Error(`${path}.drop_reason is invalid for disposition`);
+  }
   const canonicalContent = stringValue(
     row.canonical_content,
     `${path}.canonical_content`,
@@ -448,20 +520,9 @@ function parseItem(value: unknown, index: number): JsonObject {
     `${path}.canonical_url`,
     2_048,
   );
-  if (canonicalUrl !== null) {
-    let parsed: URL;
-    try {
-      parsed = new URL(canonicalUrl);
-    } catch {
-      throw new Error(`${path}.canonical_url must be HTTPS`);
-    }
-    if (
-      parsed.protocol !== "https:" || parsed.username || parsed.password ||
-      (parsed.port && parsed.port !== "443")
-    ) {
-      throw new Error(`${path}.canonical_url must be HTTPS`);
-    }
-  }
+  const normalizedCanonicalUrl = canonicalUrl === null
+    ? null
+    : canonicalizeUrl(canonicalUrl, `${path}.canonical_url`);
   return {
     id: uuidValue(row.id, `${path}.id`),
     run_item_id: uuidValue(row.run_item_id, `${path}.run_item_id`),
@@ -471,7 +532,7 @@ function parseItem(value: unknown, index: number): JsonObject {
       `${path}.upstream_item_id`,
       512,
     ),
-    canonical_url: canonicalUrl,
+    canonical_url: normalizedCanonicalUrl,
     published_at: timestamp(row.published_at, `${path}.published_at`, true),
     effective_at: timestamp(row.effective_at, `${path}.effective_at`, true),
     title: stringValue(row.title, `${path}.title`, 500),
@@ -667,24 +728,33 @@ function parsePacket(value: unknown, policyVersionHint?: number): JsonObject {
     throw new Error("payload.packet policy_version mismatch");
   }
   candidates.forEach((candidate, index) => {
+    const path = `payload.packet.packet.candidates[${index}]`;
     const candidateRow = objectValue(
       candidate,
-      `payload.packet.packet.candidates[${index}]`,
+      path,
     );
-    arrayValue(
+    exactKeys(candidateRow, ["candidate_key", "evidence_ids"], path);
+    stringValue(candidateRow.candidate_key, `${path}.candidate_key`, 256);
+    uuidArray(
       candidateRow.evidence_ids,
-      `payload.packet.packet.candidates[${index}].evidence_ids`,
+      `${path}.evidence_ids`,
+      0,
       8,
     );
   });
   evidence.forEach((item, index) => {
+    const path = `payload.packet.packet.evidence[${index}]`;
     const evidenceRow = objectValue(
       item,
-      `payload.packet.packet.evidence[${index}]`,
+      path,
     );
-    uuidValue(
-      evidenceRow.item_id,
-      `payload.packet.packet.evidence[${index}].item_id`,
+    exactKeys(evidenceRow, ["item_id", "normalized_text"], path);
+    uuidValue(evidenceRow.item_id, `${path}.item_id`);
+    stringValue(
+      evidenceRow.normalized_text,
+      `${path}.normalized_text`,
+      2_000,
+      true,
     );
   });
   return {
