@@ -73,13 +73,163 @@ def test_http_canary_uses_only_get_and_checks_unauthenticated_denial():
             return 401, {"access-control-allow-origin": ORIGIN}, json.dumps({"error": {"code": "unauthorized"}}).encode()
         route = url.removeprefix(API_URL)
         data = {"boundaries": {"owner_only": True, "suggestion_only": True, "friend_invitations": "disabled", "brokerage_authority": "none"}}
-        if route == "/v1/today": data["portfolio"] = {"data_as_of": None, "market_state": "unknown", "price_sources": []}
-        if route == "/v1/runs": data["runs"] = [{"id": "6903b3cc-05b7-4f90-bbc2-7e80a3a59e22", "status": "completed"}]
+        if route == "/v1/today": data["portfolio"] = {"data_as_of": None, "market_state": "unknown", "price_sources": [], "holdings": []}
+        if route == "/v1/portfolio": data["holdings"] = []
+        if route == "/v1/alerts": data["alerts"] = []
+        if route == "/v1/runs": data["runs"] = [{
+            "id": "6903b3cc-05b7-4f90-bbc2-7e80a3a59e22", "kind": "on-demand",
+            "status": "completed", "finished_at": "2026-09-03T20:00:00.000Z",
+            "data_as_of": None, "evaluation_count": 0, "suggestion_count": 0,
+            "publication_status": None,
+        }]
         if route.startswith("/v1/runs/"):
-            data = {"run": {"id": route.rsplit("/", 1)[-1], "status": "completed", "finished_at": "2026-09-03T20:00:00.000Z"}, "write_counts": {"suggestions": 0}, "incomplete_stages": []}
+            data = {
+                "run": {
+                    "id": route.rsplit("/", 1)[-1], "kind": "on-demand",
+                    "status": "completed", "finished_at": "2026-09-03T20:00:00.000Z",
+                    "data_as_of": None, "evaluation_count": 0, "suggestion_count": 0,
+                    "publication_status": None,
+                },
+                "request_receipts": [{"request_id": "one"}], "evaluations": [],
+                "write_counts": {"suggestions": 0}, "telegram_message_ids": [],
+                "incomplete_stages": [],
+            }
         return 200, {"access-control-allow-origin": ORIGIN, "cache-control": "no-store"}, json.dumps(envelope(data, freshness="unavailable", market_state="unknown", data_as_of=None)).encode()
 
-    receipt = verify.run_http_canary(API_URL, ORIGIN, "owner-token", requester=requester)
+    def source_reader(run_id):
+        return {
+            "database_user": verify.RUNTIME_ROLE,
+            "transaction_read_only": "on",
+            "run": {
+                "id": run_id,
+                "kind": "on-demand",
+                "status": "completed",
+                "finished_at": "2026-09-03T20:00:00.000Z",
+                "data_as_of": None,
+                "write_counts": {"suggestions": 0},
+                "telegram_message_ids": [],
+            },
+            "gateway_request_count": 1,
+            "evaluation_count": 0,
+            "suggestion_count": 0,
+            "alerts": [],
+            "policy_version": None,
+            "holdings": [],
+            "portfolio_data_as_of": None,
+        }
+
+    receipt = verify.run_http_canary(
+        API_URL, ORIGIN, "owner-token", requester=requester, source_reader=source_reader,
+    )
     assert receipt["unauthenticated_status"] == 401
     assert receipt["owner_route_count"] == 7
+    assert receipt["source_reconciliation"] == "verified"
+    assert receipt["source_database_role"] == verify.RUNTIME_ROLE
     assert {method for method, _url, _headers in calls} == {"GET"}
+
+
+def test_source_reconciliation_rejects_unsupported_run_send_policy_and_price_claims():
+    run_id = "6903b3cc-05b7-4f90-bbc2-7e80a3a59e22"
+    payloads = {route: envelope({}) for route in verify.CANARY_ROUTES}
+    holding = {
+        "ticker": "VTI", "shares": "2", "average_cost": "100", "price": "110",
+        "price_as_of": "2026-09-03T20:00:00.000Z", "price_source": "yahoo-chart",
+    }
+    payloads["/v1/today"] = envelope({
+        "boundaries": verify.BOUNDARIES,
+        "portfolio": {
+            "data_as_of": "2026-09-03T20:00:00.000Z", "market_state": "as_of_close",
+            "price_sources": ["yahoo-chart"], "holdings": [holding],
+        },
+    })
+    payloads["/v1/portfolio"] = envelope({"holdings": [holding]})
+    payloads["/v1/runs"] = envelope({"runs": [{
+        "id": run_id, "kind": "post-market", "status": "completed",
+        "finished_at": "2026-09-03T20:00:00.000Z", "data_as_of": "2026-09-03T20:00:00.000Z",
+        "evaluation_count": 1, "suggestion_count": 1, "publication_status": "delivered",
+    }]})
+    payloads["/v1/alerts"] = envelope({"alerts": [{
+        "id": "7903b3cc-05b7-4f90-bbc2-7e80a3a59e22", "state": "delivered",
+        "telegram_message_ids": [123], "rendered_hash": "a" * 64, "template_version": "3",
+        "event_status": "triggered",
+    }]})
+    payloads["/v1/system"] = envelope({"policy_version": 17})
+    detail = envelope({
+        "run": payloads["/v1/runs"]["data"]["runs"][0],
+        "request_receipts": [{"request_id": "one"}],
+        "evaluations": [{"id": "1"}],
+        "write_counts": {"suggestions": 1},
+        "telegram_message_ids": [123],
+        "incomplete_stages": [],
+    })
+    source = {
+        "database_user": verify.RUNTIME_ROLE,
+        "transaction_read_only": "on",
+        "run": {
+            "id": run_id, "kind": "post-market", "status": "completed",
+            "finished_at": "2026-09-03T20:00:00.000Z", "data_as_of": "2026-09-03T20:00:00.000Z",
+            "write_counts": {"suggestions": 1}, "telegram_message_ids": [123],
+        },
+        "gateway_request_count": 1,
+        "evaluation_count": 1,
+        "suggestion_count": 1,
+        "alerts": [{
+            "id": "7903b3cc-05b7-4f90-bbc2-7e80a3a59e22", "status": "delivered",
+            "telegram_message_ids": [123], "rendered_hash": "a" * 64,
+            "template_version": "3", "event_status": "triggered",
+        }],
+        "policy_version": 17,
+        "holdings": [{
+            "ticker": "VTI", "shares": "2", "average_cost": "100", "price": "110",
+            "price_as_of": "2026-09-03T20:00:00.000Z", "price_source": "yahoo-chart",
+        }],
+        "portfolio_data_as_of": "2026-09-03T20:00:00.000Z",
+    }
+
+    receipt = verify.reconcile_source_receipts(payloads, detail, source, run_id)
+    assert receipt == {"status": "verified", "database_role": verify.RUNTIME_ROLE, "claims_checked": 5}
+
+    for path, value in [
+        (("run", "write_counts"), {"suggestions": 2}),
+        (("alerts", 0, "telegram_message_ids"), [999]),
+        (("policy_version",), 18),
+        (("holdings", 0, "price"), "109"),
+    ]:
+        changed = json.loads(json.dumps(source))
+        target = changed
+        for part in path[:-1]:
+            target = target[part]
+        target[path[-1]] = value
+        with pytest.raises(RuntimeError, match="source receipt"):
+            verify.reconcile_source_receipts(payloads, detail, changed, run_id)
+
+
+def test_source_reconciliation_requires_scoped_read_only_database_role():
+    source = {
+        "database_user": "postgres", "transaction_read_only": "off", "run": {},
+        "gateway_request_count": 0, "evaluation_count": 0, "suggestion_count": 0,
+        "alerts": [], "policy_version": None, "holdings": [], "portfolio_data_as_of": None,
+    }
+    with pytest.raises(RuntimeError, match="source receipt"):
+        verify.reconcile_source_receipts({}, {}, source, "6903b3cc-05b7-4f90-bbc2-7e80a3a59e22")
+
+
+def test_source_database_url_must_use_the_scoped_session_pooler_login():
+    valid = (
+        "postgresql://stock_agent_dashboard_runtime.hlxpxbxhqctwsqizwjjy:"
+        "dashboard-password-longer-than-24@aws-1-us-west-2.pooler.supabase.com:5432/postgres"
+    )
+    assert verify.validate_source_database_url(valid, API_URL) == valid
+    for invalid in [
+        valid.replace("stock_agent_dashboard_runtime", "postgres"),
+        valid.replace(":5432/", ":6543/"),
+        valid.replace("pooler.supabase.com", "example.com"),
+    ]:
+        with pytest.raises(ValueError, match="source database"):
+            verify.validate_source_database_url(invalid, API_URL)
+
+
+def test_source_timestamp_normalization_fails_closed():
+    assert verify.normalize_receipt_timestamp("2026-09-03T20:00:00.123456+00:00") == "2026-09-03T20:00:00.123Z"
+    assert verify.normalize_receipt_timestamp("not-a-date") is None
+    assert verify.normalize_receipt_timestamp(None) is None

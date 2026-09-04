@@ -40,6 +40,15 @@ def test_valid_configuration_is_normalized_without_secret_values():
     assert "dashboard-password" not in str(result)
 
 
+def test_static_configuration_can_be_validated_before_database_mutation():
+    result = deploy.validate_static_configuration(
+        PROJECT_REF, OWNER_ID, ORIGIN, deploy.DASHBOARD_SECRET_NAMES,
+    )
+    assert result["allowed_origin"] == ORIGIN
+    with pytest.raises(ValueError, match="owner UUID"):
+        deploy.validate_static_configuration(PROJECT_REF, "", ORIGIN, deploy.DASHBOARD_SECRET_NAMES)
+
+
 @pytest.mark.parametrize(
     ("field", "value", "message"),
     (
@@ -109,14 +118,21 @@ def test_secret_manifest_uses_a_private_file_and_never_command_arguments(tmp_pat
 
 def test_function_deploy_is_pinned_and_returns_a_bounded_receipt(tmp_path):
     commands = []
+    list_count = 0
 
     def runner(command, **_options):
+        nonlocal list_count
         commands.append(command)
-        output = '[{"name":"owner-dashboard-api","version":3}]' if "list" in command else "ok"
+        if "list" in command:
+            list_count += 1
+            output = f'[{ {"name": "owner-dashboard-api", "version": list_count + 1} }]'.replace("'", '"')
+        else:
+            output = "ok"
         return type("Result", (), {"returncode": 0, "stdout": output, "stderr": ""})()
 
     receipt = deploy.deploy_function(PROJECT_REF, "a" * 40, tmp_path, runner)
     assert receipt["git_sha"] == "a" * 40
     assert receipt["function_version"] == 3
+    assert receipt["rollback_function_version"] == 2
     assert any(command[-2:] == ["--no-verify-jwt", "--use-api"] for command in commands)
     assert all("service_role" not in " ".join(command).lower() for command in commands)

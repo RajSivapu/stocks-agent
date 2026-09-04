@@ -18,10 +18,11 @@ export function priceReceiptContext(
   sources: readonly string[],
 ): string {
   const state = marketState === "as_of_close" ? "as of close" : marketState.replaceAll("_", " ");
-  const timestamp = asOf
+  const parsedTimestamp = asOf ? new Date(asOf) : null;
+  const timestamp = parsedTimestamp && !Number.isNaN(parsedTimestamp.valueOf())
     ? new Intl.DateTimeFormat("en-US", {
       dateStyle: "medium", timeStyle: "short", timeZone: "America/New_York",
-    }).format(new Date(asOf))
+    }).format(parsedTimestamp)
     : "time unavailable";
   const labels = [...new Set(sources.map((source) => priceSourceLabel(source)))];
   return `${state} · ${timestamp} ET · ${labels.join(", ") || "Source unavailable"}`;

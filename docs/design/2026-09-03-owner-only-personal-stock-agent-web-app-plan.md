@@ -72,8 +72,9 @@ and a completed delivery without opening raw database records.
 - Supabase Auth with one pre-created owner account and public sign-up disabled.
 - A new `owner-dashboard-api` Supabase Edge Function as the only financial-data boundary exposed to
   the browser.
-- Static frontend hosting on Cloudflare Pages, using an exact production origin and strict security
-  headers.
+- Static frontend hosting on a private Codex Site, using an exact production origin, an explicit
+  one-account access allowlist, immutable versions, and strict security headers. The owner-only Site
+  was selected after the Cloudflare CLI preflight found no authenticated owner account.
 
 ## 4. Non-goals
 
@@ -931,7 +932,8 @@ data current.
 3. Set `DASHBOARD_OWNER_USER_ID` and `DASHBOARD_DATABASE_URL`; verify the UUID matches the sole
    intended owner account out of band, and confirm the function has no service-role secret.
 4. Deploy `owner-dashboard-api` through the protected Supabase path.
-5. Deploy static assets to the owner-controlled Cloudflare Pages project.
+5. Deploy static assets to the owner-controlled private Codex Site and verify that its allowlist
+   contains exactly the intended owner account, no groups, and no external visitors.
 6. Verify HTTPS, security headers, authentication, and owner denial.
 7. Perform GET-only receipt reconciliation and the structural database-privilege audit.
 
@@ -967,10 +969,12 @@ data current.
 
 ### Hosting decision
 
-Cloudflare Pages is the recommended first host because the deferred branch already demonstrates a
-static Vite deployment pattern and strict headers. The implementation must not assume Cloudflare
-APIs beyond static hosting. If the owner chooses another HTTPS static host during review, only the
-deployment adapter and header configuration should change; product and API contracts remain stable.
+The reviewed architecture permits a different HTTPS static host without changing product or API
+contracts. The production adapter uses a private Codex Site because it supplies immutable source
+versions and an explicit owner-account allowlist, while the available Cloudflare CLI had no
+authenticated owner account. The release must verify one allowed account, no groups, no external
+visitors, exact API/Supabase origins, and the required response headers before claiming the Site is
+live.
 
 ## 23. Definition of done
 
@@ -1041,7 +1045,8 @@ The implementation code review must challenge, at minimum:
 7. Does the read model expose unnecessary analyst, checker, owner, or operational data?
 8. Do sign-out, access-token expiry, refresh rotation, and inactivity-lock copy match their actual
    security boundaries?
-9. Do Cloudflare Pages security headers and Supabase redirect/CORS rules match browser behavior?
+9. Do the private static host's access allowlist and security headers, plus Supabase redirect/CORS
+   rules, match browser behavior?
 10. Do the protected deployment receipts and structural privilege audit support every production
     claim?
 

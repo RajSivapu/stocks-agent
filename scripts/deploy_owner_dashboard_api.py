@@ -93,6 +93,26 @@ def _validate_role_receipt(value: Mapping[str, object]) -> None:
         raise ValueError("role verifier evidence is missing or unsafe")
 
 
+def validate_static_configuration(
+    project_ref: str,
+    owner_user_id: str,
+    allowed_origin: str,
+    secret_names: Sequence[str],
+) -> dict[str, object]:
+    if not PROJECT_REF_PATTERN.fullmatch(project_ref):
+        raise ValueError("a canonical Supabase project reference is required")
+    if not UUID_PATTERN.fullmatch(owner_user_id):
+        raise ValueError("a canonical owner UUID is required")
+    origin = _validate_origin(allowed_origin)
+    if tuple(sorted(secret_names)) != tuple(sorted(DASHBOARD_SECRET_NAMES)):
+        raise ValueError("dashboard secret manifest is not exact")
+    return {
+        "project_ref_digest": _project_digest(project_ref),
+        "allowed_origin": origin,
+        "secret_names": list(DASHBOARD_SECRET_NAMES),
+    }
+
+
 def validate_deployment_configuration(
     *,
     project_ref: str,
@@ -102,21 +122,10 @@ def validate_deployment_configuration(
     role_receipt: Mapping[str, object],
     secret_names: Sequence[str],
 ) -> dict[str, object]:
-    if not PROJECT_REF_PATTERN.fullmatch(project_ref):
-        raise ValueError("a canonical Supabase project reference is required")
-    if not UUID_PATTERN.fullmatch(owner_user_id):
-        raise ValueError("a canonical owner UUID is required")
-    origin = _validate_origin(allowed_origin)
+    safe = validate_static_configuration(project_ref, owner_user_id, allowed_origin, secret_names)
     _validate_database_url(database_url, project_ref)
     _validate_role_receipt(role_receipt)
-    if tuple(sorted(secret_names)) != tuple(sorted(DASHBOARD_SECRET_NAMES)):
-        raise ValueError("dashboard secret manifest is not exact")
-    return {
-        "project_ref_digest": _project_digest(project_ref),
-        "allowed_origin": origin,
-        "role_status": "verified",
-        "secret_names": list(DASHBOARD_SECRET_NAMES),
-    }
+    return {**safe, "role_status": "verified"}
 
 
 def _run(command: list[str], *, cwd: Path, runner: Callable[..., object]):
@@ -187,6 +196,25 @@ def deploy_function(
 ) -> dict[str, object]:
     if not PROJECT_REF_PATTERN.fullmatch(project_ref) or not re.fullmatch(r"[0-9a-f]{40}", git_sha):
         raise ValueError("canonical project and git receipts are required")
+    def function_version() -> int | None:
+        listing = _run(
+            [
+                "npx", "--yes", f"supabase@{SUPABASE_CLI_VERSION}", "functions", "list",
+                "--project-ref", project_ref, "--output", "json",
+            ],
+            cwd=repo_root,
+            runner=runner,
+        )
+        if getattr(listing, "returncode", 1) != 0:
+            raise RuntimeError("dashboard function version receipt is unavailable")
+        try:
+            functions = json.loads(str(getattr(listing, "stdout", "")))
+            row = next((item for item in functions if item.get("name") == FUNCTION_NAME), None)
+            return None if row is None else int(row["version"])
+        except (json.JSONDecodeError, KeyError, TypeError, ValueError) as error:
+            raise RuntimeError("dashboard function version receipt is malformed") from error
+
+    rollback_version = function_version()
     deploy = _run(
         [
             "npx", "--yes", f"supabase@{SUPABASE_CLI_VERSION}", "functions", "deploy",
@@ -197,26 +225,14 @@ def deploy_function(
     )
     if getattr(deploy, "returncode", 1) != 0:
         raise RuntimeError("Supabase rejected the dashboard function deployment")
-    listing = _run(
-        [
-            "npx", "--yes", f"supabase@{SUPABASE_CLI_VERSION}", "functions", "list",
-            "--project-ref", project_ref, "--output", "json",
-        ],
-        cwd=repo_root,
-        runner=runner,
-    )
-    if getattr(listing, "returncode", 1) != 0:
-        raise RuntimeError("dashboard function version receipt is unavailable")
-    try:
-        functions = json.loads(str(getattr(listing, "stdout", "")))
-        row = next(item for item in functions if item.get("name") == FUNCTION_NAME)
-        version = int(row["version"])
-    except (json.JSONDecodeError, KeyError, StopIteration, TypeError, ValueError) as error:
-        raise RuntimeError("dashboard function version receipt is malformed") from error
+    version = function_version()
+    if version is None or (rollback_version is not None and version <= rollback_version):
+        raise RuntimeError("dashboard function version did not advance")
     return {
         "status": "deployed",
         "function": FUNCTION_NAME,
         "function_version": version,
+        "rollback_function_version": rollback_version,
         "git_sha": git_sha,
         "project_ref_digest": _project_digest(project_ref),
         "cli_version": SUPABASE_CLI_VERSION,
@@ -235,6 +251,12 @@ def main() -> int:
     if not admin_url or not session_template:
         raise SystemExit("POSTGRES_URL and SUPAVISOR_SESSION_URL are required")
 
+    validate_static_configuration(
+        arguments.project_ref,
+        owner_user_id,
+        arguments.allowed_origin,
+        DASHBOARD_SECRET_NAMES,
+    )
     git_sha = verify_git_release()
     run_local_verification()
     with psycopg.connect(admin_url) as connection:

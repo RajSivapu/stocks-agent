@@ -4,13 +4,18 @@
 from __future__ import annotations
 
 import argparse
+from datetime import datetime, timezone
 import hashlib
 import json
 import os
+import re
 from typing import Callable, Mapping
 from urllib.error import HTTPError
 from urllib.parse import urlparse
 from urllib.request import Request, urlopen
+
+import psycopg
+from psycopg.rows import dict_row
 
 
 CANARY_METHOD = "GET"
@@ -28,6 +33,234 @@ BOUNDARIES = {
     "friend_invitations": "disabled",
     "brokerage_authority": "none",
 }
+RUNTIME_ROLE = "stock_agent_dashboard_runtime"
+UUID_PATTERN = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$", re.IGNORECASE)
+
+
+def normalize_receipt_timestamp(value: object) -> str | None:
+    if not isinstance(value, str):
+        return None
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        return None
+    return parsed.astimezone(timezone.utc).isoformat(timespec="milliseconds").replace("+00:00", "Z")
+
+
+def validate_source_database_url(database_url: str, api_url: str) -> str:
+    api = urlparse(api_url)
+    project_ref = (api.hostname or "").split(".", 1)[0]
+    parsed = urlparse(database_url)
+    expected_user = f"{RUNTIME_ROLE}.{project_ref}"
+    if (
+        parsed.scheme not in {"postgres", "postgresql"}
+        or not re.fullmatch(r"[a-z0-9-]+\.pooler\.supabase\.com", parsed.hostname or "")
+        or parsed.port != 5432
+        or parsed.username != expected_user
+        or not parsed.password
+        or len(parsed.password) < 24
+        or parsed.path != "/postgres"
+        or parsed.params
+        or parsed.query
+        or parsed.fragment
+    ):
+        raise ValueError("source database URL must use the scoped session-pooler login")
+    return database_url
+
+
+def _fetch_one(connection, query: str, parameters: tuple[object, ...] = ()) -> dict[str, object]:
+    with connection.cursor() as cursor:
+        cursor.execute(query, parameters)
+        row = cursor.fetchone()
+    return dict(row) if row else {}
+
+
+def _fetch_all(connection, query: str, parameters: tuple[object, ...] = ()) -> list[dict[str, object]]:
+    with connection.cursor() as cursor:
+        cursor.execute(query, parameters)
+        return [dict(row) for row in cursor.fetchall()]
+
+
+def collect_source_receipts(database_url: str, api_url: str, run_id: str) -> dict[str, object]:
+    """Read the source rows through the scoped dashboard login in a read-only transaction."""
+    validate_source_database_url(database_url, api_url)
+    if not UUID_PATTERN.fullmatch(run_id):
+        raise ValueError("completed run identifier is malformed")
+    timestamp = "to_char({field} AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS.MS\"Z\"')"
+    with psycopg.connect(database_url, row_factory=dict_row) as connection:
+        with connection.cursor() as cursor:
+            cursor.execute("SET TRANSACTION READ ONLY")
+        identity = _fetch_one(
+            connection,
+            "SELECT current_user AS database_user, current_setting('transaction_read_only') AS transaction_read_only",
+        )
+        run = _fetch_one(
+            connection,
+            f"""SELECT id::text AS id, kind, status,
+                       {timestamp.format(field='finished_at')} AS finished_at,
+                       {timestamp.format(field='data_as_of')} AS data_as_of,
+                       write_counts, telegram_message_ids
+                  FROM public.analysis_runs WHERE id = %s::uuid""",
+            (run_id,),
+        )
+        counts = _fetch_one(
+            connection,
+            """SELECT
+                 (SELECT count(*) FROM public.market_gateway_requests WHERE run_id = %s::uuid) AS gateway_request_count,
+                 (SELECT count(*) FROM public.decision_evaluations WHERE run_id = %s::uuid) AS evaluation_count,
+                 (SELECT count(*) FROM public.suggestions WHERE run_id = %s::uuid) AS suggestion_count""",
+            (run_id, run_id, run_id),
+        )
+        alerts = _fetch_all(
+            connection,
+            """SELECT p.id::text AS id, p.status, p.telegram_message_ids, p.rendered_hash,
+                      p.template_version,
+                      (SELECT e.status FROM public.market_alert_events e
+                        WHERE e.publication_id = p.id ORDER BY e.persisted_at DESC LIMIT 1) AS event_status
+                 FROM public.market_publications p
+                ORDER BY p.created_at DESC, p.id DESC LIMIT 50""",
+        )
+        policy = _fetch_one(
+            connection,
+            "SELECT version FROM public.market_policy_config WHERE active = true ORDER BY version DESC LIMIT 1",
+        )
+        holdings = _fetch_all(
+            connection,
+            f"""SELECT h.ticker, h.shares::text AS shares, h.avg_cost::text AS average_cost,
+                       latest.normalized->>'verified_price' AS price,
+                       latest.normalized->>'quote_as_of' AS price_as_of,
+                       latest.normalized->>'quote_source' AS price_source
+                  FROM public.holdings h
+                  LEFT JOIN LATERAL (
+                    SELECT de.normalized, de.created_at FROM public.decision_evaluations de
+                     WHERE de.normalized->>'ticker' = h.ticker
+                       AND COALESCE(de.normalized->>'quote_as_of', '') <> ''
+                     ORDER BY de.created_at DESC LIMIT 1
+                  ) latest ON true
+                 ORDER BY h.ticker LIMIT 100""",
+        )
+    for row in holdings:
+        row["price_as_of"] = normalize_receipt_timestamp(row.get("price_as_of"))
+        for field in ("shares", "average_cost", "price", "price_source"):
+            if row.get(field) is not None:
+                row[field] = str(row[field])
+    price_times = [row.get("price_as_of") for row in holdings if row.get("price_as_of")]
+    return {
+        **identity,
+        "run": run,
+        **{key: int(value) for key, value in counts.items()},
+        "alerts": alerts,
+        "policy_version": policy.get("version"),
+        "holdings": holdings,
+        "portfolio_data_as_of": max(price_times) if price_times else None,
+    }
+
+
+def _publication_state(row: Mapping[str, object]) -> str:
+    status = row.get("status")
+    ids = row.get("telegram_message_ids")
+    if status == "delivered":
+        return "delivered" if isinstance(ids, list) and ids else "incomplete"
+    if status in {"ready", "sending", "delivery_failed", "delivery_unknown", "suppressed"}:
+        return str(status)
+    return "incomplete"
+
+
+def reconcile_source_receipts(
+    payloads: Mapping[str, Mapping[str, object]],
+    detail: Mapping[str, object],
+    source: Mapping[str, object],
+    run_id: str,
+) -> dict[str, object]:
+    """Fail closed unless all visible production claims agree with independent source reads."""
+    def fail() -> None:
+        raise RuntimeError("dashboard claim differs from its source receipt")
+
+    if source.get("database_user") != RUNTIME_ROLE or source.get("transaction_read_only") != "on":
+        fail()
+    detail_data = detail.get("data")
+    if not isinstance(detail_data, dict):
+        fail()
+    visible_run = detail_data.get("run")
+    source_run = source.get("run")
+    if not isinstance(visible_run, dict) or not isinstance(source_run, dict):
+        fail()
+    for field in ("id", "kind", "status", "finished_at", "data_as_of"):
+        if visible_run.get(field) != source_run.get(field):
+            fail()
+    if visible_run.get("id") != run_id:
+        fail()
+    if detail_data.get("write_counts") != source_run.get("write_counts"):
+        fail()
+    if detail_data.get("telegram_message_ids") != (source_run.get("telegram_message_ids") or []):
+        fail()
+    requests = detail_data.get("request_receipts")
+    evaluations = detail_data.get("evaluations")
+    if not isinstance(requests, list) or len(requests) != source.get("gateway_request_count"):
+        fail()
+    if not isinstance(evaluations, list) or len(evaluations) != source.get("evaluation_count"):
+        fail()
+    runs_data = payloads.get("/v1/runs", {}).get("data")
+    runs = runs_data.get("runs") if isinstance(runs_data, dict) else None
+    visible_summary = next((row for row in runs or [] if isinstance(row, dict) and row.get("id") == run_id), None)
+    if not isinstance(visible_summary, dict) or visible_summary.get("suggestion_count") != source.get("suggestion_count"):
+        fail()
+
+    alerts_data = payloads.get("/v1/alerts", {}).get("data")
+    visible_alerts = alerts_data.get("alerts") if isinstance(alerts_data, dict) else None
+    source_alerts = source.get("alerts")
+    if not isinstance(visible_alerts, list) or not isinstance(source_alerts, list):
+        fail()
+    source_by_id = {row.get("id"): row for row in source_alerts if isinstance(row, dict)}
+    for alert in visible_alerts:
+        if not isinstance(alert, dict) or not isinstance(source_by_id.get(alert.get("id")), dict):
+            fail()
+        row = source_by_id[alert["id"]]
+        source_ids = row.get("telegram_message_ids") or []
+        if row.get("status") == "suppressed" and source_ids:
+            fail()
+        if (
+            alert.get("state") != _publication_state(row)
+            or alert.get("telegram_message_ids") != source_ids
+            or alert.get("rendered_hash") != row.get("rendered_hash")
+            or alert.get("template_version") != row.get("template_version")
+            or alert.get("event_status") != row.get("event_status")
+        ):
+            fail()
+
+    system_data = payloads.get("/v1/system", {}).get("data")
+    if not isinstance(system_data, dict) or system_data.get("policy_version") != source.get("policy_version"):
+        fail()
+
+    portfolio_data = payloads.get("/v1/portfolio", {}).get("data")
+    today_data = payloads.get("/v1/today", {}).get("data")
+    today_portfolio = today_data.get("portfolio") if isinstance(today_data, dict) else None
+    visible_holdings = portfolio_data.get("holdings") if isinstance(portfolio_data, dict) else None
+    today_holdings = today_portfolio.get("holdings") if isinstance(today_portfolio, dict) else None
+    source_holdings = source.get("holdings")
+    if not isinstance(visible_holdings, list) or not isinstance(today_holdings, list) or not isinstance(source_holdings, list):
+        fail()
+    source_by_ticker = {row.get("ticker"): row for row in source_holdings if isinstance(row, dict)}
+    for holding_set in (visible_holdings, today_holdings):
+        if {row.get("ticker") for row in holding_set if isinstance(row, dict)} != set(source_by_ticker):
+            fail()
+        for holding in holding_set:
+            if not isinstance(holding, dict):
+                fail()
+            row = source_by_ticker[holding.get("ticker")]
+            for visible_field, source_field in (
+                ("shares", "shares"), ("average_cost", "average_cost"),
+                ("price_as_of", "price_as_of"), ("price_source", "price_source"),
+            ):
+                if holding.get(visible_field) != row.get(source_field):
+                    fail()
+            if holding.get("price") is not None and holding.get("price") != row.get("price"):
+                fail()
+    if today_portfolio.get("data_as_of") != source.get("portfolio_data_as_of"):
+        fail()
+    return {"status": "verified", "database_role": RUNTIME_ROLE, "claims_checked": 5}
 
 
 def validate_api_boundary(api_url: str, origin: str) -> tuple[str, str]:
@@ -112,6 +345,7 @@ def run_http_canary(
     owner_access_token: str,
     *,
     requester: Callable[[str, str, Mapping[str, str]], tuple[int, Mapping[str, str], bytes]] = _request,
+    source_reader: Callable[[str], Mapping[str, object]] | None = None,
 ) -> dict[str, object]:
     validate_api_boundary(api_url, origin)
     if not owner_access_token or "\n" in owner_access_token or "\r" in owner_access_token:
@@ -177,6 +411,9 @@ def run_http_canary(
         or not detail_data["run"].get("finished_at")
     ):
         raise RuntimeError("completed run detail lacks a complete receipt chain")
+    if source_reader is None:
+        raise RuntimeError("independent source receipt reader is required")
+    source_receipt = reconcile_source_receipts(payloads, detail, source_reader(run_id), run_id)
     return {
         "status": "verified",
         "unauthenticated_status": denied_status,
@@ -184,6 +421,8 @@ def run_http_canary(
         "run_id_digest": hashlib.sha256(run_id.encode()).hexdigest()[:16],
         "method": CANARY_METHOD,
         "financial_write_routes": 0,
+        "source_reconciliation": source_receipt["status"],
+        "source_database_role": source_receipt["database_role"],
         "friend_invitations": "disabled",
         "brokerage_authority": "none",
     }
@@ -195,7 +434,15 @@ def main() -> int:
     parser.add_argument("--origin", required=True)
     arguments = parser.parse_args()
     token = os.environ.get("DASHBOARD_OWNER_ACCESS_TOKEN", "").strip()
-    receipt = run_http_canary(arguments.api_url, arguments.origin, token)
+    database_url = os.environ.get("DASHBOARD_DATABASE_URL", "").strip()
+    if not database_url:
+        raise SystemExit("DASHBOARD_DATABASE_URL is required")
+    receipt = run_http_canary(
+        arguments.api_url,
+        arguments.origin,
+        token,
+        source_reader=lambda run_id: collect_source_receipts(database_url, arguments.api_url, run_id),
+    )
     print(json.dumps(receipt, sort_keys=True, separators=(",", ":")))
     return 0
 

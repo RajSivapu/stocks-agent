@@ -628,7 +628,7 @@ git commit -m "test: verify owner dashboard end to end"
 - Produces: review disposition, protected deployment receipt, structural privilege evidence, HTTP
   header/auth evidence, and source-receipt reconciliation.
 - Consumes: production deployment authority already available to the protected Stocks Agent path,
-  plus an owner-controlled Cloudflare Pages project and the pre-created owner Auth account.
+  plus an owner-controlled private Codex Site and the pre-created owner Auth account.
 
 - [ ] **Step 1: Record an adversarial Claude code review against the exact commit range**
 
@@ -637,13 +637,13 @@ ten targets in design section 25. Verify every finding against the current branc
 and Important findings with new failing tests before deployment; record rejected findings with code
 and test evidence.
 
-- [ ] **Step 2: Write failing deployment-script tests**
+- [x] **Step 2: Write failing deployment-script tests**
 
 Test that deployment refuses a non-canonical project reference, absent/malformed owner UUID,
 non-Supavisor database URL, missing role verifier evidence, dirty or unpushed commit, service-role
 secret in the function manifest, failed local suite, or non-exact origin.
 
-- [ ] **Step 3: Run deployment-script tests and verify RED**
+- [x] **Step 3: Run deployment-script tests and verify RED**
 
 Run: `.venv/bin/python -m pytest tests/test_deploy_owner_dashboard_api.py tests/test_verify_owner_dashboard_deployment.py -q`
 
@@ -659,10 +659,11 @@ and database privilege structure.
 
 - [ ] **Step 5: Deploy the immutable static build and verify browser security**
 
-Deploy only after a Cloudflare Pages project/domain is explicitly available. Capture deployment ID,
-commit SHA, HTTPS origin, `_headers`, asset hashes, and rollback target. Verify CSP, HSTS,
-frame-ancestors, no-referrer, nosniff, permissions policy, no source maps, no fixture data, and exact
-API/Supabase origins.
+Deploy only after a private Codex Site and exact owner allowlist are explicitly verified. Capture
+version/deployment ID, commit SHA, HTTPS origin, `_headers`, asset hashes, and rollback target.
+Verify CSP, HSTS, frame-ancestors, no-referrer, nosniff, permissions policy, no source maps, no
+fixture data, exact API/Supabase origins, one allowed owner account, no groups, and no external
+visitors.
 
 - [ ] **Step 6: Reconcile a GET-only production canary**
 
