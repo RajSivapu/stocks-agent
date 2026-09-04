@@ -78,6 +78,43 @@ def _get_filings(sym, forms, limit):
         return []
 
 
+def parse_submissions(payload, limit=50):
+    """Normalize one SEC submissions payload without performing I/O."""
+    if not isinstance(payload, dict) or not isinstance(payload.get("filings"), dict):
+        raise ValueError("invalid SEC submissions response")
+    recent = payload["filings"].get("recent")
+    if not isinstance(recent, dict):
+        raise ValueError("invalid SEC submissions response")
+    columns = (
+        recent.get("accessionNumber"), recent.get("filingDate"),
+        recent.get("reportDate"), recent.get("form"), recent.get("primaryDocument"),
+    )
+    if any(not isinstance(column, list) for column in columns):
+        raise ValueError("invalid SEC submissions response")
+    cik = str(payload.get("cik") or "").zfill(10)
+    issuer = str(payload.get("name") or "SEC issuer")
+    rows = []
+    for accession, filing_date, report_date, form, document in zip(*columns):
+        accession = str(accession)
+        accession_path = accession.replace("-", "")
+        cik_path = cik.lstrip("0") or "0"
+        rows.append({
+            "upstream_item_id": accession,
+            "source_url": (
+                f"https://www.sec.gov/Archives/edgar/data/{cik_path}/"
+                f"{accession_path}/{document}"
+            ),
+            "title": f"{issuer} {form}",
+            "text": f"SEC filing {form}, accession {accession}",
+            "published_at": filing_date,
+            "effective_at": report_date or None,
+            "metadata": {"cik": cik, "form": form, "accession_number": accession},
+        })
+        if len(rows) >= limit:
+            break
+    return rows
+
+
 def recent_filings(sym, forms=("10-K", "10-Q", "8-K"), limit=5):
     """Recent material filings for `sym` (default: 10-K/10-Q/8-K), newest first.
 

@@ -19,14 +19,24 @@ def _get(u, t=20):
 def history(sym, range_="1y"):
     """Daily closes for `sym` over `range_` (Nones dropped)."""
     j = _get(f"https://query1.finance.yahoo.com/v8/finance/chart/{sym}?range={range_}&interval=1d")
-    res = j["chart"]["result"][0]
+    return parse_history_payload(j)
+
+
+def parse_history_payload(payload):
+    """Extract closes from a Yahoo chart payload without changing legacy semantics."""
+    res = payload["chart"]["result"][0]
     return [c for c in res["indicators"]["quote"][0]["close"] if c is not None]
 
 
 def quote(sym):
     """Latest quote plus exchange-provided freshness metadata."""
     j = _get(f"https://query1.finance.yahoo.com/v8/finance/chart/{sym}?range=5d&interval=1d")
-    m = j["chart"]["result"][0]["meta"]
+    return parse_quote_payload(j)
+
+
+def parse_quote_payload(payload):
+    """Normalize Yahoo quote metadata while preserving its exchange timestamp/session."""
+    m = payload["chart"]["result"][0]["meta"]
     px = m.get("regularMarketPrice"); pc = m.get("previousClose") or m.get("chartPreviousClose")
     timestamp = m.get("regularMarketTime")
     try:
