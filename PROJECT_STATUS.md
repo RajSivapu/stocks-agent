@@ -2,7 +2,7 @@
 
 Last updated: 2026-09-04
 Canonical release: Personal Stock Agent V1
-Source baseline: `c5886f5` on `codex/owner-alert-v3`
+Source baseline: `167ce06` on `codex/owner-alert-v3`
 Current state: subagent-driven implementation active; V1-C2 in progress
 
 This file is the version-controlled source of truth for the Personal Stock Agent V1 rollout.
@@ -47,7 +47,10 @@ V1-C1 is complete.
 
 ### V1-C2 — Free intelligence ingestion
 
-- [ ] In progress under the committed subagent-driven implementation plan.
+- [x] Release policy and configuration contract locked with the approved provider allowlist,
+  zero-cost authority boundaries, phase budgets, and bounded evidence-packet limits.
+- [ ] Remaining free-ingestion adapters, receipts, cache, normalization, and deduplication are in
+  progress under the committed subagent-driven implementation plan.
 
 ### V1-C3 — Market-discovery brain
 

@@ -8,6 +8,56 @@
     "mode": "owner_only",
     "friend_invitations_enabled": false
   },
+  "intelligence": {
+    "providers": [
+      "gdelt", "alpha_vantage", "finnhub", "yahoo", "sec_edgar",
+      "federal_register", "white_house", "doe", "dod", "eia",
+      "fred", "bls", "bea"
+    ],
+    "seed_domains": [
+      "macro_and_policy",
+      "technology_ai_and_semiconductors",
+      "energy_nuclear_and_grid_infrastructure",
+      "industrial_infrastructure",
+      "critical_minerals_and_magnets",
+      "healthcare",
+      "consumer",
+      "defense_trade_and_geopolitics",
+      "earnings_and_mergers_and_acquisitions"
+    ],
+    "alpha_vantage_daily_ceiling": 20,
+    "alpha_vantage_phase_budget": {
+      "pre-market": 8,
+      "intraday": 4,
+      "post-market": 4,
+      "on-demand": 2
+    },
+    "provider_phase_budgets": {
+      "gdelt": {"pre-market": 80, "intraday": 20, "post-market": 40, "on-demand": 20},
+      "finnhub": {"pre-market": 6, "intraday": 3, "post-market": 4, "on-demand": 2},
+      "yahoo": {"pre-market": 12, "intraday": 6, "post-market": 8, "on-demand": 4},
+      "sec_edgar": {"pre-market": 6, "intraday": 2, "post-market": 4, "on-demand": 2},
+      "federal_register": {"pre-market": 4, "intraday": 1, "post-market": 2, "on-demand": 2},
+      "white_house": {"pre-market": 4, "intraday": 1, "post-market": 2, "on-demand": 2},
+      "doe": {"pre-market": 4, "intraday": 1, "post-market": 2, "on-demand": 2},
+      "dod": {"pre-market": 4, "intraday": 1, "post-market": 2, "on-demand": 2},
+      "eia": {"pre-market": 4, "intraday": 1, "post-market": 2, "on-demand": 2},
+      "fred": {"pre-market": 4, "intraday": 1, "post-market": 2, "on-demand": 2},
+      "bls": {"pre-market": 4, "intraday": 1, "post-market": 2, "on-demand": 2},
+      "bea": {"pre-market": 4, "intraday": 1, "post-market": 2, "on-demand": 2}
+    },
+    "packet": {
+      "max_candidates": 12,
+      "max_evidence_per_candidate": 8,
+      "max_item_characters": 2000,
+      "max_serialized_bytes": 98304
+    },
+    "paid_fallback_enabled": false,
+    "runtime_model_api_enabled": false,
+    "automatic_policy_changes_enabled": false,
+    "suggestion_only": true,
+    "execution_allowed": false
+  },
   "strategy": {
     "style": "long-term core + some swing",
     "allocation": { "core": 0.70, "growth": 0.20, "speculative": 0.10 },

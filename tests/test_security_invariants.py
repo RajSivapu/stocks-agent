@@ -1,4 +1,5 @@
 import ast
+import json
 from pathlib import Path
 import re
 
@@ -23,6 +24,22 @@ GATEWAY_RPCS = (
     "claim_market_publication(UUID)",
     "finish_market_publication(UUID, UUID, TEXT, JSONB, TEXT)",
 )
+
+
+def test_v1_intelligence_configuration_keeps_zero_cost_owner_only_boundaries():
+    settings = json.loads((ROOT / "config" / "settings.json").read_text())
+    intelligence = settings["intelligence"]
+
+    assert intelligence["paid_fallback_enabled"] is False
+    assert intelligence["runtime_model_api_enabled"] is False
+    assert intelligence["automatic_policy_changes_enabled"] is False
+    assert intelligence["suggestion_only"] is True
+    assert intelligence["execution_allowed"] is False
+    assert settings["guardrails"]["execution_allowed"] is False
+    assert settings["access"]["friend_invitations_enabled"] is False
+    assert settings["learning"]["self_tuning_enabled"] is False
+    assert "benzinga" not in intelligence["providers"]
+    assert "alpaca" not in intelligence["providers"]
 
 
 def test_privileged_portfolio_rpcs_are_schema_qualified_and_service_role_only():
