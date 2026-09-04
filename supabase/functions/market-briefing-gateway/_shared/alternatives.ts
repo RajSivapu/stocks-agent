@@ -2,6 +2,11 @@ import type { PortfolioAlternativeRequest } from "./contracts.ts";
 export type { PortfolioAlternativeRequest } from "./contracts.ts";
 import { formatFixed, parseFixed } from "./fixed-point.ts";
 import type { AdjustedBar } from "./market-data.ts";
+import {
+  personalComparisonReasonCodes,
+  type PersonalFactorStatus,
+  type PolicyReasonCode,
+} from "./policy.ts";
 
 export type AlternativeCoverage =
   | "complete"
@@ -23,6 +28,17 @@ export interface PortfolioAlternativeComparison
   monthly_excess_pct: string | null;
   baseline_max_drawdown_pct: string | null;
   alternative_max_drawdown_pct: string | null;
+  daily_return_correlation: string | null;
+}
+
+export interface PersonalAlternativeGate {
+  overlap_status: PersonalFactorStatus;
+  concentration_status: PersonalFactorStatus;
+}
+
+export interface PersonalAlternativeDecision {
+  status: "eligible" | "vetoed" | "insufficient";
+  reason_codes: PolicyReasonCode[];
 }
 
 const SCALE = 12;
@@ -66,6 +82,7 @@ function empty(
     monthly_excess_pct: null,
     baseline_max_drawdown_pct: null,
     alternative_max_drawdown_pct: null,
+    daily_return_correlation: null,
   };
 }
 
@@ -91,6 +108,58 @@ function maxDrawdown(prices: readonly bigint[]): bigint {
     if (current > drawdown) drawdown = current;
   }
   return drawdown;
+}
+
+function correlation(
+  leftPrices: readonly bigint[],
+  rightPrices: readonly bigint[],
+): string | null {
+  const left: number[] = [];
+  const right: number[] = [];
+  for (let index = 1; index < leftPrices.length; index += 1) {
+    left.push(Number(leftPrices[index]) / Number(leftPrices[index - 1]) - 1);
+    right.push(
+      Number(rightPrices[index]) / Number(rightPrices[index - 1]) - 1,
+    );
+  }
+  if (left.length < 2) return null;
+  const leftMean = left.reduce((sum, value) => sum + value, 0) / left.length;
+  const rightMean = right.reduce((sum, value) => sum + value, 0) /
+    right.length;
+  let covariance = 0;
+  let leftVariance = 0;
+  let rightVariance = 0;
+  for (let index = 0; index < left.length; index += 1) {
+    const leftDelta = left[index] - leftMean;
+    const rightDelta = right[index] - rightMean;
+    covariance += leftDelta * rightDelta;
+    leftVariance += leftDelta * leftDelta;
+    rightVariance += rightDelta * rightDelta;
+  }
+  const denominator = Math.sqrt(leftVariance * rightVariance);
+  if (!Number.isFinite(denominator) || denominator <= Number.EPSILON) {
+    return null;
+  }
+  const value = Math.max(-1, Math.min(1, covariance / denominator));
+  if (!Number.isFinite(value)) return null;
+  return value.toFixed(4).replace(/\.?0+$/, "");
+}
+
+export function qualifyPersonalAlternative(
+  gate: PersonalAlternativeGate,
+): PersonalAlternativeDecision {
+  const reasonCodes = personalComparisonReasonCodes(
+    gate.overlap_status,
+    gate.concentration_status,
+  );
+  return {
+    status: reasonCodes.some((reason) => reason.endsWith("_VETO"))
+      ? "vetoed"
+      : reasonCodes.length > 0
+      ? "insufficient"
+      : "eligible",
+    reason_codes: reasonCodes,
+  };
 }
 
 function monthlyReturn(
@@ -170,6 +239,10 @@ export function comparePortfolioAlternative(
       ),
       alternative_max_drawdown_pct: pct(
         maxDrawdown(rows.map((row) => row.alternative)),
+      ),
+      daily_return_correlation: correlation(
+        rows.map((row) => row.baseline),
+        rows.map((row) => row.alternative),
       ),
     };
   } catch {

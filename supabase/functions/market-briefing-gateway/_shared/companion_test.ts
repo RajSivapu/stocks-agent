@@ -1,7 +1,12 @@
-import { analyzeLongTermCompanion, qualifyCompanionRole } from "./companion.ts";
+import {
+  analyzeLongTermCompanion,
+  qualifyCompanion,
+  qualifyCompanionRole,
+} from "./companion.ts";
 import type {
   AlternativeRelationship,
   LongTermCompanionRequest,
+  PolicyContext,
 } from "./contracts.ts";
 import type { AdjustedBar } from "./market-data.ts";
 
@@ -29,6 +34,26 @@ function request(
       "Currency and foreign-market risks can cause long periods of lagging U.S. stocks.",
     evidence_ids: ["vxus-profile"],
     ...overrides,
+  };
+}
+
+function context(): PolicyContext {
+  return {
+    holdings: [],
+    holding_quotes: {},
+    realized_pnl_today: null,
+    portfolio_command_coverage_complete: true,
+    consecutive_completed_losses: 0,
+    owner_plans: [{
+      id: "00000000-0000-4000-8000-000000000020",
+      ticker: "VTI",
+      bucket: "core",
+      amount: "300",
+      cadence: "monthly",
+      next_due_on: "2026-09-21",
+      active: true,
+      updated_at: "2026-09-04T12:00:00.000Z",
+    }],
   };
 }
 
@@ -135,6 +160,23 @@ Deno.test("gateway-owned companion roles reject duplicate and mislabeled exposur
     assertEquals(result.allowed, item.allowed);
     assertEquals(result.recurring_plan_review_eligible, item.recurring);
   }
+});
+
+Deno.test("VTI substitute cannot become a companion", () => {
+  const proposal = request({ companion_ticker: "ITOT", role: "satellite" });
+  const result = qualifyCompanion(proposal, "like_for_like", context());
+
+  assertEquals(result.status, "insufficient");
+  assertEquals(result.reason, "substitute_is_not_companion");
+});
+
+Deno.test("companion baseline must come from current holdings or an active owner plan", () => {
+  const missing = context();
+  missing.owner_plans = [];
+  const result = qualifyCompanion(request(), "diversifier", missing);
+
+  assertEquals(result.status, "insufficient");
+  assertEquals(result.reason, "baseline_not_current");
 });
 
 Deno.test("long-term companion computes complete synchronized horizons and rolling contribution history", () => {

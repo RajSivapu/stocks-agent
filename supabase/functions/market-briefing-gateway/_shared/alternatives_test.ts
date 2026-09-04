@@ -1,6 +1,7 @@
 import {
   comparePortfolioAlternative,
   type PortfolioAlternativeRequest,
+  qualifyPersonalAlternative,
 } from "./alternatives.ts";
 import type { AdjustedBar } from "./market-data.ts";
 
@@ -162,4 +163,29 @@ Deno.test("portfolio comparison synchronizes mismatched calendars by date", () =
   assertEquals(result.common_sessions, 255);
   assertEquals(result.period_start, alternative[0].date);
   assertEquals(result.period_end, baseline.at(-1)!.date);
+});
+
+Deno.test("portfolio comparison reports correlation from synchronized adjusted returns", () => {
+  const baseline = businessBars("2025-09-02", 260, 100, 120);
+  const alternative = baseline.map((bar) => ({ ...bar }));
+  const result = comparePortfolioAlternative(request(), baseline, alternative);
+
+  assertEquals(result.coverage_status, "complete");
+  assertEquals(result.daily_return_correlation, "1");
+});
+
+Deno.test("personal overlap or concentration evidence can veto an attractive case", () => {
+  const overlap = qualifyPersonalAlternative({
+    overlap_status: "veto",
+    concentration_status: "supported",
+  });
+  const concentration = qualifyPersonalAlternative({
+    overlap_status: "supported",
+    concentration_status: "veto",
+  });
+
+  assertEquals(overlap.status, "vetoed");
+  assertEquals(overlap.reason_codes, ["PERSONAL_OVERLAP_VETO"]);
+  assertEquals(concentration.status, "vetoed");
+  assertEquals(concentration.reason_codes, ["PERSONAL_CONCENTRATION_VETO"]);
 });

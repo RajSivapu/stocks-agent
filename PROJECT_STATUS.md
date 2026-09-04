@@ -3,7 +3,7 @@
 Last updated: 2026-09-04
 Canonical release: Personal Stock Agent V1
 Source baseline: `167ce06` on `codex/owner-alert-v3`
-Current state: subagent-driven implementation active; V1-C3 done; V1-C4 in progress
+Current state: subagent-driven implementation active; V1-C4 done; V1-C5 in progress
 
 This file is the version-controlled source of truth for the Personal Stock Agent V1 rollout.
 `docs/ROADMAP.md` retains historical capability and deployment detail. Notion may later mirror this
@@ -77,16 +77,25 @@ production migration, provider/model call, database write, Telegram delivery, or
 
 ### V1-C4 — Personal comparison brain
 
-- [ ] Existing alternatives and Companion logic form a foundation; complete V1 integration is not
-  started and depends on C3 candidate records.
+- [x] Immutable evidence-valued comparisons use current gateway-shaped holdings and active owner
+  plans as runtime anchors, expose explicit missing-data limitations and conditional cited
+  bear/base/bull scenarios, and provide no portfolio mutation surface.
+- [x] Gateway comparison policy preserves VTI role ownership, rejects substitutes as companions,
+  requires a current baseline, permits overlap or concentration evidence to veto, and adds
+  synchronized adjusted-return correlation without weakening existing complete-window thresholds,
+  drawdowns, or normalized one-year contribution replay.
 
-V1-C4 is in progress; Task 9 personal holdings and recurring-investment comparison is the next
-checkpoint.
+V1-C4 is complete based on the exact Task 9 focused gate: 7 Python comparison tests and 43 Deno
+alternatives, Companion, and policy tests passed on 2026-09-04. This fixture-backed local evidence
+does not claim a portfolio or plan mutation, live provider/model call, database write, Telegram
+delivery, production migration, or deployment.
 
 ### V1-C5 — Reports, dashboard, and delivery
 
 - [ ] Existing dashboard and Telegram v3 foundations are implemented but are not the complete V1
   scope and are not claimed live.
+
+V1-C5 is in progress; Task 10 immutable reports and quiet Telegram delivery is the next checkpoint.
 
 ### V1-C6 — Independent review and protected rollout
 
@@ -95,7 +104,7 @@ checkpoint.
 
 ## Next
 
-1. Complete V1-C4 personal holdings and recurring-investment comparison.
+1. Complete V1-C5 immutable reports and quiet Telegram delivery.
 2. Continue checkpoint by checkpoint with task-scoped review gates and status updates.
 3. Preserve scheduled production capacity and inspect only scheduled receipts at their established
    times.
@@ -148,5 +157,5 @@ live run is requested.
 
 ## Last Commit
 
-Task 8 started from `68dd556` (`fix: bind intelligence runs to real context`). The Task 8
+Task 9 started from `25cfcc1` (`fix: close discovery gateway authority gaps`). The Task 9
 implementation commit is the current Git `HEAD` after the scoped changes are committed.

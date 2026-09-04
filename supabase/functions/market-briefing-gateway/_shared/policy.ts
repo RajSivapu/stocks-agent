@@ -46,7 +46,26 @@ export type PolicyReasonCode =
   | "CALENDAR_COVERAGE_MISSING"
   | "EXPOSURE_EVIDENCE_MISSING"
   | "CHECKER_COPIED"
-  | "ANALYSIS_CHAIN_INVALID";
+  | "ANALYSIS_CHAIN_INVALID"
+  | "PERSONAL_OVERLAP_VETO"
+  | "PERSONAL_CONCENTRATION_VETO"
+  | "PERSONAL_COMPARISON_INSUFFICIENT";
+
+export type PersonalFactorStatus = "supported" | "missing" | "veto";
+
+export function personalComparisonReasonCodes(
+  overlap: PersonalFactorStatus,
+  concentration: PersonalFactorStatus,
+): PolicyReasonCode[] {
+  const reasons: PolicyReasonCode[] = [];
+  if (overlap === "veto") reasons.push("PERSONAL_OVERLAP_VETO");
+  if (concentration === "veto") reasons.push("PERSONAL_CONCENTRATION_VETO");
+  if (
+    reasons.length === 0 &&
+    (overlap === "missing" || concentration === "missing")
+  ) reasons.push("PERSONAL_COMPARISON_INSUFFICIENT");
+  return reasons;
+}
 
 export interface PolicyEvaluation {
   evaluation_id: string;
@@ -98,6 +117,8 @@ const VETO_CODES = new Set<PolicyReasonCode>([
   "CHECKER_COPIED",
   "ANALYSIS_CHAIN_INVALID",
   "OWNER_PLAN_MISMATCH",
+  "PERSONAL_OVERLAP_VETO",
+  "PERSONAL_CONCENTRATION_VETO",
 ]);
 const INFORMATIONAL_CODES = new Set<PolicyReasonCode>([
   "OUTSIDE_SESSION_CONDITIONAL",
@@ -404,7 +425,8 @@ export function evaluateCandidate(
   }
   if (packetId !== null) {
     if (
-      candidate.analyst.id == null || candidate.analyst.packet_id !== packetId ||
+      candidate.analyst.id == null ||
+      candidate.analyst.packet_id !== packetId ||
       candidate.checker.id == null || candidate.checker.analyst_id == null ||
       candidate.checker.analyst_id !== candidate.analyst.id ||
       candidate.checker.id === candidate.analyst.id ||

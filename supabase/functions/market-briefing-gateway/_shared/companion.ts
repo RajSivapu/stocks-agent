@@ -1,6 +1,7 @@
 import type {
   AlternativeRelationship,
   LongTermCompanionRequest,
+  PolicyContext,
 } from "./contracts.ts";
 import type { AdjustedBar } from "./market-data.ts";
 
@@ -8,6 +9,18 @@ export interface CompanionRoleDecision {
   allowed: boolean;
   reason: string;
   recurring_plan_review_eligible: boolean;
+}
+
+export interface CompanionQualification {
+  status: "qualified" | "insufficient";
+  reason:
+    | "qualified"
+    | "baseline_not_current"
+    | "relationship_mismatch"
+    | "substitute_is_not_companion"
+    | "replacement_is_not_companion"
+    | "role_not_allowed";
+  policy: CompanionRoleDecision;
 }
 
 export interface CompanionHorizon {
@@ -48,6 +61,46 @@ interface SynchronizedRow {
 const DATE_PATTERN = /^\d{4}-\d{2}-\d{2}$/;
 const MIN_SESSIONS_PER_YEAR = 240;
 const HORIZONS = [3, 5, 10] as const;
+
+export function qualifyCompanion(
+  request: LongTermCompanionRequest,
+  relationship: AlternativeRelationship,
+  context: PolicyContext,
+): CompanionQualification {
+  const currentBaseline =
+    context.holdings.some((holding) =>
+      holding.ticker === request.baseline_ticker
+    ) || context.owner_plans.some((plan) =>
+      plan.active && plan.ticker === request.baseline_ticker
+    );
+  const policy = qualifyCompanionRole(request, relationship);
+  if (!currentBaseline) {
+    return { status: "insufficient", reason: "baseline_not_current", policy };
+  }
+  if (
+    request.companion_ticker === "ITOT" || request.companion_ticker === "SCHB"
+  ) {
+    return {
+      status: "insufficient",
+      reason: "substitute_is_not_companion",
+      policy,
+    };
+  }
+  if (request.companion_ticker === "VT") {
+    return {
+      status: "insufficient",
+      reason: "replacement_is_not_companion",
+      policy,
+    };
+  }
+  if (relationship !== request.role) {
+    return { status: "insufficient", reason: "relationship_mismatch", policy };
+  }
+  if (!policy.allowed) {
+    return { status: "insufficient", reason: "role_not_allowed", policy };
+  }
+  return { status: "qualified", reason: "qualified", policy };
+}
 
 export function qualifyCompanionRole(
   request: LongTermCompanionRequest,
