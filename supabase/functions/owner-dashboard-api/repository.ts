@@ -178,10 +178,11 @@ const REPORT_SOURCES = `SELECT id, title, canonical_url
   FROM public.market_source_items WHERE id::text = ANY($1::text[])
  ORDER BY id LIMIT 96`;
 
-const REPORT_PUBLICATIONS = `SELECT id, kind, phase, status, rendered_body, rendered_hash,
-       template_version, telegram_message_ids, attempt_count, created_at, delivered_at
-  FROM public.market_publications WHERE run_id = $1::uuid
- ORDER BY created_at LIMIT 20`;
+const REPORT_PUBLICATIONS = `SELECT request_id, status, attempt_count, finished_at, response
+  FROM public.market_gateway_requests
+ WHERE operation = 'record_report' AND status = 'completed'
+   AND response->>'report_id' = $1::text
+ ORDER BY finished_at, request_id LIMIT 20`;
 
 const STATEMENTS = new Set([
   HOLDINGS, PLANS, TRANSACTIONS, IDEAS, COMPANION, ALERTS, RUNS, RUN_DETAIL,
@@ -495,7 +496,7 @@ export function createDashboardRepository(
       ? report.source_ids.slice(0, 96).filter((value): value is string => typeof value === "string" && value.length <= 100)
       : [];
     const [sources, publications] = await Promise.all([
-      query(REPORT_SOURCES, [sourceIds]), query(REPORT_PUBLICATIONS, [String(row.run_id ?? "")]),
+      query(REPORT_SOURCES, [sourceIds]), query(REPORT_PUBLICATIONS, [String(row.id ?? "")]),
     ]);
     const data = mapReportDetail(row, sources, publications);
     const dataAsOf = iso(row.created_at);

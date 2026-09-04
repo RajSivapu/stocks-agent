@@ -12,10 +12,12 @@ export type MarketState =
 export type ReceiptStatus =
   | "ready"
   | "sending"
+  | "accepted_by_telegram"
   | "delivered"
   | "delivery_failed"
   | "delivery_unknown"
   | "suppressed"
+  | "duplicate"
   | "incomplete";
 export type DashboardErrorCode =
   | "unauthorized"
@@ -325,7 +327,10 @@ export interface ReportSectionView {
 }
 
 export interface ReceiptTimelineItem {
+  request_id: string;
   status: ReceiptStatus;
+  gateway_status: "completed";
+  attempt_count: number;
   at: string;
   telegram_message_ids: number[];
 }

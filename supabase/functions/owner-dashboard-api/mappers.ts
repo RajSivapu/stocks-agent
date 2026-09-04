@@ -354,9 +354,27 @@ export function mapReportDetail(
       return sourceLinks([{ label, url: source.canonical_url }]);
     }),
     publication: publicationRows.slice(0, 20).flatMap((publication) => {
-      const mapped = mapPublicationReceipt(publication);
-      const at = mapped.delivered_at ?? mapped.created_at;
-      return at ? [{ status: mapped.state, at, telegram_message_ids: mapped.telegram_message_ids }] : [];
+      const requestId = text(publication.request_id, 64);
+      const at = text(publication.finished_at, 40);
+      const attemptCount = integer(publication.attempt_count);
+      const response = record(publication.response);
+      const receipt = record(response.publication_receipt);
+      const persisted = text(receipt.status, 40);
+      const allowed: ReceiptStatus[] = [
+        "accepted_by_telegram", "delivery_failed", "delivery_unknown", "duplicate", "suppressed",
+      ];
+      if (
+        !requestId || !at || attemptCount === null || attemptCount < 1 ||
+        publication.status !== "completed" || !allowed.includes(persisted as ReceiptStatus)
+      ) return [];
+      return [{
+        request_id: requestId,
+        status: persisted as ReceiptStatus,
+        gateway_status: "completed" as const,
+        attempt_count: attemptCount,
+        at,
+        telegram_message_ids: messageIds(receipt.telegram_message_ids),
+      }];
     }),
   };
 }

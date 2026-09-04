@@ -51,3 +51,17 @@ scheduled run, financial mutation, brokerage integration, or trade execution occ
   deployment, or live dashboard receipts.
 - Report source links are resolved only for bounded persisted source identifiers that match stored
   source-item IDs. Missing links remain absent rather than reconstructed from prose.
+
+## Fix round 1
+
+- Replaced the incorrect report-to-`market_publications` run linkage with a fixed bounded SELECT
+  from authoritative completed `record_report` gateway requests, matched exactly by the stored
+  `response.report_id` and report UUID.
+- The report mapper reads only bounded `publication_receipt` fields from the stored response and
+  emits request ID, completed gateway status, attempt count, finish time, stored outcome, and
+  bounded Telegram message IDs. It allowlists `accepted_by_telegram`, `delivery_failed`,
+  `delivery_unknown`, `duplicate`, and `suppressed`; it never upgrades acceptance to delivery and
+  never exposes the raw response.
+- Existing grants were sufficient, so no migration, schema, verifier, or test changed. The exact
+  Task 11 Step 4 gate passed in one run: 6 contracts, 42 Deno API tests, and 16 role/supply-chain
+  tests.
