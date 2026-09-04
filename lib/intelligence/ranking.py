@@ -9,7 +9,7 @@ from typing import Iterable, Mapping, Sequence
 
 from lib.intelligence.normalize import SourceItem
 from lib.intelligence.relationships import EventRelationship
-from lib.intelligence.themes import MarketEvent
+from lib.intelligence.themes import MarketEvent, evidence_key
 
 
 _Q = Decimal("0.000001")
@@ -106,6 +106,22 @@ def candidate_sort_key(candidate: RankedCandidate) -> tuple[Decimal, int, str]:
     return (-candidate.total_score, -candidate.authoritative_evidence_count, candidate.ticker)
 
 
+def _evidence_index(items: Sequence[SourceItem]) -> tuple[dict[str, SourceItem], bool]:
+    indexed: dict[str, SourceItem] = {}
+    consistent = True
+    for item in items:
+        key = evidence_key(item)
+        prior = indexed.get(key)
+        if prior is not None and (
+            prior.content_hash != item.content_hash
+            or prior.canonical_content != item.canonical_content
+        ):
+            consistent = False
+        else:
+            indexed[key] = item
+    return indexed, consistent
+
+
 def rank_candidates(
     candidates: Sequence[CandidateInput],
     *,
@@ -120,6 +136,30 @@ def rank_candidates(
         if ticker != candidate.relation.ticker:
             raise ValueError("candidate ticker must match its relationship")
         missing: list[str] = []
+        candidate_evidence, candidate_evidence_consistent = _evidence_index(candidate.evidence)
+        relation_exposure, relation_exposure_consistent = _evidence_index(
+            candidate.relation.exposure_evidence
+        )
+        event_consistent = candidate.event.event_id == candidate.relation.event_id
+        evidence_consistent = bool(candidate_evidence) and bool(relation_exposure)
+        evidence_consistent = (
+            evidence_consistent
+            and candidate_evidence_consistent
+            and relation_exposure_consistent
+            and all(
+                key in candidate_evidence
+                and candidate_evidence[key].content_hash == item.content_hash
+                and candidate_evidence[key].canonical_content == item.canonical_content
+                for key, item in relation_exposure.items()
+            )
+        )
+        exposure_consistent = event_consistent and evidence_consistent
+        if not event_consistent:
+            missing.append("event_relation:mismatch")
+        if not candidate_evidence:
+            missing.append("evidence:empty")
+        elif not evidence_consistent:
+            missing.append("exposure_evidence:mismatch")
         values: dict[str, Decimal] = {"materiality": candidate.event.materiality}
         supplied = {
             "authority_corroboration": candidate.authority_corroboration,
@@ -137,6 +177,8 @@ def rank_candidates(
                 if score < 0 or score > 1:
                     raise ValueError(f"{name} must be between zero and one")
                 values[name] = score
+        if not exposure_consistent:
+            values["exposure"] = _ZERO
 
         holding_overlap = ticker in holding_positions
         plan_overlap = ticker in plan_positions
@@ -170,7 +212,9 @@ def rank_candidates(
                 event_id=candidate.event.event_id,
                 relationship_type=candidate.relation.relationship_type,
                 evidence=tuple(candidate.evidence),
-                exposure_evidence=candidate.relation.exposure_evidence,
+                exposure_evidence=(
+                    candidate.relation.exposure_evidence if exposure_consistent else ()
+                ),
                 components=ordered,
                 missing_reasons=tuple(missing),
                 total_score=total,

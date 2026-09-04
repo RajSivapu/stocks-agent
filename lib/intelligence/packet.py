@@ -167,16 +167,16 @@ def build_evidence_packet(
 
     packet = materialize()
     while len(packet.to_json_bytes()) > limits.max_serialized_bytes:
-        target = next(
-            ((key, evidence) for key, evidence in reversed(mutable) if evidence),
-            None,
-        )
-        if target is not None:
-            key, evidence = target
+        if mutable and len(mutable[-1][1]) > 1:
+            key, evidence = mutable[-1]
             removed = evidence.pop()
             drops.append(PacketDrop("evidence", key, removed.item_id, "serialized_byte_limit"))
         elif mutable:
-            key, _evidence = mutable.pop()
+            key, evidence = mutable.pop()
+            for removed in reversed(evidence):
+                drops.append(
+                    PacketDrop("evidence", key, removed.item_id, "serialized_byte_limit")
+                )
             drops.append(PacketDrop("candidate", key, None, "serialized_byte_limit"))
         else:
             raise ValueError("serialized byte limit cannot hold packet envelope")
