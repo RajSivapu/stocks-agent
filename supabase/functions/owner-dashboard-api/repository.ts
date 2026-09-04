@@ -135,6 +135,8 @@ const STATEMENTS = new Set([
 
 type PageKind = "transactions" | "ideas" | "alerts" | "runs";
 interface PageCursor { v: 1; k: PageKind; id: string; at?: string }
+const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+const MAX_BIGINT = 9_223_372_036_854_775_807n;
 
 function invalidCursor(): never {
   throw new DashboardHttpError(400, "invalid_request", "Invalid cursor.");
@@ -148,8 +150,8 @@ function decodeCursor(value: string | undefined, kind: PageKind): PageCursor | n
     const parsed = JSON.parse(atob(padded)) as Partial<PageCursor>;
     if (parsed.v !== 1 || parsed.k !== kind || typeof parsed.id !== "string") invalidCursor();
     if (kind === "transactions" || kind === "ideas") {
-      if (!/^\d{1,20}$/.test(parsed.id)) invalidCursor();
-    } else if (!/^[0-9a-f]{8}-[0-9a-f-]{27}$/.test(parsed.id) || !iso(parsed.at)) {
+      if (!/^\d{1,19}$/.test(parsed.id) || BigInt(parsed.id) < 1n || BigInt(parsed.id) > MAX_BIGINT) invalidCursor();
+    } else if (!UUID_PATTERN.test(parsed.id) || !iso(parsed.at)) {
       invalidCursor();
     }
     return parsed as PageCursor;
@@ -195,6 +197,14 @@ function latestTimestamp(rows: readonly Row[], fields: readonly string[]): strin
 
 function oldestTimestamp(values: readonly (string | null)[]): string | null {
   return values.filter((value): value is string => Boolean(value)).sort().at(0) ?? null;
+}
+
+function marketDate(value: Date): string {
+  const parts = new Intl.DateTimeFormat("en-US", {
+    timeZone: "America/New_York", year: "numeric", month: "2-digit", day: "2-digit",
+  }).formatToParts(value);
+  const part = (type: Intl.DateTimeFormatPartTypes) => parts.find((item) => item.type === type)?.value ?? "";
+  return `${part("year")}-${part("month")}-${part("day")}`;
 }
 
 function combinedFreshness(results: readonly DashboardReadResult[]): DashboardReadResult["freshness"] {
@@ -315,7 +325,8 @@ export function createDashboardRepository(
     const runRow = runRows[0];
     if (!runRow) throw new DashboardHttpError(404, "not_found", "Run receipt not found.");
     const run = mapRun(runRow);
-    const writeCounts = runRow.write_counts && typeof runRow.write_counts === "object" && !Array.isArray(runRow.write_counts)
+    const hasWriteCounts = Boolean(runRow.write_counts && typeof runRow.write_counts === "object" && !Array.isArray(runRow.write_counts));
+    const writeCounts = hasWriteCounts
       ? runRow.write_counts as Record<string, number>
       : {};
     const ids = Array.isArray(runRow.telegram_message_ids)
@@ -324,6 +335,7 @@ export function createDashboardRepository(
     const incomplete: string[] = [];
     if (requests.length === 0) incomplete.push("gateway_request");
     if (!run.finished_at) incomplete.push("finished_run");
+    if (!hasWriteCounts) incomplete.push("write_counts");
     const data: RunDetailView = {
       run,
       request_receipts: requests.slice(0, 50).map((row) => ({
@@ -349,7 +361,12 @@ export function createDashboardRepository(
       query(ALERTS, [null, null, null]),
       query(ACTIVE_POLICY),
     ]);
-    const latestByKind: SystemView["latest_by_kind"] = {};
+    const latestByKind: SystemView["latest_by_kind"] = {
+      "pre-market": null,
+      intraday: null,
+      "post-market": null,
+      "weekly-audit": null,
+    };
     for (const row of runRows.slice(0, 50)) {
       const run = mapRun(row);
       if (!latestByKind[run.kind]) latestByKind[run.kind] = run;
@@ -421,6 +438,11 @@ export function createDashboardRepository(
         const ideasData = ideasResult.data as unknown as IdeasView;
         const companionData = companionResult.data as unknown as TodayView["companion"];
         const alertsData = alertsResult.data as unknown as AlertsView;
+        const currentMarketDate = marketDate(now());
+        const entryZones = ideasData.ideas.filter((item) =>
+          Boolean(item.entry_zone_low && item.entry_zone_high) &&
+          Boolean(item.valid_until && /^\d{4}-\d{2}-\d{2}$/.test(item.valid_until) && item.valid_until >= currentMarketDate)
+        ).slice(0, 10);
         const attention: TodayView["attention"] = [];
         for (const item of portfolioData.holdings.filter((holding) => holding.freshness !== "fresh").slice(0, 5)) {
           attention.push({
@@ -451,9 +473,12 @@ export function createDashboardRepository(
             cost_basis: portfolioData.totals.cost_basis,
             unrealized_amount: portfolioData.totals.unrealized_amount,
             holdings: portfolioData.holdings,
+            data_as_of: portfolioResult.dataAsOf,
+            market_state: portfolioResult.marketState,
+            price_sources: [...new Set(portfolioData.holdings.flatMap((item) => item.price_source ? [item.price_source] : []))],
           },
           market_summary: null,
-          entry_zones: ideasData.ideas.filter((item) => item.entry_zone_low && item.entry_zone_high).slice(0, 10),
+          entry_zones: entryZones,
           companion: companionData,
         };
         const supporting = [portfolioResult, runsResult, ideasResult, companionResult, alertsResult];

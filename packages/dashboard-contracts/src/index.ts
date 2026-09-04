@@ -60,6 +60,8 @@ export interface HoldingView {
   target: string | null;
   price: string | null;
   price_as_of: string | null;
+  price_source: string | null;
+  market_state: MarketState;
   value: string | null;
   unrealized_amount: string | null;
   unrealized_percent: string | null;
@@ -124,6 +126,9 @@ export interface TodayView {
     cost_basis: string;
     unrealized_amount: string | null;
     holdings: HoldingView[];
+    data_as_of: string | null;
+    market_state: MarketState;
+    price_sources: string[];
   };
   market_summary: string | null;
   entry_zones: IdeaView[];

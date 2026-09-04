@@ -31,7 +31,7 @@ const today: TodayView = {
   boundaries,
   attention: [{ id: "risk", severity: "review", title: "VTI stop distance", detail: "Review persisted risk level.", data_as_of: "2026-09-03T18:00:00.000Z", destination: "/portfolio" }],
   latest_run: null,
-  portfolio: { value: "2200", cost_basis: "2000", unrealized_amount: "200", holdings: [] },
+  portfolio: { value: "2200", cost_basis: "2000", unrealized_amount: "200", holdings: [], data_as_of: null, market_state: "unknown", price_sources: [] },
   market_summary: "Mixed close; small caps lagged.",
   entry_zones: [],
   companion: null,
@@ -47,7 +47,7 @@ it("renders attention first and collapses empty optional blocks", () => {
 
 it("portfolio omits unsupported market value and labels the recurring reminder", () => {
   const data: PortfolioView = {
-    holdings: [{ ticker: "VTI", shares: "2", average_cost: "100", bucket: "core", opened_at: null, stop: "95", target: null, price: null, price_as_of: "2026-09-02T20:00:00.000Z", value: null, unrealized_amount: null, unrealized_percent: null, weight_percent: null, freshness: "stale" }],
+    holdings: [{ ticker: "VTI", shares: "2", average_cost: "100", bucket: "core", opened_at: null, stop: "95", target: null, price: null, price_as_of: "2026-09-02T20:00:00.000Z", price_source: "yahoo-chart", market_state: "as_of_close", value: null, unrealized_amount: null, unrealized_percent: null, weight_percent: null, freshness: "stale" }],
     plans: [{ id: "plan", ticker: "VTI", amount: "100", cadence: "monthly", next_due_on: "2026-10-01", due_day: 1, active: true }],
     transactions: [],
     totals: { cost_basis: "200", value: null, unrealized_amount: null },
@@ -56,6 +56,40 @@ it("portfolio omits unsupported market value and labels the recurring reminder",
   render(<PortfolioPage data={data} />);
   expect(screen.getByText(/market value withheld/i)).toBeVisible();
   expect(screen.getByText(/reminder only/i)).toBeVisible();
+});
+
+it("labels closed-session prices with their receipt time and source", () => {
+  const holding = {
+    ticker: "VTI", shares: "2", average_cost: "100", bucket: "core", opened_at: null,
+    stop: "95", target: null, price: "110", price_as_of: "2026-09-03T20:00:00.000Z",
+    price_source: "yahoo-chart", market_state: "as_of_close", value: "220",
+    unrealized_amount: "20", unrealized_percent: "10", weight_percent: "100", freshness: "fresh",
+  } as unknown as PortfolioView["holdings"][number];
+  const portfolio = {
+    holdings: [holding], plans: [], transactions: [],
+    totals: { cost_basis: "200", value: "220", unrealized_amount: "20" },
+    comparison_availability: "structured_companion",
+  } as PortfolioView;
+  const todayWithClose = {
+    ...today,
+    portfolio: {
+      ...today.portfolio,
+      value: "220",
+      holdings: [holding],
+      data_as_of: "2026-09-03T20:00:00.000Z",
+      market_state: "as_of_close",
+      price_sources: ["yahoo-chart"],
+    },
+  } as unknown as TodayView;
+
+  const { rerender } = render(<PortfolioPage data={portfolio} />);
+  expect(screen.getByText(/as of close/i)).toBeVisible();
+  expect(screen.getByText(/sep 3, 2026/i)).toBeVisible();
+  expect(screen.getByText(/yahoo finance/i)).toBeVisible();
+
+  rerender(<MemoryRouter><TodayPage data={todayWithClose} /></MemoryRouter>);
+  expect(screen.getByText(/portfolio prices as of close/i)).toBeVisible();
+  expect(screen.getByText(/yahoo finance/i)).toBeVisible();
 });
 
 it("renders policy evidence separately from analyst and checker", () => {

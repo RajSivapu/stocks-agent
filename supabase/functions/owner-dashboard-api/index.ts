@@ -38,6 +38,7 @@ const handler = createOwnerDashboardHandler({
   ownerUserId,
   projectUrl,
   allowedOrigins,
+  configurationReady: Boolean(jwks && repository),
   verifyOwner: (request) => {
     if (!jwks) throw new Error("owner verifier unavailable");
     return verifyOwnerRequest(request, jwks, ownerUserId, projectUrl);

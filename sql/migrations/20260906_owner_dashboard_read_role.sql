@@ -17,6 +17,8 @@ GRANT USAGE ON SCHEMA public TO stock_agent_dashboard;
 
 REVOKE ALL ON FUNCTION public.reject_decision_evaluation_mutation() FROM PUBLIC, stock_agent_dashboard;
 REVOKE ALL ON FUNCTION public.reject_market_alert_ledger_mutation() FROM PUBLIC, stock_agent_dashboard;
+-- This default applies to the executing migration role. The deployment verifier remains the
+-- authoritative cross-role check that the dashboard login can execute no application function.
 ALTER DEFAULT PRIVILEGES IN SCHEMA public REVOKE EXECUTE ON FUNCTIONS FROM PUBLIC;
 
 REVOKE ALL PRIVILEGES ON TABLE

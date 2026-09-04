@@ -103,6 +103,11 @@ function holding(row: Row): HoldingView {
   const changePercent = change !== null && cost !== null && cost !== 0n
     ? (Number(change) * 100 / Number(cost)).toFixed(2).replace(/\.00$/, "")
     : null;
+  const marketState = [
+    "regular", "pre_market", "post_market", "closed", "holiday", "as_of_close", "unknown",
+  ].includes(String(row.price_display_state))
+    ? row.price_display_state as HoldingView["market_state"]
+    : "unknown";
   return {
     ticker: text(row.ticker, 24) ?? "UNKNOWN",
     shares: text(row.shares, 80) ?? "0",
@@ -113,6 +118,8 @@ function holding(row: Row): HoldingView {
     target: text(row.target, 80),
     price: freshness === "fresh" ? text(row.price, 80) : null,
     price_as_of: text(row.price_as_of, 40),
+    price_source: text(row.price_source, 120),
+    market_state: marketState,
     value: value === null ? null : decimal(value),
     unrealized_amount: change === null ? null : decimal(change),
     unrealized_percent: changePercent,
@@ -293,6 +300,14 @@ export function mapPublicationReceipt(row: Row): AlertView {
     : "incomplete";
   if (persisted === "delivered") state = ids.length > 0 ? "delivered" : "incomplete";
   if (persisted === "suppressed") state = "suppressed";
+  const eventStatus = text(row.event_status, 40);
+  const suppressionReason = state !== "suppressed"
+    ? null
+    : eventStatus === "not_triggered"
+    ? "conditions_not_met"
+    : eventStatus === "unsafe_to_evaluate"
+    ? "unsafe_to_evaluate"
+    : null;
   return {
     id: text(row.id, 64) ?? "unknown",
     kind: text(row.kind, 80) ?? "unknown",
@@ -305,10 +320,10 @@ export function mapPublicationReceipt(row: Row): AlertView {
     attempt_count: integer(row.attempt_count) ?? 0,
     created_at: text(row.created_at, 40) ?? "",
     delivered_at: state === "delivered" ? text(row.delivered_at, 40) : null,
-    suppression_reason: null,
+    suppression_reason: suppressionReason,
     rule_ticker: text(row.rule_ticker, 24),
     rule_state: text(row.rule_state, 40),
-    event_status: text(row.event_status, 40),
+    event_status: eventStatus,
     owner_action: text(row.owner_action, 40),
     sources: sourceLinks(row.sources),
   };

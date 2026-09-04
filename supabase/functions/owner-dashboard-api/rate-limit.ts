@@ -10,25 +10,30 @@ interface WindowState {
 }
 
 export function clientNetworkSignal(request: Request): string {
-  for (const name of ["cf-connecting-ip", "x-forwarded-for"]) {
-    const raw = request.headers.get(name)?.split(",", 1)[0]?.trim() ?? "";
-    if (/^[0-9a-fA-F:.]{3,64}$/.test(raw)) return raw;
-  }
+  const cloudflare = request.headers.get("cf-connecting-ip")?.trim() ?? "";
+  if (/^[0-9a-fA-F:.]{3,64}$/.test(cloudflare)) return cloudflare;
+  const forwarded = request.headers.get("x-forwarded-for")?.split(",").at(-1)?.trim() ?? "";
+  if (/^[0-9a-fA-F:.]{3,64}$/.test(forwarded)) return forwarded;
   return "unknown";
 }
 
 export function createDashboardRateLimiter(
   limits: Readonly<Record<RateLimitStage, number>> = { pre_auth: 30, owner: 120 },
   windowMs = 60_000,
+  maxEntries = 4_096,
 ): DashboardRateLimiter {
   const windows = new Map<string, WindowState>();
   return {
     check(stage, key, now) {
       const instant = now.valueOf();
       if (!Number.isFinite(instant)) return 60;
+      for (const [candidate, state] of windows) {
+        if (instant - state.startedAt >= windowMs) windows.delete(candidate);
+      }
       const mapKey = `${stage}:${key}`;
       const current = windows.get(mapKey);
-      if (!current || instant - current.startedAt >= windowMs) {
+      if (!current) {
+        if (windows.size >= maxEntries) return Math.max(1, Math.ceil(windowMs / 1_000));
         windows.set(mapKey, { startedAt: instant, count: 1 });
         return null;
       }

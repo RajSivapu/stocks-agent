@@ -26,6 +26,7 @@ export interface DashboardHandlerDependencies {
   now?: () => Date;
   requestId?: () => string;
   rateLimiter?: DashboardRateLimiter;
+  configurationReady?: boolean;
 }
 
 const OWNER_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
@@ -58,7 +59,13 @@ export function createOwnerDashboardHandler(
       if (request.method === "OPTIONS") {
         return preflightResponse(request, dependencies.allowedOrigins);
       }
-      if (!OWNER_PATTERN.test(dependencies.ownerUserId) || dependencies.allowedOrigins.length === 0) {
+      const requestedOrigin = request.headers.get("origin")?.trim() ?? "";
+      if (dependencies.allowedOrigins.includes(requestedOrigin)) origin = requestedOrigin;
+      if (
+        dependencies.configurationReady === false ||
+        !OWNER_PATTERN.test(dependencies.ownerUserId) ||
+        dependencies.allowedOrigins.length === 0
+      ) {
         throw new DashboardHttpError(
           503,
           "temporarily_unavailable",

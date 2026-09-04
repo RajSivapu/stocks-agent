@@ -101,10 +101,21 @@ Deno.test("publication errors are never forwarded as suppression copy", () => {
     telegram_message_ids: [],
     attempt_count: 0,
     created_at: "2026-09-03T18:00:00.000Z",
+    event_status: "not_triggered",
     error: "https://api.telegram.org/bot-secret/sendMessage?chat_id=123",
   });
-  assertEquals(mapped.suppression_reason, null);
+  assertEquals(mapped.suppression_reason, "conditions_not_met");
   assertEquals(JSON.stringify(mapped).includes("bot-secret"), false);
+});
+
+Deno.test("suppression copy is not inferred from a triggered event alone", () => {
+  const mapped = mapPublicationReceipt({
+    id: "alert-2", kind: "alert", phase: "intraday", status: "suppressed",
+    rendered_body: "Review only.", rendered_hash: "b".repeat(64), template_version: "3",
+    telegram_message_ids: [], attempt_count: 0, created_at: "2026-09-03T18:00:00.000Z",
+    event_status: "triggered",
+  });
+  assertEquals(mapped.suppression_reason, null);
 });
 
 Deno.test("unknown run values remain unknown rather than inventing receipt attributes", () => {

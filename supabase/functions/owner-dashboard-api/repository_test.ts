@@ -26,6 +26,10 @@ function recordingDatabase() {
   };
 }
 
+function cursor(payload: unknown): string {
+  return btoa(JSON.stringify(payload)).replaceAll("+", "-").replaceAll("/", "_").replace(/=+$/, "");
+}
+
 Deno.test("repository issues only fixed parameterized SELECT statements", async () => {
   const recorder = recordingDatabase();
   const repository = createDashboardRepository(TEST_DATABASE_URL, recorder.factory);
@@ -76,6 +80,22 @@ Deno.test("repository applies fixed caps and returns opaque cursors", async () =
   assert(typeof result.nextCursor === "string" && !/^\d+$/.test(result.nextCursor), "cursor must be opaque");
   assert((statements[0] ?? "").includes("LIMIT 51"));
   assert(!(statements[0] ?? "").includes("OFFSET"), "offset pagination can skip concurrent receipts");
+});
+
+Deno.test("repository rejects non-canonical and out-of-range cursor identifiers", async () => {
+  const repository = createDashboardRepository(TEST_DATABASE_URL, recordingDatabase().factory);
+  for (const route of [
+    { name: "transactions" as const, cursor: cursor({ v: 1, k: "transactions", id: "9223372036854775808" }) },
+    { name: "alerts" as const, cursor: cursor({ v: 1, k: "alerts", id: "00000000-0000-0000-0000-000000000000", at: "2026-09-03T18:00:00.000Z" }) },
+  ]) {
+    let status = 0;
+    try {
+      await repository.read(route);
+    } catch (error) {
+      status = (error as { status?: number }).status ?? 0;
+    }
+    assertEquals(status, 400);
+  }
 });
 
 Deno.test("an empty portfolio is unavailable rather than fresh", async () => {
@@ -133,6 +153,46 @@ Deno.test("today reports the worst supporting freshness and a conservative times
   const result = await repository.read({ name: "today" });
   assertEquals(result.freshness, "stale");
   assertEquals(result.dataAsOf, old);
+});
+
+Deno.test("today excludes entry zones that are no longer valid", async () => {
+  const repository = createDashboardRepository(TEST_DATABASE_URL, () => ({
+    query: (text: string) => {
+      if (text.includes("FROM public.suggestions s")) return Promise.resolve([
+        { id: "2", ticker: "LIVE", entry_zone_low: "100", entry_zone_high: "105", valid_until: "2026-09-03", policy_status: "approved", evaluation_id: "e2", created_at: "2026-09-03T17:00:00.000Z" },
+        { id: "1", ticker: "OLD", entry_zone_low: "50", entry_zone_high: "55", valid_until: "2026-09-02", policy_status: "approved", evaluation_id: "e1", created_at: "2026-09-02T17:00:00.000Z" },
+      ]);
+      return Promise.resolve([]);
+    },
+  }), () => new Date("2026-09-03T18:00:00.000Z"));
+  const result = await repository.read({ name: "today" });
+  assertEquals((result.data as { entry_zones: Array<{ ticker: string }> }).entry_zones.map((item) => item.ticker), ["LIVE"]);
+});
+
+Deno.test("run detail marks a missing write-count receipt as incomplete", async () => {
+  const repository = createDashboardRepository(TEST_DATABASE_URL, () => ({
+    query: (text: string) => {
+      if (text.includes("FROM public.analysis_runs r WHERE")) return Promise.resolve([{
+        id: "7d834dbd-75bb-4313-931f-09732f003932", kind: "intraday", status: "completed",
+        started_at: "2026-09-03T17:00:00.000Z", finished_at: "2026-09-03T17:02:00.000Z",
+        data_as_of: "2026-09-03T17:01:00.000Z", write_counts: null,
+      }]);
+      if (text.includes("FROM public.market_gateway_requests")) return Promise.resolve([{
+        request_id: "7d834dbd-75bb-4313-931f-09732f003932", operation: "finish_run", status: "completed",
+      }]);
+      return Promise.resolve([]);
+    },
+  }));
+  const result = await repository.read({ name: "runDetail", id: "7d834dbd-75bb-4313-931f-09732f003932" });
+  assert((result.data as { incomplete_stages: string[] }).incomplete_stages.includes("write_counts"));
+});
+
+Deno.test("system seeds every expected scheduled receipt kind", async () => {
+  const repository = createDashboardRepository(TEST_DATABASE_URL, () => ({ query: () => Promise.resolve([]) }));
+  const result = await repository.read({ name: "system" });
+  assertEquals(Object.keys((result.data as { latest_by_kind: Record<string, unknown> }).latest_by_kind), [
+    "pre-market", "intraday", "post-market", "weekly-audit",
+  ]);
 });
 
 Deno.test("alerts query carries structured source evidence", async () => {

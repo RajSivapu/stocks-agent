@@ -32,7 +32,6 @@ interface AuthContextValue {
   sendOtp(email: string): Promise<void>;
   verifyOtp(email: string, token: string): Promise<void>;
   signOut(): Promise<void>;
-  unlock(): void;
 }
 
 const AuthContext = createContext<AuthContextValue | null>(null);
@@ -140,9 +139,6 @@ export function AuthProvider({
         setLocked(false);
         window.sessionStorage.clear();
       }
-    },
-    unlock: () => {
-      if (session) setLocked(false);
     },
   }), [client, loading, locked, session]);
 

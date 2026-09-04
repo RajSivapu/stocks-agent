@@ -57,6 +57,14 @@ Deno.test("missing owner configuration fails before repository access", async ()
   assertEquals(accessed, false);
 });
 
+Deno.test("an allowlisted browser receives CORS on a configuration kill-switch response", async () => {
+  const handler = createOwnerDashboardHandler(dependencies({ configurationReady: false }));
+  const response = await handler(request("/v1/meta"));
+  assertEquals(response.status, 503);
+  assertEquals(response.headers.get("access-control-allow-origin"), ORIGIN);
+  assertEquals((await response.json()).error.code, "temporarily_unavailable");
+});
+
 Deno.test("missing owner configuration fails closed before origin disclosure", async () => {
   const handler = createOwnerDashboardHandler(dependencies({ ownerUserId: "" }));
   const response = await handler(new Request("https://api.example/v1/meta", {
