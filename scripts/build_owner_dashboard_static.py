@@ -10,6 +10,7 @@ import json
 import os
 from pathlib import Path
 import re
+import shutil
 import subprocess
 from typing import Callable, Sequence
 from urllib.parse import urlparse
@@ -83,8 +84,19 @@ def build_static_release(
     )
     if getattr(build_result, "returncode", 1) != 0:
         raise RuntimeError("owner dashboard production build failed")
+    application_output = repo_root / "apps/web/dist"
+    static_output = repo_root / "dist"
+    if any(path.is_symlink() for path in application_output.rglob("*")):
+        raise RuntimeError("owner dashboard static output contains a symlink")
+    if not (application_output / "index.html").is_file():
+        raise RuntimeError("owner dashboard production output is incomplete")
+    if static_output.is_symlink():
+        raise RuntimeError("owner dashboard hosting output cannot be a symlink")
+    if static_output.exists():
+        shutil.rmtree(static_output)
+    shutil.copytree(application_output, static_output)
     scan_result = _run(
-        ["node", "scripts/check_dashboard_bundle.mjs", "apps/web/dist"],
+        ["node", "scripts/check_dashboard_bundle.mjs", "dist"],
         repo_root=repo_root,
         runner=runner,
     )
@@ -102,6 +114,7 @@ def build_static_release(
         "project_ref_digest": hashlib.sha256(project_ref.encode()).hexdigest()[:16],
         "site_origin": site_origin,
         "api_origin": api_url,
+        "static_directory": "dist",
         "file_count": scan.get("file_count"),
         "initial_js_gzip_bytes": scan.get("initial_js_gzip_bytes"),
         "asset_hashes": scan["hashes"],
