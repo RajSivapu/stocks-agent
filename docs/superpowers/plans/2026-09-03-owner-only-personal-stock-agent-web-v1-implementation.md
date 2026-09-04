@@ -55,6 +55,8 @@ deployment verifiers, Cloudflare Pages static hosting.
 - Create: `apps/web/index.html`
 - Create: `apps/web/public/theme-bootstrap.js`
 - Create: `apps/web/public/_headers`
+- Create: `apps/web/src/main.tsx`
+- Create: `apps/web/src/styles.css`
 - Create: `apps/web/src/test/setup.ts`
 - Create: `apps/web/src/security-config.test.ts`
 
@@ -65,7 +67,7 @@ deployment verifiers, Cloudflare Pages static hosting.
 - Produces: production `_headers` with exact Supabase/API origins substituted at build time.
 - Consumes: no production data or credentials.
 
-- [ ] **Step 1: Write failing contract and security configuration tests**
+- [x] **Step 1: Write failing contract and security configuration tests**
 
 ```ts
 import { describe, expect, it } from "vitest";
@@ -94,13 +96,13 @@ it("ships a CSP without inline or third-party scripts", () => {
 });
 ```
 
-- [ ] **Step 2: Run the tests and verify RED**
+- [x] **Step 2: Run the tests and verify RED**
 
 Run: `npm test --workspace packages/dashboard-contracts -- --run`
 
 Expected: FAIL because the workspace, parser, and security files do not exist.
 
-- [ ] **Step 3: Add the pinned workspace and minimal canonical contracts**
+- [x] **Step 3: Add the pinned workspace and minimal canonical contracts**
 
 ```ts
 export type Freshness = "fresh" | "stale" | "partial" | "unavailable";
@@ -134,14 +136,14 @@ Vite to reject non-canonical production Supabase/API origins and replace static 
 at build time. Load `/theme-bootstrap.js` synchronously before the application module; it may read
 only `personal-stock-agent-theme` and set `document.documentElement.dataset.theme`.
 
-- [ ] **Step 4: Run contract, header, type, and build checks and verify GREEN**
+- [x] **Step 4: Run contract, header, type, and build checks and verify GREEN**
 
 Run: `npm test --workspace packages/dashboard-contracts -- --run && npm test --workspace @stocks-agent/web -- --run src/security-config.test.ts && npm run typecheck --workspace @stocks-agent/web && VITE_SUPABASE_URL=https://test-project.supabase.co VITE_DASHBOARD_API_URL=https://test-project.supabase.co/functions/v1/owner-dashboard-api VITE_SUPABASE_PUBLISHABLE_KEY=sb_publishable_test npm run build --workspace @stocks-agent/web`
 
 Expected: all commands exit 0; `apps/web/dist/_headers` has exact origins and no marker or
 `unsafe-inline`.
 
-- [ ] **Step 5: Commit Task 1**
+- [x] **Step 5: Commit Task 1**
 
 ```bash
 git add package.json package-lock.json packages/dashboard-contracts apps/web
