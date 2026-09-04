@@ -6,7 +6,7 @@ Status: **release candidate; independent exact-head verdict pending**.
 
 - Branch: `codex/owner-alert-v3`
 - Review base: `d4e0c3ddd5a032fd4a41599aa6ad1966c9d7594f`
-- Current implementation candidate: `9ad6633536f3ed1ab016f91ac444c17c34c1c821`
+- Current implementation candidate: `686bd3b57774a2462c49666b53b6b67f8e339a01`
 - Design: `docs/design/2026-09-03-owner-only-personal-stock-agent-web-app-plan.md`
 - Plan: `docs/superpowers/plans/2026-09-03-owner-only-personal-stock-agent-web-v1-implementation.md`
 
@@ -67,18 +67,27 @@ exact direct administrator hostname, port, login, database, TLS parameter, and t
 project suffix before migration or role provisioning. A cross-project URL now fails before any
 mutation.
 
+GitHub's Linux browser run then exposed page-level overflow at the 320-pixel boundary that did not
+reproduce at the same width locally. Commit `686bd3b` removes intrinsic grid-item minimums, permits
+the mobile navigation labels to wrap, extends the regression to 300 pixels, and makes every
+horizontally scrollable table a named keyboard-focusable region. The exact commit passed the remote
+Linux workflow.
+
 ## Verification receipts before independent review
 
-- `npm run test:all` exited 0 on candidate `9ad6633` at 2026-09-04T12:55Z.
+- `npm run test:all` exited 0 on candidate `686bd3b` at 2026-09-04T12:56Z.
 - Python: 204 passed.
 - Telegram/command Node tests: 63 passed.
 - Edge/Deno: 187 passed.
 - Dashboard contracts: 4 passed.
 - Web unit tests: 23 passed.
-- Browser: 17 passed; one production-live canary was intentionally skipped before deployment.
+- Browser: 18 passed; one production-live canary was intentionally skipped before deployment.
 - Type checking, lint, dependency-license check, production build, and bundle scan passed.
 - `npm audit --audit-level=high --omit=optional --ignore-scripts` reported zero vulnerabilities on
-  the immediately preceding candidate; it must be rerun on the deployed SHA.
+  candidate `686bd3b`.
+- GitHub Actions run `33875390097` completed successfully against exact candidate `686bd3b` on the
+  Linux runner, including the dependency audit, license check, Chromium installation, and full
+  repository suite.
 
 ## Platform boundary disclosed for review
 

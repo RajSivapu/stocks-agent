@@ -14,8 +14,9 @@ Status: **not live; protected deployment pending independent review**.
 ## Candidate source receipts
 
 - GitHub branch: `codex/owner-alert-v3`
-- Implementation candidate SHA: `9ad6633536f3ed1ab016f91ac444c17c34c1c821`
-- Private Site source repository: verified at the same SHA before version creation.
+- Implementation candidate SHA: `686bd3b57774a2462c49666b53b6b67f8e339a01`
+- Private Site source repository: must be verified at the exact final review SHA before version
+  creation.
 - Working tree: clean after push.
 - Site version: none.
 - API function: not deployed.
