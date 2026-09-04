@@ -5,6 +5,7 @@ import {
   type StartIntelligencePayload,
 } from "./intelligence.ts";
 import { parseRecordReportPayload, type RecordReportPayload } from "./reports.ts";
+import type { RecordLearningPayload } from "./outcomes.ts";
 
 export type Operation =
   | "start_run"
@@ -16,7 +17,8 @@ export type Operation =
   | "finish_run"
   | "start_intelligence_run"
   | "record_intelligence"
-  | "record_report";
+  | "record_report"
+  | "record_learning";
 export type Phase = "pre-market" | "intraday" | "post-market" | "on-demand";
 export type Action =
   | "buy"
@@ -171,7 +173,7 @@ export interface GatewayEnvelope {
   request_id: string;
   run_id: string | null;
   dry_run: boolean;
-  payload: unknown | StartIntelligencePayload | RecordIntelligencePayload;
+  payload: unknown | StartIntelligencePayload | RecordIntelligencePayload | RecordReportPayload | RecordLearningPayload;
 }
 
 export interface EvidenceBlock {
@@ -520,6 +522,7 @@ const OPERATIONS: readonly Operation[] = [
   "start_intelligence_run",
   "record_intelligence",
   "record_report",
+  "record_learning",
 ];
 const PHASES: readonly Phase[] = [
   "pre-market",
@@ -773,6 +776,94 @@ function arrayValue(
   return value;
 }
 
+export function parseRecordLearningPayload(value: unknown): RecordLearningPayload {
+  const row = objectValue(value, "learning");
+  exactKeys(row, [
+    "id",
+    "policy_version",
+    "observation_type",
+    "horizon_days",
+    "sample_size",
+    "benchmark",
+    "observation",
+    "content_hash",
+  ], "learning");
+  const observation = objectValue(row.observation, "learning.observation");
+  exactKeys(observation, [
+    "status",
+    "evidence_ids",
+    "limitations",
+    "metrics",
+    "proposed_change",
+  ], "learning.observation");
+  const status = enumValue(
+    observation.status,
+    ["observation", "owner_review"] as const,
+    "learning.observation.status",
+  );
+  const proposed = observation.proposed_change === null
+    ? null
+    : objectValue(
+      observation.proposed_change,
+      "learning.observation.proposed_change",
+    );
+  if (proposed !== null) {
+    exactKeys(proposed, [
+      "area",
+      "recommendation",
+      "false_positive_rate",
+    ], "learning.observation.proposed_change");
+  }
+  if (
+    (status === "owner_review") !== (proposed !== null) ||
+    JSON.stringify(observation).length > 32_768 ||
+    typeof row.content_hash !== "string" ||
+    !/^[0-9a-f]{64}$/.test(row.content_hash)
+  ) throw new Error("learning observation review status is invalid");
+  const horizon = integerValue(row.horizon_days, "learning.horizon_days", 0, 63);
+  if (![0, 5, 21, 63].includes(horizon)) {
+    throw new Error("learning horizon is invalid");
+  }
+  return {
+    id: uuidValue(row.id, "learning.id"),
+    policy_version: integerValue(row.policy_version, "learning.policy_version", 1, 1_000_000),
+    observation_type: enumValue(row.observation_type, [
+      "outcome", "missed-event", "source-failure", "noise",
+    ] as const, "learning.observation_type"),
+    horizon_days: horizon as 0 | 5 | 21 | 63,
+    sample_size: integerValue(row.sample_size, "learning.sample_size", 1, 1_000_000),
+    benchmark: nullableString(row.benchmark, "learning.benchmark", 100),
+    observation: {
+      status,
+      evidence_ids: arrayValue(
+        observation.evidence_ids,
+        "learning.observation.evidence_ids",
+        96,
+      ).map((id, index) => uuidValue(id, `learning.observation.evidence_ids[${index}]`)),
+      limitations: arrayValue(
+        observation.limitations,
+        "learning.observation.limitations",
+        20,
+      ).map((item, index) => stringValue(item, `learning.observation.limitations[${index}]`, 500)),
+      metrics: objectValue(observation.metrics, "learning.observation.metrics"),
+      proposed_change: proposed === null ? null : {
+        area: stringValue(proposed.area, "learning.observation.proposed_change.area", 100),
+        recommendation: stringValue(
+          proposed.recommendation,
+          "learning.observation.proposed_change.recommendation",
+          200,
+        ),
+        false_positive_rate: stringValue(
+          proposed.false_positive_rate,
+          "learning.observation.proposed_change.false_positive_rate",
+          20,
+        ),
+      },
+    },
+    content_hash: stringValue(row.content_hash, "learning.content_hash", 64),
+  };
+}
+
 export function parseGatewayEnvelope(value: unknown): GatewayEnvelope {
   const row = objectValue(value, "envelope");
   exactKeys(
@@ -805,6 +896,11 @@ export function parseGatewayEnvelope(value: unknown): GatewayEnvelope {
       throw new Error("run_id is required for record_report");
     }
     payload = parseRecordReportPayload(row.payload);
+  } else if (operation === "record_learning") {
+    if (row.run_id === null) {
+      throw new Error("run_id is required for record_learning");
+    }
+    payload = parseRecordLearningPayload(row.payload);
   }
   return {
     schema_version: 1,
@@ -816,7 +912,8 @@ export function parseGatewayEnvelope(value: unknown): GatewayEnvelope {
       | unknown
       | StartIntelligencePayload
       | RecordIntelligencePayload
-      | RecordReportPayload,
+      | RecordReportPayload
+      | RecordLearningPayload,
   };
 }
 

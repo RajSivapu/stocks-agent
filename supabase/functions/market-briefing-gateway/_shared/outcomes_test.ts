@@ -1,5 +1,10 @@
 import type { AdjustedBar } from "./market-data.ts";
-import { gradeDecision, type DueDecision } from "./outcomes.ts";
+import {
+  type DueDecision,
+  eligibleLearningOutcomes,
+  gradeDecision,
+  summarizeLearningOutcomes,
+} from "./outcomes.ts";
 
 function assertEquals<T>(actual: T, expected: T): void {
   if (JSON.stringify(actual) !== JSON.stringify(expected)) {
@@ -111,3 +116,76 @@ for (const final_action of ["watch", "hold", "avoid"] as const) {
     assertEquals(gradeDecision(decision({ final_action }), stock, benchmark, 5).direction_success, null);
   });
 }
+
+Deno.test("learning accepts only complete benchmark-linked 5/21/63-session outcomes", () => {
+  const complete = {
+    ...gradeDecision(decision(), stock, benchmark, 5),
+    coverage_status: "complete" as const,
+    horizon_sessions: 5,
+    stock_return_pct: "5.0000",
+    benchmark_return_pct: "2.0000",
+    excess_return_pct: "3.0000",
+    direction_success: true,
+  };
+  const rows = [
+    complete,
+    { ...complete, horizon_days: 10 as 5, horizon_sessions: 10 },
+    { ...complete, coverage_status: "incomplete" as const },
+    { ...complete, benchmark_return_pct: null, excess_return_pct: null },
+    { ...complete, horizon_days: 21 as const, horizon_sessions: 20 },
+  ];
+
+  assertEquals(eligibleLearningOutcomes(rows), [complete]);
+});
+
+Deno.test("learning summary is benchmark and policy-version linked with noise rate", () => {
+  const rows = Array.from({ length: 6 }, (_, index) => ({
+    ...gradeDecision(decision(), stock, benchmark, 5),
+    coverage_status: "complete" as const,
+    horizon_sessions: 5,
+    stock_return_pct: index === 0 ? "-1.0000" : "5.0000",
+    benchmark_return_pct: "2.0000",
+    excess_return_pct: index === 0 ? "-3.0000" : "3.0000",
+    direction_success: index !== 0,
+  }));
+
+  assertEquals(summarizeLearningOutcomes(rows), {
+    policy_version: 1,
+    horizon_sessions: 5,
+    benchmark: "VOO",
+    sample_size: 6,
+    false_positive_count: 1,
+    false_positive_rate: "0.1667",
+    limitations: ["historical outcomes do not prove future performance"],
+  });
+});
+
+Deno.test("learning summary rejects mixed benchmark or policy versions", () => {
+  const complete = {
+    ...gradeDecision(decision(), stock, benchmark, 5),
+    coverage_status: "complete" as const,
+    horizon_sessions: 5,
+    stock_return_pct: "5.0000",
+    benchmark_return_pct: "2.0000",
+    excess_return_pct: "3.0000",
+    direction_success: true,
+  };
+  let threw = false;
+  try {
+    summarizeLearningOutcomes([complete, { ...complete, policy_version: 2 }]);
+  } catch {
+    threw = true;
+  }
+  assertEquals(threw, true);
+
+  threw = false;
+  try {
+    summarizeLearningOutcomes([
+      complete,
+      { ...complete, benchmark_ticker: "VXUS" as const },
+    ]);
+  } catch {
+    threw = true;
+  }
+  assertEquals(threw, true);
+});

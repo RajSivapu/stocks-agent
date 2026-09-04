@@ -352,6 +352,23 @@ class FakeRepository implements GatewayRepository {
   due: DueDecision[] = [];
   graded: OutcomeGrade[] = [];
   dueLimit: number | null = null;
+  learningCalls = 0;
+  lastLearning: unknown = null;
+
+  recordLearning(_runId: string, payload: unknown): Promise<{
+    observation_id: string;
+    content_hash: string;
+    duplicate: boolean;
+  }> {
+    this.learningCalls += 1;
+    this.lastLearning = structuredClone(payload);
+    const row = payload as { id: string; content_hash: string };
+    return Promise.resolve({
+      observation_id: row.id,
+      content_hash: row.content_hash,
+      duplicate: false,
+    });
+  }
 
   claimRequest(envelope: GatewayEnvelope): Promise<GatewayRequestClaim> {
     this.mutationCalls += 1;
@@ -756,6 +773,73 @@ Deno.test("scheduled discovery requires the persisted packet hash before market 
   }));
   assertEquals((await json(response)).code, "INTELLIGENCE_PACKET_MISMATCH");
   assertEquals(setup.fetched, []);
+});
+
+Deno.test("record_learning persists only the immutable observation RPC payload", async () => {
+  const fixture = makeHandler();
+  const observation = {
+    status: "owner_review",
+    evidence_ids: ["00000000-0000-4000-8000-000000000010"],
+    limitations: ["Historical outcomes do not prove future performance."],
+    metrics: { false_positive_rate: "0.1667" },
+    proposed_change: {
+      area: "candidate_ranking_review",
+      recommendation: "review_false_positive_rate",
+      false_positive_rate: "0.1667",
+    },
+  };
+  const payload = {
+    id: "00000000-0000-4000-8000-000000000040",
+    policy_version: 1,
+    observation_type: "outcome",
+    horizon_days: 21,
+    sample_size: 6,
+    benchmark: "VOO",
+    observation,
+    content_hash: sha256Hex(canonicalJson(observation)),
+  };
+
+  const body = await json(await fixture.handler(request("record_learning", payload)));
+
+  assertEquals(body.ok, true);
+  assertEquals(body.observation_id, payload.id);
+  assertEquals(fixture.repository.learningCalls, 1);
+  assertEquals(fixture.repository.lastLearning, payload);
+  assertEquals(fixture.sent, []);
+  assertEquals(fixture.repository.applyCalls, 0);
+});
+
+Deno.test("record_learning dry-run is write-free and rejects executable authority", async () => {
+  const fixture = makeHandler();
+  const observation = {
+    status: "observation",
+    evidence_ids: [],
+    limitations: ["Insufficient sample."],
+    metrics: { false_positive_rate: null },
+    proposed_change: null,
+  };
+  const payload = {
+    id: "00000000-0000-4000-8000-000000000040",
+    policy_version: 1,
+    observation_type: "noise",
+    horizon_days: 5,
+    sample_size: 1,
+    benchmark: "VOO",
+    observation,
+    content_hash: sha256Hex(canonicalJson(observation)),
+  };
+  const dry = await json(
+    await fixture.handler(request("record_learning", payload, { dry: true })),
+  );
+  assertEquals(dry.dry_run, true);
+  assertEquals(dry.write_counts, {});
+  assertEquals(fixture.repository.learningCalls, 0);
+
+  const invalid = structuredClone(payload);
+  (invalid.observation as Record<string, unknown>).apply = true;
+  const denied = await fixture.handler(request("record_learning", invalid));
+  assertEquals(denied.status, 400);
+  assertEquals(fixture.repository.learningCalls, 0);
 });
 
 Deno.test("scheduled discovery rejects evidence outside the immutable packet", async () => {

@@ -170,6 +170,7 @@ def test_alert_evaluation_is_allowlisted_and_standalone(monkeypatch):
         ("start_intelligence_run", None),
         ("record_intelligence", RUN_ID),
         ("record_report", RUN_ID),
+        ("record_learning", RUN_ID),
     ],
 )
 def test_intelligence_persistence_operations_are_allowlisted(monkeypatch, operation, run_id):

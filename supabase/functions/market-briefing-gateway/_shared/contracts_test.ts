@@ -219,6 +219,82 @@ Deno.test("gateway envelope rejects unknown and extra authority fields", () => {
   assertThrows(() => parseGatewayEnvelope(withTable), "unexpected key");
 });
 
+Deno.test("gateway envelope accepts only a bounded review-only learning record", () => {
+  const observation = {
+    status: "owner_review",
+    evidence_ids: ["00000000-0000-4000-8000-000000000010"],
+    limitations: ["Historical outcomes do not prove future performance."],
+    metrics: { false_positive_rate: "0.1667" },
+    proposed_change: {
+      area: "candidate_ranking_review",
+      recommendation: "review_false_positive_rate",
+      false_positive_rate: "0.1667",
+    },
+  };
+  const envelope = {
+    ...validEnvelope(),
+    operation: "record_learning",
+    payload: {
+      id: "00000000-0000-4000-8000-000000000040",
+      policy_version: 1,
+      observation_type: "outcome",
+      horizon_days: 21,
+      sample_size: 6,
+      benchmark: "VOO",
+      observation,
+      content_hash: "a".repeat(64),
+    },
+  };
+
+  assertEquals(parseGatewayEnvelope(envelope).operation, "record_learning");
+
+  const executable = structuredClone(envelope);
+  (executable.payload.observation as Record<string, unknown>).apply = true;
+  assertThrows(() => parseGatewayEnvelope(executable), "unexpected key");
+
+  const mutationTarget = structuredClone(envelope);
+  (mutationTarget.payload.observation.proposed_change as Record<string, unknown>)
+    .operation = "update_policy";
+  assertThrows(() => parseGatewayEnvelope(mutationTarget), "unexpected key");
+});
+
+Deno.test("learning record rejects unsupported horizons, kinds, and unbounded evidence", () => {
+  const base = {
+    ...validEnvelope(),
+    operation: "record_learning",
+    payload: {
+      id: "00000000-0000-4000-8000-000000000040",
+      policy_version: 1,
+      observation_type: "noise",
+      horizon_days: 5,
+      sample_size: 6,
+      benchmark: "VOO",
+      observation: {
+        status: "observation",
+        evidence_ids: [],
+        limitations: [],
+        metrics: { false_positive_rate: "0.1667" },
+        proposed_change: null,
+      },
+      content_hash: "a".repeat(64),
+    },
+  };
+  const horizon = structuredClone(base);
+  horizon.payload.horizon_days = 10;
+  assertThrows(() => parseGatewayEnvelope(horizon), "horizon");
+
+  const kind = structuredClone(base);
+  kind.payload.observation_type = "policy-update";
+  assertThrows(() => parseGatewayEnvelope(kind), "observation_type");
+
+  const evidence = structuredClone(base);
+  (evidence.payload.observation.evidence_ids as string[]) = Array.from(
+    { length: 97 },
+    () => "00000000-0000-4000-8000-000000000010",
+  );
+  assertThrows(() => parseGatewayEnvelope(evidence), "at most 96");
+});
+
 Deno.test("gateway envelope rejects invalid identifiers and decimal JSON numbers", () => {
   const invalidId = validEnvelope();
   invalidId.request_id = "not-a-uuid";

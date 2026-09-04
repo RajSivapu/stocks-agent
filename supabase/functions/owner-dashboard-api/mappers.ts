@@ -6,6 +6,7 @@ import type {
   IdeaView,
   IntelligenceView,
   InvestmentPlanView,
+  LearningObservationView,
   PortfolioView,
   ReceiptStatus,
   ReportDetailView,
@@ -254,6 +255,7 @@ export function mapIntelligence(
   candidateRows: readonly Row[],
   relationshipRows: readonly Row[],
   sourceRows: readonly Row[],
+  learningRows: readonly Row[] = [],
 ): IntelligenceView {
   const run = runRows[0] ?? {};
   const themeMap = new Map<string, { relationship_count: number; evidence: Set<string> }>();
@@ -318,6 +320,42 @@ export function mapIntelligence(
       }];
     }),
     sources,
+    ...(learningRows.length > 0 ? { learning_observations: learningRows.slice(0, 20).flatMap((row) => {
+      const id = text(row.id, 64);
+      const kind = text(row.observation_type, 40);
+      const policyVersion = integer(row.policy_version);
+      const horizonDays = integer(row.horizon_days);
+      const sampleSize = integer(row.sample_size);
+      const createdAt = text(row.created_at, 40);
+      const observation = record(row.observation);
+      const status = observation.status === "owner_review"
+        ? "owner_review" as const
+        : "observation" as const;
+      if (
+        !id || !["outcome", "missed-event", "source-failure", "noise"].includes(kind ?? "") ||
+        policyVersion === null || ![0, 5, 21, 63].includes(horizonDays ?? -1) ||
+        sampleSize === null || sampleSize < 1 || !createdAt
+      ) return [];
+      const metrics = record(observation.metrics);
+      const evidenceIds = Array.isArray(observation.evidence_ids)
+        ? observation.evidence_ids.slice(0, 96)
+        : [];
+      return [{
+        id,
+        kind: kind as LearningObservationView["kind"],
+        status,
+        policy_version: policyVersion,
+        horizon_days: horizonDays as LearningObservationView["horizon_days"],
+        sample_size: sampleSize,
+        benchmark: text(row.benchmark, 100),
+        false_positive_rate: text(metrics.false_positive_rate, 20),
+        evidence_count: evidenceIds.length,
+        limitations: textArray(observation.limitations, 20),
+        proposal_available: status === "owner_review" &&
+          Object.keys(record(observation.proposed_change)).length > 0,
+        created_at: createdAt,
+      }];
+    }) } : {}),
     limitations: [...new Set(limitations)].slice(0, 20),
   };
 }

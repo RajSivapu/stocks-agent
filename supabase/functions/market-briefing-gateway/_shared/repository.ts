@@ -16,7 +16,7 @@ import type {
 import { parseEvidencePacket } from "./contracts.ts";
 import { parseAlertDraft } from "./alerts.ts";
 import type { PolicyEvaluation } from "./policy.ts";
-import type { DueDecision, OutcomeGrade } from "./outcomes.ts";
+import type { DueDecision, OutcomeGrade, RecordLearningPayload } from "./outcomes.ts";
 import { formatFixed, parseFixed } from "./fixed-point.ts";
 import {
   type IntelligenceRecordReceipt,
@@ -32,6 +32,12 @@ export interface ReportRecordReceipt {
   report_id: string;
   report_hash: string;
   rendered_hash: string;
+  duplicate: boolean;
+}
+
+export interface LearningRecordReceipt {
+  observation_id: string;
+  content_hash: string;
   duplicate: boolean;
 }
 
@@ -194,6 +200,10 @@ export interface PersistedExposureFact {
 }
 
 export interface GatewayRepository {
+  recordLearning?(
+    runId: string,
+    payload: RecordLearningPayload,
+  ): Promise<LearningRecordReceipt>;
   recordReport?(
     runId: string,
     payload: RecordReportPayload,
@@ -511,6 +521,19 @@ export function createSupabaseGatewayRepository(
   }
 
   return {
+    async recordLearning(runId, payload) {
+      const result = await client.rpc("record_market_learning", {
+        p_run_id: runId,
+        p_observation: payload,
+      });
+      const row = oneObject(result);
+      return {
+        observation_id: text(row.observation_id, 36),
+        content_hash: text(row.content_hash, 64),
+        duplicate: boole(row.duplicate),
+      };
+    },
+
     async recordReport(runId, payload) {
       const result = await client.rpc("record_market_report", {
         p_run_id: runId,

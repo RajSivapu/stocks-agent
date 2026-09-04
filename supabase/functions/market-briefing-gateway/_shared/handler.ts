@@ -9,6 +9,7 @@ import {
   parseArtifactMutationBatch,
   parseDecisionBundle,
   parseGatewayEnvelope,
+  parseRecordLearningPayload,
   type Phase,
   type PolicyContext,
   validatePacketEvidence,
@@ -24,6 +25,7 @@ import {
   type IntradayQuoteEvidence,
 } from "./market-data.ts";
 import { type DueDecision, gradeDecision } from "./outcomes.ts";
+import type { RecordLearningPayload } from "./outcomes.ts";
 import { evaluateCandidate, type PolicyEvaluation } from "./policy.ts";
 import { draftFromEvaluation } from "./policy.ts";
 import { alertFingerprint, alertRuleFingerprint, evaluateAlertRule, shouldPublishAlert } from "./alerts.ts";
@@ -376,11 +378,19 @@ export function createGatewayHandler(dependencies: GatewayDependencies) {
       if (
         envelope.operation === "start_intelligence_run" ||
         envelope.operation === "record_intelligence" ||
-        envelope.operation === "record_report"
+        envelope.operation === "record_report" ||
+        envelope.operation === "record_learning"
       ) {
         prepared = envelope.operation === "record_report"
           ? parseRecordReportPayload(envelope.payload)
+          : envelope.operation === "record_learning"
+          ? parseRecordLearningPayload(envelope.payload)
           : envelope.payload;
+        if (
+          envelope.operation === "record_learning" &&
+          sha256Hex(canonicalJson((prepared as RecordLearningPayload).observation)) !==
+            (prepared as RecordLearningPayload).content_hash
+        ) throw new GatewayHttpError(400, "INVALID_REQUEST");
       } else if (envelope.operation === "start_run") {
         prepared = parseStartPayload(envelope.payload, currentDate);
       } else if (envelope.operation === "record_artifacts") {
@@ -473,6 +483,17 @@ export function createGatewayHandler(dependencies: GatewayDependencies) {
               status: delivery.status,
               telegram_message_ids: [],
             },
+            telegram_message_ids: [],
+          });
+        }
+        if (envelope.operation === "record_learning") {
+          return response(200, {
+            ok: true,
+            dry_run: true,
+            observation_id: (prepared as RecordLearningPayload).id,
+            content_hash: (prepared as RecordLearningPayload).content_hash,
+            duplicate: false,
+            write_counts: {},
             telegram_message_ids: [],
           });
         }
@@ -587,6 +608,29 @@ export function createGatewayHandler(dependencies: GatewayDependencies) {
           telegram_message_ids: [],
         });
       } catch (error) {
+        const code = error instanceof GatewayRepositoryError ? error.code : "PERSISTENCE_FAILED";
+        return response(errorStatus(code), { ok: false, code });
+      }
+    }
+    if (envelope.operation === "record_learning") {
+      try {
+        if (!deps.repository.recordLearning) {
+          throw new GatewayRepositoryError("PERSISTENCE_FAILED");
+        }
+        const payload = prepared as RecordLearningPayload;
+        const receipt = await deps.repository.recordLearning(
+          requireRun(envelope),
+          payload,
+        );
+        return response(200, {
+          ok: true,
+          ...receipt,
+          telegram_message_ids: [],
+        });
+      } catch (error) {
+        if (error instanceof GatewayHttpError) {
+          return response(error.status, { ok: false, code: error.code });
+        }
         const code = error instanceof GatewayRepositoryError ? error.code : "PERSISTENCE_FAILED";
         return response(errorStatus(code), { ok: false, code });
       }

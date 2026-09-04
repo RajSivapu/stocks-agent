@@ -318,6 +318,7 @@ def test_gateway_repository_uses_only_fixed_tables_and_named_rpcs():
         "get_due_market_decisions",
         "record_market_alert_evaluations",
             "record_market_intelligence",
+            "record_market_learning",
             "record_market_report",
         "read_market_evidence_packet",
         "start_market_analysis_run",

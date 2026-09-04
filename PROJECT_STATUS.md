@@ -94,6 +94,8 @@ delivery, production migration, or deployment.
 
 - [x] Immutable reports, quiet Telegram delivery, owner-only report/intelligence read contracts, and
   the five-surface owner dashboard are implemented locally.
+- [x] Deterministic 5/21/63-session outcome learning, coverage-scoped missed-event observations,
+  explicit source-failure/noise records, and owner-review-only proposals are implemented locally.
 
 Task 10 immutable reports and quiet Telegram delivery is complete locally. Immutable canonical
 report hashes, deterministic SHA-256 idempotency, sorted source references, concise morning and
@@ -114,6 +116,21 @@ production build, dashboard bundle security/size verification, and 17 Playwright
 passed; the opt-in live read-only canary was skipped. The browser checks covered both themes,
 keyboard access, axe accessibility, 300–1440 CSS pixel widths including 320, five primary routes,
 report deep links, hostile stored content, and stale/owner-denied/expired states.
+
+Task 13 adds frozen immutable learning observations linked to the original run and policy version.
+Only complete benchmark-backed 5/21/63-session outcomes are eligible; insufficient samples remain
+observations, and later evidence counts as a missed event only when authoritative, discovered after
+the run, absent from the original ranking, and inside the run's declared source/time coverage.
+Source failures and false-positive/noise rates remain explicit, historical results are labeled as
+non-predictive, and proposed changes are owner-review records with no apply/update authority. The
+gateway exposes only `record_learning` backed by the existing append-only
+`record_market_learning` RPC; dry runs write and send nothing. The owner dashboard mapping exposes
+only bounded/redacted observation metadata and never executable proposal content.
+
+The exact Task 13 focused gate passed locally on 2026-09-04: 60 Python learning/gateway/security
+tests and 60 Deno outcome/contract/handler tests passed. No provider or model call, database write,
+policy/weight/provider activation, holdings/plan mutation, Telegram delivery, migration, or
+deployment occurred.
 
 V1-C5 is awaiting only the consolidated full suite and exact-head independent review. Nothing in
 this checkpoint claims a live API, production migration, Telegram send, Site deployment, or owner
@@ -179,5 +196,5 @@ live run is requested.
 
 ## Last Commit
 
-Task 12 started from `b892fa6` (`fix: link report delivery receipts`). The Task 12 implementation
-commit becomes the current Git `HEAD` after the scoped changes are committed.
+Task 13 started from `f2148bf` (`fix: preserve dashboard receipt state boundaries`). The Task 13
+implementation commit becomes the current Git `HEAD` after the scoped changes are committed.

@@ -296,6 +296,21 @@ export interface SourceCoverageView {
   dropped_count: number;
 }
 
+export interface LearningObservationView {
+  id: string;
+  kind: "outcome" | "missed-event" | "source-failure" | "noise";
+  status: "observation" | "owner_review";
+  policy_version: number;
+  horizon_days: 0 | 5 | 21 | 63;
+  sample_size: number;
+  benchmark: string | null;
+  false_positive_rate: string | null;
+  evidence_count: number;
+  limitations: string[];
+  proposal_available: boolean;
+  created_at: string;
+}
+
 export interface IntelligenceView {
   run_id: string;
   data_as_of: string | null;
@@ -303,6 +318,7 @@ export interface IntelligenceView {
   events: MarketEventView[];
   candidates: CandidateRelationshipView[];
   sources: SourceCoverageView[];
+  learning_observations?: LearningObservationView[];
   limitations: string[];
 }
 
