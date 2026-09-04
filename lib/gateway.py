@@ -20,7 +20,12 @@ OPERATIONS = (
     "record_artifacts",
     "grade_due_decisions",
     "evaluate_and_publish",
+    "evaluate_alert_rules",
     "finish_run",
+    "start_intelligence_run",
+    "record_intelligence",
+    "record_report",
+    "record_learning",
 )
 MAX_REQUEST_BYTES = 262_144
 MAX_RESPONSE_BYTES = 1_048_576
@@ -95,9 +100,9 @@ def call(
         request_id = str(uuid.uuid4())
     if not _valid_uuid(request_id):
         raise ValueError("request_id must be a canonical UUID")
-    if operation == "start_run":
+    if operation in {"start_run", "evaluate_alert_rules", "start_intelligence_run"}:
         if run_id is not None:
-            raise ValueError("start_run does not accept run_id")
+            raise ValueError(f"{operation} does not accept run_id")
     elif not _valid_uuid(run_id):
         raise ValueError("run_id must be a canonical UUID")
     if not isinstance(dry_run, bool):

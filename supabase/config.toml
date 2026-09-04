@@ -1,5 +1,15 @@
 project_id = "stocks-agent"
 
+[auth]
+enabled = true
+jwt_expiry = 900
+enable_signup = false
+
+[auth.email]
+enable_signup = false
+otp_length = 6
+otp_expiry = 600
+
 [functions."telegram-portfolio"]
 enabled = true
 verify_jwt = false
@@ -9,3 +19,8 @@ entrypoint = "./functions/telegram-portfolio/index.ts"
 enabled = true
 verify_jwt = false
 entrypoint = "./functions/market-briefing-gateway/index.ts"
+
+[functions."owner-dashboard-api"]
+enabled = true
+verify_jwt = false
+entrypoint = "./functions/owner-dashboard-api/index.ts"

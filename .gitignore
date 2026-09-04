@@ -31,3 +31,11 @@ docs/HANDOFF.md
 
 # Test cache
 .pytest_cache/
+
+# Node and browser build output
+node_modules/
+/dist/
+apps/web/dist/
+apps/web/coverage/
+apps/web/test-results/
+apps/web/playwright-report/

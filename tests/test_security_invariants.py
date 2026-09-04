@@ -1,4 +1,5 @@
 import ast
+import json
 from pathlib import Path
 import re
 
@@ -23,6 +24,79 @@ GATEWAY_RPCS = (
     "claim_market_publication(UUID)",
     "finish_market_publication(UUID, UUID, TEXT, JSONB, TEXT)",
 )
+INTELLIGENCE_TABLES = (
+    "market_intelligence_runs",
+    "market_intelligence_run_events",
+    "market_source_quota_reservations",
+    "market_source_receipts",
+    "market_source_items",
+    "market_intelligence_run_items",
+    "market_events",
+    "market_event_relationships",
+    "market_candidate_rankings",
+    "market_evidence_packets",
+    "market_reports",
+    "market_learning_observations",
+)
+INTELLIGENCE_RPCS = (
+    "start_market_intelligence_run(UUID, TEXT, DATE, INT, JSONB)",
+    "record_market_intelligence(UUID, UUID, JSONB)",
+    "read_market_evidence_packet(UUID, UUID)",
+    "record_market_report(UUID, TEXT, JSONB)",
+    "record_market_learning(UUID, JSONB)",
+)
+
+
+def test_v1_intelligence_configuration_keeps_zero_cost_owner_only_boundaries():
+    settings = json.loads((ROOT / "config" / "settings.json").read_text())
+    intelligence = settings["intelligence"]
+
+    assert intelligence["paid_fallback_enabled"] is False
+    assert intelligence["runtime_model_api_enabled"] is False
+    assert intelligence["automatic_policy_changes_enabled"] is False
+    assert intelligence["suggestion_only"] is True
+    assert intelligence["execution_allowed"] is False
+    assert settings["guardrails"]["execution_allowed"] is False
+    assert settings["access"]["friend_invitations_enabled"] is False
+    assert settings["learning"]["self_tuning_enabled"] is False
+    assert "benzinga" not in intelligence["providers"]
+    assert "alpaca" not in intelligence["providers"]
+
+
+def test_intelligence_migration_has_no_brokerage_authority_and_is_gateway_only():
+    paths = (
+        ROOT / "sql" / "schema.sql",
+        ROOT / "sql" / "migrations" / "20260907_market_intelligence.sql",
+    )
+    for path in paths:
+        sql = path.read_text()
+        intelligence_sql = sql[sql.index("CREATE TABLE IF NOT EXISTS public.market_intelligence_runs"):]
+        for table in INTELLIGENCE_TABLES:
+            assert f"ALTER TABLE public.{table} ENABLE ROW LEVEL SECURITY;" in intelligence_sql
+        for signature in INTELLIGENCE_RPCS:
+            assert (
+                f"REVOKE ALL ON FUNCTION public.{signature} "
+                "FROM PUBLIC, anon, authenticated;"
+            ) in intelligence_sql
+            assert f"GRANT EXECUTE ON FUNCTION public.{signature} TO service_role;" in intelligence_sql
+        for forbidden in (
+            "brokerage",
+            "place_order",
+            "submit_order",
+            "order_id",
+            "api_secret",
+            "api_key",
+        ):
+            assert forbidden not in intelligence_sql.lower()
+
+
+def test_alpha_vantage_cadence_wording_matches_the_intelligence_ceiling():
+    settings = json.loads((ROOT / "config" / "settings.json").read_text())
+    ceiling = settings["intelligence"]["alpha_vantage_daily_ceiling"]
+    cadence_note = settings["schedule"]["_cadence_note"]
+
+    assert f"Alpha Vantage's {ceiling}/day budget" in cadence_note
+    assert "25/day budget" not in cadence_note
 
 
 def test_privileged_portfolio_rpcs_are_schema_qualified_and_service_role_only():
@@ -43,6 +117,36 @@ def test_live_rpc_verifier_cannot_be_disabled_with_python_optimization():
         path = ROOT / "scripts" / name
         tree = ast.parse(path.read_text(), filename=str(path))
         assert not any(isinstance(node, ast.Assert) for node in ast.walk(tree))
+
+
+def test_dashboard_role_tools_cannot_be_disabled_with_python_optimization():
+    for name in (
+        "provision_dashboard_runtime_role.py",
+        "verify_owner_dashboard_role.py",
+    ):
+        path = ROOT / "scripts" / name
+        tree = ast.parse(path.read_text(), filename=str(path))
+        assert not any(isinstance(node, ast.Assert) for node in ast.walk(tree))
+
+
+def test_dashboard_role_migration_is_select_only_and_excludes_sensitive_tables():
+    path = ROOT / "sql" / "migrations" / "20260906_owner_dashboard_read_role.sql"
+    sql = path.read_text()
+    assert "CREATE ROLE stock_agent_dashboard" in sql
+    assert "NOBYPASSRLS" in sql
+    assert "FOR SELECT TO stock_agent_dashboard" in sql
+    assert "GRANT SELECT" in sql
+    for forbidden in (
+        "GRANT INSERT",
+        "GRANT UPDATE",
+        "GRANT DELETE",
+        "GRANT EXECUTE",
+        "auth.users",
+        "portfolio_commands",
+        "telegram_updates",
+        "vault.decrypted_secrets",
+    ):
+        assert forbidden not in sql
 
 
 def test_gateway_migration_verifier_covers_the_full_release_chain():
@@ -66,6 +170,30 @@ def test_webhook_acknowledges_non_owner_updates_without_processing_them():
     source = (ROOT / "supabase" / "functions" / "telegram-portfolio" / "index.ts").read_text()
     assert "return jsonResponse(200, { ok: true, ignored: true });" in source
     assert "return jsonResponse(403, { ok: false });" not in source
+
+
+def test_alert_callbacks_use_the_owner_gate_fixed_rpc_and_telegram_receipt():
+    source = (ROOT / "supabase" / "functions" / "telegram-portfolio" / "index.ts").read_text()
+    owner_gate = source.index("if (!ownerMatches(chatId, userId")
+    dispatch = source.index("await handleCallback(updateId as number")
+    assert owner_gate < dispatch
+    assert '"apply_market_alert_action"' in source
+    assert "alertActionPayload(parsed, updateId, OWNER_CHAT_ID_NUMBER, OWNER_USER_ID_NUMBER)" in source
+    assert "No brokerage order was placed or modified." in (
+        ROOT / "supabase" / "functions" / "telegram-portfolio" / "alert-utils.mjs"
+    ).read_text()
+
+
+def test_telegram_eval_covers_owner_only_alert_transitions():
+    evaluation = (ROOT / "docs" / "eval" / "telegram-portfolio-eval.yaml").read_text()
+    for case_name in (
+        "alert_wrong_owner",
+        "alert_arm_once",
+        "alert_stale_version",
+        "alert_snooze_and_resume",
+        "alert_no_brokerage_capability",
+    ):
+        assert f"name: {case_name}" in evaluation
 
 
 def test_gateway_tables_have_rls_append_only_evaluations_and_service_role_rpcs():
@@ -139,8 +267,10 @@ def test_gateway_entrypoint_uses_only_pinned_dependencies_and_scoped_secrets():
     assert set(re.findall(r'requiredEnvironment\("([A-Z0-9_]+)"\)', source)) == {
         "SUPABASE_URL",
         "SUPABASE_SERVICE_ROLE_KEY",
-        "MARKET_AGENT_SECRET",
-        "TELEGRAM_BOT_TOKEN",
+            "MARKET_AGENT_SECRET",
+            "OWNER_DASHBOARD_ORIGIN",
+            "OWNER_DASHBOARD_URL",
+            "TELEGRAM_BOT_TOKEN",
         "TELEGRAM_OWNER_CHAT_ID",
     }
     config = (ROOT / "supabase" / "config.toml").read_text()
@@ -159,6 +289,9 @@ def test_gateway_repository_uses_only_fixed_tables_and_named_rpcs():
         "dry_powder",
         "holdings",
         "lessons",
+        "market_alert_drafts",
+        "market_alert_events",
+        "market_alert_rules",
         "market_gateway_requests",
         "market_policy_config",
         "market_publications",
@@ -177,9 +310,19 @@ def test_gateway_repository_uses_only_fixed_tables_and_named_rpcs():
         "claim_market_gateway_request",
         "claim_market_publication",
         "complete_market_gateway_request",
+        "create_market_alert_publication",
+        "create_market_alert_drafts",
+        "expire_market_alert_rules",
+        "finish_market_alert_publication",
         "finish_market_publication",
         "get_due_market_decisions",
+        "record_market_alert_evaluations",
+            "record_market_intelligence",
+            "record_market_learning",
+            "record_market_report",
+        "read_market_evidence_packet",
         "start_market_analysis_run",
+        "start_market_intelligence_run",
         "upsert_market_outcome_grades",
     }
     assert not re.search(r"client\.from\((?!\")[^)]+\)", source)
@@ -225,6 +368,17 @@ def test_cloud_market_skills_have_only_bounded_gateway_authority():
     assert "/buy" in skills["reconcile-trade"]
     assert "/sell" in skills["reconcile-trade"]
     assert "local-admin" in skills["reconcile-trade"]
+    market_skill = skills["market-briefing"]
+    for boundary in (
+        "comparisons",
+        "equal monthly contributions",
+        "Hypothetical history is not a forecast",
+        "never change or cancel an owner plan",
+        "like-for-like",
+        "diversifier",
+        "peer",
+    ):
+        assert boundary in market_skill
 
 
 def test_cloud_market_support_scripts_do_not_restore_privileged_paths():
@@ -249,6 +403,15 @@ def test_market_briefing_eval_covers_gateway_failure_pressure_cases():
         "database_failure",
         "definitive_telegram_failure",
         "ambiguous_delivery",
+        "vti_like_for_like_vs_diversifier",
+        "comparison_history_is_server_computed",
+        "comparison_cannot_change_owner_plan",
+        "peer_list_requires_business_validation",
+        "companion_substitute_rejected",
+        "vxus_diversifier_companion",
+        "satellite_not_recurring",
+        "no_companion_qualified",
+        "companion_history_is_server_computed",
     )
     for case_name in required:
         assert f"name: {case_name}" in evaluation
@@ -338,7 +501,8 @@ def test_routine_documentation_exposes_only_scoped_cloud_credentials():
         "status: suppressed",
     ):
         assert required in routines
-    assert '{"gateway":"ok","finnhub":"ok","yahoo":"ok"}' in routines
+    assert '{"alerts":"ok","gateway":"ok","finnhub":"ok","yahoo":"ok"}' in routines
+    assert "sends no Telegram healthcheck or alert" in routines
 
 
 def test_behavioral_evals_use_gateway_receipts_not_privileged_helpers():

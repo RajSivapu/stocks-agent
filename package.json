@@ -1,0 +1,17 @@
+{
+  "name": "stocks-agent",
+  "private": true,
+  "workspaces": [
+    "packages/dashboard-contracts",
+    "apps/web"
+  ],
+  "scripts": {
+    "test:contracts": "npm test --workspace @stocks-agent/dashboard-contracts",
+    "test:web": "npm test --workspace @stocks-agent/web",
+    "test:e2e": "npm run test:e2e --workspace @stocks-agent/web",
+    "test:all": "bash scripts/test_all.sh"
+  },
+  "engines": {
+    "node": ">=24"
+  }
+}

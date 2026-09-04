@@ -55,7 +55,7 @@ research, Analyst/Checker, `evaluate_and_publish`, permitted artifacts/grading, 
 - Finnhub free tier: fundamentals, news, earnings/events, insider and analyst context.
 - Alpha Vantage is not used by the current release and is intentionally absent from the Routine
   environment.
-- Supabase free-tier project: Postgres and two Edge Functions.
+- Supabase free-tier project: Postgres and three Edge Functions, including the owner-only read API.
 - Telegram Bot API: fixed brief delivery and deterministic recordkeeping chat.
 - Anthropic plan allowance: scheduled model reasoning; no Anthropic API key in this repo.
 - ChatGPT/Codex desktop allowance: optional Friday audit; no OpenAI API key in this repo.
@@ -88,6 +88,8 @@ sql/migrations/20260901_reliable_stock_agent.sql
 sql/migrations/20260902_decision_safety_gateway.sql
 sql/migrations/20260903_owner_investment_plans.sql
 sql/migrations/20260904_outcome_evaluation.sql
+sql/migrations/20260905_owner_alert_lifecycle.sql
+sql/migrations/20260906_owner_dashboard_read_role.sql
 ```
 
 The gateway migration intentionally stops on unknown legacy action/confidence/bucket labels. Review
@@ -105,6 +107,8 @@ Supabase Edge Function secrets/runtime contain:
 - `MARKET_AGENT_SECRET` (new random scoped gateway secret);
 - `TELEGRAM_BOT_TOKEN`, `TELEGRAM_WEBHOOK_SECRET`, `TELEGRAM_OWNER_CHAT_ID`, and
   `TELEGRAM_OWNER_USER_ID`;
+- `DASHBOARD_OWNER_USER_ID`, `DASHBOARD_ALLOWED_ORIGINS`, and the separately provisioned
+  `DASHBOARD_DATABASE_URL` for the owner dashboard;
 - Supabase's injected `SUPABASE_URL` and `SUPABASE_SERVICE_ROLE_KEY`.
 
 Anthropic's personal `stocks-agent` cloud environment contains exactly these variables:
@@ -131,15 +135,18 @@ npx supabase link --project-ref <project-ref>
 npx supabase secrets set --env-file supabase/.env.local
 npx supabase functions deploy market-briefing-gateway --no-verify-jwt
 npx supabase functions deploy telegram-portfolio --no-verify-jwt
+npx supabase functions deploy owner-dashboard-api --no-verify-jwt
 .venv/bin/python scripts/publish_market_policy.py
 .venv/bin/python scripts/verify_portfolio_command_rpc.py
 .venv/bin/python scripts/register_telegram_webhook.py
 ```
 
-JWT verification is disabled because the Routine and Telegram cannot supply user JWTs. Each
-function instead verifies its dedicated secret before parsing a body; the recorder also requires
-the exact owner chat and user IDs. RLS remains enabled, and privileged RPC execution is limited to
-`service_role`.
+Platform JWT verification is disabled for all three functions because the Routine and Telegram
+cannot supply user JWTs and the browser must complete exact-origin CORS preflight. The market and
+Telegram functions verify dedicated secrets before parsing a body. The owner dashboard function
+independently verifies a short-lived Supabase user JWT against the project's remote JWKS and exact
+owner UUID before any database read. Its repository connects only as the structurally read-only
+dashboard role. RLS remains enabled, and privileged RPC execution is limited to `service_role`.
 
 ### 5. Verify connectivity
 
@@ -147,13 +154,69 @@ the exact owner chat and user IDs. RLS remains enabled, and privileged RPC execu
 .venv/bin/python scripts/healthcheck.py
 ```
 
-Expected keys are `gateway`, `finnhub`, and `yahoo`. Healthcheck uses dry-run gateway operations and
-sends no Telegram message.
+Expected keys are `alerts`, `gateway`, `finnhub`, and `yahoo`. Healthcheck uses dry-run gateway
+operations and sends no Telegram message.
 
 ### 6. Configure Routines
 
 Follow [`routines/README.md`](routines/README.md). The saved prompts are receipt-driven and the cloud
 environment has only the three scoped/read-only values listed above.
+
+## Owner-only web dashboard
+
+The React dashboard under `apps/web` is a read-only projection of stored evidence and receipts. It
+has no mutation route, provider lookup, Routine trigger, Telegram-send path, brokerage integration,
+or invitation flow. It shows unsupported or stale data explicitly instead of filling gaps with
+client-side calculations.
+
+### Provision owner access and the read-only runtime
+
+1. Create the single owner user directly in Supabase Auth. Public signup remains disabled; the
+   browser requests an email OTP with `shouldCreateUser: false`.
+2. Set the hosted Auth JWT lifetime to 900 seconds and confirm email signup remains disabled. The
+   matching local project settings are recorded in `supabase/config.toml`.
+3. Apply `sql/migrations/20260906_owner_dashboard_read_role.sql` with the normal protected migration
+   path.
+4. Put `DASHBOARD_OWNER_USER_ID` and the exact deployed HTTPS origin in
+   `DASHBOARD_ALLOWED_ORIGINS` inside the ignored `supabase/.env.local`, then publish the function
+   secrets without printing their values.
+5. Provision the generated database login from trusted admin and Supavisor session URLs. The helper
+   rotates the password and publishes only `DASHBOARD_DATABASE_URL` through a private temporary
+   env file:
+
+```bash
+POSTGRES_URL='<admin database URL>' \
+SUPAVISOR_SESSION_URL='<Supavisor session URL on port 5432>' \
+  .venv/bin/python scripts/provision_dashboard_runtime_role.py --project-ref <project-ref>
+POSTGRES_URL='<admin database URL>' \
+  .venv/bin/python scripts/verify_owner_dashboard_role.py
+npx supabase functions deploy owner-dashboard-api --no-verify-jwt
+```
+
+The verifier must report `status: verified`, 15 allowlisted tables, zero table-level/write
+privileges, zero application-function execution, and zero owned objects before deployment proceeds.
+
+### Build and access the dashboard
+
+Copy `apps/web/.env.example` to an ignored production environment file or configure the same three
+public build variables in the static host. The publishable Auth key is intentionally browser-visible;
+never use a service-role key here.
+
+```bash
+npm ci
+npm run test:all
+npm run build --workspace @stocks-agent/web
+```
+
+Deploy only `apps/web/dist` to the approved static host. Keep the generated `_headers` file: it
+contains the exact Supabase/API Content Security Policy, frame denial, no-store shell policy, and
+immutable hashed-asset policy. Open the deployed HTTPS URL, enter the pre-created owner email, then
+enter the emailed six-digit code. Sessions use browser session storage, globally sign out on owner
+request, and privacy-lock after 30 minutes of inactivity. A second user must receive an owner-only
+denial and no portfolio data.
+
+The optional production canary is GET-only and must be enabled deliberately with `E2E_LIVE=1` plus
+an owner access token; the normal test suite never reads production.
 
 ## Gateway client
 
@@ -220,6 +283,24 @@ every gateway operation and begins with:
 🧪 DRY RUN — nothing sent, nothing written to Supabase.
 ```
 
+Portfolio-alternative research is available on demand and in the first pre-market brief of each
+month. It compares only an existing holding or active owner plan with at most six evidence-validated
+alternatives. The gateway computes synchronized one-year adjusted-history results using the same
+equal monthly contributions and reports max drawdown; the model cannot submit return numbers. VTI
+remains the recorded recurring baseline unless the owner separately confirms another plan. These
+comparisons never change a plan or holding, and on-demand previews never send Telegram.
+
+The optional Long-Term Companion layer then selects at most one additive research candidate or says
+that none qualified. It separates duplicate core substitutes from diversifiers, tilts, and
+concentrated satellites. The gateway computes available 3/5/10-year annualized history, drawdowns,
+daily-return correlation, and weak/middle/strong rolling one-year outcomes for a normalized
+$100/month contribution. Those outcomes are historical planning illustrations, not forecasts. Only
+the initial VTI/VXUS pair can be marked eligible for a later owner-reviewed recurring-reminder
+discussion; no reminder, holding, or brokerage order is created or changed by the review.
+An on-demand companion proposal must be a protected dry run and is rejected before persistence or
+delivery otherwise. Scheduled companion review is accepted only on the first configured NYSE
+session of the month.
+
 ## Deterministic policy and outcomes
 
 Reviewed policy comes from `config/settings.json`, is validated and versioned by
@@ -227,6 +308,11 @@ Reviewed policy comes from `config/settings.json`, is validated and versioned by
 quotes, checks session freshness, reconciles sizing, enforces stop/reward-risk/concentration/loss
 limits, and owns holding-alert transitions. If Yahoo omits `marketState`, the gateway derives the
 session only from Yahoo's validated epoch trading windows; missing or malformed windows fail closed.
+Policy v3 adds an explicit owner-reviewed alert-class allowlist to the owner-only alert v3 controls.
+Its initial deployment is shadow-only with an empty allowlist: projected drafts are rendered in the
+gateway receipt but no alert lifecycle row or Telegram alert is created. Live enablement requires a
+non-empty list containing only the reviewed `entry_trigger`, `stop_breach`, or `target_hit` classes;
+the rollout begins with `stop_breach` alone only after the owner approves a real shadow example.
 
 Final gateway suggestions are graded after 5/21/63 trading sessions using adjusted closes, a fixed
 VOO benchmark (VXUS for VXUS), excess return, MFE/MAE, and raw threshold hits. Splits require review;
@@ -234,7 +320,7 @@ non-actionable decisions get no binary success label. Complete grades are immuta
 audit reports sample sizes and separates scheduled delivered recommendations from session-only
 research.
 
-## Supabase schema (18 tables)
+## Supabase schema (23 tables)
 
 Core portfolio/research tables:
 
@@ -244,6 +330,8 @@ Core portfolio/research tables:
 - `market_gateway_requests`, `market_policy_config`, `decision_evaluations`, and
   `market_publications`;
 - `owner_investment_plans`.
+- `market_alert_drafts`, `market_alert_rules`, `market_alert_rule_versions`,
+  `market_alert_events`, and `market_alert_actions`.
 
 Privileged RPCs are fixed-name, fixed-search-path, and service-role-only:
 
@@ -253,6 +341,9 @@ Privileged RPCs are fixed-name, fixed-search-path, and service-role-only:
   `apply_market_decision_bundle`, `import_legacy_suggestion`, `claim_market_publication`, and
   `finish_market_publication`;
 - outcomes: `get_due_market_decisions`, `upsert_market_outcome_grades`.
+- owner alerts: `create_market_alert_drafts`, `apply_market_alert_action`,
+  `expire_market_alert_rules`, `record_market_alert_evaluations`,
+  `create_market_alert_publication`, and `finish_market_alert_publication`.
 
 ## Tests
 

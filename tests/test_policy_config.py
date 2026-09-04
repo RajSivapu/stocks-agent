@@ -11,7 +11,7 @@ from lib.policy_config import build_policy_config, validate_policy_config
 def test_build_policy_config_uses_reviewed_safety_values():
     policy = build_policy_config(load_settings())
 
-    assert policy["version"] == 1
+    assert policy["version"] == 3
     assert policy["allocation_bps"] == {
         "core": 7000,
         "growth": 2000,
@@ -48,6 +48,14 @@ def test_build_policy_config_uses_reviewed_safety_values():
         },
         "max_requests_per_run": 20,
         "max_authenticated_requests_per_hour": 100,
+    }
+    assert policy["alerts_v3"] == {
+        "enabled": False,
+        "shadow": True,
+        "enabled_classes": [],
+        "profile": "balanced",
+        "draft_ttl_hours": 24,
+        "drafts_per_hour": 5,
     }
 
 
@@ -127,3 +135,70 @@ def test_validate_policy_config_rejects_extra_keys_and_boolean_integer():
     with pytest.raises(ValueError, match="alert_near_bps"):
         validate_policy_config(policy)
 
+
+@pytest.mark.parametrize(
+    ("key", "value", "message"),
+    [
+        ("enabled", 1, "enabled"),
+        ("shadow", "yes", "shadow"),
+        ("enabled_classes", ["stop_near"], "enabled_classes"),
+        ("enabled_classes", ["stop_breach", "stop_breach"], "enabled_classes"),
+        ("profile", "aggressive", "profile"),
+        ("draft_ttl_hours", 48, "draft_ttl_hours"),
+        ("drafts_per_hour", 6, "drafts_per_hour"),
+    ],
+)
+def test_alert_v3_policy_rejects_unreviewed_authority_or_bounds(key, value, message):
+    policy = build_policy_config(load_settings())
+    policy["alerts_v3"][key] = value
+    with pytest.raises(ValueError, match=message):
+        validate_policy_config(policy)
+
+
+def test_alert_v3_enabled_policy_requires_an_explicit_canary_class():
+    policy = build_policy_config(load_settings())
+    policy["alerts_v3"]["enabled"] = True
+    policy["alerts_v3"]["shadow"] = False
+    with pytest.raises(ValueError, match="enabled_classes"):
+        validate_policy_config(policy)
+
+    policy["alerts_v3"]["enabled_classes"] = ["stop_breach"]
+    validate_policy_config(policy)
+
+
+def test_owner_only_access_and_no_brokerage_remain_explicit_in_settings():
+    settings = load_settings()
+    assert settings["access"] == {
+        "mode": "owner_only",
+        "friend_invitations_enabled": False,
+    }
+    assert settings["guardrails"]["execution_allowed"] is False
+
+
+def test_portfolio_alternative_review_is_bounded_and_cannot_change_the_plan():
+    settings = load_settings()
+    assert settings["deployment"]["core_mix"] == {"VTI": 1.0}
+    assert settings["portfolio_alternatives"] == {
+        "enabled": True,
+        "cadence": "first_pre_market_of_month_and_on_demand",
+        "max_pairs": 6,
+        "history_method": "gateway_adjusted_equal_monthly_contributions_1y",
+        "recurring_core_candidates": ["ITOT", "SCHB", "VOO", "VT", "VXUS", "SCHD"],
+        "peer_discovery": "finnhub_then_business_model_validation",
+        "long_term_companion": {
+            "enabled": True,
+            "max_proposals": 1,
+            "history_years": [3, 5, 10],
+            "scenario_monthly_usd": 100,
+            "substitutes": ["ITOT", "SCHB"],
+            "tilts": ["VOO", "SCHD"],
+            "global_core_replacements": ["VT"],
+            "diversifiers": ["VXUS"],
+            "recurring_plan_review_pairs": ["VTI:VXUS"],
+            "individual_stocks_research_only": True,
+            "automatic_plan_changes": False,
+            "automatic_holding_changes": False,
+        },
+        "automatic_plan_changes": False,
+        "automatic_holding_changes": False,
+    }

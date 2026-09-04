@@ -12,6 +12,7 @@ from lib.marketdata import nyse_holidays
 
 _BUCKETS = ("core", "growth", "speculative")
 _KNOWN_BROAD_CORE_ETFS = frozenset({"SCHD", "VOO", "VTI", "VXUS"})
+_ALERT_V3_CLASSES = frozenset({"entry_trigger", "stop_breach", "target_hit"})
 _TICKER = re.compile(r"^[A-Z][A-Z0-9]*(?:[.-][A-Z0-9]+)*$")
 _POLICY_KEYS = frozenset({
     "version",
@@ -30,6 +31,7 @@ _POLICY_KEYS = frozenset({
     "market_calendar_year",
     "nyse_holidays",
     "request_limits",
+    "alerts_v3",
 })
 
 
@@ -109,6 +111,20 @@ def build_policy_config(settings: dict) -> dict:
     capital = _mapping(settings, "capital")
     data = _mapping(settings, "data")
     learning = _mapping(settings, "learning")
+    alerts = _mapping(settings, "alerts_v3")
+    access = _mapping(settings, "access")
+    guardrails = _mapping(settings, "guardrails")
+
+    if access != {"mode": "owner_only", "friend_invitations_enabled": False}:
+        raise ValueError("access must remain owner-only with friend invitations disabled")
+    if _required(guardrails, "execution_allowed") is not False:
+        raise ValueError("execution_allowed must remain false")
+    if _required(alerts, "allowed_profiles") != ["long_term", "balanced", "active"]:
+        raise ValueError("alerts_v3.allowed_profiles must match the reviewed hybrid profiles")
+    if _required(alerts, "max_conditions") != 5:
+        raise ValueError("alerts_v3.max_conditions must be 5")
+    if _required(alerts, "monitor_interval_minutes") != 15:
+        raise ValueError("alerts_v3.monitor_interval_minutes must remain the inactive reviewed option")
 
     allocation = _bucket_projection(
         _required(strategy, "allocation"), Decimal("10000"), "allocation"
@@ -125,7 +141,7 @@ def build_policy_config(settings: dict) -> dict:
 
     calendar_year = 2026
     policy = {
-        "version": 1,
+        "version": 3,
         "allocation_bps": allocation,
         "max_position_bps_of_bucket": _bucket_projection(
             _required(risk, "max_position_pct_of_bucket"),
@@ -183,13 +199,21 @@ def build_policy_config(settings: dict) -> dict:
             "max_requests_per_run": 20,
             "max_authenticated_requests_per_hour": 100,
         },
+        "alerts_v3": {
+            "enabled": _required(alerts, "enabled"),
+            "shadow": _required(alerts, "shadow"),
+            "enabled_classes": _required(alerts, "enabled_classes"),
+            "profile": _required(alerts, "default_profile"),
+            "draft_ttl_hours": _required(alerts, "draft_ttl_hours"),
+            "drafts_per_hour": _required(alerts, "drafts_per_hour"),
+        },
     }
     validate_policy_config(policy)
     return policy
 
 
 def validate_policy_config(policy: dict) -> None:
-    """Reject any policy that is not the exact version-1 immutable contract."""
+    """Reject any policy that is not the exact immutable v3 contract."""
     if not isinstance(policy, dict):
         raise ValueError("policy must be an object")
     unexpected = set(policy) - _POLICY_KEYS
@@ -198,8 +222,8 @@ def validate_policy_config(policy: dict) -> None:
         raise ValueError(f"policy has unexpected keys: {sorted(unexpected)}")
     if missing:
         raise ValueError(f"policy is missing keys: {sorted(missing)}")
-    if policy["version"] != 1 or isinstance(policy["version"], bool):
-        raise ValueError("version must be integer 1")
+    if policy["version"] != 3 or isinstance(policy["version"], bool):
+        raise ValueError("version must be integer 3")
 
     for key in (
         "allocation_bps",
@@ -248,3 +272,32 @@ def validate_policy_config(policy: dict) -> None:
     }
     if limits != expected_limits:
         raise ValueError("request_limits must match reviewed gateway limits")
+
+    alerts = policy["alerts_v3"]
+    expected_alert_keys = {
+        "enabled", "shadow", "enabled_classes", "profile", "draft_ttl_hours",
+        "drafts_per_hour"
+    }
+    if not isinstance(alerts, dict) or set(alerts) != expected_alert_keys:
+        raise ValueError("alerts_v3 must contain exact reviewed keys")
+    if type(alerts["enabled"]) is not bool:
+        raise ValueError("alerts_v3.enabled must be boolean")
+    if type(alerts["shadow"]) is not bool:
+        raise ValueError("alerts_v3.shadow must be boolean")
+    if alerts["enabled"] and alerts["shadow"]:
+        raise ValueError("alerts_v3 enabled and shadow cannot both be true")
+    enabled_classes = alerts["enabled_classes"]
+    if (
+        not isinstance(enabled_classes, list)
+        or any(not isinstance(item, str) or item not in _ALERT_V3_CLASSES for item in enabled_classes)
+        or len(enabled_classes) != len(set(enabled_classes))
+    ):
+        raise ValueError("alerts_v3.enabled_classes must contain unique reviewed classes")
+    if alerts["enabled"] and not enabled_classes:
+        raise ValueError("alerts_v3.enabled_classes must select a live canary class")
+    if alerts["profile"] not in {"long_term", "balanced", "active"}:
+        raise ValueError("alerts_v3.profile must be reviewed")
+    if alerts["draft_ttl_hours"] != 24 or isinstance(alerts["draft_ttl_hours"], bool):
+        raise ValueError("alerts_v3.draft_ttl_hours must be 24")
+    if alerts["drafts_per_hour"] != 5 or isinstance(alerts["drafts_per_hour"], bool):
+        raise ValueError("alerts_v3.drafts_per_hour must be 5")

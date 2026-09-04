@@ -1,6 +1,6 @@
 # Stocks Agent — Roadmap and Deployment Status
 
-Last updated: 2026-09-02.
+Last updated: 2026-09-04.
 
 This repository is suggestion-only decision support plus portfolio recordkeeping. It has no
 brokerage integration and never places, modifies, or cancels a trade. Any future execution project
@@ -10,37 +10,53 @@ is separate, paper-first, and outside this codebase.
 
 | Capability | Code status | Live status |
 |---|---|---|
-| Pre-market, intraday, and post-market Claude Routines | Receipt-driven prompts implemented | Live on `main` in the restricted `stocks-agent` environment; first new scheduled receipts pending observation |
+| Pre-market, intraday, and post-market Claude Routines | Receipt-driven prompts implemented | Live in the restricted `stocks-agent` environment; the 2026-09-03 intraday and post-market Routine transcripts, database chains, and Telegram receipts reconcile |
 | Scoped market gateway and least-privilege Routine client | Implemented and tested | Live; Routine has only Supabase URL, scoped gateway secret, and read-only Finnhub key |
-| Fresh independent packet on every run | Implemented | Full production dry run completed with zero writes; first scheduled phase pending observation |
-| Analyst → Checker pass with stale/prior-plan veto | Implemented | Production dry run completed through both records and gateway evaluation |
-| Server-refetched quotes + deterministic sizing/risk policy | Implemented and tested | Live with policy v1; Yahoo's omitted `marketState` is handled from validated provider trading windows |
-| Atomic decision/evidence/publication audit trail | Implemented and rollback-tested | Migrations `20260902`–`20260904` applied and production verifiers passed |
+| Fresh independent packet on every run | Implemented | The first observed scheduled intraday run used same-run quote/history/news evidence instead of mechanically reusing the morning conclusion |
+| Analyst → Checker pass with stale/prior-plan veto | Implemented | Five new intraday Analyst and Checker records were accepted by the gateway on 2026-09-03 |
+| Server-refetched quotes + deterministic sizing/risk policy | Implemented and tested | Live with shadow-only policy v3; Yahoo's omitted `marketState` is handled from validated provider trading windows |
+| Atomic decision/evidence/publication audit trail | Implemented and rollback-tested | Migrations `20260902`–`20260905` applied and production verifiers passed |
 | Deterministic Telegram Buy/Sell/Stop recorder, including delayed trade dates | Implemented, tested, Deno type-checked | Live; owner-confirmed Buy/Sell/Portfolio flows are working |
 | Confirmed `/plan`, `/cancelplan`, and read-only `/plans` reminders | Implemented and rollback-tested | Live; owner-confirmed plan flow was exercised end to end and read back |
 | Deterministic 5/21/63-session outcome grading | Implemented and rollback-tested | Live; results remain empty until eligible gateway decisions reach their horizons |
 | Friday ChatGPT weekly process audit v2 | Packet + skill implemented and tested | Active Fridays 16:30 local on `gpt-5.6-terra`; live packet smoke test passed, first scheduled report pending |
 | Watchlist changes as owner-reviewed proposals | Implemented in settings/skill | Live through the revised Routine; never edits/pushes the checkout |
+| Owner-only alert v3 | Implemented, reviewed, and rollback-tested | Live in shadow-only mode with gateway v17, Telegram v12, and policy v3; protected dry-runs remain write-free and send-free |
+| Owner portfolio alternatives review | Gateway-computed history, evidence gate, renderer, and routine contract implemented and tested | Live in gateway v17; protected five-pair VTI review returned complete coverage, a suppressed preview, zero writes/sends, and left VTI as the unchanged recurring baseline |
+| Long-Term Companion research | Strict nomination contract, gateway-owned role policy, 3/5/10-year analytics, rolling contribution scenarios, and compact renderer implemented and independently reviewed | Live in gateway v17; protected VTI/VXUS preview qualified VXUS only as a diversifier for owner review, was suppressed with zero writes/sends, and left the VTI reminder unchanged |
+| Owner-only Personal Stock Agent Web v1 | Read-only API, direct-column database role, owner OTP auth, seven responsive views, receipt/staleness semantics, hostile-content isolation, private Site adapter, and browser/bundle verification implemented on `codex/owner-alert-v3` | Private owner-only Site is reserved with one-account access; protected API/static deployment and owner/denial canaries remain pending, so no web version is claimed live yet |
+| Personal Stock Agent V1 release gate | Review-fix candidate binds the scheduled run UUID, deterministically records reports, validates report chains, requires receipt-backed prior-gateway restoration, and strictly reconciles all 15 typed gates plus nonempty V1 rows/hashes | `a5d4296` was blocked and never deployed; replacement exact-head CI/re-review, protected dry-run/deployment, source parity, denial canaries, and scheduled receipts remain pending; C6 is not complete |
 
-All code through the current release is on GitHub `main`. "Live" means the corresponding external
-Supabase, Telegram, Claude, or ChatGPT configuration was checked directly; pending observation is
-called out separately.
+The reliability release is on GitHub `main`. Alert v3 is deployed from
+`codex/owner-alert-v3` for shadow verification and is not yet merged. "Live" means the corresponding
+external Supabase, Telegram, Claude, or ChatGPT configuration was checked directly; pending
+observation is called out separately.
+
+The owner-only line contains the same `renderer.ts` v2 patch as checkpoint `386da6f`, applied to
+`main` as `1bdb490`. The additional multi-user/web stack on `codex/stock-agent-reliability` remains a
+separate deferred branch and must not be merged wholesale: it conflicts with the current personal,
+friend-invitations-disabled product boundary. The new owner-only Web v1 is instead built from an
+independent least-privilege design and adds no tenant, invitation, brokerage, or financial-write
+authority.
 
 ## Remaining rollout checks
 
 The fail-closed cutover is deployed. Migrations/verifiers, policy activation, both Edge Functions,
 webhook health, secret rotation, Routine isolation, cloud healthcheck, Telegram owner flows, and two
-production dry-run lifecycles are complete. Both dry runs reported empty writes/message IDs, and
-independent before/after counts across eleven protected tables were unchanged.
+initial production dry-run lifecycles are complete. Subsequent protected comparison dry-runs also
+reported empty writes/message IDs, and independent before/after counts across twelve protected
+tables were unchanged.
 
-The remaining checks are observation rather than implementation:
+The remaining checks are scheduled observation followed by an explicitly approved one-class canary:
 
-1. Inspect the first new scheduled pre-market, quiet intraday, and post-market receipts. Confirm
-   request/run, evaluation, suggestion, publication, artifact/grade, and delivery claims agree.
+1. Inspect the first scheduled pre-market, intraday, and post-market cycle after gateway v17 and
+   reconcile the improved messages with their receipts.
 2. Inspect the first Friday v2 audit and confirm it remains bounded, segmented, and read-only.
 3. After the first scheduled cycle, decide whether synthetic-looking legacy suggestions need a
    separately approved archival cleanup. Do not mix that destructive data cleanup into this
    release.
+4. Review a real owner-visible v3 shadow example, then enable only the explicitly approved
+   `stop_breach` class as a canary. Do not enable from a synthetic preview.
 
 ## Next reliability work
 
@@ -58,6 +74,22 @@ The remaining checks are observation rather than implementation:
 - Before sharing with friends, redesign holdings/commands around `owner_id`, add per-owner RLS and bot
   onboarding, separate secrets/configuration, and threat-model tenant isolation. The current release
   is intentionally single-owner.
+
+## Personal portfolio research
+
+- On demand and on the first pre-market brief of each month, compare active owner plans and selected
+  holdings with at most six evidence-validated alternatives.
+- The gateway, not model prose, computes synchronized adjusted-history lump-sum, equal-monthly, and
+  max-drawdown figures. History is hypothetical and never represented as a forecast.
+- VTI is the current baseline. ITOT/SCHB are like-for-like candidates; VOO is a large-cap tilt;
+  VT/VXUS are diversification changes. Individual-stock peers require business-model validation.
+- Forward views remain qualitative and are forced to `insufficient` when the alternative fails
+  gateway policy or cited evidence is unavailable. The review never changes a holding or plan.
+- The Long-Term Companion layer may nominate at most one additive candidate after the comparison
+  screen. ITOT/SCHB remain substitutes, VT a global-core replacement, VXUS a possible diversifier,
+  VOO/SCHD tilts, and individual companies research-only concentrated satellites.
+- Gateway-computed 3/5/10-year annualized return, drawdown, correlation, and normalized rolling
+  one-year contribution history are planning evidence, never a future-profit forecast.
 
 ## Deferred research features
 

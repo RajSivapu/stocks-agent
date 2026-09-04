@@ -1,5 +1,10 @@
 import { createClient } from "npm:@supabase/supabase-js@2.112.4";
 
+import {
+  alertActionPayload,
+  alertActionResultText,
+  parseAlertCallbackData,
+} from "./alert-utils.mjs";
 import { parsePortfolioCommand } from "./parser.mjs";
 import { planPreviewText, planResultText, plansText, planTickerAllowed } from "./plan-utils.mjs";
 import { ownerMatches, parseCallbackData, resolveExecutionDate, resolvePlanDate, secureEqual } from "./webhook-utils.mjs";
@@ -349,7 +354,49 @@ function callbackResultText(result: Record<string, unknown>): string {
   return `Recorded ${String(result.operation).toUpperCase()} ${result.ticker}. Position: ${formatNumber(result.shares)} shares @ $${formatNumber(result.avg_cost, 2)}${executionDate}${pnl}. No trade was placed by this bot.`;
 }
 
-async function handleCallback(callback: TelegramCallback) {
+async function handleAlertCallback(
+  updateId: number,
+  callback: TelegramCallback,
+  parsed: NonNullable<ReturnType<typeof parseAlertCallbackData>>,
+) {
+  if (!callback.message) {
+    await telegram("answerCallbackQuery", { callback_query_id: callback.id, text: "Invalid or expired action." });
+    return;
+  }
+  const { data, error } = await supabase.rpc(
+    "apply_market_alert_action",
+    alertActionPayload(parsed, updateId, OWNER_CHAT_ID_NUMBER, OWNER_USER_ID_NUMBER),
+  );
+  if (error || !data) {
+    await telegram("answerCallbackQuery", {
+      callback_query_id: callback.id,
+      text: "Alert action rejected. Nothing changed.",
+    });
+    return;
+  }
+  const result = data as Record<string, unknown>;
+  await telegram("answerCallbackQuery", {
+    callback_query_id: callback.id,
+    text: result.ok !== true
+      ? "Alert action rejected. Nothing changed."
+      : result.duplicate
+      ? "Already recorded."
+      : "Alert updated.",
+  });
+  await telegram("editMessageText", {
+    chat_id: callback.message.chat.id,
+    message_id: callback.message.message_id,
+    text: alertActionResultText(result, parsed.action),
+    reply_markup: { inline_keyboard: [] },
+  });
+}
+
+async function handleCallback(updateId: number, callback: TelegramCallback) {
+  const alert = parseAlertCallbackData(callback.data);
+  if (alert) {
+    await handleAlertCallback(updateId, callback, alert);
+    return;
+  }
   const parsed = parseCallbackData(callback.data);
   if (!parsed || !callback.message) {
     await telegram("answerCallbackQuery", { callback_query_id: callback.id, text: "Invalid or expired action." });
@@ -408,7 +455,7 @@ Deno.serve(async (request: Request): Promise<Response> => {
   try {
     if (!(await claimUpdate(updateId as number, kind))) return jsonResponse(200, { ok: true, duplicate: true });
     if (update.message) await handleMessage(updateId as number, update.message);
-    else if (update.callback_query) await handleCallback(update.callback_query);
+    else if (update.callback_query) await handleCallback(updateId as number, update.callback_query);
     return jsonResponse(200, { ok: true });
   } catch {
     try {

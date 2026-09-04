@@ -53,6 +53,7 @@ def test_healthcheck_supplies_owner_market_date_to_gateway(monkeypatch, capsys):
     assert calls[0][1]["phase"] == "on-demand"
     assert calls[0][1]["market_date"] in {before, after}
     assert calls[0][2]["dry_run"] is True
+    assert calls[2] == ("evaluate_alert_rules", {}, {"dry_run": True})
 
 
 def configured(monkeypatch):
@@ -140,6 +141,56 @@ def test_call_generates_uuid_and_passes_run_identity(monkeypatch):
 
     assert gateway.UUID_PATTERN.fullmatch(captured["request_id"])
     assert captured["run_id"] == RUN_ID
+
+
+def test_alert_evaluation_is_allowlisted_and_standalone(monkeypatch):
+    configured(monkeypatch)
+    captured = {}
+
+    def opener(request, **_kwargs):
+        captured.update(json.loads(request.data))
+        return FakeResponse({"ok": True, "data": {"dry_run": True}})
+
+    result = gateway.call(
+        "evaluate_alert_rules",
+        {},
+        dry_run=True,
+        request_id=REQUEST_ID,
+        _opener=opener,
+    )
+
+    assert result["ok"] is True
+    assert captured["operation"] == "evaluate_alert_rules"
+    assert captured["run_id"] is None
+
+
+@pytest.mark.parametrize(
+    ("operation", "run_id"),
+    [
+        ("start_intelligence_run", None),
+        ("record_intelligence", RUN_ID),
+        ("record_report", RUN_ID),
+        ("record_learning", RUN_ID),
+    ],
+)
+def test_intelligence_persistence_operations_are_allowlisted(monkeypatch, operation, run_id):
+    configured(monkeypatch)
+    captured = {}
+
+    def opener(request, **_kwargs):
+        captured.update(json.loads(request.data))
+        return FakeResponse({"ok": True, "data": {"telegram_message_ids": []}})
+
+    gateway.call(
+        operation,
+        {},
+        run_id=run_id,
+        request_id=REQUEST_ID,
+        _opener=opener,
+    )
+
+    assert captured["operation"] == operation
+    assert captured["run_id"] == run_id
 
 
 @pytest.mark.parametrize("operation", ["send_telegram", "drop_table", "BUY"])
@@ -282,6 +333,6 @@ def test_healthcheck_allows_finnhub_proxy_to_inject_header(monkeypatch, capsys):
     runpy.run_path(str(ROOT / "scripts" / "healthcheck.py"), run_name="__main__")
     result = json.loads(capsys.readouterr().out)
 
-    assert result == {"gateway": "ok", "finnhub": "ok", "yahoo": "ok"}
+    assert result == {"alerts": "ok", "gateway": "ok", "finnhub": "ok", "yahoo": "ok"}
     finnhub_request = next(r for r in requests if "finnhub.io" in r.full_url)
     assert "X-finnhub-token" not in finnhub_request.headers

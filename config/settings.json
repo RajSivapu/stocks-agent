@@ -4,6 +4,60 @@
     "email": "your@email.com",
     "timezone": "America/Chicago"
   },
+  "access": {
+    "mode": "owner_only",
+    "friend_invitations_enabled": false
+  },
+  "intelligence": {
+    "providers": [
+      "gdelt", "alpha_vantage", "finnhub", "yahoo", "sec_edgar",
+      "federal_register", "white_house", "doe", "dod", "eia",
+      "fred", "bls", "bea"
+    ],
+    "seed_domains": [
+      "macro_and_policy",
+      "technology_ai_and_semiconductors",
+      "energy_nuclear_and_grid_infrastructure",
+      "industrial_infrastructure",
+      "critical_minerals_and_magnets",
+      "healthcare",
+      "consumer",
+      "defense_trade_and_geopolitics",
+      "earnings_and_mergers_and_acquisitions"
+    ],
+    "alpha_vantage_daily_ceiling": 20,
+    "alpha_vantage_phase_budget": {
+      "pre-market": 8,
+      "intraday": 4,
+      "post-market": 4,
+      "on-demand": 2
+    },
+    "provider_phase_budgets": {
+      "gdelt": {"pre-market": 80, "intraday": 20, "post-market": 40, "on-demand": 20},
+      "finnhub": {"pre-market": 6, "intraday": 3, "post-market": 4, "on-demand": 2},
+      "yahoo": {"pre-market": 12, "intraday": 6, "post-market": 8, "on-demand": 4},
+      "sec_edgar": {"pre-market": 6, "intraday": 2, "post-market": 4, "on-demand": 2},
+      "federal_register": {"pre-market": 4, "intraday": 1, "post-market": 2, "on-demand": 2},
+      "white_house": {"pre-market": 4, "intraday": 1, "post-market": 2, "on-demand": 2},
+      "doe": {"pre-market": 4, "intraday": 1, "post-market": 2, "on-demand": 2},
+      "dod": {"pre-market": 4, "intraday": 1, "post-market": 2, "on-demand": 2},
+      "eia": {"pre-market": 4, "intraday": 1, "post-market": 2, "on-demand": 2},
+      "fred": {"pre-market": 4, "intraday": 1, "post-market": 2, "on-demand": 2},
+      "bls": {"pre-market": 4, "intraday": 1, "post-market": 2, "on-demand": 2},
+      "bea": {"pre-market": 4, "intraday": 1, "post-market": 2, "on-demand": 2}
+    },
+    "packet": {
+      "max_candidates": 12,
+      "max_evidence_per_candidate": 8,
+      "max_item_characters": 2000,
+      "max_serialized_bytes": 98304
+    },
+    "paid_fallback_enabled": false,
+    "runtime_model_api_enabled": false,
+    "automatic_policy_changes_enabled": false,
+    "suggestion_only": true,
+    "execution_allowed": false
+  },
   "strategy": {
     "style": "long-term core + some swing",
     "allocation": { "core": 0.70, "growth": 0.20, "speculative": 0.10 },
@@ -26,12 +80,36 @@
     "_note": "Owner starts at $500/mo (first buy by end of June 2026) and will scale toward $1,000/mo, building slowly. Each run, read monthly_investment_usd_current AND the actual portfolio size, then split by the 70/20/10 allocation (so $500 -> 350/100/50; $1000 -> 700/200/100) and ADAPT emphasis as the portfolio grows. $200/mo income stays a Year-2/3 target once the speculative bucket is real money — NOT Year-1. Until the opportunities fund reaches $500, speculative ideas are LEARNING/paper-trade only."
   },
   "deployment": {
-    "core_mix": { "VOO": 0.80, "VXUS": 0.10, "SCHD": 0.10 },
-    "core_mix_note": "Default Core DCA split (config-driven). Mostly VOO (US S&P 500) + a small VXUS (international) + SCHD (dividend) tilt — justified in the monthly brief so it isn't 'why only VOO'. Owner may set pure VOO ({\"VOO\":1.0}). Core is AUTO-DCA: buy the fixed monthly Core amount across this mix every month regardless of price; lean MORE on red days.",
+    "core_mix": { "VTI": 1.0 },
+    "core_mix_note": "Current personal baseline only: the owner recorded a VTI monthly reminder. The database plan is the source of truth and remains unchanged until the owner confirms a different plan. The monthly alternatives review may compare VTI with like-for-like funds, tilts, and diversifiers but cannot switch, cancel, or advance the reminder.",
     "dry_powder": {
       "rollover_months": 2,
       "_note": "Growth + speculative money is HELD AS CASH (dry powder), tracked in the dry_powder Postgres table per month (columns month, growth_available, spec_available, rolled_months). Deploy ONLY when a candidate clears the Rigorous-Mode gate (Medium+ conviction, risk gate passed) AND price is inside its entry zone — NOT just because a new month started. If no qualifying setup appears, growth cash waits up to rollover_months (2); after that, suggest DCA'ing it into Core so money isn't idle forever."
     }
+  },
+  "portfolio_alternatives": {
+    "enabled": true,
+    "cadence": "first_pre_market_of_month_and_on_demand",
+    "max_pairs": 6,
+    "history_method": "gateway_adjusted_equal_monthly_contributions_1y",
+    "recurring_core_candidates": ["ITOT", "SCHB", "VOO", "VT", "VXUS", "SCHD"],
+    "peer_discovery": "finnhub_then_business_model_validation",
+    "long_term_companion": {
+      "enabled": true,
+      "max_proposals": 1,
+      "history_years": [3, 5, 10],
+      "scenario_monthly_usd": 100,
+      "substitutes": ["ITOT", "SCHB"],
+      "tilts": ["VOO", "SCHD"],
+      "global_core_replacements": ["VT"],
+      "diversifiers": ["VXUS"],
+      "recurring_plan_review_pairs": ["VTI:VXUS"],
+      "individual_stocks_research_only": true,
+      "automatic_plan_changes": false,
+      "automatic_holding_changes": false
+    },
+    "automatic_plan_changes": false,
+    "automatic_holding_changes": false
   },
   "entry_zones": {
     "enabled": true,
@@ -45,7 +123,7 @@
     "monthly_money_moves_on_first_brief_of_month": true,
     "market_open_et": "09:30",
     "market_close_et": "16:00",
-    "_cadence_note": "Owner chose a DAILY weekday brief (07:30 ET) for the learning habit. Actionable money moves stay MONTHLY (full block on the first brief of the calendar month; a 1-line reminder otherwise). Free data APIs are fine — Alpha Vantage's 25/day budget resets each day. Cost: daily uses ~5x the Claude (Pro) usage of weekly; no separate API bill. v2 adds intraday + post-market runs (see cadence block)."
+    "_cadence_note": "Owner chose a DAILY weekday brief (07:30 ET) for the learning habit. Actionable money moves stay MONTHLY (full block on the first brief of the calendar month; a 1-line reminder otherwise). Free data APIs are fine — Alpha Vantage's 20/day budget is the configured internal ceiling and resets each day. Cost: daily uses ~5x the Claude (Pro) usage of weekly; no separate API bill. v2 adds intraday + post-market runs (see cadence block)."
   },
   "cadence": {
     "timezone": "America/Chicago",
@@ -65,6 +143,18 @@
     "depth": "compact",
     "discovery_enabled": true,
     "_note": "Bounded mid-day opportunity check: independently refresh macro, holdings, quote timestamps, relevant news/events, and radar (<=15); deep-analyze <=3 names at COMPACT depth. A morning zone is only a candidate. Alert only when the current thesis, recomputed levels, freshness gate, and checker all pass."
+  },
+  "alerts_v3": {
+    "enabled": false,
+    "shadow": true,
+    "enabled_classes": [],
+    "default_profile": "balanced",
+    "allowed_profiles": ["long_term", "balanced", "active"],
+    "max_conditions": 5,
+    "draft_ttl_hours": 24,
+    "drafts_per_hour": 5,
+    "monitor_interval_minutes": 15,
+    "_note": "Approved owner-only hybrid alert design. Shadow mode renders previews but sends nothing. The 15-minute interval is a future option, not an active schedule. Only the verified owner may arm or change a rule; every alert remains suggestion-only and has no brokerage authority."
   },
   "trailing_stop": {
     "enabled": true,

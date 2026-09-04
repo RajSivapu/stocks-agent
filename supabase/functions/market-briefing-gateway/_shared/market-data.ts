@@ -9,6 +9,8 @@ export interface AdjustedBar {
   split_ratio: string | null;
 }
 
+export type AdjustedHistoryRange = "1y" | "10y";
+
 export type FetchLike = (
   input: RequestInfo | URL,
   init?: RequestInit,
@@ -42,7 +44,9 @@ function decimal(
   if (typeof value === "number" && (!Number.isFinite(value) || value <= 0)) {
     throw new MarketDataError("invalid provider decimal");
   }
-  const text = typeof value === "number" ? value.toString() : value;
+  const text = typeof value === "number"
+    ? value.toFixed(6).replace(/\.?0+$/, "")
+    : value;
   if (!DECIMAL_PATTERN.test(text) || text.length > 40 || Number(text) <= 0) {
     throw new MarketDataError("invalid provider decimal");
   }
@@ -124,7 +128,7 @@ async function fetchProviderJson(
 
 function chartResult(
   payload: unknown,
-  kind: "quote" | "history",
+  kind: "quote" | "history" | "intraday",
 ): Record<string, unknown> {
   try {
     const chart = objectValue(objectValue(payload).chart);
@@ -133,6 +137,45 @@ function chartResult(
     return objectValue(results[0]);
   } catch {
     throw new MarketDataError(`invalid ${kind} response`);
+  }
+}
+
+export interface IntradayQuoteEvidence {
+  ticker: string;
+  market_session: "regular" | "pre_market" | "post_market";
+  source: "yahoo-chart";
+  points: Array<{
+    value: string;
+    comparison_value: null;
+    observed_at: string;
+    bar_complete: true;
+  }>;
+}
+
+function providerSessionAt(
+  meta: Record<string, unknown>,
+  epochSeconds: number,
+): IntradayQuoteEvidence["market_session"] | null {
+  try {
+    const periods = objectValue(meta.currentTradingPeriod);
+    for (const [name, session] of [
+      ["pre", "pre_market"],
+      ["regular", "regular"],
+      ["post", "post_market"],
+    ] as const) {
+      const period = objectValue(periods[name]);
+      const start = providerEpoch(period.start);
+      const end = providerEpoch(period.end);
+      if (start >= end) throw new Error();
+      if (epochSeconds >= start && epochSeconds < end) return session;
+    }
+    return null;
+  } catch {
+    const state = meta.marketState;
+    if (state === "REGULAR") return "regular";
+    if (state === "PRE") return "pre_market";
+    if (state === "POST") return "post_market";
+    return null;
   }
 }
 
@@ -224,6 +267,58 @@ export async function fetchVerifiedQuote(
   }
 }
 
+export async function fetchIntradayQuoteEvidence(
+  ticker: string,
+  fetchImpl: FetchLike = fetch,
+  now: Date = new Date(),
+): Promise<IntradayQuoteEvidence> {
+  const symbol = canonicalTicker(ticker);
+  if (Number.isNaN(now.valueOf())) throw new MarketDataError("invalid intraday response");
+  const url = `https://query1.finance.yahoo.com/v8/finance/chart/${
+    encodeURIComponent(symbol)
+  }?range=1d&interval=1m&includePrePost=true`;
+  const payload = await fetchProviderJson(url, fetchImpl);
+  try {
+    const result = chartResult(payload, "intraday");
+    const meta = objectValue(result.meta);
+    const timestamps = arrayValue(result.timestamp);
+    const quotes = arrayValue(objectValue(result.indicators).quote);
+    if (timestamps.length < 1 || timestamps.length > 1_000 || quotes.length !== 1) throw new Error();
+    const closes = arrayValue(objectValue(quotes[0]).close);
+    if (closes.length !== timestamps.length) throw new Error();
+    const available: Array<IntradayQuoteEvidence["points"][number] & {
+      session: IntradayQuoteEvidence["market_session"];
+    }> = [];
+    let previousEpoch = 0;
+    for (let index = 0; index < timestamps.length; index += 1) {
+      const epoch = providerEpoch(timestamps[index]);
+      if (epoch <= previousEpoch) throw new Error();
+      previousEpoch = epoch;
+      const observed = new Date(epoch * 1_000);
+      if (Number.isNaN(observed.valueOf()) || observed.valueOf() > now.valueOf() + 5 * 60_000) {
+        throw new Error();
+      }
+      if (closes[index] === null || observed.valueOf() + 60_000 > now.valueOf()) continue;
+      const session = providerSessionAt(meta, epoch);
+      if (!session) continue;
+      available.push({
+        value: decimal(closes[index])!,
+        comparison_value: null,
+        observed_at: observed.toISOString(),
+        bar_complete: true,
+        session,
+      });
+    }
+    const latestSession = available.at(-1)?.session;
+    if (!latestSession) throw new Error();
+    const points = available.filter((point) => point.session === latestSession).slice(-3).map(({ session: _session, ...point }) => point);
+    if (points.length < 1) throw new Error();
+    return { ticker: symbol, market_session: latestSession, source: "yahoo-chart", points };
+  } catch {
+    throw new MarketDataError("invalid intraday response");
+  }
+}
+
 function exchangeDate(epochSeconds: number): string {
   if (!Number.isSafeInteger(epochSeconds) || epochSeconds <= 0) {
     throw new MarketDataError("invalid history response");
@@ -264,19 +359,24 @@ function splitRatio(value: unknown): string {
 
 export async function fetchAdjustedHistory(
   ticker: string,
-  range: "1y",
+  range: AdjustedHistoryRange,
   fetchImpl: FetchLike = fetch,
 ): Promise<AdjustedBar[]> {
   const symbol = canonicalTicker(ticker);
-  if (range !== "1y") throw new MarketDataError("invalid history range");
+  if (range !== "1y" && range !== "10y") {
+    throw new MarketDataError("invalid history range");
+  }
   const url = `https://query1.finance.yahoo.com/v8/finance/chart/${
     encodeURIComponent(symbol)
-  }?range=1y&interval=1d&events=div%2Csplits`;
+  }?range=${range}&interval=1d&events=div%2Csplits`;
   const payload = await fetchProviderJson(url, fetchImpl);
   try {
     const result = chartResult(payload, "history");
     const timestamps = arrayValue(result.timestamp);
-    if (timestamps.length === 0 || timestamps.length > 400) throw new Error();
+    const maxObservations = range === "1y" ? 400 : 3_000;
+    if (
+      timestamps.length === 0 || timestamps.length > maxObservations
+    ) throw new Error();
     const indicators = objectValue(result.indicators);
     const quotes = arrayValue(indicators.quote);
     const adjusted = arrayValue(indicators.adjclose);

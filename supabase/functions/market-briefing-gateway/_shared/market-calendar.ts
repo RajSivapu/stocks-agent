@@ -2,7 +2,9 @@ import type { Phase, VerifiedQuote } from "./contracts.ts";
 
 const DATE_PATTERN = /^\d{4}-\d{2}-\d{2}$/;
 
-function localParts(instant: Date): { date: string; hour: number; minute: number; weekday: string } {
+function localParts(
+  instant: Date,
+): { date: string; hour: number; minute: number; weekday: string } {
   const parts = new Intl.DateTimeFormat("en-US", {
     timeZone: "America/New_York",
     year: "numeric",
@@ -48,12 +50,41 @@ function quoteLocalDate(quote: VerifiedQuote): string | null {
   return Number.isNaN(instant.valueOf()) ? null : localParts(instant).date;
 }
 
-export function isNyseHoliday(localDate: string, holidays: readonly string[]): boolean {
+export function isNyseHoliday(
+  localDate: string,
+  holidays: readonly string[],
+): boolean {
   if (!DATE_PATTERN.test(localDate) || isWeekend(localDate)) return false;
   return holidays.includes(localDate);
 }
 
-export function isRegularSession(now: Date, holidays: readonly string[]): boolean {
+export function isFirstNyseSessionOfMonth(
+  localDate: string,
+  holidays: readonly string[],
+): boolean {
+  if (!DATE_PATTERN.test(localDate)) return false;
+  const instant = new Date(`${localDate}T12:00:00.000Z`);
+  if (
+    Number.isNaN(instant.valueOf()) ||
+    instant.toISOString().slice(0, 10) !== localDate ||
+    isWeekend(localDate) ||
+    isNyseHoliday(localDate, holidays)
+  ) return false;
+  const month = localDate.slice(0, 7);
+  let cursor = `${month}-01`;
+  for (let count = 0; count < 31 && cursor.slice(0, 7) === month; count += 1) {
+    if (!isWeekend(cursor) && !isNyseHoliday(cursor, holidays)) {
+      return cursor === localDate;
+    }
+    cursor = addDays(cursor, 1);
+  }
+  return false;
+}
+
+export function isRegularSession(
+  now: Date,
+  holidays: readonly string[],
+): boolean {
   const local = localParts(now);
   const minutes = local.hour * 60 + local.minute;
   return !isWeekend(local.date) && !isNyseHoliday(local.date, holidays) &&
@@ -87,13 +118,16 @@ export function quoteAllowedForPhase(
   const quoteDate = quoteLocalDate(quote);
   if (quoteDate === null) return false;
 
-  if (phase !== "on-demand" &&
-    (isWeekend(local.date) || isNyseHoliday(local.date, holidays))) return false;
+  if (
+    phase !== "on-demand" &&
+    (isWeekend(local.date) || isNyseHoliday(local.date, holidays))
+  ) return false;
 
   const regular = isRegularSession(now, holidays);
   if (phase === "intraday" || (phase === "on-demand" && regular)) {
     const ageMinutes = (now.valueOf() - quoteInstant.valueOf()) / 60_000;
-    return quote.market_state === "REGULAR" && ageMinutes >= 0 && ageMinutes <= maxAgeMinutes;
+    return quote.market_state === "REGULAR" && ageMinutes >= 0 &&
+      ageMinutes <= maxAgeMinutes;
   }
 
   if (phase === "pre-market") {
@@ -101,9 +135,10 @@ export function quoteAllowedForPhase(
   }
 
   const minutes = local.hour * 60 + local.minute;
-  const latestCompleted = !isWeekend(local.date) && !isNyseHoliday(local.date, holidays) &&
+  const latestCompleted =
+    !isWeekend(local.date) && !isNyseHoliday(local.date, holidays) &&
       minutes >= 16 * 60
-    ? local.date
-    : previousSession(local.date, holidays);
+      ? local.date
+      : previousSession(local.date, holidays);
   return quote.market_state !== "REGULAR" && quoteDate === latestCompleted;
 }

@@ -201,3 +201,79 @@ export function gradeDecision(
   }
   return result;
 }
+
+export function eligibleLearningOutcomes(
+  outcomes: readonly OutcomeGrade[],
+): OutcomeGrade[] {
+  return outcomes.filter((outcome) =>
+    HORIZONS.has(outcome.horizon_days) &&
+    outcome.horizon_sessions === outcome.horizon_days &&
+    outcome.coverage_status === "complete" &&
+    outcome.stock_return_pct !== null &&
+    outcome.benchmark_return_pct !== null &&
+    outcome.excess_return_pct !== null &&
+    typeof outcome.direction_success === "boolean"
+  );
+}
+
+export interface LearningOutcomeSummary {
+  policy_version: number;
+  horizon_sessions: 5 | 21 | 63;
+  benchmark: "VOO" | "VXUS";
+  sample_size: number;
+  false_positive_count: number;
+  false_positive_rate: string;
+  limitations: string[];
+}
+
+export interface RecordLearningPayload {
+  id: string;
+  policy_version: number;
+  observation_type: "outcome" | "missed-event" | "source-failure" | "noise";
+  horizon_days: 0 | 5 | 21 | 63;
+  sample_size: number;
+  benchmark: string | null;
+  observation: {
+    status: "observation" | "owner_review";
+    evidence_ids: string[];
+    limitations: string[];
+    metrics: Record<string, unknown>;
+    proposed_change: {
+      area: string;
+      recommendation: string;
+      false_positive_rate: string;
+    } | null;
+  };
+  content_hash: string;
+}
+
+export function summarizeLearningOutcomes(
+  outcomes: readonly OutcomeGrade[],
+): LearningOutcomeSummary {
+  const eligible = eligibleLearningOutcomes(outcomes);
+  if (eligible.length === 0) throw new Error("no eligible learning outcomes");
+  const first = eligible[0];
+  if (
+    eligible.some((outcome) => outcome.policy_version !== first.policy_version)
+  ) throw new Error("learning outcomes must share a policy version");
+  if (
+    eligible.some((outcome) =>
+      outcome.benchmark_ticker !== first.benchmark_ticker
+    )
+  ) throw new Error("learning outcomes must share a benchmark");
+  if (
+    eligible.some((outcome) => outcome.horizon_days !== first.horizon_days)
+  ) throw new Error("learning outcomes must share a horizon");
+  const falsePositiveCount = eligible.filter((outcome) =>
+    outcome.direction_success === false
+  ).length;
+  return {
+    policy_version: first.policy_version,
+    horizon_sessions: first.horizon_days,
+    benchmark: first.benchmark_ticker,
+    sample_size: eligible.length,
+    false_positive_count: falsePositiveCount,
+    false_positive_rate: (falsePositiveCount / eligible.length).toFixed(4),
+    limitations: ["historical outcomes do not prove future performance"],
+  };
+}

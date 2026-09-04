@@ -1,4 +1,4 @@
-import { fetchAdjustedHistory, fetchVerifiedQuote } from "./market-data.ts";
+import { fetchAdjustedHistory, fetchIntradayQuoteEvidence, fetchVerifiedQuote } from "./market-data.ts";
 
 function assert(value: boolean, message: string): void {
   if (!value) throw new Error(message);
@@ -282,6 +282,68 @@ Deno.test("adjusted history keeps raw ranges and split ratios, sorted and dedupl
   ]);
 });
 
+Deno.test("adjusted history accepts only bounded one-year and ten-year ranges", async () => {
+  let requested = "";
+  const bars = await fetchAdjustedHistory(
+    "VTI",
+    "10y",
+    (input: RequestInfo | URL) => {
+      requested = String(input);
+      return fixtureFetch(historyFixture)(input);
+    },
+  );
+  assertEquals(bars.length, 2);
+  assert(
+    requested.endsWith("/VTI?range=10y&interval=1d&events=div%2Csplits"),
+    "ten-year history used the wrong provider URL",
+  );
+
+  const oversized = structuredClone(historyFixture);
+  const timestamps = Array.from(
+    { length: 3_001 },
+    (_, index) => Date.parse("2010-01-01T20:00:00.000Z") / 1000 + index * 86_400,
+  );
+  oversized.chart.result[0].timestamp = timestamps;
+  oversized.chart.result[0].indicators.quote[0].close = timestamps.map(() => 100);
+  oversized.chart.result[0].indicators.quote[0].high = timestamps.map(() => 101);
+  oversized.chart.result[0].indicators.quote[0].low = timestamps.map(() => 99);
+  oversized.chart.result[0].indicators.adjclose[0].adjclose = timestamps.map(() => 100);
+  await assertRejects(
+    () => fetchAdjustedHistory("VTI", "10y", fixtureFetch(oversized)),
+    "invalid history response",
+  );
+
+  const oneYearOversized = structuredClone(oversized);
+  oneYearOversized.chart.result[0].timestamp = timestamps.slice(0, 401);
+  oneYearOversized.chart.result[0].indicators.quote[0].close = timestamps.slice(0, 401).map(() => 100);
+  oneYearOversized.chart.result[0].indicators.quote[0].high = timestamps.slice(0, 401).map(() => 101);
+  oneYearOversized.chart.result[0].indicators.quote[0].low = timestamps.slice(0, 401).map(() => 99);
+  oneYearOversized.chart.result[0].indicators.adjclose[0].adjclose = timestamps.slice(0, 401).map(() => 100);
+  await assertRejects(
+    () => fetchAdjustedHistory("VTI", "1y", fixtureFetch(oneYearOversized)),
+    "invalid history response",
+  );
+});
+
+Deno.test("history normalizes provider floating-point noise to six decimals", async () => {
+  const noisy = structuredClone(historyFixture);
+  noisy.chart.result[0].indicators.quote[0].close[1] = 320.1400146484375;
+  noisy.chart.result[0].indicators.quote[0].high[1] = 320.2300109863281;
+  noisy.chart.result[0].indicators.quote[0].low[1] = 317.32000732421875;
+  noisy.chart.result[0].indicators.adjclose[0].adjclose[1] =
+    316.4450378417969;
+
+  const bars = await fetchAdjustedHistory("VTI", "1y", fixtureFetch(noisy));
+  assertEquals(bars[0], {
+    date: "2026-09-01",
+    raw_close: "320.140015",
+    adjusted_close: "316.445038",
+    raw_high: "320.230011",
+    raw_low: "317.320007",
+    split_ratio: "2",
+  });
+});
+
 Deno.test("history rejects missing adjusted values and arbitrary ranges", async () => {
   const missing = structuredClone(historyFixture);
   missing.chart.result[0].indicators.adjclose[0].adjclose[1] =
@@ -292,7 +354,93 @@ Deno.test("history rejects missing adjusted values and arbitrary ranges", async 
   );
   await assertRejects(
     () =>
-      fetchAdjustedHistory("VTI", "max" as "1y", fixtureFetch(historyFixture)),
+      fetchAdjustedHistory(
+        "VTI",
+        "max" as "1y" | "10y",
+        fixtureFetch(historyFixture),
+      ),
     "invalid history range",
   );
+});
+
+Deno.test("intraday evidence returns bounded same-session quote points with provider timestamps", async () => {
+  const timestamps = [
+    "2026-09-02T13:29:00.000Z",
+    "2026-09-02T16:58:00.000Z",
+    "2026-09-02T16:59:00.000Z",
+    "2026-09-02T17:00:00.000Z",
+  ].map((value) => Date.parse(value) / 1000);
+  const payload = {
+    chart: { result: [{
+      meta: {
+        marketState: "REGULAR",
+        currentTradingPeriod: {
+          pre: { start: Date.parse("2026-09-02T08:00:00.000Z") / 1000, end: Date.parse("2026-09-02T13:30:00.000Z") / 1000 },
+          regular: { start: Date.parse("2026-09-02T13:30:00.000Z") / 1000, end: Date.parse("2026-09-02T20:00:00.000Z") / 1000 },
+          post: { start: Date.parse("2026-09-02T20:00:00.000Z") / 1000, end: Date.parse("2026-09-03T00:00:00.000Z") / 1000 },
+        },
+      },
+      timestamp: timestamps,
+      indicators: { quote: [{ close: [40, 41.9, 42.05, 42.1] }] },
+    }], error: null },
+  };
+  let requested = "";
+  const evidence = await fetchIntradayQuoteEvidence("ABC", (input) => {
+    requested = String(input);
+    return Promise.resolve(new Response(JSON.stringify(payload)));
+  }, new Date("2026-09-02T17:01:00.000Z"));
+  assertEquals(evidence, {
+    ticker: "ABC",
+    market_session: "regular",
+    source: "yahoo-chart",
+    points: [
+      { value: "41.9", comparison_value: null, observed_at: "2026-09-02T16:58:00.000Z", bar_complete: true },
+      { value: "42.05", comparison_value: null, observed_at: "2026-09-02T16:59:00.000Z", bar_complete: true },
+      { value: "42.1", comparison_value: null, observed_at: "2026-09-02T17:00:00.000Z", bar_complete: true },
+    ],
+  });
+  assert(requested.endsWith("/ABC?range=1d&interval=1m&includePrePost=true"), "unexpected intraday URL");
+});
+
+Deno.test("intraday evidence fails closed on mixed, missing, or future latest data", async () => {
+  const now = new Date("2026-09-02T17:01:00.000Z");
+  for (const result of [
+    { meta: { marketState: "REGULAR" }, timestamp: [], indicators: { quote: [{ close: [] }] } },
+    { meta: { marketState: "REGULAR" }, timestamp: [Date.parse("2026-09-02T17:07:00.000Z") / 1000], indicators: { quote: [{ close: [42] }] } },
+    { meta: { marketState: "CLOSED" }, timestamp: [Date.parse("2026-09-02T17:00:00.000Z") / 1000], indicators: { quote: [{ close: [42] }] } },
+  ]) {
+    await assertRejects(
+      () => fetchIntradayQuoteEvidence("ABC", fixtureFetch({ chart: { result: [result] } }), now),
+      "invalid intraday response",
+    );
+  }
+});
+
+Deno.test("intraday evidence rejects nonincreasing timestamps and excludes a forming minute", async () => {
+  const periods = {
+    pre: { start: Date.parse("2026-09-02T08:00:00.000Z") / 1000, end: Date.parse("2026-09-02T13:30:00.000Z") / 1000 },
+    regular: { start: Date.parse("2026-09-02T13:30:00.000Z") / 1000, end: Date.parse("2026-09-02T20:00:00.000Z") / 1000 },
+    post: { start: Date.parse("2026-09-02T20:00:00.000Z") / 1000, end: Date.parse("2026-09-03T00:00:00.000Z") / 1000 },
+  };
+  const make = (timestamps: number[]) => ({
+    chart: { result: [{
+      meta: { marketState: "REGULAR", currentTradingPeriod: periods },
+      timestamp: timestamps,
+      indicators: { quote: [{ close: timestamps.map((_, index) => 41 + index) }] },
+    }], error: null },
+  });
+  const at = (value: string) => Date.parse(value) / 1000;
+  await assertRejects(
+    () => fetchIntradayQuoteEvidence("ABC", fixtureFetch(make([
+      at("2026-09-02T16:59:00.000Z"), at("2026-09-02T16:58:00.000Z"),
+    ])), new Date("2026-09-02T17:01:00.000Z")),
+    "invalid intraday response",
+  );
+  const evidence = await fetchIntradayQuoteEvidence("ABC", fixtureFetch(make([
+    at("2026-09-02T16:58:00.000Z"), at("2026-09-02T16:59:00.000Z"),
+    at("2026-09-02T17:00:00.000Z"),
+  ])), new Date("2026-09-02T17:00:30.000Z"));
+  assertEquals(evidence.points.map((point) => point.observed_at), [
+    "2026-09-02T16:58:00.000Z", "2026-09-02T16:59:00.000Z",
+  ]);
 });
