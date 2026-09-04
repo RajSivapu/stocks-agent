@@ -44,13 +44,20 @@ BEHAVIOR_ERRORS = {
     "duplicate_idempotency": "duplicate idempotency was not preserved",
     "bounded_cache_returned": "bounded cache entry was not returned",
     "over_quota_rejected": "over-quota request was not rejected",
+    "phase_quota_rejected": "phase quota was not rejected cumulatively",
     "mutation_rejected": "mutation was not rejected",
     "invalid_hash_rejected": "invalid hash was not rejected",
+    "semantic_hashes_rejected": "semantic hashes were not rejected",
     "partial_write_rolled_back": "partial write was not rolled back",
     "oversized_json_rejected": "oversized JSON was not rejected",
     "wrong_run_reservation_rejected": "wrong-run reservation was not rejected",
+    "ineligible_evidence_rejected": "ineligible evidence was not rejected",
+    "url_host_rejected": "URL host was not rejected",
+    "cross_provider_host_rejected": "cross-provider host was not rejected",
+    "social_provider_recorded": "social provider was not recorded",
     "failed_receipt_recorded": "failed receipt was not recorded",
     "report_idempotency": "report idempotency was not preserved",
+    "theme_report_recorded": "theme report was not recorded",
     "incomplete_packet_rejected": "incomplete packet report was not rejected",
     "learning_type_rejected": "learning type was not rejected",
     "rollback_clean": "rollback left verifier rows behind",
@@ -91,6 +98,22 @@ def evaluate_snapshot(snapshot: dict[str, Any]) -> dict[str, object]:
             raise RuntimeError(f"gateway execute is missing for {signature}")
         gateway_only += 1
     _require(public_execute == 0, "PUBLIC execute grant remains on an intelligence RPC")
+
+    for grant in snapshot.get("table_grants") or []:
+        if not grant.get("is_owner"):
+            raise RuntimeError(f"unexpected grant: {grant}")
+    expected_function_grants = {
+        (signature, GATEWAY_ROLE, "EXECUTE") for signature in RPCS
+    }
+    actual_function_grants = {
+        (grant.get("signature"), grant.get("grantee"), grant.get("privilege"))
+        for grant in snapshot.get("function_grants") or []
+        if not grant.get("is_owner")
+    }
+    if actual_function_grants != expected_function_grants:
+        raise RuntimeError(
+            f"unexpected grant: {sorted(actual_function_grants ^ expected_function_grants)!r}"
+        )
 
     unexpected_grants = snapshot.get("unexpected_grants") or []
     if unexpected_grants:
@@ -177,23 +200,41 @@ def collect_snapshot(cursor, behavior: dict[str, bool]) -> dict[str, Any]:
             "gateway_execute": gateway_execute,
         }
 
-    unexpected_grants = [
-        f"{grantee}:{table}:{privilege}"
-        for grantee, table, privilege in _fetch_all(
-            cursor,
-            """
-            SELECT grantee, table_name, privilege_type
-              FROM information_schema.table_privileges
-             WHERE table_schema='public' AND table_name=ANY(%s)
-               AND grantee IN ('PUBLIC','anon','authenticated','service_role')
-               AND privilege_type IN (
-                 'INSERT','UPDATE','DELETE','TRUNCATE','REFERENCES','TRIGGER'
-               )
-             ORDER BY grantee, table_name, privilege_type
-            """,
-            (list(TABLES),),
-        )
+    table_grants = [
+        {"table": table, "grantee": grantee or "PUBLIC", "privilege": privilege,
+         "is_owner": is_owner}
+        for table, grantee, privilege, is_owner in _fetch_all(cursor, """
+            SELECT class.relname, grantee.rolname, acl.privilege_type,
+                   acl.grantee=class.relowner
+            FROM pg_catalog.pg_class class
+            JOIN pg_catalog.pg_namespace namespace ON namespace.oid=class.relnamespace
+            CROSS JOIN LATERAL pg_catalog.aclexplode(COALESCE(
+              class.relacl, pg_catalog.acldefault('r',class.relowner)
+            )) acl
+            LEFT JOIN pg_catalog.pg_roles grantee ON grantee.oid=acl.grantee
+            WHERE namespace.nspname='public' AND class.relname=ANY(%s)
+            ORDER BY class.relname, grantee.rolname, acl.privilege_type
+        """, (list(TABLES),))
     ]
+    function_grants = [
+        {"signature": signature.removeprefix("public."),
+         "grantee": grantee or "PUBLIC", "privilege": privilege,
+         "is_owner": is_owner}
+        for signature, grantee, privilege, is_owner in _fetch_all(cursor, """
+            SELECT procedure.oid::regprocedure::text, grantee.rolname,
+                   acl.privilege_type, acl.grantee=procedure.proowner
+            FROM pg_catalog.pg_proc procedure
+            JOIN pg_catalog.pg_namespace namespace ON namespace.oid=procedure.pronamespace
+            CROSS JOIN LATERAL pg_catalog.aclexplode(COALESCE(
+              procedure.proacl, pg_catalog.acldefault('f',procedure.proowner)
+            )) acl
+            LEFT JOIN pg_catalog.pg_roles grantee ON grantee.oid=acl.grantee
+            WHERE namespace.nspname='public' AND procedure.proname=ANY(%s)
+            ORDER BY procedure.oid::regprocedure::text, grantee.rolname, acl.privilege_type
+        """, ([signature.split("(", 1)[0] for signature in RPCS]
+                + ["reject_market_intelligence_mutation", "market_canonical_jsonb"],))
+    ]
+    unexpected_grants: list[str] = []
     brokerage_columns = [
         f"{table}.{column}"
         for table, column in _fetch_all(
@@ -211,6 +252,8 @@ def collect_snapshot(cursor, behavior: dict[str, bool]) -> dict[str, Any]:
     return {
         "tables": tables,
         "functions": functions,
+        "table_grants": table_grants,
+        "function_grants": function_grants,
         "unexpected_grants": unexpected_grants,
         "brokerage_columns": brokerage_columns,
         "behavior": behavior,
@@ -245,7 +288,7 @@ def _policy_config() -> dict[str, object]:
         }
         for provider in (
             "gdelt", "finnhub", "yahoo", "sec_edgar", "federal_register",
-            "white_house", "doe", "dod", "eia", "fred", "bls", "bea",
+            "white_house", "doe", "dod", "eia", "fred", "bls", "bea", "social",
         )
     }
     return {
@@ -271,6 +314,11 @@ def _reservation(reservation_id: UUID, provider: str, requests: int, cache_keys:
     }
 
 
+def _canonical_hash(value: object) -> str:
+    canonical = json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
 def _completed_payload(
     *,
     reservation_id: UUID,
@@ -281,7 +329,7 @@ def _completed_payload(
     cache_key: str,
 ) -> dict[str, object]:
     canonical_content = "gdelt\nrollback-item\nRollback-only verifier item\nBounded normalized verifier content."
-    return {
+    payload = {
         "status": "completed",
         "coverage": {"sources_checked": ["gdelt"], "limitations": []},
         "receipts": [{
@@ -306,7 +354,7 @@ def _completed_payload(
             "run_item_id": str(run_item_id),
             "receipt_id": str(receipt_id),
             "upstream_item_id": "rollback-item",
-            "canonical_url": "https://example.invalid/rollback-item",
+            "canonical_url": "https://api.gdeltproject.org/api/v2/doc/doc?query=rollback",
             "published_at": "2099-09-04T11:00:00+00:00",
             "effective_at": None,
             "title": "Rollback-only verifier item",
@@ -331,10 +379,12 @@ def _completed_payload(
                 "limitations": [],
                 "policy_version": 1,
             },
-            "packet_hash": "c" * 64,
+            "packet_hash": "",
         },
         "error": None,
     }
+    payload["packet"]["packet_hash"] = _canonical_hash(payload["packet"]["packet"])
+    return payload
 
 
 def _failed_payload(*, reservation_id: UUID, receipt_id: UUID, cache_key: str):
@@ -365,6 +415,41 @@ def _failed_payload(*, reservation_id: UUID, receipt_id: UUID, cache_key: str):
         "packet": None,
         "error": {"code": "ROLLBACK_ONLY_FAILURE"},
     }
+
+
+def _add_evidence_graph(payload: dict[str, object]) -> dict[str, object]:
+    item_id = payload["items"][0]["id"]
+    event = {
+        "id": str(uuid4()), "event_type": "policy", "title": "Verifier event",
+        "summary": "Bounded event.", "occurred_at": None, "effective_at": None,
+        "materiality": 0.5, "confidence": 0.75, "evidence_item_ids": [item_id],
+    }
+    event["content_hash"] = _canonical_hash({k: v for k, v in event.items() if k != "id"})
+    relationship = {
+        "id": str(uuid4()), "event_id": event["id"], "source_kind": "event",
+        "source_key": "verifier", "target_kind": "theme", "target_key": "policy",
+        "relationship_type": "may_affect", "hypothesis": True,
+        "evidence_item_ids": [item_id],
+    }
+    relationship["content_hash"] = _canonical_hash(
+        {k: v for k, v in relationship.items() if k != "id"}
+    )
+    ranking = {
+        "id": str(uuid4()), "event_id": event["id"], "candidate_key": "SPY",
+        "ticker": "SPY", "rank": 1, "component_scores": {"evidence": 1},
+        "total_score": 1, "qualified": True, "veto_reasons": [],
+        "exposure_item_ids": [item_id],
+    }
+    ranking["content_hash"] = _canonical_hash({k: v for k, v in ranking.items() if k != "id"})
+    payload["events"] = [event]
+    payload["relationships"] = [relationship]
+    payload["rankings"] = [ranking]
+    payload["packet"]["candidate_count"] = 1
+    payload["packet"]["packet"]["candidates"] = [
+        {"candidate_key": "SPY", "evidence_ids": [item_id]}
+    ]
+    payload["packet"]["packet_hash"] = _canonical_hash(payload["packet"]["packet"])
+    return payload
 
 
 def verify(cursor) -> tuple[dict[str, object], list[UUID]]:
@@ -407,6 +492,7 @@ def verify(cursor) -> tuple[dict[str, object], list[UUID]]:
         cache_key=cache_key,
     )
     payload["packet"]["packet"]["policy_version"] = policy_version
+    payload["packet"]["packet_hash"] = _canonical_hash(payload["packet"]["packet"])
     recorded = _call(cursor, "record_market_intelligence", prior_run, completion_id, Jsonb(payload))
     replay = _call(cursor, "record_market_intelligence", prior_run, completion_id, Jsonb(payload))
     duplicate_idempotency = recorded["duplicate"] is False and replay["duplicate"] is True
@@ -419,8 +505,11 @@ def verify(cursor) -> tuple[dict[str, object], list[UUID]]:
         "market_date": (date.today() - timedelta(days=1)).isoformat(),
         "kind": "on-demand",
         "report": {"sections": [], "limitations": []},
-        "report_hash": "d" * 64,
-        "rendered_hash": "e" * 64,
+        "report_hash": _canonical_hash({"sections": [], "limitations": []}),
+        "rendered_text": "Rollback-only verifier report",
+        "rendered_hash": hashlib.sha256(
+            b"Rollback-only verifier report"
+        ).hexdigest(),
     }
     report = _call(
         cursor, "record_market_report", prior_run, report_key, Jsonb(report_payload)
@@ -432,8 +521,8 @@ def verify(cursor) -> tuple[dict[str, object], list[UUID]]:
         report["report_id"] == str(report_id)
         and report["duplicate"] is False
         and report_replay["duplicate"] is True
-        and report_replay["report_hash"] == "d" * 64
-        and report_replay["rendered_hash"] == "e" * 64
+        and report_replay["report_hash"] == report_payload["report_hash"]
+        and report_replay["rendered_hash"] == report_payload["rendered_hash"]
     )
     observation_id = uuid4()
     observation_payload = {
@@ -444,7 +533,7 @@ def verify(cursor) -> tuple[dict[str, object], list[UUID]]:
         "sample_size": 1,
         "benchmark": "SPY",
         "observation": {"status": "observation", "limitations": []},
-        "content_hash": "f" * 64,
+        "content_hash": _canonical_hash({"status": "observation", "limitations": []}),
     }
     learning = _call(
         cursor, "record_market_learning", prior_run, Jsonb(observation_payload)
@@ -525,6 +614,20 @@ def verify(cursor) -> tuple[dict[str, object], list[UUID]]:
             Jsonb({"reservations": [_reservation(uuid4(), "alpha_vantage", 21, [])]}),
         ),
     )
+    phase_date = date.today() + timedelta(days=20)
+    phase_run = uuid4()
+    created_runs.append(phase_run)
+    _call(cursor, "start_market_intelligence_run", phase_run, "pre-market", phase_date,
+          policy_version, Jsonb({"reservations": [
+              _reservation(uuid4(), "alpha_vantage", 5, [])
+          ]}))
+    phase_quota_rejected = _expect_db_error(
+        cursor,
+        lambda: _call(cursor, "start_market_intelligence_run", uuid4(), "pre-market",
+                      phase_date, policy_version, Jsonb({"reservations": [
+                          _reservation(uuid4(), "alpha_vantage", 4, [])
+                      ]})),
+    )
     mutation_rejected = _expect_db_error(
         cursor,
         lambda: cursor.execute(
@@ -555,6 +658,9 @@ def verify(cursor) -> tuple[dict[str, object], list[UUID]]:
         cache_key="gdelt:invalid-hash",
     )
     invalid_payload["packet"]["packet"]["policy_version"] = policy_version
+    invalid_payload["packet"]["packet_hash"] = _canonical_hash(
+        invalid_payload["packet"]["packet"]
+    )
     invalid_payload["items"][0]["content_hash"] = "0" * 64
     invalid_hash_rejected = _expect_db_error(
         cursor,
@@ -585,6 +691,9 @@ def verify(cursor) -> tuple[dict[str, object], list[UUID]]:
         cache_key="gdelt:wrong-run",
     )
     wrong_run_payload["packet"]["packet"]["policy_version"] = policy_version
+    wrong_run_payload["packet"]["packet_hash"] = _canonical_hash(
+        wrong_run_payload["packet"]["packet"]
+    )
     wrong_run_reservation_rejected = _expect_db_error(
         cursor,
         lambda: _call(
@@ -592,18 +701,119 @@ def verify(cursor) -> tuple[dict[str, object], list[UUID]]:
         ),
     )
 
+    def completion_case(day_offset: int, *, provider: str = "gdelt"):
+        run_id, reservation_id = uuid4(), uuid4()
+        created_runs.append(run_id)
+        _call(cursor, "start_market_intelligence_run", run_id, "on-demand",
+              date.today() + timedelta(days=day_offset), policy_version,
+              Jsonb({"reservations": [_reservation(reservation_id, provider, 1, [])]}))
+        case_payload = _completed_payload(
+            reservation_id=reservation_id, receipt_id=uuid4(), item_id=uuid4(),
+            run_item_id=uuid4(), packet_id=uuid4(), cache_key=f"{provider}:case:{uuid4()}",
+        )
+        case_payload["packet"]["packet"]["policy_version"] = policy_version
+        case_payload["packet"]["packet_hash"] = _canonical_hash(
+            case_payload["packet"]["packet"]
+        )
+        return run_id, case_payload
+
+    invalid_url_run, invalid_url_payload = completion_case(30)
+    invalid_url_payload["items"][0]["canonical_url"] = "https://example.invalid/item"
+    url_host_rejected = _expect_db_error(
+        cursor, lambda: _call(cursor, "record_market_intelligence", invalid_url_run,
+                              uuid4(), Jsonb(invalid_url_payload)))
+    cross_url_run, cross_url_payload = completion_case(31)
+    cross_url_payload["items"][0]["canonical_url"] = "https://www.sec.gov/item"
+    cross_provider_host_rejected = _expect_db_error(
+        cursor, lambda: _call(cursor, "record_market_intelligence", cross_url_run,
+                              uuid4(), Jsonb(cross_url_payload)))
+
+    dropped_run, dropped_payload = completion_case(32)
+    _add_evidence_graph(dropped_payload)
+    dropped_payload["items"][0]["disposition"] = "dropped"
+    dropped_payload["items"][0]["drop_reason"] = "not eligible"
+    dropped_receipt_id = dropped_payload["receipts"][0]["id"]
+    ineligible_evidence_rejected = _expect_db_error(
+        cursor, lambda: _call(cursor, "record_market_intelligence", dropped_run,
+                              uuid4(), Jsonb(dropped_payload)))
+    ineligible_evidence_rejected = ineligible_evidence_rejected and cursor.execute(
+        "SELECT count(*)=0 FROM public.market_source_receipts WHERE id=%s",
+        (dropped_receipt_id,),
+    ).fetchone()[0]
+    failed_item_run, failed_item_payload = completion_case(34)
+    failed_item_receipt = failed_item_payload["receipts"][0]
+    failed_item_receipt.update({
+        "status": "failed", "expires_at": None, "error": {"code": "FAILED"},
+        "response_hash": None,
+    })
+    ineligible_evidence_rejected = ineligible_evidence_rejected and _expect_db_error(
+        cursor, lambda: _call(cursor, "record_market_intelligence", failed_item_run,
+                              uuid4(), Jsonb(failed_item_payload)))
+
+    social_run, social_payload = completion_case(33, provider="social")
+    social_payload["items"][0]["canonical_url"] = "https://www.reddit.com/r/stocks/test"
+    social_record = _call(cursor, "record_market_intelligence", social_run, uuid4(),
+                          Jsonb(social_payload))
+    social_provider_recorded = social_record["counts"]["source_items"] == 1
+
+    semantic_results = []
+    for offset, section in enumerate(("events", "relationships", "rankings"), start=40):
+        semantic_run, semantic_payload = completion_case(offset)
+        _add_evidence_graph(semantic_payload)
+        semantic_payload[section][0]["content_hash"] = "0" * 64
+        semantic_results.append(_expect_db_error(
+            cursor, lambda run=semantic_run, body=semantic_payload: _call(
+                cursor, "record_market_intelligence", run, uuid4(), Jsonb(body)
+            )
+        ))
+    packet_hash_run, packet_hash_payload = completion_case(43)
+    packet_hash_payload["packet"]["packet_hash"] = "0" * 64
+    semantic_results.append(_expect_db_error(
+        cursor, lambda: _call(cursor, "record_market_intelligence", packet_hash_run,
+                              uuid4(), Jsonb(packet_hash_payload))))
+    bad_report_hash = {**report_payload, "id": str(uuid4()), "report_hash": "0" * 64}
+    semantic_results.append(_expect_db_error(
+        cursor, lambda: _call(cursor, "record_market_report", prior_run, uuid4(),
+                              Jsonb(bad_report_hash))))
+    bad_rendered_hash = {**report_payload, "id": str(uuid4()), "rendered_hash": "0" * 64}
+    semantic_results.append(_expect_db_error(
+        cursor, lambda: _call(cursor, "record_market_report", prior_run, uuid4(),
+                              Jsonb(bad_rendered_hash))))
+    bad_learning_hash = {**observation_payload, "id": str(uuid4()),
+                         "content_hash": "0" * 64}
+    semantic_results.append(_expect_db_error(
+        cursor, lambda: _call(cursor, "record_market_learning", prior_run,
+                              Jsonb(bad_learning_hash))))
+    semantic_hashes_rejected = all(semantic_results)
+
+    theme_payload = {
+        **report_payload, "id": str(uuid4()), "kind": "theme",
+        "report": {"theme": "policy", "limitations": []},
+    }
+    theme_payload["report_hash"] = _canonical_hash(theme_payload["report"])
+    theme_result = _call(cursor, "record_market_report", prior_run, uuid4(),
+                         Jsonb(theme_payload))
+    theme_report_recorded = theme_result["duplicate"] is False
+
     behavior = {
         "new_run_not_duplicate": prior_start["duplicate"] is False,
         "duplicate_idempotency": duplicate_idempotency,
         "bounded_cache_returned": bounded_cache_returned,
         "over_quota_rejected": over_quota_rejected,
+        "phase_quota_rejected": phase_quota_rejected,
         "mutation_rejected": mutation_rejected,
         "invalid_hash_rejected": invalid_hash_rejected,
+        "semantic_hashes_rejected": semantic_hashes_rejected,
         "partial_write_rolled_back": partial_write_rolled_back,
         "oversized_json_rejected": oversized_json_rejected,
         "wrong_run_reservation_rejected": wrong_run_reservation_rejected,
+        "ineligible_evidence_rejected": ineligible_evidence_rejected,
+        "url_host_rejected": url_host_rejected,
+        "cross_provider_host_rejected": cross_provider_host_rejected,
+        "social_provider_recorded": social_provider_recorded,
         "failed_receipt_recorded": failed_receipt_recorded,
         "report_idempotency": report_idempotency,
+        "theme_report_recorded": theme_report_recorded,
         "incomplete_packet_rejected": incomplete_packet_rejected,
         "learning_type_rejected": learning_type_rejected,
         "rollback_clean": False,

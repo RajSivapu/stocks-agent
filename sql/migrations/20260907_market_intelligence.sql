@@ -33,7 +33,7 @@ CREATE TABLE IF NOT EXISTS public.market_source_quota_reservations (
   run_id UUID NOT NULL REFERENCES public.market_intelligence_runs(id) ON DELETE RESTRICT,
   provider TEXT NOT NULL CHECK (provider IN (
     'gdelt','alpha_vantage','finnhub','yahoo','sec_edgar','federal_register',
-    'white_house','doe','dod','eia','fred','bls','bea'
+    'white_house','doe','dod','eia','fred','bls','bea','social'
   )),
   market_date DATE NOT NULL,
   phase TEXT NOT NULL CHECK (phase IN ('pre-market','intraday','post-market','on-demand')),
@@ -54,7 +54,7 @@ CREATE TABLE IF NOT EXISTS public.market_source_receipts (
   reservation_id UUID NOT NULL REFERENCES public.market_source_quota_reservations(id) ON DELETE RESTRICT,
   provider TEXT NOT NULL CHECK (provider IN (
     'gdelt','alpha_vantage','finnhub','yahoo','sec_edgar','federal_register',
-    'white_house','doe','dod','eia','fred','bls','bea'
+    'white_house','doe','dod','eia','fred','bls','bea','social'
   )),
   status TEXT NOT NULL CHECK (status IN (
     'succeeded','failed','cache_hit','quota_blocked','configuration_missing'
@@ -94,7 +94,7 @@ CREATE TABLE IF NOT EXISTS public.market_source_items (
   source_receipt_id UUID NOT NULL REFERENCES public.market_source_receipts(id) ON DELETE RESTRICT,
   provider TEXT NOT NULL CHECK (provider IN (
     'gdelt','alpha_vantage','finnhub','yahoo','sec_edgar','federal_register',
-    'white_house','doe','dod','eia','fred','bls','bea'
+    'white_house','doe','dod','eia','fred','bls','bea','social'
   )),
   upstream_item_id TEXT CHECK (upstream_item_id IS NULL OR char_length(upstream_item_id) <= 512),
   canonical_url TEXT CHECK (
@@ -219,11 +219,12 @@ CREATE TABLE IF NOT EXISTS public.market_reports (
   run_id UUID NOT NULL REFERENCES public.market_intelligence_runs(id) ON DELETE RESTRICT,
   packet_id UUID NOT NULL REFERENCES public.market_evidence_packets(id) ON DELETE RESTRICT,
   market_date DATE NOT NULL,
-  kind TEXT NOT NULL CHECK (kind IN ('morning','urgent','weekly','monthly','on-demand')),
+  kind TEXT NOT NULL CHECK (kind IN ('morning','urgent','weekly','monthly','theme','on-demand')),
   report JSONB NOT NULL CHECK (
     jsonb_typeof(report)='object' AND octet_length(report::text) <= 131072
   ),
   report_hash TEXT NOT NULL CHECK (report_hash ~ '^[0-9a-f]{64}$'),
+  rendered_text TEXT NOT NULL CHECK (char_length(rendered_text) <= 14000),
   rendered_hash TEXT NOT NULL CHECK (rendered_hash ~ '^[0-9a-f]{64}$'),
   created_at TIMESTAMPTZ NOT NULL DEFAULT statement_timestamp()
 );
@@ -252,6 +253,33 @@ CREATE OR REPLACE FUNCTION public.reject_market_intelligence_mutation()
 RETURNS trigger LANGUAGE plpgsql SET search_path = pg_catalog AS $$
 BEGIN
   RAISE EXCEPTION 'market intelligence ledgers are append-only' USING ERRCODE = '55000';
+END;
+$$;
+
+-- Canonical JSON is compact UTF-8 JSON: object keys are sorted lexicographically,
+-- arrays retain order, and scalar values use PostgreSQL jsonb serialization.
+CREATE OR REPLACE FUNCTION public.market_canonical_jsonb(p_value JSONB)
+RETURNS TEXT LANGUAGE plpgsql IMMUTABLE STRICT
+SET search_path = pg_catalog AS $$
+DECLARE
+  v_result TEXT;
+BEGIN
+  CASE jsonb_typeof(p_value)
+    WHEN 'object' THEN
+      SELECT '{' || COALESCE(string_agg(
+        to_jsonb(entry.key)::text || ':' || public.market_canonical_jsonb(entry.value),
+        ',' ORDER BY entry.key COLLATE "C"
+      ), '') || '}' INTO v_result
+      FROM jsonb_each(p_value) AS entry;
+    WHEN 'array' THEN
+      SELECT '[' || COALESCE(string_agg(
+        public.market_canonical_jsonb(entry.value), ',' ORDER BY entry.ordinality
+      ), '') || ']' INTO v_result
+      FROM jsonb_array_elements(p_value) WITH ORDINALITY AS entry(value, ordinality);
+    ELSE
+      v_result := p_value::text;
+  END CASE;
+  RETURN v_result;
 END;
 $$;
 
@@ -349,6 +377,7 @@ DECLARE
   v_phase_budget INT;
   v_daily_ceiling INT;
   v_existing_total INT;
+  v_existing_phase INT;
   v_reservation_ids JSONB;
   v_cache_entries JSONB;
   v_was_existing BOOLEAN := false;
@@ -396,7 +425,7 @@ BEGIN
          OR (v_reservation - ARRAY['id','provider','requests','cache_keys']) <> '{}'::jsonb
          OR v_reservation->>'provider' NOT IN (
            'gdelt','alpha_vantage','finnhub','yahoo','sec_edgar','federal_register',
-           'white_house','doe','dod','eia','fred','bls','bea'
+           'white_house','doe','dod','eia','fred','bls','bea','social'
          )
          OR jsonb_typeof(v_reservation->'requests')<>'number'
          OR (v_reservation->>'requests') !~ '^[0-9]+$'
@@ -438,6 +467,12 @@ BEGIN
       SELECT COALESCE(sum(reserved_requests),0) INTO v_existing_total
       FROM public.market_source_quota_reservations
       WHERE provider=v_provider AND market_date=p_market_date;
+      SELECT COALESCE(sum(reserved_requests),0) INTO v_existing_phase
+      FROM public.market_source_quota_reservations
+      WHERE provider=v_provider AND market_date=p_market_date AND phase=p_phase;
+      IF v_provider='alpha_vantage' AND v_existing_phase + v_requested > v_phase_budget THEN
+        RAISE EXCEPTION 'alpha vantage phase quota exceeded' USING ERRCODE = '54000';
+      END IF;
       IF v_provider='alpha_vantage' AND v_existing_total + v_requested > v_daily_ceiling THEN
         RAISE EXCEPTION 'alpha vantage daily quota exceeded' USING ERRCODE = '54000';
       END IF;
@@ -517,6 +552,7 @@ DECLARE
   v_packet JSONB;
   v_candidate JSONB;
   v_evidence_id JSONB;
+  v_source_host TEXT;
   v_payload_hash TEXT;
   v_receipt_json JSONB;
   v_item_count INT := 0;
@@ -682,6 +718,31 @@ BEGIN
     IF NOT FOUND THEN
       RAISE EXCEPTION 'source item receipt unavailable' USING ERRCODE = '22023';
     END IF;
+    IF v_row->>'disposition'='accepted'
+       AND v_receipt.status NOT IN ('succeeded','cache_hit') THEN
+      RAISE EXCEPTION 'accepted source item requires successful receipt' USING ERRCODE = '22023';
+    END IF;
+    IF v_row->'canonical_url'<>'null'::jsonb THEN
+      v_source_host := lower(substring(v_row->>'canonical_url' FROM '^https://([^/:?#]+)'));
+      IF NOT (CASE v_receipt.provider
+        WHEN 'gdelt' THEN v_source_host='api.gdeltproject.org'
+        WHEN 'alpha_vantage' THEN v_source_host='www.alphavantage.co'
+        WHEN 'finnhub' THEN v_source_host='finnhub.io'
+        WHEN 'yahoo' THEN v_source_host='query1.finance.yahoo.com'
+        WHEN 'sec_edgar' THEN v_source_host IN ('www.sec.gov','data.sec.gov')
+        WHEN 'federal_register' THEN v_source_host='www.federalregister.gov'
+        WHEN 'white_house' THEN v_source_host='www.whitehouse.gov'
+        WHEN 'doe' THEN v_source_host='www.energy.gov'
+        WHEN 'dod' THEN v_source_host='www.defense.gov'
+        WHEN 'eia' THEN v_source_host IN ('api.eia.gov','www.eia.gov')
+        WHEN 'fred' THEN v_source_host IN ('api.stlouisfed.org','fred.stlouisfed.org')
+        WHEN 'bls' THEN v_source_host IN ('api.bls.gov','www.bls.gov')
+        WHEN 'bea' THEN v_source_host IN ('apps.bea.gov','www.bea.gov')
+        WHEN 'social' THEN v_source_host IN ('www.reddit.com','oauth.reddit.com')
+        ELSE false END) THEN
+        RAISE EXCEPTION 'source URL host mismatch' USING ERRCODE = '22023';
+      END IF;
+    END IF;
     INSERT INTO public.market_source_items(
       id,source_receipt_id,provider,upstream_item_id,canonical_url,published_at,effective_at,title,
       normalized_text,canonical_content,content_hash,metadata
@@ -717,15 +778,25 @@ BEGIN
        OR (v_row->>'confidence')::numeric NOT BETWEEN 0 AND 1
        OR jsonb_typeof(v_row->'evidence_item_ids')<>'array'
        OR jsonb_array_length(v_row->'evidence_item_ids') NOT BETWEEN 1 AND 96
-       OR v_row->>'content_hash' !~ '^[0-9a-f]{64}$' THEN
+       OR v_row->>'content_hash' !~ '^[0-9a-f]{64}$'
+       OR v_row->>'content_hash' <> encode(extensions.digest(convert_to(
+         public.market_canonical_jsonb(v_row - ARRAY['id','content_hash']),'UTF8'
+       ),'sha256'),'hex') THEN
       RAISE EXCEPTION 'invalid market event' USING ERRCODE = '22023';
     END IF;
     FOR v_evidence_id IN SELECT value FROM jsonb_array_elements(v_row->'evidence_item_ids') LOOP
       IF jsonb_typeof(v_evidence_id)<>'string' OR NOT EXISTS (
-        SELECT 1 FROM public.market_intelligence_run_items
-        WHERE run_id=p_run_id AND source_item_id=(v_evidence_id #>> '{}')::uuid
+        SELECT 1
+        FROM public.market_intelligence_run_items run_item
+        JOIN public.market_source_items item ON item.id=run_item.source_item_id
+        JOIN public.market_source_receipts receipt
+          ON receipt.id=run_item.source_receipt_id AND receipt.id=item.source_receipt_id
+        WHERE run_item.run_id=p_run_id
+          AND run_item.source_item_id=(v_evidence_id #>> '{}')::uuid
+          AND run_item.disposition='accepted' AND receipt.run_id=p_run_id
+          AND receipt.status IN ('succeeded','cache_hit')
       ) THEN
-        RAISE EXCEPTION 'market event evidence unavailable' USING ERRCODE = '22023';
+        RAISE EXCEPTION 'ineligible evidence item' USING ERRCODE = '22023';
       END IF;
     END LOOP;
     INSERT INTO public.market_events(
@@ -759,12 +830,26 @@ BEGIN
        OR jsonb_typeof(v_row->'evidence_item_ids')<>'array'
        OR jsonb_array_length(v_row->'evidence_item_ids') NOT BETWEEN 1 AND 8
        OR v_row->>'content_hash' !~ '^[0-9a-f]{64}$'
+       OR v_row->>'content_hash' <> encode(extensions.digest(convert_to(
+         public.market_canonical_jsonb(v_row - ARRAY['id','content_hash']),'UTF8'
+       ),'sha256'),'hex')
        OR NOT EXISTS (
          SELECT 1 FROM public.market_events
          WHERE id=(v_row->>'event_id')::uuid AND run_id=p_run_id
        ) THEN
       RAISE EXCEPTION 'invalid market event relationship' USING ERRCODE = '22023';
     END IF;
+    FOR v_evidence_id IN SELECT value FROM jsonb_array_elements(v_row->'evidence_item_ids') LOOP
+      IF jsonb_typeof(v_evidence_id)<>'string' OR NOT EXISTS (
+        SELECT 1 FROM public.market_intelligence_run_items run_item
+        JOIN public.market_source_items item ON item.id=run_item.source_item_id
+        JOIN public.market_source_receipts receipt
+          ON receipt.id=run_item.source_receipt_id AND receipt.id=item.source_receipt_id
+        WHERE run_item.run_id=p_run_id AND run_item.disposition='accepted'
+          AND run_item.source_item_id=(v_evidence_id #>> '{}')::uuid
+          AND receipt.run_id=p_run_id AND receipt.status IN ('succeeded','cache_hit')
+      ) THEN RAISE EXCEPTION 'ineligible evidence item' USING ERRCODE = '22023'; END IF;
+    END LOOP;
     INSERT INTO public.market_event_relationships(
       id,run_id,event_id,source_kind,source_key,target_kind,target_key,relationship_type,
       hypothesis,evidence_item_ids,content_hash
@@ -800,12 +885,26 @@ BEGIN
        OR jsonb_array_length(v_row->'exposure_item_ids')>8
        OR ((v_row->>'qualified')::boolean AND jsonb_array_length(v_row->'exposure_item_ids')=0)
        OR v_row->>'content_hash' !~ '^[0-9a-f]{64}$'
+       OR v_row->>'content_hash' <> encode(extensions.digest(convert_to(
+         public.market_canonical_jsonb(v_row - ARRAY['id','content_hash']),'UTF8'
+       ),'sha256'),'hex')
        OR (v_row->'event_id'<>'null'::jsonb AND NOT EXISTS (
          SELECT 1 FROM public.market_events
          WHERE id=(v_row->>'event_id')::uuid AND run_id=p_run_id
        )) THEN
       RAISE EXCEPTION 'invalid market candidate ranking' USING ERRCODE = '22023';
     END IF;
+    FOR v_evidence_id IN SELECT value FROM jsonb_array_elements(v_row->'exposure_item_ids') LOOP
+      IF jsonb_typeof(v_evidence_id)<>'string' OR NOT EXISTS (
+        SELECT 1 FROM public.market_intelligence_run_items run_item
+        JOIN public.market_source_items item ON item.id=run_item.source_item_id
+        JOIN public.market_source_receipts receipt
+          ON receipt.id=run_item.source_receipt_id AND receipt.id=item.source_receipt_id
+        WHERE run_item.run_id=p_run_id AND run_item.disposition='accepted'
+          AND run_item.source_item_id=(v_evidence_id #>> '{}')::uuid
+          AND receipt.run_id=p_run_id AND receipt.status IN ('succeeded','cache_hit')
+      ) THEN RAISE EXCEPTION 'ineligible evidence item' USING ERRCODE = '22023'; END IF;
+    END LOOP;
     INSERT INTO public.market_candidate_rankings(
       id,run_id,event_id,candidate_key,ticker,rank,component_scores,total_score,qualified,
       veto_reasons,exposure_item_ids,content_hash
@@ -827,6 +926,9 @@ BEGIN
        OR jsonb_typeof(v_packet->'packet')<>'object'
        OR octet_length((v_packet->'packet')::text)>98304
        OR v_packet->>'packet_hash' !~ '^[0-9a-f]{64}$'
+       OR v_packet->>'packet_hash' <> encode(extensions.digest(convert_to(
+         public.market_canonical_jsonb(v_packet->'packet'),'UTF8'
+       ),'sha256'),'hex')
        OR NOT (v_packet->'packet' ?& ARRAY[
          'candidates','evidence','coverage','limitations','policy_version'
        ])
@@ -843,6 +945,31 @@ BEGIN
          OR jsonb_array_length(v_candidate->'evidence_ids')>8 THEN
         RAISE EXCEPTION 'evidence per candidate exceeds limit' USING ERRCODE = '22023';
       END IF;
+    END LOOP;
+    FOR v_evidence_id IN SELECT value->'item_id'
+      FROM jsonb_array_elements(v_packet->'packet'->'evidence') LOOP
+      IF jsonb_typeof(v_evidence_id)<>'string' OR NOT EXISTS (
+        SELECT 1 FROM public.market_intelligence_run_items run_item
+        JOIN public.market_source_items item ON item.id=run_item.source_item_id
+        JOIN public.market_source_receipts receipt
+          ON receipt.id=run_item.source_receipt_id AND receipt.id=item.source_receipt_id
+        WHERE run_item.run_id=p_run_id AND run_item.disposition='accepted'
+          AND run_item.source_item_id=(v_evidence_id #>> '{}')::uuid
+          AND receipt.run_id=p_run_id AND receipt.status IN ('succeeded','cache_hit')
+      ) THEN RAISE EXCEPTION 'ineligible evidence item' USING ERRCODE = '22023'; END IF;
+    END LOOP;
+    FOR v_candidate IN SELECT value FROM jsonb_array_elements(v_packet->'packet'->'candidates') LOOP
+      FOR v_evidence_id IN SELECT value FROM jsonb_array_elements(v_candidate->'evidence_ids') LOOP
+        IF jsonb_typeof(v_evidence_id)<>'string' OR NOT EXISTS (
+          SELECT 1 FROM public.market_intelligence_run_items run_item
+          JOIN public.market_source_items item ON item.id=run_item.source_item_id
+          JOIN public.market_source_receipts receipt
+            ON receipt.id=run_item.source_receipt_id AND receipt.id=item.source_receipt_id
+          WHERE run_item.run_id=p_run_id AND run_item.disposition='accepted'
+            AND run_item.source_item_id=(v_evidence_id #>> '{}')::uuid
+            AND receipt.run_id=p_run_id AND receipt.status IN ('succeeded','cache_hit')
+        ) THEN RAISE EXCEPTION 'ineligible evidence item' USING ERRCODE = '22023'; END IF;
+      END LOOP;
     END LOOP;
     INSERT INTO public.market_evidence_packets(
       id,run_id,policy_version,status,candidate_count,evidence_count,packet,packet_hash
@@ -895,16 +1022,24 @@ BEGIN
   IF p_run_id IS NULL OR p_idempotency_key IS NULL OR jsonb_typeof(p_report)<>'object'
      OR octet_length(p_report::text)>196608
      OR NOT (p_report ?& ARRAY[
-       'id','packet_id','market_date','kind','report','report_hash','rendered_hash'
+       'id','packet_id','market_date','kind','report','report_hash','rendered_text','rendered_hash'
      ])
      OR (p_report - ARRAY[
-       'id','packet_id','market_date','kind','report','report_hash','rendered_hash'
+       'id','packet_id','market_date','kind','report','report_hash','rendered_text','rendered_hash'
      ]) <> '{}'::jsonb
-     OR p_report->>'kind' NOT IN ('morning','urgent','weekly','monthly','on-demand')
+     OR p_report->>'kind' NOT IN ('morning','urgent','weekly','monthly','theme','on-demand')
      OR jsonb_typeof(p_report->'report')<>'object'
      OR octet_length((p_report->'report')::text)>131072
      OR p_report->>'report_hash' !~ '^[0-9a-f]{64}$'
-     OR p_report->>'rendered_hash' !~ '^[0-9a-f]{64}$' THEN
+     OR p_report->>'report_hash' <> encode(extensions.digest(convert_to(
+       public.market_canonical_jsonb(p_report->'report'),'UTF8'
+     ),'sha256'),'hex')
+     OR jsonb_typeof(p_report->'rendered_text')<>'string'
+     OR char_length(p_report->>'rendered_text')>14000
+     OR p_report->>'rendered_hash' !~ '^[0-9a-f]{64}$'
+     OR p_report->>'rendered_hash' <> encode(extensions.digest(
+       convert_to(p_report->>'rendered_text','UTF8'),'sha256'
+     ),'hex') THEN
     RAISE EXCEPTION 'invalid market report' USING ERRCODE = '22023';
   END IF;
   PERFORM pg_advisory_xact_lock(hashtextextended(
@@ -915,6 +1050,7 @@ BEGIN
     IF v_existing.run_id IS DISTINCT FROM p_run_id
        OR v_existing.packet_id IS DISTINCT FROM (p_report->>'packet_id')::uuid
        OR v_existing.report_hash IS DISTINCT FROM p_report->>'report_hash'
+       OR v_existing.rendered_text IS DISTINCT FROM p_report->>'rendered_text'
        OR v_existing.rendered_hash IS DISTINCT FROM p_report->>'rendered_hash' THEN
       RAISE EXCEPTION 'market report idempotency mismatch' USING ERRCODE = '22023';
     END IF;
@@ -935,11 +1071,11 @@ BEGIN
     RAISE EXCEPTION 'completed evidence packet unavailable' USING ERRCODE = '22023';
   END IF;
   INSERT INTO public.market_reports(
-    id,idempotency_key,run_id,packet_id,market_date,kind,report,report_hash,rendered_hash
+    id,idempotency_key,run_id,packet_id,market_date,kind,report,report_hash,rendered_text,rendered_hash
   ) VALUES (
     (p_report->>'id')::uuid,p_idempotency_key,p_run_id,v_packet.id,
     (p_report->>'market_date')::date,p_report->>'kind',p_report->'report',
-    p_report->>'report_hash',p_report->>'rendered_hash'
+    p_report->>'report_hash',p_report->>'rendered_text',p_report->>'rendered_hash'
   ) RETURNING * INTO v_existing;
   RETURN jsonb_build_object(
     'report_id',v_existing.id,
@@ -979,7 +1115,10 @@ BEGIN
        AND char_length(p_observation->>'benchmark')>100)
      OR jsonb_typeof(p_observation->'observation')<>'object'
      OR octet_length((p_observation->'observation')::text)>32768
-     OR p_observation->>'content_hash' !~ '^[0-9a-f]{64}$' THEN
+     OR p_observation->>'content_hash' !~ '^[0-9a-f]{64}$'
+     OR p_observation->>'content_hash' <> encode(extensions.digest(convert_to(
+       public.market_canonical_jsonb(p_observation->'observation'),'UTF8'
+     ),'sha256'),'hex') THEN
     RAISE EXCEPTION 'invalid market learning observation' USING ERRCODE = '22023';
   END IF;
   PERFORM pg_advisory_xact_lock(hashtextextended(
@@ -1016,6 +1155,8 @@ END;
 $$;
 
 REVOKE ALL ON FUNCTION public.reject_market_intelligence_mutation()
+  FROM PUBLIC, anon, authenticated, service_role;
+REVOKE ALL ON FUNCTION public.market_canonical_jsonb(JSONB)
   FROM PUBLIC, anon, authenticated, service_role;
 REVOKE ALL ON FUNCTION public.start_market_intelligence_run(UUID, TEXT, DATE, INT, JSONB) FROM PUBLIC, anon, authenticated;
 REVOKE ALL ON FUNCTION public.record_market_intelligence(UUID, UUID, JSONB) FROM PUBLIC, anon, authenticated;

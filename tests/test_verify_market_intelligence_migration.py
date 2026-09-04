@@ -51,6 +51,16 @@ def complete_snapshot():
             }
             for signature in RPCS
         },
+        "table_grants": [],
+        "function_grants": [
+            {
+                "signature": signature,
+                "grantee": "service_role",
+                "privilege": "EXECUTE",
+                "is_owner": False,
+            }
+            for signature in RPCS
+        ],
         "unexpected_grants": [],
         "brokerage_columns": [],
         "behavior": {
@@ -58,13 +68,20 @@ def complete_snapshot():
             "duplicate_idempotency": True,
             "bounded_cache_returned": True,
             "over_quota_rejected": True,
+            "phase_quota_rejected": True,
             "mutation_rejected": True,
             "invalid_hash_rejected": True,
+            "semantic_hashes_rejected": True,
             "partial_write_rolled_back": True,
             "oversized_json_rejected": True,
             "wrong_run_reservation_rejected": True,
+            "ineligible_evidence_rejected": True,
+            "url_host_rejected": True,
+            "cross_provider_host_rejected": True,
+            "social_provider_recorded": True,
             "failed_receipt_recorded": True,
             "report_idempotency": True,
+            "theme_report_recorded": True,
             "incomplete_packet_rejected": True,
             "learning_type_rejected": True,
             "rollback_clean": True,
@@ -88,6 +105,28 @@ def test_mutation_grant_fails_closed():
         evaluate_snapshot(snapshot)
 
 
+def test_any_non_owner_table_or_function_grant_fails_closed():
+    table_grant = complete_snapshot()
+    table_grant["table_grants"] = [{
+        "table": "market_reports",
+        "grantee": "surprise_reader",
+        "privilege": "SELECT",
+        "is_owner": False,
+    }]
+    with pytest.raises(RuntimeError, match="unexpected grant"):
+        evaluate_snapshot(table_grant)
+
+    function_grant = complete_snapshot()
+    function_grant["function_grants"].append({
+        "signature": "record_market_report(uuid,uuid,jsonb)",
+        "grantee": "surprise_executor",
+        "privilege": "EXECUTE",
+        "is_owner": False,
+    })
+    with pytest.raises(RuntimeError, match="unexpected grant"):
+        evaluate_snapshot(function_grant)
+
+
 @pytest.mark.parametrize(
     ("field", "message"),
     (
@@ -95,13 +134,20 @@ def test_mutation_grant_fails_closed():
         ("duplicate_idempotency", "duplicate idempotency"),
         ("bounded_cache_returned", "bounded cache"),
         ("over_quota_rejected", "over-quota"),
+        ("phase_quota_rejected", "phase quota"),
         ("mutation_rejected", "mutation"),
         ("invalid_hash_rejected", "invalid hash"),
+        ("semantic_hashes_rejected", "semantic hashes"),
         ("partial_write_rolled_back", "partial write"),
         ("oversized_json_rejected", "oversized JSON"),
         ("wrong_run_reservation_rejected", "wrong-run reservation"),
+        ("ineligible_evidence_rejected", "ineligible evidence"),
+        ("url_host_rejected", "URL host"),
+        ("cross_provider_host_rejected", "cross-provider host"),
+        ("social_provider_recorded", "social provider"),
         ("failed_receipt_recorded", "failed receipt"),
         ("report_idempotency", "report idempotency"),
+        ("theme_report_recorded", "theme report"),
         ("incomplete_packet_rejected", "incomplete packet"),
         ("learning_type_rejected", "learning type"),
         ("rollback_clean", "rollback"),
@@ -170,6 +216,22 @@ def test_schema_declares_complete_bounded_append_only_ledgers_and_rpcs():
         assert "extensions.digest(convert_to(v_row->>'canonical_content','UTF8'),'sha256')" in sql
         assert "reserved_requests BETWEEN 1 AND 100" in sql
         assert "alpha vantage daily quota exceeded" in sql
+        assert "alpha vantage phase quota exceeded" in sql
+        assert "public.market_canonical_jsonb" in sql
+        assert sql.count("public.market_canonical_jsonb(") >= 8
+        assert "v_row - ARRAY['id','content_hash']" in sql
+        assert "public.market_canonical_jsonb(v_packet->'packet')" in sql
+        assert "public.market_canonical_jsonb(p_report->'report')" in sql
+        assert "public.market_canonical_jsonb(p_observation->'observation')" in sql
+        assert sql.count("ineligible evidence item") >= 5
+        assert sql.count("receipt.status IN ('succeeded','cache_hit')") >= 5
+        assert "accepted source item requires successful receipt" in sql
+        assert "ineligible evidence item" in sql
+        assert "source URL host mismatch" in sql
+        assert "WHEN 'gdelt' THEN v_source_host='api.gdeltproject.org'" in sql
+        assert "WHEN 'sec_edgar' THEN v_source_host IN ('www.sec.gov','data.sec.gov')" in sql
+        assert "'social'" in sql
+        assert "'morning','urgent','weekly','monthly','theme','on-demand'" in sql
         assert "LIMIT 50" in sql
         assert "expires_at > statement_timestamp()" in sql
         assert "~ '^[0-9a-f]{64}$'" in sql
