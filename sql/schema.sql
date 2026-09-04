@@ -2685,7 +2685,7 @@ CREATE TABLE IF NOT EXISTS public.market_reports (
   run_id UUID NOT NULL REFERENCES public.market_intelligence_runs(id) ON DELETE RESTRICT,
   packet_id UUID NOT NULL REFERENCES public.market_evidence_packets(id) ON DELETE RESTRICT,
   market_date DATE NOT NULL,
-  kind TEXT NOT NULL CHECK (kind IN ('morning','urgent','weekly','monthly','theme','on-demand')),
+  kind TEXT NOT NULL CHECK (kind IN ('morning','urgent','weekly','monthly','theme','on-demand','intraday')),
   report JSONB NOT NULL CHECK (
     jsonb_typeof(report)='object' AND octet_length(report::text) <= 131072
   ),
@@ -3585,7 +3585,7 @@ BEGIN
      OR (p_report - ARRAY[
        'id','packet_id','market_date','kind','report','report_hash','rendered_text','rendered_hash'
      ]) <> '{}'::jsonb
-     OR p_report->>'kind' NOT IN ('morning','urgent','weekly','monthly','theme','on-demand')
+     OR p_report->>'kind' NOT IN ('morning','urgent','weekly','monthly','theme','on-demand','intraday')
      OR jsonb_typeof(p_report->'report')<>'object'
      OR octet_length((p_report->'report')::text)>131072
      OR p_report->>'report_hash' !~ '^[0-9a-f]{64}$'

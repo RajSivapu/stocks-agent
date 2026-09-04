@@ -232,7 +232,7 @@ def test_schema_declares_complete_bounded_append_only_ledgers_and_rpcs():
         assert "WHEN 'gdelt' THEN v_source_host='api.gdeltproject.org'" in sql
         assert "WHEN 'sec_edgar' THEN v_source_host IN ('www.sec.gov','data.sec.gov')" in sql
         assert "'social'" in sql
-        assert "'morning','urgent','weekly','monthly','theme','on-demand'" in sql
+        assert "'morning','urgent','weekly','monthly','theme','on-demand','intraday'" in sql
         assert "LIMIT 50" in sql
         assert "expires_at > statement_timestamp()" in sql
         assert "'retrieved_at',receipt.retrieved_at" in sql
