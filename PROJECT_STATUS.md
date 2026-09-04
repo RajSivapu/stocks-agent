@@ -3,7 +3,7 @@
 Last updated: 2026-09-04
 Canonical release: Personal Stock Agent V1
 Source baseline: `167ce06` on `codex/owner-alert-v3`
-Current state: V1-C5 complete locally; V1-C6 release infrastructure implemented locally and protected external gates pending
+Current state: V1 implementation is merged and deployed; V1-C6 awaits only the next existing scheduled V1 receipt chain
 
 This file is the version-controlled source of truth for the Personal Stock Agent V1 rollout.
 `docs/ROADMAP.md` retains historical capability and deployment detail. Notion may later mirror this
@@ -27,7 +27,7 @@ scope is not renamed V1.1.
 - Built and verified the owner-only read-only dashboard foundation with one-owner auth, a
   least-privilege direct-SELECT role, safe view contracts, responsive light/dark UI, and protected
   deployment tooling.
-- Reserved the private one-account Site; the dashboard is not claimed live.
+- Deployed the private one-account Site and owner-only read API from the reviewed V1 candidate.
 - Approved the zero-cost V1 provider and product architecture in owner chat.
 - Wrote the consolidated V1 specification and this canonical checkpoint document.
 - Owner approved the written specification on 2026-09-04.
@@ -132,9 +132,9 @@ tests and 60 Deno outcome/contract/handler tests passed. No provider or model ca
 policy/weight/provider activation, holdings/plan mutation, Telegram delivery, migration, or
 deployment occurred.
 
-V1-C5 is awaiting only the consolidated full suite and exact-head independent review. Nothing in
-this checkpoint claims a live API, production migration, Telegram send, Site deployment, or owner
-view receipt.
+V1-C5 is complete. The consolidated full suite, exact-head CI, independent review, production
+migrations, private Site, read API, and owner/denial canaries have passed. This does not claim a new
+scheduled V1 intelligence/report receipt or enable an alert class.
 
 ### V1-C6 — Independent review and protected rollout
 
@@ -142,16 +142,17 @@ view receipt.
 - [x] Protected scripts cover the two V1 migrations, only the changed gateway/dashboard functions,
   reviewed-SHA source/static receipts, five dashboard surfaces, anonymous/non-owner denial, and
   cleanup of newly introduced dashboard secrets/function/runtime login on initial failure.
-- [ ] Existing dashboard exact-head independent verdict is pending.
-- [ ] Consolidated V1 exact-head review, protected deployment, and receipt verification are pending.
+- [x] Consolidated exact-head CI and independent review accepted the deployed implementation.
+- [x] Protected migrations, gateway/API, private Site, source parity, rollback exercise, dry-run,
+  and owner/anonymous/non-owner canaries completed.
+- [ ] The next existing scheduled V1 intelligence/report/publication chain must be reconciled.
 
-Task 14 release infrastructure is local-only. Independent review blocked `a5d4296` on five release
-boundaries; the local fix-round candidate closes exact scheduled run identity, scheduled report
-calling and report-chain validation, real prior-gateway restoration, and typed 15-gate/source-chain
-verification. The canonical review and rollout records remain pending templates and make no
-production claim. V1-C6 remains incomplete until exact-head CI, repeat independent
-review, dry-run, both migration/function/static deployments, source parity, owner and denial
-canaries, rollback evidence, and the next existing scheduled receipts are all present.
+Independent review blocked `a5d4296` on five release boundaries. The fixes and subsequent runtime
+deltas through `688d473` were accepted, exact-head CI passed, and PR #1 was merged to `main` as
+`6819052`. All three migrations, gateway/dashboard functions, and private Site version 2 are live;
+deployed downloads match source, owner and denial canaries pass, and two failed initial attempts
+exercised clean rollback. V1-C6 remains incomplete only because the Sep 4 post-market run began
+before the merge and cannot supply the required V1 intelligence/report chain.
 
 The consolidated local gate passed on 2026-09-04: 364 Python, 63 Node, 218 Deno, 6 dashboard
 contract, 31 web-unit, and 17 Playwright tests passed (699 total); 19 Python and one opt-in live
@@ -161,15 +162,14 @@ The first run exposed migration/schema drift in the learning authority rejection
 
 ## Next
 
-1. Commit the review-fix checkpoint and obtain repeat exact-head independent review.
-2. Run the protected dry-run/deployment only after exact-head CI and review pass.
-3. Preserve scheduled production capacity and inspect only scheduled receipts at their established
-   times.
+1. Inspect the next existing scheduled run after the `main` merge; do not trigger a duplicate.
+2. Reconcile its run, packet, report, publication, source/quota, and dashboard/database receipts.
+3. Mark C6/V1 complete only when the fail-closed verifier accepts that scheduled chain.
 
 ## Owner Action
 
-No action is required while local implementation and review proceed. Owner action will be listed
-only when a protected external gate cannot be completed safely without it.
+No owner action is currently required. The existing rollout heartbeat will resume verification at
+the next eligible scheduled market run.
 
 No provider purchase, paid trial, card signup, brokerage credential, friend invitation, or duplicate
 live run is requested.
@@ -195,8 +195,8 @@ live run is requested.
 
 ## Blockers
 
-- Production dashboard deployment remains blocked by its exact-head independent review gate and
-  must not deploy the superseded thin dashboard.
+- The only current release blocker is the next existing post-merge scheduled receipt chain; the
+  superseded thin dashboard remains excluded.
 - Any unavailable free-provider entitlement, quota, or official-source access must fail closed and
   be surfaced; it does not authorize a paid replacement.
 
@@ -205,18 +205,16 @@ live run is requested.
 - Existing production foundation and scheduled receipt history are summarized in `docs/ROADMAP.md`.
 - Owner alert v3 remains shadow-only; its receipt record is
   `docs/rollouts/2026-09-03-owner-alert-v3-shadow.md`.
-- Owner dashboard protected rollout is not live; pending gates and empty production receipt fields
-  are recorded in `docs/rollouts/2026-09-03-owner-dashboard-web-v1.md`.
-- Consolidated V1 review and rollout gates remain empty and fail-closed in
+- Owner dashboard API version 3 and private Site version 2 are live with owner/denial canaries and
+  source-parity receipts.
+- Consolidated V1 review and rollout evidence is recorded in
   `docs/reviews/2026-09-04-personal-stock-agent-v1-review.md` and
   `docs/rollouts/2026-09-04-personal-stock-agent-v1.md`.
-- The Sep 4 intraday, post-market, and Friday audit checks remain scheduled. No duplicate live run
-  will be triggered to inspect them.
-- This documentation checkpoint creates no database write, report publication, Telegram send, Site
-  version, function deployment, or production receipt.
+- The Sep 4 post-market run predates the V1 `main` merge and is excluded from V1 completion. No
+  duplicate live run will be triggered.
 
 ## Last Commit
 
-The first Task 14 checkpoint was `a5d4296` (`feat: add fail-closed v1 release gates`) and was blocked
-by independent review. The review-fix checkpoint becomes the new candidate for exact-head CI and
-repeat independent review; it is not a C6 completion or production receipt.
+The deployed implementation is `688d473b4696ce699965adc16c213cefdeb4dc6a`; GitHub `main` contains
+it through merge commit `681905290510790160b5d3f712f71187527cf720`. C6 remains pending the
+scheduled receipt chain only.

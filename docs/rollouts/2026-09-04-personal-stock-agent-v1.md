@@ -1,96 +1,62 @@
 # Personal Stock Agent V1 — Protected Rollout Record
 
-Status: **not deployed; protected rollout and scheduled verification pending**.
+Status: **implementation deployed; the next existing scheduled V1 intelligence/report receipt is pending**.
 
 ## Immutable release boundary
 
-- Owner-only, friend invitations disabled, suggestion-only, and brokerage-free.
-- Zero incremental dollars and approved free sources only.
-- Browser surfaces are GET-only and cannot trigger research, Telegram, or financial mutation.
-- No duplicate live scheduled run may be started for verification.
-- The superseded thin dashboard is not a deployable V1 artifact.
+- Owner-only, friend invitations disabled, suggestion-only, brokerage-free, and zero incremental cost.
+- Browser surfaces are authenticated GET-only and cannot trigger research, Telegram, or financial mutation.
+- Alert-class enablement remains disabled pending a real shadow example and separate owner approval.
+- No duplicate live scheduled run was started for verification.
 
-## Candidate and review receipts
+## Candidate, review, and CI
 
-- Prior candidate `a5d4296595ab5f41a7120953ba117638888dccf6`: blocked by independent review and never deployed.
-- Replacement candidate SHA: pending the fix-round checkpoint and exact-head re-review.
-- Local full suite: passed on 2026-09-04 with 699 tests passed and 20 skipped; typecheck, lint,
-  license, production build, bundle scan, and Playwright gates passed.
-- Exact-head CI SHA and run URL: pending.
-- Independent review verdict: `a5d4296` blocked; replacement verdict and reviewed SHA pending.
+- Deployed implementation SHA: `688d473b4696ce699965adc16c213cefdeb4dc6a`.
+- GitHub merge commit on `main`: `681905290510790160b5d3f712f71187527cf720`.
+- Pull request: `https://github.com/RajSivapu/stocks-agent/pull/1` (merged 2026-09-04).
+- Exact-candidate CI: `https://github.com/RajSivapu/stocks-agent/actions/runs/33916684106`, success at `688d473b4696ce699965adc16c213cefdeb4dc6a`.
+- Local full gate: 699 passed and 20 skipped; typecheck, lint, license, production build, bundle scan, and Playwright gates passed.
+- Independent review: the original `a5d4296` candidate was blocked. The five blocking boundaries were fixed and accepted; subsequent migration/runtime deltas through `688d473` were independently accepted with no unresolved Critical or Important finding.
 
-## Protected dry-run receipts
+## Protected dry-run
 
-- Fixture/provider mode: pending.
-- Packet size and candidate/evidence bounds: pending.
-- Provider quota receipts: pending.
-- Before/after table counts and zero-write result: pending.
-- Telegram message IDs and zero-send result: pending.
-- Holdings and plans unchanged: pending.
+- Fixture-backed on-demand run ID: `00000000-0000-4000-8000-00000000c600`.
+- Packet ID: `1c2e78ca-995a-5aa0-9457-75877fe1802b`.
+- Twelve protected table deltas were zero; Telegram message IDs were empty; holdings and plans were unchanged.
+- The dry-run was deliberately write-free/send-free. Provider quota/source receipts remain a scheduled-production gate because this fixture had no live source context.
 
-## Database and function receipts
+## Database and function deployment
 
-- Migration `20260907` hash/application/verifier receipt: pending.
-- Migration `20260908` hash/application/role-verifier receipt: pending.
-- `market-briefing-gateway` version, candidate SHA, and source hash/parity: pending.
-- `owner-dashboard-api` version, candidate SHA, and source hash/parity: pending.
-- New dashboard secret manifest receipt: pending.
-- Dashboard runtime-login least-privilege receipt: pending.
+- `20260906_owner_dashboard_read_role.sql`: applied, SHA-256 `7aa056b052a5e5b8cb85a1afdf047acfbe7b93c9c789aef64d48d77b7e9ad2c0`.
+- `20260907_market_intelligence.sql`: applied, SHA-256 `79aeb682eba5ddaa2832d72c8ffea24caa2b7904e19c15704605bd64953367e0`.
+- `20260908_owner_dashboard_intelligence_read_role.sql`: applied, SHA-256 `2fb4feb46b495afbea32701f5a9e102d8377d5044d178fee93b15d5842ed191c`.
+- Scoped dashboard runtime login is enabled and can read the allowlisted direct columns; it has no financial-write or application-function execution authority.
+- `market-briefing-gateway`: active version 30 after secret refresh; deployed source tree SHA-256 `58d7a7a01d164279539e3b57f2b0b9169b75f97e6c33742bda7551b005dce8b2`.
+- `owner-dashboard-api`: active version 3; deployed source tree SHA-256 `f0e649361555847b51f81d73f2be979b7c940aee907d1727a1dcced34ff041c8`.
+- A fresh management-plane download compared 16 gateway files and 11 dashboard files against the candidate with zero mismatches.
 
-Only those two changed functions are in the V1 deployment manifest. The existing Telegram function
-is not part of this deployment.
+## Static site and access
 
-## Static and access receipts
+- Private Site version 2: `appgprj_6a9a35fb60648191b30e2bb973a2347f~appgver_86bd49ad514c81918e96830844768a4d`.
+- Archive content hash: `sha256:ee61fff48177c61b210394c59bcd53a2f4d283feb4975195760055ce983ff341`.
+- Production deployment: `appgdep_6a9b2be35a388191b24c4fd870d87d7d`, succeeded.
+- URL: `https://personal-stock-agent.rupesh-sivapu.chatgpt.site`.
+- Deployment used the verified private-owner path: custom access, one allowed owner account, no groups, and no external visitors.
 
-- Immutable static asset hashes and candidate SHA: pending.
-- Private Site version and deployment ID: pending.
-- One-account host allowlist and security headers: pending.
-- Owner canary across Portfolio, Ideas, Intelligence, Reports, and System / Receipts: pending.
-- Anonymous denial: pending.
-- Authenticated non-owner denial: pending.
+## Production canaries
 
-## Reconciliation and scheduled receipts
+- Anonymous `/v1/meta`: 401 `unauthorized`.
+- Authenticated temporary non-owner `/v1/meta`: 403 `owner_only`; the temporary user was then deleted.
+- Owner `/v1/meta`: 200, contract version 1, request ID present, fresh policy metadata, exact Site CORS, and `cache-control: no-store`.
+- Owner GETs for Today, Portfolio, Ideas, System, Intelligence, and Reports: all 200.
+- The initial owner read exposed an Edge-runtime receiver-binding fault in the default UUID generator. Commit `688d473` fixed it, focused Deno verification passed 11/11 plus typecheck, exact-SHA CI passed, and the production canary then passed.
 
-- Independent database/source parity: pending.
-- Intelligence, report, publication, and hash reconciliation: pending.
-- Next existing pre-market/intraday/post-market/Friday scheduled chain: pending.
-- Owner-approved alert-class canary, if approved after a real shadow example: pending.
-- Telegram acceptance and separate owner acknowledgement: pending.
+## Rollback evidence
 
-## Rollback receipt
+- Two failed initial dashboard attempts exercised the production rollback path.
+- Each exercise removed the new dashboard authority, disabled the runtime login, and restored the prior gateway from the verified rollback checkout/source hash.
+- The successful deployment was performed only after rollback recovery and blocker correction.
 
-- Local rollback-path verification: the protected path requires a prior gateway Git ref, matching
-  source SHA-256, and current live version before mutation, then redeploys and verifies that source
-  while removing the new dashboard authority. No production rollback was invoked.
-- Initial production rollback exercise/result: pending.
-- Dashboard secrets unset: pending.
-- Newly introduced dashboard function removed: pending.
-- Dashboard runtime login disabled: pending.
+## Remaining scheduled gate
 
-## Canonical verifier input
-
-The protected controller must populate and pass this schema to
-`scripts/verify_personal_stock_agent_v1.py`; `null` is intentionally fail-closed:
-
-```json
-{
-  "candidate_sha": null,
-  "exact_head_ci": null,
-  "independent_review": null,
-  "quota_receipts": null,
-  "dry_run_zero_writes": null,
-  "dry_run_zero_sends": null,
-  "migration_version": null,
-  "gateway_version": null,
-  "dashboard_api_version": null,
-  "site_version": null,
-  "owner_canary": null,
-  "anonymous_denial": null,
-  "non_owner_denial": null,
-  "source_parity": null,
-  "scheduled_receipt": null,
-  "rollback_check": null
-}
-```
-
-No production, Telegram, owner-view, or C6-complete claim is supported by this pending record.
+The 2026-09-04 post-market run (`9dfee973-e678-4910-8e1e-a1f541a68806`) completed successfully but began before V1 reached `main`; it produced no V1 intelligence or report rows and is not claimed as V1 evidence. The existing rollout heartbeat is scheduled to inspect the next eligible routine after the merge, without starting a duplicate. C6 and the full V1 completion claim remain fail-closed until one scheduled run provides the linked analysis run, intelligence run, packet/hash, report/hash, gateway publication receipt, source/quota receipts, and dashboard/database reconciliation.
