@@ -34,6 +34,7 @@ docs/HANDOFF.md
 
 # Node and browser build output
 node_modules/
+/dist/
 apps/web/dist/
 apps/web/coverage/
 apps/web/test-results/
