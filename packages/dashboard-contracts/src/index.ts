@@ -145,6 +145,7 @@ export interface PortfolioView {
     unrealized_amount: string | null;
   };
   comparison_availability: "structured_companion" | "coverage_only" | "unavailable";
+  latest_intelligence_run_id: string | null;
 }
 
 export interface IdeaView {
@@ -168,6 +169,13 @@ export interface IdeaView {
   analyst_complete: boolean;
   checker_complete: boolean;
   sources: SourceLink[];
+  intelligence_run_id: string | null;
+  evidence_as_of: string | null;
+  outcome: {
+    result: string;
+    horizon_days: number;
+    graded_at: string;
+  } | null;
 }
 
 export interface IdeasView {
@@ -248,6 +256,86 @@ export interface RunsView {
   runs: RunSummaryView[];
 }
 
+export interface ThemeView {
+  key: string;
+  relationship_count: number;
+  evidence_count: number;
+}
+
+export interface MarketEventView {
+  id: string;
+  type: string;
+  title: string;
+  summary: string;
+  occurred_at: string | null;
+  effective_at: string | null;
+  materiality: string;
+  confidence: string;
+  sources: SourceLink[];
+}
+
+export interface CandidateRelationshipView {
+  id: string;
+  event_id: string | null;
+  candidate_key: string;
+  ticker: string | null;
+  rank: number;
+  total_score: string;
+  qualified: boolean;
+  veto_reasons: string[];
+  sources: SourceLink[];
+}
+
+export interface SourceCoverageView {
+  provider: string;
+  status: "complete" | "partial" | "unavailable";
+  retrieved_at: string | null;
+  accepted_count: number;
+  dropped_count: number;
+}
+
+export interface IntelligenceView {
+  run_id: string;
+  data_as_of: string | null;
+  themes: ThemeView[];
+  events: MarketEventView[];
+  candidates: CandidateRelationshipView[];
+  sources: SourceCoverageView[];
+  limitations: string[];
+}
+
+export interface ReportSummaryView {
+  id: string;
+  market_date: string;
+  kind: "morning" | "urgent" | "weekly" | "monthly" | "theme" | "on-demand" | "intraday" | "unknown";
+  title: string;
+  summary: string;
+  report_hash: string;
+  created_at: string;
+}
+
+export interface ReportsView {
+  reports: ReportSummaryView[];
+  next_cursor: string | null;
+}
+
+export interface ReportSectionView {
+  heading: string;
+  body: string;
+}
+
+export interface ReceiptTimelineItem {
+  status: ReceiptStatus;
+  at: string;
+  telegram_message_ids: number[];
+}
+
+export interface ReportDetailView extends ReportSummaryView {
+  sections: ReportSectionView[];
+  sources: SourceLink[];
+  publication: ReceiptTimelineItem[];
+}
+
 export interface SystemView {
   product_version: string;
   api_version: string;
@@ -256,6 +344,9 @@ export interface SystemView {
   latest_by_kind: Record<string, RunSummaryView | null>;
   latest_publication_status: ReceiptStatus | null;
   boundaries: TodayView["boundaries"];
+  source_coverage: SourceCoverageView[];
+  latest_report: ReportSummaryView | null;
+  latest_intelligence_run_id: string | null;
 }
 
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;

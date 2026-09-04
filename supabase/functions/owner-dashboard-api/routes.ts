@@ -10,6 +10,9 @@ export type DashboardRouteName =
   | "alerts"
   | "runs"
   | "runDetail"
+  | "intelligence"
+  | "reports"
+  | "reportDetail"
   | "system";
 
 export interface DashboardRoute {
@@ -71,6 +74,7 @@ export function resolveDashboardRoute(
     ["/v1/portfolio", "portfolio"],
     ["/v1/companion", "companion"],
     ["/v1/system", "system"],
+    ["/v1/intelligence", "intelligence"],
   ]);
   const name = simple.get(path);
   if (name) {
@@ -105,6 +109,10 @@ export function resolveDashboardRoute(
       cursor: optionalBounded(parameters, "cursor"),
     };
   }
+  if (path === "/v1/reports") {
+    rejectUnknownParameters(parameters, ["cursor"]);
+    return { name: "reports", cursor: optionalBounded(parameters, "cursor") };
+  }
   const runMatch = /^\/v1\/runs\/([^/]+)$/.exec(path);
   if (runMatch) {
     rejectUnknownParameters(parameters, []);
@@ -112,6 +120,14 @@ export function resolveDashboardRoute(
       throw new DashboardHttpError(400, "invalid_request", "Invalid run identifier.");
     }
     return { name: "runDetail", id: runMatch[1] };
+  }
+  const reportMatch = /^\/v1\/reports\/([^/]+)$/.exec(path);
+  if (reportMatch) {
+    rejectUnknownParameters(parameters, []);
+    if (!UUID_PATTERN.test(reportMatch[1] ?? "")) {
+      throw new DashboardHttpError(400, "invalid_request", "Invalid report identifier.");
+    }
+    return { name: "reportDetail", id: reportMatch[1] };
   }
   throw new DashboardHttpError(404, "not_found", "Dashboard route not found.");
 }

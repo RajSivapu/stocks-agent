@@ -1,4 +1,7 @@
 import {
+  mapIntelligence,
+  mapReportDetail,
+  mapReportSummary,
   mapCompanionResponse,
   mapIdea,
   mapPortfolio,
@@ -127,4 +130,26 @@ Deno.test("unknown run values remain unknown rather than inventing receipt attri
   });
   assertEquals(mapped.kind, "unknown");
   assertEquals(mapped.status, "unknown");
+});
+
+Deno.test("intelligence mapper bounds hostile text and omits raw provider state", () => {
+  const mapped = mapIntelligence(
+    [{ id: "run-1", created_at: "2026-09-03T18:00:00.000Z" }],
+    [{ id: "event-1", event_type: "policy", title: "<script>" + "x".repeat(600), summary: "safe", materiality: "0.8", confidence: "0.7", evidence: [{ title: "Source", url: "javascript:alert(1)" }] }],
+    [{ id: "rank-1", candidate_key: "MSFT", ticker: "MSFT", rank: 1, total_score: "9", qualified: true, veto_reasons: [], evidence: [] }],
+    [{ source_key: "policy", target_key: "ai", relationship_type: "supports", evidence_item_ids: ["one"] }],
+    [{ provider: "gdelt", status: "succeeded", retrieved_at: "2026-09-03T17:59:00.000Z", accepted_count: 4, dropped_count: 1, raw_payload: "secret" }],
+  );
+  assertEquals(mapped.events[0]?.title.length, 500);
+  assertEquals(mapped.events[0]?.sources[0]?.url, null);
+  assertEquals(mapped.sources[0]?.status, "complete");
+  assertEquals(JSON.stringify(mapped).includes("raw_payload"), false);
+});
+
+Deno.test("report mappers use accepted structured fields and never hidden JSON", () => {
+  const row = { id: "report-1", market_date: "2026-09-03", kind: "weekly", report_hash: "a".repeat(64), created_at: "2026-09-03T20:00:00.000Z", report: { title: "Weekly", summary: "Summary", full_markdown: "# One\nBody", source_ids: ["source-1"], hidden_model_state: "secret" } };
+  assertEquals(mapReportSummary(row).title, "Weekly");
+  const detail = mapReportDetail(row, [{ id: "source-1", title: "Official", canonical_url: "https://example.com/item" }], [{ status: "delivered", created_at: "2026-09-03T20:01:00.000Z", telegram_message_ids: [42] }]);
+  assertEquals(detail.sections, [{ heading: "Weekly", body: "# One\nBody" }]);
+  assertEquals(JSON.stringify(detail).includes("hidden_model_state"), false);
 });

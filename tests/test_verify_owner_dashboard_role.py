@@ -101,3 +101,20 @@ def test_dashboard_migration_revokes_trigger_function_execution_and_future_publi
     assert "reject_decision_evaluation_mutation() FROM PUBLIC" in migration
     assert "reject_market_alert_ledger_mutation() FROM PUBLIC" in migration
     assert "ALTER DEFAULT PRIVILEGES IN SCHEMA public REVOKE EXECUTE ON FUNCTIONS FROM PUBLIC" in migration
+
+
+def test_dashboard_role_has_exact_intelligence_select_columns():
+    receipt = evaluate_dashboard_privileges(valid_snapshot())
+    assert receipt["write_privileges"] == 0
+    assert "market_source_items" in EXPECTED_COLUMNS
+    assert "raw_payload" not in EXPECTED_COLUMNS["market_source_items"]
+    assert "normalized_text" not in EXPECTED_COLUMNS["market_source_items"]
+
+
+def test_intelligence_dashboard_migration_is_exact_schema_mirror_and_revokes_first():
+    root = Path(__file__).parents[1]
+    migration = (root / "sql/migrations/20260908_owner_dashboard_intelligence_read_role.sql").read_text()
+    schema = (root / "sql/schema.sql").read_text()
+    assert schema.endswith(migration)
+    assert migration.index("REVOKE ALL PRIVILEGES ON TABLE") < migration.index("GRANT SELECT")
+    assert "GRANT EXECUTE" not in migration

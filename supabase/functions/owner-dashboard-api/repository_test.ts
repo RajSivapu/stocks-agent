@@ -38,6 +38,13 @@ Deno.test("repository issues only fixed parameterized SELECT statements", async 
   await repository.read({ name: "today" });
   await repository.read({ name: "companion" });
   await repository.read({ name: "system" });
+  await repository.read({ name: "intelligence" });
+  await repository.read({ name: "reports" });
+  try {
+    await repository.read({ name: "reportDetail", id: "7d834dbd-75bb-4313-931f-09732f003932" });
+  } catch {
+    // Empty fixture has no report.
+  }
   await repository.read({ name: "transactions" });
   await repository.read({ name: "ideas", status: "approved" });
   await repository.read({ name: "alerts", state: "delivered" });
@@ -56,6 +63,20 @@ Deno.test("repository issues only fixed parameterized SELECT statements", async 
     assert(!/\b(CALL|INSERT|UPDATE|DELETE|MERGE|CREATE|ALTER|DROP|GRANT|REVOKE|RPC)\b/i.test(statement.text));
     assert(!statement.text.includes("25"), "cursor values must be parameters");
   }
+});
+
+Deno.test("intelligence and report repositories select only allowlisted columns", async () => {
+  const recorder = recordingDatabase();
+  const repository = createDashboardRepository(TEST_DATABASE_URL, recorder.factory);
+  await repository.read({ name: "intelligence" });
+  await repository.read({ name: "reports" });
+  try { await repository.read({ name: "reportDetail", id: "7d834dbd-75bb-4313-931f-09732f003932" }); } catch { /* expected */ }
+  const text = recorder.statements.map((item) => item.text).join("\n");
+  for (const forbidden of ["raw_payload", "normalized_text", "canonical_content", "metadata", "reservation_plan", "component_scores", "packet"]) {
+    assert(!text.includes(forbidden), `selected forbidden column ${forbidden}`);
+  }
+  assert(text.includes("FROM public.market_reports"));
+  assert(text.includes("FROM public.market_source_receipts"));
 });
 
 Deno.test("repository applies fixed caps and returns opaque cursors", async () => {

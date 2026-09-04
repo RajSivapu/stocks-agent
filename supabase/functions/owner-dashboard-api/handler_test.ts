@@ -174,6 +174,9 @@ Deno.test("route resolver exposes only documented bounded GET routes", () => {
     "/v1/runs?kind=intraday&cursor=eyJ2IjoxLCJpZCI6IjUwIn0",
     "/v1/runs/7d834dbd-75bb-4313-931f-09732f003932",
     "/v1/system",
+    "/v1/intelligence",
+    "/v1/reports?cursor=eyJ2IjoxLCJpZCI6IjUwIn0",
+    "/v1/reports/7d834dbd-75bb-4313-931f-09732f003932",
   ];
   for (const value of routes) {
     const url = new URL(`https://api.example${value}`);

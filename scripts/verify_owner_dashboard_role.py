@@ -29,6 +29,14 @@ EXPECTED_COLUMNS: dict[str, set[str]] = {
     "market_alert_rule_versions": {"rule_id", "version", "snapshot", "created_at"},
     "market_alert_events": {"id", "request_id", "rule_id", "rule_version", "fingerprint", "status", "reason_codes", "observed_at", "evaluated_at", "persisted_at", "market_session", "condition_results", "evidence_ids", "publication_id"},
     "market_alert_actions": {"id", "draft_id", "rule_id", "event_id", "publication_id", "telegram_update_id", "action", "prior_state", "new_state", "expected_version", "resulting_version", "snoozed_until", "received_at"},
+    "market_intelligence_runs": {"id", "phase", "market_date", "policy_version", "created_at"},
+    "market_intelligence_run_events": {"run_id", "status"},
+    "market_source_receipts": {"run_id", "provider", "status", "retrieved_at", "accepted_count", "dropped_count"},
+    "market_source_items": {"id", "canonical_url", "title"},
+    "market_events": {"id", "run_id", "event_type", "title", "summary", "occurred_at", "effective_at", "materiality", "confidence", "evidence_item_ids"},
+    "market_event_relationships": {"id", "run_id", "source_key", "target_kind", "target_key", "relationship_type", "evidence_item_ids"},
+    "market_candidate_rankings": {"id", "run_id", "event_id", "candidate_key", "ticker", "rank", "total_score", "qualified", "veto_reasons", "exposure_item_ids"},
+    "market_reports": {"id", "run_id", "market_date", "kind", "report", "report_hash", "created_at"},
 }
 
 

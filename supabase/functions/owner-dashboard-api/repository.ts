@@ -1,6 +1,8 @@
 import type {
   AlertsView,
   IdeasView,
+  IntelligenceView,
+  ReportsView,
   RunDetailView,
   RunsView,
   SystemView,
@@ -14,9 +16,12 @@ import type { DashboardReader, DashboardReadResult } from "./handler.ts";
 import {
   mapCompanionResponse,
   mapIdea,
+  mapIntelligence,
   mapPortfolio,
   mapPublicationReceipt,
   mapRun,
+  mapReportDetail,
+  mapReportSummary,
   mapTransactions,
 } from "./mappers.ts";
 import type { DashboardRoute } from "./routes.ts";
@@ -50,7 +55,10 @@ const IDEAS = `SELECT s.id, s.ticker, s.action, s.bucket, s.depth AS profile, s.
        s.entry_zone_high, s.valid_until, s.stop, s.target, s.confidence, s.bull, s.bear,
        s.decisive_factor, s.invalidation_level, s.reason, s.evaluation_id,
        de.final_action, de.policy_status, de.policy_version, de.reason_codes,
-       de.evidence, de.analyst, de.checker, de.created_at
+       de.evidence, de.analyst, de.checker, de.created_at, s.evidence_as_of,
+       (SELECT g.result FROM public.suggestion_grades g WHERE g.suggestion_id = s.id ORDER BY g.graded_at DESC LIMIT 1) AS grade_result,
+       (SELECT g.horizon_days FROM public.suggestion_grades g WHERE g.suggestion_id = s.id ORDER BY g.graded_at DESC LIMIT 1) AS grade_horizon_days,
+       (SELECT g.graded_at FROM public.suggestion_grades g WHERE g.suggestion_id = s.id ORDER BY g.graded_at DESC LIMIT 1) AS graded_at
   FROM public.suggestions s
   LEFT JOIN public.decision_evaluations de ON de.id = s.evaluation_id
  WHERE ($1::text IS NULL OR de.policy_status = $1)
@@ -128,12 +136,62 @@ const RUN_EVALUATIONS = `SELECT s.id, s.ticker, s.action, s.bucket, s.depth AS p
 const ACTIVE_POLICY = `SELECT version, config, activated_at FROM public.market_policy_config
  WHERE active = true ORDER BY version DESC LIMIT 1`;
 
+const LATEST_INTELLIGENCE = `SELECT r.id, r.phase, r.market_date, r.policy_version, r.created_at AS data_as_of
+  FROM public.market_intelligence_runs r
+ WHERE EXISTS (SELECT 1 FROM public.market_intelligence_run_events e WHERE e.run_id = r.id AND e.status = 'completed')
+ ORDER BY r.created_at DESC, r.id DESC LIMIT 1`;
+
+const INTELLIGENCE_EVENTS = `SELECT e.id, e.event_type, e.title, e.summary, e.occurred_at,
+       e.effective_at, e.materiality, e.confidence,
+       COALESCE((SELECT jsonb_agg(jsonb_build_object('title', i.title, 'url', i.canonical_url) ORDER BY i.id)
+                   FROM public.market_source_items i
+                  WHERE i.id::text IN (SELECT jsonb_array_elements_text(e.evidence_item_ids))), '[]'::jsonb) AS evidence
+  FROM public.market_events e WHERE e.run_id = $1::uuid
+ ORDER BY e.materiality DESC, e.id LIMIT 50`;
+
+const INTELLIGENCE_CANDIDATES = `SELECT c.id, c.event_id, c.candidate_key, c.ticker, c.rank,
+       c.total_score, c.qualified, c.veto_reasons,
+       COALESCE((SELECT jsonb_agg(jsonb_build_object('title', i.title, 'url', i.canonical_url) ORDER BY i.id)
+                   FROM public.market_source_items i
+                  WHERE i.id::text IN (SELECT jsonb_array_elements_text(c.exposure_item_ids))), '[]'::jsonb) AS evidence
+  FROM public.market_candidate_rankings c WHERE c.run_id = $1::uuid
+ ORDER BY c.rank LIMIT 12`;
+
+const INTELLIGENCE_RELATIONSHIPS = `SELECT source_key, target_kind, target_key,
+       relationship_type, evidence_item_ids
+  FROM public.market_event_relationships WHERE run_id = $1::uuid
+ ORDER BY target_key, id LIMIT 100`;
+
+const INTELLIGENCE_SOURCES = `SELECT provider, status, retrieved_at, accepted_count, dropped_count
+  FROM public.market_source_receipts WHERE run_id = $1::uuid
+ ORDER BY provider, retrieved_at DESC LIMIT 50`;
+
+const REPORTS = `SELECT id, run_id, market_date, kind, report, report_hash, created_at
+  FROM public.market_reports
+ WHERE ($1::timestamptz IS NULL OR (created_at, id) < ($1::timestamptz, $2::uuid))
+ ORDER BY created_at DESC, id DESC LIMIT 51`;
+
+const REPORT_DETAIL = `SELECT id, run_id, market_date, kind, report, report_hash, created_at
+  FROM public.market_reports WHERE id = $1::uuid LIMIT 1`;
+
+const REPORT_SOURCES = `SELECT id, title, canonical_url
+  FROM public.market_source_items WHERE id::text = ANY($1::text[])
+ ORDER BY id LIMIT 96`;
+
+const REPORT_PUBLICATIONS = `SELECT id, kind, phase, status, rendered_body, rendered_hash,
+       template_version, telegram_message_ids, attempt_count, created_at, delivered_at
+  FROM public.market_publications WHERE run_id = $1::uuid
+ ORDER BY created_at LIMIT 20`;
+
 const STATEMENTS = new Set([
   HOLDINGS, PLANS, TRANSACTIONS, IDEAS, COMPANION, ALERTS, RUNS, RUN_DETAIL,
   RUN_REQUESTS, RUN_EVALUATIONS, ACTIVE_POLICY,
+  LATEST_INTELLIGENCE, INTELLIGENCE_EVENTS, INTELLIGENCE_CANDIDATES,
+  INTELLIGENCE_RELATIONSHIPS, INTELLIGENCE_SOURCES, REPORTS, REPORT_DETAIL,
+  REPORT_SOURCES, REPORT_PUBLICATIONS,
 ]);
 
-type PageKind = "transactions" | "ideas" | "alerts" | "runs";
+type PageKind = "transactions" | "ideas" | "alerts" | "runs" | "reports";
 interface PageCursor { v: 1; k: PageKind; id: string; at?: string }
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const MAX_BIGINT = 9_223_372_036_854_775_807n;
@@ -163,7 +221,7 @@ function decodeCursor(value: string | undefined, kind: PageKind): PageCursor | n
 
 function encodeCursor(kind: PageKind, row: Row): string {
   const payload: PageCursor = { v: 1, k: kind, id: String(row.id ?? "") };
-  if (kind === "alerts") payload.at = iso(row.created_at) ?? invalidCursor();
+  if (kind === "alerts" || kind === "reports") payload.at = iso(row.created_at) ?? invalidCursor();
   if (kind === "runs") payload.at = iso(row.started_at) ?? invalidCursor();
   const value = btoa(JSON.stringify(payload));
   return value.replaceAll("+", "-").replaceAll("/", "_").replace(/=+$/, "");
@@ -253,13 +311,15 @@ export function createDashboardRepository(
   }
 
   async function portfolio(): Promise<DashboardReadResult> {
-    const [holdingRows, planRows, transactionRows] = await Promise.all([
+    const [holdingRows, planRows, transactionRows, intelligenceRows] = await Promise.all([
       holdings(),
       query(PLANS),
       query(TRANSACTIONS, [null]),
+      query(LATEST_INTELLIGENCE),
     ]);
     const dataAsOf = latestTimestamp(holdingRows, ["price_as_of"]);
     const mapped = mapPortfolio(holdingRows, planRows, transactionRows);
+    mapped.latest_intelligence_run_id = typeof intelligenceRows[0]?.id === "string" ? intelligenceRows[0].id : null;
     const freshness = mapped.holdings.length === 0
       ? "unavailable"
       : mapped.holdings.some((item) => item.freshness !== "fresh") ? "partial" : "fresh";
@@ -356,10 +416,12 @@ export function createDashboardRepository(
   }
 
   async function system(): Promise<DashboardReadResult> {
-    const [runRows, alertRows, policyRows] = await Promise.all([
+    const [runRows, alertRows, policyRows, intelligenceResult, reportResult] = await Promise.all([
       query(RUNS, [null, null, null]),
       query(ALERTS, [null, null, null]),
       query(ACTIVE_POLICY),
+      intelligence(),
+      reports({ name: "reports" }),
     ]);
     const latestByKind: SystemView["latest_by_kind"] = {
       "pre-market": null,
@@ -390,10 +452,54 @@ export function createDashboardRepository(
       latest_by_kind: latestByKind,
       latest_publication_status: alertRows[0] ? mapPublicationReceipt(alertRows[0]).state : null,
       boundaries,
+      source_coverage: (intelligenceResult.data as IntelligenceView).sources,
+      latest_report: (reportResult.data as ReportsView).reports[0] ?? null,
+      latest_intelligence_run_id: (intelligenceResult.data as IntelligenceView).run_id === "unknown" ? null : (intelligenceResult.data as IntelligenceView).run_id,
     };
     const dataAsOf = latestTimestamp(runRows, ["data_as_of", "finished_at"]);
     const state = classifyFreshness({ kind: "run", dataAsOf, phase: String(runRows[0]?.kind ?? ""), status: String(runRows[0]?.status ?? "") }, now(), calendar);
     return { data, dataAsOf, freshness: state.freshness, marketState: state.marketState };
+  }
+
+  async function intelligence(): Promise<DashboardReadResult> {
+    const runRows = await query(LATEST_INTELLIGENCE);
+    const run = runRows[0];
+    const id = typeof run?.id === "string" ? run.id : null;
+    const [events, candidates, relationships, sources] = await Promise.all([
+      query(INTELLIGENCE_EVENTS, [id]), query(INTELLIGENCE_CANDIDATES, [id]),
+      query(INTELLIGENCE_RELATIONSHIPS, [id]), query(INTELLIGENCE_SOURCES, [id]),
+    ]);
+    const data = mapIntelligence(runRows, events, candidates, relationships, sources);
+    if (!run) {
+      return { data, dataAsOf: null, freshness: "unavailable", marketState: "unknown" };
+    }
+    const state = classifyFreshness({ kind: "run", phase: String(run.phase ?? "on-demand"), status: "completed", dataAsOf: data.data_as_of }, now(), calendar);
+    return { data, dataAsOf: data.data_as_of, freshness: state.freshness, marketState: state.marketState };
+  }
+
+  async function reports(route: DashboardRoute): Promise<DashboardReadResult> {
+    const cursor = decodeCursor(route.cursor, "reports");
+    const result = page(await query(REPORTS, [cursor?.at ?? null, cursor?.id ?? null]), "reports");
+    const data: ReportsView = { reports: result.rows.map(mapReportSummary), next_cursor: result.nextCursor };
+    const dataAsOf = latestTimestamp(result.rows, ["created_at"]);
+    const state = classifyFreshness({ kind: "run", phase: "on-demand", status: result.rows.length ? "completed" : "", dataAsOf }, now(), calendar);
+    return { data, dataAsOf, freshness: result.rows.length ? state.freshness : "unavailable", marketState: state.marketState, nextCursor: result.nextCursor };
+  }
+
+  async function reportDetail(route: DashboardRoute): Promise<DashboardReadResult> {
+    const rows = await query(REPORT_DETAIL, [route.id ?? ""]);
+    const row = rows[0];
+    if (!row) throw new DashboardHttpError(404, "not_found", "Report not found.");
+    const report = row.report && typeof row.report === "object" && !Array.isArray(row.report) ? row.report as Row : {};
+    const sourceIds = Array.isArray(report.source_ids)
+      ? report.source_ids.slice(0, 96).filter((value): value is string => typeof value === "string" && value.length <= 100)
+      : [];
+    const [sources, publications] = await Promise.all([
+      query(REPORT_SOURCES, [sourceIds]), query(REPORT_PUBLICATIONS, [String(row.run_id ?? "")]),
+    ]);
+    const data = mapReportDetail(row, sources, publications);
+    const dataAsOf = iso(row.created_at);
+    return { data, dataAsOf, freshness: dataAsOf ? "fresh" : "partial", marketState: "unknown" };
   }
 
   return {
@@ -424,6 +530,9 @@ export function createDashboardRepository(
       if (route.name === "alerts") return await alerts(route);
       if (route.name === "runs") return await runs(route);
       if (route.name === "runDetail") return await runDetail(route);
+      if (route.name === "intelligence") return await intelligence();
+      if (route.name === "reports") return await reports(route);
+      if (route.name === "reportDetail") return await reportDetail(route);
       if (route.name === "system") return await system();
       if (route.name === "today") {
         const [portfolioResult, runsResult, ideasResult, companionResult, alertsResult] = await Promise.all([

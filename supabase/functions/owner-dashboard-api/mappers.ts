@@ -4,9 +4,12 @@ import type {
   CompanionView,
   HoldingView,
   IdeaView,
+  IntelligenceView,
   InvestmentPlanView,
   PortfolioView,
   ReceiptStatus,
+  ReportDetailView,
+  ReportSummaryView,
   RunSummaryView,
   SourceLink,
   TransactionView,
@@ -178,6 +181,7 @@ export function mapPortfolio(
       unrealized_amount: complete ? decimal(totalValue - costBasis) : null,
     },
     comparison_availability: "structured_companion",
+    latest_intelligence_run_id: null,
   };
 }
 
@@ -232,6 +236,128 @@ export function mapIdea(row: Row): IdeaView {
     analyst_complete: analyst.completed === true || analyst.verdict === "complete",
     checker_complete: checker.completed === true || ["pass", "approve", "downgrade", "veto"].includes(String(checker.verdict)),
     sources: sourceLinks(row.evidence),
+    intelligence_run_id: text(row.intelligence_run_id, 64),
+    evidence_as_of: text(row.evidence_as_of, 40),
+    outcome: text(row.grade_result, 120) && integer(row.grade_horizon_days) !== null && text(row.graded_at, 40)
+      ? {
+        result: text(row.grade_result, 120)!,
+        horizon_days: integer(row.grade_horizon_days)!,
+        graded_at: text(row.graded_at, 40)!,
+      }
+      : null,
+  };
+}
+
+export function mapIntelligence(
+  runRows: readonly Row[],
+  eventRows: readonly Row[],
+  candidateRows: readonly Row[],
+  relationshipRows: readonly Row[],
+  sourceRows: readonly Row[],
+): IntelligenceView {
+  const run = runRows[0] ?? {};
+  const themeMap = new Map<string, { relationship_count: number; evidence: Set<string> }>();
+  for (const row of relationshipRows.slice(0, 100)) {
+    if (row.target_kind !== undefined && row.target_kind !== "theme") continue;
+    const key = text(row.target_key, 256);
+    if (!key) continue;
+    const current = themeMap.get(key) ?? { relationship_count: 0, evidence: new Set<string>() };
+    current.relationship_count += 1;
+    for (const item of textArray(row.evidence_item_ids, 8)) current.evidence.add(item);
+    themeMap.set(key, current);
+  }
+  const limitations: string[] = [];
+  const sources = sourceRows.slice(0, 50).flatMap((row) => {
+    const provider = text(row.provider, 80);
+    if (!provider) return [];
+    const persisted = text(row.status, 40);
+    const status = persisted === "succeeded" || persisted === "cache_hit"
+      ? "complete" as const
+      : persisted === "failed" && (integer(row.accepted_count) ?? 0) > 0
+      ? "partial" as const
+      : "unavailable" as const;
+    if (status !== "complete") limitations.push(`${provider} coverage is ${status}.`);
+    return [{
+      provider,
+      status,
+      retrieved_at: text(row.retrieved_at, 40),
+      accepted_count: integer(row.accepted_count) ?? 0,
+      dropped_count: integer(row.dropped_count) ?? 0,
+    }];
+  });
+  return {
+    run_id: text(run.id, 64) ?? "unknown",
+    data_as_of: text(run.data_as_of ?? run.created_at, 40),
+    themes: [...themeMap.entries()].slice(0, 25).map(([key, value]) => ({
+      key,
+      relationship_count: value.relationship_count,
+      evidence_count: value.evidence.size,
+    })),
+    events: eventRows.slice(0, 50).flatMap((row) => {
+      const id = text(row.id, 64);
+      const type = text(row.event_type, 80);
+      const title = text(row.title, 500);
+      if (!id || !type || !title) return [];
+      return [{
+        id, type, title, summary: text(row.summary, 4_000) ?? "",
+        occurred_at: text(row.occurred_at, 40), effective_at: text(row.effective_at, 40),
+        materiality: text(row.materiality, 80) ?? "0", confidence: text(row.confidence, 80) ?? "0",
+        sources: sourceLinks(row.evidence),
+      }];
+    }),
+    candidates: candidateRows.slice(0, 12).flatMap((row) => {
+      const id = text(row.id, 64);
+      const candidateKey = text(row.candidate_key, 256);
+      const rank = integer(row.rank);
+      if (!id || !candidateKey || rank === null) return [];
+      return [{
+        id, event_id: text(row.event_id, 64), candidate_key: candidateKey,
+        ticker: text(row.ticker, 24), rank, total_score: text(row.total_score, 80) ?? "0",
+        qualified: row.qualified === true, veto_reasons: textArray(row.veto_reasons),
+        sources: sourceLinks(row.evidence),
+      }];
+    }),
+    sources,
+    limitations: [...new Set(limitations)].slice(0, 20),
+  };
+}
+
+export function mapReportSummary(row: Row): ReportSummaryView {
+  const report = record(row.report);
+  const kind = ["morning", "urgent", "weekly", "monthly", "theme", "on-demand", "intraday"].includes(String(row.kind))
+    ? row.kind as ReportSummaryView["kind"] : "unknown";
+  return {
+    id: text(row.id, 64) ?? "unknown",
+    market_date: text(row.market_date, 40) ?? "",
+    kind,
+    title: text(report.title, 200) ?? "Untitled report",
+    summary: text(report.summary, 1_000) ?? "",
+    report_hash: text(row.report_hash, 64) ?? "",
+    created_at: text(row.created_at, 40) ?? "",
+  };
+}
+
+export function mapReportDetail(
+  row: Row,
+  sourceRows: readonly Row[],
+  publicationRows: readonly Row[],
+): ReportDetailView {
+  const summary = mapReportSummary(row);
+  const report = record(row.report);
+  const body = text(report.full_markdown, 14_000);
+  return {
+    ...summary,
+    sections: body ? [{ heading: summary.title, body }] : [],
+    sources: sourceRows.slice(0, 96).flatMap((source) => {
+      const label = text(source.title, 120);
+      if (!label) return [];
+      return sourceLinks([{ label, url: source.canonical_url }]);
+    }),
+    publication: publicationRows.slice(0, 20).flatMap((publication) => {
+      const mapped = mapPublicationReceipt(publication);
+      const at = mapped.delivered_at ?? mapped.created_at;
+      return at ? [{ status: mapped.state, at, telegram_message_ids: mapped.telegram_message_ids }] : [];
+    }),
   };
 }
 

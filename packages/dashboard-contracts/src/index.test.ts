@@ -1,8 +1,11 @@
 import { describe, expect, it } from "vitest";
 
 import {
+  type IntelligenceView,
   parseDashboardEnvelope,
   parseDashboardErrorEnvelope,
+  type ReportDetailView,
+  type ReportsView,
 } from "./index";
 
 const base = {
@@ -51,5 +54,32 @@ describe("dashboard response contracts", () => {
       ...error,
       error: { code: "postgres_error", message: "relation missing" },
     })).toThrow("error.code");
+  });
+
+  it("parses intelligence coverage without raw provider payloads", () => {
+    const fixture = {
+      ...base,
+      data: {
+        run_id: "7d834dbd-75bb-4313-931f-09732f003932",
+        data_as_of: "2026-09-03T19:55:00.000Z",
+        themes: [], events: [], candidates: [], limitations: [],
+        sources: [{ provider: "gdelt", status: "complete", retrieved_at: "2026-09-03T19:55:00.000Z", accepted_count: 3, dropped_count: 0 }],
+      },
+    };
+    const view: IntelligenceView = parseDashboardEnvelope<IntelligenceView>(fixture).data;
+    expect(view.sources[0]).toEqual(expect.objectContaining({ provider: "gdelt", status: "complete" }));
+    expect(JSON.stringify(view)).not.toContain("raw_payload");
+  });
+
+  it("exports bounded report list and detail contracts", () => {
+    const reports: ReportsView = { reports: [], next_cursor: null };
+    const detail: ReportDetailView = {
+      id: "7d834dbd-75bb-4313-931f-09732f003932", market_date: "2026-09-03",
+      kind: "weekly", title: "Weekly review", summary: "Bounded summary.",
+      report_hash: "a".repeat(64), created_at: "2026-09-03T20:00:00.000Z",
+      sections: [], sources: [], publication: [],
+    };
+    expect(reports.next_cursor).toBeNull();
+    expect(detail.sections).toEqual([]);
   });
 });
