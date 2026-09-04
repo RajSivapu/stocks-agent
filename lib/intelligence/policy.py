@@ -147,6 +147,8 @@ def load_intelligence_policy(settings: Mapping[str, object]) -> IntelligencePoli
     )
     if sum(alpha_budget.values()) > 18:
         raise ValueError("alpha vantage phase budget must not exceed 18")
+    if sum(alpha_budget.values()) > daily_ceiling:
+        raise ValueError("alpha vantage daily ceiling cannot be lower than its phase allocation")
 
     raw_provider_budgets = _mapping(intelligence, "provider_phase_budgets")
     expected_budget_providers = set(_PROVIDERS) - {"alpha_vantage"}

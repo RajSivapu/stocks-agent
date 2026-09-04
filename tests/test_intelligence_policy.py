@@ -50,6 +50,13 @@ def test_root_execution_authority_is_rejected(settings):
         load_intelligence_policy(settings)
 
 
+def test_alpha_vantage_phase_allocation_cannot_exceed_daily_ceiling(settings):
+    settings["intelligence"]["alpha_vantage_daily_ceiling"] = 10
+
+    with pytest.raises(ValueError, match="daily ceiling"):
+        load_intelligence_policy(settings)
+
+
 @pytest.mark.parametrize(
     ("path", "value", "message"),
     [

@@ -123,7 +123,7 @@
     "monthly_money_moves_on_first_brief_of_month": true,
     "market_open_et": "09:30",
     "market_close_et": "16:00",
-    "_cadence_note": "Owner chose a DAILY weekday brief (07:30 ET) for the learning habit. Actionable money moves stay MONTHLY (full block on the first brief of the calendar month; a 1-line reminder otherwise). Free data APIs are fine — Alpha Vantage's 25/day budget resets each day. Cost: daily uses ~5x the Claude (Pro) usage of weekly; no separate API bill. v2 adds intraday + post-market runs (see cadence block)."
+    "_cadence_note": "Owner chose a DAILY weekday brief (07:30 ET) for the learning habit. Actionable money moves stay MONTHLY (full block on the first brief of the calendar month; a 1-line reminder otherwise). Free data APIs are fine — Alpha Vantage's 20/day budget is the configured internal ceiling and resets each day. Cost: daily uses ~5x the Claude (Pro) usage of weekly; no separate API bill. v2 adds intraday + post-market runs (see cadence block)."
   },
   "cadence": {
     "timezone": "America/Chicago",

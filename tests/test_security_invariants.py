@@ -42,6 +42,15 @@ def test_v1_intelligence_configuration_keeps_zero_cost_owner_only_boundaries():
     assert "alpaca" not in intelligence["providers"]
 
 
+def test_alpha_vantage_cadence_wording_matches_the_intelligence_ceiling():
+    settings = json.loads((ROOT / "config" / "settings.json").read_text())
+    ceiling = settings["intelligence"]["alpha_vantage_daily_ceiling"]
+    cadence_note = settings["schedule"]["_cadence_note"]
+
+    assert f"Alpha Vantage's {ceiling}/day budget" in cadence_note
+    assert "25/day budget" not in cadence_note
+
+
 def test_privileged_portfolio_rpcs_are_schema_qualified_and_service_role_only():
     for path in SQL_FILES:
         sql = path.read_text()
