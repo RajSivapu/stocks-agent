@@ -215,12 +215,14 @@ def test_source_reconciliation_rejects_unsupported_run_send_policy_and_price_cla
     assert receipt["status"] == "verified"
     assert receipt["claims_checked"] == 11
     assert receipt["relationships_verified"] is True
+    assert receipt["scheduled_chain"]["run_id"] == run_id
 
     for path, value in [
         (("run", "write_counts"), {"suggestions": 2}),
         (("alerts", 0, "telegram_message_ids"), [999]),
         (("policy_version",), 18),
         (("holdings", 0, "price"), "109"),
+        (("intelligence_events", 0, "content_hash"), "invalid"),
     ]:
         changed = json.loads(json.dumps(source))
         target = changed

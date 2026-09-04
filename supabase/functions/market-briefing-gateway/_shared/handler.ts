@@ -1607,10 +1607,25 @@ async function evaluateAndPublish(
   const result = {
     ok: delivered.status !== "delivery_failed" &&
       delivered.status !== "delivery_unknown",
+    run_id: requireRun(envelope),
     publication_id: delivered.id,
     publication_status: delivered.status,
     telegram_message_ids: delivered.telegram_message_ids,
     evaluation_count: evaluations.length,
+    policy_decision_ids: evaluations.map((evaluation) =>
+      evaluation.evaluation_id
+    ).sort(),
+    source_ids: [
+      ...new Set(evaluations.flatMap((evaluation) =>
+        evaluation.candidate.evidence.map((item) => item.id)
+      )),
+    ].sort(),
+    intelligence_packet: bundle.intelligence_packet
+      ? {
+        id: bundle.intelligence_packet.id,
+        content_hash: bundle.intelligence_packet.content_hash,
+      }
+      : null,
     suggestion_count: suggestions.length,
     alert_drafts_created: alertDraftsCreated,
     alert_draft_status: alertDraftStatus,

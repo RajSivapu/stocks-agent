@@ -11,7 +11,6 @@ from typing import Literal
 
 
 ReportKind = Literal["morning", "urgent", "weekly", "monthly", "theme", "on-demand", "intraday"]
-_REPORT_NAMESPACE = uuid.UUID("5489a117-f79a-4ca8-98cd-792e81628472")
 _HASH = frozenset("0123456789abcdef")
 
 
@@ -107,6 +106,14 @@ def report_idempotency_key(kind: str, market_date: date, packet_hash: str) -> st
     return _sha256(f"v1:{kind}:{market_date}:{packet_hash}".encode())
 
 
+def report_id_from_key(key: str) -> str:
+    _validate_hash(key, "idempotency_key")
+    value = list(key[:32])
+    value[12] = "5"
+    value[16] = "8"
+    return str(uuid.UUID("".join(value)))
+
+
 def build_report(value: ReportInput) -> MarketReport:
     if value.kind not in {"morning", "urgent", "weekly", "monthly", "theme", "on-demand", "intraday"}:
         raise ValueError("unsupported report kind")
@@ -131,6 +138,8 @@ def build_report(value: ReportInput) -> MarketReport:
     comparison_ids = _sorted_unique(value.comparison_ids, "comparison_ids")
     if comparison_ids:
         raise ValueError("comparison_ids require a durable comparison ledger")
+    if not source_ids or not policy_ids:
+        raise ValueError("report requires source and policy decision receipts")
     markdown = value.full_markdown.rstrip()
     if "suggestion only" not in markdown.lower():
         markdown += "\n\nSuggestion only; no order was placed."
@@ -149,7 +158,7 @@ def build_report(value: ReportInput) -> MarketReport:
     canonical = json.dumps(body, ensure_ascii=False, separators=(",", ":"), sort_keys=True).encode()
     key = report_idempotency_key(value.kind, value.market_date, value.packet_hash)
     return MarketReport(
-        report_id=str(uuid.uuid5(_REPORT_NAMESPACE, key)),
+        report_id=report_id_from_key(key),
         idempotency_key=key,
         packet_id=packet_id,
         packet_hash=value.packet_hash,
@@ -169,4 +178,4 @@ def build_report(value: ReportInput) -> MarketReport:
     )
 
 
-__all__ = ["MarketReport", "ReportInput", "ReportKind", "build_report", "report_idempotency_key"]
+__all__ = ["MarketReport", "ReportInput", "ReportKind", "build_report", "report_id_from_key", "report_idempotency_key"]

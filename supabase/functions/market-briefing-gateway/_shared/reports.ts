@@ -89,6 +89,19 @@ function identifiers(value: unknown, path: string): string[] {
   return [...result];
 }
 
+export function reportIdFromKey(key: string): string {
+  if (!HASH.test(key)) {
+    throw new Error("idempotency_key must be a lowercase SHA-256 hash");
+  }
+  const value = key.slice(0, 32).split("");
+  value[12] = "5";
+  value[16] = "8";
+  const hex = value.join("");
+  return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${
+    hex.slice(16, 20)
+  }-${hex.slice(20)}`;
+}
+
 export function parseRecordReportPayload(value: unknown): RecordReportPayload {
   const row = object(value, "report payload");
   exact(row, [
@@ -112,6 +125,9 @@ export function parseRecordReportPayload(value: unknown): RecordReportPayload {
   const key = bounded(row.idempotency_key, "idempotency_key", 64);
   if (!HASH.test(key)) {
     throw new Error("idempotency_key must be a lowercase SHA-256 hash");
+  }
+  if (id !== reportIdFromKey(key)) {
+    throw new Error("report id does not match idempotency_key");
   }
   const marketDate = bounded(row.market_date, "market_date", 10);
   if (
@@ -149,6 +165,11 @@ export function parseRecordReportPayload(value: unknown): RecordReportPayload {
   };
   if (report.comparison_ids.length !== 0) {
     throw new Error("comparison_ids require a durable comparison ledger");
+  }
+  if (
+    report.source_ids.length === 0 || report.policy_decision_ids.length === 0
+  ) {
+    throw new Error("report requires source and policy decision receipts");
   }
   if (
     reportRow.suggestion_only !== true ||

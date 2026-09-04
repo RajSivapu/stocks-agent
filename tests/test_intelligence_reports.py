@@ -3,7 +3,7 @@ from datetime import date
 
 import pytest
 
-from lib.intelligence.reports import ReportInput, build_report, report_idempotency_key
+from lib.intelligence.reports import ReportInput, build_report, report_id_from_key, report_idempotency_key
 
 SOURCE_A = "00000000-0000-4000-8000-000000000001"
 SOURCE_B = "00000000-0000-4000-8000-000000000002"
@@ -44,6 +44,7 @@ def test_report_idempotency_key_is_exact_lowercase_sha256():
     key = report_idempotency_key("weekly", date(2026, 9, 4), "a" * 64)
     assert key == "8104d9d6f504c9d84a98d812dc17d5d8043d25897d037b9a2a0f72c739b92ab5"
     assert len(key) == 64 and key == key.lower()
+    assert report_id_from_key(key) == "8104d9d6-f504-59d8-8a98-d812dc17d5d8"
 
 
 def test_report_is_immutable_bounded_and_suggestion_only():
@@ -60,3 +61,5 @@ def test_urgent_and_intraday_reports_fail_closed():
         build_report(report_input(kind="urgent", intraday_triggered=True))
     with pytest.raises(ValueError, match="trigger"):
         build_report(report_input(kind="intraday", intraday_triggered=False))
+    with pytest.raises(ValueError, match="requires source"):
+        build_report(report_input(source_ids=()))

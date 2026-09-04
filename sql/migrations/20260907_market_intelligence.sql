@@ -1173,6 +1173,7 @@ DECLARE
   v_existing public.market_reports%ROWTYPE;
   v_packet public.market_evidence_packets%ROWTYPE;
   v_expected_key TEXT;
+  v_expected_id UUID;
 BEGIN
   IF p_run_id IS NULL OR p_idempotency_key IS NULL
      OR p_idempotency_key !~ '^[0-9a-f]{64}$' OR jsonb_typeof(p_report)<>'object'
@@ -1199,6 +1200,8 @@ BEGIN
      OR jsonb_typeof(p_report->'report'->'source_ids') <> 'array'
      OR jsonb_typeof(p_report->'report'->'policy_decision_ids') <> 'array'
      OR jsonb_typeof(p_report->'report'->'comparison_ids') <> 'array'
+     OR jsonb_array_length(p_report->'report'->'source_ids') = 0
+     OR jsonb_array_length(p_report->'report'->'policy_decision_ids') = 0
      OR jsonb_array_length(p_report->'report'->'comparison_ids') <> 0
      OR EXISTS (SELECT 1 FROM jsonb_array_elements_text(p_report->'report'->'source_ids') item
        WHERE item !~ '^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$')
@@ -1219,7 +1222,12 @@ BEGIN
     'v1:' || p_report->>'kind' || ':' || p_report->>'market_date' || ':' || v_packet.packet_hash,
     'UTF8'
   ), 'sha256'), 'hex');
-  IF p_idempotency_key <> v_expected_key
+  v_expected_id := (
+    substr(v_expected_key,1,8) || '-' || substr(v_expected_key,9,4) || '-5' ||
+    substr(v_expected_key,14,3) || '-8' || substr(v_expected_key,18,3) || '-' ||
+    substr(v_expected_key,21,12)
+  )::uuid;
+  IF p_idempotency_key <> v_expected_key OR p_report->>'id' <> v_expected_id::text
      OR EXISTS (
        SELECT 1 FROM jsonb_array_elements_text(p_report->'report'->'source_ids') source_id
        WHERE NOT EXISTS (
@@ -1245,6 +1253,7 @@ BEGIN
     AND market_date=(p_report->>'market_date')::date AND kind=p_report->>'kind';
   IF FOUND THEN
     IF v_existing.run_id IS DISTINCT FROM p_run_id
+       OR v_existing.id IS DISTINCT FROM v_expected_id
        OR v_existing.packet_id IS DISTINCT FROM (p_report->>'packet_id')::uuid
        OR v_existing.report_hash IS DISTINCT FROM p_report->>'report_hash'
        OR v_existing.rendered_text IS DISTINCT FROM p_report->>'rendered_text'

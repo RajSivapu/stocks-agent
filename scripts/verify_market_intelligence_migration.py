@@ -320,6 +320,13 @@ def _canonical_hash(value: object) -> str:
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
 
+def _report_id_from_key(key: str) -> str:
+    value = list(key[:32])
+    value[12] = "5"
+    value[16] = "8"
+    return str(UUID("".join(value)))
+
+
 def _completed_payload(
     *,
     reservation_id: UUID,
@@ -498,15 +505,40 @@ def verify(cursor) -> tuple[dict[str, object], list[UUID]]:
     replay = _call(cursor, "record_market_intelligence", prior_run, completion_id, Jsonb(payload))
     duplicate_idempotency = recorded["duplicate"] is False and replay["duplicate"] is True
 
-    report_id = uuid4()
-    report_key = hashlib.sha256(b"rollback-only-report-key").hexdigest()
+    decision_request_id, decision_id = uuid4(), uuid4()
+    cursor.execute(
+        "INSERT INTO public.analysis_runs(id,kind,status) VALUES (%s,'on-demand','running')",
+        (prior_run,),
+    )
+    cursor.execute(
+        """INSERT INTO public.market_gateway_requests(
+          request_id,operation,run_id,status,lease_token
+        ) VALUES (%s,'evaluate_and_publish',%s,'completed',%s)""",
+        (decision_request_id, prior_run, uuid4()),
+    )
+    cursor.execute(
+        """INSERT INTO public.decision_evaluations(
+          id,request_id,run_id,candidate_id,policy_version,input_digest,raw_action,
+          final_action,policy_status,reason_codes,explanations,normalized,evidence,analyst,checker
+        ) VALUES (%s,%s,%s,%s,%s,%s,'hold','hold','approved','[]','[]','{}','[]','{}','{}')""",
+        (decision_id, decision_request_id, prior_run, uuid4(), policy_version, "a" * 64),
+    )
+    report_key = hashlib.sha256(
+        f"v1:on-demand:{date.today() - timedelta(days=1)}:{payload['packet']['packet_hash']}".encode()
+    ).hexdigest()
+    report_id = UUID(_report_id_from_key(report_key))
+    report_body = {
+        "sections": [], "limitations": [],
+        "source_ids": [payload["items"][0]["id"]],
+        "policy_decision_ids": [str(decision_id)], "comparison_ids": [],
+    }
     report_payload = {
         "id": str(report_id),
         "packet_id": payload["packet"]["id"],
         "market_date": (date.today() - timedelta(days=1)).isoformat(),
         "kind": "on-demand",
-        "report": {"sections": [], "limitations": []},
-        "report_hash": _canonical_hash({"sections": [], "limitations": []}),
+        "report": report_body,
+        "report_hash": _canonical_hash(report_body),
         "rendered_text": "Rollback-only verifier report",
         "rendered_hash": hashlib.sha256(
             b"Rollback-only verifier report"
@@ -791,12 +823,15 @@ def verify(cursor) -> tuple[dict[str, object], list[UUID]]:
                               Jsonb(bad_learning_hash))))
     semantic_hashes_rejected = all(semantic_results)
 
+    theme_key = hashlib.sha256(
+        f"v1:theme:{date.today() - timedelta(days=1)}:{payload['packet']['packet_hash']}".encode()
+    ).hexdigest()
     theme_payload = {
-        **report_payload, "id": str(uuid4()), "kind": "theme",
-        "report": {"theme": "policy", "limitations": []},
+        **report_payload, "id": _report_id_from_key(theme_key), "kind": "theme",
+        "report": {**report_body, "theme": "policy"},
     }
     theme_payload["report_hash"] = _canonical_hash(theme_payload["report"])
-    theme_result = _call(cursor, "record_market_report", prior_run, hashlib.sha256(b"theme-report-key").hexdigest(),
+    theme_result = _call(cursor, "record_market_report", prior_run, theme_key,
                          Jsonb(theme_payload))
     theme_report_recorded = theme_result["duplicate"] is False
 

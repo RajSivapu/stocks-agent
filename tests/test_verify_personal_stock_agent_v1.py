@@ -20,7 +20,7 @@ def complete_release_receipt():
         "owner_canary": {"status": "verified", "http_status": 200, "url": "https://stocks.example.com"},
         "anonymous_denial": {"status": "verified", "http_status": 401, "url": "https://stocks.example.com"},
         "non_owner_denial": {"status": "verified", "http_status": 403, "url": "https://stocks.example.com"},
-        "source_parity": {"status": "verified", "candidate_sha": sha, "relationships_verified": True, "hashes_verified": True, "counts": {key: 1 for key in ("runs", "events", "rankings", "packets", "reports", "report_publications")}},
+        "source_parity": {"status": "verified", "candidate_sha": sha, "relationships_verified": True, "hashes_verified": True, "counts": {key: 1 for key in ("runs", "events", "rankings", "packets", "reports", "report_publications")}, "scheduled_chain": {"run_id": uid, "intelligence_run_id": uid, "packet_id": "22222222-2222-4222-8222-222222222222", "report_id": "33333333-3333-4333-8333-333333333333", "packet_hash": "1" * 64, "report_hash": "2" * 64, "publication_receipt": {"status": "accepted_by_telegram", "telegram_message_ids": [7]}}},
         "scheduled_receipt": {"status": "completed", "run_id": uid, "intelligence_run_id": uid, "packet_id": "22222222-2222-4222-8222-222222222222", "report_id": "33333333-3333-4333-8333-333333333333", "packet_hash": "1" * 64, "report_hash": "2" * 64, "publication_receipt": {"status": "accepted_by_telegram", "telegram_message_ids": [7]}},
         "rollback_check": {"status": "rolled_back", "function": "owner-dashboard-api", "dashboard_secrets_unset": ["DASHBOARD_ALLOWED_ORIGINS", "DASHBOARD_DATABASE_URL", "DASHBOARD_OWNER_USER_ID"], "runtime_login": {"status": "disabled", "login": False, "memberships": 0}, "gateway": {"status": "restored", "source_sha256": "3" * 64, "git_sha": "9" * 40, "function_version": 19}},
     }
@@ -29,6 +29,9 @@ def complete_release_receipt():
 def test_release_receipt_requires_every_gate():
     receipt = complete_release_receipt()
     assert verify_release(receipt) == {"status": "verified", "candidate_sha": "a" * 40, "gate_count": 15}
+    receipt["scheduled_receipt"]["report_hash"] = "4" * 64
+    with pytest.raises(RuntimeError, match="reconciled source chain"):
+        verify_release(receipt)
 
 
 @pytest.mark.parametrize("missing", [

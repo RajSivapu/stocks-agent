@@ -452,6 +452,10 @@ def reconcile_source_receipts(
     )}
     if any(not isinstance(rows, list) or not rows for rows in chains.values()):
         fail()
+    if len(chains["intelligence_runs"]) != 1 or chains["intelligence_runs"][0].get("id") != run_id:
+        fail()
+    if any(row.get("run_id") != run_id or not re.fullmatch(r"[0-9a-f]{64}", str(row.get("content_hash", ""))) for row in chains["intelligence_events"]):
+        fail()
     packet = chains["intelligence_packets"][0]
     if packet.get("run_id") != run_id or not re.fullmatch(r"[0-9a-f]{64}", str(packet.get("packet_hash", ""))):
         fail()
@@ -467,6 +471,11 @@ def reconcile_source_receipts(
         response = row.get("response")
         if row.get("run_id") != run_id or not isinstance(response, dict) or response.get("report_id") not in report_ids or not isinstance(response.get("publication_receipt"), dict):
             fail()
+    report = chains["reports"][-1]
+    publication = next((row["response"] for row in chains["report_publications"]
+                        if isinstance(row.get("response"), dict) and row["response"].get("report_id") == report.get("id")), None)
+    if not isinstance(publication, dict):
+        fail()
     intelligence = payloads.get("/v1/intelligence", {}).get("data")
     reports_view = payloads.get("/v1/reports", {}).get("data")
     if not isinstance(intelligence, dict) or intelligence.get("run_id") != run_id or not isinstance(reports_view, dict):
@@ -480,6 +489,13 @@ def reconcile_source_receipts(
                    "rankings": len(chains["intelligence_rankings"]), "packets": len(chains["intelligence_packets"]),
                    "reports": len(chains["reports"]), "report_publications": len(chains["report_publications"])},
         "relationships_verified": True, "hashes_verified": True,
+        "scheduled_chain": {
+            "run_id": run_id,
+            "intelligence_run_id": chains["intelligence_runs"][0]["id"],
+            "packet_id": packet["id"], "packet_hash": packet["packet_hash"],
+            "report_id": report["id"], "report_hash": report["report_hash"],
+            "publication_receipt": publication["publication_receipt"],
+        },
     }
 
 

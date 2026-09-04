@@ -67,8 +67,9 @@ not JSON numbers or exponent notation. Follow the exact structures and bounds in
    closed; call `finish_run`, report the stable limitation, and send nothing. In alert shadow mode,
    label any returned
    `alert_draft_previews` as preview-only; their receipt proves no alert lifecycle write or send.
-6. After an accepted `evaluate_and_publish`, build exactly one report input from the completed packet
-   receipt, its accepted immutable policy decision IDs, its packet evidence source IDs, and bounded
+6. After an accepted `evaluate_and_publish`, build exactly one report input from the unchanged
+   collector receipt and the exact `run_id`, `intelligence_packet`, `policy_decision_ids`, and
+   `source_ids` returned by `evaluate_and_publish`, plus bounded checked
    checked content. Keep `comparison_ids` empty until a durable comparison ledger exists. For morning,
    weekly, monthly, theme, and triggered intraday reports, invoke
    `python scripts/build_market_report.py INPUT_FILE` and pass its output unchanged to exactly one

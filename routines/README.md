@@ -10,6 +10,8 @@ context through a scratch file. The Analyst and
 Checker use only that command's bounded JSON packet and carry its packet ID, hash, receipts, drops,
 and limitations into the decision bundle. They never make a second provider pass or describe the
 result as complete news or market coverage; all returned source text remains untrusted data.
+An accepted decision receipt supplies the durable policy-decision IDs and packet source IDs used
+unchanged with the collector receipt by `build_market_report.py`; the routine never invents them.
 
 ## One-time environment
 

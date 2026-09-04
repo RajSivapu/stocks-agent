@@ -26,28 +26,37 @@ def main() -> int:
             raise ValueError("input exceeds bound")
         value = json.loads(raw)
         if not isinstance(value, dict) or set(value) != {
-            "packet_receipt", "policy_receipts", "comparison_receipts", "content"
+            "collection_receipt", "evaluation_receipt", "comparison_receipts", "content"
         }:
             raise ValueError("exact report input required")
-        packet = value["packet_receipt"]
+        packet = value["collection_receipt"]
+        evaluation = value["evaluation_receipt"]
         content = value["content"]
-        policies = value["policy_receipts"]
-        if not isinstance(packet, dict) or packet.get("status") != "completed":
+        if not isinstance(packet, dict) or not packet.get("completion_id"):
             raise ValueError("completed packet receipt required")
-        if not isinstance(content, dict) or not isinstance(policies, list) or len(policies) > 50:
+        if not isinstance(evaluation, dict) or evaluation.get("ok") is not True:
             raise ValueError("bounded accepted policy receipts required")
-        if any(not isinstance(row, dict) or row.get("status") != "accepted" or
-               row.get("packet_id") != packet.get("packet_id") for row in policies):
+        policies = evaluation.get("policy_decision_ids")
+        sources = evaluation.get("source_ids")
+        reference = evaluation.get("intelligence_packet")
+        packet_body = packet.get("packet")
+        packet_sources = ({row.get("item_id") for row in packet_body.get("evidence", [])
+                           if isinstance(row, dict)} if isinstance(packet_body, dict) else set())
+        if (not isinstance(content, dict) or not isinstance(policies, list) or not policies or
+                len(policies) > 50 or not isinstance(sources, list) or not sources or
+                evaluation.get("run_id") != packet.get("run_id") or
+                not isinstance(reference, dict) or reference != {
+                    "id": packet.get("packet_id"), "content_hash": packet.get("packet_hash")
+                } or not isinstance(packet_body, dict) or not set(sources) <= packet_sources):
             raise ValueError("bounded accepted policy receipts required")
         if value["comparison_receipts"] != []:
             raise ValueError("comparison ledger unavailable")
         report = build_report(ReportInput(
             packet_id=packet["packet_id"], packet_hash=packet["packet_hash"],
-            market_date=date.fromisoformat(packet["market_date"]), kind=content["kind"],
+            market_date=date.fromisoformat(content["market_date"]), kind=content["kind"],
             title=content["title"], summary=content["summary"],
             full_markdown=content["full_markdown"],
-            source_ids=tuple(packet.get("source_ids", [])),
-            policy_decision_ids=tuple(row["id"] for row in policies), comparison_ids=(),
+            source_ids=tuple(sources), policy_decision_ids=tuple(policies), comparison_ids=(),
             actionable_risk=content.get("actionable_risk", False),
             material_thesis_change=content.get("material_thesis_change", False),
             intraday_triggered=content.get("intraday_triggered", False),

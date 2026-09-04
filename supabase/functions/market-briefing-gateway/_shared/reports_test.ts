@@ -2,6 +2,7 @@ import {
   parseRecordReportPayload,
   type RecordReportPayload,
   renderReportDelivery,
+  reportIdFromKey,
 } from "./reports.ts";
 import { canonicalJson, sha256Hex } from "./intelligence.ts";
 
@@ -45,7 +46,7 @@ function report(
     suggestion_only: true,
   };
   return {
-    id: "00000000-0000-4000-8000-000000000040",
+    id: reportIdFromKey("a".repeat(64)),
     idempotency_key: "a".repeat(64),
     packet_id: "00000000-0000-4000-8000-000000000020",
     market_date: "2026-09-04",
@@ -74,6 +75,10 @@ Deno.test("report payload accepts only canonical hashes and a SHA-256 idempotenc
     () =>
       parseRecordReportPayload({ ...report(), report_hash: "0".repeat(64) }),
     "report_hash",
+  );
+  assertThrows(
+    () => parseRecordReportPayload({ ...report(), id: crypto.randomUUID() }),
+    "does not match",
   );
 });
 

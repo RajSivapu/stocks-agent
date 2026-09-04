@@ -884,6 +884,18 @@ Deno.test("accepted discovery persists the packet to Analyst to Checker chain", 
     intelligence_packet: packetRef(),
   }));
   assertEquals(response.status, 200);
+  const receipt = await json(response);
+  assertEquals(receipt.run_id, RUN_ID);
+  assert(
+    Array.isArray(receipt.policy_decision_ids) &&
+      receipt.policy_decision_ids.length === 1,
+    "durable policy decision ID missing",
+  );
+  assertEquals(receipt.source_ids, ["q"]);
+  assertEquals(receipt.intelligence_packet, {
+    id: PACKET_ID,
+    content_hash: PACKET_HASH,
+  });
   const persisted = setup.repository.lastBundle!.evaluations[0].candidate;
   assertEquals(persisted.analyst.packet_id, PACKET_ID);
   assertEquals(persisted.checker.analyst_id, persisted.analyst.id);

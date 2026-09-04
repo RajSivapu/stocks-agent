@@ -53,11 +53,13 @@ def verify_release(receipt:Mapping[str,object])->dict[str,object]:
  for gate,status in (("owner_canary",200),("anonymous_denial",401),("non_owner_denial",403)):
   row=_row(receipt,gate)
   if row.get("status")!="verified" or row.get("http_status")!=status or not isinstance(row.get("url"),str): raise RuntimeError(f"invalid release gate: {gate}")
- parity=_row(receipt,"source_parity"); counts=parity.get("counts"); required={"runs","events","rankings","packets","reports","report_publications"}
- if parity.get("status")!="verified" or parity.get("relationships_verified") is not True or parity.get("hashes_verified") is not True or not isinstance(counts,Mapping) or set(counts)!=required or any(isinstance(counts[k],bool) or not isinstance(counts[k],int) or counts[k]<=0 for k in required): raise RuntimeError("invalid release gate: source_parity")
+ parity=_row(receipt,"source_parity"); counts=parity.get("counts"); chain=parity.get("scheduled_chain"); required={"runs","events","rankings","packets","reports","report_publications"}
+ if parity.get("status")!="verified" or parity.get("relationships_verified") is not True or parity.get("hashes_verified") is not True or not isinstance(chain,Mapping) or not isinstance(counts,Mapping) or set(counts)!=required or any(isinstance(counts[k],bool) or not isinstance(counts[k],int) or counts[k]<=0 for k in required): raise RuntimeError("invalid release gate: source_parity")
  _same(parity,("candidate_sha",),candidate,"source_parity")
  scheduled=_row(receipt,"scheduled_receipt"); ids=(scheduled.get("run_id"),scheduled.get("intelligence_run_id"),scheduled.get("packet_id"),scheduled.get("report_id")); pub=scheduled.get("publication_receipt")
  if scheduled.get("status")!="completed" or not all(_uuid(v) for v in ids) or ids[0]!=ids[1] or not isinstance(pub,Mapping) or pub.get("status") not in {"accepted_by_telegram","duplicate"} or not _hash(scheduled.get("packet_hash")) or not _hash(scheduled.get("report_hash")): raise RuntimeError("invalid release gate: scheduled_receipt")
+ for field in ("run_id","intelligence_run_id","packet_id","packet_hash","report_id","report_hash","publication_receipt"):
+  if scheduled.get(field)!=chain.get(field): raise RuntimeError("scheduled receipt does not match reconciled source chain")
  msg=pub.get("telegram_message_ids")
  if pub.get("status")=="accepted_by_telegram" and (not isinstance(msg,list) or not msg or any(isinstance(v,bool) or not isinstance(v,int) or v<=0 for v in msg)): raise RuntimeError("invalid release gate: scheduled_receipt")
  rollback=_row(receipt,"rollback_check"); gateway=rollback.get("gateway"); runtime=rollback.get("runtime_login")
