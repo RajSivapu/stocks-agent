@@ -3,7 +3,7 @@
 Last updated: 2026-09-04
 Canonical release: Personal Stock Agent V1
 Source baseline: `167ce06` on `codex/owner-alert-v3`
-Current state: subagent-driven implementation active; V1-C2 in progress
+Current state: subagent-driven implementation active; V1-C2 done; V1-C3 in progress
 
 This file is the version-controlled source of truth for the Personal Stock Agent V1 rollout.
 `docs/ROADMAP.md` retains historical capability and deployment detail. Notion may later mirror this
@@ -49,12 +49,22 @@ V1-C1 is complete.
 
 - [x] Release policy and configuration contract locked with the approved provider allowlist,
   zero-cost authority boundaries, phase budgets, and bounded evidence-packet limits.
-- [ ] Remaining free-ingestion adapters, receipts, cache, normalization, and deduplication are in
-  progress under the committed subagent-driven implementation plan.
+- [x] Implemented and focused-tested bounded HTTPS transport, immutable quota reservations, all
+  approved free-source adapters, timestamp-preserving cache behavior, normalization,
+  deduplication, hashes, coverage limitations, and receipt-backed atomic gateway persistence.
+
+V1-C2 is complete based on fixture-backed provider, transport/quota, normalization/deduplication,
+gateway contract, migration-verifier, and security-invariant evidence. Live provider health and
+production migration remain protected V1-C6 rollout gates and are not implied by this checkpoint.
 
 ### V1-C3 — Market-discovery brain
 
-- [ ] Not started; depends on C2 contracts and receipts.
+- [x] Deterministic seed taxonomy, exposure-gated relationships, fixed-point ranking, and bounded
+  evidence-packet construction are implemented and focused-tested.
+- [x] Receipt-backed phase orchestration and scheduled routine integration are implemented and
+  focused-tested with one start, one atomic record, explicit partial failures, and write-free dry
+  fixtures.
+- [ ] The Analyst/Checker gateway binding remains the next checkpoint.
 
 ### V1-C4 — Personal comparison brain
 
@@ -73,7 +83,7 @@ V1-C1 is complete.
 
 ## Next
 
-1. Implement Task 1's strict V1 policy/configuration contract using TDD.
+1. Complete V1-C3 Analyst/Checker and deterministic gateway binding.
 2. Continue checkpoint by checkpoint with task-scoped review gates and status updates.
 3. Preserve scheduled production capacity and inspect only scheduled receipts at their established
    times.
