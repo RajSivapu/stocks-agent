@@ -1,4 +1,4 @@
-import postgres from "postgres";
+import postgres from "npm:postgres@3.4.9";
 
 export interface DashboardDatabase {
   query(text: string, parameters?: readonly unknown[]): Promise<Record<string, unknown>[]>;

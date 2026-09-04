@@ -1,4 +1,4 @@
-import { createRemoteJWKSet } from "jose";
+import { createRemoteJWKSet } from "npm:jose@6.2.2";
 
 import { verifyOwnerRequest } from "./auth.ts";
 import { parseAllowedOrigins } from "./cors.ts";
