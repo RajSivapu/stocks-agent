@@ -63,6 +63,11 @@ import {
   type TelegramAlertReceipt,
   TelegramDeliveryError,
 } from "./telegram.ts";
+import {
+  type RecordIntelligencePayload,
+  type StartIntelligencePayload,
+  summarizeIntelligencePayload,
+} from "./intelligence.ts";
 
 export interface GatewayDependencies {
   repository: GatewayRepository;
@@ -374,7 +379,12 @@ export function createGatewayHandler(dependencies: GatewayDependencies) {
     const currentDate = chicagoDate(deps.now());
     try {
       envelope = parseGatewayEnvelope(await readBody(request));
-      if (envelope.operation === "start_run") {
+      if (
+        envelope.operation === "start_intelligence_run" ||
+        envelope.operation === "record_intelligence"
+      ) {
+        prepared = envelope.payload;
+      } else if (envelope.operation === "start_run") {
         prepared = parseStartPayload(envelope.payload, currentDate);
       } else if (envelope.operation === "record_artifacts") {
         requireRun(envelope);
@@ -421,6 +431,33 @@ export function createGatewayHandler(dependencies: GatewayDependencies) {
 
     if (envelope.dry_run) {
       try {
+        if (envelope.operation === "start_intelligence_run") {
+          return response(200, {
+            ok: true,
+            dry_run: true,
+            run_id: envelope.request_id,
+            reservation_ids: [],
+            cache_entries: [],
+            duplicate: false,
+            write_counts: {},
+            telegram_message_ids: [],
+          });
+        }
+        if (envelope.operation === "record_intelligence") {
+          const payload = prepared as RecordIntelligencePayload;
+          return response(200, {
+            ok: true,
+            dry_run: true,
+            run_id: requireRun(envelope),
+            completion_id: envelope.request_id,
+            status: payload.status,
+            counts: {},
+            packet_hash: payload.packet?.packet_hash ?? null,
+            ...summarizeIntelligencePayload(payload),
+            write_counts: {},
+            telegram_message_ids: [],
+          });
+        }
         if (envelope.operation === "start_run") {
           return response(200, {
             ok: true,
@@ -493,6 +530,52 @@ export function createGatewayHandler(dependencies: GatewayDependencies) {
         const code = error instanceof GatewayRepositoryError
           ? error.code
           : "POLICY_REJECTED";
+        return response(errorStatus(code), { ok: false, code });
+      }
+    }
+
+    if (envelope.operation === "start_intelligence_run") {
+      try {
+        if (!deps.repository.startIntelligenceRun) {
+          throw new GatewayRepositoryError("PERSISTENCE_FAILED");
+        }
+        const receipt = await deps.repository.startIntelligenceRun(
+          envelope.request_id,
+          prepared as StartIntelligencePayload,
+        );
+        return response(200, {
+          ok: true,
+          ...receipt,
+          telegram_message_ids: [],
+        });
+      } catch (error) {
+        const code = error instanceof GatewayRepositoryError
+          ? error.code
+          : "PERSISTENCE_FAILED";
+        return response(errorStatus(code), { ok: false, code });
+      }
+    }
+    if (envelope.operation === "record_intelligence") {
+      try {
+        if (!deps.repository.recordIntelligence) {
+          throw new GatewayRepositoryError("PERSISTENCE_FAILED");
+        }
+        const payload = prepared as RecordIntelligencePayload;
+        const receipt = await deps.repository.recordIntelligence(
+          requireRun(envelope),
+          envelope.request_id,
+          payload,
+        );
+        return response(200, {
+          ok: true,
+          ...receipt,
+          ...summarizeIntelligencePayload(payload),
+          telegram_message_ids: [],
+        });
+      } catch (error) {
+        const code = error instanceof GatewayRepositoryError
+          ? error.code
+          : "PERSISTENCE_FAILED";
         return response(errorStatus(code), { ok: false, code });
       }
     }

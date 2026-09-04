@@ -1,3 +1,10 @@
+import {
+  parseRecordIntelligencePayload,
+  parseStartIntelligencePayload,
+  type RecordIntelligencePayload,
+  type StartIntelligencePayload,
+} from "./intelligence.ts";
+
 export type Operation =
   | "start_run"
   | "read_context"
@@ -5,7 +12,9 @@ export type Operation =
   | "grade_due_decisions"
   | "evaluate_and_publish"
   | "evaluate_alert_rules"
-  | "finish_run";
+  | "finish_run"
+  | "start_intelligence_run"
+  | "record_intelligence";
 export type Phase = "pre-market" | "intraday" | "post-market" | "on-demand";
 export type Action =
   | "buy"
@@ -153,7 +162,7 @@ export interface GatewayEnvelope {
   request_id: string;
   run_id: string | null;
   dry_run: boolean;
-  payload: unknown;
+  payload: unknown | StartIntelligencePayload | RecordIntelligencePayload;
 }
 
 export interface EvidenceBlock {
@@ -477,6 +486,8 @@ const OPERATIONS: readonly Operation[] = [
   "evaluate_and_publish",
   "evaluate_alert_rules",
   "finish_run",
+  "start_intelligence_run",
+  "record_intelligence",
 ];
 const PHASES: readonly Phase[] = [
   "pre-market",
@@ -738,13 +749,26 @@ export function parseGatewayEnvelope(value: unknown): GatewayEnvelope {
     "envelope",
   );
   if (row.schema_version !== 1) throw new Error("schema_version must be 1");
+  const operation = enumValue(row.operation, OPERATIONS, "operation");
+  let payload = row.payload;
+  if (operation === "start_intelligence_run") {
+    if (row.run_id !== null) {
+      throw new Error("run_id must be null for start_intelligence_run");
+    }
+    payload = parseStartIntelligencePayload(row.payload);
+  } else if (operation === "record_intelligence") {
+    if (row.run_id === null) {
+      throw new Error("run_id is required for record_intelligence");
+    }
+    payload = parseRecordIntelligencePayload(row.payload);
+  }
   return {
     schema_version: 1,
-    operation: enumValue(row.operation, OPERATIONS, "operation"),
+    operation,
     request_id: uuidValue(row.request_id, "request_id"),
     run_id: row.run_id === null ? null : uuidValue(row.run_id, "run_id"),
     dry_run: booleanValue(row.dry_run, "dry_run"),
-    payload: row.payload,
+    payload,
   };
 }
 

@@ -16,6 +16,14 @@ import { parseAlertDraft } from "./alerts.ts";
 import type { PolicyEvaluation } from "./policy.ts";
 import type { DueDecision, OutcomeGrade } from "./outcomes.ts";
 import { formatFixed, parseFixed } from "./fixed-point.ts";
+import {
+  type IntelligenceRecordReceipt,
+  type IntelligenceStartReceipt,
+  parseIntelligenceRecordReceipt,
+  parseIntelligenceStartReceipt,
+  type RecordIntelligencePayload,
+  type StartIntelligencePayload,
+} from "./intelligence.ts";
 
 export interface PersistedBundle {
   request_id: string;
@@ -143,6 +151,15 @@ export interface GatewayRequestClaim {
 }
 
 export interface GatewayRepository {
+  startIntelligenceRun?(
+    runId: string,
+    payload: StartIntelligencePayload,
+  ): Promise<IntelligenceStartReceipt>;
+  recordIntelligence?(
+    runId: string,
+    completionId: string,
+    payload: RecordIntelligencePayload,
+  ): Promise<IntelligenceRecordReceipt>;
   claimRequest(envelope: GatewayEnvelope): Promise<GatewayRequestClaim>;
   completeRequest(requestId: string, leaseToken: string, response: unknown): Promise<void>;
   failRequest(requestId: string, leaseToken: string, code: string): Promise<void>;
@@ -381,6 +398,36 @@ export function createSupabaseGatewayRepository(
   }
 
   return {
+    async startIntelligenceRun(runId, payload) {
+      const result = await client.rpc("start_market_intelligence_run", {
+        p_run_id: runId,
+        p_phase: payload.phase,
+        p_market_date: payload.market_date,
+        p_policy_version: payload.policy_version,
+        p_reservation_plan: payload.reservation_plan,
+      });
+      if (result.error) throw new GatewayRepositoryError("PERSISTENCE_FAILED");
+      try {
+        return parseIntelligenceStartReceipt(result.data);
+      } catch {
+        throw new GatewayRepositoryError("INVALID_PERSISTED_DATA");
+      }
+    },
+
+    async recordIntelligence(runId, completionId, payload) {
+      const result = await client.rpc("record_market_intelligence", {
+        p_run_id: runId,
+        p_completion_id: completionId,
+        p_payload: payload,
+      });
+      if (result.error) throw new GatewayRepositoryError("PERSISTENCE_FAILED");
+      try {
+        return parseIntelligenceRecordReceipt(result.data);
+      } catch {
+        throw new GatewayRepositoryError("INVALID_PERSISTED_DATA");
+      }
+    },
+
     async claimRequest(envelope) {
       const result = await client.rpc("claim_market_gateway_request", {
         p_request_id: envelope.request_id,

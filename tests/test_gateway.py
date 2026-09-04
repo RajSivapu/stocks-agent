@@ -164,6 +164,30 @@ def test_alert_evaluation_is_allowlisted_and_standalone(monkeypatch):
     assert captured["run_id"] is None
 
 
+@pytest.mark.parametrize(
+    ("operation", "run_id"),
+    [("start_intelligence_run", None), ("record_intelligence", RUN_ID)],
+)
+def test_intelligence_persistence_operations_are_allowlisted(monkeypatch, operation, run_id):
+    configured(monkeypatch)
+    captured = {}
+
+    def opener(request, **_kwargs):
+        captured.update(json.loads(request.data))
+        return FakeResponse({"ok": True, "data": {"telegram_message_ids": []}})
+
+    gateway.call(
+        operation,
+        {},
+        run_id=run_id,
+        request_id=REQUEST_ID,
+        _opener=opener,
+    )
+
+    assert captured["operation"] == operation
+    assert captured["run_id"] == run_id
+
+
 @pytest.mark.parametrize("operation", ["send_telegram", "drop_table", "BUY"])
 def test_call_rejects_unknown_operations_before_opening(monkeypatch, operation):
     configured(monkeypatch)
