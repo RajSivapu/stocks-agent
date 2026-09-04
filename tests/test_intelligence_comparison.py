@@ -26,7 +26,10 @@ def candidate(ticker="AA", **overrides):
         "valuation": evidence(Decimal("8.2"), "aa-valuation"),
         "concentration": evidence(Decimal("0.12"), "portfolio-snapshot"),
         "liquidity": evidence(Decimal("25000000"), "aa-market-data"),
-        "drawdowns": {"AA": Decimal("0.28"), "CENX": Decimal("0.34")},
+        "drawdowns": {
+            "AA": evidence(Decimal("0.28"), "aa-history"),
+            "CENX": evidence(Decimal("0.34"), "cenx-history"),
+        },
         "correlation": evidence(Decimal("0.62"), "matched-history"),
         "scenario_evidence_ids": {
             "bear": ("aa-risk",),
@@ -57,6 +60,7 @@ def test_candidate_is_compared_with_current_database_anchors_only():
     assert result.anchor_tickers == ("CENX", "VTI")
     assert set(result.scenarios) == {"bear", "base", "bull"}
     assert "VXUS" not in result.anchor_tickers
+    assert result.drawdowns["CENX"].evidence_ids == ("cenx-history",)
 
 
 def test_anchor_selection_never_invents_cenx_or_vti():
@@ -71,6 +75,9 @@ def test_anchor_selection_never_invents_cenx_or_vti():
     assert result.anchor_tickers == ("AAPL", "SCHD")
     assert "CENX" not in result.anchor_tickers
     assert "VTI" not in result.anchor_tickers
+    missing = compare_candidate(candidate("MSFT"), context())
+    assert missing.status == "insufficient"
+    assert "anchor:missing" in missing.limitations
 
 
 def test_missing_expense_valuation_liquidity_and_drawdown_are_explicit():
@@ -79,7 +86,7 @@ def test_missing_expense_valuation_liquidity_and_drawdown_are_explicit():
             cost=evidence(None, status="missing"),
             valuation=evidence(None, status="missing"),
             liquidity=evidence(None, status="missing"),
-            drawdowns={"AA": None},
+            drawdowns={"AA": evidence(None, status="missing")},
             correlation=evidence(None, status="missing"),
         ),
         context(holdings=({"ticker": "CENX", "shares": "1"},)),
@@ -128,6 +135,6 @@ def test_comparison_is_deeply_read_only_and_has_no_mutation_surface():
     with pytest.raises(TypeError):
         result.scenarios["base"] = result.scenarios["bear"]
     with pytest.raises(TypeError):
-        result.drawdowns["AA"] = Decimal("0")
+        result.drawdowns["AA"] = evidence(Decimal("0"), "replacement-history")
     assert not hasattr(PersonalComparison, "apply")
     assert not hasattr(PersonalComparison, "rebalance")

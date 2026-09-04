@@ -51,7 +51,7 @@ class ComparisonCandidate:
     valuation: EvidenceValue
     concentration: EvidenceValue
     liquidity: EvidenceValue
-    drawdowns: Mapping[str, Decimal | None]
+    drawdowns: Mapping[str, EvidenceValue]
     correlation: EvidenceValue
     scenario_evidence_ids: Mapping[str, tuple[str, ...]]
 
@@ -92,7 +92,7 @@ class PersonalComparison:
     valuation: EvidenceValue
     concentration: EvidenceValue
     liquidity: EvidenceValue
-    drawdowns: Mapping[str, Decimal | None]
+    drawdowns: Mapping[str, EvidenceValue]
     correlation: EvidenceValue
     scenarios: Mapping[str, Scenario]
     limitations: tuple[str, ...]
@@ -138,14 +138,22 @@ def _scenarios(candidate: ComparisonCandidate) -> Mapping[str, Scenario]:
         "base": "base conditions hold, the cited operating evidence supports the central case",
         "bull": "bull conditions hold, the cited catalyst evidence supports an upside case",
     }
-    return MappingProxyType({
-        name: Scenario(
+    drawdown_evidence = tuple(
+        evidence_id
+        for drawdown in candidate.drawdowns.values()
+        for evidence_id in drawdown.evidence_ids
+    )
+    scenarios = {}
+    for name, description in descriptions.items():
+        evidence_ids = candidate.scenario_evidence_ids[name]
+        if name == "bear":
+            evidence_ids = tuple(dict.fromkeys((*evidence_ids, *drawdown_evidence)))
+        scenarios[name] = Scenario(
             name=name,  # type: ignore[arg-type]
             prose=f"If the cited {description}; this is conditional research, not a forecast.",
-            evidence_ids=candidate.scenario_evidence_ids[name],
+            evidence_ids=evidence_ids,
         )
-        for name, description in descriptions.items()
-    })
+    return MappingProxyType(scenarios)
 
 
 def compare_candidate(
@@ -156,18 +164,20 @@ def compare_candidate(
 
     anchors = _current_anchors(context)
     limitations: list[str] = []
+    if not anchors:
+        limitations.append("anchor:missing")
     for name in _FACTORS:
         item = getattr(candidate, name)
         if item.status in {"missing", "conflicting"}:
             limitations.append(f"{name}:{item.status}")
 
     drawdowns = dict(candidate.drawdowns)
-    drawdowns.setdefault(candidate.ticker, None)
+    drawdowns.setdefault(candidate.ticker, EvidenceValue(None, status="missing"))
     for ticker in anchors:
-        drawdowns.setdefault(ticker, None)
-    for ticker, value in drawdowns.items():
-        if value is None:
-            limitations.append(f"drawdown:{ticker}:missing")
+        drawdowns.setdefault(ticker, EvidenceValue(None, status="missing"))
+    for ticker, item in drawdowns.items():
+        if item.status in {"missing", "conflicting"}:
+            limitations.append(f"drawdown:{ticker}:{item.status}")
 
     scenarios = _scenarios(candidate)
     for name, scenario in scenarios.items():
