@@ -69,3 +69,18 @@ Check supabase/functions/owner-dashboard-api/mappers.ts
 - Owner review is a proposal state only. There is intentionally no automatic policy, weight,
   threshold, source, sizing, holding, plan, or delivery activation path.
 - The full repository suite and release deployment gates remain Task 14 work and were not run here.
+
+## Reviewer fix round 1
+
+`build_noise_observation` now fails closed unless every eligible outcome matches the caller-supplied
+original run and policy version and the complete aggregation shares one eligible horizon and one
+benchmark. Mixed provenance can no longer be labeled with metadata copied from the first row.
+Insufficient-sample proposal behavior and the frozen tests remain unchanged.
+
+Focused verification:
+
+```text
+$ .venv/bin/python -m pytest tests/test_intelligence_learning.py -q && npx --yes deno@2.9.6 test --config supabase/functions/deno.json supabase/functions/market-briefing-gateway/_shared/outcomes_test.ts
+10 passed in 0.01s
+ok | 12 passed | 0 failed
+```

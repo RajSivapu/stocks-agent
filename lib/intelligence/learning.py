@@ -209,12 +209,26 @@ def build_noise_observation(
     eligible = _eligible_outcomes(outcomes)
     if not eligible:
         raise ValueError("no eligible outcomes")
+    expected_run_id = _uuid(original_run_id, "original run id")
+    if not isinstance(policy_version, int) or isinstance(policy_version, bool) or policy_version <= 0:
+        raise ValueError("invalid policy version")
+    if any(
+        _uuid(_value(row, "original_run_id"), "original run id") != expected_run_id
+        for row in eligible
+    ):
+        raise ValueError("outcomes must match the supplied original run")
+    if any(_value(row, "policy_version") != policy_version for row in eligible):
+        raise ValueError("outcomes must match the supplied policy version")
+    horizons = {_value(row, "horizon_days") for row in eligible}
+    if len(horizons) != 1:
+        raise ValueError("outcomes must share one horizon")
+    benchmarks = {_value(row, "benchmark") for row in eligible}
+    if len(benchmarks) != 1:
+        raise ValueError("outcomes must share one benchmark")
     false_positives = sum(_value(row, "direction_success") is False for row in eligible)
-    horizon = _value(eligible[0], "horizon_days")
-    benchmark = _value(eligible[0], "benchmark")
     return LearningObservation(
         kind="noise",
-        original_run_id=_uuid(original_run_id, "original run id"),
+        original_run_id=expected_run_id,
         policy_version=policy_version,
         sample_size=len(eligible),
         evidence_ids=tuple(
@@ -226,8 +240,8 @@ def build_noise_observation(
         limitations=("historical outcomes do not prove future performance",),
         proposed_change=None,
         status="observation",
-        horizon_days=horizon,
-        benchmark=benchmark,
+        horizon_days=next(iter(horizons)),
+        benchmark=next(iter(benchmarks)),
         metrics=_frozen(
             {
                 "false_positive_count": false_positives,
