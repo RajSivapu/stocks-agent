@@ -66,6 +66,7 @@ export default defineConfig(({ command, mode }) => {
     build: { sourcemap: false },
     test: {
       environment: "jsdom",
+      environmentOptions: { jsdom: { url: "https://dashboard.example/" } },
       exclude: [...configDefaults.exclude, "e2e/**"],
       setupFiles: ["./src/test/setup.ts"],
       restoreMocks: true,

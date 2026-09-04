@@ -425,7 +425,7 @@ git commit -m "feat: add receipt-backed dashboard read models"
 - Produces: `ThemeMode = "system" | "light" | "dark"` and accessible application navigation.
 - Consumes: canonical dashboard contracts and the public Supabase configuration only.
 
-- [ ] **Step 1: Write failing auth, theme, and API-client tests**
+- [x] **Step 1: Write failing auth, theme, and API-client tests**
 
 ```tsx
 it("requests OTP with account creation disabled", async () => {
@@ -442,13 +442,13 @@ it("does not call the financial API before authentication", () => {
 });
 ```
 
-- [ ] **Step 2: Run focused frontend tests and verify RED**
+- [x] **Step 2: Run focused frontend tests and verify RED**
 
 Run: `npm test --workspace @stocks-agent/web -- --run src/auth src/api src/theme src/app/AppShell.test.tsx`
 
 Expected: FAIL because the application shell modules do not exist.
 
-- [ ] **Step 3: Implement authentication and data clearing**
+- [x] **Step 3: Implement authentication and data clearing**
 
 Create the Supabase client with a custom `sessionStorage` adapter, refresh rotation support, and no
 financial persistence. Use neutral OTP UI copy. The 30-minute inactivity lock clears rendered
@@ -456,20 +456,20 @@ financial state and requires reauthentication; it is labeled as screen privacy. 
 calls `supabase.auth.signOut({ scope: "global" })` and fails closed locally even if the network is
 unavailable.
 
-- [ ] **Step 4: Implement the approved shell and theme pair**
+- [x] **Step 4: Implement the approved shell and theme pair**
 
 Use the approved Midnight Navy/Warm Gold dark tokens and Warm Pearl/Midnight Navy/Gold light tokens.
 Build a semantic sidebar/top-drawer navigation for Today, Portfolio, Ideas, Companion, Alerts, Runs,
 and System. Provide System/Light/Dark radio controls, visible focus, reduced motion, status text plus
 icons, and a persistent data-time bar after authentication.
 
-- [ ] **Step 5: Run frontend tests, typecheck, and lint and verify GREEN**
+- [x] **Step 5: Run frontend tests, typecheck, and lint and verify GREEN**
 
 Run: `npm test --workspace @stocks-agent/web -- --run && npm run typecheck --workspace @stocks-agent/web && npm run lint --workspace @stocks-agent/web`
 
 Expected: all commands exit 0 with no console warning.
 
-- [ ] **Step 6: Commit Task 5**
+- [x] **Step 6: Commit Task 5**
 
 ```bash
 git add apps/web packages/dashboard-contracts
