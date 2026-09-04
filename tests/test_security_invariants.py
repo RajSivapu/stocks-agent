@@ -24,6 +24,26 @@ GATEWAY_RPCS = (
     "claim_market_publication(UUID)",
     "finish_market_publication(UUID, UUID, TEXT, JSONB, TEXT)",
 )
+INTELLIGENCE_TABLES = (
+    "market_intelligence_runs",
+    "market_intelligence_run_events",
+    "market_source_quota_reservations",
+    "market_source_receipts",
+    "market_source_items",
+    "market_intelligence_run_items",
+    "market_events",
+    "market_event_relationships",
+    "market_candidate_rankings",
+    "market_evidence_packets",
+    "market_reports",
+    "market_learning_observations",
+)
+INTELLIGENCE_RPCS = (
+    "start_market_intelligence_run(UUID, TEXT, DATE, INT, JSONB)",
+    "record_market_intelligence(UUID, UUID, JSONB)",
+    "record_market_report(UUID, UUID, JSONB)",
+    "record_market_learning(UUID, JSONB)",
+)
 
 
 def test_v1_intelligence_configuration_keeps_zero_cost_owner_only_boundaries():
@@ -40,6 +60,33 @@ def test_v1_intelligence_configuration_keeps_zero_cost_owner_only_boundaries():
     assert settings["learning"]["self_tuning_enabled"] is False
     assert "benzinga" not in intelligence["providers"]
     assert "alpaca" not in intelligence["providers"]
+
+
+def test_intelligence_migration_has_no_brokerage_authority_and_is_gateway_only():
+    paths = (
+        ROOT / "sql" / "schema.sql",
+        ROOT / "sql" / "migrations" / "20260907_market_intelligence.sql",
+    )
+    for path in paths:
+        sql = path.read_text()
+        intelligence_sql = sql[sql.index("CREATE TABLE IF NOT EXISTS public.market_intelligence_runs"):]
+        for table in INTELLIGENCE_TABLES:
+            assert f"ALTER TABLE public.{table} ENABLE ROW LEVEL SECURITY;" in intelligence_sql
+        for signature in INTELLIGENCE_RPCS:
+            assert (
+                f"REVOKE ALL ON FUNCTION public.{signature} "
+                "FROM PUBLIC, anon, authenticated;"
+            ) in intelligence_sql
+            assert f"GRANT EXECUTE ON FUNCTION public.{signature} TO service_role;" in intelligence_sql
+        for forbidden in (
+            "brokerage",
+            "place_order",
+            "submit_order",
+            "order_id",
+            "api_secret",
+            "api_key",
+        ):
+            assert forbidden not in intelligence_sql.lower()
 
 
 def test_alpha_vantage_cadence_wording_matches_the_intelligence_ceiling():
