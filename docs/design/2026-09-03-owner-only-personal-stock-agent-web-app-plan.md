@@ -1,9 +1,9 @@
 # Owner-Only Personal Stock Agent v1 Web Application
 
-**Date:** 2026-09-03  
+**Date:** 2026-09-03
 **Status:** Approved by the owner after verified Claude review; implementation authorized
-**Product version:** Personal Stock Agent Web v1  
-**Owner:** Rajrupesh  
+**Product version:** Personal Stock Agent Web v1
+**Owner:** Rajrupesh
 **Repository boundary:** Suggestion-only decision support and portfolio recordkeeping
 
 ## 1. Executive summary
@@ -153,7 +153,7 @@ financial mutation endpoints remain excluded.
 
 The frontend signs in with Supabase Auth and uses RLS to query tables.
 
-**Advantages:** fewer components and less server code.  
+**Advantages:** fewer components and less server code.
 **Disadvantages:** current tables are single-owner and do not carry `owner_id`; exposing them would
 require broad authenticated select policies or a large RLS redesign. It would also couple the UI to
 raw schemas and risk exposing internal analyst/checker payloads and bounded operational errors.
@@ -168,7 +168,7 @@ direct `SELECT` access only to allowlisted columns, removes fields that the UI d
 computes freshness labels, and returns versioned view models.
 
 **Advantages:** smallest exposed data surface, stable UI contracts, centralized freshness and
-redaction rules, exact CORS, and a clear audit boundary.  
+redaction rules, exact CORS, and a clear audit boundary.
 **Disadvantages:** adds one service and a set of API contract tests.
 
 **Decision:** recommended.
