@@ -33,9 +33,12 @@ function report(
     summary: "Evidence changed; review the cited research.",
     full_markdown: "# Weekly owner research\n\n" +
       "Detailed evidence. ".repeat(80),
-    source_ids: ["a", "b"],
-    policy_decision_ids: ["policy-a"],
-    comparison_ids: ["comparison-a"],
+    source_ids: [
+      "00000000-0000-4000-8000-000000000001",
+      "00000000-0000-4000-8000-000000000002",
+    ],
+    policy_decision_ids: ["00000000-0000-4000-8000-000000000003"],
+    comparison_ids: [],
     actionable_risk: false,
     material_thesis_change: false,
     intraday_triggered: true,

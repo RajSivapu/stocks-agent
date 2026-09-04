@@ -21,6 +21,20 @@ def envelope(data, *, freshness="fresh", market_state="regular", data_as_of="202
     }
 
 
+def v1_chain(run_id):
+    event_id = "22222222-2222-4222-8222-222222222222"
+    packet_id = "33333333-3333-4333-8333-333333333333"
+    report_id = "44444444-4444-4444-8444-444444444444"
+    return {
+        "intelligence_runs": [{"id": run_id}],
+        "intelligence_events": [{"id": event_id, "run_id": run_id, "content_hash": "a" * 64}],
+        "intelligence_rankings": [{"id": "55555555-5555-4555-8555-555555555555", "run_id": run_id, "event_id": event_id, "content_hash": "b" * 64}],
+        "intelligence_packets": [{"id": packet_id, "run_id": run_id, "packet_hash": "c" * 64, "candidate_count": 1, "evidence_count": 1}],
+        "reports": [{"id": report_id, "run_id": run_id, "packet_id": packet_id, "report_hash": "d" * 64, "rendered_hash": "e" * 64}],
+        "report_publications": [{"request_id": "66666666-6666-4666-8666-666666666666", "run_id": run_id, "response": {"report_id": report_id, "publication_receipt": {"status": "accepted_by_telegram"}}}],
+    }
+
+
 def test_canary_routes_are_get_only_and_bounded():
     assert verify.CANARY_ROUTES == (
         "/v1/today", "/v1/portfolio", "/v1/ideas", "/v1/companion", "/v1/alerts",
@@ -80,6 +94,8 @@ def test_http_canary_uses_only_get_and_checks_anonymous_and_non_owner_denial():
         if route == "/v1/today": data["portfolio"] = {"data_as_of": None, "market_state": "unknown", "price_sources": [], "holdings": []}
         if route == "/v1/portfolio": data["holdings"] = []
         if route == "/v1/alerts": data["alerts"] = []
+        if route == "/v1/intelligence": data["run_id"] = "6903b3cc-05b7-4f90-bbc2-7e80a3a59e22"
+        if route == "/v1/reports": data["reports"] = [{"id": "44444444-4444-4444-8444-444444444444"}]
         if route == "/v1/runs": data["runs"] = [{
             "id": "6903b3cc-05b7-4f90-bbc2-7e80a3a59e22", "kind": "on-demand",
             "status": "completed", "finished_at": "2026-09-03T20:00:00.000Z",
@@ -120,6 +136,7 @@ def test_http_canary_uses_only_get_and_checks_anonymous_and_non_owner_denial():
             "policy_version": None,
             "holdings": [],
             "portfolio_data_as_of": None,
+            **v1_chain(run_id),
         }
 
     receipt = verify.run_http_canary(
@@ -159,6 +176,8 @@ def test_source_reconciliation_rejects_unsupported_run_send_policy_and_price_cla
         "event_status": "triggered",
     }]})
     payloads["/v1/system"] = envelope({"policy_version": 17})
+    payloads["/v1/intelligence"] = envelope({"run_id": run_id})
+    payloads["/v1/reports"] = envelope({"reports": [{"id": "44444444-4444-4444-8444-444444444444"}]})
     detail = envelope({
         "run": payloads["/v1/runs"]["data"]["runs"][0],
         "request_receipts": [{"request_id": "one"}],
@@ -189,10 +208,13 @@ def test_source_reconciliation_rejects_unsupported_run_send_policy_and_price_cla
             "price_as_of": "2026-09-03T20:00:00.000Z", "price_source": "yahoo-chart",
         }],
         "portfolio_data_as_of": "2026-09-03T20:00:00.000Z",
+        **v1_chain(run_id),
     }
 
     receipt = verify.reconcile_source_receipts(payloads, detail, source, run_id)
-    assert receipt == {"status": "verified", "database_role": verify.RUNTIME_ROLE, "claims_checked": 5}
+    assert receipt["status"] == "verified"
+    assert receipt["claims_checked"] == 11
+    assert receipt["relationships_verified"] is True
 
     for path, value in [
         (("run", "write_counts"), {"suggestions": 2}),

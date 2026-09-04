@@ -226,6 +226,54 @@ def _tree_sha256(path: Path) -> str:
     return digest.hexdigest()
 
 
+def prepare_gateway_rollback_artifact(
+    rollback_ref: str,
+    expected_source_sha256: str,
+    destination: Path,
+    repo_root: Path = ROOT,
+    runner: Callable[..., object] = subprocess.run,
+) -> dict[str, object]:
+    """Materialize and verify the exact predeployment gateway source before mutation."""
+    if not re.fullmatch(r"[0-9a-f]{64}", expected_source_sha256):
+        raise ValueError("gateway rollback source SHA-256 is required")
+    resolved = _run(["git", "rev-parse", f"{rollback_ref}^{{commit}}"], cwd=repo_root, runner=runner)
+    commit = str(getattr(resolved, "stdout", "")).strip()
+    if getattr(resolved, "returncode", 1) != 0 or not re.fullmatch(r"[0-9a-f]{40}", commit):
+        raise RuntimeError("gateway rollback ref is unavailable")
+    added = _run(["git", "worktree", "add", "--detach", str(destination), commit], cwd=repo_root, runner=runner)
+    if getattr(added, "returncode", 1) != 0:
+        raise RuntimeError("gateway rollback artifact could not be materialized")
+    source = destination / "supabase/functions/market-briefing-gateway"
+    if not (source / "index.ts").is_file():
+        raise RuntimeError("gateway rollback artifact has no deployable source")
+    actual = _tree_sha256(source)
+    if actual != expected_source_sha256:
+        raise RuntimeError("gateway rollback artifact source hash mismatch")
+    return {"commit_sha": commit, "source_sha256": actual, "repo_root": destination}
+
+
+def release_gateway_rollback_artifact(
+    artifact: Mapping[str, object], repo_root: Path = ROOT,
+    runner: Callable[..., object] = subprocess.run,
+) -> None:
+    path = Path(str(artifact["repo_root"]))
+    result = _run(["git", "worktree", "remove", "--force", str(path)], cwd=repo_root, runner=runner)
+    if getattr(result, "returncode", 1) != 0:
+        raise RuntimeError("gateway rollback artifact cleanup failed")
+    path.parent.rmdir()
+
+
+def verify_gateway_rollback_preflight(
+    project_ref: str, expected_version: int, artifact: Mapping[str, object],
+) -> dict[str, object]:
+    if isinstance(expected_version, bool) or expected_version <= 0:
+        raise ValueError("positive current gateway version is required")
+    observed = function_version(project_ref, "market-briefing-gateway")
+    if observed != expected_version:
+        raise RuntimeError("live gateway version differs from rollback receipt")
+    return {"function_version": observed, "source_sha256": artifact["source_sha256"]}
+
+
 def apply_release_migrations(cursor) -> list[dict[str, str]]:
     """Apply the two V1 migrations in fixed order and bind receipts to their bytes."""
     receipts = []
@@ -453,6 +501,40 @@ def rollback_initial_deployment(
     }
 
 
+def restore_gateway_and_rollback_initial_dashboard(
+    project_ref: str,
+    admin_url: str,
+    gateway_artifact: Mapping[str, object],
+    *,
+    runner: Callable[..., object] = subprocess.run,
+    connector: Callable[..., object] = psycopg.connect,
+) -> dict[str, object]:
+    """Restore the prior gateway bytes and remove all initial dashboard authority."""
+    root = Path(str(gateway_artifact.get("repo_root", "")))
+    commit = str(gateway_artifact.get("commit_sha", ""))
+    expected_hash = str(gateway_artifact.get("source_sha256", ""))
+    if not root.is_dir() or _tree_sha256(root / "supabase/functions/market-briefing-gateway") != expected_hash:
+        raise RuntimeError("verified gateway rollback artifact is unavailable")
+    cleanup = rollback_initial_deployment(
+        project_ref, admin_url, connector=connector,
+        edge_rollback=lambda ref: rollback_initial_function(ref, root, runner),
+    )
+    restored = _deploy_named_function(
+        project_ref, "market-briefing-gateway", commit, root, runner, require_existing=True,
+    )
+    if restored["source_sha256"] != expected_hash:
+        raise RuntimeError("restored gateway source receipt mismatch")
+    return {
+        **cleanup,
+        "gateway": {
+            "status": "restored",
+            "git_sha": commit,
+            "source_sha256": expected_hash,
+            "function_version": restored["function_version"],
+        },
+    }
+
+
 def publish_and_deploy_or_rollback(
     project_ref: str,
     values: Mapping[str, str],
@@ -581,6 +663,9 @@ def main() -> int:
     parser.add_argument("--allowed-origin", required=True)
     parser.add_argument("--site-origin", required=True)
     parser.add_argument("--reviewed-sha", required=True)
+    parser.add_argument("--gateway-rollback-ref", required=True)
+    parser.add_argument("--gateway-rollback-source-sha256", required=True)
+    parser.add_argument("--gateway-current-version", required=True, type=int)
     arguments = parser.parse_args()
     owner_user_id = os.environ.get("DASHBOARD_OWNER_USER_ID", "").strip()
     owner_email = os.environ.get("DASHBOARD_OWNER_EMAIL", "").strip()
@@ -597,6 +682,15 @@ def main() -> int:
         )
 
     validate_release_database_endpoints(arguments.project_ref, admin_url, session_template)
+    rollback_directory = Path(tempfile.mkdtemp(prefix="stocks-gateway-rollback-")) / "checkout"
+    gateway_rollback = prepare_gateway_rollback_artifact(
+        arguments.gateway_rollback_ref,
+        arguments.gateway_rollback_source_sha256,
+        rollback_directory,
+    )
+    gateway_rollback_preflight = verify_gateway_rollback_preflight(
+        arguments.project_ref, arguments.gateway_current_version, gateway_rollback
+    )
 
     validate_static_configuration(
         arguments.project_ref,
@@ -624,6 +718,9 @@ def main() -> int:
         role_receipt=role_receipt,
         secret_names=DASHBOARD_SECRET_NAMES,
     )
+    rollback_release = lambda project_ref, admin: restore_gateway_and_rollback_initial_dashboard(
+        project_ref, admin, gateway_rollback
+    )
     receipt = publish_and_deploy_or_rollback(
         arguments.project_ref,
         {
@@ -634,6 +731,7 @@ def main() -> int:
         git_sha,
         admin_url,
         deployer=deploy_changed_functions,
+        rollback=rollback_release,
     )
     receipt["candidate_sha"] = git_sha
     receipt["migrations"] = migration_receipts
@@ -648,25 +746,31 @@ def main() -> int:
         service_key,
         publishable_key,
         non_owner_access_token,
-        rollback=lambda project_ref: rollback_initial_deployment(project_ref, admin_url),
+        rollback=lambda project_ref: rollback_release(project_ref, admin_url),
     )
     receipt["static_assets"] = build_static_or_rollback(
         arguments.project_ref,
         arguments.site_origin,
         git_sha,
-        admin_url,
+        admin_url, rollback=rollback_release,
     )
     try:
         receipt["artifact_verification"] = verify_release_artifact_receipts(git_sha, receipt)
     except Exception as error:
         try:
-            rollback_initial_deployment(arguments.project_ref, admin_url)
+            rollback_release(arguments.project_ref, admin_url)
         except Exception as rollback_error:
             raise RuntimeError(
                 "artifact verification failed and the initial dashboard rollback also failed"
             ) from rollback_error
         raise error
+    receipt["gateway_rollback_artifact"] = {
+        "git_sha": gateway_rollback["commit_sha"],
+        "source_sha256": gateway_rollback["source_sha256"],
+        "predeployment_function_version": gateway_rollback_preflight["function_version"],
+    }
     print(json.dumps(receipt, sort_keys=True, separators=(",", ":")))
+    release_gateway_rollback_artifact(gateway_rollback)
     return 0
 
 

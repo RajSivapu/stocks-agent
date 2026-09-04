@@ -25,9 +25,16 @@ def _validate_hash(value: str, name: str) -> None:
 
 
 def _sorted_unique(values: tuple[str, ...], name: str) -> tuple[str, ...]:
-    if any(not isinstance(value, str) or not value or len(value) > 100 for value in values):
-        raise ValueError(f"{name} must contain bounded identifiers")
-    return tuple(sorted(set(values)))
+    canonical: list[str] = []
+    for value in values:
+        try:
+            parsed = str(uuid.UUID(value))
+        except (ValueError, TypeError, AttributeError):
+            raise ValueError(f"{name} must contain canonical UUIDs") from None
+        if parsed != value:
+            raise ValueError(f"{name} must contain canonical UUIDs")
+        canonical.append(parsed)
+    return tuple(sorted(set(canonical)))
 
 
 @dataclass(frozen=True, slots=True)
@@ -122,6 +129,8 @@ def build_report(value: ReportInput) -> MarketReport:
     source_ids = _sorted_unique(value.source_ids, "source_ids")
     policy_ids = _sorted_unique(value.policy_decision_ids, "policy_decision_ids")
     comparison_ids = _sorted_unique(value.comparison_ids, "comparison_ids")
+    if comparison_ids:
+        raise ValueError("comparison_ids require a durable comparison ledger")
     markdown = value.full_markdown.rstrip()
     if "suggestion only" not in markdown.lower():
         markdown += "\n\nSuggestion only; no order was placed."

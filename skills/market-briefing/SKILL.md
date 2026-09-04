@@ -17,7 +17,7 @@ python scripts/market_gateway.py OPERATION [--run-id UUID] [--request-id UUID] [
 ```
 
 Send exactly one JSON object on stdin. Use only `start_run`, `read_context`, `record_artifacts`,
-`grade_due_decisions`, `evaluate_and_publish`, `evaluate_alert_rules`, and `finish_run`. Never call a
+`grade_due_decisions`, `evaluate_and_publish`, `record_report`, `evaluate_alert_rules`, and `finish_run`. Never call a
 database client, Supabase table/REST endpoint, messaging endpoint, brokerage endpoint, or order tool
 directly. Never read broad database credentials or messaging credentials. `config/settings.json`
 and `config/watchlist.json` are read-only.
@@ -45,7 +45,8 @@ not JSON numbers or exponent notation. Follow the exact structures and bounds in
    market data first.
 3. Call `read_context` with the returned run ID. This bounded response is the only portfolio,
    suggestion, plan, lesson, radar, watch, or prior-run state you may use.
-4. Invoke `python scripts/collect_market_intelligence.py` exactly once with this phase, the
+4. Invoke `python scripts/collect_market_intelligence.py` exactly once with `--run-id` set to the
+   exact analysis run ID from `start_run`, this phase, the
    gateway-owned market date, and only the relevant bounded `read_context` fields in a scratch
    context file. Do not call providers or gather source text through another path. Use only the
    collector's bounded JSON packet for the scheduled Analyst/Checker pass, retaining its packet ID,
@@ -66,12 +67,22 @@ not JSON numbers or exponent notation. Follow the exact structures and bounds in
    closed; call `finish_run`, report the stable limitation, and send nothing. In alert shadow mode,
    label any returned
    `alert_draft_previews` as preview-only; their receipt proves no alert lifecycle write or send.
-6. Use `record_artifacts` only for supported non-recommendation mutations derived in this run. Never
+6. After an accepted `evaluate_and_publish`, build exactly one report input from the completed packet
+   receipt, its accepted immutable policy decision IDs, its packet evidence source IDs, and bounded
+   checked content. Keep `comparison_ids` empty until a durable comparison ledger exists. For morning,
+   weekly, monthly, theme, and triggered intraday reports, invoke
+   `python scripts/build_market_report.py INPUT_FILE` and pass its output unchanged to exactly one
+   `record_report` call with the same run ID. Map the scheduled phase to the requested report kind;
+   never create a report for a suppressed or untriggered intraday run. Reuse the same report operation
+   request ID only to retry an uncertain identical call, so the deterministic report ID and key cannot
+   cause a duplicate send. Preserve the returned report and publication receipt for `finish_run`.
+7. Use `record_artifacts` only for supported non-recommendation mutations derived in this run. Never
    put a holding or transaction mutation in artifacts. During post-market, call
    `grade_due_decisions`; never supply model-created returns.
-7. Call `finish_run`. Describe only its actual receipt: server-derived status, write counts,
-   publication statuses, and message IDs. Never invent a send, log, write, or success claim.
-8. When the checked-in alert policy is in shadow mode, a scheduled intraday or post-market run calls
+8. Call `finish_run`. Describe only its actual receipt, including the report/publication receipt:
+   server-derived status, write counts, publication statuses, and message IDs. Never invent a send,
+   log, write, or success claim.
+9. When the checked-in alert policy is in shadow mode, a scheduled intraday or post-market run calls
    standalone `evaluate_alert_rules` exactly once after `finish_run`, with `--dry-run`, an empty JSON
    object, and no run ID. Never supply a quote, price, condition result, Telegram input, or model
    prose. Report it only as a preview receipt; it writes no alert lifecycle row and sends nothing.

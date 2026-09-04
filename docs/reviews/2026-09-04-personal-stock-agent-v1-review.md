@@ -1,10 +1,11 @@
 # Personal Stock Agent V1 — Exact-Head Review Record
 
-Status: **pending independent review; no release verdict recorded**.
+Status: **`a5d4296` rejected with blocking findings; replacement candidate pending exact-head re-review**.
 
 ## Candidate identity
 
-- Candidate SHA: pending the release-infrastructure checkpoint commit.
+- Prior reviewed SHA: `a5d4296595ab5f41a7120953ba117638888dccf6`.
+- Replacement candidate SHA: the fix-round checkpoint produced from this record; pending re-review.
 - Exact-head CI run URL: pending.
 - Local full-suite receipt: passed on 2026-09-04 — 364 Python, 63 Node, 218 Deno, 6 dashboard
   contract, 31 web-unit, and 17 Playwright tests passed; 19 Python and one opt-in live Playwright
@@ -29,13 +30,22 @@ The final verdict must explicitly cover:
   source parity; and
 - initial-deployment rollback of the new dashboard secrets, function, and runtime login.
 
-## Findings and verdict
+## Prior findings and verdict
 
-- Critical findings: pending.
-- Important findings: pending.
+- Critical findings: scheduled collection generated an unrelated intelligence run UUID instead of
+  binding the `start_run` analysis UUID.
+- Important findings: no scheduled `record_report` caller; unverifiable report identifiers and
+  caller-controlled idempotency; no real gateway restoration during failed initial deployment; and
+  shallow C6 receipt/source verification.
 - Suggestions: pending.
-- Verdict: pending.
-- Reviewed candidate SHA: pending.
+- Verdict: blocked; do not deploy `a5d4296`.
+- Reviewed candidate SHA: `a5d4296595ab5f41a7120953ba117638888dccf6`.
+
+## Replacement candidate
+
+All five blocking boundaries are implemented locally. The replacement remains ineligible for
+deployment until its exact SHA passes CI and an independent reviewer explicitly approves that same
+SHA. No prior review receipt transfers to the replacement candidate.
 
 No empty field in this record is evidence of review. Any Critical or Important finding requires a
 new exact candidate, full verification, and repeat independent review.

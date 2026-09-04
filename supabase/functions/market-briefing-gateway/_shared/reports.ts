@@ -79,10 +79,8 @@ function bounded(
 function identifiers(value: unknown, path: string): string[] {
   if (
     !Array.isArray(value) || value.length > 96 ||
-    value.some((item) =>
-      typeof item !== "string" || item.length < 1 || item.length > 100
-    )
-  ) throw new Error(`${path} must be bounded identifiers`);
+    value.some((item) => typeof item !== "string" || !UUID.test(item))
+  ) throw new Error(`${path} must contain canonical UUIDs`);
   const result = value as string[];
   if (
     new Set(result).size !== result.length ||
@@ -149,6 +147,9 @@ export function parseRecordReportPayload(value: unknown): RecordReportPayload {
     intraday_triggered: reportRow.intraday_triggered === true,
     suggestion_only: true,
   };
+  if (report.comparison_ids.length !== 0) {
+    throw new Error("comparison_ids require a durable comparison ledger");
+  }
   if (
     reportRow.suggestion_only !== true ||
     typeof reportRow.actionable_risk !== "boolean" ||

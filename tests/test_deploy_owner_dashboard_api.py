@@ -285,6 +285,29 @@ def test_rollback_skips_delete_when_no_dashboard_function_exists(tmp_path):
     assert not any("delete" in command for command in commands)
 
 
+def test_release_rollback_restores_the_verified_prior_gateway(tmp_path, monkeypatch):
+    source = tmp_path / "supabase/functions/market-briefing-gateway"
+    source.mkdir(parents=True)
+    (source / "index.ts").write_text("export const prior = true;\n")
+    source_hash = deploy._tree_sha256(source)
+    monkeypatch.setattr(deploy, "rollback_initial_deployment", lambda *_args, **_kwargs: {
+        "status": "rolled_back", "function": "owner-dashboard-api",
+        "dashboard_secrets_unset": list(deploy.DASHBOARD_SECRET_NAMES),
+        "runtime_login": {"status": "disabled", "login": False, "memberships": 0},
+    })
+    monkeypatch.setattr(deploy, "_deploy_named_function", lambda *_args, **_kwargs: {
+        "source_sha256": source_hash, "function_version": 19,
+    })
+    receipt = deploy.restore_gateway_and_rollback_initial_dashboard(
+        PROJECT_REF, ADMIN_URL,
+        {"repo_root": tmp_path, "commit_sha": "a" * 40, "source_sha256": source_hash},
+    )
+    assert receipt["gateway"] == {
+        "status": "restored", "git_sha": "a" * 40,
+        "source_sha256": source_hash, "function_version": 19,
+    }
+
+
 def test_rollback_attempts_edge_cleanup_even_if_runtime_login_disable_fails():
     events = []
 

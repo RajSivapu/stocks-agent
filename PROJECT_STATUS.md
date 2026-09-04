@@ -145,8 +145,11 @@ view receipt.
 - [ ] Existing dashboard exact-head independent verdict is pending.
 - [ ] Consolidated V1 exact-head review, protected deployment, and receipt verification are pending.
 
-Task 14 release infrastructure is local-only. The canonical review and rollout records are pending
-templates and make no production claim. V1-C6 remains incomplete until exact-head CI, independent
+Task 14 release infrastructure is local-only. Independent review blocked `a5d4296` on five release
+boundaries; the local fix-round candidate closes exact scheduled run identity, scheduled report
+calling and report-chain validation, real prior-gateway restoration, and typed 15-gate/source-chain
+verification. The canonical review and rollout records remain pending templates and make no
+production claim. V1-C6 remains incomplete until exact-head CI, repeat independent
 review, dry-run, both migration/function/static deployments, source parity, owner and denial
 canaries, rollback evidence, and the next existing scheduled receipts are all present.
 
@@ -158,7 +161,7 @@ The first run exposed migration/schema drift in the learning authority rejection
 
 ## Next
 
-1. Commit this local release-infrastructure checkpoint and obtain exact-head independent review.
+1. Commit the review-fix checkpoint and obtain repeat exact-head independent review.
 2. Run the protected dry-run/deployment only after exact-head CI and review pass.
 3. Preserve scheduled production capacity and inspect only scheduled receipts at their established
    times.
@@ -214,6 +217,6 @@ live run is requested.
 
 ## Last Commit
 
-Task 14 started from `1155327` (`fix: reject mixed learning provenance`). The release-infrastructure
-checkpoint commit becomes the candidate for exact-head CI and independent review; it is not a C6
-completion or production receipt.
+The first Task 14 checkpoint was `a5d4296` (`feat: add fail-closed v1 release gates`) and was blocked
+by independent review. The review-fix checkpoint becomes the new candidate for exact-head CI and
+repeat independent review; it is not a C6 completion or production receipt.

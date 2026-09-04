@@ -72,6 +72,35 @@ Total: 699 passed and 20 skipped. The opt-in live check remained skipped because
 not authorized to touch production. The final focused release/migration gate passed 85 tests, and
 `git diff --check` produced no output.
 
+## Independent review fix round 1
+
+The independent exact-head review of `a5d4296` returned a blocking verdict with five release
+findings: scheduled run identity was not bound to the analysis UUID; scheduled reports had no
+deterministic caller; report identifiers and idempotency were not tied to the persisted chain; the
+gateway was not actually restored on initial rollout failure; and the C6 verifier/source
+reconciliation accepted shallow receipts.
+
+The replacement local candidate now requires the `start_run` UUID for collection and rejects a
+mismatched intelligence-run receipt; builds report IDs, semantic/rendered hashes, and idempotency
+keys through a dedicated deterministic CLI; records accepted reports before `finish_run` while
+keeping suppressed intraday runs silent; validates report UUIDs, exact packet-derived keys, packet
+evidence, and same-run policy decisions at both Edge and SQL; rejects comparison IDs until a durable
+ledger exists; and makes packet/kind/date unique. `finish_run` includes stored report publication
+receipts without resending.
+
+The protected deploy now materializes a prior gateway Git ref, verifies its source SHA-256 and live
+predeployment version before any production mutation, and redeploys that exact source on every
+initial rollout failure while also deleting the new dashboard function, unsetting its secrets, and
+disabling its runtime login. The C6 verifier now validates typed evidence for all 15 gates and
+requires exact SHA equality, access status codes, dry-run deltas, quota totals, rollback actions,
+scheduled run identity, nonempty V1 chains, hashes, and row relationships.
+
+Focused checks passed 120 Python and 5 Deno tests. The single final `npm run test:all` passed with
+the same complete counts: 364 Python, 63 Node, 218 Deno, 6 dashboard-contract, 31 web-unit, and 17
+Playwright tests (699 total), with 19 Python and one opt-in live Playwright test skipped. Exact-head
+CI and repeat independent review of the new commit remain pending; this is not a production or C6
+completion claim.
+
 ## Protected rollout requirements
 
 The controller still needs the exact checkpoint SHA pushed through the protected branch, matching

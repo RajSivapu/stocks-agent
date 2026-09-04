@@ -306,6 +306,8 @@ BEGIN
   END IF;
 END;
 $$;
+CREATE UNIQUE INDEX IF NOT EXISTS uq_market_reports_packet_kind_date
+  ON public.market_reports(run_id, packet_id, market_date, kind);
 
 CREATE TABLE IF NOT EXISTS public.market_learning_observations (
   id UUID PRIMARY KEY,
@@ -1170,6 +1172,7 @@ SET search_path = pg_catalog AS $$
 DECLARE
   v_existing public.market_reports%ROWTYPE;
   v_packet public.market_evidence_packets%ROWTYPE;
+  v_expected_key TEXT;
 BEGIN
   IF p_run_id IS NULL OR p_idempotency_key IS NULL
      OR p_idempotency_key !~ '^[0-9a-f]{64}$' OR jsonb_typeof(p_report)<>'object'
@@ -1192,13 +1195,54 @@ BEGIN
      OR p_report->>'rendered_hash' !~ '^[0-9a-f]{64}$'
      OR p_report->>'rendered_hash' <> encode(extensions.digest(
        convert_to(p_report->>'rendered_text','UTF8'),'sha256'
-     ),'hex') THEN
+     ),'hex')
+     OR jsonb_typeof(p_report->'report'->'source_ids') <> 'array'
+     OR jsonb_typeof(p_report->'report'->'policy_decision_ids') <> 'array'
+     OR jsonb_typeof(p_report->'report'->'comparison_ids') <> 'array'
+     OR jsonb_array_length(p_report->'report'->'comparison_ids') <> 0
+     OR EXISTS (SELECT 1 FROM jsonb_array_elements_text(p_report->'report'->'source_ids') item
+       WHERE item !~ '^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$')
+     OR EXISTS (SELECT 1 FROM jsonb_array_elements_text(p_report->'report'->'policy_decision_ids') item
+       WHERE item !~ '^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$') THEN
     RAISE EXCEPTION 'invalid market report' USING ERRCODE = '22023';
   END IF;
+  SELECT packet.* INTO v_packet
+  FROM public.market_evidence_packets packet
+  JOIN public.market_intelligence_run_events event
+    ON event.run_id=packet.run_id AND event.status='completed'
+  WHERE packet.id=(p_report->>'packet_id')::uuid
+    AND packet.run_id=p_run_id AND packet.status='completed';
+  IF NOT FOUND THEN
+    RAISE EXCEPTION 'completed evidence packet unavailable' USING ERRCODE = '22023';
+  END IF;
+  v_expected_key := encode(extensions.digest(convert_to(
+    'v1:' || p_report->>'kind' || ':' || p_report->>'market_date' || ':' || v_packet.packet_hash,
+    'UTF8'
+  ), 'sha256'), 'hex');
+  IF p_idempotency_key <> v_expected_key
+     OR EXISTS (
+       SELECT 1 FROM jsonb_array_elements_text(p_report->'report'->'source_ids') source_id
+       WHERE NOT EXISTS (
+         SELECT 1 FROM jsonb_array_elements(v_packet.packet->'evidence') evidence
+         WHERE evidence->>'item_id'=source_id
+       )
+     )
+     OR EXISTS (
+       SELECT 1 FROM jsonb_array_elements_text(p_report->'report'->'policy_decision_ids') decision_id
+       WHERE NOT EXISTS (
+         SELECT 1 FROM public.decision_evaluations evaluation
+         WHERE evaluation.id=decision_id::uuid AND evaluation.run_id=p_run_id
+       )
+     ) THEN
+    RAISE EXCEPTION 'market report chain mismatch' USING ERRCODE = '22023';
+  END IF;
   PERFORM pg_advisory_xact_lock(hashtextextended(
-    'market-intelligence-report:' || p_idempotency_key::text, 0
+    'market-intelligence-report:' || p_run_id::text || ':' || v_packet.id::text || ':' ||
+      (p_report->>'market_date') || ':' || (p_report->>'kind'), 0
   ));
-  SELECT * INTO v_existing FROM public.market_reports WHERE idempotency_key=p_idempotency_key;
+  SELECT * INTO v_existing FROM public.market_reports
+  WHERE run_id=p_run_id AND packet_id=v_packet.id
+    AND market_date=(p_report->>'market_date')::date AND kind=p_report->>'kind';
   IF FOUND THEN
     IF v_existing.run_id IS DISTINCT FROM p_run_id
        OR v_existing.packet_id IS DISTINCT FROM (p_report->>'packet_id')::uuid
@@ -1213,15 +1257,6 @@ BEGIN
       'rendered_hash',v_existing.rendered_hash,
       'duplicate',true
     );
-  END IF;
-  SELECT packet.* INTO v_packet
-  FROM public.market_evidence_packets packet
-  JOIN public.market_intelligence_run_events event
-    ON event.run_id=packet.run_id AND event.status='completed'
-  WHERE packet.id=(p_report->>'packet_id')::uuid
-    AND packet.run_id=p_run_id AND packet.status='completed';
-  IF NOT FOUND THEN
-    RAISE EXCEPTION 'completed evidence packet unavailable' USING ERRCODE = '22023';
   END IF;
   INSERT INTO public.market_reports(
     id,idempotency_key,run_id,packet_id,market_date,kind,report,report_hash,rendered_text,rendered_hash

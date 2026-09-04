@@ -210,8 +210,8 @@ class IntelligencePipeline:
         start_payload = request.collection_plan(providers, targets)
         start = self._start(start_payload, request.request_id)
         run_id = str(start.get("run_id") or "")
-        if not run_id:
-            raise ValueError("gateway start receipt is missing run_id")
+        if run_id != request.request_id:
+            raise ValueError("gateway start receipt run_id does not match request_id")
         plan_rows = start_payload["reservation_plan"]["reservations"]
         self._install_quota(plan_rows)
 

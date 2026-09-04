@@ -17,7 +17,10 @@ RESERVATION_ID = "22222222-2222-4222-8222-222222222222"
 
 
 def request(phase: str, *, dry_run: bool = False) -> PipelineRequest:
-    return PipelineRequest(phase=phase, market_date=date(2026, 9, 4), now=NOW, dry_run=dry_run)
+    return PipelineRequest(
+        phase=phase, market_date=date(2026, 9, 4), now=NOW,
+        dry_run=dry_run, request_id=RUN_ID,
+    )
 
 
 def raw_item(domain: str, *, provider: str = "gdelt", official: bool = False) -> SourceItem:

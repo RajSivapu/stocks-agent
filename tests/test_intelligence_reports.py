@@ -5,6 +5,11 @@ import pytest
 
 from lib.intelligence.reports import ReportInput, build_report, report_idempotency_key
 
+SOURCE_A = "00000000-0000-4000-8000-000000000001"
+SOURCE_B = "00000000-0000-4000-8000-000000000002"
+POLICY_A = "00000000-0000-4000-8000-000000000003"
+POLICY_B = "00000000-0000-4000-8000-000000000004"
+
 
 def report_input(**overrides):
     value = ReportInput(
@@ -15,9 +20,9 @@ def report_input(**overrides):
         title="Weekly owner research",
         summary="Evidence changed; review the cited research.",
         full_markdown="# Weekly owner research\n\nEvidence-backed detail.",
-        source_ids=("b", "a"),
-        policy_decision_ids=("policy-b", "policy-a"),
-        comparison_ids=("comparison-b", "comparison-a"),
+        source_ids=(SOURCE_B, SOURCE_A),
+        policy_decision_ids=(POLICY_B, POLICY_A),
+        comparison_ids=(),
         actionable_risk=False,
         material_thesis_change=False,
         intraday_triggered=True,
@@ -26,12 +31,12 @@ def report_input(**overrides):
 
 
 def test_report_hash_is_deterministic_and_sources_are_sorted():
-    first = build_report(report_input(source_ids=("b", "a")))
-    second = build_report(report_input(source_ids=("a", "b")))
+    first = build_report(report_input(source_ids=(SOURCE_B, SOURCE_A)))
+    second = build_report(report_input(source_ids=(SOURCE_A, SOURCE_B)))
     assert first.content_hash == second.content_hash
-    assert first.source_ids == ("a", "b")
-    assert first.policy_decision_ids == ("policy-a", "policy-b")
-    assert first.comparison_ids == ("comparison-a", "comparison-b")
+    assert first.source_ids == (SOURCE_A, SOURCE_B)
+    assert first.policy_decision_ids == (POLICY_A, POLICY_B)
+    assert first.comparison_ids == ()
     assert first.report_id == second.report_id
 
 

@@ -1281,14 +1281,30 @@ export function createSupabaseGatewayRepository(
         evaluations: evaluationRows.length,
         suggestions: suggestionRows.length,
         publications: publicationRows.length,
+        reports: 0,
       };
+      const reportStatuses: string[] = [];
+      const reportMessageIds: number[] = [];
       for (const request of requestRows) {
         const response = request.response;
         if (
           typeof response !== "object" || response === null ||
           Array.isArray(response)
         ) continue;
-        const responseCounts = (response as Record<string, unknown>).counts;
+        const responseRow = response as Record<string, unknown>;
+        if (request.operation === "record_report" && request.status === "completed") {
+          const publicationReceipt = responseRow.publication_receipt;
+          if (typeof publicationReceipt === "object" && publicationReceipt !== null &&
+            !Array.isArray(publicationReceipt)) {
+            const publication = publicationReceipt as Record<string, unknown>;
+            reportStatuses.push(text(publication.status, 30));
+            if (Array.isArray(publication.telegram_message_ids)) {
+              reportMessageIds.push(...publication.telegram_message_ids.map(integer));
+            }
+          }
+          if (typeof responseRow.report_id === "string") counts.reports += 1;
+        }
+        const responseCounts = responseRow.counts;
         if (
           typeof responseCounts !== "object" || responseCounts === null ||
           Array.isArray(responseCounts)
@@ -1302,10 +1318,13 @@ export function createSupabaseGatewayRepository(
           }
         }
       }
-      const statuses = publicationRows.map((row) => text(row.status, 30));
-      const ids = publicationRows.flatMap((row) =>
+      const statuses = [
+        ...publicationRows.map((row) => text(row.status, 30)),
+        ...reportStatuses,
+      ];
+      const ids = [...new Set([...publicationRows.flatMap((row) =>
         Array.isArray(row.telegram_message_ids) ? row.telegram_message_ids.map(integer) : []
-      );
+      ), ...reportMessageIds])];
       const partial = requestRows.some((row) =>
         row.status === "failed" ||
         (row.status === "claimed" && row.operation !== "finish_run")

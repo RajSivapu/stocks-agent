@@ -12,11 +12,12 @@ Status: **not deployed; protected rollout and scheduled verification pending**.
 
 ## Candidate and review receipts
 
-- Candidate SHA: pending the release-infrastructure checkpoint commit.
+- Prior candidate `a5d4296595ab5f41a7120953ba117638888dccf6`: blocked by independent review and never deployed.
+- Replacement candidate SHA: pending the fix-round checkpoint and exact-head re-review.
 - Local full suite: passed on 2026-09-04 with 699 tests passed and 20 skipped; typecheck, lint,
   license, production build, bundle scan, and Playwright gates passed.
 - Exact-head CI SHA and run URL: pending.
-- Independent review verdict and reviewed SHA: pending.
+- Independent review verdict: `a5d4296` blocked; replacement verdict and reviewed SHA pending.
 
 ## Protected dry-run receipts
 
@@ -58,8 +59,9 @@ is not part of this deployment.
 
 ## Rollback receipt
 
-- Local rollback-path verification: covered by the passing local Python deployment tests; no
-  production rollback was invoked.
+- Local rollback-path verification: the protected path requires a prior gateway Git ref, matching
+  source SHA-256, and current live version before mutation, then redeploys and verifies that source
+  while removing the new dashboard authority. No production rollback was invoked.
 - Initial production rollback exercise/result: pending.
 - Dashboard secrets unset: pending.
 - Newly introduced dashboard function removed: pending.

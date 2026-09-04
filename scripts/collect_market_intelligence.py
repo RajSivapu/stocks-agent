@@ -34,6 +34,9 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--market-date")
     parser.add_argument("--now")
     parser.add_argument("--context-file")
+    run_identifier = parser.add_mutually_exclusive_group(required=True)
+    run_identifier.add_argument("--request-id", dest="run_id")
+    run_identifier.add_argument("--run-id", dest="run_id")
     parser.add_argument("--dry-run", action="store_true")
     return parser
 
@@ -103,7 +106,9 @@ def main(argv: Sequence[str] | None = None, *, stdout: TextIO | None = None) -> 
     try:
         args = _parser().parse_args(argv)
         now = _now(args.now)
-        request = PipelineRequest(args.phase, _market_date(args.market_date, now), now, args.dry_run)
+        request = PipelineRequest(
+            args.phase, _market_date(args.market_date, now), now, args.dry_run, args.run_id
+        )
         context = _context(args.context_file)
         if args.dry_run:
             pipeline = IntelligencePipeline(object(), (), context=context)

@@ -308,6 +308,19 @@ def collect_source_receipts(database_url: str, api_url: str, run_id: str) -> dic
                   ) latest ON true
                  ORDER BY h.ticker LIMIT 100""",
         )
+        intelligence_runs = _fetch_all(connection,
+            "SELECT id::text AS id, phase, market_date::text AS market_date, policy_version FROM public.market_intelligence_runs WHERE id=%s::uuid",
+            (run_id,))
+        intelligence_events = _fetch_all(connection,
+            "SELECT id::text AS id, run_id::text AS run_id, content_hash FROM public.market_events WHERE run_id=%s::uuid ORDER BY id", (run_id,))
+        intelligence_rankings = _fetch_all(connection,
+            "SELECT id::text AS id, run_id::text AS run_id, event_id::text AS event_id, content_hash FROM public.market_candidate_rankings WHERE run_id=%s::uuid ORDER BY rank", (run_id,))
+        intelligence_packets = _fetch_all(connection,
+            "SELECT id::text AS id, run_id::text AS run_id, packet_hash, candidate_count, evidence_count FROM public.market_evidence_packets WHERE run_id=%s::uuid", (run_id,))
+        reports = _fetch_all(connection,
+            "SELECT id::text AS id, run_id::text AS run_id, packet_id::text AS packet_id, report_hash, rendered_hash FROM public.market_reports WHERE run_id=%s::uuid ORDER BY created_at", (run_id,))
+        report_publications = _fetch_all(connection,
+            "SELECT request_id::text AS request_id, run_id::text AS run_id, response FROM public.market_gateway_requests WHERE run_id=%s::uuid AND operation='record_report' AND status='completed' ORDER BY request_id", (run_id,))
     for row in holdings:
         row["price_as_of"] = normalize_receipt_timestamp(row.get("price_as_of"))
         for field in ("shares", "average_cost", "price", "price_source"):
@@ -322,6 +335,12 @@ def collect_source_receipts(database_url: str, api_url: str, run_id: str) -> dic
         "policy_version": policy.get("version"),
         "holdings": holdings,
         "portfolio_data_as_of": max(price_times) if price_times else None,
+        "intelligence_runs": intelligence_runs,
+        "intelligence_events": intelligence_events,
+        "intelligence_rankings": intelligence_rankings,
+        "intelligence_packets": intelligence_packets,
+        "reports": reports,
+        "report_publications": report_publications,
     }
 
 
@@ -427,7 +446,41 @@ def reconcile_source_receipts(
                 fail()
     if today_portfolio.get("data_as_of") != source.get("portfolio_data_as_of"):
         fail()
-    return {"status": "verified", "database_role": RUNTIME_ROLE, "claims_checked": 5}
+    chains = {key: source.get(key) for key in (
+        "intelligence_runs", "intelligence_events", "intelligence_rankings",
+        "intelligence_packets", "reports", "report_publications",
+    )}
+    if any(not isinstance(rows, list) or not rows for rows in chains.values()):
+        fail()
+    packet = chains["intelligence_packets"][0]
+    if packet.get("run_id") != run_id or not re.fullmatch(r"[0-9a-f]{64}", str(packet.get("packet_hash", ""))):
+        fail()
+    event_ids = {row.get("id") for row in chains["intelligence_events"]}
+    if any(row.get("run_id") != run_id or row.get("event_id") not in event_ids or not re.fullmatch(r"[0-9a-f]{64}", str(row.get("content_hash", ""))) for row in chains["intelligence_rankings"]):
+        fail()
+    report_ids = set()
+    for row in chains["reports"]:
+        if row.get("run_id") != run_id or row.get("packet_id") != packet.get("id") or not re.fullmatch(r"[0-9a-f]{64}", str(row.get("report_hash", ""))) or not re.fullmatch(r"[0-9a-f]{64}", str(row.get("rendered_hash", ""))):
+            fail()
+        report_ids.add(row.get("id"))
+    for row in chains["report_publications"]:
+        response = row.get("response")
+        if row.get("run_id") != run_id or not isinstance(response, dict) or response.get("report_id") not in report_ids or not isinstance(response.get("publication_receipt"), dict):
+            fail()
+    intelligence = payloads.get("/v1/intelligence", {}).get("data")
+    reports_view = payloads.get("/v1/reports", {}).get("data")
+    if not isinstance(intelligence, dict) or intelligence.get("run_id") != run_id or not isinstance(reports_view, dict):
+        fail()
+    visible_reports = reports_view.get("reports")
+    if not isinstance(visible_reports, list) or not report_ids.issubset({row.get("id") for row in visible_reports if isinstance(row, dict)}):
+        fail()
+    return {
+        "status": "verified", "database_role": RUNTIME_ROLE, "claims_checked": 11,
+        "counts": {"runs": len(chains["intelligence_runs"]), "events": len(chains["intelligence_events"]),
+                   "rankings": len(chains["intelligence_rankings"]), "packets": len(chains["intelligence_packets"]),
+                   "reports": len(chains["reports"]), "report_publications": len(chains["report_publications"])},
+        "relationships_verified": True, "hashes_verified": True,
+    }
 
 
 def validate_api_boundary(api_url: str, origin: str) -> tuple[str, str]:
