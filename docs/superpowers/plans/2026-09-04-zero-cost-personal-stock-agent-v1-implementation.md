@@ -63,7 +63,7 @@ New dashboard feature folders:
 
 ---
 
-### Task 1: V1-C1 Release Policy and Configuration Contract
+### Task 1: V1-C2 Release Policy and Configuration Contract
 
 **Files:**
 - Create: `lib/intelligence/__init__.py`
@@ -143,9 +143,9 @@ Run: `.venv/bin/python -m pytest tests/test_intelligence_policy.py tests/test_se
 
 Expected: PASS with no paid provider, brokerage, friend invitation, or automatic policy-change path enabled.
 
-- [ ] **Step 5: Record approval and commit V1-C1**
+- [ ] **Step 5: Confirm V1-C1 and begin V1-C2**
 
-Update `PROJECT_STATUS.md` so the written-spec approval and plan creation are checked, move V1-C1 to Done, and set V1-C2 as In Progress.
+Confirm the written-spec approval and plan creation remain checked in `PROJECT_STATUS.md`, keep V1-C1 in Done, and set V1-C2 as In Progress.
 
 ```bash
 git add config/settings.json lib/intelligence tests/test_intelligence_policy.py tests/test_security_invariants.py PROJECT_STATUS.md
@@ -537,6 +537,7 @@ git commit -m "feat: rank evidence-backed market candidates"
 - Create: `tests/test_collect_market_intelligence.py`
 - Modify: `skills/market-briefing/SKILL.md`
 - Modify: `routines/README.md`
+- Modify: `PROJECT_STATUS.md`
 
 **Interfaces:**
 - Consumes: `PipelineRequest(phase, market_date, now, dry_run)`, injected adapters, gateway client, and current holdings/plans context.
@@ -609,6 +610,7 @@ git commit -m "feat: orchestrate receipt-backed market discovery"
 - Modify: `supabase/functions/market-briefing-gateway/_shared/handler.ts`
 - Modify: `supabase/functions/market-briefing-gateway/_shared/handler_test.ts`
 - Modify: `docs/eval/market-briefing-eval.yaml`
+- Modify: `PROJECT_STATUS.md`
 
 **Interfaces:**
 - Consumes: `DecisionBundle.intelligence_packet = {id, content_hash, coverage}` on scheduled runs, or an inline fixture packet only when `dry_run: true`.
@@ -683,6 +685,7 @@ git commit -m "feat: bind discovery evidence to gateway policy"
 - Modify: `supabase/functions/market-briefing-gateway/_shared/companion.ts`
 - Modify: `supabase/functions/market-briefing-gateway/_shared/companion_test.ts`
 - Modify: `supabase/functions/market-briefing-gateway/_shared/policy.ts`
+- Modify: `PROJECT_STATUS.md`
 
 **Interfaces:**
 - Consumes: qualified candidates, gateway holdings/plans context, synchronized adjusted history, official fund/company evidence, and current CENX/VTI records when present.
@@ -926,6 +929,7 @@ git commit -m "feat: expose owner-only intelligence read models"
 - Modify: `apps/web/src/styles/global.css`
 - Modify: `apps/web/src/styles/tokens.css`
 - Modify: `apps/web/e2e/dashboard.spec.ts`
+- Modify: `PROJECT_STATUS.md`
 
 **Interfaces:**
 - Consumes: dashboard contracts from Task 11.
@@ -1000,6 +1004,7 @@ git commit -m "feat: deliver five-surface owner intelligence dashboard"
 - Modify: `tests/test_gateway.py`
 - Modify: `packages/dashboard-contracts/src/index.ts`
 - Modify: `supabase/functions/owner-dashboard-api/mappers.ts`
+- Modify: `PROJECT_STATUS.md`
 
 **Interfaces:**
 - Consumes: eligible 5/21/63-session outcomes, later authoritative events, original coverage, candidate rankings, and policy version.

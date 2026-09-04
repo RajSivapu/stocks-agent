@@ -3,7 +3,7 @@
 Last updated: 2026-09-04
 Canonical release: Personal Stock Agent V1
 Source baseline: `c5886f5` on `codex/owner-alert-v3`
-Current state: written specification approved; implementation plan complete; execution workflow selection required
+Current state: subagent-driven implementation active; V1-C2 in progress
 
 This file is the version-controlled source of truth for the Personal Stock Agent V1 rollout.
 `docs/ROADMAP.md` retains historical capability and deployment detail. Notion may later mirror this
@@ -47,7 +47,7 @@ V1-C1 is complete.
 
 ### V1-C2 — Free intelligence ingestion
 
-- [ ] Not started; awaiting implementation workflow selection.
+- [ ] In progress under the committed subagent-driven implementation plan.
 
 ### V1-C3 — Market-discovery brain
 
@@ -70,17 +70,15 @@ V1-C1 is complete.
 
 ## Next
 
-1. Select the implementation workflow: subagent-driven development or inline execution.
-2. Implement checkpoint by checkpoint with tests, internal review, and status updates.
+1. Implement Task 1's strict V1 policy/configuration contract using TDD.
+2. Continue checkpoint by checkpoint with task-scoped review gates and status updates.
 3. Preserve scheduled production capacity and inspect only scheduled receipts at their established
    times.
 
 ## Owner Action
 
-Review the committed
-`docs/superpowers/plans/2026-09-04-zero-cost-personal-stock-agent-v1-implementation.md` and select
-the execution workflow: subagent-driven development or inline execution. Product code begins only
-after that selection.
+No action is required while local implementation and review proceed. Owner action will be listed
+only when a protected external gate cannot be completed safely without it.
 
 No provider purchase, paid trial, card signup, brokerage credential, friend invitation, or duplicate
 live run is requested.
@@ -101,10 +99,11 @@ live run is requested.
   authenticated link.
 - Learning cannot silently change policy or authority.
 - `PROJECT_STATUS.md` is canonical; Notion is optional as a later mirror only.
+- The owner selected subagent-driven development on 2026-09-04 and delegated routine technical
+  decisions while preserving all security, production, and receipt gates.
 
 ## Blockers
 
-- Implementation execution waits for the post-plan workflow selection.
 - Production dashboard deployment remains blocked by its exact-head independent review gate and
   must not deploy the superseded thin dashboard.
 - Any unavailable free-provider entitlement, quota, or official-source access must fail closed and
