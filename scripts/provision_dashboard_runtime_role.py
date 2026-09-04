@@ -130,6 +130,28 @@ def provision_dashboard_role(
     }
 
 
+def disable_dashboard_runtime_login(connection) -> dict[str, object]:
+    """Remove the deploy credential's login and inherited dashboard privileges."""
+    with connection.transaction():
+        with connection.cursor() as cursor:
+            cursor.execute(
+                sql.SQL("REVOKE {} FROM {}").format(
+                    sql.Identifier(PRIVILEGE_ROLE), sql.Identifier(RUNTIME_ROLE)
+                )
+            )
+            cursor.execute(
+                sql.SQL("ALTER ROLE {} NOLOGIN PASSWORD NULL").format(
+                    sql.Identifier(RUNTIME_ROLE)
+                )
+            )
+    return {
+        "status": "disabled",
+        "runtime_role": RUNTIME_ROLE,
+        "login": False,
+        "memberships": 0,
+    }
+
+
 def publish_dashboard_secret(
     values: Mapping[str, str],
     project_ref: str,

@@ -82,3 +82,43 @@ def test_secret_publisher_rejects_any_extra_credential():
             },
             project_ref="projectref",
         )
+
+
+def test_disable_runtime_login_removes_login_and_membership():
+    statements = []
+
+    class Cursor:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return None
+
+        def execute(self, statement, parameters=None):
+            statements.append((str(statement), parameters))
+
+    class Transaction:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return None
+
+    class Connection:
+        def transaction(self):
+            return Transaction()
+
+        def cursor(self):
+            return Cursor()
+
+    receipt = provision.disable_dashboard_runtime_login(Connection())
+
+    assert receipt == {
+        "status": "disabled",
+        "runtime_role": provision.RUNTIME_ROLE,
+        "login": False,
+        "memberships": 0,
+    }
+    rendered = "\n".join(statement for statement, _ in statements)
+    assert "NOLOGIN PASSWORD NULL" in rendered
+    assert "REVOKE" in rendered

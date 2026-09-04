@@ -22,7 +22,10 @@ import psycopg
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
-from scripts.provision_dashboard_runtime_role import provision_dashboard_role
+from scripts.provision_dashboard_runtime_role import (
+    disable_dashboard_runtime_login,
+    provision_dashboard_role,
+)
 from scripts.verify_owner_dashboard_role import verify_dashboard_role
 from scripts.verify_owner_dashboard_deployment import (
     collect_source_receipts,
@@ -193,6 +196,38 @@ def publish_dashboard_secrets(
                 path.unlink(missing_ok=True)
 
 
+def dashboard_function_version(
+    project_ref: str,
+    repo_root: Path = ROOT,
+    runner: Callable[..., object] = subprocess.run,
+) -> int | None:
+    listing = _run(
+        [
+            "npx", "--yes", f"supabase@{SUPABASE_CLI_VERSION}", "functions", "list",
+            "--project-ref", project_ref, "--output", "json",
+        ],
+        cwd=repo_root,
+        runner=runner,
+    )
+    if getattr(listing, "returncode", 1) != 0:
+        raise RuntimeError("dashboard function version receipt is unavailable")
+    try:
+        functions = json.loads(str(getattr(listing, "stdout", "")))
+        row = next((item for item in functions if item.get("name") == FUNCTION_NAME), None)
+        return None if row is None else int(row["version"])
+    except (json.JSONDecodeError, KeyError, TypeError, ValueError) as error:
+        raise RuntimeError("dashboard function version receipt is malformed") from error
+
+
+def ensure_initial_function_absent(
+    project_ref: str,
+    repo_root: Path = ROOT,
+    runner: Callable[..., object] = subprocess.run,
+) -> None:
+    if dashboard_function_version(project_ref, repo_root, runner) is not None:
+        raise RuntimeError("initial dashboard function already exists")
+
+
 def deploy_function(
     project_ref: str,
     git_sha: str,
@@ -201,25 +236,7 @@ def deploy_function(
 ) -> dict[str, object]:
     if not PROJECT_REF_PATTERN.fullmatch(project_ref) or not re.fullmatch(r"[0-9a-f]{40}", git_sha):
         raise ValueError("canonical project and git receipts are required")
-    def function_version() -> int | None:
-        listing = _run(
-            [
-                "npx", "--yes", f"supabase@{SUPABASE_CLI_VERSION}", "functions", "list",
-                "--project-ref", project_ref, "--output", "json",
-            ],
-            cwd=repo_root,
-            runner=runner,
-        )
-        if getattr(listing, "returncode", 1) != 0:
-            raise RuntimeError("dashboard function version receipt is unavailable")
-        try:
-            functions = json.loads(str(getattr(listing, "stdout", "")))
-            row = next((item for item in functions if item.get("name") == FUNCTION_NAME), None)
-            return None if row is None else int(row["version"])
-        except (json.JSONDecodeError, KeyError, TypeError, ValueError) as error:
-            raise RuntimeError("dashboard function version receipt is malformed") from error
-
-    rollback_version = function_version()
+    rollback_version = dashboard_function_version(project_ref, repo_root, runner)
     if rollback_version is not None:
         raise RuntimeError("initial dashboard function already exists")
     deploy = _run(
@@ -232,7 +249,7 @@ def deploy_function(
     )
     if getattr(deploy, "returncode", 1) != 0:
         raise RuntimeError("Supabase rejected the dashboard function deployment")
-    version = function_version()
+    version = dashboard_function_version(project_ref, repo_root, runner)
     if version is None or (rollback_version is not None and version <= rollback_version):
         raise RuntimeError("dashboard function version did not advance")
     return {
@@ -264,21 +281,81 @@ def rollback_initial_function(
     )
     if getattr(unset, "returncode", 1) != 0:
         raise RuntimeError("dashboard rollback could not activate the configuration kill switch")
-    deletion = _run(
-        [
-            "npx", "--yes", f"supabase@{SUPABASE_CLI_VERSION}", "functions", "delete",
-            FUNCTION_NAME, "--project-ref", project_ref, "--yes",
-        ],
-        cwd=repo_root,
-        runner=runner,
-    )
-    if getattr(deletion, "returncode", 1) != 0:
-        raise RuntimeError("dashboard rollback could not remove the initial function")
+    try:
+        version = dashboard_function_version(project_ref, repo_root, runner)
+    except RuntimeError:
+        version = -1  # Unknown is fail-closed: make the idempotent delete attempt.
+    if version is not None:
+        deletion = _run(
+            [
+                "npx", "--yes", f"supabase@{SUPABASE_CLI_VERSION}", "functions", "delete",
+                FUNCTION_NAME, "--project-ref", project_ref, "--yes",
+            ],
+            cwd=repo_root,
+            runner=runner,
+        )
+        if getattr(deletion, "returncode", 1) != 0:
+            raise RuntimeError("dashboard rollback could not remove the initial function")
     return {
         "status": "rolled_back",
         "function": FUNCTION_NAME,
         "dashboard_secrets_unset": list(DASHBOARD_SECRET_NAMES),
     }
+
+
+def rollback_initial_deployment(
+    project_ref: str,
+    admin_url: str,
+    *,
+    edge_rollback: Callable[..., Mapping[str, object]] = rollback_initial_function,
+    connector: Callable[..., object] = psycopg.connect,
+) -> dict[str, object]:
+    """Remove the initial Edge deployment and invalidate its database login."""
+    role_receipt: Mapping[str, object] | None = None
+    edge_receipt: Mapping[str, object] | None = None
+    errors: list[Exception] = []
+    try:
+        with connector(admin_url) as connection:
+            role_receipt = disable_dashboard_runtime_login(connection)
+    except Exception as error:
+        errors.append(error)
+    try:
+        edge_receipt = edge_rollback(project_ref)
+    except Exception as error:
+        errors.append(error)
+    if errors:
+        raise RuntimeError("dashboard rollback was incomplete") from errors[-1]
+    assert role_receipt is not None and edge_receipt is not None
+    return {
+        **dict(edge_receipt),
+        "runtime_login": role_receipt,
+    }
+
+
+def publish_and_deploy_or_rollback(
+    project_ref: str,
+    values: Mapping[str, str],
+    git_sha: str,
+    admin_url: str,
+    *,
+    preflight: Callable[..., None] = ensure_initial_function_absent,
+    publisher: Callable[..., None] = publish_dashboard_secrets,
+    deployer: Callable[..., Mapping[str, object]] = deploy_function,
+    rollback: Callable[..., Mapping[str, object]] = rollback_initial_deployment,
+) -> dict[str, object]:
+    """Publish the exact secret manifest and clean it up if deployment fails."""
+    preflight(project_ref)
+    publisher(project_ref, values)
+    try:
+        return dict(deployer(project_ref, git_sha))
+    except Exception as error:
+        try:
+            rollback(project_ref, admin_url)
+        except Exception as rollback_error:
+            raise RuntimeError(
+                "dashboard function deployment failed and the initial dashboard rollback also failed"
+            ) from rollback_error
+        raise error
 
 
 def run_post_deploy_canary(
@@ -364,6 +441,7 @@ def main() -> int:
     )
     git_sha = verify_git_release()
     run_local_verification()
+    ensure_initial_function_absent(arguments.project_ref)
     with psycopg.connect(admin_url) as connection:
         with connection.cursor() as cursor:
             cursor.execute(MIGRATION.read_text())
@@ -378,15 +456,16 @@ def main() -> int:
         role_receipt=role_receipt,
         secret_names=DASHBOARD_SECRET_NAMES,
     )
-    publish_dashboard_secrets(
+    receipt = publish_and_deploy_or_rollback(
         arguments.project_ref,
         {
             "DASHBOARD_ALLOWED_ORIGINS": arguments.allowed_origin,
             "DASHBOARD_DATABASE_URL": database_url,
             "DASHBOARD_OWNER_USER_ID": owner_user_id,
         },
+        git_sha,
+        admin_url,
     )
-    receipt = deploy_function(arguments.project_ref, git_sha)
     receipt["configuration"] = safe_configuration
     receipt["role"] = role_receipt
     receipt["canary"] = verify_initial_deployment_or_rollback(
@@ -396,6 +475,7 @@ def main() -> int:
         owner_email,
         service_key,
         publishable_key,
+        rollback=lambda project_ref: rollback_initial_deployment(project_ref, admin_url),
     )
     print(json.dumps(receipt, sort_keys=True, separators=(",", ":")))
     return 0

@@ -172,10 +172,130 @@ def test_failed_initial_canary_deletes_only_the_new_dashboard_function(tmp_path)
             *deploy.DASHBOARD_SECRET_NAMES, "--project-ref", PROJECT_REF, "--yes",
         ],
         [
+            "npx", "--yes", f"supabase@{deploy.SUPABASE_CLI_VERSION}", "functions", "list",
+            "--project-ref", PROJECT_REF, "--output", "json",
+        ],
+        [
             "npx", "--yes", f"supabase@{deploy.SUPABASE_CLI_VERSION}", "functions", "delete",
             "owner-dashboard-api", "--project-ref", PROJECT_REF, "--yes",
         ],
     ]
+
+
+def test_rollback_skips_delete_when_no_dashboard_function_exists(tmp_path):
+    commands = []
+
+    def runner(command, **_options):
+        commands.append(command)
+        output = "[]" if "list" in command else "ok"
+        return type("Result", (), {"returncode": 0, "stdout": output, "stderr": ""})()
+
+    receipt = deploy.rollback_initial_function(PROJECT_REF, tmp_path, runner)
+    assert receipt["status"] == "rolled_back"
+    assert not any("delete" in command for command in commands)
+
+
+def test_rollback_attempts_edge_cleanup_even_if_runtime_login_disable_fails():
+    events = []
+
+    def connector(*_args, **_kwargs):
+        events.append("disable")
+        raise RuntimeError("database unavailable")
+
+    def edge_rollback(*_args, **_kwargs):
+        events.append("edge")
+        return {"status": "rolled_back"}
+
+    with pytest.raises(RuntimeError, match="rollback was incomplete"):
+        deploy.rollback_initial_deployment(
+            PROJECT_REF,
+            "postgresql://admin:secret@example.com/postgres",
+            edge_rollback=edge_rollback,
+            connector=connector,
+        )
+    assert events == ["disable", "edge"]
+
+
+def test_post_publication_deploy_failure_rolls_back_before_propagating():
+    events = []
+
+    def publisher(*_args, **_kwargs):
+        events.append("publish")
+
+    def deployer(*_args, **_kwargs):
+        events.append("deploy")
+        raise RuntimeError("function deploy failed")
+
+    def rollback(*_args, **_kwargs):
+        events.append("rollback")
+        return {"status": "rolled_back"}
+
+    with pytest.raises(RuntimeError, match="function deploy failed"):
+        deploy.publish_and_deploy_or_rollback(
+            PROJECT_REF,
+            {
+                "DASHBOARD_DATABASE_URL": DATABASE_URL,
+                "DASHBOARD_OWNER_USER_ID": OWNER_ID,
+                "DASHBOARD_ALLOWED_ORIGINS": ORIGIN,
+            },
+            "a" * 40,
+            "postgresql://admin:secret@example.com/postgres",
+            preflight=lambda *_args, **_kwargs: events.append("preflight"),
+            publisher=publisher,
+            deployer=deployer,
+            rollback=rollback,
+        )
+    assert events == ["preflight", "publish", "deploy", "rollback"]
+
+
+def test_pre_publication_failure_does_not_run_destructive_rollback():
+    events = []
+
+    def publisher(*_args, **_kwargs):
+        events.append("publish")
+        raise RuntimeError("secret publication failed")
+
+    with pytest.raises(RuntimeError, match="secret publication failed"):
+        deploy.publish_and_deploy_or_rollback(
+            PROJECT_REF,
+            {
+                "DASHBOARD_DATABASE_URL": DATABASE_URL,
+                "DASHBOARD_OWNER_USER_ID": OWNER_ID,
+                "DASHBOARD_ALLOWED_ORIGINS": ORIGIN,
+            },
+            "a" * 40,
+            "postgresql://admin:secret@example.com/postgres",
+            preflight=lambda *_args, **_kwargs: events.append("preflight"),
+            publisher=publisher,
+            deployer=lambda *_args, **_kwargs: events.append("deploy"),
+            rollback=lambda *_args, **_kwargs: events.append("rollback"),
+        )
+    assert events == ["preflight", "publish"]
+
+
+def test_existing_function_stops_before_secret_publication_or_rollback():
+    events = []
+
+    def preflight(*_args, **_kwargs):
+        events.append("preflight")
+        raise RuntimeError("initial dashboard function already exists")
+
+    with pytest.raises(RuntimeError, match="already exists"):
+        deploy.publish_and_deploy_or_rollback(
+            PROJECT_REF,
+            {
+                "DASHBOARD_DATABASE_URL": DATABASE_URL,
+                "DASHBOARD_OWNER_USER_ID": OWNER_ID,
+                "DASHBOARD_ALLOWED_ORIGINS": ORIGIN,
+            },
+            "a" * 40,
+            "postgresql://admin:secret@example.com/postgres",
+            preflight=preflight,
+            publisher=lambda *_args, **_kwargs: events.append("publish"),
+            deployer=lambda *_args, **_kwargs: events.append("deploy"),
+            rollback=lambda *_args, **_kwargs: events.append("rollback"),
+        )
+    assert events == ["preflight"]
 
 
 def test_canary_failure_invokes_rollback_before_propagating():
