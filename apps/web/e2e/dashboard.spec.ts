@@ -16,7 +16,7 @@ test("owner dashboard is keyboard usable in light and dark modes", async ({ page
   await expect(page.locator("html")).toHaveAttribute("data-theme", "light");
 });
 
-for (const width of [320, 390, 768, 1024, 1440]) {
+for (const width of [300, 320, 390, 768, 1024, 1440]) {
   test(`dashboard fits ${width}px without page-level horizontal clipping`, async ({ page }) => {
     await page.setViewportSize({ width, height: 900 });
     await page.goto("/?fixture=complete");

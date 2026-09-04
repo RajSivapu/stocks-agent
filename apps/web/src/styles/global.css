@@ -44,6 +44,7 @@ a { color: inherit; }
 .page-heading { max-width: 48rem; }
 .page-heading > p:last-child { color: var(--muted); font-size: 1.05rem; }
 .page-stack { display: grid; gap: 1.5rem; }
+.page-stack > * { min-width: 0; }
 .section-block, .state-card { padding: clamp(1.15rem, 3vw, 2rem); border: 1px solid var(--line); border-radius: 1rem; background: var(--surface); box-shadow: var(--shadow); }
 .section-block h2, .state-card h1 { font-size: clamp(1.4rem, 2.5vw, 2rem); }
 .section-heading { display: flex; align-items: flex-start; justify-content: space-between; gap: 1rem; }
@@ -97,7 +98,7 @@ th small, td small { display: block; margin-top: .25rem; color: var(--muted); fo
   .app-shell { display: block; }
   .sidebar { position: static; width: 100%; height: auto; padding: 1rem; }
   .sidebar nav { grid-template-columns: repeat(4, minmax(0, 1fr)); margin: 1rem 0; }
-  .sidebar nav a { padding: .55rem .3rem; text-align: center; font-size: .78rem; }
+  .sidebar nav a { min-width: 0; padding: .55rem .3rem; overflow-wrap: anywhere; text-align: center; font-size: .78rem; }
   .sidebar-footer { grid-template-columns: 1fr auto; align-items: end; }
   .sidebar-footer > p { display: none; }
   .data-bar { align-items: flex-start; flex-wrap: wrap; }
