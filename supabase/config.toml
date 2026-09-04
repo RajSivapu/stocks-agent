@@ -9,3 +9,8 @@ entrypoint = "./functions/telegram-portfolio/index.ts"
 enabled = true
 verify_jwt = false
 entrypoint = "./functions/market-briefing-gateway/index.ts"
+
+[functions."owner-dashboard-api"]
+enabled = true
+verify_jwt = false
+entrypoint = "./functions/owner-dashboard-api/index.ts"

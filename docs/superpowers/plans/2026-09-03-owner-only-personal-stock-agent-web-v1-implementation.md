@@ -264,7 +264,7 @@ git commit -m "feat: add read-only dashboard database role"
 - Produces: `createOwnerDashboardHandler(dependencies): (request) => Promise<Response>`.
 - Consumes: `DashboardRepository` from Task 4 through dependency injection.
 
-- [ ] **Step 1: Write failing authorization, preflight, and method tests**
+- [x] **Step 1: Write failing authorization, preflight, and method tests**
 
 ```ts
 Deno.test("missing owner configuration fails before repository access", async () => {
@@ -289,20 +289,20 @@ Deno.test("POST is unavailable", async () => {
 });
 ```
 
-- [ ] **Step 2: Run Deno API tests and verify RED**
+- [x] **Step 2: Run Deno API tests and verify RED**
 
 Run: `npx --yes deno@2.9.6 test --config supabase/functions/deno.json supabase/functions/owner-dashboard-api`
 
 Expected: FAIL because the API modules do not exist.
 
-- [ ] **Step 3: Implement minimal fail-closed boundary**
+- [x] **Step 3: Implement minimal fail-closed boundary**
 
 Use asymmetric JWKS verification only (`ES256`, `RS256`, `EdDSA`), issuer
 `${SUPABASE_URL}/auth/v1`, audience `authenticated`, canonical UUID subject, and a maximum 900-second
 JWT lifetime. Validate owner configuration before constructing the database repository. Require the
 owner JWT on `/meta` and every GET route. Return only the documented bounded error envelope.
 
-- [ ] **Step 4: Configure preflight-safe Edge behavior**
+- [x] **Step 4: Configure preflight-safe Edge behavior**
 
 ```toml
 [functions."owner-dashboard-api"]
@@ -314,13 +314,13 @@ entrypoint = "./functions/owner-dashboard-api/index.ts"
 The handler accepts only exact configured origins. `OPTIONS` advertises `GET`; all non-OPTIONS calls
 authenticate in-function. No wildcard origin or credential-reflecting fallback exists.
 
-- [ ] **Step 5: Run Deno API tests and check the entrypoint and verify GREEN**
+- [x] **Step 5: Run Deno API tests and check the entrypoint and verify GREEN**
 
 Run: `npx --yes deno@2.9.6 test --config supabase/functions/deno.json supabase/functions/owner-dashboard-api && npx --yes deno@2.9.6 check --config supabase/functions/deno.json supabase/functions/owner-dashboard-api/index.ts`
 
 Expected: all tests and type checks exit 0.
 
-- [ ] **Step 6: Commit Task 3**
+- [x] **Step 6: Commit Task 3**
 
 ```bash
 git add supabase/config.toml supabase/functions
