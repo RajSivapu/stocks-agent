@@ -53,3 +53,17 @@ This task performed local implementation and focused fixture tests only. It did 
 - GREEN: exact Task 11 Deno gate — `49 passed, 0 failed`.
 - GREEN: focused authoritative-query contract — `1 passed, 29 deselected`.
 - `git diff --check` passed. No full suite, live database, migration, deployment, Telegram, scheduler, provider/model, or brokerage action was run.
+
+## Fix round 3 — Eligibility before the recommendation bound
+
+- Replaced the two-stage recommendation-ID lookup with one bounded PostgREST inner-join query. The database now admits only gateway recommendations having at least one complete 5/21/63-session grade whose `direction_success` is a boolean before applying `LIMIT 150`.
+- The qualifying recommendations remain ordered by authoritative `suggestions.ts DESC, suggestions.id DESC`. All eligible horizons are embedded for those bounded recommendations, validated at the repository boundary, and the existing recommendation-level reducer selects the longest completed horizon once.
+- The end-to-end regression places 151 newer ineligible recommendations (ungraded, incomplete, or complete with null direction) ahead of the completed two-loss/one-win history, while retaining 151 old incomplete rows with fresh grade timestamps. RED returned `0`; GREEN returns the authoritative completed streak of `2` without an unbounded client scan.
+
+### Fix-round evidence
+
+- RED: focused repository test — `11 passed, 1 failed` (`expected 2, got 0`).
+- RED: focused authoritative-query contract — `1 failed, 29 deselected` because grade eligibility was absent from the bounded parent query.
+- GREEN: exact Task 11 Deno gate — `49 passed, 0 failed`.
+- GREEN: focused authoritative-query contract — `1 passed, 29 deselected`.
+- `git diff --check` passed. No full suite, live database, migration, deployment, Telegram, scheduler, provider/model, or brokerage action was run.

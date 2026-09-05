@@ -438,39 +438,53 @@ function oneObject(
 
 async function recentRecommendationGrades(client: SupabaseLike): Promise<DbResult> {
   const recommendationRows = rows(
-    await client.from("suggestions").select("id,ts")
+    await client.from("suggestions").select(
+      "id,ts,eligible_grades:suggestion_grades!inner(suggestion_id,horizon_days,coverage_status,excess_return_pct,direction_success,graded_at)",
+    )
       .eq("decision_source", "gateway")
+      .eq("eligible_grades.coverage_status", "complete")
+      .in("eligible_grades.horizon_days", [5, 21, 63])
+      .in("eligible_grades.direction_success", [true, false])
       .order("ts", { ascending: false })
       .order("id", { ascending: false }).limit(150),
     "CONTEXT_TOO_LARGE",
   );
-  const recommendationTimes = new Map<number, string>();
+  const gradeRows: Record<string, unknown>[] = [];
   for (const row of recommendationRows) {
     const suggestionId = integer(row.id);
     const recommendationAt = text(row.ts, 40);
     if (!Number.isFinite(Date.parse(recommendationAt))) {
       throw new GatewayRepositoryError("INVALID_PERSISTED_DATA");
     }
-    recommendationTimes.set(suggestionId, recommendationAt);
+    const eligibleGrades = rows(
+      { data: row.eligible_grades, error: null },
+      "INVALID_PERSISTED_DATA",
+    );
+    if (eligibleGrades.length === 0 || eligibleGrades.length > 3) {
+      throw new GatewayRepositoryError("INVALID_PERSISTED_DATA");
+    }
+    for (const grade of eligibleGrades) {
+      const horizonDays = integer(grade.horizon_days);
+      const directionSuccess = boole(grade.direction_success);
+      if (
+        integer(grade.suggestion_id) !== suggestionId ||
+        grade.coverage_status !== "complete" ||
+        ![5, 21, 63].includes(horizonDays)
+      ) {
+        throw new GatewayRepositoryError("INVALID_PERSISTED_DATA");
+      }
+      gradeRows.push({
+        ...grade,
+        suggestion_id: suggestionId,
+        horizon_days: horizonDays,
+        coverage_status: "complete",
+        direction_success: directionSuccess,
+        recommendation: { ts: recommendationAt },
+      });
+    }
   }
-  const recommendationIds = [...recommendationTimes.keys()];
-  if (recommendationIds.length === 0) return { data: [], error: null };
-
-  const gradeRows = rows(
-    await client.from("suggestion_grades").select(
-      "suggestion_id,horizon_days,coverage_status,excess_return_pct,direction_success,graded_at",
-    ).in("suggestion_id", recommendationIds).eq("coverage_status", "complete")
-      .in("horizon_days", [5, 21, 63])
-      .order("suggestion_id", { ascending: false })
-      .order("horizon_days", { ascending: false }).limit(recommendationIds.length * 3),
-    "CONTEXT_TOO_LARGE",
-  );
   return {
-    data: gradeRows.map((row) => {
-      const recommendationAt = recommendationTimes.get(integer(row.suggestion_id));
-      if (!recommendationAt) throw new GatewayRepositoryError("INVALID_PERSISTED_DATA");
-      return { ...row, recommendation: { ts: recommendationAt } };
-    }),
+    data: gradeRows,
     error: null,
   };
 }

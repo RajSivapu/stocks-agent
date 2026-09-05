@@ -151,19 +151,41 @@ Deno.test("recommendation streak orders equal-time grades by recommendation chro
   ]), 2);
 });
 
-Deno.test("context bounds recommendations before fresh old grade rows", async () => {
+Deno.test("context bounds eligible completed recommendations before newer ineligible rows", async () => {
+  const newerIneligibleRecommendations = Array.from({ length: 151 }, (_, index) => ({
+    id: 2000 + index,
+    ts: "2026-10-01T14:00:00Z",
+    decision_source: "gateway",
+  }));
   const oldRecommendations = Array.from({ length: 151 }, (_, index) => ({
     id: index + 1,
     ts: "2026-08-01T14:00:00Z",
     decision_source: "gateway",
   }));
   const recommendations = [
+    ...newerIneligibleRecommendations,
     { id: 1001, ts: "2026-09-03T14:00:00Z", decision_source: "gateway" },
     { id: 1000, ts: "2026-09-02T14:00:00Z", decision_source: "gateway" },
     { id: 999, ts: "2026-09-01T14:00:00Z", decision_source: "gateway" },
     ...oldRecommendations,
   ];
   const grades = [
+    ...newerIneligibleRecommendations.slice(0, 50).map((recommendation) => ({
+      suggestion_id: recommendation.id,
+      horizon_days: 5,
+      coverage_status: "incomplete",
+      excess_return_pct: null,
+      direction_success: false,
+      graded_at: "2026-11-01T21:00:00Z",
+    })),
+    ...newerIneligibleRecommendations.slice(50, 100).map((recommendation) => ({
+      suggestion_id: recommendation.id,
+      horizon_days: 5,
+      coverage_status: "complete",
+      excess_return_pct: null,
+      direction_success: null,
+      graded_at: "2026-11-01T21:00:00Z",
+    })),
     ...oldRecommendations.map((recommendation) => ({
       suggestion_id: recommendation.id,
       horizon_days: 5,
@@ -211,15 +233,44 @@ Deno.test("context bounds recommendations before fresh old grade rows", async ()
     lt(): ReadQuery { return this; }
 
     private result(): { data: Record<string, unknown>[]; error: null } {
-      let data: Record<string, unknown>[] = this.table === "suggestions" && this.selected === "id,ts"
+      const joinedGrades = this.table === "suggestions" &&
+        this.selected.startsWith("id,ts,eligible_grades:suggestion_grades!inner(");
+      let data: Record<string, unknown>[] = joinedGrades
+        ? structuredClone(recommendations).map((recommendation) => {
+          let eligibleGrades = structuredClone(grades).filter((grade) =>
+            grade.suggestion_id === recommendation.id
+          );
+          for (const [column, value] of this.equals) {
+            if (column.startsWith("eligible_grades.")) {
+              const nestedColumn = column.slice("eligible_grades.".length);
+              eligibleGrades = eligibleGrades.filter((grade) =>
+                (grade as Record<string, unknown>)[nestedColumn] === value
+              );
+            }
+          }
+          for (const [column, values] of this.included) {
+            if (column.startsWith("eligible_grades.")) {
+              const nestedColumn = column.slice("eligible_grades.".length);
+              eligibleGrades = eligibleGrades.filter((grade) =>
+                values.includes((grade as Record<string, unknown>)[nestedColumn])
+              );
+            }
+          }
+          return { ...recommendation, eligible_grades: eligibleGrades };
+        }).filter((recommendation) =>
+          (recommendation.eligible_grades as unknown[]).length > 0
+        )
+        : this.table === "suggestions" && this.selected === "id,ts"
         ? structuredClone(recommendations)
         : this.table === "suggestion_grades"
         ? structuredClone(grades)
         : [];
       for (const [column, value] of this.equals) {
+        if (column.startsWith("eligible_grades.")) continue;
         data = data.filter((row) => row[column] === value);
       }
       for (const [column, values] of this.included) {
+        if (column.startsWith("eligible_grades.")) continue;
         data = data.filter((row) => values.includes(row[column]));
       }
       data.sort((left, right) => {
