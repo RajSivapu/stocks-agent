@@ -3,6 +3,7 @@ from urllib.parse import urlencode
 from lib.intelligence.http import HttpRequest, SourceFailure
 
 from . import CollectionQuery, SourceAdapter, publisher_reference, security_ids
+from .claims import news_claim
 
 
 class FinnhubAdapter(SourceAdapter):
@@ -42,5 +43,6 @@ class FinnhubAdapter(SourceAdapter):
             "title": article.get("headline"), "text": article.get("summary"),
             "published_at": article.get("datetime"), "effective_at": None,
             "security_ids": security_ids(query.symbols),
-            "metadata": {"category": article.get("category")} | publisher_reference(article.get("url")),
+            "metadata": {"category": article.get("category")} | publisher_reference(article.get("url"))
+                | news_claim(article.get("headline"), article.get("summary"), article.get("datetime"), article.get("source"), article.get("url")),
         } for article in payload if isinstance(article, dict)]

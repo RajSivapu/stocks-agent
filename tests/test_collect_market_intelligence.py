@@ -78,3 +78,40 @@ def test_cli_rejects_untyped_comparison_and_learning_context():
         output = io.StringIO()
         assert main(["--phase", "pre-market", "--run-id", "11111111-1111-4111-8111-111111111111", "--context-file", str(context), "--dry-run"], stdout=output) == 2
     assert json.loads(output.getvalue()) == {"error": "INVALID_ARGUMENT", "ok": False}
+
+
+def test_scheduled_collector_consumes_protected_context_and_ignores_scratch_authority(monkeypatch, tmp_path):
+    import scripts.collect_market_intelligence as collector
+    from test_intelligence_pipeline import FakeAdapter, FakeGateway, NOW, RUN_ID
+    gateway = FakeGateway()
+    adapter = FakeAdapter()
+    reads = []
+    trusted = {"holdings": [{"ticker": "TEST", "shares": "4"}, {"ticker": "OTHER", "shares": "6"}],
+        "owner_plans": [], "intelligence_collection_context": {
+            "holding_market_values": {"TEST": "400", "OTHER": "600"},
+            "liquidity_by_ticker": {"TEST": "0.75"}, "overlap_by_ticker": {"TEST": "0.4"}}}
+    def read(run_id):
+        reads.append(run_id)
+        return {"data": {"context": trusted}}
+    monkeypatch.setattr(collector, "_read_context", read, raising=False)
+    monkeypatch.setattr(collector, "gateway", gateway)
+    monkeypatch.setattr(collector, "_adapters", lambda *_: [adapter])
+    scratch = tmp_path / "scratch.json"
+    scratch.write_text(json.dumps({"holdings": {"FAKE": "0"}, "liquidity_by_ticker": {"FAKE": "1"}}))
+    output = io.StringIO()
+    assert collector.main(["--phase", "intraday", "--run-id", RUN_ID,
+        "--now", NOW.isoformat(), "--context-file", str(scratch)], stdout=output) == 0
+    assert reads == [RUN_ID]
+    assert json.loads(output.getvalue())["domains_checked"] == ["holding:OTHER", "holding:TEST"]
+
+
+def test_protected_context_unwraps_values_and_never_uses_supplied_current_price():
+    from lib.intelligence.pipeline import protected_collection_context
+    result = protected_collection_context({"holdings": [{"ticker": "TEST", "shares": "2", "current_price": "999"}],
+        "liquidity_by_ticker": {"TEST": "1"}, "intelligence_collection_context": {
+            "holding_market_values": {"TEST": "200"}, "liquidity_by_ticker": {"TEST": "0.5"},
+            "overlap_by_ticker": {"TEST": "0.2"}}})
+    assert result["holdings"] == [{"ticker": "TEST", "shares": "2", "market_value": "200"}]
+    assert result["liquidity_by_ticker"] == {"TEST": "0.5"}
+    assert protected_collection_context({"holdings": [{"ticker": "TEST", "current_price": "999"}],
+        "liquidity_by_ticker": {"TEST": "1"}})["liquidity_by_ticker"] == {}

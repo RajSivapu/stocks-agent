@@ -276,23 +276,26 @@ class SourceAdapter(ABC):
         validate_request = getattr(self.http, "validate_request", None)
         if callable(validate_request):
             validate_request(request)
-        reservation_id = self.quota.next_reservation_id(self.provider)
+        reservation_id = self.quota.receipt_reservation_id(self.provider)
+        attempts = 0
 
         def admit_attempt() -> None:
             # A receipt has one reservation identity, so every counted open for
             # this collection must fit that reservation.  Do not silently spill
             # a redirect into another reservation that the terminal receipt
             # cannot prove; quota exhaustion stops before that next open.
+            nonlocal attempts
             self.quota.consume(self.provider, reservation_id)
+            attempts += 1
 
         response: HttpResult | None = None
         try:
+            reservation_id = self.quota.next_reservation_id(self.provider)
             if callable(validate_request):
                 response = self.http.get(request, before_attempt=admit_attempt)
             else:  # deterministic fixture transport has one declared outbound attempt
                 admit_attempt()
                 response = self.http.get(request)
-            attempts = int(getattr(response, "attempt_count", 1))
             payload = json.loads(
                 response.body,
                 parse_constant=lambda _value: (_ for _ in ()).throw(ValueError()),
@@ -339,14 +342,14 @@ class SourceAdapter(ABC):
             receipt = RequestReceipt(
                 provider=self.provider,
                 reservation_id=reservation_id,
-                status="failed",
+                status="quota_blocked" if isinstance(exc, QuotaExceeded) else "failed",
                 cache_key=receipt_cache_key,
                 requested_window=requested_window,
                 requested_limit=query.limit,
                 retrieved_at=response.retrieved_at if response is not None else _utc(self.clock()),
                 observed_at=response.observed_at if response is not None else None,
                 expires_at=None,
-                request_cost=0 if cached_failure else int(getattr(self.http, "last_attempt_count", 0)),
+                request_cost=0 if cached_failure else attempts,
                 upstream_remaining=None,
                 returned_count=0,
                 accepted_count=0,

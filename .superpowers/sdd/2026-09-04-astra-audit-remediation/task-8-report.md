@@ -176,3 +176,73 @@
   supabase/functions/market-briefing-gateway/_shared/repository_test.ts` — **65 passed**.
 - No live provider, database, scheduled run, Telegram, deployment, or full suite was run. The
   protected database migration/application path remains the only residual integration risk.
+
+## Replacement controller contract (review of `3fbcf7a`)
+
+This pass supersedes the round-5 closure claims above. The six reported boundary defects were
+reproduced or inspected in their actual call paths, then closed as one additive contract.
+
+- `20260922_collection_controller_contract.sql` explicitly defines the nonrecursive outer
+  controller, provider validator, and exact-key legacy recorder. The outer layer removes the
+  unsupported predecessor key before delegation, validates provider/reservation/window/hash/time
+  identity against the durable checkpoint, and persists distinct cache/predecessor lineage.
+  It restores every original actual checkpoint receipt into the terminal source/quota ledger;
+  cache hits never replace nonzero request costs. Existing deployed migration history is unchanged.
+- The fresh-schema intelligence suffix is generated from ordered additive migrations by
+  `scripts/sync_intelligence_schema.py`. It preserves original gateway grants and the deferred
+  report-outbox foreign key. Executable database catalog checks compare final function bodies,
+  privileges, and the relevant foreign key across fresh and ordered installs, replacing a prior
+  string-only wrapper-order assertion.
+- The worker asks for the immutable completion using the stable completion identity before
+  starting/resuming collection. A terminal commit followed by a lost response returns the original
+  packet and receipt on an independent process retry, without another start/write/hash calculation
+  over changed cache receipts. A separate process-crash test hydrates an actual successful
+  checkpoint, generates a distinct zero-cost cache receipt, and verifies the original nonzero
+  cost and predecessor link in the SQL ledger.
+- Production ranking context now has a protected producer, not only a scratch table. The
+  authenticated `collect_intelligence_quote` gateway accepts only ticker/cache/reservation/receipt
+  identities, reserves the attempt before its own bounded Yahoo fetch, validates symbol/USD/type/
+  freshness/price/volume, and records the server-owned quote outcome. The protected context reader
+  derives current values from these outcomes plus reconciled holdings. Caller-authored checkpoint
+  metadata cannot become quote, liquidity, or overlap authority. Direct context/quote-table access
+  is revoked; plain authenticated callers cannot invoke the producer/read RPCs.
+- Scheduled collection explicitly unwraps `intelligence_collection_context` and refreshes it after
+  source collection. Live scratch/context files cannot supply holdings, valuations, liquidity, or
+  overlap. Checked-in Task-7 query identifiers/terms are accepted with bounded policy validation,
+  so the real scheduled configuration is usable. Missing/stale values remain insufficient; ETF
+  underlying overlap is unavailable without composition evidence. All-equity direct-security
+  overlap is derived only when the complete holding valuation is known.
+- Quota admission and actual attempt counting are separate from prior transport state. Exhaustion
+  before the first open returns `QUOTA_BLOCKED`/zero; exhaustion before a redirect returns
+  `QUOTA_BLOCKED` with the already-made call count. SQL tests persist both outcomes. An uncertain
+  in-flight server quote blocks restart and completion rather than erasing an ambiguous attempt.
+- Alpha Vantage and Finnhub produce normalized claim, polarity, publisher, and upstream identities
+  from their real response shapes. Explicit annual revenue-guidance claims can corroborate across
+  independent wording/providers/publishers; ambiguous claims conservatively retain wording identity.
+  Syndicated upstream identity is not independent corroboration. Opposite polarity stays in
+  separate events and carries a conflict veto.
+
+### Final focused verification and self-review
+
+- Python: `.venv/bin/python -m pytest -q tests/test_gateway.py tests/test_intelligence_http.py
+  tests/test_intelligence_providers.py tests/test_intelligence_quota.py tests/test_intelligence_pipeline.py
+  tests/test_intelligence_ranking.py tests/test_collect_market_intelligence.py
+  tests/test_verify_market_intelligence_migration.py tests/test_intelligence_controller_sql.py
+  tests/test_intelligence_policy.py` — **236 passed**.
+- Deno: `npx --yes deno@2.9.6 test --config supabase/functions/deno.json
+  supabase/functions/market-briefing-gateway/_shared/contracts_test.ts
+  supabase/functions/market-briefing-gateway/_shared/handler_test.ts
+  supabase/functions/market-briefing-gateway/_shared/repository_test.ts
+  supabase/functions/market-briefing-gateway/_shared/intelligence_test.ts
+  supabase/functions/market-briefing-gateway/_shared/collection-quotes_test.ts` — **72 passed**.
+- `.venv/bin/python scripts/sync_intelligence_schema.py` and `git diff --check` — passed.
+- Self-review covered exact-key delegation, append-only source costs, cache predecessor validation,
+  terminal identity recovery, quote authority and pending-attempt failure behavior, missing ranking
+  values, reservation accounting, conservative corroboration/conflict semantics, and preservation
+  of prior schema grants/constraints.
+- The SQL integration tests initialize a new temporary, socket-only local PostgreSQL cluster,
+  execute both install paths, spawn independent workers, and tear down that cluster. They never
+  read existing credentials or connect to an existing database. All provider bodies are fixtures.
+  No live provider, production database, scheduled run, Telegram action, deployment, or full suite
+  was performed. Applying the additive migration and exercising protected deployment remain
+  release gates, not evidence claimed by this local implementation.

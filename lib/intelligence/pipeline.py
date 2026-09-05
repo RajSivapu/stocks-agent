@@ -13,7 +13,7 @@ from decimal import Decimal
 from zoneinfo import ZoneInfo
 
 from lib.intelligence.dedupe import RunItemDisposition, deduplicate
-from lib.intelligence.cache import ResumableCollectionCache
+from lib.intelligence.cache import ResumableCollectionCache, collection_from_checkpoint
 from lib.intelligence.http import SourceFailure, cache_key
 from lib.intelligence.normalize import SourceItem, normalize_item
 from lib.intelligence.packet import EvidencePacket, build_evidence_packet
@@ -139,14 +139,14 @@ class PipelineRequest:
 class PersistedPacket:
     packet_id: str
     packet_hash: str
-    value: EvidencePacket
+    value: EvidencePacket | Mapping[str, object]
 
     @property
     def coverage(self) -> Coverage:
-        return Coverage(self.value.coverage)
+        return Coverage(self.value["coverage"] if isinstance(self.value, Mapping) else self.value.coverage)
 
     def to_dict(self) -> dict[str, object]:
-        return self.value.to_dict()
+        return dict(self.value) if isinstance(self.value, Mapping) else self.value.to_dict()
 
 
 @dataclass(frozen=True, slots=True)
@@ -232,6 +232,11 @@ class IntelligencePipeline:
         if isinstance(completed, PipelineReceipt):
             return replace(completed, actual_requests=0, cache_hits=completed.actual_requests)
 
+        # Read the immutable completion before changing any restart state.
+        recovered = self._read_completion(request.request_id)
+        if recovered is not None:
+            return recovered
+
         providers = tuple(str(adapter.provider) for adapter in self.adapters)
         if not providers:
             raise ValueError("at least one adapter is required for live collection")
@@ -241,6 +246,10 @@ class IntelligencePipeline:
         start_payload = request.collection_plan(
             providers, targets, cache_keys=planned_cache_keys, request_window=initial_window
         )
+        jobs = self._jobs(request, targets)
+        counts = {provider: sum(str(adapter.provider) == provider for adapter, _ in jobs) for provider in providers}
+        for row in start_payload["reservation_plan"]["reservations"]:
+            row["requests"] = counts[row["provider"]]
         start = self._start(start_payload, request.request_id)
         run_id = str(start.get("run_id") or "")
         if run_id != request.request_id:
@@ -255,7 +264,7 @@ class IntelligencePipeline:
         if len(checkpoint_entries) != sum(isinstance(entry, Mapping) for entry in checkpoint_entries):
             raise ValueError("gateway start receipt checkpoints are invalid")
         plan_rows = start_payload["reservation_plan"]["reservations"]
-        self._install_quota(plan_rows)
+        self._install_quota(plan_rows, start.get("reservation_usage", {}))
 
         results = self._collect(request, targets, plan_rows, request_window)
         receipt = self._complete(request, run_id, targets, results)
@@ -298,7 +307,7 @@ class IntelligencePipeline:
         requested = sorted(_strings(self.context.get("requested_topics")))
         return tuple(f"request:{value}" for value in requested)[:10] or ("on_demand_request",)
 
-    def _install_quota(self, plan_rows: Sequence[Mapping[str, object]]) -> None:
+    def _install_quota(self, plan_rows: Sequence[Mapping[str, object]], usage: object = None) -> None:
         reservations = {
             str(row["provider"]): ({
                 "reservation_id": str(row["id"]),
@@ -307,9 +316,32 @@ class IntelligencePipeline:
             for row in plan_rows
         }
         quota = QuotaSession(reservations)
+        if not isinstance(usage, Mapping):
+            raise ValueError("invalid persisted reservation usage")
+        for row in plan_rows:
+            used = usage.get(str(row["id"]), 0)
+            if isinstance(used, bool) or not isinstance(used, int) or not 0 <= used <= int(row["requests"]):
+                raise ValueError("invalid persisted reservation usage")
+            for _ in range(used):
+                quota.consume(str(row["provider"]), str(row["id"]))
         for adapter in self.adapters:
             if hasattr(adapter, "quota"):
                 adapter.quota = quota
+
+    def _jobs(self, request: PipelineRequest, targets: Sequence[str]) -> list[tuple[object, str]]:
+        jobs = [(self.adapters[index % len(self.adapters)], targets[index % len(targets)])
+                for index in range(max(len(self.adapters), len(targets)))]
+        yahoo = next((adapter for adapter in self.adapters if adapter.provider == "yahoo"), None)
+        if yahoo is not None:
+            tickers = sorted(_holding_tickers(self.context.get("holdings"))
+                | _active_plan_tickers(self.context.get("owner_plans"))
+                | _strings(self.context.get("qualified_candidates")))
+            if tickers:
+                from lib.config import load_settings
+                budget = load_settings()["intelligence"]["provider_phase_budgets"]["yahoo"][request.phase]
+                jobs = [(adapter, target) for adapter, target in jobs if adapter.provider != "yahoo"]
+                jobs.extend((yahoo, f"holding:{ticker}") for ticker in tickers[:budget])
+        return jobs
 
     def _collect(
         self,
@@ -319,11 +351,8 @@ class IntelligencePipeline:
         request_window: Mapping[str, str],
     ) -> list[CollectionResult]:
         plan_by_provider = {str(row["provider"]): row for row in plan_rows}
-        count = max(len(self.adapters), len(targets))
         results: list[CollectionResult] = []
-        for index in range(count):
-            adapter = self.adapters[index % len(self.adapters)]
-            target = targets[index % len(targets)]
+        for index, (adapter, target) in enumerate(self._jobs(request, targets)):
             row = plan_by_provider[str(adapter.provider)]
             source_receipt_id = _uuid("receipt", request.request_id, index, adapter.provider)
             query = CollectionQuery(
@@ -339,15 +368,26 @@ class IntelligencePipeline:
                 if cached is not None:
                     results.append(cached)
                     continue
-                result = adapter.collect(query)
+                if adapter.provider == "yahoo" and callable(getattr(self.gateway, "call", None)):
+                    try:
+                        collected = self.gateway.call("collect_intelligence_quote", {
+                            "ticker": query.symbols[0], "cache_key": _collection_cache_key(adapter, query),
+                            "reservation_id": str(row["id"]),
+                            "source_receipt_id": _uuid("gateway-quote", source_receipt_id, _timestamp(request.now)),
+                        }, run_id=request.request_id)
+                        result = collection_from_checkpoint(_gateway_data(collected)["checkpoint"])
+                    except Exception as exc:
+                        raise _CheckpointFailure("server quote collection outcome unavailable") from exc
+                else:
+                    result = adapter.collect(query)
                 if not isinstance(result, CollectionResult):
                     raise TypeError("adapter returned an invalid collection result")
                 result = replace(
                     result,
-                    receipt=replace(result.receipt, source_receipt_id=source_receipt_id),
+                    receipt=replace(result.receipt, source_receipt_id=result.receipt.source_receipt_id or _uuid("actual-receipt", source_receipt_id, _timestamp(result.receipt.retrieved_at)),
+                                    reservation_id=str(row["id"])),
                 )
                 if result.receipt.request_cost > 0:
-                    result = replace(result, receipt=replace(result.receipt, source_receipt_id=source_receipt_id))
                     try:
                         self._checkpoint(request.request_id, _collection_cache_key(adapter, query), result)
                     except Exception as exc:
@@ -413,6 +453,9 @@ class IntelligencePipeline:
             value.item for value in dispositions
             if value.disposition in {"accepted", "near_duplicate"}
         ]
+        if callable(getattr(self.gateway, "call", None)):
+            context_response = self.gateway.call("read_intelligence_context", {}, run_id=run_id)
+            self.context = protected_collection_context(_gateway_data(context_response)["context"])
         events, relationships, ranked = _discover(discovery_items, self.context, request.now)
         qualified_ids = {
             evidence_key(item)
@@ -490,9 +533,6 @@ class IntelligencePipeline:
             "packet": packet_row,
             "error": None,
         }
-        final = self._record(
-            run_id, payload, _uuid("completion-request", request.request_id)
-        )
         collection_drops = tuple(
             {
                 "candidate_key": "",
@@ -508,6 +548,8 @@ class IntelligencePipeline:
              "kind": drop.kind, "reason": drop.reason}
             for drop in evidence_packet.drops
         )
+        coverage["collector_drops"] = list(collection_drops + packet_drops)
+        final = self._record(run_id, payload, _uuid("completion-request", request.request_id))
         limitations = tuple(failure_codes) + tuple(packet_dict["limitations"])
         counts = final.get("counts") if isinstance(final.get("counts"), Mapping) else {}
         return PipelineReceipt(
@@ -573,6 +615,43 @@ class IntelligencePipeline:
         )
         return _gateway_data(result)
 
+    def _read_completion(self, run_id: str) -> PipelineReceipt | None:
+        completion_id = _uuid("completion-request", run_id)
+        method = getattr(self.gateway, "read_intelligence_completion", None)
+        if callable(method):
+            response = method(run_id, completion_id)
+        elif callable(getattr(self.gateway, "call", None)):
+            response = self.gateway.call("read_intelligence_completion", {},
+                run_id=run_id, request_id=completion_id)
+        else:
+            return None
+        saved = _gateway_data(response).get("completion")
+        if saved is None:
+            return None
+        if not isinstance(saved, Mapping):
+            raise ValueError("invalid persisted completion")
+        final, payload, providers = saved["receipt"], saved["payload"], saved["providers"]
+        if final["run_id"] != run_id or final["completion_id"] != completion_id:
+            raise ValueError("persisted completion identity mismatch")
+        packet = payload["packet"]
+        if (packet["id"] != final["packet_id"] or packet["packet_hash"] != final["packet_hash"]
+                or hashlib.sha256(_canonical(packet["packet"]).encode()).hexdigest() != final["packet_hash"]):
+            raise ValueError("persisted completion packet mismatch")
+        sources = tuple({"accepted_count": row["accepted_count"],
+            "error_code": row["error"]["code"] if row["error"] else None,
+            "provider": providers[row["reservation_id"]], "receipt_id": row["id"],
+            "reservation_id": row["reservation_id"], "response_hash": row["response_hash"],
+            "status": row["status"]} for row in payload["receipts"])
+        coverage = payload["coverage"]
+        return PipelineReceipt(run_id=run_id,
+            packet=PersistedPacket(packet["id"], packet["packet_hash"], packet["packet"]),
+            sources=sources, drops=tuple(coverage.get("collector_drops", [])), coverage=coverage,
+            write_counts=dict(final["counts"]), domains_checked=tuple(coverage.get("domains_checked", [])),
+            limitations=tuple(sorted(f"{row['provider']}:{row['error_code']}" for row in sources if row["error_code"]))
+                + tuple(packet["packet"]["limitations"]), completion_id=completion_id,
+            actual_requests=sum(row["request_cost"] for row in payload["receipts"]),
+            cache_hits=sum(row["status"] == "cache_hit" for row in payload["receipts"]))
+
     def _checkpoint(self, run_id: str, cache_key_value: str, result: CollectionResult) -> None:
         payload = {
             "cache_key": cache_key_value,
@@ -600,6 +679,25 @@ def _gateway_data(result: object) -> Mapping[str, object]:
         raise ValueError("gateway returned an invalid receipt")
     nested = result.get("data")
     return nested if isinstance(nested, Mapping) else result
+
+
+def protected_collection_context(value: object) -> dict[str, object]:
+    """Unwrap only the protected read shape; source prose and scratch scores have no authority."""
+    if not isinstance(value, Mapping):
+        raise ValueError("invalid protected collection context")
+    trusted = _mapping(value.get("intelligence_collection_context"))
+    valuations = _mapping(trusted.get("holding_market_values"))
+    holdings = value.get("holdings", [])
+    if not isinstance(holdings, list):
+        raise ValueError("protected holdings must be rows")
+    return {
+        "holdings": [{"ticker": row["ticker"], "shares": row.get("shares"),
+                      "market_value": valuations.get(row["ticker"])} for row in holdings if isinstance(row, Mapping)],
+        "owner_plans": value.get("owner_plans", []),
+        "qualified_candidates": value.get("qualified_candidates", []),
+        "liquidity_by_ticker": dict(_mapping(trusted.get("liquidity_by_ticker"))),
+        "overlap_by_ticker": dict(_mapping(trusted.get("overlap_by_ticker"))),
+    }
 
 
 def _mapping(value: object) -> Mapping[object, object]:
@@ -718,7 +816,7 @@ def _failed_receipt(
     provider: str, reservation_id: str, query: CollectionQuery, now: datetime, *, error_code: str
 ) -> RequestReceipt:
     return RequestReceipt(
-        provider=provider, reservation_id=reservation_id, status="failed",
+        provider=provider, reservation_id=reservation_id, status="quota_blocked" if error_code == "QUOTA_BLOCKED" else "failed",
         cache_key=hashlib.sha256(f"{provider}:{query.text}".encode()).hexdigest(),
         requested_window={"start": _timestamp(query.start), "end": _timestamp(query.end)},
         requested_limit=query.limit, retrieved_at=_utc(now), observed_at=None, expires_at=None,
@@ -792,6 +890,12 @@ def _discover(
         if not ticker:
             continue
         grouped.setdefault(_claim_key(item, ticker), []).append(item)
+    polarities: dict[tuple[str, str], set[str]] = {}
+    for ticker, claim, polarity in grouped:
+        polarities.setdefault((ticker, claim), set()).add(polarity)
+    conflicting_claims = {key for key, values in polarities.items()
+                          if {"positive", "negative"} <= values}
+    conflicting_events: set[str] = set()
     for (_ticker, _claim, _polarity), supporting_items in grouped.items():
         item = supporting_items[0]
         ticker = _ticker
@@ -808,6 +912,8 @@ def _discover(
         relation = propose_relation(event, ticker=ticker,
                                     role=str(item.metadata.get("role") or "exposure"), evidence=supporting)
         events.append(event)
+        if (_ticker, _claim) in conflicting_claims:
+            conflicting_events.add(event.event_id)
         relations.append(relation)
         observed_at = item.published_at or item.retrieved_at
         age_seconds = max(0.0, (_utc(now) - _utc(observed_at)).total_seconds())
@@ -832,6 +938,9 @@ def _discover(
     holdings = _holding_weights(context.get("holdings"))
     plans = context.get("owner_plans", context.get("plans"))
     ranked = rank_candidates(candidates, holdings=holdings, plans=plans)
+    ranked = [replace(candidate, qualified=False,
+        veto_reasons=(*candidate.veto_reasons, "CONFLICTING_CLAIM_POLARITY"))
+        if candidate.event_id in conflicting_events else candidate for candidate in ranked]
     return events, relations, ranked
 
 
@@ -896,7 +1005,7 @@ def _holding_weights(value: object) -> dict[str, Decimal] | None:
 
 def _liquidity_score(item: SourceItem, context: Mapping[str, object], ticker: str) -> Decimal | None:
     values = context.get("liquidity_by_ticker")
-    raw = values.get(ticker) if isinstance(values, Mapping) else item.metadata.get("liquidity_score")
+    raw = values.get(ticker) if isinstance(values, Mapping) else None
     try:
         result = Decimal(str(raw))
     except Exception:
@@ -908,7 +1017,10 @@ def _authority_score(items: Sequence[SourceItem]) -> Decimal | None:
     """Corroboration requires a genuinely independent retained source, never a label alone."""
     if not items:
         return None
-    independent = {(item.provider, item.source_url) for item in items}
+    # Providers are distribution channels. Reuters syndicated through two
+    # channels is one source, even when tracking URLs or headlines differ.
+    independent = {(str(item.metadata.get("source_identity") or item.source_url),
+                    str(item.metadata.get("upstream_identity") or item.source_url)) for item in items}
     authorities = {item.authority for item in items}
     if "official" in authorities:
         return Decimal("1")
@@ -916,7 +1028,9 @@ def _authority_score(items: Sequence[SourceItem]) -> Decimal | None:
         return Decimal("0.75") if len(independent) >= 2 else None
     if "secondary" in authorities:
         providers = {item.provider for item in items}
-        return Decimal("0.75") if len(providers) >= 2 and len(independent) >= 2 else None
+        publishers = {source for source, _ in independent}
+        upstreams = {upstream for _, upstream in independent}
+        return Decimal("0.75") if len(providers) >= 2 and len(publishers) >= 2 and len(upstreams) >= 2 else None
     if "market_data" in authorities:
         return Decimal("0.5")
     return Decimal("0.25") if "radar" in authorities else None

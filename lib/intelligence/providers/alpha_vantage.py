@@ -3,6 +3,7 @@ from urllib.parse import urlencode
 from lib.intelligence.http import HttpRequest, SourceFailure
 
 from . import CollectionQuery, SourceAdapter, publisher_reference, security_ids
+from .claims import news_claim
 
 
 class AlphaVantageAdapter(SourceAdapter):
@@ -55,6 +56,7 @@ class AlphaVantageAdapter(SourceAdapter):
                 "title": article.get("title"), "text": article.get("summary"),
                 "published_at": article.get("time_published"), "effective_at": None,
                 "security_ids": tickers,
-                "metadata": {"source": article.get("source")} | publisher_reference(article.get("url")),
+                "metadata": {"source": article.get("source")} | publisher_reference(article.get("url"))
+                    | news_claim(article.get("title"), article.get("summary"), article.get("time_published"), article.get("source"), article.get("url")),
             })
         return records

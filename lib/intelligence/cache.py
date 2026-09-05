@@ -8,6 +8,7 @@ from dataclasses import replace
 from datetime import datetime, timezone
 from types import MappingProxyType
 from typing import Any
+import uuid
 
 from lib.intelligence.http import cache_key
 from lib.intelligence.providers import CollectionResult, RequestReceipt, SourceItem, parse_timestamp
@@ -52,7 +53,7 @@ class ResumableCollectionCache:
         return MappingProxyType(result)
 
     def put_collection(self, key: str, result: CollectionResult) -> None:
-        if result.receipt.status not in {"succeeded", "cache_hit", "failed"}:
+        if result.receipt.status not in {"succeeded", "cache_hit", "failed", "quota_blocked"}:
             return
         self._collections[key] = result
 
@@ -82,14 +83,16 @@ class ResumableCollectionCache:
         predecessor = result.receipt.source_receipt_id
         if not predecessor:
             raise ValueError("cached collection is missing its persisted source receipt")
-        if result.receipt.status == "failed":
+        if result.receipt.status in {"failed", "quota_blocked"}:
             # A failed checkpoint is an already-paid same-run outcome, not a
             # cache hit.  Preserve its original receipt identity and cost so
             # the terminal packet cannot erase the outbound attempt.
             return result
         receipt = replace(
             result.receipt, reservation_id=reservation_id, status="cache_hit", request_cost=0,
-            source_receipt_id=source_receipt_id, cache_predecessor_receipt_id=predecessor,
+            source_receipt_id=str(uuid.uuid5(uuid.NAMESPACE_URL,
+                f"market-intelligence:cache-hit:{source_receipt_id}:{predecessor}")),
+            cache_predecessor_receipt_id=predecessor,
         )
         return replace(result, receipt=receipt)
 
@@ -100,6 +103,11 @@ class ResumableCollectionCache:
 
     def get_run(self, run_id: str) -> object | None:
         return self._runs.get(run_id)
+
+
+def collection_from_checkpoint(entry: Mapping[str, object]) -> CollectionResult:
+    receipt = _receipt_from_checkpoint(entry["receipt"])
+    return CollectionResult(tuple(_item_from_checkpoint(row) for row in entry["items"]), receipt, receipt.requested_limit)
 
 
 __all__ = ["ResumableCollectionCache"]
@@ -129,7 +137,7 @@ def _receipt_from_checkpoint(row: Mapping[str, object]) -> RequestReceipt:
             cache_key=str(row["cache_key"]), requested_window=MappingProxyType(dict(row["requested_window"])),
             requested_limit=int(row["requested_limit"]), retrieved_at=_timestamp(row["retrieved_at"], "retrieved_at"),
             observed_at=_timestamp(row["observed_at"], "observed_at", nullable=True),
-            expires_at=_timestamp(row["expires_at"], "expires_at"), request_cost=int(row["request_cost"]),
+            expires_at=_timestamp(row["expires_at"], "expires_at", nullable=True), request_cost=int(row["request_cost"]),
             upstream_remaining=None if row["upstream_remaining"] is None else int(row["upstream_remaining"]),
             returned_count=int(row["returned_count"]), accepted_count=int(row["accepted_count"]),
             duplicate_count=int(row["duplicate_count"]), dropped_count=int(row["dropped_count"]),

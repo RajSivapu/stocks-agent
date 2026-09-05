@@ -28,6 +28,10 @@ class YahooAdapter(SourceAdapter):
         symbol = query.symbols[0] if query.symbols else query.text
         if quote_data.get("price") is None or quote_data.get("as_of") is None:
             raise ValueError("invalid Yahoo quote")
+        result = payload["chart"]["result"][0]
+        meta = result["meta"]
+        if meta.get("symbol") != symbol:
+            raise ValueError("Yahoo quote symbol mismatch")
         return [{
             "upstream_item_id": f"{symbol}:{quote_data['as_of']}",
             "source_url": f"https://finance.yahoo.com/quote/{quote(symbol, safe='')}",

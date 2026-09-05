@@ -79,6 +79,7 @@ export interface IntelligenceStartReceipt {
   cache_entries: JsonObject[];
   request_window: JsonObject;
   duplicate: boolean;
+  reservation_usage?: Record<string, number>;
 }
 
 export interface IntelligenceRecordReceipt {
@@ -996,7 +997,7 @@ export function parseIntelligenceStartReceipt(
   const row = objectValue(value, "start intelligence receipt");
   exactKeys(
     row,
-    ["run_id", "reservation_ids", "cache_entries", "request_window", "duplicate"],
+    ["run_id", "reservation_ids", "cache_entries", "request_window", "duplicate", ...("reservation_usage" in row ? ["reservation_usage"] : [])],
     "start intelligence receipt",
   );
   const cacheEntries = arrayValue(
@@ -1008,7 +1009,7 @@ export function parseIntelligenceStartReceipt(
       boundedObject(
         entry,
         `start intelligence receipt.cache_entries[${index}]`,
-        16_384,
+        65_536,
       )
     );
   return {
@@ -1023,6 +1024,10 @@ export function parseIntelligenceStartReceipt(
       ),
     cache_entries: cacheEntries,
     request_window: parseRequestWindow(row.request_window),
+    ...("reservation_usage" in row ? { reservation_usage: Object.fromEntries(
+      Object.entries(objectValue(row.reservation_usage, "reservation usage")).map(([key, value]) =>
+        [uuidValue(key, "reservation usage id"), integer(value, "reservation usage count", 0, 100)]),
+    ) } : {}),
     duplicate: typeof row.duplicate === "boolean" ? row.duplicate : (() => {
       throw new Error("start intelligence receipt.duplicate must be boolean");
     })(),

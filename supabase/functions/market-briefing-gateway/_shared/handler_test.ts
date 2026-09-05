@@ -1125,6 +1125,77 @@ function request(
   );
 }
 
+Deno.test("protected completion recovery bypasses new request claims and refuses authored payloads", async () => {
+  const REQUEST_ID = "00000000-0000-4000-8000-000000000071";
+  const repo = Object.assign(new FakeRepository(), {
+    readIntelligenceCompletion: (runId: string, completionId: string) => Promise.resolve({ run_id: runId, completion_id: completionId }),
+  });
+  const setup = makeHandler(repo);
+  const recovered = await setup.handler(request("read_intelligence_completion", {}, { requestId: REQUEST_ID }));
+  assertEquals(recovered.status, 200);
+  assertEquals((await json(recovered)).completion, { run_id: RUN_ID, completion_id: REQUEST_ID });
+  assertEquals(repo.claims.size, 0);
+  assertEquals(setup.sent, []);
+  const invented = await setup.handler(request("read_intelligence_context", { liquidity_by_ticker: { TEST: "1" } }));
+  assertEquals(invented.status, 400);
+  const unauthorized = await setup.handler(request("read_intelligence_context", {}, { secret: "wrong" }));
+  assertEquals(unauthorized.status, 401);
+});
+
+Deno.test("protected quote producer reserves before fetching and resumes without another call", async () => {
+  const { fetchCollectionQuote } = await import("./collection-quotes.ts");
+  const input = { ticker: "TEST", cache_key: "a".repeat(64),
+    source_receipt_id: "00000000-0000-4000-8000-000000000081",
+    reservation_id: "00000000-0000-4000-8000-000000000082" };
+  const window = { start: "2026-09-02T16:00:00.000Z", end: NOW.toISOString() };
+  const calls: string[] = [];
+  let saved: Record<string, unknown> | null = null;
+  let blocked = false;
+  const repo = Object.assign(new FakeRepository(), {
+    claimIntelligenceQuote: () => {
+      calls.push("claim");
+      return Promise.resolve(saved ? { status: "completed", checkpoint: saved }
+        : { status: blocked ? "quota_blocked" : "claimed", request_window: window });
+    },
+    recordIntelligenceQuote: (_run: string, _id: string, quote: unknown, checkpoint: Record<string, unknown>) => {
+      calls.push("record");
+      assert(quote !== null, "protected fetch supplied the quote");
+      saved = checkpoint;
+      return Promise.resolve(checkpoint);
+    },
+  });
+  const setup = makeHandler(repo, {
+    fetchCollectionQuote: (ticker: string, now: Date) => {
+      calls.push("fetch");
+      return fetchCollectionQuote(ticker, now, () => Promise.resolve(Response.json({ chart: { result: [{
+        meta: { symbol: ticker, currency: "USD", instrumentType: "EQUITY", regularMarketPrice: 100,
+          regularMarketTime: Math.floor(now.valueOf()/1000) },
+        timestamp: [Math.floor(now.valueOf()/1000)], indicators: { quote: [{ close: [100], volume: [50000] }] },
+      }] } })));
+    },
+  });
+  const first = await setup.handler(request("collect_intelligence_quote", input));
+  assertEquals(first.status, 200);
+  assertEquals(calls, ["claim", "fetch", "record"]);
+  const checkpoint = (await json(first)).checkpoint as { receipt: { request_cost: number; status: string } };
+  assertEquals(checkpoint.receipt.request_cost, 1);
+  assertEquals(checkpoint.receipt.status, "succeeded");
+  const retry = await setup.handler(request("collect_intelligence_quote", input));
+  assertEquals((await json(retry)).checkpoint, checkpoint);
+  assertEquals(calls, ["claim", "fetch", "record", "claim"]);
+  saved = null; blocked = true;
+  const exhausted = await setup.handler(request("collect_intelligence_quote", input));
+  const blockedReceipt = ((await json(exhausted)).checkpoint as { receipt: Record<string, unknown> }).receipt;
+  assertEquals(blockedReceipt.status, "quota_blocked");
+  assertEquals(blockedReceipt.error_code, "QUOTA_BLOCKED");
+  assertEquals(blockedReceipt.request_cost, 0);
+  assertEquals(calls.filter((value) => value === "fetch").length, 1);
+  assertEquals((await setup.handler(request("collect_intelligence_quote", { ...input, price: "999999" }))).status, 400);
+  assertEquals((await setup.handler(request("collect_intelligence_quote", input, { secret: "wrong" }))).status, 401);
+  assertEquals(repo.claims.size, 0);
+  assertEquals(setup.sent, []);
+});
+
 Deno.test("scheduled discovery requires the persisted packet hash before market work", async () => {
   class MismatchedPacketRepository extends FakeRepository {
     override loadIntelligencePacket(): Promise<

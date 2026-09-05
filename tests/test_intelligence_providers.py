@@ -45,6 +45,49 @@ def sample_query(limit=2, **overrides):
     return CollectionQuery(**values)
 
 
+def test_zero_capacity_collection_returns_quota_blocked_without_open():
+    http = FixtureHttp({"articles": []})
+    result = build_adapter("gdelt", http, QuotaSession({"gdelt": ()}), clock=lambda: NOW).collect(sample_query())
+    assert result.receipt.status == "quota_blocked"
+    assert result.receipt.error_code == "QUOTA_BLOCKED"
+    assert result.receipt.request_cost == 0
+    assert http.requests == []
+
+
+def test_secondary_adapters_normalize_independent_claims_and_syndication():
+    from lib.intelligence.pipeline import _discover
+    from lib.intelligence.normalize import normalize_item
+    from decimal import Decimal
+
+    alpha_payload = {"feed": [{
+        "title": "TEST raises full-year revenue guidance", "summary": "Management lifts sales outlook for 2026.",
+        "time_published": "20260904T110000", "url": "https://reuters.com/test-guidance", "source": "Reuters",
+        "ticker_sentiment": [{"ticker": "TEST", "relevance_score": "1"}],
+    }]}
+    finnhub_payload = [{"id": 19, "headline": "TEST boosts 2026 sales forecast",
+        "summary": "The company increases its annual revenue outlook.", "datetime": 1788519600,
+        "url": "https://bloomberg.com/test-sales", "source": "Bloomberg", "related": "TEST", "category": "company"}]
+    def collect(provider, payload):
+        return normalize_item(build_adapter(provider, FixtureHttp(payload),
+            QuotaSession({provider: ("reservation",)}), secret_getter=lambda _: "fixture", clock=lambda: NOW,
+        ).collect(sample_query()).items[0])
+    alpha = collect("alpha_vantage", alpha_payload)
+    finn = collect("finnhub", finnhub_payload)
+    assert alpha.metadata["claim_key"] == finn.metadata["claim_key"]
+    assert alpha.metadata["polarity"] == finn.metadata["polarity"] == "positive"
+    context = {"holdings": {"TEST": "0.1"}, "liquidity_by_ticker": {"TEST": "1"}, "overlap_by_ticker": {"TEST": "0.1"}}
+    events, _, ranked = _discover([alpha, finn], context, NOW)
+    assert len(events) == 1
+    assert ranked[0].components["authority_corroboration"] == Decimal("0.75")
+    syndicated = dict(finnhub_payload[0], source="Reuters", url="https://reuters.com/test-guidance?utm_source=finnhub")
+    _, _, ranked = _discover([alpha, collect("finnhub", [syndicated])], context, NOW)
+    assert "authority_corroboration:missing" in ranked[0].missing_reasons
+    opposite = dict(finnhub_payload[0], headline="TEST cuts 2026 sales forecast", summary="Management lowers annual revenue guidance.")
+    events, _, ranked = _discover([alpha, collect("finnhub", [opposite])], context, NOW)
+    assert len(events) == 2
+    assert all(not item.qualified and "CONFLICTING_CLAIM_POLARITY" in item.veto_reasons for item in ranked)
+
+
 FIXTURES = {
     "gdelt": {
         "articles": [{

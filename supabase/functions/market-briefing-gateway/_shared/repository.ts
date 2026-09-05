@@ -244,6 +244,9 @@ export interface GatewayRepository {
     payload: StartIntelligencePayload,
   ): Promise<IntelligenceStartReceipt>;
   checkpointIntelligenceCollection?(runId: string, payload: { cache_key: string; receipt: Record<string, unknown>; items: Record<string, unknown>[] }): Promise<{ run_id: string; cache_key: string }>;
+  readIntelligenceCompletion?(runId: string, completionId: string): Promise<Record<string, unknown> | null>;
+  claimIntelligenceQuote?(runId: string, input: Record<string, unknown>): Promise<Record<string, unknown>>;
+  recordIntelligenceQuote?(runId: string, receiptId: string, quote: unknown, checkpoint: Record<string, unknown>): Promise<Record<string, unknown>>;
   recordIntelligence?(
     runId: string,
     completionId: string,
@@ -723,6 +726,28 @@ export function createSupabaseGatewayRepository(
       return { run_id: text(row.run_id, 36), cache_key: text(row.cache_key, 512) };
     },
 
+    async readIntelligenceCompletion(runId, completionId) {
+      const result = await client.rpc("read_market_intelligence_completion", {
+        p_run_id: runId, p_completion_id: completionId,
+      });
+      if (result.error) throw new GatewayRepositoryError("PERSISTENCE_FAILED");
+      return result.data === null ? null : oneObject(result);
+    },
+
+    async claimIntelligenceQuote(runId, input) {
+      const result = await client.rpc("claim_market_intelligence_quote", { p_run_id: runId, p_input: input });
+      if (result.error) throw new GatewayRepositoryError("PERSISTENCE_FAILED");
+      return oneObject(result);
+    },
+
+    async recordIntelligenceQuote(runId, receiptId, quote, checkpoint) {
+      const result = await client.rpc("record_market_intelligence_quote", {
+        p_run_id: runId, p_receipt_id: receiptId, p_quote: quote, p_checkpoint: checkpoint,
+      });
+      if (result.error) throw new GatewayRepositoryError("PERSISTENCE_FAILED");
+      return oneObject(result);
+    },
+
     async recordIntelligence(runId, completionId, payload) {
       const result = await client.rpc("record_market_intelligence", {
         p_run_id: runId,
@@ -1090,10 +1115,8 @@ export function createSupabaseGatewayRepository(
           "applied",
         ).limit(501),
         _runId
-          ? client.from("market_intelligence_context_inputs").select(
-            "holding_market_values,liquidity_by_ticker,overlap_by_ticker",
-          ).eq("run_id", _runId).limit(1)
-          : Promise.resolve({ data: [], error: null }),
+          ? client.rpc("refresh_market_intelligence_context", { p_run_id: _runId })
+          : Promise.resolve({ data: null, error: null }),
       ]);
       const holdings = rows(results[0], "CONTEXT_TOO_LARGE");
       const suggestions = rows(results[1], "CONTEXT_TOO_LARGE");
@@ -1101,7 +1124,8 @@ export function createSupabaseGatewayRepository(
       const watches = rows(results[7], "CONTEXT_TOO_LARGE");
       const transactions = rows(results[9], "CONTEXT_TOO_LARGE");
       const commands = rows(results[10], "CONTEXT_TOO_LARGE");
-      const intelligenceInputs = rows(results[11], "CONTEXT_TOO_LARGE");
+      if (results[11].error) throw new GatewayRepositoryError("PERSISTENCE_FAILED");
+      const intelligenceInputs = results[11].data === null ? [] : [oneObject(results[11])];
       if (
         holdings.length > 100 || suggestions.length > 100 ||
         plans.length > 20 ||
@@ -1153,6 +1177,12 @@ export function createSupabaseGatewayRepository(
             holding_market_values: decimalMap(intelligenceInputs[0].holding_market_values),
             liquidity_by_ticker: decimalMap(intelligenceInputs[0].liquidity_by_ticker),
             overlap_by_ticker: decimalMap(intelligenceInputs[0].overlap_by_ticker),
+            current_quotes: Object.fromEntries(Object.entries(oneObject({ data: intelligenceInputs[0].current_quotes ?? {}, error: null })).map(([ticker, raw]) => {
+              const quote = oneObject({ data: raw, error: null });
+              return [ticker, { price: decimal(quote.price), as_of: text(quote.as_of, 40) }];
+            })),
+            quote_receipt_ids: Array.isArray(intelligenceInputs[0].quote_receipt_ids)
+              ? intelligenceInputs[0].quote_receipt_ids.map((id) => text(id, 36)) : [],
           }
           : undefined,
         realized_pnl_today: coverage ? formatFixed(pnlMicros, 6) : null,

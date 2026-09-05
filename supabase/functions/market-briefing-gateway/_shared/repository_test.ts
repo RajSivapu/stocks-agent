@@ -45,6 +45,22 @@ function policy(): PolicyConfig {
   };
 }
 
+Deno.test("completion recovery reads the immutable completion by run and stable identity", async () => {
+  const calls: unknown[] = [];
+  const saved = { receipt: { completion_id: "00000000-0000-4000-8000-000000000002" }, payload: {}, providers: {} };
+  const repository = createSupabaseGatewayRepository({
+    rpc(name: string, parameters?: Record<string, unknown>) {
+      calls.push({ name, parameters });
+      return Promise.resolve({ data: saved, error: null });
+    },
+  });
+  const result = await repository.readIntelligenceCompletion!("00000000-0000-4000-8000-000000000001", "00000000-0000-4000-8000-000000000002");
+  assertEquals(result, saved);
+  assertEquals(calls, [{ name: "read_market_intelligence_completion", parameters: {
+    p_run_id: "00000000-0000-4000-8000-000000000001", p_completion_id: "00000000-0000-4000-8000-000000000002",
+  } }]);
+});
+
 function rejects(value: unknown): boolean {
   try {
     validatePolicy(value);

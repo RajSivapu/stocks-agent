@@ -137,6 +137,41 @@ def test_pre_market_runs_all_seed_domains_and_persists_once():
     assert result.packet_hash == result.packet.packet_hash
 
 
+def test_production_collection_routes_quotes_through_protected_producer_and_unwraps_context():
+    from lib.intelligence.pipeline import _checkpoint_receipt
+    class Gateway(FakeGateway):
+        def call(self, operation, payload, *, run_id=None, request_id=None):
+            self.operations.append(operation)
+            if operation == "read_intelligence_completion":
+                return {"completion": None}
+            if operation == "collect_intelligence_quote":
+                assert set(payload) == {"ticker", "cache_key", "reservation_id", "source_receipt_id"}
+                assert payload["ticker"] == "TEST"
+                quote_receipt = replace(receipt("yahoo"), source_receipt_id=payload["source_receipt_id"],
+                                        reservation_id=payload["reservation_id"], cache_key=payload["cache_key"],
+                                        returned_count=0, accepted_count=0)
+                return {"checkpoint": {"cache_key": payload["cache_key"], "receipt": _checkpoint_receipt(quote_receipt), "items": []}}
+            if operation == "checkpoint_intelligence_collection":
+                return {"run_id": run_id, "cache_key": payload["cache_key"]}
+            if operation == "read_intelligence_context":
+                return {"context": {"holdings": [{"ticker": "TEST", "shares": "2", "current_price": "999999"}],
+                    "liquidity_by_ticker": {"TEST": "1"}, "intelligence_collection_context": {
+                        "holding_market_values": {"TEST": "200"}, "liquidity_by_ticker": {"TEST": "0.5"},
+                        "overlap_by_ticker": {"TEST": "1"}}}}
+            raise AssertionError(operation)
+    adapter = FakeAdapter()
+    adapter.provider = "yahoo"
+    gateway = Gateway()
+    pipeline = IntelligencePipeline(gateway, [adapter], context={"holdings": [{"ticker": "TEST"}]})
+    result = pipeline.run(request("intraday"))
+    assert adapter.queries == []
+    assert result.actual_requests == 1
+    assert pipeline.context["holdings"] == [{"ticker": "TEST", "shares": "2", "market_value": "200"}]
+    assert pipeline.context["liquidity_by_ticker"] == {"TEST": "0.5"}
+    assert gateway.operations == ["read_intelligence_completion", "start_intelligence_run", "collect_intelligence_quote",
+                                  "checkpoint_intelligence_collection", "read_intelligence_context", "record_intelligence"]
+
+
 def test_dry_run_uses_fixtures_and_has_zero_side_effects():
     gateway = FakeGateway()
     adapter = FakeAdapter()
@@ -450,6 +485,42 @@ def test_restart_hydrates_durable_checkpoints_after_final_packet_failure():
     assert {
         receipt["cache_predecessor_receipt_id"] for receipt in second_gateway.payloads[-1]["receipts"]
     } == {entry["receipt"]["source_receipt_id"] for entry in state["checkpoints"]}
+    assert all(row["id"] != row["cache_predecessor_receipt_id"]
+               for row in second_gateway.payloads[-1]["receipts"])
+    assert sum(entry["receipt"]["request_cost"] for entry in state["checkpoints"]) == 9
+
+
+def test_terminal_commit_response_loss_returns_original_before_start_or_collection():
+    from copy import deepcopy
+    from lib.intelligence.pipeline import _uuid
+
+    class LostResponseGateway(PersistedCheckpointGateway):
+        def read_intelligence_completion(self, run_id, completion_id):
+            assert completion_id == _uuid("completion-request", run_id)
+            return {"completion": self.state.get("completion")}
+
+        def record_intelligence(self, run_id, payload):
+            final = super().record_intelligence(run_id, payload)
+            final["completion_id"] = _uuid("completion-request", run_id)
+            self.state["completion"] = {
+                "receipt": final, "payload": deepcopy(payload),
+                "providers": {row["reservation_id"]: "gdelt" for row in payload["receipts"]},
+            }
+            raise RuntimeError("response lost after commit")
+
+    state = {}
+    with pytest.raises(RuntimeError, match="after commit"):
+        IntelligencePipeline(LostResponseGateway(state), [FakeAdapter()]).run(request("pre-market"))
+    adapter = FakeAdapter()
+    restarted = LostResponseGateway(deepcopy(state))
+    result = IntelligencePipeline(restarted, [adapter]).run(
+        replace(request("pre-market"), now=NOW + timedelta(minutes=2)))
+    assert adapter.queries == []
+    assert restarted.operations == []
+    assert result.completion_id == state["completion"]["receipt"]["completion_id"]
+    assert result.packet_hash == state["completion"]["payload"]["packet"]["packet_hash"]
+    assert result.actual_requests == 9
+    assert result.cache_hits == 0
 
 
 def test_production_discovery_vetoes_a_42_percent_holding_from_gateway_context():

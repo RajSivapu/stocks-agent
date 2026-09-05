@@ -8,6 +8,7 @@ from types import MappingProxyType
 
 
 class QuotaExceeded(RuntimeError):
+    code = "QUOTA_BLOCKED"
     def __init__(self, provider: str):
         self.provider = provider
         super().__init__(provider)
@@ -110,3 +111,8 @@ class QuotaSession:
             if self._consumed[reservation.reservation_id] < reservation.reserved_requests:
                 return reservation.reservation_id
         raise QuotaExceeded(provider)
+
+    def receipt_reservation_id(self, provider: str) -> str:
+        """Retain the admitted reservation identity after its capacity is exhausted."""
+        entries = self._available.get(provider, ())
+        return entries[0].reservation_id if entries else ""

@@ -84,6 +84,7 @@ import {
   type RecordReportPayload,
   renderReportDelivery,
 } from "./reports.ts";
+import { type CollectionQuote, fetchCollectionQuote, quoteCheckpoint } from "./collection-quotes.ts";
 
 export interface GatewayDependencies {
   repository: GatewayRepository;
@@ -93,6 +94,7 @@ export interface GatewayDependencies {
   now?: () => Date;
   newId?: () => string;
   fetchQuote?: (ticker: string, now: Date) => Promise<VerifiedQuote>;
+  fetchCollectionQuote?: (ticker: string, now: Date) => Promise<CollectionQuote>;
   fetchHistory?: (
     ticker: string,
     range?: AdjustedHistoryRange,
@@ -372,6 +374,7 @@ export function createGatewayHandler(dependencies: GatewayDependencies) {
     ...dependencies,
     now: dependencies.now ?? (() => new Date()),
     newId: dependencies.newId ?? (() => crypto.randomUUID()),
+    fetchCollectionQuote: dependencies.fetchCollectionQuote ?? fetchCollectionQuote,
     fetchQuote: dependencies.fetchQuote ??
       ((ticker: string, now: Date) => fetchVerifiedQuote(ticker, fetch, now)),
     fetchHistory: dependencies.fetchHistory ??
@@ -415,6 +418,16 @@ export function createGatewayHandler(dependencies: GatewayDependencies) {
             ) !==
             (prepared as RecordLearningPayload).content_hash
         ) throw new GatewayHttpError(400, "INVALID_REQUEST");
+      } else if (envelope.operation === "collect_intelligence_quote") {
+        requireRun(envelope);
+        const row = objectValue(envelope.payload);
+        exactKeys(row, ["ticker", "reservation_id", "source_receipt_id", "cache_key"]);
+        if (typeof row.ticker !== "string" || !/^[A-Z][A-Z0-9.-]{0,14}$/.test(row.ticker)
+          || typeof row.cache_key !== "string" || !/^[a-f0-9]{64}$/.test(row.cache_key)
+          || [row.reservation_id, row.source_receipt_id].some(value => typeof value !== "string" || !/^[a-f0-9-]{36}$/.test(value))) {
+          throw new GatewayHttpError(400, "INVALID_REQUEST");
+        }
+        prepared = row;
       } else if (envelope.operation === "start_run") {
         prepared = parseStartPayload(envelope.payload, currentDate);
       } else if (envelope.operation === "record_artifacts") {
@@ -446,6 +459,8 @@ export function createGatewayHandler(dependencies: GatewayDependencies) {
         prepared = parseAlertPayload(envelope.payload);
       } else if (
         envelope.operation === "read_context" ||
+        envelope.operation === "read_intelligence_completion" ||
+        envelope.operation === "read_intelligence_context" ||
         envelope.operation === "finish_run"
       ) {
         requireRun(envelope);
@@ -462,6 +477,9 @@ export function createGatewayHandler(dependencies: GatewayDependencies) {
 
     if (envelope.dry_run) {
       try {
+        if (envelope.operation === "read_intelligence_completion" || envelope.operation === "read_intelligence_context" || envelope.operation === "collect_intelligence_quote") {
+          return response(200, { ok: true, dry_run: true, completion: null, context: {}, write_counts: {}, telegram_message_ids: [] });
+        }
         if (envelope.operation === "start_intelligence_run") {
           return response(200, {
             ok: true,
@@ -608,6 +626,42 @@ export function createGatewayHandler(dependencies: GatewayDependencies) {
       }
     }
 
+    if (envelope.operation === "collect_intelligence_quote") {
+      try {
+        if (!deps.repository.claimIntelligenceQuote || !deps.repository.recordIntelligenceQuote) throw new GatewayRepositoryError("PERSISTENCE_FAILED");
+        const input = prepared as Record<string, unknown>;
+        const runId = requireRun(envelope);
+        const claim = await deps.repository.claimIntelligenceQuote(runId, input);
+        if (claim.status === "completed") return response(200, { ok: true, checkpoint: claim.checkpoint });
+        if (claim.status === "quota_blocked") {
+          const checkpoint = quoteCheckpoint(input, claim.request_window as Record<string, unknown>, null, deps.now());
+          Object.assign(checkpoint.receipt as Record<string, unknown>, { status: "quota_blocked", request_cost: 0, error_code: "QUOTA_BLOCKED" });
+          return response(200, { ok: true, checkpoint });
+        }
+        if (claim.status !== "claimed") throw new GatewayRepositoryError("COLLECTION_OUTCOME_UNCERTAIN");
+        let quote: CollectionQuote | null = null;
+        try { quote = await deps.fetchCollectionQuote(input.ticker as string, deps.now()); } catch { /* A real failed attempt still costs one. */ }
+        const checkpoint = quoteCheckpoint(input, claim.request_window as Record<string, unknown>, quote, deps.now());
+        return response(200, { ok: true, checkpoint: await deps.repository.recordIntelligenceQuote(
+          runId, input.source_receipt_id as string, quote, checkpoint) });
+      } catch (error) {
+        const code = error instanceof GatewayRepositoryError ? error.code : "PERSISTENCE_FAILED";
+        return response(errorStatus(code), { ok: false, code });
+      }
+    }
+    if (envelope.operation === "read_intelligence_completion" || envelope.operation === "read_intelligence_context") {
+      try {
+        if (envelope.operation === "read_intelligence_context") {
+          return response(200, { ok: true, context: await deps.repository.readContext(requireRun(envelope)), telegram_message_ids: [] });
+        }
+        if (!deps.repository.readIntelligenceCompletion) throw new GatewayRepositoryError("PERSISTENCE_FAILED");
+        return response(200, { ok: true, completion: await deps.repository.readIntelligenceCompletion(
+          requireRun(envelope), envelope.request_id), telegram_message_ids: [] });
+      } catch (error) {
+        const code = error instanceof GatewayRepositoryError ? error.code : "PERSISTENCE_FAILED";
+        return response(errorStatus(code), { ok: false, code });
+      }
+    }
     if (envelope.operation === "start_intelligence_run") {
       try {
         if (!deps.repository.startIntelligenceRun) {

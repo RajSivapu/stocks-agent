@@ -74,6 +74,22 @@ def client(*responses):
     )
 
 
+def test_redirect_exhaustion_retains_quota_classification_and_every_real_open():
+    from lib.intelligence.providers import build_adapter, CollectionQuery
+    from lib.intelligence.quota import QuotaSession
+    opener = FakeOpener(FakeResponse(status=302, headers={"Location": "https://api.gdeltproject.org/next"}))
+    adapter = build_adapter("gdelt", BoundedHttpClient(allowed_hosts={"api.gdeltproject.org"}, opener=opener, clock=lambda: NOW),
+        QuotaSession({"gdelt": ({"reservation_id": "quota-one", "reserved_requests": 1},)}), clock=lambda: NOW)
+    query = CollectionQuery("energy", (), NOW-timedelta(hours=1), NOW)
+    first = adapter.collect(query)
+    second = adapter.collect(query)
+    assert first.receipt.status == second.receipt.status == "quota_blocked"
+    assert first.receipt.error_code == second.receipt.error_code == "QUOTA_BLOCKED"
+    assert first.receipt.request_cost == 1
+    assert second.receipt.request_cost == 0
+    assert len(opener.requests) == 1
+
+
 @pytest.mark.parametrize(
     "url",
     [

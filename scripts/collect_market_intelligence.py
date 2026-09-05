@@ -17,7 +17,7 @@ if str(ROOT) not in sys.path:
 from lib import gateway  # noqa: E402
 from lib.config import load_settings  # noqa: E402
 from lib.intelligence.http import BoundedHttpClient  # noqa: E402
-from lib.intelligence.pipeline import IntelligencePipeline, PHASES, PipelineRequest  # noqa: E402
+from lib.intelligence.pipeline import IntelligencePipeline, PHASES, PipelineRequest, protected_collection_context  # noqa: E402
 from lib.intelligence.policy import load_intelligence_policy  # noqa: E402
 from lib.intelligence.providers import build_adapter  # noqa: E402
 from lib.intelligence.quota import QuotaSession  # noqa: E402
@@ -118,6 +118,11 @@ def main(argv: Sequence[str] | None = None, *, stdout: TextIO | None = None) -> 
         if args.dry_run:
             pipeline = IntelligencePipeline(object(), (), context=context)
         else:
+            protected = _read_context(args.run_id)
+            data = protected.get("data", protected)
+            # --context-file is fixture/intent input only. The scheduled path
+            # obtains holdings and every ranking value from the protected reader.
+            context = protected_collection_context(data["context"])
             policy = load_intelligence_policy(load_settings())
             pipeline = IntelligencePipeline(
                 gateway, _adapters(policy, now), context=context, packet_limits=policy.packet
@@ -131,6 +136,10 @@ def main(argv: Sequence[str] | None = None, *, stdout: TextIO | None = None) -> 
     except Exception:
         output.write(json.dumps({"error": "COLLECTION_FAILED", "ok": False}, separators=(",", ":"), sort_keys=True) + "\n")
         return 1
+
+
+def _read_context(run_id: str):
+    return gateway.call("read_intelligence_context", {}, run_id=run_id)
 
 
 if __name__ == "__main__":

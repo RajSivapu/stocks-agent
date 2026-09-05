@@ -22,6 +22,9 @@ export type Operation =
   | "start_intelligence_run"
   | "checkpoint_intelligence_collection"
   | "record_intelligence"
+  | "read_intelligence_completion"
+  | "read_intelligence_context"
+  | "collect_intelligence_quote"
   | "record_report"
   | "record_learning";
 export type Phase = "pre-market" | "intraday" | "post-market" | "on-demand";
@@ -555,6 +558,8 @@ export interface GatewayReadContext extends PolicyContext {
     holding_market_values: Record<string, string>;
     liquidity_by_ticker: Record<string, string>;
     overlap_by_ticker: Record<string, string>;
+    current_quotes?: Record<string, { price: string; as_of: string }>;
+    quote_receipt_ids?: string[];
   };
   recent_suggestions: ContextSuggestion[];
   observations: Array<{
@@ -639,6 +644,9 @@ const OPERATIONS: readonly Operation[] = [
   "start_intelligence_run",
   "checkpoint_intelligence_collection",
   "record_intelligence",
+  "read_intelligence_completion",
+  "read_intelligence_context",
+  "collect_intelligence_quote",
   "record_report",
   "record_learning",
 ];

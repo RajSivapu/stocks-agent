@@ -110,10 +110,26 @@ def load_intelligence_policy(settings: Mapping[str, object]) -> IntelligencePoli
     """Validate checked-in V1 settings and return an immutable policy view."""
     intelligence = _mapping(settings, "intelligence")
     guardrails = _mapping(settings, "guardrails")
-    unexpected = set(intelligence) - _INTELLIGENCE_KEYS
+    unexpected = set(intelligence) - _INTELLIGENCE_KEYS - {"provider_query_identifiers", "provider_query_terms"}
     missing = _INTELLIGENCE_KEYS - set(intelligence)
     if unexpected or missing:
         raise ValueError("intelligence settings must contain exactly the approved keys")
+    if "provider_query_identifiers" in intelligence:
+        identifiers = _mapping(intelligence, "provider_query_identifiers")
+        if set(identifiers) != {"version", "cik_by_symbol", "series_by_provider"} or identifiers["version"] != 1:
+            raise ValueError("provider identifiers must use the reviewed version")
+        for name in ("cik_by_symbol", "series_by_provider"):
+            values = _mapping(identifiers, name)
+            if len(values) > 100 or any(not isinstance(key, str) or not isinstance(value, str) or len(value) > 160 for key, value in values.items()):
+                raise ValueError("provider identifiers exceed bounds")
+    if "provider_query_terms" in intelligence:
+        terms = _mapping(intelligence, "provider_query_terms")
+        if not set(terms) <= set(_PROVIDERS):
+            raise ValueError("provider query terms use an unapproved provider")
+        for provider in terms:
+            values = _mapping(terms, provider)
+            if len(values) > 100 or any(not isinstance(key, str) or not isinstance(value, str) or not 1 <= len(value) <= 500 for key, value in values.items()):
+                raise ValueError("provider query terms exceed bounds")
 
     providers = _required(intelligence, "providers")
     if not isinstance(providers, list) or tuple(providers) != _PROVIDERS:

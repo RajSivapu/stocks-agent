@@ -25,6 +25,9 @@ OPERATIONS = (
     "start_intelligence_run",
     "checkpoint_intelligence_collection",
     "record_intelligence",
+    "read_intelligence_completion",
+    "read_intelligence_context",
+    "collect_intelligence_quote",
     "record_report",
     "record_learning",
 )
