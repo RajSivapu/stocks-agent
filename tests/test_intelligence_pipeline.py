@@ -78,12 +78,41 @@ class FakeAdapter:
         self.queries = []
         self.fail_domain = fail_domain
 
-    def collect(self, query):
+    def collect(self, query, *, source_receipt_id=None, before_transport_attempt=None):
         self.queries.append(query)
         if query.text == self.fail_domain:
             return CollectionResult((), receipt(self.provider, status="failed"), query.limit)
         item = raw_item(query.text)
         return CollectionResult((item,), receipt(self.provider), query.limit)
+
+
+def test_pipeline_rejects_provider_outside_reviewed_registry():
+    adapter = FakeAdapter()
+    adapter.provider = "unreviewed_source"
+    with pytest.raises(ValueError, match="reviewed provider"):
+        IntelligencePipeline(object(), [adapter])
+
+
+@pytest.mark.parametrize("checkpoint", ["missing", "failed", "malformed"])
+def test_reserved_transport_requires_a_successful_durable_barrier(checkpoint):
+    from lib.intelligence.providers import build_adapter
+    from lib.intelligence.quota import QuotaSession
+    calls = []
+    class Http:
+        def get(self, query):
+            calls.append(query)
+            raise AssertionError("transport must not begin without durability")
+    gateway = FakeGateway()
+    if checkpoint != "missing":
+        def persist(run_id, payload):
+            if checkpoint == "failed":
+                raise RuntimeError("database unavailable")
+            return {"run_id": "wrong", "cache_key": payload["cache_key"]}
+        gateway.checkpoint_intelligence_collection = persist
+    adapter = build_adapter("gdelt", Http(), QuotaSession({"gdelt": ()}), clock=lambda: NOW)
+    with pytest.raises(RuntimeError, match="durable provider attempt barrier"):
+        IntelligencePipeline(gateway, [adapter]).run(request("on-demand"))
+    assert calls == []
 
 
 class FakeGateway:
@@ -264,7 +293,7 @@ def test_pipeline_persists_provider_identity_urls_times_and_discovery_status():
         security_ids=("TEST",),
         metadata=MappingProxyType({"cik": "0000000001", "exposure_kind": "filing"}),
     )
-    adapter.collect = lambda query: CollectionResult((source,), receipt(adapter.provider), query.limit)
+    adapter.collect = lambda query, **kwargs: CollectionResult((source,), receipt(adapter.provider), query.limit)
 
     result = IntelligencePipeline(gateway, [adapter], context={"holdings": {"TEST": "1"}}).run(
         request("intraday")
@@ -285,7 +314,7 @@ def test_exact_duplicate_persists_once_but_retains_receipt_accounting():
     adapter = FakeAdapter()
     source = raw_item("holding:TEST", official=True)
     source = replace(source, security_ids=("TEST",), metadata=MappingProxyType({"exposure_kind": "filing"}))
-    adapter.collect = lambda query: CollectionResult((source, source), receipt(adapter.provider), query.limit)
+    adapter.collect = lambda query, **kwargs: CollectionResult((source, source), receipt(adapter.provider), query.limit)
 
     result = IntelligencePipeline(gateway, [adapter], context={"holdings": {"TEST": "1"}}).run(
         request("intraday")
@@ -309,7 +338,7 @@ def test_near_corroboration_reaches_discovery_and_packet_evidence():
         source_url="https://publisher.example/corroborating-story",
         normalized_text="Evidence!", canonical_content='{"summary":"Evidence!","title":"Market event"}',
     )
-    adapter.collect = lambda query: CollectionResult((first, second), receipt(adapter.provider), query.limit)
+    adapter.collect = lambda query, **kwargs: CollectionResult((first, second), receipt(adapter.provider), query.limit)
 
     result = IntelligencePipeline(gateway, [adapter], context={
         "holdings": {"TEST": "0.10"}, "liquidity_by_ticker": {"TEST": "0.75"},
@@ -530,7 +559,7 @@ def test_production_discovery_vetoes_a_42_percent_holding_from_gateway_context()
         raw_item("holding:TEST", official=True), security_ids=("TEST",),
         metadata=MappingProxyType({"exposure_kind": "filing"}),
     )
-    adapter.collect = lambda query: CollectionResult((source,), receipt(adapter.provider), query.limit)
+    adapter.collect = lambda query, **kwargs: CollectionResult((source,), receipt(adapter.provider), query.limit)
 
     IntelligencePipeline(gateway, [adapter], context={
         "holdings": [{"ticker": "TEST", "market_value": "420"}, {"ticker": "OTHER", "market_value": "580"}],

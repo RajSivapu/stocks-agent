@@ -28,6 +28,7 @@ class RecoveryRestoreTarget(Protocol):
 
 
 _RESTORE_TABLES = (
+    ("release_migration_ledger", "stock_agent_release_migration_ledger", {}),
     ("policies", "market_policy_config", {}),
     ("holdings", "holdings", {"average_cost": "avg_cost"}),
     ("transactions", "transactions", {"quantity": "qty"}),

@@ -95,6 +95,8 @@ RECOVERY_SQL = {
         FROM pg_catalog.pg_roles r WHERE r.rolname IN ('stock_agent_dashboard','stock_agent_dashboard_runtime')""",
     "schema_version": """SELECT version,statements,encode(extensions.digest(convert_to(array_to_string(statements,E'\\n'),'UTF8'),'sha256'),'hex') AS sha256
                          FROM supabase_migrations.schema_migrations""",
+    "release_migration_ledger": """SELECT path,version,sha256,applied_at::text
+                                  FROM public.stock_agent_release_migration_ledger""",
 }
 READ_TABLES = (
     "holdings", "transactions", "portfolio_commands", "portfolio_command_acknowledgements", "analysis_runs", "market_policy_config", "market_evidence_packets", "market_reports",
@@ -103,6 +105,7 @@ READ_TABLES = (
     "market_report_request_origins", "market_publications", "market_source_quota_reservations", "market_source_receipts",
     "market_alert_drafts", "market_alert_events", "market_alert_actions", "portfolio_cash_ledger_state",
     "reconciled_cash_snapshots", "market_run_terminal_outcomes", "decision_evaluations", "market_policy_comparisons",
+    "stock_agent_release_migration_ledger",
 )
 
 

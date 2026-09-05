@@ -204,9 +204,11 @@ def test_each_declared_provider_yields_discoverable_evidence_or_pre_http_unsuppo
     )
 
     if not expect_item:
+        barriers = []
         with pytest.raises(SourceFailure, match="UNSUPPORTED_QUERY"):
-            adapter.collect(sample_query(**query_overrides))
+            adapter.collect(sample_query(**query_overrides), before_transport_attempt=barriers.append)
         assert http.requests == []
+        assert barriers == []
         assert quota.consume_next(adapter_name) == "declared"
         return
 

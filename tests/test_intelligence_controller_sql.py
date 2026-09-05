@@ -236,7 +236,7 @@ def test_quota_blocked_outcome_persists_real_attempt_count(databases, actual_cos
     assert db.execute("SELECT status,request_cost,error FROM market_source_receipts WHERE run_id=%s", (run,)).fetchone() == ("quota_blocked", actual_cost, {"code": "QUOTA_BLOCKED"})
 
 
-def _independent_worker(dsn, run_id, timestamp, crash, output, provider="gdelt", transport_count=None):
+def _independent_worker(dsn, run_id, timestamp, crash, output, provider="gdelt", transport_count=None, registry_fixture=False):
     """Independent process, real pipeline + RPCs; only the outbound provider is a fixture."""
     from datetime import datetime
     from zoneinfo import ZoneInfo
@@ -258,7 +258,7 @@ def _independent_worker(dsn, run_id, timestamp, crash, output, provider="gdelt",
                     checkpoint = db.execute("SELECT public.checkpoint_market_intelligence_collection(%s,%s)", (run_id, Jsonb(payload))).fetchone()[0]
                     if crash == "attempt_barrier" and payload["receipt"].get("error_code") == "TRANSPORT_OUTCOME_UNCERTAIN":
                         os._exit(75)
-                    if crash == "checkpoint":
+                    if crash == "checkpoint" and payload["receipt"].get("status") == "succeeded":
                         os._exit(74)
                     return checkpoint
                 if operation == "read_intelligence_context":
@@ -274,15 +274,73 @@ def _independent_worker(dsn, run_id, timestamp, crash, output, provider="gdelt",
                 if transport_count is not None:
                     with transport_count.get_lock():
                         transport_count.value += 1
+                if crash == "inside_transport":
+                    os._exit(76)
                 payload = b'{"articles":[]}' if provider == "gdelt" else b'{"feed":[]}' if provider == "alpha_vantage" else b'[]'
                 return HttpResult(request.url, 200, {}, payload, now, now)
         adapter = build_adapter(provider, Source(), QuotaSession({provider: ()}),
                                 secret_getter=lambda _name: "existing-free-key", clock=lambda: now)
+        if registry_fixture and provider not in {"gdelt", "alpha_vantage", "finnhub"}:
+            # Exercise the common transport contract even for currently unsupported
+            # official queries. No production endpoint/capability is added.
+            from lib.intelligence.http import HttpRequest
+            from lib.intelligence.providers import CollectionQuery
+            adapter._request = lambda query: HttpRequest("https://fixture.invalid/official")
+            IntelligencePipeline._query_for = lambda self, adapter, target, request, window: CollectionQuery(
+                text=target, symbols=(), start=datetime.fromisoformat(window["start"].replace("Z", "+00:00")),
+                end=datetime.fromisoformat(window["end"].replace("Z", "+00:00")), limit=20)
         phase = "intraday" if provider in {"alpha_vantage", "finnhub"} else "on-demand"
         context_data = {"holdings": {"TEST": "1"}} if phase == "intraday" else None
         result = IntelligencePipeline(Gateway(), [adapter], context=context_data).run(PipelineRequest(
             phase, now.astimezone(ZoneInfo("America/Chicago")).date(), now, request_id=run_id))
         output.put(result.to_dict())
+
+
+@pytest.mark.parametrize("provider", [
+    "gdelt", "alpha_vantage", "finnhub", "sec_edgar", "federal_register",
+    "white_house", "doe", "dod", "eia", "fred", "bls", "bea",
+])
+def test_registry_transport_crash_durably_accounts_one_attempt_without_replacement(databases, provider):
+    import multiprocessing
+    from datetime import datetime, timedelta
+    db = databases["ordered"]
+    run_id = str(uuid.uuid4())
+    phase = "intraday" if provider in {"alpha_vantage", "finnhub"} else "on-demand"
+    db.execute("INSERT INTO analysis_runs(id,kind) VALUES(%s,%s)", (run_id, phase))
+    timestamp = db.execute("SELECT statement_timestamp()").fetchone()[0].isoformat()
+    context = multiprocessing.get_context("spawn")
+    output, calls = context.Queue(), context.Value("i", 0)
+    first = context.Process(target=_independent_worker,
+        args=(db.info.dsn, run_id, timestamp, "inside_transport", output, provider, calls, True))
+    first.start(); first.join(20)
+    assert first.exitcode == 76
+    assert calls.value == 1
+    checkpoint = db.execute(
+        "SELECT payload FROM market_collection_checkpoints WHERE run_id=%s", (run_id,)).fetchall()
+    assert len(checkpoint) == 1
+    attempt = checkpoint[0][0]["receipt"]
+    assert (attempt["provider"], attempt["request_cost"], attempt["error_code"]) == (provider, 1, "TRANSPORT_OUTCOME_UNCERTAIN")
+    second = context.Process(target=_independent_worker,
+        args=(db.info.dsn, run_id, (datetime.fromisoformat(timestamp) + timedelta(seconds=10)).isoformat(), False, output, provider, calls, True))
+    second.start(); second.join(20)
+    assert second.exitcode == 0
+    assert output.get(timeout=2)["actual_requests"] == 1
+    assert calls.value == 1
+    assert db.execute("SELECT payload FROM market_collection_checkpoints WHERE run_id=%s", (run_id,)).fetchall() == checkpoint
+    assert db.execute("SELECT count(*) FROM market_collection_checkpoint_history WHERE run_id=%s", (run_id,)).fetchone() == (0,)
+    assert db.execute("SELECT count(*),sum(request_cost) FROM market_source_receipts WHERE run_id=%s", (run_id,)).fetchone() == (1, 1)
+    assert db.execute("SELECT id::text,provider,reserved_requests FROM market_source_quota_reservations WHERE run_id=%s", (run_id,)).fetchone() == (attempt["reservation_id"], provider, 1)
+
+
+def test_sql_attempt_allowlist_is_exact_reviewed_non_yahoo_registry(databases):
+    import re
+    from lib.intelligence.policy import _PROVIDERS
+    from lib.intelligence.providers import RESERVED_OUTBOUND_PROVIDERS
+    assert RESERVED_OUTBOUND_PROVIDERS == set(_PROVIDERS) - {"yahoo"}
+    for db in databases.values():
+        definition = db.execute("SELECT pg_get_functiondef('public.checkpoint_market_intelligence_collection(uuid,jsonb)'::regprocedure)").fetchone()[0]
+        allowed = re.search(r"v_reserved.provider NOT IN \(([^)]+)\)", definition).group(1)
+        assert set(re.findall(r"'([^']+)'", allowed)) == set(_PROVIDERS) - {"yahoo"}
 
 
 @pytest.mark.parametrize("provider", ["alpha_vantage", "finnhub"])

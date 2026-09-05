@@ -18,7 +18,7 @@ from lib.intelligence.canonical import canonical_event, canonical_ranking
 from lib.intelligence.http import SourceFailure, cache_key
 from lib.intelligence.normalize import SourceItem, normalize_item
 from lib.intelligence.packet import EvidencePacket, build_evidence_packet
-from lib.intelligence.providers import CollectionQuery, CollectionResult, RequestReceipt
+from lib.intelligence.providers import CollectionQuery, CollectionResult, RequestReceipt, RESERVED_OUTBOUND_PROVIDERS
 from lib.intelligence.quota import QuotaSession
 from lib.intelligence.ranking import CandidateInput, RankedCandidate, rank_candidates
 from lib.intelligence.relationships import EventRelationship, exposure_kind, propose_relation
@@ -217,6 +217,8 @@ class IntelligencePipeline:
         providers = [str(getattr(adapter, "provider", "")) for adapter in values]
         if any(not provider for provider in providers) or len(set(providers)) != len(providers):
             raise ValueError("adapters must have unique provider names")
+        if set(providers) - (RESERVED_OUTBOUND_PROVIDERS | {"yahoo"}):
+            raise ValueError("adapters must use a reviewed provider")
         self.adapters = values
         self.context = dict(context or {})
         if {"comparison_ids", "learning_inputs"} & self.context.keys():
@@ -380,13 +382,14 @@ class IntelligencePipeline:
                     except Exception as exc:
                         raise _CheckpointFailure("server quote collection outcome unavailable") from exc
                 else:
-                    if adapter.provider in {"alpha_vantage", "finnhub"}:
+                    if adapter.provider in RESERVED_OUTBOUND_PROVIDERS:
                         def checkpoint_attempt(barrier: RequestReceipt) -> None:
                             try:
                                 self._checkpoint(
                                     request.request_id,
                                     _collection_cache_key(adapter, query),
                                     CollectionResult((), barrier, query.limit),
+                                    required=True,
                                 )
                             except Exception as exc:
                                 raise _CheckpointFailure(
@@ -672,7 +675,7 @@ class IntelligencePipeline:
             actual_requests=sum(row["request_cost"] for row in payload["receipts"]),
             cache_hits=sum(row["status"] == "cache_hit" for row in payload["receipts"]))
 
-    def _checkpoint(self, run_id: str, cache_key_value: str, result: CollectionResult) -> None:
+    def _checkpoint(self, run_id: str, cache_key_value: str, result: CollectionResult, *, required: bool = False) -> None:
         payload = {
             "cache_key": cache_key_value,
             "receipt": _checkpoint_receipt(result.receipt),
@@ -687,6 +690,8 @@ class IntelligencePipeline:
                 request_id=_uuid("checkpoint-request", run_id, cache_key_value),
             )
         else:
+            if required:
+                raise ValueError("outbound attempts require a durable gateway checkpoint")
             # Fixture gateways model only final atomic persistence; production must expose one path.
             return
         returned = _gateway_data(result_value)

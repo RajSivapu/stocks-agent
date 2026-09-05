@@ -145,6 +145,7 @@ def recovery_records():
                    "memberships": [], "grants": ["SELECT:public.holdings"]}],
         "schema_version": [{"version": "20260926", "statements": ["SELECT 1"],
                             "sha256": hashlib.sha256(b"SELECT 1").hexdigest()}],
+        "release_migration_ledger": [],
     }
     records["holdings"][0].update(bucket="core", opened_at="2026-09-01", notes=None, stop=None, target=None, high_water_price=None,
                                   stop_alert_active=False, hold_override_until=None, stop_near_alert_active=False, target_near_alert_active=False, target_alert_active=False)
@@ -225,11 +226,42 @@ def test_recovery_payload_carries_identity_delivery_and_release_state(tmp_path, 
         "sending", 1, "77777777-7777-4777-8777-777777777777",
     )
     assert records["schema_version"][0]["statements"] == ["SELECT 1"]
+    assert records["release_migration_ledger"] == []
     assert set(records) >= {
         "intelligence_run_events", "source_quota_reservations", "collection_checkpoints",
         "collection_checkpoint_history", "collection_completions", "report_origins",
         "cash_ledger_state", "cash_snapshots", "run_terminal_outcomes",
     }
+
+
+@pytest.mark.parametrize("change", [
+    lambda row: row.update(path="../escape.sql"),
+    lambda row: row.update(version="20260101"),
+    lambda row: row.update(sha256="not-a-hash"),
+    lambda row: row.update(applied_at="not-a-timestamp"),
+    lambda row: row.update(statements=["SELECT 1"]),
+    lambda row: row.update(password="forbidden"),
+])
+def test_private_migration_ledger_requires_exact_no_secret_identity(change):
+    from scripts.deploy_owner_dashboard_api import migration_statements_sha256
+    records = recovery_records()
+    row = {"path": "sql/migrations/20260926_recovery.sql", "version": "20260926",
+           "sha256": migration_statements_sha256(["SELECT 1"]), "applied_at": "2026-09-05T20:00:00Z"}
+    records["release_migration_ledger"] = [row]
+    assert _validated_records(records)["release_migration_ledger"] == [row]
+    change(row)
+    with pytest.raises(ValueError):
+        _validated_records(records)
+
+
+def test_private_and_native_migration_ledgers_must_agree():
+    records = recovery_records()
+    records["release_migration_ledger"] = [{
+        "path": "sql/migrations/20260926_recovery.sql", "version": "20260926",
+        "sha256": "a" * 64, "applied_at": "2026-09-05T20:00:00Z",
+    }]
+    with pytest.raises(ValueError, match="migration.*diverge"):
+        _validated_records(records)
 
 
 def test_recovery_accepts_historical_cash_snapshots_below_the_current_ledger_revision():
@@ -292,6 +324,10 @@ def test_restore_refreshes_the_isolated_reader_snapshot_before_reconciliation(tm
 
 
 def test_verifier_applies_actual_isolated_postgres_restore_and_retains_uncertain_delivery(tmp_path, commands):
+    from scripts.deploy_owner_dashboard_api import (
+        apply_release_migrations, candidate_migration_manifest, normalize_migration_statements,
+    )
+    from psycopg.rows import tuple_row
     binaries = {name: shutil.which(name) for name in ("initdb", "pg_ctl")}
     if not all(binaries.values()):
         pytest.skip("disposable PostgreSQL binaries unavailable")
@@ -315,9 +351,10 @@ def test_verifier_applies_actual_isolated_postgres_restore_and_retains_uncertain
                 admin.execute("CREATE ROLE anon; CREATE ROLE authenticated; CREATE ROLE service_role")
                 admin.execute("CREATE DATABASE recovery_source")
                 admin.execute("CREATE DATABASE recovery_restore")
-            schema = (Path(__file__).resolve().parents[1] / "sql/schema.sql").read_text()
-            additions = "\n".join((Path(__file__).resolve().parents[1] / "sql/migrations" / name).read_text()
-                                  for name in ("20260929_policy_lifecycle_closure.sql", "20260930_provider_attempt_and_recovery_closure.sql"))
+            repo = Path(__file__).resolve().parents[1]
+            schema = (repo / "sql/schema.sql").read_text()
+            audited_base = "432d647ef911ff63da427097f02a852e18038b62"
+            baseline_schema = subprocess.check_output(["git", "show", f"{audited_base}:sql/schema.sql"], cwd=repo, text=True)
             for database in ("recovery_source", "recovery_restore"):
                 connection = psycopg.connect(
                     f"host={root} port={port} dbname={database}", autocommit=True, row_factory=dict_row,
@@ -325,8 +362,7 @@ def test_verifier_applies_actual_isolated_postgres_restore_and_retains_uncertain
                 connections.append(connection)
                 connection.execute("CREATE SCHEMA auth; CREATE FUNCTION auth.uid() RETURNS uuid LANGUAGE sql AS 'SELECT NULL::uuid'")
                 connection.execute("CREATE SCHEMA supabase_migrations; CREATE TABLE supabase_migrations.schema_migrations(version text PRIMARY KEY, statements text[])")
-                connection.execute(schema)
-                connection.execute(additions)
+                connection.execute(baseline_schema if database == "recovery_source" else schema)
 
             class DatabaseSource:
                 def __init__(self, connection, project, isolated=False):
@@ -346,7 +382,51 @@ def test_verifier_applies_actual_isolated_postgres_restore_and_retains_uncertain
 
             source = DatabaseSource(connections[0], "p" * 20)
             restored_source = DatabaseSource(connections[1], "r" * 20, isolated=True)
-            restore_recovery_records(connections[0], recovery_records(), isolated_guard=True)
+            records = recovery_records()
+            manifest = candidate_migration_manifest()
+            baseline = set(subprocess.check_output(
+                ["git", "ls-tree", "--name-only", "432d647ef911ff63da427097f02a852e18038b62", "sql/migrations/"],
+                cwd=repo, text=True).splitlines())
+            # Start with the native prefix; execute the actual additive release
+            # suffix before exporting its immutable private ledger evidence.
+            for item in manifest:
+                if item["path"] in baseline:
+                    connections[0].execute("INSERT INTO supabase_migrations.schema_migrations VALUES (%s,%s)",
+                        (item["version"], normalize_migration_statements((repo / item["path"]).read_text())))
+            with connections[0].transaction(), connections[0].cursor(row_factory=tuple_row) as cursor:
+                upgrade = apply_release_migrations(cursor)
+            assert upgrade["applied"] == [item for item in manifest if item["path"] not in baseline]
+            assert upgrade["skipped"] == [item for item in manifest if item["path"] in baseline]
+            # Seed business fixtures in the genuinely upgraded source; never
+            # manufacture, clear, or replace its native/private migration receipts.
+            from scripts.verify_recovery_bundle import _RESTORE_TABLES
+            for dataset, table, renames in _RESTORE_TABLES:
+                if dataset == "release_migration_ledger":
+                    continue
+                for source_row in records[dataset]:
+                    row = {renames.get(key, key): value for key, value in source_row.items()}
+                    if dataset == "runs":
+                        row["gateway_request_id"] = None
+                    connections[0].execute(
+                        f"INSERT INTO public.{table} SELECT * FROM json_populate_record(NULL::public.{table}, %s::json)",
+                        (json.dumps(row),))
+            for row in records["runs"]:
+                connections[0].execute("UPDATE analysis_runs SET gateway_request_id=%s WHERE id=%s",
+                    (row["gateway_request_id"], row["id"]))
+            from scripts.protected_evidence import READ_TABLES
+            assert "stock_agent_release_migration_ledger" in READ_TABLES
+            for connection in connections:
+                assert connection.execute("SELECT has_table_privilege('stock_agent_release_reader_runtime', 'public.stock_agent_release_migration_ledger', 'SELECT') AS allowed").fetchone()["allowed"]
+                assert not connection.execute("SELECT has_table_privilege('stock_agent_release_reader_runtime', 'public.stock_agent_release_migration_ledger', 'INSERT,UPDATE,DELETE') AS allowed").fetchone()["allowed"]
+            connections[0].execute("SET ROLE stock_agent_release_reader_runtime")
+            try:
+                ledger = connections[0].execute(RECOVERY_SQL["release_migration_ledger"]).fetchall()
+                assert len(ledger) == len(manifest)
+                assert all(set(row) == {"path", "version", "sha256", "applied_at"} for row in ledger)
+                with pytest.raises(psycopg.errors.InsufficientPrivilege):
+                    connections[0].execute("DELETE FROM public.stock_agent_release_migration_ledger")
+            finally:
+                connections[0].execute("RESET ROLE")
             artifact = export_recovery_bundle(source, tmp_path / "actual.enc", **commands)
 
             class Target:
@@ -364,6 +444,12 @@ def test_verifier_applies_actual_isolated_postgres_restore_and_retains_uncertain
                 "SELECT status,attempt_count,lease_token::text FROM market_publications"
             ).fetchone()
             assert result["restore_applied"] is True
+            before = restored_source.read_records()
+            with connections[1].transaction(), connections[1].cursor(row_factory=tuple_row) as cursor:
+                retry = apply_release_migrations(cursor)
+            assert retry == {"applied": [], "skipped": manifest, "candidate": manifest}
+            assert restored_source.read_records() == before
+            assert before["release_migration_ledger"] == source.read_records()["release_migration_ledger"]
             assert tuple(restored_delivery.values()) == (
                 "sending", 1, "77777777-7777-4777-8777-777777777777",
             )
@@ -393,6 +479,7 @@ def test_verifier_applies_actual_isolated_postgres_restore_and_retains_uncertain
     lambda db: db.records["command_acknowledgements"][0].update(command_id="55555555-5555-4555-8555-555555555555"),
     lambda db: db.records["evaluation_publications"][0].update(lease_token=None),
     lambda db: db.records["schema_version"][0]["statements"].append("SELECT 2"),
+    lambda db: db.records.pop("release_migration_ledger"),
     lambda db: db.records.update(cash_ledger_state=[]),
     lambda db: db.reported_counts.update(holdings=2),
 ])
@@ -413,6 +500,7 @@ def test_export_rejects_incomplete_or_unreconciled_sources(tmp_path, commands, m
     lambda db: db.records.update(packets=[]),
     lambda db: db.records["roles"][0].update(login=True),
     lambda db: db.records["schema_version"][0].update(sha256="e" * 64),
+    lambda db: db.records.pop("release_migration_ledger"),
 ])
 def test_recovery_rejects_fake_isolation_or_incomplete_restore(tmp_path, commands, mutation):
     production = FakeDatabase()

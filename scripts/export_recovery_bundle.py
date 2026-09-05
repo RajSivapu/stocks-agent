@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+from datetime import datetime
 import hashlib
 import io
 import json
@@ -25,7 +26,7 @@ REQUIRED_RECOVERY_RECORDS = (
     "intelligence_run_events", "source_quota_reservations", "collection_checkpoints",
     "collection_checkpoint_history", "collection_completions", "report_origins",
     "publications", "evaluation_publications", "cash_ledger_state",
-    "cash_snapshots", "run_terminal_outcomes", "decision_evaluations", "policy_comparisons", "roles", "schema_version",
+    "cash_snapshots", "run_terminal_outcomes", "decision_evaluations", "policy_comparisons", "roles", "schema_version", "release_migration_ledger",
 )
 NULLABLE_TEXT = (str, type(None))
 DATASET_FIELDS = {
@@ -120,6 +121,7 @@ DATASET_FIELDS = {
                            "comparison": dict, "created_at": str},
     "roles": {"role": str, "login": bool, "superuser": bool, "bypass_rls": bool, "memberships": list, "grants": list},
     "schema_version": {"version": str, "statements": list, "sha256": str},
+    "release_migration_ledger": {"path": str, "version": str, "sha256": str, "applied_at": str},
 }
 MAX_PAYLOAD_BYTES = 256 * 1024 * 1024
 HASH = re.compile(r"[0-9a-f]{64}")
@@ -182,6 +184,7 @@ def _validated_records(records: Mapping[str, object]) -> dict[str, list[dict[str
             "gateway_requests": "request_id", "policies": "version",
             "publications": "report_id", "cash_ledger_state": "singleton",
             "run_terminal_outcomes": "run_id", "roles": "role", "schema_version": "version",
+            "release_migration_ledger": "path",
             "collection_checkpoints": ("run_id", "cache_key"),
             "collection_checkpoint_history": ("run_id", "cache_key", "source_receipt_id"),
             "collection_completions": "completion_id", "report_origins": "request_id",
@@ -285,10 +288,29 @@ def _validated_records(records: Mapping[str, object]) -> dict[str, list[dict[str
             raise ValueError("publication delivery state is incomplete")
     if not {row["report_id"] for row in result["publications"]}.issubset(reports):
         raise ValueError("recovery publication has no report")
-    if any(not HASH.fullmatch(row["sha256"]) or not all(isinstance(statement, str) for statement in row["statements"])
+    if any(not row["version"].isdigit() or not row["statements"]
+           or not HASH.fullmatch(row["sha256"]) or not all(isinstance(statement, str) and statement.strip() for statement in row["statements"])
            or sha256("\n".join(row["statements"]).encode()) != row["sha256"]
            for row in result["schema_version"]):
         raise ValueError("schema version hash is invalid")
+    private_versions = {}
+    for row in result["release_migration_ledger"]:
+        match = re.fullmatch(r"sql/migrations/(\d{8}(?:\d{4})?)_[a-z0-9][a-z0-9_]*\.sql", row["path"])
+        if (match is None or match.group(1) != row["version"] or not HASH.fullmatch(row["sha256"])
+                or row["version"] in private_versions):
+            raise ValueError("release migration ledger identity is invalid")
+        try:
+            applied_at = datetime.fromisoformat(row["applied_at"].replace("Z", "+00:00"))
+            if applied_at.tzinfo is None:
+                raise ValueError("timezone required")
+        except ValueError:
+            raise ValueError("release migration ledger applied_at is invalid") from None
+        private_versions[row["version"]] = row["sha256"]
+    # The native export hash binds its exact stored statements[], while the
+    # release ledger uses the reconciler's canonical statement-array identity.
+    from scripts.deploy_owner_dashboard_api import migration_statements_sha256
+    if private_versions and any(private_versions.get(row["version"]) != migration_statements_sha256(row["statements"]) for row in result["schema_version"]):
+        raise ValueError("native/private migration ledgers diverge")
     for row in result["evaluation_publications"]:
         if (row["idempotency_key"] not in requests or (row["run_id"] is not None and row["run_id"] not in runs)
                 or not HASH.fullmatch(row["rendered_hash"]) or row["attempt_count"] < 0

@@ -15,6 +15,7 @@ from typing import Any
 from urllib.parse import urlsplit
 
 from lib import config
+from lib.intelligence.policy import _PROVIDERS
 from lib.intelligence.http import (
     BoundedHttpClient,
     HttpRequest,
@@ -23,6 +24,11 @@ from lib.intelligence.http import (
     cache_key,
 )
 from lib.intelligence.quota import QuotaExceeded, QuotaSession
+
+
+# Every reviewed outbound reservation uses the same durable transport barrier.
+# Yahoo is deliberately separate: its quote transport is protected by the gateway.
+RESERVED_OUTBOUND_PROVIDERS = frozenset(_PROVIDERS) - {"yahoo"}
 
 
 _MAX_TEXT_CHARACTERS = 2_000
