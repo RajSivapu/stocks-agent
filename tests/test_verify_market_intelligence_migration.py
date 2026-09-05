@@ -19,6 +19,7 @@ SCHEMA = ROOT / "sql" / "schema.sql"
 VERIFIER = ROOT / "scripts" / "verify_market_intelligence_migration.py"
 TRANSACTION_CHRONOLOGY = ROOT / "sql" / "migrations" / "20260909_transaction_chronology.sql"
 PORTFOLIO_COMMAND_VERIFIER = ROOT / "scripts" / "verify_portfolio_command_rpc.py"
+DELIVERY_OUTBOX = ROOT / "sql" / "migrations" / "20260910_delivery_outbox.sql"
 
 TABLES = (
     "market_intelligence_runs",
@@ -486,3 +487,20 @@ def test_chronology_verifier_reloads_authoritative_state_after_rejection():
             portfolio_command_verifier._require_late_rejection_preserves_accounting(
                 FakeSupabase(mutated_transactions), sell_command_id="sell-command"
             )
+
+
+def test_report_delivery_outbox_is_durable_and_schema_aligned():
+    migration = DELIVERY_OUTBOX.read_text()
+    schema = SCHEMA.read_text()
+    for sql in (migration, schema):
+        assert "CREATE TABLE IF NOT EXISTS public.market_report_publications" in sql
+        assert "status IN ('pending','delivered','failed','uncertain','suppressed')" in sql
+        assert "status = 'delivered' OR jsonb_array_length(telegram_message_ids) = 0" in sql
+        assert "CREATE OR REPLACE FUNCTION public.create_market_report_publication(" in sql
+        assert "CREATE OR REPLACE FUNCTION public.claim_market_report_publication(" in sql
+        assert "CREATE OR REPLACE FUNCTION public.finish_market_report_publication(" in sql
+        assert "SET search_path = pg_catalog" in sql
+        assert "REVOKE ALL ON TABLE public.market_report_publications FROM PUBLIC, anon, authenticated;" in sql
+        assert "GRANT EXECUTE ON FUNCTION public.claim_market_report_publication(TEXT) TO service_role;" in sql
+    assert "status='uncertain'" in migration
+    assert "telegram_message_ids=CASE WHEN p_status='delivered' THEN p_message_ids ELSE '[]'::jsonb END" in migration

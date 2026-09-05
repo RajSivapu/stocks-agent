@@ -71,6 +71,28 @@ function reportFixture(kind: "morning" | "urgent" = "morning") {
   };
 }
 
+function approvedReportDecision(payload: ReturnType<typeof reportFixture>): ReportPolicyDecision {
+  return {
+    evaluation_id: payload.report.policy_decision_ids[0],
+    candidate_id: "00000000-0000-4000-8000-000000000033",
+    run_id: RUN_ID,
+    packet_id: PACKET_ID,
+    packet_hash: PACKET_HASH,
+    ticker: "CENX",
+    status: "approved",
+    final_action: "buy",
+    final_alert_urgency: null,
+    approved_terms: {
+      quantity: "10",
+      entry_low: "45",
+      entry_high: "47.02",
+      stop: "42",
+      target: "58",
+      urgency: "routine",
+    },
+  };
+}
+
 Deno.test("report handler loads exact persisted decisions before generating delivery and stored prose", async () => {
   const repo = new FakeRepository();
   const payload = reportFixture();
@@ -110,6 +132,32 @@ Deno.test("report handler loads exact persisted decisions before generating deli
     !JSON.stringify(repo.storedReport).includes("999999"),
     "raw prose retained in report",
   );
+});
+
+Deno.test("stored report delivery becomes uncertain after a send crash and same report key is never resent", async () => {
+  const repo = new FakeRepository();
+  const payload = reportFixture();
+  repo.reportDecisions = [approvedReportDecision(payload)];
+  const first = makeHandler(repo, {
+    sendTelegram: () => Promise.reject(new TelegramDeliveryError("ambiguous", [77])),
+  });
+  const firstResponse = await first.handler(request("record_report", payload));
+  assertEquals(firstResponse.status, 502);
+  assertEquals((await json(firstResponse)).publication_receipt, {
+    status: "uncertain",
+    telegram_message_ids: [],
+    retry_allowed: false,
+  });
+
+  const retry = makeHandler(repo);
+  const retryResponse = await retry.handler(request("record_report", payload));
+  assertEquals(retryResponse.status, 502);
+  assertEquals((await json(retryResponse)).publication_receipt, {
+    status: "uncertain",
+    telegram_message_ids: [],
+    retry_allowed: false,
+  });
+  assertEquals(retry.sent, []);
 });
 
 Deno.test("report handler publishes an approved sizing-free urgent HOLD alert without caller trade prose", async () => {
@@ -545,6 +593,7 @@ class FakeRepository implements GatewayRepository {
   > = [];
   reportDecisions: ReportPolicyDecision[] = [];
   storedReport: unknown = null;
+  reportPublication: PublicationReceipt | null = null;
   loadReportDecisions(
     runId: string,
     packetId: string,
@@ -564,6 +613,47 @@ class FakeRepository implements GatewayRepository {
       rendered_hash: payload.rendered_hash,
       duplicate: false,
     });
+  }
+  createReportPublication(
+    _runId: string,
+    payload: { id: string; idempotency_key: string },
+  ): Promise<PublicationReceipt> {
+    this.events.push("persist-report-publication");
+    if (!this.reportPublication) {
+      this.reportPublication = {
+        id: payload.id,
+        idempotency_key: payload.idempotency_key,
+        status: "pending",
+        telegram_message_ids: [],
+        telegram_accepted_at: null,
+        lease_token: null,
+      };
+    }
+    return Promise.resolve(structuredClone(this.reportPublication));
+  }
+  claimReportPublication(idempotencyKey: string): Promise<PublicationClaim> {
+    this.events.push("claim-report-publication");
+    const receipt = this.reportPublication!;
+    const claimed = receipt.status === "pending" || receipt.status === "failed";
+    return Promise.resolve({
+      claimed,
+      lease_token: claimed ? "00000000-0000-4000-8000-000000000052" : null,
+      receipt: { ...receipt, idempotency_key: idempotencyKey },
+    });
+  }
+  finishReportPublication(
+    _key: string,
+    _lease: string,
+    status: "delivered" | "failed" | "uncertain",
+    ids: number[],
+  ): Promise<PublicationReceipt> {
+    this.reportPublication = {
+      ...this.reportPublication!,
+      status,
+      telegram_message_ids: ids,
+      lease_token: null,
+    };
+    return Promise.resolve(structuredClone(this.reportPublication));
   }
   mutationCalls = 0;
   startCalls = 0;
@@ -2205,6 +2295,19 @@ Deno.test("evaluation refetches every quote, persists before sending, and ignore
     status: "delivered",
     ids: [77],
   }]);
+});
+
+Deno.test("periodic evaluation persists a suppression receipt and leaves report delivery to its deterministic report key", async () => {
+  const { handler, repository, sent } = makeHandler();
+  const response = await handler(request("evaluate_and_publish", {
+    phase: "pre-market",
+    market_date: "2026-09-02",
+    title: "ignored",
+    candidates: [candidate("pre-market")],
+  }));
+  assertEquals(response.status, 200);
+  assertEquals(repository.lastBundle!.publication.status, "suppressed");
+  assertEquals(sent, []);
 });
 
 Deno.test("persistence failure prevents Telegram and delivery outcomes are classified", async () => {

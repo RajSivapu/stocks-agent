@@ -1,5 +1,5 @@
 import type { PolicyConfig } from "./contracts.ts";
-import { GatewayRepositoryError, validatePolicy } from "./repository.ts";
+import { createSupabaseGatewayRepository, GatewayRepositoryError, validatePolicy } from "./repository.ts";
 
 function assert(value: boolean, message: string): void {
   if (!value) throw new Error(message);
@@ -77,4 +77,53 @@ Deno.test("repository accepts only the reviewed alert v3 policy shape", () => {
   ]) {
     assert(rejects({ ...policy(), version: 3, alerts_v3: alerts }), "unreviewed alert policy accepted");
   }
+});
+
+Deno.test("report delivery outbox is created from the deterministic report receipt before Telegram work", async () => {
+  const calls: Array<{ name: string; parameters: Record<string, unknown> | undefined }> = [];
+  const repository = createSupabaseGatewayRepository({
+    rpc(name: string, parameters?: Record<string, unknown>) {
+      calls.push({ name, parameters });
+      return Promise.resolve({
+        data: {
+          report_id: "00000000-0000-4000-8000-000000000001",
+          idempotency_key: "a".repeat(64),
+          status: "pending",
+          telegram_message_ids: [],
+          telegram_accepted_at: null,
+          lease_token: null,
+        },
+        error: null,
+      });
+    },
+  });
+  const receipt = await repository.createReportPublication!(
+    "00000000-0000-4000-8000-000000000002",
+    {
+      id: "00000000-0000-4000-8000-000000000001",
+      idempotency_key: "a".repeat(64),
+      packet_id: "00000000-0000-4000-8000-000000000003",
+      market_date: "2026-09-02",
+      kind: "morning",
+      report: {
+        title: "x", summary: "x", full_markdown: "x", source_ids: [],
+        policy_decision_ids: [], comparison_ids: [], actionable_risk: false,
+        material_thesis_change: false, intraday_triggered: false, suggestion_only: true,
+      },
+      report_hash: "b".repeat(64), rendered_text: "Delivery body", rendered_hash: "c".repeat(64),
+    },
+  );
+  assertEquals(receipt, {
+    id: "00000000-0000-4000-8000-000000000001", idempotency_key: "a".repeat(64),
+    status: "pending", telegram_message_ids: [], telegram_accepted_at: null, lease_token: null,
+  });
+  assertEquals(calls, [{
+    name: "create_market_report_publication",
+    parameters: {
+      p_run_id: "00000000-0000-4000-8000-000000000002",
+      p_report_id: "00000000-0000-4000-8000-000000000001",
+      p_idempotency_key: "a".repeat(64), p_market_date: "2026-09-02", p_kind: "morning",
+      p_rendered_body: "Delivery body", p_rendered_hash: "c".repeat(64),
+    },
+  }]);
 });

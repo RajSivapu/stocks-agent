@@ -3,6 +3,7 @@ import { readFileSync } from "node:fs";
 import test from "node:test";
 
 import {
+  committedDeliveryUncertainText,
   ownerMatches,
   parseCallbackData,
   resolveExecutionDate,
@@ -15,6 +16,7 @@ import {
   plansText,
   planTickerAllowed,
 } from "../supabase/functions/telegram-portfolio/plan-utils.mjs";
+import { acknowledgeCommittedCommand } from "../supabase/functions/telegram-portfolio/command-delivery-utils.mjs";
 
 test("secureEqual accepts only an exact secret", async () => {
   assert.equal(await secureEqual("correct-secret", "correct-secret"), true);
@@ -115,4 +117,30 @@ test("a late transaction receipt tells the owner to reconcile", () => {
   assert.match(source, /TRANSACTION_OUT_OF_ORDER/);
   assert.match(source, /reconciliation is required/);
   assert.match(source, /No trade was placed by this bot/);
+});
+
+test("a committed command never claims nothing changed when Telegram acknowledgement is uncertain", () => {
+  const message = committedDeliveryUncertainText("Recorded BUY AAPL.");
+  assert.match(message, /Recorded BUY AAPL\./);
+  assert.match(message, /Telegram acknowledgement is uncertain/i);
+  assert.doesNotMatch(message, /Nothing (was )?changed/i);
+});
+
+test("a committed callback reports uncertain acknowledgement when editMessageText fails", async () => {
+  const calls = [];
+  const receipt = await acknowledgeCommittedCommand({
+    telegram: async (method) => {
+      calls.push(method);
+      if (method === "editMessageText") throw new Error("timeout");
+    },
+    sendText: async (_chatId, text) => calls.push(text),
+    callback: { id: "callback", message: { chat: { id: 123 }, message_id: 456 } },
+    result: { ok: true },
+    resultText: "Recorded BUY AAPL.",
+  });
+  assert.deepEqual(receipt, { committed: true, acknowledgement: "uncertain" });
+  assert.equal(calls[0], "answerCallbackQuery");
+  assert.equal(calls[1], "editMessageText");
+  assert.match(calls[2], /Telegram acknowledgement is uncertain/i);
+  assert.doesNotMatch(calls[2], /Nothing (was )?changed/i);
 });

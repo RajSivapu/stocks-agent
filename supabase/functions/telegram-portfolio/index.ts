@@ -1,5 +1,7 @@
 import { createClient } from "npm:@supabase/supabase-js@2.112.4";
 
+import { acknowledgeCommittedCommand } from "./command-delivery-utils.mjs";
+
 import {
   alertActionPayload,
   alertActionResultText,
@@ -416,16 +418,7 @@ async function handleCallback(updateId: number, callback: TelegramCallback) {
     return;
   }
   const result = data as Record<string, unknown>;
-  await telegram("answerCallbackQuery", {
-    callback_query_id: callback.id,
-    text: result.ok ? "Recorded." : "Nothing changed.",
-  });
-  await telegram("editMessageText", {
-    chat_id: callback.message.chat.id,
-    message_id: callback.message.message_id,
-    text: callbackResultText(result),
-    reply_markup: { inline_keyboard: [] },
-  });
+  await acknowledgeCommittedCommand({ telegram, sendText, callback, result, resultText: callbackResultText(result) });
 }
 
 Deno.serve(async (request: Request): Promise<Response> => {

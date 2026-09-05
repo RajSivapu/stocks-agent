@@ -716,49 +716,33 @@ export function createGatewayHandler(dependencies: GatewayDependencies) {
             requireRun(envelope),
             delivery.payload!,
           );
-          if (receipt.duplicate) {
-            result = {
-              ok: true,
-              ...receipt,
-              publication_receipt: {
-                status: "duplicate",
-                telegram_message_ids: [],
-              },
-              telegram_message_ids: [],
-            };
-          } else {
-            try {
-              const ids = await deps.sendTelegram(
-                delivery.parts,
-                deps.telegramChatId,
-                deps.telegramToken,
-              );
-              result = {
-                ok: true,
-                ...receipt,
-                publication_receipt: {
-                  status: "accepted_by_telegram",
-                  telegram_message_ids: ids,
-                },
-                telegram_message_ids: ids,
-              };
-            } catch (error) {
-              const deliveryError = error instanceof TelegramDeliveryError
-                ? error
-                : new TelegramDeliveryError("ambiguous", []);
-              const code = deliveryError.kind === "definitive" ? "DELIVERY_FAILED" : "DELIVERY_UNKNOWN";
-              result = {
-                ok: false,
-                code,
-                ...receipt,
-                publication_receipt: {
-                  status: deliveryError.kind === "definitive" ? "delivery_failed" : "delivery_unknown",
-                  telegram_message_ids: deliveryError.partialMessageIds,
-                },
-                telegram_message_ids: deliveryError.partialMessageIds,
-              };
-            }
+          if (!deps.repository.createReportPublication ||
+            !deps.repository.claimReportPublication ||
+            !deps.repository.finishReportPublication) {
+            throw new GatewayRepositoryError("PERSISTENCE_FAILED");
           }
+          const persisted = await deps.repository.createReportPublication(
+            requireRun(envelope),
+            delivery.payload!,
+          );
+          const delivered = await deliverReadyReportPublication(
+            persisted,
+            delivery.parts,
+            deps,
+          );
+          const retryAllowed = delivered.status === "pending" || delivered.status === "failed";
+          const failed = delivered.status === "failed" || delivered.status === "uncertain";
+          result = {
+            ok: !failed,
+            ...(failed ? { code: delivered.status === "uncertain" ? "DELIVERY_UNKNOWN" : "DELIVERY_FAILED" } : {}),
+            ...receipt,
+            publication_receipt: {
+              status: delivered.status,
+              telegram_message_ids: delivered.telegram_message_ids,
+              retry_allowed: retryAllowed,
+            },
+            telegram_message_ids: delivered.telegram_message_ids,
+          };
         }
         await deps.repository.completeRequest(
           envelope.request_id,
@@ -1452,6 +1436,38 @@ async function deliverReadyPublication(
   }
 }
 
+async function deliverReadyReportPublication(
+  persisted: PublicationReceipt,
+  parts: string[],
+  deps: ResolvedDependencies,
+): Promise<PublicationReceipt> {
+  if (!deps.repository.claimReportPublication || !deps.repository.finishReportPublication) {
+    throw new GatewayRepositoryError("PERSISTENCE_FAILED");
+  }
+  if (persisted.status === "delivered" || persisted.status === "uncertain" ||
+    persisted.status === "suppressed") return persisted;
+  const claim = await deps.repository.claimReportPublication(persisted.idempotency_key);
+  if (!claim.claimed || !claim.lease_token) return claim.receipt;
+  try {
+    const ids = await deps.sendTelegram(parts, deps.telegramChatId, deps.telegramToken);
+    return await deps.repository.finishReportPublication(
+      persisted.idempotency_key, claim.lease_token, "delivered", ids, null,
+    );
+  } catch (error) {
+    const delivery = error instanceof TelegramDeliveryError
+      ? error
+      : new TelegramDeliveryError("ambiguous", []);
+    // A partial identifier is not a delivery receipt. Retain IDs only after a complete acceptance.
+    return await deps.repository.finishReportPublication(
+      persisted.idempotency_key,
+      claim.lease_token,
+      delivery.kind === "definitive" ? "failed" : "uncertain",
+      [],
+      delivery.kind === "definitive" ? "TELEGRAM_REJECTED" : "TELEGRAM_OUTCOME_UNKNOWN",
+    );
+  }
+}
+
 async function evaluateAndPublish(
   envelope: GatewayEnvelope,
   bundle: ReturnType<typeof parseDecisionBundle>,
@@ -1625,6 +1641,10 @@ async function evaluateAndPublish(
     });
   }
   if (!leaseToken) throw new GatewayRepositoryError("PERSISTENCE_FAILED");
+  // Morning/post-market brief delivery belongs to the immutable report key. The
+  // evaluation receipt remains durable, but cannot create a competing Telegram send.
+  const periodicReport = bundle.phase === "pre-market" || bundle.phase === "post-market";
+  const publicationStatus = periodicReport ? "suppressed" : rendered.status;
   const persistedInput: PersistedBundle = {
     request_id: envelope.request_id,
     request_lease_token: leaseToken,
@@ -1644,7 +1664,7 @@ async function evaluateAndPublish(
       template_version: rendered.template_version,
       rendered_body: rendered.body,
       rendered_hash: rendered.hash,
-      status: rendered.status,
+      status: publicationStatus,
     },
   };
   const persisted = await deps.repository.applyDecisionBundle(persistedInput);
@@ -1667,7 +1687,7 @@ async function evaluateAndPublish(
   }
   const delivered = await deliverReadyPublication(
     persisted,
-    rendered.parts,
+    periodicReport ? [] : rendered.parts,
     deps,
   );
   const result = {

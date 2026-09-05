@@ -82,7 +82,10 @@ export interface PublicationReceipt {
     | "delivered"
     | "delivery_failed"
     | "delivery_unknown"
-    | "suppressed";
+    | "suppressed"
+    | "pending"
+    | "failed"
+    | "uncertain";
   telegram_message_ids: number[];
   telegram_accepted_at: string | null;
   lease_token: string | null;
@@ -223,6 +226,18 @@ export interface GatewayRepository {
     runId: string,
     payload: RecordReportPayload,
   ): Promise<ReportRecordReceipt>;
+  createReportPublication?(
+    runId: string,
+    payload: RecordReportPayload,
+  ): Promise<PublicationReceipt>;
+  claimReportPublication?(idempotencyKey: string): Promise<PublicationClaim>;
+  finishReportPublication?(
+    idempotencyKey: string,
+    leaseToken: string,
+    status: "delivered" | "failed" | "uncertain",
+    messageIds: number[],
+    error: string | null,
+  ): Promise<PublicationReceipt>;
   startIntelligenceRun?(
     runId: string,
     payload: StartIntelligencePayload,
@@ -586,6 +601,75 @@ export function createSupabaseGatewayRepository(
         report_hash: text(row.report_hash, 64),
         rendered_hash: text(row.rendered_hash, 64),
         duplicate: boole(row.duplicate),
+      };
+    },
+
+    async createReportPublication(runId, payload) {
+      const result = await client.rpc("create_market_report_publication", {
+        p_run_id: runId,
+        p_report_id: payload.id,
+        p_idempotency_key: payload.idempotency_key,
+        p_market_date: payload.market_date,
+        p_kind: payload.kind,
+        p_rendered_body: payload.rendered_text,
+        p_rendered_hash: payload.rendered_hash,
+      });
+      if (result.error) throw new GatewayRepositoryError("PERSISTENCE_FAILED");
+      const row = oneObject(result);
+      return {
+        id: text(row.report_id, 36),
+        idempotency_key: text(row.idempotency_key, 64),
+        status: text(row.status, 20) as PublicationReceipt["status"],
+        telegram_message_ids: Array.isArray(row.telegram_message_ids)
+          ? row.telegram_message_ids.map(integer)
+          : [],
+        telegram_accepted_at: nullableText(row.telegram_accepted_at, 40),
+        lease_token: nullableText(row.lease_token, 36),
+      };
+    },
+
+    async claimReportPublication(idempotencyKey) {
+      const result = await client.rpc("claim_market_report_publication", {
+        p_idempotency_key: idempotencyKey,
+      });
+      if (result.error) throw new GatewayRepositoryError("PERSISTENCE_FAILED");
+      const row = oneObject(result);
+      const receipt: PublicationReceipt = {
+        id: text(row.report_id, 36),
+        idempotency_key: text(row.idempotency_key, 64),
+        status: text(row.status, 20) as PublicationReceipt["status"],
+        telegram_message_ids: Array.isArray(row.telegram_message_ids)
+          ? row.telegram_message_ids.map(integer)
+          : [],
+        telegram_accepted_at: nullableText(row.telegram_accepted_at, 40),
+        lease_token: nullableText(row.lease_token, 36),
+      };
+      return {
+        claimed: boole(row.claimed),
+        lease_token: nullableText(row.lease_token, 36),
+        receipt,
+      };
+    },
+
+    async finishReportPublication(idempotencyKey, leaseToken, status, messageIds, error) {
+      const result = await client.rpc("finish_market_report_publication", {
+        p_idempotency_key: idempotencyKey,
+        p_lease_token: leaseToken,
+        p_status: status,
+        p_message_ids: messageIds,
+        p_error: error,
+      });
+      if (result.error) throw new GatewayRepositoryError("PERSISTENCE_FAILED");
+      const row = oneObject(result);
+      return {
+        id: text(row.report_id, 36),
+        idempotency_key: text(row.idempotency_key, 64),
+        status: text(row.status, 20) as PublicationReceipt["status"],
+        telegram_message_ids: Array.isArray(row.telegram_message_ids)
+          ? row.telegram_message_ids.map(integer)
+          : [],
+        telegram_accepted_at: nullableText(row.telegram_accepted_at, 40),
+        lease_token: null,
       };
     },
 
