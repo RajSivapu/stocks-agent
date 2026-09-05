@@ -413,21 +413,25 @@ export function renderReportDelivery(
   const finalAlertTriggered = decisions.some((row) =>
     row.final_alert_urgency !== null
   );
-  const finalAlertUrgency: "urgent" | "routine" | null = decisions.some((
-      row,
-    ) => row.final_alert_urgency === "urgent"
+  const effectiveUrgency: "urgent" | "routine" | null = decisions.some((row) =>
+      row.final_alert_urgency === "urgent" ||
+      row.approved_terms?.urgency === "urgent"
     )
     ? "urgent"
-    : (finalAlertTriggered ? "routine" : null);
+    : (decisions.some((row) => row.final_alert_urgency === "routine")
+      ? "routine"
+      : null);
+  const finalKind: ReportKind = effectiveUrgency === "urgent"
+    ? "urgent"
+    : (effectiveUrgency === "routine" ? "intraday" : value.kind);
   if (
-    value.kind === "intraday" && actionableFields.length === 0 &&
+    finalKind === "intraday" && actionableFields.length === 0 &&
     !finalAlertTriggered
   ) {
     return { status: "suppressed", body: "", parts: [], reason: "no_trigger" };
   }
-  const urgent = actionableFields.some((row) => row.urgency === "urgent") ||
-    decisions.some((row) => row.final_alert_urgency === "urgent");
-  if (value.kind === "urgent" && !urgent && finalAlertUrgency === null) {
+  const urgent = effectiveUrgency === "urgent";
+  if (finalKind === "urgent" && !urgent) {
     return {
       status: "suppressed",
       body: "",
@@ -435,12 +439,9 @@ export function renderReportDelivery(
       reason: "not_actionable",
     };
   }
-  const finalKind: ReportKind = finalAlertUrgency === "urgent"
-    ? "urgent"
-    : (finalAlertUrgency === "routine" ? "intraday" : value.kind);
-  const heading = finalAlertUrgency === "urgent"
+  const heading = effectiveUrgency === "urgent"
     ? "URGENT RESEARCH REVIEW"
-    : (finalAlertUrgency === "routine"
+    : (effectiveUrgency === "routine"
       ? "INTRADAY RESEARCH"
       : (urgent
         ? "URGENT RESEARCH REVIEW"

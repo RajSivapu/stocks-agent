@@ -1286,9 +1286,12 @@ BEGIN
      OR p_report->>'rendered_hash' <> encode(extensions.digest(
        convert_to(p_report->>'rendered_text','UTF8'),'sha256'
      ),'hex')
-     OR jsonb_typeof(p_report->'report'->'source_ids') <> 'array'
-     OR jsonb_typeof(p_report->'report'->'policy_decision_ids') <> 'array'
-     OR jsonb_typeof(p_report->'report'->'comparison_ids') <> 'array'
+     OR NOT (p_report->'report' ?& ARRAY[
+       'source_ids','policy_decision_ids','comparison_ids'
+     ])
+     OR jsonb_typeof(p_report->'report'->'source_ids') IS DISTINCT FROM 'array'
+     OR jsonb_typeof(p_report->'report'->'policy_decision_ids') IS DISTINCT FROM 'array'
+     OR jsonb_typeof(p_report->'report'->'comparison_ids') IS DISTINCT FROM 'array'
      OR jsonb_array_length(p_report->'report'->'source_ids') = 0
      OR jsonb_array_length(p_report->'report'->'policy_decision_ids') = 0
      OR jsonb_array_length(p_report->'report'->'comparison_ids') > 96

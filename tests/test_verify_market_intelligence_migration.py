@@ -87,6 +87,7 @@ def complete_snapshot():
             "report_source_provenance": True,
             "report_decision_packet_provenance": True,
             "report_comparison_provenance": True,
+            "report_nested_provenance_required": True,
             "report_semantic_key": True,
             "theme_report_recorded": True,
             "incomplete_packet_rejected": True,
@@ -111,7 +112,7 @@ def test_mutation_grant_fails_closed():
     with pytest.raises(RuntimeError, match="unexpected grant"):
         evaluate_snapshot(snapshot)
 
-@pytest.mark.parametrize("field", ["report_source_provenance", "report_decision_packet_provenance", "report_comparison_provenance", "report_semantic_key"])
+@pytest.mark.parametrize("field", ["report_source_provenance", "report_decision_packet_provenance", "report_comparison_provenance", "report_nested_provenance_required", "report_semantic_key"])
 def test_report_provenance_requires_actual_database_evidence(field):
     snapshot = complete_snapshot()
     snapshot["behavior"][field] = False
@@ -258,6 +259,27 @@ def test_schema_declares_complete_bounded_append_only_ledgers_and_rpcs():
         ):
             assert lock_key in sql
         assert "EXECUTE format(" not in sql
+
+
+def test_report_nested_provenance_arrays_are_explicit_and_null_safe():
+    for path in (MIGRATION, SCHEMA):
+        sql = path.read_text()
+        assert "p_report->'report' ?& ARRAY[\n       'source_ids','policy_decision_ids','comparison_ids'\n     ]" in sql
+        for field in ("source_ids", "policy_decision_ids", "comparison_ids"):
+            assert (
+                f"jsonb_typeof(p_report->'report'->'{field}') IS DISTINCT FROM 'array'"
+                in sql
+            )
+        assert "jsonb_array_length(p_report->'report'->'source_ids') = 0" in sql
+        assert "jsonb_array_length(p_report->'report'->'policy_decision_ids') = 0" in sql
+        assert "jsonb_array_length(p_report->'report'->'comparison_ids') > 96" in sql
+
+
+def test_verifier_probes_each_missing_report_nested_provenance_array():
+    source = VERIFIER.read_text()
+    for field in ("source_ids", "policy_decision_ids", "comparison_ids"):
+        assert f"report_body - {{'{field}'}}" in source
+    assert "report_body - {'source_ids', 'policy_decision_ids', 'comparison_ids'}" in source
 
 
 def test_migration_is_idempotent_and_schema_mirrors_it_verbatim():

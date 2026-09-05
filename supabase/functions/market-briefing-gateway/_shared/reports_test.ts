@@ -171,6 +171,43 @@ Deno.test("urgent and intraday authority derives from final terms instead of cal
     "no_trigger",
   );
 });
+Deno.test("an urgent actionable final decision controls the canonical report kind and heading", () => {
+  const delivery = renderReportDelivery(report("morning"), [
+    decision({
+      approved_terms: { ...decision().approved_terms!, urgency: "urgent" },
+    }),
+  ], OPTIONS);
+  assertEquals(delivery.status, "ready");
+  assertEquals(delivery.payload!.kind, "urgent");
+  assert(
+    delivery.body.startsWith("<b>URGENT RESEARCH REVIEW"),
+    "urgent actionable heading was not canonical",
+  );
+});
+Deno.test("urgent actionable final decisions outrank routine pure-HOLD alerts", () => {
+  const actionable = decision({
+    evaluation_id: "00000000-0000-4000-8000-000000000004",
+    approved_terms: { ...decision().approved_terms!, urgency: "urgent" },
+  });
+  const routineHold = decision({
+    evaluation_id: "00000000-0000-4000-8000-000000000005",
+    final_action: "hold",
+    final_alert_urgency: "routine",
+    approved_terms: null,
+  });
+  const value = report("intraday");
+  value.report.policy_decision_ids = [
+    actionable.evaluation_id,
+    routineHold.evaluation_id,
+  ];
+  const delivery = renderReportDelivery(resign(value), [actionable, routineHold], OPTIONS);
+  assertEquals(delivery.status, "ready");
+  assertEquals(delivery.payload!.kind, "urgent");
+  assert(
+    delivery.body.startsWith("<b>URGENT RESEARCH REVIEW"),
+    "routine HOLD relabelled the urgent actionable decision as intraday",
+  );
+});
 Deno.test("raw prose cannot smuggle quantity or urgency through an approved buy word", () => {
   const value = report("morning");
   value.report.summary =

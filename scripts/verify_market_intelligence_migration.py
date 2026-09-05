@@ -63,6 +63,7 @@ BEHAVIOR_ERRORS = {
     "report_source_provenance": "report source provenance was not verified",
     "report_decision_packet_provenance": "report decision packet provenance was not verified",
     "report_comparison_provenance": "report comparison provenance was not verified",
+    "report_nested_provenance_required": "report nested provenance arrays were not required",
     "report_semantic_key": "report semantic key was not verified",
     "theme_report_recorded": "theme report was not recorded",
     "incomplete_packet_rejected": "incomplete packet report was not rejected",
@@ -561,6 +562,12 @@ def verify(cursor) -> tuple[dict[str, object], list[UUID]]:
         return _expect_db_error(cursor, lambda: _call(
             cursor, "record_market_report", prior_run, key, Jsonb(changed)))
 
+    report_nested_provenance_required = all((
+        rejects_report_body(report_body - {'source_ids'}),
+        rejects_report_body(report_body - {'policy_decision_ids'}),
+        rejects_report_body(report_body - {'comparison_ids'}),
+        rejects_report_body(report_body - {'source_ids', 'policy_decision_ids', 'comparison_ids'}),
+    ))
     report_source_provenance = rejects_report_body({**report_body, "source_ids": [str(uuid4())]})
     other_decision_id = uuid4()
     cursor.execute(
@@ -908,6 +915,7 @@ def verify(cursor) -> tuple[dict[str, object], list[UUID]]:
         "report_source_provenance": report_source_provenance,
         "report_decision_packet_provenance": report_decision_packet_provenance,
         "report_comparison_provenance": report_comparison_provenance,
+        "report_nested_provenance_required": report_nested_provenance_required,
         "report_semantic_key": report_semantic_key,
         "theme_report_recorded": theme_report_recorded,
         "incomplete_packet_rejected": incomplete_packet_rejected,
