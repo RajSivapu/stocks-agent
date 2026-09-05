@@ -17,7 +17,10 @@ import {
   plansText,
   planTickerAllowed,
 } from "../supabase/functions/telegram-portfolio/plan-utils.mjs";
-import { acknowledgeCommittedCommand } from "../supabase/functions/telegram-portfolio/command-delivery-utils.mjs";
+import {
+  acknowledgeCommittedCommand,
+  reconcileLostCommandAcknowledgementRpc,
+} from "../supabase/functions/telegram-portfolio/command-delivery-utils.mjs";
 
 test("secureEqual accepts only an exact secret", async () => {
   assert.equal(await secureEqual("correct-secret", "correct-secret"), true);
@@ -149,4 +152,22 @@ test("a committed callback reports uncertain acknowledgement when editMessageTex
 test("post-commit acknowledgement persistence failures never produce a false rollback message", () => {
   assert.equal(webhookFailureText(true), null);
   assert.match(webhookFailureText(false), /Nothing was changed/);
+});
+
+test("lost apply-and-ack RPC response reconciles a committed receipt without claiming rollback", async () => {
+  const calls = [];
+  const receipt = await reconcileLostCommandAcknowledgementRpc({
+    readReceipt: async () => ({ status: "pending", result: { ok: true } }),
+    telegram: async (method, payload) => calls.push({ method, payload }),
+    callback: { id: "callback" },
+    resultText: "Recorded BUY AAPL.",
+  });
+
+  assert.deepEqual(receipt, { status: "pending", result: { ok: true } });
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].method, "answerCallbackQuery");
+  assert.match(calls[0].payload.text, /Recorded BUY AAPL\./);
+  assert.match(calls[0].payload.text, /acknowledgement is uncertain/i);
+  assert.match(calls[0].payload.text, /reconciliation is required/i);
+  assert.doesNotMatch(calls[0].payload.text, /Nothing (was )?changed/i);
 });

@@ -1,6 +1,6 @@
 import { createClient } from "npm:@supabase/supabase-js@2.112.4";
 
-import { acknowledgeCommittedCommand } from "./command-delivery-utils.mjs";
+import { acknowledgeCommittedCommand, reconcileLostCommandAcknowledgementRpc } from "./command-delivery-utils.mjs";
 
 import {
   alertActionPayload,
@@ -138,6 +138,21 @@ async function claimUpdate(updateId: number, kind: "message" | "callback_query")
   if (!error) return true;
   if (error.code === "23505") return false;
   throw new Error("Could not claim Telegram update");
+}
+
+async function readCommandAcknowledgement(commandId: string, updateId: number) {
+  const { data, error } = await supabase.from("portfolio_command_acknowledgements")
+    .select("command_id,telegram_update_id,status,result")
+    .eq("command_id", commandId)
+    .eq("telegram_update_id", updateId)
+    .maybeSingle();
+  if (error) throw new Error("Could not read command acknowledgement");
+  if (!data || typeof data !== "object" || Array.isArray(data)) return null;
+  const receipt = data as Record<string, unknown>;
+  if (receipt.command_id !== commandId || receipt.telegram_update_id !== updateId) return null;
+  if (!(["pending", "delivered", "failed", "uncertain"] as const).includes(receipt.status as never)) return null;
+  if (typeof receipt.result !== "object" || receipt.result === null || Array.isArray(receipt.result)) return null;
+  return { status: receipt.status, result: receipt.result as Record<string, unknown> };
 }
 
 async function getHolding(ticker: string): Promise<Holding | null> {
@@ -417,7 +432,12 @@ async function handleCallback(updateId: number, callback: TelegramCallback) {
     p_telegram_update_id: updateId,
   });
   if (error || !data) {
-    await telegram("answerCallbackQuery", { callback_query_id: callback.id, text: "Temporary database error. Nothing was changed." });
+    await reconcileLostCommandAcknowledgementRpc({
+      readReceipt: () => readCommandAcknowledgement(parsed.commandId, updateId),
+      telegram,
+      callback,
+      resultText: (result: Record<string, unknown> | null) => callbackResultText(result ?? {}),
+    });
     return;
   }
   const receipt = data as Record<string, unknown>;

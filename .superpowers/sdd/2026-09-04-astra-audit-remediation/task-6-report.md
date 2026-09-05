@@ -63,3 +63,23 @@ work):
 - `node --test tests/test_telegram_webhook_utils.mjs` — 15 passed, 0 failed.
 - `.venv/bin/python -m pytest -q tests/test_verify_market_intelligence_migration.py` — 61 passed.
 - `git diff --check` — passed.
+
+## Controller review round 3 — lost atomic-RPC response
+
+- An `error || !data` result from `apply_portfolio_command_with_acknowledgement` is no longer
+  treated as proof that PostgreSQL rolled back. The webhook performs a service-role, owner-scoped
+  durable receipt read using both the command ID and Telegram update ID.
+- A recovered committed receipt produces a callback alert with the recorded outcome, uncertain
+  acknowledgement, and required reconciliation; a recovered rejected receipt is the only path
+  allowed to say no change was recorded. Missing or unreadable receipts produce only the uncertain
+  outcome/reconciliation notice. No recovery path sends a duplicate command acknowledgement.
+- Focused regression: a committed pending acknowledgement receipt with a lost RPC response returns
+  the durable receipt and an uncertainty/reconciliation alert without `Nothing was changed`.
+
+Focused Task 6 rerun (no full suite, live database, Telegram, deployment, or scheduled work):
+
+- `npx --yes deno@2.9.6 test --config supabase/functions/deno.json supabase/functions/market-briefing-gateway/_shared/repository_test.ts supabase/functions/market-briefing-gateway/_shared/handler_test.ts` — 44 passed, 0 failed.
+- `npx --yes deno@2.9.6 check --config supabase/functions/deno.json supabase/functions/telegram-portfolio/index.ts` — passed.
+- `node --test tests/test_telegram_webhook_utils.mjs` — 16 passed, 0 failed.
+- `.venv/bin/python -m pytest -q tests/test_verify_market_intelligence_migration.py` — 61 passed.
+- `git diff --check` — passed.
