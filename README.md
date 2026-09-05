@@ -393,16 +393,16 @@ with exactly these record sets: `holdings`, `transactions`, `commands`, `runs`, 
 
 ```bash
 python scripts/export_recovery_bundle.py \
-  --records-json isolated-export.json --destination ./recovery-bundle
-python scripts/verify_recovery_bundle.py \
-  --bundle ./recovery-bundle --isolated-restored-records-json restored-isolated.json
+  --records-json isolated-export.json --destination ./recovery-bundle.enc \
+  --encrypt-command 'local-encrypt {input} {output}' \
+  --decrypt-command 'local-decrypt {input} {output}'
 ```
 
-The bundle stores canonical NDJSON with per-file SHA-256 hashes. Its manifest contains only record
-counts, paths, and hashes—never portfolio values or secrets. If encryption is required, pass a
-caller-owned local command containing `{input}` and `{output}` to `--encrypt-command`; the project
-does not select, install, or pay for an encryption or backup service. Verification accepts only
-records restored in an isolated environment.
+The encrypted artifact contains canonical NDJSON, per-file hashes, and a root-bound manifest. Its
+sidecar contains only the artifact and root hashes—never portfolio values or secrets. Encryption and
+decrypt verification commands are mandatory caller-owned local boundaries; the project does not
+select, install, or pay for an encryption or backup service. Verification accepts only records read
+back from an explicitly identified, read-only isolated restore.
 
 ## Unchanging guardrails
 

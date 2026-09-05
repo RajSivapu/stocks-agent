@@ -355,10 +355,10 @@ def collect_source_receipts(database_url: str, api_url: str, run_id: str) -> dic
             "SELECT id::text AS id, run_id::text AS run_id, packet_id::text AS packet_id, report_hash, rendered_hash, report AS canonical, rendered_text FROM public.market_reports WHERE run_id=%s::uuid ORDER BY created_at", (run_id,))
         report_publications = _fetch_all(connection,
             """SELECT p.report_id::text AS report_id, r.run_id::text AS run_id, p.idempotency_key,
-                      p.status, p.telegram_message_ids, p.telegram_accepted_at,
+                      p.status, p.telegram_message_ids, p.telegram_accepted_at, p.error AS suppression_reason,
                       jsonb_build_object('report_id',p.report_id,'idempotency_key',p.idempotency_key,
                         'status',p.status,'telegram_message_ids',p.telegram_message_ids,
-                        'telegram_accepted_at',p.telegram_accepted_at) AS canonical
+                        'telegram_accepted_at',p.telegram_accepted_at,'suppression_reason',p.error) AS canonical
                  FROM public.market_report_publications p
                  JOIN public.market_reports r ON r.id=p.report_id
                 WHERE r.run_id=%s::uuid ORDER BY p.report_id""", (run_id,))
@@ -551,6 +551,8 @@ def reconcile_source_receipts(
             fail()
         if row.get("status") == "suppressed" and ids != []:
             fail()
+        if row.get("status") == "suppressed" and (not isinstance(row.get("suppression_reason"), str) or not row["suppression_reason"].strip()):
+            fail()
     report = chains["reports"][-1]
     publication = next((row for row in chains["report_publications"] if row.get("report_id") == report.get("id")), None)
     if not isinstance(publication, Mapping):
@@ -577,8 +579,7 @@ def reconcile_source_receipts(
             "publication_receipt": {
                 "status": "accepted_by_telegram" if publication["status"] == "delivered" else "suppressed",
                 "telegram_message_ids": publication["telegram_message_ids"],
-                "original_telegram_message_ids": publication["telegram_message_ids"],
-                **({"suppression_reason": "stored outbox suppression"} if publication["status"] == "suppressed" else {}),
+                **({"original_delivery_receipt": {"telegram_message_ids": publication["telegram_message_ids"], "telegram_accepted_at": publication["telegram_accepted_at"]}} if publication["status"] == "delivered" else {"suppression_reason": publication["suppression_reason"]}),
             },
         },
     }

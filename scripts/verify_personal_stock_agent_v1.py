@@ -8,6 +8,7 @@ from typing import Mapping
 from urllib.parse import urlparse
 
 REQUIRED_GATES=("exact_head_ci","independent_review","quota_receipts","dry_run_zero_writes","dry_run_zero_sends","migration_version","gateway_version","dashboard_api_version","site_version","owner_canary","anonymous_denial","non_owner_denial","source_parity","scheduled_receipt","rollback_check")
+MAX_SCHEDULED_RECEIPT_AGE_SECONDS=7*24*60*60
 SHA=re.compile(r"[0-9a-f]{40}"); HASH=re.compile(r"[0-9a-f]{64}"); UUID=re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}")
 def _row(r:Mapping[str,object],g:str)->Mapping[str,object]:
  v=r.get(g)
@@ -35,6 +36,20 @@ def _reject_sensitive(value:object):
 
 def verify_release(receipt:Mapping[str,object])->dict[str,object]:
  _reject_sensitive(receipt)
+ authority=receipt.get("authoritative_records")
+ if not isinstance(authority,Mapping) or set(authority)!={"ci","deployments","source","rollback"}:
+  raise RuntimeError("authoritative release records are unavailable")
+ ci_authority=authority.get("ci"); deployments=authority.get("deployments"); source=authority.get("source"); rollback_authority=authority.get("rollback")
+ if not isinstance(ci_authority,Mapping): raise RuntimeError("authoritative exact_head_ci is unavailable")
+ if not isinstance(deployments,Mapping) or not isinstance(source,Mapping): raise RuntimeError("authoritative release records are unavailable")
+ if not isinstance(rollback_authority,Mapping): raise RuntimeError("authoritative rollback_check is unavailable")
+ if set(deployments)!={"gateway_version","dashboard_api_version","site_version"} or set(source)!={"source_parity","scheduled_receipt"}:
+  raise RuntimeError("authoritative release records are incomplete")
+ candidate=ci_authority.get("workflow_sha")
+ if not isinstance(candidate,str) or not SHA.fullmatch(candidate): raise RuntimeError("authoritative candidate SHA is malformed")
+ # All release-critical data comes from the separate source/deploy/CI record set.
+ derived=dict(receipt); derived.update({"candidate_sha":candidate,"exact_head_ci":ci_authority,"gateway_version":deployments["gateway_version"],"dashboard_api_version":deployments["dashboard_api_version"],"site_version":deployments["site_version"],"source_parity":source["source_parity"],"scheduled_receipt":source["scheduled_receipt"],"rollback_check":rollback_authority})
+ receipt=derived
  for gate in REQUIRED_GATES:
   if gate not in receipt: raise RuntimeError(f"missing release gate: {gate}")
  candidate=receipt.get("candidate_sha")
@@ -78,14 +93,15 @@ def verify_release(receipt:Mapping[str,object])->dict[str,object]:
   raise RuntimeError("canonical source records are incomplete")
  scheduled=_row(receipt,"scheduled_receipt"); ids=(scheduled.get("run_id"),scheduled.get("intelligence_run_id"),scheduled.get("packet_id"),scheduled.get("report_id")); pub=scheduled.get("publication_receipt")
  merged_at=_timestamp(scheduled.get("merged_at")); completed_at=_timestamp(scheduled.get("completed_at")); stages=scheduled.get("stages")
+ verified_at=_timestamp(receipt.get("verified_at"))
  required_stages=("collection","packet","evaluation","report","publication")
- if (scheduled.get("status")!="completed" or scheduled.get("scheduled") is not True or scheduled.get("phase") not in {"pre-market","intraday","post-market"} or scheduled.get("dry_run") is not False or scheduled.get("duplicate") is not False or merged_at is None or completed_at is None or completed_at <= merged_at or scheduled.get("required_stages") != list(required_stages) or not isinstance(stages,Mapping) or set(stages) != set(required_stages) or any(not isinstance(stages.get(stage),Mapping) or stages[stage].get("status") != "completed" or not isinstance(stages[stage].get("receipt_id"),str) or not stages[stage]["receipt_id"] for stage in required_stages) or not all(_uuid(v) for v in ids) or ids[0]!=ids[1] or not isinstance(pub,Mapping) or pub.get("status") not in {"accepted_by_telegram","suppressed"} or not _hash(scheduled.get("packet_hash")) or not _hash(scheduled.get("report_hash"))):
+ if (scheduled.get("status")!="completed" or scheduled.get("scheduled") is not True or scheduled.get("phase") not in {"pre-market","intraday","post-market"} or scheduled.get("dry_run") is not False or scheduled.get("duplicate") is not False or merged_at is None or completed_at is None or verified_at is None or completed_at <= merged_at or (verified_at-completed_at).total_seconds()>MAX_SCHEDULED_RECEIPT_AGE_SECONDS or scheduled.get("required_stages") != list(required_stages) or not isinstance(stages,Mapping) or set(stages) != set(required_stages) or any(not isinstance(stages.get(stage),Mapping) or stages[stage].get("status") != "completed" or not isinstance(stages[stage].get("receipt_id"),str) or not stages[stage]["receipt_id"] for stage in required_stages) or not all(_uuid(v) for v in ids) or ids[0]!=ids[1] or not isinstance(pub,Mapping) or pub.get("status") not in {"accepted_by_telegram","suppressed"} or not _hash(scheduled.get("packet_hash")) or not _hash(scheduled.get("report_hash"))):
   raise RuntimeError("invalid scheduled receipt")
  for field in ("run_id","intelligence_run_id","packet_id","packet_hash","report_id","report_hash","publication_receipt"):
   if scheduled.get(field)!=chain.get(field): raise RuntimeError("scheduled receipt does not match reconciled source chain")
- msg=pub.get("telegram_message_ids"); original=pub.get("original_telegram_message_ids")
- if pub.get("status")=="accepted_by_telegram" and (not isinstance(msg,list) or not msg or msg != original or any(isinstance(v,bool) or not isinstance(v,int) or v<=0 for v in msg)): raise RuntimeError("invalid scheduled receipt")
- if pub.get("status")=="suppressed" and (msg != [] or original != [] or not isinstance(pub.get("suppression_reason"),str) or not pub["suppression_reason"].strip()): raise RuntimeError("invalid scheduled receipt")
+ msg=pub.get("telegram_message_ids"); original=pub.get("original_delivery_receipt")
+ if pub.get("status")=="accepted_by_telegram" and (not isinstance(msg,list) or not msg or not isinstance(original,Mapping) or original.get("telegram_message_ids") != msg or _timestamp(original.get("telegram_accepted_at")) is None or any(isinstance(v,bool) or not isinstance(v,int) or v<=0 for v in msg)): raise RuntimeError("invalid scheduled receipt")
+ if pub.get("status")=="suppressed" and (msg != [] or original is not None or not isinstance(pub.get("suppression_reason"),str) or not pub["suppression_reason"].strip()): raise RuntimeError("invalid scheduled receipt")
  rollback=_row(receipt,"rollback_check"); gateway=rollback.get("gateway"); runtime=rollback.get("runtime_login")
  if rollback.get("status")!="rolled_back" or rollback.get("function")!="owner-dashboard-api" or rollback.get("dashboard_secrets_unset") != ["DASHBOARD_ALLOWED_ORIGINS","DASHBOARD_DATABASE_URL","DASHBOARD_OWNER_USER_ID"] or not isinstance(runtime,Mapping) or runtime.get("status")!="disabled" or runtime.get("login") is not False or runtime.get("memberships")!=0 or not isinstance(gateway,Mapping) or gateway.get("status")!="restored" or not _hash(gateway.get("source_sha256")) or not SHA.fullmatch(str(gateway.get("git_sha",""))) or isinstance(gateway.get("function_version"),bool) or not isinstance(gateway.get("function_version"),int) or gateway["function_version"]<=0: raise RuntimeError("invalid release gate: rollback_check")
  return {"status":"verified","candidate_sha":candidate,"gate_count":len(REQUIRED_GATES)}

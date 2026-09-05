@@ -320,6 +320,19 @@ def test_release_rollback_restores_the_verified_prior_gateway(tmp_path, monkeypa
     }
 
 
+def test_gateway_restore_precedes_dashboard_cleanup_failure(tmp_path, monkeypatch):
+    source = tmp_path / "supabase/functions/market-briefing-gateway"
+    source.mkdir(parents=True)
+    (source / "index.ts").write_text("export const prior = true;\n")
+    source_hash = deploy._tree_sha256(source)
+    events = []
+    monkeypatch.setattr(deploy, "_deploy_named_function", lambda *_args, **_kwargs: events.append("restore") or {"source_sha256": source_hash, "function_version": 19})
+    monkeypatch.setattr(deploy, "rollback_initial_deployment", lambda *_args, **_kwargs: events.append("cleanup") or (_ for _ in ()).throw(RuntimeError("cleanup")))
+    with pytest.raises(RuntimeError, match="cleanup"):
+        deploy.restore_gateway_and_rollback_initial_dashboard(PROJECT_REF, ADMIN_URL, {"repo_root": tmp_path, "commit_sha": "a" * 40, "source_sha256": source_hash})
+    assert events == ["restore", "cleanup"]
+
+
 def test_every_post_gateway_failure_uses_the_captured_gateway_restore_artifact():
     artifact = {"repo_root": "/verified/rollback", "commit_sha": "a" * 40, "source_sha256": "b" * 64}
     calls = []

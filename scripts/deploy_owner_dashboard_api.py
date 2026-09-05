@@ -515,15 +515,20 @@ def restore_gateway_and_rollback_initial_dashboard(
     expected_hash = str(gateway_artifact.get("source_sha256", ""))
     if not root.is_dir() or _tree_sha256(root / "supabase/functions/market-briefing-gateway") != expected_hash:
         raise RuntimeError("verified gateway rollback artifact is unavailable")
-    cleanup = rollback_initial_deployment(
-        project_ref, admin_url, connector=connector,
-        edge_rollback=lambda ref: rollback_initial_function(ref, root, runner),
-    )
     restored = _deploy_named_function(
         project_ref, "market-briefing-gateway", commit, root, runner, require_existing=True,
     )
     if restored["source_sha256"] != expected_hash:
         raise RuntimeError("restored gateway source receipt mismatch")
+    # Gateway restoration is the first safety action. Dashboard cleanup is best effort only after
+    # the prior gateway bytes are independently deployed again.
+    try:
+        cleanup = rollback_initial_deployment(
+            project_ref, admin_url, connector=connector,
+            edge_rollback=lambda ref: rollback_initial_function(ref, root, runner),
+        )
+    except Exception as error:
+        raise RuntimeError("gateway restored but dashboard cleanup was incomplete") from error
     return {
         **cleanup,
         "gateway": {
