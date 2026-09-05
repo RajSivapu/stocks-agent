@@ -261,7 +261,7 @@ def test_near_corroboration_reaches_discovery_and_packet_evidence():
     adapter = FakeAdapter()
     first = replace(
         raw_item("holding:TEST", official=True), security_ids=("TEST",),
-        metadata=MappingProxyType({"exposure_kind": "filing"}),
+        metadata=MappingProxyType({"exposure_kind": "filing", "liquidity_score": "0.75"}),
     )
     second = replace(
         first, provider="finnhub", upstream_item_id="corroborating-story",
@@ -270,7 +270,9 @@ def test_near_corroboration_reaches_discovery_and_packet_evidence():
     )
     adapter.collect = lambda query: CollectionResult((first, second), receipt(adapter.provider), query.limit)
 
-    result = IntelligencePipeline(gateway, [adapter], context={"holdings": {"TEST": "1"}}).run(
+    result = IntelligencePipeline(gateway, [adapter], context={
+        "holdings": {"TEST": "0.10"}, "liquidity_by_ticker": {"TEST": "0.75"},
+    }).run(
         request("intraday")
     )
 
@@ -304,3 +306,36 @@ def test_two_runs_reuse_source_identity_but_scope_event_graph_ids_by_run():
     assert second["rankings"][0]["event_id"] == second["events"][0]["id"]
     pipeline._complete(request("intraday"), run_one, ("holding:TEST",), (result,))
     assert gateway.payloads[-1]["events"][0]["id"] == first["events"][0]["id"]
+
+
+def test_retry_reuses_completed_collection_without_new_quota_or_provider_call():
+    gateway = FakeGateway()
+    adapter = FakeAdapter()
+    pipeline = IntelligencePipeline(gateway, [adapter])
+
+    first = pipeline.run(request("pre-market"))
+    second = pipeline.run(request("pre-market"))
+
+    assert first.actual_requests == len(adapter.queries)
+    assert second.cache_hits == first.actual_requests
+    assert second.run_id == first.run_id == RUN_ID
+    assert gateway.operations == ["start_intelligence_run", "record_intelligence"]
+    assert second.sources == first.sources
+
+
+def test_pipeline_preserves_comparison_ids_and_learning_inputs_for_existing_receipts():
+    gateway = FakeGateway()
+    comparison_id = "55555555-5555-4555-8555-555555555555"
+    learning_id = "66666666-6666-4666-8666-666666666666"
+    pipeline = IntelligencePipeline(gateway, [FakeAdapter()], context={
+        "comparison_ids": [comparison_id],
+        "learning_inputs": {"observation_ids": [learning_id], "coverage": "bounded"},
+    })
+
+    pipeline.run(request("pre-market"))
+
+    coverage = gateway.payloads[-1]["coverage"]
+    assert coverage["comparison_ids"] == [comparison_id]
+    assert coverage["learning_inputs"] == {
+        "coverage": "bounded", "observation_ids": [learning_id],
+    }

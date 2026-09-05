@@ -50,6 +50,9 @@ class CandidateInput:
     portfolio_relevance: Decimal | int | str | None = None
     liquidity: Decimal | int | str | None = None
     duplication_penalty: Decimal | int | str | None = None
+    holding_weight: Decimal | int | str | None = None
+    overlap: Decimal | int | str | None = None
+    concentration: Decimal | int | str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -180,6 +183,34 @@ def rank_candidates(
         if not exposure_consistent:
             values["exposure"] = _ZERO
 
+        derived_holding_weight = (
+            (holding_positions.get(ticker, _ZERO) if holdings is not None else None)
+            if candidate.holding_weight is None
+            else candidate.holding_weight
+        )
+        derived_overlap = (
+            (Decimal("1") if ticker in holding_positions or ticker in plan_positions else _ZERO)
+            if holdings is not None or plans is not None else None
+        ) if candidate.overlap is None else candidate.overlap
+        derived_concentration = (
+            derived_holding_weight if candidate.concentration is None else candidate.concentration
+        )
+        for name, value in {
+            "holding_weight": derived_holding_weight,
+            "overlap": derived_overlap,
+            "concentration": derived_concentration,
+        }.items():
+            if value is None:
+                missing.append(f"{name}:missing")
+                continue
+            score = _fixed(value, name)
+            if score < 0 or score > 1:
+                raise ValueError(f"{name} must be between zero and one")
+            if name == "holding_weight" and score >= Decimal("0.40"):
+                missing.append("holding_weight:concentrated")
+            if name == "concentration" and score >= Decimal("0.40"):
+                missing.append("concentration:high")
+
         holding_overlap = ticker in holding_positions
         plan_overlap = ticker in plan_positions
         automatic_duplication = (
@@ -194,7 +225,10 @@ def rank_candidates(
         if explicit_duplication > 0:
             raise ValueError("duplication_penalty cannot be positive")
         values["duplication_penalty"] = (automatic_duplication + explicit_duplication).quantize(_Q)
-        concentration = -holding_positions.get(ticker, _ZERO) - (
+        concentration = -(
+            _fixed(derived_holding_weight, "holding_weight")
+            if derived_holding_weight is not None else _ZERO
+        ) - (
             plan_positions.get(ticker, _ZERO) / Decimal("2")
         )
         values["concentration_penalty"] = max(Decimal("-1.000000"), concentration).quantize(_Q)
@@ -203,7 +237,11 @@ def rank_candidates(
         total = sum(ordered.values(), _ZERO).quantize(_Q)
         authoritative_count = sum(1 for item in candidate.evidence if item.authority == "official")
         vetoes = list(candidate.relation.missing_reasons)
-        vetoes.extend(f"missing_{reason.split(':', 1)[0]}" for reason in missing)
+        vetoes.extend(
+            f"missing_{reason.split(':', 1)[0]}" if reason.endswith(":missing")
+            else reason.replace(":", "_").upper()
+            for reason in missing
+        )
         qualified = candidate.relation.eligible_for_ranking and not missing
         ranked.append(
             RankedCandidate(

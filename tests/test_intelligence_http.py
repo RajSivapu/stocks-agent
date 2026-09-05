@@ -15,6 +15,7 @@ from lib.intelligence.http import (
     SourceFailure,
     cache_key,
 )
+from lib.intelligence.cache import ResumableCollectionCache
 
 
 NOW = datetime(2026, 9, 4, 12, 0, tzinfo=timezone.utc)
@@ -298,3 +299,19 @@ def test_gateway_cache_rejects_missing_original_timestamp_metadata():
 
     with pytest.raises(ValueError, match="validated"):
         CacheStore.from_gateway_entries([entry])
+
+
+def test_resumable_cache_key_includes_provider_query_window_and_schema_receipt():
+    cache = ResumableCollectionCache()
+    receipt = {"provider": "gdelt", "request_cost": 1, "receipt_id": "r1"}
+    first = cache.key("gdelt", {"query": "energy"}, "2026-09-04T00:00Z/2026-09-04T12:00Z", 1)
+    changed_schema = cache.key("gdelt", {"query": "energy"}, "2026-09-04T00:00Z/2026-09-04T12:00Z", 2)
+
+    cache.put(first, {"items": ["evidence"], "receipt": receipt})
+
+    hit = cache.get(first)
+
+    assert first != changed_schema
+    assert hit is not None
+    assert hit["receipt"] == receipt
+    assert hit["cache_hit"] is True

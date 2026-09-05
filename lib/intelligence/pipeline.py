@@ -12,7 +12,8 @@ from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
 
 from lib.intelligence.dedupe import RunItemDisposition, deduplicate
-from lib.intelligence.http import SourceFailure
+from lib.intelligence.cache import ResumableCollectionCache
+from lib.intelligence.http import SourceFailure, cache_key
 from lib.intelligence.normalize import SourceItem, normalize_item
 from lib.intelligence.packet import EvidencePacket, build_evidence_packet
 from lib.intelligence.providers import CollectionQuery, CollectionResult, RequestReceipt
@@ -98,7 +99,13 @@ class PipelineRequest:
         except (AttributeError, TypeError, ValueError):
             raise ValueError("request_id must be a canonical UUID") from None
 
-    def collection_plan(self, providers: Sequence[str], targets: Sequence[str]) -> dict[str, object]:
+    def collection_plan(
+        self,
+        providers: Sequence[str],
+        targets: Sequence[str],
+        *,
+        cache_keys: Mapping[str, Sequence[str]] | None = None,
+    ) -> dict[str, object]:
         request_counts = {provider: 0 for provider in providers}
         count = max(len(providers), len(targets)) if providers and targets else 0
         for index in range(count):
@@ -108,7 +115,7 @@ class PipelineRequest:
                 "id": _uuid("reservation", self.request_id, provider),
                 "provider": provider,
                 "requests": request_counts[provider],
-                "cache_keys": [],
+                "cache_keys": list(cache_keys.get(provider, ()) if cache_keys else ()),
             }
             for provider in providers
             if request_counts[provider]
@@ -147,6 +154,8 @@ class PipelineReceipt:
     limitations: tuple[str, ...]
     telegram_message_ids: tuple[object, ...] = ()
     completion_id: str | None = None
+    actual_requests: int = 0
+    cache_hits: int = 0
 
     @property
     def packet_id(self) -> str:
@@ -159,6 +168,8 @@ class PipelineReceipt:
     def to_dict(self) -> dict[str, object]:
         return {
             "completion_id": self.completion_id,
+            "actual_requests": self.actual_requests,
+            "cache_hits": self.cache_hits,
             "coverage": self.coverage,
             "domains_checked": list(self.domains_checked),
             "drops": list(self.drops),
@@ -191,6 +202,7 @@ class IntelligencePipeline:
         *,
         context: Mapping[str, object] | None = None,
         packet_limits: PacketLimits = PacketLimits(),
+        cache: ResumableCollectionCache | None = None,
     ) -> None:
         self.gateway = gateway
         values = tuple(adapters.values()) if isinstance(adapters, Mapping) else tuple(adapters)
@@ -200,16 +212,22 @@ class IntelligencePipeline:
         self.adapters = values
         self.context = dict(context or {})
         self.packet_limits = packet_limits
+        self.cache = cache or ResumableCollectionCache()
 
     def run(self, request: PipelineRequest) -> PipelineReceipt:
         targets = self._targets(request.phase)
         if request.dry_run:
             return self._fixture_preview(request, targets)
 
+        completed = self.cache.get_run(request.request_id)
+        if isinstance(completed, PipelineReceipt):
+            return replace(completed, actual_requests=0, cache_hits=completed.actual_requests)
+
         providers = tuple(str(adapter.provider) for adapter in self.adapters)
         if not providers:
             raise ValueError("at least one adapter is required for live collection")
-        start_payload = request.collection_plan(providers, targets)
+        planned_cache_keys = self._planned_cache_keys(request, targets)
+        start_payload = request.collection_plan(providers, targets, cache_keys=planned_cache_keys)
         start = self._start(start_payload, request.request_id)
         run_id = str(start.get("run_id") or "")
         if run_id != request.request_id:
@@ -218,7 +236,23 @@ class IntelligencePipeline:
         self._install_quota(plan_rows)
 
         results = self._collect(request, targets, plan_rows)
-        return self._complete(request, run_id, targets, results)
+        receipt = self._complete(request, run_id, targets, results)
+        self.cache.put_run(request.request_id, receipt)
+        return receipt
+
+    def _planned_cache_keys(
+        self, request: PipelineRequest, targets: Sequence[str]
+    ) -> dict[str, tuple[str, ...]]:
+        keys: dict[str, list[str]] = {str(adapter.provider): [] for adapter in self.adapters}
+        count = max(len(self.adapters), len(targets))
+        for index in range(count):
+            adapter = self.adapters[index % len(self.adapters)]
+            try:
+                query = self._query_for(adapter, targets[index % len(targets)], request)
+            except (SourceFailure, ValueError):
+                continue
+            keys[str(adapter.provider)].append(_collection_cache_key(adapter, query))
+        return {provider: tuple(dict.fromkeys(values)) for provider, values in keys.items()}
 
     def _targets(self, phase: str) -> tuple[str, ...]:
         holdings = sorted(_holding_tickers(self.context.get("holdings")))
@@ -273,9 +307,15 @@ class IntelligencePipeline:
             )
             try:
                 query = self._query_for(adapter, target, request)
+                cached = self.cache.get_collection(_collection_cache_key(adapter, query))
+                if cached is not None:
+                    results.append(cached)
+                    continue
                 result = adapter.collect(query)
                 if not isinstance(result, CollectionResult):
                     raise TypeError("adapter returned an invalid collection result")
+                if result.receipt.request_cost > 0:
+                    self.cache.put_collection(_collection_cache_key(adapter, query), result)
             except Exception as exc:
                 row = plan_by_provider[str(adapter.provider)]
                 result = CollectionResult(
@@ -330,7 +370,7 @@ class IntelligencePipeline:
             value.item for value in dispositions
             if value.disposition in {"accepted", "near_duplicate"}
         ]
-        events, relationships, ranked = _discover(discovery_items, self.context)
+        events, relationships, ranked = _discover(discovery_items, self.context, request.now)
         qualified_ids = {
             evidence_key(item)
             for relation in relationships if relation.eligible_for_ranking
@@ -377,6 +417,8 @@ class IntelligencePipeline:
                 for index, value in enumerate(dispositions)
                 if value.disposition == "duplicate"
             ],
+            "comparison_ids": list(_receipt_ids(self.context.get("comparison_ids"), "comparison_ids")),
+            "learning_inputs": _learning_inputs(self.context.get("learning_inputs")),
         })
         limits = replace(
             self.packet_limits,
@@ -438,6 +480,8 @@ class IntelligencePipeline:
             limitations=limitations,
             telegram_message_ids=tuple(final.get("telegram_message_ids") or ()),
             completion_id=str(final["completion_id"]) if final.get("completion_id") else None,
+            actual_requests=sum(result.receipt.request_cost for result in results),
+            cache_hits=sum(result.receipt.status == "cache_hit" for result in results),
         )
 
     def _fixture_preview(self, request: PipelineRequest, targets: tuple[str, ...]) -> PipelineReceipt:
@@ -466,6 +510,8 @@ class IntelligencePipeline:
             write_counts={},
             domains_checked=targets,
             limitations=("fixture_only_no_external_coverage",),
+            actual_requests=0,
+            cache_hits=0,
         )
 
     def _start(
@@ -608,7 +654,7 @@ def _item_row(
 
 
 def _discover(
-    items: Sequence[SourceItem], context: Mapping[str, object]
+    items: Sequence[SourceItem], context: Mapping[str, object], now: datetime
 ) -> tuple[list[MarketEvent], list[EventRelationship], list[RankedCandidate]]:
     candidates: list[CandidateInput] = []
     events: list[MarketEvent] = []
@@ -630,16 +676,113 @@ def _discover(
                                     role=str(item.metadata.get("role") or "exposure"), evidence=(item,))
         events.append(event)
         relations.append(relation)
+        observed_at = item.published_at or item.retrieved_at
+        age_seconds = max(0.0, (_utc(now) - _utc(observed_at)).total_seconds())
+        liquidity = _liquidity_score(item, context, ticker)
+        holding_weights = _holding_weights(context.get("holdings"))
+        holding_weight = (
+            holding_weights.get(ticker, Decimal("0"))
+            if isinstance(context.get("holdings"), Mapping) else None
+        )
+        overlap = _overlap_score(context, ticker, holding_weight)
         candidates.append(CandidateInput(
             ticker=ticker, event=event, relation=relation, evidence=(item,),
             authority_corroboration=Decimal("1") if item.authority == "official" else Decimal("0.25"),
             exposure_strength=Decimal("1") if relation.eligible_for_ranking else Decimal("0"),
-            recency=Decimal("1"), portfolio_relevance=Decimal("0.5"), liquidity=Decimal("0.5"),
+            recency=max(Decimal("0"), Decimal("1") - Decimal(str(age_seconds)) / Decimal("604800")),
+            portfolio_relevance=(max(holding_weight, overlap)
+                                 if holding_weight is not None and overlap is not None else None),
+            liquidity=liquidity,
+            holding_weight=holding_weight, overlap=overlap, concentration=holding_weight,
         ))
-    holdings = {ticker: "0" for ticker in _holding_tickers(context.get("holdings"))}
+    holdings = _holding_weights(context.get("holdings"))
     plans = context.get("owner_plans", context.get("plans"))
     ranked = rank_candidates(candidates, holdings=holdings, plans=plans)
     return events, relations, ranked
+
+
+def _collection_cache_key(adapter: object, query: CollectionQuery) -> str:
+    window = json.dumps({"start": _utc(query.start).isoformat(), "end": _utc(query.end).isoformat()}, separators=(",", ":"), sort_keys=True)
+    return cache_key(str(adapter.provider), {
+        "query": query.text, "symbols": ",".join(query.symbols), "cik": query.cik or "",
+        "series_id": query.series_id or "", "limit": str(query.limit),
+    }, window, 1)
+
+
+def _holding_weights(value: object) -> dict[str, Decimal]:
+    if not isinstance(value, Mapping):
+        return {}
+    weights: dict[str, Decimal] = {}
+    for ticker, raw in value.items():
+        try:
+            parsed = Decimal(str(raw))
+        except Exception:
+            continue
+        if parsed.is_finite() and parsed >= 0:
+            weights[str(ticker).upper()] = parsed
+    return weights
+
+
+def _liquidity_score(item: SourceItem, context: Mapping[str, object], ticker: str) -> Decimal | None:
+    values = context.get("liquidity_by_ticker")
+    raw = values.get(ticker) if isinstance(values, Mapping) else item.metadata.get("liquidity_score")
+    try:
+        result = Decimal(str(raw))
+    except Exception:
+        return None
+    return result if result.is_finite() and Decimal("0") <= result <= Decimal("1") else None
+
+
+def _overlap_score(
+    context: Mapping[str, object], ticker: str, holding_weight: Decimal | None
+) -> Decimal | None:
+    values = context.get("overlap_by_ticker")
+    if isinstance(values, Mapping):
+        raw = values.get(ticker)
+    elif holding_weight is not None:
+        raw = holding_weight
+    else:
+        return None
+    try:
+        result = Decimal(str(raw))
+    except Exception:
+        return None
+    return result if result.is_finite() and Decimal("0") <= result <= Decimal("1") else None
+
+
+def _receipt_ids(value: object, name: str) -> tuple[str, ...]:
+    if value is None:
+        return ()
+    if not isinstance(value, Sequence) or isinstance(value, (str, bytes, bytearray)):
+        raise ValueError(f"{name} must be a sequence")
+    if len(value) > 96:
+        raise ValueError(f"{name} exceeds bound")
+    values: list[str] = []
+    for raw in value:
+        try:
+            parsed = str(uuid.UUID(str(raw)))
+        except (AttributeError, TypeError, ValueError):
+            raise ValueError(f"{name} must contain canonical UUIDs") from None
+        if parsed != raw:
+            raise ValueError(f"{name} must contain canonical UUIDs")
+        values.append(parsed)
+    if len(set(values)) != len(values):
+        raise ValueError(f"{name} must not contain duplicates")
+    return tuple(sorted(values))
+
+
+def _learning_inputs(value: object) -> dict[str, object]:
+    if value is None:
+        return {}
+    if not isinstance(value, Mapping):
+        raise ValueError("learning_inputs must be an object")
+    try:
+        encoded = _canonical(dict(value)).encode("utf-8")
+    except (TypeError, ValueError):
+        raise ValueError("learning_inputs must be JSON") from None
+    if len(encoded) > 8_192:
+        raise ValueError("learning_inputs exceeds bound")
+    return json.loads(encoded)
 
 
 def _discovery_status(item: SourceItem, *, qualified: bool) -> str:

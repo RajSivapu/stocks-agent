@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
+from types import MappingProxyType
 
 
 class QuotaExceeded(RuntimeError):
@@ -60,8 +61,13 @@ class QuotaSession:
             for provider, provider_reservations in available.items()
         }
         self._consumed: dict[str, int] = {reservation_id: 0 for reservation_id in all_ids}
+        self._actual_requests: dict[str, int] = {provider: 0 for provider in available}
+        self._cache_hits: dict[str, int] = {provider: 0 for provider in available}
 
     def consume(self, provider: str, reservation_id: str) -> None:
+        self.record_actual_request(provider, reservation_id)
+
+    def record_actual_request(self, provider: str, reservation_id: str) -> None:
         available = self._available.get(provider, ())
         reservation = next(
             (entry for entry in available if entry.reservation_id == reservation_id),
@@ -73,6 +79,24 @@ class QuotaSession:
         ):
             raise QuotaExceeded(provider)
         self._consumed[reservation_id] += 1
+        self._actual_requests[provider] += 1
+
+    def record_cache_hit(self, provider: str, reservation_id: str) -> None:
+        if not any(entry.reservation_id == reservation_id for entry in self._available.get(provider, ())):
+            raise QuotaExceeded(provider)
+        self._cache_hits[provider] += 1
+
+    @property
+    def actual_requests(self) -> Mapping[str, int]:
+        return MappingProxyType(dict(self._actual_requests))
+
+    @property
+    def cache_hits(self) -> Mapping[str, int]:
+        return MappingProxyType(dict(self._cache_hits))
+
+    @property
+    def consumed_requests(self) -> Mapping[str, int]:
+        return MappingProxyType(dict(self._actual_requests))
 
     def consume_next(self, provider: str) -> str:
         for reservation in self._available.get(provider, ()):

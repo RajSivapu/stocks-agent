@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import json
 import sys
+import uuid
 from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import Sequence, TextIO
@@ -34,7 +35,7 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--market-date")
     parser.add_argument("--now")
     parser.add_argument("--context-file")
-    run_identifier = parser.add_mutually_exclusive_group(required=True)
+    run_identifier = parser.add_mutually_exclusive_group(required=False)
     run_identifier.add_argument("--request-id", dest="run_id")
     run_identifier.add_argument("--run-id", dest="run_id")
     parser.add_argument("--dry-run", action="store_true")
@@ -96,7 +97,8 @@ def _context(path: str | None) -> dict[str, object]:
         raise ValueError("context must be an object")
     allowed = {
         "holdings", "owner_plans", "qualified_candidates", "urgent_events",
-        "high_materiality_themes", "requested_topics",
+        "high_materiality_themes", "requested_topics", "comparison_ids", "learning_inputs",
+        "liquidity_by_ticker", "overlap_by_ticker",
     }
     return {key: value[key] for key in sorted(value) if key in allowed}
 
@@ -105,9 +107,12 @@ def main(argv: Sequence[str] | None = None, *, stdout: TextIO | None = None) -> 
     output = stdout or sys.stdout
     try:
         args = _parser().parse_args(argv)
+        if not args.dry_run and not args.run_id:
+            raise ValueError("scheduled collection requires run id")
         now = _now(args.now)
         request = PipelineRequest(
-            args.phase, _market_date(args.market_date, now), now, args.dry_run, args.run_id
+            args.phase, _market_date(args.market_date, now), now, args.dry_run,
+            args.run_id or str(uuid.uuid4()),
         )
         context = _context(args.context_file)
         if args.dry_run:

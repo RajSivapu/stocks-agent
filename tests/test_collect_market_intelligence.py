@@ -48,3 +48,14 @@ def test_cli_rejects_unknown_phase_as_one_secret_free_json_error():
     document = json.loads(output.getvalue())
     assert document == {"error": "INVALID_ARGUMENT", "ok": False}
     assert output.getvalue().count("\n") == 1
+
+
+def test_cli_requires_exact_run_id_for_scheduled_collection_but_allows_explicit_dry_run_fixture():
+    scheduled = io.StringIO()
+    fixture = io.StringIO()
+
+    assert main(["--phase", "pre-market"], stdout=scheduled) == 2
+    assert main(["--phase", "pre-market", "--dry-run"], stdout=fixture) == 0
+
+    assert json.loads(scheduled.getvalue()) == {"error": "INVALID_ARGUMENT", "ok": False}
+    assert json.loads(fixture.getvalue())["coverage"]["mode"] == "fixture_dry_run"
