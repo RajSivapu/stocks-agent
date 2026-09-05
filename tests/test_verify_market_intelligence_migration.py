@@ -24,12 +24,14 @@ TABLES = (
     "market_candidate_rankings",
     "market_evidence_packets",
     "market_reports",
+    "market_policy_comparisons",
     "market_learning_observations",
 )
 RPCS = (
     "start_market_intelligence_run(uuid,text,date,integer,jsonb)",
     "record_market_intelligence(uuid,uuid,jsonb)",
     "read_market_evidence_packet(uuid,uuid)",
+    "read_market_report_decisions(uuid,uuid,jsonb)",
     "record_market_report(uuid,text,jsonb)",
     "record_market_learning(uuid,jsonb)",
 )
@@ -82,6 +84,10 @@ def complete_snapshot():
             "social_provider_recorded": True,
             "failed_receipt_recorded": True,
             "report_idempotency": True,
+            "report_source_provenance": True,
+            "report_decision_packet_provenance": True,
+            "report_comparison_provenance": True,
+            "report_semantic_key": True,
             "theme_report_recorded": True,
             "incomplete_packet_rejected": True,
             "learning_type_rejected": True,
@@ -92,9 +98,9 @@ def complete_snapshot():
 
 def test_intelligence_tables_are_append_only_and_gateway_scoped():
     receipt = evaluate_snapshot(complete_snapshot())
-    assert receipt["append_only_tables"] == 12
-    assert receipt["rls_tables"] == 12
-    assert receipt["gateway_only_rpcs"] == 5
+    assert receipt["append_only_tables"] == 13
+    assert receipt["rls_tables"] == 13
+    assert receipt["gateway_only_rpcs"] == 6
     assert receipt["public_execute_grants"] == 0
     assert receipt["brokerage_columns"] == 0
 
@@ -103,6 +109,13 @@ def test_mutation_grant_fails_closed():
     snapshot = complete_snapshot()
     snapshot["unexpected_grants"] = ["anon:market_reports:INSERT"]
     with pytest.raises(RuntimeError, match="unexpected grant"):
+        evaluate_snapshot(snapshot)
+
+@pytest.mark.parametrize("field", ["report_source_provenance", "report_decision_packet_provenance", "report_comparison_provenance", "report_semantic_key"])
+def test_report_provenance_requires_actual_database_evidence(field):
+    snapshot = complete_snapshot()
+    snapshot["behavior"][field] = False
+    with pytest.raises(RuntimeError, match="report"):
         evaluate_snapshot(snapshot)
 
 

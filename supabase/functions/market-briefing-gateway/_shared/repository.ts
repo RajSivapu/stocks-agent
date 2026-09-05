@@ -12,11 +12,16 @@ import type {
   NotificationKind,
   Phase,
   PolicyConfig,
+  TrustedEvidenceFact,
 } from "./contracts.ts";
-import { parseEvidencePacket } from "./contracts.ts";
+import { parseEvidencePacket, parseTrustedEvidenceFacts } from "./contracts.ts";
 import { parseAlertDraft } from "./alerts.ts";
 import type { PolicyEvaluation } from "./policy.ts";
-import type { DueDecision, OutcomeGrade, RecordLearningPayload } from "./outcomes.ts";
+import type {
+  DueDecision,
+  OutcomeGrade,
+  RecordLearningPayload,
+} from "./outcomes.ts";
 import { formatFixed, parseFixed } from "./fixed-point.ts";
 import {
   type IntelligenceRecordReceipt,
@@ -26,7 +31,11 @@ import {
   type RecordIntelligencePayload,
   type StartIntelligencePayload,
 } from "./intelligence.ts";
-import type { RecordReportPayload } from "./reports.ts";
+import {
+  parseReportDecisions,
+  type RecordReportPayload,
+  type ReportPolicyDecision,
+} from "./reports.ts";
 
 export interface ReportRecordReceipt {
   report_id: string;
@@ -182,6 +191,7 @@ export interface PersistedIntelligencePacket {
   content_hash: string;
   packet: EvidencePacket;
   exposure_facts: PersistedExposureFact[];
+  evidence_facts: TrustedEvidenceFact[];
 }
 
 export interface PersistedExposureFact {
@@ -200,6 +210,11 @@ export interface PersistedExposureFact {
 }
 
 export interface GatewayRepository {
+  loadReportDecisions(
+    runId: string,
+    packetId: string,
+    decisionIds: string[],
+  ): Promise<ReportPolicyDecision[]>;
   recordLearning?(
     runId: string,
     payload: RecordLearningPayload,
@@ -534,6 +549,22 @@ export function createSupabaseGatewayRepository(
       };
     },
 
+    async loadReportDecisions(runId, packetId, decisionIds) {
+      const result = await client.rpc("read_market_report_decisions", {
+        p_run_id: runId,
+        p_packet_id: packetId,
+        p_decision_ids: decisionIds,
+      });
+      if (result.error) {
+        throw new GatewayRepositoryError("INVALID_PERSISTED_DATA");
+      }
+      try {
+        return parseReportDecisions(result.data, runId, packetId, decisionIds);
+      } catch {
+        throw new GatewayRepositoryError("INVALID_PERSISTED_DATA");
+      }
+    },
+
     async recordReport(runId, payload) {
       const result = await client.rpc("record_market_report", {
         p_run_id: runId,
@@ -649,6 +680,7 @@ export function createSupabaseGatewayRepository(
           run_id: text(packetRow.run_id, 36),
           content_hash: text(packetRow.packet_hash, 64),
           packet: parseEvidencePacket(packetRow.packet),
+          evidence_facts: parseTrustedEvidenceFacts(packetRow.evidence_facts),
           exposure_facts,
         };
       } catch {
@@ -1292,14 +1324,22 @@ export function createSupabaseGatewayRepository(
           Array.isArray(response)
         ) continue;
         const responseRow = response as Record<string, unknown>;
-        if (request.operation === "record_report" && request.status === "completed") {
+        if (
+          request.operation === "record_report" &&
+          request.status === "completed"
+        ) {
           const publicationReceipt = responseRow.publication_receipt;
-          if (typeof publicationReceipt === "object" && publicationReceipt !== null &&
-            !Array.isArray(publicationReceipt)) {
+          if (
+            typeof publicationReceipt === "object" &&
+            publicationReceipt !== null &&
+            !Array.isArray(publicationReceipt)
+          ) {
             const publication = publicationReceipt as Record<string, unknown>;
             reportStatuses.push(text(publication.status, 30));
             if (Array.isArray(publication.telegram_message_ids)) {
-              reportMessageIds.push(...publication.telegram_message_ids.map(integer));
+              reportMessageIds.push(
+                ...publication.telegram_message_ids.map(integer),
+              );
             }
           }
           if (typeof responseRow.report_id === "string") counts.reports += 1;
@@ -1322,14 +1362,23 @@ export function createSupabaseGatewayRepository(
         ...publicationRows.map((row) => text(row.status, 30)),
         ...reportStatuses,
       ];
-      const ids = [...new Set([...publicationRows.flatMap((row) =>
-        Array.isArray(row.telegram_message_ids) ? row.telegram_message_ids.map(integer) : []
-      ), ...reportMessageIds])];
+      const ids = [
+        ...new Set([
+          ...publicationRows.flatMap((row) =>
+            Array.isArray(row.telegram_message_ids)
+              ? row.telegram_message_ids.map(integer)
+              : []
+          ),
+          ...reportMessageIds,
+        ]),
+      ];
       const partial = requestRows.some((row) =>
         row.status === "failed" ||
         (row.status === "claimed" && row.operation !== "finish_run")
       ) ||
-        statuses.some((status) => status === "delivery_failed" || status === "delivery_unknown");
+        statuses.some((status) =>
+          status === "delivery_failed" || status === "delivery_unknown"
+        );
       const status: RunReceipt["status"] = partial ? "partial" : "completed";
       const update = await client.from("analysis_runs").update({
         status,

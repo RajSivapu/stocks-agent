@@ -4,7 +4,10 @@ import {
   type RecordIntelligencePayload,
   type StartIntelligencePayload,
 } from "./intelligence.ts";
-import { parseRecordReportPayload, type RecordReportPayload } from "./reports.ts";
+import {
+  parseRecordReportPayload,
+  type RecordReportPayload,
+} from "./reports.ts";
 import type { RecordLearningPayload } from "./outcomes.ts";
 
 export type Operation =
@@ -173,7 +176,12 @@ export interface GatewayEnvelope {
   request_id: string;
   run_id: string | null;
   dry_run: boolean;
-  payload: unknown | StartIntelligencePayload | RecordIntelligencePayload | RecordReportPayload | RecordLearningPayload;
+  payload:
+    | unknown
+    | StartIntelligencePayload
+    | RecordIntelligencePayload
+    | RecordReportPayload
+    | RecordLearningPayload;
 }
 
 export interface EvidenceBlock {
@@ -201,6 +209,106 @@ export interface EvidencePacket {
   coverage: Record<string, unknown>;
   limitations: string[];
   policy_version: number;
+  facts?: TrustedEvidenceFact[];
+}
+
+/** Only populated by the persisted packet read (or an explicit dry-run fixture). */
+export interface TrustedEvidenceFact {
+  candidate_key: string;
+  evidence_id: string;
+  category: EvidenceBlock["kind"] | "unknown";
+  source: string;
+  source_status: "succeeded" | "cache_hit" | "failed";
+  authority: "official" | "market_data" | "reported" | "unverified";
+  published_at: string | null;
+  retrieved_at: string;
+  expires_at: string | null;
+  reference: string | null;
+  normalized_text: string;
+  exposure_kind: ExposureKind | null;
+  relationship_eligible: boolean;
+  claim_key: string | null;
+  claim_polarity: "affirmed" | "denied" | null;
+}
+
+export function parseTrustedEvidenceFacts(
+  value: unknown,
+): TrustedEvidenceFact[] {
+  const seen = new Set<string>();
+  return arrayValue(value, "persisted evidence facts", 96).map(
+    (value, index) => {
+      const path = `persisted evidence facts[${index}]`;
+      const row = objectValue(value, path);
+      exactKeys(row, [
+        "candidate_key",
+        "evidence_id",
+        "category",
+        "source",
+        "source_status",
+        "authority",
+        "published_at",
+        "retrieved_at",
+        "expires_at",
+        "reference",
+        "normalized_text",
+        "exposure_kind",
+        "relationship_eligible",
+        "claim_key",
+        "claim_polarity",
+      ], path);
+      if (typeof row.relationship_eligible !== "boolean") {
+        throw new Error(`${path} invalid eligibility`);
+      }
+      const key = `${row.candidate_key}:${row.evidence_id}`;
+      if (seen.has(key)) throw new Error(`${path} duplicate evidence fact`);
+      seen.add(key);
+      return {
+        candidate_key: tickerValue(row.candidate_key, `${path}.candidate_key`),
+        evidence_id: stringValue(row.evidence_id, `${path}.evidence_id`, 100),
+        category: enumValue(
+          row.category,
+          [...EVIDENCE_KINDS, "unknown"] as const,
+          `${path}.category`,
+        ),
+        source: stringValue(row.source, `${path}.source`, 200),
+        source_status: enumValue(
+          row.source_status,
+          ["succeeded", "cache_hit", "failed"] as const,
+          `${path}.source_status`,
+        ),
+        authority: enumValue(
+          row.authority,
+          ["official", "market_data", "reported", "unverified"] as const,
+          `${path}.authority`,
+        ),
+        published_at: nullableTimestamp(
+          row.published_at,
+          `${path}.published_at`,
+        ),
+        retrieved_at: timestampValue(row.retrieved_at, `${path}.retrieved_at`),
+        expires_at: nullableTimestamp(row.expires_at, `${path}.expires_at`),
+        reference: nullableString(row.reference, `${path}.reference`),
+        normalized_text: stringValue(
+          row.normalized_text,
+          `${path}.normalized_text`,
+          2000,
+          true,
+        ),
+        exposure_kind: row.exposure_kind === null ? null : enumValue(
+          row.exposure_kind,
+          EXPOSURE_KINDS,
+          `${path}.exposure_kind`,
+        ),
+        relationship_eligible: row.relationship_eligible,
+        claim_key: nullableString(row.claim_key, `${path}.claim_key`, 200),
+        claim_polarity: row.claim_polarity === null ? null : enumValue(
+          row.claim_polarity,
+          ["affirmed", "denied"] as const,
+          `${path}.claim_polarity`,
+        ),
+      };
+    },
+  );
 }
 
 export interface IntelligencePacketRef {
@@ -778,7 +886,9 @@ function arrayValue(
   return value;
 }
 
-export function parseRecordLearningPayload(value: unknown): RecordLearningPayload {
+export function parseRecordLearningPayload(
+  value: unknown,
+): RecordLearningPayload {
   const row = objectValue(value, "learning");
   exactKeys(row, [
     "id",
@@ -822,18 +932,40 @@ export function parseRecordLearningPayload(value: unknown): RecordLearningPayloa
     typeof row.content_hash !== "string" ||
     !/^[0-9a-f]{64}$/.test(row.content_hash)
   ) throw new Error("learning observation review status is invalid");
-  const horizon = integerValue(row.horizon_days, "learning.horizon_days", 0, 63);
+  const horizon = integerValue(
+    row.horizon_days,
+    "learning.horizon_days",
+    0,
+    63,
+  );
   if (![0, 5, 21, 63].includes(horizon)) {
     throw new Error("learning horizon is invalid");
   }
   return {
     id: uuidValue(row.id, "learning.id"),
-    policy_version: integerValue(row.policy_version, "learning.policy_version", 1, 1_000_000),
-    observation_type: enumValue(row.observation_type, [
-      "outcome", "missed-event", "source-failure", "noise",
-    ] as const, "learning.observation_type"),
+    policy_version: integerValue(
+      row.policy_version,
+      "learning.policy_version",
+      1,
+      1_000_000,
+    ),
+    observation_type: enumValue(
+      row.observation_type,
+      [
+        "outcome",
+        "missed-event",
+        "source-failure",
+        "noise",
+      ] as const,
+      "learning.observation_type",
+    ),
     horizon_days: horizon as 0 | 5 | 21 | 63,
-    sample_size: integerValue(row.sample_size, "learning.sample_size", 1, 1_000_000),
+    sample_size: integerValue(
+      row.sample_size,
+      "learning.sample_size",
+      1,
+      1_000_000,
+    ),
     benchmark: nullableString(row.benchmark, "learning.benchmark", 100),
     observation: {
       status,
@@ -841,15 +973,23 @@ export function parseRecordLearningPayload(value: unknown): RecordLearningPayloa
         observation.evidence_ids,
         "learning.observation.evidence_ids",
         96,
-      ).map((id, index) => uuidValue(id, `learning.observation.evidence_ids[${index}]`)),
+      ).map((id, index) =>
+        uuidValue(id, `learning.observation.evidence_ids[${index}]`)
+      ),
       limitations: arrayValue(
         observation.limitations,
         "learning.observation.limitations",
         20,
-      ).map((item, index) => stringValue(item, `learning.observation.limitations[${index}]`, 500)),
+      ).map((item, index) =>
+        stringValue(item, `learning.observation.limitations[${index}]`, 500)
+      ),
       metrics: objectValue(observation.metrics, "learning.observation.metrics"),
       proposed_change: proposed === null ? null : {
-        area: stringValue(proposed.area, "learning.observation.proposed_change.area", 100),
+        area: stringValue(
+          proposed.area,
+          "learning.observation.proposed_change.area",
+          100,
+        ),
         recommendation: stringValue(
           proposed.recommendation,
           "learning.observation.proposed_change.recommendation",
@@ -1206,7 +1346,14 @@ export function parseEvidencePacket(value: unknown): EvidencePacket {
   }
   exactKeys(
     row,
-    ["candidates", "evidence", "coverage", "limitations", "policy_version"],
+    [
+      "candidates",
+      "evidence",
+      "coverage",
+      "limitations",
+      "policy_version",
+      ...(Object.hasOwn(row, "facts") ? ["facts"] : []),
+    ],
     path,
   );
   const evidence = arrayValue(row.evidence, `${path}.evidence`, 96).map(
@@ -1262,12 +1409,17 @@ export function parseEvidencePacket(value: unknown): EvidencePacket {
   }
   const coverage = objectValue(row.coverage, `${path}.coverage`);
   const limitations = arrayValue(row.limitations, `${path}.limitations`, 100)
-    .map((item, index) => stringValue(item, `${path}.limitations[${index}]`, 500));
+    .map((item, index) =>
+      stringValue(item, `${path}.limitations[${index}]`, 500)
+    );
   return {
     candidates,
     evidence,
     coverage,
     limitations,
+    ...(Object.hasOwn(row, "facts")
+      ? { facts: parseTrustedEvidenceFacts(row.facts) }
+      : {}),
     policy_version: integerValue(
       row.policy_version,
       `${path}.policy_version`,

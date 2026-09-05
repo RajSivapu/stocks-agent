@@ -28,13 +28,25 @@ import { type DueDecision, gradeDecision } from "./outcomes.ts";
 import type { RecordLearningPayload } from "./outcomes.ts";
 import {
   evaluateCandidate,
-  reservePortfolioPlan,
   type PolicyEvaluation,
+  reservePortfolioPlan,
 } from "./policy.ts";
 import { draftFromEvaluation } from "./policy.ts";
-import { alertFingerprint, alertRuleFingerprint, evaluateAlertRule, shouldPublishAlert } from "./alerts.ts";
-import { renderAlertV3, type RenderedAlert, renderPublication } from "./renderer.ts";
-import { comparePortfolioAlternative, type PortfolioAlternativeComparison } from "./alternatives.ts";
+import {
+  alertFingerprint,
+  alertRuleFingerprint,
+  evaluateAlertRule,
+  shouldPublishAlert,
+} from "./alerts.ts";
+import {
+  renderAlertV3,
+  type RenderedAlert,
+  renderPublication,
+} from "./renderer.ts";
+import {
+  comparePortfolioAlternative,
+  type PortfolioAlternativeComparison,
+} from "./alternatives.ts";
 import {
   analyzeLongTermCompanion,
   type CompanionRoleDecision,
@@ -66,7 +78,12 @@ import {
   type StartIntelligencePayload,
   summarizeIntelligencePayload,
 } from "./intelligence.ts";
-import { parseRecordReportPayload, type RecordReportPayload, renderReportDelivery } from "./reports.ts";
+import {
+  parseRecordReportPayload,
+  parseReportDecisions,
+  type RecordReportPayload,
+  renderReportDelivery,
+} from "./reports.ts";
 
 export interface GatewayDependencies {
   repository: GatewayRepository;
@@ -392,7 +409,9 @@ export function createGatewayHandler(dependencies: GatewayDependencies) {
           : envelope.payload;
         if (
           envelope.operation === "record_learning" &&
-          sha256Hex(canonicalJson((prepared as RecordLearningPayload).observation)) !==
+          sha256Hex(
+              canonicalJson((prepared as RecordLearningPayload).observation),
+            ) !==
             (prepared as RecordLearningPayload).content_hash
         ) throw new GatewayHttpError(400, "INVALID_REQUEST");
       } else if (envelope.operation === "start_run") {
@@ -470,9 +489,20 @@ export function createGatewayHandler(dependencies: GatewayDependencies) {
           });
         }
         if (envelope.operation === "record_report") {
+          const payload = prepared as RecordReportPayload;
+          const decisions = parseReportDecisions(
+            await deps.repository.loadReportDecisions(
+              requireRun(envelope),
+              payload.packet_id,
+              payload.report.policy_decision_ids,
+            ),
+            requireRun(envelope),
+            payload.packet_id,
+            payload.report.policy_decision_ids,
+          );
           const delivery = renderReportDelivery(
-            prepared as RecordReportPayload,
-            [],
+            payload,
+            decisions,
             {
               dashboardBaseUrl: dependencies.dashboardBaseUrl ??
                 "https://invalid.local",
@@ -483,7 +513,7 @@ export function createGatewayHandler(dependencies: GatewayDependencies) {
           return response(200, {
             ok: true,
             dry_run: true,
-            report_id: (prepared as RecordReportPayload).id,
+            report_id: delivery.payload?.id ?? null,
             publication_receipt: {
               status: delivery.status,
               telegram_message_ids: [],
@@ -655,7 +685,17 @@ export function createGatewayHandler(dependencies: GatewayDependencies) {
           throw new GatewayRepositoryError("PERSISTENCE_FAILED");
         }
         const payload = prepared as RecordReportPayload;
-        const delivery = renderReportDelivery(payload, [], {
+        const decisions = parseReportDecisions(
+          await deps.repository.loadReportDecisions(
+            requireRun(envelope),
+            payload.packet_id,
+            payload.report.policy_decision_ids,
+          ),
+          requireRun(envelope),
+          payload.packet_id,
+          payload.report.policy_decision_ids,
+        );
+        const delivery = renderReportDelivery(payload, decisions, {
           dashboardBaseUrl: dependencies.dashboardBaseUrl ??
             "https://invalid.local",
           allowedDashboardOrigins: dependencies.dashboardAllowedOrigins ?? [],
@@ -674,7 +714,7 @@ export function createGatewayHandler(dependencies: GatewayDependencies) {
         } else {
           const receipt = await deps.repository.recordReport(
             requireRun(envelope),
-            payload,
+            delivery.payload!,
           );
           if (receipt.duplicate) {
             result = {
@@ -1475,6 +1515,7 @@ async function evaluateAndPublish(
       deps.newId,
       bundle.intelligence_packet?.id ?? null,
       packet?.qualifiedExposureIds.get(candidate.ticker) ?? new Set(),
+      packet?.facts ?? [],
     )
   );
   const reservation = reservePortfolioPlan(
@@ -1641,9 +1682,11 @@ async function evaluateAndPublish(
       evaluation.evaluation_id
     ).sort(),
     source_ids: [
-      ...new Set(evaluations.flatMap((evaluation) =>
-        evaluation.candidate.evidence.map((item) => item.id)
-      )),
+      ...new Set(
+        evaluations.flatMap((evaluation) =>
+          evaluation.candidate.evidence.map((item) => item.id)
+        ),
+      ),
     ].sort(),
     intelligence_packet: bundle.intelligence_packet
       ? {
@@ -1691,6 +1734,7 @@ async function resolveIntelligencePacket(
   {
     packet: EvidencePacket;
     qualifiedExposureIds: Map<string, Set<string>>;
+    facts: import("./contracts.ts").TrustedEvidenceFact[];
   } | null
 > {
   const reference = bundle.intelligence_packet;
@@ -1709,12 +1753,14 @@ async function resolveIntelligencePacket(
   }
 
   let packet: EvidencePacket;
+  let facts: import("./contracts.ts").TrustedEvidenceFact[];
   const qualifiedExposureIds = new Map<string, Set<string>>();
   if (reference.packet) {
     if (!envelope.dry_run || reference.coverage !== "fixture_dry_run") {
       throw new GatewayRepositoryError("INTELLIGENCE_PACKET_INVALID");
     }
     packet = reference.packet;
+    facts = packet.facts ?? [];
     for (const candidate of bundle.candidates) {
       qualifiedExposureIds.set(
         candidate.ticker,
@@ -1742,6 +1788,7 @@ async function resolveIntelligencePacket(
       throw new GatewayRepositoryError("INTELLIGENCE_PACKET_MISMATCH");
     }
     packet = persisted.packet;
+    facts = persisted.evidence_facts;
     for (const fact of persisted.exposure_facts) {
       if (fact.status !== "fresh" || fact.observed_at === null) continue;
       const ids = qualifiedExposureIds.get(fact.candidate_key) ?? new Set();
@@ -1757,8 +1804,22 @@ async function resolveIntelligencePacket(
     if (validatePacketEvidence(candidate, packet).length > 0) {
       throw new GatewayRepositoryError("EVIDENCE_NOT_IN_PACKET");
     }
+    const expected = packet.candidates.find((row) =>
+      row.candidate_key === candidate.ticker
+    )!.evidence_ids;
+    const stored = facts.filter((row) =>
+      row.candidate_key === candidate.ticker
+    );
+    if (
+      stored.length !== expected.length || new Set(stored.map((row) =>
+          row.evidence_id
+        )).size !== expected.length ||
+      stored.some((row) => !expected.includes(row.evidence_id))
+    ) {
+      throw new GatewayRepositoryError("INTELLIGENCE_PACKET_MISMATCH");
+    }
   }
-  return { packet, qualifiedExposureIds };
+  return { packet, qualifiedExposureIds, facts };
 }
 
 async function buildPortfolioComparisons(

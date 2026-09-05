@@ -2,8 +2,9 @@ import {
   parseArtifactMutationBatch,
   parseDecisionBundle,
   parseGatewayEnvelope,
-  validatePacketEvidence,
+  parseTrustedEvidenceFacts,
   type Phase,
+  validatePacketEvidence,
 } from "./contracts.ts";
 
 function assertEquals<T>(actual: T, expected: T): void {
@@ -104,6 +105,31 @@ function fixturePacket() {
   };
 }
 
+Deno.test("persisted facts reject duplicate IDs and missing authority fields", () => {
+  const fact = {
+    candidate_key: "CENX",
+    evidence_id: "quote-1",
+    category: "quote",
+    source: "yahoo",
+    source_status: "succeeded",
+    authority: "market_data",
+    published_at: "2026-09-02T16:55:00Z",
+    retrieved_at: "2026-09-02T16:56:00Z",
+    expires_at: "2026-09-03T16:55:00Z",
+    reference: null,
+    normalized_text: "Stored source",
+    exposure_kind: null,
+    relationship_eligible: false,
+    claim_key: null,
+    claim_polarity: null,
+  };
+  assertEquals(parseTrustedEvidenceFacts([fact])[0].source, "yahoo");
+  assertThrows(() => parseTrustedEvidenceFacts([fact, fact]), "duplicate");
+  const missing = { ...fact } as Record<string, unknown>;
+  delete missing.authority;
+  assertThrows(() => parseTrustedEvidenceFacts([missing]), "authority");
+});
+
 function validBundle(phase: Phase = "on-demand") {
   return {
     phase,
@@ -186,9 +212,14 @@ Deno.test("inline intelligence packet enforces candidate, evidence, and byte bou
 Deno.test("candidate cannot omit contradictory packet evidence", () => {
   const candidate = validCandidate();
   const packet = fixturePacket();
-  packet.evidence.push({ item_id: "conflict-1", normalized_text: "Contradicts the thesis." });
+  packet.evidence.push({
+    item_id: "conflict-1",
+    normalized_text: "Contradicts the thesis.",
+  });
   packet.candidates[0].evidence_ids.push("conflict-1");
-  assertEquals(validatePacketEvidence(candidate as never, packet), ["EVIDENCE_NOT_IN_PACKET"]);
+  assertEquals(validatePacketEvidence(candidate as never, packet), [
+    "EVIDENCE_NOT_IN_PACKET",
+  ]);
 });
 
 Deno.test("gateway envelope accepts the bounded standalone alert evaluation operation", () => {

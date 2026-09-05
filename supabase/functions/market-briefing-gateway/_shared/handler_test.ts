@@ -4,6 +4,7 @@ import type {
   GatewayEnvelope,
   GatewayReadContext,
   PolicyConfig,
+  TrustedEvidenceFact,
   VerifiedQuote,
 } from "./contracts.ts";
 import { createGatewayHandler } from "./handler.ts";
@@ -24,6 +25,7 @@ import { TelegramDeliveryError } from "./telegram.ts";
 import type { DueDecision, OutcomeGrade } from "./outcomes.ts";
 import type { AdjustedBar, IntradayQuoteEvidence } from "./market-data.ts";
 import { canonicalJson, sha256Hex } from "./intelligence.ts";
+import { reportIdFromKey, type ReportPolicyDecision } from "./reports.ts";
 
 function assert(value: boolean, message: string): void {
   if (!value) throw new Error(message);
@@ -40,6 +42,97 @@ function assertEquals<T>(actual: T, expected: T): void {
 const SECRET = "test-market-secret-with-enough-entropy";
 const NOW = new Date("2026-09-02T17:00:00.000Z");
 const RUN_ID = "00000000-0000-4000-8000-000000000002";
+
+function reportFixture() {
+  const report = {
+    title: "Caller title",
+    summary: "BUY CENX 999999 shares immediately",
+    full_markdown: "Caller BUY 999999",
+    source_ids: ["00000000-0000-4000-8000-000000000031"],
+    policy_decision_ids: ["00000000-0000-4000-8000-000000000032"],
+    comparison_ids: [],
+    actionable_risk: true,
+    material_thesis_change: false,
+    intraday_triggered: true,
+    suggestion_only: true,
+  };
+  const report_hash = sha256Hex(canonicalJson(report));
+  const key = sha256Hex(`v2:morning:2026-09-02:${PACKET_HASH}:${report_hash}`);
+  return {
+    id: reportIdFromKey(key),
+    idempotency_key: key,
+    packet_id: PACKET_ID,
+    market_date: "2026-09-02",
+    kind: "morning",
+    report,
+    report_hash,
+    rendered_text: report.full_markdown,
+    rendered_hash: sha256Hex(report.full_markdown),
+  };
+}
+
+Deno.test("report handler loads exact persisted decisions before generating delivery and stored prose", async () => {
+  const repo = new FakeRepository();
+  const payload = reportFixture();
+  repo.reportDecisions = [{
+    evaluation_id: payload.report.policy_decision_ids[0],
+    candidate_id: "00000000-0000-4000-8000-000000000033",
+    run_id: RUN_ID,
+    packet_id: PACKET_ID,
+    packet_hash: PACKET_HASH,
+    ticker: "CENX",
+    status: "approved",
+    final_action: "buy",
+    approved_terms: {
+      quantity: "10",
+      entry_low: "45",
+      entry_high: "47.02",
+      stop: "42",
+      target: "58",
+      urgency: "routine",
+    },
+  }];
+  const setup = makeHandler(repo);
+  const response = await setup.handler(request("record_report", payload));
+  assertEquals(response.status, 200);
+  assertEquals(repo.reportDecisionReads, [{
+    runId: RUN_ID,
+    packetId: PACKET_ID,
+    ids: payload.report.policy_decision_ids,
+  }]);
+  assertEquals(setup.sent.length, 1);
+  assert(
+    setup.sent[0][0].includes("47.02") && !setup.sent[0][0].includes("999999"),
+    "delivery ignored stored terms",
+  );
+  assert(
+    !JSON.stringify(repo.storedReport).includes("999999"),
+    "raw prose retained in report",
+  );
+});
+
+Deno.test("report handler rejects missing or wrong-packet policy decisions without a write or send", async () => {
+  for (const wrong of ["missing", "packet", "run"]) {
+    const repo = new FakeRepository();
+    const payload = reportFixture();
+    repo.reportDecisions = wrong === "missing" ? [] : [{
+      evaluation_id: payload.report.policy_decision_ids[0],
+      candidate_id: "00000000-0000-4000-8000-000000000033",
+      run_id: wrong === "run" ? payload.report.source_ids[0] : RUN_ID,
+      packet_id: wrong === "packet" ? payload.report.source_ids[0] : PACKET_ID,
+      packet_hash: PACKET_HASH,
+      ticker: "CENX",
+      status: "downgraded",
+      final_action: "watch",
+      approved_terms: null,
+    }];
+    const setup = makeHandler(repo);
+    await setup.handler(request("record_report", payload));
+    assertEquals(repo.reportDecisionReads.length, 1);
+    assertEquals(repo.storedReport, null);
+    assertEquals(setup.sent.length, 0);
+  }
+});
 let requestCounter = 10;
 
 function policy(): PolicyConfig {
@@ -237,9 +330,30 @@ function evidencePacket(): EvidencePacket {
   return {
     candidates: [{ candidate_key: "CENX", evidence_ids: ["q"] }],
     evidence: [{ item_id: "q", normalized_text: "Current quote." }],
+    facts: [storedFact()],
     coverage: { mode: "bounded", complete_market_coverage: false },
     limitations: [],
     policy_version: 1,
+  };
+}
+
+function storedFact(candidateKey = "CENX", id = "q"): TrustedEvidenceFact {
+  return {
+    candidate_key: candidateKey,
+    evidence_id: id,
+    category: "quote",
+    source: "sec_edgar",
+    source_status: "succeeded",
+    authority: "official",
+    published_at: "2026-09-02T16:55:00.000Z",
+    retrieved_at: "2026-09-02T16:56:00.000Z",
+    expires_at: "2026-09-04T17:00:00.000Z",
+    reference: null,
+    normalized_text: "Stored evidence.",
+    exposure_kind: "filing",
+    relationship_eligible: true,
+    claim_key: null,
+    claim_polarity: null,
   };
 }
 
@@ -257,6 +371,17 @@ function packetForCandidates(
   });
   return {
     candidates,
+    facts: values.flatMap((value) =>
+      (value.evidence as Array<Record<string, unknown>>).map((item) => ({
+        ...storedFact(String(value.ticker), String(item.id)),
+        category: item.kind as TrustedEvidenceFact["category"],
+        published_at: item.observed_at as string | null,
+        retrieved_at: item.retrieved_at as string,
+        source_status: item.status === "fresh"
+          ? "succeeded" as const
+          : "failed" as const,
+      }))
+    ),
     evidence: [...evidence].map(([item_id, normalized_text]) => ({
       item_id,
       normalized_text,
@@ -328,6 +453,31 @@ function alertWork(
 }
 
 class FakeRepository implements GatewayRepository {
+  reportDecisionReads: Array<
+    { runId: string; packetId: string; ids: string[] }
+  > = [];
+  reportDecisions: ReportPolicyDecision[] = [];
+  storedReport: unknown = null;
+  loadReportDecisions(
+    runId: string,
+    packetId: string,
+    ids: string[],
+  ): Promise<ReportPolicyDecision[]> {
+    this.reportDecisionReads.push({ runId, packetId, ids });
+    return Promise.resolve(structuredClone(this.reportDecisions));
+  }
+  recordReport(
+    _runId: string,
+    payload: { id: string; report_hash: string; rendered_hash: string },
+  ) {
+    this.storedReport = structuredClone(payload);
+    return Promise.resolve({
+      report_id: payload.id,
+      report_hash: payload.report_hash,
+      rendered_hash: payload.rendered_hash,
+      duplicate: false,
+    });
+  }
   mutationCalls = 0;
   startCalls = 0;
   recordCalls = 0;
@@ -421,6 +571,7 @@ class FakeRepository implements GatewayRepository {
       run_id: string;
       content_hash: string;
       packet: EvidencePacket;
+      evidence_facts: TrustedEvidenceFact[];
       exposure_facts: Array<{
         candidate_key: string;
         evidence_id: string;
@@ -437,6 +588,7 @@ class FakeRepository implements GatewayRepository {
       run_id: RUN_ID,
       content_hash: PACKET_HASH,
       packet: evidencePacket(),
+      evidence_facts: [storedFact()],
       exposure_facts: [{
         candidate_key: "CENX",
         evidence_id: "q",
@@ -695,7 +847,7 @@ function request(
   ) {
     const row = payloadValue as Record<string, unknown>;
     const phase = row.phase;
-    if (phase !== "on-demand" && !("intelligence_packet" in row)) {
+    if (!("intelligence_packet" in row)) {
       if (options.dry) {
         const packet = packetForCandidates(
           row.candidates as Array<Record<string, unknown>>,
@@ -710,7 +862,7 @@ function request(
         row.intelligence_packet = packetRef();
       }
     }
-    if (phase !== "on-demand" && Array.isArray(row.candidates)) {
+    if (Array.isArray(row.candidates)) {
       for (const value of row.candidates) {
         const item = value as Record<string, unknown>;
         const analyst = item.analyst as Record<string, unknown>;
@@ -755,6 +907,7 @@ Deno.test("scheduled discovery requires the persisted packet hash before market 
         run_id: string;
         content_hash: string;
         packet: EvidencePacket;
+        evidence_facts: TrustedEvidenceFact[];
         exposure_facts: [];
       }
     > {
@@ -764,6 +917,7 @@ Deno.test("scheduled discovery requires the persisted packet hash before market 
         run_id: RUN_ID,
         content_hash: "b".repeat(64),
         packet: evidencePacket(),
+        evidence_facts: [storedFact()],
         exposure_facts: [],
       });
     }
@@ -778,6 +932,35 @@ Deno.test("scheduled discovery requires the persisted packet hash before market 
   }));
   assertEquals((await json(response)).code, "INTELLIGENCE_PACKET_MISMATCH");
   assertEquals(setup.fetched, []);
+});
+
+Deno.test("gateway binds current caller evidence to stale persisted packet facts", async () => {
+  class StalePacketRepository extends FakeRepository {
+    override async loadIntelligencePacket() {
+      const persisted = await super.loadIntelligencePacket();
+      persisted.evidence_facts[0].published_at = "2020-01-01T00:00:00Z";
+      return persisted;
+    }
+  }
+  const setup = makeHandler(new StalePacketRepository());
+  await setup.handler(
+    request("evaluate_and_publish", {
+      phase: "intraday",
+      market_date: "2026-09-02",
+      title: "Caller fresh",
+      candidates: [candidate()],
+    }),
+  );
+  const evaluation = setup.repository.lastBundle!.evaluations[0];
+  assertEquals(evaluation.final_action, "watch");
+  assert(
+    evaluation.reason_codes.includes("EVIDENCE_STALE"),
+    "handler lost stored timestamps",
+  );
+  assertEquals(
+    evaluation.candidate.evidence[0].observed_at,
+    "2020-01-01T00:00:00Z",
+  );
 });
 
 Deno.test("record_learning persists only the immutable observation RPC payload", async () => {
@@ -804,7 +987,9 @@ Deno.test("record_learning persists only the immutable observation RPC payload",
     content_hash: sha256Hex(canonicalJson(observation)),
   };
 
-  const body = await json(await fixture.handler(request("record_learning", payload)));
+  const body = await json(
+    await fixture.handler(request("record_learning", payload)),
+  );
 
   assertEquals(body.ok, true);
   assertEquals(body.observation_id, payload.id);
@@ -1045,41 +1230,50 @@ Deno.test("six individually valid purchases cannot exceed the growth allocation"
 Deno.test("unreconciled cash and mutually exclusive purchases fail closed", async () => {
   const unavailable = makeHandler();
   unavailable.repository.context.dry_powder = [];
-  const missingCash = await json(await unavailable.handler(request(
-    "evaluate_and_publish",
-    {
-      phase: "on-demand",
-      market_date: "2026-09-02",
-      title: "Cash check",
-      candidates: [candidate("on-demand", "brief")],
-    },
-    { dry: true },
-  )));
+  const missingCash = await json(
+    await unavailable.handler(request(
+      "evaluate_and_publish",
+      {
+        phase: "on-demand",
+        market_date: "2026-09-02",
+        title: "Cash check",
+        candidates: [candidate("on-demand", "brief")],
+      },
+      { dry: true },
+    )),
+  );
   const cashEvaluation = (missingCash.evaluations as Array<{
     final_action: string | null;
     reason_codes: string[];
   }>)[0];
   assertEquals(cashEvaluation.final_action, "watch");
-  assert(new Set(cashEvaluation.reason_codes).has("CASH_UNAVAILABLE"), "missing cash passed");
+  assert(
+    new Set(cashEvaluation.reason_codes).has("CASH_UNAVAILABLE"),
+    "missing cash passed",
+  );
 
   const alternatives = makeHandler();
   alternatives.repository.policyValue.max_trade_risk_bps.growth = 1000;
   const proposals = [0, 1].map((index) => ({
     ...candidate("on-demand", "brief"),
-    candidate_id: `00000000-0000-4000-8000-${String(index + 50).padStart(12, "0")}`,
+    candidate_id: `00000000-0000-4000-8000-${
+      String(index + 50).padStart(12, "0")
+    }`,
     ticker: `A${index}`,
     reservation_group: "same-idea",
   }));
-  const alternativeResult = await json(await alternatives.handler(request(
-    "evaluate_and_publish",
-    {
-      phase: "on-demand",
-      market_date: "2026-09-02",
-      title: "Alternative ideas",
-      candidates: proposals,
-    },
-    { dry: true },
-  )));
+  const alternativeResult = await json(
+    await alternatives.handler(request(
+      "evaluate_and_publish",
+      {
+        phase: "on-demand",
+        market_date: "2026-09-02",
+        title: "Alternative ideas",
+        candidates: proposals,
+      },
+      { dry: true },
+    )),
+  );
   const alternativeEvaluations = alternativeResult.evaluations as Array<{
     final_action: string | null;
     reason_codes: string[];
@@ -1113,16 +1307,18 @@ Deno.test("existing stop exposure reserves portfolio risk before a new purchase"
     target_near_alert_active: false,
     target_alert_active: false,
   });
-  const result = await json(await setup.handler(request(
-    "evaluate_and_publish",
-    {
-      phase: "on-demand",
-      market_date: "2026-09-02",
-      title: "Risk reservation",
-      candidates: [candidate("on-demand", "brief")],
-    },
-    { dry: true },
-  )));
+  const result = await json(
+    await setup.handler(request(
+      "evaluate_and_publish",
+      {
+        phase: "on-demand",
+        market_date: "2026-09-02",
+        title: "Risk reservation",
+        candidates: [candidate("on-demand", "brief")],
+      },
+      { dry: true },
+    )),
+  );
   const evaluation = (result.evaluations as Array<{
     final_action: string | null;
     reason_codes: string[];
@@ -1168,16 +1364,18 @@ Deno.test("owner-plan Core purchase requires cash but not a stop-derived risk va
     updated_at: "2026-09-02T12:00:00.000Z",
   }];
   setup.repository.context.spendable_cash = { core: "300" };
-  const approved = await json(await setup.handler(request(
-    "evaluate_and_publish",
-    {
-      phase: "on-demand",
-      market_date: "2026-09-02",
-      title: "Core contribution",
-      candidates: [ownerPlanCandidate],
-    },
-    { dry: true },
-  )));
+  const approved = await json(
+    await setup.handler(request(
+      "evaluate_and_publish",
+      {
+        phase: "on-demand",
+        market_date: "2026-09-02",
+        title: "Core contribution",
+        candidates: [ownerPlanCandidate],
+      },
+      { dry: true },
+    )),
+  );
   const approvedEvaluation = (approved.evaluations as Array<{
     final_action: string | null;
     reason_codes: string[];
@@ -1185,18 +1383,24 @@ Deno.test("owner-plan Core purchase requires cash but not a stop-derived risk va
   assertEquals(approvedEvaluation.final_action, "buy");
 
   const unavailable = makeHandler();
-  unavailable.repository.context.holdings = structuredClone(setup.repository.context.holdings);
-  unavailable.repository.context.owner_plans = structuredClone(setup.repository.context.owner_plans);
-  const missingCash = await json(await unavailable.handler(request(
-    "evaluate_and_publish",
-    {
-      phase: "on-demand",
-      market_date: "2026-09-02",
-      title: "Core contribution",
-      candidates: [ownerPlanCandidate],
-    },
-    { dry: true },
-  )));
+  unavailable.repository.context.holdings = structuredClone(
+    setup.repository.context.holdings,
+  );
+  unavailable.repository.context.owner_plans = structuredClone(
+    setup.repository.context.owner_plans,
+  );
+  const missingCash = await json(
+    await unavailable.handler(request(
+      "evaluate_and_publish",
+      {
+        phase: "on-demand",
+        market_date: "2026-09-02",
+        title: "Core contribution",
+        candidates: [ownerPlanCandidate],
+      },
+      { dry: true },
+    )),
+  );
   const missingCashEvaluation = (missingCash.evaluations as Array<{
     final_action: string | null;
     reason_codes: string[];

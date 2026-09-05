@@ -1,5 +1,5 @@
 import { canonicalJson, sha256Hex } from "./intelligence.ts";
-import type { PolicyEvaluation } from "./policy.ts";
+import type { ApprovedTerms } from "./policy.ts";
 
 const UUID =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
@@ -45,6 +45,7 @@ export interface RenderedReportDelivery {
   body: string;
   parts: string[];
   reason?: "no_trigger" | "not_actionable" | "REPORT_POLICY_MISMATCH";
+  payload?: RecordReportPayload;
   actionable_fields?: Array<{
     evaluation_id: string;
     candidate_id: string;
@@ -57,6 +58,105 @@ export interface RenderedReportDelivery {
     target: string | null;
     urgency: "urgent" | "routine";
   }>;
+}
+
+export interface ReportPolicyDecision {
+  evaluation_id: string;
+  candidate_id: string;
+  run_id: string;
+  packet_id: string;
+  packet_hash: string;
+  ticker: string;
+  status: "approved" | "downgraded" | "vetoed";
+  final_action:
+    | "buy"
+    | "add"
+    | "reduce"
+    | "sell"
+    | "hold"
+    | "watch"
+    | "avoid"
+    | null;
+  approved_terms: ApprovedTerms | null;
+}
+
+export function parseReportDecisions(
+  value: unknown,
+  runId: string,
+  packetId: string,
+  ids: readonly string[],
+): ReportPolicyDecision[] {
+  if (
+    !UUID.test(runId) || !UUID.test(packetId) || !Array.isArray(value) ||
+    value.length !== ids.length || value.length === 0 || value.length > 96
+  ) {
+    throw new Error("REPORT_POLICY_MISMATCH");
+  }
+  const seen = new Set<string>();
+  const result = value.map((item): ReportPolicyDecision => {
+    const row = object(item, "persisted decision");
+    if (
+      row.run_id !== runId || row.packet_id !== packetId ||
+      typeof row.evaluation_id !== "string" ||
+      !ids.includes(row.evaluation_id) || seen.has(row.evaluation_id) ||
+      !UUID.test(String(row.candidate_id)) ||
+      !HASH.test(String(row.packet_hash)) ||
+      !/^[A-Z][A-Z0-9.-]{0,9}$/.test(String(row.ticker)) ||
+      !["approved", "downgraded", "vetoed"].includes(String(row.status)) ||
+      (row.final_action !== null &&
+        !["buy", "add", "reduce", "sell", "hold", "watch", "avoid"].includes(
+          String(row.final_action),
+        ))
+    ) {
+      throw new Error("REPORT_POLICY_MISMATCH");
+    }
+    seen.add(row.evaluation_id);
+    const actionable = row.status === "approved" &&
+      ["buy", "add", "reduce", "sell"].includes(String(row.final_action));
+    let terms: ApprovedTerms | null = null;
+    if (actionable) {
+      const proposed = object(row.approved_terms, "approved terms");
+      exact(proposed, [
+        "quantity",
+        "entry_low",
+        "entry_high",
+        "stop",
+        "target",
+        "urgency",
+      ], "approved terms");
+      for (
+        const field of ["quantity", "entry_low", "entry_high", "stop", "target"]
+      ) {
+        if (
+          proposed[field] !== null && (typeof proposed[field] !== "string" ||
+            !/^\d{1,15}(\.\d{1,8})?$/.test(proposed[field] as string) ||
+            Number(proposed[field]) <= 0)
+        ) {
+          throw new Error("REPORT_POLICY_MISMATCH");
+        }
+      }
+      if (
+        proposed.quantity === null ||
+        !["urgent", "routine"].includes(String(proposed.urgency))
+      ) throw new Error("REPORT_POLICY_MISMATCH");
+      terms = proposed as unknown as ApprovedTerms;
+    }
+    return {
+      evaluation_id: row.evaluation_id,
+      candidate_id: String(row.candidate_id),
+      run_id: runId,
+      packet_id: packetId,
+      packet_hash: String(row.packet_hash),
+      ticker: String(row.ticker),
+      status: row.status as ReportPolicyDecision["status"],
+      final_action: row.final_action as ReportPolicyDecision["final_action"],
+      approved_terms: terms,
+    };
+  });
+  if (new Set(result.map((row) => row.packet_hash)).size !== 1) {
+    throw new Error("REPORT_POLICY_MISMATCH");
+  }
+  return result.sort((a, b) => a.evaluation_id.localeCompare(b.evaluation_id));
 }
 
 export interface ReportDeliveryOptions {
@@ -181,9 +281,6 @@ export function parseRecordReportPayload(value: unknown): RecordReportPayload {
     intraday_triggered: reportRow.intraday_triggered === true,
     suggestion_only: true,
   };
-  if (report.comparison_ids.length !== 0) {
-    throw new Error("comparison_ids require a durable comparison ledger");
-  }
   if (
     report.source_ids.length === 0 || report.policy_decision_ids.length === 0
   ) {
@@ -258,69 +355,30 @@ function reportUrl(
   return `${base.origin}/reports/${id}`;
 }
 
-function reportMentionsAction(value: RecordReportPayload["report"]): boolean {
-  return /\b(buy|add|reduce|sell)\b/i.test(`${value.summary}\n${value.full_markdown}`);
-}
-
-function derivedActionableFields(
-  evaluations: readonly PolicyEvaluation[],
-  kind: ReportKind,
-) {
-  return evaluations.filter((evaluation) =>
-    evaluation.status !== "vetoed" && evaluation.final_action !== null
-  ).map((evaluation) => ({
-    evaluation_id: evaluation.evaluation_id,
-    candidate_id: evaluation.candidate_id,
-    ticker: evaluation.candidate.ticker,
-    action: evaluation.final_action!,
-    quantity: evaluation.candidate.proposed_shares,
-    entry_low: evaluation.candidate.entry_zone_low,
-    entry_high: evaluation.candidate.entry_zone_high,
-    stop: evaluation.candidate.stop,
-    target: evaluation.candidate.target,
-    urgency: kind === "urgent" ? "urgent" as const : "routine" as const,
-  }));
-}
-
 export function renderReportDelivery(
   input: RecordReportPayload,
-  finalEvaluations: readonly PolicyEvaluation[],
+  finalEvaluations: readonly ReportPolicyDecision[],
   options: ReportDeliveryOptions,
-): RenderedReportDelivery;
-export function renderReportDelivery(
-  input: RecordReportPayload,
-  options: ReportDeliveryOptions,
-): RenderedReportDelivery;
-export function renderReportDelivery(
-  input: RecordReportPayload,
-  finalEvaluationsOrOptions: readonly PolicyEvaluation[] | ReportDeliveryOptions,
-  maybeOptions?: ReportDeliveryOptions,
 ): RenderedReportDelivery {
-  const finalEvaluations = Array.isArray(finalEvaluationsOrOptions)
-    ? finalEvaluationsOrOptions
-    : [];
-  const options: ReportDeliveryOptions | undefined = Array.isArray(
-      finalEvaluationsOrOptions,
-    )
-    ? maybeOptions
-    : finalEvaluationsOrOptions as ReportDeliveryOptions;
   if (!options) throw new Error("report delivery options are required");
   const value = parseRecordReportPayload(input);
-  const decisions = new Map(finalEvaluations.map((item) => [item.evaluation_id, item]));
-  const referenced = value.report.policy_decision_ids.map((id) => decisions.get(id));
-  const actionableFields = derivedActionableFields(
-    referenced.filter((item): item is PolicyEvaluation => item !== undefined),
-    value.kind,
-  );
-  if (
-    reportMentionsAction(value.report) &&
-    (referenced.some((item) => item === undefined || item.final_action === null) ||
-      !actionableFields.some((item) =>
-        new RegExp(`\\b${item.action}\\b`, "i").test(
-          `${value.report.summary}\n${value.report.full_markdown}`,
-        )
-      ))
-  ) {
+  let decisions: ReportPolicyDecision[];
+  try {
+    decisions = parseReportDecisions(
+      finalEvaluations,
+      finalEvaluations[0]?.run_id,
+      value.packet_id,
+      value.report.policy_decision_ids,
+    );
+    const key = sha256Hex(
+      `v2:${value.kind}:${value.market_date}:${
+        decisions[0].packet_hash
+      }:${value.report_hash}`,
+    );
+    if (value.idempotency_key !== key) {
+      throw new Error("REPORT_POLICY_MISMATCH");
+    }
+  } catch {
     return {
       status: "suppressed",
       body: "",
@@ -328,13 +386,20 @@ export function renderReportDelivery(
       reason: "REPORT_POLICY_MISMATCH",
     };
   }
-  if (value.kind === "intraday" && !value.report.intraday_triggered) {
+  const actionableFields = decisions.filter((row) =>
+    row.approved_terms !== null
+  ).map((row) => ({
+    evaluation_id: row.evaluation_id,
+    candidate_id: row.candidate_id,
+    ticker: row.ticker,
+    action: row.final_action!,
+    ...row.approved_terms!,
+  }));
+  if (value.kind === "intraday" && actionableFields.length === 0) {
     return { status: "suppressed", body: "", parts: [], reason: "no_trigger" };
   }
-  if (
-    value.kind === "urgent" && !value.report.actionable_risk &&
-    !value.report.material_thesis_change
-  ) {
+  const urgent = actionableFields.some((row) => row.urgency === "urgent");
+  if (value.kind === "urgent" && !urgent) {
     return {
       status: "suppressed",
       body: "",
@@ -342,16 +407,52 @@ export function renderReportDelivery(
       reason: "not_actionable",
     };
   }
-  const heading = value.kind === "urgent"
+  const heading = urgent
     ? "URGENT RESEARCH REVIEW"
     : `${value.kind.toUpperCase()} RESEARCH`;
+  const lines = decisions.map((row) => {
+    const terms = row.approved_terms;
+    if (!terms) {
+      return `${row.ticker}: ${
+        row.final_action === null
+          ? "INSUFFICIENT"
+          : row.final_action.toUpperCase()
+      }. No action terms approved.`;
+    }
+    return `${row.ticker}: ${
+      row.final_action!.toUpperCase()
+    } ${terms.quantity} shares; ` +
+      `entry ${terms.entry_low ?? "unavailable"}–${
+        terms.entry_high ?? "unavailable"
+      }; ` +
+      `stop ${terms.stop ?? "unavailable"}; target ${
+        terms.target ?? "unavailable"
+      }; ${terms.urgency}.`;
+  });
+  const approvedReport: ReportBody = {
+    ...value.report,
+    title: `${heading} — ${value.market_date}`,
+    summary: compact(lines.join(" "), 720),
+    full_markdown: lines.join("\n\n") +
+      "\n\nSuggestion only; review manually. No order was placed.",
+    actionable_risk: urgent,
+    material_thesis_change: urgent,
+    intraday_triggered: actionableFields.length > 0,
+  };
+  const approvedHash = sha256Hex(canonicalJson(approvedReport));
+  const approvedKey = sha256Hex(
+    `v2:${value.kind}:${value.market_date}:${
+      decisions[0].packet_hash
+    }:${approvedHash}`,
+  );
+  const approvedId = reportIdFromKey(approvedKey);
   let body = `<b>${heading} — ${value.market_date}</b>\n${
-    escaped(compact(value.report.summary, 720))
+    escaped(approvedReport.summary)
   }\n\nSuggestion only; review manually. No order was placed.`;
   if (["weekly", "monthly", "theme"].includes(value.kind)) {
     body += `\n${
       reportUrl(
-        value.id,
+        approvedId,
         options.dashboardBaseUrl,
         options.allowedDashboardOrigins,
       )
@@ -362,6 +463,17 @@ export function renderReportDelivery(
     status: "ready",
     body,
     parts: [body],
-    ...(actionableFields.length > 0 ? { actionable_fields: actionableFields } : {}),
+    payload: {
+      ...value,
+      id: approvedId,
+      idempotency_key: approvedKey,
+      report: approvedReport,
+      report_hash: approvedHash,
+      rendered_text: body,
+      rendered_hash: sha256Hex(body),
+    },
+    ...(actionableFields.length > 0
+      ? { actionable_fields: actionableFields }
+      : {}),
   };
 }
