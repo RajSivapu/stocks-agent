@@ -25,7 +25,16 @@ export async function acknowledgeCommittedCommand({ telegram, sendText, callback
   }
 }
 
-function uncertainRpcOutcomeText(receipt, resultText) {
+export function isDefinitiveServerRejection(error) {
+  if (!error || typeof error !== "object") return false;
+  const { code, status } = error;
+  if (typeof code === "string" && (/^[0-9A-Z]{5}$/.test(code) || /^PGRST\d{3}$/.test(code))) {
+    return true;
+  }
+  return Number.isInteger(status) && status >= 400 && status < 500;
+}
+
+function uncertainRpcOutcomeText(receipt, resultText, definitiveRejection) {
   const renderedResult = typeof resultText === "function"
     ? resultText(receipt?.result ?? null)
     : resultText;
@@ -33,6 +42,7 @@ function uncertainRpcOutcomeText(receipt, resultText) {
     return `${renderedResult}\nTelegram acknowledgement is uncertain; reconciliation is required before retrying.`;
   }
   if (receipt?.result?.ok === false) return "No change was recorded.";
+  if (definitiveRejection) return "No change was recorded.";
   return "Command outcome is uncertain; reconciliation is required before retrying.";
 }
 
@@ -41,6 +51,7 @@ export async function reconcileLostCommandAcknowledgementRpc({
   telegram,
   callback,
   resultText,
+  definitiveRejection = false,
 }) {
   let receipt = null;
   try {
@@ -51,7 +62,7 @@ export async function reconcileLostCommandAcknowledgementRpc({
   try {
     await telegram("answerCallbackQuery", {
       callback_query_id: callback.id,
-      text: uncertainRpcOutcomeText(receipt, resultText),
+      text: uncertainRpcOutcomeText(receipt, resultText, definitiveRejection),
       show_alert: true,
     });
   } catch {

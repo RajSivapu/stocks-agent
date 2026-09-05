@@ -1,6 +1,6 @@
 import { createClient } from "npm:@supabase/supabase-js@2.112.4";
 
-import { acknowledgeCommittedCommand, reconcileLostCommandAcknowledgementRpc } from "./command-delivery-utils.mjs";
+import { acknowledgeCommittedCommand, isDefinitiveServerRejection, reconcileLostCommandAcknowledgementRpc } from "./command-delivery-utils.mjs";
 
 import {
   alertActionPayload,
@@ -437,6 +437,7 @@ async function handleCallback(updateId: number, callback: TelegramCallback) {
       telegram,
       callback,
       resultText: (result: Record<string, unknown> | null) => callbackResultText(result ?? {}),
+      definitiveRejection: isDefinitiveServerRejection(error),
     });
     return;
   }

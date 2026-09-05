@@ -19,6 +19,7 @@ import {
 } from "../supabase/functions/telegram-portfolio/plan-utils.mjs";
 import {
   acknowledgeCommittedCommand,
+  isDefinitiveServerRejection,
   reconcileLostCommandAcknowledgementRpc,
 } from "../supabase/functions/telegram-portfolio/command-delivery-utils.mjs";
 
@@ -171,3 +172,40 @@ test("lost apply-and-ack RPC response reconciles a committed receipt without cla
   assert.match(calls[0].payload.text, /reconciliation is required/i);
   assert.doesNotMatch(calls[0].payload.text, /Nothing (was )?changed/i);
 });
+
+test("definite apply-and-ack server rejection without a receipt can truthfully report no change", async () => {
+  assert.equal(isDefinitiveServerRejection({ code: "42501" }), true);
+  assert.equal(isDefinitiveServerRejection({ status: 409 }), true);
+  assert.equal(isDefinitiveServerRejection({ code: "ECONNRESET" }), false);
+  assert.equal(isDefinitiveServerRejection({ status: 500 }), false);
+
+  const calls = [];
+  const receipt = await reconcileLostCommandAcknowledgementRpc({
+    readReceipt: async () => null,
+    telegram: async (method, payload) => calls.push({ method, payload }),
+    callback: { id: "callback" },
+    resultText: "Recorded BUY AAPL.",
+    definitiveRejection: true,
+  });
+  assert.equal(receipt, null);
+  assert.match(calls[0].payload.text, /No change was recorded/i);
+});
+
+for (const [name, readReceipt] of [
+  ["missing", async () => null],
+  ["unreadable", async () => { throw new Error("timeout"); }],
+]) {
+  test(`${name} acknowledgement receipt after an ambiguous RPC response requires reconciliation`, async () => {
+    const calls = [];
+    await reconcileLostCommandAcknowledgementRpc({
+      readReceipt,
+      telegram: async (method, payload) => calls.push({ method, payload }),
+      callback: { id: "callback" },
+      resultText: "Recorded BUY AAPL.",
+      definitiveRejection: false,
+    });
+    assert.match(calls[0].payload.text, /outcome is uncertain/i);
+    assert.match(calls[0].payload.text, /reconciliation is required/i);
+    assert.doesNotMatch(calls[0].payload.text, /Nothing (was )?changed/i);
+  });
+}

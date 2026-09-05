@@ -64,6 +64,25 @@ work):
 - `.venv/bin/python -m pytest -q tests/test_verify_market_intelligence_migration.py` — 61 passed.
 - `git diff --check` — passed.
 
+## Controller review round 4 — definitive rejection classification
+
+- Durable acknowledgement lookup remains first at the atomic apply-and-ack boundary. A populated
+  PostgreSQL SQLSTATE, PostgREST response code, or 4xx server status with no receipt is now the
+  narrow proof required to report that no change was recorded. A durable receipt still overrides
+  that classification.
+- Empty/no-data responses, transport-style error codes, server 5xx responses, missing receipts,
+  and unreadable receipts remain conservative uncertainty with required reconciliation.
+- Focused tests retain committed-response-loss coverage and add definite server rejection, missing
+  receipt, and unreadable receipt cases.
+
+Focused Task 6 rerun (no full suite, live database, Telegram, deployment, or scheduled work):
+
+- `npx --yes deno@2.9.6 test --config supabase/functions/deno.json supabase/functions/market-briefing-gateway/_shared/repository_test.ts supabase/functions/market-briefing-gateway/_shared/handler_test.ts` — 44 passed, 0 failed.
+- `npx --yes deno@2.9.6 check --config supabase/functions/deno.json supabase/functions/telegram-portfolio/index.ts` — passed.
+- `node --test tests/test_telegram_webhook_utils.mjs` — 19 passed, 0 failed.
+- `.venv/bin/python -m pytest -q tests/test_verify_market_intelligence_migration.py` — 61 passed.
+- `git diff --check` — passed.
+
 ## Controller review round 3 — lost atomic-RPC response
 
 - An `error || !data` result from `apply_portfolio_command_with_acknowledgement` is no longer
