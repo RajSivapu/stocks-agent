@@ -97,6 +97,9 @@ def _context(path: str | None) -> dict[str, object]:
         "high_materiality_themes", "requested_topics",
         "liquidity_by_ticker", "overlap_by_ticker",
     }
+    forbidden = {"comparison_ids", "learning_inputs"} & set(value)
+    if forbidden:
+        raise ValueError("comparison and learning inputs require typed gateway operations")
     return {key: value[key] for key in sorted(value) if key in allowed}
 
 

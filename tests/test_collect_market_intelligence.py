@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import io
 import json
+from pathlib import Path
+import tempfile
 
 from scripts.collect_market_intelligence import main
 
@@ -66,4 +68,13 @@ def test_cli_rejects_ambiguous_legacy_request_id_flag():
 
     assert main(["--phase", "pre-market", "--request-id", "11111111-1111-4111-8111-111111111111"], stdout=output) == 2
 
+    assert json.loads(output.getvalue()) == {"error": "INVALID_ARGUMENT", "ok": False}
+
+
+def test_cli_rejects_untyped_comparison_and_learning_context():
+    with tempfile.TemporaryDirectory() as directory:
+        context = Path(directory) / "context.json"
+        context.write_text(json.dumps({"comparison_ids": ["11111111-1111-4111-8111-111111111111"]}))
+        output = io.StringIO()
+        assert main(["--phase", "pre-market", "--run-id", "11111111-1111-4111-8111-111111111111", "--context-file", str(context), "--dry-run"], stdout=output) == 2
     assert json.loads(output.getvalue()) == {"error": "INVALID_ARGUMENT", "ok": False}
