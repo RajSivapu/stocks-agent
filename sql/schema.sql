@@ -3639,6 +3639,8 @@ BEGIN
     'run_id',evaluation.run_id,'packet_id',packet.id,'packet_hash',packet.packet_hash,
     'ticker',evaluation.normalized->>'ticker','status',evaluation.policy_status,
     'final_action',evaluation.final_action,
+    'final_alert_urgency',CASE WHEN evaluation.policy_status='approved' AND evaluation.final_action='hold'
+      THEN evaluation.normalized->'final_alert_urgency' ELSE 'null'::jsonb END,
     'approved_terms',CASE WHEN evaluation.policy_status='approved' AND evaluation.final_action IN ('buy','add','reduce','sell')
       THEN evaluation.normalized->'approved_terms' ELSE 'null'::jsonb END
   ) ORDER BY evaluation.id),'[]'::jsonb) INTO v_result

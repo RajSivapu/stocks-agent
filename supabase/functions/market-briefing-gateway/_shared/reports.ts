@@ -77,6 +77,7 @@ export interface ReportPolicyDecision {
     | "watch"
     | "avoid"
     | null;
+  final_alert_urgency: "urgent" | "routine" | null;
   approved_terms: ApprovedTerms | null;
 }
 
@@ -141,6 +142,19 @@ export function parseReportDecisions(
       ) throw new Error("REPORT_POLICY_MISMATCH");
       terms = proposed as unknown as ApprovedTerms;
     }
+    const finalAlertUrgency = row.final_alert_urgency === null
+      ? null
+      : (typeof row.final_alert_urgency === "string" &&
+          ["urgent", "routine"].includes(row.final_alert_urgency)
+        ? row.final_alert_urgency as "urgent" | "routine"
+        : (() => {
+          throw new Error("REPORT_POLICY_MISMATCH");
+        })());
+    if (
+      finalAlertUrgency !== null &&
+      (row.status !== "approved" || row.final_action !== "hold" ||
+        row.approved_terms !== null)
+    ) throw new Error("REPORT_POLICY_MISMATCH");
     return {
       evaluation_id: row.evaluation_id,
       candidate_id: String(row.candidate_id),
@@ -150,6 +164,7 @@ export function parseReportDecisions(
       ticker: String(row.ticker),
       status: row.status as ReportPolicyDecision["status"],
       final_action: row.final_action as ReportPolicyDecision["final_action"],
+      final_alert_urgency: finalAlertUrgency,
       approved_terms: terms,
     };
   });
@@ -395,10 +410,17 @@ export function renderReportDelivery(
     action: row.final_action!,
     ...row.approved_terms!,
   }));
-  if (value.kind === "intraday" && actionableFields.length === 0) {
+  const finalAlertTriggered = decisions.some((row) =>
+    row.final_alert_urgency !== null
+  );
+  if (
+    value.kind === "intraday" && actionableFields.length === 0 &&
+    !finalAlertTriggered
+  ) {
     return { status: "suppressed", body: "", parts: [], reason: "no_trigger" };
   }
-  const urgent = actionableFields.some((row) => row.urgency === "urgent");
+  const urgent = actionableFields.some((row) => row.urgency === "urgent") ||
+    decisions.some((row) => row.final_alert_urgency === "urgent");
   if (value.kind === "urgent" && !urgent) {
     return {
       status: "suppressed",
@@ -410,7 +432,17 @@ export function renderReportDelivery(
   const heading = urgent
     ? "URGENT RESEARCH REVIEW"
     : `${value.kind.toUpperCase()} RESEARCH`;
+  const finalKind: ReportKind = decisions.some((row) =>
+    row.final_alert_urgency === "urgent"
+  )
+    ? "urgent"
+    : value.kind;
   const lines = decisions.map((row) => {
+    if (row.final_alert_urgency !== null) {
+      return `${row.ticker}: POLICY-APPROVED ${
+        row.final_alert_urgency.toUpperCase()
+      } ALERT. Manual review required.`;
+    }
     const terms = row.approved_terms;
     if (!terms) {
       return `${row.ticker}: ${
@@ -437,11 +469,11 @@ export function renderReportDelivery(
       "\n\nSuggestion only; review manually. No order was placed.",
     actionable_risk: urgent,
     material_thesis_change: urgent,
-    intraday_triggered: actionableFields.length > 0,
+    intraday_triggered: actionableFields.length > 0 || finalAlertTriggered,
   };
   const approvedHash = sha256Hex(canonicalJson(approvedReport));
   const approvedKey = sha256Hex(
-    `v2:${value.kind}:${value.market_date}:${
+    `v2:${finalKind}:${value.market_date}:${
       decisions[0].packet_hash
     }:${approvedHash}`,
   );
@@ -449,7 +481,7 @@ export function renderReportDelivery(
   let body = `<b>${heading} — ${value.market_date}</b>\n${
     escaped(approvedReport.summary)
   }\n\nSuggestion only; review manually. No order was placed.`;
-  if (["weekly", "monthly", "theme"].includes(value.kind)) {
+  if (["weekly", "monthly", "theme"].includes(finalKind)) {
     body += `\n${
       reportUrl(
         approvedId,
@@ -465,6 +497,7 @@ export function renderReportDelivery(
     parts: [body],
     payload: {
       ...value,
+      kind: finalKind,
       id: approvedId,
       idempotency_key: approvedKey,
       report: approvedReport,

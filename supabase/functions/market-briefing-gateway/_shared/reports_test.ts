@@ -78,6 +78,7 @@ function decision(
     ticker: "CENX",
     status: "approved",
     final_action: "buy",
+    final_alert_urgency: null,
     approved_terms: {
       quantity: "10",
       entry_low: "45",
@@ -163,6 +164,7 @@ Deno.test("urgent and intraday authority derives from final terms instead of cal
       decision({
         final_action: "watch",
         status: "downgraded",
+        final_alert_urgency: null,
         approved_terms: null,
       }),
     ], OPTIONS).reason,
@@ -191,7 +193,12 @@ Deno.test("watch decisions emit no raw proposal fields or buy prose", () => {
   const value = report("morning");
   value.report.summary = "BUY CENX immediately";
   const delivery = renderReportDelivery(resign(value), [
-    decision({ final_action: "watch", status: "downgraded" }),
+    decision({
+      final_action: "watch",
+      status: "downgraded",
+      final_alert_urgency: null,
+      approved_terms: null,
+    }),
   ], OPTIONS);
   assertEquals(delivery.status, "ready");
   assert(

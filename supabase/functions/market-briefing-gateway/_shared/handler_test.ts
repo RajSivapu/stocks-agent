@@ -43,7 +43,7 @@ const SECRET = "test-market-secret-with-enough-entropy";
 const NOW = new Date("2026-09-02T17:00:00.000Z");
 const RUN_ID = "00000000-0000-4000-8000-000000000002";
 
-function reportFixture() {
+function reportFixture(kind: "morning" | "urgent" = "morning") {
   const report = {
     title: "Caller title",
     summary: "BUY CENX 999999 shares immediately",
@@ -57,13 +57,13 @@ function reportFixture() {
     suggestion_only: true,
   };
   const report_hash = sha256Hex(canonicalJson(report));
-  const key = sha256Hex(`v2:morning:2026-09-02:${PACKET_HASH}:${report_hash}`);
+  const key = sha256Hex(`v2:${kind}:2026-09-02:${PACKET_HASH}:${report_hash}`);
   return {
     id: reportIdFromKey(key),
     idempotency_key: key,
     packet_id: PACKET_ID,
     market_date: "2026-09-02",
-    kind: "morning",
+    kind,
     report,
     report_hash,
     rendered_text: report.full_markdown,
@@ -83,6 +83,7 @@ Deno.test("report handler loads exact persisted decisions before generating deli
     ticker: "CENX",
     status: "approved",
     final_action: "buy",
+    final_alert_urgency: null,
     approved_terms: {
       quantity: "10",
       entry_low: "45",
@@ -111,6 +112,42 @@ Deno.test("report handler loads exact persisted decisions before generating deli
   );
 });
 
+Deno.test("report handler publishes an approved sizing-free urgent HOLD alert without caller trade prose", async () => {
+  const repo = new FakeRepository();
+  const payload = reportFixture();
+  repo.reportDecisions = [{
+    evaluation_id: payload.report.policy_decision_ids[0],
+    candidate_id: "00000000-0000-4000-8000-000000000033",
+    run_id: RUN_ID,
+    packet_id: PACKET_ID,
+    packet_hash: PACKET_HASH,
+    ticker: "CENX",
+    status: "approved",
+    final_action: "hold",
+    approved_terms: null,
+    final_alert_urgency: "urgent",
+  }];
+  const setup = makeHandler(repo);
+  const response = await setup.handler(request("record_report", payload));
+  assertEquals(response.status, 200);
+  assertEquals(setup.sent.length, 1);
+  assert(
+    setup.sent[0][0].includes("URGENT RESEARCH REVIEW") &&
+      !setup.sent[0][0].includes("BUY") &&
+      !setup.sent[0][0].includes("999999") &&
+      !setup.sent[0][0].includes("shares"),
+    "pure alert retained caller trade action or quantity prose",
+  );
+  assert(
+    !JSON.stringify(repo.storedReport).includes("999999"),
+    "stored canonical report retained caller trade prose",
+  );
+  assertEquals(
+    (repo.storedReport as { kind: unknown }).kind,
+    "urgent",
+  );
+});
+
 Deno.test("report handler rejects missing or wrong-packet policy decisions without a write or send", async () => {
   for (const wrong of ["missing", "packet", "run"]) {
     const repo = new FakeRepository();
@@ -124,6 +161,7 @@ Deno.test("report handler rejects missing or wrong-packet policy decisions witho
       ticker: "CENX",
       status: "downgraded",
       final_action: "watch",
+      final_alert_urgency: null,
       approved_terms: null,
     }];
     const setup = makeHandler(repo);

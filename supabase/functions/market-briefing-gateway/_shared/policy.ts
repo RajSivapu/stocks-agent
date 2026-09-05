@@ -95,6 +95,7 @@ export interface PolicyEvaluation {
     total_investable_value: string | null;
     dollars_at_risk: string | null;
     reward_risk_milli: string | null;
+    final_alert_urgency: "urgent" | "routine" | null;
     approved_terms?: ApprovedTerms | null;
   };
   holding_state_change: {
@@ -1022,6 +1023,14 @@ export function evaluateCandidate(
       reward_risk_milli: rewardRiskMilli === null
         ? null
         : rewardRiskMilli.toString(),
+      final_alert_urgency: status === "approved" && finalAction === "hold" &&
+          isPureAlert
+        ? (["stop_breach", "thesis_break"].includes(
+            candidate.notification_kind,
+          )
+          ? "urgent"
+          : "routine")
+        : null,
       approved_terms: status === "approved" && finalAction !== null &&
           ACTIONABLE.has(finalAction)
         ? {

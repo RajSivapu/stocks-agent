@@ -1034,6 +1034,53 @@ Deno.test("hold override suppresses mechanical stop but not evidenced thesis bre
   assertEquals(evaluate(thesis, ctx, quote("CENX", "44")).final_action, "hold");
 });
 
+Deno.test("approved sizing-free stop and thesis alerts persist urgent final facts", () => {
+  const owned = holding({
+    ticker: "CENX",
+    shares: "10",
+    bucket: "growth",
+    stop: "45",
+  });
+  for (const notification_kind of ["stop_breach", "thesis_break"] as const) {
+    const evidence = notification_kind === "thesis_break"
+      ? [{ ...candidate().evidence[0], kind: "event" as const }]
+      : candidate().evidence;
+    const alert = candidate({
+      action: "hold",
+      notification_kind,
+      proposed_amount: null,
+      proposed_shares: null,
+      entry_zone_low: null,
+      entry_zone_high: null,
+      stop: null,
+      target: null,
+      invalidation_price: null,
+      evidence,
+      analyst: {
+        completed: true,
+        action: "hold",
+        confidence: "high",
+        reason: "Policy-approved pure alert.",
+      },
+    });
+    const result = evaluate(
+      alert,
+      context({
+        holdings: [owned],
+        holding_quotes: { CENX: quote("CENX", "44") },
+      }),
+      quote("CENX", "44"),
+    );
+    assertEquals(result.status, "approved");
+    assertEquals(result.final_action, "hold");
+    assertEquals(
+      result.normalized.final_alert_urgency,
+      "urgent",
+    );
+    assertEquals(result.normalized.approved_terms, null);
+  }
+});
+
 Deno.test("holding output contains only server-authorized high-water and edge fields", () => {
   const owned = holding({
     ticker: "CENX",
