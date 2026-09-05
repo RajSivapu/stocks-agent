@@ -446,7 +446,9 @@ export function evaluateCandidate(
   } else if (verifiedQuote.actionable_price_status !== "available") {
     add(
       "QUOTE_MISSING",
-      `The quote cannot support an actionable price: ${verifiedQuote.actionable_price_reasons.join(",")}.`,
+      `The quote cannot support an actionable price: ${
+        verifiedQuote.actionable_price_reasons.join(",")
+      }.`,
     );
   } else if (
     !(candidateQuoteAllowed = quoteAllowedForPhase(
@@ -504,14 +506,18 @@ export function evaluateCandidate(
   const currentEvidence = candidate.evidence.filter((item) => {
     if (item.status !== "fresh" || item.observed_at === null) return false;
     const observedAt = Date.parse(item.observed_at);
-    return Number.isFinite(observedAt) && now.valueOf() - observedAt <= MAX_EVIDENCE_AGE_MS;
+    return Number.isFinite(observedAt) &&
+      now.valueOf() - observedAt <= MAX_EVIDENCE_AGE_MS;
   });
   const hasCurrentEvidence = currentEvidence.length > 0;
-  if (candidate.evidence.some((item) => {
-    if (item.observed_at === null) return false;
-    const observedAt = Date.parse(item.observed_at);
-    return Number.isFinite(observedAt) && now.valueOf() - observedAt > MAX_EVIDENCE_AGE_MS;
-  })) {
+  if (
+    candidate.evidence.some((item) => {
+      if (item.observed_at === null) return false;
+      const observedAt = Date.parse(item.observed_at);
+      return Number.isFinite(observedAt) &&
+        now.valueOf() - observedAt > MAX_EVIDENCE_AGE_MS;
+    })
+  ) {
     add(
       "EVIDENCE_STALE",
       "Evidence timestamps exceed the reviewed freshness window.",
@@ -1150,16 +1156,43 @@ function incrementalProposalRisk(
   );
 }
 
+function reconciledCashForBucket(
+  context: PolicyContext,
+  bucket: DecisionCandidate["bucket"],
+  now: Date,
+): string | null {
+  const snapshot = context.reconciled_cash_snapshot;
+  if (!snapshot) return null;
+  const asOf = Date.parse(snapshot.as_of);
+  const freshThrough = Date.parse(snapshot.fresh_through);
+  const keys = Object.keys(snapshot.spendable_cash).sort();
+  if (
+    !/^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/
+      .test(
+        snapshot.snapshot_id,
+      ) ||
+    !/^\d+$/.test(snapshot.ledger_watermark) ||
+    !Number.isFinite(asOf) || !Number.isFinite(freshThrough) ||
+    asOf > now.getTime() + 60_000 || freshThrough < now.getTime() ||
+    freshThrough <= asOf || freshThrough > asOf + 30 * 60_000 ||
+    JSON.stringify(keys) !==
+      JSON.stringify(["core", "growth", "speculative"])
+  ) return null;
+  return snapshot.spendable_cash[bucket] ?? null;
+}
+
 export function reservePortfolioPlan(
   evaluations: readonly PolicyEvaluation[],
   context: PolicyContext,
   config: PolicyConfig,
+  now: Date,
 ): PortfolioPlanReservation {
   const approved: string[] = [];
   const alternatives: string[] = [];
   const reasons = new Set<PolicyReasonCode>();
   const output = new Map(evaluations.map((item) => [item.evaluation_id, item]));
-  const reservedSpend: Partial<Record<DecisionCandidate["bucket"], bigint>> = {};
+  const reservedSpend: Partial<Record<DecisionCandidate["bucket"], bigint>> =
+    {};
   const reservedRisk: Partial<Record<DecisionCandidate["bucket"], bigint>> = {};
   const approvedGroups = new Set<string>();
   let existingRisk: Partial<Record<DecisionCandidate["bucket"], bigint>> | null;
@@ -1204,7 +1237,7 @@ export function reservePortfolioPlan(
       continue;
     }
     try {
-      const cashValue = context.spendable_cash?.[bucket] ?? null;
+      const cashValue = reconciledCashForBucket(context, bucket, now);
       if (cashValue === null) {
         output.set(
           evaluation.evaluation_id,
@@ -1217,7 +1250,8 @@ export function reservePortfolioPlan(
         reasons.add("CASH_UNAVAILABLE");
         continue;
       }
-      const cash = validPositive(cashValue, 6);
+      const parsedCash = cashValue === null ? null : parseFixed(cashValue, 6);
+      const cash = parsedCash !== null && parsedCash >= 0n ? parsedCash : null;
       const totalInvestable =
         evaluation.normalized.total_investable_value === null
           ? null

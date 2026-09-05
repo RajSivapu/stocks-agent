@@ -27,6 +27,7 @@ PORTFOLIO_COMMAND_VERIFIER = ROOT / "scripts" / "verify_portfolio_command_rpc.py
 DELIVERY_OUTBOX = ROOT / "sql" / "migrations" / "20260910_delivery_outbox.sql"
 COMMAND_ACKNOWLEDGEMENT_LEASE = ROOT / "sql" / "migrations" / "20260913_command_acknowledgement_lease.sql"
 SCHEDULED_LIFECYCLE = ROOT / "sql" / "migrations" / "20260923_scheduled_run_lifecycle.sql"
+POLICY_LIFECYCLE_CLOSURE = ROOT / "sql" / "migrations" / "20260929_policy_lifecycle_closure.sql"
 
 TABLES = (
     "market_intelligence_runs",
@@ -608,6 +609,28 @@ def test_scheduled_lifecycle_is_additive_and_mirrors_the_fresh_schema():
         assert "generate_series" in sql
         assert "UPDATE public.market_gateway_requests SET run_id=v_run.id" in sql
         assert "status='completed'" in sql
+
+
+def test_policy_lifecycle_closure_is_additive_and_fail_closed():
+    sql = POLICY_LIFECYCLE_CLOSURE.read_text()
+    assert "CREATE TABLE IF NOT EXISTS public.portfolio_cash_ledger_state" in sql
+    assert "CREATE TABLE IF NOT EXISTS public.reconciled_cash_snapshots" in sql
+    assert "CREATE TRIGGER transactions_advance_cash_ledger" in sql
+    assert "CREATE OR REPLACE FUNCTION public.record_reconciled_cash_snapshot(" in sql
+    assert "CREATE OR REPLACE FUNCTION public.read_portfolio_cash_ledger_watermark(" in sql
+    assert "CREATE OR REPLACE FUNCTION public.read_reconciled_cash_snapshot(" in sql
+    assert "CREATE OR REPLACE FUNCTION public.apply_market_decision_bundle_with_cash_snapshot(" in sql
+    assert "ledger_watermark" in sql
+    assert "fresh_through" in sql
+    assert "CREATE TABLE IF NOT EXISTS public.market_run_terminal_outcomes" in sql
+    assert "CREATE OR REPLACE FUNCTION public.record_market_run_outcome(" in sql
+    assert "v_run.scheduled_phase='intraday'" in sql
+    assert "MISSING_REPORT_RECEIPT" in sql
+    assert "MISSING_PUBLICATION_RECEIPT" in sql
+    assert "GRANT EXECUTE ON FUNCTION public.finish_market_analysis_run(UUID) TO service_role;" in sql
+    repository = (ROOT / "supabase/functions/market-briefing-gateway/_shared/repository.ts").read_text()
+    assert '"apply_market_decision_bundle_with_cash_snapshot",' in repository
+    assert 'row.code === "RUN_ALREADY_EVALUATED"' in repository
 
 
 def test_fresh_schema_declares_reports_before_report_outbox_rowtype_functions():

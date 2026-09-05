@@ -40,7 +40,10 @@ export interface RecordReportPayload {
   rendered_hash: string;
 }
 
-export type ReportSuppressionReason = "no_trigger" | "not_actionable" | "REPORT_POLICY_MISMATCH";
+export type ReportSuppressionReason =
+  | "no_trigger"
+  | "not_actionable"
+  | "REPORT_POLICY_MISMATCH";
 
 export interface RenderedReportDelivery {
   status: "ready" | "suppressed";
@@ -415,32 +418,19 @@ export function renderReportDelivery(
   const finalAlertTriggered = decisions.some((row) =>
     row.final_alert_urgency !== null
   );
-  const effectiveUrgency: "urgent" | "routine" | null = decisions.some((row) =>
-      row.final_alert_urgency === "urgent" ||
-      row.approved_terms?.urgency === "urgent"
-    )
-    ? "urgent"
-    : (decisions.some((row) => row.final_alert_urgency === "routine")
-      ? "routine"
-      : null);
+  const effectiveUrgency: "urgent" | "routine" | null =
+    decisions.some((row) =>
+        row.final_alert_urgency === "urgent" ||
+        row.approved_terms?.urgency === "urgent"
+      )
+      ? "urgent"
+      : (decisions.some((row) => row.final_alert_urgency === "routine")
+        ? "routine"
+        : null);
   const finalKind: ReportKind = effectiveUrgency === "urgent"
     ? "urgent"
     : (effectiveUrgency === "routine" ? "intraday" : value.kind);
-  if (
-    finalKind === "intraday" && actionableFields.length === 0 &&
-    !finalAlertTriggered
-  ) {
-    return { status: "suppressed", body: "", parts: [], reason: "no_trigger" };
-  }
   const urgent = effectiveUrgency === "urgent";
-  if (finalKind === "urgent" && !urgent) {
-    return {
-      status: "suppressed",
-      body: "",
-      parts: [],
-      reason: "not_actionable",
-    };
-  }
   const heading = effectiveUrgency === "urgent"
     ? "URGENT RESEARCH REVIEW"
     : (effectiveUrgency === "routine"
@@ -500,20 +490,42 @@ export function renderReportDelivery(
     }`;
   }
   body = compact(body, 1_200);
+  const canonicalPayload: RecordReportPayload = {
+    ...value,
+    kind: finalKind,
+    id: approvedId,
+    idempotency_key: approvedKey,
+    report: approvedReport,
+    report_hash: approvedHash,
+    rendered_text: body,
+    rendered_hash: sha256Hex(body),
+  };
+  if (
+    finalKind === "intraday" && actionableFields.length === 0 &&
+    !finalAlertTriggered
+  ) {
+    return {
+      status: "suppressed",
+      body: "",
+      parts: [],
+      reason: "no_trigger",
+      payload: canonicalPayload,
+    };
+  }
+  if (finalKind === "urgent" && !urgent) {
+    return {
+      status: "suppressed",
+      body: "",
+      parts: [],
+      reason: "not_actionable",
+      payload: canonicalPayload,
+    };
+  }
   return {
     status: "ready",
     body,
     parts: [body],
-    payload: {
-      ...value,
-      kind: finalKind,
-      id: approvedId,
-      idempotency_key: approvedKey,
-      report: approvedReport,
-      report_hash: approvedHash,
-      rendered_text: body,
-      rendered_hash: sha256Hex(body),
-    },
+    payload: canonicalPayload,
     ...(actionableFields.length > 0
       ? { actionable_fields: actionableFields }
       : {}),

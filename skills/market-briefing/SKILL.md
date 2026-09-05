@@ -67,6 +67,9 @@ not JSON numbers or exponent notation. Follow the exact structures and bounds in
    closed; call `finish_run`, report the stable limitation, and send nothing. In alert shadow mode,
    label any returned
    `alert_draft_previews` as preview-only; their receipt proves no alert lifecycle write or send.
+   For scheduled intraday, preserve an authoritative `run_outcome` receipt returned by the gateway.
+   A `no_trigger` or `not_actionable` outcome is the durable quiet completion path: create no report
+   and no publication for it, then proceed to `finish_run`.
 6. After an accepted `evaluate_and_publish`, build exactly one report input from the unchanged
    collector receipt and the exact `run_id`, `intelligence_packet`, `policy_decision_ids`, and
    `source_ids` returned by `evaluate_and_publish`, plus bounded checked
@@ -80,9 +83,11 @@ not JSON numbers or exponent notation. Follow the exact structures and bounds in
 7. Use `record_artifacts` only for supported non-recommendation mutations derived in this run. Never
    put a holding or transaction mutation in artifacts. During post-market, call
    `grade_due_decisions`; never supply model-created returns.
-8. Call `finish_run`. Describe only its actual receipt, including the report/publication receipt:
-   server-derived status, write counts, publication statuses, and message IDs. Never invent a send,
-   log, write, or success claim.
+8. Call `finish_run`. A quiet scheduled intraday run supplies its durable `run_outcome` receipt
+   instead of a report/publication receipt; every other scheduled report phase still requires the
+   complete report and publication chain. Describe only the actual receipt: server-derived status,
+   write counts, publication statuses, and message IDs. Never invent a send, log, write, or success
+   claim.
 9. When the checked-in alert policy is in shadow mode, a scheduled intraday or post-market run calls
    standalone `evaluate_alert_rules` exactly once after `finish_run`, with `--dry-run`, an empty JSON
    object, and no run ID. Never supply a quote, price, condition result, Telegram input, or model
@@ -149,7 +154,10 @@ deduplication, holding alert transitions, high-water values, rendering, publicat
 Recorded stops never change from an analyst recommendation. Show a proposed ratchet as research;
 the owner must confirm a supported `/stop TICKER PRICE` command separately. A hold override suppresses
 only eligible mechanical alerts, not an evidenced thesis break. Legacy dry-powder rows are
-display-only and may not enlarge the risk denominator or be mutated here.
+display-only and may not enlarge the risk denominator, satisfy a cash check, or be mutated here.
+Buy-side approval requires the gateway's explicit fresh reconciled-cash snapshot, including its
+snapshot identity and transaction-ledger watermark; an absent, stale, or invalidated snapshot fails
+closed as `CASH_UNAVAILABLE`.
 
 An alert draft is inert until the owner arms it. Telegram buttons can only arm, dismiss, pause,
 resume, acknowledge, or snooze monitoring state; they can never trade. A Telegram message ID means

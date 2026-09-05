@@ -60,18 +60,24 @@ export function consecutiveRecommendationLosses(
     recommendationTime: number;
   }>();
   for (const row of rows) {
-    if (row.coverage_status !== "complete" || typeof row.direction_success !== "boolean") continue;
+    if (
+      row.coverage_status !== "complete" ||
+      typeof row.direction_success !== "boolean"
+    ) continue;
     const recommendation = row.recommendation;
-    const recommendationAt = typeof recommendation === "object" && recommendation !== null &&
+    const recommendationAt =
+      typeof recommendation === "object" && recommendation !== null &&
         !Array.isArray(recommendation)
-      ? (recommendation as Record<string, unknown>).ts
-      : null;
+        ? (recommendation as Record<string, unknown>).ts
+        : null;
     const recommendationTime = typeof recommendationAt === "string"
       ? Date.parse(recommendationAt)
       : Number.NaN;
-    if (!Number.isSafeInteger(row.suggestion_id) ||
-        !Number.isSafeInteger(row.horizon_days) ||
-        !Number.isFinite(recommendationTime)) {
+    if (
+      !Number.isSafeInteger(row.suggestion_id) ||
+      !Number.isSafeInteger(row.horizon_days) ||
+      !Number.isFinite(recommendationTime)
+    ) {
       throw new GatewayRepositoryError("INVALID_PERSISTED_DATA");
     }
     const suggestionId = row.suggestion_id as number;
@@ -111,6 +117,10 @@ export interface PersistedBundle {
   holding_state_changes: NonNullable<
     PolicyEvaluation["holding_state_change"]
   >[];
+  cash_snapshot: {
+    snapshot_id: string;
+    ledger_watermark: string;
+  } | null;
   publication: {
     id: string;
     idempotency_key: string;
@@ -284,7 +294,12 @@ export interface GatewayRepository {
     runId: string,
     payload: Pick<
       RecordReportPayload,
-      "id" | "idempotency_key" | "packet_id" | "market_date" | "kind" | "report_hash"
+      | "id"
+      | "idempotency_key"
+      | "packet_id"
+      | "market_date"
+      | "kind"
+      | "report_hash"
     >,
   ): Promise<{ scheduled: boolean }>;
   createReportPublication?(
@@ -299,15 +314,36 @@ export interface GatewayRepository {
     messageIds: number[],
     error: string | null,
   ): Promise<PublicationReceipt>;
-  suppressReportPublication?(idempotencyKey: string, reason: ReportSuppressionReason): Promise<PublicationReceipt>;
+  suppressReportPublication?(
+    idempotencyKey: string,
+    reason: ReportSuppressionReason,
+  ): Promise<PublicationReceipt>;
   startIntelligenceRun?(
     runId: string,
     payload: StartIntelligencePayload,
   ): Promise<IntelligenceStartReceipt>;
-  checkpointIntelligenceCollection?(runId: string, payload: { cache_key: string; receipt: Record<string, unknown>; items: Record<string, unknown>[] }): Promise<{ run_id: string; cache_key: string }>;
-  readIntelligenceCompletion?(runId: string, completionId: string): Promise<Record<string, unknown> | null>;
-  claimIntelligenceQuote?(runId: string, input: Record<string, unknown>): Promise<Record<string, unknown>>;
-  recordIntelligenceQuote?(runId: string, receiptId: string, quote: unknown, checkpoint: Record<string, unknown>): Promise<Record<string, unknown>>;
+  checkpointIntelligenceCollection?(
+    runId: string,
+    payload: {
+      cache_key: string;
+      receipt: Record<string, unknown>;
+      items: Record<string, unknown>[];
+    },
+  ): Promise<{ run_id: string; cache_key: string }>;
+  readIntelligenceCompletion?(
+    runId: string,
+    completionId: string,
+  ): Promise<Record<string, unknown> | null>;
+  claimIntelligenceQuote?(
+    runId: string,
+    input: Record<string, unknown>,
+  ): Promise<Record<string, unknown>>;
+  recordIntelligenceQuote?(
+    runId: string,
+    receiptId: string,
+    quote: unknown,
+    checkpoint: Record<string, unknown>,
+  ): Promise<Record<string, unknown>>;
   recordIntelligence?(
     runId: string,
     completionId: string,
@@ -329,7 +365,19 @@ export interface GatewayRepository {
     leaseToken: string,
     phase: Phase,
     marketDate: string,
-  ): Promise<string>;
+  ): Promise<{ run_id: string; duplicate: boolean }>;
+  recordRunOutcome(
+    requestId: string,
+    leaseToken: string,
+    runId: string,
+    outcome: "no_trigger" | "not_actionable",
+  ): Promise<
+    {
+      run_id: string;
+      outcome: "no_trigger" | "not_actionable";
+      duplicate: boolean;
+    }
+  >;
   readContext(runId: string | null): Promise<GatewayReadContext>;
   loadIntelligencePacket(
     packetId: string,
@@ -436,7 +484,9 @@ function oneObject(
   return result.data as Record<string, unknown>;
 }
 
-async function recentRecommendationGrades(client: SupabaseLike): Promise<DbResult> {
+async function recentRecommendationGrades(
+  client: SupabaseLike,
+): Promise<DbResult> {
   const recommendationRows = rows(
     await client.from("suggestions").select(
       "id,ts,eligible_grades:suggestion_grades!inner(suggestion_id,horizon_days,coverage_status,excess_return_pct,direction_success,graded_at)",
@@ -497,7 +547,9 @@ function text(value: unknown, max = 1000): string {
 }
 
 function nullableText(value: unknown, max = 1000): string | null {
-  return value === null || value === undefined ? null : text(String(value), max);
+  return value === null || value === undefined
+    ? null
+    : text(String(value), max);
 }
 
 function decimalMap(value: unknown): Record<string, string> {
@@ -505,9 +557,12 @@ function decimalMap(value: unknown): Record<string, string> {
     throw new GatewayRepositoryError("INVALID_PERSISTED_DATA");
   }
   const entries = Object.entries(value as Record<string, unknown>);
-  if (entries.length > 100) throw new GatewayRepositoryError("CONTEXT_TOO_LARGE");
+  if (entries.length > 100) {
+    throw new GatewayRepositoryError("CONTEXT_TOO_LARGE");
+  }
   return Object.fromEntries(entries.map(([ticker, amount]) => [
-    text(ticker.toUpperCase(), 15), decimal(amount),
+    text(ticker.toUpperCase(), 15),
+    decimal(amount),
   ]));
 }
 
@@ -532,7 +587,9 @@ function nullableDecimal(value: unknown): string | null {
 }
 
 function signedMicros(value: string): bigint {
-  return value.startsWith("-") ? -parseFixed(value.slice(1), 6) : parseFixed(value, 6);
+  return value.startsWith("-")
+    ? -parseFixed(value.slice(1), 6)
+    : parseFixed(value, 6);
 }
 
 function boole(value: unknown): boolean {
@@ -588,7 +645,8 @@ function ownerDate(now: Date): string {
     month: "2-digit",
     day: "2-digit",
   }).formatToParts(now);
-  const get = (type: Intl.DateTimeFormatPartTypes) => values.find((part) => part.type === type)?.value ?? "";
+  const get = (type: Intl.DateTimeFormatPartTypes) =>
+    values.find((part) => part.type === type)?.value ?? "";
   return `${get("year")}-${get("month")}-${get("day")}`;
 }
 
@@ -606,7 +664,9 @@ export function mergeRelevantSuggestions<T extends Record<string, unknown>>(
   const output: T[] = [];
   const seen = new Set<string>();
   const orderByNewestDateAndId = (left: T, right: T): number => {
-    const byDate = String(right.date ?? "").localeCompare(String(left.date ?? ""));
+    const byDate = String(right.date ?? "").localeCompare(
+      String(left.date ?? ""),
+    );
     if (byDate !== 0) return byDate;
     const leftId = Number(left.id);
     const rightId = Number(right.id);
@@ -659,7 +719,9 @@ export function validatePolicy(value: unknown): PolicyConfig {
       "draft_ttl_hours",
       "drafts_per_hour",
     ];
-    const expected = policy.version === 3 ? [...legacyExpected, "enabled_classes"] : legacyExpected;
+    const expected = policy.version === 3
+      ? [...legacyExpected, "enabled_classes"]
+      : legacyExpected;
     const enabledClasses = policy.version === 3 ? row.enabled_classes : [];
     const supportedClasses = new Set([
       "entry_trigger",
@@ -667,11 +729,15 @@ export function validatePolicy(value: unknown): PolicyConfig {
       "target_hit",
     ]);
     if (
-      Object.keys(row).length !== expected.length || expected.some((key) => !(key in row)) ||
+      Object.keys(row).length !== expected.length || expected.some((key) =>
+        !(key in row)
+      ) ||
       typeof row.enabled !== "boolean" || typeof row.shadow !== "boolean" ||
       (row.enabled === true && row.shadow === true) ||
       !Array.isArray(enabledClasses) ||
-      enabledClasses.some((value) => typeof value !== "string" || !supportedClasses.has(value)) ||
+      enabledClasses.some((value) =>
+        typeof value !== "string" || !supportedClasses.has(value)
+      ) ||
       new Set(enabledClasses).size !== enabledClasses.length ||
       (row.enabled === true && enabledClasses.length === 0) ||
       !["long_term", "balanced", "active"].includes(String(row.profile)) ||
@@ -692,7 +758,9 @@ async function digestCandidate(value: unknown): Promise<string> {
     "SHA-256",
     new TextEncoder().encode(JSON.stringify(value)),
   );
-  return Array.from(new Uint8Array(digest)).map((byte) => byte.toString(16).padStart(2, "0")).join("");
+  return Array.from(new Uint8Array(digest)).map((byte) =>
+    byte.toString(16).padStart(2, "0")
+  ).join("");
 }
 
 export function createSupabaseGatewayRepository(
@@ -709,7 +777,9 @@ export function createSupabaseGatewayRepository(
         )
         .eq("id", id).single(),
     );
-    const ids = Array.isArray(row.telegram_message_ids) ? row.telegram_message_ids.map(integer) : [];
+    const ids = Array.isArray(row.telegram_message_ids)
+      ? row.telegram_message_ids.map(integer)
+      : [];
     return {
       id: text(row.id, 36),
       idempotency_key: text(row.idempotency_key, 36),
@@ -837,7 +907,13 @@ export function createSupabaseGatewayRepository(
       };
     },
 
-    async finishReportPublication(idempotencyKey, leaseToken, status, messageIds, error) {
+    async finishReportPublication(
+      idempotencyKey,
+      leaseToken,
+      status,
+      messageIds,
+      error,
+    ) {
       const result = await client.rpc("finish_market_report_publication", {
         p_idempotency_key: idempotencyKey,
         p_lease_token: leaseToken,
@@ -871,9 +947,12 @@ export function createSupabaseGatewayRepository(
       }
       return {
         suppression_reason: reason,
-        id: text(row.report_id, 36), idempotency_key: text(row.idempotency_key, 64),
+        id: text(row.report_id, 36),
+        idempotency_key: text(row.idempotency_key, 64),
         status: text(row.status, 20) as PublicationReceipt["status"],
-        telegram_message_ids: [], telegram_accepted_at: null, lease_token: null,
+        telegram_message_ids: [],
+        telegram_accepted_at: null,
+        lease_token: null,
       };
     },
 
@@ -895,29 +974,42 @@ export function createSupabaseGatewayRepository(
     },
 
     async checkpointIntelligenceCollection(runId, payload) {
-      const result = await client.rpc("checkpoint_market_intelligence_collection", { p_run_id: runId, p_payload: payload });
+      const result = await client.rpc(
+        "checkpoint_market_intelligence_collection",
+        { p_run_id: runId, p_payload: payload },
+      );
       if (result.error) throw new GatewayRepositoryError("PERSISTENCE_FAILED");
       const row = oneObject(result);
-      return { run_id: text(row.run_id, 36), cache_key: text(row.cache_key, 512) };
+      return {
+        run_id: text(row.run_id, 36),
+        cache_key: text(row.cache_key, 512),
+      };
     },
 
     async readIntelligenceCompletion(runId, completionId) {
       const result = await client.rpc("read_market_intelligence_completion", {
-        p_run_id: runId, p_completion_id: completionId,
+        p_run_id: runId,
+        p_completion_id: completionId,
       });
       if (result.error) throw new GatewayRepositoryError("PERSISTENCE_FAILED");
       return result.data === null ? null : oneObject(result);
     },
 
     async claimIntelligenceQuote(runId, input) {
-      const result = await client.rpc("claim_market_intelligence_quote", { p_run_id: runId, p_input: input });
+      const result = await client.rpc("claim_market_intelligence_quote", {
+        p_run_id: runId,
+        p_input: input,
+      });
       if (result.error) throw new GatewayRepositoryError("PERSISTENCE_FAILED");
       return oneObject(result);
     },
 
     async recordIntelligenceQuote(runId, receiptId, quote, checkpoint) {
       const result = await client.rpc("record_market_intelligence_quote", {
-        p_run_id: runId, p_receipt_id: receiptId, p_quote: quote, p_checkpoint: checkpoint,
+        p_run_id: runId,
+        p_receipt_id: receiptId,
+        p_quote: quote,
+        p_checkpoint: checkpoint,
       });
       if (result.error) throw new GatewayRepositoryError("PERSISTENCE_FAILED");
       return oneObject(result);
@@ -1068,7 +1160,30 @@ export function createSupabaseGatewayRepository(
         p_market_date: marketDate,
       });
       if (result.error) throw new GatewayRepositoryError("PERSISTENCE_FAILED");
-      return text(oneObject(result).run_id, 36);
+      const row = oneObject(result);
+      return {
+        run_id: text(row.run_id, 36),
+        duplicate: boole(row.duplicate),
+      };
+    },
+
+    async recordRunOutcome(requestId, leaseToken, runId, outcome) {
+      const result = await client.rpc("record_market_run_outcome", {
+        p_request_id: requestId,
+        p_lease_token: leaseToken,
+        p_run_id: runId,
+        p_outcome: outcome,
+      });
+      if (result.error) throw new GatewayRepositoryError("PERSISTENCE_FAILED");
+      const row = oneObject(result);
+      if (row.outcome !== "no_trigger" && row.outcome !== "not_actionable") {
+        throw new GatewayRepositoryError("INVALID_PERSISTED_DATA");
+      }
+      return {
+        run_id: text(row.run_id, 36),
+        outcome: row.outcome,
+        duplicate: boole(row.duplicate),
+      };
     },
 
     async activePolicy() {
@@ -1099,7 +1214,9 @@ export function createSupabaseGatewayRepository(
       );
       return {
         created_count: integer(row.created_count),
-        draft_ids: Array.isArray(row.draft_ids) ? row.draft_ids.map((id) => text(id, 36)) : [],
+        draft_ids: Array.isArray(row.draft_ids)
+          ? row.draft_ids.map((id) => text(id, 36))
+          : [],
       };
     },
 
@@ -1150,7 +1267,9 @@ export function createSupabaseGatewayRepository(
       }
       const evaluationIds = [
         ...new Set(
-          [...allDrafts.values()].map((row) => text(row.source_evaluation_id, 36)),
+          [...allDrafts.values()].map((row) =>
+            text(row.source_evaluation_id, 36)
+          ),
         ),
       ];
       const suggestionRows = evaluationIds.length === 0 ? [] : rows(
@@ -1194,7 +1313,9 @@ export function createSupabaseGatewayRepository(
         draft: Record<string, unknown>,
       ): AlertWorkItem => ({
         rule: alertRule,
-        recent_events: eventRows.filter((event) => event.rule_id === alertRule.rule_id).map((event) => ({
+        recent_events: eventRows.filter((event) =>
+          event.rule_id === alertRule.rule_id
+        ).map((event) => ({
           fingerprint: text(event.fingerprint, 64),
           status: text(event.status, 30) as AlertRecentEvent["status"],
           evaluated_at: text(event.evaluated_at, 40),
@@ -1211,7 +1332,9 @@ export function createSupabaseGatewayRepository(
           }
           return workItem(alertRuleFromRow(row), draft);
         }),
-        drafts: pendingDrafts.map((draft) => workItem(parseAlertDraft(draft.rule_snapshot), draft)),
+        drafts: pendingDrafts.map((draft) =>
+          workItem(parseAlertDraft(draft.rule_snapshot), draft)
+        ),
       };
     },
 
@@ -1227,7 +1350,9 @@ export function createSupabaseGatewayRepository(
       );
       return {
         event_count: integer(row.event_count),
-        event_ids: Array.isArray(row.event_ids) ? row.event_ids.map((id) => text(id, 36)) : [],
+        event_ids: Array.isArray(row.event_ids)
+          ? row.event_ids.map((id) => text(id, 36))
+          : [],
       };
     },
 
@@ -1248,7 +1373,8 @@ export function createSupabaseGatewayRepository(
     },
 
     async readContext(_runId) {
-      const today = ownerDate(now());
+      const current = now();
+      const today = ownerDate(current);
       const results = await Promise.all([
         client.from("holdings").select(
           "ticker,shares,avg_cost,bucket,stop,target,high_water_price,hold_override_until,stop_alert_active,stop_near_alert_active,target_near_alert_active,target_alert_active",
@@ -1297,8 +1423,13 @@ export function createSupabaseGatewayRepository(
           "applied",
         ).limit(501),
         _runId
-          ? client.rpc("refresh_market_intelligence_context", { p_run_id: _runId })
+          ? client.rpc("refresh_market_intelligence_context", {
+            p_run_id: _runId,
+          })
           : Promise.resolve({ data: null, error: null }),
+        client.rpc("read_reconciled_cash_snapshot", {
+          p_now: current.toISOString(),
+        }),
       ]);
       const holdings = rows(results[0], "CONTEXT_TOO_LARGE");
       const unresolvedSuggestions = rows(results[1], "CONTEXT_TOO_LARGE");
@@ -1312,8 +1443,18 @@ export function createSupabaseGatewayRepository(
       const watches = rows(results[8], "CONTEXT_TOO_LARGE");
       const transactions = rows(results[10], "CONTEXT_TOO_LARGE");
       const commands = rows(results[11], "CONTEXT_TOO_LARGE");
-      if (results[12].error) throw new GatewayRepositoryError("PERSISTENCE_FAILED");
-      const intelligenceInputs = results[12].data === null ? [] : [oneObject(results[12])];
+      if (results[12].error) {
+        throw new GatewayRepositoryError("PERSISTENCE_FAILED");
+      }
+      const intelligenceInputs = results[12].data === null
+        ? []
+        : [oneObject(results[12])];
+      if (results[13].error) {
+        throw new GatewayRepositoryError("PERSISTENCE_FAILED");
+      }
+      const cashSnapshot = results[13].data === null
+        ? null
+        : oneObject(results[13]);
       if (
         holdings.length > 100 || unresolvedSuggestions.length > 100 ||
         plans.length > 20 ||
@@ -1354,15 +1495,35 @@ export function createSupabaseGatewayRepository(
         holding_quotes: {},
         intelligence_collection_context: intelligenceInputs.length === 1
           ? {
-            holding_market_values: decimalMap(intelligenceInputs[0].holding_market_values),
-            liquidity_by_ticker: decimalMap(intelligenceInputs[0].liquidity_by_ticker),
-            overlap_by_ticker: decimalMap(intelligenceInputs[0].overlap_by_ticker),
-            current_quotes: Object.fromEntries(Object.entries(oneObject({ data: intelligenceInputs[0].current_quotes ?? {}, error: null })).map(([ticker, raw]) => {
-              const quote = oneObject({ data: raw, error: null });
-              return [ticker, { price: decimal(quote.price), as_of: text(quote.as_of, 40) }];
-            })),
-            quote_receipt_ids: Array.isArray(intelligenceInputs[0].quote_receipt_ids)
-              ? intelligenceInputs[0].quote_receipt_ids.map((id) => text(id, 36)) : [],
+            holding_market_values: decimalMap(
+              intelligenceInputs[0].holding_market_values,
+            ),
+            liquidity_by_ticker: decimalMap(
+              intelligenceInputs[0].liquidity_by_ticker,
+            ),
+            overlap_by_ticker: decimalMap(
+              intelligenceInputs[0].overlap_by_ticker,
+            ),
+            current_quotes: Object.fromEntries(
+              Object.entries(
+                oneObject({
+                  data: intelligenceInputs[0].current_quotes ?? {},
+                  error: null,
+                }),
+              ).map(([ticker, raw]) => {
+                const quote = oneObject({ data: raw, error: null });
+                return [ticker, {
+                  price: decimal(quote.price),
+                  as_of: text(quote.as_of, 40),
+                }];
+              }),
+            ),
+            quote_receipt_ids:
+              Array.isArray(intelligenceInputs[0].quote_receipt_ids)
+                ? intelligenceInputs[0].quote_receipt_ids.map((id) =>
+                  text(id, 36)
+                )
+                : [],
           }
           : undefined,
         realized_pnl_today: coverage ? formatFixed(pnlMicros, 6) : null,
@@ -1378,6 +1539,30 @@ export function createSupabaseGatewayRepository(
           active: boole(row.active),
           updated_at: text(row.updated_at, 40),
         })),
+        ...(cashSnapshot
+          ? {
+            reconciled_cash_snapshot: {
+              snapshot_id: text(cashSnapshot.snapshot_id, 36),
+              as_of: text(cashSnapshot.as_of, 40),
+              fresh_through: text(cashSnapshot.fresh_through, 40),
+              ledger_watermark: text(cashSnapshot.ledger_watermark, 30),
+              spendable_cash: {
+                core: decimal(
+                  oneObject({ data: cashSnapshot.spendable_cash, error: null })
+                    .core,
+                ),
+                growth: decimal(
+                  oneObject({ data: cashSnapshot.spendable_cash, error: null })
+                    .growth,
+                ),
+                speculative: decimal(
+                  oneObject({ data: cashSnapshot.spendable_cash, error: null })
+                    .speculative,
+                ),
+              },
+            },
+          }
+          : {}),
         recent_suggestions: suggestions.map((row) => ({
           id: integer(row.id),
           date: text(row.date, 10),
@@ -1421,7 +1606,9 @@ export function createSupabaseGatewayRepository(
           ticker: text(row.ticker, 15),
           added: nullableText(row.added, 10),
           last_seen: nullableText(row.last_seen, 10),
-          days_relevant: row.days_relevant === null ? null : integer(row.days_relevant),
+          days_relevant: row.days_relevant === null
+            ? null
+            : integer(row.days_relevant),
           reason: nullableText(row.reason, 1000),
           bucket_guess: nullableText(
             row.bucket_guess,
@@ -1435,7 +1622,9 @@ export function createSupabaseGatewayRepository(
           horizon_days: integer(row.horizon_days),
           coverage_status: nullableText(row.coverage_status, 30),
           excess_return_pct: nullableDecimal(row.excess_return_pct),
-          direction_success: row.direction_success === null ? null : boole(row.direction_success),
+          direction_success: row.direction_success === null
+            ? null
+            : boole(row.direction_success),
         })),
         dry_powder: rows(results[9], "CONTEXT_TOO_LARGE").map((row) => ({
           month: text(row.month, 7),
@@ -1458,7 +1647,9 @@ export function createSupabaseGatewayRepository(
           ) as GatewayReadContext["paper_watches"][number][
             "agent_view_at_open"
           ],
-          agent_score_at_open: row.agent_score_at_open === null ? null : integer(row.agent_score_at_open),
+          agent_score_at_open: row.agent_score_at_open === null
+            ? null
+            : integer(row.agent_score_at_open),
         })),
       };
       if (
@@ -1483,7 +1674,9 @@ export function createSupabaseGatewayRepository(
           data: row.counts,
           error: null,
         }) as ArtifactReceipt["counts"],
-        created_paper_watch_ids: Array.isArray(row.paper_watch_ids) ? row.paper_watch_ids.map(integer) : [],
+        created_paper_watch_ids: Array.isArray(row.paper_watch_ids)
+          ? row.paper_watch_ids.map(integer)
+          : [],
       };
     },
 
@@ -1505,7 +1698,9 @@ export function createSupabaseGatewayRepository(
         stop: nullableDecimal(row.stop),
         target: nullableDecimal(row.target),
         invalidation_price: nullableDecimal(row.invalidation_price),
-        completed_horizons: Array.isArray(row.completed_horizons) ? row.completed_horizons.map(integer) : [],
+        completed_horizons: Array.isArray(row.completed_horizons)
+          ? row.completed_horizons.map(integer)
+          : [],
       }));
     },
 
@@ -1540,25 +1735,40 @@ export function createSupabaseGatewayRepository(
           checker: evaluation.candidate.checker,
         })),
       );
-      const result = await client.rpc("apply_market_decision_bundle", {
-        p_request_id: input.request_id,
-        p_run_id: input.run_id,
-        p_lease_token: input.request_lease_token,
-        p_policy_version: input.policy_version,
-        p_evaluations: evaluations,
-        p_suggestions: input.suggestions,
-        p_publication: {
-          market_date: input.publication.market_date,
-          phase: input.publication.phase,
-          kind: input.publication.kind,
-          template_version: input.publication.template_version,
-          rendered_body: input.publication.rendered_body,
-          rendered_hash: input.publication.rendered_hash,
-          status: input.publication.status,
-          holding_state: input.holding_state_changes,
+      const result = await client.rpc(
+        "apply_market_decision_bundle_with_cash_snapshot",
+        {
+          p_request_id: input.request_id,
+          p_run_id: input.run_id,
+          p_lease_token: input.request_lease_token,
+          p_policy_version: input.policy_version,
+          p_evaluations: evaluations,
+          p_suggestions: input.suggestions,
+          p_publication: {
+            market_date: input.publication.market_date,
+            phase: input.publication.phase,
+            kind: input.publication.kind,
+            template_version: input.publication.template_version,
+            rendered_body: input.publication.rendered_body,
+            rendered_hash: input.publication.rendered_hash,
+            status: input.publication.status,
+            holding_state: input.holding_state_changes,
+          },
+          p_cash_snapshot_id: input.cash_snapshot?.snapshot_id ?? null,
+          p_cash_ledger_watermark: input.cash_snapshot?.ledger_watermark ??
+            null,
         },
-      });
+      );
+      if (result.error) {
+        if (result.error.message?.includes("CASH_UNAVAILABLE")) {
+          throw new GatewayRepositoryError("CASH_UNAVAILABLE");
+        }
+        throw new GatewayRepositoryError("PERSISTENCE_FAILED");
+      }
       const row = oneObject(result);
+      if (row.code === "RUN_ALREADY_EVALUATED") {
+        throw new GatewayRepositoryError("RUN_ALREADY_EVALUATED");
+      }
       return await publication(text(row.publication_id, 36));
     },
 
@@ -1630,7 +1840,9 @@ export function createSupabaseGatewayRepository(
     },
 
     async finishRun(runId) {
-      const result = await client.rpc("finish_market_analysis_run", { p_run_id: runId });
+      const result = await client.rpc("finish_market_analysis_run", {
+        p_run_id: runId,
+      });
       if (result.error) {
         const code = result.error.message;
         if (typeof code === "string" && /^MISSING_[A-Z_]+$/.test(code)) {
@@ -1643,9 +1855,17 @@ export function createSupabaseGatewayRepository(
       return {
         run_id: text(row.run_id, 36),
         status: text(row.status, 10) as RunReceipt["status"],
-        write_counts: Object.fromEntries(Object.entries(writeCounts).map(([key, value]) => [key, integer(value)])),
-        publication_statuses: Array.isArray(row.publication_statuses) ? row.publication_statuses.map((value) => text(value, 30)) : [],
-        telegram_message_ids: Array.isArray(row.telegram_message_ids) ? row.telegram_message_ids.map(integer) : [],
+        write_counts: Object.fromEntries(
+          Object.entries(writeCounts).map((
+            [key, value],
+          ) => [key, integer(value)]),
+        ),
+        publication_statuses: Array.isArray(row.publication_statuses)
+          ? row.publication_statuses.map((value) => text(value, 30))
+          : [],
+        telegram_message_ids: Array.isArray(row.telegram_message_ids)
+          ? row.telegram_message_ids.map(integer)
+          : [],
       };
     },
   };

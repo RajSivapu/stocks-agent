@@ -76,7 +76,9 @@ function reportFixture(kind: ReportKind = "morning") {
   };
 }
 
-function approvedReportDecision(payload: ReturnType<typeof reportFixture>): ReportPolicyDecision {
+function approvedReportDecision(
+  payload: ReturnType<typeof reportFixture>,
+): ReportPolicyDecision {
   return {
     evaluation_id: payload.report.policy_decision_ids[0],
     candidate_id: "00000000-0000-4000-8000-000000000033",
@@ -101,7 +103,12 @@ function approvedReportDecision(payload: ReturnType<typeof reportFixture>): Repo
 Deno.test("suppressed report retains the typed policy reason without a Telegram send", async () => {
   const repo = new FakeRepository();
   const payload = reportFixture("intraday");
-  repo.reportDecisions = [{ ...approvedReportDecision(payload), status: "downgraded", final_action: "watch", approved_terms: null }];
+  repo.reportDecisions = [{
+    ...approvedReportDecision(payload),
+    status: "downgraded",
+    final_action: "watch",
+    approved_terms: null,
+  }];
   const setup = makeHandler(repo);
   const result = await setup.handler(request("record_report", payload));
   assertEquals(result.status, 200);
@@ -109,6 +116,12 @@ Deno.test("suppressed report retains the typed policy reason without a Telegram 
   assertEquals(body.publication_receipt.suppression_reason, "no_trigger");
   assertEquals(repo.suppressionReasons, ["no_trigger"]);
   assertEquals(setup.sent.length, 0);
+  assert(
+    repo.storedReport !== null &&
+      !JSON.stringify(repo.storedReport).includes("999999") &&
+      JSON.stringify(repo.storedReport).includes("WATCH"),
+    "dashboard-visible suppressed report retained caller advice",
+  );
 });
 
 Deno.test("report handler loads exact persisted decisions before generating delivery and stored prose", async () => {
@@ -157,7 +170,8 @@ Deno.test("stored report delivery becomes uncertain after a send crash and same 
   const payload = reportFixture();
   repo.reportDecisions = [approvedReportDecision(payload)];
   const first = makeHandler(repo, {
-    sendTelegram: () => Promise.reject(new TelegramDeliveryError("ambiguous", [77])),
+    sendTelegram: () =>
+      Promise.reject(new TelegramDeliveryError("ambiguous", [77])),
   });
   const firstResponse = await first.handler(request("record_report", payload));
   assertEquals(firstResponse.status, 502);
@@ -186,14 +200,18 @@ Deno.test("active report delivery leaves its gateway request retryable until its
   repo.reportPublicationClaimable = false;
   const first = makeHandler(repo);
 
-  const pending = await first.handler(request("record_report", payload, { requestId }));
+  const pending = await first.handler(
+    request("record_report", payload, { requestId }),
+  );
   assertEquals(pending.status, 409);
   assertEquals(repo.claims.has(requestId), false);
   assertEquals(first.sent, []);
 
   repo.reportPublicationLeaseExpired = true;
   const retry = makeHandler(repo);
-  const uncertain = await retry.handler(request("record_report", payload, { requestId }));
+  const uncertain = await retry.handler(
+    request("record_report", payload, { requestId }),
+  );
   assertEquals(uncertain.status, 502);
   assertEquals((await json(uncertain)).publication_receipt, {
     status: "uncertain",
@@ -289,10 +307,11 @@ Deno.test("report handler derives routine pure-HOLD alert kind and text without 
 });
 
 Deno.test("scheduled report origins retain requested kind before pre-market delivery derives urgent or intraday", async () => {
-  const cases: Array<{ urgency: "urgent" | "routine"; finalKind: ReportKind }> = [
-    { urgency: "urgent", finalKind: "urgent" },
-    { urgency: "routine", finalKind: "intraday" },
-  ];
+  const cases: Array<{ urgency: "urgent" | "routine"; finalKind: ReportKind }> =
+    [
+      { urgency: "urgent", finalKind: "urgent" },
+      { urgency: "routine", finalKind: "intraday" },
+    ];
   for (const expected of cases) {
     const repo = new FakeRepository();
     repo.scheduledReportPhase = "pre-market";
@@ -310,13 +329,19 @@ Deno.test("scheduled report origins retain requested kind before pre-market deli
       final_alert_urgency: expected.urgency,
     }];
     const setup = makeHandler(repo);
-    assertEquals((await setup.handler(request("record_report", payload))).status, 200);
+    assertEquals(
+      (await setup.handler(request("record_report", payload))).status,
+      200,
+    );
     assertEquals(repo.reportOrigins.length, 1);
     assertEquals(repo.reportOrigins[0].runId, RUN_ID);
     assertEquals(repo.reportOrigins[0].marketDate, "2026-09-02");
     assertEquals(repo.reportOrigins[0].kind, "morning");
     assertEquals(repo.reportOrigins[0].phase, "pre-market");
-    assertEquals((repo.storedReport as { kind: unknown }).kind, expected.finalKind);
+    assertEquals(
+      (repo.storedReport as { kind: unknown }).kind,
+      expected.finalKind,
+    );
   }
 });
 
@@ -337,7 +362,10 @@ Deno.test("scheduled report origin permits post-market routine delivery to finis
     final_alert_urgency: "routine",
   }];
   const setup = makeHandler(repo);
-  assertEquals((await setup.handler(request("record_report", payload))).status, 200);
+  assertEquals(
+    (await setup.handler(request("record_report", payload))).status,
+    200,
+  );
   assertEquals(repo.reportOrigins.length, 1);
   assertEquals(repo.reportOrigins[0].kind, "weekly");
   assertEquals(repo.reportOrigins[0].phase, "post-market");
@@ -482,6 +510,13 @@ function readContext(): GatewayReadContext {
     portfolio_command_coverage_complete: true,
     consecutive_completed_losses: 0,
     owner_plans: [],
+    reconciled_cash_snapshot: {
+      snapshot_id: "00000000-0000-4000-8000-000000000099",
+      as_of: "2026-09-02T16:59:00.000Z",
+      fresh_through: "2026-09-02T17:14:00.000Z",
+      ledger_watermark: "0",
+      spendable_cash: { core: "300", growth: "10000", speculative: "0" },
+    },
     recent_suggestions: [],
     observations: [],
     lessons: [],
@@ -761,7 +796,11 @@ class FakeRepository implements GatewayRepository {
     this.events.push("claim-report-publication");
     const receipt = this.reportPublication!;
     if (this.reportPublicationLeaseExpired) {
-      this.reportPublication = { ...receipt, status: "uncertain", lease_token: null };
+      this.reportPublication = {
+        ...receipt,
+        status: "uncertain",
+        lease_token: null,
+      };
       return Promise.resolve({
         claimed: false,
         lease_token: null,
@@ -797,13 +836,25 @@ class FakeRepository implements GatewayRepository {
     return Promise.resolve(structuredClone(this.reportPublication));
   }
   suppressionReasons: Array<string | undefined> = [];
-  suppressReportPublication(idempotencyKey: string, reason?: string): Promise<PublicationReceipt> {
+  suppressReportPublication(
+    idempotencyKey: string,
+    reason?: string,
+  ): Promise<PublicationReceipt> {
     this.suppressionReasons.push(reason);
     this.reportPublication = {
-      ...this.reportPublication!, idempotency_key: idempotencyKey,
-      status: "suppressed", telegram_message_ids: [], telegram_accepted_at: null, lease_token: null,
+      ...this.reportPublication!,
+      idempotency_key: idempotencyKey,
+      status: "suppressed",
+      telegram_message_ids: [],
+      telegram_accepted_at: null,
+      lease_token: null,
     };
-    return Promise.resolve({ ...structuredClone(this.reportPublication), suppression_reason: reason } as PublicationReceipt);
+    return Promise.resolve(
+      {
+        ...structuredClone(this.reportPublication),
+        suppression_reason: reason,
+      } as PublicationReceipt,
+    );
   }
   mutationCalls = 0;
   startCalls = 0;
@@ -819,6 +870,7 @@ class FakeRepository implements GatewayRepository {
   > = [];
   expireAlertRuleCalls = 0;
   finishRunCalls = 0;
+  runOutcomes: Array<{ runId: string; outcome: string }> = [];
   scheduledSlots: string[] = [];
   readCalls = 0;
   packetReadCalls = 0;
@@ -884,11 +936,28 @@ class FakeRepository implements GatewayRepository {
     this.claims.set(requestId, { ok: false, code });
     return Promise.resolve();
   }
-  startRun(_requestId: string, _leaseToken: string, phase: Phase, marketDate?: string): Promise<string> {
+  startRun(
+    _requestId: string,
+    _leaseToken: string,
+    phase: Phase,
+    marketDate?: string,
+  ): Promise<{ run_id: string; duplicate: boolean }> {
     this.mutationCalls += 1;
     this.startCalls += 1;
-    this.scheduledSlots.push(`${marketDate ?? "missing"}:${phase}`);
-    return Promise.resolve(RUN_ID);
+    const slot = `${marketDate ?? "missing"}:${phase}`;
+    const duplicate = phase !== "on-demand" &&
+      this.scheduledSlots.includes(slot);
+    this.scheduledSlots.push(slot);
+    return Promise.resolve({ run_id: RUN_ID, duplicate });
+  }
+  recordRunOutcome(
+    _requestId: string,
+    _leaseToken: string,
+    runId: string,
+    outcome: "no_trigger" | "not_actionable",
+  ) {
+    this.runOutcomes.push({ runId, outcome });
+    return Promise.resolve({ run_id: runId, outcome, duplicate: false });
   }
   readContext(): Promise<GatewayReadContext> {
     this.readCalls += 1;
@@ -1231,25 +1300,40 @@ function request(
 Deno.test("protected completion recovery bypasses new request claims and refuses authored payloads", async () => {
   const REQUEST_ID = "00000000-0000-4000-8000-000000000071";
   const repo = Object.assign(new FakeRepository(), {
-    readIntelligenceCompletion: (runId: string, completionId: string) => Promise.resolve({ run_id: runId, completion_id: completionId }),
+    readIntelligenceCompletion: (runId: string, completionId: string) =>
+      Promise.resolve({ run_id: runId, completion_id: completionId }),
   });
   const setup = makeHandler(repo);
-  const recovered = await setup.handler(request("read_intelligence_completion", {}, { requestId: REQUEST_ID }));
+  const recovered = await setup.handler(
+    request("read_intelligence_completion", {}, { requestId: REQUEST_ID }),
+  );
   assertEquals(recovered.status, 200);
-  assertEquals((await json(recovered)).completion, { run_id: RUN_ID, completion_id: REQUEST_ID });
+  assertEquals((await json(recovered)).completion, {
+    run_id: RUN_ID,
+    completion_id: REQUEST_ID,
+  });
   assertEquals(repo.claims.size, 0);
   assertEquals(setup.sent, []);
-  const invented = await setup.handler(request("read_intelligence_context", { liquidity_by_ticker: { TEST: "1" } }));
+  const invented = await setup.handler(
+    request("read_intelligence_context", {
+      liquidity_by_ticker: { TEST: "1" },
+    }),
+  );
   assertEquals(invented.status, 400);
-  const unauthorized = await setup.handler(request("read_intelligence_context", {}, { secret: "wrong" }));
+  const unauthorized = await setup.handler(
+    request("read_intelligence_context", {}, { secret: "wrong" }),
+  );
   assertEquals(unauthorized.status, 401);
 });
 
 Deno.test("protected quote producer reserves before fetching and resumes without another call", async () => {
   const { fetchCollectionQuote } = await import("./collection-quotes.ts");
-  const input = { ticker: "TEST", cache_key: "a".repeat(64),
+  const input = {
+    ticker: "TEST",
+    cache_key: "a".repeat(64),
     source_receipt_id: "00000000-0000-4000-8000-000000000081",
-    reservation_id: "00000000-0000-4000-8000-000000000082" };
+    reservation_id: "00000000-0000-4000-8000-000000000082",
+  };
   const window = { start: "2026-09-02T16:00:00.000Z", end: NOW.toISOString() };
   const calls: string[] = [];
   let saved: Record<string, unknown> | null = null;
@@ -1257,10 +1341,19 @@ Deno.test("protected quote producer reserves before fetching and resumes without
   const repo = Object.assign(new FakeRepository(), {
     claimIntelligenceQuote: () => {
       calls.push("claim");
-      return Promise.resolve(saved ? { status: "completed", checkpoint: saved }
-        : { status: blocked ? "quota_blocked" : "claimed", request_window: window });
+      return Promise.resolve(
+        saved ? { status: "completed", checkpoint: saved } : {
+          status: blocked ? "quota_blocked" : "claimed",
+          request_window: window,
+        },
+      );
     },
-    recordIntelligenceQuote: (_run: string, _id: string, quote: unknown, checkpoint: Record<string, unknown>) => {
+    recordIntelligenceQuote: (
+      _run: string,
+      _id: string,
+      quote: unknown,
+      checkpoint: Record<string, unknown>,
+    ) => {
       calls.push("record");
       assert(quote !== null, "protected fetch supplied the quote");
       saved = checkpoint;
@@ -1270,31 +1363,67 @@ Deno.test("protected quote producer reserves before fetching and resumes without
   const setup = makeHandler(repo, {
     fetchCollectionQuote: (ticker: string, now: Date) => {
       calls.push("fetch");
-      return fetchCollectionQuote(ticker, now, () => Promise.resolve(Response.json({ chart: { result: [{
-        meta: { symbol: ticker, currency: "USD", instrumentType: "EQUITY", regularMarketPrice: 100,
-          regularMarketTime: Math.floor(now.valueOf()/1000) },
-        timestamp: [Math.floor(now.valueOf()/1000)], indicators: { quote: [{ close: [100], volume: [50000] }] },
-      }] } })));
+      return fetchCollectionQuote(
+        ticker,
+        now,
+        () =>
+          Promise.resolve(Response.json({
+            chart: {
+              result: [{
+                meta: {
+                  symbol: ticker,
+                  currency: "USD",
+                  instrumentType: "EQUITY",
+                  regularMarketPrice: 100,
+                  regularMarketTime: Math.floor(now.valueOf() / 1000),
+                },
+                timestamp: [Math.floor(now.valueOf() / 1000)],
+                indicators: { quote: [{ close: [100], volume: [50000] }] },
+              }],
+            },
+          })),
+      );
     },
   });
-  const first = await setup.handler(request("collect_intelligence_quote", input));
+  const first = await setup.handler(
+    request("collect_intelligence_quote", input),
+  );
   assertEquals(first.status, 200);
   assertEquals(calls, ["claim", "fetch", "record"]);
-  const checkpoint = (await json(first)).checkpoint as { receipt: { request_cost: number; status: string } };
+  const checkpoint = (await json(first)).checkpoint as {
+    receipt: { request_cost: number; status: string };
+  };
   assertEquals(checkpoint.receipt.request_cost, 1);
   assertEquals(checkpoint.receipt.status, "succeeded");
-  const retry = await setup.handler(request("collect_intelligence_quote", input));
+  const retry = await setup.handler(
+    request("collect_intelligence_quote", input),
+  );
   assertEquals((await json(retry)).checkpoint, checkpoint);
   assertEquals(calls, ["claim", "fetch", "record", "claim"]);
-  saved = null; blocked = true;
-  const exhausted = await setup.handler(request("collect_intelligence_quote", input));
-  const blockedReceipt = ((await json(exhausted)).checkpoint as { receipt: Record<string, unknown> }).receipt;
+  saved = null;
+  blocked = true;
+  const exhausted = await setup.handler(
+    request("collect_intelligence_quote", input),
+  );
+  const blockedReceipt =
+    ((await json(exhausted)).checkpoint as { receipt: Record<string, unknown> })
+      .receipt;
   assertEquals(blockedReceipt.status, "quota_blocked");
   assertEquals(blockedReceipt.error_code, "QUOTA_BLOCKED");
   assertEquals(blockedReceipt.request_cost, 0);
   assertEquals(calls.filter((value) => value === "fetch").length, 1);
-  assertEquals((await setup.handler(request("collect_intelligence_quote", { ...input, price: "999999" }))).status, 400);
-  assertEquals((await setup.handler(request("collect_intelligence_quote", input, { secret: "wrong" }))).status, 401);
+  assertEquals(
+    (await setup.handler(
+      request("collect_intelligence_quote", { ...input, price: "999999" }),
+    )).status,
+    400,
+  );
+  assertEquals(
+    (await setup.handler(
+      request("collect_intelligence_quote", input, { secret: "wrong" }),
+    )).status,
+    401,
+  );
   assertEquals(repo.claims.size, 0);
   assertEquals(setup.sent, []);
 });
@@ -1631,7 +1760,13 @@ Deno.test("six individually valid purchases cannot exceed the growth allocation"
 
 Deno.test("unreconciled cash and mutually exclusive purchases fail closed", async () => {
   const unavailable = makeHandler();
-  unavailable.repository.context.dry_powder = [];
+  unavailable.repository.context.reconciled_cash_snapshot = undefined;
+  unavailable.repository.context.dry_powder = [{
+    month: "2026-09",
+    growth_available: "999999999",
+    spec_available: "999999999",
+    rolled_months: 99,
+  }];
   const missingCash = await json(
     await unavailable.handler(request(
       "evaluate_and_publish",
@@ -1652,6 +1787,33 @@ Deno.test("unreconciled cash and mutually exclusive purchases fail closed", asyn
   assert(
     new Set(cashEvaluation.reason_codes).has("CASH_UNAVAILABLE"),
     "missing cash passed",
+  );
+
+  const stale = makeHandler();
+  stale.repository.context.reconciled_cash_snapshot = {
+    ...stale.repository.context.reconciled_cash_snapshot!,
+    fresh_through: "2026-09-02T16:59:59.000Z",
+  };
+  const staleResult = await json(
+    await stale.handler(request(
+      "evaluate_and_publish",
+      {
+        phase: "on-demand",
+        market_date: "2026-09-02",
+        title: "Stale cash check",
+        candidates: [candidate("on-demand", "brief")],
+      },
+      { dry: true },
+    )),
+  );
+  const staleEvaluation = (staleResult.evaluations as Array<{
+    final_action: string | null;
+    reason_codes: string[];
+  }>)[0];
+  assertEquals(staleEvaluation.final_action, "watch");
+  assert(
+    staleEvaluation.reason_codes.includes("CASH_UNAVAILABLE"),
+    "stale cash snapshot passed",
   );
 
   const alternatives = makeHandler();
@@ -1765,7 +1927,13 @@ Deno.test("owner-plan Core purchase requires cash but not a stop-derived risk va
     active: true,
     updated_at: "2026-09-02T12:00:00.000Z",
   }];
-  setup.repository.context.spendable_cash = { core: "300" };
+  setup.repository.context.reconciled_cash_snapshot = {
+    snapshot_id: "00000000-0000-4000-8000-000000000099",
+    as_of: "2026-09-02T16:59:00.000Z",
+    fresh_through: "2026-09-02T17:14:00.000Z",
+    ledger_watermark: "0",
+    spendable_cash: { core: "300", growth: "10000", speculative: "0" },
+  };
   const approved = await json(
     await setup.handler(request(
       "evaluate_and_publish",
@@ -1791,6 +1959,7 @@ Deno.test("owner-plan Core purchase requires cash but not a stop-derived risk va
   unavailable.repository.context.owner_plans = structuredClone(
     setup.repository.context.owner_plans,
   );
+  unavailable.repository.context.reconciled_cash_snapshot = undefined;
   const missingCash = await json(
     await unavailable.handler(request(
       "evaluate_and_publish",
@@ -2449,21 +2618,34 @@ Deno.test("live start_run is idempotent", async () => {
   );
   assertEquals(first.run_id, RUN_ID);
   assertEquals(second.run_id, RUN_ID);
+  assertEquals(first.duplicate, false);
+  assertEquals(second.duplicate, false);
   assertEquals(repository.startCalls, 1);
 });
 
 Deno.test("different request ids for one scheduled market slot return the same run", async () => {
   const { handler, repository } = makeHandler();
-  const first = await json(await handler(request(
-    "start_run", { phase: "intraday", market_date: "2026-09-02" },
-    { requestId: nextRequestId() },
-  )));
-  const second = await json(await handler(request(
-    "start_run", { phase: "intraday", market_date: "2026-09-02" },
-    { requestId: nextRequestId() },
-  )));
+  const first = await json(
+    await handler(request(
+      "start_run",
+      { phase: "intraday", market_date: "2026-09-02" },
+      { requestId: nextRequestId() },
+    )),
+  );
+  const second = await json(
+    await handler(request(
+      "start_run",
+      { phase: "intraday", market_date: "2026-09-02" },
+      { requestId: nextRequestId() },
+    )),
+  );
   assertEquals(first.run_id, second.run_id);
-  assertEquals(repository.scheduledSlots, ["2026-09-02:intraday", "2026-09-02:intraday"]);
+  assertEquals(first.duplicate, false);
+  assertEquals(second.duplicate, true);
+  assertEquals(repository.scheduledSlots, [
+    "2026-09-02:intraday",
+    "2026-09-02:intraday",
+  ]);
 });
 
 Deno.test("finish_run returns the specific missing lifecycle stage", async () => {
@@ -2538,6 +2720,10 @@ Deno.test("intraday evaluation refetches every quote, persists a suppression rec
     repository.lastBundle!.evaluations[0].normalized.total_investable_value,
     "40500",
   );
+  assertEquals(repository.lastBundle!.cash_snapshot, {
+    snapshot_id: "00000000-0000-4000-8000-000000000099",
+    ledger_watermark: "0",
+  });
   assertEquals(repository.lastBundle!.publication.template_version, 2);
   assertEquals(repository.lastBundle!.publication.status, "suppressed");
   assertEquals(sent.length, 0);
@@ -2568,7 +2754,7 @@ Deno.test("persistence failure prevents Telegram and scheduled evaluation never 
     phase: "intraday",
     market_date: "2026-09-02",
     title: "x",
-    candidates: [candidate()],
+    candidates: [candidate("intraday", "brief")],
   };
   assertEquals(
     (await failed.handler(request("evaluate_and_publish", bundle))).status,
@@ -2577,7 +2763,10 @@ Deno.test("persistence failure prevents Telegram and scheduled evaluation never 
   assertEquals(failed.sent, []);
 
   const scheduled = makeHandler();
-  assertEquals((await scheduled.handler(request("evaluate_and_publish", bundle))).status, 200);
+  assertEquals(
+    (await scheduled.handler(request("evaluate_and_publish", bundle))).status,
+    200,
+  );
   assertEquals(scheduled.sent, []);
 });
 
@@ -2599,6 +2788,10 @@ Deno.test("suppressed intraday and on-demand outputs never call Telegram", async
     intraday.repository.lastBundle!.publication.status,
     "suppressed",
   );
+  assertEquals(intraday.repository.runOutcomes, [{
+    runId: RUN_ID,
+    outcome: "no_trigger",
+  }]);
 
   const onDemand = makeHandler();
   const onDemandBundle = {
@@ -2652,21 +2845,16 @@ Deno.test("duplicate scheduled evaluation requests never send outside the report
   assertEquals(attempts, 0);
 });
 
-Deno.test("a second scheduled evaluation reuses its suppression receipt without sending", async () => {
+Deno.test("a second scheduled evaluation cannot reuse another request's suppression receipt", async () => {
   class OnePublicationRepository extends FakeRepository {
     override applyDecisionBundle(
       input: PersistedBundle,
     ): Promise<PublicationReceipt> {
       if (this.applyCalls > 0) {
         this.applyCalls += 1;
-        return Promise.resolve({
-          id: "00000000-0000-4000-8000-000000000050",
-          idempotency_key: "00000000-0000-4000-8000-000000000090",
-          status: "delivered",
-          telegram_message_ids: [77],
-          telegram_accepted_at: "2026-09-02T17:00:00.000Z",
-          lease_token: null,
-        });
+        return Promise.reject(
+          new GatewayRepositoryError("RUN_ALREADY_EVALUATED"),
+        );
       }
       return super.applyDecisionBundle(input);
     }
@@ -2676,12 +2864,15 @@ Deno.test("a second scheduled evaluation reuses its suppression receipt without 
     phase: "intraday",
     market_date: "2026-09-02",
     title: "x",
-    candidates: [candidate()],
+    candidates: [candidate("intraday", "brief")],
   };
   await setup.handler(request("evaluate_and_publish", bundle));
-  await setup.handler(request("evaluate_and_publish", bundle));
+  const replay = await setup.handler(request("evaluate_and_publish", bundle));
+  assertEquals(replay.status, 409);
+  assertEquals((await json(replay)).code, "RUN_ALREADY_EVALUATED");
   assertEquals(setup.sent.length, 0);
   assertEquals(setup.repository.applyCalls, 2);
+  assertEquals(setup.repository.runOutcomes.length, 1);
 });
 
 Deno.test("holiday, bounded grading, and server-derived finish behavior", async () => {

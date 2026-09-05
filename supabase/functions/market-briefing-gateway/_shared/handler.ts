@@ -84,7 +84,11 @@ import {
   type RecordReportPayload,
   renderReportDelivery,
 } from "./reports.ts";
-import { type CollectionQuote, fetchCollectionQuote, quoteCheckpoint } from "./collection-quotes.ts";
+import {
+  type CollectionQuote,
+  fetchCollectionQuote,
+  quoteCheckpoint,
+} from "./collection-quotes.ts";
 
 export interface GatewayDependencies {
   repository: GatewayRepository;
@@ -94,7 +98,10 @@ export interface GatewayDependencies {
   now?: () => Date;
   newId?: () => string;
   fetchQuote?: (ticker: string, now: Date) => Promise<VerifiedQuote>;
-  fetchCollectionQuote?: (ticker: string, now: Date) => Promise<CollectionQuote>;
+  fetchCollectionQuote?: (
+    ticker: string,
+    now: Date,
+  ) => Promise<CollectionQuote>;
   fetchHistory?: (
     ticker: string,
     range?: AdjustedHistoryRange,
@@ -250,7 +257,8 @@ function chicagoDate(now: Date): string {
     month: "2-digit",
     day: "2-digit",
   }).formatToParts(now);
-  const get = (type: Intl.DateTimeFormatPartTypes) => parts.find((part) => part.type === type)?.value ?? "";
+  const get = (type: Intl.DateTimeFormatPartTypes) =>
+    parts.find((part) => part.type === type)?.value ?? "";
   return `${get("year")}-${get("month")}-${get("day")}`;
 }
 
@@ -283,6 +291,9 @@ function errorStatus(code: string): number {
   if (code === "CONTEXT_TOO_LARGE") return 413;
   if (/^MISSING_[A-Z_]+$/.test(code)) return 409;
   if (code === "POLICY_REJECTED" || code === "CALENDAR_COVERAGE_MISSING") {
+    return 409;
+  }
+  if (code === "RUN_ALREADY_EVALUATED" || code === "CASH_UNAVAILABLE") {
     return 409;
   }
   if (
@@ -342,13 +353,16 @@ async function normalizeArtifacts(
     & Pick<GatewayDependencies, "repository">,
 ): Promise<PersistableArtifactMutationBatch> {
   const currentDate = chicagoDate(deps.now());
-  let context: Awaited<ReturnType<GatewayRepository["readContext"]>> | null = null;
+  let context: Awaited<ReturnType<GatewayRepository["readContext"]>> | null =
+    null;
   const output: PersistableArtifactMutation[] = [];
   for (const mutation of mutations) {
     if (mutation.kind === "paper_watch_create") {
       context ??= await deps.repository.readContext(runId);
       const quote = await deps.fetchQuote(mutation.ticker, deps.now());
-      const latest = context.recent_suggestions.find((item) => item.ticker === mutation.ticker);
+      const latest = context.recent_suggestions.find((item) =>
+        item.ticker === mutation.ticker
+      );
       output.push({
         ...mutation,
         entry_ref_price: quote.price,
@@ -375,13 +389,16 @@ export function createGatewayHandler(dependencies: GatewayDependencies) {
     ...dependencies,
     now: dependencies.now ?? (() => new Date()),
     newId: dependencies.newId ?? (() => crypto.randomUUID()),
-    fetchCollectionQuote: dependencies.fetchCollectionQuote ?? fetchCollectionQuote,
+    fetchCollectionQuote: dependencies.fetchCollectionQuote ??
+      fetchCollectionQuote,
     fetchQuote: dependencies.fetchQuote ??
       ((ticker: string, now: Date) => fetchVerifiedQuote(ticker, fetch, now)),
     fetchHistory: dependencies.fetchHistory ??
-      ((ticker: string, range: AdjustedHistoryRange = "1y") => fetchAdjustedHistory(ticker, range, fetch)),
+      ((ticker: string, range: AdjustedHistoryRange = "1y") =>
+        fetchAdjustedHistory(ticker, range, fetch)),
     fetchAlertEvidence: dependencies.fetchAlertEvidence ??
-      ((ticker: string, now: Date) => fetchIntradayQuoteEvidence(ticker, fetch, now)),
+      ((ticker: string, now: Date) =>
+        fetchIntradayQuoteEvidence(ticker, fetch, now)),
     sendTelegram: dependencies.sendTelegram ?? sendTelegramParts,
     sendTelegramAlert: dependencies.sendTelegramAlert ?? sendTelegramAlert,
   };
@@ -422,10 +439,21 @@ export function createGatewayHandler(dependencies: GatewayDependencies) {
       } else if (envelope.operation === "collect_intelligence_quote") {
         requireRun(envelope);
         const row = objectValue(envelope.payload);
-        exactKeys(row, ["ticker", "reservation_id", "source_receipt_id", "cache_key"]);
-        if (typeof row.ticker !== "string" || !/^[A-Z][A-Z0-9.-]{0,14}$/.test(row.ticker)
-          || typeof row.cache_key !== "string" || !/^[a-f0-9]{64}$/.test(row.cache_key)
-          || [row.reservation_id, row.source_receipt_id].some(value => typeof value !== "string" || !/^[a-f0-9-]{36}$/.test(value))) {
+        exactKeys(row, [
+          "ticker",
+          "reservation_id",
+          "source_receipt_id",
+          "cache_key",
+        ]);
+        if (
+          typeof row.ticker !== "string" ||
+          !/^[A-Z][A-Z0-9.-]{0,14}$/.test(row.ticker) ||
+          typeof row.cache_key !== "string" ||
+          !/^[a-f0-9]{64}$/.test(row.cache_key) ||
+          [row.reservation_id, row.source_receipt_id].some((value) =>
+            typeof value !== "string" || !/^[a-f0-9-]{36}$/.test(value)
+          )
+        ) {
           throw new GatewayHttpError(400, "INVALID_REQUEST");
         }
         prepared = row;
@@ -478,8 +506,19 @@ export function createGatewayHandler(dependencies: GatewayDependencies) {
 
     if (envelope.dry_run) {
       try {
-        if (envelope.operation === "read_intelligence_completion" || envelope.operation === "read_intelligence_context" || envelope.operation === "collect_intelligence_quote") {
-          return response(200, { ok: true, dry_run: true, completion: null, context: {}, write_counts: {}, telegram_message_ids: [] });
+        if (
+          envelope.operation === "read_intelligence_completion" ||
+          envelope.operation === "read_intelligence_context" ||
+          envelope.operation === "collect_intelligence_quote"
+        ) {
+          return response(200, {
+            ok: true,
+            dry_run: true,
+            completion: null,
+            context: {},
+            write_counts: {},
+            telegram_message_ids: [],
+          });
         }
         if (envelope.operation === "start_intelligence_run") {
           return response(200, {
@@ -488,7 +527,8 @@ export function createGatewayHandler(dependencies: GatewayDependencies) {
             run_id: envelope.request_id,
             reservation_ids: [],
             cache_entries: [],
-            request_window: (prepared as StartIntelligencePayload).request_window,
+            request_window:
+              (prepared as StartIntelligencePayload).request_window,
             duplicate: false,
             write_counts: {},
             telegram_message_ids: [],
@@ -622,44 +662,101 @@ export function createGatewayHandler(dependencies: GatewayDependencies) {
           deps,
         );
       } catch (error) {
-        const code = error instanceof GatewayRepositoryError ? error.code : "POLICY_REJECTED";
+        const code = error instanceof GatewayRepositoryError
+          ? error.code
+          : "POLICY_REJECTED";
         return response(errorStatus(code), { ok: false, code });
       }
     }
 
     if (envelope.operation === "collect_intelligence_quote") {
       try {
-        if (!deps.repository.claimIntelligenceQuote || !deps.repository.recordIntelligenceQuote) throw new GatewayRepositoryError("PERSISTENCE_FAILED");
+        if (
+          !deps.repository.claimIntelligenceQuote ||
+          !deps.repository.recordIntelligenceQuote
+        ) throw new GatewayRepositoryError("PERSISTENCE_FAILED");
         const input = prepared as Record<string, unknown>;
         const runId = requireRun(envelope);
-        const claim = await deps.repository.claimIntelligenceQuote(runId, input);
-        if (claim.status === "completed") return response(200, { ok: true, checkpoint: claim.checkpoint });
+        const claim = await deps.repository.claimIntelligenceQuote(
+          runId,
+          input,
+        );
+        if (claim.status === "completed") {
+          return response(200, { ok: true, checkpoint: claim.checkpoint });
+        }
         if (claim.status === "quota_blocked") {
-          const checkpoint = quoteCheckpoint(input, claim.request_window as Record<string, unknown>, null, deps.now());
-          Object.assign(checkpoint.receipt as Record<string, unknown>, { status: "quota_blocked", request_cost: 0, error_code: "QUOTA_BLOCKED" });
+          const checkpoint = quoteCheckpoint(
+            input,
+            claim.request_window as Record<string, unknown>,
+            null,
+            deps.now(),
+          );
+          Object.assign(checkpoint.receipt as Record<string, unknown>, {
+            status: "quota_blocked",
+            request_cost: 0,
+            error_code: "QUOTA_BLOCKED",
+          });
           return response(200, { ok: true, checkpoint });
         }
-        if (claim.status !== "claimed") throw new GatewayRepositoryError("COLLECTION_OUTCOME_UNCERTAIN");
+        if (claim.status !== "claimed") {
+          throw new GatewayRepositoryError("COLLECTION_OUTCOME_UNCERTAIN");
+        }
         let quote: CollectionQuote | null = null;
-        try { quote = await deps.fetchCollectionQuote(input.ticker as string, deps.now()); } catch { /* A real failed attempt still costs one. */ }
-        const checkpoint = quoteCheckpoint(input, claim.request_window as Record<string, unknown>, quote, deps.now());
-        return response(200, { ok: true, checkpoint: await deps.repository.recordIntelligenceQuote(
-          runId, input.source_receipt_id as string, quote, checkpoint) });
+        try {
+          quote = await deps.fetchCollectionQuote(
+            input.ticker as string,
+            deps.now(),
+          );
+        } catch { /* A real failed attempt still costs one. */ }
+        const checkpoint = quoteCheckpoint(
+          input,
+          claim.request_window as Record<string, unknown>,
+          quote,
+          deps.now(),
+        );
+        return response(200, {
+          ok: true,
+          checkpoint: await deps.repository.recordIntelligenceQuote(
+            runId,
+            input.source_receipt_id as string,
+            quote,
+            checkpoint,
+          ),
+        });
       } catch (error) {
-        const code = error instanceof GatewayRepositoryError ? error.code : "PERSISTENCE_FAILED";
+        const code = error instanceof GatewayRepositoryError
+          ? error.code
+          : "PERSISTENCE_FAILED";
         return response(errorStatus(code), { ok: false, code });
       }
     }
-    if (envelope.operation === "read_intelligence_completion" || envelope.operation === "read_intelligence_context") {
+    if (
+      envelope.operation === "read_intelligence_completion" ||
+      envelope.operation === "read_intelligence_context"
+    ) {
       try {
         if (envelope.operation === "read_intelligence_context") {
-          return response(200, { ok: true, context: await deps.repository.readContext(requireRun(envelope)), telegram_message_ids: [] });
+          return response(200, {
+            ok: true,
+            context: await deps.repository.readContext(requireRun(envelope)),
+            telegram_message_ids: [],
+          });
         }
-        if (!deps.repository.readIntelligenceCompletion) throw new GatewayRepositoryError("PERSISTENCE_FAILED");
-        return response(200, { ok: true, completion: await deps.repository.readIntelligenceCompletion(
-          requireRun(envelope), envelope.request_id), telegram_message_ids: [] });
+        if (!deps.repository.readIntelligenceCompletion) {
+          throw new GatewayRepositoryError("PERSISTENCE_FAILED");
+        }
+        return response(200, {
+          ok: true,
+          completion: await deps.repository.readIntelligenceCompletion(
+            requireRun(envelope),
+            envelope.request_id,
+          ),
+          telegram_message_ids: [],
+        });
       } catch (error) {
-        const code = error instanceof GatewayRepositoryError ? error.code : "PERSISTENCE_FAILED";
+        const code = error instanceof GatewayRepositoryError
+          ? error.code
+          : "PERSISTENCE_FAILED";
         return response(errorStatus(code), { ok: false, code });
       }
     }
@@ -678,7 +775,9 @@ export function createGatewayHandler(dependencies: GatewayDependencies) {
           telegram_message_ids: [],
         });
       } catch (error) {
-        const code = error instanceof GatewayRepositoryError ? error.code : "PERSISTENCE_FAILED";
+        const code = error instanceof GatewayRepositoryError
+          ? error.code
+          : "PERSISTENCE_FAILED";
         return response(errorStatus(code), { ok: false, code });
       }
     }
@@ -700,17 +799,30 @@ export function createGatewayHandler(dependencies: GatewayDependencies) {
           telegram_message_ids: [],
         });
       } catch (error) {
-        const code = error instanceof GatewayRepositoryError ? error.code : "PERSISTENCE_FAILED";
+        const code = error instanceof GatewayRepositoryError
+          ? error.code
+          : "PERSISTENCE_FAILED";
         return response(errorStatus(code), { ok: false, code });
       }
     }
     if (envelope.operation === "checkpoint_intelligence_collection") {
       try {
-        if (!deps.repository.checkpointIntelligenceCollection) throw new GatewayRepositoryError("PERSISTENCE_FAILED");
-        const receipt = await deps.repository.checkpointIntelligenceCollection(requireRun(envelope), prepared as never);
-        return response(200, { ok: true, ...receipt, telegram_message_ids: [] });
+        if (!deps.repository.checkpointIntelligenceCollection) {
+          throw new GatewayRepositoryError("PERSISTENCE_FAILED");
+        }
+        const receipt = await deps.repository.checkpointIntelligenceCollection(
+          requireRun(envelope),
+          prepared as never,
+        );
+        return response(200, {
+          ok: true,
+          ...receipt,
+          telegram_message_ids: [],
+        });
       } catch (error) {
-        const code = error instanceof GatewayRepositoryError ? error.code : "PERSISTENCE_FAILED";
+        const code = error instanceof GatewayRepositoryError
+          ? error.code
+          : "PERSISTENCE_FAILED";
         return response(errorStatus(code), { ok: false, code });
       }
     }
@@ -733,7 +845,9 @@ export function createGatewayHandler(dependencies: GatewayDependencies) {
         if (error instanceof GatewayHttpError) {
           return response(error.status, { ok: false, code: error.code });
         }
-        const code = error instanceof GatewayRepositoryError ? error.code : "PERSISTENCE_FAILED";
+        const code = error instanceof GatewayRepositoryError
+          ? error.code
+          : "PERSISTENCE_FAILED";
         return response(errorStatus(code), { ok: false, code });
       }
     }
@@ -748,7 +862,9 @@ export function createGatewayHandler(dependencies: GatewayDependencies) {
       if (!leaseToken) throw new GatewayRepositoryError("PERSISTENCE_FAILED");
 
       if (envelope.operation === "record_report") {
-        if (!deps.repository.recordReport || !deps.repository.recordReportOrigin) {
+        if (
+          !deps.repository.recordReport || !deps.repository.recordReportOrigin
+        ) {
           throw new GatewayRepositoryError("PERSISTENCE_FAILED");
         }
         const payload = prepared as RecordReportPayload;
@@ -778,14 +894,31 @@ export function createGatewayHandler(dependencies: GatewayDependencies) {
         });
         let result: Record<string, unknown>;
         if (delivery.status === "suppressed") {
-          if (!deps.repository.recordReport || !deps.repository.createReportPublication ||
-            !deps.repository.suppressReportPublication) {
+          if (
+            !deps.repository.recordReport ||
+            !deps.repository.createReportPublication ||
+            !deps.repository.suppressReportPublication
+          ) {
             throw new GatewayRepositoryError("PERSISTENCE_FAILED");
           }
-          const receipt = await deps.repository.recordReport(requireRun(envelope), payload);
-          const pending = await deps.repository.createReportPublication(requireRun(envelope), payload);
-          if (!delivery.reason) throw new GatewayRepositoryError("PERSISTENCE_FAILED");
-          const suppressed = await deps.repository.suppressReportPublication(pending.idempotency_key, delivery.reason);
+          if (!delivery.payload) {
+            throw new GatewayRepositoryError("REPORT_POLICY_MISMATCH");
+          }
+          const receipt = await deps.repository.recordReport(
+            requireRun(envelope),
+            delivery.payload,
+          );
+          const pending = await deps.repository.createReportPublication(
+            requireRun(envelope),
+            delivery.payload,
+          );
+          if (!delivery.reason) {
+            throw new GatewayRepositoryError("PERSISTENCE_FAILED");
+          }
+          const suppressed = await deps.repository.suppressReportPublication(
+            pending.idempotency_key,
+            delivery.reason,
+          );
           result = {
             ok: true,
             ...receipt,
@@ -802,9 +935,11 @@ export function createGatewayHandler(dependencies: GatewayDependencies) {
             requireRun(envelope),
             delivery.payload!,
           );
-          if (!deps.repository.createReportPublication ||
+          if (
+            !deps.repository.createReportPublication ||
             !deps.repository.claimReportPublication ||
-            !deps.repository.finishReportPublication) {
+            !deps.repository.finishReportPublication
+          ) {
             throw new GatewayRepositoryError("PERSISTENCE_FAILED");
           }
           const persisted = await deps.repository.createReportPublication(
@@ -832,11 +967,18 @@ export function createGatewayHandler(dependencies: GatewayDependencies) {
               telegram_message_ids: [],
             });
           }
-          const failed = delivered.status === "failed" || delivered.status === "uncertain";
+          const failed = delivered.status === "failed" ||
+            delivered.status === "uncertain";
           const retryAllowed = delivered.status === "failed";
           result = {
             ok: !failed,
-            ...(failed ? { code: delivered.status === "uncertain" ? "DELIVERY_UNKNOWN" : "DELIVERY_FAILED" } : {}),
+            ...(failed
+              ? {
+                code: delivered.status === "uncertain"
+                  ? "DELIVERY_UNKNOWN"
+                  : "DELIVERY_FAILED",
+              }
+              : {}),
             ...receipt,
             publication_receipt: {
               status: delivered.status,
@@ -847,8 +989,16 @@ export function createGatewayHandler(dependencies: GatewayDependencies) {
           };
         }
         if (result.ok !== true) {
-          await deps.repository.failRequest(envelope.request_id, leaseToken, String(result.code));
-        } else await deps.repository.completeRequest(envelope.request_id, leaseToken, result);
+          await deps.repository.failRequest(
+            envelope.request_id,
+            leaseToken,
+            String(result.code),
+          );
+        } else {await deps.repository.completeRequest(
+            envelope.request_id,
+            leaseToken,
+            result,
+          );}
         return response(result.ok === true ? 200 : 502, result);
       }
 
@@ -892,6 +1042,7 @@ export function createGatewayHandler(dependencies: GatewayDependencies) {
             evaluations: [],
             suggestions: [],
             holding_state_changes: [],
+            cash_snapshot: null,
             publication: {
               id: deps.newId(),
               idempotency_key: envelope.request_id,
@@ -920,7 +1071,9 @@ export function createGatewayHandler(dependencies: GatewayDependencies) {
             delivered.status === "delivery_failed" ||
             delivered.status === "delivery_unknown"
           ) {
-            const code = delivered.status === "delivery_unknown" ? "DELIVERY_UNKNOWN" : "DELIVERY_FAILED";
+            const code = delivered.status === "delivery_unknown"
+              ? "DELIVERY_UNKNOWN"
+              : "DELIVERY_FAILED";
             await deps.repository.failRequest(
               envelope.request_id,
               leaseToken,
@@ -935,7 +1088,7 @@ export function createGatewayHandler(dependencies: GatewayDependencies) {
           );
           return response(200, result);
         }
-        const runId = await deps.repository.startRun(
+        const run = await deps.repository.startRun(
           envelope.request_id,
           leaseToken,
           start.phase,
@@ -943,7 +1096,8 @@ export function createGatewayHandler(dependencies: GatewayDependencies) {
         );
         const result = {
           ok: true,
-          run_id: runId,
+          run_id: run.run_id,
+          duplicate: run.duplicate,
           phase: start.phase,
           market_date: currentDate,
         };
@@ -1017,7 +1171,9 @@ export function createGatewayHandler(dependencies: GatewayDependencies) {
           result.publication_status === "delivery_failed" ||
           result.publication_status === "delivery_unknown"
         ) {
-          const code = result.publication_status === "delivery_unknown" ? "DELIVERY_UNKNOWN" : "DELIVERY_FAILED";
+          const code = result.publication_status === "delivery_unknown"
+            ? "DELIVERY_UNKNOWN"
+            : "DELIVERY_FAILED";
           await deps.repository.failRequest(
             envelope.request_id,
             leaseToken,
@@ -1040,7 +1196,9 @@ export function createGatewayHandler(dependencies: GatewayDependencies) {
         deps,
       );
     } catch (error) {
-      const code = error instanceof GatewayRepositoryError ? error.code : "PERSISTENCE_FAILED";
+      const code = error instanceof GatewayRepositoryError
+        ? error.code
+        : "PERSISTENCE_FAILED";
       if (leaseToken) {
         try {
           await deps.repository.failRequest(
@@ -1133,10 +1291,16 @@ function evidenceForAlertRule(
       (rule.session === "all" ? "regular" : rule.session);
     return {
       condition_index: conditionIndex,
-      status: supported && intraday ? "fresh" : supported ? "missing" : "unsupported",
+      status: supported && intraday
+        ? "fresh"
+        : supported
+        ? "missing"
+        : "unsupported",
       market_session: marketSession,
       evidence_ids: supported && intraday
-        ? intraday.points.map((point) => `${intraday.source}:${point.observed_at}`)
+        ? intraday.points.map((point) =>
+          `${intraday.source}:${point.observed_at}`
+        )
         : [],
       points: supported && intraday ? intraday.points : [],
     };
@@ -1148,7 +1312,9 @@ function persistableAlertEvent(
   evaluation: AlertEvaluation,
   fingerprint: string,
 ): PersistableAlertEvent {
-  const session = evaluation.market_session === "all" ? "regular" : evaluation.market_session;
+  const session = evaluation.market_session === "all"
+    ? "regular"
+    : evaluation.market_session;
   return {
     id,
     rule_id: evaluation.rule.rule_id,
@@ -1253,13 +1419,17 @@ async function deliverReadyAlert(
       accepted.accepted_at,
     );
   } catch (error) {
-    const delivery = error instanceof TelegramDeliveryError ? error : new TelegramDeliveryError("ambiguous", []);
+    const delivery = error instanceof TelegramDeliveryError
+      ? error
+      : new TelegramDeliveryError("ambiguous", []);
     return await deps.repository.finishAlertPublication(
       persisted.idempotency_key,
       claim.lease_token,
       delivery.kind === "definitive" ? "delivery_failed" : "delivery_unknown",
       delivery.partialMessageIds,
-      delivery.kind === "definitive" ? "TELEGRAM_REJECTED" : "TELEGRAM_OUTCOME_UNKNOWN",
+      delivery.kind === "definitive"
+        ? "TELEGRAM_REJECTED"
+        : "TELEGRAM_OUTCOME_UNKNOWN",
       null,
     );
   }
@@ -1314,8 +1484,12 @@ async function evaluateAlertRules(
     return evidenceByTicker.get(ticker)!;
   };
 
-  const allowedRules = work.rules.filter((item) => alertRuleAllowed(item.rule, alertPolicy));
-  const allowedDrafts = work.drafts.filter((item) => alertRuleAllowed(item.rule, alertPolicy));
+  const allowedRules = work.rules.filter((item) =>
+    alertRuleAllowed(item.rule, alertPolicy)
+  );
+  const allowedDrafts = work.drafts.filter((item) =>
+    alertRuleAllowed(item.rule, alertPolicy)
+  );
   const evaluated = await Promise.all(allowedRules.map(async (item) => {
     const providerEvidence = await evidence(item.rule.ticker);
     const evaluation = evaluateAlertRule(
@@ -1332,13 +1506,15 @@ async function evaluateAlertRules(
     );
     const recordable = publishable || unsafeOutsideCooldown(item, evaluation);
     const eventId = deps.newId();
-    const rendered = evaluation.status === "not_triggered" ? null : await renderAlertV3({
-      event_id: eventId,
-      evaluation,
-      source_evaluation: null,
-      source_summary: item.source_summary,
-      context,
-    });
+    const rendered = evaluation.status === "not_triggered"
+      ? null
+      : await renderAlertV3({
+        event_id: eventId,
+        evaluation,
+        source_evaluation: null,
+        source_summary: item.source_summary,
+        context,
+      });
     return {
       item,
       evaluation,
@@ -1357,7 +1533,9 @@ async function evaluateAlertRules(
       reason_codes: [],
       observed_at: null,
       evaluated_at: now.toISOString(),
-      market_session: item.rule.session === "all" ? "regular" : item.rule.session,
+      market_session: item.rule.session === "all"
+        ? "regular"
+        : item.rule.session,
       condition_results: item.rule.conditions.map((condition) => ({
         condition,
         passed: null,
@@ -1390,7 +1568,9 @@ async function evaluateAlertRules(
       item.recordable &&
       (item.evaluation.status === "unsafe_to_evaluate" || item === chosenEvent)
     )
-    .map((item) => persistableAlertEvent(item.eventId, item.evaluation, item.fingerprint));
+    .map((item) =>
+      persistableAlertEvent(item.eventId, item.evaluation, item.fingerprint)
+    );
   const alertPreviews = evaluated.flatMap((item) =>
     item.rendered
       ? [{
@@ -1403,9 +1583,15 @@ async function evaluateAlertRules(
   );
   const base = {
     evaluated_rules: evaluated.length,
-    unsafe_evaluations: evaluated.filter((item) => item.evaluation.status === "unsafe_to_evaluate").length,
+    unsafe_evaluations:
+      evaluated.filter((item) =>
+        item.evaluation.status === "unsafe_to_evaluate"
+      ).length,
     would_write_events: persistables.length,
-    would_publish: alertPolicy.enabled && (chosenEvent !== null || draftPreviews.length > 0) ? 1 : 0,
+    would_publish:
+      alertPolicy.enabled && (chosenEvent !== null || draftPreviews.length > 0)
+        ? 1
+        : 0,
     shadow_publish_candidates: publishable.length,
     alert_events_recorded: 0,
     publication_status: "not_created" as AlertOperationPublicationStatus,
@@ -1444,7 +1630,9 @@ async function evaluateAlertRules(
     {
       id: publicationId,
       market_date: chicagoDate(now),
-      kind: chosenEvent ? alertKind(chosenEvent.item.rule, chosenEvent.evaluation) : alertKind(chosenDraft!.item.rule),
+      kind: chosenEvent
+        ? alertKind(chosenEvent.item.rule, chosenEvent.evaluation)
+        : alertKind(chosenDraft!.item.rule),
       rendered_body: rendered.body,
       rendered_hash: rendered.hash,
       event_ids: chosenEvent ? [chosenEvent.eventId] : [],
@@ -1491,7 +1679,9 @@ async function gradeDueDecisions(
       counts: {
         inserted: 0,
         updated: 0,
-        incomplete: grades.filter((grade) => grade.coverage_status !== "complete").length,
+        incomplete: grades.filter((grade) =>
+          grade.coverage_status !== "complete"
+        ).length,
       },
       would_grade: grades.length,
     };
@@ -1526,13 +1716,17 @@ async function deliverReadyPublication(
       null,
     );
   } catch (error) {
-    const delivery = error instanceof TelegramDeliveryError ? error : new TelegramDeliveryError("ambiguous", []);
+    const delivery = error instanceof TelegramDeliveryError
+      ? error
+      : new TelegramDeliveryError("ambiguous", []);
     return await deps.repository.finishPublication(
       persisted.idempotency_key,
       claim.lease_token,
       delivery.kind === "definitive" ? "delivery_failed" : "delivery_unknown",
       delivery.partialMessageIds,
-      delivery.kind === "definitive" ? "TELEGRAM_REJECTED" : "TELEGRAM_OUTCOME_UNKNOWN",
+      delivery.kind === "definitive"
+        ? "TELEGRAM_REJECTED"
+        : "TELEGRAM_OUTCOME_UNKNOWN",
     );
   }
 }
@@ -1542,17 +1736,32 @@ async function deliverReadyReportPublication(
   parts: string[],
   deps: ResolvedDependencies,
 ): Promise<PublicationReceipt> {
-  if (!deps.repository.claimReportPublication || !deps.repository.finishReportPublication) {
+  if (
+    !deps.repository.claimReportPublication ||
+    !deps.repository.finishReportPublication
+  ) {
     throw new GatewayRepositoryError("PERSISTENCE_FAILED");
   }
-  if (persisted.status === "delivered" || persisted.status === "uncertain" ||
-    persisted.status === "suppressed") return persisted;
-  const claim = await deps.repository.claimReportPublication(persisted.idempotency_key);
+  if (
+    persisted.status === "delivered" || persisted.status === "uncertain" ||
+    persisted.status === "suppressed"
+  ) return persisted;
+  const claim = await deps.repository.claimReportPublication(
+    persisted.idempotency_key,
+  );
   if (!claim.claimed || !claim.lease_token) return claim.receipt;
   try {
-    const ids = await deps.sendTelegram(parts, deps.telegramChatId, deps.telegramToken);
+    const ids = await deps.sendTelegram(
+      parts,
+      deps.telegramChatId,
+      deps.telegramToken,
+    );
     return await deps.repository.finishReportPublication(
-      persisted.idempotency_key, claim.lease_token, "delivered", ids, null,
+      persisted.idempotency_key,
+      claim.lease_token,
+      "delivered",
+      ids,
+      null,
     );
   } catch (error) {
     const delivery = error instanceof TelegramDeliveryError
@@ -1564,7 +1773,9 @@ async function deliverReadyReportPublication(
       claim.lease_token,
       delivery.kind === "definitive" ? "failed" : "uncertain",
       [],
-      delivery.kind === "definitive" ? "TELEGRAM_REJECTED" : "TELEGRAM_OUTCOME_UNKNOWN",
+      delivery.kind === "definitive"
+        ? "TELEGRAM_REJECTED"
+        : "TELEGRAM_OUTCOME_UNKNOWN",
     );
   }
 }
@@ -1614,14 +1825,6 @@ async function evaluateAndPublish(
       return quote ? [[holding.ticker, quote]] : [];
     }),
   );
-  const currentPowder = context.dry_powder.find((item) =>
-    item.month === bundle.market_date.slice(0, 7)
-  );
-  context.spendable_cash = {
-    core: context.spendable_cash?.core ?? null,
-    growth: currentPowder?.growth_available ?? null,
-    speculative: currentPowder?.spec_available ?? null,
-  };
   const preliminaryEvaluations = bundle.candidates.map((candidate) =>
     evaluateCandidate(
       candidate,
@@ -1639,6 +1842,7 @@ async function evaluateAndPublish(
     preliminaryEvaluations,
     context,
     activePolicy,
+    deps.now(),
   );
   const evaluations = reservation.evaluations;
   const comparisons = await buildPortfolioComparisons(
@@ -1654,7 +1858,9 @@ async function evaluateAndPublish(
     context,
     deps,
   );
-  const suggestions = evaluations.map((evaluation) => suggestionFromEvaluation(evaluation, bundle.market_date))
+  const suggestions = evaluations.map((evaluation) =>
+    suggestionFromEvaluation(evaluation, bundle.market_date)
+  )
     .filter((item): item is Record<string, unknown> => item !== null);
   const alertDrafts: PersistableAlertDraft[] = [];
   for (const evaluation of evaluations) {
@@ -1679,7 +1885,9 @@ async function evaluateAndPublish(
   }
   const alertDraftPreviews = await Promise.all(
     alertDrafts.map(async (draft) => {
-      const source = evaluations.find((evaluation) => evaluation.evaluation_id === draft.source_evaluation_id);
+      const source = evaluations.find((evaluation) =>
+        evaluation.evaluation_id === draft.source_evaluation_id
+      );
       if (!source) throw new GatewayRepositoryError("POLICY_REJECTED");
       const previewEvaluation: AlertEvaluation = {
         rule: draft.rule_snapshot,
@@ -1687,7 +1895,9 @@ async function evaluateAndPublish(
         reason_codes: [],
         observed_at: source.normalized.quote_as_of,
         evaluated_at: deps.now().toISOString(),
-        market_session: draft.rule_snapshot.session === "all" ? "regular" : draft.rule_snapshot.session,
+        market_session: draft.rule_snapshot.session === "all"
+          ? "regular"
+          : draft.rule_snapshot.session,
         condition_results: draft.rule_snapshot.conditions.map((condition) => ({
           condition,
           passed: null,
@@ -1744,9 +1954,18 @@ async function evaluateAndPublish(
   if (!leaseToken) throw new GatewayRepositoryError("PERSISTENCE_FAILED");
   // Morning/post-market brief delivery belongs to the immutable report key. The
   // evaluation receipt remains durable, but cannot create a competing Telegram send.
-  const periodicReport = bundle.phase === "pre-market" || bundle.phase === "post-market" ||
+  const periodicReport = bundle.phase === "pre-market" ||
+    bundle.phase === "post-market" ||
     bundle.phase === "intraday";
   const publicationStatus = periodicReport ? "suppressed" : rendered.status;
+  const requiresCashSnapshot = evaluations.some((evaluation) =>
+    evaluation.status === "approved" &&
+    (evaluation.final_action === "buy" || evaluation.final_action === "add")
+  );
+  const cashSnapshot = context.reconciled_cash_snapshot;
+  if (requiresCashSnapshot && !cashSnapshot) {
+    throw new GatewayRepositoryError("CASH_UNAVAILABLE");
+  }
   const persistedInput: PersistedBundle = {
     request_id: envelope.request_id,
     request_lease_token: leaseToken,
@@ -1757,6 +1976,12 @@ async function evaluateAndPublish(
     holding_state_changes: evaluations.flatMap((evaluation) =>
       evaluation.holding_state_change ? [evaluation.holding_state_change] : []
     ),
+    cash_snapshot: requiresCashSnapshot
+      ? {
+        snapshot_id: cashSnapshot!.snapshot_id,
+        ledger_watermark: cashSnapshot!.ledger_watermark,
+      }
+      : null,
     publication: {
       id: deps.newId(),
       idempotency_key: envelope.request_id,
@@ -1770,6 +1995,15 @@ async function evaluateAndPublish(
     },
   };
   const persisted = await deps.repository.applyDecisionBundle(persistedInput);
+  const runOutcome =
+    bundle.phase === "intraday" && rendered.status === "suppressed"
+      ? await deps.repository.recordRunOutcome(
+        envelope.request_id,
+        leaseToken,
+        requireRun(envelope),
+        "no_trigger",
+      )
+      : null;
   let alertDraftsCreated = 0;
   let alertDraftStatus = alertDrafts.length === 0
     ? "not_applicable"
@@ -1798,6 +2032,7 @@ async function evaluateAndPublish(
     run_id: requireRun(envelope),
     publication_id: delivered.id,
     publication_status: delivered.status,
+    run_outcome: runOutcome,
     telegram_message_ids: delivered.telegram_message_ids,
     evaluation_count: evaluations.length,
     policy_decision_ids: evaluations.map((evaluation) =>
@@ -1819,15 +2054,21 @@ async function evaluateAndPublish(
     suggestion_count: suggestions.length,
     alert_drafts_created: alertDraftsCreated,
     alert_draft_status: alertDraftStatus,
-    alert_draft_previews: activePolicy.alerts_v3?.shadow ? alertDraftPreviews : [],
+    alert_draft_previews: activePolicy.alerts_v3?.shadow
+      ? alertDraftPreviews
+      : [],
     comparison_count: comparisons.length,
     comparison_coverage: comparisonCoverage(comparisons),
     companion_status: companion?.qualification_status ??
       (bundle.comparisons ? "not_nominated" : "not_reviewed"),
     companion_analysis: companion,
     preview: bundle.phase === "on-demand" ? rendered.body : undefined,
-    ...(delivered.status === "delivery_unknown" ? { code: "DELIVERY_UNKNOWN" } : {}),
-    ...(delivered.status === "delivery_failed" ? { code: "DELIVERY_FAILED" } : {}),
+    ...(delivered.status === "delivery_unknown"
+      ? { code: "DELIVERY_UNKNOWN" }
+      : {}),
+    ...(delivered.status === "delivery_failed"
+      ? { code: "DELIVERY_FAILED" }
+      : {}),
   };
   if (
     delivered.status === "delivery_failed" ||
@@ -1953,7 +2194,9 @@ async function buildPortfolioComparisons(
   if (requests.length === 0) return [];
   const ownerTickers = new Set([
     ...context.holdings.map((holding) => holding.ticker),
-    ...context.owner_plans.filter((plan) => plan.active).map((plan) => plan.ticker),
+    ...context.owner_plans.filter((plan) => plan.active).map((plan) =>
+      plan.ticker
+    ),
   ]);
   if (requests.some((request) => !ownerTickers.has(request.baseline_ticker))) {
     throw new GatewayRepositoryError("POLICY_REJECTED");
@@ -1974,17 +2217,23 @@ async function buildPortfolioComparisons(
     })),
   );
   return requests.map((request) => {
-    const alternative = evaluations.find((evaluation) => evaluation.candidate.ticker === request.alternative_ticker);
+    const alternative = evaluations.find((evaluation) =>
+      evaluation.candidate.ticker === request.alternative_ticker
+    );
     const evidenceAvailable = alternative !== undefined &&
       request.evidence_ids.every((id) => {
-        const evidence = alternative.candidate.evidence.find((item) => item.id === id);
+        const evidence = alternative.candidate.evidence.find((item) =>
+          item.id === id
+        );
         return evidence?.status === "fresh" || evidence?.status === "fallback";
       });
-    const checkedRequest = alternative?.status === "approved" && evidenceAvailable ? request : {
-      ...request,
-      prospective_view: "insufficient" as const,
-      reason: "Gateway policy or current evidence did not support a forward comparison conclusion.",
-    };
+    const checkedRequest =
+      alternative?.status === "approved" && evidenceAvailable ? request : {
+        ...request,
+        prospective_view: "insufficient" as const,
+        reason:
+          "Gateway policy or current evidence did not support a forward comparison conclusion.",
+      };
     return comparePortfolioAlternative(
       checkedRequest,
       histories.get(request.baseline_ticker) ?? [],
@@ -2005,7 +2254,9 @@ async function buildLongTermCompanion(
   if (!request) return undefined;
   const ownerTickers = new Set([
     ...context.holdings.map((holding) => holding.ticker),
-    ...context.owner_plans.filter((plan) => plan.active).map((plan) => plan.ticker),
+    ...context.owner_plans.filter((plan) => plan.active).map((plan) =>
+      plan.ticker
+    ),
   ]);
   if (!ownerTickers.has(request.baseline_ticker)) {
     throw new GatewayRepositoryError("POLICY_REJECTED");
@@ -2019,16 +2270,21 @@ async function buildLongTermCompanion(
   if (!rolePolicy.allowed) {
     return analyzeLongTermCompanion(request, [], [], rolePolicy);
   }
-  const evaluation = evaluations.find((item) => item.candidate.ticker === request.companion_ticker);
+  const evaluation = evaluations.find((item) =>
+    item.candidate.ticker === request.companion_ticker
+  );
   const evidenceAvailable = evaluation !== undefined &&
     request.evidence_ids.every((id) => {
-      const evidence = evaluation.candidate.evidence.find((item) => item.id === id);
+      const evidence = evaluation.candidate.evidence.find((item) =>
+        item.id === id
+      );
       return evidence?.status === "fresh" || evidence?.status === "fallback";
     });
   if (evaluation?.status !== "approved" || !evidenceAvailable) {
     const denied: CompanionRoleDecision = {
       allowed: false,
-      reason: "Gateway policy or current evidence did not support a long-term companion conclusion.",
+      reason:
+        "Gateway policy or current evidence did not support a long-term companion conclusion.",
       recurring_plan_review_eligible: false,
     };
     return analyzeLongTermCompanion(request, [], [], denied);
@@ -2050,7 +2306,8 @@ function comparisonCoverage(
 ): Record<string, number> {
   const counts: Record<string, number> = {};
   for (const comparison of comparisons) {
-    counts[comparison.coverage_status] = (counts[comparison.coverage_status] ?? 0) + 1;
+    counts[comparison.coverage_status] =
+      (counts[comparison.coverage_status] ?? 0) + 1;
   }
   return counts;
 }

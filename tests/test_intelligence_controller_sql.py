@@ -4,7 +4,7 @@ Never reads credentials or connects to an existing server.
 """
 import hashlib
 import json
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 import shutil
 import subprocess
@@ -487,3 +487,182 @@ def test_scheduled_finish_requires_successful_date_bound_receipt_chain(databases
         (correct_report_id,),
     )
     assert db.execute("SELECT public.finish_market_analysis_run(%s)", (run,)).fetchone()[0]["status"] == "suppressed"
+
+
+def test_reconciled_cash_snapshot_is_explicit_fresh_and_invalidated_by_ledger_mutation(databases):
+    db = databases["ordered"]
+    snapshot_id = uuid.uuid4()
+    now = db.execute("SELECT statement_timestamp()").fetchone()[0]
+    ledger = db.execute(
+        "SELECT public.read_portfolio_cash_ledger_watermark()"
+    ).fetchone()[0]
+    watermark = int(ledger["ledger_watermark"])
+    assert ledger["ledger_updated_at"] <= now.isoformat()
+    recorded = db.execute(
+        "SELECT public.record_reconciled_cash_snapshot(%s,%s,%s,%s,%s)",
+        (
+            snapshot_id,
+            now,
+            now + timedelta(minutes=15),
+            watermark,
+            Jsonb({"core": "300", "growth": "1000", "speculative": "0"}),
+        ),
+    ).fetchone()[0]
+    assert recorded["snapshot_id"] == str(snapshot_id)
+    assert datetime.fromisoformat(recorded["as_of"]) == now
+    assert datetime.fromisoformat(recorded["fresh_through"]) == now + timedelta(minutes=15)
+    assert recorded["ledger_watermark"] == str(watermark)
+    assert recorded["spendable_cash"] == {
+        "core": "300", "growth": "1000", "speculative": "0"
+    }
+    assert recorded["duplicate"] is False
+    current = db.execute(
+        "SELECT public.read_reconciled_cash_snapshot(%s)", (now,)
+    ).fetchone()[0]
+    assert current["snapshot_id"] == str(snapshot_id)
+    assert current["ledger_watermark"] == str(watermark)
+
+    db.execute(
+        "INSERT INTO public.transactions(ticker,side,qty,price,source,executed_on) "
+        "VALUES('CASHX','buy',1,1,'test',CURRENT_DATE)"
+    )
+    assert db.execute(
+        "SELECT public.read_reconciled_cash_snapshot(%s)", (now,)
+    ).fetchone()[0] is None
+    with pytest.raises(
+        psycopg.errors.ObjectNotInPrerequisiteState, match="CASH_UNAVAILABLE"
+    ):
+        db.execute(
+            "SELECT public.apply_market_decision_bundle_with_cash_snapshot("
+            "%s,%s,%s,1,'[{\"policy_status\":\"approved\","
+            "\"final_action\":\"buy\"}]'::jsonb,'[]'::jsonb,'{}'::jsonb,%s,%s)",
+            (uuid.uuid4(), uuid.uuid4(), uuid.uuid4(), snapshot_id, watermark),
+        )
+    assert int(db.execute(
+        "SELECT public.read_portfolio_cash_ledger_watermark()"
+    ).fetchone()[0]["ledger_watermark"]) > watermark
+    start_request, start_lease = uuid.uuid4(), uuid.uuid4()
+    db.execute(
+        "INSERT INTO market_gateway_requests(request_id,operation,status,lease_token) "
+        "VALUES(%s,'start_run','claimed',%s)",
+        (start_request, start_lease),
+    )
+    run = db.execute(
+        "SELECT public.start_market_analysis_run(%s,%s,'intraday','2026-09-11')",
+        (start_request, start_lease),
+    ).fetchone()[0]["run_id"]
+    retry_request, retry_lease = uuid.uuid4(), uuid.uuid4()
+    publication_id = uuid.uuid4()
+    db.execute(
+        "INSERT INTO market_gateway_requests(request_id,operation,run_id,status,lease_token) "
+        "VALUES(%s,'evaluate_and_publish',%s,'claimed',%s)",
+        (retry_request, run, retry_lease),
+    )
+    db.execute(
+        "INSERT INTO market_publications(id,idempotency_key,run_id,market_date,phase,kind,"
+        "template_version,rendered_body,rendered_hash,status) "
+        "VALUES(%s,%s,%s,'2026-09-11','intraday','brief',2,'',repeat('a',64),'suppressed')",
+        (publication_id, retry_request, run),
+    )
+    recovered = db.execute(
+        "SELECT public.apply_market_decision_bundle_with_cash_snapshot("
+        "%s,%s,%s,1,'[{\"policy_status\":\"approved\","
+        "\"final_action\":\"buy\"}]'::jsonb,'[]'::jsonb,'{}'::jsonb,%s,%s)",
+        (retry_request, run, retry_lease, snapshot_id, watermark),
+    ).fetchone()[0]
+    assert recovered == {
+        "publication_id": str(publication_id),
+        "status": "suppressed",
+        "duplicate": True,
+    }
+    db.execute(
+        "INSERT INTO public.dry_powder(month,growth_available,spec_available,rolled_months) "
+        "VALUES('2099-12',999999999,999999999,99) ON CONFLICT(month) DO UPDATE "
+        "SET growth_available=EXCLUDED.growth_available"
+    )
+    assert db.execute(
+        "SELECT public.read_reconciled_cash_snapshot(%s)", (now,)
+    ).fetchone()[0] is None
+    assert not db.execute(
+        "SELECT has_function_privilege('authenticated',"
+        "'public.record_reconciled_cash_snapshot(uuid,timestamptz,timestamptz,bigint,jsonb)','EXECUTE')"
+    ).fetchone()[0]
+    assert not db.execute(
+        "SELECT has_function_privilege('authenticated',"
+        "'public.read_portfolio_cash_ledger_watermark()','EXECUTE')"
+    ).fetchone()[0]
+
+
+def test_quiet_scheduled_intraday_outcome_finishes_without_a_report(databases):
+    db = databases["ordered"]
+    market_date = "2026-09-10"
+    start_request, start_lease = uuid.uuid4(), uuid.uuid4()
+    db.execute(
+        "INSERT INTO market_gateway_requests(request_id,operation,status,lease_token) "
+        "VALUES(%s,'start_run','claimed',%s)",
+        (start_request, start_lease),
+    )
+    start = db.execute(
+        "SELECT public.start_market_analysis_run(%s,%s,'intraday',%s)",
+        (start_request, start_lease, market_date),
+    ).fetchone()[0]
+    assert start["duplicate"] is False
+    run, completion, _, payload = prepared_run(
+        db, run_id=start["run_id"], phase="intraday", market_date=market_date
+    )
+    db.execute(
+        "SELECT public.record_market_intelligence(%s,%s,%s)",
+        (run, completion, Jsonb(payload)),
+    )
+
+    evaluation_request, evaluation_lease = uuid.uuid4(), uuid.uuid4()
+    db.execute(
+        "INSERT INTO market_gateway_requests(request_id,operation,run_id,status,lease_token) "
+        "VALUES(%s,'evaluate_and_publish',%s,'claimed',%s)",
+        (evaluation_request, run, evaluation_lease),
+    )
+    db.execute(
+        "INSERT INTO market_publications(id,idempotency_key,run_id,market_date,phase,kind,"
+        "template_version,rendered_body,rendered_hash,status) "
+        "VALUES(%s,%s,%s,%s,'intraday','brief',2,'',repeat('a',64),'suppressed')",
+        (uuid.uuid4(), evaluation_request, run, market_date),
+    )
+    outcome = db.execute(
+        "SELECT public.record_market_run_outcome(%s,%s,%s,'no_trigger')",
+        (evaluation_request, evaluation_lease, run),
+    ).fetchone()[0]
+    assert outcome == {"run_id": str(run), "outcome": "no_trigger", "duplicate": False}
+    replay = db.execute(
+        "SELECT public.record_market_run_outcome(%s,%s,%s,'no_trigger')",
+        (evaluation_request, evaluation_lease, run),
+    ).fetchone()[0]
+    assert replay["duplicate"] is True
+    unrelated_request, unrelated_lease = uuid.uuid4(), uuid.uuid4()
+    db.execute(
+        "INSERT INTO market_gateway_requests(request_id,operation,run_id,status,lease_token) "
+        "VALUES(%s,'evaluate_and_publish',%s,'claimed',%s)",
+        (unrelated_request, run, unrelated_lease),
+    )
+    with pytest.raises(
+        psycopg.errors.ObjectNotInPrerequisiteState,
+        match="suppressed evaluation receipt unavailable",
+    ):
+        db.execute(
+            "SELECT public.record_market_run_outcome(%s,%s,%s,'no_trigger')",
+            (unrelated_request, unrelated_lease, run),
+        )
+    db.execute(
+        "UPDATE market_gateway_requests SET status='completed',response=%s WHERE request_id=%s",
+        (Jsonb({"ok": True, "run_outcome": outcome}), evaluation_request),
+    )
+    receipt = db.execute(
+        "SELECT public.finish_market_analysis_run(%s)", (run,)
+    ).fetchone()[0]
+    assert receipt["status"] == "suppressed"
+    assert db.execute(
+        "SELECT count(*) FROM market_reports WHERE run_id=%s", (run,)
+    ).fetchone()[0] == 0
+    assert db.execute(
+        "SELECT count(*) FROM market_report_publications p JOIN market_reports r ON r.id=p.report_id "
+        "WHERE r.run_id=%s", (run,)
+    ).fetchone()[0] == 0

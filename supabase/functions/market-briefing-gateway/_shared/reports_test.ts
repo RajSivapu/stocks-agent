@@ -144,10 +144,24 @@ Deno.test("report links require HTTPS and allowlisted origin", () => {
 });
 Deno.test("urgent and intraday authority derives from final terms instead of caller flags", () => {
   const urgent = report("urgent");
+  urgent.report.summary = "SELL EVERYTHING NOW";
+  urgent.report.full_markdown = "Caller says SELL 999999 shares";
   urgent.report.actionable_risk = true;
+  const notActionable = renderReportDelivery(
+    resign(urgent),
+    [decision()],
+    OPTIONS,
+  );
+  assertEquals(notActionable.reason, "not_actionable");
+  assert(
+    notActionable.payload !== undefined &&
+      !JSON.stringify(notActionable.payload).includes("999999") &&
+      !JSON.stringify(notActionable.payload).includes("SELL EVERYTHING"),
+    "suppressed urgent report retained caller advice",
+  );
   assertEquals(
-    renderReportDelivery(resign(urgent), [decision()], OPTIONS).reason,
-    "not_actionable",
+    parseRecordReportPayload(notActionable.payload).report_hash,
+    notActionable.payload!.report_hash,
   );
   assertEquals(
     renderReportDelivery(urgent, [
@@ -158,17 +172,23 @@ Deno.test("urgent and intraday authority derives from final terms instead of cal
     "ready",
   );
   const intraday = report("intraday");
+  intraday.report.summary = "BUY 999999 shares immediately";
+  intraday.report.full_markdown = intraday.report.summary;
   intraday.report.intraday_triggered = true;
-  assertEquals(
-    renderReportDelivery(resign(intraday), [
-      decision({
-        final_action: "watch",
-        status: "downgraded",
-        final_alert_urgency: null,
-        approved_terms: null,
-      }),
-    ], OPTIONS).reason,
-    "no_trigger",
+  const noTrigger = renderReportDelivery(resign(intraday), [
+    decision({
+      final_action: "watch",
+      status: "downgraded",
+      final_alert_urgency: null,
+      approved_terms: null,
+    }),
+  ], OPTIONS);
+  assertEquals(noTrigger.reason, "no_trigger");
+  assert(
+    noTrigger.payload !== undefined &&
+      !JSON.stringify(noTrigger.payload).includes("999999") &&
+      JSON.stringify(noTrigger.payload).includes("WATCH"),
+    "no-trigger report was not canonical policy prose",
   );
 });
 Deno.test("an urgent actionable final decision controls the canonical report kind and heading", () => {
@@ -200,7 +220,10 @@ Deno.test("urgent actionable final decisions outrank routine pure-HOLD alerts", 
     actionable.evaluation_id,
     routineHold.evaluation_id,
   ];
-  const delivery = renderReportDelivery(resign(value), [actionable, routineHold], OPTIONS);
+  const delivery = renderReportDelivery(resign(value), [
+    actionable,
+    routineHold,
+  ], OPTIONS);
   assertEquals(delivery.status, "ready");
   assertEquals(delivery.payload!.kind, "urgent");
   assert(
