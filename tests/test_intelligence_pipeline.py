@@ -236,3 +236,43 @@ def test_pipeline_persists_provider_identity_urls_times_and_discovery_status():
     assert item["entity_ids"] == ["cik:0000000001"]
     assert item["security_ids"] == ["TEST"]
     assert item["discovery_status"] == "qualified"
+
+
+def test_exact_duplicate_persists_once_but_retains_receipt_accounting():
+    gateway = FakeGateway()
+    adapter = FakeAdapter()
+    source = raw_item("holding:TEST", official=True)
+    source = replace(source, security_ids=("TEST",), metadata=MappingProxyType({"exposure_kind": "filing"}))
+    adapter.collect = lambda query: CollectionResult((source, source), receipt(adapter.provider), query.limit)
+
+    result = IntelligencePipeline(gateway, [adapter], context={"holdings": {"TEST": "1"}}).run(
+        request("intraday")
+    )
+
+    assert len(gateway.payloads[-1]["items"]) == 1
+    assert result.coverage["duplicate_count"] == 1
+    assert result.coverage["duplicate_references"][0]["reason"] == "same_upstream_item_id"
+    assert [drop["reason"] for drop in result.drops if drop["kind"] == "source_item"] == ["same_upstream_item_id"]
+
+
+def test_near_corroboration_reaches_discovery_and_packet_evidence():
+    gateway = FakeGateway()
+    adapter = FakeAdapter()
+    first = replace(
+        raw_item("holding:TEST", official=True), security_ids=("TEST",),
+        metadata=MappingProxyType({"exposure_kind": "filing"}),
+    )
+    second = replace(
+        first, provider="finnhub", upstream_item_id="corroborating-story",
+        source_url="https://publisher.example/corroborating-story",
+        normalized_text="Evidence!", canonical_content='{"summary":"Evidence!","title":"Market event"}',
+    )
+    adapter.collect = lambda query: CollectionResult((first, second), receipt(adapter.provider), query.limit)
+
+    result = IntelligencePipeline(gateway, [adapter], context={"holdings": {"TEST": "1"}}).run(
+        request("intraday")
+    )
+
+    assert result.coverage["near_duplicate_count"] == 1
+    assert len(gateway.payloads[-1]["events"]) == 2
+    assert len(result.packet.to_dict()["evidence"]) == 2

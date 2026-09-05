@@ -323,8 +323,11 @@ class IntelligencePipeline:
 
         dispositions = deduplicate(item for item, _receipt_id in raw_items)
         receipt_ids = [receipt_id for _item, receipt_id in raw_items]
-        accepted = [value.item for value in dispositions if value.disposition == "accepted"]
-        events, relationships, ranked = _discover(accepted, self.context)
+        discovery_items = [
+            value.item for value in dispositions
+            if value.disposition in {"accepted", "near_duplicate"}
+        ]
+        events, relationships, ranked = _discover(discovery_items, self.context)
         qualified_ids = {
             evidence_key(item)
             for relation in relationships if relation.eligible_for_ranking
@@ -334,6 +337,7 @@ class IntelligencePipeline:
             _item_row(run_id, value, receipt_ids[index], index,
                       qualified=evidence_key(value.item) in qualified_ids)
             for index, value in enumerate(dispositions)
+            if value.disposition != "duplicate"
         ]
         failure_codes = sorted(
             f"{result.receipt.provider}:{result.receipt.error_code or 'SOURCE_FAILED'}"
@@ -341,7 +345,7 @@ class IntelligencePipeline:
             if result.receipt.status not in {"succeeded", "cache_hit"}
         )
         coverage = Coverage({
-            "accepted_item_count": len(accepted),
+            "accepted_item_count": len(discovery_items),
             "complete_market_coverage": False,
             "domains_checked": list(targets),
             "duplicate_count": sum(
@@ -357,8 +361,17 @@ class IntelligencePipeline:
             "discovery_outcomes": [
                 {"provider": result.receipt.provider,
                  "status": "insufficient_coverage" if result.receipt.status not in {"succeeded", "cache_hit"}
-                 else "no_event" if not result.items else "completed"}
+                 else "no_event" if not result.items
+                 else "qualified" if any(
+                     evidence_key(item) in qualified_ids for item in result.items
+                 ) else "insufficient_coverage"}
                 for result in results
+            ],
+            "duplicate_references": [
+                {"item_id": evidence_key(value.item), "receipt_id": receipt_ids[index],
+                 "reason": value.reason}
+                for index, value in enumerate(dispositions)
+                if value.disposition == "duplicate"
             ],
         })
         limits = replace(
@@ -401,7 +414,7 @@ class IntelligencePipeline:
                 "reason": str(value.reason),
             }
             for value in dispositions
-            if value.disposition != "accepted"
+            if value.disposition == "duplicate"
         )
         packet_drops = tuple(
             {"candidate_key": drop.candidate_key, "item_id": drop.item_id,

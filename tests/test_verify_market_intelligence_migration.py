@@ -256,6 +256,8 @@ def test_schema_declares_complete_bounded_append_only_ledgers_and_rpcs():
         sql = path.read_text()
         assert "CREATE TABLE IF NOT EXISTS public.market_source_item_provenance" in sql
         assert "market_source_item_provenance_append_only" in sql
+        assert "octet_length(entity_ids::text)<=4096" in sql
+        assert "octet_length(security_ids::text)<=1024" in sql
 
     for path in (MIGRATION, SCHEMA):
         sql = path.read_text()

@@ -61,3 +61,21 @@
 - The new provenance table stores the publisher link separately so legacy Task 4 fact interfaces
   continue to read the provider request reference. A subsequent display-layer migration can join
   provenance for publisher-link presentation without changing those persisted fact contracts.
+
+## Controller remediation (round 2)
+
+- Exact duplicate evidence rows are now collapsed before persistence, preventing duplicate source-item
+  UUID inserts. Their receipt/item/reason references are retained in bounded completion coverage and
+  receipt accounting, while near-duplicate corroboration remains in discovery and packet evidence.
+- Discovery outcomes are derived only after relationship qualification and use only `qualified`,
+  `no_event`, or `insufficient_coverage`.
+- Gateway parsing rejects secret-bearing request URL query/path values before any RPC. Schema now
+  exactly uses the migration's identifier-array byte bounds. Federal Register requests use its
+  documented `conditions[...]`, `per_page`, and `order` parameter shape.
+
+### Controller round 2 evidence
+
+- Final focused gate: `126 passed` across focused Task 7 Python and migration tests; gateway Deno
+  contract tests: `3 passed`; `git diff --check` passed.
+- Fixtures only: no network/provider calls, database writes, deployment, Telegram send, brokerage
+  action, paid provider, or full-suite run.

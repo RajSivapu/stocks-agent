@@ -14,7 +14,7 @@ class GdeltAdapter(SourceAdapter):
 
     def _evidence_url(self, query: CollectionQuery) -> str:
         params = urlencode({
-            "query": query.text,
+            "query": " ".join((query.text, *query.symbols)).strip(),
             "mode": "ArtList",
             "format": "json",
             "maxrecords": min(query.limit, self.max_items_per_request),

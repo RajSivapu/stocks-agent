@@ -114,6 +114,11 @@ Deno.test("record_intelligence accepts persisted provider provenance but rejects
     entity_ids: [], security_ids: [], discovery_status: "no_event",
   });
   assertThrows(() => parseGatewayEnvelope(invalid), "request_url");
+
+  const secretBearing = validRecordIntelligenceEnvelope();
+  secretBearing.payload.items[0].request_url =
+    "https://api.gdeltproject.org/api/v2/doc/doc?api_key=not-persistable";
+  assertThrows(() => parseGatewayEnvelope(secretBearing), "secret-bearing");
 });
 
 Deno.test("canonical JSON and hashes match Task 2 semantic ordering", () => {

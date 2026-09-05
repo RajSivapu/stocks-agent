@@ -286,7 +286,11 @@ function canonicalizeUrl(value: string, path: string): string {
 
 function providerRequestUrl(value: unknown, provider: unknown, path: string): string {
   const url = canonicalizeUrl(stringValue(value, path, 2_048), path);
-  const host = new URL(url).hostname;
+  const parsed = new URL(url);
+  if (/(?:api[_-]?key|token|secret|password)=/i.test(`${parsed.pathname}?${parsed.search}`)) {
+    throw new Error(`${path} contains a secret-bearing query or path`);
+  }
+  const host = parsed.hostname;
   if (!PROVIDER_HOSTS[String(provider)]?.includes(host)) {
     throw new Error(`${path} host is not approved for provider`);
   }

@@ -22,10 +22,14 @@ class OfficialAdapter(SourceAdapter):
                 'observation_end': query.end.date().isoformat(),
                 'limit': min(query.limit, self.max_items_per_request),
             })}"
-        return f"{self.endpoint}?{urlencode({
-            'query': query.text, 'limit': min(query.limit, self.max_items_per_request),
-            'from': query.start.date().isoformat(), 'to': query.end.date().isoformat(),
-        })}"
+        if self.provider == "federal_register":
+            return f"{self.endpoint}?{urlencode({
+                'conditions[term]': ' '.join((query.text, *query.symbols)).strip(),
+                'conditions[publication_date][gte]': query.start.date().isoformat(),
+                'conditions[publication_date][lte]': query.end.date().isoformat(),
+                'per_page': min(query.limit, self.max_items_per_request), 'order': 'newest',
+            })}"
+        return f"{self.endpoint}?{urlencode({'query': query.text, 'limit': min(query.limit, self.max_items_per_request), 'from': query.start.date().isoformat(), 'to': query.end.date().isoformat()})}"
 
     def _request(self, query: CollectionQuery) -> HttpRequest:
         if self.provider == "sec_edgar":
@@ -61,6 +65,8 @@ class OfficialAdapter(SourceAdapter):
             # The approved provider exists, but abstract themes do not identify a
             # documented free endpoint/series. Do not spend quota guessing one.
             raise SourceFailure("UNSUPPORTED_QUERY")
+        if self.provider == "federal_register":
+            return HttpRequest(self._request_reference(query))
         params = urlencode({
             "query": query.text,
             "limit": min(query.limit, self.max_items_per_request),

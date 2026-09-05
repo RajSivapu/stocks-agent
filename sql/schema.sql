@@ -4373,8 +4373,8 @@ CREATE TABLE IF NOT EXISTS public.market_source_item_provenance (
   canonical_item_url TEXT NOT NULL CHECK (char_length(canonical_item_url) <= 2048 AND canonical_item_url ~ '^https://'),
   request_url TEXT NOT NULL CHECK (char_length(request_url) <= 2048 AND request_url ~ '^https://'),
   retrieved_at TIMESTAMPTZ NOT NULL, reporting_at TIMESTAMPTZ,
-  entity_ids JSONB NOT NULL CHECK (jsonb_typeof(entity_ids)='array' AND jsonb_array_length(entity_ids)<=32),
-  security_ids JSONB NOT NULL CHECK (jsonb_typeof(security_ids)='array' AND jsonb_array_length(security_ids)<=32),
+  entity_ids JSONB NOT NULL CHECK (jsonb_typeof(entity_ids)='array' AND jsonb_array_length(entity_ids)<=32 AND octet_length(entity_ids::text)<=4096),
+  security_ids JSONB NOT NULL CHECK (jsonb_typeof(security_ids)='array' AND jsonb_array_length(security_ids)<=32 AND octet_length(security_ids::text)<=1024),
   discovery_status TEXT NOT NULL CHECK (discovery_status IN ('qualified','no_event','insufficient_coverage')),
   created_at TIMESTAMPTZ NOT NULL DEFAULT statement_timestamp()
 );

@@ -217,6 +217,22 @@ def test_official_release_and_effective_timestamps_remain_distinct():
     assert item.effective_at.isoformat() == "2026-09-04T12:00:00+00:00"
 
 
+def test_federal_register_uses_documented_conditions_and_per_page_shape():
+    http = FixtureHttp(FIXTURES["federal_register"])
+    build_adapter(
+        "federal_register", http,
+        QuotaSession({"federal_register": ({"reservation_id": "fr-shape", "reserved_requests": 1},)}),
+        clock=lambda: NOW,
+    ).collect(sample_query(symbols=("CENX",)))
+
+    params = parse_qs(urlsplit(http.requests[0].url).query)
+    assert "conditions[term]" in params and "CENX" in params["conditions[term]"][0]
+    assert "conditions[publication_date][gte]" in params
+    assert "conditions[publication_date][lte]" in params
+    assert params["per_page"] == ["2"]
+    assert "query" not in params and "limit" not in params
+
+
 def test_newly_published_prior_period_filing_is_retained_with_distinct_times():
     payload = {"cik": "0000000001", "name": "Test Issuer", "filings": {"recent": {
         "accessionNumber": ["0000000001-26-000002"],
