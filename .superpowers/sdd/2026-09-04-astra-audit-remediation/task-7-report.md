@@ -111,3 +111,15 @@
 
 - Focused executable two-run test proves stable source item identity, distinct downstream graph IDs,
   and same-run stability. Final focused gate: `129 passed` Python; gateway Deno: `3 passed`.
+
+## Controller remediation (round 5)
+
+- Reordered consolidated schema blocks into the required fresh-schema call chain: base recorder,
+  provider-v2 host/secret validator, immutable reuse layer, then run-provenance wrapper. The final
+  wrapper delegates to provider-v2 and cannot be renamed into or recurse through itself.
+- Added a structural body/order regression and updated the two-run fixture to use distinct request
+  windows while retaining the same immutable source identity.
+
+### Controller round 5 evidence
+
+- Final focused gate: `130 passed` Python tests and `3 passed` Deno tests; `git diff --check` passed.

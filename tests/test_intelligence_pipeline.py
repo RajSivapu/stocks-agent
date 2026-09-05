@@ -287,14 +287,18 @@ def test_two_runs_reuse_source_identity_but_scope_event_graph_ids_by_run():
                      metadata=MappingProxyType({"exposure_kind": "filing"}),
                      request_url="https://api.gdeltproject.org/api/v2/doc/doc?query=TEST&start=one")
     result = CollectionResult((source,), receipt("gdelt"), 20)
+    second_result = CollectionResult((replace(
+        source, request_url="https://api.gdeltproject.org/api/v2/doc/doc?query=TEST&start=two"
+    ),), receipt("gdelt"), 20)
     run_one = RUN_ID
     run_two = "44444444-4444-4444-8444-444444444444"
 
     pipeline._complete(request("intraday"), run_one, ("holding:TEST",), (result,))
-    pipeline._complete(request("intraday"), run_two, ("holding:TEST",), (result,))
+    pipeline._complete(request("intraday"), run_two, ("holding:TEST",), (second_result,))
     first, second = gateway.payloads[-2:]
 
     assert first["items"][0]["id"] == second["items"][0]["id"]
+    assert first["items"][0]["request_url"] != second["items"][0]["request_url"]
     assert first["events"][0]["id"] != second["events"][0]["id"]
     assert first["relationships"][0]["event_id"] == first["events"][0]["id"]
     assert second["rankings"][0]["event_id"] == second["events"][0]["id"]

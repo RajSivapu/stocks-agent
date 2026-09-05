@@ -357,6 +357,19 @@ def test_request_windows_are_run_scoped_and_secret_free():
     assert "canonical_url IS DISTINCT FROM NEW.canonical_url" not in migration
 
 
+def test_fresh_schema_orders_provider_validator_before_final_run_wrapper_without_recursion():
+    schema = SCHEMA.read_text()
+    provider_body_start = schema.index("CREATE OR REPLACE FUNCTION public.record_market_intelligence(p_run_id UUID, p_completion_id UUID")
+    rename = schema.index("RENAME TO record_market_intelligence_provider_v2", provider_body_start)
+    final_wrapper = schema.rindex("result_row := public.record_market_intelligence_provider_v2")
+    assert provider_body_start < rename < final_wrapper
+    provider_body = schema[provider_body_start:schema.index("REVOKE ALL ON FUNCTION public.record_market_intelligence", provider_body_start)]
+    assert "provider request URL host mismatch" in provider_body
+    assert "record_market_intelligence_provider_v2(" not in provider_body
+    final_body = schema[final_wrapper:]
+    assert "market_run_source_item_provenance" in final_body
+
+
 def test_verifier_is_rollback_only_and_optimization_safe():
     source = VERIFIER.read_text()
     tree = ast.parse(source, filename=str(VERIFIER))
