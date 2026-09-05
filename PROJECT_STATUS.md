@@ -1,220 +1,174 @@
 # Personal Stock Agent Project Status
 
-Last updated: 2026-09-04
-Canonical release: Personal Stock Agent V1
-Source baseline: `167ce06` on `codex/owner-alert-v3`
-Current state: V1 implementation is merged and deployed; V1-C6 awaits only the next existing scheduled V1 receipt chain
+Last updated: 2026-09-05
+Canonical release: Personal Stock Agent V1 safety remediation
+Audit baseline: `432d647ef911ff63da427097f02a852e18038b62` on `origin/main`
+Consolidated local-gate candidate: `a0f8158c959e788b2a302ae6411328ec6e98a707`
+Current state: local implementation, task-level review, and consolidated local gate complete;
+independent whole-branch review pending
 
 This file is the version-controlled source of truth for the Personal Stock Agent V1 rollout.
-`docs/ROADMAP.md` retains historical capability and deployment detail. Notion may later mirror this
-status but is not authoritative and must never contain credentials or private financial data.
+`docs/ROADMAP.md` records the implementation sequence and remaining release gates.
+`docs/HANDOFF.md` is ignored and is not authoritative.
 
-## Release Definition
+## Release boundary
 
-Deliver one complete owner-only, suggestion-only Personal Stock Agent V1 through V1-C1 to V1-C6.
-The release includes zero-cost intelligence ingestion, market-wide discovery, personal portfolio
-comparison, append-only reports, the private owner dashboard, bounded Telegram delivery, learning
-evaluation, independent review, protected deployment, and receipt-backed production verification.
+The product remains owner-only, suggestion-only, brokerage-free, and constrained to zero
+incremental cost. It cannot place, modify, or cancel a trade. No remediation task performed a live
+database mutation, deployment, Auth-template change, Telegram send, provider/model call, brokerage
+action, or scheduled run.
 
-The proposed written design is
-`docs/superpowers/specs/2026-09-04-zero-cost-personal-stock-agent-v1-design.md`. Missing approved
-scope is not renamed V1.1.
+The GPT-6 Astra audit of `432d647` returned a no-go verdict for trusted portfolio decision support.
+The findings are implemented locally but the no-go is not lifted by local code or fixture tests.
+Trusted use requires the exact-candidate local, independent-review, CI, protected deployment, Auth,
+recovery, and scheduled-receipt gates below.
 
-## Done
+## GPT-6 Astra findings
 
-- Established the existing reliable suggestion-only gateway, portfolio recordkeeping, scheduled
-  routines, deterministic policy, receipts, owner alert v3 shadow path, and Long-Term Companion.
-- Built and verified the owner-only read-only dashboard foundation with one-owner auth, a
-  least-privilege direct-SELECT role, safe view contracts, responsive light/dark UI, and protected
-  deployment tooling.
-- Deployed the private one-account Site and owner-only read API from the reviewed V1 candidate.
-- Approved the zero-cost V1 provider and product architecture in owner chat.
-- Wrote the consolidated V1 specification and this canonical checkpoint document.
-- Owner approved the written specification on 2026-09-04.
-- Wrote the single checkpointed implementation plan at
-  `docs/superpowers/plans/2026-09-04-zero-cost-personal-stock-agent-v1-implementation.md`.
+"Implemented locally" means the code exists on this branch and its focused task review was clean.
+It does not mean the change is on `main` or in production.
+
+| Finding | Disposition | Evidence and remaining boundary |
+|---|---|---|
+| F1 — entry above zone/target | Implemented locally | Task 3 requires an executable current price inside the entry range and below target; sizing and reward/risk use that price. Closed through `01374a9`; deployment pending. |
+| F2 — report prose bypasses policy | Implemented locally | Task 4 renders actionable content only from persisted final decisions and derives publication authority. Closed through `4504044`; deployment pending. |
+| F3 — caller-labelled or unrelated evidence | Implemented locally | Tasks 4 and 7 bind timestamps, categories, relationships, membership, conflicts, and report provenance to persisted records. Closed through `4504044` and `84f0839`; production receipt proof pending. |
+| F4 — individually valid but unfunded portfolio plan | Implemented locally | Task 3 reserves reconciled cash, allocation, risk, holdings, existing stop exposure, alternatives, and available shares across the complete proposal set. Closed through `01374a9`; deployment pending. |
+| F5 — decimal parse becomes zero basis | Implemented locally | Task 5 preserves fixed-point values and makes invalid basis/profit visibly unavailable instead of zero. Closed through `c5de624`; deployment pending. |
+| F6 — adapters cannot reach discovery | Implemented locally | Task 7 implements provider-native queries, normalized identifiers/timestamps, discoverable securities, and attributable failures. Closed through `84f0839`; live free-provider health remains a protected gate. |
+| F7 — dedupe/timestamps discard corrections or conflict | Implemented locally | Task 7 separates request provenance from item identity and retains corrections, distinct claims, contradictions, and publication/retrieval/effective/reporting times. Closed through `84f0839`; scheduled evidence pending. |
+| F8 — ordinary tests can mutate production | Implemented locally | Task 1 deselects credentialed tests by default and requires explicit opt-in plus an exact allowlisted non-production project before credentials are loaded. Closed through `d798129`. |
+| F9 — history growth and incomplete scheduled success | Implemented locally | Task 9 bounds relevant history without losing pending state, enforces one slot per market date/phase, required terminal stages, suppression, and overdue detection. Closed through `9ba3bc0`; migration and scheduled proof pending. |
+| F10 — database/Telegram ambiguity | Implemented locally | Task 6 adds durable pending/delivered/failed/uncertain delivery and acknowledgement states, original-receipt recovery, and one publication authority. Closed through `c498177`; live Telegram was not exercised. |
+| F11 — backdated trades corrupt accounting | Implemented locally | Task 5 rejects unsafe chronology changes, preserves the ledger, and returns replay-stable receipts until explicit chronological reconciliation. Closed through `c5de624`; production migration pending. |
+| F12 — verifier accepts stale/wrong evidence | Implemented locally; operational proof pending | Task 10 binds current-main review/CI/deployment identity, recomputed candidate bytes and hashes, stored scheduled stages, original delivery or suppression receipts, and durable recovery. Closed through `6da3e84`; exact-head CI and protected deployment have not run. |
+| F13 — retry/cache/quota accounting | Implemented locally | Task 8 persists per-attempt quota, checkpoints, immutable request costs, cache/predecessor lineage, failure receipts, and restart recovery. Closed through `eff4612`; live provider/database proof pending. |
+| F14 — ranking placeholders/disconnected V1 inputs | Implemented locally | Task 8 supplies protected server-owned holdings, valuation, liquidity, overlap, discovery strength, comparison, and learning inputs; unknown values fail closed. Closed through `eff4612`; production inputs and scheduled output pending. |
+| F15 — misleading outcome/weekly calculations | Implemented locally | Task 11 groups losses per eligible recommendation, aligns benchmark windows, uses session highs/lows, distinguishes fills, and retains veto-only weeks. Closed through `f7af10f`; production observation pending. |
+| F16 — recovery unproven | Local mechanism and disposable drill implemented; live drill pending | Task 10 creates authenticated encrypted exports, exact schema/receipt reconciliation, durable rollback artifacts, and an isolated disposable-runtime restore drill. A protected live isolated restore has not been performed. |
+| F17 — excessive read privilege/unpinned Python | Implemented locally | Task 11 uses a restricted read-only weekly role with verified TLS and installs a complete hash-locked binary dependency set, including recovery cryptography. Closed through `f7af10f`; production role migration pending. |
+| F18 — token refresh defeats idle lock | Implemented locally | Task 2 moves the privacy deadline only on explicit owner activity, never token refresh. Closed through `ce6d9a7`; web deployment pending. |
+| F19 — early close/quote identity gaps | Implemented locally | Task 11 models maintained 2026 early closes, fails closed outside coverage, and rejects wrong symbol/currency or unknown halt/spread/liquidity. Closed through `f7af10f`; production deployment pending. |
+
+## Owner email OTP
+
+The repository now requires one emailed six-digit numeric OTP and rejects a ConfirmationURL-only or
+non-six-digit Auth configuration. The browser, provisioning checks, and deployment verifier are
+aligned through `ce6d9a7`.
+
+The live Supabase Auth email template and OTP length have not been changed or read back in this
+remediation. Production sign-in remains unverified until the protected owner action sets a six-digit
+OTP and a template containing the Supabase token variable, followed by an owner login canary.
+
+## V1 checkpoints
 
 ### V1-C1 — Release control
 
-- [x] Consolidated architecture written.
-- [x] Root canonical status created.
-- [x] Owner approved the written specification on 2026-09-04.
-- [x] Detailed implementation plan written after approval.
+- [x] Owner approved the Astra remediation design and implementation plan.
+- [x] Audit baseline and non-negotiable authority/cost boundaries are recorded.
 
-V1-C1 is complete.
-
-## In Progress
+V1-C1 remains complete.
 
 ### V1-C2 — Free intelligence ingestion
 
-- [x] Release policy and configuration contract locked with the approved provider allowlist,
-  zero-cost authority boundaries, phase budgets, and bounded evidence-packet limits.
-- [x] Implemented and focused-tested bounded HTTPS transport, immutable quota reservations, all
-  approved free-source adapters, timestamp-preserving cache behavior, normalization,
-  deduplication, hashes, coverage limitations, and receipt-backed atomic gateway persistence.
+- [x] Provider discovery, normalized identities and timestamps, contradiction preservation,
+  cache/checkpoint lineage, and quota accounting are implemented and task-reviewed locally.
+- [ ] Apply the ordered migrations and deploy the protected collection/gateway candidate.
+- [ ] Prove supported free-provider paths and persisted source/quota receipts on an existing
+  scheduled run.
 
-V1-C2 is complete based on fixture-backed provider, transport/quota, normalization/deduplication,
-gateway contract, migration-verifier, and security-invariant evidence. Live provider health and
-production migration remain protected V1-C6 rollout gates and are not implied by this checkpoint.
+V1-C2 is reopened until protected deployment and scheduled receipt evidence pass.
 
 ### V1-C3 — Market-discovery brain
 
-- [x] Deterministic seed taxonomy, exposure-gated relationships, fixed-point ranking, and bounded
-  evidence-packet construction are implemented and focused-tested.
-- [x] Receipt-backed phase orchestration and scheduled routine integration are implemented and
-  focused-tested with one start, one atomic record, explicit partial failures, and write-free dry
-  fixtures.
-- [x] Scheduled Analyst and Checker records are bound to the exact immutable evidence packet before
-  policy evaluation, with canonical hash verification, candidate-scoped evidence membership,
-  exposure gating, distinct receipt linkage, copied/missing Checker vetoes, and dry-run-only inline
-  fixtures.
+- [x] Server-owned ranking inputs, fail-closed unknown values, packet construction, and scheduled
+  lifecycle controls are implemented and task-reviewed locally.
+- [ ] Complete exact-candidate CI, protected deployment, and one non-duplicated scheduled chain.
 
-V1-C3 is complete based on the exact Task 8 focused gate: 159 Deno gateway tests and 26 Python
-security-invariant tests passed on 2026-09-04. The bounded fix verification also passed 55 focused
-migration/security checks and the rollback-only local PostgreSQL verifier with 5 gateway-only RPCs,
-0 public execute grants, and 0 remaining verifier rows. This local evidence does not claim a
-production migration, provider/model call, database write, Telegram delivery, or deployment.
+V1-C3 is reopened.
 
 ### V1-C4 — Personal comparison brain
 
-- [x] Immutable evidence-valued comparisons use current gateway-shaped holdings and active owner
-  plans as runtime anchors, expose explicit missing-data limitations and conditional cited
-  bear/base/bull scenarios, and provide no portfolio mutation surface.
-- [x] Gateway comparison policy preserves VTI role ownership, rejects substitutes as companions,
-  requires a current baseline, permits overlap or concentration evidence to veto, and adds
-  synchronized adjusted-return correlation without weakening existing complete-window thresholds,
-  drawdowns, or normalized one-year contribution replay.
+- [x] Comparison and advisory-learning inputs are constrained to persisted, typed, server-owned
+  evidence; missing concentration, liquidity, or overlap fails closed.
+- [ ] Verify the deployed read/write authority and one production scheduled comparison chain.
 
-V1-C4 is complete based on the exact Task 9 focused gate: 7 Python comparison tests and 43 Deno
-alternatives, Companion, and policy tests passed on 2026-09-04. This fixture-backed local evidence
-does not claim a portfolio or plan mutation, live provider/model call, database write, Telegram
-delivery, production migration, or deployment.
+V1-C4 is reopened.
 
 ### V1-C5 — Reports, dashboard, and delivery
 
-- [x] Immutable reports, quiet Telegram delivery, owner-only report/intelligence read contracts, and
-  the five-surface owner dashboard are implemented locally.
-- [x] Deterministic 5/21/63-session outcome learning, coverage-scoped missed-event observations,
-  explicit source-failure/noise records, and owner-review-only proposals are implemented locally.
+- [x] Final-policy report authority, durable report/command delivery, fixed-point accounting,
+  outcome corrections, owner inactivity, and read-only weekly audit controls are implemented and
+  task-reviewed locally.
+- [ ] Configure and verify the live six-digit Supabase Auth email template.
+- [ ] Deploy the exact reviewed candidate and pass owner, anonymous, and non-owner canaries.
+- [ ] Reconcile an original Telegram delivery ID or explicit persisted suppression from the next
+  existing scheduled chain.
 
-Task 10 immutable reports and quiet Telegram delivery is complete locally. Immutable canonical
-report hashes, deterministic SHA-256 idempotency, sorted source references, concise morning and
-summary/link periodic delivery, urgent/no-trigger gates, and unknown-outcome-safe replay are focused
-verified. The report migration remains local-only and no Telegram message was sent.
-
-Task 11 added bounded receipt-derived Intelligence, Reports, report-detail, Portfolio, Ideas, and
-System read contracts plus authenticated owner-only GET routes and least-privilege direct-SELECT
-access. Task 12 now presents exactly five primary surfaces: Portfolio, Ideas, Intelligence, Reports,
-and System / Receipts. Portfolio absorbs Today and Companion context; System absorbs run and alert
-receipt summaries; immutable report versions retain subordinate deep links and exact publication
-timelines. External text is rendered as text, unsafe links remain non-clickable, source coverage is
-explicitly bounded/partial, and no exhaustive-news, delivery, write, send, or deployment claim is
-inferred.
-
-The Task 12 web gate passed locally on 2026-09-04: 31 unit tests, TypeScript typecheck, ESLint,
-production build, dashboard bundle security/size verification, and 17 Playwright browser checks
-passed; the opt-in live read-only canary was skipped. The browser checks covered both themes,
-keyboard access, axe accessibility, 300–1440 CSS pixel widths including 320, five primary routes,
-report deep links, hostile stored content, and stale/owner-denied/expired states.
-
-Task 13 adds frozen immutable learning observations linked to the original run and policy version.
-Only complete benchmark-backed 5/21/63-session outcomes are eligible; insufficient samples remain
-observations, and later evidence counts as a missed event only when authoritative, discovered after
-the run, absent from the original ranking, and inside the run's declared source/time coverage.
-Source failures and false-positive/noise rates remain explicit, historical results are labeled as
-non-predictive, and proposed changes are owner-review records with no apply/update authority. The
-gateway exposes only `record_learning` backed by the existing append-only
-`record_market_learning` RPC; dry runs write and send nothing. The owner dashboard mapping exposes
-only bounded/redacted observation metadata and never executable proposal content.
-
-The exact Task 13 focused gate passed locally on 2026-09-04: 60 Python learning/gateway/security
-tests and 60 Deno outcome/contract/handler tests passed. No provider or model call, database write,
-policy/weight/provider activation, holdings/plan mutation, Telegram delivery, migration, or
-deployment occurred.
-
-V1-C5 is complete. The consolidated full suite, exact-head CI, independent review, production
-migrations, private Site, read API, and owner/denial canaries have passed. This does not claim a new
-scheduled V1 intelligence/report receipt or enable an alert class.
+V1-C5 is reopened.
 
 ### V1-C6 — Independent review and protected rollout
 
-- [x] Fail-closed V1 receipt verifier and fixed local/CI release-gate wiring implemented.
-- [x] Protected scripts cover the two V1 migrations, only the changed gateway/dashboard functions,
-  reviewed-SHA source/static receipts, five dashboard surfaces, anonymous/non-owner denial, and
-  cleanup of newly introduced dashboard secrets/function/runtime login on initial failure.
-- [x] Consolidated exact-head CI and independent review accepted the deployed implementation.
-- [x] Protected migrations, gateway/API, private Site, source parity, rollback exercise, dry-run,
-  and owner/anonymous/non-owner canaries completed.
-- [ ] The next existing scheduled V1 intelligence/report/publication chain must be reconciled.
+- [x] Candidate-bound release verification, durable recovery orchestration, migration ledgering,
+  encrypted export, and local disposable restore drill are implemented and task-reviewed locally.
+- [x] Consolidated local `npm run test:all` gate passed for the code at `a0f8158`.
+- [ ] Independent whole-branch GPT-6 Astra review with no unresolved Critical or Important finding.
+- [ ] Exact-head CI on the final reviewed candidate.
+- [ ] Protected production migrations, functions, private Site, source/static parity, and denial/
+  owner canaries.
+- [ ] Protected isolated live restore drill and reconciliation.
+- [ ] Next existing post-deployment scheduled intelligence/report/publication receipt chain; never
+  trigger a duplicate merely to obtain evidence.
 
-Independent review blocked `a5d4296` on five release boundaries. The fixes and subsequent runtime
-deltas through `688d473` were accepted, exact-head CI passed, and PR #1 was merged to `main` as
-`6819052`. All three migrations, gateway/dashboard functions, and private Site version 2 are live;
-deployed downloads match source, owner and denial canaries pass, and two failed initial attempts
-exercised clean rollback. V1-C6 remains incomplete only because the Sep 4 post-market run began
-before the merge and cannot supply the required V1 intelligence/report chain.
+V1-C6 is reopened and the release remains no-go for trusted use.
 
-The consolidated local gate passed on 2026-09-04: 364 Python, 63 Node, 218 Deno, 6 dashboard
-contract, 31 web-unit, and 17 Playwright tests passed (699 total); 19 Python and one opt-in live
-Playwright check skipped. Typecheck, lint, license, production build, and bundle scan also passed.
-The first run exposed migration/schema drift in the learning authority rejection clause; the fixed
-`20260907` migration now mirrors the already-reviewed schema defense and the complete gate passed.
+## Immediate next gates
 
-## Next
+1. Obtain the independent whole-branch review and fix any Critical or Important findings.
+2. Run exact-head CI, then use only the protected deployment/recovery workflow.
+3. Configure and read back live six-digit Auth, pass owner and denial canaries, and perform the
+   isolated restore drill.
+4. Reconcile the next existing scheduled chain without triggering a duplicate.
 
-1. Inspect the next existing scheduled run after the `main` merge; do not trigger a duplicate.
-2. Reconcile its run, packet, report, publication, source/quota, and dashboard/database receipts.
-3. Mark C6/V1 complete only when the fail-closed verifier accepts that scheduled chain.
+## Consolidated local evidence
 
-## Owner Action
+The first `npm run test:all` run exposed six stale integration checks: two packet fixtures did not
+supply newly required ranking context; one repository allowlist still expected the removed direct
+grade query; two SQL tests scanned unrelated later migrations for dynamic SQL; and one schema mirror
+test assumed no additive migrations followed `20260908`. The generated fresh schema was also behind
+the final ordered migrations. No product behavior was relaxed.
 
-No owner action is currently required. The existing rollout heartbeat will resume verification at
-the next eligible scheduled market run.
+After those exact six checks were corrected and `scripts/sync_intelligence_schema.py` regenerated
+the fresh schema, the focused reproduction passed 6/6. The one permitted consolidated rerun passed:
 
-No provider purchase, paid trial, card signup, brokerage credential, friend invitation, or duplicate
-live run is requested.
+- 589 Python tests passed, 3 skipped, and 4 credentialed database-integration tests deselected;
+- 71 Node tests passed;
+- 289 Deno tests passed, followed by Deno checks for all three Edge entrypoints;
+- 6 dashboard-contract and 34 web-unit tests passed;
+- dashboard-contract and web TypeScript checks, web lint, 242-package license verification,
+  production build, and the 14-file bundle scan passed;
+- 17 Playwright tests passed and the opt-in live read-only canary was skipped.
 
-## Decisions
+That is 1,006 passed tests, 4 skipped tests, and 4 explicitly deselected credentialed integration
+tests. The code content is committed at `a0f8158`; the required documentation changes were the only
+remaining dirty state after that focused fix commit.
 
-- One complete V1; no V1.1 deferral for approved scope.
-- Zero incremental dollars and no metered runtime model API.
-- Approved sources: GDELT, existing free Alpha Vantage, existing free Finnhub, Yahoo, and free
-  official sources. Reddit/social is hypothesis discovery only.
-- Massive, Benzinga, Alpaca, and all paid/commercial providers are excluded.
-- Deterministic collection, caching, deduplication, mapping, ranking, and policy surround bounded
-  Claude Analyst/Checker packets.
-- Owner-only, friend invitations disabled, no brokerage, and suggestion-only.
-- Dashboard primary surfaces: Portfolio, Ideas, Intelligence, Reports, and System / Receipts using
-  the paired Midnight Navy/Warm Gold and Warm Pearl visual system.
-- Detailed periodic/theme reports are stored once; Telegram receives a short summary and private
-  authenticated link.
-- Learning cannot silently change policy or authority.
-- `PROJECT_STATUS.md` is canonical; Notion is optional as a later mirror only.
-- The owner selected subagent-driven development on 2026-09-04 and delegated routine technical
-  decisions while preserving all security, production, and receipt gates.
+## Production truth
 
-## Blockers
+Production still reflects the previously documented release on `main`; none of the Astra
+remediation commits are claimed deployed. Earlier production receipts remain historical evidence,
+not evidence for this candidate. No current production version, secret inventory, Auth template,
+restore state, or post-remediation scheduled receipt was inspected during local implementation.
 
-- The only current release blocker is the next existing post-merge scheduled receipt chain; the
-  superseded thin dashboard remains excluded.
-- Any unavailable free-provider entitlement, quota, or official-source access must fail closed and
-  be surfaced; it does not authorize a paid replacement.
+## Decisions and guardrails
 
-## Production Receipts
-
-- Existing production foundation and scheduled receipt history are summarized in `docs/ROADMAP.md`.
-- Owner alert v3 remains shadow-only; its receipt record is
-  `docs/rollouts/2026-09-03-owner-alert-v3-shadow.md`.
-- Owner dashboard API version 3 and private Site version 2 are live with owner/denial canaries and
-  source-parity receipts.
-- Consolidated V1 review and rollout evidence is recorded in
-  `docs/reviews/2026-09-04-personal-stock-agent-v1-review.md` and
-  `docs/rollouts/2026-09-04-personal-stock-agent-v1.md`.
-- The Sep 4 post-market run predates the V1 `main` merge and is excluded from V1 completion. No
-  duplicate live run will be triggered.
-
-## Last Commit
-
-The deployed implementation is `688d473b4696ce699965adc16c213cefdeb4dc6a`; GitHub `main` contains
-it through merge commit `681905290510790160b5d3f712f71187527cf720`. C6 remains pending the
-scheduled receipt chain only.
+- One complete V1; no silent V1.1 deferral for approved scope.
+- Zero incremental dollars; no paid/premium/trial providers or metered runtime model API.
+- Approved free-source boundary only: GDELT, existing free Alpha Vantage, existing free Finnhub,
+  Yahoo, and free official sources. Social material is hypothesis discovery only.
+- Owner-only, friend invitations disabled, no brokerage credentials or execution, and every trade
+  remains a manual owner decision.
+- Missing, stale, contradictory, quota-blocked, or unverifiable evidence fails closed.
+- Learning is advisory and cannot silently change policy, thresholds, source priority, sizing,
+  routing, or authority.
+- A local test, green CI run, stored report, or quiet bot is not production correctness evidence.
