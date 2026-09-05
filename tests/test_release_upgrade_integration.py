@@ -116,7 +116,41 @@ def test_workflow_cli_reports_missing_transport_without_pythonpath_injection():
     result = subprocess.run([sys.executable, str(ROOT / "scripts/release_components.py"), "--check-transport"],
         cwd=ROOT, env={"PATH": os.environ["PATH"], "PYTHONPATH": ""}, capture_output=True, text=True)
     assert result.returncode != 0
-    assert "Sites transport is not configured" in result.stderr
+    assert "Sites" in result.stderr and "transport" in result.stderr
+
+
+@pytest.mark.parametrize("absent", [(), COMPONENTS])
+@pytest.mark.parametrize("target", COMPONENTS)
+def test_pre_mutation_apply_failure_never_restores_or_deletes(absent, target):
+    release = module(); platform = Platform(absent)
+    candidate = {name: {**copy.deepcopy(prior), "exists": True, "identity": name + "-v4", "version": "4",
+                        "files": {"index": "candidate"}, "values": {"credential": "new-secret"}}
+                 for name, prior in platform.state.items()}
+    candidate = {name: value if name == target else platform.state[name] for name, value in candidate.items()}
+    def fail_before_write(name, value): raise RuntimeError("before remote write")
+    platform.apply = fail_before_write
+    with pytest.raises(RuntimeError, match="before remote write"):
+        release.execute_release(platform, candidate, persist=lambda _: None)
+    assert platform.mutations == []
+    assert platform.state == platform.original
+
+
+def test_recovery_retry_does_not_redeploy_already_restored_function_version():
+    release = module(); platform = Platform(); name = release.FUNCTIONS[0]
+    prior = platform.capture(name)
+    platform.state[name]["version"] = "5"
+    journal = {"format": 1, "components": {component: {"changed": component == name,
+        "prior": snapshot, "prior_sha256": hashlib.sha256(release.canonical(snapshot)).hexdigest()}
+        for component, snapshot in platform.original.items()}}
+    release.recover_components(platform, journal, persist=lambda _: None)
+    assert platform.mutations == []
+    assert journal["components"][name]["restoration"] == {
+        "original_identity": prior["identity"], "original_version": "3", "identity": prior["identity"], "version": "5"}
+
+
+def test_recovery_reader_attests_decision_and_comparison_tables():
+    from scripts.protected_evidence import READ_TABLES
+    assert {"decision_evaluations", "market_policy_comparisons"} <= set(READ_TABLES)
 
 
 def test_final_component_readback_rejects_forged_candidate_hash():

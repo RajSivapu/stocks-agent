@@ -80,14 +80,18 @@ These results are local evidence; the final consolidated and independent-review 
 The production CLI and independent recovery now share the six-component encrypted journal engine.
 Every prior snapshot contains presence, complete configuration, exact files, private values,
 platform identity/version, and an authenticated snapshot hash. Every attempted mutation is durably
-marked before transport; only marked components are restored, in reverse order, and then read back.
+marked before transport. Recovery first reads each marked component and restores only proven
+differences, in reverse order, then reads back again. An attempted write that failed before mutation
+never causes restore/delete/unset. Supabase redeployment allocates a new version: exact prior
+bytes/configuration are restored, while both original and restoration identities remain in evidence.
 The final verifier independently reads protected immutable artifacts for all three Edge functions
 and the owner Site, requires platform identities and byte parity, and checks predeployment capture.
 
-The configured zero-cost static target remains `.openai/hosting.json`. There is no reviewed native
-CI adapter in this repository. The workflow checks that before creating a production deployment,
-and the CLI checks before acquiring the mutation lease. Findings 3 and 5 remain open until the
-adapter is implemented/configured through the reviewed candidate process. No alternate hosting,
+The configured zero-cost static target remains `.openai/hosting.json`. The PostgreSQL/Supabase
+adapter is now concrete, but no reviewed Sites CI transport or immutable four-artifact publication
+integration exists. The workflow checks that before creating a production deployment, and the CLI
+checks before acquiring the mutation lease. Finding 3 is locally implemented; finding 5 remains
+open at that explicit Sites conditional. No alternate hosting,
 paid service, fabricated deployment receipt, or automatic deployment is introduced.
 
 The fixed integration contract is `scripts.configured_native_release_adapter.py:create_adapter(context)`:
@@ -97,10 +101,13 @@ The fixed integration contract is `scripts.configured_native_release_adapter.py:
   role attributes, password verifier, memberships/grant options, settings, source bytes/import
   configuration, and the exact existing managed values or proven absence. Existing secret values
   must match the platform digests through `capture_managed_secrets` before any rotation.
-- `site` binds the same capture/apply/restore methods to the exact manifest project. Initial capture
+- `site` remains `None`; its future reviewed implementation must bind capture/apply/restore to the exact manifest project. Initial capture
   must prove existing owner-only access and retain the prior immutable version and complete bytes.
   Recovery validates the captured prior state and must not require the failed candidate Site to
   be healthy before attempting other components' restoration.
+  It must also implement `plan(context)` and `release_receipt(candidate_sha, prior, readbacks, static)`:
+  the latter publishes real immutable protected artifacts and returns the existing full writer/verifier
+  contract. This is an in-process integration contract, not a claimed Sites API or configured transport.
 - `plan(context)` is read/build-only. It returns all six candidate snapshots; newly created platform
   identities can be returned by `apply` and must match an independent subsequent capture.
 - `retain(encrypted_bytes)` must durably acknowledge each authenticated encrypted journal version
@@ -112,7 +119,23 @@ The fixed integration contract is `scripts.configured_native_release_adapter.py:
   readbacks, runtime configuration, migration receipts, and rollback readiness. A receipt label alone
   cannot substitute for bytes, exact identities, or owner/denial canaries.
 
-The native adapter is an outstanding implementation/integration requirement, not a completed live
+The adapter uses pinned `supabase@2.116.0` list/download/deploy/delete/secrets commands. Existing
+functions require exact active identity/version, entrypoint/import configuration, stable metadata
+before/after download, and complete base64 byte captures. Missing metadata or source fails capture.
+The protected environment must provide `DASHBOARD_PRIOR_MANAGED_SECRETS_JSON`, containing every
+currently existing managed value. Platform digests must match. Values unsafe for literal env-file
+round trips are rejected before mutation; credentials never appear in command arguments or receipts.
+The administrator must be able to capture `pg_authid`, membership options/grantors, and per-database
+role settings. PostgreSQL DDL is transactional and passwords are captured/restored as exact verifiers.
+
+Authenticated encrypted journal versions are committed to the append-only
+`public.stock_agent_component_recovery_journals` metadata table under the unresolved protected lease.
+PUBLIC and Supabase client/service-role grants are revoked, RLS is enabled, and independent recovery
+selects the latest ciphertext for the exact project/candidate/original run. Candidate secret values
+are encrypted before attempted writes so fresh-process lost-response recovery can resolve actual
+platform digests. Keep `RELEASE_RECOVERY_KEY` available throughout the protected retention period.
+
+The missing Sites transport/publication remains an implementation/integration requirement, not a completed live
 rollout. Production cannot proceed until it is reviewed and available. All production gates above
 remain pending, including exact-head CI, live six-digit Auth, Site deployment/parity, live isolated
 restore, and the next existing scheduled run without any duplicate trigger.

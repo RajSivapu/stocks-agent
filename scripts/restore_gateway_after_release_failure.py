@@ -35,6 +35,7 @@ def main() -> int:
         from scripts.release_components import EncryptedJournal, SiteBoundTransport, load_native_release_adapter, recover_components
         candidate = subprocess.check_output(["git", "rev-parse", "HEAD"], text=True).strip()
         adapter = load_native_release_adapter({"project_ref": args.project_ref, "candidate_sha": candidate,
+                                               "lease_owner": args.lease_owner,
                                                "release_run_id": args.release_run_id, "recovery": True})
         if args.release_run_id is not None:
             raw = adapter.recover_retained(args.release_run_id)

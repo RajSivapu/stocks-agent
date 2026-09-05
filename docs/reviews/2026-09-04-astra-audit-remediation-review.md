@@ -115,9 +115,9 @@ idempotent retry, and an actual export/restore with policy-comparison/evaluation
 
 | Final Astra finding | Local disposition | Remaining boundary |
 |---|---|---|
-| 3 — upgrade-aware exact recovery | Shared production orchestration, encrypted durable journal, per-component attempt flags, first-install/upgrade failure injection, and `changed=false` no-op implemented | The reviewed native management-plane transport module is absent; executable native capture/apply/restore integration remains open |
+| 3 — upgrade-aware exact recovery | Concrete repository-native PostgreSQL role, Supabase managed-secret, and all-three-Edge adapter implemented; committed encrypted journals, fresh-process recovery, exact readback no-ops, and first-install/upgrade boundary tests | Local implementation complete; fix-round independent review and live protected recovery remain pending |
 | 4 — immutable history | All audited migration bytes restored; documented `20260907` raw/native hashes reconcile; changes moved into `20261001` | Protected migration deployment and exact-head CI remain pending |
-| 5 — every changed deployed artifact | Gateway, dashboard API, Telegram, and Site identity/downloaded-byte verification plus shared recovery contract implemented | Native Sites transport unavailable; workflow fails before mutation and cannot claim Site verification |
+| 5 — every changed deployed artifact | Gateway, dashboard API, and Telegram capture/download/apply/readback/restore are concrete; Site contract and four-artifact verification remain fail-closed | Reviewed Sites transport and immutable four-artifact publication/receipt integration unavailable; workflow fails before mutation and cannot claim Site verification |
 
 The static manifest is unchanged. Track A's cash-aware decision RPC, reconciled-cash reader,
 and terminal-outcome operation are explicitly allowlisted; the removed direct bundle RPC remains
@@ -130,3 +130,14 @@ first-install platform identity allocation, and malformed workflow YAML. These w
 focused green runs. No independent Track C review is claimed here. Final focused review,
 consolidated verification of the final candidate, final Astra re-review, exact-head CI, protected
 deployment, live Auth/Site/restore, and next existing scheduled receipt gates remain pending.
+
+### Track C fix round 1
+
+Fix base: `b2f067a0c4dd735dd31be7d3e4efb270c7ebfd75`. The missing non-Site native adapter,
+incomplete recovery-reader attestation, and attempted-write rollback gap are addressed locally.
+The final focused gate passed **366 tests** (including 37 native-adapter and 65 release-upgrade
+tests). Actual disposable PostgreSQL covers exact role attributes/password verifier, grantor and
+membership options, quoted/per-database settings, and committed encrypted journal retrieval.
+Stateful Supabase command tests cover all three active downloads and metadata races, upgrades,
+first installs, secret digest/absence round trips, and six-component orchestration failures.
+An independent review of this fix commit and every consolidated/production gate remain pending.

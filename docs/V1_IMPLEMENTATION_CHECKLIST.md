@@ -13,7 +13,7 @@ An owner-only personal stock agent that uses zero-incremental-cost data sources,
 - [x] Initial Astra audit findings F1–F19 implemented
 - [x] Consolidated local gate passed: 1,006 checks passed, 4 skipped, 4 credentialed database tests intentionally deselected
 - [x] Final whole-repository GPT-6 Astra review completed
-- [ ] Final Astra fix wave complete — **9 of 11 findings locally implemented; 3/5 remain open at native transport integration**
+- [ ] Final Astra fix wave complete — **10 of 11 findings locally implemented; 5 remains open at the Sites transport/publication conditional**
 - [ ] Final focused review and consolidated gate
 - [ ] Final GPT-6 Astra re-review
 - [ ] Protected production rollout and live receipts
@@ -37,9 +37,9 @@ An owner-only personal stock agent that uses zero-incremental-cost data sources,
 
 - [x] 1. Persist only canonical policy-derived report prose, including suppressed reports
 - [x] 2. Use fresh reconciled cash with ledger invalidation; never spend legacy monthly budgets as cash
-- [ ] 3. Make deployment upgrade-aware and restore exact prior component state — **local orchestration and failure-injection tests complete; reviewed native transport absent**
+- [x] 3. Make deployment upgrade-aware and restore exact prior component state — **concrete PostgreSQL/Supabase adapter and focused first-install/upgrade recovery tests complete; independent review pending**
 - [x] 4. Preserve already-applied migration bytes and move changes into additive migrations — **audited bytes restored; actual native-ledger PostgreSQL upgrade/retry passed**
-- [ ] 5. Deploy, verify, and recover every changed component, including Telegram and the owner web site — **four-artifact verification and shared recovery engine implemented; executable native transport integration pending**
+- [ ] 5. Deploy, verify, and recover every changed component, including Telegram and the owner web site — **all three native Edge paths implemented; reviewed Sites transport and immutable four-artifact publication/receipt integration remain open and preflight blocks before mutation**
 - [x] 6. Persist provider attempts before transport and reconcile crash uncertainty without duplicate calls
 - [x] 7. Allow durable no-trigger completion for quiet scheduled intraday runs
 - [x] 8. Propagate the authoritative `start_run` duplicate flag into release evidence

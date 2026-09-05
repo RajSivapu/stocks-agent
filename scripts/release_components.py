@@ -115,8 +115,29 @@ def recover_components(transport: ComponentTransport, journal: dict, *, persist:
             prior = validate_snapshot(name, entry["prior"])
             if hashlib.sha256(canonical(prior)).hexdigest() != entry["prior_sha256"]:
                 raise RuntimeError("prior recovery bytes changed")
-            transport.restore(name, prior)
-            verify_component_readback(name, prior, transport.capture(name))
+            hydrate = getattr(transport, "hydrate_recovery", None)
+            if callable(hydrate): hydrate(name, prior, entry.get("candidate"))
+            current = validate_snapshot(name, transport.capture(name))
+            content_keys = ("exists", "configuration", "files", "values")
+            restored_content = name in FUNCTIONS and all(current[key] == prior[key] for key in content_keys)
+            if current != prior and restored_content:
+                entry["restoration"] = {"original_identity": prior["identity"],
+                    "original_version": prior["version"], "identity": current["identity"], "version": current["version"]}
+            elif current != prior:
+                restored = transport.restore(name, prior)
+                expected = prior
+                if restored is not None:
+                    # Supabase redeployment allocates a new version. Only a
+                    # complete, independently read-back byte/config equivalent
+                    # snapshot may supply that newly allocated identity.
+                    restored = validate_snapshot(name, restored)
+                    if name not in FUNCTIONS or any(restored[key] != prior[key] for key in content_keys):
+                        raise RuntimeError("restoration changed prior component content")
+                    expected = restored
+                    entry["restoration"] = {"original_identity": prior["identity"],
+                        "original_version": prior["version"], "identity": restored["identity"],
+                        "version": restored["version"]}
+                verify_component_readback(name, expected, transport.capture(name))
             entry["changed"] = False
             persist(copy.deepcopy(journal))
         except Exception:
@@ -155,6 +176,7 @@ def execute_release(transport: ComponentTransport, candidates: Mapping, *, persi
                 continue
             pending = copy.deepcopy(journal)
             pending["components"][name]["changed"] = True
+            pending["components"][name]["candidate"] = candidates[name]
             pending["status"] = "recovery_required"
             persist(pending)
             journal = pending
@@ -193,7 +215,8 @@ def capture_managed_secrets(inventory: list[Mapping], prior_values: Mapping[str,
     """
     if not isinstance(inventory, list):
         raise RuntimeError("managed secret inventory is unavailable")
-    managed = [row for row in inventory if row.get("name") in MANAGED_SECRETS]
+    managed = sorted(({"name": row["name"], "digest": row.get("digest")}
+                      for row in inventory if row.get("name") in MANAGED_SECRETS), key=lambda row: row["name"])
     if len({row["name"] for row in managed}) != len(managed):
         raise RuntimeError("managed secret inventory is ambiguous")
     values = {}
@@ -236,6 +259,9 @@ class SiteBoundTransport:
     def capture(self, name): return self.provider(name).capture(name)
     def apply(self, name, candidate): return self.provider(name).apply(name, candidate)
     def restore(self, name, prior): return self.provider(name).restore(name, prior)
+    def hydrate_recovery(self, name, prior, candidate):
+        hydrate = getattr(self.provider(name), "hydrate_recovery", None)
+        if callable(hydrate): hydrate(name, prior, candidate)
 
 
 def execute_protected_release(transport: ComponentTransport, candidates: Mapping, *, repo_root: Path,

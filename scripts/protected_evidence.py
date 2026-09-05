@@ -102,7 +102,7 @@ READ_TABLES = (
     "market_collection_checkpoints", "market_collection_checkpoint_history", "market_events", "market_candidate_rankings", "market_gateway_requests",
     "market_report_request_origins", "market_publications", "market_source_quota_reservations", "market_source_receipts",
     "market_alert_drafts", "market_alert_events", "market_alert_actions", "portfolio_cash_ledger_state",
-    "reconciled_cash_snapshots", "market_run_terminal_outcomes",
+    "reconciled_cash_snapshots", "market_run_terminal_outcomes", "decision_evaluations", "market_policy_comparisons",
 )
 
 
@@ -246,12 +246,17 @@ class GitHubProductionDataSource:
                 and record["deployment_id"] == deployment["id"], "protected deployment candidate/project mismatch")
         return {**record, "id": deployment["id"], "sha": deployment["sha"], "environment": deployment["environment"], "deployed_at": statuses[0]["created_at"]}
 
-    def artifact(self, artifact_id: int) -> dict[str, bytes]:
+    def artifact(self, artifact_id: int, *, active_run_id: int | None = None) -> dict[str, bytes]:
         require(type(artifact_id) is int and artifact_id > 0, "numeric protected artifact ID required")
         metadata = self._get(f"{self.prefix}/actions/artifacts/{artifact_id}")
         run = self._get(f"{self.prefix}/actions/runs/{metadata['workflow_run']['id']}")
+        # Only the in-process protected deployment verifier can inspect its own
+        # running release. Final independent verification still requires success.
+        active = (type(active_run_id) is int and active_run_id > 0
+                  and run.get("id") == metadata["workflow_run"]["id"] == active_run_id
+                  and run.get("status") == "in_progress" and run.get("conclusion") is None)
         require(not metadata["expired"] and metadata["workflow_run"]["head_sha"] == self.candidate
-                and run["head_sha"] == self.candidate and run["head_branch"] == "main" and run["conclusion"] == "success"
+                and run["head_sha"] == self.candidate and run["head_branch"] == "main" and (run["conclusion"] == "success" or active)
                 and run["path"] == ".github/workflows/owner-dashboard-release.yml", "artifact did not originate in the protected candidate release workflow")
         raw = self._get(f"{self.prefix}/actions/artifacts/{artifact_id}/zip", binary=True)
         with zipfile.ZipFile(io.BytesIO(raw)) as archive:

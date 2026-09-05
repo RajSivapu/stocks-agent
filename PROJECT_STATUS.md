@@ -4,8 +4,8 @@ Last updated: 2026-09-05
 Canonical release: Personal Stock Agent V1 safety remediation
 Audit baseline: `432d647ef911ff63da427097f02a852e18038b62` on `origin/main`
 Consolidated local-gate candidate: `a0f8158c959e788b2a302ae6411328ec6e98a707`
-Current state: final Astra fix wave has local release-orchestration and immutable-history changes;
-native transport integration, final focused review, and final consolidated gate remain pending.
+Current state: final Astra fix wave has concrete local PostgreSQL/Supabase recovery and immutable-history changes;
+Sites transport/publication integration, final focused review, and final consolidated gate remain pending.
 The `a0f8158` consolidated result is historical and does not verify this final fix wave.
 
 This file is the version-controlled source of truth for the Personal Stock Agent V1 rollout.
@@ -22,11 +22,16 @@ an actual disposable PostgreSQL upgrade and idempotent retry passed.
 The protected CLI now uses one encrypted, per-component capture/mutation/readback/recovery engine
 for the runtime role, managed secrets, gateway, dashboard API, Telegram function, and owner Site.
 The final verifier requires downloaded artifact bytes and exact identities for all four deployed
-artifacts. The configured private Site manifest is unchanged. A reviewed
-`scripts.configured_native_release_adapter.py` implementation is absent, so production preflight
-fails before mutation. Final Astra findings 3 and 5 remain open at that transport integration
-boundary; finding 4 is locally implemented. Local failure-injection coverage is not a substitute
-for the missing native adapter or any live deployment/restore proof.
+artifacts. The configured private Site manifest is unchanged. The repository-native adapter now
+implements transactional runtime-role restoration, recoverable managed-secret rotation, exact
+downloaded Edge bytes/configuration, and committed encrypted recovery journals. Recovery reads
+current state first and never restores/deletes/unsets an attempted component that did not change.
+Supabase restoration preserves prior bytes/configuration and records both the original captured
+identity and the newly allocated restoration version; it does not resurrect the old version number.
+Final Astra findings 3 and 4 are locally implemented. Finding 5 remains open only at the reviewed
+Sites transport and immutable four-artifact publication/receipt integration. The native factory is
+I/O-free and the missing Sites capability still blocks production before mutation. Focused local
+tests do not substitute for independent review or any live deployment/restore proof.
 
 Final independent review, consolidated verification of the final candidate, exact-head CI,
 protected deployment, live Auth, Site deployment/parity, live isolated restore, and the next

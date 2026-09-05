@@ -17,11 +17,15 @@ Final fix wave Track C: immutable audited migrations are restored and the additi
 and workflow tests are covered, including an actual disposable PostgreSQL upgrade and restore.
 Recovery now includes policy comparisons and their decision-evaluation dependencies.
 
-The protected main/recovery entrypoints share the component engine. They require a reviewed native
-transport at the fixed repository module `scripts.configured_native_release_adapter.py`; that module
-is not configured. The unchanged `.openai/hosting.json` remains the sole zero-cost Site target.
-Preflight blocks deployment before mutation. Final Astra finding 4 is locally complete; findings
-3 and 5 remain open for executable native transport integration. The final focused review,
+The protected main/recovery entrypoints share the component engine and the concrete
+`scripts.configured_native_release_adapter.py` PostgreSQL/Supabase implementation. It captures and
+restores runtime role attributes/verifier/memberships/settings, recoverable secret values/digests,
+and exact downloaded bytes/configuration for all three Edge functions. Unchanged readback is a
+recovery no-op; restored Edge versions are newly allocated and recorded alongside prior identities.
+The unchanged `.openai/hosting.json` remains the sole zero-cost Site target. Its reviewed CI transport
+and immutable artifact-publication integration remain absent, so preflight blocks before mutation.
+Final Astra findings 3 and 4 are locally complete; finding 5 remains open at that Sites conditional.
+The final focused review,
 consolidated gate, re-review, exact-head CI, and every production receipt remain pending.
 
 | Layer | Local candidate | Production status |
