@@ -354,6 +354,17 @@ Deno.test("decision bundle permits only one candidate per ticker", () => {
   );
 });
 
+Deno.test("decision bundle accepts an explicit bounded reservation group", () => {
+  const bundle = validBundle();
+  Object.assign(bundle.candidates[0], {
+    reservation_group: "aluminum-growth-idea",
+  });
+  assertEquals(
+    parseDecisionBundle(bundle, "on-demand").candidates[0].reservation_group,
+    "aluminum-growth-idea",
+  );
+});
+
 Deno.test("decision bundle accepts bounded evidence-linked portfolio comparisons", () => {
   const bundle = validBundle("on-demand");
   bundle.candidates.push({

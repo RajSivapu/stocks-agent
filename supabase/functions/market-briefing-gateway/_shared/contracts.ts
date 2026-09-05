@@ -234,6 +234,7 @@ export interface DecisionCandidate {
   valid_until: string | null;
   evidence: EvidenceBlock[];
   relationship_type?: "direct" | "second_order" | null;
+  reservation_group?: string | null;
   factors: Array<{
     kind:
       | "fundamentals"
@@ -436,6 +437,7 @@ export interface PolicyContext {
   portfolio_command_coverage_complete: boolean;
   consecutive_completed_losses: number;
   owner_plans: OwnerInvestmentPlan[];
+  spendable_cash?: Partial<Record<Bucket, string | null>>;
 }
 
 export interface GatewayReadContext extends PolicyContext {
@@ -959,6 +961,7 @@ function parseCandidate(
 ): DecisionCandidate {
   const row = objectValue(value, path);
   const hasRelationshipType = Object.hasOwn(row, "relationship_type");
+  const hasReservationGroup = Object.hasOwn(row, "reservation_group");
   const keys = [
     "candidate_id",
     "ticker",
@@ -983,6 +986,7 @@ function parseCandidate(
     "valid_until",
     "evidence",
     ...(hasRelationshipType ? ["relationship_type"] : []),
+    ...(hasReservationGroup ? ["reservation_group"] : []),
     "factors",
     "analyst",
     "checker",
@@ -1139,6 +1143,9 @@ function parseCandidate(
       ["direct", "second_order"] as const,
       `${path}.relationship_type`,
     ),
+    reservation_group: !hasReservationGroup || row.reservation_group === null
+      ? null
+      : stringValue(row.reservation_group, `${path}.reservation_group`, 100),
     factors,
     analyst: {
       id: !hasAnalystReceipt || analystRow.id === null ? null : uuidValue(analystRow.id, `${path}.analyst.id`),

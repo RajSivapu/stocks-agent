@@ -375,6 +375,19 @@ Deno.test("stale live quote downgrades Buy and on-demand cannot bypass it", () =
   );
 });
 
+Deno.test("entry above zone and target is never actionable", () => {
+  const result = evaluate(
+    candidate({ proposed_amount: "700", proposed_shares: "10" }),
+    context(),
+    quote("CENX", "70"),
+  );
+  assertEquals(result.final_action, "watch");
+  assert(
+    new Set<string>(result.reason_codes).has("ENTRY_TRIGGER_NOT_MET"),
+    "an out-of-range executable quote passed the entry trigger",
+  );
+});
+
 Deno.test("outside-session research is conditional and cannot emit an entry trigger", () => {
   const close = quote("CENX", "47.02", "2026-09-02T20:00:00.000Z", "CLOSED");
   const afterClose = new Date("2026-09-02T22:00:00.000Z");
@@ -574,6 +587,19 @@ Deno.test("ownership and sell quantity mismatches veto", () => {
   assert(
     sold.reason_codes.includes("SELL_EXCEEDS_HOLDING"),
     "sell limit absent",
+  );
+  const reduce = evaluate(
+    {
+      ...sell,
+      action: "reduce",
+      analyst: { ...sell.analyst, action: "reduce" },
+    },
+    context({ holdings: [owned], holding_quotes: { CENX: quote() } }),
+  );
+  assertEquals(reduce.final_action, null);
+  assert(
+    reduce.reason_codes.includes("SELL_EXCEEDS_HOLDING"),
+    "reduce limit absent",
   );
 });
 

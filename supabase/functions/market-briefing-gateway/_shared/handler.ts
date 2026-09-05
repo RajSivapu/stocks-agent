@@ -26,7 +26,11 @@ import {
 } from "./market-data.ts";
 import { type DueDecision, gradeDecision } from "./outcomes.ts";
 import type { RecordLearningPayload } from "./outcomes.ts";
-import { evaluateCandidate, type PolicyEvaluation } from "./policy.ts";
+import {
+  evaluateCandidate,
+  reservePortfolioPlan,
+  type PolicyEvaluation,
+} from "./policy.ts";
 import { draftFromEvaluation } from "./policy.ts";
 import { alertFingerprint, alertRuleFingerprint, evaluateAlertRule, shouldPublishAlert } from "./alerts.ts";
 import { renderAlertV3, type RenderedAlert, renderPublication } from "./renderer.ts";
@@ -1452,7 +1456,15 @@ async function evaluateAndPublish(
       return quote ? [[holding.ticker, quote]] : [];
     }),
   );
-  const evaluations = bundle.candidates.map((candidate) =>
+  const currentPowder = context.dry_powder.find((item) =>
+    item.month === bundle.market_date.slice(0, 7)
+  );
+  context.spendable_cash = {
+    core: null,
+    growth: currentPowder?.growth_available ?? null,
+    speculative: currentPowder?.spec_available ?? null,
+  };
+  const preliminaryEvaluations = bundle.candidates.map((candidate) =>
     evaluateCandidate(
       candidate,
       context,
@@ -1464,6 +1476,12 @@ async function evaluateAndPublish(
       packet?.qualifiedExposureIds.get(candidate.ticker) ?? new Set(),
     )
   );
+  const reservation = reservePortfolioPlan(
+    preliminaryEvaluations,
+    context,
+    activePolicy,
+  );
+  const evaluations = reservation.evaluations;
   const comparisons = await buildPortfolioComparisons(
     bundle.comparisons ?? [],
     evaluations,
@@ -1546,6 +1564,12 @@ async function evaluateAndPublish(
       ok: true,
       dry_run: true,
       evaluation_count: evaluations.length,
+      evaluations,
+      reservation: {
+        approved: reservation.approved,
+        alternatives: reservation.alternatives,
+        reason_codes: reservation.reason_codes,
+      },
       would_write_suggestions: suggestions.length,
       would_create_alert_drafts: alertDrafts.length,
       alert_draft_previews: alertDraftPreviews,

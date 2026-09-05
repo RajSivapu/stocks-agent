@@ -21,6 +21,10 @@ export type PolicyReasonCode =
   | "QUOTE_MISSING"
   | "QUOTE_STALE"
   | "QUOTE_SESSION_MISMATCH"
+  | "ENTRY_TRIGGER_NOT_MET"
+  | "CASH_UNAVAILABLE"
+  | "PORTFOLIO_BUDGET_EXCEEDED"
+  | "MUTUALLY_EXCLUSIVE_ALTERNATIVE"
   | "PRICE_RELATION_INVALID"
   | "AMOUNT_SHARES_MISMATCH"
   | "CURRENT_EVIDENCE_MISSING"
@@ -506,7 +510,7 @@ export function evaluateCandidate(
       schemaInvalid = true;
     }
     if (
-      candidate.action === "sell" && holding && shares !== null &&
+      SELL_SIDE.has(candidate.action) && holding && shares !== null &&
       shares > parseFixed(holding.shares, 8)
     ) {
       add(
@@ -565,6 +569,7 @@ export function evaluateCandidate(
     }
   }
 
+  let entryLow: bigint | null = null;
   let entryHigh: bigint | null = null;
   let candidateStop: bigint | null = null;
   let candidateTarget: bigint | null = null;
@@ -579,14 +584,14 @@ export function evaluateCandidate(
       );
     } else {
       try {
-        const low = validPositive(candidate.entry_zone_low, 6);
+        entryLow = validPositive(candidate.entry_zone_low, 6);
         entryHigh = validPositive(candidate.entry_zone_high, 6);
         candidateStop = validPositive(candidate.stop, 6);
         candidateTarget = validPositive(candidate.target, 6);
         if (
-          low === null || entryHigh === null || candidateStop === null ||
+          entryLow === null || entryHigh === null || candidateStop === null ||
           candidateTarget === null ||
-          !(candidateStop < low && low <= entryHigh &&
+          !(candidateStop < entryLow && entryLow <= entryHigh &&
             entryHigh < candidateTarget)
         ) {
           add(
@@ -600,6 +605,27 @@ export function evaluateCandidate(
           "Required long price levels are invalid.",
         );
       }
+    }
+  }
+
+  if (
+    BUY_SIDE.has(candidate.action) && !ownerPlanMatched &&
+    candidateQuoteAllowed && verifiedQuote !== null &&
+    entryLow !== null && entryHigh !== null && candidateTarget !== null
+  ) {
+    try {
+      const executablePrice = parseFixed(verifiedQuote.price, 6);
+      if (
+        executablePrice < entryLow || executablePrice > entryHigh ||
+        executablePrice >= candidateTarget
+      ) {
+        add(
+          "ENTRY_TRIGGER_NOT_MET",
+          "The verified current price is outside the executable entry trigger.",
+        );
+      }
+    } catch {
+      add("QUOTE_MISSING", "The executable quote price is invalid.");
     }
   }
 
@@ -647,10 +673,7 @@ export function evaluateCandidate(
         const positionCap = bucketBudget *
           BigInt(config.max_position_bps_of_bucket[candidate.bucket]) / 10_000n;
         const quotePrice = parseFixed(verifiedQuote!.price, 6);
-        const sizingPrice = entryHigh === null
-          ? quotePrice
-          : max(quotePrice, entryHigh);
-        const newTradeValue = money(sizingPrice, candidate.proposed_shares!);
+        const newTradeValue = money(quotePrice, candidate.proposed_shares!);
         positionValueAfter = (holdingValues.get(candidate.ticker) ?? 0n) +
           newTradeValue;
         if (positionValueAfter > positionCap) {
@@ -682,7 +705,7 @@ export function evaluateCandidate(
             }
           }
           const newRisk = money(
-            entryHigh - candidateStop,
+            quotePrice - candidateStop,
             candidate.proposed_shares!,
           );
           dollarsAtRisk = existingRisk + newRisk;
@@ -696,8 +719,8 @@ export function evaluateCandidate(
               "Conservative dollars at risk exceed the reviewed portfolio limit.",
             );
           }
-          rewardRiskMilli = (candidateTarget - entryHigh) * 1_000n /
-            (entryHigh - candidateStop);
+          rewardRiskMilli = (candidateTarget - quotePrice) * 1_000n /
+            (quotePrice - candidateStop);
           if (rewardRiskMilli < BigInt(config.min_reward_risk_milli)) {
             add(
               "REWARD_RISK_TOO_LOW",
@@ -881,5 +904,150 @@ export function evaluateCandidate(
     },
     holding_state_change: holdingState,
     candidate,
+  };
+}
+
+export interface PortfolioPlanReservation {
+  evaluations: PolicyEvaluation[];
+  approved: string[];
+  alternatives: string[];
+  reason_codes: PolicyReasonCode[];
+}
+
+function withPortfolioReason(
+  evaluation: PolicyEvaluation,
+  code: PolicyReasonCode,
+  explanation: string,
+): PolicyEvaluation {
+  const reasonCodes = evaluation.reason_codes.includes(code)
+    ? evaluation.reason_codes
+    : [...evaluation.reason_codes, code];
+  const explanations = evaluation.reason_codes.includes(code)
+    ? evaluation.explanations
+    : [...evaluation.explanations, explanation];
+  return {
+    ...evaluation,
+    final_action: BUY_SIDE.has(evaluation.raw_action) ? "watch" : evaluation.final_action,
+    status: "downgraded",
+    reason_codes: reasonCodes,
+    explanations,
+  };
+}
+
+function rankedEvaluations(evaluations: readonly PolicyEvaluation[]): PolicyEvaluation[] {
+  return [...evaluations].sort((left, right) => {
+    const leftScore = left.candidate.health_score === null
+      ? -1n
+      : parseFixed(left.candidate.health_score, 6);
+    const rightScore = right.candidate.health_score === null
+      ? -1n
+      : parseFixed(right.candidate.health_score, 6);
+    if (leftScore !== rightScore) return leftScore > rightScore ? -1 : 1;
+    return left.candidate.candidate_id.localeCompare(right.candidate.candidate_id);
+  });
+}
+
+export function reservePortfolioPlan(
+  evaluations: readonly PolicyEvaluation[],
+  context: PolicyContext,
+  config: PolicyConfig,
+): PortfolioPlanReservation {
+  const approved: string[] = [];
+  const alternatives: string[] = [];
+  const reasons = new Set<PolicyReasonCode>();
+  const output = new Map(evaluations.map((item) => [item.evaluation_id, item]));
+  const reservedSpend: Partial<Record<DecisionCandidate["bucket"], bigint>> = {};
+  const reservedRisk: Partial<Record<DecisionCandidate["bucket"], bigint>> = {};
+  const approvedGroups = new Set<string>();
+
+  for (const evaluation of rankedEvaluations(evaluations)) {
+    if (!BUY_SIDE.has(evaluation.raw_action) || evaluation.final_action !== evaluation.raw_action) {
+      continue;
+    }
+    const bucket = evaluation.candidate.bucket;
+    const group = evaluation.candidate.reservation_group ?? null;
+    if (group !== null && approvedGroups.has(group)) {
+      output.set(evaluation.evaluation_id, withPortfolioReason(
+        evaluation,
+        "MUTUALLY_EXCLUSIVE_ALTERNATIVE",
+        "This proposal is an alternative to a higher-ranked approved proposal.",
+      ));
+      alternatives.push(evaluation.candidate_id);
+      reasons.add("MUTUALLY_EXCLUSIVE_ALTERNATIVE");
+      continue;
+    }
+    try {
+      const cashValue = context.spendable_cash?.[bucket] ?? null;
+      if (cashValue === null) {
+        output.set(evaluation.evaluation_id, withPortfolioReason(
+          evaluation,
+          "CASH_UNAVAILABLE",
+          "Reconciled spendable cash is unavailable for this bucket.",
+        ));
+        reasons.add("CASH_UNAVAILABLE");
+        continue;
+      }
+      const cash = validPositive(cashValue, 6);
+      const totalInvestable = evaluation.normalized.total_investable_value === null
+        ? null
+        : validPositive(evaluation.normalized.total_investable_value, 6);
+      const price = validPositive(evaluation.normalized.verified_price, 6);
+      const shares = evaluation.candidate.proposed_shares === null
+        ? null
+        : validPositive(evaluation.candidate.proposed_shares, 8);
+      const risk = evaluation.normalized.dollars_at_risk === null
+        ? null
+        : validPositive(evaluation.normalized.dollars_at_risk, 6);
+      if (cash === null || totalInvestable === null || price === null || shares === null || risk === null) {
+        output.set(evaluation.evaluation_id, withPortfolioReason(
+          evaluation,
+          "CASH_UNAVAILABLE",
+          "Executable-price sizing or reconciled cash is unavailable.",
+        ));
+        reasons.add("CASH_UNAVAILABLE");
+        continue;
+      }
+      let existingBucketValue = 0n;
+      for (const holding of context.holdings) {
+        if (holding.bucket !== bucket) continue;
+        const quote = context.holding_quotes[holding.ticker];
+        if (!quote || quote.ticker !== holding.ticker) throw new Error("holding quote unavailable");
+        existingBucketValue += parseHoldingValue(holding, quote);
+      }
+      const bucketBudget = totalInvestable * BigInt(config.allocation_bps[bucket]) / 10_000n;
+      const remainingAllocation = bucketBudget > existingBucketValue
+        ? bucketBudget - existingBucketValue
+        : 0n;
+      const cost = money(price, evaluation.candidate.proposed_shares!);
+      const nextSpend = (reservedSpend[bucket] ?? 0n) + cost;
+      const nextRisk = (reservedRisk[bucket] ?? 0n) + risk;
+      const riskLimit = totalInvestable * BigInt(config.max_trade_risk_bps[bucket]) / 10_000n;
+      if (nextSpend > cash || nextSpend > remainingAllocation || nextRisk > riskLimit) {
+        output.set(evaluation.evaluation_id, withPortfolioReason(
+          evaluation,
+          "PORTFOLIO_BUDGET_EXCEEDED",
+          "Earlier approved proposals have reserved the available portfolio budget or risk.",
+        ));
+        reasons.add("PORTFOLIO_BUDGET_EXCEEDED");
+        continue;
+      }
+      reservedSpend[bucket] = nextSpend;
+      reservedRisk[bucket] = nextRisk;
+      if (group !== null) approvedGroups.add(group);
+      approved.push(evaluation.candidate_id);
+    } catch {
+      output.set(evaluation.evaluation_id, withPortfolioReason(
+        evaluation,
+        "CASH_UNAVAILABLE",
+        "Reconciled cash or portfolio valuation cannot be verified.",
+      ));
+      reasons.add("CASH_UNAVAILABLE");
+    }
+  }
+  return {
+    evaluations: evaluations.map((item) => output.get(item.evaluation_id) ?? item),
+    approved,
+    alternatives,
+    reason_codes: [...reasons].sort(),
   };
 }

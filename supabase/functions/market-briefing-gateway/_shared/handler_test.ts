@@ -158,7 +158,12 @@ function readContext(): GatewayReadContext {
     lessons: [],
     radar: [],
     recent_grades: [],
-    dry_powder: [],
+    dry_powder: [{
+      month: "2026-09",
+      growth_available: "10000",
+      spec_available: "0",
+      rolled_months: 0,
+    }],
     paper_watches: [],
   };
 }
@@ -1000,6 +1005,95 @@ Deno.test("dry-run operations are write-free and report only their own effects",
   assertEquals(finished.write_counts, {});
   assertEquals(repository.mutationCalls, 0);
   assertEquals(sent, []);
+});
+
+Deno.test("six individually valid purchases cannot exceed the growth allocation", async () => {
+  const setup = makeHandler();
+  setup.repository.policyValue.max_trade_risk_bps.growth = 1000;
+  const purchases = Array.from({ length: 6 }, (_, index) => ({
+    ...candidate("on-demand", "brief"),
+    candidate_id: `00000000-0000-4000-8000-${String(index + 30).padStart(12, "0")}`,
+    ticker: `G${index}`,
+    proposed_amount: "1500",
+    proposed_shares: "31.901318",
+  }));
+  const response = await setup.handler(request("evaluate_and_publish", {
+    phase: "on-demand",
+    market_date: "2026-09-02",
+    title: "Growth candidates",
+    candidates: purchases,
+  }, { dry: true }));
+  assertEquals(response.status, 200);
+  const result = await json(response);
+  const evaluations = (result.evaluations ?? []) as Array<{
+    final_action: string | null;
+    candidate: { proposed_amount: string | null };
+    reason_codes: string[];
+  }>;
+  const approvedCost = evaluations
+    .filter((item) => item.final_action === "buy")
+    .reduce((total, item) => total + Number(item.candidate.proposed_amount), 0);
+  assert(approvedCost <= 8100, "approved purchases exceeded growth allocation");
+  assert(
+    evaluations.some((item) =>
+      new Set<string>(item.reason_codes).has("PORTFOLIO_BUDGET_EXCEEDED")
+    ),
+    "portfolio-level rejection was absent",
+  );
+});
+
+Deno.test("unreconciled cash and mutually exclusive purchases fail closed", async () => {
+  const unavailable = makeHandler();
+  unavailable.repository.context.dry_powder = [];
+  const missingCash = await json(await unavailable.handler(request(
+    "evaluate_and_publish",
+    {
+      phase: "on-demand",
+      market_date: "2026-09-02",
+      title: "Cash check",
+      candidates: [candidate("on-demand", "brief")],
+    },
+    { dry: true },
+  )));
+  const cashEvaluation = (missingCash.evaluations as Array<{
+    final_action: string | null;
+    reason_codes: string[];
+  }>)[0];
+  assertEquals(cashEvaluation.final_action, "watch");
+  assert(new Set(cashEvaluation.reason_codes).has("CASH_UNAVAILABLE"), "missing cash passed");
+
+  const alternatives = makeHandler();
+  alternatives.repository.policyValue.max_trade_risk_bps.growth = 1000;
+  const proposals = [0, 1].map((index) => ({
+    ...candidate("on-demand", "brief"),
+    candidate_id: `00000000-0000-4000-8000-${String(index + 50).padStart(12, "0")}`,
+    ticker: `A${index}`,
+    reservation_group: "same-idea",
+  }));
+  const alternativeResult = await json(await alternatives.handler(request(
+    "evaluate_and_publish",
+    {
+      phase: "on-demand",
+      market_date: "2026-09-02",
+      title: "Alternative ideas",
+      candidates: proposals,
+    },
+    { dry: true },
+  )));
+  const alternativeEvaluations = alternativeResult.evaluations as Array<{
+    final_action: string | null;
+    reason_codes: string[];
+  }>;
+  assertEquals(
+    alternativeEvaluations.filter((item) => item.final_action === "buy").length,
+    1,
+  );
+  assert(
+    alternativeEvaluations.some((item) =>
+      new Set(item.reason_codes).has("MUTUALLY_EXCLUSIVE_ALTERNATIVE")
+    ),
+    "mutually exclusive proposal was not labeled as an alternative",
+  );
 });
 
 Deno.test("on-demand alternatives are history-computed by the gateway and remain send-free", async () => {
