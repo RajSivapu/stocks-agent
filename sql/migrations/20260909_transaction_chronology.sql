@@ -76,6 +76,20 @@ BEGIN
     );
     IF v_executed_on >= DATE '2000-01-01'
         AND v_executed_on <= (CURRENT_TIMESTAMP AT TIME ZONE 'America/Chicago')::date THEN
+      -- Nullable columns can satisfy a CHECK through SQL NULL semantics.
+      -- Reject corrupt amounts before chronology or legacy write arithmetic.
+      IF v_command.qty IS NULL OR v_command.qty <= 0
+          OR v_command.price IS NULL OR v_command.price <= 0 THEN
+        v_result := jsonb_build_object(
+          'ok', false, 'status', 'rejected',
+          'reason', 'quantity and price must be positive'
+        );
+        UPDATE public.portfolio_commands
+        SET status = 'rejected', updated_at = now(), error = 'invalid transaction amount', result = v_result
+        WHERE id = v_command.id;
+        RETURN v_result;
+      END IF;
+
       SELECT MAX(COALESCE(executed_on, (ts AT TIME ZONE 'America/Chicago')::date))
       INTO v_latest_transaction_on
       FROM public.transactions

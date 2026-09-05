@@ -5,8 +5,8 @@ import { DashboardHttpError, errorEnvelope } from "./errors.ts";
 import { clientNetworkSignal, createDashboardRateLimiter, type DashboardRateLimiter } from "./rate-limit.ts";
 import { resolveDashboardRoute, type DashboardRoute } from "./routes.ts";
 
-export interface DashboardReadResult {
-  data: object;
+export interface DashboardReadResult<T extends object = object> {
+  data: T;
   dataAsOf: string | null;
   freshness: Freshness;
   marketState: MarketState;

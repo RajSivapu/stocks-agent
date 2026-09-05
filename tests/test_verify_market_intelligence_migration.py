@@ -381,6 +381,36 @@ def test_chronology_defers_ineligible_commands_to_legacy_receipts(prerequisite):
         assert "WHERE ticker = v_command.ticker\n    FOR UPDATE;" in migration
 
 
+@pytest.mark.parametrize("operation", ["buy", "sell"])
+@pytest.mark.parametrize("field", ["qty", "price"])
+@pytest.mark.parametrize("invalid", [None, 0, -1])
+def test_chronology_rejects_invalid_transaction_amounts_before_ledger_access(operation, field, invalid):
+    migration = TRANSACTION_CHRONOLOGY.read_text()
+    # A backdated command with these amounts must terminate in its eligibility
+    # guard, not reach the chronology receipt or legacy holdings arithmetic.
+    guard = re.search(
+        r"IF (v_command\.qty IS NULL OR v_command\.qty <= 0\s+"
+        r"OR v_command\.price IS NULL OR v_command\.price <= 0) THEN(?P<body>.*?)END IF;",
+        migration, re.S,
+    )
+    assert guard is not None, f"missing amount rejection for backdated {operation} {field}={invalid}"
+    condition = guard.group(1)
+    assert f"v_command.{field} IS NULL" in condition if invalid is None else f"v_command.{field} <= 0" in condition
+    body = guard.group("body")
+    assert "'ok', false, 'status', 'rejected'" in body
+    assert "'reason', 'quantity and price must be positive'" in body
+    assert "UPDATE public.portfolio_commands" in body
+    assert "RETURN v_result;" in body
+    assert "TRANSACTION_OUT_OF_ORDER" not in body
+    assert "apply_portfolio_command_without_chronology" not in body
+    assert not re.search(r"(?:INSERT INTO|UPDATE|DELETE FROM) public\.(?:holdings|transactions)\b", body)
+    assert "realized_pnl" not in body
+    assert migration.index("v_command.status = 'pending' AND v_command.operation IN ('buy', 'sell')") < guard.start()
+    assert migration.index("pg_advisory_xact_lock") < guard.start()
+    assert migration.index("v_current_shares IS DISTINCT FROM v_command.expected_shares") < guard.start()
+    assert guard.end() < migration.index("SELECT MAX(COALESCE(executed_on")
+
+
 def test_portfolio_command_verifier_exercises_the_authoritative_chronology_fixture():
     source = PORTFOLIO_COMMAND_VERIFIER.read_text()
 
