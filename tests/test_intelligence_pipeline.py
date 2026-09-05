@@ -203,3 +203,32 @@ def test_output_packet_and_persistence_payload_are_bounded_and_secret_free():
     assert "raw_payload" not in result.to_json_bytes().decode()
     assert "secret" not in result.to_json_bytes().decode().casefold()
     assert len(gateway.payloads) == 2
+
+
+def test_pipeline_persists_provider_identity_urls_times_and_discovery_status():
+    gateway = FakeGateway()
+    adapter = FakeAdapter()
+    source = raw_item("holding:TEST")
+    source = replace(
+        source,
+        source_url="https://publisher.example/test-filing",
+        request_url="https://api.gdeltproject.org/api/v2/doc/doc?query=TEST",
+        published_at=NOW,
+        reporting_at=datetime(2025, 12, 31, tzinfo=timezone.utc),
+        entity_ids=("cik:0000000001",),
+        security_ids=("TEST",),
+        metadata=MappingProxyType({"cik": "0000000001"}),
+    )
+    adapter.collect = lambda query: CollectionResult((source,), receipt(adapter.provider), query.limit)
+
+    IntelligencePipeline(gateway, [adapter], context={"holdings": {"TEST": "1"}}).run(
+        request("intraday")
+    )
+
+    item = gateway.payloads[-1]["items"][0]
+    assert item["canonical_url"] == "https://publisher.example/test-filing"
+    assert item["request_url"] == "https://api.gdeltproject.org/api/v2/doc/doc?query=TEST"
+    assert item["reporting_at"] == "2025-12-31T00:00:00.000Z"
+    assert item["entity_ids"] == ["cik:0000000001"]
+    assert item["security_ids"] == ["TEST"]
+    assert item["discovery_status"] == "qualified"

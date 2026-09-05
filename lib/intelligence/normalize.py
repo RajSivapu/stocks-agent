@@ -86,6 +86,11 @@ class SourceItem:
     authority: str
     metadata: Mapping[str, Any]
     trust: str = "untrusted_data"
+    request_url: str | None = None
+    reporting_at: datetime | None = None
+    entity_ids: tuple[str, ...] = ()
+    security_ids: tuple[str, ...] = ()
+    claim_polarity: str = "unknown"
 
     @property
     def source_url(self) -> str:
@@ -115,6 +120,28 @@ def _field(raw: object, name: str, default: object = None) -> object:
     return getattr(raw, name, default)
 
 
+def _identifiers(value: object, *, security: bool = False) -> tuple[str, ...]:
+    values = value if isinstance(value, (list, tuple, set, frozenset)) else (value,)
+    normalized = {
+        normalize_text(item, 32).upper() if security else normalize_text(item, 160).casefold()
+        for item in values
+        if normalize_text(item, 160)
+    }
+    return tuple(sorted(normalized))
+
+
+def _claim_polarity(title: str, summary: str, metadata: Mapping[str, Any]) -> str:
+    declared = normalize_text(metadata.get("claim_polarity"), 16).lower()
+    if declared in {"affirmed", "denied", "unknown"}:
+        return declared
+    text = f"{title} {summary}".casefold()
+    if any(token in text for token in (" denies", " denied", "not ", " no ", "cancelled", "canceled")):
+        return "denied"
+    if any(token in text for token in (" confirms", " confirmed", " approves", " approved", " will proceed")):
+        return "affirmed"
+    return "unknown"
+
+
 def normalize_item(raw: object) -> SourceItem:
     provider = normalize_text(_field(raw, "provider", ""), 80).lower()
     title = normalize_text(_field(raw, "title", ""), TITLE_LIMIT)
@@ -129,21 +156,27 @@ def normalize_item(raw: object) -> SourceItem:
     upstream_id = None if upstream is None else normalize_text(upstream, UPSTREAM_ID_LIMIT)
     published = _field(raw, "published_at")
     effective = _field(raw, "effective_at")
+    reporting = _field(raw, "reporting_at")
     retrieved = _field(raw, "retrieved_at")
     _timestamp(published)
     _timestamp(effective)
+    _timestamp(reporting)
     if not isinstance(retrieved, datetime) or retrieved.tzinfo is None:
         raise ValueError("retrieved_at must be timezone-aware")
     authority = normalize_text(_field(raw, "authority", ""), 40).lower()
     metadata = _field(raw, "metadata", {})
     if not isinstance(metadata, Mapping):
         raise ValueError("source metadata must be an object")
+    entity_ids = _identifiers(_field(raw, "entity_ids", metadata.get("entity_ids", ())))
+    security_ids = _identifiers(
+        _field(raw, "security_ids", metadata.get("security_ids", metadata.get("ticker", ()))), security=True
+    )
 
     preliminary = SourceItem(
         provider=provider,
         upstream_item_id=upstream_id or None,
         canonical_url=canonicalize_url(
-            _field(raw, "source_url", _field(raw, "canonical_url", ""))
+            _field(raw, "item_url", _field(raw, "source_url", _field(raw, "canonical_url", "")))
         ),
         title=title,
         summary=summary,
@@ -154,6 +187,11 @@ def normalize_item(raw: object) -> SourceItem:
         retrieved_at=retrieved,
         authority=authority,
         metadata=dict(metadata),
+        request_url=canonicalize_url(_field(raw, "request_url", "")),
+        reporting_at=reporting,
+        entity_ids=entity_ids,
+        security_ids=security_ids,
+        claim_polarity=_claim_polarity(title, summary, metadata),
     )
     canonical = json.dumps(
         preliminary.hash_fields(),
@@ -174,6 +212,11 @@ def normalize_item(raw: object) -> SourceItem:
         retrieved_at=preliminary.retrieved_at,
         authority=preliminary.authority,
         metadata=preliminary.metadata,
+        request_url=preliminary.request_url,
+        reporting_at=preliminary.reporting_at,
+        entity_ids=preliminary.entity_ids,
+        security_ids=preliminary.security_ids,
+        claim_polarity=preliminary.claim_polarity,
     )
 
 

@@ -2,7 +2,7 @@ from urllib.parse import urlencode
 
 from lib.intelligence.http import HttpRequest, SourceFailure
 
-from . import CollectionQuery, SourceAdapter, publisher_reference
+from . import CollectionQuery, SourceAdapter, publisher_reference, security_ids
 
 
 class AlphaVantageAdapter(SourceAdapter):
@@ -37,12 +37,20 @@ class AlphaVantageAdapter(SourceAdapter):
         feed = payload.get("feed") if isinstance(payload, dict) else None
         if not isinstance(feed, list):
             raise ValueError("invalid Alpha Vantage response")
-        return [{
-            "upstream_item_id": article.get("url"),
-            "source_url": self._evidence_url(query),
-            "title": article.get("title"),
-            "text": article.get("summary"),
-            "published_at": article.get("time_published"),
-            "effective_at": None,
-            "metadata": {"source": article.get("source")} | publisher_reference(article.get("url")),
-        } for article in feed if isinstance(article, dict)]
+        records = []
+        for article in feed:
+            if not isinstance(article, dict):
+                continue
+            tickers = security_ids([
+                row.get("ticker") for row in article.get("ticker_sentiment", [])
+                if isinstance(row, dict)
+            ]) or security_ids(query.symbols)
+            records.append({
+                "upstream_item_id": article.get("url"), "request_url": self._evidence_url(query),
+                "item_url": article.get("url") or self._evidence_url(query),
+                "title": article.get("title"), "text": article.get("summary"),
+                "published_at": article.get("time_published"), "effective_at": None,
+                "security_ids": tickers,
+                "metadata": {"source": article.get("source")} | publisher_reference(article.get("url")),
+            })
+        return records

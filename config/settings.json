@@ -46,6 +46,16 @@
       "bls": {"pre-market": 4, "intraday": 1, "post-market": 2, "on-demand": 2},
       "bea": {"pre-market": 4, "intraday": 1, "post-market": 2, "on-demand": 2}
     },
+    "provider_query_identifiers": {
+      "version": 1,
+      "cik_by_symbol": {
+        "CENX": "0000949157",
+        "NVDA": "0001045810"
+      },
+      "series_by_provider": {
+        "fred": "CPIAUCSL"
+      }
+    },
     "packet": {
       "max_candidates": 12,
       "max_evidence_per_candidate": 8,

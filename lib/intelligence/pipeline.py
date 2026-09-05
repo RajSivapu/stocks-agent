@@ -265,26 +265,34 @@ class IntelligencePipeline:
         for index in range(count):
             adapter = self.adapters[index % len(self.adapters)]
             target = targets[index % len(targets)]
-            query = CollectionQuery(
-                text=target,
-                symbols=_symbols_for_target(target),
-                start=_utc(request.now) - _window_for(request.phase),
-                end=_utc(request.now),
-                limit=20,
-            )
+            query = self._query_for(adapter, target, request)
             try:
                 result = adapter.collect(query)
                 if not isinstance(result, CollectionResult):
                     raise TypeError("adapter returned an invalid collection result")
-            except Exception:
+            except Exception as exc:
                 row = plan_by_provider[str(adapter.provider)]
                 result = CollectionResult(
                     (),
-                    _failed_receipt(str(adapter.provider), str(row["id"]), query, request.now),
+                    _failed_receipt(
+                        str(adapter.provider), str(row["id"]), query, request.now,
+                        error_code=getattr(exc, "code", "SOURCE_UNAVAILABLE"),
+                    ),
                     query.limit,
                 )
             results.append(result)
         return results
+
+    def _query_for(self, adapter: object, target: str, request: PipelineRequest) -> CollectionQuery:
+        provider = str(getattr(adapter, "provider", ""))
+        symbols = _symbols_for_target(target)
+        identifiers = _provider_query_identifiers()
+        cik = identifiers["cik_by_symbol"].get(symbols[0]) if symbols else None
+        series_id = identifiers["series_by_provider"].get(provider)
+        return CollectionQuery(
+            text=target, symbols=symbols, cik=cik, series_id=series_id,
+            start=_utc(request.now) - _window_for(request.phase), end=_utc(request.now), limit=20,
+        )
 
     def _complete(
         self,
@@ -497,7 +505,7 @@ def _window_for(phase: str) -> timedelta:
 
 
 def _failed_receipt(
-    provider: str, reservation_id: str, query: CollectionQuery, now: datetime
+    provider: str, reservation_id: str, query: CollectionQuery, now: datetime, *, error_code: str
 ) -> RequestReceipt:
     return RequestReceipt(
         provider=provider, reservation_id=reservation_id, status="failed",
@@ -505,7 +513,7 @@ def _failed_receipt(
         requested_window={"start": _timestamp(query.start), "end": _timestamp(query.end)},
         requested_limit=query.limit, retrieved_at=_utc(now), observed_at=None, expires_at=None,
         request_cost=0, upstream_remaining=None, returned_count=0, accepted_count=0,
-        duplicate_count=0, dropped_count=0, response_hash=None, error_code="SOURCE_UNAVAILABLE",
+        duplicate_count=0, dropped_count=0, response_hash=None, error_code=error_code,
     )
 
 
@@ -548,8 +556,11 @@ def _item_row(
         "id": evidence_key(item),
         "run_item_id": _uuid("run-item", run_id, evidence_key(item), receipt_id, ordinal),
         "receipt_id": receipt_id, "upstream_item_id": item.upstream_item_id,
-        "canonical_url": item.canonical_url, "published_at": _timestamp(item.published_at),
-        "effective_at": _timestamp(item.effective_at), "title": item.title,
+        "canonical_url": item.canonical_url, "request_url": item.request_url,
+        "published_at": _timestamp(item.published_at), "retrieved_at": _timestamp(item.retrieved_at),
+        "effective_at": _timestamp(item.effective_at), "reporting_at": _timestamp(item.reporting_at),
+        "entity_ids": list(item.entity_ids), "security_ids": list(item.security_ids),
+        "discovery_status": _discovery_status(item), "title": item.title,
         "normalized_text": item.summary, "canonical_content": item.canonical_content,
         "content_hash": item.content_hash, "metadata": metadata,
         "disposition": value.disposition, "drop_reason": value.reason,
@@ -564,6 +575,8 @@ def _discover(
     relations: list[EventRelationship] = []
     for item in items:
         ticker = str(item.metadata.get("ticker") or item.metadata.get("symbol") or "").upper()
+        if not ticker and item.security_ids:
+            ticker = item.security_ids[0]
         if not ticker:
             continue
         event = build_market_event(
@@ -587,6 +600,34 @@ def _discover(
     plans = context.get("owner_plans", context.get("plans"))
     ranked = rank_candidates(candidates, holdings=holdings, plans=plans)
     return events, relations, ranked
+
+
+def _discovery_status(item: SourceItem) -> str:
+    if item.security_ids or item.metadata.get("ticker") or item.metadata.get("symbol"):
+        return "qualified"
+    if item.entity_ids:
+        return "no_event"
+    return "insufficient_coverage"
+
+
+def _provider_query_identifiers() -> dict[str, dict[str, str]]:
+    """Read only versioned local mappings; never resolve identifiers over the network."""
+    from lib import config
+
+    settings = config.load_settings().get("intelligence", {})
+    mapping = settings.get("provider_query_identifiers", {}) if isinstance(settings, Mapping) else {}
+    raw_series = mapping.get("series_by_provider", {}) if isinstance(mapping, Mapping) else {}
+    raw_ciks = mapping.get("cik_by_symbol", {}) if isinstance(mapping, Mapping) else {}
+    return {
+        "series_by_provider": {
+            str(key): str(value) for key, value in raw_series.items()
+            if isinstance(key, str) and isinstance(value, str)
+        } if isinstance(raw_series, Mapping) else {},
+        "cik_by_symbol": {
+            str(key).upper(): str(value) for key, value in raw_ciks.items()
+            if isinstance(key, str) and isinstance(value, str)
+        } if isinstance(raw_ciks, Mapping) else {},
+    }
 
 
 def _event_row(value: MarketEvent) -> dict[str, object]:

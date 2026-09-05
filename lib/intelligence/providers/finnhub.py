@@ -2,7 +2,7 @@ from urllib.parse import urlencode
 
 from lib.intelligence.http import HttpRequest, SourceFailure
 
-from . import CollectionQuery, SourceAdapter, publisher_reference
+from . import CollectionQuery, SourceAdapter, publisher_reference, security_ids
 
 
 class FinnhubAdapter(SourceAdapter):
@@ -20,6 +20,8 @@ class FinnhubAdapter(SourceAdapter):
         return f"https://finnhub.io/api/v1/company-news?{params}"
 
     def _request(self, query: CollectionQuery) -> HttpRequest:
+        if not security_ids(query.symbols):
+            raise SourceFailure("UNSUPPORTED_QUERY")
         try:
             key = self.secret_getter("finnhub_api_key")
         except (KeyError, OSError, ValueError):
@@ -35,11 +37,10 @@ class FinnhubAdapter(SourceAdapter):
         if not isinstance(payload, list):
             raise ValueError("invalid Finnhub response")
         return [{
-            "upstream_item_id": article.get("id"),
-            "source_url": self._evidence_url(query),
-            "title": article.get("headline"),
-            "text": article.get("summary"),
-            "published_at": article.get("datetime"),
-            "effective_at": None,
+            "upstream_item_id": article.get("id"), "request_url": self._evidence_url(query),
+            "item_url": article.get("url") or self._evidence_url(query),
+            "title": article.get("headline"), "text": article.get("summary"),
+            "published_at": article.get("datetime"), "effective_at": None,
+            "security_ids": security_ids(query.symbols),
             "metadata": {"category": article.get("category")} | publisher_reference(article.get("url")),
         } for article in payload if isinstance(article, dict)]

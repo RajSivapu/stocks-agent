@@ -7,6 +7,7 @@ import pytest
 from lib.intelligence.http import HttpResult, SourceFailure
 from lib.intelligence.quota import QuotaSession
 from lib.intelligence.providers import CollectionQuery, build_adapter
+from lib import config
 
 
 NOW = datetime(2026, 9, 4, 12, 0, tzinfo=timezone.utc)
@@ -93,6 +94,55 @@ FIXTURES = {
 }
 
 
+@pytest.mark.parametrize("adapter_name,payload,query_overrides,expect_item", [
+    ("gdelt", FIXTURES["gdelt"], {}, True),
+    ("alpha_vantage", FIXTURES["alpha_vantage"], {}, True),
+    ("finnhub", FIXTURES["finnhub"], {}, True),
+    ("yahoo", {"chart": {"result": [{"meta": {
+        "symbol": "TEST", "regularMarketPrice": 101, "previousClose": 100,
+        "regularMarketTime": 1788516000, "marketState": "REGULAR",
+    }, "timestamp": [1788516000], "indicators": {"quote": [{"close": [101]}]}}]}}, {}, True),
+    ("sec_edgar", FIXTURES["sec_edgar"], {"cik": "0000000001"}, True),
+    ("federal_register", FIXTURES["federal_register"], {}, True),
+    ("fred", FIXTURES["fred"], {"series_id": "CPIAUCSL"}, True),
+    ("white_house", {}, {}, False),
+    ("doe", {}, {}, False),
+    ("dod", {}, {}, False),
+    ("eia", {}, {"series_id": "PET.WCESTUS1.W"}, False),
+    ("bls", {}, {"series_id": "CUUR0000SA0"}, False),
+    ("bea", {}, {"series_id": "T10105"}, False),
+])
+def test_each_declared_provider_yields_discoverable_evidence_or_pre_http_unsupported_failure(
+    adapter_name, payload, query_overrides, expect_item,
+):
+    assert adapter_name in config.load_settings()["intelligence"]["providers"]
+    http = FixtureHttp(payload)
+    quota = QuotaSession({adapter_name: ({"reservation_id": "declared", "reserved_requests": 1},)})
+    secrets = {
+        "alphavantage_api_key": "existing-free-alpha-key",
+        "finnhub_api_key": "existing-free-finnhub-key",
+        "fred_api_key": "existing-free-fred-key",
+    }
+    adapter = build_adapter(
+        adapter_name, http, quota, secret_getter=lambda name: secrets[name], clock=lambda: NOW,
+    )
+
+    if not expect_item:
+        with pytest.raises(SourceFailure, match="UNSUPPORTED_QUERY"):
+            adapter.collect(sample_query(**query_overrides))
+        assert http.requests == []
+        assert quota.consume_next(adapter_name) == "declared"
+        return
+
+    result = adapter.collect(sample_query(**query_overrides))
+    assert len(result.items) == 1
+    item = result.items[0]
+    assert item.upstream_item_id
+    assert item.request_url and item.source_url and item.request_url != item.source_url or adapter_name == "yahoo"
+    assert item.published_at and item.retrieved_at
+    assert item.security_ids or item.entity_ids
+
+
 @pytest.mark.parametrize("adapter_name", tuple(FIXTURES))
 def test_adapter_returns_bounded_items_and_one_request_receipt(adapter_name):
     http = FixtureHttp(FIXTURES[adapter_name])
@@ -165,6 +215,49 @@ def test_official_release_and_effective_timestamps_remain_distinct():
     item = result.items[0]
     assert item.published_at.isoformat() == "2026-09-04T00:00:00+00:00"
     assert item.effective_at.isoformat() == "2026-09-04T12:00:00+00:00"
+
+
+def test_newly_published_prior_period_filing_is_retained_with_distinct_times():
+    payload = {"cik": "0000000001", "name": "Test Issuer", "filings": {"recent": {
+        "accessionNumber": ["0000000001-26-000002"],
+        "filingDate": ["2026-09-04"],
+        "reportDate": ["2025-12-31"],
+        "form": ["10-K"],
+        "primaryDocument": ["annual.htm"],
+    }}}
+    result = build_adapter(
+        "sec_edgar", FixtureHttp(payload),
+        QuotaSession({"sec_edgar": ({"reservation_id": "s2", "reserved_requests": 1},)}),
+        clock=lambda: NOW,
+    ).collect(sample_query(cik="0000000001", symbols=("TEST",)))
+
+    assert len(result.items) == 1
+    item = result.items[0]
+    assert item.published_at.isoformat() == "2026-09-04T00:00:00+00:00"
+    assert item.reporting_at.isoformat() == "2025-12-31T00:00:00+00:00"
+    assert item.security_ids == ("TEST",)
+    assert item.entity_ids == ("cik:0000000001",)
+
+
+def test_provider_keeps_secret_free_request_url_separate_from_item_url_and_identity():
+    result = build_adapter(
+        "alpha_vantage", FixtureHttp({"feed": [{
+            "title": "Test issuer contract update",
+            "url": "https://publisher.example/stories/contract-update",
+            "summary": "A contract update for the issuer.",
+            "time_published": "20260904T093000",
+            "ticker_sentiment": [{"ticker": "TEST"}],
+        }]}),
+        QuotaSession({"alpha_vantage": ({"reservation_id": "a1", "reserved_requests": 1},)}),
+        secret_getter=lambda _name: "existing-free-alpha-key", clock=lambda: NOW,
+    ).collect(sample_query())
+
+    item = result.items[0]
+    assert item.source_url == "https://publisher.example/stories/contract-update"
+    assert item.request_url.startswith("https://www.alphavantage.co/query?")
+    assert "existing-free-alpha-key" not in item.request_url
+    assert item.security_ids == ("TEST",)
+    assert item.upstream_item_id == "https://publisher.example/stories/contract-update"
 
 
 @pytest.mark.parametrize("adapter_name,secret_name", [
@@ -350,9 +443,10 @@ def test_external_publisher_links_use_secret_free_provider_evidence_url(
 
     assert len(result.items) == 1
     item = result.items[0]
-    assert urlsplit(item.source_url).hostname == expected_host
-    assert reference_key in parse_qs(urlsplit(item.source_url).query)
-    assert secret not in item.source_url
+    assert urlsplit(item.source_url).hostname == "publisher.example"
+    assert urlsplit(item.request_url).hostname == expected_host
+    assert reference_key in parse_qs(urlsplit(item.request_url).query)
+    assert secret not in item.request_url
     assert item.metadata["publisher_url"].startswith("https://publisher.example/")
     assert item.metadata["publisher_url_authority"] == "untrusted_reference"
 
@@ -380,7 +474,7 @@ def test_collection_window_is_inclusive_and_rejects_stale_or_future_items(timest
     assert result.receipt.dropped_count == (0 if accepted else 1)
 
 
-def test_any_supplied_effective_timestamp_outside_window_is_dropped():
+def test_future_effective_timestamp_does_not_drop_newly_published_fact():
     payload = {"results": [{
         "document_number": "2026-99999",
         "title": "Future rule",
@@ -396,8 +490,9 @@ def test_any_supplied_effective_timestamp_outside_window_is_dropped():
         clock=lambda: NOW,
     ).collect(sample_query())
 
-    assert result.items == ()
-    assert result.receipt.dropped_count == 1
+    assert len(result.items) == 1
+    assert result.items[0].effective_at.isoformat() == "2026-09-04T12:00:01+00:00"
+    assert result.receipt.dropped_count == 0
 
 
 def test_cached_schema_failure_uses_original_timestamps_and_zero_request_cost():

@@ -28,10 +28,12 @@ class SocialAdapter(SourceAdapter):
             records.append({
                 "upstream_item_id": data.get("id"),
                 "source_url": f"https://www.reddit.com{permalink}",
+                "request_url": f"https://www.reddit.com/search.json?{urlencode({'q': query.text, 'limit': min(query.limit, self.max_items_per_request)})}",
                 "title": data.get("title"),
                 "text": data.get("selftext"),
                 "published_at": data.get("created_utc"),
                 "effective_at": None,
                 "metadata": {"subreddit": data.get("subreddit"), "score": data.get("score")},
+                "security_ids": query.symbols,
             })
         return records

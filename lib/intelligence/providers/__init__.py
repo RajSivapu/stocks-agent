@@ -71,6 +71,10 @@ class SourceItem:
     retrieved_at: datetime
     authority: str
     metadata: Mapping[str, Any]
+    request_url: str | None = None
+    reporting_at: datetime | None = None
+    entity_ids: tuple[str, ...] = ()
+    security_ids: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -192,6 +196,28 @@ def bounded_metadata(value: object) -> Mapping[str, object]:
     if len(encoded) > _MAX_METADATA_BYTES:
         return MappingProxyType({})
     return MappingProxyType(bounded)
+
+
+def security_ids(value: object) -> tuple[str, ...]:
+    values = value if isinstance(value, (list, tuple, set, frozenset)) else (value,)
+    return tuple(sorted({
+        symbol.strip().upper()
+        for item in values
+        if isinstance(item, str)
+        for symbol in (item,)
+        if re.fullmatch(r"[A-Za-z][A-Za-z0-9.-]{0,14}", symbol.strip())
+    }))
+
+
+def entity_ids(value: object) -> tuple[str, ...]:
+    values = value if isinstance(value, (list, tuple, set, frozenset)) else (value,)
+    return tuple(sorted({
+        identifier.strip().lower()
+        for item in values
+        if isinstance(item, str)
+        for identifier in (item,)
+        if identifier.strip() and len(identifier.strip()) <= 160
+    }))
 
 
 class SourceAdapter(ABC):
@@ -320,17 +346,24 @@ class SourceAdapter(ABC):
     ) -> SourceItem | None:
         if not isinstance(record, Mapping):
             return None
-        source_url = str(record.get("source_url") or "")
+        request_url = str(record.get("request_url") or "")
+        item_url = str(record.get("item_url") or record.get("source_url") or request_url)
         try:
-            parsed = urlsplit(source_url)
+            request = urlsplit(request_url)
+            item = urlsplit(item_url)
         except ValueError:
             return None
         if (
-            parsed.scheme.lower() != "https"
-            or (parsed.hostname or "").lower().rstrip(".") not in self.allowed_hosts
-            or parsed.username is not None
-            or parsed.password is not None
-            or parsed.port not in (None, 443)
+            request.scheme.lower() != "https"
+            or (request.hostname or "").lower().rstrip(".") not in self.allowed_hosts
+            or request.username is not None
+            or request.password is not None
+            or request.port not in (None, 443)
+            or item.scheme.lower() != "https"
+            or not item.hostname
+            or item.username is not None
+            or item.password is not None
+            or item.port not in (None, 443)
         ):
             return None
         title = bounded_text(record.get("title"))[:500]
@@ -339,23 +372,29 @@ class SourceAdapter(ABC):
         text = bounded_text(record.get("text"))
         upstream_id = record.get("upstream_item_id")
         metadata = bounded_metadata(record.get("metadata"))
-        published_at = parse_timestamp(record.get("published_at"))
+        raw_published_at = record.get("published_at")
+        published_at = parse_timestamp(raw_published_at)
         effective_at = parse_timestamp(record.get("effective_at"))
-        if published_at is None and effective_at is None:
+        reporting_at = parse_timestamp(record.get("reporting_at"))
+        if raw_published_at not in (None, "") and published_at is None:
             return None
-        item_times = tuple(
-            timestamp for timestamp in (published_at, effective_at) if timestamp is not None
-        )
-        if any(
-            not _utc(query.start) <= timestamp <= _utc(query.end)
-            for timestamp in item_times
-        ):
+        collection_time = published_at or retrieved_at
+        if not _utc(query.start) <= collection_time <= _utc(query.end):
             return None
+        entities = entity_ids(record.get("entity_ids"))
+        securities = security_ids(record.get("security_ids"))
+        source_metadata = dict(metadata)
+        if entities:
+            source_metadata["entity_ids"] = list(entities)
+        if securities:
+            source_metadata["security_ids"] = list(securities)
+            source_metadata.setdefault("ticker", securities[0])
         canonical = json.dumps(
             {
                 "provider": self.provider,
                 "upstream_item_id": None if upstream_id is None else str(upstream_id)[:512],
-                "source_url": source_url[:2048],
+                "item_url": item_url[:2048],
+                "request_url": request_url[:2048],
                 "title": title,
                 "text": text,
             },
@@ -366,7 +405,7 @@ class SourceAdapter(ABC):
         return SourceItem(
             provider=self.provider,
             upstream_item_id=None if upstream_id is None else str(upstream_id)[:512],
-            source_url=source_url[:2048],
+            source_url=item_url[:2048],
             title=title,
             normalized_text=text,
             canonical_content=canonical,
@@ -375,7 +414,11 @@ class SourceAdapter(ABC):
             effective_at=effective_at,
             retrieved_at=retrieved_at,
             authority=self.authority,
-            metadata=metadata,
+            metadata=bounded_metadata(source_metadata),
+            request_url=request_url[:2048],
+            reporting_at=reporting_at,
+            entity_ids=entities,
+            security_ids=securities,
         )
 
 
@@ -416,4 +459,6 @@ __all__ = [
     "SourceAdapter",
     "SourceItem",
     "build_adapter",
+    "entity_ids",
+    "security_ids",
 ]
