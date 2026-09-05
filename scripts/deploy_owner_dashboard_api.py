@@ -172,8 +172,8 @@ def validate_deployment_configuration(
     return {**safe, "role_status": "verified"}
 
 
-def _run(command: list[str], *, cwd: Path, runner: Callable[..., object]):
-    return runner(command, cwd=cwd, capture_output=True, text=True, check=False)
+def _run(command: list[str], *, cwd: Path, runner: Callable[..., object], **options):
+    return runner(command, cwd=cwd, capture_output=True, text=True, check=False, **options)
 
 
 def verify_git_release(
@@ -238,6 +238,7 @@ def construct_protected_release_requests(project_ref: str, candidate_sha: str, m
 def run_protected_candidate_dry_run(
     *, project_ref: str, owner_user_id: str, allowed_origin: str, site_origin: str,
     candidate_sha: str, reviewed_sha: str, admin_url: str, session_template: str,
+    publishable_key: str,
     repo_root: Path = ROOT, runner: Callable[..., object] = subprocess.run,
 ) -> dict[str, object]:
     """Build and validate a candidate in a disposable checkout without remote mutation."""
@@ -247,10 +248,19 @@ def run_protected_candidate_dry_run(
     verify_reviewed_sha(git_sha, reviewed_sha)
     source = verify_v1_dashboard_source(repo_root)
     manifest = candidate_migration_manifest(repo_root / "sql/migrations")
+    if not re.fullmatch(r"sb_publishable_[A-Za-z0-9_-]{24,128}", publishable_key):
+        raise RuntimeError("protected publishable key is unavailable")
+    project_url = f"https://{project_ref}.supabase.co"
+    build_env = {**os.environ, "VITE_SUPABASE_URL": project_url,
+                 "VITE_DASHBOARD_API_URL": f"{project_url}/functions/v1/{FUNCTION_NAME}",
+                 "VITE_SUPABASE_PUBLISHABLE_KEY": publishable_key}
     with tempfile.TemporaryDirectory(prefix="stocks-release-candidate-") as raw:
         isolated = Path(raw) / "candidate"
         shutil.copytree(repo_root, isolated, ignore=shutil.ignore_patterns(".git", "node_modules", ".venv", "dist", "__pycache__"))
-        built = _run(["npm", "run", "build", "--workspace", "@stocks-agent/web"], cwd=isolated, runner=runner)
+        installed = _run(["npm", "ci", "--ignore-scripts"], cwd=isolated, runner=runner)
+        if getattr(installed, "returncode", 1) != 0:
+            raise RuntimeError("candidate dry-run dependency installation failed")
+        built = _run(["npm", "run", "build", "--workspace", "@stocks-agent/web"], cwd=isolated, runner=runner, env=build_env)
         if getattr(built, "returncode", 1) != 0 or not (isolated / "apps/web/dist/index.html").is_file():
             raise RuntimeError("candidate dry-run build failed")
         build_hash = _tree_sha256(isolated / "apps/web/dist")
@@ -332,13 +342,16 @@ def retain_gateway_rollback_artifact(artifact: Mapping[str, object], evidence_di
 
 def capture_durable_recovery_state(
     rollback_ref: str, expected_source_sha256: str, rollback_worktree: Path,
-    evidence_directory: Path, release_state: Path, *, repo_root: Path = ROOT,
+    evidence_directory: Path, release_state: Path, deployment_id: int, *, repo_root: Path = ROOT,
     runner: Callable[..., object] = subprocess.run,
 ) -> dict[str, object]:
     """Persist source plus an atomic recovery journal before any gateway mutation."""
     artifact = prepare_gateway_rollback_artifact(rollback_ref, expected_source_sha256, rollback_worktree, repo_root, runner)
     capture = retain_gateway_rollback_artifact(artifact, evidence_directory)
-    state = {"changed": False, "artifact": {"repo_root": str(artifact["repo_root"]), "commit_sha": artifact["commit_sha"], "source_sha256": artifact["source_sha256"]}}
+    if deployment_id <= 0:
+        raise ValueError("positive deployment identity is required")
+    state = {"recovery_required_on_non_success": True, "deployment_id": deployment_id,
+             "artifact": {"repo_root": str(artifact["repo_root"]), "commit_sha": artifact["commit_sha"], "source_sha256": artifact["source_sha256"]}}
     release_state.parent.mkdir(parents=True, exist_ok=True)
     temporary = release_state.with_suffix(".tmp")
     temporary.write_text(json.dumps(state, sort_keys=True, separators=(",", ":")) + "\n")
@@ -364,7 +377,7 @@ def verify_gateway_rollback_preflight(
 
 
 def execute_isolated_gateway_rollback_drill(artifact: Mapping[str, object]) -> dict[str, object]:
-    """Exercise the real local bundle restore path against a disposable target."""
+    """Exercise the same function deployment command builder against a fake target."""
     source = Path(str(artifact.get("repo_root", ""))) / "supabase/functions/market-briefing-gateway"
     expected = str(artifact.get("source_sha256", ""))
     if not source.is_dir() or not re.fullmatch(r"[0-9a-f]{64}", expected) or _tree_sha256(source) != expected:
@@ -372,41 +385,29 @@ def execute_isolated_gateway_rollback_drill(artifact: Mapping[str, object]) -> d
     started = datetime.now(timezone.utc).isoformat()
     with tempfile.TemporaryDirectory(prefix="stocks-isolated-rollback-drill-") as raw:
         target = Path(raw) / "gateway-runtime"
-        failed = target / "failed-candidate"
-        failed.mkdir(parents=True)
-        (failed / "index.ts").write_text("export const gateway = 'failed-candidate'\n")
-        restored = restore_gateway_bundle(artifact, target)
-        measured = _tree_sha256(target / "active")
-        if measured != expected:
+        bundle = target / "supabase/functions/market-briefing-gateway"
+        bundle.parent.mkdir(parents=True)
+        shutil.copytree(source, bundle, symlinks=False)
+        commands: list[list[str]] = []
+        inventories = iter([
+            '[{"name":"market-briefing-gateway","version":7}]',
+            '[{"name":"market-briefing-gateway","version":8}]',
+        ])
+        def local_runner(command, **_options):
+            commands.append(command)
+            output = next(inventories) if "list" in command else "ok"
+            return type("Result", (), {"returncode": 0, "stdout": output, "stderr": ""})()
+        restored = _deploy_named_function(
+            "a" * 20, "market-briefing-gateway", str(artifact.get("commit_sha", "")), target, local_runner,
+            require_existing=True,
+        )
+        measured = _tree_sha256(bundle)
+        if measured != expected or restored["source_sha256"] != expected:
             raise RuntimeError("isolated rollback drill hash mismatch")
     completed = datetime.now(timezone.utc).isoformat()
     return {"status": "verified", "isolated": True, "source_sha256": measured,
-            "active_commit_sha": restored["commit_sha"], "failed_candidate_removed": restored["failed_candidate_removed"],
+            "commit_sha": artifact["commit_sha"], "deploy_command": "functions deploy",
             "started_at": started, "completed_at": completed}
-
-
-def restore_gateway_bundle(artifact: Mapping[str, object], target: Path) -> dict[str, object]:
-    """Restore a verified bundle into the activation layout used by recovery."""
-    root = Path(str(artifact.get("repo_root", "")))
-    source = root / "supabase/functions/market-briefing-gateway"
-    commit, expected = artifact.get("commit_sha"), artifact.get("source_sha256")
-    if (not isinstance(commit, str) or not re.fullmatch(r"[0-9a-f]{40}", commit)
-            or not isinstance(expected, str) or not re.fullmatch(r"[0-9a-f]{64}", expected)
-            or not source.is_dir() or _tree_sha256(source) != expected):
-        raise RuntimeError("verified gateway rollback artifact is unavailable")
-    target.mkdir(parents=True, exist_ok=True)
-    failed, staging, active = target / "failed-candidate", target / "restoring", target / "active"
-    if failed.exists():
-        shutil.rmtree(failed)
-    if staging.exists():
-        shutil.rmtree(staging)
-    shutil.copytree(source, staging, symlinks=False)
-    if _tree_sha256(staging) != expected or not (staging / "index.ts").is_file():
-        raise RuntimeError("gateway rollback bundle is not loadable")
-    if active.exists():
-        shutil.rmtree(active)
-    os.replace(staging, active)
-    return {"commit_sha": commit, "source_sha256": expected, "failed_candidate_removed": not failed.exists()}
 
 
 def candidate_migration_manifest(migrations_directory: Path = ROOT / "sql/migrations") -> list[dict[str, str]]:
@@ -474,8 +475,9 @@ def apply_release_migrations(
         if path in known or not re.fullmatch(r"[0-9a-f]{64}", digest):
             raise RuntimeError("migration ledger receipt is malformed")
         known[path] = (version, digest)
-    # Native Supabase and private hash ledgers must be the same exact
-    # candidate prefix on every run. Never repair an ahead or partial DB.
+    # Native Supabase is an immutable prefix; this transaction records a
+    # contiguous private suffix for DDL it applies directly. This permits a
+    # retry after a post-migration failure without accepting gaps or drift.
     cursor.execute("SELECT version, statements FROM supabase_migrations.schema_migrations ORDER BY version FOR UPDATE")
     legacy = cursor.fetchall()
     by_version: dict[str, list[Mapping[str, str]]] = {}
@@ -494,14 +496,17 @@ def apply_release_migrations(
             raise RuntimeError("native migration hash mismatch")
         item = matching[0]
         native[item["path"]] = (item["version"], item["sha256"])
-    if known and known != native:
+    native_paths = [item["path"] for item in manifest if item["path"] in native]
+    if native_paths != expected_paths[:len(native_paths)]:
+        raise RuntimeError("native migration state is not an exact candidate prefix")
+    if known and any(known.get(path) != value for path, value in native.items()):
         raise RuntimeError("native/private migration ledgers diverge")
     if not known:
         for path, (version, digest) in native.items():
             cursor.execute(f"INSERT INTO {MIGRATION_LEDGER} (path, version, sha256) VALUES (%s, %s, %s)", (path, version, digest))
         known = dict(native)
-    applied_paths = [item["path"] for item in manifest if item["path"] in known]
-    if applied_paths != expected_paths[:len(applied_paths)]:
+    private_paths = [item["path"] for item in manifest if item["path"] in known]
+    if private_paths != expected_paths[:len(private_paths)] or len(known) != len(private_paths):
         raise RuntimeError("migration state is not an exact candidate prefix")
     applied: list[dict[str, str]] = []
     skipped: list[dict[str, str]] = []
@@ -972,6 +977,7 @@ def main() -> int:
     parser.add_argument("--release-state", type=Path, required=True)
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument("--prepare-recovery", action="store_true")
+    parser.add_argument("--deployment-id", type=int)
     arguments = parser.parse_args()
     if not os.environ.get("SUPABASE_ACCESS_TOKEN", "").strip():
         raise SystemExit("SUPABASE_ACCESS_TOKEN is required for protected Supabase mutation")
@@ -993,7 +999,7 @@ def main() -> int:
         receipt = run_protected_candidate_dry_run(
             project_ref=arguments.project_ref, owner_user_id=owner_user_id, allowed_origin=arguments.allowed_origin,
             site_origin=arguments.site_origin, candidate_sha=arguments.candidate_sha or "", reviewed_sha=arguments.reviewed_sha,
-            admin_url=admin_url, session_template=session_template,
+            admin_url=admin_url, session_template=session_template, publishable_key=publishable_key,
         )
         print(json.dumps(receipt, sort_keys=True, separators=(",", ":")))
         return 0
@@ -1001,11 +1007,11 @@ def main() -> int:
     if arguments.prepare_recovery:
         git_sha = verify_git_release(expected_sha=arguments.candidate_sha)
         verify_reviewed_sha(git_sha, arguments.reviewed_sha)
-        if arguments.rollback_worktree is None:
-            raise SystemExit("--prepare-recovery requires --rollback-worktree")
+        if arguments.rollback_worktree is None or arguments.deployment_id is None:
+            raise SystemExit("--prepare-recovery requires --rollback-worktree and --deployment-id")
         receipt = capture_durable_recovery_state(
             arguments.gateway_rollback_ref, arguments.gateway_rollback_source_sha256,
-            arguments.rollback_worktree, arguments.evidence_directory, arguments.release_state,
+            arguments.rollback_worktree, arguments.evidence_directory, arguments.release_state, arguments.deployment_id,
         )
         print(json.dumps({"status": "prepared", "rollback_capture": receipt["capture"]}, sort_keys=True, separators=(",", ":")))
         return 0
@@ -1039,7 +1045,8 @@ def main() -> int:
     )
 
     def write_state(changed: bool) -> None:
-        state = {"changed": changed, "artifact": {"repo_root": str(gateway_rollback["repo_root"]), "commit_sha": gateway_rollback["commit_sha"], "source_sha256": gateway_rollback["source_sha256"]}}
+        state = {"recovery_required_on_non_success": True, "changed": changed,
+                 "artifact": {"repo_root": str(gateway_rollback["repo_root"]), "commit_sha": gateway_rollback["commit_sha"], "source_sha256": gateway_rollback["source_sha256"]}}
         arguments.release_state.parent.mkdir(parents=True, exist_ok=True)
         temporary = arguments.release_state.with_suffix(".tmp")
         temporary.write_text(json.dumps(state, sort_keys=True, separators=(",", ":")) + "\n")

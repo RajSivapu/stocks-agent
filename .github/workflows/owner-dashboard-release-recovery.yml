@@ -10,28 +10,43 @@ permissions:
   contents: read
   deployments: write
 
+concurrency:
+  group: protected-owner-dashboard-release-production
+  cancel-in-progress: false
+
 jobs:
   recover:
-    # A separate workflow survives cancellation, timeout, and runner loss in
-    # the release job. It restores only unsuccessful/cancelled executions.
-    if: github.event.workflow_run.conclusion == 'failure' || github.event.workflow_run.conclusion == 'cancelled' || github.event.workflow_run.conclusion == 'timed_out'
+    # A separate workflow survives cancellation, timeout, and runner loss.
+    if: github.event.workflow_run.conclusion != 'success'
     environment: owner-dashboard-production
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
-        with: {ref: main}
+        with: {ref: ${{ github.event.workflow_run.head_sha }}}
       - uses: actions/setup-python@42375524e23c412d93fb67b49958b491fce71c38
         with: {python-version: "3.14"}
-      - name: Download durable rollback artifact and journal
+      - name: Download separate durable source and recovery metadata
         env: {GH_TOKEN: ${{ github.token }}}
         run: |
           set -euo pipefail
-          mkdir -m 700 recovery
-          gh run download "${{ github.event.workflow_run.id }}" --name "gateway-rollback-${{ github.event.workflow_run.id }}-${{ github.event.workflow_run.run_attempt }}" --dir recovery
-          test -f recovery/release-state.json
-          test -f recovery/rollback-capture.json
+          mkdir -m 700 recovery recovery-source recovery-metadata
+          gh run download "${{ github.event.workflow_run.id }}" --name "rollback-source-${{ github.event.workflow_run.id }}-${{ github.event.workflow_run.run_attempt }}" --dir recovery-source
+          gh run download "${{ github.event.workflow_run.id }}" --name "recovery-metadata-${{ github.event.workflow_run.id }}-${{ github.event.workflow_run.run_attempt }}" --dir recovery-metadata
+          test -f recovery-metadata/release-state.json
+          test -f recovery-metadata/rollback-capture.json
+          test -f recovery-source/index.ts
+      - name: Require recovery unless the deployment is verified successful
+        id: deployment
+        env: {GH_TOKEN: ${{ github.token }}}
+        run: |
+          set -euo pipefail
+          DEPLOYMENT_ID="$(jq -r .deployment_id recovery-metadata/release-state.json)"
+          DEPLOYMENT_STATUS="$(gh api "repos/$GITHUB_REPOSITORY/deployments/$DEPLOYMENT_ID/statuses" --jq '.[0].state')"
+          echo "DEPLOYMENT_ID=$DEPLOYMENT_ID" >> "$GITHUB_OUTPUT"
+          if [ "$DEPLOYMENT_STATUS" = success ]; then echo 'required=false' >> "$GITHUB_OUTPUT"; else echo 'required=true' >> "$GITHUB_OUTPUT"; fi
       - name: Restore durable gateway recovery artifact
+        if: steps.deployment.outputs.required == 'true'
         env:
           SUPABASE_ACCESS_TOKEN: ${{ secrets.SUPABASE_ACCESS_TOKEN }}
           POSTGRES_URL: ${{ secrets.POSTGRES_URL }}
@@ -41,6 +56,6 @@ jobs:
           # A failed restore deliberately retains the downloaded artifact for
           # GitHub's retention window and causes this independent job to fail.
           python -m pip install --requirement requirements-test.txt
-          mkdir -p recovery/rollback-worktree/supabase/functions
-          mv recovery/gateway-source recovery/rollback-worktree/supabase/functions/market-briefing-gateway
-          python scripts/restore_gateway_after_release_failure.py --project-ref "$PROJECT_REF" --admin-url "$POSTGRES_URL" --release-state recovery/release-state.json --recovery-root recovery/rollback-worktree
+          mkdir -p recovery/rollback-worktree/supabase/functions/market-briefing-gateway
+          cp -R recovery-source/. recovery/rollback-worktree/supabase/functions/market-briefing-gateway/
+          python scripts/restore_gateway_after_release_failure.py --project-ref "$PROJECT_REF" --admin-url "$POSTGRES_URL" --release-state recovery-metadata/release-state.json --recovery-root recovery/rollback-worktree --retain-recovery-artifact

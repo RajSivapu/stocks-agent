@@ -76,16 +76,32 @@ def test_release_workflow_binds_review_times_and_durable_pre_mutation_recovery()
     workflow = Path(".github/workflows/owner-dashboard-release.yml").read_text()
     assert 'PYTHON_BIN="$RELEASE_VENV/bin/python"' in workflow
     assert 'head_commit_time <= review.submitted_at <= merged_at <= candidate_commit_time' in workflow
-    assert "Upload durable rollback capture and journal before gateway mutation" in workflow
-    assert "rollback-artifact:$ROLLBACK_ARTIFACT_ID" in workflow
+    assert "Upload prior gateway source before gateway mutation" in workflow
+    assert "rollback-source:$ROLLBACK_SOURCE_ARTIFACT_ID" in workflow
     assert Path(".github/workflows/owner-dashboard-release-recovery.yml").is_file()
-    assert workflow.index("Upload durable rollback capture and journal before gateway mutation") < workflow.index("Execute protected deployment")
+    assert workflow.index("Upload prior gateway source before gateway mutation") < workflow.index("Execute protected deployment")
 
 
 def test_independent_recovery_contract_covers_cancelled_and_lost_release_runners():
     recovery = Path(".github/workflows/owner-dashboard-release-recovery.yml").read_text()
     assert "workflow_run:" in recovery
-    assert "conclusion == 'cancelled'" in recovery
-    assert "conclusion == 'timed_out'" in recovery
-    assert "gateway-rollback-${{ github.event.workflow_run.id }}" in recovery
+    assert "conclusion != 'success'" in recovery
+    assert "rollback-source-${{ github.event.workflow_run.id }}" in recovery
     assert "--recovery-root" in recovery
+
+
+def test_release_exports_candidate_for_every_set_u_dry_run_and_recovery_step():
+    workflow = Path(".github/workflows/owner-dashboard-release.yml").read_text()
+    assert 'echo "CANDIDATE_SHA=$CANDIDATE_SHA" >> "$GITHUB_ENV"' in workflow
+    assert 'CANDIDATE_SHA: ${{ steps.candidate.outputs.candidate_sha }}' in workflow
+    assert 'state=in_progress' in workflow
+
+
+def test_recovery_uses_exact_candidate_concurrency_and_separate_durable_artifacts():
+    workflow = Path(".github/workflows/owner-dashboard-release.yml").read_text()
+    recovery = Path(".github/workflows/owner-dashboard-release-recovery.yml").read_text()
+    assert "rollback-source-" in workflow and "recovery-metadata-" in workflow
+    assert "group: protected-owner-dashboard-release-production" in recovery
+    assert "ref: ${{ github.event.workflow_run.head_sha }}" in recovery
+    assert "deployments/$DEPLOYMENT_ID/statuses" in recovery
+    assert "--retain-recovery-artifact" in recovery

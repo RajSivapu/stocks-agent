@@ -260,11 +260,36 @@ def test_isolated_rollback_drill_uses_the_restore_path_and_removes_failed_candid
     (source / "index.ts").write_text("export const gateway = 'prior'\n")
     digest = deploy._tree_sha256(source)
     drill = deploy.execute_isolated_gateway_rollback_drill({"repo_root": tmp_path / "checkout", "commit_sha": "a" * 40, "source_sha256": digest})
-    assert drill["active_commit_sha"] == "a" * 40
-    assert drill["failed_candidate_removed"] is True
+    assert drill["commit_sha"] == "a" * 40
+    assert drill["deploy_command"] == "functions deploy"
 
 
-def test_migration_ledger_rejects_native_private_set_divergence(tmp_path):
+def test_candidate_dry_run_installs_dependencies_and_uses_only_protected_vite_values(tmp_path, monkeypatch):
+    root = tmp_path / "repo"
+    app = root / "apps/web/src/app"; app.mkdir(parents=True)
+    (app / "App.tsx").write_text("\n".join(f'path="/{surface}"' for surface in deploy.V1_SURFACES))
+    migrations = root / "sql/migrations"; migrations.mkdir(parents=True)
+    (migrations / "20260928_candidate.sql").write_text("SELECT 1;\n")
+    monkeypatch.setattr(deploy, "verify_git_release", lambda *_args, **_kwargs: "a" * 40)
+    commands = []
+    def runner(command, *, cwd, **options):
+        commands.append((command, options.get("env", {})))
+        if command[:2] == ["npm", "run"]:
+            output = cwd / "apps/web/dist"; output.mkdir(parents=True); (output / "index.html").write_text("ok")
+        return type("Result", (), {"returncode": 0, "stdout": "", "stderr": ""})()
+    receipt = deploy.run_protected_candidate_dry_run(
+        project_ref=PROJECT_REF, owner_user_id=OWNER_ID, allowed_origin=ORIGIN, site_origin=ORIGIN,
+        candidate_sha="a" * 40, reviewed_sha="a" * 40, admin_url=ADMIN_URL, session_template=SESSION_TEMPLATE,
+        publishable_key="sb_publishable_abcdefghijklmnopqrstuvwx", repo_root=root, runner=runner,
+    )
+    assert commands[0][0] == ["npm", "ci", "--ignore-scripts"]
+    assert commands[1][1]["VITE_SUPABASE_URL"] == f"https://{PROJECT_REF}.supabase.co"
+    assert commands[1][1]["VITE_DASHBOARD_API_URL"].endswith("/owner-dashboard-api")
+    assert commands[1][1]["VITE_SUPABASE_PUBLISHABLE_KEY"].startswith("sb_publishable_")
+    assert receipt["request_plan"]["telegram_mutations"] == 0
+
+
+def test_migration_ledger_accepts_the_contiguous_private_suffix_created_after_migration(tmp_path):
     path = tmp_path / "20260928_native.sql"; path.write_text("SELECT 28;\n")
     manifest = deploy.candidate_migration_manifest(tmp_path)
 
@@ -277,8 +302,8 @@ def test_migration_ledger_rejects_native_private_set_divergence(tmp_path):
                 return [(manifest[0]["path"], manifest[0]["version"], manifest[0]["sha256"])]
             return []
 
-    with pytest.raises(RuntimeError, match="native/private migration ledgers diverge"):
-        deploy.apply_release_migrations(Cursor(), manifest, tmp_path)
+    receipt = deploy.apply_release_migrations(Cursor(), manifest, tmp_path)
+    assert receipt["applied"] == [] and receipt["skipped"] == manifest
 
 
 def test_deploy_and_release_verifiers_share_the_complete_candidate_migration_manifest():

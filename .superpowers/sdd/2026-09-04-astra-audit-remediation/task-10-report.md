@@ -61,6 +61,18 @@ Residual risk: deployment receipt collection must still populate the authoritati
 - `.venv/bin/python -m pytest -q tests/test_deploy_owner_dashboard_api.py tests/test_owner_dashboard_release_workflow.py tests/test_verify_personal_stock_agent_v1.py tests/test_verify_owner_dashboard_deployment.py` — `90 passed in 10.63s`.
 - No workflow, deployment, database migration, scheduled run, recovery drill, Telegram send, provider/model call, brokerage action, or full suite was invoked.
 
+## Acceptance correction evidence — 2026-09-05
+
+- Focused Task 10/workflow test gate is recorded in the final correction commit; no live operation was run.
+
+## Acceptance correction pass — 2026-09-05
+
+- Candidate identity is exported through `GITHUB_ENV` and declared on all `set -u` dry-run/recovery preparation steps. Review timestamp extraction uses the GitHub commit object's top-level committer timestamp and accepts a candidate timestamp equal to merge time.
+- The candidate dry-run performs an isolated `npm ci --ignore-scripts` and build with only the protected project-derived Vite URL/API URL and supplied publishable key; it does not synthesize deployment configuration.
+- Recovery is required for every non-success terminal release. Before mutation the workflow uploads the exact rollback source tree and recovery metadata/journal as separate artifacts, marks the deployment `in_progress`, and records both immutable IDs. The independent workflow uses the same production concurrency group, exact failed candidate checkout, terminal deployment-status query, normalized artifact paths, and retained recovery source.
+- Native migration state is accepted as a verified prefix while the private hash ledger may retain only its contiguous candidate suffix, so post-migration retries work without admitting gaps, drift, extras, or database-ahead state.
+- The isolated drill now uses `_deploy_named_function` with a disposable loadable bundle and fake runner, exercising the protected function-deploy command builder rather than a drill-only activation path.
+
 ## Release-orchestration replacement pass — 2026-09-05
 
 - The release runner now honors an explicit trusted `PYTHON_BIN`/`VENV_PYTHON`; the protected workflow exports its release venv and still checks checkout cleanliness before any scratch/recovery writes.
@@ -101,3 +113,8 @@ Residual risk: deployment receipt collection must still populate the authoritati
 
 - Focused release/recovery contracts: `.venv/bin/python -m pytest -q tests/test_deploy_owner_dashboard_api.py tests/test_owner_dashboard_release_workflow.py tests/test_verify_personal_stock_agent_v1.py tests/test_verify_owner_dashboard_deployment.py` — `94 passed in 9.60s`.
 - No workflow, deployment, database migration, scheduled run, recovery drill, Telegram send, provider/model call, brokerage action, or full suite was invoked.
+
+## Acceptance correction final evidence — 2026-09-05
+
+- Corrected the candidate environment export, isolated dependency-backed build, split durable artifacts, non-success recovery decision, migration retry suffix, GitHub timestamp source/equality, exact recovery checkout/concurrency, and command-builder rollback drill.
+- Focused task gate: `139 passed in 14.73s`; `git diff --check` passed. No live workflow, database, deployment, migration, recovery, Telegram, provider/model, brokerage, scheduled run, or full suite was invoked.

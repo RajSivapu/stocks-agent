@@ -91,15 +91,16 @@ jobs:
           gh api "repos/$GITHUB_REPOSITORY/pulls/$PULL_REQUEST_NUMBER/reviews" --paginate > "$RELEASE_STATE_DIR/reviews.json"
           HEAD_COMMIT="$(gh api "repos/$GITHUB_REPOSITORY/git/commits/$PR_HEAD_SHA")"
           CANDIDATE_COMMIT="$(gh api "repos/$GITHUB_REPOSITORY/git/commits/$CANDIDATE_SHA")"
-          HEAD_COMMIT_TIME="$(jq -r .commit.committer.date <<<"$HEAD_COMMIT")"
-          CANDIDATE_COMMIT_TIME="$(jq -r .commit.committer.date <<<"$CANDIDATE_COMMIT")"
+          HEAD_COMMIT_TIME="$(jq -r .committer.date <<<"$HEAD_COMMIT")"
+          CANDIDATE_COMMIT_TIME="$(jq -r .committer.date <<<"$CANDIDATE_COMMIT")"
           MERGED_AT="$(jq -r .merged_at <<<"$PR")"
           # head_commit_time <= review.submitted_at <= merged_at <= candidate_commit_time
           jq -e --arg sha "$PR_HEAD_SHA" --arg head "$HEAD_COMMIT_TIME" --arg merged "$MERGED_AT" --arg candidate "$CANDIDATE_COMMIT_TIME" 'any(.[]; .state == "APPROVED" and .commit_id == $sha and (.submitted_at >= $head and .submitted_at <= $merged) and ($merged <= $candidate))' "$RELEASE_STATE_DIR/reviews.json" >/dev/null || { echo 'required timed review approval is missing'; exit 1; }
-          test "$CANDIDATE_COMMIT_TIME" '>' "$MERGED_AT" || { echo 'candidate commit predates merge'; exit 1; }
+          test "$CANDIDATE_COMMIT_TIME" = "$MERGED_AT" || test "$CANDIDATE_COMMIT_TIME" '>' "$MERGED_AT" || { echo 'candidate commit predates merge'; exit 1; }
           git fetch --no-tags origin "$PR_HEAD_SHA" || true
           git merge-base --is-ancestor "$PR_HEAD_SHA" "$CANDIDATE_SHA" || test "$(git rev-parse "$PR_HEAD_SHA^{tree}")" = "$(git rev-parse "$CANDIDATE_SHA^{tree}")" || { echo 'reviewed head does not bind candidate'; exit 1; }
           printf 'candidate_sha=%s\nreviewed_sha=%s\nci_workflow_run_id=%s\npull_request_number=%s\n' "$CANDIDATE_SHA" "$CANDIDATE_SHA" "$CI_WORKFLOW_RUN_ID" "$PULL_REQUEST_NUMBER" >> "$GITHUB_OUTPUT"
+          echo "CANDIDATE_SHA=$CANDIDATE_SHA" >> "$GITHUB_ENV"
       - name: Create the candidate-bound GitHub Deployment
         id: deployment
         env: {GH_TOKEN: ${{ github.token }}, CANDIDATE_SHA: ${{ steps.candidate.outputs.candidate_sha }}}
@@ -123,6 +124,7 @@ jobs:
           PROJECT_REF: ${{ vars.SUPABASE_PROJECT_REF }}
           ALLOWED_ORIGIN: ${{ vars.DASHBOARD_ALLOWED_ORIGIN }}
           SITE_ORIGIN: ${{ vars.DASHBOARD_SITE_ORIGIN }}
+          CANDIDATE_SHA: ${{ steps.candidate.outputs.candidate_sha }}
         run: |
           set -euo pipefail
           test -n "$RELEASE_READONLY_DATABASE_URL" || { echo 'release reader is required'; exit 1; }
@@ -140,18 +142,23 @@ jobs:
           PROJECT_REF: ${{ vars.SUPABASE_PROJECT_REF }}
           ALLOWED_ORIGIN: ${{ vars.DASHBOARD_ALLOWED_ORIGIN }}
           SITE_ORIGIN: ${{ vars.DASHBOARD_SITE_ORIGIN }}
+          CANDIDATE_SHA: ${{ steps.candidate.outputs.candidate_sha }}
           GATEWAY_ROLLBACK_REF: ${{ vars.GATEWAY_ROLLBACK_REF }}
           GATEWAY_ROLLBACK_SOURCE_SHA256: ${{ vars.GATEWAY_ROLLBACK_SOURCE_SHA256 }}
         run: |
           set -euo pipefail; umask 077
-          "$PYTHON_BIN" scripts/deploy_owner_dashboard_api.py --prepare-recovery --project-ref "$PROJECT_REF" --allowed-origin "$ALLOWED_ORIGIN" --site-origin "$SITE_ORIGIN" --reviewed-sha "$CANDIDATE_SHA" --candidate-sha "$CANDIDATE_SHA" --gateway-rollback-ref "$GATEWAY_ROLLBACK_REF" --gateway-rollback-source-sha256 "$GATEWAY_ROLLBACK_SOURCE_SHA256" --gateway-current-version 1 --evidence-directory "$RELEASE_STATE_DIR/capture" --rollback-worktree "$RELEASE_STATE_DIR/rollback-worktree" --release-state "$RELEASE_STATE_DIR/release-state.json" > "$RELEASE_STATE_DIR/recovery-prepare.json"
-      - name: Upload durable rollback capture and journal before gateway mutation
-        id: rollback_artifact
+          "$PYTHON_BIN" scripts/deploy_owner_dashboard_api.py --prepare-recovery --deployment-id "$DEPLOYMENT_ID" --project-ref "$PROJECT_REF" --allowed-origin "$ALLOWED_ORIGIN" --site-origin "$SITE_ORIGIN" --reviewed-sha "$CANDIDATE_SHA" --candidate-sha "$CANDIDATE_SHA" --gateway-rollback-ref "$GATEWAY_ROLLBACK_REF" --gateway-rollback-source-sha256 "$GATEWAY_ROLLBACK_SOURCE_SHA256" --gateway-current-version 1 --evidence-directory "$RELEASE_STATE_DIR/capture" --rollback-worktree "$RELEASE_STATE_DIR/rollback-worktree" --release-state "$RELEASE_STATE_DIR/release-state.json" > "$RELEASE_STATE_DIR/recovery-prepare.json"
+      - name: Upload prior gateway source before gateway mutation
+        id: rollback_source_artifact
         uses: actions/upload-artifact@65462800fd760344b1a7b4382951275a0abb4808
-        with: {name: gateway-rollback-${{ github.run_id }}-${{ github.run_attempt }}, path: "${{ env.RELEASE_STATE_DIR }}/capture\n${{ env.RELEASE_STATE_DIR }}/release-state.json", if-no-files-found: error, retention-days: 90}
-      - name: Bind durable rollback artifact to pending deployment
-        env: {GH_TOKEN: ${{ github.token }}, DEPLOYMENT_ID: ${{ steps.deployment.outputs.deployment_id }}, ROLLBACK_ARTIFACT_ID: ${{ steps.rollback_artifact.outputs.artifact-id }} }
-        run: gh api --method POST "repos/$GITHUB_REPOSITORY/deployments/$DEPLOYMENT_ID/statuses" -f state=pending -f description="rollback-artifact:$ROLLBACK_ARTIFACT_ID"
+        with: {name: rollback-source-${{ github.run_id }}-${{ github.run_attempt }}, path: ${{ env.RELEASE_STATE_DIR }}/capture/gateway-source, if-no-files-found: error, retention-days: 90}
+      - name: Upload recovery metadata and journal before gateway mutation
+        id: recovery_metadata_artifact
+        uses: actions/upload-artifact@65462800fd760344b1a7b4382951275a0abb4808
+        with: {name: recovery-metadata-${{ github.run_id }}-${{ github.run_attempt }}, path: "${{ env.RELEASE_STATE_DIR }}/capture/rollback-capture.json\n${{ env.RELEASE_STATE_DIR }}/release-state.json", if-no-files-found: error, retention-days: 90}
+      - name: Bind durable recovery to in-progress deployment
+        env: {GH_TOKEN: ${{ github.token }}, DEPLOYMENT_ID: ${{ steps.deployment.outputs.deployment_id }}, ROLLBACK_SOURCE_ARTIFACT_ID: ${{ steps.rollback_source_artifact.outputs.artifact-id }}, RECOVERY_METADATA_ARTIFACT_ID: ${{ steps.recovery_metadata_artifact.outputs.artifact-id }} }
+        run: gh api --method POST "repos/$GITHUB_REPOSITORY/deployments/$DEPLOYMENT_ID/statuses" -f state=in_progress -f description="rollback-source:$ROLLBACK_SOURCE_ARTIFACT_ID recovery-metadata:$RECOVERY_METADATA_ARTIFACT_ID"
       - name: Execute protected deployment and retain rollback worktree
         env:
           SUPABASE_ACCESS_TOKEN: ${{ secrets.SUPABASE_ACCESS_TOKEN }}
@@ -182,9 +189,10 @@ jobs:
           CI_WORKFLOW_RUN_ID: ${{ steps.candidate.outputs.ci_workflow_run_id }}
           PULL_REQUEST_NUMBER: ${{ steps.candidate.outputs.pull_request_number }}
           DEPLOYMENT_ID: ${{ steps.deployment.outputs.deployment_id }}
-          ROLLBACK_ARTIFACT_ID: ${{ steps.rollback_artifact.outputs.artifact-id }}
+          ROLLBACK_ARTIFACT_ID: ${{ steps.rollback_source_artifact.outputs.artifact-id }}
+          RECOVERY_METADATA_ARTIFACT_ID: ${{ steps.recovery_metadata_artifact.outputs.artifact-id }}
           PROJECT_REF: ${{ vars.SUPABASE_PROJECT_REF }}
-        run: "$RELEASE_VENV/bin/python" scripts/write_protected_release_record.py --receipt "$RELEASE_STATE_DIR/deploy-receipt.json" --dry-run-evidence "$RELEASE_STATE_DIR/dry-run-evidence.json" --output "$RELEASE_STATE_DIR/release-record.json" --candidate-sha "$CANDIDATE_SHA" --ci-workflow-run-id "$CI_WORKFLOW_RUN_ID" --release-workflow-run-id "$GITHUB_RUN_ID" --pull-request-number "$PULL_REQUEST_NUMBER" --deployment-id "$DEPLOYMENT_ID" --rollback-artifact-id "$ROLLBACK_ARTIFACT_ID" --project-ref "$PROJECT_REF"
+        run: "$RELEASE_VENV/bin/python" scripts/write_protected_release_record.py --receipt "$RELEASE_STATE_DIR/deploy-receipt.json" --dry-run-evidence "$RELEASE_STATE_DIR/dry-run-evidence.json" --output "$RELEASE_STATE_DIR/release-record.json" --candidate-sha "$CANDIDATE_SHA" --ci-workflow-run-id "$CI_WORKFLOW_RUN_ID" --release-workflow-run-id "$GITHUB_RUN_ID" --pull-request-number "$PULL_REQUEST_NUMBER" --deployment-id "$DEPLOYMENT_ID" --rollback-artifact-id "$ROLLBACK_ARTIFACT_ID" --recovery-metadata-artifact-id "$RECOVERY_METADATA_ARTIFACT_ID" --project-ref "$PROJECT_REF"
       - name: Upload immutable release record
         id: release_artifact
         uses: actions/upload-artifact@65462800fd760344b1a7b4382951275a0abb4808
