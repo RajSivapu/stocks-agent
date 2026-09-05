@@ -48,3 +48,15 @@ Residual risk: deployment receipt collection must still populate the authoritati
 - `.venv/bin/python -m pytest -q tests/test_verify_personal_stock_agent_v1.py tests/test_verify_owner_dashboard_deployment.py tests/test_deploy_owner_dashboard_api.py tests/test_recovery_bundle.py tests/test_intelligence_controller_sql.py` — `132 passed in 13.58s`.
 - `npx --yes deno@2.9.6 test --config supabase/functions/deno.json supabase/functions/market-briefing-gateway/_shared/repository_test.ts supabase/functions/market-briefing-gateway/_shared/handler_test.ts` — `57 passed`.
 - These are fixture/local PostgreSQL checks only. They do not claim a live migration, protected deployment, production database read, recovery drill, Telegram delivery, provider/model call, brokerage operation, or full-suite result.
+
+## Controller acceptance remediation — 2026-09-05
+
+- Added the protected `owner-dashboard-release.yml` producer. A successful main CI completion or an environment-protected explicit dispatch binds checkout, reviewed SHA, CI run, merged PR, and GitHub Deployment to one candidate before it invokes the existing protected deploy script. It does not start or duplicate a market run.
+- The workflow captures prior gateway source as an immutable artifact, writes canonical candidate/deployment/workflow/migration/function/static receipt evidence, uploads a release record artifact, and attaches that immutable artifact identity to the production Deployment status. Candidate/ref mismatches fail before mutation.
+- Replaced the deployer's fixed 20260906–08 migration list with a canonical discovery manifest. It hashes and applies every ordered candidate SQL migration exactly once per protected invocation, including 20260926/27 and later additions; deploy and verifier receipts use the same `{path, version, sha256}` form.
+- Release verification now distinguishes the authoritative `dry_run: false` execution flag from separately shaped zero-side-effect evidence. Missing, null, true, string, and numeric flags fail closed.
+
+### Final local evidence
+
+- `.venv/bin/python -m pytest -q tests/test_deploy_owner_dashboard_api.py tests/test_owner_dashboard_release_workflow.py tests/test_verify_personal_stock_agent_v1.py tests/test_verify_owner_dashboard_deployment.py` — `90 passed in 10.63s`.
+- No workflow, deployment, database migration, scheduled run, recovery drill, Telegram send, provider/model call, brokerage action, or full suite was invoked.

@@ -1,0 +1,181 @@
+name: Protected owner dashboard release
+
+on:
+  workflow_run:
+    workflows: ["Owner dashboard verification"]
+    branches: [main]
+    types: [completed]
+  workflow_dispatch:
+    inputs:
+      candidate_sha:
+        description: Reviewed main candidate SHA
+        required: true
+        type: string
+      reviewed_sha:
+        description: Independently reviewed SHA; must equal the candidate
+        required: true
+        type: string
+      ci_workflow_run_id:
+        description: Successful owner-dashboard CI run for the candidate
+        required: true
+        type: string
+      pull_request_number:
+        description: Merged reviewed pull request number for the candidate
+        required: true
+        type: string
+
+permissions:
+  actions: read
+  contents: read
+  deployments: write
+
+concurrency:
+  group: protected-owner-dashboard-release-${{ github.event.workflow_run.head_sha || inputs.candidate_sha }}
+  cancel-in-progress: false
+
+jobs:
+  release:
+    if: github.event_name == 'workflow_dispatch' || (github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.head_branch == 'main')
+    environment: owner-dashboard-production
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: ${{ github.event_name == 'workflow_run' && github.event.workflow_run.head_sha || inputs.candidate_sha }}
+          fetch-depth: 0
+      - name: Bind protected dispatch to the reviewed main candidate
+        id: candidate
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          EVENT_CONCLUSION: ${{ github.event.workflow_run.conclusion }}
+          EVENT_BRANCH: ${{ github.event.workflow_run.head_branch }}
+          EVENT_SHA: ${{ github.event.workflow_run.head_sha }}
+          EVENT_CI_RUN_ID: ${{ github.event.workflow_run.id }}
+          INPUT_SHA: ${{ inputs.candidate_sha }}
+          INPUT_REVIEWED_SHA: ${{ inputs.reviewed_sha }}
+          INPUT_CI_RUN_ID: ${{ inputs.ci_workflow_run_id }}
+          INPUT_PR: ${{ inputs.pull_request_number }}
+        run: |
+          set -euo pipefail
+          if [ "$EVENT_NAME" = workflow_run ]; then
+            test "$EVENT_CONCLUSION" = success
+            test "$EVENT_BRANCH" = main
+            CANDIDATE_SHA="$EVENT_SHA"
+            REVIEWED_SHA="$EVENT_SHA"
+            CI_WORKFLOW_RUN_ID="$EVENT_CI_RUN_ID"
+            PULL_REQUEST_NUMBER="$(gh api "repos/$GITHUB_REPOSITORY/commits/$CANDIDATE_SHA/pulls" --jq '.[] | select(.merged_at != null and .merge_commit_sha == env.CANDIDATE_SHA) | .number' | head -n1)"
+          else
+            CANDIDATE_SHA="$INPUT_SHA"
+            REVIEWED_SHA="$INPUT_REVIEWED_SHA"
+            CI_WORKFLOW_RUN_ID="$INPUT_CI_RUN_ID"
+            PULL_REQUEST_NUMBER="$INPUT_PR"
+          fi
+          test "$CANDIDATE_SHA" = "$REVIEWED_SHA" || { echo 'candidate SHA/ref mismatch'; exit 1; }
+          test "$(git rev-parse HEAD)" = "$CANDIDATE_SHA" || { echo 'candidate SHA/ref mismatch'; exit 1; }
+          git fetch --no-tags origin main
+          git merge-base --is-ancestor "$CANDIDATE_SHA" origin/main
+          test -n "$PULL_REQUEST_NUMBER" || { echo 'candidate SHA/ref mismatch'; exit 1; }
+          printf 'candidate_sha=%s\nreviewed_sha=%s\nci_workflow_run_id=%s\npull_request_number=%s\n' "$CANDIDATE_SHA" "$REVIEWED_SHA" "$CI_WORKFLOW_RUN_ID" "$PULL_REQUEST_NUMBER" >> "$GITHUB_OUTPUT"
+      - uses: actions/setup-python@42375524e23c412d93fb67b49958b491fce71c38
+        with:
+          python-version: "3.14"
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with:
+          node-version: "24"
+          cache: npm
+      - name: Create the candidate-bound GitHub Deployment
+        id: deployment
+        env:
+          CANDIDATE_SHA: ${{ steps.candidate.outputs.candidate_sha }}
+        run: |
+          set -euo pipefail
+          payload="$(jq -cn --arg candidate_sha "$CANDIDATE_SHA" --argjson release_workflow_run_id "$GITHUB_RUN_ID" '{candidate_sha:$candidate_sha,release_workflow_run_id:$release_workflow_run_id}')"
+          DEPLOYMENT_ID="$(gh api --method POST "repos/$GITHUB_REPOSITORY/deployments" -f ref="$CANDIDATE_SHA" -f environment=production -F production_environment=true -F auto_merge=false -f payload="$payload" --jq .id)"
+          test -n "$DEPLOYMENT_ID" || { echo 'candidate SHA/ref mismatch'; exit 1; }
+          echo "deployment_id=$DEPLOYMENT_ID" >> "$GITHUB_OUTPUT"
+          echo "DEPLOYMENT_ID=$DEPLOYMENT_ID" >> "$GITHUB_ENV"
+      - name: Execute the existing protected deployment path
+        env:
+          DASHBOARD_OWNER_USER_ID: ${{ secrets.DASHBOARD_OWNER_USER_ID }}
+          DASHBOARD_OWNER_EMAIL: ${{ secrets.DASHBOARD_OWNER_EMAIL }}
+          DASHBOARD_NON_OWNER_ACCESS_TOKEN: ${{ secrets.DASHBOARD_NON_OWNER_ACCESS_TOKEN }}
+          POSTGRES_URL: ${{ secrets.POSTGRES_URL }}
+          SUPAVISOR_SESSION_URL: ${{ secrets.SUPAVISOR_SESSION_URL }}
+          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+          SUPABASE_PUBLISHABLE_KEY: ${{ secrets.SUPABASE_PUBLISHABLE_KEY }}
+          PROJECT_REF: ${{ vars.SUPABASE_PROJECT_REF }}
+          ALLOWED_ORIGIN: ${{ vars.DASHBOARD_ALLOWED_ORIGIN }}
+          SITE_ORIGIN: ${{ vars.DASHBOARD_SITE_ORIGIN }}
+          GATEWAY_ROLLBACK_REF: ${{ vars.GATEWAY_ROLLBACK_REF }}
+          GATEWAY_ROLLBACK_SOURCE_SHA256: ${{ vars.GATEWAY_ROLLBACK_SOURCE_SHA256 }}
+          GATEWAY_CURRENT_VERSION: ${{ vars.GATEWAY_CURRENT_VERSION }}
+          CANDIDATE_SHA: ${{ steps.candidate.outputs.candidate_sha }}
+          REVIEWED_SHA: ${{ steps.candidate.outputs.reviewed_sha }}
+        run: |
+          set -euo pipefail
+          umask 077
+          mkdir protected-evidence
+          python scripts/deploy_owner_dashboard_api.py --project-ref "$PROJECT_REF" --allowed-origin "$ALLOWED_ORIGIN" --site-origin "$SITE_ORIGIN" --reviewed-sha "$REVIEWED_SHA" --candidate-sha "$CANDIDATE_SHA" --gateway-rollback-ref "$GATEWAY_ROLLBACK_REF" --gateway-rollback-source-sha256 "$GATEWAY_ROLLBACK_SOURCE_SHA256" --gateway-current-version "$GATEWAY_CURRENT_VERSION" --evidence-directory "$PWD/protected-evidence" > protected-evidence/deploy-receipt.json
+      - name: Upload immutable rollback capture
+        id: rollback_artifact
+        uses: actions/upload-artifact@65462800fd760344b1a7b4382951275a0abb4808
+        with:
+          name: gateway-rollback-${{ github.run_id }}-${{ github.run_attempt }}
+          path: protected-evidence/gateway-source
+          if-no-files-found: error
+          retention-days: 90
+      - name: Generate canonical release record
+        env:
+          CANDIDATE_SHA: ${{ steps.candidate.outputs.candidate_sha }}
+          CI_WORKFLOW_RUN_ID: ${{ steps.candidate.outputs.ci_workflow_run_id }}
+          PULL_REQUEST_NUMBER: ${{ steps.candidate.outputs.pull_request_number }}
+          DEPLOYMENT_ID: ${{ steps.deployment.outputs.deployment_id }}
+          ROLLBACK_ARTIFACT_ID: ${{ steps.rollback_artifact.outputs.artifact-id }}
+          PROJECT_REF: ${{ vars.SUPABASE_PROJECT_REF }}
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          import hashlib, json, os
+          from pathlib import Path
+          receipt=json.loads(Path('protected-evidence/deploy-receipt.json').read_text())
+          candidate=os.environ['CANDIDATE_SHA']
+          def tree(root):
+              digest=hashlib.sha256()
+              for path in sorted(p for p in Path(root).rglob('*') if p.is_file()):
+                  digest.update(path.relative_to(root).as_posix().encode()+b'\0'+path.read_bytes()+b'\0')
+              return digest.hexdigest()
+          static_root=Path('dist')
+          files={p.relative_to(static_root).as_posix():hashlib.sha256(p.read_bytes()).hexdigest() for p in static_root.rglob('*') if p.is_file()}
+          rollback=receipt['gateway_rollback_artifact']
+          record={
+              'candidate_sha':candidate, 'project_ref':os.environ['PROJECT_REF'],
+              'workflow_run_id':int(os.environ['CI_WORKFLOW_RUN_ID']), 'release_workflow_run_id':int(os.environ['GITHUB_RUN_ID']),
+              'pull_request_number':int(os.environ['PULL_REQUEST_NUMBER']), 'deployment_id':int(os.environ['DEPLOYMENT_ID']),
+              'migrations':receipt['migrations'], 'functions':receipt['functions'],
+              'static_assets':{'candidate_sha':candidate,'source_sha256':tree('apps/web'),'files':files},
+              'dry_run':False, 'dry_run_evidence':{'table_deltas':{'analysis_runs':0,'market_reports':0},'telegram_message_ids':[],'message_id_delta':0},
+              'canaries':{'owner':200,'anonymous':401,'non_owner':403},
+              'rollback_capture':{'artifact_id':int(os.environ['ROLLBACK_ARTIFACT_ID']),'git_sha':rollback['git_sha'],'captured_at':rollback['captured_at'],'source_sha256':rollback['source_sha256']},
+              'rollback':receipt.get('rollback', {'status':'not_exercised'}),
+          }
+          Path('release-record.json').write_text(json.dumps(record,sort_keys=True,separators=(',',':'))+'\n')
+          PY
+      - name: Upload immutable release record
+        id: release_artifact
+        uses: actions/upload-artifact@65462800fd760344b1a7b4382951275a0abb4808
+        with:
+          name: release-record-${{ steps.deployment.outputs.deployment_id }}
+          path: release-record.json
+          if-no-files-found: error
+          retention-days: 90
+      - name: Mark candidate deployment successful with immutable artifact identity
+        env:
+          DEPLOYMENT_ID: ${{ steps.deployment.outputs.deployment_id }}
+          RELEASE_ARTIFACT_ID: ${{ steps.release_artifact.outputs.artifact-id }}
+        run: |
+          set -euo pipefail
+          gh api --method POST "repos/$GITHUB_REPOSITORY/deployments/$DEPLOYMENT_ID/statuses" -f state=success -f description="release-artifact:$RELEASE_ARTIFACT_ID" -f log_url="$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
+      - name: Mark candidate deployment failed if the protected path fails
+        if: ${{ failure() && env.DEPLOYMENT_ID != '' }}
+        run: gh api --method POST "repos/$GITHUB_REPOSITORY/deployments/$DEPLOYMENT_ID/statuses" -f state=failure -f description='protected release failed before evidence acceptance'

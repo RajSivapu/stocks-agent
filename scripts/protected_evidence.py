@@ -167,11 +167,14 @@ class GitHubProductionDataSource:
         statuses = self._get(f"{self.prefix}/deployments/{deployment_id}/statuses")
         require(statuses and statuses[0].get("state") == "success", "latest production deployment status is not successful")
         self.candidate = deployment["sha"]
-        artifact_id = deployment["payload"]["release_artifact_id"]
+        match = re.fullmatch(r"release-artifact:([1-9][0-9]*)", str(statuses[0].get("description", "")))
+        require(match is not None, "protected deployment status lacks immutable release artifact identity")
+        artifact_id = int(match.group(1))
         files = self.artifact(artifact_id)
         require(set(files) == {"release-record.json"}, "release artifact has unexpected files")
         record = json.loads(files["release-record.json"])
-        require(record["candidate_sha"] == self.candidate and record["project_ref"] == self.project_ref, "protected deployment candidate/project mismatch")
+        require(record["candidate_sha"] == self.candidate and record["project_ref"] == self.project_ref
+                and record["deployment_id"] == deployment["id"], "protected deployment candidate/project mismatch")
         return {**record, "id": deployment["id"], "sha": deployment["sha"], "environment": deployment["environment"], "deployed_at": statuses[0]["created_at"]}
 
     def artifact(self, artifact_id: int) -> dict[str, bytes]:

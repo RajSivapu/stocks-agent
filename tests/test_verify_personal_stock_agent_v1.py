@@ -81,10 +81,11 @@ def release(tmp_path):
         "id": 42, "sha": sha, "environment": "production", "project_ref": "p" * 20,
         "deployed_at": "2026-09-05T19:00:00Z", "workflow_run_id": 43, "pull_request_number": 44,
         "run_id": RUN, "candidate_sha": sha,
-        "migrations": [{"path": "sql/migrations/20260926_suppression_reasons.sql", "sha256": hashlib.sha256(raw["sql/migrations/20260926_suppression_reasons.sql"]).hexdigest()}],
+        "migrations": [{"path": "sql/migrations/20260926_suppression_reasons.sql", "version": "20260926", "sha256": hashlib.sha256(raw["sql/migrations/20260926_suppression_reasons.sql"]).hexdigest()}],
         "functions": [{"function": name, "git_sha": sha, "function_version": 5, "source_sha256": tree_hash({"index.ts": raw[f"supabase/functions/{name}/index.ts"]})} for name in ("market-briefing-gateway", "owner-dashboard-api")],
         "static_assets": {"candidate_sha": sha, "source_sha256": tree_hash({"src/main.tsx": b"web source\n"}), "files": {"index.html": hashlib.sha256(b"<main>Private</main>").hexdigest()}},
-        "dry_run": {"table_deltas": {"analysis_runs": 0, "market_reports": 0}, "telegram_message_ids": [], "message_id_delta": 0},
+        "dry_run": False,
+        "dry_run_evidence": {"table_deltas": {"analysis_runs": 0, "market_reports": 0}, "telegram_message_ids": [], "message_id_delta": 0},
         "canaries": {"owner": 200, "anonymous": 401, "non_owner": 403},
         "rollback_capture": {"artifact_id": 46, "git_sha": prior, "captured_at": "2026-09-05T18:15:00Z", "source_sha256": tree_hash(source.artifacts[46])},
         "rollback": {"status": "rolled_back", "gateway": {"status": "restored", "git_sha": prior, "source_sha256": tree_hash(source.artifacts[46]), "function_version": 4},
@@ -184,6 +185,17 @@ def test_release_recomputes_local_git_objects_and_static_bytes(release):
         verify_release(source, **args)
 
 
+@pytest.mark.parametrize("value", ["missing", None, True, "false", 0, 1])
+def test_release_requires_authoritative_non_dry_run_boolean(release, value):
+    source, args = release
+    if value == "missing":
+        source.record.pop("dry_run")
+    else:
+        source.record["dry_run"] = value
+    with pytest.raises(RuntimeError, match="dry-run"):
+        verify_release(source, **args)
+
+
 def test_production_source_reads_deployment_and_protected_artifact_instead_of_caller_json(monkeypatch):
     from scripts import protected_evidence as evidence
     database = object()
@@ -195,10 +207,10 @@ def test_production_source_reads_deployment_and_protected_artifact_instead_of_ca
             return {"id": 42, "sha": "a" * 40, "environment": "production", "production_environment": True,
                     "payload": {"release_artifact_id": 46}, "created_at": "2026-09-05T18:00:00Z"}
         if path.endswith("/deployments/42/statuses"):
-            return [{"state": "success", "created_at": "2026-09-05T19:00:00Z"}]
+            return [{"state": "success", "created_at": "2026-09-05T19:00:00Z", "description": "release-artifact:46"}]
         raise AssertionError(path)
     monkeypatch.setattr(source, "_get", get)
-    monkeypatch.setattr(source, "artifact", lambda artifact_id: {"release-record.json": b'{"candidate_sha":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","project_ref":"pppppppppppppppppppp","run_id":"11111111-1111-4111-8111-111111111111"}'})
+    monkeypatch.setattr(source, "artifact", lambda artifact_id: {"release-record.json": b'{"candidate_sha":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","project_ref":"pppppppppppppppppppp","deployment_id":42}'})
     result = source.deployment(42)
     assert result["deployed_at"] == "2026-09-05T19:00:00Z"
     assert result["id"] == 42

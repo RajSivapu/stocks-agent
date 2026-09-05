@@ -90,7 +90,7 @@ def git_files(repo: Path, sha: str, prefix: str) -> dict[str, bytes]:
 
 def verify_artifacts(repo: Path, static_root: Path, candidate: str, record: Mapping, source: ReleaseDataSource, now: datetime, deployed: datetime) -> None:
     migrations = git_files(repo, candidate, "sql/migrations")
-    expected_migrations = [{"path": f"sql/migrations/{path}", "sha256": sha256(raw)} for path, raw in sorted(migrations.items()) if path.endswith(".sql")]
+    expected_migrations = [{"path": f"sql/migrations/{path}", "version": Path(path).name.split("_", 1)[0], "sha256": sha256(raw)} for path, raw in sorted(migrations.items()) if path.endswith(".sql")]
     require(record["migrations"] == expected_migrations, "migration byte hashes or complete version set differ from candidate")
     functions = record["functions"]
     require(isinstance(functions, list) and [row["function"] for row in functions] == list(FUNCTIONS), "function evidence is incomplete")
@@ -216,7 +216,8 @@ def verify_release(source: ReleaseDataSource, *, deployment_id: int, repo_root: 
         reviews = source.reviews(record["pull_request_number"])
         require(any(row["state"] == "APPROVED" and row["commit_id"] == candidate and commit_time <= timestamp(row["submitted_at"]) <= deployed for row in reviews), "independent review of exact candidate is missing")
         verify_artifacts(repo_root, static_root, candidate, record, source, now, deployed)
-        dry = record["dry_run"]
+        require(record.get("dry_run") is False, "protected deployment dry-run authority must be false")
+        dry = record["dry_run_evidence"]
         require(isinstance(dry["table_deltas"], Mapping) and dry["table_deltas"] and all(type(value) is int and value == 0 for value in dry["table_deltas"].values())
                 and dry["telegram_message_ids"] == [] and dry["message_id_delta"] == 0, "protected dry-run side-effect evidence is incomplete")
         require(record["canaries"] == {"owner": 200, "anonymous": 401, "non_owner": 403}, "protected owner/denial canaries are incomplete")

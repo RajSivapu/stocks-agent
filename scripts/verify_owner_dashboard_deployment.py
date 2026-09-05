@@ -11,7 +11,7 @@ import os
 from pathlib import Path
 import re
 import sys
-from typing import Callable, Mapping
+from typing import Callable, Mapping, Sequence
 from urllib.error import HTTPError
 from urllib.parse import urlparse
 from urllib.request import Request, urlopen
@@ -46,10 +46,10 @@ BOUNDARIES = {
     "friend_invitations": "disabled",
     "brokerage_authority": "none",
 }
-RELEASE_MIGRATION_VERSIONS = ("20260907", "20260908")
 RELEASE_FUNCTIONS = ("market-briefing-gateway", "owner-dashboard-api")
 RUNTIME_ROLE = "stock_agent_dashboard_runtime"
 UUID_PATTERN = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$", re.IGNORECASE)
+MIGRATION_NAME = re.compile(r"^(?P<version>\d{8})_[a-z0-9][a-z0-9_]*\.sql$")
 REPORT_PUBLICATION_SQL = """SELECT p.report_id::text AS report_id,r.run_id::text AS run_id,p.idempotency_key,
     p.status,p.telegram_message_ids,to_char(p.telegram_accepted_at AT TIME ZONE 'UTC','YYYY-MM-DD\"T\"HH24:MI:SS.MS\"Z\"') AS telegram_accepted_at,p.suppression_reason,
     jsonb_build_object('report_id',p.report_id,'idempotency_key',p.idempotency_key,'status',p.status,
@@ -95,9 +95,24 @@ def canonical_sha256(value: object) -> str:
     ).hexdigest()
 
 
+def candidate_migration_manifest(migrations_directory: Path = ROOT / "sql/migrations") -> list[dict[str, str]]:
+    if not migrations_directory.is_dir() or migrations_directory.is_symlink():
+        raise RuntimeError("candidate migration directory is unavailable")
+    paths = sorted(migrations_directory.iterdir())
+    if (not paths or any(not path.is_file() or path.is_symlink() or not MIGRATION_NAME.fullmatch(path.name)
+                          for path in paths)):
+        raise RuntimeError("candidate migration manifest is malformed")
+    return [{
+        "path": f"sql/migrations/{path.name}",
+        "version": MIGRATION_NAME.fullmatch(path.name).group("version"),  # type: ignore[union-attr]
+        "sha256": hashlib.sha256(path.read_bytes()).hexdigest(),
+    } for path in paths]
+
+
 def verify_release_artifact_receipts(
     candidate_sha: str,
     deployment: Mapping[str, object],
+    expected_migrations: Sequence[Mapping[str, str]],
 ) -> dict[str, object]:
     """Bind migrations, changed functions, and static assets to one reviewed candidate."""
     if not re.fullmatch(r"[0-9a-f]{40}", candidate_sha):
@@ -105,9 +120,12 @@ def verify_release_artifact_receipts(
     migrations = deployment.get("migrations")
     functions = deployment.get("functions")
     static = deployment.get("static_assets")
-    if not isinstance(migrations, list) or tuple(row.get("version") for row in migrations if isinstance(row, dict)) != RELEASE_MIGRATION_VERSIONS:
+    if not isinstance(migrations, list) or migrations != list(expected_migrations):
         raise RuntimeError("release migration receipts are incomplete")
-    if any(not re.fullmatch(r"[0-9a-f]{64}", str(row.get("sha256", ""))) for row in migrations):
+    if any(not isinstance(row, Mapping) or set(row) != {"path", "version", "sha256"}
+           or not re.fullmatch(r"sql/migrations/\d{8}_[a-z0-9][a-z0-9_]*\.sql", str(row.get("path", "")))
+           or not re.fullmatch(r"\d{8}", str(row.get("version", "")))
+           or not re.fullmatch(r"[0-9a-f]{64}", str(row.get("sha256", ""))) for row in migrations):
         raise RuntimeError("release migration hash receipt is malformed")
     if not isinstance(functions, list) or tuple(row.get("function") for row in functions if isinstance(row, dict)) != RELEASE_FUNCTIONS:
         raise RuntimeError("changed function receipts are incomplete")
@@ -131,7 +149,7 @@ def verify_release_artifact_receipts(
     return {
         "status": "verified",
         "candidate_sha": candidate_sha,
-        "migration_version": ",".join(RELEASE_MIGRATION_VERSIONS),
+        "migration_version": ",".join(row["version"] for row in migrations),
         "function_count": len(RELEASE_FUNCTIONS),
         "static_asset_count": len(static["asset_hashes"]),
     }
@@ -810,7 +828,7 @@ def main() -> int:
         if not isinstance(deployment, dict):
             raise SystemExit("deployment receipt must be a JSON object")
         receipt["artifact_verification"] = verify_release_artifact_receipts(
-            arguments.candidate_sha, deployment,
+            arguments.candidate_sha, deployment, candidate_migration_manifest(),
         )
     print(json.dumps(receipt, sort_keys=True, separators=(",", ":")))
     return 0

@@ -127,11 +127,13 @@ def test_local_verification_cannot_inherit_database_integration_opt_in(tmp_path)
     assert commands == [["env", "-u", "RUN_DB_INTEGRATION_TESTS", "npm", "run", "test:all"]]
 
 
-def test_release_manifest_contains_only_new_migrations_and_changed_functions():
-    assert tuple(path.name for path in deploy.RELEASE_MIGRATIONS) == (
-        "20260907_market_intelligence.sql",
-        "20260908_owner_dashboard_intelligence_read_role.sql",
-    )
+def test_candidate_migration_manifest_discovers_every_ordered_candidate_migration_and_hash():
+    manifest = deploy.candidate_migration_manifest()
+    names = [row["path"] for row in manifest]
+    assert names == sorted(names)
+    assert "sql/migrations/20260926_report_suppression_reasons.sql" in names
+    assert "sql/migrations/20260927_release_evidence_reader.sql" in names
+    assert all(len(row["sha256"]) == 64 for row in manifest)
     assert deploy.CHANGED_FUNCTIONS == ("market-briefing-gateway", "owner-dashboard-api")
 
 
@@ -148,13 +150,12 @@ def test_release_source_refuses_the_superseded_thin_dashboard(tmp_path):
     }
 
 
-def test_release_migrations_are_applied_in_order_with_immutable_receipts(tmp_path, monkeypatch):
+def test_release_migrations_are_applied_in_order_once_with_candidate_hashes(tmp_path):
     migrations = []
-    for name in ("20260907_market_intelligence.sql", "20260908_owner_dashboard_intelligence_read_role.sql"):
+    for name in ("20260926_report_suppression_reasons.sql", "20260927_release_evidence_reader.sql", "20260928_future_addition.sql"):
         path = tmp_path / name
         path.write_text(f"-- {name}\nSELECT 1;\n")
         migrations.append(path)
-    monkeypatch.setattr(deploy, "RELEASE_MIGRATIONS", tuple(migrations))
 
     class Cursor:
         def __init__(self):
@@ -164,10 +165,34 @@ def test_release_migrations_are_applied_in_order_with_immutable_receipts(tmp_pat
             self.statements.append(statement)
 
     cursor = Cursor()
-    receipt = deploy.apply_release_migrations(cursor)
+    manifest = deploy.candidate_migration_manifest(tmp_path)
+    receipt = deploy.apply_release_migrations(cursor, manifest, tmp_path)
     assert cursor.statements == [path.read_text() for path in migrations]
-    assert [row["version"] for row in receipt] == ["20260907", "20260908"]
+    assert [row["version"] for row in receipt] == ["20260926", "20260927", "20260928"]
     assert all(len(row["sha256"]) == 64 for row in receipt)
+    manifest[0]["sha256"] = "0" * 64
+    with pytest.raises(RuntimeError, match="hash"):
+        deploy.apply_release_migrations(Cursor(), manifest, tmp_path)
+
+
+def test_deploy_and_release_verifiers_share_the_complete_candidate_migration_manifest():
+    from scripts.verify_owner_dashboard_deployment import verify_release_artifact_receipts
+
+    manifest = deploy.candidate_migration_manifest()
+    deployment = {
+        "migrations": manifest,
+        "functions": [
+            {"function": "market-briefing-gateway", "git_sha": "a" * 40, "function_version": 1, "source_sha256": "b" * 64},
+            {"function": "owner-dashboard-api", "git_sha": "a" * 40, "function_version": 1, "source_sha256": "c" * 64},
+        ],
+        "static_assets": {"status": "verified", "candidate_sha": "a" * 40, "asset_hashes": ["d" * 64]},
+    }
+    verified = verify_release_artifact_receipts("a" * 40, deployment, manifest)
+    assert "20260926" in verified["migration_version"]
+    assert "20260927" in verified["migration_version"]
+    deployment["migrations"] = [*manifest[:-1], {**manifest[-1], "sha256": "0" * 64}]
+    with pytest.raises(RuntimeError, match="migration"):
+        verify_release_artifact_receipts("a" * 40, deployment, manifest)
 
 
 def test_changed_function_deploy_updates_gateway_and_creates_dashboard(tmp_path):

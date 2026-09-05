@@ -39,11 +39,7 @@ from scripts.verify_owner_dashboard_deployment import (
 )
 
 
-MIGRATION = ROOT / "sql/migrations/20260906_owner_dashboard_read_role.sql"
-RELEASE_MIGRATIONS = (
-    ROOT / "sql/migrations/20260907_market_intelligence.sql",
-    ROOT / "sql/migrations/20260908_owner_dashboard_intelligence_read_role.sql",
-)
+MIGRATION_NAME = re.compile(r"^(?P<version>\d{8})_[a-z0-9][a-z0-9_]*\.sql$")
 SUPABASE_CLI_VERSION = "2.116.0"
 FUNCTION_NAME = "owner-dashboard-api"
 CHANGED_FUNCTIONS = ("market-briefing-gateway", FUNCTION_NAME)
@@ -178,13 +174,21 @@ def _run(command: list[str], *, cwd: Path, runner: Callable[..., object]):
     return runner(command, cwd=cwd, capture_output=True, text=True, check=False)
 
 
-def verify_git_release(repo_root: Path = ROOT, runner: Callable[..., object] = subprocess.run) -> str:
+def verify_git_release(
+    repo_root: Path = ROOT, runner: Callable[..., object] = subprocess.run,
+    expected_sha: str | None = None,
+) -> str:
     status = _run(["git", "status", "--porcelain=v1"], cwd=repo_root, runner=runner)
     if getattr(status, "returncode", 1) != 0 or str(getattr(status, "stdout", "")).strip():
         raise RuntimeError("deployment requires a clean working tree")
     head = _run(["git", "rev-parse", "HEAD"], cwd=repo_root, runner=runner)
-    upstream = _run(["git", "rev-parse", "@{upstream}"], cwd=repo_root, runner=runner)
     local_sha = str(getattr(head, "stdout", "")).strip()
+    if expected_sha is not None:
+        if (not re.fullmatch(r"[0-9a-f]{40}", expected_sha)
+                or getattr(head, "returncode", 1) != 0 or local_sha != expected_sha):
+            raise RuntimeError("deployment candidate SHA/ref mismatch")
+        return local_sha
+    upstream = _run(["git", "rev-parse", "@{upstream}"], cwd=repo_root, runner=runner)
     remote_sha = str(getattr(upstream, "stdout", "")).strip()
     if getattr(head, "returncode", 1) != 0 or getattr(upstream, "returncode", 1) != 0 or local_sha != remote_sha:
         raise RuntimeError("deployment requires the exact commit to be pushed")
@@ -299,16 +303,60 @@ def verify_gateway_rollback_preflight(
     return {"function_version": observed, "source_sha256": artifact["source_sha256"]}
 
 
-def apply_release_migrations(cursor) -> list[dict[str, str]]:
-    """Apply the two V1 migrations in fixed order and bind receipts to their bytes."""
-    receipts = []
-    for path in RELEASE_MIGRATIONS:
-        sql = path.read_text()
-        cursor.execute(sql)
-        receipts.append({
-            "version": path.name.split("_", 1)[0],
-            "sha256": hashlib.sha256(sql.encode()).hexdigest(),
+def candidate_migration_manifest(migrations_directory: Path = ROOT / "sql/migrations") -> list[dict[str, str]]:
+    """Discover every candidate migration in stable byte-bound order."""
+    if not migrations_directory.is_dir() or migrations_directory.is_symlink():
+        raise RuntimeError("candidate migration directory is unavailable")
+    paths = sorted(migrations_directory.iterdir())
+    if (not paths or any(not path.is_file() or path.is_symlink() or not MIGRATION_NAME.fullmatch(path.name)
+                          for path in paths)):
+        raise RuntimeError("candidate migration manifest is malformed")
+    manifest = []
+    for path in paths:
+        raw = path.read_bytes()
+        if not raw:
+            raise RuntimeError("candidate migration is empty")
+        manifest.append({
+            "path": f"sql/migrations/{path.name}",
+            "version": MIGRATION_NAME.fullmatch(path.name).group("version"),  # type: ignore[union-attr]
+            "sha256": hashlib.sha256(raw).hexdigest(),
         })
+    return manifest
+
+
+def apply_release_migrations(
+    cursor, manifest: Sequence[Mapping[str, str]] | None = None,
+    migrations_directory: Path = ROOT / "sql/migrations",
+) -> list[dict[str, str]]:
+    """Apply each discovered candidate migration once, in stable byte-bound order."""
+    manifest = list(candidate_migration_manifest() if manifest is None else manifest)
+    def valid_item(row: Mapping[str, str]) -> bool:
+        path = row.get("path")
+        version = row.get("version")
+        digest = row.get("sha256")
+        return (set(row) == {"path", "version", "sha256"} and isinstance(path, str)
+                and isinstance(version, str) and isinstance(digest, str)
+                and path == f"sql/migrations/{Path(path).name}"
+                and MIGRATION_NAME.fullmatch(Path(path).name) is not None
+                and version == Path(path).name.split("_", 1)[0]
+                and re.fullmatch(r"[0-9a-f]{64}", digest) is not None)
+    if not manifest or any(not isinstance(row, Mapping) or not valid_item(row) for row in manifest):
+        raise RuntimeError("candidate migration manifest is incomplete or unordered")
+    expected_paths = [row["path"] for row in manifest]
+    if expected_paths != sorted(expected_paths) or len(expected_paths) != len(set(expected_paths)):
+        raise RuntimeError("candidate migration manifest is incomplete or unordered")
+    receipts = []
+    for item in manifest:
+        path = migrations_directory / Path(str(item["path"])).name
+        if path.is_symlink() or not path.is_file() or not MIGRATION_NAME.fullmatch(path.name):
+            raise RuntimeError("candidate migration path is unsafe")
+        raw = path.read_bytes()
+        actual = hashlib.sha256(raw).hexdigest()
+        if item["sha256"] != actual:
+            raise RuntimeError("candidate migration hash mismatch")
+        sql = raw.decode("utf-8")
+        cursor.execute(sql)
+        receipts.append(dict(item))
     return receipts
 
 
@@ -716,6 +764,7 @@ def main() -> int:
     parser.add_argument("--allowed-origin", required=True)
     parser.add_argument("--site-origin", required=True)
     parser.add_argument("--reviewed-sha", required=True)
+    parser.add_argument("--candidate-sha")
     parser.add_argument("--gateway-rollback-ref", required=True)
     parser.add_argument("--gateway-rollback-source-sha256", required=True)
     parser.add_argument("--gateway-current-version", required=True, type=int)
@@ -753,15 +802,15 @@ def main() -> int:
         arguments.allowed_origin,
         DASHBOARD_SECRET_NAMES,
     )
-    git_sha = verify_git_release()
+    git_sha = verify_git_release(expected_sha=arguments.candidate_sha)
     verify_reviewed_sha(git_sha, arguments.reviewed_sha)
     run_local_verification()
     dashboard_source = verify_v1_dashboard_source()
     ensure_initial_function_absent(arguments.project_ref)
+    migration_manifest = candidate_migration_manifest()
     with psycopg.connect(admin_url) as connection:
         with connection.cursor() as cursor:
-            cursor.execute(MIGRATION.read_text())
-            migration_receipts = apply_release_migrations(cursor)
+            migration_receipts = apply_release_migrations(cursor, migration_manifest)
         database_secret = provision_dashboard_role(connection, session_template)
         role_receipt = verify_dashboard_role(connection)
     database_url = database_secret["DASHBOARD_DATABASE_URL"]
@@ -810,7 +859,7 @@ def main() -> int:
         admin_url, rollback=rollback_release,
     )
     try:
-        receipt["artifact_verification"] = verify_release_artifact_receipts(git_sha, receipt)
+        receipt["artifact_verification"] = verify_release_artifact_receipts(git_sha, receipt, migration_manifest)
     except Exception as error:
         try:
             rollback_release(arguments.project_ref, admin_url)
