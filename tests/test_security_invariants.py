@@ -573,10 +573,15 @@ def test_weekly_audit_columns_are_exactly_admitted_by_the_dashboard_verifier():
 def test_loss_streak_query_has_authoritative_chronology_and_stable_tie_breakers():
     source = (ROOT / "supabase/functions/market-briefing-gateway/_shared/repository.ts").read_text()
     compact = re.sub(r"\s+", "", source)
-    assert "recommendation:suggestions!inner(ts)" in compact
     assert (
-        ').order("graded_at",{ascending:false}).order("suggestion_id",{ascending:false})'
-        '.order("horizon_days",{ascending:false}).limit(150)'
+        'client.from("suggestions").select("id,ts").eq("decision_source","gateway")'
+        '.order("ts",{ascending:false}).order("id",{ascending:false}).limit(150)'
+    ) in compact
+    assert 'client.from("suggestion_grades").select(' in compact
+    assert (
+        '.in("suggestion_id",recommendationIds).eq("coverage_status","complete")'
+        '.in("horizon_days",[5,21,63]).order("suggestion_id",{ascending:false})'
+        '.order("horizon_days",{ascending:false}).limit(recommendationIds.length*3)'
     ) in compact
 
 

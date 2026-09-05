@@ -151,6 +151,104 @@ Deno.test("recommendation streak orders equal-time grades by recommendation chro
   ]), 2);
 });
 
+Deno.test("context bounds recommendations before fresh old grade rows", async () => {
+  const oldRecommendations = Array.from({ length: 151 }, (_, index) => ({
+    id: index + 1,
+    ts: "2026-08-01T14:00:00Z",
+    decision_source: "gateway",
+  }));
+  const recommendations = [
+    { id: 1001, ts: "2026-09-03T14:00:00Z", decision_source: "gateway" },
+    { id: 1000, ts: "2026-09-02T14:00:00Z", decision_source: "gateway" },
+    { id: 999, ts: "2026-09-01T14:00:00Z", decision_source: "gateway" },
+    ...oldRecommendations,
+  ];
+  const grades = [
+    ...oldRecommendations.map((recommendation) => ({
+      suggestion_id: recommendation.id,
+      horizon_days: 5,
+      coverage_status: "incomplete",
+      excess_return_pct: null,
+      direction_success: null,
+      graded_at: "2026-12-31T21:00:00Z",
+    })),
+    { suggestion_id: 1001, horizon_days: 5, coverage_status: "complete", excess_return_pct: "-2", direction_success: false, graded_at: "2026-09-10T21:00:00Z" },
+    { suggestion_id: 1000, horizon_days: 21, coverage_status: "complete", excess_return_pct: "-3", direction_success: false, graded_at: "2026-09-09T21:00:00Z" },
+    { suggestion_id: 999, horizon_days: 63, coverage_status: "complete", excess_return_pct: "2", direction_success: true, graded_at: "2026-09-08T21:00:00Z" },
+  ];
+
+  class ReadQuery {
+    private selected = "";
+    private equals: Array<[string, unknown]> = [];
+    private included: Array<[string, unknown[]]> = [];
+    private orders: Array<[string, boolean]> = [];
+    private rowLimit: number | null = null;
+
+    constructor(private table: string) {}
+
+    select(columns: string): ReadQuery {
+      this.selected = columns;
+      return this;
+    }
+    eq(column: string, value: unknown): ReadQuery {
+      this.equals.push([column, value]);
+      return this;
+    }
+    in(column: string, values: unknown[]): ReadQuery {
+      this.included.push([column, values]);
+      return this;
+    }
+    order(column: string, options: { ascending?: boolean } = {}): ReadQuery {
+      this.orders.push([column, options.ascending !== false]);
+      return this;
+    }
+    limit(count: number): ReadQuery {
+      this.rowLimit = count;
+      return this;
+    }
+    or(): ReadQuery { return this; }
+    gte(): ReadQuery { return this; }
+    lt(): ReadQuery { return this; }
+
+    private result(): { data: Record<string, unknown>[]; error: null } {
+      let data: Record<string, unknown>[] = this.table === "suggestions" && this.selected === "id,ts"
+        ? structuredClone(recommendations)
+        : this.table === "suggestion_grades"
+        ? structuredClone(grades)
+        : [];
+      for (const [column, value] of this.equals) {
+        data = data.filter((row) => row[column] === value);
+      }
+      for (const [column, values] of this.included) {
+        data = data.filter((row) => values.includes(row[column]));
+      }
+      data.sort((left, right) => {
+        for (const [column, ascending] of this.orders) {
+          const compared = String(left[column]).localeCompare(String(right[column]), "en", { numeric: true });
+          if (compared !== 0) return ascending ? compared : -compared;
+        }
+        return 0;
+      });
+      return { data: this.rowLimit === null ? data : data.slice(0, this.rowLimit), error: null };
+    }
+
+    then(
+      onfulfilled?: (value: { data: Record<string, unknown>[]; error: null }) => unknown,
+      onrejected?: (reason: unknown) => unknown,
+    ): Promise<unknown> {
+      return Promise.resolve(this.result()).then(onfulfilled, onrejected);
+    }
+  }
+
+  const repository = createSupabaseGatewayRepository({
+    from(table: string) {
+      return new ReadQuery(table);
+    },
+  });
+  const context = await repository.readContext(null);
+  assertEquals(context.consecutive_completed_losses, 2);
+});
+
 Deno.test("unresolved suggestion overflow fails closed instead of dropping pending state", () => {
   let error: unknown = null;
   try {

@@ -40,3 +40,16 @@ This task performed local implementation and focused fixture tests only. It did 
 - GREEN: the exact Task 11 Python gate passed `38 passed`.
 - GREEN: the affected protected-workflow contract passed `12 passed`.
 - `git diff --check` passed. No full suite or external/live action was run.
+
+## Fix round 2 — Recommendation-first streak bound
+
+- Replaced the grade-update-time-first `LIMIT 150` with a bounded first-stage query over gateway recommendations ordered by authoritative `suggestions.ts DESC, suggestions.id DESC`.
+- Only those recommendation IDs can enter the second-stage grade query. That query accepts only complete 5/21/63-session horizons and is bounded at three horizons per selected recommendation; the existing recommendation-level reducer then selects the longest completed horizon once.
+- The end-to-end `readContext` regression creates 151 old recommendations with newly updated incomplete grade rows plus two newer losses and an older winner whose grade timestamps are earlier. RED returned a circuit-breaker streak of `0`; GREEN returns `2` because old grade update time can no longer crowd newer recommendations out before the bound.
+
+### Fix-round evidence
+
+- RED: focused repository test — `11 passed, 1 failed` (`expected 2, got 0`).
+- GREEN: exact Task 11 Deno gate — `49 passed, 0 failed`.
+- GREEN: focused authoritative-query contract — `1 passed, 29 deselected`.
+- `git diff --check` passed. No full suite, live database, migration, deployment, Telegram, scheduler, provider/model, or brokerage action was run.

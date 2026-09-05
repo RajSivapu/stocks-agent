@@ -436,6 +436,45 @@ function oneObject(
   return result.data as Record<string, unknown>;
 }
 
+async function recentRecommendationGrades(client: SupabaseLike): Promise<DbResult> {
+  const recommendationRows = rows(
+    await client.from("suggestions").select("id,ts")
+      .eq("decision_source", "gateway")
+      .order("ts", { ascending: false })
+      .order("id", { ascending: false }).limit(150),
+    "CONTEXT_TOO_LARGE",
+  );
+  const recommendationTimes = new Map<number, string>();
+  for (const row of recommendationRows) {
+    const suggestionId = integer(row.id);
+    const recommendationAt = text(row.ts, 40);
+    if (!Number.isFinite(Date.parse(recommendationAt))) {
+      throw new GatewayRepositoryError("INVALID_PERSISTED_DATA");
+    }
+    recommendationTimes.set(suggestionId, recommendationAt);
+  }
+  const recommendationIds = [...recommendationTimes.keys()];
+  if (recommendationIds.length === 0) return { data: [], error: null };
+
+  const gradeRows = rows(
+    await client.from("suggestion_grades").select(
+      "suggestion_id,horizon_days,coverage_status,excess_return_pct,direction_success,graded_at",
+    ).in("suggestion_id", recommendationIds).eq("coverage_status", "complete")
+      .in("horizon_days", [5, 21, 63])
+      .order("suggestion_id", { ascending: false })
+      .order("horizon_days", { ascending: false }).limit(recommendationIds.length * 3),
+    "CONTEXT_TOO_LARGE",
+  );
+  return {
+    data: gradeRows.map((row) => {
+      const recommendationAt = recommendationTimes.get(integer(row.suggestion_id));
+      if (!recommendationAt) throw new GatewayRepositoryError("INVALID_PERSISTED_DATA");
+      return { ...row, recommendation: { ts: recommendationAt } };
+    }),
+    error: null,
+  };
+}
+
 function text(value: unknown, max = 1000): string {
   if (typeof value !== "string") {
     throw new GatewayRepositoryError("INVALID_PERSISTED_DATA");
@@ -1221,11 +1260,7 @@ export function createSupabaseGatewayRepository(
         client.from("radar").select(
           "ticker,added,last_seen,days_relevant,reason,bucket_guess,promoted,promoted_on",
         ).order("last_seen", { ascending: false }).limit(20),
-        client.from("suggestion_grades").select(
-          "suggestion_id,horizon_days,coverage_status,excess_return_pct,direction_success,graded_at,recommendation:suggestions!inner(ts)",
-        ).order("graded_at", { ascending: false })
-          .order("suggestion_id", { ascending: false })
-          .order("horizon_days", { ascending: false }).limit(150),
+        recentRecommendationGrades(client),
         client.from("owner_investment_plans").select(
           "id,ticker,bucket,amount,cadence,next_due_on,active,updated_at",
         ).eq("active", true).limit(21),
