@@ -127,18 +127,27 @@ Deno.test("newer completed history cannot displace unresolved suggestion context
 
 Deno.test("three losing horizons for one recommendation count as one loss", () => {
   assertEquals(consecutiveRecommendationLosses([
-    { suggestion_id: 9, horizon_days: 63, coverage_status: "complete", direction_success: false },
-    { suggestion_id: 9, horizon_days: 21, coverage_status: "complete", direction_success: false },
-    { suggestion_id: 9, horizon_days: 5, coverage_status: "complete", direction_success: false },
+    { suggestion_id: 9, horizon_days: 63, coverage_status: "complete", direction_success: false, recommendation: { ts: "2026-09-03T14:00:00Z" } },
+    { suggestion_id: 9, horizon_days: 21, coverage_status: "complete", direction_success: false, recommendation: { ts: "2026-09-03T14:00:00Z" } },
+    { suggestion_id: 9, horizon_days: 5, coverage_status: "complete", direction_success: false, recommendation: { ts: "2026-09-03T14:00:00Z" } },
   ]), 1);
 });
 
 Deno.test("recommendation streak uses the longest completed horizon once", () => {
   assertEquals(consecutiveRecommendationLosses([
-    { suggestion_id: 10, horizon_days: 5, coverage_status: "complete", direction_success: true },
-    { suggestion_id: 10, horizon_days: 21, coverage_status: "complete", direction_success: false },
-    { suggestion_id: 9, horizon_days: 63, coverage_status: "complete", direction_success: false },
-    { suggestion_id: 8, horizon_days: 63, coverage_status: "complete", direction_success: true },
+    { suggestion_id: 10, horizon_days: 5, coverage_status: "complete", direction_success: true, recommendation: { ts: "2026-09-03T14:00:00Z" } },
+    { suggestion_id: 10, horizon_days: 21, coverage_status: "complete", direction_success: false, recommendation: { ts: "2026-09-03T14:00:00Z" } },
+    { suggestion_id: 9, horizon_days: 63, coverage_status: "complete", direction_success: false, recommendation: { ts: "2026-09-02T14:00:00Z" } },
+    { suggestion_id: 8, horizon_days: 63, coverage_status: "complete", direction_success: true, recommendation: { ts: "2026-09-01T14:00:00Z" } },
+  ]), 2);
+});
+
+Deno.test("recommendation streak orders equal-time grades by recommendation chronology", () => {
+  const gradedAt = "2026-12-31T21:00:00Z";
+  assertEquals(consecutiveRecommendationLosses([
+    { suggestion_id: 7, horizon_days: 63, coverage_status: "complete", direction_success: true, graded_at: gradedAt, recommendation: { ts: "2026-09-01T14:00:00Z" } },
+    { suggestion_id: 9, horizon_days: 5, coverage_status: "complete", direction_success: false, graded_at: gradedAt, recommendation: { ts: "2026-09-03T14:00:00Z" } },
+    { suggestion_id: 8, horizon_days: 21, coverage_status: "complete", direction_success: false, graded_at: gradedAt, recommendation: { ts: "2026-09-02T14:00:00Z" } },
   ]), 2);
 });
 

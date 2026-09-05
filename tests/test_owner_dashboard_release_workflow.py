@@ -41,7 +41,7 @@ def test_release_workflow_has_all_mutation_preconditions_and_pinned_tools():
     assert "SUPABASE_ACCESS_TOKEN: ${{ secrets.SUPABASE_ACCESS_TOKEN }}" in workflow
     assert 'test -n "$SUPABASE_ACCESS_TOKEN"' in workflow
     assert "npm ci --ignore-scripts" in workflow
-    assert "requirements-test.txt" in workflow
+    assert "--require-hashes --only-binary=:all: -r requirements.lock" in workflow
     assert "supabase@2.116.0" in workflow
     assert 'git/ref/heads/main' in workflow
     assert "actions/runs/$CI_WORKFLOW_RUN_ID" in workflow
@@ -67,7 +67,7 @@ def test_final_release_workflow_keeps_all_ephemera_outside_the_checkout_and_uses
     assert "--release-state" in workflow
     assert "--dry-run" in workflow
     assert "npx playwright install --with-deps chromium" in workflow
-    assert "cryptography==" in Path("requirements-test.txt").read_text()
+    assert "cryptography==" in Path("requirements.lock").read_text()
     assert '"$PR_HEAD_SHA"' in workflow
     assert "reviewed head does not bind candidate" in workflow
 
@@ -90,6 +90,17 @@ def test_independent_recovery_contract_covers_cancelled_and_lost_release_runners
     assert "--recovery-root" in recovery
     assert "recovery-metadata/release-state.json" in recovery
     assert "recovery-metadata/recovery-metadata" not in recovery
+
+
+def test_protected_release_and_recovery_install_only_the_complete_hashed_lock():
+    required = "--require-hashes --only-binary=:all: -r requirements.lock"
+    for path in (
+        ".github/workflows/owner-dashboard-release.yml",
+        ".github/workflows/owner-dashboard-release-recovery.yml",
+    ):
+        workflow = Path(path).read_text()
+        assert required in workflow
+        assert "requirements-test.txt" not in workflow
 
 
 def test_release_exports_candidate_for_every_set_u_dry_run_and_recovery_step():

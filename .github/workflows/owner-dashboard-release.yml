@@ -53,7 +53,7 @@ jobs:
           echo "RELEASE_LEASE_OWNER=release-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT" >> "$GITHUB_ENV"
           echo "RELEASE_VENV=$RUNNER_TEMP/owner-dashboard-release-venv-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT" >> "$GITHUB_ENV"
           python -m venv "$RUNNER_TEMP/owner-dashboard-release-venv-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
-          "$RUNNER_TEMP/owner-dashboard-release-venv-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT/bin/python" -m pip install --requirement requirements-test.txt
+          "$RUNNER_TEMP/owner-dashboard-release-venv-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT/bin/python" -m pip install --require-hashes --only-binary=:all: -r requirements.lock
           echo "PYTHON_BIN=$RUNNER_TEMP/owner-dashboard-release-venv-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT/bin/python" >> "$GITHUB_ENV"
           npx playwright install --with-deps chromium
           npx --yes supabase@2.116.0 --version >/dev/null

@@ -54,21 +54,45 @@ export interface LearningRecordReceipt {
 export function consecutiveRecommendationLosses(
   rows: readonly Record<string, unknown>[],
 ): number {
-  const orderedRecommendationIds: number[] = [];
-  const longestOutcome = new Map<number, { horizon: number; directionSuccess: boolean }>();
+  const longestOutcome = new Map<number, {
+    horizon: number;
+    directionSuccess: boolean;
+    recommendationTime: number;
+  }>();
   for (const row of rows) {
+    if (row.coverage_status !== "complete" || typeof row.direction_success !== "boolean") continue;
+    const recommendation = row.recommendation;
+    const recommendationAt = typeof recommendation === "object" && recommendation !== null &&
+        !Array.isArray(recommendation)
+      ? (recommendation as Record<string, unknown>).ts
+      : null;
+    const recommendationTime = typeof recommendationAt === "string"
+      ? Date.parse(recommendationAt)
+      : Number.NaN;
     if (!Number.isSafeInteger(row.suggestion_id) ||
         !Number.isSafeInteger(row.horizon_days) ||
-        row.coverage_status !== "complete" ||
-        typeof row.direction_success !== "boolean") continue;
+        !Number.isFinite(recommendationTime)) {
+      throw new GatewayRepositoryError("INVALID_PERSISTED_DATA");
+    }
     const suggestionId = row.suggestion_id as number;
     const horizon = row.horizon_days as number;
-    if (!longestOutcome.has(suggestionId)) orderedRecommendationIds.push(suggestionId);
     const prior = longestOutcome.get(suggestionId);
+    if (prior && prior.recommendationTime !== recommendationTime) {
+      throw new GatewayRepositoryError("INVALID_PERSISTED_DATA");
+    }
     if (!prior || horizon > prior.horizon) {
-      longestOutcome.set(suggestionId, { horizon, directionSuccess: row.direction_success });
+      longestOutcome.set(suggestionId, {
+        horizon,
+        directionSuccess: row.direction_success,
+        recommendationTime,
+      });
     }
   }
+  const orderedRecommendationIds = [...longestOutcome.entries()]
+    .sort(([leftId, left], [rightId, right]) =>
+      right.recommendationTime - left.recommendationTime || rightId - leftId
+    )
+    .map(([suggestionId]) => suggestionId);
   let losses = 0;
   for (const suggestionId of orderedRecommendationIds) {
     if (longestOutcome.get(suggestionId)!.directionSuccess) break;
@@ -1198,8 +1222,10 @@ export function createSupabaseGatewayRepository(
           "ticker,added,last_seen,days_relevant,reason,bucket_guess,promoted,promoted_on",
         ).order("last_seen", { ascending: false }).limit(20),
         client.from("suggestion_grades").select(
-          "suggestion_id,horizon_days,coverage_status,excess_return_pct,direction_success,graded_at",
-        ).order("graded_at", { ascending: false }).limit(150),
+          "suggestion_id,horizon_days,coverage_status,excess_return_pct,direction_success,graded_at,recommendation:suggestions!inner(ts)",
+        ).order("graded_at", { ascending: false })
+          .order("suggestion_id", { ascending: false })
+          .order("horizon_days", { ascending: false }).limit(150),
         client.from("owner_investment_plans").select(
           "id,ticker,bucket,amount,cadence,next_due_on,active,updated_at",
         ).eq("active", true).limit(21),

@@ -146,6 +146,16 @@ Deno.test("reviewed 2026 half-days stop the regular session at 13:00 New York", 
   }
 });
 
+Deno.test("intraday rejects a regular-state quote after an early close", () => {
+  assert(!quoteAllowedForPhase(
+    "intraday",
+    quote("2026-11-27T18:00:00.000Z", "REGULAR"),
+    new Date("2026-11-27T18:01:00.000Z"),
+    holidays,
+    20,
+  ), "a 13:00 regular-state quote remained actionable after the 13:00 close");
+});
+
 Deno.test("market session checks fail closed outside maintained calendar coverage", () => {
   const now = new Date("2027-01-04T17:00:00.000Z");
   assert(!isRegularSession(now, []), "unreviewed 2027 session was accepted");

@@ -137,6 +137,7 @@ export function quoteAllowedForPhase(
   ) return false;
 
   const regular = isRegularSession(now, holidays);
+  if (phase === "intraday" && !regular) return false;
   if (phase === "intraday" || (phase === "on-demand" && regular)) {
     const ageMinutes = (now.valueOf() - quoteInstant.valueOf()) / 60_000;
     return quote.market_state === "REGULAR" && ageMinutes >= 0 &&

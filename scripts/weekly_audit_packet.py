@@ -103,7 +103,11 @@ def main():
         database_url = weekly_audit_database_url(os.environ, project_ref)
     except ValueError as error:
         raise SystemExit(str(error)) from error
-    with psycopg.connect(database_url, row_factory=dict_row) as connection:
+    with psycopg.connect(
+        database_url,
+        sslmode="verify-full",
+        row_factory=dict_row,
+    ) as connection:
         inputs = read_weekly_audit_inputs(connection)
     packet = build_packet(
         **inputs,

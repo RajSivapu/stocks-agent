@@ -3,6 +3,11 @@ import json
 from pathlib import Path
 import re
 
+from scripts.verify_owner_dashboard_role import (
+    EXPECTED_COLUMNS,
+    evaluate_dashboard_privileges,
+)
+
 
 ROOT = Path(__file__).resolve().parents[1]
 SQL_FILES = (
@@ -505,6 +510,74 @@ def test_weekly_audit_read_scope_is_column_limited_and_has_no_write_authority():
     for forbidden in ("GRANT INSERT", "GRANT UPDATE", "GRANT DELETE", "GRANT EXECUTE"):
         assert forbidden not in sql
     assert sql in schema
+
+
+def test_weekly_audit_columns_are_exactly_admitted_by_the_dashboard_verifier():
+    weekly_columns = {
+        "suggestion_grades": {
+            "id", "suggestion_id", "graded_at", "result", "price_then", "price_later",
+            "horizon_days", "note", "benchmark_ticker", "stock_return_pct",
+            "benchmark_return_pct", "excess_return_pct", "mfe_pct", "mae_pct",
+            "entry_hit_at", "stop_hit_at", "target_hit_at", "invalidation_hit_at",
+            "coverage_status", "horizon_sessions", "policy_version", "final_action",
+            "direction_success",
+        },
+        "lessons": {"id", "entry_date", "category", "content", "created_at"},
+        "daily_snapshots": {
+            "id", "snap_date", "ticker", "close", "day_move_pct", "rsi14", "sma50",
+            "sma200", "macd_hist",
+        },
+    }
+    for table, columns in weekly_columns.items():
+        assert EXPECTED_COLUMNS[table] == columns
+
+    def snapshot():
+        return {
+            "role": {
+                "rolname": "stock_agent_dashboard_runtime", "rolcanlogin": True,
+                "rolsuper": False, "rolcreatedb": False, "rolcreaterole": False,
+                "rolbypassrls": False,
+            },
+            "memberships": ["stock_agent_dashboard"],
+            "schema_privileges": {"USAGE"},
+            "table_privileges": {},
+            "column_privileges": {
+                table: set(columns) for table, columns in EXPECTED_COLUMNS.items()
+            },
+            "application_function_execute": [],
+            "owned_objects": [],
+            "policies": {
+                table: {"cmd": "SELECT", "roles": ["stock_agent_dashboard"]}
+                for table in EXPECTED_COLUMNS
+            },
+        }
+
+    assert evaluate_dashboard_privileges(snapshot())["write_privileges"] == 0
+    for table, column, operation in (
+        ("lessons", "content", "missing"),
+        ("daily_snapshots", "private_note", "extra"),
+    ):
+        drifted = snapshot()
+        if operation == "missing":
+            drifted["column_privileges"][table].remove(column)
+        else:
+            drifted["column_privileges"][table].add(column)
+        try:
+            evaluate_dashboard_privileges(drifted)
+        except RuntimeError as error:
+            assert "allowlist" in str(error)
+        else:
+            raise AssertionError(f"dashboard verifier accepted {operation} {table} column")
+
+
+def test_loss_streak_query_has_authoritative_chronology_and_stable_tie_breakers():
+    source = (ROOT / "supabase/functions/market-briefing-gateway/_shared/repository.ts").read_text()
+    compact = re.sub(r"\s+", "", source)
+    assert "recommendation:suggestions!inner(ts)" in compact
+    assert (
+        ').order("graded_at",{ascending:false}).order("suggestion_id",{ascending:false})'
+        '.order("horizon_days",{ascending:false}).limit(150)'
+    ) in compact
 
 
 def test_ci_installs_the_complete_python_lock_with_hash_enforcement():

@@ -1,6 +1,7 @@
 from copy import deepcopy
 
 from lib.weekly_audit import build_packet
+import scripts.weekly_audit_packet as weekly_packet
 from scripts.weekly_audit_packet import read_weekly_audit_inputs, weekly_audit_database_url
 
 
@@ -257,3 +258,32 @@ def test_weekly_audit_database_url_accepts_only_the_scoped_runtime_role():
             pass
         else:
             raise AssertionError("weekly audit accepted a non-scoped database role")
+
+
+def test_weekly_audit_connection_verifies_the_server_certificate_and_hostname(monkeypatch):
+    project_ref = "abcdefghijklmnopqrst"
+    scoped = (
+        "postgresql://stock_agent_dashboard_runtime.abcdefghijklmnopqrst:password-longer-than-24"
+        "@aws-0-us-east-1.pooler.supabase.com:5432/postgres"
+    )
+    class Connection(_ReadOnlyConnection):
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+    connection = Connection()
+    observed = {}
+
+    def connect(conninfo, **kwargs):
+        observed.update(conninfo=conninfo, **kwargs)
+        return connection
+
+    monkeypatch.setenv("SUPABASE_PROJECT_REF", project_ref)
+    monkeypatch.setenv("DASHBOARD_DATABASE_URL", scoped)
+    monkeypatch.setattr(weekly_packet.psycopg, "connect", connect)
+
+    assert weekly_packet.main() == 0
+    assert observed["conninfo"] == scoped
+    assert observed["sslmode"] == "verify-full"
