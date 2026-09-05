@@ -582,6 +582,7 @@ export function createDashboardRepository(
             value: portfolioData.totals.value,
             cost_basis: portfolioData.totals.cost_basis,
             unrealized_amount: portfolioData.totals.unrealized_amount,
+            incomplete: portfolioData.summary.incomplete,
             holdings: portfolioData.holdings,
             data_as_of: portfolioResult.dataAsOf,
             market_state: portfolioResult.marketState,

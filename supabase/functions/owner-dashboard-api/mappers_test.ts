@@ -8,6 +8,7 @@ import {
   mapPublicationReceipt,
   mapRun,
 } from "./mappers.ts";
+import type { PortfolioView, TodayView } from "../../../packages/dashboard-contracts/src/index.ts";
 
 function assertEquals(actual: unknown, expected: unknown): void {
   if (JSON.stringify(actual) !== JSON.stringify(expected)) {
@@ -113,6 +114,17 @@ Deno.test("missing cost basis remains unavailable instead of becoming zero", () 
   assertEquals(view.summary.incomplete, true);
 });
 
+Deno.test("public portfolio contracts represent unavailable basis and incomplete summaries", () => {
+  const view: PortfolioView = mapPortfolio([{ ticker: "ABC", shares: "3", price: "105", price_freshness: "fresh" }]);
+  const unavailableBasis: PortfolioView["totals"]["cost_basis"] = null;
+  const todayBasis: TodayView["portfolio"]["cost_basis"] = null;
+  const todayIncomplete: TodayView["portfolio"]["incomplete"] = view.summary.incomplete;
+  assertEquals(view.totals.cost_basis, unavailableBasis);
+  assertEquals(view.totals.cost_basis, todayBasis);
+  assertEquals(view.summary, { costBasis: null, unrealizedProfit: null, incomplete: true });
+  assertEquals(todayIncomplete, true);
+});
+
 Deno.test("a quote without validated freshness remains unavailable", () => {
   const view = mapPortfolio([{ ticker: "ABC", shares: "3", avg_cost: "100", current_price: "105" }]);
   assertEquals(view.holdings[0]?.freshness, "unavailable");
@@ -125,6 +137,36 @@ Deno.test("unsafe display totals are unavailable and incomplete", () => {
   assertEquals(view.summary.costBasis, null);
   assertEquals(view.summary.unrealizedProfit, null);
   assertEquals(view.summary.incomplete, true);
+});
+
+for (const field of ["shares", "avg_cost", "price"] as const) {
+  for (const invalid of ["-1", "0"]) {
+    Deno.test(`invalid holding ${field}=${invalid} cannot produce complete accounting`, () => {
+      const view = mapPortfolio([
+        { ticker: "GOOD", shares: "2", avg_cost: "100", price: "110", price_freshness: "fresh" },
+        { ticker: "BAD", shares: "3", avg_cost: "100", price: "105", price_freshness: "fresh", [field]: invalid },
+      ]);
+      assertEquals(view.summary.incomplete, true);
+      assertEquals(view.summary.unrealizedProfit, null);
+      assertEquals(view.totals.unrealized_amount, null);
+      assertEquals(view.holdings[1]?.unrealized_amount, null);
+      if (field === "shares" || field === "avg_cost") {
+        assertEquals(view.summary.costBasis, null);
+        assertEquals(view.totals.cost_basis, null);
+      }
+      if (field === "shares" || field === "price") {
+        assertEquals(view.totals.value, null);
+        assertEquals(view.holdings[1]?.value, null);
+      }
+      if (field === "price") assertEquals(view.holdings[1]?.price, null);
+    });
+  }
+}
+
+Deno.test("valid positive holdings retain a negative unrealized profit", () => {
+  const view = mapPortfolio([{ ticker: "ABC", shares: "3", avg_cost: "100", price: "90", price_freshness: "fresh" }]);
+  assertEquals(view.summary, { costBasis: 300, unrealizedProfit: -30, incomplete: false });
+  assertEquals(view.holdings[0]?.unrealized_amount, "-30");
 });
 
 Deno.test("publication errors are never forwarded as suppression copy", () => {

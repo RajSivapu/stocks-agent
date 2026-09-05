@@ -78,7 +78,9 @@ function fixed(value: unknown): bigint | null {
   const suppliedFraction = match[3] ?? "";
   const fraction = suppliedFraction.padEnd(36, "0");
   const result = BigInt(whole) * SCALE + BigInt(fraction || "0");
-  return match[1] === "-" ? -result : result;
+  // Open positions and their acquisition/quote prices must be strictly positive.
+  // Signed unrealized returns are derived after validating these inputs.
+  return match[1] === "-" || result <= 0n ? null : result;
 }
 
 function decimal(value: bigint): string {
@@ -129,7 +131,7 @@ function holding(row: Row): HoldingView {
     opened_at: text(row.opened_at, 40),
     stop: text(row.stop, 80),
     target: text(row.target, 80),
-    price: freshness === "fresh" ? text(row.price ?? row.current_price, 80) : null,
+    price: freshness === "fresh" && price !== null ? text(row.price ?? row.current_price, 80) : null,
     price_as_of: text(row.price_as_of, 40),
     price_source: text(row.price_source, 120),
     market_state: marketState,
@@ -145,9 +147,7 @@ export function mapPortfolio(
   holdingRows: readonly Row[],
   planRows: readonly Row[] = [],
   transactionRows: readonly Row[] = [],
-): PortfolioView & {
-  summary: { costBasis: number | null; unrealizedProfit: number | null; incomplete: boolean };
-} {
+): PortfolioView {
   const rawHoldings = holdingRows.slice(0, 100);
   const holdings = rawHoldings.map(holding);
   const holdingValues = rawHoldings.map((row) => {
@@ -204,7 +204,7 @@ export function mapPortfolio(
     plans,
     transactions: mapTransactions(transactionRows),
     totals: {
-      cost_basis: basisComplete ? decimal(costBasis) : null as unknown as string,
+      cost_basis: basisComplete ? decimal(costBasis) : null,
       value: complete ? decimal(totalValue) : null,
       unrealized_amount: !summaryIncomplete ? decimal(totalValue - costBasis) : null,
     },

@@ -31,7 +31,7 @@ const today: TodayView = {
   boundaries,
   attention: [{ id: "risk", severity: "review", title: "VTI stop distance", detail: "Review persisted risk level.", data_as_of: "2026-09-03T18:00:00.000Z", destination: "/portfolio" }],
   latest_run: null,
-  portfolio: { value: "2200", cost_basis: "2000", unrealized_amount: "200", holdings: [], data_as_of: null, market_state: "unknown", price_sources: [] },
+  portfolio: { value: "2200", cost_basis: "2000", unrealized_amount: "200", incomplete: false, holdings: [], data_as_of: null, market_state: "unknown", price_sources: [] },
   market_summary: "Mixed close; small caps lagged.",
   entry_zones: [],
   companion: null,
@@ -51,6 +51,7 @@ it("portfolio omits unsupported market value and labels the recurring reminder",
     plans: [{ id: "plan", ticker: "VTI", amount: "100", cadence: "monthly", next_due_on: "2026-10-01", due_day: 1, active: true }],
     transactions: [],
     totals: { cost_basis: "200", value: null, unrealized_amount: null },
+    summary: { costBasis: 200, unrealizedProfit: null, incomplete: true },
     comparison_availability: "structured_companion",
     latest_intelligence_run_id: null,
   };
@@ -60,19 +61,20 @@ it("portfolio omits unsupported market value and labels the recurring reminder",
 });
 
 it("labels closed-session prices with their receipt time and source", () => {
-  const holding = {
+  const holding: PortfolioView["holdings"][number] = {
     ticker: "VTI", shares: "2", average_cost: "100", bucket: "core", opened_at: null,
     stop: "95", target: null, price: "110", price_as_of: "2026-09-03T20:00:00.000Z",
     price_source: "yahoo-chart", market_state: "as_of_close", value: "220",
     unrealized_amount: "20", unrealized_percent: "10", weight_percent: "100", freshness: "fresh",
-  } as unknown as PortfolioView["holdings"][number];
-  const portfolio = {
+  };
+  const portfolio: PortfolioView = {
     holdings: [holding], plans: [], transactions: [],
     totals: { cost_basis: "200", value: "220", unrealized_amount: "20" },
+    summary: { costBasis: 200, unrealizedProfit: 20, incomplete: false },
     comparison_availability: "structured_companion",
     latest_intelligence_run_id: null,
-  } as PortfolioView;
-  const todayWithClose = {
+  };
+  const todayWithClose: TodayView = {
     ...today,
     portfolio: {
       ...today.portfolio,
@@ -82,7 +84,7 @@ it("labels closed-session prices with their receipt time and source", () => {
       market_state: "as_of_close",
       price_sources: ["yahoo-chart"],
     },
-  } as unknown as TodayView;
+  };
 
   const { rerender } = render(<PortfolioPage data={portfolio} />);
   expect(screen.getByText(/as of close/i)).toBeVisible();
@@ -109,6 +111,7 @@ it("renders policy evidence separately from analyst and checker", () => {
 it("portfolio absorbs today's owner summary and companion context", () => {
   const portfolio: PortfolioView = {
     holdings: [], plans: [], transactions: [], totals: { cost_basis: "2000", value: "2200", unrealized_amount: "200" },
+    summary: { costBasis: 2000, unrealizedProfit: 200, incomplete: false },
     comparison_availability: "structured_companion", latest_intelligence_run_id: "7d834dbd-75bb-4313-931f-09732f003932",
   };
   const companion: CompanionView = {

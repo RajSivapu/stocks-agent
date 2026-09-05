@@ -1,4 +1,5 @@
 import { createDashboardRepository } from "./repository.ts";
+import type { TodayView } from "../../../packages/dashboard-contracts/src/index.ts";
 
 const TEST_DATABASE_URL =
   "postgresql://stock_agent_dashboard_runtime.projectref:dashboard-password-longer-than-24@aws-0-us-east-1.pooler.supabase.com:5432/postgres";
@@ -188,6 +189,21 @@ Deno.test("today excludes entry zones that are no longer valid", async () => {
   }), () => new Date("2026-09-03T18:00:00.000Z"));
   const result = await repository.read({ name: "today" });
   assertEquals((result.data as { entry_zones: Array<{ ticker: string }> }).entry_zones.map((item) => item.ticker), ["LIVE"]);
+});
+
+Deno.test("today preserves unavailable portfolio basis and incomplete accounting", async () => {
+  const repository = createDashboardRepository(TEST_DATABASE_URL, () => ({
+    query: (text: string) => Promise.resolve(text.includes("FROM public.holdings h") ? [{
+      ticker: "VTI", shares: "1", avg_cost: "-100", bucket: "core", price: "110",
+      price_as_of: "2026-09-03T17:55:00.000Z", price_source: "finnhub",
+      price_market_state: "REGULAR",
+    }] : []),
+  }), () => new Date("2026-09-03T18:00:00.000Z"));
+  const result = await repository.read({ name: "today" });
+  const { portfolio } = result.data as TodayView;
+  assertEquals(portfolio.cost_basis, null);
+  assertEquals(portfolio.unrealized_amount, null);
+  assertEquals(portfolio.incomplete, true);
 });
 
 Deno.test("run detail marks a missing write-count receipt as incomplete", async () => {

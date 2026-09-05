@@ -3979,6 +3979,9 @@ SET search_path = pg_catalog
 AS $$
 DECLARE
   v_command public.portfolio_commands%ROWTYPE;
+  v_holding public.holdings%ROWTYPE;
+  v_has_holding BOOLEAN;
+  v_current_shares NUMERIC;
   v_executed_on DATE;
   v_latest_transaction_on DATE;
   v_result JSONB;
@@ -3999,14 +4002,37 @@ BEGIN
   END IF;
 
   IF v_command.status = 'pending' AND v_command.operation IN ('buy', 'sell') THEN
+    -- Preserve prerequisite receipts before assigning a chronology rejection.
+    IF v_command.expires_at <= now() THEN
+      RETURN public.apply_portfolio_command_without_chronology(p_command_id, p_chat_id, p_user_id);
+    END IF;
+
+    -- Hold the same ticker and holding locks through eligibility, chronology,
+    -- and the delegated mutation; the legacy function can re-enter these locks.
+    PERFORM pg_advisory_xact_lock(hashtextextended(v_command.ticker, 0));
+    SELECT * INTO v_holding
+    FROM public.holdings
+    WHERE ticker = v_command.ticker
+    FOR UPDATE;
+    v_has_holding := FOUND;
+    v_current_shares := CASE WHEN v_has_holding THEN v_holding.shares ELSE 0 END;
+
+    IF v_current_shares IS DISTINCT FROM v_command.expected_shares THEN
+      RETURN public.apply_portfolio_command_without_chronology(p_command_id, p_chat_id, p_user_id);
+    END IF;
+    IF v_command.operation = 'sell' AND (NOT v_has_holding OR v_command.qty > v_holding.shares) THEN
+      RETURN public.apply_portfolio_command_without_chronology(p_command_id, p_chat_id, p_user_id);
+    END IF;
+    IF v_command.operation = 'buy' AND NOT v_has_holding AND v_command.bucket IS NULL THEN
+      RETURN public.apply_portfolio_command_without_chronology(p_command_id, p_chat_id, p_user_id);
+    END IF;
+
     v_executed_on := COALESCE(
       v_command.executed_on,
       (CURRENT_TIMESTAMP AT TIME ZONE 'America/Chicago')::date
     );
     IF v_executed_on >= DATE '2000-01-01'
         AND v_executed_on <= (CURRENT_TIMESTAMP AT TIME ZONE 'America/Chicago')::date THEN
-      -- Use the same ticker lock as the state mutation, so the latest-date check cannot race it.
-      PERFORM pg_advisory_xact_lock(hashtextextended(v_command.ticker, 0));
       SELECT MAX(COALESCE(executed_on, (ts AT TIME ZONE 'America/Chicago')::date))
       INTO v_latest_transaction_on
       FROM public.transactions

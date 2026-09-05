@@ -1,4 +1,5 @@
 import ast
+import re
 from copy import deepcopy
 from pathlib import Path
 from types import SimpleNamespace
@@ -345,11 +346,39 @@ def test_transaction_chronology_rejects_late_ledger_entries_without_rewriting_ho
     assert "v_executed_on < v_latest_transaction_on" in migration
     assert "'code', 'TRANSACTION_OUT_OF_ORDER'" in migration
     assert "'reason', 'transaction execution date precedes the recorded ledger; reconciliation is required'" in migration
-    assert migration.index("v_executed_on < v_latest_transaction_on") < migration.index(
+    assert migration.index("v_executed_on < v_latest_transaction_on") < migration.rindex(
         "RETURN public.apply_portfolio_command_without_chronology"
     )
     assert "v_command.status = 'rejected'" in migration
     assert "v_command.result->>'code' = 'TRANSACTION_OUT_OF_ORDER'" in migration
+
+
+@pytest.mark.parametrize("prerequisite", [
+    "v_command.expires_at <= now()",
+    "v_current_shares IS DISTINCT FROM v_command.expected_shares",
+    "v_command.operation = 'sell' AND (NOT v_has_holding OR v_command.qty > v_holding.shares)",
+    "v_command.operation = 'buy' AND NOT v_has_holding AND v_command.bucket IS NULL",
+])
+def test_chronology_defers_ineligible_commands_to_legacy_receipts(prerequisite):
+    migration = TRANSACTION_CHRONOLOGY.read_text()
+    # Delegation retains the legacy expiry / holding-changed / invalid-sell
+    # receipt (and new-buy bucket error) rather than reclassifying the command.
+    guard = re.search(
+        r"IF " + re.escape(prerequisite) + r" THEN\s*"
+        r"RETURN public\.apply_portfolio_command_without_chronology"
+        r"\(p_command_id, p_chat_id, p_user_id\);\s*END IF;",
+        migration,
+    )
+    assert guard is not None, f"missing legacy prerequisite delegation: {prerequisite}"
+    assert guard.end() < migration.index("SELECT MAX(COALESCE(executed_on")
+    assert migration.index("v_command.status = 'pending' AND v_command.operation IN ('buy', 'sell')") < guard.start()
+    if prerequisite == "v_command.expires_at <= now()":
+        assert guard.end() < migration.index("pg_advisory_xact_lock")
+    else:
+        assert migration.index("pg_advisory_xact_lock") < guard.start()
+        assert migration.index("FROM public.holdings") < guard.start()
+        assert "v_current_shares := CASE WHEN v_has_holding THEN v_holding.shares ELSE 0 END;" in migration
+        assert "WHERE ticker = v_command.ticker\n    FOR UPDATE;" in migration
 
 
 def test_portfolio_command_verifier_exercises_the_authoritative_chronology_fixture():
