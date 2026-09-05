@@ -83,7 +83,15 @@ platform identity/version, and an authenticated snapshot hash. Every attempted m
 marked before transport. Recovery first reads each marked component and restores only proven
 differences, in reverse order, then reads back again. An attempted write that failed before mutation
 never causes restore/delete/unset. Supabase redeployment allocates a new version: exact prior
-bytes/configuration are restored, while both original and restoration identities remain in evidence.
+bytes/configuration and the existing function identity are preserved; only the version may advance.
+The captured original and verified restoration versions remain in evidence. An attempted write is
+not ownership proof: current state must equal the exact retained candidate/assigned snapshot or
+pass the reviewed adapter's `attest_recovery(name, prior, candidate, current)` contract before a
+restore/delete/unset. Unknown drift retains `recovery_required` and is never overwritten. Native
+role/function proof requires the complete candidate and safe identities/versions; secret proof
+requires every managed value and presence to come from the encrypted prior/candidate pair. Site
+preflight requires a callable attestation capability before capture/mutation; its proof must bind
+the exact candidate identity or attest its platform-specific partial/lost-response state.
 The final verifier independently reads protected immutable artifacts for all three Edge functions
 and the owner Site, requires platform identities and byte parity, and checks predeployment capture.
 

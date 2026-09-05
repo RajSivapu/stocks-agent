@@ -141,3 +141,19 @@ membership options, quoted/per-database settings, and committed encrypted journa
 Stateful Supabase command tests cover all three active downloads and metadata races, upgrades,
 first installs, secret digest/absence round trips, and six-component orchestration failures.
 An independent review of this fix commit and every consolidated/production gate remain pending.
+
+### Track C fix round 2 — recovery ownership and identity
+
+Review of `69b88b0830d07c4fc688e37f2340b72584fb47c0` returned two Important findings: an
+attempt flag did not prove ownership of current drift, and function restoration permitted a
+foreign identity. Recovery now requires an exact retained candidate/assigned snapshot or explicit
+native attestation; unknown state remains `recovery_required` with no restore/delete/unset.
+Native proofs require complete atomic role/function candidates, stable existing function IDs,
+safe version allocation, and per-key prior/candidate secret values and presence for partial writes.
+Both already-restored and post-restore verification preserve the prior function ID. Sites preflight
+requires an attestation capability, and the actual Site transport/publication remains unimplemented.
+
+Observed red: 15 ownership/identity regressions, 14 missing native-proof cases, and one missing Site
+proof-capability guard. Final affected gate: **299 passed** (51 native, 81 recovery-engine, 167
+affected deployment/verifier/workflow/recovery tests). Compilation and diff checks passed. No full
+suite or live operation ran. Independent review of this fix and all production gates remain pending.

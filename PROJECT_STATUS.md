@@ -26,8 +26,12 @@ artifacts. The configured private Site manifest is unchanged. The repository-nat
 implements transactional runtime-role restoration, recoverable managed-secret rotation, exact
 downloaded Edge bytes/configuration, and committed encrypted recovery journals. Recovery reads
 current state first and never restores/deletes/unsets an attempted component that did not change.
+Unknown drift is not treated as release-owned: writes require exact retained candidate state or
+explicit native attestation, including per-key secret value/presence proof. Unknown state keeps the
+recovery journal unresolved without overwriting another actor's change.
 Supabase restoration preserves prior bytes/configuration and records both the original captured
-identity and the newly allocated restoration version; it does not resurrect the old version number.
+identity and the newly allocated restoration version; the existing function ID must stay exact.
+It does not resurrect the old version number or accept a foreign ID with matching bytes.
 Final Astra findings 3 and 4 are locally implemented. Finding 5 remains open only at the reviewed
 Sites transport and immutable four-artifact publication/receipt integration. The native factory is
 I/O-free and the missing Sites capability still blocks production before mutation. Focused local

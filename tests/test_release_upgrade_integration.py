@@ -85,13 +85,15 @@ class Platform:
     def restore(self, name, prior):
         self.mutations.append("restore:" + name)
         self.state[name] = copy.deepcopy(prior)
+    def attest_recovery(self, name, prior, candidate, current): return current == candidate
 
 
 @pytest.mark.parametrize("boundary", ["preflight", *COMPONENTS])
 @pytest.mark.parametrize("absent", [(), COMPONENTS])
 def test_failure_after_each_mutation_restores_only_attempted_components(tmp_path, boundary, absent):
     release = module(); platform = Platform(absent)
-    candidate = {name: {**copy.deepcopy(prior), "exists": True, "identity": name + "-v4", "version": "4",
+    candidate = {name: {**copy.deepcopy(prior), "exists": True,
+                        "identity": prior["identity"] if name in release.FUNCTIONS and prior["exists"] else name + "-v4", "version": "4",
                         "files": {"index": "candidate"}, "values": {"credential": "new-secret"}}
                  for name, prior in platform.state.items()}
     journal = {}
@@ -146,6 +148,84 @@ def test_recovery_retry_does_not_redeploy_already_restored_function_version():
     assert platform.mutations == []
     assert journal["components"][name]["restoration"] == {
         "original_identity": prior["identity"], "original_version": "3", "identity": prior["identity"], "version": "5"}
+
+
+@pytest.mark.parametrize("absent", [(), COMPONENTS])
+@pytest.mark.parametrize("target", COMPONENTS)
+def test_unrelated_drift_after_prewrite_failure_is_never_restored(absent, target):
+    release = module(); platform = Platform(absent)
+    candidates = copy.deepcopy(platform.state)
+    candidates[target] = {**candidates[target], "exists": True, "identity": target + "-candidate", "version": "4",
+                          "files": {"index": "candidate"}, "values": {"credential": "candidate"}}
+    unrelated = {**copy.deepcopy(candidates[target]), "identity": target + "-unrelated", "version": "9",
+                 "files": {"index": "unrelated"}, "values": {"credential": "unrelated"}}
+    journal = {}
+    def persist(value): journal.clear(); journal.update(copy.deepcopy(value))
+    def fail_before_write(name, _candidate):
+        platform.state[name] = copy.deepcopy(unrelated)  # separate actor's write, not this release
+        raise RuntimeError("prewrite failure")
+    platform.apply = fail_before_write
+    with pytest.raises(RuntimeError, match="recovery remains incomplete"):
+        release.execute_release(platform, candidates, persist=persist)
+    assert platform.state[target] == unrelated
+    assert platform.mutations == []
+    assert journal["status"] == "recovery_required" and journal["components"][target]["changed"] is True
+
+
+def recovery_journal(platform, name, candidate):
+    release = module()
+    return {"format": 1, "components": {component: {"changed": component == name,
+        "prior": copy.deepcopy(snapshot), "prior_sha256": hashlib.sha256(release.canonical(snapshot)).hexdigest(),
+        **({"candidate": copy.deepcopy(candidate)} if component == name else {})}
+        for component, snapshot in platform.original.items()}}
+
+
+def test_foreign_identity_with_prior_function_content_never_counts_as_restored():
+    release = module(); platform = Platform(); name = release.FUNCTIONS[0]
+    prior = platform.capture(name)
+    candidate = {**copy.deepcopy(prior), "version": "4", "files": {"index": "candidate"}}
+    platform.state[name] = {**copy.deepcopy(prior), "identity": "unrelated-id", "version": "5"}
+    journal = recovery_journal(platform, name, candidate)
+    with pytest.raises(RuntimeError, match="recovery remains incomplete"):
+        release.recover_components(platform, journal, persist=lambda _: None)
+    assert journal["status"] == "recovery_required" and journal["components"][name]["changed"] is True
+    assert platform.mutations == [] and platform.state[name]["identity"] == "unrelated-id"
+
+
+def test_restore_result_with_foreign_function_identity_is_not_verified():
+    release = module(); platform = Platform(); name = release.FUNCTIONS[0]
+    prior = platform.capture(name)
+    candidate = {**copy.deepcopy(prior), "version": "4", "files": {"index": "candidate"}}
+    platform.state[name] = copy.deepcopy(candidate)
+    def restore(name, prior):
+        platform.state[name] = {**copy.deepcopy(prior), "identity": "unrelated-restore-id", "version": "5"}
+        return platform.capture(name)
+    platform.restore = restore
+    journal = recovery_journal(platform, name, candidate)
+    with pytest.raises(RuntimeError, match="recovery remains incomplete"):
+        release.recover_components(platform, journal, persist=lambda _: None)
+    assert journal["status"] == "recovery_required" and journal["components"][name]["changed"] is True
+
+
+def test_site_matching_candidate_bytes_without_identity_proof_cannot_be_restored():
+    release = module(); platform = Platform(); name = "owner-web-site"
+    prior = platform.capture(name)
+    candidate = {**copy.deepcopy(prior), "identity": None, "version": None, "files": {"index": "candidate"}}
+    platform.state[name] = {**copy.deepcopy(candidate), "identity": "unknown-platform-id", "version": "4"}
+    journal = recovery_journal(platform, name, candidate)
+    with pytest.raises(RuntimeError, match="recovery remains incomplete"):
+        release.recover_components(platform, journal, persist=lambda _: None)
+    assert platform.mutations == [] and journal["components"][name]["changed"] is True
+
+
+def test_site_missing_recovery_attestation_blocks_before_capture_or_mutation():
+    release = module(); platform = Platform()
+    platform.project_id = release.site_configuration(ROOT)["project_id"]
+    platform.attest_recovery = None
+    platform.capture = lambda _name: pytest.fail("capture must not precede proof-capability preflight")
+    with pytest.raises(RuntimeError, match="Sites.*transport"):
+        release.require_site_transport(ROOT, adapter=platform)
+    assert platform.mutations == []
 
 
 def test_recovery_reader_attests_decision_and_comparison_tables():
@@ -218,7 +298,8 @@ def test_production_orchestration_uses_component_engine_and_recovers(tmp_path, a
     release = module(); platform = Platform(absent)
     platform.project_id = release.site_configuration(ROOT)["project_id"]
     platform.site = platform
-    platform.plan = lambda context: {name: {**copy.deepcopy(old), "exists": True, "identity": name + "-4", "version": "4",
+    platform.plan = lambda context: {name: {**copy.deepcopy(old), "exists": True,
+                                           "identity": old["identity"] if name in release.FUNCTIONS and old["exists"] else name + "-4", "version": "4",
                                            "files": {"index": "candidate"}, "values": {"credential": "new-secret"}}
                                      for name, old in platform.state.items()}
     retained = []

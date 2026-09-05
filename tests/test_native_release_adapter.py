@@ -234,6 +234,7 @@ class Site:
                 "files": {"index.html": base64.b64encode(b"candidate").decode()}}
     def apply(self, name, candidate): self.state = copy.deepcopy(candidate); return self.capture(name)
     def restore(self, name, prior): self.state = copy.deepcopy(prior)
+    def attest_recovery(self, name, prior, candidate, current): return current == candidate
     def release_receipt(self, candidate, prior, current, static):
         return {"candidate_sha": candidate, "captured_components": list(prior), "readback_components": list(current)}
 
@@ -356,3 +357,114 @@ def test_active_release_artifact_readback_is_exact_run_bound_and_does_not_weaken
     with pytest.raises(RuntimeError, match="protected candidate"): adapter.artifact(17)
     source = evidence.GitHubProductionDataSource("owner/repo", "p" * 20, None); source.candidate = "a" * 40
     with pytest.raises(RuntimeError, match="protected candidate"): source.artifact(17)
+
+
+def single_component_journal(name, prior, candidate):
+    return {"format": 1, "components": {component: {"changed": component == name,
+        "prior": copy.deepcopy(prior) if component == name else adapter_module().absent(),
+        "prior_sha256": hashlib.sha256(release.canonical(prior if component == name else adapter_module().absent())).hexdigest(),
+        **({"candidate": copy.deepcopy(candidate)} if component == name else {})}
+        for component in release.COMPONENTS}}
+
+
+def secret_snapshot(values):
+    return release.capture_managed_secrets([{"name": key, "digest": hashlib.sha256(value.encode()).hexdigest()}
+        for key, value in values.items()], values)
+
+
+@pytest.mark.parametrize("name", release.FUNCTIONS)
+@pytest.mark.parametrize("first_install", [False, True])
+def test_native_attestation_recovers_exact_candidate_after_lost_function_response(name, first_install):
+    platform = Supabase(); adapter = native(platform)
+    template = adapter.capture(name)
+    if first_install: del platform.functions[name]
+    prior = adapter.capture(name)
+    candidate = {**template, "identity": None, "version": None,
+                 "files": {"index.ts": base64.b64encode(b"candidate").decode()}}
+    # The command completed, but no apply return value/assigned ID was retained.
+    adapter.apply(name, candidate)
+    current = adapter.capture(name)
+    assert adapter.attest_recovery(name, prior, candidate, current) is True
+    journal = single_component_journal(name, prior, candidate)
+    release.recover_components(adapter, journal, persist=lambda _: None)
+    restored = adapter.capture(name)
+    assert journal["status"] == "rolled_back"
+    if first_install:
+        assert restored == prior and name not in platform.functions
+    else:
+        assert restored["identity"] == prior["identity"]
+        assert restored["version"] == "5" and restored["files"] == prior["files"]
+
+
+@pytest.mark.parametrize("drift", ["content", "identity", "version"])
+def test_native_function_attestation_rejects_non_candidate_drift(drift):
+    platform = Supabase(); adapter = native(platform); name = release.FUNCTIONS[0]
+    prior = adapter.capture(name)
+    candidate = {**copy.deepcopy(prior), "identity": None, "version": None,
+                 "files": {"index.ts": base64.b64encode(b"candidate").decode()}}
+    adapter.apply(name, candidate)
+    if drift == "content": platform.functions[name]["files"] = {"index.ts": b"unrelated"}
+    elif drift == "identity": platform.functions[name]["id"] = "foreign-id"
+    else: platform.functions[name]["version"] = 8
+    current = adapter.capture(name)
+    assert adapter.attest_recovery(name, prior, candidate, current) is False
+    before = len(platform.calls)
+    journal = single_component_journal(name, prior, candidate)
+    with pytest.raises(RuntimeError, match="recovery remains incomplete"):
+        release.recover_components(adapter, journal, persist=lambda _: None)
+    assert not any(command[4] in {"deploy", "delete", "set", "unset"} for command in platform.calls[before:])
+    assert journal["status"] == "recovery_required" and adapter.capture(name) == current
+
+
+@pytest.mark.parametrize("state", ["partial_set", "partial_unset", "foreign_value", "foreign_absence"])
+def test_native_secret_partial_proof_accepts_only_exact_prior_or_candidate_values_and_presence(state):
+    platform = Supabase()
+    first, second, third = release.MANAGED_SECRETS
+    prior_values = {first: "old-first", second: "old-second"}
+    candidate_values = {first: "new-first", third: "new-third"}
+    if state == "partial_unset":
+        prior_values[third] = "old-third"
+        candidate_values = {first: "new-first"}  # two removals; only one has completed
+    platform.secrets = copy.deepcopy(prior_values); adapter = native(platform)
+    prior = adapter.capture("dashboard-secrets"); candidate = secret_snapshot(candidate_values)
+    states = {"partial_set": {first: "new-first", second: "old-second"},
+              "partial_unset": {first: "new-first", second: "old-second"},
+              "foreign_value": {first: "foreign", second: "old-second"},
+              "foreign_absence": {second: "old-second"}}
+    current_values = states[state]; platform.secrets = copy.deepcopy(current_values)
+    current = secret_snapshot(current_values)
+    owned = state in {"partial_set", "partial_unset"}
+    assert adapter.attest_recovery("dashboard-secrets", prior, candidate, current) is owned
+    journal = single_component_journal("dashboard-secrets", prior, candidate)
+    before = len(platform.calls)
+    if owned:
+        release.recover_components(adapter, journal, persist=lambda _: None)
+        assert platform.secrets == prior_values and journal["status"] == "rolled_back"
+    else:
+        with pytest.raises(RuntimeError, match="recovery remains incomplete"):
+            release.recover_components(adapter, journal, persist=lambda _: None)
+        assert platform.secrets == current_values and journal["status"] == "recovery_required"
+        assert not any(command[4] in {"set", "unset"} for command in platform.calls[before:])
+
+
+def test_native_atomic_role_attestation_requires_complete_candidate_state(database):
+    platform, adapter = database_adapter(database)
+    with psycopg.connect(database, autocommit=True) as connection:
+        connection.execute("CREATE ROLE stock_agent_dashboard_runtime LOGIN PASSWORD 'test-password-at-least-24-characters'")
+    try:
+        prior = adapter.capture("runtime-role")
+        candidate = copy.deepcopy(prior); candidate["version"] = None
+        candidate["configuration"]["attributes"]["rolconnlimit"] = 7
+        deployed = adapter.apply("runtime-role", candidate)
+        assert adapter.attest_recovery("runtime-role", prior, candidate, deployed) is True
+        with psycopg.connect(database, autocommit=True) as connection:
+            connection.execute("ALTER ROLE stock_agent_dashboard_runtime CONNECTION LIMIT 9")
+        drift = adapter.capture("runtime-role")
+        assert adapter.attest_recovery("runtime-role", prior, candidate, drift) is False
+        journal = single_component_journal("runtime-role", prior, candidate)
+        with pytest.raises(RuntimeError, match="recovery remains incomplete"):
+            release.recover_components(adapter, journal, persist=lambda _: None)
+        assert adapter.capture("runtime-role") == drift
+    finally:
+        with psycopg.connect(database, autocommit=True) as connection:
+            connection.execute("DROP ROLE stock_agent_dashboard_runtime")

@@ -14,6 +14,7 @@ import importlib
 import importlib.util
 import json
 import os
+import re
 import sys
 from pathlib import Path
 from typing import Callable, Mapping, Protocol
@@ -26,12 +27,25 @@ FUNCTIONS = ("market-briefing-gateway", "owner-dashboard-api", "telegram-portfol
 ARTIFACTS = (*FUNCTIONS, "owner-web-site")
 COMPONENTS = ("runtime-role", "dashboard-secrets", *ARTIFACTS)
 MANAGED_SECRETS = ("DASHBOARD_ALLOWED_ORIGINS", "DASHBOARD_DATABASE_URL", "DASHBOARD_OWNER_USER_ID")
+CONTENT_KEYS = ("exists", "configuration", "files", "values")
 
 
 class ComponentTransport(Protocol):
     def capture(self, name: str) -> Mapping: ...
     def apply(self, name: str, candidate: Mapping) -> Mapping: ...
     def restore(self, name: str, prior: Mapping) -> None: ...
+
+
+def same_content(left: Mapping, right: Mapping) -> bool:
+    return all(left[key] == right[key] for key in CONTENT_KEYS)
+
+
+def restored_function_snapshot(prior: Mapping, current: Mapping) -> bool:
+    """A redeploy can advance a version, never replace an existing function ID."""
+    return (prior["exists"] and current["exists"] and current["identity"] == prior["identity"]
+            and same_content(prior, current)
+            and all(re.fullmatch(r"[1-9][0-9]*", str(value)) for value in (prior["version"], current["version"]))
+            and int(current["version"]) > int(prior["version"]))
 
 
 class EncryptedJournal:
@@ -100,7 +114,9 @@ def recover_components(transport: ComponentTransport, journal: dict, *, persist:
 
     A remote write can complete before the caller receives its response, so
     `changed` records an attempted write, durably before that write begins.
-    All recovery attempts continue even when an earlier restore fails.
+    Attempts do not prove ownership: only an exact bound candidate or a reviewed
+    adapter's explicit attestation authorizes recovery writes. Unknown drift is
+    retained for intervention. Other components still receive recovery checks.
     """
     if journal.get("format") != 1 or set(journal.get("components", {})) != set(COMPONENTS):
         raise RuntimeError("complete release recovery journal is required")
@@ -118,12 +134,24 @@ def recover_components(transport: ComponentTransport, journal: dict, *, persist:
             hydrate = getattr(transport, "hydrate_recovery", None)
             if callable(hydrate): hydrate(name, prior, entry.get("candidate"))
             current = validate_snapshot(name, transport.capture(name))
-            content_keys = ("exists", "configuration", "files", "values")
-            restored_content = name in FUNCTIONS and all(current[key] == prior[key] for key in content_keys)
+            restored_content = name in FUNCTIONS and restored_function_snapshot(prior, current)
             if current != prior and restored_content:
                 entry["restoration"] = {"original_identity": prior["identity"],
                     "original_version": prior["version"], "identity": current["identity"], "version": current["version"]}
             elif current != prior:
+                candidate = validate_snapshot(name, entry["candidate"], candidate=True)
+                bound = entry.get("deployed")
+                if bound is not None:
+                    bound = validate_snapshot(name, bound)
+                    if not same_content(candidate, bound):
+                        raise RuntimeError("bound deployment differs from attempted candidate")
+                    candidate = bound
+                if name in FUNCTIONS and prior["exists"] and current["identity"] != prior["identity"]:
+                    raise RuntimeError("existing function identity drift is not owned by this release")
+                attest = getattr(transport, "attest_recovery", None)
+                owned = (attest(name, prior, candidate, current) is True if callable(attest) else current == candidate)
+                if not owned:
+                    raise RuntimeError("current component is not proven to belong to this release")
                 restored = transport.restore(name, prior)
                 expected = prior
                 if restored is not None:
@@ -131,7 +159,7 @@ def recover_components(transport: ComponentTransport, journal: dict, *, persist:
                     # complete, independently read-back byte/config equivalent
                     # snapshot may supply that newly allocated identity.
                     restored = validate_snapshot(name, restored)
-                    if name not in FUNCTIONS or any(restored[key] != prior[key] for key in content_keys):
+                    if name not in FUNCTIONS or not restored_function_snapshot(prior, restored):
                         raise RuntimeError("restoration changed prior component content")
                     expected = restored
                     entry["restoration"] = {"original_identity": prior["identity"],
@@ -182,7 +210,13 @@ def execute_release(transport: ComponentTransport, candidates: Mapping, *, persi
             journal = pending
             deployed = validate_snapshot(name, transport.apply(name, candidates[name]))
             expected = {**candidates[name], "identity": deployed["identity"], "version": deployed["version"]}
+            if name in FUNCTIONS and prior[name]["exists"]:
+                expected["identity"] = prior[name]["identity"]
             verify_component_readback(name, expected, deployed)
+            # Retain assigned IDs before later steps can fail. A lost response
+            # instead requires platform-specific attestation of the candidate.
+            journal["components"][name]["deployed"] = copy.deepcopy(deployed)
+            persist(copy.deepcopy(journal))
             checkpoint(name)
             receipts.append(verify_component_readback(name, expected, transport.capture(name)))
         after_mutations()
@@ -240,7 +274,7 @@ def require_site_transport(repo_root: Path = ROOT, environment: Mapping | None =
     # native implementation can satisfy this contract; no env executable hook.
     if (adapter is None or isinstance(adapter, Mapping)
             or getattr(adapter, "project_id", None) != configuration["project_id"]
-            or any(not callable(getattr(adapter, name, None)) for name in ("capture", "apply", "restore"))):
+            or any(not callable(getattr(adapter, name, None)) for name in ("capture", "apply", "restore", "attest_recovery"))):
         raise RuntimeError("protected native Sites deployment/readback/recovery transport is unavailable; release blocked before mutation")
     if not inspect_current:
         return adapter
@@ -262,6 +296,9 @@ class SiteBoundTransport:
     def hydrate_recovery(self, name, prior, candidate):
         hydrate = getattr(self.provider(name), "hydrate_recovery", None)
         if callable(hydrate): hydrate(name, prior, candidate)
+    def attest_recovery(self, name, prior, candidate, current):
+        attest = getattr(self.provider(name), "attest_recovery", None)
+        return attest(name, prior, candidate, current) is True if callable(attest) else current == candidate
 
 
 def execute_protected_release(transport: ComponentTransport, candidates: Mapping, *, repo_root: Path,

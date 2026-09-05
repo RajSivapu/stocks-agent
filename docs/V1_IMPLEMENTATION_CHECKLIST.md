@@ -37,7 +37,7 @@ An owner-only personal stock agent that uses zero-incremental-cost data sources,
 
 - [x] 1. Persist only canonical policy-derived report prose, including suppressed reports
 - [x] 2. Use fresh reconciled cash with ledger invalidation; never spend legacy monthly budgets as cash
-- [x] 3. Make deployment upgrade-aware and restore exact prior component state — **concrete PostgreSQL/Supabase adapter and focused first-install/upgrade recovery tests complete; independent review pending**
+- [x] 3. Make deployment upgrade-aware and restore exact prior component state — **native recovery requires proven candidate/partial ownership and stable existing function IDs; focused tests complete, independent fix review pending**
 - [x] 4. Preserve already-applied migration bytes and move changes into additive migrations — **audited bytes restored; actual native-ledger PostgreSQL upgrade/retry passed**
 - [ ] 5. Deploy, verify, and recover every changed component, including Telegram and the owner web site — **all three native Edge paths implemented; reviewed Sites transport and immutable four-artifact publication/receipt integration remain open and preflight blocks before mutation**
 - [x] 6. Persist provider attempts before transport and reconcile crash uncertainty without duplicate calls

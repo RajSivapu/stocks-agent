@@ -30,7 +30,7 @@ from psycopg import sql
 from psycopg.rows import dict_row
 
 from scripts.release_components import (FUNCTIONS, MANAGED_SECRETS, ROOT, canonical,
-    capture_managed_secrets, require_site_transport, validate_snapshot)
+    capture_managed_secrets, require_site_transport, same_content, validate_snapshot)
 from scripts.provision_dashboard_runtime_role import RUNTIME_ROLE, PRIVILEGE_ROLE, runtime_url
 
 CLI = ["npx", "--yes", "supabase@2.116.0"]
@@ -312,6 +312,51 @@ class NativeReleaseAdapter:
     def hydrate_recovery(self, name, prior, candidate):
         if name == "dashboard-secrets":
             self._refresh_known_secrets(prior["values"], (candidate or {}).get("values", {}))
+
+    def attest_recovery(self, name, prior, candidate, current):
+        """Prove release-owned state; a changed flag alone is not authority.
+
+        Atomic writes require full candidate content. Supabase first installs
+        allocate version 1; upgrades preserve the function ID and advance once.
+        Secrets can partially set/unset, but every value AND presence must be
+        from the encrypted prior/candidate pair, with canonical digest metadata.
+        No Site proof is invented here; its reviewed transport owns that proof.
+        """
+        prior = validate_snapshot(name, prior)
+        candidate = validate_snapshot(name, candidate, candidate=True)
+        current = validate_snapshot(name, current)
+        if name == "dashboard-secrets":
+            missing = object()
+            if any(set(value["values"]) - set(MANAGED_SECRETS) for value in (prior, candidate, current)):
+                return False
+            for key in MANAGED_SECRETS:
+                value = current["values"].get(key, missing)
+                if value not in (prior["values"].get(key, missing), candidate["values"].get(key, missing)):
+                    return False
+            inventory = [{"name": key, "digest": hashlib.sha256(value.encode()).hexdigest()}
+                         for key, value in current["values"].items() if isinstance(value, str)]
+            expected = capture_managed_secrets(inventory, current["values"])
+            return current == expected
+        if name not in (*FUNCTIONS, "runtime-role") or not same_content(candidate, current):
+            return False
+        if not candidate["exists"]:
+            return current == candidate
+        if name == "runtime-role":
+            version = hashlib.sha256(canonical([candidate["configuration"], candidate["values"]])).hexdigest()
+            return (current["identity"] == RUNTIME_ROLE and candidate["identity"] in (None, RUNTIME_ROLE)
+                    and (not prior["exists"] or prior["identity"] == RUNTIME_ROLE)
+                    and current["version"] == version and candidate["version"] in (None, version))
+        if not re.fullmatch(r"[1-9][0-9]*", str(current["version"])):
+            return False
+        if candidate["identity"] is not None and current["identity"] != candidate["identity"]:
+            return False
+        if candidate["version"] is not None and current["version"] != candidate["version"]:
+            return False
+        if prior["exists"]:
+            return (current["identity"] == prior["identity"]
+                    and re.fullmatch(r"[1-9][0-9]*", str(prior["version"])) is not None
+                    and int(current["version"]) == int(prior["version"]) + 1)
+        return current["version"] == "1"
 
     def plan(self, context):
         require_site_transport(self.root, adapter=self.site)
