@@ -34,6 +34,12 @@ export function committedDeliveryUncertainText(committedText) {
   return `${text}\nTelegram acknowledgement is uncertain; the recorded change may already be visible in Supabase.`;
 }
 
+export function webhookFailureText(afterCommittedCommand) {
+  return afterCommittedCommand
+    ? null
+    : "Temporary recorder error. Nothing was changed; please try again shortly.";
+}
+
 function validTradeDate(value) {
   if (typeof value !== "string" || !ISO_DATE.test(value) || value < "2000-01-01") return false;
   const parsed = new Date(`${value}T00:00:00Z`);

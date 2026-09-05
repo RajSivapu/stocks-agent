@@ -738,8 +738,24 @@ export function createGatewayHandler(dependencies: GatewayDependencies) {
             delivery.parts,
             deps,
           );
+          // A different worker still owns the publication lease. Do not cache a
+          // transient pending receipt as the outer request's terminal response:
+          // once that lease expires, this same deterministic request must be able
+          // to re-enter and let the outbox mark the send uncertain without resend.
+          if (delivered.status === "pending") {
+            return response(409, {
+              ok: false,
+              code: "REPORT_DELIVERY_IN_PROGRESS",
+              publication_receipt: {
+                status: delivered.status,
+                telegram_message_ids: [],
+                retry_allowed: true,
+              },
+              telegram_message_ids: [],
+            });
+          }
           const failed = delivered.status === "failed" || delivered.status === "uncertain";
-          const retryAllowed = delivered.status === "failed" || delivered.status === "pending";
+          const retryAllowed = delivered.status === "failed";
           result = {
             ok: !failed,
             ...(failed ? { code: delivered.status === "uncertain" ? "DELIVERY_UNKNOWN" : "DELIVERY_FAILED" } : {}),

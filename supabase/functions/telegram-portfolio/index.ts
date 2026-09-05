@@ -9,7 +9,7 @@ import {
 } from "./alert-utils.mjs";
 import { parsePortfolioCommand } from "./parser.mjs";
 import { planPreviewText, planResultText, plansText, planTickerAllowed } from "./plan-utils.mjs";
-import { ownerMatches, parseCallbackData, resolveExecutionDate, resolvePlanDate, secureEqual } from "./webhook-utils.mjs";
+import { ownerMatches, parseCallbackData, resolveExecutionDate, resolvePlanDate, secureEqual, webhookFailureText } from "./webhook-utils.mjs";
 
 type TelegramMessage = {
   message_id: number;
@@ -50,6 +50,8 @@ type InvestmentPlan = {
   active: boolean;
   updated_at: string;
 };
+
+class CommittedAcknowledgementPersistenceError extends Error {}
 
 const mustEnv = (name: string): string => {
   const value = Deno.env.get(name);
@@ -420,16 +422,20 @@ async function handleCallback(updateId: number, callback: TelegramCallback) {
   }
   const receipt = data as Record<string, unknown>;
   const result = receipt.result as Record<string, unknown>;
-  const acknowledgement = String(receipt.acknowledgement_status);
-  if (acknowledgement === "delivered" || acknowledgement === "uncertain") return;
+  if (receipt.acknowledgement_claimed !== true) return;
+  const acknowledgementLeaseToken = String(receipt.acknowledgement_lease_token ?? "");
+  if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(acknowledgementLeaseToken)) {
+    throw new Error("Command acknowledgement lease is unavailable");
+  }
   const delivered = await acknowledgeCommittedCommand({ telegram, sendText, callback, result, resultText: callbackResultText(result) });
   const { error: finishError } = await supabase.rpc("finish_portfolio_command_acknowledgement", {
     p_command_id: parsed.commandId,
     p_telegram_update_id: updateId,
+    p_lease_token: acknowledgementLeaseToken,
     p_status: delivered.acknowledgement,
     p_error: delivered.acknowledgement === "uncertain" ? "TELEGRAM_ACKNOWLEDGEMENT_UNKNOWN" : null,
   });
-  if (finishError) throw new Error("Could not persist command acknowledgement receipt");
+  if (finishError) throw new CommittedAcknowledgementPersistenceError();
 }
 
 Deno.serve(async (request: Request): Promise<Response> => {
@@ -470,9 +476,10 @@ Deno.serve(async (request: Request): Promise<Response> => {
     if (update.message) await handleMessage(updateId as number, update.message);
     else if (update.callback_query) await handleCallback(updateId as number, update.callback_query);
     return jsonResponse(200, { ok: true });
-  } catch {
+  } catch (error) {
     try {
-      if (chatId !== undefined) await sendText(chatId, "Temporary recorder error. Nothing was changed; please try again shortly.");
+      const failureText = webhookFailureText(error instanceof CommittedAcknowledgementPersistenceError);
+      if (chatId !== undefined && failureText) await sendText(chatId, failureText);
     } catch {
       // Telegram delivery also failed; never expose credentials or internal errors.
     }

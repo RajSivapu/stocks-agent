@@ -20,6 +20,7 @@ VERIFIER = ROOT / "scripts" / "verify_market_intelligence_migration.py"
 TRANSACTION_CHRONOLOGY = ROOT / "sql" / "migrations" / "20260909_transaction_chronology.sql"
 PORTFOLIO_COMMAND_VERIFIER = ROOT / "scripts" / "verify_portfolio_command_rpc.py"
 DELIVERY_OUTBOX = ROOT / "sql" / "migrations" / "20260910_delivery_outbox.sql"
+COMMAND_ACKNOWLEDGEMENT_LEASE = ROOT / "sql" / "migrations" / "20260913_command_acknowledgement_lease.sql"
 
 TABLES = (
     "market_intelligence_runs",
@@ -304,7 +305,10 @@ def test_missing_report_probe_builder_removes_each_field_from_a_real_payload(fie
 def test_migration_is_idempotent_and_schema_mirrors_it_verbatim():
     migration = MIGRATION.read_text()
     schema = SCHEMA.read_text()
-    assert migration in schema
+    # Later additive migrations replace the request-claim function. The immutable
+    # ledger definition itself remains the same fresh-schema source of truth.
+    ledger = migration.split("CREATE OR REPLACE FUNCTION public.claim_market_gateway_request(", 1)[0]
+    assert ledger in schema
     assert "\\n+--" not in schema
     assert migration.count("CREATE TABLE IF NOT EXISTS public.") == len(TABLES)
     assert migration.count("DROP TRIGGER IF EXISTS") == len(TABLES)
@@ -506,9 +510,41 @@ def test_report_delivery_outbox_is_durable_and_schema_aligned():
     assert "telegram_message_ids=CASE WHEN p_status='delivered' THEN p_message_ids ELSE '[]'::jsonb END" in migration
 
 
-def test_fresh_schema_declares_reports_before_adding_the_report_outbox_foreign_key():
+def test_fresh_schema_declares_reports_before_report_outbox_rowtype_functions():
     sql = SCHEMA.read_text()
     reports = sql.index("CREATE TABLE IF NOT EXISTS public.market_reports")
-    outbox_foreign_key = sql.rindex("FOREIGN KEY (report_id) REFERENCES public.market_reports(id)")
-    assert reports < outbox_foreign_key
-    assert sql.count("market_report_publications_report_id_fkey") == 2
+    outbox = sql.index("CREATE TABLE IF NOT EXISTS public.market_report_publications")
+    report_rowtype = sql.index("DECLARE v_report public.market_reports%ROWTYPE")
+    outbox_foreign_key = sql.index("FOREIGN KEY (report_id) REFERENCES public.market_reports(id)", outbox)
+    assert outbox < reports < report_rowtype < outbox_foreign_key
+
+
+def test_report_recovery_claim_is_additive_and_matches_the_final_schema_routine():
+    migration = (ROOT / "sql" / "migrations" / "20260912_delivery_recovery_claims.sql").read_text()
+    schema = SCHEMA.read_text()
+    final_claim = schema[schema.rindex("CREATE OR REPLACE FUNCTION public.claim_market_gateway_request("):]
+    expected_recovery = "IF v_request.status='failed' AND p_operation='record_report' THEN"
+    for sql in (migration, final_claim):
+        assert expected_recovery in sql
+        assert "SET status='claimed',lease_token=v_lease" in sql
+        assert "attempt_count=attempt_count+1" in sql
+    assert "GRANT EXECUTE ON FUNCTION public.claim_market_gateway_request(UUID, TEXT, UUID) TO service_role;" in migration
+    assert "GRANT EXECUTE ON FUNCTION public.claim_market_gateway_request(UUID, TEXT, UUID) TO service_role;" in schema
+
+
+def test_command_acknowledgement_lease_is_durable_and_mirrored_after_command_functions():
+    migration = COMMAND_ACKNOWLEDGEMENT_LEASE.read_text()
+    schema = SCHEMA.read_text()
+    for sql in (migration, schema):
+        assert "ADD COLUMN IF NOT EXISTS lease_token UUID" in sql
+        assert "ADD COLUMN IF NOT EXISTS lease_expires_at TIMESTAMPTZ" in sql
+        assert "acknowledgement_claimed" in sql
+        assert "acknowledgement_lease_token" in sql
+        assert "ACKNOWLEDGEMENT_LEASE_EXPIRED" in sql
+        assert "p_lease_token UUID" in sql
+        assert "lease_token=p_lease_token" in sql
+        assert "lease_expires_at < statement_timestamp()" in sql
+        assert "DROP FUNCTION IF EXISTS public.finish_portfolio_command_acknowledgement(UUID, BIGINT, TEXT, TEXT);" in sql
+    apply = schema.rindex("CREATE OR REPLACE FUNCTION public.apply_portfolio_command_with_acknowledgement(")
+    cancel = schema.rindex("CREATE OR REPLACE FUNCTION public.cancel_portfolio_command(")
+    assert cancel < apply

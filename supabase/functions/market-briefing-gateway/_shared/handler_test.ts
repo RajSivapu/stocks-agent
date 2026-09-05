@@ -160,6 +160,31 @@ Deno.test("stored report delivery becomes uncertain after a send crash and same 
   assertEquals(retry.sent, []);
 });
 
+Deno.test("active report delivery leaves its gateway request retryable until its lease becomes uncertain", async () => {
+  const repo = new FakeRepository();
+  const payload = reportFixture();
+  const requestId = "00000000-0000-4000-8000-000000000054";
+  repo.reportDecisions = [approvedReportDecision(payload)];
+  repo.reportPublicationClaimable = false;
+  const first = makeHandler(repo);
+
+  const pending = await first.handler(request("record_report", payload, { requestId }));
+  assertEquals(pending.status, 409);
+  assertEquals(repo.claims.has(requestId), false);
+  assertEquals(first.sent, []);
+
+  repo.reportPublicationLeaseExpired = true;
+  const retry = makeHandler(repo);
+  const uncertain = await retry.handler(request("record_report", payload, { requestId }));
+  assertEquals(uncertain.status, 502);
+  assertEquals((await json(uncertain)).publication_receipt, {
+    status: "uncertain",
+    telegram_message_ids: [],
+    retry_allowed: false,
+  });
+  assertEquals(retry.sent, []);
+});
+
 Deno.test("report handler publishes an approved sizing-free urgent HOLD alert without caller trade prose", async () => {
   const repo = new FakeRepository();
   const payload = reportFixture();
@@ -594,6 +619,8 @@ class FakeRepository implements GatewayRepository {
   reportDecisions: ReportPolicyDecision[] = [];
   storedReport: unknown = null;
   reportPublication: PublicationReceipt | null = null;
+  reportPublicationClaimable = true;
+  reportPublicationLeaseExpired = false;
   loadReportDecisions(
     runId: string,
     packetId: string,
@@ -634,6 +661,21 @@ class FakeRepository implements GatewayRepository {
   claimReportPublication(idempotencyKey: string): Promise<PublicationClaim> {
     this.events.push("claim-report-publication");
     const receipt = this.reportPublication!;
+    if (this.reportPublicationLeaseExpired) {
+      this.reportPublication = { ...receipt, status: "uncertain", lease_token: null };
+      return Promise.resolve({
+        claimed: false,
+        lease_token: null,
+        receipt: { ...this.reportPublication, idempotency_key: idempotencyKey },
+      });
+    }
+    if (!this.reportPublicationClaimable) {
+      return Promise.resolve({
+        claimed: false,
+        lease_token: null,
+        receipt: { ...receipt, idempotency_key: idempotencyKey },
+      });
+    }
     const claimed = receipt.status === "pending" || receipt.status === "failed";
     return Promise.resolve({
       claimed,

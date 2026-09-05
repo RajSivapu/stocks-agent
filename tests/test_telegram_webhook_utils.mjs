@@ -4,6 +4,7 @@ import test from "node:test";
 
 import {
   committedDeliveryUncertainText,
+  webhookFailureText,
   ownerMatches,
   parseCallbackData,
   resolveExecutionDate,
@@ -143,4 +144,9 @@ test("a committed callback reports uncertain acknowledgement when editMessageTex
   assert.equal(calls[1], "editMessageText");
   assert.match(calls[2], /Telegram acknowledgement is uncertain/i);
   assert.doesNotMatch(calls[2], /Nothing (was )?changed/i);
+});
+
+test("post-commit acknowledgement persistence failures never produce a false rollback message", () => {
+  assert.equal(webhookFailureText(true), null);
+  assert.match(webhookFailureText(false), /Nothing was changed/);
 });
