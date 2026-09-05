@@ -320,6 +320,22 @@ def test_release_rollback_restores_the_verified_prior_gateway(tmp_path, monkeypa
     }
 
 
+def test_predeployment_gateway_bytes_are_retained_and_rehashed_before_cleanup(tmp_path):
+    root = tmp_path / "checkout"
+    gateway = root / "supabase/functions/market-briefing-gateway"
+    gateway.mkdir(parents=True)
+    (gateway / "index.ts").write_text("export const prior = true;\n")
+    evidence = tmp_path / "protected-evidence"
+    artifact = {"repo_root": root, "commit_sha": "a" * 40, "source_sha256": deploy._tree_sha256(gateway)}
+    receipt = deploy.retain_gateway_rollback_artifact(artifact, evidence)
+    assert (evidence / "gateway-source/index.ts").read_text() == "export const prior = true;\n"
+    assert receipt["source_sha256"] == artifact["source_sha256"]
+    assert receipt["git_sha"] == artifact["commit_sha"]
+    (gateway / "index.ts").write_text("tampered")
+    with pytest.raises(RuntimeError, match="hash"):
+        deploy.retain_gateway_rollback_artifact(artifact, tmp_path / "other-evidence")
+
+
 def test_gateway_restore_precedes_dashboard_cleanup_failure(tmp_path, monkeypatch):
     source = tmp_path / "supabase/functions/market-briefing-gateway"
     source.mkdir(parents=True)

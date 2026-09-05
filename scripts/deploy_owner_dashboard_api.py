@@ -263,6 +263,31 @@ def release_gateway_rollback_artifact(
     path.parent.rmdir()
 
 
+def retain_gateway_rollback_artifact(artifact: Mapping[str, object], evidence_directory: Path) -> dict[str, object]:
+    """Retain byte-for-byte source for a protected Actions artifact before mutation."""
+    from scripts.export_recovery_bundle import exact_file
+    exact_file(evidence_directory, exists=False)
+    if evidence_directory.exists():
+        raise RuntimeError("protected evidence destination must not already exist")
+    source = Path(str(artifact["repo_root"])) / "supabase/functions/market-briefing-gateway"
+    if any(path.is_symlink() for path in source.rglob("*")) or _tree_sha256(source) != artifact["source_sha256"]:
+        raise RuntimeError("captured gateway source hash mismatch")
+    destination = evidence_directory / "gateway-source"
+    destination.mkdir(parents=True, mode=0o700)
+    for path in sorted(source.rglob("*")):
+        if path.is_file():
+            retained = destination / path.relative_to(source)
+            retained.parent.mkdir(parents=True, exist_ok=True)
+            retained.write_bytes(path.read_bytes())
+            retained.chmod(0o600)
+    if _tree_sha256(destination) != artifact["source_sha256"]:
+        raise RuntimeError("retained gateway source hash mismatch")
+    receipt = {"git_sha": artifact["commit_sha"], "source_sha256": artifact["source_sha256"],
+               "captured_at": datetime.now(timezone.utc).isoformat(), "source_directory": "gateway-source"}
+    (evidence_directory / "rollback-capture.json").write_text(json.dumps(receipt, sort_keys=True) + "\n")
+    return receipt
+
+
 def verify_gateway_rollback_preflight(
     project_ref: str, expected_version: int, artifact: Mapping[str, object],
 ) -> dict[str, object]:
@@ -520,6 +545,7 @@ def restore_gateway_and_rollback_initial_dashboard(
     )
     if restored["source_sha256"] != expected_hash:
         raise RuntimeError("restored gateway source receipt mismatch")
+    restored_at = datetime.now(timezone.utc).isoformat()
     # Gateway restoration is the first safety action. Dashboard cleanup is best effort only after
     # the prior gateway bytes are independently deployed again.
     try:
@@ -531,6 +557,8 @@ def restore_gateway_and_rollback_initial_dashboard(
         raise RuntimeError("gateway restored but dashboard cleanup was incomplete") from error
     return {
         **cleanup,
+        "gateway_restored_at": restored_at,
+        "dashboard_cleaned_at": datetime.now(timezone.utc).isoformat(),
         "gateway": {
             "status": "restored",
             "git_sha": commit,
@@ -691,6 +719,7 @@ def main() -> int:
     parser.add_argument("--gateway-rollback-ref", required=True)
     parser.add_argument("--gateway-rollback-source-sha256", required=True)
     parser.add_argument("--gateway-current-version", required=True, type=int)
+    parser.add_argument("--evidence-directory", required=True, type=Path)
     arguments = parser.parse_args()
     owner_user_id = os.environ.get("DASHBOARD_OWNER_USER_ID", "").strip()
     owner_email = os.environ.get("DASHBOARD_OWNER_EMAIL", "").strip()
@@ -716,6 +745,7 @@ def main() -> int:
     gateway_rollback_preflight = verify_gateway_rollback_preflight(
         arguments.project_ref, arguments.gateway_current_version, gateway_rollback
     )
+    retained_gateway = retain_gateway_rollback_artifact(gateway_rollback, arguments.evidence_directory)
 
     validate_static_configuration(
         arguments.project_ref,
@@ -790,6 +820,7 @@ def main() -> int:
             ) from rollback_error
         raise error
     receipt["gateway_rollback_artifact"] = {
+        **retained_gateway,
         "git_sha": gateway_rollback["commit_sha"],
         "source_sha256": gateway_rollback["source_sha256"],
         "predeployment_function_version": gateway_rollback_preflight["function_version"],

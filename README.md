@@ -387,22 +387,63 @@ npx --yes deno@2.9.6 check supabase/functions/market-briefing-gateway/index.ts
 
 ## Local recovery evidence
 
-The recovery tools are deliberately local-only and never contact cloud storage. Export a JSON object
-with exactly these record sets: `holdings`, `transactions`, `commands`, `runs`, `packets`,
-`reports`, `publications`, `roles`, and `schema_version`.
+The recovery tools query a restricted database connection and keep plaintext in a temporary directory.
+They export only the allowlisted `holdings`, `transactions`, `commands`, `runs`, `packets`, `reports`,
+`publications`, `roles`, and `schema_version` datasets. Packet/report bodies, ledger values, original
+delivery IDs, role grants, and schema hashes are retained inside the encrypted artifact. Credentials
+and arbitrary extra fields are rejected. No cloud storage or paid backup provider is introduced.
 
 ```bash
 python scripts/export_recovery_bundle.py \
-  --records-json isolated-export.json --destination ./recovery-bundle.enc \
+  --production-project-ref PRODUCTION_PROJECT_REF \
+  --destination /absolute/private/path/recovery-bundle.enc \
   --encrypt-command 'local-encrypt {input} {output}' \
+  --decrypt-command 'local-decrypt {input} {output}'
+
+python scripts/verify_recovery_bundle.py /absolute/private/path/recovery-bundle.enc \
+  --production-project-ref PRODUCTION_PROJECT_REF \
+  --restore-project-ref ISOLATED_PROJECT_REF --allow-isolated-restore \
   --decrypt-command 'local-decrypt {input} {output}'
 ```
 
-The encrypted artifact contains canonical NDJSON, per-file hashes, and a root-bound manifest. Its
-sidecar contains only the artifact and root hashes—never portfolio values or secrets. Encryption and
-decrypt verification commands are mandatory caller-owned local boundaries; the project does not
-select, install, or pay for an encryption or backup service. Verification accepts only records read
-back from an explicitly identified, read-only isolated restore.
+Supply `RECOVERY_PRODUCTION_DATABASE_URL` and `RECOVERY_RESTORE_DATABASE_URL` through the protected
+environment. Both must use the restricted `stock_agent_release_reader_runtime` login. Migration
+`20260927` creates SELECT-only membership with the runtime initially NOLOGIN; password/login
+provisioning stays in the protected process. The restore project and queried server/database identity
+must both differ from production. TLS verifies the server certificate; configure the trusted CA
+through libpq's normal environment. JSON files cannot stand in for either database connection.
+
+The manifest binds canonical NDJSON hashes, exact counts, and packet/run/report/publication
+relationships. Verification queries the restored database and production counts directly; it fails
+if the production snapshot has advanced, so use a consistent export/drill window. The sidecar holds
+only hashes. Encryption and decrypt commands are mandatory, must use authenticated encryption with
+binary output, and must fail on a changed ciphertext byte. Copy commands and readable tar/text outputs
+fail. Encryption, decryption, or authentication-test failures remove the failed external artifact and
+its sidecar. Only exact absolute paths are accepted; archive members are never extracted to disk.
+
+The release verifier also accepts no caller receipt JSON:
+
+```bash
+python scripts/verify_personal_stock_agent_v1.py \
+  --repository OWNER/REPOSITORY --deployment-id DEPLOYMENT_ID \
+  --production-project-ref PRODUCTION_PROJECT_REF --static-root /absolute/path/to/dist
+```
+
+It uses `gh` read access plus `RELEASE_READONLY_DATABASE_URL`. The protected production GitHub
+deployment must reference an immutable `release_artifact_id`; its sole `release-record.json` file
+contains the candidate/project, CI run and PR IDs, complete migration paths/hashes, function versions
+and source hashes, static source/file hashes, measured dry-run/canary evidence, and the rollback
+capture/exercise records. Artifact provenance must match a successful candidate run of the protected
+`owner-dashboard-release.yml` workflow on main. This evidence publication is a protected rollout
+prerequisite; a missing record/workflow fails verification and is not a deployment claim.
+
+The deploy tool's required `--evidence-directory` retains predeployment gateway bytes under
+`gateway-source` plus `rollback-capture.json` before any gateway change. Publish those source files
+as the immutable rollback artifact and bind its numeric ID in the protected release record. The
+verifier recomputes local Git commit/time/tree hashes, migration/function/static bytes, captured
+rollback bytes, and exact queried stage/origin/report/outbox identities. It discovers the next
+existing scheduled postdeployment run without starting one. Suppression requires its dedicated
+reason; old reasonless rows remain unverified rather than receiving an invented historical reason.
 
 ## Unchanging guardrails
 

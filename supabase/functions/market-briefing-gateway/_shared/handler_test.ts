@@ -98,6 +98,19 @@ function approvedReportDecision(payload: ReturnType<typeof reportFixture>): Repo
   };
 }
 
+Deno.test("suppressed report retains the typed policy reason without a Telegram send", async () => {
+  const repo = new FakeRepository();
+  const payload = reportFixture("intraday");
+  repo.reportDecisions = [{ ...approvedReportDecision(payload), status: "downgraded", final_action: "watch", approved_terms: null }];
+  const setup = makeHandler(repo);
+  const result = await setup.handler(request("record_report", payload));
+  assertEquals(result.status, 200);
+  const body = await result.json();
+  assertEquals(body.publication_receipt.suppression_reason, "no_trigger");
+  assertEquals(repo.suppressionReasons, ["no_trigger"]);
+  assertEquals(setup.sent.length, 0);
+});
+
 Deno.test("report handler loads exact persisted decisions before generating delivery and stored prose", async () => {
   const repo = new FakeRepository();
   const payload = reportFixture();
@@ -781,12 +794,14 @@ class FakeRepository implements GatewayRepository {
     };
     return Promise.resolve(structuredClone(this.reportPublication));
   }
-  suppressReportPublication(idempotencyKey: string): Promise<PublicationReceipt> {
+  suppressionReasons: Array<string | undefined> = [];
+  suppressReportPublication(idempotencyKey: string, reason?: string): Promise<PublicationReceipt> {
+    this.suppressionReasons.push(reason);
     this.reportPublication = {
       ...this.reportPublication!, idempotency_key: idempotencyKey,
       status: "suppressed", telegram_message_ids: [], telegram_accepted_at: null, lease_token: null,
     };
-    return Promise.resolve(structuredClone(this.reportPublication));
+    return Promise.resolve({ ...structuredClone(this.reportPublication), suppression_reason: reason } as PublicationReceipt);
   }
   mutationCalls = 0;
   startCalls = 0;

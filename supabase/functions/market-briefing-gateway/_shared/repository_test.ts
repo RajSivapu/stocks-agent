@@ -50,6 +50,27 @@ function policy(): PolicyConfig {
   };
 }
 
+Deno.test("report suppression RPC persists the typed reason and rejects an error alias", async () => {
+  const calls: unknown[] = [];
+  let legacy = false;
+  const repository = createSupabaseGatewayRepository({
+    rpc(name: string, parameters?: Record<string, unknown>) {
+      calls.push({ name, parameters });
+      return Promise.resolve({ data: {
+        report_id: "00000000-0000-4000-8000-000000000001", idempotency_key: "a".repeat(64), status: "suppressed",
+        ...(legacy ? { error: "no_trigger" } : { suppression_reason: "no_trigger" }),
+      }, error: null });
+    },
+  });
+  const result = await repository.suppressReportPublication!("a".repeat(64), "no_trigger");
+  assertEquals(result.suppression_reason, "no_trigger");
+  assertEquals(calls, [{ name: "suppress_market_report_publication", parameters: { p_idempotency_key: "a".repeat(64), p_reason: "no_trigger" } }]);
+  legacy = true;
+  let rejected = false;
+  try { await repository.suppressReportPublication!("a".repeat(64), "no_trigger"); } catch { rejected = true; }
+  assert(rejected, "generic error field became suppression authority");
+});
+
 Deno.test("completion recovery reads the immutable completion by run and stable identity", async () => {
   const calls: unknown[] = [];
   const saved = { receipt: { completion_id: "00000000-0000-4000-8000-000000000002" }, payload: {}, providers: {} };

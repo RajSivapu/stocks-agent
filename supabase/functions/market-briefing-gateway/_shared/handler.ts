@@ -784,12 +784,14 @@ export function createGatewayHandler(dependencies: GatewayDependencies) {
           }
           const receipt = await deps.repository.recordReport(requireRun(envelope), payload);
           const pending = await deps.repository.createReportPublication(requireRun(envelope), payload);
-          const suppressed = await deps.repository.suppressReportPublication(pending.idempotency_key);
+          if (!delivery.reason) throw new GatewayRepositoryError("PERSISTENCE_FAILED");
+          const suppressed = await deps.repository.suppressReportPublication(pending.idempotency_key, delivery.reason);
           result = {
             ok: true,
             ...receipt,
             publication_receipt: {
               status: suppressed.status,
+              suppression_reason: suppressed.suppression_reason,
               telegram_message_ids: [],
               retry_allowed: false,
             },

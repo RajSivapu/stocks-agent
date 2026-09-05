@@ -35,6 +35,7 @@ import {
   parseReportDecisions,
   type RecordReportPayload,
   type ReportPolicyDecision,
+  type ReportSuppressionReason,
 } from "./reports.ts";
 
 export interface ReportRecordReceipt {
@@ -74,6 +75,7 @@ export interface PersistedBundle {
 }
 
 export interface PublicationReceipt {
+  suppression_reason?: ReportSuppressionReason | null;
   id: string;
   idempotency_key: string;
   status:
@@ -247,7 +249,7 @@ export interface GatewayRepository {
     messageIds: number[],
     error: string | null,
   ): Promise<PublicationReceipt>;
-  suppressReportPublication?(idempotencyKey: string): Promise<PublicationReceipt>;
+  suppressReportPublication?(idempotencyKey: string, reason: ReportSuppressionReason): Promise<PublicationReceipt>;
   startIntelligenceRun?(
     runId: string,
     payload: StartIntelligencePayload,
@@ -754,13 +756,18 @@ export function createSupabaseGatewayRepository(
       };
     },
 
-    async suppressReportPublication(idempotencyKey) {
+    async suppressReportPublication(idempotencyKey, reason) {
       const result = await client.rpc("suppress_market_report_publication", {
         p_idempotency_key: idempotencyKey,
+        p_reason: reason,
       });
       if (result.error) throw new GatewayRepositoryError("PERSISTENCE_FAILED");
       const row = oneObject(result);
+      if (row.status !== "suppressed" || row.suppression_reason !== reason) {
+        throw new GatewayRepositoryError("PERSISTENCE_FAILED");
+      }
       return {
+        suppression_reason: reason,
         id: text(row.report_id, 36), idempotency_key: text(row.idempotency_key, 64),
         status: text(row.status, 20) as PublicationReceipt["status"],
         telegram_message_ids: [], telegram_accepted_at: null, lease_token: null,

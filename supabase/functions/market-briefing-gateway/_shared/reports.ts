@@ -40,11 +40,13 @@ export interface RecordReportPayload {
   rendered_hash: string;
 }
 
+export type ReportSuppressionReason = "no_trigger" | "not_actionable" | "REPORT_POLICY_MISMATCH";
+
 export interface RenderedReportDelivery {
   status: "ready" | "suppressed";
   body: string;
   parts: string[];
-  reason?: "no_trigger" | "not_actionable" | "REPORT_POLICY_MISMATCH";
+  reason?: ReportSuppressionReason;
   payload?: RecordReportPayload;
   actionable_fields?: Array<{
     evaluation_id: string;

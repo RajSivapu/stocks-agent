@@ -40,6 +40,7 @@ def databases():
                 connection = psycopg.connect(f"host={root} port=55439 dbname={kind}", autocommit=True)
                 connections[kind] = connection
                 connection.execute("CREATE SCHEMA auth; CREATE FUNCTION auth.uid() RETURNS uuid LANGUAGE sql AS 'SELECT NULL::uuid'")
+                connection.execute("CREATE SCHEMA supabase_migrations; CREATE TABLE supabase_migrations.schema_migrations(version text PRIMARY KEY, statements text[])")
                 if kind == "fresh":
                     connection.execute(schema)
                 else:
@@ -85,6 +86,56 @@ def prepared_run(connection, *, provider="gdelt", cache=False, checkpoint=True, 
         "packet": {"id": str(uuid.uuid4()), "candidate_count": 0, "evidence_count": 0, "packet": packet,
                    "packet_hash": hashlib.sha256(canonical.encode()).hexdigest()}, "error": None}
     return run, completion, original, payload
+
+
+@pytest.mark.parametrize("kind", ["fresh", "ordered"])
+def test_report_suppression_requires_reason_and_preserves_original_delivery(databases, kind):
+    db = databases[kind]
+    run, completion, _, payload = prepared_run(db)
+    db.execute("SELECT public.record_market_intelligence(%s,%s,%s)", (run, completion, Jsonb(payload)))
+    report_id, delivered_id = uuid.uuid4(), uuid.uuid4()
+    keys = [hashlib.sha256(str(identity).encode()).hexdigest() for identity in (report_id, delivered_id)]
+    for identity, key in zip((report_id, delivered_id), keys):
+        db.execute("INSERT INTO market_reports(id,idempotency_key,run_id,packet_id,market_date,kind,report,report_hash,rendered_text,rendered_hash) VALUES(%s,%s,%s,%s,CURRENT_DATE,%s,'{}',repeat('b',64),'text',repeat('c',64))",
+                   (identity, key, run, payload["packet"]["id"], "intraday" if identity == report_id else "urgent"))
+        db.execute("INSERT INTO market_report_publications(report_id,idempotency_key,status) VALUES(%s,%s,'pending')", (identity, key))
+    for reason in (None, "", " ", "caller prose"):
+        with pytest.raises(psycopg.errors.InvalidParameterValue):
+            db.execute("SELECT public.suppress_market_report_publication(%s,%s)", (keys[0], reason))
+    result = db.execute("SELECT public.suppress_market_report_publication(%s,'no_trigger')", (keys[0],)).fetchone()[0]
+    assert result["suppression_reason"] == "no_trigger"
+    assert db.execute("SELECT status,suppression_reason,error FROM market_report_publications WHERE report_id=%s", (report_id,)).fetchone() == ("suppressed", "no_trigger", None)
+    with pytest.raises(psycopg.errors.CheckViolation):
+        db.execute("UPDATE market_report_publications SET suppression_reason='' WHERE report_id=%s", (report_id,))
+    with pytest.raises(psycopg.errors.ObjectNotInPrerequisiteState):
+        db.execute("SELECT public.suppress_market_report_publication(%s,'not_actionable')", (keys[0],))
+    db.execute("UPDATE market_report_publications SET status='delivered',telegram_message_ids='[77]',telegram_accepted_at=now() WHERE report_id=%s", (delivered_id,))
+    original = db.execute("SELECT telegram_message_ids,telegram_accepted_at FROM market_report_publications WHERE report_id=%s", (delivered_id,)).fetchone()
+    with pytest.raises(psycopg.errors.ObjectNotInPrerequisiteState):
+        db.execute("SELECT public.suppress_market_report_publication(%s,'no_trigger')", (keys[1],))
+    assert db.execute("SELECT telegram_message_ids,telegram_accepted_at FROM market_report_publications WHERE report_id=%s", (delivered_id,)).fetchone() == original
+    assert db.execute("SELECT to_regprocedure('public.suppress_market_report_publication(text)')").fetchone()[0] is None
+    assert not db.execute("SELECT has_function_privilege('authenticated','public.suppress_market_report_publication(text,text)','EXECUTE')").fetchone()[0]
+    from scripts.protected_evidence import PostgresReadOnlySource
+    source = object.__new__(PostgresReadOnlySource)
+    source.connection = db
+    rows = source.release_rows(run)
+    assert next(row for row in rows["publications"] if row["report_id"] == str(report_id))["suppression_reason"] == "no_trigger"
+    assert next(row for row in rows["publications"] if row["report_id"] == str(delivered_id))["telegram_message_ids"] == [77]
+    from scripts.verify_owner_dashboard_deployment import REPORT_PUBLICATION_SQL
+    dashboard_rows = source.query(REPORT_PUBLICATION_SQL, (run,))
+    assert next(row for row in dashboard_rows if row["report_id"] == str(report_id))["suppression_reason"] == "no_trigger"
+    assert isinstance(next(row for row in dashboard_rows if row["report_id"] == str(delivered_id))["telegram_accepted_at"], str)
+    db.execute("SET ROLE stock_agent_release_reader")
+    try:
+        assert source.query("SELECT count(*) AS count FROM public.market_report_publications")[0]["count"] >= 2
+        from scripts.protected_evidence import RECOVERY_SQL
+        role_records = source.query(RECOVERY_SQL["roles"])
+        assert next(row for row in role_records if row["role"] == "stock_agent_dashboard")["grants"]
+        with pytest.raises(psycopg.errors.InsufficientPrivilege):
+            db.execute("DELETE FROM public.market_report_publications WHERE report_id=%s", (report_id,))
+    finally:
+        db.execute("RESET ROLE")
 
 
 @pytest.mark.parametrize("kind", ["fresh", "ordered"])
@@ -432,7 +483,7 @@ def test_scheduled_finish_requires_successful_date_bound_receipt_chain(databases
     with pytest.raises(psycopg.errors.InvalidParameterValue, match="MISSING_PUBLICATION_RECEIPT"):
         db.execute("SELECT public.finish_market_analysis_run(%s)", (run,))
     db.execute(
-        "INSERT INTO market_report_publications(report_id,idempotency_key,status) VALUES(%s,repeat('e',64),'suppressed')",
+        "INSERT INTO market_report_publications(report_id,idempotency_key,status,suppression_reason) VALUES(%s,repeat('e',64),'suppressed','no_trigger')",
         (correct_report_id,),
     )
     assert db.execute("SELECT public.finish_market_analysis_run(%s)", (run,)).fetchone()[0]["status"] == "suppressed"

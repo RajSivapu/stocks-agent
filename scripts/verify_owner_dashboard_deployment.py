@@ -50,6 +50,14 @@ RELEASE_MIGRATION_VERSIONS = ("20260907", "20260908")
 RELEASE_FUNCTIONS = ("market-briefing-gateway", "owner-dashboard-api")
 RUNTIME_ROLE = "stock_agent_dashboard_runtime"
 UUID_PATTERN = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$", re.IGNORECASE)
+REPORT_PUBLICATION_SQL = """SELECT p.report_id::text AS report_id,r.run_id::text AS run_id,p.idempotency_key,
+    p.status,p.telegram_message_ids,to_char(p.telegram_accepted_at AT TIME ZONE 'UTC','YYYY-MM-DD\"T\"HH24:MI:SS.MS\"Z\"') AS telegram_accepted_at,p.suppression_reason,
+    jsonb_build_object('report_id',p.report_id,'idempotency_key',p.idempotency_key,'status',p.status,
+      'telegram_message_ids',p.telegram_message_ids,
+      'telegram_accepted_at',to_char(p.telegram_accepted_at AT TIME ZONE 'UTC','YYYY-MM-DD\"T\"HH24:MI:SS.MS\"Z\"'),
+      'suppression_reason',p.suppression_reason) AS canonical
+    FROM public.market_report_publications p JOIN public.market_reports r ON r.id=p.report_id
+    WHERE r.run_id=%s::uuid ORDER BY p.report_id"""
 
 
 def validate_deployment_auth_configuration(config: Mapping[str, object]) -> dict[str, object]:
@@ -353,15 +361,7 @@ def collect_source_receipts(database_url: str, api_url: str, run_id: str) -> dic
             "SELECT id::text AS id, run_id::text AS run_id, packet_hash, candidate_count, evidence_count, packet AS canonical FROM public.market_evidence_packets WHERE run_id=%s::uuid", (run_id,))
         reports = _fetch_all(connection,
             "SELECT id::text AS id, run_id::text AS run_id, packet_id::text AS packet_id, report_hash, rendered_hash, report AS canonical, rendered_text FROM public.market_reports WHERE run_id=%s::uuid ORDER BY created_at", (run_id,))
-        report_publications = _fetch_all(connection,
-            """SELECT p.report_id::text AS report_id, r.run_id::text AS run_id, p.idempotency_key,
-                      p.status, p.telegram_message_ids, p.telegram_accepted_at, p.error AS suppression_reason,
-                      jsonb_build_object('report_id',p.report_id,'idempotency_key',p.idempotency_key,
-                        'status',p.status,'telegram_message_ids',p.telegram_message_ids,
-                        'telegram_accepted_at',p.telegram_accepted_at,'suppression_reason',p.error) AS canonical
-                 FROM public.market_report_publications p
-                 JOIN public.market_reports r ON r.id=p.report_id
-                WHERE r.run_id=%s::uuid ORDER BY p.report_id""", (run_id,))
+        report_publications = _fetch_all(connection, REPORT_PUBLICATION_SQL, (run_id,))
         overdue_scheduled_phases = _fetch_all(
             connection,
             "SELECT market_date::text AS market_date, phase, to_char(deadline_at AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS.MS\"Z\"') AS deadline_at FROM public.read_overdue_scheduled_market_phases()",
