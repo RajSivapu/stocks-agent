@@ -393,9 +393,10 @@ def test_scheduled_finish_requires_successful_date_bound_receipt_chain(databases
         "VALUES(%s,repeat('f',64),%s,%s,%s,'morning','{}',repeat('c',64),'suppressed',repeat('d',64))",
         (wrong_kind_report_id, run, packet_id, market_date),
     )
+    wrong_kind_request = uuid.uuid4()
     db.execute(
         "INSERT INTO market_gateway_requests(request_id,operation,status,lease_token,response) VALUES(%s,'record_report','completed',%s,%s)",
-        (uuid.uuid4(), uuid.uuid4(), Jsonb({"ok": True, "report_id": str(wrong_kind_report_id), "report_hash": "c" * 64, "rendered_hash": "d" * 64})),
+        (wrong_kind_request, uuid.uuid4(), Jsonb({"ok": True, "report_id": str(wrong_kind_report_id), "report_hash": "c" * 64, "rendered_hash": "d" * 64})),
     )
     with pytest.raises(psycopg.errors.InvalidParameterValue, match="MISSING_REPORT_RECEIPT"):
         db.execute("SELECT public.finish_market_analysis_run(%s)", (run,))
@@ -405,9 +406,27 @@ def test_scheduled_finish_requires_successful_date_bound_receipt_chain(databases
         "VALUES(%s,repeat('1',64),%s,%s,%s,'intraday','{}',repeat('c',64),'suppressed',repeat('d',64))",
         (correct_report_id, run, packet_id, market_date),
     )
+    correct_report_request = uuid.uuid4()
     db.execute(
         "INSERT INTO market_gateway_requests(request_id,operation,status,lease_token,response) VALUES(%s,'record_report','completed',%s,%s)",
-        (uuid.uuid4(), uuid.uuid4(), Jsonb({"ok": True, "report_id": str(correct_report_id), "report_hash": "c" * 64, "rendered_hash": "d" * 64})),
+        (correct_report_request, uuid.uuid4(), Jsonb({"ok": True, "report_id": str(correct_report_id), "report_hash": "c" * 64, "rendered_hash": "d" * 64})),
+    )
+
+    # A final intraday kind cannot stand in for the immutable scheduled origin.
+    with pytest.raises(psycopg.errors.InvalidParameterValue, match="MISSING_REPORT_RECEIPT"):
+        db.execute("SELECT public.finish_market_analysis_run(%s)", (run,))
+    db.execute(
+        "INSERT INTO market_report_request_origins(request_id,run_id,scheduled_phase,market_date,requested_kind,requested_report_id,requested_packet_id,requested_idempotency_key,requested_report_hash) "
+        "VALUES(%s,%s,'pre-market',%s,'morning',%s,%s,repeat('2',64),repeat('3',64))",
+        (correct_report_request, run, market_date, uuid.uuid4(), packet_id),
+    )
+    with pytest.raises(psycopg.errors.InvalidParameterValue, match="MISSING_REPORT_RECEIPT"):
+        db.execute("SELECT public.finish_market_analysis_run(%s)", (run,))
+    db.execute("DELETE FROM market_report_request_origins WHERE request_id=%s", (correct_report_request,))
+    db.execute(
+        "INSERT INTO market_report_request_origins(request_id,run_id,scheduled_phase,market_date,requested_kind,requested_report_id,requested_packet_id,requested_idempotency_key,requested_report_hash) "
+        "VALUES(%s,%s,'intraday',%s,'intraday',%s,%s,repeat('2',64),repeat('3',64))",
+        (correct_report_request, run, market_date, uuid.uuid4(), packet_id),
     )
 
     with pytest.raises(psycopg.errors.InvalidParameterValue, match="MISSING_PUBLICATION_RECEIPT"):

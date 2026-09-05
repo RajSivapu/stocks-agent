@@ -748,10 +748,19 @@ export function createGatewayHandler(dependencies: GatewayDependencies) {
       if (!leaseToken) throw new GatewayRepositoryError("PERSISTENCE_FAILED");
 
       if (envelope.operation === "record_report") {
-        if (!deps.repository.recordReport) {
+        if (!deps.repository.recordReport || !deps.repository.recordReportOrigin) {
           throw new GatewayRepositoryError("PERSISTENCE_FAILED");
         }
         const payload = prepared as RecordReportPayload;
+        // This write intentionally precedes rendering: delivery can convert a
+        // scheduled routine report into intraday or urgent, but finish_run must
+        // attest to the original scheduled report identity and phase.
+        await deps.repository.recordReportOrigin(
+          envelope.request_id,
+          leaseToken,
+          requireRun(envelope),
+          payload,
+        );
         const decisions = parseReportDecisions(
           await deps.repository.loadReportDecisions(
             requireRun(envelope),

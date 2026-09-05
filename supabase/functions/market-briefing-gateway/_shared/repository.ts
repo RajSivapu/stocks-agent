@@ -226,6 +226,15 @@ export interface GatewayRepository {
     runId: string,
     payload: RecordReportPayload,
   ): Promise<ReportRecordReceipt>;
+  recordReportOrigin?(
+    requestId: string,
+    leaseToken: string,
+    runId: string,
+    payload: Pick<
+      RecordReportPayload,
+      "id" | "idempotency_key" | "packet_id" | "market_date" | "kind" | "report_hash"
+    >,
+  ): Promise<{ scheduled: boolean }>;
   createReportPublication?(
     runId: string,
     payload: RecordReportPayload,
@@ -658,6 +667,22 @@ export function createSupabaseGatewayRepository(
         rendered_hash: text(row.rendered_hash, 64),
         duplicate: boole(row.duplicate),
       };
+    },
+
+    async recordReportOrigin(requestId, leaseToken, runId, payload) {
+      const result = await client.rpc("record_market_report_origin", {
+        p_request_id: requestId,
+        p_lease_token: leaseToken,
+        p_run_id: runId,
+        p_market_date: payload.market_date,
+        p_requested_kind: payload.kind,
+        p_requested_report_id: payload.id,
+        p_requested_packet_id: payload.packet_id,
+        p_requested_idempotency_key: payload.idempotency_key,
+        p_requested_report_hash: payload.report_hash,
+      });
+      const row = oneObject(result);
+      return { scheduled: boole(row.scheduled) };
     },
 
     async createReportPublication(runId, payload) {

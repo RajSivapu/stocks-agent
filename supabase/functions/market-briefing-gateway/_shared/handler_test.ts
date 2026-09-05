@@ -26,7 +26,11 @@ import { TelegramDeliveryError } from "./telegram.ts";
 import type { DueDecision, OutcomeGrade } from "./outcomes.ts";
 import type { AdjustedBar, IntradayQuoteEvidence } from "./market-data.ts";
 import { canonicalJson, sha256Hex } from "./intelligence.ts";
-import { reportIdFromKey, type ReportPolicyDecision } from "./reports.ts";
+import {
+  reportIdFromKey,
+  type ReportKind,
+  type ReportPolicyDecision,
+} from "./reports.ts";
 
 function assert(value: boolean, message: string): void {
   if (!value) throw new Error(message);
@@ -44,7 +48,7 @@ const SECRET = "test-market-secret-with-enough-entropy";
 const NOW = new Date("2026-09-02T17:00:00.000Z");
 const RUN_ID = "00000000-0000-4000-8000-000000000002";
 
-function reportFixture(kind: "morning" | "urgent" = "morning") {
+function reportFixture(kind: ReportKind = "morning") {
   const report = {
     title: "Caller title",
     summary: "BUY CENX 999999 shares immediately",
@@ -269,6 +273,62 @@ Deno.test("report handler derives routine pure-HOLD alert kind and text without 
       "routine alert retained caller labels or trade prose",
     );
   }
+});
+
+Deno.test("scheduled report origins retain requested kind before pre-market delivery derives urgent or intraday", async () => {
+  const cases: Array<{ urgency: "urgent" | "routine"; finalKind: ReportKind }> = [
+    { urgency: "urgent", finalKind: "urgent" },
+    { urgency: "routine", finalKind: "intraday" },
+  ];
+  for (const expected of cases) {
+    const repo = new FakeRepository();
+    repo.scheduledReportPhase = "pre-market";
+    const payload = reportFixture("morning");
+    repo.reportDecisions = [{
+      evaluation_id: payload.report.policy_decision_ids[0],
+      candidate_id: "00000000-0000-4000-8000-000000000033",
+      run_id: RUN_ID,
+      packet_id: PACKET_ID,
+      packet_hash: PACKET_HASH,
+      ticker: "CENX",
+      status: "approved",
+      final_action: "hold",
+      approved_terms: null,
+      final_alert_urgency: expected.urgency,
+    }];
+    const setup = makeHandler(repo);
+    assertEquals((await setup.handler(request("record_report", payload))).status, 200);
+    assertEquals(repo.reportOrigins.length, 1);
+    assertEquals(repo.reportOrigins[0].runId, RUN_ID);
+    assertEquals(repo.reportOrigins[0].marketDate, "2026-09-02");
+    assertEquals(repo.reportOrigins[0].kind, "morning");
+    assertEquals(repo.reportOrigins[0].phase, "pre-market");
+    assertEquals((repo.storedReport as { kind: unknown }).kind, expected.finalKind);
+  }
+});
+
+Deno.test("scheduled report origin permits post-market routine delivery to finish as intraday", async () => {
+  const repo = new FakeRepository();
+  repo.scheduledReportPhase = "post-market";
+  const payload = reportFixture("weekly");
+  repo.reportDecisions = [{
+    evaluation_id: payload.report.policy_decision_ids[0],
+    candidate_id: "00000000-0000-4000-8000-000000000033",
+    run_id: RUN_ID,
+    packet_id: PACKET_ID,
+    packet_hash: PACKET_HASH,
+    ticker: "CENX",
+    status: "approved",
+    final_action: "hold",
+    approved_terms: null,
+    final_alert_urgency: "routine",
+  }];
+  const setup = makeHandler(repo);
+  assertEquals((await setup.handler(request("record_report", payload))).status, 200);
+  assertEquals(repo.reportOrigins.length, 1);
+  assertEquals(repo.reportOrigins[0].kind, "weekly");
+  assertEquals(repo.reportOrigins[0].phase, "post-market");
+  assertEquals((repo.storedReport as { kind: unknown }).kind, "intraday");
 });
 
 Deno.test("report handler rejects missing or wrong-packet policy decisions without a write or send", async () => {
@@ -618,6 +678,14 @@ class FakeRepository implements GatewayRepository {
     { runId: string; packetId: string; ids: string[] }
   > = [];
   reportDecisions: ReportPolicyDecision[] = [];
+  scheduledReportPhase: "pre-market" | "intraday" | "post-market" | null = null;
+  reportOrigins: Array<{
+    requestId: string;
+    runId: string;
+    marketDate: string;
+    kind: ReportKind;
+    phase: "pre-market" | "intraday" | "post-market" | null;
+  }> = [];
   storedReport: unknown = null;
   reportPublication: PublicationReceipt | null = null;
   reportPublicationClaimable = true;
@@ -629,6 +697,21 @@ class FakeRepository implements GatewayRepository {
   ): Promise<ReportPolicyDecision[]> {
     this.reportDecisionReads.push({ runId, packetId, ids });
     return Promise.resolve(structuredClone(this.reportDecisions));
+  }
+  recordReportOrigin(
+    requestId: string,
+    _leaseToken: string,
+    runId: string,
+    payload: { market_date: string; kind: ReportKind },
+  ) {
+    this.reportOrigins.push({
+      requestId,
+      runId,
+      marketDate: payload.market_date,
+      kind: payload.kind,
+      phase: this.scheduledReportPhase,
+    });
+    return Promise.resolve({ scheduled: this.scheduledReportPhase !== null });
   }
   recordReport(
     _runId: string,

@@ -43,3 +43,12 @@ Controller remediation commit: `fix: close scheduled lifecycle receipt gaps`.
 - The overdue reader selects the latest effective schedule per phase/date, validates the active calendar year and holiday array shape, and excludes actual configured holidays.
 - RED: the new focused cases failed for silent unresolved truncation, single-row schedule keys, and the null-run report receipt contract.
 - GREEN: focused Deno repository/handler tests passed `53`; deployment/migration verifier tests passed `81`; fresh/ordered disposable PostgreSQL scheduled tests passed `4` (with `13` intentionally deselected); `git diff --check` passed.
+
+## Controller remediation round three
+
+- Added ordered additive migration `20260925_scheduled_report_origins.sql`, after the existing `20260924` lifecycle migration. It keeps an immutable, write-once scheduled report origin keyed to the deliberately runless `record_report` gateway request.
+- The gateway persists the caller's original report identity, kind, packet, date, run, and database-derived scheduled phase before `renderReportDelivery` can derive an `urgent` or `intraday` final kind. The RPC validates the original deterministic identity against the completed packet and permits exact retry only.
+- `finish_market_analysis_run` now proves that immutable origin, completed request response, final report/date/run/packet/hash linkage, and terminal delivered-or-suppressed report-publication receipt. It no longer relies on a final-kind allowlist.
+- The executable fresh schema mirrors the final ordered contract after all report dependencies; the initial attempted mirror location was inside a documented superseded SQL comment block, so the focused fresh install caught and corrected that placement.
+- RED: the strengthened fresh/ordered disposable PostgreSQL test initially failed with `MISSING_REPORT_RECEIPT` until it inserted the required origin row; the fresh path then exposed the commented-out mirror placement.
+- GREEN: focused Deno repository/handler tests passed `55`; deployment/migration verifier tests passed `81`; fresh/ordered disposable PostgreSQL scheduled tests passed `4` (with `13` intentionally deselected); `git diff --check` passed.
