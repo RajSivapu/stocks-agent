@@ -95,3 +95,15 @@ def test_identical_text_from_distinct_upstreams_has_distinct_persistable_identit
     ))
 
     assert first.content_hash != second.content_hash
+
+
+def test_near_duplicate_is_retained_as_corroborating_evidence():
+    first = normalize_item(raw_item(upstream_item_id="one", normalized_text="Issuer announces a grid contract."))
+    corroborating = normalize_item(raw_item(
+        provider="finnhub", upstream_item_id="two", source_url="https://publisher.example/two",
+        normalized_text="Issuer announces a grid contract!",
+    ))
+
+    assert [row.disposition for row in deduplicate([first, corroborating])] == [
+        "accepted", "near_duplicate",
+    ]
