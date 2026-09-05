@@ -384,13 +384,38 @@ def test_chronology_verifier_reloads_authoritative_state_after_rejection():
             return SimpleNamespace(data=self.rows)
 
     class FakeSupabase:
+        def __init__(self, transactions):
+            self.transactions = transactions
+
         def table(self, name):
             return Query({
                 "holdings": [{"shares": "5"}],
                 "portfolio_commands": [{"realized_pnl": "50"}],
-                "transactions": [{"side": "buy"}, {"side": "sell"}],
+                "transactions": self.transactions,
             }[name])
 
     portfolio_command_verifier._require_late_rejection_preserves_accounting(
-        FakeSupabase(), sell_command_id="sell-command"
+        FakeSupabase([
+            {"executed_on": "2026-09-01", "side": "buy", "qty": "10", "price": "100"},
+            {"executed_on": "2026-09-03", "side": "sell", "qty": "5", "price": "110"},
+        ]), sell_command_id="sell-command"
     )
+
+    for mutated_transactions in (
+        [
+            {"executed_on": "2026-09-02", "side": "buy", "qty": "10", "price": "100"},
+            {"executed_on": "2026-09-03", "side": "sell", "qty": "5", "price": "110"},
+        ],
+        [
+            {"executed_on": "2026-09-01", "side": "buy", "qty": "9", "price": "100"},
+            {"executed_on": "2026-09-03", "side": "sell", "qty": "5", "price": "110"},
+        ],
+        [
+            {"executed_on": "2026-09-01", "side": "buy", "qty": "10", "price": "100"},
+            {"executed_on": "2026-09-03", "side": "sell", "qty": "5", "price": "111"},
+        ],
+    ):
+        with pytest.raises(RuntimeError, match="late Buy changed authoritative transactions"):
+            portfolio_command_verifier._require_late_rejection_preserves_accounting(
+                FakeSupabase(mutated_transactions), sell_command_id="sell-command"
+            )

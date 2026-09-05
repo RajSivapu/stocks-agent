@@ -85,7 +85,14 @@ def _require_late_rejection_preserves_accounting(sb, *, sell_command_id):
              "late Buy changed authoritative holdings")
     _require(persisted_sell is not None and Decimal(str(persisted_sell["realized_pnl"])) == Decimal("50"),
              "late Buy changed persisted realized P&L")
-    _require([transaction["side"] for transaction in transactions] == ["buy", "sell"],
+    ledger = [
+        (str(transaction["executed_on"]), transaction["side"], Decimal(str(transaction["qty"])), Decimal(str(transaction["price"])))
+        for transaction in transactions
+    ]
+    _require(ledger == [
+        ("2026-09-01", "buy", Decimal("10"), Decimal("100")),
+        ("2026-09-03", "sell", Decimal("5"), Decimal("110")),
+    ],
              "late Buy changed authoritative transactions")
 
 
