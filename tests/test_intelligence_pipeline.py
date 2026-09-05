@@ -225,7 +225,7 @@ def test_pipeline_persists_provider_identity_urls_times_and_discovery_status():
     )
     adapter.collect = lambda query: CollectionResult((source,), receipt(adapter.provider), query.limit)
 
-    IntelligencePipeline(gateway, [adapter], context={"holdings": {"TEST": "1"}}).run(
+    result = IntelligencePipeline(gateway, [adapter], context={"holdings": {"TEST": "1"}}).run(
         request("intraday")
     )
 
@@ -236,6 +236,7 @@ def test_pipeline_persists_provider_identity_urls_times_and_discovery_status():
     assert item["entity_ids"] == ["cik:0000000001"]
     assert item["security_ids"] == ["TEST"]
     assert item["discovery_status"] == "qualified"
+    assert result.coverage["discovery_outcomes"] == [{"provider": "gdelt", "status": "qualified"}]
 
 
 def test_exact_duplicate_persists_once_but_retains_receipt_accounting():
@@ -274,5 +275,6 @@ def test_near_corroboration_reaches_discovery_and_packet_evidence():
     )
 
     assert result.coverage["near_duplicate_count"] == 1
+    assert [item["disposition"] for item in gateway.payloads[-1]["items"]] == ["accepted", "near_duplicate"]
     assert len(gateway.payloads[-1]["events"]) == 2
     assert len(result.packet.to_dict()["evidence"]) == 2

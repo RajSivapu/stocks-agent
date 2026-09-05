@@ -79,3 +79,21 @@
   contract tests: `3 passed`; `git diff --check` passed.
 - Fixtures only: no network/provider calls, database writes, deployment, Telegram send, brokerage
   action, paid provider, or full-suite run.
+
+## Controller remediation (round 3)
+
+- Near-duplicate items remain explicit `near_duplicate` pipeline/gateway records, while the additive
+  SQL override admits only that bounded corroborating class as Task 4 accepted evidence. Exact
+  duplicates remain collapsed and contradictory polarity stays independently identifiable.
+- Added an immutable-source reuse trigger and recorder override. A source UUID may recur in a later
+  run only when every immutable identity/content field agrees; conflicting payloads fail closed.
+  Each successful later receipt still receives its own run-item evidence record.
+- Provider outcome qualification now compares the single normalized item identity used by discovery,
+  so a relationship-qualified item deterministically yields a qualified provider outcome.
+
+### Controller round 3 evidence
+
+- Final focused gate: `127 passed` across focused Task 7 Python and migration tests; gateway Deno
+  contract tests: `3 passed`; `git diff --check` passed.
+- No live network/provider, database, Telegram, deployment, brokerage, paid-provider, or full-suite
+  action was performed.

@@ -313,13 +313,16 @@ class IntelligencePipeline:
         results: Sequence[CollectionResult],
     ) -> PipelineReceipt:
         raw_items: list[tuple[SourceItem, str]] = []
+        normalized_by_receipt: dict[str, list[SourceItem]] = {}
         receipt_rows: list[dict[str, object]] = []
         sources: list[dict[str, object]] = []
         for index, result in enumerate(results):
             receipt_id = _uuid("receipt", run_id, index, result.receipt.provider)
             receipt_rows.append(_receipt_row(result.receipt, receipt_id))
             sources.append(_source_summary(result.receipt, receipt_id))
-            raw_items.extend((normalize_item(item), receipt_id) for item in result.items)
+            normalized_items = [normalize_item(item) for item in result.items]
+            normalized_by_receipt[receipt_id] = normalized_items
+            raw_items.extend((item, receipt_id) for item in normalized_items)
 
         dispositions = deduplicate(item for item, _receipt_id in raw_items)
         receipt_ids = [receipt_id for _item, receipt_id in raw_items]
@@ -361,11 +364,12 @@ class IntelligencePipeline:
             "discovery_outcomes": [
                 {"provider": result.receipt.provider,
                  "status": "insufficient_coverage" if result.receipt.status not in {"succeeded", "cache_hit"}
-                 else "no_event" if not result.items
+                 else "no_event" if not normalized_by_receipt[receipt_rows[index]["id"]]
                  else "qualified" if any(
-                     evidence_key(item) in qualified_ids for item in result.items
+                     evidence_key(item) in qualified_ids
+                     for item in normalized_by_receipt[receipt_rows[index]["id"]]
                  ) else "insufficient_coverage"}
-                for result in results
+                for index, result in enumerate(results)
             ],
             "duplicate_references": [
                 {"item_id": evidence_key(value.item), "receipt_id": receipt_ids[index],

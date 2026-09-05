@@ -119,6 +119,16 @@ Deno.test("record_intelligence accepts persisted provider provenance but rejects
   secretBearing.payload.items[0].request_url =
     "https://api.gdeltproject.org/api/v2/doc/doc?api_key=not-persistable";
   assertThrows(() => parseGatewayEnvelope(secretBearing), "secret-bearing");
+
+  const corroborating = validRecordIntelligenceEnvelope();
+  Object.assign(corroborating.payload.items[0], {
+    disposition: "near_duplicate", drop_reason: "similar_normalized_content",
+  });
+  assertEquals(
+    ((parseGatewayEnvelope(corroborating).payload as { items: Array<Record<string, unknown>> }).items[0])
+      .disposition,
+    "near_duplicate",
+  );
 });
 
 Deno.test("canonical JSON and hashes match Task 2 semantic ordering", () => {

@@ -16,6 +16,7 @@ from scripts import verify_portfolio_command_rpc as portfolio_command_verifier
 ROOT = Path(__file__).resolve().parents[1]
 MIGRATION = ROOT / "sql" / "migrations" / "20260907_market_intelligence.sql"
 PROVENANCE_MIGRATION = ROOT / "sql" / "migrations" / "20260914_provider_evidence_integrity.sql"
+REUSE_MIGRATION = ROOT / "sql" / "migrations" / "20260915_market_source_item_reuse.sql"
 SCHEMA = ROOT / "sql" / "schema.sql"
 VERIFIER = ROOT / "scripts" / "verify_market_intelligence_migration.py"
 TRANSACTION_CHRONOLOGY = ROOT / "sql" / "migrations" / "20260909_transaction_chronology.sql"
@@ -259,6 +260,13 @@ def test_schema_declares_complete_bounded_append_only_ledgers_and_rpcs():
         assert "octet_length(entity_ids::text)<=4096" in sql
         assert "octet_length(security_ids::text)<=1024" in sql
 
+    for path in (REUSE_MIGRATION, SCHEMA):
+        sql = path.read_text()
+        assert "market_source_items_reuse_immutable" in sql
+        assert "conflicting immutable market source item identity" in sql
+        assert "receipt.id=item.source_receipt_id" in sql
+        assert "record_market_intelligence_provider_v2" in sql
+
     for path in (MIGRATION, SCHEMA):
         sql = path.read_text()
         assert sql.count("ineligible evidence item") >= 5
@@ -325,6 +333,19 @@ def test_migration_is_idempotent_and_schema_mirrors_it_verbatim():
     assert "\\n+--" not in schema
     assert migration.count("CREATE TABLE IF NOT EXISTS public.") == len(BASE_TABLES)
     assert migration.count("DROP TRIGGER IF EXISTS") == len(BASE_TABLES)
+
+
+def test_reuse_override_validates_immutable_identity_and_keeps_run_receipt_evidence():
+    migration = REUSE_MIGRATION.read_text()
+    for marker in (
+        "reuse_market_source_item_if_immutable",
+        "conflicting immutable market source item identity",
+        "RETURN NULL",
+        "market_source_items_reuse_immutable BEFORE INSERT",
+        "replace(definition_text, ' AND receipt.id=item.source_receipt_id', '')",
+        "record_market_intelligence_provider_v2",
+    ):
+        assert marker in migration
 
 
 def test_verifier_is_rollback_only_and_optimization_safe():

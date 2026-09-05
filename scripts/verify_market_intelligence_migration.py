@@ -20,6 +20,7 @@ ROOT = Path(__file__).resolve().parents[1]
 MIGRATIONS = (
     ROOT / "sql" / "migrations" / "20260907_market_intelligence.sql",
     ROOT / "sql" / "migrations" / "20260914_provider_evidence_integrity.sql",
+    ROOT / "sql" / "migrations" / "20260915_market_source_item_reuse.sql",
 )
 GATEWAY_ROLE = "service_role"
 TABLES = (
@@ -380,10 +381,17 @@ def _completed_payload(
             "id": str(item_id),
             "run_item_id": str(run_item_id),
             "receipt_id": str(receipt_id),
+            "provider": "gdelt",
             "upstream_item_id": "rollback-item",
-            "canonical_url": "https://api.gdeltproject.org/api/v2/doc/doc?query=rollback",
+            "canonical_url": "https://publisher.invalid/rollback-item",
+            "request_url": "https://api.gdeltproject.org/api/v2/doc/doc?query=rollback",
             "published_at": "2099-09-04T11:00:00+00:00",
+            "retrieved_at": "2099-09-04T12:00:00+00:00",
             "effective_at": None,
+            "reporting_at": None,
+            "entity_ids": [],
+            "security_ids": [],
+            "discovery_status": "no_event",
             "title": "Rollback-only verifier item",
             "normalized_text": "Bounded normalized verifier content.",
             "canonical_content": canonical_content,
@@ -828,12 +836,12 @@ def verify(cursor) -> tuple[dict[str, object], list[UUID]]:
         return run_id, case_payload
 
     invalid_url_run, invalid_url_payload = completion_case(30)
-    invalid_url_payload["items"][0]["canonical_url"] = "https://example.invalid/item"
+    invalid_url_payload["items"][0]["request_url"] = "https://example.invalid/item"
     url_host_rejected = _expect_db_error(
         cursor, lambda: _call(cursor, "record_market_intelligence", invalid_url_run,
                               uuid4(), Jsonb(invalid_url_payload)))
     cross_url_run, cross_url_payload = completion_case(31)
-    cross_url_payload["items"][0]["canonical_url"] = "https://www.sec.gov/item"
+    cross_url_payload["items"][0]["request_url"] = "https://www.sec.gov/item"
     cross_provider_host_rejected = _expect_db_error(
         cursor, lambda: _call(cursor, "record_market_intelligence", cross_url_run,
                               uuid4(), Jsonb(cross_url_payload)))
@@ -862,6 +870,8 @@ def verify(cursor) -> tuple[dict[str, object], list[UUID]]:
 
     social_run, social_payload = completion_case(33, provider="social")
     social_payload["items"][0]["canonical_url"] = "https://www.reddit.com/r/stocks/test"
+    social_payload["items"][0]["provider"] = "social"
+    social_payload["items"][0]["request_url"] = "https://www.reddit.com/r/stocks/test"
     social_record = _call(cursor, "record_market_intelligence", social_run, uuid4(),
                           Jsonb(social_payload))
     social_provider_recorded = social_record["counts"]["source_items"] == 1
