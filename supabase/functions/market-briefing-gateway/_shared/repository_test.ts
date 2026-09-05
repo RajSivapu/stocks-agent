@@ -1,5 +1,6 @@
 import type { PolicyConfig } from "./contracts.ts";
 import {
+  consecutiveRecommendationLosses,
   createSupabaseGatewayRepository,
   GatewayRepositoryError,
   mergeRelevantSuggestions,
@@ -122,6 +123,23 @@ Deno.test("newer completed history cannot displace unresolved suggestion context
     1,
   );
   assertEquals(selected.map((row) => row.ticker), ["PENDING"]);
+});
+
+Deno.test("three losing horizons for one recommendation count as one loss", () => {
+  assertEquals(consecutiveRecommendationLosses([
+    { suggestion_id: 9, horizon_days: 63, coverage_status: "complete", direction_success: false },
+    { suggestion_id: 9, horizon_days: 21, coverage_status: "complete", direction_success: false },
+    { suggestion_id: 9, horizon_days: 5, coverage_status: "complete", direction_success: false },
+  ]), 1);
+});
+
+Deno.test("recommendation streak uses the longest completed horizon once", () => {
+  assertEquals(consecutiveRecommendationLosses([
+    { suggestion_id: 10, horizon_days: 5, coverage_status: "complete", direction_success: true },
+    { suggestion_id: 10, horizon_days: 21, coverage_status: "complete", direction_success: false },
+    { suggestion_id: 9, horizon_days: 63, coverage_status: "complete", direction_success: false },
+    { suggestion_id: 8, horizon_days: 63, coverage_status: "complete", direction_success: true },
+  ]), 2);
 });
 
 Deno.test("unresolved suggestion overflow fails closed instead of dropping pending state", () => {

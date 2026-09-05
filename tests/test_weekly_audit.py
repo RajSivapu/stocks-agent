@@ -1,6 +1,7 @@
 from copy import deepcopy
 
 from lib.weekly_audit import build_packet
+from scripts.weekly_audit_packet import read_weekly_audit_inputs, weekly_audit_database_url
 
 
 def _contains_sensitive_key(value):
@@ -141,6 +142,11 @@ def test_packet_links_gateway_policy_and_outcomes_without_publication_bodies():
         "direction_success_by_confidence": {"medium": {"successful": 1, "total": 1}},
         "mean_excess_return_by_action": {"watch": "2.5"},
         "coverage_gaps": [{"coverage_status": "incomplete", "horizon_days": 21, "count": 1}],
+        "methodology": {
+            "return_window": "decision_session_close",
+            "entry_hit": "market_touch_not_owner_fill",
+            "actual_fill_status": "unavailable_without_explicit_trade_link",
+        },
     }
     assert packet["policy_summary"] == {
         "approved": 0,
@@ -168,3 +174,86 @@ def test_packet_bounds_linked_evaluations_and_publications():
     )
     assert len(packet["evaluations"]) == 50
     assert len(packet["publications"]) == 50
+
+
+def test_veto_only_week_retains_the_evaluation_and_policy_summary():
+    packet = build_packet(
+        holdings=[], transactions=[], suggestions=[], grades=[], lessons=[], snapshots=[],
+        evaluations=[{
+            "id": "eval-veto", "run_id": "run-veto", "raw_action": "buy",
+            "final_action": None, "policy_status": "vetoed",
+            "reason_codes": ["PORTFOLIO_VALUE_INCOMPLETE"],
+        }],
+        publications=[{
+            "id": "pub-veto", "run_id": "run-veto", "phase": "on-demand",
+            "status": "suppressed", "kind": "brief",
+        }],
+        generated_at="2026-09-04T21:30:00+00:00",
+    )
+
+    assert [row["id"] for row in packet["evaluations"]] == ["eval-veto"]
+    assert [row["id"] for row in packet["publications"]] == ["pub-veto"]
+    assert packet["policy_summary"]["vetoed"] == 1
+    assert packet["policy_summary"]["raw_final_disagreements"] == 1
+    assert packet["policy_summary"]["top_reason_codes"] == [
+        {"code": "PORTFOLIO_VALUE_INCOMPLETE", "count": 1}
+    ]
+    assert packet["outcome_summary"]["methodology"] == {
+        "return_window": "decision_session_close",
+        "entry_hit": "market_touch_not_owner_fill",
+        "actual_fill_status": "unavailable_without_explicit_trade_link",
+    }
+
+
+class _Result:
+    def __init__(self, rows):
+        self._rows = rows
+
+    def fetchall(self):
+        return self._rows
+
+
+class _ReadOnlyConnection:
+    def __init__(self):
+        self.statements = []
+
+    def execute(self, statement):
+        normalized = " ".join(str(statement).split())
+        self.statements.append(normalized)
+        if normalized == "SET TRANSACTION READ ONLY":
+            return _Result([])
+        return _Result([])
+
+
+def test_weekly_audit_reader_uses_one_read_only_transaction_and_selects_only():
+    connection = _ReadOnlyConnection()
+    inputs = read_weekly_audit_inputs(connection)
+
+    assert set(inputs) == {
+        "holdings", "transactions", "suggestions", "grades", "lessons",
+        "snapshots", "evaluations", "publications",
+    }
+    assert connection.statements[0] == "SET TRANSACTION READ ONLY"
+    assert len(connection.statements) == 9
+    assert all(statement.startswith("SELECT ") for statement in connection.statements[1:])
+
+
+def test_weekly_audit_database_url_accepts_only_the_scoped_runtime_role():
+    project_ref = "abcdefghijklmnopqrst"
+    scoped = (
+        "postgresql://stock_agent_dashboard_runtime.abcdefghijklmnopqrst:password-longer-than-24"
+        "@aws-0-us-east-1.pooler.supabase.com:5432/postgres"
+    )
+    assert weekly_audit_database_url({"DASHBOARD_DATABASE_URL": scoped}, project_ref) == scoped
+
+    for unsafe in (
+        scoped.replace("stock_agent_dashboard_runtime", "postgres"),
+        scoped.replace("abcdefghijklmnopqrst:password", "zzzzzzzzzzzzzzzzzzzz:password"),
+        scoped.replace("pooler.supabase.com", "example.com"),
+    ):
+        try:
+            weekly_audit_database_url({"DASHBOARD_DATABASE_URL": unsafe}, project_ref)
+        except ValueError:
+            pass
+        else:
+            raise AssertionError("weekly audit accepted a non-scoped database role")

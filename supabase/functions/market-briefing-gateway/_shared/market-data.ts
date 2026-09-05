@@ -222,6 +222,38 @@ function quoteMarketState(meta: Record<string, unknown>, now: Date): string {
   return "CLOSED";
 }
 
+function fixedProviderDecimal(value: string): bigint {
+  const [whole, fraction = ""] = value.split(".");
+  return BigInt(whole) * 1_000_000_000_000n + BigInt(fraction.padEnd(12, "0"));
+}
+
+function quoteActionability(meta: Record<string, unknown>): Pick<
+  VerifiedQuote, "actionable_price_status" | "actionable_price_reasons"
+> {
+  const reasons: VerifiedQuote["actionable_price_reasons"] = [];
+  if (meta.tradingHalted === true) reasons.push("halted");
+  else if (meta.tradingHalted !== false) reasons.push("halt_status_unknown");
+
+  if (meta.bid === undefined || meta.bid === null || meta.ask === undefined || meta.ask === null) {
+    reasons.push("spread_unknown");
+  } else {
+    const bid = decimal(meta.bid)!;
+    const ask = decimal(meta.ask)!;
+    if (fixedProviderDecimal(ask) < fixedProviderDecimal(bid)) {
+      throw new MarketDataError("invalid quote response");
+    }
+  }
+  if (meta.regularMarketVolume === undefined || meta.regularMarketVolume === null) {
+    reasons.push("liquidity_unknown");
+  } else {
+    decimal(meta.regularMarketVolume);
+  }
+  return {
+    actionable_price_status: reasons.length === 0 ? "available" : "unavailable",
+    actionable_price_reasons: reasons,
+  };
+}
+
 export async function fetchVerifiedQuote(
   ticker: string,
   fetchImpl: FetchLike = fetch,
@@ -234,6 +266,7 @@ export async function fetchVerifiedQuote(
   const payload = await fetchProviderJson(url, fetchImpl);
   try {
     const meta = objectValue(chartResult(payload, "quote").meta);
+    if (meta.symbol !== symbol || meta.currency !== "USD") throw new Error();
     const price = decimal(meta.regularMarketPrice);
     const previousClose = decimal(
       meta.previousClose ?? meta.chartPreviousClose ?? null,
@@ -261,6 +294,7 @@ export async function fetchVerifiedQuote(
       as_of: asOf.toISOString(),
       market_state: marketState,
       source: "yahoo-chart",
+      ...quoteActionability(meta),
     };
   } catch {
     throw new MarketDataError("invalid quote response");

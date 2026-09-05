@@ -411,6 +411,8 @@ function verifiedQuote(
     as_of: "2026-09-02T16:55:00.000Z",
     market_state: "REGULAR",
     source: "yahoo-chart",
+    actionable_price_status: "available",
+    actionable_price_reasons: [],
   };
 }
 

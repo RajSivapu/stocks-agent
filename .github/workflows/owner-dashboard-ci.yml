@@ -28,7 +28,7 @@ jobs:
           node-version: "24"
           cache: npm
       - run: python -m venv .venv
-      - run: .venv/bin/pip install supabase pytest "psycopg[binary]" pyyaml
+      - run: .venv/bin/pip install --require-hashes --only-binary=:all: -r requirements.lock
       - run: npm ci --ignore-scripts
       - run: npm audit --audit-level=high --omit=optional --ignore-scripts
       - run: node scripts/check_dependency_licenses.mjs

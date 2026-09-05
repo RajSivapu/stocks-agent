@@ -1,6 +1,7 @@
 import {
   isFirstNyseSessionOfMonth,
   isNyseHoliday,
+  isRegularSession,
   quoteAllowedForPhase,
 } from "./market-calendar.ts";
 import type { VerifiedQuote } from "./contracts.ts";
@@ -19,6 +20,8 @@ function quote(asOf: string, marketState: string): VerifiedQuote {
     as_of: asOf,
     market_state: marketState,
     source: "yahoo-chart",
+    actionable_price_status: "available",
+    actionable_price_reasons: [],
   };
 }
 
@@ -130,4 +133,23 @@ Deno.test("outside-session on-demand requires the latest official close", () => 
     ),
     "older close should fail",
   );
+});
+
+Deno.test("reviewed 2026 half-days stop the regular session at 13:00 New York", () => {
+  for (const date of ["2026-11-27", "2026-12-24"]) {
+    assert(isRegularSession(new Date(`${date}T17:59:00.000Z`), holidays), `${date} should be open at 12:59 ET`);
+    assert(!isRegularSession(new Date(`${date}T18:00:00.000Z`), holidays), `${date} should close at 13:00 ET`);
+    assert(quoteAllowedForPhase(
+      "on-demand", quote(`${date}T18:00:00.000Z`, "CLOSED"),
+      new Date(`${date}T18:01:00.000Z`), holidays, 20,
+    ), `${date} official half-day close should be authoritative`);
+  }
+});
+
+Deno.test("market session checks fail closed outside maintained calendar coverage", () => {
+  const now = new Date("2027-01-04T17:00:00.000Z");
+  assert(!isRegularSession(now, []), "unreviewed 2027 session was accepted");
+  assert(!quoteAllowedForPhase(
+    "intraday", quote("2027-01-04T16:59:00.000Z", "REGULAR"), now, [], 20,
+  ), "unreviewed 2027 quote was accepted");
 });

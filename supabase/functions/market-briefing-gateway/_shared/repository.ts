@@ -51,6 +51,32 @@ export interface LearningRecordReceipt {
   duplicate: boolean;
 }
 
+export function consecutiveRecommendationLosses(
+  rows: readonly Record<string, unknown>[],
+): number {
+  const orderedRecommendationIds: number[] = [];
+  const longestOutcome = new Map<number, { horizon: number; directionSuccess: boolean }>();
+  for (const row of rows) {
+    if (!Number.isSafeInteger(row.suggestion_id) ||
+        !Number.isSafeInteger(row.horizon_days) ||
+        row.coverage_status !== "complete" ||
+        typeof row.direction_success !== "boolean") continue;
+    const suggestionId = row.suggestion_id as number;
+    const horizon = row.horizon_days as number;
+    if (!longestOutcome.has(suggestionId)) orderedRecommendationIds.push(suggestionId);
+    const prior = longestOutcome.get(suggestionId);
+    if (!prior || horizon > prior.horizon) {
+      longestOutcome.set(suggestionId, { horizon, directionSuccess: row.direction_success });
+    }
+  }
+  let losses = 0;
+  for (const suggestionId of orderedRecommendationIds) {
+    if (longestOutcome.get(suggestionId)!.directionSuccess) break;
+    losses += 1;
+  }
+  return losses;
+}
+
 export interface PersistedBundle {
   request_id: string;
   request_lease_token: string;
@@ -1229,15 +1255,7 @@ export function createSupabaseGatewayRepository(
         return value === null ? sum : sum + signedMicros(value);
       }, 0n);
       const gradeRows = rows(results[6], "CONTEXT_TOO_LARGE");
-      let consecutiveLosses = 0;
-      for (const row of gradeRows) {
-        if (
-          row.coverage_status !== "complete" ||
-          typeof row.direction_success !== "boolean"
-        ) continue;
-        if (row.direction_success) break;
-        consecutiveLosses += 1;
-      }
+      const consecutiveLosses = consecutiveRecommendationLosses(gradeRows);
       const context: GatewayReadContext = {
         holdings: holdings.map((row) => ({
           ticker: text(row.ticker, 15),

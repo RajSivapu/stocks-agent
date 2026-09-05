@@ -184,6 +184,8 @@ function quote(
     as_of: asOf,
     market_state: marketState,
     source: "yahoo-chart",
+    actionable_price_status: "available",
+    actionable_price_reasons: [],
   };
 }
 

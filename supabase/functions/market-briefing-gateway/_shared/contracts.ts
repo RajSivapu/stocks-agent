@@ -487,6 +487,11 @@ export interface VerifiedQuote {
   as_of: string;
   market_state: string;
   source: "yahoo-chart";
+  actionable_price_status: "available" | "unavailable";
+  actionable_price_reasons: Array<
+    "halted" | "halt_status_unknown" | "spread_unknown" |
+      "liquidity_unknown"
+  >;
 }
 
 export interface HoldingState {

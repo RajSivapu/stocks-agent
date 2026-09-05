@@ -443,6 +443,11 @@ export function evaluateCandidate(
       "QUOTE_MISSING",
       "An independent quote for the candidate is unavailable.",
     );
+  } else if (verifiedQuote.actionable_price_status !== "available") {
+    add(
+      "QUOTE_MISSING",
+      `The quote cannot support an actionable price: ${verifiedQuote.actionable_price_reasons.join(",")}.`,
+    );
   } else if (
     !(candidateQuoteAllowed = quoteAllowedForPhase(
       candidate.phase,

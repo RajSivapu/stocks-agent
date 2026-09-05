@@ -44,10 +44,16 @@ const quoteFixture = {
   chart: {
     result: [{
       meta: {
+        symbol: "VTI",
+        currency: "USD",
         regularMarketPrice: 380.16,
         previousClose: 377.89,
         regularMarketTime: Date.parse("2026-09-02T17:00:00.000Z") / 1000,
         marketState: "REGULAR",
+        tradingHalted: false,
+        bid: 380.15,
+        ask: 380.16,
+        regularMarketVolume: 1_000_000,
       },
     }],
     error: null,
@@ -67,7 +73,43 @@ Deno.test("verified quote uses provider timestamp and decimal strings", async ()
     as_of: "2026-09-02T17:00:00.000Z",
     market_state: "REGULAR",
     source: "yahoo-chart",
+    actionable_price_status: "available",
+    actionable_price_reasons: [],
   });
+});
+
+Deno.test("quote parser rejects a provider symbol or currency mismatch", async () => {
+  for (const meta of [{ symbol: "WRONG" }, { currency: "EUR" }]) {
+    const mismatched = structuredClone(quoteFixture);
+    Object.assign(mismatched.chart.result[0].meta, meta);
+    await assertRejects(
+      () => fetchVerifiedQuote("VTI", fixtureFetch(mismatched), new Date("2026-09-02T17:01:00.000Z")),
+      "invalid quote response",
+    );
+  }
+});
+
+Deno.test("unknown halt, spread, or liquidity makes the actionable price unavailable", async () => {
+  for (const field of ["tradingHalted", "bid", "regularMarketVolume"] as const) {
+    const incomplete = structuredClone(quoteFixture);
+    delete (incomplete.chart.result[0].meta as Record<string, unknown>)[field];
+    if (field === "bid") delete (incomplete.chart.result[0].meta as Record<string, unknown>).ask;
+    const result = await fetchVerifiedQuote(
+      "VTI", fixtureFetch(incomplete), new Date("2026-09-02T17:01:00.000Z"),
+    );
+    assertEquals(result.actionable_price_status, "unavailable");
+    assert(result.actionable_price_reasons.length > 0, `${field} had no unavailable reason`);
+  }
+});
+
+Deno.test("an explicit trading halt makes the actionable price unavailable", async () => {
+  const halted = structuredClone(quoteFixture);
+  halted.chart.result[0].meta.tradingHalted = true;
+  const result = await fetchVerifiedQuote(
+    "VTI", fixtureFetch(halted), new Date("2026-09-02T17:01:00.000Z"),
+  );
+  assertEquals(result.actionable_price_status, "unavailable");
+  assertEquals(result.actionable_price_reasons, ["halted"]);
 });
 
 Deno.test("verified quote derives the session from provider trading windows when marketState is omitted", async () => {
@@ -124,9 +166,11 @@ Deno.test("quote parser fails closed when both marketState and trading windows a
 
 Deno.test("quote request uses one encoded canonical ticker path", async () => {
   let requested = "";
+  const brkFixture = structuredClone(quoteFixture);
+  brkFixture.chart.result[0].meta.symbol = "BRK.B";
   await fetchVerifiedQuote("BRK.B", (input: RequestInfo | URL) => {
     requested = String(input);
-    return Promise.resolve(new Response(JSON.stringify(quoteFixture)));
+    return Promise.resolve(new Response(JSON.stringify(brkFixture)));
   }, new Date("2026-09-02T17:01:00.000Z"));
   assert(
     requested ===

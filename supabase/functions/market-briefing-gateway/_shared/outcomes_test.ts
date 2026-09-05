@@ -55,21 +55,34 @@ Deno.test("five-session buy grade counts market sessions and uses adjusted close
   assertEquals(grade.stock_return_pct, "10");
   assertEquals(grade.benchmark_return_pct, "4");
   assertEquals(grade.excess_return_pct, "6");
-  assertEquals(grade.mfe_pct, "10");
-  assertEquals(grade.mae_pct, "-1");
+  assertEquals(grade.mfe_pct, "11");
+  assertEquals(grade.mae_pct, "-2");
   assertEquals(grade.entry_hit_at, "2026-09-03");
   assertEquals(grade.target_hit_at, "2026-09-10");
   assertEquals(grade.direction_success, true);
 });
 
-Deno.test("decision price is converted to adjusted basis", () => {
+Deno.test("stock and benchmark exposure both begin at the decision-session close", () => {
   const adjustedStock = stock.map((item, index) => ({
     ...item,
     adjusted_close: index === 0 ? "50" : String(Number(item.adjusted_close) / 2),
   }));
-  const grade = gradeDecision(decision(), adjustedStock, benchmark, 5);
+  const grade = gradeDecision(
+    decision({ decision_price: "80" }), adjustedStock, benchmark, 5,
+  );
   assertEquals(grade.stock_return_pct, "10");
-  assertEquals(grade.mfe_pct, "10");
+  assertEquals(grade.benchmark_return_pct, "4");
+});
+
+Deno.test("excursions use adjusted session highs and lows rather than closes", () => {
+  const volatile = [
+    stock[0],
+    bar("2026-09-03", "101", "80", "130"),
+    ...stock.slice(2),
+  ];
+  const grade = gradeDecision(decision(), volatile, benchmark, 5);
+  assertEquals(grade.mfe_pct, "30");
+  assertEquals(grade.mae_pct, "-20");
 });
 
 Deno.test("first raw level hits and an earlier stop make a Buy unsuccessful", () => {

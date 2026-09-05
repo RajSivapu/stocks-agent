@@ -1,6 +1,8 @@
 import type { Phase, VerifiedQuote } from "./contracts.ts";
 
 const DATE_PATTERN = /^\d{4}-\d{2}-\d{2}$/;
+const MAINTAINED_YEAR = "2026";
+const EARLY_CLOSES = new Set(["2026-11-27", "2026-12-24"]);
 
 function localParts(
   instant: Date,
@@ -36,13 +38,23 @@ function isWeekend(date: string): boolean {
   return day === 0 || day === 6;
 }
 
-function previousSession(date: string, holidays: readonly string[]): string {
+function hasMaintainedCoverage(date: string): boolean {
+  return DATE_PATTERN.test(date) && date.slice(0, 4) === MAINTAINED_YEAR;
+}
+
+function sessionCloseMinutes(date: string, holidays: readonly string[]): number | null {
+  if (!hasMaintainedCoverage(date) || isWeekend(date) || isNyseHoliday(date, holidays)) return null;
+  return EARLY_CLOSES.has(date) ? 13 * 60 : 16 * 60;
+}
+
+function previousSession(date: string, holidays: readonly string[]): string | null {
   let cursor = addDays(date, -1);
   for (let count = 0; count < 10; count += 1) {
+    if (!hasMaintainedCoverage(cursor)) return null;
     if (!isWeekend(cursor) && !isNyseHoliday(cursor, holidays)) return cursor;
     cursor = addDays(cursor, -1);
   }
-  throw new Error("calendar has no prior session in bounded window");
+  return null;
 }
 
 function quoteLocalDate(quote: VerifiedQuote): string | null {
@@ -87,8 +99,8 @@ export function isRegularSession(
 ): boolean {
   const local = localParts(now);
   const minutes = local.hour * 60 + local.minute;
-  return !isWeekend(local.date) && !isNyseHoliday(local.date, holidays) &&
-    minutes >= 9 * 60 + 30 && minutes < 16 * 60;
+  const close = sessionCloseMinutes(local.date, holidays);
+  return close !== null && minutes >= 9 * 60 + 30 && minutes < close;
 }
 
 export function ownerLocalDate(now: Date): string {
@@ -116,7 +128,8 @@ export function quoteAllowedForPhase(
   if (Number.isNaN(quoteInstant.valueOf()) || quoteInstant > now) return false;
   const local = localParts(now);
   const quoteDate = quoteLocalDate(quote);
-  if (quoteDate === null) return false;
+  if (quote.actionable_price_status !== "available" || quoteDate === null ||
+      !hasMaintainedCoverage(local.date) || !hasMaintainedCoverage(quoteDate)) return false;
 
   if (
     phase !== "on-demand" &&
@@ -135,10 +148,10 @@ export function quoteAllowedForPhase(
   }
 
   const minutes = local.hour * 60 + local.minute;
+  const close = sessionCloseMinutes(local.date, holidays);
   const latestCompleted =
-    !isWeekend(local.date) && !isNyseHoliday(local.date, holidays) &&
-      minutes >= 16 * 60
+    close !== null && minutes >= close
       ? local.date
       : previousSession(local.date, holidays);
-  return quote.market_state !== "REGULAR" && quoteDate === latestCompleted;
+  return latestCompleted !== null && quote.market_state !== "REGULAR" && quoteDate === latestCompleted;
 }
