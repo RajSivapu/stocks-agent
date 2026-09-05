@@ -15,6 +15,7 @@ MIGRATION = ROOT / "sql" / "migrations" / "20260907_market_intelligence.sql"
 SCHEMA = ROOT / "sql" / "schema.sql"
 VERIFIER = ROOT / "scripts" / "verify_market_intelligence_migration.py"
 TRANSACTION_CHRONOLOGY = ROOT / "sql" / "migrations" / "20260909_transaction_chronology.sql"
+PORTFOLIO_COMMAND_VERIFIER = ROOT / "scripts" / "verify_portfolio_command_rpc.py"
 
 TABLES = (
     "market_intelligence_runs",
@@ -345,3 +346,19 @@ def test_transaction_chronology_rejects_late_ledger_entries_without_rewriting_ho
     assert migration.index("v_executed_on < v_latest_transaction_on") < migration.index(
         "RETURN public.apply_portfolio_command_without_chronology"
     )
+    assert "v_command.status = 'rejected'" in migration
+    assert "v_command.result->>'code' = 'TRANSACTION_OUT_OF_ORDER'" in migration
+
+
+def test_portfolio_command_verifier_exercises_the_authoritative_chronology_fixture():
+    source = PORTFOLIO_COMMAND_VERIFIER.read_text()
+
+    assert "2026-09-01" in source
+    assert "2026-09-03" in source
+    assert "2026-09-02" in source
+    assert "qty=10, price=100" in source
+    assert "qty=5, price=110" in source
+    assert "qty=10, price=200" in source
+    assert 'late_buy["code"] == "TRANSACTION_OUT_OF_ORDER"' in source
+    assert "Decimal(str(holding[\"shares\"])) == Decimal(\"5\")" in source
+    assert "Decimal(str(sell[\"realized_pnl\"])) == Decimal(\"50\")" in source

@@ -36,6 +36,11 @@ BEGIN
     RAISE EXCEPTION 'command unavailable' USING ERRCODE = '42501';
   END IF;
 
+  IF v_command.status = 'rejected'
+      AND v_command.result->>'code' = 'TRANSACTION_OUT_OF_ORDER' THEN
+    RETURN v_command.result || jsonb_build_object('duplicate', true);
+  END IF;
+
   IF v_command.status = 'pending' AND v_command.operation IN ('buy', 'sell') THEN
     v_executed_on := COALESCE(
       v_command.executed_on,

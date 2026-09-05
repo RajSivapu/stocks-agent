@@ -93,10 +93,38 @@ Deno.test("portfolio omits derived totals when any required price is missing or 
 });
 
 Deno.test("repeating decimal cost basis remains available", () => {
-  const view = mapPortfolio([{ ticker: "ABC", shares: "3", avg_cost: "100.6666666666666667", current_price: "105" }]);
+  const view = mapPortfolio([{ ticker: "ABC", shares: "3", avg_cost: "100.6666666666666667", current_price: "105", price_freshness: "fresh" }]);
   assertEquals(view.summary.costBasis, 302);
   assertEquals(view.summary.unrealizedProfit, 13);
   assertEquals(view.summary.incomplete, false);
+});
+
+Deno.test("decimal arithmetic rounds only after the portfolio total is calculated", () => {
+  const view = mapPortfolio([{ ticker: "ABC", shares: "3", avg_cost: "100.1666666", price: "105", price_freshness: "fresh" }]);
+  assertEquals(view.summary.costBasis, 300);
+  assertEquals(view.summary.unrealizedProfit, 15);
+  assertEquals(view.summary.incomplete, false);
+});
+
+Deno.test("missing cost basis remains unavailable instead of becoming zero", () => {
+  const view = mapPortfolio([{ ticker: "ABC", shares: "3", price: "105", price_freshness: "fresh" }]);
+  assertEquals(view.summary.costBasis, null);
+  assertEquals(view.summary.unrealizedProfit, null);
+  assertEquals(view.summary.incomplete, true);
+});
+
+Deno.test("a quote without validated freshness remains unavailable", () => {
+  const view = mapPortfolio([{ ticker: "ABC", shares: "3", avg_cost: "100", current_price: "105" }]);
+  assertEquals(view.holdings[0]?.freshness, "unavailable");
+  assertEquals(view.summary.unrealizedProfit, null);
+  assertEquals(view.summary.incomplete, true);
+});
+
+Deno.test("unsafe display totals are unavailable and incomplete", () => {
+  const view = mapPortfolio([{ ticker: "ABC", shares: "9007199254740992", avg_cost: "1", price: "1", price_freshness: "fresh" }]);
+  assertEquals(view.summary.costBasis, null);
+  assertEquals(view.summary.unrealizedProfit, null);
+  assertEquals(view.summary.incomplete, true);
 });
 
 Deno.test("publication errors are never forwarded as suppression copy", () => {

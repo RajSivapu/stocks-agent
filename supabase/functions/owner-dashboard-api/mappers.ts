@@ -67,18 +67,17 @@ function sourceLinks(value: unknown): SourceLink[] {
   });
 }
 
-const SCALE = 1_000_000n;
+const SCALE = 10n ** 36n;
 
 function fixed(value: unknown): bigint | null {
   const raw = text(value, 80);
-  const match = raw && /^(-?)(\d{1,18})(?:\.(\d{1,24}))?$/.exec(raw);
+  const match = raw && /^(-?)(\d{1,18})(?:\.(\d{1,18}))?$/.exec(raw);
   if (!match) return null;
   const whole = match[2];
   if (!whole) return null;
   const suppliedFraction = match[3] ?? "";
-  const fraction = suppliedFraction.slice(0, 6).padEnd(6, "0");
-  let result = BigInt(whole) * SCALE + BigInt(fraction || "0");
-  if (suppliedFraction.length > 6 && suppliedFraction[6] >= "5") result += 1n;
+  const fraction = suppliedFraction.padEnd(36, "0");
+  const result = BigInt(whole) * SCALE + BigInt(fraction || "0");
   return match[1] === "-" ? -result : result;
 }
 
@@ -86,7 +85,7 @@ function decimal(value: bigint): string {
   const negative = value < 0n;
   const absolute = negative ? -value : value;
   const whole = absolute / SCALE;
-  const fraction = (absolute % SCALE).toString().padStart(6, "0").replace(/0+$/, "");
+  const fraction = (absolute % SCALE).toString().padStart(36, "0").replace(/0+$/, "");
   return `${negative ? "-" : ""}${whole}${fraction ? `.${fraction}` : ""}`;
 }
 
@@ -105,8 +104,6 @@ function roundedDisplayAmount(value: bigint): number | null {
 function holding(row: Row): HoldingView {
   const freshness = ["fresh", "stale", "partial", "unavailable"].includes(String(row.price_freshness))
     ? row.price_freshness as HoldingView["freshness"]
-    : row.current_price !== undefined
-    ? "fresh"
     : "unavailable";
   const shares = fixed(row.shares);
   const average = fixed(row.avg_cost);
@@ -151,23 +148,30 @@ export function mapPortfolio(
 ): PortfolioView & {
   summary: { costBasis: number | null; unrealizedProfit: number | null; incomplete: boolean };
 } {
-  const holdings = holdingRows.slice(0, 100).map(holding);
+  const rawHoldings = holdingRows.slice(0, 100);
+  const holdings = rawHoldings.map(holding);
+  const holdingValues = rawHoldings.map((row) => {
+    const shares = fixed(row.shares);
+    const price = fixed(row.price ?? row.current_price);
+    const freshness = row.price_freshness === "fresh";
+    return shares !== null && price !== null && freshness ? multiply(shares, price) : null;
+  });
   let costBasis = 0n;
   let totalValue = 0n;
   let complete = holdings.length > 0;
   let basisComplete = holdings.length > 0;
-  for (const row of holdings) {
+  for (const [index, row] of rawHoldings.entries()) {
     const shares = fixed(row.shares);
-    const average = fixed(row.average_cost);
+    const average = fixed(row.avg_cost);
     if (shares !== null && average !== null) costBasis += multiply(shares, average);
     else basisComplete = false;
-    const value = fixed(row.value);
+    const value = holdingValues[index];
     if (value === null) complete = false;
     else totalValue += value;
   }
   if (complete && totalValue > 0n) {
-    for (const row of holdings) {
-      const value = fixed(row.value) ?? 0n;
+    for (const [index, row] of holdings.entries()) {
+      const value = holdingValues[index] ?? 0n;
       row.weight_percent = (Number(value) * 100 / Number(totalValue)).toFixed(2).replace(/\.00$/, "");
     }
   }
@@ -188,11 +192,13 @@ export function mapPortfolio(
       active: row.active === true,
     }];
   });
-  const summaryIncomplete = !complete || !basisComplete;
+  const baseSummaryIncomplete = !complete || !basisComplete;
   const summaryCostBasis = basisComplete ? roundedDisplayAmount(costBasis) : null;
-  const summaryUnrealized = summaryIncomplete
+  const candidateUnrealized = baseSummaryIncomplete
     ? null
     : roundedDisplayAmount(totalValue - costBasis);
+  const summaryIncomplete = baseSummaryIncomplete || summaryCostBasis === null || candidateUnrealized === null;
+  const summaryUnrealized = summaryIncomplete ? null : candidateUnrealized;
   return {
     holdings,
     plans,
