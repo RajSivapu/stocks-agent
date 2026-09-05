@@ -13,6 +13,16 @@ def test_protected_release_and_recovery_are_valid_workflow_yaml():
         assert workflow["jobs"]
 
 
+def test_ci_fetches_the_audited_baseline_history():
+    workflow = yaml.safe_load(Path(".github/workflows/owner-dashboard-ci.yml").read_text())
+    checkout = next(
+        step
+        for step in workflow["jobs"]["verify"]["steps"]
+        if str(step.get("uses", "")).startswith("actions/checkout@")
+    )
+    assert checkout["with"]["fetch-depth"] == 0
+
+
 def test_protected_release_workflow_binds_a_successful_main_candidate_to_immutable_evidence():
     workflow = Path(".github/workflows/owner-dashboard-release.yml").read_text()
     assert "workflow_run:" in workflow
