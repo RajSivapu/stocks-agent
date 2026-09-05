@@ -115,6 +115,18 @@ def test_local_suite_failure_stops_deployment(tmp_path):
         deploy.run_local_verification(tmp_path, runner)
 
 
+def test_local_verification_cannot_inherit_database_integration_opt_in(tmp_path):
+    commands = []
+
+    def runner(command, **_options):
+        commands.append(command)
+        return type("Result", (), {"returncode": 0, "stdout": "", "stderr": ""})()
+
+    deploy.run_local_verification(tmp_path, runner)
+
+    assert commands == [["env", "-u", "RUN_DB_INTEGRATION_TESTS", "npm", "run", "test:all"]]
+
+
 def test_release_manifest_contains_only_new_migrations_and_changed_functions():
     assert tuple(path.name for path in deploy.RELEASE_MIGRATIONS) == (
         "20260907_market_intelligence.sql",

@@ -5,7 +5,7 @@ repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$repo_root"
 
 .venv/bin/python -m py_compile scripts/verify_personal_stock_agent_v1.py
-.venv/bin/python -m pytest -q
+env -u RUN_DB_INTEGRATION_TESTS .venv/bin/python -m pytest -q -m "not db_integration"
 node --test tests/*.mjs
 npx --yes deno@2.9.6 test --config supabase/functions/deno.json \
   supabase/functions/market-briefing-gateway/_shared \

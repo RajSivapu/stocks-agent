@@ -200,7 +200,7 @@ def verify_reviewed_sha(candidate_sha: str, reviewed_sha: str) -> str:
 
 
 def run_local_verification(repo_root: Path = ROOT, runner: Callable[..., object] = subprocess.run) -> None:
-    result = _run(["npm", "run", "test:all"], cwd=repo_root, runner=runner)
+    result = _run(["env", "-u", "RUN_DB_INTEGRATION_TESTS", "npm", "run", "test:all"], cwd=repo_root, runner=runner)
     if getattr(result, "returncode", 1) != 0:
         raise RuntimeError("local verification suite failed")
 

@@ -1,5 +1,6 @@
 # Secrets — never commit
 config/secrets.local.json
+config/test-secrets.local.json
 .mcp.json
 .env
 supabase/.env.local

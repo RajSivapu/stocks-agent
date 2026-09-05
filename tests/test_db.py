@@ -1,18 +1,42 @@
-import os, pytest
+import json
+import os
+from pathlib import Path
+
+import pytest
 from datetime import date
 from uuid import uuid4
-from lib import db, config
+from lib import db
 from supabase import create_client
+from tests.integration_guard import require_isolated_supabase_test_project
 
-pytestmark = pytest.mark.skipif(
-    not (os.environ.get("SUPABASE_URL") or
-         __import__("pathlib").Path("config/secrets.local.json").exists()),
-    reason="no DB credentials"
-)
+TEST_SECRETS_PATH = Path("config/test-secrets.local.json")
 
 
-def _sb():
-    return create_client(config.secret("supabase_url"), config.secret("supabase_service_role_key"))
+def configured_test_url() -> str:
+    return os.environ["SUPABASE_URL"]
+
+
+def configured_test_service_key() -> str:
+    try:
+        value = json.loads(TEST_SECRETS_PATH.read_text())["supabase_service_role_key"]
+    except (OSError, json.JSONDecodeError, KeyError, TypeError) as error:
+        raise RuntimeError("isolated test service-role credentials are required") from error
+    if not isinstance(value, str) or not value:
+        raise RuntimeError("isolated test service-role credentials are required")
+    return value
+
+
+@pytest.fixture
+def isolated_db(monkeypatch):
+    require_isolated_supabase_test_project(os.environ, TEST_SECRETS_PATH)
+    client = create_client(configured_test_url(), configured_test_service_key())
+    monkeypatch.setattr(db, "_sb", lambda: client)
+    cleanups = []
+    try:
+        yield client, cleanups
+    finally:
+        for cleanup in reversed(cleanups):
+            cleanup()
 
 
 class _RecordingQuery:
@@ -73,46 +97,52 @@ def test_legacy_suggestion_import_uses_only_named_rpc(monkeypatch):
     assert not any(call[1] == "table" and call[0] == "suggestions" for call in client.calls)
 
 
-def test_holding_stop_roundtrip():
+@pytest.mark.db_integration
+def test_holding_stop_roundtrip(isolated_db):
+    client, cleanups = isolated_db
+    ticker = f"T{uuid4().hex[:8].upper()}"
+    cleanups.append(lambda: client.table("holdings").delete().eq("ticker", ticker).execute())
     db.init_schema()
-    db.upsert_holding({"ticker": "TSTH", "shares": 1, "avg_cost": 100, "bucket": "growth",
+    db.upsert_holding({"ticker": ticker, "shares": 1, "avg_cost": 100, "bucket": "growth",
         "opened_at": "2026-06-18", "notes": "t", "stop": 90, "target": 130, "high_water_price": 100})
-    h = {r["ticker"]: r for r in db.get_holdings()}["TSTH"]
+    h = {r["ticker"]: r for r in db.get_holdings()}[ticker]
     assert float(h["stop"]) == 90 and float(h["target"]) == 130
     # plain re-upsert WITHOUT stop must not wipe it (COALESCE logic in upsert_holding)
-    db.upsert_holding({"ticker": "TSTH", "shares": 2, "avg_cost": 100, "bucket": "growth",
+    db.upsert_holding({"ticker": ticker, "shares": 2, "avg_cost": 100, "bucket": "growth",
         "opened_at": "2026-06-18", "notes": "t2"})
-    h = {r["ticker"]: r for r in db.get_holdings()}["TSTH"]
+    h = {r["ticker"]: r for r in db.get_holdings()}[ticker]
     assert float(h["stop"]) == 90 and float(h["shares"]) == 2
     # ratchet the stop up
-    db.update_holding_stop("TSTH", stop=110, high_water_price=125)
-    h = {r["ticker"]: r for r in db.get_holdings()}["TSTH"]
+    db.update_holding_stop(ticker, stop=110, high_water_price=125)
+    h = {r["ticker"]: r for r in db.get_holdings()}[ticker]
     assert float(h["stop"]) == 110 and float(h["high_water_price"]) == 125
     # stop-alert de-dup flag: starts unset, can be set and cleared (edge-triggered cooldown)
-    db.set_stop_alert_active("TSTH", True)
-    h = {r["ticker"]: r for r in db.get_holdings()}["TSTH"]
+    db.set_stop_alert_active(ticker, True)
+    h = {r["ticker"]: r for r in db.get_holdings()}[ticker]
     assert h["stop_alert_active"] is True
-    db.set_stop_alert_active("TSTH", False)
-    h = {r["ticker"]: r for r in db.get_holdings()}["TSTH"]
+    db.set_stop_alert_active(ticker, False)
+    h = {r["ticker"]: r for r in db.get_holdings()}[ticker]
     assert h["stop_alert_active"] is False
     # approaching-stop / approaching-target / target-hit flags: same roundtrip
-    db.set_stop_near_alert_active("TSTH", True)
-    db.set_target_near_alert_active("TSTH", True)
-    db.set_target_alert_active("TSTH", True)
-    h = {r["ticker"]: r for r in db.get_holdings()}["TSTH"]
+    db.set_stop_near_alert_active(ticker, True)
+    db.set_target_near_alert_active(ticker, True)
+    db.set_target_alert_active(ticker, True)
+    h = {r["ticker"]: r for r in db.get_holdings()}[ticker]
     assert h["stop_near_alert_active"] is True and h["target_near_alert_active"] is True and h["target_alert_active"] is True
     # owner hold-override: sets an expiry date and (optionally) a reason in notes
-    db.set_hold_override("TSTH", "2026-07-31", reason="owner: holding through July, ignore routine stop pushes")
-    h = {r["ticker"]: r for r in db.get_holdings()}["TSTH"]
+    db.set_hold_override(ticker, "2026-07-31", reason="owner: holding through July, ignore routine stop pushes")
+    h = {r["ticker"]: r for r in db.get_holdings()}[ticker]
     assert h["hold_override_until"] == "2026-07-31"
     assert "holding through July" in h["notes"]
-    # cleanup
-    _sb().table("holdings").delete().eq("ticker", "TSTH").execute()
 
 
-def test_paper_watch_lifecycle():
+@pytest.mark.db_integration
+def test_paper_watch_lifecycle(isolated_db):
+    client, cleanups = isolated_db
+    ticker = f"T{uuid4().hex[:8].upper()}"
+    cleanups.append(lambda: client.table("paper_watches").delete().eq("ticker", ticker).execute())
     db.init_schema()
-    pid = db.insert_paper_watch({"ticker": "TSTP", "created": "2026-06-18",
+    pid = db.insert_paper_watch({"ticker": ticker, "created": "2026-06-18",
         "entry_ref_price": 100, "target_price": 130, "hypothetical_amount": 100,
         "thesis": "t", "horizon": "weeks", "agent_view_at_open": "Watch", "agent_score_at_open": 80})
     assert isinstance(pid, int)
@@ -121,53 +151,54 @@ def test_paper_watch_lifecycle():
     assert float(active["entry_ref_price"]) == 100
     assert active["agent_view_at_open"] == "Watch"
     db.close_paper_watch(pid, close_price=120, closed_date="2026-06-25")
-    closed = _sb().table("paper_watches").select("*").eq("id", pid).execute().data[0]
+    closed = client.table("paper_watches").select("*").eq("id", pid).execute().data[0]
     assert float(closed["close_price"]) == 120
     assert not any(r["id"] == pid for r in db.get_active_paper_watches())
-    _sb().table("paper_watches").delete().eq("id", pid).execute()
 
 
-def test_lessons_roundtrip():
+@pytest.mark.db_integration
+def test_lessons_roundtrip(isolated_db):
+    client, cleanups = isolated_db
     db.init_schema()
     content = f"test regime line {uuid4()}"
-    try:
-        db.insert_lesson({"entry_date": str(date.today()), "category": "regime", "content": content})
-        rows = db.get_lessons(limit=50)
-        match = [r for r in rows if r["content"] == content]
-        assert len(match) == 1 and match[0]["category"] == "regime"
-    finally:
-        _sb().table("lessons").delete().eq("content", content).execute()
+    cleanups.append(lambda: client.table("lessons").delete().eq("content", content).execute())
+    db.insert_lesson({"entry_date": str(date.today()), "category": "regime", "content": content})
+    rows = db.get_lessons(limit=50)
+    match = [r for r in rows if r["content"] == content]
+    assert len(match) == 1 and match[0]["category"] == "regime"
 
 
-def test_analysis_run_lifecycle_roundtrip():
-    run_id = None
-    try:
-        run_id = db.start_analysis_run("test", started_at="2026-09-01T15:00:00+00:00")
-        running = _sb().table("analysis_runs").select("*").eq("id", run_id).execute().data[0]
-        assert running["kind"] == "test"
-        assert running["status"] == "running"
-        assert running["finished_at"] is None
+@pytest.mark.db_integration
+def test_analysis_run_lifecycle_roundtrip(isolated_db):
+    client, cleanups = isolated_db
+    run_ids = []
+    cleanups.append(
+        lambda: client.table("analysis_runs").delete().eq("id", run_ids[0]).execute() if run_ids else None,
+    )
+    run_id = db.start_analysis_run("test", started_at="2026-09-01T15:00:00+00:00")
+    run_ids.append(run_id)
+    running = client.table("analysis_runs").select("*").eq("id", run_id).execute().data[0]
+    assert running["kind"] == "test"
+    assert running["status"] == "running"
+    assert running["finished_at"] is None
 
-        db.finish_analysis_run(
-            run_id,
-            status="completed",
-            data_as_of="2026-09-01T15:04:00+00:00",
-            source_status={"quotes": "fresh", "news": "partial"},
-            symbols=["AAPL", "MSFT"],
-            write_counts={"suggestions": 1, "observations": 2},
-            telegram_message_ids=[12345],
-            summary="test run complete",
-        )
-        completed = _sb().table("analysis_runs").select("*").eq("id", run_id).execute().data[0]
-        assert completed["status"] == "completed"
-        assert completed["finished_at"] is not None
-        assert completed["source_status"] == {"quotes": "fresh", "news": "partial"}
-        assert completed["symbols"] == ["AAPL", "MSFT"]
-        assert completed["write_counts"] == {"suggestions": 1, "observations": 2}
-        assert completed["telegram_message_ids"] == [12345]
-    finally:
-        if run_id:
-            _sb().table("analysis_runs").delete().eq("id", run_id).execute()
+    db.finish_analysis_run(
+        run_id,
+        status="completed",
+        data_as_of="2026-09-01T15:04:00+00:00",
+        source_status={"quotes": "fresh", "news": "partial"},
+        symbols=["AAPL", "MSFT"],
+        write_counts={"suggestions": 1, "observations": 2},
+        telegram_message_ids=[12345],
+        summary="test run complete",
+    )
+    completed = client.table("analysis_runs").select("*").eq("id", run_id).execute().data[0]
+    assert completed["status"] == "completed"
+    assert completed["finished_at"] is not None
+    assert completed["source_status"] == {"quotes": "fresh", "news": "partial"}
+    assert completed["symbols"] == ["AAPL", "MSFT"]
+    assert completed["write_counts"] == {"suggestions": 1, "observations": 2}
+    assert completed["telegram_message_ids"] == [12345]
 
 
 @pytest.mark.parametrize(("function_name", "table", "order_column", "limit"), [
