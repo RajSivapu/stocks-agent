@@ -27,6 +27,7 @@ def v1_chain(run_id):
     packet_id = "33333333-3333-4333-8333-333333333333"
     report_id = "44444444-4444-4444-8444-444444444444"
     return {
+        "overdue_scheduled_phases": [],
         "intelligence_runs": [{"id": run_id}],
         "intelligence_events": [{"id": event_id, "run_id": run_id, "content_hash": "a" * 64}],
         "intelligence_rankings": [{"id": "55555555-5555-4555-8555-555555555555", "run_id": run_id, "event_id": event_id, "content_hash": "b" * 64}],
@@ -296,6 +297,28 @@ def test_source_reconciliation_requires_scoped_read_only_database_role():
     }
     with pytest.raises(RuntimeError, match="source receipt"):
         verify.reconcile_source_receipts({}, {}, source, "6903b3cc-05b7-4f90-bbc2-7e80a3a59e22")
+
+
+def test_source_reconciliation_rejects_an_overdue_scheduled_phase():
+    run_id = "6903b3cc-05b7-4f90-bbc2-7e80a3a59e22"
+    payloads = {route: envelope({}) for route in verify.CANARY_ROUTES}
+    payloads["/v1/today"] = envelope({"boundaries": verify.BOUNDARIES, "portfolio": {"data_as_of": None, "market_state": "unknown", "price_sources": [], "holdings": []}})
+    payloads["/v1/portfolio"] = envelope({"holdings": []})
+    payloads["/v1/runs"] = envelope({"runs": [{"id": run_id, "kind": "post-market", "status": "completed", "finished_at": "2026-09-03T20:00:00.000Z", "data_as_of": None, "evaluation_count": 0, "suggestion_count": 0, "publication_status": None}]})
+    payloads["/v1/alerts"] = envelope({"alerts": []})
+    payloads["/v1/intelligence"] = envelope({"run_id": run_id})
+    payloads["/v1/reports"] = envelope({"reports": [{"id": "44444444-4444-4444-8444-444444444444"}]})
+    detail = envelope({"run": payloads["/v1/runs"]["data"]["runs"][0], "request_receipts": [], "evaluations": [], "write_counts": {}, "telegram_message_ids": [], "incomplete_stages": []})
+    source = {
+        "database_user": verify.RUNTIME_ROLE, "transaction_read_only": "on",
+        "run": {"id": run_id, "kind": "post-market", "status": "completed", "finished_at": "2026-09-03T20:00:00.000Z", "data_as_of": None, "write_counts": {}, "telegram_message_ids": []},
+        "gateway_request_count": 0, "evaluation_count": 0, "suggestion_count": 0,
+        "alerts": [], "policy_version": None, "holdings": [], "portfolio_data_as_of": None,
+        **v1_chain(run_id),
+        "overdue_scheduled_phases": [{"market_date": "2026-09-03", "phase": "post-market", "deadline_at": "2026-09-03T22:00:00.000Z"}],
+    }
+    with pytest.raises(RuntimeError, match="overdue scheduled phase"):
+        verify.reconcile_source_receipts(payloads, detail, source, run_id)
 
 
 def test_source_database_url_must_use_the_scoped_session_pooler_login():

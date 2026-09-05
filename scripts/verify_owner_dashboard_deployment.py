@@ -340,6 +340,10 @@ def collect_source_receipts(database_url: str, api_url: str, run_id: str) -> dic
             "SELECT id::text AS id, run_id::text AS run_id, packet_id::text AS packet_id, report_hash, rendered_hash FROM public.market_reports WHERE run_id=%s::uuid ORDER BY created_at", (run_id,))
         report_publications = _fetch_all(connection,
             "SELECT request_id::text AS request_id, run_id::text AS run_id, response FROM public.market_gateway_requests WHERE run_id=%s::uuid AND operation='record_report' AND status='completed' ORDER BY request_id", (run_id,))
+        overdue_scheduled_phases = _fetch_all(
+            connection,
+            "SELECT market_date::text AS market_date, phase, to_char(deadline_at AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS.MS\"Z\"') AS deadline_at FROM public.read_overdue_scheduled_market_phases()",
+        )
     for row in holdings:
         row["price_as_of"] = normalize_receipt_timestamp(row.get("price_as_of"))
         for field in ("shares", "average_cost", "price", "price_source"):
@@ -360,6 +364,7 @@ def collect_source_receipts(database_url: str, api_url: str, run_id: str) -> dic
         "intelligence_packets": intelligence_packets,
         "reports": reports,
         "report_publications": report_publications,
+        "overdue_scheduled_phases": overdue_scheduled_phases,
     }
 
 
@@ -382,6 +387,12 @@ def reconcile_source_receipts(
     """Fail closed unless all visible production claims agree with independent source reads."""
     def fail() -> None:
         raise RuntimeError("dashboard claim differs from its source receipt")
+
+    overdue = source.get("overdue_scheduled_phases")
+    if not isinstance(overdue, list):
+        fail()
+    if overdue:
+        raise RuntimeError("overdue scheduled phase is missing a completed or suppressed receipt")
 
     if source.get("database_user") != RUNTIME_ROLE or source.get("transaction_read_only") != "on":
         fail()

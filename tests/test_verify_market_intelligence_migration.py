@@ -26,6 +26,7 @@ TRANSACTION_CHRONOLOGY = ROOT / "sql" / "migrations" / "20260909_transaction_chr
 PORTFOLIO_COMMAND_VERIFIER = ROOT / "scripts" / "verify_portfolio_command_rpc.py"
 DELIVERY_OUTBOX = ROOT / "sql" / "migrations" / "20260910_delivery_outbox.sql"
 COMMAND_ACKNOWLEDGEMENT_LEASE = ROOT / "sql" / "migrations" / "20260913_command_acknowledgement_lease.sql"
+SCHEDULED_LIFECYCLE = ROOT / "sql" / "migrations" / "20260923_scheduled_run_lifecycle.sql"
 
 TABLES = (
     "market_intelligence_runs",
@@ -576,6 +577,24 @@ def test_report_delivery_outbox_is_durable_and_schema_aligned():
         assert "GRANT EXECUTE ON FUNCTION public.claim_market_report_publication(TEXT) TO service_role;" in sql
     assert "status='uncertain'" in migration
     assert "telegram_message_ids=CASE WHEN p_status='delivered' THEN p_message_ids ELSE '[]'::jsonb END" in migration
+
+
+def test_scheduled_lifecycle_is_additive_and_mirrors_the_fresh_schema():
+    migration = SCHEDULED_LIFECYCLE.read_text()
+    schema = SCHEMA.read_text()
+    for sql in (migration, schema):
+        assert "scheduled_market_date DATE" in sql
+        assert "scheduled_phase TEXT" in sql
+        assert "uq_analysis_runs_scheduled_slot" in sql
+        assert "pg_advisory_xact_lock(hashtextextended('scheduled-analysis-run:'" in sql
+        assert "CREATE OR REPLACE FUNCTION public.finish_market_analysis_run(" in sql
+        assert "MISSING_COLLECTION_RECEIPT" in sql
+        assert "MISSING_PACKET_RECEIPT" in sql
+        assert "MISSING_EVALUATION_RECEIPT" in sql
+        assert "MISSING_REPORT_RECEIPT" in sql
+        assert "MISSING_PUBLICATION_RECEIPT" in sql
+        assert "CREATE OR REPLACE FUNCTION public.read_overdue_scheduled_market_phases(" in sql
+        assert "GRANT EXECUTE ON FUNCTION public.finish_market_analysis_run(UUID) TO service_role;" in sql
 
 
 def test_fresh_schema_declares_reports_before_report_outbox_rowtype_functions():

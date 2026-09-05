@@ -281,6 +281,7 @@ function requireRun(envelope: GatewayEnvelope): string {
 function errorStatus(code: string): number {
   if (code === "RATE_LIMITED") return 429;
   if (code === "CONTEXT_TOO_LARGE") return 413;
+  if (/^MISSING_[A-Z_]+$/.test(code)) return 409;
   if (code === "POLICY_REJECTED" || code === "CALENDAR_COVERAGE_MISSING") {
     return 409;
   }
@@ -927,6 +928,7 @@ export function createGatewayHandler(dependencies: GatewayDependencies) {
           envelope.request_id,
           leaseToken,
           start.phase,
+          start.market_date,
         );
         const result = {
           ok: true,

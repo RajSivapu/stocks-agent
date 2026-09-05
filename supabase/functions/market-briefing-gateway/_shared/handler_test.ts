@@ -3,6 +3,7 @@ import type {
   EvidencePacket,
   GatewayEnvelope,
   GatewayReadContext,
+  Phase,
   PolicyConfig,
   TrustedEvidenceFact,
   VerifiedQuote,
@@ -718,6 +719,7 @@ class FakeRepository implements GatewayRepository {
   > = [];
   expireAlertRuleCalls = 0;
   finishRunCalls = 0;
+  scheduledSlots: string[] = [];
   readCalls = 0;
   packetReadCalls = 0;
   events: string[] = [];
@@ -782,9 +784,10 @@ class FakeRepository implements GatewayRepository {
     this.claims.set(requestId, { ok: false, code });
     return Promise.resolve();
   }
-  startRun(): Promise<string> {
+  startRun(_requestId: string, _leaseToken: string, phase: Phase, marketDate?: string): Promise<string> {
     this.mutationCalls += 1;
     this.startCalls += 1;
+    this.scheduledSlots.push(`${marketDate ?? "missing"}:${phase}`);
     return Promise.resolve(RUN_ID);
   }
   readContext(): Promise<GatewayReadContext> {
@@ -2347,6 +2350,32 @@ Deno.test("live start_run is idempotent", async () => {
   assertEquals(first.run_id, RUN_ID);
   assertEquals(second.run_id, RUN_ID);
   assertEquals(repository.startCalls, 1);
+});
+
+Deno.test("different request ids for one scheduled market slot return the same run", async () => {
+  const { handler, repository } = makeHandler();
+  const first = await json(await handler(request(
+    "start_run", { phase: "intraday", market_date: "2026-09-02" },
+    { requestId: nextRequestId() },
+  )));
+  const second = await json(await handler(request(
+    "start_run", { phase: "intraday", market_date: "2026-09-02" },
+    { requestId: nextRequestId() },
+  )));
+  assertEquals(first.run_id, second.run_id);
+  assertEquals(repository.scheduledSlots, ["2026-09-02:intraday", "2026-09-02:intraday"]);
+});
+
+Deno.test("finish_run returns the specific missing lifecycle stage", async () => {
+  class MissingStageRepository extends FakeRepository {
+    override finishRun(): Promise<RunReceipt> {
+      throw new GatewayRepositoryError("MISSING_COLLECTION_RECEIPT");
+    }
+  }
+  const { handler } = makeHandler(new MissingStageRepository());
+  const result = await handler(request("finish_run", {}));
+  assertEquals(result.status, 409);
+  assertEquals((await json(result)).code, "MISSING_COLLECTION_RECEIPT");
 });
 
 Deno.test("record_artifacts derives paper-watch date, quote, and latest gateway view", async () => {

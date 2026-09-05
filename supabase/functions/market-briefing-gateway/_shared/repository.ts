@@ -267,6 +267,7 @@ export interface GatewayRepository {
     requestId: string,
     leaseToken: string,
     phase: Phase,
+    marketDate: string,
   ): Promise<string>;
   readContext(runId: string | null): Promise<GatewayReadContext>;
   loadIntelligencePacket(
@@ -336,6 +337,8 @@ interface QueryBuilder extends PromiseLike<DbResult> {
   eq(column: string, value: unknown): QueryBuilder;
   is(column: string, value: null): QueryBuilder;
   gte(column: string, value: unknown): QueryBuilder;
+  lt(column: string, value: unknown): QueryBuilder;
+  or(filters: string): QueryBuilder;
   in(column: string, values: unknown[]): QueryBuilder;
   order(column: string, options?: { ascending?: boolean }): QueryBuilder;
   limit(count: number): QueryBuilder;
@@ -473,6 +476,25 @@ function ownerDate(now: Date): string {
   }).formatToParts(now);
   const get = (type: Intl.DateTimeFormatPartTypes) => values.find((part) => part.type === type)?.value ?? "";
   return `${get("year")}-${get("month")}-${get("day")}`;
+}
+
+export function mergeRelevantSuggestions<T extends Record<string, unknown>>(
+  unresolved: T[],
+  completed: T[],
+  limit: number,
+): T[] {
+  if (!Number.isSafeInteger(limit) || limit < 1) {
+    throw new GatewayRepositoryError("CONTEXT_TOO_LARGE");
+  }
+  const output: T[] = [];
+  const seen = new Set<string>();
+  for (const row of [...unresolved, ...completed]) {
+    const identity = String(row.id);
+    if (seen.has(identity) || output.length >= limit) continue;
+    seen.add(identity);
+    output.push(row);
+  }
+  return output;
 }
 
 export function validatePolicy(value: unknown): PolicyConfig {
@@ -885,12 +907,14 @@ export function createSupabaseGatewayRepository(
       if (result.error) throw new GatewayRepositoryError("PERSISTENCE_FAILED");
     },
 
-    async startRun(requestId, leaseToken, phase) {
+    async startRun(requestId, leaseToken, phase, marketDate) {
       const result = await client.rpc("start_market_analysis_run", {
         p_request_id: requestId,
         p_lease_token: leaseToken,
         p_kind: phase,
+        p_market_date: marketDate,
       });
+      if (result.error) throw new GatewayRepositoryError("PERSISTENCE_FAILED");
       return text(oneObject(result).run_id, 36);
     },
 
@@ -1078,8 +1102,13 @@ export function createSupabaseGatewayRepository(
         ).order("ticker").limit(101),
         client.from("suggestions").select(
           "id,date,ticker,action,bucket,confidence,score,stop,target,invalidation_price,valid_until,evidence_as_of",
-        ).eq("decision_source", "gateway").order("date", { ascending: false })
-          .limit(101),
+        ).eq("decision_source", "gateway")
+          .or(`valid_until.is.null,valid_until.gte.${today}`)
+          .order("date", { ascending: false }).limit(101),
+        client.from("suggestions").select(
+          "id,date,ticker,action,bucket,confidence,score,stop,target,invalidation_price,valid_until,evidence_as_of",
+        ).eq("decision_source", "gateway").lt("valid_until", today)
+          .order("date", { ascending: false }).limit(100),
         client.from("stock_observations").select(
           "id,ticker,obs_date,event_type,summary,price_reaction,confidence,source",
         ).order("obs_date", { ascending: false }).limit(100),
@@ -1119,15 +1148,21 @@ export function createSupabaseGatewayRepository(
           : Promise.resolve({ data: null, error: null }),
       ]);
       const holdings = rows(results[0], "CONTEXT_TOO_LARGE");
-      const suggestions = rows(results[1], "CONTEXT_TOO_LARGE");
-      const plans = rows(results[6], "CONTEXT_TOO_LARGE");
-      const watches = rows(results[7], "CONTEXT_TOO_LARGE");
-      const transactions = rows(results[9], "CONTEXT_TOO_LARGE");
-      const commands = rows(results[10], "CONTEXT_TOO_LARGE");
-      if (results[11].error) throw new GatewayRepositoryError("PERSISTENCE_FAILED");
-      const intelligenceInputs = results[11].data === null ? [] : [oneObject(results[11])];
+      const unresolvedSuggestions = rows(results[1], "CONTEXT_TOO_LARGE");
+      const completedSuggestions = rows(results[2], "CONTEXT_TOO_LARGE");
+      const suggestions = mergeRelevantSuggestions(
+        unresolvedSuggestions,
+        completedSuggestions,
+        100,
+      );
+      const plans = rows(results[7], "CONTEXT_TOO_LARGE");
+      const watches = rows(results[8], "CONTEXT_TOO_LARGE");
+      const transactions = rows(results[10], "CONTEXT_TOO_LARGE");
+      const commands = rows(results[11], "CONTEXT_TOO_LARGE");
+      if (results[12].error) throw new GatewayRepositoryError("PERSISTENCE_FAILED");
+      const intelligenceInputs = results[12].data === null ? [] : [oneObject(results[12])];
       if (
-        holdings.length > 100 || suggestions.length > 100 ||
+        holdings.length > 100 || unresolvedSuggestions.length > 100 ||
         plans.length > 20 ||
         watches.length > 50 || transactions.length > 500 ||
         commands.length > 500
@@ -1141,7 +1176,7 @@ export function createSupabaseGatewayRepository(
         const value = nullableDecimal(row.realized_pnl);
         return value === null ? sum : sum + signedMicros(value);
       }, 0n);
-      const gradeRows = rows(results[5], "CONTEXT_TOO_LARGE");
+      const gradeRows = rows(results[6], "CONTEXT_TOO_LARGE");
       let consecutiveLosses = 0;
       for (const row of gradeRows) {
         if (
@@ -1221,7 +1256,7 @@ export function createSupabaseGatewayRepository(
           valid_until: nullableText(row.valid_until, 10),
           evidence_as_of: nullableText(row.evidence_as_of, 40),
         })),
-        observations: rows(results[2], "CONTEXT_TOO_LARGE").map((row) => ({
+        observations: rows(results[3], "CONTEXT_TOO_LARGE").map((row) => ({
           id: integer(row.id),
           ticker: text(row.ticker, 15),
           obs_date: text(row.obs_date, 10),
@@ -1231,13 +1266,13 @@ export function createSupabaseGatewayRepository(
           confidence: nullableText(row.confidence, 20),
           source: nullableText(row.source, 200),
         })),
-        lessons: rows(results[3], "CONTEXT_TOO_LARGE").map((row) => ({
+        lessons: rows(results[4], "CONTEXT_TOO_LARGE").map((row) => ({
           id: integer(row.id),
           entry_date: text(row.entry_date, 10),
           category: text(row.category, 100),
           content: text(row.content, 1000),
         })),
-        radar: rows(results[4], "CONTEXT_TOO_LARGE").map((row) => ({
+        radar: rows(results[5], "CONTEXT_TOO_LARGE").map((row) => ({
           ticker: text(row.ticker, 15),
           added: nullableText(row.added, 10),
           last_seen: nullableText(row.last_seen, 10),
@@ -1257,7 +1292,7 @@ export function createSupabaseGatewayRepository(
           excess_return_pct: nullableDecimal(row.excess_return_pct),
           direction_success: row.direction_success === null ? null : boole(row.direction_success),
         })),
-        dry_powder: rows(results[8], "CONTEXT_TOO_LARGE").map((row) => ({
+        dry_powder: rows(results[9], "CONTEXT_TOO_LARGE").map((row) => ({
           month: text(row.month, 7),
           growth_available: decimal(row.growth_available),
           spec_available: decimal(row.spec_available),
@@ -1450,110 +1485,22 @@ export function createSupabaseGatewayRepository(
     },
 
     async finishRun(runId) {
-      const results = await Promise.all([
-        client.from("market_gateway_requests").select(
-          "operation,status,response",
-        ).eq("run_id", runId).limit(501),
-        client.from("decision_evaluations").select("id").eq("run_id", runId)
-          .limit(501),
-        client.from("suggestions").select("id").eq("run_id", runId).limit(501),
-        client.from("market_publications").select("status,telegram_message_ids")
-          .eq("run_id", runId).limit(2),
-      ]);
-      const requestRows = rows(results[0]);
-      const evaluationRows = rows(results[1]);
-      const suggestionRows = rows(results[2]);
-      const publicationRows = rows(results[3]);
-      if (
-        requestRows.length > 500 || evaluationRows.length > 500 ||
-        suggestionRows.length > 500 || publicationRows.length > 1
-      ) {
-        throw new GatewayRepositoryError("CONTEXT_TOO_LARGE");
-      }
-      const counts: Record<string, number> = {
-        evaluations: evaluationRows.length,
-        suggestions: suggestionRows.length,
-        publications: publicationRows.length,
-        reports: 0,
-      };
-      const reportStatuses: string[] = [];
-      const reportMessageIds: number[] = [];
-      for (const request of requestRows) {
-        const response = request.response;
-        if (
-          typeof response !== "object" || response === null ||
-          Array.isArray(response)
-        ) continue;
-        const responseRow = response as Record<string, unknown>;
-        if (
-          request.operation === "record_report" &&
-          request.status === "completed"
-        ) {
-          const publicationReceipt = responseRow.publication_receipt;
-          if (
-            typeof publicationReceipt === "object" &&
-            publicationReceipt !== null &&
-            !Array.isArray(publicationReceipt)
-          ) {
-            const publication = publicationReceipt as Record<string, unknown>;
-            reportStatuses.push(text(publication.status, 30));
-            if (Array.isArray(publication.telegram_message_ids)) {
-              reportMessageIds.push(
-                ...publication.telegram_message_ids.map(integer),
-              );
-            }
-          }
-          if (typeof responseRow.report_id === "string") counts.reports += 1;
+      const result = await client.rpc("finish_market_analysis_run", { p_run_id: runId });
+      if (result.error) {
+        const code = result.error.message;
+        if (typeof code === "string" && /^MISSING_[A-Z_]+$/.test(code)) {
+          throw new GatewayRepositoryError(code);
         }
-        const responseCounts = responseRow.counts;
-        if (
-          typeof responseCounts !== "object" || responseCounts === null ||
-          Array.isArray(responseCounts)
-        ) continue;
-        for (const [key, value] of Object.entries(responseCounts)) {
-          if (
-            typeof value === "number" && Number.isSafeInteger(value) &&
-            value >= 0
-          ) {
-            counts[key] = (counts[key] ?? 0) + value;
-          }
-        }
+        throw new GatewayRepositoryError("PERSISTENCE_FAILED");
       }
-      const statuses = [
-        ...publicationRows.map((row) => text(row.status, 30)),
-        ...reportStatuses,
-      ];
-      const ids = [
-        ...new Set([
-          ...publicationRows.flatMap((row) =>
-            Array.isArray(row.telegram_message_ids)
-              ? row.telegram_message_ids.map(integer)
-              : []
-          ),
-          ...reportMessageIds,
-        ]),
-      ];
-      const partial = requestRows.some((row) =>
-        row.status === "failed" ||
-        (row.status === "claimed" && row.operation !== "finish_run")
-      ) ||
-        statuses.some((status) =>
-          status === "delivery_failed" || status === "delivery_unknown"
-        );
-      const status: RunReceipt["status"] = partial ? "partial" : "completed";
-      const update = await client.from("analysis_runs").update({
-        status,
-        finished_at: now().toISOString(),
-        write_counts: counts,
-        telegram_message_ids: ids,
-      }).eq("id", runId);
-      if (update.error) throw new GatewayRepositoryError("PERSISTENCE_FAILED");
+      const row = oneObject(result);
+      const writeCounts = oneObject({ data: row.write_counts, error: null });
       return {
-        run_id: runId,
-        status,
-        write_counts: counts,
-        publication_statuses: statuses,
-        telegram_message_ids: ids,
+        run_id: text(row.run_id, 36),
+        status: text(row.status, 10) as RunReceipt["status"],
+        write_counts: Object.fromEntries(Object.entries(writeCounts).map(([key, value]) => [key, integer(value)])),
+        publication_statuses: Array.isArray(row.publication_statuses) ? row.publication_statuses.map((value) => text(value, 30)) : [],
+        telegram_message_ids: Array.isArray(row.telegram_message_ids) ? row.telegram_message_ids.map(integer) : [],
       };
     },
   };

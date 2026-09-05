@@ -1,5 +1,10 @@
 import type { PolicyConfig } from "./contracts.ts";
-import { createSupabaseGatewayRepository, GatewayRepositoryError, validatePolicy } from "./repository.ts";
+import {
+  createSupabaseGatewayRepository,
+  GatewayRepositoryError,
+  mergeRelevantSuggestions,
+  validatePolicy,
+} from "./repository.ts";
 
 function assert(value: boolean, message: string): void {
   if (!value) throw new Error(message);
@@ -59,6 +64,20 @@ Deno.test("completion recovery reads the immutable completion by run and stable 
   assertEquals(calls, [{ name: "read_market_intelligence_completion", parameters: {
     p_run_id: "00000000-0000-4000-8000-000000000001", p_completion_id: "00000000-0000-4000-8000-000000000002",
   } }]);
+});
+
+Deno.test("relevant suggestion context keeps unresolved work when old completed history exceeds the bound", () => {
+  const unresolved = [{ id: 999, date: "2026-09-02", ticker: "OPEN", valid_until: "2026-09-09" }];
+  const completed = Array.from({ length: 101 }, (_, index) => ({
+    id: index,
+    date: `2026-08-${String(31 - (index % 28)).padStart(2, "0")}`,
+    ticker: `OLD${index}`,
+    valid_until: "2026-08-31",
+  }));
+  const selected = mergeRelevantSuggestions(unresolved, completed, 100);
+  assertEquals(selected.length, 100);
+  assertEquals(selected[0].ticker, "OPEN");
+  assertEquals(selected.at(-1)?.ticker, "OLD98");
 });
 
 function rejects(value: unknown): boolean {
