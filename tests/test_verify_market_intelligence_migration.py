@@ -17,6 +17,7 @@ ROOT = Path(__file__).resolve().parents[1]
 MIGRATION = ROOT / "sql" / "migrations" / "20260907_market_intelligence.sql"
 PROVENANCE_MIGRATION = ROOT / "sql" / "migrations" / "20260914_provider_evidence_integrity.sql"
 REUSE_MIGRATION = ROOT / "sql" / "migrations" / "20260915_market_source_item_reuse.sql"
+RUN_PROVENANCE_MIGRATION = ROOT / "sql" / "migrations" / "20260916_run_scoped_request_provenance.sql"
 SCHEMA = ROOT / "sql" / "schema.sql"
 VERIFIER = ROOT / "scripts" / "verify_market_intelligence_migration.py"
 TRANSACTION_CHRONOLOGY = ROOT / "sql" / "migrations" / "20260909_transaction_chronology.sql"
@@ -346,6 +347,14 @@ def test_reuse_override_validates_immutable_identity_and_keeps_run_receipt_evide
         "record_market_intelligence_provider_v2",
     ):
         assert marker in migration
+
+
+def test_request_windows_are_run_scoped_and_secret_free():
+    migration = RUN_PROVENANCE_MIGRATION.read_text()
+    assert "market_run_source_item_provenance" in migration
+    assert "UNIQUE(run_id, source_item_id, source_receipt_id)" in migration
+    assert "api[_-]?key|token|secret|password" in migration
+    assert "canonical_url IS DISTINCT FROM NEW.canonical_url" not in migration
 
 
 def test_verifier_is_rollback_only_and_optimization_safe():

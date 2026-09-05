@@ -97,3 +97,17 @@
   contract tests: `3 passed`; `git diff --check` passed.
 - No live network/provider, database, Telegram, deployment, brokerage, paid-provider, or full-suite
   action was performed.
+
+## Controller remediation (round 4)
+
+- Added run-scoped request provenance so secret-free provider request windows are retained per run
+  item/receipt while immutable source reuse is driven by publisher identity/content rather than a
+  moving request URL. Provider host and secret checks remain in the gateway/provider-v2 path.
+- Persisted event, relationship, and ranking references now derive from the run ID plus their
+  deterministic fact identity. Reprocessing creates a complete distinct run graph; retrying the
+  same run produces the same graph IDs and packet references.
+
+### Controller round 4 evidence
+
+- Focused executable two-run test proves stable source item identity, distinct downstream graph IDs,
+  and same-run stability. Final focused gate: `129 passed` Python; gateway Deno: `3 passed`.

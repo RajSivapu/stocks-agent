@@ -21,6 +21,7 @@ MIGRATIONS = (
     ROOT / "sql" / "migrations" / "20260907_market_intelligence.sql",
     ROOT / "sql" / "migrations" / "20260914_provider_evidence_integrity.sql",
     ROOT / "sql" / "migrations" / "20260915_market_source_item_reuse.sql",
+    ROOT / "sql" / "migrations" / "20260916_run_scoped_request_provenance.sql",
 )
 GATEWAY_ROLE = "service_role"
 TABLES = (

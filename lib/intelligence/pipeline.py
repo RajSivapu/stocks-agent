@@ -401,9 +401,9 @@ class IntelligencePipeline:
             "coverage": coverage,
             "receipts": receipt_rows,
             "items": item_rows,
-            "events": [_event_row(event) for event in events],
-            "relationships": [_relationship_row(relation) for relation in relationships],
-            "rankings": [_ranking_row(candidate) for candidate in ranked],
+            "events": [_event_row(run_id, event) for event in events],
+            "relationships": [_relationship_row(run_id, relation) for relation in relationships],
+            "rankings": [_ranking_row(run_id, candidate) for candidate in ranked],
             "packet": packet_row,
             "error": None,
         }
@@ -684,27 +684,31 @@ def _provider_query_text(provider: str, target: str, symbols: tuple[str, ...]) -
     return translated.strip()
 
 
-def _event_row(value: MarketEvent) -> dict[str, object]:
+def _stored_event_id(run_id: str, event_id: str) -> str:
+    return _uuid("event", run_id, event_id)
+
+
+def _event_row(run_id: str, value: MarketEvent) -> dict[str, object]:
     return _semantic_row("event", {
         "event_type": value.event_type, "title": value.title, "summary": value.summary,
         "occurred_at": _timestamp(value.occurred_at), "effective_at": _timestamp(value.effective_at),
         "materiality": str(value.materiality), "confidence": str(value.confidence),
         "evidence_item_ids": [evidence_key(item) for item in value.evidence],
-    }, row_id=value.event_id)
+    }, row_id=_stored_event_id(run_id, value.event_id))
 
 
-def _relationship_row(value: EventRelationship) -> dict[str, object]:
+def _relationship_row(run_id: str, value: EventRelationship) -> dict[str, object]:
     return _semantic_row("relationship", {
-        "event_id": value.event_id, "source_kind": value.source_kind, "source_key": value.source_key,
+        "event_id": _stored_event_id(run_id, value.event_id), "source_kind": value.source_kind, "source_key": _stored_event_id(run_id, value.source_key) if value.source_kind == "event" else value.source_key,
         "target_kind": value.target_kind, "target_key": value.target_key,
         "relationship_type": value.relationship_type, "hypothesis": value.hypothesis,
         "evidence_item_ids": [evidence_key(item) for item in value.evidence],
     })
 
 
-def _ranking_row(value: RankedCandidate) -> dict[str, object]:
+def _ranking_row(run_id: str, value: RankedCandidate) -> dict[str, object]:
     return _semantic_row("ranking", {
-        "event_id": value.event_id, "candidate_key": value.candidate_key, "ticker": value.ticker,
+        "event_id": _stored_event_id(run_id, value.event_id), "candidate_key": value.candidate_key, "ticker": value.ticker,
         "rank": value.rank, "component_scores": {key: str(score) for key, score in value.components.items()},
         "total_score": str(value.total_score), "qualified": value.qualified,
         "veto_reasons": list(value.veto_reasons),

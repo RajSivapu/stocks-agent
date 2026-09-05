@@ -278,3 +278,25 @@ def test_near_corroboration_reaches_discovery_and_packet_evidence():
     assert [item["disposition"] for item in gateway.payloads[-1]["items"]] == ["accepted", "near_duplicate"]
     assert len(gateway.payloads[-1]["events"]) == 2
     assert len(result.packet.to_dict()["evidence"]) == 2
+
+
+def test_two_runs_reuse_source_identity_but_scope_event_graph_ids_by_run():
+    gateway = FakeGateway()
+    pipeline = IntelligencePipeline(gateway, [FakeAdapter()], context={"holdings": {"TEST": "1"}})
+    source = replace(raw_item("holding:TEST", official=True), security_ids=("TEST",),
+                     metadata=MappingProxyType({"exposure_kind": "filing"}),
+                     request_url="https://api.gdeltproject.org/api/v2/doc/doc?query=TEST&start=one")
+    result = CollectionResult((source,), receipt("gdelt"), 20)
+    run_one = RUN_ID
+    run_two = "44444444-4444-4444-8444-444444444444"
+
+    pipeline._complete(request("intraday"), run_one, ("holding:TEST",), (result,))
+    pipeline._complete(request("intraday"), run_two, ("holding:TEST",), (result,))
+    first, second = gateway.payloads[-2:]
+
+    assert first["items"][0]["id"] == second["items"][0]["id"]
+    assert first["events"][0]["id"] != second["events"][0]["id"]
+    assert first["relationships"][0]["event_id"] == first["events"][0]["id"]
+    assert second["rankings"][0]["event_id"] == second["events"][0]["id"]
+    pipeline._complete(request("intraday"), run_one, ("holding:TEST",), (result,))
+    assert gateway.payloads[-1]["events"][0]["id"] == first["events"][0]["id"]
