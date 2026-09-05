@@ -334,6 +334,14 @@ def _report_id_from_key(key: str) -> str:
     return str(UUID("".join(value)))
 
 
+def remove_report_fields(body: dict[str, object], fields: set[str]) -> dict[str, object]:
+    """Return a probe payload with selected nested provenance fields removed."""
+    changed = dict(body)
+    for field in fields:
+        changed.pop(field, None)
+    return changed
+
+
 def _completed_payload(
     *,
     reservation_id: UUID,
@@ -563,10 +571,11 @@ def verify(cursor) -> tuple[dict[str, object], list[UUID]]:
             cursor, "record_market_report", prior_run, key, Jsonb(changed)))
 
     report_nested_provenance_required = all((
-        rejects_report_body(report_body - {'source_ids'}),
-        rejects_report_body(report_body - {'policy_decision_ids'}),
-        rejects_report_body(report_body - {'comparison_ids'}),
-        rejects_report_body(report_body - {'source_ids', 'policy_decision_ids', 'comparison_ids'}),
+        rejects_report_body(remove_report_fields(report_body, {'source_ids'})),
+        rejects_report_body(remove_report_fields(report_body, {'policy_decision_ids'})),
+        rejects_report_body(remove_report_fields(report_body, {'comparison_ids'})),
+        rejects_report_body(remove_report_fields(
+            report_body, {'source_ids', 'policy_decision_ids', 'comparison_ids'})),
     ))
     report_source_provenance = rejects_report_body({**report_body, "source_ids": [str(uuid4())]})
     other_decision_id = uuid4()

@@ -4,7 +4,10 @@ from pathlib import Path
 
 import pytest
 
-from scripts.verify_market_intelligence_migration import evaluate_snapshot
+from scripts.verify_market_intelligence_migration import (
+    evaluate_snapshot,
+    remove_report_fields,
+)
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -275,11 +278,21 @@ def test_report_nested_provenance_arrays_are_explicit_and_null_safe():
         assert "jsonb_array_length(p_report->'report'->'comparison_ids') > 96" in sql
 
 
-def test_verifier_probes_each_missing_report_nested_provenance_array():
-    source = VERIFIER.read_text()
-    for field in ("source_ids", "policy_decision_ids", "comparison_ids"):
-        assert f"report_body - {{'{field}'}}" in source
-    assert "report_body - {'source_ids', 'policy_decision_ids', 'comparison_ids'}" in source
+@pytest.mark.parametrize("field", ("source_ids", "policy_decision_ids", "comparison_ids"))
+def test_missing_report_probe_builder_removes_each_field_from_a_real_payload(field):
+    report_body = {
+        "sections": [{"title": "context"}],
+        "source_ids": ["source-1"],
+        "policy_decision_ids": ["decision-1"],
+        "comparison_ids": [],
+    }
+
+    changed = remove_report_fields(report_body, {field})
+
+    assert field not in changed
+    assert changed["sections"] == [{"title": "context"}]
+    assert set(changed) == {"sections", "source_ids", "policy_decision_ids", "comparison_ids"} - {field}
+    assert field in report_body
 
 
 def test_migration_is_idempotent_and_schema_mirrors_it_verbatim():
