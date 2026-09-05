@@ -2,6 +2,7 @@ import {
   parseArtifactMutationBatch,
   parseDecisionBundle,
   parseGatewayEnvelope,
+  validatePacketEvidence,
   type Phase,
 } from "./contracts.ts";
 
@@ -180,6 +181,14 @@ Deno.test("inline intelligence packet enforces candidate, evidence, and byte bou
     coverage: Record<string, unknown>;
   }).coverage = { padding: "x".repeat(98_304) };
   assertThrows(() => parseDecisionBundle(oversized, "intraday"), "96 KiB");
+});
+
+Deno.test("candidate cannot omit contradictory packet evidence", () => {
+  const candidate = validCandidate();
+  const packet = fixturePacket();
+  packet.evidence.push({ item_id: "conflict-1", normalized_text: "Contradicts the thesis." });
+  packet.candidates[0].evidence_ids.push("conflict-1");
+  assertEquals(validatePacketEvidence(candidate as never, packet), ["EVIDENCE_NOT_IN_PACKET"]);
 });
 
 Deno.test("gateway envelope accepts the bounded standalone alert evaluation operation", () => {

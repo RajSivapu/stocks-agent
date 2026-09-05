@@ -1312,7 +1312,11 @@ export function validatePacketEvidence(
   const packetCandidate = packet.candidates.find((row) => row.candidate_key === candidate.ticker);
   if (!packetCandidate) return ["EVIDENCE_NOT_IN_PACKET"];
   const allowed = new Set(packetCandidate.evidence_ids);
-  return candidate.evidence.every((item) => allowed.has(item.id)) ? [] : ["EVIDENCE_NOT_IN_PACKET"];
+  const supplied = new Set(candidate.evidence.map((item) => item.id));
+  return supplied.size === allowed.size &&
+      [...allowed].every((id) => supplied.has(id))
+    ? []
+    : ["EVIDENCE_NOT_IN_PACKET"];
 }
 
 export function parseDecisionBundle(
