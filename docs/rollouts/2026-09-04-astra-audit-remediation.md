@@ -147,3 +147,8 @@ The missing Sites transport/publication remains an implementation/integration re
 rollout. Production cannot proceed until it is reviewed and available. All production gates above
 remain pending, including exact-head CI, live six-digit Auth, Site deployment/parity, live isolated
 restore, and the next existing scheduled run without any duplicate trigger.
+
+The complete Track C focused gate passed **396 tests** after the recovery ownership/identity fix.
+The independent reviewer marked both Important findings addressed, found no new Critical or Important
+issue, and returned **SPEC PASS / QUALITY PASS / APPROVED**. This approval covers the exact Track C
+range; it does not close the Sites integration, consolidated, exact-head, or production gates.

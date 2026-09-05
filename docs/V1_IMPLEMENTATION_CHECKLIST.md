@@ -14,7 +14,8 @@ An owner-only personal stock agent that uses zero-incremental-cost data sources,
 - [x] Consolidated local gate passed: 1,006 checks passed, 4 skipped, 4 credentialed database tests intentionally deselected
 - [x] Final whole-repository GPT-6 Astra review completed
 - [ ] Final Astra fix wave complete — **10 of 11 findings locally implemented; 5 remains open at the Sites transport/publication conditional**
-- [ ] Final focused review and consolidated gate
+- [x] Final Track C focused code review approved with no open Critical or Important findings
+- [ ] Consolidated final-candidate gate
 - [ ] Final GPT-6 Astra re-review
 - [ ] Protected production rollout and live receipts
 
@@ -37,7 +38,7 @@ An owner-only personal stock agent that uses zero-incremental-cost data sources,
 
 - [x] 1. Persist only canonical policy-derived report prose, including suppressed reports
 - [x] 2. Use fresh reconciled cash with ledger invalidation; never spend legacy monthly budgets as cash
-- [x] 3. Make deployment upgrade-aware and restore exact prior component state — **native recovery requires proven candidate/partial ownership and stable existing function IDs; focused tests complete, independent fix review pending**
+- [x] 3. Make deployment upgrade-aware and restore exact prior component state — **native recovery requires proven candidate/partial ownership and stable existing function IDs; independent Track C review approved**
 - [x] 4. Preserve already-applied migration bytes and move changes into additive migrations — **audited bytes restored; actual native-ledger PostgreSQL upgrade/retry passed**
 - [ ] 5. Deploy, verify, and recover every changed component, including Telegram and the owner web site — **all three native Edge paths implemented; reviewed Sites transport and immutable four-artifact publication/receipt integration remain open and preflight blocks before mutation**
 - [x] 6. Persist provider attempts before transport and reconcile crash uncertainty without duplicate calls
@@ -51,6 +52,7 @@ An owner-only personal stock agent that uses zero-incremental-cost data sources,
 
 - [ ] Finish findings 3–5 in one release-integration pass
 - [x] Run focused release/migration/rollback tests
+- [x] Complete independent Track C review with no open Critical or Important findings
 - [ ] Run one consolidated repository gate after the fixes
 - [ ] Run one scoped GPT-6 Astra re-review of the 11 findings
 - [x] Update this checklist and the formal status/rollout records

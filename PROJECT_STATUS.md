@@ -5,7 +5,7 @@ Canonical release: Personal Stock Agent V1 safety remediation
 Audit baseline: `432d647ef911ff63da427097f02a852e18038b62` on `origin/main`
 Consolidated local-gate candidate: `a0f8158c959e788b2a302ae6411328ec6e98a707`
 Current state: final Astra fix wave has concrete local PostgreSQL/Supabase recovery and immutable-history changes;
-Sites transport/publication integration, final focused review, and final consolidated gate remain pending.
+the Track C focused review is approved. Sites transport/publication integration and the final consolidated gate remain pending.
 The `a0f8158` consolidated result is historical and does not verify this final fix wave.
 
 This file is the version-controlled source of truth for the Personal Stock Agent V1 rollout.
@@ -37,7 +37,8 @@ Sites transport and immutable four-artifact publication/receipt integration. The
 I/O-free and the missing Sites capability still blocks production before mutation. Focused local
 tests do not substitute for independent review or any live deployment/restore proof.
 
-Final independent review, consolidated verification of the final candidate, exact-head CI,
+The exact Track C range received independent approval after both Important recovery findings were fixed.
+Final whole-repository Astra re-review, consolidated verification of the final candidate, exact-head CI,
 protected deployment, live Auth, Site deployment/parity, live isolated restore, and the next
 existing scheduled receipts are all pending. No scheduled run was triggered.
 

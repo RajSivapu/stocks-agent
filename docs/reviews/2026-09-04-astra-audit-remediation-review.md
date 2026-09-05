@@ -115,7 +115,7 @@ idempotent retry, and an actual export/restore with policy-comparison/evaluation
 
 | Final Astra finding | Local disposition | Remaining boundary |
 |---|---|---|
-| 3 — upgrade-aware exact recovery | Concrete repository-native PostgreSQL role, Supabase managed-secret, and all-three-Edge adapter implemented; committed encrypted journals, fresh-process recovery, exact readback no-ops, and first-install/upgrade boundary tests | Local implementation complete; fix-round independent review and live protected recovery remain pending |
+| 3 — upgrade-aware exact recovery | Concrete repository-native PostgreSQL role, Supabase managed-secret, and all-three-Edge adapter implemented; committed encrypted journals, fresh-process recovery, exact readback no-ops, and first-install/upgrade boundary tests | Local implementation and independent Track C review complete; live protected recovery remains pending |
 | 4 — immutable history | All audited migration bytes restored; documented `20260907` raw/native hashes reconcile; changes moved into `20261001` | Protected migration deployment and exact-head CI remain pending |
 | 5 — every changed deployed artifact | Gateway, dashboard API, and Telegram capture/download/apply/readback/restore are concrete; Site contract and four-artifact verification remain fail-closed | Reviewed Sites transport and immutable four-artifact publication/receipt integration unavailable; workflow fails before mutation and cannot claim Site verification |
 
@@ -127,8 +127,8 @@ Observed red evidence included immutable/native hash drift, ignored `changed=fal
 component/production orchestration, missing encrypted journal and prior-secret validation,
 acceptance of missing four-artifact readback, acceptance of postdeployment Site prior capture,
 first-install platform identity allocation, and malformed workflow YAML. These were followed by
-focused green runs. No independent Track C review is claimed here. Final focused review,
-consolidated verification of the final candidate, final Astra re-review, exact-head CI, protected
+focused green runs. Later fix rounds and the approved Track C review are recorded below.
+Consolidated verification of the final candidate, final Astra re-review, exact-head CI, protected
 deployment, live Auth/Site/restore, and next existing scheduled receipt gates remain pending.
 
 ### Track C fix round 1
@@ -140,7 +140,8 @@ tests). Actual disposable PostgreSQL covers exact role attributes/password verif
 membership options, quoted/per-database settings, and committed encrypted journal retrieval.
 Stateful Supabase command tests cover all three active downloads and metadata races, upgrades,
 first installs, secret digest/absence round trips, and six-component orchestration failures.
-An independent review of this fix commit and every consolidated/production gate remain pending.
+The subsequent exact-range review found two Important recovery-proof gaps; both were fixed in round 2.
+Every consolidated/production gate remains pending.
 
 ### Track C fix round 2 — recovery ownership and identity
 
@@ -154,6 +155,7 @@ Both already-restored and post-restore verification preserve the prior function 
 requires an attestation capability, and the actual Site transport/publication remains unimplemented.
 
 Observed red: 15 ownership/identity regressions, 14 missing native-proof cases, and one missing Site
-proof-capability guard. Final affected gate: **299 passed** (51 native, 81 recovery-engine, 167
-affected deployment/verifier/workflow/recovery tests). Compilation and diff checks passed. No full
-suite or live operation ran. Independent review of this fix and all production gates remain pending.
+proof-capability guard. The final combined Track C focused gate passed **396 tests**; compilation,
+audited migration hashes, and diff checks passed. The independent reviewer marked both Important
+findings addressed, found no new Critical or Important issue, and returned **SPEC PASS / QUALITY PASS /
+APPROVED**. No full suite or live operation ran. All production gates remain pending.
