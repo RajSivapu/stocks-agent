@@ -370,6 +370,7 @@ def test_chronology_verifier_reloads_authoritative_state_after_rejection():
     class Query:
         def __init__(self, rows):
             self.rows = rows
+            self.order_columns = []
 
         def select(self, _columns):
             return self
@@ -377,11 +378,13 @@ def test_chronology_verifier_reloads_authoritative_state_after_rejection():
         def eq(self, _column, _value):
             return self
 
-        def order(self, _column):
+        def order(self, column):
+            self.order_columns.append(column)
             return self
 
         def execute(self):
-            return SimpleNamespace(data=self.rows)
+            rows = sorted(self.rows, key=lambda row: tuple(row[column] for column in self.order_columns))
+            return SimpleNamespace(data=rows)
 
     class FakeSupabase:
         def __init__(self, transactions):
@@ -394,27 +397,32 @@ def test_chronology_verifier_reloads_authoritative_state_after_rejection():
                 "transactions": self.transactions,
             }[name])
 
-    portfolio_command_verifier._require_late_rejection_preserves_accounting(
-        FakeSupabase([
-            {"executed_on": "2026-09-01", "side": "buy", "qty": "10", "price": "100"},
-            {"executed_on": "2026-09-03", "side": "sell", "qty": "5", "price": "110"},
-        ]), sell_command_id="sell-command"
-    )
+    buy_id = "ffffffff-ffff-4fff-bfff-ffffffffffff"
+    sell_id = "00000000-0000-4000-8000-000000000000"
+    transactions = [
+        {"id": buy_id, "executed_on": "2026-09-01", "side": "buy", "qty": "10", "price": "100"},
+        {"id": sell_id, "executed_on": "2026-09-03", "side": "sell", "qty": "5", "price": "110"},
+    ]
 
-    for mutated_transactions in (
-        [
-            {"executed_on": "2026-09-02", "side": "buy", "qty": "10", "price": "100"},
-            {"executed_on": "2026-09-03", "side": "sell", "qty": "5", "price": "110"},
-        ],
-        [
-            {"executed_on": "2026-09-01", "side": "buy", "qty": "9", "price": "100"},
-            {"executed_on": "2026-09-03", "side": "sell", "qty": "5", "price": "110"},
-        ],
-        [
-            {"executed_on": "2026-09-01", "side": "buy", "qty": "10", "price": "100"},
-            {"executed_on": "2026-09-03", "side": "sell", "qty": "5", "price": "111"},
-        ],
+    # A date tie must return the same ID order regardless of database row order.
+    same_day = [dict(row, executed_on="2026-09-03") for row in transactions]
+    for rows in (same_day, list(reversed(same_day))):
+        ordered = portfolio_command_verifier._transactions(FakeSupabase(rows))
+        assert [row["id"] for row in ordered] == [sell_id, buy_id]
+
+    # UUID order is deliberately opposite to execution chronology.
+    for rows in (transactions, list(reversed(transactions))):
+        portfolio_command_verifier._require_late_rejection_preserves_accounting(
+            FakeSupabase(rows), sell_command_id=sell_id
+        )
+
+    for row_index, field, value in (
+        (0, "executed_on", "2026-09-02"),
+        (0, "qty", "9"),
+        (1, "price", "111"),
     ):
+        mutated_transactions = deepcopy(transactions)
+        mutated_transactions[row_index][field] = value
         with pytest.raises(RuntimeError, match="late Buy changed authoritative transactions"):
             portfolio_command_verifier._require_late_rejection_preserves_accounting(
                 FakeSupabase(mutated_transactions), sell_command_id="sell-command"

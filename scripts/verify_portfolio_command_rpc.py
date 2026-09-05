@@ -69,7 +69,7 @@ def _transaction_count(sb):
 
 
 def _transactions(sb):
-    return sb.table("transactions").select("*").eq("ticker", TICKER).order("id").execute().data
+    return sb.table("transactions").select("*").eq("ticker", TICKER).order("executed_on").order("id").execute().data
 
 
 def _command(sb, command_id):
