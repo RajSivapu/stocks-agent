@@ -262,6 +262,29 @@ def test_isolated_rollback_drill_uses_the_restore_path_and_removes_failed_candid
     drill = deploy.execute_isolated_gateway_rollback_drill({"repo_root": tmp_path / "checkout", "commit_sha": "a" * 40, "source_sha256": digest})
     assert drill["commit_sha"] == "a" * 40
     assert drill["deploy_command"] == "functions deploy"
+    assert drill["candidate_removed"] is True
+
+
+def test_recovery_metadata_archive_has_only_the_normalized_download_paths(tmp_path):
+    root = tmp_path / "capture/recovery-metadata"; root.mkdir(parents=True)
+    (root / "rollback-capture.json").write_text("{}")
+    (root / "release-state.json").write_text("{}")
+    assert deploy.recovery_metadata_members(tmp_path / "capture") == {
+        "recovery-metadata/rollback-capture.json", "recovery-metadata/release-state.json",
+    }
+    (root / "unexpected").write_text("x")
+    with pytest.raises(RuntimeError, match="archive layout"):
+        deploy.recovery_metadata_members(tmp_path / "capture")
+
+
+def test_migration_statement_hash_handles_multiple_ordered_statements_and_duplicate_versions(tmp_path):
+    first = tmp_path / "202609120001_first.sql"; first.write_text("SELECT 'a;';\nSELECT 2;\n")
+    second = tmp_path / "202609120002_second.sql"; second.write_text("-- comment\nSELECT 3;\n")
+    manifest = deploy.candidate_migration_manifest(tmp_path)
+    assert len(manifest) == 2 and manifest[0]["sha256"] == deploy.migration_statements_sha256(["SELECT 'a;';", "SELECT 2;"])
+    duplicate = tmp_path / "202609120001_duplicate.sql"; duplicate.write_text("SELECT 4;")
+    with pytest.raises(RuntimeError, match="globally unique"):
+        deploy.candidate_migration_manifest(tmp_path)
 
 
 def test_candidate_dry_run_installs_dependencies_and_uses_only_protected_vite_values(tmp_path, monkeypatch):

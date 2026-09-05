@@ -613,7 +613,7 @@ def test_fresh_schema_declares_reports_before_report_outbox_rowtype_functions():
 
 
 def test_report_recovery_claim_is_additive_and_matches_the_final_schema_routine():
-    migration = (ROOT / "sql" / "migrations" / "20260912_delivery_recovery_claims.sql").read_text()
+    migration = (ROOT / "sql" / "migrations" / "202609120001_delivery_recovery_claims.sql").read_text()
     schema = SCHEMA.read_text()
     final_claim = schema[schema.rindex("CREATE OR REPLACE FUNCTION public.claim_market_gateway_request("):]
     expected_recovery = "IF v_request.status='failed' AND p_operation='record_report' THEN"

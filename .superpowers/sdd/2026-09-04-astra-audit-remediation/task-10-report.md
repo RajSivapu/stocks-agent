@@ -118,3 +118,10 @@ Residual risk: deployment receipt collection must still populate the authoritati
 
 - Corrected the candidate environment export, isolated dependency-backed build, split durable artifacts, non-success recovery decision, migration retry suffix, GitHub timestamp source/equality, exact recovery checkout/concurrency, and command-builder rollback drill.
 - Focused task gate: `139 passed in 14.73s`; `git diff --check` passed. No live workflow, database, deployment, migration, recovery, Telegram, provider/model, brokerage, scheduled run, or full suite was invoked.
+
+## Final acceptance correction — 2026-09-05
+
+- Recovery metadata is staged under one exact `recovery-metadata/` root, with source and metadata uploaded as separate immutable artifacts. A non-success release conclusion now always follows the shared recovery state machine, even if a success status was posted earlier.
+- The release success status is the final success-path action. Recovery uses a candidate-scoped workflow lock plus the database advisory lock used by deployment/recovery mutations; new releases reject in-progress recovery work.
+- Migration statements are parsed and canonically hashed as ordered `statements[]`; duplicate migration versions are rejected. The two never-deployed `20260912` branch-only migrations were renamed to unique ordered timestamp versions and schema/test references were synchronized.
+- The rollback drill now drives the actual recovery state machine and protected function deployment command builder through a disposable runtime driver, proving the prior bundle activates and the candidate bundle is removed.

@@ -40,7 +40,7 @@ from scripts.verify_owner_dashboard_deployment import (
 )
 
 
-MIGRATION_NAME = re.compile(r"^(?P<version>\d{8})_[a-z0-9][a-z0-9_]*\.sql$")
+MIGRATION_NAME = re.compile(r"^(?P<version>\d{8}(?:\d{4})?)_[a-z0-9][a-z0-9_]*\.sql$")
 SUPABASE_CLI_VERSION = "2.116.0"
 MIGRATION_LEDGER = "public.stock_agent_release_migration_ledger"
 FUNCTION_NAME = "owner-dashboard-api"
@@ -120,6 +120,11 @@ def validate_release_database_endpoints(
     candidate = runtime_url(session_template, RUNTIME_ROLE, "x" * 32)
     _validate_database_url(candidate, project_ref)
     return {"admin_database": "verified", "session_pooler": "verified"}
+
+
+def acquire_protected_release_lock(cursor) -> None:
+    """Serialize release and recovery mutations inside the production database."""
+    cursor.execute("SELECT pg_advisory_xact_lock(hashtextextended('stock_agent_protected_release', 0))")
 
 
 def _validate_role_receipt(value: Mapping[str, object]) -> None:
@@ -279,6 +284,48 @@ def _tree_sha256(path: Path) -> str:
     return digest.hexdigest()
 
 
+def normalize_migration_statements(sql: str) -> list[str]:
+    """Canonicalize Supabase's ordered statements[] representation."""
+    statements, buffer, quote, dollar = [], [], None, None
+    index = 0
+    while index < len(sql):
+        char = sql[index]
+        if quote is None and dollar is None and sql.startswith("--", index):
+            end = sql.find("\n", index); index = len(sql) if end < 0 else end; continue
+        if quote is None and dollar is None and sql.startswith("/*", index):
+            end = sql.find("*/", index + 2)
+            if end < 0: raise RuntimeError("migration contains unterminated comment")
+            index = end + 2; continue
+        if dollar is not None:
+            if sql.startswith(dollar, index): buffer.append(dollar); index += len(dollar); dollar = None; continue
+            buffer.append(char); index += 1; continue
+        if quote is not None:
+            buffer.append(char)
+            if char == quote:
+                if index + 1 < len(sql) and sql[index + 1] == quote: buffer.append(quote); index += 2; continue
+                quote = None
+            index += 1; continue
+        matched = re.match(r"\$[A-Za-z_][A-Za-z0-9_]*\$|\$\$", sql[index:])
+        if matched:
+            dollar = matched.group(0); buffer.append(dollar); index += len(dollar); continue
+        if char in {"'", '"'}: quote = char; buffer.append(char)
+        elif char == ";":
+            value = " ".join("".join(buffer).split())
+            if value: statements.append(value + ";")
+            buffer = []
+        else: buffer.append(char)
+        index += 1
+    if quote is not None or dollar is not None: raise RuntimeError("migration contains unterminated quoted SQL")
+    value = " ".join("".join(buffer).split())
+    if value: statements.append(value)
+    if not statements: raise RuntimeError("candidate migration is empty")
+    return statements
+
+
+def migration_statements_sha256(statements: Sequence[str]) -> str:
+    return hashlib.sha256(json.dumps(list(statements), ensure_ascii=False, separators=(",", ":")).encode()).hexdigest()
+
+
 def prepare_gateway_rollback_artifact(
     rollback_ref: str,
     expected_source_sha256: str,
@@ -352,11 +399,23 @@ def capture_durable_recovery_state(
         raise ValueError("positive deployment identity is required")
     state = {"recovery_required_on_non_success": True, "deployment_id": deployment_id,
              "artifact": {"repo_root": str(artifact["repo_root"]), "commit_sha": artifact["commit_sha"], "source_sha256": artifact["source_sha256"]}}
-    release_state.parent.mkdir(parents=True, exist_ok=True)
-    temporary = release_state.with_suffix(".tmp")
+    metadata = evidence_directory / "recovery-metadata"
+    metadata.mkdir(mode=0o700)
+    os.replace(evidence_directory / "rollback-capture.json", metadata / "rollback-capture.json")
+    temporary = (metadata / "release-state.json").with_suffix(".tmp")
     temporary.write_text(json.dumps(state, sort_keys=True, separators=(",", ":")) + "\n")
-    os.replace(temporary, release_state)
+    os.replace(temporary, metadata / "release-state.json")
+    release_state.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(metadata / "release-state.json", release_state)
     return {"artifact": artifact, "capture": capture}
+
+
+def recovery_metadata_members(root: Path) -> set[str]:
+    expected = {"recovery-metadata/rollback-capture.json", "recovery-metadata/release-state.json"}
+    actual = {path.relative_to(root).as_posix() for path in root.rglob("*") if path.is_file()}
+    if actual != expected:
+        raise RuntimeError("recovery metadata archive layout is malformed")
+    return actual
 
 
 def verify_gateway_rollback_preflight(
@@ -377,17 +436,20 @@ def verify_gateway_rollback_preflight(
 
 
 def execute_isolated_gateway_rollback_drill(artifact: Mapping[str, object]) -> dict[str, object]:
-    """Exercise the same function deployment command builder against a fake target."""
+    """Run the production recovery state machine against a disposable runtime driver."""
     source = Path(str(artifact.get("repo_root", ""))) / "supabase/functions/market-briefing-gateway"
     expected = str(artifact.get("source_sha256", ""))
     if not source.is_dir() or not re.fullmatch(r"[0-9a-f]{64}", expected) or _tree_sha256(source) != expected:
         raise RuntimeError("isolated rollback drill source is unavailable")
     started = datetime.now(timezone.utc).isoformat()
     with tempfile.TemporaryDirectory(prefix="stocks-isolated-rollback-drill-") as raw:
-        target = Path(raw) / "gateway-runtime"
+        target = Path(raw) / "downloaded"
         bundle = target / "supabase/functions/market-briefing-gateway"
         bundle.parent.mkdir(parents=True)
         shutil.copytree(source, bundle, symlinks=False)
+        runtime = Path(raw) / "runtime"
+        (runtime / "candidate").mkdir(parents=True)
+        (runtime / "candidate/index.ts").write_text("export const candidate = true\n")
         commands: list[list[str]] = []
         inventories = iter([
             '[{"name":"market-briefing-gateway","version":7}]',
@@ -395,18 +457,24 @@ def execute_isolated_gateway_rollback_drill(artifact: Mapping[str, object]) -> d
         ])
         def local_runner(command, **_options):
             commands.append(command)
+            if "deploy" in command:
+                active = runtime / "active"
+                if active.exists(): shutil.rmtree(active)
+                shutil.copytree(bundle, active)
+                shutil.rmtree(runtime / "candidate")
             output = next(inventories) if "list" in command else "ok"
             return type("Result", (), {"returncode": 0, "stdout": output, "stderr": ""})()
-        restored = _deploy_named_function(
-            "a" * 20, "market-briefing-gateway", str(artifact.get("commit_sha", "")), target, local_runner,
-            require_existing=True,
-        )
-        measured = _tree_sha256(bundle)
-        if measured != expected or restored["source_sha256"] != expected:
+        def restorer(project_ref, _admin_url, received):
+            restored = _deploy_named_function(project_ref, "market-briefing-gateway", str(received["commit_sha"]), target, local_runner, require_existing=True)
+            return {"gateway": {"status": "restored", "commit_sha": received["commit_sha"], "source_sha256": restored["source_sha256"]}}
+        state = {"recovery_required_on_non_success": True, "artifact": {"repo_root": str(target), "commit_sha": artifact["commit_sha"], "source_sha256": expected}}
+        recover_gateway_from_state(state, "a" * 20, "local-admin", recovery_root=target, restorer=restorer, releaser=lambda _artifact: None)
+        measured = _tree_sha256(runtime / "active")
+        if measured != expected or (runtime / "candidate").exists():
             raise RuntimeError("isolated rollback drill hash mismatch")
     completed = datetime.now(timezone.utc).isoformat()
     return {"status": "verified", "isolated": True, "source_sha256": measured,
-            "commit_sha": artifact["commit_sha"], "deploy_command": "functions deploy",
+            "commit_sha": artifact["commit_sha"], "deploy_command": "functions deploy", "candidate_removed": True,
             "started_at": started, "completed_at": completed}
 
 
@@ -421,13 +489,15 @@ def candidate_migration_manifest(migrations_directory: Path = ROOT / "sql/migrat
     manifest = []
     for path in paths:
         raw = path.read_bytes()
-        if not raw:
-            raise RuntimeError("candidate migration is empty")
+        try: statements = normalize_migration_statements(raw.decode("utf-8"))
+        except UnicodeDecodeError as error: raise RuntimeError("candidate migration is not UTF-8") from error
         manifest.append({
             "path": f"sql/migrations/{path.name}",
             "version": MIGRATION_NAME.fullmatch(path.name).group("version"),  # type: ignore[union-attr]
-            "sha256": hashlib.sha256(raw).hexdigest(),
+            "sha256": migration_statements_sha256(statements),
         })
+    if len({item["version"] for item in manifest}) != len(manifest):
+        raise RuntimeError("candidate migration versions must be globally unique")
     return manifest
 
 
@@ -491,7 +561,7 @@ def apply_release_migrations(
         candidates = by_version.get(version, [])
         if not candidates or not all(isinstance(part, str) for part in statements):
             raise RuntimeError("native migration version is not an exact candidate")
-        matching = [item for item in candidates if hashlib.sha256("\n".join(statements).encode()).hexdigest() == item["sha256"]]
+        matching = [item for item in candidates if migration_statements_sha256(normalize_migration_statements("\n".join(statements))) == item["sha256"]]
         if len(matching) != 1 or matching[0]["path"] in native:
             raise RuntimeError("native migration hash mismatch")
         item = matching[0]
@@ -515,13 +585,11 @@ def apply_release_migrations(
         if path.is_symlink() or not path.is_file() or not MIGRATION_NAME.fullmatch(path.name):
             raise RuntimeError("candidate migration path is unsafe")
         raw = path.read_bytes()
-        actual = hashlib.sha256(raw).hexdigest()
+        actual = migration_statements_sha256(normalize_migration_statements(raw.decode("utf-8")))
         if item["sha256"] != actual:
             raise RuntimeError("candidate migration hash mismatch")
-        try:
-            sql = raw.decode("utf-8")
-        except UnicodeDecodeError as error:
-            raise RuntimeError("candidate migration is not UTF-8") from error
+        try: sql = raw.decode("utf-8")
+        except UnicodeDecodeError as error: raise RuntimeError("candidate migration is not UTF-8") from error
         existing = known.get(item["path"])
         if existing is not None:
             if existing != (item["version"], item["sha256"]):
@@ -839,6 +907,20 @@ def restore_gateway_after_release_failure(
     return restored
 
 
+def recover_gateway_from_state(
+    state: Mapping[str, object], project_ref: str, admin_url: str, *, recovery_root: Path | None = None,
+    restorer: Callable[..., Mapping[str, object]] = rollback_after_gateway_change,
+    releaser: Callable[..., None] = release_gateway_rollback_artifact,
+) -> dict[str, object]:
+    """Shared recovery state machine for workflow recovery and the isolated drill."""
+    if state.get("recovery_required_on_non_success") is not True or not isinstance(state.get("artifact"), Mapping):
+        raise RuntimeError("retained gateway rollback artifact is unavailable")
+    stored = state["artifact"]
+    artifact = {"repo_root": str(recovery_root) if recovery_root is not None else stored.get("repo_root"),
+                "commit_sha": stored.get("commit_sha"), "source_sha256": stored.get("source_sha256")}
+    return restore_gateway_after_release_failure(project_ref, admin_url, artifact, restorer=restorer, releaser=releaser)
+
+
 def publish_and_deploy_or_rollback(
     project_ref: str,
     values: Mapping[str, str],
@@ -1024,7 +1106,7 @@ def main() -> int:
         raise SystemExit("--keep-rollback-worktree requires --rollback-worktree")
     rollback_directory = (arguments.rollback_worktree if arguments.rollback_worktree is not None
                           else Path(tempfile.mkdtemp(prefix="stocks-gateway-rollback-")) / "checkout")
-    prepared_capture = arguments.evidence_directory / "rollback-capture.json"
+    prepared_capture = arguments.evidence_directory / "recovery-metadata/rollback-capture.json"
     if prepared_capture.is_file() and arguments.release_state.is_file():
         captured = json.loads(prepared_capture.read_text())
         state = json.loads(arguments.release_state.read_text())
@@ -1069,6 +1151,7 @@ def main() -> int:
     migration_manifest = candidate_migration_manifest()
     with psycopg.connect(admin_url) as connection:
         with connection.cursor() as cursor:
+            acquire_protected_release_lock(cursor)
             migration_receipts = apply_release_migrations(cursor, migration_manifest)
         database_secret = provision_dashboard_role(connection, session_template)
         role_receipt = verify_dashboard_role(connection)

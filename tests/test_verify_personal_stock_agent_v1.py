@@ -9,6 +9,7 @@ import subprocess
 import pytest
 
 from scripts.verify_personal_stock_agent_v1 import verify_release
+from scripts.verify_owner_dashboard_deployment import migration_statements_sha256, normalize_migration_statements
 from test_recovery_bundle import recovery_records, digest
 
 NOW = datetime(2026, 9, 5, 21, tzinfo=timezone.utc)
@@ -87,7 +88,7 @@ def release(tmp_path):
         "id": 42, "sha": sha, "environment": "production", "project_ref": "p" * 20,
         "deployed_at": "2026-09-05T19:00:00Z", "workflow_run_id": 43, "pull_request_number": 44,
         "run_id": RUN, "candidate_sha": sha,
-        "migrations": [{"path": "sql/migrations/20260926_suppression_reasons.sql", "version": "20260926", "sha256": hashlib.sha256(raw["sql/migrations/20260926_suppression_reasons.sql"]).hexdigest()}],
+        "migrations": [{"path": "sql/migrations/20260926_suppression_reasons.sql", "version": "20260926", "sha256": migration_statements_sha256(normalize_migration_statements(raw["sql/migrations/20260926_suppression_reasons.sql"].decode()))}],
         "functions": [{"function": name, "git_sha": sha, "function_version": 5, "source_sha256": tree_hash({"index.ts": raw[f"supabase/functions/{name}/index.ts"]})} for name in ("market-briefing-gateway", "owner-dashboard-api")],
         "static_assets": {"candidate_sha": sha, "source_sha256": tree_hash({"src/main.tsx": b"web source\n"}), "files": {"index.html": hashlib.sha256(b"<main>Private</main>").hexdigest()}},
         "dry_run": False,

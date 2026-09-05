@@ -101,7 +101,11 @@ def test_recovery_uses_exact_candidate_concurrency_and_separate_durable_artifact
     workflow = Path(".github/workflows/owner-dashboard-release.yml").read_text()
     recovery = Path(".github/workflows/owner-dashboard-release-recovery.yml").read_text()
     assert "rollback-source-" in workflow and "recovery-metadata-" in workflow
-    assert "group: protected-owner-dashboard-release-production" in recovery
+    assert "group: protected-owner-dashboard-recovery-${{ github.event.workflow_run.id }}" in recovery
     assert "ref: ${{ github.event.workflow_run.head_sha }}" in recovery
     assert "deployments/$DEPLOYMENT_ID/statuses" in recovery
     assert "--retain-recovery-artifact" in recovery
+    assert "conclusion != 'success'" in recovery
+    assert "state=success" in workflow and workflow.rindex("state=success") > workflow.rindex("Release local rollback worktree")
+    assert "steps.deployment.outputs.required" not in recovery
+    assert recovery.index("Restore durable gateway recovery artifact") > recovery.index("Record terminal deployment status")

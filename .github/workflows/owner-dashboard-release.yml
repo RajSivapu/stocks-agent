@@ -110,6 +110,12 @@ jobs:
           DEPLOYMENT_ID="$(gh api --method POST "repos/$GITHUB_REPOSITORY/deployments" -f ref="$CANDIDATE_SHA" -f environment=production -F production_environment=true -F auto_merge=false -f payload="$payload" --jq .id)"
           test -n "$DEPLOYMENT_ID" || { echo 'candidate SHA/ref mismatch'; exit 1; }
           echo "deployment_id=$DEPLOYMENT_ID" >> "$GITHUB_OUTPUT"; echo "DEPLOYMENT_ID=$DEPLOYMENT_ID" >> "$GITHUB_ENV"
+      - name: Refuse a release while prior recovery remains unresolved
+        env: {GH_TOKEN: ${{ github.token }}}
+        run: |
+          set -euo pipefail
+          gh api "repos/$GITHUB_REPOSITORY/actions/runs?event=workflow_run&status=in_progress" --jq '.workflow_runs[] | select(.name == "Protected owner dashboard release recovery") | .id' > "$RELEASE_STATE_DIR/pending-recoveries"
+          test ! -s "$RELEASE_STATE_DIR/pending-recoveries" || { echo 'prior protected recovery remains unresolved'; exit 1; }
       - name: Derive protected no-side-effect evidence around the real candidate dry-run
         env:
           RELEASE_READONLY_DATABASE_URL: ${{ secrets.RELEASE_READONLY_DATABASE_URL }}
@@ -155,7 +161,7 @@ jobs:
       - name: Upload recovery metadata and journal before gateway mutation
         id: recovery_metadata_artifact
         uses: actions/upload-artifact@65462800fd760344b1a7b4382951275a0abb4808
-        with: {name: recovery-metadata-${{ github.run_id }}-${{ github.run_attempt }}, path: "${{ env.RELEASE_STATE_DIR }}/capture/rollback-capture.json\n${{ env.RELEASE_STATE_DIR }}/release-state.json", if-no-files-found: error, retention-days: 90}
+        with: {name: recovery-metadata-${{ github.run_id }}-${{ github.run_attempt }}, path: ${{ env.RELEASE_STATE_DIR }}/capture/recovery-metadata, if-no-files-found: error, retention-days: 90}
       - name: Bind durable recovery to in-progress deployment
         env: {GH_TOKEN: ${{ github.token }}, DEPLOYMENT_ID: ${{ steps.deployment.outputs.deployment_id }}, ROLLBACK_SOURCE_ARTIFACT_ID: ${{ steps.rollback_source_artifact.outputs.artifact-id }}, RECOVERY_METADATA_ARTIFACT_ID: ${{ steps.recovery_metadata_artifact.outputs.artifact-id }} }
         run: gh api --method POST "repos/$GITHUB_REPOSITORY/deployments/$DEPLOYMENT_ID/statuses" -f state=in_progress -f description="rollback-source:$ROLLBACK_SOURCE_ARTIFACT_ID recovery-metadata:$RECOVERY_METADATA_ARTIFACT_ID"
@@ -197,9 +203,6 @@ jobs:
         id: release_artifact
         uses: actions/upload-artifact@65462800fd760344b1a7b4382951275a0abb4808
         with: {name: release-record-${{ steps.deployment.outputs.deployment_id }}, path: ${{ env.RELEASE_STATE_DIR }}/release-record.json, if-no-files-found: error, retention-days: 90}
-      - name: Mark candidate deployment successful with immutable artifact identity
-        env: {GH_TOKEN: ${{ github.token }}, DEPLOYMENT_ID: ${{ steps.deployment.outputs.deployment_id }}, RELEASE_ARTIFACT_ID: ${{ steps.release_artifact.outputs.artifact-id }}}
-        run: gh api --method POST "repos/$GITHUB_REPOSITORY/deployments/$DEPLOYMENT_ID/statuses" -f state=success -f description="release-artifact:$RELEASE_ARTIFACT_ID" -f log_url="$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
       - name: Release local rollback worktree
         run: "$RELEASE_VENV/bin/python" scripts/release_gateway_rollback_worktree.py --receipt "$RELEASE_STATE_DIR/deploy-receipt.json"
       - name: Restore gateway if any post-deploy evidence step failed
@@ -215,3 +218,7 @@ jobs:
         if: ${{ failure() && env.DEPLOYMENT_ID != '' }}
         env: {GH_TOKEN: ${{ github.token }}}
         run: gh api --method POST "repos/$GITHUB_REPOSITORY/deployments/$DEPLOYMENT_ID/statuses" -f state=failure -f description='protected release failed; restoration attempted'
+      - name: Mark candidate deployment successful with immutable artifact identity
+        if: ${{ success() }}
+        env: {GH_TOKEN: ${{ github.token }}, DEPLOYMENT_ID: ${{ steps.deployment.outputs.deployment_id }}, RELEASE_ARTIFACT_ID: ${{ steps.release_artifact.outputs.artifact-id }}}
+        run: gh api --method POST "repos/$GITHUB_REPOSITORY/deployments/$DEPLOYMENT_ID/statuses" -f state=success -f description="release-artifact:$RELEASE_ARTIFACT_ID" -f log_url="$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"

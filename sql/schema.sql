@@ -4827,7 +4827,7 @@ REVOKE ALL ON FUNCTION public.finish_portfolio_command_acknowledgement(UUID, BIG
 GRANT EXECUTE ON FUNCTION public.apply_portfolio_command_with_acknowledgement(TEXT, UUID, BIGINT, BIGINT, BIGINT) TO service_role;
 GRANT EXECUTE ON FUNCTION public.finish_portfolio_command_acknowledgement(UUID, BIGINT, TEXT, TEXT) TO service_role;
 
--- Consolidated from sql/migrations/20260912_collection_cache_lineage.sql
+-- Consolidated from sql/migrations/202609120002_collection_cache_lineage.sql
 -- Preserve cache-hit provenance without reusing a prior run reservation.
 ALTER TABLE public.market_source_receipts
   ADD COLUMN IF NOT EXISTS cache_predecessor_receipt_id UUID
@@ -4841,7 +4841,7 @@ ALTER TABLE public.market_source_receipts
     OR (status <> 'cache_hit' AND cache_predecessor_receipt_id IS NULL)
   );
 
--- Consolidated from sql/migrations/20260912_delivery_recovery_claims.sql
+-- Consolidated from sql/migrations/202609120001_delivery_recovery_claims.sql
 -- Existing deployments have already applied earlier request-claim migrations.
 -- Reinstall the final claim routine so failed report deliveries can resume only
 -- through their deterministic outbox key.

@@ -49,7 +49,7 @@ BOUNDARIES = {
 RELEASE_FUNCTIONS = ("market-briefing-gateway", "owner-dashboard-api")
 RUNTIME_ROLE = "stock_agent_dashboard_runtime"
 UUID_PATTERN = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$", re.IGNORECASE)
-MIGRATION_NAME = re.compile(r"^(?P<version>\d{8})_[a-z0-9][a-z0-9_]*\.sql$")
+MIGRATION_NAME = re.compile(r"^(?P<version>\d{8}(?:\d{4})?)_[a-z0-9][a-z0-9_]*\.sql$")
 REPORT_PUBLICATION_SQL = """SELECT p.report_id::text AS report_id,r.run_id::text AS run_id,p.idempotency_key,
     p.status,p.telegram_message_ids,to_char(p.telegram_accepted_at AT TIME ZONE 'UTC','YYYY-MM-DD\"T\"HH24:MI:SS.MS\"Z\"') AS telegram_accepted_at,p.suppression_reason,
     jsonb_build_object('report_id',p.report_id,'idempotency_key',p.idempotency_key,'status',p.status,
@@ -95,6 +95,47 @@ def canonical_sha256(value: object) -> str:
     ).hexdigest()
 
 
+def normalize_migration_statements(sql: str) -> list[str]:
+    # Keep this byte-independent representation aligned with Supabase's
+    # schema_migrations.statements[] receipts.
+    statements, buffer, quote, dollar, index = [], [], None, None, 0
+    while index < len(sql):
+        char = sql[index]
+        if quote is None and dollar is None and sql.startswith("--", index):
+            end = sql.find("\n", index); index = len(sql) if end < 0 else end; continue
+        if quote is None and dollar is None and sql.startswith("/*", index):
+            end = sql.find("*/", index + 2)
+            if end < 0: raise RuntimeError("migration contains unterminated comment")
+            index = end + 2; continue
+        if dollar is not None:
+            if sql.startswith(dollar, index): buffer.append(dollar); index += len(dollar); dollar = None; continue
+            buffer.append(char); index += 1; continue
+        if quote is not None:
+            buffer.append(char)
+            if char == quote:
+                if index + 1 < len(sql) and sql[index + 1] == quote: buffer.append(quote); index += 2; continue
+                quote = None
+            index += 1; continue
+        matched = re.match(r"\$[A-Za-z_][A-Za-z0-9_]*\$|\$\$", sql[index:])
+        if matched: dollar = matched.group(0); buffer.append(dollar); index += len(dollar); continue
+        if char in {"'", '"'}: quote = char; buffer.append(char)
+        elif char == ";":
+            value = " ".join("".join(buffer).split())
+            if value: statements.append(value + ";")
+            buffer = []
+        else: buffer.append(char)
+        index += 1
+    if quote is not None or dollar is not None: raise RuntimeError("migration contains unterminated quoted SQL")
+    value = " ".join("".join(buffer).split())
+    if value: statements.append(value)
+    if not statements: raise RuntimeError("candidate migration is empty")
+    return statements
+
+
+def migration_statements_sha256(statements: Sequence[str]) -> str:
+    return canonical_sha256(list(statements))
+
+
 def candidate_migration_manifest(migrations_directory: Path = ROOT / "sql/migrations") -> list[dict[str, str]]:
     if not migrations_directory.is_dir() or migrations_directory.is_symlink():
         raise RuntimeError("candidate migration directory is unavailable")
@@ -102,11 +143,14 @@ def candidate_migration_manifest(migrations_directory: Path = ROOT / "sql/migrat
     if (not paths or any(not path.is_file() or path.is_symlink() or not MIGRATION_NAME.fullmatch(path.name)
                           for path in paths)):
         raise RuntimeError("candidate migration manifest is malformed")
-    return [{
+    manifest = [{
         "path": f"sql/migrations/{path.name}",
         "version": MIGRATION_NAME.fullmatch(path.name).group("version"),  # type: ignore[union-attr]
-        "sha256": hashlib.sha256(path.read_bytes()).hexdigest(),
+        "sha256": migration_statements_sha256(normalize_migration_statements(path.read_text(encoding="utf-8"))),
     } for path in paths]
+    if len({item["version"] for item in manifest}) != len(manifest):
+        raise RuntimeError("candidate migration versions must be globally unique")
+    return manifest
 
 
 def verify_release_artifact_receipts(
@@ -123,8 +167,8 @@ def verify_release_artifact_receipts(
     if not isinstance(migrations, list) or migrations != list(expected_migrations):
         raise RuntimeError("release migration receipts are incomplete")
     if any(not isinstance(row, Mapping) or set(row) != {"path", "version", "sha256"}
-           or not re.fullmatch(r"sql/migrations/\d{8}_[a-z0-9][a-z0-9_]*\.sql", str(row.get("path", "")))
-           or not re.fullmatch(r"\d{8}", str(row.get("version", "")))
+           or not re.fullmatch(r"sql/migrations/\d{8}(?:\d{4})?_[a-z0-9][a-z0-9_]*\.sql", str(row.get("path", "")))
+           or not re.fullmatch(r"\d{8}(?:\d{4})?", str(row.get("version", "")))
            or not re.fullmatch(r"[0-9a-f]{64}", str(row.get("sha256", ""))) for row in migrations):
         raise RuntimeError("release migration hash receipt is malformed")
     if not isinstance(functions, list) or tuple(row.get("function") for row in functions if isinstance(row, dict)) != RELEASE_FUNCTIONS:

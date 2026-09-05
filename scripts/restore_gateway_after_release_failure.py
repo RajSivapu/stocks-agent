@@ -8,7 +8,7 @@ from pathlib import Path
 
 from scripts.deploy_owner_dashboard_api import (
     release_gateway_rollback_artifact,
-    restore_gateway_after_release_failure,
+    recover_gateway_from_state,
 )
 
 
@@ -22,18 +22,8 @@ def main() -> int:
     parser.add_argument("--retain-recovery-artifact", action="store_true")
     args = parser.parse_args()
     state = json.loads(args.release_state.read_text())
-    artifact = state.get("artifact")
-    if not state.get("recovery_required_on_non_success"):
-        return 0
-    if not isinstance(artifact, dict):
-        raise SystemExit("retained gateway rollback artifact is unavailable")
-    gateway = {
-        "repo_root": str(args.recovery_root) if args.recovery_root is not None else artifact.get("repo_root"),
-        "commit_sha": artifact.get("commit_sha"),
-        "source_sha256": artifact.get("source_sha256"),
-    }
-    restore_gateway_after_release_failure(
-        args.project_ref, args.admin_url, gateway,
+    recover_gateway_from_state(
+        state, args.project_ref, args.admin_url, recovery_root=args.recovery_root,
         releaser=(lambda _artifact: None) if args.retain_recovery_artifact else release_gateway_rollback_artifact,
     )
     return 0

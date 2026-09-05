@@ -11,7 +11,7 @@ permissions:
   deployments: write
 
 concurrency:
-  group: protected-owner-dashboard-release-production
+  group: protected-owner-dashboard-recovery-${{ github.event.workflow_run.id }}
   cancel-in-progress: false
 
 jobs:
@@ -33,20 +33,19 @@ jobs:
           mkdir -m 700 recovery recovery-source recovery-metadata
           gh run download "${{ github.event.workflow_run.id }}" --name "rollback-source-${{ github.event.workflow_run.id }}-${{ github.event.workflow_run.run_attempt }}" --dir recovery-source
           gh run download "${{ github.event.workflow_run.id }}" --name "recovery-metadata-${{ github.event.workflow_run.id }}-${{ github.event.workflow_run.run_attempt }}" --dir recovery-metadata
-          test -f recovery-metadata/release-state.json
-          test -f recovery-metadata/rollback-capture.json
+          test -f recovery-metadata/recovery-metadata/release-state.json
+          test -f recovery-metadata/recovery-metadata/rollback-capture.json
           test -f recovery-source/index.ts
-      - name: Require recovery unless the deployment is verified successful
+      - name: Record terminal deployment status without bypassing recovery
         id: deployment
         env: {GH_TOKEN: ${{ github.token }}}
         run: |
           set -euo pipefail
-          DEPLOYMENT_ID="$(jq -r .deployment_id recovery-metadata/release-state.json)"
+          DEPLOYMENT_ID="$(jq -r .deployment_id recovery-metadata/recovery-metadata/release-state.json)"
           DEPLOYMENT_STATUS="$(gh api "repos/$GITHUB_REPOSITORY/deployments/$DEPLOYMENT_ID/statuses" --jq '.[0].state')"
           echo "DEPLOYMENT_ID=$DEPLOYMENT_ID" >> "$GITHUB_OUTPUT"
-          if [ "$DEPLOYMENT_STATUS" = success ]; then echo 'required=false' >> "$GITHUB_OUTPUT"; else echo 'required=true' >> "$GITHUB_OUTPUT"; fi
+          echo "terminal_status=$DEPLOYMENT_STATUS" >> "$GITHUB_OUTPUT"
       - name: Restore durable gateway recovery artifact
-        if: steps.deployment.outputs.required == 'true'
         env:
           SUPABASE_ACCESS_TOKEN: ${{ secrets.SUPABASE_ACCESS_TOKEN }}
           POSTGRES_URL: ${{ secrets.POSTGRES_URL }}
@@ -58,4 +57,4 @@ jobs:
           python -m pip install --requirement requirements-test.txt
           mkdir -p recovery/rollback-worktree/supabase/functions/market-briefing-gateway
           cp -R recovery-source/. recovery/rollback-worktree/supabase/functions/market-briefing-gateway/
-          python scripts/restore_gateway_after_release_failure.py --project-ref "$PROJECT_REF" --admin-url "$POSTGRES_URL" --release-state recovery-metadata/release-state.json --recovery-root recovery/rollback-worktree --retain-recovery-artifact
+          python scripts/restore_gateway_after_release_failure.py --project-ref "$PROJECT_REF" --admin-url "$POSTGRES_URL" --release-state recovery-metadata/recovery-metadata/release-state.json --recovery-root recovery/rollback-worktree --retain-recovery-artifact
