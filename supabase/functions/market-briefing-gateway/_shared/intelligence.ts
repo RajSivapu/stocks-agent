@@ -34,6 +34,16 @@ const DISPOSITIONS = [
   "near_duplicate",
   "dropped",
 ] as const;
+const DISCOVERY_STATUSES = ["qualified", "no_event", "insufficient_coverage"] as const;
+const PROVIDER_HOSTS: Readonly<Record<string, readonly string[]>> = {
+  gdelt: ["api.gdeltproject.org"], alpha_vantage: ["www.alphavantage.co"],
+  finnhub: ["finnhub.io"], yahoo: ["query1.finance.yahoo.com"],
+  sec_edgar: ["www.sec.gov", "data.sec.gov"], federal_register: ["www.federalregister.gov"],
+  white_house: ["www.whitehouse.gov"], doe: ["www.energy.gov"], dod: ["www.defense.gov"],
+  eia: ["api.eia.gov", "www.eia.gov"], fred: ["api.stlouisfed.org", "fred.stlouisfed.org"],
+  bls: ["api.bls.gov", "www.bls.gov"], bea: ["apps.bea.gov", "www.bea.gov"],
+  social: ["www.reddit.com", "oauth.reddit.com"],
+};
 
 type JsonObject = Record<string, unknown>;
 
@@ -274,6 +284,22 @@ function canonicalizeUrl(value: string, path: string): string {
   return canonical;
 }
 
+function providerRequestUrl(value: unknown, provider: unknown, path: string): string {
+  const url = canonicalizeUrl(stringValue(value, path, 2_048), path);
+  const host = new URL(url).hostname;
+  if (!PROVIDER_HOSTS[String(provider)]?.includes(host)) {
+    throw new Error(`${path} host is not approved for provider`);
+  }
+  return url;
+}
+
+function identifierArray(value: unknown, path: string, maxLength: number): string[] {
+  const rows = arrayValue(value, path, 32);
+  const values = rows.map((entry, index) => stringValue(entry, `${path}[${index}]`, maxLength));
+  if (new Set(values).size !== values.length) throw new Error(`${path} is duplicated`);
+  return values;
+}
+
 function canonicalValue(value: unknown): unknown {
   if (
     value === null || typeof value === "string" || typeof value === "boolean"
@@ -470,10 +496,17 @@ function parseItem(value: unknown, index: number): JsonObject {
     "id",
     "run_item_id",
     "receipt_id",
+    "provider",
     "upstream_item_id",
     "canonical_url",
+    "request_url",
     "published_at",
+    "retrieved_at",
     "effective_at",
+    "reporting_at",
+    "entity_ids",
+    "security_ids",
+    "discovery_status",
     "title",
     "normalized_text",
     "canonical_content",
@@ -523,18 +556,33 @@ function parseItem(value: unknown, index: number): JsonObject {
   const normalizedCanonicalUrl = canonicalUrl === null
     ? null
     : canonicalizeUrl(canonicalUrl, `${path}.canonical_url`);
+  const provider = enumValue(row.provider, INTELLIGENCE_PROVIDERS, `${path}.provider`);
+  const requestUrl = providerRequestUrl(row.request_url, provider, `${path}.request_url`);
+  const entityIds = identifierArray(row.entity_ids, `${path}.entity_ids`, 160);
+  const securityIds = identifierArray(row.security_ids, `${path}.security_ids`, 32);
+  const discoveryStatus = enumValue(row.discovery_status, DISCOVERY_STATUSES, `${path}.discovery_status`);
+  if (discoveryStatus === "qualified" && securityIds.length === 0) {
+    throw new Error(`${path}.qualified evidence requires a security identifier`);
+  }
   return {
     id: uuidValue(row.id, `${path}.id`),
     run_item_id: uuidValue(row.run_item_id, `${path}.run_item_id`),
     receipt_id: uuidValue(row.receipt_id, `${path}.receipt_id`),
+    provider,
     upstream_item_id: nullableString(
       row.upstream_item_id,
       `${path}.upstream_item_id`,
       512,
     ),
     canonical_url: normalizedCanonicalUrl,
+    request_url: requestUrl,
     published_at: timestamp(row.published_at, `${path}.published_at`, true),
+    retrieved_at: timestamp(row.retrieved_at, `${path}.retrieved_at`),
     effective_at: timestamp(row.effective_at, `${path}.effective_at`, true),
+    reporting_at: timestamp(row.reporting_at, `${path}.reporting_at`, true),
+    entity_ids: entityIds,
+    security_ids: securityIds,
+    discovery_status: discoveryStatus,
     title: stringValue(row.title, `${path}.title`, 500),
     normalized_text: stringValue(
       row.normalized_text,

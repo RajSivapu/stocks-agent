@@ -121,7 +121,11 @@ def test_pre_market_runs_all_seed_domains_and_persists_once():
     result = IntelligencePipeline(gateway, [adapter]).run(request("pre-market"))
 
     assert set(result.domains_checked) == set(SEED_THEMES)
-    assert [query.text for query in adapter.queries] == list(SEED_THEMES)
+    assert [query.text for query in adapter.queries] == [
+        "economic policy", "semiconductor industry", "nuclear energy grid",
+        "industrial infrastructure", "critical minerals", "healthcare industry",
+        "consumer spending", "defense trade geopolitics", "earnings mergers acquisitions",
+    ]
     assert gateway.operations == ["start_intelligence_run", "record_intelligence"]
     assert result.telegram_message_ids == ()
     assert result.packet_hash == result.packet.packet_hash
@@ -173,7 +177,7 @@ def test_phase_selection_is_bounded_to_current_context():
 
 def test_partial_provider_failure_is_explicit_and_still_records_atomically():
     gateway = FakeGateway()
-    adapter = FakeAdapter(fail_domain=SEED_THEMES[2])
+    adapter = FakeAdapter(fail_domain="nuclear energy grid")
 
     result = IntelligencePipeline(gateway, [adapter]).run(request("pre-market"))
 
@@ -208,7 +212,7 @@ def test_output_packet_and_persistence_payload_are_bounded_and_secret_free():
 def test_pipeline_persists_provider_identity_urls_times_and_discovery_status():
     gateway = FakeGateway()
     adapter = FakeAdapter()
-    source = raw_item("holding:TEST")
+    source = raw_item("holding:TEST", official=True)
     source = replace(
         source,
         source_url="https://publisher.example/test-filing",
@@ -217,7 +221,7 @@ def test_pipeline_persists_provider_identity_urls_times_and_discovery_status():
         reporting_at=datetime(2025, 12, 31, tzinfo=timezone.utc),
         entity_ids=("cik:0000000001",),
         security_ids=("TEST",),
-        metadata=MappingProxyType({"cik": "0000000001"}),
+        metadata=MappingProxyType({"cik": "0000000001", "exposure_kind": "filing"}),
     )
     adapter.collect = lambda query: CollectionResult((source,), receipt(adapter.provider), query.limit)
 

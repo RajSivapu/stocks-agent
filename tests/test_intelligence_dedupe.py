@@ -84,3 +84,14 @@ def test_same_request_url_does_not_collapse_distinct_items():
     dispositions = deduplicate([first, second])
 
     assert [row.disposition for row in dispositions] == ["accepted", "accepted"]
+
+
+def test_identical_text_from_distinct_upstreams_has_distinct_persistable_identity():
+    first = normalize_item(raw_item(
+        upstream_item_id="provider-a-1", source_url="https://publisher-a.example/item",
+    ))
+    second = normalize_item(raw_item(
+        upstream_item_id="provider-b-1", source_url="https://publisher-b.example/item",
+    ))
+
+    assert first.content_hash != second.content_hash

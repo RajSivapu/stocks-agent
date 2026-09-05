@@ -32,3 +32,32 @@
   claim of collection.
 - This task used fixtures only. It made no network/provider call, database write, Telegram send,
   deployment, brokerage action, or scheduled run.
+
+## Controller remediation (round 1)
+
+- Added an additive provenance ledger and migration which accepts the gateway's provider, request
+  URL, retrieval/reporting time, identifiers, and discovery status fields. The legacy fact tables
+  keep their Task 4 interface; the provider request URL is used only to satisfy its provider-host
+  contract, while the provenance ledger retains the canonical publisher item URL.
+- Gateway parsing now validates the provider-specific request host separately from the external
+  publisher URL, bounds identifier arrays, rejects secret-bearing request URLs, and requires a
+  security relationship for a `qualified` item.
+- Evidence identity now includes provider, stable upstream ID, canonical item URL, and claim
+  polarity, so corroborating sources do not collide and opposite polarity cannot share an item UUID.
+  Yahoo now has a distinct publisher canonical URL and request URL.
+- Pipeline targets are translated through versioned local mappings before provider use. Invalid or
+  missing CIK/series mappings fail `UNSUPPORTED_QUERY` before quota/HTTP. Discovery outcomes are
+  included with source receipts; `qualified` requires a ranking-eligible relationship.
+
+### Controller evidence
+
+- Final focused gate: `122 passed` across the three Task 7 Python suites plus the migration
+  verifier, and `3 passed` in the gateway Deno contract test.
+- `git diff --check` passed. No network/provider call, database mutation, deployment, Telegram
+  action, brokerage action, or paid-provider action was performed.
+
+### Controller residual risks
+
+- The new provenance table stores the publisher link separately so legacy Task 4 fact interfaces
+  continue to read the provider request reference. A subsequent display-layer migration can join
+  provenance for publisher-link presentation without changing those persisted fact contracts.

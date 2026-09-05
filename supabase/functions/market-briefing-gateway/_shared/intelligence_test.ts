@@ -45,10 +45,17 @@ function validRecordIntelligenceEnvelope() {
         id: "00000000-0000-4000-8000-000000000010",
         run_item_id: "00000000-0000-4000-8000-000000000011",
         receipt_id: "00000000-0000-4000-8000-000000000012",
+        provider: "gdelt",
         upstream_item_id: "story-1",
         canonical_url: "https://api.gdeltproject.org/api/v2/doc/doc",
+        request_url: "https://api.gdeltproject.org/api/v2/doc/doc?query=grid",
         published_at: "2026-09-04T12:00:00.000Z",
+        retrieved_at: "2026-09-04T12:01:00.000Z",
         effective_at: null,
+        reporting_at: null,
+        entity_ids: [],
+        security_ids: [],
+        discovery_status: "no_event",
         title: "Bounded item",
         normalized_text: "Evidence.",
         canonical_content: canonicalContent,
@@ -83,6 +90,30 @@ Deno.test("record_intelligence rejects bad hashes and extra authority fields", (
   >;
   (extraAuthority.payload as Record<string, unknown>).send_telegram = true;
   assertThrows(() => parseGatewayEnvelope(extraAuthority), "unexpected key");
+});
+
+Deno.test("record_intelligence accepts persisted provider provenance but rejects a provider-host mismatch", () => {
+  const valid = validRecordIntelligenceEnvelope();
+  Object.assign(valid.payload.items[0], {
+    request_url: "https://api.gdeltproject.org/api/v2/doc/doc?query=grid",
+    retrieved_at: "2026-09-04T12:01:00.000Z",
+    reporting_at: "2025-12-31T00:00:00.000Z",
+    entity_ids: ["cik:0000000001"],
+    security_ids: ["TEST"],
+    discovery_status: "qualified",
+  });
+  const parsed = parseGatewayEnvelope(valid);
+  const item = (parsed.payload as { items: Array<Record<string, unknown>> }).items[0];
+  assertEquals(item.request_url, "https://api.gdeltproject.org/api/v2/doc/doc?query=grid");
+
+  const invalid = validRecordIntelligenceEnvelope();
+  Object.assign(invalid.payload.items[0], {
+    request_url: "https://www.sec.gov/submissions/CIK0000000001.json",
+    retrieved_at: "2026-09-04T12:01:00.000Z",
+    reporting_at: null,
+    entity_ids: [], security_ids: [], discovery_status: "no_event",
+  });
+  assertThrows(() => parseGatewayEnvelope(invalid), "request_url");
 });
 
 Deno.test("canonical JSON and hashes match Task 2 semantic ordering", () => {

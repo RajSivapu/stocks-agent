@@ -138,7 +138,7 @@ def test_each_declared_provider_yields_discoverable_evidence_or_pre_http_unsuppo
     assert len(result.items) == 1
     item = result.items[0]
     assert item.upstream_item_id
-    assert item.request_url and item.source_url and item.request_url != item.source_url or adapter_name == "yahoo"
+    assert item.request_url and item.source_url and item.request_url != item.source_url
     assert item.published_at and item.retrieved_at
     assert item.security_ids or item.entity_ids
 
@@ -420,7 +420,7 @@ def test_item_without_a_parseable_provider_timestamp_is_dropped():
         "title": "Publisher story",
         "summary": "Summary",
         "time_published": "20260904T100000",
-    }]}, "alphavantage_api_key", "www.alphavantage.co", "topics"),
+    }]}, "alphavantage_api_key", "www.alphavantage.co", "tickers"),
     ("finnhub", [{
         "id": 8,
         "url": "https://publisher.example/finnhub-story",

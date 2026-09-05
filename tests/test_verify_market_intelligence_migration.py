@@ -15,6 +15,7 @@ from scripts import verify_portfolio_command_rpc as portfolio_command_verifier
 
 ROOT = Path(__file__).resolve().parents[1]
 MIGRATION = ROOT / "sql" / "migrations" / "20260907_market_intelligence.sql"
+PROVENANCE_MIGRATION = ROOT / "sql" / "migrations" / "20260914_provider_evidence_integrity.sql"
 SCHEMA = ROOT / "sql" / "schema.sql"
 VERIFIER = ROOT / "scripts" / "verify_market_intelligence_migration.py"
 TRANSACTION_CHRONOLOGY = ROOT / "sql" / "migrations" / "20260909_transaction_chronology.sql"
@@ -28,6 +29,7 @@ TABLES = (
     "market_source_quota_reservations",
     "market_source_receipts",
     "market_source_items",
+    "market_source_item_provenance",
     "market_intelligence_run_items",
     "market_events",
     "market_event_relationships",
@@ -37,6 +39,7 @@ TABLES = (
     "market_policy_comparisons",
     "market_learning_observations",
 )
+BASE_TABLES = tuple(table for table in TABLES if table != "market_source_item_provenance")
 RPCS = (
     "start_market_intelligence_run(uuid,text,date,integer,jsonb)",
     "record_market_intelligence(uuid,uuid,jsonb)",
@@ -109,8 +112,8 @@ def complete_snapshot():
 
 def test_intelligence_tables_are_append_only_and_gateway_scoped():
     receipt = evaluate_snapshot(complete_snapshot())
-    assert receipt["append_only_tables"] == 13
-    assert receipt["rls_tables"] == 13
+    assert receipt["append_only_tables"] == 14
+    assert receipt["rls_tables"] == 14
     assert receipt["gateway_only_rpcs"] == 6
     assert receipt["public_execute_grants"] == 0
     assert receipt["brokerage_columns"] == 0
@@ -210,7 +213,7 @@ def test_missing_trigger_rls_or_gateway_scope_fails_closed():
 def test_schema_declares_complete_bounded_append_only_ledgers_and_rpcs():
     for path in (MIGRATION, SCHEMA):
         sql = path.read_text()
-        for table in TABLES:
+        for table in BASE_TABLES:
             assert f"CREATE TABLE IF NOT EXISTS public.{table}" in sql
             assert f"ALTER TABLE public.{table} ENABLE ROW LEVEL SECURITY;" in sql
             assert f"{table}_append_only" in sql
@@ -248,6 +251,14 @@ def test_schema_declares_complete_bounded_append_only_ledgers_and_rpcs():
         assert "public.market_canonical_jsonb(v_packet->'packet')" in sql
         assert "public.market_canonical_jsonb(p_report->'report')" in sql
         assert "public.market_canonical_jsonb(p_observation->'observation')" in sql
+
+    for path in (PROVENANCE_MIGRATION, SCHEMA):
+        sql = path.read_text()
+        assert "CREATE TABLE IF NOT EXISTS public.market_source_item_provenance" in sql
+        assert "market_source_item_provenance_append_only" in sql
+
+    for path in (MIGRATION, SCHEMA):
+        sql = path.read_text()
         assert sql.count("ineligible evidence item") >= 5
         assert sql.count("receipt.status IN ('succeeded','cache_hit')") >= 5
         assert "accepted source item requires successful receipt" in sql
@@ -310,8 +321,8 @@ def test_migration_is_idempotent_and_schema_mirrors_it_verbatim():
     ledger = migration.split("CREATE OR REPLACE FUNCTION public.claim_market_gateway_request(", 1)[0]
     assert ledger in schema
     assert "\\n+--" not in schema
-    assert migration.count("CREATE TABLE IF NOT EXISTS public.") == len(TABLES)
-    assert migration.count("DROP TRIGGER IF EXISTS") == len(TABLES)
+    assert migration.count("CREATE TABLE IF NOT EXISTS public.") == len(BASE_TABLES)
+    assert migration.count("DROP TRIGGER IF EXISTS") == len(BASE_TABLES)
 
 
 def test_verifier_is_rollback_only_and_optimization_safe():

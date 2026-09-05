@@ -371,6 +371,8 @@ class SourceAdapter(ABC):
             return None
         text = bounded_text(record.get("text"))
         upstream_id = record.get("upstream_item_id")
+        if upstream_id is None or not str(upstream_id).strip():
+            return None
         metadata = bounded_metadata(record.get("metadata"))
         raw_published_at = record.get("published_at")
         published_at = parse_timestamp(raw_published_at)
@@ -388,7 +390,6 @@ class SourceAdapter(ABC):
             source_metadata["entity_ids"] = list(entities)
         if securities:
             source_metadata["security_ids"] = list(securities)
-            source_metadata.setdefault("ticker", securities[0])
         canonical = json.dumps(
             {
                 "provider": self.provider,

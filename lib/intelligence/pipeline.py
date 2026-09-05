@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 import uuid
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field, replace
@@ -11,6 +12,7 @@ from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
 
 from lib.intelligence.dedupe import RunItemDisposition, deduplicate
+from lib.intelligence.http import SourceFailure
 from lib.intelligence.normalize import SourceItem, normalize_item
 from lib.intelligence.packet import EvidencePacket, build_evidence_packet
 from lib.intelligence.providers import CollectionQuery, CollectionResult, RequestReceipt
@@ -265,8 +267,12 @@ class IntelligencePipeline:
         for index in range(count):
             adapter = self.adapters[index % len(self.adapters)]
             target = targets[index % len(targets)]
-            query = self._query_for(adapter, target, request)
+            query = CollectionQuery(
+                text="unsupported", symbols=(), start=_utc(request.now) - _window_for(request.phase),
+                end=_utc(request.now), limit=20,
+            )
             try:
+                query = self._query_for(adapter, target, request)
                 result = adapter.collect(query)
                 if not isinstance(result, CollectionResult):
                     raise TypeError("adapter returned an invalid collection result")
@@ -289,8 +295,13 @@ class IntelligencePipeline:
         identifiers = _provider_query_identifiers()
         cik = identifiers["cik_by_symbol"].get(symbols[0]) if symbols else None
         series_id = identifiers["series_by_provider"].get(provider)
+        if provider == "sec_edgar" and (not cik or not re.fullmatch(r"[1-9][0-9]{0,9}", cik)):
+            raise SourceFailure("UNSUPPORTED_QUERY")
+        if provider == "fred" and (not series_id or not re.fullmatch(r"[A-Za-z0-9._-]{1,120}", series_id)):
+            raise SourceFailure("UNSUPPORTED_QUERY")
+        text = _provider_query_text(provider, target, symbols)
         return CollectionQuery(
-            text=target, symbols=symbols, cik=cik, series_id=series_id,
+            text=text, symbols=symbols, cik=cik, series_id=series_id,
             start=_utc(request.now) - _window_for(request.phase), end=_utc(request.now), limit=20,
         )
 
@@ -312,12 +323,18 @@ class IntelligencePipeline:
 
         dispositions = deduplicate(item for item, _receipt_id in raw_items)
         receipt_ids = [receipt_id for _item, receipt_id in raw_items]
-        item_rows = [
-            _item_row(run_id, value, receipt_ids[index], index)
-            for index, value in enumerate(dispositions)
-        ]
         accepted = [value.item for value in dispositions if value.disposition == "accepted"]
         events, relationships, ranked = _discover(accepted, self.context)
+        qualified_ids = {
+            evidence_key(item)
+            for relation in relationships if relation.eligible_for_ranking
+            for item in relation.evidence
+        }
+        item_rows = [
+            _item_row(run_id, value, receipt_ids[index], index,
+                      qualified=evidence_key(value.item) in qualified_ids)
+            for index, value in enumerate(dispositions)
+        ]
         failure_codes = sorted(
             f"{result.receipt.provider}:{result.receipt.error_code or 'SOURCE_FAILED'}"
             for result in results
@@ -337,6 +354,12 @@ class IntelligencePipeline:
             ),
             "phase": request.phase,
             "source_request_count": len(results),
+            "discovery_outcomes": [
+                {"provider": result.receipt.provider,
+                 "status": "insufficient_coverage" if result.receipt.status not in {"succeeded", "cache_hit"}
+                 else "no_event" if not result.items else "completed"}
+                for result in results
+            ],
         })
         limits = replace(
             self.packet_limits,
@@ -540,7 +563,7 @@ def _source_summary(value: RequestReceipt, receipt_id: str) -> dict[str, object]
 
 
 def _item_row(
-    run_id: str, value: RunItemDisposition, receipt_id: str, ordinal: int
+    run_id: str, value: RunItemDisposition, receipt_id: str, ordinal: int, *, qualified: bool
 ) -> dict[str, object]:
     item = value.item
     metadata = dict(item.metadata)
@@ -555,12 +578,12 @@ def _item_row(
     return {
         "id": evidence_key(item),
         "run_item_id": _uuid("run-item", run_id, evidence_key(item), receipt_id, ordinal),
-        "receipt_id": receipt_id, "upstream_item_id": item.upstream_item_id,
+        "receipt_id": receipt_id, "provider": item.provider, "upstream_item_id": item.upstream_item_id,
         "canonical_url": item.canonical_url, "request_url": item.request_url,
         "published_at": _timestamp(item.published_at), "retrieved_at": _timestamp(item.retrieved_at),
         "effective_at": _timestamp(item.effective_at), "reporting_at": _timestamp(item.reporting_at),
         "entity_ids": list(item.entity_ids), "security_ids": list(item.security_ids),
-        "discovery_status": _discovery_status(item), "title": item.title,
+        "discovery_status": _discovery_status(item, qualified=qualified), "title": item.title,
         "normalized_text": item.summary, "canonical_content": item.canonical_content,
         "content_hash": item.content_hash, "metadata": metadata,
         "disposition": value.disposition, "drop_reason": value.reason,
@@ -602,12 +625,10 @@ def _discover(
     return events, relations, ranked
 
 
-def _discovery_status(item: SourceItem) -> str:
-    if item.security_ids or item.metadata.get("ticker") or item.metadata.get("symbol"):
+def _discovery_status(item: SourceItem, *, qualified: bool) -> str:
+    if qualified:
         return "qualified"
-    if item.entity_ids:
-        return "no_event"
-    return "insufficient_coverage"
+    return "insufficient_coverage" if item.security_ids or item.entity_ids else "no_event"
 
 
 def _provider_query_identifiers() -> dict[str, dict[str, str]]:
@@ -616,7 +637,9 @@ def _provider_query_identifiers() -> dict[str, dict[str, str]]:
 
     settings = config.load_settings().get("intelligence", {})
     mapping = settings.get("provider_query_identifiers", {}) if isinstance(settings, Mapping) else {}
-    raw_series = mapping.get("series_by_provider", {}) if isinstance(mapping, Mapping) else {}
+    if not isinstance(mapping, Mapping) or mapping.get("version") != 1:
+        raise SourceFailure("UNSUPPORTED_QUERY")
+    raw_series = mapping.get("series_by_provider", {})
     raw_ciks = mapping.get("cik_by_symbol", {}) if isinstance(mapping, Mapping) else {}
     return {
         "series_by_provider": {
@@ -628,6 +651,20 @@ def _provider_query_identifiers() -> dict[str, dict[str, str]]:
             if isinstance(key, str) and isinstance(value, str)
         } if isinstance(raw_ciks, Mapping) else {},
     }
+
+
+def _provider_query_text(provider: str, target: str, symbols: tuple[str, ...]) -> str:
+    """Translate internal target labels before they reach an upstream endpoint."""
+    if symbols:
+        return ",".join(symbols)
+    settings = __import__("lib.config", fromlist=["load_settings"]).load_settings()
+    intelligence = settings.get("intelligence", {}) if isinstance(settings, Mapping) else {}
+    mappings = intelligence.get("provider_query_terms", {}) if isinstance(intelligence, Mapping) else {}
+    values = mappings.get(provider, {}) if isinstance(mappings, Mapping) else {}
+    translated = values.get(target) if isinstance(values, Mapping) else None
+    if not isinstance(translated, str) or not translated.strip():
+        raise SourceFailure("UNSUPPORTED_QUERY")
+    return translated.strip()
 
 
 def _event_row(value: MarketEvent) -> dict[str, object]:

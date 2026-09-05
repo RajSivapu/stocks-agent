@@ -101,7 +101,17 @@ class SourceItem:
         return self.summary
 
     def hash_fields(self) -> dict[str, object]:
-        return {"summary": self.summary, "title": self.title}
+        # Content similarity is not persistence identity: independent upstream
+        # references must remain attributable, and opposite claims must never
+        # collide in the source ledger.
+        return {
+            "provider": self.provider,
+            "upstream_item_id": self.upstream_item_id,
+            "canonical_url": self.canonical_url,
+            "claim_polarity": self.claim_polarity,
+            "summary": self.summary,
+            "title": self.title,
+        }
 
 
 def content_hash(item: SourceItem) -> str:

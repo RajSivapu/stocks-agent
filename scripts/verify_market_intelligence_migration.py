@@ -17,7 +17,10 @@ from psycopg.types.json import Jsonb
 
 
 ROOT = Path(__file__).resolve().parents[1]
-MIGRATION = ROOT / "sql" / "migrations" / "20260907_market_intelligence.sql"
+MIGRATIONS = (
+    ROOT / "sql" / "migrations" / "20260907_market_intelligence.sql",
+    ROOT / "sql" / "migrations" / "20260914_provider_evidence_integrity.sql",
+)
 GATEWAY_ROLE = "service_role"
 TABLES = (
     "market_intelligence_runs",
@@ -25,6 +28,7 @@ TABLES = (
     "market_source_quota_reservations",
     "market_source_receipts",
     "market_source_items",
+    "market_source_item_provenance",
     "market_intelligence_run_items",
     "market_events",
     "market_event_relationships",
@@ -477,8 +481,10 @@ def _add_evidence_graph(payload: dict[str, object]) -> dict[str, object]:
 
 def verify(cursor) -> tuple[dict[str, object], list[UUID]]:
     """Apply twice, exercise fail-closed behavior, and leave rollback to the caller."""
-    cursor.execute(MIGRATION.read_text())
-    cursor.execute(MIGRATION.read_text())
+    for migration in MIGRATIONS:
+        cursor.execute(migration.read_text())
+    for migration in MIGRATIONS:
+        cursor.execute(migration.read_text())
     policy_version = cursor.execute(
         "SELECT COALESCE(max(version),0)+1 FROM public.market_policy_config"
     ).fetchone()[0]

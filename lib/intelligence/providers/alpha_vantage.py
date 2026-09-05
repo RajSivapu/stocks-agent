@@ -12,13 +12,17 @@ class AlphaVantageAdapter(SourceAdapter):
     max_items_per_request = 50
 
     def _query_parameters(self, query: CollectionQuery) -> dict[str, object]:
-        return {
+        params = {
             "function": "NEWS_SENTIMENT",
-            "topics": query.text,
             "time_from": query.start.strftime("%Y%m%dT%H%M"),
             "time_to": query.end.strftime("%Y%m%dT%H%M"),
             "limit": min(query.limit, self.max_items_per_request),
         }
+        if query.symbols:
+            params["tickers"] = ",".join(query.symbols)
+        else:
+            params["topics"] = query.text
+        return params
 
     def _evidence_url(self, query: CollectionQuery) -> str:
         return f"https://www.alphavantage.co/query?{urlencode(self._query_parameters(query))}"

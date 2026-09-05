@@ -30,10 +30,7 @@ class YahooAdapter(SourceAdapter):
             raise ValueError("invalid Yahoo quote")
         return [{
             "upstream_item_id": f"{symbol}:{quote_data['as_of']}",
-            "source_url": (
-                "https://query1.finance.yahoo.com/v8/finance/chart/"
-                f"{quote(symbol, safe='')}?range=5d&interval=1d"
-            ),
+            "source_url": f"https://finance.yahoo.com/quote/{quote(symbol, safe='')}",
             "request_url": (
                 "https://query1.finance.yahoo.com/v8/finance/chart/"
                 f"{quote(symbol, safe='')}?range=5d&interval=1d"
