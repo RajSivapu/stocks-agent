@@ -175,7 +175,7 @@ export interface PersistableArtifactMutationBatch {
 
 export interface RunReceipt {
   run_id: string;
-  status: "completed" | "partial" | "failed";
+  status: "completed" | "suppressed" | "partial" | "failed";
   write_counts: Record<string, number>;
   publication_statuses: string[];
   telegram_message_ids: number[];
@@ -488,7 +488,22 @@ export function mergeRelevantSuggestions<T extends Record<string, unknown>>(
   }
   const output: T[] = [];
   const seen = new Set<string>();
-  for (const row of [...unresolved, ...completed]) {
+  const orderByNewestDateAndId = (left: T, right: T): number => {
+    const byDate = String(right.date ?? "").localeCompare(String(left.date ?? ""));
+    if (byDate !== 0) return byDate;
+    const leftId = Number(left.id);
+    const rightId = Number(right.id);
+    if (Number.isSafeInteger(leftId) && Number.isSafeInteger(rightId)) {
+      return rightId - leftId;
+    }
+    return String(right.id).localeCompare(String(left.id));
+  };
+  // Unresolved rows are actionably pending. History is only allowed to use
+  // capacity left after those bounded rows, regardless of a newer history date.
+  const ordered = [...unresolved].sort(orderByNewestDateAndId).concat(
+    [...completed].sort(orderByNewestDateAndId),
+  );
+  for (const row of ordered) {
     const identity = String(row.id);
     if (seen.has(identity) || output.length >= limit) continue;
     seen.add(identity);
@@ -1104,11 +1119,13 @@ export function createSupabaseGatewayRepository(
           "id,date,ticker,action,bucket,confidence,score,stop,target,invalidation_price,valid_until,evidence_as_of",
         ).eq("decision_source", "gateway")
           .or(`valid_until.is.null,valid_until.gte.${today}`)
-          .order("date", { ascending: false }).limit(101),
+          .order("date", { ascending: false }).order("id", { ascending: false })
+          .limit(100),
         client.from("suggestions").select(
           "id,date,ticker,action,bucket,confidence,score,stop,target,invalidation_price,valid_until,evidence_as_of",
         ).eq("decision_source", "gateway").lt("valid_until", today)
-          .order("date", { ascending: false }).limit(100),
+          .order("date", { ascending: false }).order("id", { ascending: false })
+          .limit(100),
         client.from("stock_observations").select(
           "id,ticker,obs_date,event_type,summary,price_reaction,confidence,source",
         ).order("obs_date", { ascending: false }).limit(100),

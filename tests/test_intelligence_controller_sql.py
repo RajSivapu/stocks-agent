@@ -4,6 +4,7 @@ Never reads credentials or connects to an existing server.
 """
 import hashlib
 import json
+from datetime import datetime
 from pathlib import Path
 import shutil
 import subprocess
@@ -55,16 +56,18 @@ def databases():
             subprocess.run([binaries["pg_ctl"], "-D", str(root / "db"), "-m", "immediate", "-w", "stop"], check=True, capture_output=True)
 
 
-def prepared_run(connection, *, provider="gdelt", cache=False, checkpoint=True):
-    run, reservation, original, hit, completion = [str(uuid.uuid4()) for _ in range(5)]
+def prepared_run(connection, *, provider="gdelt", cache=False, checkpoint=True, run_id=None, phase="intraday", market_date=None):
+    generated_run, reservation, original, hit, completion = [str(uuid.uuid4()) for _ in range(5)]
+    run = str(run_id or generated_run)
     now = connection.execute("SELECT statement_timestamp()").fetchone()[0]
     from datetime import timedelta
     window = {"start": (now - timedelta(hours=1)).isoformat(), "end": now.isoformat(),
-              "timezone": "America/Chicago", "market_date": now.astimezone(__import__('zoneinfo').ZoneInfo("America/Chicago")).date().isoformat(), "phase": "intraday"}
+              "timezone": "America/Chicago", "market_date": market_date or now.astimezone(__import__('zoneinfo').ZoneInfo("America/Chicago")).date().isoformat(), "phase": phase}
     plan = {"reservations": [{"id": reservation, "provider": provider, "requests": 2, "cache_keys": []}]}
-    connection.execute("INSERT INTO analysis_runs(id,kind) VALUES(%s,'intraday')", (run,))
+    if run_id is None:
+        connection.execute("INSERT INTO analysis_runs(id,kind) VALUES(%s,%s)", (run, phase))
     # Fixture setup explicitly uses the immutable policy already installed by the schema.
-    connection.execute("SELECT public.start_market_intelligence_run(%s,'intraday',%s,1,%s,%s)", (run, window["market_date"], Jsonb(plan), Jsonb(window)))
+    connection.execute("SELECT public.start_market_intelligence_run(%s,%s,%s,1,%s,%s)", (run, phase, window["market_date"], Jsonb(plan), Jsonb(window)))
     receipt = {"id": hit if cache else original, "reservation_id": reservation, "status": "cache_hit" if cache else "succeeded",
         "cache_key": "a" * 64, "requested_window": {"start": window["start"], "end": window["end"]},
         "retrieved_at": now.isoformat(), "expires_at": (now + timedelta(minutes=15)).isoformat(),
@@ -267,3 +270,112 @@ def test_independent_worker_hydrates_successful_checkpoint_with_distinct_receipt
     assert db.execute("SELECT cache_receipt_id::text,cache_predecessor_receipt_id::text FROM market_checkpoint_receipt_lineage WHERE run_id=%s", (run_id,)).fetchone() == (hit, original)
     assert db.execute("SELECT status,request_cost FROM market_source_receipts WHERE id=%s", (original,)).fetchone() == ("succeeded", 1)
     assert db.execute("SELECT sum(request_cost) FROM market_source_receipts WHERE run_id=%s", (run_id,)).fetchone()[0] == 1
+
+
+@pytest.mark.parametrize("kind", ["fresh", "ordered"])
+def test_scheduled_lifecycle_uses_one_slot_run_binds_retries_and_keeps_prior_overdue_slots(databases, kind):
+    """Exercise the installed final RPCs without an external database or scheduler."""
+    db = databases[kind]
+    market_date = "2026-09-08"
+    first_request, second_request = uuid.uuid4(), uuid.uuid4()
+    first_lease, second_lease = uuid.uuid4(), uuid.uuid4()
+    for request_id, lease_token in ((first_request, first_lease), (second_request, second_lease)):
+        db.execute(
+            "INSERT INTO market_gateway_requests(request_id,operation,status,lease_token) VALUES(%s,'start_run','claimed',%s)",
+            (request_id, lease_token),
+        )
+
+    first = db.execute(
+        "SELECT public.start_market_analysis_run(%s,%s,'intraday',%s)",
+        (first_request, first_lease, market_date),
+    ).fetchone()[0]
+    second = db.execute(
+        "SELECT public.start_market_analysis_run(%s,%s,'intraday',%s)",
+        (second_request, second_lease, market_date),
+    ).fetchone()[0]
+    assert first["duplicate"] is False
+    assert second == {"run_id": first["run_id"], "duplicate": True}
+    assert db.execute(
+        "SELECT count(DISTINCT run_id), count(*) FROM market_gateway_requests WHERE request_id IN (%s,%s)",
+        (first_request, second_request),
+    ).fetchone() == (1, 2)
+    assert db.execute(
+        "SELECT to_regprocedure('public.start_market_analysis_run(uuid,uuid,text)')"
+    ).fetchone()[0] is None
+
+    policy = db.execute("SELECT config FROM market_policy_config WHERE version=1").fetchone()[0]
+    policy.update({"market_calendar_year": 2026, "nyse_holidays": []})
+    db.execute("UPDATE market_policy_config SET config=%s, active=true WHERE version=1", (Jsonb(policy),))
+    db.execute("UPDATE market_scheduled_phase_deadlines SET effective_on='2026-09-07'")
+    overdue = db.execute(
+        "SELECT market_date::text, phase, deadline_at AT TIME ZONE 'America/Chicago' "
+        "FROM public.read_overdue_scheduled_market_phases('2026-09-08 23:00:00-05')"
+    ).fetchall()
+    assert ("2026-09-07", "pre-market", datetime(2026, 9, 7, 6, 45)) in overdue
+    assert ("2026-09-07", "intraday", datetime(2026, 9, 7, 12, 15)) in overdue
+    assert ("2026-09-07", "post-market", datetime(2026, 9, 7, 15, 25)) in overdue
+    assert ("2026-09-08", "intraday", datetime(2026, 9, 8, 12, 15)) in overdue
+
+
+@pytest.mark.parametrize("kind", ["fresh", "ordered"])
+def test_scheduled_finish_requires_successful_date_bound_receipt_chain(databases, kind):
+    db = databases[kind]
+    market_date = "2026-09-09"
+    start_request, start_lease = uuid.uuid4(), uuid.uuid4()
+    db.execute(
+        "INSERT INTO market_gateway_requests(request_id,operation,status,lease_token) VALUES(%s,'start_run','claimed',%s)",
+        (start_request, start_lease),
+    )
+    run = db.execute(
+        "SELECT public.start_market_analysis_run(%s,%s,'intraday',%s)",
+        (start_request, start_lease, market_date),
+    ).fetchone()[0]["run_id"]
+    run, completion, _, payload = prepared_run(db, run_id=run, phase="intraday", market_date=market_date)
+    db.execute("SELECT public.record_market_intelligence(%s,%s,%s)", (run, completion, Jsonb(payload)))
+
+    with pytest.raises(psycopg.errors.InvalidParameterValue, match="MISSING_EVALUATION_RECEIPT"):
+        db.execute("SELECT public.finish_market_analysis_run(%s)", (run,))
+
+    evaluation_request = uuid.uuid4()
+    db.execute(
+        "INSERT INTO market_gateway_requests(request_id,operation,run_id,status,lease_token) VALUES(%s,'evaluate_and_publish',%s,'completed',%s)",
+        (evaluation_request, run, uuid.uuid4()),
+    )
+    db.execute(
+        "INSERT INTO market_publications(id,idempotency_key,run_id,market_date,phase,kind,template_version,rendered_body,rendered_hash,status) "
+        "VALUES(%s,%s,%s,'2026-09-08','intraday','brief',2,'suppressed','a'::text || repeat('a',63),'suppressed')",
+        (uuid.uuid4(), evaluation_request, run),
+    )
+    with pytest.raises(psycopg.errors.InvalidParameterValue, match="MISSING_EVALUATION_RECEIPT"):
+        db.execute("SELECT public.finish_market_analysis_run(%s)", (run,))
+    db.execute("UPDATE market_publications SET market_date=%s WHERE run_id=%s", (market_date, run))
+
+    with pytest.raises(psycopg.errors.InvalidParameterValue, match="MISSING_REPORT_RECEIPT"):
+        db.execute("SELECT public.finish_market_analysis_run(%s)", (run,))
+    report_request, report_id = uuid.uuid4(), uuid.uuid4()
+    db.execute(
+        "INSERT INTO market_gateway_requests(request_id,operation,run_id,status,lease_token) VALUES(%s,'record_report',%s,'completed',%s)",
+        (report_request, run, uuid.uuid4()),
+    )
+    packet_id = db.execute("SELECT id FROM market_evidence_packets WHERE run_id=%s", (run,)).fetchone()[0]
+    db.execute(
+        "INSERT INTO market_reports(id,idempotency_key,run_id,packet_id,market_date,kind,report,report_hash,rendered_text,rendered_hash) "
+        "VALUES(%s,repeat('b',64),%s,%s,'2026-09-08','intraday','{}',repeat('c',64),'suppressed',repeat('d',64))",
+        (report_id, run, packet_id),
+    )
+    with pytest.raises(psycopg.errors.InvalidParameterValue, match="MISSING_REPORT_RECEIPT"):
+        db.execute("SELECT public.finish_market_analysis_run(%s)", (run,))
+    correct_report_id = uuid.uuid4()
+    db.execute(
+        "INSERT INTO market_reports(id,idempotency_key,run_id,packet_id,market_date,kind,report,report_hash,rendered_text,rendered_hash) "
+        "VALUES(%s,repeat('f',64),%s,%s,%s,'intraday','{}',repeat('c',64),'suppressed',repeat('d',64))",
+        (correct_report_id, run, packet_id, market_date),
+    )
+
+    with pytest.raises(psycopg.errors.InvalidParameterValue, match="MISSING_PUBLICATION_RECEIPT"):
+        db.execute("SELECT public.finish_market_analysis_run(%s)", (run,))
+    db.execute(
+        "INSERT INTO market_report_publications(report_id,idempotency_key,status) VALUES(%s,repeat('e',64),'suppressed')",
+        (correct_report_id,),
+    )
+    assert db.execute("SELECT public.finish_market_analysis_run(%s)", (run,)).fetchone()[0]["status"] == "suppressed"

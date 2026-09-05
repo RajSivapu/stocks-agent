@@ -595,6 +595,12 @@ def test_scheduled_lifecycle_is_additive_and_mirrors_the_fresh_schema():
         assert "MISSING_PUBLICATION_RECEIPT" in sql
         assert "CREATE OR REPLACE FUNCTION public.read_overdue_scheduled_market_phases(" in sql
         assert "GRANT EXECUTE ON FUNCTION public.finish_market_analysis_run(UUID) TO service_role;" in sql
+        assert "DROP FUNCTION IF EXISTS public.start_market_analysis_run(UUID, UUID, TEXT);" in sql
+        assert "VALUES ('pre-market','06:30',15),('intraday','12:00',15),('post-market','15:10',15)" in sql
+        assert "grace_minutes" in sql
+        assert "generate_series" in sql
+        assert "UPDATE public.market_gateway_requests SET run_id=v_run.id" in sql
+        assert "status='completed'" in sql
 
 
 def test_fresh_schema_declares_reports_before_report_outbox_rowtype_functions():

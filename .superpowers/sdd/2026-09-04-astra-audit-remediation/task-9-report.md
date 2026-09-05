@@ -19,7 +19,18 @@
 
 `fix: enforce scheduled run lifecycle` (this report is included in that commit).
 
+Controller remediation commit: `fix: close scheduled lifecycle receipt gaps`.
+
 ## Residual risks
 
 - No live database, provider, Telegram delivery, scheduled run, migration application, or deployment was performed.
 - The protected rollout must apply the ordered `20260923` migration and reconcile an existing scheduled chain; the verifier intentionally treats any overdue phase without a completed or explicit suppression receipt as a failure.
+
+## Controller remediation
+
+- Revoked the obsolete three-argument start RPC and bound every duplicate scheduled-start gateway request to the converged run.
+- The lifecycle closure now requires completed, phase/date-bound collection; a persisted packet; completed evaluation plus a suppressed periodic publication; completed report plus a date-bound report; and a delivered or suppressed report outbox receipt. A wholly suppressed chain records `analysis_runs.status = 'suppressed'`.
+- Overdue detection now covers every trading day since the effective deadline, uses the Chicago 06:30/12:00/15:10 deadlines with an explicit 15-minute grace period, and fails closed when the active annual calendar is missing.
+- Context preserves bounded unresolved rows before completed history and orders equal-date history by durable ID descending.
+- RED: the disposable fresh/ordered PostgreSQL regression first exposed fresh-schema retry rows not being bound, then exposed the migration overdue query's stale `d` alias.
+- GREEN: focused Deno repository/handler tests passed `52`; deployment/migration verifier tests passed `81`; disposable fresh/ordered PostgreSQL scheduled-lifecycle tests passed `4` (with `13` intentionally deselected); `git diff --check` passed.

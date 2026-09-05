@@ -77,7 +77,30 @@ Deno.test("relevant suggestion context keeps unresolved work when old completed 
   const selected = mergeRelevantSuggestions(unresolved, completed, 100);
   assertEquals(selected.length, 100);
   assertEquals(selected[0].ticker, "OPEN");
-  assertEquals(selected.at(-1)?.ticker, "OLD98");
+  assertEquals(selected.filter((row) => row.ticker === "OPEN").length, 1);
+  assertEquals(selected.filter((row) => row.ticker.startsWith("OLD")).length, 99);
+  assertEquals(new Set(selected.map((row) => row.id)).size, 100);
+});
+
+Deno.test("relevant suggestion history resolves equal dates by descending durable id", () => {
+  const selected = mergeRelevantSuggestions(
+    [],
+    [
+      { id: 2, date: "2026-09-01", ticker: "SECOND" },
+      { id: 9, date: "2026-09-01", ticker: "FIRST" },
+    ],
+    2,
+  );
+  assertEquals(selected.map((row) => row.id), [9, 2]);
+});
+
+Deno.test("newer completed history cannot displace unresolved suggestion context", () => {
+  const selected = mergeRelevantSuggestions(
+    [{ id: 1, date: "2026-01-01", ticker: "PENDING" }],
+    [{ id: 99, date: "2099-01-01", ticker: "HISTORY" }],
+    1,
+  );
+  assertEquals(selected.map((row) => row.ticker), ["PENDING"]);
 });
 
 function rejects(value: unknown): boolean {

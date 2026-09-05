@@ -28,13 +28,17 @@ CREATE UNIQUE INDEX IF NOT EXISTS uq_analysis_runs_scheduled_slot
 CREATE TABLE IF NOT EXISTS public.market_scheduled_phase_deadlines (
   phase TEXT PRIMARY KEY CHECK (phase IN ('pre-market','intraday','post-market')),
   deadline_local TIME NOT NULL,
+  grace_minutes INT NOT NULL DEFAULT 15 CHECK (grace_minutes BETWEEN 0 AND 60),
   effective_on DATE NOT NULL DEFAULT (timezone('America/Chicago', statement_timestamp())::date)
 );
+ALTER TABLE public.market_scheduled_phase_deadlines
+  ADD COLUMN IF NOT EXISTS grace_minutes INT NOT NULL DEFAULT 15 CHECK (grace_minutes BETWEEN 0 AND 60);
 ALTER TABLE public.market_scheduled_phase_deadlines ENABLE ROW LEVEL SECURITY;
 REVOKE ALL ON public.market_scheduled_phase_deadlines FROM PUBLIC, anon, authenticated;
-INSERT INTO public.market_scheduled_phase_deadlines(phase,deadline_local)
-VALUES ('pre-market','09:30'),('intraday','13:00'),('post-market','17:15')
-ON CONFLICT (phase) DO NOTHING;
+INSERT INTO public.market_scheduled_phase_deadlines(phase,deadline_local,grace_minutes)
+VALUES ('pre-market','06:30',15),('intraday','12:00',15),('post-market','15:10',15)
+ON CONFLICT (phase) DO UPDATE SET deadline_local=EXCLUDED.deadline_local,
+  grace_minutes=EXCLUDED.grace_minutes;
 
 CREATE OR REPLACE FUNCTION public.start_market_analysis_run(
   p_request_id UUID, p_lease_token UUID, p_kind TEXT, p_market_date DATE
@@ -56,6 +60,7 @@ BEGIN
        OR COALESCE(v_run.scheduled_market_date,p_market_date) IS DISTINCT FROM p_market_date THEN
       RAISE EXCEPTION 'run identity mismatch' USING ERRCODE='22023';
     END IF;
+    UPDATE public.market_gateway_requests SET run_id=v_run.id WHERE request_id=p_request_id;
     RETURN jsonb_build_object('run_id',v_run.id,'duplicate',true);
   END IF;
   IF p_kind <> 'on-demand' THEN
@@ -63,6 +68,7 @@ BEGIN
     SELECT * INTO v_run FROM public.analysis_runs
       WHERE scheduled_market_date=p_market_date AND scheduled_phase=p_kind FOR UPDATE;
     IF FOUND THEN
+      UPDATE public.market_gateway_requests SET run_id=v_run.id WHERE request_id=p_request_id;
       RETURN jsonb_build_object('run_id',v_run.id,'duplicate',true);
     END IF;
     INSERT INTO public.analysis_runs(kind,status,gateway_request_id,scheduled_market_date,scheduled_phase)
@@ -71,6 +77,7 @@ BEGIN
     INSERT INTO public.analysis_runs(kind,status,gateway_request_id)
     VALUES (p_kind,'running',p_request_id) RETURNING * INTO v_run;
   END IF;
+  UPDATE public.market_gateway_requests SET run_id=v_run.id WHERE request_id=p_request_id;
   RETURN jsonb_build_object('run_id',v_run.id,'duplicate',false);
 END;
 $$;
@@ -86,6 +93,8 @@ BEGIN
     IF NOT EXISTS (SELECT 1 FROM public.market_intelligence_runs i
                    WHERE i.id=p_run_id AND i.phase=v_run.scheduled_phase
                      AND i.market_date=v_run.scheduled_market_date)
+       OR NOT EXISTS (SELECT 1 FROM public.market_intelligence_run_events e
+                      WHERE e.run_id=p_run_id AND e.status='completed')
        OR NOT EXISTS (SELECT 1 FROM public.market_collection_checkpoints c WHERE c.run_id=p_run_id)
        OR NOT EXISTS (SELECT 1 FROM public.market_intelligence_collection_completions c WHERE c.run_id=p_run_id) THEN
       RAISE EXCEPTION 'MISSING_COLLECTION_RECEIPT' USING ERRCODE='22023';
@@ -94,15 +103,22 @@ BEGIN
       RAISE EXCEPTION 'MISSING_PACKET_RECEIPT' USING ERRCODE='22023';
     END IF;
     IF NOT EXISTS (SELECT 1 FROM public.market_gateway_requests q
-                   WHERE q.run_id=p_run_id AND q.operation='evaluate_and_publish' AND q.status='completed') THEN
+                   WHERE q.run_id=p_run_id AND q.operation='evaluate_and_publish' AND q.status='completed')
+       OR NOT EXISTS (SELECT 1 FROM public.market_publications p
+                      WHERE p.run_id=p_run_id AND p.market_date=v_run.scheduled_market_date
+                        AND p.phase=v_run.scheduled_phase AND p.status='suppressed') THEN
       RAISE EXCEPTION 'MISSING_EVALUATION_RECEIPT' USING ERRCODE='22023';
     END IF;
-    IF NOT EXISTS (SELECT 1 FROM public.market_reports r WHERE r.run_id=p_run_id) THEN
+    IF NOT EXISTS (SELECT 1 FROM public.market_gateway_requests q
+                   WHERE q.run_id=p_run_id AND q.operation='record_report' AND q.status='completed')
+       OR NOT EXISTS (SELECT 1 FROM public.market_reports r
+                      WHERE r.run_id=p_run_id AND r.market_date=v_run.scheduled_market_date) THEN
       RAISE EXCEPTION 'MISSING_REPORT_RECEIPT' USING ERRCODE='22023';
     END IF;
     IF NOT EXISTS (SELECT 1 FROM public.market_reports r
                    JOIN public.market_report_publications p ON p.report_id=r.id
-                   WHERE r.run_id=p_run_id AND p.status IN ('delivered','suppressed')) THEN
+                   WHERE r.run_id=p_run_id AND r.market_date=v_run.scheduled_market_date
+                     AND p.status IN ('delivered','suppressed')) THEN
       RAISE EXCEPTION 'MISSING_PUBLICATION_RECEIPT' USING ERRCODE='22023';
     END IF;
   END IF;
@@ -128,7 +144,14 @@ BEGIN
   SELECT CASE WHEN EXISTS(SELECT 1 FROM public.market_gateway_requests
                            WHERE run_id=p_run_id AND status='failed')
                    OR v_statuses ?| ARRAY['delivery_failed','delivery_unknown','failed','uncertain']
-              THEN 'partial' ELSE 'completed' END INTO v_status;
+              THEN 'partial'
+              WHEN NOT EXISTS(SELECT 1 FROM public.market_reports r
+                              JOIN public.market_report_publications p ON p.report_id=r.id
+                              WHERE r.run_id=p_run_id AND p.status='delivered')
+                   AND EXISTS(SELECT 1 FROM public.market_reports r
+                              JOIN public.market_report_publications p ON p.report_id=r.id
+                              WHERE r.run_id=p_run_id AND p.status='suppressed')
+              THEN 'suppressed' ELSE 'completed' END INTO v_status;
   UPDATE public.analysis_runs SET status=v_status,finished_at=statement_timestamp(),
     write_counts=v_counts,telegram_message_ids=v_ids WHERE id=p_run_id;
   RETURN jsonb_build_object('run_id',p_run_id,'status',v_status,'write_counts',v_counts,
@@ -139,21 +162,29 @@ $$;
 CREATE OR REPLACE FUNCTION public.read_overdue_scheduled_market_phases(
   p_now TIMESTAMPTZ DEFAULT statement_timestamp()
 ) RETURNS TABLE(market_date DATE, phase TEXT, deadline_at TIMESTAMPTZ)
-LANGUAGE sql STABLE SECURITY DEFINER SET search_path=pg_catalog AS $$
-  SELECT d.market_date, deadline.phase,
-         (d.market_date::timestamp + deadline.deadline_local) AT TIME ZONE 'America/Chicago' AS deadline_at
-  FROM (SELECT timezone('America/Chicago',p_now)::date AS market_date) d
-  JOIN public.market_scheduled_phase_deadlines deadline ON deadline.effective_on<=d.market_date
-  WHERE extract(isodow FROM d.market_date) BETWEEN 1 AND 5
-    AND ((d.market_date::timestamp + deadline.deadline_local) AT TIME ZONE 'America/Chicago') < p_now
-    AND NOT EXISTS (SELECT 1 FROM public.market_policy_config policy
-                    WHERE policy.active AND policy.config->'nyse_holidays' ? d.market_date::text)
-    AND NOT EXISTS (SELECT 1 FROM public.analysis_runs run
-                    WHERE run.scheduled_market_date=d.market_date AND run.scheduled_phase=deadline.phase
-                      AND run.status IN ('completed','suppressed'))
-  ORDER BY d.market_date, deadline.phase;
+LANGUAGE plpgsql STABLE SECURITY DEFINER SET search_path=pg_catalog AS $$
+DECLARE v_policy JSONB; v_today DATE := timezone('America/Chicago',p_now)::date;
+BEGIN
+  SELECT config INTO v_policy FROM public.market_policy_config WHERE active;
+  IF NOT FOUND OR COALESCE((v_policy->>'market_calendar_year')::int,0) <> extract(year FROM v_today) THEN
+    RAISE EXCEPTION 'calendar coverage missing' USING ERRCODE='22023';
+  END IF;
+  RETURN QUERY
+    SELECT slot_days.market_date, deadline.phase,
+           (slot_days.market_date::timestamp + deadline.deadline_local + make_interval(mins=>deadline.grace_minutes)) AT TIME ZONE 'America/Chicago'
+    FROM generate_series((SELECT min(effective_on) FROM public.market_scheduled_phase_deadlines),v_today,interval '1 day') AS days(value)
+    CROSS JOIN LATERAL (SELECT days.value::date AS market_date) slot_days
+    JOIN public.market_scheduled_phase_deadlines deadline ON deadline.effective_on<=slot_days.market_date
+    WHERE extract(isodow FROM slot_days.market_date) BETWEEN 1 AND 5
+      AND ((slot_days.market_date::timestamp + deadline.deadline_local + make_interval(mins=>deadline.grace_minutes)) AT TIME ZONE 'America/Chicago') < p_now
+      AND NOT (v_policy->'nyse_holidays' ? slot_days.market_date::text)
+      AND NOT EXISTS (SELECT 1 FROM public.analysis_runs run WHERE run.scheduled_market_date=slot_days.market_date
+                      AND run.scheduled_phase=deadline.phase AND run.status IN ('completed','suppressed'))
+    ORDER BY slot_days.market_date, deadline.phase;
+END;
 $$;
 
+DROP FUNCTION IF EXISTS public.start_market_analysis_run(UUID, UUID, TEXT);
 REVOKE ALL ON FUNCTION public.start_market_analysis_run(UUID,UUID,TEXT,DATE) FROM PUBLIC, anon, authenticated;
 REVOKE ALL ON FUNCTION public.finish_market_analysis_run(UUID) FROM PUBLIC, anon, authenticated;
 REVOKE ALL ON FUNCTION public.read_overdue_scheduled_market_phases(TIMESTAMPTZ) FROM PUBLIC, anon, authenticated;
