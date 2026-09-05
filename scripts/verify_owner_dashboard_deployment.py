@@ -80,6 +80,13 @@ def normalize_receipt_timestamp(value: object) -> str | None:
     return parsed.astimezone(timezone.utc).isoformat(timespec="milliseconds").replace("+00:00", "Z")
 
 
+def canonical_sha256(value: object) -> str:
+    """Hash retained JSON content using the same canonical bytes as receipt producers."""
+    return hashlib.sha256(
+        json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode(),
+    ).hexdigest()
+
+
 def verify_release_artifact_receipts(
     candidate_sha: str,
     deployment: Mapping[str, object],
@@ -331,15 +338,30 @@ def collect_source_receipts(database_url: str, api_url: str, run_id: str) -> dic
             "SELECT id::text AS id, phase, market_date::text AS market_date, policy_version FROM public.market_intelligence_runs WHERE id=%s::uuid",
             (run_id,))
         intelligence_events = _fetch_all(connection,
-            "SELECT id::text AS id, run_id::text AS run_id, content_hash FROM public.market_events WHERE run_id=%s::uuid ORDER BY id", (run_id,))
+            """SELECT id::text AS id, run_id::text AS run_id, content_hash,
+                      jsonb_build_object('event_type',event_type,'title',title,'summary',summary,
+                        'occurred_at',occurred_at,'effective_at',effective_at,'materiality',materiality,
+                        'confidence',confidence,'evidence_item_ids',evidence_item_ids) AS canonical
+                 FROM public.market_events WHERE run_id=%s::uuid ORDER BY id""", (run_id,))
         intelligence_rankings = _fetch_all(connection,
-            "SELECT id::text AS id, run_id::text AS run_id, event_id::text AS event_id, content_hash FROM public.market_candidate_rankings WHERE run_id=%s::uuid ORDER BY rank", (run_id,))
+            """SELECT id::text AS id, run_id::text AS run_id, event_id::text AS event_id, content_hash,
+                      jsonb_build_object('event_id',event_id,'candidate_key',candidate_key,'ticker',ticker,
+                        'rank',rank,'component_scores',component_scores,'total_score',total_score,
+                        'qualified',qualified,'veto_reasons',veto_reasons,'exposure_item_ids',exposure_item_ids) AS canonical
+                 FROM public.market_candidate_rankings WHERE run_id=%s::uuid ORDER BY rank""", (run_id,))
         intelligence_packets = _fetch_all(connection,
-            "SELECT id::text AS id, run_id::text AS run_id, packet_hash, candidate_count, evidence_count FROM public.market_evidence_packets WHERE run_id=%s::uuid", (run_id,))
+            "SELECT id::text AS id, run_id::text AS run_id, packet_hash, candidate_count, evidence_count, packet AS canonical FROM public.market_evidence_packets WHERE run_id=%s::uuid", (run_id,))
         reports = _fetch_all(connection,
-            "SELECT id::text AS id, run_id::text AS run_id, packet_id::text AS packet_id, report_hash, rendered_hash FROM public.market_reports WHERE run_id=%s::uuid ORDER BY created_at", (run_id,))
+            "SELECT id::text AS id, run_id::text AS run_id, packet_id::text AS packet_id, report_hash, rendered_hash, report AS canonical, rendered_text FROM public.market_reports WHERE run_id=%s::uuid ORDER BY created_at", (run_id,))
         report_publications = _fetch_all(connection,
-            "SELECT request_id::text AS request_id, run_id::text AS run_id, response FROM public.market_gateway_requests WHERE run_id=%s::uuid AND operation='record_report' AND status='completed' ORDER BY request_id", (run_id,))
+            """SELECT p.report_id::text AS report_id, r.run_id::text AS run_id, p.idempotency_key,
+                      p.status, p.telegram_message_ids, p.telegram_accepted_at,
+                      jsonb_build_object('report_id',p.report_id,'idempotency_key',p.idempotency_key,
+                        'status',p.status,'telegram_message_ids',p.telegram_message_ids,
+                        'telegram_accepted_at',p.telegram_accepted_at) AS canonical
+                 FROM public.market_report_publications p
+                 JOIN public.market_reports r ON r.id=p.report_id
+                WHERE r.run_id=%s::uuid ORDER BY p.report_id""", (run_id,))
         overdue_scheduled_phases = _fetch_all(
             connection,
             "SELECT market_date::text AS market_date, phase, to_char(deadline_at AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS.MS\"Z\"') AS deadline_at FROM public.read_overdue_scheduled_market_phases()",
@@ -350,6 +372,17 @@ def collect_source_receipts(database_url: str, api_url: str, run_id: str) -> dic
             if row.get(field) is not None:
                 row[field] = str(row[field])
     price_times = [row.get("price_as_of") for row in holdings if row.get("price_as_of")]
+    canonical_records = []
+    for kind, rows, field in (
+        ("event", intelligence_events, "content_hash"),
+        ("ranking", intelligence_rankings, "content_hash"),
+        ("packet", intelligence_packets, "packet_hash"),
+        ("report", reports, "report_hash"),
+    ):
+        canonical_records.extend({"kind": kind, "body": row["canonical"], "sha256": row[field]} for row in rows)
+    canonical_records.extend({
+        "kind": "publication", "body": row["canonical"], "sha256": canonical_sha256(row["canonical"]),
+    } for row in report_publications)
     return {
         **identity,
         "run": run,
@@ -364,6 +397,7 @@ def collect_source_receipts(database_url: str, api_url: str, run_id: str) -> dic
         "intelligence_packets": intelligence_packets,
         "reports": reports,
         "report_publications": report_publications,
+        "canonical_records": canonical_records,
         "overdue_scheduled_phases": overdue_scheduled_phases,
     }
 
@@ -484,27 +518,42 @@ def reconcile_source_receipts(
         fail()
     if len(chains["intelligence_runs"]) != 1 or chains["intelligence_runs"][0].get("id") != run_id:
         fail()
-    if any(row.get("run_id") != run_id or not re.fullmatch(r"[0-9a-f]{64}", str(row.get("content_hash", ""))) for row in chains["intelligence_events"]):
+    if any(row.get("run_id") != run_id or not isinstance(row.get("canonical"), Mapping)
+           or canonical_sha256(row["canonical"]) != row.get("content_hash") for row in chains["intelligence_events"]):
         fail()
     packet = chains["intelligence_packets"][0]
-    if packet.get("run_id") != run_id or not re.fullmatch(r"[0-9a-f]{64}", str(packet.get("packet_hash", ""))):
+    if (packet.get("run_id") != run_id or not isinstance(packet.get("canonical"), Mapping)
+            or canonical_sha256(packet["canonical"]) != packet.get("packet_hash")):
         fail()
     event_ids = {row.get("id") for row in chains["intelligence_events"]}
-    if any(row.get("run_id") != run_id or row.get("event_id") not in event_ids or not re.fullmatch(r"[0-9a-f]{64}", str(row.get("content_hash", ""))) for row in chains["intelligence_rankings"]):
+    if any(row.get("run_id") != run_id or row.get("event_id") not in event_ids
+           or not isinstance(row.get("canonical"), Mapping)
+           or canonical_sha256(row["canonical"]) != row.get("content_hash")
+           for row in chains["intelligence_rankings"]):
         fail()
     report_ids = set()
     for row in chains["reports"]:
-        if row.get("run_id") != run_id or row.get("packet_id") != packet.get("id") or not re.fullmatch(r"[0-9a-f]{64}", str(row.get("report_hash", ""))) or not re.fullmatch(r"[0-9a-f]{64}", str(row.get("rendered_hash", ""))):
+        if (row.get("run_id") != run_id or row.get("packet_id") != packet.get("id")
+                or not isinstance(row.get("canonical"), Mapping)
+                or canonical_sha256(row["canonical"]) != row.get("report_hash")
+                or not isinstance(row.get("rendered_text"), str)
+                or hashlib.sha256(row["rendered_text"].encode()).hexdigest() != row.get("rendered_hash")):
             fail()
         report_ids.add(row.get("id"))
     for row in chains["report_publications"]:
-        response = row.get("response")
-        if row.get("run_id") != run_id or not isinstance(response, dict) or response.get("report_id") not in report_ids or not isinstance(response.get("publication_receipt"), dict):
+        if (row.get("run_id") != run_id or row.get("report_id") not in report_ids
+                or row.get("status") not in {"delivered", "suppressed"}
+                or not isinstance(row.get("canonical"), Mapping)):
+            fail()
+        ids = row.get("telegram_message_ids")
+        if row.get("status") == "delivered" and (not isinstance(ids, list) or not ids
+                or any(isinstance(value, bool) or not isinstance(value, int) or value <= 0 for value in ids)):
+            fail()
+        if row.get("status") == "suppressed" and ids != []:
             fail()
     report = chains["reports"][-1]
-    publication = next((row["response"] for row in chains["report_publications"]
-                        if isinstance(row.get("response"), dict) and row["response"].get("report_id") == report.get("id")), None)
-    if not isinstance(publication, dict):
+    publication = next((row for row in chains["report_publications"] if row.get("report_id") == report.get("id")), None)
+    if not isinstance(publication, Mapping):
         fail()
     intelligence = payloads.get("/v1/intelligence", {}).get("data")
     reports_view = payloads.get("/v1/reports", {}).get("data")
@@ -519,12 +568,18 @@ def reconcile_source_receipts(
                    "rankings": len(chains["intelligence_rankings"]), "packets": len(chains["intelligence_packets"]),
                    "reports": len(chains["reports"]), "report_publications": len(chains["report_publications"])},
         "relationships_verified": True, "hashes_verified": True,
+        "canonical_records": source.get("canonical_records"),
         "scheduled_chain": {
             "run_id": run_id,
             "intelligence_run_id": chains["intelligence_runs"][0]["id"],
             "packet_id": packet["id"], "packet_hash": packet["packet_hash"],
             "report_id": report["id"], "report_hash": report["report_hash"],
-            "publication_receipt": publication["publication_receipt"],
+            "publication_receipt": {
+                "status": "accepted_by_telegram" if publication["status"] == "delivered" else "suppressed",
+                "telegram_message_ids": publication["telegram_message_ids"],
+                "original_telegram_message_ids": publication["telegram_message_ids"],
+                **({"suppression_reason": "stored outbox suppression"} if publication["status"] == "suppressed" else {}),
+            },
         },
     }
 

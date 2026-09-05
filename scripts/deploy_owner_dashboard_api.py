@@ -535,6 +535,26 @@ def restore_gateway_and_rollback_initial_dashboard(
     }
 
 
+def rollback_after_gateway_change(
+    project_ref: str,
+    admin_url: str,
+    gateway_artifact: Mapping[str, object],
+    *,
+    restorer: Callable[..., Mapping[str, object]] = restore_gateway_and_rollback_initial_dashboard,
+) -> dict[str, object]:
+    """Use the captured gateway artifact for every deployment failure after gateway mutation."""
+    if not all(isinstance(gateway_artifact.get(field), str) and gateway_artifact[field]
+               for field in ("repo_root", "commit_sha", "source_sha256")):
+        raise RuntimeError("captured gateway rollback artifact is unavailable")
+    receipt = dict(restorer(project_ref, admin_url, gateway_artifact))
+    gateway = receipt.get("gateway")
+    if (not isinstance(gateway, Mapping) or gateway.get("status") != "restored"
+            or gateway.get("git_sha") != gateway_artifact["commit_sha"]
+            or gateway.get("source_sha256") != gateway_artifact["source_sha256"]):
+        raise RuntimeError("captured gateway rollback was incomplete")
+    return receipt
+
+
 def publish_and_deploy_or_rollback(
     project_ref: str,
     values: Mapping[str, str],
@@ -718,7 +738,7 @@ def main() -> int:
         role_receipt=role_receipt,
         secret_names=DASHBOARD_SECRET_NAMES,
     )
-    rollback_release = lambda project_ref, admin: restore_gateway_and_rollback_initial_dashboard(
+    rollback_release = lambda project_ref, admin: rollback_after_gateway_change(
         project_ref, admin, gateway_rollback
     )
     receipt = publish_and_deploy_or_rollback(

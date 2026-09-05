@@ -385,6 +385,25 @@ npx --yes deno@2.9.6 check supabase/functions/market-briefing-gateway/index.ts
 6. Run dry-run start/context, migration/RPC verifiers, and one controlled live phase before resuming
    the cadence.
 
+## Local recovery evidence
+
+The recovery tools are deliberately local-only and never contact cloud storage. Export a JSON object
+with exactly these record sets: `holdings`, `transactions`, `commands`, `runs`, `packets`,
+`reports`, `publications`, `roles`, and `schema_version`.
+
+```bash
+python scripts/export_recovery_bundle.py \
+  --records-json isolated-export.json --destination ./recovery-bundle
+python scripts/verify_recovery_bundle.py \
+  --bundle ./recovery-bundle --isolated-restored-records-json restored-isolated.json
+```
+
+The bundle stores canonical NDJSON with per-file SHA-256 hashes. Its manifest contains only record
+counts, paths, and hashes—never portfolio values or secrets. If encryption is required, pass a
+caller-owned local command containing `{input}` and `{output}` to `--encrypt-command`; the project
+does not select, install, or pay for an encryption or backup service. Verification accepts only
+records restored in an isolated environment.
+
 ## Unchanging guardrails
 
 - No brokerage credentials or order endpoints.

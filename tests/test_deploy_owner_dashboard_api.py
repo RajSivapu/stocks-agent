@@ -320,6 +320,24 @@ def test_release_rollback_restores_the_verified_prior_gateway(tmp_path, monkeypa
     }
 
 
+def test_every_post_gateway_failure_uses_the_captured_gateway_restore_artifact():
+    artifact = {"repo_root": "/verified/rollback", "commit_sha": "a" * 40, "source_sha256": "b" * 64}
+    calls = []
+
+    def restorer(project_ref, admin_url, received_artifact):
+        calls.append((project_ref, admin_url, received_artifact))
+        return {
+            "status": "rolled_back", "function": "owner-dashboard-api",
+            "gateway": {"status": "restored", "git_sha": "a" * 40, "source_sha256": "b" * 64, "function_version": 19},
+        }
+
+    receipt = deploy.rollback_after_gateway_change(
+        PROJECT_REF, ADMIN_URL, artifact, restorer=restorer,
+    )
+    assert receipt["gateway"]["status"] == "restored"
+    assert calls == [(PROJECT_REF, ADMIN_URL, artifact)]
+
+
 def test_rollback_attempts_edge_cleanup_even_if_runtime_login_disable_fails():
     events = []
 

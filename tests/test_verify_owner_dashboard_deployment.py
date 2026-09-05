@@ -1,4 +1,5 @@
 import json
+import hashlib
 import sys
 
 import pytest
@@ -26,14 +27,21 @@ def v1_chain(run_id):
     event_id = "22222222-2222-4222-8222-222222222222"
     packet_id = "33333333-3333-4333-8333-333333333333"
     report_id = "44444444-4444-4444-8444-444444444444"
+    event_canonical = {"title": "event"}
+    ranking_canonical = {"event_id": event_id, "rank": 1}
+    packet_canonical = {"packet": "evidence"}
+    report_canonical = {"summary": "research"}
+    rendered_text = "Suggestion only."
+    publication_canonical = {"report_id": report_id, "status": "delivered", "telegram_message_ids": [7]}
+    digest = lambda value: hashlib.sha256(json.dumps(value, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
     return {
         "overdue_scheduled_phases": [],
         "intelligence_runs": [{"id": run_id}],
-        "intelligence_events": [{"id": event_id, "run_id": run_id, "content_hash": "a" * 64}],
-        "intelligence_rankings": [{"id": "55555555-5555-4555-8555-555555555555", "run_id": run_id, "event_id": event_id, "content_hash": "b" * 64}],
-        "intelligence_packets": [{"id": packet_id, "run_id": run_id, "packet_hash": "c" * 64, "candidate_count": 1, "evidence_count": 1}],
-        "reports": [{"id": report_id, "run_id": run_id, "packet_id": packet_id, "report_hash": "d" * 64, "rendered_hash": "e" * 64}],
-        "report_publications": [{"request_id": "66666666-6666-4666-8666-666666666666", "run_id": run_id, "response": {"report_id": report_id, "publication_receipt": {"status": "accepted_by_telegram"}}}],
+        "intelligence_events": [{"id": event_id, "run_id": run_id, "canonical": event_canonical, "content_hash": digest(event_canonical)}],
+        "intelligence_rankings": [{"id": "55555555-5555-4555-8555-555555555555", "run_id": run_id, "event_id": event_id, "canonical": ranking_canonical, "content_hash": digest(ranking_canonical)}],
+        "intelligence_packets": [{"id": packet_id, "run_id": run_id, "canonical": packet_canonical, "packet_hash": digest(packet_canonical), "candidate_count": 1, "evidence_count": 1}],
+        "reports": [{"id": report_id, "run_id": run_id, "packet_id": packet_id, "canonical": report_canonical, "report_hash": digest(report_canonical), "rendered_text": rendered_text, "rendered_hash": hashlib.sha256(rendered_text.encode()).hexdigest()}],
+        "report_publications": [{"report_id": report_id, "run_id": run_id, "status": "delivered", "telegram_message_ids": [7], "canonical": publication_canonical}],
     }
 
 
@@ -287,6 +295,11 @@ def test_source_reconciliation_rejects_unsupported_run_send_policy_and_price_cla
         target[path[-1]] = value
         with pytest.raises(RuntimeError, match="source receipt"):
             verify.reconcile_source_receipts(payloads, detail, changed, run_id)
+
+    changed = json.loads(json.dumps(source))
+    changed["intelligence_events"][0]["canonical"]["title"] = "replaced retained source body"
+    with pytest.raises(RuntimeError, match="source receipt"):
+        verify.reconcile_source_receipts(payloads, detail, changed, run_id)
 
 
 def test_source_reconciliation_requires_scoped_read_only_database_role():

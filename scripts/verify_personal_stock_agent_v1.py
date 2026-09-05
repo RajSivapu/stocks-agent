@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """Fail closed unless every V1 release receipt is typed and reconciled."""
 from __future__ import annotations
-import argparse, json, re
+import argparse, hashlib, json, re
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Mapping
 from urllib.parse import urlparse
@@ -16,6 +17,14 @@ def _same(r:Mapping[str,object], fields:tuple[str,...], sha:str,g:str):
  if any(r.get(f)!=sha for f in fields): raise RuntimeError(f"release gate SHA mismatch: {g}")
 def _hash(v:object)->bool:return isinstance(v,str) and HASH.fullmatch(v) is not None
 def _uuid(v:object)->bool:return isinstance(v,str) and UUID.fullmatch(v) is not None
+def _canonical_hash(value: object) -> str:
+ return hashlib.sha256(json.dumps(value,sort_keys=True,separators=(",",":"),ensure_ascii=False).encode()).hexdigest()
+def _timestamp(value: object) -> datetime | None:
+ if not isinstance(value,str): return None
+ try:
+  parsed=datetime.fromisoformat(value.replace("Z","+00:00"))
+ except ValueError:return None
+ return parsed.astimezone(timezone.utc) if parsed.tzinfo is not None else None
 def _reject_sensitive(value:object):
  if isinstance(value,Mapping):
   for key,nested in value.items():
@@ -56,12 +65,27 @@ def verify_release(receipt:Mapping[str,object])->dict[str,object]:
  parity=_row(receipt,"source_parity"); counts=parity.get("counts"); chain=parity.get("scheduled_chain"); required={"runs","events","rankings","packets","reports","report_publications"}
  if parity.get("status")!="verified" or parity.get("relationships_verified") is not True or parity.get("hashes_verified") is not True or not isinstance(chain,Mapping) or not isinstance(counts,Mapping) or set(counts)!=required or any(isinstance(counts[k],bool) or not isinstance(counts[k],int) or counts[k]<=0 for k in required): raise RuntimeError("invalid release gate: source_parity")
  _same(parity,("candidate_sha",),candidate,"source_parity")
+ canonical_records=parity.get("canonical_records")
+ expected_canonical_counts={"event":counts["events"],"ranking":counts["rankings"],"packet":counts["packets"],"report":counts["reports"],"publication":counts["report_publications"]}
+ seen_canonical_counts={kind:0 for kind in expected_canonical_counts}
+ if not isinstance(canonical_records,list):
+  raise RuntimeError("invalid release gate: canonical source records")
+ for row in canonical_records:
+  if not isinstance(row,Mapping) or row.get("kind") not in seen_canonical_counts or not isinstance(row.get("body"),Mapping) or not _hash(row.get("sha256")) or _canonical_hash(row["body"]) != row["sha256"]:
+   raise RuntimeError("canonical source record hash mismatch")
+  seen_canonical_counts[row["kind"]]+=1
+ if seen_canonical_counts != expected_canonical_counts:
+  raise RuntimeError("canonical source records are incomplete")
  scheduled=_row(receipt,"scheduled_receipt"); ids=(scheduled.get("run_id"),scheduled.get("intelligence_run_id"),scheduled.get("packet_id"),scheduled.get("report_id")); pub=scheduled.get("publication_receipt")
- if scheduled.get("status")!="completed" or not all(_uuid(v) for v in ids) or ids[0]!=ids[1] or not isinstance(pub,Mapping) or pub.get("status") not in {"accepted_by_telegram","duplicate"} or not _hash(scheduled.get("packet_hash")) or not _hash(scheduled.get("report_hash")): raise RuntimeError("invalid release gate: scheduled_receipt")
+ merged_at=_timestamp(scheduled.get("merged_at")); completed_at=_timestamp(scheduled.get("completed_at")); stages=scheduled.get("stages")
+ required_stages=("collection","packet","evaluation","report","publication")
+ if (scheduled.get("status")!="completed" or scheduled.get("scheduled") is not True or scheduled.get("phase") not in {"pre-market","intraday","post-market"} or scheduled.get("dry_run") is not False or scheduled.get("duplicate") is not False or merged_at is None or completed_at is None or completed_at <= merged_at or scheduled.get("required_stages") != list(required_stages) or not isinstance(stages,Mapping) or set(stages) != set(required_stages) or any(not isinstance(stages.get(stage),Mapping) or stages[stage].get("status") != "completed" or not isinstance(stages[stage].get("receipt_id"),str) or not stages[stage]["receipt_id"] for stage in required_stages) or not all(_uuid(v) for v in ids) or ids[0]!=ids[1] or not isinstance(pub,Mapping) or pub.get("status") not in {"accepted_by_telegram","suppressed"} or not _hash(scheduled.get("packet_hash")) or not _hash(scheduled.get("report_hash"))):
+  raise RuntimeError("invalid scheduled receipt")
  for field in ("run_id","intelligence_run_id","packet_id","packet_hash","report_id","report_hash","publication_receipt"):
   if scheduled.get(field)!=chain.get(field): raise RuntimeError("scheduled receipt does not match reconciled source chain")
- msg=pub.get("telegram_message_ids")
- if pub.get("status")=="accepted_by_telegram" and (not isinstance(msg,list) or not msg or any(isinstance(v,bool) or not isinstance(v,int) or v<=0 for v in msg)): raise RuntimeError("invalid release gate: scheduled_receipt")
+ msg=pub.get("telegram_message_ids"); original=pub.get("original_telegram_message_ids")
+ if pub.get("status")=="accepted_by_telegram" and (not isinstance(msg,list) or not msg or msg != original or any(isinstance(v,bool) or not isinstance(v,int) or v<=0 for v in msg)): raise RuntimeError("invalid scheduled receipt")
+ if pub.get("status")=="suppressed" and (msg != [] or original != [] or not isinstance(pub.get("suppression_reason"),str) or not pub["suppression_reason"].strip()): raise RuntimeError("invalid scheduled receipt")
  rollback=_row(receipt,"rollback_check"); gateway=rollback.get("gateway"); runtime=rollback.get("runtime_login")
  if rollback.get("status")!="rolled_back" or rollback.get("function")!="owner-dashboard-api" or rollback.get("dashboard_secrets_unset") != ["DASHBOARD_ALLOWED_ORIGINS","DASHBOARD_DATABASE_URL","DASHBOARD_OWNER_USER_ID"] or not isinstance(runtime,Mapping) or runtime.get("status")!="disabled" or runtime.get("login") is not False or runtime.get("memberships")!=0 or not isinstance(gateway,Mapping) or gateway.get("status")!="restored" or not _hash(gateway.get("source_sha256")) or not SHA.fullmatch(str(gateway.get("git_sha",""))) or isinstance(gateway.get("function_version"),bool) or not isinstance(gateway.get("function_version"),int) or gateway["function_version"]<=0: raise RuntimeError("invalid release gate: rollback_check")
  return {"status":"verified","candidate_sha":candidate,"gate_count":len(REQUIRED_GATES)}
