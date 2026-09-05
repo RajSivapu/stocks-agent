@@ -239,6 +239,14 @@ def test_schema_declares_complete_bounded_append_only_ledgers_and_rpcs():
                 "FROM PUBLIC, anon, authenticated;"
             ) in sql
             assert f"GRANT EXECUTE ON FUNCTION public.{display_signature} TO service_role;" in sql
+            matches = list(re.finditer(
+                rf"CREATE OR REPLACE FUNCTION public\.{re.escape(name)}\(",
+                sql,
+            ))
+            assert matches
+            for match in matches:
+                body = sql[match.start():sql.index("$$;", match.start())]
+                assert "EXECUTE format(" not in body
         assert sql.count("SECURITY DEFINER\nSET search_path = pg_catalog") >= len(RPCS)
         assert "ON DELETE RESTRICT" in sql
         assert "octet_length(packet::text) <= 98304" in sql
@@ -293,7 +301,6 @@ def test_schema_declares_complete_bounded_append_only_ledgers_and_rpcs():
             "market-intelligence-learning:",
         ):
             assert lock_key in sql
-        assert "EXECUTE format(" not in sql
 
 
 def test_report_nested_provenance_arrays_are_explicit_and_null_safe():

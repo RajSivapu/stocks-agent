@@ -311,7 +311,6 @@ def test_gateway_repository_uses_only_fixed_tables_and_named_rpcs():
         "portfolio_commands",
         "radar",
         "stock_observations",
-        "suggestion_grades",
         "suggestions",
         "transactions",
     }
