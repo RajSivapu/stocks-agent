@@ -1,5 +1,6 @@
 import {
   parseRecordIntelligencePayload,
+  parseCheckpointIntelligencePayload,
   parseStartIntelligencePayload,
   type RecordIntelligencePayload,
   type StartIntelligencePayload,
@@ -19,6 +20,7 @@ export type Operation =
   | "evaluate_alert_rules"
   | "finish_run"
   | "start_intelligence_run"
+  | "checkpoint_intelligence_collection"
   | "record_intelligence"
   | "record_report"
   | "record_learning";
@@ -1028,6 +1030,9 @@ export function parseGatewayEnvelope(value: unknown): GatewayEnvelope {
       throw new Error("run_id must be null for start_intelligence_run");
     }
     payload = parseStartIntelligencePayload(row.payload);
+  } else if (operation === "checkpoint_intelligence_collection") {
+    if (row.run_id === null) throw new Error("run_id is required for checkpoint_intelligence_collection");
+    payload = parseCheckpointIntelligencePayload(row.payload);
   } else if (operation === "record_intelligence") {
     if (row.run_id === null) {
       throw new Error("run_id is required for record_intelligence");

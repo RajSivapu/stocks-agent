@@ -52,6 +52,13 @@ export interface StartIntelligencePayload {
   market_date: string;
   policy_version: number;
   reservation_plan: { reservations: JsonObject[] };
+  request_window: JsonObject;
+}
+
+export interface CheckpointIntelligencePayload {
+  cache_key: string;
+  receipt: JsonObject;
+  items: JsonObject[];
 }
 
 export interface RecordIntelligencePayload {
@@ -70,6 +77,7 @@ export interface IntelligenceStartReceipt {
   run_id: string;
   reservation_ids: string[];
   cache_entries: JsonObject[];
+  request_window: JsonObject;
   duplicate: boolean;
 }
 
@@ -355,7 +363,7 @@ export function parseStartIntelligencePayload(
   const row = objectValue(value, "payload");
   exactKeys(
     row,
-    ["phase", "market_date", "policy_version", "reservation_plan"],
+    ["phase", "market_date", "policy_version", "reservation_plan", "request_window"],
     "payload",
   );
   const plan = objectValue(row.reservation_plan, "payload.reservation_plan");
@@ -406,6 +414,28 @@ export function parseStartIntelligencePayload(
       2_147_483_647,
     ),
     reservation_plan: { reservations: parsedReservations },
+    request_window: parseRequestWindow(row.request_window),
+  };
+}
+
+function parseRequestWindow(value: unknown): JsonObject {
+  const row = objectValue(value, "payload.request_window");
+  exactKeys(row, ["start", "end", "timezone", "market_date", "phase"], "payload.request_window");
+  const start = timestamp(row.start, "payload.request_window.start")!;
+  const end = timestamp(row.end, "payload.request_window.end")!;
+  if (Date.parse(start) >= Date.parse(end) || row.timezone !== "America/Chicago") {
+    throw new Error("payload.request_window is invalid");
+  }
+  return { start, end, timezone: "America/Chicago", market_date: dateValue(row.market_date, "payload.request_window.market_date"), phase: enumValue(row.phase, PHASES, "payload.request_window.phase") };
+}
+
+export function parseCheckpointIntelligencePayload(value: unknown): CheckpointIntelligencePayload {
+  const row = objectValue(value, "checkpoint payload");
+  exactKeys(row, ["cache_key", "receipt", "items"], "checkpoint payload");
+  return {
+    cache_key: stringValue(row.cache_key, "checkpoint payload.cache_key", 512),
+    receipt: boundedObject(row.receipt, "checkpoint payload.receipt", 16_384),
+    items: arrayValue(row.items, "checkpoint payload.items", 50).map((item, index) => boundedObject(item, `checkpoint payload.items[${index}]`, 16_384)),
   };
 }
 
@@ -966,7 +996,7 @@ export function parseIntelligenceStartReceipt(
   const row = objectValue(value, "start intelligence receipt");
   exactKeys(
     row,
-    ["run_id", "reservation_ids", "cache_entries", "duplicate"],
+    ["run_id", "reservation_ids", "cache_entries", "request_window", "duplicate"],
     "start intelligence receipt",
   );
   const cacheEntries = arrayValue(
@@ -992,6 +1022,7 @@ export function parseIntelligenceStartReceipt(
         uuidValue(id, `start intelligence receipt.reservation_ids[${index}]`)
       ),
     cache_entries: cacheEntries,
+    request_window: parseRequestWindow(row.request_window),
     duplicate: typeof row.duplicate === "boolean" ? row.duplicate : (() => {
       throw new Error("start intelligence receipt.duplicate must be boolean");
     })(),

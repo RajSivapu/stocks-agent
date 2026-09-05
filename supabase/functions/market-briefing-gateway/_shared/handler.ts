@@ -398,6 +398,7 @@ export function createGatewayHandler(dependencies: GatewayDependencies) {
       envelope = parseGatewayEnvelope(await readBody(request));
       if (
         envelope.operation === "start_intelligence_run" ||
+        envelope.operation === "checkpoint_intelligence_collection" ||
         envelope.operation === "record_intelligence" ||
         envelope.operation === "record_report" ||
         envelope.operation === "record_learning"
@@ -468,6 +469,7 @@ export function createGatewayHandler(dependencies: GatewayDependencies) {
             run_id: envelope.request_id,
             reservation_ids: [],
             cache_entries: [],
+            request_window: (prepared as StartIntelligencePayload).request_window,
             duplicate: false,
             write_counts: {},
             telegram_message_ids: [],
@@ -642,6 +644,16 @@ export function createGatewayHandler(dependencies: GatewayDependencies) {
           ...summarizeIntelligencePayload(payload),
           telegram_message_ids: [],
         });
+      } catch (error) {
+        const code = error instanceof GatewayRepositoryError ? error.code : "PERSISTENCE_FAILED";
+        return response(errorStatus(code), { ok: false, code });
+      }
+    }
+    if (envelope.operation === "checkpoint_intelligence_collection") {
+      try {
+        if (!deps.repository.checkpointIntelligenceCollection) throw new GatewayRepositoryError("PERSISTENCE_FAILED");
+        const receipt = await deps.repository.checkpointIntelligenceCollection(requireRun(envelope), prepared as never);
+        return response(200, { ok: true, ...receipt, telegram_message_ids: [] });
       } catch (error) {
         const code = error instanceof GatewayRepositoryError ? error.code : "PERSISTENCE_FAILED";
         return response(errorStatus(code), { ok: false, code });

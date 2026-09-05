@@ -10,6 +10,7 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from datetime import date, datetime, time, timedelta, timezone
 from decimal import Decimal
+from zoneinfo import ZoneInfo
 
 from lib.intelligence.dedupe import RunItemDisposition, deduplicate
 from lib.intelligence.cache import ResumableCollectionCache
@@ -105,6 +106,7 @@ class PipelineRequest:
         targets: Sequence[str],
         *,
         cache_keys: Mapping[str, Sequence[str]] | None = None,
+        request_window: Mapping[str, str] | None = None,
     ) -> dict[str, object]:
         request_counts = {provider: 0 for provider in providers}
         count = max(len(providers), len(targets)) if providers and targets else 0
@@ -124,6 +126,7 @@ class PipelineRequest:
             "phase": self.phase,
             "market_date": self.market_date.isoformat(),
             "policy_version": 1,
+            "request_window": dict(request_window or _initial_request_window(self)),
             "reservation_plan": {"reservations": reservations},
         }
 
@@ -228,29 +231,42 @@ class IntelligencePipeline:
         providers = tuple(str(adapter.provider) for adapter in self.adapters)
         if not providers:
             raise ValueError("at least one adapter is required for live collection")
-        planned_cache_keys = self._planned_cache_keys(request, targets)
-        start_payload = request.collection_plan(providers, targets, cache_keys=planned_cache_keys)
+        initial_window = _initial_request_window(request)
+        # Durable checkpoints, not speculative wall-clock cache keys, are the reservation authority.
+        planned_cache_keys: dict[str, tuple[str, ...]] = {}
+        start_payload = request.collection_plan(
+            providers, targets, cache_keys=planned_cache_keys, request_window=initial_window
+        )
         start = self._start(start_payload, request.request_id)
         run_id = str(start.get("run_id") or "")
         if run_id != request.request_id:
             raise ValueError("gateway start receipt run_id does not match request_id")
+        request_window = _request_window(start.get("request_window"), request)
+        checkpoint_entries = start.get("cache_entries")
+        if not isinstance(checkpoint_entries, Sequence) or isinstance(checkpoint_entries, (str, bytes, bytearray)):
+            raise ValueError("gateway start receipt checkpoints are invalid")
+        self.cache.hydrate_collections(
+            (entry for entry in checkpoint_entries if isinstance(entry, Mapping)), now=_utc(request.now)
+        )
+        if len(checkpoint_entries) != sum(isinstance(entry, Mapping) for entry in checkpoint_entries):
+            raise ValueError("gateway start receipt checkpoints are invalid")
         plan_rows = start_payload["reservation_plan"]["reservations"]
         self._install_quota(plan_rows)
 
-        results = self._collect(request, targets, plan_rows)
+        results = self._collect(request, targets, plan_rows, request_window)
         receipt = self._complete(request, run_id, targets, results)
         self.cache.put_run(request.request_id, receipt)
         return receipt
 
     def _planned_cache_keys(
-        self, request: PipelineRequest, targets: Sequence[str]
+        self, request: PipelineRequest, targets: Sequence[str], request_window: Mapping[str, str]
     ) -> dict[str, tuple[str, ...]]:
         keys: dict[str, list[str]] = {str(adapter.provider): [] for adapter in self.adapters}
         count = max(len(self.adapters), len(targets))
         for index in range(count):
             adapter = self.adapters[index % len(self.adapters)]
             try:
-                query = self._query_for(adapter, targets[index % len(targets)], request)
+                query = self._query_for(adapter, targets[index % len(targets)], request, request_window)
             except (SourceFailure, ValueError):
                 continue
             keys[str(adapter.provider)].append(_collection_cache_key(adapter, query))
@@ -296,6 +312,7 @@ class IntelligencePipeline:
         request: PipelineRequest,
         targets: Sequence[str],
         plan_rows: Sequence[Mapping[str, object]],
+        request_window: Mapping[str, str],
     ) -> list[CollectionResult]:
         plan_by_provider = {str(row["provider"]): row for row in plan_rows}
         count = max(len(self.adapters), len(targets))
@@ -310,10 +327,10 @@ class IntelligencePipeline:
                 end=_utc(request.now), limit=20,
             )
             try:
-                query = self._query_for(adapter, target, request)
+                query = self._query_for(adapter, target, request, request_window)
                 cached = self.cache.get_collection(
                     _collection_cache_key(adapter, query), reservation_id=str(row["id"]),
-                    source_receipt_id=source_receipt_id,
+                    source_receipt_id=source_receipt_id, now=_utc(request.now),
                 )
                 if cached is not None:
                     results.append(cached)
@@ -326,6 +343,10 @@ class IntelligencePipeline:
                     receipt=replace(result.receipt, source_receipt_id=source_receipt_id),
                 )
                 if result.receipt.request_cost > 0:
+                    result = replace(result, receipt=replace(result.receipt, source_receipt_id=source_receipt_id))
+                    self._checkpoint(
+                        request.request_id, _collection_cache_key(adapter, query), result
+                    )
                     self.cache.put_collection(_collection_cache_key(adapter, query), result)
             except Exception as exc:
                 result = CollectionResult(
@@ -339,7 +360,9 @@ class IntelligencePipeline:
             results.append(result)
         return results
 
-    def _query_for(self, adapter: object, target: str, request: PipelineRequest) -> CollectionQuery:
+    def _query_for(
+        self, adapter: object, target: str, request: PipelineRequest, request_window: Mapping[str, str]
+    ) -> CollectionQuery:
         provider = str(getattr(adapter, "provider", ""))
         symbols = _symbols_for_target(target)
         identifiers = _provider_query_identifiers()
@@ -352,8 +375,8 @@ class IntelligencePipeline:
         text = _provider_query_text(provider, target, symbols)
         return CollectionQuery(
             text=text, symbols=symbols, cik=cik, series_id=series_id,
-            start=_stable_window_end(request) - _window_for(request.phase),
-            end=_stable_window_end(request), limit=20,
+            start=_window_timestamp(request_window, "start"),
+            end=_window_timestamp(request_window, "end"), limit=20,
         )
 
     def _complete(
@@ -543,6 +566,27 @@ class IntelligencePipeline:
         )
         return _gateway_data(result)
 
+    def _checkpoint(self, run_id: str, cache_key_value: str, result: CollectionResult) -> None:
+        payload = {
+            "cache_key": cache_key_value,
+            "receipt": _checkpoint_receipt(result.receipt),
+            "items": [_checkpoint_item(item) for item in result.items],
+        }
+        method = getattr(self.gateway, "checkpoint_intelligence_collection", None)
+        if callable(method):
+            result_value = method(run_id, payload)
+        elif callable(getattr(self.gateway, "call", None)):
+            result_value = self.gateway.call(
+                "checkpoint_intelligence_collection", payload, run_id=run_id,
+                request_id=_uuid("checkpoint-request", run_id, cache_key_value),
+            )
+        else:
+            # Fixture gateways model only final atomic persistence; production must expose one path.
+            return
+        returned = _gateway_data(result_value)
+        if str(returned.get("run_id") or "") != run_id or returned.get("cache_key") != cache_key_value:
+            raise ValueError("gateway checkpoint receipt mismatch")
+
 
 def _gateway_data(result: object) -> Mapping[str, object]:
     if not isinstance(result, Mapping):
@@ -601,10 +645,66 @@ def _window_for(phase: str) -> timedelta:
             "post-market": timedelta(hours=12), "on-demand": timedelta(days=2)}[phase]
 
 
-def _stable_window_end(request: PipelineRequest) -> datetime:
-    """Scheduled retry windows are anchored to the gateway-owned market date, never wall clock."""
-    hour = {"pre-market": 13, "intraday": 20, "post-market": 23, "on-demand": 23}[request.phase]
-    return datetime.combine(request.market_date, time(hour, 0), tzinfo=timezone.utc)
+def _initial_request_window(request: PipelineRequest) -> dict[str, str]:
+    """The first gateway start persists this real Chicago-session request window."""
+    chicago = ZoneInfo("America/Chicago")
+    end = _utc(request.now)
+    local = end.astimezone(chicago)
+    return {
+        "start": _timestamp(end - _window_for(request.phase)) or "",
+        "end": _timestamp(end) or "",
+        "timezone": "America/Chicago",
+        "market_date": local.date().isoformat(),
+        "phase": request.phase,
+    }
+
+
+def _request_window(value: object, request: PipelineRequest) -> Mapping[str, str]:
+    if not isinstance(value, Mapping) or set(value) != {"start", "end", "timezone", "market_date", "phase"}:
+        raise ValueError("gateway request window is invalid")
+    result = {str(key): str(raw) for key, raw in value.items()}
+    if result["timezone"] != "America/Chicago" or result["phase"] != request.phase:
+        raise ValueError("gateway request window is invalid")
+    start, end = _window_timestamp(result, "start"), _window_timestamp(result, "end")
+    if start >= end or end > _utc(request.now) + timedelta(minutes=5):
+        raise ValueError("gateway request window is invalid")
+    return result
+
+
+def _window_timestamp(window: Mapping[str, str], key: str) -> datetime:
+    try:
+        value = datetime.fromisoformat(window[key].replace("Z", "+00:00"))
+    except (AttributeError, KeyError, ValueError):
+        raise ValueError("gateway request window is invalid") from None
+    return _utc(value)
+
+
+def _checkpoint_receipt(value: RequestReceipt) -> dict[str, object]:
+    return {
+        "provider": value.provider, "reservation_id": value.reservation_id, "status": value.status,
+        "cache_key": value.cache_key, "requested_window": dict(value.requested_window),
+        "requested_limit": value.requested_limit, "retrieved_at": _timestamp(value.retrieved_at),
+        "observed_at": _timestamp(value.observed_at), "expires_at": _timestamp(value.expires_at),
+        "request_cost": value.request_cost, "upstream_remaining": value.upstream_remaining,
+        "returned_count": value.returned_count, "accepted_count": value.accepted_count,
+        "duplicate_count": value.duplicate_count, "dropped_count": value.dropped_count,
+        "response_hash": value.response_hash, "error_code": value.error_code,
+        "source_receipt_id": value.source_receipt_id,
+        "cache_predecessor_receipt_id": value.cache_predecessor_receipt_id,
+    }
+
+
+def _checkpoint_item(value: SourceItem) -> dict[str, object]:
+    return {
+        "provider": value.provider, "upstream_item_id": value.upstream_item_id,
+        "source_url": value.source_url, "title": value.title, "normalized_text": value.normalized_text,
+        "canonical_content": value.canonical_content, "content_hash": value.content_hash,
+        "published_at": _timestamp(value.published_at), "effective_at": _timestamp(value.effective_at),
+        "retrieved_at": _timestamp(value.retrieved_at), "authority": value.authority,
+        "metadata": dict(value.metadata), "request_url": value.request_url,
+        "reporting_at": _timestamp(value.reporting_at), "entity_ids": list(value.entity_ids),
+        "security_ids": list(value.security_ids),
+    }
 
 
 def _failed_receipt(
@@ -705,7 +805,7 @@ def _discover(
         overlap = _overlap_score(context, ticker, holding_weight)
         candidates.append(CandidateInput(
             ticker=ticker, event=event, relation=relation, evidence=(item,),
-            authority_corroboration=_authority_score(item),
+            authority_corroboration=_authority_score(relation.evidence),
             exposure_strength=(Decimal(len(relation.exposure_evidence)) / Decimal(len(relation.evidence))
                                if relation.evidence else None),
             recency=max(Decimal("0"), Decimal("1") - Decimal(str(age_seconds)) / Decimal("604800")),
@@ -780,11 +880,19 @@ def _liquidity_score(item: SourceItem, context: Mapping[str, object], ticker: st
     return result if result.is_finite() and Decimal("0") <= result <= Decimal("1") else None
 
 
-def _authority_score(item: SourceItem) -> Decimal | None:
-    return {
-        "official": Decimal("1"), "corroborating": Decimal("0.75"),
-        "market_data": Decimal("0.5"), "radar": Decimal("0.25"),
-    }.get(item.authority)
+def _authority_score(items: Sequence[SourceItem]) -> Decimal | None:
+    """Corroboration requires a genuinely independent retained source, never a label alone."""
+    if not items:
+        return None
+    independent = {(item.provider, item.source_url) for item in items}
+    authorities = {item.authority for item in items}
+    if "official" in authorities:
+        return Decimal("1")
+    if "corroborating" in authorities:
+        return Decimal("0.75") if len(independent) >= 2 else None
+    if "market_data" in authorities:
+        return Decimal("0.5")
+    return Decimal("0.25") if "radar" in authorities else None
 
 
 def _overlap_score(

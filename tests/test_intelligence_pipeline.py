@@ -3,7 +3,7 @@ from __future__ import annotations
 import hashlib
 from dataclasses import replace
 import pytest
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from types import MappingProxyType
 
 from lib.intelligence.pipeline import IntelligencePipeline, PipelineRequest
@@ -57,7 +57,7 @@ def receipt(provider: str, *, status: str = "succeeded") -> RequestReceipt:
         requested_limit=20,
         retrieved_at=NOW,
         observed_at=NOW,
-        expires_at=NOW if succeeded else None,
+        expires_at=NOW + timedelta(days=1) if succeeded else None,
         request_cost=1,
         upstream_remaining=None,
         returned_count=1 if succeeded else 0,
@@ -98,6 +98,7 @@ class FakeGateway:
             "run_id": self.run_id,
             "reservation_ids": [self.reservation_id],
             "cache_entries": [],
+            "request_window": payload["request_window"],
             "duplicate": False,
             "telegram_message_ids": [],
         }
@@ -349,7 +350,7 @@ def test_new_pipeline_instance_rehydrates_completed_collection_with_new_run_rece
     second_gateway.reservation_id = "88888888-8888-4888-8888-888888888888"
     second_adapter = FakeAdapter()
     second = IntelligencePipeline(second_gateway, [second_adapter], cache=cache).run(
-        PipelineRequest("pre-market", date(2026, 9, 4), NOW.replace(hour=18), request_id=next_id)
+        PipelineRequest("pre-market", date(2026, 9, 4), NOW, request_id=next_id)
     )
 
     assert first.actual_requests == len(first_adapter.queries)
@@ -358,3 +359,76 @@ def test_new_pipeline_instance_rehydrates_completed_collection_with_new_run_rece
     assert second_adapter.queries == []
     assert second_gateway.payloads[-1]["receipts"][0]["reservation_id"] != first_gateway.payloads[-1]["receipts"][0]["reservation_id"]
     assert second_gateway.payloads[-1]["receipts"][0]["cache_predecessor_receipt_id"] == first_gateway.payloads[-1]["receipts"][0]["id"]
+
+
+class PersistedCheckpointGateway(FakeGateway):
+    """A restart-safe gateway fake: workers share only durable gateway state."""
+
+    def __init__(self, state, *, fail_final=False):
+        super().__init__()
+        self.state = state
+        self.fail_final = fail_final
+
+    def start_intelligence_run(self, payload):
+        self.operations.append("start_intelligence_run")
+        self.payloads.append(payload)
+        self.state.setdefault("window", payload["request_window"])
+        return {
+            "run_id": self.run_id,
+            "reservation_ids": [self.reservation_id],
+            "cache_entries": list(self.state.get("checkpoints", [])),
+            "request_window": self.state["window"],
+            "duplicate": bool(self.state.get("checkpoints")),
+        }
+
+    def checkpoint_intelligence_collection(self, run_id, payload):
+        assert run_id == self.run_id
+        self.operations.append("checkpoint_intelligence_collection")
+        self.state.setdefault("checkpoints", []).append(payload)
+        return {"run_id": run_id, "cache_key": payload["cache_key"]}
+
+    def record_intelligence(self, run_id, payload):
+        self.operations.append("record_intelligence")
+        self.payloads.append(payload)
+        if self.fail_final:
+            raise RuntimeError("final packet write interrupted")
+        return super().record_intelligence(run_id, payload)
+
+
+def test_restart_hydrates_durable_checkpoints_after_final_packet_failure():
+    state = {}
+    first_adapter = FakeAdapter()
+    first_gateway = PersistedCheckpointGateway(state, fail_final=True)
+    with pytest.raises(RuntimeError, match="interrupted"):
+        IntelligencePipeline(first_gateway, [first_adapter]).run(request("pre-market"))
+
+    # This is intentionally a different cache and a different worker process facade.
+    second_adapter = FakeAdapter()
+    second_gateway = PersistedCheckpointGateway(state)
+    result = IntelligencePipeline(second_gateway, [second_adapter]).run(request("pre-market"))
+
+    assert len(state["checkpoints"]) == len(SEED_THEMES)
+    assert second_adapter.queries == []
+    assert result.actual_requests == 0
+    assert result.cache_hits == len(SEED_THEMES)
+    assert state["window"]["timezone"] == "America/Chicago"
+    assert second_gateway.payloads[0]["request_window"] == state["window"]
+
+
+def test_production_discovery_vetoes_a_42_percent_holding_from_gateway_context():
+    gateway = FakeGateway()
+    adapter = FakeAdapter()
+    source = replace(
+        raw_item("holding:TEST", official=True), security_ids=("TEST",),
+        metadata=MappingProxyType({"exposure_kind": "filing"}),
+    )
+    adapter.collect = lambda query: CollectionResult((source,), receipt(adapter.provider), query.limit)
+
+    IntelligencePipeline(gateway, [adapter], context={
+        "holdings": [{"ticker": "TEST", "market_value": "420"}, {"ticker": "OTHER", "market_value": "580"}],
+        "overlap_by_ticker": {"TEST": "0.42"}, "liquidity_by_ticker": {"TEST": "0.75"},
+    }).run(request("intraday"))
+
+    ranking = gateway.payloads[-1]["rankings"][0]
+    assert ranking["qualified"] is False
+    assert "HOLDING_WEIGHT_CONCENTRATED" in ranking["veto_reasons"]

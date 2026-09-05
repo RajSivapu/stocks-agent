@@ -2,14 +2,15 @@
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Iterable, Mapping
 from copy import deepcopy
 from dataclasses import replace
+from datetime import datetime, timezone
 from types import MappingProxyType
 from typing import Any
 
 from lib.intelligence.http import cache_key
-from lib.intelligence.providers import CollectionResult
+from lib.intelligence.providers import CollectionResult, RequestReceipt, SourceItem, parse_timestamp
 
 
 class ResumableCollectionCache:
@@ -55,11 +56,28 @@ class ResumableCollectionCache:
             return
         self._collections[key] = result
 
+    def hydrate_collections(self, entries: Iterable[Mapping[str, object]], *, now: datetime) -> None:
+        """Rebuild only unexpired, gateway-validated collection checkpoints."""
+        for entry in entries:
+            key = entry.get("cache_key")
+            receipt_row = entry.get("receipt")
+            items_row = entry.get("items")
+            if not isinstance(key, str) or not key or not isinstance(receipt_row, Mapping) or not isinstance(items_row, list):
+                raise ValueError("invalid persisted collection checkpoint")
+            receipt = _receipt_from_checkpoint(receipt_row)
+            if receipt.status != "succeeded" or receipt.expires_at is None or receipt.expires_at <= now.astimezone(timezone.utc):
+                continue
+            items = tuple(_item_from_checkpoint(value) for value in items_row)
+            self._collections[key] = CollectionResult(items, receipt, receipt.requested_limit)
+
     def get_collection(
-        self, key: str, *, reservation_id: str, source_receipt_id: str
+        self, key: str, *, reservation_id: str, source_receipt_id: str, now: datetime
     ) -> CollectionResult | None:
         result = self._collections.get(key)
         if result is None:
+            return None
+        if result.receipt.expires_at is None or result.receipt.expires_at <= now.astimezone(timezone.utc):
+            self._collections.pop(key, None)
             return None
         predecessor = result.receipt.source_receipt_id
         if not predecessor:
@@ -80,3 +98,63 @@ class ResumableCollectionCache:
 
 
 __all__ = ["ResumableCollectionCache"]
+
+
+def _timestamp(value: object, name: str, *, nullable: bool = False) -> datetime | None:
+    parsed = parse_timestamp(value)
+    if parsed is None and not nullable:
+        raise ValueError(f"checkpoint {name} is invalid")
+    return parsed
+
+
+def _receipt_from_checkpoint(row: Mapping[str, object]) -> RequestReceipt:
+    required = {
+        "provider", "reservation_id", "status", "cache_key", "requested_window", "requested_limit",
+        "retrieved_at", "observed_at", "expires_at", "request_cost", "upstream_remaining",
+        "returned_count", "accepted_count", "duplicate_count", "dropped_count", "response_hash",
+        "error_code", "source_receipt_id", "cache_predecessor_receipt_id",
+    }
+    if set(row) != required or not isinstance(row["requested_window"], Mapping):
+        raise ValueError("invalid persisted receipt checkpoint")
+    if not isinstance(row["source_receipt_id"], str) or not row["source_receipt_id"]:
+        raise ValueError("invalid persisted receipt checkpoint")
+    try:
+        return RequestReceipt(
+            provider=str(row["provider"]), reservation_id=str(row["reservation_id"]), status=str(row["status"]),
+            cache_key=str(row["cache_key"]), requested_window=MappingProxyType(dict(row["requested_window"])),
+            requested_limit=int(row["requested_limit"]), retrieved_at=_timestamp(row["retrieved_at"], "retrieved_at"),
+            observed_at=_timestamp(row["observed_at"], "observed_at", nullable=True),
+            expires_at=_timestamp(row["expires_at"], "expires_at"), request_cost=int(row["request_cost"]),
+            upstream_remaining=None if row["upstream_remaining"] is None else int(row["upstream_remaining"]),
+            returned_count=int(row["returned_count"]), accepted_count=int(row["accepted_count"]),
+            duplicate_count=int(row["duplicate_count"]), dropped_count=int(row["dropped_count"]),
+            response_hash=None if row["response_hash"] is None else str(row["response_hash"]),
+            error_code=None if row["error_code"] is None else str(row["error_code"]),
+            source_receipt_id=row["source_receipt_id"],
+            cache_predecessor_receipt_id=None if row["cache_predecessor_receipt_id"] is None else str(row["cache_predecessor_receipt_id"]),
+        )
+    except (TypeError, ValueError):
+        raise ValueError("invalid persisted receipt checkpoint") from None
+
+
+def _item_from_checkpoint(value: object) -> SourceItem:
+    if not isinstance(value, Mapping) or set(value) != {
+        "provider", "upstream_item_id", "source_url", "title", "normalized_text", "canonical_content",
+        "content_hash", "published_at", "effective_at", "retrieved_at", "authority", "metadata",
+        "request_url", "reporting_at", "entity_ids", "security_ids",
+    } or not isinstance(value["metadata"], Mapping):
+        raise ValueError("invalid persisted source item checkpoint")
+    try:
+        return SourceItem(
+            provider=str(value["provider"]), upstream_item_id=None if value["upstream_item_id"] is None else str(value["upstream_item_id"]),
+            source_url=str(value["source_url"]), title=str(value["title"]), normalized_text=str(value["normalized_text"]),
+            canonical_content=str(value["canonical_content"]), content_hash=str(value["content_hash"]),
+            published_at=_timestamp(value["published_at"], "published_at", nullable=True),
+            effective_at=_timestamp(value["effective_at"], "effective_at", nullable=True),
+            retrieved_at=_timestamp(value["retrieved_at"], "retrieved_at"), authority=str(value["authority"]),
+            metadata=MappingProxyType(dict(value["metadata"])), request_url=None if value["request_url"] is None else str(value["request_url"]),
+            reporting_at=_timestamp(value["reporting_at"], "reporting_at", nullable=True),
+            entity_ids=tuple(str(item) for item in value["entity_ids"]), security_ids=tuple(str(item) for item in value["security_ids"]),
+        )
+    except (TypeError, ValueError):
+        raise ValueError("invalid persisted source item checkpoint") from None

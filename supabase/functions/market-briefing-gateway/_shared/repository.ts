@@ -243,6 +243,7 @@ export interface GatewayRepository {
     runId: string,
     payload: StartIntelligencePayload,
   ): Promise<IntelligenceStartReceipt>;
+  checkpointIntelligenceCollection?(runId: string, payload: { cache_key: string; receipt: Record<string, unknown>; items: Record<string, unknown>[] }): Promise<{ run_id: string; cache_key: string }>;
   recordIntelligence?(
     runId: string,
     completionId: string,
@@ -694,6 +695,7 @@ export function createSupabaseGatewayRepository(
         p_market_date: payload.market_date,
         p_policy_version: payload.policy_version,
         p_reservation_plan: payload.reservation_plan,
+        p_request_window: payload.request_window,
       });
       if (result.error) throw new GatewayRepositoryError("PERSISTENCE_FAILED");
       try {
@@ -701,6 +703,13 @@ export function createSupabaseGatewayRepository(
       } catch {
         throw new GatewayRepositoryError("INVALID_PERSISTED_DATA");
       }
+    },
+
+    async checkpointIntelligenceCollection(runId, payload) {
+      const result = await client.rpc("checkpoint_market_intelligence_collection", { p_run_id: runId, p_payload: payload });
+      if (result.error) throw new GatewayRepositoryError("PERSISTENCE_FAILED");
+      const row = oneObject(result);
+      return { run_id: text(row.run_id, 36), cache_key: text(row.cache_key, 512) };
     },
 
     async recordIntelligence(runId, completionId, payload) {

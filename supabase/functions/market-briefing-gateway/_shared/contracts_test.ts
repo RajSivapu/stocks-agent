@@ -245,6 +245,10 @@ Deno.test("gateway envelope accepts only the two scoped intelligence persistence
       market_date: "2026-09-02",
       policy_version: 1,
       reservation_plan: { reservations: [] },
+      request_window: {
+        start: "2026-09-04T11:00:00.000Z", end: "2026-09-04T12:00:00.000Z",
+        timezone: "America/Chicago", market_date: "2026-09-04", phase: "pre-market",
+      },
     },
   };
   assertEquals(parseGatewayEnvelope(start).operation, "start_intelligence_run");
