@@ -101,9 +101,12 @@ class MarketReport:
         }
 
 
-def report_idempotency_key(kind: str, market_date: date, packet_hash: str) -> str:
+def report_idempotency_key(
+    kind: str, market_date: date, packet_hash: str, report_hash: str
+) -> str:
     _validate_hash(packet_hash, "packet_hash")
-    return _sha256(f"v1:{kind}:{market_date}:{packet_hash}".encode())
+    _validate_hash(report_hash, "report_hash")
+    return _sha256(f"v2:{kind}:{market_date}:{packet_hash}:{report_hash}".encode())
 
 
 def report_id_from_key(key: str) -> str:
@@ -156,7 +159,10 @@ def build_report(value: ReportInput) -> MarketReport:
         "title": value.title.strip(),
     }
     canonical = json.dumps(body, ensure_ascii=False, separators=(",", ":"), sort_keys=True).encode()
-    key = report_idempotency_key(value.kind, value.market_date, value.packet_hash)
+    content_hash = _sha256(canonical)
+    key = report_idempotency_key(
+        value.kind, value.market_date, value.packet_hash, content_hash
+    )
     return MarketReport(
         report_id=report_id_from_key(key),
         idempotency_key=key,
@@ -173,7 +179,7 @@ def build_report(value: ReportInput) -> MarketReport:
         actionable_risk=value.actionable_risk,
         material_thesis_change=value.material_thesis_change,
         intraday_triggered=value.intraday_triggered,
-        content_hash=_sha256(canonical),
+        content_hash=content_hash,
         rendered_hash=_sha256(markdown.encode()),
     )
 

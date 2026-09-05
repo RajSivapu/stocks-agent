@@ -69,7 +69,31 @@ def _transaction_count(sb):
 
 
 def _transactions(sb):
-    return sb.table("transactions").select("*").eq("ticker", TICKER).order("id").execute().data
+    return sb.table("transactions").select("*").eq("ticker", TICKER).order("executed_on").order("id").execute().data
+
+
+def _command(sb, command_id):
+    rows = sb.table("portfolio_commands").select("realized_pnl,result").eq("id", command_id).execute().data
+    return rows[0] if rows else None
+
+
+def _require_late_rejection_preserves_accounting(sb, *, sell_command_id):
+    holding = _holding(sb)
+    persisted_sell = _command(sb, sell_command_id)
+    transactions = _transactions(sb)
+    _require(holding is not None and Decimal(str(holding["shares"])) == Decimal("5"),
+             "late Buy changed authoritative holdings")
+    _require(persisted_sell is not None and Decimal(str(persisted_sell["realized_pnl"])) == Decimal("50"),
+             "late Buy changed persisted realized P&L")
+    ledger = [
+        (str(transaction["executed_on"]), transaction["side"], Decimal(str(transaction["qty"])), Decimal(str(transaction["price"])))
+        for transaction in transactions
+    ]
+    _require(ledger == [
+        ("2026-09-01", "buy", Decimal("10"), Decimal("100")),
+        ("2026-09-03", "sell", Decimal("5"), Decimal("110")),
+    ],
+             "late Buy changed authoritative transactions")
 
 
 def _plan(sb):
@@ -157,23 +181,34 @@ def main():
         print("PASS: Cancel prevents mutation")
 
         _cleanup(sb)
-        later_date = str(date.today() - timedelta(days=2))
-        earlier_date = str(date.today() - timedelta(days=5))
-        later_buy_id = _pending(
-            sb, operation="buy", expected_shares=0, qty=1, price=100, bucket="growth",
-            executed_on=later_date,
+        first_date = "2026-09-01"
+        sell_date = "2026-09-03"
+        late_date = "2026-09-02"
+        first_buy_id = _pending(
+            sb, operation="buy", expected_shares=0, qty=10, price=100, bucket="growth",
+            executed_on=first_date,
         )
-        _require(_rpc(sb, "apply_portfolio_command", later_buy_id)["ok"] is True,
-                 "later historical Buy did not succeed")
-        earlier_buy_id = _pending(
-            sb, operation="buy", expected_shares=1, qty=1, price=90, bucket="growth",
-            executed_on=earlier_date,
+        _require(_rpc(sb, "apply_portfolio_command", first_buy_id)["ok"] is True,
+                 "initial chronological Buy did not succeed")
+        sell_id = _pending(
+            sb, operation="sell", expected_shares=10, qty=5, price=110,
+            executed_on=sell_date,
         )
-        _require(_rpc(sb, "apply_portfolio_command", earlier_buy_id)["ok"] is True,
-                 "earlier historical Buy did not succeed")
-        _require(_holding(sb)["opened_at"] == earlier_date,
-                 "out-of-order Buy did not preserve the earliest holding open date")
-        print("PASS: out-of-order Buys preserve the earliest open date")
+        sell = _rpc(sb, "apply_portfolio_command", sell_id)
+        _require(sell["ok"] is True and Decimal(str(sell["realized_pnl"])) == Decimal("50"),
+                 "chronological Sell did not preserve +50 realized P&L")
+        late_buy_id = _pending(
+            sb, operation="buy", expected_shares=5, qty=10, price=200, bucket="growth",
+            executed_on=late_date,
+        )
+        late_buy = _rpc(sb, "apply_portfolio_command", late_buy_id)
+        _require(late_buy["ok"] is False and late_buy["code"] == "TRANSACTION_OUT_OF_ORDER",
+                 "late Buy was not rejected with TRANSACTION_OUT_OF_ORDER")
+        _require_late_rejection_preserves_accounting(sb, sell_command_id=sell_id)
+        replay = _rpc(sb, "apply_portfolio_command", late_buy_id)
+        _require(replay.get("duplicate") is True and replay.get("code") == "TRANSACTION_OUT_OF_ORDER",
+                 "late Buy replay did not preserve its chronology receipt")
+        print("PASS: late transaction rejection preserves authoritative accounting")
 
         _cleanup(sb)
         due_on = str(date.today())

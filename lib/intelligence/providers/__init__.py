@@ -15,6 +15,7 @@ from typing import Any
 from urllib.parse import urlsplit
 
 from lib import config
+from lib.intelligence.policy import _PROVIDERS
 from lib.intelligence.http import (
     BoundedHttpClient,
     HttpRequest,
@@ -22,7 +23,12 @@ from lib.intelligence.http import (
     SourceFailure,
     cache_key,
 )
-from lib.intelligence.quota import QuotaSession
+from lib.intelligence.quota import QuotaExceeded, QuotaSession
+
+
+# Every reviewed outbound reservation uses the same durable transport barrier.
+# Yahoo is deliberately separate: its quote transport is protected by the gateway.
+RESERVED_OUTBOUND_PROVIDERS = frozenset(_PROVIDERS) - {"yahoo"}
 
 
 _MAX_TEXT_CHARACTERS = 2_000
@@ -71,6 +77,10 @@ class SourceItem:
     retrieved_at: datetime
     authority: str
     metadata: Mapping[str, Any]
+    request_url: str | None = None
+    reporting_at: datetime | None = None
+    entity_ids: tuple[str, ...] = ()
+    security_ids: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -92,6 +102,8 @@ class RequestReceipt:
     dropped_count: int
     response_hash: str | None
     error_code: str | None = None
+    source_receipt_id: str | None = None
+    cache_predecessor_receipt_id: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -194,6 +206,28 @@ def bounded_metadata(value: object) -> Mapping[str, object]:
     return MappingProxyType(bounded)
 
 
+def security_ids(value: object) -> tuple[str, ...]:
+    values = value if isinstance(value, (list, tuple, set, frozenset)) else (value,)
+    return tuple(sorted({
+        symbol.strip().upper()
+        for item in values
+        if isinstance(item, str)
+        for symbol in (item,)
+        if re.fullmatch(r"[A-Za-z][A-Za-z0-9.-]{0,14}", symbol.strip())
+    }))
+
+
+def entity_ids(value: object) -> tuple[str, ...]:
+    values = value if isinstance(value, (list, tuple, set, frozenset)) else (value,)
+    return tuple(sorted({
+        identifier.strip().lower()
+        for item in values
+        if isinstance(item, str)
+        for identifier in (item,)
+        if identifier.strip() and len(identifier.strip()) <= 160
+    }))
+
+
 class SourceAdapter(ABC):
     provider: str
     allowed_hosts: frozenset[str]
@@ -226,7 +260,13 @@ class SourceAdapter(ABC):
     ) -> Sequence[Mapping[str, object]]:
         raise NotImplementedError
 
-    def collect(self, query: CollectionQuery) -> CollectionResult:
+    def collect(
+        self,
+        query: CollectionQuery,
+        *,
+        source_receipt_id: str | None = None,
+        before_transport_attempt: Callable[[RequestReceipt], None] | None = None,
+    ) -> CollectionResult:
         request = self._request(query)
         requested_window = MappingProxyType({
             "start": _utc(query.start).isoformat(),
@@ -244,10 +284,51 @@ class SourceAdapter(ABC):
             json.dumps(dict(requested_window), separators=(",", ":"), sort_keys=True),
             1,
         )
-        reservation_id = self.quota.consume_next(self.provider)
+        # The pre-open validation is deliberately before quota admission: zero transport attempts cost zero.
+        validate_request = getattr(self.http, "validate_request", None)
+        if callable(validate_request):
+            validate_request(request)
+        reservation_id = self.quota.receipt_reservation_id(self.provider)
+        attempts = 0
+
+        def admit_attempt() -> None:
+            # A receipt has one reservation identity, so every counted open for
+            # this collection must fit that reservation.  Do not silently spill
+            # a redirect into another reservation that the terminal receipt
+            # cannot prove; quota exhaustion stops before that next open.
+            nonlocal attempts
+            self.quota.consume(self.provider, reservation_id)
+            attempts += 1
+            if before_transport_attempt is not None:
+                before_transport_attempt(RequestReceipt(
+                    provider=self.provider,
+                    reservation_id=reservation_id,
+                    status="failed",
+                    cache_key=receipt_cache_key,
+                    requested_window=requested_window,
+                    requested_limit=query.limit,
+                    retrieved_at=_utc(self.clock()),
+                    observed_at=None,
+                    expires_at=None,
+                    request_cost=attempts,
+                    upstream_remaining=None,
+                    returned_count=0,
+                    accepted_count=0,
+                    duplicate_count=0,
+                    dropped_count=0,
+                    response_hash=None,
+                    error_code="TRANSPORT_OUTCOME_UNCERTAIN",
+                    source_receipt_id=source_receipt_id,
+                ))
+
         response: HttpResult | None = None
         try:
-            response = self.http.get(request)
+            reservation_id = self.quota.next_reservation_id(self.provider)
+            if callable(validate_request):
+                response = self.http.get(request, before_attempt=admit_attempt)
+            else:  # deterministic fixture transport has one declared outbound attempt
+                admit_attempt()
+                response = self.http.get(request)
             payload = json.loads(
                 response.body,
                 parse_constant=lambda _value: (_ for _ in ()).throw(ValueError()),
@@ -280,35 +361,37 @@ class SourceAdapter(ABC):
                 retrieved_at=response.retrieved_at,
                 observed_at=response.observed_at,
                 expires_at=response.retrieved_at + _CACHE_TTL,
-                request_cost=0 if response.cache_hit else 1,
+                request_cost=0 if response.cache_hit else attempts,
                 upstream_remaining=None,
                 returned_count=len(records),
                 accepted_count=len(items),
                 duplicate_count=0,
                 dropped_count=dropped,
                 response_hash=body_hash,
+                source_receipt_id=source_receipt_id,
             )
             return CollectionResult(tuple(items), receipt, query.limit)
-        except (SourceFailure, UnicodeDecodeError, ValueError, TypeError, KeyError) as exc:
+        except (SourceFailure, QuotaExceeded, UnicodeDecodeError, ValueError, TypeError, KeyError) as exc:
             cached_failure = response is not None and response.cache_hit
             receipt = RequestReceipt(
                 provider=self.provider,
                 reservation_id=reservation_id,
-                status="failed",
+                status="quota_blocked" if isinstance(exc, QuotaExceeded) else "failed",
                 cache_key=receipt_cache_key,
                 requested_window=requested_window,
                 requested_limit=query.limit,
                 retrieved_at=response.retrieved_at if response is not None else _utc(self.clock()),
                 observed_at=response.observed_at if response is not None else None,
                 expires_at=None,
-                request_cost=0 if cached_failure else 1,
+                request_cost=0 if cached_failure else attempts,
                 upstream_remaining=None,
                 returned_count=0,
                 accepted_count=0,
                 duplicate_count=0,
                 dropped_count=0,
                 response_hash=None,
-                error_code=exc.code if isinstance(exc, SourceFailure) else "INVALID_RESPONSE",
+                error_code=(exc.code if isinstance(exc, SourceFailure) else "QUOTA_BLOCKED" if isinstance(exc, QuotaExceeded) else "INVALID_RESPONSE"),
+                source_receipt_id=source_receipt_id,
             )
             return CollectionResult((), receipt, query.limit)
 
@@ -320,17 +403,24 @@ class SourceAdapter(ABC):
     ) -> SourceItem | None:
         if not isinstance(record, Mapping):
             return None
-        source_url = str(record.get("source_url") or "")
+        request_url = str(record.get("request_url") or "")
+        item_url = str(record.get("item_url") or record.get("source_url") or request_url)
         try:
-            parsed = urlsplit(source_url)
+            request = urlsplit(request_url)
+            item = urlsplit(item_url)
         except ValueError:
             return None
         if (
-            parsed.scheme.lower() != "https"
-            or (parsed.hostname or "").lower().rstrip(".") not in self.allowed_hosts
-            or parsed.username is not None
-            or parsed.password is not None
-            or parsed.port not in (None, 443)
+            request.scheme.lower() != "https"
+            or (request.hostname or "").lower().rstrip(".") not in self.allowed_hosts
+            or request.username is not None
+            or request.password is not None
+            or request.port not in (None, 443)
+            or item.scheme.lower() != "https"
+            or not item.hostname
+            or item.username is not None
+            or item.password is not None
+            or item.port not in (None, 443)
         ):
             return None
         title = bounded_text(record.get("title"))[:500]
@@ -338,24 +428,31 @@ class SourceAdapter(ABC):
             return None
         text = bounded_text(record.get("text"))
         upstream_id = record.get("upstream_item_id")
+        if upstream_id is None or not str(upstream_id).strip():
+            return None
         metadata = bounded_metadata(record.get("metadata"))
-        published_at = parse_timestamp(record.get("published_at"))
+        raw_published_at = record.get("published_at")
+        published_at = parse_timestamp(raw_published_at)
         effective_at = parse_timestamp(record.get("effective_at"))
-        if published_at is None and effective_at is None:
+        reporting_at = parse_timestamp(record.get("reporting_at"))
+        if raw_published_at not in (None, "") and published_at is None:
             return None
-        item_times = tuple(
-            timestamp for timestamp in (published_at, effective_at) if timestamp is not None
-        )
-        if any(
-            not _utc(query.start) <= timestamp <= _utc(query.end)
-            for timestamp in item_times
-        ):
+        collection_time = published_at or retrieved_at
+        if not _utc(query.start) <= collection_time <= _utc(query.end):
             return None
+        entities = entity_ids(record.get("entity_ids"))
+        securities = security_ids(record.get("security_ids"))
+        source_metadata = dict(metadata)
+        if entities:
+            source_metadata["entity_ids"] = list(entities)
+        if securities:
+            source_metadata["security_ids"] = list(securities)
         canonical = json.dumps(
             {
                 "provider": self.provider,
                 "upstream_item_id": None if upstream_id is None else str(upstream_id)[:512],
-                "source_url": source_url[:2048],
+                "item_url": item_url[:2048],
+                "request_url": request_url[:2048],
                 "title": title,
                 "text": text,
             },
@@ -366,7 +463,7 @@ class SourceAdapter(ABC):
         return SourceItem(
             provider=self.provider,
             upstream_item_id=None if upstream_id is None else str(upstream_id)[:512],
-            source_url=source_url[:2048],
+            source_url=item_url[:2048],
             title=title,
             normalized_text=text,
             canonical_content=canonical,
@@ -375,7 +472,11 @@ class SourceAdapter(ABC):
             effective_at=effective_at,
             retrieved_at=retrieved_at,
             authority=self.authority,
-            metadata=metadata,
+            metadata=bounded_metadata(source_metadata),
+            request_url=request_url[:2048],
+            reporting_at=reporting_at,
+            entity_ids=entities,
+            security_ids=securities,
         )
 
 
@@ -416,4 +517,6 @@ __all__ = [
     "SourceAdapter",
     "SourceItem",
     "build_adapter",
+    "entity_ids",
+    "security_ids",
 ]

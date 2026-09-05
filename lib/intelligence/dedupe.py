@@ -25,11 +25,16 @@ def _near_duplicate(left: SourceItem, right: SourceItem) -> bool:
     return SequenceMatcher(None, left_text, right_text, autojunk=False).ratio() >= 0.88
 
 
+def _contradicts(left: SourceItem, right: SourceItem) -> bool:
+    return (
+        left.claim_polarity in {"affirmed", "denied"}
+        and right.claim_polarity in {"affirmed", "denied"}
+        and left.claim_polarity != right.claim_polarity
+    )
+
+
 def deduplicate(items: Iterable[SourceItem]) -> list[RunItemDisposition]:
     accepted: list[SourceItem] = []
-    seen_urls: set[str] = set()
-    seen_upstream_ids: set[tuple[str, str]] = set()
-    seen_hashes: set[str] = set()
     output: list[RunItemDisposition] = []
     for item in items:
         reason: str | None = None
@@ -37,24 +42,26 @@ def deduplicate(items: Iterable[SourceItem]) -> list[RunItemDisposition]:
         upstream_identity = (
             (item.provider, item.upstream_item_id) if item.upstream_item_id else None
         )
-        if item.canonical_url and item.canonical_url in seen_urls:
-            disposition, reason = "duplicate", "same_canonical_url"
-        elif upstream_identity and upstream_identity in seen_upstream_ids:
+        upstream_matches = [
+            canonical for canonical in accepted
+            if upstream_identity
+            and canonical.provider == item.provider
+            and canonical.upstream_item_id == item.upstream_item_id
+        ]
+        hash_matches = [
+            canonical for canonical in accepted if canonical.content_hash == item.content_hash
+        ]
+        if upstream_matches and not any(_contradicts(item, canonical) for canonical in upstream_matches):
             disposition, reason = "duplicate", "same_upstream_item_id"
-        elif item.content_hash in seen_hashes:
+        elif hash_matches and not any(_contradicts(item, canonical) for canonical in hash_matches):
             disposition, reason = "duplicate", "same_content_hash"
         else:
             for canonical in accepted:
-                if _near_duplicate(item, canonical):
+                if not _contradicts(item, canonical) and _near_duplicate(item, canonical):
                     disposition, reason = "near_duplicate", "similar_normalized_content"
                     break
         if disposition == "accepted":
             accepted.append(item)
-        if item.canonical_url:
-            seen_urls.add(item.canonical_url)
-        if upstream_identity:
-            seen_upstream_ids.add(upstream_identity)
-        seen_hashes.add(item.content_hash)
         output.append(RunItemDisposition(item=item, disposition=disposition, reason=reason))
     return output
 

@@ -25,7 +25,14 @@ def candidates(count: int, evidence_count: int = 10, text_size: int = 80):
                     summary="x" * text_size,
                 )
             )
-        rows.append(candidate(f"T{candidate_index:02d}", evidence=evidence))
+        rows.append(
+            replace(
+                candidate(f"T{candidate_index:02d}", evidence=evidence),
+                holding_weight=Decimal("0"),
+                overlap=Decimal("0"),
+                concentration=Decimal("0"),
+            )
+        )
     return rank_candidates(rows)
 
 

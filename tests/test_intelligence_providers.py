@@ -7,6 +7,7 @@ import pytest
 from lib.intelligence.http import HttpResult, SourceFailure
 from lib.intelligence.quota import QuotaSession
 from lib.intelligence.providers import CollectionQuery, build_adapter
+from lib import config
 
 
 NOW = datetime(2026, 9, 4, 12, 0, tzinfo=timezone.utc)
@@ -42,6 +43,82 @@ def sample_query(limit=2, **overrides):
     )
     values.update(overrides)
     return CollectionQuery(**values)
+
+
+def test_zero_capacity_collection_returns_quota_blocked_without_open():
+    http = FixtureHttp({"articles": []})
+    result = build_adapter("gdelt", http, QuotaSession({"gdelt": ()}), clock=lambda: NOW).collect(sample_query())
+    assert result.receipt.status == "quota_blocked"
+    assert result.receipt.error_code == "QUOTA_BLOCKED"
+    assert result.receipt.request_cost == 0
+    assert http.requests == []
+
+
+@pytest.mark.parametrize("adapter_name", ["alpha_vantage", "finnhub"])
+def test_paid_secondary_provider_persists_attempt_barrier_before_transport(adapter_name):
+    order = []
+
+    class BarrierHttp(FixtureHttp):
+        def get(self, request):
+            order.append("transport")
+            return super().get(request)
+
+    http = BarrierHttp(FIXTURES[adapter_name])
+    adapter = build_adapter(
+        adapter_name,
+        http,
+        QuotaSession({adapter_name: ({"reservation_id": "paid", "reserved_requests": 1},)}),
+        secret_getter=lambda _name: "existing-free-key",
+        clock=lambda: NOW,
+    )
+    result = adapter.collect(
+        sample_query(),
+        source_receipt_id="11111111-1111-4111-8111-111111111111",
+        before_transport_attempt=lambda barrier: order.append((
+            "barrier", barrier.error_code, barrier.request_cost, barrier.source_receipt_id,
+        )),
+    )
+
+    assert order == [
+        ("barrier", "TRANSPORT_OUTCOME_UNCERTAIN", 1, "11111111-1111-4111-8111-111111111111"),
+        "transport",
+    ]
+    assert result.receipt.source_receipt_id == "11111111-1111-4111-8111-111111111111"
+    assert result.receipt.request_cost == 1
+
+
+def test_secondary_adapters_normalize_independent_claims_and_syndication():
+    from lib.intelligence.pipeline import _discover
+    from lib.intelligence.normalize import normalize_item
+    from decimal import Decimal
+
+    alpha_payload = {"feed": [{
+        "title": "TEST raises full-year revenue guidance", "summary": "Management lifts sales outlook for 2026.",
+        "time_published": "20260904T110000", "url": "https://reuters.com/test-guidance", "source": "Reuters",
+        "ticker_sentiment": [{"ticker": "TEST", "relevance_score": "1"}],
+    }]}
+    finnhub_payload = [{"id": 19, "headline": "TEST boosts 2026 sales forecast",
+        "summary": "The company increases its annual revenue outlook.", "datetime": 1788519600,
+        "url": "https://bloomberg.com/test-sales", "source": "Bloomberg", "related": "TEST", "category": "company"}]
+    def collect(provider, payload):
+        return normalize_item(build_adapter(provider, FixtureHttp(payload),
+            QuotaSession({provider: ("reservation",)}), secret_getter=lambda _: "fixture", clock=lambda: NOW,
+        ).collect(sample_query()).items[0])
+    alpha = collect("alpha_vantage", alpha_payload)
+    finn = collect("finnhub", finnhub_payload)
+    assert alpha.metadata["claim_key"] == finn.metadata["claim_key"]
+    assert alpha.metadata["polarity"] == finn.metadata["polarity"] == "positive"
+    context = {"holdings": {"TEST": "0.1"}, "liquidity_by_ticker": {"TEST": "1"}, "overlap_by_ticker": {"TEST": "0.1"}}
+    events, _, ranked = _discover([alpha, finn], context, NOW)
+    assert len(events) == 1
+    assert ranked[0].components["authority_corroboration"] == Decimal("0.75")
+    syndicated = dict(finnhub_payload[0], source="Reuters", url="https://reuters.com/test-guidance?utm_source=finnhub")
+    _, _, ranked = _discover([alpha, collect("finnhub", [syndicated])], context, NOW)
+    assert "authority_corroboration:missing" in ranked[0].missing_reasons
+    opposite = dict(finnhub_payload[0], headline="TEST cuts 2026 sales forecast", summary="Management lowers annual revenue guidance.")
+    events, _, ranked = _discover([alpha, collect("finnhub", [opposite])], context, NOW)
+    assert len(events) == 2
+    assert all(not item.qualified and "CONFLICTING_CLAIM_POLARITY" in item.veto_reasons for item in ranked)
 
 
 FIXTURES = {
@@ -91,6 +168,57 @@ FIXTURES = {
         "observations": [{"date": "2026-09-01", "value": "103.2"}],
     },
 }
+
+
+@pytest.mark.parametrize("adapter_name,payload,query_overrides,expect_item", [
+    ("gdelt", FIXTURES["gdelt"], {}, True),
+    ("alpha_vantage", FIXTURES["alpha_vantage"], {}, True),
+    ("finnhub", FIXTURES["finnhub"], {}, True),
+    ("yahoo", {"chart": {"result": [{"meta": {
+        "symbol": "TEST", "regularMarketPrice": 101, "previousClose": 100,
+        "regularMarketTime": 1788516000, "marketState": "REGULAR",
+    }, "timestamp": [1788516000], "indicators": {"quote": [{"close": [101]}]}}]}}, {}, True),
+    ("sec_edgar", FIXTURES["sec_edgar"], {"cik": "0000000001"}, True),
+    ("federal_register", FIXTURES["federal_register"], {}, True),
+    ("fred", FIXTURES["fred"], {"series_id": "CPIAUCSL"}, True),
+    ("white_house", {}, {}, False),
+    ("doe", {}, {}, False),
+    ("dod", {}, {}, False),
+    ("eia", {}, {"series_id": "PET.WCESTUS1.W"}, False),
+    ("bls", {}, {"series_id": "CUUR0000SA0"}, False),
+    ("bea", {}, {"series_id": "T10105"}, False),
+])
+def test_each_declared_provider_yields_discoverable_evidence_or_pre_http_unsupported_failure(
+    adapter_name, payload, query_overrides, expect_item,
+):
+    assert adapter_name in config.load_settings()["intelligence"]["providers"]
+    http = FixtureHttp(payload)
+    quota = QuotaSession({adapter_name: ({"reservation_id": "declared", "reserved_requests": 1},)})
+    secrets = {
+        "alphavantage_api_key": "existing-free-alpha-key",
+        "finnhub_api_key": "existing-free-finnhub-key",
+        "fred_api_key": "existing-free-fred-key",
+    }
+    adapter = build_adapter(
+        adapter_name, http, quota, secret_getter=lambda name: secrets[name], clock=lambda: NOW,
+    )
+
+    if not expect_item:
+        barriers = []
+        with pytest.raises(SourceFailure, match="UNSUPPORTED_QUERY"):
+            adapter.collect(sample_query(**query_overrides), before_transport_attempt=barriers.append)
+        assert http.requests == []
+        assert barriers == []
+        assert quota.consume_next(adapter_name) == "declared"
+        return
+
+    result = adapter.collect(sample_query(**query_overrides))
+    assert len(result.items) == 1
+    item = result.items[0]
+    assert item.upstream_item_id
+    assert item.request_url and item.source_url and item.request_url != item.source_url
+    assert item.published_at and item.retrieved_at
+    assert item.security_ids or item.entity_ids
 
 
 @pytest.mark.parametrize("adapter_name", tuple(FIXTURES))
@@ -165,6 +293,65 @@ def test_official_release_and_effective_timestamps_remain_distinct():
     item = result.items[0]
     assert item.published_at.isoformat() == "2026-09-04T00:00:00+00:00"
     assert item.effective_at.isoformat() == "2026-09-04T12:00:00+00:00"
+
+
+def test_federal_register_uses_documented_conditions_and_per_page_shape():
+    http = FixtureHttp(FIXTURES["federal_register"])
+    build_adapter(
+        "federal_register", http,
+        QuotaSession({"federal_register": ({"reservation_id": "fr-shape", "reserved_requests": 1},)}),
+        clock=lambda: NOW,
+    ).collect(sample_query(symbols=("CENX",)))
+
+    params = parse_qs(urlsplit(http.requests[0].url).query)
+    assert "conditions[term]" in params and "CENX" in params["conditions[term]"][0]
+    assert "conditions[publication_date][gte]" in params
+    assert "conditions[publication_date][lte]" in params
+    assert params["per_page"] == ["2"]
+    assert "query" not in params and "limit" not in params
+
+
+def test_newly_published_prior_period_filing_is_retained_with_distinct_times():
+    payload = {"cik": "0000000001", "name": "Test Issuer", "filings": {"recent": {
+        "accessionNumber": ["0000000001-26-000002"],
+        "filingDate": ["2026-09-04"],
+        "reportDate": ["2025-12-31"],
+        "form": ["10-K"],
+        "primaryDocument": ["annual.htm"],
+    }}}
+    result = build_adapter(
+        "sec_edgar", FixtureHttp(payload),
+        QuotaSession({"sec_edgar": ({"reservation_id": "s2", "reserved_requests": 1},)}),
+        clock=lambda: NOW,
+    ).collect(sample_query(cik="0000000001", symbols=("TEST",)))
+
+    assert len(result.items) == 1
+    item = result.items[0]
+    assert item.published_at.isoformat() == "2026-09-04T00:00:00+00:00"
+    assert item.reporting_at.isoformat() == "2025-12-31T00:00:00+00:00"
+    assert item.security_ids == ("TEST",)
+    assert item.entity_ids == ("cik:0000000001",)
+
+
+def test_provider_keeps_secret_free_request_url_separate_from_item_url_and_identity():
+    result = build_adapter(
+        "alpha_vantage", FixtureHttp({"feed": [{
+            "title": "Test issuer contract update",
+            "url": "https://publisher.example/stories/contract-update",
+            "summary": "A contract update for the issuer.",
+            "time_published": "20260904T093000",
+            "ticker_sentiment": [{"ticker": "TEST"}],
+        }]}),
+        QuotaSession({"alpha_vantage": ({"reservation_id": "a1", "reserved_requests": 1},)}),
+        secret_getter=lambda _name: "existing-free-alpha-key", clock=lambda: NOW,
+    ).collect(sample_query())
+
+    item = result.items[0]
+    assert item.source_url == "https://publisher.example/stories/contract-update"
+    assert item.request_url.startswith("https://www.alphavantage.co/query?")
+    assert "existing-free-alpha-key" not in item.request_url
+    assert item.security_ids == ("TEST",)
+    assert item.upstream_item_id == "https://publisher.example/stories/contract-update"
 
 
 @pytest.mark.parametrize("adapter_name,secret_name", [
@@ -327,7 +514,7 @@ def test_item_without_a_parseable_provider_timestamp_is_dropped():
         "title": "Publisher story",
         "summary": "Summary",
         "time_published": "20260904T100000",
-    }]}, "alphavantage_api_key", "www.alphavantage.co", "topics"),
+    }]}, "alphavantage_api_key", "www.alphavantage.co", "tickers"),
     ("finnhub", [{
         "id": 8,
         "url": "https://publisher.example/finnhub-story",
@@ -350,9 +537,10 @@ def test_external_publisher_links_use_secret_free_provider_evidence_url(
 
     assert len(result.items) == 1
     item = result.items[0]
-    assert urlsplit(item.source_url).hostname == expected_host
-    assert reference_key in parse_qs(urlsplit(item.source_url).query)
-    assert secret not in item.source_url
+    assert urlsplit(item.source_url).hostname == "publisher.example"
+    assert urlsplit(item.request_url).hostname == expected_host
+    assert reference_key in parse_qs(urlsplit(item.request_url).query)
+    assert secret not in item.request_url
     assert item.metadata["publisher_url"].startswith("https://publisher.example/")
     assert item.metadata["publisher_url_authority"] == "untrusted_reference"
 
@@ -380,7 +568,7 @@ def test_collection_window_is_inclusive_and_rejects_stale_or_future_items(timest
     assert result.receipt.dropped_count == (0 if accepted else 1)
 
 
-def test_any_supplied_effective_timestamp_outside_window_is_dropped():
+def test_future_effective_timestamp_does_not_drop_newly_published_fact():
     payload = {"results": [{
         "document_number": "2026-99999",
         "title": "Future rule",
@@ -396,8 +584,9 @@ def test_any_supplied_effective_timestamp_outside_window_is_dropped():
         clock=lambda: NOW,
     ).collect(sample_query())
 
-    assert result.items == ()
-    assert result.receipt.dropped_count == 1
+    assert len(result.items) == 1
+    assert result.items[0].effective_at.isoformat() == "2026-09-04T12:00:01+00:00"
+    assert result.receipt.dropped_count == 0
 
 
 def test_cached_schema_failure_uses_original_timestamps_and_zero_request_cost():

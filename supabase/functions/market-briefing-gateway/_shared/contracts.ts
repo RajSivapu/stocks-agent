@@ -1,10 +1,14 @@
 import {
+  parseCheckpointIntelligencePayload,
   parseRecordIntelligencePayload,
   parseStartIntelligencePayload,
   type RecordIntelligencePayload,
   type StartIntelligencePayload,
 } from "./intelligence.ts";
-import { parseRecordReportPayload, type RecordReportPayload } from "./reports.ts";
+import {
+  parseRecordReportPayload,
+  type RecordReportPayload,
+} from "./reports.ts";
 import type { RecordLearningPayload } from "./outcomes.ts";
 
 export type Operation =
@@ -16,7 +20,11 @@ export type Operation =
   | "evaluate_alert_rules"
   | "finish_run"
   | "start_intelligence_run"
+  | "checkpoint_intelligence_collection"
   | "record_intelligence"
+  | "read_intelligence_completion"
+  | "read_intelligence_context"
+  | "collect_intelligence_quote"
   | "record_report"
   | "record_learning";
 export type Phase = "pre-market" | "intraday" | "post-market" | "on-demand";
@@ -173,7 +181,12 @@ export interface GatewayEnvelope {
   request_id: string;
   run_id: string | null;
   dry_run: boolean;
-  payload: unknown | StartIntelligencePayload | RecordIntelligencePayload | RecordReportPayload | RecordLearningPayload;
+  payload:
+    | unknown
+    | StartIntelligencePayload
+    | RecordIntelligencePayload
+    | RecordReportPayload
+    | RecordLearningPayload;
 }
 
 export interface EvidenceBlock {
@@ -201,6 +214,106 @@ export interface EvidencePacket {
   coverage: Record<string, unknown>;
   limitations: string[];
   policy_version: number;
+  facts?: TrustedEvidenceFact[];
+}
+
+/** Only populated by the persisted packet read (or an explicit dry-run fixture). */
+export interface TrustedEvidenceFact {
+  candidate_key: string;
+  evidence_id: string;
+  category: EvidenceBlock["kind"] | "unknown";
+  source: string;
+  source_status: "succeeded" | "cache_hit" | "failed";
+  authority: "official" | "market_data" | "reported" | "unverified";
+  published_at: string | null;
+  retrieved_at: string;
+  expires_at: string | null;
+  reference: string | null;
+  normalized_text: string;
+  exposure_kind: ExposureKind | null;
+  relationship_eligible: boolean;
+  claim_key: string | null;
+  claim_polarity: "affirmed" | "denied" | null;
+}
+
+export function parseTrustedEvidenceFacts(
+  value: unknown,
+): TrustedEvidenceFact[] {
+  const seen = new Set<string>();
+  return arrayValue(value, "persisted evidence facts", 96).map(
+    (value, index) => {
+      const path = `persisted evidence facts[${index}]`;
+      const row = objectValue(value, path);
+      exactKeys(row, [
+        "candidate_key",
+        "evidence_id",
+        "category",
+        "source",
+        "source_status",
+        "authority",
+        "published_at",
+        "retrieved_at",
+        "expires_at",
+        "reference",
+        "normalized_text",
+        "exposure_kind",
+        "relationship_eligible",
+        "claim_key",
+        "claim_polarity",
+      ], path);
+      if (typeof row.relationship_eligible !== "boolean") {
+        throw new Error(`${path} invalid eligibility`);
+      }
+      const key = `${row.candidate_key}:${row.evidence_id}`;
+      if (seen.has(key)) throw new Error(`${path} duplicate evidence fact`);
+      seen.add(key);
+      return {
+        candidate_key: tickerValue(row.candidate_key, `${path}.candidate_key`),
+        evidence_id: stringValue(row.evidence_id, `${path}.evidence_id`, 100),
+        category: enumValue(
+          row.category,
+          [...EVIDENCE_KINDS, "unknown"] as const,
+          `${path}.category`,
+        ),
+        source: stringValue(row.source, `${path}.source`, 200),
+        source_status: enumValue(
+          row.source_status,
+          ["succeeded", "cache_hit", "failed"] as const,
+          `${path}.source_status`,
+        ),
+        authority: enumValue(
+          row.authority,
+          ["official", "market_data", "reported", "unverified"] as const,
+          `${path}.authority`,
+        ),
+        published_at: nullableTimestamp(
+          row.published_at,
+          `${path}.published_at`,
+        ),
+        retrieved_at: timestampValue(row.retrieved_at, `${path}.retrieved_at`),
+        expires_at: nullableTimestamp(row.expires_at, `${path}.expires_at`),
+        reference: nullableString(row.reference, `${path}.reference`),
+        normalized_text: stringValue(
+          row.normalized_text,
+          `${path}.normalized_text`,
+          2000,
+          true,
+        ),
+        exposure_kind: row.exposure_kind === null ? null : enumValue(
+          row.exposure_kind,
+          EXPOSURE_KINDS,
+          `${path}.exposure_kind`,
+        ),
+        relationship_eligible: row.relationship_eligible,
+        claim_key: nullableString(row.claim_key, `${path}.claim_key`, 200),
+        claim_polarity: row.claim_polarity === null ? null : enumValue(
+          row.claim_polarity,
+          ["affirmed", "denied"] as const,
+          `${path}.claim_polarity`,
+        ),
+      };
+    },
+  );
 }
 
 export interface IntelligencePacketRef {
@@ -234,6 +347,7 @@ export interface DecisionCandidate {
   valid_until: string | null;
   evidence: EvidenceBlock[];
   relationship_type?: "direct" | "second_order" | null;
+  reservation_group?: string | null;
   factors: Array<{
     kind:
       | "fundamentals"
@@ -373,6 +487,10 @@ export interface VerifiedQuote {
   as_of: string;
   market_state: string;
   source: "yahoo-chart";
+  actionable_price_status: "available" | "unavailable";
+  actionable_price_reasons: Array<
+    "halted" | "halt_status_unknown" | "spread_unknown" | "liquidity_unknown"
+  >;
 }
 
 export interface HoldingState {
@@ -436,9 +554,23 @@ export interface PolicyContext {
   portfolio_command_coverage_complete: boolean;
   consecutive_completed_losses: number;
   owner_plans: OwnerInvestmentPlan[];
+  reconciled_cash_snapshot?: {
+    snapshot_id: string;
+    as_of: string;
+    fresh_through: string;
+    ledger_watermark: string;
+    spendable_cash: Record<Bucket, string>;
+  };
 }
 
 export interface GatewayReadContext extends PolicyContext {
+  intelligence_collection_context?: {
+    holding_market_values: Record<string, string>;
+    liquidity_by_ticker: Record<string, string>;
+    overlap_by_ticker: Record<string, string>;
+    current_quotes?: Record<string, { price: string; as_of: string }>;
+    quote_receipt_ids?: string[];
+  };
   recent_suggestions: ContextSuggestion[];
   observations: Array<{
     id: number;
@@ -520,7 +652,11 @@ const OPERATIONS: readonly Operation[] = [
   "evaluate_alert_rules",
   "finish_run",
   "start_intelligence_run",
+  "checkpoint_intelligence_collection",
   "record_intelligence",
+  "read_intelligence_completion",
+  "read_intelligence_context",
+  "collect_intelligence_quote",
   "record_report",
   "record_learning",
 ];
@@ -612,7 +748,8 @@ const CANDIDATE_LIMITS: Record<Phase, number> = {
   "post-market": 80,
   "on-demand": 10,
 };
-const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+const UUID_PATTERN =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const TICKER_PATTERN = /^[A-Z][A-Z0-9]*([.-][A-Z0-9]+)*$/;
 const DECIMAL_PATTERN = /^(?:0|[1-9]\d*)(?:\.\d+)?$/;
 const SIGNED_DECIMAL_PATTERN = /^-?(?:0|[1-9]\d*)(?:\.\d+)?$/;
@@ -776,7 +913,9 @@ function arrayValue(
   return value;
 }
 
-export function parseRecordLearningPayload(value: unknown): RecordLearningPayload {
+export function parseRecordLearningPayload(
+  value: unknown,
+): RecordLearningPayload {
   const row = objectValue(value, "learning");
   exactKeys(row, [
     "id",
@@ -801,12 +940,10 @@ export function parseRecordLearningPayload(value: unknown): RecordLearningPayloa
     ["observation", "owner_review"] as const,
     "learning.observation.status",
   );
-  const proposed = observation.proposed_change === null
-    ? null
-    : objectValue(
-      observation.proposed_change,
-      "learning.observation.proposed_change",
-    );
+  const proposed = observation.proposed_change === null ? null : objectValue(
+    observation.proposed_change,
+    "learning.observation.proposed_change",
+  );
   if (proposed !== null) {
     exactKeys(proposed, [
       "area",
@@ -820,18 +957,40 @@ export function parseRecordLearningPayload(value: unknown): RecordLearningPayloa
     typeof row.content_hash !== "string" ||
     !/^[0-9a-f]{64}$/.test(row.content_hash)
   ) throw new Error("learning observation review status is invalid");
-  const horizon = integerValue(row.horizon_days, "learning.horizon_days", 0, 63);
+  const horizon = integerValue(
+    row.horizon_days,
+    "learning.horizon_days",
+    0,
+    63,
+  );
   if (![0, 5, 21, 63].includes(horizon)) {
     throw new Error("learning horizon is invalid");
   }
   return {
     id: uuidValue(row.id, "learning.id"),
-    policy_version: integerValue(row.policy_version, "learning.policy_version", 1, 1_000_000),
-    observation_type: enumValue(row.observation_type, [
-      "outcome", "missed-event", "source-failure", "noise",
-    ] as const, "learning.observation_type"),
+    policy_version: integerValue(
+      row.policy_version,
+      "learning.policy_version",
+      1,
+      1_000_000,
+    ),
+    observation_type: enumValue(
+      row.observation_type,
+      [
+        "outcome",
+        "missed-event",
+        "source-failure",
+        "noise",
+      ] as const,
+      "learning.observation_type",
+    ),
     horizon_days: horizon as 0 | 5 | 21 | 63,
-    sample_size: integerValue(row.sample_size, "learning.sample_size", 1, 1_000_000),
+    sample_size: integerValue(
+      row.sample_size,
+      "learning.sample_size",
+      1,
+      1_000_000,
+    ),
     benchmark: nullableString(row.benchmark, "learning.benchmark", 100),
     observation: {
       status,
@@ -839,15 +998,23 @@ export function parseRecordLearningPayload(value: unknown): RecordLearningPayloa
         observation.evidence_ids,
         "learning.observation.evidence_ids",
         96,
-      ).map((id, index) => uuidValue(id, `learning.observation.evidence_ids[${index}]`)),
+      ).map((id, index) =>
+        uuidValue(id, `learning.observation.evidence_ids[${index}]`)
+      ),
       limitations: arrayValue(
         observation.limitations,
         "learning.observation.limitations",
         20,
-      ).map((item, index) => stringValue(item, `learning.observation.limitations[${index}]`, 500)),
+      ).map((item, index) =>
+        stringValue(item, `learning.observation.limitations[${index}]`, 500)
+      ),
       metrics: objectValue(observation.metrics, "learning.observation.metrics"),
       proposed_change: proposed === null ? null : {
-        area: stringValue(proposed.area, "learning.observation.proposed_change.area", 100),
+        area: stringValue(
+          proposed.area,
+          "learning.observation.proposed_change.area",
+          100,
+        ),
         recommendation: stringValue(
           proposed.recommendation,
           "learning.observation.proposed_change.recommendation",
@@ -886,6 +1053,13 @@ export function parseGatewayEnvelope(value: unknown): GatewayEnvelope {
       throw new Error("run_id must be null for start_intelligence_run");
     }
     payload = parseStartIntelligencePayload(row.payload);
+  } else if (operation === "checkpoint_intelligence_collection") {
+    if (row.run_id === null) {
+      throw new Error(
+        "run_id is required for checkpoint_intelligence_collection",
+      );
+    }
+    payload = parseCheckpointIntelligencePayload(row.payload);
   } else if (operation === "record_intelligence") {
     if (row.run_id === null) {
       throw new Error("run_id is required for record_intelligence");
@@ -959,6 +1133,7 @@ function parseCandidate(
 ): DecisionCandidate {
   const row = objectValue(value, path);
   const hasRelationshipType = Object.hasOwn(row, "relationship_type");
+  const hasReservationGroup = Object.hasOwn(row, "reservation_group");
   const keys = [
     "candidate_id",
     "ticker",
@@ -983,6 +1158,7 @@ function parseCandidate(
     "valid_until",
     "evidence",
     ...(hasRelationshipType ? ["relationship_type"] : []),
+    ...(hasReservationGroup ? ["reservation_group"] : []),
     "factors",
     "analyst",
     "checker",
@@ -1018,7 +1194,9 @@ function parseCandidate(
         factor.evidence_ids,
         `${factorPath}.evidence_ids`,
         20,
-      ).map((id, evidenceIndex) => stringValue(id, `${factorPath}.evidence_ids[${evidenceIndex}]`, 100));
+      ).map((id, evidenceIndex) =>
+        stringValue(id, `${factorPath}.evidence_ids[${evidenceIndex}]`, 100)
+      );
       for (const id of factorEvidenceIds) {
         if (!evidenceIds.has(id)) {
           throw new Error(`${factorPath} references unknown evidence id`);
@@ -1054,7 +1232,9 @@ function parseCandidate(
     `${path}.checker`,
   );
 
-  const validUntil = row.valid_until === null ? null : dateValue(row.valid_until, `${path}.valid_until`);
+  const validUntil = row.valid_until === null
+    ? null
+    : dateValue(row.valid_until, `${path}.valid_until`);
   return {
     candidate_id: uuidValue(row.candidate_id, `${path}.candidate_id`),
     ticker: tickerValue(row.ticker, `${path}.ticker`),
@@ -1134,14 +1314,21 @@ function parseCandidate(
     ),
     valid_until: validUntil,
     evidence,
-    relationship_type: !hasRelationshipType || row.relationship_type === null ? null : enumValue(
-      row.relationship_type,
-      ["direct", "second_order"] as const,
-      `${path}.relationship_type`,
-    ),
+    relationship_type: !hasRelationshipType || row.relationship_type === null
+      ? null
+      : enumValue(
+        row.relationship_type,
+        ["direct", "second_order"] as const,
+        `${path}.relationship_type`,
+      ),
+    reservation_group: !hasReservationGroup || row.reservation_group === null
+      ? null
+      : stringValue(row.reservation_group, `${path}.reservation_group`, 100),
     factors,
     analyst: {
-      id: !hasAnalystReceipt || analystRow.id === null ? null : uuidValue(analystRow.id, `${path}.analyst.id`),
+      id: !hasAnalystReceipt || analystRow.id === null
+        ? null
+        : uuidValue(analystRow.id, `${path}.analyst.id`),
       packet_id: !hasAnalystReceipt || analystRow.packet_id === null
         ? null
         : uuidValue(analystRow.packet_id, `${path}.analyst.packet_id`),
@@ -1158,7 +1345,9 @@ function parseCandidate(
       reason: stringValue(analystRow.reason, `${path}.analyst.reason`),
     },
     checker: {
-      id: !hasCheckerReceipt || checkerRow.id === null ? null : uuidValue(checkerRow.id, `${path}.checker.id`),
+      id: !hasCheckerReceipt || checkerRow.id === null
+        ? null
+        : uuidValue(checkerRow.id, `${path}.checker.id`),
       analyst_id: !hasCheckerReceipt || checkerRow.analyst_id === null
         ? null
         : uuidValue(checkerRow.analyst_id, `${path}.checker.analyst_id`),
@@ -1175,7 +1364,9 @@ function parseCandidate(
         checkerRow.reason_codes,
         `${path}.checker.reason_codes`,
         20,
-      ).map((code, index) => stringValue(code, `${path}.checker.reason_codes[${index}]`, 100)),
+      ).map((code, index) =>
+        stringValue(code, `${path}.checker.reason_codes[${index}]`, 100)
+      ),
       reason: stringValue(checkerRow.reason, `${path}.checker.reason`),
     },
     decisive_factor: stringValue(
@@ -1187,7 +1378,9 @@ function parseCandidate(
       row.prior_suggestion_ids,
       `${path}.prior_suggestion_ids`,
       20,
-    ).map((id, index) => stringValue(id, `${path}.prior_suggestion_ids[${index}]`, 100)),
+    ).map((id, index) =>
+      stringValue(id, `${path}.prior_suggestion_ids[${index}]`, 100)
+    ),
   };
 }
 
@@ -1199,7 +1392,14 @@ export function parseEvidencePacket(value: unknown): EvidencePacket {
   }
   exactKeys(
     row,
-    ["candidates", "evidence", "coverage", "limitations", "policy_version"],
+    [
+      "candidates",
+      "evidence",
+      "coverage",
+      "limitations",
+      "policy_version",
+      ...(Object.hasOwn(row, "facts") ? ["facts"] : []),
+    ],
     path,
   );
   const evidence = arrayValue(row.evidence, `${path}.evidence`, 96).map(
@@ -1231,7 +1431,9 @@ export function parseEvidencePacket(value: unknown): EvidencePacket {
         item.evidence_ids,
         `${candidatePath}.evidence_ids`,
         8,
-      ).map((id, evidenceIndex) => stringValue(id, `${candidatePath}.evidence_ids[${evidenceIndex}]`, 100));
+      ).map((id, evidenceIndex) =>
+        stringValue(id, `${candidatePath}.evidence_ids[${evidenceIndex}]`, 100)
+      );
       if (
         new Set(evidenceIds).size !== evidenceIds.length ||
         evidenceIds.some((id) => !knownEvidence.has(id))
@@ -1255,12 +1457,17 @@ export function parseEvidencePacket(value: unknown): EvidencePacket {
   }
   const coverage = objectValue(row.coverage, `${path}.coverage`);
   const limitations = arrayValue(row.limitations, `${path}.limitations`, 100)
-    .map((item, index) => stringValue(item, `${path}.limitations[${index}]`, 500));
+    .map((item, index) =>
+      stringValue(item, `${path}.limitations[${index}]`, 500)
+    );
   return {
     candidates,
     evidence,
     coverage,
     limitations,
+    ...(Object.hasOwn(row, "facts")
+      ? { facts: parseTrustedEvidenceFacts(row.facts) }
+      : {}),
     policy_version: integerValue(
       row.policy_version,
       `${path}.policy_version`,
@@ -1275,7 +1482,9 @@ function parseIntelligencePacketRef(value: unknown): IntelligencePacketRef {
   const hasPacket = Object.hasOwn(row, "packet");
   exactKeys(
     row,
-    hasPacket ? ["id", "content_hash", "coverage", "packet"] : ["id", "content_hash", "coverage"],
+    hasPacket
+      ? ["id", "content_hash", "coverage", "packet"]
+      : ["id", "content_hash", "coverage"],
     path,
   );
   const contentHash = stringValue(row.content_hash, `${path}.content_hash`, 64);
@@ -1302,10 +1511,16 @@ export function validatePacketEvidence(
   candidate: DecisionCandidate,
   packet: EvidencePacket,
 ): string[] {
-  const packetCandidate = packet.candidates.find((row) => row.candidate_key === candidate.ticker);
+  const packetCandidate = packet.candidates.find((row) =>
+    row.candidate_key === candidate.ticker
+  );
   if (!packetCandidate) return ["EVIDENCE_NOT_IN_PACKET"];
   const allowed = new Set(packetCandidate.evidence_ids);
-  return candidate.evidence.every((item) => allowed.has(item.id)) ? [] : ["EVIDENCE_NOT_IN_PACKET"];
+  const supplied = new Set(candidate.evidence.map((item) => item.id));
+  return supplied.size === allowed.size &&
+      [...allowed].every((id) => supplied.has(id))
+    ? []
+    : ["EVIDENCE_NOT_IN_PACKET"];
 }
 
 export function parseDecisionBundle(
@@ -1358,7 +1573,9 @@ export function parseDecisionBundle(
     }
   }
   if (evidenceCount > 100) throw new Error("bundle exceeds evidence limit");
-  const intelligencePacket = hasIntelligencePacket ? parseIntelligencePacketRef(row.intelligence_packet) : undefined;
+  const intelligencePacket = hasIntelligencePacket
+    ? parseIntelligencePacketRef(row.intelligence_packet)
+    : undefined;
   if (hasComparisons && phase !== "pre-market" && phase !== "on-demand") {
     throw new Error(
       "portfolio comparisons are limited to pre-market and on-demand reviews",
@@ -1404,17 +1621,23 @@ export function parseDecisionBundle(
         ) {
           throw new Error(`${path} has an invalid comparison ticker`);
         }
-        const alternative = candidates.find((candidate) => candidate.ticker === alternativeTicker)!;
+        const alternative = candidates.find((candidate) =>
+          candidate.ticker === alternativeTicker
+        )!;
         const evidenceIds = arrayValue(
           comparison.evidence_ids,
           `${path}.evidence_ids`,
           10,
-        ).map((id, evidenceIndex) => stringValue(id, `${path}.evidence_ids[${evidenceIndex}]`, 100));
+        ).map((id, evidenceIndex) =>
+          stringValue(id, `${path}.evidence_ids[${evidenceIndex}]`, 100)
+        );
         if (
           evidenceIds.length === 0 ||
           evidenceIds.some((id) =>
             !alternative.evidence.some((evidence) => evidence.id === id) ||
-            !alternative.factors.some((factor) => factor.evidence_ids.includes(id))
+            !alternative.factors.some((factor) =>
+              factor.evidence_ids.includes(id)
+            )
           )
         ) {
           throw new Error(`${path} references unknown comparison evidence`);
@@ -1441,7 +1664,8 @@ export function parseDecisionBundle(
   if (comparisons) {
     const pairs = new Set<string>();
     for (const comparison of comparisons) {
-      const pair = `${comparison.baseline_ticker}:${comparison.alternative_ticker}`;
+      const pair =
+        `${comparison.baseline_ticker}:${comparison.alternative_ticker}`;
       if (pairs.has(pair)) {
         throw new Error("bundle has duplicate portfolio comparison");
       }
@@ -1496,12 +1720,16 @@ export function parseDecisionBundle(
       if (!pair) {
         throw new Error(`${path} requires a matching portfolio comparison`);
       }
-      const candidate = candidates.find((item) => item.ticker === companionTicker)!;
+      const candidate = candidates.find((item) =>
+        item.ticker === companionTicker
+      )!;
       const evidenceIds = arrayValue(
         proposal.evidence_ids,
         `${path}.evidence_ids`,
         10,
-      ).map((id, index) => stringValue(id, `${path}.evidence_ids[${index}]`, 100));
+      ).map((id, index) =>
+        stringValue(id, `${path}.evidence_ids[${index}]`, 100)
+      );
       if (
         evidenceIds.length === 0 ||
         evidenceIds.some((id) =>
@@ -1653,7 +1881,9 @@ function parseArtifact(value: unknown, path: string): ArtifactMutation {
           `${path}.bucket_guess`,
         ),
         promoted: booleanValue(row.promoted, `${path}.promoted`),
-        promoted_on: row.promoted_on === null ? null : dateValue(row.promoted_on, `${path}.promoted_on`),
+        promoted_on: row.promoted_on === null
+          ? null
+          : dateValue(row.promoted_on, `${path}.promoted_on`),
       };
     case "radar_delete":
       exactKeys(row, ["kind", "ticker"], path);
@@ -1721,6 +1951,8 @@ export function parseArtifactMutationBatch(
     throw new Error("artifact batch must not be empty");
   }
   return {
-    mutations: mutations.map((mutation, index) => parseArtifact(mutation, `artifact batch.mutations[${index}]`)),
+    mutations: mutations.map((mutation, index) =>
+      parseArtifact(mutation, `artifact batch.mutations[${index}]`)
+    ),
   };
 }

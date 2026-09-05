@@ -73,17 +73,14 @@ export function AuthProvider({
   const [loading, setLoading] = useState(true);
   const [locked, setLocked] = useState(false);
   const timer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const lastActivityAt = useRef<number | null>(null);
 
   const lock = useCallback(() => {
+    lastActivityAt.current = null;
     setSession(null);
     setLocked(true);
     void client.signOut({ scope: "local" }).catch(() => undefined);
   }, [client]);
-
-  const resetTimer = useCallback(() => {
-    if (timer.current) clearTimeout(timer.current);
-    if (session) timer.current = setTimeout(lock, inactivityMs);
-  }, [inactivityMs, lock, session]);
 
   useEffect(() => {
     let active = true;
@@ -94,10 +91,10 @@ export function AuthProvider({
     }).finally(() => {
       if (active) setLoading(false);
     });
-    const { data } = client.onAuthStateChange((_event, nextSession) => {
+    const { data } = client.onAuthStateChange((event, nextSession) => {
       if (!active) return;
       setSession(nextSession);
-      if (nextSession) setLocked(false);
+      if (nextSession && event !== "TOKEN_REFRESHED") setLocked(false);
       setLoading(false);
     });
     return () => {
@@ -107,15 +104,33 @@ export function AuthProvider({
   }, [client]);
 
   useEffect(() => {
-    if (!session) return;
+    if (!session) {
+      lastActivityAt.current = null;
+      return;
+    }
+    if (lastActivityAt.current === null) lastActivityAt.current = Date.now();
+
+    const scheduleLock = () => {
+      if (timer.current) clearTimeout(timer.current);
+      const remaining = inactivityMs - (Date.now() - (lastActivityAt.current ?? Date.now()));
+      if (remaining <= 0) {
+        lock();
+        return;
+      }
+      timer.current = setTimeout(lock, remaining);
+    };
+    const recordActivity = () => {
+      lastActivityAt.current = Date.now();
+      scheduleLock();
+    };
     const events = ["pointerdown", "keydown", "focus"] as const;
-    for (const event of events) window.addEventListener(event, resetTimer, { passive: true });
-    resetTimer();
+    for (const event of events) window.addEventListener(event, recordActivity, { passive: true });
+    scheduleLock();
     return () => {
       if (timer.current) clearTimeout(timer.current);
-      for (const event of events) window.removeEventListener(event, resetTimer);
+      for (const event of events) window.removeEventListener(event, recordActivity);
     };
-  }, [resetTimer, session]);
+  }, [inactivityMs, lock, session]);
 
   const value = useMemo<AuthContextValue>(() => ({
     session,
@@ -135,6 +150,7 @@ export function AuthProvider({
       try {
         await client.signOut({ scope: "global" });
       } finally {
+        lastActivityAt.current = null;
         setSession(null);
         setLocked(false);
         window.sessionStorage.clear();

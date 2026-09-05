@@ -1,0 +1,45 @@
+name: Protected owner dashboard release recovery
+
+on:
+  workflow_run:
+    workflows: ["Protected owner dashboard release"]
+    types: [completed]
+
+permissions:
+  actions: read
+  contents: read
+  deployments: write
+
+concurrency:
+  group: protected-owner-dashboard-recovery-${{ github.event.workflow_run.id }}
+  cancel-in-progress: false
+
+jobs:
+  recover:
+    # A separate workflow survives cancellation, timeout, and runner loss.
+    if: github.event.workflow_run.conclusion != 'success'
+    environment: owner-dashboard-production
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: ${{ github.event.workflow_run.head_sha }}
+      - uses: actions/setup-python@42375524e23c412d93fb67b49958b491fce71c38
+        with:
+          python-version: "3.14"
+      - name: Restore encrypted changed-component journal for the exact failed release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SUPABASE_ACCESS_TOKEN: ${{ secrets.SUPABASE_ACCESS_TOKEN }}
+          RELEASE_RECOVERY_KEY: ${{ secrets.RELEASE_RECOVERY_KEY }}
+          POSTGRES_URL: ${{ secrets.POSTGRES_URL }}
+          PROJECT_REF: ${{ vars.SUPABASE_PROJECT_REF }}
+        run: |
+          set -euo pipefail
+          python -m pip install --require-hashes --only-binary=:all: -r requirements.lock
+          mkdir -m 700 recovery
+          # The native adapter retrieves the latest authenticated encrypted
+          # journal by this exact original run identity. It must reject missing
+          # or ambiguous state; terminal GitHub labels cannot bypass recovery.
+          python scripts/restore_gateway_after_release_failure.py --project-ref "$PROJECT_REF" --admin-url "$POSTGRES_URL" --release-state recovery/release.enc --release-run-id "${{ github.event.workflow_run.id }}" --lease-owner "recovery-${{ github.event.workflow_run.id }}-${{ github.event.workflow_run.run_attempt }}" --retain-recovery-artifact

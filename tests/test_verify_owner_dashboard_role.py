@@ -115,6 +115,11 @@ def test_intelligence_dashboard_migration_is_exact_schema_mirror_and_revokes_fir
     root = Path(__file__).parents[1]
     migration = (root / "sql/migrations/20260908_owner_dashboard_intelligence_read_role.sql").read_text()
     schema = (root / "sql/schema.sql").read_text()
-    assert schema.endswith(migration)
+    consolidated = (
+        "-- Consolidated from sql/migrations/"
+        "20260908_owner_dashboard_intelligence_read_role.sql\n"
+        f"{migration.rstrip()}\n"
+    )
+    assert consolidated in schema
     assert migration.index("REVOKE ALL PRIVILEGES ON TABLE") < migration.index("GRANT SELECT")
     assert "GRANT EXECUTE" not in migration

@@ -93,6 +93,7 @@ const portfolio: PortfolioView = {
   plans: [{ id: "fixture-plan", ticker: "FIXTURE_ONLY_TICKER", amount: "100", cadence: "monthly", next_due_on: "2026-10-01", due_day: 1, active: true }],
   transactions: [{ id: "fixture-transaction", timestamp: "2026-08-01T15:00:00.000Z", executed_on: "2026-08-01", ticker: "FIXTURE_ONLY_TICKER", side: "buy", quantity: "10", price: "98", source: "owner" }],
   totals: { cost_basis: "980", value: "1020", unrealized_amount: "40" },
+  summary: { costBasis: 980, unrealizedProfit: 40, incomplete: false },
   comparison_availability: "structured_companion",
   latest_intelligence_run_id: RUN_ID,
 };
@@ -148,7 +149,7 @@ function FixtureSurface() {
     boundaries,
     attention: [{ id: "fixture-attention", severity: "review", title: "Review the recorded stop distance", detail: "The current receipt places price near the owner-recorded risk level.", data_as_of: DATA_TIME, destination: "/portfolio" }],
     latest_run: run,
-    portfolio: { value: "1020", cost_basis: "980", unrealized_amount: "40", holdings, data_as_of: DATA_TIME, market_state: "regular", price_sources: ["yahoo-chart"] },
+    portfolio: { value: "1020", cost_basis: "980", unrealized_amount: "40", incomplete: false, holdings, data_as_of: DATA_TIME, market_state: "regular", price_sources: ["yahoo-chart"] },
     market_summary: "The persisted market note described a mixed, narrow session.",
     entry_zones: [idea],
     companion,

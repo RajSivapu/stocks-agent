@@ -1,5 +1,7 @@
 import { createClient } from "npm:@supabase/supabase-js@2.112.4";
 
+import { acknowledgeCommittedCommand, isDefinitiveServerRejection, reconcileLostCommandAcknowledgementRpc } from "./command-delivery-utils.mjs";
+
 import {
   alertActionPayload,
   alertActionResultText,
@@ -7,7 +9,7 @@ import {
 } from "./alert-utils.mjs";
 import { parsePortfolioCommand } from "./parser.mjs";
 import { planPreviewText, planResultText, plansText, planTickerAllowed } from "./plan-utils.mjs";
-import { ownerMatches, parseCallbackData, resolveExecutionDate, resolvePlanDate, secureEqual } from "./webhook-utils.mjs";
+import { ownerMatches, parseCallbackData, resolveExecutionDate, resolvePlanDate, secureEqual, webhookFailureText } from "./webhook-utils.mjs";
 
 type TelegramMessage = {
   message_id: number;
@@ -48,6 +50,8 @@ type InvestmentPlan = {
   active: boolean;
   updated_at: string;
 };
+
+class CommittedAcknowledgementPersistenceError extends Error {}
 
 const mustEnv = (name: string): string => {
   const value = Deno.env.get(name);
@@ -134,6 +138,21 @@ async function claimUpdate(updateId: number, kind: "message" | "callback_query")
   if (!error) return true;
   if (error.code === "23505") return false;
   throw new Error("Could not claim Telegram update");
+}
+
+async function readCommandAcknowledgement(commandId: string, updateId: number) {
+  const { data, error } = await supabase.from("portfolio_command_acknowledgements")
+    .select("command_id,telegram_update_id,status,result")
+    .eq("command_id", commandId)
+    .eq("telegram_update_id", updateId)
+    .maybeSingle();
+  if (error) throw new Error("Could not read command acknowledgement");
+  if (!data || typeof data !== "object" || Array.isArray(data)) return null;
+  const receipt = data as Record<string, unknown>;
+  if (receipt.command_id !== commandId || receipt.telegram_update_id !== updateId) return null;
+  if (!(["pending", "delivered", "failed", "uncertain"] as const).includes(receipt.status as never)) return null;
+  if (typeof receipt.result !== "object" || receipt.result === null || Array.isArray(receipt.result)) return null;
+  return { status: receipt.status, result: receipt.result as Record<string, unknown> };
 }
 
 async function getHolding(ticker: string): Promise<Holding | null> {
@@ -340,6 +359,9 @@ async function handleMessage(updateId: number, message: TelegramMessage) {
 
 function callbackResultText(result: Record<string, unknown>): string {
   if (result.ok && result.status === "cancelled") return "Cancelled. Nothing was changed.";
+  if (result.code === "TRANSACTION_OUT_OF_ORDER") {
+    return "TRANSACTION_OUT_OF_ORDER: This transaction predates a recorded transaction; reconciliation is required before recording it. No trade was placed by this bot.";
+  }
   if (!result.ok) {
     return `${String(result.status ?? "rejected").toUpperCase()}: ${String(result.reason ?? "Nothing was changed; submit the command again.")}`;
   }
@@ -402,27 +424,39 @@ async function handleCallback(updateId: number, callback: TelegramCallback) {
     await telegram("answerCallbackQuery", { callback_query_id: callback.id, text: "Invalid or expired action." });
     return;
   }
-  const functionName = parsed.action === "confirm" ? "apply_portfolio_command" : "cancel_portfolio_command";
-  const { data, error } = await supabase.rpc(functionName, {
+  const { data, error } = await supabase.rpc("apply_portfolio_command_with_acknowledgement", {
+    p_action: parsed.action,
     p_command_id: parsed.commandId,
     p_chat_id: OWNER_CHAT_ID_NUMBER,
     p_user_id: OWNER_USER_ID_NUMBER,
+    p_telegram_update_id: updateId,
   });
   if (error || !data) {
-    await telegram("answerCallbackQuery", { callback_query_id: callback.id, text: "Temporary database error. Nothing was changed." });
+    await reconcileLostCommandAcknowledgementRpc({
+      readReceipt: () => readCommandAcknowledgement(parsed.commandId, updateId),
+      telegram,
+      callback,
+      resultText: (result: Record<string, unknown> | null) => callbackResultText(result ?? {}),
+      definitiveRejection: isDefinitiveServerRejection(error),
+    });
     return;
   }
-  const result = data as Record<string, unknown>;
-  await telegram("answerCallbackQuery", {
-    callback_query_id: callback.id,
-    text: result.ok ? "Recorded." : "Nothing changed.",
+  const receipt = data as Record<string, unknown>;
+  const result = receipt.result as Record<string, unknown>;
+  if (receipt.acknowledgement_claimed !== true) return;
+  const acknowledgementLeaseToken = String(receipt.acknowledgement_lease_token ?? "");
+  if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(acknowledgementLeaseToken)) {
+    throw new Error("Command acknowledgement lease is unavailable");
+  }
+  const delivered = await acknowledgeCommittedCommand({ telegram, sendText, callback, result, resultText: callbackResultText(result) });
+  const { error: finishError } = await supabase.rpc("finish_portfolio_command_acknowledgement", {
+    p_command_id: parsed.commandId,
+    p_telegram_update_id: updateId,
+    p_lease_token: acknowledgementLeaseToken,
+    p_status: delivered.acknowledgement,
+    p_error: delivered.acknowledgement === "uncertain" ? "TELEGRAM_ACKNOWLEDGEMENT_UNKNOWN" : null,
   });
-  await telegram("editMessageText", {
-    chat_id: callback.message.chat.id,
-    message_id: callback.message.message_id,
-    text: callbackResultText(result),
-    reply_markup: { inline_keyboard: [] },
-  });
+  if (finishError) throw new CommittedAcknowledgementPersistenceError();
 }
 
 Deno.serve(async (request: Request): Promise<Response> => {
@@ -453,13 +487,20 @@ Deno.serve(async (request: Request): Promise<Response> => {
   }
 
   try {
-    if (!(await claimUpdate(updateId as number, kind))) return jsonResponse(200, { ok: true, duplicate: true });
+    const firstReceipt = await claimUpdate(updateId as number, kind);
+    if (!firstReceipt) {
+      // A callback may have committed its command before the process crashed while
+      // acknowledging Telegram. Re-enter only the idempotent acknowledgement path.
+      if (update.callback_query) await handleCallback(updateId as number, update.callback_query);
+      return jsonResponse(200, { ok: true, duplicate: true });
+    }
     if (update.message) await handleMessage(updateId as number, update.message);
     else if (update.callback_query) await handleCallback(updateId as number, update.callback_query);
     return jsonResponse(200, { ok: true });
-  } catch {
+  } catch (error) {
     try {
-      if (chatId !== undefined) await sendText(chatId, "Temporary recorder error. Nothing was changed; please try again shortly.");
+      const failureText = webhookFailureText(error instanceof CommittedAcknowledgementPersistenceError);
+      if (chatId !== undefined && failureText) await sendText(chatId, failureText);
     } catch {
       // Telegram delivery also failed; never expose credentials or internal errors.
     }

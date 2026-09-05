@@ -3,7 +3,9 @@ import type {
   EvidencePacket,
   GatewayEnvelope,
   GatewayReadContext,
+  Phase,
   PolicyConfig,
+  TrustedEvidenceFact,
   VerifiedQuote,
 } from "./contracts.ts";
 import { createGatewayHandler } from "./handler.ts";
@@ -24,6 +26,11 @@ import { TelegramDeliveryError } from "./telegram.ts";
 import type { DueDecision, OutcomeGrade } from "./outcomes.ts";
 import type { AdjustedBar, IntradayQuoteEvidence } from "./market-data.ts";
 import { canonicalJson, sha256Hex } from "./intelligence.ts";
+import {
+  reportIdFromKey,
+  type ReportKind,
+  type ReportPolicyDecision,
+} from "./reports.ts";
 
 function assert(value: boolean, message: string): void {
   if (!value) throw new Error(message);
@@ -40,6 +47,354 @@ function assertEquals<T>(actual: T, expected: T): void {
 const SECRET = "test-market-secret-with-enough-entropy";
 const NOW = new Date("2026-09-02T17:00:00.000Z");
 const RUN_ID = "00000000-0000-4000-8000-000000000002";
+
+function reportFixture(kind: ReportKind = "morning") {
+  const report = {
+    title: "Caller title",
+    summary: "BUY CENX 999999 shares immediately",
+    full_markdown: "Caller BUY 999999",
+    source_ids: ["00000000-0000-4000-8000-000000000031"],
+    policy_decision_ids: ["00000000-0000-4000-8000-000000000032"],
+    comparison_ids: [],
+    actionable_risk: true,
+    material_thesis_change: false,
+    intraday_triggered: true,
+    suggestion_only: true,
+  };
+  const report_hash = sha256Hex(canonicalJson(report));
+  const key = sha256Hex(`v2:${kind}:2026-09-02:${PACKET_HASH}:${report_hash}`);
+  return {
+    id: reportIdFromKey(key),
+    idempotency_key: key,
+    packet_id: PACKET_ID,
+    market_date: "2026-09-02",
+    kind,
+    report,
+    report_hash,
+    rendered_text: report.full_markdown,
+    rendered_hash: sha256Hex(report.full_markdown),
+  };
+}
+
+function approvedReportDecision(
+  payload: ReturnType<typeof reportFixture>,
+): ReportPolicyDecision {
+  return {
+    evaluation_id: payload.report.policy_decision_ids[0],
+    candidate_id: "00000000-0000-4000-8000-000000000033",
+    run_id: RUN_ID,
+    packet_id: PACKET_ID,
+    packet_hash: PACKET_HASH,
+    ticker: "CENX",
+    status: "approved",
+    final_action: "buy",
+    final_alert_urgency: null,
+    approved_terms: {
+      quantity: "10",
+      entry_low: "45",
+      entry_high: "47.02",
+      stop: "42",
+      target: "58",
+      urgency: "routine",
+    },
+  };
+}
+
+Deno.test("suppressed report retains the typed policy reason without a Telegram send", async () => {
+  const repo = new FakeRepository();
+  const payload = reportFixture("intraday");
+  repo.reportDecisions = [{
+    ...approvedReportDecision(payload),
+    status: "downgraded",
+    final_action: "watch",
+    approved_terms: null,
+  }];
+  const setup = makeHandler(repo);
+  const result = await setup.handler(request("record_report", payload));
+  assertEquals(result.status, 200);
+  const body = await result.json();
+  assertEquals(body.publication_receipt.suppression_reason, "no_trigger");
+  assertEquals(repo.suppressionReasons, ["no_trigger"]);
+  assertEquals(setup.sent.length, 0);
+  assert(
+    repo.storedReport !== null &&
+      !JSON.stringify(repo.storedReport).includes("999999") &&
+      JSON.stringify(repo.storedReport).includes("WATCH"),
+    "dashboard-visible suppressed report retained caller advice",
+  );
+});
+
+Deno.test("report handler loads exact persisted decisions before generating delivery and stored prose", async () => {
+  const repo = new FakeRepository();
+  const payload = reportFixture();
+  repo.reportDecisions = [{
+    evaluation_id: payload.report.policy_decision_ids[0],
+    candidate_id: "00000000-0000-4000-8000-000000000033",
+    run_id: RUN_ID,
+    packet_id: PACKET_ID,
+    packet_hash: PACKET_HASH,
+    ticker: "CENX",
+    status: "approved",
+    final_action: "buy",
+    final_alert_urgency: null,
+    approved_terms: {
+      quantity: "10",
+      entry_low: "45",
+      entry_high: "47.02",
+      stop: "42",
+      target: "58",
+      urgency: "routine",
+    },
+  }];
+  const setup = makeHandler(repo);
+  const response = await setup.handler(request("record_report", payload));
+  assertEquals(response.status, 200);
+  assertEquals(repo.reportDecisionReads, [{
+    runId: RUN_ID,
+    packetId: PACKET_ID,
+    ids: payload.report.policy_decision_ids,
+  }]);
+  assertEquals(setup.sent.length, 1);
+  assert(
+    setup.sent[0][0].includes("47.02") && !setup.sent[0][0].includes("999999"),
+    "delivery ignored stored terms",
+  );
+  assert(
+    !JSON.stringify(repo.storedReport).includes("999999"),
+    "raw prose retained in report",
+  );
+});
+
+Deno.test("stored report delivery becomes uncertain after a send crash and same report key is never resent", async () => {
+  const repo = new FakeRepository();
+  const payload = reportFixture();
+  repo.reportDecisions = [approvedReportDecision(payload)];
+  const first = makeHandler(repo, {
+    sendTelegram: () =>
+      Promise.reject(new TelegramDeliveryError("ambiguous", [77])),
+  });
+  const firstResponse = await first.handler(request("record_report", payload));
+  assertEquals(firstResponse.status, 502);
+  assertEquals((await json(firstResponse)).publication_receipt, {
+    status: "uncertain",
+    telegram_message_ids: [],
+    retry_allowed: false,
+  });
+
+  const retry = makeHandler(repo);
+  const retryResponse = await retry.handler(request("record_report", payload));
+  assertEquals(retryResponse.status, 502);
+  assertEquals((await json(retryResponse)).publication_receipt, {
+    status: "uncertain",
+    telegram_message_ids: [],
+    retry_allowed: false,
+  });
+  assertEquals(retry.sent, []);
+});
+
+Deno.test("active report delivery leaves its gateway request retryable until its lease becomes uncertain", async () => {
+  const repo = new FakeRepository();
+  const payload = reportFixture();
+  const requestId = "00000000-0000-4000-8000-000000000054";
+  repo.reportDecisions = [approvedReportDecision(payload)];
+  repo.reportPublicationClaimable = false;
+  const first = makeHandler(repo);
+
+  const pending = await first.handler(
+    request("record_report", payload, { requestId }),
+  );
+  assertEquals(pending.status, 409);
+  assertEquals(repo.claims.has(requestId), false);
+  assertEquals(first.sent, []);
+
+  repo.reportPublicationLeaseExpired = true;
+  const retry = makeHandler(repo);
+  const uncertain = await retry.handler(
+    request("record_report", payload, { requestId }),
+  );
+  assertEquals(uncertain.status, 502);
+  assertEquals((await json(uncertain)).publication_receipt, {
+    status: "uncertain",
+    telegram_message_ids: [],
+    retry_allowed: false,
+  });
+  assertEquals(retry.sent, []);
+});
+
+Deno.test("report handler publishes an approved sizing-free urgent HOLD alert without caller trade prose", async () => {
+  const repo = new FakeRepository();
+  const payload = reportFixture();
+  repo.reportDecisions = [{
+    evaluation_id: payload.report.policy_decision_ids[0],
+    candidate_id: "00000000-0000-4000-8000-000000000033",
+    run_id: RUN_ID,
+    packet_id: PACKET_ID,
+    packet_hash: PACKET_HASH,
+    ticker: "CENX",
+    status: "approved",
+    final_action: "hold",
+    approved_terms: null,
+    final_alert_urgency: "urgent",
+  }];
+  const setup = makeHandler(repo);
+  const response = await setup.handler(request("record_report", payload));
+  assertEquals(response.status, 200);
+  assertEquals(setup.sent.length, 1);
+  assert(
+    setup.sent[0][0].includes("URGENT RESEARCH REVIEW") &&
+      !setup.sent[0][0].includes("BUY") &&
+      !setup.sent[0][0].includes("999999") &&
+      !setup.sent[0][0].includes("shares"),
+    "pure alert retained caller trade action or quantity prose",
+  );
+  assert(
+    !JSON.stringify(repo.storedReport).includes("999999"),
+    "stored canonical report retained caller trade prose",
+  );
+  assertEquals(
+    (repo.storedReport as { kind: unknown }).kind,
+    "urgent",
+  );
+});
+
+Deno.test("report handler derives routine pure-HOLD alert kind and text without caller labels", async () => {
+  const results: Array<{
+    sent: string[];
+    stored:
+      | { kind: unknown; report: { title: unknown; summary: unknown } }
+      | null;
+  }> = [];
+  for (const kind of ["morning", "urgent"] as const) {
+    const repo = new FakeRepository();
+    const payload = reportFixture(kind);
+    repo.reportDecisions = [{
+      evaluation_id: payload.report.policy_decision_ids[0],
+      candidate_id: "00000000-0000-4000-8000-000000000033",
+      run_id: RUN_ID,
+      packet_id: PACKET_ID,
+      packet_hash: PACKET_HASH,
+      ticker: "CENX",
+      status: "approved",
+      final_action: "hold",
+      approved_terms: null,
+      final_alert_urgency: "routine",
+    }];
+    const setup = makeHandler(repo);
+    const response = await setup.handler(request("record_report", payload));
+    assertEquals(response.status, 200);
+    results.push({
+      sent: setup.sent.map(([body]) => body),
+      stored: repo.storedReport as {
+        kind: unknown;
+        report: { title: unknown; summary: unknown };
+      } | null,
+    });
+  }
+  assertEquals(results.map((result) => result.sent.length), [1, 1]);
+  for (const result of results) {
+    assert(result.stored !== null, "routine alert was not persisted");
+    assertEquals(result.stored!.kind, "intraday");
+    assertEquals(result.stored!.report.title, "INTRADAY RESEARCH — 2026-09-02");
+    assert(
+      result.sent[0].includes("INTRADAY RESEARCH") &&
+        result.sent[0].includes("POLICY-APPROVED ROUTINE ALERT") &&
+        !result.sent[0].includes("BUY") &&
+        !result.sent[0].includes("999999") &&
+        !result.sent[0].includes("shares"),
+      "routine alert retained caller labels or trade prose",
+    );
+  }
+});
+
+Deno.test("scheduled report origins retain requested kind before pre-market delivery derives urgent or intraday", async () => {
+  const cases: Array<{ urgency: "urgent" | "routine"; finalKind: ReportKind }> =
+    [
+      { urgency: "urgent", finalKind: "urgent" },
+      { urgency: "routine", finalKind: "intraday" },
+    ];
+  for (const expected of cases) {
+    const repo = new FakeRepository();
+    repo.scheduledReportPhase = "pre-market";
+    const payload = reportFixture("morning");
+    repo.reportDecisions = [{
+      evaluation_id: payload.report.policy_decision_ids[0],
+      candidate_id: "00000000-0000-4000-8000-000000000033",
+      run_id: RUN_ID,
+      packet_id: PACKET_ID,
+      packet_hash: PACKET_HASH,
+      ticker: "CENX",
+      status: "approved",
+      final_action: "hold",
+      approved_terms: null,
+      final_alert_urgency: expected.urgency,
+    }];
+    const setup = makeHandler(repo);
+    assertEquals(
+      (await setup.handler(request("record_report", payload))).status,
+      200,
+    );
+    assertEquals(repo.reportOrigins.length, 1);
+    assertEquals(repo.reportOrigins[0].runId, RUN_ID);
+    assertEquals(repo.reportOrigins[0].marketDate, "2026-09-02");
+    assertEquals(repo.reportOrigins[0].kind, "morning");
+    assertEquals(repo.reportOrigins[0].phase, "pre-market");
+    assertEquals(
+      (repo.storedReport as { kind: unknown }).kind,
+      expected.finalKind,
+    );
+  }
+});
+
+Deno.test("scheduled report origin permits post-market routine delivery to finish as intraday", async () => {
+  const repo = new FakeRepository();
+  repo.scheduledReportPhase = "post-market";
+  const payload = reportFixture("weekly");
+  repo.reportDecisions = [{
+    evaluation_id: payload.report.policy_decision_ids[0],
+    candidate_id: "00000000-0000-4000-8000-000000000033",
+    run_id: RUN_ID,
+    packet_id: PACKET_ID,
+    packet_hash: PACKET_HASH,
+    ticker: "CENX",
+    status: "approved",
+    final_action: "hold",
+    approved_terms: null,
+    final_alert_urgency: "routine",
+  }];
+  const setup = makeHandler(repo);
+  assertEquals(
+    (await setup.handler(request("record_report", payload))).status,
+    200,
+  );
+  assertEquals(repo.reportOrigins.length, 1);
+  assertEquals(repo.reportOrigins[0].kind, "weekly");
+  assertEquals(repo.reportOrigins[0].phase, "post-market");
+  assertEquals((repo.storedReport as { kind: unknown }).kind, "intraday");
+});
+
+Deno.test("report handler rejects missing or wrong-packet policy decisions without a write or send", async () => {
+  for (const wrong of ["missing", "packet", "run"]) {
+    const repo = new FakeRepository();
+    const payload = reportFixture();
+    repo.reportDecisions = wrong === "missing" ? [] : [{
+      evaluation_id: payload.report.policy_decision_ids[0],
+      candidate_id: "00000000-0000-4000-8000-000000000033",
+      run_id: wrong === "run" ? payload.report.source_ids[0] : RUN_ID,
+      packet_id: wrong === "packet" ? payload.report.source_ids[0] : PACKET_ID,
+      packet_hash: PACKET_HASH,
+      ticker: "CENX",
+      status: "downgraded",
+      final_action: "watch",
+      final_alert_urgency: null,
+      approved_terms: null,
+    }];
+    const setup = makeHandler(repo);
+    await setup.handler(request("record_report", payload));
+    assertEquals(repo.reportDecisionReads.length, 1);
+    assertEquals(repo.storedReport, null);
+    assertEquals(setup.sent.length, 0);
+  }
+});
 let requestCounter = 10;
 
 function policy(): PolicyConfig {
@@ -84,6 +439,8 @@ function verifiedQuote(
     as_of: "2026-09-02T16:55:00.000Z",
     market_state: "REGULAR",
     source: "yahoo-chart",
+    actionable_price_status: "available",
+    actionable_price_reasons: [],
   };
 }
 
@@ -153,12 +510,24 @@ function readContext(): GatewayReadContext {
     portfolio_command_coverage_complete: true,
     consecutive_completed_losses: 0,
     owner_plans: [],
+    reconciled_cash_snapshot: {
+      snapshot_id: "00000000-0000-4000-8000-000000000099",
+      as_of: "2026-09-02T16:59:00.000Z",
+      fresh_through: "2026-09-02T17:14:00.000Z",
+      ledger_watermark: "0",
+      spendable_cash: { core: "300", growth: "10000", speculative: "0" },
+    },
     recent_suggestions: [],
     observations: [],
     lessons: [],
     radar: [],
     recent_grades: [],
-    dry_powder: [],
+    dry_powder: [{
+      month: "2026-09",
+      growth_available: "10000",
+      spec_available: "0",
+      rolled_months: 0,
+    }],
     paper_watches: [],
   };
 }
@@ -232,9 +601,30 @@ function evidencePacket(): EvidencePacket {
   return {
     candidates: [{ candidate_key: "CENX", evidence_ids: ["q"] }],
     evidence: [{ item_id: "q", normalized_text: "Current quote." }],
+    facts: [storedFact()],
     coverage: { mode: "bounded", complete_market_coverage: false },
     limitations: [],
     policy_version: 1,
+  };
+}
+
+function storedFact(candidateKey = "CENX", id = "q"): TrustedEvidenceFact {
+  return {
+    candidate_key: candidateKey,
+    evidence_id: id,
+    category: "quote",
+    source: "sec_edgar",
+    source_status: "succeeded",
+    authority: "official",
+    published_at: "2026-09-02T16:55:00.000Z",
+    retrieved_at: "2026-09-02T16:56:00.000Z",
+    expires_at: "2026-09-04T17:00:00.000Z",
+    reference: null,
+    normalized_text: "Stored evidence.",
+    exposure_kind: "filing",
+    relationship_eligible: true,
+    claim_key: null,
+    claim_polarity: null,
   };
 }
 
@@ -252,6 +642,17 @@ function packetForCandidates(
   });
   return {
     candidates,
+    facts: values.flatMap((value) =>
+      (value.evidence as Array<Record<string, unknown>>).map((item) => ({
+        ...storedFact(String(value.ticker), String(item.id)),
+        category: item.kind as TrustedEvidenceFact["category"],
+        published_at: item.observed_at as string | null,
+        retrieved_at: item.retrieved_at as string,
+        source_status: item.status === "fresh"
+          ? "succeeded" as const
+          : "failed" as const,
+      }))
+    ),
     evidence: [...evidence].map(([item_id, normalized_text]) => ({
       item_id,
       normalized_text,
@@ -323,6 +724,138 @@ function alertWork(
 }
 
 class FakeRepository implements GatewayRepository {
+  reportDecisionReads: Array<
+    { runId: string; packetId: string; ids: string[] }
+  > = [];
+  reportDecisions: ReportPolicyDecision[] = [];
+  scheduledReportPhase: "pre-market" | "intraday" | "post-market" | null = null;
+  reportOrigins: Array<{
+    requestId: string;
+    runId: string;
+    marketDate: string;
+    kind: ReportKind;
+    phase: "pre-market" | "intraday" | "post-market" | null;
+  }> = [];
+  storedReport: unknown = null;
+  reportPublication: PublicationReceipt | null = null;
+  reportPublicationClaimable = true;
+  reportPublicationLeaseExpired = false;
+  loadReportDecisions(
+    runId: string,
+    packetId: string,
+    ids: string[],
+  ): Promise<ReportPolicyDecision[]> {
+    this.reportDecisionReads.push({ runId, packetId, ids });
+    return Promise.resolve(structuredClone(this.reportDecisions));
+  }
+  recordReportOrigin(
+    requestId: string,
+    _leaseToken: string,
+    runId: string,
+    payload: { market_date: string; kind: ReportKind },
+  ) {
+    this.reportOrigins.push({
+      requestId,
+      runId,
+      marketDate: payload.market_date,
+      kind: payload.kind,
+      phase: this.scheduledReportPhase,
+    });
+    return Promise.resolve({ scheduled: this.scheduledReportPhase !== null });
+  }
+  recordReport(
+    _runId: string,
+    payload: { id: string; report_hash: string; rendered_hash: string },
+  ) {
+    this.storedReport = structuredClone(payload);
+    return Promise.resolve({
+      report_id: payload.id,
+      report_hash: payload.report_hash,
+      rendered_hash: payload.rendered_hash,
+      duplicate: false,
+    });
+  }
+  createReportPublication(
+    _runId: string,
+    payload: { id: string; idempotency_key: string },
+  ): Promise<PublicationReceipt> {
+    this.events.push("persist-report-publication");
+    if (!this.reportPublication) {
+      this.reportPublication = {
+        id: payload.id,
+        idempotency_key: payload.idempotency_key,
+        status: "pending",
+        telegram_message_ids: [],
+        telegram_accepted_at: null,
+        lease_token: null,
+      };
+    }
+    return Promise.resolve(structuredClone(this.reportPublication));
+  }
+  claimReportPublication(idempotencyKey: string): Promise<PublicationClaim> {
+    this.events.push("claim-report-publication");
+    const receipt = this.reportPublication!;
+    if (this.reportPublicationLeaseExpired) {
+      this.reportPublication = {
+        ...receipt,
+        status: "uncertain",
+        lease_token: null,
+      };
+      return Promise.resolve({
+        claimed: false,
+        lease_token: null,
+        receipt: { ...this.reportPublication, idempotency_key: idempotencyKey },
+      });
+    }
+    if (!this.reportPublicationClaimable) {
+      return Promise.resolve({
+        claimed: false,
+        lease_token: null,
+        receipt: { ...receipt, idempotency_key: idempotencyKey },
+      });
+    }
+    const claimed = receipt.status === "pending" || receipt.status === "failed";
+    return Promise.resolve({
+      claimed,
+      lease_token: claimed ? "00000000-0000-4000-8000-000000000052" : null,
+      receipt: { ...receipt, idempotency_key: idempotencyKey },
+    });
+  }
+  finishReportPublication(
+    _key: string,
+    _lease: string,
+    status: "delivered" | "failed" | "uncertain",
+    ids: number[],
+  ): Promise<PublicationReceipt> {
+    this.reportPublication = {
+      ...this.reportPublication!,
+      status,
+      telegram_message_ids: ids,
+      lease_token: null,
+    };
+    return Promise.resolve(structuredClone(this.reportPublication));
+  }
+  suppressionReasons: Array<string | undefined> = [];
+  suppressReportPublication(
+    idempotencyKey: string,
+    reason?: string,
+  ): Promise<PublicationReceipt> {
+    this.suppressionReasons.push(reason);
+    this.reportPublication = {
+      ...this.reportPublication!,
+      idempotency_key: idempotencyKey,
+      status: "suppressed",
+      telegram_message_ids: [],
+      telegram_accepted_at: null,
+      lease_token: null,
+    };
+    return Promise.resolve(
+      {
+        ...structuredClone(this.reportPublication),
+        suppression_reason: reason,
+      } as PublicationReceipt,
+    );
+  }
   mutationCalls = 0;
   startCalls = 0;
   recordCalls = 0;
@@ -337,6 +870,8 @@ class FakeRepository implements GatewayRepository {
   > = [];
   expireAlertRuleCalls = 0;
   finishRunCalls = 0;
+  runOutcomes: Array<{ runId: string; outcome: string }> = [];
+  scheduledSlots: string[] = [];
   readCalls = 0;
   packetReadCalls = 0;
   events: string[] = [];
@@ -401,10 +936,28 @@ class FakeRepository implements GatewayRepository {
     this.claims.set(requestId, { ok: false, code });
     return Promise.resolve();
   }
-  startRun(): Promise<string> {
+  startRun(
+    _requestId: string,
+    _leaseToken: string,
+    phase: Phase,
+    marketDate?: string,
+  ): Promise<{ run_id: string; duplicate: boolean }> {
     this.mutationCalls += 1;
     this.startCalls += 1;
-    return Promise.resolve(RUN_ID);
+    const slot = `${marketDate ?? "missing"}:${phase}`;
+    const duplicate = phase !== "on-demand" &&
+      this.scheduledSlots.includes(slot);
+    this.scheduledSlots.push(slot);
+    return Promise.resolve({ run_id: RUN_ID, duplicate });
+  }
+  recordRunOutcome(
+    _requestId: string,
+    _leaseToken: string,
+    runId: string,
+    outcome: "no_trigger" | "not_actionable",
+  ) {
+    this.runOutcomes.push({ runId, outcome });
+    return Promise.resolve({ run_id: runId, outcome, duplicate: false });
   }
   readContext(): Promise<GatewayReadContext> {
     this.readCalls += 1;
@@ -416,6 +969,7 @@ class FakeRepository implements GatewayRepository {
       run_id: string;
       content_hash: string;
       packet: EvidencePacket;
+      evidence_facts: TrustedEvidenceFact[];
       exposure_facts: Array<{
         candidate_key: string;
         evidence_id: string;
@@ -432,6 +986,7 @@ class FakeRepository implements GatewayRepository {
       run_id: RUN_ID,
       content_hash: PACKET_HASH,
       packet: evidencePacket(),
+      evidence_facts: [storedFact()],
       exposure_facts: [{
         candidate_key: "CENX",
         evidence_id: "q",
@@ -690,7 +1245,7 @@ function request(
   ) {
     const row = payloadValue as Record<string, unknown>;
     const phase = row.phase;
-    if (phase !== "on-demand" && !("intelligence_packet" in row)) {
+    if (!("intelligence_packet" in row)) {
       if (options.dry) {
         const packet = packetForCandidates(
           row.candidates as Array<Record<string, unknown>>,
@@ -705,7 +1260,7 @@ function request(
         row.intelligence_packet = packetRef();
       }
     }
-    if (phase !== "on-demand" && Array.isArray(row.candidates)) {
+    if (Array.isArray(row.candidates)) {
       for (const value of row.candidates) {
         const item = value as Record<string, unknown>;
         const analyst = item.analyst as Record<string, unknown>;
@@ -742,6 +1297,137 @@ function request(
   );
 }
 
+Deno.test("protected completion recovery bypasses new request claims and refuses authored payloads", async () => {
+  const REQUEST_ID = "00000000-0000-4000-8000-000000000071";
+  const repo = Object.assign(new FakeRepository(), {
+    readIntelligenceCompletion: (runId: string, completionId: string) =>
+      Promise.resolve({ run_id: runId, completion_id: completionId }),
+  });
+  const setup = makeHandler(repo);
+  const recovered = await setup.handler(
+    request("read_intelligence_completion", {}, { requestId: REQUEST_ID }),
+  );
+  assertEquals(recovered.status, 200);
+  assertEquals((await json(recovered)).completion, {
+    run_id: RUN_ID,
+    completion_id: REQUEST_ID,
+  });
+  assertEquals(repo.claims.size, 0);
+  assertEquals(setup.sent, []);
+  const invented = await setup.handler(
+    request("read_intelligence_context", {
+      liquidity_by_ticker: { TEST: "1" },
+    }),
+  );
+  assertEquals(invented.status, 400);
+  const unauthorized = await setup.handler(
+    request("read_intelligence_context", {}, { secret: "wrong" }),
+  );
+  assertEquals(unauthorized.status, 401);
+});
+
+Deno.test("protected quote producer reserves before fetching and resumes without another call", async () => {
+  const { fetchCollectionQuote } = await import("./collection-quotes.ts");
+  const input = {
+    ticker: "TEST",
+    cache_key: "a".repeat(64),
+    source_receipt_id: "00000000-0000-4000-8000-000000000081",
+    reservation_id: "00000000-0000-4000-8000-000000000082",
+  };
+  const window = { start: "2026-09-02T16:00:00.000Z", end: NOW.toISOString() };
+  const calls: string[] = [];
+  let saved: Record<string, unknown> | null = null;
+  let blocked = false;
+  const repo = Object.assign(new FakeRepository(), {
+    claimIntelligenceQuote: () => {
+      calls.push("claim");
+      return Promise.resolve(
+        saved ? { status: "completed", checkpoint: saved } : {
+          status: blocked ? "quota_blocked" : "claimed",
+          request_window: window,
+        },
+      );
+    },
+    recordIntelligenceQuote: (
+      _run: string,
+      _id: string,
+      quote: unknown,
+      checkpoint: Record<string, unknown>,
+    ) => {
+      calls.push("record");
+      assert(quote !== null, "protected fetch supplied the quote");
+      saved = checkpoint;
+      return Promise.resolve(checkpoint);
+    },
+  });
+  const setup = makeHandler(repo, {
+    fetchCollectionQuote: (ticker: string, now: Date) => {
+      calls.push("fetch");
+      return fetchCollectionQuote(
+        ticker,
+        now,
+        () =>
+          Promise.resolve(Response.json({
+            chart: {
+              result: [{
+                meta: {
+                  symbol: ticker,
+                  currency: "USD",
+                  instrumentType: "EQUITY",
+                  regularMarketPrice: 100,
+                  regularMarketTime: Math.floor(now.valueOf() / 1000),
+                },
+                timestamp: [Math.floor(now.valueOf() / 1000)],
+                indicators: { quote: [{ close: [100], volume: [50000] }] },
+              }],
+            },
+          })),
+      );
+    },
+  });
+  const first = await setup.handler(
+    request("collect_intelligence_quote", input),
+  );
+  assertEquals(first.status, 200);
+  assertEquals(calls, ["claim", "fetch", "record"]);
+  const checkpoint = (await json(first)).checkpoint as {
+    receipt: { request_cost: number; status: string };
+  };
+  assertEquals(checkpoint.receipt.request_cost, 1);
+  assertEquals(checkpoint.receipt.status, "succeeded");
+  const retry = await setup.handler(
+    request("collect_intelligence_quote", input),
+  );
+  assertEquals((await json(retry)).checkpoint, checkpoint);
+  assertEquals(calls, ["claim", "fetch", "record", "claim"]);
+  saved = null;
+  blocked = true;
+  const exhausted = await setup.handler(
+    request("collect_intelligence_quote", input),
+  );
+  const blockedReceipt =
+    ((await json(exhausted)).checkpoint as { receipt: Record<string, unknown> })
+      .receipt;
+  assertEquals(blockedReceipt.status, "quota_blocked");
+  assertEquals(blockedReceipt.error_code, "QUOTA_BLOCKED");
+  assertEquals(blockedReceipt.request_cost, 0);
+  assertEquals(calls.filter((value) => value === "fetch").length, 1);
+  assertEquals(
+    (await setup.handler(
+      request("collect_intelligence_quote", { ...input, price: "999999" }),
+    )).status,
+    400,
+  );
+  assertEquals(
+    (await setup.handler(
+      request("collect_intelligence_quote", input, { secret: "wrong" }),
+    )).status,
+    401,
+  );
+  assertEquals(repo.claims.size, 0);
+  assertEquals(setup.sent, []);
+});
+
 Deno.test("scheduled discovery requires the persisted packet hash before market work", async () => {
   class MismatchedPacketRepository extends FakeRepository {
     override loadIntelligencePacket(): Promise<
@@ -750,6 +1436,7 @@ Deno.test("scheduled discovery requires the persisted packet hash before market 
         run_id: string;
         content_hash: string;
         packet: EvidencePacket;
+        evidence_facts: TrustedEvidenceFact[];
         exposure_facts: [];
       }
     > {
@@ -759,6 +1446,7 @@ Deno.test("scheduled discovery requires the persisted packet hash before market 
         run_id: RUN_ID,
         content_hash: "b".repeat(64),
         packet: evidencePacket(),
+        evidence_facts: [storedFact()],
         exposure_facts: [],
       });
     }
@@ -773,6 +1461,35 @@ Deno.test("scheduled discovery requires the persisted packet hash before market 
   }));
   assertEquals((await json(response)).code, "INTELLIGENCE_PACKET_MISMATCH");
   assertEquals(setup.fetched, []);
+});
+
+Deno.test("gateway binds current caller evidence to stale persisted packet facts", async () => {
+  class StalePacketRepository extends FakeRepository {
+    override async loadIntelligencePacket() {
+      const persisted = await super.loadIntelligencePacket();
+      persisted.evidence_facts[0].published_at = "2020-01-01T00:00:00Z";
+      return persisted;
+    }
+  }
+  const setup = makeHandler(new StalePacketRepository());
+  await setup.handler(
+    request("evaluate_and_publish", {
+      phase: "intraday",
+      market_date: "2026-09-02",
+      title: "Caller fresh",
+      candidates: [candidate()],
+    }),
+  );
+  const evaluation = setup.repository.lastBundle!.evaluations[0];
+  assertEquals(evaluation.final_action, "watch");
+  assert(
+    evaluation.reason_codes.includes("EVIDENCE_STALE"),
+    "handler lost stored timestamps",
+  );
+  assertEquals(
+    evaluation.candidate.evidence[0].observed_at,
+    "2020-01-01T00:00:00Z",
+  );
 });
 
 Deno.test("record_learning persists only the immutable observation RPC payload", async () => {
@@ -799,7 +1516,9 @@ Deno.test("record_learning persists only the immutable observation RPC payload",
     content_hash: sha256Hex(canonicalJson(observation)),
   };
 
-  const body = await json(await fixture.handler(request("record_learning", payload)));
+  const body = await json(
+    await fixture.handler(request("record_learning", payload)),
+  );
 
   assertEquals(body.ok, true);
   assertEquals(body.observation_id, payload.id);
@@ -1000,6 +1719,268 @@ Deno.test("dry-run operations are write-free and report only their own effects",
   assertEquals(finished.write_counts, {});
   assertEquals(repository.mutationCalls, 0);
   assertEquals(sent, []);
+});
+
+Deno.test("six individually valid purchases cannot exceed the growth allocation", async () => {
+  const setup = makeHandler();
+  setup.repository.policyValue.max_trade_risk_bps.growth = 1000;
+  const purchases = Array.from({ length: 6 }, (_, index) => ({
+    ...candidate("on-demand", "brief"),
+    candidate_id: `00000000-0000-4000-8000-${
+      String(index + 30).padStart(12, "0")
+    }`,
+    ticker: `G${index}`,
+    proposed_amount: "1500",
+    proposed_shares: "31.901318",
+  }));
+  const response = await setup.handler(request("evaluate_and_publish", {
+    phase: "on-demand",
+    market_date: "2026-09-02",
+    title: "Growth candidates",
+    candidates: purchases,
+  }, { dry: true }));
+  assertEquals(response.status, 200);
+  const result = await json(response);
+  const evaluations = (result.evaluations ?? []) as Array<{
+    final_action: string | null;
+    candidate: { proposed_amount: string | null };
+    reason_codes: string[];
+  }>;
+  const approvedCost = evaluations
+    .filter((item) => item.final_action === "buy")
+    .reduce((total, item) => total + Number(item.candidate.proposed_amount), 0);
+  assert(approvedCost <= 8100, "approved purchases exceeded growth allocation");
+  assert(
+    evaluations.some((item) =>
+      new Set<string>(item.reason_codes).has("PORTFOLIO_BUDGET_EXCEEDED")
+    ),
+    "portfolio-level rejection was absent",
+  );
+});
+
+Deno.test("unreconciled cash and mutually exclusive purchases fail closed", async () => {
+  const unavailable = makeHandler();
+  unavailable.repository.context.reconciled_cash_snapshot = undefined;
+  unavailable.repository.context.dry_powder = [{
+    month: "2026-09",
+    growth_available: "999999999",
+    spec_available: "999999999",
+    rolled_months: 99,
+  }];
+  const missingCash = await json(
+    await unavailable.handler(request(
+      "evaluate_and_publish",
+      {
+        phase: "on-demand",
+        market_date: "2026-09-02",
+        title: "Cash check",
+        candidates: [candidate("on-demand", "brief")],
+      },
+      { dry: true },
+    )),
+  );
+  const cashEvaluation = (missingCash.evaluations as Array<{
+    final_action: string | null;
+    reason_codes: string[];
+  }>)[0];
+  assertEquals(cashEvaluation.final_action, "watch");
+  assert(
+    new Set(cashEvaluation.reason_codes).has("CASH_UNAVAILABLE"),
+    "missing cash passed",
+  );
+
+  const stale = makeHandler();
+  stale.repository.context.reconciled_cash_snapshot = {
+    ...stale.repository.context.reconciled_cash_snapshot!,
+    fresh_through: "2026-09-02T16:59:59.000Z",
+  };
+  const staleResult = await json(
+    await stale.handler(request(
+      "evaluate_and_publish",
+      {
+        phase: "on-demand",
+        market_date: "2026-09-02",
+        title: "Stale cash check",
+        candidates: [candidate("on-demand", "brief")],
+      },
+      { dry: true },
+    )),
+  );
+  const staleEvaluation = (staleResult.evaluations as Array<{
+    final_action: string | null;
+    reason_codes: string[];
+  }>)[0];
+  assertEquals(staleEvaluation.final_action, "watch");
+  assert(
+    staleEvaluation.reason_codes.includes("CASH_UNAVAILABLE"),
+    "stale cash snapshot passed",
+  );
+
+  const alternatives = makeHandler();
+  alternatives.repository.policyValue.max_trade_risk_bps.growth = 1000;
+  const proposals = [0, 1].map((index) => ({
+    ...candidate("on-demand", "brief"),
+    candidate_id: `00000000-0000-4000-8000-${
+      String(index + 50).padStart(12, "0")
+    }`,
+    ticker: `A${index}`,
+    reservation_group: "same-idea",
+  }));
+  const alternativeResult = await json(
+    await alternatives.handler(request(
+      "evaluate_and_publish",
+      {
+        phase: "on-demand",
+        market_date: "2026-09-02",
+        title: "Alternative ideas",
+        candidates: proposals,
+      },
+      { dry: true },
+    )),
+  );
+  const alternativeEvaluations = alternativeResult.evaluations as Array<{
+    final_action: string | null;
+    reason_codes: string[];
+  }>;
+  assertEquals(
+    alternativeEvaluations.filter((item) => item.final_action === "buy").length,
+    1,
+  );
+  assert(
+    alternativeEvaluations.some((item) =>
+      new Set(item.reason_codes).has("MUTUALLY_EXCLUSIVE_ALTERNATIVE")
+    ),
+    "mutually exclusive proposal was not labeled as an alternative",
+  );
+});
+
+Deno.test("existing stop exposure reserves portfolio risk before a new purchase", async () => {
+  const setup = makeHandler();
+  setup.repository.policyValue.max_trade_risk_bps.growth = 400;
+  setup.repository.context.holdings.push({
+    ticker: "GROW",
+    shares: "100",
+    avg_cost: "60",
+    bucket: "growth",
+    stop: "42",
+    target: null,
+    high_water_price: null,
+    hold_override_until: null,
+    stop_alert_active: false,
+    stop_near_alert_active: false,
+    target_near_alert_active: false,
+    target_alert_active: false,
+  });
+  const result = await json(
+    await setup.handler(request(
+      "evaluate_and_publish",
+      {
+        phase: "on-demand",
+        market_date: "2026-09-02",
+        title: "Risk reservation",
+        candidates: [candidate("on-demand", "brief")],
+      },
+      { dry: true },
+    )),
+  );
+  const evaluation = (result.evaluations as Array<{
+    final_action: string | null;
+    reason_codes: string[];
+  }>)[0];
+  assertEquals(evaluation.final_action, "watch");
+  assert(
+    new Set(evaluation.reason_codes).has("PORTFOLIO_BUDGET_EXCEEDED"),
+    "existing stop exposure did not consume the risk limit",
+  );
+});
+
+Deno.test("owner-plan Core purchase requires cash but not a stop-derived risk value", async () => {
+  const ownerPlanCandidate = {
+    ...candidate("on-demand", "brief"),
+    ticker: "VTI",
+    action: "buy",
+    decision_mode: "owner_plan",
+    bucket: "core",
+    proposed_amount: "300",
+    proposed_shares: "0.75",
+    entry_zone_low: null,
+    entry_zone_high: null,
+    stop: null,
+    target: null,
+    invalidation_price: null,
+  };
+  const setup = makeHandler();
+  setup.repository.policyValue.allocation_bps.core = 10000;
+  setup.repository.context.holdings = [{
+    ...setup.repository.context.holdings[0],
+    ticker: "VOO",
+    avg_cost: "480",
+    high_water_price: "510",
+  }];
+  setup.repository.context.owner_plans = [{
+    id: "00000000-0000-4000-8000-000000000088",
+    ticker: "VTI",
+    bucket: "core",
+    amount: "300",
+    cadence: "monthly",
+    next_due_on: "2026-09-01",
+    active: true,
+    updated_at: "2026-09-02T12:00:00.000Z",
+  }];
+  setup.repository.context.reconciled_cash_snapshot = {
+    snapshot_id: "00000000-0000-4000-8000-000000000099",
+    as_of: "2026-09-02T16:59:00.000Z",
+    fresh_through: "2026-09-02T17:14:00.000Z",
+    ledger_watermark: "0",
+    spendable_cash: { core: "300", growth: "10000", speculative: "0" },
+  };
+  const approved = await json(
+    await setup.handler(request(
+      "evaluate_and_publish",
+      {
+        phase: "on-demand",
+        market_date: "2026-09-02",
+        title: "Core contribution",
+        candidates: [ownerPlanCandidate],
+      },
+      { dry: true },
+    )),
+  );
+  const approvedEvaluation = (approved.evaluations as Array<{
+    final_action: string | null;
+    reason_codes: string[];
+  }>)[0];
+  assertEquals(approvedEvaluation.final_action, "buy");
+
+  const unavailable = makeHandler();
+  unavailable.repository.context.holdings = structuredClone(
+    setup.repository.context.holdings,
+  );
+  unavailable.repository.context.owner_plans = structuredClone(
+    setup.repository.context.owner_plans,
+  );
+  unavailable.repository.context.reconciled_cash_snapshot = undefined;
+  const missingCash = await json(
+    await unavailable.handler(request(
+      "evaluate_and_publish",
+      {
+        phase: "on-demand",
+        market_date: "2026-09-02",
+        title: "Core contribution",
+        candidates: [ownerPlanCandidate],
+      },
+      { dry: true },
+    )),
+  );
+  const missingCashEvaluation = (missingCash.evaluations as Array<{
+    final_action: string | null;
+    reason_codes: string[];
+  }>)[0];
+  assertEquals(missingCashEvaluation.final_action, "watch");
+  assert(
+    new Set(missingCashEvaluation.reason_codes).has("CASH_UNAVAILABLE"),
+    "owner-plan cash availability did not fail closed",
+  );
 });
 
 Deno.test("on-demand alternatives are history-computed by the gateway and remain send-free", async () => {
@@ -1637,7 +2618,46 @@ Deno.test("live start_run is idempotent", async () => {
   );
   assertEquals(first.run_id, RUN_ID);
   assertEquals(second.run_id, RUN_ID);
+  assertEquals(first.duplicate, false);
+  assertEquals(second.duplicate, false);
   assertEquals(repository.startCalls, 1);
+});
+
+Deno.test("different request ids for one scheduled market slot return the same run", async () => {
+  const { handler, repository } = makeHandler();
+  const first = await json(
+    await handler(request(
+      "start_run",
+      { phase: "intraday", market_date: "2026-09-02" },
+      { requestId: nextRequestId() },
+    )),
+  );
+  const second = await json(
+    await handler(request(
+      "start_run",
+      { phase: "intraday", market_date: "2026-09-02" },
+      { requestId: nextRequestId() },
+    )),
+  );
+  assertEquals(first.run_id, second.run_id);
+  assertEquals(first.duplicate, false);
+  assertEquals(second.duplicate, true);
+  assertEquals(repository.scheduledSlots, [
+    "2026-09-02:intraday",
+    "2026-09-02:intraday",
+  ]);
+});
+
+Deno.test("finish_run returns the specific missing lifecycle stage", async () => {
+  class MissingStageRepository extends FakeRepository {
+    override finishRun(): Promise<RunReceipt> {
+      throw new GatewayRepositoryError("MISSING_COLLECTION_RECEIPT");
+    }
+  }
+  const { handler } = makeHandler(new MissingStageRepository());
+  const result = await handler(request("finish_run", {}));
+  assertEquals(result.status, 409);
+  assertEquals((await json(result)).code, "MISSING_COLLECTION_RECEIPT");
 });
 
 Deno.test("record_artifacts derives paper-watch date, quote, and latest gateway view", async () => {
@@ -1680,7 +2700,7 @@ Deno.test("record_artifacts derives paper-watch date, quote, and latest gateway 
   assertEquals(fetched, ["CENX"]);
 });
 
-Deno.test("evaluation refetches every quote, persists before sending, and ignores claimed prices", async () => {
+Deno.test("intraday evaluation refetches every quote, persists a suppression receipt, and leaves delivery to the report or alert key", async () => {
   const { handler, repository, sent, fetched } = makeHandler();
   const bundle = {
     phase: "intraday",
@@ -1691,7 +2711,7 @@ Deno.test("evaluation refetches every quote, persists before sending, and ignore
   const response = await handler(request("evaluate_and_publish", bundle));
   assertEquals(response.status, 200);
   assertEquals(fetched.sort(), ["CENX", "VTI"]);
-  assertEquals(repository.events, ["persist", "claim-publication", "send"]);
+  assertEquals(repository.events, ["persist"]);
   assertEquals(
     repository.lastBundle!.evaluations[0].normalized.verified_price,
     "47.02",
@@ -1700,15 +2720,30 @@ Deno.test("evaluation refetches every quote, persists before sending, and ignore
     repository.lastBundle!.evaluations[0].normalized.total_investable_value,
     "40500",
   );
+  assertEquals(repository.lastBundle!.cash_snapshot, {
+    snapshot_id: "00000000-0000-4000-8000-000000000099",
+    ledger_watermark: "0",
+  });
   assertEquals(repository.lastBundle!.publication.template_version, 2);
-  assertEquals(sent.length, 1);
-  assertEquals(repository.finishPublicationCalls, [{
-    status: "delivered",
-    ids: [77],
-  }]);
+  assertEquals(repository.lastBundle!.publication.status, "suppressed");
+  assertEquals(sent.length, 0);
+  assertEquals(repository.finishPublicationCalls, []);
 });
 
-Deno.test("persistence failure prevents Telegram and delivery outcomes are classified", async () => {
+Deno.test("periodic evaluation persists a suppression receipt and leaves report delivery to its deterministic report key", async () => {
+  const { handler, repository, sent } = makeHandler();
+  const response = await handler(request("evaluate_and_publish", {
+    phase: "pre-market",
+    market_date: "2026-09-02",
+    title: "ignored",
+    candidates: [candidate("pre-market")],
+  }));
+  assertEquals(response.status, 200);
+  assertEquals(repository.lastBundle!.publication.status, "suppressed");
+  assertEquals(sent, []);
+});
+
+Deno.test("persistence failure prevents Telegram and scheduled evaluation never bypasses report delivery authority", async () => {
   class FailingRepository extends FakeRepository {
     override applyDecisionBundle(): Promise<PublicationReceipt> {
       throw new GatewayRepositoryError("PERSISTENCE_FAILED");
@@ -1719,7 +2754,7 @@ Deno.test("persistence failure prevents Telegram and delivery outcomes are class
     phase: "intraday",
     market_date: "2026-09-02",
     title: "x",
-    candidates: [candidate()],
+    candidates: [candidate("intraday", "brief")],
   };
   assertEquals(
     (await failed.handler(request("evaluate_and_publish", bundle))).status,
@@ -1727,34 +2762,12 @@ Deno.test("persistence failure prevents Telegram and delivery outcomes are class
   );
   assertEquals(failed.sent, []);
 
-  const definitiveRepo = new FakeRepository();
-  const definitive = makeHandler(definitiveRepo, {
-    sendTelegram: () =>
-      Promise.reject(new TelegramDeliveryError("definitive", [])),
-  });
+  const scheduled = makeHandler();
   assertEquals(
-    (await definitive.handler(request("evaluate_and_publish", bundle))).status,
-    502,
+    (await scheduled.handler(request("evaluate_and_publish", bundle))).status,
+    200,
   );
-  assertEquals(definitiveRepo.finishPublicationCalls, [{
-    status: "delivery_failed",
-    ids: [],
-  }]);
-
-  const ambiguousRepo = new FakeRepository();
-  const ambiguous = makeHandler(ambiguousRepo, {
-    sendTelegram: () =>
-      Promise.reject(new TelegramDeliveryError("ambiguous", [88])),
-  });
-  const response = await ambiguous.handler(
-    request("evaluate_and_publish", bundle),
-  );
-  assertEquals(response.status, 502);
-  assertEquals((await json(response)).code, "DELIVERY_UNKNOWN");
-  assertEquals(ambiguousRepo.finishPublicationCalls, [{
-    status: "delivery_unknown",
-    ids: [88],
-  }]);
+  assertEquals(scheduled.sent, []);
 });
 
 Deno.test("suppressed intraday and on-demand outputs never call Telegram", async () => {
@@ -1775,6 +2788,10 @@ Deno.test("suppressed intraday and on-demand outputs never call Telegram", async
     intraday.repository.lastBundle!.publication.status,
     "suppressed",
   );
+  assertEquals(intraday.repository.runOutcomes, [{
+    runId: RUN_ID,
+    outcome: "no_trigger",
+  }]);
 
   const onDemand = makeHandler();
   const onDemandBundle = {
@@ -1793,7 +2810,7 @@ Deno.test("suppressed intraday and on-demand outputs never call Telegram", async
   );
 });
 
-Deno.test("delivered and ambiguous duplicate requests never resend", async () => {
+Deno.test("duplicate scheduled evaluation requests never send outside the report or alert delivery keys", async () => {
   const bundle = {
     phase: "intraday",
     market_date: "2026-09-02",
@@ -1808,7 +2825,7 @@ Deno.test("delivered and ambiguous duplicate requests never resend", async () =>
   await delivered.handler(
     request("evaluate_and_publish", bundle, { requestId: deliveredId }),
   );
-  assertEquals(delivered.sent.length, 1);
+  assertEquals(delivered.sent.length, 0);
 
   const ambiguousRepo = new FakeRepository();
   let attempts = 0;
@@ -1825,24 +2842,19 @@ Deno.test("delivered and ambiguous duplicate requests never resend", async () =>
   await ambiguous.handler(
     request("evaluate_and_publish", bundle, { requestId: ambiguousId }),
   );
-  assertEquals(attempts, 1);
+  assertEquals(attempts, 0);
 });
 
-Deno.test("a second request for an evaluated run reuses the publication without sending", async () => {
+Deno.test("a second scheduled evaluation cannot reuse another request's suppression receipt", async () => {
   class OnePublicationRepository extends FakeRepository {
     override applyDecisionBundle(
       input: PersistedBundle,
     ): Promise<PublicationReceipt> {
       if (this.applyCalls > 0) {
         this.applyCalls += 1;
-        return Promise.resolve({
-          id: "00000000-0000-4000-8000-000000000050",
-          idempotency_key: "00000000-0000-4000-8000-000000000090",
-          status: "delivered",
-          telegram_message_ids: [77],
-          telegram_accepted_at: "2026-09-02T17:00:00.000Z",
-          lease_token: null,
-        });
+        return Promise.reject(
+          new GatewayRepositoryError("RUN_ALREADY_EVALUATED"),
+        );
       }
       return super.applyDecisionBundle(input);
     }
@@ -1852,12 +2864,15 @@ Deno.test("a second request for an evaluated run reuses the publication without 
     phase: "intraday",
     market_date: "2026-09-02",
     title: "x",
-    candidates: [candidate()],
+    candidates: [candidate("intraday", "brief")],
   };
   await setup.handler(request("evaluate_and_publish", bundle));
-  await setup.handler(request("evaluate_and_publish", bundle));
-  assertEquals(setup.sent.length, 1);
+  const replay = await setup.handler(request("evaluate_and_publish", bundle));
+  assertEquals(replay.status, 409);
+  assertEquals((await json(replay)).code, "RUN_ALREADY_EVALUATED");
+  assertEquals(setup.sent.length, 0);
   assertEquals(setup.repository.applyCalls, 2);
+  assertEquals(setup.repository.runOutcomes.length, 1);
 });
 
 Deno.test("holiday, bounded grading, and server-derived finish behavior", async () => {

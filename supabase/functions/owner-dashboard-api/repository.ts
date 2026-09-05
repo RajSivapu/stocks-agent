@@ -2,6 +2,7 @@ import type {
   AlertsView,
   IdeasView,
   IntelligenceView,
+  PortfolioView,
   ReportsView,
   RunDetailView,
   RunsView,
@@ -311,7 +312,7 @@ export function createDashboardRepository(
     });
   }
 
-  async function portfolio(): Promise<DashboardReadResult> {
+  async function portfolio(): Promise<DashboardReadResult<PortfolioView>> {
     const [holdingRows, planRows, transactionRows, intelligenceRows] = await Promise.all([
       holdings(),
       query(PLANS),
@@ -543,7 +544,7 @@ export function createDashboardRepository(
           companion(),
           alerts({ name: "alerts" }),
         ]);
-        const portfolioData = portfolioResult.data as unknown as ReturnType<typeof mapPortfolio>;
+        const portfolioData = portfolioResult.data;
         const runsData = runsResult.data as unknown as RunsView;
         const ideasData = ideasResult.data as unknown as IdeasView;
         const companionData = companionResult.data as unknown as TodayView["companion"];
@@ -582,6 +583,7 @@ export function createDashboardRepository(
             value: portfolioData.totals.value,
             cost_basis: portfolioData.totals.cost_basis,
             unrealized_amount: portfolioData.totals.unrealized_amount,
+            incomplete: portfolioData.summary.incomplete,
             holdings: portfolioData.holdings,
             data_as_of: portfolioResult.dataAsOf,
             market_state: portfolioResult.marketState,

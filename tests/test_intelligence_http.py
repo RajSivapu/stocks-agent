@@ -15,6 +15,9 @@ from lib.intelligence.http import (
     SourceFailure,
     cache_key,
 )
+from lib.intelligence.cache import ResumableCollectionCache
+from lib.intelligence.providers import CollectionResult, RequestReceipt
+from lib.intelligence.quota import QuotaExceeded
 
 
 NOW = datetime(2026, 9, 4, 12, 0, tzinfo=timezone.utc)
@@ -71,6 +74,22 @@ def client(*responses):
     )
 
 
+def test_redirect_exhaustion_retains_quota_classification_and_every_real_open():
+    from lib.intelligence.providers import build_adapter, CollectionQuery
+    from lib.intelligence.quota import QuotaSession
+    opener = FakeOpener(FakeResponse(status=302, headers={"Location": "https://api.gdeltproject.org/next"}))
+    adapter = build_adapter("gdelt", BoundedHttpClient(allowed_hosts={"api.gdeltproject.org"}, opener=opener, clock=lambda: NOW),
+        QuotaSession({"gdelt": ({"reservation_id": "quota-one", "reserved_requests": 1},)}), clock=lambda: NOW)
+    query = CollectionQuery("energy", (), NOW-timedelta(hours=1), NOW)
+    first = adapter.collect(query)
+    second = adapter.collect(query)
+    assert first.receipt.status == second.receipt.status == "quota_blocked"
+    assert first.receipt.error_code == second.receipt.error_code == "QUOTA_BLOCKED"
+    assert first.receipt.request_cost == 1
+    assert second.receipt.request_cost == 0
+    assert len(opener.requests) == 1
+
+
 @pytest.mark.parametrize(
     "url",
     [
@@ -104,10 +123,38 @@ def test_http_follows_an_approved_https_redirect():
 
     assert result.body == b'{"ok":true}'
     assert result.url == "https://data.example.gov/feed"
+    assert result.attempt_count == 2
     assert opener.requests == [
         ("https://api.gdeltproject.org/start", 3, ()),
         ("https://data.example.gov/feed", 3, ()),
     ]
+
+
+def test_http_admits_each_open_before_it_reaches_transport():
+    opener = FakeOpener(
+        FakeResponse(status=302, headers={"Location": "https://data.example.gov/feed"}),
+        FakeResponse(body=b'{"ok":true}', url="https://data.example.gov/feed"),
+    )
+    admitted: list[int] = []
+    result = BoundedHttpClient(
+        opener=opener,
+        allowed_hosts={"api.gdeltproject.org", "data.example.gov"},
+        clock=lambda: NOW,
+    ).get(HttpRequest("https://api.gdeltproject.org/start"), before_attempt=lambda: admitted.append(len(admitted) + 1))
+
+    assert result.attempt_count == 2
+    assert admitted == [1, 2]
+    assert len(opener.requests) == 2
+
+
+def test_http_propagates_quota_exhaustion_without_opening_transport():
+    opener = FakeOpener(FakeResponse())
+    transport = BoundedHttpClient(
+        opener=opener, allowed_hosts={"api.gdeltproject.org"}, clock=lambda: NOW,
+    )
+    with pytest.raises(QuotaExceeded):
+        transport.get(HttpRequest("https://api.gdeltproject.org/feed"), before_attempt=lambda: (_ for _ in ()).throw(QuotaExceeded("gdelt")))
+    assert opener.requests == []
 
 
 def test_http_strips_sensitive_headers_on_cross_origin_redirect():
@@ -298,3 +345,38 @@ def test_gateway_cache_rejects_missing_original_timestamp_metadata():
 
     with pytest.raises(ValueError, match="validated"):
         CacheStore.from_gateway_entries([entry])
+
+
+def test_resumable_cache_key_includes_provider_query_window_and_schema_receipt():
+    cache = ResumableCollectionCache()
+    receipt = {"provider": "gdelt", "request_cost": 1, "receipt_id": "r1"}
+    first = cache.key("gdelt", {"query": "energy"}, "2026-09-04T00:00Z/2026-09-04T12:00Z", 1)
+    changed_schema = cache.key("gdelt", {"query": "energy"}, "2026-09-04T00:00Z/2026-09-04T12:00Z", 2)
+
+    cache.put(first, {"items": ["evidence"], "receipt": receipt})
+
+    hit = cache.get(first)
+
+    assert first != changed_schema
+    assert hit is not None
+    assert hit["receipt"] == receipt
+    assert hit["cache_hit"] is True
+
+
+def test_failed_checkpoint_hydration_keeps_the_original_paid_receipt():
+    cache = ResumableCollectionCache()
+    original = RequestReceipt(
+        provider="gdelt", reservation_id="original-reservation", status="failed", cache_key="key",
+        requested_window={"start": NOW.isoformat(), "end": NOW.isoformat()}, requested_limit=1,
+        retrieved_at=NOW, observed_at=None, expires_at=None, request_cost=1, upstream_remaining=None,
+        returned_count=0, accepted_count=0, duplicate_count=0, dropped_count=0, response_hash=None,
+        error_code="SOURCE_UNAVAILABLE", source_receipt_id="original-receipt",
+    )
+    cache.put_collection("key", CollectionResult((), original, 1))
+
+    resumed = cache.get_collection("key", reservation_id="new-reservation", source_receipt_id="new-receipt", now=NOW)
+
+    assert resumed is not None
+    assert resumed.receipt.status == "failed"
+    assert resumed.receipt.source_receipt_id == "original-receipt"
+    assert resumed.receipt.request_cost == 1

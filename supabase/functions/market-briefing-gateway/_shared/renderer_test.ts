@@ -18,18 +18,41 @@ Deno.test("renderer report delivery surface excludes full private content", () =
     intraday_triggered: true,
     suggestion_only: true,
   };
+  const packetHash = "b".repeat(64);
+  const reportHash = sha256Hex(canonicalJson(body));
+  const idempotencyKey = sha256Hex(
+    `v2:monthly:2026-09-04:${packetHash}:${reportHash}`,
+  );
   const input = {
-    id: reportIdFromKey("a".repeat(64)),
-    idempotency_key: "a".repeat(64),
+    id: reportIdFromKey(idempotencyKey),
+    idempotency_key: idempotencyKey,
     packet_id: "00000000-0000-4000-8000-000000000020",
     market_date: "2026-09-04",
     kind: "monthly" as const,
     report: body,
-    report_hash: sha256Hex(canonicalJson(body)),
+    report_hash: reportHash,
     rendered_text: body.full_markdown,
     rendered_hash: sha256Hex(body.full_markdown),
   };
-  const rendered = renderReportDelivery(input, {
+  const rendered = renderReportDelivery(input, [{
+    evaluation_id: "00000000-0000-4000-8000-000000000002",
+    candidate_id: "00000000-0000-4000-8000-000000000010",
+    run_id: "00000000-0000-4000-8000-000000000011",
+    packet_id: input.packet_id,
+    packet_hash: packetHash,
+    ticker: "CENX",
+    status: "approved" as const,
+    final_action: "buy" as const,
+    final_alert_urgency: null,
+    approved_terms: {
+      quantity: "10",
+      entry_low: "45",
+      entry_high: "47.02",
+      stop: "42",
+      target: "58",
+      urgency: "routine" as const,
+    },
+  }], {
     dashboardBaseUrl: "https://stocks.example.test",
     allowedDashboardOrigins: ["https://stocks.example.test"],
   });
@@ -157,6 +180,7 @@ function evaluation(
       total_investable_value: "40500",
       dollars_at_risk: "50.2",
       reward_risk_milli: "2187",
+      final_alert_urgency: null,
     },
     holding_state_change: null,
     candidate,
@@ -201,6 +225,8 @@ function context(overrides: Partial<PolicyContext> = {}): PolicyContext {
         as_of: "2026-09-03T11:02:00.000Z",
         market_state: "PRE",
         source: "yahoo-chart",
+        actionable_price_status: "available",
+        actionable_price_reasons: [],
       },
       VTI: {
         ticker: "VTI",
@@ -209,6 +235,8 @@ function context(overrides: Partial<PolicyContext> = {}): PolicyContext {
         as_of: "2026-09-03T11:01:00.000Z",
         market_state: "PRE",
         source: "yahoo-chart",
+        actionable_price_status: "available",
+        actionable_price_reasons: [],
       },
     },
     realized_pnl_today: null,
@@ -388,6 +416,8 @@ Deno.test("renderer bounds Telegram parts without splitting a portfolio row", as
       as_of: "2026-09-03T11:00:00.000Z",
       market_state: "PRE",
       source: "yahoo-chart" as const,
+      actionable_price_status: "available" as const,
+      actionable_price_reasons: [],
     }]),
   );
   const rendered = await renderPublication({
@@ -518,6 +548,8 @@ Deno.test("post-market restores the owner-approved visual portfolio hierarchy", 
         as_of: "2026-09-03T20:00:01.000Z",
         market_state: "POST",
         source: "yahoo-chart",
+        actionable_price_status: "available",
+        actionable_price_reasons: [],
       },
       VTI: {
         ticker: "VTI",
@@ -526,6 +558,8 @@ Deno.test("post-market restores the owner-approved visual portfolio hierarchy", 
         as_of: "2026-09-03T20:00:00.000Z",
         market_state: "POST",
         source: "yahoo-chart",
+        actionable_price_status: "available",
+        actionable_price_reasons: [],
       },
     },
   });
@@ -584,6 +618,8 @@ Deno.test("post-market supports the policy contract's eight-decimal holdings", a
           as_of: "2026-09-03T20:00:00.000Z",
           market_state: "POST",
           source: "yahoo-chart",
+          actionable_price_status: "available",
+          actionable_price_reasons: [],
         },
       },
     }),

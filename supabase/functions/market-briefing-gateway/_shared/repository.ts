@@ -12,11 +12,16 @@ import type {
   NotificationKind,
   Phase,
   PolicyConfig,
+  TrustedEvidenceFact,
 } from "./contracts.ts";
-import { parseEvidencePacket } from "./contracts.ts";
+import { parseEvidencePacket, parseTrustedEvidenceFacts } from "./contracts.ts";
 import { parseAlertDraft } from "./alerts.ts";
 import type { PolicyEvaluation } from "./policy.ts";
-import type { DueDecision, OutcomeGrade, RecordLearningPayload } from "./outcomes.ts";
+import type {
+  DueDecision,
+  OutcomeGrade,
+  RecordLearningPayload,
+} from "./outcomes.ts";
 import { formatFixed, parseFixed } from "./fixed-point.ts";
 import {
   type IntelligenceRecordReceipt,
@@ -26,7 +31,12 @@ import {
   type RecordIntelligencePayload,
   type StartIntelligencePayload,
 } from "./intelligence.ts";
-import type { RecordReportPayload } from "./reports.ts";
+import {
+  parseReportDecisions,
+  type RecordReportPayload,
+  type ReportPolicyDecision,
+  type ReportSuppressionReason,
+} from "./reports.ts";
 
 export interface ReportRecordReceipt {
   report_id: string;
@@ -41,6 +51,62 @@ export interface LearningRecordReceipt {
   duplicate: boolean;
 }
 
+export function consecutiveRecommendationLosses(
+  rows: readonly Record<string, unknown>[],
+): number {
+  const longestOutcome = new Map<number, {
+    horizon: number;
+    directionSuccess: boolean;
+    recommendationTime: number;
+  }>();
+  for (const row of rows) {
+    if (
+      row.coverage_status !== "complete" ||
+      typeof row.direction_success !== "boolean"
+    ) continue;
+    const recommendation = row.recommendation;
+    const recommendationAt =
+      typeof recommendation === "object" && recommendation !== null &&
+        !Array.isArray(recommendation)
+        ? (recommendation as Record<string, unknown>).ts
+        : null;
+    const recommendationTime = typeof recommendationAt === "string"
+      ? Date.parse(recommendationAt)
+      : Number.NaN;
+    if (
+      !Number.isSafeInteger(row.suggestion_id) ||
+      !Number.isSafeInteger(row.horizon_days) ||
+      !Number.isFinite(recommendationTime)
+    ) {
+      throw new GatewayRepositoryError("INVALID_PERSISTED_DATA");
+    }
+    const suggestionId = row.suggestion_id as number;
+    const horizon = row.horizon_days as number;
+    const prior = longestOutcome.get(suggestionId);
+    if (prior && prior.recommendationTime !== recommendationTime) {
+      throw new GatewayRepositoryError("INVALID_PERSISTED_DATA");
+    }
+    if (!prior || horizon > prior.horizon) {
+      longestOutcome.set(suggestionId, {
+        horizon,
+        directionSuccess: row.direction_success,
+        recommendationTime,
+      });
+    }
+  }
+  const orderedRecommendationIds = [...longestOutcome.entries()]
+    .sort(([leftId, left], [rightId, right]) =>
+      right.recommendationTime - left.recommendationTime || rightId - leftId
+    )
+    .map(([suggestionId]) => suggestionId);
+  let losses = 0;
+  for (const suggestionId of orderedRecommendationIds) {
+    if (longestOutcome.get(suggestionId)!.directionSuccess) break;
+    losses += 1;
+  }
+  return losses;
+}
+
 export interface PersistedBundle {
   request_id: string;
   request_lease_token: string;
@@ -51,6 +117,10 @@ export interface PersistedBundle {
   holding_state_changes: NonNullable<
     PolicyEvaluation["holding_state_change"]
   >[];
+  cash_snapshot: {
+    snapshot_id: string;
+    ledger_watermark: string;
+  } | null;
   publication: {
     id: string;
     idempotency_key: string;
@@ -65,6 +135,7 @@ export interface PersistedBundle {
 }
 
 export interface PublicationReceipt {
+  suppression_reason?: ReportSuppressionReason | null;
   id: string;
   idempotency_key: string;
   status:
@@ -73,7 +144,10 @@ export interface PublicationReceipt {
     | "delivered"
     | "delivery_failed"
     | "delivery_unknown"
-    | "suppressed";
+    | "suppressed"
+    | "pending"
+    | "failed"
+    | "uncertain";
   telegram_message_ids: number[];
   telegram_accepted_at: string | null;
   lease_token: string | null;
@@ -163,7 +237,7 @@ export interface PersistableArtifactMutationBatch {
 
 export interface RunReceipt {
   run_id: string;
-  status: "completed" | "partial" | "failed";
+  status: "completed" | "suppressed" | "partial" | "failed";
   write_counts: Record<string, number>;
   publication_statuses: string[];
   telegram_message_ids: number[];
@@ -182,6 +256,7 @@ export interface PersistedIntelligencePacket {
   content_hash: string;
   packet: EvidencePacket;
   exposure_facts: PersistedExposureFact[];
+  evidence_facts: TrustedEvidenceFact[];
 }
 
 export interface PersistedExposureFact {
@@ -200,6 +275,11 @@ export interface PersistedExposureFact {
 }
 
 export interface GatewayRepository {
+  loadReportDecisions(
+    runId: string,
+    packetId: string,
+    decisionIds: string[],
+  ): Promise<ReportPolicyDecision[]>;
   recordLearning?(
     runId: string,
     payload: RecordLearningPayload,
@@ -208,10 +288,62 @@ export interface GatewayRepository {
     runId: string,
     payload: RecordReportPayload,
   ): Promise<ReportRecordReceipt>;
+  recordReportOrigin?(
+    requestId: string,
+    leaseToken: string,
+    runId: string,
+    payload: Pick<
+      RecordReportPayload,
+      | "id"
+      | "idempotency_key"
+      | "packet_id"
+      | "market_date"
+      | "kind"
+      | "report_hash"
+    >,
+  ): Promise<{ scheduled: boolean }>;
+  createReportPublication?(
+    runId: string,
+    payload: RecordReportPayload,
+  ): Promise<PublicationReceipt>;
+  claimReportPublication?(idempotencyKey: string): Promise<PublicationClaim>;
+  finishReportPublication?(
+    idempotencyKey: string,
+    leaseToken: string,
+    status: "delivered" | "failed" | "uncertain",
+    messageIds: number[],
+    error: string | null,
+  ): Promise<PublicationReceipt>;
+  suppressReportPublication?(
+    idempotencyKey: string,
+    reason: ReportSuppressionReason,
+  ): Promise<PublicationReceipt>;
   startIntelligenceRun?(
     runId: string,
     payload: StartIntelligencePayload,
   ): Promise<IntelligenceStartReceipt>;
+  checkpointIntelligenceCollection?(
+    runId: string,
+    payload: {
+      cache_key: string;
+      receipt: Record<string, unknown>;
+      items: Record<string, unknown>[];
+    },
+  ): Promise<{ run_id: string; cache_key: string }>;
+  readIntelligenceCompletion?(
+    runId: string,
+    completionId: string,
+  ): Promise<Record<string, unknown> | null>;
+  claimIntelligenceQuote?(
+    runId: string,
+    input: Record<string, unknown>,
+  ): Promise<Record<string, unknown>>;
+  recordIntelligenceQuote?(
+    runId: string,
+    receiptId: string,
+    quote: unknown,
+    checkpoint: Record<string, unknown>,
+  ): Promise<Record<string, unknown>>;
   recordIntelligence?(
     runId: string,
     completionId: string,
@@ -232,7 +364,20 @@ export interface GatewayRepository {
     requestId: string,
     leaseToken: string,
     phase: Phase,
-  ): Promise<string>;
+    marketDate: string,
+  ): Promise<{ run_id: string; duplicate: boolean }>;
+  recordRunOutcome(
+    requestId: string,
+    leaseToken: string,
+    runId: string,
+    outcome: "no_trigger" | "not_actionable",
+  ): Promise<
+    {
+      run_id: string;
+      outcome: "no_trigger" | "not_actionable";
+      duplicate: boolean;
+    }
+  >;
   readContext(runId: string | null): Promise<GatewayReadContext>;
   loadIntelligencePacket(
     packetId: string,
@@ -301,6 +446,8 @@ interface QueryBuilder extends PromiseLike<DbResult> {
   eq(column: string, value: unknown): QueryBuilder;
   is(column: string, value: null): QueryBuilder;
   gte(column: string, value: unknown): QueryBuilder;
+  lt(column: string, value: unknown): QueryBuilder;
+  or(filters: string): QueryBuilder;
   in(column: string, values: unknown[]): QueryBuilder;
   order(column: string, options?: { ascending?: boolean }): QueryBuilder;
   limit(count: number): QueryBuilder;
@@ -337,6 +484,61 @@ function oneObject(
   return result.data as Record<string, unknown>;
 }
 
+async function recentRecommendationGrades(
+  client: SupabaseLike,
+): Promise<DbResult> {
+  const recommendationRows = rows(
+    await client.from("suggestions").select(
+      "id,ts,eligible_grades:suggestion_grades!inner(suggestion_id,horizon_days,coverage_status,excess_return_pct,direction_success,graded_at)",
+    )
+      .eq("decision_source", "gateway")
+      .eq("eligible_grades.coverage_status", "complete")
+      .in("eligible_grades.horizon_days", [5, 21, 63])
+      .in("eligible_grades.direction_success", [true, false])
+      .order("ts", { ascending: false })
+      .order("id", { ascending: false }).limit(150),
+    "CONTEXT_TOO_LARGE",
+  );
+  const gradeRows: Record<string, unknown>[] = [];
+  for (const row of recommendationRows) {
+    const suggestionId = integer(row.id);
+    const recommendationAt = text(row.ts, 40);
+    if (!Number.isFinite(Date.parse(recommendationAt))) {
+      throw new GatewayRepositoryError("INVALID_PERSISTED_DATA");
+    }
+    const eligibleGrades = rows(
+      { data: row.eligible_grades, error: null },
+      "INVALID_PERSISTED_DATA",
+    );
+    if (eligibleGrades.length === 0 || eligibleGrades.length > 3) {
+      throw new GatewayRepositoryError("INVALID_PERSISTED_DATA");
+    }
+    for (const grade of eligibleGrades) {
+      const horizonDays = integer(grade.horizon_days);
+      const directionSuccess = boole(grade.direction_success);
+      if (
+        integer(grade.suggestion_id) !== suggestionId ||
+        grade.coverage_status !== "complete" ||
+        ![5, 21, 63].includes(horizonDays)
+      ) {
+        throw new GatewayRepositoryError("INVALID_PERSISTED_DATA");
+      }
+      gradeRows.push({
+        ...grade,
+        suggestion_id: suggestionId,
+        horizon_days: horizonDays,
+        coverage_status: "complete",
+        direction_success: directionSuccess,
+        recommendation: { ts: recommendationAt },
+      });
+    }
+  }
+  return {
+    data: gradeRows,
+    error: null,
+  };
+}
+
 function text(value: unknown, max = 1000): string {
   if (typeof value !== "string") {
     throw new GatewayRepositoryError("INVALID_PERSISTED_DATA");
@@ -345,7 +547,23 @@ function text(value: unknown, max = 1000): string {
 }
 
 function nullableText(value: unknown, max = 1000): string | null {
-  return value === null || value === undefined ? null : text(String(value), max);
+  return value === null || value === undefined
+    ? null
+    : text(String(value), max);
+}
+
+function decimalMap(value: unknown): Record<string, string> {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) {
+    throw new GatewayRepositoryError("INVALID_PERSISTED_DATA");
+  }
+  const entries = Object.entries(value as Record<string, unknown>);
+  if (entries.length > 100) {
+    throw new GatewayRepositoryError("CONTEXT_TOO_LARGE");
+  }
+  return Object.fromEntries(entries.map(([ticker, amount]) => [
+    text(ticker.toUpperCase(), 15),
+    decimal(amount),
+  ]));
 }
 
 function integer(value: unknown): number {
@@ -369,7 +587,9 @@ function nullableDecimal(value: unknown): string | null {
 }
 
 function signedMicros(value: string): bigint {
-  return value.startsWith("-") ? -parseFixed(value.slice(1), 6) : parseFixed(value, 6);
+  return value.startsWith("-")
+    ? -parseFixed(value.slice(1), 6)
+    : parseFixed(value, 6);
 }
 
 function boole(value: unknown): boolean {
@@ -425,8 +645,48 @@ function ownerDate(now: Date): string {
     month: "2-digit",
     day: "2-digit",
   }).formatToParts(now);
-  const get = (type: Intl.DateTimeFormatPartTypes) => values.find((part) => part.type === type)?.value ?? "";
+  const get = (type: Intl.DateTimeFormatPartTypes) =>
+    values.find((part) => part.type === type)?.value ?? "";
   return `${get("year")}-${get("month")}-${get("day")}`;
+}
+
+export function mergeRelevantSuggestions<T extends Record<string, unknown>>(
+  unresolved: T[],
+  completed: T[],
+  limit: number,
+): T[] {
+  if (!Number.isSafeInteger(limit) || limit < 1) {
+    throw new GatewayRepositoryError("CONTEXT_TOO_LARGE");
+  }
+  if (unresolved.length > limit) {
+    throw new GatewayRepositoryError("CONTEXT_TOO_LARGE");
+  }
+  const output: T[] = [];
+  const seen = new Set<string>();
+  const orderByNewestDateAndId = (left: T, right: T): number => {
+    const byDate = String(right.date ?? "").localeCompare(
+      String(left.date ?? ""),
+    );
+    if (byDate !== 0) return byDate;
+    const leftId = Number(left.id);
+    const rightId = Number(right.id);
+    if (Number.isSafeInteger(leftId) && Number.isSafeInteger(rightId)) {
+      return rightId - leftId;
+    }
+    return String(right.id).localeCompare(String(left.id));
+  };
+  // Unresolved rows are actionably pending. History is only allowed to use
+  // capacity left after those bounded rows, regardless of a newer history date.
+  const ordered = [...unresolved].sort(orderByNewestDateAndId).concat(
+    [...completed].sort(orderByNewestDateAndId),
+  );
+  for (const row of ordered) {
+    const identity = String(row.id);
+    if (seen.has(identity) || output.length >= limit) continue;
+    seen.add(identity);
+    output.push(row);
+  }
+  return output;
 }
 
 export function validatePolicy(value: unknown): PolicyConfig {
@@ -459,7 +719,9 @@ export function validatePolicy(value: unknown): PolicyConfig {
       "draft_ttl_hours",
       "drafts_per_hour",
     ];
-    const expected = policy.version === 3 ? [...legacyExpected, "enabled_classes"] : legacyExpected;
+    const expected = policy.version === 3
+      ? [...legacyExpected, "enabled_classes"]
+      : legacyExpected;
     const enabledClasses = policy.version === 3 ? row.enabled_classes : [];
     const supportedClasses = new Set([
       "entry_trigger",
@@ -467,11 +729,15 @@ export function validatePolicy(value: unknown): PolicyConfig {
       "target_hit",
     ]);
     if (
-      Object.keys(row).length !== expected.length || expected.some((key) => !(key in row)) ||
+      Object.keys(row).length !== expected.length || expected.some((key) =>
+        !(key in row)
+      ) ||
       typeof row.enabled !== "boolean" || typeof row.shadow !== "boolean" ||
       (row.enabled === true && row.shadow === true) ||
       !Array.isArray(enabledClasses) ||
-      enabledClasses.some((value) => typeof value !== "string" || !supportedClasses.has(value)) ||
+      enabledClasses.some((value) =>
+        typeof value !== "string" || !supportedClasses.has(value)
+      ) ||
       new Set(enabledClasses).size !== enabledClasses.length ||
       (row.enabled === true && enabledClasses.length === 0) ||
       !["long_term", "balanced", "active"].includes(String(row.profile)) ||
@@ -492,7 +758,9 @@ async function digestCandidate(value: unknown): Promise<string> {
     "SHA-256",
     new TextEncoder().encode(JSON.stringify(value)),
   );
-  return Array.from(new Uint8Array(digest)).map((byte) => byte.toString(16).padStart(2, "0")).join("");
+  return Array.from(new Uint8Array(digest)).map((byte) =>
+    byte.toString(16).padStart(2, "0")
+  ).join("");
 }
 
 export function createSupabaseGatewayRepository(
@@ -509,7 +777,9 @@ export function createSupabaseGatewayRepository(
         )
         .eq("id", id).single(),
     );
-    const ids = Array.isArray(row.telegram_message_ids) ? row.telegram_message_ids.map(integer) : [];
+    const ids = Array.isArray(row.telegram_message_ids)
+      ? row.telegram_message_ids.map(integer)
+      : [];
     return {
       id: text(row.id, 36),
       idempotency_key: text(row.idempotency_key, 36),
@@ -532,6 +802,22 @@ export function createSupabaseGatewayRepository(
         content_hash: text(row.content_hash, 64),
         duplicate: boole(row.duplicate),
       };
+    },
+
+    async loadReportDecisions(runId, packetId, decisionIds) {
+      const result = await client.rpc("read_market_report_decisions", {
+        p_run_id: runId,
+        p_packet_id: packetId,
+        p_decision_ids: decisionIds,
+      });
+      if (result.error) {
+        throw new GatewayRepositoryError("INVALID_PERSISTED_DATA");
+      }
+      try {
+        return parseReportDecisions(result.data, runId, packetId, decisionIds);
+      } catch {
+        throw new GatewayRepositoryError("INVALID_PERSISTED_DATA");
+      }
     },
 
     async recordReport(runId, payload) {
@@ -558,6 +844,118 @@ export function createSupabaseGatewayRepository(
       };
     },
 
+    async recordReportOrigin(requestId, leaseToken, runId, payload) {
+      const result = await client.rpc("record_market_report_origin", {
+        p_request_id: requestId,
+        p_lease_token: leaseToken,
+        p_run_id: runId,
+        p_market_date: payload.market_date,
+        p_requested_kind: payload.kind,
+        p_requested_report_id: payload.id,
+        p_requested_packet_id: payload.packet_id,
+        p_requested_idempotency_key: payload.idempotency_key,
+        p_requested_report_hash: payload.report_hash,
+      });
+      const row = oneObject(result);
+      return { scheduled: boole(row.scheduled) };
+    },
+
+    async createReportPublication(runId, payload) {
+      const result = await client.rpc("create_market_report_publication", {
+        p_run_id: runId,
+        p_report_id: payload.id,
+        p_idempotency_key: payload.idempotency_key,
+        p_market_date: payload.market_date,
+        p_kind: payload.kind,
+        p_rendered_body: payload.rendered_text,
+        p_rendered_hash: payload.rendered_hash,
+      });
+      if (result.error) throw new GatewayRepositoryError("PERSISTENCE_FAILED");
+      const row = oneObject(result);
+      return {
+        id: text(row.report_id, 36),
+        idempotency_key: text(row.idempotency_key, 64),
+        status: text(row.status, 20) as PublicationReceipt["status"],
+        telegram_message_ids: Array.isArray(row.telegram_message_ids)
+          ? row.telegram_message_ids.map(integer)
+          : [],
+        telegram_accepted_at: nullableText(row.telegram_accepted_at, 40),
+        lease_token: nullableText(row.lease_token, 36),
+      };
+    },
+
+    async claimReportPublication(idempotencyKey) {
+      const result = await client.rpc("claim_market_report_publication", {
+        p_idempotency_key: idempotencyKey,
+      });
+      if (result.error) throw new GatewayRepositoryError("PERSISTENCE_FAILED");
+      const row = oneObject(result);
+      const receipt: PublicationReceipt = {
+        id: text(row.report_id, 36),
+        idempotency_key: text(row.idempotency_key, 64),
+        status: text(row.status, 20) as PublicationReceipt["status"],
+        telegram_message_ids: Array.isArray(row.telegram_message_ids)
+          ? row.telegram_message_ids.map(integer)
+          : [],
+        telegram_accepted_at: nullableText(row.telegram_accepted_at, 40),
+        lease_token: nullableText(row.lease_token, 36),
+      };
+      return {
+        claimed: boole(row.claimed),
+        lease_token: nullableText(row.lease_token, 36),
+        receipt,
+      };
+    },
+
+    async finishReportPublication(
+      idempotencyKey,
+      leaseToken,
+      status,
+      messageIds,
+      error,
+    ) {
+      const result = await client.rpc("finish_market_report_publication", {
+        p_idempotency_key: idempotencyKey,
+        p_lease_token: leaseToken,
+        p_status: status,
+        p_message_ids: messageIds,
+        p_error: error,
+      });
+      if (result.error) throw new GatewayRepositoryError("PERSISTENCE_FAILED");
+      const row = oneObject(result);
+      return {
+        id: text(row.report_id, 36),
+        idempotency_key: text(row.idempotency_key, 64),
+        status: text(row.status, 20) as PublicationReceipt["status"],
+        telegram_message_ids: Array.isArray(row.telegram_message_ids)
+          ? row.telegram_message_ids.map(integer)
+          : [],
+        telegram_accepted_at: nullableText(row.telegram_accepted_at, 40),
+        lease_token: null,
+      };
+    },
+
+    async suppressReportPublication(idempotencyKey, reason) {
+      const result = await client.rpc("suppress_market_report_publication", {
+        p_idempotency_key: idempotencyKey,
+        p_reason: reason,
+      });
+      if (result.error) throw new GatewayRepositoryError("PERSISTENCE_FAILED");
+      const row = oneObject(result);
+      if (row.status !== "suppressed" || row.suppression_reason !== reason) {
+        throw new GatewayRepositoryError("PERSISTENCE_FAILED");
+      }
+      return {
+        suppression_reason: reason,
+        id: text(row.report_id, 36),
+        idempotency_key: text(row.idempotency_key, 64),
+        status: text(row.status, 20) as PublicationReceipt["status"],
+        telegram_message_ids: [],
+        telegram_accepted_at: null,
+        lease_token: null,
+      };
+    },
+
     async startIntelligenceRun(runId, payload) {
       const result = await client.rpc("start_market_intelligence_run", {
         p_run_id: runId,
@@ -565,6 +963,7 @@ export function createSupabaseGatewayRepository(
         p_market_date: payload.market_date,
         p_policy_version: payload.policy_version,
         p_reservation_plan: payload.reservation_plan,
+        p_request_window: payload.request_window,
       });
       if (result.error) throw new GatewayRepositoryError("PERSISTENCE_FAILED");
       try {
@@ -572,6 +971,48 @@ export function createSupabaseGatewayRepository(
       } catch {
         throw new GatewayRepositoryError("INVALID_PERSISTED_DATA");
       }
+    },
+
+    async checkpointIntelligenceCollection(runId, payload) {
+      const result = await client.rpc(
+        "checkpoint_market_intelligence_collection",
+        { p_run_id: runId, p_payload: payload },
+      );
+      if (result.error) throw new GatewayRepositoryError("PERSISTENCE_FAILED");
+      const row = oneObject(result);
+      return {
+        run_id: text(row.run_id, 36),
+        cache_key: text(row.cache_key, 512),
+      };
+    },
+
+    async readIntelligenceCompletion(runId, completionId) {
+      const result = await client.rpc("read_market_intelligence_completion", {
+        p_run_id: runId,
+        p_completion_id: completionId,
+      });
+      if (result.error) throw new GatewayRepositoryError("PERSISTENCE_FAILED");
+      return result.data === null ? null : oneObject(result);
+    },
+
+    async claimIntelligenceQuote(runId, input) {
+      const result = await client.rpc("claim_market_intelligence_quote", {
+        p_run_id: runId,
+        p_input: input,
+      });
+      if (result.error) throw new GatewayRepositoryError("PERSISTENCE_FAILED");
+      return oneObject(result);
+    },
+
+    async recordIntelligenceQuote(runId, receiptId, quote, checkpoint) {
+      const result = await client.rpc("record_market_intelligence_quote", {
+        p_run_id: runId,
+        p_receipt_id: receiptId,
+        p_quote: quote,
+        p_checkpoint: checkpoint,
+      });
+      if (result.error) throw new GatewayRepositoryError("PERSISTENCE_FAILED");
+      return oneObject(result);
     },
 
     async recordIntelligence(runId, completionId, payload) {
@@ -649,6 +1090,7 @@ export function createSupabaseGatewayRepository(
           run_id: text(packetRow.run_id, 36),
           content_hash: text(packetRow.packet_hash, 64),
           packet: parseEvidencePacket(packetRow.packet),
+          evidence_facts: parseTrustedEvidenceFacts(packetRow.evidence_facts),
           exposure_facts,
         };
       } catch {
@@ -710,13 +1152,38 @@ export function createSupabaseGatewayRepository(
       if (result.error) throw new GatewayRepositoryError("PERSISTENCE_FAILED");
     },
 
-    async startRun(requestId, leaseToken, phase) {
+    async startRun(requestId, leaseToken, phase, marketDate) {
       const result = await client.rpc("start_market_analysis_run", {
         p_request_id: requestId,
         p_lease_token: leaseToken,
         p_kind: phase,
+        p_market_date: marketDate,
       });
-      return text(oneObject(result).run_id, 36);
+      if (result.error) throw new GatewayRepositoryError("PERSISTENCE_FAILED");
+      const row = oneObject(result);
+      return {
+        run_id: text(row.run_id, 36),
+        duplicate: boole(row.duplicate),
+      };
+    },
+
+    async recordRunOutcome(requestId, leaseToken, runId, outcome) {
+      const result = await client.rpc("record_market_run_outcome", {
+        p_request_id: requestId,
+        p_lease_token: leaseToken,
+        p_run_id: runId,
+        p_outcome: outcome,
+      });
+      if (result.error) throw new GatewayRepositoryError("PERSISTENCE_FAILED");
+      const row = oneObject(result);
+      if (row.outcome !== "no_trigger" && row.outcome !== "not_actionable") {
+        throw new GatewayRepositoryError("INVALID_PERSISTED_DATA");
+      }
+      return {
+        run_id: text(row.run_id, 36),
+        outcome: row.outcome,
+        duplicate: boole(row.duplicate),
+      };
     },
 
     async activePolicy() {
@@ -747,7 +1214,9 @@ export function createSupabaseGatewayRepository(
       );
       return {
         created_count: integer(row.created_count),
-        draft_ids: Array.isArray(row.draft_ids) ? row.draft_ids.map((id) => text(id, 36)) : [],
+        draft_ids: Array.isArray(row.draft_ids)
+          ? row.draft_ids.map((id) => text(id, 36))
+          : [],
       };
     },
 
@@ -798,7 +1267,9 @@ export function createSupabaseGatewayRepository(
       }
       const evaluationIds = [
         ...new Set(
-          [...allDrafts.values()].map((row) => text(row.source_evaluation_id, 36)),
+          [...allDrafts.values()].map((row) =>
+            text(row.source_evaluation_id, 36)
+          ),
         ),
       ];
       const suggestionRows = evaluationIds.length === 0 ? [] : rows(
@@ -842,7 +1313,9 @@ export function createSupabaseGatewayRepository(
         draft: Record<string, unknown>,
       ): AlertWorkItem => ({
         rule: alertRule,
-        recent_events: eventRows.filter((event) => event.rule_id === alertRule.rule_id).map((event) => ({
+        recent_events: eventRows.filter((event) =>
+          event.rule_id === alertRule.rule_id
+        ).map((event) => ({
           fingerprint: text(event.fingerprint, 64),
           status: text(event.status, 30) as AlertRecentEvent["status"],
           evaluated_at: text(event.evaluated_at, 40),
@@ -859,7 +1332,9 @@ export function createSupabaseGatewayRepository(
           }
           return workItem(alertRuleFromRow(row), draft);
         }),
-        drafts: pendingDrafts.map((draft) => workItem(parseAlertDraft(draft.rule_snapshot), draft)),
+        drafts: pendingDrafts.map((draft) =>
+          workItem(parseAlertDraft(draft.rule_snapshot), draft)
+        ),
       };
     },
 
@@ -875,7 +1350,9 @@ export function createSupabaseGatewayRepository(
       );
       return {
         event_count: integer(row.event_count),
-        event_ids: Array.isArray(row.event_ids) ? row.event_ids.map((id) => text(id, 36)) : [],
+        event_ids: Array.isArray(row.event_ids)
+          ? row.event_ids.map((id) => text(id, 36))
+          : [],
       };
     },
 
@@ -896,15 +1373,23 @@ export function createSupabaseGatewayRepository(
     },
 
     async readContext(_runId) {
-      const today = ownerDate(now());
+      const current = now();
+      const today = ownerDate(current);
       const results = await Promise.all([
         client.from("holdings").select(
           "ticker,shares,avg_cost,bucket,stop,target,high_water_price,hold_override_until,stop_alert_active,stop_near_alert_active,target_near_alert_active,target_alert_active",
         ).order("ticker").limit(101),
         client.from("suggestions").select(
           "id,date,ticker,action,bucket,confidence,score,stop,target,invalidation_price,valid_until,evidence_as_of",
-        ).eq("decision_source", "gateway").order("date", { ascending: false })
+        ).eq("decision_source", "gateway")
+          .or(`valid_until.is.null,valid_until.gte.${today}`)
+          .order("date", { ascending: false }).order("id", { ascending: false })
           .limit(101),
+        client.from("suggestions").select(
+          "id,date,ticker,action,bucket,confidence,score,stop,target,invalidation_price,valid_until,evidence_as_of",
+        ).eq("decision_source", "gateway").lt("valid_until", today)
+          .order("date", { ascending: false }).order("id", { ascending: false })
+          .limit(100),
         client.from("stock_observations").select(
           "id,ticker,obs_date,event_type,summary,price_reaction,confidence,source",
         ).order("obs_date", { ascending: false }).limit(100),
@@ -915,9 +1400,7 @@ export function createSupabaseGatewayRepository(
         client.from("radar").select(
           "ticker,added,last_seen,days_relevant,reason,bucket_guess,promoted,promoted_on",
         ).order("last_seen", { ascending: false }).limit(20),
-        client.from("suggestion_grades").select(
-          "suggestion_id,horizon_days,coverage_status,excess_return_pct,direction_success,graded_at",
-        ).order("graded_at", { ascending: false }).limit(150),
+        recentRecommendationGrades(client),
         client.from("owner_investment_plans").select(
           "id,ticker,bucket,amount,cadence,next_due_on,active,updated_at",
         ).eq("active", true).limit(21),
@@ -939,15 +1422,41 @@ export function createSupabaseGatewayRepository(
           "status",
           "applied",
         ).limit(501),
+        _runId
+          ? client.rpc("refresh_market_intelligence_context", {
+            p_run_id: _runId,
+          })
+          : Promise.resolve({ data: null, error: null }),
+        client.rpc("read_reconciled_cash_snapshot", {
+          p_now: current.toISOString(),
+        }),
       ]);
       const holdings = rows(results[0], "CONTEXT_TOO_LARGE");
-      const suggestions = rows(results[1], "CONTEXT_TOO_LARGE");
-      const plans = rows(results[6], "CONTEXT_TOO_LARGE");
-      const watches = rows(results[7], "CONTEXT_TOO_LARGE");
-      const transactions = rows(results[9], "CONTEXT_TOO_LARGE");
-      const commands = rows(results[10], "CONTEXT_TOO_LARGE");
+      const unresolvedSuggestions = rows(results[1], "CONTEXT_TOO_LARGE");
+      const completedSuggestions = rows(results[2], "CONTEXT_TOO_LARGE");
+      const suggestions = mergeRelevantSuggestions(
+        unresolvedSuggestions,
+        completedSuggestions,
+        100,
+      );
+      const plans = rows(results[7], "CONTEXT_TOO_LARGE");
+      const watches = rows(results[8], "CONTEXT_TOO_LARGE");
+      const transactions = rows(results[10], "CONTEXT_TOO_LARGE");
+      const commands = rows(results[11], "CONTEXT_TOO_LARGE");
+      if (results[12].error) {
+        throw new GatewayRepositoryError("PERSISTENCE_FAILED");
+      }
+      const intelligenceInputs = results[12].data === null
+        ? []
+        : [oneObject(results[12])];
+      if (results[13].error) {
+        throw new GatewayRepositoryError("PERSISTENCE_FAILED");
+      }
+      const cashSnapshot = results[13].data === null
+        ? null
+        : oneObject(results[13]);
       if (
-        holdings.length > 100 || suggestions.length > 100 ||
+        holdings.length > 100 || unresolvedSuggestions.length > 100 ||
         plans.length > 20 ||
         watches.length > 50 || transactions.length > 500 ||
         commands.length > 500
@@ -961,16 +1470,8 @@ export function createSupabaseGatewayRepository(
         const value = nullableDecimal(row.realized_pnl);
         return value === null ? sum : sum + signedMicros(value);
       }, 0n);
-      const gradeRows = rows(results[5], "CONTEXT_TOO_LARGE");
-      let consecutiveLosses = 0;
-      for (const row of gradeRows) {
-        if (
-          row.coverage_status !== "complete" ||
-          typeof row.direction_success !== "boolean"
-        ) continue;
-        if (row.direction_success) break;
-        consecutiveLosses += 1;
-      }
+      const gradeRows = rows(results[6], "CONTEXT_TOO_LARGE");
+      const consecutiveLosses = consecutiveRecommendationLosses(gradeRows);
       const context: GatewayReadContext = {
         holdings: holdings.map((row) => ({
           ticker: text(row.ticker, 15),
@@ -992,6 +1493,39 @@ export function createSupabaseGatewayRepository(
           target_alert_active: boole(row.target_alert_active ?? false),
         })),
         holding_quotes: {},
+        intelligence_collection_context: intelligenceInputs.length === 1
+          ? {
+            holding_market_values: decimalMap(
+              intelligenceInputs[0].holding_market_values,
+            ),
+            liquidity_by_ticker: decimalMap(
+              intelligenceInputs[0].liquidity_by_ticker,
+            ),
+            overlap_by_ticker: decimalMap(
+              intelligenceInputs[0].overlap_by_ticker,
+            ),
+            current_quotes: Object.fromEntries(
+              Object.entries(
+                oneObject({
+                  data: intelligenceInputs[0].current_quotes ?? {},
+                  error: null,
+                }),
+              ).map(([ticker, raw]) => {
+                const quote = oneObject({ data: raw, error: null });
+                return [ticker, {
+                  price: decimal(quote.price),
+                  as_of: text(quote.as_of, 40),
+                }];
+              }),
+            ),
+            quote_receipt_ids:
+              Array.isArray(intelligenceInputs[0].quote_receipt_ids)
+                ? intelligenceInputs[0].quote_receipt_ids.map((id) =>
+                  text(id, 36)
+                )
+                : [],
+          }
+          : undefined,
         realized_pnl_today: coverage ? formatFixed(pnlMicros, 6) : null,
         portfolio_command_coverage_complete: coverage,
         consecutive_completed_losses: consecutiveLosses,
@@ -1005,6 +1539,30 @@ export function createSupabaseGatewayRepository(
           active: boole(row.active),
           updated_at: text(row.updated_at, 40),
         })),
+        ...(cashSnapshot
+          ? {
+            reconciled_cash_snapshot: {
+              snapshot_id: text(cashSnapshot.snapshot_id, 36),
+              as_of: text(cashSnapshot.as_of, 40),
+              fresh_through: text(cashSnapshot.fresh_through, 40),
+              ledger_watermark: text(cashSnapshot.ledger_watermark, 30),
+              spendable_cash: {
+                core: decimal(
+                  oneObject({ data: cashSnapshot.spendable_cash, error: null })
+                    .core,
+                ),
+                growth: decimal(
+                  oneObject({ data: cashSnapshot.spendable_cash, error: null })
+                    .growth,
+                ),
+                speculative: decimal(
+                  oneObject({ data: cashSnapshot.spendable_cash, error: null })
+                    .speculative,
+                ),
+              },
+            },
+          }
+          : {}),
         recent_suggestions: suggestions.map((row) => ({
           id: integer(row.id),
           date: text(row.date, 10),
@@ -1028,7 +1586,7 @@ export function createSupabaseGatewayRepository(
           valid_until: nullableText(row.valid_until, 10),
           evidence_as_of: nullableText(row.evidence_as_of, 40),
         })),
-        observations: rows(results[2], "CONTEXT_TOO_LARGE").map((row) => ({
+        observations: rows(results[3], "CONTEXT_TOO_LARGE").map((row) => ({
           id: integer(row.id),
           ticker: text(row.ticker, 15),
           obs_date: text(row.obs_date, 10),
@@ -1038,17 +1596,19 @@ export function createSupabaseGatewayRepository(
           confidence: nullableText(row.confidence, 20),
           source: nullableText(row.source, 200),
         })),
-        lessons: rows(results[3], "CONTEXT_TOO_LARGE").map((row) => ({
+        lessons: rows(results[4], "CONTEXT_TOO_LARGE").map((row) => ({
           id: integer(row.id),
           entry_date: text(row.entry_date, 10),
           category: text(row.category, 100),
           content: text(row.content, 1000),
         })),
-        radar: rows(results[4], "CONTEXT_TOO_LARGE").map((row) => ({
+        radar: rows(results[5], "CONTEXT_TOO_LARGE").map((row) => ({
           ticker: text(row.ticker, 15),
           added: nullableText(row.added, 10),
           last_seen: nullableText(row.last_seen, 10),
-          days_relevant: row.days_relevant === null ? null : integer(row.days_relevant),
+          days_relevant: row.days_relevant === null
+            ? null
+            : integer(row.days_relevant),
           reason: nullableText(row.reason, 1000),
           bucket_guess: nullableText(
             row.bucket_guess,
@@ -1062,9 +1622,11 @@ export function createSupabaseGatewayRepository(
           horizon_days: integer(row.horizon_days),
           coverage_status: nullableText(row.coverage_status, 30),
           excess_return_pct: nullableDecimal(row.excess_return_pct),
-          direction_success: row.direction_success === null ? null : boole(row.direction_success),
+          direction_success: row.direction_success === null
+            ? null
+            : boole(row.direction_success),
         })),
-        dry_powder: rows(results[8], "CONTEXT_TOO_LARGE").map((row) => ({
+        dry_powder: rows(results[9], "CONTEXT_TOO_LARGE").map((row) => ({
           month: text(row.month, 7),
           growth_available: decimal(row.growth_available),
           spec_available: decimal(row.spec_available),
@@ -1085,7 +1647,9 @@ export function createSupabaseGatewayRepository(
           ) as GatewayReadContext["paper_watches"][number][
             "agent_view_at_open"
           ],
-          agent_score_at_open: row.agent_score_at_open === null ? null : integer(row.agent_score_at_open),
+          agent_score_at_open: row.agent_score_at_open === null
+            ? null
+            : integer(row.agent_score_at_open),
         })),
       };
       if (
@@ -1110,7 +1674,9 @@ export function createSupabaseGatewayRepository(
           data: row.counts,
           error: null,
         }) as ArtifactReceipt["counts"],
-        created_paper_watch_ids: Array.isArray(row.paper_watch_ids) ? row.paper_watch_ids.map(integer) : [],
+        created_paper_watch_ids: Array.isArray(row.paper_watch_ids)
+          ? row.paper_watch_ids.map(integer)
+          : [],
       };
     },
 
@@ -1132,7 +1698,9 @@ export function createSupabaseGatewayRepository(
         stop: nullableDecimal(row.stop),
         target: nullableDecimal(row.target),
         invalidation_price: nullableDecimal(row.invalidation_price),
-        completed_horizons: Array.isArray(row.completed_horizons) ? row.completed_horizons.map(integer) : [],
+        completed_horizons: Array.isArray(row.completed_horizons)
+          ? row.completed_horizons.map(integer)
+          : [],
       }));
     },
 
@@ -1167,25 +1735,40 @@ export function createSupabaseGatewayRepository(
           checker: evaluation.candidate.checker,
         })),
       );
-      const result = await client.rpc("apply_market_decision_bundle", {
-        p_request_id: input.request_id,
-        p_run_id: input.run_id,
-        p_lease_token: input.request_lease_token,
-        p_policy_version: input.policy_version,
-        p_evaluations: evaluations,
-        p_suggestions: input.suggestions,
-        p_publication: {
-          market_date: input.publication.market_date,
-          phase: input.publication.phase,
-          kind: input.publication.kind,
-          template_version: input.publication.template_version,
-          rendered_body: input.publication.rendered_body,
-          rendered_hash: input.publication.rendered_hash,
-          status: input.publication.status,
-          holding_state: input.holding_state_changes,
+      const result = await client.rpc(
+        "apply_market_decision_bundle_with_cash_snapshot",
+        {
+          p_request_id: input.request_id,
+          p_run_id: input.run_id,
+          p_lease_token: input.request_lease_token,
+          p_policy_version: input.policy_version,
+          p_evaluations: evaluations,
+          p_suggestions: input.suggestions,
+          p_publication: {
+            market_date: input.publication.market_date,
+            phase: input.publication.phase,
+            kind: input.publication.kind,
+            template_version: input.publication.template_version,
+            rendered_body: input.publication.rendered_body,
+            rendered_hash: input.publication.rendered_hash,
+            status: input.publication.status,
+            holding_state: input.holding_state_changes,
+          },
+          p_cash_snapshot_id: input.cash_snapshot?.snapshot_id ?? null,
+          p_cash_ledger_watermark: input.cash_snapshot?.ledger_watermark ??
+            null,
         },
-      });
+      );
+      if (result.error) {
+        if (result.error.message?.includes("CASH_UNAVAILABLE")) {
+          throw new GatewayRepositoryError("CASH_UNAVAILABLE");
+        }
+        throw new GatewayRepositoryError("PERSISTENCE_FAILED");
+      }
       const row = oneObject(result);
+      if (row.code === "RUN_ALREADY_EVALUATED") {
+        throw new GatewayRepositoryError("RUN_ALREADY_EVALUATED");
+      }
       return await publication(text(row.publication_id, 36));
     },
 
@@ -1257,93 +1840,32 @@ export function createSupabaseGatewayRepository(
     },
 
     async finishRun(runId) {
-      const results = await Promise.all([
-        client.from("market_gateway_requests").select(
-          "operation,status,response",
-        ).eq("run_id", runId).limit(501),
-        client.from("decision_evaluations").select("id").eq("run_id", runId)
-          .limit(501),
-        client.from("suggestions").select("id").eq("run_id", runId).limit(501),
-        client.from("market_publications").select("status,telegram_message_ids")
-          .eq("run_id", runId).limit(2),
-      ]);
-      const requestRows = rows(results[0]);
-      const evaluationRows = rows(results[1]);
-      const suggestionRows = rows(results[2]);
-      const publicationRows = rows(results[3]);
-      if (
-        requestRows.length > 500 || evaluationRows.length > 500 ||
-        suggestionRows.length > 500 || publicationRows.length > 1
-      ) {
-        throw new GatewayRepositoryError("CONTEXT_TOO_LARGE");
-      }
-      const counts: Record<string, number> = {
-        evaluations: evaluationRows.length,
-        suggestions: suggestionRows.length,
-        publications: publicationRows.length,
-        reports: 0,
-      };
-      const reportStatuses: string[] = [];
-      const reportMessageIds: number[] = [];
-      for (const request of requestRows) {
-        const response = request.response;
-        if (
-          typeof response !== "object" || response === null ||
-          Array.isArray(response)
-        ) continue;
-        const responseRow = response as Record<string, unknown>;
-        if (request.operation === "record_report" && request.status === "completed") {
-          const publicationReceipt = responseRow.publication_receipt;
-          if (typeof publicationReceipt === "object" && publicationReceipt !== null &&
-            !Array.isArray(publicationReceipt)) {
-            const publication = publicationReceipt as Record<string, unknown>;
-            reportStatuses.push(text(publication.status, 30));
-            if (Array.isArray(publication.telegram_message_ids)) {
-              reportMessageIds.push(...publication.telegram_message_ids.map(integer));
-            }
-          }
-          if (typeof responseRow.report_id === "string") counts.reports += 1;
+      const result = await client.rpc("finish_market_analysis_run", {
+        p_run_id: runId,
+      });
+      if (result.error) {
+        const code = result.error.message;
+        if (typeof code === "string" && /^MISSING_[A-Z_]+$/.test(code)) {
+          throw new GatewayRepositoryError(code);
         }
-        const responseCounts = responseRow.counts;
-        if (
-          typeof responseCounts !== "object" || responseCounts === null ||
-          Array.isArray(responseCounts)
-        ) continue;
-        for (const [key, value] of Object.entries(responseCounts)) {
-          if (
-            typeof value === "number" && Number.isSafeInteger(value) &&
-            value >= 0
-          ) {
-            counts[key] = (counts[key] ?? 0) + value;
-          }
-        }
+        throw new GatewayRepositoryError("PERSISTENCE_FAILED");
       }
-      const statuses = [
-        ...publicationRows.map((row) => text(row.status, 30)),
-        ...reportStatuses,
-      ];
-      const ids = [...new Set([...publicationRows.flatMap((row) =>
-        Array.isArray(row.telegram_message_ids) ? row.telegram_message_ids.map(integer) : []
-      ), ...reportMessageIds])];
-      const partial = requestRows.some((row) =>
-        row.status === "failed" ||
-        (row.status === "claimed" && row.operation !== "finish_run")
-      ) ||
-        statuses.some((status) => status === "delivery_failed" || status === "delivery_unknown");
-      const status: RunReceipt["status"] = partial ? "partial" : "completed";
-      const update = await client.from("analysis_runs").update({
-        status,
-        finished_at: now().toISOString(),
-        write_counts: counts,
-        telegram_message_ids: ids,
-      }).eq("id", runId);
-      if (update.error) throw new GatewayRepositoryError("PERSISTENCE_FAILED");
+      const row = oneObject(result);
+      const writeCounts = oneObject({ data: row.write_counts, error: null });
       return {
-        run_id: runId,
-        status,
-        write_counts: counts,
-        publication_statuses: statuses,
-        telegram_message_ids: ids,
+        run_id: text(row.run_id, 36),
+        status: text(row.status, 10) as RunReceipt["status"],
+        write_counts: Object.fromEntries(
+          Object.entries(writeCounts).map((
+            [key, value],
+          ) => [key, integer(value)]),
+        ),
+        publication_statuses: Array.isArray(row.publication_statuses)
+          ? row.publication_statuses.map((value) => text(value, 30))
+          : [],
+        telegram_message_ids: Array.isArray(row.telegram_message_ids)
+          ? row.telegram_message_ids.map(integer)
+          : [],
       };
     },
   };

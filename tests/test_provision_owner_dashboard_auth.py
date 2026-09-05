@@ -1,4 +1,5 @@
 import json
+import sys
 
 import pytest
 
@@ -9,6 +10,66 @@ PROJECT_URL = "https://hlxpxbxhqctwsqizwjjy.supabase.co"
 OWNER_EMAIL = "owner@example.com"
 SERVICE_KEY = "sb_secret_" + "a" * 40
 OWNER_ID = "6903b3cc-05b7-4f90-bbc2-7e80a3a59e22"
+
+
+def test_email_otp_config_requires_token_template_and_six_digits():
+    with pytest.raises(RuntimeError, match="six-digit"):
+        provision.validate_email_otp_configuration({
+            "mailer_otp_length": 8,
+            "mailer_templates_magic_link_content": "{{ .ConfirmationURL }}",
+        })
+
+    with pytest.raises(RuntimeError, match="exactly"):
+        provision.validate_email_otp_configuration({
+            "mailer_otp_length": 6,
+            "mailer_templates_magic_link_content": "{{ .Token }}",
+            "owner_email": OWNER_EMAIL,
+        })
+
+    with pytest.raises(RuntimeError, match="Token"):
+        provision.validate_email_otp_configuration({
+            "mailer_otp_length": 6,
+            "mailer_templates_magic_link_content": "{{ .ConfirmationURL }}",
+        })
+
+    with pytest.raises(RuntimeError, match="six-digit"):
+        provision.validate_email_otp_configuration({
+            "mailer_otp_length": 6.0,
+            "mailer_templates_magic_link_content": "{{ .Token }}",
+        })
+
+    receipt = provision.validate_email_otp_configuration({
+        "mailer_otp_length": 6,
+        "mailer_templates_magic_link_content": "Your Personal Stock Agent code is {{ .Token }}.",
+    })
+    assert receipt == {"status": "verified", "otp_length": 6, "token_template": True}
+    assert "Token" not in json.dumps(receipt)
+
+
+@pytest.mark.parametrize("receipt_contents", [None, "not JSON"])
+def test_provision_main_rejects_absent_or_malformed_auth_receipt_before_network(
+    tmp_path, monkeypatch, receipt_contents,
+):
+    receipt_path = tmp_path / "auth-email-otp.json"
+    if receipt_contents is not None:
+        receipt_path.write_text(receipt_contents)
+    network_calls = []
+
+    def no_network(*_args, **_kwargs):
+        network_calls.append(True)
+        raise AssertionError("network must not be reached")
+
+    monkeypatch.setattr(provision, "urlopen", no_network)
+    monkeypatch.setattr(sys, "argv", [
+        "provision_owner_dashboard_auth.py",
+        "--project-url", PROJECT_URL,
+        "--auth-config-receipt", str(receipt_path),
+    ])
+
+    with pytest.raises(RuntimeError, match="Auth configuration receipt"):
+        provision.main()
+
+    assert network_calls == []
 
 
 def test_configuration_is_exact_and_receipts_never_return_identity_or_secret():

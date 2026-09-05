@@ -58,3 +58,14 @@ def test_invalid_gateway_reservation_capacity_fails_closed(reserved_requests):
             "reservation_id": "g1",
             "reserved_requests": reserved_requests,
         },)})
+
+
+def test_quota_receipt_counts_only_actual_http_calls():
+    session = QuotaSession({"gdelt": ({"reservation_id": "g1", "reserved_requests": 2},)})
+
+    session.record_actual_request("gdelt", "g1")
+    session.record_cache_hit("gdelt", "g1")
+
+    assert session.actual_requests == {"gdelt": 1}
+    assert session.cache_hits == {"gdelt": 1}
+    assert session.consumed_requests == {"gdelt": 1}

@@ -55,6 +55,13 @@ function percent(end: bigint, start: bigint): bigint {
   return divideRounded((end - start) * 1_000_000n, start);
 }
 
+function adjustedRawPrice(bar: AdjustedBar, rawPrice: string): bigint {
+  return divideRounded(
+    fixed(rawPrice) * fixed(bar.adjusted_close),
+    fixed(bar.raw_close),
+  );
+}
+
 function pctText(value: bigint): string {
   return formatFixed(value, 4);
 }
@@ -139,15 +146,22 @@ export function gradeDecision(
   let adjustedStart: bigint;
   let benchmarkStart: bigint;
   let stockReturns: bigint[];
+  let stockHighReturns: bigint[];
+  let stockLowReturns: bigint[];
   let stockReturn: bigint | null;
   let benchmarkReturn: bigint | null;
   try {
-    adjustedStart = divideRounded(
-      fixed(decision.decision_price) * fixed(decisionBar.adjusted_close),
-      fixed(decisionBar.raw_close),
-    );
+    // Daily stock and benchmark histories share the decision-session close.
+    // The recommendation price is not evidence of an owner's actual fill.
+    adjustedStart = fixed(decisionBar.adjusted_close);
     benchmarkStart = fixed(benchmarkDecisionBar.adjusted_close);
     stockReturns = horizonBars.map((bar) => percent(fixed(bar.adjusted_close), adjustedStart));
+    stockHighReturns = horizonBars.map((bar) =>
+      percent(adjustedRawPrice(bar, bar.raw_high), adjustedStart)
+    );
+    stockLowReturns = horizonBars.map((bar) =>
+      percent(adjustedRawPrice(bar, bar.raw_low), adjustedStart)
+    );
     stockReturn = sessions ? stockReturns[stockReturns.length - 1] : null;
     const benchmarkEnd = sessions
       ? fixed(benchmarkByDate.get(horizonBars[horizonBars.length - 1].date)!.adjusted_close)
@@ -162,15 +176,20 @@ export function gradeDecision(
   const coverageStatus: OutcomeGrade["coverage_status"] = split
     ? "corporate_action_review"
     : complete ? "complete" : "incomplete";
-  const zeroAndReturns = [0n, ...stockReturns];
+  const zeroAndHighReturns = [0n, ...stockHighReturns];
+  const zeroAndLowReturns = [0n, ...stockLowReturns];
   const result = empty(decision, horizon, benchmarkTicker, coverageStatus, sessions);
   result.stock_return_pct = stockReturn === null ? null : pctText(stockReturn);
   result.benchmark_return_pct = benchmarkReturn === null ? null : pctText(benchmarkReturn);
   result.excess_return_pct = stockReturn === null || benchmarkReturn === null
     ? null
     : pctText(stockReturn - benchmarkReturn);
-  result.mfe_pct = sessions ? pctText(zeroAndReturns.reduce((left, right) => left > right ? left : right)) : null;
-  result.mae_pct = sessions ? pctText(zeroAndReturns.reduce((left, right) => left < right ? left : right)) : null;
+  result.mfe_pct = sessions
+    ? pctText(zeroAndHighReturns.reduce((left, right) => left > right ? left : right))
+    : null;
+  result.mae_pct = sessions
+    ? pctText(zeroAndLowReturns.reduce((left, right) => left < right ? left : right))
+    : null;
 
   if (!split) {
     const entryLow = decision.entry_zone_low === null ? null : fixed(decision.entry_zone_low);

@@ -7,6 +7,7 @@ import type {
   HoldingState,
   PolicyConfig,
   PolicyContext,
+  TrustedEvidenceFact,
   VerifiedQuote,
 } from "./contracts.ts";
 import { formatFixed, multiplyFixed, parseFixed } from "./fixed-point.ts";
@@ -21,9 +22,18 @@ export type PolicyReasonCode =
   | "QUOTE_MISSING"
   | "QUOTE_STALE"
   | "QUOTE_SESSION_MISMATCH"
+  | "ENTRY_TRIGGER_NOT_MET"
+  | "CASH_UNAVAILABLE"
+  | "PORTFOLIO_BUDGET_EXCEEDED"
+  | "MUTUALLY_EXCLUSIVE_ALTERNATIVE"
   | "PRICE_RELATION_INVALID"
   | "AMOUNT_SHARES_MISMATCH"
   | "CURRENT_EVIDENCE_MISSING"
+  | "EVIDENCE_STALE"
+  | "EVIDENCE_FUTURE"
+  | "EVIDENCE_UNVERIFIED"
+  | "EVIDENCE_CATEGORY_MISSING"
+  | "EVIDENCE_CONFLICT"
   | "ANALYST_INCOMPLETE"
   | "CHECKER_INCOMPLETE"
   | "CHECKER_DOWNGRADE"
@@ -85,6 +95,8 @@ export interface PolicyEvaluation {
     total_investable_value: string | null;
     dollars_at_risk: string | null;
     reward_risk_milli: string | null;
+    final_alert_urgency: "urgent" | "routine" | null;
+    approved_terms?: ApprovedTerms | null;
   };
   holding_state_change: {
     ticker: string;
@@ -95,6 +107,15 @@ export interface PolicyEvaluation {
     target_alert_active: boolean;
   } | null;
   candidate: DecisionCandidate;
+}
+
+export interface ApprovedTerms {
+  quantity: string | null;
+  entry_low: string | null;
+  entry_high: string | null;
+  stop: string | null;
+  target: string | null;
+  urgency: "urgent" | "routine";
 }
 
 const ACTIONABLE = new Set<Action>(["buy", "add", "reduce", "sell"]);
@@ -123,6 +144,7 @@ const VETO_CODES = new Set<PolicyReasonCode>([
 const INFORMATIONAL_CODES = new Set<PolicyReasonCode>([
   "OUTSIDE_SESSION_CONDITIONAL",
 ]);
+const MAX_EVIDENCE_AGE_MS = 7 * 24 * 60 * 60 * 1_000;
 
 function alertSession(
   phase: DecisionCandidate["phase"],
@@ -299,7 +321,8 @@ export function evaluateCandidate(
   now: Date,
   newId: () => string = () => crypto.randomUUID(),
   packetId: string | null = null,
-  qualifyingExposureEvidenceIds: ReadonlySet<string> = new Set(),
+  _qualifyingExposureEvidenceIds: ReadonlySet<string> = new Set(),
+  trustedEvidenceFacts: readonly TrustedEvidenceFact[] = [],
 ): PolicyEvaluation {
   const reasons: PolicyReasonCode[] = [];
   const explanations: string[] = [];
@@ -309,6 +332,95 @@ export function evaluateCandidate(
       explanations.push(explanation);
     }
   };
+  const facts = trustedEvidenceFacts.filter((fact) =>
+    fact.candidate_key === candidate.ticker
+  );
+  const currentFacts = facts.filter((fact) => {
+    const published = fact.published_at === null
+      ? NaN
+      : Date.parse(fact.published_at);
+    const retrieved = Date.parse(fact.retrieved_at);
+    const expires = fact.expires_at === null
+      ? NaN
+      : Date.parse(fact.expires_at);
+    if (published > now.valueOf() || retrieved > now.valueOf()) {
+      add(
+        "EVIDENCE_FUTURE",
+        "Persisted publication or retrieval time is in the future.",
+      );
+      return false;
+    }
+    if (
+      !Number.isFinite(published) || !Number.isFinite(retrieved) ||
+      !Number.isFinite(expires) ||
+      now.valueOf() - published > MAX_EVIDENCE_AGE_MS ||
+      expires <= now.valueOf()
+    ) {
+      add(
+        "EVIDENCE_STALE",
+        "Persisted evidence is missing current publication or retrieval validity.",
+      );
+      return false;
+    }
+    if (
+      !["succeeded", "cache_hit"].includes(fact.source_status) ||
+      fact.authority === "unverified" || fact.category === "unknown"
+    ) {
+      add(
+        "EVIDENCE_UNVERIFIED",
+        "The stored source is not qualified for this claim.",
+      );
+      return false;
+    }
+    return true;
+  });
+  const currentIds = new Set(currentFacts.map((fact) => fact.evidence_id));
+  candidate = {
+    ...candidate,
+    evidence: facts.map((fact) => ({
+      id: fact.evidence_id,
+      kind: fact.category === "unknown" ? "news" : fact.category,
+      source: fact.source,
+      status: currentIds.has(fact.evidence_id) ? "fresh" : "stale",
+      observed_at: fact.published_at,
+      retrieved_at: fact.retrieved_at,
+      reference: fact.reference,
+      claims: [fact.normalized_text],
+      exposure_kind: fact.exposure_kind,
+    })),
+  };
+  const polarities = new Map<string, Set<string>>();
+  for (const fact of facts) {
+    if (fact.claim_key && fact.claim_polarity) {
+      const values = polarities.get(fact.claim_key) ?? new Set<string>();
+      values.add(fact.claim_polarity);
+      polarities.set(fact.claim_key, values);
+    }
+  }
+  if ([...polarities.values()].some((values) => values.size > 1)) {
+    add(
+      "EVIDENCE_CONFLICT",
+      "Persisted evidence contains both affirmation and denial of the same claim.",
+    );
+  }
+  for (const factor of candidate.factors) {
+    if (factor.kind === "risk") continue;
+    const category = factor.kind === "valuation" ? "fundamentals" : factor.kind;
+    if (
+      !currentFacts.some((fact) =>
+        factor.evidence_ids.includes(fact.evidence_id) &&
+        fact.category === category &&
+        (["fundamentals", "event", "macro", "sector"].includes(category)
+          ? fact.authority === "official"
+          : fact.authority !== "unverified")
+      )
+    ) {
+      add(
+        "EVIDENCE_CATEGORY_MISSING",
+        `The ${factor.kind} claim lacks qualified stored ${category} evidence.`,
+      );
+    }
+  }
   const marketDate = ownerLocalDate(now);
   const holding = context.holdings.find((item) =>
     item.ticker === candidate.ticker
@@ -330,6 +442,13 @@ export function evaluateCandidate(
     add(
       "QUOTE_MISSING",
       "An independent quote for the candidate is unavailable.",
+    );
+  } else if (verifiedQuote.actionable_price_status !== "available") {
+    add(
+      "QUOTE_MISSING",
+      `The quote cannot support an actionable price: ${
+        verifiedQuote.actionable_price_reasons.join(",")
+      }.`,
     );
   } else if (
     !(candidateQuoteAllowed = quoteAllowedForPhase(
@@ -384,9 +503,26 @@ export function evaluateCandidate(
     );
   }
 
-  const hasCurrentEvidence = candidate.evidence.some((item) =>
-    item.status === "fresh" && item.observed_at !== null
-  );
+  const currentEvidence = candidate.evidence.filter((item) => {
+    if (item.status !== "fresh" || item.observed_at === null) return false;
+    const observedAt = Date.parse(item.observed_at);
+    return Number.isFinite(observedAt) &&
+      now.valueOf() - observedAt <= MAX_EVIDENCE_AGE_MS;
+  });
+  const hasCurrentEvidence = currentEvidence.length > 0;
+  if (
+    candidate.evidence.some((item) => {
+      if (item.observed_at === null) return false;
+      const observedAt = Date.parse(item.observed_at);
+      return Number.isFinite(observedAt) &&
+        now.valueOf() - observedAt > MAX_EVIDENCE_AGE_MS;
+    })
+  ) {
+    add(
+      "EVIDENCE_STALE",
+      "Evidence timestamps exceed the reviewed freshness window.",
+    );
+  }
   if (
     (ACTIONABLE.has(candidate.action) ||
       candidate.prior_suggestion_ids.length > 0 ||
@@ -408,11 +544,12 @@ export function evaluateCandidate(
     );
   }
   if (
-    candidate.relationship_type !== null &&
-    candidate.relationship_type !== undefined
+    packetId !== null || (candidate.relationship_type !== null &&
+      candidate.relationship_type !== undefined)
   ) {
-    const hasQualifiedExposure = candidate.evidence.some((item) =>
-      qualifyingExposureEvidenceIds.has(item.id)
+    const hasQualifiedExposure = currentFacts.some((item) =>
+      item.relationship_eligible && item.authority === "official" &&
+      item.exposure_kind !== null
     );
     if (
       !hasQualifiedExposure
@@ -506,7 +643,7 @@ export function evaluateCandidate(
       schemaInvalid = true;
     }
     if (
-      candidate.action === "sell" && holding && shares !== null &&
+      SELL_SIDE.has(candidate.action) && holding && shares !== null &&
       shares > parseFixed(holding.shares, 8)
     ) {
       add(
@@ -565,6 +702,7 @@ export function evaluateCandidate(
     }
   }
 
+  let entryLow: bigint | null = null;
   let entryHigh: bigint | null = null;
   let candidateStop: bigint | null = null;
   let candidateTarget: bigint | null = null;
@@ -579,14 +717,14 @@ export function evaluateCandidate(
       );
     } else {
       try {
-        const low = validPositive(candidate.entry_zone_low, 6);
+        entryLow = validPositive(candidate.entry_zone_low, 6);
         entryHigh = validPositive(candidate.entry_zone_high, 6);
         candidateStop = validPositive(candidate.stop, 6);
         candidateTarget = validPositive(candidate.target, 6);
         if (
-          low === null || entryHigh === null || candidateStop === null ||
+          entryLow === null || entryHigh === null || candidateStop === null ||
           candidateTarget === null ||
-          !(candidateStop < low && low <= entryHigh &&
+          !(candidateStop < entryLow && entryLow <= entryHigh &&
             entryHigh < candidateTarget)
         ) {
           add(
@@ -600,6 +738,27 @@ export function evaluateCandidate(
           "Required long price levels are invalid.",
         );
       }
+    }
+  }
+
+  if (
+    BUY_SIDE.has(candidate.action) && !ownerPlanMatched &&
+    candidateQuoteAllowed && verifiedQuote !== null &&
+    entryLow !== null && entryHigh !== null && candidateTarget !== null
+  ) {
+    try {
+      const executablePrice = parseFixed(verifiedQuote.price, 6);
+      if (
+        executablePrice < entryLow || executablePrice > entryHigh ||
+        executablePrice >= candidateTarget
+      ) {
+        add(
+          "ENTRY_TRIGGER_NOT_MET",
+          "The verified current price is outside the executable entry trigger.",
+        );
+      }
+    } catch {
+      add("QUOTE_MISSING", "The executable quote price is invalid.");
     }
   }
 
@@ -647,10 +806,7 @@ export function evaluateCandidate(
         const positionCap = bucketBudget *
           BigInt(config.max_position_bps_of_bucket[candidate.bucket]) / 10_000n;
         const quotePrice = parseFixed(verifiedQuote!.price, 6);
-        const sizingPrice = entryHigh === null
-          ? quotePrice
-          : max(quotePrice, entryHigh);
-        const newTradeValue = money(sizingPrice, candidate.proposed_shares!);
+        const newTradeValue = money(quotePrice, candidate.proposed_shares!);
         positionValueAfter = (holdingValues.get(candidate.ticker) ?? 0n) +
           newTradeValue;
         if (positionValueAfter > positionCap) {
@@ -682,7 +838,7 @@ export function evaluateCandidate(
             }
           }
           const newRisk = money(
-            entryHigh - candidateStop,
+            quotePrice - candidateStop,
             candidate.proposed_shares!,
           );
           dollarsAtRisk = existingRisk + newRisk;
@@ -696,8 +852,8 @@ export function evaluateCandidate(
               "Conservative dollars at risk exceed the reviewed portfolio limit.",
             );
           }
-          rewardRiskMilli = (candidateTarget - entryHigh) * 1_000n /
-            (entryHigh - candidateStop);
+          rewardRiskMilli = (candidateTarget - quotePrice) * 1_000n /
+            (quotePrice - candidateStop);
           if (rewardRiskMilli < BigInt(config.min_reward_risk_milli)) {
             add(
               "REWARD_RISK_TOO_LOW",
@@ -878,8 +1034,306 @@ export function evaluateCandidate(
       reward_risk_milli: rewardRiskMilli === null
         ? null
         : rewardRiskMilli.toString(),
+      final_alert_urgency: status === "approved" && finalAction === "hold" &&
+          isPureAlert
+        ? (["stop_breach", "thesis_break"].includes(
+            candidate.notification_kind,
+          )
+          ? "urgent"
+          : "routine")
+        : null,
+      approved_terms: status === "approved" && finalAction !== null &&
+          ACTIONABLE.has(finalAction)
+        ? {
+          quantity: candidate.proposed_shares,
+          entry_low: BUY_SIDE.has(finalAction)
+            ? candidate.entry_zone_low
+            : null,
+          entry_high: BUY_SIDE.has(finalAction)
+            ? candidate.entry_zone_high
+            : null,
+          stop: candidate.action === "add"
+            ? holding?.stop ?? null
+            : candidate.stop,
+          target: candidate.target,
+          urgency: ["stop_breach", "thesis_break"].includes(
+              candidate.notification_kind,
+            )
+            ? "urgent"
+            : "routine",
+        }
+        : null,
     },
     holding_state_change: holdingState,
     candidate,
+  };
+}
+
+export interface PortfolioPlanReservation {
+  evaluations: PolicyEvaluation[];
+  approved: string[];
+  alternatives: string[];
+  reason_codes: PolicyReasonCode[];
+}
+
+function withPortfolioReason(
+  evaluation: PolicyEvaluation,
+  code: PolicyReasonCode,
+  explanation: string,
+): PolicyEvaluation {
+  const reasonCodes = evaluation.reason_codes.includes(code)
+    ? evaluation.reason_codes
+    : [...evaluation.reason_codes, code];
+  const explanations = evaluation.reason_codes.includes(code)
+    ? evaluation.explanations
+    : [...evaluation.explanations, explanation];
+  return {
+    ...evaluation,
+    final_action: BUY_SIDE.has(evaluation.raw_action)
+      ? "watch"
+      : evaluation.final_action,
+    status: "downgraded",
+    reason_codes: reasonCodes,
+    explanations,
+  };
+}
+
+function rankedEvaluations(
+  evaluations: readonly PolicyEvaluation[],
+): PolicyEvaluation[] {
+  return [...evaluations].sort((left, right) => {
+    const leftScore = left.candidate.health_score === null
+      ? -1n
+      : parseFixed(left.candidate.health_score, 6);
+    const rightScore = right.candidate.health_score === null
+      ? -1n
+      : parseFixed(right.candidate.health_score, 6);
+    if (leftScore !== rightScore) return leftScore > rightScore ? -1 : 1;
+    return left.candidate.candidate_id.localeCompare(
+      right.candidate.candidate_id,
+    );
+  });
+}
+
+function existingStopRiskByBucket(
+  context: PolicyContext,
+): Partial<Record<DecisionCandidate["bucket"], bigint>> {
+  const risks: Partial<Record<DecisionCandidate["bucket"], bigint>> = {};
+  for (const holding of context.holdings) {
+    if (holding.bucket === null || holding.stop === null) continue;
+    const average = validPositive(holding.avg_cost, 6);
+    const stop = validPositive(holding.stop, 6);
+    const shares = validPositive(holding.shares, 8);
+    if (average === null || stop === null || shares === null) {
+      throw new Error("invalid holding risk");
+    }
+    const risk = money(average > stop ? average - stop : 0n, holding.shares);
+    risks[holding.bucket] = (risks[holding.bucket] ?? 0n) + risk;
+  }
+  return risks;
+}
+
+function incrementalProposalRisk(
+  evaluation: PolicyEvaluation,
+  context: PolicyContext,
+): bigint | null {
+  if (evaluation.candidate.decision_mode === "owner_plan") return 0n;
+  const holding = context.holdings.find((item) =>
+    item.ticker === evaluation.candidate.ticker
+  );
+  const stopValue = evaluation.raw_action === "add"
+    ? holding?.stop ?? null
+    : evaluation.candidate.stop;
+  const price = validPositive(evaluation.normalized.verified_price, 6);
+  const stop = stopValue === null ? null : validPositive(stopValue, 6);
+  const shares = evaluation.candidate.proposed_shares === null
+    ? null
+    : validPositive(evaluation.candidate.proposed_shares, 8);
+  if (price === null || stop === null || shares === null) return null;
+  return money(
+    price > stop ? price - stop : 0n,
+    evaluation.candidate.proposed_shares!,
+  );
+}
+
+function reconciledCashForBucket(
+  context: PolicyContext,
+  bucket: DecisionCandidate["bucket"],
+  now: Date,
+): string | null {
+  const snapshot = context.reconciled_cash_snapshot;
+  if (!snapshot) return null;
+  const asOf = Date.parse(snapshot.as_of);
+  const freshThrough = Date.parse(snapshot.fresh_through);
+  const keys = Object.keys(snapshot.spendable_cash).sort();
+  if (
+    !/^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/
+      .test(
+        snapshot.snapshot_id,
+      ) ||
+    !/^\d+$/.test(snapshot.ledger_watermark) ||
+    !Number.isFinite(asOf) || !Number.isFinite(freshThrough) ||
+    asOf > now.getTime() + 60_000 || freshThrough < now.getTime() ||
+    freshThrough <= asOf || freshThrough > asOf + 30 * 60_000 ||
+    JSON.stringify(keys) !==
+      JSON.stringify(["core", "growth", "speculative"])
+  ) return null;
+  return snapshot.spendable_cash[bucket] ?? null;
+}
+
+export function reservePortfolioPlan(
+  evaluations: readonly PolicyEvaluation[],
+  context: PolicyContext,
+  config: PolicyConfig,
+  now: Date,
+): PortfolioPlanReservation {
+  const approved: string[] = [];
+  const alternatives: string[] = [];
+  const reasons = new Set<PolicyReasonCode>();
+  const output = new Map(evaluations.map((item) => [item.evaluation_id, item]));
+  const reservedSpend: Partial<Record<DecisionCandidate["bucket"], bigint>> =
+    {};
+  const reservedRisk: Partial<Record<DecisionCandidate["bucket"], bigint>> = {};
+  const approvedGroups = new Set<string>();
+  let existingRisk: Partial<Record<DecisionCandidate["bucket"], bigint>> | null;
+  try {
+    existingRisk = existingStopRiskByBucket(context);
+  } catch {
+    existingRisk = null;
+  }
+
+  for (const evaluation of rankedEvaluations(evaluations)) {
+    if (
+      !BUY_SIDE.has(evaluation.raw_action) ||
+      evaluation.final_action !== evaluation.raw_action
+    ) {
+      continue;
+    }
+    const bucket = evaluation.candidate.bucket;
+    const group = evaluation.candidate.reservation_group ?? null;
+    if (existingRisk === null) {
+      output.set(
+        evaluation.evaluation_id,
+        withPortfolioReason(
+          evaluation,
+          "CASH_UNAVAILABLE",
+          "Existing portfolio stop exposure cannot be reconciled.",
+        ),
+      );
+      reasons.add("CASH_UNAVAILABLE");
+      continue;
+    }
+    if (group !== null && approvedGroups.has(group)) {
+      output.set(
+        evaluation.evaluation_id,
+        withPortfolioReason(
+          evaluation,
+          "MUTUALLY_EXCLUSIVE_ALTERNATIVE",
+          "This proposal is an alternative to a higher-ranked approved proposal.",
+        ),
+      );
+      alternatives.push(evaluation.candidate_id);
+      reasons.add("MUTUALLY_EXCLUSIVE_ALTERNATIVE");
+      continue;
+    }
+    try {
+      const cashValue = reconciledCashForBucket(context, bucket, now);
+      if (cashValue === null) {
+        output.set(
+          evaluation.evaluation_id,
+          withPortfolioReason(
+            evaluation,
+            "CASH_UNAVAILABLE",
+            "Reconciled spendable cash is unavailable for this bucket.",
+          ),
+        );
+        reasons.add("CASH_UNAVAILABLE");
+        continue;
+      }
+      const parsedCash = cashValue === null ? null : parseFixed(cashValue, 6);
+      const cash = parsedCash !== null && parsedCash >= 0n ? parsedCash : null;
+      const totalInvestable =
+        evaluation.normalized.total_investable_value === null
+          ? null
+          : validPositive(evaluation.normalized.total_investable_value, 6);
+      const price = validPositive(evaluation.normalized.verified_price, 6);
+      const shares = evaluation.candidate.proposed_shares === null
+        ? null
+        : validPositive(evaluation.candidate.proposed_shares, 8);
+      const incrementalRisk = incrementalProposalRisk(evaluation, context);
+      if (
+        cash === null || totalInvestable === null || price === null ||
+        shares === null || incrementalRisk === null
+      ) {
+        output.set(
+          evaluation.evaluation_id,
+          withPortfolioReason(
+            evaluation,
+            "CASH_UNAVAILABLE",
+            "Executable-price sizing or reconciled cash is unavailable.",
+          ),
+        );
+        reasons.add("CASH_UNAVAILABLE");
+        continue;
+      }
+      let existingBucketValue = 0n;
+      for (const holding of context.holdings) {
+        if (holding.bucket !== bucket) continue;
+        const quote = context.holding_quotes[holding.ticker];
+        if (!quote || quote.ticker !== holding.ticker) {
+          throw new Error("holding quote unavailable");
+        }
+        existingBucketValue += parseHoldingValue(holding, quote);
+      }
+      const bucketBudget = totalInvestable *
+        BigInt(config.allocation_bps[bucket]) / 10_000n;
+      const remainingAllocation = bucketBudget > existingBucketValue
+        ? bucketBudget - existingBucketValue
+        : 0n;
+      const cost = money(price, evaluation.candidate.proposed_shares!);
+      const nextSpend = (reservedSpend[bucket] ?? 0n) + cost;
+      const nextRisk = (existingRisk[bucket] ?? 0n) +
+        (reservedRisk[bucket] ?? 0n) + incrementalRisk;
+      const riskLimit = totalInvestable *
+        BigInt(config.max_trade_risk_bps[bucket]) / 10_000n;
+      if (
+        nextSpend > cash || nextSpend > remainingAllocation ||
+        (evaluation.candidate.decision_mode !== "owner_plan" &&
+          nextRisk > riskLimit)
+      ) {
+        output.set(
+          evaluation.evaluation_id,
+          withPortfolioReason(
+            evaluation,
+            "PORTFOLIO_BUDGET_EXCEEDED",
+            "Earlier approved proposals have reserved the available portfolio budget or risk.",
+          ),
+        );
+        reasons.add("PORTFOLIO_BUDGET_EXCEEDED");
+        continue;
+      }
+      reservedSpend[bucket] = nextSpend;
+      reservedRisk[bucket] = (reservedRisk[bucket] ?? 0n) + incrementalRisk;
+      if (group !== null) approvedGroups.add(group);
+      approved.push(evaluation.candidate_id);
+    } catch {
+      output.set(
+        evaluation.evaluation_id,
+        withPortfolioReason(
+          evaluation,
+          "CASH_UNAVAILABLE",
+          "Reconciled cash or portfolio valuation cannot be verified.",
+        ),
+      );
+      reasons.add("CASH_UNAVAILABLE");
+    }
+  }
+  return {
+    evaluations: evaluations.map((item) =>
+      output.get(item.evaluation_id) ?? item
+    ),
+    approved,
+    alternatives,
+    reason_codes: [...reasons].sort(),
   };
 }

@@ -1,75 +1,325 @@
 #!/usr/bin/env python3
-"""Fail closed unless every V1 release receipt is typed and reconciled."""
+"""Verify one protected deployment against local Git bytes and queried production rows."""
 from __future__ import annotations
-import argparse, json, re
-from pathlib import Path
-from typing import Mapping
-from urllib.parse import urlparse
 
-REQUIRED_GATES=("exact_head_ci","independent_review","quota_receipts","dry_run_zero_writes","dry_run_zero_sends","migration_version","gateway_version","dashboard_api_version","site_version","owner_canary","anonymous_denial","non_owner_denial","source_parity","scheduled_receipt","rollback_check")
-SHA=re.compile(r"[0-9a-f]{40}"); HASH=re.compile(r"[0-9a-f]{64}"); UUID=re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}")
-def _row(r:Mapping[str,object],g:str)->Mapping[str,object]:
- v=r.get(g)
- if not isinstance(v,Mapping): raise RuntimeError(f"invalid release gate: {g}")
- return v
-def _same(r:Mapping[str,object], fields:tuple[str,...], sha:str,g:str):
- if any(r.get(f)!=sha for f in fields): raise RuntimeError(f"release gate SHA mismatch: {g}")
-def _hash(v:object)->bool:return isinstance(v,str) and HASH.fullmatch(v) is not None
-def _uuid(v:object)->bool:return isinstance(v,str) and UUID.fullmatch(v) is not None
-def _reject_sensitive(value:object):
- if isinstance(value,Mapping):
-  for key,nested in value.items():
-   if str(key).lower() in {"secret","password","database_url","access_token","service_key","telegram_token"}: raise RuntimeError("release receipt contains sensitive fields")
-   _reject_sensitive(nested)
- elif isinstance(value,list):
-  for nested in value:_reject_sensitive(nested)
+import argparse
+from datetime import datetime, timezone
+import hashlib
+import json
+import os
+from pathlib import Path, PurePosixPath
+import re
+import subprocess
+import sys
+from typing import Callable, Mapping, Protocol, runtime_checkable
 
-def verify_release(receipt:Mapping[str,object])->dict[str,object]:
- _reject_sensitive(receipt)
- for gate in REQUIRED_GATES:
-  if gate not in receipt: raise RuntimeError(f"missing release gate: {gate}")
- candidate=receipt.get("candidate_sha")
- if not isinstance(candidate,str) or not SHA.fullmatch(candidate): raise RuntimeError("missing release gate: candidate_sha")
- ci=_row(receipt,"exact_head_ci"); review=_row(receipt,"independent_review")
- if ci.get("status")!="passed" or ci.get("conclusion")!="success" or isinstance(ci.get("workflow_run_id"),bool) or not isinstance(ci.get("workflow_run_id"),int): raise RuntimeError("invalid release gate: exact_head_ci")
- _same(ci,("candidate_sha","workflow_sha"),candidate,"exact_head_ci")
- if review.get("status")!="passed" or review.get("verdict")!="approved": raise RuntimeError("invalid release gate: independent_review")
- _same(review,("candidate_sha","reviewed_sha"),candidate,"independent_review")
- quota=_row(receipt,"quota_receipts"); reservations=quota.get("provider_reservations")
- if quota.get("status")!="verified" or not isinstance(reservations,Mapping) or not reservations or any(isinstance(v,bool) or not isinstance(v,int) or v<0 for v in reservations.values()) or quota.get("total_requests")!=sum(reservations.values()): raise RuntimeError("invalid release gate: quota_receipts")
- writes=_row(receipt,"dry_run_zero_writes"); deltas=writes.get("table_deltas")
- if writes.get("status")!="verified" or not isinstance(deltas,Mapping) or not deltas or any(v!=0 for v in deltas.values()): raise RuntimeError("dry-run side-effect gate failed")
- sends=_row(receipt,"dry_run_zero_sends")
- if sends.get("status")!="verified" or sends.get("telegram_message_ids")!=[] or sends.get("message_id_delta")!=0: raise RuntimeError("dry-run side-effect gate failed")
- migrations=_row(receipt,"migration_version"); versions=migrations.get("versions")
- if migrations.get("status")!="verified" or not isinstance(versions,list) or [r.get("version") for r in versions if isinstance(r,Mapping)]!=["20260907","20260908"] or len(versions)!=2 or any(not isinstance(r,Mapping) or not _hash(r.get("sha256")) for r in versions): raise RuntimeError("invalid release gate: migration_version")
- for gate in ("gateway_version","dashboard_api_version"):
-  row=_row(receipt,gate)
-  if row.get("status")!="deployed" or isinstance(row.get("version"),bool) or not isinstance(row.get("version"),int) or row["version"]<=0 or not _hash(row.get("source_sha256")): raise RuntimeError(f"invalid release gate: {gate}")
-  _same(row,("candidate_sha","deployed_sha"),candidate,gate)
- site=_row(receipt,"site_version"); parsed=urlparse(str(site.get("url","")))
- if site.get("status")!="deployed" or not site.get("version") or parsed.scheme!="https" or not isinstance(site.get("asset_hashes"),list) or not site["asset_hashes"] or any(not _hash(v) for v in site["asset_hashes"]): raise RuntimeError("invalid release gate: site_version")
- _same(site,("candidate_sha","deployed_sha"),candidate,"site_version")
- for gate,status in (("owner_canary",200),("anonymous_denial",401),("non_owner_denial",403)):
-  row=_row(receipt,gate)
-  if row.get("status")!="verified" or row.get("http_status")!=status or not isinstance(row.get("url"),str): raise RuntimeError(f"invalid release gate: {gate}")
- parity=_row(receipt,"source_parity"); counts=parity.get("counts"); chain=parity.get("scheduled_chain"); required={"runs","events","rankings","packets","reports","report_publications"}
- if parity.get("status")!="verified" or parity.get("relationships_verified") is not True or parity.get("hashes_verified") is not True or not isinstance(chain,Mapping) or not isinstance(counts,Mapping) or set(counts)!=required or any(isinstance(counts[k],bool) or not isinstance(counts[k],int) or counts[k]<=0 for k in required): raise RuntimeError("invalid release gate: source_parity")
- _same(parity,("candidate_sha",),candidate,"source_parity")
- scheduled=_row(receipt,"scheduled_receipt"); ids=(scheduled.get("run_id"),scheduled.get("intelligence_run_id"),scheduled.get("packet_id"),scheduled.get("report_id")); pub=scheduled.get("publication_receipt")
- if scheduled.get("status")!="completed" or not all(_uuid(v) for v in ids) or ids[0]!=ids[1] or not isinstance(pub,Mapping) or pub.get("status") not in {"accepted_by_telegram","duplicate"} or not _hash(scheduled.get("packet_hash")) or not _hash(scheduled.get("report_hash")): raise RuntimeError("invalid release gate: scheduled_receipt")
- for field in ("run_id","intelligence_run_id","packet_id","packet_hash","report_id","report_hash","publication_receipt"):
-  if scheduled.get(field)!=chain.get(field): raise RuntimeError("scheduled receipt does not match reconciled source chain")
- msg=pub.get("telegram_message_ids")
- if pub.get("status")=="accepted_by_telegram" and (not isinstance(msg,list) or not msg or any(isinstance(v,bool) or not isinstance(v,int) or v<=0 for v in msg)): raise RuntimeError("invalid release gate: scheduled_receipt")
- rollback=_row(receipt,"rollback_check"); gateway=rollback.get("gateway"); runtime=rollback.get("runtime_login")
- if rollback.get("status")!="rolled_back" or rollback.get("function")!="owner-dashboard-api" or rollback.get("dashboard_secrets_unset") != ["DASHBOARD_ALLOWED_ORIGINS","DASHBOARD_DATABASE_URL","DASHBOARD_OWNER_USER_ID"] or not isinstance(runtime,Mapping) or runtime.get("status")!="disabled" or runtime.get("login") is not False or runtime.get("memberships")!=0 or not isinstance(gateway,Mapping) or gateway.get("status")!="restored" or not _hash(gateway.get("source_sha256")) or not SHA.fullmatch(str(gateway.get("git_sha",""))) or isinstance(gateway.get("function_version"),bool) or not isinstance(gateway.get("function_version"),int) or gateway["function_version"]<=0: raise RuntimeError("invalid release gate: rollback_check")
- return {"status":"verified","candidate_sha":candidate,"gate_count":len(REQUIRED_GATES)}
+ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT))
+from scripts.export_recovery_bundle import canonical_json, sha256
+from scripts.verify_owner_dashboard_deployment import migration_statements_sha256, normalize_migration_statements
 
-def main()->int:
- parser=argparse.ArgumentParser(description=__doc__); parser.add_argument("receipt",type=Path); args=parser.parse_args()
- try:value=json.loads(args.receipt.read_text())
- except (OSError,json.JSONDecodeError) as error:raise SystemExit("release receipt is unavailable or malformed") from error
- if not isinstance(value,dict):raise SystemExit("release receipt must be a JSON object")
- print(json.dumps(verify_release(value),sort_keys=True,separators=(",",":"))); return 0
-if __name__=="__main__":raise SystemExit(main())
+MAX_SCHEDULED_RECEIPT_AGE_SECONDS = 7 * 24 * 60 * 60
+SHA = re.compile(r"[0-9a-f]{40}")
+UUID = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}")
+FUNCTIONS = ("market-briefing-gateway", "owner-dashboard-api", "telegram-portfolio")
+
+
+def verify_component_artifacts(repo: Path, candidate: str, record: Mapping, source: ReleaseDataSource, *, deployed_at: datetime | None = None) -> None:
+    """Bind protected management-plane readbacks to all changed candidate bytes."""
+    names = (*FUNCTIONS, "owner-web-site")
+    rows = record.get("component_readbacks")
+    require(isinstance(rows, list) and [row.get("component") for row in rows] == list(names),
+            "all four component readbacks are required")
+    hosting = json.loads(git(repo, "show", f"{candidate}:.openai/hosting.json"))
+    for row in rows:
+        name = row["component"]
+        require(row.get("candidate_sha") == candidate and isinstance(row.get("deployment_id"), str)
+                and row["deployment_id"] and isinstance(row.get("version"), str) and row["version"]
+                and row.get("origin") == "management_plane_download", "component platform identity is incomplete")
+        expected = (git_files(repo, candidate, f"supabase/functions/{name}") if name in FUNCTIONS else None)
+        files = source.artifact(row["artifact_id"])
+        digest = tree_sha256(files)
+        require(digest == row["deployed_sha256"], "component readback artifact bytes mismatch")
+        if expected is not None:
+            function = next(item for item in record["functions"] if item["function"] == name)
+            require(files == expected and row["deployment_id"] == function.get("deployment_id")
+                    and row["version"] == str(function["function_version"]), "component deployed byte/version parity mismatch")
+        else:
+            require(row.get("project_id") == hosting.get("project_id")
+                    and hosting.get("static", {}).get("directory") == "dist"
+                    and {path: sha256(raw) for path, raw in files.items()} == record["static_assets"]["files"],
+                    "Site deployment identity or deployed bytes mismatch")
+        prior = row.get("prior")
+        require(isinstance(prior, Mapping) and type(prior.get("exists")) is bool
+                and isinstance(prior.get("configuration"), Mapping), "component prior-state rollback capture is incomplete")
+        captured = timestamp(prior.get("captured_at"))
+        require(captured < (deployed_at or datetime.now(timezone.utc)), "component rollback capture is not predeployment")
+        if prior["exists"]:
+            require(isinstance(prior.get("deployment_id"), str) and prior["deployment_id"]
+                    and isinstance(prior.get("version"), str) and prior["version"]
+                    and tree_sha256(source.artifact(prior["artifact_id"])) == prior["source_sha256"],
+                    "component prior rollback bytes or identity mismatch")
+        else:
+            require(prior.get("deployment_id") is None and prior.get("version") is None
+                    and prior.get("artifact_id") is None, "component absence proof is inconsistent")
+
+
+@runtime_checkable
+class ReleaseDataSource(Protocol):
+    def scheduled_run(self, deployed_at: str) -> str: ...
+    def deployment(self, deployment_id: int) -> Mapping: ...
+    def ci(self, workflow_run_id: int) -> Mapping: ...
+    def merge(self, pull_request_number: int) -> Mapping: ...
+    def reviews(self, pull_request_number: int) -> list[Mapping]: ...
+    def release_rows(self, run_id: str) -> Mapping: ...
+    def artifact(self, artifact_id: int) -> Mapping[str, bytes]: ...
+
+
+def require(condition: object, message: str) -> None:
+    if not condition:
+        raise RuntimeError(message)
+
+
+def timestamp(value: object) -> datetime:
+    try:
+        parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+        require(parsed.tzinfo is not None, "receipt timestamp has no timezone")
+        return parsed.astimezone(timezone.utc)
+    except (ValueError, TypeError) as error:
+        raise RuntimeError("receipt timestamp is invalid") from error
+
+
+def path_is_safe(path: str) -> bool:
+    return bool(path) and "\\" not in path and not PurePosixPath(path).is_absolute() and all(part not in {"", ".", ".."} for part in path.split("/"))
+
+
+def tree_sha256(files: Mapping[str, bytes]) -> str:
+    require(files and all(path_is_safe(name) and isinstance(raw, bytes) for name, raw in files.items()), "artifact paths or bytes are invalid")
+    digest = hashlib.sha256()
+    for name, raw in sorted(files.items()):
+        digest.update(name.encode() + b"\0" + raw + b"\0")
+    return digest.hexdigest()
+
+
+def git(repo: Path, *args: str) -> bytes:
+    result = subprocess.run(["git", *args], cwd=repo, capture_output=True, check=False)
+    require(result.returncode == 0, "candidate Git object is unavailable")
+    return result.stdout
+
+
+def git_commit(repo: Path, sha: str) -> datetime:
+    require(bool(SHA.fullmatch(sha)), "candidate SHA is malformed")
+    raw = git(repo, "cat-file", "commit", sha)
+    require(hashlib.sha1(b"commit " + str(len(raw)).encode() + b"\0" + raw).hexdigest() == sha, "candidate Git object hash mismatch")
+    return timestamp(git(repo, "show", "-s", "--format=%cI", sha).decode().strip())
+
+
+def git_files(repo: Path, sha: str, prefix: str) -> dict[str, bytes]:
+    files = {}
+    for entry in git(repo, "ls-tree", "-rz", sha, "--", prefix).split(b"\0"):
+        if not entry:
+            continue
+        metadata, path = entry.split(b"\t", 1)
+        mode, kind, object_id = metadata.decode().split()
+        require(mode in {"100644", "100755"} and kind == "blob", "candidate artifact includes non-file entries")
+        name = path.decode()
+        require(name.startswith(prefix + "/"), "candidate artifact path mismatch")
+        files[name[len(prefix) + 1:]] = git(repo, "cat-file", "blob", object_id)
+    require(files, "candidate source tree is empty")
+    return files
+
+
+def verify_artifacts(repo: Path, static_root: Path, candidate: str, record: Mapping, source: ReleaseDataSource, now: datetime, deployed: datetime) -> None:
+    verify_component_artifacts(repo, candidate, record, source, deployed_at=deployed)
+    migrations = git_files(repo, candidate, "sql/migrations")
+    expected_migrations = [{"path": f"sql/migrations/{path}", "version": Path(path).name.split("_", 1)[0],
+                            "sha256": migration_statements_sha256(normalize_migration_statements(raw.decode("utf-8")))}
+                           for path, raw in sorted(migrations.items()) if path.endswith(".sql")]
+    require(record["migrations"] == expected_migrations, "migration byte hashes or complete version set differ from candidate")
+    functions = record["functions"]
+    require(isinstance(functions, list) and [row["function"] for row in functions] == list(FUNCTIONS), "function evidence is incomplete")
+    for row in functions:
+        require(row["git_sha"] == candidate and type(row["function_version"]) is int and row["function_version"] > 0
+                and row["source_sha256"] == tree_sha256(git_files(repo, candidate, f"supabase/functions/{row['function']}")), "function byte hash or candidate SHA mismatch")
+    static = record["static_assets"]
+    require(static["candidate_sha"] == candidate and static["source_sha256"] == tree_sha256(git_files(repo, candidate, "apps/web")), "static source candidate hash mismatch")
+    require(static_root.is_dir() and not static_root.is_symlink(), "static build is unavailable")
+    local_files = {}
+    for path in sorted(static_root.rglob("*")):
+        require(not path.is_symlink(), "static build includes a symlink")
+        if path.is_file():
+            local_files[path.relative_to(static_root).as_posix()] = sha256(path.read_bytes())
+    require(local_files and "index.html" in local_files and local_files == static["files"], "static artifact bytes do not match protected deployment")
+    capture = record["rollback_capture"]
+    captured = timestamp(capture["captured_at"])
+    require(captured < deployed <= now and git_commit(repo, capture["commit_sha"]) <= captured, "rollback capture is not predeployment")
+    captured_files = source.artifact(capture["artifact_id"])
+    captured_hash = tree_sha256(captured_files)
+    require(captured_files == git_files(repo, capture["commit_sha"], "supabase/functions/market-briefing-gateway")
+            and captured_hash == capture["source_sha256"], "captured rollback artifact bytes mismatch")
+    outcome = record.get("deployment_outcome")
+    if outcome == "succeeded":
+        ready = record["rollback_readiness"]
+        drill = ready["isolated_drill"]
+        require(ready["status"] == "ready" and type(ready["function_version"]) is int and ready["function_version"] > 0
+                and ready["source_sha256"] == captured_hash and drill["status"] == "verified" and drill["isolated"] is True
+                and drill["source_sha256"] == captured_hash and timestamp(drill["started_at"]) <= timestamp(drill["completed_at"]), "successful deployment rollback readiness is incomplete")
+    elif outcome == "failed":
+        rollback = record["rollback"]
+        gateway, runtime = rollback["gateway"], rollback["runtime_login"]
+        require(rollback["status"] == "rolled_back" and gateway["status"] == "restored" and gateway["commit_sha"] == capture["commit_sha"]
+                and gateway["source_sha256"] == captured_hash and type(gateway["function_version"]) is int and gateway["function_version"] > 0
+                and captured <= timestamp(rollback["gateway_restored_at"]) <= timestamp(rollback["dashboard_cleaned_at"]) < deployed
+                and runtime["login"] is False and runtime["memberships"] == 0
+                and rollback["dashboard_secrets_unset"] == ["DASHBOARD_ALLOWED_ORIGINS", "DASHBOARD_DATABASE_URL", "DASHBOARD_OWNER_USER_ID"], "gateway-first rollback evidence is incomplete")
+    else:
+        raise RuntimeError("deployment outcome is missing or unsafe")
+
+
+def one(rows: object, label: str) -> Mapping:
+    require(isinstance(rows, list) and len(rows) == 1 and isinstance(rows[0], Mapping), f"scheduled {label} receipt is missing or ambiguous")
+    return rows[0]
+
+
+def report_identity(kind: str, market_date: str, packet_hash: str, report_hash: str) -> tuple[str, str]:
+    key = sha256(f"v2:{kind}:{market_date}:{packet_hash}:{report_hash}".encode())
+    return key, f"{key[:8]}-{key[8:12]}-5{key[13:16]}-8{key[17:20]}-{key[20:32]}"
+
+
+def verify_scheduled(rows: Mapping, run_id: str, deployed: datetime, now: datetime) -> dict:
+    run = one(rows["run"], "run")
+    intelligence = one(rows["intelligence_runs"], "intelligence run")
+    require(UUID.fullmatch(run_id) and run["id"] == intelligence["id"] == run_id, "scheduled run identity mismatch")
+    phase, market_date = run["scheduled_phase"], run["scheduled_market_date"]
+    start, end = timestamp(run["started_at"]), timestamp(run["finished_at"])
+    require(phase in {"pre-market", "intraday", "post-market"} and run["kind"] == intelligence["phase"] == phase
+            and intelligence["market_date"] == market_date and run["status"] in {"completed", "suppressed"}
+            and deployed < start <= end <= now and (now - end).total_seconds() <= MAX_SCHEDULED_RECEIPT_AGE_SECONDS, "scheduled receipt is stale, future, or not postdeployment")
+    requests = rows["requests"]
+    require(all(isinstance(row, Mapping) and UUID.fullmatch(str(row.get("request_id", ""))) for row in requests), "scheduled request UUID is invalid")
+    start_request = one([row for row in requests if row["request_id"] == run["gateway_request_id"]], "start")
+    require(start_request["operation"] == "start_run" and start_request["run_id"] == run_id and start_request["status"] == "completed"
+            and start_request["response"]["run_id"] == run_id and start_request["response"].get("duplicate") is False
+            and start_request["response"].get("dry_run") is not True, "scheduled start is duplicate or dry-run")
+    completion = one(rows["completions"], "collection")
+    packet = one(rows["packets"], "packet")
+    require(UUID.fullmatch(completion["completion_id"]) and completion["run_id"] == run_id
+            and any(row["id"] == completion["completion_id"] and row["run_id"] == run_id and row["status"] == "completed" for row in rows["run_events"])
+            and rows["checkpoints"] and all(row["run_id"] == run_id for row in rows["checkpoints"]), "scheduled collection stage is not persisted")
+    require(UUID.fullmatch(packet["id"]) and packet["run_id"] == run_id and sha256(canonical_json(packet["packet"]).encode()) == packet["packet_hash"]
+            and completion["receipt"]["packet_id"] == packet["id"] and completion["receipt"]["packet_hash"] == packet["packet_hash"], "scheduled packet content or collection hash mismatch")
+    event_ids = set()
+    for row in rows["events"]:
+        require(UUID.fullmatch(row["id"]) and row["run_id"] == run_id and sha256(canonical_json(row["canonical"]).encode()) == row["content_hash"], "event content hash mismatch")
+        event_ids.add(row["id"])
+    for row in rows["rankings"]:
+        require(UUID.fullmatch(row["id"]) and row["run_id"] == run_id and row["event_id"] in event_ids
+                and sha256(canonical_json(row["canonical"]).encode()) == row["content_hash"], "ranking content or event relationship mismatch")
+    evaluation = one([row for row in requests if row["operation"] == "evaluate_and_publish" and row["run_id"] == run_id and row["status"] == "completed"], "evaluation")
+    evaluation_publication = one([row for row in rows["evaluation_publications"] if row["id"] == evaluation["response"]["publication_id"]], "evaluation publication")
+    require(UUID.fullmatch(evaluation_publication["id"]) and evaluation_publication["run_id"] == run_id and evaluation_publication["phase"] == phase
+            and evaluation_publication["market_date"] == market_date and evaluation_publication["status"] == "suppressed", "scheduled evaluation publication mismatch")
+    origin = one(rows["origins"], "report origin")
+    report_request = one([row for row in requests if row["request_id"] == origin["request_id"] and row["operation"] == "record_report" and row["run_id"] is None and row["status"] == "completed"], "report request")
+    report = one([row for row in rows["reports"] if row["id"] == report_request["response"]["report_id"]], "report")
+    require((origin["requested_idempotency_key"], origin["requested_report_id"]) == report_identity(origin["requested_kind"], market_date, packet["packet_hash"], origin["requested_report_hash"])
+            and (report["idempotency_key"], report["id"]) == report_identity(report["kind"], market_date, packet["packet_hash"], report["report_hash"]), "scheduled original or rendered report identity mismatch")
+    allowed = {"pre-market": {"morning", "monthly"}, "intraday": {"intraday", "urgent"}, "post-market": {"weekly", "monthly", "theme", "urgent"}}
+    require(origin["run_id"] == run_id and origin["scheduled_phase"] == phase and origin["market_date"] == market_date and origin["requested_kind"] in allowed[phase]
+            and UUID.fullmatch(origin["requested_report_id"]) and re.fullmatch(r"[0-9a-f]{64}", origin["requested_idempotency_key"])
+            and re.fullmatch(r"[0-9a-f]{64}", origin["requested_report_hash"])
+            and UUID.fullmatch(report["id"]) and report["run_id"] == run_id and report["market_date"] == market_date
+            and report["packet_id"] == origin["requested_packet_id"] == packet["id"]
+            and sha256(canonical_json(report["report"]).encode()) == report["report_hash"] == report_request["response"]["report_hash"]
+            and sha256(report["rendered_text"].encode()) == report["rendered_hash"] == report_request["response"]["rendered_hash"], "scheduled report origin, relationship, or hash mismatch")
+    publication = one([row for row in rows["publications"] if row["report_id"] == report["id"]], "publication")
+    require(publication["idempotency_key"] == report["idempotency_key"] and re.fullmatch(r"[0-9a-f]{64}", publication["idempotency_key"]), "scheduled outbox identity mismatch")
+    ids = publication["telegram_message_ids"]
+    if publication["status"] == "delivered":
+        accepted = timestamp(publication["telegram_accepted_at"])
+        require(isinstance(ids, list) and ids and all(type(value) is int and value > 0 for value in ids)
+                and start <= accepted <= end and publication.get("suppression_reason") is None and run["telegram_message_ids"] == ids, "original Telegram delivery receipt is incomplete")
+        delivery = {"status": "accepted_by_telegram", "telegram_message_ids": ids, "telegram_accepted_at": publication["telegram_accepted_at"]}
+    else:
+        reason = publication.get("suppression_reason")
+        require(publication["status"] == "suppressed" and ids == [] and publication["telegram_accepted_at"] is None
+                and isinstance(reason, str) and reason.strip() and run["telegram_message_ids"] == [], "explicit scheduled suppression reason is missing")
+        delivery = {"status": "suppressed", "telegram_message_ids": [], "suppression_reason": reason}
+    require(rows["quota"] and all(row["run_id"] == run_id and UUID.fullmatch(row["id"]) and type(row["actual_requests"]) is int
+            and type(row["reserved_requests"]) is int and 0 <= row["actual_requests"] <= row["reserved_requests"] for row in rows["quota"]), "scheduled quota receipts are incomplete")
+    return {"run_id": run_id, "packet_id": packet["id"], "packet_hash": packet["packet_hash"], "report_id": report["id"], "report_hash": report["report_hash"],
+            "stage_ids": {"collection": completion["completion_id"], "packet": packet["id"], "evaluation": evaluation["request_id"], "report": report_request["request_id"], "publication": publication["report_id"]},
+            "publication_key": publication["idempotency_key"], "publication_receipt": delivery}
+
+
+def verify_release(source: ReleaseDataSource, *, deployment_id: int, repo_root: Path = ROOT, static_root: Path = ROOT / "dist",
+                   clock: Callable[[], datetime] = lambda: datetime.now(timezone.utc)) -> dict[str, object]:
+    require(not isinstance(source, Mapping) and isinstance(source, ReleaseDataSource), "protected production data source is required")
+    try:
+        now = clock()
+        require(now.tzinfo is not None, "verifier clock must have timezone")
+        record = source.deployment(deployment_id)
+        candidate = record["sha"]
+        candidate_commit_time = git_commit(repo_root, candidate)
+        ci, merge = source.ci(record["workflow_run_id"]), source.merge(record["pull_request_number"])
+        deployed, merged = timestamp(record["deployed_at"]), timestamp(merge["merged_at"])
+        require(record["id"] == deployment_id and record["environment"] == "production" and record["candidate_sha"] == candidate
+                and ci["head_sha"] == candidate and ci["status"] == "completed" and ci["conclusion"] == "success"
+                and ci["path"] == ".github/workflows/owner-dashboard-ci.yml" and ci["id"] == record["workflow_run_id"]
+                and merge["merged"] is True and merge["merge_commit_sha"] == candidate
+                and merged <= candidate_commit_time < deployed <= now and candidate_commit_time <= timestamp(ci["updated_at"]) <= deployed, "protected CI/merge/deployment candidate SHA or time mismatch")
+        reviewed_head = merge["head"]["sha"]
+        require(bool(re.fullmatch(r"[0-9a-f]{40}", reviewed_head)), "reviewed PR head is malformed")
+        reviewed_head_time = git_commit(repo_root, reviewed_head)
+        reviews = source.reviews(record["pull_request_number"])
+        require(any(row["state"] == "APPROVED" and row["commit_id"] == reviewed_head
+                    and reviewed_head_time <= timestamp(row["submitted_at"]) <= merged <= candidate_commit_time <= deployed for row in reviews), "independent review of exact PR head is missing")
+        if reviewed_head != candidate:
+            ancestor = subprocess.run(["git", "merge-base", "--is-ancestor", reviewed_head, candidate], cwd=repo_root, capture_output=True, check=False)
+            if ancestor.returncode != 0:
+                reviewed_tree = subprocess.run(["git", "rev-parse", f"{reviewed_head}^{{tree}}"], cwd=repo_root, text=True, capture_output=True, check=False)
+                candidate_tree = subprocess.run(["git", "rev-parse", f"{candidate}^{{tree}}"], cwd=repo_root, text=True, capture_output=True, check=False)
+                require(reviewed_tree.returncode == candidate_tree.returncode == 0 and reviewed_tree.stdout == candidate_tree.stdout, "reviewed PR head does not bind candidate merge/tree")
+        verify_artifacts(repo_root, static_root, candidate, record, source, now, deployed)
+        require(record.get("dry_run") is False, "protected deployment dry-run authority must be false")
+        dry = record["dry_run_evidence"]
+        before, after = dry["before"], dry["after"]
+        argv = dry.get("safe_command_argv")
+        script_sha = dry.get("candidate_script_sha256")
+        expected_command_hash = hashlib.sha256(json.dumps({"argv": argv, "candidate_sha": candidate,
+            "candidate_script_sha256": script_sha}, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+        require(isinstance(before, Mapping) and isinstance(after, Mapping) and before["tables"] == after["tables"]
+                and isinstance(dry["table_deltas"], Mapping) and set(dry["table_deltas"]) == set(before["tables"])
+                and all(type(value) is int and value == 0 for value in dry["table_deltas"].values())
+                and type(dry["safe_command_exit_code"]) is int and dry["safe_command_exit_code"] == 0
+                and isinstance(argv, list) and all(isinstance(arg, str) for arg in argv) and candidate in argv and "--dry-run" in argv
+                and isinstance(script_sha, str) and script_sha == sha256(git(repo_root, "show", f"{candidate}:scripts/deploy_owner_dashboard_api.py"))
+                and dry["safe_command_sha256"] == expected_command_hash
+                and before.get("source") == after.get("source")
+                and all(isinstance(value, Mapping) and set(value) == {"count", "rows_sha256"} and type(value.get("count")) is int
+                        and isinstance(value.get("rows_sha256"), str) and re.fullmatch(r"[0-9a-f]{64}", value["rows_sha256"])
+                        for value in before["tables"].values()), "protected dry-run side-effect evidence is incomplete")
+        require(record["canaries"] == {"owner": 200, "anonymous": 401, "non_owner": 403}, "protected owner/denial canaries are incomplete")
+        run_id = source.scheduled_run(record["deployed_at"])
+        chain = verify_scheduled(source.release_rows(run_id), run_id, deployed, now)
+        return {"status": "verified", "candidate_sha": candidate, "deployment_id": deployment_id, **chain}
+    except (KeyError, TypeError, ValueError, IndexError, AttributeError) as error:
+        raise RuntimeError("protected release evidence is unavailable or malformed") from error
+
+
+def main() -> int:
+    from scripts.protected_evidence import GitHubProductionDataSource, PostgresReadOnlySource
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--repository", required=True)
+    parser.add_argument("--deployment-id", type=int, required=True)
+    parser.add_argument("--production-project-ref", required=True)
+    parser.add_argument("--static-root", type=Path, required=True)
+    args = parser.parse_args()
+    with PostgresReadOnlySource(os.environ.get("RELEASE_READONLY_DATABASE_URL", ""), args.production_project_ref) as database:
+        source = GitHubProductionDataSource(args.repository, args.production_project_ref, database)
+        print(json.dumps(verify_release(source, deployment_id=args.deployment_id, static_root=args.static_root), sort_keys=True))
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

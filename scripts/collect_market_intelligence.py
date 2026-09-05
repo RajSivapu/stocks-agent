@@ -17,7 +17,7 @@ if str(ROOT) not in sys.path:
 from lib import gateway  # noqa: E402
 from lib.config import load_settings  # noqa: E402
 from lib.intelligence.http import BoundedHttpClient  # noqa: E402
-from lib.intelligence.pipeline import IntelligencePipeline, PHASES, PipelineRequest  # noqa: E402
+from lib.intelligence.pipeline import IntelligencePipeline, PHASES, PipelineRequest, protected_collection_context  # noqa: E402
 from lib.intelligence.policy import load_intelligence_policy  # noqa: E402
 from lib.intelligence.providers import build_adapter  # noqa: E402
 from lib.intelligence.quota import QuotaSession  # noqa: E402
@@ -34,9 +34,7 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--market-date")
     parser.add_argument("--now")
     parser.add_argument("--context-file")
-    run_identifier = parser.add_mutually_exclusive_group(required=True)
-    run_identifier.add_argument("--request-id", dest="run_id")
-    run_identifier.add_argument("--run-id", dest="run_id")
+    parser.add_argument("--run-id")
     parser.add_argument("--dry-run", action="store_true")
     return parser
 
@@ -97,7 +95,11 @@ def _context(path: str | None) -> dict[str, object]:
     allowed = {
         "holdings", "owner_plans", "qualified_candidates", "urgent_events",
         "high_materiality_themes", "requested_topics",
+        "liquidity_by_ticker", "overlap_by_ticker",
     }
+    forbidden = {"comparison_ids", "learning_inputs"} & set(value)
+    if forbidden:
+        raise ValueError("comparison and learning inputs require typed gateway operations")
     return {key: value[key] for key in sorted(value) if key in allowed}
 
 
@@ -105,14 +107,22 @@ def main(argv: Sequence[str] | None = None, *, stdout: TextIO | None = None) -> 
     output = stdout or sys.stdout
     try:
         args = _parser().parse_args(argv)
+        if not args.dry_run and not args.run_id:
+            raise ValueError("scheduled collection requires run id")
         now = _now(args.now)
         request = PipelineRequest(
-            args.phase, _market_date(args.market_date, now), now, args.dry_run, args.run_id
+            args.phase, _market_date(args.market_date, now), now, args.dry_run,
+            args.run_id or "00000000-0000-4000-8000-000000000000",
         )
         context = _context(args.context_file)
         if args.dry_run:
             pipeline = IntelligencePipeline(object(), (), context=context)
         else:
+            protected = _read_context(args.run_id)
+            data = protected.get("data", protected)
+            # --context-file is fixture/intent input only. The scheduled path
+            # obtains holdings and every ranking value from the protected reader.
+            context = protected_collection_context(data["context"])
             policy = load_intelligence_policy(load_settings())
             pipeline = IntelligencePipeline(
                 gateway, _adapters(policy, now), context=context, packet_limits=policy.packet
@@ -126,6 +136,10 @@ def main(argv: Sequence[str] | None = None, *, stdout: TextIO | None = None) -> 
     except Exception:
         output.write(json.dumps({"error": "COLLECTION_FAILED", "ok": False}, separators=(",", ":"), sort_keys=True) + "\n")
         return 1
+
+
+def _read_context(run_id: str):
+    return gateway.call("read_intelligence_context", {}, run_id=run_id)
 
 
 if __name__ == "__main__":

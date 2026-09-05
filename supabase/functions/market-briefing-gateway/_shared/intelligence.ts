@@ -34,6 +34,16 @@ const DISPOSITIONS = [
   "near_duplicate",
   "dropped",
 ] as const;
+const DISCOVERY_STATUSES = ["qualified", "no_event", "insufficient_coverage"] as const;
+const PROVIDER_HOSTS: Readonly<Record<string, readonly string[]>> = {
+  gdelt: ["api.gdeltproject.org"], alpha_vantage: ["www.alphavantage.co"],
+  finnhub: ["finnhub.io"], yahoo: ["query1.finance.yahoo.com"],
+  sec_edgar: ["www.sec.gov", "data.sec.gov"], federal_register: ["www.federalregister.gov"],
+  white_house: ["www.whitehouse.gov"], doe: ["www.energy.gov"], dod: ["www.defense.gov"],
+  eia: ["api.eia.gov", "www.eia.gov"], fred: ["api.stlouisfed.org", "fred.stlouisfed.org"],
+  bls: ["api.bls.gov", "www.bls.gov"], bea: ["apps.bea.gov", "www.bea.gov"],
+  social: ["www.reddit.com", "oauth.reddit.com"],
+};
 
 type JsonObject = Record<string, unknown>;
 
@@ -42,6 +52,13 @@ export interface StartIntelligencePayload {
   market_date: string;
   policy_version: number;
   reservation_plan: { reservations: JsonObject[] };
+  request_window: JsonObject;
+}
+
+export interface CheckpointIntelligencePayload {
+  cache_key: string;
+  receipt: JsonObject;
+  items: JsonObject[];
 }
 
 export interface RecordIntelligencePayload {
@@ -60,7 +77,9 @@ export interface IntelligenceStartReceipt {
   run_id: string;
   reservation_ids: string[];
   cache_entries: JsonObject[];
+  request_window: JsonObject;
   duplicate: boolean;
+  reservation_usage?: Record<string, number>;
 }
 
 export interface IntelligenceRecordReceipt {
@@ -274,6 +293,26 @@ function canonicalizeUrl(value: string, path: string): string {
   return canonical;
 }
 
+function providerRequestUrl(value: unknown, provider: unknown, path: string): string {
+  const url = canonicalizeUrl(stringValue(value, path, 2_048), path);
+  const parsed = new URL(url);
+  if (/(?:api[_-]?key|token|secret|password)=/i.test(`${parsed.pathname}?${parsed.search}`)) {
+    throw new Error(`${path} contains a secret-bearing query or path`);
+  }
+  const host = parsed.hostname;
+  if (!PROVIDER_HOSTS[String(provider)]?.includes(host)) {
+    throw new Error(`${path} host is not approved for provider`);
+  }
+  return url;
+}
+
+function identifierArray(value: unknown, path: string, maxLength: number): string[] {
+  const rows = arrayValue(value, path, 32);
+  const values = rows.map((entry, index) => stringValue(entry, `${path}[${index}]`, maxLength));
+  if (new Set(values).size !== values.length) throw new Error(`${path} is duplicated`);
+  return values;
+}
+
 function canonicalValue(value: unknown): unknown {
   if (
     value === null || typeof value === "string" || typeof value === "boolean"
@@ -325,7 +364,7 @@ export function parseStartIntelligencePayload(
   const row = objectValue(value, "payload");
   exactKeys(
     row,
-    ["phase", "market_date", "policy_version", "reservation_plan"],
+    ["phase", "market_date", "policy_version", "reservation_plan", "request_window"],
     "payload",
   );
   const plan = objectValue(row.reservation_plan, "payload.reservation_plan");
@@ -376,6 +415,28 @@ export function parseStartIntelligencePayload(
       2_147_483_647,
     ),
     reservation_plan: { reservations: parsedReservations },
+    request_window: parseRequestWindow(row.request_window),
+  };
+}
+
+function parseRequestWindow(value: unknown): JsonObject {
+  const row = objectValue(value, "payload.request_window");
+  exactKeys(row, ["start", "end", "timezone", "market_date", "phase"], "payload.request_window");
+  const start = timestamp(row.start, "payload.request_window.start")!;
+  const end = timestamp(row.end, "payload.request_window.end")!;
+  if (Date.parse(start) >= Date.parse(end) || row.timezone !== "America/Chicago") {
+    throw new Error("payload.request_window is invalid");
+  }
+  return { start, end, timezone: "America/Chicago", market_date: dateValue(row.market_date, "payload.request_window.market_date"), phase: enumValue(row.phase, PHASES, "payload.request_window.phase") };
+}
+
+export function parseCheckpointIntelligencePayload(value: unknown): CheckpointIntelligencePayload {
+  const row = objectValue(value, "checkpoint payload");
+  exactKeys(row, ["cache_key", "receipt", "items"], "checkpoint payload");
+  return {
+    cache_key: stringValue(row.cache_key, "checkpoint payload.cache_key", 512),
+    receipt: boundedObject(row.receipt, "checkpoint payload.receipt", 16_384),
+    items: arrayValue(row.items, "checkpoint payload.items", 50).map((item, index) => boundedObject(item, `checkpoint payload.items[${index}]`, 16_384)),
   };
 }
 
@@ -398,6 +459,7 @@ function parseReceipt(value: unknown, index: number): JsonObject {
     "dropped_count",
     "error",
     "response_hash",
+    "cache_predecessor_receipt_id",
   ];
   exactKeys(row, keys, path);
   const status = enumValue(row.status, RECEIPT_STATUSES, `${path}.status`);
@@ -460,6 +522,9 @@ function parseReceipt(value: unknown, index: number): JsonObject {
     response_hash: row.response_hash === null
       ? null
       : hashValue(row.response_hash, `${path}.response_hash`),
+    cache_predecessor_receipt_id: row.cache_predecessor_receipt_id === null
+      ? null
+      : uuidValue(row.cache_predecessor_receipt_id, `${path}.cache_predecessor_receipt_id`),
   };
 }
 
@@ -470,10 +535,17 @@ function parseItem(value: unknown, index: number): JsonObject {
     "id",
     "run_item_id",
     "receipt_id",
+    "provider",
     "upstream_item_id",
     "canonical_url",
+    "request_url",
     "published_at",
+    "retrieved_at",
     "effective_at",
+    "reporting_at",
+    "entity_ids",
+    "security_ids",
+    "discovery_status",
     "title",
     "normalized_text",
     "canonical_content",
@@ -523,18 +595,33 @@ function parseItem(value: unknown, index: number): JsonObject {
   const normalizedCanonicalUrl = canonicalUrl === null
     ? null
     : canonicalizeUrl(canonicalUrl, `${path}.canonical_url`);
+  const provider = enumValue(row.provider, INTELLIGENCE_PROVIDERS, `${path}.provider`);
+  const requestUrl = providerRequestUrl(row.request_url, provider, `${path}.request_url`);
+  const entityIds = identifierArray(row.entity_ids, `${path}.entity_ids`, 160);
+  const securityIds = identifierArray(row.security_ids, `${path}.security_ids`, 32);
+  const discoveryStatus = enumValue(row.discovery_status, DISCOVERY_STATUSES, `${path}.discovery_status`);
+  if (discoveryStatus === "qualified" && securityIds.length === 0) {
+    throw new Error(`${path}.qualified evidence requires a security identifier`);
+  }
   return {
     id: uuidValue(row.id, `${path}.id`),
     run_item_id: uuidValue(row.run_item_id, `${path}.run_item_id`),
     receipt_id: uuidValue(row.receipt_id, `${path}.receipt_id`),
+    provider,
     upstream_item_id: nullableString(
       row.upstream_item_id,
       `${path}.upstream_item_id`,
       512,
     ),
     canonical_url: normalizedCanonicalUrl,
+    request_url: requestUrl,
     published_at: timestamp(row.published_at, `${path}.published_at`, true),
+    retrieved_at: timestamp(row.retrieved_at, `${path}.retrieved_at`),
     effective_at: timestamp(row.effective_at, `${path}.effective_at`, true),
+    reporting_at: timestamp(row.reporting_at, `${path}.reporting_at`, true),
+    entity_ids: entityIds,
+    security_ids: securityIds,
+    discovery_status: discoveryStatus,
     title: stringValue(row.title, `${path}.title`, 500),
     normalized_text: stringValue(
       row.normalized_text,
@@ -910,7 +997,7 @@ export function parseIntelligenceStartReceipt(
   const row = objectValue(value, "start intelligence receipt");
   exactKeys(
     row,
-    ["run_id", "reservation_ids", "cache_entries", "duplicate"],
+    ["run_id", "reservation_ids", "cache_entries", "request_window", "duplicate", ...("reservation_usage" in row ? ["reservation_usage"] : [])],
     "start intelligence receipt",
   );
   const cacheEntries = arrayValue(
@@ -922,7 +1009,7 @@ export function parseIntelligenceStartReceipt(
       boundedObject(
         entry,
         `start intelligence receipt.cache_entries[${index}]`,
-        16_384,
+        65_536,
       )
     );
   return {
@@ -936,6 +1023,11 @@ export function parseIntelligenceStartReceipt(
         uuidValue(id, `start intelligence receipt.reservation_ids[${index}]`)
       ),
     cache_entries: cacheEntries,
+    request_window: parseRequestWindow(row.request_window),
+    ...("reservation_usage" in row ? { reservation_usage: Object.fromEntries(
+      Object.entries(objectValue(row.reservation_usage, "reservation usage")).map(([key, value]) =>
+        [uuidValue(key, "reservation usage id"), integer(value, "reservation usage count", 0, 100)]),
+    ) } : {}),
     duplicate: typeof row.duplicate === "boolean" ? row.duplicate : (() => {
       throw new Error("start intelligence receipt.duplicate must be boolean");
     })(),

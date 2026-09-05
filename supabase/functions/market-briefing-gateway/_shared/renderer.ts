@@ -64,13 +64,22 @@ const TRIGGER_PRIORITY: NotificationKind[] = [
 const TRIGGERS = new Set(TRIGGER_PRIORITY);
 
 const REASON_LABELS: Record<PolicyReasonCode, string> = {
+  EVIDENCE_FUTURE: "Evidence timestamp is in the future",
+  EVIDENCE_UNVERIFIED: "Stored source is unverified",
+  EVIDENCE_CATEGORY_MISSING: "Required evidence category is missing",
+  EVIDENCE_CONFLICT: "Stored evidence conflicts",
   INVALID_SCHEMA: "Invalid structured proposal",
   QUOTE_MISSING: "Verified quote is missing",
   QUOTE_STALE: "Quote is stale",
   QUOTE_SESSION_MISMATCH: "Quote does not match the required market session",
+  ENTRY_TRIGGER_NOT_MET: "Current price is outside the approved entry trigger",
+  CASH_UNAVAILABLE: "Reconciled spendable cash is unavailable",
+  PORTFOLIO_BUDGET_EXCEEDED: "Portfolio budget or risk is already reserved",
+  MUTUALLY_EXCLUSIVE_ALTERNATIVE: "Alternative proposal was not selected",
   PRICE_RELATION_INVALID: "Price or threshold relationship is invalid",
   AMOUNT_SHARES_MISMATCH: "Amount and shares do not reconcile",
   CURRENT_EVIDENCE_MISSING: "Current evidence is missing",
+  EVIDENCE_STALE: "Persisted evidence is stale",
   ANALYST_INCOMPLETE: "Analyst review is incomplete",
   CHECKER_INCOMPLETE: "Checker review is incomplete",
   CHECKER_DOWNGRADE: "Checker downgraded the proposal",
@@ -718,12 +727,18 @@ function comparisonRows(
       );
     }
     lines.push(
-      `Forward evidence: ${comparison.prospective_view.toUpperCase()} — ${escapeHtml(comparison.reason)}`,
+      `Forward evidence: ${comparison.prospective_view.toUpperCase()} — ${
+        escapeHtml(comparison.reason)
+      }`,
     );
-    const plan = context.owner_plans.find((item) => item.active && item.ticker === comparison.baseline_ticker);
+    const plan = context.owner_plans.find((item) =>
+      item.active && item.ticker === comparison.baseline_ticker
+    );
     lines.push(
       plan
-        ? `Your recorded ${escapeHtml(plan.ticker)} ${escapeHtml(plan.cadence)} plan is unchanged.`
+        ? `Your recorded ${escapeHtml(plan.ticker)} ${
+          escapeHtml(plan.cadence)
+        } plan is unchanged.`
         : "No holding or recurring plan was changed.",
     );
     rows.push(lines.join("\n"));

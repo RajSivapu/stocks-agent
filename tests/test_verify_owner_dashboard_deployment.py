@@ -1,4 +1,6 @@
 import json
+import hashlib
+import sys
 
 import pytest
 
@@ -25,13 +27,21 @@ def v1_chain(run_id):
     event_id = "22222222-2222-4222-8222-222222222222"
     packet_id = "33333333-3333-4333-8333-333333333333"
     report_id = "44444444-4444-4444-8444-444444444444"
+    event_canonical = {"title": "event"}
+    ranking_canonical = {"event_id": event_id, "rank": 1}
+    packet_canonical = {"packet": "evidence"}
+    report_canonical = {"summary": "research"}
+    rendered_text = "Suggestion only."
+    publication_canonical = {"report_id": report_id, "status": "delivered", "telegram_message_ids": [7]}
+    digest = lambda value: hashlib.sha256(json.dumps(value, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
     return {
+        "overdue_scheduled_phases": [],
         "intelligence_runs": [{"id": run_id}],
-        "intelligence_events": [{"id": event_id, "run_id": run_id, "content_hash": "a" * 64}],
-        "intelligence_rankings": [{"id": "55555555-5555-4555-8555-555555555555", "run_id": run_id, "event_id": event_id, "content_hash": "b" * 64}],
-        "intelligence_packets": [{"id": packet_id, "run_id": run_id, "packet_hash": "c" * 64, "candidate_count": 1, "evidence_count": 1}],
-        "reports": [{"id": report_id, "run_id": run_id, "packet_id": packet_id, "report_hash": "d" * 64, "rendered_hash": "e" * 64}],
-        "report_publications": [{"request_id": "66666666-6666-4666-8666-666666666666", "run_id": run_id, "response": {"report_id": report_id, "publication_receipt": {"status": "accepted_by_telegram"}}}],
+        "intelligence_events": [{"id": event_id, "run_id": run_id, "canonical": event_canonical, "content_hash": digest(event_canonical)}],
+        "intelligence_rankings": [{"id": "55555555-5555-4555-8555-555555555555", "run_id": run_id, "event_id": event_id, "canonical": ranking_canonical, "content_hash": digest(ranking_canonical)}],
+        "intelligence_packets": [{"id": packet_id, "run_id": run_id, "canonical": packet_canonical, "packet_hash": digest(packet_canonical), "candidate_count": 1, "evidence_count": 1}],
+        "reports": [{"id": report_id, "run_id": run_id, "packet_id": packet_id, "canonical": report_canonical, "report_hash": digest(report_canonical), "rendered_text": rendered_text, "rendered_hash": hashlib.sha256(rendered_text.encode()).hexdigest()}],
+        "report_publications": [{"report_id": report_id, "run_id": run_id, "status": "delivered", "telegram_message_ids": [7], "telegram_accepted_at": "2026-09-03T20:00:00.000Z", "canonical": publication_canonical}],
     }
 
 
@@ -41,6 +51,60 @@ def test_canary_routes_are_get_only_and_bounded():
         "/v1/runs", "/v1/system", "/v1/intelligence", "/v1/reports",
     )
     assert verify.CANARY_METHOD == "GET"
+
+
+def test_deployment_auth_configuration_rejects_confirmation_url_only_templates():
+    with pytest.raises(RuntimeError, match="Token"):
+        verify.validate_deployment_auth_configuration({
+            "mailer_otp_length": 6,
+            "mailer_templates_magic_link_content": "{{ .ConfirmationURL }}",
+        })
+
+    assert verify.validate_deployment_auth_configuration({
+        "mailer_otp_length": 6,
+        "mailer_templates_magic_link_content": "Your code: {{ .Token }}",
+    }) == {"status": "verified", "otp_length": 6, "token_template": True}
+
+    with pytest.raises(RuntimeError, match="exactly"):
+        verify.validate_deployment_auth_configuration({
+            "mailer_otp_length": 6,
+            "mailer_templates_magic_link_content": "Your code: {{ .Token }}",
+            "secret": "must-not-be-accepted",
+        })
+
+
+@pytest.mark.parametrize("receipt_contents", [None, "not JSON"])
+def test_deployment_main_rejects_absent_or_malformed_auth_receipt_before_network_or_canary(
+    tmp_path, monkeypatch, receipt_contents,
+):
+    receipt_path = tmp_path / "auth-email-otp.json"
+    if receipt_contents is not None:
+        receipt_path.write_text(receipt_contents)
+    network_calls = []
+    canary_calls = []
+
+    def no_network(*_args, **_kwargs):
+        network_calls.append(True)
+        raise AssertionError("network must not be reached")
+
+    def no_canary(*_args, **_kwargs):
+        canary_calls.append(True)
+        raise AssertionError("canary must not be reached")
+
+    monkeypatch.setattr(verify, "urlopen", no_network)
+    monkeypatch.setattr(verify, "run_http_canary", no_canary)
+    monkeypatch.setattr(sys, "argv", [
+        "verify_owner_dashboard_deployment.py",
+        "--api-url", API_URL,
+        "--origin", ORIGIN,
+        "--auth-config-receipt", str(receipt_path),
+    ])
+
+    with pytest.raises(RuntimeError, match="Auth configuration receipt"):
+        verify.main()
+
+    assert network_calls == []
+    assert canary_calls == []
 
 
 def test_api_url_and_origin_must_be_exact_https_boundaries():
@@ -232,6 +296,11 @@ def test_source_reconciliation_rejects_unsupported_run_send_policy_and_price_cla
         with pytest.raises(RuntimeError, match="source receipt"):
             verify.reconcile_source_receipts(payloads, detail, changed, run_id)
 
+    changed = json.loads(json.dumps(source))
+    changed["intelligence_events"][0]["canonical"]["title"] = "replaced retained source body"
+    with pytest.raises(RuntimeError, match="source receipt"):
+        verify.reconcile_source_receipts(payloads, detail, changed, run_id)
+
 
 def test_source_reconciliation_requires_scoped_read_only_database_role():
     source = {
@@ -241,6 +310,28 @@ def test_source_reconciliation_requires_scoped_read_only_database_role():
     }
     with pytest.raises(RuntimeError, match="source receipt"):
         verify.reconcile_source_receipts({}, {}, source, "6903b3cc-05b7-4f90-bbc2-7e80a3a59e22")
+
+
+def test_source_reconciliation_rejects_an_overdue_scheduled_phase():
+    run_id = "6903b3cc-05b7-4f90-bbc2-7e80a3a59e22"
+    payloads = {route: envelope({}) for route in verify.CANARY_ROUTES}
+    payloads["/v1/today"] = envelope({"boundaries": verify.BOUNDARIES, "portfolio": {"data_as_of": None, "market_state": "unknown", "price_sources": [], "holdings": []}})
+    payloads["/v1/portfolio"] = envelope({"holdings": []})
+    payloads["/v1/runs"] = envelope({"runs": [{"id": run_id, "kind": "post-market", "status": "completed", "finished_at": "2026-09-03T20:00:00.000Z", "data_as_of": None, "evaluation_count": 0, "suggestion_count": 0, "publication_status": None}]})
+    payloads["/v1/alerts"] = envelope({"alerts": []})
+    payloads["/v1/intelligence"] = envelope({"run_id": run_id})
+    payloads["/v1/reports"] = envelope({"reports": [{"id": "44444444-4444-4444-8444-444444444444"}]})
+    detail = envelope({"run": payloads["/v1/runs"]["data"]["runs"][0], "request_receipts": [], "evaluations": [], "write_counts": {}, "telegram_message_ids": [], "incomplete_stages": []})
+    source = {
+        "database_user": verify.RUNTIME_ROLE, "transaction_read_only": "on",
+        "run": {"id": run_id, "kind": "post-market", "status": "completed", "finished_at": "2026-09-03T20:00:00.000Z", "data_as_of": None, "write_counts": {}, "telegram_message_ids": []},
+        "gateway_request_count": 0, "evaluation_count": 0, "suggestion_count": 0,
+        "alerts": [], "policy_version": None, "holdings": [], "portfolio_data_as_of": None,
+        **v1_chain(run_id),
+        "overdue_scheduled_phases": [{"market_date": "2026-09-03", "phase": "post-market", "deadline_at": "2026-09-03T22:00:00.000Z"}],
+    }
+    with pytest.raises(RuntimeError, match="overdue scheduled phase"):
+        verify.reconcile_source_receipts(payloads, detail, source, run_id)
 
 
 def test_source_database_url_must_use_the_scoped_session_pooler_login():

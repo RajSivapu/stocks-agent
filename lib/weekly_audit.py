@@ -142,7 +142,8 @@ def _summaries(suggestions, grades, evaluations):
                             if row.get("decision_source") == "gateway"
                             and row.get("delivery_segment") in eligible_segments}
     for evaluation in evaluations:
-        if evaluation.get("id") not in eligible_evaluations:
+        if evaluation.get("id") not in eligible_evaluations and \
+                evaluation.get("policy_status") != "vetoed":
             continue
         status = evaluation.get("policy_status")
         if status in policy:
@@ -167,6 +168,11 @@ def _summaries(suggestions, grades, evaluations):
             {"coverage_status": status, "horizon_days": horizon, "count": count}
             for (status, horizon), count in sorted(gaps.items(), key=lambda item: (str(item[0][0]), item[0][1] or 0))
         ],
+        "methodology": {
+            "return_window": "decision_session_close",
+            "entry_hit": "market_touch_not_owner_fill",
+            "actual_fill_status": "unavailable_without_explicit_trade_link",
+        },
     }, policy
 
 
@@ -189,9 +195,15 @@ def build_packet(*, holdings, transactions, suggestions, grades, lessons, snapsh
     clean_evaluations = [
         _safe({key: value for key, value in row.items() if key in _EVALUATION_FIELDS})
         for row in evaluations
-        if isinstance(row, dict) and row.get("id") in evaluation_ids
+        if isinstance(row, dict) and (
+            row.get("id") in evaluation_ids or row.get("policy_status") == "vetoed"
+        )
     ][:LIMITS["evaluations"]]
-    run_ids = {row.get("run_id") for row in clean_suggestions if row.get("run_id")}
+    run_ids = {
+        row.get("run_id")
+        for row in (*clean_suggestions, *clean_evaluations)
+        if row.get("run_id")
+    }
     publication_fields = {
         "id", "idempotency_key", "run_id", "market_date", "phase", "kind", "template_version",
         "status", "telegram_message_ids", "attempt_count", "created_at", "updated_at",

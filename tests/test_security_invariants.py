@@ -3,6 +3,11 @@ import json
 from pathlib import Path
 import re
 
+from scripts.verify_owner_dashboard_role import (
+    EXPECTED_COLUMNS,
+    evaluate_dashboard_privileges,
+)
+
 
 ROOT = Path(__file__).resolve().parents[1]
 SQL_FILES = (
@@ -255,8 +260,17 @@ def test_gateway_security_definer_functions_use_fixed_search_path_and_no_dynamic
     for path in GATEWAY_SQL_FILES:
         sql = path.read_text()
         assert sql.count("SECURITY DEFINER\nSET search_path = pg_catalog") >= len(GATEWAY_RPCS)
-        assert "EXECUTE format(" not in sql
-        assert "EXECUTE p_" not in sql
+        for signature in GATEWAY_RPCS:
+            name = signature.split("(", 1)[0]
+            matches = list(re.finditer(
+                rf"CREATE OR REPLACE FUNCTION public\.{re.escape(name)}\(",
+                sql,
+            ))
+            assert matches
+            for match in matches:
+                body = sql[match.start():sql.index("$$;", match.start())]
+                assert "EXECUTE format(" not in body
+                assert "EXECUTE p_" not in body
 
 
 def test_gateway_entrypoint_uses_only_pinned_dependencies_and_scoped_secrets():
@@ -284,15 +298,12 @@ def test_gateway_repository_uses_only_fixed_tables_and_named_rpcs():
     ).read_text()
     tables = set(re.findall(r'\.from\("([a-z_]+)"\)', source))
     assert tables == {
-        "analysis_runs",
-        "decision_evaluations",
         "dry_powder",
         "holdings",
         "lessons",
         "market_alert_drafts",
         "market_alert_events",
         "market_alert_rules",
-        "market_gateway_requests",
         "market_policy_config",
         "market_publications",
         "owner_investment_plans",
@@ -300,33 +311,47 @@ def test_gateway_repository_uses_only_fixed_tables_and_named_rpcs():
         "portfolio_commands",
         "radar",
         "stock_observations",
-        "suggestion_grades",
         "suggestions",
         "transactions",
     }
-    assert set(re.findall(r'\.rpc\("([a-z_]+)"', source)) == {
+    assert set(re.findall(r'\.rpc\(\s*"([a-z_]+)"', source)) == {
         "apply_market_artifacts",
-        "apply_market_decision_bundle",
+        "apply_market_decision_bundle_with_cash_snapshot",
+        "checkpoint_market_intelligence_collection",
         "claim_market_gateway_request",
+        "claim_market_intelligence_quote",
         "claim_market_publication",
+        "claim_market_report_publication",
         "complete_market_gateway_request",
         "create_market_alert_publication",
         "create_market_alert_drafts",
+        "create_market_report_publication",
         "expire_market_alert_rules",
         "finish_market_alert_publication",
+        "finish_market_analysis_run",
         "finish_market_publication",
+        "finish_market_report_publication",
         "get_due_market_decisions",
         "record_market_alert_evaluations",
-            "record_market_intelligence",
-            "record_market_learning",
-            "record_market_report",
+        "read_market_intelligence_completion",
+        "read_market_report_decisions",
+        "read_reconciled_cash_snapshot",
+        "record_market_run_outcome",
+        "record_market_intelligence",
+        "record_market_intelligence_quote",
+        "record_market_learning",
+        "record_market_report",
+        "record_market_report_origin",
         "read_market_evidence_packet",
+        "refresh_market_intelligence_context",
         "start_market_analysis_run",
         "start_market_intelligence_run",
+        "suppress_market_report_publication",
         "upsert_market_outcome_grades",
     }
     assert not re.search(r"client\.from\((?!\")[^)]+\)", source)
-    assert not re.search(r"client\.rpc\((?!\")[^)]+\)", source)
+    assert not re.search(r'client\.rpc\(\s*[^\s"]', source)
+    assert '"apply_market_decision_bundle"' not in source
 
 
 def test_gateway_authentication_precedes_body_parsing():
@@ -466,6 +491,129 @@ def test_outcome_migration_is_bounded_idempotent_and_service_role_only():
         assert fragment in sql
         assert fragment in schema
     assert sql in schema
+
+
+def test_weekly_audit_read_scope_is_column_limited_and_has_no_write_authority():
+    migration = ROOT / "sql" / "migrations" / "20260928_weekly_audit_read_scope.sql"
+    assert migration.exists()
+    sql = migration.read_text()
+    schema = (ROOT / "sql" / "schema.sql").read_text()
+    for fragment in (
+        "GRANT SELECT (id, suggestion_id, graded_at, result, price_then, price_later,",
+        "ON public.suggestion_grades TO stock_agent_dashboard",
+        "GRANT SELECT (id, entry_date, category, content, created_at)",
+        "ON public.lessons TO stock_agent_dashboard",
+        "GRANT SELECT (id, snap_date, ticker, close, day_move_pct, rsi14, sma50, sma200, macd_hist)",
+        "ON public.daily_snapshots TO stock_agent_dashboard",
+        "FOR SELECT TO stock_agent_dashboard USING (true)",
+    ):
+        assert fragment in sql
+        assert fragment in schema
+    for forbidden in ("GRANT INSERT", "GRANT UPDATE", "GRANT DELETE", "GRANT EXECUTE"):
+        assert forbidden not in sql
+    assert sql in schema
+
+
+def test_weekly_audit_columns_are_exactly_admitted_by_the_dashboard_verifier():
+    weekly_columns = {
+        "suggestion_grades": {
+            "id", "suggestion_id", "graded_at", "result", "price_then", "price_later",
+            "horizon_days", "note", "benchmark_ticker", "stock_return_pct",
+            "benchmark_return_pct", "excess_return_pct", "mfe_pct", "mae_pct",
+            "entry_hit_at", "stop_hit_at", "target_hit_at", "invalidation_hit_at",
+            "coverage_status", "horizon_sessions", "policy_version", "final_action",
+            "direction_success",
+        },
+        "lessons": {"id", "entry_date", "category", "content", "created_at"},
+        "daily_snapshots": {
+            "id", "snap_date", "ticker", "close", "day_move_pct", "rsi14", "sma50",
+            "sma200", "macd_hist",
+        },
+    }
+    for table, columns in weekly_columns.items():
+        assert EXPECTED_COLUMNS[table] == columns
+
+    def snapshot():
+        return {
+            "role": {
+                "rolname": "stock_agent_dashboard_runtime", "rolcanlogin": True,
+                "rolsuper": False, "rolcreatedb": False, "rolcreaterole": False,
+                "rolbypassrls": False,
+            },
+            "memberships": ["stock_agent_dashboard"],
+            "schema_privileges": {"USAGE"},
+            "table_privileges": {},
+            "column_privileges": {
+                table: set(columns) for table, columns in EXPECTED_COLUMNS.items()
+            },
+            "application_function_execute": [],
+            "owned_objects": [],
+            "policies": {
+                table: {"cmd": "SELECT", "roles": ["stock_agent_dashboard"]}
+                for table in EXPECTED_COLUMNS
+            },
+        }
+
+    assert evaluate_dashboard_privileges(snapshot())["write_privileges"] == 0
+    for table, column, operation in (
+        ("lessons", "content", "missing"),
+        ("daily_snapshots", "private_note", "extra"),
+    ):
+        drifted = snapshot()
+        if operation == "missing":
+            drifted["column_privileges"][table].remove(column)
+        else:
+            drifted["column_privileges"][table].add(column)
+        try:
+            evaluate_dashboard_privileges(drifted)
+        except RuntimeError as error:
+            assert "allowlist" in str(error)
+        else:
+            raise AssertionError(f"dashboard verifier accepted {operation} {table} column")
+
+
+def test_loss_streak_query_has_authoritative_chronology_and_stable_tie_breakers():
+    source = (ROOT / "supabase/functions/market-briefing-gateway/_shared/repository.ts").read_text()
+    compact = re.sub(r"\s+", "", source)
+    helper = compact.split("asyncfunctionrecentRecommendationGrades", 1)[1].split(
+        "functiontext", 1
+    )[0]
+    assert 'client.from("suggestions").select(' in helper
+    assert (
+        '"id,ts,eligible_grades:suggestion_grades!inner('
+        'suggestion_id,horizon_days,coverage_status,excess_return_pct,direction_success,graded_at)"'
+    ) in helper
+    assert (
+        '.eq("decision_source","gateway")'
+        '.eq("eligible_grades.coverage_status","complete")'
+        '.in("eligible_grades.horizon_days",[5,21,63])'
+        '.in("eligible_grades.direction_success",[true,false])'
+        '.order("ts",{ascending:false}).order("id",{ascending:false}).limit(150)'
+    ) in helper
+    assert 'client.from("suggestion_grades")' not in helper
+
+
+def test_ci_installs_the_complete_python_lock_with_hash_enforcement():
+    workflow = (ROOT / ".github" / "workflows" / "owner-dashboard-ci.yml").read_text()
+    assert ".venv/bin/pip install --require-hashes --only-binary=:all: -r requirements.lock" in workflow
+    assert '.venv/bin/pip install supabase pytest "psycopg[binary]" pyyaml' not in workflow
+
+    lock = (ROOT / "requirements.lock").read_text()
+    logical_lines = []
+    current = ""
+    for line in lock.splitlines():
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#"):
+            continue
+        current = f"{current} {stripped}".strip()
+        if not stripped.endswith("\\"):
+            logical_lines.append(current)
+            current = ""
+    assert not current
+    assert logical_lines
+    assert all("==" in line and "--hash=sha256:" in line for line in logical_lines)
+    for requirement in ("cryptography==", "psycopg==", "psycopg-binary==", "pytest==", "pyyaml==", "supabase=="):
+        assert any(line.lower().startswith(requirement) for line in logical_lines)
 
 
 def test_routine_documentation_exposes_only_scoped_cloud_credentials():

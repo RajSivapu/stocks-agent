@@ -4,6 +4,7 @@ import type {
   HoldingState,
   PolicyConfig,
   PolicyContext,
+  TrustedEvidenceFact,
   VerifiedQuote,
 } from "./contracts.ts";
 import { draftFromEvaluation, evaluateCandidate } from "./policy.ts";
@@ -22,6 +23,122 @@ function assertEquals<T>(actual: T, expected: T): void {
 
 const NOW = new Date("2026-09-02T17:00:00.000Z");
 const NEW_ID = () => "00000000-0000-4000-8000-000000000099";
+
+function trustedFacts(overrides: Record<string, unknown> = {}) {
+  return [{
+    candidate_key: "CENX",
+    evidence_id: "quote-1",
+    category: "quote",
+    source: "yahoo",
+    source_status: "succeeded",
+    authority: "market_data",
+    published_at: "2026-09-02T16:55:00.000Z",
+    retrieved_at: "2026-09-02T16:56:00.000Z",
+    expires_at: "2026-09-03T17:00:00.000Z",
+    reference: null,
+    normalized_text: "Stored quote.",
+    exposure_kind: null,
+    relationship_eligible: false,
+    claim_key: null,
+    claim_polarity: null,
+    ...overrides,
+  }];
+}
+
+Deno.test("stored evidence timestamps override a caller fresh label and recent timestamp", () => {
+  const result = Reflect.apply(evaluateCandidate, null, [
+    candidate(),
+    context(),
+    config(),
+    quote(),
+    NOW,
+    NEW_ID,
+    null,
+    new Set(),
+    trustedFacts({ published_at: "2020-01-01T00:00:00Z" }),
+  ]);
+  assertEquals(result.final_action, "watch");
+  assert(
+    result.reason_codes.includes("EVIDENCE_STALE"),
+    "stored stale reason missing",
+  );
+});
+
+Deno.test("future persisted publication and retrieval times fail closed", () => {
+  for (const field of ["published_at", "retrieved_at"]) {
+    const result = Reflect.apply(evaluateCandidate, null, [
+      candidate(),
+      context(),
+      config(),
+      quote(),
+      NOW,
+      NEW_ID,
+      null,
+      new Set(),
+      trustedFacts({ [field]: "2027-01-01T00:00:00Z" }),
+    ]);
+    assertEquals(result.final_action, "watch");
+    assert(
+      result.reason_codes.includes("EVIDENCE_FUTURE"),
+      `${field} allowed future evidence`,
+    );
+  }
+});
+
+Deno.test("claim categories and authority come from stored evidence", () => {
+  for (const overrides of [{ category: "news" }, { authority: "unverified" }]) {
+    const c = candidate();
+    c.factors[0].kind = "fundamentals";
+    const result = Reflect.apply(evaluateCandidate, null, [
+      c,
+      context(),
+      config(),
+      quote(),
+      NOW,
+      NEW_ID,
+      null,
+      new Set(),
+      trustedFacts(overrides),
+    ]);
+    assertEquals(result.final_action, "watch");
+    assert(
+      result.reason_codes.includes("EVIDENCE_CATEGORY_MISSING") ||
+        result.reason_codes.includes("EVIDENCE_UNVERIFIED"),
+      "stored qualification was ignored",
+    );
+  }
+});
+
+Deno.test("contradictory stored facts remain visible even if candidate omits one", () => {
+  const facts = [
+    ...trustedFacts({
+      claim_key: "contract-award",
+      claim_polarity: "affirmed",
+    }),
+    ...trustedFacts({
+      evidence_id: "denial",
+      claim_key: "contract-award",
+      claim_polarity: "denied",
+    }),
+  ];
+  const result = Reflect.apply(evaluateCandidate, null, [
+    candidate(),
+    context(),
+    config(),
+    quote(),
+    NOW,
+    NEW_ID,
+    null,
+    new Set(),
+    facts,
+  ]);
+  assertEquals(result.final_action, "watch");
+  assert(
+    result.reason_codes.includes("EVIDENCE_CONFLICT"),
+    "conflict not surfaced",
+  );
+  assertEquals(result.candidate.evidence.length, 2);
+});
 
 function config(): PolicyConfig {
   return {
@@ -67,6 +184,8 @@ function quote(
     as_of: asOf,
     market_state: marketState,
     source: "yahoo-chart",
+    actionable_price_status: "available",
+    actionable_price_reasons: [],
   };
 }
 
@@ -173,7 +292,24 @@ function evaluate(
   cfg = config(),
   now = NOW,
 ) {
-  return evaluateCandidate(c, ctx, cfg, q, now, NEW_ID);
+  const facts: TrustedEvidenceFact[] = c.evidence.map((item) => ({
+    candidate_key: c.ticker,
+    evidence_id: item.id,
+    category: item.kind,
+    source: item.source,
+    source_status: item.status === "fresh" ? "succeeded" : "failed",
+    authority: "official",
+    published_at: item.observed_at,
+    retrieved_at: item.retrieved_at,
+    expires_at: "2026-09-04T17:00:00.000Z",
+    reference: item.reference,
+    normalized_text: item.claims.join(" "),
+    exposure_kind: item.exposure_kind ?? null,
+    relationship_eligible: false,
+    claim_key: null,
+    claim_polarity: null,
+  }));
+  return evaluateCandidate(c, ctx, cfg, q, now, NEW_ID, null, new Set(), facts);
 }
 
 Deno.test("non-actionable actions are never upgraded", () => {
@@ -375,6 +511,19 @@ Deno.test("stale live quote downgrades Buy and on-demand cannot bypass it", () =
   );
 });
 
+Deno.test("entry above zone and target is never actionable", () => {
+  const result = evaluate(
+    candidate({ proposed_amount: "700", proposed_shares: "10" }),
+    context(),
+    quote("CENX", "70"),
+  );
+  assertEquals(result.final_action, "watch");
+  assert(
+    new Set<string>(result.reason_codes).has("ENTRY_TRIGGER_NOT_MET"),
+    "an out-of-range executable quote passed the entry trigger",
+  );
+});
+
 Deno.test("outside-session research is conditional and cannot emit an entry trigger", () => {
   const close = quote("CENX", "47.02", "2026-09-02T20:00:00.000Z", "CLOSED");
   const afterClose = new Date("2026-09-02T22:00:00.000Z");
@@ -467,6 +616,22 @@ Deno.test("prior plans need current evidence", () => {
   assert(
     result.reason_codes.includes("CURRENT_EVIDENCE_MISSING"),
     "stale morning plan was reused",
+  );
+});
+
+Deno.test("caller fresh label cannot make 2020 evidence current", () => {
+  const result = evaluate(candidate({
+    evidence: [{
+      ...candidate().evidence[0],
+      status: "fresh",
+      observed_at: "2020-09-02T16:55:00.000Z",
+      retrieved_at: "2020-09-02T16:56:00.000Z",
+    }],
+  }));
+  assertEquals(result.final_action, "watch");
+  assert(
+    result.reason_codes.map(String).includes("EVIDENCE_STALE"),
+    "caller freshness label bypassed evidence timestamp",
   );
 });
 
@@ -574,6 +739,19 @@ Deno.test("ownership and sell quantity mismatches veto", () => {
   assert(
     sold.reason_codes.includes("SELL_EXCEEDS_HOLDING"),
     "sell limit absent",
+  );
+  const reduce = evaluate(
+    {
+      ...sell,
+      action: "reduce",
+      analyst: { ...sell.analyst, action: "reduce" },
+    },
+    context({ holdings: [owned], holding_quotes: { CENX: quote() } }),
+  );
+  assertEquals(reduce.final_action, null);
+  assert(
+    reduce.reason_codes.includes("SELL_EXCEEDS_HOLDING"),
+    "reduce limit absent",
   );
 });
 
@@ -856,6 +1034,53 @@ Deno.test("hold override suppresses mechanical stop but not evidenced thesis bre
     evidence: [{ ...stop.evidence[0], kind: "event" as const }],
   };
   assertEquals(evaluate(thesis, ctx, quote("CENX", "44")).final_action, "hold");
+});
+
+Deno.test("approved sizing-free stop and thesis alerts persist urgent final facts", () => {
+  const owned = holding({
+    ticker: "CENX",
+    shares: "10",
+    bucket: "growth",
+    stop: "45",
+  });
+  for (const notification_kind of ["stop_breach", "thesis_break"] as const) {
+    const evidence = notification_kind === "thesis_break"
+      ? [{ ...candidate().evidence[0], kind: "event" as const }]
+      : candidate().evidence;
+    const alert = candidate({
+      action: "hold",
+      notification_kind,
+      proposed_amount: null,
+      proposed_shares: null,
+      entry_zone_low: null,
+      entry_zone_high: null,
+      stop: null,
+      target: null,
+      invalidation_price: null,
+      evidence,
+      analyst: {
+        completed: true,
+        action: "hold",
+        confidence: "high",
+        reason: "Policy-approved pure alert.",
+      },
+    });
+    const result = evaluate(
+      alert,
+      context({
+        holdings: [owned],
+        holding_quotes: { CENX: quote("CENX", "44") },
+      }),
+      quote("CENX", "44"),
+    );
+    assertEquals(result.status, "approved");
+    assertEquals(result.final_action, "hold");
+    assertEquals(
+      result.normalized.final_alert_urgency,
+      "urgent",
+    );
+    assertEquals(result.normalized.approved_terms, null);
+  }
 });
 
 Deno.test("holding output contains only server-authorized high-water and edge fields", () => {

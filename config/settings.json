@@ -46,6 +46,36 @@
       "bls": {"pre-market": 4, "intraday": 1, "post-market": 2, "on-demand": 2},
       "bea": {"pre-market": 4, "intraday": 1, "post-market": 2, "on-demand": 2}
     },
+    "provider_query_identifiers": {
+      "version": 1,
+      "cik_by_symbol": {
+        "CENX": "0000949157",
+        "NVDA": "0001045810"
+      },
+      "series_by_provider": {
+        "fred": "CPIAUCSL"
+      }
+    },
+    "provider_query_terms": {
+      "gdelt": {
+        "macro_policy": "economic policy",
+        "technology_ai_semiconductors": "semiconductor industry",
+        "energy_nuclear_grid": "nuclear energy grid",
+        "industrial_infrastructure": "industrial infrastructure",
+        "critical_minerals_magnets": "critical minerals",
+        "healthcare": "healthcare industry",
+        "consumer": "consumer spending",
+        "defense_trade_geopolitics": "defense trade geopolitics",
+        "earnings_ma": "earnings mergers acquisitions",
+        "intraday_delta": "market developments",
+        "day_reconciliation": "market close",
+        "on_demand_request": "market news"
+      },
+      "federal_register": {
+        "macro_policy": "economic policy",
+        "energy_nuclear_grid": "energy infrastructure"
+      }
+    },
     "packet": {
       "max_candidates": 12,
       "max_evidence_per_candidate": 8,

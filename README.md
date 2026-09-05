@@ -173,8 +173,24 @@ client-side calculations.
 
 1. Create the single owner user directly in Supabase Auth. Public signup remains disabled; the
    browser requests an email OTP with `shouldCreateUser: false`.
-2. Set the hosted Auth JWT lifetime to 900 seconds and confirm email signup remains disabled. The
-   matching local project settings are recorded in `supabase/config.toml`.
+2. Set the hosted Auth JWT lifetime to 900 seconds and confirm email signup remains disabled. In
+   **Authentication → Email Templates → Magic Link**, make the email body show the six-digit code
+   with `{{ .Token }}`; a `{{ .ConfirmationURL }}`-only body is not acceptable. Set the hosted email
+   OTP length to exactly `6`. The matching local OTP length is recorded in `supabase/config.toml`.
+   Supabase supports a [read-only Management API Auth-config endpoint](https://supabase.com/docs/reference/api/v1-get-auth-service-config)
+   for a deliberately provisioned token with `auth:read` / `auth_config_read`. This project does not
+   provision or store a Management API token, so the protected operator must manually verify those
+   two dashboard settings and save only this minimal local receipt (no owner email, URL, key, or
+   rendered email) outside version control:
+
+```json
+{"mailer_otp_length":6,"mailer_templates_magic_link_content":"Your code is {{ .Token }}"}
+```
+
+   Pass that receipt to both protected Auth commands with
+   `--auth-config-receipt /secure/path/auth-email-otp.json`. They fail closed before any Auth admin
+   request or deployment canary when it is absent, malformed, not six digits, or lacks the Token
+   variable. The scripts print only the bounded verification fields, never the template body.
 3. Apply `sql/migrations/20260906_owner_dashboard_read_role.sql` with the normal protected migration
    path.
 4. Put `DASHBOARD_OWNER_USER_ID` and the exact deployed HTTPS origin in
@@ -368,6 +384,66 @@ npx --yes deno@2.9.6 check supabase/functions/market-briefing-gateway/index.ts
    point and validating restore in isolation.
 6. Run dry-run start/context, migration/RPC verifiers, and one controlled live phase before resuming
    the cadence.
+
+## Local recovery evidence
+
+The recovery tools query a restricted database connection and keep plaintext in a temporary directory.
+They export only the allowlisted `holdings`, `transactions`, `commands`, `runs`, `packets`, `reports`,
+`publications`, `roles`, and `schema_version` datasets. Packet/report bodies, ledger values, original
+delivery IDs, role grants, and schema hashes are retained inside the encrypted artifact. Credentials
+and arbitrary extra fields are rejected. No cloud storage or paid backup provider is introduced.
+
+```bash
+python scripts/export_recovery_bundle.py \
+  --production-project-ref PRODUCTION_PROJECT_REF \
+  --destination /absolute/private/path/recovery-bundle.enc \
+  --encrypt-command 'local-encrypt {input} {output}' \
+  --decrypt-command 'local-decrypt {input} {output}'
+
+python scripts/verify_recovery_bundle.py /absolute/private/path/recovery-bundle.enc \
+  --production-project-ref PRODUCTION_PROJECT_REF \
+  --restore-project-ref ISOLATED_PROJECT_REF --allow-isolated-restore \
+  --decrypt-command 'local-decrypt {input} {output}'
+```
+
+Supply `RECOVERY_PRODUCTION_DATABASE_URL` and `RECOVERY_RESTORE_DATABASE_URL` through the protected
+environment. Both must use the restricted `stock_agent_release_reader_runtime` login. Migration
+`20260927` creates SELECT-only membership with the runtime initially NOLOGIN; password/login
+provisioning stays in the protected process. The restore project and queried server/database identity
+must both differ from production. TLS verifies the server certificate; configure the trusted CA
+through libpq's normal environment. JSON files cannot stand in for either database connection.
+
+The manifest binds canonical NDJSON hashes, exact counts, and packet/run/report/publication
+relationships. Verification queries the restored database and production counts directly; it fails
+if the production snapshot has advanced, so use a consistent export/drill window. The sidecar holds
+only hashes. Encryption and decrypt commands are mandatory, must use authenticated encryption with
+binary output, and must fail on a changed ciphertext byte. Copy commands and readable tar/text outputs
+fail. Encryption, decryption, or authentication-test failures remove the failed external artifact and
+its sidecar. Only exact absolute paths are accepted; archive members are never extracted to disk.
+
+The release verifier also accepts no caller receipt JSON:
+
+```bash
+python scripts/verify_personal_stock_agent_v1.py \
+  --repository OWNER/REPOSITORY --deployment-id DEPLOYMENT_ID \
+  --production-project-ref PRODUCTION_PROJECT_REF --static-root /absolute/path/to/dist
+```
+
+It uses `gh` read access plus `RELEASE_READONLY_DATABASE_URL`. The protected production GitHub
+deployment must reference an immutable `release_artifact_id`; its sole `release-record.json` file
+contains the candidate/project, CI run and PR IDs, complete migration paths/hashes, function versions
+and source hashes, static source/file hashes, measured dry-run/canary evidence, and the rollback
+capture/exercise records. Artifact provenance must match a successful candidate run of the protected
+`owner-dashboard-release.yml` workflow on main. This evidence publication is a protected rollout
+prerequisite; a missing record/workflow fails verification and is not a deployment claim.
+
+The deploy tool's required `--evidence-directory` retains predeployment gateway bytes under
+`gateway-source` plus `rollback-capture.json` before any gateway change. Publish those source files
+as the immutable rollback artifact and bind its numeric ID in the protected release record. The
+verifier recomputes local Git commit/time/tree hashes, migration/function/static bytes, captured
+rollback bytes, and exact queried stage/origin/report/outbox identities. It discovers the next
+existing scheduled postdeployment run without starting one. Suppression requires its dedicated
+reason; old reasonless rows remain unverified rather than receiving an invented historical reason.
 
 ## Unchanging guardrails
 

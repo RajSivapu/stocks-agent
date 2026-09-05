@@ -67,5 +67,36 @@ def test_ranking_records_every_fixed_point_component_and_missing_reason():
         "recency:missing",
         "portfolio_relevance:missing",
         "liquidity:missing",
+        "holding_weight:missing",
+        "overlap:missing",
+        "concentration:missing",
     }
     assert row.qualified is False
+
+
+def test_missing_liquidity_or_high_holding_concentration_is_insufficient():
+    missing_liquidity = candidate("MISS", complete=True)
+    missing_liquidity = CandidateInput(
+        **{field: getattr(missing_liquidity, field) for field in (
+            "ticker", "event", "relation", "evidence", "authority_corroboration",
+            "exposure_strength", "recency", "portfolio_relevance", "duplication_penalty",
+        )},
+        liquidity=None,
+    )
+    concentrated = candidate("CONC", complete=True)
+
+    missing = rank_candidates([missing_liquidity])[0]
+    held = rank_candidates([concentrated], holdings={"CONC": Decimal("0.42")})[0]
+
+    assert missing.qualified is False
+    assert "liquidity:missing" in missing.missing_reasons
+    assert held.qualified is False
+    assert "holding_weight:concentrated" in held.missing_reasons
+
+
+def test_missing_overlap_is_insufficient_and_is_not_substituted_from_holding_weight():
+    row = rank_candidates([candidate("HELD")], holdings={"HELD": Decimal("0.42")})[0]
+
+    assert row.qualified is False
+    assert "overlap:missing" in row.missing_reasons
+    assert "HOLDING_WEIGHT_CONCENTRATED" in row.veto_reasons

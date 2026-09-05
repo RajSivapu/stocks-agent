@@ -2,6 +2,9 @@ import { type FormEvent, useEffect, useState } from "react";
 
 import { useAuth } from "./AuthProvider";
 
+const OTP_LENGTH = 6;
+const OTP_PATTERN = `[0-9]{${OTP_LENGTH}}`;
+
 export function SignInPage() {
   const auth = useAuth();
   const [email, setEmail] = useState("");
@@ -70,11 +73,11 @@ export function SignInPage() {
                 id="owner-code"
                 inputMode="numeric"
                 autoComplete="one-time-code"
-                pattern="[0-9]{6}"
-                maxLength={6}
+                pattern={OTP_PATTERN}
+                maxLength={OTP_LENGTH}
                 required
                 value={code}
-                onChange={(event) => setCode(event.target.value.replace(/\D/g, "").slice(0, 6))}
+                onChange={(event) => setCode(event.target.value.replace(/\D/g, "").slice(0, OTP_LENGTH))}
               />
             </>
           )}

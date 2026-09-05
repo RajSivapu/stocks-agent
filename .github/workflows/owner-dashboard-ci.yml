@@ -18,6 +18,8 @@ jobs:
     timeout-minutes: 25
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          fetch-depth: 0
       - name: Bind verification to the workflow SHA
         run: test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
       - uses: actions/setup-python@42375524e23c412d93fb67b49958b491fce71c38
@@ -28,7 +30,8 @@ jobs:
           node-version: "24"
           cache: npm
       - run: python -m venv .venv
-      - run: .venv/bin/pip install supabase pytest "psycopg[binary]" pyyaml
+      - run: >-
+          .venv/bin/pip install --require-hashes --only-binary=:all: -r requirements.lock
       - run: npm ci --ignore-scripts
       - run: npm audit --audit-level=high --omit=optional --ignore-scripts
       - run: node scripts/check_dependency_licenses.mjs

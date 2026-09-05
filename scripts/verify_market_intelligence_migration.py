@@ -17,7 +17,12 @@ from psycopg.types.json import Jsonb
 
 
 ROOT = Path(__file__).resolve().parents[1]
-MIGRATION = ROOT / "sql" / "migrations" / "20260907_market_intelligence.sql"
+MIGRATIONS = (
+    ROOT / "sql" / "migrations" / "20260907_market_intelligence.sql",
+    ROOT / "sql" / "migrations" / "20260914_provider_evidence_integrity.sql",
+    ROOT / "sql" / "migrations" / "20260915_market_source_item_reuse.sql",
+    ROOT / "sql" / "migrations" / "20260916_run_scoped_request_provenance.sql",
+)
 GATEWAY_ROLE = "service_role"
 TABLES = (
     "market_intelligence_runs",
@@ -25,18 +30,21 @@ TABLES = (
     "market_source_quota_reservations",
     "market_source_receipts",
     "market_source_items",
+    "market_source_item_provenance",
     "market_intelligence_run_items",
     "market_events",
     "market_event_relationships",
     "market_candidate_rankings",
     "market_evidence_packets",
     "market_reports",
+    "market_policy_comparisons",
     "market_learning_observations",
 )
 RPCS = (
     "start_market_intelligence_run(uuid,text,date,integer,jsonb)",
     "record_market_intelligence(uuid,uuid,jsonb)",
     "read_market_evidence_packet(uuid,uuid)",
+    "read_market_report_decisions(uuid,uuid,jsonb)",
     "record_market_report(uuid,text,jsonb)",
     "record_market_learning(uuid,jsonb)",
 )
@@ -58,6 +66,11 @@ BEHAVIOR_ERRORS = {
     "social_provider_recorded": "social provider was not recorded",
     "failed_receipt_recorded": "failed receipt was not recorded",
     "report_idempotency": "report idempotency was not preserved",
+    "report_source_provenance": "report source provenance was not verified",
+    "report_decision_packet_provenance": "report decision packet provenance was not verified",
+    "report_comparison_provenance": "report comparison provenance was not verified",
+    "report_nested_provenance_required": "report nested provenance arrays were not required",
+    "report_semantic_key": "report semantic key was not verified",
     "theme_report_recorded": "theme report was not recorded",
     "incomplete_packet_rejected": "incomplete packet report was not rejected",
     "learning_type_rejected": "learning type was not rejected",
@@ -327,6 +340,14 @@ def _report_id_from_key(key: str) -> str:
     return str(UUID("".join(value)))
 
 
+def remove_report_fields(body: dict[str, object], fields: set[str]) -> dict[str, object]:
+    """Return a probe payload with selected nested provenance fields removed."""
+    changed = dict(body)
+    for field in fields:
+        changed.pop(field, None)
+    return changed
+
+
 def _completed_payload(
     *,
     reservation_id: UUID,
@@ -361,10 +382,17 @@ def _completed_payload(
             "id": str(item_id),
             "run_item_id": str(run_item_id),
             "receipt_id": str(receipt_id),
+            "provider": "gdelt",
             "upstream_item_id": "rollback-item",
-            "canonical_url": "https://api.gdeltproject.org/api/v2/doc/doc?query=rollback",
+            "canonical_url": "https://publisher.invalid/rollback-item",
+            "request_url": "https://api.gdeltproject.org/api/v2/doc/doc?query=rollback",
             "published_at": "2099-09-04T11:00:00+00:00",
+            "retrieved_at": "2099-09-04T12:00:00+00:00",
             "effective_at": None,
+            "reporting_at": None,
+            "entity_ids": [],
+            "security_ids": [],
+            "discovery_status": "no_event",
             "title": "Rollback-only verifier item",
             "normalized_text": "Bounded normalized verifier content.",
             "canonical_content": canonical_content,
@@ -462,8 +490,10 @@ def _add_evidence_graph(payload: dict[str, object]) -> dict[str, object]:
 
 def verify(cursor) -> tuple[dict[str, object], list[UUID]]:
     """Apply twice, exercise fail-closed behavior, and leave rollback to the caller."""
-    cursor.execute(MIGRATION.read_text())
-    cursor.execute(MIGRATION.read_text())
+    for migration in MIGRATIONS:
+        cursor.execute(migration.read_text())
+    for migration in MIGRATIONS:
+        cursor.execute(migration.read_text())
     policy_version = cursor.execute(
         "SELECT COALESCE(max(version),0)+1 FROM public.market_policy_config"
     ).fetchone()[0]
@@ -520,30 +550,72 @@ def verify(cursor) -> tuple[dict[str, object], list[UUID]]:
         """INSERT INTO public.decision_evaluations(
           id,request_id,run_id,candidate_id,policy_version,input_digest,raw_action,
           final_action,policy_status,reason_codes,explanations,normalized,evidence,analyst,checker
-        ) VALUES (%s,%s,%s,%s,%s,%s,'hold','hold','approved','[]','[]','{}','[]','{}','{}')""",
-        (decision_id, decision_request_id, prior_run, uuid4(), policy_version, "a" * 64),
+        ) VALUES (%s,%s,%s,%s,%s,%s,'hold','hold','approved','[]','[]',%s,'[]',%s,'{}')""",
+        (decision_id, decision_request_id, prior_run, uuid4(), policy_version, "a" * 64,
+         Jsonb({"ticker": "TEST"}), Jsonb({"packet_id": payload["packet"]["id"]})),
     )
-    report_key = hashlib.sha256(
-        f"v1:on-demand:{date.today() - timedelta(days=1)}:{payload['packet']['packet_hash']}".encode()
-    ).hexdigest()
-    report_id = UUID(_report_id_from_key(report_key))
     report_body = {
         "sections": [], "limitations": [],
         "source_ids": [payload["items"][0]["id"]],
         "policy_decision_ids": [str(decision_id)], "comparison_ids": [],
     }
+    report_hash = _canonical_hash(report_body)
+    report_key = hashlib.sha256(
+        f"v2:on-demand:{date.today() - timedelta(days=1)}:{payload['packet']['packet_hash']}:{report_hash}".encode()
+    ).hexdigest()
+    report_id = UUID(_report_id_from_key(report_key))
     report_payload = {
         "id": str(report_id),
         "packet_id": payload["packet"]["id"],
         "market_date": (date.today() - timedelta(days=1)).isoformat(),
         "kind": "on-demand",
         "report": report_body,
-        "report_hash": _canonical_hash(report_body),
+        "report_hash": report_hash,
         "rendered_text": "Rollback-only verifier report",
         "rendered_hash": hashlib.sha256(
             b"Rollback-only verifier report"
         ).hexdigest(),
     }
+    def rejects_report_body(body):
+        changed = {**report_payload, "report": body, "report_hash": _canonical_hash(body)}
+        key = hashlib.sha256(
+            f"v2:{changed['kind']}:{changed['market_date']}:{payload['packet']['packet_hash']}:{changed['report_hash']}".encode()
+        ).hexdigest()
+        changed["id"] = _report_id_from_key(key)
+        return _expect_db_error(cursor, lambda: _call(
+            cursor, "record_market_report", prior_run, key, Jsonb(changed)))
+
+    report_nested_provenance_required = all((
+        rejects_report_body(remove_report_fields(report_body, {'source_ids'})),
+        rejects_report_body(remove_report_fields(report_body, {'policy_decision_ids'})),
+        rejects_report_body(remove_report_fields(report_body, {'comparison_ids'})),
+        rejects_report_body(remove_report_fields(
+            report_body, {'source_ids', 'policy_decision_ids', 'comparison_ids'})),
+    ))
+    report_source_provenance = rejects_report_body({**report_body, "source_ids": [str(uuid4())]})
+    other_decision_id = uuid4()
+    cursor.execute(
+        """INSERT INTO public.decision_evaluations(
+          id,request_id,run_id,candidate_id,policy_version,input_digest,raw_action,
+          final_action,policy_status,normalized,analyst
+        ) VALUES (%s,%s,%s,%s,%s,%s,'hold','hold','approved',%s,%s)""",
+        (other_decision_id, decision_request_id, prior_run, uuid4(), policy_version, "c" * 64,
+         Jsonb({"ticker": "TEST"}), Jsonb({"packet_id": str(uuid4())})),
+    )
+    report_decision_packet_provenance = rejects_report_body({
+        **report_body, "policy_decision_ids": [str(other_decision_id)]})
+    report_comparison_provenance = rejects_report_body({**report_body, "comparison_ids": [str(uuid4())]})
+    mismatched_comparison_id = uuid4()
+    cursor.execute(
+        """INSERT INTO public.market_policy_comparisons(id,run_id,packet_id,evaluation_id,comparison)
+        VALUES (%s,%s,%s,%s,'{}')""",
+        (mismatched_comparison_id, prior_run, UUID(payload["packet"]["id"]), other_decision_id),
+    )
+    report_comparison_provenance = report_comparison_provenance and rejects_report_body({
+        **report_body, "comparison_ids": [str(mismatched_comparison_id)]})
+    report_semantic_key = _expect_db_error(cursor, lambda: _call(
+        cursor, "record_market_report", prior_run, "d" * 64,
+        Jsonb({**report_payload, "id": _report_id_from_key("d" * 64)})))
     report = _call(
         cursor, "record_market_report", prior_run, report_key, Jsonb(report_payload)
     )
@@ -556,6 +628,16 @@ def verify(cursor) -> tuple[dict[str, object], list[UUID]]:
         and report_replay["duplicate"] is True
         and report_replay["report_hash"] == report_payload["report_hash"]
         and report_replay["rendered_hash"] == report_payload["rendered_hash"]
+    )
+    report_idempotency = report_idempotency and _expect_db_error(
+        cursor,
+        lambda: _call(
+            cursor,
+            "record_market_report",
+            prior_run,
+            hashlib.sha256(b"arbitrary-report-key").hexdigest(),
+            Jsonb({**report_payload, "id": str(uuid4())}),
+        ),
     )
     observation_id = uuid4()
     observation_payload = {
@@ -755,12 +837,12 @@ def verify(cursor) -> tuple[dict[str, object], list[UUID]]:
         return run_id, case_payload
 
     invalid_url_run, invalid_url_payload = completion_case(30)
-    invalid_url_payload["items"][0]["canonical_url"] = "https://example.invalid/item"
+    invalid_url_payload["items"][0]["request_url"] = "https://example.invalid/item"
     url_host_rejected = _expect_db_error(
         cursor, lambda: _call(cursor, "record_market_intelligence", invalid_url_run,
                               uuid4(), Jsonb(invalid_url_payload)))
     cross_url_run, cross_url_payload = completion_case(31)
-    cross_url_payload["items"][0]["canonical_url"] = "https://www.sec.gov/item"
+    cross_url_payload["items"][0]["request_url"] = "https://www.sec.gov/item"
     cross_provider_host_rejected = _expect_db_error(
         cursor, lambda: _call(cursor, "record_market_intelligence", cross_url_run,
                               uuid4(), Jsonb(cross_url_payload)))
@@ -789,6 +871,8 @@ def verify(cursor) -> tuple[dict[str, object], list[UUID]]:
 
     social_run, social_payload = completion_case(33, provider="social")
     social_payload["items"][0]["canonical_url"] = "https://www.reddit.com/r/stocks/test"
+    social_payload["items"][0]["provider"] = "social"
+    social_payload["items"][0]["request_url"] = "https://www.reddit.com/r/stocks/test"
     social_record = _call(cursor, "record_market_intelligence", social_run, uuid4(),
                           Jsonb(social_payload))
     social_provider_recorded = social_record["counts"]["source_items"] == 1
@@ -823,14 +907,15 @@ def verify(cursor) -> tuple[dict[str, object], list[UUID]]:
                               Jsonb(bad_learning_hash))))
     semantic_hashes_rejected = all(semantic_results)
 
-    theme_key = hashlib.sha256(
-        f"v1:theme:{date.today() - timedelta(days=1)}:{payload['packet']['packet_hash']}".encode()
-    ).hexdigest()
     theme_payload = {
-        **report_payload, "id": _report_id_from_key(theme_key), "kind": "theme",
+        **report_payload, "id": str(uuid4()), "kind": "theme",
         "report": {**report_body, "theme": "policy"},
     }
     theme_payload["report_hash"] = _canonical_hash(theme_payload["report"])
+    theme_key = hashlib.sha256(
+        f"v2:theme:{date.today() - timedelta(days=1)}:{payload['packet']['packet_hash']}:{theme_payload['report_hash']}".encode()
+    ).hexdigest()
+    theme_payload["id"] = _report_id_from_key(theme_key)
     theme_result = _call(cursor, "record_market_report", prior_run, theme_key,
                          Jsonb(theme_payload))
     theme_report_recorded = theme_result["duplicate"] is False
@@ -853,6 +938,11 @@ def verify(cursor) -> tuple[dict[str, object], list[UUID]]:
         "social_provider_recorded": social_provider_recorded,
         "failed_receipt_recorded": failed_receipt_recorded,
         "report_idempotency": report_idempotency,
+        "report_source_provenance": report_source_provenance,
+        "report_decision_packet_provenance": report_decision_packet_provenance,
+        "report_comparison_provenance": report_comparison_provenance,
+        "report_nested_provenance_required": report_nested_provenance_required,
+        "report_semantic_key": report_semantic_key,
         "theme_report_recorded": theme_report_recorded,
         "incomplete_packet_rejected": incomplete_packet_rejected,
         "learning_type_rejected": learning_type_rejected,

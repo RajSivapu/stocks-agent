@@ -4,13 +4,32 @@ from urllib.parse import quote, urlencode
 from lib.edgar import parse_submissions
 from lib.intelligence.http import HttpRequest, SourceFailure
 
-from . import CollectionQuery, SourceAdapter
+from . import CollectionQuery, SourceAdapter, entity_ids, security_ids
 
 
 class OfficialAdapter(SourceAdapter):
     authority = "official"
     max_items_per_request = 50
     endpoint = ""
+
+    def _request_reference(self, query: CollectionQuery) -> str:
+        if self.provider == "sec_edgar":
+            return f"https://data.sec.gov/submissions/CIK{str(query.cik).zfill(10)}.json"
+        if self.provider == "fred":
+            return f"{self.endpoint}?{urlencode({
+                'series_id': query.series_id, 'file_type': 'json',
+                'observation_start': query.start.date().isoformat(),
+                'observation_end': query.end.date().isoformat(),
+                'limit': min(query.limit, self.max_items_per_request),
+            })}"
+        if self.provider == "federal_register":
+            return f"{self.endpoint}?{urlencode({
+                'conditions[term]': ' '.join((query.text, *query.symbols)).strip(),
+                'conditions[publication_date][gte]': query.start.date().isoformat(),
+                'conditions[publication_date][lte]': query.end.date().isoformat(),
+                'per_page': min(query.limit, self.max_items_per_request), 'order': 'newest',
+            })}"
+        return f"{self.endpoint}?{urlencode({'query': query.text, 'limit': min(query.limit, self.max_items_per_request), 'from': query.start.date().isoformat(), 'to': query.end.date().isoformat()})}"
 
     def _request(self, query: CollectionQuery) -> HttpRequest:
         if self.provider == "sec_edgar":
@@ -42,6 +61,12 @@ class OfficialAdapter(SourceAdapter):
                 "limit": min(query.limit, self.max_items_per_request),
             })
             return HttpRequest(f"{self.endpoint}?{params}")
+        if self.provider in {"white_house", "doe", "dod", "eia", "bls", "bea"}:
+            # The approved provider exists, but abstract themes do not identify a
+            # documented free endpoint/series. Do not spend quota guessing one.
+            raise SourceFailure("UNSUPPORTED_QUERY")
+        if self.provider == "federal_register":
+            return HttpRequest(self._request_reference(query))
         params = urlencode({
             "query": query.text,
             "limit": min(query.limit, self.max_items_per_request),
@@ -52,12 +77,31 @@ class OfficialAdapter(SourceAdapter):
 
     def _records(self, payload, query, response):
         if self.provider == "sec_edgar":
-            return parse_submissions(payload, min(query.limit, self.max_items_per_request))
+            records = parse_submissions(payload, min(query.limit, self.max_items_per_request))
+            return [{
+                **record,
+                "request_url": self._request_reference(query),
+                "item_url": record["source_url"],
+                "reporting_at": record.get("effective_at"),
+                "entity_ids": entity_ids((f"cik:{str(query.cik).zfill(10)}",)),
+                "security_ids": security_ids(query.symbols),
+            } for record in records]
         if self.provider == "federal_register":
-            return self._federal_register(payload)
+            return self._with_query_identity(self._federal_register(payload), query, self._request_reference(query))
         if self.provider == "fred":
-            return self._fred(payload, query)
-        return self._generic(payload, response.url)
+            return self._fred(payload, query, self._request_reference(query))
+        return self._with_query_identity(
+            self._generic(payload, self._request_reference(query)), query, self._request_reference(query)
+        )
+
+    @staticmethod
+    def _with_query_identity(records, query, request_url):
+        return [{
+            **record,
+            "request_url": request_url,
+            "item_url": record.get("source_url") or request_url,
+            "security_ids": security_ids(query.symbols),
+        } for record in records]
 
     @staticmethod
     def _federal_register(payload):
@@ -75,7 +119,7 @@ class OfficialAdapter(SourceAdapter):
         } for item in results if isinstance(item, dict)]
 
     @staticmethod
-    def _fred(payload, query):
+    def _fred(payload, query, request_url):
         observations = payload.get("observations") if isinstance(payload, dict) else None
         if not isinstance(observations, list):
             raise ValueError("invalid FRED response")
@@ -83,10 +127,14 @@ class OfficialAdapter(SourceAdapter):
         return [{
             "upstream_item_id": f"{series_id}:{item.get('date')}",
             "source_url": f"https://fred.stlouisfed.org/series/{quote(series_id)}",
+            "request_url": request_url,
+            "item_url": f"https://fred.stlouisfed.org/series/{quote(series_id)}",
             "title": f"FRED {series_id} observation",
             "text": f"{item.get('date')}: {item.get('value')}",
             "published_at": item.get("realtime_start") or payload.get("realtime_start"),
             "effective_at": item.get("date"),
+            "reporting_at": item.get("date"),
+            "entity_ids": entity_ids((f"series:{series_id}",)),
             "metadata": {"series_id": series_id, "value": item.get("value")},
         } for item in observations if isinstance(item, dict)]
 

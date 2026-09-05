@@ -41,10 +41,18 @@ def test_report_hash_is_deterministic_and_sources_are_sorted():
 
 
 def test_report_idempotency_key_is_exact_lowercase_sha256():
-    key = report_idempotency_key("weekly", date(2026, 9, 4), "a" * 64)
-    assert key == "8104d9d6f504c9d84a98d812dc17d5d8043d25897d037b9a2a0f72c739b92ab5"
+    key = report_idempotency_key("weekly", date(2026, 9, 4), "a" * 64, "b" * 64)
+    assert key == "56d5aaa198e7e33b9870c32253c62dc76ccdf82d7ffa2332c0e666cc3c2ae56a"
     assert len(key) == 64 and key == key.lower()
-    assert report_id_from_key(key) == "8104d9d6-f504-59d8-8a98-d812dc17d5d8"
+    assert report_id_from_key(key) == "56d5aaa1-98e7-533b-8870-c32253c62dc7"
+
+
+def test_report_identity_binds_the_canonical_report_hash():
+    first = build_report(report_input(summary="First canonical report."))
+    second = build_report(report_input(summary="Second canonical report."))
+    assert first.content_hash != second.content_hash
+    assert first.idempotency_key != second.idempotency_key
+    assert first.report_id != second.report_id
 
 
 def test_report_is_immutable_bounded_and_suggestion_only():

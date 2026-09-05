@@ -2,9 +2,9 @@ import json
 from urllib.parse import quote
 
 from lib import marketdata
-from lib.intelligence.http import HttpRequest
+from lib.intelligence.http import HttpRequest, SourceFailure
 
-from . import CollectionQuery, SourceAdapter
+from . import CollectionQuery, SourceAdapter, security_ids
 
 
 class YahooAdapter(SourceAdapter):
@@ -14,7 +14,10 @@ class YahooAdapter(SourceAdapter):
     max_items_per_request = 1
 
     def _request(self, query: CollectionQuery) -> HttpRequest:
-        symbol = query.symbols[0] if query.symbols else query.text
+        symbols = security_ids(query.symbols)
+        if not symbols:
+            raise SourceFailure("UNSUPPORTED_QUERY")
+        symbol = symbols[0]
         return HttpRequest(
             "https://query1.finance.yahoo.com/v8/finance/chart/"
             f"{quote(symbol, safe='')}?range=5d&interval=1d"
@@ -25,12 +28,21 @@ class YahooAdapter(SourceAdapter):
         symbol = query.symbols[0] if query.symbols else query.text
         if quote_data.get("price") is None or quote_data.get("as_of") is None:
             raise ValueError("invalid Yahoo quote")
+        result = payload["chart"]["result"][0]
+        meta = result["meta"]
+        if meta.get("symbol") != symbol:
+            raise ValueError("Yahoo quote symbol mismatch")
         return [{
             "upstream_item_id": f"{symbol}:{quote_data['as_of']}",
-            "source_url": response.url,
+            "source_url": f"https://finance.yahoo.com/quote/{quote(symbol, safe='')}",
+            "request_url": (
+                "https://query1.finance.yahoo.com/v8/finance/chart/"
+                f"{quote(symbol, safe='')}?range=5d&interval=1d"
+            ),
             "title": f"{symbol} market quote",
             "text": json.dumps(quote_data, separators=(",", ":"), sort_keys=True),
             "published_at": quote_data["as_of"],
             "effective_at": quote_data["as_of"],
             "metadata": quote_data,
+            "security_ids": (symbol,),
         }]

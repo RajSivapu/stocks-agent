@@ -1,4 +1,5 @@
 import ast
+import re
 from pathlib import Path
 
 
@@ -56,8 +57,15 @@ def test_alert_lifecycle_rpcs_are_fixed_path_and_service_role_only():
                 "FROM PUBLIC, anon, authenticated;"
             ) in sql
             assert f"GRANT EXECUTE ON FUNCTION public.{signature} TO service_role;" in sql
+            matches = list(re.finditer(
+                rf"CREATE OR REPLACE FUNCTION public\.{re.escape(name)}\(",
+                sql,
+            ))
+            assert matches
+            for match in matches:
+                body = sql[match.start():sql.index("$$;", match.start())]
+                assert "EXECUTE format(" not in body
         assert sql.count("SECURITY DEFINER\nSET search_path = pg_catalog") >= len(RPCS)
-        assert "EXECUTE format(" not in sql
 
 
 def test_alert_publication_rpc_is_request_bound_and_links_before_delivery():

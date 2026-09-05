@@ -1,4 +1,7 @@
 import { createDashboardRepository } from "./repository.ts";
+import type { PortfolioView, TodayView } from "../../../packages/dashboard-contracts/src/index.ts";
+import type { DashboardReadResult } from "./handler.ts";
+import { mapPortfolio } from "./mappers.ts";
 
 const TEST_DATABASE_URL =
   "postgresql://stock_agent_dashboard_runtime.projectref:dashboard-password-longer-than-24@aws-0-us-east-1.pooler.supabase.com:5432/postgres";
@@ -188,6 +191,44 @@ Deno.test("today excludes entry zones that are no longer valid", async () => {
   }), () => new Date("2026-09-03T18:00:00.000Z"));
   const result = await repository.read({ name: "today" });
   assertEquals((result.data as { entry_zones: Array<{ ticker: string }> }).entry_zones.map((item) => item.ticker), ["LIVE"]);
+});
+
+Deno.test("today preserves unavailable portfolio basis and incomplete accounting", async () => {
+  const repository = createDashboardRepository(TEST_DATABASE_URL, () => ({
+    query: (text: string) => Promise.resolve(text.includes("FROM public.holdings h") ? [{
+      ticker: "VTI", shares: "1", avg_cost: "-100", bucket: "core", price: "110",
+      price_as_of: "2026-09-03T17:55:00.000Z", price_source: "finnhub",
+      price_market_state: "REGULAR",
+    }] : []),
+  }), () => new Date("2026-09-03T18:00:00.000Z"));
+  const result = await repository.read({ name: "today" });
+  const { portfolio } = result.data as TodayView;
+  assertEquals(portfolio.cost_basis, null);
+  assertEquals(portfolio.unrealized_amount, null);
+  assertEquals(portfolio.incomplete, true);
+});
+
+Deno.test("portfolio read results preserve required summaries and nullable totals through Today", () => {
+  const data = mapPortfolio([{ ticker: "VTI", shares: "1", avg_cost: null }]);
+  const result: DashboardReadResult<PortfolioView> = {
+    data, dataAsOf: null, freshness: "unavailable", marketState: "unknown",
+  };
+  const costBasis: string | null = result.data.totals.cost_basis;
+  const incomplete: boolean = result.data.summary.incomplete;
+  assertEquals(costBasis, null);
+  assertEquals(incomplete, true);
+
+  // These assignments protect the payload boundary during Deno's typecheck.
+  const { summary: _summary, ...withoutSummary } = data;
+  // @ts-expect-error A portfolio read cannot omit the accounting summary.
+  const missingSummary: typeof result.data = withoutSummary;
+  // @ts-expect-error Incompleteness must remain a boolean at the read boundary.
+  const malformedSummary: typeof result.data = { ...data, summary: { ...data.summary, incomplete: "true" } };
+  // @ts-expect-error Nullable decimal totals accept strings or null, never numbers.
+  const malformedTotals: typeof result.data = { ...data, totals: { ...data.totals, cost_basis: 0 } };
+  const nullableTotals: typeof result.data = { ...data, totals: { cost_basis: null, value: null, unrealized_amount: null } };
+  assertEquals(nullableTotals.totals.cost_basis, null);
+  void [missingSummary, malformedSummary, malformedTotals];
 });
 
 Deno.test("run detail marks a missing write-count receipt as incomplete", async () => {

@@ -11,7 +11,7 @@ import os
 from pathlib import Path
 import re
 import sys
-from typing import Callable, Mapping
+from typing import Callable, Mapping, Sequence
 from urllib.error import HTTPError
 from urllib.parse import urlparse
 from urllib.request import Request, urlopen
@@ -22,7 +22,11 @@ from psycopg.rows import dict_row
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
-from scripts.provision_owner_dashboard_auth import validate_configuration as validate_auth_admin_configuration
+from scripts.provision_owner_dashboard_auth import (
+    validate_configuration as validate_auth_admin_configuration,
+    validate_email_otp_configuration,
+)
+from lib.intelligence.canonical import EVENT_CANONICAL_SQL, RANKING_CANONICAL_SQL
 
 
 CANARY_METHOD = "GET"
@@ -43,10 +47,34 @@ BOUNDARIES = {
     "friend_invitations": "disabled",
     "brokerage_authority": "none",
 }
-RELEASE_MIGRATION_VERSIONS = ("20260907", "20260908")
-RELEASE_FUNCTIONS = ("market-briefing-gateway", "owner-dashboard-api")
+RELEASE_FUNCTIONS = ("market-briefing-gateway", "owner-dashboard-api", "telegram-portfolio")
 RUNTIME_ROLE = "stock_agent_dashboard_runtime"
 UUID_PATTERN = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$", re.IGNORECASE)
+MIGRATION_NAME = re.compile(r"^(?P<version>\d{8}(?:\d{4})?)_[a-z0-9][a-z0-9_]*\.sql$")
+REPORT_PUBLICATION_SQL = """SELECT p.report_id::text AS report_id,r.run_id::text AS run_id,p.idempotency_key,
+    p.status,p.telegram_message_ids,to_char(p.telegram_accepted_at AT TIME ZONE 'UTC','YYYY-MM-DD\"T\"HH24:MI:SS.MS\"Z\"') AS telegram_accepted_at,p.suppression_reason,
+    jsonb_build_object('report_id',p.report_id,'idempotency_key',p.idempotency_key,'status',p.status,
+      'telegram_message_ids',p.telegram_message_ids,
+      'telegram_accepted_at',to_char(p.telegram_accepted_at AT TIME ZONE 'UTC','YYYY-MM-DD\"T\"HH24:MI:SS.MS\"Z\"'),
+      'suppression_reason',p.suppression_reason) AS canonical
+    FROM public.market_report_publications p JOIN public.market_reports r ON r.id=p.report_id
+    WHERE r.run_id=%s::uuid ORDER BY p.report_id"""
+
+
+def validate_deployment_auth_configuration(config: Mapping[str, object]) -> dict[str, object]:
+    """Expose the Auth configuration gate at the deployment-verifier boundary."""
+    return validate_email_otp_configuration(config)
+
+
+def load_deployment_auth_configuration_receipt(receipt_path: Path) -> dict[str, object]:
+    """Read the protected, manually verified Auth-settings receipt before network access."""
+    try:
+        value = json.loads(receipt_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as error:
+        raise RuntimeError("Auth configuration receipt is unavailable or malformed") from error
+    if not isinstance(value, dict):
+        raise RuntimeError("Auth configuration receipt is unavailable or malformed")
+    return validate_deployment_auth_configuration(value)
 
 
 def normalize_receipt_timestamp(value: object) -> str | None:
@@ -61,9 +89,76 @@ def normalize_receipt_timestamp(value: object) -> str | None:
     return parsed.astimezone(timezone.utc).isoformat(timespec="milliseconds").replace("+00:00", "Z")
 
 
+def canonical_sha256(value: object) -> str:
+    """Hash retained JSON content using the same canonical bytes as receipt producers."""
+    return hashlib.sha256(
+        json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode(),
+    ).hexdigest()
+
+
+def normalize_migration_statements(sql: str) -> list[str]:
+    # Keep this byte-independent representation aligned with Supabase's
+    # schema_migrations.statements[] receipts.
+    statements, buffer, quote, dollar, index = [], [], None, None, 0
+    while index < len(sql):
+        char = sql[index]
+        if quote is None and dollar is None and sql.startswith("--", index):
+            end = sql.find("\n", index); index = len(sql) if end < 0 else end; continue
+        if quote is None and dollar is None and sql.startswith("/*", index):
+            end = sql.find("*/", index + 2)
+            if end < 0: raise RuntimeError("migration contains unterminated comment")
+            index = end + 2; continue
+        if dollar is not None:
+            if sql.startswith(dollar, index): buffer.append(dollar); index += len(dollar); dollar = None; continue
+            buffer.append(char); index += 1; continue
+        if quote is not None:
+            buffer.append(char)
+            if char == quote:
+                if index + 1 < len(sql) and sql[index + 1] == quote: buffer.append(quote); index += 2; continue
+                quote = None
+            index += 1; continue
+        matched = re.match(r"\$[A-Za-z_][A-Za-z0-9_]*\$|\$\$", sql[index:])
+        if matched: dollar = matched.group(0); buffer.append(dollar); index += len(dollar); continue
+        if char in {"'", '"'}: quote = char; buffer.append(char)
+        elif char == ";":
+            value = " ".join("".join(buffer).split())
+            if value: statements.append(value)
+            buffer = []
+        else: buffer.append(char)
+        index += 1
+    if quote is not None or dollar is not None: raise RuntimeError("migration contains unterminated quoted SQL")
+    value = " ".join("".join(buffer).split())
+    if value: statements.append(value)
+    if not statements: raise RuntimeError("candidate migration is empty")
+    return statements
+
+
+def migration_statements_sha256(statements: Sequence[str]) -> str:
+    canonical = [item for statement in statements for item in normalize_migration_statements(statement)]
+    return canonical_sha256(canonical)
+
+
+def candidate_migration_manifest(migrations_directory: Path = ROOT / "sql/migrations") -> list[dict[str, str]]:
+    if not migrations_directory.is_dir() or migrations_directory.is_symlink():
+        raise RuntimeError("candidate migration directory is unavailable")
+    paths = sorted(migrations_directory.iterdir())
+    if (not paths or any(not path.is_file() or path.is_symlink() or not MIGRATION_NAME.fullmatch(path.name)
+                          for path in paths)):
+        raise RuntimeError("candidate migration manifest is malformed")
+    manifest = [{
+        "path": f"sql/migrations/{path.name}",
+        "version": MIGRATION_NAME.fullmatch(path.name).group("version"),  # type: ignore[union-attr]
+        "sha256": migration_statements_sha256(normalize_migration_statements(path.read_text(encoding="utf-8"))),
+    } for path in paths]
+    if len({item["version"] for item in manifest}) != len(manifest):
+        raise RuntimeError("candidate migration versions must be globally unique")
+    return manifest
+
+
 def verify_release_artifact_receipts(
     candidate_sha: str,
     deployment: Mapping[str, object],
+    expected_migrations: Sequence[Mapping[str, str]],
 ) -> dict[str, object]:
     """Bind migrations, changed functions, and static assets to one reviewed candidate."""
     if not re.fullmatch(r"[0-9a-f]{40}", candidate_sha):
@@ -71,9 +166,12 @@ def verify_release_artifact_receipts(
     migrations = deployment.get("migrations")
     functions = deployment.get("functions")
     static = deployment.get("static_assets")
-    if not isinstance(migrations, list) or tuple(row.get("version") for row in migrations if isinstance(row, dict)) != RELEASE_MIGRATION_VERSIONS:
+    if not isinstance(migrations, list) or migrations != list(expected_migrations):
         raise RuntimeError("release migration receipts are incomplete")
-    if any(not re.fullmatch(r"[0-9a-f]{64}", str(row.get("sha256", ""))) for row in migrations):
+    if any(not isinstance(row, Mapping) or set(row) != {"path", "version", "sha256"}
+           or not re.fullmatch(r"sql/migrations/\d{8}(?:\d{4})?_[a-z0-9][a-z0-9_]*\.sql", str(row.get("path", "")))
+           or not re.fullmatch(r"\d{8}(?:\d{4})?", str(row.get("version", "")))
+           or not re.fullmatch(r"[0-9a-f]{64}", str(row.get("sha256", ""))) for row in migrations):
         raise RuntimeError("release migration hash receipt is malformed")
     if not isinstance(functions, list) or tuple(row.get("function") for row in functions if isinstance(row, dict)) != RELEASE_FUNCTIONS:
         raise RuntimeError("changed function receipts are incomplete")
@@ -97,7 +195,7 @@ def verify_release_artifact_receipts(
     return {
         "status": "verified",
         "candidate_sha": candidate_sha,
-        "migration_version": ",".join(RELEASE_MIGRATION_VERSIONS),
+        "migration_version": ",".join(row["version"] for row in migrations),
         "function_count": len(RELEASE_FUNCTIONS),
         "static_asset_count": len(static["asset_hashes"]),
     }
@@ -312,21 +410,39 @@ def collect_source_receipts(database_url: str, api_url: str, run_id: str) -> dic
             "SELECT id::text AS id, phase, market_date::text AS market_date, policy_version FROM public.market_intelligence_runs WHERE id=%s::uuid",
             (run_id,))
         intelligence_events = _fetch_all(connection,
-            "SELECT id::text AS id, run_id::text AS run_id, content_hash FROM public.market_events WHERE run_id=%s::uuid ORDER BY id", (run_id,))
+            f"""SELECT id::text AS id, run_id::text AS run_id, content_hash,
+                      {EVENT_CANONICAL_SQL} AS canonical
+                 FROM public.market_events WHERE run_id=%s::uuid ORDER BY id""", (run_id,))
         intelligence_rankings = _fetch_all(connection,
-            "SELECT id::text AS id, run_id::text AS run_id, event_id::text AS event_id, content_hash FROM public.market_candidate_rankings WHERE run_id=%s::uuid ORDER BY rank", (run_id,))
+            f"""SELECT id::text AS id, run_id::text AS run_id, event_id::text AS event_id, content_hash,
+                      {RANKING_CANONICAL_SQL} AS canonical
+                 FROM public.market_candidate_rankings WHERE run_id=%s::uuid ORDER BY rank""", (run_id,))
         intelligence_packets = _fetch_all(connection,
-            "SELECT id::text AS id, run_id::text AS run_id, packet_hash, candidate_count, evidence_count FROM public.market_evidence_packets WHERE run_id=%s::uuid", (run_id,))
+            "SELECT id::text AS id, run_id::text AS run_id, packet_hash, candidate_count, evidence_count, packet AS canonical FROM public.market_evidence_packets WHERE run_id=%s::uuid", (run_id,))
         reports = _fetch_all(connection,
-            "SELECT id::text AS id, run_id::text AS run_id, packet_id::text AS packet_id, report_hash, rendered_hash FROM public.market_reports WHERE run_id=%s::uuid ORDER BY created_at", (run_id,))
-        report_publications = _fetch_all(connection,
-            "SELECT request_id::text AS request_id, run_id::text AS run_id, response FROM public.market_gateway_requests WHERE run_id=%s::uuid AND operation='record_report' AND status='completed' ORDER BY request_id", (run_id,))
+            "SELECT id::text AS id, run_id::text AS run_id, packet_id::text AS packet_id, report_hash, rendered_hash, report AS canonical, rendered_text FROM public.market_reports WHERE run_id=%s::uuid ORDER BY created_at", (run_id,))
+        report_publications = _fetch_all(connection, REPORT_PUBLICATION_SQL, (run_id,))
+        overdue_scheduled_phases = _fetch_all(
+            connection,
+            "SELECT market_date::text AS market_date, phase, to_char(deadline_at AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS.MS\"Z\"') AS deadline_at FROM public.read_overdue_scheduled_market_phases()",
+        )
     for row in holdings:
         row["price_as_of"] = normalize_receipt_timestamp(row.get("price_as_of"))
         for field in ("shares", "average_cost", "price", "price_source"):
             if row.get(field) is not None:
                 row[field] = str(row[field])
     price_times = [row.get("price_as_of") for row in holdings if row.get("price_as_of")]
+    canonical_records = []
+    for kind, rows, field in (
+        ("event", intelligence_events, "content_hash"),
+        ("ranking", intelligence_rankings, "content_hash"),
+        ("packet", intelligence_packets, "packet_hash"),
+        ("report", reports, "report_hash"),
+    ):
+        canonical_records.extend({"kind": kind, "body": row["canonical"], "sha256": row[field]} for row in rows)
+    canonical_records.extend({
+        "kind": "publication", "body": row["canonical"], "sha256": canonical_sha256(row["canonical"]),
+    } for row in report_publications)
     return {
         **identity,
         "run": run,
@@ -341,6 +457,8 @@ def collect_source_receipts(database_url: str, api_url: str, run_id: str) -> dic
         "intelligence_packets": intelligence_packets,
         "reports": reports,
         "report_publications": report_publications,
+        "canonical_records": canonical_records,
+        "overdue_scheduled_phases": overdue_scheduled_phases,
     }
 
 
@@ -363,6 +481,12 @@ def reconcile_source_receipts(
     """Fail closed unless all visible production claims agree with independent source reads."""
     def fail() -> None:
         raise RuntimeError("dashboard claim differs from its source receipt")
+
+    overdue = source.get("overdue_scheduled_phases")
+    if not isinstance(overdue, list):
+        fail()
+    if overdue:
+        raise RuntimeError("overdue scheduled phase is missing a completed or suppressed receipt")
 
     if source.get("database_user") != RUNTIME_ROLE or source.get("transaction_read_only") != "on":
         fail()
@@ -454,27 +578,44 @@ def reconcile_source_receipts(
         fail()
     if len(chains["intelligence_runs"]) != 1 or chains["intelligence_runs"][0].get("id") != run_id:
         fail()
-    if any(row.get("run_id") != run_id or not re.fullmatch(r"[0-9a-f]{64}", str(row.get("content_hash", ""))) for row in chains["intelligence_events"]):
+    if any(row.get("run_id") != run_id or not isinstance(row.get("canonical"), Mapping)
+           or canonical_sha256(row["canonical"]) != row.get("content_hash") for row in chains["intelligence_events"]):
         fail()
     packet = chains["intelligence_packets"][0]
-    if packet.get("run_id") != run_id or not re.fullmatch(r"[0-9a-f]{64}", str(packet.get("packet_hash", ""))):
+    if (packet.get("run_id") != run_id or not isinstance(packet.get("canonical"), Mapping)
+            or canonical_sha256(packet["canonical"]) != packet.get("packet_hash")):
         fail()
     event_ids = {row.get("id") for row in chains["intelligence_events"]}
-    if any(row.get("run_id") != run_id or row.get("event_id") not in event_ids or not re.fullmatch(r"[0-9a-f]{64}", str(row.get("content_hash", ""))) for row in chains["intelligence_rankings"]):
+    if any(row.get("run_id") != run_id or row.get("event_id") not in event_ids
+           or not isinstance(row.get("canonical"), Mapping)
+           or canonical_sha256(row["canonical"]) != row.get("content_hash")
+           for row in chains["intelligence_rankings"]):
         fail()
     report_ids = set()
     for row in chains["reports"]:
-        if row.get("run_id") != run_id or row.get("packet_id") != packet.get("id") or not re.fullmatch(r"[0-9a-f]{64}", str(row.get("report_hash", ""))) or not re.fullmatch(r"[0-9a-f]{64}", str(row.get("rendered_hash", ""))):
+        if (row.get("run_id") != run_id or row.get("packet_id") != packet.get("id")
+                or not isinstance(row.get("canonical"), Mapping)
+                or canonical_sha256(row["canonical"]) != row.get("report_hash")
+                or not isinstance(row.get("rendered_text"), str)
+                or hashlib.sha256(row["rendered_text"].encode()).hexdigest() != row.get("rendered_hash")):
             fail()
         report_ids.add(row.get("id"))
     for row in chains["report_publications"]:
-        response = row.get("response")
-        if row.get("run_id") != run_id or not isinstance(response, dict) or response.get("report_id") not in report_ids or not isinstance(response.get("publication_receipt"), dict):
+        if (row.get("run_id") != run_id or row.get("report_id") not in report_ids
+                or row.get("status") not in {"delivered", "suppressed"}
+                or not isinstance(row.get("canonical"), Mapping)):
+            fail()
+        ids = row.get("telegram_message_ids")
+        if row.get("status") == "delivered" and (not isinstance(ids, list) or not ids
+                or any(isinstance(value, bool) or not isinstance(value, int) or value <= 0 for value in ids)):
+            fail()
+        if row.get("status") == "suppressed" and ids != []:
+            fail()
+        if row.get("status") == "suppressed" and (not isinstance(row.get("suppression_reason"), str) or not row["suppression_reason"].strip()):
             fail()
     report = chains["reports"][-1]
-    publication = next((row["response"] for row in chains["report_publications"]
-                        if isinstance(row.get("response"), dict) and row["response"].get("report_id") == report.get("id")), None)
-    if not isinstance(publication, dict):
+    publication = next((row for row in chains["report_publications"] if row.get("report_id") == report.get("id")), None)
+    if not isinstance(publication, Mapping):
         fail()
     intelligence = payloads.get("/v1/intelligence", {}).get("data")
     reports_view = payloads.get("/v1/reports", {}).get("data")
@@ -489,12 +630,17 @@ def reconcile_source_receipts(
                    "rankings": len(chains["intelligence_rankings"]), "packets": len(chains["intelligence_packets"]),
                    "reports": len(chains["reports"]), "report_publications": len(chains["report_publications"])},
         "relationships_verified": True, "hashes_verified": True,
+        "canonical_records": source.get("canonical_records"),
         "scheduled_chain": {
             "run_id": run_id,
             "intelligence_run_id": chains["intelligence_runs"][0]["id"],
             "packet_id": packet["id"], "packet_hash": packet["packet_hash"],
             "report_id": report["id"], "report_hash": report["report_hash"],
-            "publication_receipt": publication["publication_receipt"],
+            "publication_receipt": {
+                "status": "accepted_by_telegram" if publication["status"] == "delivered" else "suppressed",
+                "telegram_message_ids": publication["telegram_message_ids"],
+                **({"original_delivery_receipt": {"telegram_message_ids": publication["telegram_message_ids"], "telegram_accepted_at": publication["telegram_accepted_at"]}} if publication["status"] == "delivered" else {"suppression_reason": publication["suppression_reason"]}),
+            },
         },
     }
 
@@ -689,7 +835,9 @@ def main() -> int:
     parser.add_argument("--origin", required=True)
     parser.add_argument("--candidate-sha")
     parser.add_argument("--deployment-receipt", type=Path)
+    parser.add_argument("--auth-config-receipt", type=Path, required=True)
     arguments = parser.parse_args()
+    auth_configuration = load_deployment_auth_configuration_receipt(arguments.auth_config_receipt)
     token = os.environ.get("DASHBOARD_OWNER_ACCESS_TOKEN", "").strip()
     if not token:
         parsed_api = urlparse(arguments.api_url)
@@ -711,6 +859,7 @@ def main() -> int:
         arguments.api_url, arguments.origin, token, non_owner_token,
         source_reader=lambda run_id: collect_source_receipts(database_url, arguments.api_url, run_id),
     )
+    receipt["auth_configuration"] = auth_configuration
     if bool(arguments.candidate_sha) != bool(arguments.deployment_receipt):
         raise SystemExit("candidate SHA and deployment receipt must be supplied together")
     if arguments.candidate_sha and arguments.deployment_receipt:
@@ -721,7 +870,7 @@ def main() -> int:
         if not isinstance(deployment, dict):
             raise SystemExit("deployment receipt must be a JSON object")
         receipt["artifact_verification"] = verify_release_artifact_receipts(
-            arguments.candidate_sha, deployment,
+            arguments.candidate_sha, deployment, candidate_migration_manifest(),
         )
     print(json.dumps(receipt, sort_keys=True, separators=(",", ":")))
     return 0

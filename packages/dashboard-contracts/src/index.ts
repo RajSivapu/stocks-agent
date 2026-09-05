@@ -125,8 +125,9 @@ export interface TodayView {
   latest_run: RunSummaryView | null;
   portfolio: {
     value: string | null;
-    cost_basis: string;
+    cost_basis: string | null;
     unrealized_amount: string | null;
+    incomplete: boolean;
     holdings: HoldingView[];
     data_as_of: string | null;
     market_state: MarketState;
@@ -142,9 +143,14 @@ export interface PortfolioView {
   plans: InvestmentPlanView[];
   transactions: TransactionView[];
   totals: {
-    cost_basis: string;
+    cost_basis: string | null;
     value: string | null;
     unrealized_amount: string | null;
+  };
+  summary: {
+    costBasis: number | null;
+    unrealizedProfit: number | null;
+    incomplete: boolean;
   };
   comparison_availability: "structured_companion" | "coverage_only" | "unavailable";
   latest_intelligence_run_id: string | null;

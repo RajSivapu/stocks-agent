@@ -1,0 +1,222 @@
+name: Protected owner dashboard release
+
+on:
+  workflow_run:
+    workflows: ["Owner dashboard verification"]
+    branches: [main]
+    types: [completed]
+  workflow_dispatch:
+    inputs:
+      candidate_sha: {description: Reviewed main SHA (hint only), required: true, type: string}
+      reviewed_sha: {description: Reviewed SHA (hint only), required: true, type: string}
+      ci_workflow_run_id: {description: Required CI run (hint only), required: true, type: string}
+      pull_request_number: {description: Reviewed merged PR (hint only), required: true, type: string}
+
+permissions:
+  actions: read
+  contents: read
+  deployments: write
+  pull-requests: read
+
+# Do not allow two different candidates to mutate production concurrently.
+concurrency:
+  group: protected-owner-dashboard-release-production
+  cancel-in-progress: false
+
+jobs:
+  release:
+    if: github.event_name == 'workflow_dispatch' || (github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.head_branch == 'main')
+    environment: owner-dashboard-production
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: ${{ github.event_name == 'workflow_run' && github.event.workflow_run.head_sha || inputs.candidate_sha }}
+          fetch-depth: 0
+      - uses: actions/setup-python@42375524e23c412d93fb67b49958b491fce71c38
+        with:
+          python-version: "3.14"
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with:
+          node-version: "24"
+          cache: npm
+      - name: Fail closed before any mutation when protected tools or secrets are absent
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SUPABASE_ACCESS_TOKEN: ${{ secrets.SUPABASE_ACCESS_TOKEN }}
+        run: |
+          set -euo pipefail
+          test -n "$GH_TOKEN" || { echo 'GitHub token is required'; exit 1; }
+          test -n "$SUPABASE_ACCESS_TOKEN" || { echo 'SUPABASE_ACCESS_TOKEN is required'; exit 1; }
+          npm ci --ignore-scripts
+          RELEASE_STATE_DIR="$RUNNER_TEMP/owner-dashboard-release-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
+          mkdir -m 700 "$RELEASE_STATE_DIR"
+          echo "RELEASE_STATE_DIR=$RELEASE_STATE_DIR" >> "$GITHUB_ENV"
+          echo "RELEASE_LEASE_OWNER=release-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT" >> "$GITHUB_ENV"
+          echo "RELEASE_VENV=$RUNNER_TEMP/owner-dashboard-release-venv-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT" >> "$GITHUB_ENV"
+          python -m venv "$RUNNER_TEMP/owner-dashboard-release-venv-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
+          "$RUNNER_TEMP/owner-dashboard-release-venv-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT/bin/python" -m pip install --require-hashes --only-binary=:all: -r requirements.lock
+          echo "PYTHON_BIN=$RUNNER_TEMP/owner-dashboard-release-venv-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT/bin/python" >> "$GITHUB_ENV"
+          npx playwright install --with-deps chromium
+          npx --yes supabase@2.116.0 --version >/dev/null
+      - name: Query and bind the authoritative reviewed main candidate
+        id: candidate
+        env:
+          GH_TOKEN: ${{ github.token }}
+          EVENT_NAME: ${{ github.event_name }}
+          EVENT_SHA: ${{ github.event.workflow_run.head_sha }}
+          EVENT_CI_RUN_ID: ${{ github.event.workflow_run.id }}
+          INPUT_SHA: ${{ inputs.candidate_sha }}
+          INPUT_REVIEWED_SHA: ${{ inputs.reviewed_sha }}
+          INPUT_CI_RUN_ID: ${{ inputs.ci_workflow_run_id }}
+          INPUT_PR: ${{ inputs.pull_request_number }}
+        run: |
+          set -euo pipefail
+          MAIN_SHA="$(gh api "repos/$GITHUB_REPOSITORY/git/ref/heads/main" --jq .object.sha)"
+          if [ "$EVENT_NAME" = workflow_run ]; then
+            CANDIDATE_SHA="$EVENT_SHA"; CI_WORKFLOW_RUN_ID="$EVENT_CI_RUN_ID"
+            PULL_REQUEST_NUMBER="$(gh api "repos/$GITHUB_REPOSITORY/commits/$CANDIDATE_SHA/pulls" --jq '.[] | select(.merged_at != null and .base.ref == "main" and .merge_commit_sha == env.CANDIDATE_SHA) | .number' | head -n1)"
+          else
+            CANDIDATE_SHA="$INPUT_SHA"; CI_WORKFLOW_RUN_ID="$INPUT_CI_RUN_ID"; PULL_REQUEST_NUMBER="$INPUT_PR"
+            test "$INPUT_SHA" = "$INPUT_REVIEWED_SHA" || { echo 'candidate SHA/ref mismatch'; exit 1; }
+          fi
+          test "$CANDIDATE_SHA" = "$MAIN_SHA" || { echo 'candidate SHA/ref mismatch'; exit 1; }
+          test "$(git rev-parse HEAD)" = "$CANDIDATE_SHA" || { echo 'candidate SHA/ref mismatch'; exit 1; }
+          git fetch --no-tags origin main
+          git merge-base --is-ancestor "$CANDIDATE_SHA" origin/main || { echo 'candidate SHA/ref mismatch'; exit 1; }
+          CI="$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$CI_WORKFLOW_RUN_ID")"
+          test "$(jq -r .head_sha <<<"$CI")" = "$CANDIDATE_SHA" || { echo 'candidate SHA/ref mismatch'; exit 1; }
+          test "$(jq -r .status <<<"$CI")" = completed && test "$(jq -r .conclusion <<<"$CI")" = success || { echo 'required CI was not successful'; exit 1; }
+          test "$(jq -r .path <<<"$CI")" = .github/workflows/owner-dashboard-ci.yml || { echo 'wrong required CI workflow'; exit 1; }
+          PR="$(gh api "repos/$GITHUB_REPOSITORY/pulls/$PULL_REQUEST_NUMBER")"
+          test "$(jq -r .merged <<<"$PR")" = true && test "$(jq -r .base.ref <<<"$PR")" = main && test "$(jq -r .merge_commit_sha <<<"$PR")" = "$CANDIDATE_SHA" || { echo 'candidate SHA/ref mismatch'; exit 1; }
+          PR_HEAD_SHA="$(jq -r .head.sha <<<"$PR")"
+          gh api "repos/$GITHUB_REPOSITORY/pulls/$PULL_REQUEST_NUMBER/reviews" --paginate > "$RELEASE_STATE_DIR/reviews.json"
+          HEAD_COMMIT="$(gh api "repos/$GITHUB_REPOSITORY/git/commits/$PR_HEAD_SHA")"
+          CANDIDATE_COMMIT="$(gh api "repos/$GITHUB_REPOSITORY/git/commits/$CANDIDATE_SHA")"
+          HEAD_COMMIT_TIME="$(jq -r .committer.date <<<"$HEAD_COMMIT")"
+          CANDIDATE_COMMIT_TIME="$(jq -r .committer.date <<<"$CANDIDATE_COMMIT")"
+          MERGED_AT="$(jq -r .merged_at <<<"$PR")"
+          # head_commit_time <= review.submitted_at <= merged_at <= candidate_commit_time
+          jq -e --arg sha "$PR_HEAD_SHA" --arg head "$HEAD_COMMIT_TIME" --arg merged "$MERGED_AT" --arg candidate "$CANDIDATE_COMMIT_TIME" 'any(.[]; .state == "APPROVED" and .commit_id == $sha and (.submitted_at >= $head and .submitted_at <= $merged) and ($merged <= $candidate))' "$RELEASE_STATE_DIR/reviews.json" >/dev/null || { echo 'required timed review approval is missing'; exit 1; }
+          test "$CANDIDATE_COMMIT_TIME" = "$MERGED_AT" || test "$CANDIDATE_COMMIT_TIME" '>' "$MERGED_AT" || { echo 'candidate commit predates merge'; exit 1; }
+          git fetch --no-tags origin "$PR_HEAD_SHA" || true
+          git merge-base --is-ancestor "$PR_HEAD_SHA" "$CANDIDATE_SHA" || test "$(git rev-parse "$PR_HEAD_SHA^{tree}")" = "$(git rev-parse "$CANDIDATE_SHA^{tree}")" || { echo 'reviewed head does not bind candidate'; exit 1; }
+          printf 'candidate_sha=%s\nreviewed_sha=%s\nci_workflow_run_id=%s\npull_request_number=%s\n' "$CANDIDATE_SHA" "$CANDIDATE_SHA" "$CI_WORKFLOW_RUN_ID" "$PULL_REQUEST_NUMBER" >> "$GITHUB_OUTPUT"
+          echo "CANDIDATE_SHA=$CANDIDATE_SHA" >> "$GITHUB_ENV"
+      - name: Require configured private Sites capture deployment readback and recovery transport
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SUPABASE_ACCESS_TOKEN: ${{ secrets.SUPABASE_ACCESS_TOKEN }}
+          PROJECT_REF: ${{ vars.SUPABASE_PROJECT_REF }}
+        run: |
+          "$RELEASE_VENV/bin/python" scripts/release_components.py --check-transport
+      - name: Create the candidate-bound GitHub Deployment
+        id: deployment
+        env:
+          GH_TOKEN: ${{ github.token }}
+          CANDIDATE_SHA: ${{ steps.candidate.outputs.candidate_sha }}
+        run: |
+          set -euo pipefail
+          payload="$(jq -cn --arg candidate_sha "$CANDIDATE_SHA" --argjson release_workflow_run_id "$GITHUB_RUN_ID" '{candidate_sha:$candidate_sha,release_workflow_run_id:$release_workflow_run_id}')"
+          DEPLOYMENT_ID="$(gh api --method POST "repos/$GITHUB_REPOSITORY/deployments" -f ref="$CANDIDATE_SHA" -f environment=production -F production_environment=true -F auto_merge=false -f payload="$payload" --jq .id)"
+          test -n "$DEPLOYMENT_ID" || { echo 'candidate SHA/ref mismatch'; exit 1; }
+          echo "deployment_id=$DEPLOYMENT_ID" >> "$GITHUB_OUTPUT"; echo "DEPLOYMENT_ID=$DEPLOYMENT_ID" >> "$GITHUB_ENV"
+      - name: Derive protected no-side-effect evidence around the real candidate dry-run
+        env:
+          RELEASE_READONLY_DATABASE_URL: ${{ secrets.RELEASE_READONLY_DATABASE_URL }}
+          SUPABASE_ACCESS_TOKEN: ${{ secrets.SUPABASE_ACCESS_TOKEN }}
+          RELEASE_RECOVERY_KEY: ${{ secrets.RELEASE_RECOVERY_KEY }}
+          GH_TOKEN: ${{ github.token }}
+          DASHBOARD_OWNER_USER_ID: ${{ secrets.DASHBOARD_OWNER_USER_ID }}
+          DASHBOARD_OWNER_EMAIL: ${{ secrets.DASHBOARD_OWNER_EMAIL }}
+          DASHBOARD_NON_OWNER_ACCESS_TOKEN: ${{ secrets.DASHBOARD_NON_OWNER_ACCESS_TOKEN }}
+          POSTGRES_URL: ${{ secrets.POSTGRES_URL }}
+          SUPAVISOR_SESSION_URL: ${{ secrets.SUPAVISOR_SESSION_URL }}
+          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+          SUPABASE_PUBLISHABLE_KEY: ${{ secrets.SUPABASE_PUBLISHABLE_KEY }}
+          PROJECT_REF: ${{ vars.SUPABASE_PROJECT_REF }}
+          ALLOWED_ORIGIN: ${{ vars.DASHBOARD_ALLOWED_ORIGIN }}
+          SITE_ORIGIN: ${{ vars.DASHBOARD_SITE_ORIGIN }}
+          CANDIDATE_SHA: ${{ steps.candidate.outputs.candidate_sha }}
+        run: |
+          set -euo pipefail
+          test -n "$RELEASE_READONLY_DATABASE_URL" || { echo 'release reader is required'; exit 1; }
+          "$PYTHON_BIN" scripts/collect_protected_dry_run_evidence.py --production-project-ref "$PROJECT_REF" --output "$RELEASE_STATE_DIR/dry-run-evidence.json" --candidate-script scripts/deploy_owner_dashboard_api.py --candidate-sha "$CANDIDATE_SHA" --safe-command "$PYTHON_BIN scripts/deploy_owner_dashboard_api.py --dry-run --project-ref $PROJECT_REF --allowed-origin $ALLOWED_ORIGIN --site-origin $SITE_ORIGIN --reviewed-sha $CANDIDATE_SHA --candidate-sha $CANDIDATE_SHA --gateway-rollback-ref unused --gateway-rollback-source-sha256 $(printf '0%.0s' {1..64}) --gateway-current-version 1 --evidence-directory $RELEASE_STATE_DIR/dry-run-capture --release-state $RELEASE_STATE_DIR/dry-run-state.json"
+      - name: Bind deployment to durable component recovery
+        env:
+          GH_TOKEN: ${{ github.token }}
+          DEPLOYMENT_ID: ${{ steps.deployment.outputs.deployment_id }}
+        run: gh api --method POST "repos/$GITHUB_REPOSITORY/deployments/$DEPLOYMENT_ID/statuses" -f state=in_progress -f description="component-recovery-run:$GITHUB_RUN_ID"
+      - name: Execute protected deployment with encrypted component recovery
+        env:
+          DASHBOARD_PRIOR_MANAGED_SECRETS_JSON: ${{ secrets.DASHBOARD_PRIOR_MANAGED_SECRETS_JSON }}
+          RELEASE_RECOVERY_KEY: ${{ secrets.RELEASE_RECOVERY_KEY }}
+          GH_TOKEN: ${{ github.token }}
+          SUPABASE_ACCESS_TOKEN: ${{ secrets.SUPABASE_ACCESS_TOKEN }}
+          DASHBOARD_OWNER_USER_ID: ${{ secrets.DASHBOARD_OWNER_USER_ID }}
+          DASHBOARD_OWNER_EMAIL: ${{ secrets.DASHBOARD_OWNER_EMAIL }}
+          DASHBOARD_NON_OWNER_ACCESS_TOKEN: ${{ secrets.DASHBOARD_NON_OWNER_ACCESS_TOKEN }}
+          POSTGRES_URL: ${{ secrets.POSTGRES_URL }}
+          SUPAVISOR_SESSION_URL: ${{ secrets.SUPAVISOR_SESSION_URL }}
+          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+          SUPABASE_PUBLISHABLE_KEY: ${{ secrets.SUPABASE_PUBLISHABLE_KEY }}
+          PROJECT_REF: ${{ vars.SUPABASE_PROJECT_REF }}
+          ALLOWED_ORIGIN: ${{ vars.DASHBOARD_ALLOWED_ORIGIN }}
+          SITE_ORIGIN: ${{ vars.DASHBOARD_SITE_ORIGIN }}
+          GATEWAY_ROLLBACK_REF: ${{ vars.GATEWAY_ROLLBACK_REF }}
+          GATEWAY_ROLLBACK_SOURCE_SHA256: ${{ vars.GATEWAY_ROLLBACK_SOURCE_SHA256 }}
+          GATEWAY_CURRENT_VERSION: ${{ vars.GATEWAY_CURRENT_VERSION }}
+          CANDIDATE_SHA: ${{ steps.candidate.outputs.candidate_sha }}
+          REVIEWED_SHA: ${{ steps.candidate.outputs.reviewed_sha }}
+        run: |
+          set -euo pipefail; umask 077
+          PYTHON_BIN="$RELEASE_VENV/bin/python"
+          export PYTHON_BIN
+          "$RELEASE_VENV/bin/python" scripts/deploy_owner_dashboard_api.py --project-ref "$PROJECT_REF" --allowed-origin "$ALLOWED_ORIGIN" --site-origin "$SITE_ORIGIN" --reviewed-sha "$REVIEWED_SHA" --candidate-sha "$CANDIDATE_SHA" --gateway-rollback-ref "$GATEWAY_ROLLBACK_REF" --gateway-rollback-source-sha256 "$GATEWAY_ROLLBACK_SOURCE_SHA256" --gateway-current-version "$GATEWAY_CURRENT_VERSION" --evidence-directory "$RELEASE_STATE_DIR/capture" --rollback-worktree "$RELEASE_STATE_DIR/rollback-worktree" --release-state "$RELEASE_STATE_DIR/release-state.json" --lease-owner "$RELEASE_LEASE_OWNER" --deployment-id "$DEPLOYMENT_ID" > "$RELEASE_STATE_DIR/deploy-receipt.json"
+      - name: Generate canonical release record
+        env:
+          CANDIDATE_SHA: ${{ steps.candidate.outputs.candidate_sha }}
+          CI_WORKFLOW_RUN_ID: ${{ steps.candidate.outputs.ci_workflow_run_id }}
+          PULL_REQUEST_NUMBER: ${{ steps.candidate.outputs.pull_request_number }}
+          DEPLOYMENT_ID: ${{ steps.deployment.outputs.deployment_id }}
+          PROJECT_REF: ${{ vars.SUPABASE_PROJECT_REF }}
+        run: |
+          "$RELEASE_VENV/bin/python" scripts/write_protected_release_record.py --receipt "$RELEASE_STATE_DIR/deploy-receipt.json" --dry-run-evidence "$RELEASE_STATE_DIR/dry-run-evidence.json" --output "$RELEASE_STATE_DIR/release-record.json" --candidate-sha "$CANDIDATE_SHA" --ci-workflow-run-id "$CI_WORKFLOW_RUN_ID" --release-workflow-run-id "$GITHUB_RUN_ID" --pull-request-number "$PULL_REQUEST_NUMBER" --deployment-id "$DEPLOYMENT_ID" --rollback-artifact-id "$(jq -r .gateway_rollback_artifact.artifact_id "$RELEASE_STATE_DIR/deploy-receipt.json")" --recovery-metadata-artifact-id "$(jq -r .gateway_rollback_artifact.recovery_metadata_artifact_id "$RELEASE_STATE_DIR/deploy-receipt.json")" --project-ref "$PROJECT_REF"
+      - name: Upload immutable release record
+        id: release_artifact
+        uses: actions/upload-artifact@65462800fd760344b1a7b4382951275a0abb4808
+        with:
+          name: release-record-${{ steps.deployment.outputs.deployment_id }}
+          path: ${{ env.RELEASE_STATE_DIR }}/release-record.json
+          if-no-files-found: error
+          retention-days: 90
+      - name: Restore changed components if any post-deploy evidence step failed
+        if: ${{ failure() }}
+        env:
+          RELEASE_RECOVERY_KEY: ${{ secrets.RELEASE_RECOVERY_KEY }}
+          GH_TOKEN: ${{ github.token }}
+          SUPABASE_ACCESS_TOKEN: ${{ secrets.SUPABASE_ACCESS_TOKEN }}
+          POSTGRES_URL: ${{ secrets.POSTGRES_URL }}
+          PROJECT_REF: ${{ vars.SUPABASE_PROJECT_REF }}
+        run: |
+          set -euo pipefail
+          test -f "$RELEASE_STATE_DIR/release-state.json" || exit 0
+          restore_after_failure() { "$RELEASE_VENV/bin/python" scripts/restore_gateway_after_release_failure.py --project-ref "$PROJECT_REF" --admin-url "$POSTGRES_URL" --release-state "$RELEASE_STATE_DIR/release-state.json" --lease-owner "recovery-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"; }
+          trap 'restore_after_failure' ERR
+          restore_after_failure
+      - name: Mark candidate deployment failed after protected restoration
+        if: ${{ failure() && env.DEPLOYMENT_ID != '' }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh api --method POST "repos/$GITHUB_REPOSITORY/deployments/$DEPLOYMENT_ID/statuses" -f state=failure -f description='protected release failed; restoration attempted'
+      - name: Mark candidate deployment successful with immutable artifact identity
+        if: ${{ success() }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          POSTGRES_URL: ${{ secrets.POSTGRES_URL }}
+          DEPLOYMENT_ID: ${{ steps.deployment.outputs.deployment_id }}
+          RELEASE_ARTIFACT_ID: ${{ steps.release_artifact.outputs.artifact-id }}
+        run: |
+          "$RELEASE_VENV/bin/python" scripts/finalize_protected_release.py --admin-url "$POSTGRES_URL" --lease-owner "$RELEASE_LEASE_OWNER" --deployment-id "$DEPLOYMENT_ID" --release-artifact-id "$RELEASE_ARTIFACT_ID" --log-url "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"

@@ -59,6 +59,7 @@ class HttpResult:
     retrieved_at: datetime
     observed_at: datetime | None
     cache_hit: bool = False
+    attempt_count: int = 0
     _validation_provenance: object | None = field(default=None, repr=False, compare=False)
 
     @property
@@ -149,13 +150,21 @@ class BoundedHttpClient:
         self._opener = opener or build_opener(_NoRedirect())
         self._clock = clock or (lambda: datetime.now(timezone.utc))
         self._future_tolerance = future_tolerance
+        self.last_attempt_count = 0
 
-    def get(self, request: HttpRequest) -> HttpResult:
+    def get(self, request: HttpRequest, *, before_attempt: Callable[[], None] | None = None) -> HttpResult:
         current_url = request.url
         current_headers = dict(request.headers or {})
+        self.last_attempt_count = 0
         for redirect_count in range(_MAX_REDIRECTS + 1):
             self._validate_url(current_url)
+            # Quota admission is deliberately outside transport normalization:
+            # quota exhaustion must reach the adapter as QUOTA_BLOCKED and no
+            # corresponding open may occur.
+            if before_attempt is not None:
+                before_attempt()
             try:
+                self.last_attempt_count += 1
                 response = self._open(
                     current_url,
                     headers=current_headers,
@@ -259,6 +268,10 @@ class BoundedHttpClient:
         ):
             raise SourceFailure("UNSAFE_URL")
 
+    def validate_request(self, request: HttpRequest) -> None:
+        """Reject invalid initial URLs before a quota reservation is consumed."""
+        self._validate_url(request.url)
+
     @staticmethod
     def _headers(response) -> dict[str, str]:
         raw_headers = getattr(response, "headers", {})
@@ -286,6 +299,7 @@ class BoundedHttpClient:
             body=body,
             retrieved_at=retrieved_at,
             observed_at=observed_at,
+            attempt_count=self.last_attempt_count,
             _validation_provenance=_HTTP_VALIDATION_PROVENANCE,
         )
 

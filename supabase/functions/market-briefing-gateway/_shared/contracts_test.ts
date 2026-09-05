@@ -2,7 +2,9 @@ import {
   parseArtifactMutationBatch,
   parseDecisionBundle,
   parseGatewayEnvelope,
+  parseTrustedEvidenceFacts,
   type Phase,
+  validatePacketEvidence,
 } from "./contracts.ts";
 
 function assertEquals<T>(actual: T, expected: T): void {
@@ -103,6 +105,31 @@ function fixturePacket() {
   };
 }
 
+Deno.test("persisted facts reject duplicate IDs and missing authority fields", () => {
+  const fact = {
+    candidate_key: "CENX",
+    evidence_id: "quote-1",
+    category: "quote",
+    source: "yahoo",
+    source_status: "succeeded",
+    authority: "market_data",
+    published_at: "2026-09-02T16:55:00Z",
+    retrieved_at: "2026-09-02T16:56:00Z",
+    expires_at: "2026-09-03T16:55:00Z",
+    reference: null,
+    normalized_text: "Stored source",
+    exposure_kind: null,
+    relationship_eligible: false,
+    claim_key: null,
+    claim_polarity: null,
+  };
+  assertEquals(parseTrustedEvidenceFacts([fact])[0].source, "yahoo");
+  assertThrows(() => parseTrustedEvidenceFacts([fact, fact]), "duplicate");
+  const missing = { ...fact } as Record<string, unknown>;
+  delete missing.authority;
+  assertThrows(() => parseTrustedEvidenceFacts([missing]), "authority");
+});
+
 function validBundle(phase: Phase = "on-demand") {
   return {
     phase,
@@ -182,6 +209,19 @@ Deno.test("inline intelligence packet enforces candidate, evidence, and byte bou
   assertThrows(() => parseDecisionBundle(oversized, "intraday"), "96 KiB");
 });
 
+Deno.test("candidate cannot omit contradictory packet evidence", () => {
+  const candidate = validCandidate();
+  const packet = fixturePacket();
+  packet.evidence.push({
+    item_id: "conflict-1",
+    normalized_text: "Contradicts the thesis.",
+  });
+  packet.candidates[0].evidence_ids.push("conflict-1");
+  assertEquals(validatePacketEvidence(candidate as never, packet), [
+    "EVIDENCE_NOT_IN_PACKET",
+  ]);
+});
+
 Deno.test("gateway envelope accepts the bounded standalone alert evaluation operation", () => {
   const envelope = {
     ...validEnvelope(),
@@ -195,7 +235,7 @@ Deno.test("gateway envelope accepts the bounded standalone alert evaluation oper
   );
 });
 
-Deno.test("gateway envelope accepts only the two scoped intelligence persistence operations", () => {
+Deno.test("gateway envelope accepts scoped intelligence controller operations", () => {
   const start = {
     ...validEnvelope(),
     operation: "start_intelligence_run",
@@ -205,9 +245,19 @@ Deno.test("gateway envelope accepts only the two scoped intelligence persistence
       market_date: "2026-09-02",
       policy_version: 1,
       reservation_plan: { reservations: [] },
+      request_window: {
+        start: "2026-09-04T11:00:00.000Z", end: "2026-09-04T12:00:00.000Z",
+        timezone: "America/Chicago", market_date: "2026-09-04", phase: "pre-market",
+      },
     },
   };
   assertEquals(parseGatewayEnvelope(start).operation, "start_intelligence_run");
+  const checkpoint = {
+    ...validEnvelope(),
+    operation: "checkpoint_intelligence_collection",
+    payload: { cache_key: "a".repeat(64), receipt: {}, items: [] },
+  };
+  assertEquals(parseGatewayEnvelope(checkpoint).operation, "checkpoint_intelligence_collection");
 });
 
 Deno.test("gateway envelope rejects unknown and extra authority fields", () => {
@@ -351,6 +401,17 @@ Deno.test("decision bundle permits only one candidate per ticker", () => {
   assertThrows(
     () => parseDecisionBundle(duplicateTicker, "on-demand"),
     "duplicate ticker",
+  );
+});
+
+Deno.test("decision bundle accepts an explicit bounded reservation group", () => {
+  const bundle = validBundle();
+  Object.assign(bundle.candidates[0], {
+    reservation_group: "aluminum-growth-idea",
+  });
+  assertEquals(
+    parseDecisionBundle(bundle, "on-demand").candidates[0].reservation_group,
+    "aluminum-growth-idea",
   );
 });
 
