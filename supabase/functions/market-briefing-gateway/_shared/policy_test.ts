@@ -483,6 +483,22 @@ Deno.test("prior plans need current evidence", () => {
   );
 });
 
+Deno.test("caller fresh label cannot make 2020 evidence current", () => {
+  const result = evaluate(candidate({
+    evidence: [{
+      ...candidate().evidence[0],
+      status: "fresh",
+      observed_at: "2020-09-02T16:55:00.000Z",
+      retrieved_at: "2020-09-02T16:56:00.000Z",
+    }],
+  }));
+  assertEquals(result.final_action, "watch");
+  assert(
+    result.reason_codes.map(String).includes("EVIDENCE_STALE"),
+    "caller freshness label bypassed evidence timestamp",
+  );
+});
+
 Deno.test("Analyst and Checker completion and verdicts remain distinct", () => {
   const analyst = evaluate(
     candidate({ analyst: { ...candidate().analyst, completed: false } }),

@@ -1,4 +1,5 @@
 import { canonicalJson, sha256Hex } from "./intelligence.ts";
+import type { PolicyEvaluation } from "./policy.ts";
 
 const UUID =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
@@ -43,7 +44,24 @@ export interface RenderedReportDelivery {
   status: "ready" | "suppressed";
   body: string;
   parts: string[];
-  reason?: "no_trigger" | "not_actionable";
+  reason?: "no_trigger" | "not_actionable" | "REPORT_POLICY_MISMATCH";
+  actionable_fields?: Array<{
+    evaluation_id: string;
+    candidate_id: string;
+    ticker: string;
+    action: string;
+    quantity: string | null;
+    entry_low: string | null;
+    entry_high: string | null;
+    stop: string | null;
+    target: string | null;
+    urgency: "urgent" | "routine";
+  }>;
+}
+
+export interface ReportDeliveryOptions {
+  dashboardBaseUrl: string;
+  allowedDashboardOrigins: readonly string[];
 }
 
 function object(value: unknown, path: string): Record<string, unknown> {
@@ -240,14 +258,76 @@ function reportUrl(
   return `${base.origin}/reports/${id}`;
 }
 
+function reportMentionsAction(value: RecordReportPayload["report"]): boolean {
+  return /\b(buy|add|reduce|sell)\b/i.test(`${value.summary}\n${value.full_markdown}`);
+}
+
+function derivedActionableFields(
+  evaluations: readonly PolicyEvaluation[],
+  kind: ReportKind,
+) {
+  return evaluations.filter((evaluation) =>
+    evaluation.status !== "vetoed" && evaluation.final_action !== null
+  ).map((evaluation) => ({
+    evaluation_id: evaluation.evaluation_id,
+    candidate_id: evaluation.candidate_id,
+    ticker: evaluation.candidate.ticker,
+    action: evaluation.final_action!,
+    quantity: evaluation.candidate.proposed_shares,
+    entry_low: evaluation.candidate.entry_zone_low,
+    entry_high: evaluation.candidate.entry_zone_high,
+    stop: evaluation.candidate.stop,
+    target: evaluation.candidate.target,
+    urgency: kind === "urgent" ? "urgent" as const : "routine" as const,
+  }));
+}
+
 export function renderReportDelivery(
   input: RecordReportPayload,
-  options: {
-    dashboardBaseUrl: string;
-    allowedDashboardOrigins: readonly string[];
-  },
+  finalEvaluations: readonly PolicyEvaluation[],
+  options: ReportDeliveryOptions,
+): RenderedReportDelivery;
+export function renderReportDelivery(
+  input: RecordReportPayload,
+  options: ReportDeliveryOptions,
+): RenderedReportDelivery;
+export function renderReportDelivery(
+  input: RecordReportPayload,
+  finalEvaluationsOrOptions: readonly PolicyEvaluation[] | ReportDeliveryOptions,
+  maybeOptions?: ReportDeliveryOptions,
 ): RenderedReportDelivery {
+  const finalEvaluations = Array.isArray(finalEvaluationsOrOptions)
+    ? finalEvaluationsOrOptions
+    : [];
+  const options: ReportDeliveryOptions | undefined = Array.isArray(
+      finalEvaluationsOrOptions,
+    )
+    ? maybeOptions
+    : finalEvaluationsOrOptions as ReportDeliveryOptions;
+  if (!options) throw new Error("report delivery options are required");
   const value = parseRecordReportPayload(input);
+  const decisions = new Map(finalEvaluations.map((item) => [item.evaluation_id, item]));
+  const referenced = value.report.policy_decision_ids.map((id) => decisions.get(id));
+  const actionableFields = derivedActionableFields(
+    referenced.filter((item): item is PolicyEvaluation => item !== undefined),
+    value.kind,
+  );
+  if (
+    reportMentionsAction(value.report) &&
+    (referenced.some((item) => item === undefined || item.final_action === null) ||
+      !actionableFields.some((item) =>
+        new RegExp(`\\b${item.action}\\b`, "i").test(
+          `${value.report.summary}\n${value.report.full_markdown}`,
+        )
+      ))
+  ) {
+    return {
+      status: "suppressed",
+      body: "",
+      parts: [],
+      reason: "REPORT_POLICY_MISMATCH",
+    };
+  }
   if (value.kind === "intraday" && !value.report.intraday_triggered) {
     return { status: "suppressed", body: "", parts: [], reason: "no_trigger" };
   }
@@ -278,5 +358,10 @@ export function renderReportDelivery(
     }`;
   }
   body = compact(body, 1_200);
-  return { status: "ready", body, parts: [body] };
+  return {
+    status: "ready",
+    body,
+    parts: [body],
+    ...(actionableFields.length > 0 ? { actionable_fields: actionableFields } : {}),
+  };
 }

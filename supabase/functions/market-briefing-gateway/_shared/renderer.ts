@@ -75,6 +75,7 @@ const REASON_LABELS: Record<PolicyReasonCode, string> = {
   PRICE_RELATION_INVALID: "Price or threshold relationship is invalid",
   AMOUNT_SHARES_MISMATCH: "Amount and shares do not reconcile",
   CURRENT_EVIDENCE_MISSING: "Current evidence is missing",
+  EVIDENCE_STALE: "Persisted evidence is stale",
   ANALYST_INCOMPLETE: "Analyst review is incomplete",
   CHECKER_INCOMPLETE: "Checker review is incomplete",
   CHECKER_DOWNGRADE: "Checker downgraded the proposal",

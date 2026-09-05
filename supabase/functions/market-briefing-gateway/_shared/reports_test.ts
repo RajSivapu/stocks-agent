@@ -4,6 +4,7 @@ import {
   renderReportDelivery,
   reportIdFromKey,
 } from "./reports.ts";
+import type { PolicyEvaluation } from "./policy.ts";
 import { canonicalJson, sha256Hex } from "./intelligence.ts";
 
 function assert(value: boolean, message: string): void {
@@ -169,4 +170,26 @@ Deno.test("morning is concise, urgent requires material action, and no-trigger i
     parts: [],
     reason: "no_trigger",
   });
+});
+
+Deno.test("report cannot publish a buy contradicted by a watch decision", () => {
+  const contradictory = report("morning");
+  contradictory.report.summary = "BUY CENX immediately.";
+  contradictory.report_hash = sha256Hex(canonicalJson(contradictory.report));
+  const watch = {
+    evaluation_id: contradictory.report.policy_decision_ids[0],
+    candidate_id: "00000000-0000-4000-8000-000000000010",
+    final_action: "watch",
+    status: "downgraded",
+    candidate: { ticker: "CENX" },
+  } as PolicyEvaluation;
+  const delivery = renderReportDelivery(contradictory, [watch], {
+    dashboardBaseUrl: "https://stocks.example.test",
+    allowedDashboardOrigins: ["https://stocks.example.test"],
+  });
+  assertEquals(delivery.status, "suppressed");
+  assert(
+    String(delivery.reason) === "REPORT_POLICY_MISMATCH",
+    "contradictory recommendation was published",
+  );
 });

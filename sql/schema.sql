@@ -3624,7 +3624,8 @@ BEGIN
     RAISE EXCEPTION 'completed evidence packet unavailable' USING ERRCODE = '22023';
   END IF;
   v_expected_key := encode(extensions.digest(convert_to(
-    'v1:' || p_report->>'kind' || ':' || p_report->>'market_date' || ':' || v_packet.packet_hash,
+    'v2:' || p_report->>'kind' || ':' || p_report->>'market_date' || ':' ||
+      v_packet.packet_hash || ':' || p_report->>'report_hash',
     'UTF8'
   ), 'sha256'), 'hex');
   v_expected_id := (

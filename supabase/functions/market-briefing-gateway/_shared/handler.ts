@@ -472,6 +472,7 @@ export function createGatewayHandler(dependencies: GatewayDependencies) {
         if (envelope.operation === "record_report") {
           const delivery = renderReportDelivery(
             prepared as RecordReportPayload,
+            [],
             {
               dashboardBaseUrl: dependencies.dashboardBaseUrl ??
                 "https://invalid.local",
@@ -654,7 +655,7 @@ export function createGatewayHandler(dependencies: GatewayDependencies) {
           throw new GatewayRepositoryError("PERSISTENCE_FAILED");
         }
         const payload = prepared as RecordReportPayload;
-        const delivery = renderReportDelivery(payload, {
+        const delivery = renderReportDelivery(payload, [], {
           dashboardBaseUrl: dependencies.dashboardBaseUrl ??
             "https://invalid.local",
           allowedDashboardOrigins: dependencies.dashboardAllowedOrigins ?? [],

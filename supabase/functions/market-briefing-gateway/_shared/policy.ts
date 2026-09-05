@@ -28,6 +28,7 @@ export type PolicyReasonCode =
   | "PRICE_RELATION_INVALID"
   | "AMOUNT_SHARES_MISMATCH"
   | "CURRENT_EVIDENCE_MISSING"
+  | "EVIDENCE_STALE"
   | "ANALYST_INCOMPLETE"
   | "CHECKER_INCOMPLETE"
   | "CHECKER_DOWNGRADE"
@@ -127,6 +128,7 @@ const VETO_CODES = new Set<PolicyReasonCode>([
 const INFORMATIONAL_CODES = new Set<PolicyReasonCode>([
   "OUTSIDE_SESSION_CONDITIONAL",
 ]);
+const MAX_EVIDENCE_AGE_MS = 7 * 24 * 60 * 60 * 1_000;
 
 function alertSession(
   phase: DecisionCandidate["phase"],
@@ -388,9 +390,22 @@ export function evaluateCandidate(
     );
   }
 
-  const hasCurrentEvidence = candidate.evidence.some((item) =>
-    item.status === "fresh" && item.observed_at !== null
-  );
+  const currentEvidence = candidate.evidence.filter((item) => {
+    if (item.status !== "fresh" || item.observed_at === null) return false;
+    const observedAt = Date.parse(item.observed_at);
+    return Number.isFinite(observedAt) && now.valueOf() - observedAt <= MAX_EVIDENCE_AGE_MS;
+  });
+  const hasCurrentEvidence = currentEvidence.length > 0;
+  if (candidate.evidence.some((item) => {
+    if (item.observed_at === null) return false;
+    const observedAt = Date.parse(item.observed_at);
+    return Number.isFinite(observedAt) && now.valueOf() - observedAt > MAX_EVIDENCE_AGE_MS;
+  })) {
+    add(
+      "EVIDENCE_STALE",
+      "Evidence timestamps exceed the reviewed freshness window.",
+    );
+  }
   if (
     (ACTIONABLE.has(candidate.action) ||
       candidate.prior_suggestion_ids.length > 0 ||
