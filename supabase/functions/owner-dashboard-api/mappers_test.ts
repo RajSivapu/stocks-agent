@@ -92,6 +92,13 @@ Deno.test("portfolio omits derived totals when any required price is missing or 
   assertEquals(mapPortfolio([{ ...holdings[0], price: null }], [], []).totals.unrealized_amount, null);
 });
 
+Deno.test("repeating decimal cost basis remains available", () => {
+  const view = mapPortfolio([{ ticker: "ABC", shares: "3", avg_cost: "100.6666666666666667", current_price: "105" }]);
+  assertEquals(view.summary.costBasis, 302);
+  assertEquals(view.summary.unrealizedProfit, 13);
+  assertEquals(view.summary.incomplete, false);
+});
+
 Deno.test("publication errors are never forwarded as suppression copy", () => {
   const mapped = mapPublicationReceipt({
     id: "alert-1",

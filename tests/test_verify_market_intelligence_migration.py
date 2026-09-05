@@ -14,6 +14,7 @@ ROOT = Path(__file__).resolve().parents[1]
 MIGRATION = ROOT / "sql" / "migrations" / "20260907_market_intelligence.sql"
 SCHEMA = ROOT / "sql" / "schema.sql"
 VERIFIER = ROOT / "scripts" / "verify_market_intelligence_migration.py"
+TRANSACTION_CHRONOLOGY = ROOT / "sql" / "migrations" / "20260909_transaction_chronology.sql"
 
 TABLES = (
     "market_intelligence_runs",
@@ -329,3 +330,18 @@ def test_fixture_is_complete_and_isolated():
     clone["tables"].pop(TABLES[0])
     assert set(snapshot["tables"]) == set(TABLES)
     assert set(snapshot["functions"]) == set(RPCS)
+
+
+def test_transaction_chronology_rejects_late_ledger_entries_without_rewriting_holdings():
+    migration = TRANSACTION_CHRONOLOGY.read_text()
+    schema = SCHEMA.read_text()
+
+    assert migration in schema
+    assert "PERFORM pg_advisory_xact_lock(hashtextextended(v_command.ticker, 0));" in migration
+    assert "SELECT MAX(COALESCE(executed_on" in migration
+    assert "v_executed_on < v_latest_transaction_on" in migration
+    assert "'code', 'TRANSACTION_OUT_OF_ORDER'" in migration
+    assert "'reason', 'transaction execution date precedes the recorded ledger; reconciliation is required'" in migration
+    assert migration.index("v_executed_on < v_latest_transaction_on") < migration.index(
+        "RETURN public.apply_portfolio_command_without_chronology"
+    )

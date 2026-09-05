@@ -340,6 +340,9 @@ async function handleMessage(updateId: number, message: TelegramMessage) {
 
 function callbackResultText(result: Record<string, unknown>): string {
   if (result.ok && result.status === "cancelled") return "Cancelled. Nothing was changed.";
+  if (result.code === "TRANSACTION_OUT_OF_ORDER") {
+    return "TRANSACTION_OUT_OF_ORDER: This transaction predates a recorded transaction; reconciliation is required before recording it. No trade was placed by this bot.";
+  }
   if (!result.ok) {
     return `${String(result.status ?? "rejected").toUpperCase()}: ${String(result.reason ?? "Nothing was changed; submit the command again.")}`;
   }

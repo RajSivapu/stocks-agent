@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import test from "node:test";
 
 import {
@@ -107,4 +108,11 @@ test("plansText is bounded by its caller and labels reminders", () => {
   assert.match(text, /Recurring investment reminders/);
   assert.match(text, /VTI: \$300 monthly · next due 2026-09-21 · core/);
   assert.match(text, /do not place brokerage orders/);
+});
+
+test("a late transaction receipt tells the owner to reconcile", () => {
+  const source = readFileSync(new URL("../supabase/functions/telegram-portfolio/index.ts", import.meta.url), "utf8");
+  assert.match(source, /TRANSACTION_OUT_OF_ORDER/);
+  assert.match(source, /reconciliation is required/);
+  assert.match(source, /No trade was placed by this bot/);
 });

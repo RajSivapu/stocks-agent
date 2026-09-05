@@ -71,12 +71,14 @@ const SCALE = 1_000_000n;
 
 function fixed(value: unknown): bigint | null {
   const raw = text(value, 80);
-  const match = raw && /^(-?)(\d{1,18})(?:\.(\d{1,6}))?$/.exec(raw);
+  const match = raw && /^(-?)(\d{1,18})(?:\.(\d{1,24}))?$/.exec(raw);
   if (!match) return null;
   const whole = match[2];
   if (!whole) return null;
-  const fraction = (match[3] ?? "").padEnd(6, "0");
-  const result = BigInt(whole) * SCALE + BigInt(fraction || "0");
+  const suppliedFraction = match[3] ?? "";
+  const fraction = suppliedFraction.slice(0, 6).padEnd(6, "0");
+  let result = BigInt(whole) * SCALE + BigInt(fraction || "0");
+  if (suppliedFraction.length > 6 && suppliedFraction[6] >= "5") result += 1n;
   return match[1] === "-" ? -result : result;
 }
 
@@ -92,13 +94,23 @@ function multiply(left: bigint, right: bigint): bigint {
   return (left * right + SCALE / 2n) / SCALE;
 }
 
+function roundedDisplayAmount(value: bigint): number | null {
+  const rounded = value < 0n
+    ? -((-value + SCALE / 2n) / SCALE)
+    : (value + SCALE / 2n) / SCALE;
+  const asNumber = Number(rounded);
+  return Number.isSafeInteger(asNumber) ? asNumber : null;
+}
+
 function holding(row: Row): HoldingView {
   const freshness = ["fresh", "stale", "partial", "unavailable"].includes(String(row.price_freshness))
     ? row.price_freshness as HoldingView["freshness"]
+    : row.current_price !== undefined
+    ? "fresh"
     : "unavailable";
   const shares = fixed(row.shares);
   const average = fixed(row.avg_cost);
-  const price = fixed(row.price);
+  const price = fixed(row.price ?? row.current_price);
   const value = shares !== null && price !== null && freshness === "fresh"
     ? multiply(shares, price)
     : null;
@@ -120,7 +132,7 @@ function holding(row: Row): HoldingView {
     opened_at: text(row.opened_at, 40),
     stop: text(row.stop, 80),
     target: text(row.target, 80),
-    price: freshness === "fresh" ? text(row.price, 80) : null,
+    price: freshness === "fresh" ? text(row.price ?? row.current_price, 80) : null,
     price_as_of: text(row.price_as_of, 40),
     price_source: text(row.price_source, 120),
     market_state: marketState,
@@ -134,17 +146,21 @@ function holding(row: Row): HoldingView {
 
 export function mapPortfolio(
   holdingRows: readonly Row[],
-  planRows: readonly Row[],
-  transactionRows: readonly Row[],
-): PortfolioView {
+  planRows: readonly Row[] = [],
+  transactionRows: readonly Row[] = [],
+): PortfolioView & {
+  summary: { costBasis: number | null; unrealizedProfit: number | null; incomplete: boolean };
+} {
   const holdings = holdingRows.slice(0, 100).map(holding);
   let costBasis = 0n;
   let totalValue = 0n;
   let complete = holdings.length > 0;
+  let basisComplete = holdings.length > 0;
   for (const row of holdings) {
     const shares = fixed(row.shares);
     const average = fixed(row.average_cost);
     if (shares !== null && average !== null) costBasis += multiply(shares, average);
+    else basisComplete = false;
     const value = fixed(row.value);
     if (value === null) complete = false;
     else totalValue += value;
@@ -172,17 +188,27 @@ export function mapPortfolio(
       active: row.active === true,
     }];
   });
+  const summaryIncomplete = !complete || !basisComplete;
+  const summaryCostBasis = basisComplete ? roundedDisplayAmount(costBasis) : null;
+  const summaryUnrealized = summaryIncomplete
+    ? null
+    : roundedDisplayAmount(totalValue - costBasis);
   return {
     holdings,
     plans,
     transactions: mapTransactions(transactionRows),
     totals: {
-      cost_basis: decimal(costBasis),
+      cost_basis: basisComplete ? decimal(costBasis) : null as unknown as string,
       value: complete ? decimal(totalValue) : null,
-      unrealized_amount: complete ? decimal(totalValue - costBasis) : null,
+      unrealized_amount: !summaryIncomplete ? decimal(totalValue - costBasis) : null,
     },
     comparison_availability: "structured_companion",
     latest_intelligence_run_id: null,
+    summary: {
+      costBasis: summaryCostBasis,
+      unrealizedProfit: summaryUnrealized,
+      incomplete: summaryIncomplete,
+    },
   };
 }
 
