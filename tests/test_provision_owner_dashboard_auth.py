@@ -11,6 +11,33 @@ SERVICE_KEY = "sb_secret_" + "a" * 40
 OWNER_ID = "6903b3cc-05b7-4f90-bbc2-7e80a3a59e22"
 
 
+def test_email_otp_config_requires_token_template_and_six_digits():
+    with pytest.raises(RuntimeError, match="six-digit"):
+        provision.validate_email_otp_configuration({
+            "mailer_otp_length": 8,
+            "mailer_templates_magic_link_content": "{{ .ConfirmationURL }}",
+        })
+
+    with pytest.raises(RuntimeError, match="Token"):
+        provision.validate_email_otp_configuration({
+            "mailer_otp_length": 6,
+            "mailer_templates_magic_link_content": "{{ .ConfirmationURL }}",
+        })
+
+    with pytest.raises(RuntimeError, match="six-digit"):
+        provision.validate_email_otp_configuration({
+            "mailer_otp_length": 6.0,
+            "mailer_templates_magic_link_content": "{{ .Token }}",
+        })
+
+    receipt = provision.validate_email_otp_configuration({
+        "mailer_otp_length": 6,
+        "mailer_templates_magic_link_content": "Your Personal Stock Agent code is {{ .Token }}.",
+    })
+    assert receipt == {"status": "verified", "otp_length": 6, "token_template": True}
+    assert "Token" not in json.dumps(receipt)
+
+
 def test_configuration_is_exact_and_receipts_never_return_identity_or_secret():
     assert provision.validate_configuration(PROJECT_URL, OWNER_EMAIL, SERVICE_KEY) == (
         PROJECT_URL, OWNER_EMAIL, SERVICE_KEY,

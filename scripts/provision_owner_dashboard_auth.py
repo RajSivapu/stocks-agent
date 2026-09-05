@@ -7,6 +7,7 @@ import argparse
 import hashlib
 import json
 import os
+from pathlib import Path
 import re
 from typing import Callable, Mapping
 from urllib.error import HTTPError
@@ -17,6 +18,29 @@ from urllib.request import Request, urlopen
 PROJECT_HOST = re.compile(r"^[a-z0-9]{20}\.supabase\.co$")
 EMAIL = re.compile(r"^[^\s@]+@[^\s@]+\.[^\s@]+$")
 UUID = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$", re.IGNORECASE)
+TOKEN_TEMPLATE = re.compile(r"{{\s*\.Token\s*}}")
+
+
+def validate_email_otp_configuration(config: Mapping[str, object]) -> dict[str, object]:
+    """Fail closed unless the hosted Auth email flow is the documented six-digit OTP flow."""
+    otp_length = config.get("mailer_otp_length")
+    if not isinstance(otp_length, int) or isinstance(otp_length, bool) or otp_length != 6:
+        raise RuntimeError("Supabase Auth email OTP must use a six-digit code")
+    template = config.get("mailer_templates_magic_link_content")
+    if not isinstance(template, str) or not TOKEN_TEMPLATE.search(template):
+        raise RuntimeError("Supabase Auth email template must contain the Token variable")
+    return {"status": "verified", "otp_length": 6, "token_template": True}
+
+
+def load_email_otp_configuration_receipt(receipt_path: Path) -> dict[str, object]:
+    """Read a manually verified, minimal Auth-settings receipt without logging its template."""
+    try:
+        value = json.loads(receipt_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as error:
+        raise RuntimeError("Auth configuration receipt is unavailable or malformed") from error
+    if not isinstance(value, dict):
+        raise RuntimeError("Auth configuration receipt is unavailable or malformed")
+    return validate_email_otp_configuration(value)
 
 
 def validate_configuration(project_url: str, owner_email: str, service_key: str) -> tuple[str, str, str]:
@@ -125,10 +149,13 @@ def provision_owner_account(
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--project-url", required=True)
+    parser.add_argument("--auth-config-receipt", type=Path, required=True)
     arguments = parser.parse_args()
     email = os.environ.get("DASHBOARD_OWNER_EMAIL", "")
     service_key = os.environ.get("SUPABASE_SERVICE_ROLE_KEY", "")
+    auth_configuration = load_email_otp_configuration_receipt(arguments.auth_config_receipt)
     receipt = provision_owner_account(arguments.project_url, email, service_key)
+    receipt["auth_configuration"] = auth_configuration
     print(json.dumps(receipt, sort_keys=True, separators=(",", ":")))
     return 0
 

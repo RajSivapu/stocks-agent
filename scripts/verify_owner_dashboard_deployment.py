@@ -22,7 +22,10 @@ from psycopg.rows import dict_row
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
-from scripts.provision_owner_dashboard_auth import validate_configuration as validate_auth_admin_configuration
+from scripts.provision_owner_dashboard_auth import (
+    validate_configuration as validate_auth_admin_configuration,
+    validate_email_otp_configuration,
+)
 
 
 CANARY_METHOD = "GET"
@@ -47,6 +50,22 @@ RELEASE_MIGRATION_VERSIONS = ("20260907", "20260908")
 RELEASE_FUNCTIONS = ("market-briefing-gateway", "owner-dashboard-api")
 RUNTIME_ROLE = "stock_agent_dashboard_runtime"
 UUID_PATTERN = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$", re.IGNORECASE)
+
+
+def validate_deployment_auth_configuration(config: Mapping[str, object]) -> dict[str, object]:
+    """Expose the Auth configuration gate at the deployment-verifier boundary."""
+    return validate_email_otp_configuration(config)
+
+
+def load_deployment_auth_configuration_receipt(receipt_path: Path) -> dict[str, object]:
+    """Read the protected, manually verified Auth-settings receipt before network access."""
+    try:
+        value = json.loads(receipt_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as error:
+        raise RuntimeError("Auth configuration receipt is unavailable or malformed") from error
+    if not isinstance(value, dict):
+        raise RuntimeError("Auth configuration receipt is unavailable or malformed")
+    return validate_deployment_auth_configuration(value)
 
 
 def normalize_receipt_timestamp(value: object) -> str | None:
@@ -689,7 +708,9 @@ def main() -> int:
     parser.add_argument("--origin", required=True)
     parser.add_argument("--candidate-sha")
     parser.add_argument("--deployment-receipt", type=Path)
+    parser.add_argument("--auth-config-receipt", type=Path, required=True)
     arguments = parser.parse_args()
+    auth_configuration = load_deployment_auth_configuration_receipt(arguments.auth_config_receipt)
     token = os.environ.get("DASHBOARD_OWNER_ACCESS_TOKEN", "").strip()
     if not token:
         parsed_api = urlparse(arguments.api_url)
@@ -711,6 +732,7 @@ def main() -> int:
         arguments.api_url, arguments.origin, token, non_owner_token,
         source_reader=lambda run_id: collect_source_receipts(database_url, arguments.api_url, run_id),
     )
+    receipt["auth_configuration"] = auth_configuration
     if bool(arguments.candidate_sha) != bool(arguments.deployment_receipt):
         raise SystemExit("candidate SHA and deployment receipt must be supplied together")
     if arguments.candidate_sha and arguments.deployment_receipt:

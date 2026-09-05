@@ -43,6 +43,19 @@ def test_canary_routes_are_get_only_and_bounded():
     assert verify.CANARY_METHOD == "GET"
 
 
+def test_deployment_auth_configuration_rejects_confirmation_url_only_templates():
+    with pytest.raises(RuntimeError, match="Token"):
+        verify.validate_deployment_auth_configuration({
+            "mailer_otp_length": 6,
+            "mailer_templates_magic_link_content": "{{ .ConfirmationURL }}",
+        })
+
+    assert verify.validate_deployment_auth_configuration({
+        "mailer_otp_length": 6,
+        "mailer_templates_magic_link_content": "Your code: {{ .Token }}",
+    }) == {"status": "verified", "otp_length": 6, "token_template": True}
+
+
 def test_api_url_and_origin_must_be_exact_https_boundaries():
     assert verify.validate_api_boundary(API_URL, ORIGIN) == (API_URL, ORIGIN)
     for api_url, origin in [

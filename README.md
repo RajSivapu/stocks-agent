@@ -173,8 +173,22 @@ client-side calculations.
 
 1. Create the single owner user directly in Supabase Auth. Public signup remains disabled; the
    browser requests an email OTP with `shouldCreateUser: false`.
-2. Set the hosted Auth JWT lifetime to 900 seconds and confirm email signup remains disabled. The
-   matching local project settings are recorded in `supabase/config.toml`.
+2. Set the hosted Auth JWT lifetime to 900 seconds and confirm email signup remains disabled. In
+   **Authentication → Email Templates → Magic Link**, make the email body show the six-digit code
+   with `{{ .Token }}`; a `{{ .ConfirmationURL }}`-only body is not acceptable. Set the hosted email
+   OTP length to exactly `6`. The matching local OTP length is recorded in `supabase/config.toml`.
+   Supabase does not expose a supported project-management credential path for this check, so the
+   protected operator must manually verify those two dashboard settings and save only this minimal
+   local receipt (no owner email, URL, key, or rendered email) outside version control:
+
+```json
+{"mailer_otp_length":6,"mailer_templates_magic_link_content":"Your code is {{ .Token }}"}
+```
+
+   Pass that receipt to both protected Auth commands with
+   `--auth-config-receipt /secure/path/auth-email-otp.json`. They fail closed before any Auth admin
+   request or deployment canary when it is absent, malformed, not six digits, or lacks the Token
+   variable. The scripts print only the bounded verification fields, never the template body.
 3. Apply `sql/migrations/20260906_owner_dashboard_read_role.sql` with the normal protected migration
    path.
 4. Put `DASHBOARD_OWNER_USER_ID` and the exact deployed HTTPS origin in
