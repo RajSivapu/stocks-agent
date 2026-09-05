@@ -371,6 +371,10 @@ def test_latest_controller_migrations_keep_restart_lineage_outside_uninserted_re
         assert "checkpoint must record an actual request outcome" in sql
         assert "analysis_runs WHERE id=p_run_id AND status='running'" in sql
         assert "cache_hit" in sql and "request_cost" in sql
+        assert "cache_predecessor_receipt_id UUID NOT NULL" in sql
+        assert "market_intelligence_run_events WHERE id=p_completion_id" in sql
+        assert "payload->'receipt'->>'response_hash'=v_receipt->>'response_hash'" in sql
+    assert "market_intelligence_context_inputs" in schema
     assert "market_collection_checkpoint_history" in controller
     assert "checkpoint idempotency mismatch" in controller
     assert terminal.index("market_checkpoint_receipt_lineage") < terminal.index(

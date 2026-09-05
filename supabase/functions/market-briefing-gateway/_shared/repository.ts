@@ -380,6 +380,17 @@ function nullableText(value: unknown, max = 1000): string | null {
   return value === null || value === undefined ? null : text(String(value), max);
 }
 
+function decimalMap(value: unknown): Record<string, string> {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) {
+    throw new GatewayRepositoryError("INVALID_PERSISTED_DATA");
+  }
+  const entries = Object.entries(value as Record<string, unknown>);
+  if (entries.length > 100) throw new GatewayRepositoryError("CONTEXT_TOO_LARGE");
+  return Object.fromEntries(entries.map(([ticker, amount]) => [
+    text(ticker.toUpperCase(), 15), decimal(amount),
+  ]));
+}
+
 function integer(value: unknown): number {
   const parsed = typeof value === "number" ? value : Number(value);
   if (!Number.isSafeInteger(parsed)) {
@@ -1078,6 +1089,11 @@ export function createSupabaseGatewayRepository(
           "status",
           "applied",
         ).limit(501),
+        _runId
+          ? client.from("market_intelligence_context_inputs").select(
+            "holding_market_values,liquidity_by_ticker,overlap_by_ticker",
+          ).eq("run_id", _runId).limit(1)
+          : Promise.resolve({ data: [], error: null }),
       ]);
       const holdings = rows(results[0], "CONTEXT_TOO_LARGE");
       const suggestions = rows(results[1], "CONTEXT_TOO_LARGE");
@@ -1085,6 +1101,7 @@ export function createSupabaseGatewayRepository(
       const watches = rows(results[7], "CONTEXT_TOO_LARGE");
       const transactions = rows(results[9], "CONTEXT_TOO_LARGE");
       const commands = rows(results[10], "CONTEXT_TOO_LARGE");
+      const intelligenceInputs = rows(results[11], "CONTEXT_TOO_LARGE");
       if (
         holdings.length > 100 || suggestions.length > 100 ||
         plans.length > 20 ||
@@ -1131,6 +1148,13 @@ export function createSupabaseGatewayRepository(
           target_alert_active: boole(row.target_alert_active ?? false),
         })),
         holding_quotes: {},
+        intelligence_collection_context: intelligenceInputs.length === 1
+          ? {
+            holding_market_values: decimalMap(intelligenceInputs[0].holding_market_values),
+            liquidity_by_ticker: decimalMap(intelligenceInputs[0].liquidity_by_ticker),
+            overlap_by_ticker: decimalMap(intelligenceInputs[0].overlap_by_ticker),
+          }
+          : undefined,
         realized_pnl_today: coverage ? formatFixed(pnlMicros, 6) : null,
         portfolio_command_coverage_complete: coverage,
         consecutive_completed_losses: consecutiveLosses,

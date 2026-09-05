@@ -784,19 +784,20 @@ def _discover(
     candidates: list[CandidateInput] = []
     events: list[MarketEvent] = []
     relations: list[EventRelationship] = []
+    grouped: dict[tuple[str, str, str], list[SourceItem]] = {}
     for item in items:
         ticker = str(item.metadata.get("ticker") or item.metadata.get("symbol") or "").upper()
         if not ticker and item.security_ids:
             ticker = item.security_ids[0]
         if not ticker:
             continue
-        # Score a claim from independently retained publisher/provider pairs, not one label.
-        supporting = tuple(
-            other for other in items
-            if (str(other.metadata.get("ticker") or other.metadata.get("symbol") or "").upper()
-                or (other.security_ids[0] if other.security_ids else "")) == ticker
-            and other.title == item.title
-        )
+        grouped.setdefault(_claim_key(item, ticker), []).append(item)
+    for (_ticker, _claim, _polarity), supporting_items in grouped.items():
+        item = supporting_items[0]
+        ticker = _ticker
+        # Claim identity is normalized retained evidence plus entity/ticker and
+        # polarity—not an adapter's display title.
+        supporting = tuple(supporting_items)
         event = build_market_event(
             event_type="provider_event", title=item.title, summary=item.summary,
             materiality=item.metadata.get("materiality", "0.5"),
@@ -832,6 +833,15 @@ def _discover(
     plans = context.get("owner_plans", context.get("plans"))
     ranked = rank_candidates(candidates, holdings=holdings, plans=plans)
     return events, relations, ranked
+
+
+def _claim_key(item: SourceItem, ticker: str) -> tuple[str, str, str]:
+    raw = str(item.metadata.get("claim_key") or item.normalized_text or item.canonical_content)
+    normalized = re.sub(r"[^a-z0-9]+", " ", raw.lower()).strip()
+    polarity = str(item.metadata.get("polarity") or "").strip().lower()
+    if polarity not in {"positive", "negative", "neutral"}:
+        polarity = "negative" if re.search(r"\b(cut|drop|fall|loss|risk|miss)\b", normalized) else "positive" if re.search(r"\b(raise|gain|beat|growth|approve)\b", normalized) else "neutral"
+    return ticker, normalized[:2_000], polarity
 
 
 def _collection_cache_key(adapter: object, query: CollectionQuery) -> str:
@@ -904,6 +914,9 @@ def _authority_score(items: Sequence[SourceItem]) -> Decimal | None:
         return Decimal("1")
     if "corroborating" in authorities:
         return Decimal("0.75") if len(independent) >= 2 else None
+    if "secondary" in authorities:
+        providers = {item.provider for item in items}
+        return Decimal("0.75") if len(providers) >= 2 and len(independent) >= 2 else None
     if "market_data" in authorities:
         return Decimal("0.5")
     return Decimal("0.25") if "radar" in authorities else None

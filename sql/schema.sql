@@ -4219,12 +4219,22 @@ END; $$;
 REVOKE ALL ON FUNCTION public.checkpoint_market_intelligence_collection(UUID,JSONB) FROM PUBLIC,anon,authenticated;
 GRANT EXECUTE ON FUNCTION public.checkpoint_market_intelligence_collection(UUID,JSONB) TO service_role;
 
+CREATE TABLE IF NOT EXISTS public.market_intelligence_context_inputs (
+  run_id UUID PRIMARY KEY REFERENCES public.analysis_runs(id) ON DELETE RESTRICT,
+  holding_market_values JSONB NOT NULL CHECK (jsonb_typeof(holding_market_values)='object' AND octet_length(holding_market_values::text)<=16384),
+  liquidity_by_ticker JSONB NOT NULL CHECK (jsonb_typeof(liquidity_by_ticker)='object' AND octet_length(liquidity_by_ticker::text)<=16384),
+  overlap_by_ticker JSONB NOT NULL CHECK (jsonb_typeof(overlap_by_ticker)='object' AND octet_length(overlap_by_ticker::text)<=16384),
+  created_at TIMESTAMPTZ NOT NULL DEFAULT statement_timestamp()
+);
+ALTER TABLE public.market_intelligence_context_inputs ENABLE ROW LEVEL SECURITY;
+REVOKE ALL ON public.market_intelligence_context_inputs FROM PUBLIC,anon,authenticated;
+
 -- 20260920 terminal checkpoint lineage.  This is deliberately the final
 -- fresh-schema controller override, after all historical recorder wrappers.
 CREATE TABLE IF NOT EXISTS public.market_checkpoint_receipt_lineage (
   cache_receipt_id UUID PRIMARY KEY REFERENCES public.market_source_receipts(id) ON DELETE RESTRICT,
   run_id UUID NOT NULL REFERENCES public.market_intelligence_runs(id) ON DELETE RESTRICT,
-  checkpoint_receipt_id UUID NOT NULL,
+  cache_predecessor_receipt_id UUID NOT NULL,
   created_at TIMESTAMPTZ NOT NULL DEFAULT statement_timestamp()
 );
 ALTER TABLE public.market_checkpoint_receipt_lineage ENABLE ROW LEVEL SECURITY;
@@ -4278,7 +4288,7 @@ BEGIN
   SELECT jsonb_set(p_payload,'{receipts}',COALESCE(jsonb_agg(CASE WHEN value->>'status'='cache_hit' THEN jsonb_set(value,'{cache_predecessor_receipt_id}','null'::jsonb) ELSE value END),'[]'::jsonb)) INTO v_effective FROM jsonb_array_elements(p_payload->'receipts');
   result_row:=public.record_market_intelligence_provider_v2(p_run_id,p_completion_id,v_effective);
   INSERT INTO public.market_run_source_item_provenance(run_item_id,run_id,source_item_id,source_receipt_id,provider,request_url,retrieved_at,reporting_at,entity_ids,security_ids,discovery_status) SELECT (value->>'run_item_id')::uuid,p_run_id,(value->>'id')::uuid,(value->>'receipt_id')::uuid,value->>'provider',value->>'request_url',(value->>'retrieved_at')::timestamptz,(value->>'reporting_at')::timestamptz,value->'entity_ids',value->'security_ids',value->>'discovery_status' FROM jsonb_array_elements(p_payload->'items') value ON CONFLICT(run_item_id) DO NOTHING;
-  INSERT INTO public.market_checkpoint_receipt_lineage(cache_receipt_id,run_id,checkpoint_receipt_id) SELECT (value->>'id')::uuid,p_run_id,(value->>'cache_predecessor_receipt_id')::uuid FROM jsonb_array_elements(p_payload->'receipts') value WHERE value->>'status'='cache_hit' ON CONFLICT(cache_receipt_id) DO NOTHING;
+  INSERT INTO public.market_checkpoint_receipt_lineage(cache_receipt_id,run_id,cache_predecessor_receipt_id) SELECT (value->>'id')::uuid,p_run_id,(value->>'cache_predecessor_receipt_id')::uuid FROM jsonb_array_elements(p_payload->'receipts') value WHERE value->>'status'='cache_hit' ON CONFLICT(cache_receipt_id) DO NOTHING;
   RETURN result_row;
 END; $$;
 REVOKE ALL ON FUNCTION public.checkpoint_market_intelligence_collection(UUID,JSONB) FROM PUBLIC,anon,authenticated;
@@ -4690,17 +4700,20 @@ CREATE OR REPLACE FUNCTION public.record_market_intelligence(p_run_id UUID,p_com
 RETURNS JSONB LANGUAGE plpgsql SECURITY DEFINER SET search_path=pg_catalog AS $$
 DECLARE v_effective JSONB; result_row JSONB; v_receipt JSONB;
 BEGIN
+  SELECT jsonb_set(p_payload,'{receipts}',COALESCE(jsonb_agg(CASE WHEN value->>'status'='cache_hit' THEN jsonb_set(value,'{cache_predecessor_receipt_id}','null'::jsonb) ELSE value END),'[]'::jsonb)) INTO v_effective FROM jsonb_array_elements(p_payload->'receipts');
+  IF EXISTS(SELECT 1 FROM public.market_intelligence_run_events WHERE id=p_completion_id) THEN
+    RETURN public.record_market_intelligence_provider_v2(p_run_id,p_completion_id,v_effective);
+  END IF;
   IF NOT EXISTS(SELECT 1 FROM public.analysis_runs WHERE id=p_run_id AND status='running')
      OR NOT EXISTS(SELECT 1 FROM public.market_intelligence_run_events WHERE run_id=p_run_id AND status='started')
      OR EXISTS(SELECT 1 FROM public.market_intelligence_run_events WHERE run_id=p_run_id AND status IN ('completed','failed')) THEN RAISE EXCEPTION 'intelligence run is not running' USING ERRCODE='22023'; END IF;
   IF EXISTS(SELECT 1 FROM public.market_collection_checkpoints checkpoint WHERE checkpoint.run_id=p_run_id AND NOT EXISTS(SELECT 1 FROM jsonb_array_elements(p_payload->'receipts') receipt WHERE receipt->>'id'=checkpoint.source_receipt_id::text OR (receipt->>'status'='cache_hit' AND receipt->>'cache_predecessor_receipt_id'=checkpoint.source_receipt_id::text))) THEN RAISE EXCEPTION 'final packet omits collection checkpoint' USING ERRCODE='22023'; END IF;
   FOR v_receipt IN SELECT value FROM jsonb_array_elements(p_payload->'receipts') LOOP
-    IF v_receipt->>'status'='cache_hit' AND NOT EXISTS(SELECT 1 FROM public.market_collection_checkpoints checkpoint WHERE checkpoint.run_id=p_run_id AND checkpoint.source_receipt_id::text=v_receipt->>'cache_predecessor_receipt_id' UNION ALL SELECT 1 FROM public.market_collection_checkpoint_history history WHERE history.run_id=p_run_id AND history.source_receipt_id::text=v_receipt->>'cache_predecessor_receipt_id') THEN RAISE EXCEPTION 'cache predecessor checkpoint unavailable' USING ERRCODE='22023'; END IF;
+    IF v_receipt->>'status'='cache_hit' AND NOT EXISTS(SELECT 1 FROM public.market_collection_checkpoints checkpoint WHERE checkpoint.run_id=p_run_id AND checkpoint.source_receipt_id::text=v_receipt->>'cache_predecessor_receipt_id' AND checkpoint.payload->'receipt'->>'provider'=v_receipt->>'provider' AND checkpoint.payload->'receipt'->>'cache_key'=v_receipt->>'cache_key' AND checkpoint.payload->'receipt'->'requested_window'=v_receipt->'requested_window' AND checkpoint.payload->'receipt'->>'response_hash'=v_receipt->>'response_hash' UNION ALL SELECT 1 FROM public.market_collection_checkpoint_history history WHERE history.run_id=p_run_id AND history.source_receipt_id::text=v_receipt->>'cache_predecessor_receipt_id' AND history.payload->'receipt'->>'provider'=v_receipt->>'provider' AND history.payload->'receipt'->>'cache_key'=v_receipt->>'cache_key' AND history.payload->'receipt'->'requested_window'=v_receipt->'requested_window' AND history.payload->'receipt'->>'response_hash'=v_receipt->>'response_hash') THEN RAISE EXCEPTION 'cache predecessor checkpoint unavailable' USING ERRCODE='22023'; END IF;
   END LOOP;
-  SELECT jsonb_set(p_payload,'{receipts}',COALESCE(jsonb_agg(CASE WHEN value->>'status'='cache_hit' THEN jsonb_set(value,'{cache_predecessor_receipt_id}','null'::jsonb) ELSE value END),'[]'::jsonb)) INTO v_effective FROM jsonb_array_elements(p_payload->'receipts');
   result_row:=public.record_market_intelligence_provider_v2(p_run_id,p_completion_id,v_effective);
   INSERT INTO public.market_run_source_item_provenance(run_item_id,run_id,source_item_id,source_receipt_id,provider,request_url,retrieved_at,reporting_at,entity_ids,security_ids,discovery_status) SELECT (value->>'run_item_id')::uuid,p_run_id,(value->>'id')::uuid,(value->>'receipt_id')::uuid,value->>'provider',value->>'request_url',(value->>'retrieved_at')::timestamptz,(value->>'reporting_at')::timestamptz,value->'entity_ids',value->'security_ids',value->>'discovery_status' FROM jsonb_array_elements(p_payload->'items') value ON CONFLICT(run_item_id) DO NOTHING;
-  INSERT INTO public.market_checkpoint_receipt_lineage(cache_receipt_id,run_id,checkpoint_receipt_id) SELECT (value->>'id')::uuid,p_run_id,(value->>'cache_predecessor_receipt_id')::uuid FROM jsonb_array_elements(p_payload->'receipts') value WHERE value->>'status'='cache_hit' ON CONFLICT(cache_receipt_id) DO NOTHING;
+  INSERT INTO public.market_checkpoint_receipt_lineage(cache_receipt_id,run_id,cache_predecessor_receipt_id) SELECT (value->>'id')::uuid,p_run_id,(value->>'cache_predecessor_receipt_id')::uuid FROM jsonb_array_elements(p_payload->'receipts') value WHERE value->>'status'='cache_hit' ON CONFLICT(cache_receipt_id) DO NOTHING;
   RETURN result_row;
 END; $$;
 REVOKE ALL ON FUNCTION public.record_market_intelligence(UUID,UUID,JSONB) FROM PUBLIC,anon,authenticated;

@@ -158,9 +158,12 @@ class BoundedHttpClient:
         self.last_attempt_count = 0
         for redirect_count in range(_MAX_REDIRECTS + 1):
             self._validate_url(current_url)
+            # Quota admission is deliberately outside transport normalization:
+            # quota exhaustion must reach the adapter as QUOTA_BLOCKED and no
+            # corresponding open may occur.
+            if before_attempt is not None:
+                before_attempt()
             try:
-                if before_attempt is not None:
-                    before_attempt()
                 self.last_attempt_count += 1
                 response = self._open(
                     current_url,

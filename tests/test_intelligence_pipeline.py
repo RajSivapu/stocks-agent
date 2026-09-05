@@ -2,11 +2,13 @@ from __future__ import annotations
 
 import hashlib
 from dataclasses import replace
+from decimal import Decimal
 import pytest
 from datetime import date, datetime, timedelta, timezone
 from types import MappingProxyType
 
-from lib.intelligence.pipeline import IntelligencePipeline, PipelineRequest
+from lib.intelligence.pipeline import IntelligencePipeline, PipelineRequest, _discover
+from lib.intelligence.normalize import normalize_item
 from lib.intelligence.providers import CollectionResult, RequestReceipt, SourceItem
 from lib.intelligence.themes import SEED_THEMES
 from lib.intelligence.types import PacketLimits
@@ -283,8 +285,26 @@ def test_near_corroboration_reaches_discovery_and_packet_evidence():
 
     assert result.coverage["near_duplicate_count"] == 1
     assert [item["disposition"] for item in gateway.payloads[-1]["items"]] == ["accepted", "near_duplicate"]
-    assert len(gateway.payloads[-1]["events"]) == 2
+    assert len(gateway.payloads[-1]["events"]) == 1
     assert len(result.packet.to_dict()["evidence"]) == 2
+
+
+def test_independent_secondary_adapter_items_corroborate_by_normalized_claim_not_title():
+    alpha = replace(
+        raw_item("secondary-alpha", provider="alpha_vantage"), title="Earnings headline",
+        normalized_text="Issuer raises full year outlook", authority="secondary",
+        security_ids=("TEST",), metadata=MappingProxyType({"ticker": "TEST", "polarity": "positive"}),
+    )
+    finnhub = replace(
+        alpha, provider="finnhub", upstream_item_id="secondary-finnhub", title="Company update",
+        source_url="https://example.com/finnhub/secondary", canonical_content='{"summary":"Issuer raises full year outlook"}',
+    )
+    events, relations, candidates = _discover(
+        (normalize_item(alpha), normalize_item(finnhub)), {"holdings": {"TEST": "0.1"}, "liquidity_by_ticker": {"TEST": "0.7"}, "overlap_by_ticker": {"TEST": "0.1"}}, NOW,
+    )
+
+    assert len(events) == len(relations) == len(candidates) == 1
+    assert candidates[0].components["authority_corroboration"] == Decimal("0.75")
 
 
 def test_two_runs_reuse_source_identity_but_scope_event_graph_ids_by_run():

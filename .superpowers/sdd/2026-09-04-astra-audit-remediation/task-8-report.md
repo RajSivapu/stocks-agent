@@ -145,3 +145,34 @@
   `sql/schema.sql`. No live provider, database, scheduled run, Telegram, deployment, or full suite
   was run; applying and exercising the ordered migrations in the protected database path remains
   the residual integration risk.
+
+## Controller remediation round 5
+
+- Terminal cache predecessors are stripped before the legacy exact-key recorder, then retained in
+  the dedicated durable lineage table. Retry of an already-recorded completion delegates to the
+  recorder's completion idempotency path before the terminal-state guard; a mismatched completion
+  remains rejected.
+- Cache-hit lineage now requires provider, cache key, request window, and response-content identity
+  to match the checkpoint. Hydrated failed checkpoints retain their original receipt ID and nonzero
+  paid request cost rather than being rewritten as cache hits.
+- Quota admission runs before every HTTP open and quota exhaustion propagates to the adapter as a
+  `QUOTA_BLOCKED` receipt without an additional open. Secondary Alpha Vantage/Finnhub evidence is
+  grouped by normalized persisted claim, ticker, and polarity; two independent providers corroborate,
+  while a lone secondary remains insufficient.
+- Added a bounded service-only `market_intelligence_context_inputs` table and repository read shape
+  for authoritative holding valuations, liquidity, and overlap. When the row is absent, the context
+  is deliberately absent and collector ranking remains insufficient.
+
+### Round 5 verification
+
+- Python focused Task 8 gate: `.venv/bin/python -m pytest -q tests/test_gateway.py
+  tests/test_intelligence_http.py tests/test_intelligence_providers.py tests/test_intelligence_quota.py
+  tests/test_intelligence_pipeline.py tests/test_intelligence_ranking.py
+  tests/test_collect_market_intelligence.py tests/test_verify_market_intelligence_migration.py`
+  — **202 passed**.
+- Deno focused gateway/repository gate: `npx --yes deno@2.9.6 test --config
+  supabase/functions/deno.json supabase/functions/market-briefing-gateway/_shared/contracts_test.ts
+  supabase/functions/market-briefing-gateway/_shared/handler_test.ts
+  supabase/functions/market-briefing-gateway/_shared/repository_test.ts` — **65 passed**.
+- No live provider, database, scheduled run, Telegram, deployment, or full suite was run. The
+  protected database migration/application path remains the only residual integration risk.

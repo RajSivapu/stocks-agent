@@ -83,10 +83,10 @@ class ResumableCollectionCache:
         if not predecessor:
             raise ValueError("cached collection is missing its persisted source receipt")
         if result.receipt.status == "failed":
-            return replace(result, receipt=replace(
-                result.receipt, reservation_id=reservation_id, request_cost=0,
-                source_receipt_id=source_receipt_id,
-            ))
+            # A failed checkpoint is an already-paid same-run outcome, not a
+            # cache hit.  Preserve its original receipt identity and cost so
+            # the terminal packet cannot erase the outbound attempt.
+            return result
         receipt = replace(
             result.receipt, reservation_id=reservation_id, status="cache_hit", request_cost=0,
             source_receipt_id=source_receipt_id, cache_predecessor_receipt_id=predecessor,

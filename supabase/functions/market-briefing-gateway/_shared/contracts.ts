@@ -551,6 +551,11 @@ export interface PolicyContext {
 }
 
 export interface GatewayReadContext extends PolicyContext {
+  intelligence_collection_context?: {
+    holding_market_values: Record<string, string>;
+    liquidity_by_ticker: Record<string, string>;
+    overlap_by_ticker: Record<string, string>;
+  };
   recent_suggestions: ContextSuggestion[];
   observations: Array<{
     id: number;
