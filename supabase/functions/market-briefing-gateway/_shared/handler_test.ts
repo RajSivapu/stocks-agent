@@ -148,6 +148,55 @@ Deno.test("report handler publishes an approved sizing-free urgent HOLD alert wi
   );
 });
 
+Deno.test("report handler derives routine pure-HOLD alert kind and text without caller labels", async () => {
+  const results: Array<{
+    sent: string[];
+    stored:
+      | { kind: unknown; report: { title: unknown; summary: unknown } }
+      | null;
+  }> = [];
+  for (const kind of ["morning", "urgent"] as const) {
+    const repo = new FakeRepository();
+    const payload = reportFixture(kind);
+    repo.reportDecisions = [{
+      evaluation_id: payload.report.policy_decision_ids[0],
+      candidate_id: "00000000-0000-4000-8000-000000000033",
+      run_id: RUN_ID,
+      packet_id: PACKET_ID,
+      packet_hash: PACKET_HASH,
+      ticker: "CENX",
+      status: "approved",
+      final_action: "hold",
+      approved_terms: null,
+      final_alert_urgency: "routine",
+    }];
+    const setup = makeHandler(repo);
+    const response = await setup.handler(request("record_report", payload));
+    assertEquals(response.status, 200);
+    results.push({
+      sent: setup.sent.map(([body]) => body),
+      stored: repo.storedReport as {
+        kind: unknown;
+        report: { title: unknown; summary: unknown };
+      } | null,
+    });
+  }
+  assertEquals(results.map((result) => result.sent.length), [1, 1]);
+  for (const result of results) {
+    assert(result.stored !== null, "routine alert was not persisted");
+    assertEquals(result.stored!.kind, "intraday");
+    assertEquals(result.stored!.report.title, "INTRADAY RESEARCH — 2026-09-02");
+    assert(
+      result.sent[0].includes("INTRADAY RESEARCH") &&
+        result.sent[0].includes("POLICY-APPROVED ROUTINE ALERT") &&
+        !result.sent[0].includes("BUY") &&
+        !result.sent[0].includes("999999") &&
+        !result.sent[0].includes("shares"),
+      "routine alert retained caller labels or trade prose",
+    );
+  }
+});
+
 Deno.test("report handler rejects missing or wrong-packet policy decisions without a write or send", async () => {
   for (const wrong of ["missing", "packet", "run"]) {
     const repo = new FakeRepository();
@@ -1235,7 +1284,9 @@ Deno.test("six individually valid purchases cannot exceed the growth allocation"
   setup.repository.policyValue.max_trade_risk_bps.growth = 1000;
   const purchases = Array.from({ length: 6 }, (_, index) => ({
     ...candidate("on-demand", "brief"),
-    candidate_id: `00000000-0000-4000-8000-${String(index + 30).padStart(12, "0")}`,
+    candidate_id: `00000000-0000-4000-8000-${
+      String(index + 30).padStart(12, "0")
+    }`,
     ticker: `G${index}`,
     proposed_amount: "1500",
     proposed_shares: "31.901318",

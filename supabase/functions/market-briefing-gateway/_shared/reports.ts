@@ -413,6 +413,12 @@ export function renderReportDelivery(
   const finalAlertTriggered = decisions.some((row) =>
     row.final_alert_urgency !== null
   );
+  const finalAlertUrgency: "urgent" | "routine" | null = decisions.some((
+      row,
+    ) => row.final_alert_urgency === "urgent"
+    )
+    ? "urgent"
+    : (finalAlertTriggered ? "routine" : null);
   if (
     value.kind === "intraday" && actionableFields.length === 0 &&
     !finalAlertTriggered
@@ -421,7 +427,7 @@ export function renderReportDelivery(
   }
   const urgent = actionableFields.some((row) => row.urgency === "urgent") ||
     decisions.some((row) => row.final_alert_urgency === "urgent");
-  if (value.kind === "urgent" && !urgent) {
+  if (value.kind === "urgent" && !urgent && finalAlertUrgency === null) {
     return {
       status: "suppressed",
       body: "",
@@ -429,19 +435,19 @@ export function renderReportDelivery(
       reason: "not_actionable",
     };
   }
-  const heading = urgent
-    ? "URGENT RESEARCH REVIEW"
-    : `${value.kind.toUpperCase()} RESEARCH`;
-  const finalKind: ReportKind = decisions.some((row) =>
-    row.final_alert_urgency === "urgent"
-  )
+  const finalKind: ReportKind = finalAlertUrgency === "urgent"
     ? "urgent"
-    : value.kind;
+    : (finalAlertUrgency === "routine" ? "intraday" : value.kind);
+  const heading = finalAlertUrgency === "urgent"
+    ? "URGENT RESEARCH REVIEW"
+    : (finalAlertUrgency === "routine"
+      ? "INTRADAY RESEARCH"
+      : (urgent
+        ? "URGENT RESEARCH REVIEW"
+        : `${finalKind.toUpperCase()} RESEARCH`));
   const lines = decisions.map((row) => {
     if (row.final_alert_urgency !== null) {
-      return `${row.ticker}: POLICY-APPROVED ${
-        row.final_alert_urgency.toUpperCase()
-      } ALERT. Manual review required.`;
+      return `${row.ticker}: POLICY-APPROVED ${row.final_alert_urgency.toUpperCase()} ALERT. Manual review required.`;
     }
     const terms = row.approved_terms;
     if (!terms) {
