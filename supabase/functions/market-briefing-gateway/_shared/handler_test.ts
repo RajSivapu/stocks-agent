@@ -1096,6 +1096,118 @@ Deno.test("unreconciled cash and mutually exclusive purchases fail closed", asyn
   );
 });
 
+Deno.test("existing stop exposure reserves portfolio risk before a new purchase", async () => {
+  const setup = makeHandler();
+  setup.repository.policyValue.max_trade_risk_bps.growth = 400;
+  setup.repository.context.holdings.push({
+    ticker: "GROW",
+    shares: "100",
+    avg_cost: "60",
+    bucket: "growth",
+    stop: "42",
+    target: null,
+    high_water_price: null,
+    hold_override_until: null,
+    stop_alert_active: false,
+    stop_near_alert_active: false,
+    target_near_alert_active: false,
+    target_alert_active: false,
+  });
+  const result = await json(await setup.handler(request(
+    "evaluate_and_publish",
+    {
+      phase: "on-demand",
+      market_date: "2026-09-02",
+      title: "Risk reservation",
+      candidates: [candidate("on-demand", "brief")],
+    },
+    { dry: true },
+  )));
+  const evaluation = (result.evaluations as Array<{
+    final_action: string | null;
+    reason_codes: string[];
+  }>)[0];
+  assertEquals(evaluation.final_action, "watch");
+  assert(
+    new Set(evaluation.reason_codes).has("PORTFOLIO_BUDGET_EXCEEDED"),
+    "existing stop exposure did not consume the risk limit",
+  );
+});
+
+Deno.test("owner-plan Core purchase requires cash but not a stop-derived risk value", async () => {
+  const ownerPlanCandidate = {
+    ...candidate("on-demand", "brief"),
+    ticker: "VTI",
+    action: "buy",
+    decision_mode: "owner_plan",
+    bucket: "core",
+    proposed_amount: "300",
+    proposed_shares: "0.75",
+    entry_zone_low: null,
+    entry_zone_high: null,
+    stop: null,
+    target: null,
+    invalidation_price: null,
+  };
+  const setup = makeHandler();
+  setup.repository.policyValue.allocation_bps.core = 10000;
+  setup.repository.context.holdings = [{
+    ...setup.repository.context.holdings[0],
+    ticker: "VOO",
+    avg_cost: "480",
+    high_water_price: "510",
+  }];
+  setup.repository.context.owner_plans = [{
+    id: "00000000-0000-4000-8000-000000000088",
+    ticker: "VTI",
+    bucket: "core",
+    amount: "300",
+    cadence: "monthly",
+    next_due_on: "2026-09-01",
+    active: true,
+    updated_at: "2026-09-02T12:00:00.000Z",
+  }];
+  setup.repository.context.spendable_cash = { core: "300" };
+  const approved = await json(await setup.handler(request(
+    "evaluate_and_publish",
+    {
+      phase: "on-demand",
+      market_date: "2026-09-02",
+      title: "Core contribution",
+      candidates: [ownerPlanCandidate],
+    },
+    { dry: true },
+  )));
+  const approvedEvaluation = (approved.evaluations as Array<{
+    final_action: string | null;
+    reason_codes: string[];
+  }>)[0];
+  assertEquals(approvedEvaluation.final_action, "buy");
+
+  const unavailable = makeHandler();
+  unavailable.repository.context.holdings = structuredClone(setup.repository.context.holdings);
+  unavailable.repository.context.owner_plans = structuredClone(setup.repository.context.owner_plans);
+  const missingCash = await json(await unavailable.handler(request(
+    "evaluate_and_publish",
+    {
+      phase: "on-demand",
+      market_date: "2026-09-02",
+      title: "Core contribution",
+      candidates: [ownerPlanCandidate],
+    },
+    { dry: true },
+  )));
+  const missingCashEvaluation = (missingCash.evaluations as Array<{
+    final_action: string | null;
+    reason_codes: string[];
+  }>)[0];
+  assertEquals(missingCashEvaluation.final_action, "watch");
+  assert(
+    new Set(missingCashEvaluation.reason_codes).has("CASH_UNAVAILABLE"),
+    "owner-plan cash availability did not fail closed",
+  );
+});
+
 Deno.test("on-demand alternatives are history-computed by the gateway and remain send-free", async () => {
   const repository = new FakeRepository();
   const setup = makeHandler(repository, {

@@ -947,6 +947,44 @@ function rankedEvaluations(evaluations: readonly PolicyEvaluation[]): PolicyEval
   });
 }
 
+function existingStopRiskByBucket(
+  context: PolicyContext,
+): Partial<Record<DecisionCandidate["bucket"], bigint>> {
+  const risks: Partial<Record<DecisionCandidate["bucket"], bigint>> = {};
+  for (const holding of context.holdings) {
+    if (holding.bucket === null || holding.stop === null) continue;
+    const average = validPositive(holding.avg_cost, 6);
+    const stop = validPositive(holding.stop, 6);
+    const shares = validPositive(holding.shares, 8);
+    if (average === null || stop === null || shares === null) {
+      throw new Error("invalid holding risk");
+    }
+    const risk = money(average > stop ? average - stop : 0n, holding.shares);
+    risks[holding.bucket] = (risks[holding.bucket] ?? 0n) + risk;
+  }
+  return risks;
+}
+
+function incrementalProposalRisk(
+  evaluation: PolicyEvaluation,
+  context: PolicyContext,
+): bigint | null {
+  if (evaluation.candidate.decision_mode === "owner_plan") return 0n;
+  const holding = context.holdings.find((item) =>
+    item.ticker === evaluation.candidate.ticker
+  );
+  const stopValue = evaluation.raw_action === "add"
+    ? holding?.stop ?? null
+    : evaluation.candidate.stop;
+  const price = validPositive(evaluation.normalized.verified_price, 6);
+  const stop = stopValue === null ? null : validPositive(stopValue, 6);
+  const shares = evaluation.candidate.proposed_shares === null
+    ? null
+    : validPositive(evaluation.candidate.proposed_shares, 8);
+  if (price === null || stop === null || shares === null) return null;
+  return money(price > stop ? price - stop : 0n, evaluation.candidate.proposed_shares!);
+}
+
 export function reservePortfolioPlan(
   evaluations: readonly PolicyEvaluation[],
   context: PolicyContext,
@@ -959,6 +997,12 @@ export function reservePortfolioPlan(
   const reservedSpend: Partial<Record<DecisionCandidate["bucket"], bigint>> = {};
   const reservedRisk: Partial<Record<DecisionCandidate["bucket"], bigint>> = {};
   const approvedGroups = new Set<string>();
+  let existingRisk: Partial<Record<DecisionCandidate["bucket"], bigint>> | null;
+  try {
+    existingRisk = existingStopRiskByBucket(context);
+  } catch {
+    existingRisk = null;
+  }
 
   for (const evaluation of rankedEvaluations(evaluations)) {
     if (!BUY_SIDE.has(evaluation.raw_action) || evaluation.final_action !== evaluation.raw_action) {
@@ -966,6 +1010,15 @@ export function reservePortfolioPlan(
     }
     const bucket = evaluation.candidate.bucket;
     const group = evaluation.candidate.reservation_group ?? null;
+    if (existingRisk === null) {
+      output.set(evaluation.evaluation_id, withPortfolioReason(
+        evaluation,
+        "CASH_UNAVAILABLE",
+        "Existing portfolio stop exposure cannot be reconciled.",
+      ));
+      reasons.add("CASH_UNAVAILABLE");
+      continue;
+    }
     if (group !== null && approvedGroups.has(group)) {
       output.set(evaluation.evaluation_id, withPortfolioReason(
         evaluation,
@@ -995,10 +1048,8 @@ export function reservePortfolioPlan(
       const shares = evaluation.candidate.proposed_shares === null
         ? null
         : validPositive(evaluation.candidate.proposed_shares, 8);
-      const risk = evaluation.normalized.dollars_at_risk === null
-        ? null
-        : validPositive(evaluation.normalized.dollars_at_risk, 6);
-      if (cash === null || totalInvestable === null || price === null || shares === null || risk === null) {
+      const incrementalRisk = incrementalProposalRisk(evaluation, context);
+      if (cash === null || totalInvestable === null || price === null || shares === null || incrementalRisk === null) {
         output.set(evaluation.evaluation_id, withPortfolioReason(
           evaluation,
           "CASH_UNAVAILABLE",
@@ -1020,9 +1071,13 @@ export function reservePortfolioPlan(
         : 0n;
       const cost = money(price, evaluation.candidate.proposed_shares!);
       const nextSpend = (reservedSpend[bucket] ?? 0n) + cost;
-      const nextRisk = (reservedRisk[bucket] ?? 0n) + risk;
+      const nextRisk = (existingRisk[bucket] ?? 0n) +
+        (reservedRisk[bucket] ?? 0n) + incrementalRisk;
       const riskLimit = totalInvestable * BigInt(config.max_trade_risk_bps[bucket]) / 10_000n;
-      if (nextSpend > cash || nextSpend > remainingAllocation || nextRisk > riskLimit) {
+      if (
+        nextSpend > cash || nextSpend > remainingAllocation ||
+        (evaluation.candidate.decision_mode !== "owner_plan" && nextRisk > riskLimit)
+      ) {
         output.set(evaluation.evaluation_id, withPortfolioReason(
           evaluation,
           "PORTFOLIO_BUDGET_EXCEEDED",
@@ -1032,7 +1087,7 @@ export function reservePortfolioPlan(
         continue;
       }
       reservedSpend[bucket] = nextSpend;
-      reservedRisk[bucket] = nextRisk;
+      reservedRisk[bucket] = (reservedRisk[bucket] ?? 0n) + incrementalRisk;
       if (group !== null) approvedGroups.add(group);
       approved.push(evaluation.candidate_id);
     } catch {

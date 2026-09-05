@@ -1460,7 +1460,7 @@ async function evaluateAndPublish(
     item.month === bundle.market_date.slice(0, 7)
   );
   context.spendable_cash = {
-    core: null,
+    core: context.spendable_cash?.core ?? null,
     growth: currentPowder?.growth_available ?? null,
     speculative: currentPowder?.spec_available ?? null,
   };
