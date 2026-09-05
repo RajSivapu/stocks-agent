@@ -53,6 +53,7 @@ jobs:
           echo "RELEASE_VENV=$RUNNER_TEMP/owner-dashboard-release-venv-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT" >> "$GITHUB_ENV"
           python -m venv "$RUNNER_TEMP/owner-dashboard-release-venv-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
           "$RUNNER_TEMP/owner-dashboard-release-venv-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT/bin/python" -m pip install --requirement requirements-test.txt
+          echo "PYTHON_BIN=$RUNNER_TEMP/owner-dashboard-release-venv-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT/bin/python" >> "$GITHUB_ENV"
           npx playwright install --with-deps chromium
           npx --yes supabase@2.116.0 --version >/dev/null
       - name: Query and bind the authoritative reviewed main candidate
@@ -88,8 +89,14 @@ jobs:
           test "$(jq -r .merged <<<"$PR")" = true && test "$(jq -r .base.ref <<<"$PR")" = main && test "$(jq -r .merge_commit_sha <<<"$PR")" = "$CANDIDATE_SHA" || { echo 'candidate SHA/ref mismatch'; exit 1; }
           PR_HEAD_SHA="$(jq -r .head.sha <<<"$PR")"
           gh api "repos/$GITHUB_REPOSITORY/pulls/$PULL_REQUEST_NUMBER/reviews" --paginate > "$RELEASE_STATE_DIR/reviews.json"
-          jq -e --arg sha "$PR_HEAD_SHA" 'any(.[]; .state == "APPROVED" and .commit_id == $sha)' "$RELEASE_STATE_DIR/reviews.json" >/dev/null || { echo 'required review approval is missing'; exit 1; }
-          gh api "repos/$GITHUB_REPOSITORY/git/commits/$PR_HEAD_SHA" --jq .sha >/dev/null
+          HEAD_COMMIT="$(gh api "repos/$GITHUB_REPOSITORY/git/commits/$PR_HEAD_SHA")"
+          CANDIDATE_COMMIT="$(gh api "repos/$GITHUB_REPOSITORY/git/commits/$CANDIDATE_SHA")"
+          HEAD_COMMIT_TIME="$(jq -r .commit.committer.date <<<"$HEAD_COMMIT")"
+          CANDIDATE_COMMIT_TIME="$(jq -r .commit.committer.date <<<"$CANDIDATE_COMMIT")"
+          MERGED_AT="$(jq -r .merged_at <<<"$PR")"
+          # head_commit_time <= review.submitted_at <= merged_at <= candidate_commit_time
+          jq -e --arg sha "$PR_HEAD_SHA" --arg head "$HEAD_COMMIT_TIME" --arg merged "$MERGED_AT" --arg candidate "$CANDIDATE_COMMIT_TIME" 'any(.[]; .state == "APPROVED" and .commit_id == $sha and (.submitted_at >= $head and .submitted_at <= $merged) and ($merged <= $candidate))' "$RELEASE_STATE_DIR/reviews.json" >/dev/null || { echo 'required timed review approval is missing'; exit 1; }
+          test "$CANDIDATE_COMMIT_TIME" '>' "$MERGED_AT" || { echo 'candidate commit predates merge'; exit 1; }
           git fetch --no-tags origin "$PR_HEAD_SHA" || true
           git merge-base --is-ancestor "$PR_HEAD_SHA" "$CANDIDATE_SHA" || test "$(git rev-parse "$PR_HEAD_SHA^{tree}")" = "$(git rev-parse "$CANDIDATE_SHA^{tree}")" || { echo 'reviewed head does not bind candidate'; exit 1; }
           printf 'candidate_sha=%s\nreviewed_sha=%s\nci_workflow_run_id=%s\npull_request_number=%s\n' "$CANDIDATE_SHA" "$CANDIDATE_SHA" "$CI_WORKFLOW_RUN_ID" "$PULL_REQUEST_NUMBER" >> "$GITHUB_OUTPUT"
@@ -102,6 +109,49 @@ jobs:
           DEPLOYMENT_ID="$(gh api --method POST "repos/$GITHUB_REPOSITORY/deployments" -f ref="$CANDIDATE_SHA" -f environment=production -F production_environment=true -F auto_merge=false -f payload="$payload" --jq .id)"
           test -n "$DEPLOYMENT_ID" || { echo 'candidate SHA/ref mismatch'; exit 1; }
           echo "deployment_id=$DEPLOYMENT_ID" >> "$GITHUB_OUTPUT"; echo "DEPLOYMENT_ID=$DEPLOYMENT_ID" >> "$GITHUB_ENV"
+      - name: Derive protected no-side-effect evidence around the real candidate dry-run
+        env:
+          RELEASE_READONLY_DATABASE_URL: ${{ secrets.RELEASE_READONLY_DATABASE_URL }}
+          SUPABASE_ACCESS_TOKEN: ${{ secrets.SUPABASE_ACCESS_TOKEN }}
+          DASHBOARD_OWNER_USER_ID: ${{ secrets.DASHBOARD_OWNER_USER_ID }}
+          DASHBOARD_OWNER_EMAIL: ${{ secrets.DASHBOARD_OWNER_EMAIL }}
+          DASHBOARD_NON_OWNER_ACCESS_TOKEN: ${{ secrets.DASHBOARD_NON_OWNER_ACCESS_TOKEN }}
+          POSTGRES_URL: ${{ secrets.POSTGRES_URL }}
+          SUPAVISOR_SESSION_URL: ${{ secrets.SUPAVISOR_SESSION_URL }}
+          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+          SUPABASE_PUBLISHABLE_KEY: ${{ secrets.SUPABASE_PUBLISHABLE_KEY }}
+          PROJECT_REF: ${{ vars.SUPABASE_PROJECT_REF }}
+          ALLOWED_ORIGIN: ${{ vars.DASHBOARD_ALLOWED_ORIGIN }}
+          SITE_ORIGIN: ${{ vars.DASHBOARD_SITE_ORIGIN }}
+        run: |
+          set -euo pipefail
+          test -n "$RELEASE_READONLY_DATABASE_URL" || { echo 'release reader is required'; exit 1; }
+          "$PYTHON_BIN" scripts/collect_protected_dry_run_evidence.py --production-project-ref "$PROJECT_REF" --output "$RELEASE_STATE_DIR/dry-run-evidence.json" --candidate-script scripts/deploy_owner_dashboard_api.py --candidate-sha "$CANDIDATE_SHA" --safe-command "$PYTHON_BIN scripts/deploy_owner_dashboard_api.py --dry-run --project-ref $PROJECT_REF --allowed-origin $ALLOWED_ORIGIN --site-origin $SITE_ORIGIN --reviewed-sha $CANDIDATE_SHA --candidate-sha $CANDIDATE_SHA --gateway-rollback-ref unused --gateway-rollback-source-sha256 $(printf '0%.0s' {1..64}) --gateway-current-version 1 --evidence-directory $RELEASE_STATE_DIR/dry-run-capture --release-state $RELEASE_STATE_DIR/dry-run-state.json"
+      - name: Prepare durable recovery before gateway mutation
+        env:
+          SUPABASE_ACCESS_TOKEN: ${{ secrets.SUPABASE_ACCESS_TOKEN }}
+          DASHBOARD_OWNER_USER_ID: ${{ secrets.DASHBOARD_OWNER_USER_ID }}
+          DASHBOARD_OWNER_EMAIL: ${{ secrets.DASHBOARD_OWNER_EMAIL }}
+          DASHBOARD_NON_OWNER_ACCESS_TOKEN: ${{ secrets.DASHBOARD_NON_OWNER_ACCESS_TOKEN }}
+          POSTGRES_URL: ${{ secrets.POSTGRES_URL }}
+          SUPAVISOR_SESSION_URL: ${{ secrets.SUPAVISOR_SESSION_URL }}
+          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+          SUPABASE_PUBLISHABLE_KEY: ${{ secrets.SUPABASE_PUBLISHABLE_KEY }}
+          PROJECT_REF: ${{ vars.SUPABASE_PROJECT_REF }}
+          ALLOWED_ORIGIN: ${{ vars.DASHBOARD_ALLOWED_ORIGIN }}
+          SITE_ORIGIN: ${{ vars.DASHBOARD_SITE_ORIGIN }}
+          GATEWAY_ROLLBACK_REF: ${{ vars.GATEWAY_ROLLBACK_REF }}
+          GATEWAY_ROLLBACK_SOURCE_SHA256: ${{ vars.GATEWAY_ROLLBACK_SOURCE_SHA256 }}
+        run: |
+          set -euo pipefail; umask 077
+          "$PYTHON_BIN" scripts/deploy_owner_dashboard_api.py --prepare-recovery --project-ref "$PROJECT_REF" --allowed-origin "$ALLOWED_ORIGIN" --site-origin "$SITE_ORIGIN" --reviewed-sha "$CANDIDATE_SHA" --candidate-sha "$CANDIDATE_SHA" --gateway-rollback-ref "$GATEWAY_ROLLBACK_REF" --gateway-rollback-source-sha256 "$GATEWAY_ROLLBACK_SOURCE_SHA256" --gateway-current-version 1 --evidence-directory "$RELEASE_STATE_DIR/capture" --rollback-worktree "$RELEASE_STATE_DIR/rollback-worktree" --release-state "$RELEASE_STATE_DIR/release-state.json" > "$RELEASE_STATE_DIR/recovery-prepare.json"
+      - name: Upload durable rollback capture and journal before gateway mutation
+        id: rollback_artifact
+        uses: actions/upload-artifact@65462800fd760344b1a7b4382951275a0abb4808
+        with: {name: gateway-rollback-${{ github.run_id }}-${{ github.run_attempt }}, path: "${{ env.RELEASE_STATE_DIR }}/capture\n${{ env.RELEASE_STATE_DIR }}/release-state.json", if-no-files-found: error, retention-days: 90}
+      - name: Bind durable rollback artifact to pending deployment
+        env: {GH_TOKEN: ${{ github.token }}, DEPLOYMENT_ID: ${{ steps.deployment.outputs.deployment_id }}, ROLLBACK_ARTIFACT_ID: ${{ steps.rollback_artifact.outputs.artifact-id }} }
+        run: gh api --method POST "repos/$GITHUB_REPOSITORY/deployments/$DEPLOYMENT_ID/statuses" -f state=pending -f description="rollback-artifact:$ROLLBACK_ARTIFACT_ID"
       - name: Execute protected deployment and retain rollback worktree
         env:
           SUPABASE_ACCESS_TOKEN: ${{ secrets.SUPABASE_ACCESS_TOKEN }}
@@ -122,18 +172,10 @@ jobs:
           REVIEWED_SHA: ${{ steps.candidate.outputs.reviewed_sha }}
         run: |
           set -euo pipefail; umask 077
+          PYTHON_BIN="$RELEASE_VENV/bin/python"
+          export PYTHON_BIN
           "$RELEASE_VENV/bin/python" scripts/deploy_owner_dashboard_api.py --project-ref "$PROJECT_REF" --allowed-origin "$ALLOWED_ORIGIN" --site-origin "$SITE_ORIGIN" --reviewed-sha "$REVIEWED_SHA" --candidate-sha "$CANDIDATE_SHA" --gateway-rollback-ref "$GATEWAY_ROLLBACK_REF" --gateway-rollback-source-sha256 "$GATEWAY_ROLLBACK_SOURCE_SHA256" --gateway-current-version "$GATEWAY_CURRENT_VERSION" --evidence-directory "$RELEASE_STATE_DIR/capture" --rollback-worktree "$RELEASE_STATE_DIR/rollback-worktree" --release-state "$RELEASE_STATE_DIR/release-state.json" --keep-rollback-worktree > "$RELEASE_STATE_DIR/deploy-receipt.json"
           echo 'GATEWAY_CHANGED=1' >> "$GITHUB_ENV"
-      - name: Derive protected no-side-effect evidence around the safe dry-run
-        env: {RELEASE_READONLY_DATABASE_URL: ${{ secrets.RELEASE_READONLY_DATABASE_URL }}, PROJECT_REF: ${{ vars.SUPABASE_PROJECT_REF }}}
-        run: |
-          set -euo pipefail
-          test -n "$RELEASE_READONLY_DATABASE_URL" || { echo 'release reader is required'; exit 1; }
-          "$RELEASE_VENV/bin/python" scripts/collect_protected_dry_run_evidence.py --production-project-ref "$PROJECT_REF" --output "$RELEASE_STATE_DIR/dry-run-evidence.json" --candidate-script scripts/verify_candidate_read_only.py --candidate-sha "$CANDIDATE_SHA" --safe-command "$RELEASE_VENV/bin/python scripts/verify_candidate_read_only.py --candidate-sha $CANDIDATE_SHA"
-      - name: Upload immutable rollback capture
-        id: rollback_artifact
-        uses: actions/upload-artifact@65462800fd760344b1a7b4382951275a0abb4808
-        with: {name: gateway-rollback-${{ github.run_id }}-${{ github.run_attempt }}, path: ${{ env.RELEASE_STATE_DIR }}/capture/gateway-source, if-no-files-found: error, retention-days: 90}
       - name: Generate canonical release record
         env:
           CANDIDATE_SHA: ${{ steps.candidate.outputs.candidate_sha }}

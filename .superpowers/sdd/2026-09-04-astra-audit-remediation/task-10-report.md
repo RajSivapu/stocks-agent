@@ -61,6 +61,19 @@ Residual risk: deployment receipt collection must still populate the authoritati
 - `.venv/bin/python -m pytest -q tests/test_deploy_owner_dashboard_api.py tests/test_owner_dashboard_release_workflow.py tests/test_verify_personal_stock_agent_v1.py tests/test_verify_owner_dashboard_deployment.py` — `90 passed in 10.63s`.
 - No workflow, deployment, database migration, scheduled run, recovery drill, Telegram send, provider/model call, brokerage action, or full suite was invoked.
 
+## Release-orchestration replacement pass — 2026-09-05
+
+- The release runner now honors an explicit trusted `PYTHON_BIN`/`VENV_PYTHON`; the protected workflow exports its release venv and still checks checkout cleanliness before any scratch/recovery writes.
+- Rollback receipts and recovery journals use the single typed `commit_sha` schema. Recovery source plus journal are captured, uploaded, and bound to the pending GitHub Deployment before the gateway command. A separate `workflow_run` recovery workflow retains and restores the durable artifact after failure, cancellation, timeout, or runner loss.
+- Candidate review evidence now requires `head_commit_time <= review.submitted_at <= merged_at <= candidate_commit_time <= deployment`; the focused fixture covers a normal merged candidate and rejects a post-merge approval.
+- The dry-run now invokes the protected deployer in its no-mutation mode. It builds in an isolated temporary checkout, constructs all mutation requests, validates config/auth-shaped inputs and candidate migration hashes, and is surrounded by restricted-reader snapshots over canonical full rows for every protected write surface. The receipt binds exact argv, candidate script bytes, hash, and database identity.
+- Migration reconciliation reads native and private ledgers every run, rejects mismatch/ahead/partial/hash-drift state, and only allows an exact pending candidate suffix. The rollback drill now uses the actual local bundle activation/restore path, verifies the prior commit is active, and removes the failed candidate bundle.
+
+### Focused local evidence
+
+- `.venv/bin/python -m pytest -q tests/test_deploy_owner_dashboard_api.py tests/test_owner_dashboard_release_workflow.py tests/test_verify_personal_stock_agent_v1.py tests/test_verify_owner_dashboard_deployment.py tests/test_recovery_bundle.py` — `134 passed in 14.45s`.
+- `git diff --check` passed. No workflow, deployment, migration, live database read/write, recovery operation, Telegram send, scheduled run, or full suite was invoked.
+
 ## Controller acceptance remediation round 5 — 2026-09-05
 
 - Moved all workflow scratch state (review API response, release receipt, rollback checkout, release state journal, generated evidence, and virtual environment) under `RUNNER_TEMP`; checkout cleanliness is verified before capture writes. The workflow installs locked Python dependencies, including the test-only cryptography package, runs `npm ci`, and installs the lockfile-pinned Playwright browser/dependencies.

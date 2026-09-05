@@ -1,0 +1,46 @@
+name: Protected owner dashboard release recovery
+
+on:
+  workflow_run:
+    workflows: ["Protected owner dashboard release"]
+    types: [completed]
+
+permissions:
+  actions: read
+  contents: read
+  deployments: write
+
+jobs:
+  recover:
+    # A separate workflow survives cancellation, timeout, and runner loss in
+    # the release job. It restores only unsuccessful/cancelled executions.
+    if: github.event.workflow_run.conclusion == 'failure' || github.event.workflow_run.conclusion == 'cancelled' || github.event.workflow_run.conclusion == 'timed_out'
+    environment: owner-dashboard-production
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with: {ref: main}
+      - uses: actions/setup-python@42375524e23c412d93fb67b49958b491fce71c38
+        with: {python-version: "3.14"}
+      - name: Download durable rollback artifact and journal
+        env: {GH_TOKEN: ${{ github.token }}}
+        run: |
+          set -euo pipefail
+          mkdir -m 700 recovery
+          gh run download "${{ github.event.workflow_run.id }}" --name "gateway-rollback-${{ github.event.workflow_run.id }}-${{ github.event.workflow_run.run_attempt }}" --dir recovery
+          test -f recovery/release-state.json
+          test -f recovery/rollback-capture.json
+      - name: Restore durable gateway recovery artifact
+        env:
+          SUPABASE_ACCESS_TOKEN: ${{ secrets.SUPABASE_ACCESS_TOKEN }}
+          POSTGRES_URL: ${{ secrets.POSTGRES_URL }}
+          PROJECT_REF: ${{ vars.SUPABASE_PROJECT_REF }}
+        run: |
+          set -euo pipefail
+          # A failed restore deliberately retains the downloaded artifact for
+          # GitHub's retention window and causes this independent job to fail.
+          python -m pip install --requirement requirements-test.txt
+          mkdir -p recovery/rollback-worktree/supabase/functions
+          mv recovery/gateway-source recovery/rollback-worktree/supabase/functions/market-briefing-gateway
+          python scripts/restore_gateway_after_release_failure.py --project-ref "$PROJECT_REF" --admin-url "$POSTGRES_URL" --release-state recovery/release-state.json --recovery-root recovery/rollback-worktree

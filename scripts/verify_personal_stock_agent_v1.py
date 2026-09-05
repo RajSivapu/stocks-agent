@@ -108,10 +108,10 @@ def verify_artifacts(repo: Path, static_root: Path, candidate: str, record: Mapp
     require(local_files and "index.html" in local_files and local_files == static["files"], "static artifact bytes do not match protected deployment")
     capture = record["rollback_capture"]
     captured = timestamp(capture["captured_at"])
-    require(captured < deployed <= now and git_commit(repo, capture["git_sha"]) <= captured, "rollback capture is not predeployment")
+    require(captured < deployed <= now and git_commit(repo, capture["commit_sha"]) <= captured, "rollback capture is not predeployment")
     captured_files = source.artifact(capture["artifact_id"])
     captured_hash = tree_sha256(captured_files)
-    require(captured_files == git_files(repo, capture["git_sha"], "supabase/functions/market-briefing-gateway")
+    require(captured_files == git_files(repo, capture["commit_sha"], "supabase/functions/market-briefing-gateway")
             and captured_hash == capture["source_sha256"], "captured rollback artifact bytes mismatch")
     outcome = record.get("deployment_outcome")
     if outcome == "succeeded":
@@ -123,7 +123,7 @@ def verify_artifacts(repo: Path, static_root: Path, candidate: str, record: Mapp
     elif outcome == "failed":
         rollback = record["rollback"]
         gateway, runtime = rollback["gateway"], rollback["runtime_login"]
-        require(rollback["status"] == "rolled_back" and gateway["status"] == "restored" and gateway["git_sha"] == capture["git_sha"]
+        require(rollback["status"] == "rolled_back" and gateway["status"] == "restored" and gateway["commit_sha"] == capture["commit_sha"]
                 and gateway["source_sha256"] == captured_hash and type(gateway["function_version"]) is int and gateway["function_version"] > 0
                 and captured <= timestamp(rollback["gateway_restored_at"]) <= timestamp(rollback["dashboard_cleaned_at"]) < deployed
                 and runtime["login"] is False and runtime["memberships"] == 0
@@ -216,18 +216,20 @@ def verify_release(source: ReleaseDataSource, *, deployment_id: int, repo_root: 
         require(now.tzinfo is not None, "verifier clock must have timezone")
         record = source.deployment(deployment_id)
         candidate = record["sha"]
-        commit_time = git_commit(repo_root, candidate)
+        candidate_commit_time = git_commit(repo_root, candidate)
         ci, merge = source.ci(record["workflow_run_id"]), source.merge(record["pull_request_number"])
         deployed, merged = timestamp(record["deployed_at"]), timestamp(merge["merged_at"])
         require(record["id"] == deployment_id and record["environment"] == "production" and record["candidate_sha"] == candidate
                 and ci["head_sha"] == candidate and ci["status"] == "completed" and ci["conclusion"] == "success"
                 and ci["path"] == ".github/workflows/owner-dashboard-ci.yml" and ci["id"] == record["workflow_run_id"]
                 and merge["merged"] is True and merge["merge_commit_sha"] == candidate
-                and commit_time <= merged < deployed <= now and commit_time <= timestamp(ci["updated_at"]) <= deployed, "protected CI/merge/deployment candidate SHA or time mismatch")
+                and merged <= candidate_commit_time < deployed <= now and candidate_commit_time <= timestamp(ci["updated_at"]) <= deployed, "protected CI/merge/deployment candidate SHA or time mismatch")
         reviewed_head = merge["head"]["sha"]
         require(bool(re.fullmatch(r"[0-9a-f]{40}", reviewed_head)), "reviewed PR head is malformed")
+        reviewed_head_time = git_commit(repo_root, reviewed_head)
         reviews = source.reviews(record["pull_request_number"])
-        require(any(row["state"] == "APPROVED" and row["commit_id"] == reviewed_head and commit_time <= timestamp(row["submitted_at"]) <= deployed for row in reviews), "independent review of exact PR head is missing")
+        require(any(row["state"] == "APPROVED" and row["commit_id"] == reviewed_head
+                    and reviewed_head_time <= timestamp(row["submitted_at"]) <= merged <= candidate_commit_time <= deployed for row in reviews), "independent review of exact PR head is missing")
         if reviewed_head != candidate:
             ancestor = subprocess.run(["git", "merge-base", "--is-ancestor", reviewed_head, candidate], cwd=repo_root, capture_output=True, check=False)
             if ancestor.returncode != 0:
@@ -238,13 +240,20 @@ def verify_release(source: ReleaseDataSource, *, deployment_id: int, repo_root: 
         require(record.get("dry_run") is False, "protected deployment dry-run authority must be false")
         dry = record["dry_run_evidence"]
         before, after = dry["before"], dry["after"]
+        argv = dry.get("safe_command_argv")
+        script_sha = dry.get("candidate_script_sha256")
+        expected_command_hash = hashlib.sha256(json.dumps({"argv": argv, "candidate_sha": candidate,
+            "candidate_script_sha256": script_sha}, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
         require(isinstance(before, Mapping) and isinstance(after, Mapping) and before["tables"] == after["tables"]
                 and isinstance(dry["table_deltas"], Mapping) and set(dry["table_deltas"]) == set(before["tables"])
                 and all(type(value) is int and value == 0 for value in dry["table_deltas"].values())
                 and type(dry["safe_command_exit_code"]) is int and dry["safe_command_exit_code"] == 0
-                and isinstance(dry["safe_command_sha256"], str) and re.fullmatch(r"[0-9a-f]{64}", dry["safe_command_sha256"])
-                and all(isinstance(value, Mapping) and type(value.get("count")) is int and isinstance(value.get("ids"), list)
-                        and isinstance(value.get("sha256"), str) and re.fullmatch(r"[0-9a-f]{64}", value["sha256"])
+                and isinstance(argv, list) and all(isinstance(arg, str) for arg in argv) and candidate in argv and "--dry-run" in argv
+                and isinstance(script_sha, str) and script_sha == sha256(git(repo_root, "show", f"{candidate}:scripts/deploy_owner_dashboard_api.py"))
+                and dry["safe_command_sha256"] == expected_command_hash
+                and before.get("source") == after.get("source")
+                and all(isinstance(value, Mapping) and set(value) == {"count", "rows_sha256"} and type(value.get("count")) is int
+                        and isinstance(value.get("rows_sha256"), str) and re.fullmatch(r"[0-9a-f]{64}", value["rows_sha256"])
                         for value in before["tables"].values()), "protected dry-run side-effect evidence is incomplete")
         require(record["canaries"] == {"owner": 200, "anonymous": 401, "non_owner": 403}, "protected owner/denial canaries are incomplete")
         run_id = source.scheduled_run(record["deployed_at"])

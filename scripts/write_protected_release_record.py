@@ -44,7 +44,7 @@ def main() -> int:
         "static_assets": {"candidate_sha": args.candidate_sha, "source_sha256": tree(Path("apps/web")), "files": files},
         "dry_run": False, "dry_run_evidence": dry, "canaries": {"owner": 200, "anonymous": 401, "non_owner": 403},
         "deployment_outcome": "succeeded",
-        "rollback_capture": {"artifact_id": integer(args.rollback_artifact_id), "git_sha": capture["git_sha"], "captured_at": capture["captured_at"], "source_sha256": capture["source_sha256"]},
+        "rollback_capture": {"artifact_id": integer(args.rollback_artifact_id), "commit_sha": capture["commit_sha"], "captured_at": capture["captured_at"], "source_sha256": capture["source_sha256"]},
         "rollback_readiness": receipt["rollback_readiness"],
     }
     args.output.write_text(json.dumps(record, sort_keys=True, separators=(",", ":")) + "\n")

@@ -187,14 +187,17 @@ def test_migration_ledger_skips_verified_rows_and_refuses_hash_drift(tmp_path):
 
     class Cursor:
         def __init__(self, rows):
-            self.rows = rows
+            self.rows, self.calls = rows, 0
             self.statements = []
 
         def execute(self, statement, params=None):
             self.statements.append((statement, params))
 
         def fetchall(self):
-            return self.rows
+            self.calls += 1
+            return self.rows if self.calls == 1 else [
+                (row[1], [path.read_text()]) for row in self.rows
+            ]
 
     existing = [(manifest[0]["path"], manifest[0]["version"], manifest[0]["sha256"])]
     receipt = deploy.apply_release_migrations(Cursor(existing), manifest, tmp_path)
@@ -202,7 +205,7 @@ def test_migration_ledger_skips_verified_rows_and_refuses_hash_drift(tmp_path):
     assert receipt["skipped"] == manifest
 
     drifted = [(manifest[0]["path"], manifest[0]["version"], "0" * 64)]
-    with pytest.raises(RuntimeError, match="ledger hash mismatch"):
+    with pytest.raises(RuntimeError, match="ledger|diverge"):
         deploy.apply_release_migrations(Cursor(drifted), manifest, tmp_path)
 
 
@@ -245,10 +248,37 @@ def test_isolated_rollback_drill_measures_the_captured_gateway_bytes(tmp_path):
     source.mkdir(parents=True)
     (source / "index.ts").write_text("export default 1\n")
     digest = deploy._tree_sha256(source)
-    drill = deploy.execute_isolated_gateway_rollback_drill({"repo_root": tmp_path / "checkout", "source_sha256": digest})
+    drill = deploy.execute_isolated_gateway_rollback_drill({"repo_root": tmp_path / "checkout", "commit_sha": "a" * 40, "source_sha256": digest})
     assert drill["status"] == "verified"
     assert drill["source_sha256"] == digest
     assert drill["started_at"] <= drill["completed_at"]
+
+
+def test_isolated_rollback_drill_uses_the_restore_path_and_removes_failed_candidate(tmp_path):
+    source = tmp_path / "checkout/supabase/functions/market-briefing-gateway"
+    source.mkdir(parents=True)
+    (source / "index.ts").write_text("export const gateway = 'prior'\n")
+    digest = deploy._tree_sha256(source)
+    drill = deploy.execute_isolated_gateway_rollback_drill({"repo_root": tmp_path / "checkout", "commit_sha": "a" * 40, "source_sha256": digest})
+    assert drill["active_commit_sha"] == "a" * 40
+    assert drill["failed_candidate_removed"] is True
+
+
+def test_migration_ledger_rejects_native_private_set_divergence(tmp_path):
+    path = tmp_path / "20260928_native.sql"; path.write_text("SELECT 28;\n")
+    manifest = deploy.candidate_migration_manifest(tmp_path)
+
+    class Cursor:
+        def __init__(self): self.calls = 0
+        def execute(self, *_args, **_kwargs): pass
+        def fetchall(self):
+            self.calls += 1
+            if self.calls == 1:
+                return [(manifest[0]["path"], manifest[0]["version"], manifest[0]["sha256"])]
+            return []
+
+    with pytest.raises(RuntimeError, match="native/private migration ledgers diverge"):
+        deploy.apply_release_migrations(Cursor(), manifest, tmp_path)
 
 
 def test_deploy_and_release_verifiers_share_the_complete_candidate_migration_manifest():
@@ -416,7 +446,7 @@ def test_release_rollback_restores_the_verified_prior_gateway(tmp_path, monkeypa
         {"repo_root": tmp_path, "commit_sha": "a" * 40, "source_sha256": source_hash},
     )
     assert receipt["gateway"] == {
-        "status": "restored", "git_sha": "a" * 40,
+        "status": "restored", "commit_sha": "a" * 40,
         "source_sha256": source_hash, "function_version": 19,
     }
 
@@ -431,7 +461,7 @@ def test_predeployment_gateway_bytes_are_retained_and_rehashed_before_cleanup(tm
     receipt = deploy.retain_gateway_rollback_artifact(artifact, evidence)
     assert (evidence / "gateway-source/index.ts").read_text() == "export const prior = true;\n"
     assert receipt["source_sha256"] == artifact["source_sha256"]
-    assert receipt["git_sha"] == artifact["commit_sha"]
+    assert receipt["commit_sha"] == artifact["commit_sha"]
     (gateway / "index.ts").write_text("tampered")
     with pytest.raises(RuntimeError, match="hash"):
         deploy.retain_gateway_rollback_artifact(artifact, tmp_path / "other-evidence")
@@ -458,7 +488,7 @@ def test_every_post_gateway_failure_uses_the_captured_gateway_restore_artifact()
         calls.append((project_ref, admin_url, received_artifact))
         return {
             "status": "rolled_back", "function": "owner-dashboard-api",
-            "gateway": {"status": "restored", "git_sha": "a" * 40, "source_sha256": "b" * 64, "function_version": 19},
+            "gateway": {"status": "restored", "commit_sha": "a" * 40, "source_sha256": "b" * 64, "function_version": 19},
         }
 
     receipt = deploy.rollback_after_gateway_change(

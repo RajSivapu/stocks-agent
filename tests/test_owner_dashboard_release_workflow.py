@@ -65,8 +65,27 @@ def test_final_release_workflow_keeps_all_ephemera_outside_the_checkout_and_uses
     assert "RUNNER_TEMP" in workflow
     assert "release-state.json" in workflow
     assert "--release-state" in workflow
-    assert "verify_candidate_read_only.py" in workflow
+    assert "--dry-run" in workflow
     assert "npx playwright install --with-deps chromium" in workflow
     assert "cryptography==" in Path("requirements-test.txt").read_text()
     assert '"$PR_HEAD_SHA"' in workflow
     assert "reviewed head does not bind candidate" in workflow
+
+
+def test_release_workflow_binds_review_times_and_durable_pre_mutation_recovery():
+    workflow = Path(".github/workflows/owner-dashboard-release.yml").read_text()
+    assert 'PYTHON_BIN="$RELEASE_VENV/bin/python"' in workflow
+    assert 'head_commit_time <= review.submitted_at <= merged_at <= candidate_commit_time' in workflow
+    assert "Upload durable rollback capture and journal before gateway mutation" in workflow
+    assert "rollback-artifact:$ROLLBACK_ARTIFACT_ID" in workflow
+    assert Path(".github/workflows/owner-dashboard-release-recovery.yml").is_file()
+    assert workflow.index("Upload durable rollback capture and journal before gateway mutation") < workflow.index("Execute protected deployment")
+
+
+def test_independent_recovery_contract_covers_cancelled_and_lost_release_runners():
+    recovery = Path(".github/workflows/owner-dashboard-release-recovery.yml").read_text()
+    assert "workflow_run:" in recovery
+    assert "conclusion == 'cancelled'" in recovery
+    assert "conclusion == 'timed_out'" in recovery
+    assert "gateway-rollback-${{ github.event.workflow_run.id }}" in recovery
+    assert "--recovery-root" in recovery

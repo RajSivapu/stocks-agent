@@ -1,6 +1,7 @@
 import copy
 from datetime import datetime, timezone
 import hashlib
+import json
 import os
 from pathlib import Path
 import subprocess
@@ -59,7 +60,8 @@ def release(tmp_path):
     raw = {"sql/migrations/20260926_suppression_reasons.sql": b"SELECT 1;\n",
            "supabase/functions/market-briefing-gateway/index.ts": b"gateway\n",
            "supabase/functions/owner-dashboard-api/index.ts": b"dashboard\n",
-           "apps/web/src/main.tsx": b"web source\n"}
+           "apps/web/src/main.tsx": b"web source\n",
+           "scripts/deploy_owner_dashboard_api.py": b"deploy verifier\n"}
     for path, content in raw.items():
         destination = repo / path; destination.parent.mkdir(parents=True, exist_ok=True); destination.write_bytes(content)
     env = {**os.environ, "GIT_AUTHOR_DATE": "2026-09-05T17:00:00Z", "GIT_COMMITTER_DATE": "2026-09-05T17:00:00Z"}
@@ -69,13 +71,17 @@ def release(tmp_path):
     prior = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=repo, text=True).strip()
     (repo / "supabase/functions/market-briefing-gateway/index.ts").write_bytes(b"gateway\n")
     subprocess.run(["git", "add", "."], cwd=repo, check=True)
-    subprocess.run(["git", "-c", "user.name=Test", "-c", "user.email=test@example.invalid", "commit", "-qm", "candidate"], cwd=repo, env=env, check=True)
+    candidate_env = {**env, "GIT_AUTHOR_DATE": "2026-09-05T17:30:00Z", "GIT_COMMITTER_DATE": "2026-09-05T17:30:00Z"}
+    subprocess.run(["git", "-c", "user.name=Test", "-c", "user.email=test@example.invalid", "commit", "-qm", "candidate"], cwd=repo, env=candidate_env, check=True)
+    reviewed_sha = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=repo, text=True).strip()
+    merge_env = {**env, "GIT_AUTHOR_DATE": "2026-09-05T18:30:00Z", "GIT_COMMITTER_DATE": "2026-09-05T18:30:00Z"}
+    subprocess.run(["git", "-c", "user.name=Test", "-c", "user.email=test@example.invalid", "commit", "--allow-empty", "-qm", "merge candidate"], cwd=repo, env=merge_env, check=True)
     sha = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=repo, text=True).strip()
     static = tmp_path / "static"; static.mkdir(); (static / "index.html").write_bytes(b"<main>Private</main>")
     source = FakeReleaseSource()
-    source.ci_record = {"id": 43, "head_sha": sha, "conclusion": "success", "status": "completed", "path": ".github/workflows/owner-dashboard-ci.yml", "updated_at": "2026-09-05T17:30:00Z"}
-    source.merge_record = {"number": 44, "merged": True, "merge_commit_sha": sha, "merged_at": "2026-09-05T18:00:00Z", "head": {"sha": sha}}
-    source.review_records = [{"id": 45, "state": "APPROVED", "commit_id": sha, "submitted_at": "2026-09-05T17:45:00Z"}]
+    source.ci_record = {"id": 43, "head_sha": sha, "conclusion": "success", "status": "completed", "path": ".github/workflows/owner-dashboard-ci.yml", "updated_at": "2026-09-05T18:40:00Z"}
+    source.merge_record = {"number": 44, "merged": True, "merge_commit_sha": sha, "merged_at": "2026-09-05T18:00:00Z", "head": {"sha": reviewed_sha}}
+    source.review_records = [{"id": 45, "state": "APPROVED", "commit_id": reviewed_sha, "submitted_at": "2026-09-05T17:45:00Z"}]
     source.artifacts = {46: {"index.ts": b"prior gateway\n"}}
     source.record = {
         "id": 42, "sha": sha, "environment": "production", "project_ref": "p" * 20,
@@ -85,9 +91,9 @@ def release(tmp_path):
         "functions": [{"function": name, "git_sha": sha, "function_version": 5, "source_sha256": tree_hash({"index.ts": raw[f"supabase/functions/{name}/index.ts"]})} for name in ("market-briefing-gateway", "owner-dashboard-api")],
         "static_assets": {"candidate_sha": sha, "source_sha256": tree_hash({"src/main.tsx": b"web source\n"}), "files": {"index.html": hashlib.sha256(b"<main>Private</main>").hexdigest()}},
         "dry_run": False,
-        "dry_run_evidence": {"before": {"tables": {"scheduled_runs": {"count": 1, "ids": [RUN], "sha256": "a" * 64}, "transactions": {"count": 0, "ids": [], "sha256": "b" * 64}}}, "after": {"tables": {"scheduled_runs": {"count": 1, "ids": [RUN], "sha256": "a" * 64}, "transactions": {"count": 0, "ids": [], "sha256": "b" * 64}}}, "table_deltas": {"scheduled_runs": 0, "transactions": 0}, "safe_command_sha256": "c" * 64, "safe_command_exit_code": 0},
+        "dry_run_evidence": {"before": {"source": {"project_ref": "p" * 20}, "tables": {"scheduled_runs": {"count": 1, "rows_sha256": "a" * 64}, "transactions": {"count": 0, "rows_sha256": "b" * 64}}}, "after": {"source": {"project_ref": "p" * 20}, "tables": {"scheduled_runs": {"count": 1, "rows_sha256": "a" * 64}, "transactions": {"count": 0, "rows_sha256": "b" * 64}}}, "table_deltas": {"scheduled_runs": 0, "transactions": 0}, "safe_command_argv": ["python", "scripts/deploy_owner_dashboard_api.py", "--dry-run", "--candidate-sha", sha], "candidate_script_sha256": hashlib.sha256(raw["scripts/deploy_owner_dashboard_api.py"]).hexdigest(), "safe_command_sha256": hashlib.sha256(json.dumps({"argv": ["python", "scripts/deploy_owner_dashboard_api.py", "--dry-run", "--candidate-sha", sha], "candidate_sha": sha, "candidate_script_sha256": hashlib.sha256(raw["scripts/deploy_owner_dashboard_api.py"]).hexdigest()}, sort_keys=True, separators=(",", ":")).encode()).hexdigest(), "safe_command_exit_code": 0},
         "canaries": {"owner": 200, "anonymous": 401, "non_owner": 403},
-        "rollback_capture": {"artifact_id": 46, "git_sha": prior, "captured_at": "2026-09-05T18:15:00Z", "source_sha256": tree_hash(source.artifacts[46])},
+        "rollback_capture": {"artifact_id": 46, "commit_sha": prior, "captured_at": "2026-09-05T18:15:00Z", "source_sha256": tree_hash(source.artifacts[46])},
         "deployment_outcome": "succeeded",
         "rollback_readiness": {"status": "ready", "function_version": 4, "source_sha256": tree_hash(source.artifacts[46]), "isolated_drill": {"status": "verified", "isolated": True, "source_sha256": tree_hash(source.artifacts[46]), "started_at": "2026-09-05T18:16:00Z", "completed_at": "2026-09-05T18:17:00Z"}},
     }
@@ -122,6 +128,20 @@ def test_release_queries_sources_and_binds_exact_receipts(release):
     assert result["publication_receipt"]["telegram_message_ids"] == [7]
     source.record.pop("run_id")
     assert verify_release(source, **args)["run_id"] == RUN
+
+
+def test_release_rejects_an_approval_after_merge_even_when_the_candidate_matches(release):
+    source, args = release
+    source.review_records[0]["submitted_at"] = "2026-09-05T18:01:00Z"
+    with pytest.raises(RuntimeError, match="independent review"):
+        verify_release(source, **args)
+
+
+def test_release_rejects_in_place_dry_run_row_mutation_with_unchanged_count(release):
+    source, args = release
+    source.record["dry_run_evidence"]["after"]["tables"]["scheduled_runs"]["rows_sha256"] = "f" * 64
+    with pytest.raises(RuntimeError, match="side-effect"):
+        verify_release(source, **args)
 
 
 def test_release_rejects_caller_json_even_when_labeled_authoritative(release):

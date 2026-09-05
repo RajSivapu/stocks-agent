@@ -41,14 +41,16 @@ def main() -> int:
     if before["source"] != after["source"] or any(value != 0 for value in deltas.values()) or before["tables"] != after["tables"]:
         raise SystemExit("safe dry-run changed protected market evidence")
     for table in before["tables"].values():
-        ids = table["ids"]
-        if table["count"] != len(ids) or table["sha256"] != hashlib.sha256(json.dumps(ids, separators=(",", ":")).encode()).hexdigest():
+        if (set(table) != {"count", "rows_sha256"} or type(table["count"]) is not int
+                or not isinstance(table["rows_sha256"], str) or not __import__("re").fullmatch(r"[0-9a-f]{64}", table["rows_sha256"])):
             raise SystemExit("safe dry-run snapshot receipt is malformed")
     command_binding = json.dumps({"argv": command, "candidate_sha": args.candidate_sha,
                                   "candidate_script_sha256": hashlib.sha256(args.candidate_script.read_bytes()).hexdigest()},
                                  sort_keys=True, separators=(",", ":")).encode()
     evidence = {
         "before": before, "after": after, "table_deltas": deltas,
+        "safe_command_argv": command,
+        "candidate_script_sha256": hashlib.sha256(args.candidate_script.read_bytes()).hexdigest(),
         "safe_command_sha256": hashlib.sha256(command_binding).hexdigest(),
         "safe_command_exit_code": result.returncode,
     }

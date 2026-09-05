@@ -123,26 +123,16 @@ class PostgresReadOnlySource:
         return {name: self.query(f"SELECT count(*) AS count FROM ({sql}) AS records")[0]["count"] for name, sql in RECOVERY_SQL.items()}
 
     def dry_run_snapshot(self) -> dict:
-        """Bound, fixed read-only proof surrounding a safe dry-run command."""
+        """Hash canonical full rows across every release write surface."""
         self.identity()
-        queries = {
-            "scheduled_runs": "SELECT id::text AS id FROM public.analysis_runs WHERE scheduled_phase IS NOT NULL ORDER BY id",
-            "transactions": "SELECT id::text AS id FROM public.transactions ORDER BY id",
-            "market_publications": "SELECT id::text AS id FROM public.market_publications ORDER BY id",
-            "telegram_publications": "SELECT report_id::text AS id FROM public.market_report_publications WHERE telegram_accepted_at IS NOT NULL ORDER BY report_id",
-            "gateway_requests": "SELECT request_id::text AS id FROM public.market_gateway_requests ORDER BY request_id",
-            "alert_drafts": "SELECT id::text AS id FROM public.market_alert_drafts ORDER BY id",
-            "alert_events": "SELECT id::text AS id FROM public.market_alert_events ORDER BY id",
-            "alert_actions": "SELECT id::text AS id FROM public.market_alert_actions ORDER BY id",
-        }
         tables = {}
-        for name, sql in queries.items():
-            rows = self.query(sql)
-            ids = [row["id"] for row in rows]
-            require(all(isinstance(value, str) for value in ids), "dry-run queried IDs are malformed")
+        for name in READ_TABLES:
+            rows = self.query(f"SELECT to_jsonb(t) AS row FROM public.{name} AS t ORDER BY to_jsonb(t)::text")
+            canonical_rows = [json.dumps(row["row"], sort_keys=True, separators=(",", ":"), ensure_ascii=False) for row in rows]
+            require(all(isinstance(value, str) for value in canonical_rows), "dry-run rows are malformed")
             tables[name] = {
-                "count": len(ids), "ids": ids,
-                "sha256": hashlib.sha256(json.dumps(ids, separators=(",", ":")).encode()).hexdigest(),
+                "count": len(canonical_rows),
+                "rows_sha256": hashlib.sha256("\n".join(canonical_rows).encode()).hexdigest(),
             }
         return {"source": self.identity(), "tables": tables}
 

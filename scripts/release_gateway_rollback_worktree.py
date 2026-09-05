@@ -19,7 +19,7 @@ def main() -> int:
         raise SystemExit("retained gateway rollback artifact is unavailable")
     release_gateway_rollback_artifact({
         "repo_root": artifact["repo_root"],
-        "commit_sha": artifact.get("git_sha", ""),
+        "commit_sha": artifact.get("commit_sha", ""),
         "source_sha256": artifact.get("source_sha256", ""),
     })
     return 0

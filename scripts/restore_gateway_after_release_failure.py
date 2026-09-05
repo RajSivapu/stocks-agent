@@ -17,6 +17,7 @@ def main() -> int:
     parser.add_argument("--admin-url", required=True)
     parser.add_argument("--receipt", type=Path)  # optional: state survives a killed deploy subprocess
     parser.add_argument("--release-state", required=True, type=Path)
+    parser.add_argument("--recovery-root", type=Path)
     args = parser.parse_args()
     state = json.loads(args.release_state.read_text())
     artifact = state.get("artifact")
@@ -25,8 +26,8 @@ def main() -> int:
     if not isinstance(artifact, dict):
         raise SystemExit("retained gateway rollback artifact is unavailable")
     gateway = {
-        "repo_root": artifact.get("repo_root"),
-        "commit_sha": artifact.get("git_sha"),
+        "repo_root": str(args.recovery_root) if args.recovery_root is not None else artifact.get("repo_root"),
+        "commit_sha": artifact.get("commit_sha"),
         "source_sha256": artifact.get("source_sha256"),
     }
     restore_gateway_after_release_failure(args.project_ref, args.admin_url, gateway)
