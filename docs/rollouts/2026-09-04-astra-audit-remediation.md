@@ -5,7 +5,7 @@ Status: **local candidate only; rollout has not started**.
 ## Immutable boundary
 
 - Audit baseline: `432d647ef911ff63da427097f02a852e18038b62`.
-- Consolidated local-gate code candidate: `a0f8158c959e788b2a302ae6411328ec6e98a707`.
+- Final consolidated local-gate code candidate: `883d521728b1b3c2700a78dab1d65208105d7a2f`.
 - Owner-only, signup/invitations disabled, suggestion-only, and no brokerage execution.
 - Zero incremental cost: no paid provider, premium endpoint, trial, paid infrastructure, or metered
   runtime model API.
@@ -27,8 +27,8 @@ candidate-bound verifiers. None is claimed applied to a live project.
 
 | Stage | Status | Required evidence |
 |---|---|---|
-| Consolidated local gate | Pending for final fix wave | Historical `a0f8158` gate passed 1,006 tests; it does not verify the final Track A/B/C changes |
-| Independent review | Pending | GPT-6 Astra whole-branch verdict with no unresolved Critical or Important finding |
+| Consolidated local gate | Complete | Final code `883d521`: 1,197 passed, 4 skipped, 4 credentialed database integrations deselected |
+| Independent review | Complete at local boundary | GPT-6 Astra approved the final scoped re-review; owner-operated Sites publication remains a production gate |
 | Exact-head CI | Pending | Successful protected CI bound to the final reviewed SHA and current `main` ancestry |
 | Migration deployment | Pending | Ordered native/private ledger match, per-statement hashes, exact candidate suffix, and no drift |
 | Function and Site deployment | Pending | Candidate source/static hashes, deployment IDs, downloaded parity, and final success status |
@@ -75,7 +75,8 @@ configuration, Telegram send, scheduled run, provider/model call, or brokerage a
 Focused local tests passed **315/315**. The audited `20260907` bytes are restored and the additive
 tail is `20261001_immutable_history_closure.sql`. Source history/hash enforcement is unchanged.
 The scoped PostgreSQL tests exercised both native-ledger upgrade/retry and a real isolated restore.
-These results are local evidence; the final consolidated and independent-review gates are pending.
+These Track C results are local evidence; the final consolidated and independent-review outcomes
+are recorded at the end of this document.
 
 The production CLI and independent recovery now share the six-component encrypted journal engine.
 Every prior snapshot contains presence, complete configuration, exact files, private values,
@@ -152,3 +153,23 @@ The complete Track C focused gate passed **396 tests** after the recovery owners
 The independent reviewer marked both Important findings addressed, found no new Critical or Important
 issue, and returned **SPEC PASS / QUALITY PASS / APPROVED**. This approval covers the exact Track C
 range; it does not close the Sites integration, consolidated, exact-head, or production gates.
+
+## Final candidate checkpoint
+
+GPT-6 Astra accepted the absent callable Sites management transport as a safe local conditional:
+the protected workflow blocks before mutation, and owner-operated native Sites publication must
+provide the real access, version, deployment, archive-hash, and byte-parity receipts. No repository
+wrapper is allowed to authenticate caller assertions as though they were platform evidence.
+
+Its final re-review found two remaining implementation defects. Commit `883d521` closes both:
+all 12 reviewed non-Yahoo providers durably checkpoint before transport and reconcile crash
+uncertainty without replacement calls; the recovery bundle now exports, validates, restores, and
+reconciles `public.stock_agent_release_migration_ledger`, including an actual upgraded-source restore
+followed by an exact no-op migration retry. Focused correction verification passed 181 tests and the
+scoped reviewer returned no findings. GPT-6 Astra's final focused verification passed 27 tests and
+returned **APPROVED**.
+
+The final local candidate `883d521` passed `npm run test:all`: **1,197 tests passed**, 4 were skipped,
+and 4 credentialed database integrations were deliberately deselected. No live database, Auth,
+function, Site, Telegram, provider, brokerage, or scheduled-run mutation was performed. All rows
+still marked pending in the rollout table require their protected production receipts.

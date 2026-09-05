@@ -9,8 +9,8 @@ pending**.
 - Audit baseline: `432d647ef911ff63da427097f02a852e18038b62`.
 - Audit verdict: no-go for trusted portfolio decision support; 12 High and 7 Medium findings, plus
   a six-digit-versus-magic-link owner Auth mismatch.
-- Consolidated local-gate code candidate:
-  `a0f8158c959e788b2a302ae6411328ec6e98a707`.
+- Final consolidated local-gate code candidate:
+  `883d521728b1b3c2700a78dab1d65208105d7a2f`.
 - Review range for the final independent pass: `432d647ef911ff63da427097f02a852e18038b62`
   through the final Task 12 candidate.
 - Specification: `docs/superpowers/specs/2026-09-04-astra-audit-remediation-design.md`.
@@ -38,8 +38,8 @@ total. The single consolidated local gate is recorded separately below.
 
 ## Consolidated local gate
 
-The results below predate the final Astra fix wave. Final-candidate consolidated verification and
-the final scoped Astra re-review remain pending.
+The results immediately below predate the final Astra fix wave. Final-candidate consolidated
+verification and the approved scoped Astra re-review are recorded at the end of this document.
 
 The required command was run exactly:
 
@@ -89,8 +89,8 @@ commit. Any Critical or Important finding remains release-blocking until fixed a
 | Gate | Status | What is and is not established |
 |---|---|---|
 | Focused local task tests | Complete | Fixture, structural SQL, disposable PostgreSQL, and local recovery-runtime behavior only |
-| Consolidated local gate | Complete | 1,006 passed, 4 skipped, 4 credentialed integration tests deselected on code commit `a0f8158` |
-| Independent whole-branch review | Pending | No final GPT-6 Astra verdict for the complete remediation diff yet |
+| Consolidated local gate | Complete | Final code commit `883d521`: 1,197 passed, 4 skipped, 4 credentialed integrations deselected |
+| Independent whole-branch review | Complete at local boundary | GPT-6 Astra approved the final scoped re-review at `883d521`; native owner-operated Sites publication remains a production gate |
 | Exact-head CI | Pending | Earlier CI on `432d647` is baseline evidence, not evidence for this branch |
 | Production deployment | Pending | No remediation migration, function, Site, or secret change is claimed live |
 | Live Auth | Pending | Repository enforces six digits/token template; production configuration and owner login are unverified |
@@ -99,9 +99,9 @@ commit. Any Critical or Important finding remains release-blocking until fixed a
 
 ## Current review decision
 
-The implementation is ready for independent whole-branch review, not ready for deployment and not
-accepted for trusted portfolio use. Owner-only research/shadow use remains the ceiling until the
-independent review and every protected rollout gate in `PROJECT_STATUS.md` pass.
+The local implementation and independent review are complete. The release is not deployed and is
+not accepted for trusted portfolio use. Owner-only research/shadow use remains the ceiling until
+every protected rollout gate in `PROJECT_STATUS.md` passes.
 
 No live database, deployment, Auth, Telegram, scheduled, provider/model, or brokerage action was
 performed to create this record.
@@ -141,7 +141,8 @@ membership options, quoted/per-database settings, and committed encrypted journa
 Stateful Supabase command tests cover all three active downloads and metadata races, upgrades,
 first installs, secret digest/absence round trips, and six-component orchestration failures.
 The subsequent exact-range review found two Important recovery-proof gaps; both were fixed in round 2.
-Every consolidated/production gate remains pending.
+At that checkpoint, every consolidated/production gate remained pending; the final local gate and
+review result are recorded below, while production gates remain pending.
 
 ### Track C fix round 2 — recovery ownership and identity
 
@@ -159,3 +160,24 @@ proof-capability guard. The final combined Track C focused gate passed **396 tes
 audited migration hashes, and diff checks passed. The independent reviewer marked both Important
 findings addressed, found no new Critical or Important issue, and returned **SPEC PASS / QUALITY PASS /
 APPROVED**. No full suite or live operation ran. All production gates remain pending.
+
+## Final Astra scoped re-review
+
+GPT-6 Astra reviewed the final fix wave from `0b092d0` through `b5d76bb` against its original
+11 Important findings. It accepted the missing callable Sites management transport as an explicit,
+truthful local safety boundary: production blocks before mutation and must not substitute
+caller-authored receipts for native owner-scoped Sites evidence. It found two remaining defects:
+GDELT and other registry providers lacked the durable pre-transport crash barrier, and recovery
+omitted `public.stock_agent_release_migration_ledger`.
+
+Commit `883d521` extended the durable attempt barrier to all 12 reviewed non-Yahoo providers and
+added strict export, validation, transactional restore, and no-op retry reconciliation for the
+private release ledger. The focused correction gate passed 181 tests, and the exact-range reviewer
+returned no findings. GPT-6 Astra then re-reviewed only those two findings and returned **APPROVED**;
+its fresh focused verification passed 27 tests.
+
+The final `npm run test:all` gate at `883d521` passed **1,197 tests**, with 4 expected skips and 4
+credentialed database integrations deliberately deselected. All local Critical and Important
+findings are closed at the safe implementation boundary. Exact-head CI, native owner-operated Sites
+publication, protected Supabase deployment, live Auth, live restore, and scheduled receipts remain
+production gates and are not claimed by this review.

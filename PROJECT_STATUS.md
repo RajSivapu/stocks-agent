@@ -3,10 +3,10 @@
 Last updated: 2026-09-05
 Canonical release: Personal Stock Agent V1 safety remediation
 Audit baseline: `432d647ef911ff63da427097f02a852e18038b62` on `origin/main`
-Consolidated local-gate candidate: `a0f8158c959e788b2a302ae6411328ec6e98a707`
-Current state: final Astra fix wave has concrete local PostgreSQL/Supabase recovery and immutable-history changes;
-the Track C focused review is approved. Sites transport/publication integration and the final consolidated gate remain pending.
-The `a0f8158` consolidated result is historical and does not verify this final fix wave.
+Consolidated local-gate candidate: `883d521728b1b3c2700a78dab1d65208105d7a2f`
+Current state: the final Astra fix wave is implemented and review-clean at the local safety boundary.
+The exact candidate passed 1,197 local checks; GPT-6 Astra approved the final scoped re-review.
+Owner-operated native Sites publication and all other protected production receipts remain pending.
 
 This file is the version-controlled source of truth for the Personal Stock Agent V1 rollout.
 `docs/ROADMAP.md` records the implementation sequence and remaining release gates.
@@ -32,15 +32,15 @@ recovery journal unresolved without overwriting another actor's change.
 Supabase restoration preserves prior bytes/configuration and records both the original captured
 identity and the newly allocated restoration version; the existing function ID must stay exact.
 It does not resurrect the old version number or accept a foreign ID with matching bytes.
-Final Astra findings 3 and 4 are locally implemented. Finding 5 remains open only at the reviewed
-Sites transport and immutable four-artifact publication/receipt integration. The native factory is
-I/O-free and the missing Sites capability still blocks production before mutation. Focused local
-tests do not substitute for independent review or any live deployment/restore proof.
+Final Astra findings 3 and 4 are locally implemented. For finding 5, GPT-6 Astra accepted the
+pre-mutation Sites block as the correct local safety boundary because the native owner-scoped Sites
+connector has no callable GitHub Actions management transport. Owner-operated Sites publication and
+immutable platform receipts remain a production gate; no caller-authored substitute is accepted.
 
 The exact Track C range received independent approval after both Important recovery findings were fixed.
-Final whole-repository Astra re-review, consolidated verification of the final candidate, exact-head CI,
-protected deployment, live Auth, Site deployment/parity, live isolated restore, and the next
-existing scheduled receipts are all pending. No scheduled run was triggered.
+The final consolidated gate and GPT-6 Astra scoped re-review are complete. Exact-head CI, protected
+deployment, live Auth, owner-operated Site deployment/parity, live isolated restore, and the next
+existing scheduled receipts are pending. No scheduled run was triggered.
 
 The product remains owner-only, suggestion-only, brokerage-free, and constrained to zero
 incremental cost. It cannot place, modify, or cancel a trade. No remediation task performed a live
@@ -140,8 +140,8 @@ V1-C5 is reopened.
 
 - [x] Candidate-bound release verification, durable recovery orchestration, migration ledgering,
   encrypted export, and local disposable restore drill are implemented and task-reviewed locally.
-- [x] Consolidated local `npm run test:all` gate passed for the code at `a0f8158`.
-- [ ] Independent whole-branch GPT-6 Astra review with no unresolved Critical or Important finding.
+- [x] Consolidated local `npm run test:all` gate passed for the final code at `883d521`.
+- [x] GPT-6 Astra approved the final scoped re-review with no unresolved local Critical or Important finding; the native Sites publication conditional remains a production gate.
 - [ ] Exact-head CI on the final reviewed candidate.
 - [ ] Protected production migrations, functions, private Site, source/static parity, and denial/
   owner canaries.
@@ -153,7 +153,7 @@ V1-C6 is reopened and the release remains no-go for trusted use.
 
 ## Immediate next gates
 
-1. Obtain the independent whole-branch review and fix any Critical or Important findings.
+1. Publish the exact candidate through the owner-operated native Sites path and retain its authoritative version/deployment receipt.
 2. Run exact-head CI, then use only the protected deployment/recovery workflow.
 3. Configure and read back live six-digit Auth, pass owner and denial canaries, and perform the
    isolated restore drill.
@@ -178,9 +178,14 @@ the fresh schema, the focused reproduction passed 6/6. The one permitted consoli
   production build, and the 14-file bundle scan passed;
 - 17 Playwright tests passed and the opt-in live read-only canary was skipped.
 
-That is 1,006 passed tests, 4 skipped tests, and 4 explicitly deselected credentialed integration
-tests. The code content is committed at `a0f8158`; the required documentation changes were the only
-remaining dirty state after that focused fix commit.
+That historical Task 12 gate was 1,006 passed tests, 4 skipped tests, and 4 explicitly deselected
+credentialed integration tests at `a0f8158`.
+
+After the final Astra fix wave and its two scoped corrections, `npm run test:all` passed again at
+`883d521`: 779 Python, 71 Node, 290 Deno, 6 dashboard-contract, 34 web-unit, and 17 Playwright tests.
+That is **1,197 passed**, 4 skipped, and 4 credentialed database integrations deliberately deselected.
+Typechecks, Edge checks, web lint, the 242-package license gate, production build, bundle scan, schema
+sync, focused PostgreSQL restore/retry evidence, and `git diff --check` also passed.
 
 ## Production truth
 

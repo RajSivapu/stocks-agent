@@ -22,11 +22,13 @@ The protected main/recovery entrypoints share the component engine and the concr
 restores runtime role attributes/verifier/memberships/settings, recoverable secret values/digests,
 and exact downloaded bytes/configuration for all three Edge functions. Unchanged readback is a
 recovery no-op; restored Edge versions are newly allocated and recorded alongside prior identities.
-The unchanged `.openai/hosting.json` remains the sole zero-cost Site target. Its reviewed CI transport
-and immutable artifact-publication integration remain absent, so preflight blocks before mutation.
-Final Astra findings 3 and 4 are locally complete; finding 5 remains open at that Sites conditional.
-The final focused review,
-consolidated gate, re-review, exact-head CI, and every production receipt remain pending.
+The unchanged `.openai/hosting.json` remains the sole zero-cost Site target. Its callable CI management
+transport remains unavailable, so preflight blocks before mutation. GPT-6 Astra accepted this as the
+correct local safety boundary: native owner-operated Sites publication must supply authoritative
+platform receipts, and no caller-authored substitute is accepted. Findings 3 and 4 are locally complete;
+finding 5's actual Site publication remains a production gate. The final focused review, consolidated
+1,197-test gate, and GPT-6 Astra scoped re-review are complete. Exact-head CI and every production
+receipt remain pending.
 
 | Layer | Local candidate | Production status |
 |---|---|---|
@@ -35,10 +37,10 @@ consolidated gate, re-review, exact-head CI, and every production receipt remain
 | Portfolio accounting and delivery integrity | Implemented and task-reviewed | Protected migrations, canaries, and original delivery receipts pending |
 | Provider, cache, quota, ranking, and lifecycle | Implemented and task-reviewed | Live free-provider health and one existing scheduled chain pending |
 | Outcomes, read privilege, dependency lock, and market sessions | Implemented and task-reviewed | Role migration and production observation pending |
-| Candidate-bound release and recovery | Implemented and task-reviewed; local disposable restore path covered | Independent whole-branch review, exact-head CI, protected deployment, and live isolated restore pending |
+| Candidate-bound release and recovery | Implemented and GPT-6 Astra review-clean; local disposable restore path covered | Exact-head CI, protected deployment, native Sites publication, and live isolated restore pending |
 
-The historical consolidated local-gate code candidate is
-`a0f8158c959e788b2a302ae6411328ec6e98a707`, based on the GPT-6 Astra audit of `origin/main` at
+The final consolidated local-gate code candidate is
+`883d521728b1b3c2700a78dab1d65208105d7a2f`, based on the GPT-6 Astra audit of `origin/main` at
 `432d647ef911ff63da427097f02a852e18038b62`. Nothing in this branch is claimed live.
 
 ## Remediation workstreams

@@ -11,12 +11,12 @@ An owner-only personal stock agent that uses zero-incremental-cost data sources,
 - [x] Design and implementation plan approved
 - [x] Core V1 implementation completed
 - [x] Initial Astra audit findings F1–F19 implemented
-- [x] Consolidated local gate passed: 1,006 checks passed, 4 skipped, 4 credentialed database tests intentionally deselected
+- [x] Final consolidated local gate passed: 1,197 checks passed, 4 skipped, 4 credentialed database tests intentionally deselected
 - [x] Final whole-repository GPT-6 Astra review completed
-- [ ] Final Astra fix wave complete — **10 of 11 findings locally implemented; 5 remains open at the Sites transport/publication conditional**
+- [x] Final Astra fix wave complete at the safe local boundary — **all code findings closed; native owner-operated Sites publication remains a production gate**
 - [x] Final Track C focused code review approved with no open Critical or Important findings
-- [ ] Consolidated final-candidate gate
-- [ ] Final GPT-6 Astra re-review
+- [x] Consolidated final-candidate gate: **1,197 checks passed, 4 skipped, 4 credentialed database tests intentionally deselected**
+- [x] Final GPT-6 Astra re-review approved at exact code commit `883d521`
 - [ ] Protected production rollout and live receipts
 
 ## Completed implementation areas
@@ -50,11 +50,11 @@ An owner-only personal stock agent that uses zero-incremental-cost data sources,
 
 ## What is happening now
 
-- [ ] Finish findings 3–5 in one release-integration pass
+- [x] Finish findings 3–5 at the local safety boundary — **3 and 4 complete; Astra accepts 5's pre-mutation block while owner-operated Sites publication remains pending**
 - [x] Run focused release/migration/rollback tests
 - [x] Complete independent Track C review with no open Critical or Important findings
-- [ ] Run one consolidated repository gate after the fixes
-- [ ] Run one scoped GPT-6 Astra re-review of the 11 findings
+- [x] Run one consolidated repository gate after the fixes — **1,197 passed**
+- [x] Run one scoped GPT-6 Astra re-review of the 11 findings — **approved**
 - [x] Update this checklist and the formal status/rollout records
 
 ## Production gates — intentionally not claimed yet
