@@ -59,3 +59,11 @@ def test_cli_requires_exact_run_id_for_scheduled_collection_but_allows_explicit_
 
     assert json.loads(scheduled.getvalue()) == {"error": "INVALID_ARGUMENT", "ok": False}
     assert json.loads(fixture.getvalue())["coverage"]["mode"] == "fixture_dry_run"
+
+
+def test_cli_rejects_ambiguous_legacy_request_id_flag():
+    output = io.StringIO()
+
+    assert main(["--phase", "pre-market", "--request-id", "11111111-1111-4111-8111-111111111111"], stdout=output) == 2
+
+    assert json.loads(output.getvalue()) == {"error": "INVALID_ARGUMENT", "ok": False}

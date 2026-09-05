@@ -2687,6 +2687,7 @@ CREATE TABLE IF NOT EXISTS public.market_source_receipts (
     jsonb_typeof(error)='object' AND octet_length(error::text) <= 4096
   )),
   response_hash TEXT CHECK (response_hash IS NULL OR response_hash ~ '^[0-9a-f]{64}$'),
+  cache_predecessor_receipt_id UUID REFERENCES public.market_source_receipts(id) ON DELETE RESTRICT,
   created_at TIMESTAMPTZ NOT NULL DEFAULT statement_timestamp(),
   UNIQUE (run_id, id),
   CHECK (accepted_count + duplicate_count + dropped_count <= returned_count),

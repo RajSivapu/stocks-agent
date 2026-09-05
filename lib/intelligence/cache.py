@@ -55,11 +55,19 @@ class ResumableCollectionCache:
             return
         self._collections[key] = result
 
-    def get_collection(self, key: str) -> CollectionResult | None:
+    def get_collection(
+        self, key: str, *, reservation_id: str, source_receipt_id: str
+    ) -> CollectionResult | None:
         result = self._collections.get(key)
         if result is None:
             return None
-        receipt = replace(result.receipt, status="cache_hit", request_cost=0)
+        predecessor = result.receipt.source_receipt_id
+        if not predecessor:
+            raise ValueError("cached collection is missing its persisted source receipt")
+        receipt = replace(
+            result.receipt, reservation_id=reservation_id, status="cache_hit", request_cost=0,
+            source_receipt_id=source_receipt_id, cache_predecessor_receipt_id=predecessor,
+        )
         return replace(result, receipt=receipt)
 
     def put_run(self, run_id: str, receipt: object) -> None:

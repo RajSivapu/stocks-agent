@@ -92,3 +92,11 @@ def test_missing_liquidity_or_high_holding_concentration_is_insufficient():
     assert "liquidity:missing" in missing.missing_reasons
     assert held.qualified is False
     assert "holding_weight:concentrated" in held.missing_reasons
+
+
+def test_missing_overlap_is_insufficient_and_is_not_substituted_from_holding_weight():
+    row = rank_candidates([candidate("HELD")], holdings={"HELD": Decimal("0.42")})[0]
+
+    assert row.qualified is False
+    assert "overlap:missing" in row.missing_reasons
+    assert "HOLDING_WEIGHT_CONCENTRATED" in row.veto_reasons

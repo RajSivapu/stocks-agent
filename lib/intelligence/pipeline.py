@@ -8,7 +8,7 @@ import re
 import uuid
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field, replace
-from datetime import date, datetime, timedelta, timezone
+from datetime import date, datetime, time, timedelta, timezone
 from decimal import Decimal
 
 from lib.intelligence.dedupe import RunItemDisposition, deduplicate
@@ -211,6 +211,8 @@ class IntelligencePipeline:
             raise ValueError("adapters must have unique provider names")
         self.adapters = values
         self.context = dict(context or {})
+        if {"comparison_ids", "learning_inputs"} & self.context.keys():
+            raise ValueError("comparison and learning provenance require typed gateway operations")
         self.packet_limits = packet_limits
         self.cache = cache or ResumableCollectionCache()
 
@@ -301,23 +303,31 @@ class IntelligencePipeline:
         for index in range(count):
             adapter = self.adapters[index % len(self.adapters)]
             target = targets[index % len(targets)]
+            row = plan_by_provider[str(adapter.provider)]
+            source_receipt_id = _uuid("receipt", request.request_id, index, adapter.provider)
             query = CollectionQuery(
                 text="unsupported", symbols=(), start=_utc(request.now) - _window_for(request.phase),
                 end=_utc(request.now), limit=20,
             )
             try:
                 query = self._query_for(adapter, target, request)
-                cached = self.cache.get_collection(_collection_cache_key(adapter, query))
+                cached = self.cache.get_collection(
+                    _collection_cache_key(adapter, query), reservation_id=str(row["id"]),
+                    source_receipt_id=source_receipt_id,
+                )
                 if cached is not None:
                     results.append(cached)
                     continue
                 result = adapter.collect(query)
                 if not isinstance(result, CollectionResult):
                     raise TypeError("adapter returned an invalid collection result")
+                result = replace(
+                    result,
+                    receipt=replace(result.receipt, source_receipt_id=source_receipt_id),
+                )
                 if result.receipt.request_cost > 0:
                     self.cache.put_collection(_collection_cache_key(adapter, query), result)
             except Exception as exc:
-                row = plan_by_provider[str(adapter.provider)]
                 result = CollectionResult(
                     (),
                     _failed_receipt(
@@ -342,7 +352,8 @@ class IntelligencePipeline:
         text = _provider_query_text(provider, target, symbols)
         return CollectionQuery(
             text=text, symbols=symbols, cik=cik, series_id=series_id,
-            start=_utc(request.now) - _window_for(request.phase), end=_utc(request.now), limit=20,
+            start=_stable_window_end(request) - _window_for(request.phase),
+            end=_stable_window_end(request), limit=20,
         )
 
     def _complete(
@@ -357,7 +368,9 @@ class IntelligencePipeline:
         receipt_rows: list[dict[str, object]] = []
         sources: list[dict[str, object]] = []
         for index, result in enumerate(results):
-            receipt_id = _uuid("receipt", run_id, index, result.receipt.provider)
+            receipt_id = result.receipt.source_receipt_id or _uuid(
+                "receipt", run_id, index, result.receipt.provider
+            )
             receipt_rows.append(_receipt_row(result.receipt, receipt_id))
             sources.append(_source_summary(result.receipt, receipt_id))
             normalized_items = [normalize_item(item) for item in result.items]
@@ -417,8 +430,6 @@ class IntelligencePipeline:
                 for index, value in enumerate(dispositions)
                 if value.disposition == "duplicate"
             ],
-            "comparison_ids": list(_receipt_ids(self.context.get("comparison_ids"), "comparison_ids")),
-            "learning_inputs": _learning_inputs(self.context.get("learning_inputs")),
         })
         limits = replace(
             self.packet_limits,
@@ -590,6 +601,12 @@ def _window_for(phase: str) -> timedelta:
             "post-market": timedelta(hours=12), "on-demand": timedelta(days=2)}[phase]
 
 
+def _stable_window_end(request: PipelineRequest) -> datetime:
+    """Scheduled retry windows are anchored to the gateway-owned market date, never wall clock."""
+    hour = {"pre-market": 13, "intraday": 20, "post-market": 23, "on-demand": 23}[request.phase]
+    return datetime.combine(request.market_date, time(hour, 0), tzinfo=timezone.utc)
+
+
 def _failed_receipt(
     provider: str, reservation_id: str, query: CollectionQuery, now: datetime, *, error_code: str
 ) -> RequestReceipt:
@@ -612,6 +629,7 @@ def _receipt_row(value: RequestReceipt, receipt_id: str) -> dict[str, object]:
         "returned_count": value.returned_count, "accepted_count": value.accepted_count,
         "duplicate_count": value.duplicate_count, "dropped_count": value.dropped_count,
         "error": None if value.error_code is None else {"code": value.error_code},
+        "cache_predecessor_receipt_id": value.cache_predecessor_receipt_id,
         "response_hash": value.response_hash,
     }
 
@@ -682,13 +700,14 @@ def _discover(
         holding_weights = _holding_weights(context.get("holdings"))
         holding_weight = (
             holding_weights.get(ticker, Decimal("0"))
-            if isinstance(context.get("holdings"), Mapping) else None
+            if holding_weights is not None else None
         )
         overlap = _overlap_score(context, ticker, holding_weight)
         candidates.append(CandidateInput(
             ticker=ticker, event=event, relation=relation, evidence=(item,),
-            authority_corroboration=Decimal("1") if item.authority == "official" else Decimal("0.25"),
-            exposure_strength=Decimal("1") if relation.eligible_for_ranking else Decimal("0"),
+            authority_corroboration=_authority_score(item),
+            exposure_strength=(Decimal(len(relation.exposure_evidence)) / Decimal(len(relation.evidence))
+                               if relation.evidence else None),
             recency=max(Decimal("0"), Decimal("1") - Decimal(str(age_seconds)) / Decimal("604800")),
             portfolio_relevance=(max(holding_weight, overlap)
                                  if holding_weight is not None and overlap is not None else None),
@@ -709,17 +728,45 @@ def _collection_cache_key(adapter: object, query: CollectionQuery) -> str:
     }, window, 1)
 
 
-def _holding_weights(value: object) -> dict[str, Decimal]:
-    if not isinstance(value, Mapping):
-        return {}
-    weights: dict[str, Decimal] = {}
-    for ticker, raw in value.items():
-        try:
-            parsed = Decimal(str(raw))
-        except Exception:
-            continue
-        if parsed.is_finite() and parsed >= 0:
+def _holding_weights(value: object) -> dict[str, Decimal] | None:
+    if isinstance(value, Mapping):
+        weights: dict[str, Decimal] = {}
+        for ticker, raw in value.items():
+            try:
+                parsed = Decimal(str(raw))
+            except Exception:
+                return None
+            if not parsed.is_finite() or parsed < 0:
+                return None
             weights[str(ticker).upper()] = parsed
+        return weights
+    if not isinstance(value, Sequence) or isinstance(value, (str, bytes, bytearray)):
+        return None
+    values: list[tuple[str, Decimal]] = []
+    for row in value:
+        if not isinstance(row, Mapping):
+            return None
+        ticker = str(row.get("ticker") or row.get("symbol") or "").strip().upper()
+        raw_value = row.get("market_value")
+        if raw_value is None:
+            shares, price = row.get("shares"), row.get("current_price")
+            try:
+                raw_value = Decimal(str(shares)) * Decimal(str(price))
+            except Exception:
+                return None
+        try:
+            market_value = Decimal(str(raw_value))
+        except Exception:
+            return None
+        if not ticker or not market_value.is_finite() or market_value <= 0:
+            return None
+        values.append((ticker, market_value))
+    total = sum((amount for _ticker, amount in values), Decimal("0"))
+    if total <= 0:
+        return None
+    weights: dict[str, Decimal] = {}
+    for ticker, amount in values:
+        weights[ticker] = amount / total
     return weights
 
 
@@ -731,6 +778,13 @@ def _liquidity_score(item: SourceItem, context: Mapping[str, object], ticker: st
     except Exception:
         return None
     return result if result.is_finite() and Decimal("0") <= result <= Decimal("1") else None
+
+
+def _authority_score(item: SourceItem) -> Decimal | None:
+    return {
+        "official": Decimal("1"), "corroborating": Decimal("0.75"),
+        "market_data": Decimal("0.5"), "radar": Decimal("0.25"),
+    }.get(item.authority)
 
 
 def _overlap_score(
@@ -748,41 +802,6 @@ def _overlap_score(
     except Exception:
         return None
     return result if result.is_finite() and Decimal("0") <= result <= Decimal("1") else None
-
-
-def _receipt_ids(value: object, name: str) -> tuple[str, ...]:
-    if value is None:
-        return ()
-    if not isinstance(value, Sequence) or isinstance(value, (str, bytes, bytearray)):
-        raise ValueError(f"{name} must be a sequence")
-    if len(value) > 96:
-        raise ValueError(f"{name} exceeds bound")
-    values: list[str] = []
-    for raw in value:
-        try:
-            parsed = str(uuid.UUID(str(raw)))
-        except (AttributeError, TypeError, ValueError):
-            raise ValueError(f"{name} must contain canonical UUIDs") from None
-        if parsed != raw:
-            raise ValueError(f"{name} must contain canonical UUIDs")
-        values.append(parsed)
-    if len(set(values)) != len(values):
-        raise ValueError(f"{name} must not contain duplicates")
-    return tuple(sorted(values))
-
-
-def _learning_inputs(value: object) -> dict[str, object]:
-    if value is None:
-        return {}
-    if not isinstance(value, Mapping):
-        raise ValueError("learning_inputs must be an object")
-    try:
-        encoded = _canonical(dict(value)).encode("utf-8")
-    except (TypeError, ValueError):
-        raise ValueError("learning_inputs must be JSON") from None
-    if len(encoded) > 8_192:
-        raise ValueError("learning_inputs exceeds bound")
-    return json.loads(encoded)
 
 
 def _discovery_status(item: SourceItem, *, qualified: bool) -> str:

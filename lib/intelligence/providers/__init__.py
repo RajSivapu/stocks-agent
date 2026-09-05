@@ -96,6 +96,8 @@ class RequestReceipt:
     dropped_count: int
     response_hash: str | None
     error_code: str | None = None
+    source_receipt_id: str | None = None
+    cache_predecessor_receipt_id: str | None = None
 
 
 @dataclass(frozen=True, slots=True)

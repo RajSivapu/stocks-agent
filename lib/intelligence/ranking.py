@@ -189,8 +189,7 @@ def rank_candidates(
             else candidate.holding_weight
         )
         derived_overlap = (
-            (Decimal("1") if ticker in holding_positions or ticker in plan_positions else _ZERO)
-            if holdings is not None or plans is not None else None
+            None
         ) if candidate.overlap is None else candidate.overlap
         derived_concentration = (
             derived_holding_weight if candidate.concentration is None else candidate.concentration

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 from dataclasses import replace
+import pytest
 from datetime import date, datetime, timezone
 from types import MappingProxyType
 
@@ -87,13 +88,15 @@ class FakeGateway:
     def __init__(self) -> None:
         self.operations: list[str] = []
         self.payloads: list[dict[str, object]] = []
+        self.run_id = RUN_ID
+        self.reservation_id = RESERVATION_ID
 
     def start_intelligence_run(self, payload):
         self.operations.append("start_intelligence_run")
         self.payloads.append(payload)
         return {
-            "run_id": RUN_ID,
-            "reservation_ids": [RESERVATION_ID],
+            "run_id": self.run_id,
+            "reservation_ids": [self.reservation_id],
             "cache_entries": [],
             "duplicate": False,
             "telegram_message_ids": [],
@@ -323,19 +326,35 @@ def test_retry_reuses_completed_collection_without_new_quota_or_provider_call():
     assert second.sources == first.sources
 
 
-def test_pipeline_preserves_comparison_ids_and_learning_inputs_for_existing_receipts():
-    gateway = FakeGateway()
+def test_pipeline_rejects_untyped_comparison_and_learning_coverage_inputs():
     comparison_id = "55555555-5555-4555-8555-555555555555"
     learning_id = "66666666-6666-4666-8666-666666666666"
-    pipeline = IntelligencePipeline(gateway, [FakeAdapter()], context={
-        "comparison_ids": [comparison_id],
-        "learning_inputs": {"observation_ids": [learning_id], "coverage": "bounded"},
-    })
+    with pytest.raises(ValueError, match="typed gateway operations"):
+        IntelligencePipeline(FakeGateway(), [FakeAdapter()], context={
+            "comparison_ids": [comparison_id],
+            "learning_inputs": {"observation_ids": [learning_id], "coverage": "bounded"},
+        })
 
-    pipeline.run(request("pre-market"))
 
-    coverage = gateway.payloads[-1]["coverage"]
-    assert coverage["comparison_ids"] == [comparison_id]
-    assert coverage["learning_inputs"] == {
-        "coverage": "bounded", "observation_ids": [learning_id],
-    }
+def test_new_pipeline_instance_rehydrates_completed_collection_with_new_run_receipt_lineage():
+    from lib.intelligence.cache import ResumableCollectionCache
+
+    cache = ResumableCollectionCache()
+    first_gateway = FakeGateway()
+    first_adapter = FakeAdapter()
+    first = IntelligencePipeline(first_gateway, [first_adapter], cache=cache).run(request("pre-market"))
+    next_id = "77777777-7777-4777-8777-777777777777"
+    second_gateway = FakeGateway()
+    second_gateway.run_id = next_id
+    second_gateway.reservation_id = "88888888-8888-4888-8888-888888888888"
+    second_adapter = FakeAdapter()
+    second = IntelligencePipeline(second_gateway, [second_adapter], cache=cache).run(
+        PipelineRequest("pre-market", date(2026, 9, 4), NOW.replace(hour=18), request_id=next_id)
+    )
+
+    assert first.actual_requests == len(first_adapter.queries)
+    assert second.actual_requests == 0
+    assert second.cache_hits == len(first_adapter.queries)
+    assert second_adapter.queries == []
+    assert second_gateway.payloads[-1]["receipts"][0]["reservation_id"] != first_gateway.payloads[-1]["receipts"][0]["reservation_id"]
+    assert second_gateway.payloads[-1]["receipts"][0]["cache_predecessor_receipt_id"] == first_gateway.payloads[-1]["receipts"][0]["id"]

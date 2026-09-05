@@ -136,6 +136,7 @@ CREATE TABLE IF NOT EXISTS public.market_source_receipts (
     jsonb_typeof(error)='object' AND octet_length(error::text) <= 4096
   )),
   response_hash TEXT CHECK (response_hash IS NULL OR response_hash ~ '^[0-9a-f]{64}$'),
+  cache_predecessor_receipt_id UUID REFERENCES public.market_source_receipts(id) ON DELETE RESTRICT,
   created_at TIMESTAMPTZ NOT NULL DEFAULT statement_timestamp(),
   UNIQUE (run_id, id),
   CHECK (accepted_count + duplicate_count + dropped_count <= returned_count),
@@ -712,12 +713,12 @@ BEGIN
        OR NOT (v_row ?& ARRAY[
          'id','reservation_id','status','cache_key','requested_window','retrieved_at','expires_at',
          'request_cost','upstream_remaining','returned_count','accepted_count','duplicate_count',
-         'dropped_count','error','response_hash'
+         'dropped_count','error','response_hash','cache_predecessor_receipt_id'
        ])
        OR (v_row - ARRAY[
          'id','reservation_id','status','cache_key','requested_window','retrieved_at','expires_at',
          'request_cost','upstream_remaining','returned_count','accepted_count','duplicate_count',
-         'dropped_count','error','response_hash'
+         'dropped_count','error','response_hash','cache_predecessor_receipt_id'
        ]) <> '{}'::jsonb
        OR v_row->>'status' NOT IN (
          'succeeded','failed','cache_hit','quota_blocked','configuration_missing'
@@ -754,14 +755,15 @@ BEGIN
     INSERT INTO public.market_source_receipts(
       id,run_id,reservation_id,provider,status,cache_key,requested_window,retrieved_at,expires_at,
       request_cost,upstream_remaining,returned_count,accepted_count,duplicate_count,dropped_count,
-      error,response_hash
+      error,response_hash,cache_predecessor_receipt_id
     ) VALUES (
       (v_row->>'id')::uuid,p_run_id,v_reservation.id,v_reservation.provider,v_row->>'status',
       v_row->>'cache_key',v_row->'requested_window',(v_row->>'retrieved_at')::timestamptz,
       (v_row->>'expires_at')::timestamptz,(v_row->>'request_cost')::int,
       (v_row->>'upstream_remaining')::int,(v_row->>'returned_count')::int,
       (v_row->>'accepted_count')::int,(v_row->>'duplicate_count')::int,
-      (v_row->>'dropped_count')::int,NULLIF(v_row->'error','null'::jsonb),v_row->>'response_hash'
+      (v_row->>'dropped_count')::int,NULLIF(v_row->'error','null'::jsonb),v_row->>'response_hash',
+      NULLIF(v_row->>'cache_predecessor_receipt_id','')::uuid
     );
     v_receipt_count := v_receipt_count + 1;
   END LOOP;

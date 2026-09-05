@@ -428,6 +428,7 @@ function parseReceipt(value: unknown, index: number): JsonObject {
     "dropped_count",
     "error",
     "response_hash",
+    "cache_predecessor_receipt_id",
   ];
   exactKeys(row, keys, path);
   const status = enumValue(row.status, RECEIPT_STATUSES, `${path}.status`);
@@ -490,6 +491,9 @@ function parseReceipt(value: unknown, index: number): JsonObject {
     response_hash: row.response_hash === null
       ? null
       : hashValue(row.response_hash, `${path}.response_hash`),
+    cache_predecessor_receipt_id: row.cache_predecessor_receipt_id === null
+      ? null
+      : uuidValue(row.cache_predecessor_receipt_id, `${path}.cache_predecessor_receipt_id`),
   };
 }
 
