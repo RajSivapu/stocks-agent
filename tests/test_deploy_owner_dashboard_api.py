@@ -160,19 +160,67 @@ def test_release_migrations_are_applied_in_order_once_with_candidate_hashes(tmp_
     class Cursor:
         def __init__(self):
             self.statements = []
+            self.rows = []
 
-        def execute(self, statement):
+        def execute(self, statement, params=None):
             self.statements.append(statement)
+
+        def fetchall(self):
+            return self.rows
 
     cursor = Cursor()
     manifest = deploy.candidate_migration_manifest(tmp_path)
     receipt = deploy.apply_release_migrations(cursor, manifest, tmp_path)
-    assert cursor.statements == [path.read_text() for path in migrations]
-    assert [row["version"] for row in receipt] == ["20260926", "20260927", "20260928"]
-    assert all(len(row["sha256"]) == 64 for row in receipt)
+    assert [row["version"] for row in receipt["applied"]] == ["20260926", "20260927", "20260928"]
+    assert receipt["skipped"] == []
+    assert [path.read_text() for path in migrations] == [s for s in cursor.statements if s.startswith("--")]
+    assert all(len(row["sha256"]) == 64 for row in receipt["candidate"])
     manifest[0]["sha256"] = "0" * 64
     with pytest.raises(RuntimeError, match="hash"):
         deploy.apply_release_migrations(Cursor(), manifest, tmp_path)
+
+
+def test_migration_ledger_skips_verified_rows_and_refuses_hash_drift(tmp_path):
+    path = tmp_path / "20260926_report_suppression_reasons.sql"
+    path.write_text("SELECT 26;\n")
+    manifest = deploy.candidate_migration_manifest(tmp_path)
+
+    class Cursor:
+        def __init__(self, rows):
+            self.rows = rows
+            self.statements = []
+
+        def execute(self, statement, params=None):
+            self.statements.append((statement, params))
+
+        def fetchall(self):
+            return self.rows
+
+    existing = [(manifest[0]["path"], manifest[0]["version"], manifest[0]["sha256"])]
+    receipt = deploy.apply_release_migrations(Cursor(existing), manifest, tmp_path)
+    assert receipt["applied"] == []
+    assert receipt["skipped"] == manifest
+
+    drifted = [(manifest[0]["path"], manifest[0]["version"], "0" * 64)]
+    with pytest.raises(RuntimeError, match="ledger hash mismatch"):
+        deploy.apply_release_migrations(Cursor(drifted), manifest, tmp_path)
+
+
+def test_post_deploy_restoration_precedes_cleanup_even_when_cleanup_fails():
+    calls = []
+    artifact = {"repo_root": "/safe/rollback", "commit_sha": "a" * 40, "source_sha256": "b" * 64}
+
+    def restore(*_args):
+        calls.append("restore")
+        return {"gateway": {"status": "restored"}}
+
+    def cleanup(*_args):
+        calls.append("cleanup")
+        raise RuntimeError("filesystem cleanup failed")
+
+    with pytest.raises(RuntimeError, match="gateway restored"):
+        deploy.restore_gateway_after_release_failure(PROJECT_REF, ADMIN_URL, artifact, restorer=restore, releaser=cleanup)
+    assert calls == ["restore", "cleanup"]
 
 
 def test_deploy_and_release_verifiers_share_the_complete_candidate_migration_manifest():

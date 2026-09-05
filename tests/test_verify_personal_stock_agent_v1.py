@@ -85,13 +85,11 @@ def release(tmp_path):
         "functions": [{"function": name, "git_sha": sha, "function_version": 5, "source_sha256": tree_hash({"index.ts": raw[f"supabase/functions/{name}/index.ts"]})} for name in ("market-briefing-gateway", "owner-dashboard-api")],
         "static_assets": {"candidate_sha": sha, "source_sha256": tree_hash({"src/main.tsx": b"web source\n"}), "files": {"index.html": hashlib.sha256(b"<main>Private</main>").hexdigest()}},
         "dry_run": False,
-        "dry_run_evidence": {"table_deltas": {"analysis_runs": 0, "market_reports": 0}, "telegram_message_ids": [], "message_id_delta": 0},
+        "dry_run_evidence": {"before": {"tables": {"scheduled_runs": {"count": 1, "ids": [RUN], "sha256": "a" * 64}, "transactions": {"count": 0, "ids": [], "sha256": "b" * 64}}}, "after": {"tables": {"scheduled_runs": {"count": 1, "ids": [RUN], "sha256": "a" * 64}, "transactions": {"count": 0, "ids": [], "sha256": "b" * 64}}}, "table_deltas": {"scheduled_runs": 0, "transactions": 0}, "safe_command_sha256": "c" * 64, "safe_command_exit_code": 0},
         "canaries": {"owner": 200, "anonymous": 401, "non_owner": 403},
         "rollback_capture": {"artifact_id": 46, "git_sha": prior, "captured_at": "2026-09-05T18:15:00Z", "source_sha256": tree_hash(source.artifacts[46])},
-        "rollback": {"status": "rolled_back", "gateway": {"status": "restored", "git_sha": prior, "source_sha256": tree_hash(source.artifacts[46]), "function_version": 4},
-                     "gateway_restored_at": "2026-09-05T18:30:00Z", "dashboard_cleaned_at": "2026-09-05T18:31:00Z",
-                     "dashboard_secrets_unset": ["DASHBOARD_ALLOWED_ORIGINS", "DASHBOARD_DATABASE_URL", "DASHBOARD_OWNER_USER_ID"],
-                     "runtime_login": {"login": False, "memberships": 0}},
+        "deployment_outcome": "succeeded",
+        "rollback_readiness": {"status": "ready", "function_version": 4, "source_sha256": tree_hash(source.artifacts[46]), "isolated_drill": {"status": "verified", "isolated": True, "source_sha256": tree_hash(source.artifacts[46])}},
     }
     recovery = recovery_records(); packet = recovery["packets"][0]; report = recovery["reports"][0]
     source.rows = {
@@ -155,7 +153,7 @@ def test_release_rejects_caller_json_even_when_labeled_authoritative(release):
     lambda s: s.rows["publications"][0].update(telegram_message_ids=[]),
     lambda s: s.rows["publications"][0].update(telegram_accepted_at=None),
     lambda s: s.rows["publications"][0].update(status="suppressed", telegram_message_ids=[], telegram_accepted_at=None, error="not an explicit suppression reason"),
-    lambda s: s.record["rollback"]["gateway"].update(source_sha256="b" * 64),
+    lambda s: s.record["rollback_readiness"]["isolated_drill"].update(source_sha256="b" * 64),
     lambda s: s.artifacts[46].update({"index.ts": b"changed rollback"}),
 ])
 def test_release_rejects_relabeling_invented_stages_and_hash_mismatches(release, mutation):

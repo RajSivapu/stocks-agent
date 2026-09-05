@@ -41,6 +41,7 @@ from scripts.verify_owner_dashboard_deployment import (
 
 MIGRATION_NAME = re.compile(r"^(?P<version>\d{8})_[a-z0-9][a-z0-9_]*\.sql$")
 SUPABASE_CLI_VERSION = "2.116.0"
+MIGRATION_LEDGER = "public.stock_agent_release_migration_ledger"
 FUNCTION_NAME = "owner-dashboard-api"
 CHANGED_FUNCTIONS = ("market-briefing-gateway", FUNCTION_NAME)
 V1_SURFACES = ("portfolio", "ideas", "intelligence", "reports", "system")
@@ -264,7 +265,10 @@ def release_gateway_rollback_artifact(
     result = _run(["git", "worktree", "remove", "--force", str(path)], cwd=repo_root, runner=runner)
     if getattr(result, "returncode", 1) != 0:
         raise RuntimeError("gateway rollback artifact cleanup failed")
-    path.parent.rmdir()
+    try:
+        path.parent.rmdir()
+    except OSError as error:
+        raise RuntimeError("gateway rollback artifact cleanup failed") from error
 
 
 def retain_gateway_rollback_artifact(artifact: Mapping[str, object], evidence_directory: Path) -> dict[str, object]:
@@ -300,7 +304,15 @@ def verify_gateway_rollback_preflight(
     observed = function_version(project_ref, "market-briefing-gateway")
     if observed != expected_version:
         raise RuntimeError("live gateway version differs from rollback receipt")
-    return {"function_version": observed, "source_sha256": artifact["source_sha256"]}
+    # This is intentionally isolated: it proves the captured bytes can be
+    # resolved and checked without touching the live function.  Production
+    # restoration is reserved for a failed release, not a successful one.
+    return {
+        "status": "ready",
+        "function_version": observed,
+        "source_sha256": artifact["source_sha256"],
+        "isolated_drill": {"status": "verified", "isolated": True, "source_sha256": artifact["source_sha256"]},
+    }
 
 
 def candidate_migration_manifest(migrations_directory: Path = ROOT / "sql/migrations") -> list[dict[str, str]]:
@@ -327,8 +339,13 @@ def candidate_migration_manifest(migrations_directory: Path = ROOT / "sql/migrat
 def apply_release_migrations(
     cursor, manifest: Sequence[Mapping[str, str]] | None = None,
     migrations_directory: Path = ROOT / "sql/migrations",
-) -> list[dict[str, str]]:
-    """Apply each discovered candidate migration once, in stable byte-bound order."""
+) -> dict[str, list[dict[str, str]]]:
+    """Atomically ledger and apply only the byte-verified pending migrations.
+
+    The ledger bootstrap and each migration's DDL share the caller's database
+    transaction.  A retry therefore sees either a verified applied row or no
+    row at all; it never replays a partially recorded migration.
+    """
     manifest = list(candidate_migration_manifest() if manifest is None else manifest)
     def valid_item(row: Mapping[str, str]) -> bool:
         path = row.get("path")
@@ -345,7 +362,26 @@ def apply_release_migrations(
     expected_paths = [row["path"] for row in manifest]
     if expected_paths != sorted(expected_paths) or len(expected_paths) != len(set(expected_paths)):
         raise RuntimeError("candidate migration manifest is incomplete or unordered")
-    receipts = []
+    cursor.execute(
+        f"CREATE TABLE IF NOT EXISTS {MIGRATION_LEDGER} ("
+        "path TEXT PRIMARY KEY, version TEXT NOT NULL, sha256 TEXT NOT NULL, "
+        "applied_at TIMESTAMPTZ NOT NULL DEFAULT transaction_timestamp(), "
+        "UNIQUE (version, path))"
+    )
+    cursor.execute(f"SELECT path, version, sha256 FROM {MIGRATION_LEDGER} FOR UPDATE")
+    prior = cursor.fetchall()
+    if not isinstance(prior, list):
+        raise RuntimeError("migration ledger receipt is malformed")
+    known: dict[str, tuple[str, str]] = {}
+    for row in prior:
+        if not isinstance(row, Sequence) or len(row) != 3 or not all(isinstance(value, str) for value in row):
+            raise RuntimeError("migration ledger receipt is malformed")
+        path, version, digest = row
+        if path in known or not re.fullmatch(r"[0-9a-f]{64}", digest):
+            raise RuntimeError("migration ledger receipt is malformed")
+        known[path] = (version, digest)
+    applied: list[dict[str, str]] = []
+    skipped: list[dict[str, str]] = []
     for item in manifest:
         path = migrations_directory / Path(str(item["path"])).name
         if path.is_symlink() or not path.is_file() or not MIGRATION_NAME.fullmatch(path.name):
@@ -354,10 +390,26 @@ def apply_release_migrations(
         actual = hashlib.sha256(raw).hexdigest()
         if item["sha256"] != actual:
             raise RuntimeError("candidate migration hash mismatch")
-        sql = raw.decode("utf-8")
+        try:
+            sql = raw.decode("utf-8")
+        except UnicodeDecodeError as error:
+            raise RuntimeError("candidate migration is not UTF-8") from error
+        existing = known.get(item["path"])
+        if existing is not None:
+            if existing != (item["version"], item["sha256"]):
+                raise RuntimeError("migration ledger hash mismatch")
+            skipped.append(dict(item))
+            continue
+        # DDL and its immutable hash receipt are deliberately issued in the
+        # same transaction.  psycopg's surrounding connection context rolls
+        # both back if either statement fails.
         cursor.execute(sql)
-        receipts.append(dict(item))
-    return receipts
+        cursor.execute(
+            f"INSERT INTO {MIGRATION_LEDGER} (path, version, sha256) VALUES (%s, %s, %s)",
+            (item["path"], item["version"], item["sha256"]),
+        )
+        applied.append(dict(item))
+    return {"candidate": [dict(item) for item in manifest], "applied": applied, "skipped": skipped}
 
 
 def publish_dashboard_secrets(
@@ -636,6 +688,29 @@ def rollback_after_gateway_change(
     return receipt
 
 
+def restore_gateway_after_release_failure(
+    project_ref: str, admin_url: str, gateway_artifact: Mapping[str, object], *,
+    restorer: Callable[..., Mapping[str, object]] = rollback_after_gateway_change,
+    releaser: Callable[..., None] = release_gateway_rollback_artifact,
+) -> dict[str, object]:
+    """Restore live bytes first; a cleanup error must never bypass restoration."""
+    restored: dict[str, object] | None = None
+    restore_error: Exception | None = None
+    try:
+        restored = dict(restorer(project_ref, admin_url, gateway_artifact))
+    except Exception as error:
+        restore_error = error
+    try:
+        releaser(gateway_artifact)
+    except Exception as cleanup_error:
+        if restore_error is None:
+            raise RuntimeError("gateway restored but rollback worktree cleanup failed") from cleanup_error
+    if restore_error is not None:
+        raise RuntimeError("gateway restoration failed") from restore_error
+    assert restored is not None
+    return restored
+
+
 def publish_and_deploy_or_rollback(
     project_ref: str,
     values: Mapping[str, str],
@@ -769,7 +844,11 @@ def main() -> int:
     parser.add_argument("--gateway-rollback-source-sha256", required=True)
     parser.add_argument("--gateway-current-version", required=True, type=int)
     parser.add_argument("--evidence-directory", required=True, type=Path)
+    parser.add_argument("--rollback-worktree", type=Path)
+    parser.add_argument("--keep-rollback-worktree", action="store_true")
     arguments = parser.parse_args()
+    if not os.environ.get("SUPABASE_ACCESS_TOKEN", "").strip():
+        raise SystemExit("SUPABASE_ACCESS_TOKEN is required for protected Supabase mutation")
     owner_user_id = os.environ.get("DASHBOARD_OWNER_USER_ID", "").strip()
     owner_email = os.environ.get("DASHBOARD_OWNER_EMAIL", "").strip()
     service_key = os.environ.get("SUPABASE_SERVICE_ROLE_KEY", "").strip()
@@ -785,7 +864,10 @@ def main() -> int:
         )
 
     validate_release_database_endpoints(arguments.project_ref, admin_url, session_template)
-    rollback_directory = Path(tempfile.mkdtemp(prefix="stocks-gateway-rollback-")) / "checkout"
+    if arguments.keep_rollback_worktree and arguments.rollback_worktree is None:
+        raise SystemExit("--keep-rollback-worktree requires --rollback-worktree")
+    rollback_directory = (arguments.rollback_worktree if arguments.rollback_worktree is not None
+                          else Path(tempfile.mkdtemp(prefix="stocks-gateway-rollback-")) / "checkout")
     gateway_rollback = prepare_gateway_rollback_artifact(
         arguments.gateway_rollback_ref,
         arguments.gateway_rollback_source_sha256,
@@ -838,7 +920,8 @@ def main() -> int:
         rollback=rollback_release,
     )
     receipt["candidate_sha"] = git_sha
-    receipt["migrations"] = migration_receipts
+    receipt["migrations"] = migration_receipts["candidate"]
+    receipt["migration_application"] = migration_receipts
     receipt["dashboard_source"] = dashboard_source
     receipt["configuration"] = safe_configuration
     receipt["role"] = role_receipt
@@ -870,12 +953,16 @@ def main() -> int:
         raise error
     receipt["gateway_rollback_artifact"] = {
         **retained_gateway,
+        "repo_root": str(gateway_rollback["repo_root"]),
         "git_sha": gateway_rollback["commit_sha"],
         "source_sha256": gateway_rollback["source_sha256"],
         "predeployment_function_version": gateway_rollback_preflight["function_version"],
     }
+    receipt["rollback_readiness"] = gateway_rollback_preflight
+    receipt["deployment_outcome"] = "succeeded"
     print(json.dumps(receipt, sort_keys=True, separators=(",", ":")))
-    release_gateway_rollback_artifact(gateway_rollback)
+    if not arguments.keep_rollback_worktree:
+        release_gateway_rollback_artifact(gateway_rollback)
     return 0
 
 

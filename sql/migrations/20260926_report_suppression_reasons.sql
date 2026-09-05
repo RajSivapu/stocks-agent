@@ -1,9 +1,17 @@
 -- Explicit suppression provenance. Existing reasonless rows remain unverified;
 -- NOT VALID preserves history without fabricating a retrospective reason.
 ALTER TABLE public.market_report_publications ADD COLUMN IF NOT EXISTS suppression_reason TEXT;
-ALTER TABLE public.market_report_publications ADD CONSTRAINT report_suppression_reason_required
-  CHECK ((status='suppressed' AND suppression_reason IS NOT NULL AND suppression_reason IN ('no_trigger','not_actionable','REPORT_POLICY_MISMATCH'))
-         OR (status<>'suppressed' AND suppression_reason IS NULL)) NOT VALID;
+DO $$ BEGIN
+  IF NOT EXISTS (
+    SELECT 1 FROM pg_constraint
+    WHERE conrelid='public.market_report_publications'::regclass
+      AND conname='report_suppression_reason_required'
+  ) THEN
+    ALTER TABLE public.market_report_publications ADD CONSTRAINT report_suppression_reason_required
+      CHECK ((status='suppressed' AND suppression_reason IS NOT NULL AND suppression_reason IN ('no_trigger','not_actionable','REPORT_POLICY_MISMATCH'))
+             OR (status<>'suppressed' AND suppression_reason IS NULL)) NOT VALID;
+  END IF;
+END $$;
 
 DROP FUNCTION IF EXISTS public.suppress_market_report_publication(TEXT);
 CREATE OR REPLACE FUNCTION public.suppress_market_report_publication(p_idempotency_key TEXT,p_reason TEXT)

@@ -20,8 +20,10 @@ def test_protected_release_workflow_binds_a_successful_main_candidate_to_immutab
 
 def test_release_workflow_writes_authoritative_non_dry_run_and_candidate_bound_record_fields():
     workflow = Path(".github/workflows/owner-dashboard-release.yml").read_text()
-    for field in ("'candidate_sha'", "'workflow_run_id'", "'deployment_id'", "'dry_run':False", "'migrations'"):
-        assert field in workflow
+    writer = Path("scripts/write_protected_release_record.py").read_text()
+    for field in ('"candidate_sha"', '"workflow_run_id"', '"deployment_id"', '"dry_run": False', '"migrations"'):
+        assert field in writer
+    assert "write_protected_release_record.py" in workflow
     assert "candidate SHA/ref mismatch" in workflow
 
 
@@ -30,3 +32,29 @@ def test_release_workflow_pins_all_third_party_actions():
     references = re.findall(r"uses:\s+([^\s]+)@([^\s]+)", workflow)
     assert references
     assert all(re.fullmatch(r"[0-9a-f]{40}", revision) for _action, revision in references)
+
+
+def test_release_workflow_has_all_mutation_preconditions_and_pinned_tools():
+    workflow = Path(".github/workflows/owner-dashboard-release.yml").read_text()
+    assert "group: protected-owner-dashboard-release-production" in workflow
+    assert "GH_TOKEN: ${{ github.token }}" in workflow
+    assert "SUPABASE_ACCESS_TOKEN: ${{ secrets.SUPABASE_ACCESS_TOKEN }}" in workflow
+    assert 'test -n "$SUPABASE_ACCESS_TOKEN"' in workflow
+    assert "npm ci --ignore-scripts" in workflow
+    assert "requirements-test.txt" in workflow
+    assert "supabase@2.116.0" in workflow
+    assert 'git/ref/heads/main' in workflow
+    assert "actions/runs/$CI_WORKFLOW_RUN_ID" in workflow
+    assert "/pulls/$PULL_REQUEST_NUMBER" in workflow
+    assert "/reviews" in workflow
+    assert '"$CANDIDATE_SHA" = "$MAIN_SHA"' in workflow
+
+
+def test_release_workflow_retains_and_restores_rollback_source_until_evidence_is_accepted():
+    workflow = Path(".github/workflows/owner-dashboard-release.yml").read_text()
+    assert "restore_gateway_after_release_failure.py" in workflow
+    assert "trap 'restore_after_failure' ERR" in workflow
+    assert "--keep-rollback-worktree" in workflow
+    assert workflow.index("Upload immutable release record") < workflow.index("Release local rollback worktree")
+    assert "rollback_readiness" in Path("scripts/write_protected_release_record.py").read_text()
+    assert "dry-run-evidence.json" in workflow

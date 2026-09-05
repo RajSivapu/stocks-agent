@@ -106,19 +106,30 @@ def verify_artifacts(repo: Path, static_root: Path, candidate: str, record: Mapp
         if path.is_file():
             local_files[path.relative_to(static_root).as_posix()] = sha256(path.read_bytes())
     require(local_files and "index.html" in local_files and local_files == static["files"], "static artifact bytes do not match protected deployment")
-    capture, rollback = record["rollback_capture"], record["rollback"]
+    capture = record["rollback_capture"]
     captured = timestamp(capture["captured_at"])
     require(captured < deployed <= now and git_commit(repo, capture["git_sha"]) <= captured, "rollback capture is not predeployment")
     captured_files = source.artifact(capture["artifact_id"])
     captured_hash = tree_sha256(captured_files)
     require(captured_files == git_files(repo, capture["git_sha"], "supabase/functions/market-briefing-gateway")
             and captured_hash == capture["source_sha256"], "captured rollback artifact bytes mismatch")
-    gateway, runtime = rollback["gateway"], rollback["runtime_login"]
-    require(rollback["status"] == "rolled_back" and gateway["status"] == "restored" and gateway["git_sha"] == capture["git_sha"]
-            and gateway["source_sha256"] == captured_hash and type(gateway["function_version"]) is int and gateway["function_version"] > 0
-            and captured <= timestamp(rollback["gateway_restored_at"]) <= timestamp(rollback["dashboard_cleaned_at"]) < deployed
-            and runtime["login"] is False and runtime["memberships"] == 0
-            and rollback["dashboard_secrets_unset"] == ["DASHBOARD_ALLOWED_ORIGINS", "DASHBOARD_DATABASE_URL", "DASHBOARD_OWNER_USER_ID"], "gateway-first rollback evidence is incomplete")
+    outcome = record.get("deployment_outcome")
+    if outcome == "succeeded":
+        ready = record["rollback_readiness"]
+        drill = ready["isolated_drill"]
+        require(ready["status"] == "ready" and type(ready["function_version"]) is int and ready["function_version"] > 0
+                and ready["source_sha256"] == captured_hash and drill["status"] == "verified" and drill["isolated"] is True
+                and drill["source_sha256"] == captured_hash, "successful deployment rollback readiness is incomplete")
+    elif outcome == "failed":
+        rollback = record["rollback"]
+        gateway, runtime = rollback["gateway"], rollback["runtime_login"]
+        require(rollback["status"] == "rolled_back" and gateway["status"] == "restored" and gateway["git_sha"] == capture["git_sha"]
+                and gateway["source_sha256"] == captured_hash and type(gateway["function_version"]) is int and gateway["function_version"] > 0
+                and captured <= timestamp(rollback["gateway_restored_at"]) <= timestamp(rollback["dashboard_cleaned_at"]) < deployed
+                and runtime["login"] is False and runtime["memberships"] == 0
+                and rollback["dashboard_secrets_unset"] == ["DASHBOARD_ALLOWED_ORIGINS", "DASHBOARD_DATABASE_URL", "DASHBOARD_OWNER_USER_ID"], "gateway-first rollback evidence is incomplete")
+    else:
+        raise RuntimeError("deployment outcome is missing or unsafe")
 
 
 def one(rows: object, label: str) -> Mapping:
@@ -218,8 +229,15 @@ def verify_release(source: ReleaseDataSource, *, deployment_id: int, repo_root: 
         verify_artifacts(repo_root, static_root, candidate, record, source, now, deployed)
         require(record.get("dry_run") is False, "protected deployment dry-run authority must be false")
         dry = record["dry_run_evidence"]
-        require(isinstance(dry["table_deltas"], Mapping) and dry["table_deltas"] and all(type(value) is int and value == 0 for value in dry["table_deltas"].values())
-                and dry["telegram_message_ids"] == [] and dry["message_id_delta"] == 0, "protected dry-run side-effect evidence is incomplete")
+        before, after = dry["before"], dry["after"]
+        require(isinstance(before, Mapping) and isinstance(after, Mapping) and before["tables"] == after["tables"]
+                and isinstance(dry["table_deltas"], Mapping) and set(dry["table_deltas"]) == set(before["tables"])
+                and all(type(value) is int and value == 0 for value in dry["table_deltas"].values())
+                and type(dry["safe_command_exit_code"]) is int and dry["safe_command_exit_code"] == 0
+                and isinstance(dry["safe_command_sha256"], str) and re.fullmatch(r"[0-9a-f]{64}", dry["safe_command_sha256"])
+                and all(isinstance(value, Mapping) and type(value.get("count")) is int and isinstance(value.get("ids"), list)
+                        and isinstance(value.get("sha256"), str) and re.fullmatch(r"[0-9a-f]{64}", value["sha256"])
+                        for value in before["tables"].values()), "protected dry-run side-effect evidence is incomplete")
         require(record["canaries"] == {"owner": 200, "anonymous": 401, "non_owner": 403}, "protected owner/denial canaries are incomplete")
         run_id = source.scheduled_run(record["deployed_at"])
         chain = verify_scheduled(source.release_rows(run_id), run_id, deployed, now)

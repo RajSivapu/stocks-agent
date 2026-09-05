@@ -60,3 +60,17 @@ Residual risk: deployment receipt collection must still populate the authoritati
 
 - `.venv/bin/python -m pytest -q tests/test_deploy_owner_dashboard_api.py tests/test_owner_dashboard_release_workflow.py tests/test_verify_personal_stock_agent_v1.py tests/test_verify_owner_dashboard_deployment.py` — `90 passed in 10.63s`.
 - No workflow, deployment, database migration, scheduled run, recovery drill, Telegram send, provider/model call, brokerage action, or full suite was invoked.
+
+## Controller acceptance remediation round 4 — 2026-09-05
+
+- Hardened the protected release workflow before mutation: it exports `GH_TOKEN`, requires the protected `SUPABASE_ACCESS_TOKEN`, installs the pinned Node/Python verification dependencies, and resolves the pinned Supabase CLI before it can create a Deployment.
+- Dispatch inputs are only hints. The workflow queries GitHub for the current `main` ref, exact successful CI run/path, merged main PR, and exact SHA review before creating the production-wide-concurrent deployment.
+- Successful releases now carry predeployment gateway capture plus isolated rollback-readiness evidence instead of pretending a successful production deployment was rolled back. Failed releases retain the existing `rolled_back` restore/cleanup receipt path.
+- Kept the verified rollback worktree until release-record artifact upload and success status complete. Any subsequent failure invokes the dedicated restoration command before posting failure status; Python restoration runs before cleanup, even if cleanup then fails.
+- Added a transactional migration hash ledger. Candidate migrations are rehashed, prior ledger rows must match exactly, pending DDL and its immutable ledger row share one transaction, and receipts separate complete candidate/applied/skipped sets. `20260926` now guards its named constraint for replay safety.
+- Replaced hard-coded dry-run claims with separate restricted-reader before/after snapshots around a safe non-scheduling `evaluate_alert_rules --dry-run` command. The canonical record retains queried IDs, counts, hashes, command hash, and zero deltas.
+
+### Final local evidence
+
+- Focused release/recovery contracts: `.venv/bin/python -m pytest -q tests/test_deploy_owner_dashboard_api.py tests/test_owner_dashboard_release_workflow.py tests/test_verify_personal_stock_agent_v1.py tests/test_verify_owner_dashboard_deployment.py` — `94 passed in 9.60s`.
+- No workflow, deployment, database migration, scheduled run, recovery drill, Telegram send, provider/model call, brokerage action, or full suite was invoked.

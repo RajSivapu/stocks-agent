@@ -121,6 +121,26 @@ class PostgresReadOnlySource:
         self.identity()
         return {name: self.query(f"SELECT count(*) AS count FROM ({sql}) AS records")[0]["count"] for name, sql in RECOVERY_SQL.items()}
 
+    def dry_run_snapshot(self) -> dict:
+        """Bound, fixed read-only proof surrounding a safe dry-run command."""
+        self.identity()
+        queries = {
+            "scheduled_runs": "SELECT id::text AS id FROM public.analysis_runs WHERE scheduled_phase IS NOT NULL ORDER BY id",
+            "transactions": "SELECT id::text AS id FROM public.transactions ORDER BY id",
+            "market_publications": "SELECT id::text AS id FROM public.market_publications ORDER BY id",
+            "telegram_publications": "SELECT report_id::text AS id FROM public.market_report_publications WHERE telegram_accepted_at IS NOT NULL ORDER BY report_id",
+        }
+        tables = {}
+        for name, sql in queries.items():
+            rows = self.query(sql)
+            ids = [row["id"] for row in rows]
+            require(all(isinstance(value, str) for value in ids), "dry-run queried IDs are malformed")
+            tables[name] = {
+                "count": len(ids), "ids": ids,
+                "sha256": hashlib.sha256(json.dumps(ids, separators=(",", ":")).encode()).hexdigest(),
+            }
+        return {"source": self.identity(), "tables": tables}
+
     def release_rows(self, run_id: str) -> dict:
         require(bool(re.fullmatch(r"[0-9a-f-]{36}", run_id)), "run UUID is required")
         parameter = (run_id,)
