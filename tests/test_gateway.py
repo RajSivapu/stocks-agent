@@ -143,6 +143,24 @@ def test_call_generates_uuid_and_passes_run_identity(monkeypatch):
     assert captured["run_id"] == RUN_ID
 
 
+def test_checkpoint_collection_is_an_allowlisted_run_scoped_operation(monkeypatch):
+    configured(monkeypatch)
+    captured = {}
+
+    def opener(request, **_kwargs):
+        captured.update(json.loads(request.data))
+        return FakeResponse({"ok": True, "data": {"run_id": RUN_ID, "cache_key": "a" * 64}})
+
+    gateway.call(
+        "checkpoint_intelligence_collection",
+        {"cache_key": "a" * 64, "receipt": {}, "items": []},
+        run_id=RUN_ID, request_id=REQUEST_ID, _opener=opener,
+    )
+
+    assert captured["operation"] == "checkpoint_intelligence_collection"
+    assert captured["run_id"] == RUN_ID
+
+
 def test_alert_evaluation_is_allowlisted_and_standalone(monkeypatch):
     configured(monkeypatch)
     captured = {}

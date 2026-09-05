@@ -33,6 +33,10 @@ MAX_OUTPUT_BYTES = 96 * 1024
 _OUTPUT_PACKET_BYTES = 72 * 1024
 
 
+class _CheckpointFailure(RuntimeError):
+    pass
+
+
 class Coverage(dict[str, object]):
     @property
     def mode(self) -> str:
@@ -344,10 +348,13 @@ class IntelligencePipeline:
                 )
                 if result.receipt.request_cost > 0:
                     result = replace(result, receipt=replace(result.receipt, source_receipt_id=source_receipt_id))
-                    self._checkpoint(
-                        request.request_id, _collection_cache_key(adapter, query), result
-                    )
+                    try:
+                        self._checkpoint(request.request_id, _collection_cache_key(adapter, query), result)
+                    except Exception as exc:
+                        raise _CheckpointFailure("durable checkpoint failed") from exc
                     self.cache.put_collection(_collection_cache_key(adapter, query), result)
+            except _CheckpointFailure:
+                raise
             except Exception as exc:
                 result = CollectionResult(
                     (),
@@ -783,15 +790,22 @@ def _discover(
             ticker = item.security_ids[0]
         if not ticker:
             continue
+        # Score a claim from independently retained publisher/provider pairs, not one label.
+        supporting = tuple(
+            other for other in items
+            if (str(other.metadata.get("ticker") or other.metadata.get("symbol") or "").upper()
+                or (other.security_ids[0] if other.security_ids else "")) == ticker
+            and other.title == item.title
+        )
         event = build_market_event(
             event_type="provider_event", title=item.title, summary=item.summary,
             materiality=item.metadata.get("materiality", "0.5"),
-            confidence=item.metadata.get("confidence", "0.5"), evidence=(item,),
+            confidence=item.metadata.get("confidence", "0.5"), evidence=supporting,
             theme_ids=(str(item.metadata.get("theme_id") or "dynamic_provider_event"),),
             occurred_at=item.published_at, effective_at=item.effective_at,
         )
         relation = propose_relation(event, ticker=ticker,
-                                    role=str(item.metadata.get("role") or "exposure"), evidence=(item,))
+                                    role=str(item.metadata.get("role") or "exposure"), evidence=supporting)
         events.append(event)
         relations.append(relation)
         observed_at = item.published_at or item.retrieved_at
@@ -804,7 +818,7 @@ def _discover(
         )
         overlap = _overlap_score(context, ticker, holding_weight)
         candidates.append(CandidateInput(
-            ticker=ticker, event=event, relation=relation, evidence=(item,),
+            ticker=ticker, event=event, relation=relation, evidence=supporting,
             authority_corroboration=_authority_score(relation.evidence),
             exposure_strength=(Decimal(len(relation.exposure_evidence)) / Decimal(len(relation.evidence))
                                if relation.evidence else None),
@@ -896,13 +910,11 @@ def _authority_score(items: Sequence[SourceItem]) -> Decimal | None:
 
 
 def _overlap_score(
-    context: Mapping[str, object], ticker: str, holding_weight: Decimal | None
+    context: Mapping[str, object], ticker: str, _holding_weight: Decimal | None
 ) -> Decimal | None:
     values = context.get("overlap_by_ticker")
     if isinstance(values, Mapping):
         raw = values.get(ticker)
-    elif holding_weight is not None:
-        raw = holding_weight
     else:
         return None
     try:

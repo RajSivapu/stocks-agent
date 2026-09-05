@@ -235,7 +235,7 @@ Deno.test("gateway envelope accepts the bounded standalone alert evaluation oper
   );
 });
 
-Deno.test("gateway envelope accepts only the two scoped intelligence persistence operations", () => {
+Deno.test("gateway envelope accepts scoped intelligence controller operations", () => {
   const start = {
     ...validEnvelope(),
     operation: "start_intelligence_run",
@@ -252,6 +252,12 @@ Deno.test("gateway envelope accepts only the two scoped intelligence persistence
     },
   };
   assertEquals(parseGatewayEnvelope(start).operation, "start_intelligence_run");
+  const checkpoint = {
+    ...validEnvelope(),
+    operation: "checkpoint_intelligence_collection",
+    payload: { cache_key: "a".repeat(64), receipt: {}, items: [] },
+  };
+  assertEquals(parseGatewayEnvelope(checkpoint).operation, "checkpoint_intelligence_collection");
 });
 
 Deno.test("gateway envelope rejects unknown and extra authority fields", () => {

@@ -4179,6 +4179,17 @@ BEGIN
 END; $$;
 REVOKE ALL ON FUNCTION public.record_market_intelligence(UUID,UUID,JSONB) FROM PUBLIC,anon,authenticated;
 GRANT EXECUTE ON FUNCTION public.record_market_intelligence(UUID,UUID,JSONB) TO service_role;
+
+
+-- 20260919 replacement history and analysis-run binding.
+CREATE TABLE IF NOT EXISTS public.market_collection_checkpoint_history (
+  run_id UUID NOT NULL REFERENCES public.market_intelligence_runs(id) ON DELETE RESTRICT,
+  cache_key TEXT NOT NULL, source_receipt_id UUID NOT NULL,
+  payload JSONB NOT NULL CHECK(jsonb_typeof(payload)='object' AND octet_length(payload::text)<=65536),
+  replaced_at TIMESTAMPTZ NOT NULL DEFAULT statement_timestamp(), PRIMARY KEY(run_id,cache_key,source_receipt_id)
+);
+ALTER TABLE public.market_collection_checkpoint_history ENABLE ROW LEVEL SECURITY;
+REVOKE ALL ON public.market_collection_checkpoint_history FROM PUBLIC,anon,authenticated;
 GRANT EXECUTE ON FUNCTION public.read_market_evidence_packet(UUID, UUID) TO service_role;
 GRANT EXECUTE ON FUNCTION public.read_market_report_decisions(UUID, UUID, JSONB) TO service_role;
 GRANT EXECUTE ON FUNCTION public.record_market_report(UUID, TEXT, JSONB) TO service_role;

@@ -105,6 +105,7 @@ def test_http_follows_an_approved_https_redirect():
 
     assert result.body == b'{"ok":true}'
     assert result.url == "https://data.example.gov/feed"
+    assert result.attempt_count == 2
     assert opener.requests == [
         ("https://api.gdeltproject.org/start", 3, ()),
         ("https://data.example.gov/feed", 3, ()),

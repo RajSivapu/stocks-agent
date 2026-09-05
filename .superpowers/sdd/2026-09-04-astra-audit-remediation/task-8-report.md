@@ -80,3 +80,16 @@
 - One focused Task 8 gate (five collector/ranking files plus migration structure) — 121 Python tests passed.
 - Gateway contract/controller subset — 66 Deno tests passed.
 - No live provider, database, scheduled job, Telegram, deployment, or full suite was run.
+
+## Controller remediation round 3
+
+- Added the runtime/controller operation allowlist and envelope regression for
+  `checkpoint_intelligence_collection`.
+- Removed the production overlap fallback: overlap is now unavailable unless its validated map is
+  supplied. Secondary-source corroboration is grouped by claim/ticker before ranking, while a lone
+  secondary remains insufficient.
+- Transport now records each explicit redirect/open attempt, charges prevalidated actual attempts,
+  and preserves a nonzero failed-request cost after an outbound failure. Checkpoint persistence
+  failures abort collection rather than fabricating a zero-cost failed receipt.
+- Added additive 20260919 SQL controller work: running `analysis_runs` binding, replacement
+  checkpoint history after expiry, and idempotent same-payload behavior.

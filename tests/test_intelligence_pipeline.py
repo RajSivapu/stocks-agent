@@ -276,6 +276,7 @@ def test_near_corroboration_reaches_discovery_and_packet_evidence():
 
     result = IntelligencePipeline(gateway, [adapter], context={
         "holdings": {"TEST": "0.10"}, "liquidity_by_ticker": {"TEST": "0.75"},
+        "overlap_by_ticker": {"TEST": "0.10"},
     }).run(
         request("intraday")
     )

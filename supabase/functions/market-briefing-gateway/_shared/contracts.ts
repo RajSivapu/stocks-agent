@@ -632,6 +632,7 @@ const OPERATIONS: readonly Operation[] = [
   "evaluate_alert_rules",
   "finish_run",
   "start_intelligence_run",
+  "checkpoint_intelligence_collection",
   "record_intelligence",
   "record_report",
   "record_learning",

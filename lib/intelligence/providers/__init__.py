@@ -272,10 +272,17 @@ class SourceAdapter(ABC):
             json.dumps(dict(requested_window), separators=(",", ":"), sort_keys=True),
             1,
         )
+        # The pre-open validation is deliberately before quota admission: zero transport attempts cost zero.
+        validate_request = getattr(self.http, "validate_request", None)
+        if callable(validate_request):
+            validate_request(request)
         reservation_id = self.quota.consume_next(self.provider)
         response: HttpResult | None = None
         try:
             response = self.http.get(request)
+            attempts = int(getattr(response, "attempt_count", 1))
+            for _ in range(max(0, attempts - 1)):
+                self.quota.consume_next(self.provider)
             payload = json.loads(
                 response.body,
                 parse_constant=lambda _value: (_ for _ in ()).throw(ValueError()),
@@ -308,7 +315,7 @@ class SourceAdapter(ABC):
                 retrieved_at=response.retrieved_at,
                 observed_at=response.observed_at,
                 expires_at=response.retrieved_at + _CACHE_TTL,
-                request_cost=0 if response.cache_hit else 1,
+                request_cost=0 if response.cache_hit else attempts,
                 upstream_remaining=None,
                 returned_count=len(records),
                 accepted_count=len(items),
@@ -329,7 +336,7 @@ class SourceAdapter(ABC):
                 retrieved_at=response.retrieved_at if response is not None else _utc(self.clock()),
                 observed_at=response.observed_at if response is not None else None,
                 expires_at=None,
-                request_cost=0 if cached_failure else 1,
+                request_cost=0 if cached_failure else int(getattr(self.http, "last_attempt_count", 1)),
                 upstream_remaining=None,
                 returned_count=0,
                 accepted_count=0,
