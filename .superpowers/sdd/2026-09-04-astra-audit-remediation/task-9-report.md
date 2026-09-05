@@ -34,3 +34,12 @@ Controller remediation commit: `fix: close scheduled lifecycle receipt gaps`.
 - Context preserves bounded unresolved rows before completed history and orders equal-date history by durable ID descending.
 - RED: the disposable fresh/ordered PostgreSQL regression first exposed fresh-schema retry rows not being bound, then exposed the migration overdue query's stale `d` alias.
 - GREEN: focused Deno repository/handler tests passed `52`; deployment/migration verifier tests passed `81`; disposable fresh/ordered PostgreSQL scheduled-lifecycle tests passed `4` (with `13` intentionally deselected); `git diff --check` passed.
+
+## Controller remediation round two
+
+- Added ordered migration `20260924_scheduled_lifecycle_followup.sql`; it preserves prior schedule rows and versions deadlines by `(phase, effective_on)`.
+- A scheduled report is now linked through the completed `record_report` response's report UUID and hashes, because that request intentionally stores no `run_id`. The matching report and its report-publication receipt must use a phase-allowed report kind.
+- Unresolved suggestions use a 101-row overflow probe and fail closed rather than silently dropping the 101st pending row.
+- The overdue reader selects the latest effective schedule per phase/date, validates the active calendar year and holiday array shape, and excludes actual configured holidays.
+- RED: the new focused cases failed for silent unresolved truncation, single-row schedule keys, and the null-run report receipt contract.
+- GREEN: focused Deno repository/handler tests passed `53`; deployment/migration verifier tests passed `81`; fresh/ordered disposable PostgreSQL scheduled tests passed `4` (with `13` intentionally deselected); `git diff --check` passed.

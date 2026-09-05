@@ -103,6 +103,25 @@ Deno.test("newer completed history cannot displace unresolved suggestion context
   assertEquals(selected.map((row) => row.ticker), ["PENDING"]);
 });
 
+Deno.test("unresolved suggestion overflow fails closed instead of dropping pending state", () => {
+  let error: unknown = null;
+  try {
+    mergeRelevantSuggestions(
+      Array.from({ length: 101 }, (_, id) => ({
+        id,
+        date: "2026-09-01",
+        ticker: `PENDING${id}`,
+      })),
+      [],
+      100,
+    );
+  } catch (caught) {
+    error = caught;
+  }
+  assert(error instanceof GatewayRepositoryError, "overflow must reject context");
+  assertEquals((error as GatewayRepositoryError).code, "CONTEXT_TOO_LARGE");
+});
+
 function rejects(value: unknown): boolean {
   try {
     validatePolicy(value);

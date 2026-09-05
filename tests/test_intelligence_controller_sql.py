@@ -315,6 +315,28 @@ def test_scheduled_lifecycle_uses_one_slot_run_binds_retries_and_keeps_prior_ove
     assert ("2026-09-07", "intraday", datetime(2026, 9, 7, 12, 15)) in overdue
     assert ("2026-09-07", "post-market", datetime(2026, 9, 7, 15, 25)) in overdue
     assert ("2026-09-08", "intraday", datetime(2026, 9, 8, 12, 15)) in overdue
+    db.execute(
+        "INSERT INTO market_scheduled_phase_deadlines(phase,deadline_local,grace_minutes,effective_on) "
+        "VALUES('intraday','12:30',15,'2026-09-08')"
+    )
+    versioned = db.execute(
+        "SELECT market_date::text, deadline_at AT TIME ZONE 'America/Chicago' "
+        "FROM public.read_overdue_scheduled_market_phases('2026-09-08 23:00:00-05') "
+        "WHERE phase='intraday' ORDER BY market_date"
+    ).fetchall()
+    assert versioned == [
+        ("2026-09-07", datetime(2026, 9, 7, 12, 15)),
+        ("2026-09-08", datetime(2026, 9, 8, 12, 45)),
+    ]
+    policy["nyse_holidays"] = ["2026-09-07"]
+    db.execute("UPDATE market_policy_config SET config=%s WHERE version=1", (Jsonb(policy),))
+    assert all(row[0] != "2026-09-07" for row in db.execute(
+        "SELECT market_date::text FROM public.read_overdue_scheduled_market_phases('2026-09-08 23:00:00-05')"
+    ).fetchall())
+    policy["nyse_holidays"] = {"not": "a calendar"}
+    db.execute("UPDATE market_policy_config SET config=%s WHERE version=1", (Jsonb(policy),))
+    with pytest.raises(psycopg.errors.InvalidParameterValue, match="calendar coverage missing"):
+        db.execute("SELECT * FROM public.read_overdue_scheduled_market_phases('2026-09-08 23:00:00-05')")
 
 
 @pytest.mark.parametrize("kind", ["fresh", "ordered"])
@@ -353,10 +375,6 @@ def test_scheduled_finish_requires_successful_date_bound_receipt_chain(databases
     with pytest.raises(psycopg.errors.InvalidParameterValue, match="MISSING_REPORT_RECEIPT"):
         db.execute("SELECT public.finish_market_analysis_run(%s)", (run,))
     report_request, report_id = uuid.uuid4(), uuid.uuid4()
-    db.execute(
-        "INSERT INTO market_gateway_requests(request_id,operation,run_id,status,lease_token) VALUES(%s,'record_report',%s,'completed',%s)",
-        (report_request, run, uuid.uuid4()),
-    )
     packet_id = db.execute("SELECT id FROM market_evidence_packets WHERE run_id=%s", (run,)).fetchone()[0]
     db.execute(
         "INSERT INTO market_reports(id,idempotency_key,run_id,packet_id,market_date,kind,report,report_hash,rendered_text,rendered_hash) "
@@ -365,11 +383,31 @@ def test_scheduled_finish_requires_successful_date_bound_receipt_chain(databases
     )
     with pytest.raises(psycopg.errors.InvalidParameterValue, match="MISSING_REPORT_RECEIPT"):
         db.execute("SELECT public.finish_market_analysis_run(%s)", (run,))
+    db.execute(
+        "INSERT INTO market_gateway_requests(request_id,operation,status,lease_token,response) VALUES(%s,'record_report','completed',%s,%s)",
+        (report_request, uuid.uuid4(), Jsonb({"ok": True, "report_id": str(report_id), "report_hash": "c" * 64, "rendered_hash": "d" * 64})),
+    )
+    wrong_kind_report_id = uuid.uuid4()
+    db.execute(
+        "INSERT INTO market_reports(id,idempotency_key,run_id,packet_id,market_date,kind,report,report_hash,rendered_text,rendered_hash) "
+        "VALUES(%s,repeat('f',64),%s,%s,%s,'morning','{}',repeat('c',64),'suppressed',repeat('d',64))",
+        (wrong_kind_report_id, run, packet_id, market_date),
+    )
+    db.execute(
+        "INSERT INTO market_gateway_requests(request_id,operation,status,lease_token,response) VALUES(%s,'record_report','completed',%s,%s)",
+        (uuid.uuid4(), uuid.uuid4(), Jsonb({"ok": True, "report_id": str(wrong_kind_report_id), "report_hash": "c" * 64, "rendered_hash": "d" * 64})),
+    )
+    with pytest.raises(psycopg.errors.InvalidParameterValue, match="MISSING_REPORT_RECEIPT"):
+        db.execute("SELECT public.finish_market_analysis_run(%s)", (run,))
     correct_report_id = uuid.uuid4()
     db.execute(
         "INSERT INTO market_reports(id,idempotency_key,run_id,packet_id,market_date,kind,report,report_hash,rendered_text,rendered_hash) "
-        "VALUES(%s,repeat('f',64),%s,%s,%s,'intraday','{}',repeat('c',64),'suppressed',repeat('d',64))",
+        "VALUES(%s,repeat('1',64),%s,%s,%s,'intraday','{}',repeat('c',64),'suppressed',repeat('d',64))",
         (correct_report_id, run, packet_id, market_date),
+    )
+    db.execute(
+        "INSERT INTO market_gateway_requests(request_id,operation,status,lease_token,response) VALUES(%s,'record_report','completed',%s,%s)",
+        (uuid.uuid4(), uuid.uuid4(), Jsonb({"ok": True, "report_id": str(correct_report_id), "report_hash": "c" * 64, "rendered_hash": "d" * 64})),
     )
 
     with pytest.raises(psycopg.errors.InvalidParameterValue, match="MISSING_PUBLICATION_RECEIPT"):

@@ -486,6 +486,9 @@ export function mergeRelevantSuggestions<T extends Record<string, unknown>>(
   if (!Number.isSafeInteger(limit) || limit < 1) {
     throw new GatewayRepositoryError("CONTEXT_TOO_LARGE");
   }
+  if (unresolved.length > limit) {
+    throw new GatewayRepositoryError("CONTEXT_TOO_LARGE");
+  }
   const output: T[] = [];
   const seen = new Set<string>();
   const orderByNewestDateAndId = (left: T, right: T): number => {
@@ -1120,7 +1123,7 @@ export function createSupabaseGatewayRepository(
         ).eq("decision_source", "gateway")
           .or(`valid_until.is.null,valid_until.gte.${today}`)
           .order("date", { ascending: false }).order("id", { ascending: false })
-          .limit(100),
+          .limit(101),
         client.from("suggestions").select(
           "id,date,ticker,action,bucket,confidence,score,stop,target,invalidation_price,valid_until,evidence_as_of",
         ).eq("decision_source", "gateway").lt("valid_until", today)
