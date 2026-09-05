@@ -4,7 +4,11 @@ import yaml
 
 
 def test_protected_release_and_recovery_are_valid_workflow_yaml():
-    for name in ("owner-dashboard-release.yml", "owner-dashboard-release-recovery.yml"):
+    for name in (
+        "owner-dashboard-ci.yml",
+        "owner-dashboard-release.yml",
+        "owner-dashboard-release-recovery.yml",
+    ):
         workflow = yaml.safe_load((Path(".github/workflows") / name).read_text())
         assert workflow["jobs"]
 
