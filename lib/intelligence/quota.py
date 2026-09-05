@@ -104,3 +104,9 @@ class QuotaSession:
                 self.consume(provider, reservation.reservation_id)
                 return reservation.reservation_id
         raise QuotaExceeded(provider)
+
+    def next_reservation_id(self, provider: str) -> str:
+        for reservation in self._available.get(provider, ()):
+            if self._consumed[reservation.reservation_id] < reservation.reserved_requests:
+                return reservation.reservation_id
+        raise QuotaExceeded(provider)

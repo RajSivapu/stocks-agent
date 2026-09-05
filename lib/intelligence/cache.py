@@ -52,7 +52,7 @@ class ResumableCollectionCache:
         return MappingProxyType(result)
 
     def put_collection(self, key: str, result: CollectionResult) -> None:
-        if result.receipt.status not in {"succeeded", "cache_hit"}:
+        if result.receipt.status not in {"succeeded", "cache_hit", "failed"}:
             return
         self._collections[key] = result
 
@@ -65,7 +65,7 @@ class ResumableCollectionCache:
             if not isinstance(key, str) or not key or not isinstance(receipt_row, Mapping) or not isinstance(items_row, list):
                 raise ValueError("invalid persisted collection checkpoint")
             receipt = _receipt_from_checkpoint(receipt_row)
-            if receipt.status != "succeeded" or receipt.expires_at is None or receipt.expires_at <= now.astimezone(timezone.utc):
+            if receipt.status == "succeeded" and (receipt.expires_at is None or receipt.expires_at <= now.astimezone(timezone.utc)):
                 continue
             items = tuple(_item_from_checkpoint(value) for value in items_row)
             self._collections[key] = CollectionResult(items, receipt, receipt.requested_limit)
@@ -76,12 +76,17 @@ class ResumableCollectionCache:
         result = self._collections.get(key)
         if result is None:
             return None
-        if result.receipt.expires_at is None or result.receipt.expires_at <= now.astimezone(timezone.utc):
+        if result.receipt.status == "succeeded" and (result.receipt.expires_at is None or result.receipt.expires_at <= now.astimezone(timezone.utc)):
             self._collections.pop(key, None)
             return None
         predecessor = result.receipt.source_receipt_id
         if not predecessor:
             raise ValueError("cached collection is missing its persisted source receipt")
+        if result.receipt.status == "failed":
+            return replace(result, receipt=replace(
+                result.receipt, reservation_id=reservation_id, request_cost=0,
+                source_receipt_id=source_receipt_id,
+            ))
         receipt = replace(
             result.receipt, reservation_id=reservation_id, status="cache_hit", request_cost=0,
             source_receipt_id=source_receipt_id, cache_predecessor_receipt_id=predecessor,

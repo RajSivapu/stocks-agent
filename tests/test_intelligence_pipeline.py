@@ -393,6 +393,18 @@ class PersistedCheckpointGateway(FakeGateway):
         self.payloads.append(payload)
         if self.fail_final:
             raise RuntimeError("final packet write interrupted")
+        # Model the terminal RPC's exact durable lineage rule: a resumed cache
+        # receipt may stand in for its checkpoint only through that checkpoint's
+        # original source receipt, never by inventing a source-receipt FK.
+        originals = {
+            entry["receipt"]["source_receipt_id"]
+            for entry in self.state.get("checkpoints", [])
+        }
+        for receipt in payload["receipts"]:
+            assert receipt["id"] in originals or (
+                receipt["status"] == "cache_hit"
+                and receipt["cache_predecessor_receipt_id"] in originals
+            )
         return super().record_intelligence(run_id, payload)
 
 
@@ -414,6 +426,10 @@ def test_restart_hydrates_durable_checkpoints_after_final_packet_failure():
     assert result.cache_hits == len(SEED_THEMES)
     assert state["window"]["timezone"] == "America/Chicago"
     assert second_gateway.payloads[0]["request_window"] == state["window"]
+    assert all(receipt["status"] == "cache_hit" for receipt in second_gateway.payloads[-1]["receipts"])
+    assert {
+        receipt["cache_predecessor_receipt_id"] for receipt in second_gateway.payloads[-1]["receipts"]
+    } == {entry["receipt"]["source_receipt_id"] for entry in state["checkpoints"]}
 
 
 def test_production_discovery_vetoes_a_42_percent_holding_from_gateway_context():

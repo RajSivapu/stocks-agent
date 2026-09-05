@@ -93,3 +93,55 @@
   failures abort collection rather than fabricating a zero-cost failed receipt.
 - Added additive 20260919 SQL controller work: running `analysis_runs` binding, replacement
   checkpoint history after expiry, and idempotent same-payload behavior.
+
+### Round 3 commit and focused gate
+
+- Commit: `99fe27f` (`fix: account durable collection attempts`).
+- Changed deployed/fresh-schema SQL artifacts: `sql/migrations/20260919_controller_lineage_and_run_binding.sql`
+  and `sql/schema.sql`; the migration adds checkpoint replacement history and the controller's
+  running-analysis-run guard.
+- Python gate: `.venv/bin/python -m pytest -q tests/test_gateway.py tests/test_intelligence_http.py
+  tests/test_intelligence_providers.py tests/test_intelligence_quota.py tests/test_intelligence_pipeline.py
+  tests/test_intelligence_ranking.py tests/test_collect_market_intelligence.py
+  tests/test_verify_market_intelligence_migration.py` — **197 passed**.
+- Deno gate: `npx --yes deno@2.9.6 test --config supabase/functions/deno.json
+  supabase/functions/market-briefing-gateway/_shared/contracts_test.ts
+  supabase/functions/market-briefing-gateway/_shared/handler_test.ts` — **63 passed**.
+
+### Round 3 residual risks
+
+- These are local contract, fake-gateway, and structural SQL checks only. No live provider,
+  database migration, scheduled run, Telegram action, deployment, or full suite was performed.
+- Production must apply the ordered additive migrations and validate the protected database path;
+  a local schema/string check is not deployment proof.
+- The read-context path remains fail-closed when current portfolio valuation, liquidity, or overlap
+  evidence is unavailable; live authoritative source population remains a protected integration gate.
+
+## Controller remediation round 4
+
+- Added the `20260920_terminal_checkpoint_lineage.sql` additive controller override. Terminal
+  cache-hit provenance is validated against durable active/history checkpoints, then recorded in
+  `market_checkpoint_receipt_lineage`; it no longer requires a predecessor row to have already
+  been inserted into `market_source_receipts`.
+- The final controller checks both the bound running `analysis_runs` row and the open intelligence
+  event stream. Checkpoints preserve failed actual outcomes, and expired or failed checkpoints are
+  safely replaced into history while same-payload writes remain idempotent.
+- Each bounded HTTP open, including every explicit redirect, calls quota admission before transport.
+  A quota exhaustion therefore prevents the next open, while a failure after an open retains the
+  actual attempt count. Fresh schema controller definitions now finish with the same 20260920
+  lineage, start, and checkpoint guards.
+
+### Round 4 verification
+
+- Python focused Task 8 gate: `.venv/bin/python -m pytest -q tests/test_gateway.py
+  tests/test_intelligence_http.py tests/test_intelligence_providers.py tests/test_intelligence_quota.py
+  tests/test_intelligence_pipeline.py tests/test_intelligence_ranking.py
+  tests/test_collect_market_intelligence.py tests/test_verify_market_intelligence_migration.py`
+  — **199 passed**.
+- Deno gateway contract/handler gate: `npx --yes deno@2.9.6 test --config
+  supabase/functions/deno.json supabase/functions/market-briefing-gateway/_shared/contracts_test.ts
+  supabase/functions/market-briefing-gateway/_shared/handler_test.ts` — **63 passed**.
+- Changed SQL artifacts: `sql/migrations/20260920_terminal_checkpoint_lineage.sql` and
+  `sql/schema.sql`. No live provider, database, scheduled run, Telegram, deployment, or full suite
+  was run; applying and exercising the ordered migrations in the protected database path remains
+  the residual integration risk.

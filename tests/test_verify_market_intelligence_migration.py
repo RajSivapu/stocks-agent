@@ -18,6 +18,8 @@ MIGRATION = ROOT / "sql" / "migrations" / "20260907_market_intelligence.sql"
 PROVENANCE_MIGRATION = ROOT / "sql" / "migrations" / "20260914_provider_evidence_integrity.sql"
 REUSE_MIGRATION = ROOT / "sql" / "migrations" / "20260915_market_source_item_reuse.sql"
 RUN_PROVENANCE_MIGRATION = ROOT / "sql" / "migrations" / "20260916_run_scoped_request_provenance.sql"
+CONTROLLER_MIGRATION = ROOT / "sql" / "migrations" / "20260919_controller_lineage_and_run_binding.sql"
+TERMINAL_LINEAGE_MIGRATION = ROOT / "sql" / "migrations" / "20260920_terminal_checkpoint_lineage.sql"
 SCHEMA = ROOT / "sql" / "schema.sql"
 VERIFIER = ROOT / "scripts" / "verify_market_intelligence_migration.py"
 TRANSACTION_CHRONOLOGY = ROOT / "sql" / "migrations" / "20260909_transaction_chronology.sql"
@@ -355,6 +357,25 @@ def test_request_windows_are_run_scoped_and_secret_free():
     assert "UNIQUE(run_id, source_item_id, source_receipt_id)" in migration
     assert "api[_-]?key|token|secret|password" in migration
     assert "canonical_url IS DISTINCT FROM NEW.canonical_url" not in migration
+
+
+def test_latest_controller_migrations_keep_restart_lineage_outside_uninserted_receipt_fk():
+    controller = CONTROLLER_MIGRATION.read_text()
+    terminal = TERMINAL_LINEAGE_MIGRATION.read_text()
+    schema = SCHEMA.read_text()
+
+    for sql in (terminal, schema):
+        assert "market_checkpoint_receipt_lineage" in sql
+        assert "cache predecessor checkpoint unavailable" in sql
+        assert "market_collection_checkpoint_history" in sql
+        assert "checkpoint must record an actual request outcome" in sql
+        assert "analysis_runs WHERE id=p_run_id AND status='running'" in sql
+        assert "cache_hit" in sql and "request_cost" in sql
+    assert "market_collection_checkpoint_history" in controller
+    assert "checkpoint idempotency mismatch" in controller
+    assert terminal.index("market_checkpoint_receipt_lineage") < terminal.index(
+        "CREATE OR REPLACE FUNCTION public.record_market_intelligence"
+    )
 
 
 def test_fresh_schema_orders_provider_validator_before_final_run_wrapper_without_recursion():

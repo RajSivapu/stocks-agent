@@ -152,13 +152,15 @@ class BoundedHttpClient:
         self._future_tolerance = future_tolerance
         self.last_attempt_count = 0
 
-    def get(self, request: HttpRequest) -> HttpResult:
+    def get(self, request: HttpRequest, *, before_attempt: Callable[[], None] | None = None) -> HttpResult:
         current_url = request.url
         current_headers = dict(request.headers or {})
         self.last_attempt_count = 0
         for redirect_count in range(_MAX_REDIRECTS + 1):
             self._validate_url(current_url)
             try:
+                if before_attempt is not None:
+                    before_attempt()
                 self.last_attempt_count += 1
                 response = self._open(
                     current_url,

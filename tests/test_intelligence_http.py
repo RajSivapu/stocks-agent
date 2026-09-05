@@ -112,6 +112,23 @@ def test_http_follows_an_approved_https_redirect():
     ]
 
 
+def test_http_admits_each_open_before_it_reaches_transport():
+    opener = FakeOpener(
+        FakeResponse(status=302, headers={"Location": "https://data.example.gov/feed"}),
+        FakeResponse(body=b'{"ok":true}', url="https://data.example.gov/feed"),
+    )
+    admitted: list[int] = []
+    result = BoundedHttpClient(
+        opener=opener,
+        allowed_hosts={"api.gdeltproject.org", "data.example.gov"},
+        clock=lambda: NOW,
+    ).get(HttpRequest("https://api.gdeltproject.org/start"), before_attempt=lambda: admitted.append(len(admitted) + 1))
+
+    assert result.attempt_count == 2
+    assert admitted == [1, 2]
+    assert len(opener.requests) == 2
+
+
 def test_http_strips_sensitive_headers_on_cross_origin_redirect():
     opener = FakeOpener(
         FakeResponse(status=302, headers={"Location": "https://data.example.gov/feed"}),

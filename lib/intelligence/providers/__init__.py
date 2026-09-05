@@ -22,7 +22,7 @@ from lib.intelligence.http import (
     SourceFailure,
     cache_key,
 )
-from lib.intelligence.quota import QuotaSession
+from lib.intelligence.quota import QuotaExceeded, QuotaSession
 
 
 _MAX_TEXT_CHARACTERS = 2_000
@@ -276,13 +276,23 @@ class SourceAdapter(ABC):
         validate_request = getattr(self.http, "validate_request", None)
         if callable(validate_request):
             validate_request(request)
-        reservation_id = self.quota.consume_next(self.provider)
+        reservation_id = self.quota.next_reservation_id(self.provider)
+
+        def admit_attempt() -> None:
+            # A receipt has one reservation identity, so every counted open for
+            # this collection must fit that reservation.  Do not silently spill
+            # a redirect into another reservation that the terminal receipt
+            # cannot prove; quota exhaustion stops before that next open.
+            self.quota.consume(self.provider, reservation_id)
+
         response: HttpResult | None = None
         try:
-            response = self.http.get(request)
+            if callable(validate_request):
+                response = self.http.get(request, before_attempt=admit_attempt)
+            else:  # deterministic fixture transport has one declared outbound attempt
+                admit_attempt()
+                response = self.http.get(request)
             attempts = int(getattr(response, "attempt_count", 1))
-            for _ in range(max(0, attempts - 1)):
-                self.quota.consume_next(self.provider)
             payload = json.loads(
                 response.body,
                 parse_constant=lambda _value: (_ for _ in ()).throw(ValueError()),
@@ -324,7 +334,7 @@ class SourceAdapter(ABC):
                 response_hash=body_hash,
             )
             return CollectionResult(tuple(items), receipt, query.limit)
-        except (SourceFailure, UnicodeDecodeError, ValueError, TypeError, KeyError) as exc:
+        except (SourceFailure, QuotaExceeded, UnicodeDecodeError, ValueError, TypeError, KeyError) as exc:
             cached_failure = response is not None and response.cache_hit
             receipt = RequestReceipt(
                 provider=self.provider,
@@ -336,14 +346,14 @@ class SourceAdapter(ABC):
                 retrieved_at=response.retrieved_at if response is not None else _utc(self.clock()),
                 observed_at=response.observed_at if response is not None else None,
                 expires_at=None,
-                request_cost=0 if cached_failure else int(getattr(self.http, "last_attempt_count", 1)),
+                request_cost=0 if cached_failure else int(getattr(self.http, "last_attempt_count", 0)),
                 upstream_remaining=None,
                 returned_count=0,
                 accepted_count=0,
                 duplicate_count=0,
                 dropped_count=0,
                 response_hash=None,
-                error_code=exc.code if isinstance(exc, SourceFailure) else "INVALID_RESPONSE",
+                error_code=(exc.code if isinstance(exc, SourceFailure) else "QUOTA_BLOCKED" if isinstance(exc, QuotaExceeded) else "INVALID_RESPONSE"),
             )
             return CollectionResult((), receipt, query.limit)
 
