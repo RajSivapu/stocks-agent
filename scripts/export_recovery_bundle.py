@@ -19,24 +19,99 @@ from typing import Mapping, Protocol, runtime_checkable
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
-REQUIRED_RECOVERY_RECORDS = ("holdings", "transactions", "commands", "runs", "packets", "reports", "publications", "roles", "schema_version")
+REQUIRED_RECOVERY_RECORDS = (
+    "holdings", "transactions", "commands", "command_acknowledgements", "runs",
+    "gateway_requests", "policies", "intelligence_runs", "packets", "reports",
+    "intelligence_run_events", "source_quota_reservations", "collection_checkpoints",
+    "collection_checkpoint_history", "collection_completions", "report_origins",
+    "publications", "evaluation_publications", "cash_ledger_state",
+    "cash_snapshots", "run_terminal_outcomes", "roles", "schema_version",
+)
 NULLABLE_TEXT = (str, type(None))
 DATASET_FIELDS = {
     "holdings": {"ticker": str, "shares": str, "average_cost": str,
                  **{key: NULLABLE_TEXT for key in ("bucket", "opened_at", "notes", "stop", "target", "high_water_price", "hold_override_until")},
                  **{key: (bool, type(None)) for key in ("stop_alert_active", "stop_near_alert_active", "target_near_alert_active", "target_alert_active")}},
     "transactions": {"id": str, "ticker": str, "quantity": str, "price": str, "ts": str, "side": str, "source": NULLABLE_TEXT, "executed_on": NULLABLE_TEXT},
-    "commands": {**{key: str for key in ("id", "status", "telegram_update_id", "chat_id", "user_id", "operation", "ticker", "expected_shares", "expires_at", "created_at", "updated_at")},
-                 **{key: NULLABLE_TEXT for key in ("qty", "price", "executed_on", "bucket", "stop", "confirmation_message_id", "applied_at", "realized_pnl", "error")},
+    "commands": {**{key: str for key in ("id", "status", "telegram_update_id", "chat_id", "user_id", "operation", "ticker", "expires_at", "created_at", "updated_at")},
+                 **{key: NULLABLE_TEXT for key in ("qty", "price", "executed_on", "bucket", "stop", "expected_shares",
+                                                    "amount", "cadence", "next_due_on", "expected_plan_updated_at",
+                                                    "confirmation_message_id", "applied_at", "realized_pnl", "error")},
                  "preview": dict, "result": (dict, type(None))},
-    "runs": {"id": str, "status": str, "phase": str, "started_at": str, "finished_at": NULLABLE_TEXT, "scheduled_phase": NULLABLE_TEXT,
-             "scheduled_market_date": NULLABLE_TEXT, "gateway_request_id": NULLABLE_TEXT, "telegram_message_ids": list},
-    "packets": {"id": str, "run_id": str, "packet_hash": str, "packet": dict},
-    "reports": {"id": str, "run_id": str, "packet_id": str, "report_hash": str, "rendered_hash": str, "report": dict, "rendered_text": str},
+    "command_acknowledgements": {
+        "command_id": str, "telegram_update_id": str, "status": str, "result": dict,
+        "error": NULLABLE_TEXT, "lease_token": NULLABLE_TEXT, "lease_expires_at": NULLABLE_TEXT,
+        "attempt_count": int, "created_at": str, "updated_at": str,
+    },
+    "runs": {"id": str, "status": str, "phase": str, "started_at": str, "finished_at": NULLABLE_TEXT,
+             "data_as_of": NULLABLE_TEXT, "source_status": dict, "symbols": list, "write_counts": dict,
+             "telegram_message_ids": list, "summary": NULLABLE_TEXT, "error": NULLABLE_TEXT,
+             "scheduled_phase": NULLABLE_TEXT, "scheduled_market_date": NULLABLE_TEXT,
+             "gateway_request_id": NULLABLE_TEXT},
+    "gateway_requests": {
+        "request_id": str, "operation": str, "run_id": NULLABLE_TEXT, "status": str,
+        "lease_token": str, "attempt_count": int, "response": (dict, type(None)),
+        "response_digest": NULLABLE_TEXT, "created_at": str, "claimed_at": str,
+        "finished_at": NULLABLE_TEXT,
+    },
+    "policies": {"version": int, "config": dict, "active": bool, "created_at": str, "activated_at": NULLABLE_TEXT},
+    "intelligence_runs": {
+        "id": str, "phase": str, "market_date": str, "policy_version": int,
+        "reservation_plan": dict, "request_window": (dict, type(None)), "created_at": str,
+    },
+    "intelligence_run_events": {
+        "id": str, "run_id": str, "status": str, "detail": dict, "created_at": str,
+    },
+    "source_quota_reservations": {
+        "id": str, "run_id": str, "provider": str, "market_date": str, "phase": str,
+        "reserved_requests": int, "cache_keys": list, "created_at": str,
+    },
+    "collection_checkpoints": {
+        "run_id": str, "cache_key": str, "request_window": dict,
+        "source_receipt_id": str, "payload": dict, "created_at": str,
+    },
+    "collection_checkpoint_history": {
+        "run_id": str, "cache_key": str, "source_receipt_id": str,
+        "payload": dict, "replaced_at": str,
+    },
+    "collection_completions": {
+        "completion_id": str, "run_id": str, "payload": dict, "receipt": dict,
+        "created_at": str,
+    },
+    "packets": {"id": str, "run_id": str, "policy_version": int, "status": str,
+                "candidate_count": int, "evidence_count": int, "packet_hash": str,
+                "packet": dict, "created_at": str},
+    "reports": {"id": str, "run_id": str, "packet_id": str, "idempotency_key": str,
+                "market_date": str, "kind": str, "report_hash": str, "rendered_hash": str,
+                "report": dict, "rendered_text": str, "created_at": str},
+    "report_origins": {
+        "request_id": str, "run_id": str, "scheduled_phase": str, "market_date": str,
+        "requested_kind": str, "requested_report_id": str, "requested_packet_id": str,
+        "requested_idempotency_key": str, "requested_report_hash": str, "created_at": str,
+    },
     "publications": {"report_id": str, "idempotency_key": str, "status": str, "telegram_message_ids": list,
-                     "telegram_accepted_at": (str, type(None)), "suppression_reason": (str, type(None))},
+                     "telegram_accepted_at": NULLABLE_TEXT, "suppression_reason": NULLABLE_TEXT,
+                     "attempt_count": int, "lease_token": NULLABLE_TEXT, "lease_expires_at": NULLABLE_TEXT,
+                     "error": NULLABLE_TEXT, "created_at": str, "updated_at": str},
+    "evaluation_publications": {
+        "id": str, "idempotency_key": str, "run_id": NULLABLE_TEXT, "market_date": str,
+        "phase": str, "kind": str, "template_version": int, "rendered_body": str,
+        "rendered_hash": str, "status": str, "telegram_message_ids": list,
+        "attempt_count": int, "lease_token": NULLABLE_TEXT, "sending_started_at": NULLABLE_TEXT,
+        "delivered_at": NULLABLE_TEXT, "telegram_accepted_at": NULLABLE_TEXT,
+        "error": NULLABLE_TEXT, "created_at": str, "updated_at": str,
+    },
+    "cash_ledger_state": {"singleton": bool, "revision": str, "updated_at": str},
+    "cash_snapshots": {
+        "id": str, "as_of": str, "fresh_through": str, "ledger_watermark": str,
+        "core_available": str, "growth_available": str, "speculative_available": str,
+        "created_at": str,
+    },
+    "run_terminal_outcomes": {
+        "run_id": str, "evaluation_request_id": str, "outcome": str, "created_at": str,
+    },
     "roles": {"role": str, "login": bool, "superuser": bool, "bypass_rls": bool, "memberships": list, "grants": list},
-    "schema_version": {"version": str, "sha256": str},
+    "schema_version": {"version": str, "statements": list, "sha256": str},
 }
 MAX_PAYLOAD_BYTES = 256 * 1024 * 1024
 HASH = re.compile(r"[0-9a-f]{64}")
@@ -87,35 +162,95 @@ def _validated_records(records: Mapping[str, object]) -> dict[str, list[dict[str
     result = {}
     for name, fields in DATASET_FIELDS.items():
         rows = records[name]
-        if not isinstance(rows, list) or (name in {"runs", "packets", "reports", "roles", "schema_version"} and not rows):
+        if not isinstance(rows, list) or (name in {"runs", "policies", "intelligence_runs", "packets", "reports", "roles", "schema_version", "cash_ledger_state"} and not rows):
             raise ValueError(f"recovery dataset {name} requires meaningful rows")
         clean = []
         for row in rows:
             if not isinstance(row, Mapping) or set(row) != set(fields) or any(not isinstance(row[key], kind) for key, kind in fields.items()):
                 raise ValueError(f"recovery dataset {name} has unknown or invalid fields")
             clean.append(dict(row))
-        identity = {"holdings": "ticker", "publications": "report_id", "roles": "role", "schema_version": "version"}.get(name, "id")
-        if any(not row[identity] for row in clean) or len({row[identity] for row in clean}) != len(clean):
+        identity_fields = {
+            "holdings": "ticker", "command_acknowledgements": "command_id",
+            "gateway_requests": "request_id", "policies": "version",
+            "publications": "report_id", "cash_ledger_state": "singleton",
+            "run_terminal_outcomes": "run_id", "roles": "role", "schema_version": "version",
+            "collection_checkpoints": ("run_id", "cache_key"),
+            "collection_checkpoint_history": ("run_id", "cache_key", "source_receipt_id"),
+            "collection_completions": "completion_id", "report_origins": "request_id",
+        }.get(name, "id")
+        if isinstance(identity_fields, str):
+            identity_fields = (identity_fields,)
+        identities = [tuple(row[field] for field in identity_fields) for row in clean]
+        if any(not all(identity) for identity in identities) or len(set(identities)) != len(identities):
             raise ValueError(f"recovery dataset {name} has duplicate or missing identities")
         result[name] = sorted(clean, key=canonical_json)
     runs = {row["id"] for row in result["runs"]}
+    commands = {row["id"] for row in result["commands"]}
+    requests = {row["request_id"] for row in result["gateway_requests"]}
+    policies = {row["version"] for row in result["policies"]}
     packets = {row["id"]: row for row in result["packets"]}
     reports = {row["id"]: row for row in result["reports"]}
-    for name in ("commands", "runs", "packets", "reports"):
+    for name in ("commands", "runs", "intelligence_runs", "intelligence_run_events",
+                 "source_quota_reservations", "packets", "reports", "evaluation_publications", "cash_snapshots"):
         if any(not UUID.fullmatch(row["id"]) for row in result[name]):
             raise ValueError(f"recovery dataset {name} has malformed UUIDs")
+    if any(not UUID.fullmatch(row["request_id"]) or (row["run_id"] is not None and row["run_id"] not in runs)
+           or (row["response_digest"] is not None and not HASH.fullmatch(row["response_digest"]))
+           for row in result["gateway_requests"]):
+        raise ValueError("gateway request relationship mismatch")
+    if any(row["gateway_request_id"] is not None and row["gateway_request_id"] not in requests
+           for row in result["runs"]):
+        raise ValueError("analysis run gateway relationship mismatch")
+    if any(row["command_id"] not in commands or row["attempt_count"] < 0
+           or ((row["lease_token"] is None) != (row["lease_expires_at"] is None))
+           for row in result["command_acknowledgements"]):
+        raise ValueError("command acknowledgement relationship mismatch")
+    if any(row["id"] not in runs or row["policy_version"] not in policies
+           for row in result["intelligence_runs"]):
+        raise ValueError("intelligence run dependency mismatch")
+    intelligence_runs = {row["id"] for row in result["intelligence_runs"]}
+    intelligence_events = {row["id"]: row for row in result["intelligence_run_events"]}
+    if (any(row["run_id"] not in intelligence_runs or row["status"] not in {"started", "completed", "failed"}
+            for row in intelligence_events.values())
+            or any(sum(row["run_id"] == run_id and row["status"] == "started"
+                       for row in intelligence_events.values()) != 1 for run_id in intelligence_runs)
+            or any(sum(row["run_id"] == run_id and row["status"] in {"completed", "failed"}
+                       for row in intelligence_events.values()) > 1 for run_id in intelligence_runs)):
+        raise ValueError("intelligence run event dependency mismatch")
+    if any(row["run_id"] not in intelligence_runs or row["reserved_requests"] < 0
+           for row in result["source_quota_reservations"]):
+        raise ValueError("source quota reservation dependency mismatch")
+    reservation_ids = {row["id"] for row in result["source_quota_reservations"]}
+    for name in ("collection_checkpoints", "collection_checkpoint_history"):
+        if any(row["run_id"] not in intelligence_runs
+               or not UUID.fullmatch(row["source_receipt_id"])
+               or row["payload"].get("receipt", {}).get("reservation_id") not in reservation_ids
+               for row in result[name]):
+            raise ValueError("collection checkpoint dependency mismatch")
+    if any(not UUID.fullmatch(row["completion_id"]) or row["run_id"] not in intelligence_runs
+           or row["completion_id"] not in intelligence_events
+           or intelligence_events[row["completion_id"]]["run_id"] != row["run_id"]
+           or intelligence_events[row["completion_id"]]["status"] != "completed"
+           for row in result["collection_completions"]):
+        raise ValueError("collection completion dependency mismatch")
+    if sum(row["active"] for row in result["policies"]) != 1:
+        raise ValueError("recovery requires exactly one active policy")
     for row in packets.values():
-        if row["run_id"] not in runs or sha256(canonical_json(row["packet"]).encode()) != row["packet_hash"]:
+        if (row["run_id"] not in runs or row["policy_version"] not in policies or row["status"] != "completed"
+                or row["candidate_count"] < 0 or row["evidence_count"] < 0
+                or sha256(canonical_json(row["packet"]).encode()) != row["packet_hash"]):
             raise ValueError("packet content or run relationship mismatch")
     for row in reports.values():
         packet = packets.get(row["packet_id"])
         if (packet is None or row["run_id"] not in runs or packet["run_id"] != row["run_id"]
                 or sha256(canonical_json(row["report"]).encode()) != row["report_hash"]
                 or sha256(row["rendered_text"].encode()) != row["rendered_hash"]
+                or not HASH.fullmatch(row["idempotency_key"])
                 or ("packet_hash" in row["report"] and row["report"]["packet_hash"] != packet["packet_hash"])):
             raise ValueError("report content or packet/run relationship mismatch")
     for row in result["publications"]:
-        if row["report_id"] not in reports or not HASH.fullmatch(row["idempotency_key"]):
+        if (row["report_id"] not in reports or not HASH.fullmatch(row["idempotency_key"])
+                or row["idempotency_key"] != reports[row["report_id"]]["idempotency_key"]):
             raise ValueError("publication report relationship mismatch")
         status, ids, accepted, reason = (row[k] for k in ("status", "telegram_message_ids", "telegram_accepted_at", "suppression_reason"))
         if status not in {"pending", "delivered", "failed", "uncertain", "suppressed"}:
@@ -125,10 +260,49 @@ def _validated_records(records: Mapping[str, object]) -> dict[str, list[dict[str
                 raise ValueError("original Telegram delivery receipt is incomplete")
         elif ids != [] or accepted is not None or (status == "suppressed" and (not reason or not reason.strip())) or (status != "suppressed" and reason is not None):
             raise ValueError("publication suppression receipt is incomplete")
-    if {row["report_id"] for row in result["publications"]} != set(reports):
-        raise ValueError("recovery reports require exactly one publication receipt each")
-    if any(not HASH.fullmatch(row["sha256"]) for row in result["schema_version"]):
+        if row["attempt_count"] < 0 or ((row["lease_token"] is None) != (row["lease_expires_at"] is None)):
+            raise ValueError("publication delivery state is incomplete")
+    if not {row["report_id"] for row in result["publications"]}.issubset(reports):
+        raise ValueError("recovery publication has no report")
+    if any(not HASH.fullmatch(row["sha256"]) or not all(isinstance(statement, str) for statement in row["statements"])
+           or sha256("\n".join(row["statements"]).encode()) != row["sha256"]
+           for row in result["schema_version"]):
         raise ValueError("schema version hash is invalid")
+    for row in result["evaluation_publications"]:
+        if (row["idempotency_key"] not in requests or (row["run_id"] is not None and row["run_id"] not in runs)
+                or not HASH.fullmatch(row["rendered_hash"]) or row["attempt_count"] < 0
+                or (row["status"] == "sending" and (row["lease_token"] is None or row["sending_started_at"] is None))
+                or (row["status"] != "sending" and row["lease_token"] is not None)):
+            raise ValueError("evaluation publication delivery state is incomplete")
+    if len(result["cash_ledger_state"]) != 1 or result["cash_ledger_state"][0]["singleton"] is not True:
+        raise ValueError("cash ledger state is incomplete")
+    try:
+        ledger_revision = int(result["cash_ledger_state"][0]["revision"])
+        snapshot_revisions = [int(row["ledger_watermark"]) for row in result["cash_snapshots"]]
+    except ValueError:
+        raise ValueError("cash snapshot ledger relationship mismatch") from None
+    if ledger_revision < 0 or any(revision < 0 or revision > ledger_revision for revision in snapshot_revisions):
+        raise ValueError("cash snapshot ledger relationship mismatch")
+    requests_by_id = {row["request_id"]: row for row in result["gateway_requests"]}
+    for row in result["report_origins"]:
+        request = requests_by_id.get(row["request_id"])
+        packet = packets.get(row["requested_packet_id"])
+        report = reports.get(row["requested_report_id"])
+        if (request is None or request["operation"] != "record_report" or request["run_id"] is not None
+                or row["run_id"] not in runs or packet is None or packet["run_id"] != row["run_id"]
+                or not HASH.fullmatch(row["requested_idempotency_key"])
+                or not HASH.fullmatch(row["requested_report_hash"])
+                or (report is not None and (report["run_id"] != row["run_id"]
+                    or report["packet_id"] != row["requested_packet_id"]
+                    or report["idempotency_key"] != row["requested_idempotency_key"]
+                    or report["report_hash"] != row["requested_report_hash"]))):
+            raise ValueError("report origin dependency mismatch")
+    if any(not UUID.fullmatch(row["run_id"]) or not UUID.fullmatch(row["evaluation_request_id"])
+           or row["run_id"] not in runs or row["evaluation_request_id"] not in requests
+           or requests_by_id[row["evaluation_request_id"]]["run_id"] != row["run_id"]
+           or row["outcome"] not in {"no_trigger", "not_actionable"}
+           for row in result["run_terminal_outcomes"]):
+        raise ValueError("terminal outcome relationship mismatch")
     return result
 
 
@@ -137,6 +311,16 @@ def relationships(records: Mapping[str, list]) -> dict[str, list]:
         "packet_run": sorted([[row["id"], row["run_id"]] for row in records["packets"]]),
         "report_packet_run": sorted([[row["id"], row["packet_id"], row["run_id"]] for row in records["reports"]]),
         "publication_report": sorted([[row["idempotency_key"], row["report_id"]] for row in records["publications"]]),
+        "command_acknowledgement": sorted([[row["command_id"], row["telegram_update_id"]] for row in records["command_acknowledgements"]]),
+        "intelligence_analysis_run": sorted([[row["id"], row["policy_version"]] for row in records["intelligence_runs"]]),
+        "intelligence_event_run": sorted([[row["id"], row["run_id"], row["status"]] for row in records["intelligence_run_events"]]),
+        "quota_reservation_run": sorted([[row["id"], row["run_id"], row["provider"]] for row in records["source_quota_reservations"]]),
+        "checkpoint_run": sorted([[row["run_id"], row["cache_key"], row["source_receipt_id"]] for row in records["collection_checkpoints"]]),
+        "checkpoint_history_run": sorted([[row["run_id"], row["cache_key"], row["source_receipt_id"]] for row in records["collection_checkpoint_history"]]),
+        "collection_completion_run": sorted([[row["completion_id"], row["run_id"]] for row in records["collection_completions"]]),
+        "report_origin_request": sorted([[row["request_id"], row["run_id"], row["requested_report_id"]] for row in records["report_origins"]]),
+        "evaluation_publication_request": sorted([[row["id"], row["idempotency_key"], row["run_id"]] for row in records["evaluation_publications"]]),
+        "terminal_outcome_request": sorted([[row["run_id"], row["evaluation_request_id"]] for row in records["run_terminal_outcomes"]]),
     }
 
 
@@ -188,7 +372,7 @@ def read_payload(path: Path) -> tuple[dict, dict]:
         manifest = json.loads(files["payload/manifest.json"])
         core = {key: value for key, value in manifest.items() if key != "root_hash"}
         if (set(core) != {"format", "record_sets", "files", "production_identity", "counts", "relationships", "secrets_included"}
-                or core["format"] != "stocks-agent-recovery-v3" or core["record_sets"] != list(REQUIRED_RECOVERY_RECORDS)
+                or core["format"] != "stocks-agent-recovery-v4" or core["record_sets"] != list(REQUIRED_RECOVERY_RECORDS)
                 or core["secrets_included"] is not False or manifest["root_hash"] != sha256(canonical_json(core).encode())
                 or set(core["files"]) != set(REQUIRED_RECOVERY_RECORDS)):
             raise ValueError("manifest root hash or fields invalid")
@@ -244,7 +428,7 @@ def export_recovery_bundle(source: RecoveryDataSource, destination: Path, *, enc
             files = {name: "".join(canonical_json(row) + "\n" for row in rows).encode() for name, rows in normalized.items()}
             if sum(map(len, files.values())) > MAX_PAYLOAD_BYTES - 1024 * 1024:
                 raise RuntimeError("complete recovery snapshot exceeds the payload limit")
-            core = {"format": "stocks-agent-recovery-v3", "record_sets": list(REQUIRED_RECOVERY_RECORDS),
+            core = {"format": "stocks-agent-recovery-v4", "record_sets": list(REQUIRED_RECOVERY_RECORDS),
                     "files": {name: {"path": f"data/{name}.ndjson", "sha256": sha256(raw), "records": counts[name]} for name, raw in files.items()},
                     "production_identity": identity, "counts": counts, "relationships": relationships(normalized), "secrets_included": False}
             manifest = {**core, "root_hash": sha256(canonical_json(core).encode())}

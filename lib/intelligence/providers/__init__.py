@@ -254,7 +254,13 @@ class SourceAdapter(ABC):
     ) -> Sequence[Mapping[str, object]]:
         raise NotImplementedError
 
-    def collect(self, query: CollectionQuery) -> CollectionResult:
+    def collect(
+        self,
+        query: CollectionQuery,
+        *,
+        source_receipt_id: str | None = None,
+        before_transport_attempt: Callable[[RequestReceipt], None] | None = None,
+    ) -> CollectionResult:
         request = self._request(query)
         requested_window = MappingProxyType({
             "start": _utc(query.start).isoformat(),
@@ -287,6 +293,27 @@ class SourceAdapter(ABC):
             nonlocal attempts
             self.quota.consume(self.provider, reservation_id)
             attempts += 1
+            if before_transport_attempt is not None:
+                before_transport_attempt(RequestReceipt(
+                    provider=self.provider,
+                    reservation_id=reservation_id,
+                    status="failed",
+                    cache_key=receipt_cache_key,
+                    requested_window=requested_window,
+                    requested_limit=query.limit,
+                    retrieved_at=_utc(self.clock()),
+                    observed_at=None,
+                    expires_at=None,
+                    request_cost=attempts,
+                    upstream_remaining=None,
+                    returned_count=0,
+                    accepted_count=0,
+                    duplicate_count=0,
+                    dropped_count=0,
+                    response_hash=None,
+                    error_code="TRANSPORT_OUTCOME_UNCERTAIN",
+                    source_receipt_id=source_receipt_id,
+                ))
 
         response: HttpResult | None = None
         try:
@@ -335,6 +362,7 @@ class SourceAdapter(ABC):
                 duplicate_count=0,
                 dropped_count=dropped,
                 response_hash=body_hash,
+                source_receipt_id=source_receipt_id,
             )
             return CollectionResult(tuple(items), receipt, query.limit)
         except (SourceFailure, QuotaExceeded, UnicodeDecodeError, ValueError, TypeError, KeyError) as exc:
@@ -357,6 +385,7 @@ class SourceAdapter(ABC):
                 dropped_count=0,
                 response_hash=None,
                 error_code=(exc.code if isinstance(exc, SourceFailure) else "QUOTA_BLOCKED" if isinstance(exc, QuotaExceeded) else "INVALID_RESPONSE"),
+                source_receipt_id=source_receipt_id,
             )
             return CollectionResult((), receipt, query.limit)
 

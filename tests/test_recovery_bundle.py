@@ -4,12 +4,20 @@ import json
 import shlex
 import sys
 import io
+from pathlib import Path
+import shutil
+import socket
+import subprocess
 import tarfile
+import tempfile
 
+import psycopg
+from psycopg.rows import dict_row
 import pytest
 
-from scripts.export_recovery_bundle import export_recovery_bundle
-from scripts.verify_recovery_bundle import verify_recovery_bundle
+from scripts.export_recovery_bundle import _validated_records, export_recovery_bundle, decrypt_verified
+from scripts.protected_evidence import RECOVERY_SQL
+from scripts.verify_recovery_bundle import restore_recovery_records, verify_recovery_bundle
 
 
 def digest(value):
@@ -20,31 +28,127 @@ def recovery_records():
     run = "11111111-1111-4111-8111-111111111111"
     packet_id = "22222222-2222-4222-8222-222222222222"
     report_id = "33333333-3333-4333-8333-333333333333"
+    command_id = "44444444-4444-4444-8444-444444444444"
+    evaluation_request = "55555555-5555-4555-8555-555555555555"
+    publication_id = "66666666-6666-4666-8666-666666666666"
+    delivery_lease = "77777777-7777-4777-8777-777777777777"
+    started_event = "88888888-8888-4888-8888-888888888888"
+    completion_event = "99999999-9999-4999-8999-999999999999"
+    report_request = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
+    reservation = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb"
+    source_receipt = "cccccccc-cccc-4ccc-8ccc-cccccccccccc"
     packet = {"candidates": [], "evidence": [], "coverage": {}, "limitations": [], "policy_version": 1}
     report = {"summary": "Suggestion only.", "packet_hash": digest(packet)}
     records = {
         "holdings": [{"ticker": "VTI", "shares": "2", "average_cost": "100"}],
         "transactions": [{"id": "1", "ticker": "VTI", "quantity": "2", "price": "100"}],
-        "commands": [{"id": "44444444-4444-4444-8444-444444444444", "status": "applied"}],
-        "runs": [{"id": run, "status": "completed", "phase": "post-market"}],
-        "packets": [{"id": packet_id, "run_id": run, "packet_hash": digest(packet), "packet": packet}],
-        "reports": [{"id": report_id, "run_id": run, "packet_id": packet_id, "report_hash": digest(report),
-                     "report": report, "rendered_hash": hashlib.sha256(b"Suggestion only.").hexdigest(), "rendered_text": "Suggestion only."}],
+        "commands": [{"id": command_id, "status": "applied"}],
+        "command_acknowledgements": [{
+            "command_id": command_id, "telegram_update_id": "1", "status": "uncertain",
+            "result": {"ok": True}, "error": "ACKNOWLEDGEMENT_LEASE_EXPIRED",
+            "lease_token": None, "lease_expires_at": None, "attempt_count": 1,
+            "created_at": "2026-09-01T12:00:00Z", "updated_at": "2026-09-01T12:06:00Z",
+        }],
+        "runs": [{"id": run, "status": "running", "phase": "post-market"}],
+        "gateway_requests": [{
+            "request_id": evaluation_request, "operation": "evaluate_and_publish", "run_id": run,
+            "status": "claimed", "lease_token": delivery_lease, "attempt_count": 1,
+            "response": None, "response_digest": None, "created_at": "2026-09-05T19:30:00Z",
+            "claimed_at": "2026-09-05T19:30:00Z", "finished_at": None,
+        }, {
+            "request_id": report_request, "operation": "record_report", "run_id": None,
+            "status": "completed", "lease_token": delivery_lease, "attempt_count": 1,
+            "response": {"report_id": report_id, "report_hash": digest(report),
+                         "rendered_hash": hashlib.sha256(b"Suggestion only.").hexdigest()},
+            "response_digest": None, "created_at": "2026-09-05T19:57:00Z",
+            "claimed_at": "2026-09-05T19:57:00Z", "finished_at": "2026-09-05T19:59:00Z",
+        }],
+        "policies": [{"version": 1, "config": {"intelligence": {}}, "active": True,
+                      "created_at": "2026-09-01T00:00:00Z", "activated_at": "2026-09-01T00:00:00Z"}],
+        "intelligence_runs": [{
+            "id": run, "phase": "post-market", "market_date": "2026-09-05", "policy_version": 1,
+            "reservation_plan": {"reservations": []}, "request_window": {
+                "start": "2026-09-05T12:00:00Z", "end": "2026-09-05T20:00:00Z",
+                "timezone": "America/Chicago", "market_date": "2026-09-05", "phase": "post-market",
+            }, "created_at": "2026-09-05T19:30:00Z",
+        }],
+        "intelligence_run_events": [
+            {"id": started_event, "run_id": run, "status": "started", "detail": {},
+             "created_at": "2026-09-05T19:30:00Z"},
+            {"id": completion_event, "run_id": run, "status": "completed",
+             "detail": {"packet_id": packet_id}, "created_at": "2026-09-05T19:45:00Z"},
+        ],
+        "source_quota_reservations": [{
+            "id": reservation, "run_id": run, "provider": "gdelt", "market_date": "2026-09-05",
+            "phase": "post-market", "reserved_requests": 1, "cache_keys": ["d" * 64],
+            "created_at": "2026-09-05T19:30:00Z",
+        }],
+        "collection_checkpoints": [{
+            "run_id": run, "cache_key": "d" * 64,
+            "request_window": {"start": "2026-09-05T12:00:00Z", "end": "2026-09-05T20:00:00Z",
+                               "timezone": "America/Chicago", "market_date": "2026-09-05", "phase": "post-market"},
+            "source_receipt_id": source_receipt,
+            "payload": {"receipt": {"provider": "gdelt", "reservation_id": reservation,
+                                      "status": "succeeded", "request_cost": 1}, "items": []},
+            "created_at": "2026-09-05T19:40:00Z",
+        }],
+        "collection_checkpoint_history": [],
+        "collection_completions": [{
+            "completion_id": completion_event, "run_id": run, "payload": {"receipts": []},
+            "receipt": {"packet_id": packet_id, "packet_hash": digest(packet)},
+            "created_at": "2026-09-05T19:45:00Z",
+        }],
+        "packets": [{"id": packet_id, "run_id": run, "policy_version": 1, "status": "completed",
+                     "candidate_count": 0, "evidence_count": 0, "packet_hash": digest(packet), "packet": packet,
+                     "created_at": "2026-09-05T19:45:00Z"}],
+        "reports": [{"id": report_id, "run_id": run, "packet_id": packet_id, "idempotency_key": "a" * 64,
+                     "market_date": "2026-09-05", "kind": "weekly", "report_hash": digest(report),
+                     "report": report, "rendered_hash": hashlib.sha256(b"Suggestion only.").hexdigest(),
+                     "rendered_text": "Suggestion only.", "created_at": "2026-09-05T19:58:00Z"}],
+        "report_origins": [{
+            "request_id": report_request, "run_id": run, "scheduled_phase": "post-market",
+            "market_date": "2026-09-05", "requested_kind": "weekly",
+            "requested_report_id": report_id, "requested_packet_id": packet_id,
+            "requested_idempotency_key": "a" * 64, "requested_report_hash": digest(report),
+            "created_at": "2026-09-05T19:57:00Z",
+        }],
         "publications": [{"report_id": report_id, "idempotency_key": "a" * 64, "status": "delivered", "telegram_message_ids": [7],
-                          "telegram_accepted_at": "2026-09-05T20:00:00Z", "suppression_reason": None}],
+                          "telegram_accepted_at": "2026-09-05T20:00:00Z", "suppression_reason": None,
+                          "attempt_count": 1, "lease_token": None, "lease_expires_at": None, "error": None,
+                          "created_at": "2026-09-05T19:59:00Z", "updated_at": "2026-09-05T20:00:00Z"}],
+        "evaluation_publications": [{
+            "id": publication_id, "idempotency_key": evaluation_request, "run_id": run,
+            "market_date": "2026-09-05", "phase": "post-market", "kind": "brief",
+            "template_version": 2, "rendered_body": "Sending suggestion-only brief.",
+            "rendered_hash": hashlib.sha256(b"Sending suggestion-only brief.").hexdigest(),
+            "status": "sending", "telegram_message_ids": [], "attempt_count": 1,
+            "lease_token": delivery_lease, "sending_started_at": "2026-09-05T20:00:00Z",
+            "delivered_at": None, "telegram_accepted_at": None, "error": None,
+            "created_at": "2026-09-05T19:59:00Z", "updated_at": "2026-09-05T20:00:00Z",
+        }],
+        "cash_ledger_state": [{"singleton": True, "revision": "0", "updated_at": "2026-09-05T19:00:00Z"}],
+        "cash_snapshots": [],
+        "run_terminal_outcomes": [],
         "roles": [{"role": "stock_agent_dashboard", "login": False, "superuser": False, "bypass_rls": False,
                    "memberships": [], "grants": ["SELECT:public.holdings"]}],
-        "schema_version": [{"version": "20260926", "sha256": "d" * 64}],
+        "schema_version": [{"version": "20260926", "statements": ["SELECT 1"],
+                            "sha256": hashlib.sha256(b"SELECT 1").hexdigest()}],
     }
     records["holdings"][0].update(bucket="core", opened_at="2026-09-01", notes=None, stop=None, target=None, high_water_price=None,
                                   stop_alert_active=False, hold_override_until=None, stop_near_alert_active=False, target_near_alert_active=False, target_alert_active=False)
     records["transactions"][0].update(ts="2026-09-01T12:00:00Z", side="buy", source="owner", executed_on="2026-09-01")
     records["commands"][0].update(telegram_update_id="1", chat_id="2", user_id="3", operation="buy", ticker="VTI", qty="2", price="100",
-                                  executed_on="2026-09-01", bucket="core", expected_shares="0", stop=None, preview={}, confirmation_message_id="4",
+                                  executed_on="2026-09-01", bucket="core", expected_shares="0", stop=None,
+                                  amount=None, cadence=None, next_due_on=None, expected_plan_updated_at=None,
+                                  preview={}, confirmation_message_id="4",
                                   expires_at="2026-09-01T12:15:00Z", applied_at="2026-09-01T12:00:00Z", realized_pnl=None, result={}, error=None,
                                   created_at="2026-09-01T11:59:00Z", updated_at="2026-09-01T12:00:00Z")
-    records["runs"][0].update(started_at="2026-09-05T19:30:00Z", finished_at="2026-09-05T20:00:00Z", scheduled_phase="post-market",
-                              scheduled_market_date="2026-09-05", gateway_request_id="55555555-5555-4555-8555-555555555555", telegram_message_ids=[7])
+    records["runs"][0].update(
+        started_at="2026-09-05T19:30:00Z", finished_at=None, data_as_of="2026-09-05T19:30:00Z",
+        source_status={}, symbols=[], write_counts={}, telegram_message_ids=[], summary=None, error=None,
+        scheduled_phase="post-market", scheduled_market_date="2026-09-05",
+        gateway_request_id="55555555-5555-4555-8555-555555555555",
+    )
     return records
 
 
@@ -95,6 +199,177 @@ def test_recovery_exports_canonical_data_and_queries_isolated_restore(tmp_path, 
     assert verify_recovery_bundle(artifact, restored(source), production_source=source, decrypt_command=commands["decrypt_command"])["status"] == "verified"
 
 
+def test_recovery_payload_carries_identity_delivery_and_release_state(tmp_path, commands):
+    artifact = export_recovery_bundle(FakeDatabase(), tmp_path / "bundle.enc", **commands)
+    with tempfile.TemporaryDirectory(prefix="recovery-payload-test-") as temporary:
+        _manifest, records = decrypt_verified(
+            artifact, commands["decrypt_command"], Path(temporary).resolve(),
+        )
+    assert records["intelligence_runs"][0]["id"] == records["runs"][0]["id"]
+    assert {"idempotency_key", "market_date", "kind"}.issubset(records["reports"][0])
+    assert records["command_acknowledgements"][0]["attempt_count"] == 1
+    publication = records["evaluation_publications"][0]
+    assert (publication["status"], publication["attempt_count"], publication["lease_token"]) == (
+        "sending", 1, "77777777-7777-4777-8777-777777777777",
+    )
+    assert records["schema_version"][0]["statements"] == ["SELECT 1"]
+    assert set(records) >= {
+        "intelligence_run_events", "source_quota_reservations", "collection_checkpoints",
+        "collection_checkpoint_history", "collection_completions", "report_origins",
+        "cash_ledger_state", "cash_snapshots", "run_terminal_outcomes",
+    }
+
+
+def test_recovery_accepts_historical_cash_snapshots_below_the_current_ledger_revision():
+    records = recovery_records()
+    records["cash_ledger_state"][0]["revision"] = "2"
+    records["cash_snapshots"] = [
+        {"id": "dddddddd-dddd-4ddd-8ddd-dddddddddddd", "as_of": "2026-09-05T18:00:00Z",
+         "fresh_through": "2026-09-05T18:15:00Z", "ledger_watermark": "1",
+         "core_available": "100", "growth_available": "50", "speculative_available": "25",
+         "created_at": "2026-09-05T18:00:00Z"},
+        {"id": "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee", "as_of": "2026-09-05T19:00:00Z",
+         "fresh_through": "2026-09-05T19:15:00Z", "ledger_watermark": "2",
+         "core_available": "90", "growth_available": "50", "speculative_available": "25",
+         "created_at": "2026-09-05T19:00:00Z"},
+    ]
+    assert len(_validated_records(records)["cash_snapshots"]) == 2
+
+
+def test_recovery_accepts_report_persisted_before_its_outbox_row(tmp_path, commands):
+    source = FakeDatabase()
+    source.records["publications"] = []
+    source.reported_counts["publications"] = 0
+    assert export_recovery_bundle(source, tmp_path / "report-crash.enc", **commands).is_file()
+
+
+def test_restore_refreshes_the_isolated_reader_snapshot_before_reconciliation(tmp_path, commands):
+    production = FakeDatabase()
+    artifact = export_recovery_bundle(production, tmp_path / "refresh.enc", **commands)
+
+    class SnapshotReader(FakeDatabase):
+        def __init__(self):
+            super().__init__(records={name: [] for name in recovery_records()})
+            self.refreshed = False
+
+        def identity(self):
+            return {"project_ref": "r" * 20, "connection_id": "restore-db", "read_only": True,
+                    "isolated_guard": True}
+
+        def refresh_snapshot(self):
+            self.records = copy.deepcopy(production.records)
+            self.reported_counts = {key: len(value) for key, value in self.records.items()}
+            self.refreshed = True
+
+    reader = SnapshotReader()
+
+    class Target:
+        def identity(self):
+            return {"project_ref": "r" * 20, "connection_id": "restore-db", "read_only": False,
+                    "restore_capable": True, "isolated_guard": True}
+
+        def restore_records(self, _records):
+            return None
+
+    result = verify_recovery_bundle(
+        artifact, reader, production_source=production,
+        decrypt_command=commands["decrypt_command"], restore_target=Target(),
+    )
+    assert result["restore_applied"] is True
+    assert reader.refreshed is True
+
+
+def test_verifier_applies_actual_isolated_postgres_restore_and_retains_uncertain_delivery(tmp_path, commands):
+    binaries = {name: shutil.which(name) for name in ("initdb", "pg_ctl")}
+    if not all(binaries.values()):
+        pytest.skip("disposable PostgreSQL binaries unavailable")
+    with tempfile.TemporaryDirectory(prefix="recovery-postgres-") as directory:
+        root = Path(directory)
+        with socket.socket() as probe:
+            probe.bind(("127.0.0.1", 0)); port = probe.getsockname()[1]
+        subprocess.run(
+            [binaries["initdb"], "-D", str(root / "db"), "-A", "trust", "-E", "UTF8", "--no-locale"],
+            check=True, capture_output=True,
+        )
+        subprocess.run(
+            [binaries["pg_ctl"], "-D", str(root / "db"), "-l", str(root / "postgres.log"),
+             "-o", f"-k {root} -h '' -p {port}", "-w", "start"],
+            check=True, capture_output=True,
+        )
+        connections = []
+        try:
+            admin_dsn = f"host={root} port={port} dbname=postgres"
+            with psycopg.connect(admin_dsn, autocommit=True) as admin:
+                admin.execute("CREATE ROLE anon; CREATE ROLE authenticated; CREATE ROLE service_role")
+                admin.execute("CREATE DATABASE recovery_source")
+                admin.execute("CREATE DATABASE recovery_restore")
+            schema = (Path(__file__).resolve().parents[1] / "sql/schema.sql").read_text()
+            additions = "\n".join((Path(__file__).resolve().parents[1] / "sql/migrations" / name).read_text()
+                                  for name in ("20260929_policy_lifecycle_closure.sql", "20260930_provider_attempt_and_recovery_closure.sql"))
+            for database in ("recovery_source", "recovery_restore"):
+                connection = psycopg.connect(
+                    f"host={root} port={port} dbname={database}", autocommit=True, row_factory=dict_row,
+                )
+                connections.append(connection)
+                connection.execute("CREATE SCHEMA auth; CREATE FUNCTION auth.uid() RETURNS uuid LANGUAGE sql AS 'SELECT NULL::uuid'")
+                connection.execute("CREATE SCHEMA supabase_migrations; CREATE TABLE supabase_migrations.schema_migrations(version text PRIMARY KEY, statements text[])")
+                connection.execute(schema)
+                connection.execute(additions)
+
+            class DatabaseSource:
+                def __init__(self, connection, project, isolated=False):
+                    self.connection, self.project, self.isolated = connection, project, isolated
+
+                def identity(self):
+                    return {"project_ref": self.project, "connection_id": self.connection.info.dbname,
+                            "read_only": True, "isolated_guard": self.isolated}
+
+                def read_records(self):
+                    return {name: [dict(row) for row in self.connection.execute(sql).fetchall()]
+                            for name, sql in RECOVERY_SQL.items()}
+
+                def counts(self):
+                    return {name: self.connection.execute(f"SELECT count(*) FROM ({sql}) records").fetchone()["count"]
+                            for name, sql in RECOVERY_SQL.items()}
+
+            source = DatabaseSource(connections[0], "p" * 20)
+            restored_source = DatabaseSource(connections[1], "r" * 20, isolated=True)
+            restore_recovery_records(connections[0], recovery_records(), isolated_guard=True)
+            artifact = export_recovery_bundle(source, tmp_path / "actual.enc", **commands)
+
+            class Target:
+                def identity(self):
+                    return {**restored_source.identity(), "read_only": False, "restore_capable": True}
+
+                def restore_records(self, records):
+                    restore_recovery_records(connections[1], records, isolated_guard=True)
+
+            result = verify_recovery_bundle(
+                artifact, restored_source, production_source=source,
+                decrypt_command=commands["decrypt_command"], restore_target=Target(),
+            )
+            restored_delivery = connections[1].execute(
+                "SELECT status,attempt_count,lease_token::text FROM market_publications"
+            ).fetchone()
+            assert result["restore_applied"] is True
+            assert tuple(restored_delivery.values()) == (
+                "sending", 1, "77777777-7777-4777-8777-777777777777",
+            )
+            for table in (
+                "market_intelligence_run_events", "market_source_quota_reservations",
+                "market_collection_checkpoints", "market_intelligence_collection_completions",
+                "market_report_request_origins",
+            ):
+                assert connections[1].execute(f"SELECT count(*) AS count FROM {table}").fetchone()["count"] >= 1
+        finally:
+            for connection in connections:
+                connection.close()
+            subprocess.run(
+                [binaries["pg_ctl"], "-D", str(root / "db"), "-m", "immediate", "-w", "stop"],
+                check=True, capture_output=True,
+            )
+
+
 @pytest.mark.parametrize("mutation", [
     lambda db: db.records["roles"][0].update(password="secret"),
     lambda db: db.records.update(reports=[]),
@@ -102,6 +377,11 @@ def test_recovery_exports_canonical_data_and_queries_isolated_restore(tmp_path, 
     lambda db: db.records["reports"][0].update(packet_id="55555555-5555-4555-8555-555555555555"),
     lambda db: db.records["packets"][0]["packet"].update(policy_version=99),
     lambda db: db.records["publications"][0].update(report_id="55555555-5555-4555-8555-555555555555"),
+    lambda db: db.records.update(intelligence_runs=[]),
+    lambda db: db.records["command_acknowledgements"][0].update(command_id="55555555-5555-4555-8555-555555555555"),
+    lambda db: db.records["evaluation_publications"][0].update(lease_token=None),
+    lambda db: db.records["schema_version"][0]["statements"].append("SELECT 2"),
+    lambda db: db.records.update(cash_ledger_state=[]),
     lambda db: db.reported_counts.update(holdings=2),
 ])
 def test_export_rejects_incomplete_or_unreconciled_sources(tmp_path, commands, mutation):
@@ -144,14 +424,6 @@ def test_recovery_never_accepts_caller_json_as_database_authority(tmp_path, comm
         export_recovery_bundle(recovery_records(), tmp_path / "bundle.enc", **commands)
 
 
-def test_export_rejects_report_without_its_outbox_receipt(tmp_path, commands):
-    source = FakeDatabase()
-    source.records["publications"] = []
-    source.reported_counts["publications"] = 0
-    with pytest.raises((ValueError, RuntimeError), match="publication"):
-        export_recovery_bundle(source, tmp_path / "bundle.enc", **commands)
-
-
 def test_copy_commands_are_not_encryption_and_leave_no_external_artifact(tmp_path):
     command = f"{shlex.quote(sys.executable)} -c 'import shutil,sys;shutil.copyfile(sys.argv[1],sys.argv[2])' {{input}} {{output}}"
     with pytest.raises(RuntimeError, match="encrypt|plaintext|authenticated"):
@@ -172,12 +444,35 @@ def test_encryption_failures_remove_external_artifact(tmp_path, commands, failur
 def test_recovery_rejects_ciphertext_tamper_and_missing_decrypt_command(tmp_path, commands):
     source = FakeDatabase(); restore = restored(source)
     artifact = export_recovery_bundle(source, tmp_path / "bundle.enc", **commands)
+    receipt = artifact.with_suffix(".enc.receipt.json")
+    original_artifact = artifact.read_bytes()
+    original_receipt = receipt.read_bytes()
     with pytest.raises((ValueError, RuntimeError), match="decrypt"):
         verify_recovery_bundle(artifact, restore, production_source=source)
+    assert artifact.read_bytes() == original_artifact
+    assert receipt.read_bytes() == original_receipt
     raw = bytearray(artifact.read_bytes()); raw[len(raw) // 2] ^= 1; artifact.write_bytes(raw)
+    tampered_artifact = artifact.read_bytes()
     with pytest.raises(RuntimeError):
         verify_recovery_bundle(artifact, restore, production_source=source, decrypt_command=commands["decrypt_command"])
-    assert not artifact.exists()
+    assert artifact.read_bytes() == tampered_artifact
+    assert receipt.read_bytes() == original_receipt
+
+
+def test_recovery_rejects_sidecar_tamper_without_mutating_either_input(tmp_path, commands):
+    source = FakeDatabase(); restore = restored(source)
+    artifact = export_recovery_bundle(source, tmp_path / "bundle.enc", **commands)
+    receipt = artifact.with_suffix(".enc.receipt.json")
+    artifact_bytes = artifact.read_bytes()
+    receipt.write_bytes(b'{"invalid":true}\n')
+    receipt_bytes = receipt.read_bytes()
+    with pytest.raises(RuntimeError):
+        verify_recovery_bundle(
+            artifact, restore, production_source=source,
+            decrypt_command=commands["decrypt_command"],
+        )
+    assert artifact.read_bytes() == artifact_bytes
+    assert receipt.read_bytes() == receipt_bytes
 
 
 def test_database_source_rejects_fake_project_identity_before_connecting(monkeypatch):

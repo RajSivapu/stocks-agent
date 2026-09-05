@@ -54,6 +54,39 @@ def test_zero_capacity_collection_returns_quota_blocked_without_open():
     assert http.requests == []
 
 
+@pytest.mark.parametrize("adapter_name", ["alpha_vantage", "finnhub"])
+def test_paid_secondary_provider_persists_attempt_barrier_before_transport(adapter_name):
+    order = []
+
+    class BarrierHttp(FixtureHttp):
+        def get(self, request):
+            order.append("transport")
+            return super().get(request)
+
+    http = BarrierHttp(FIXTURES[adapter_name])
+    adapter = build_adapter(
+        adapter_name,
+        http,
+        QuotaSession({adapter_name: ({"reservation_id": "paid", "reserved_requests": 1},)}),
+        secret_getter=lambda _name: "existing-free-key",
+        clock=lambda: NOW,
+    )
+    result = adapter.collect(
+        sample_query(),
+        source_receipt_id="11111111-1111-4111-8111-111111111111",
+        before_transport_attempt=lambda barrier: order.append((
+            "barrier", barrier.error_code, barrier.request_cost, barrier.source_receipt_id,
+        )),
+    )
+
+    assert order == [
+        ("barrier", "TRANSPORT_OUTCOME_UNCERTAIN", 1, "11111111-1111-4111-8111-111111111111"),
+        "transport",
+    ]
+    assert result.receipt.source_receipt_id == "11111111-1111-4111-8111-111111111111"
+    assert result.receipt.request_cost == 1
+
+
 def test_secondary_adapters_normalize_independent_claims_and_syndication():
     from lib.intelligence.pipeline import _discover
     from lib.intelligence.normalize import normalize_item

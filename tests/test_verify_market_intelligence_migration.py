@@ -28,6 +28,7 @@ DELIVERY_OUTBOX = ROOT / "sql" / "migrations" / "20260910_delivery_outbox.sql"
 COMMAND_ACKNOWLEDGEMENT_LEASE = ROOT / "sql" / "migrations" / "20260913_command_acknowledgement_lease.sql"
 SCHEDULED_LIFECYCLE = ROOT / "sql" / "migrations" / "20260923_scheduled_run_lifecycle.sql"
 POLICY_LIFECYCLE_CLOSURE = ROOT / "sql" / "migrations" / "20260929_policy_lifecycle_closure.sql"
+PROVIDER_RECOVERY_CLOSURE = ROOT / "sql" / "migrations" / "20260930_provider_attempt_and_recovery_closure.sql"
 
 TABLES = (
     "market_intelligence_runs",
@@ -631,6 +632,24 @@ def test_policy_lifecycle_closure_is_additive_and_fail_closed():
     repository = (ROOT / "supabase/functions/market-briefing-gateway/_shared/repository.ts").read_text()
     assert '"apply_market_decision_bundle_with_cash_snapshot",' in repository
     assert 'row.code === "RUN_ALREADY_EVALUATED"' in repository
+
+
+def test_provider_attempt_and_recovery_closure_is_additive_and_fail_closed():
+    sql = PROVIDER_RECOVERY_CLOSURE.read_text()
+    assert "CREATE OR REPLACE FUNCTION public.checkpoint_market_intelligence_collection(" in sql
+    assert "TRANSPORT_OUTCOME_UNCERTAIN" in sql
+    assert "v_reserved.provider NOT IN ('alpha_vantage','finnhub')" in sql
+    assert "octet_length(p_payload::text)>65536" in sql
+    assert "reservation use exceeds allocation" in sql
+    assert "v_valid_attempt_transition" in sql
+    assert "Never archive an attempt barrier" in sql
+    for table in (
+        "portfolio_command_acknowledgements", "market_policy_config",
+        "portfolio_cash_ledger_state", "reconciled_cash_snapshots",
+        "market_run_terminal_outcomes", "market_collection_checkpoint_history",
+    ):
+        assert f"'{table}'" in sql
+    assert "GRANT SELECT ON public.%I TO stock_agent_release_reader" in sql
 
 
 def test_fresh_schema_declares_reports_before_report_outbox_rowtype_functions():

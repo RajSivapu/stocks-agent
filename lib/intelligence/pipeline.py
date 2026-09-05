@@ -14,6 +14,7 @@ from zoneinfo import ZoneInfo
 
 from lib.intelligence.dedupe import RunItemDisposition, deduplicate
 from lib.intelligence.cache import ResumableCollectionCache, collection_from_checkpoint
+from lib.intelligence.canonical import canonical_event, canonical_ranking
 from lib.intelligence.http import SourceFailure, cache_key
 from lib.intelligence.normalize import SourceItem, normalize_item
 from lib.intelligence.packet import EvidencePacket, build_evidence_packet
@@ -379,7 +380,26 @@ class IntelligencePipeline:
                     except Exception as exc:
                         raise _CheckpointFailure("server quote collection outcome unavailable") from exc
                 else:
-                    result = adapter.collect(query)
+                    if adapter.provider in {"alpha_vantage", "finnhub"}:
+                        def checkpoint_attempt(barrier: RequestReceipt) -> None:
+                            try:
+                                self._checkpoint(
+                                    request.request_id,
+                                    _collection_cache_key(adapter, query),
+                                    CollectionResult((), barrier, query.limit),
+                                )
+                            except Exception as exc:
+                                raise _CheckpointFailure(
+                                    "durable provider attempt barrier failed"
+                                ) from exc
+
+                        result = adapter.collect(
+                            query,
+                            source_receipt_id=source_receipt_id,
+                            before_transport_attempt=checkpoint_attempt,
+                        )
+                    else:
+                        result = adapter.collect(query)
                 if not isinstance(result, CollectionResult):
                     raise TypeError("adapter returned an invalid collection result")
                 result = replace(
@@ -1098,12 +1118,12 @@ def _stored_event_id(run_id: str, event_id: str) -> str:
 
 
 def _event_row(run_id: str, value: MarketEvent) -> dict[str, object]:
-    return _semantic_row("event", {
+    return _semantic_row("event", canonical_event({
         "event_type": value.event_type, "title": value.title, "summary": value.summary,
         "occurred_at": _timestamp(value.occurred_at), "effective_at": _timestamp(value.effective_at),
-        "materiality": str(value.materiality), "confidence": str(value.confidence),
+        "materiality": value.materiality, "confidence": value.confidence,
         "evidence_item_ids": [evidence_key(item) for item in value.evidence],
-    }, row_id=_stored_event_id(run_id, value.event_id))
+    }), row_id=_stored_event_id(run_id, value.event_id))
 
 
 def _relationship_row(run_id: str, value: EventRelationship) -> dict[str, object]:
@@ -1116,13 +1136,13 @@ def _relationship_row(run_id: str, value: EventRelationship) -> dict[str, object
 
 
 def _ranking_row(run_id: str, value: RankedCandidate) -> dict[str, object]:
-    return _semantic_row("ranking", {
+    return _semantic_row("ranking", canonical_ranking({
         "event_id": _stored_event_id(run_id, value.event_id), "candidate_key": value.candidate_key, "ticker": value.ticker,
-        "rank": value.rank, "component_scores": {key: str(score) for key, score in value.components.items()},
-        "total_score": str(value.total_score), "qualified": value.qualified,
+        "rank": value.rank, "component_scores": value.components,
+        "total_score": value.total_score, "qualified": value.qualified,
         "veto_reasons": list(value.veto_reasons),
         "exposure_item_ids": [evidence_key(item) for item in value.exposure_evidence],
-    })
+    }))
 
 
 __all__ = [

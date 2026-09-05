@@ -26,6 +26,7 @@ from scripts.provision_owner_dashboard_auth import (
     validate_configuration as validate_auth_admin_configuration,
     validate_email_otp_configuration,
 )
+from lib.intelligence.canonical import EVENT_CANONICAL_SQL, RANKING_CANONICAL_SQL
 
 
 CANARY_METHOD = "GET"
@@ -409,16 +410,12 @@ def collect_source_receipts(database_url: str, api_url: str, run_id: str) -> dic
             "SELECT id::text AS id, phase, market_date::text AS market_date, policy_version FROM public.market_intelligence_runs WHERE id=%s::uuid",
             (run_id,))
         intelligence_events = _fetch_all(connection,
-            """SELECT id::text AS id, run_id::text AS run_id, content_hash,
-                      jsonb_build_object('event_type',event_type,'title',title,'summary',summary,
-                        'occurred_at',occurred_at,'effective_at',effective_at,'materiality',materiality,
-                        'confidence',confidence,'evidence_item_ids',evidence_item_ids) AS canonical
+            f"""SELECT id::text AS id, run_id::text AS run_id, content_hash,
+                      {EVENT_CANONICAL_SQL} AS canonical
                  FROM public.market_events WHERE run_id=%s::uuid ORDER BY id""", (run_id,))
         intelligence_rankings = _fetch_all(connection,
-            """SELECT id::text AS id, run_id::text AS run_id, event_id::text AS event_id, content_hash,
-                      jsonb_build_object('event_id',event_id,'candidate_key',candidate_key,'ticker',ticker,
-                        'rank',rank,'component_scores',component_scores,'total_score',total_score,
-                        'qualified',qualified,'veto_reasons',veto_reasons,'exposure_item_ids',exposure_item_ids) AS canonical
+            f"""SELECT id::text AS id, run_id::text AS run_id, event_id::text AS event_id, content_hash,
+                      {RANKING_CANONICAL_SQL} AS canonical
                  FROM public.market_candidate_rankings WHERE run_id=%s::uuid ORDER BY rank""", (run_id,))
         intelligence_packets = _fetch_all(connection,
             "SELECT id::text AS id, run_id::text AS run_id, packet_hash, candidate_count, evidence_count, packet AS canonical FROM public.market_evidence_packets WHERE run_id=%s::uuid", (run_id,))

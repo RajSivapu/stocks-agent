@@ -236,7 +236,7 @@ def test_quota_blocked_outcome_persists_real_attempt_count(databases, actual_cos
     assert db.execute("SELECT status,request_cost,error FROM market_source_receipts WHERE run_id=%s", (run,)).fetchone() == ("quota_blocked", actual_cost, {"code": "QUOTA_BLOCKED"})
 
 
-def _independent_worker(dsn, run_id, timestamp, crash, output):
+def _independent_worker(dsn, run_id, timestamp, crash, output, provider="gdelt", transport_count=None):
     """Independent process, real pipeline + RPCs; only the outbound provider is a fixture."""
     from datetime import datetime
     from zoneinfo import ZoneInfo
@@ -256,6 +256,8 @@ def _independent_worker(dsn, run_id, timestamp, crash, output):
                         (request_id, payload["phase"], payload["market_date"], payload["policy_version"], Jsonb(payload["reservation_plan"]), Jsonb(payload["request_window"]))).fetchone()[0]
                 if operation == "checkpoint_intelligence_collection":
                     checkpoint = db.execute("SELECT public.checkpoint_market_intelligence_collection(%s,%s)", (run_id, Jsonb(payload))).fetchone()[0]
+                    if crash == "attempt_barrier" and payload["receipt"].get("error_code") == "TRANSPORT_OUTCOME_UNCERTAIN":
+                        os._exit(75)
                     if crash == "checkpoint":
                         os._exit(74)
                     return checkpoint
@@ -269,11 +271,141 @@ def _independent_worker(dsn, run_id, timestamp, crash, output):
                 raise AssertionError(operation)
         class Source:
             def get(self, request):
-                return HttpResult(request.url, 200, {}, b'{"articles":[]}', now, now)
-        adapter = build_adapter("gdelt", Source(), QuotaSession({"gdelt": ()}), clock=lambda: now)
-        result = IntelligencePipeline(Gateway(), [adapter]).run(PipelineRequest(
-            "on-demand", now.astimezone(ZoneInfo("America/Chicago")).date(), now, request_id=run_id))
+                if transport_count is not None:
+                    with transport_count.get_lock():
+                        transport_count.value += 1
+                payload = b'{"articles":[]}' if provider == "gdelt" else b'{"feed":[]}' if provider == "alpha_vantage" else b'[]'
+                return HttpResult(request.url, 200, {}, payload, now, now)
+        adapter = build_adapter(provider, Source(), QuotaSession({provider: ()}),
+                                secret_getter=lambda _name: "existing-free-key", clock=lambda: now)
+        phase = "intraday" if provider in {"alpha_vantage", "finnhub"} else "on-demand"
+        context_data = {"holdings": {"TEST": "1"}} if phase == "intraday" else None
+        result = IntelligencePipeline(Gateway(), [adapter], context=context_data).run(PipelineRequest(
+            phase, now.astimezone(ZoneInfo("America/Chicago")).date(), now, request_id=run_id))
         output.put(result.to_dict())
+
+
+@pytest.mark.parametrize("provider", ["alpha_vantage", "finnhub"])
+def test_paid_provider_attempt_barrier_survives_process_crash_without_replacement_call(databases, provider):
+    import multiprocessing
+    db = databases["ordered"]
+    run_id = str(uuid.uuid4())
+    db.execute("INSERT INTO analysis_runs(id,kind) VALUES(%s,'intraday')", (run_id,))
+    timestamp = db.execute("SELECT statement_timestamp()").fetchone()[0].isoformat()
+    context = multiprocessing.get_context("spawn")
+    output = context.Queue()
+    transport_count = context.Value("i", 0)
+
+    first = context.Process(
+        target=_independent_worker,
+        args=(db.info.dsn, run_id, timestamp, "attempt_barrier", output, provider, transport_count),
+    )
+    first.start(); first.join(20)
+    assert first.exitcode == 75
+    checkpoint = db.execute(
+        "SELECT payload->'receipt'->>'status',payload->'receipt'->>'error_code',"
+        "(payload->'receipt'->>'request_cost')::int FROM market_collection_checkpoints WHERE run_id=%s",
+        (run_id,),
+    ).fetchone()
+    assert checkpoint == ("failed", "TRANSPORT_OUTCOME_UNCERTAIN", 1)
+    assert transport_count.value == 0
+
+    second = context.Process(
+        target=_independent_worker,
+        args=(db.info.dsn, run_id, timestamp, False, output, provider, transport_count),
+    )
+    second.start(); second.join(20)
+    assert second.exitcode == 0
+    result = output.get(timeout=2)
+    assert result["actual_requests"] == 1 and result["cache_hits"] == 0
+    assert result["receipts"][0]["error_code"] == "TRANSPORT_OUTCOME_UNCERTAIN"
+    assert transport_count.value == 0
+    assert db.execute(
+        "SELECT count(*),sum(request_cost) FROM market_source_receipts WHERE run_id=%s", (run_id,)
+    ).fetchone() == (1, 1)
+
+
+def test_paid_provider_attempt_barrier_transitions_to_one_terminal_receipt(databases):
+    import multiprocessing
+    db = databases["ordered"]
+    run_id = str(uuid.uuid4())
+    db.execute("INSERT INTO analysis_runs(id,kind) VALUES(%s,'intraday')", (run_id,))
+    timestamp = db.execute("SELECT statement_timestamp()").fetchone()[0].isoformat()
+    context = multiprocessing.get_context("spawn")
+    output, transport_count = context.Queue(), context.Value("i", 0)
+    worker = context.Process(
+        target=_independent_worker,
+        args=(db.info.dsn, run_id, timestamp, False, output, "alpha_vantage", transport_count),
+    )
+    worker.start(); worker.join(20)
+    assert worker.exitcode == 0
+    result = output.get(timeout=2)
+    assert result["actual_requests"] == 1 and transport_count.value == 1
+    assert db.execute(
+        "SELECT payload->'receipt'->>'status',(payload->'receipt'->>'request_cost')::int "
+        "FROM market_collection_checkpoints WHERE run_id=%s", (run_id,),
+    ).fetchone() == ("succeeded", 1)
+    assert db.execute(
+        "SELECT count(*) FROM market_collection_checkpoint_history WHERE run_id=%s", (run_id,),
+    ).fetchone()[0] == 0
+    assert db.execute(
+        "SELECT count(*),sum(request_cost) FROM market_source_receipts WHERE run_id=%s", (run_id,),
+    ).fetchone() == (1, 1)
+
+
+def test_event_and_ranking_hashes_survive_typed_postgres_readback_losslessly(databases):
+    from decimal import Decimal
+    from types import MappingProxyType
+    from lib.intelligence.pipeline import _event_row, _ranking_row
+    from lib.intelligence.normalize import SourceItem
+    from lib.intelligence.ranking import RankedCandidate
+    from lib.intelligence.themes import build_market_event
+    from scripts.protected_evidence import PostgresReadOnlySource
+
+    db = databases["ordered"]
+    run, _completion, _original, _payload = prepared_run(db, checkpoint=False)
+    now = db.execute("SELECT statement_timestamp()").fetchone()[0]
+    item = SourceItem(
+        provider="sec_edgar", upstream_item_id="filing-1", canonical_url="https://sec.gov/filing-1",
+        title="Issuer filing", summary="Material update", canonical_content="{}",
+        content_hash="a" * 64, published_at=now, effective_at=None, retrieved_at=now,
+        authority="official", metadata=MappingProxyType({"item_id": str(uuid.uuid4())}),
+    )
+    event = build_market_event(
+        event_type="filing", title="Material filing", summary="Issuer reports an update.",
+        materiality=Decimal("0.700000"), confidence=Decimal("0.800000"), evidence=(item,),
+        theme_ids=("earnings_ma",), occurred_at=now, effective_at=now,
+    )
+    event_row = _event_row(run, event)
+    ranking_row = _ranking_row(run, RankedCandidate(
+        ticker="TEST", candidate_key="TEST:filing", event_id=event.event_id,
+        relationship_type="affects", evidence=(item,), exposure_evidence=(),
+        components=MappingProxyType({"materiality": Decimal("0.700000")}),
+        missing_reasons=("exposure:missing",), total_score=Decimal("0.700000"),
+        authoritative_evidence_count=1, qualified=False,
+        veto_reasons=("INSUFFICIENT_EXPOSURE",), rank=1,
+    ))
+    db.execute(
+        "INSERT INTO market_events(id,run_id,event_type,title,summary,occurred_at,effective_at,materiality,confidence,evidence_item_ids,content_hash) "
+        "VALUES(%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)",
+        (event_row["id"], run, event_row["event_type"], event_row["title"], event_row["summary"],
+         event_row["occurred_at"], event_row["effective_at"], event_row["materiality"], event_row["confidence"],
+         Jsonb(event_row["evidence_item_ids"]), event_row["content_hash"]),
+    )
+    db.execute(
+        "INSERT INTO market_candidate_rankings(id,run_id,event_id,candidate_key,ticker,rank,component_scores,total_score,qualified,veto_reasons,exposure_item_ids,content_hash) "
+        "VALUES(%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)",
+        (ranking_row["id"], run, ranking_row["event_id"], ranking_row["candidate_key"], ranking_row["ticker"],
+         ranking_row["rank"], Jsonb(ranking_row["component_scores"]), ranking_row["total_score"], ranking_row["qualified"],
+         Jsonb(ranking_row["veto_reasons"]), Jsonb(ranking_row["exposure_item_ids"]), ranking_row["content_hash"]),
+    )
+    source = object.__new__(PostgresReadOnlySource)
+    source.connection = db
+    rows = source.release_rows(run)
+    assert rows["events"][0]["canonical"] == {key: value for key, value in event_row.items() if key not in {"id", "content_hash"}}
+    assert rows["rankings"][0]["canonical"] == {key: value for key, value in ranking_row.items() if key not in {"id", "content_hash"}}
+    assert hashlib.sha256(json.dumps(rows["events"][0]["canonical"], sort_keys=True, separators=(",", ":")).encode()).hexdigest() == event_row["content_hash"]
+    assert hashlib.sha256(json.dumps(rows["rankings"][0]["canonical"], sort_keys=True, separators=(",", ":")).encode()).hexdigest() == ranking_row["content_hash"]
 
 
 def test_actual_terminal_commit_survives_lost_response_and_independent_process_retry(databases):

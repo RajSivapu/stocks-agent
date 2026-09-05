@@ -18,6 +18,7 @@ import zipfile
 import psycopg
 from psycopg.rows import dict_row
 
+from lib.intelligence.canonical import EVENT_CANONICAL_SQL, RANKING_CANONICAL_SQL
 from scripts.export_recovery_bundle import MAX_PAYLOAD_BYTES
 from scripts.verify_personal_stock_agent_v1 import path_is_safe, require
 
@@ -27,12 +28,55 @@ RECOVERY_SQL = {
     "transactions": "SELECT id::text AS id,ticker,qty::text AS quantity,price::text AS price,ts::text AS ts,side,source,executed_on::text AS executed_on FROM public.transactions",
     "commands": """SELECT id::text AS id,status,telegram_update_id::text AS telegram_update_id,chat_id::text AS chat_id,user_id::text AS user_id,
         operation,ticker,qty::text AS qty,price::text AS price,executed_on::text AS executed_on,bucket,expected_shares::text AS expected_shares,
-        stop::text AS stop,preview,confirmation_message_id::text AS confirmation_message_id,expires_at::text AS expires_at,
+        stop::text AS stop,amount::text AS amount,cadence,next_due_on::text AS next_due_on,
+        expected_plan_updated_at::text AS expected_plan_updated_at,preview,
+        confirmation_message_id::text AS confirmation_message_id,expires_at::text AS expires_at,
         applied_at::text AS applied_at,realized_pnl::text AS realized_pnl,result,error,created_at::text AS created_at,updated_at::text AS updated_at FROM public.portfolio_commands""",
-    "runs": "SELECT id::text AS id,status,kind AS phase,started_at::text AS started_at,finished_at::text AS finished_at,scheduled_phase,scheduled_market_date::text AS scheduled_market_date,gateway_request_id::text AS gateway_request_id,telegram_message_ids FROM public.analysis_runs",
-    "packets": "SELECT id::text AS id,run_id::text AS run_id,packet_hash,packet FROM public.market_evidence_packets",
-    "reports": "SELECT id::text AS id,run_id::text AS run_id,packet_id::text AS packet_id,report_hash,rendered_hash,report,rendered_text FROM public.market_reports",
-    "publications": "SELECT report_id::text AS report_id,idempotency_key,status,telegram_message_ids,telegram_accepted_at::text AS telegram_accepted_at,suppression_reason FROM public.market_report_publications",
+    "command_acknowledgements": """SELECT command_id::text AS command_id,telegram_update_id::text AS telegram_update_id,status,result,error,
+        lease_token::text AS lease_token,lease_expires_at::text AS lease_expires_at,attempt_count,
+        created_at::text AS created_at,updated_at::text AS updated_at FROM public.portfolio_command_acknowledgements""",
+    "runs": """SELECT id::text AS id,status,kind AS phase,started_at::text AS started_at,finished_at::text AS finished_at,
+        data_as_of::text AS data_as_of,source_status,symbols,write_counts,telegram_message_ids,summary,error,
+        scheduled_phase,scheduled_market_date::text AS scheduled_market_date,gateway_request_id::text AS gateway_request_id
+        FROM public.analysis_runs""",
+    "gateway_requests": """SELECT request_id::text AS request_id,operation,run_id::text AS run_id,status,lease_token::text AS lease_token,
+        attempt_count,response,response_digest,created_at::text AS created_at,claimed_at::text AS claimed_at,finished_at::text AS finished_at
+        FROM public.market_gateway_requests""",
+    "policies": "SELECT version,config,active,created_at::text AS created_at,activated_at::text AS activated_at FROM public.market_policy_config",
+    "intelligence_runs": """SELECT id::text AS id,phase,market_date::text AS market_date,policy_version,reservation_plan,request_window,
+        created_at::text AS created_at FROM public.market_intelligence_runs""",
+    "intelligence_run_events": """SELECT id::text AS id,run_id::text AS run_id,status,detail,created_at::text AS created_at
+        FROM public.market_intelligence_run_events""",
+    "source_quota_reservations": """SELECT id::text AS id,run_id::text AS run_id,provider,market_date::text AS market_date,
+        phase,reserved_requests,cache_keys,created_at::text AS created_at FROM public.market_source_quota_reservations""",
+    "collection_checkpoints": """SELECT run_id::text AS run_id,cache_key,request_window,source_receipt_id::text AS source_receipt_id,
+        payload,created_at::text AS created_at FROM public.market_collection_checkpoints""",
+    "collection_checkpoint_history": """SELECT run_id::text AS run_id,cache_key,source_receipt_id::text AS source_receipt_id,
+        payload,replaced_at::text AS replaced_at FROM public.market_collection_checkpoint_history""",
+    "collection_completions": """SELECT completion_id::text AS completion_id,run_id::text AS run_id,payload,receipt,
+        created_at::text AS created_at FROM public.market_intelligence_collection_completions""",
+    "packets": """SELECT id::text AS id,run_id::text AS run_id,policy_version,status,candidate_count,evidence_count,
+        packet_hash,packet,created_at::text AS created_at FROM public.market_evidence_packets""",
+    "reports": """SELECT id::text AS id,run_id::text AS run_id,packet_id::text AS packet_id,idempotency_key,market_date::text AS market_date,kind,
+        report_hash,rendered_hash,report,rendered_text,created_at::text AS created_at FROM public.market_reports""",
+    "report_origins": """SELECT request_id::text AS request_id,run_id::text AS run_id,scheduled_phase,market_date::text AS market_date,
+        requested_kind,requested_report_id::text AS requested_report_id,requested_packet_id::text AS requested_packet_id,
+        requested_idempotency_key,requested_report_hash,created_at::text AS created_at FROM public.market_report_request_origins""",
+    "publications": """SELECT report_id::text AS report_id,idempotency_key,status,telegram_message_ids,
+        telegram_accepted_at::text AS telegram_accepted_at,suppression_reason,attempt_count,lease_token::text AS lease_token,
+        lease_expires_at::text AS lease_expires_at,error,created_at::text AS created_at,updated_at::text AS updated_at
+        FROM public.market_report_publications""",
+    "evaluation_publications": """SELECT id::text AS id,idempotency_key::text AS idempotency_key,run_id::text AS run_id,
+        market_date::text AS market_date,phase,kind,template_version,rendered_body,rendered_hash,status,telegram_message_ids,
+        attempt_count,lease_token::text AS lease_token,sending_started_at::text AS sending_started_at,delivered_at::text AS delivered_at,
+        telegram_accepted_at::text AS telegram_accepted_at,error,created_at::text AS created_at,updated_at::text AS updated_at
+        FROM public.market_publications""",
+    "cash_ledger_state": "SELECT singleton,revision::text AS revision,updated_at::text AS updated_at FROM public.portfolio_cash_ledger_state",
+    "cash_snapshots": """SELECT id::text AS id,as_of::text AS as_of,fresh_through::text AS fresh_through,
+        ledger_watermark::text AS ledger_watermark,core_available::text AS core_available,growth_available::text AS growth_available,
+        speculative_available::text AS speculative_available,created_at::text AS created_at FROM public.reconciled_cash_snapshots""",
+    "run_terminal_outcomes": """SELECT run_id::text AS run_id,evaluation_request_id::text AS evaluation_request_id,outcome,
+        created_at::text AS created_at FROM public.market_run_terminal_outcomes""",
     "roles": """SELECT r.rolname AS role,r.rolcanlogin AS login,r.rolsuper AS superuser,r.rolbypassrls AS bypass_rls,
         COALESCE((SELECT jsonb_agg(parent.rolname ORDER BY parent.rolname) FROM pg_catalog.pg_auth_members m
                   JOIN pg_catalog.pg_roles parent ON parent.oid=m.roleid WHERE m.member=r.oid),'[]'::jsonb) AS memberships,
@@ -47,15 +91,16 @@ RECOVERY_SQL = {
               CROSS JOIN LATERAL aclexplode(col.attacl) a WHERE a.grantee=r.oid
         ) g),'[]'::jsonb) AS grants
         FROM pg_catalog.pg_roles r WHERE r.rolname IN ('stock_agent_dashboard','stock_agent_dashboard_runtime')""",
-    "schema_version": """SELECT version,encode(extensions.digest(convert_to(array_to_string(statements,E'\\n'),'UTF8'),'sha256'),'hex') AS sha256
+    "schema_version": """SELECT version,statements,encode(extensions.digest(convert_to(array_to_string(statements,E'\\n'),'UTF8'),'sha256'),'hex') AS sha256
                          FROM supabase_migrations.schema_migrations""",
 }
 READ_TABLES = (
-    "holdings", "transactions", "portfolio_commands", "analysis_runs", "market_evidence_packets", "market_reports",
+    "holdings", "transactions", "portfolio_commands", "portfolio_command_acknowledgements", "analysis_runs", "market_policy_config", "market_evidence_packets", "market_reports",
     "market_report_publications", "market_intelligence_runs", "market_intelligence_collection_completions", "market_intelligence_run_events",
-    "market_collection_checkpoints", "market_events", "market_candidate_rankings", "market_gateway_requests",
+    "market_collection_checkpoints", "market_collection_checkpoint_history", "market_events", "market_candidate_rankings", "market_gateway_requests",
     "market_report_request_origins", "market_publications", "market_source_quota_reservations", "market_source_receipts",
-    "market_alert_drafts", "market_alert_events", "market_alert_actions",
+    "market_alert_drafts", "market_alert_events", "market_alert_actions", "portfolio_cash_ledger_state",
+    "reconciled_cash_snapshots", "market_run_terminal_outcomes",
 )
 
 
@@ -122,6 +167,13 @@ class PostgresReadOnlySource:
         self.identity()
         return {name: self.query(f"SELECT count(*) AS count FROM ({sql}) AS records")[0]["count"] for name, sql in RECOVERY_SQL.items()}
 
+    def refresh_snapshot(self):
+        """Begin a fresh read-only snapshot after an isolated writer commits restore data."""
+        self.identity()
+        self.connection.rollback()
+        self.connection.execute("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY")
+        self.connection.execute("SET LOCAL statement_timeout='30s'")
+
     def dry_run_snapshot(self) -> dict:
         """Hash canonical full rows across every release write surface."""
         self.identity()
@@ -148,8 +200,8 @@ class PostgresReadOnlySource:
             "packets": RECOVERY_SQL["packets"] + " WHERE run_id=%s::uuid",
             "reports": "SELECT id::text AS id,run_id::text AS run_id,packet_id::text AS packet_id,report_hash,rendered_hash,report,rendered_text,idempotency_key,market_date::text AS market_date,kind FROM public.market_reports WHERE run_id=%s::uuid",
             "publications": RECOVERY_SQL["publications"] + " WHERE report_id IN (SELECT id FROM public.market_reports WHERE run_id=%s::uuid)",
-            "events": """SELECT id::text AS id,run_id::text AS run_id,content_hash,jsonb_build_object('event_type',event_type,'title',title,'summary',summary,'occurred_at',occurred_at,'effective_at',effective_at,'materiality',materiality,'confidence',confidence,'evidence_item_ids',evidence_item_ids) AS canonical FROM public.market_events WHERE run_id=%s::uuid""",
-            "rankings": """SELECT id::text AS id,run_id::text AS run_id,event_id::text AS event_id,content_hash,jsonb_build_object('event_id',event_id,'candidate_key',candidate_key,'ticker',ticker,'rank',rank,'component_scores',component_scores,'total_score',total_score,'qualified',qualified,'veto_reasons',veto_reasons,'exposure_item_ids',exposure_item_ids) AS canonical FROM public.market_candidate_rankings WHERE run_id=%s::uuid""",
+            "events": f"""SELECT id::text AS id,run_id::text AS run_id,content_hash,{EVENT_CANONICAL_SQL} AS canonical FROM public.market_events WHERE run_id=%s::uuid""",
+            "rankings": f"""SELECT id::text AS id,run_id::text AS run_id,event_id::text AS event_id,content_hash,{RANKING_CANONICAL_SQL} AS canonical FROM public.market_candidate_rankings WHERE run_id=%s::uuid""",
             "evaluation_publications": "SELECT id::text AS id,run_id::text AS run_id,status,phase,market_date::text AS market_date FROM public.market_publications WHERE run_id=%s::uuid",
             "origins": "SELECT request_id::text AS request_id,run_id::text AS run_id,requested_packet_id::text AS requested_packet_id,scheduled_phase,market_date::text AS market_date,requested_kind,requested_report_id::text AS requested_report_id,requested_idempotency_key,requested_report_hash FROM public.market_report_request_origins WHERE run_id=%s::uuid",
             "quota": "SELECT q.id::text AS id,q.run_id::text AS run_id,q.provider,q.reserved_requests,COALESCE((SELECT sum(r.request_cost) FROM public.market_source_receipts r WHERE r.reservation_id=q.id),0)::int AS actual_requests FROM public.market_source_quota_reservations q WHERE q.run_id=%s::uuid",
