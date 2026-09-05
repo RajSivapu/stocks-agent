@@ -88,6 +88,8 @@ def test_independent_recovery_contract_covers_cancelled_and_lost_release_runners
     assert "conclusion != 'success'" in recovery
     assert "rollback-source-${{ github.event.workflow_run.id }}" in recovery
     assert "--recovery-root" in recovery
+    assert "recovery-metadata/release-state.json" in recovery
+    assert "recovery-metadata/recovery-metadata" not in recovery
 
 
 def test_release_exports_candidate_for_every_set_u_dry_run_and_recovery_step():
@@ -106,6 +108,21 @@ def test_recovery_uses_exact_candidate_concurrency_and_separate_durable_artifact
     assert "deployments/$DEPLOYMENT_ID/statuses" in recovery
     assert "--retain-recovery-artifact" in recovery
     assert "conclusion != 'success'" in recovery
-    assert "state=success" in workflow and workflow.rindex("state=success") > workflow.rindex("Release local rollback worktree")
+    finalizer = Path("scripts/finalize_protected_release.py").read_text()
+    assert "finalize_protected_release.py" in workflow and "state=success" in finalizer
+    assert workflow.index("Release local rollback worktree") < workflow.index("Mark candidate deployment successful")
     assert "steps.deployment.outputs.required" not in recovery
     assert recovery.index("Restore durable gateway recovery artifact") > recovery.index("Record terminal deployment status")
+
+
+def test_database_lease_is_the_authoritative_release_recovery_serialization_boundary():
+    workflow = Path(".github/workflows/owner-dashboard-release.yml").read_text()
+    recovery = Path(".github/workflows/owner-dashboard-release-recovery.yml").read_text()
+    deployer = Path("scripts/deploy_owner_dashboard_api.py").read_text()
+    restorer = Path("scripts/restore_gateway_after_release_failure.py").read_text()
+    assert "RELEASE_LEASE_OWNER=release-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT" in workflow
+    assert "--lease-owner \"$RELEASE_LEASE_OWNER\"" in workflow
+    assert "actions/runs?event=workflow_run&status=in_progress" not in workflow
+    assert "DurableMutationLease" in deployer and "pg_advisory_lock" in deployer
+    assert "recovery_required" in deployer and "lease.resolve()" in restorer
+    assert "finalize_protected_release.py" in workflow

@@ -125,3 +125,14 @@ Residual risk: deployment receipt collection must still populate the authoritati
 - The release success status is the final success-path action. Recovery uses a candidate-scoped workflow lock plus the database advisory lock used by deployment/recovery mutations; new releases reject in-progress recovery work.
 - Migration statements are parsed and canonically hashed as ordered `statements[]`; duplicate migration versions are rejected. The two never-deployed `20260912` branch-only migrations were renamed to unique ordered timestamp versions and schema/test references were synchronized.
 - The rollback drill now drives the actual recovery state machine and protected function deployment command builder through a disposable runtime driver, proving the prior bundle activates and the candidate bundle is removed.
+
+## Acceptance correction 3 — 2026-09-05
+
+- Corrected recovery artifact consumption to the directory-root download contract: the metadata artifact contains exactly `recovery-metadata/release-state.json` and `recovery-metadata/rollback-capture.json`, with a focused layout test that models `upload-artifact` directory-root behavior.
+- Replaced the race-prone Actions run snapshot with a production database session advisory lock and durable, fail-closed lease record. Release keeps the lease through database, gateway, dashboard, canary, and static mutations; independent recovery uses the same protocol, can safely take over after the releasing session is gone, and releases remain blocked while recovery is unresolved. The final status helper retains that lock through the GitHub success-status request and resolves only after it is accepted.
+- Candidate SQL and native Supabase `statements[]` are now normalized per statement, never by joining native entries. Hashes use ordered, trimmed, no-terminal-semicolon statements and focused fixtures cover multi-statement native receipts plus comments and whitespace.
+
+### Focused local evidence
+
+- `.venv/bin/python -m pytest -q tests/test_deploy_owner_dashboard_api.py tests/test_owner_dashboard_release_workflow.py tests/test_verify_personal_stock_agent_v1.py tests/test_verify_owner_dashboard_deployment.py tests/test_recovery_bundle.py` — `144 passed in 15.19s`.
+- `git diff --check` passed. No live workflow, deployment, database migration/read/write, recovery operation, Telegram send, provider/model call, brokerage action, scheduled run, or full suite was invoked.

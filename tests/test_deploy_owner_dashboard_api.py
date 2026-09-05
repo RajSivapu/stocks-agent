@@ -266,15 +266,17 @@ def test_isolated_rollback_drill_uses_the_restore_path_and_removes_failed_candid
 
 
 def test_recovery_metadata_archive_has_only_the_normalized_download_paths(tmp_path):
-    root = tmp_path / "capture/recovery-metadata"; root.mkdir(parents=True)
+    # upload-artifact receives the directory itself.  Its download therefore
+    # has exactly one recovery-metadata root, not a duplicated directory.
+    root = tmp_path / "downloaded-artifact/recovery-metadata"; root.mkdir(parents=True)
     (root / "rollback-capture.json").write_text("{}")
     (root / "release-state.json").write_text("{}")
-    assert deploy.recovery_metadata_members(tmp_path / "capture") == {
+    assert deploy.recovery_metadata_members(tmp_path / "downloaded-artifact") == {
         "recovery-metadata/rollback-capture.json", "recovery-metadata/release-state.json",
     }
     (root / "unexpected").write_text("x")
     with pytest.raises(RuntimeError, match="archive layout"):
-        deploy.recovery_metadata_members(tmp_path / "capture")
+        deploy.recovery_metadata_members(tmp_path / "downloaded-artifact")
 
 
 def test_migration_statement_hash_handles_multiple_ordered_statements_and_duplicate_versions(tmp_path):
@@ -285,6 +287,39 @@ def test_migration_statement_hash_handles_multiple_ordered_statements_and_duplic
     duplicate = tmp_path / "202609120001_duplicate.sql"; duplicate.write_text("SELECT 4;")
     with pytest.raises(RuntimeError, match="globally unique"):
         deploy.candidate_migration_manifest(tmp_path)
+
+
+def test_native_supabase_statement_receipts_are_compared_without_joining_or_reparsing():
+    from scripts import verify_owner_dashboard_deployment as verifier
+
+    candidate = deploy.normalize_migration_statements(" -- receipt comment\n SELECT 1; /* ignored */\n SELECT 2; ")
+    assert candidate == ["SELECT 1", "SELECT 2"]
+    assert deploy.migration_statements_sha256(candidate) == deploy.migration_statements_sha256(
+        ["\n SELECT 1  ", "SELECT 2\n"]
+    )
+    assert deploy.migration_statements_sha256(
+        deploy.normalize_migration_statements("SELECT 1; SELECT 2;")
+    ) == deploy.migration_statements_sha256(["SELECT 1", "SELECT 2"])
+    assert verifier.migration_statements_sha256(["SELECT 1", "SELECT 2"]) == deploy.migration_statements_sha256(candidate)
+
+
+def test_shared_durable_lease_blocks_new_release_and_allows_recovery_takeover_after_lock():
+    release_owner = "release-123456789"
+    recovery_owner = "recovery-123456789"
+
+    class Cursor:
+        def __init__(self, row): self.row, self.calls, self.rowcount = row, [], 1
+        def execute(self, statement, params=None): self.calls.append((statement, params))
+        def fetchall(self): return [self.row]
+
+    blocked = Cursor((release_owner, "release", "recovery_required", True))
+    with pytest.raises(RuntimeError, match="remains unresolved"):
+        deploy.acquire_durable_release_lease(blocked, "release-987654321", "release")
+    takeover = Cursor((release_owner, "release", "recovery_required", True))
+    deploy.acquire_protected_release_lock(takeover)
+    deploy.acquire_durable_release_lease(takeover, recovery_owner, "recovery")
+    assert "pg_advisory_lock" in takeover.calls[0][0]
+    assert takeover.calls[-1][1] == (recovery_owner, "recovery")
 
 
 def test_candidate_dry_run_installs_dependencies_and_uses_only_protected_vite_values(tmp_path, monkeypatch):

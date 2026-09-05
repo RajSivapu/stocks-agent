@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+from contextlib import AbstractContextManager
 from datetime import datetime, timezone
 import hashlib
 import json
@@ -43,6 +44,8 @@ from scripts.verify_owner_dashboard_deployment import (
 MIGRATION_NAME = re.compile(r"^(?P<version>\d{8}(?:\d{4})?)_[a-z0-9][a-z0-9_]*\.sql$")
 SUPABASE_CLI_VERSION = "2.116.0"
 MIGRATION_LEDGER = "public.stock_agent_release_migration_ledger"
+RELEASE_LEASE = "public.stock_agent_release_mutation_lease"
+RELEASE_LEASE_SECONDS = 900
 FUNCTION_NAME = "owner-dashboard-api"
 CHANGED_FUNCTIONS = ("market-briefing-gateway", FUNCTION_NAME)
 V1_SURFACES = ("portfolio", "ideas", "intelligence", "reports", "system")
@@ -123,8 +126,102 @@ def validate_release_database_endpoints(
 
 
 def acquire_protected_release_lock(cursor) -> None:
-    """Serialize release and recovery mutations inside the production database."""
-    cursor.execute("SELECT pg_advisory_xact_lock(hashtextextended('stock_agent_protected_release', 0))")
+    """Acquire the session lock shared by every production mutation driver.
+
+    This deliberately is not an Actions-concurrency substitute: it is held by
+    the database session while Edge, database, and static mutations run.
+    """
+    cursor.execute("SELECT pg_advisory_lock(hashtextextended('stock_agent_protected_release', 0))")
+
+
+def acquire_durable_release_lease(cursor, owner: str, kind: str) -> None:
+    """Record the holder after the shared session lock has been acquired.
+
+    A release can never replace an unresolved record.  Recovery can replace a
+    release record only after it owns the session lock, so an active release
+    cannot be interrupted between the check and the first mutation.
+    """
+    if not re.fullmatch(r"[a-z0-9-]{16,128}", owner):
+        raise ValueError("canonical release lease owner is required")
+    if kind not in {"release", "recovery"}:
+        raise ValueError("canonical release lease kind is required")
+    cursor.execute(
+        f"CREATE TABLE IF NOT EXISTS {RELEASE_LEASE} (singleton BOOLEAN PRIMARY KEY DEFAULT true CHECK (singleton), owner TEXT NOT NULL, kind TEXT NOT NULL CHECK (kind IN ('release','recovery')), state TEXT NOT NULL CHECK (state IN ('recovery_required','resolved')), expires_at TIMESTAMPTZ NOT NULL, heartbeat_at TIMESTAMPTZ NOT NULL)"
+    )
+    cursor.execute(f"SELECT owner, kind, state, expires_at > statement_timestamp() FROM {RELEASE_LEASE} WHERE singleton FOR UPDATE")
+    rows = cursor.fetchall()
+    if rows:
+        if len(rows) != 1 or len(rows[0]) != 4:
+            raise RuntimeError("protected release lease receipt is malformed")
+        current_owner, current_kind, current_state, _active = rows[0]
+        same_owner = current_owner == owner and current_kind == kind
+        # A recovery is idempotent and may take over either a lost release or
+        # an earlier local recovery.  The session advisory lock above proves
+        # none of those owners is in a protected mutation at this instant.
+        recovery_takeover = kind == "recovery"
+        if not same_owner and current_state != "resolved" and not recovery_takeover:
+            raise RuntimeError("a protected release or recovery lease remains unresolved")
+    cursor.execute(
+        f"INSERT INTO {RELEASE_LEASE} (singleton,owner,kind,state,expires_at,heartbeat_at) VALUES (true,%s,%s,'recovery_required',statement_timestamp()+interval '{RELEASE_LEASE_SECONDS} seconds',statement_timestamp()) ON CONFLICT (singleton) DO UPDATE SET owner=EXCLUDED.owner, kind=EXCLUDED.kind, state='recovery_required', expires_at=EXCLUDED.expires_at, heartbeat_at=EXCLUDED.heartbeat_at",
+        (owner, kind),
+    )
+
+
+def heartbeat_durable_release_lease(cursor, owner: str) -> None:
+    cursor.execute(f"UPDATE {RELEASE_LEASE} SET expires_at=statement_timestamp()+interval '{RELEASE_LEASE_SECONDS} seconds', heartbeat_at=statement_timestamp() WHERE singleton AND owner=%s", (owner,))
+    if cursor.rowcount != 1:
+        raise RuntimeError("protected release lease ownership was lost")
+
+
+def resolve_durable_release_lease(cursor, owner: str) -> None:
+    """Resolve only the currently held recovery obligation."""
+    cursor.execute(
+        f"UPDATE {RELEASE_LEASE} SET state='resolved', expires_at=statement_timestamp(), heartbeat_at=statement_timestamp() WHERE singleton AND owner=%s",
+        (owner,),
+    )
+    if cursor.rowcount != 1:
+        raise RuntimeError("protected release lease ownership was lost")
+
+
+class DurableMutationLease(AbstractContextManager["DurableMutationLease"]):
+    """A session advisory lock plus committed fail-closed recovery record.
+
+    The session lock prevents the classic check-then-start race.  The durable
+    row intentionally survives a killed runner, preventing a later release
+    from mutating until the independent recovery takes ownership or success is
+    durably resolved.
+    """
+    def __init__(self, admin_url: str, owner: str, kind: str, *, connector: Callable[..., object] = psycopg.connect):
+        self.admin_url, self.owner, self.kind, self.connector = admin_url, owner, kind, connector
+        self.connection = None
+
+    def __enter__(self) -> "DurableMutationLease":
+        self.connection = self.connector(self.admin_url, autocommit=True)
+        with self.connection.cursor() as cursor:
+            acquire_protected_release_lock(cursor)
+            acquire_durable_release_lease(cursor, self.owner, self.kind)
+        return self
+
+    def heartbeat(self) -> None:
+        if self.connection is None:
+            raise RuntimeError("protected release lease is unavailable")
+        with self.connection.cursor() as cursor:
+            heartbeat_durable_release_lease(cursor, self.owner)
+
+    def resolve(self) -> None:
+        if self.connection is None:
+            raise RuntimeError("protected release lease is unavailable")
+        with self.connection.cursor() as cursor:
+            resolve_durable_release_lease(cursor, self.owner)
+
+    def __exit__(self, _type, _value, _traceback) -> None:
+        if self.connection is not None:
+            try:
+                with self.connection.cursor() as cursor:
+                    cursor.execute("SELECT pg_advisory_unlock(hashtextextended('stock_agent_protected_release', 0))")
+            finally:
+                self.connection.close()
+                self.connection = None
 
 
 def _validate_role_receipt(value: Mapping[str, object]) -> None:
@@ -311,7 +408,7 @@ def normalize_migration_statements(sql: str) -> list[str]:
         if char in {"'", '"'}: quote = char; buffer.append(char)
         elif char == ";":
             value = " ".join("".join(buffer).split())
-            if value: statements.append(value + ";")
+            if value: statements.append(value)
             buffer = []
         else: buffer.append(char)
         index += 1
@@ -323,7 +420,10 @@ def normalize_migration_statements(sql: str) -> list[str]:
 
 
 def migration_statements_sha256(statements: Sequence[str]) -> str:
-    return hashlib.sha256(json.dumps(list(statements), ensure_ascii=False, separators=(",", ":")).encode()).hexdigest()
+    # Native schema_migrations.statements[] elements are already split: never
+    # join and reparse them, since that can change a statement boundary.
+    canonical = [item for statement in statements for item in normalize_migration_statements(statement)]
+    return hashlib.sha256(json.dumps(canonical, ensure_ascii=False, separators=(",", ":")).encode()).hexdigest()
 
 
 def prepare_gateway_rollback_artifact(
@@ -561,7 +661,7 @@ def apply_release_migrations(
         candidates = by_version.get(version, [])
         if not candidates or not all(isinstance(part, str) for part in statements):
             raise RuntimeError("native migration version is not an exact candidate")
-        matching = [item for item in candidates if migration_statements_sha256(normalize_migration_statements("\n".join(statements))) == item["sha256"]]
+        matching = [item for item in candidates if migration_statements_sha256(statements) == item["sha256"]]
         if len(matching) != 1 or matching[0]["path"] in native:
             raise RuntimeError("native migration hash mismatch")
         item = matching[0]
@@ -1060,6 +1160,7 @@ def main() -> int:
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument("--prepare-recovery", action="store_true")
     parser.add_argument("--deployment-id", type=int)
+    parser.add_argument("--lease-owner")
     arguments = parser.parse_args()
     if not os.environ.get("SUPABASE_ACCESS_TOKEN", "").strip():
         raise SystemExit("SUPABASE_ACCESS_TOKEN is required for protected Supabase mutation")
@@ -1099,6 +1200,8 @@ def main() -> int:
         return 0
 
     validate_release_database_endpoints(arguments.project_ref, admin_url, session_template)
+    if not arguments.lease_owner:
+        raise SystemExit("--lease-owner is required for protected production mutation")
     # The clean-tree gate intentionally precedes capture/state writes.
     git_sha = verify_git_release(expected_sha=arguments.candidate_sha)
     verify_reviewed_sha(git_sha, arguments.reviewed_sha)
@@ -1149,12 +1252,17 @@ def main() -> int:
     dashboard_source = verify_v1_dashboard_source()
     ensure_initial_function_absent(arguments.project_ref)
     migration_manifest = candidate_migration_manifest()
+    # This lease survives a lost runner as an unresolved recovery obligation.
+    # Do not resolve it here: the final workflow action resolves it only after
+    # GitHub accepts the terminal deployment success status.
+    mutation_lease = DurableMutationLease(admin_url, arguments.lease_owner, "release")
+    mutation_lease.__enter__()
     with psycopg.connect(admin_url) as connection:
         with connection.cursor() as cursor:
-            acquire_protected_release_lock(cursor)
             migration_receipts = apply_release_migrations(cursor, migration_manifest)
         database_secret = provision_dashboard_role(connection, session_template)
         role_receipt = verify_dashboard_role(connection)
+    mutation_lease.heartbeat()
     database_url = database_secret["DASHBOARD_DATABASE_URL"]
     safe_configuration = validate_deployment_configuration(
         project_ref=arguments.project_ref,
@@ -1170,6 +1278,7 @@ def main() -> int:
     # A subprocess can die after its remote mutation and before it returns a
     # receipt, so mark this state atomically before attempting that command.
     write_state(True)
+    mutation_lease.heartbeat()
     receipt = publish_and_deploy_or_rollback(
         arguments.project_ref,
         {
@@ -1198,6 +1307,7 @@ def main() -> int:
         non_owner_access_token,
         rollback=lambda project_ref: rollback_release(project_ref, admin_url),
     )
+    mutation_lease.heartbeat()
     receipt["static_assets"] = build_static_or_rollback(
         arguments.project_ref,
         arguments.site_origin,
@@ -1224,6 +1334,10 @@ def main() -> int:
     receipt["rollback_readiness"] = gateway_rollback_preflight
     receipt["deployment_outcome"] = "succeeded"
     print(json.dumps(receipt, sort_keys=True, separators=(",", ":")))
+    # The durable row remains recovery_required.  The terminal-status helper
+    # resolves it while holding the same protocol lock as the last workflow
+    # action; failure/cancellation leaves it available to independent recovery.
+    mutation_lease.__exit__(None, None, None)
     if not arguments.keep_rollback_worktree:
         release_gateway_rollback_artifact(gateway_rollback)
     return 0

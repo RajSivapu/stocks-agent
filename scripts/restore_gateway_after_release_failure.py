@@ -7,6 +7,7 @@ import json
 from pathlib import Path
 
 from scripts.deploy_owner_dashboard_api import (
+    DurableMutationLease,
     release_gateway_rollback_artifact,
     recover_gateway_from_state,
 )
@@ -20,12 +21,19 @@ def main() -> int:
     parser.add_argument("--release-state", required=True, type=Path)
     parser.add_argument("--recovery-root", type=Path)
     parser.add_argument("--retain-recovery-artifact", action="store_true")
+    parser.add_argument("--lease-owner", required=True)
     args = parser.parse_args()
     state = json.loads(args.release_state.read_text())
-    recover_gateway_from_state(
-        state, args.project_ref, args.admin_url, recovery_root=args.recovery_root,
-        releaser=(lambda _artifact: None) if args.retain_recovery_artifact else release_gateway_rollback_artifact,
-    )
+    # Acquiring the same durable session lock makes recovery a safe takeover
+    # after a release runner disappears, while an active release cannot be
+    # raced between a preflight check and its first remote mutation.
+    with DurableMutationLease(args.admin_url, args.lease_owner, "recovery") as lease:
+        recover_gateway_from_state(
+            state, args.project_ref, args.admin_url, recovery_root=args.recovery_root,
+            releaser=(lambda _artifact: None) if args.retain_recovery_artifact else release_gateway_rollback_artifact,
+        )
+        lease.heartbeat()
+        lease.resolve()
     return 0
 
 

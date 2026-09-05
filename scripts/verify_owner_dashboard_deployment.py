@@ -121,7 +121,7 @@ def normalize_migration_statements(sql: str) -> list[str]:
         if char in {"'", '"'}: quote = char; buffer.append(char)
         elif char == ";":
             value = " ".join("".join(buffer).split())
-            if value: statements.append(value + ";")
+            if value: statements.append(value)
             buffer = []
         else: buffer.append(char)
         index += 1
@@ -133,7 +133,8 @@ def normalize_migration_statements(sql: str) -> list[str]:
 
 
 def migration_statements_sha256(statements: Sequence[str]) -> str:
-    return canonical_sha256(list(statements))
+    canonical = [item for statement in statements for item in normalize_migration_statements(statement)]
+    return canonical_sha256(canonical)
 
 
 def candidate_migration_manifest(migrations_directory: Path = ROOT / "sql/migrations") -> list[dict[str, str]]:
