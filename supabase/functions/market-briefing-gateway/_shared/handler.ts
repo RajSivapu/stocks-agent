@@ -738,10 +738,8 @@ export function createGatewayHandler(dependencies: GatewayDependencies) {
             delivery.parts,
             deps,
           );
-          // The gateway-request lease is complete at this point. Do not advertise a
-          // same-request retry that its immutable response cache cannot actually claim.
-          const retryAllowed = false;
           const failed = delivered.status === "failed" || delivered.status === "uncertain";
+          const retryAllowed = delivered.status === "failed" || delivered.status === "pending";
           result = {
             ok: !failed,
             ...(failed ? { code: delivered.status === "uncertain" ? "DELIVERY_UNKNOWN" : "DELIVERY_FAILED" } : {}),
@@ -754,11 +752,9 @@ export function createGatewayHandler(dependencies: GatewayDependencies) {
             telegram_message_ids: delivered.telegram_message_ids,
           };
         }
-        await deps.repository.completeRequest(
-          envelope.request_id,
-          leaseToken,
-          result,
-        );
+        if (result.ok !== true) {
+          await deps.repository.failRequest(envelope.request_id, leaseToken, String(result.code));
+        } else await deps.repository.completeRequest(envelope.request_id, leaseToken, result);
         return response(result.ok === true ? 200 : 502, result);
       }
 

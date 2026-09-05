@@ -810,6 +810,14 @@ BEGIN
      OR (p_operation <> 'start_run' AND v_request.run_id IS DISTINCT FROM p_run_id) THEN
     RAISE EXCEPTION 'request identity mismatch' USING ERRCODE = '22023';
   END IF;
+  IF v_request.status='failed' AND p_operation='record_report' THEN
+    -- Only report delivery failures are reclaimable: their deterministic outbox
+    -- key remains the authority and delivered/uncertain rows decline a send.
+    v_lease := gen_random_uuid();
+    UPDATE public.market_gateway_requests SET status='claimed',lease_token=v_lease,
+      claimed_at=now(),attempt_count=attempt_count+1 WHERE request_id=p_request_id;
+    RETURN jsonb_build_object('claimed',true,'lease_token',v_lease,'attempt_count',v_request.attempt_count+1);
+  END IF;
   IF v_request.status IN ('completed','failed') THEN
     RETURN jsonb_build_object('claimed', false, 'status', v_request.status,
       'response', v_request.response, 'response_digest', v_request.response_digest);
@@ -2594,6 +2602,12 @@ BEGIN
   IF v_request.operation<>p_operation
      OR v_request.run_id IS DISTINCT FROM v_stored_run THEN
     RAISE EXCEPTION 'request identity mismatch' USING ERRCODE = '22023';
+  END IF;
+  IF v_request.status='failed' AND p_operation='record_report' THEN
+    v_lease := gen_random_uuid();
+    UPDATE public.market_gateway_requests SET status='claimed',lease_token=v_lease,
+      claimed_at=now(),attempt_count=attempt_count+1 WHERE request_id=p_request_id;
+    RETURN jsonb_build_object('claimed',true,'lease_token',v_lease,'attempt_count',v_request.attempt_count+1);
   END IF;
   IF v_request.status IN ('completed','failed') THEN
     RETURN jsonb_build_object('claimed',false,'status',v_request.status,
