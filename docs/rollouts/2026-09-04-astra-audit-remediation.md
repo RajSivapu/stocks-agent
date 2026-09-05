@@ -27,7 +27,7 @@ candidate-bound verifiers. None is claimed applied to a live project.
 
 | Stage | Status | Required evidence |
 |---|---|---|
-| Consolidated local gate | Complete | `npm run test:all`: 1,006 passed, 4 skipped, 4 credentialed integrations deselected; tested code committed at `a0f8158` |
+| Consolidated local gate | Pending for final fix wave | Historical `a0f8158` gate passed 1,006 tests; it does not verify the final Track A/B/C changes |
 | Independent review | Pending | GPT-6 Astra whole-branch verdict with no unresolved Critical or Important finding |
 | Exact-head CI | Pending | Successful protected CI bound to the final reviewed SHA and current `main` ancestry |
 | Migration deployment | Pending | Ordered native/private ledger match, per-statement hashes, exact candidate suffix, and no drift |
@@ -45,7 +45,7 @@ Earlier production and CI records predate this remediation and cannot satisfy th
 2. Run exact-head CI and verify current-main plus merged-review ancestry.
 3. Capture immutable rollback state and acquire the durable production release lease.
 4. Apply every ordered migration with native and private statement-ledger reconciliation.
-5. Deploy only the reviewed gateway/API/Site artifacts and prove source/static parity.
+5. Deploy the reviewed gateway/API/Telegram/Site artifacts and prove downloaded source/static parity.
 6. Configure/read back six-digit owner Auth and run owner/denial canaries.
 7. Perform the protected isolated restore drill before treating recovery as proven.
 8. Reconcile the next existing scheduled chain without creating a duplicate run.
@@ -69,3 +69,50 @@ proof. Focused tests and the forthcoming consolidated gate are not deployment ev
 
 Creating this record performed no live database access or mutation, migration, deployment, Auth
 configuration, Telegram send, scheduled run, provider/model call, or brokerage action.
+
+## Final fix wave Track C transport boundary
+
+Focused local tests passed **315/315**. The audited `20260907` bytes are restored and the additive
+tail is `20261001_immutable_history_closure.sql`. Source history/hash enforcement is unchanged.
+The scoped PostgreSQL tests exercised both native-ledger upgrade/retry and a real isolated restore.
+These results are local evidence; the final consolidated and independent-review gates are pending.
+
+The production CLI and independent recovery now share the six-component encrypted journal engine.
+Every prior snapshot contains presence, complete configuration, exact files, private values,
+platform identity/version, and an authenticated snapshot hash. Every attempted mutation is durably
+marked before transport; only marked components are restored, in reverse order, and then read back.
+The final verifier independently reads protected immutable artifacts for all three Edge functions
+and the owner Site, requires platform identities and byte parity, and checks predeployment capture.
+
+The configured zero-cost static target remains `.openai/hosting.json`. There is no reviewed native
+CI adapter in this repository. The workflow checks that before creating a production deployment,
+and the CLI checks before acquiring the mutation lease. Findings 3 and 5 remain open until the
+adapter is implemented/configured through the reviewed candidate process. No alternate hosting,
+paid service, fabricated deployment receipt, or automatic deployment is introduced.
+
+The fixed integration contract is `scripts.configured_native_release_adapter.py:create_adapter(context)`:
+
+- `capture`, `apply`, and `restore` cover the three named Edge functions, runtime role, and managed
+  secrets. Capture must query authoritative management/database state, including complete runtime
+  role attributes, password verifier, memberships/grant options, settings, source bytes/import
+  configuration, and the exact existing managed values or proven absence. Existing secret values
+  must match the platform digests through `capture_managed_secrets` before any rotation.
+- `site` binds the same capture/apply/restore methods to the exact manifest project. Initial capture
+  must prove existing owner-only access and retain the prior immutable version and complete bytes.
+  Recovery validates the captured prior state and must not require the failed candidate Site to
+  be healthy before attempting other components' restoration.
+- `plan(context)` is read/build-only. It returns all six candidate snapshots; newly created platform
+  identities can be returned by `apply` and must match an independent subsequent capture.
+- `retain(encrypted_bytes)` must durably acknowledge each authenticated encrypted journal version
+  before returning. `recover_retained(original_run_id)` retrieves the unique latest retained token,
+  bound to the exact candidate, project, and original release run. The `RELEASE_RECOVERY_KEY` remains
+  a protected secret; plaintext snapshots and credentials must never be uploaded or logged.
+- `receipt(candidate_sha)` and `artifact(artifact_id)` supply the protected release writer/verifier
+  contract, including original prior-source artifact identities, full four-component management-plane
+  readbacks, runtime configuration, migration receipts, and rollback readiness. A receipt label alone
+  cannot substitute for bytes, exact identities, or owner/denial canaries.
+
+The native adapter is an outstanding implementation/integration requirement, not a completed live
+rollout. Production cannot proceed until it is reviewed and available. All production gates above
+remain pending, including exact-head CI, live six-digit Auth, Site deployment/parity, live isolated
+restore, and the next existing scheduled run without any duplicate trigger.

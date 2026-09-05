@@ -129,6 +129,18 @@ def recovery_records():
         "cash_ledger_state": [{"singleton": True, "revision": "0", "updated_at": "2026-09-05T19:00:00Z"}],
         "cash_snapshots": [],
         "run_terminal_outcomes": [],
+        "decision_evaluations": [{
+            "id": "abcdef01-1111-4111-8111-111111111111", "request_id": evaluation_request,
+            "run_id": run, "candidate_id": "abcdef02-1111-4111-8111-111111111111", "policy_version": 1,
+            "input_digest": "a" * 64, "raw_action": "watch", "final_action": "watch", "policy_status": "approved",
+            "reason_codes": [], "explanations": [], "normalized": {}, "evidence": [], "analyst": {}, "checker": {},
+            "created_at": "2026-09-05T19:55:00Z",
+        }],
+        "policy_comparisons": [{
+            "id": "abcdef03-1111-4111-8111-111111111111", "run_id": run, "packet_id": packet_id,
+            "evaluation_id": "abcdef01-1111-4111-8111-111111111111", "comparison": {"advisory": True},
+            "created_at": "2026-09-05T19:56:00Z",
+        }],
         "roles": [{"role": "stock_agent_dashboard", "login": False, "superuser": False, "bypass_rls": False,
                    "memberships": [], "grants": ["SELECT:public.holdings"]}],
         "schema_version": [{"version": "20260926", "statements": ["SELECT 1"],

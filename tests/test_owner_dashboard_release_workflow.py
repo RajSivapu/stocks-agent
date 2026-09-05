@@ -1,5 +1,12 @@
 from pathlib import Path
 import re
+import yaml
+
+
+def test_protected_release_and_recovery_are_valid_workflow_yaml():
+    for name in ("owner-dashboard-release.yml", "owner-dashboard-release-recovery.yml"):
+        workflow = yaml.safe_load((Path(".github/workflows") / name).read_text())
+        assert workflow["jobs"]
 
 
 def test_protected_release_workflow_binds_a_successful_main_candidate_to_immutable_evidence():
@@ -54,8 +61,8 @@ def test_release_workflow_retains_and_restores_rollback_source_until_evidence_is
     workflow = Path(".github/workflows/owner-dashboard-release.yml").read_text()
     assert "restore_gateway_after_release_failure.py" in workflow
     assert "trap 'restore_after_failure' ERR" in workflow
-    assert "--keep-rollback-worktree" in workflow
-    assert workflow.index("Upload immutable release record") < workflow.index("Release local rollback worktree")
+    assert "RELEASE_RECOVERY_KEY" in workflow
+    assert "Release local rollback worktree" not in workflow
     assert "rollback_readiness" in Path("scripts/write_protected_release_record.py").read_text()
     assert "dry-run-evidence.json" in workflow
 
@@ -76,19 +83,19 @@ def test_release_workflow_binds_review_times_and_durable_pre_mutation_recovery()
     workflow = Path(".github/workflows/owner-dashboard-release.yml").read_text()
     assert 'PYTHON_BIN="$RELEASE_VENV/bin/python"' in workflow
     assert 'head_commit_time <= review.submitted_at <= merged_at <= candidate_commit_time' in workflow
-    assert "Upload prior gateway source before gateway mutation" in workflow
-    assert "rollback-source:$ROLLBACK_SOURCE_ARTIFACT_ID" in workflow
+    assert "component-recovery-run:$GITHUB_RUN_ID" in workflow
+    assert "release_components.py --check-transport" in workflow
     assert Path(".github/workflows/owner-dashboard-release-recovery.yml").is_file()
-    assert workflow.index("Upload prior gateway source before gateway mutation") < workflow.index("Execute protected deployment")
+    assert workflow.index("release_components.py --check-transport") < workflow.index("Create the candidate-bound GitHub Deployment")
 
 
 def test_independent_recovery_contract_covers_cancelled_and_lost_release_runners():
     recovery = Path(".github/workflows/owner-dashboard-release-recovery.yml").read_text()
     assert "workflow_run:" in recovery
     assert "conclusion != 'success'" in recovery
-    assert "rollback-source-${{ github.event.workflow_run.id }}" in recovery
-    assert "--recovery-root" in recovery
-    assert "recovery-metadata/release-state.json" in recovery
+    assert '--release-run-id "${{ github.event.workflow_run.id }}"' in recovery
+    assert "RELEASE_RECOVERY_KEY" in recovery
+    assert "recovery/release.enc" in recovery
     assert "recovery-metadata/recovery-metadata" not in recovery
 
 
@@ -116,14 +123,14 @@ def test_recovery_uses_exact_candidate_concurrency_and_separate_durable_artifact
     assert "rollback-source-" in workflow and "recovery-metadata-" in workflow
     assert "group: protected-owner-dashboard-recovery-${{ github.event.workflow_run.id }}" in recovery
     assert "ref: ${{ github.event.workflow_run.head_sha }}" in recovery
-    assert "deployments/$DEPLOYMENT_ID/statuses" in recovery
+    assert "--release-run-id" in recovery
     assert "--retain-recovery-artifact" in recovery
     assert "conclusion != 'success'" in recovery
     finalizer = Path("scripts/finalize_protected_release.py").read_text()
     assert "finalize_protected_release.py" in workflow and "state=success" in finalizer
-    assert workflow.index("Release local rollback worktree") < workflow.index("Mark candidate deployment successful")
+    assert workflow.index("Upload immutable release record") < workflow.index("Mark candidate deployment successful")
     assert "steps.deployment.outputs.required" not in recovery
-    assert recovery.index("Restore durable gateway recovery artifact") > recovery.index("Record terminal deployment status")
+    assert "Restore encrypted changed-component journal" in recovery
 
 
 def test_database_lease_is_the_authoritative_release_recovery_serialization_boundary():

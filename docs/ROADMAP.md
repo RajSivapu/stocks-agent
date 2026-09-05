@@ -12,6 +12,18 @@ and rollout order. `docs/HANDOFF.md` is ignored and is not a source of truth.
 
 ## Current release status
 
+Final fix wave Track C: immutable audited migrations are restored and the additive tail is now
+`20261001_immutable_history_closure.sql`. Local upgrade, encrypted recovery, four-artifact verifier,
+and workflow tests are covered, including an actual disposable PostgreSQL upgrade and restore.
+Recovery now includes policy comparisons and their decision-evaluation dependencies.
+
+The protected main/recovery entrypoints share the component engine. They require a reviewed native
+transport at the fixed repository module `scripts.configured_native_release_adapter.py`; that module
+is not configured. The unchanged `.openai/hosting.json` remains the sole zero-cost Site target.
+Preflight blocks deployment before mutation. Final Astra finding 4 is locally complete; findings
+3 and 5 remain open for executable native transport integration. The final focused review,
+consolidated gate, re-review, exact-head CI, and every production receipt remain pending.
+
 | Layer | Local candidate | Production status |
 |---|---|---|
 | Test and owner-auth containment | Implemented and task-reviewed | Remediation not deployed; live Supabase six-digit OTP/template is pending |
@@ -21,7 +33,7 @@ and rollout order. `docs/HANDOFF.md` is ignored and is not a source of truth.
 | Outcomes, read privilege, dependency lock, and market sessions | Implemented and task-reviewed | Role migration and production observation pending |
 | Candidate-bound release and recovery | Implemented and task-reviewed; local disposable restore path covered | Independent whole-branch review, exact-head CI, protected deployment, and live isolated restore pending |
 
-The consolidated local-gate code candidate is
+The historical consolidated local-gate code candidate is
 `a0f8158c959e788b2a302ae6411328ec6e98a707`, based on the GPT-6 Astra audit of `origin/main` at
 `432d647ef911ff63da427097f02a852e18038b62`. Nothing in this branch is claimed live.
 

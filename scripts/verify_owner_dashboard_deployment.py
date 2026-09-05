@@ -47,7 +47,7 @@ BOUNDARIES = {
     "friend_invitations": "disabled",
     "brokerage_authority": "none",
 }
-RELEASE_FUNCTIONS = ("market-briefing-gateway", "owner-dashboard-api")
+RELEASE_FUNCTIONS = ("market-briefing-gateway", "owner-dashboard-api", "telegram-portfolio")
 RUNTIME_ROLE = "stock_agent_dashboard_runtime"
 UUID_PATTERN = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$", re.IGNORECASE)
 MIGRATION_NAME = re.compile(r"^(?P<version>\d{8}(?:\d{4})?)_[a-z0-9][a-z0-9_]*\.sql$")

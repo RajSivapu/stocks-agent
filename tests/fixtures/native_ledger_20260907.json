@@ -1,0 +1,7 @@
+{
+  "audited_commit": "432d647ef911ff63da427097f02a852e18038b62",
+  "version": "20260907",
+  "file_sha256": "79aeb682eba5ddaa2832d72c8ffea24caa2b7904e19c15704605bd64953367e0",
+  "native_statements_sha256": "382989dff4c2b51e32fa6c320f1d3716dc0440a1276ba28596f37cbbccd51277",
+  "receipt_source": "docs/rollouts/2026-09-04-personal-stock-agent-v1.md"
+}

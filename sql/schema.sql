@@ -2894,6 +2894,70 @@ BEGIN
 END;
 $$;
 
+-- Consolidated from sql/migrations/20260907_market_intelligence.sql
+-- Immutable, receipt-backed market-intelligence and report ledgers.
+-- Additive and idempotent. This migration is local-only until the V1-C6 gate.
+
+ALTER TABLE public.market_gateway_requests
+  DROP CONSTRAINT IF EXISTS market_gateway_requests_operation_check;
+ALTER TABLE public.market_gateway_requests
+  ADD CONSTRAINT market_gateway_requests_operation_check CHECK (operation IN (
+    'start_run','read_context','record_artifacts','grade_due_decisions',
+    'evaluate_and_publish','evaluate_alert_rules','finish_run','record_report'
+  ));
+
+CREATE OR REPLACE FUNCTION public.claim_market_gateway_request(
+  p_request_id UUID, p_operation TEXT, p_run_id UUID
+) RETURNS JSONB LANGUAGE plpgsql SECURITY DEFINER
+SET search_path = pg_catalog AS $$
+DECLARE
+  v_request public.market_gateway_requests%ROWTYPE;
+  v_lease UUID;
+  v_stored_run UUID := CASE WHEN p_operation='record_report' THEN NULL ELSE p_run_id END;
+BEGIN
+  IF p_operation NOT IN (
+       'start_run','read_context','record_artifacts','grade_due_decisions',
+       'evaluate_and_publish','evaluate_alert_rules','finish_run','record_report'
+     )
+     OR (p_operation = 'start_run' AND p_run_id IS NOT NULL)
+     OR (p_operation <> 'start_run' AND p_run_id IS NULL) THEN
+    RAISE EXCEPTION 'invalid request identity' USING ERRCODE = '22023';
+  END IF;
+  SELECT * INTO v_request FROM public.market_gateway_requests
+  WHERE request_id=p_request_id FOR UPDATE;
+  IF NOT FOUND THEN
+    PERFORM pg_advisory_xact_lock(hashtextextended('market_gateway_rate',0));
+    IF (SELECT count(*) FROM public.market_gateway_requests
+        WHERE created_at >= now()-interval '1 hour') >= 100
+       OR (v_stored_run IS NOT NULL AND (
+         SELECT count(*) FROM public.market_gateway_requests WHERE run_id=v_stored_run
+       ) >= 20) THEN
+      RAISE EXCEPTION 'gateway rate limit exceeded' USING ERRCODE = '54000';
+    END IF;
+    v_lease := gen_random_uuid();
+    INSERT INTO public.market_gateway_requests(request_id,operation,run_id,status,lease_token)
+    VALUES (p_request_id,p_operation,v_stored_run,'claimed',v_lease);
+    RETURN jsonb_build_object('claimed',true,'lease_token',v_lease,'attempt_count',1);
+  END IF;
+  IF v_request.operation<>p_operation
+     OR v_request.run_id IS DISTINCT FROM v_stored_run THEN
+    RAISE EXCEPTION 'request identity mismatch' USING ERRCODE = '22023';
+  END IF;
+  IF v_request.status IN ('completed','failed') THEN
+    RETURN jsonb_build_object('claimed',false,'status',v_request.status,
+      'response',v_request.response,'response_digest',v_request.response_digest);
+  END IF;
+  IF v_request.claimed_at > now()-interval '5 minutes' THEN
+    RETURN jsonb_build_object('claimed',false,'status','REQUEST_IN_PROGRESS');
+  END IF;
+  v_lease := gen_random_uuid();
+  UPDATE public.market_gateway_requests SET lease_token=v_lease,claimed_at=now(),
+    attempt_count=attempt_count+1 WHERE request_id=p_request_id;
+  RETURN jsonb_build_object('claimed',true,'lease_token',v_lease,
+    'attempt_count',v_request.attempt_count+1);
+END;
+$$;
+
 
 CREATE TABLE IF NOT EXISTS public.market_intelligence_runs (
   id UUID PRIMARY KEY,
@@ -2969,7 +3033,6 @@ CREATE TABLE IF NOT EXISTS public.market_source_receipts (
     jsonb_typeof(error)='object' AND octet_length(error::text) <= 4096
   )),
   response_hash TEXT CHECK (response_hash IS NULL OR response_hash ~ '^[0-9a-f]{64}$'),
-  cache_predecessor_receipt_id UUID REFERENCES public.market_source_receipts(id) ON DELETE RESTRICT,
   created_at TIMESTAMPTZ NOT NULL DEFAULT statement_timestamp(),
   UNIQUE (run_id, id),
   CHECK (accepted_count + duplicate_count + dropped_count <= returned_count),
@@ -3123,15 +3186,6 @@ CREATE TABLE IF NOT EXISTS public.market_reports (
   rendered_hash TEXT NOT NULL CHECK (rendered_hash ~ '^[0-9a-f]{64}$'),
   created_at TIMESTAMPTZ NOT NULL DEFAULT statement_timestamp()
 );
-
-CREATE TABLE IF NOT EXISTS public.market_policy_comparisons (
-  id UUID PRIMARY KEY,
-  run_id UUID NOT NULL REFERENCES public.analysis_runs(id) ON DELETE RESTRICT,
-  packet_id UUID NOT NULL REFERENCES public.market_evidence_packets(id) ON DELETE RESTRICT,
-  evaluation_id UUID NOT NULL REFERENCES public.decision_evaluations(id) ON DELETE RESTRICT,
-  comparison JSONB NOT NULL CHECK (jsonb_typeof(comparison)='object' AND octet_length(comparison::text)<=16384),
-  created_at TIMESTAMPTZ NOT NULL DEFAULT statement_timestamp()
-);
 CREATE INDEX IF NOT EXISTS idx_market_reports_date_kind
   ON public.market_reports(market_date DESC, kind, created_at DESC);
 
@@ -3151,132 +3205,6 @@ END;
 $$;
 CREATE UNIQUE INDEX IF NOT EXISTS uq_market_reports_packet_kind_date
   ON public.market_reports(run_id, packet_id, market_date, kind);
-
--- Durable report-delivery outbox functions follow market_reports because their
--- declarations use market_reports%ROWTYPE during a fresh schema apply.
-CREATE OR REPLACE FUNCTION public.create_market_report_publication(
-  p_run_id UUID, p_report_id UUID, p_idempotency_key TEXT, p_market_date DATE,
-  p_kind TEXT, p_rendered_body TEXT, p_rendered_hash TEXT
-) RETURNS JSONB LANGUAGE plpgsql SECURITY DEFINER
-SET search_path = pg_catalog AS $$
-DECLARE v_report public.market_reports%ROWTYPE; v_existing public.market_report_publications%ROWTYPE;
-BEGIN
-  IF p_run_id IS NULL OR p_report_id IS NULL OR p_idempotency_key !~ '^[0-9a-f]{64}$'
-     OR p_kind NOT IN ('morning','urgent','weekly','monthly','theme','on-demand','intraday')
-     OR p_rendered_body IS NULL OR char_length(p_rendered_body)>14000
-     OR p_rendered_hash !~ '^[0-9a-f]{64}$' THEN
-    RAISE EXCEPTION 'invalid report publication' USING ERRCODE='22023';
-  END IF;
-  SELECT * INTO v_report FROM public.market_reports WHERE id=p_report_id FOR UPDATE;
-  IF NOT FOUND OR v_report.run_id IS DISTINCT FROM p_run_id
-     OR v_report.idempotency_key IS DISTINCT FROM p_idempotency_key
-     OR v_report.market_date IS DISTINCT FROM p_market_date OR v_report.kind IS DISTINCT FROM p_kind
-     OR v_report.rendered_text IS DISTINCT FROM p_rendered_body
-     OR v_report.rendered_hash IS DISTINCT FROM p_rendered_hash THEN
-    RAISE EXCEPTION 'report publication mismatch' USING ERRCODE='22023';
-  END IF;
-  SELECT * INTO v_existing FROM public.market_report_publications
-  WHERE report_id=p_report_id OR idempotency_key=p_idempotency_key FOR UPDATE;
-  IF FOUND THEN
-    IF v_existing.report_id IS DISTINCT FROM p_report_id OR v_existing.idempotency_key IS DISTINCT FROM p_idempotency_key THEN
-      RAISE EXCEPTION 'report publication idempotency mismatch' USING ERRCODE='22023';
-    END IF;
-    RETURN jsonb_build_object('report_id',v_existing.report_id,'idempotency_key',v_existing.idempotency_key,
-      'status',v_existing.status,'telegram_message_ids',v_existing.telegram_message_ids,
-      'telegram_accepted_at',v_existing.telegram_accepted_at,'lease_token',v_existing.lease_token);
-  END IF;
-  INSERT INTO public.market_report_publications(report_id,idempotency_key,status)
-  VALUES (p_report_id,p_idempotency_key,'pending');
-  RETURN jsonb_build_object('report_id',p_report_id,'idempotency_key',p_idempotency_key,
-    'status','pending','telegram_message_ids','[]'::jsonb,'telegram_accepted_at',NULL,'lease_token',NULL);
-END;
-$$;
-
-CREATE OR REPLACE FUNCTION public.claim_market_report_publication(p_idempotency_key TEXT)
-RETURNS JSONB LANGUAGE plpgsql SECURITY DEFINER
-SET search_path = pg_catalog AS $$
-DECLARE v_pub public.market_report_publications%ROWTYPE; v_lease UUID;
-BEGIN
-  IF p_idempotency_key !~ '^[0-9a-f]{64}$' THEN RAISE EXCEPTION 'invalid report publication key' USING ERRCODE='22023'; END IF;
-  SELECT * INTO v_pub FROM public.market_report_publications WHERE idempotency_key=p_idempotency_key FOR UPDATE;
-  IF NOT FOUND THEN RAISE EXCEPTION 'report publication unavailable' USING ERRCODE='22023'; END IF;
-  IF v_pub.status IN ('delivered','uncertain','suppressed') THEN
-    RETURN jsonb_build_object('claimed',false,'report_id',v_pub.report_id,'idempotency_key',v_pub.idempotency_key,
-      'status',v_pub.status,'telegram_message_ids',v_pub.telegram_message_ids,
-      'telegram_accepted_at',v_pub.telegram_accepted_at,'lease_token',NULL);
-  END IF;
-  IF v_pub.lease_token IS NOT NULL THEN
-    IF v_pub.lease_expires_at >= statement_timestamp() THEN
-      RETURN jsonb_build_object('claimed',false,'report_id',v_pub.report_id,'idempotency_key',v_pub.idempotency_key,
-        'status','pending','telegram_message_ids','[]'::jsonb,'telegram_accepted_at',NULL,'lease_token',NULL);
-    END IF;
-    UPDATE public.market_report_publications SET status='uncertain',lease_token=NULL,lease_expires_at=NULL,
-      error='SEND_LEASE_EXPIRED',updated_at=now() WHERE report_id=v_pub.report_id;
-    RETURN jsonb_build_object('claimed',false,'report_id',v_pub.report_id,'idempotency_key',v_pub.idempotency_key,
-      'status','uncertain','telegram_message_ids','[]'::jsonb,'telegram_accepted_at',NULL,'lease_token',NULL);
-  END IF;
-  IF v_pub.status NOT IN ('pending','failed') THEN RAISE EXCEPTION 'invalid report publication state' USING ERRCODE='22023'; END IF;
-  v_lease := gen_random_uuid();
-  UPDATE public.market_report_publications SET lease_token=v_lease,
-    lease_expires_at=statement_timestamp()+interval '5 minutes',attempt_count=attempt_count+1,
-    error=NULL,updated_at=now() WHERE report_id=v_pub.report_id;
-  RETURN jsonb_build_object('claimed',true,'report_id',v_pub.report_id,'idempotency_key',v_pub.idempotency_key,
-    'status','pending','telegram_message_ids','[]'::jsonb,'telegram_accepted_at',NULL,'lease_token',v_lease);
-END;
-$$;
-
-CREATE OR REPLACE FUNCTION public.finish_market_report_publication(
-  p_idempotency_key TEXT, p_lease_token UUID, p_status TEXT, p_message_ids JSONB, p_error TEXT
-) RETURNS JSONB LANGUAGE plpgsql SECURITY DEFINER
-SET search_path = pg_catalog AS $$
-DECLARE v_ids_valid BOOLEAN; v_result public.market_report_publications%ROWTYPE;
-BEGIN
-  IF p_idempotency_key !~ '^[0-9a-f]{64}$' OR p_status NOT IN ('delivered','failed','uncertain')
-     OR jsonb_typeof(p_message_ids)<>'array' OR char_length(COALESCE(p_error,''))>1000 THEN
-    RAISE EXCEPTION 'invalid report publication completion' USING ERRCODE='22023';
-  END IF;
-  SELECT COALESCE(bool_and(jsonb_typeof(value)='number' AND value::text ~ '^[0-9]+$'),true)
-    INTO v_ids_valid FROM jsonb_array_elements(p_message_ids);
-  IF NOT v_ids_valid OR (p_status='delivered' AND jsonb_array_length(p_message_ids)=0) THEN
-    RAISE EXCEPTION 'invalid telegram message ids' USING ERRCODE='22023';
-  END IF;
-  UPDATE public.market_report_publications SET status=p_status,
-    telegram_message_ids=CASE WHEN p_status='delivered' THEN p_message_ids ELSE '[]'::jsonb END,
-    telegram_accepted_at=CASE WHEN p_status='delivered' THEN now() ELSE NULL END,
-    lease_token=NULL,lease_expires_at=NULL,error=CASE WHEN p_error IS NULL THEN NULL ELSE regexp_replace(left(p_error,1000),'[^A-Za-z0-9_ .:-]','?','g') END,
-    updated_at=now()
-  WHERE idempotency_key=p_idempotency_key AND lease_token=p_lease_token AND status IN ('pending','failed')
-  RETURNING * INTO v_result;
-  IF NOT FOUND THEN RAISE EXCEPTION 'report publication lease unavailable' USING ERRCODE='40001'; END IF;
-  RETURN jsonb_build_object('report_id',v_result.report_id,'idempotency_key',v_result.idempotency_key,
-    'status',v_result.status,'telegram_message_ids',v_result.telegram_message_ids,
-    'telegram_accepted_at',v_result.telegram_accepted_at,'lease_token',NULL);
-END;
-$$;
-
-CREATE OR REPLACE FUNCTION public.suppress_market_report_publication(p_idempotency_key TEXT)
-RETURNS JSONB LANGUAGE plpgsql SECURITY DEFINER SET search_path=pg_catalog AS $$
-DECLARE v_result public.market_report_publications%ROWTYPE;
-BEGIN
-  UPDATE public.market_report_publications SET status='suppressed',lease_token=NULL,lease_expires_at=NULL,
-    telegram_message_ids='[]'::jsonb,telegram_accepted_at=NULL,updated_at=now()
-  WHERE idempotency_key=p_idempotency_key AND status IN ('pending','failed')
-  RETURNING * INTO v_result;
-  IF NOT FOUND THEN SELECT * INTO v_result FROM public.market_report_publications WHERE idempotency_key=p_idempotency_key; END IF;
-  IF NOT FOUND OR v_result.status<>'suppressed' THEN RAISE EXCEPTION 'report publication cannot be suppressed' USING ERRCODE='40001'; END IF;
-  RETURN jsonb_build_object('report_id',v_result.report_id,'idempotency_key',v_result.idempotency_key,'status',v_result.status);
-END;
-$$;
-
-REVOKE ALL ON TABLE public.market_report_publications FROM PUBLIC, anon, authenticated;
-REVOKE ALL ON FUNCTION public.create_market_report_publication(UUID, UUID, TEXT, DATE, TEXT, TEXT, TEXT) FROM PUBLIC, anon, authenticated;
-REVOKE ALL ON FUNCTION public.claim_market_report_publication(TEXT) FROM PUBLIC, anon, authenticated;
-REVOKE ALL ON FUNCTION public.finish_market_report_publication(TEXT, UUID, TEXT, JSONB, TEXT) FROM PUBLIC, anon, authenticated;
-REVOKE ALL ON FUNCTION public.suppress_market_report_publication(TEXT) FROM PUBLIC, anon, authenticated;
-GRANT EXECUTE ON FUNCTION public.create_market_report_publication(UUID, UUID, TEXT, DATE, TEXT, TEXT, TEXT) TO service_role;
-GRANT EXECUTE ON FUNCTION public.claim_market_report_publication(TEXT) TO service_role;
-GRANT EXECUTE ON FUNCTION public.finish_market_report_publication(TEXT, UUID, TEXT, JSONB, TEXT) TO service_role;
-GRANT EXECUTE ON FUNCTION public.suppress_market_report_publication(TEXT) TO service_role;
 
 CREATE TABLE IF NOT EXISTS public.market_learning_observations (
   id UUID PRIMARY KEY,
@@ -3374,12 +3302,6 @@ DROP TRIGGER IF EXISTS market_reports_append_only ON public.market_reports;
 CREATE TRIGGER market_reports_append_only BEFORE UPDATE OR DELETE
 ON public.market_reports FOR EACH ROW
 EXECUTE FUNCTION public.reject_market_intelligence_mutation();
-DROP TRIGGER IF EXISTS market_policy_comparisons_append_only ON public.market_policy_comparisons;
-CREATE TRIGGER market_policy_comparisons_append_only BEFORE UPDATE OR DELETE
-ON public.market_policy_comparisons FOR EACH ROW
-EXECUTE FUNCTION public.reject_market_intelligence_mutation();
-ALTER TABLE public.market_policy_comparisons ENABLE ROW LEVEL SECURITY;
-REVOKE ALL ON public.market_policy_comparisons FROM PUBLIC, anon, authenticated, service_role;
 DROP TRIGGER IF EXISTS market_learning_observations_append_only ON public.market_learning_observations;
 CREATE TRIGGER market_learning_observations_append_only BEFORE UPDATE OR DELETE
 ON public.market_learning_observations FOR EACH ROW
@@ -4080,47 +4002,6 @@ BEGIN
     'run_id',packet.run_id,
     'packet_hash',packet.packet_hash,
     'packet',packet.packet,
-    'evidence_facts',COALESCE((
-      SELECT jsonb_agg(jsonb_build_object(
-        'candidate_key',candidate->>'candidate_key',
-        'evidence_id',item.id,
-        'category',CASE
-          WHEN item.metadata->>'evidence_category' IN ('quote','fundamentals','technicals','news','event','macro','sector')
-            THEN item.metadata->>'evidence_category'
-          WHEN item.provider='sec_edgar' THEN 'fundamentals'
-          WHEN item.provider IN ('fred','eia','bls','bea') THEN 'macro'
-          WHEN item.provider IN ('white_house','doe','dod','federal_register') THEN 'event'
-          WHEN item.provider IN ('gdelt','finnhub') THEN 'news'
-          WHEN item.provider='yahoo' THEN 'quote'
-          ELSE 'unknown' END,
-        'source',item.provider,
-        'source_status',CASE WHEN receipt.status IN ('succeeded','cache_hit') THEN receipt.status ELSE 'failed' END,
-        'authority',CASE
-          WHEN item.metadata->>'authority'='official' AND item.provider IN ('sec_edgar','fred','eia','bls','bea','white_house','doe','dod','federal_register') THEN 'official'
-          WHEN item.provider IN ('yahoo','alpha_vantage') THEN 'market_data'
-          WHEN item.provider IN ('gdelt','finnhub') THEN 'reported'
-          ELSE 'unverified' END,
-        'published_at',item.published_at,
-        'retrieved_at',receipt.retrieved_at,
-        'expires_at',receipt.expires_at,
-        'reference',item.canonical_url,
-        'normalized_text',item.normalized_text,
-        'exposure_kind',CASE WHEN item.metadata->>'exposure_kind' IN ('filing','contract','backlog','revenue','capacity','official_fund') THEN item.metadata->>'exposure_kind' ELSE NULL END,
-        'relationship_eligible',EXISTS (
-          SELECT 1 FROM public.market_candidate_rankings ranking
-          WHERE ranking.run_id=packet.run_id AND ranking.candidate_key=candidate->>'candidate_key'
-            AND ranking.qualified AND ranking.exposure_item_ids ? item.id::text
-        ),
-        'claim_key',item.metadata->>'claim_key',
-        'claim_polarity',CASE WHEN item.metadata->>'claim_polarity' IN ('affirmed','denied') THEN item.metadata->>'claim_polarity' ELSE NULL END
-      ) ORDER BY candidate->>'candidate_key',item.id)
-      FROM jsonb_array_elements(packet.packet->'candidates') candidate
-      CROSS JOIN LATERAL jsonb_array_elements_text(candidate->'evidence_ids') evidence_id
-      JOIN public.market_intelligence_run_items run_item ON run_item.run_id=packet.run_id
-        AND run_item.source_item_id=evidence_id::uuid AND run_item.disposition='accepted'
-      JOIN public.market_source_items item ON item.id=run_item.source_item_id
-      JOIN public.market_source_receipts receipt ON receipt.id=run_item.source_receipt_id
-    ),'[]'::jsonb),
     'exposure_facts',COALESCE((
       SELECT jsonb_agg(jsonb_build_object(
         'candidate_key',fact.candidate_key,
@@ -4179,39 +4060,6 @@ END;
 $$;
 
 DROP FUNCTION IF EXISTS public.record_market_report(UUID, UUID, JSONB);
-CREATE OR REPLACE FUNCTION public.read_market_report_decisions(
-  p_run_id UUID, p_packet_id UUID, p_decision_ids JSONB
-) RETURNS JSONB LANGUAGE plpgsql SECURITY DEFINER
-SET search_path = pg_catalog AS $$
-DECLARE v_result JSONB;
-BEGIN
-  IF jsonb_typeof(p_decision_ids) IS DISTINCT FROM 'array'
-     OR jsonb_array_length(p_decision_ids) NOT BETWEEN 1 AND 96 THEN
-    RAISE EXCEPTION 'invalid report decision IDs' USING ERRCODE='22023';
-  END IF;
-  SELECT COALESCE(jsonb_agg(jsonb_build_object(
-    'evaluation_id',evaluation.id,'candidate_id',evaluation.candidate_id,
-    'run_id',evaluation.run_id,'packet_id',packet.id,'packet_hash',packet.packet_hash,
-    'ticker',evaluation.normalized->>'ticker','status',evaluation.policy_status,
-    'final_action',evaluation.final_action,
-    'final_alert_urgency',CASE WHEN evaluation.policy_status='approved' AND evaluation.final_action='hold'
-      THEN evaluation.normalized->'final_alert_urgency' ELSE 'null'::jsonb END,
-    'approved_terms',CASE WHEN evaluation.policy_status='approved' AND evaluation.final_action IN ('buy','add','reduce','sell')
-      THEN evaluation.normalized->'approved_terms' ELSE 'null'::jsonb END
-  ) ORDER BY evaluation.id),'[]'::jsonb) INTO v_result
-  FROM public.market_evidence_packets packet
-  JOIN public.decision_evaluations evaluation ON evaluation.run_id=packet.run_id
-    AND evaluation.analyst->>'packet_id'=packet.id::text
-    AND evaluation.policy_version=packet.policy_version
-  WHERE packet.id=p_packet_id AND packet.run_id=p_run_id AND packet.status='completed'
-    AND p_decision_ids ? evaluation.id::text;
-  IF jsonb_array_length(v_result)<>jsonb_array_length(p_decision_ids) THEN
-    RAISE EXCEPTION 'report decision provenance mismatch' USING ERRCODE='22023';
-  END IF;
-  RETURN v_result;
-END;
-$$;
-
 CREATE OR REPLACE FUNCTION public.record_market_report(
   p_run_id UUID,
   p_idempotency_key TEXT,
@@ -4246,15 +4094,12 @@ BEGIN
      OR p_report->>'rendered_hash' <> encode(extensions.digest(
        convert_to(p_report->>'rendered_text','UTF8'),'sha256'
      ),'hex')
-     OR NOT (p_report->'report' ?& ARRAY[
-       'source_ids','policy_decision_ids','comparison_ids'
-     ])
-     OR jsonb_typeof(p_report->'report'->'source_ids') IS DISTINCT FROM 'array'
-     OR jsonb_typeof(p_report->'report'->'policy_decision_ids') IS DISTINCT FROM 'array'
-     OR jsonb_typeof(p_report->'report'->'comparison_ids') IS DISTINCT FROM 'array'
+     OR jsonb_typeof(p_report->'report'->'source_ids') <> 'array'
+     OR jsonb_typeof(p_report->'report'->'policy_decision_ids') <> 'array'
+     OR jsonb_typeof(p_report->'report'->'comparison_ids') <> 'array'
      OR jsonb_array_length(p_report->'report'->'source_ids') = 0
      OR jsonb_array_length(p_report->'report'->'policy_decision_ids') = 0
-     OR jsonb_array_length(p_report->'report'->'comparison_ids') > 96
+     OR jsonb_array_length(p_report->'report'->'comparison_ids') <> 0
      OR EXISTS (SELECT 1 FROM jsonb_array_elements_text(p_report->'report'->'source_ids') item
        WHERE item !~ '^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$')
      OR EXISTS (SELECT 1 FROM jsonb_array_elements_text(p_report->'report'->'policy_decision_ids') item
@@ -4271,8 +4116,7 @@ BEGIN
     RAISE EXCEPTION 'completed evidence packet unavailable' USING ERRCODE = '22023';
   END IF;
   v_expected_key := encode(extensions.digest(convert_to(
-    'v2:' || (p_report->>'kind') || ':' || (p_report->>'market_date') || ':' ||
-      v_packet.packet_hash || ':' || (p_report->>'report_hash'),
+    'v1:' || p_report->>'kind' || ':' || p_report->>'market_date' || ':' || v_packet.packet_hash,
     'UTF8'
   ), 'sha256'), 'hex');
   v_expected_id := (
@@ -4285,11 +4129,6 @@ BEGIN
        SELECT 1 FROM jsonb_array_elements_text(p_report->'report'->'source_ids') source_id
        WHERE NOT EXISTS (
          SELECT 1 FROM jsonb_array_elements(v_packet.packet->'evidence') evidence
-         JOIN public.market_source_items item ON item.id=(evidence->>'item_id')::uuid
-         JOIN public.market_intelligence_run_items run_item ON run_item.source_item_id=item.id
-           AND run_item.run_id=p_run_id AND run_item.disposition='accepted'
-         JOIN public.market_source_receipts receipt ON receipt.id=run_item.source_receipt_id
-           AND receipt.status IN ('succeeded','cache_hit')
          WHERE evidence->>'item_id'=source_id
        )
      )
@@ -4298,18 +4137,6 @@ BEGIN
        WHERE NOT EXISTS (
          SELECT 1 FROM public.decision_evaluations evaluation
          WHERE evaluation.id=decision_id::uuid AND evaluation.run_id=p_run_id
-           AND evaluation.analyst->>'packet_id'=v_packet.id::text
-           AND evaluation.policy_version=v_packet.policy_version
-       )
-     ) OR EXISTS (
-       SELECT 1 FROM jsonb_array_elements_text(p_report->'report'->'comparison_ids') comparison_id
-       WHERE NOT EXISTS (
-         SELECT 1 FROM public.market_policy_comparisons comparison
-         JOIN public.decision_evaluations evaluation ON evaluation.id=comparison.evaluation_id
-           AND evaluation.run_id=p_run_id AND evaluation.analyst->>'packet_id'=v_packet.id::text
-         WHERE comparison.id=comparison_id::uuid AND comparison.run_id=p_run_id
-           AND comparison.packet_id=v_packet.id
-           AND p_report->'report'->'policy_decision_ids' ? evaluation.id::text
        )
      ) THEN
     RAISE EXCEPTION 'market report chain mismatch' USING ERRCODE = '22023';
@@ -4439,11 +4266,13 @@ REVOKE ALL ON FUNCTION public.market_canonical_jsonb(JSONB)
 REVOKE ALL ON FUNCTION public.start_market_intelligence_run(UUID, TEXT, DATE, INT, JSONB) FROM PUBLIC, anon, authenticated;
 REVOKE ALL ON FUNCTION public.record_market_intelligence(UUID, UUID, JSONB) FROM PUBLIC, anon, authenticated;
 REVOKE ALL ON FUNCTION public.read_market_evidence_packet(UUID, UUID) FROM PUBLIC, anon, authenticated;
-REVOKE ALL ON FUNCTION public.read_market_report_decisions(UUID, UUID, JSONB) FROM PUBLIC, anon, authenticated;
 REVOKE ALL ON FUNCTION public.record_market_report(UUID, TEXT, JSONB) FROM PUBLIC, anon, authenticated;
 REVOKE ALL ON FUNCTION public.record_market_learning(UUID, JSONB) FROM PUBLIC, anon, authenticated;
 GRANT EXECUTE ON FUNCTION public.start_market_intelligence_run(UUID, TEXT, DATE, INT, JSONB) TO service_role;
 GRANT EXECUTE ON FUNCTION public.record_market_intelligence(UUID, UUID, JSONB) TO service_role;
+GRANT EXECUTE ON FUNCTION public.read_market_evidence_packet(UUID, UUID) TO service_role;
+GRANT EXECUTE ON FUNCTION public.record_market_report(UUID, TEXT, JSONB) TO service_role;
+GRANT EXECUTE ON FUNCTION public.record_market_learning(UUID, JSONB) TO service_role;
 
 -- Consolidated from sql/migrations/20260908_owner_dashboard_intelligence_read_role.sql
 -- Redacted owner-dashboard reads for immutable intelligence and report ledgers.
@@ -5575,7 +5404,7 @@ DO $$ BEGIN
   END IF;
 END; $$;
 GRANT EXECUTE ON FUNCTION public.read_market_evidence_packet(UUID, UUID) TO service_role;
-GRANT EXECUTE ON FUNCTION public.read_market_report_decisions(UUID, UUID, JSONB) TO service_role;
+-- Report-decision reader and its grant are created together in 20261001.
 GRANT EXECUTE ON FUNCTION public.record_market_report(UUID, TEXT, JSONB) TO service_role;
 GRANT EXECUTE ON FUNCTION public.record_market_learning(UUID, JSONB) TO service_role;
 
@@ -7051,3 +6880,990 @@ CREATE POLICY owner_dashboard_select_lessons ON public.lessons
 DROP POLICY IF EXISTS owner_dashboard_select_snapshots ON public.daily_snapshots;
 CREATE POLICY owner_dashboard_select_snapshots ON public.daily_snapshots
   FOR SELECT TO stock_agent_dashboard USING (true);
+
+-- Consolidated from sql/migrations/20260929_policy_lifecycle_closure.sql
+-- Final policy/lifecycle closure. Legacy dry_powder is deliberately not a cash
+-- authority. Spendable cash must be an explicit, fresh reconciliation bound to
+-- the transaction ledger watermark.
+CREATE TABLE IF NOT EXISTS public.portfolio_cash_ledger_state (
+  singleton BOOLEAN PRIMARY KEY DEFAULT true CHECK (singleton),
+  revision BIGINT NOT NULL DEFAULT 0 CHECK (revision >= 0),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT statement_timestamp()
+);
+INSERT INTO public.portfolio_cash_ledger_state(singleton) VALUES(true)
+ON CONFLICT(singleton) DO NOTHING;
+
+CREATE OR REPLACE FUNCTION public.advance_portfolio_cash_ledger()
+RETURNS TRIGGER LANGUAGE plpgsql SECURITY DEFINER SET search_path=pg_catalog AS $$
+BEGIN
+  UPDATE public.portfolio_cash_ledger_state
+  SET revision=revision+1,updated_at=statement_timestamp()
+  WHERE singleton=true;
+  RETURN NULL;
+END;
+$$;
+DROP TRIGGER IF EXISTS transactions_advance_cash_ledger ON public.transactions;
+CREATE TRIGGER transactions_advance_cash_ledger
+AFTER INSERT OR UPDATE OR DELETE OR TRUNCATE ON public.transactions
+FOR EACH STATEMENT EXECUTE FUNCTION public.advance_portfolio_cash_ledger();
+
+CREATE OR REPLACE FUNCTION public.read_portfolio_cash_ledger_watermark()
+RETURNS JSONB LANGUAGE sql STABLE SECURITY DEFINER SET search_path=pg_catalog AS $$
+  SELECT jsonb_build_object(
+    'ledger_watermark',revision::text,
+    'ledger_updated_at',updated_at
+  ) FROM public.portfolio_cash_ledger_state WHERE singleton=true
+$$;
+
+CREATE TABLE IF NOT EXISTS public.reconciled_cash_snapshots (
+  id UUID PRIMARY KEY,
+  as_of TIMESTAMPTZ NOT NULL,
+  fresh_through TIMESTAMPTZ NOT NULL,
+  ledger_watermark BIGINT NOT NULL CHECK (ledger_watermark >= 0),
+  core_available NUMERIC NOT NULL CHECK (core_available >= 0),
+  growth_available NUMERIC NOT NULL CHECK (growth_available >= 0),
+  speculative_available NUMERIC NOT NULL CHECK (speculative_available >= 0),
+  created_at TIMESTAMPTZ NOT NULL DEFAULT statement_timestamp(),
+  CHECK (fresh_through > as_of AND fresh_through <= as_of + interval '30 minutes')
+);
+CREATE INDEX IF NOT EXISTS idx_reconciled_cash_snapshots_current
+  ON public.reconciled_cash_snapshots(as_of DESC,created_at DESC);
+DROP TRIGGER IF EXISTS reconciled_cash_snapshots_append_only
+  ON public.reconciled_cash_snapshots;
+CREATE TRIGGER reconciled_cash_snapshots_append_only BEFORE UPDATE OR DELETE
+ON public.reconciled_cash_snapshots FOR EACH ROW
+EXECUTE FUNCTION public.reject_market_intelligence_mutation();
+
+CREATE OR REPLACE FUNCTION public.record_reconciled_cash_snapshot(
+  p_snapshot_id UUID,
+  p_as_of TIMESTAMPTZ,
+  p_fresh_through TIMESTAMPTZ,
+  p_ledger_watermark BIGINT,
+  p_cash JSONB
+) RETURNS JSONB LANGUAGE plpgsql SECURITY DEFINER SET search_path=pg_catalog AS $$
+DECLARE
+  v_revision BIGINT;
+  v_ledger_updated_at TIMESTAMPTZ;
+  v_existing public.reconciled_cash_snapshots%ROWTYPE;
+  v_duplicate BOOLEAN := false;
+BEGIN
+  IF p_snapshot_id IS NULL OR p_as_of IS NULL OR p_fresh_through IS NULL
+     OR p_ledger_watermark IS NULL OR jsonb_typeof(p_cash) IS DISTINCT FROM 'object'
+     OR NOT (p_cash ?& ARRAY['core','growth','speculative'])
+     OR (p_cash - ARRAY['core','growth','speculative']) <> '{}'::jsonb
+     OR EXISTS (
+       SELECT 1 FROM jsonb_each(p_cash) item
+       WHERE jsonb_typeof(item.value) IS DISTINCT FROM 'string'
+         OR trim(both '"' from item.value::text) !~ '^(0|[1-9][0-9]{0,14})(\.[0-9]{1,6})?$'
+     )
+     OR p_as_of > statement_timestamp() + interval '1 minute'
+     OR p_fresh_through <= statement_timestamp()
+     OR p_fresh_through > p_as_of + interval '30 minutes' THEN
+    RAISE EXCEPTION 'invalid reconciled cash snapshot' USING ERRCODE='22023';
+  END IF;
+
+  SELECT revision,updated_at INTO v_revision,v_ledger_updated_at
+  FROM public.portfolio_cash_ledger_state
+  WHERE singleton=true FOR SHARE;
+  IF v_revision IS DISTINCT FROM p_ledger_watermark
+     OR p_as_of < v_ledger_updated_at THEN
+    RAISE EXCEPTION 'cash ledger watermark changed' USING ERRCODE='40001';
+  END IF;
+
+  SELECT * INTO v_existing FROM public.reconciled_cash_snapshots
+  WHERE id=p_snapshot_id;
+  IF FOUND THEN
+    v_duplicate := true;
+    IF v_existing.as_of IS DISTINCT FROM p_as_of
+       OR v_existing.fresh_through IS DISTINCT FROM p_fresh_through
+       OR v_existing.ledger_watermark IS DISTINCT FROM p_ledger_watermark
+       OR v_existing.core_available IS DISTINCT FROM (p_cash->>'core')::numeric
+       OR v_existing.growth_available IS DISTINCT FROM (p_cash->>'growth')::numeric
+       OR v_existing.speculative_available IS DISTINCT FROM (p_cash->>'speculative')::numeric THEN
+      RAISE EXCEPTION 'cash snapshot idempotency mismatch' USING ERRCODE='22023';
+    END IF;
+  ELSE
+    INSERT INTO public.reconciled_cash_snapshots(
+      id,as_of,fresh_through,ledger_watermark,
+      core_available,growth_available,speculative_available
+    ) VALUES (
+      p_snapshot_id,p_as_of,p_fresh_through,p_ledger_watermark,
+      (p_cash->>'core')::numeric,(p_cash->>'growth')::numeric,
+      (p_cash->>'speculative')::numeric
+    ) RETURNING * INTO v_existing;
+  END IF;
+
+  RETURN jsonb_build_object(
+    'snapshot_id',v_existing.id,
+    'as_of',v_existing.as_of,
+    'fresh_through',v_existing.fresh_through,
+    'ledger_watermark',v_existing.ledger_watermark::text,
+    'spendable_cash',jsonb_build_object(
+      'core',v_existing.core_available::text,
+      'growth',v_existing.growth_available::text,
+      'speculative',v_existing.speculative_available::text
+    ),
+    'duplicate',v_duplicate
+  );
+END;
+$$;
+
+CREATE OR REPLACE FUNCTION public.read_reconciled_cash_snapshot(
+  p_now TIMESTAMPTZ DEFAULT statement_timestamp()
+) RETURNS JSONB LANGUAGE plpgsql STABLE SECURITY DEFINER SET search_path=pg_catalog AS $$
+DECLARE v_snapshot public.reconciled_cash_snapshots%ROWTYPE;
+BEGIN
+  IF p_now IS NULL THEN RETURN NULL; END IF;
+  SELECT snapshot.* INTO v_snapshot
+  FROM public.reconciled_cash_snapshots snapshot
+  JOIN public.portfolio_cash_ledger_state ledger
+    ON ledger.singleton=true AND ledger.revision=snapshot.ledger_watermark
+  WHERE snapshot.as_of<=p_now AND snapshot.fresh_through>=p_now
+  ORDER BY snapshot.as_of DESC,snapshot.created_at DESC,snapshot.id
+  LIMIT 1;
+  IF NOT FOUND THEN RETURN NULL; END IF;
+  RETURN jsonb_build_object(
+    'snapshot_id',v_snapshot.id,
+    'as_of',v_snapshot.as_of,
+    'fresh_through',v_snapshot.fresh_through,
+    'ledger_watermark',v_snapshot.ledger_watermark::text,
+    'spendable_cash',jsonb_build_object(
+      'core',v_snapshot.core_available::text,
+      'growth',v_snapshot.growth_available::text,
+      'speculative',v_snapshot.speculative_available::text
+    )
+  );
+END;
+$$;
+
+-- Keep cash authority valid through the decision write itself. The shared
+-- ledger lock prevents a confirmed transaction mutation from committing
+-- between this check and apply_market_decision_bundle's durable writes.
+CREATE OR REPLACE FUNCTION public.apply_market_decision_bundle_with_cash_snapshot(
+  p_request_id UUID,
+  p_run_id UUID,
+  p_lease_token UUID,
+  p_policy_version INT,
+  p_evaluations JSONB,
+  p_suggestions JSONB,
+  p_publication JSONB,
+  p_cash_snapshot_id UUID,
+  p_cash_ledger_watermark BIGINT
+) RETURNS JSONB LANGUAGE plpgsql SECURITY DEFINER SET search_path=pg_catalog AS $$
+DECLARE
+  v_revision BIGINT;
+  v_snapshot public.reconciled_cash_snapshots%ROWTYPE;
+  v_requires_cash BOOLEAN;
+BEGIN
+  IF jsonb_typeof(p_evaluations) IS DISTINCT FROM 'array' THEN
+    RAISE EXCEPTION 'invalid decision transaction' USING ERRCODE='22023';
+  END IF;
+  PERFORM pg_advisory_xact_lock(hashtextextended(p_request_id::text,0));
+  IF EXISTS (
+    SELECT 1 FROM public.market_publications publication
+    WHERE publication.idempotency_key=p_request_id
+       OR (p_run_id IS NOT NULL AND publication.run_id=p_run_id)
+  ) THEN
+    -- The original RPC revalidates the active request lease, then returns the
+    -- immutable same-request receipt or RUN_ALREADY_EVALUATED. Cash freshness
+    -- must gate new money decisions, not make an already durable write orphaned.
+    RETURN public.apply_market_decision_bundle(
+      p_request_id,p_run_id,p_lease_token,p_policy_version,
+      p_evaluations,p_suggestions,p_publication
+    );
+  END IF;
+  SELECT EXISTS (
+    SELECT 1 FROM jsonb_array_elements(p_evaluations) evaluation
+    WHERE evaluation->>'policy_status'='approved'
+      AND evaluation->>'final_action' IN ('buy','add')
+  ) INTO v_requires_cash;
+
+  IF v_requires_cash THEN
+    IF p_cash_snapshot_id IS NULL OR p_cash_ledger_watermark IS NULL THEN
+      RAISE EXCEPTION 'CASH_UNAVAILABLE' USING ERRCODE='55000';
+    END IF;
+    SELECT revision INTO v_revision
+    FROM public.portfolio_cash_ledger_state
+    WHERE singleton=true FOR SHARE;
+    SELECT * INTO v_snapshot
+    FROM public.reconciled_cash_snapshots
+    WHERE id=p_cash_snapshot_id FOR SHARE;
+    IF NOT FOUND OR v_revision IS DISTINCT FROM p_cash_ledger_watermark
+       OR v_snapshot.ledger_watermark IS DISTINCT FROM p_cash_ledger_watermark
+       OR v_snapshot.as_of>statement_timestamp()
+       OR v_snapshot.fresh_through<statement_timestamp() THEN
+      RAISE EXCEPTION 'CASH_UNAVAILABLE' USING ERRCODE='55000';
+    END IF;
+  ELSIF p_cash_snapshot_id IS NOT NULL OR p_cash_ledger_watermark IS NOT NULL THEN
+    RAISE EXCEPTION 'unexpected cash authority' USING ERRCODE='22023';
+  END IF;
+
+  RETURN public.apply_market_decision_bundle(
+    p_request_id,p_run_id,p_lease_token,p_policy_version,
+    p_evaluations,p_suggestions,p_publication
+  );
+END;
+$$;
+
+-- A quiet scheduled intraday run closes with a durable policy outcome, not a
+-- fabricated immutable report or Telegram publication.
+CREATE TABLE IF NOT EXISTS public.market_run_terminal_outcomes (
+  run_id UUID PRIMARY KEY REFERENCES public.analysis_runs(id) ON DELETE RESTRICT,
+  evaluation_request_id UUID NOT NULL UNIQUE
+    REFERENCES public.market_gateway_requests(request_id) ON DELETE RESTRICT,
+  outcome TEXT NOT NULL CHECK (outcome IN ('no_trigger','not_actionable')),
+  created_at TIMESTAMPTZ NOT NULL DEFAULT statement_timestamp()
+);
+DROP TRIGGER IF EXISTS market_run_terminal_outcomes_append_only
+  ON public.market_run_terminal_outcomes;
+CREATE TRIGGER market_run_terminal_outcomes_append_only BEFORE UPDATE OR DELETE
+ON public.market_run_terminal_outcomes FOR EACH ROW
+EXECUTE FUNCTION public.reject_market_intelligence_mutation();
+
+CREATE OR REPLACE FUNCTION public.record_market_run_outcome(
+  p_request_id UUID,
+  p_lease_token UUID,
+  p_run_id UUID,
+  p_outcome TEXT
+) RETURNS JSONB LANGUAGE plpgsql SECURITY DEFINER SET search_path=pg_catalog AS $$
+DECLARE
+  v_request public.market_gateway_requests%ROWTYPE;
+  v_run public.analysis_runs%ROWTYPE;
+  v_existing public.market_run_terminal_outcomes%ROWTYPE;
+  v_evaluation_request_id UUID;
+BEGIN
+  IF p_request_id IS NULL OR p_lease_token IS NULL OR p_run_id IS NULL
+     OR p_outcome NOT IN ('no_trigger','not_actionable') THEN
+    RAISE EXCEPTION 'invalid market run outcome' USING ERRCODE='22023';
+  END IF;
+  SELECT * INTO v_request FROM public.market_gateway_requests
+  WHERE request_id=p_request_id FOR UPDATE;
+  IF NOT FOUND OR v_request.operation<>'evaluate_and_publish'
+     OR v_request.run_id IS DISTINCT FROM p_run_id
+     OR v_request.status<>'claimed' OR v_request.lease_token<>p_lease_token THEN
+    RAISE EXCEPTION 'request lease unavailable' USING ERRCODE='40001';
+  END IF;
+  SELECT * INTO v_run FROM public.analysis_runs WHERE id=p_run_id;
+  IF NOT FOUND OR v_run.scheduled_phase IS DISTINCT FROM 'intraday'
+     OR v_run.scheduled_market_date IS NULL THEN
+    RAISE EXCEPTION 'quiet outcome requires scheduled intraday run' USING ERRCODE='22023';
+  END IF;
+  SELECT publication.idempotency_key INTO v_evaluation_request_id
+    FROM public.market_publications publication
+    WHERE publication.run_id=p_run_id
+      AND publication.idempotency_key=p_request_id
+      AND publication.market_date=v_run.scheduled_market_date
+      AND publication.phase='intraday' AND publication.status='suppressed'
+      AND publication.telegram_message_ids='[]'::jsonb
+    ORDER BY publication.created_at,publication.id
+    LIMIT 1;
+  IF NOT FOUND THEN
+    RAISE EXCEPTION 'suppressed evaluation receipt unavailable' USING ERRCODE='55000';
+  END IF;
+  SELECT * INTO v_existing FROM public.market_run_terminal_outcomes
+  WHERE run_id=p_run_id;
+  IF FOUND THEN
+    IF v_existing.evaluation_request_id IS DISTINCT FROM v_evaluation_request_id
+       OR v_existing.outcome IS DISTINCT FROM p_outcome THEN
+      RAISE EXCEPTION 'market run outcome mismatch' USING ERRCODE='22023';
+    END IF;
+    RETURN jsonb_build_object(
+      'run_id',v_existing.run_id,'outcome',v_existing.outcome,'duplicate',true
+    );
+  END IF;
+  INSERT INTO public.market_run_terminal_outcomes(
+    run_id,evaluation_request_id,outcome
+  ) VALUES(p_run_id,v_evaluation_request_id,p_outcome) RETURNING * INTO v_existing;
+  RETURN jsonb_build_object(
+    'run_id',v_existing.run_id,'outcome',v_existing.outcome,'duplicate',false
+  );
+END;
+$$;
+
+CREATE OR REPLACE FUNCTION public.finish_market_analysis_run(p_run_id UUID)
+RETURNS JSONB LANGUAGE plpgsql SECURITY DEFINER SET search_path=pg_catalog AS $$
+DECLARE
+  v_run public.analysis_runs%ROWTYPE;
+  v_counts JSONB;
+  v_statuses JSONB;
+  v_ids JSONB;
+  v_status TEXT;
+  v_quiet_intraday BOOLEAN := false;
+BEGIN
+  SELECT * INTO v_run FROM public.analysis_runs WHERE id=p_run_id FOR UPDATE;
+  IF NOT FOUND THEN RAISE EXCEPTION 'run unavailable' USING ERRCODE='22023'; END IF;
+  IF v_run.scheduled_phase IS NOT NULL THEN
+    IF NOT EXISTS (
+      SELECT 1 FROM public.market_intelligence_runs i
+      WHERE i.id=p_run_id AND i.phase=v_run.scheduled_phase
+        AND i.market_date=v_run.scheduled_market_date
+    ) OR NOT EXISTS (
+      SELECT 1 FROM public.market_intelligence_run_events e
+      WHERE e.run_id=p_run_id AND e.status='completed'
+    ) OR NOT EXISTS (
+      SELECT 1 FROM public.market_collection_checkpoints c WHERE c.run_id=p_run_id
+    ) OR NOT EXISTS (
+      SELECT 1 FROM public.market_intelligence_collection_completions c WHERE c.run_id=p_run_id
+    ) THEN
+      RAISE EXCEPTION 'MISSING_COLLECTION_RECEIPT' USING ERRCODE='22023';
+    END IF;
+    IF NOT EXISTS (
+      SELECT 1 FROM public.market_evidence_packets p WHERE p.run_id=p_run_id
+    ) THEN
+      RAISE EXCEPTION 'MISSING_PACKET_RECEIPT' USING ERRCODE='22023';
+    END IF;
+    IF NOT EXISTS (
+      SELECT 1 FROM public.market_gateway_requests q
+      WHERE q.run_id=p_run_id AND q.operation='evaluate_and_publish'
+        AND q.status='completed'
+    ) OR NOT EXISTS (
+      SELECT 1 FROM public.market_publications p
+      WHERE p.run_id=p_run_id AND p.market_date=v_run.scheduled_market_date
+        AND p.phase=v_run.scheduled_phase AND p.status='suppressed'
+    ) THEN
+      RAISE EXCEPTION 'MISSING_EVALUATION_RECEIPT' USING ERRCODE='22023';
+    END IF;
+
+    SELECT v_run.scheduled_phase='intraday' AND EXISTS (
+      SELECT 1 FROM public.market_run_terminal_outcomes outcome
+      JOIN public.market_gateway_requests request
+        ON request.request_id=outcome.evaluation_request_id
+      JOIN public.market_publications publication
+        ON publication.run_id=outcome.run_id
+       AND publication.idempotency_key=outcome.evaluation_request_id
+      WHERE outcome.run_id=p_run_id
+        AND outcome.outcome IN ('no_trigger','not_actionable')
+        AND request.run_id=p_run_id AND request.operation='evaluate_and_publish'
+        AND request.status='completed'
+        AND publication.market_date=v_run.scheduled_market_date
+        AND publication.phase='intraday' AND publication.status='suppressed'
+        AND publication.telegram_message_ids='[]'::jsonb
+    ) INTO v_quiet_intraday;
+
+    IF NOT v_quiet_intraday AND NOT EXISTS (
+      SELECT 1 FROM public.market_gateway_requests q
+      JOIN public.market_report_request_origins o ON o.request_id=q.request_id
+      JOIN public.market_reports r ON r.id=CASE
+        WHEN q.response->>'report_id' ~ '^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$'
+        THEN (q.response->>'report_id')::uuid END
+      WHERE q.operation='record_report' AND q.run_id IS NULL
+        AND q.status='completed' AND jsonb_typeof(q.response)='object'
+        AND q.response->>'report_hash'=r.report_hash
+        AND q.response->>'rendered_hash'=r.rendered_hash
+        AND o.run_id=p_run_id AND o.scheduled_phase=v_run.scheduled_phase
+        AND o.market_date=v_run.scheduled_market_date
+        AND o.requested_packet_id=r.packet_id
+        AND r.run_id=p_run_id AND r.market_date=v_run.scheduled_market_date
+        AND ((v_run.scheduled_phase='pre-market' AND o.requested_kind IN ('morning','monthly'))
+          OR (v_run.scheduled_phase='intraday' AND o.requested_kind IN ('intraday','urgent'))
+          OR (v_run.scheduled_phase='post-market' AND o.requested_kind IN ('weekly','monthly','theme','urgent')))
+    ) THEN
+      RAISE EXCEPTION 'MISSING_REPORT_RECEIPT' USING ERRCODE='22023';
+    END IF;
+    IF NOT v_quiet_intraday AND NOT EXISTS (
+      SELECT 1 FROM public.market_gateway_requests q
+      JOIN public.market_report_request_origins o ON o.request_id=q.request_id
+      JOIN public.market_reports r ON r.id=CASE
+        WHEN q.response->>'report_id' ~ '^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$'
+        THEN (q.response->>'report_id')::uuid END
+      JOIN public.market_report_publications p ON p.report_id=r.id
+      WHERE q.operation='record_report' AND q.run_id IS NULL
+        AND q.status='completed' AND jsonb_typeof(q.response)='object'
+        AND q.response->>'report_hash'=r.report_hash
+        AND q.response->>'rendered_hash'=r.rendered_hash
+        AND o.run_id=p_run_id AND o.scheduled_phase=v_run.scheduled_phase
+        AND o.market_date=v_run.scheduled_market_date
+        AND o.requested_packet_id=r.packet_id
+        AND r.run_id=p_run_id AND r.market_date=v_run.scheduled_market_date
+        AND ((v_run.scheduled_phase='pre-market' AND o.requested_kind IN ('morning','monthly'))
+          OR (v_run.scheduled_phase='intraday' AND o.requested_kind IN ('intraday','urgent'))
+          OR (v_run.scheduled_phase='post-market' AND o.requested_kind IN ('weekly','monthly','theme','urgent')))
+        AND p.status IN ('delivered','suppressed')
+    ) THEN
+      RAISE EXCEPTION 'MISSING_PUBLICATION_RECEIPT' USING ERRCODE='22023';
+    END IF;
+  END IF;
+
+  SELECT jsonb_build_object(
+    'evaluations',(SELECT count(*) FROM public.decision_evaluations WHERE run_id=p_run_id),
+    'suggestions',(SELECT count(*) FROM public.suggestions WHERE run_id=p_run_id),
+    'publications',(SELECT count(*) FROM public.market_publications WHERE run_id=p_run_id),
+    'reports',(SELECT count(*) FROM public.market_reports WHERE run_id=p_run_id),
+    'run_outcomes',(SELECT count(*) FROM public.market_run_terminal_outcomes WHERE run_id=p_run_id)
+  ) INTO v_counts;
+  SELECT COALESCE(jsonb_agg(status ORDER BY status),'[]'::jsonb)
+  INTO v_statuses FROM (
+    SELECT status FROM public.market_publications WHERE run_id=p_run_id
+    UNION ALL
+    SELECT p.status FROM public.market_reports r
+    JOIN public.market_report_publications p ON p.report_id=r.id
+    WHERE r.run_id=p_run_id
+  ) states;
+  SELECT COALESCE(jsonb_agg(DISTINCT message_id),'[]'::jsonb)
+  INTO v_ids FROM (
+    SELECT value AS message_id FROM public.market_publications p
+    CROSS JOIN LATERAL jsonb_array_elements(p.telegram_message_ids) value
+    WHERE p.run_id=p_run_id
+    UNION ALL
+    SELECT value AS message_id FROM public.market_reports r
+    JOIN public.market_report_publications p ON p.report_id=r.id
+    CROSS JOIN LATERAL jsonb_array_elements(p.telegram_message_ids) value
+    WHERE r.run_id=p_run_id
+  ) message_ids;
+  SELECT CASE
+    WHEN EXISTS(
+      SELECT 1 FROM public.market_gateway_requests
+      WHERE run_id=p_run_id AND status='failed'
+    ) OR v_statuses ?| ARRAY['delivery_failed','delivery_unknown','failed','uncertain']
+      THEN 'partial'
+    WHEN v_quiet_intraday OR (
+      NOT EXISTS(
+        SELECT 1 FROM public.market_reports r
+        JOIN public.market_report_publications p ON p.report_id=r.id
+        WHERE r.run_id=p_run_id AND p.status='delivered'
+      ) AND EXISTS(
+        SELECT 1 FROM public.market_reports r
+        JOIN public.market_report_publications p ON p.report_id=r.id
+        WHERE r.run_id=p_run_id AND p.status='suppressed'
+      )
+    ) THEN 'suppressed'
+    ELSE 'completed'
+  END INTO v_status;
+  UPDATE public.analysis_runs SET status=v_status,finished_at=statement_timestamp(),
+    write_counts=v_counts,telegram_message_ids=v_ids WHERE id=p_run_id;
+  RETURN jsonb_build_object(
+    'run_id',p_run_id,'status',v_status,'write_counts',v_counts,
+    'publication_statuses',v_statuses,'telegram_message_ids',v_ids
+  );
+END;
+$$;
+
+ALTER TABLE public.portfolio_cash_ledger_state ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.reconciled_cash_snapshots ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.market_run_terminal_outcomes ENABLE ROW LEVEL SECURITY;
+REVOKE ALL ON TABLE public.portfolio_cash_ledger_state,
+  public.reconciled_cash_snapshots,public.market_run_terminal_outcomes
+  FROM PUBLIC,anon,authenticated,service_role;
+REVOKE ALL ON FUNCTION public.advance_portfolio_cash_ledger(),
+  public.read_portfolio_cash_ledger_watermark(),
+  public.record_reconciled_cash_snapshot(UUID,TIMESTAMPTZ,TIMESTAMPTZ,BIGINT,JSONB),
+  public.read_reconciled_cash_snapshot(TIMESTAMPTZ),
+  public.apply_market_decision_bundle_with_cash_snapshot(UUID,UUID,UUID,INT,JSONB,JSONB,JSONB,UUID,BIGINT),
+  public.record_market_run_outcome(UUID,UUID,UUID,TEXT),
+  public.finish_market_analysis_run(UUID)
+  FROM PUBLIC,anon,authenticated;
+REVOKE EXECUTE ON FUNCTION public.apply_market_decision_bundle(UUID,UUID,UUID,INT,JSONB,JSONB,JSONB)
+  FROM service_role;
+GRANT EXECUTE ON FUNCTION public.record_reconciled_cash_snapshot(UUID,TIMESTAMPTZ,TIMESTAMPTZ,BIGINT,JSONB) TO service_role;
+GRANT EXECUTE ON FUNCTION public.read_portfolio_cash_ledger_watermark() TO service_role;
+GRANT EXECUTE ON FUNCTION public.read_reconciled_cash_snapshot(TIMESTAMPTZ) TO service_role;
+GRANT EXECUTE ON FUNCTION public.apply_market_decision_bundle_with_cash_snapshot(UUID,UUID,UUID,INT,JSONB,JSONB,JSONB,UUID,BIGINT) TO service_role;
+GRANT EXECUTE ON FUNCTION public.record_market_run_outcome(UUID,UUID,UUID,TEXT) TO service_role;
+GRANT EXECUTE ON FUNCTION public.finish_market_analysis_run(UUID) TO service_role;
+
+-- Consolidated from sql/migrations/20260930_provider_attempt_and_recovery_closure.sql
+-- Close paid secondary-provider crash ambiguity before any outbound transport.
+-- The checkpoint row itself is the durable attempt ledger: a process restart
+-- reuses an uncertain outcome instead of issuing a replacement request.
+
+CREATE OR REPLACE FUNCTION public.checkpoint_market_intelligence_collection(
+  p_run_id UUID,
+  p_payload JSONB
+) RETURNS JSONB LANGUAGE plpgsql SECURITY DEFINER SET search_path=pg_catalog AS $$
+DECLARE
+  v_window JSONB;
+  v_existing public.market_collection_checkpoints%ROWTYPE;
+  r JSONB;
+  v_reserved public.market_source_quota_reservations%ROWTYPE;
+  v_used INT;
+  v_existing_receipt JSONB;
+  v_existing_uncertain BOOLEAN;
+  v_incoming_uncertain BOOLEAN;
+  v_same_attempt_identity BOOLEAN;
+  v_valid_attempt_transition BOOLEAN;
+BEGIN
+  IF p_payload IS NULL OR jsonb_typeof(p_payload)<>'object'
+     OR NOT(p_payload ?& ARRAY['cache_key','receipt','items'])
+     OR (p_payload-ARRAY['cache_key','receipt','items'])<>'{}'::jsonb
+     OR octet_length(p_payload::text)>65536
+     OR jsonb_typeof(p_payload->'items')<>'array'
+     OR jsonb_array_length(p_payload->'items')>50 THEN
+    RAISE EXCEPTION 'invalid collection checkpoint' USING ERRCODE='22023';
+  END IF;
+  SELECT request_window INTO v_window
+  FROM public.market_intelligence_runs WHERE id=p_run_id FOR UPDATE;
+  IF v_window IS NULL
+     OR NOT EXISTS(SELECT 1 FROM public.analysis_runs WHERE id=p_run_id AND status='running')
+     OR NOT EXISTS(SELECT 1 FROM public.market_intelligence_run_events WHERE run_id=p_run_id AND status='started')
+     OR EXISTS(SELECT 1 FROM public.market_intelligence_run_events WHERE run_id=p_run_id AND status IN ('completed','failed')) THEN
+    RAISE EXCEPTION 'intelligence run is not running' USING ERRCODE='22023';
+  END IF;
+
+  r:=p_payload->'receipt';
+  IF r IS NULL OR NOT(r ?& ARRAY['provider','reservation_id','status','cache_key','requested_window','requested_limit',
+       'retrieved_at','observed_at','expires_at','request_cost','upstream_remaining','returned_count','accepted_count',
+       'duplicate_count','dropped_count','response_hash','error_code','source_receipt_id','cache_predecessor_receipt_id'])
+     OR (r-ARRAY['provider','reservation_id','status','cache_key','requested_window','requested_limit',
+       'retrieved_at','observed_at','expires_at','request_cost','upstream_remaining','returned_count','accepted_count',
+       'duplicate_count','dropped_count','response_hash','error_code','source_receipt_id','cache_predecessor_receipt_id'])<>'{}'::jsonb
+     OR r->>'status' NOT IN ('succeeded','failed','quota_blocked')
+     OR (r->>'request_cost')::int NOT BETWEEN 1 AND 100
+     OR r->'cache_predecessor_receipt_id'<>'null'::jsonb
+     OR r->>'cache_key'<>p_payload->>'cache_key'
+     OR (r->'requested_window'->>'start')::timestamptz<>(v_window->>'start')::timestamptz
+     OR (r->'requested_window'->>'end')::timestamptz<>(v_window->>'end')::timestamptz
+     OR (r->>'source_receipt_id') !~ '^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$'
+     OR ((r->>'status')='succeeded'
+       AND ((r->>'expires_at')::timestamptz<=(r->>'retrieved_at')::timestamptz
+         OR r->>'response_hash' !~ '^[0-9a-f]{64}$'))
+     OR ((r->>'status')<>'succeeded'
+       AND (r->'expires_at'<>'null'::jsonb OR COALESCE(r->>'error_code','')='')) THEN
+    RAISE EXCEPTION 'checkpoint must record an actual request outcome' USING ERRCODE='22023';
+  END IF;
+  SELECT * INTO v_reserved
+  FROM public.market_source_quota_reservations
+  WHERE id=(r->>'reservation_id')::uuid AND run_id=p_run_id AND provider=r->>'provider';
+  IF NOT FOUND THEN
+    RAISE EXCEPTION 'wrong-run reservation' USING ERRCODE='22023';
+  END IF;
+  v_incoming_uncertain := r->>'status'='failed'
+    AND r->>'error_code'='TRANSPORT_OUTCOME_UNCERTAIN';
+  IF v_incoming_uncertain AND (
+      v_reserved.provider NOT IN ('alpha_vantage','finnhub')
+      OR jsonb_array_length(p_payload->'items')<>0
+      OR r->'observed_at'<>'null'::jsonb
+      OR r->'expires_at'<>'null'::jsonb
+      OR r->'upstream_remaining'<>'null'::jsonb
+      OR r->'response_hash'<>'null'::jsonb
+      OR (r->>'returned_count')::int<>0
+      OR (r->>'accepted_count')::int<>0
+      OR (r->>'duplicate_count')::int<>0
+      OR (r->>'dropped_count')::int<>0
+  ) THEN
+    RAISE EXCEPTION 'invalid provider attempt barrier' USING ERRCODE='22023';
+  END IF;
+
+  SELECT * INTO v_existing
+  FROM public.market_collection_checkpoints
+  WHERE run_id=p_run_id AND cache_key=p_payload->>'cache_key' FOR UPDATE;
+  IF FOUND AND v_existing.payload=p_payload-'cache_key' THEN
+    RETURN jsonb_build_object('run_id',p_run_id,'cache_key',p_payload->>'cache_key');
+  END IF;
+  SELECT COALESCE(sum((payload->'receipt'->>'request_cost')::int),0) INTO v_used FROM (
+    SELECT payload FROM public.market_collection_checkpoints WHERE run_id=p_run_id
+    UNION ALL SELECT payload FROM public.market_collection_checkpoint_history WHERE run_id=p_run_id
+  ) paid WHERE payload->'receipt'->>'reservation_id'=r->>'reservation_id';
+  IF v_existing.run_id IS NOT NULL THEN
+    v_existing_receipt := v_existing.payload->'receipt';
+    v_existing_uncertain := v_existing_receipt->>'status'='failed'
+      AND v_existing_receipt->>'error_code'='TRANSPORT_OUTCOME_UNCERTAIN';
+    v_same_attempt_identity := v_existing.source_receipt_id::text=r->>'source_receipt_id'
+      AND v_existing_receipt->>'provider'=r->>'provider'
+      AND v_existing_receipt->>'reservation_id'=r->>'reservation_id'
+      AND v_existing_receipt->>'cache_key'=r->>'cache_key'
+      AND v_existing_receipt->'requested_window'=r->'requested_window'
+      AND v_existing_receipt->>'requested_limit'=r->>'requested_limit';
+    v_valid_attempt_transition := v_existing_uncertain AND v_same_attempt_identity AND (
+      (v_incoming_uncertain
+       AND (r->>'request_cost')::int=(v_existing_receipt->>'request_cost')::int+1)
+      OR (NOT v_incoming_uncertain
+       AND (r->>'request_cost')::int=(v_existing_receipt->>'request_cost')::int)
+    );
+    IF v_valid_attempt_transition THEN
+      IF v_used-(v_existing_receipt->>'request_cost')::int+(r->>'request_cost')::int>v_reserved.reserved_requests THEN
+        RAISE EXCEPTION 'reservation use exceeds allocation' USING ERRCODE='54000';
+      END IF;
+      -- Never archive an attempt barrier: history plus its terminal row would
+      -- count the same provider request twice during restart reconciliation.
+      UPDATE public.market_collection_checkpoints
+      SET payload=p_payload-'cache_key',created_at=statement_timestamp()
+      WHERE run_id=p_run_id AND cache_key=p_payload->>'cache_key';
+    ELSE
+      IF v_existing.source_receipt_id=(r->>'source_receipt_id')::uuid
+         OR (v_existing_receipt->>'expires_at')::timestamptz>statement_timestamp() THEN
+        RAISE EXCEPTION 'checkpoint idempotency mismatch' USING ERRCODE='22023';
+      END IF;
+      IF v_used+(r->>'request_cost')::int>v_reserved.reserved_requests THEN
+        RAISE EXCEPTION 'reservation use exceeds allocation' USING ERRCODE='54000';
+      END IF;
+      INSERT INTO public.market_collection_checkpoint_history(
+        run_id,cache_key,source_receipt_id,payload
+      ) VALUES(
+        v_existing.run_id,v_existing.cache_key,v_existing.source_receipt_id,v_existing.payload
+      );
+      UPDATE public.market_collection_checkpoints
+      SET source_receipt_id=(r->>'source_receipt_id')::uuid,
+          payload=p_payload-'cache_key',created_at=statement_timestamp()
+      WHERE run_id=p_run_id AND cache_key=p_payload->>'cache_key';
+    END IF;
+  ELSE
+    IF v_used+(r->>'request_cost')::int>v_reserved.reserved_requests THEN
+      RAISE EXCEPTION 'reservation use exceeds allocation' USING ERRCODE='54000';
+    END IF;
+    INSERT INTO public.market_collection_checkpoints(
+      run_id,cache_key,request_window,source_receipt_id,payload
+    ) VALUES(
+      p_run_id,p_payload->>'cache_key',v_window,
+      (r->>'source_receipt_id')::uuid,p_payload-'cache_key'
+    );
+  END IF;
+  RETURN jsonb_build_object('run_id',p_run_id,'cache_key',p_payload->>'cache_key');
+END;
+$$;
+
+REVOKE ALL ON FUNCTION public.checkpoint_market_intelligence_collection(UUID,JSONB)
+  FROM PUBLIC,anon,authenticated;
+GRANT EXECUTE ON FUNCTION public.checkpoint_market_intelligence_collection(UUID,JSONB)
+  TO service_role;
+
+-- The recovery reader must cover the state added after its original grant
+-- migration, plus acknowledgement and policy dependencies needed by a restore.
+DO $$
+DECLARE name TEXT;
+BEGIN
+  FOREACH name IN ARRAY ARRAY[
+    'portfolio_command_acknowledgements','market_policy_config',
+    'portfolio_cash_ledger_state','reconciled_cash_snapshots',
+    'market_run_terminal_outcomes','market_collection_checkpoint_history'
+  ] LOOP
+    EXECUTE format(
+      'REVOKE ALL ON public.%I FROM stock_agent_release_reader,stock_agent_release_reader_runtime',
+      name
+    );
+    EXECUTE format('GRANT SELECT ON public.%I TO stock_agent_release_reader',name);
+    EXECUTE format('DROP POLICY IF EXISTS release_evidence_select ON public.%I',name);
+    EXECUTE format(
+      'CREATE POLICY release_evidence_select ON public.%I FOR SELECT TO stock_agent_release_reader USING (true)',
+      name
+    );
+  END LOOP;
+END;
+$$;
+
+-- Consolidated from sql/migrations/20261001_immutable_history_closure.sql
+-- Additive closure of changes previously embedded in immutable 20260907.
+-- Cache lineage column already exists from 202609120002; the consolidated
+-- controller owns receipt ingestion. Do not replace its final implementation.
+
+CREATE TABLE IF NOT EXISTS public.market_policy_comparisons (
+  id UUID PRIMARY KEY,
+  run_id UUID NOT NULL REFERENCES public.analysis_runs(id) ON DELETE RESTRICT,
+  packet_id UUID NOT NULL REFERENCES public.market_evidence_packets(id) ON DELETE RESTRICT,
+  evaluation_id UUID NOT NULL REFERENCES public.decision_evaluations(id) ON DELETE RESTRICT,
+  comparison JSONB NOT NULL CHECK (jsonb_typeof(comparison)='object' AND octet_length(comparison::text)<=16384),
+  created_at TIMESTAMPTZ NOT NULL DEFAULT statement_timestamp()
+);
+
+DROP TRIGGER IF EXISTS market_policy_comparisons_append_only ON public.market_policy_comparisons;
+CREATE TRIGGER market_policy_comparisons_append_only BEFORE UPDATE OR DELETE
+ON public.market_policy_comparisons FOR EACH ROW
+EXECUTE FUNCTION public.reject_market_intelligence_mutation();
+ALTER TABLE public.market_policy_comparisons ENABLE ROW LEVEL SECURITY;
+REVOKE ALL ON public.market_policy_comparisons FROM PUBLIC, anon, authenticated, service_role;
+
+CREATE OR REPLACE FUNCTION public.read_market_evidence_packet(
+  p_packet_id UUID,
+  p_run_id UUID
+) RETURNS JSONB LANGUAGE plpgsql SECURITY DEFINER
+SET search_path = pg_catalog AS $$
+DECLARE
+  v_result JSONB;
+BEGIN
+  IF p_packet_id IS NULL OR p_run_id IS NULL THEN
+    RAISE EXCEPTION 'packet and run identifiers are required' USING ERRCODE = '22023';
+  END IF;
+
+  SELECT jsonb_build_object(
+    'id',packet.id,
+    'run_id',packet.run_id,
+    'packet_hash',packet.packet_hash,
+    'packet',packet.packet,
+    'evidence_facts',COALESCE((
+      SELECT jsonb_agg(jsonb_build_object(
+        'candidate_key',candidate->>'candidate_key',
+        'evidence_id',item.id,
+        'category',CASE
+          WHEN item.metadata->>'evidence_category' IN ('quote','fundamentals','technicals','news','event','macro','sector')
+            THEN item.metadata->>'evidence_category'
+          WHEN item.provider='sec_edgar' THEN 'fundamentals'
+          WHEN item.provider IN ('fred','eia','bls','bea') THEN 'macro'
+          WHEN item.provider IN ('white_house','doe','dod','federal_register') THEN 'event'
+          WHEN item.provider IN ('gdelt','finnhub') THEN 'news'
+          WHEN item.provider='yahoo' THEN 'quote'
+          ELSE 'unknown' END,
+        'source',item.provider,
+        'source_status',CASE WHEN receipt.status IN ('succeeded','cache_hit') THEN receipt.status ELSE 'failed' END,
+        'authority',CASE
+          WHEN item.metadata->>'authority'='official' AND item.provider IN ('sec_edgar','fred','eia','bls','bea','white_house','doe','dod','federal_register') THEN 'official'
+          WHEN item.provider IN ('yahoo','alpha_vantage') THEN 'market_data'
+          WHEN item.provider IN ('gdelt','finnhub') THEN 'reported'
+          ELSE 'unverified' END,
+        'published_at',item.published_at,
+        'retrieved_at',receipt.retrieved_at,
+        'expires_at',receipt.expires_at,
+        'reference',item.canonical_url,
+        'normalized_text',item.normalized_text,
+        'exposure_kind',CASE WHEN item.metadata->>'exposure_kind' IN ('filing','contract','backlog','revenue','capacity','official_fund') THEN item.metadata->>'exposure_kind' ELSE NULL END,
+        'relationship_eligible',EXISTS (
+          SELECT 1 FROM public.market_candidate_rankings ranking
+          WHERE ranking.run_id=packet.run_id AND ranking.candidate_key=candidate->>'candidate_key'
+            AND ranking.qualified AND ranking.exposure_item_ids ? item.id::text
+        ),
+        'claim_key',item.metadata->>'claim_key',
+        'claim_polarity',CASE WHEN item.metadata->>'claim_polarity' IN ('affirmed','denied') THEN item.metadata->>'claim_polarity' ELSE NULL END
+      ) ORDER BY candidate->>'candidate_key',item.id)
+      FROM jsonb_array_elements(packet.packet->'candidates') candidate
+      CROSS JOIN LATERAL jsonb_array_elements_text(candidate->'evidence_ids') evidence_id
+      JOIN public.market_intelligence_run_items run_item ON run_item.run_id=packet.run_id
+        AND run_item.source_item_id=evidence_id::uuid AND run_item.disposition='accepted'
+      JOIN public.market_source_items item ON item.id=run_item.source_item_id
+      JOIN public.market_source_receipts receipt ON receipt.id=run_item.source_receipt_id
+    ),'[]'::jsonb),
+    'exposure_facts',COALESCE((
+      SELECT jsonb_agg(jsonb_build_object(
+        'candidate_key',fact.candidate_key,
+        'evidence_id',fact.evidence_id,
+        'exposure_kind',fact.exposure_kind,
+        'status',fact.freshness,
+        'observed_at',fact.observed_at,
+        'retrieved_at',fact.retrieved_at
+      ) ORDER BY fact.candidate_key,fact.evidence_id)
+      FROM (
+        SELECT DISTINCT ranking.candidate_key,
+          item.id AS evidence_id,
+          item.metadata->>'exposure_kind' AS exposure_kind,
+          CASE WHEN receipt.expires_at>statement_timestamp()
+                    AND COALESCE(item.effective_at,item.published_at) IS NOT NULL
+            THEN 'fresh' ELSE 'stale' END AS freshness,
+          COALESCE(item.effective_at,item.published_at) AS observed_at,
+          receipt.retrieved_at
+        FROM public.market_candidate_rankings ranking
+        CROSS JOIN LATERAL jsonb_array_elements_text(ranking.exposure_item_ids)
+          AS exposure_id(value)
+        JOIN public.market_intelligence_run_items run_item
+          ON run_item.run_id=ranking.run_id
+          AND run_item.source_item_id=exposure_id.value::uuid
+          AND run_item.disposition='accepted'
+        JOIN public.market_source_items item
+          ON item.id=run_item.source_item_id
+          AND item.source_receipt_id=run_item.source_receipt_id
+        JOIN public.market_source_receipts receipt
+          ON receipt.id=run_item.source_receipt_id
+          AND receipt.run_id=ranking.run_id
+          AND receipt.status IN ('succeeded','cache_hit')
+        WHERE ranking.run_id=packet.run_id AND ranking.qualified
+          AND item.metadata->>'authority'='official'
+          AND item.metadata->>'exposure_kind' IN (
+            'filing','contract','backlog','revenue','capacity','official_fund'
+          )
+          AND EXISTS (
+            SELECT 1 FROM jsonb_array_elements(packet.packet->'candidates') candidate
+            WHERE candidate->>'candidate_key'=ranking.candidate_key
+              AND candidate->'evidence_ids' ? item.id::text
+          )
+      ) fact
+    ),'[]'::jsonb)
+  ) INTO v_result
+  FROM public.market_evidence_packets packet
+  JOIN public.market_intelligence_run_events event
+    ON event.run_id=packet.run_id AND event.status='completed'
+  WHERE packet.id=p_packet_id AND packet.run_id=p_run_id AND packet.status='completed';
+
+  IF v_result IS NOT NULL AND octet_length(v_result::text)>131072 THEN
+    RAISE EXCEPTION 'packet read exceeds bound' USING ERRCODE = '22023';
+  END IF;
+  RETURN v_result;
+END;
+$$;
+
+CREATE OR REPLACE FUNCTION public.read_market_report_decisions(
+  p_run_id UUID, p_packet_id UUID, p_decision_ids JSONB
+) RETURNS JSONB LANGUAGE plpgsql SECURITY DEFINER
+SET search_path = pg_catalog AS $$
+DECLARE v_result JSONB;
+BEGIN
+  IF jsonb_typeof(p_decision_ids) IS DISTINCT FROM 'array'
+     OR jsonb_array_length(p_decision_ids) NOT BETWEEN 1 AND 96 THEN
+    RAISE EXCEPTION 'invalid report decision IDs' USING ERRCODE='22023';
+  END IF;
+  SELECT COALESCE(jsonb_agg(jsonb_build_object(
+    'evaluation_id',evaluation.id,'candidate_id',evaluation.candidate_id,
+    'run_id',evaluation.run_id,'packet_id',packet.id,'packet_hash',packet.packet_hash,
+    'ticker',evaluation.normalized->>'ticker','status',evaluation.policy_status,
+    'final_action',evaluation.final_action,
+    'final_alert_urgency',CASE WHEN evaluation.policy_status='approved' AND evaluation.final_action='hold'
+      THEN evaluation.normalized->'final_alert_urgency' ELSE 'null'::jsonb END,
+    'approved_terms',CASE WHEN evaluation.policy_status='approved' AND evaluation.final_action IN ('buy','add','reduce','sell')
+      THEN evaluation.normalized->'approved_terms' ELSE 'null'::jsonb END
+  ) ORDER BY evaluation.id),'[]'::jsonb) INTO v_result
+  FROM public.market_evidence_packets packet
+  JOIN public.decision_evaluations evaluation ON evaluation.run_id=packet.run_id
+    AND evaluation.analyst->>'packet_id'=packet.id::text
+    AND evaluation.policy_version=packet.policy_version
+  WHERE packet.id=p_packet_id AND packet.run_id=p_run_id AND packet.status='completed'
+    AND p_decision_ids ? evaluation.id::text;
+  IF jsonb_array_length(v_result)<>jsonb_array_length(p_decision_ids) THEN
+    RAISE EXCEPTION 'report decision provenance mismatch' USING ERRCODE='22023';
+  END IF;
+  RETURN v_result;
+END;
+$$;
+
+CREATE OR REPLACE FUNCTION public.record_market_report(
+  p_run_id UUID,
+  p_idempotency_key TEXT,
+  p_report JSONB
+) RETURNS JSONB LANGUAGE plpgsql SECURITY DEFINER
+SET search_path = pg_catalog AS $$
+DECLARE
+  v_existing public.market_reports%ROWTYPE;
+  v_packet public.market_evidence_packets%ROWTYPE;
+  v_expected_key TEXT;
+  v_expected_id UUID;
+BEGIN
+  IF p_run_id IS NULL OR p_idempotency_key IS NULL
+     OR p_idempotency_key !~ '^[0-9a-f]{64}$' OR jsonb_typeof(p_report)<>'object'
+     OR octet_length(p_report::text)>196608
+     OR NOT (p_report ?& ARRAY[
+       'id','packet_id','market_date','kind','report','report_hash','rendered_text','rendered_hash'
+     ])
+     OR (p_report - ARRAY[
+       'id','packet_id','market_date','kind','report','report_hash','rendered_text','rendered_hash'
+     ]) <> '{}'::jsonb
+     OR p_report->>'kind' NOT IN ('morning','urgent','weekly','monthly','theme','on-demand','intraday')
+     OR jsonb_typeof(p_report->'report')<>'object'
+     OR octet_length((p_report->'report')::text)>131072
+     OR p_report->>'report_hash' !~ '^[0-9a-f]{64}$'
+     OR p_report->>'report_hash' <> encode(extensions.digest(convert_to(
+       public.market_canonical_jsonb(p_report->'report'),'UTF8'
+     ),'sha256'),'hex')
+     OR jsonb_typeof(p_report->'rendered_text')<>'string'
+     OR char_length(p_report->>'rendered_text')>14000
+     OR p_report->>'rendered_hash' !~ '^[0-9a-f]{64}$'
+     OR p_report->>'rendered_hash' <> encode(extensions.digest(
+       convert_to(p_report->>'rendered_text','UTF8'),'sha256'
+     ),'hex')
+     OR NOT (p_report->'report' ?& ARRAY[
+       'source_ids','policy_decision_ids','comparison_ids'
+     ])
+     OR jsonb_typeof(p_report->'report'->'source_ids') IS DISTINCT FROM 'array'
+     OR jsonb_typeof(p_report->'report'->'policy_decision_ids') IS DISTINCT FROM 'array'
+     OR jsonb_typeof(p_report->'report'->'comparison_ids') IS DISTINCT FROM 'array'
+     OR jsonb_array_length(p_report->'report'->'source_ids') = 0
+     OR jsonb_array_length(p_report->'report'->'policy_decision_ids') = 0
+     OR jsonb_array_length(p_report->'report'->'comparison_ids') > 96
+     OR EXISTS (SELECT 1 FROM jsonb_array_elements_text(p_report->'report'->'source_ids') item
+       WHERE item !~ '^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$')
+     OR EXISTS (SELECT 1 FROM jsonb_array_elements_text(p_report->'report'->'policy_decision_ids') item
+       WHERE item !~ '^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$') THEN
+    RAISE EXCEPTION 'invalid market report' USING ERRCODE = '22023';
+  END IF;
+  SELECT packet.* INTO v_packet
+  FROM public.market_evidence_packets packet
+  JOIN public.market_intelligence_run_events event
+    ON event.run_id=packet.run_id AND event.status='completed'
+  WHERE packet.id=(p_report->>'packet_id')::uuid
+    AND packet.run_id=p_run_id AND packet.status='completed';
+  IF NOT FOUND THEN
+    RAISE EXCEPTION 'completed evidence packet unavailable' USING ERRCODE = '22023';
+  END IF;
+  v_expected_key := encode(extensions.digest(convert_to(
+    'v2:' || (p_report->>'kind') || ':' || (p_report->>'market_date') || ':' ||
+      v_packet.packet_hash || ':' || (p_report->>'report_hash'),
+    'UTF8'
+  ), 'sha256'), 'hex');
+  v_expected_id := (
+    substr(v_expected_key,1,8) || '-' || substr(v_expected_key,9,4) || '-5' ||
+    substr(v_expected_key,14,3) || '-8' || substr(v_expected_key,18,3) || '-' ||
+    substr(v_expected_key,21,12)
+  )::uuid;
+  IF p_idempotency_key <> v_expected_key OR p_report->>'id' <> v_expected_id::text
+     OR EXISTS (
+       SELECT 1 FROM jsonb_array_elements_text(p_report->'report'->'source_ids') source_id
+       WHERE NOT EXISTS (
+         SELECT 1 FROM jsonb_array_elements(v_packet.packet->'evidence') evidence
+         JOIN public.market_source_items item ON item.id=(evidence->>'item_id')::uuid
+         JOIN public.market_intelligence_run_items run_item ON run_item.source_item_id=item.id
+           AND run_item.run_id=p_run_id AND run_item.disposition='accepted'
+         JOIN public.market_source_receipts receipt ON receipt.id=run_item.source_receipt_id
+           AND receipt.status IN ('succeeded','cache_hit')
+         WHERE evidence->>'item_id'=source_id
+       )
+     )
+     OR EXISTS (
+       SELECT 1 FROM jsonb_array_elements_text(p_report->'report'->'policy_decision_ids') decision_id
+       WHERE NOT EXISTS (
+         SELECT 1 FROM public.decision_evaluations evaluation
+         WHERE evaluation.id=decision_id::uuid AND evaluation.run_id=p_run_id
+           AND evaluation.analyst->>'packet_id'=v_packet.id::text
+           AND evaluation.policy_version=v_packet.policy_version
+       )
+     ) OR EXISTS (
+       SELECT 1 FROM jsonb_array_elements_text(p_report->'report'->'comparison_ids') comparison_id
+       WHERE NOT EXISTS (
+         SELECT 1 FROM public.market_policy_comparisons comparison
+         JOIN public.decision_evaluations evaluation ON evaluation.id=comparison.evaluation_id
+           AND evaluation.run_id=p_run_id AND evaluation.analyst->>'packet_id'=v_packet.id::text
+         WHERE comparison.id=comparison_id::uuid AND comparison.run_id=p_run_id
+           AND comparison.packet_id=v_packet.id
+           AND p_report->'report'->'policy_decision_ids' ? evaluation.id::text
+       )
+     ) THEN
+    RAISE EXCEPTION 'market report chain mismatch' USING ERRCODE = '22023';
+  END IF;
+  PERFORM pg_advisory_xact_lock(hashtextextended(
+    'market-intelligence-report:' || p_run_id::text || ':' || v_packet.id::text || ':' ||
+      (p_report->>'market_date') || ':' || (p_report->>'kind'), 0
+  ));
+  SELECT * INTO v_existing FROM public.market_reports
+  WHERE run_id=p_run_id AND packet_id=v_packet.id
+    AND market_date=(p_report->>'market_date')::date AND kind=p_report->>'kind';
+  IF FOUND THEN
+    IF v_existing.run_id IS DISTINCT FROM p_run_id
+       OR v_existing.id IS DISTINCT FROM v_expected_id
+       OR v_existing.packet_id IS DISTINCT FROM (p_report->>'packet_id')::uuid
+       OR v_existing.report_hash IS DISTINCT FROM p_report->>'report_hash'
+       OR v_existing.rendered_text IS DISTINCT FROM p_report->>'rendered_text'
+       OR v_existing.rendered_hash IS DISTINCT FROM p_report->>'rendered_hash' THEN
+      RAISE EXCEPTION 'market report idempotency mismatch' USING ERRCODE = '22023';
+    END IF;
+    RETURN jsonb_build_object(
+      'report_id',v_existing.id,
+      'report_hash',v_existing.report_hash,
+      'rendered_hash',v_existing.rendered_hash,
+      'duplicate',true
+    );
+  END IF;
+  INSERT INTO public.market_reports(
+    id,idempotency_key,run_id,packet_id,market_date,kind,report,report_hash,rendered_text,rendered_hash
+  ) VALUES (
+    (p_report->>'id')::uuid,p_idempotency_key,p_run_id,v_packet.id,
+    (p_report->>'market_date')::date,p_report->>'kind',p_report->'report',
+    p_report->>'report_hash',p_report->>'rendered_text',p_report->>'rendered_hash'
+  ) RETURNING * INTO v_existing;
+  RETURN jsonb_build_object(
+    'report_id',v_existing.id,
+    'report_hash',v_existing.report_hash,
+    'rendered_hash',v_existing.rendered_hash,
+    'duplicate',false
+  );
+END;
+$$;
+
+REVOKE ALL ON FUNCTION public.read_market_evidence_packet(UUID, UUID) FROM PUBLIC, anon, authenticated;
+GRANT EXECUTE ON FUNCTION public.read_market_evidence_packet(UUID, UUID) TO service_role;
+REVOKE ALL ON FUNCTION public.read_market_report_decisions(UUID, UUID, JSONB) FROM PUBLIC, anon, authenticated;
+GRANT EXECUTE ON FUNCTION public.read_market_report_decisions(UUID, UUID, JSONB) TO service_role;
+REVOKE ALL ON FUNCTION public.record_market_report(UUID, TEXT, JSONB) FROM PUBLIC, anon, authenticated;
+GRANT EXECUTE ON FUNCTION public.record_market_report(UUID, TEXT, JSONB) TO service_role;
+
+-- Recovery must preserve policy comparison provenance and its evaluation FK.
+REVOKE ALL ON public.decision_evaluations, public.market_policy_comparisons
+  FROM stock_agent_release_reader, stock_agent_release_reader_runtime;
+GRANT SELECT ON public.decision_evaluations, public.market_policy_comparisons TO stock_agent_release_reader;
+DROP POLICY IF EXISTS release_evidence_select ON public.decision_evaluations;
+CREATE POLICY release_evidence_select ON public.decision_evaluations
+  FOR SELECT TO stock_agent_release_reader USING (true);
+DROP POLICY IF EXISTS release_evidence_select ON public.market_policy_comparisons;
+CREATE POLICY release_evidence_select ON public.market_policy_comparisons
+  FOR SELECT TO stock_agent_release_reader USING (true);

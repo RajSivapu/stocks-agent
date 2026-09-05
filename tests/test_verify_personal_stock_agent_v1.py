@@ -61,6 +61,8 @@ def release(tmp_path):
     raw = {"sql/migrations/20260926_suppression_reasons.sql": b"SELECT 1;\n",
            "supabase/functions/market-briefing-gateway/index.ts": b"gateway\n",
            "supabase/functions/owner-dashboard-api/index.ts": b"dashboard\n",
+           "supabase/functions/telegram-portfolio/index.ts": b"telegram\n",
+           ".openai/hosting.json": b'{"project_id":"appgprj_fixture","static":{"directory":"dist"}}',
            "apps/web/src/main.tsx": b"web source\n",
            "scripts/deploy_owner_dashboard_api.py": b"deploy verifier\n"}
     for path, content in raw.items():
@@ -89,7 +91,7 @@ def release(tmp_path):
         "deployed_at": "2026-09-05T19:00:00Z", "workflow_run_id": 43, "pull_request_number": 44,
         "run_id": RUN, "candidate_sha": sha,
         "migrations": [{"path": "sql/migrations/20260926_suppression_reasons.sql", "version": "20260926", "sha256": migration_statements_sha256(normalize_migration_statements(raw["sql/migrations/20260926_suppression_reasons.sql"].decode()))}],
-        "functions": [{"function": name, "git_sha": sha, "function_version": 5, "source_sha256": tree_hash({"index.ts": raw[f"supabase/functions/{name}/index.ts"]})} for name in ("market-briefing-gateway", "owner-dashboard-api")],
+        "functions": [{"function": name, "deployment_id": name + "-deployment", "git_sha": sha, "function_version": 5, "source_sha256": tree_hash({"index.ts": raw[f"supabase/functions/{name}/index.ts"]})} for name in ("market-briefing-gateway", "owner-dashboard-api", "telegram-portfolio")],
         "static_assets": {"candidate_sha": sha, "source_sha256": tree_hash({"src/main.tsx": b"web source\n"}), "files": {"index.html": hashlib.sha256(b"<main>Private</main>").hexdigest()}},
         "dry_run": False,
         "dry_run_evidence": {"before": {"source": {"project_ref": "p" * 20}, "tables": {"scheduled_runs": {"count": 1, "rows_sha256": "a" * 64}, "transactions": {"count": 0, "rows_sha256": "b" * 64}}}, "after": {"source": {"project_ref": "p" * 20}, "tables": {"scheduled_runs": {"count": 1, "rows_sha256": "a" * 64}, "transactions": {"count": 0, "rows_sha256": "b" * 64}}}, "table_deltas": {"scheduled_runs": 0, "transactions": 0}, "safe_command_argv": ["python", "scripts/deploy_owner_dashboard_api.py", "--dry-run", "--candidate-sha", sha], "candidate_script_sha256": hashlib.sha256(raw["scripts/deploy_owner_dashboard_api.py"]).hexdigest(), "safe_command_sha256": hashlib.sha256(json.dumps({"argv": ["python", "scripts/deploy_owner_dashboard_api.py", "--dry-run", "--candidate-sha", sha], "candidate_sha": sha, "candidate_script_sha256": hashlib.sha256(raw["scripts/deploy_owner_dashboard_api.py"]).hexdigest()}, sort_keys=True, separators=(",", ":")).encode()).hexdigest(), "safe_command_exit_code": 0},
@@ -98,6 +100,18 @@ def release(tmp_path):
         "deployment_outcome": "succeeded",
         "rollback_readiness": {"status": "ready", "function_version": 4, "source_sha256": tree_hash(source.artifacts[46]), "isolated_drill": {"status": "verified", "isolated": True, "source_sha256": tree_hash(source.artifacts[46]), "started_at": "2026-09-05T18:16:00Z", "completed_at": "2026-09-05T18:17:00Z"}},
     }
+    source.record["component_readbacks"] = []
+    for index, name in enumerate(("market-briefing-gateway", "owner-dashboard-api", "telegram-portfolio", "owner-web-site")):
+        files = {"index.ts": raw[f"supabase/functions/{name}/index.ts"]} if name != "owner-web-site" else {"index.html": b"<main>Private</main>"}
+        source.artifacts[100 + index] = files
+        source.record["component_readbacks"].append({
+            "component": name, "candidate_sha": sha, "deployment_id": name + "-deployment", "version": "5",
+            "project_id": "appgprj_fixture", "origin": "management_plane_download", "artifact_id": 100 + index,
+            "deployed_sha256": tree_hash(files),
+            "prior": {"exists": True, "deployment_id": name + "-prior", "version": "4", "configuration": {},
+                      "captured_at": "2026-09-05T18:15:00Z",
+                      "artifact_id": 46, "source_sha256": tree_hash(source.artifacts[46])},
+        })
     recovery = recovery_records(); packet = recovery["packets"][0]; report = recovery["reports"][0]
     source.rows = {
         "run": [{"id": RUN, "kind": "post-market", "scheduled_phase": "post-market", "scheduled_market_date": "2026-09-05", "status": "completed", "started_at": "2026-09-05T19:10:00Z", "finished_at": "2026-09-05T20:00:00Z", "gateway_request_id": START, "telegram_message_ids": [7]}],
@@ -129,6 +143,36 @@ def test_release_queries_sources_and_binds_exact_receipts(release):
     assert result["publication_receipt"]["telegram_message_ids"] == [7]
     source.record.pop("run_id")
     assert verify_release(source, **args)["run_id"] == RUN
+
+
+def test_release_requires_readback_of_all_four_deployed_artifacts(release):
+    source, args = release
+    source.record.pop("component_readbacks", None)
+    with pytest.raises(RuntimeError, match="component|readback"):
+        verify_release(source, **args)
+
+
+def test_release_rejects_site_prior_capture_after_deployment(release):
+    source, args = release
+    source.record["component_readbacks"][3]["prior"]["captured_at"] = "2026-09-05T20:00:00Z"
+    with pytest.raises(RuntimeError, match="predeployment"):
+        verify_release(source, **args)
+
+
+@pytest.mark.parametrize("index", range(4))
+def test_release_rejects_each_component_deployed_byte_drift(release, index):
+    source, args = release
+    source.artifacts[100 + index] = {"index": b"unreviewed deployed bytes"}
+    with pytest.raises(RuntimeError, match="component.*bytes"):
+        verify_release(source, **args)
+
+
+@pytest.mark.parametrize("index", range(4))
+def test_release_rejects_each_component_missing_prior_identity(release, index):
+    source, args = release
+    source.record["component_readbacks"][index]["prior"]["deployment_id"] = None
+    with pytest.raises(RuntimeError, match="rollback.*identity"):
+        verify_release(source, **args)
 
 
 def test_release_rejects_an_approval_after_merge_even_when_the_candidate_matches(release):

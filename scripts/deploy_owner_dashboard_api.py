@@ -47,7 +47,7 @@ MIGRATION_LEDGER = "public.stock_agent_release_migration_ledger"
 RELEASE_LEASE = "public.stock_agent_release_mutation_lease"
 RELEASE_LEASE_SECONDS = 900
 FUNCTION_NAME = "owner-dashboard-api"
-CHANGED_FUNCTIONS = ("market-briefing-gateway", FUNCTION_NAME)
+CHANGED_FUNCTIONS = ("market-briefing-gateway", FUNCTION_NAME, "telegram-portfolio")
 V1_SURFACES = ("portfolio", "ideas", "intelligence", "reports", "system")
 DASHBOARD_SECRET_NAMES = (
     "DASHBOARD_ALLOWED_ORIGINS",
@@ -787,8 +787,6 @@ def _deploy_named_function(
     prior = function_version(project_ref, function_name, repo_root, runner)
     if require_existing and prior is None:
         raise RuntimeError(f"required existing function is missing: {function_name}")
-    if not require_existing and prior is not None:
-        raise RuntimeError("initial dashboard function already exists")
     deployed = _run(
         [
             "npx", "--yes", f"supabase@{SUPABASE_CLI_VERSION}", "functions", "deploy",
@@ -1013,6 +1011,8 @@ def recover_gateway_from_state(
     releaser: Callable[..., None] = release_gateway_rollback_artifact,
 ) -> dict[str, object]:
     """Shared recovery state machine for workflow recovery and the isolated drill."""
+    if state.get("changed") is False:
+        return {"status": "unchanged", "changed": False}
     if state.get("recovery_required_on_non_success") is not True or not isinstance(state.get("artifact"), Mapping):
         raise RuntimeError("retained gateway rollback artifact is unavailable")
     stored = state["artifact"]
@@ -1188,158 +1188,51 @@ def main() -> int:
         return 0
 
     if arguments.prepare_recovery:
-        git_sha = verify_git_release(expected_sha=arguments.candidate_sha)
-        verify_reviewed_sha(git_sha, arguments.reviewed_sha)
-        if arguments.rollback_worktree is None or arguments.deployment_id is None:
-            raise SystemExit("--prepare-recovery requires --rollback-worktree and --deployment-id")
-        receipt = capture_durable_recovery_state(
-            arguments.gateway_rollback_ref, arguments.gateway_rollback_source_sha256,
-            arguments.rollback_worktree, arguments.evidence_directory, arguments.release_state, arguments.deployment_id,
-        )
-        print(json.dumps({"status": "prepared", "rollback_capture": receipt["capture"]}, sort_keys=True, separators=(",", ":")))
-        return 0
-
+        raise SystemExit("recovery capture now occurs under the lease in the component release engine")
     validate_release_database_endpoints(arguments.project_ref, admin_url, session_template)
+    validate_static_configuration(arguments.project_ref, owner_user_id, arguments.allowed_origin, DASHBOARD_SECRET_NAMES)
     if not arguments.lease_owner:
         raise SystemExit("--lease-owner is required for protected production mutation")
-    # The clean-tree gate intentionally precedes capture/state writes.
     git_sha = verify_git_release(expected_sha=arguments.candidate_sha)
     verify_reviewed_sha(git_sha, arguments.reviewed_sha)
-    if arguments.keep_rollback_worktree and arguments.rollback_worktree is None:
-        raise SystemExit("--keep-rollback-worktree requires --rollback-worktree")
-    rollback_directory = (arguments.rollback_worktree if arguments.rollback_worktree is not None
-                          else Path(tempfile.mkdtemp(prefix="stocks-gateway-rollback-")) / "checkout")
-    prepared_capture = arguments.evidence_directory / "recovery-metadata/rollback-capture.json"
-    if prepared_capture.is_file() and arguments.release_state.is_file():
-        captured = json.loads(prepared_capture.read_text())
-        state = json.loads(arguments.release_state.read_text())
-        artifact_state = state.get("artifact", {})
-        gateway_rollback = {"repo_root": Path(str(artifact_state.get("repo_root", ""))),
-                            "commit_sha": captured.get("commit_sha"), "source_sha256": captured.get("source_sha256")}
-        if (gateway_rollback["repo_root"] != rollback_directory or gateway_rollback["commit_sha"] != artifact_state.get("commit_sha")
-                or gateway_rollback["source_sha256"] != artifact_state.get("source_sha256")):
-            raise SystemExit("durable rollback recovery journal is inconsistent")
-        retained_gateway = captured
-    else:
-        gateway_rollback = prepare_gateway_rollback_artifact(
-            arguments.gateway_rollback_ref, arguments.gateway_rollback_source_sha256, rollback_directory,
+    key = os.environ.get("RELEASE_RECOVERY_KEY", "").encode()
+    if not key:
+        raise SystemExit("RELEASE_RECOVERY_KEY is required for authenticated encrypted component recovery")
+    from scripts.release_components import load_native_release_adapter, run_native_release
+    from scripts.verify_personal_stock_agent_v1 import verify_component_artifacts
+    context = {"candidate_sha": git_sha, "project_ref": arguments.project_ref,
+               "release_run_id": os.environ.get("GITHUB_RUN_ID"),
+               "deployment_id": arguments.deployment_id, "allowed_origin": arguments.allowed_origin,
+               "site_origin": arguments.site_origin, "owner_user_id": owner_user_id}
+    adapter = load_native_release_adapter(context)
+    manifest = candidate_migration_manifest()
+    migrations = {}
+    def migrate():
+        with psycopg.connect(admin_url) as connection:
+            with connection.cursor() as cursor:
+                migrations.update(apply_release_migrations(cursor, manifest))
+    def verify(receipt):
+        receipt["candidate_sha"] = git_sha
+        receipt["migrations"] = migrations["candidate"]
+        receipt["migration_application"] = migrations
+        verify_release_artifact_receipts(git_sha, receipt, manifest)
+        verify_component_artifacts(ROOT, git_sha, receipt, adapter)
+        captured = adapter.capture("dashboard-secrets")
+        database_url = captured["values"]["DASHBOARD_DATABASE_URL"]
+        receipt["canary"] = run_post_deploy_canary(
+            arguments.project_ref, arguments.allowed_origin, database_url, owner_email,
+            service_key, publishable_key, non_owner_access_token,
         )
-        retained_gateway = retain_gateway_rollback_artifact(gateway_rollback, arguments.evidence_directory)
-    gateway_rollback_preflight = verify_gateway_rollback_preflight(
-        arguments.project_ref, arguments.gateway_current_version, gateway_rollback
-    )
-
-    def write_state(changed: bool) -> None:
-        state = {"recovery_required_on_non_success": True, "changed": changed,
-                 "artifact": {"repo_root": str(gateway_rollback["repo_root"]), "commit_sha": gateway_rollback["commit_sha"], "source_sha256": gateway_rollback["source_sha256"]}}
-        arguments.release_state.parent.mkdir(parents=True, exist_ok=True)
-        temporary = arguments.release_state.with_suffix(".tmp")
-        temporary.write_text(json.dumps(state, sort_keys=True, separators=(",", ":")) + "\n")
-        os.replace(temporary, arguments.release_state)
-
-    # Persist the artifact identity before further validation. The changed
-    # marker itself is written immediately before the first gateway mutation.
-    if not arguments.release_state.is_file():
-        write_state(False)
-
-    validate_static_configuration(
-        arguments.project_ref,
-        owner_user_id,
-        arguments.allowed_origin,
-        DASHBOARD_SECRET_NAMES,
-    )
-    run_local_verification()
-    dashboard_source = verify_v1_dashboard_source()
-    ensure_initial_function_absent(arguments.project_ref)
-    migration_manifest = candidate_migration_manifest()
-    # This lease survives a lost runner as an unresolved recovery obligation.
-    # Do not resolve it here: the final workflow action resolves it only after
-    # GitHub accepts the terminal deployment success status.
-    mutation_lease = DurableMutationLease(admin_url, arguments.lease_owner, "release")
-    mutation_lease.__enter__()
-    with psycopg.connect(admin_url) as connection:
-        with connection.cursor() as cursor:
-            migration_receipts = apply_release_migrations(cursor, migration_manifest)
-        database_secret = provision_dashboard_role(connection, session_template)
-        role_receipt = verify_dashboard_role(connection)
-    mutation_lease.heartbeat()
-    database_url = database_secret["DASHBOARD_DATABASE_URL"]
-    safe_configuration = validate_deployment_configuration(
-        project_ref=arguments.project_ref,
-        owner_user_id=owner_user_id,
-        allowed_origin=arguments.allowed_origin,
-        database_url=database_url,
-        role_receipt=role_receipt,
-        secret_names=DASHBOARD_SECRET_NAMES,
-    )
-    rollback_release = lambda project_ref, admin: rollback_after_gateway_change(
-        project_ref, admin, gateway_rollback
-    )
-    # A subprocess can die after its remote mutation and before it returns a
-    # receipt, so mark this state atomically before attempting that command.
-    write_state(True)
-    mutation_lease.heartbeat()
-    receipt = publish_and_deploy_or_rollback(
-        arguments.project_ref,
-        {
-            "DASHBOARD_ALLOWED_ORIGINS": arguments.allowed_origin,
-            "DASHBOARD_DATABASE_URL": database_url,
-            "DASHBOARD_OWNER_USER_ID": owner_user_id,
-        },
-        git_sha,
-        admin_url,
-        deployer=deploy_changed_functions,
-        rollback=rollback_release,
-    )
-    receipt["candidate_sha"] = git_sha
-    receipt["migrations"] = migration_receipts["candidate"]
-    receipt["migration_application"] = migration_receipts
-    receipt["dashboard_source"] = dashboard_source
-    receipt["configuration"] = safe_configuration
-    receipt["role"] = role_receipt
-    receipt["canary"] = verify_initial_deployment_or_rollback(
-        arguments.project_ref,
-        arguments.allowed_origin,
-        database_url,
-        owner_email,
-        service_key,
-        publishable_key,
-        non_owner_access_token,
-        rollback=lambda project_ref: rollback_release(project_ref, admin_url),
-    )
-    mutation_lease.heartbeat()
-    receipt["static_assets"] = build_static_or_rollback(
-        arguments.project_ref,
-        arguments.site_origin,
-        git_sha,
-        admin_url, rollback=rollback_release,
-    )
-    try:
-        receipt["artifact_verification"] = verify_release_artifact_receipts(git_sha, receipt, migration_manifest)
-    except Exception as error:
-        try:
-            rollback_release(arguments.project_ref, admin_url)
-        except Exception as rollback_error:
-            raise RuntimeError(
-                "artifact verification failed and the initial dashboard rollback also failed"
-            ) from rollback_error
-        raise error
-    receipt["gateway_rollback_artifact"] = {
-        **retained_gateway,
-        "repo_root": str(gateway_rollback["repo_root"]),
-        "commit_sha": gateway_rollback["commit_sha"],
-        "source_sha256": gateway_rollback["source_sha256"],
-        "predeployment_function_version": gateway_rollback_preflight["function_version"],
-    }
-    receipt["rollback_readiness"] = gateway_rollback_preflight
-    receipt["deployment_outcome"] = "succeeded"
+    # There is one mutation path. Capture and encrypted retention occur before
+    # migrate(), role/secret changes, Edge writes, or the Site deployment.
+    with DurableMutationLease(admin_url, arguments.lease_owner, "release") as lease:
+        receipt = run_native_release(
+            adapter, context, repo_root=ROOT, journal_path=arguments.release_state,
+            key=key, migrate=migrate, checkpoint=lambda _boundary: lease.heartbeat(),
+            verify_receipt=verify,
+        )
     print(json.dumps(receipt, sort_keys=True, separators=(",", ":")))
-    # The durable row remains recovery_required.  The terminal-status helper
-    # resolves it while holding the same protocol lock as the last workflow
-    # action; failure/cancellation leaves it available to independent recovery.
-    mutation_lease.__exit__(None, None, None)
-    if not arguments.keep_rollback_worktree:
-        release_gateway_rollback_artifact(gateway_rollback)
+    # Keep the durable lease unresolved until the workflow records success.
     return 0
 
 

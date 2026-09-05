@@ -41,6 +41,8 @@ _RESTORE_TABLES = (
     ("collection_checkpoint_history", "market_collection_checkpoint_history", {}),
     ("collection_completions", "market_intelligence_collection_completions", {}),
     ("packets", "market_evidence_packets", {}),
+    ("decision_evaluations", "decision_evaluations", {}),
+    ("policy_comparisons", "market_policy_comparisons", {}),
     ("reports", "market_reports", {}),
     ("report_origins", "market_report_request_origins", {}),
     ("publications", "market_report_publications", {}),

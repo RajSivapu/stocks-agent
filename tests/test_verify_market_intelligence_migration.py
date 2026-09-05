@@ -220,6 +220,8 @@ def test_missing_trigger_rls_or_gateway_scope_fails_closed():
 def test_schema_declares_complete_bounded_append_only_ledgers_and_rpcs():
     for path in (MIGRATION, SCHEMA):
         sql = path.read_text()
+        if path == MIGRATION:
+            sql += (MIGRATION.parent / "20261001_immutable_history_closure.sql").read_text()
         for table in BASE_TABLES:
             assert f"CREATE TABLE IF NOT EXISTS public.{table}" in sql
             assert f"ALTER TABLE public.{table} ENABLE ROW LEVEL SECURITY;" in sql
@@ -308,6 +310,8 @@ def test_schema_declares_complete_bounded_append_only_ledgers_and_rpcs():
 def test_report_nested_provenance_arrays_are_explicit_and_null_safe():
     for path in (MIGRATION, SCHEMA):
         sql = path.read_text()
+        if path == MIGRATION:
+            sql += (MIGRATION.parent / "20261001_immutable_history_closure.sql").read_text()
         assert "p_report->'report' ?& ARRAY[\n       'source_ids','policy_decision_ids','comparison_ids'\n     ]" in sql
         for field in ("source_ids", "policy_decision_ids", "comparison_ids"):
             assert (
@@ -344,8 +348,9 @@ def test_migration_is_idempotent_and_schema_mirrors_it_verbatim():
     ledger = migration.split("CREATE OR REPLACE FUNCTION public.claim_market_gateway_request(", 1)[0]
     assert ledger in schema
     assert "\\n+--" not in schema
-    assert migration.count("CREATE TABLE IF NOT EXISTS public.") == len(BASE_TABLES)
-    assert migration.count("DROP TRIGGER IF EXISTS") == len(BASE_TABLES)
+    assert migration.count("CREATE TABLE IF NOT EXISTS public.") == len(BASE_TABLES) - 1
+    assert migration.count("DROP TRIGGER IF EXISTS") == len(BASE_TABLES) - 1
+    assert (MIGRATION.parent / "20261001_immutable_history_closure.sql").read_text() in schema
 
 
 def test_reuse_override_validates_immutable_identity_and_keeps_run_receipt_evidence():

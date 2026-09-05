@@ -136,7 +136,6 @@ CREATE TABLE IF NOT EXISTS public.market_source_receipts (
     jsonb_typeof(error)='object' AND octet_length(error::text) <= 4096
   )),
   response_hash TEXT CHECK (response_hash IS NULL OR response_hash ~ '^[0-9a-f]{64}$'),
-  cache_predecessor_receipt_id UUID REFERENCES public.market_source_receipts(id) ON DELETE RESTRICT,
   created_at TIMESTAMPTZ NOT NULL DEFAULT statement_timestamp(),
   UNIQUE (run_id, id),
   CHECK (accepted_count + duplicate_count + dropped_count <= returned_count),
@@ -290,15 +289,6 @@ CREATE TABLE IF NOT EXISTS public.market_reports (
   rendered_hash TEXT NOT NULL CHECK (rendered_hash ~ '^[0-9a-f]{64}$'),
   created_at TIMESTAMPTZ NOT NULL DEFAULT statement_timestamp()
 );
-
-CREATE TABLE IF NOT EXISTS public.market_policy_comparisons (
-  id UUID PRIMARY KEY,
-  run_id UUID NOT NULL REFERENCES public.analysis_runs(id) ON DELETE RESTRICT,
-  packet_id UUID NOT NULL REFERENCES public.market_evidence_packets(id) ON DELETE RESTRICT,
-  evaluation_id UUID NOT NULL REFERENCES public.decision_evaluations(id) ON DELETE RESTRICT,
-  comparison JSONB NOT NULL CHECK (jsonb_typeof(comparison)='object' AND octet_length(comparison::text)<=16384),
-  created_at TIMESTAMPTZ NOT NULL DEFAULT statement_timestamp()
-);
 CREATE INDEX IF NOT EXISTS idx_market_reports_date_kind
   ON public.market_reports(market_date DESC, kind, created_at DESC);
 
@@ -415,12 +405,6 @@ DROP TRIGGER IF EXISTS market_reports_append_only ON public.market_reports;
 CREATE TRIGGER market_reports_append_only BEFORE UPDATE OR DELETE
 ON public.market_reports FOR EACH ROW
 EXECUTE FUNCTION public.reject_market_intelligence_mutation();
-DROP TRIGGER IF EXISTS market_policy_comparisons_append_only ON public.market_policy_comparisons;
-CREATE TRIGGER market_policy_comparisons_append_only BEFORE UPDATE OR DELETE
-ON public.market_policy_comparisons FOR EACH ROW
-EXECUTE FUNCTION public.reject_market_intelligence_mutation();
-ALTER TABLE public.market_policy_comparisons ENABLE ROW LEVEL SECURITY;
-REVOKE ALL ON public.market_policy_comparisons FROM PUBLIC, anon, authenticated, service_role;
 DROP TRIGGER IF EXISTS market_learning_observations_append_only ON public.market_learning_observations;
 CREATE TRIGGER market_learning_observations_append_only BEFORE UPDATE OR DELETE
 ON public.market_learning_observations FOR EACH ROW
@@ -713,12 +697,12 @@ BEGIN
        OR NOT (v_row ?& ARRAY[
          'id','reservation_id','status','cache_key','requested_window','retrieved_at','expires_at',
          'request_cost','upstream_remaining','returned_count','accepted_count','duplicate_count',
-         'dropped_count','error','response_hash','cache_predecessor_receipt_id'
+         'dropped_count','error','response_hash'
        ])
        OR (v_row - ARRAY[
          'id','reservation_id','status','cache_key','requested_window','retrieved_at','expires_at',
          'request_cost','upstream_remaining','returned_count','accepted_count','duplicate_count',
-         'dropped_count','error','response_hash','cache_predecessor_receipt_id'
+         'dropped_count','error','response_hash'
        ]) <> '{}'::jsonb
        OR v_row->>'status' NOT IN (
          'succeeded','failed','cache_hit','quota_blocked','configuration_missing'
@@ -755,15 +739,14 @@ BEGIN
     INSERT INTO public.market_source_receipts(
       id,run_id,reservation_id,provider,status,cache_key,requested_window,retrieved_at,expires_at,
       request_cost,upstream_remaining,returned_count,accepted_count,duplicate_count,dropped_count,
-      error,response_hash,cache_predecessor_receipt_id
+      error,response_hash
     ) VALUES (
       (v_row->>'id')::uuid,p_run_id,v_reservation.id,v_reservation.provider,v_row->>'status',
       v_row->>'cache_key',v_row->'requested_window',(v_row->>'retrieved_at')::timestamptz,
       (v_row->>'expires_at')::timestamptz,(v_row->>'request_cost')::int,
       (v_row->>'upstream_remaining')::int,(v_row->>'returned_count')::int,
       (v_row->>'accepted_count')::int,(v_row->>'duplicate_count')::int,
-      (v_row->>'dropped_count')::int,NULLIF(v_row->'error','null'::jsonb),v_row->>'response_hash',
-      NULLIF(v_row->>'cache_predecessor_receipt_id','')::uuid
+      (v_row->>'dropped_count')::int,NULLIF(v_row->'error','null'::jsonb),v_row->>'response_hash'
     );
     v_receipt_count := v_receipt_count + 1;
   END LOOP;
@@ -1122,47 +1105,6 @@ BEGIN
     'run_id',packet.run_id,
     'packet_hash',packet.packet_hash,
     'packet',packet.packet,
-    'evidence_facts',COALESCE((
-      SELECT jsonb_agg(jsonb_build_object(
-        'candidate_key',candidate->>'candidate_key',
-        'evidence_id',item.id,
-        'category',CASE
-          WHEN item.metadata->>'evidence_category' IN ('quote','fundamentals','technicals','news','event','macro','sector')
-            THEN item.metadata->>'evidence_category'
-          WHEN item.provider='sec_edgar' THEN 'fundamentals'
-          WHEN item.provider IN ('fred','eia','bls','bea') THEN 'macro'
-          WHEN item.provider IN ('white_house','doe','dod','federal_register') THEN 'event'
-          WHEN item.provider IN ('gdelt','finnhub') THEN 'news'
-          WHEN item.provider='yahoo' THEN 'quote'
-          ELSE 'unknown' END,
-        'source',item.provider,
-        'source_status',CASE WHEN receipt.status IN ('succeeded','cache_hit') THEN receipt.status ELSE 'failed' END,
-        'authority',CASE
-          WHEN item.metadata->>'authority'='official' AND item.provider IN ('sec_edgar','fred','eia','bls','bea','white_house','doe','dod','federal_register') THEN 'official'
-          WHEN item.provider IN ('yahoo','alpha_vantage') THEN 'market_data'
-          WHEN item.provider IN ('gdelt','finnhub') THEN 'reported'
-          ELSE 'unverified' END,
-        'published_at',item.published_at,
-        'retrieved_at',receipt.retrieved_at,
-        'expires_at',receipt.expires_at,
-        'reference',item.canonical_url,
-        'normalized_text',item.normalized_text,
-        'exposure_kind',CASE WHEN item.metadata->>'exposure_kind' IN ('filing','contract','backlog','revenue','capacity','official_fund') THEN item.metadata->>'exposure_kind' ELSE NULL END,
-        'relationship_eligible',EXISTS (
-          SELECT 1 FROM public.market_candidate_rankings ranking
-          WHERE ranking.run_id=packet.run_id AND ranking.candidate_key=candidate->>'candidate_key'
-            AND ranking.qualified AND ranking.exposure_item_ids ? item.id::text
-        ),
-        'claim_key',item.metadata->>'claim_key',
-        'claim_polarity',CASE WHEN item.metadata->>'claim_polarity' IN ('affirmed','denied') THEN item.metadata->>'claim_polarity' ELSE NULL END
-      ) ORDER BY candidate->>'candidate_key',item.id)
-      FROM jsonb_array_elements(packet.packet->'candidates') candidate
-      CROSS JOIN LATERAL jsonb_array_elements_text(candidate->'evidence_ids') evidence_id
-      JOIN public.market_intelligence_run_items run_item ON run_item.run_id=packet.run_id
-        AND run_item.source_item_id=evidence_id::uuid AND run_item.disposition='accepted'
-      JOIN public.market_source_items item ON item.id=run_item.source_item_id
-      JOIN public.market_source_receipts receipt ON receipt.id=run_item.source_receipt_id
-    ),'[]'::jsonb),
     'exposure_facts',COALESCE((
       SELECT jsonb_agg(jsonb_build_object(
         'candidate_key',fact.candidate_key,
@@ -1221,39 +1163,6 @@ END;
 $$;
 
 DROP FUNCTION IF EXISTS public.record_market_report(UUID, UUID, JSONB);
-CREATE OR REPLACE FUNCTION public.read_market_report_decisions(
-  p_run_id UUID, p_packet_id UUID, p_decision_ids JSONB
-) RETURNS JSONB LANGUAGE plpgsql SECURITY DEFINER
-SET search_path = pg_catalog AS $$
-DECLARE v_result JSONB;
-BEGIN
-  IF jsonb_typeof(p_decision_ids) IS DISTINCT FROM 'array'
-     OR jsonb_array_length(p_decision_ids) NOT BETWEEN 1 AND 96 THEN
-    RAISE EXCEPTION 'invalid report decision IDs' USING ERRCODE='22023';
-  END IF;
-  SELECT COALESCE(jsonb_agg(jsonb_build_object(
-    'evaluation_id',evaluation.id,'candidate_id',evaluation.candidate_id,
-    'run_id',evaluation.run_id,'packet_id',packet.id,'packet_hash',packet.packet_hash,
-    'ticker',evaluation.normalized->>'ticker','status',evaluation.policy_status,
-    'final_action',evaluation.final_action,
-    'final_alert_urgency',CASE WHEN evaluation.policy_status='approved' AND evaluation.final_action='hold'
-      THEN evaluation.normalized->'final_alert_urgency' ELSE 'null'::jsonb END,
-    'approved_terms',CASE WHEN evaluation.policy_status='approved' AND evaluation.final_action IN ('buy','add','reduce','sell')
-      THEN evaluation.normalized->'approved_terms' ELSE 'null'::jsonb END
-  ) ORDER BY evaluation.id),'[]'::jsonb) INTO v_result
-  FROM public.market_evidence_packets packet
-  JOIN public.decision_evaluations evaluation ON evaluation.run_id=packet.run_id
-    AND evaluation.analyst->>'packet_id'=packet.id::text
-    AND evaluation.policy_version=packet.policy_version
-  WHERE packet.id=p_packet_id AND packet.run_id=p_run_id AND packet.status='completed'
-    AND p_decision_ids ? evaluation.id::text;
-  IF jsonb_array_length(v_result)<>jsonb_array_length(p_decision_ids) THEN
-    RAISE EXCEPTION 'report decision provenance mismatch' USING ERRCODE='22023';
-  END IF;
-  RETURN v_result;
-END;
-$$;
-
 CREATE OR REPLACE FUNCTION public.record_market_report(
   p_run_id UUID,
   p_idempotency_key TEXT,
@@ -1288,15 +1197,12 @@ BEGIN
      OR p_report->>'rendered_hash' <> encode(extensions.digest(
        convert_to(p_report->>'rendered_text','UTF8'),'sha256'
      ),'hex')
-     OR NOT (p_report->'report' ?& ARRAY[
-       'source_ids','policy_decision_ids','comparison_ids'
-     ])
-     OR jsonb_typeof(p_report->'report'->'source_ids') IS DISTINCT FROM 'array'
-     OR jsonb_typeof(p_report->'report'->'policy_decision_ids') IS DISTINCT FROM 'array'
-     OR jsonb_typeof(p_report->'report'->'comparison_ids') IS DISTINCT FROM 'array'
+     OR jsonb_typeof(p_report->'report'->'source_ids') <> 'array'
+     OR jsonb_typeof(p_report->'report'->'policy_decision_ids') <> 'array'
+     OR jsonb_typeof(p_report->'report'->'comparison_ids') <> 'array'
      OR jsonb_array_length(p_report->'report'->'source_ids') = 0
      OR jsonb_array_length(p_report->'report'->'policy_decision_ids') = 0
-     OR jsonb_array_length(p_report->'report'->'comparison_ids') > 96
+     OR jsonb_array_length(p_report->'report'->'comparison_ids') <> 0
      OR EXISTS (SELECT 1 FROM jsonb_array_elements_text(p_report->'report'->'source_ids') item
        WHERE item !~ '^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$')
      OR EXISTS (SELECT 1 FROM jsonb_array_elements_text(p_report->'report'->'policy_decision_ids') item
@@ -1313,8 +1219,7 @@ BEGIN
     RAISE EXCEPTION 'completed evidence packet unavailable' USING ERRCODE = '22023';
   END IF;
   v_expected_key := encode(extensions.digest(convert_to(
-    'v2:' || (p_report->>'kind') || ':' || (p_report->>'market_date') || ':' ||
-      v_packet.packet_hash || ':' || (p_report->>'report_hash'),
+    'v1:' || p_report->>'kind' || ':' || p_report->>'market_date' || ':' || v_packet.packet_hash,
     'UTF8'
   ), 'sha256'), 'hex');
   v_expected_id := (
@@ -1327,11 +1232,6 @@ BEGIN
        SELECT 1 FROM jsonb_array_elements_text(p_report->'report'->'source_ids') source_id
        WHERE NOT EXISTS (
          SELECT 1 FROM jsonb_array_elements(v_packet.packet->'evidence') evidence
-         JOIN public.market_source_items item ON item.id=(evidence->>'item_id')::uuid
-         JOIN public.market_intelligence_run_items run_item ON run_item.source_item_id=item.id
-           AND run_item.run_id=p_run_id AND run_item.disposition='accepted'
-         JOIN public.market_source_receipts receipt ON receipt.id=run_item.source_receipt_id
-           AND receipt.status IN ('succeeded','cache_hit')
          WHERE evidence->>'item_id'=source_id
        )
      )
@@ -1340,18 +1240,6 @@ BEGIN
        WHERE NOT EXISTS (
          SELECT 1 FROM public.decision_evaluations evaluation
          WHERE evaluation.id=decision_id::uuid AND evaluation.run_id=p_run_id
-           AND evaluation.analyst->>'packet_id'=v_packet.id::text
-           AND evaluation.policy_version=v_packet.policy_version
-       )
-     ) OR EXISTS (
-       SELECT 1 FROM jsonb_array_elements_text(p_report->'report'->'comparison_ids') comparison_id
-       WHERE NOT EXISTS (
-         SELECT 1 FROM public.market_policy_comparisons comparison
-         JOIN public.decision_evaluations evaluation ON evaluation.id=comparison.evaluation_id
-           AND evaluation.run_id=p_run_id AND evaluation.analyst->>'packet_id'=v_packet.id::text
-         WHERE comparison.id=comparison_id::uuid AND comparison.run_id=p_run_id
-           AND comparison.packet_id=v_packet.id
-           AND p_report->'report'->'policy_decision_ids' ? evaluation.id::text
        )
      ) THEN
     RAISE EXCEPTION 'market report chain mismatch' USING ERRCODE = '22023';
@@ -1481,12 +1369,10 @@ REVOKE ALL ON FUNCTION public.market_canonical_jsonb(JSONB)
 REVOKE ALL ON FUNCTION public.start_market_intelligence_run(UUID, TEXT, DATE, INT, JSONB) FROM PUBLIC, anon, authenticated;
 REVOKE ALL ON FUNCTION public.record_market_intelligence(UUID, UUID, JSONB) FROM PUBLIC, anon, authenticated;
 REVOKE ALL ON FUNCTION public.read_market_evidence_packet(UUID, UUID) FROM PUBLIC, anon, authenticated;
-REVOKE ALL ON FUNCTION public.read_market_report_decisions(UUID, UUID, JSONB) FROM PUBLIC, anon, authenticated;
 REVOKE ALL ON FUNCTION public.record_market_report(UUID, TEXT, JSONB) FROM PUBLIC, anon, authenticated;
 REVOKE ALL ON FUNCTION public.record_market_learning(UUID, JSONB) FROM PUBLIC, anon, authenticated;
 GRANT EXECUTE ON FUNCTION public.start_market_intelligence_run(UUID, TEXT, DATE, INT, JSONB) TO service_role;
 GRANT EXECUTE ON FUNCTION public.record_market_intelligence(UUID, UUID, JSONB) TO service_role;
 GRANT EXECUTE ON FUNCTION public.read_market_evidence_packet(UUID, UUID) TO service_role;
-GRANT EXECUTE ON FUNCTION public.read_market_report_decisions(UUID, UUID, JSONB) TO service_role;
 GRANT EXECUTE ON FUNCTION public.record_market_report(UUID, TEXT, JSONB) TO service_role;
 GRANT EXECUTE ON FUNCTION public.record_market_learning(UUID, JSONB) TO service_role;

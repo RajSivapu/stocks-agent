@@ -134,7 +134,7 @@ def test_candidate_migration_manifest_discovers_every_ordered_candidate_migratio
     assert "sql/migrations/20260926_report_suppression_reasons.sql" in names
     assert "sql/migrations/20260927_release_evidence_reader.sql" in names
     assert all(len(row["sha256"]) == 64 for row in manifest)
-    assert deploy.CHANGED_FUNCTIONS == ("market-briefing-gateway", "owner-dashboard-api")
+    assert deploy.CHANGED_FUNCTIONS == ("market-briefing-gateway", "owner-dashboard-api", "telegram-portfolio")
 
 
 def test_release_source_refuses_the_superseded_thin_dashboard(tmp_path):
@@ -373,6 +373,7 @@ def test_deploy_and_release_verifiers_share_the_complete_candidate_migration_man
         "functions": [
             {"function": "market-briefing-gateway", "git_sha": "a" * 40, "function_version": 1, "source_sha256": "b" * 64},
             {"function": "owner-dashboard-api", "git_sha": "a" * 40, "function_version": 1, "source_sha256": "c" * 64},
+            {"function": "telegram-portfolio", "git_sha": "a" * 40, "function_version": 1, "source_sha256": "e" * 64},
         ],
         "static_assets": {"status": "verified", "candidate_sha": "a" * 40, "asset_hashes": ["d" * 64]},
     }
@@ -391,6 +392,8 @@ def test_changed_function_deploy_updates_gateway_and_creates_dashboard(tmp_path)
         '[{"name":"market-briefing-gateway","version":18}]',
         '[{"name":"market-briefing-gateway","version":18}]',
         '[{"name":"market-briefing-gateway","version":18},{"name":"owner-dashboard-api","version":1}]',
+        '[{"name":"telegram-portfolio","version":4}]',
+        '[{"name":"telegram-portfolio","version":5}]',
     ])
 
     def runner(command, **_options):
@@ -402,7 +405,16 @@ def test_changed_function_deploy_updates_gateway_and_creates_dashboard(tmp_path)
     assert [row["function"] for row in receipt] == list(deploy.CHANGED_FUNCTIONS)
     deployed = [command[command.index("deploy") + 1] for command in commands if "deploy" in command]
     assert deployed == list(deploy.CHANGED_FUNCTIONS)
-    assert "telegram-portfolio" not in str(commands)
+    assert "telegram-portfolio" in str(commands)
+
+
+def test_existing_dashboard_upgrade_advances_version_without_requiring_absence(tmp_path):
+    versions = iter([3, 4])
+    def runner(command, **kwargs):
+        output = '[{"name":"owner-dashboard-api","version":%d}]' % next(versions) if "list" in command else "ok"
+        return type("Result", (), {"returncode": 0, "stdout": output})()
+    result = deploy.deploy_function(PROJECT_REF, "a" * 40, tmp_path, runner)
+    assert result["rollback_function_version"] == 3 and result["function_version"] == 4
 
 
 def test_secret_manifest_uses_a_private_file_and_never_command_arguments(tmp_path, monkeypatch):
@@ -454,7 +466,7 @@ def test_function_deploy_is_pinned_and_returns_a_bounded_receipt(tmp_path):
     assert all("service_role" not in " ".join(command).lower() for command in commands)
 
 
-def test_initial_deploy_refuses_to_overwrite_an_existing_function(tmp_path):
+def test_upgrade_rejects_a_platform_version_that_does_not_advance(tmp_path):
     commands = []
 
     def runner(command, **_options):
@@ -465,9 +477,9 @@ def test_initial_deploy_refuses_to_overwrite_an_existing_function(tmp_path):
             "stderr": "",
         })()
 
-    with pytest.raises(RuntimeError, match="already exists"):
+    with pytest.raises(RuntimeError, match="did not advance"):
         deploy.deploy_function(PROJECT_REF, "a" * 40, tmp_path, runner)
-    assert not any("deploy" in command for command in commands)
+    assert any("deploy" in command for command in commands)
 
 
 def test_failed_initial_canary_deletes_only_the_new_dashboard_function(tmp_path):

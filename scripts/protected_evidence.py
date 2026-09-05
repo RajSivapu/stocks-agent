@@ -24,6 +24,8 @@ from scripts.verify_personal_stock_agent_v1 import path_is_safe, require
 
 READER = "stock_agent_release_reader_runtime"
 RECOVERY_SQL = {
+    "decision_evaluations": "SELECT id::text,request_id::text,run_id::text,candidate_id::text,policy_version,input_digest,raw_action,final_action,policy_status,reason_codes,explanations,normalized,evidence,analyst,checker,created_at::text FROM public.decision_evaluations",
+    "policy_comparisons": "SELECT id::text,run_id::text,packet_id::text,evaluation_id::text,comparison,created_at::text FROM public.market_policy_comparisons",
     "holdings": "SELECT ticker,shares::text AS shares,avg_cost::text AS average_cost,bucket,opened_at::text AS opened_at,notes,stop::text AS stop,target::text AS target,high_water_price::text AS high_water_price,hold_override_until::text AS hold_override_until,stop_alert_active,stop_near_alert_active,target_near_alert_active,target_alert_active FROM public.holdings",
     "transactions": "SELECT id::text AS id,ticker,qty::text AS quantity,price::text AS price,ts::text AS ts,side,source,executed_on::text AS executed_on FROM public.transactions",
     "commands": """SELECT id::text AS id,status,telegram_update_id::text AS telegram_update_id,chat_id::text AS chat_id,user_id::text AS user_id,

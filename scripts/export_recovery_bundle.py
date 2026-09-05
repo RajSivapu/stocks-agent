@@ -25,7 +25,7 @@ REQUIRED_RECOVERY_RECORDS = (
     "intelligence_run_events", "source_quota_reservations", "collection_checkpoints",
     "collection_checkpoint_history", "collection_completions", "report_origins",
     "publications", "evaluation_publications", "cash_ledger_state",
-    "cash_snapshots", "run_terminal_outcomes", "roles", "schema_version",
+    "cash_snapshots", "run_terminal_outcomes", "decision_evaluations", "policy_comparisons", "roles", "schema_version",
 )
 NULLABLE_TEXT = (str, type(None))
 DATASET_FIELDS = {
@@ -110,6 +110,14 @@ DATASET_FIELDS = {
     "run_terminal_outcomes": {
         "run_id": str, "evaluation_request_id": str, "outcome": str, "created_at": str,
     },
+    "decision_evaluations": {
+        "id": str, "request_id": NULLABLE_TEXT, "run_id": NULLABLE_TEXT, "candidate_id": str,
+        "policy_version": (int, type(None)), "input_digest": str, "raw_action": str, "final_action": NULLABLE_TEXT,
+        "policy_status": str, "reason_codes": list, "explanations": list, "normalized": dict,
+        "evidence": list, "analyst": dict, "checker": dict, "created_at": str,
+    },
+    "policy_comparisons": {"id": str, "run_id": str, "packet_id": str, "evaluation_id": str,
+                           "comparison": dict, "created_at": str},
     "roles": {"role": str, "login": bool, "superuser": bool, "bypass_rls": bool, "memberships": list, "grants": list},
     "schema_version": {"version": str, "statements": list, "sha256": str},
 }
@@ -190,6 +198,19 @@ def _validated_records(records: Mapping[str, object]) -> dict[str, list[dict[str
     policies = {row["version"] for row in result["policies"]}
     packets = {row["id"]: row for row in result["packets"]}
     reports = {row["id"]: row for row in result["reports"]}
+    evaluations = {row["id"]: row for row in result["decision_evaluations"]}
+    for row in evaluations.values():
+        if (not UUID.fullmatch(row["id"]) or not UUID.fullmatch(row["candidate_id"])
+                or not HASH.fullmatch(row["input_digest"])
+                or (row["request_id"] is not None and row["request_id"] not in requests)
+                or (row["run_id"] is not None and row["run_id"] not in runs)
+                or (row["policy_version"] is not None and row["policy_version"] not in policies)):
+            raise ValueError("decision evaluation recovery dependency mismatch")
+    for row in result["policy_comparisons"]:
+        evaluation, packet = evaluations.get(row["evaluation_id"]), packets.get(row["packet_id"])
+        if (not UUID.fullmatch(row["id"]) or evaluation is None or packet is None
+                or row["run_id"] != evaluation["run_id"] or row["run_id"] != packet["run_id"]):
+            raise ValueError("policy comparison recovery dependency mismatch")
     for name in ("commands", "runs", "intelligence_runs", "intelligence_run_events",
                  "source_quota_reservations", "packets", "reports", "evaluation_publications", "cash_snapshots"):
         if any(not UUID.fullmatch(row["id"]) for row in result[name]):

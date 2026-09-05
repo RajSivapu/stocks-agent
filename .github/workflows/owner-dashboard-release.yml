@@ -35,9 +35,12 @@ jobs:
           ref: ${{ github.event_name == 'workflow_run' && github.event.workflow_run.head_sha || inputs.candidate_sha }}
           fetch-depth: 0
       - uses: actions/setup-python@42375524e23c412d93fb67b49958b491fce71c38
-        with: {python-version: "3.14"}
+        with:
+          python-version: "3.14"
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
-        with: {node-version: "24", cache: npm}
+        with:
+          node-version: "24"
+          cache: npm
       - name: Fail closed before any mutation when protected tools or secrets are absent
         env:
           GH_TOKEN: ${{ github.token }}
@@ -102,9 +105,18 @@ jobs:
           git merge-base --is-ancestor "$PR_HEAD_SHA" "$CANDIDATE_SHA" || test "$(git rev-parse "$PR_HEAD_SHA^{tree}")" = "$(git rev-parse "$CANDIDATE_SHA^{tree}")" || { echo 'reviewed head does not bind candidate'; exit 1; }
           printf 'candidate_sha=%s\nreviewed_sha=%s\nci_workflow_run_id=%s\npull_request_number=%s\n' "$CANDIDATE_SHA" "$CANDIDATE_SHA" "$CI_WORKFLOW_RUN_ID" "$PULL_REQUEST_NUMBER" >> "$GITHUB_OUTPUT"
           echo "CANDIDATE_SHA=$CANDIDATE_SHA" >> "$GITHUB_ENV"
+      - name: Require configured private Sites capture deployment readback and recovery transport
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SUPABASE_ACCESS_TOKEN: ${{ secrets.SUPABASE_ACCESS_TOKEN }}
+          PROJECT_REF: ${{ vars.SUPABASE_PROJECT_REF }}
+        run: |
+          "$RELEASE_VENV/bin/python" scripts/release_components.py --check-transport
       - name: Create the candidate-bound GitHub Deployment
         id: deployment
-        env: {GH_TOKEN: ${{ github.token }}, CANDIDATE_SHA: ${{ steps.candidate.outputs.candidate_sha }}}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          CANDIDATE_SHA: ${{ steps.candidate.outputs.candidate_sha }}
         run: |
           set -euo pipefail
           payload="$(jq -cn --arg candidate_sha "$CANDIDATE_SHA" --argjson release_workflow_run_id "$GITHUB_RUN_ID" '{candidate_sha:$candidate_sha,release_workflow_run_id:$release_workflow_run_id}')"
@@ -115,6 +127,8 @@ jobs:
         env:
           RELEASE_READONLY_DATABASE_URL: ${{ secrets.RELEASE_READONLY_DATABASE_URL }}
           SUPABASE_ACCESS_TOKEN: ${{ secrets.SUPABASE_ACCESS_TOKEN }}
+          RELEASE_RECOVERY_KEY: ${{ secrets.RELEASE_RECOVERY_KEY }}
+          GH_TOKEN: ${{ github.token }}
           DASHBOARD_OWNER_USER_ID: ${{ secrets.DASHBOARD_OWNER_USER_ID }}
           DASHBOARD_OWNER_EMAIL: ${{ secrets.DASHBOARD_OWNER_EMAIL }}
           DASHBOARD_NON_OWNER_ACCESS_TOKEN: ${{ secrets.DASHBOARD_NON_OWNER_ACCESS_TOKEN }}
@@ -130,38 +144,15 @@ jobs:
           set -euo pipefail
           test -n "$RELEASE_READONLY_DATABASE_URL" || { echo 'release reader is required'; exit 1; }
           "$PYTHON_BIN" scripts/collect_protected_dry_run_evidence.py --production-project-ref "$PROJECT_REF" --output "$RELEASE_STATE_DIR/dry-run-evidence.json" --candidate-script scripts/deploy_owner_dashboard_api.py --candidate-sha "$CANDIDATE_SHA" --safe-command "$PYTHON_BIN scripts/deploy_owner_dashboard_api.py --dry-run --project-ref $PROJECT_REF --allowed-origin $ALLOWED_ORIGIN --site-origin $SITE_ORIGIN --reviewed-sha $CANDIDATE_SHA --candidate-sha $CANDIDATE_SHA --gateway-rollback-ref unused --gateway-rollback-source-sha256 $(printf '0%.0s' {1..64}) --gateway-current-version 1 --evidence-directory $RELEASE_STATE_DIR/dry-run-capture --release-state $RELEASE_STATE_DIR/dry-run-state.json"
-      - name: Prepare durable recovery before gateway mutation
+      - name: Bind deployment to durable component recovery
         env:
-          SUPABASE_ACCESS_TOKEN: ${{ secrets.SUPABASE_ACCESS_TOKEN }}
-          DASHBOARD_OWNER_USER_ID: ${{ secrets.DASHBOARD_OWNER_USER_ID }}
-          DASHBOARD_OWNER_EMAIL: ${{ secrets.DASHBOARD_OWNER_EMAIL }}
-          DASHBOARD_NON_OWNER_ACCESS_TOKEN: ${{ secrets.DASHBOARD_NON_OWNER_ACCESS_TOKEN }}
-          POSTGRES_URL: ${{ secrets.POSTGRES_URL }}
-          SUPAVISOR_SESSION_URL: ${{ secrets.SUPAVISOR_SESSION_URL }}
-          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
-          SUPABASE_PUBLISHABLE_KEY: ${{ secrets.SUPABASE_PUBLISHABLE_KEY }}
-          PROJECT_REF: ${{ vars.SUPABASE_PROJECT_REF }}
-          ALLOWED_ORIGIN: ${{ vars.DASHBOARD_ALLOWED_ORIGIN }}
-          SITE_ORIGIN: ${{ vars.DASHBOARD_SITE_ORIGIN }}
-          CANDIDATE_SHA: ${{ steps.candidate.outputs.candidate_sha }}
-          GATEWAY_ROLLBACK_REF: ${{ vars.GATEWAY_ROLLBACK_REF }}
-          GATEWAY_ROLLBACK_SOURCE_SHA256: ${{ vars.GATEWAY_ROLLBACK_SOURCE_SHA256 }}
-        run: |
-          set -euo pipefail; umask 077
-          "$PYTHON_BIN" scripts/deploy_owner_dashboard_api.py --prepare-recovery --deployment-id "$DEPLOYMENT_ID" --project-ref "$PROJECT_REF" --allowed-origin "$ALLOWED_ORIGIN" --site-origin "$SITE_ORIGIN" --reviewed-sha "$CANDIDATE_SHA" --candidate-sha "$CANDIDATE_SHA" --gateway-rollback-ref "$GATEWAY_ROLLBACK_REF" --gateway-rollback-source-sha256 "$GATEWAY_ROLLBACK_SOURCE_SHA256" --gateway-current-version 1 --evidence-directory "$RELEASE_STATE_DIR/capture" --rollback-worktree "$RELEASE_STATE_DIR/rollback-worktree" --release-state "$RELEASE_STATE_DIR/release-state.json" > "$RELEASE_STATE_DIR/recovery-prepare.json"
-      - name: Upload prior gateway source before gateway mutation
-        id: rollback_source_artifact
-        uses: actions/upload-artifact@65462800fd760344b1a7b4382951275a0abb4808
-        with: {name: rollback-source-${{ github.run_id }}-${{ github.run_attempt }}, path: ${{ env.RELEASE_STATE_DIR }}/capture/gateway-source, if-no-files-found: error, retention-days: 90}
-      - name: Upload recovery metadata and journal before gateway mutation
-        id: recovery_metadata_artifact
-        uses: actions/upload-artifact@65462800fd760344b1a7b4382951275a0abb4808
-        with: {name: recovery-metadata-${{ github.run_id }}-${{ github.run_attempt }}, path: ${{ env.RELEASE_STATE_DIR }}/capture/recovery-metadata, if-no-files-found: error, retention-days: 90}
-      - name: Bind durable recovery to in-progress deployment
-        env: {GH_TOKEN: ${{ github.token }}, DEPLOYMENT_ID: ${{ steps.deployment.outputs.deployment_id }}, ROLLBACK_SOURCE_ARTIFACT_ID: ${{ steps.rollback_source_artifact.outputs.artifact-id }}, RECOVERY_METADATA_ARTIFACT_ID: ${{ steps.recovery_metadata_artifact.outputs.artifact-id }} }
-        run: gh api --method POST "repos/$GITHUB_REPOSITORY/deployments/$DEPLOYMENT_ID/statuses" -f state=in_progress -f description="rollback-source:$ROLLBACK_SOURCE_ARTIFACT_ID recovery-metadata:$RECOVERY_METADATA_ARTIFACT_ID"
-      - name: Execute protected deployment and retain rollback worktree
+          GH_TOKEN: ${{ github.token }}
+          DEPLOYMENT_ID: ${{ steps.deployment.outputs.deployment_id }}
+        run: gh api --method POST "repos/$GITHUB_REPOSITORY/deployments/$DEPLOYMENT_ID/statuses" -f state=in_progress -f description="component-recovery-run:$GITHUB_RUN_ID"
+      - name: Execute protected deployment with encrypted component recovery
         env:
+          RELEASE_RECOVERY_KEY: ${{ secrets.RELEASE_RECOVERY_KEY }}
+          GH_TOKEN: ${{ github.token }}
           SUPABASE_ACCESS_TOKEN: ${{ secrets.SUPABASE_ACCESS_TOKEN }}
           DASHBOARD_OWNER_USER_ID: ${{ secrets.DASHBOARD_OWNER_USER_ID }}
           DASHBOARD_OWNER_EMAIL: ${{ secrets.DASHBOARD_OWNER_EMAIL }}
@@ -182,27 +173,32 @@ jobs:
           set -euo pipefail; umask 077
           PYTHON_BIN="$RELEASE_VENV/bin/python"
           export PYTHON_BIN
-          "$RELEASE_VENV/bin/python" scripts/deploy_owner_dashboard_api.py --project-ref "$PROJECT_REF" --allowed-origin "$ALLOWED_ORIGIN" --site-origin "$SITE_ORIGIN" --reviewed-sha "$REVIEWED_SHA" --candidate-sha "$CANDIDATE_SHA" --gateway-rollback-ref "$GATEWAY_ROLLBACK_REF" --gateway-rollback-source-sha256 "$GATEWAY_ROLLBACK_SOURCE_SHA256" --gateway-current-version "$GATEWAY_CURRENT_VERSION" --evidence-directory "$RELEASE_STATE_DIR/capture" --rollback-worktree "$RELEASE_STATE_DIR/rollback-worktree" --release-state "$RELEASE_STATE_DIR/release-state.json" --lease-owner "$RELEASE_LEASE_OWNER" --keep-rollback-worktree > "$RELEASE_STATE_DIR/deploy-receipt.json"
-          echo 'GATEWAY_CHANGED=1' >> "$GITHUB_ENV"
+          "$RELEASE_VENV/bin/python" scripts/deploy_owner_dashboard_api.py --project-ref "$PROJECT_REF" --allowed-origin "$ALLOWED_ORIGIN" --site-origin "$SITE_ORIGIN" --reviewed-sha "$REVIEWED_SHA" --candidate-sha "$CANDIDATE_SHA" --gateway-rollback-ref "$GATEWAY_ROLLBACK_REF" --gateway-rollback-source-sha256 "$GATEWAY_ROLLBACK_SOURCE_SHA256" --gateway-current-version "$GATEWAY_CURRENT_VERSION" --evidence-directory "$RELEASE_STATE_DIR/capture" --rollback-worktree "$RELEASE_STATE_DIR/rollback-worktree" --release-state "$RELEASE_STATE_DIR/release-state.json" --lease-owner "$RELEASE_LEASE_OWNER" --deployment-id "$DEPLOYMENT_ID" > "$RELEASE_STATE_DIR/deploy-receipt.json"
       - name: Generate canonical release record
         env:
           CANDIDATE_SHA: ${{ steps.candidate.outputs.candidate_sha }}
           CI_WORKFLOW_RUN_ID: ${{ steps.candidate.outputs.ci_workflow_run_id }}
           PULL_REQUEST_NUMBER: ${{ steps.candidate.outputs.pull_request_number }}
           DEPLOYMENT_ID: ${{ steps.deployment.outputs.deployment_id }}
-          ROLLBACK_ARTIFACT_ID: ${{ steps.rollback_source_artifact.outputs.artifact-id }}
-          RECOVERY_METADATA_ARTIFACT_ID: ${{ steps.recovery_metadata_artifact.outputs.artifact-id }}
           PROJECT_REF: ${{ vars.SUPABASE_PROJECT_REF }}
-        run: "$RELEASE_VENV/bin/python" scripts/write_protected_release_record.py --receipt "$RELEASE_STATE_DIR/deploy-receipt.json" --dry-run-evidence "$RELEASE_STATE_DIR/dry-run-evidence.json" --output "$RELEASE_STATE_DIR/release-record.json" --candidate-sha "$CANDIDATE_SHA" --ci-workflow-run-id "$CI_WORKFLOW_RUN_ID" --release-workflow-run-id "$GITHUB_RUN_ID" --pull-request-number "$PULL_REQUEST_NUMBER" --deployment-id "$DEPLOYMENT_ID" --rollback-artifact-id "$ROLLBACK_ARTIFACT_ID" --recovery-metadata-artifact-id "$RECOVERY_METADATA_ARTIFACT_ID" --project-ref "$PROJECT_REF"
+        run: |
+          "$RELEASE_VENV/bin/python" scripts/write_protected_release_record.py --receipt "$RELEASE_STATE_DIR/deploy-receipt.json" --dry-run-evidence "$RELEASE_STATE_DIR/dry-run-evidence.json" --output "$RELEASE_STATE_DIR/release-record.json" --candidate-sha "$CANDIDATE_SHA" --ci-workflow-run-id "$CI_WORKFLOW_RUN_ID" --release-workflow-run-id "$GITHUB_RUN_ID" --pull-request-number "$PULL_REQUEST_NUMBER" --deployment-id "$DEPLOYMENT_ID" --rollback-artifact-id "$(jq -r .gateway_rollback_artifact.artifact_id "$RELEASE_STATE_DIR/deploy-receipt.json")" --recovery-metadata-artifact-id "$(jq -r .gateway_rollback_artifact.recovery_metadata_artifact_id "$RELEASE_STATE_DIR/deploy-receipt.json")" --project-ref "$PROJECT_REF"
       - name: Upload immutable release record
         id: release_artifact
         uses: actions/upload-artifact@65462800fd760344b1a7b4382951275a0abb4808
-        with: {name: release-record-${{ steps.deployment.outputs.deployment_id }}, path: ${{ env.RELEASE_STATE_DIR }}/release-record.json, if-no-files-found: error, retention-days: 90}
-      - name: Release local rollback worktree
-        run: "$RELEASE_VENV/bin/python" scripts/release_gateway_rollback_worktree.py --receipt "$RELEASE_STATE_DIR/deploy-receipt.json"
-      - name: Restore gateway if any post-deploy evidence step failed
+        with:
+          name: release-record-${{ steps.deployment.outputs.deployment_id }}
+          path: ${{ env.RELEASE_STATE_DIR }}/release-record.json
+          if-no-files-found: error
+          retention-days: 90
+      - name: Restore changed components if any post-deploy evidence step failed
         if: ${{ failure() }}
-        env: {SUPABASE_ACCESS_TOKEN: ${{ secrets.SUPABASE_ACCESS_TOKEN }}, POSTGRES_URL: ${{ secrets.POSTGRES_URL }}, PROJECT_REF: ${{ vars.SUPABASE_PROJECT_REF }}}
+        env:
+          RELEASE_RECOVERY_KEY: ${{ secrets.RELEASE_RECOVERY_KEY }}
+          GH_TOKEN: ${{ github.token }}
+          SUPABASE_ACCESS_TOKEN: ${{ secrets.SUPABASE_ACCESS_TOKEN }}
+          POSTGRES_URL: ${{ secrets.POSTGRES_URL }}
+          PROJECT_REF: ${{ vars.SUPABASE_PROJECT_REF }}
         run: |
           set -euo pipefail
           test -f "$RELEASE_STATE_DIR/release-state.json" || exit 0
@@ -211,9 +207,15 @@ jobs:
           restore_after_failure
       - name: Mark candidate deployment failed after protected restoration
         if: ${{ failure() && env.DEPLOYMENT_ID != '' }}
-        env: {GH_TOKEN: ${{ github.token }}}
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: gh api --method POST "repos/$GITHUB_REPOSITORY/deployments/$DEPLOYMENT_ID/statuses" -f state=failure -f description='protected release failed; restoration attempted'
       - name: Mark candidate deployment successful with immutable artifact identity
         if: ${{ success() }}
-        env: {GH_TOKEN: ${{ github.token }}, POSTGRES_URL: ${{ secrets.POSTGRES_URL }}, DEPLOYMENT_ID: ${{ steps.deployment.outputs.deployment_id }}, RELEASE_ARTIFACT_ID: ${{ steps.release_artifact.outputs.artifact-id }}}
-        run: "$RELEASE_VENV/bin/python" scripts/finalize_protected_release.py --admin-url "$POSTGRES_URL" --lease-owner "$RELEASE_LEASE_OWNER" --deployment-id "$DEPLOYMENT_ID" --release-artifact-id "$RELEASE_ARTIFACT_ID" --log-url "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
+        env:
+          GH_TOKEN: ${{ github.token }}
+          POSTGRES_URL: ${{ secrets.POSTGRES_URL }}
+          DEPLOYMENT_ID: ${{ steps.deployment.outputs.deployment_id }}
+          RELEASE_ARTIFACT_ID: ${{ steps.release_artifact.outputs.artifact-id }}
+        run: |
+          "$RELEASE_VENV/bin/python" scripts/finalize_protected_release.py --admin-url "$POSTGRES_URL" --lease-owner "$RELEASE_LEASE_OWNER" --deployment-id "$DEPLOYMENT_ID" --release-artifact-id "$RELEASE_ARTIFACT_ID" --log-url "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"

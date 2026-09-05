@@ -11,7 +11,7 @@ DO $$ BEGIN
   END IF;
 END; $$;
 GRANT EXECUTE ON FUNCTION public.read_market_evidence_packet(UUID, UUID) TO service_role;
-GRANT EXECUTE ON FUNCTION public.read_market_report_decisions(UUID, UUID, JSONB) TO service_role;
+-- Report-decision reader and its grant are created together in 20261001.
 GRANT EXECUTE ON FUNCTION public.record_market_report(UUID, TEXT, JSONB) TO service_role;
 GRANT EXECUTE ON FUNCTION public.record_market_learning(UUID, JSONB) TO service_role;
 

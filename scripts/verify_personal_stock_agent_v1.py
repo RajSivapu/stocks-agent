@@ -21,7 +21,47 @@ from scripts.verify_owner_dashboard_deployment import migration_statements_sha25
 MAX_SCHEDULED_RECEIPT_AGE_SECONDS = 7 * 24 * 60 * 60
 SHA = re.compile(r"[0-9a-f]{40}")
 UUID = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}")
-FUNCTIONS = ("market-briefing-gateway", "owner-dashboard-api")
+FUNCTIONS = ("market-briefing-gateway", "owner-dashboard-api", "telegram-portfolio")
+
+
+def verify_component_artifacts(repo: Path, candidate: str, record: Mapping, source: ReleaseDataSource, *, deployed_at: datetime | None = None) -> None:
+    """Bind protected management-plane readbacks to all changed candidate bytes."""
+    names = (*FUNCTIONS, "owner-web-site")
+    rows = record.get("component_readbacks")
+    require(isinstance(rows, list) and [row.get("component") for row in rows] == list(names),
+            "all four component readbacks are required")
+    hosting = json.loads(git(repo, "show", f"{candidate}:.openai/hosting.json"))
+    for row in rows:
+        name = row["component"]
+        require(row.get("candidate_sha") == candidate and isinstance(row.get("deployment_id"), str)
+                and row["deployment_id"] and isinstance(row.get("version"), str) and row["version"]
+                and row.get("origin") == "management_plane_download", "component platform identity is incomplete")
+        expected = (git_files(repo, candidate, f"supabase/functions/{name}") if name in FUNCTIONS else None)
+        files = source.artifact(row["artifact_id"])
+        digest = tree_sha256(files)
+        require(digest == row["deployed_sha256"], "component readback artifact bytes mismatch")
+        if expected is not None:
+            function = next(item for item in record["functions"] if item["function"] == name)
+            require(files == expected and row["deployment_id"] == function.get("deployment_id")
+                    and row["version"] == str(function["function_version"]), "component deployed byte/version parity mismatch")
+        else:
+            require(row.get("project_id") == hosting.get("project_id")
+                    and hosting.get("static", {}).get("directory") == "dist"
+                    and {path: sha256(raw) for path, raw in files.items()} == record["static_assets"]["files"],
+                    "Site deployment identity or deployed bytes mismatch")
+        prior = row.get("prior")
+        require(isinstance(prior, Mapping) and type(prior.get("exists")) is bool
+                and isinstance(prior.get("configuration"), Mapping), "component prior-state rollback capture is incomplete")
+        captured = timestamp(prior.get("captured_at"))
+        require(captured < (deployed_at or datetime.now(timezone.utc)), "component rollback capture is not predeployment")
+        if prior["exists"]:
+            require(isinstance(prior.get("deployment_id"), str) and prior["deployment_id"]
+                    and isinstance(prior.get("version"), str) and prior["version"]
+                    and tree_sha256(source.artifact(prior["artifact_id"])) == prior["source_sha256"],
+                    "component prior rollback bytes or identity mismatch")
+        else:
+            require(prior.get("deployment_id") is None and prior.get("version") is None
+                    and prior.get("artifact_id") is None, "component absence proof is inconsistent")
 
 
 @runtime_checkable
@@ -90,6 +130,7 @@ def git_files(repo: Path, sha: str, prefix: str) -> dict[str, bytes]:
 
 
 def verify_artifacts(repo: Path, static_root: Path, candidate: str, record: Mapping, source: ReleaseDataSource, now: datetime, deployed: datetime) -> None:
+    verify_component_artifacts(repo, candidate, record, source, deployed_at=deployed)
     migrations = git_files(repo, candidate, "sql/migrations")
     expected_migrations = [{"path": f"sql/migrations/{path}", "version": Path(path).name.split("_", 1)[0],
                             "sha256": migration_statements_sha256(normalize_migration_statements(raw.decode("utf-8")))}

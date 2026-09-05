@@ -38,6 +38,9 @@ total. The single consolidated local gate is recorded separately below.
 
 ## Consolidated local gate
 
+The results below predate the final Astra fix wave. Final-candidate consolidated verification and
+the final scoped Astra re-review remain pending.
+
 The required command was run exactly:
 
 ```text
@@ -102,3 +105,28 @@ independent review and every protected rollout gate in `PROJECT_STATUS.md` pass.
 
 No live database, deployment, Auth, Telegram, scheduled, provider/model, or brokerage action was
 performed to create this record.
+
+## Final fix wave Track C
+
+Base: `13be913503d757e698fc8fb7a8b8957f679c949a`. Focused local verification: **315 passed**
+across release upgrade/orchestration, deployment/verifier, workflow, recovery, migration, and
+security-invariant modules. This includes an actual disposable PostgreSQL baseline upgrade,
+idempotent retry, and an actual export/restore with policy-comparison/evaluation records.
+
+| Final Astra finding | Local disposition | Remaining boundary |
+|---|---|---|
+| 3 — upgrade-aware exact recovery | Shared production orchestration, encrypted durable journal, per-component attempt flags, first-install/upgrade failure injection, and `changed=false` no-op implemented | The reviewed native management-plane transport module is absent; executable native capture/apply/restore integration remains open |
+| 4 — immutable history | All audited migration bytes restored; documented `20260907` raw/native hashes reconcile; changes moved into `20261001` | Protected migration deployment and exact-head CI remain pending |
+| 5 — every changed deployed artifact | Gateway, dashboard API, Telegram, and Site identity/downloaded-byte verification plus shared recovery contract implemented | Native Sites transport unavailable; workflow fails before mutation and cannot claim Site verification |
+
+The static manifest is unchanged. Track A's cash-aware decision RPC, reconciled-cash reader,
+and terminal-outcome operation are explicitly allowlisted; the removed direct bundle RPC remains
+rejected. Track B recovery now includes policy comparisons and their evaluation dependencies.
+
+Observed red evidence included immutable/native hash drift, ignored `changed=false`, missing
+component/production orchestration, missing encrypted journal and prior-secret validation,
+acceptance of missing four-artifact readback, acceptance of postdeployment Site prior capture,
+first-install platform identity allocation, and malformed workflow YAML. These were followed by
+focused green runs. No independent Track C review is claimed here. Final focused review,
+consolidated verification of the final candidate, final Astra re-review, exact-head CI, protected
+deployment, live Auth/Site/restore, and next existing scheduled receipt gates remain pending.

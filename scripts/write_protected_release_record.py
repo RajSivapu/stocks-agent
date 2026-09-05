@@ -31,7 +31,9 @@ def main() -> int:
     parser.add_argument("--rollback-artifact-id", required=True); parser.add_argument("--recovery-metadata-artifact-id", required=True); parser.add_argument("--project-ref", required=True)
     args = parser.parse_args()
     receipt = json.loads(args.receipt.read_text()); dry = json.loads(args.dry_run_evidence.read_text())
-    if receipt.get("deployment_outcome") != "succeeded" or not isinstance(dry.get("table_deltas"), dict):
+    if (receipt.get("deployment_outcome") != "succeeded" or not isinstance(dry.get("table_deltas"), dict)
+            or [row.get("component") for row in receipt.get("component_readbacks", [])] != [
+                "market-briefing-gateway", "owner-dashboard-api", "telegram-portfolio", "owner-web-site"]):
         raise SystemExit("protected receipts are incomplete")
     static_root = Path("dist")
     files = {path.relative_to(static_root).as_posix(): hashlib.sha256(path.read_bytes()).hexdigest() for path in static_root.rglob("*") if path.is_file()}
@@ -44,6 +46,7 @@ def main() -> int:
         "static_assets": {"candidate_sha": args.candidate_sha, "source_sha256": tree(Path("apps/web")), "files": files},
         "dry_run": False, "dry_run_evidence": dry, "canaries": {"owner": 200, "anonymous": 401, "non_owner": 403},
         "deployment_outcome": "succeeded",
+        "component_readbacks": receipt["component_readbacks"],
         "rollback_capture": {"artifact_id": integer(args.rollback_artifact_id), "recovery_metadata_artifact_id": integer(args.recovery_metadata_artifact_id), "commit_sha": capture["commit_sha"], "captured_at": capture["captured_at"], "source_sha256": capture["source_sha256"]},
         "rollback_readiness": receipt["rollback_readiness"],
     }

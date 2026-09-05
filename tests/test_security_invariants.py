@@ -314,9 +314,9 @@ def test_gateway_repository_uses_only_fixed_tables_and_named_rpcs():
         "suggestions",
         "transactions",
     }
-    assert set(re.findall(r'\.rpc\("([a-z_]+)"', source)) == {
+    assert set(re.findall(r'\.rpc\(\s*"([a-z_]+)"', source)) == {
         "apply_market_artifacts",
-        "apply_market_decision_bundle",
+        "apply_market_decision_bundle_with_cash_snapshot",
         "checkpoint_market_intelligence_collection",
         "claim_market_gateway_request",
         "claim_market_intelligence_quote",
@@ -335,6 +335,8 @@ def test_gateway_repository_uses_only_fixed_tables_and_named_rpcs():
         "record_market_alert_evaluations",
         "read_market_intelligence_completion",
         "read_market_report_decisions",
+        "read_reconciled_cash_snapshot",
+        "record_market_run_outcome",
         "record_market_intelligence",
         "record_market_intelligence_quote",
         "record_market_learning",
@@ -348,7 +350,8 @@ def test_gateway_repository_uses_only_fixed_tables_and_named_rpcs():
         "upsert_market_outcome_grades",
     }
     assert not re.search(r"client\.from\((?!\")[^)]+\)", source)
-    assert not re.search(r"client\.rpc\((?!\")[^)]+\)", source)
+    assert not re.search(r'client\.rpc\(\s*[^\s"]', source)
+    assert '"apply_market_decision_bundle"' not in source
 
 
 def test_gateway_authentication_precedes_body_parsing():

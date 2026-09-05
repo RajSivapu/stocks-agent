@@ -4,14 +4,33 @@ Last updated: 2026-09-05
 Canonical release: Personal Stock Agent V1 safety remediation
 Audit baseline: `432d647ef911ff63da427097f02a852e18038b62` on `origin/main`
 Consolidated local-gate candidate: `a0f8158c959e788b2a302ae6411328ec6e98a707`
-Current state: local implementation, task-level review, and consolidated local gate complete;
-independent whole-branch review pending
+Current state: final Astra fix wave has local release-orchestration and immutable-history changes;
+native transport integration, final focused review, and final consolidated gate remain pending.
+The `a0f8158` consolidated result is historical and does not verify this final fix wave.
 
 This file is the version-controlled source of truth for the Personal Stock Agent V1 rollout.
 `docs/ROADMAP.md` records the implementation sequence and remaining release gates.
 `docs/HANDOFF.md` is ignored and is not authoritative.
 
 ## Release boundary
+
+Final fix wave Track C restored every audited migration's exact bytes and moved the required
+intelligence/report changes to `20261001_immutable_history_closure.sql`. The native-ledger fixture
+retains the documented `20260907` file hash `79aeb682eba5ddaa2832d72c8ffea24caa2b7904e19c15704605bd64953367e0`;
+an actual disposable PostgreSQL upgrade and idempotent retry passed.
+
+The protected CLI now uses one encrypted, per-component capture/mutation/readback/recovery engine
+for the runtime role, managed secrets, gateway, dashboard API, Telegram function, and owner Site.
+The final verifier requires downloaded artifact bytes and exact identities for all four deployed
+artifacts. The configured private Site manifest is unchanged. A reviewed
+`scripts.configured_native_release_adapter.py` implementation is absent, so production preflight
+fails before mutation. Final Astra findings 3 and 5 remain open at that transport integration
+boundary; finding 4 is locally implemented. Local failure-injection coverage is not a substitute
+for the missing native adapter or any live deployment/restore proof.
+
+Final independent review, consolidated verification of the final candidate, exact-head CI,
+protected deployment, live Auth, Site deployment/parity, live isolated restore, and the next
+existing scheduled receipts are all pending. No scheduled run was triggered.
 
 The product remains owner-only, suggestion-only, brokerage-free, and constrained to zero
 incremental cost. It cannot place, modify, or cancel a trade. No remediation task performed a live
