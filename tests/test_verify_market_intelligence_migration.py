@@ -1,6 +1,7 @@
 import ast
 from copy import deepcopy
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -8,6 +9,7 @@ from scripts.verify_market_intelligence_migration import (
     evaluate_snapshot,
     remove_report_fields,
 )
+from scripts import verify_portfolio_command_rpc as portfolio_command_verifier
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -362,3 +364,33 @@ def test_portfolio_command_verifier_exercises_the_authoritative_chronology_fixtu
     assert 'late_buy["code"] == "TRANSACTION_OUT_OF_ORDER"' in source
     assert "Decimal(str(holding[\"shares\"])) == Decimal(\"5\")" in source
     assert "Decimal(str(sell[\"realized_pnl\"])) == Decimal(\"50\")" in source
+
+
+def test_chronology_verifier_reloads_authoritative_state_after_rejection():
+    class Query:
+        def __init__(self, rows):
+            self.rows = rows
+
+        def select(self, _columns):
+            return self
+
+        def eq(self, _column, _value):
+            return self
+
+        def order(self, _column):
+            return self
+
+        def execute(self):
+            return SimpleNamespace(data=self.rows)
+
+    class FakeSupabase:
+        def table(self, name):
+            return Query({
+                "holdings": [{"shares": "5"}],
+                "portfolio_commands": [{"realized_pnl": "50"}],
+                "transactions": [{"side": "buy"}, {"side": "sell"}],
+            }[name])
+
+    portfolio_command_verifier._require_late_rejection_preserves_accounting(
+        FakeSupabase(), sell_command_id="sell-command"
+    )

@@ -72,6 +72,23 @@ def _transactions(sb):
     return sb.table("transactions").select("*").eq("ticker", TICKER).order("id").execute().data
 
 
+def _command(sb, command_id):
+    rows = sb.table("portfolio_commands").select("realized_pnl,result").eq("id", command_id).execute().data
+    return rows[0] if rows else None
+
+
+def _require_late_rejection_preserves_accounting(sb, *, sell_command_id):
+    holding = _holding(sb)
+    persisted_sell = _command(sb, sell_command_id)
+    transactions = _transactions(sb)
+    _require(holding is not None and Decimal(str(holding["shares"])) == Decimal("5"),
+             "late Buy changed authoritative holdings")
+    _require(persisted_sell is not None and Decimal(str(persisted_sell["realized_pnl"])) == Decimal("50"),
+             "late Buy changed persisted realized P&L")
+    _require([transaction["side"] for transaction in transactions] == ["buy", "sell"],
+             "late Buy changed authoritative transactions")
+
+
 def _plan(sb):
     rows = sb.table("owner_investment_plans").select("*").eq("ticker", PLAN_TICKER).execute().data
     return rows[0] if rows else None
@@ -171,7 +188,6 @@ def main():
             executed_on=sell_date,
         )
         sell = _rpc(sb, "apply_portfolio_command", sell_id)
-        holding = _holding(sb)
         _require(sell["ok"] is True and Decimal(str(sell["realized_pnl"])) == Decimal("50"),
                  "chronological Sell did not preserve +50 realized P&L")
         late_buy_id = _pending(
@@ -181,11 +197,7 @@ def main():
         late_buy = _rpc(sb, "apply_portfolio_command", late_buy_id)
         _require(late_buy["ok"] is False and late_buy["code"] == "TRANSACTION_OUT_OF_ORDER",
                  "late Buy was not rejected with TRANSACTION_OUT_OF_ORDER")
-        _require(Decimal(str(holding["shares"])) == Decimal("5"),
-                 "late Buy changed authoritative holdings")
-        _require(Decimal(str(sell["realized_pnl"])) == Decimal("50"),
-                 "late Buy changed realized P&L")
-        _require(_transaction_count(sb) == 2, "late Buy created a transaction")
+        _require_late_rejection_preserves_accounting(sb, sell_command_id=sell_id)
         replay = _rpc(sb, "apply_portfolio_command", late_buy_id)
         _require(replay.get("duplicate") is True and replay.get("code") == "TRANSACTION_OUT_OF_ORDER",
                  "late Buy replay did not preserve its chronology receipt")
