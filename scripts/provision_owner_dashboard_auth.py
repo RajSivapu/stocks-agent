@@ -19,10 +19,16 @@ PROJECT_HOST = re.compile(r"^[a-z0-9]{20}\.supabase\.co$")
 EMAIL = re.compile(r"^[^\s@]+@[^\s@]+\.[^\s@]+$")
 UUID = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$", re.IGNORECASE)
 TOKEN_TEMPLATE = re.compile(r"{{\s*\.Token\s*}}")
+AUTH_EMAIL_OTP_RECEIPT_KEYS = frozenset({
+    "mailer_otp_length",
+    "mailer_templates_magic_link_content",
+})
 
 
 def validate_email_otp_configuration(config: Mapping[str, object]) -> dict[str, object]:
     """Fail closed unless the hosted Auth email flow is the documented six-digit OTP flow."""
+    if set(config) != AUTH_EMAIL_OTP_RECEIPT_KEYS:
+        raise RuntimeError("Auth configuration receipt must contain exactly the OTP length and email template")
     otp_length = config.get("mailer_otp_length")
     if not isinstance(otp_length, int) or isinstance(otp_length, bool) or otp_length != 6:
         raise RuntimeError("Supabase Auth email OTP must use a six-digit code")

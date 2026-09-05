@@ -1,4 +1,5 @@
 import json
+import sys
 
 import pytest
 
@@ -54,6 +55,47 @@ def test_deployment_auth_configuration_rejects_confirmation_url_only_templates()
         "mailer_otp_length": 6,
         "mailer_templates_magic_link_content": "Your code: {{ .Token }}",
     }) == {"status": "verified", "otp_length": 6, "token_template": True}
+
+    with pytest.raises(RuntimeError, match="exactly"):
+        verify.validate_deployment_auth_configuration({
+            "mailer_otp_length": 6,
+            "mailer_templates_magic_link_content": "Your code: {{ .Token }}",
+            "secret": "must-not-be-accepted",
+        })
+
+
+@pytest.mark.parametrize("receipt_contents", [None, "not JSON"])
+def test_deployment_main_rejects_absent_or_malformed_auth_receipt_before_network_or_canary(
+    tmp_path, monkeypatch, receipt_contents,
+):
+    receipt_path = tmp_path / "auth-email-otp.json"
+    if receipt_contents is not None:
+        receipt_path.write_text(receipt_contents)
+    network_calls = []
+    canary_calls = []
+
+    def no_network(*_args, **_kwargs):
+        network_calls.append(True)
+        raise AssertionError("network must not be reached")
+
+    def no_canary(*_args, **_kwargs):
+        canary_calls.append(True)
+        raise AssertionError("canary must not be reached")
+
+    monkeypatch.setattr(verify, "urlopen", no_network)
+    monkeypatch.setattr(verify, "run_http_canary", no_canary)
+    monkeypatch.setattr(sys, "argv", [
+        "verify_owner_dashboard_deployment.py",
+        "--api-url", API_URL,
+        "--origin", ORIGIN,
+        "--auth-config-receipt", str(receipt_path),
+    ])
+
+    with pytest.raises(RuntimeError, match="Auth configuration receipt"):
+        verify.main()
+
+    assert network_calls == []
+    assert canary_calls == []
 
 
 def test_api_url_and_origin_must_be_exact_https_boundaries():

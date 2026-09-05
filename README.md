@@ -177,9 +177,11 @@ client-side calculations.
    **Authentication → Email Templates → Magic Link**, make the email body show the six-digit code
    with `{{ .Token }}`; a `{{ .ConfirmationURL }}`-only body is not acceptable. Set the hosted email
    OTP length to exactly `6`. The matching local OTP length is recorded in `supabase/config.toml`.
-   Supabase does not expose a supported project-management credential path for this check, so the
-   protected operator must manually verify those two dashboard settings and save only this minimal
-   local receipt (no owner email, URL, key, or rendered email) outside version control:
+   Supabase supports a [read-only Management API Auth-config endpoint](https://supabase.com/docs/reference/api/v1-get-auth-service-config)
+   for a deliberately provisioned token with `auth:read` / `auth_config_read`. This project does not
+   provision or store a Management API token, so the protected operator must manually verify those
+   two dashboard settings and save only this minimal local receipt (no owner email, URL, key, or
+   rendered email) outside version control:
 
 ```json
 {"mailer_otp_length":6,"mailer_templates_magic_link_content":"Your code is {{ .Token }}"}

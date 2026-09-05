@@ -107,7 +107,20 @@ it("accepts exactly six numeric OTP characters", async () => {
   await user.click(screen.getByRole("button", { name: /send code/i }));
   const code = await screen.findByLabelText(/six-digit code/i);
 
-  await user.type(code, "12345678");
+  await user.type(code, "12a3b45678");
 
   expect(code).toHaveValue("123456");
+});
+
+it("does not submit an OTP with fewer than six numeric characters", async () => {
+  const authClient = client();
+  const user = userEvent.setup();
+  render(<AuthProvider client={authClient}><Screen /></AuthProvider>);
+  await user.type(screen.getByLabelText(/email/i), "owner@example.com");
+  await user.click(screen.getByRole("button", { name: /send code/i }));
+  await user.type(await screen.findByLabelText(/six-digit code/i), "12345");
+
+  await user.click(screen.getByRole("button", { name: /verify code/i }));
+
+  expect(authClient.verifyOtp).not.toHaveBeenCalled();
 });
