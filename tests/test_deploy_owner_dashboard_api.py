@@ -206,6 +206,23 @@ def test_migration_ledger_skips_verified_rows_and_refuses_hash_drift(tmp_path):
         deploy.apply_release_migrations(Cursor(drifted), manifest, tmp_path)
 
 
+def test_migration_ledger_bootstraps_only_matching_native_statement_receipts(tmp_path):
+    path = tmp_path / "20260928_native.sql"; path.write_text("SELECT 28;\n")
+    manifest = deploy.candidate_migration_manifest(tmp_path)
+
+    class Cursor:
+        def __init__(self, native): self.native, self.calls = native, 0
+        def execute(self, *_args, **_kwargs): pass
+        def fetchall(self):
+            self.calls += 1
+            return [] if self.calls == 1 else self.native
+
+    receipt = deploy.apply_release_migrations(Cursor([("20260928", [path.read_text()])]), manifest, tmp_path)
+    assert receipt["applied"] == [] and receipt["skipped"] == manifest
+    with pytest.raises(RuntimeError, match="native migration hash"):
+        deploy.apply_release_migrations(Cursor([("20260928", ["SELECT changed;"]) ]), manifest, tmp_path)
+
+
 def test_post_deploy_restoration_precedes_cleanup_even_when_cleanup_fails():
     calls = []
     artifact = {"repo_root": "/safe/rollback", "commit_sha": "a" * 40, "source_sha256": "b" * 64}
@@ -221,6 +238,17 @@ def test_post_deploy_restoration_precedes_cleanup_even_when_cleanup_fails():
     with pytest.raises(RuntimeError, match="gateway restored"):
         deploy.restore_gateway_after_release_failure(PROJECT_REF, ADMIN_URL, artifact, restorer=restore, releaser=cleanup)
     assert calls == ["restore", "cleanup"]
+
+
+def test_isolated_rollback_drill_measures_the_captured_gateway_bytes(tmp_path):
+    source = tmp_path / "checkout/supabase/functions/market-briefing-gateway"
+    source.mkdir(parents=True)
+    (source / "index.ts").write_text("export default 1\n")
+    digest = deploy._tree_sha256(source)
+    drill = deploy.execute_isolated_gateway_rollback_drill({"repo_root": tmp_path / "checkout", "source_sha256": digest})
+    assert drill["status"] == "verified"
+    assert drill["source_sha256"] == digest
+    assert drill["started_at"] <= drill["completed_at"]
 
 
 def test_deploy_and_release_verifiers_share_the_complete_candidate_migration_manifest():

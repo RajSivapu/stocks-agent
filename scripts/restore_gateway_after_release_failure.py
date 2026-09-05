@@ -15,10 +15,13 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--project-ref", required=True)
     parser.add_argument("--admin-url", required=True)
-    parser.add_argument("--receipt", required=True, type=Path)
+    parser.add_argument("--receipt", type=Path)  # optional: state survives a killed deploy subprocess
+    parser.add_argument("--release-state", required=True, type=Path)
     args = parser.parse_args()
-    receipt = json.loads(args.receipt.read_text())
-    artifact = receipt.get("gateway_rollback_artifact")
+    state = json.loads(args.release_state.read_text())
+    artifact = state.get("artifact")
+    if not state.get("changed"):
+        return 0
     if not isinstance(artifact, dict):
         raise SystemExit("retained gateway rollback artifact is unavailable")
     gateway = {

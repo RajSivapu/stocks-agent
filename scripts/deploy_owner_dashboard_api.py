@@ -10,6 +10,7 @@ import json
 import os
 from pathlib import Path
 import re
+import shutil
 import stat
 import subprocess
 import sys
@@ -265,10 +266,6 @@ def release_gateway_rollback_artifact(
     result = _run(["git", "worktree", "remove", "--force", str(path)], cwd=repo_root, runner=runner)
     if getattr(result, "returncode", 1) != 0:
         raise RuntimeError("gateway rollback artifact cleanup failed")
-    try:
-        path.parent.rmdir()
-    except OSError as error:
-        raise RuntimeError("gateway rollback artifact cleanup failed") from error
 
 
 def retain_gateway_rollback_artifact(artifact: Mapping[str, object], evidence_directory: Path) -> dict[str, object]:
@@ -304,15 +301,31 @@ def verify_gateway_rollback_preflight(
     observed = function_version(project_ref, "market-briefing-gateway")
     if observed != expected_version:
         raise RuntimeError("live gateway version differs from rollback receipt")
-    # This is intentionally isolated: it proves the captured bytes can be
-    # resolved and checked without touching the live function.  Production
-    # restoration is reserved for a failed release, not a successful one.
+    drill = execute_isolated_gateway_rollback_drill(artifact)
     return {
         "status": "ready",
         "function_version": observed,
         "source_sha256": artifact["source_sha256"],
-        "isolated_drill": {"status": "verified", "isolated": True, "source_sha256": artifact["source_sha256"]},
+        "isolated_drill": drill,
     }
+
+
+def execute_isolated_gateway_rollback_drill(artifact: Mapping[str, object]) -> dict[str, object]:
+    """Actually stage and verify captured gateway bytes in a disposable root."""
+    source = Path(str(artifact.get("repo_root", ""))) / "supabase/functions/market-briefing-gateway"
+    expected = str(artifact.get("source_sha256", ""))
+    if not source.is_dir() or not re.fullmatch(r"[0-9a-f]{64}", expected) or _tree_sha256(source) != expected:
+        raise RuntimeError("isolated rollback drill source is unavailable")
+    started = datetime.now(timezone.utc).isoformat()
+    with tempfile.TemporaryDirectory(prefix="stocks-isolated-rollback-drill-") as raw:
+        restored = Path(raw) / "restored-gateway"
+        shutil.copytree(source, restored, symlinks=False)
+        measured = _tree_sha256(restored)
+        if measured != expected:
+            raise RuntimeError("isolated rollback drill hash mismatch")
+    completed = datetime.now(timezone.utc).isoformat()
+    return {"status": "verified", "isolated": True, "source_sha256": measured,
+            "started_at": started, "completed_at": completed}
 
 
 def candidate_migration_manifest(migrations_directory: Path = ROOT / "sql/migrations") -> list[dict[str, str]]:
@@ -380,6 +393,32 @@ def apply_release_migrations(
         if path in known or not re.fullmatch(r"[0-9a-f]{64}", digest):
             raise RuntimeError("migration ledger receipt is malformed")
         known[path] = (version, digest)
+    # A previously applied Supabase migration may not be replayed merely
+    # because this private ledger is new. Bootstrap it only from the native
+    # statements receipt, and reject any untraceable/extra version.
+    if not known:
+        cursor.execute("SELECT version, statements FROM supabase_migrations.schema_migrations ORDER BY version FOR UPDATE")
+        legacy = cursor.fetchall()
+        by_version: dict[str, list[Mapping[str, str]]] = {}
+        for item in manifest:
+            by_version.setdefault(item["version"], []).append(item)
+        for row in legacy:
+            if not isinstance(row, Sequence) or len(row) != 2 or not isinstance(row[0], str) or not isinstance(row[1], Sequence):
+                raise RuntimeError("native migration receipt is malformed")
+            version, statements = row
+            candidates = by_version.get(version, [])
+            if not candidates or not all(isinstance(part, str) for part in statements):
+                raise RuntimeError("native migration version is not an exact candidate")
+            normalized = "\n".join(statements).encode()
+            matching = [item for item in candidates if hashlib.sha256(normalized).hexdigest() == item["sha256"]]
+            if len(matching) != 1:
+                raise RuntimeError("native migration hash mismatch")
+            item = matching[0]
+            cursor.execute(
+                f"INSERT INTO {MIGRATION_LEDGER} (path, version, sha256) VALUES (%s, %s, %s)",
+                (item["path"], item["version"], item["sha256"]),
+            )
+            known[item["path"]] = (item["version"], item["sha256"])
     applied: list[dict[str, str]] = []
     skipped: list[dict[str, str]] = []
     for item in manifest:
@@ -700,13 +739,13 @@ def restore_gateway_after_release_failure(
         restored = dict(restorer(project_ref, admin_url, gateway_artifact))
     except Exception as error:
         restore_error = error
+    if restore_error is not None:
+        # Preserve the verified source so a later guarded retry can restore it.
+        raise RuntimeError("gateway restoration failed") from restore_error
     try:
         releaser(gateway_artifact)
     except Exception as cleanup_error:
-        if restore_error is None:
-            raise RuntimeError("gateway restored but rollback worktree cleanup failed") from cleanup_error
-    if restore_error is not None:
-        raise RuntimeError("gateway restoration failed") from restore_error
+        raise RuntimeError("gateway restored but rollback worktree cleanup failed") from cleanup_error
     assert restored is not None
     return restored
 
@@ -846,6 +885,7 @@ def main() -> int:
     parser.add_argument("--evidence-directory", required=True, type=Path)
     parser.add_argument("--rollback-worktree", type=Path)
     parser.add_argument("--keep-rollback-worktree", action="store_true")
+    parser.add_argument("--release-state", type=Path, required=True)
     arguments = parser.parse_args()
     if not os.environ.get("SUPABASE_ACCESS_TOKEN", "").strip():
         raise SystemExit("SUPABASE_ACCESS_TOKEN is required for protected Supabase mutation")
@@ -864,6 +904,9 @@ def main() -> int:
         )
 
     validate_release_database_endpoints(arguments.project_ref, admin_url, session_template)
+    # The clean-tree gate intentionally precedes capture/state writes.
+    git_sha = verify_git_release(expected_sha=arguments.candidate_sha)
+    verify_reviewed_sha(git_sha, arguments.reviewed_sha)
     if arguments.keep_rollback_worktree and arguments.rollback_worktree is None:
         raise SystemExit("--keep-rollback-worktree requires --rollback-worktree")
     rollback_directory = (arguments.rollback_worktree if arguments.rollback_worktree is not None
@@ -878,14 +921,23 @@ def main() -> int:
     )
     retained_gateway = retain_gateway_rollback_artifact(gateway_rollback, arguments.evidence_directory)
 
+    def write_state(changed: bool) -> None:
+        state = {"changed": changed, "artifact": {"repo_root": str(gateway_rollback["repo_root"]), "commit_sha": gateway_rollback["commit_sha"], "source_sha256": gateway_rollback["source_sha256"]}}
+        arguments.release_state.parent.mkdir(parents=True, exist_ok=True)
+        temporary = arguments.release_state.with_suffix(".tmp")
+        temporary.write_text(json.dumps(state, sort_keys=True, separators=(",", ":")) + "\n")
+        os.replace(temporary, arguments.release_state)
+
+    # Persist the artifact identity before further validation. The changed
+    # marker itself is written immediately before the first gateway mutation.
+    write_state(False)
+
     validate_static_configuration(
         arguments.project_ref,
         owner_user_id,
         arguments.allowed_origin,
         DASHBOARD_SECRET_NAMES,
     )
-    git_sha = verify_git_release(expected_sha=arguments.candidate_sha)
-    verify_reviewed_sha(git_sha, arguments.reviewed_sha)
     run_local_verification()
     dashboard_source = verify_v1_dashboard_source()
     ensure_initial_function_absent(arguments.project_ref)
@@ -907,6 +959,9 @@ def main() -> int:
     rollback_release = lambda project_ref, admin: rollback_after_gateway_change(
         project_ref, admin, gateway_rollback
     )
+    # A subprocess can die after its remote mutation and before it returns a
+    # receipt, so mark this state atomically before attempting that command.
+    write_state(True)
     receipt = publish_and_deploy_or_rollback(
         arguments.project_ref,
         {

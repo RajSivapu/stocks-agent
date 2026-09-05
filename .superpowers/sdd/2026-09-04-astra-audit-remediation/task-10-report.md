@@ -61,6 +61,20 @@ Residual risk: deployment receipt collection must still populate the authoritati
 - `.venv/bin/python -m pytest -q tests/test_deploy_owner_dashboard_api.py tests/test_owner_dashboard_release_workflow.py tests/test_verify_personal_stock_agent_v1.py tests/test_verify_owner_dashboard_deployment.py` — `90 passed in 10.63s`.
 - No workflow, deployment, database migration, scheduled run, recovery drill, Telegram send, provider/model call, brokerage action, or full suite was invoked.
 
+## Controller acceptance remediation round 5 — 2026-09-05
+
+- Moved all workflow scratch state (review API response, release receipt, rollback checkout, release state journal, generated evidence, and virtual environment) under `RUNNER_TEMP`; checkout cleanliness is verified before capture writes. The workflow installs locked Python dependencies, including the test-only cryptography package, runs `npm ci`, and installs the lockfile-pinned Playwright browser/dependencies.
+- The protected no-side-effect evidence now surrounds a candidate-owned local read-only verifier. Its evidence hash binds exact argv, candidate SHA, and verifier bytes; two restricted-reader snapshots must share identity and exactly match IDs/counts/hashes for scheduled runs, gateway requests, alerts, publications, transactions, and report delivery surfaces.
+- Added an atomic external release-state journal. It persists verified rollback source identity before mutation and flips its changed marker immediately before the gateway-changing command. Failure handling reads the journal even when no deploy receipt was emitted, preserves source on a failed restore, and cleanup never removes the shared temporary parent.
+- Migration hash ledger bootstrap now verifies native Supabase statement receipts against candidate migration bytes, rejects unknown or drifted versions, imports only exact entries, and applies only transactionally pending candidate migrations.
+- Approval binds to the authoritative PR head SHA rather than the merge result; both workflow and independent verifier accept only a local ancestor/tree relationship from that reviewed head to the current main candidate.
+- Replaced the synthesized rollback-drill claim with an executed disposable local byte-restore drill that records measured hash and timestamps; its behavior is covered directly by focused tests.
+
+### Final local evidence
+
+- Focused Task 10/workflow contracts: `.venv/bin/python -m pytest -q tests/test_deploy_owner_dashboard_api.py tests/test_owner_dashboard_release_workflow.py tests/test_verify_personal_stock_agent_v1.py tests/test_verify_owner_dashboard_deployment.py` — `97 passed in 10.83s`.
+- No workflow, deployment, database migration, scheduled run, recovery drill against a live environment, Telegram send, provider/model call, brokerage action, or full suite was invoked.
+
 ## Controller acceptance remediation round 4 — 2026-09-05
 
 - Hardened the protected release workflow before mutation: it exports `GH_TOKEN`, requires the protected `SUPABASE_ACCESS_TOKEN`, installs the pinned Node/Python verification dependencies, and resolves the pinned Supabase CLI before it can create a Deployment.

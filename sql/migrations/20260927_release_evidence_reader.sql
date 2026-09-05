@@ -18,7 +18,7 @@ BEGIN
     'market_report_publications','market_intelligence_runs','market_intelligence_collection_completions',
     'market_intelligence_run_events','market_collection_checkpoints','market_events','market_candidate_rankings',
     'market_gateway_requests','market_report_request_origins','market_publications',
-    'market_source_quota_reservations','market_source_receipts'
+    'market_source_quota_reservations','market_source_receipts','market_alert_drafts','market_alert_events','market_alert_actions'
   ] LOOP
     EXECUTE format('REVOKE ALL ON public.%I FROM stock_agent_release_reader,stock_agent_release_reader_runtime',name);
     EXECUTE format('GRANT SELECT ON public.%I TO stock_agent_release_reader',name);

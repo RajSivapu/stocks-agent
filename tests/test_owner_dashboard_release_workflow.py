@@ -58,3 +58,15 @@ def test_release_workflow_retains_and_restores_rollback_source_until_evidence_is
     assert workflow.index("Upload immutable release record") < workflow.index("Release local rollback worktree")
     assert "rollback_readiness" in Path("scripts/write_protected_release_record.py").read_text()
     assert "dry-run-evidence.json" in workflow
+
+
+def test_final_release_workflow_keeps_all_ephemera_outside_the_checkout_and_uses_state_journal():
+    workflow = Path(".github/workflows/owner-dashboard-release.yml").read_text()
+    assert "RUNNER_TEMP" in workflow
+    assert "release-state.json" in workflow
+    assert "--release-state" in workflow
+    assert "verify_candidate_read_only.py" in workflow
+    assert "npx playwright install --with-deps chromium" in workflow
+    assert "cryptography==" in Path("requirements-test.txt").read_text()
+    assert '"$PR_HEAD_SHA"' in workflow
+    assert "reviewed head does not bind candidate" in workflow

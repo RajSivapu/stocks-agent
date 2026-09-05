@@ -119,7 +119,7 @@ def verify_artifacts(repo: Path, static_root: Path, candidate: str, record: Mapp
         drill = ready["isolated_drill"]
         require(ready["status"] == "ready" and type(ready["function_version"]) is int and ready["function_version"] > 0
                 and ready["source_sha256"] == captured_hash and drill["status"] == "verified" and drill["isolated"] is True
-                and drill["source_sha256"] == captured_hash, "successful deployment rollback readiness is incomplete")
+                and drill["source_sha256"] == captured_hash and timestamp(drill["started_at"]) <= timestamp(drill["completed_at"]), "successful deployment rollback readiness is incomplete")
     elif outcome == "failed":
         rollback = record["rollback"]
         gateway, runtime = rollback["gateway"], rollback["runtime_login"]
@@ -224,8 +224,16 @@ def verify_release(source: ReleaseDataSource, *, deployment_id: int, repo_root: 
                 and ci["path"] == ".github/workflows/owner-dashboard-ci.yml" and ci["id"] == record["workflow_run_id"]
                 and merge["merged"] is True and merge["merge_commit_sha"] == candidate
                 and commit_time <= merged < deployed <= now and commit_time <= timestamp(ci["updated_at"]) <= deployed, "protected CI/merge/deployment candidate SHA or time mismatch")
+        reviewed_head = merge["head"]["sha"]
+        require(bool(re.fullmatch(r"[0-9a-f]{40}", reviewed_head)), "reviewed PR head is malformed")
         reviews = source.reviews(record["pull_request_number"])
-        require(any(row["state"] == "APPROVED" and row["commit_id"] == candidate and commit_time <= timestamp(row["submitted_at"]) <= deployed for row in reviews), "independent review of exact candidate is missing")
+        require(any(row["state"] == "APPROVED" and row["commit_id"] == reviewed_head and commit_time <= timestamp(row["submitted_at"]) <= deployed for row in reviews), "independent review of exact PR head is missing")
+        if reviewed_head != candidate:
+            ancestor = subprocess.run(["git", "merge-base", "--is-ancestor", reviewed_head, candidate], cwd=repo_root, capture_output=True, check=False)
+            if ancestor.returncode != 0:
+                reviewed_tree = subprocess.run(["git", "rev-parse", f"{reviewed_head}^{{tree}}"], cwd=repo_root, text=True, capture_output=True, check=False)
+                candidate_tree = subprocess.run(["git", "rev-parse", f"{candidate}^{{tree}}"], cwd=repo_root, text=True, capture_output=True, check=False)
+                require(reviewed_tree.returncode == candidate_tree.returncode == 0 and reviewed_tree.stdout == candidate_tree.stdout, "reviewed PR head does not bind candidate merge/tree")
         verify_artifacts(repo_root, static_root, candidate, record, source, now, deployed)
         require(record.get("dry_run") is False, "protected deployment dry-run authority must be false")
         dry = record["dry_run_evidence"]

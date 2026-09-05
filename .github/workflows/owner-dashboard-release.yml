@@ -47,8 +47,13 @@ jobs:
           test -n "$GH_TOKEN" || { echo 'GitHub token is required'; exit 1; }
           test -n "$SUPABASE_ACCESS_TOKEN" || { echo 'SUPABASE_ACCESS_TOKEN is required'; exit 1; }
           npm ci --ignore-scripts
-          python -m venv .release-venv
-          .release-venv/bin/python -m pip install --requirement requirements-test.txt
+          RELEASE_STATE_DIR="$RUNNER_TEMP/owner-dashboard-release-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
+          mkdir -m 700 "$RELEASE_STATE_DIR"
+          echo "RELEASE_STATE_DIR=$RELEASE_STATE_DIR" >> "$GITHUB_ENV"
+          echo "RELEASE_VENV=$RUNNER_TEMP/owner-dashboard-release-venv-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT" >> "$GITHUB_ENV"
+          python -m venv "$RUNNER_TEMP/owner-dashboard-release-venv-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
+          "$RUNNER_TEMP/owner-dashboard-release-venv-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT/bin/python" -m pip install --requirement requirements-test.txt
+          npx playwright install --with-deps chromium
           npx --yes supabase@2.116.0 --version >/dev/null
       - name: Query and bind the authoritative reviewed main candidate
         id: candidate
@@ -81,8 +86,12 @@ jobs:
           test "$(jq -r .path <<<"$CI")" = .github/workflows/owner-dashboard-ci.yml || { echo 'wrong required CI workflow'; exit 1; }
           PR="$(gh api "repos/$GITHUB_REPOSITORY/pulls/$PULL_REQUEST_NUMBER")"
           test "$(jq -r .merged <<<"$PR")" = true && test "$(jq -r .base.ref <<<"$PR")" = main && test "$(jq -r .merge_commit_sha <<<"$PR")" = "$CANDIDATE_SHA" || { echo 'candidate SHA/ref mismatch'; exit 1; }
-          gh api "repos/$GITHUB_REPOSITORY/pulls/$PULL_REQUEST_NUMBER/reviews" --paginate > reviews.json
-          jq -e --arg sha "$CANDIDATE_SHA" 'any(.[]; .state == "APPROVED" and .commit_id == $sha)' reviews.json >/dev/null || { echo 'required review approval is missing'; exit 1; }
+          PR_HEAD_SHA="$(jq -r .head.sha <<<"$PR")"
+          gh api "repos/$GITHUB_REPOSITORY/pulls/$PULL_REQUEST_NUMBER/reviews" --paginate > "$RELEASE_STATE_DIR/reviews.json"
+          jq -e --arg sha "$PR_HEAD_SHA" 'any(.[]; .state == "APPROVED" and .commit_id == $sha)' "$RELEASE_STATE_DIR/reviews.json" >/dev/null || { echo 'required review approval is missing'; exit 1; }
+          gh api "repos/$GITHUB_REPOSITORY/git/commits/$PR_HEAD_SHA" --jq .sha >/dev/null
+          git fetch --no-tags origin "$PR_HEAD_SHA" || true
+          git merge-base --is-ancestor "$PR_HEAD_SHA" "$CANDIDATE_SHA" || test "$(git rev-parse "$PR_HEAD_SHA^{tree}")" = "$(git rev-parse "$CANDIDATE_SHA^{tree}")" || { echo 'reviewed head does not bind candidate'; exit 1; }
           printf 'candidate_sha=%s\nreviewed_sha=%s\nci_workflow_run_id=%s\npull_request_number=%s\n' "$CANDIDATE_SHA" "$CANDIDATE_SHA" "$CI_WORKFLOW_RUN_ID" "$PULL_REQUEST_NUMBER" >> "$GITHUB_OUTPUT"
       - name: Create the candidate-bound GitHub Deployment
         id: deployment
@@ -112,19 +121,19 @@ jobs:
           CANDIDATE_SHA: ${{ steps.candidate.outputs.candidate_sha }}
           REVIEWED_SHA: ${{ steps.candidate.outputs.reviewed_sha }}
         run: |
-          set -euo pipefail; umask 077; mkdir protected-evidence
-          .release-venv/bin/python scripts/deploy_owner_dashboard_api.py --project-ref "$PROJECT_REF" --allowed-origin "$ALLOWED_ORIGIN" --site-origin "$SITE_ORIGIN" --reviewed-sha "$REVIEWED_SHA" --candidate-sha "$CANDIDATE_SHA" --gateway-rollback-ref "$GATEWAY_ROLLBACK_REF" --gateway-rollback-source-sha256 "$GATEWAY_ROLLBACK_SOURCE_SHA256" --gateway-current-version "$GATEWAY_CURRENT_VERSION" --evidence-directory "$PWD/protected-evidence/capture" --rollback-worktree "$PWD/protected-evidence/rollback-worktree" --keep-rollback-worktree > protected-evidence/deploy-receipt.json
+          set -euo pipefail; umask 077
+          "$RELEASE_VENV/bin/python" scripts/deploy_owner_dashboard_api.py --project-ref "$PROJECT_REF" --allowed-origin "$ALLOWED_ORIGIN" --site-origin "$SITE_ORIGIN" --reviewed-sha "$REVIEWED_SHA" --candidate-sha "$CANDIDATE_SHA" --gateway-rollback-ref "$GATEWAY_ROLLBACK_REF" --gateway-rollback-source-sha256 "$GATEWAY_ROLLBACK_SOURCE_SHA256" --gateway-current-version "$GATEWAY_CURRENT_VERSION" --evidence-directory "$RELEASE_STATE_DIR/capture" --rollback-worktree "$RELEASE_STATE_DIR/rollback-worktree" --release-state "$RELEASE_STATE_DIR/release-state.json" --keep-rollback-worktree > "$RELEASE_STATE_DIR/deploy-receipt.json"
           echo 'GATEWAY_CHANGED=1' >> "$GITHUB_ENV"
       - name: Derive protected no-side-effect evidence around the safe dry-run
         env: {RELEASE_READONLY_DATABASE_URL: ${{ secrets.RELEASE_READONLY_DATABASE_URL }}, PROJECT_REF: ${{ vars.SUPABASE_PROJECT_REF }}}
         run: |
           set -euo pipefail
           test -n "$RELEASE_READONLY_DATABASE_URL" || { echo 'release reader is required'; exit 1; }
-          .release-venv/bin/python scripts/collect_protected_dry_run_evidence.py --production-project-ref "$PROJECT_REF" --output protected-evidence/dry-run-evidence.json --safe-command ".release-venv/bin/python scripts/market_gateway.py evaluate_alert_rules --dry-run"
+          "$RELEASE_VENV/bin/python" scripts/collect_protected_dry_run_evidence.py --production-project-ref "$PROJECT_REF" --output "$RELEASE_STATE_DIR/dry-run-evidence.json" --candidate-script scripts/verify_candidate_read_only.py --candidate-sha "$CANDIDATE_SHA" --safe-command "$RELEASE_VENV/bin/python scripts/verify_candidate_read_only.py --candidate-sha $CANDIDATE_SHA"
       - name: Upload immutable rollback capture
         id: rollback_artifact
         uses: actions/upload-artifact@65462800fd760344b1a7b4382951275a0abb4808
-        with: {name: gateway-rollback-${{ github.run_id }}-${{ github.run_attempt }}, path: protected-evidence/capture/gateway-source, if-no-files-found: error, retention-days: 90}
+        with: {name: gateway-rollback-${{ github.run_id }}-${{ github.run_attempt }}, path: ${{ env.RELEASE_STATE_DIR }}/capture/gateway-source, if-no-files-found: error, retention-days: 90}
       - name: Generate canonical release record
         env:
           CANDIDATE_SHA: ${{ steps.candidate.outputs.candidate_sha }}
@@ -133,22 +142,23 @@ jobs:
           DEPLOYMENT_ID: ${{ steps.deployment.outputs.deployment_id }}
           ROLLBACK_ARTIFACT_ID: ${{ steps.rollback_artifact.outputs.artifact-id }}
           PROJECT_REF: ${{ vars.SUPABASE_PROJECT_REF }}
-        run: .release-venv/bin/python scripts/write_protected_release_record.py --receipt protected-evidence/deploy-receipt.json --dry-run-evidence protected-evidence/dry-run-evidence.json --output release-record.json --candidate-sha "$CANDIDATE_SHA" --ci-workflow-run-id "$CI_WORKFLOW_RUN_ID" --release-workflow-run-id "$GITHUB_RUN_ID" --pull-request-number "$PULL_REQUEST_NUMBER" --deployment-id "$DEPLOYMENT_ID" --rollback-artifact-id "$ROLLBACK_ARTIFACT_ID" --project-ref "$PROJECT_REF"
+        run: "$RELEASE_VENV/bin/python" scripts/write_protected_release_record.py --receipt "$RELEASE_STATE_DIR/deploy-receipt.json" --dry-run-evidence "$RELEASE_STATE_DIR/dry-run-evidence.json" --output "$RELEASE_STATE_DIR/release-record.json" --candidate-sha "$CANDIDATE_SHA" --ci-workflow-run-id "$CI_WORKFLOW_RUN_ID" --release-workflow-run-id "$GITHUB_RUN_ID" --pull-request-number "$PULL_REQUEST_NUMBER" --deployment-id "$DEPLOYMENT_ID" --rollback-artifact-id "$ROLLBACK_ARTIFACT_ID" --project-ref "$PROJECT_REF"
       - name: Upload immutable release record
         id: release_artifact
         uses: actions/upload-artifact@65462800fd760344b1a7b4382951275a0abb4808
-        with: {name: release-record-${{ steps.deployment.outputs.deployment_id }}, path: release-record.json, if-no-files-found: error, retention-days: 90}
+        with: {name: release-record-${{ steps.deployment.outputs.deployment_id }}, path: ${{ env.RELEASE_STATE_DIR }}/release-record.json, if-no-files-found: error, retention-days: 90}
       - name: Mark candidate deployment successful with immutable artifact identity
         env: {GH_TOKEN: ${{ github.token }}, DEPLOYMENT_ID: ${{ steps.deployment.outputs.deployment_id }}, RELEASE_ARTIFACT_ID: ${{ steps.release_artifact.outputs.artifact-id }}}
         run: gh api --method POST "repos/$GITHUB_REPOSITORY/deployments/$DEPLOYMENT_ID/statuses" -f state=success -f description="release-artifact:$RELEASE_ARTIFACT_ID" -f log_url="$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
       - name: Release local rollback worktree
-        run: .release-venv/bin/python scripts/release_gateway_rollback_worktree.py --receipt protected-evidence/deploy-receipt.json
+        run: "$RELEASE_VENV/bin/python" scripts/release_gateway_rollback_worktree.py --receipt "$RELEASE_STATE_DIR/deploy-receipt.json"
       - name: Restore gateway if any post-deploy evidence step failed
-        if: ${{ failure() && env.GATEWAY_CHANGED == '1' }}
+        if: ${{ failure() }}
         env: {SUPABASE_ACCESS_TOKEN: ${{ secrets.SUPABASE_ACCESS_TOKEN }}, POSTGRES_URL: ${{ secrets.POSTGRES_URL }}, PROJECT_REF: ${{ vars.SUPABASE_PROJECT_REF }}}
         run: |
           set -euo pipefail
-          restore_after_failure() { .release-venv/bin/python scripts/restore_gateway_after_release_failure.py --project-ref "$PROJECT_REF" --admin-url "$POSTGRES_URL" --receipt protected-evidence/deploy-receipt.json; }
+          test -f "$RELEASE_STATE_DIR/release-state.json" || exit 0
+          restore_after_failure() { "$RELEASE_VENV/bin/python" scripts/restore_gateway_after_release_failure.py --project-ref "$PROJECT_REF" --admin-url "$POSTGRES_URL" --release-state "$RELEASE_STATE_DIR/release-state.json"; }
           trap 'restore_after_failure' ERR
           restore_after_failure
       - name: Mark candidate deployment failed after protected restoration

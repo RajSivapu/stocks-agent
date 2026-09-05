@@ -55,6 +55,7 @@ READ_TABLES = (
     "market_report_publications", "market_intelligence_runs", "market_intelligence_collection_completions", "market_intelligence_run_events",
     "market_collection_checkpoints", "market_events", "market_candidate_rankings", "market_gateway_requests",
     "market_report_request_origins", "market_publications", "market_source_quota_reservations", "market_source_receipts",
+    "market_alert_drafts", "market_alert_events", "market_alert_actions",
 )
 
 
@@ -129,6 +130,10 @@ class PostgresReadOnlySource:
             "transactions": "SELECT id::text AS id FROM public.transactions ORDER BY id",
             "market_publications": "SELECT id::text AS id FROM public.market_publications ORDER BY id",
             "telegram_publications": "SELECT report_id::text AS id FROM public.market_report_publications WHERE telegram_accepted_at IS NOT NULL ORDER BY report_id",
+            "gateway_requests": "SELECT request_id::text AS id FROM public.market_gateway_requests ORDER BY request_id",
+            "alert_drafts": "SELECT id::text AS id FROM public.market_alert_drafts ORDER BY id",
+            "alert_events": "SELECT id::text AS id FROM public.market_alert_events ORDER BY id",
+            "alert_actions": "SELECT id::text AS id FROM public.market_alert_actions ORDER BY id",
         }
         tables = {}
         for name, sql in queries.items():

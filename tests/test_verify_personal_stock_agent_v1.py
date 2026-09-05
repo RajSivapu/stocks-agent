@@ -89,7 +89,7 @@ def release(tmp_path):
         "canaries": {"owner": 200, "anonymous": 401, "non_owner": 403},
         "rollback_capture": {"artifact_id": 46, "git_sha": prior, "captured_at": "2026-09-05T18:15:00Z", "source_sha256": tree_hash(source.artifacts[46])},
         "deployment_outcome": "succeeded",
-        "rollback_readiness": {"status": "ready", "function_version": 4, "source_sha256": tree_hash(source.artifacts[46]), "isolated_drill": {"status": "verified", "isolated": True, "source_sha256": tree_hash(source.artifacts[46])}},
+        "rollback_readiness": {"status": "ready", "function_version": 4, "source_sha256": tree_hash(source.artifacts[46]), "isolated_drill": {"status": "verified", "isolated": True, "source_sha256": tree_hash(source.artifacts[46]), "started_at": "2026-09-05T18:16:00Z", "completed_at": "2026-09-05T18:17:00Z"}},
     }
     recovery = recovery_records(); packet = recovery["packets"][0]; report = recovery["reports"][0]
     source.rows = {
