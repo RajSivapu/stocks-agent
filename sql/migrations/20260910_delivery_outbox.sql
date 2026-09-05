@@ -119,10 +119,26 @@ BEGIN
 END;
 $$;
 
+CREATE OR REPLACE FUNCTION public.suppress_market_report_publication(p_idempotency_key TEXT)
+RETURNS JSONB LANGUAGE plpgsql SECURITY DEFINER SET search_path=pg_catalog AS $$
+DECLARE v_result public.market_report_publications%ROWTYPE;
+BEGIN
+  UPDATE public.market_report_publications SET status='suppressed',lease_token=NULL,lease_expires_at=NULL,
+    telegram_message_ids='[]'::jsonb,telegram_accepted_at=NULL,updated_at=now()
+  WHERE idempotency_key=p_idempotency_key AND status IN ('pending','failed')
+  RETURNING * INTO v_result;
+  IF NOT FOUND THEN SELECT * INTO v_result FROM public.market_report_publications WHERE idempotency_key=p_idempotency_key; END IF;
+  IF NOT FOUND OR v_result.status<>'suppressed' THEN RAISE EXCEPTION 'report publication cannot be suppressed' USING ERRCODE='40001'; END IF;
+  RETURN jsonb_build_object('report_id',v_result.report_id,'idempotency_key',v_result.idempotency_key,'status',v_result.status);
+END;
+$$;
+
 REVOKE ALL ON TABLE public.market_report_publications FROM PUBLIC, anon, authenticated;
 REVOKE ALL ON FUNCTION public.create_market_report_publication(UUID, UUID, TEXT, DATE, TEXT, TEXT, TEXT) FROM PUBLIC, anon, authenticated;
 REVOKE ALL ON FUNCTION public.claim_market_report_publication(TEXT) FROM PUBLIC, anon, authenticated;
 REVOKE ALL ON FUNCTION public.finish_market_report_publication(TEXT, UUID, TEXT, JSONB, TEXT) FROM PUBLIC, anon, authenticated;
+REVOKE ALL ON FUNCTION public.suppress_market_report_publication(TEXT) FROM PUBLIC, anon, authenticated;
 GRANT EXECUTE ON FUNCTION public.create_market_report_publication(UUID, UUID, TEXT, DATE, TEXT, TEXT, TEXT) TO service_role;
 GRANT EXECUTE ON FUNCTION public.claim_market_report_publication(TEXT) TO service_role;
 GRANT EXECUTE ON FUNCTION public.finish_market_report_publication(TEXT, UUID, TEXT, JSONB, TEXT) TO service_role;
+GRANT EXECUTE ON FUNCTION public.suppress_market_report_publication(TEXT) TO service_role;

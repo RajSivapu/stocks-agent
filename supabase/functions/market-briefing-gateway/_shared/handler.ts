@@ -702,12 +702,20 @@ export function createGatewayHandler(dependencies: GatewayDependencies) {
         });
         let result: Record<string, unknown>;
         if (delivery.status === "suppressed") {
+          if (!deps.repository.recordReport || !deps.repository.createReportPublication ||
+            !deps.repository.suppressReportPublication) {
+            throw new GatewayRepositoryError("PERSISTENCE_FAILED");
+          }
+          const receipt = await deps.repository.recordReport(requireRun(envelope), payload);
+          const pending = await deps.repository.createReportPublication(requireRun(envelope), payload);
+          const suppressed = await deps.repository.suppressReportPublication(pending.idempotency_key);
           result = {
             ok: true,
-            report_id: null,
+            ...receipt,
             publication_receipt: {
-              status: "suppressed",
+              status: suppressed.status,
               telegram_message_ids: [],
+              retry_allowed: false,
             },
             telegram_message_ids: [],
           };
@@ -730,7 +738,9 @@ export function createGatewayHandler(dependencies: GatewayDependencies) {
             delivery.parts,
             deps,
           );
-          const retryAllowed = delivered.status === "pending" || delivered.status === "failed";
+          // The gateway-request lease is complete at this point. Do not advertise a
+          // same-request retry that its immutable response cache cannot actually claim.
+          const retryAllowed = false;
           const failed = delivered.status === "failed" || delivered.status === "uncertain";
           result = {
             ok: !failed,
@@ -1643,7 +1653,8 @@ async function evaluateAndPublish(
   if (!leaseToken) throw new GatewayRepositoryError("PERSISTENCE_FAILED");
   // Morning/post-market brief delivery belongs to the immutable report key. The
   // evaluation receipt remains durable, but cannot create a competing Telegram send.
-  const periodicReport = bundle.phase === "pre-market" || bundle.phase === "post-market";
+  const periodicReport = bundle.phase === "pre-market" || bundle.phase === "post-market" ||
+    bundle.phase === "intraday";
   const publicationStatus = periodicReport ? "suppressed" : rendered.status;
   const persistedInput: PersistedBundle = {
     request_id: envelope.request_id,

@@ -504,3 +504,11 @@ def test_report_delivery_outbox_is_durable_and_schema_aligned():
         assert "GRANT EXECUTE ON FUNCTION public.claim_market_report_publication(TEXT) TO service_role;" in sql
     assert "status='uncertain'" in migration
     assert "telegram_message_ids=CASE WHEN p_status='delivered' THEN p_message_ids ELSE '[]'::jsonb END" in migration
+
+
+def test_fresh_schema_declares_reports_before_adding_the_report_outbox_foreign_key():
+    sql = SCHEMA.read_text()
+    reports = sql.index("CREATE TABLE IF NOT EXISTS public.market_reports")
+    outbox_foreign_key = sql.rindex("FOREIGN KEY (report_id) REFERENCES public.market_reports(id)")
+    assert reports < outbox_foreign_key
+    assert sql.count("market_report_publications_report_id_fkey") == 2

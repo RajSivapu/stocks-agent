@@ -341,6 +341,44 @@ BEGIN
 END;
 $$;
 
+-- Durable command acknowledgement outbox; mirrors 20260911_command_acknowledgements.sql.
+CREATE TABLE IF NOT EXISTS public.portfolio_command_acknowledgements (
+  command_id UUID PRIMARY KEY REFERENCES public.portfolio_commands(id) ON DELETE RESTRICT,
+  telegram_update_id BIGINT NOT NULL UNIQUE CHECK (telegram_update_id >= 0),
+  status TEXT NOT NULL CHECK (status IN ('pending','delivered','failed','uncertain')),
+  result JSONB NOT NULL CHECK (jsonb_typeof(result)='object'), error TEXT CHECK (error IS NULL OR char_length(error)<=1000),
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now(), updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+ALTER TABLE public.portfolio_command_acknowledgements ENABLE ROW LEVEL SECURITY;
+CREATE OR REPLACE FUNCTION public.apply_portfolio_command_with_acknowledgement(p_action TEXT,p_command_id UUID,p_chat_id BIGINT,p_user_id BIGINT,p_telegram_update_id BIGINT)
+RETURNS JSONB LANGUAGE plpgsql SECURITY DEFINER SET search_path=pg_catalog AS $$
+DECLARE v_result JSONB; v_ack public.portfolio_command_acknowledgements%ROWTYPE;
+BEGIN
+  IF p_action NOT IN ('confirm','cancel') OR p_telegram_update_id<0 THEN RAISE EXCEPTION 'invalid command acknowledgement' USING ERRCODE='22023'; END IF;
+  IF p_action='confirm' THEN v_result:=public.apply_portfolio_command(p_command_id,p_chat_id,p_user_id); ELSE v_result:=public.cancel_portfolio_command(p_command_id,p_chat_id,p_user_id); END IF;
+  INSERT INTO public.portfolio_command_acknowledgements(command_id,telegram_update_id,status,result) VALUES(p_command_id,p_telegram_update_id,'pending',v_result) ON CONFLICT (command_id) DO NOTHING;
+  SELECT * INTO v_ack FROM public.portfolio_command_acknowledgements WHERE command_id=p_command_id FOR UPDATE;
+  IF NOT FOUND OR v_ack.telegram_update_id IS DISTINCT FROM p_telegram_update_id THEN RAISE EXCEPTION 'acknowledgement target mismatch' USING ERRCODE='22023'; END IF;
+  RETURN jsonb_build_object('result',v_ack.result,'acknowledgement_status',v_ack.status);
+END;
+$$;
+CREATE OR REPLACE FUNCTION public.finish_portfolio_command_acknowledgement(p_command_id UUID,p_telegram_update_id BIGINT,p_status TEXT,p_error TEXT)
+RETURNS JSONB LANGUAGE plpgsql SECURITY DEFINER SET search_path=pg_catalog AS $$
+DECLARE v_ack public.portfolio_command_acknowledgements%ROWTYPE;
+BEGIN
+  IF p_status NOT IN ('delivered','failed','uncertain') OR char_length(COALESCE(p_error,''))>1000 THEN RAISE EXCEPTION 'invalid acknowledgement completion' USING ERRCODE='22023'; END IF;
+  UPDATE public.portfolio_command_acknowledgements SET status=p_status,error=p_error,updated_at=now() WHERE command_id=p_command_id AND telegram_update_id=p_telegram_update_id AND status IN ('pending','failed') RETURNING * INTO v_ack;
+  IF NOT FOUND THEN SELECT * INTO v_ack FROM public.portfolio_command_acknowledgements WHERE command_id=p_command_id AND telegram_update_id=p_telegram_update_id; END IF;
+  IF NOT FOUND THEN RAISE EXCEPTION 'acknowledgement unavailable' USING ERRCODE='40001'; END IF;
+  RETURN jsonb_build_object('status',v_ack.status,'result',v_ack.result);
+END;
+$$;
+REVOKE ALL ON TABLE public.portfolio_command_acknowledgements FROM PUBLIC, anon, authenticated;
+REVOKE ALL ON FUNCTION public.apply_portfolio_command_with_acknowledgement(TEXT, UUID, BIGINT, BIGINT, BIGINT) FROM PUBLIC, anon, authenticated;
+REVOKE ALL ON FUNCTION public.finish_portfolio_command_acknowledgement(UUID, BIGINT, TEXT, TEXT) FROM PUBLIC, anon, authenticated;
+GRANT EXECUTE ON FUNCTION public.apply_portfolio_command_with_acknowledgement(TEXT, UUID, BIGINT, BIGINT, BIGINT) TO service_role;
+GRANT EXECUTE ON FUNCTION public.finish_portfolio_command_acknowledgement(UUID, BIGINT, TEXT, TEXT) TO service_role;
+
 CREATE OR REPLACE FUNCTION public.cancel_portfolio_command(
   p_command_id UUID,
   p_chat_id BIGINT,
@@ -388,9 +426,10 @@ REVOKE ALL ON FUNCTION public.apply_portfolio_command(UUID, BIGINT, BIGINT) FROM
 REVOKE ALL ON FUNCTION public.cancel_portfolio_command(UUID, BIGINT, BIGINT) FROM PUBLIC, anon, authenticated;
 GRANT EXECUTE ON FUNCTION public.apply_portfolio_command(UUID, BIGINT, BIGINT) TO service_role;
 
+
 -- Durable report delivery outbox. This mirrors 20260910_delivery_outbox.sql.
 CREATE TABLE IF NOT EXISTS public.market_report_publications (
-  report_id UUID PRIMARY KEY REFERENCES public.market_reports(id) ON DELETE RESTRICT,
+  report_id UUID PRIMARY KEY,
   idempotency_key TEXT NOT NULL UNIQUE CHECK (idempotency_key ~ '^[0-9a-f]{64}$'),
   status TEXT NOT NULL CHECK (status IN ('pending','delivered','failed','uncertain','suppressed')),
   telegram_message_ids JSONB NOT NULL DEFAULT '[]'::jsonb CHECK (jsonb_typeof(telegram_message_ids) = 'array' AND (status = 'delivered' OR jsonb_array_length(telegram_message_ids) = 0)),
@@ -477,9 +516,21 @@ REVOKE ALL ON TABLE public.market_report_publications FROM PUBLIC, anon, authent
 REVOKE ALL ON FUNCTION public.create_market_report_publication(UUID, UUID, TEXT, DATE, TEXT, TEXT, TEXT) FROM PUBLIC, anon, authenticated;
 REVOKE ALL ON FUNCTION public.claim_market_report_publication(TEXT) FROM PUBLIC, anon, authenticated;
 REVOKE ALL ON FUNCTION public.finish_market_report_publication(TEXT, UUID, TEXT, JSONB, TEXT) FROM PUBLIC, anon, authenticated;
+CREATE OR REPLACE FUNCTION public.suppress_market_report_publication(p_idempotency_key TEXT)
+RETURNS JSONB LANGUAGE plpgsql SECURITY DEFINER SET search_path=pg_catalog AS $$
+DECLARE v_result public.market_report_publications%ROWTYPE;
+BEGIN
+  UPDATE public.market_report_publications SET status='suppressed',lease_token=NULL,lease_expires_at=NULL,telegram_message_ids='[]'::jsonb,telegram_accepted_at=NULL,updated_at=now() WHERE idempotency_key=p_idempotency_key AND status IN ('pending','failed') RETURNING * INTO v_result;
+  IF NOT FOUND THEN SELECT * INTO v_result FROM public.market_report_publications WHERE idempotency_key=p_idempotency_key; END IF;
+  IF NOT FOUND OR v_result.status<>'suppressed' THEN RAISE EXCEPTION 'report publication cannot be suppressed' USING ERRCODE='40001'; END IF;
+  RETURN jsonb_build_object('report_id',v_result.report_id,'idempotency_key',v_result.idempotency_key,'status',v_result.status);
+END;
+$$;
+REVOKE ALL ON FUNCTION public.suppress_market_report_publication(TEXT) FROM PUBLIC, anon, authenticated;
 GRANT EXECUTE ON FUNCTION public.create_market_report_publication(UUID, UUID, TEXT, DATE, TEXT, TEXT, TEXT) TO service_role;
 GRANT EXECUTE ON FUNCTION public.claim_market_report_publication(TEXT) TO service_role;
 GRANT EXECUTE ON FUNCTION public.finish_market_report_publication(TEXT, UUID, TEXT, JSONB, TEXT) TO service_role;
+GRANT EXECUTE ON FUNCTION public.suppress_market_report_publication(TEXT) TO service_role;
 
 GRANT EXECUTE ON FUNCTION public.cancel_portfolio_command(UUID, BIGINT, BIGINT) TO service_role;
 -- Deterministic market-decision safety gateway, audit ledger, and transactional outbox.
@@ -4171,3 +4222,18 @@ REVOKE ALL ON FUNCTION public.apply_portfolio_command_without_chronology(UUID, B
 REVOKE ALL ON FUNCTION public.apply_portfolio_command(UUID, BIGINT, BIGINT)
   FROM PUBLIC, anon, authenticated;
 GRANT EXECUTE ON FUNCTION public.apply_portfolio_command(UUID, BIGINT, BIGINT) TO service_role;
+
+-- `market_reports` is declared by the intelligence ledger before this final schema section.
+DO $$
+BEGIN
+  IF NOT EXISTS (
+    SELECT 1 FROM pg_catalog.pg_constraint
+    WHERE conrelid='public.market_report_publications'::regclass
+      AND conname='market_report_publications_report_id_fkey'
+  ) THEN
+    ALTER TABLE public.market_report_publications
+      ADD CONSTRAINT market_report_publications_report_id_fkey
+      FOREIGN KEY (report_id) REFERENCES public.market_reports(id) ON DELETE RESTRICT;
+  END IF;
+END;
+$$;

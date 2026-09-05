@@ -407,18 +407,29 @@ async function handleCallback(updateId: number, callback: TelegramCallback) {
     await telegram("answerCallbackQuery", { callback_query_id: callback.id, text: "Invalid or expired action." });
     return;
   }
-  const functionName = parsed.action === "confirm" ? "apply_portfolio_command" : "cancel_portfolio_command";
-  const { data, error } = await supabase.rpc(functionName, {
+  const { data, error } = await supabase.rpc("apply_portfolio_command_with_acknowledgement", {
+    p_action: parsed.action,
     p_command_id: parsed.commandId,
     p_chat_id: OWNER_CHAT_ID_NUMBER,
     p_user_id: OWNER_USER_ID_NUMBER,
+    p_telegram_update_id: updateId,
   });
   if (error || !data) {
     await telegram("answerCallbackQuery", { callback_query_id: callback.id, text: "Temporary database error. Nothing was changed." });
     return;
   }
-  const result = data as Record<string, unknown>;
-  await acknowledgeCommittedCommand({ telegram, sendText, callback, result, resultText: callbackResultText(result) });
+  const receipt = data as Record<string, unknown>;
+  const result = receipt.result as Record<string, unknown>;
+  const acknowledgement = String(receipt.acknowledgement_status);
+  if (acknowledgement === "delivered" || acknowledgement === "uncertain") return;
+  const delivered = await acknowledgeCommittedCommand({ telegram, sendText, callback, result, resultText: callbackResultText(result) });
+  const { error: finishError } = await supabase.rpc("finish_portfolio_command_acknowledgement", {
+    p_command_id: parsed.commandId,
+    p_telegram_update_id: updateId,
+    p_status: delivered.acknowledgement,
+    p_error: delivered.acknowledgement === "uncertain" ? "TELEGRAM_ACKNOWLEDGEMENT_UNKNOWN" : null,
+  });
+  if (finishError) throw new Error("Could not persist command acknowledgement receipt");
 }
 
 Deno.serve(async (request: Request): Promise<Response> => {
@@ -449,7 +460,13 @@ Deno.serve(async (request: Request): Promise<Response> => {
   }
 
   try {
-    if (!(await claimUpdate(updateId as number, kind))) return jsonResponse(200, { ok: true, duplicate: true });
+    const firstReceipt = await claimUpdate(updateId as number, kind);
+    if (!firstReceipt) {
+      // A callback may have committed its command before the process crashed while
+      // acknowledging Telegram. Re-enter only the idempotent acknowledgement path.
+      if (update.callback_query) await handleCallback(updateId as number, update.callback_query);
+      return jsonResponse(200, { ok: true, duplicate: true });
+    }
     if (update.message) await handleMessage(updateId as number, update.message);
     else if (update.callback_query) await handleCallback(updateId as number, update.callback_query);
     return jsonResponse(200, { ok: true });

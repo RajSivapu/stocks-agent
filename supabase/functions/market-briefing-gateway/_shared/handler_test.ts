@@ -655,6 +655,13 @@ class FakeRepository implements GatewayRepository {
     };
     return Promise.resolve(structuredClone(this.reportPublication));
   }
+  suppressReportPublication(idempotencyKey: string): Promise<PublicationReceipt> {
+    this.reportPublication = {
+      ...this.reportPublication!, idempotency_key: idempotencyKey,
+      status: "suppressed", telegram_message_ids: [], telegram_accepted_at: null, lease_token: null,
+    };
+    return Promise.resolve(structuredClone(this.reportPublication));
+  }
   mutationCalls = 0;
   startCalls = 0;
   recordCalls = 0;
@@ -2269,7 +2276,7 @@ Deno.test("record_artifacts derives paper-watch date, quote, and latest gateway 
   assertEquals(fetched, ["CENX"]);
 });
 
-Deno.test("evaluation refetches every quote, persists before sending, and ignores claimed prices", async () => {
+Deno.test("intraday evaluation refetches every quote, persists a suppression receipt, and leaves delivery to the report or alert key", async () => {
   const { handler, repository, sent, fetched } = makeHandler();
   const bundle = {
     phase: "intraday",
@@ -2280,7 +2287,7 @@ Deno.test("evaluation refetches every quote, persists before sending, and ignore
   const response = await handler(request("evaluate_and_publish", bundle));
   assertEquals(response.status, 200);
   assertEquals(fetched.sort(), ["CENX", "VTI"]);
-  assertEquals(repository.events, ["persist", "claim-publication", "send"]);
+  assertEquals(repository.events, ["persist"]);
   assertEquals(
     repository.lastBundle!.evaluations[0].normalized.verified_price,
     "47.02",
@@ -2290,11 +2297,9 @@ Deno.test("evaluation refetches every quote, persists before sending, and ignore
     "40500",
   );
   assertEquals(repository.lastBundle!.publication.template_version, 2);
-  assertEquals(sent.length, 1);
-  assertEquals(repository.finishPublicationCalls, [{
-    status: "delivered",
-    ids: [77],
-  }]);
+  assertEquals(repository.lastBundle!.publication.status, "suppressed");
+  assertEquals(sent.length, 0);
+  assertEquals(repository.finishPublicationCalls, []);
 });
 
 Deno.test("periodic evaluation persists a suppression receipt and leaves report delivery to its deterministic report key", async () => {
@@ -2310,7 +2315,7 @@ Deno.test("periodic evaluation persists a suppression receipt and leaves report 
   assertEquals(sent, []);
 });
 
-Deno.test("persistence failure prevents Telegram and delivery outcomes are classified", async () => {
+Deno.test("persistence failure prevents Telegram and scheduled evaluation never bypasses report delivery authority", async () => {
   class FailingRepository extends FakeRepository {
     override applyDecisionBundle(): Promise<PublicationReceipt> {
       throw new GatewayRepositoryError("PERSISTENCE_FAILED");
@@ -2329,34 +2334,9 @@ Deno.test("persistence failure prevents Telegram and delivery outcomes are class
   );
   assertEquals(failed.sent, []);
 
-  const definitiveRepo = new FakeRepository();
-  const definitive = makeHandler(definitiveRepo, {
-    sendTelegram: () =>
-      Promise.reject(new TelegramDeliveryError("definitive", [])),
-  });
-  assertEquals(
-    (await definitive.handler(request("evaluate_and_publish", bundle))).status,
-    502,
-  );
-  assertEquals(definitiveRepo.finishPublicationCalls, [{
-    status: "delivery_failed",
-    ids: [],
-  }]);
-
-  const ambiguousRepo = new FakeRepository();
-  const ambiguous = makeHandler(ambiguousRepo, {
-    sendTelegram: () =>
-      Promise.reject(new TelegramDeliveryError("ambiguous", [88])),
-  });
-  const response = await ambiguous.handler(
-    request("evaluate_and_publish", bundle),
-  );
-  assertEquals(response.status, 502);
-  assertEquals((await json(response)).code, "DELIVERY_UNKNOWN");
-  assertEquals(ambiguousRepo.finishPublicationCalls, [{
-    status: "delivery_unknown",
-    ids: [88],
-  }]);
+  const scheduled = makeHandler();
+  assertEquals((await scheduled.handler(request("evaluate_and_publish", bundle))).status, 200);
+  assertEquals(scheduled.sent, []);
 });
 
 Deno.test("suppressed intraday and on-demand outputs never call Telegram", async () => {
@@ -2395,7 +2375,7 @@ Deno.test("suppressed intraday and on-demand outputs never call Telegram", async
   );
 });
 
-Deno.test("delivered and ambiguous duplicate requests never resend", async () => {
+Deno.test("duplicate scheduled evaluation requests never send outside the report or alert delivery keys", async () => {
   const bundle = {
     phase: "intraday",
     market_date: "2026-09-02",
@@ -2410,7 +2390,7 @@ Deno.test("delivered and ambiguous duplicate requests never resend", async () =>
   await delivered.handler(
     request("evaluate_and_publish", bundle, { requestId: deliveredId }),
   );
-  assertEquals(delivered.sent.length, 1);
+  assertEquals(delivered.sent.length, 0);
 
   const ambiguousRepo = new FakeRepository();
   let attempts = 0;
@@ -2427,10 +2407,10 @@ Deno.test("delivered and ambiguous duplicate requests never resend", async () =>
   await ambiguous.handler(
     request("evaluate_and_publish", bundle, { requestId: ambiguousId }),
   );
-  assertEquals(attempts, 1);
+  assertEquals(attempts, 0);
 });
 
-Deno.test("a second request for an evaluated run reuses the publication without sending", async () => {
+Deno.test("a second scheduled evaluation reuses its suppression receipt without sending", async () => {
   class OnePublicationRepository extends FakeRepository {
     override applyDecisionBundle(
       input: PersistedBundle,
@@ -2458,7 +2438,7 @@ Deno.test("a second request for an evaluated run reuses the publication without 
   };
   await setup.handler(request("evaluate_and_publish", bundle));
   await setup.handler(request("evaluate_and_publish", bundle));
-  assertEquals(setup.sent.length, 1);
+  assertEquals(setup.sent.length, 0);
   assertEquals(setup.repository.applyCalls, 2);
 });
 

@@ -238,6 +238,7 @@ export interface GatewayRepository {
     messageIds: number[],
     error: string | null,
   ): Promise<PublicationReceipt>;
+  suppressReportPublication?(idempotencyKey: string): Promise<PublicationReceipt>;
   startIntelligenceRun?(
     runId: string,
     payload: StartIntelligencePayload,
@@ -670,6 +671,19 @@ export function createSupabaseGatewayRepository(
           : [],
         telegram_accepted_at: nullableText(row.telegram_accepted_at, 40),
         lease_token: null,
+      };
+    },
+
+    async suppressReportPublication(idempotencyKey) {
+      const result = await client.rpc("suppress_market_report_publication", {
+        p_idempotency_key: idempotencyKey,
+      });
+      if (result.error) throw new GatewayRepositoryError("PERSISTENCE_FAILED");
+      const row = oneObject(result);
+      return {
+        id: text(row.report_id, 36), idempotency_key: text(row.idempotency_key, 64),
+        status: text(row.status, 20) as PublicationReceipt["status"],
+        telegram_message_ids: [], telegram_accepted_at: null, lease_token: null,
       };
     },
 
