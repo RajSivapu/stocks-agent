@@ -285,9 +285,10 @@ def revoke_ephemeral_owner_session(
     access_token: str,
     publishable_key: str,
     *,
+    scope: str = "global",
     requester: Callable[[str, str, Mapping[str, str], bytes | None], tuple[int, bytes]] = _auth_request,
 ) -> dict[str, str]:
-    """Globally revoke the temporary canary session without returning its token."""
+    """Revoke the requested temporary canary session scope without returning its token."""
     parsed = urlparse(project_url)
     if (
         parsed.scheme != "https"
@@ -300,11 +301,12 @@ def revoke_ephemeral_owner_session(
         or len(access_token) > 8_192
         or any(character.isspace() for character in access_token)
         or not re.fullmatch(r"sb_publishable_[A-Za-z0-9_-]{24,128}", publishable_key)
+        or scope not in {"global", "local"}
     ):
         raise ValueError("ephemeral session revocation configuration is invalid")
     status, _body = requester(
         "POST",
-        f"{project_url}/auth/v1/logout?scope=global",
+        f"{project_url}/auth/v1/logout?scope={scope}",
         {
             "apikey": publishable_key,
             "authorization": f"Bearer {access_token}",
@@ -313,7 +315,7 @@ def revoke_ephemeral_owner_session(
     )
     if status < 200 or status >= 300:
         raise RuntimeError("ephemeral owner session revocation failed")
-    return {"status": "revoked", "scope": "global"}
+    return {"status": "revoked", "scope": scope}
 
 
 def validate_source_database_url(database_url: str, api_url: str) -> str:

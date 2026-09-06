@@ -415,3 +415,22 @@ def test_ephemeral_owner_session_revocation_uses_global_logout_without_leaking_t
     assert observed["url"].endswith("/auth/v1/logout?scope=global")
     assert observed["body"] is None
     assert "owner-access-token" not in str(receipt)
+
+
+def test_ephemeral_owner_session_revocation_can_target_only_current_session():
+    observed = {}
+
+    def requester(method, url, headers, body):
+        observed.update(method=method, url=url, headers=headers, body=body)
+        return 204, b""
+
+    receipt = verify.revoke_ephemeral_owner_session(
+        "https://hlxpxbxhqctwsqizwjjy.supabase.co",
+        "owner-access-token-" + "x" * 40,
+        "sb_publishable_" + "p" * 32,
+        scope="local",
+        requester=requester,
+    )
+
+    assert receipt == {"status": "revoked", "scope": "local"}
+    assert observed["url"].endswith("/auth/v1/logout?scope=local")

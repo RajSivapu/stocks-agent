@@ -1,0 +1,51 @@
+{
+  "format": "stocks-native-sites-attestation-v1",
+  "captured_at": "2026-09-06T19:10:00Z",
+  "trust_domain": "codex-native-sites-connector",
+  "site": {
+    "project_id": "appgprj_6a9a35fb60648191b30e2bb973a2347f",
+    "status": "active",
+    "live_url": "https://personal-stock-agent.rupesh-sivapu.chatgpt.site",
+    "latest_version_number": 5,
+    "current_user_role": "owner",
+    "access_mode": "custom",
+    "allowed_owner_count": 1,
+    "external_visitor_count": 0,
+    "allowed_group_count": 0
+  },
+  "active_version": {
+    "id": "appgprj_6a9a35fb60648191b30e2bb973a2347f~appgver_d747b726ea30819188d38f5f46c692d5",
+    "version_number": 5,
+    "source_commit_sha": "ba3ebc180db015750df8726856769a889056754a",
+    "archive_format": "tar",
+    "archive_content_hash": "sha256:7d5b0a3fa6c51961f77cd6a6f1e34768bb04f4823d0c142fe7d3221f9af65b64",
+    "file_count": 15,
+    "size_bytes": 512000
+  },
+  "active_deployment": {
+    "id": "appgdep_6a9cd0def8f0819187aa7d30d99a7ada",
+    "version_id": "appgprj_6a9a35fb60648191b30e2bb973a2347f~appgver_d747b726ea30819188d38f5f46c692d5",
+    "type": "publish",
+    "status": "succeeded",
+    "url": "https://personal-stock-agent.rupesh-sivapu.chatgpt.site"
+  },
+  "live_bundle": {
+    "html_sha256": "803799b1314f7f54b71a7c3db38d58c32891b3aa187a1d135b690b597e45947f",
+    "script_assets": [
+      {
+        "url": "https://personal-stock-agent.rupesh-sivapu.chatgpt.site/theme-bootstrap.js",
+        "sha256": "6fa252c83c9f670c11d7cce88dc803ec14f0dd40c12fd4a3e32c96232e0df921",
+        "bytes": 293
+      },
+      {
+        "url": "https://personal-stock-agent.rupesh-sivapu.chatgpt.site/assets/index-DLOp7JiG.js",
+        "sha256": "fa31d83e93c456f2e7c9b7c9eae81dbf4d9ecfbe4a7847253aa11d8b1455b7a0",
+        "bytes": 457335
+      }
+    ],
+    "supabase_project_ref": "hlxpxbxhqctwsqizwjjy",
+    "dashboard_api_url": "https://hlxpxbxhqctwsqizwjjy.supabase.co/functions/v1/owner-dashboard-api",
+    "project_ref_present": true,
+    "api_url_present": true
+  }
+}
