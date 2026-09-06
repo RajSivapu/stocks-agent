@@ -364,7 +364,7 @@ def test_ephemeral_owner_session_uses_admin_link_without_sending_email_or_return
     def requester(method, url, headers, body):
         calls.append((method, url, headers, body))
         if url.endswith("/auth/v1/admin/generate_link"):
-            return 200, json.dumps({"properties": {"hashed_token": "hash-token-value"}}).encode()
+            return 200, json.dumps({"hashed_token": "hash-token-value"}).encode()
         return 200, json.dumps({"access_token": access_token}).encode()
 
     token = verify.obtain_ephemeral_owner_access_token(
