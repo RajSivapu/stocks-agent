@@ -368,7 +368,7 @@ def _roots_query(relations: tuple[str, ...]) -> str:
     for relation in relations:
         parts.append(
             "SELECT '%s'::text AS relation, count(*)::bigint AS count, "
-            "encode(extensions.digest(convert_to(string_agg(encode(row_hash, 'hex'), '' ORDER BY row_hash), 'UTF8'), 'sha256'), 'hex') AS root_sha256 "
+            "encode(extensions.digest(convert_to(COALESCE(string_agg(encode(row_hash, 'hex'), '' ORDER BY row_hash), ''), 'UTF8'), 'sha256'), 'hex') AS root_sha256 "
             "FROM (WITH limited_hashes AS MATERIALIZED (SELECT extensions.digest(convert_to(to_jsonb(row)::text, 'UTF8'), 'sha256') AS row_hash "
             "FROM public.%s AS row CROSS JOIN root_guard LIMIT %d), cap_guard AS MATERIALIZED "
             "(SELECT 1 / CASE WHEN count(*) <= %d THEN 1 ELSE 0 END AS permitted FROM limited_hashes) "

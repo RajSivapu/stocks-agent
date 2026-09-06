@@ -1,7 +1,11 @@
 import copy
 import hashlib
 import json
+import os
 from pathlib import Path
+import shutil
+import subprocess
+import tempfile
 
 import pytest
 
@@ -96,6 +100,52 @@ def _roots(catalog=None):
         {"relation": relation, "count": 0, "root_sha256": hashlib.sha256(b"").hexdigest()}
         for relation in sorted(item["name"] for item in (catalog or _catalog())["relations"] if item["kind"] in {"r", "p"})
     ]
+
+
+def test_generated_roots_accept_an_empty_public_table():
+    from scripts.inspect_production_schema_baseline import _roots_query, _validate_roots
+
+    binaries = {name: shutil.which(name) for name in ("initdb", "pg_ctl", "psql")}
+    if not all(binaries.values()) or os.geteuid() == 0:
+        pytest.skip("disposable PostgreSQL requires local server binaries and a non-root user")
+
+    def run(name, *args, sql=None):
+        return subprocess.run(
+            [binaries[name], *args], input=sql, text=True, capture_output=True,
+            check=True, timeout=60,
+        ).stdout
+
+    # Keep the private Unix socket path below PostgreSQL's platform length limit.
+    with tempfile.TemporaryDirectory(prefix="inventory-empty-", dir="/tmp") as directory:
+        data = str(Path(directory) / "data")
+        run("initdb", "-D", data, "-U", "postgres", "--auth=trust", "--no-locale", "--encoding=UTF8")
+        run("pg_ctl", "-D", data, "-l", str(Path(directory) / "server.log"),
+            "-o", f"-F -k {directory} -c listen_addresses=''", "-w", "start")
+        try:
+            connection = ("-X", "-h", directory, "-p", "5432", "-d", "postgres", "-v", "ON_ERROR_STOP=1", "-qAt")
+            run("psql", *connection, "-U", "postgres", sql="""
+                CREATE SCHEMA extensions;
+                CREATE EXTENSION pgcrypto WITH SCHEMA extensions;
+                CREATE TABLE public.empty_root_probe (value text);
+                CREATE ROLE supabase_read_only_user LOGIN BYPASSRLS;
+                ALTER ROLE supabase_read_only_user SET statement_timeout = '30s';
+                GRANT USAGE ON SCHEMA extensions TO supabase_read_only_user;
+                GRANT SELECT ON public.empty_root_probe TO supabase_read_only_user;
+            """)
+            result = json.loads(run("psql", *connection, "-U", "supabase_read_only_user", sql=(
+                "BEGIN READ ONLY; SELECT row_to_json(result) FROM ("
+                + _roots_query(("empty_root_probe",)) + ") AS result; ROLLBACK;"
+            )))
+        finally:
+            run("pg_ctl", "-D", data, "-m", "immediate", "-w", "stop")
+
+    assert result["root_identity"]["transaction_read_only"] == "on"
+    assert result["root_identity"]["statement_timeout_ms"] == 30000
+    assert result["protected_roots"] == [{
+        "relation": "empty_root_probe", "count": 0,
+        "root_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    }]
+    assert _validate_roots(result["protected_roots"], ("empty_root_probe",)) == result["protected_roots"]
 
 
 class FakeReadOnlyApi:
