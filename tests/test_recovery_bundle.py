@@ -299,17 +299,25 @@ INTELLIGENCE_DEPENDENT_DATASETS = (
     "collection_completions",
 )
 
+EMPTY_INTELLIGENCE_PACKET_REPORT_HISTORY = (
+    "intelligence_runs",
+    *INTELLIGENCE_DEPENDENT_DATASETS,
+    "packets",
+    "reports",
+    "report_origins",
+    "publications",
+    "policy_comparisons",
+)
 
-def test_recovery_accepts_empty_intelligence_history_when_all_dependents_are_empty():
+
+def test_recovery_accepts_empty_intelligence_packet_report_history_when_all_dependents_are_empty():
     records = recovery_records()
-    records["intelligence_runs"] = []
-    for dataset in INTELLIGENCE_DEPENDENT_DATASETS:
+    for dataset in EMPTY_INTELLIGENCE_PACKET_REPORT_HISTORY:
         records[dataset] = []
 
     validated = _validated_records(records)
 
-    assert validated["intelligence_runs"] == []
-    assert all(validated[dataset] == [] for dataset in INTELLIGENCE_DEPENDENT_DATASETS)
+    assert all(validated[dataset] == [] for dataset in EMPTY_INTELLIGENCE_PACKET_REPORT_HISTORY)
 
 
 @pytest.mark.parametrize("orphan_dataset", INTELLIGENCE_DEPENDENT_DATASETS)
@@ -329,6 +337,41 @@ def test_recovery_rejects_each_intelligence_dependent_without_its_run(orphan_dat
     records[orphan_dataset] = orphan_rows
 
     with pytest.raises(ValueError, match="dependency mismatch"):
+        _validated_records(records)
+
+
+def test_recovery_rejects_report_without_its_packet():
+    records = recovery_records()
+    records["packets"] = []
+    records["policy_comparisons"] = []
+    records["report_origins"] = []
+    records["publications"] = []
+
+    with pytest.raises(ValueError, match="report content or packet/run relationship mismatch"):
+        _validated_records(records)
+
+
+def test_recovery_rejects_publication_without_its_report():
+    records = recovery_records()
+    records["reports"] = []
+    records["report_origins"] = []
+
+    with pytest.raises(ValueError, match="publication report relationship mismatch"):
+        _validated_records(records)
+
+
+@pytest.mark.parametrize("missing_dependency", ("packet", "evaluation"))
+def test_recovery_rejects_policy_comparison_without_its_dependencies(missing_dependency):
+    records = recovery_records()
+    if missing_dependency == "packet":
+        records["packets"] = []
+        records["reports"] = []
+        records["report_origins"] = []
+        records["publications"] = []
+    else:
+        records["decision_evaluations"] = []
+
+    with pytest.raises(ValueError, match="policy comparison recovery dependency mismatch"):
         _validated_records(records)
 
 
