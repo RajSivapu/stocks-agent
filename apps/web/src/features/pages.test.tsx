@@ -187,3 +187,17 @@ it("keeps the complete safe alert audit record inside a per-alert disclosure", a
   expect(screen.getByText(/MSFT/i)).toBeVisible();
   expect(screen.getByRole("link", { name: /official evidence/i })).toHaveAttribute("href", "https://www.sec.gov/example");
 });
+
+it("keeps run timing and policy metadata inside a per-run disclosure", async () => {
+  const user = userEvent.setup();
+  const runs: RunsView = { runs: [{ id: "7d834dbd-75bb-4313-931f-09732f003932", kind: "intraday", status: "completed", started_at: "2026-09-03T17:00:00.000Z", finished_at: "2026-09-03T17:02:00.000Z", data_as_of: "2026-09-03T17:01:00.000Z", policy_version: 17, evaluation_count: 2, suggestion_count: 1, publication_status: "suppressed" }] };
+  const system: SystemView = { product_version: "v1", api_version: "v1", policy_version: 17, alert_mode: "shadow", latest_by_kind: {}, latest_publication_status: "suppressed", boundaries, source_coverage: [], latest_report: null, latest_intelligence_run_id: null };
+  render(<MemoryRouter><SystemPage data={system} runs={runs} alerts={{ alerts: [] }} /></MemoryRouter>);
+
+  await user.click(screen.getByText(/run and alert receipts/i));
+  await user.click(screen.getByText(/full run receipt/i));
+  expect(screen.getByText(/policy 17/i)).toBeVisible();
+  expect(screen.getByText(/9\/3\/2026, 12:00:00 PM/i)).toBeVisible();
+  expect(screen.getByText(/9\/3\/2026, 12:02:00 PM/i)).toBeVisible();
+  expect(screen.getByText(/9\/3\/2026, 12:01:00 PM/i)).toBeVisible();
+});

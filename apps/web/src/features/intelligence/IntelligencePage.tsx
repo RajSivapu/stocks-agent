@@ -4,7 +4,11 @@ import { SafeSourceLink } from "../../components/SafeSourceLink";
 
 const statusLabel = (value: string) => value.replaceAll("_", " ");
 
-export function IntelligencePage({ data }: { data: IntelligenceView }) {
+function EventCard({ event }: { event: IntelligenceView["events"][number] }) {
+  return <article className="card"><p className="card-kicker">{event.type} · {event.materiality}</p><h3>{event.title}</h3><p>{event.summary}</p><p className="muted">Confidence {event.confidence} · {event.occurred_at ? new Date(event.occurred_at).toLocaleString() : "event time unavailable"}</p>{event.sources.length > 0 && <ul className="source-list">{event.sources.map((source, index) => <li key={`${source.label}-${index}`}><SafeSourceLink source={source} /></li>)}</ul>}</article>;
+}
+
+export function IntelligencePage({ data, portfolioTickers = [] }: { data: IntelligenceView; portfolioTickers?: string[] }) {
   const accepted = data.sources.reduce((total, source) => total + source.accepted_count, 0);
   const dropped = data.sources.reduce((total, source) => total + source.dropped_count, 0);
   const unavailable = data.sources.filter((source) => source.status === "unavailable").length;
@@ -18,6 +22,10 @@ export function IntelligencePage({ data }: { data: IntelligenceView }) {
     const safeRight = Number.isNaN(rightTime) ? Number.NEGATIVE_INFINITY : rightTime;
     return safeRight - safeLeft;
   });
+  const portfolio = new Set(portfolioTickers.map((ticker) => ticker.trim().toUpperCase()).filter(Boolean));
+  const linkedEventIds = new Set(data.candidates.filter((candidate) => candidate.qualified && candidate.event_id && candidate.ticker && portfolio.has(candidate.ticker.trim().toUpperCase())).map((candidate) => candidate.event_id!));
+  const portfolioEvents = events.filter((event) => linkedEventIds.has(event.id));
+  const otherEvents = events.filter((event) => !linkedEventIds.has(event.id));
 
   if (empty) return <div className="page-stack"><header className="page-heading"><p className="eyebrow">Advanced research</p><h1>Intelligence</h1><p>Events and relationships discovered from queried approved sources.</p></header><section className="state-card"><h2>No intelligence receipt</h2><p>Source coverage is unavailable for this view. No broader market-coverage claim is made.</p></section></div>;
 
@@ -26,10 +34,12 @@ export function IntelligencePage({ data }: { data: IntelligenceView }) {
       <header className="page-heading"><p className="eyebrow">Advanced research</p><h1>Intelligence</h1><p>Events and relationships discovered from queried approved sources.</p></header>
 
       <section className="section-block">
-        <div className="section-heading"><div><p className="eyebrow">Newest first</p><h2>Current research events</h2></div><span className="count-chip">{events.length}</span></div>
-        {events.length === 0 ? <p className="empty-copy">No material event was persisted in the latest bounded run.</p> : <div className="card-grid">{events.slice(0, 6).map((event) => <article className="card" key={event.id}><p className="card-kicker">{event.type} · {event.materiality}</p><h3>{event.title}</h3><p>{event.summary}</p><p className="muted">Confidence {event.confidence} · {event.occurred_at ? new Date(event.occurred_at).toLocaleString() : "event time unavailable"}</p>{event.sources.length > 0 && <ul className="source-list">{event.sources.map((source, index) => <li key={`${source.label}-${index}`}><SafeSourceLink source={source} /></li>)}</ul>}</article>)}</div>}
-        {events.length > 6 && <p className="muted">Showing the six newest material events from this receipt.</p>}
+        <div className="section-heading"><div><p className="eyebrow">Newest first</p><h2>Portfolio-linked events</h2></div><span className="count-chip">{portfolioEvents.length}</span></div>
+        {portfolioEvents.length === 0 ? <p className="empty-copy">No event in this receipt has a qualified link to a current holding or active plan.</p> : <div className="card-grid">{portfolioEvents.slice(0, 6).map((event) => <EventCard event={event} key={event.id} />)}</div>}
+        {portfolioEvents.length > 6 && <p className="muted">Showing the six newest portfolio-linked events from this receipt.</p>}
       </section>
+
+      <details className="section-block disclosure-block other-events-details"><summary><h2>Other current research events</h2></summary><div className="disclosure-content">{otherEvents.length === 0 ? <p className="empty-copy">No other material event was persisted in this bounded run.</p> : <div className="card-grid">{otherEvents.map((event) => <EventCard event={event} key={event.id} />)}</div>}</div></details>
 
       <section className="section-block">
         <div className="section-heading"><div><p className="eyebrow">Exposure-gated</p><h2>Related companies</h2></div><span className="count-chip">{qualified.length}</span></div>
