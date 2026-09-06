@@ -226,6 +226,88 @@ def test_migration_ledger_bootstraps_only_matching_native_statement_receipts(tmp
         deploy.apply_release_migrations(Cursor([("20260928", ["SELECT changed;"]) ]), manifest, tmp_path)
 
 
+@pytest.fixture
+def reconciliation_ledger(tmp_path, monkeypatch):
+    import hashlib
+
+    baseline_path = "sql/reconciliation/20261004_production_schema_reconciliation.sql"
+    baseline = tmp_path / baseline_path
+    baseline.parent.mkdir(parents=True)
+    baseline.write_text("-- immutable baseline\nSELECT 1;\n")
+    migrations = tmp_path / "sql/migrations"
+    migrations.mkdir()
+    for version in ("20260926", "20261005", "20261006"):
+        (migrations / f"{version}_change.sql").write_text(f"SELECT {version};\n")
+    monkeypatch.setattr(deploy, "ROOT", tmp_path)
+    manifest = deploy.candidate_migration_manifest(migrations)
+    baseline_row = (baseline_path, "20261004", hashlib.sha256(b'["SELECT 1"]').hexdigest())
+
+    class Cursor:
+        def __init__(self, private=None, native=None):
+            self.private = [baseline_row] if private is None else private
+            self.native = [("20261004", ["SELECT 1"])] if native is None else native
+            self.statements = []
+            self.reads = 0
+
+        def execute(self, statement, params=None):
+            self.statements.append((statement, params))
+
+        def fetchall(self):
+            self.reads += 1
+            return self.private if self.reads == 1 else self.native
+
+    return migrations, manifest, baseline_row, Cursor
+
+
+@pytest.mark.parametrize("suffix_length", (0, 1, 2))
+def test_reconciliation_baseline_skips_history_without_fabricating_receipts(reconciliation_ledger, suffix_length):
+    migrations, manifest, baseline, Cursor = reconciliation_ledger
+    suffix = [tuple(item[key] for key in ("path", "version", "sha256")) for item in manifest[1:1 + suffix_length]]
+    cursor = Cursor(private=[baseline, *suffix])
+
+    receipt = deploy.apply_release_migrations(cursor, manifest, migrations)
+
+    assert receipt["candidate"] == manifest
+    assert [item["version"] for item in receipt["skipped"]] == ["20260926", "20261005", "20261006"][:1 + suffix_length]
+    assert [item["version"] for item in receipt["applied"]] == ["20261005", "20261006"][suffix_length:]
+    inserts = [params for statement, params in cursor.statements if statement.startswith("INSERT")]
+    assert [params[1] for params in inserts] == ["20261005", "20261006"][suffix_length:]
+    assert not any(statement == "SELECT 20260926;\n" for statement, _params in cursor.statements)
+
+
+@pytest.mark.parametrize("corruption", (
+    "private_missing", "native_missing", "private_hash", "native_hash", "private_version",
+    "lookalike", "duplicate_version", "suffix_gap", "suffix_hash", "older_private", "native_extra",
+    "candidate_version_collision", "baseline_file_drift",
+))
+def test_reconciliation_baseline_rejects_unproven_coverage_before_migration_bodies(reconciliation_ledger, corruption):
+    migrations, manifest, baseline, Cursor = reconciliation_ledger
+    private, native = [baseline], [("20261004", ["SELECT 1"])]
+    as_tuple = lambda item: tuple(item[key] for key in ("path", "version", "sha256"))
+    if corruption == "private_missing": private = []
+    elif corruption == "native_missing": native = []
+    elif corruption == "private_hash": private = [(baseline[0], baseline[1], "0" * 64)]
+    elif corruption == "native_hash": native = [("20261004", ["SELECT 2"])]
+    elif corruption == "private_version": private = [(baseline[0], "20261003", baseline[2])]
+    elif corruption == "lookalike": private = [(baseline[0].replace("production_schema", "other_schema"), baseline[1], baseline[2])]
+    elif corruption == "duplicate_version": private.append(("sql/migrations/20261004_fake.sql", baseline[1], baseline[2]))
+    elif corruption == "suffix_gap": private.append(as_tuple(manifest[2]))
+    elif corruption == "suffix_hash": private.append((manifest[1]["path"], manifest[1]["version"], "0" * 64))
+    elif corruption == "older_private": private.append(as_tuple(manifest[0]))
+    elif corruption == "native_extra": native.append(("20260926", ["SELECT 20260926"]))
+    elif corruption == "candidate_version_collision":
+        (migrations / "20261004_collision.sql").write_text("SELECT 4;")
+        manifest = deploy.candidate_migration_manifest(migrations)
+    elif corruption == "baseline_file_drift":
+        (deploy.ROOT / baseline[0]).write_text("SELECT 2;")
+    cursor = Cursor(private=private, native=native)
+
+    with pytest.raises(RuntimeError, match="migration|reconciliation"):
+        deploy.apply_release_migrations(cursor, manifest, migrations)
+
+    assert not any(statement.startswith(("INSERT", "SELECT 2026")) for statement, _params in cursor.statements)
+
+
 def test_post_deploy_restoration_precedes_cleanup_even_when_cleanup_fails():
     calls = []
     artifact = {"repo_root": "/safe/rollback", "commit_sha": "a" * 40, "source_sha256": "b" * 64}

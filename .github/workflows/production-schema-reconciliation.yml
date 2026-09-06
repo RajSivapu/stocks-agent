@@ -1,0 +1,145 @@
+name: Production schema reconciliation
+
+on:
+  workflow_dispatch:
+    inputs:
+      prior_inventory_run_id:
+        description: Exact successful production schema inventory workflow run ID
+        required: true
+        type: string
+      ci_workflow_run_id:
+        description: Successful exact-main owner CI workflow run ID
+        required: true
+        type: string
+
+permissions:
+  actions: read
+  contents: read
+
+concurrency:
+  group: production-schema-reconciliation
+  cancel-in-progress: false
+
+jobs:
+  reconcile:
+    environment: owner-dashboard-production
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: main
+          fetch-depth: 0
+      - uses: actions/setup-python@42375524e23c412d93fb67b49958b491fce71c38
+        with:
+          python-version: "3.14"
+      - name: Bind current main and the supplied successful checks
+        env:
+          GH_TOKEN: ${{ github.token }}
+          CI_WORKFLOW_RUN_ID: ${{ inputs.ci_workflow_run_id }}
+          PRIOR_INVENTORY_RUN_ID: ${{ inputs.prior_inventory_run_id }}
+        run: |
+          set -euo pipefail
+          test "${GITHUB_REF:-}" = "refs/heads/main" || { echo 'workflow ref is not main'; exit 1; }
+          git fetch --no-tags origin main
+          MAIN_SHA="$(gh api "repos/$GITHUB_REPOSITORY/git/ref/heads/main" --jq .object.sha)"
+          test "${GITHUB_SHA:-}" = "$MAIN_SHA" || { echo 'workflow SHA is not current main'; exit 1; }
+          test "$(git rev-parse HEAD)" = "$MAIN_SHA" || { echo 'checkout is not current main'; exit 1; }
+          test -n "$CI_WORKFLOW_RUN_ID" && [[ "$CI_WORKFLOW_RUN_ID" =~ ^[0-9]+$ ]] || { echo 'numeric CI workflow run ID is required'; exit 1; }
+          test -n "$PRIOR_INVENTORY_RUN_ID" && [[ "$PRIOR_INVENTORY_RUN_ID" =~ ^[0-9]+$ ]] || { echo 'numeric prior inventory run ID is required'; exit 1; }
+          test "$PRIOR_INVENTORY_RUN_ID" = "34029103876" || { echo 'prior inventory run is not the approved baseline'; exit 1; }
+
+          CI="$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$CI_WORKFLOW_RUN_ID")"
+          test "$(jq -r .repository.full_name <<<$CI)" = "$GITHUB_REPOSITORY" || { echo 'required CI belongs to another repository'; exit 1; }
+          test "$(jq -r .head_sha <<<$CI)" = "$MAIN_SHA" || { echo 'required CI is not for current main'; exit 1; }
+          test "$(jq -r .status <<<$CI)" = completed && test "$(jq -r .conclusion <<<$CI)" = success || { echo 'required CI was not successful'; exit 1; }
+          test "$(jq -r .path <<<$CI)" = .github/workflows/owner-dashboard-ci.yml || { echo 'wrong required CI workflow'; exit 1; }
+          test "$(jq -r .name <<<$CI)" = "Owner dashboard verification" || { echo 'wrong required CI workflow name'; exit 1; }
+          test "$(jq -r .event <<<$CI)" = push || { echo 'required CI was not a push run'; exit 1; }
+          test "$(jq -r .head_branch <<<$CI)" = main || { echo 'required CI was not for main'; exit 1; }
+
+          PRIOR="$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$PRIOR_INVENTORY_RUN_ID")"
+          test "$(jq -r .repository.full_name <<<$PRIOR)" = "$GITHUB_REPOSITORY" || { echo 'prior inventory belongs to another repository'; exit 1; }
+          test "$(jq -r .status <<<$PRIOR)" = completed && test "$(jq -r .conclusion <<<$PRIOR)" = success || { echo 'prior inventory was not successful'; exit 1; }
+          test "$(jq -r .path <<<$PRIOR)" = .github/workflows/production-schema-inventory.yml || { echo 'wrong prior inventory workflow'; exit 1; }
+          test "$(jq -r .name <<<$PRIOR)" = "Production schema inventory" || { echo 'wrong prior inventory workflow name'; exit 1; }
+          test "$(jq -r .event <<<$PRIOR)" = workflow_dispatch || { echo 'prior inventory was not manually dispatched'; exit 1; }
+          test "$(jq -r .head_branch <<<$PRIOR)" = main || { echo 'prior inventory was not for main'; exit 1; }
+          PRIOR_INVENTORY_HEAD_SHA="$(jq -r .head_sha <<<$PRIOR)"
+          PRIOR_INVENTORY_RUN_ATTEMPT="$(jq -r .run_attempt <<<$PRIOR)"
+          test -n "$PRIOR_INVENTORY_HEAD_SHA" && [[ "$PRIOR_INVENTORY_HEAD_SHA" =~ ^[0-9a-f]{40}$ ]] || { echo 'prior inventory head SHA is invalid'; exit 1; }
+          test "$PRIOR_INVENTORY_HEAD_SHA" = "849763522216394576ce54969693dd561b44af80" || { echo 'prior inventory head is not the approved baseline'; exit 1; }
+          test -n "$PRIOR_INVENTORY_RUN_ATTEMPT" && [[ "$PRIOR_INVENTORY_RUN_ATTEMPT" =~ ^[1-9][0-9]*$ ]] || { echo 'prior inventory run attempt is invalid'; exit 1; }
+          echo "MAIN_SHA=$MAIN_SHA" >> "$GITHUB_ENV"
+          echo "PRIOR_INVENTORY_HEAD_SHA=$PRIOR_INVENTORY_HEAD_SHA" >> "$GITHUB_ENV"
+          echo "PRIOR_INVENTORY_RUN_ATTEMPT=$PRIOR_INVENTORY_RUN_ATTEMPT" >> "$GITHUB_ENV"
+      - name: Download the exact prior inventory receipt
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PRIOR_INVENTORY_RUN_ID: ${{ inputs.prior_inventory_run_id }}
+        run: |
+          set -euo pipefail
+          EXPECTED_NAME="production-schema-inventory-$PRIOR_INVENTORY_RUN_ID-$PRIOR_INVENTORY_RUN_ATTEMPT"
+          ARTIFACTS="$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$PRIOR_INVENTORY_RUN_ID/artifacts?per_page=100")"
+          MATCH_COUNT="$(jq -r --arg name "$EXPECTED_NAME" '[.artifacts[] | select(.name == $name and .expired == false)] | length' <<<$ARTIFACTS)"
+          test "$MATCH_COUNT" = 1 || { echo 'exact prior inventory artifact is unavailable'; exit 1; }
+          ARTIFACT_ID="$(jq -r --arg name "$EXPECTED_NAME" '.artifacts[] | select(.name == $name and .expired == false) | .id' <<<$ARTIFACTS)"
+          test -n "$ARTIFACT_ID" && [[ "$ARTIFACT_ID" =~ ^[0-9]+$ ]] || { echo 'prior inventory artifact ID is invalid'; exit 1; }
+          gh api "repos/$GITHUB_REPOSITORY/actions/artifacts/$ARTIFACT_ID/zip" > "$RUNNER_TEMP/prior-inventory.zip"
+          mkdir "$RUNNER_TEMP/prior-inventory"
+          PRIOR_ZIP="$RUNNER_TEMP/prior-inventory.zip" PRIOR_DIR="$RUNNER_TEMP/prior-inventory" python - <<'PY'
+          import os
+          from pathlib import Path
+          import json
+          import stat
+          import zipfile
+
+          source = Path(os.environ["PRIOR_ZIP"])
+          destination = Path(os.environ["PRIOR_DIR"])
+          with zipfile.ZipFile(source) as archive:
+              members = archive.infolist()
+              if len(members) != 1 or members[0].filename != "schema-inventory.json":
+                  raise SystemExit("prior inventory archive shape is invalid")
+              member = members[0]
+              if member.is_dir() or stat.S_ISLNK(member.external_attr >> 16) or member.file_size > 1_000_000:
+                  raise SystemExit("prior inventory archive member is unsafe")
+              raw = archive.read(member)
+              try:
+                  receipt = json.loads(raw)
+              except (UnicodeDecodeError, json.JSONDecodeError):
+                  raise SystemExit("prior inventory receipt is malformed")
+              if receipt.get("receipt_sha256") != "f1f08d635d59bb2e429c57deb1a2a9948d1ce631faa746bc8a19ea51372afb46":
+                  raise SystemExit("prior inventory receipt is not the approved baseline")
+              target = destination / "schema-inventory.json"
+              target.write_bytes(raw)
+              target.chmod(0o600)
+          PY
+      - name: Install locked reconciliation dependencies
+        run: >-
+          python -m pip install --require-hashes --only-binary=:all: -r requirements.lock
+      - name: Run the protected schema reconciliation
+        env:
+          SUPABASE_ACCESS_TOKEN: ${{ secrets.SUPABASE_ACCESS_TOKEN }}
+          SUPABASE_PROJECT_REF: ${{ secrets.SUPABASE_PROJECT_REF }}
+          RELEASE_RECOVERY_KEY: ${{ secrets.RELEASE_RECOVERY_KEY }}
+          PRIOR_INVENTORY_RUN_ID: ${{ inputs.prior_inventory_run_id }}
+          CI_WORKFLOW_RUN_ID: ${{ inputs.ci_workflow_run_id }}
+        run: |
+          set -euo pipefail
+          test -n "$SUPABASE_ACCESS_TOKEN" && test -n "$SUPABASE_PROJECT_REF" && test -n "$RELEASE_RECOVERY_KEY"
+          mkdir "$RUNNER_TEMP/schema-reconciliation-output"
+          python scripts/reconcile_production_schema.py \
+            --prior-inventory "$RUNNER_TEMP/prior-inventory/schema-inventory.json" \
+            --prior-inventory-run-id "$PRIOR_INVENTORY_RUN_ID" \
+            --prior-inventory-head-sha "$PRIOR_INVENTORY_HEAD_SHA" \
+            --main-sha "$MAIN_SHA" \
+            --ci-workflow-run-id "$CI_WORKFLOW_RUN_ID" \
+            --output-dir "$RUNNER_TEMP/schema-reconciliation-output"
+      - name: Upload encrypted snapshot and bounded reconciliation receipt
+        if: ${{ always() }}
+        uses: actions/upload-artifact@65462800fd760344b1a7b4382951275a0abb4808
+        with:
+          name: production-schema-reconciliation-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/schema-reconciliation-output/
+          if-no-files-found: error
+          retention-days: 90

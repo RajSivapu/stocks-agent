@@ -269,6 +269,54 @@ def test_private_and_native_migration_ledgers_must_agree():
         _validated_records(records)
 
 
+@pytest.fixture
+def reconciled_records(tmp_path, monkeypatch):
+    import scripts.deploy_owner_dashboard_api as deploy
+
+    path = "sql/reconciliation/20261004_production_schema_reconciliation.sql"
+    source = tmp_path / path
+    source.parent.mkdir(parents=True)
+    source.write_text("-- exact normalized baseline\n SELECT 1;\n")
+    monkeypatch.setattr(deploy, "ROOT", tmp_path)
+    records = recovery_records()
+    records["schema_version"][0]["version"] = "20261004"
+    records["release_migration_ledger"] = [{
+        "path": path, "version": "20261004", "sha256": hashlib.sha256(b'["SELECT 1"]').hexdigest(),
+        "applied_at": "2026-09-06T20:00:00Z",
+    }]
+    return records
+
+
+def test_recovery_accepts_the_exact_truthful_reconciliation_pair(reconciled_records):
+    assert _validated_records(reconciled_records)["release_migration_ledger"] == reconciled_records["release_migration_ledger"]
+
+
+@pytest.mark.parametrize("corruption", (
+    "native_missing", "private_missing", "lookalike", "private_hash", "native_hash", "duplicate_version",
+    "normal_path_lookalike", "native_extra", "older_private", "baseline_file_drift",
+))
+def test_recovery_rejects_unpaired_or_drifted_reconciliation(reconciled_records, corruption):
+    import scripts.deploy_owner_dashboard_api as deploy
+
+    records = reconciled_records
+    private = records["release_migration_ledger"][0]
+    if corruption == "native_missing": records["schema_version"] = []
+    elif corruption == "private_missing": records["release_migration_ledger"] = []
+    elif corruption == "lookalike": private["path"] = private["path"].replace("production_schema", "other_schema")
+    elif corruption == "normal_path_lookalike": private["path"] = "sql/migrations/20261004_production_schema_reconciliation.sql"
+    elif corruption == "private_hash": private["sha256"] = "a" * 64
+    elif corruption == "native_hash":
+        records["schema_version"][0].update(statements=["SELECT 2"], sha256=hashlib.sha256(b"SELECT 2").hexdigest())
+    elif corruption == "duplicate_version":
+        records["release_migration_ledger"].append({**private, "path": "sql/migrations/20261004_duplicate.sql"})
+    elif corruption == "native_extra": records["schema_version"].append({**records["schema_version"][0], "version": "20261003"})
+    elif corruption == "older_private":
+        records["release_migration_ledger"].append({**private, "path": "sql/migrations/20261003_old.sql", "version": "20261003"})
+    elif corruption == "baseline_file_drift": (deploy.ROOT / private["path"]).write_text("SELECT 2;")
+    with pytest.raises(ValueError, match="migration|reconciliation|schema_version"):
+        _validated_records(records)
+
+
 def test_recovery_accepts_historical_cash_snapshots_below_the_current_ledger_revision():
     records = recovery_records()
     records["cash_ledger_state"][0]["revision"] = "2"

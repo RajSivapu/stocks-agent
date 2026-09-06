@@ -303,12 +303,20 @@ def _validated_records(records: Mapping[str, object]) -> dict[str, list[dict[str
            or sha256("\n".join(row["statements"]).encode()) != row["sha256"]
            for row in result["schema_version"]):
         raise ValueError("schema version hash is invalid")
+    from scripts.deploy_owner_dashboard_api import (
+        RECONCILIATION_BASELINE_PATH, RECONCILIATION_BASELINE_VERSION,
+        migration_statements_sha256, reconciliation_baseline_manifest,
+    )
     private_versions = {}
+    baseline_row = None
     for row in result["release_migration_ledger"]:
         match = re.fullmatch(r"sql/migrations/(\d{8}(?:\d{4})?)_[a-z0-9][a-z0-9_]*\.sql", row["path"])
-        if (match is None or match.group(1) != row["version"] or not HASH.fullmatch(row["sha256"])
+        is_baseline = row["path"] == RECONCILIATION_BASELINE_PATH and row["version"] == RECONCILIATION_BASELINE_VERSION
+        if ((not is_baseline and (match is None or match.group(1) != row["version"])) or not HASH.fullmatch(row["sha256"])
                 or row["version"] in private_versions):
             raise ValueError("release migration ledger identity is invalid")
+        if is_baseline:
+            baseline_row = row
         try:
             applied_at = datetime.fromisoformat(row["applied_at"].replace("Z", "+00:00"))
             if applied_at.tzinfo is None:
@@ -318,7 +326,19 @@ def _validated_records(records: Mapping[str, object]) -> dict[str, list[dict[str
         private_versions[row["version"]] = row["sha256"]
     # The native export hash binds its exact stored statements[], while the
     # release ledger uses the reconciler's canonical statement-array identity.
-    from scripts.deploy_owner_dashboard_api import migration_statements_sha256
+    native_baseline = [row for row in result["schema_version"] if row["version"] == RECONCILIATION_BASELINE_VERSION]
+    if baseline_row is not None or native_baseline:
+        try:
+            expected = reconciliation_baseline_manifest()
+        except (RuntimeError, OSError) as error:
+            raise ValueError("reconciliation migration baseline source is invalid") from error
+        if (baseline_row is None or baseline_row["sha256"] != expected["sha256"]
+                or len(result["schema_version"]) != 1 or len(native_baseline) != 1
+                or migration_statements_sha256(native_baseline[0]["statements"]) != expected["sha256"]
+                or any(row["path"] != RECONCILIATION_BASELINE_PATH
+                       and row["version"] <= RECONCILIATION_BASELINE_VERSION
+                       for row in result["release_migration_ledger"])):
+            raise ValueError("reconciliation migration baseline pair is invalid")
     if private_versions and any(private_versions.get(row["version"]) != migration_statements_sha256(row["statements"]) for row in result["schema_version"]):
         raise ValueError("native/private migration ledgers diverge")
     for row in result["evaluation_publications"]:

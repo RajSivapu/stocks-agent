@@ -5,9 +5,9 @@ Canonical release: Personal Stock Agent V1 safety remediation
 Audit baseline: `432d647ef911ff63da427097f02a852e18038b62` on `origin/main`
 Consolidated local-gate candidate: `883d521728b1b3c2700a78dab1d65208105d7a2f`
 Current state: the app remains live and the owner can reach the portfolio dashboard, but V1 trusted
-use remains **no-go**. Production schema drift blocks the recovery/release path before any mutation.
-The next step is an owner-approved recoverable production schema migration; no production migration
-was applied to the live database from this checkpoint.
+use remains **no-go**. Protected inventory run `34029103876` now defines the exact production
+baseline for the approved recoverable schema reconciliation. No production migration has been
+applied from this checkpoint.
 
 This file is the version-controlled source of truth for the Personal Stock Agent V1 rollout.
 `docs/ROADMAP.md` records the implementation sequence and remaining release gates.
@@ -26,13 +26,27 @@ This file is the version-controlled source of truth for the Personal Stock Agent
   passed. The full release is manual-only and secret-backed; failed-release trust, run-attempt,
   encrypted-journal, and durable-lease ordering are hardened. No automatic release or recovery ran
   after that merge.
-- [ ] Read-only production schema inventory has only 13 of 24 required recovery relations. Missing:
+- [x] PR #17 merged as `8497635`; exact-main CI `34028945226` and protected read-only inventory run
+  `34029103876` passed. Receipt `f1f08d635d59bb2e429c57deb1a2a9948d1ce631faa746bc8a19ea51372afb46`
+  is bound to that main SHA and covers 35 protected public base-table roots without exposing rows.
+- [ ] The authoritative receipt has 13 of 31 required relation markers. Seventeen final-state public
+  relations are absent: `market_checkpoint_receipt_lineage`,
   `market_collection_checkpoint_history`, `market_collection_checkpoints`,
-  `market_intelligence_collection_completions`, `market_policy_comparisons`,
-  `market_report_publications`, `market_report_request_origins`, `market_run_terminal_outcomes`,
+  `market_intelligence_collection_completions`, `market_intelligence_context_inputs`,
+  `market_intelligence_quote_attempts`, `market_policy_comparisons`,
+  `market_report_publications`, `market_report_request_origins`,
+  `market_run_source_item_provenance`, `market_run_terminal_outcomes`,
+  `market_scheduled_phase_deadlines`, `market_source_item_provenance`,
   `portfolio_cash_ledger_state`, `portfolio_command_acknowledgements`,
   `reconciled_cash_snapshots`, and `stock_agent_release_migration_ledger`.
-  `supabase_migrations.schema_migrations` is also absent.
+  `supabase_migrations.schema_migrations` is also absent. The final-state reconciliation is being
+  implemented against this exact receipt; it will not fabricate historical migration rows.
+
+## Product interface direction
+
+Telegram is the primary timely decision surface. The web app remains intentionally small and
+owner-only: portfolio state, history, reconciliation status, and audit evidence. It is not presented
+as a live trading terminal, and the absence of continuous live data is surfaced rather than hidden.
 
 ## Release boundary
 
@@ -142,7 +156,8 @@ V1-C1 remains complete.
 
 - [x] Provider discovery, normalized identities and timestamps, contradiction preservation,
   cache/checkpoint lineage, and quota accounting are implemented and task-reviewed locally.
-- [ ] Apply the ordered migrations and deploy the protected collection/gateway candidate.
+- [ ] Apply the receipt-bound final-state reconciliation and deploy the protected
+  collection/gateway candidate.
 - [ ] Prove supported free-provider paths and persisted source/quota receipts on an existing
   scheduled run.
 
@@ -189,7 +204,7 @@ V1-C5 is reopened.
 - [x] Exact-head CI `34013930731` and exact-main CI `34014003786` passed for merged main `774584e`.
 - [x] Historical production runtime readback, three-function parity, private Site publication, and
   owner/anonymous canaries completed; current schema inventory is separately blocked above.
-- [ ] Owner-approve and apply a recoverable production schema migration; do not fabricate historical
+- [ ] Apply the approved receipt-bound production schema reconciliation; do not fabricate historical
   receipts or treat missing relations as empty.
 - [ ] Rerun the managed isolated restore only after the schema gate passes.
 - [ ] Run the protected manual release and retain its receipt after all required secrets and
@@ -201,8 +216,8 @@ V1-C6 is reopened and the release remains no-go for trusted use.
 
 ## Immediate next gates
 
-1. Obtain owner approval for the recoverable production schema migration, then rerun the managed
-   isolated restore only after its schema gate passes.
+1. Complete and apply the approved recoverable production schema reconciliation, then rerun the
+   managed isolated restore only after its schema gate passes.
 2. Retain the protected manual-release receipt once every required secret and transport is available.
 3. Observe the next existing scheduled receipt without triggering a duplicate.
 
@@ -237,8 +252,8 @@ sync, focused PostgreSQL restore/retry evidence, and `git diff --check` also pas
 ## Production truth
 
 Production contains the live owner dashboard and prior reviewed runtime receipts, but its recovery
-schema is incomplete: only 13 of 24 required relations are present and the native migration ledger
-is absent. The managed restore therefore failed closed before creating an isolated target. This is
+schema is incomplete: the authoritative run has only 13 of 31 required relation markers, including
+an absent native migration ledger. The managed restore therefore failed closed before creating an isolated target. This is
 not proof of a protected manual release, an isolated live restore, or a post-remediation scheduled
 receipt chain. The owner email-click canary and formal non-owner denial canary passed on 2026-09-05.
 
