@@ -31,7 +31,7 @@ deployment readback, and private Site publication are complete.
 
 | Layer | Local candidate | Production status |
 |---|---|---|
-| Test and owner-auth containment | Implemented and task-reviewed | Live Auth read back; signed-link-compatible Site deployment and formal non-owner canary are the remaining login receipts |
+| Test and owner-auth containment | Implemented and task-reviewed | Live Auth read back and signed-link-compatible Site v5 deployed; owner email-click and formal non-owner canaries remain |
 | Decision, evidence, and publication authority | Implemented and task-reviewed | Database/function deployment read back; protected-workflow and scheduled receipts pending |
 | Portfolio accounting and delivery integrity | Implemented and task-reviewed | Owner/anonymous API canaries passed; formal non-owner and original delivery receipts pending |
 | Provider, cache, quota, ranking, and lifecycle | Implemented and task-reviewed | Live free-provider health and one existing scheduled chain pending |
@@ -57,8 +57,8 @@ Implemented locally:
 
 Still required:
 
-- Publish the signed-link-compatible Site build and retain its platform receipt.
-- Retain a formal non-owner login/access denial receipt; owner and anonymous API canaries passed.
+- Retain owner email-click and formal non-owner login/access receipts; the Site login screen and
+  anonymous API denial are verified.
 
 ### 2. Decision and publication authority
 
@@ -155,8 +155,9 @@ Still required:
 1. Independent whole-branch review with no unresolved Critical or Important finding. **Complete.**
 2. Exact-main CI and current-main/merged-review binding. **Complete.**
 3. Owner-operated database/gateway/API/Site deployment, runtime parity, and owner/anonymous
-   canaries. **Complete; signed-link Site refresh and formal non-owner receipt are in progress.**
-4. Live Auth configuration and owner email-link/code canary.
+   canaries. **Complete; signed-link-compatible Site v5 is live.**
+4. Live Auth configuration and owner email-link/code canary. **Configuration and live login screen
+   verified; owner email-click receipt remains.**
 5. Protected isolated restore drill with holdings, commands, reports, roles, schema, and delivery
    receipts reconciled.
 6. Next existing scheduled intelligence/report/publication receipt chain, without a duplicate run.
