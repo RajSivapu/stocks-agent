@@ -12,12 +12,14 @@ and rollout order. `docs/HANDOFF.md` is ignored and is not a source of truth.
 
 ## Current release status
 
-The app remains live and the owner can reach the portfolio dashboard, but V1 trusted use remains
-**no-go**. Protected inventory run `34029103876` passed on main `8497635`; its verified receipt
-`f1f08d635d59bb2e429c57deb1a2a9948d1ce631faa746bc8a19ea51372afb46` covers 35 protected public
-base-table roots and is now the authoritative reconciliation baseline. It has 13 of 31 required
-relation markers: 17 final-state public relations and the native migration relation are absent. No
-schema migration was applied to the live production database from this checkpoint.
+The owner dashboard remains live; V1 trusted use remains **no-go** pending the protected
+manual-release receipt and existing scheduled evidence. Approved production schema reconciliation
+`34039011879` succeeded exactly once. Managed isolated restore `34042155368` succeeded on main
+`bd1cee2317a8689b8ac5a55fb38b853e7320bbfb`; exact-main CI `34042021993` passed.
+Restore artifacts were downloaded and validated once against GitHub archive digests and all four
+embedded hashes: 26 verified record sets, identical production roots, no migrations applied on
+retry, temporary project deleted, and both cleanup receipts successful with no retained project.
+See `PROJECT_STATUS.md` for archive hashes. Do not rerun reconciliation or restore.
 
 Telegram is the primary timely decision surface. The owner-only web app is a compact portfolio,
 history, reconciliation, and audit-evidence surface—not a continuously live trading terminal.
@@ -35,9 +37,8 @@ history, reconciliation, and audit-evidence surface—not a continuously live tr
   after merge.
 - [x] PR #17 merged main `8497635`; exact-main CI `34028945226` and receipt-bound read-only inventory
   run `34029103876` passed without production mutation.
-- [ ] Approved receipt-bound final-state production schema reconciliation, with an encrypted
-  pre-migration snapshot and truthful reconciliation-only ledger receipt.
-- [ ] Managed isolated restore rerun after the schema gate passes.
+- [x] Approved receipt-bound production schema reconciliation (`34039011879`).
+- [x] Managed isolated restore and both cleanup paths (`34042155368`).
 - [ ] Protected manual-release receipt after all required secrets/transports are available.
 - [ ] Next existing scheduled receipt, without a duplicate run.
 
@@ -62,16 +63,16 @@ not establish the current recovery schema.
 | Layer | Local candidate | Production status |
 |---|---|---|
 | Test and owner-auth containment | Implemented and task-reviewed | Live Auth read back, signed-link-compatible Site v5 deployed, owner email-click confirmed, and formal non-owner denial passed |
-| Decision, evidence, and publication authority | Implemented and task-reviewed | Function deployment read back; production schema gate, protected-workflow, and scheduled receipts pending |
+| Decision, evidence, and publication authority | Implemented and task-reviewed | Function deployment read back; Schema reconciled; protected-workflow and scheduled receipts pending |
 | Portfolio accounting and delivery integrity | Implemented and task-reviewed | Owner/anonymous/non-owner API canaries passed; original delivery receipt pending |
 | Provider, cache, quota, ranking, and lifecycle | Implemented and task-reviewed | Live free-provider health and one existing scheduled chain pending |
 | Outcomes, read privilege, dependency lock, and market sessions | Implemented and task-reviewed | Runtime is live; production observation pending |
-| Candidate-bound release and recovery | Implemented and GPT-6 Astra review-clean; local disposable restore path covered | Production schema gate blocks restore/release before mutation; protected manual-release and live isolated-restore receipts pending |
+| Candidate-bound release and recovery | Implemented and GPT-6 Astra review-clean; local disposable restore path covered | Schema reconciliation and isolated restore complete; protected manual-release receipt pending |
 
 The final consolidated local-gate code candidate was
 `883d521728b1b3c2700a78dab1d65208105d7a2f`, based on the GPT-6 Astra audit of `origin/main` at
 `432d647ef911ff63da427097f02a852e18038b62`. Later main `774584e` passed exact-head CI
-`34013930731` and exact-main CI `34014003786`; neither result proves the missing production schema.
+`34013930731` and exact-main CI `34014003786`; these historical results are superseded by exact-main CI `34042021993` and the recovery receipts above.
 
 ## Remediation workstreams
 
@@ -105,8 +106,7 @@ Implemented locally:
 
 Still required:
 
-- Apply the approved receipt-bound final-state schema reconciliation, then retain the protected manual-release
-  receipt for the resulting migration/function state.
+- Retain the protected manual-release receipt for the reconciled migration/function state.
 - Reconcile one post-deployment scheduled packet, evaluation, report, and publication chain.
 
 ### 3. Money and delivery integrity
@@ -121,9 +121,8 @@ Implemented locally:
 
 Still required:
 
-- Do not claim the remote migration ledger is current: the native migration ledger and required
-  recovery relations are absent. Apply only the approved receipt-bound reconciliation without
-  synthesizing historical receipts.
+- Schema reconciliation is complete; preserve its truthful reconciliation-only ledger and do not
+  synthesize historical migration receipts.
 - Verify production owner flows and the next existing scheduled original Telegram ID or explicit
   persisted suppression. Do not trigger a duplicate run.
 
@@ -178,8 +177,7 @@ Implemented locally:
 Still required:
 
 - Exact-head CI `34013930731` and exact-main CI `34014003786` passed for main `774584e`.
-- Apply the approved receipt-bound recoverable production schema reconciliation; then rerun managed isolated
-  restore only after its schema gate passes.
+- Schema reconciliation and isolated restore are complete (`34039011879`, `34042155368`); do not rerun.
 - Retain the protected manual-release receipt after all required secrets/transports are available;
   do not weaken preflight.
 - Observe the next existing scheduled receipt without a duplicate run.
@@ -187,20 +185,31 @@ Still required:
 ## Ordered gates to trusted owner use
 
 1. Independent whole-branch review with no unresolved Critical or Important finding. **Complete.**
-2. Exact-main CI and current-main/merged-review binding. **Complete** for main `774584e`.
+2. Exact-main CI and current-main/merged-review binding. **Complete** for main `bd1cee2` (`34042021993`).
 3. Historical owner-operated gateway/API/Site deployment, runtime parity, and owner/anonymous
    canaries. **Complete for the prior runtime; signed-link-compatible Site v5 is live, while the
-   current production schema gate remains pending.**
+   production schema reconciliation is now complete.**
 4. Live Auth configuration and owner email-link/code canary. **Complete; the owner confirmed the
    signed email link opened the live portfolio dashboard.**
-5. Approved receipt-bound production schema reconciliation, then protected isolated restore with
-   recovery receipts reconciled.
+5. Approved schema reconciliation and protected isolated restore with recovery receipts.
+   **Complete** (`34039011879`, `34042155368`); do not rerun.
 6. Protected manual-release receipt and next existing scheduled intelligence/report/publication
    receipt chain, without a duplicate run.
 
 Until all six gates pass, V1-C2 through V1-C6 remain reopened and the system stays in limited
 owner-only research/shadow use. Positions, cash, prices, and calculations must be independently
 verified before the owner acts.
+
+## Exact remaining handoff boundary
+
+Frontend and all Edge function sources are unchanged from `774584e` through `bd1cee2`; retain
+Site v5 and the existing owner-only access. No publication is needed for the recovery changes.
+`PROJECT_STATUS.md` lists the missing protected secrets and variables. Separately, the native
+adapter has no configured Sites CI transport (`site = None`), so supplying secrets alone cannot
+unblock the protected release. Do not dispatch until all prerequisites are available.
+The restricted scheduled-evidence reader is also unavailable; observe an existing persisted chain
+when available and never dispatch a duplicate. The live app remains limited owner research/shadow
+use until protected release and scheduled gates pass.
 
 ## Deferred work
 

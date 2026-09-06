@@ -4,10 +4,10 @@ Last updated: 2026-09-06
 Canonical release: Personal Stock Agent V1 safety remediation
 Audit baseline: `432d647ef911ff63da427097f02a852e18038b62` on `origin/main`
 Consolidated local-gate candidate: `883d521728b1b3c2700a78dab1d65208105d7a2f`
-Current state: the app remains live and the owner can reach the portfolio dashboard, but V1 trusted
-use remains **no-go**. Protected inventory run `34029103876` now defines the exact production
-baseline for the approved recoverable schema reconciliation. No production migration has been
-applied from this checkpoint.
+Current state: the owner dashboard is live. Production schema reconciliation and managed isolated
+recovery are complete; trusted V1 use remains **no-go** pending the protected manual-release
+receipt and existing scheduled evidence. Current verified runtime/recovery checkpoint is main
+`bd1cee2317a8689b8ac5a55fb38b853e7320bbfb`, with successful CI `34042021993`.
 
 This file is the version-controlled source of truth for the Personal Stock Agent V1 rollout.
 `docs/ROADMAP.md` records the implementation sequence and remaining release gates.
@@ -29,18 +29,20 @@ This file is the version-controlled source of truth for the Personal Stock Agent
 - [x] PR #17 merged as `8497635`; exact-main CI `34028945226` and protected read-only inventory run
   `34029103876` passed. Receipt `f1f08d635d59bb2e429c57deb1a2a9948d1ce631faa746bc8a19ea51372afb46`
   is bound to that main SHA and covers 35 protected public base-table roots without exposing rows.
-- [ ] The authoritative receipt has 13 of 31 required relation markers. Seventeen final-state public
-  relations are absent: `market_checkpoint_receipt_lineage`,
-  `market_collection_checkpoint_history`, `market_collection_checkpoints`,
-  `market_intelligence_collection_completions`, `market_intelligence_context_inputs`,
-  `market_intelligence_quote_attempts`, `market_policy_comparisons`,
-  `market_report_publications`, `market_report_request_origins`,
-  `market_run_source_item_provenance`, `market_run_terminal_outcomes`,
-  `market_scheduled_phase_deadlines`, `market_source_item_provenance`,
-  `portfolio_cash_ledger_state`, `portfolio_command_acknowledgements`,
-  `reconciled_cash_snapshots`, and `stock_agent_release_migration_ledger`.
-  `supabase_migrations.schema_migrations` is also absent. The final-state reconciliation is being
-  implemented against this exact receipt; it will not fabricate historical migration rows.
+- [x] Approved production schema reconciliation succeeded exactly once in run `34039011879`
+  on `18c25e9b0f40d93a3b65198823b7a7c19105cdfb`. This supersedes the inventory's missing-schema
+  blocker. Do not rerun reconciliation or fabricate historical migration receipts.
+- [x] PR #23 fixed hosted non-superuser role restoration and was reviewed CLEAN before merge.
+  Exact-main CI `34042021993` passed on `bd1cee2317a8689b8ac5a55fb38b853e7320bbfb`.
+- [x] Managed isolated restore `34042155368`, attempt 1, succeeded on that exact main.
+  Downloaded artifacts were validated once: all four embedded artifact SHA-256 values match;
+  production before/after roots are identical; 26 record sets restored and verified; migration
+  retry applied nothing. The restore receipt confirms temporary-project deletion, and both
+  same-job and independent cleanup receipts confirm `deleted: true`, no retained project.
+  Do not rerun this completed restore gate.
+  Recovery archive SHA-256: `97b15b0200a8011302368abb1d7dd8f6cccab269a03a92a8000bdf9ebf558378`.
+  Cleanup archive SHA-256: `70ef10347da57aecfce1d33eaba66caad1d7b1eedede36b3c32385d565c4a6d2`.
+  Both match GitHub artifact metadata; encrypted contents were not decrypted locally.
 
 ## Product interface direction
 
@@ -77,9 +79,8 @@ The exact Track C range received independent approval after both Important recov
 fixed. The final consolidated gate, GPT-6 Astra scoped re-review, historical exact-main CI,
 owner-operated Site publication, Edge deployment/readback, live Auth configuration readback,
 owner/anonymous API canaries, owner email-click canary, and formal non-owner denial canary are
-complete. Historical database readback does not establish the current recovery schema: the current
-inventory supersedes it and shows the native ledger and required relations are absent. The GitHub
-protected workflow, isolated live restore, and next existing scheduled receipts remain pending. The
+complete. The successful reconciliation and isolated restore receipts above supersede the earlier missing-schema
+inventory. The GitHub protected workflow and next existing scheduled receipts remain pending. The
 local candidate now includes a manual-only Management-API isolated restore
 workflow: it proves a one-project free slot, uses only the Management read-only SQL endpoint for
 production, restores only a run-created project, compares two encrypted production root hashes,
@@ -113,14 +114,14 @@ separately; deployment never substitutes for the protected-workflow, restore, or
 | F6 — adapters cannot reach discovery | Implemented | Task 7 implements provider-native queries, normalized identifiers/timestamps, discoverable securities, and attributable failures. Closed through `84f0839`; live free-provider health remains a protected gate. |
 | F7 — dedupe/timestamps discard corrections or conflict | Implemented | Task 7 separates request provenance from item identity and retains corrections, distinct claims, contradictions, and publication/retrieval/effective/reporting times. Closed through `84f0839`; scheduled evidence pending. |
 | F8 — ordinary tests can mutate production | Implemented | Task 1 deselects credentialed tests by default and requires explicit opt-in plus an exact allowlisted non-production project before credentials are loaded. Closed through `d798129`. |
-| F9 — history growth and incomplete scheduled success | Implemented locally; production schema gate blocked | Task 9 bounds relevant history without losing pending state, enforces one slot per market date/phase, required terminal stages, suppression, and overdue detection. Production is missing required recovery relations; scheduled proof remains pending. |
-| F10 — database/Telegram ambiguity | Implemented locally; production schema gate blocked | Task 6 adds durable pending/delivered/failed/uncertain delivery and acknowledgement states, original-receipt recovery, and one publication authority. Telegram v20 is deployed, but the acknowledgement relation is missing in production and no extra send was triggered. |
-| F11 — backdated trades corrupt accounting | Implemented locally; production schema gate blocked | Task 5 rejects unsafe chronology changes, preserves the ledger, and returns replay-stable receipts until explicit chronological reconciliation. Production migration state is not current; production observation is pending. |
+| F9 — history growth and incomplete scheduled success | Implemented; schema gate complete | Task 9 bounds relevant history without losing pending state, enforces one slot per market date/phase, required terminal stages, suppression, and overdue detection. Required recovery schema is reconciled; scheduled proof remains pending. |
+| F10 — database/Telegram ambiguity | Implemented; schema gate complete | Task 6 adds durable pending/delivered/failed/uncertain delivery and acknowledgement states, original-receipt recovery, and one publication authority. Telegram v20 is deployed and the schema is reconciled; original scheduled delivery evidence remains pending. |
+| F11 — backdated trades corrupt accounting | Implemented; schema gate complete | Task 5 rejects unsafe chronology changes, preserves the ledger, and returns replay-stable receipts until explicit chronological reconciliation. Production schema reconciliation is complete; production observation is pending. |
 | F12 — verifier accepts stale/wrong evidence | Implemented; operational proof pending | Task 10 binds current-main review/CI/deployment identity, recomputed candidate bytes and hashes, stored scheduled stages, original delivery or suppression receipts, and durable recovery. Closed through `6da3e84`; exact-main CI and owner deployment completed, protected-workflow receipt pending. |
 | F13 — retry/cache/quota accounting | Implemented | Task 8 persists per-attempt quota, checkpoints, immutable request costs, cache/predecessor lineage, failure receipts, and restart recovery. Closed through `eff4612`; live provider/database proof pending. |
 | F14 — ranking placeholders/disconnected V1 inputs | Implemented | Task 8 supplies protected server-owned holdings, valuation, liquidity, overlap, discovery strength, comparison, and learning inputs; unknown values fail closed. Closed through `eff4612`; scheduled production output pending. |
 | F15 — misleading outcome/weekly calculations | Implemented | Task 11 groups losses per eligible recommendation, aligns benchmark windows, uses session highs/lows, distinguishes fills, and retains veto-only weeks. Closed through `f7af10f`; production observation pending. |
-| F16 — recovery unproven | Local mechanism and disposable drill implemented; live drill pending | Task 10 creates authenticated encrypted exports, exact schema/receipt reconciliation, durable rollback artifacts, and an isolated disposable-runtime restore drill. A protected live isolated restore has not been performed. |
+| F16 — recovery unproven | Implemented; protected isolated live drill complete | Task 10 creates authenticated encrypted exports, exact schema/receipt reconciliation, durable rollback artifacts, and an isolated disposable-runtime restore drill. Protected live isolated restore `34042155368` verified 26 record sets, unchanged production roots, and deletion of the temporary project; both cleanup receipts passed. |
 | F17 — excessive read privilege/unpinned Python | Implemented | Task 11 uses a restricted read-only weekly role with verified TLS and installs a complete hash-locked binary dependency set, including recovery cryptography. Closed through `f7af10f`; live runtime is deployed and protected-workflow receipt pending. |
 | F18 — token refresh defeats idle lock | Implemented | Task 2 moves the privacy deadline only on explicit owner activity, never token refresh. Closed through `ce6d9a7`; signed-link-compatible Site v5 is live and the owner confirmed that its signed email link opened the portfolio dashboard. |
 | F19 — early close/quote identity gaps | Implemented | Task 11 models maintained 2026 early closes, fails closed outside coverage, and rejects wrong symbol/currency or unknown halt/spread/liquidity. Closed through `f7af10f`; deployed, scheduled evidence pending. |
@@ -156,8 +157,8 @@ V1-C1 remains complete.
 
 - [x] Provider discovery, normalized identities and timestamps, contradiction preservation,
   cache/checkpoint lineage, and quota accounting are implemented and task-reviewed locally.
-- [ ] Apply the receipt-bound final-state reconciliation and deploy the protected
-  collection/gateway candidate.
+- [x] Apply the receipt-bound final-state reconciliation (`34039011879`).
+- [ ] Retain the protected collection/gateway release receipt.
 - [ ] Prove supported free-provider paths and persisted source/quota receipts on an existing
   scheduled run.
 
@@ -203,10 +204,9 @@ V1-C5 is reopened.
 - [x] GPT-6 Astra approved the final scoped re-review with no unresolved local Critical or Important finding; the native Sites publication conditional remains a production gate.
 - [x] Exact-head CI `34013930731` and exact-main CI `34014003786` passed for merged main `774584e`.
 - [x] Historical production runtime readback, three-function parity, private Site publication, and
-  owner/anonymous canaries completed; current schema inventory is separately blocked above.
-- [ ] Apply the approved receipt-bound production schema reconciliation; do not fabricate historical
-  receipts or treat missing relations as empty.
-- [ ] Rerun the managed isolated restore only after the schema gate passes.
+  owner/anonymous canaries completed; schema reconciliation is now complete above.
+- [x] Approved receipt-bound schema reconciliation completed (`34039011879`); do not rerun.
+- [x] Managed isolated restore and both cleanup paths completed (`34042155368`); do not rerun.
 - [ ] Run the protected manual release and retain its receipt after all required secrets and
   transports are available; do not weaken preflight.
 - [ ] Next existing post-deployment scheduled intelligence/report/publication receipt chain; never
@@ -216,10 +216,40 @@ V1-C6 is reopened and the release remains no-go for trusted use.
 
 ## Immediate next gates
 
-1. Complete and apply the approved recoverable production schema reconciliation, then rerun the
-   managed isolated restore only after its schema gate passes.
+1. Preserve the completed schema and isolated recovery gates; do not rerun them.
 2. Retain the protected manual-release receipt once every required secret and transport is available.
 3. Observe the next existing scheduled receipt without triggering a duplicate.
+
+## Remaining release configuration — verified 2026-09-06
+
+Source comparison `git diff 774584e..bd1cee2 -- apps/web supabase/functions` is empty.
+The published Site v5 and Edge functions do not need republishing for these recovery changes.
+The owner app is https://personal-stock-agent.rupesh-sivapu.chatgpt.site; retain its existing access.
+
+The protected environment `owner-dashboard-production` has only `RELEASE_RECOVERY_KEY`,
+`SUPABASE_ACCESS_TOKEN`, and `SUPABASE_PROJECT_REF`; repository secrets and environment variables
+are empty. The workflow additionally references these unavailable secrets:
+
+- `RELEASE_READONLY_DATABASE_URL`
+- `DASHBOARD_OWNER_USER_ID`, `DASHBOARD_OWNER_EMAIL`, `DASHBOARD_NON_OWNER_ACCESS_TOKEN`
+- `POSTGRES_URL`, `SUPAVISOR_SESSION_URL`
+- `SUPABASE_SERVICE_ROLE_KEY`, `SUPABASE_PUBLISHABLE_KEY`
+- `DASHBOARD_PRIOR_MANAGED_SECRETS_JSON`
+
+Missing variables are `DASHBOARD_ALLOWED_ORIGIN`, `DASHBOARD_SITE_ORIGIN`, `GATEWAY_ROLLBACK_REF`,
+`GATEWAY_ROLLBACK_SOURCE_SHA256`, and `GATEWAY_CURRENT_VERSION`. These must be based on verified
+configuration and retained rollback evidence; do not invent values or reset credentials.
+
+There is also a transport blocker: `NativeReleaseAdapter.site = None`. GitHub Actions has no
+configured reviewed Sites capture/publish/readback/restore/recovery-attestation transport. Merely
+adding secrets does not resolve it. Keep the pre-mutation transport check and do not dispatch the
+protected release until both prerequisites are satisfied.
+
+The formal scheduled reader in `scripts/protected_evidence.py` requires the missing restricted
+`RELEASE_READONLY_DATABASE_URL`; `scripts/verify_personal_stock_agent_v1.py` validates the persisted
+chain, original Telegram delivery or explicit suppression, and quota lineage. Never send another
+report to manufacture evidence. Future scheduled evidence is not the sole remaining gate, so a
+scheduled-only heartbeat is not yet the final rollout step.
 
 ## Consolidated local evidence
 
@@ -251,11 +281,11 @@ sync, focused PostgreSQL restore/retry evidence, and `git diff --check` also pas
 
 ## Production truth
 
-Production contains the live owner dashboard and prior reviewed runtime receipts, but its recovery
-schema is incomplete: the authoritative run has only 13 of 31 required relation markers, including
-an absent native migration ledger. The managed restore therefore failed closed before creating an isolated target. This is
-not proof of a protected manual release, an isolated live restore, or a post-remediation scheduled
-receipt chain. The owner email-click canary and formal non-owner denial canary passed on 2026-09-05.
+Production contains the owner dashboard and prior reviewed runtime. Approved schema reconciliation
+`34039011879` and isolated live restore `34042155368` passed. This does not substitute for a
+protected manual release or a post-remediation scheduled receipt chain. The owner email-click and
+formal non-owner denial canaries remain complete. Site v5 remains owner-only with one allowed owner,
+no groups, and zero external visitors at the verified publication checkpoint; access is unchanged.
 
 ## Decisions and guardrails
 
