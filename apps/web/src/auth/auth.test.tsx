@@ -2,7 +2,7 @@ import { act, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { expect, it, vi } from "vitest";
 
-import { AuthProvider, useAuth, type AuthClient } from "./AuthProvider";
+import { BROWSER_AUTH_FLOW, AuthProvider, useAuth, type AuthClient } from "./AuthProvider";
 import { SignInPage } from "./SignInPage";
 
 function client(session: unknown = null): AuthClient & {
@@ -35,6 +35,26 @@ function Screen() {
     : <SignInPage />;
 }
 
+it("enables the signed email-link callback without changing session-only storage", () => {
+  expect(BROWSER_AUTH_FLOW).toEqual({
+    persistSession: true,
+    autoRefreshToken: true,
+    detectSessionInUrl: true,
+    flowType: "implicit",
+  });
+});
+
+it("accepts a signed email-link session from the auth state callback", async () => {
+  const authClient = client();
+  const linkSession = { access_token: "owner-link-token", user: { id: "owner-id" } };
+  render(<AuthProvider client={authClient}><Screen /></AuthProvider>);
+  await screen.findByRole("button", { name: /send code/i });
+
+  act(() => authClient.emitAuth("SIGNED_IN", linkSession));
+
+  expect(await screen.findByRole("button", { name: /sign out/i })).toBeVisible();
+});
+
 it("requests OTP with account creation disabled", async () => {
   const authClient = client();
   const user = userEvent.setup();
@@ -43,7 +63,10 @@ it("requests OTP with account creation disabled", async () => {
   await user.click(screen.getByRole("button", { name: /send code/i }));
   expect(authClient.signInWithOtp).toHaveBeenCalledWith({
     email: "owner@example.com",
-    options: { shouldCreateUser: false },
+    options: {
+      shouldCreateUser: false,
+      emailRedirectTo: window.location.origin,
+    },
   });
   expect(await screen.findByLabelText(/six-digit code/i)).toBeVisible();
 });

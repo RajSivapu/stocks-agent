@@ -12,7 +12,7 @@ SERVICE_KEY = "sb_secret_" + "a" * 40
 OWNER_ID = "6903b3cc-05b7-4f90-bbc2-7e80a3a59e22"
 
 
-def test_email_otp_config_requires_token_template_and_six_digits():
+def test_email_auth_config_accepts_free_tier_link_or_six_digit_code():
     with pytest.raises(RuntimeError, match="six-digit"):
         provision.validate_email_otp_configuration({
             "mailer_otp_length": 8,
@@ -26,24 +26,30 @@ def test_email_otp_config_requires_token_template_and_six_digits():
             "owner_email": OWNER_EMAIL,
         })
 
-    with pytest.raises(RuntimeError, match="Token"):
-        provision.validate_email_otp_configuration({
-            "mailer_otp_length": 6,
-            "mailer_templates_magic_link_content": "{{ .ConfirmationURL }}",
-        })
-
     with pytest.raises(RuntimeError, match="six-digit"):
         provision.validate_email_otp_configuration({
             "mailer_otp_length": 6.0,
             "mailer_templates_magic_link_content": "{{ .Token }}",
         })
 
-    receipt = provision.validate_email_otp_configuration({
+    with pytest.raises(RuntimeError, match="Token or ConfirmationURL"):
+        provision.validate_email_otp_configuration({
+            "mailer_otp_length": 6,
+            "mailer_templates_magic_link_content": "Sign in without a supported variable.",
+        })
+
+    code_receipt = provision.validate_email_otp_configuration({
         "mailer_otp_length": 6,
         "mailer_templates_magic_link_content": "Your Personal Stock Agent code is {{ .Token }}.",
     })
-    assert receipt == {"status": "verified", "otp_length": 6, "token_template": True}
-    assert "Token" not in json.dumps(receipt)
+    link_receipt = provision.validate_email_otp_configuration({
+        "mailer_otp_length": 6,
+        "mailer_templates_magic_link_content": "Sign in: {{ .ConfirmationURL }}",
+    })
+    assert code_receipt == {"status": "verified", "otp_length": 6, "email_flow": "code"}
+    assert link_receipt == {"status": "verified", "otp_length": 6, "email_flow": "link"}
+    assert "Token" not in json.dumps(code_receipt)
+    assert "ConfirmationURL" not in json.dumps(link_receipt)
 
 
 @pytest.mark.parametrize("receipt_contents", [None, "not JSON"])

@@ -23,25 +23,25 @@ restores runtime role attributes/verifier/memberships/settings, recoverable secr
 and exact downloaded bytes/configuration for all three Edge functions. Unchanged readback is a
 recovery no-op; restored Edge versions are newly allocated and recorded alongside prior identities.
 The unchanged `.openai/hosting.json` remains the sole zero-cost Site target. Its callable CI management
-transport remains unavailable, so preflight blocks before mutation. GPT-6 Astra accepted this as the
-correct local safety boundary: native owner-operated Sites publication must supply authoritative
-platform receipts, and no caller-authored substitute is accepted. Findings 3 and 4 are locally complete;
-finding 5's actual Site publication remains a production gate. The final focused review, consolidated
-1,197-test gate, and GPT-6 Astra scoped re-review are complete. Exact-head CI and every production
-receipt remain pending.
+transport remains unavailable, so the GitHub workflow correctly blocks before mutation. GPT-6 Astra
+accepted that fail-closed boundary. Owner-operated native Site publication now supplies its separate
+authoritative platform receipt; no caller-authored substitute is accepted. The final focused review,
+consolidated 1,197-test gate, GPT-6 Astra scoped re-review, exact-main CI, owner-operated database/Edge
+deployment readback, and private Site publication are complete.
 
 | Layer | Local candidate | Production status |
 |---|---|---|
-| Test and owner-auth containment | Implemented and task-reviewed | Remediation not deployed; live Supabase six-digit OTP/template is pending |
-| Decision, evidence, and publication authority | Implemented and task-reviewed | Protected migrations/functions and scheduled receipts pending |
-| Portfolio accounting and delivery integrity | Implemented and task-reviewed | Protected migrations, canaries, and original delivery receipts pending |
+| Test and owner-auth containment | Implemented and task-reviewed | Live Auth read back; signed-link-compatible Site deployment and formal non-owner canary are the remaining login receipts |
+| Decision, evidence, and publication authority | Implemented and task-reviewed | Database/function deployment read back; protected-workflow and scheduled receipts pending |
+| Portfolio accounting and delivery integrity | Implemented and task-reviewed | Owner/anonymous API canaries passed; formal non-owner and original delivery receipts pending |
 | Provider, cache, quota, ranking, and lifecycle | Implemented and task-reviewed | Live free-provider health and one existing scheduled chain pending |
-| Outcomes, read privilege, dependency lock, and market sessions | Implemented and task-reviewed | Role migration and production observation pending |
-| Candidate-bound release and recovery | Implemented and GPT-6 Astra review-clean; local disposable restore path covered | Exact-head CI, protected deployment, native Sites publication, and live isolated restore pending |
+| Outcomes, read privilege, dependency lock, and market sessions | Implemented and task-reviewed | Runtime is live; production observation pending |
+| Candidate-bound release and recovery | Implemented and GPT-6 Astra review-clean; local disposable restore path covered | Manual deployment receipts exist; protected-workflow and live isolated restore pending |
 
-The final consolidated local-gate code candidate is
+The final consolidated local-gate code candidate was
 `883d521728b1b3c2700a78dab1d65208105d7a2f`, based on the GPT-6 Astra audit of `origin/main` at
-`432d647ef911ff63da427097f02a852e18038b62`. Nothing in this branch is claimed live.
+`432d647ef911ff63da427097f02a852e18038b62`. It is now included in deployed `main`; exact-main CI
+passed at `c9e3140` after the live Supabase contract corrections.
 
 ## Remediation workstreams
 
@@ -52,13 +52,13 @@ Implemented locally:
 - F8: credentialed database tests require explicit opt-in and an exact allowlisted isolated
   Supabase project; the ordinary suite and deployment-local verification cannot inherit the opt-in.
 - F18: token refresh cannot extend the 30-minute activity deadline.
-- Owner OTP mismatch: frontend, provisioning, and verifier require one six-digit numeric code and a
-  Supabase token template.
+- Owner email mismatch: frontend, provisioning, and verifier accept a six-digit token template or
+  Supabase's free-tier signed confirmation link while retaining session-only storage.
 
 Still required:
 
-- Configure and read back the live Auth OTP length/template through the protected owner process.
-- Pass owner, anonymous, and non-owner login/access canaries on the final candidate.
+- Publish the signed-link-compatible Site build and retain its platform receipt.
+- Retain a formal non-owner login/access denial receipt; owner and anonymous API canaries passed.
 
 ### 2. Decision and publication authority
 
@@ -74,7 +74,7 @@ Implemented locally:
 
 Still required:
 
-- Apply and verify the protected migrations and gateway deployment.
+- Retain the protected-workflow receipt for the already read-back migration/function state.
 - Reconcile one post-deployment scheduled packet, evaluation, report, and publication chain.
 
 ### 3. Money and delivery integrity
@@ -89,7 +89,7 @@ Implemented locally:
 
 Still required:
 
-- Apply the ordered accounting/outbox migrations through the protected workflow.
+- Retain the protected-workflow receipt for the already current remote migration ledger.
 - Verify production owner flows and the next existing scheduled original Telegram ID or explicit
   persisted suppression. Do not trigger a duplicate run.
 
@@ -127,8 +127,8 @@ Implemented locally:
 
 Still required:
 
-- Apply and verify the read-role migration, inspect the final runtime secret boundary, and observe
-  production outcomes without changing policy automatically.
+- Retain the protected-workflow receipt for the live restricted runtime and observe production
+  outcomes without changing policy automatically.
 - Extend the reviewed market calendar before its maintained coverage expires.
 
 ### 6. Release and recovery
@@ -143,9 +143,8 @@ Implemented locally:
 
 Still required:
 
-- The single consolidated local gate passed; run an independent GPT-6 Astra whole-branch review.
-- Run exact-head CI only after final review fixes.
-- Use only the protected release/recovery workflow for production migration and deployment.
+- The single consolidated local gate, independent GPT-6 Astra review, and exact-main CI passed.
+- Complete the protected release/recovery workflow receipt without weakening its preflight.
 - Perform and reconcile a protected isolated live restore. A local disposable drill is not this
   proof.
 - Reconcile the next existing post-deployment scheduled chain. Review, CI, and deployment receipts
@@ -153,16 +152,16 @@ Still required:
 
 ## Ordered gates to trusted owner use
 
-1. Independent whole-branch review with no unresolved Critical or Important finding.
-2. Exact-head CI and current-main/merged-review binding.
-3. Protected migrations, gateway/API/Site deployment, source/static parity, and owner/denial
-   canaries.
-4. Live six-digit Auth configuration and owner login canary.
+1. Independent whole-branch review with no unresolved Critical or Important finding. **Complete.**
+2. Exact-main CI and current-main/merged-review binding. **Complete.**
+3. Owner-operated database/gateway/API/Site deployment, runtime parity, and owner/anonymous
+   canaries. **Complete; signed-link Site refresh and formal non-owner receipt are in progress.**
+4. Live Auth configuration and owner email-link/code canary.
 5. Protected isolated restore drill with holdings, commands, reports, roles, schema, and delivery
    receipts reconciled.
 6. Next existing scheduled intelligence/report/publication receipt chain, without a duplicate run.
 
-Until all seven gates pass, V1-C2 through V1-C6 remain reopened and the system stays in limited
+Until all six gates pass, V1-C2 through V1-C6 remain reopened and the system stays in limited
 owner-only research/shadow use. Positions, cash, prices, and calculations must be independently
 verified before the owner acts.
 

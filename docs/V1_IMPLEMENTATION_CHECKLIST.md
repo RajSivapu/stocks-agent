@@ -17,12 +17,16 @@ An owner-only personal stock agent that uses zero-incremental-cost data sources,
 - [x] Final Track C focused code review approved with no open Critical or Important findings
 - [x] Consolidated final-candidate gate: **1,197 checks passed, 4 skipped, 4 credentialed database tests intentionally deselected**
 - [x] Final GPT-6 Astra re-review approved at exact code commit `883d521`
-- [ ] Protected production rollout and live receipts
+- [x] Astra remediation merged to protected `main`; exact-main CI passed at `c9e3140`
+- [x] Database ledger read back as current; gateway v33, dashboard API v4, and Telegram v20 deployed with runtime-byte parity
+- [x] Private owner Site published and owner/anonymous API canaries passed
+- [x] Live free-tier Auth read back and browser updated to accept its signed email link as well as six-digit codes
+- [ ] Protected-workflow, isolated-restore, formal non-owner, and scheduled-chain receipts
 
 ## Completed implementation areas
 
 - [x] Credentialed database tests are opt-in and deployment-safe
-- [x] Six-digit email OTP contract and true inactivity timeout
+- [x] Free-tier signed email link/six-digit code contract and true inactivity timeout
 - [x] Executable-price validation and portfolio-wide risk reservations
 - [x] Evidence-authoritative reports and SQL idempotency
 - [x] Decimal-safe and backdated transaction accounting
@@ -40,7 +44,7 @@ An owner-only personal stock agent that uses zero-incremental-cost data sources,
 - [x] 2. Use fresh reconciled cash with ledger invalidation; never spend legacy monthly budgets as cash
 - [x] 3. Make deployment upgrade-aware and restore exact prior component state — **native recovery requires proven candidate/partial ownership and stable existing function IDs; independent Track C review approved**
 - [x] 4. Preserve already-applied migration bytes and move changes into additive migrations — **audited bytes restored; actual native-ledger PostgreSQL upgrade/retry passed**
-- [ ] 5. Deploy, verify, and recover every changed component, including Telegram and the owner web site — **all three native Edge paths implemented; reviewed Sites transport and immutable four-artifact publication/receipt integration remain open and preflight blocks before mutation**
+- [ ] 5. Deploy, verify, and recover every changed component, including Telegram and the owner web site — **owner-operated deployment and runtime parity are complete; protected-workflow and isolated-restore receipts remain open**
 - [x] 6. Persist provider attempts before transport and reconcile crash uncertainty without duplicate calls
 - [x] 7. Allow durable no-trigger completion for quiet scheduled intraday runs
 - [x] 8. Propagate the authoritative `start_run` duplicate flag into release evidence
@@ -50,7 +54,7 @@ An owner-only personal stock agent that uses zero-incremental-cost data sources,
 
 ## What is happening now
 
-- [x] Finish findings 3–5 at the local safety boundary — **3 and 4 complete; Astra accepts 5's pre-mutation block while owner-operated Sites publication remains pending**
+- [x] Finish findings 3–5 at the local safety boundary — **3 and 4 complete; owner-operated function/Site publication closes the runnable-app portion of 5**
 - [x] Run focused release/migration/rollback tests
 - [x] Complete independent Track C review with no open Critical or Important findings
 - [x] Run one consolidated repository gate after the fixes — **1,197 passed**
@@ -61,12 +65,16 @@ An owner-only personal stock agent that uses zero-incremental-cost data sources,
 
 These require the protected production path and must not be replaced by local evidence.
 
-- [ ] Confirm the live Supabase email template emits a six-digit OTP
-- [ ] Push/merge the exact reviewed commit through protected `main`
-- [ ] Pass exact-head CI
+- [x] Confirm live Auth is signup-disabled with 900-second JWT, six-digit/600-second OTP settings, and a signed-link template
+- [x] Support both the free-tier signed link and optional six-digit code in the browser
+- [x] Push/merge the exact reviewed remediation through protected `main`
+- [x] Pass exact-main CI
 - [ ] Run the protected deployment workflow
-- [ ] Verify deployed byte/version parity for gateway, dashboard API, Telegram function, and owner web site
+- [x] Verify owner-operated deployed byte/version parity for gateway, dashboard API, Telegram function, and owner web site
+- [ ] Publish this signed-link-compatible web build and verify its new Site deployment receipt
+- [ ] Complete an owner email sign-in canary on that new Site build
 - [ ] Perform the protected restore drill and retain its receipt
+- [ ] Retain a formal non-owner login denial receipt (anonymous denial already passed)
 - [ ] Observe fresh scheduled morning/intraday/weekly receipts without triggering duplicate live runs
 - [ ] Close V1-C2 through V1-C6 only when their production receipts exist
 

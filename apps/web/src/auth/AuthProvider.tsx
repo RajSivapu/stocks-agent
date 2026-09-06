@@ -17,7 +17,10 @@ export interface AuthClient {
   onAuthStateChange(callback: (event: string, session: AuthSession | null) => void): {
     data: { subscription: { unsubscribe(): void } };
   };
-  signInWithOtp(input: { email: string; options: { shouldCreateUser: false } }): Promise<{ error: unknown }>;
+  signInWithOtp(input: {
+    email: string;
+    options: { shouldCreateUser: false; emailRedirectTo: string };
+  }): Promise<{ error: unknown }>;
   verifyOtp(input: { email: string; token: string; type: "email" }): Promise<{
     data: { session: AuthSession | null };
     error: unknown;
@@ -35,6 +38,13 @@ interface AuthContextValue {
 }
 
 const AuthContext = createContext<AuthContextValue | null>(null);
+
+export const BROWSER_AUTH_FLOW = {
+  persistSession: true,
+  autoRefreshToken: true,
+  detectSessionInUrl: true,
+  flowType: "implicit" as const,
+};
 
 function adapter(client: SupabaseClient): AuthClient {
   return {
@@ -57,9 +67,7 @@ export function createBrowserAuthClient(): AuthClient {
   return adapter(createClient(url, key, {
     auth: {
       storage: window.sessionStorage,
-      persistSession: true,
-      autoRefreshToken: true,
-      detectSessionInUrl: false,
+      ...BROWSER_AUTH_FLOW,
     },
   }));
 }
@@ -137,8 +145,14 @@ export function AuthProvider({
     loading,
     locked,
     sendOtp: async (email) => {
-      const result = await client.signInWithOtp({ email, options: { shouldCreateUser: false } });
-      if (result.error) throw new Error("The sign-in code could not be sent.");
+      const result = await client.signInWithOtp({
+        email,
+        options: {
+          shouldCreateUser: false,
+          emailRedirectTo: window.location.origin,
+        },
+      });
+      if (result.error) throw new Error("The sign-in email could not be sent.");
     },
     verifyOtp: async (email, token) => {
       const result = await client.verifyOtp({ email, token, type: "email" });

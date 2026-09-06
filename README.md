@@ -173,10 +173,13 @@ client-side calculations.
 
 1. Create the single owner user directly in Supabase Auth. Public signup remains disabled; the
    browser requests an email OTP with `shouldCreateUser: false`.
-2. Set the hosted Auth JWT lifetime to 900 seconds and confirm email signup remains disabled. In
-   **Authentication → Email Templates → Magic Link**, make the email body show the six-digit code
-   with `{{ .Token }}`; a `{{ .ConfirmationURL }}`-only body is not acceptable. Set the hosted email
-   OTP length to exactly `6`. The matching local OTP length is recorded in `supabase/config.toml`.
+2. Set the hosted Auth JWT lifetime to 900 seconds and confirm email signup remains disabled. Keep
+   the hosted email OTP length at exactly `6`; the matching local value is recorded in
+   `supabase/config.toml`. The owner web app supports both Supabase email modes: a six-digit code
+   template containing `{{ .Token }}`, or the free-tier default signed link containing
+   `{{ .ConfirmationURL }}`. The browser supplies its exact deployed origin as the email redirect,
+   detects the signed callback, clears the callback URL through the Supabase client, and retains the
+   resulting session only in browser session storage.
    Supabase supports a [read-only Management API Auth-config endpoint](https://supabase.com/docs/reference/api/v1-get-auth-service-config)
    for a deliberately provisioned token with `auth:read` / `auth_config_read`. This project does not
    provision or store a Management API token, so the protected operator must manually verify those
@@ -184,13 +187,13 @@ client-side calculations.
    rendered email) outside version control:
 
 ```json
-{"mailer_otp_length":6,"mailer_templates_magic_link_content":"Your code is {{ .Token }}"}
+{"mailer_otp_length":6,"mailer_templates_magic_link_content":"Follow {{ .ConfirmationURL }} to sign in"}
 ```
 
    Pass that receipt to both protected Auth commands with
    `--auth-config-receipt /secure/path/auth-email-otp.json`. They fail closed before any Auth admin
-   request or deployment canary when it is absent, malformed, not six digits, or lacks the Token
-   variable. The scripts print only the bounded verification fields, never the template body.
+   request or deployment canary when it is absent, malformed, not six digits, or lacks both supported
+   variables. The scripts print only the bounded flow type, never the template body.
 3. Apply `sql/migrations/20260906_owner_dashboard_read_role.sql` with the normal protected migration
    path.
 4. Put `DASHBOARD_OWNER_USER_ID` and the exact deployed HTTPS origin in
@@ -227,9 +230,9 @@ npm run build --workspace @stocks-agent/web
 Deploy only `apps/web/dist` to the approved static host. Keep the generated `_headers` file: it
 contains the exact Supabase/API Content Security Policy, frame denial, no-store shell policy, and
 immutable hashed-asset policy. Open the deployed HTTPS URL, enter the pre-created owner email, then
-enter the emailed six-digit code. Sessions use browser session storage, globally sign out on owner
-request, and privacy-lock after 30 minutes of inactivity. A second user must receive an owner-only
-denial and no portfolio data.
+follow the signed link in the email or enter its six-digit code when the template shows one. Sessions
+use browser session storage, globally sign out on owner request, and privacy-lock after 30 minutes of
+inactivity. A second user must receive an owner-only denial and no portfolio data.
 
 The optional production canary is GET-only and must be enabled deliberately with `E2E_LIVE=1` plus
 an owner access token; the normal test suite never reads production.
