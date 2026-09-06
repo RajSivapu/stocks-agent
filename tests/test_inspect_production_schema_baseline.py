@@ -56,14 +56,21 @@ def _catalog():
         "constraints": [{"schema": "public", "relation": "holdings", "name": "holdings_pkey",
                          "kind": "p", "definition_sha256": "b" * 64}],
         "functions": [{"schema": "public", "identity": "public.normalize_ticker(text)", "language": "plpgsql",
-                       "volatility": "i", "security_definer": False, "definition_sha256": "c" * 64}],
+                       "kind": "f", "owner": "postgres", "volatility": "i", "security_definer": False,
+                       "definition_sha256": "c" * 64}],
         "indexes": [{"schema": "public", "relation": "holdings", "name": "holdings_pkey",
-                     "definition_sha256": "d" * 64}],
+                     "definition_sha256": "d" * 64, "valid": True, "ready": True, "live": True}],
         "triggers": [],
-        "policies": [{"schema": "public", "relation": "holdings", "name": "public_reader", "command": "r",
+        "policies": [{"schema": "public", "relation": "holdings", "name": "public_reader", "command": "r", "permissive": True,
                       "roles": ["PUBLIC"], "using_sha256": "e" * 64, "check_sha256": "e" * 64}],
         "acls": [{"object_kind": "relation", "schema": "public", "object": "holdings",
                   "grantee": "dashboard", "grantor": "postgres", "privilege": "SELECT", "grantable": False}],
+        "column_acls": [{"schema": "public", "relation": "holdings", "column": "ticker", "grantee": "dashboard",
+                         "grantor": "postgres", "privilege": "SELECT", "grantable": False}],
+        "schema_acls": [{"schema": "public", "grantee": "dashboard", "grantor": "postgres",
+                         "privilege": "USAGE", "grantable": False}],
+        "default_privileges": [{"scope": "public", "owner": "postgres", "object_type": "r",
+                                "grantee": "dashboard", "grantor": "postgres", "privilege": "SELECT", "grantable": False}],
         "roles": [
             {"name": name, "exists": True, "login": login, "inherit": inherit, "superuser": False,
              "bypassrls": False, "createrole": False, "createdb": False, "replication": False,
@@ -75,6 +82,8 @@ def _catalog():
                 ("stock_agent_release_reader_runtime", False, False, ["stock_agent_release_reader"]),
             )
         ],
+        "memberships": [{"member": "stock_agent_dashboard_runtime", "role": "stock_agent_dashboard",
+                         "grantor": "postgres", "admin_option": False, "inherit_option": True, "set_option": True}],
     }
 
 
@@ -97,10 +106,11 @@ class FakeReadOnlyApi:
         assert method == "POST"
         assert path == f"/v1/projects/{PROJECT_REF}/database/query/read-only"
         query = payload["query"]
+        if "protected_roots" in query:
+            return [{"root_identity": {"role": "supabase_read_only_user", "transaction_read_only": "on", "row_security": "off"},
+                     "catalog": self.catalog, "relation_presence": _presence(self.catalog), "protected_roots": self.roots}]
         if "current_user AS role" in query:
             return [self.identity]
-        if "protected_roots" in query:
-            return [{"protected_roots": self.roots}]
         if "catalog" in query:
             return [{"catalog": self.catalog, "relation_presence": _presence(self.catalog)}]
         raise AssertionError(query)
@@ -144,6 +154,49 @@ def test_inspection_roots_every_validated_public_base_or_partitioned_table_and_f
     assert "relrowsecurity" in catalog_query and "relforcerowsecurity" in catalog_query
     assert "WHEN role_oid = 0 THEN 'PUBLIC'" in catalog_query
     assert "rolpassword" not in catalog_query
+
+
+def test_inspection_captures_full_authorization_and_uses_bounded_full_visibility_root_snapshot():
+    from scripts.inspect_production_schema_baseline import inspect_production_schema
+
+    api = FakeReadOnlyApi()
+    receipt = inspect_production_schema(api, PROJECT_REF, MAIN_SHA)
+
+    assert receipt["catalog"]["column_acls"][0]["column"] == "ticker"
+    assert receipt["catalog"]["schema_acls"][0]["privilege"] == "USAGE"
+    assert receipt["catalog"]["default_privileges"][0]["scope"] == "public"
+    assert receipt["catalog"]["memberships"][0]["inherit_option"] is True
+    assert receipt["catalog"]["functions"][0]["owner"] == "postgres"
+    assert receipt["catalog"]["indexes"][0]["live"] is True
+    root_query = api.calls[2][2]["query"]
+    assert "set_config('row_security', 'off', true)" in root_query
+    assert "set_config('statement_timeout'" in root_query
+    assert "jsonb_agg(to_jsonb(row)" not in root_query
+    assert "bit_xor" in root_query
+
+
+def test_inspection_rejects_roots_without_full_visibility_or_matching_catalog_snapshot():
+    from scripts.inspect_production_schema_baseline import inspect_production_schema
+
+    class FilteredRootApi(FakeReadOnlyApi):
+        def __call__(self, method, path, payload=None):
+            response = super().__call__(method, path, payload)
+            if "protected_roots" in payload["query"]:
+                response[0]["root_identity"]["row_security"] = "on"
+            return response
+
+    with pytest.raises(RuntimeError, match="root identity"):
+        inspect_production_schema(FilteredRootApi(), PROJECT_REF, MAIN_SHA)
+
+    class ChangedCatalogApi(FakeReadOnlyApi):
+        def __call__(self, method, path, payload=None):
+            response = super().__call__(method, path, payload)
+            if "protected_roots" in payload["query"]:
+                response[0]["catalog"]["relations"][0]["owner"] = "changed_owner"
+            return response
+
+    with pytest.raises(RuntimeError, match="snapshot"):
+        inspect_production_schema(ChangedCatalogApi(), PROJECT_REF, MAIN_SHA)
 
 
 def test_inspection_rejects_inconsistent_post_marker_presence_and_dynamic_root_sets(monkeypatch):
