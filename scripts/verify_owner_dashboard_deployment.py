@@ -758,7 +758,7 @@ def run_http_canary(
             non_owner = json.loads(non_owner_body)
         except json.JSONDecodeError as error:
             raise RuntimeError("non-owner denial body is malformed") from error
-        if non_owner_status != 403 or non_owner.get("error", {}).get("code") != "forbidden":
+        if non_owner_status != 403 or non_owner.get("error", {}).get("code") != "owner_only":
             raise RuntimeError("non-owner request was not denied")
         if non_owner_headers.get("access-control-allow-origin") != origin:
             raise RuntimeError("non-owner response CORS is not exact")
