@@ -128,6 +128,13 @@ def test_independent_recovery_contract_covers_cancelled_and_lost_release_runners
     assert "recovery-metadata/recovery-metadata" not in recovery
     assert "${{ vars.SUPABASE_PROJECT_REF }}" not in recovery
     assert "${{ secrets.SUPABASE_PROJECT_REF }}" in recovery
+    assert "Verify exact failed-release deployment trust marker" in recovery
+    assert "component-recovery-run:$RUN_ID" in recovery
+    assert "release_workflow_run_id" in recovery and "candidate_sha" in recovery
+    assert "steps.trust.outputs.trusted == 'true'" in recovery
+    trust = recovery.split("- name: Verify exact failed-release deployment trust marker", 1)[1].split("- name:", 1)[0]
+    assert "GH_TOKEN: ${{ github.token }}" in trust
+    assert "SUPABASE_ACCESS_TOKEN" not in trust and "RELEASE_RECOVERY_KEY" not in trust and "POSTGRES_URL" not in trust
 
 
 def test_protected_release_and_recovery_install_only_the_complete_hashed_lock():
