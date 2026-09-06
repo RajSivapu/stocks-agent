@@ -361,6 +361,30 @@ def _root_relation_names(relations: list[dict[str, object]]) -> tuple[str, ...]:
     return tuple(sorted(names))
 
 
+def _root_preflight_query(relations: tuple[str, ...]) -> str:
+    relation_literals = ",".join("'%s'" % relation for relation in relations) or "NULL"
+    return f"""
+SELECT role.rolname AS role,
+  current_setting('transaction_read_only') AS transaction_read_only,
+  current_setting('row_security') AS row_security,
+  role.rolbypassrls AS rolbypassrls,
+  settings.setting::int AS statement_timeout_ms,
+  count(relation.oid)::bigint AS relation_count,
+  COALESCE(bool_and(CASE
+    WHEN relation.oid IS NULL OR NOT relation.relrowsecurity THEN true
+    ELSE role.rolbypassrls OR (relation.relowner = role.oid AND NOT relation.relforcerowsecurity)
+  END), true) AS full_visibility
+FROM pg_catalog.pg_roles AS role
+JOIN pg_catalog.pg_settings AS settings ON settings.name = 'statement_timeout'
+LEFT JOIN pg_catalog.pg_class AS relation
+  ON relation.relnamespace = (SELECT oid FROM pg_catalog.pg_namespace WHERE nspname = 'public')
+  AND relation.relkind IN ('r', 'p')
+  AND relation.relname IN ({relation_literals})
+WHERE role.rolname = current_user
+GROUP BY role.oid, role.rolname, role.rolbypassrls, settings.setting
+""".strip()
+
+
 def _roots_query(relations: tuple[str, ...]) -> str:
     catalog_query = _catalog_query()
     relation_literals = ",".join("'%s'" % relation for relation in relations) or "NULL"
@@ -516,6 +540,30 @@ def _validate_roots(value: object, expected_relations: tuple[str, ...]) -> list[
     return [by_name[name] for name in sorted(by_name)]
 
 
+def _validate_root_preflight(value: object, expected_relation_count: int) -> None:
+    expected_fields = {
+        "role", "transaction_read_only", "row_security", "rolbypassrls",
+        "statement_timeout_ms", "relation_count", "full_visibility",
+    }
+    if not isinstance(value, list) or len(value) != 1 or not isinstance(value[0], Mapping) or set(value[0]) != expected_fields:
+        raise RuntimeError("protected root preflight response is malformed")
+    item = value[0]
+    if (item.get("role") != "supabase_read_only_user"
+            or item.get("transaction_read_only") != "on"
+            or not isinstance(item.get("row_security"), str) or not item["row_security"]
+            or type(item.get("rolbypassrls")) is not bool
+            or type(item.get("statement_timeout_ms")) is not int
+            or type(item.get("relation_count")) is not int
+            or type(item.get("full_visibility")) is not bool):
+        raise RuntimeError("protected root preflight response is malformed")
+    if not 1 <= item["statement_timeout_ms"] <= 30_000:
+        raise RuntimeError("protected root preflight statement timeout is unsafe")
+    if item["relation_count"] != expected_relation_count:
+        raise RuntimeError("protected root preflight relation set changed")
+    if not item["full_visibility"]:
+        raise RuntimeError("protected root preflight visibility is incomplete")
+
+
 def inspect_production_schema(request, project_ref: str, main_sha: str) -> dict[str, object]:
     """Return a deterministic, non-secret baseline receipt from fixed SQL."""
     if not isinstance(project_ref, str) or PROJECT_REF.fullmatch(project_ref) is None:
@@ -536,6 +584,9 @@ def inspect_production_schema(request, project_ref: str, main_sha: str) -> dict[
     catalog = _validate_catalog(catalog_rows[0]["catalog"])
     presence = _validate_presence(catalog_rows[0]["relation_presence"], catalog["relations"])
     root_relations = _root_relation_names(catalog["relations"])
+
+    root_preflight = _query(request, project_ref, _root_preflight_query(root_relations))
+    _validate_root_preflight(root_preflight, len(root_relations))
 
     root_rows = _query(request, project_ref, _roots_query(root_relations))
     if len(root_rows) != 1 or set(root_rows[0]) != {"root_identity", "catalog", "relation_presence", "protected_roots"}:

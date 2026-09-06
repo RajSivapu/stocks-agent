@@ -149,9 +149,18 @@ def test_generated_roots_accept_an_empty_public_table():
 
 
 class FakeReadOnlyApi:
-    def __init__(self, *, identity=None, catalog=None, roots=None):
+    def __init__(self, *, identity=None, catalog=None, root_preflight=None, roots=None):
         self.identity = identity or {"role": "supabase_read_only_user", "transaction_read_only": "on", "database": "postgres"}
         self.catalog = _catalog() if catalog is None else catalog
+        self.root_preflight = {
+            "role": "supabase_read_only_user",
+            "transaction_read_only": "on",
+            "row_security": "on",
+            "rolbypassrls": True,
+            "statement_timeout_ms": 30000,
+            "relation_count": sum(item["kind"] in {"r", "p"} for item in self.catalog["relations"]),
+            "full_visibility": True,
+        } if root_preflight is None else root_preflight
         self.roots = _roots(self.catalog) if roots is None else roots
         self.calls = []
 
@@ -164,6 +173,8 @@ class FakeReadOnlyApi:
             return [{"root_identity": {"role": "supabase_read_only_user", "transaction_read_only": "on", "row_security": "on",
                                         "bypassrls": True, "statement_timeout_ms": 30000},
                      "catalog": self.catalog, "relation_presence": _presence(self.catalog), "protected_roots": self.roots}]
+        if "full_visibility" in query:
+            return [copy.deepcopy(self.root_preflight)]
         if "current_user AS role" in query:
             return [self.identity]
         if "catalog" in query:
@@ -180,9 +191,13 @@ def test_inspection_uses_only_read_only_path_and_proves_read_only_identity_first
     assert receipt["main_sha"] == MAIN_SHA
     assert [path for _method, path, _payload in api.calls] == [
         f"/v1/projects/{PROJECT_REF}/database/query/read-only",
-    ] * 3
+    ] * 4
     assert "current_user AS role" in api.calls[0][2]["query"]
     assert "transaction_read_only" in api.calls[0][2]["query"]
+    preflight_query = api.calls[2][2]["query"]
+    assert "full_visibility" in preflight_query
+    assert "pg_catalog.pg_class" in preflight_query
+    assert "FROM public." not in preflight_query
     assert "/database/query\"" not in "\n".join(call[1] for call in api.calls)
 
 
@@ -196,7 +211,7 @@ def test_inspection_roots_every_validated_public_base_or_partitioned_table_and_f
         {"dry_powder", "holdings", "owner_investment_plans", "market_intelligence_runs", "portfolio_commands",
          "suggestion_grades", "suggestions", "unexpected_audit_state"}
     )
-    roots_query = api.calls[2][2]["query"]
+    roots_query = api.calls[3][2]["query"]
     assert "public.dry_powder" in roots_query
     assert "public.owner_investment_plans" in roots_query
     assert "public.unexpected_audit_state" in roots_query
@@ -229,7 +244,7 @@ def test_inspection_captures_full_authorization_and_uses_bounded_full_visibility
     assert receipt["catalog"]["indexes"][0]["live"] is True
     assert receipt["catalog"]["default_acl_sets"][0]["is_empty"] is True
     assert receipt["catalog"]["authorization_capabilities"][0]["membership_options_supported"] is True
-    root_query = api.calls[2][2]["query"]
+    root_query = api.calls[3][2]["query"]
     assert "set_config('row_security'" not in root_query
     assert "set_config('statement_timeout'" not in root_query
     assert "statement_timeout" in root_query and "rolbypassrls" in root_query
@@ -261,6 +276,51 @@ def test_inspection_rejects_roots_without_full_visibility_or_matching_catalog_sn
 
     with pytest.raises(RuntimeError, match="snapshot"):
         inspect_production_schema(ChangedCatalogApi(), PROJECT_REF, MAIN_SHA)
+
+
+@pytest.mark.parametrize(
+    ("root_preflight", "message"),
+    (
+        ({"role": "supabase_read_only_user", "transaction_read_only": "on", "row_security": "on",
+          "rolbypassrls": True, "statement_timeout_ms": 0, "relation_count": 8, "full_visibility": True},
+         "root preflight statement timeout"),
+        ({"role": "supabase_read_only_user", "transaction_read_only": "on", "row_security": "on",
+          "rolbypassrls": True, "statement_timeout_ms": 30000, "relation_count": 7, "full_visibility": True},
+         "root preflight relation set"),
+        ({"role": "supabase_read_only_user", "transaction_read_only": "on", "row_security": "on",
+          "rolbypassrls": False, "statement_timeout_ms": 30000, "relation_count": 8, "full_visibility": False},
+         "root preflight visibility"),
+    ),
+)
+def test_root_preflight_guard_failures_prevent_root_query(root_preflight, message):
+    from scripts.inspect_production_schema_baseline import inspect_production_schema
+
+    api = FakeReadOnlyApi(root_preflight=root_preflight)
+    with pytest.raises(RuntimeError, match=message):
+        inspect_production_schema(api, PROJECT_REF, MAIN_SHA)
+
+    assert len(api.calls) == 3
+    assert all("protected_roots" not in call[2]["query"] for call in api.calls)
+
+
+@pytest.mark.parametrize(
+    "root_preflight",
+    (
+        {"role": "supabase_read_only_user", "transaction_read_only": "on", "row_security": "on",
+         "rolbypassrls": True, "statement_timeout_ms": 30000, "relation_count": 8,
+         "full_visibility": True, "unexpected": "field"},
+        {"role": "supabase_read_only_user", "transaction_read_only": "on", "row_security": "on",
+         "rolbypassrls": True, "statement_timeout_ms": 30000, "relation_count": True,
+         "full_visibility": True},
+    ),
+)
+def test_root_preflight_rejects_non_exact_or_mistyped_metadata(root_preflight):
+    from scripts.inspect_production_schema_baseline import inspect_production_schema
+
+    api = FakeReadOnlyApi(root_preflight=root_preflight)
+    with pytest.raises(RuntimeError, match="root preflight response"):
+        inspect_production_schema(api, PROJECT_REF, MAIN_SHA)
+    assert len(api.calls) == 3
 
 
 def test_inspection_preserves_unsupported_membership_options_as_unknown_not_false():
