@@ -81,6 +81,18 @@ def test_release_workflow_retains_and_restores_rollback_source_until_evidence_is
     assert "dry-run-evidence.json" in workflow
 
 
+def test_release_failure_recovery_is_safe_when_preflight_never_created_state_directory():
+    workflow = Path(".github/workflows/owner-dashboard-release.yml").read_text()
+    recovery_step = workflow.split(
+        "- name: Restore changed components if any post-deploy evidence step failed",
+        maxsplit=1,
+    )[1].split("- name:", maxsplit=1)[0]
+    assert 'test -n "${RELEASE_STATE_DIR:-}" || exit 0' in recovery_step
+    assert recovery_step.index('${RELEASE_STATE_DIR:-}') < recovery_step.index(
+        '$RELEASE_STATE_DIR/release-state.json'
+    )
+
+
 def test_final_release_workflow_keeps_all_ephemera_outside_the_checkout_and_uses_state_journal():
     workflow = Path(".github/workflows/owner-dashboard-release.yml").read_text()
     assert "RUNNER_TEMP" in workflow
