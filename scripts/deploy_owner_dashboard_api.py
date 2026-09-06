@@ -44,6 +44,8 @@ from scripts.verify_owner_dashboard_deployment import (
 MIGRATION_NAME = re.compile(r"^(?P<version>\d{8}(?:\d{4})?)_[a-z0-9][a-z0-9_]*\.sql$")
 SUPABASE_CLI_VERSION = "2.116.0"
 MIGRATION_LEDGER = "public.stock_agent_release_migration_ledger"
+RECONCILIATION_BASELINE_PATH = "sql/reconciliation/20261004_production_schema_reconciliation.sql"
+RECONCILIATION_BASELINE_VERSION = "20261004"
 RELEASE_LEASE = "public.stock_agent_release_mutation_lease"
 RELEASE_LEASE_SECONDS = 900
 CANONICAL_ATTEMPT_LEASE_OWNER = re.compile(r"^(release|recovery)-([1-9][0-9]*)-([1-9][0-9]*)$")
@@ -612,6 +614,19 @@ def candidate_migration_manifest(migrations_directory: Path = ROOT / "sql/migrat
     return manifest
 
 
+def reconciliation_baseline_manifest() -> dict[str, str]:
+    """Bind the one permitted baseline receipt to its reviewed SQL bytes."""
+    path = ROOT / RECONCILIATION_BASELINE_PATH
+    if not path.is_file() or path.is_symlink() or path.parent.is_symlink() or path.parent.parent.is_symlink():
+        raise RuntimeError("reconciliation baseline source is unavailable or unsafe")
+    try:
+        statements = normalize_migration_statements(path.read_bytes().decode("utf-8"))
+    except UnicodeDecodeError as error:
+        raise RuntimeError("reconciliation baseline source is not UTF-8") from error
+    return {"path": RECONCILIATION_BASELINE_PATH, "version": RECONCILIATION_BASELINE_VERSION,
+            "sha256": migration_statements_sha256(statements)}
+
+
 def apply_release_migrations(
     cursor, manifest: Sequence[Mapping[str, str]] | None = None,
     migrations_directory: Path = ROOT / "sql/migrations",
@@ -636,7 +651,8 @@ def apply_release_migrations(
     if not manifest or any(not isinstance(row, Mapping) or not valid_item(row) for row in manifest):
         raise RuntimeError("candidate migration manifest is incomplete or unordered")
     expected_paths = [row["path"] for row in manifest]
-    if expected_paths != sorted(expected_paths) or len(expected_paths) != len(set(expected_paths)):
+    if (expected_paths != sorted(expected_paths) or len(expected_paths) != len(set(expected_paths))
+            or len({item["version"] for item in manifest}) != len(manifest)):
         raise RuntimeError("candidate migration manifest is incomplete or unordered")
     cursor.execute(
         f"CREATE TABLE IF NOT EXISTS {MIGRATION_LEDGER} ("
@@ -649,18 +665,49 @@ def apply_release_migrations(
     if not isinstance(prior, list):
         raise RuntimeError("migration ledger receipt is malformed")
     known: dict[str, tuple[str, str]] = {}
+    private_versions: set[str] = set()
     for row in prior:
         if not isinstance(row, Sequence) or len(row) != 3 or not all(isinstance(value, str) for value in row):
             raise RuntimeError("migration ledger receipt is malformed")
         path, version, digest = row
-        if path in known or not re.fullmatch(r"[0-9a-f]{64}", digest):
+        item = {"path": path, "version": version, "sha256": digest}
+        is_baseline = path == RECONCILIATION_BASELINE_PATH and version == RECONCILIATION_BASELINE_VERSION
+        if (path in known or version in private_versions or not re.fullmatch(r"[0-9a-f]{64}", digest)
+                or not (is_baseline or valid_item(item))):
             raise RuntimeError("migration ledger receipt is malformed")
         known[path] = (version, digest)
+        private_versions.add(version)
     # Native Supabase is an immutable prefix; this transaction records a
     # contiguous private suffix for DDL it applies directly. This permits a
     # retry after a post-migration failure without accepting gaps or drift.
     cursor.execute("SELECT version, statements FROM supabase_migrations.schema_migrations ORDER BY version FOR UPDATE")
     legacy = cursor.fetchall()
+    if (not isinstance(legacy, list) or any(
+            not isinstance(row, Sequence) or isinstance(row, (str, bytes)) or len(row) != 2
+            or not isinstance(row[0], str) or not isinstance(row[1], Sequence)
+            or isinstance(row[1], (str, bytes)) or not row[1]
+            or not all(isinstance(part, str) for part in row[1]) for row in legacy)):
+        raise RuntimeError("native migration receipt is malformed")
+    subsumed: set[str] = set()
+    has_baseline = (RECONCILIATION_BASELINE_PATH in known
+                    or any(row[0] == RECONCILIATION_BASELINE_VERSION for row in legacy))
+    if has_baseline:
+        baseline = reconciliation_baseline_manifest()
+        if (known.get(baseline["path"]) != (baseline["version"], baseline["sha256"])
+                or len(legacy) != 1 or legacy[0][0] != baseline["version"]
+                or migration_statements_sha256(legacy[0][1]) != baseline["sha256"]
+                or any(item["version"] == baseline["version"] for item in manifest)):
+            raise RuntimeError("reconciliation migration baseline pair is invalid")
+        subsumed = {item["path"] for item in manifest if item["version"] < baseline["version"]}
+        future = [item for item in manifest if item["version"] > baseline["version"]]
+        suffix = {path: value for path, value in known.items() if path != baseline["path"]}
+        expected_suffix = {item["path"]: (item["version"], item["sha256"]) for item in future[:len(suffix)]}
+        if suffix != expected_suffix:
+            raise RuntimeError("reconciliation migration suffix is not an exact candidate prefix")
+        # The historical files are covered by this actual baseline execution;
+        # they have no individual execution rows and must never acquire any.
+        known = suffix
+        legacy = []
     by_version: dict[str, list[Mapping[str, str]]] = {}
     for item in manifest:
         by_version.setdefault(item["version"], []).append(item)
@@ -682,12 +729,13 @@ def apply_release_migrations(
         raise RuntimeError("native migration state is not an exact candidate prefix")
     if known and any(known.get(path) != value for path, value in native.items()):
         raise RuntimeError("native/private migration ledgers diverge")
-    if not known:
+    if not known and not has_baseline:
         for path, (version, digest) in native.items():
             cursor.execute(f"INSERT INTO {MIGRATION_LEDGER} (path, version, sha256) VALUES (%s, %s, %s)", (path, version, digest))
         known = dict(native)
     private_paths = [item["path"] for item in manifest if item["path"] in known]
-    if private_paths != expected_paths[:len(private_paths)] or len(known) != len(private_paths):
+    active_paths = [path for path in expected_paths if path not in subsumed]
+    if private_paths != active_paths[:len(private_paths)] or len(known) != len(private_paths):
         raise RuntimeError("migration state is not an exact candidate prefix")
     applied: list[dict[str, str]] = []
     skipped: list[dict[str, str]] = []
@@ -699,6 +747,9 @@ def apply_release_migrations(
         actual = migration_statements_sha256(normalize_migration_statements(raw.decode("utf-8")))
         if item["sha256"] != actual:
             raise RuntimeError("candidate migration hash mismatch")
+        if item["path"] in subsumed:
+            skipped.append(dict(item))
+            continue
         try: sql = raw.decode("utf-8")
         except UnicodeDecodeError as error: raise RuntimeError("candidate migration is not UTF-8") from error
         existing = known.get(item["path"])

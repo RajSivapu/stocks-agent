@@ -491,6 +491,37 @@ def test_actual_migration_retry_invokes_release_migration_contract_and_requires_
     assert len(seen) == 1
 
 
+def test_actual_migration_retry_accepts_truthful_baseline_without_writing_historical_rows(tmp_path, monkeypatch):
+    import hashlib
+    import scripts.deploy_owner_dashboard_api as deploy
+    from scripts.managed_isolated_restore import ManagedRestoreTarget
+
+    path = "sql/reconciliation/20261004_production_schema_reconciliation.sql"
+    source = tmp_path / path
+    source.parent.mkdir(parents=True)
+    source.write_text("SELECT 1;")
+    monkeypatch.setattr(deploy, "ROOT", tmp_path)
+    queries = []
+
+    def api(_method, _path, payload=None):
+        query = payload["query"]
+        queries.append(query)
+        if query.startswith("SELECT path, version, sha256"):
+            return [{"path": path, "version": "20261004", "sha256": hashlib.sha256(b'["SELECT 1"]').hexdigest()}]
+        if query.startswith("SELECT version, statements"):
+            return [{"version": "20261004", "statements": ["SELECT 1"]}]
+        if query.startswith("CREATE TABLE IF NOT EXISTS public.stock_agent_release_migration_ledger"):
+            return []
+        raise AssertionError("baseline retry attempted unexpected SQL")
+
+    target = ManagedRestoreTarget(api, "r" * 20, "p" * 20, created_project_ref="r" * 20)
+    receipt = target.retry_release_migrations()
+
+    assert receipt["applied"] == []
+    assert receipt["skipped"] == [item["version"] for item in deploy.candidate_migration_manifest()]
+    assert len(queries) == 3
+
+
 def test_management_restore_resets_transaction_sequence_like_the_existing_postgres_target():
     from scripts.managed_isolated_restore import ManagedRestoreTarget
 
