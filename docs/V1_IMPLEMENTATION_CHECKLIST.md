@@ -19,7 +19,7 @@ An owner-only personal stock agent that uses zero-incremental-cost data sources,
 - [x] Final GPT-6 Astra re-review approved at exact code commit `883d521`
 - [x] Astra remediation merged to protected `main`; exact-main CI passed at `c9e3140`
 - [x] Database ledger read back as current; gateway v33, dashboard API v4, and Telegram v20 deployed with runtime-byte parity
-- [x] Private owner Site published and owner/anonymous API canaries passed
+- [x] Private owner Site v5 published from exact `main` merge `ba3ebc1`; reviewed bundle parity and owner/anonymous API canaries passed
 - [x] Live free-tier Auth read back and browser updated to accept its signed email link as well as six-digit codes
 - [ ] Protected-workflow, isolated-restore, formal non-owner, and scheduled-chain receipts
 
@@ -71,7 +71,7 @@ These require the protected production path and must not be replaced by local ev
 - [x] Pass exact-main CI
 - [ ] Run the protected deployment workflow
 - [x] Verify owner-operated deployed byte/version parity for gateway, dashboard API, Telegram function, and owner web site
-- [ ] Publish this signed-link-compatible web build and verify its new Site deployment receipt
+- [x] Publish the signed-link-compatible web build as Site v5; deployment `appgdep_6a9cd0def8f0819187aa7d30d99a7ada` succeeded
 - [ ] Complete an owner email sign-in canary on that new Site build
 - [ ] Perform the protected restore drill and retain its receipt
 - [ ] Retain a formal non-owner login denial receipt (anonymous denial already passed)

@@ -5,9 +5,9 @@ Canonical release: Personal Stock Agent V1 safety remediation
 Audit baseline: `432d647ef911ff63da427097f02a852e18038b62` on `origin/main`
 Consolidated local-gate candidate: `883d521728b1b3c2700a78dab1d65208105d7a2f`
 Current state: the Astra remediation is merged, the exact-main CI gate passed, all three reviewed
-Edge functions are deployed with runtime-byte readback, and the private owner Site is live. The
-signed-link-compatible Site refresh is in progress. Remaining release evidence includes that refresh,
-the protected workflow/restore, formal non-owner login, and the next existing scheduled receipts.
+Edge functions are deployed with runtime-byte readback, and signed-link-compatible private Site v5
+is live. Remaining release evidence includes the protected workflow/restore, owner email-click and
+formal non-owner login canaries, and the next existing scheduled receipts.
 
 This file is the version-controlled source of truth for the Personal Stock Agent V1 rollout.
 `docs/ROADMAP.md` records the implementation sequence and remaining release gates.
@@ -79,7 +79,7 @@ separately; deployment never substitutes for the protected-workflow, restore, or
 | F15 — misleading outcome/weekly calculations | Implemented | Task 11 groups losses per eligible recommendation, aligns benchmark windows, uses session highs/lows, distinguishes fills, and retains veto-only weeks. Closed through `f7af10f`; production observation pending. |
 | F16 — recovery unproven | Local mechanism and disposable drill implemented; live drill pending | Task 10 creates authenticated encrypted exports, exact schema/receipt reconciliation, durable rollback artifacts, and an isolated disposable-runtime restore drill. A protected live isolated restore has not been performed. |
 | F17 — excessive read privilege/unpinned Python | Implemented | Task 11 uses a restricted read-only weekly role with verified TLS and installs a complete hash-locked binary dependency set, including recovery cryptography. Closed through `f7af10f`; live runtime is deployed and protected-workflow receipt pending. |
-| F18 — token refresh defeats idle lock | Implemented | Task 2 moves the privacy deadline only on explicit owner activity, never token refresh. Closed through `ce6d9a7`; signed-link-compatible Site refresh pending. |
+| F18 — token refresh defeats idle lock | Implemented | Task 2 moves the privacy deadline only on explicit owner activity, never token refresh. Closed through `ce6d9a7`; signed-link-compatible Site v5 is live and the owner email-click canary is pending. |
 | F19 — early close/quote identity gaps | Implemented | Task 11 models maintained 2026 early closes, fails closed outside coverage, and rejects wrong symbol/currency or unknown halt/spread/liquidity. Closed through `f7af10f`; deployed, scheduled evidence pending. |
 
 ## Owner email sign-in
@@ -163,11 +163,9 @@ V1-C6 is reopened and the release remains no-go for trusted use.
 
 ## Immediate next gates
 
-1. Publish the email-link-compatible web build through the owner-operated native Sites path and
-   retain its authoritative version/deployment receipt.
+1. Complete the owner email-click and formal non-owner denial canaries.
 2. Complete the protected-workflow and isolated live-restore evidence without weakening preflight.
-3. Complete the formal non-owner denial canary.
-4. Reconcile the next existing scheduled chain without triggering a duplicate.
+3. Reconcile the next existing scheduled chain without triggering a duplicate.
 
 ## Consolidated local evidence
 
@@ -200,9 +198,11 @@ sync, focused PostgreSQL restore/retry evidence, and `git diff --check` also pas
 ## Production truth
 
 Production contains the reviewed Astra remediation: gateway version 33, owner-dashboard API version
-4, Telegram function version 20, an up-to-date remote migration ledger, and the private owner Site.
-The owner API returned all nine bounded projections to an ephemeral owner canary and denied anonymous
-access. This is not yet proof of the GitHub protected workflow, an isolated live restore, a formal
+4, Telegram function version 20, an up-to-date remote migration ledger, and private Site version 5
+from exact `main` merge `ba3ebc1`. Site deployment `appgdep_6a9cd0def8f0819187aa7d30d99a7ada`
+succeeded; the live login bundle hash exactly matches the reviewed build. The owner API returned all
+nine bounded projections to an ephemeral owner canary and denied anonymous access. This is not yet
+proof of the GitHub protected workflow, an isolated live restore, an owner email-click, a formal
 non-owner login denial, or a post-remediation scheduled receipt chain.
 
 ## Decisions and guardrails
