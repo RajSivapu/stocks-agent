@@ -209,13 +209,14 @@ class ManagedRestoreTarget:
         self.execute(resolved.read_text())
 
     def reproduce_role_shapes(self, roles: object) -> None:
+        from scripts.protected_evidence import RECOVERY_SQL
+
         if not isinstance(roles, list):
             raise RuntimeError("recovery role shapes are unavailable")
         expected = {"stock_agent_dashboard", "stock_agent_dashboard_runtime"}
         by_name = {row.get("role"): row for row in roles if isinstance(row, Mapping)}
         if set(by_name) != expected:
             raise RuntimeError("recovery must contain exactly the two expected role shapes")
-        statements: list[str] = []
         for role in sorted(expected):
             row = by_name[role]
             expected_login = role == "stock_agent_dashboard_runtime"
@@ -223,19 +224,16 @@ class ManagedRestoreTarget:
             if (row.get("login") is not expected_login or row.get("inherit") is not expected_inherit
                     or row.get("superuser") is not False or row.get("bypass_rls") is not False):
                 raise RuntimeError("recovery role shape has unsafe authority")
-            login_shape = "LOGIN INHERIT PASSWORD NULL" if expected_login else "NOLOGIN NOINHERIT"
-            statements.append("DO $$ BEGIN IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = '%s') THEN CREATE ROLE %s %s NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS; END IF; END $$" % (role, role, login_shape))
-            statements.append(f"ALTER ROLE {role} {login_shape} NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS")
-            statements.append("DO $$ DECLARE parent text; BEGIN FOR parent IN SELECT p.rolname FROM pg_auth_members m JOIN pg_roles p ON p.oid=m.roleid JOIN pg_roles child ON child.oid=m.member WHERE child.rolname='%s' LOOP EXECUTE format('REVOKE %%I FROM %%I',parent,'%s'); END LOOP; END $$" % (role, role))
-            statements.append(f"REVOKE ALL PRIVILEGES ON ALL TABLES IN SCHEMA public FROM {role}")
             memberships = row.get("memberships")
             grants = row.get("grants")
             if not isinstance(memberships, list) or not isinstance(grants, list):
                 raise RuntimeError("recovery role shape is malformed")
+            expected_memberships = ["stock_agent_dashboard"] if expected_login else []
+            if memberships != expected_memberships:
+                raise RuntimeError("recovery role membership is unsafe")
             for parent in memberships:
                 if not isinstance(parent, str) or not re.fullmatch(r"[a-z_][a-z0-9_]{0,62}", parent):
                     raise RuntimeError("recovery role membership is invalid")
-                statements.append(f"GRANT {parent} TO {role}")
             for grant in grants:
                 if not isinstance(grant, str):
                     raise RuntimeError("recovery role grant is invalid")
@@ -245,14 +243,26 @@ class ManagedRestoreTarget:
                 if match is None or match.group(1) not in {"SELECT", "INSERT", "UPDATE", "DELETE", "TRUNCATE", "REFERENCES", "TRIGGER", "EXECUTE", "USAGE"}:
                     raise RuntimeError("recovery role grant is invalid")
                 privilege, object_name, column, grantable = match.groups()
-                suffix = " WITH GRANT OPTION" if grantable == "true" else ""
                 if column is not None:
                     if privilege not in {"SELECT", "INSERT", "UPDATE", "REFERENCES"}:
                         raise RuntimeError("recovery column grant is invalid")
-                    statements.append(f"GRANT {privilege} ({column}) ON {object_name} TO {role}{suffix}")
-                else:
-                    statements.append(f"GRANT {privilege} ON {object_name} TO {role}{suffix}")
+        # schema.sql already creates and grants the bounded dashboard privilege
+        # role.  The hosted writer is intentionally not a superuser, so it may
+        # not ALTER protected role attributes even to their safe false values.
+        # Create only the fresh runtime login, with no password, then prove the
+        # complete exported role snapshot matches the schema without replaying
+        # hundreds of redundant column grants.
+        statements = [
+            "DO $$ DECLARE r record; BEGIN SELECT rolcanlogin,rolinherit,rolsuper,rolcreatedb,rolcreaterole,rolreplication,rolbypassrls INTO r FROM pg_roles WHERE rolname='stock_agent_dashboard'; IF NOT FOUND OR r.rolcanlogin OR r.rolinherit OR r.rolsuper OR r.rolcreatedb OR r.rolcreaterole OR r.rolreplication OR r.rolbypassrls THEN RAISE EXCEPTION 'schema dashboard role is missing or unsafe'; END IF; END $$",
+            "DO $$ BEGIN IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname='stock_agent_dashboard_runtime') THEN RAISE EXCEPTION 'isolated runtime role already exists'; END IF; CREATE ROLE stock_agent_dashboard_runtime LOGIN INHERIT NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS; END $$",
+            "GRANT stock_agent_dashboard TO stock_agent_dashboard_runtime",
+        ]
         self.execute("BEGIN;" + ";".join(statements) + ";COMMIT")
+        actual = self.execute(RECOVERY_SQL["roles"])
+        ordered_expected = sorted((dict(row) for row in roles), key=lambda row: str(row["role"]))
+        ordered_actual = sorted(actual, key=lambda row: str(row.get("role")))
+        if canonical_json(ordered_actual) != canonical_json(ordered_expected):
+            raise RuntimeError("isolated restore role shapes do not match recovery")
 
     def restore_records(self, records: Mapping[str, list[dict[str, object]]]) -> None:
         from scripts.export_recovery_bundle import _validated_records

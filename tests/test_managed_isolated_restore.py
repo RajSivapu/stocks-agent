@@ -323,16 +323,47 @@ def test_role_recreation_preserves_dashboard_nologin_and_runtime_login_inherit_w
     from scripts.managed_isolated_restore import ManagedRestoreTarget
 
     queries = []
-    target = ManagedRestoreTarget(lambda _method, _path, payload=None: queries.append(payload["query"]) or [],
-                                  "r" * 20, "p" * 20, created_project_ref="r" * 20)
-    target.reproduce_role_shapes([
+    roles = [
         {"role": "stock_agent_dashboard", "login": False, "inherit": False, "superuser": False, "bypass_rls": False,
-         "memberships": [], "grants": []},
+         "memberships": [], "grants": ["SELECT:public.holdings.ticker:grantable=false"]},
         {"role": "stock_agent_dashboard_runtime", "login": True, "inherit": True, "superuser": False, "bypass_rls": False,
          "memberships": ["stock_agent_dashboard"], "grants": []},
-    ])
-    assert "ALTER ROLE stock_agent_dashboard NOLOGIN" in queries[-1]
-    assert "ALTER ROLE stock_agent_dashboard_runtime LOGIN INHERIT PASSWORD NULL" in queries[-1]
+    ]
+    def api(_method, _path, payload=None):
+        queries.append(payload["query"])
+        return roles if len(queries) == 2 else []
+
+    target = ManagedRestoreTarget(api,
+                                  "r" * 20, "p" * 20, created_project_ref="r" * 20)
+    target.reproduce_role_shapes(roles)
+    assert len(queries) == 2
+    assert "CREATE ROLE stock_agent_dashboard_runtime LOGIN INHERIT NOSUPERUSER" in queries[0]
+    assert "PASSWORD" not in queries[0]
+    assert "ALTER ROLE" not in queries[0]
+    assert "GRANT SELECT (ticker)" not in queries[0]
+    assert "FROM pg_catalog.pg_roles" in queries[1]
+
+
+def test_role_recreation_fails_closed_when_schema_role_grants_do_not_match_recovery():
+    from scripts.managed_isolated_restore import ManagedRestoreTarget
+
+    roles = [
+        {"role": "stock_agent_dashboard", "login": False, "inherit": False, "superuser": False, "bypass_rls": False,
+         "memberships": [], "grants": ["SELECT:public.holdings.ticker:grantable=false"]},
+        {"role": "stock_agent_dashboard_runtime", "login": True, "inherit": True, "superuser": False, "bypass_rls": False,
+         "memberships": ["stock_agent_dashboard"], "grants": []},
+    ]
+    actual = [dict(row) for row in roles]
+    actual[0] = {**actual[0], "grants": []}
+    calls = 0
+    def api(_method, _path, payload=None):
+        nonlocal calls
+        calls += 1
+        return actual if calls == 2 else []
+
+    target = ManagedRestoreTarget(api, "r" * 20, "p" * 20, created_project_ref="r" * 20)
+    with pytest.raises(RuntimeError, match="role shapes do not match"):
+        target.reproduce_role_shapes(roles)
 
 
 def test_provisioner_uses_organization_slug_and_ignores_other_org_and_paused_projects_for_free_slot():
