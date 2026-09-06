@@ -15,6 +15,7 @@ it("keeps three daily destinations primary and places audit views under Advanced
       </ThemeProvider>
     </MemoryRouter>,
   );
+  expect(screen.getByRole("link", { name: /skip to main content/i })).toHaveAttribute("href", "#main-content");
   expect(screen.getByRole("navigation", { name: /primary/i })).toBeVisible();
   const primary = screen.getByRole("navigation", { name: /primary/i });
   const primaryLinks = within(primary).getAllByRole("link");
