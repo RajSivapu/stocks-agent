@@ -11,6 +11,20 @@ PRIOR_SHA = "b" * 40
 EMPTY_ROOT = hashlib.sha256(b"").hexdigest()
 
 
+def _hosted_writer_capabilities():
+    return {
+        "role": "postgres",
+        "transaction_read_only": "off",
+        "database": "postgres",
+        "superuser": False,
+        "createrole": True,
+        "bypassrls": True,
+        "database_create": True,
+        "public_schema_usage": True,
+        "public_schema_create": True,
+    }
+
+
 def _catalog():
     from scripts.inspect_production_schema_baseline import (
         AUTHORIZATION_ROLES, _CATALOG_FIELDS, _validate_catalog,
@@ -172,22 +186,58 @@ def test_snapshot_is_authenticated_encrypted_and_sidecar_contains_no_rows_or_sec
         Fernet(key).decrypt(bytes(altered))
 
 
-def test_writer_identity_requires_exact_postgres_superuser_and_write_transaction():
+def test_writer_identity_accepts_exact_hosted_postgres_capabilities():
     from scripts.reconcile_production_schema import verify_writer_identity
 
     calls = []
+    identity = _hosted_writer_capabilities()
+
     def request(method, path, payload=None):
         calls.append((method, path, payload))
-        return [{"role": "postgres", "transaction_read_only": "off", "database": "postgres", "superuser": True}]
-    verify_writer_identity(request, PROJECT_REF)
+        return [identity]
+
+    assert verify_writer_identity(request, PROJECT_REF) == identity
     assert calls[0][1] == f"/v1/projects/{PROJECT_REF}/database/query"
-    for field, value in (("role", "other"), ("transaction_read_only", "on"), ("superuser", False)):
-        def unsafe(_method, _path, _payload=None, field=field, value=value):
-            row = {"role": "postgres", "transaction_read_only": "off", "database": "postgres", "superuser": True}
-            row[field] = value
-            return [row]
+    query = calls[0][2]["query"]
+    assert "role.rolsuper AS superuser" in query
+    assert "role.rolcreaterole AS createrole" in query
+    assert "role.rolbypassrls AS bypassrls" in query
+    assert "has_database_privilege(current_user, current_database(), 'CREATE') AS database_create" in query
+    assert "has_schema_privilege(current_user, 'public', 'USAGE') AS public_schema_usage" in query
+    assert "has_schema_privilege(current_user, 'public', 'CREATE') AS public_schema_create" in query
+
+
+def test_writer_identity_rejects_malformed_missing_or_unsafe_capabilities():
+    from scripts.reconcile_production_schema import verify_writer_identity
+
+    identity = _hosted_writer_capabilities()
+    unsafe_responses = [
+        [],
+        [identity, identity],
+        [{**identity, "unexpected": True}],
+        [{key: value for key, value in identity.items() if key != "database_create"}],
+        [{**identity, "role": "other"}],
+        [{**identity, "transaction_read_only": "on"}],
+        [{**identity, "database": "other"}],
+        [{**identity, "superuser": True}],
+        *(
+            [{**identity, field: False}]
+            for field in (
+                "createrole",
+                "bypassrls",
+                "database_create",
+                "public_schema_usage",
+                "public_schema_create",
+            )
+        ),
+        [{**identity, "database_create": "true"}],
+    ]
+    for response in unsafe_responses:
         with pytest.raises(RuntimeError, match="writer identity"):
-            verify_writer_identity(unsafe, PROJECT_REF)
+            verify_writer_identity(
+                lambda _method, _path, _payload=None, response=response: response,
+                PROJECT_REF,
+            )
 
 
 def test_mutation_is_one_transaction_with_finite_guards_projected_roots_and_truthful_ledgers(tmp_path):
@@ -203,6 +253,12 @@ def test_mutation_is_one_transaction_with_finite_guards_projected_roots_and_trut
     assert query.count("BEGIN;") == 1 and query.rstrip().endswith("COMMIT;")
     assert "SET LOCAL statement_timeout = '120s'" in query
     assert "SET LOCAL lock_timeout = '10s'" in query
+    identity_guard = query[query.index("DO $identity$"):query.index("$identity$;", query.index("DO $identity$") + 1)]
+    assert "current_database() <> 'postgres'" in identity_guard
+    assert "NOT rolsuper AND rolcreaterole AND rolbypassrls" in identity_guard
+    assert "has_database_privilege(current_user, current_database(), 'CREATE') IS NOT TRUE" in identity_guard
+    assert "has_schema_privilege(current_user, 'public', 'USAGE') IS NOT TRUE" in identity_guard
+    assert "has_schema_privilege(current_user, 'public', 'CREATE') IS NOT TRUE" in identity_guard
     assert "pg_advisory_xact_lock(hashtextextended('stock_agent_protected_release', 0))" in query
     assert "jsonb_build_object('ticker', row.ticker, 'shares', row.shares)" in query
     assert path.read_text().strip() in query
@@ -232,10 +288,8 @@ def test_uncertain_outcome_is_observed_atomically_under_the_writer_lock(tmp_path
     def request(method, route, payload=None):
         calls.append((method, route, payload))
         return [{
+            **_hosted_writer_capabilities(),
             "lock_acquired": True,
-            "role": "postgres",
-            "transaction_read_only": "off",
-            "superuser": True,
             "statement_timeout_ms": 120000,
             "catalog": _inventory()["catalog"],
             "relation_presence": _inventory()["relation_presence"],
@@ -256,8 +310,64 @@ def test_uncertain_outcome_is_observed_atomically_under_the_writer_lock(tmp_path
     assert calls[0][1] == f"/v1/projects/{PROJECT_REF}/database/query"
     query = calls[0][2]["query"]
     assert "pg_try_advisory_xact_lock(hashtextextended('stock_agent_protected_release', 0))" in query
+    assert "current_database() AS database" in query
+    assert "role.rolcreaterole AS createrole" in query
+    assert "role.rolbypassrls AS bypassrls" in query
+    assert "has_database_privilege(current_user, current_database(), 'CREATE') AS database_create" in query
+    assert "has_schema_privilege(current_user, 'public', 'USAGE') AS public_schema_usage" in query
+    assert "has_schema_privilege(current_user, 'public', 'CREATE') AS public_schema_create" in query
     assert "relation_presence" in query and "protected_roots" in query
     assert "native_receipts_xml" in query and "private_receipts_xml" in query
+
+
+def test_locked_observer_rejects_malformed_missing_or_unsafe_capabilities(tmp_path):
+    from scripts.reconcile_production_schema import (
+        load_reconciliation_sql,
+        observe_reconciliation_state,
+    )
+
+    path = tmp_path / "sql/reconciliation/20261004_production_schema_reconciliation.sql"
+    path.parent.mkdir(parents=True)
+    path.write_text("CREATE TABLE public.new_final_state(id bigint);\n")
+    base_row = {
+        **_hosted_writer_capabilities(),
+        "lock_acquired": True,
+        "statement_timeout_ms": 120000,
+        "catalog": _inventory()["catalog"],
+        "relation_presence": _inventory()["relation_presence"],
+        "protected_roots": _inventory()["protected_roots"],
+        "native_receipts_xml": None,
+        "private_receipts_xml": None,
+    }
+    unsafe_responses = [
+        [],
+        [None],
+        [{**base_row, "unexpected": True}],
+        [{key: value for key, value in base_row.items() if key != "public_schema_create"}],
+        [{**base_row, "database": "other"}],
+        [{**base_row, "superuser": True}],
+        *(
+            [{**base_row, field: False}]
+            for field in (
+                "createrole",
+                "bypassrls",
+                "database_create",
+                "public_schema_usage",
+                "public_schema_create",
+            )
+        ),
+        [{**base_row, "public_schema_usage": "true"}],
+    ]
+    reconciliation = load_reconciliation_sql(tmp_path)
+    for response in unsafe_responses:
+        with pytest.raises(RuntimeError, match="locked reconciliation"):
+            observe_reconciliation_state(
+                lambda _method, _route, _payload=None, response=response: response,
+                PROJECT_REF,
+                MAIN_SHA,
+                _inventory(),
+                reconciliation,
+            )
 
 
 @pytest.mark.parametrize(
