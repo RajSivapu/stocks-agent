@@ -98,8 +98,10 @@ _CATALOG_FIELDS: Final[dict[str, tuple[str, ...]]] = {
     "policies": ("schema", "relation", "name", "command", "permissive", "roles", "using_sha256", "check_sha256"),
     "acls": ("object_kind", "schema", "object", "grantee", "grantor", "privilege", "grantable"),
     "column_acls": ("schema", "relation", "column", "grantee", "grantor", "privilege", "grantable"),
-    "schema_acls": ("schema", "grantee", "grantor", "privilege", "grantable"),
+    "schema_acls": ("schema", "owner", "grantee", "grantor", "privilege", "grantable"),
     "default_privileges": ("scope", "owner", "object_type", "grantee", "grantor", "privilege", "grantable"),
+    "default_acl_sets": ("scope", "owner", "object_type", "acl_sha256", "is_empty"),
+    "authorization_capabilities": ("server_version_num", "membership_options_supported"),
     "roles": ("name", "exists", "login", "inherit", "superuser", "bypassrls", "createrole", "createdb", "replication", "member_of"),
     "memberships": ("member", "role", "grantor", "admin_option", "inherit_option", "set_option"),
 }
@@ -114,8 +116,10 @@ _CATALOG_IDENTITIES: Final[dict[str, tuple[str, ...]]] = {
     "policies": ("schema", "relation", "name"),
     "acls": ("object_kind", "schema", "object", "grantee", "grantor", "privilege"),
     "column_acls": ("schema", "relation", "column", "grantee", "grantor", "privilege"),
-    "schema_acls": ("schema", "grantee", "grantor", "privilege"),
+    "schema_acls": ("schema", "owner", "grantee", "grantor", "privilege"),
     "default_privileges": ("scope", "owner", "object_type", "grantee", "grantor", "privilege"),
+    "default_acl_sets": ("scope", "owner", "object_type"),
+    "authorization_capabilities": ("server_version_num",),
     "roles": ("name",),
     "memberships": ("member", "role", "grantor"),
 }
@@ -224,7 +228,7 @@ relations AS (
   FROM pg_catalog.pg_class AS c
   JOIN pg_catalog.pg_namespace AS n ON n.oid = c.relnamespace
   CROSS JOIN LATERAL pg_catalog.aclexplode(COALESCE(c.relacl,
-    pg_catalog.acldefault(CASE WHEN c.relkind = 'S' THEN 'S'::"char" ELSE 'r'::"char" END, c.relowner))) AS x
+    pg_catalog.acldefault(CASE WHEN c.relkind = 'S' THEN 's'::"char" ELSE 'r'::"char" END, c.relowner))) AS x
   LEFT JOIN pg_catalog.pg_roles AS grantee ON grantee.oid = x.grantee
   JOIN pg_catalog.pg_roles AS grantor ON grantor.oid = x.grantor
   WHERE n.nspname = 'public' AND c.relkind IN ('r', 'p', 'v', 'm', 'f', 'S')
@@ -252,10 +256,11 @@ relations AS (
   WHERE n.nspname = 'public' AND c.relkind IN ('r', 'p', 'v', 'm', 'f')
     AND a.attnum > 0 AND NOT a.attisdropped AND a.attacl IS NOT NULL
 ), schema_acls AS (
-  SELECT jsonb_build_object('schema', n.nspname, 'grantee', COALESCE(grantee.rolname, 'PUBLIC'),
+  SELECT jsonb_build_object('schema', n.nspname, 'owner', owner.rolname, 'grantee', COALESCE(grantee.rolname, 'PUBLIC'),
     'grantor', grantor.rolname, 'privilege', x.privilege_type, 'grantable', x.is_grantable) AS item
   FROM pg_catalog.pg_namespace AS n
   CROSS JOIN LATERAL pg_catalog.aclexplode(COALESCE(n.nspacl, pg_catalog.acldefault('n', n.nspowner))) AS x
+  JOIN pg_catalog.pg_roles AS owner ON owner.oid = n.nspowner
   LEFT JOIN pg_catalog.pg_roles AS grantee ON grantee.oid = x.grantee
   JOIN pg_catalog.pg_roles AS grantor ON grantor.oid = x.grantor
   WHERE n.nspname = 'public'
@@ -271,6 +276,18 @@ relations AS (
   LEFT JOIN pg_catalog.pg_roles AS grantee ON grantee.oid = x.grantee
   JOIN pg_catalog.pg_roles AS grantor ON grantor.oid = x.grantor
   WHERE defaults.defaclnamespace IN (0, public_schema.oid)
+), default_acl_sets AS (
+  SELECT jsonb_build_object('scope', CASE WHEN defaults.defaclnamespace = 0 THEN 'global' ELSE 'public' END,
+    'owner', owner.rolname, 'object_type', defaults.defaclobjtype::text,
+    'acl_sha256', encode(extensions.digest(convert_to(COALESCE(to_jsonb(defaults.defaclacl)::text, 'null'), 'UTF8'), 'sha256'), 'hex'),
+    'is_empty', COALESCE(cardinality(defaults.defaclacl), 0) = 0) AS item
+  FROM pg_catalog.pg_default_acl AS defaults
+  JOIN pg_catalog.pg_namespace AS public_schema ON public_schema.nspname = 'public'
+  JOIN pg_catalog.pg_roles AS owner ON owner.oid = defaults.defaclrole
+  WHERE defaults.defaclnamespace IN (0, public_schema.oid)
+), authorization_capabilities AS (
+  SELECT jsonb_build_object('server_version_num', current_setting('server_version_num')::int,
+    'membership_options_supported', current_setting('server_version_num')::int >= 160000) AS item
 ), roles AS (
   SELECT jsonb_build_object('name', expected_roles.role_name, 'exists', role.oid IS NOT NULL,
     'login', COALESCE(role.rolcanlogin, false), 'inherit', COALESCE(role.rolinherit, false),
@@ -286,8 +303,8 @@ relations AS (
 ), memberships AS (
   SELECT jsonb_build_object('member', member_role.rolname, 'role', parent.rolname, 'grantor', grantor.rolname,
     'admin_option', membership.admin_option,
-    'inherit_option', COALESCE(to_jsonb(membership)->'inherit_option', 'false'::jsonb),
-    'set_option', COALESCE(to_jsonb(membership)->'set_option', 'false'::jsonb)) AS item
+    'inherit_option', to_jsonb(membership)->'inherit_option',
+    'set_option', to_jsonb(membership)->'set_option') AS item
   FROM pg_catalog.pg_auth_members AS membership
   JOIN pg_catalog.pg_roles AS member_role ON member_role.oid = membership.member
   JOIN pg_catalog.pg_roles AS parent ON parent.oid = membership.roleid
@@ -307,6 +324,8 @@ SELECT
     'column_acls', COALESCE((SELECT jsonb_agg(item ORDER BY item::text) FROM column_acls), '[]'::jsonb),
     'schema_acls', COALESCE((SELECT jsonb_agg(item ORDER BY item::text) FROM schema_acls), '[]'::jsonb),
     'default_privileges', COALESCE((SELECT jsonb_agg(item ORDER BY item::text) FROM default_privileges), '[]'::jsonb),
+    'default_acl_sets', COALESCE((SELECT jsonb_agg(item ORDER BY item::text) FROM default_acl_sets), '[]'::jsonb),
+    'authorization_capabilities', COALESCE((SELECT jsonb_agg(item ORDER BY item::text) FROM authorization_capabilities), '[]'::jsonb),
     'roles', COALESCE((SELECT jsonb_agg(item ORDER BY item::text) FROM roles), '[]'::jsonb),
     'memberships', COALESCE((SELECT jsonb_agg(item ORDER BY item::text) FROM memberships), '[]'::jsonb)
   ) AS catalog,
@@ -332,28 +351,45 @@ def _root_relation_names(relations: list[dict[str, object]]) -> tuple[str, ...]:
 
 def _roots_query(relations: tuple[str, ...]) -> str:
     catalog_query = _catalog_query()
+    relation_literals = ",".join("'%s'" % relation for relation in relations) or "NULL"
+    limb_sums = " || ':' || ".join(
+        "COALESCE(sum((get_byte(row_hash, %d) * 256 + get_byte(row_hash, %d))::numeric), 0)::text" % (offset, offset + 1)
+        for offset in range(0, 32, 2)
+    )
     parts = []
     for relation in relations:
         parts.append(
             "SELECT '%s'::text AS relation, count(*)::bigint AS count, "
-            "encode(extensions.digest(convert_to(count(*)::text || ':' || "
-            "COALESCE(bit_xor(('x' || encode(extensions.digest(convert_to(to_jsonb(row)::text, 'UTF8'), 'sha256'), 'hex'))::bit(256))::text, "
-            "repeat('0', 256)), 'UTF8'), 'sha256'), 'hex') AS root_sha256 "
-            "FROM public.%s AS row CROSS JOIN root_settings" % (relation, relation)
+            "encode(extensions.digest(convert_to(count(*)::text || ':' || %s, 'UTF8'), 'sha256'), 'hex') AS root_sha256 "
+            "FROM (SELECT extensions.digest(convert_to(to_jsonb(row)::text, 'UTF8'), 'sha256') AS row_hash "
+            "FROM public.%s AS row CROSS JOIN root_guard) AS row_hashes" % (relation, limb_sums, relation)
         )
     root_rows = " UNION ALL ".join(parts) if parts else "SELECT NULL::text AS relation, 0::bigint AS count, NULL::text AS root_sha256 WHERE false"
     return f"""
-WITH root_settings AS (
-  SELECT set_config('row_security', 'off', true), set_config('statement_timeout', '30000', true)
-), root_identity AS (
-  SELECT current_user AS role, current_setting('transaction_read_only') AS transaction_read_only,
-    current_setting('row_security') AS row_security FROM root_settings
+WITH root_guard AS MATERIALIZED (
+  SELECT role.rolname AS role, current_setting('transaction_read_only') AS transaction_read_only,
+    current_setting('row_security') AS row_security, role.rolbypassrls AS bypassrls,
+    settings.setting::int AS statement_timeout_ms,
+    1 / CASE WHEN settings.setting::int BETWEEN 1 AND 30000
+      AND (SELECT count(*) FROM pg_catalog.pg_class AS c
+           JOIN pg_catalog.pg_namespace AS n ON n.oid = c.relnamespace
+           WHERE n.nspname = 'public' AND c.relkind IN ('r', 'p') AND c.relname IN ({relation_literals})) = {len(relations)}
+      AND NOT EXISTS (SELECT 1 FROM pg_catalog.pg_class AS c
+          JOIN pg_catalog.pg_namespace AS n ON n.oid = c.relnamespace
+          WHERE n.nspname = 'public' AND c.relkind IN ('r', 'p') AND c.relname IN ({relation_literals})
+            AND c.relrowsecurity AND NOT role.rolbypassrls
+            AND NOT (c.relowner = role.oid AND NOT c.relforcerowsecurity))
+      THEN 1 ELSE 0 END AS permission
+  FROM pg_catalog.pg_roles AS role
+  JOIN pg_catalog.pg_settings AS settings ON settings.name = 'statement_timeout'
+  WHERE role.rolname = current_user
 ), roots AS ({root_rows})
 SELECT root_identity.root_identity, snapshot.catalog, snapshot.relation_presence,
   COALESCE((SELECT jsonb_agg(jsonb_build_object('relation', relation, 'count', count, 'root_sha256', root_sha256)
     ORDER BY relation) FROM roots), '[]'::jsonb) AS protected_roots
 FROM (SELECT jsonb_build_object('role', role, 'transaction_read_only', transaction_read_only,
-  'row_security', row_security) AS root_identity FROM root_identity) AS root_identity
+  'row_security', row_security, 'bypassrls', bypassrls, 'statement_timeout_ms', statement_timeout_ms) AS root_identity
+  FROM root_guard) AS root_identity
 CROSS JOIN ({catalog_query}) AS snapshot
 """.strip()
 
@@ -379,16 +415,19 @@ def _validate_catalog(catalog: object) -> dict[str, list[dict[str, object]]]:
             if not isinstance(value, Mapping) or set(value) != set(fields):
                 raise RuntimeError("schema catalog is malformed")
             item = dict(value)
-            if category not in {"roles", "memberships", "default_privileges"} and item.get("schema") != "public":
+            if category not in {"roles", "memberships", "default_privileges", "default_acl_sets", "authorization_capabilities"} and item.get("schema") != "public":
                 raise RuntimeError("schema catalog contains an unexpected schema")
             for key, field in item.items():
-                if key in {"position"}:
+                if key in {"position", "server_version_num"}:
                     if not isinstance(field, int) or field < 1:
                         raise RuntimeError("schema catalog is malformed")
                 elif key in {"not_null", "has_default", "security_definer", "grantable", "row_security", "force_row_security",
                              "exists", "login", "inherit", "superuser", "bypassrls", "createrole", "createdb", "replication",
-                             "permissive", "valid", "ready", "live", "admin_option", "inherit_option", "set_option"}:
+                             "permissive", "valid", "ready", "live", "admin_option", "is_empty", "membership_options_supported"}:
                     if not isinstance(field, bool):
+                        raise RuntimeError("schema catalog is malformed")
+                elif key in {"inherit_option", "set_option"}:
+                    if field is not None and not isinstance(field, bool):
                         raise RuntimeError("schema catalog is malformed")
                 elif key in {"roles", "member_of"}:
                     if (not isinstance(field, list) or not all(isinstance(role, str) and role for role in field)
@@ -401,11 +440,13 @@ def _validate_catalog(catalog: object) -> dict[str, list[dict[str, object]]]:
                         raise RuntimeError("schema catalog is malformed")
                 else:
                     _require_string(field, key)
+            if category == "authorization_capabilities" and (not isinstance(item["server_version_num"], int) or item["server_version_num"] < 90_000):
+                raise RuntimeError("schema catalog is malformed")
             if category == "relations" and item["kind"] not in {"r", "p", "v", "m", "f", "S", "i", "I", "c"}:
                 raise RuntimeError("schema catalog is malformed")
             if category == "functions" and item["kind"] not in {"f", "a", "p", "w"}:
                 raise RuntimeError("schema catalog is malformed")
-            if category == "default_privileges" and (item["scope"] not in {"global", "public"} or item["object_type"] not in {"r", "S", "f", "T", "n"}):
+            if category in {"default_privileges", "default_acl_sets"} and (item["scope"] not in {"global", "public"} or item["object_type"] not in {"r", "S", "f", "T", "n"}):
                 raise RuntimeError("schema catalog is malformed")
             if category == "memberships" and item["member"] not in AUTHORIZATION_ROLES:
                 raise RuntimeError("schema catalog is malformed")
@@ -418,6 +459,15 @@ def _validate_catalog(catalog: object) -> dict[str, list[dict[str, object]]]:
     roles = checked["roles"]
     if len(roles) != len(AUTHORIZATION_ROLES) or {item["name"] for item in roles} != set(AUTHORIZATION_ROLES):
         raise RuntimeError("schema authorization roles are malformed")
+    capabilities = checked["authorization_capabilities"]
+    if len(capabilities) != 1:
+        raise RuntimeError("schema authorization capabilities are malformed")
+    supports_membership_options = capabilities[0]["membership_options_supported"]
+    if supports_membership_options != (capabilities[0]["server_version_num"] >= 160000):
+        raise RuntimeError("schema authorization capabilities are inconsistent")
+    for membership in checked["memberships"]:
+        if supports_membership_options != (isinstance(membership["inherit_option"], bool) and isinstance(membership["set_option"], bool)):
+            raise RuntimeError("schema membership option support is inconsistent")
     return checked
 
 
@@ -478,14 +528,24 @@ def inspect_production_schema(request, project_ref: str, main_sha: str) -> dict[
     if len(root_rows) != 1 or set(root_rows[0]) != {"root_identity", "catalog", "relation_presence", "protected_roots"}:
         raise RuntimeError("protected root response is malformed")
     root_identity = root_rows[0]["root_identity"]
-    if (not isinstance(root_identity, Mapping) or set(root_identity) != {"role", "transaction_read_only", "row_security"}
+    if (not isinstance(root_identity, Mapping) or set(root_identity) != {"role", "transaction_read_only", "row_security", "bypassrls", "statement_timeout_ms"}
             or root_identity.get("role") != "supabase_read_only_user"
-            or root_identity.get("transaction_read_only") != "on" or root_identity.get("row_security") != "off"):
-        raise RuntimeError("protected root identity is unavailable or filtered")
+            or root_identity.get("transaction_read_only") != "on"
+            or not isinstance(root_identity.get("row_security"), str)
+            or not isinstance(root_identity.get("bypassrls"), bool)
+            or not isinstance(root_identity.get("statement_timeout_ms"), int)
+            or not 1 <= root_identity["statement_timeout_ms"] <= 30_000):
+        raise RuntimeError("protected root identity is unavailable or unsafe")
     root_catalog = _validate_catalog(root_rows[0]["catalog"])
     root_presence = _validate_presence(root_rows[0]["relation_presence"], root_catalog["relations"])
     if canonical_json(root_catalog) != canonical_json(catalog) or canonical_json(root_presence) != canonical_json(presence):
         raise RuntimeError("protected root catalog snapshot changed during inventory")
+    for relation in root_catalog["relations"]:
+        if relation["name"] not in root_relations:
+            continue
+        if relation["row_security"] and not root_identity["bypassrls"] and not (
+                relation["owner"] == root_identity["role"] and not relation["force_row_security"]):
+            raise RuntimeError("protected root visibility is incomplete")
     roots = _validate_roots(root_rows[0]["protected_roots"], root_relations)
 
     receipt: dict[str, object] = {
@@ -494,7 +554,7 @@ def inspect_production_schema(request, project_ref: str, main_sha: str) -> dict[
         "production_binding_sha256": _sha256(("stocks-production-schema-inventory-v1\\0" + project_ref).encode()),
         "relation_presence": presence,
         "catalog": catalog,
-        "root_algorithm": "sha256-row-xor-v1",
+        "root_algorithm": "sha256-row-limb-sum-v1",
         "protected_roots": roots,
     }
     receipt["receipt_sha256"] = _sha256(canonical_json(receipt).encode())

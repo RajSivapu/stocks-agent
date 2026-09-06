@@ -67,10 +67,13 @@ def _catalog():
                   "grantee": "dashboard", "grantor": "postgres", "privilege": "SELECT", "grantable": False}],
         "column_acls": [{"schema": "public", "relation": "holdings", "column": "ticker", "grantee": "dashboard",
                          "grantor": "postgres", "privilege": "SELECT", "grantable": False}],
-        "schema_acls": [{"schema": "public", "grantee": "dashboard", "grantor": "postgres",
+        "schema_acls": [{"schema": "public", "owner": "postgres", "grantee": "dashboard", "grantor": "postgres",
                          "privilege": "USAGE", "grantable": False}],
         "default_privileges": [{"scope": "public", "owner": "postgres", "object_type": "r",
                                 "grantee": "dashboard", "grantor": "postgres", "privilege": "SELECT", "grantable": False}],
+        "default_acl_sets": [{"scope": "public", "owner": "postgres", "object_type": "r",
+                              "acl_sha256": "f" * 64, "is_empty": True}],
+        "authorization_capabilities": [{"server_version_num": 170000, "membership_options_supported": True}],
         "roles": [
             {"name": name, "exists": True, "login": login, "inherit": inherit, "superuser": False,
              "bypassrls": False, "createrole": False, "createdb": False, "replication": False,
@@ -107,7 +110,8 @@ class FakeReadOnlyApi:
         assert path == f"/v1/projects/{PROJECT_REF}/database/query/read-only"
         query = payload["query"]
         if "protected_roots" in query:
-            return [{"root_identity": {"role": "supabase_read_only_user", "transaction_read_only": "on", "row_security": "off"},
+            return [{"root_identity": {"role": "supabase_read_only_user", "transaction_read_only": "on", "row_security": "on",
+                                        "bypassrls": True, "statement_timeout_ms": 30000},
                      "catalog": self.catalog, "relation_presence": _presence(self.catalog), "protected_roots": self.roots}]
         if "current_user AS role" in query:
             return [self.identity]
@@ -153,6 +157,8 @@ def test_inspection_roots_every_validated_public_base_or_partitioned_table_and_f
     assert "default_sha256" in catalog_query
     assert "relrowsecurity" in catalog_query and "relforcerowsecurity" in catalog_query
     assert "WHEN role_oid = 0 THEN 'PUBLIC'" in catalog_query
+    assert "THEN 's'::\"char\"" in catalog_query
+    assert "default_acl_sets" in catalog_query
     assert "rolpassword" not in catalog_query
 
 
@@ -163,16 +169,20 @@ def test_inspection_captures_full_authorization_and_uses_bounded_full_visibility
     receipt = inspect_production_schema(api, PROJECT_REF, MAIN_SHA)
 
     assert receipt["catalog"]["column_acls"][0]["column"] == "ticker"
-    assert receipt["catalog"]["schema_acls"][0]["privilege"] == "USAGE"
+    assert receipt["catalog"]["schema_acls"][0]["owner"] == "postgres"
     assert receipt["catalog"]["default_privileges"][0]["scope"] == "public"
     assert receipt["catalog"]["memberships"][0]["inherit_option"] is True
     assert receipt["catalog"]["functions"][0]["owner"] == "postgres"
     assert receipt["catalog"]["indexes"][0]["live"] is True
+    assert receipt["catalog"]["default_acl_sets"][0]["is_empty"] is True
+    assert receipt["catalog"]["authorization_capabilities"][0]["membership_options_supported"] is True
     root_query = api.calls[2][2]["query"]
-    assert "set_config('row_security', 'off', true)" in root_query
-    assert "set_config('statement_timeout'" in root_query
+    assert "set_config('row_security'" not in root_query
+    assert "set_config('statement_timeout'" not in root_query
+    assert "statement_timeout" in root_query and "rolbypassrls" in root_query
     assert "jsonb_agg(to_jsonb(row)" not in root_query
-    assert "bit_xor" in root_query
+    assert "bit_xor" not in root_query
+    assert "sum(" in root_query
 
 
 def test_inspection_rejects_roots_without_full_visibility_or_matching_catalog_snapshot():
@@ -182,10 +192,10 @@ def test_inspection_rejects_roots_without_full_visibility_or_matching_catalog_sn
         def __call__(self, method, path, payload=None):
             response = super().__call__(method, path, payload)
             if "protected_roots" in payload["query"]:
-                response[0]["root_identity"]["row_security"] = "on"
+                response[0]["root_identity"]["bypassrls"] = False
             return response
 
-    with pytest.raises(RuntimeError, match="root identity"):
+    with pytest.raises(RuntimeError, match="root visibility"):
         inspect_production_schema(FilteredRootApi(), PROJECT_REF, MAIN_SHA)
 
     class ChangedCatalogApi(FakeReadOnlyApi):
@@ -197,6 +207,17 @@ def test_inspection_rejects_roots_without_full_visibility_or_matching_catalog_sn
 
     with pytest.raises(RuntimeError, match="snapshot"):
         inspect_production_schema(ChangedCatalogApi(), PROJECT_REF, MAIN_SHA)
+
+
+def test_inspection_preserves_unsupported_membership_options_as_unknown_not_false():
+    from scripts.inspect_production_schema_baseline import inspect_production_schema
+
+    catalog = _catalog()
+    catalog["authorization_capabilities"][0] = {"server_version_num": 150000, "membership_options_supported": False}
+    catalog["memberships"][0]["inherit_option"] = None
+    catalog["memberships"][0]["set_option"] = None
+    receipt = inspect_production_schema(FakeReadOnlyApi(catalog=catalog), PROJECT_REF, MAIN_SHA)
+    assert receipt["catalog"]["memberships"][0]["inherit_option"] is None
 
 
 def test_inspection_rejects_inconsistent_post_marker_presence_and_dynamic_root_sets(monkeypatch):
