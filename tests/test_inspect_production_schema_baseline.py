@@ -303,6 +303,44 @@ def test_root_preflight_guard_failures_prevent_root_query(root_preflight, messag
     assert all("protected_roots" not in call[2]["query"] for call in api.calls)
 
 
+def test_root_preflight_accepts_platform_timeout_ceiling():
+    from scripts.inspect_production_schema_baseline import _validate_root_preflight
+
+    _validate_root_preflight([{
+        "role": "supabase_read_only_user",
+        "transaction_read_only": "on",
+        "row_security": "on",
+        "rolbypassrls": True,
+        "statement_timeout_ms": 60000,
+        "relation_count": 8,
+        "full_visibility": True,
+    }], 8)
+
+
+@pytest.mark.parametrize("statement_timeout_ms", (0, 60001))
+def test_root_preflight_rejects_timeout_outside_platform_bound(statement_timeout_ms):
+    from scripts.inspect_production_schema_baseline import _validate_root_preflight
+
+    with pytest.raises(RuntimeError, match="root preflight statement timeout"):
+        _validate_root_preflight([{
+            "role": "supabase_read_only_user",
+            "transaction_read_only": "on",
+            "row_security": "on",
+            "rolbypassrls": True,
+            "statement_timeout_ms": statement_timeout_ms,
+            "relation_count": 8,
+            "full_visibility": True,
+        }], 8)
+
+
+def test_root_guard_sql_uses_shared_platform_timeout_bound(monkeypatch):
+    import scripts.inspect_production_schema_baseline as inspector
+
+    monkeypatch.setattr(inspector, "MAX_ROOT_STATEMENT_TIMEOUT_MS", 43210)
+
+    assert "settings.setting::int BETWEEN 1 AND 43210" in inspector._roots_query(())
+
+
 @pytest.mark.parametrize(
     "root_preflight",
     (
