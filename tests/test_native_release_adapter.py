@@ -25,7 +25,9 @@ def adapter_module():
 class Supabase:
     def __init__(self):
         self.functions = {name: {"id": name + "-id", "slug": name, "version": 3,
-            "verify_jwt": False, "entrypoint_path": "index.ts", "import_map_path": None,
+            "verify_jwt": False,
+            "entrypoint_path": f"file:///tmp/function/source/supabase/functions/{name}/index.ts",
+            "import_map": False,
             "files": {"index.ts": b"old\x00bytes", "deno.json": b"{}"}} for name in release.FUNCTIONS}
         self.secrets = {name: "old-" + name for name in release.MANAGED_SECRETS}
         self.calls = []
@@ -50,12 +52,14 @@ class Supabase:
             cfg = tomllib.loads((Path(cwd) / "supabase/config.toml").read_text())["functions"][name]
             old = self.functions.get(name, {"version": 0})
             self.functions[name] = {"id": name + "-id", "slug": name, "version": old["version"] + 1,
-                "verify_jwt": cfg["verify_jwt"], "entrypoint_path": "index.ts", "import_map_path": None,
+                "verify_jwt": cfg["verify_jwt"],
+                "entrypoint_path": f"file:///tmp/function/source/supabase/functions/{name}/index.ts",
+                "import_map": False,
                 "files": {path.relative_to(root).as_posix(): path.read_bytes() for path in root.rglob("*") if path.is_file()}}
         elif args[:2] == ["functions", "delete"]:
             self.functions.pop(args[2], None)
         elif args[:2] == ["secrets", "list"]:
-            output = json.dumps([{"name": name, "digest": hashlib.sha256(value.encode()).hexdigest()} for name, value in self.secrets.items()])
+            output = json.dumps([{"name": name, "value": hashlib.sha256(value.encode()).hexdigest()} for name, value in self.secrets.items()])
         elif args[:2] == ["secrets", "set"]:
             path = Path(args[args.index("--env-file") + 1])
             assert path.stat().st_mode & 0o777 == 0o600
@@ -126,6 +130,26 @@ def test_native_secret_capture_requires_recoverable_values_and_restores_partial_
     adapter.known_secrets = {}
     with pytest.raises(RuntimeError, match="secret.*digest"):
         adapter.capture("dashboard-secrets")
+
+
+@pytest.mark.parametrize("row", [None, {}, {"name": None}, {"name": ""}, {"name": 7}])
+def test_native_secret_inventory_rejects_malformed_platform_rows(row):
+    platform = Supabase()
+    adapter = native(platform)
+    adapter.runner = lambda _command, **_kwargs: SimpleNamespace(
+        returncode=0,
+        stdout=json.dumps([row]),
+        stderr="",
+    )
+    with pytest.raises(RuntimeError, match="secret inventory"):
+        adapter.capture("dashboard-secrets")
+
+
+def test_native_function_path_preserves_nested_standard_prefixes_after_source_root():
+    name = "market-briefing-gateway"
+    nested = f"nested/supabase/functions/{name}/index.ts"
+    value = f"file:///tmp/runtime/source/supabase/functions/{name}/{nested}"
+    assert adapter_module().function_path(value, name) == nested
 
 
 def test_native_download_detects_version_race():

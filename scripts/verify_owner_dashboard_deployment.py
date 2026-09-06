@@ -252,8 +252,10 @@ def obtain_ephemeral_owner_access_token(
         "POST", f"{project_url}/auth/v1/admin/generate_link", admin_headers, link_body,
     )
     link = _auth_json(link_status, link_response)
-    properties = link.get("properties")
-    token_hash = properties.get("hashed_token") if isinstance(properties, dict) else None
+    token_hash = link.get("hashed_token")
+    if not isinstance(token_hash, str):
+        properties = link.get("properties")
+        token_hash = properties.get("hashed_token") if isinstance(properties, dict) else None
     if not isinstance(token_hash, str) or not 8 <= len(token_hash) <= 512 or any(character.isspace() for character in token_hash):
         raise RuntimeError("ephemeral owner session link receipt is malformed")
 

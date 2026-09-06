@@ -58,8 +58,16 @@ def function_path(value, name):
     # Management-plane paths may include this standard source prefix. Do not
     # accept machine-specific absolute paths or dependencies outside the capture.
     value = value.removeprefix("./")
-    for prefix in (f"supabase/functions/{name}/", f"functions/{name}/"):
-        if value.startswith(prefix): value = value[len(prefix):]; break
+    prefixes = (f"supabase/functions/{name}/", f"functions/{name}/")
+    if value.startswith("file://"):
+        source_prefixes = tuple(f"/source/{prefix}" for prefix in prefixes)
+        matches = [prefix for prefix in source_prefixes if prefix in value]
+        if len(matches) != 1 or value.count(matches[0]) != 1:
+            raise RuntimeError("exact function configuration has an unsafe path")
+        value = value.split(matches[0], 1)[1]
+    else:
+        for prefix in prefixes:
+            if value.startswith(prefix): value = value[len(prefix):]; break
     if (not value or PurePosixPath(value).is_absolute() or "\\" in value
             or any(part in {"", ".", ".."} for part in value.split("/"))):
         raise RuntimeError("exact function configuration has an unsafe path")
@@ -110,6 +118,25 @@ class NativeReleaseAdapter:
         try: return json.loads(result.stdout)
         except (ValueError, TypeError) as error: raise RuntimeError("Supabase inventory is malformed") from error
 
+    def _secret_inventory(self):
+        rows = self._command(["secrets", "list", "--output", "json"], json_output=True)
+        if not isinstance(rows, list):
+            raise RuntimeError("managed secret inventory is unavailable")
+        inventory = []
+        for row in rows:
+            if not isinstance(row, dict):
+                raise RuntimeError("managed secret inventory is malformed")
+            name = row.get("name")
+            if not isinstance(name, str) or not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", name):
+                raise RuntimeError("managed secret inventory is malformed")
+            if name not in MANAGED_SECRETS:
+                continue
+            digest = row.get("value")
+            if not isinstance(digest, str) or not re.fullmatch(r"[0-9a-f]{64}", digest):
+                raise RuntimeError("managed secret digest is unavailable")
+            inventory.append({"name": name, "digest": digest})
+        return inventory
+
     def _connection(self):
         url = self.environment.get("POSTGRES_URL")
         if not url: raise RuntimeError("protected PostgreSQL administrator endpoint is required")
@@ -125,10 +152,16 @@ class NativeReleaseAdapter:
         if (not isinstance(row.get("id"), str) or not row["id"]
                 or type(row.get("version")) is not int or row["version"] <= 0
                 or type(row.get("verify_jwt")) is not bool
-                or "entrypoint_path" not in row or "import_map_path" not in row):
+                or "entrypoint_path" not in row):
             raise RuntimeError("exact active function identity/version/configuration is unavailable")
+        if "import_map_path" in row:
+            import_map = row["import_map_path"]
+        elif row.get("import_map") is False:
+            import_map = None
+        else:
+            raise RuntimeError("exact active function import-map configuration is unavailable")
         config = {"verify_jwt": row["verify_jwt"], "entrypoint": function_path(row["entrypoint_path"], name),
-                  "import_map": function_path(row["import_map_path"], name) if row["import_map_path"] else None}
+                  "import_map": function_path(import_map, name) if import_map else None}
         return {"identity": row["id"], "version": str(row["version"]), "configuration": config}
 
     def _capture_function(self, name):
@@ -175,7 +208,7 @@ class NativeReleaseAdapter:
                 try: self.known_secrets = json.loads(self.environment.get("DASHBOARD_PRIOR_MANAGED_SECRETS_JSON", "{}"))
                 except ValueError as error: raise RuntimeError("protected prior managed secret values are malformed") from error
                 if not isinstance(self.known_secrets, dict): raise RuntimeError("protected prior managed secret values are malformed")
-            snapshot = capture_managed_secrets(self._command(["secrets", "list", "--output", "json"], json_output=True), self.known_secrets)
+            snapshot = capture_managed_secrets(self._secret_inventory(), self.known_secrets)
             literal_secret_values(snapshot["values"])
         else: raise RuntimeError("native component is not allowlisted")
         snapshot = validate_snapshot(name, snapshot)
@@ -229,7 +262,7 @@ class NativeReleaseAdapter:
             finally: self._refresh_known_secrets(current, values)
 
     def _refresh_known_secrets(self, prior, candidate):
-        rows = self._command(["secrets", "list", "--output", "json"], json_output=True)
+        rows = self._secret_inventory()
         known = {}
         for row in rows:
             key = row.get("name")
