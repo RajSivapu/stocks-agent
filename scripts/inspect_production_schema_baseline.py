@@ -36,7 +36,9 @@ MAIN_SHA = re.compile(r"[0-9a-f]{40}\Z")
 MAX_CATALOG_ROWS = 10_000
 MAX_ROOT_RELATIONS = 256
 MAX_ROOT_ROWS_PER_RELATION = 10_000
-MAX_ROOT_STATEMENT_TIMEOUT_MS = 60_000
+# Supabase caps Dashboard and external-tool/Postgres queries at two minutes;
+# accepting only that finite hosted ceiling keeps every root scan server-bounded.
+MAX_ROOT_STATEMENT_TIMEOUT_MS = 120_000
 MAX_ROLE_MEMBERSHIPS = 64
 MAX_RECEIPT_BYTES = 1_000_000
 _DIGEST = re.compile(r"[0-9a-f]{64}\Z")
