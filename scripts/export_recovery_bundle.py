@@ -119,7 +119,7 @@ DATASET_FIELDS = {
     },
     "policy_comparisons": {"id": str, "run_id": str, "packet_id": str, "evaluation_id": str,
                            "comparison": dict, "created_at": str},
-    "roles": {"role": str, "login": bool, "superuser": bool, "bypass_rls": bool, "memberships": list, "grants": list},
+    "roles": {"role": str, "login": bool, "inherit": bool, "superuser": bool, "bypass_rls": bool, "memberships": list, "grants": list},
     "schema_version": {"version": str, "statements": list, "sha256": str},
     "release_migration_ledger": {"path": str, "version": str, "sha256": str, "applied_at": str},
 }
@@ -195,6 +195,16 @@ def _validated_records(records: Mapping[str, object]) -> dict[str, list[dict[str
         if any(not all(identity) for identity in identities) or len(set(identities)) != len(identities):
             raise ValueError(f"recovery dataset {name} has duplicate or missing identities")
         result[name] = sorted(clean, key=canonical_json)
+    expected_role_shapes = {
+        "stock_agent_dashboard": {"login": False, "inherit": False},
+        "stock_agent_dashboard_runtime": {"login": True, "inherit": True},
+    }
+    if ({row["role"] for row in result["roles"]} != set(expected_role_shapes)
+            or any(row["superuser"] is not False or row["bypass_rls"] is not False
+                   or row["login"] is not expected_role_shapes[row["role"]]["login"]
+                   or row["inherit"] is not expected_role_shapes[row["role"]]["inherit"]
+                   for row in result["roles"])):
+        raise ValueError("recovery role shapes are invalid")
     runs = {row["id"] for row in result["runs"]}
     commands = {row["id"] for row in result["commands"]}
     requests = {row["request_id"] for row in result["gateway_requests"]}
@@ -415,7 +425,7 @@ def read_payload(path: Path) -> tuple[dict, dict]:
         manifest = json.loads(files["payload/manifest.json"])
         core = {key: value for key, value in manifest.items() if key != "root_hash"}
         if (set(core) != {"format", "record_sets", "files", "production_identity", "counts", "relationships", "secrets_included"}
-                or core["format"] != "stocks-agent-recovery-v4" or core["record_sets"] != list(REQUIRED_RECOVERY_RECORDS)
+                or core["format"] != "stocks-agent-recovery-v5" or core["record_sets"] != list(REQUIRED_RECOVERY_RECORDS)
                 or core["secrets_included"] is not False or manifest["root_hash"] != sha256(canonical_json(core).encode())
                 or set(core["files"]) != set(REQUIRED_RECOVERY_RECORDS)):
             raise ValueError("manifest root hash or fields invalid")
@@ -471,7 +481,7 @@ def export_recovery_bundle(source: RecoveryDataSource, destination: Path, *, enc
             files = {name: "".join(canonical_json(row) + "\n" for row in rows).encode() for name, rows in normalized.items()}
             if sum(map(len, files.values())) > MAX_PAYLOAD_BYTES - 1024 * 1024:
                 raise RuntimeError("complete recovery snapshot exceeds the payload limit")
-            core = {"format": "stocks-agent-recovery-v4", "record_sets": list(REQUIRED_RECOVERY_RECORDS),
+            core = {"format": "stocks-agent-recovery-v5", "record_sets": list(REQUIRED_RECOVERY_RECORDS),
                     "files": {name: {"path": f"data/{name}.ndjson", "sha256": sha256(raw), "records": counts[name]} for name, raw in files.items()},
                     "production_identity": identity, "counts": counts, "relationships": relationships(normalized), "secrets_included": False}
             manifest = {**core, "root_hash": sha256(canonical_json(core).encode())}

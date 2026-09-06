@@ -141,8 +141,12 @@ def recovery_records():
             "evaluation_id": "abcdef01-1111-4111-8111-111111111111", "comparison": {"advisory": True},
             "created_at": "2026-09-05T19:56:00Z",
         }],
-        "roles": [{"role": "stock_agent_dashboard", "login": False, "superuser": False, "bypass_rls": False,
-                   "memberships": [], "grants": ["SELECT:public.holdings"]}],
+        "roles": [
+            {"role": "stock_agent_dashboard", "login": False, "inherit": False, "superuser": False, "bypass_rls": False,
+             "memberships": [], "grants": ["SELECT:public.holdings"]},
+            {"role": "stock_agent_dashboard_runtime", "login": True, "inherit": True, "superuser": False, "bypass_rls": False,
+             "memberships": ["stock_agent_dashboard"], "grants": []},
+        ],
         "schema_version": [{"version": "20260926", "statements": ["SELECT 1"],
                             "sha256": hashlib.sha256(b"SELECT 1").hexdigest()}],
         "release_migration_ledger": [],
@@ -208,6 +212,7 @@ def test_recovery_exports_canonical_data_and_queries_isolated_restore(tmp_path, 
     source = FakeDatabase()
     artifact = export_recovery_bundle(source, tmp_path / "bundle.enc", **commands)
     sidecar = json.loads(artifact.with_suffix(".enc.receipt.json").read_text())
+    assert sidecar["format"] == "stocks-agent-recovery-v5"
     assert "VTI" not in json.dumps(sidecar)
     assert verify_recovery_bundle(artifact, restored(source), production_source=source, decrypt_command=commands["decrypt_command"])["status"] == "verified"
 
@@ -363,6 +368,8 @@ def test_verifier_applies_actual_isolated_postgres_restore_and_retains_uncertain
                 connection.execute("CREATE SCHEMA auth; CREATE FUNCTION auth.uid() RETURNS uuid LANGUAGE sql AS 'SELECT NULL::uuid'")
                 connection.execute("CREATE SCHEMA supabase_migrations; CREATE TABLE supabase_migrations.schema_migrations(version text PRIMARY KEY, statements text[])")
                 connection.execute(baseline_schema if database == "recovery_source" else schema)
+                connection.execute("DO $$ BEGIN IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname='stock_agent_dashboard_runtime') THEN CREATE ROLE stock_agent_dashboard_runtime LOGIN INHERIT PASSWORD NULL NOSUPERUSER NOBYPASSRLS; END IF; END $$")
+                connection.execute("GRANT stock_agent_dashboard TO stock_agent_dashboard_runtime")
 
             class DatabaseSource:
                 def __init__(self, connection, project, isolated=False):
