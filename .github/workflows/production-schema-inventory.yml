@@ -1,0 +1,61 @@
+name: Production schema inventory
+
+on:
+  workflow_dispatch:
+
+permissions:
+  actions: read
+  contents: read
+
+concurrency:
+  group: production-schema-inventory
+  cancel-in-progress: false
+
+jobs:
+  inventory:
+    environment: owner-dashboard-production
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: main
+          fetch-depth: 0
+      - uses: actions/setup-python@42375524e23c412d93fb67b49958b491fce71c38
+        with:
+          python-version: "3.14"
+      - name: Bind checkout to current main and its successful owner verification
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          test "${GITHUB_REF:-}" = "refs/heads/main" || { echo 'workflow ref is not main'; exit 1; }
+          git fetch --no-tags origin main
+          MAIN_SHA="$(gh api "repos/$GITHUB_REPOSITORY/git/ref/heads/main" --jq .object.sha)"
+          export MAIN_SHA
+          test "${GITHUB_SHA:-}" = "$MAIN_SHA" || { echo 'workflow SHA is not current main'; exit 1; }
+          test "$(git rev-parse HEAD)" = "$MAIN_SHA" || { echo 'checkout is not current main'; exit 1; }
+          VERIFIED="$(gh api "repos/$GITHUB_REPOSITORY/actions/workflows/owner-dashboard-ci.yml/runs?head_sha=$MAIN_SHA&status=completed&per_page=100" --jq '[.workflow_runs[] | select(.head_sha == env.MAIN_SHA and .conclusion == "success" and .name == "Owner dashboard verification" and .path == ".github/workflows/owner-dashboard-ci.yml")] | length')"
+          test "$VERIFIED" -ge 1 || { echo 'exact-main Owner dashboard verification is required'; exit 1; }
+          echo "MAIN_SHA=$MAIN_SHA" >> "$GITHUB_ENV"
+      - name: Install locked inventory dependencies
+        run: >-
+          python -m pip install --require-hashes --only-binary=:all: -r requirements.lock
+      - name: Inspect production schema through the read-only Management API
+        env:
+          SUPABASE_ACCESS_TOKEN: ${{ secrets.SUPABASE_ACCESS_TOKEN }}
+          SUPABASE_PROJECT_REF: ${{ secrets.SUPABASE_PROJECT_REF }}
+        run: |
+          set -euo pipefail
+          test -n "$SUPABASE_ACCESS_TOKEN" && test -n "$SUPABASE_PROJECT_REF"
+          python scripts/inspect_production_schema_baseline.py \
+            --production-project-ref "$SUPABASE_PROJECT_REF" \
+            --main-sha "$MAIN_SHA" \
+            --output "$RUNNER_TEMP/schema-inventory.json"
+      - name: Upload bounded schema inventory receipt
+        uses: actions/upload-artifact@65462800fd760344b1a7b4382951275a0abb4808
+        with:
+          name: production-schema-inventory-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/schema-inventory.json
+          if-no-files-found: error
+          retention-days: 90

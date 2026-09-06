@@ -1,6 +1,7 @@
 import copy
 import hashlib
 import json
+from pathlib import Path
 
 import pytest
 
@@ -139,3 +140,24 @@ def test_inspection_is_deterministic_bounded_and_never_serializes_rows_or_projec
     with pytest.raises(RuntimeError, match="catalog"):
         inspector.inspect_production_schema(FakeReadOnlyApi(), PROJECT_REF, MAIN_SHA)
 
+
+def test_schema_inventory_workflow_is_manual_protected_and_read_only():
+    workflow = Path(".github/workflows/production-schema-inventory.yml").read_text()
+
+    assert "workflow_dispatch:" in workflow
+    assert "schedule:" not in workflow and "workflow_run:" not in workflow
+    assert "environment: owner-dashboard-production" in workflow
+    assert "refs/heads/main" in workflow and "GITHUB_SHA" in workflow and "MAIN_SHA" in workflow
+    assert "owner-dashboard-ci.yml/runs?head_sha=$MAIN_SHA" in workflow
+    assert "--require-hashes --only-binary=:all: -r requirements.lock" in workflow
+    assert "SUPABASE_PROJECT_REF: ${{ secrets.SUPABASE_PROJECT_REF }}" in workflow
+    assert "vars.SUPABASE_PROJECT_REF" not in workflow
+    assert "inspect_production_schema_baseline.py" in workflow
+    assert "production-schema-inventory-${{ github.run_id }}-${{ github.run_attempt }}" in workflow
+    assert "retention-days: 90" in workflow
+    assert "managed_isolated_restore.py" not in workflow
+    assert "restore_gateway_after_release_failure.py" not in workflow
+    assert "SUPABASE_ACCESS_TOKEN" in workflow
+    for action in ("actions/checkout@", "actions/setup-python@", "actions/upload-artifact@"):
+        pinned = [line for line in workflow.splitlines() if action in line]
+        assert pinned and all(len(line.rsplit("@", 1)[1].strip()) == 40 for line in pinned)
