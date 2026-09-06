@@ -197,7 +197,7 @@ it("keeps run timing and policy metadata inside a per-run disclosure", async () 
   await user.click(screen.getByText(/run and alert receipts/i));
   await user.click(screen.getByText(/full run receipt/i));
   expect(screen.getByText(/policy 17/i)).toBeVisible();
-  expect(screen.getByText(/9\/3\/2026, 12:00:00 PM/i)).toBeVisible();
-  expect(screen.getByText(/9\/3\/2026, 12:02:00 PM/i)).toBeVisible();
-  expect(screen.getByText(/9\/3\/2026, 12:01:00 PM/i)).toBeVisible();
+  for (const timestamp of ["2026-09-03T17:00:00.000Z", "2026-09-03T17:02:00.000Z", "2026-09-03T17:01:00.000Z"]) {
+    expect(screen.getByText(new Date(timestamp).toLocaleString())).toBeVisible();
+  }
 });
