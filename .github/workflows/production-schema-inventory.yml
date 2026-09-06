@@ -2,6 +2,11 @@ name: Production schema inventory
 
 on:
   workflow_dispatch:
+    inputs:
+      ci_workflow_run_id:
+        description: Successful exact-main owner CI workflow run ID
+        required: true
+        type: string
 
 permissions:
   actions: read
@@ -27,16 +32,23 @@ jobs:
       - name: Bind checkout to current main and its successful owner verification
         env:
           GH_TOKEN: ${{ github.token }}
+          CI_WORKFLOW_RUN_ID: ${{ inputs.ci_workflow_run_id }}
         run: |
           set -euo pipefail
           test "${GITHUB_REF:-}" = "refs/heads/main" || { echo 'workflow ref is not main'; exit 1; }
           git fetch --no-tags origin main
           MAIN_SHA="$(gh api "repos/$GITHUB_REPOSITORY/git/ref/heads/main" --jq .object.sha)"
-          export MAIN_SHA
           test "${GITHUB_SHA:-}" = "$MAIN_SHA" || { echo 'workflow SHA is not current main'; exit 1; }
           test "$(git rev-parse HEAD)" = "$MAIN_SHA" || { echo 'checkout is not current main'; exit 1; }
-          VERIFIED="$(gh api "repos/$GITHUB_REPOSITORY/actions/workflows/owner-dashboard-ci.yml/runs?head_sha=$MAIN_SHA&status=completed&per_page=100" --jq '[.workflow_runs[] | select(.head_sha == env.MAIN_SHA and .conclusion == "success" and .name == "Owner dashboard verification" and .path == ".github/workflows/owner-dashboard-ci.yml")] | length')"
-          test "$VERIFIED" -ge 1 || { echo 'exact-main Owner dashboard verification is required'; exit 1; }
+          test -n "$CI_WORKFLOW_RUN_ID" && [[ "$CI_WORKFLOW_RUN_ID" =~ ^[0-9]+$ ]] || { echo 'numeric CI workflow run ID is required'; exit 1; }
+          CI="$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$CI_WORKFLOW_RUN_ID")"
+          test "$(jq -r .repository.full_name <<<"$CI")" = "$GITHUB_REPOSITORY" || { echo 'required CI belongs to another repository'; exit 1; }
+          test "$(jq -r .head_sha <<<"$CI")" = "$MAIN_SHA" || { echo 'required CI is not for current main'; exit 1; }
+          test "$(jq -r .status <<<"$CI")" = completed && test "$(jq -r .conclusion <<<"$CI")" = success || { echo 'required CI was not successful'; exit 1; }
+          test "$(jq -r .path <<<"$CI")" = .github/workflows/owner-dashboard-ci.yml || { echo 'wrong required CI workflow'; exit 1; }
+          test "$(jq -r .name <<<"$CI")" = "Owner dashboard verification" || { echo 'wrong required CI workflow name'; exit 1; }
+          test "$(jq -r .event <<<"$CI")" = push || { echo 'required CI was not a push run'; exit 1; }
+          test "$(jq -r .head_branch <<<"$CI")" = main || { echo 'required CI was not for the main branch'; exit 1; }
           echo "MAIN_SHA=$MAIN_SHA" >> "$GITHUB_ENV"
       - name: Install locked inventory dependencies
         run: >-

@@ -370,10 +370,21 @@ def test_schema_inventory_workflow_is_manual_protected_and_read_only():
     workflow = Path(".github/workflows/production-schema-inventory.yml").read_text()
 
     assert "workflow_dispatch:" in workflow
+    assert "ci_workflow_run_id:" in workflow
+    assert "CI_WORKFLOW_RUN_ID: ${{ inputs.ci_workflow_run_id }}" in workflow
     assert "schedule:" not in workflow and "workflow_run:" not in workflow
     assert "environment: owner-dashboard-production" in workflow
     assert "refs/heads/main" in workflow and "GITHUB_SHA" in workflow and "MAIN_SHA" in workflow
-    assert "owner-dashboard-ci.yml/runs?head_sha=$MAIN_SHA" in workflow
+    assert '[[ "$CI_WORKFLOW_RUN_ID" =~ ^[0-9]+$ ]]' in workflow
+    assert 'actions/runs/$CI_WORKFLOW_RUN_ID' in workflow
+    assert "owner-dashboard-ci.yml/runs?head_sha=$MAIN_SHA" not in workflow
+    assert ".repository.full_name" in workflow
+    assert ".head_sha" in workflow
+    assert ".status" in workflow and ".conclusion" in workflow
+    assert ".path" in workflow and ".name" in workflow
+    assert ".event" in workflow and ".head_branch" in workflow
+    assert "Owner dashboard verification" in workflow
+    assert ".github/workflows/owner-dashboard-ci.yml" in workflow
     assert "--require-hashes --only-binary=:all: -r requirements.lock" in workflow
     assert "SUPABASE_PROJECT_REF: ${{ secrets.SUPABASE_PROJECT_REF }}" in workflow
     assert "vars.SUPABASE_PROJECT_REF" not in workflow
