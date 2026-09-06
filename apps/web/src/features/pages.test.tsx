@@ -171,3 +171,19 @@ it("system summarizes health and keeps immutable receipt diagnostics available",
   expect(screen.getByRole("heading", { name: /write, send, and deploy boundaries/i })).toBeVisible();
   expect(screen.getByText(/no browser write route/i)).not.toBeVisible();
 });
+
+it("keeps the complete safe alert audit record inside a per-alert disclosure", async () => {
+  const user = userEvent.setup();
+  const alerts: AlertsView = { alerts: [{ id: "a", kind: "brief", phase: "intraday", state: "delivered", rendered_text: "Rendered owner alert", rendered_hash: "f".repeat(64), template_version: "3", telegram_message_ids: [42], attempt_count: 1, created_at: "2026-09-03T18:00:00.000Z", delivered_at: "2026-09-03T18:01:00.000Z", suppression_reason: null, rule_ticker: "MSFT", rule_state: "active", event_status: "triggered", owner_action: "acknowledged", sources: [{ label: "Official evidence", url: "https://www.sec.gov/example" }] }] };
+  const system: SystemView = { product_version: "v1", api_version: "v1", policy_version: 17, alert_mode: "shadow", latest_by_kind: {}, latest_publication_status: "delivered", boundaries, source_coverage: [], latest_report: null, latest_intelligence_run_id: null };
+  render(<MemoryRouter><SystemPage data={system} runs={{ runs: [] }} alerts={alerts} /></MemoryRouter>);
+
+  await user.click(screen.getByText(/run and alert receipts/i));
+  expect(screen.getByText("Rendered owner alert")).not.toBeVisible();
+  await user.click(screen.getByText(/full alert receipt/i));
+  expect(screen.getByText("Rendered owner alert")).toBeVisible();
+  expect(screen.getByText("f".repeat(64))).toBeVisible();
+  expect(screen.getByText(/template 3/i)).toBeVisible();
+  expect(screen.getByText(/MSFT/i)).toBeVisible();
+  expect(screen.getByRole("link", { name: /official evidence/i })).toHaveAttribute("href", "https://www.sec.gov/example");
+});

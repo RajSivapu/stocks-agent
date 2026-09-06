@@ -3,7 +3,8 @@ import { expect, it, vi } from "vitest";
 
 import { DashboardApiError, type DashboardClient } from "../api/client";
 import type { AuthClient } from "../auth/AuthProvider";
-import { App } from "./App";
+import type { ResourceState } from "../api/useDashboardResource";
+import { App, bannerState } from "./App";
 
 function authClient() {
   const signOut = vi.fn().mockResolvedValue({ error: null });
@@ -42,4 +43,23 @@ it("shows a bounded owner-only denial and clears private views on a 403", async 
   expect(await screen.findByRole("heading", { name: /owner-only access/i })).toBeVisible();
   expect(screen.getByText(/restricted to its owner/i)).toBeVisible();
   expect(screen.queryByText(/portfolio at a glance/i)).not.toBeInTheDocument();
+});
+
+it("keeps a combined view loading until every displayed child receipt settles", () => {
+  const ready = {
+    status: "ready",
+    envelope: {
+      contract_version: 1,
+      request_id: "request",
+      generated_at: "2026-09-06T18:00:00.000Z",
+      data_as_of: "2026-09-06T17:59:00.000Z",
+      freshness: "fresh",
+      market_state: "regular",
+      data: {},
+    },
+    error: null,
+  } satisfies ResourceState<unknown>;
+  const loading = { status: "loading", envelope: null, error: null } satisfies ResourceState<unknown>;
+
+  expect(bannerState(ready, [ready, ready, loading])).toMatchObject({ viewStatus: "loading" });
 });

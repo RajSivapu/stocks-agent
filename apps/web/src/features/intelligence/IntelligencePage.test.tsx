@@ -39,9 +39,9 @@ const partialFixture: IntelligenceView = {
   limitations: ["GDELT quota was bounded for this run."],
 };
 
-it("leads with portfolio-relevant events and collapses provider diagnostics", () => {
+it("leads with explicitly chronological research events and collapses provider diagnostics", () => {
   const { container } = render(<IntelligencePage data={partialFixture} />);
-  expect(screen.getByRole("heading", { name: /what may affect your portfolio/i })).toBeVisible();
+  expect(screen.getByRole("heading", { name: /current research events/i })).toBeVisible();
   expect(screen.getByText(/bounded official-source event summary/i)).toBeVisible();
   expect(screen.getByText(/source and coverage details/i)).toBeVisible();
   const details = container.querySelector("details.intelligence-details");
@@ -49,6 +49,7 @@ it("leads with portfolio-relevant events and collapses provider diagnostics", ()
   expect(screen.getByText(/1 unavailable source/i)).not.toBeVisible();
   expect(screen.getByText(/4 dropped items/i)).not.toBeVisible();
   expect(screen.queryByText(/all news/i)).not.toBeInTheDocument();
+  expect(screen.queryByText(/affect your portfolio/i)).not.toBeInTheDocument();
 });
 
 it("renders hostile event text inert and unsafe source URLs as text", () => {
@@ -63,5 +64,5 @@ it("states an explicit empty bounded-coverage limitation", () => {
   render(<IntelligencePage data={{ ...partialFixture, themes: [], events: [], candidates: [], sources: [], limitations: [] }} />);
   expect(screen.getByRole("heading", { name: /no intelligence receipt/i })).toBeVisible();
   expect(screen.getByText(/coverage is unavailable/i)).toBeVisible();
-  expect(screen.queryByRole("heading", { name: /what may affect your portfolio/i })).not.toBeInTheDocument();
+  expect(screen.queryByRole("heading", { name: /current research events/i })).not.toBeInTheDocument();
 });

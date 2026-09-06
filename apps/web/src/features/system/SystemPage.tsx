@@ -3,6 +3,7 @@ import { Link } from "react-router-dom";
 import type { AlertsView, RunsView, SystemView } from "@stocks-agent/dashboard-contracts";
 import type { ResourceState } from "../../api/useDashboardResource";
 import { AsyncView } from "../../components/AsyncView";
+import { SafeTelegramPreview } from "../../components/SafeTelegramPreview";
 
 const statusLabel = (value: string) => value.replaceAll("_", " ");
 
@@ -11,7 +12,7 @@ function RunReceipts({ data, fallback }: { data: RunsView; fallback: SystemView[
 }
 
 function AlertReceipts({ data }: { data: AlertsView }) {
-  return <section className="nested-section"><h3>Alert and send receipts</h3>{data.alerts.length > 0 ? <div className="card-grid">{data.alerts.map((alert) => <article className="card" key={alert.id}><p className="card-kicker">{alert.kind} · {alert.phase}</p><h3>{statusLabel(alert.state)}</h3><p>{alert.attempt_count} send attempt{alert.attempt_count === 1 ? "" : "s"} · Telegram message IDs {alert.telegram_message_ids.length > 0 ? alert.telegram_message_ids.join(", ") : "none"}</p>{alert.suppression_reason && <p>Suppression: {alert.suppression_reason}</p>}</article>)}</div> : <p className="empty-copy">No alert receipts are available.</p>}</section>;
+  return <section className="nested-section"><h3>Alert and send receipts</h3>{data.alerts.length > 0 ? <div className="card-grid">{data.alerts.map((alert) => <article className="card" key={alert.id}><p className="card-kicker">{alert.kind} · {alert.phase}</p><h3>{statusLabel(alert.state)}</h3><p>{alert.attempt_count} send attempt{alert.attempt_count === 1 ? "" : "s"} · Telegram message IDs {alert.telegram_message_ids.length > 0 ? alert.telegram_message_ids.join(", ") : "none"}</p>{alert.suppression_reason && <p>Suppression: {alert.suppression_reason}</p>}<details className="alert-receipt-details"><summary>Full alert receipt</summary><SafeTelegramPreview text={alert.rendered_text} links={alert.sources} /><dl className="receipt-meta"><div><dt>Hash</dt><dd>{alert.rendered_hash}</dd></div><div><dt>Template</dt><dd>Template {alert.template_version}</dd></div><div><dt>Created</dt><dd>{alert.created_at ? new Date(alert.created_at).toLocaleString() : "unavailable"}</dd></div><div><dt>Delivered</dt><dd>{alert.delivered_at ? new Date(alert.delivered_at).toLocaleString() : "not delivered"}</dd></div><div><dt>Rule / event / action</dt><dd>{[alert.rule_ticker, alert.rule_state, alert.event_status, alert.owner_action].filter(Boolean).join(" · ") || "not linked"}</dd></div></dl></details></article>)}</div> : <p className="empty-copy">No alert receipts are available.</p>}</section>;
 }
 
 export function SystemPage({ data, runs, alerts, runsState, alertsState }: { data: SystemView; runs?: RunsView; alerts?: AlertsView; runsState?: ResourceState<RunsView>; alertsState?: ResourceState<AlertsView> }) {

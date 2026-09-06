@@ -1,21 +1,13 @@
 import type { IdeaView } from "@stocks-agent/dashboard-contracts";
 
-function evidenceTime(idea: IdeaView) {
-  if (!idea.evidence_as_of) return Number.NEGATIVE_INFINITY;
-  const value = Date.parse(idea.evidence_as_of);
-  return Number.isNaN(value) ? Number.NEGATIVE_INFINITY : value;
-}
-
 export function splitIdeaVersions(ideas: IdeaView[]) {
-  const ordered = ideas
-    .map((idea, index) => ({ idea, index }))
-    .sort((left, right) => evidenceTime(right.idea) - evidenceTime(left.idea) || left.index - right.index)
-    .map(({ idea }) => idea);
   const tickers = new Set<string>();
   const current: IdeaView[] = [];
   const history: IdeaView[] = [];
 
-  for (const idea of ordered) {
+  // The API returns persisted suggestion rows in descending ID order. Preserve
+  // that ordering: evidence_as_of describes source age, not version creation.
+  for (const idea of ideas) {
     const ticker = idea.ticker.trim().toUpperCase();
     if (tickers.has(ticker)) history.push(idea);
     else {
@@ -29,5 +21,5 @@ export function splitIdeaVersions(ideas: IdeaView[]) {
 
 export function isActionNow(idea: IdeaView) {
   const action = idea.final_action?.trim().toLowerCase();
-  return Boolean(action && action !== "watch" && action !== "hold" && action !== "no action");
+  return idea.policy_status === "approved" && Boolean(action && ["buy", "add", "reduce", "sell"].includes(action));
 }

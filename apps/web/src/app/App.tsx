@@ -41,7 +41,7 @@ interface BannerState {
 
 const freshnessRank: Record<Freshness, number> = { fresh: 0, stale: 1, partial: 2, unavailable: 3 };
 
-function bannerState<T>(primary: ResourceState<T>, children: ResourceState<unknown>[] = []): BannerState {
+export function bannerState<T>(primary: ResourceState<T>, children: ResourceState<unknown>[] = []): BannerState {
   if (primary.status === "loading") return { dataTime: null, freshness: "unavailable", viewStatus: "loading" };
   if (primary.status === "error") return { dataTime: null, freshness: "unavailable", viewStatus: "error" };
   if (children.some((child) => child.status === "loading")) {
@@ -93,7 +93,7 @@ function PortfolioRoute({ client, token, onError, onSignOut }: { client: Dashboa
   const companion = useDashboardResource<CompanionView>(client, "/v1/companion", token, onError);
   const ideas = useDashboardResource<IdeasView>(client, "/v1/ideas", token, onError);
   const reports = useDashboardResource<ReportsView>(client, "/v1/reports", token, onError);
-  const banner = bannerState(portfolio, [overview, companion]);
+  const banner = bannerState(portfolio, [overview, companion, ideas, reports]);
   return <AppShell {...banner} onSignOut={onSignOut}><AsyncView state={portfolio}>{(data) => <PortfolioPage data={data} overviewState={overview} companionState={companion} ideasState={ideas} reportsState={reports} />}</AsyncView></AppShell>;
 }
 

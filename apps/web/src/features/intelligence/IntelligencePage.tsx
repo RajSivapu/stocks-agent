@@ -11,6 +11,13 @@ export function IntelligencePage({ data }: { data: IntelligenceView }) {
   const partial = data.sources.some((source) => source.status !== "complete");
   const empty = data.themes.length === 0 && data.events.length === 0 && data.candidates.length === 0 && data.sources.length === 0;
   const qualified = data.candidates.filter((candidate) => candidate.qualified).slice(0, 6);
+  const events = [...data.events].sort((left, right) => {
+    const leftTime = left.occurred_at ? Date.parse(left.occurred_at) : Number.NEGATIVE_INFINITY;
+    const rightTime = right.occurred_at ? Date.parse(right.occurred_at) : Number.NEGATIVE_INFINITY;
+    const safeLeft = Number.isNaN(leftTime) ? Number.NEGATIVE_INFINITY : leftTime;
+    const safeRight = Number.isNaN(rightTime) ? Number.NEGATIVE_INFINITY : rightTime;
+    return safeRight - safeLeft;
+  });
 
   if (empty) return <div className="page-stack"><header className="page-heading"><p className="eyebrow">Advanced research</p><h1>Intelligence</h1><p>Events and relationships discovered from queried approved sources.</p></header><section className="state-card"><h2>No intelligence receipt</h2><p>Source coverage is unavailable for this view. No broader market-coverage claim is made.</p></section></div>;
 
@@ -19,9 +26,9 @@ export function IntelligencePage({ data }: { data: IntelligenceView }) {
       <header className="page-heading"><p className="eyebrow">Advanced research</p><h1>Intelligence</h1><p>Events and relationships discovered from queried approved sources.</p></header>
 
       <section className="section-block">
-        <div className="section-heading"><div><p className="eyebrow">Current research</p><h2>What may affect your portfolio</h2></div><span className="count-chip">{data.events.length}</span></div>
-        {data.events.length === 0 ? <p className="empty-copy">No material event was persisted in the latest bounded run.</p> : <div className="card-grid">{data.events.slice(0, 6).map((event) => <article className="card" key={event.id}><p className="card-kicker">{event.type} · {event.materiality}</p><h3>{event.title}</h3><p>{event.summary}</p><p className="muted">Confidence {event.confidence} · {event.occurred_at ? new Date(event.occurred_at).toLocaleString() : "event time unavailable"}</p>{event.sources.length > 0 && <ul className="source-list">{event.sources.map((source, index) => <li key={`${source.label}-${index}`}><SafeSourceLink source={source} /></li>)}</ul>}</article>)}</div>}
-        {data.events.length > 6 && <p className="muted">Showing the six newest material events from this receipt.</p>}
+        <div className="section-heading"><div><p className="eyebrow">Newest first</p><h2>Current research events</h2></div><span className="count-chip">{events.length}</span></div>
+        {events.length === 0 ? <p className="empty-copy">No material event was persisted in the latest bounded run.</p> : <div className="card-grid">{events.slice(0, 6).map((event) => <article className="card" key={event.id}><p className="card-kicker">{event.type} · {event.materiality}</p><h3>{event.title}</h3><p>{event.summary}</p><p className="muted">Confidence {event.confidence} · {event.occurred_at ? new Date(event.occurred_at).toLocaleString() : "event time unavailable"}</p>{event.sources.length > 0 && <ul className="source-list">{event.sources.map((source, index) => <li key={`${source.label}-${index}`}><SafeSourceLink source={source} /></li>)}</ul>}</article>)}</div>}
+        {events.length > 6 && <p className="muted">Showing the six newest material events from this receipt.</p>}
       </section>
 
       <section className="section-block">
