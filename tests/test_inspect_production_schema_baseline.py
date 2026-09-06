@@ -69,6 +69,7 @@ def _catalog():
                          "grantor": "postgres", "privilege": "SELECT", "grantable": False}],
         "schema_acls": [{"schema": "public", "owner": "postgres", "grantee": "dashboard", "grantor": "postgres",
                          "privilege": "USAGE", "grantable": False}],
+        "schema_acl_state": [{"schema": "public", "owner": "postgres", "acl_state": "empty", "acl_sha256": "a" * 64}],
         "default_privileges": [{"scope": "public", "owner": "postgres", "object_type": "r",
                                 "grantee": "dashboard", "grantor": "postgres", "privilege": "SELECT", "grantable": False}],
         "default_acl_sets": [{"scope": "public", "owner": "postgres", "object_type": "r",
@@ -159,6 +160,7 @@ def test_inspection_roots_every_validated_public_base_or_partitioned_table_and_f
     assert "WHEN role_oid = 0 THEN 'PUBLIC'" in catalog_query
     assert "THEN 's'::\"char\"" in catalog_query
     assert "default_acl_sets" in catalog_query
+    assert "schema_acl_state" in catalog_query
     assert "rolpassword" not in catalog_query
 
 
@@ -170,6 +172,7 @@ def test_inspection_captures_full_authorization_and_uses_bounded_full_visibility
 
     assert receipt["catalog"]["column_acls"][0]["column"] == "ticker"
     assert receipt["catalog"]["schema_acls"][0]["owner"] == "postgres"
+    assert receipt["catalog"]["schema_acl_state"][0]["acl_state"] == "empty"
     assert receipt["catalog"]["default_privileges"][0]["scope"] == "public"
     assert receipt["catalog"]["memberships"][0]["inherit_option"] is True
     assert receipt["catalog"]["functions"][0]["owner"] == "postgres"
@@ -182,7 +185,8 @@ def test_inspection_captures_full_authorization_and_uses_bounded_full_visibility
     assert "statement_timeout" in root_query and "rolbypassrls" in root_query
     assert "jsonb_agg(to_jsonb(row)" not in root_query
     assert "bit_xor" not in root_query
-    assert "sum(" in root_query
+    assert "sum(" not in root_query
+    assert "string_agg" in root_query and "LIMIT 10001" in root_query
 
 
 def test_inspection_rejects_roots_without_full_visibility_or_matching_catalog_snapshot():
@@ -218,6 +222,18 @@ def test_inspection_preserves_unsupported_membership_options_as_unknown_not_fals
     catalog["memberships"][0]["set_option"] = None
     receipt = inspect_production_schema(FakeReadOnlyApi(catalog=catalog), PROJECT_REF, MAIN_SHA)
     assert receipt["catalog"]["memberships"][0]["inherit_option"] is None
+
+
+def test_schema_acl_state_is_present_without_privilege_rows_and_owner_changes_the_receipt():
+    from scripts.inspect_production_schema_baseline import inspect_production_schema
+
+    first = inspect_production_schema(FakeReadOnlyApi(), PROJECT_REF, MAIN_SHA)
+    changed = _catalog()
+    changed["schema_acls"] = []
+    changed["schema_acl_state"][0]["owner"] = "new_owner"
+    second = inspect_production_schema(FakeReadOnlyApi(catalog=changed), PROJECT_REF, MAIN_SHA)
+    assert second["catalog"]["schema_acl_state"] == [{"schema": "public", "owner": "new_owner", "acl_state": "empty", "acl_sha256": "a" * 64}]
+    assert second["receipt_sha256"] != first["receipt_sha256"]
 
 
 def test_inspection_rejects_inconsistent_post_marker_presence_and_dynamic_root_sets(monkeypatch):

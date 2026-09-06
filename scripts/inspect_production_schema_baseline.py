@@ -35,6 +35,7 @@ from scripts.managed_isolated_restore import (  # noqa: E402
 MAIN_SHA = re.compile(r"[0-9a-f]{40}\Z")
 MAX_CATALOG_ROWS = 10_000
 MAX_ROOT_RELATIONS = 256
+MAX_ROOT_ROWS_PER_RELATION = 10_000
 MAX_ROLE_MEMBERSHIPS = 64
 MAX_RECEIPT_BYTES = 1_000_000
 _DIGEST = re.compile(r"[0-9a-f]{64}\Z")
@@ -99,6 +100,7 @@ _CATALOG_FIELDS: Final[dict[str, tuple[str, ...]]] = {
     "acls": ("object_kind", "schema", "object", "grantee", "grantor", "privilege", "grantable"),
     "column_acls": ("schema", "relation", "column", "grantee", "grantor", "privilege", "grantable"),
     "schema_acls": ("schema", "owner", "grantee", "grantor", "privilege", "grantable"),
+    "schema_acl_state": ("schema", "owner", "acl_state", "acl_sha256"),
     "default_privileges": ("scope", "owner", "object_type", "grantee", "grantor", "privilege", "grantable"),
     "default_acl_sets": ("scope", "owner", "object_type", "acl_sha256", "is_empty"),
     "authorization_capabilities": ("server_version_num", "membership_options_supported"),
@@ -117,6 +119,7 @@ _CATALOG_IDENTITIES: Final[dict[str, tuple[str, ...]]] = {
     "acls": ("object_kind", "schema", "object", "grantee", "grantor", "privilege"),
     "column_acls": ("schema", "relation", "column", "grantee", "grantor", "privilege"),
     "schema_acls": ("schema", "owner", "grantee", "grantor", "privilege"),
+    "schema_acl_state": ("schema",),
     "default_privileges": ("scope", "owner", "object_type", "grantee", "grantor", "privilege"),
     "default_acl_sets": ("scope", "owner", "object_type"),
     "authorization_capabilities": ("server_version_num",),
@@ -264,6 +267,14 @@ relations AS (
   LEFT JOIN pg_catalog.pg_roles AS grantee ON grantee.oid = x.grantee
   JOIN pg_catalog.pg_roles AS grantor ON grantor.oid = x.grantor
   WHERE n.nspname = 'public'
+), schema_acl_state AS (
+  SELECT jsonb_build_object('schema', n.nspname, 'owner', owner.rolname,
+    'acl_state', CASE WHEN n.nspacl IS NULL THEN 'default'
+                      WHEN cardinality(n.nspacl) = 0 THEN 'empty' ELSE 'explicit' END,
+    'acl_sha256', encode(extensions.digest(convert_to(COALESCE(to_jsonb(n.nspacl)::text, 'null'), 'UTF8'), 'sha256'), 'hex')) AS item
+  FROM pg_catalog.pg_namespace AS n
+  JOIN pg_catalog.pg_roles AS owner ON owner.oid = n.nspowner
+  WHERE n.nspname = 'public'
 ), default_privileges AS (
   SELECT jsonb_build_object('scope', CASE WHEN defaults.defaclnamespace = 0 THEN 'global' ELSE 'public' END,
     'owner', owner.rolname, 'object_type', defaults.defaclobjtype::text,
@@ -323,6 +334,7 @@ SELECT
     'acls', COALESCE((SELECT jsonb_agg(item ORDER BY item::text) FROM acls), '[]'::jsonb),
     'column_acls', COALESCE((SELECT jsonb_agg(item ORDER BY item::text) FROM column_acls), '[]'::jsonb),
     'schema_acls', COALESCE((SELECT jsonb_agg(item ORDER BY item::text) FROM schema_acls), '[]'::jsonb),
+    'schema_acl_state', COALESCE((SELECT jsonb_agg(item ORDER BY item::text) FROM schema_acl_state), '[]'::jsonb),
     'default_privileges', COALESCE((SELECT jsonb_agg(item ORDER BY item::text) FROM default_privileges), '[]'::jsonb),
     'default_acl_sets', COALESCE((SELECT jsonb_agg(item ORDER BY item::text) FROM default_acl_sets), '[]'::jsonb),
     'authorization_capabilities', COALESCE((SELECT jsonb_agg(item ORDER BY item::text) FROM authorization_capabilities), '[]'::jsonb),
@@ -352,17 +364,16 @@ def _root_relation_names(relations: list[dict[str, object]]) -> tuple[str, ...]:
 def _roots_query(relations: tuple[str, ...]) -> str:
     catalog_query = _catalog_query()
     relation_literals = ",".join("'%s'" % relation for relation in relations) or "NULL"
-    limb_sums = " || ':' || ".join(
-        "COALESCE(sum((get_byte(row_hash, %d) * 256 + get_byte(row_hash, %d))::numeric), 0)::text" % (offset, offset + 1)
-        for offset in range(0, 32, 2)
-    )
     parts = []
     for relation in relations:
         parts.append(
             "SELECT '%s'::text AS relation, count(*)::bigint AS count, "
-            "encode(extensions.digest(convert_to(count(*)::text || ':' || %s, 'UTF8'), 'sha256'), 'hex') AS root_sha256 "
-            "FROM (SELECT extensions.digest(convert_to(to_jsonb(row)::text, 'UTF8'), 'sha256') AS row_hash "
-            "FROM public.%s AS row CROSS JOIN root_guard) AS row_hashes" % (relation, limb_sums, relation)
+            "encode(extensions.digest(convert_to(string_agg(encode(row_hash, 'hex'), '' ORDER BY row_hash), 'UTF8'), 'sha256'), 'hex') AS root_sha256 "
+            "FROM (WITH limited_hashes AS MATERIALIZED (SELECT extensions.digest(convert_to(to_jsonb(row)::text, 'UTF8'), 'sha256') AS row_hash "
+            "FROM public.%s AS row CROSS JOIN root_guard LIMIT %d), cap_guard AS MATERIALIZED "
+            "(SELECT 1 / CASE WHEN count(*) <= %d THEN 1 ELSE 0 END AS permitted FROM limited_hashes) "
+            "SELECT row_hash FROM limited_hashes CROSS JOIN cap_guard) AS bounded_hashes" % (
+                relation, relation, MAX_ROOT_ROWS_PER_RELATION + 1, MAX_ROOT_ROWS_PER_RELATION)
         )
     root_rows = " UNION ALL ".join(parts) if parts else "SELECT NULL::text AS relation, 0::bigint AS count, NULL::text AS root_sha256 WHERE false"
     return f"""
@@ -445,6 +456,8 @@ def _validate_catalog(catalog: object) -> dict[str, list[dict[str, object]]]:
             if category == "relations" and item["kind"] not in {"r", "p", "v", "m", "f", "S", "i", "I", "c"}:
                 raise RuntimeError("schema catalog is malformed")
             if category == "functions" and item["kind"] not in {"f", "a", "p", "w"}:
+                raise RuntimeError("schema catalog is malformed")
+            if category == "schema_acl_state" and item["acl_state"] not in {"default", "empty", "explicit"}:
                 raise RuntimeError("schema catalog is malformed")
             if category in {"default_privileges", "default_acl_sets"} and (item["scope"] not in {"global", "public"} or item["object_type"] not in {"r", "S", "f", "T", "n"}):
                 raise RuntimeError("schema catalog is malformed")
@@ -554,7 +567,7 @@ def inspect_production_schema(request, project_ref: str, main_sha: str) -> dict[
         "production_binding_sha256": _sha256(("stocks-production-schema-inventory-v1\\0" + project_ref).encode()),
         "relation_presence": presence,
         "catalog": catalog,
-        "root_algorithm": "sha256-row-limb-sum-v1",
+        "root_algorithm": "sha256-sorted-row-hashes-v1",
         "protected_roots": roots,
     }
     receipt["receipt_sha256"] = _sha256(canonical_json(receipt).encode())
