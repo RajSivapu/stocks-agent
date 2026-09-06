@@ -1,17 +1,38 @@
 # Personal Stock Agent Project Status
 
-Last updated: 2026-09-05
+Last updated: 2026-09-06
 Canonical release: Personal Stock Agent V1 safety remediation
 Audit baseline: `432d647ef911ff63da427097f02a852e18038b62` on `origin/main`
 Consolidated local-gate candidate: `883d521728b1b3c2700a78dab1d65208105d7a2f`
-Current state: the Astra remediation is merged, the exact-main CI gate passed, all three reviewed
-Edge functions are deployed with runtime-byte readback, and signed-link-compatible private Site v5
-is live. The owner email-click and formal non-owner denial canaries passed. Remaining release
-evidence includes the protected workflow/restore and the next existing scheduled receipts.
+Current state: the app remains live and the owner can reach the portfolio dashboard, but V1 trusted
+use remains **no-go**. Production schema drift blocks the recovery/release path before any mutation.
+The next step is an owner-approved recoverable production schema migration; no production migration
+was applied to the live database from this checkpoint.
 
 This file is the version-controlled source of truth for the Personal Stock Agent V1 rollout.
 `docs/ROADMAP.md` records the implementation sequence and remaining release gates.
 `docs/HANDOFF.md` is ignored and is not authoritative.
+
+## Verified live checkpoint — 2026-09-06
+
+- [x] PR #10 fixed the Management API `User-Agent` and changed the production reference binding to
+  a masked environment secret. Exact-main `4003437` CI passed.
+- [x] Managed isolated restore run `34012010196` reached the production snapshot and failed closed
+  before temporary-project creation because `public.portfolio_command_acknowledgements` is absent.
+  Same-job and independent cleanup receipts both report `deleted: true` and `retained: null`; the
+  post-run read-only inventory found exactly one healthy production project and no temporary restore
+  projects.
+- [x] PR #11 merged at `774584e`. Exact-head CI `34013930731` and exact-main CI `34014003786`
+  passed. The full release is manual-only and secret-backed; failed-release trust, run-attempt,
+  encrypted-journal, and durable-lease ordering are hardened. No automatic release or recovery ran
+  after that merge.
+- [ ] Read-only production schema inventory has only 13 of 24 required recovery relations. Missing:
+  `market_collection_checkpoint_history`, `market_collection_checkpoints`,
+  `market_intelligence_collection_completions`, `market_policy_comparisons`,
+  `market_report_publications`, `market_report_request_origins`, `market_run_terminal_outcomes`,
+  `portfolio_cash_ledger_state`, `portfolio_command_acknowledgements`,
+  `reconciled_cash_snapshots`, and `stock_agent_release_migration_ledger`.
+  `supabase_migrations.schema_migrations` is also absent.
 
 ## Release boundary
 
@@ -39,11 +60,13 @@ connector has no callable GitHub Actions management transport. Owner-operated Si
 now complete; the GitHub protected-workflow receipt remains a separate gate.
 
 The exact Track C range received independent approval after both Important recovery findings were
-fixed. The final consolidated gate, GPT-6 Astra scoped re-review, exact-main CI, owner-operated Site
-publication, database migration readback, Edge deployment/readback, live Auth configuration readback,
+fixed. The final consolidated gate, GPT-6 Astra scoped re-review, historical exact-main CI,
+owner-operated Site publication, Edge deployment/readback, live Auth configuration readback,
 owner/anonymous API canaries, owner email-click canary, and formal non-owner denial canary are
-complete. The GitHub protected workflow, isolated live restore, and next existing scheduled receipts
-remain pending. The local candidate now includes a manual-only Management-API isolated restore
+complete. Historical database readback does not establish the current recovery schema: the current
+inventory supersedes it and shows the native ledger and required relations are absent. The GitHub
+protected workflow, isolated live restore, and next existing scheduled receipts remain pending. The
+local candidate now includes a manual-only Management-API isolated restore
 workflow: it proves a one-project free slot, uses only the Management read-only SQL endpoint for
 production, restores only a run-created project, compares two encrypted production root hashes,
 and fail-closes if the exact temporary project cannot be deleted. The candidate persists a
@@ -76,9 +99,9 @@ separately; deployment never substitutes for the protected-workflow, restore, or
 | F6 — adapters cannot reach discovery | Implemented | Task 7 implements provider-native queries, normalized identifiers/timestamps, discoverable securities, and attributable failures. Closed through `84f0839`; live free-provider health remains a protected gate. |
 | F7 — dedupe/timestamps discard corrections or conflict | Implemented | Task 7 separates request provenance from item identity and retains corrections, distinct claims, contradictions, and publication/retrieval/effective/reporting times. Closed through `84f0839`; scheduled evidence pending. |
 | F8 — ordinary tests can mutate production | Implemented | Task 1 deselects credentialed tests by default and requires explicit opt-in plus an exact allowlisted non-production project before credentials are loaded. Closed through `d798129`. |
-| F9 — history growth and incomplete scheduled success | Implemented | Task 9 bounds relevant history without losing pending state, enforces one slot per market date/phase, required terminal stages, suppression, and overdue detection. Closed through `9ba3bc0`; remote ledger is current and scheduled proof is pending. |
-| F10 — database/Telegram ambiguity | Implemented | Task 6 adds durable pending/delivered/failed/uncertain delivery and acknowledgement states, original-receipt recovery, and one publication authority. Closed through `c498177`; Telegram v20 is deployed but no extra send was triggered. |
-| F11 — backdated trades corrupt accounting | Implemented | Task 5 rejects unsafe chronology changes, preserves the ledger, and returns replay-stable receipts until explicit chronological reconciliation. Closed through `c5de624`; remote ledger is current and production observation is pending. |
+| F9 — history growth and incomplete scheduled success | Implemented locally; production schema gate blocked | Task 9 bounds relevant history without losing pending state, enforces one slot per market date/phase, required terminal stages, suppression, and overdue detection. Production is missing required recovery relations; scheduled proof remains pending. |
+| F10 — database/Telegram ambiguity | Implemented locally; production schema gate blocked | Task 6 adds durable pending/delivered/failed/uncertain delivery and acknowledgement states, original-receipt recovery, and one publication authority. Telegram v20 is deployed, but the acknowledgement relation is missing in production and no extra send was triggered. |
+| F11 — backdated trades corrupt accounting | Implemented locally; production schema gate blocked | Task 5 rejects unsafe chronology changes, preserves the ledger, and returns replay-stable receipts until explicit chronological reconciliation. Production migration state is not current; production observation is pending. |
 | F12 — verifier accepts stale/wrong evidence | Implemented; operational proof pending | Task 10 binds current-main review/CI/deployment identity, recomputed candidate bytes and hashes, stored scheduled stages, original delivery or suppression receipts, and durable recovery. Closed through `6da3e84`; exact-main CI and owner deployment completed, protected-workflow receipt pending. |
 | F13 — retry/cache/quota accounting | Implemented | Task 8 persists per-attempt quota, checkpoints, immutable request costs, cache/predecessor lineage, failure receipts, and restart recovery. Closed through `eff4612`; live provider/database proof pending. |
 | F14 — ranking placeholders/disconnected V1 inputs | Implemented | Task 8 supplies protected server-owned holdings, valuation, liquidity, overlap, discovery strength, comparison, and learning inputs; unknown values fail closed. Closed through `eff4612`; scheduled production output pending. |
@@ -163,12 +186,14 @@ V1-C5 is reopened.
   encrypted export, and local disposable restore drill are implemented and task-reviewed locally.
 - [x] Consolidated local `npm run test:all` gate passed for the final code at `883d521`.
 - [x] GPT-6 Astra approved the final scoped re-review with no unresolved local Critical or Important finding; the native Sites publication conditional remains a production gate.
-- [x] Exact-head CI passed on reviewed `main` at `c9e3140`.
-- [x] Owner-operated production database readback, three-function runtime parity, private Site
-  publication, and owner/anonymous canaries completed.
-- [ ] Run the GitHub protected production workflow once its independent-review and Sites transport
-  gates are available; do not weaken its fail-closed preflight.
-- [ ] Protected isolated live restore drill and reconciliation.
+- [x] Exact-head CI `34013930731` and exact-main CI `34014003786` passed for merged main `774584e`.
+- [x] Historical production runtime readback, three-function parity, private Site publication, and
+  owner/anonymous canaries completed; current schema inventory is separately blocked above.
+- [ ] Owner-approve and apply a recoverable production schema migration; do not fabricate historical
+  receipts or treat missing relations as empty.
+- [ ] Rerun the managed isolated restore only after the schema gate passes.
+- [ ] Run the protected manual release and retain its receipt after all required secrets and
+  transports are available; do not weaken preflight.
 - [ ] Next existing post-deployment scheduled intelligence/report/publication receipt chain; never
   trigger a duplicate merely to obtain evidence.
 
@@ -176,8 +201,10 @@ V1-C6 is reopened and the release remains no-go for trusted use.
 
 ## Immediate next gates
 
-1. Complete the protected-workflow and isolated live-restore evidence without weakening preflight.
-2. Reconcile the next existing scheduled chain without triggering a duplicate.
+1. Obtain owner approval for the recoverable production schema migration, then rerun the managed
+   isolated restore only after its schema gate passes.
+2. Retain the protected manual-release receipt once every required secret and transport is available.
+3. Observe the next existing scheduled receipt without triggering a duplicate.
 
 ## Consolidated local evidence
 
@@ -209,12 +236,10 @@ sync, focused PostgreSQL restore/retry evidence, and `git diff --check` also pas
 
 ## Production truth
 
-Production contains the reviewed Astra remediation: gateway version 33, owner-dashboard API version
-4, Telegram function version 20, an up-to-date remote migration ledger, and private Site version 5
-from exact `main` merge `ba3ebc1`. Site deployment `appgdep_6a9cd0def8f0819187aa7d30d99a7ada`
-succeeded; the live login bundle hash exactly matches the reviewed build. The owner API returned all
-nine bounded projections to an ephemeral owner canary and denied anonymous access. This is not yet
-proof of the GitHub protected workflow, an isolated live restore, or a post-remediation scheduled
+Production contains the live owner dashboard and prior reviewed runtime receipts, but its recovery
+schema is incomplete: only 13 of 24 required relations are present and the native migration ledger
+is absent. The managed restore therefore failed closed before creating an isolated target. This is
+not proof of a protected manual release, an isolated live restore, or a post-remediation scheduled
 receipt chain. The owner email-click canary and formal non-owner denial canary passed on 2026-09-05.
 
 ## Decisions and guardrails

@@ -1,6 +1,6 @@
 # Stocks Agent — Roadmap and Deployment Status
 
-Last updated: 2026-09-05.
+Last updated: 2026-09-06.
 
 This repository is owner-only, suggestion-only decision support plus portfolio recordkeeping. It
 has no brokerage credentials or order endpoints and never places, modifies, or cancels a trade.
@@ -11,6 +11,32 @@ metered runtime model API.
 and rollout order. `docs/HANDOFF.md` is ignored and is not a source of truth.
 
 ## Current release status
+
+The app remains live and the owner can reach the portfolio dashboard, but V1 trusted use remains
+**no-go**. Read-only production inventory has 13 of 24 required recovery relations. Missing are
+`market_collection_checkpoint_history`, `market_collection_checkpoints`,
+`market_intelligence_collection_completions`, `market_policy_comparisons`,
+`market_report_publications`, `market_report_request_origins`, `market_run_terminal_outcomes`,
+`portfolio_cash_ledger_state`, `portfolio_command_acknowledgements`,
+`reconciled_cash_snapshots`, and `stock_agent_release_migration_ledger`; the native
+`supabase_migrations.schema_migrations` relation is absent. No schema migration was applied to the
+live production database from this checkpoint.
+
+- [x] PR #10 fixed the Management API `User-Agent` and moved the production reference binding to a
+  masked environment secret; exact-main `4003437` CI passed.
+- [x] Managed isolated restore run `34012010196` reached the production snapshot and failed closed
+  before temporary-project creation on the missing
+  `public.portfolio_command_acknowledgements` relation. Same-job and independent cleanup receipts
+  both report `deleted: true` and `retained: null`; read-only post-run inventory found exactly one
+  healthy production project and no temporary restore projects.
+- [x] PR #11 merged main `774584e`; exact-head CI `34013930731` and exact-main CI `34014003786`
+  passed. Release is manual-only and secret-backed, with failed-release recovery trust, run-attempt,
+  encrypted-journal, and durable-lease ordering hardened. No automatic release or recovery ran
+  after merge.
+- [ ] Owner-approved recoverable production schema migration.
+- [ ] Managed isolated restore rerun after the schema gate passes.
+- [ ] Protected manual-release receipt after all required secrets/transports are available.
+- [ ] Next existing scheduled receipt, without a duplicate run.
 
 Final fix wave Track C: immutable audited migrations are restored and the additive tail is now
 `20261001_immutable_history_closure.sql`. Local upgrade, encrypted recovery, four-artifact verifier,
@@ -26,22 +52,23 @@ The unchanged `.openai/hosting.json` remains the sole zero-cost Site target. Its
 transport remains unavailable, so the GitHub workflow correctly blocks before mutation. GPT-6 Astra
 accepted that fail-closed boundary. Owner-operated native Site publication now supplies its separate
 authoritative platform receipt; no caller-authored substitute is accepted. The final focused review,
-consolidated 1,197-test gate, GPT-6 Astra scoped re-review, exact-main CI, owner-operated database/Edge
-deployment readback, and private Site publication are complete.
+consolidated 1,197-test gate, GPT-6 Astra scoped re-review, historical CI, owner-operated Edge
+deployment readback, and private Site publication are complete. Historical database readback does
+not establish the current recovery schema.
 
 | Layer | Local candidate | Production status |
 |---|---|---|
 | Test and owner-auth containment | Implemented and task-reviewed | Live Auth read back, signed-link-compatible Site v5 deployed, owner email-click confirmed, and formal non-owner denial passed |
-| Decision, evidence, and publication authority | Implemented and task-reviewed | Database/function deployment read back; protected-workflow and scheduled receipts pending |
+| Decision, evidence, and publication authority | Implemented and task-reviewed | Function deployment read back; production schema gate, protected-workflow, and scheduled receipts pending |
 | Portfolio accounting and delivery integrity | Implemented and task-reviewed | Owner/anonymous/non-owner API canaries passed; original delivery receipt pending |
 | Provider, cache, quota, ranking, and lifecycle | Implemented and task-reviewed | Live free-provider health and one existing scheduled chain pending |
 | Outcomes, read privilege, dependency lock, and market sessions | Implemented and task-reviewed | Runtime is live; production observation pending |
-| Candidate-bound release and recovery | Implemented and GPT-6 Astra review-clean; local disposable restore path covered | Manual deployment receipts exist; protected-workflow and live isolated restore pending |
+| Candidate-bound release and recovery | Implemented and GPT-6 Astra review-clean; local disposable restore path covered | Production schema gate blocks restore/release before mutation; protected manual-release and live isolated-restore receipts pending |
 
 The final consolidated local-gate code candidate was
 `883d521728b1b3c2700a78dab1d65208105d7a2f`, based on the GPT-6 Astra audit of `origin/main` at
-`432d647ef911ff63da427097f02a852e18038b62`. It is now included in deployed `main`; exact-main CI
-passed at `c9e3140` after the live Supabase contract corrections.
+`432d647ef911ff63da427097f02a852e18038b62`. Later main `774584e` passed exact-head CI
+`34013930731` and exact-main CI `34014003786`; neither result proves the missing production schema.
 
 ## Remediation workstreams
 
@@ -75,7 +102,8 @@ Implemented locally:
 
 Still required:
 
-- Retain the protected-workflow receipt for the already read-back migration/function state.
+- Apply the owner-approved recoverable schema migration, then retain the protected manual-release
+  receipt for the resulting migration/function state.
 - Reconcile one post-deployment scheduled packet, evaluation, report, and publication chain.
 
 ### 3. Money and delivery integrity
@@ -90,7 +118,8 @@ Implemented locally:
 
 Still required:
 
-- Retain the protected-workflow receipt for the already current remote migration ledger.
+- Do not claim the remote migration ledger is current: the native migration ledger and required
+  recovery relations are absent. First obtain owner approval for a recoverable schema migration.
 - Verify production owner flows and the next existing scheduled original Telegram ID or explicit
   persisted suppression. Do not trigger a duplicate run.
 
@@ -144,24 +173,26 @@ Implemented locally:
 
 Still required:
 
-- The single consolidated local gate, independent GPT-6 Astra review, and exact-main CI passed.
-- Complete the protected release/recovery workflow receipt without weakening its preflight.
-- Perform and reconcile a protected isolated live restore. A local disposable drill is not this
-  proof.
-- Reconcile the next existing post-deployment scheduled chain. Review, CI, and deployment receipts
-  cannot substitute for it.
+- Exact-head CI `34013930731` and exact-main CI `34014003786` passed for main `774584e`.
+- Owner-approve and apply the recoverable production schema migration; then rerun managed isolated
+  restore only after its schema gate passes.
+- Retain the protected manual-release receipt after all required secrets/transports are available;
+  do not weaken preflight.
+- Observe the next existing scheduled receipt without a duplicate run.
 
 ## Ordered gates to trusted owner use
 
 1. Independent whole-branch review with no unresolved Critical or Important finding. **Complete.**
-2. Exact-main CI and current-main/merged-review binding. **Complete.**
-3. Owner-operated database/gateway/API/Site deployment, runtime parity, and owner/anonymous
-   canaries. **Complete; signed-link-compatible Site v5 is live.**
+2. Exact-main CI and current-main/merged-review binding. **Complete** for main `774584e`.
+3. Historical owner-operated gateway/API/Site deployment, runtime parity, and owner/anonymous
+   canaries. **Complete for the prior runtime; signed-link-compatible Site v5 is live, while the
+   current production schema gate remains pending.**
 4. Live Auth configuration and owner email-link/code canary. **Complete; the owner confirmed the
    signed email link opened the live portfolio dashboard.**
-5. Protected isolated restore drill with holdings, commands, reports, roles, schema, and delivery
-   receipts reconciled.
-6. Next existing scheduled intelligence/report/publication receipt chain, without a duplicate run.
+5. Owner-approved recoverable production schema migration, then protected isolated restore with
+   recovery receipts reconciled.
+6. Protected manual-release receipt and next existing scheduled intelligence/report/publication
+   receipt chain, without a duplicate run.
 
 Until all six gates pass, V1-C2 through V1-C6 remain reopened and the system stays in limited
 owner-only research/shadow use. Positions, cash, prices, and calculations must be independently
