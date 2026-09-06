@@ -1,0 +1,162 @@
+{
+  "format": "stocks-native-sites-ui-release-v1",
+  "captured_at": "2026-09-06T23:33:30Z",
+  "trust_domain": "codex-native-sites-connector",
+  "release_scope": {
+    "kind": "owner-site-only-ui",
+    "changed_components": [
+      "owner_site"
+    ],
+    "unchanged_components": [
+      "production_database",
+      "supabase_auth",
+      "gateway_edge_function",
+      "dashboard_api_edge_function",
+      "telegram_edge_function",
+      "scheduled_workflows"
+    ],
+    "scheduled_runs_started": 0,
+    "secret_rotations": 0,
+    "backend_attestation_reference": {
+      "run_id": 34055419086,
+      "attested_main_sha": "b3f7d706573224d8edfa88570067dfb1b0900672"
+    },
+    "pull_requests": [
+      28,
+      29
+    ],
+    "exact_main_ci_runs": [
+      34066235515,
+      34066973967
+    ]
+  },
+  "site": {
+    "project_id": "appgprj_6a9a35fb60648191b30e2bb973a2347f",
+    "status": "active",
+    "live_url": "https://personal-stock-agent.rupesh-sivapu.chatgpt.site",
+    "latest_version_number": 7,
+    "current_user_role": "owner",
+    "access_mode": "custom",
+    "allowed_owner_count": 1,
+    "allowed_user_count": 1,
+    "external_visitor_count": 0,
+    "allowed_group_count": 0
+  },
+  "active_version": {
+    "id": "appgprj_6a9a35fb60648191b30e2bb973a2347f~appgver_f26ef8c387b88191b701c29197d2e9ce",
+    "version_number": 7,
+    "source_commit_sha": "a4c8031f30ffd324bf35965bd2f31e60f41165b6",
+    "archive_format": "tar",
+    "archive_content_hash": "sha256:66b4fe12d2133d708e504f9e1730b67746a2135e6cf71de0a6b2c194cd0a4cc2",
+    "local_archive_sha256": "13258c2272a45fe373e74c2d90e4f38826006b2cab4645bad821bee531a058df",
+    "file_count": 16,
+    "size_bytes": 532480
+  },
+  "active_deployment": {
+    "id": "appgdep_6a9df7eee2cc819193fefc13aa39d8bb",
+    "version_id": "appgprj_6a9a35fb60648191b30e2bb973a2347f~appgver_f26ef8c387b88191b701c29197d2e9ce",
+    "type": "publish",
+    "status": "succeeded",
+    "url": "https://personal-stock-agent.rupesh-sivapu.chatgpt.site",
+    "env_set_revision": 0,
+    "updated_at": "2026-09-06T23:32:51.111946+00:00"
+  },
+  "rollback_version": {
+    "id": "appgprj_6a9a35fb60648191b30e2bb973a2347f~appgver_5f8082d3c6888191b0dcca64b7879511",
+    "version_number": 6,
+    "source_commit_sha": "6ef5fcce948a5101a47aa68842cc02130a67d146",
+    "deployment_id": "appgdep_6a9df4a026088191a4faed742770e54d"
+  },
+  "build": {
+    "api_origin": "https://hlxpxbxhqctwsqizwjjy.supabase.co/functions/v1/owner-dashboard-api",
+    "asset_hashes": [
+      {
+        "file": "_headers",
+        "sha256": "23024334411c251734b729dc3f3898000b5d9f49a79b9ba75cac61f71e973118"
+      },
+      {
+        "file": "assets/IdeasPage-Je_ho6-o.js",
+        "sha256": "cdae12d3a5cd4edffb68195a3731bd5a1df9f0b0e8ffb925cd4c7a50c6ea2f99"
+      },
+      {
+        "file": "assets/IntelligencePage-CSfjrLRj.js",
+        "sha256": "f04710761e60740bf6d89db5ad4d5e6b5343958e657ef99fd8a86a534391a050"
+      },
+      {
+        "file": "assets/PortfolioPage-B0IyDWM5.js",
+        "sha256": "f8e1728d58b81466ff62095ea58ed8e6a15a1712657415ff3cbdb7119cd5b47f"
+      },
+      {
+        "file": "assets/ReceiptTimeline-kesCLU-Q.js",
+        "sha256": "ca3508aafd796936ad9aa47ab42b0d021d0313710ecb3f2d198a41ae82ddbb30"
+      },
+      {
+        "file": "assets/ReportDetailPage-D_wX4R-5.js",
+        "sha256": "1c977ad9460f0ce9e16c9e1b45ef4bba7d183971513abc28500c897c6accf72c"
+      },
+      {
+        "file": "assets/ReportsPage-Bv0bFXHw.js",
+        "sha256": "b2c84736c58d3bd3a836727ec710d27d1c063d4b1bb0e7c3e8e95163388b2faf"
+      },
+      {
+        "file": "assets/RunDetailPage-T2vyIOKJ.js",
+        "sha256": "73fd3f23f973590711dc0b410d03eecb80e1d3fc3e5b83e9f4b3bee0c081792a"
+      },
+      {
+        "file": "assets/SafeSourceLink-CHsHyok4.js",
+        "sha256": "c1aea438378f1794c02732b9c1ecbab9476f8a29a2310b855849ed123527996f"
+      },
+      {
+        "file": "assets/SystemPage-CHz3Gr4Y.js",
+        "sha256": "3112b0a601d149f6828cb0ccfcf200a547b8a234c9ca678771a1e35c96fa7deb"
+      },
+      {
+        "file": "assets/ideaVersions-BkLbKlnd.js",
+        "sha256": "5d38118380b9c56a6ceffef54653d8200d4813160b48c03ebfeb0b2309a76754"
+      },
+      {
+        "file": "assets/index-CyRg-o1h.js",
+        "sha256": "e5ff70b8a21427e3e9d6cdee5bdf15eb6b562329a740c090c5ae3b75a0269efc"
+      },
+      {
+        "file": "assets/index-DOqmwdYq.css",
+        "sha256": "a9e9b3242654677c58145002243d7d1315cd907d79b0dd48352cca54df6d3881"
+      },
+      {
+        "file": "index.html",
+        "sha256": "62e006cc2bfe9bcc103f7306445d69cb872e431542bdaba881179266a5376d7e"
+      },
+      {
+        "file": "theme-bootstrap.js",
+        "sha256": "6fa252c83c9f670c11d7cce88dc803ec14f0dd40c12fd4a3e32c96232e0df921"
+      }
+    ],
+    "built_at": "2026-09-06T23:28:41.347906Z",
+    "file_count": 15,
+    "initial_js_gzip_bytes": 131731,
+    "project_ref_digest": "610d1c4379ea1257",
+    "site_origin": "https://personal-stock-agent.rupesh-sivapu.chatgpt.site",
+    "static_directory": "dist",
+    "status": "verified"
+  },
+  "live_bundle": {
+    "html_sha256": "f6fe3db8476d1e3b99ba6c40e87c22ca6bf1d9ce478aadcfd27eec3e8622aaee",
+    "script_assets": [
+      {
+        "url": "https://personal-stock-agent.rupesh-sivapu.chatgpt.site/theme-bootstrap.js",
+        "sha256": "6fa252c83c9f670c11d7cce88dc803ec14f0dd40c12fd4a3e32c96232e0df921",
+        "bytes": 293
+      },
+      {
+        "url": "https://personal-stock-agent.rupesh-sivapu.chatgpt.site/assets/index-CyRg-o1h.js",
+        "sha256": "e5ff70b8a21427e3e9d6cdee5bdf15eb6b562329a740c090c5ae3b75a0269efc",
+        "bytes": 458317
+      }
+    ],
+    "supabase_project_ref": "hlxpxbxhqctwsqizwjjy",
+    "dashboard_api_url": "https://hlxpxbxhqctwsqizwjjy.supabase.co/functions/v1/owner-dashboard-api",
+    "project_ref_present": true,
+    "api_url_present": true
+  },
+  "live_script_assets_match_built": true
+}
