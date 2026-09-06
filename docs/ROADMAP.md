@@ -31,9 +31,9 @@ deployment readback, and private Site publication are complete.
 
 | Layer | Local candidate | Production status |
 |---|---|---|
-| Test and owner-auth containment | Implemented and task-reviewed | Live Auth read back and signed-link-compatible Site v5 deployed; owner email-click and formal non-owner canaries remain |
+| Test and owner-auth containment | Implemented and task-reviewed | Live Auth read back, signed-link-compatible Site v5 deployed, owner email-click confirmed, and formal non-owner denial passed |
 | Decision, evidence, and publication authority | Implemented and task-reviewed | Database/function deployment read back; protected-workflow and scheduled receipts pending |
-| Portfolio accounting and delivery integrity | Implemented and task-reviewed | Owner/anonymous API canaries passed; formal non-owner and original delivery receipts pending |
+| Portfolio accounting and delivery integrity | Implemented and task-reviewed | Owner/anonymous/non-owner API canaries passed; original delivery receipt pending |
 | Provider, cache, quota, ranking, and lifecycle | Implemented and task-reviewed | Live free-provider health and one existing scheduled chain pending |
 | Outcomes, read privilege, dependency lock, and market sessions | Implemented and task-reviewed | Runtime is live; production observation pending |
 | Candidate-bound release and recovery | Implemented and GPT-6 Astra review-clean; local disposable restore path covered | Manual deployment receipts exist; protected-workflow and live isolated restore pending |
@@ -55,10 +55,11 @@ Implemented locally:
 - Owner email mismatch: frontend, provisioning, and verifier accept a six-digit token template or
   Supabase's free-tier signed confirmation link while retaining session-only storage.
 
-Still required:
+Production receipt:
 
-- Retain owner email-click and formal non-owner login/access receipts; the Site login screen and
-  anonymous API denial are verified.
+- On 2026-09-05 the owner confirmed the signed email link opened the portfolio dashboard. A bounded
+  temporary non-owner canary received HTTP 403 `owner_only` with no portfolio data and was deleted;
+  Auth inventory returned to exactly one owner.
 
 ### 2. Decision and publication authority
 
@@ -156,8 +157,8 @@ Still required:
 2. Exact-main CI and current-main/merged-review binding. **Complete.**
 3. Owner-operated database/gateway/API/Site deployment, runtime parity, and owner/anonymous
    canaries. **Complete; signed-link-compatible Site v5 is live.**
-4. Live Auth configuration and owner email-link/code canary. **Configuration and live login screen
-   verified; owner email-click receipt remains.**
+4. Live Auth configuration and owner email-link/code canary. **Complete; the owner confirmed the
+   signed email link opened the live portfolio dashboard.**
 5. Protected isolated restore drill with holdings, commands, reports, roles, schema, and delivery
    receipts reconciled.
 6. Next existing scheduled intelligence/report/publication receipt chain, without a duplicate run.

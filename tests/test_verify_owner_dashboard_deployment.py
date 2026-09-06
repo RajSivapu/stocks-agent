@@ -151,7 +151,7 @@ def test_http_canary_uses_only_get_and_checks_anonymous_and_non_owner_denial():
         if not authorization:
             return 401, {"access-control-allow-origin": ORIGIN}, json.dumps({"error": {"code": "unauthorized"}}).encode()
         if authorization == "Bearer non-owner-token":
-            return 403, {"access-control-allow-origin": ORIGIN}, json.dumps({"error": {"code": "forbidden"}}).encode()
+            return 403, {"access-control-allow-origin": ORIGIN}, json.dumps({"error": {"code": "owner_only"}}).encode()
         route = url.removeprefix(API_URL)
         data = {"boundaries": {"owner_only": True, "suggestion_only": True, "friend_invitations": "disabled", "brokerage_authority": "none"}}
         if route == "/v1/today": data["portfolio"] = {"data_as_of": None, "market_state": "unknown", "price_sources": [], "holdings": []}

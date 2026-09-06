@@ -6,8 +6,8 @@ Audit baseline: `432d647ef911ff63da427097f02a852e18038b62` on `origin/main`
 Consolidated local-gate candidate: `883d521728b1b3c2700a78dab1d65208105d7a2f`
 Current state: the Astra remediation is merged, the exact-main CI gate passed, all three reviewed
 Edge functions are deployed with runtime-byte readback, and signed-link-compatible private Site v5
-is live. Remaining release evidence includes the protected workflow/restore, owner email-click and
-formal non-owner login canaries, and the next existing scheduled receipts.
+is live. The owner email-click and formal non-owner denial canaries passed. Remaining release
+evidence includes the protected workflow/restore and the next existing scheduled receipts.
 
 This file is the version-controlled source of truth for the Personal Stock Agent V1 rollout.
 `docs/ROADMAP.md` records the implementation sequence and remaining release gates.
@@ -41,9 +41,9 @@ now complete; the GitHub protected-workflow receipt remains a separate gate.
 The exact Track C range received independent approval after both Important recovery findings were
 fixed. The final consolidated gate, GPT-6 Astra scoped re-review, exact-main CI, owner-operated Site
 publication, database migration readback, Edge deployment/readback, live Auth configuration readback,
-and owner/anonymous API canaries are complete. The GitHub protected workflow, isolated live restore,
-formal non-owner login canary, and next existing scheduled receipts remain pending. No scheduled run
-was triggered merely to collect evidence.
+owner/anonymous API canaries, owner email-click canary, and formal non-owner denial canary are
+complete. The GitHub protected workflow, isolated live restore, and next existing scheduled receipts
+remain pending. No scheduled run was triggered merely to collect evidence.
 
 The product remains owner-only, suggestion-only, brokerage-free, and constrained to zero
 incremental cost. It cannot place, modify, or cancel a trade. The production work did not change the
@@ -79,7 +79,7 @@ separately; deployment never substitutes for the protected-workflow, restore, or
 | F15 — misleading outcome/weekly calculations | Implemented | Task 11 groups losses per eligible recommendation, aligns benchmark windows, uses session highs/lows, distinguishes fills, and retains veto-only weeks. Closed through `f7af10f`; production observation pending. |
 | F16 — recovery unproven | Local mechanism and disposable drill implemented; live drill pending | Task 10 creates authenticated encrypted exports, exact schema/receipt reconciliation, durable rollback artifacts, and an isolated disposable-runtime restore drill. A protected live isolated restore has not been performed. |
 | F17 — excessive read privilege/unpinned Python | Implemented | Task 11 uses a restricted read-only weekly role with verified TLS and installs a complete hash-locked binary dependency set, including recovery cryptography. Closed through `f7af10f`; live runtime is deployed and protected-workflow receipt pending. |
-| F18 — token refresh defeats idle lock | Implemented | Task 2 moves the privacy deadline only on explicit owner activity, never token refresh. Closed through `ce6d9a7`; signed-link-compatible Site v5 is live and the owner email-click canary is pending. |
+| F18 — token refresh defeats idle lock | Implemented | Task 2 moves the privacy deadline only on explicit owner activity, never token refresh. Closed through `ce6d9a7`; signed-link-compatible Site v5 is live and the owner confirmed that its signed email link opened the portfolio dashboard. |
 | F19 — early close/quote identity gaps | Implemented | Task 11 models maintained 2026 early closes, fails closed outside coverage, and rejects wrong symbol/currency or unknown halt/spread/liquidity. Closed through `f7af10f`; deployed, scheduled evidence pending. |
 
 ## Owner email sign-in
@@ -94,6 +94,11 @@ Live Auth was read back on 2026-09-05: signup is disabled, JWT lifetime is 900 s
 only allowed redirect are the private owner Site, and exactly one confirmed owner exists. The template
 was not changed because custom template modification is unavailable with the project's default
 free-tier mail provider.
+
+The owner confirmed on 2026-09-05 that the signed email link opened the live portfolio dashboard.
+A separate bounded canary created one temporary confirmed non-owner without sending email, verified
+that the live owner API returned HTTP 403 with `owner_only` and no portfolio data, revoked the
+temporary session, deleted the user, and confirmed that Auth inventory returned to exactly one owner.
 
 ## V1 checkpoints
 
@@ -138,7 +143,9 @@ V1-C4 is reopened.
 - [x] Read back the live signup-disabled, 900-second JWT, six-digit/600-second email settings and
   support the default signed-link template without adding paid SMTP.
 - [x] Deploy the reviewed API candidate and pass owner and anonymous canaries.
-- [ ] Complete a formal non-owner login canary and retain its bounded denial receipt.
+- [x] Complete the owner email-click canary; the owner confirmed the live dashboard appeared.
+- [x] Complete a formal non-owner login canary and retain its bounded denial receipt: HTTP 403
+  `owner_only`, no portfolio data, temporary user deleted, and exactly one owner afterward.
 - [ ] Reconcile an original Telegram delivery ID or explicit persisted suppression from the next
   existing scheduled chain.
 
@@ -163,9 +170,8 @@ V1-C6 is reopened and the release remains no-go for trusted use.
 
 ## Immediate next gates
 
-1. Complete the owner email-click and formal non-owner denial canaries.
-2. Complete the protected-workflow and isolated live-restore evidence without weakening preflight.
-3. Reconcile the next existing scheduled chain without triggering a duplicate.
+1. Complete the protected-workflow and isolated live-restore evidence without weakening preflight.
+2. Reconcile the next existing scheduled chain without triggering a duplicate.
 
 ## Consolidated local evidence
 
@@ -202,8 +208,8 @@ Production contains the reviewed Astra remediation: gateway version 33, owner-da
 from exact `main` merge `ba3ebc1`. Site deployment `appgdep_6a9cd0def8f0819187aa7d30d99a7ada`
 succeeded; the live login bundle hash exactly matches the reviewed build. The owner API returned all
 nine bounded projections to an ephemeral owner canary and denied anonymous access. This is not yet
-proof of the GitHub protected workflow, an isolated live restore, an owner email-click, a formal
-non-owner login denial, or a post-remediation scheduled receipt chain.
+proof of the GitHub protected workflow, an isolated live restore, or a post-remediation scheduled
+receipt chain. The owner email-click canary and formal non-owner denial canary passed on 2026-09-05.
 
 ## Decisions and guardrails
 
