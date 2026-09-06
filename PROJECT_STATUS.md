@@ -43,7 +43,11 @@ fixed. The final consolidated gate, GPT-6 Astra scoped re-review, exact-main CI,
 publication, database migration readback, Edge deployment/readback, live Auth configuration readback,
 owner/anonymous API canaries, owner email-click canary, and formal non-owner denial canary are
 complete. The GitHub protected workflow, isolated live restore, and next existing scheduled receipts
-remain pending. No scheduled run was triggered merely to collect evidence.
+remain pending. The local candidate now includes a manual-only Management-API isolated restore
+workflow: it proves a one-project free slot, uses only the Management read-only SQL endpoint for
+production, restores only a run-created project, compares two encrypted production root hashes,
+and fail-closes if the exact temporary project cannot be deleted. No scheduled run was triggered
+merely to collect evidence.
 
 The product remains owner-only, suggestion-only, brokerage-free, and constrained to zero
 incremental cost. It cannot place, modify, or cancel a trade. The production work did not change the
