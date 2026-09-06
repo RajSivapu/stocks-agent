@@ -172,7 +172,7 @@ def _validated_records(records: Mapping[str, object]) -> dict[str, list[dict[str
     result = {}
     for name, fields in DATASET_FIELDS.items():
         rows = records[name]
-        if not isinstance(rows, list) or (name in {"runs", "policies", "intelligence_runs", "packets", "reports", "roles", "schema_version", "cash_ledger_state"} and not rows):
+        if not isinstance(rows, list) or (name in {"runs", "policies", "packets", "reports", "roles", "schema_version", "cash_ledger_state"} and not rows):
             raise ValueError(f"recovery dataset {name} requires meaningful rows")
         clean = []
         for row in rows:

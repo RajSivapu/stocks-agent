@@ -291,6 +291,47 @@ def test_recovery_accepts_the_exact_truthful_reconciliation_pair(reconciled_reco
     assert _validated_records(reconciled_records)["release_migration_ledger"] == reconciled_records["release_migration_ledger"]
 
 
+INTELLIGENCE_DEPENDENT_DATASETS = (
+    "intelligence_run_events",
+    "source_quota_reservations",
+    "collection_checkpoints",
+    "collection_checkpoint_history",
+    "collection_completions",
+)
+
+
+def test_recovery_accepts_empty_intelligence_history_when_all_dependents_are_empty():
+    records = recovery_records()
+    records["intelligence_runs"] = []
+    for dataset in INTELLIGENCE_DEPENDENT_DATASETS:
+        records[dataset] = []
+
+    validated = _validated_records(records)
+
+    assert validated["intelligence_runs"] == []
+    assert all(validated[dataset] == [] for dataset in INTELLIGENCE_DEPENDENT_DATASETS)
+
+
+@pytest.mark.parametrize("orphan_dataset", INTELLIGENCE_DEPENDENT_DATASETS)
+def test_recovery_rejects_each_intelligence_dependent_without_its_run(orphan_dataset):
+    records = recovery_records()
+    orphan_rows = copy.deepcopy(records[orphan_dataset])
+    if not orphan_rows:
+        checkpoint = records["collection_checkpoints"][0]
+        orphan_rows = [{
+            "run_id": checkpoint["run_id"], "cache_key": checkpoint["cache_key"],
+            "source_receipt_id": checkpoint["source_receipt_id"], "payload": checkpoint["payload"],
+            "replaced_at": checkpoint["created_at"],
+        }]
+    records["intelligence_runs"] = []
+    for dataset in INTELLIGENCE_DEPENDENT_DATASETS:
+        records[dataset] = []
+    records[orphan_dataset] = orphan_rows
+
+    with pytest.raises(ValueError, match="dependency mismatch"):
+        _validated_records(records)
+
+
 @pytest.mark.parametrize("corruption", (
     "native_missing", "private_missing", "lookalike", "private_hash", "native_hash", "duplicate_version",
     "normal_path_lookalike", "native_extra", "older_private", "baseline_file_drift",
