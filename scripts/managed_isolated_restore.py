@@ -23,6 +23,13 @@ import sys
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
+# Running this file directly puts ``scripts/`` (not the repository root) on
+# sys.path.  Keep package imports working without relying on runner PYTHONPATH.
+if __package__ in {None, ""}:
+    _REPOSITORY_ROOT = str(Path(__file__).resolve().parents[1])
+    if _REPOSITORY_ROOT not in sys.path:
+        sys.path.insert(0, _REPOSITORY_ROOT)
+
 from scripts.export_recovery_bundle import REQUIRED_RECOVERY_RECORDS, canonical_json
 
 PROJECT_REF = re.compile(r"[a-z0-9]{20}\Z")
@@ -79,8 +86,9 @@ def _snapshot_sql() -> str:
     parts = []
     for name in REQUIRED_RECOVERY_RECORDS:
         sql = RECOVERY_SQL[name].strip().rstrip(";")
+        literal_name = "'" + name.replace("'", "''") + "'"
         parts.append("%s,COALESCE((SELECT jsonb_agg(to_jsonb(records) ORDER BY to_jsonb(records)::text) "
-                     "FROM (%s) AS records),'[]'::jsonb)" % (json.dumps(name), sql))
+                     "FROM (%s) AS records),'[]'::jsonb)" % (literal_name, sql))
     return "SELECT jsonb_build_object('datasets',jsonb_build_object(" + ",".join(parts) + ")) AS snapshot"
 
 
@@ -174,19 +182,23 @@ class ManagedRestoreTarget:
 
     def preflight_empty(self) -> None:
         from scripts.verify_recovery_bundle import _RESTORE_TABLES
+        self.ensure_native_migration_ledger()
         # schema.sql deliberately seeds the singleton cash ledger; restoration
         # updates/upserts it just like the established PostgreSQL target.
         tables = tuple(dict.fromkeys(table for _dataset, table, _renames in _RESTORE_TABLES))
         checks = " AND ".join(f"(SELECT count(*) = 0 FROM public.{table})" for table in tables)
         query = ("SELECT jsonb_build_object('tables_empty',(" + checks + "),"
-                 "'native_migrations_empty',(to_regclass('supabase_migrations.schema_migrations') IS NULL OR "
-                 "(SELECT count(*) = 0 FROM supabase_migrations.schema_migrations)),"
-                 "'private_ledger_empty',(to_regclass('public.stock_agent_release_migration_ledger') IS NULL OR "
-                 "(SELECT count(*) = 0 FROM public.stock_agent_release_migration_ledger))) AS restore_preflight")
+                 "'native_migrations_empty',(SELECT count(*) = 0 FROM supabase_migrations.schema_migrations),"
+                 "'private_ledger_empty',(SELECT count(*) = 0 FROM public.stock_agent_release_migration_ledger)) AS restore_preflight")
         rows = self.execute(query)
         result = rows[0].get("restore_preflight") if len(rows) == 1 else None
         if not isinstance(result, Mapping) or result != {"tables_empty": True, "native_migrations_empty": True, "private_ledger_empty": True}:
             raise RuntimeError("isolated restore preflight requires empty restore tables and migration ledgers")
+
+    def ensure_native_migration_ledger(self) -> None:
+        """Provision the empty native ledger required by the restore contract."""
+        self.execute("CREATE SCHEMA IF NOT EXISTS supabase_migrations;"
+                     "CREATE TABLE IF NOT EXISTS supabase_migrations.schema_migrations(version text PRIMARY KEY,statements text[])")
 
     def apply_schema(self, schema: Path) -> None:
         resolved = Path(schema).resolve()
@@ -330,7 +342,10 @@ class ManagedProjectProvisioner:
     """Creates a single disposable project only after the free-slot proof."""
 
     _HEALTHY = {"ACTIVE_HEALTHY", "HEALTHY"}
-    _ACTIVE = _HEALTHY | {"ACTIVE", "CREATING", "RESTORING", "UPGRADING", "PAUSING"}
+    _NON_CONSUMING = {"INACTIVE", "PAUSED"}
+    _KNOWN_STATUSES = _HEALTHY | _NON_CONSUMING | {
+        "ACTIVE", "ACTIVE_UNHEALTHY", "CREATING", "RESTORING", "UPGRADING", "PAUSING",
+    }
 
     @staticmethod
     def _run_bound_name(production_ref: str, workflow_run_id: str, workflow_attempt: str, cleanup_key: bytes) -> str:
@@ -398,13 +413,42 @@ class ManagedProjectProvisioner:
             raise RuntimeError("production organization or region is unavailable")
         return dict(value)
 
+    def _validated_inventory(self, projects: object, *, cleanup: bool = False) -> list[dict[str, object]]:
+        """Validate the complete inventory before using any ref or absence claim."""
+        if not isinstance(projects, list):
+            raise RuntimeError("cleanup inventory is unavailable" if cleanup else "project inventory is unavailable")
+        validated: list[dict[str, object]] = []
+        seen_refs: set[str] = set()
+        for project in projects:
+            if not isinstance(project, Mapping):
+                raise RuntimeError("cleanup inventory is malformed" if cleanup else "project inventory is malformed")
+            ref = _project_ref(project.get("ref"), "inventory")
+            if ref in seen_refs:
+                raise RuntimeError("cleanup inventory has duplicate project identity" if cleanup else "project inventory has duplicate identity")
+            seen_refs.add(ref)
+            for field in ("organization_id", "organization_slug", "region", "status"):
+                value = project.get(field)
+                if not isinstance(value, str) or not value.strip():
+                    raise RuntimeError("cleanup inventory is malformed" if cleanup else "project inventory is malformed")
+            if project["status"] not in self._KNOWN_STATUSES:
+                raise RuntimeError("cleanup inventory has unknown status" if cleanup else "project inventory has unknown status")
+            name = project.get("name")
+            if (cleanup and (not isinstance(name, str) or not name.strip())) or (
+                    not cleanup and name is not None and (not isinstance(name, str) or not name.strip())):
+                raise RuntimeError("cleanup inventory is malformed" if cleanup else "project inventory is malformed")
+            validated.append(dict(project))
+        return validated
+
     def create_and_wait(self) -> str:
         production = self._production()
-        projects = self._request("GET", "/v1/projects", None)
-        if not isinstance(projects, list) or not all(isinstance(project, Mapping) for project in projects):
-            raise RuntimeError("project inventory is unavailable")
-        active = [project for project in projects if project.get("organization_slug") == production["organization_slug"]
-                  and project.get("status") in self._ACTIVE]
+        projects = self._validated_inventory(self._request("GET", "/v1/projects", None))
+        owner_projects = []
+        for project in projects:
+            if project["organization_id"] == production["organization_id"]:
+                if project["organization_slug"] != production["organization_slug"]:
+                    raise RuntimeError("project inventory has ambiguous production organization identity")
+                owner_projects.append(project)
+        active = [project for project in owner_projects if project["status"] not in self._NON_CONSUMING]
         if len(active) != 1 or active[0].get("ref") != self.production_ref:
             raise RuntimeError("exactly one active project is required for a free restore slot")
         # This password exists only in the create request.  It is deliberately
@@ -442,9 +486,7 @@ class ManagedProjectProvisioner:
         if ref is not None and self._cleanup_name is not None:
             try:
                 production = self._production()
-                projects = self._request("GET", "/v1/projects", None)
-                if not isinstance(projects, list) or not all(isinstance(project, Mapping) for project in projects):
-                    raise RuntimeError("cleanup inventory is unavailable")
+                projects = self._validated_inventory(self._request("GET", "/v1/projects", None), cleanup=True)
                 exact = [project for project in projects if project.get("ref") == ref]
                 if len(exact) > 1:
                     raise RuntimeError("cleanup inventory has duplicate project identity")
@@ -455,7 +497,8 @@ class ManagedProjectProvisioner:
                     self._persist_cleanup_identity()
                     return {"attempted": False, "deleted": True, "retained_project_ref": None}
                 project = exact[0]
-                if (project.get("name") != self._cleanup_name or project.get("organization_slug") != production["organization_slug"]
+                if (project.get("name") != self._cleanup_name or project.get("organization_id") != production["organization_id"]
+                        or project.get("organization_slug") != production["organization_slug"]
                         or project.get("region") != production["region"] or ref == self.production_ref):
                     raise RuntimeError("persisted cleanup ref does not match the deterministic temporary project")
             except Exception as error:
@@ -468,10 +511,9 @@ class ManagedProjectProvisioner:
                 # no stored ref, so wait through the bounded visibility window
                 # before treating a stable no-match as authoritative absence.
                 for attempt in range(self._max_cleanup_checks):
-                    projects = self._request("GET", "/v1/projects", None)
-                    if not isinstance(projects, list) or not all(isinstance(project, Mapping) for project in projects):
-                        raise RuntimeError("cleanup inventory is unavailable")
+                    projects = self._validated_inventory(self._request("GET", "/v1/projects", None), cleanup=True)
                     candidates = [project for project in projects if project.get("name") == self._cleanup_name
+                                  and project.get("organization_id") == production["organization_id"]
                                   and project.get("organization_slug") == production["organization_slug"]
                                   and project.get("region") == production["region"]]
                     if len(candidates) > 1:
@@ -501,8 +543,8 @@ class ManagedProjectProvisioner:
             failure = None
         for attempt in range(self._max_cleanup_checks):
             try:
-                projects = self._request("GET", "/v1/projects", None)
-                absent = isinstance(projects, list) and not any(isinstance(project, Mapping) and project.get("ref") == ref for project in projects)
+                projects = self._validated_inventory(self._request("GET", "/v1/projects", None), cleanup=True)
+                absent = not any(project["ref"] == ref for project in projects)
             except Exception:
                 absent = False
             if absent:

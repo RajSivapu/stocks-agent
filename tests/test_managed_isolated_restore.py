@@ -55,6 +55,51 @@ def test_management_source_rejects_any_non_read_only_identity_before_snapshot():
     assert len(http.calls) == 0
 
 
+def test_direct_script_help_imports_scripts_package_without_pythonpath():
+    script = Path(__file__).parents[1] / "scripts" / "managed_isolated_restore.py"
+    environment = dict(os.environ)
+    environment.pop("PYTHONPATH", None)
+    result = subprocess.run([sys.executable, str(script), "--help"], env=environment,
+                            text=True, capture_output=True)
+    assert result.returncode == 0
+    assert "--cleanup-only" in result.stdout
+
+
+def test_cleanup_only_main_uses_mocked_transport_without_printing_environment_secrets(tmp_path, monkeypatch, capsys):
+    import scripts.managed_isolated_restore as managed
+
+    identity = tmp_path / "cleanup.json"
+    key = "cleanup-key-not-for-output"
+    provisioner_class = managed.ManagedProjectProvisioner
+    provisioner_class(lambda *_args: [], "p" * 20, cleanup_identity_path=identity,
+                      workflow_run_id="42", workflow_attempt="3", cleanup_key=key.encode())
+    def transport(method, path, _payload=None):
+        if path == f"/v1/projects/{'p' * 20}":
+            return {"ref": "p" * 20, "organization_id": "org-1", "organization_slug": "owner-org", "region": "us-east-1"}
+        if method == "GET" and path == "/v1/projects":
+            return []
+        raise AssertionError((method, path))
+    monkeypatch.setattr(managed, "SupabaseManagementApi", lambda _token: transport)
+    monkeypatch.setattr(managed, "ManagedProjectProvisioner", lambda *args, **kwargs: provisioner_class(
+        *args, **kwargs, max_cleanup_checks=1, sleep=lambda _seconds: None))
+    monkeypatch.setenv("SUPABASE_ACCESS_TOKEN", "token-not-for-output")
+    monkeypatch.setenv("RELEASE_RECOVERY_KEY", key)
+    monkeypatch.setattr(sys, "argv", ["managed_isolated_restore.py", "--cleanup-only", "--production-project-ref", "p" * 20,
+                                       "--output-dir", str(tmp_path), "--cleanup-identity", str(identity),
+                                       "--workflow-run-id", "42", "--workflow-attempt", "3"])
+    assert managed.main() == 0
+    output = capsys.readouterr().out
+    assert "token-not-for-output" not in output and key not in output
+
+
+def test_snapshot_sql_uses_postgres_text_literals_for_dataset_keys():
+    from scripts.managed_isolated_restore import _snapshot_sql
+
+    query = _snapshot_sql()
+    assert "'holdings',COALESCE" in query
+    assert '"holdings",COALESCE' not in query
+
+
 def test_restore_target_refuses_caller_owned_or_production_project_and_never_uses_read_only_write_path():
     from scripts.managed_isolated_restore import ManagedRestoreTarget
 
@@ -111,6 +156,23 @@ def test_provisioner_refuses_to_create_when_the_owner_has_more_than_one_active_p
         ManagedProjectProvisioner(api, "p" * 20).create_and_wait()
 
 
+def test_provisioner_fails_closed_on_unknown_inventory_status_before_project_creation():
+    from scripts.managed_isolated_restore import ManagedProjectProvisioner
+
+    def api(method, path, _payload=None):
+        if path == f"/v1/projects/{'p' * 20}":
+            return {"ref": "p" * 20, "organization_id": "org-1", "organization_slug": "owner-org", "region": "us-east-1"}
+        if path == "/v1/projects" and method == "GET":
+            return [
+                {"ref": "p" * 20, "name": "production", "organization_id": "org-1", "organization_slug": "owner-org", "region": "us-east-1", "status": "ACTIVE_HEALTHY"},
+                {"ref": "x" * 20, "name": "foreign", "organization_id": "org-2", "organization_slug": "other", "region": "us-east-1", "status": "UNKNOWN"},
+            ]
+        raise AssertionError("project creation must not happen")
+
+    with pytest.raises(RuntimeError, match="inventory"):
+        ManagedProjectProvisioner(api, "p" * 20).create_and_wait()
+
+
 def test_restore_receipt_is_bounded_and_never_serializes_secret_values_or_rows(tmp_path):
     from scripts.managed_isolated_restore import write_restore_receipt
 
@@ -148,8 +210,25 @@ def test_restore_target_preflight_rejects_nonempty_restore_state_before_any_inse
     target = ManagedRestoreTarget(api, "r" * 20, "p" * 20, created_project_ref="r" * 20)
     with pytest.raises(RuntimeError, match="preflight"):
         target.preflight_empty()
-    assert len(calls) == 1
-    assert calls[0][1] == f"/v1/projects/{'r' * 20}/database/query"
+    assert len(calls) == 2
+    assert "CREATE SCHEMA IF NOT EXISTS supabase_migrations" in calls[0][2]["query"]
+    assert calls[1][1] == f"/v1/projects/{'r' * 20}/database/query"
+
+
+def test_restore_target_creates_empty_native_migration_ledger_before_preflight_without_relation_short_circuit():
+    from scripts.managed_isolated_restore import ManagedRestoreTarget
+
+    queries = []
+    def api(_method, _path, payload=None):
+        queries.append(payload["query"])
+        if "restore_preflight" in payload["query"]:
+            return [{"restore_preflight": {"tables_empty": True, "native_migrations_empty": True,
+                                             "private_ledger_empty": True}}]
+        return []
+
+    ManagedRestoreTarget(api, "r" * 20, "p" * 20, created_project_ref="r" * 20).preflight_empty()
+    assert "CREATE TABLE IF NOT EXISTS supabase_migrations.schema_migrations(version text PRIMARY KEY,statements text[])" in queries[0]
+    assert "to_regclass" not in queries[1]
 
 
 def test_recovery_crypt_reads_key_only_from_environment_and_rejects_tampering(tmp_path):
@@ -259,7 +338,7 @@ def test_provisioner_uses_organization_slug_and_ignores_other_org_and_paused_pro
 def test_cleanup_confirms_exact_delete_response_and_bounded_inventory_absence():
     from scripts.managed_isolated_restore import ManagedProjectProvisioner
 
-    inventory = [[{"ref": "r" * 20}], []]
+    inventory = [[{"ref": "r" * 20, "name": "temporary", "organization_id": "org-1", "organization_slug": "owner-org", "region": "us-east-1", "status": "ACTIVE_HEALTHY"}], []]
     def api(method, path, _payload=None):
         if method == "DELETE":
             return {"ref": "r" * 20}
@@ -270,6 +349,41 @@ def test_cleanup_confirms_exact_delete_response_and_bounded_inventory_absence():
     provisioner = ManagedProjectProvisioner(api, "p" * 20, max_cleanup_checks=2, sleep=lambda _seconds: None)
     provisioner.created_project_ref = "r" * 20
     assert provisioner.cleanup()["deleted"] is True
+
+
+def test_cleanup_malformed_post_delete_inventory_retains_the_exact_project_ref():
+    from scripts.managed_isolated_restore import ManagedProjectProvisioner
+
+    def api(method, path, _payload=None):
+        if method == "DELETE" and path == f"/v1/projects/{'r' * 20}":
+            return {"ref": "r" * 20}
+        if method == "GET" and path == "/v1/projects":
+            return [None]
+        raise AssertionError((method, path))
+
+    provisioner = ManagedProjectProvisioner(api, "p" * 20, max_cleanup_checks=1, sleep=lambda _seconds: None)
+    provisioner.created_project_ref = "r" * 20
+    assert provisioner.cleanup()["retained_project_ref"] == "r" * 20
+
+
+def test_known_cleanup_ref_malformed_inventory_never_claims_exact_ref_absent(tmp_path):
+    from scripts.managed_isolated_restore import ManagedProjectProvisioner
+
+    identity = tmp_path / "cleanup.json"
+    first = ManagedProjectProvisioner(lambda *_args: [], "p" * 20, cleanup_identity_path=identity,
+                                      workflow_run_id="42", workflow_attempt="3", cleanup_key=b"k" * 32)
+    payload = json.loads(identity.read_text()); payload["restore_project_ref"] = "r" * 20; identity.write_text(json.dumps(payload))
+    def api(method, path, _payload=None):
+        if path == f"/v1/projects/{'p' * 20}":
+            return {"ref": "p" * 20, "organization_id": "org-1", "organization_slug": "owner-org", "region": "us-east-1"}
+        if method == "GET" and path == "/v1/projects":
+            return [None]
+        raise AssertionError((method, path))
+
+    provisioner = ManagedProjectProvisioner(api, "p" * 20, cleanup_identity_path=identity,
+                                             workflow_run_id="42", workflow_attempt="3", cleanup_key=b"k" * 32)
+    assert first.created_project_ref is None
+    assert provisioner.cleanup()["retained_project_ref"] == "r" * 20
 
 
 def test_cleanup_fails_closed_on_lost_delete_response_but_discovers_only_deterministic_run_name(tmp_path):
@@ -319,7 +433,7 @@ def test_restarted_cleanup_discovers_exact_run_name_after_lost_delete_response_a
     original = ManagedProjectProvisioner(lambda *_args: [], "p" * 20, cleanup_identity_path=identity,
                                          workflow_run_id="42", workflow_attempt="3", cleanup_key=b"k" * 32)
     name = json.loads(identity.read_text())["name"]
-    inventories = [[{"ref": "r" * 20, "name": name, "organization_slug": "owner-org", "region": "us-east-1"}], []]
+    inventories = [[{"ref": "r" * 20, "name": name, "organization_id": "org-1", "organization_slug": "owner-org", "region": "us-east-1", "status": "ACTIVE_HEALTHY"}], []]
     def api(method, path, _payload=None):
         if path == f"/v1/projects/{'p' * 20}":
             return {"ref": "p" * 20, "organization_id": "org-1", "organization_slug": "owner-org", "region": "us-east-1"}
@@ -344,7 +458,7 @@ def test_unknown_ref_cleanup_waits_for_inventory_visibility_then_binds_and_delet
     name = json.loads(identity.read_text())["name"]
     inventories = [
         [],
-        [{"ref": "r" * 20, "name": name, "organization_slug": "owner-org", "region": "us-east-1"}],
+        [{"ref": "r" * 20, "name": name, "organization_id": "org-1", "organization_slug": "owner-org", "region": "us-east-1", "status": "ACTIVE_HEALTHY"}],
         [],
     ]
     calls = []
@@ -438,3 +552,11 @@ def test_workflow_has_separate_always_cleanup_job_for_runner_loss():
     bind = next(step["run"] for step in workflow["jobs"]["restore"]["steps"] if step.get("name", "").startswith("Bind checkout"))
     assert '"${GITHUB_REF:-}" = "refs/heads/main"' in bind
     assert '"${GITHUB_SHA:-}" = "$MAIN_SHA"' in bind
+    cleanup_bind = next(step for step in cleanup["steps"] if step.get("name", "").startswith("Bind cleanup"))
+    cleanup_run = cleanup_bind["run"]
+    assert cleanup_bind.get("env") == {"GH_TOKEN": "${{ github.token }}"}
+    assert '"${GITHUB_REF:-}" = "refs/heads/main"' in cleanup_run
+    assert "head_sha=$GITHUB_SHA" in cleanup_run
+    assert "Owner dashboard verification" in cleanup_run and "conclusion == \"success\"" in cleanup_run
+    secret_step = next(step for step in cleanup["steps"] if step.get("name", "").startswith("Derive and clean"))
+    assert cleanup["steps"].index(cleanup_bind) < cleanup["steps"].index(secret_step)
