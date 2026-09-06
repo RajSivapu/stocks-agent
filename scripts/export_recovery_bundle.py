@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import argparse
+import base64
+import binascii
 from datetime import datetime
 import hashlib
 import io
@@ -426,6 +428,14 @@ def reject_plaintext(path: Path) -> None:
     try:
         raw.decode("utf-8")
     except UnicodeDecodeError:
+        return
+    try:
+        envelope = base64.b64decode(raw, altchars=b"-_", validate=True)
+    except (binascii.Error, ValueError):
+        envelope = b""
+    if (raw == base64.urlsafe_b64encode(envelope)
+            and len(envelope) >= 73 and envelope[0] == 0x80
+            and (len(envelope) - 57) % 16 == 0):
         return
     raise RuntimeError("encryption output is readable as plaintext")
 

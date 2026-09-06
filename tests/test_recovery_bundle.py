@@ -671,6 +671,45 @@ def test_copy_commands_are_not_encryption_and_leave_no_external_artifact(tmp_pat
     assert not (tmp_path / "bundle.enc.receipt.json").exists()
 
 
+def test_actual_recovery_crypt_fernet_command_exports_and_decrypt_verifies(tmp_path, monkeypatch):
+    script = Path(__file__).parents[1] / "scripts" / "recovery_crypt.py"
+    prefix = " ".join(map(shlex.quote, [sys.executable, str(script)]))
+    commands = {
+        "encrypt_command": prefix + " encrypt {input} {output}",
+        "decrypt_command": prefix + " decrypt {input} {output}",
+    }
+    monkeypatch.setenv("RELEASE_RECOVERY_KEY", "MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY=")
+    source = FakeDatabase()
+
+    artifact = export_recovery_bundle(source, tmp_path / "fernet.enc", **commands)
+
+    assert verify_recovery_bundle(
+        artifact, restored(source), production_source=source,
+        decrypt_command=commands["decrypt_command"],
+    )["status"] == "verified"
+
+
+@pytest.mark.parametrize("wrapper", ("hex", "urlsafe_base64"))
+def test_non_fernet_textual_wrappers_are_not_accepted_as_ciphertext(tmp_path, commands, wrapper):
+    script = tmp_path / f"{wrapper}.py"
+    transform = "raw.hex().encode()" if wrapper == "hex" else "base64.urlsafe_b64encode(raw)"
+    script.write_text(
+        "import base64, pathlib, sys\n"
+        "raw = pathlib.Path(sys.argv[1]).read_bytes()\n"
+        f"pathlib.Path(sys.argv[2]).write_bytes({transform})\n"
+    )
+    encrypt_command = " ".join(map(shlex.quote, [sys.executable, str(script)])) + " {input} {output}"
+
+    with pytest.raises(RuntimeError, match="plaintext"):
+        export_recovery_bundle(
+            FakeDatabase(), tmp_path / f"{wrapper}.enc",
+            encrypt_command=encrypt_command, decrypt_command=commands["decrypt_command"],
+        )
+
+    assert not (tmp_path / f"{wrapper}.enc").exists()
+    assert not (tmp_path / f"{wrapper}.enc.receipt.json").exists()
+
+
 @pytest.mark.parametrize("failure", ["encrypt", "decrypt"])
 def test_encryption_failures_remove_external_artifact(tmp_path, commands, failure):
     failing = f"{shlex.quote(sys.executable)} -c 'import pathlib,sys;pathlib.Path(sys.argv[2]).write_bytes(b\"partial\");sys.exit(1)' {{input}} {{output}}"
