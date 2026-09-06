@@ -36,6 +36,7 @@ MAIN_SHA = re.compile(r"[0-9a-f]{40}\Z")
 MAX_CATALOG_ROWS = 10_000
 MAX_ROOT_RELATIONS = 256
 MAX_ROOT_ROWS_PER_RELATION = 10_000
+MAX_ROOT_STATEMENT_TIMEOUT_MS = 60_000
 MAX_ROLE_MEMBERSHIPS = 64
 MAX_RECEIPT_BYTES = 1_000_000
 _DIGEST = re.compile(r"[0-9a-f]{64}\Z")
@@ -405,7 +406,7 @@ WITH root_guard AS MATERIALIZED (
   SELECT role.rolname AS role, current_setting('transaction_read_only') AS transaction_read_only,
     current_setting('row_security') AS row_security, role.rolbypassrls AS bypassrls,
     settings.setting::int AS statement_timeout_ms,
-    1 / CASE WHEN settings.setting::int BETWEEN 1 AND 30000
+    1 / CASE WHEN settings.setting::int BETWEEN 1 AND {MAX_ROOT_STATEMENT_TIMEOUT_MS}
       AND (SELECT count(*) FROM pg_catalog.pg_class AS c
            JOIN pg_catalog.pg_namespace AS n ON n.oid = c.relnamespace
            WHERE n.nspname = 'public' AND c.relkind IN ('r', 'p') AND c.relname IN ({relation_literals})) = {len(relations)}
@@ -556,7 +557,7 @@ def _validate_root_preflight(value: object, expected_relation_count: int) -> Non
             or type(item.get("relation_count")) is not int
             or type(item.get("full_visibility")) is not bool):
         raise RuntimeError("protected root preflight response is malformed")
-    if not 1 <= item["statement_timeout_ms"] <= 30_000:
+    if not 1 <= item["statement_timeout_ms"] <= MAX_ROOT_STATEMENT_TIMEOUT_MS:
         raise RuntimeError("protected root preflight statement timeout is unsafe")
     if item["relation_count"] != expected_relation_count:
         raise RuntimeError("protected root preflight relation set changed")
@@ -598,7 +599,7 @@ def inspect_production_schema(request, project_ref: str, main_sha: str) -> dict[
             or not isinstance(root_identity.get("row_security"), str)
             or not isinstance(root_identity.get("bypassrls"), bool)
             or not isinstance(root_identity.get("statement_timeout_ms"), int)
-            or not 1 <= root_identity["statement_timeout_ms"] <= 30_000):
+            or not 1 <= root_identity["statement_timeout_ms"] <= MAX_ROOT_STATEMENT_TIMEOUT_MS):
         raise RuntimeError("protected root identity is unavailable or unsafe")
     root_catalog = _validate_catalog(root_rows[0]["catalog"])
     root_presence = _validate_presence(root_rows[0]["relation_presence"], root_catalog["relations"])
