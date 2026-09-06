@@ -69,6 +69,8 @@ jobs:
           CANDIDATE_SHA="$INPUT_SHA"; CI_WORKFLOW_RUN_ID="$INPUT_CI_RUN_ID"; PULL_REQUEST_NUMBER="$INPUT_PR"
           export CANDIDATE_SHA
           test "$INPUT_SHA" = "$INPUT_REVIEWED_SHA" || { echo 'candidate SHA/ref mismatch'; exit 1; }
+          test "${GITHUB_REF:-}" = "refs/heads/main" || { echo 'manual release ref is not main'; exit 1; }
+          test "${GITHUB_SHA:-}" = "$CANDIDATE_SHA" || { echo 'manual release SHA does not bind candidate'; exit 1; }
           test "$CANDIDATE_SHA" = "$MAIN_SHA" || { echo 'candidate SHA/ref mismatch'; exit 1; }
           test "$(git rev-parse HEAD)" = "$CANDIDATE_SHA" || { echo 'candidate SHA/ref mismatch'; exit 1; }
           git fetch --no-tags origin main

@@ -35,6 +35,8 @@ def test_protected_release_workflow_is_manual_only_and_binds_immutable_evidence(
     assert "actions/upload-artifact@" in workflow
     assert "start_run" not in workflow
     assert "collect_market_intelligence.py" not in workflow
+    assert '"${GITHUB_REF:-}" = "refs/heads/main"' in workflow
+    assert '"${GITHUB_SHA:-}" = "$CANDIDATE_SHA"' in workflow
 
 
 def test_release_workflow_writes_authoritative_non_dry_run_and_candidate_bound_record_fields():
