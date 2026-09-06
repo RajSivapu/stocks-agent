@@ -190,11 +190,15 @@ def test_release_exports_candidate_for_every_set_u_dry_run_and_recovery_step():
     assert 'state=in_progress' in workflow
 
 
-def test_recovery_uses_exact_candidate_concurrency_and_separate_durable_artifacts():
+def test_recovery_serializes_with_release_and_authenticates_the_event_attempt():
     workflow = Path(".github/workflows/owner-dashboard-release.yml").read_text()
     recovery = Path(".github/workflows/owner-dashboard-release-recovery.yml").read_text()
     assert "rollback-source-" in workflow and "recovery-metadata-" in workflow
-    assert "group: protected-owner-dashboard-recovery-${{ github.event.workflow_run.id }}" in recovery
+    assert "group: protected-owner-dashboard-release-production" in workflow
+    assert "group: protected-owner-dashboard-release-production" in recovery
+    assert "cancel-in-progress: false" in recovery
+    trust = recovery.split("- name: Verify exact failed-release deployment trust marker", 1)[1].split("- name:", 1)[0]
+    assert 'test "$(jq -r .run_attempt <<<"$RUN")" = "$RUN_ATTEMPT"' in trust
     assert "ref: ${{ github.event.workflow_run.head_sha }}" in recovery
     assert "--release-run-id" in recovery
     assert "--retain-recovery-artifact" in recovery

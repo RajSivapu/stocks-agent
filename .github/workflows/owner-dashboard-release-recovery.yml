@@ -11,7 +11,7 @@ permissions:
   deployments: write
 
 concurrency:
-  group: protected-owner-dashboard-recovery-${{ github.event.workflow_run.id }}
+  group: protected-owner-dashboard-release-production
   cancel-in-progress: false
 
 jobs:
@@ -33,6 +33,7 @@ jobs:
           HEAD_SHA="${{ github.event.workflow_run.head_sha }}"
           export HEAD_SHA
           RUN="$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$RUN_ID")"
+          test "$(jq -r .run_attempt <<<"$RUN")" = "$RUN_ATTEMPT"
           jq -e --arg repo "$GITHUB_REPOSITORY" --arg sha "$HEAD_SHA" '.repository.full_name == $repo and .head_sha == $sha and .head_branch == "main" and .event == "workflow_dispatch" and .path == ".github/workflows/owner-dashboard-release.yml" and .name == "Protected owner dashboard release"' <<<"$RUN" >/dev/null
           VERIFIED="$(gh api "repos/$GITHUB_REPOSITORY/actions/workflows/owner-dashboard-ci.yml/runs?head_sha=$HEAD_SHA&status=completed&per_page=100" --jq '[.workflow_runs[] | select(.head_sha == env.HEAD_SHA and .conclusion == "success" and .name == "Owner dashboard verification" and .path == ".github/workflows/owner-dashboard-ci.yml")] | length')"
           test "$VERIFIED" -ge 1
