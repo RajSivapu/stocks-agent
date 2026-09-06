@@ -434,12 +434,18 @@ class NativeReleaseAdapter:
         if context["project_ref"] != self._project() or context["candidate_sha"] != self.context["candidate_sha"]:
             raise RuntimeError("encrypted journal project/candidate binding mismatch")
         run_id = str(context["release_run_id"])
-        if not re.fullmatch(r"[1-9][0-9]*", run_id): raise RuntimeError("protected journal run identity is required")
+        run_attempt = str(context["release_run_attempt"])
+        if not re.fullmatch(r"[1-9][0-9]*", run_id) or not re.fullmatch(r"[1-9][0-9]*", run_attempt):
+            raise RuntimeError("protected journal run identity and attempt are required")
+        if (run_id != str(self.context.get("release_run_id"))
+                or run_attempt != str(self.context.get("release_run_attempt"))):
+            raise RuntimeError("encrypted journal run identity/attempt binding mismatch")
         with self._connection() as connection:
             lease = connection.execute("SELECT owner,state FROM public.stock_agent_release_mutation_lease WHERE singleton FOR SHARE").fetchone()
             if not lease or lease["state"] != "recovery_required" or lease["owner"] != self.context.get("lease_owner"):
                 raise RuntimeError("encrypted journal retention requires the held protected lease")
-            connection.execute(f"CREATE TABLE IF NOT EXISTS {JOURNALS} (sequence bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY, project_ref text NOT NULL, candidate_sha text NOT NULL, run_id text NOT NULL, ciphertext bytea NOT NULL, captured_at timestamptz NOT NULL DEFAULT clock_timestamp())")
+            connection.execute(f"CREATE TABLE IF NOT EXISTS {JOURNALS} (sequence bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY, project_ref text NOT NULL, candidate_sha text NOT NULL, run_id text NOT NULL, run_attempt text NOT NULL, ciphertext bytea NOT NULL, captured_at timestamptz NOT NULL DEFAULT clock_timestamp())")
+            connection.execute(f"ALTER TABLE {JOURNALS} ADD COLUMN IF NOT EXISTS run_attempt text")
             connection.execute(f"REVOKE ALL ON {JOURNALS} FROM PUBLIC")
             # Supabase default privileges can grant directly to these roles;
             # revoking PUBLIC alone does not remove those direct grants.
@@ -448,15 +454,30 @@ class NativeReleaseAdapter:
                     connection.execute(sql.SQL("REVOKE ALL ON {}.{} FROM {}").format(
                         sql.Identifier("public"), sql.Identifier(JOURNALS.split(".")[1]), sql.Identifier(role)))
             connection.execute(f"ALTER TABLE {JOURNALS} ENABLE ROW LEVEL SECURITY")
-            connection.execute(f"INSERT INTO {JOURNALS}(project_ref,candidate_sha,run_id,ciphertext) VALUES(%s,%s,%s,%s)",
-                               (self._project(), self.context["candidate_sha"], run_id, encrypted))
+            connection.execute(f"INSERT INTO {JOURNALS}(project_ref,candidate_sha,run_id,run_attempt,ciphertext) VALUES(%s,%s,%s,%s,%s)",
+                               (self._project(), self.context["candidate_sha"], run_id, run_attempt, encrypted))
 
-    def recover_retained(self, run_id):
+    def recover_retained(self, run_id, run_attempt):
+        run_id, run_attempt = str(run_id), str(run_attempt)
+        if (not re.fullmatch(r"[1-9][0-9]*", run_id) or not re.fullmatch(r"[1-9][0-9]*", run_attempt)
+                or run_id != str(self.context.get("release_run_id"))
+                or run_attempt != str(self.context.get("release_run_attempt"))):
+            raise RuntimeError("protected retained journal run identity/attempt mismatch")
         with self._connection() as connection:
-            row = connection.execute(f"SELECT ciphertext FROM {JOURNALS} WHERE project_ref=%s AND candidate_sha=%s AND run_id=%s ORDER BY sequence DESC LIMIT 1",
-                (self._project(), self.context["candidate_sha"], str(run_id))).fetchone()
+            row = connection.execute(f"SELECT ciphertext FROM {JOURNALS} WHERE project_ref=%s AND candidate_sha=%s AND run_id=%s AND run_attempt=%s ORDER BY sequence DESC LIMIT 1",
+                (self._project(), self.context["candidate_sha"], run_id, run_attempt)).fetchone()
         if not row: raise RuntimeError("retained encrypted component journal is unavailable")
-        return bytes(row["ciphertext"])
+        encrypted = bytes(row["ciphertext"])
+        from cryptography.fernet import Fernet
+        try:
+            context = json.loads(Fernet(self.environment["RELEASE_RECOVERY_KEY"].encode()).decrypt(encrypted))["release_context"]
+        except Exception as error:
+            raise RuntimeError("retained encrypted component journal identity is invalid") from error
+        if (context.get("project_ref") != self._project() or context.get("candidate_sha") != self.context["candidate_sha"]
+                or str(context.get("release_run_id")) != run_id
+                or str(context.get("release_run_attempt")) != run_attempt):
+            raise RuntimeError("retained encrypted component journal identity mismatch")
+        return encrypted
 
     def receipt(self, candidate_sha):
         # Publication requires real immutable artifact IDs, including the Site's

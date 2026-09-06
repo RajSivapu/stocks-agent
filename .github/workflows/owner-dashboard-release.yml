@@ -194,7 +194,7 @@ jobs:
           set -euo pipefail
           test -n "${RELEASE_STATE_DIR:-}" || exit 0
           test -f "$RELEASE_STATE_DIR/release-state.json" || exit 0
-          restore_after_failure() { "$RELEASE_VENV/bin/python" scripts/restore_gateway_after_release_failure.py --project-ref "$PROJECT_REF" --admin-url "$POSTGRES_URL" --release-state "$RELEASE_STATE_DIR/release-state.json" --lease-owner "recovery-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"; }
+          restore_after_failure() { "$RELEASE_VENV/bin/python" scripts/restore_gateway_after_release_failure.py --project-ref "$PROJECT_REF" --admin-url "$POSTGRES_URL" --release-state "$RELEASE_STATE_DIR/release-state.json" --release-run-id "$GITHUB_RUN_ID" --release-run-attempt "$GITHUB_RUN_ATTEMPT" --lease-owner "recovery-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"; }
           trap 'restore_after_failure' ERR
           restore_after_failure
       - name: Mark candidate deployment failed after protected restoration

@@ -1203,6 +1203,7 @@ def main() -> int:
     context = {"candidate_sha": git_sha, "project_ref": arguments.project_ref,
                "lease_owner": arguments.lease_owner,
                "release_run_id": os.environ.get("GITHUB_RUN_ID"),
+               "release_run_attempt": os.environ.get("GITHUB_RUN_ATTEMPT"),
                "deployment_id": arguments.deployment_id, "allowed_origin": arguments.allowed_origin,
                "site_origin": arguments.site_origin, "owner_user_id": owner_user_id}
     adapter = load_native_release_adapter(context)

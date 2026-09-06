@@ -149,6 +149,18 @@ def test_release_deployment_and_recovery_marker_bind_the_original_run_attempt():
     assert "component-recovery-run:$RUN_ID:$RUN_ATTEMPT" in recovery
 
 
+def test_recovery_journal_invocation_binds_the_exact_release_run_attempt():
+    workflow = Path(".github/workflows/owner-dashboard-release.yml").read_text()
+    recovery = Path(".github/workflows/owner-dashboard-release-recovery.yml").read_text()
+    deployer = Path("scripts/deploy_owner_dashboard_api.py").read_text()
+    restorer = Path("scripts/restore_gateway_after_release_failure.py").read_text()
+    assert '"release_run_attempt": os.environ.get("GITHUB_RUN_ATTEMPT")' in deployer
+    assert 'parser.add_argument("--release-run-attempt", type=int, required=True)' in restorer
+    assert '--release-run-id "$GITHUB_RUN_ID"' in workflow
+    assert '--release-run-attempt "$GITHUB_RUN_ATTEMPT"' in workflow
+    assert '--release-run-attempt "${{ github.event.workflow_run.run_attempt }}"' in recovery
+
+
 def test_recovery_trust_rejects_feature_or_unreviewed_run_before_checkout():
     recovery = Path(".github/workflows/owner-dashboard-release-recovery.yml").read_text()
     trust = recovery.split("- name: Verify exact failed-release deployment trust marker", 1)[1].split("- uses: actions/checkout", 1)[0]
