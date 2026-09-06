@@ -481,14 +481,28 @@ def verify_writer_identity(request: ManagementRequest, project_ref: str) -> dict
     query = (
         "SELECT current_user AS role, "
         "current_setting('transaction_read_only') AS transaction_read_only, "
-        "current_database() AS database, role.rolsuper AS superuser "
+        "current_database() AS database, role.rolsuper AS superuser, "
+        "role.rolcreaterole AS createrole, role.rolbypassrls AS bypassrls, "
+        "has_database_privilege(current_user, current_database(), 'CREATE') AS database_create, "
+        "has_schema_privilege(current_user, 'public', 'USAGE') AS public_schema_usage, "
+        "has_schema_privilege(current_user, 'public', 'CREATE') AS public_schema_create "
         "FROM pg_catalog.pg_roles AS role WHERE role.rolname = current_user"
     )
     response = request(
         "POST", f"/v1/projects/{project_ref}/database/query", {"query": query}
     )
     _canonical_bytes(response, "writer identity response", MAX_MANAGEMENT_RESPONSE_BYTES)
-    fields = {"role", "transaction_read_only", "database", "superuser"}
+    fields = {
+        "role",
+        "transaction_read_only",
+        "database",
+        "superuser",
+        "createrole",
+        "bypassrls",
+        "database_create",
+        "public_schema_usage",
+        "public_schema_create",
+    }
     if (
         not isinstance(response, list)
         or len(response) != 1
@@ -496,9 +510,13 @@ def verify_writer_identity(request: ManagementRequest, project_ref: str) -> dict
         or set(response[0]) != fields
         or response[0].get("role") != "postgres"
         or response[0].get("transaction_read_only") != "off"
-        or response[0].get("superuser") is not True
-        or not isinstance(response[0].get("database"), str)
-        or not response[0].get("database")
+        or response[0].get("database") != "postgres"
+        or response[0].get("superuser") is not False
+        or response[0].get("createrole") is not True
+        or response[0].get("bypassrls") is not True
+        or response[0].get("database_create") is not True
+        or response[0].get("public_schema_usage") is not True
+        or response[0].get("public_schema_create") is not True
     ):
         raise RuntimeError("writer identity is unavailable or unsafe")
     return dict(response[0])
@@ -679,8 +697,13 @@ def build_mutation_sql(
             f"SET LOCAL lock_timeout = '{DB_LOCK_TIMEOUT_SECONDS}s';",
             f"SET LOCAL idle_in_transaction_session_timeout = '{MAX_DB_STATEMENT_TIMEOUT_MS // 1000}s';",
             "DO $identity$ BEGIN IF current_user <> 'postgres' OR "
+            "current_database() <> 'postgres' OR "
             "current_setting('transaction_read_only') <> 'off' OR NOT EXISTS ("
-            "SELECT 1 FROM pg_catalog.pg_roles WHERE rolname = current_user AND rolsuper) "
+            "SELECT 1 FROM pg_catalog.pg_roles WHERE rolname = current_user "
+            "AND NOT rolsuper AND rolcreaterole AND rolbypassrls) OR "
+            "has_database_privilege(current_user, current_database(), 'CREATE') IS NOT TRUE OR "
+            "has_schema_privilege(current_user, 'public', 'USAGE') IS NOT TRUE OR "
+            "has_schema_privilege(current_user, 'public', 'CREATE') IS NOT TRUE "
             "THEN RAISE EXCEPTION 'unsafe reconciliation writer identity' USING ERRCODE = '42501'; "
             "END IF; END; $identity$;",
             "SELECT pg_advisory_xact_lock(hashtextextended('stock_agent_protected_release', 0));",
@@ -789,7 +812,13 @@ def _observer_query(
 WITH observer_lock AS MATERIALIZED (
   SELECT role.rolname AS role,
     current_setting('transaction_read_only') AS transaction_read_only,
+    current_database() AS database,
     role.rolsuper AS superuser,
+    role.rolcreaterole AS createrole,
+    role.rolbypassrls AS bypassrls,
+    has_database_privilege(current_user, current_database(), 'CREATE') AS database_create,
+    has_schema_privilege(current_user, 'public', 'USAGE') AS public_schema_usage,
+    has_schema_privilege(current_user, 'public', 'CREATE') AS public_schema_create,
     settings.setting::int AS statement_timeout_ms,
     pg_try_advisory_xact_lock(hashtextextended('stock_agent_protected_release', 0)) AS lock_acquired
   FROM pg_catalog.pg_roles AS role
@@ -814,8 +843,10 @@ WITH observer_lock AS MATERIALIZED (
   WHERE lock.lock_acquired
     AND lock.statement_timeout_ms BETWEEN 1 AND 120000
 )
-SELECT lock.lock_acquired, lock.role, lock.transaction_read_only, lock.superuser,
-  lock.statement_timeout_ms, observed.catalog, observed.relation_presence,
+SELECT lock.lock_acquired, lock.role, lock.transaction_read_only, lock.database,
+  lock.superuser, lock.createrole, lock.bypassrls, lock.database_create,
+  lock.public_schema_usage, lock.public_schema_create, lock.statement_timeout_ms,
+  observed.catalog, observed.relation_presence,
   observed.protected_roots, observed.native_receipts_xml,
   observed.private_receipts_xml
 FROM observer_lock AS lock
@@ -908,7 +939,13 @@ def observe_reconciliation_state(
         "lock_acquired",
         "role",
         "transaction_read_only",
+        "database",
         "superuser",
+        "createrole",
+        "bypassrls",
+        "database_create",
+        "public_schema_usage",
+        "public_schema_create",
         "statement_timeout_ms",
         "catalog",
         "relation_presence",
@@ -927,7 +964,13 @@ def observe_reconciliation_state(
     if (
         row.get("role") != "postgres"
         or row.get("transaction_read_only") != "off"
-        or row.get("superuser") is not True
+        or row.get("database") != "postgres"
+        or row.get("superuser") is not False
+        or row.get("createrole") is not True
+        or row.get("bypassrls") is not True
+        or row.get("database_create") is not True
+        or row.get("public_schema_usage") is not True
+        or row.get("public_schema_create") is not True
         or type(row.get("statement_timeout_ms")) is not int
         or not 1 <= row["statement_timeout_ms"] <= MAX_DB_STATEMENT_TIMEOUT_MS
     ):
