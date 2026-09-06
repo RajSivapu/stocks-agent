@@ -66,3 +66,35 @@ jobs:
           path: recovery
           if-no-files-found: error
           retention-days: 90
+  cleanup:
+    needs: restore
+    if: ${{ always() }}
+    environment: owner-dashboard-production
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 1
+      - uses: actions/setup-python@42375524e23c412d93fb67b49958b491fce71c38
+        with:
+          python-version: "3.14"
+      - name: Derive and clean only this workflow run's temporary project
+        env:
+          SUPABASE_ACCESS_TOKEN: ${{ secrets.SUPABASE_ACCESS_TOKEN }}
+          RELEASE_RECOVERY_KEY: ${{ secrets.RELEASE_RECOVERY_KEY }}
+          SUPABASE_PROJECT_REF: ${{ vars.SUPABASE_PROJECT_REF }}
+        run: |
+          set -euo pipefail
+          test -n "$SUPABASE_ACCESS_TOKEN" && test -n "$RELEASE_RECOVERY_KEY" && test -n "$SUPABASE_PROJECT_REF"
+          mkdir -m 700 cleanup-recovery
+          python scripts/managed_isolated_restore.py --cleanup-only --production-project-ref "$SUPABASE_PROJECT_REF" --output-dir cleanup-recovery --cleanup-identity cleanup-recovery/cleanup-identity.json --workflow-run-id "$GITHUB_RUN_ID" --workflow-attempt "$GITHUB_RUN_ATTEMPT"
+      - name: Upload durable cleanup receipt
+        if: ${{ always() }}
+        uses: actions/upload-artifact@65462800fd760344b1a7b4382951275a0abb4808
+        with:
+          name: managed-isolated-cleanup-${{ github.run_id }}-${{ github.run_attempt }}
+          path: cleanup-recovery/managed-isolated-cleanup-receipt.json
+          if-no-files-found: error
+          retention-days: 90

@@ -119,7 +119,7 @@ DATASET_FIELDS = {
     },
     "policy_comparisons": {"id": str, "run_id": str, "packet_id": str, "evaluation_id": str,
                            "comparison": dict, "created_at": str},
-    "roles": {"role": str, "login": bool, "superuser": bool, "bypass_rls": bool, "memberships": list, "grants": list},
+    "roles": {"role": str, "login": bool, "inherit": bool, "superuser": bool, "bypass_rls": bool, "memberships": list, "grants": list},
     "schema_version": {"version": str, "statements": list, "sha256": str},
     "release_migration_ledger": {"path": str, "version": str, "sha256": str, "applied_at": str},
 }
@@ -195,6 +195,16 @@ def _validated_records(records: Mapping[str, object]) -> dict[str, list[dict[str
         if any(not all(identity) for identity in identities) or len(set(identities)) != len(identities):
             raise ValueError(f"recovery dataset {name} has duplicate or missing identities")
         result[name] = sorted(clean, key=canonical_json)
+    expected_role_shapes = {
+        "stock_agent_dashboard": {"login": False, "inherit": False},
+        "stock_agent_dashboard_runtime": {"login": True, "inherit": True},
+    }
+    if ({row["role"] for row in result["roles"]} != set(expected_role_shapes)
+            or any(row["superuser"] is not False or row["bypass_rls"] is not False
+                   or row["login"] is not expected_role_shapes[row["role"]]["login"]
+                   or row["inherit"] is not expected_role_shapes[row["role"]]["inherit"]
+                   for row in result["roles"])):
+        raise ValueError("recovery role shapes are invalid")
     runs = {row["id"] for row in result["runs"]}
     commands = {row["id"] for row in result["commands"]}
     requests = {row["request_id"] for row in result["gateway_requests"]}

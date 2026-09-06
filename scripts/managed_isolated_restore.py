@@ -24,7 +24,6 @@ from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
 from scripts.export_recovery_bundle import REQUIRED_RECOVERY_RECORDS, canonical_json
-from scripts.protected_evidence import RECOVERY_SQL
 
 PROJECT_REF = re.compile(r"[a-z0-9]{20}\Z")
 MAX_MANAGEMENT_RESPONSE_BYTES = 32 * 1024 * 1024
@@ -74,6 +73,7 @@ class SupabaseManagementApi:
 
 
 def _snapshot_sql() -> str:
+    from scripts.protected_evidence import RECOVERY_SQL
     # One fixed query obtains all allowlisted sets atomically; ORDER BY gives a
     # deterministic snapshot before the existing exporter validates it.
     parts = []
@@ -206,9 +206,11 @@ class ManagedRestoreTarget:
         for role in sorted(expected):
             row = by_name[role]
             expected_login = role == "stock_agent_dashboard_runtime"
-            if row.get("login") is not expected_login or row.get("superuser") is not False or row.get("bypass_rls") is not False:
+            expected_inherit = expected_login
+            if (row.get("login") is not expected_login or row.get("inherit") is not expected_inherit
+                    or row.get("superuser") is not False or row.get("bypass_rls") is not False):
                 raise RuntimeError("recovery role shape has unsafe authority")
-            login_shape = "LOGIN INHERIT PASSWORD NULL" if expected_login else "NOLOGIN INHERIT"
+            login_shape = "LOGIN INHERIT PASSWORD NULL" if expected_login else "NOLOGIN NOINHERIT"
             statements.append("DO $$ BEGIN IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = '%s') THEN CREATE ROLE %s %s NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS; END IF; END $$" % (role, role, login_shape))
             statements.append(f"ALTER ROLE {role} {login_shape} NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS")
             statements.append("DO $$ DECLARE parent text; BEGIN FOR parent IN SELECT p.rolname FROM pg_auth_members m JOIN pg_roles p ON p.oid=m.roleid JOIN pg_roles child ON child.oid=m.member WHERE child.rolname='%s' LOOP EXECUTE format('REVOKE %%I FROM %%I',parent,'%s'); END LOOP; END $$" % (role, role))
@@ -330,6 +332,16 @@ class ManagedProjectProvisioner:
     _HEALTHY = {"ACTIVE_HEALTHY", "HEALTHY"}
     _ACTIVE = _HEALTHY | {"ACTIVE", "CREATING", "RESTORING", "UPGRADING", "PAUSING"}
 
+    @staticmethod
+    def _run_bound_name(production_ref: str, workflow_run_id: str, workflow_attempt: str, cleanup_key: bytes) -> str:
+        if (not workflow_run_id or not workflow_attempt or len(cleanup_key) < 16):
+            raise RuntimeError("run-bound cleanup identity requires workflow identity and key")
+        label = f"{workflow_run_id}:{workflow_attempt}".encode()
+        digest = hmac.new(cleanup_key, b"stocks-managed-cleanup-v1\0" + production_ref.encode() + b"\0" + label, hashlib.sha256).hexdigest()[:24]
+        run = re.sub(r"[^a-z0-9]", "", workflow_run_id.lower())[-16:] or "run"
+        attempt = re.sub(r"[^a-z0-9]", "", workflow_attempt.lower())[-8:] or "attempt"
+        return f"stocks-recovery-{run}-{attempt}-{digest}"
+
     def __init__(self, request: ManagementRequest, production_project_ref: str, *,
                  random_bytes: Callable[[int], bytes] = secrets.token_bytes,
                  sleep: Callable[[float], None] | None = None, max_health_checks: int = 12,
@@ -350,24 +362,22 @@ class ManagedProjectProvisioner:
         self._cleanup_path = None if cleanup_identity_path is None else Path(cleanup_identity_path).resolve()
         self._cleanup_name: str | None = None
         if self._cleanup_path is not None:
+            if (not isinstance(workflow_run_id, str) or not isinstance(workflow_attempt, str)
+                    or not isinstance(cleanup_key, bytes)):
+                raise RuntimeError("run-bound cleanup identity requires workflow identity and key")
+            expected_name = self._run_bound_name(self.production_ref, workflow_run_id, workflow_attempt, cleanup_key)
             if self._cleanup_path.exists():
                 stored = json.loads(self._cleanup_path.read_text())
                 if (not isinstance(stored, Mapping) or stored.get("format") != "stocks-managed-cleanup-v1"
                         or stored.get("production_project_ref") != self.production_ref
-                        or not isinstance(stored.get("name"), str)):
-                    raise RuntimeError("run-bound cleanup identity is invalid")
-                self._cleanup_name = stored["name"]
+                        or stored.get("name") != expected_name):
+                    raise RuntimeError("run-bound deterministic cleanup identity is invalid")
+                self._cleanup_name = expected_name
                 ref = stored.get("restore_project_ref")
                 if ref is not None:
                     self.created_project_ref = _project_ref(ref, "cleanup restore")
             else:
-                if not all(isinstance(value, str) and value for value in (workflow_run_id, workflow_attempt)) or not isinstance(cleanup_key, bytes) or len(cleanup_key) < 16:
-                    raise RuntimeError("run-bound cleanup identity requires workflow identity and key")
-                label = f"{workflow_run_id}:{workflow_attempt}".encode()
-                digest = hmac.new(cleanup_key, b"stocks-managed-cleanup-v1\0" + self.production_ref.encode() + b"\0" + label, hashlib.sha256).hexdigest()[:24]
-                run = re.sub(r"[^a-z0-9]", "", workflow_run_id.lower())[-16:] or "run"
-                attempt = re.sub(r"[^a-z0-9]", "", workflow_attempt.lower())[-8:] or "attempt"
-                self._cleanup_name = f"stocks-recovery-{run}-{attempt}-{digest}"
+                self._cleanup_name = expected_name
                 self._persist_cleanup_identity()
 
     def _persist_cleanup_identity(self) -> None:
@@ -429,30 +439,44 @@ class ManagedProjectProvisioner:
 
     def cleanup(self) -> dict[str, object]:
         ref = self.created_project_ref
-        if self._cleanup_name is not None:
+        if ref is not None and self._cleanup_name is not None:
             try:
                 production = self._production()
-                candidates = [project for project in self._request("GET", "/v1/projects", None)
-                              if isinstance(project, Mapping) and project.get("name") == self._cleanup_name
+                projects = self._request("GET", "/v1/projects", None)
+                if not isinstance(projects, list) or not all(isinstance(project, Mapping) for project in projects):
+                    raise RuntimeError("cleanup inventory is unavailable")
+                exact = [project for project in projects if project.get("ref") == ref]
+                if len(exact) > 1:
+                    raise RuntimeError("cleanup inventory has duplicate project identity")
+                if not exact:
+                    # Exact-ref absence is the deletion proof; a name lookup
+                    # never overrides a persisted ref.
+                    self.created_project_ref = None
+                    self._persist_cleanup_identity()
+                    return {"attempted": False, "deleted": True, "retained_project_ref": None}
+                project = exact[0]
+                if (project.get("name") != self._cleanup_name or project.get("organization_slug") != production["organization_slug"]
+                        or project.get("region") != production["region"] or ref == self.production_ref):
+                    raise RuntimeError("persisted cleanup ref does not match the deterministic temporary project")
+            except Exception as error:
+                return {"attempted": False, "deleted": False, "retained_project_ref": ref, "error": type(error).__name__}
+        elif self._cleanup_name is not None:
+            try:
+                production = self._production()
+                projects = self._request("GET", "/v1/projects", None)
+                if not isinstance(projects, list) or not all(isinstance(project, Mapping) for project in projects):
+                    raise RuntimeError("cleanup inventory is unavailable")
+                candidates = [project for project in projects if project.get("name") == self._cleanup_name
                               and project.get("organization_slug") == production["organization_slug"]
                               and project.get("region") == production["region"]]
                 if len(candidates) > 1:
                     raise RuntimeError("cleanup identity is ambiguous")
                 if len(candidates) == 1:
-                    discovered = _project_ref(candidates[0].get("ref"), "cleanup restore")
-                    if discovered == self.production_ref:
+                    ref = _project_ref(candidates[0].get("ref"), "cleanup restore")
+                    if ref == self.production_ref:
                         raise RuntimeError("cleanup cannot target production")
-                    if ref is not None and ref != discovered:
-                        raise RuntimeError("cleanup identity does not match the deterministic project")
-                    ref = discovered
-                    self.created_project_ref = discovered
+                    self.created_project_ref = ref
                     self._persist_cleanup_identity()
-                elif ref is not None:
-                    # The deterministic project is already absent; no DELETE
-                    # can safely be directed at a stale persisted ref.
-                    self.created_project_ref = None
-                    self._persist_cleanup_identity()
-                    return {"attempted": False, "deleted": True, "retained_project_ref": None}
             except Exception as error:
                 return {"attempted": False, "deleted": False, "retained_project_ref": None, "error": type(error).__name__}
         if ref is None:

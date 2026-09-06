@@ -79,7 +79,7 @@ RECOVERY_SQL = {
         speculative_available::text AS speculative_available,created_at::text AS created_at FROM public.reconciled_cash_snapshots""",
     "run_terminal_outcomes": """SELECT run_id::text AS run_id,evaluation_request_id::text AS evaluation_request_id,outcome,
         created_at::text AS created_at FROM public.market_run_terminal_outcomes""",
-    "roles": """SELECT r.rolname AS role,r.rolcanlogin AS login,r.rolsuper AS superuser,r.rolbypassrls AS bypass_rls,
+    "roles": """SELECT r.rolname AS role,r.rolcanlogin AS login,r.rolinherit AS inherit,r.rolsuper AS superuser,r.rolbypassrls AS bypass_rls,
         COALESCE((SELECT jsonb_agg(parent.rolname ORDER BY parent.rolname) FROM pg_catalog.pg_auth_members m
                   JOIN pg_catalog.pg_roles parent ON parent.oid=m.roleid WHERE m.member=r.oid),'[]'::jsonb) AS memberships,
         COALESCE((SELECT jsonb_agg(g.privilege ORDER BY g.privilege) FROM (

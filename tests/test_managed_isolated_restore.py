@@ -222,9 +222,9 @@ def test_role_recreation_preserves_dashboard_nologin_and_runtime_login_inherit_w
     target = ManagedRestoreTarget(lambda _method, _path, payload=None: queries.append(payload["query"]) or [],
                                   "r" * 20, "p" * 20, created_project_ref="r" * 20)
     target.reproduce_role_shapes([
-        {"role": "stock_agent_dashboard", "login": False, "superuser": False, "bypass_rls": False,
+        {"role": "stock_agent_dashboard", "login": False, "inherit": False, "superuser": False, "bypass_rls": False,
          "memberships": [], "grants": []},
-        {"role": "stock_agent_dashboard_runtime", "login": True, "superuser": False, "bypass_rls": False,
+        {"role": "stock_agent_dashboard_runtime", "login": True, "inherit": True, "superuser": False, "bypass_rls": False,
          "memberships": ["stock_agent_dashboard"], "grants": []},
     ])
     assert "ALTER ROLE stock_agent_dashboard NOLOGIN" in queries[-1]
@@ -333,3 +333,49 @@ def test_restarted_cleanup_discovers_exact_run_name_after_lost_delete_response_a
                                           sleep=lambda _seconds: None, max_cleanup_checks=2)
     assert original.created_project_ref is None
     assert restarted.cleanup()["deleted"] is True
+
+
+def test_recovery_role_contract_requires_exact_dashboard_and_runtime_login_inherit_shapes():
+    from scripts.export_recovery_bundle import _validated_records
+
+    records = recovery_records()
+    assert _validated_records(records)["roles"] == records["roles"]
+    records["roles"][1]["inherit"] = False
+    with pytest.raises(ValueError, match="role"):
+        _validated_records(records)
+
+
+def test_known_persisted_ref_requires_a_full_inventory_and_exact_deterministic_name_before_delete(tmp_path):
+    from scripts.managed_isolated_restore import ManagedProjectProvisioner
+
+    identity = tmp_path / "cleanup.json"
+    first = ManagedProjectProvisioner(lambda *_args: [], "p" * 20, cleanup_identity_path=identity,
+                                      workflow_run_id="42", workflow_attempt="3", cleanup_key=b"k" * 32)
+    payload = json.loads(identity.read_text()); payload["restore_project_ref"] = "r" * 20; identity.write_text(json.dumps(payload))
+    provisioner = ManagedProjectProvisioner(lambda method, path, _payload=None: (
+        {"ref": "p" * 20, "organization_id": "org-1", "organization_slug": "owner-org", "region": "us-east-1"}
+        if path.endswith("/" + "p" * 20) else {"not": "a-list"}), "p" * 20,
+        cleanup_identity_path=identity, workflow_run_id="42", workflow_attempt="3", cleanup_key=b"k" * 32)
+    result = provisioner.cleanup()
+    assert result["deleted"] is False and result["retained_project_ref"] == "r" * 20
+
+
+def test_loading_cleanup_identity_recomputes_and_rejects_a_tampered_run_name(tmp_path):
+    from scripts.managed_isolated_restore import ManagedProjectProvisioner
+
+    identity = tmp_path / "cleanup.json"
+    ManagedProjectProvisioner(lambda *_args: [], "p" * 20, cleanup_identity_path=identity,
+                              workflow_run_id="42", workflow_attempt="3", cleanup_key=b"k" * 32)
+    payload = json.loads(identity.read_text()); payload["name"] = "stocks-recovery-forged"; identity.write_text(json.dumps(payload))
+    with pytest.raises(RuntimeError, match="deterministic"):
+        ManagedProjectProvisioner(lambda *_args: [], "p" * 20, cleanup_identity_path=identity,
+                                  workflow_run_id="42", workflow_attempt="3", cleanup_key=b"k" * 32)
+
+
+def test_workflow_has_separate_always_cleanup_job_for_runner_loss():
+    import yaml
+
+    workflow = yaml.safe_load((Path(__file__).parents[1] / ".github/workflows/managed-isolated-restore.yml").read_text())
+    cleanup = workflow["jobs"]["cleanup"]
+    assert cleanup["needs"] == "restore" and cleanup["if"] == "${{ always() }}"
+    assert cleanup["environment"] == "owner-dashboard-production"
