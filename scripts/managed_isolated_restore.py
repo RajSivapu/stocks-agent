@@ -430,8 +430,8 @@ class ManagedProjectProvisioner:
                 value = project.get(field)
                 if not isinstance(value, str) or not value.strip():
                     raise RuntimeError("cleanup inventory is malformed" if cleanup else "project inventory is malformed")
-            if project["status"] not in self._KNOWN_STATUSES:
-                raise RuntimeError("cleanup inventory has unknown status" if cleanup else "project inventory has unknown status")
+            if not cleanup and project["status"] not in self._KNOWN_STATUSES:
+                raise RuntimeError("project inventory has unknown status")
             name = project.get("name")
             if (cleanup and (not isinstance(name, str) or not name.strip())) or (
                     not cleanup and name is not None and (not isinstance(name, str) or not name.strip())):

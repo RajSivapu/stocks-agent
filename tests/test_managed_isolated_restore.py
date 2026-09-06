@@ -386,6 +386,60 @@ def test_known_cleanup_ref_malformed_inventory_never_claims_exact_ref_absent(tmp
     assert provisioner.cleanup()["retained_project_ref"] == "r" * 20
 
 
+def test_known_cleanup_ref_deletes_coming_up_project_despite_unrelated_future_status(tmp_path):
+    from scripts.managed_isolated_restore import ManagedProjectProvisioner
+
+    identity = tmp_path / "cleanup.json"
+    ManagedProjectProvisioner(lambda *_args: [], "p" * 20, cleanup_identity_path=identity,
+                              workflow_run_id="42", workflow_attempt="3", cleanup_key=b"k" * 32)
+    payload = json.loads(identity.read_text()); payload["restore_project_ref"] = "r" * 20; identity.write_text(json.dumps(payload))
+    name = payload["name"]
+    inventories = [[
+        {"ref": "r" * 20, "name": name, "organization_id": "org-1", "organization_slug": "owner-org", "region": "us-east-1", "status": "COMING_UP"},
+        {"ref": "x" * 20, "name": "unrelated", "organization_id": "org-2", "organization_slug": "other", "region": "us-east-1", "status": "FUTURE_STATE"},
+    ], []]
+    def api(method, path, _payload=None):
+        if path == f"/v1/projects/{'p' * 20}":
+            return {"ref": "p" * 20, "organization_id": "org-1", "organization_slug": "owner-org", "region": "us-east-1"}
+        if method == "GET" and path == "/v1/projects":
+            return inventories.pop(0)
+        if method == "DELETE" and path == f"/v1/projects/{'r' * 20}":
+            return {"ref": "r" * 20}
+        raise AssertionError((method, path))
+
+    provisioner = ManagedProjectProvisioner(api, "p" * 20, cleanup_identity_path=identity,
+                                             workflow_run_id="42", workflow_attempt="3", cleanup_key=b"k" * 32,
+                                             sleep=lambda _seconds: None, max_cleanup_checks=2)
+    assert provisioner.cleanup()["deleted"] is True
+
+
+def test_unknown_cleanup_ref_discovers_coming_up_project_despite_unrelated_future_status(tmp_path):
+    from scripts.managed_isolated_restore import ManagedProjectProvisioner
+
+    identity = tmp_path / "cleanup.json"
+    original = ManagedProjectProvisioner(lambda *_args: [], "p" * 20, cleanup_identity_path=identity,
+                                         workflow_run_id="42", workflow_attempt="3", cleanup_key=b"k" * 32)
+    name = json.loads(identity.read_text())["name"]
+    inventories = [[
+        {"ref": "r" * 20, "name": name, "organization_id": "org-1", "organization_slug": "owner-org", "region": "us-east-1", "status": "COMING_UP"},
+        {"ref": "x" * 20, "name": "unrelated", "organization_id": "org-2", "organization_slug": "other", "region": "us-east-1", "status": "FUTURE_STATE"},
+    ], []]
+    def api(method, path, _payload=None):
+        if path == f"/v1/projects/{'p' * 20}":
+            return {"ref": "p" * 20, "organization_id": "org-1", "organization_slug": "owner-org", "region": "us-east-1"}
+        if method == "GET" and path == "/v1/projects":
+            return inventories.pop(0)
+        if method == "DELETE" and path == f"/v1/projects/{'r' * 20}":
+            return {"ref": "r" * 20}
+        raise AssertionError((method, path))
+
+    provisioner = ManagedProjectProvisioner(api, "p" * 20, cleanup_identity_path=identity,
+                                             workflow_run_id="42", workflow_attempt="3", cleanup_key=b"k" * 32,
+                                             sleep=lambda _seconds: None, max_cleanup_checks=2)
+    assert original.created_project_ref is None
+    assert provisioner.cleanup()["deleted"] is True
+
+
 def test_cleanup_fails_closed_on_lost_delete_response_but_discovers_only_deterministic_run_name(tmp_path):
     from scripts.managed_isolated_restore import ManagedProjectProvisioner
 
