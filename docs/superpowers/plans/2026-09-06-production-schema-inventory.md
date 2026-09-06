@@ -35,28 +35,28 @@ the canonical receipt. No production rows or secret values appear in logs or art
 - Produces: `inspect_production_schema(request, project_ref, main_sha) -> dict[str, object]` and CLI
   arguments `--production-project-ref`, `--main-sha`, and `--output`.
 
-- [ ] **Step 1: Write failing query-boundary tests**
+- [x] **Step 1: Write failing query-boundary tests**
 
   Assert every request path is exactly `/v1/projects/<ref>/database/query/read-only`, the first query
   proves `supabase_read_only_user` and `transaction_read_only=on`, and a writer path is rejected.
 
-- [ ] **Step 2: Run the focused test and confirm failure**
+- [x] **Step 2: Run the focused test and confirm failure**
 
   Run: `.venv/bin/python -m pytest -q tests/test_inspect_production_schema_baseline.py`
 
-- [ ] **Step 3: Implement fixed catalog and root queries**
+- [x] **Step 3: Implement fixed catalog and root queries**
 
   Query allowlisted `public` relations, columns, constraints, functions, triggers, policies, and ACLs.
   Compute protected table counts and roots inside PostgreSQL with ordered `jsonb_agg(to_jsonb(row))`
   and `digest(..., 'sha256')`; return only count/root pairs. Enforce the 20-character project identity,
   40-character lowercase Git SHA, response byte limit, exact top-level keys, and canonical sorting.
 
-- [ ] **Step 4: Add malformed/secret-leak/bounds tests and pass them**
+- [x] **Step 4: Add malformed/secret-leak/bounds tests and pass them**
 
   Cover wrong role, unexpected schema, duplicate identities, row-shaped output, invalid digest, response
   overflow, and deterministic receipt hashing. Run the same focused test file.
 
-- [ ] **Step 5: Commit the module**
+- [x] **Step 5: Commit the module**
 
   Commit: `feat(recovery): fingerprint production schema baseline`
 
@@ -71,23 +71,23 @@ the canonical receipt. No production rows or secret values appear in logs or art
 - Produces: artifact `production-schema-inventory-<run_id>-<run_attempt>` containing only
   `schema-inventory.json`.
 
-- [ ] **Step 1: Write failing workflow-contract tests**
+- [x] **Step 1: Write failing workflow-contract tests**
 
   Assert manual dispatch only, pinned actions, `owner-dashboard-production`, current-main/CI binding,
   locked dependencies, secret-backed project identity, read-only script invocation, artifact retention,
   and absence of restore/release/schedule commands.
 
-- [ ] **Step 2: Run the focused test and confirm failure**
+- [x] **Step 2: Run the focused test and confirm failure**
 
   Run: `.venv/bin/python -m pytest -q tests/test_inspect_production_schema_baseline.py`
 
-- [ ] **Step 3: Implement the workflow**
+- [x] **Step 3: Implement the workflow**
 
   Checkout `main`, verify `GITHUB_REF`, `GITHUB_SHA`, remote main, and a successful exact-SHA
   `owner-dashboard-ci.yml` run. Install `requirements.lock`, run the inspector with secrets passed only
   through environment variables, and upload the one receipt for 90 days.
 
-- [ ] **Step 4: Pass focused verification and commit**
+- [x] **Step 4: Pass focused verification and commit**
 
   Run the focused test file and `git diff --check`. Commit:
   `feat(recovery): add protected schema inventory workflow`.
@@ -102,27 +102,27 @@ the canonical receipt. No production rows or secret values appear in logs or art
 - Consumes: exact reviewed PR head, exact-head CI, merged main SHA, exact-main CI.
 - Produces: one live read-only inventory artifact and its workflow URL/digest.
 
-- [ ] **Step 1: Obtain two focused independent reviews**
+- [x] **Step 1: Obtain two focused independent reviews**
 
   Review the exact head for data disclosure, Management API path containment, current-main binding,
   catalog completeness, and deterministic validation. Resolve only Critical or Important findings.
 
-- [ ] **Step 2: Run one combined focused verification**
+- [x] **Step 2: Run one combined focused verification**
 
   Run: `.venv/bin/python -m pytest -q tests/test_inspect_production_schema_baseline.py tests/test_managed_isolated_restore.py`
   and `git diff --check`.
 
-- [ ] **Step 3: Merge through exact-head and exact-main CI**
+- [x] **Step 3: Merge through exact-head and exact-main CI**
 
   Push, open the PR, wait for exact-head CI, merge, and wait for exact-main CI. Do not dispatch release
   or restore workflows.
 
-- [ ] **Step 4: Dispatch inventory exactly once from main**
+- [x] **Step 4: Dispatch inventory exactly once from main**
 
   Use `gh workflow run production-schema-inventory.yml --ref main`. Wait for completion, download the
   artifact, verify the receipt SHA and main binding, and inspect only schema metadata/count/root fields.
 
-- [ ] **Step 5: Record the authoritative checkpoint**
+- [x] **Step 5: Record the authoritative checkpoint**
 
   Update the canonical status files with the inventory run, digest, actual catalog shape, and the exact
   next reconciliation boundary. Never include project identities, tokens, URLs with credentials, or

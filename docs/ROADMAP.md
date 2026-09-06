@@ -13,14 +13,14 @@ and rollout order. `docs/HANDOFF.md` is ignored and is not a source of truth.
 ## Current release status
 
 The app remains live and the owner can reach the portfolio dashboard, but V1 trusted use remains
-**no-go**. Read-only production inventory has 13 of 24 required recovery relations. Missing are
-`market_collection_checkpoint_history`, `market_collection_checkpoints`,
-`market_intelligence_collection_completions`, `market_policy_comparisons`,
-`market_report_publications`, `market_report_request_origins`, `market_run_terminal_outcomes`,
-`portfolio_cash_ledger_state`, `portfolio_command_acknowledgements`,
-`reconciled_cash_snapshots`, and `stock_agent_release_migration_ledger`; the native
-`supabase_migrations.schema_migrations` relation is absent. No schema migration was applied to the
-live production database from this checkpoint.
+**no-go**. Protected inventory run `34029103876` passed on main `8497635`; its verified receipt
+`f1f08d635d59bb2e429c57deb1a2a9948d1ce631faa746bc8a19ea51372afb46` covers 35 protected public
+base-table roots and is now the authoritative reconciliation baseline. It has 13 of 31 required
+relation markers: 17 final-state public relations and the native migration relation are absent. No
+schema migration was applied to the live production database from this checkpoint.
+
+Telegram is the primary timely decision surface. The owner-only web app is a compact portfolio,
+history, reconciliation, and audit-evidence surface—not a continuously live trading terminal.
 
 - [x] PR #10 fixed the Management API `User-Agent` and moved the production reference binding to a
   masked environment secret; exact-main `4003437` CI passed.
@@ -33,7 +33,10 @@ live production database from this checkpoint.
   passed. Release is manual-only and secret-backed, with failed-release recovery trust, run-attempt,
   encrypted-journal, and durable-lease ordering hardened. No automatic release or recovery ran
   after merge.
-- [ ] Owner-approved recoverable production schema migration.
+- [x] PR #17 merged main `8497635`; exact-main CI `34028945226` and receipt-bound read-only inventory
+  run `34029103876` passed without production mutation.
+- [ ] Approved receipt-bound final-state production schema reconciliation, with an encrypted
+  pre-migration snapshot and truthful reconciliation-only ledger receipt.
 - [ ] Managed isolated restore rerun after the schema gate passes.
 - [ ] Protected manual-release receipt after all required secrets/transports are available.
 - [ ] Next existing scheduled receipt, without a duplicate run.
@@ -102,7 +105,7 @@ Implemented locally:
 
 Still required:
 
-- Apply the owner-approved recoverable schema migration, then retain the protected manual-release
+- Apply the approved receipt-bound final-state schema reconciliation, then retain the protected manual-release
   receipt for the resulting migration/function state.
 - Reconcile one post-deployment scheduled packet, evaluation, report, and publication chain.
 
@@ -119,7 +122,8 @@ Implemented locally:
 Still required:
 
 - Do not claim the remote migration ledger is current: the native migration ledger and required
-  recovery relations are absent. First obtain owner approval for a recoverable schema migration.
+  recovery relations are absent. Apply only the approved receipt-bound reconciliation without
+  synthesizing historical receipts.
 - Verify production owner flows and the next existing scheduled original Telegram ID or explicit
   persisted suppression. Do not trigger a duplicate run.
 
@@ -174,7 +178,7 @@ Implemented locally:
 Still required:
 
 - Exact-head CI `34013930731` and exact-main CI `34014003786` passed for main `774584e`.
-- Owner-approve and apply the recoverable production schema migration; then rerun managed isolated
+- Apply the approved receipt-bound recoverable production schema reconciliation; then rerun managed isolated
   restore only after its schema gate passes.
 - Retain the protected manual-release receipt after all required secrets/transports are available;
   do not weaken preflight.
@@ -189,7 +193,7 @@ Still required:
    current production schema gate remains pending.**
 4. Live Auth configuration and owner email-link/code canary. **Complete; the owner confirmed the
    signed email link opened the live portfolio dashboard.**
-5. Owner-approved recoverable production schema migration, then protected isolated restore with
+5. Approved receipt-bound production schema reconciliation, then protected isolated restore with
    recovery receipts reconciled.
 6. Protected manual-release receipt and next existing scheduled intelligence/report/publication
    receipt chain, without a duplicate run.
