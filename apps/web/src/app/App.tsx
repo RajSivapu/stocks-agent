@@ -41,7 +41,7 @@ interface BannerState {
 
 const freshnessRank: Record<Freshness, number> = { fresh: 0, stale: 1, partial: 2, unavailable: 3 };
 
-function bannerState<T>(primary: ResourceState<T>, children: ResourceState<unknown>[] = []): BannerState {
+export function bannerState<T>(primary: ResourceState<T>, children: ResourceState<unknown>[] = []): BannerState {
   if (primary.status === "loading") return { dataTime: null, freshness: "unavailable", viewStatus: "loading" };
   if (primary.status === "error") return { dataTime: null, freshness: "unavailable", viewStatus: "error" };
   if (children.some((child) => child.status === "loading")) {
@@ -91,8 +91,17 @@ function PortfolioRoute({ client, token, onError, onSignOut }: { client: Dashboa
   const portfolio = useDashboardResource<PortfolioView>(client, "/v1/portfolio", token, onError);
   const overview = useDashboardResource<TodayView>(client, "/v1/today", token, onError);
   const companion = useDashboardResource<CompanionView>(client, "/v1/companion", token, onError);
-  const banner = bannerState(portfolio, [overview, companion]);
-  return <AppShell {...banner} onSignOut={onSignOut}><AsyncView state={portfolio}>{(data) => <PortfolioPage data={data} overviewState={overview} companionState={companion} />}</AsyncView></AppShell>;
+  const ideas = useDashboardResource<IdeasView>(client, "/v1/ideas", token, onError);
+  const reports = useDashboardResource<ReportsView>(client, "/v1/reports", token, onError);
+  const banner = bannerState(portfolio, [overview, companion, ideas, reports]);
+  return <AppShell {...banner} onSignOut={onSignOut}><AsyncView state={portfolio}>{(data) => <PortfolioPage data={data} overviewState={overview} companionState={companion} ideasState={ideas} reportsState={reports} />}</AsyncView></AppShell>;
+}
+
+function IntelligenceRoute({ client, token, onError, onSignOut }: { client: DashboardClient; token: string; onError(error: Error): void; onSignOut(): void }) {
+  const intelligence = useDashboardResource<IntelligenceView>(client, "/v1/intelligence", token, onError);
+  const portfolio = useDashboardResource<PortfolioView>(client, "/v1/portfolio", token, onError);
+  const banner = bannerState(intelligence, [portfolio]);
+  return <AppShell {...banner} onSignOut={onSignOut}><AsyncView state={intelligence}>{(data) => <AsyncView state={portfolio}>{(portfolioData) => <IntelligencePage data={data} portfolioTickers={[...portfolioData.holdings.map((holding) => holding.ticker), ...portfolioData.plans.filter((plan) => plan.active).map((plan) => plan.ticker)]} />}</AsyncView>}</AsyncView></AppShell>;
 }
 
 function SystemRoute({ client, token, onError, onSignOut }: { client: DashboardClient; token: string; onError(error: Error): void; onSignOut(): void }) {
@@ -127,7 +136,7 @@ function AuthenticatedApplication({ dashboardClient, token, onSignOut }: { dashb
           <Route path="/" element={<Navigate replace to="/portfolio" />} />
           <Route path="/portfolio" element={<PortfolioRoute client={dashboardClient} token={token} onError={onResourceError} onSignOut={signOut} />} />
           <Route path="/ideas" element={<ResourceRoute<IdeasView> client={dashboardClient} token={token} path="/v1/ideas" component={IdeasPage} onError={onResourceError} onSignOut={signOut} />} />
-          <Route path="/intelligence" element={<ResourceRoute<IntelligenceView> client={dashboardClient} token={token} path="/v1/intelligence" component={IntelligencePage} onError={onResourceError} onSignOut={signOut} />} />
+          <Route path="/intelligence" element={<IntelligenceRoute client={dashboardClient} token={token} onError={onResourceError} onSignOut={signOut} />} />
           <Route path="/reports" element={<ResourceRoute<ReportsView> client={dashboardClient} token={token} path="/v1/reports" component={ReportsPage} onError={onResourceError} onSignOut={signOut} />} />
           <Route path="/reports/:id" element={<ReportRoute client={dashboardClient} token={token} onError={onResourceError} onSignOut={signOut} />} />
           <Route path="/companion" element={<Navigate replace to="/portfolio" />} />

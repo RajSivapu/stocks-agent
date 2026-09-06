@@ -196,8 +196,8 @@ function FixtureSurface() {
   return (
     <AppShell dataTime={DATA_TIME} freshness={stale ? "stale" : "fresh"}>
       <Routes>
-        <Route path="/" element={<PortfolioPage data={portfolio} overview={today} companion={companion} />} />
-        <Route path="/portfolio" element={<PortfolioPage overview={today} companion={companion} data={stale ? { ...portfolio, totals: { ...portfolio.totals, value: null, unrealized_amount: null }, holdings: holdings.map((item) => ({ ...item, price: null, value: null, unrealized_amount: null, unrealized_percent: null, freshness: "stale" as const })) } : portfolio} />} />
+        <Route path="/" element={<PortfolioPage data={portfolio} overview={today} companion={companion} ideas={ideas} reports={reports} />} />
+        <Route path="/portfolio" element={<PortfolioPage overview={today} companion={companion} ideas={ideas} reports={reports} data={stale ? { ...portfolio, totals: { ...portfolio.totals, value: null, unrealized_amount: null }, holdings: holdings.map((item) => ({ ...item, price: null, value: null, unrealized_amount: null, unrealized_percent: null, freshness: "stale" as const })) } : portfolio} />} />
         <Route path="/ideas" element={<IdeasPage data={ideas} />} />
         <Route path="/intelligence" element={<IntelligencePage data={intelligence} />} />
         <Route path="/reports" element={<ReportsPage data={reports} />} />

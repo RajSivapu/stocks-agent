@@ -1,16 +1,19 @@
 import type { PropsWithChildren } from "react";
-import { NavLink } from "react-router-dom";
+import { NavLink, useLocation } from "react-router-dom";
 
 import type { Freshness } from "@stocks-agent/dashboard-contracts";
 
 import { ThemeControl } from "../theme/ThemeControl";
 
-const pages = [
-  ["Portfolio", "/portfolio"],
+const primaryPages = [
+  ["Overview", "/portfolio"],
   ["Ideas", "/ideas"],
-  ["Intelligence", "/intelligence"],
   ["Reports", "/reports"],
-  ["System / Receipts", "/system"],
+] as const;
+
+const advancedPages = [
+  ["Intelligence", "/intelligence"],
+  ["Receipts", "/system"],
 ] as const;
 
 const freshnessLabels: Record<Freshness, string> = {
@@ -29,6 +32,8 @@ export function AppShell({
   onSignOut,
   children,
 }: PropsWithChildren<{ dataTime: string | null; freshness: Freshness; viewStatus?: ViewStatus; onSignOut?: () => void }>) {
+  const location = useLocation();
+  const advancedActive = location.pathname === "/intelligence" || location.pathname === "/system" || location.pathname.startsWith("/runs/");
   const statusLabel = viewStatus === "loading"
     ? "Loading route data"
     : viewStatus === "error"
@@ -45,10 +50,16 @@ export function AppShell({
           <p className="owner-chip">Private · Owner only</p>
         </div>
         <nav aria-label="Primary">
-          {pages.map(([label, path]) => (
+          {primaryPages.map(([label, path]) => (
             <NavLink key={path} to={path}>{label}</NavLink>
           ))}
         </nav>
+        <details className="advanced-nav" open={advancedActive}>
+          <summary>Advanced</summary>
+          <nav aria-label="Advanced">
+            {advancedPages.map(([label, path]) => <NavLink key={path} to={path}>{label}</NavLink>)}
+          </nav>
+        </details>
         <div className="sidebar-footer">
           <ThemeControl />
           {onSignOut && <button className="text-button" onClick={onSignOut}>Sign out</button>}
