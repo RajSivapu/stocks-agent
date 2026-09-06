@@ -11,11 +11,13 @@ from collections.abc import Callable, Mapping
 from datetime import UTC, datetime
 import base64
 import hashlib
+import hmac
 import json
 import re
 import secrets
 import os
 from pathlib import Path
+import signal
 import subprocess
 import sys
 from urllib.error import HTTPError, URLError
@@ -172,7 +174,9 @@ class ManagedRestoreTarget:
 
     def preflight_empty(self) -> None:
         from scripts.verify_recovery_bundle import _RESTORE_TABLES
-        tables = tuple(dict.fromkeys(table for _dataset, table, _renames in _RESTORE_TABLES)) + ("portfolio_cash_ledger_state",)
+        # schema.sql deliberately seeds the singleton cash ledger; restoration
+        # updates/upserts it just like the established PostgreSQL target.
+        tables = tuple(dict.fromkeys(table for _dataset, table, _renames in _RESTORE_TABLES))
         checks = " AND ".join(f"(SELECT count(*) = 0 FROM public.{table})" for table in tables)
         query = ("SELECT jsonb_build_object('tables_empty',(" + checks + "),"
                  "'native_migrations_empty',(to_regclass('supabase_migrations.schema_migrations') IS NULL OR "
@@ -201,10 +205,14 @@ class ManagedRestoreTarget:
         statements: list[str] = []
         for role in sorted(expected):
             row = by_name[role]
-            if row.get("login") is not False or row.get("superuser") is not False or row.get("bypass_rls") is not False:
+            expected_login = role == "stock_agent_dashboard_runtime"
+            if row.get("login") is not expected_login or row.get("superuser") is not False or row.get("bypass_rls") is not False:
                 raise RuntimeError("recovery role shape has unsafe authority")
-            statements.append("DO $$ BEGIN IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = '%s') THEN CREATE ROLE %s NOLOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS; END IF; END $$" % (role, role))
-            statements.append(f"ALTER ROLE {role} NOLOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS")
+            login_shape = "LOGIN INHERIT PASSWORD NULL" if expected_login else "NOLOGIN INHERIT"
+            statements.append("DO $$ BEGIN IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = '%s') THEN CREATE ROLE %s %s NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS; END IF; END $$" % (role, role, login_shape))
+            statements.append(f"ALTER ROLE {role} {login_shape} NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS")
+            statements.append("DO $$ DECLARE parent text; BEGIN FOR parent IN SELECT p.rolname FROM pg_auth_members m JOIN pg_roles p ON p.oid=m.roleid JOIN pg_roles child ON child.oid=m.member WHERE child.rolname='%s' LOOP EXECUTE format('REVOKE %%I FROM %%I',parent,'%s'); END LOOP; END $$" % (role, role))
+            statements.append(f"REVOKE ALL PRIVILEGES ON ALL TABLES IN SCHEMA public FROM {role}")
             memberships = row.get("memberships")
             grants = row.get("grants")
             if not isinstance(memberships, list) or not isinstance(grants, list):
@@ -254,6 +262,8 @@ class ManagedRestoreTarget:
             version = row["version"].replace("'", "''")
             statement_array = "ARRAY[" + ",".join("'%s'" % item.replace("'", "''") for item in row["statements"]) + "]"
             statements.append("INSERT INTO supabase_migrations.schema_migrations(version,statements) VALUES('%s',%s)" % (version, statement_array))
+        if normalized["transactions"]:
+            statements.append("SELECT setval(pg_get_serial_sequence('public.transactions','id'),(SELECT max(id) FROM public.transactions),true)")
         statements.append("COMMIT")
         self.execute(";".join(statements))
 
@@ -282,16 +292,50 @@ class ManagedRestoreTarget:
             raise RuntimeError("native migration retry is not a no-op")
         return {"applied": [], "skipped": [version for version, _statements in expected]}
 
+    def retry_release_migrations(self) -> dict[str, list[str]]:
+        """Exercise the real candidate migration algorithm against restored ledgers.
+
+        The cursor maps only its bounded SQL/query result surface to the
+        Management writer.  On a correct restore, the real algorithm sees the
+        full native/private state and executes no candidate migration body.
+        """
+        from scripts.deploy_owner_dashboard_api import apply_release_migrations
+
+        class Cursor:
+            def __init__(self, target: ManagedRestoreTarget):
+                self.target, self.rows = target, []
+
+            def execute(self, sql: str, _parameters: object = None) -> None:
+                if _parameters not in (None, ()):
+                    raise RuntimeError("no-op migration retry unexpectedly needs parameters")
+                response = self.target.execute(sql)
+                self.rows = [tuple(row.values()) for row in response]
+
+            def fetchall(self):
+                return list(self.rows)
+
+        result = apply_release_migrations(Cursor(self))
+        if (not isinstance(result, Mapping) or result.get("applied") != []
+                or not isinstance(result.get("skipped"), list) or result.get("skipped") != result.get("candidate")):
+            raise RuntimeError("release migration retry applied changes or lacks exact candidate receipts")
+        skipped = result["skipped"]
+        if not all(isinstance(row, Mapping) and isinstance(row.get("version"), str) for row in skipped):
+            raise RuntimeError("release migration retry receipt is malformed")
+        return {"applied": [], "skipped": [row["version"] for row in skipped]}
+
 
 class ManagedProjectProvisioner:
     """Creates a single disposable project only after the free-slot proof."""
 
     _HEALTHY = {"ACTIVE_HEALTHY", "HEALTHY"}
-    _ACTIVE = _HEALTHY | {"ACTIVE", "CREATING", "RESTORING", "UPGRADING", "PAUSING", "PAUSED"}
+    _ACTIVE = _HEALTHY | {"ACTIVE", "CREATING", "RESTORING", "UPGRADING", "PAUSING"}
 
     def __init__(self, request: ManagementRequest, production_project_ref: str, *,
                  random_bytes: Callable[[int], bytes] = secrets.token_bytes,
-                 sleep: Callable[[float], None] | None = None, max_health_checks: int = 12):
+                 sleep: Callable[[float], None] | None = None, max_health_checks: int = 12,
+                 max_cleanup_checks: int = 8, cleanup_identity_path: Path | None = None,
+                 workflow_run_id: str | None = None, workflow_attempt: str | None = None,
+                 cleanup_key: bytes | None = None):
         self._request = request
         self.production_ref = _project_ref(production_project_ref, "production")
         self._random_bytes = random_bytes
@@ -299,13 +343,48 @@ class ManagedProjectProvisioner:
         if not isinstance(max_health_checks, int) or not 1 <= max_health_checks <= 30:
             raise RuntimeError("bounded health check count is required")
         self._max_health_checks = max_health_checks
+        if not isinstance(max_cleanup_checks, int) or not 1 <= max_cleanup_checks <= 30:
+            raise RuntimeError("bounded cleanup check count is required")
+        self._max_cleanup_checks = max_cleanup_checks
         self.created_project_ref: str | None = None
+        self._cleanup_path = None if cleanup_identity_path is None else Path(cleanup_identity_path).resolve()
+        self._cleanup_name: str | None = None
+        if self._cleanup_path is not None:
+            if self._cleanup_path.exists():
+                stored = json.loads(self._cleanup_path.read_text())
+                if (not isinstance(stored, Mapping) or stored.get("format") != "stocks-managed-cleanup-v1"
+                        or stored.get("production_project_ref") != self.production_ref
+                        or not isinstance(stored.get("name"), str)):
+                    raise RuntimeError("run-bound cleanup identity is invalid")
+                self._cleanup_name = stored["name"]
+                ref = stored.get("restore_project_ref")
+                if ref is not None:
+                    self.created_project_ref = _project_ref(ref, "cleanup restore")
+            else:
+                if not all(isinstance(value, str) and value for value in (workflow_run_id, workflow_attempt)) or not isinstance(cleanup_key, bytes) or len(cleanup_key) < 16:
+                    raise RuntimeError("run-bound cleanup identity requires workflow identity and key")
+                label = f"{workflow_run_id}:{workflow_attempt}".encode()
+                digest = hmac.new(cleanup_key, b"stocks-managed-cleanup-v1\0" + self.production_ref.encode() + b"\0" + label, hashlib.sha256).hexdigest()[:24]
+                run = re.sub(r"[^a-z0-9]", "", workflow_run_id.lower())[-16:] or "run"
+                attempt = re.sub(r"[^a-z0-9]", "", workflow_attempt.lower())[-8:] or "attempt"
+                self._cleanup_name = f"stocks-recovery-{run}-{attempt}-{digest}"
+                self._persist_cleanup_identity()
+
+    def _persist_cleanup_identity(self) -> None:
+        if self._cleanup_path is None or self._cleanup_name is None:
+            return
+        payload = {"format": "stocks-managed-cleanup-v1", "production_project_ref": self.production_ref,
+                   "name": self._cleanup_name, "restore_project_ref": self.created_project_ref}
+        self._cleanup_path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+        self._cleanup_path.write_text(canonical_json(payload) + "\n")
+        self._cleanup_path.chmod(0o600)
 
     def _production(self) -> dict[str, object]:
         value = self._request("GET", f"/v1/projects/{self.production_ref}", None)
         if not isinstance(value, Mapping) or value.get("ref") != self.production_ref:
             raise RuntimeError("production project metadata is unavailable")
-        if not isinstance(value.get("organization_id"), str) or not isinstance(value.get("region"), str):
+        if (not isinstance(value.get("organization_id"), str) or not isinstance(value.get("organization_slug"), str)
+                or not isinstance(value.get("region"), str)):
             raise RuntimeError("production organization or region is unavailable")
         return dict(value)
 
@@ -314,7 +393,8 @@ class ManagedProjectProvisioner:
         projects = self._request("GET", "/v1/projects", None)
         if not isinstance(projects, list) or not all(isinstance(project, Mapping) for project in projects):
             raise RuntimeError("project inventory is unavailable")
-        active = [project for project in projects if project.get("status") in self._ACTIVE]
+        active = [project for project in projects if project.get("organization_slug") == production["organization_slug"]
+                  and project.get("status") in self._ACTIVE]
         if len(active) != 1 or active[0].get("ref") != self.production_ref:
             raise RuntimeError("exactly one active project is required for a free restore slot")
         # This password exists only in the create request.  It is deliberately
@@ -322,20 +402,25 @@ class ManagedProjectProvisioner:
         password = base64.urlsafe_b64encode(self._random_bytes(36)).decode().rstrip("=")
         name_suffix = base64.b32encode(self._random_bytes(8)).decode().lower().rstrip("=")
         created = self._request("POST", "/v1/projects", {
-            "name": f"stocks-recovery-{name_suffix}",
-            "organization_id": production["organization_id"], "region": production["region"], "db_pass": password,
+            "name": self._cleanup_name or f"stocks-recovery-{name_suffix}",
+            "organization_slug": production["organization_slug"], "region": production["region"], "db_pass": password,
         })
         if not isinstance(created, Mapping):
             raise RuntimeError("temporary project creation returned invalid metadata")
         restore_ref = _project_ref(created.get("ref"), "created restore")
-        if (restore_ref == self.production_ref or created.get("organization_id") != production["organization_id"]
+        if restore_ref == self.production_ref:
+            raise RuntimeError("temporary project must differ from production")
+        # Persist the exact non-production ref before validating other returned
+        # metadata so a malformed response cannot strand a created project.
+        self.created_project_ref = restore_ref
+        self._persist_cleanup_identity()
+        if (created.get("organization_id") != production["organization_id"] or created.get("organization_slug") != production["organization_slug"]
                 or created.get("region") != production["region"]):
             raise RuntimeError("temporary project does not match the production organization and region")
-        self.created_project_ref = restore_ref
         for attempt in range(self._max_health_checks):
             status = self._request("GET", f"/v1/projects/{restore_ref}", None)
             if (isinstance(status, Mapping) and status.get("ref") == restore_ref
-                    and status.get("organization_id") == production["organization_id"]
+                    and status.get("organization_id") == production["organization_id"] and status.get("organization_slug") == production["organization_slug"]
                     and status.get("region") == production["region"] and status.get("status") in self._HEALTHY):
                 return restore_ref
             if attempt + 1 < self._max_health_checks:
@@ -343,16 +428,59 @@ class ManagedProjectProvisioner:
         raise RuntimeError("temporary restore project did not become healthy within the bounded wait")
 
     def cleanup(self) -> dict[str, object]:
-        if self.created_project_ref is None:
-            return {"attempted": False, "deleted": False, "retained_project_ref": None}
         ref = self.created_project_ref
+        if self._cleanup_name is not None:
+            try:
+                production = self._production()
+                candidates = [project for project in self._request("GET", "/v1/projects", None)
+                              if isinstance(project, Mapping) and project.get("name") == self._cleanup_name
+                              and project.get("organization_slug") == production["organization_slug"]
+                              and project.get("region") == production["region"]]
+                if len(candidates) > 1:
+                    raise RuntimeError("cleanup identity is ambiguous")
+                if len(candidates) == 1:
+                    discovered = _project_ref(candidates[0].get("ref"), "cleanup restore")
+                    if discovered == self.production_ref:
+                        raise RuntimeError("cleanup cannot target production")
+                    if ref is not None and ref != discovered:
+                        raise RuntimeError("cleanup identity does not match the deterministic project")
+                    ref = discovered
+                    self.created_project_ref = discovered
+                    self._persist_cleanup_identity()
+                elif ref is not None:
+                    # The deterministic project is already absent; no DELETE
+                    # can safely be directed at a stale persisted ref.
+                    self.created_project_ref = None
+                    self._persist_cleanup_identity()
+                    return {"attempted": False, "deleted": True, "retained_project_ref": None}
+            except Exception as error:
+                return {"attempted": False, "deleted": False, "retained_project_ref": None, "error": type(error).__name__}
+        if ref is None:
+            # A persisted run identity with no matching project proves the
+            # cancellation/failure cleanup target is already absent.
+            return {"attempted": False, "deleted": self._cleanup_name is not None, "retained_project_ref": None}
         try:
-            self._request("DELETE", f"/v1/projects/{ref}", None)
+            response = self._request("DELETE", f"/v1/projects/{ref}", None)
+            if not isinstance(response, Mapping) or response.get("ref") != ref:
+                raise RuntimeError("temporary project deletion response is not exact")
         except Exception as error:
-            # No API error text is surfaced; it may contain sensitive data.
-            return {"attempted": True, "deleted": False, "retained_project_ref": ref,
-                    "error": type(error).__name__}
-        return {"attempted": True, "deleted": True, "retained_project_ref": None}
+            failure = type(error).__name__
+        else:
+            failure = None
+        for attempt in range(self._max_cleanup_checks):
+            try:
+                projects = self._request("GET", "/v1/projects", None)
+                absent = isinstance(projects, list) and not any(isinstance(project, Mapping) and project.get("ref") == ref for project in projects)
+            except Exception:
+                absent = False
+            if absent:
+                self.created_project_ref = None
+                self._persist_cleanup_identity()
+                return {"attempted": True, "deleted": True, "retained_project_ref": None}
+            if attempt + 1 < self._max_cleanup_checks:
+                self._sleep(min(5 * (attempt + 1), 30))
+        return {"attempted": True, "deleted": False, "retained_project_ref": ref,
+                "error": failure or "project_still_present"}
 
 
 def _digest(value: object, label: str, *, length: int = 64) -> str:
@@ -466,7 +594,7 @@ class ManagedIsolatedRestoreDrill:
                  repository: Path, workflow_run_id: str, workflow_attempt: str):
         self.request = request
         self.production_ref = _project_ref(production_project_ref, "production")
-        self.output_dir = Path(output_dir)
+        self.output_dir = Path(output_dir).resolve()
         self.repository = Path(repository).resolve()
         self.workflow_run_id, self.workflow_attempt = str(workflow_run_id), str(workflow_attempt)
 
@@ -490,10 +618,22 @@ class ManagedIsolatedRestoreDrill:
         first = self.output_dir / "production-before.enc"
         second = self.output_dir / "production-after.enc"
         receipt_path = self.output_dir / "managed-isolated-restore-receipt.json"
-        provisioner = ManagedProjectProvisioner(self.request, self.production_ref)
-        failure: Exception | None = None
+        provisioner = ManagedProjectProvisioner(
+            self.request, self.production_ref,
+            cleanup_identity_path=self.output_dir / "cleanup-identity.json",
+            workflow_run_id=self.workflow_run_id, workflow_attempt=self.workflow_attempt,
+            cleanup_key=os.environ.get("RELEASE_RECOVERY_KEY", "").encode(),
+        )
+        failure: BaseException | None = None
         cleanup: dict[str, object] = {"attempted": False, "deleted": False, "retained_project_ref": None}
         values: dict[str, object] | None = None
+        previous_signals: dict[int, object] = {}
+        def interrupted(signum, _frame):
+            provisioner.cleanup()
+            raise KeyboardInterrupt(f"restore drill interrupted by signal {signum}")
+        if __import__("threading").current_thread() is __import__("threading").main_thread():
+            for signum in (signal.SIGTERM, signal.SIGINT):
+                previous_signals[signum] = signal.signal(signum, interrupted)
         try:
             restore_ref = provisioner.create_and_wait()
             production = ManagedReadOnlyRecoverySource(self.request, self.production_ref)
@@ -510,7 +650,7 @@ class ManagedIsolatedRestoreDrill:
             restored = ManagedReadOnlyRecoverySource(self.request, restore_ref, isolated_guard=True)
             verification = verify_recovery_bundle(first, restored, production_source=production,
                                                   decrypt_command=self._crypt_command("decrypt"), restore_target=target)
-            migration_retry = target.verify_migration_noop(records["schema_version"])
+            migration_retry = target.retry_release_migrations()
             # A second independently fetched production bundle closes the
             # source-count race: its root must equal the pre-restore export.
             after_source = ManagedReadOnlyRecoverySource(self.request, self.production_ref)
@@ -534,7 +674,7 @@ class ManagedIsolatedRestoreDrill:
                 },
                 "workflow": {"run_id": self.workflow_run_id, "attempt": self.workflow_attempt},
             }
-        except Exception as error:
+        except BaseException as error:
             failure = error
         finally:
             cleanup = provisioner.cleanup()
@@ -548,6 +688,8 @@ class ManagedIsolatedRestoreDrill:
                     production_ref=self.production_ref, restore_ref=provisioner.created_project_ref,
                     cleanup=cleanup, error=failure or RuntimeError("unknown restore failure"),
                 )
+            for signum, previous in previous_signals.items():
+                signal.signal(signum, previous)
         if failure is not None:
             raise RuntimeError("managed isolated restore drill failed") from failure
         if cleanup["deleted"] is not True:
@@ -562,12 +704,30 @@ def main() -> int:
     parser.add_argument("--output-dir", type=Path, required=True)
     parser.add_argument("--workflow-run-id", required=True)
     parser.add_argument("--workflow-attempt", required=True)
+    parser.add_argument("--cleanup-only", action="store_true")
+    parser.add_argument("--cleanup-identity", type=Path)
     args = parser.parse_args()
     # Both values remain process environment only; neither is accepted by argv.
     token = os.environ.get("SUPABASE_ACCESS_TOKEN", "")
     if not os.environ.get("RELEASE_RECOVERY_KEY"):
         raise RuntimeError("recovery encryption key is required")
     api = SupabaseManagementApi(token)
+    if args.cleanup_only:
+        identity = (args.cleanup_identity or (Path(args.output_dir).resolve() / "cleanup-identity.json"))
+        cleanup = ManagedProjectProvisioner(
+            api, args.production_project_ref, cleanup_identity_path=identity,
+            workflow_run_id=args.workflow_run_id, workflow_attempt=args.workflow_attempt,
+            cleanup_key=os.environ["RELEASE_RECOVERY_KEY"].encode(),
+        ).cleanup()
+        # The receipt contains only the run-bound ref (if retained) and no
+        # response body, database URL, or Management credential.
+        receipt = identity.parent / "managed-isolated-cleanup-receipt.json"
+        receipt.write_text(canonical_json({"format": "stocks-managed-cleanup-v1", "cleanup": cleanup}) + "\n")
+        receipt.chmod(0o600)
+        if cleanup.get("deleted") is not True:
+            raise RuntimeError("run-bound cleanup did not prove temporary project absence")
+        print(canonical_json({"cleanup": cleanup}))
+        return 0
     result = ManagedIsolatedRestoreDrill(api, args.production_project_ref, output_dir=args.output_dir,
                                          repository=Path(__file__).resolve().parents[1],
                                          workflow_run_id=args.workflow_run_id,

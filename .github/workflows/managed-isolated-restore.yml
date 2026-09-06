@@ -48,6 +48,16 @@ jobs:
           test -n "$SUPABASE_ACCESS_TOKEN" && test -n "$RELEASE_RECOVERY_KEY" && test -n "$SUPABASE_PROJECT_REF"
           mkdir -m 700 recovery
           python scripts/managed_isolated_restore.py --production-project-ref "$SUPABASE_PROJECT_REF" --output-dir recovery --workflow-run-id "$GITHUB_RUN_ID" --workflow-attempt "$GITHUB_RUN_ATTEMPT"
+      - name: Independently clean only this run-bound temporary project
+        if: ${{ always() }}
+        env:
+          SUPABASE_ACCESS_TOKEN: ${{ secrets.SUPABASE_ACCESS_TOKEN }}
+          RELEASE_RECOVERY_KEY: ${{ secrets.RELEASE_RECOVERY_KEY }}
+          SUPABASE_PROJECT_REF: ${{ vars.SUPABASE_PROJECT_REF }}
+        run: |
+          set -euo pipefail
+          mkdir -p recovery
+          python scripts/managed_isolated_restore.py --cleanup-only --production-project-ref "$SUPABASE_PROJECT_REF" --output-dir recovery --cleanup-identity recovery/cleanup-identity.json --workflow-run-id "$GITHUB_RUN_ID" --workflow-attempt "$GITHUB_RUN_ATTEMPT"
       - name: Upload encrypted recovery evidence and receipt
         if: ${{ always() }}
         uses: actions/upload-artifact@65462800fd760344b1a7b4382951275a0abb4808

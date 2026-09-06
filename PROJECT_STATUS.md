@@ -46,8 +46,10 @@ complete. The GitHub protected workflow, isolated live restore, and next existin
 remain pending. The local candidate now includes a manual-only Management-API isolated restore
 workflow: it proves a one-project free slot, uses only the Management read-only SQL endpoint for
 production, restores only a run-created project, compares two encrypted production root hashes,
-and fail-closes if the exact temporary project cannot be deleted. No scheduled run was triggered
-merely to collect evidence.
+and fail-closes if the exact temporary project cannot be deleted. The candidate persists a
+keyed, run-bound cleanup identity before project creation and has an `always()` workflow cleanup
+step for ordinary cancellation/failure paths; runner loss still requires owner follow-up from the
+bounded receipt. No scheduled run was triggered merely to collect evidence.
 
 The product remains owner-only, suggestion-only, brokerage-free, and constrained to zero
 incremental cost. It cannot place, modify, or cancel a trade. The production work did not change the

@@ -77,16 +77,16 @@ def test_provisioner_creates_only_one_new_project_in_production_org_region_after
     def api(method, path, payload=None):
         calls.append((method, path, payload))
         if path == f"/v1/projects/{'p' * 20}":
-            return {"ref": "p" * 20, "organization_id": "org-1", "region": "us-east-1", "status": "ACTIVE_HEALTHY"}
+            return {"ref": "p" * 20, "organization_id": "org-1", "organization_slug": "owner-org", "region": "us-east-1", "status": "ACTIVE_HEALTHY"}
         if path == "/v1/projects":
             if method == "GET":
-                return [{"ref": "p" * 20, "organization_id": "org-1", "region": "us-east-1", "status": "ACTIVE_HEALTHY"}]
-            assert payload["organization_id"] == "org-1"
+                return [{"ref": "p" * 20, "organization_id": "org-1", "organization_slug": "owner-org", "region": "us-east-1", "status": "ACTIVE_HEALTHY"}]
+            assert payload["organization_slug"] == "owner-org" and "organization_id" not in payload
             assert payload["region"] == "us-east-1"
             assert isinstance(payload["db_pass"], str) and len(payload["db_pass"]) >= 32
-            return {"ref": "r" * 20, "organization_id": "org-1", "region": "us-east-1"}
+            return {"ref": "r" * 20, "organization_id": "org-1", "organization_slug": "owner-org", "region": "us-east-1"}
         if path == f"/v1/projects/{'r' * 20}":
-            return {"ref": "r" * 20, "organization_id": "org-1", "region": "us-east-1", "status": "ACTIVE_HEALTHY"}
+            return {"ref": "r" * 20, "organization_id": "org-1", "organization_slug": "owner-org", "region": "us-east-1", "status": "ACTIVE_HEALTHY"}
         raise AssertionError((method, path))
 
     provisioner = ManagedProjectProvisioner(api, "p" * 20, random_bytes=lambda size: b"a" * size)
@@ -99,11 +99,11 @@ def test_provisioner_refuses_to_create_when_the_owner_has_more_than_one_active_p
 
     def api(method, path, _payload=None):
         if path == f"/v1/projects/{'p' * 20}":
-            return {"ref": "p" * 20, "organization_id": "org-1", "region": "us-east-1", "status": "ACTIVE_HEALTHY"}
+            return {"ref": "p" * 20, "organization_id": "org-1", "organization_slug": "owner-org", "region": "us-east-1", "status": "ACTIVE_HEALTHY"}
         if path == "/v1/projects" and method == "GET":
             return [
-                {"ref": "p" * 20, "organization_id": "org-1", "region": "us-east-1", "status": "ACTIVE_HEALTHY"},
-                {"ref": "x" * 20, "organization_id": "org-1", "region": "us-east-1", "status": "ACTIVE_HEALTHY"},
+                {"ref": "p" * 20, "organization_id": "org-1", "organization_slug": "owner-org", "region": "us-east-1", "status": "ACTIVE_HEALTHY"},
+                {"ref": "x" * 20, "organization_id": "org-1", "organization_slug": "owner-org", "region": "us-east-1", "status": "ACTIVE_HEALTHY"},
             ]
         raise AssertionError("project creation must not happen")
 
@@ -192,3 +192,144 @@ def test_failed_cleanup_receipt_keeps_only_the_retained_temporary_identity(tmp_p
     assert data["cleanup"]["retained_project_ref"] == "r" * 20
     assert data["status"] == "failed"
     assert "do-not-print" not in receipt.read_text()
+
+
+def test_drill_resolves_a_relative_output_directory_before_exporter_contracts(tmp_path):
+    from scripts.managed_isolated_restore import ManagedIsolatedRestoreDrill
+
+    drill = ManagedIsolatedRestoreDrill(lambda *_args: [], "p" * 20, output_dir=Path("recovery"),
+                                        repository=tmp_path, workflow_run_id="1", workflow_attempt="1")
+    assert drill.output_dir.is_absolute()
+
+
+def test_preflight_allows_schema_seeded_cash_singleton_but_requires_restore_tables_and_ledgers_empty():
+    from scripts.managed_isolated_restore import ManagedRestoreTarget
+
+    seen = []
+    def api(_method, _path, payload=None):
+        seen.append(payload["query"])
+        return [{"restore_preflight": {"tables_empty": True, "native_migrations_empty": True,
+                                        "private_ledger_empty": True}}]
+
+    ManagedRestoreTarget(api, "r" * 20, "p" * 20, created_project_ref="r" * 20).preflight_empty()
+    assert "portfolio_cash_ledger_state" not in seen[0]
+
+
+def test_role_recreation_preserves_dashboard_nologin_and_runtime_login_inherit_without_password():
+    from scripts.managed_isolated_restore import ManagedRestoreTarget
+
+    queries = []
+    target = ManagedRestoreTarget(lambda _method, _path, payload=None: queries.append(payload["query"]) or [],
+                                  "r" * 20, "p" * 20, created_project_ref="r" * 20)
+    target.reproduce_role_shapes([
+        {"role": "stock_agent_dashboard", "login": False, "superuser": False, "bypass_rls": False,
+         "memberships": [], "grants": []},
+        {"role": "stock_agent_dashboard_runtime", "login": True, "superuser": False, "bypass_rls": False,
+         "memberships": ["stock_agent_dashboard"], "grants": []},
+    ])
+    assert "ALTER ROLE stock_agent_dashboard NOLOGIN" in queries[-1]
+    assert "ALTER ROLE stock_agent_dashboard_runtime LOGIN INHERIT PASSWORD NULL" in queries[-1]
+
+
+def test_provisioner_uses_organization_slug_and_ignores_other_org_and_paused_projects_for_free_slot():
+    from scripts.managed_isolated_restore import ManagedProjectProvisioner
+
+    calls = []
+    def api(method, path, payload=None):
+        calls.append((method, path, payload))
+        if path == f"/v1/projects/{'p' * 20}":
+            return {"ref": "p" * 20, "organization_id": "org-1", "organization_slug": "owner-org",
+                    "region": "us-east-1", "status": "ACTIVE_HEALTHY"}
+        if path == "/v1/projects" and method == "GET":
+            return [
+                {"ref": "p" * 20, "organization_id": "org-1", "organization_slug": "owner-org", "region": "us-east-1", "status": "ACTIVE_HEALTHY"},
+                {"ref": "x" * 20, "organization_id": "org-2", "organization_slug": "other", "region": "us-east-1", "status": "ACTIVE_HEALTHY"},
+                {"ref": "y" * 20, "organization_id": "org-1", "organization_slug": "owner-org", "region": "us-east-1", "status": "PAUSED"},
+            ]
+        if path == "/v1/projects" and method == "POST":
+            assert payload["organization_slug"] == "owner-org" and "organization_id" not in payload
+            return {"ref": "r" * 20, "organization_id": "org-1", "organization_slug": "owner-org", "region": "us-east-1", "status": "INACTIVE"}
+        if path == f"/v1/projects/{'r' * 20}":
+            return {"ref": "r" * 20, "organization_id": "org-1", "organization_slug": "owner-org", "region": "us-east-1", "status": "ACTIVE_HEALTHY"}
+        raise AssertionError((method, path))
+
+    assert ManagedProjectProvisioner(api, "p" * 20).create_and_wait() == "r" * 20
+
+
+def test_cleanup_confirms_exact_delete_response_and_bounded_inventory_absence():
+    from scripts.managed_isolated_restore import ManagedProjectProvisioner
+
+    inventory = [[{"ref": "r" * 20}], []]
+    def api(method, path, _payload=None):
+        if method == "DELETE":
+            return {"ref": "r" * 20}
+        if method == "GET" and path == "/v1/projects":
+            return inventory.pop(0)
+        raise AssertionError((method, path))
+
+    provisioner = ManagedProjectProvisioner(api, "p" * 20, max_cleanup_checks=2, sleep=lambda _seconds: None)
+    provisioner.created_project_ref = "r" * 20
+    assert provisioner.cleanup()["deleted"] is True
+
+
+def test_cleanup_fails_closed_on_lost_delete_response_but_discovers_only_deterministic_run_name(tmp_path):
+    from scripts.managed_isolated_restore import ManagedProjectProvisioner
+
+    identity = tmp_path / "cleanup.json"
+    provisioner = ManagedProjectProvisioner(lambda *_args: [], "p" * 20, cleanup_identity_path=identity,
+                                            workflow_run_id="42", workflow_attempt="3", cleanup_key=b"k" * 32)
+    assert identity.is_file()
+    saved = json.loads(identity.read_text())
+    assert saved["name"].startswith("stocks-recovery-") and "k" * 4 not in identity.read_text()
+
+
+def test_actual_migration_retry_invokes_release_migration_contract_and_requires_no_applied(monkeypatch):
+    from scripts.managed_isolated_restore import ManagedRestoreTarget
+    import scripts.deploy_owner_dashboard_api as deploy
+
+    seen = []
+    def apply(cursor):
+        seen.append(cursor)
+        return {"candidate": [{"path": "sql/migrations/202609010001_x.sql", "version": "202609010001", "sha256": "a" * 64}],
+                "applied": [], "skipped": [{"path": "sql/migrations/202609010001_x.sql", "version": "202609010001", "sha256": "a" * 64}]}
+    monkeypatch.setattr(deploy, "apply_release_migrations", apply)
+    target = ManagedRestoreTarget(lambda _method, _path, _payload=None: [], "r" * 20, "p" * 20, created_project_ref="r" * 20)
+    assert target.retry_release_migrations() == {"applied": [], "skipped": ["202609010001"]}
+    assert len(seen) == 1
+
+
+def test_management_restore_resets_transaction_sequence_like_the_existing_postgres_target():
+    from scripts.managed_isolated_restore import ManagedRestoreTarget
+
+    queries = []
+    def api(_method, _path, payload=None):
+        queries.append(payload["query"])
+        if "restore_preflight" in payload["query"]:
+            return [{"restore_preflight": {"tables_empty": True, "native_migrations_empty": True,
+                                            "private_ledger_empty": True}}]
+        return []
+    ManagedRestoreTarget(api, "r" * 20, "p" * 20, created_project_ref="r" * 20).restore_records(recovery_records())
+    assert "SELECT setval(pg_get_serial_sequence('public.transactions','id'),(SELECT max(id) FROM public.transactions),true)" in queries[-1]
+
+
+def test_restarted_cleanup_discovers_exact_run_name_after_lost_delete_response_and_proves_absence(tmp_path):
+    from scripts.managed_isolated_restore import ManagedProjectProvisioner
+
+    identity = tmp_path / "cleanup.json"
+    original = ManagedProjectProvisioner(lambda *_args: [], "p" * 20, cleanup_identity_path=identity,
+                                         workflow_run_id="42", workflow_attempt="3", cleanup_key=b"k" * 32)
+    name = json.loads(identity.read_text())["name"]
+    inventories = [[{"ref": "r" * 20, "name": name, "organization_slug": "owner-org", "region": "us-east-1"}], []]
+    def api(method, path, _payload=None):
+        if path == f"/v1/projects/{'p' * 20}":
+            return {"ref": "p" * 20, "organization_id": "org-1", "organization_slug": "owner-org", "region": "us-east-1"}
+        if path == "/v1/projects" and method == "GET":
+            return inventories.pop(0)
+        if method == "DELETE":
+            raise OSError("response lost")
+        raise AssertionError((method, path))
+    restarted = ManagedProjectProvisioner(api, "p" * 20, cleanup_identity_path=identity,
+                                          workflow_run_id="42", workflow_attempt="3", cleanup_key=b"k" * 32,
+                                          sleep=lambda _seconds: None, max_cleanup_checks=2)
+    assert original.created_project_ref is None
+    assert restarted.cleanup()["deleted"] is True
