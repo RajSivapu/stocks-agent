@@ -137,6 +137,10 @@ class NativeReleaseAdapter:
             inventory.append({"name": name, "digest": digest})
         return inventory
 
+    def managed_secret_digests(self):
+        """Return the validated, non-secret digests of the managed runtime values."""
+        return copy.deepcopy(self._secret_inventory())
+
     def _connection(self):
         url = self.environment.get("POSTGRES_URL")
         if not url: raise RuntimeError("protected PostgreSQL administrator endpoint is required")
