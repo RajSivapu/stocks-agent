@@ -4,10 +4,12 @@ Last updated: 2026-09-06
 Canonical release: Personal Stock Agent V1 safety remediation
 Audit baseline: `432d647ef911ff63da427097f02a852e18038b62` on `origin/main`
 Consolidated local-gate candidate: `883d521728b1b3c2700a78dab1d65208105d7a2f`
-Current state: the owner dashboard is live. Production schema reconciliation, managed isolated
-recovery, and the protected existing-runtime attestation are complete; trusted V1 use remains
-**no-go** pending the next existing scheduled evidence chain. Current attested main is
-`b3f7d706573224d8edfa88570067dfb1b0900672`, with successful exact-main CI `34055295512`.
+Current state: owner-only Site v7 is live from UI main
+`a4c8031f30ffd324bf35965bd2f31e60f41165b6`, with successful exact-main CI `34066973967`.
+Production schema reconciliation, managed isolated recovery, and the protected backend-runtime
+attestation are complete; trusted V1 use remains **no-go** pending the next existing scheduled
+evidence chain. The unchanged backend remains attested at
+`b3f7d706573224d8edfa88570067dfb1b0900672` by protected run `34055419086`.
 
 This file is the version-controlled source of truth for the Personal Stock Agent V1 rollout.
 `docs/ROADMAP.md` records the implementation sequence and remaining release gates.
@@ -54,12 +56,24 @@ This file is the version-controlled source of truth for the Personal Stock Agent
   required relations and 52 protected roots, exactly one owner, anonymous HTTP 401, and an owner
   HTTP 200 database-backed GET. It records zero database writes, deployments, secret rotations, or
   scheduled starts; its one canary session was revoked with local scope.
+- [x] PR #28 simplified the owner dashboard around Overview, Ideas, and Reports, moved Intelligence
+  and Receipts under Advanced, and used progressive disclosure for supporting evidence. It merged as
+  `6ef5fcc`; exact-main CI `34066235515` passed.
+- [x] PR #29 applied the UI/UX audit follow-up: keyboard skip navigation plus theme-aware contrast
+  for the skip link and sign-in button. The focused control passes axe in both themes, the Sol
+  re-review returned CLEAN, and exact-main CI `34066973967` passed on `a4c8031`.
+- [x] Owner-only Site v7 is live from that exact main. Native deployment
+  `appgdep_6a9df7eee2cc819193fefc13aa39d8bb` succeeded with one allowed owner, no groups, and zero
+  external visitors. Its live script hashes match the verified build; Site v6 remains the immediate
+  rollback. Receipt: `docs/receipts/2026-09-06-native-site-v7.json`.
 
 ## Product interface direction
 
 Telegram is the primary timely decision surface. The web app remains intentionally small and
-owner-only: portfolio state, history, reconciliation status, and audit evidence. It is not presented
-as a live trading terminal, and the absence of continuous live data is surfaced rather than hidden.
+owner-only. Overview contains attention items, portfolio state, current suggestions, and the latest
+report; Ideas and Reports hold the daily decision history; Intelligence and Receipts preserve deeper
+research and audit evidence under Advanced. It is not presented as a live trading terminal, and the
+absence of continuous live data is surfaced rather than hidden.
 
 ## Release boundary
 
@@ -102,9 +116,9 @@ step for ordinary cancellation/failure paths; runner loss still requires owner f
 bounded receipt. No scheduled run was triggered merely to collect evidence.
 
 The product remains owner-only, suggestion-only, brokerage-free, and constrained to zero
-incremental cost. It cannot place, modify, or cancel a trade. The production work did not change the
-free-tier Auth template, send Telegram output, call a brokerage, place a trade, or trigger an extra
-scheduled run.
+incremental cost. It cannot place, modify, or cancel a trade. The Site-only UI releases did not
+change the database, Auth configuration, Edge functions, managed secrets, Telegram output, or
+schedules, and did not trigger an extra scheduled run.
 
 The GPT-6 Astra audit of `432d647` returned a no-go verdict for trusted portfolio decision support.
 The findings are implemented locally but the no-go is not lifted by local code or fixture tests.
@@ -204,6 +218,8 @@ V1-C4 is reopened.
 - [x] Complete the owner email-click canary; the owner confirmed the live dashboard appeared.
 - [x] Complete a formal non-owner login canary and retain its bounded denial receipt: HTTP 403
   `owner_only`, no portfolio data, temporary user deleted, and exactly one owner afterward.
+- [x] Publish the simplified, progressive-disclosure owner UI and accessibility follow-up as
+  owner-only Site v7 from exact main `a4c8031`; retain Site v6 as rollback.
 - [ ] Reconcile an original Telegram delivery ID or explicit persisted suppression from the next
   existing scheduled chain.
 
@@ -216,7 +232,8 @@ V1-C5 is reopened.
 - [x] Consolidated local `npm run test:all` gate passed for the final code at `883d521`.
 - [x] GPT-6 Astra approved the final scoped re-review with no unresolved local Critical or Important
   finding; the final split-trust review also returned CLEAN with no Critical/P1/P2 finding.
-- [x] Exact-head CI `34055169909` and exact-main CI `34055295512` passed for attested main `b3f7d70`.
+- [x] Exact-head CI `34055169909` and exact-main CI `34055295512` passed for attested backend main
+  `b3f7d70`; later UI-only main `a4c8031` passed exact-main CI `34066973967`.
 - [x] Historical production runtime readback, three-function parity, private Site publication, and
   owner/anonymous canaries completed; schema reconciliation is now complete above.
 - [x] Approved receipt-bound schema reconciliation completed (`34039011879`); do not rerun.
@@ -232,6 +249,21 @@ V1-C6 is reopened and the release remains no-go for trusted use.
 
 1. Preserve the completed schema and isolated recovery gates; do not rerun them.
 2. Observe the next existing scheduled receipt without triggering a duplicate.
+
+## Site-only UI release — completed 2026-09-06
+
+PRs #28 and #29 changed only the owner Site. The final UI main `a4c8031` passed exact-main CI
+`34066973967`, and its private Site v7 deployment succeeded. Native readback confirmed custom access
+with exactly one allowed owner, no allowed groups, and zero external visitors. The live entry scripts
+match the verified local build, and Site v6 is retained as the immediate rollback. The bounded receipt
+is `docs/receipts/2026-09-06-native-site-v7.json`.
+
+This release did not mutate the production database, Supabase Auth, any Edge function, managed
+secrets, Telegram, or scheduled workflows. The protected backend attestation at `b3f7d70` remains the
+backend evidence boundary; it does not claim to attest the later UI bytes. The original protected
+multi-component workflow remains required for backend changes. A Site-only UI change may use the
+owner-scoped native Sites connector when it preserves exact source, verified build, owner-only
+access, deployment, live-bundle, and rollback receipts.
 
 ## Protected attestation boundary — completed 2026-09-06
 
@@ -307,11 +339,12 @@ sync, focused PostgreSQL restore/retry evidence, and `git diff --check` also pas
 
 ## Production truth
 
-Production contains the owner dashboard and reviewed runtime. Approved schema reconciliation
+Production contains owner-only Site v7 and the reviewed backend runtime. Approved schema reconciliation
 `34039011879`, isolated live restore `34042155368`, and protected existing-runtime attestation
 `34055419086` passed. These do not substitute for a post-remediation scheduled receipt chain. The owner email-click and
-formal non-owner denial canaries remain complete. Site v5 remains owner-only with one allowed owner,
-no groups, and zero external visitors at the verified publication checkpoint; access is unchanged.
+formal non-owner denial canaries remain complete. Native Site v7 readback confirms one allowed owner,
+no groups, and zero external visitors. Its receipt explicitly separates the UI-only publication from
+the unchanged backend and the still-pending scheduled chain.
 
 ## Decisions and guardrails
 

@@ -13,13 +13,13 @@ An owner-only personal stock agent that uses zero-incremental-cost data sources,
 - [x] Initial Astra audit findings F1–F19 implemented
 - [x] Final consolidated local gate passed: 1,197 checks passed, 4 skipped, 4 credentialed database tests intentionally deselected
 - [x] Final whole-repository GPT-6 Astra review completed
-- [x] Final Astra fix wave complete at the safe local boundary — **all code findings closed; native owner-operated Sites publication remains a production gate**
+- [x] Final Astra fix wave complete at the safe local boundary — **all code findings closed; native owner-operated Sites publication completed**
 - [x] Final Track C focused code review approved with no open Critical or Important findings
 - [x] Consolidated final-candidate gate: **1,197 checks passed, 4 skipped, 4 credentialed database tests intentionally deselected**
 - [x] Final GPT-6 Astra re-review approved at exact code commit `883d521`
 - [x] Astra remediation merged to protected `main`; exact-main CI passed at `c9e3140`
 - [x] Database ledger read back as current; gateway v33, dashboard API v4, and Telegram v20 deployed with runtime-byte parity
-- [x] Private owner Site v5 published from exact `main` merge `ba3ebc1`; reviewed bundle parity and owner/anonymous API canaries passed
+- [x] Private owner Site v7 published from exact UI `main` merge `a4c8031`; reviewed live-script parity and owner-only access readback passed, while the backend attestation remains bound to `b3f7d70`
 - [x] Live free-tier Auth read back and browser updated to accept its signed email link as well as six-digit codes
 - [x] Receipt-bound production schema reconciliation completed exactly once in run `34039011879`
 - [x] Protected isolated restore and both cleanup paths completed in run `34042155368`
@@ -39,6 +39,7 @@ An owner-only personal stock agent that uses zero-incremental-cost data sources,
 - [x] Scheduled-run lifecycle, history, suppression, and report origins
 - [x] Protected release evidence, migration reconciliation, and recovery orchestration
 - [x] Outcome semantics, least-privilege weekly audit, locked dependencies, market calendar, and quote identity
+- [x] Simplified three-tab dashboard, advanced evidence disclosure, keyboard skip navigation, and theme-aware control contrast
 - [x] F1–F19 status and rollout documentation
 
 ## Final Astra review findings
@@ -63,6 +64,7 @@ An owner-only personal stock agent that uses zero-incremental-cost data sources,
 - [x] Run one consolidated repository gate after the fixes — **1,197 passed**
 - [x] Run one scoped GPT-6 Astra re-review of the 11 findings — **approved**
 - [x] Update this checklist and the formal status/rollout records
+- [x] Publish the UI/UX-audited dashboard as owner-only Site v7 and retain Site v6 as rollback
 
 ## Production gates
 
@@ -74,9 +76,10 @@ These require the protected production path and must not be replaced by local ev
 - [x] Pass exact-main CI
 - [x] Apply the receipt-bound production schema reconciliation exactly once — **run `34039011879`**
 - [x] Run the protected one-time existing-runtime attestation before routine scheduled data advances — **run `34055419086`; artifact `9995809768`; receipt SHA-256 `88bedc1a0488e11e2a0c75bc981087f5eeacc45ec8c9d42dbf5c937104155baf`**
-- [x] Verify owner-operated deployed byte/version parity for gateway, dashboard API, Telegram function, and owner web site
+- [x] Verify owner-operated deployed byte/version parity for gateway, dashboard API, and Telegram function at the protected backend boundary; verify the later Site-only UI release separately
 - [x] Publish the signed-link-compatible web build as Site v5; deployment `appgdep_6a9cd0def8f0819187aa7d30d99a7ada` succeeded
-- [x] Complete an owner email sign-in canary on that new Site build — **owner confirmed the signed email link opened the portfolio dashboard on 2026-09-05**
+- [x] Publish the simplified and accessibility-reviewed UI as owner-only Site v7 from exact main `a4c8031`; deployment `appgdep_6a9df7eee2cc819193fefc13aa39d8bb` succeeded and `docs/receipts/2026-09-06-native-site-v7.json` binds the source, build, live scripts, access, and rollback
+- [x] Complete an owner email sign-in canary on signed-link Site v5 — **owner confirmed the signed email link opened the portfolio dashboard on 2026-09-05; later Site v7 preserves the same Auth flow**
 - [x] Perform the protected restore drill and retain its receipt — **run `34042155368` restored and
   verified 26 record sets, preserved identical production roots, applied no migrations on retry,
   deleted the temporary project, and passed both cleanup receipts**
