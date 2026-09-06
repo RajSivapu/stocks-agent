@@ -16,7 +16,7 @@ permissions:
 
 # Do not allow two different candidates to mutate production concurrently.
 concurrency:
-  group: protected-owner-dashboard-release-production-${{ github.run_id }}-${{ github.run_attempt }}
+  group: protected-owner-dashboard-release-production
   cancel-in-progress: false
 
 jobs:

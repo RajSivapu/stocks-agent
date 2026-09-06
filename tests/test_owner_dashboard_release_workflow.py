@@ -190,12 +190,14 @@ def test_release_exports_candidate_for_every_set_u_dry_run_and_recovery_step():
     assert 'state=in_progress' in workflow
 
 
-def test_recovery_serializes_with_its_matching_release_attempt_without_latest_attempt_gate():
+def test_release_and_recovery_use_separate_safe_actions_concurrency_boundaries():
     workflow = Path(".github/workflows/owner-dashboard-release.yml").read_text()
     recovery = Path(".github/workflows/owner-dashboard-release-recovery.yml").read_text()
     assert "rollback-source-" in workflow and "recovery-metadata-" in workflow
-    assert "group: protected-owner-dashboard-release-production-${{ github.run_id }}-${{ github.run_attempt }}" in workflow
-    assert "group: protected-owner-dashboard-release-production-${{ github.event.workflow_run.id }}-${{ github.event.workflow_run.run_attempt }}" in recovery
+    assert "group: protected-owner-dashboard-release-production" in workflow
+    assert "group: protected-owner-dashboard-release-production-${{" not in workflow
+    assert "group: protected-owner-dashboard-release-recovery-${{ github.event.workflow_run.id }}-${{ github.event.workflow_run.run_attempt }}" in recovery
+    assert "protected-owner-dashboard-release-production-${{" not in recovery
     assert "cancel-in-progress: false" in recovery
     trust = recovery.split("- name: Verify exact failed-release deployment trust marker", 1)[1].split("- name:", 1)[0]
     assert 'jq -r .run_attempt' not in trust

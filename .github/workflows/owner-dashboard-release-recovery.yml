@@ -10,8 +10,10 @@ permissions:
   contents: read
   deployments: write
 
+# Keep distinct recovery obligations pending independently. The durable
+# database advisory lock and ordered lease serialize them against releases.
 concurrency:
-  group: protected-owner-dashboard-release-production-${{ github.event.workflow_run.id }}-${{ github.event.workflow_run.run_attempt }}
+  group: protected-owner-dashboard-release-recovery-${{ github.event.workflow_run.id }}-${{ github.event.workflow_run.run_attempt }}
   cancel-in-progress: false
 
 jobs:

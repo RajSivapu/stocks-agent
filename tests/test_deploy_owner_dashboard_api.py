@@ -364,6 +364,18 @@ def test_durable_lease_allows_recovery_for_the_current_canonical_attempt():
     assert cursor.calls[-1][1] == ("recovery-123456789-2", "recovery")
 
 
+def test_durable_lease_rejects_an_older_release_after_a_newer_resolved_attempt():
+    class Cursor:
+        def __init__(self): self.calls, self.rowcount = [], 1
+        def execute(self, statement, params=None): self.calls.append((statement, params))
+        def fetchall(self): return [("release-123456790-1", "release", "resolved", False)]
+
+    cursor = Cursor()
+    with pytest.raises(RuntimeError, match="newer protected release attempt"):
+        deploy.acquire_durable_release_lease(cursor, "release-123456789-9", "release")
+    assert len(cursor.calls) == 2
+
+
 def test_candidate_dry_run_installs_dependencies_and_uses_only_protected_vite_values(tmp_path, monkeypatch):
     root = tmp_path / "repo"
     app = root / "apps/web/src/app"; app.mkdir(parents=True)

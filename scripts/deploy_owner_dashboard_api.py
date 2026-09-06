@@ -162,7 +162,7 @@ def acquire_durable_release_lease(cursor, owner: str, kind: str) -> None:
             raise RuntimeError("protected release lease receipt is malformed")
         current_owner, current_kind, current_state, _active = rows[0]
         same_owner = current_owner == owner and current_kind == kind
-        requested_identity = canonical_attempt_lease_identity(owner) if kind == "recovery" else None
+        requested_identity = canonical_attempt_lease_identity(owner)
         current_identity = canonical_attempt_lease_identity(current_owner)
         if requested_identity and current_identity and current_identity > requested_identity:
             raise RuntimeError("a newer protected release attempt already owns the durable lease")
