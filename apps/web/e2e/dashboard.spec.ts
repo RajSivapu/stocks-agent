@@ -7,7 +7,11 @@ test("owner dashboard is keyboard usable in light and dark modes", async ({ page
   await page.goto("/portfolio?fixture=complete");
   await expect(page.getByRole("navigation", { name: "Primary" })).toBeVisible();
   await page.keyboard.press("Tab");
-  await expect(page.getByRole("link", { name: "Skip to main content" })).toBeFocused();
+  const skipLink = page.getByRole("link", { name: "Skip to main content" });
+  await expect(skipLink).toBeFocused();
+  await expect(skipLink).toBeVisible();
+  const focusedResults = await new AxeBuilder({ page }).analyze();
+  expect(focusedResults.violations).toEqual([]);
   await page.keyboard.press("Enter");
   await expect(page.locator("main#main-content")).toBeFocused();
   await page.getByRole("radio", { name: "Dark" }).check();
