@@ -291,7 +291,8 @@ its rollback source is bound to `dceb76c9a32a94a16e0cdc0f9dab602f465ef186` with 
 
 The original mutation workflow remains correctly blocked because `NativeReleaseAdapter.site = None`
 and its runtime-role planner would rotate credentials. It remains the required path for a future
-release that changes a deployed component. It is not needed to attest this unchanged V1 runtime.
+backend or multi-component release. It was not needed for the unchanged-runtime attestation or the
+later bounded Site-only UI release.
 
 The approved one-time workflow used two independent trust domains: a fresh, bounded native Sites
 receipt captured through the owner-scoped connector, and protected GitHub readback of current main,
