@@ -43,6 +43,7 @@ export function AppShell({
         : freshnessLabels[freshness];
   return (
     <div className="app-shell">
+      <a className="skip-link" href="#main-content">Skip to main content</a>
       <aside className="sidebar">
         <div>
           <p className="eyebrow">MarketPal</p>
@@ -72,7 +73,7 @@ export function AppShell({
           <strong>{statusLabel}</strong>
           <span>{viewStatus === "loading" ? "Waiting for this view's receipt" : dataTime ? `Data through ${new Date(dataTime).toLocaleString()}` : "No supported data time for this view"}</span>
         </div>
-        <main id="main-content" className="page-content">{children}</main>
+        <main id="main-content" className="page-content" tabIndex={-1}>{children}</main>
       </div>
     </div>
   );

@@ -17,11 +17,13 @@ a { color: inherit; }
 .auth-card form { display: grid; gap: .55rem; margin-top: 2rem; }
 .auth-card label { margin-top: .5rem; font-weight: 750; }
 .auth-card input { width: 100%; padding: .8rem .9rem; border: 1px solid var(--line); border-radius: .65rem; background: var(--canvas); }
-.primary-button { margin-top: .8rem; border: 0; border-radius: .65rem; padding: .85rem 1rem; background: var(--gold); color: #08111f; font-weight: 800; cursor: pointer; }
+.primary-button { margin-top: .8rem; border: 0; border-radius: .65rem; padding: .85rem 1rem; background: var(--gold); color: var(--on-gold); font-weight: 800; cursor: pointer; }
 .primary-button:disabled { opacity: .6; cursor: wait; }
 .notice, .form-message { padding: .75rem; border-left: 3px solid var(--gold); background: var(--gold-soft); }
 .boundary-note { margin: 1.5rem 0 0; color: var(--muted); font-size: .78rem; }
 .app-shell { min-height: 100vh; display: grid; grid-template-columns: 16.5rem minmax(0, 1fr); }
+.skip-link { position: fixed; z-index: 1000; top: .75rem; left: .75rem; padding: .7rem 1rem; border-radius: .55rem; background: var(--gold); color: var(--on-gold); font-weight: 800; text-decoration: none; transform: translateY(calc(-100% - 1.5rem)); }
+.skip-link:focus-visible { transform: translateY(0); }
 .sidebar { position: sticky; top: 0; height: 100vh; display: flex; flex-direction: column; justify-content: space-between; padding: 1.5rem; background: var(--nav); color: var(--nav-text); }
 .sidebar .eyebrow { color: #f4c865; }
 .product-name { font-family: Georgia, "Times New Roman", serif; font-size: 1.45rem; line-height: 1.15; }

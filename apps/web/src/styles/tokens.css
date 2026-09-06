@@ -13,6 +13,7 @@
   --muted: #626d7c;
   --line: #d9d3c5;
   --gold: var(--warm-gold);
+  --on-gold: #fffdf8;
   --gold-soft: #efe2bd;
   --positive: #16734a;
   --warning: #936000;
@@ -35,6 +36,7 @@
   --muted: #b2bdca;
   --line: #30415a;
   --gold: var(--warm-gold);
+  --on-gold: #08111f;
   --gold-soft: #3f3420;
   --positive: #63d39a;
   --warning: #f1bf56;
@@ -58,6 +60,7 @@
     --muted: #b2bdca;
     --line: #30415a;
     --gold: var(--warm-gold);
+    --on-gold: #08111f;
     --gold-soft: #3f3420;
     --positive: #63d39a;
     --warning: #f1bf56;
