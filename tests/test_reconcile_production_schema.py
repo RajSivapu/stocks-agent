@@ -69,20 +69,54 @@ def _inventory(main_sha=PRIOR_SHA):
     return receipt
 
 
-def test_prior_inventory_requires_exact_digest_head_and_fresh_state(tmp_path):
-    from scripts.reconcile_production_schema import inventories_match, validate_prior_inventory
+def test_prior_inventory_requires_exact_digest_head_and_fresh_state(tmp_path, monkeypatch):
+    from scripts import reconcile_production_schema as reconciliation
 
+    receipt = _inventory(reconciliation.AUTHORIZED_PRIOR_INVENTORY_HEAD_SHA)
+    monkeypatch.setattr(
+        reconciliation, "AUTHORIZED_PRIOR_INVENTORY_RECEIPT_SHA256", receipt["receipt_sha256"]
+    )
     path = tmp_path / "schema-inventory.json"
-    path.write_text(json.dumps(_inventory()))
-    prior = validate_prior_inventory(path, PROJECT_REF, PRIOR_SHA)
-    assert inventories_match(prior, _inventory(MAIN_SHA))
+    path.write_text(json.dumps(receipt))
+    prior = reconciliation.validate_prior_inventory(
+        path,
+        PROJECT_REF,
+        reconciliation.AUTHORIZED_PRIOR_INVENTORY_RUN_ID,
+        reconciliation.AUTHORIZED_PRIOR_INVENTORY_HEAD_SHA,
+    )
+    assert reconciliation.inventories_match(prior, _inventory(MAIN_SHA))
 
     changed = _inventory(MAIN_SHA)
     changed["protected_roots"][0]["count"] = 1
-    assert not inventories_match(prior, changed)
-    path.write_text(json.dumps({**_inventory(), "receipt_sha256": "0" * 64}))
+    assert not reconciliation.inventories_match(prior, changed)
+    path.write_text(json.dumps({**receipt, "receipt_sha256": "0" * 64}))
     with pytest.raises(RuntimeError, match="digest"):
-        validate_prior_inventory(path, PROJECT_REF, PRIOR_SHA)
+        reconciliation.validate_prior_inventory(
+            path,
+            PROJECT_REF,
+            reconciliation.AUTHORIZED_PRIOR_INVENTORY_RUN_ID,
+            reconciliation.AUTHORIZED_PRIOR_INVENTORY_HEAD_SHA,
+        )
+
+
+def test_only_the_authorized_prior_inventory_run_head_and_receipt_are_accepted():
+    from scripts.reconcile_production_schema import validate_authorized_prior_binding
+
+    run_id = "34029103876"
+    head_sha = "849763522216394576ce54969693dd561b44af80"
+    receipt_sha = "f1f08d635d59bb2e429c57deb1a2a9948d1ce631faa746bc8a19ea51372afb46"
+    validate_authorized_prior_binding(run_id, head_sha, receipt_sha)
+    for changed in (
+        ("34029103877", head_sha, receipt_sha),
+        (run_id, "0" * 40, receipt_sha),
+        (run_id, head_sha, "0" * 64),
+    ):
+        with pytest.raises(RuntimeError, match="authorized prior inventory"):
+            validate_authorized_prior_binding(*changed)
+
+    workflow = Path(".github/workflows/production-schema-reconciliation.yml").read_text()
+    assert 'test "$PRIOR_INVENTORY_RUN_ID" = "34029103876"' in workflow
+    assert 'test "$PRIOR_INVENTORY_HEAD_SHA" = "849763522216394576ce54969693dd561b44af80"' in workflow
 
 
 def test_atomic_snapshot_queries_every_preexisting_table_once_and_validates_server_roots():
@@ -158,6 +192,7 @@ def test_writer_identity_requires_exact_postgres_superuser_and_write_transaction
 
 def test_mutation_is_one_transaction_with_finite_guards_projected_roots_and_truthful_ledgers(tmp_path):
     from scripts.reconcile_production_schema import build_mutation_sql, load_reconciliation_sql
+    from scripts.inspect_production_schema_baseline import _catalog_query, canonical_json
 
     path = tmp_path / "sql/reconciliation/20261004_production_schema_reconciliation.sql"
     path.parent.mkdir(parents=True)
@@ -174,8 +209,55 @@ def test_mutation_is_one_transaction_with_finite_guards_projected_roots_and_trut
     assert "supabase_migrations.schema_migrations" in query
     assert "public.stock_agent_release_migration_ledger" in query
     assert reconciliation["sha256"] in query
+    catalog_guard = query.index("stock_agent_catalog_guard")
+    assert _catalog_query() in query
+    assert canonical_json(_inventory()["catalog"]) in query
+    assert canonical_json(_inventory()["relation_presence"]) in query
+    assert query.index("LOCK TABLE") < catalog_guard < query.index(path.read_text().strip())
     assert query.index("CREATE TEMP TABLE") < query.index(path.read_text().strip())
     assert query.index(path.read_text().strip()) < query.index("post_projection_guard")
+
+
+def test_uncertain_outcome_is_observed_atomically_under_the_writer_lock(tmp_path):
+    from scripts.reconcile_production_schema import (
+        load_reconciliation_sql,
+        observe_reconciliation_state,
+    )
+
+    path = tmp_path / "sql/reconciliation/20261004_production_schema_reconciliation.sql"
+    path.parent.mkdir(parents=True)
+    path.write_text("CREATE TABLE public.new_final_state(id bigint);\n")
+    calls = []
+
+    def request(method, route, payload=None):
+        calls.append((method, route, payload))
+        return [{
+            "lock_acquired": True,
+            "role": "postgres",
+            "transaction_read_only": "off",
+            "superuser": True,
+            "statement_timeout_ms": 120000,
+            "catalog": _inventory()["catalog"],
+            "relation_presence": _inventory()["relation_presence"],
+            "protected_roots": _inventory()["protected_roots"],
+            "native_receipts_xml": None,
+            "private_receipts_xml": None,
+        }]
+
+    state, _, roots = observe_reconciliation_state(
+        request,
+        PROJECT_REF,
+        MAIN_SHA,
+        _inventory(),
+        load_reconciliation_sql(tmp_path),
+    )
+    assert state == "proven_uncommitted" and roots == _inventory()["protected_roots"]
+    assert len(calls) == 1
+    assert calls[0][1] == f"/v1/projects/{PROJECT_REF}/database/query"
+    query = calls[0][2]["query"]
+    assert "pg_try_advisory_xact_lock(hashtextextended('stock_agent_protected_release', 0))" in query
+    assert "relation_presence" in query and "protected_roots" in query
+    assert "native_receipts_xml" in query and "private_receipts_xml" in query
 
 
 @pytest.mark.parametrize(

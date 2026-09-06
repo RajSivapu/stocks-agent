@@ -17,6 +17,7 @@ from pathlib import Path
 import re
 import sys
 from typing import Final
+import xml.etree.ElementTree as ElementTree
 
 from cryptography.fernet import Fernet, InvalidToken
 
@@ -37,6 +38,7 @@ from scripts.inspect_production_schema_baseline import (  # noqa: E402
     MAX_ROOT_ROWS_PER_RELATION,
     RELATION_PRESENCE,
     _IDENTIFIER,
+    _catalog_query,
     _root_relation_names,
     _validate_catalog,
     _validate_presence,
@@ -56,6 +58,11 @@ RECONCILIATION_RELATIVE_PATH = Path(
     "sql/reconciliation/20261004_production_schema_reconciliation.sql"
 )
 RECONCILIATION_VERSION = "20261004"
+AUTHORIZED_PRIOR_INVENTORY_RUN_ID = "34029103876"
+AUTHORIZED_PRIOR_INVENTORY_HEAD_SHA = "849763522216394576ce54969693dd561b44af80"
+AUTHORIZED_PRIOR_INVENTORY_RECEIPT_SHA256 = (
+    "f1f08d635d59bb2e429c57deb1a2a9948d1ce631faa746bc8a19ea51372afb46"
+)
 RECEIPT_FORMAT = "stocks-production-schema-reconciliation-v1"
 SNAPSHOT_FORMAT = "stocks-production-legacy-snapshot-v1"
 MAX_RECONCILIATION_SQL_BYTES = 4 * 1024 * 1024
@@ -95,6 +102,18 @@ def _validate_run_id(value: object, label: str) -> str:
     return value
 
 
+def validate_authorized_prior_binding(
+    run_id: object, head_sha: object, receipt_sha256: object
+) -> None:
+    """Accept only the reviewed legacy inventory used to author the SQL."""
+    if (
+        run_id != AUTHORIZED_PRIOR_INVENTORY_RUN_ID
+        or head_sha != AUTHORIZED_PRIOR_INVENTORY_HEAD_SHA
+        or receipt_sha256 != AUTHORIZED_PRIOR_INVENTORY_RECEIPT_SHA256
+    ):
+        raise RuntimeError("authorized prior inventory binding is required")
+
+
 def _canonical_bytes(value: object, label: str, maximum: int) -> bytes:
     try:
         raw = canonical_json(value).encode()
@@ -118,11 +137,22 @@ def _read_bounded_json(path: Path, label: str, maximum: int) -> object:
 
 
 def validate_prior_inventory(
-    path: Path, project_ref: str, prior_head_sha: str
+    path: Path,
+    project_ref: str,
+    prior_inventory_run_id: str,
+    prior_head_sha: str,
 ) -> dict[str, object]:
     """Validate the downloaded receipt including its run head and project bind."""
     project_ref = _validate_project_ref(project_ref)
+    prior_inventory_run_id = _validate_run_id(
+        prior_inventory_run_id, "prior inventory run ID"
+    )
     prior_head_sha = _validate_main_sha(prior_head_sha, "prior inventory head")
+    if (
+        prior_inventory_run_id != AUTHORIZED_PRIOR_INVENTORY_RUN_ID
+        or prior_head_sha != AUTHORIZED_PRIOR_INVENTORY_HEAD_SHA
+    ):
+        raise RuntimeError("authorized prior inventory binding is required")
     value = _read_bounded_json(Path(path), "prior inventory receipt", MAX_RECEIPT_BYTES)
     expected_fields = {
         "format",
@@ -149,6 +179,9 @@ def validate_prior_inventory(
         raise RuntimeError("prior inventory receipt format is invalid")
     if receipt.get("main_sha") != prior_head_sha:
         raise RuntimeError("prior inventory receipt run binding is invalid")
+    validate_authorized_prior_binding(
+        prior_inventory_run_id, prior_head_sha, digest
+    )
     expected_binding = _sha256(
         ("stocks-production-schema-inventory-v1\\0" + project_ref).encode()
     )
@@ -564,6 +597,48 @@ $guard$;
 """.strip()
 
 
+def _catalog_guard_sql(prior_inventory: Mapping[str, object]) -> str:
+    expected_catalog = _sql_literal(canonical_json(prior_inventory["catalog"]))
+    expected_presence = _sql_literal(canonical_json(prior_inventory["relation_presence"]))
+    catalog_query = _catalog_query()
+    # The inspector validates catalog arrays after sorting them by canonical
+    # JSON.  Normalize both JSONB values by their server representation here so
+    # array order cannot create a false mismatch while membership remains exact.
+    normalized_actual = """
+(SELECT jsonb_object_agg(category, COALESCE((
+   SELECT jsonb_agg(item ORDER BY item::text)
+   FROM jsonb_array_elements(value) AS items(item)
+ ), '[]'::jsonb))
+ FROM jsonb_each(actual_catalog) AS category_rows(category, value))
+""".strip()
+    normalized_expected = """
+(SELECT jsonb_object_agg(category, COALESCE((
+   SELECT jsonb_agg(item ORDER BY item::text)
+   FROM jsonb_array_elements(value) AS items(item)
+ ), '[]'::jsonb))
+ FROM jsonb_each(expected_catalog) AS category_rows(category, value))
+""".strip()
+    return f"""
+DO $stock_agent_catalog_guard$
+DECLARE
+  actual_catalog jsonb;
+  actual_presence jsonb;
+  expected_catalog jsonb := {expected_catalog}::jsonb;
+  expected_presence jsonb := {expected_presence}::jsonb;
+BEGIN
+  SELECT snapshot.catalog, snapshot.relation_presence
+    INTO actual_catalog, actual_presence
+  FROM ({catalog_query}) AS snapshot;
+  IF {normalized_actual} IS DISTINCT FROM {normalized_expected}
+     OR actual_presence IS DISTINCT FROM expected_presence THEN
+    RAISE EXCEPTION 'reconciliation catalog or presence differs from inventory'
+      USING ERRCODE = '55000';
+  END IF;
+END;
+$stock_agent_catalog_guard$;
+""".strip()
+
+
 def build_mutation_sql(
     prior_inventory: Mapping[str, object], reconciliation: Mapping[str, object]
 ) -> str:
@@ -610,6 +685,7 @@ def build_mutation_sql(
             "END IF; END; $identity$;",
             "SELECT pg_advisory_xact_lock(hashtextextended('stock_agent_protected_release', 0));",
             locks,
+            _catalog_guard_sql(prior_inventory),
             "CREATE TEMP TABLE pg_temp.stock_agent_pre_projection_guard ("
             "relation text PRIMARY KEY, count bigint NOT NULL, root_sha256 text NOT NULL) ON COMMIT DROP;",
             _projected_roots_insert(
@@ -701,90 +777,195 @@ def _projected_roots_query(
     )
 
 
-def _read_projected_roots(
-    request: ManagementRequest, project_ref: str, inventory: Mapping[str, object]
-) -> list[dict[str, object]]:
-    names, columns, _ = _legacy_shape(inventory)
-    rows = _read_only_query(
-        request,
-        project_ref,
-        _projected_roots_query(names, columns),
-        "projected root response",
-    )
-    if len(rows) != 1 or set(rows[0]) != {"protected_roots"}:
-        raise RuntimeError("projected root response is malformed")
-    return _validate_roots(rows[0]["protected_roots"], names)
+def _observer_query(
+    names: Sequence[str], columns: Mapping[str, Sequence[str]]
+) -> str:
+    catalog_query = _catalog_query()
+    roots_query = _projected_roots_query(names, columns)
+    # query_to_xml defers parsing the two ledger relation names until execution.
+    # That lets the same SELECT safely describe both the reviewed prestate (the
+    # relations do not exist) and the final state without durable helper DDL.
+    return f"""
+WITH observer_lock AS MATERIALIZED (
+  SELECT role.rolname AS role,
+    current_setting('transaction_read_only') AS transaction_read_only,
+    role.rolsuper AS superuser,
+    settings.setting::int AS statement_timeout_ms,
+    pg_try_advisory_xact_lock(hashtextextended('stock_agent_protected_release', 0)) AS lock_acquired
+  FROM pg_catalog.pg_roles AS role
+  JOIN pg_catalog.pg_settings AS settings ON settings.name = 'statement_timeout'
+  WHERE role.rolname = current_user
+), observed AS MATERIALIZED (
+  SELECT catalog_snapshot.catalog, catalog_snapshot.relation_presence,
+    root_snapshot.protected_roots,
+    CASE WHEN pg_catalog.to_regclass('supabase_migrations.schema_migrations') IS NULL THEN NULL
+      ELSE query_to_xml($native_receipts$
+        SELECT version, cardinality(statements)::bigint AS statement_count,
+          encode(extensions.digest(convert_to(array_to_json(statements)::text, 'UTF8'), 'sha256'), 'hex') AS statements_sha256
+        FROM supabase_migrations.schema_migrations ORDER BY version
+      $native_receipts$, true, false, '')::text END AS native_receipts_xml,
+    CASE WHEN pg_catalog.to_regclass('public.stock_agent_release_migration_ledger') IS NULL THEN NULL
+      ELSE query_to_xml($private_receipts$
+        SELECT path, version, sha256 FROM public.stock_agent_release_migration_ledger ORDER BY path
+      $private_receipts$, true, false, '')::text END AS private_receipts_xml
+  FROM observer_lock AS lock
+  CROSS JOIN LATERAL ({catalog_query}) AS catalog_snapshot
+  CROSS JOIN LATERAL ({roots_query}) AS root_snapshot
+  WHERE lock.lock_acquired
+    AND lock.statement_timeout_ms BETWEEN 1 AND 120000
+)
+SELECT lock.lock_acquired, lock.role, lock.transaction_read_only, lock.superuser,
+  lock.statement_timeout_ms, observed.catalog, observed.relation_presence,
+  observed.protected_roots, observed.native_receipts_xml,
+  observed.private_receipts_xml
+FROM observer_lock AS lock
+LEFT JOIN observed ON true
+""".strip()
 
 
-def _read_ledger_pair(
-    request: ManagementRequest,
-    project_ref: str,
+def _xml_receipt_rows(
+    value: object, fields: tuple[str, ...], label: str
+) -> list[dict[str, str]] | None:
+    if value is None:
+        return None
+    if not isinstance(value, str) or not value or len(value.encode()) > MAX_MANAGEMENT_RESPONSE_BYTES:
+        raise RuntimeError(f"{label} is malformed")
+    try:
+        root = ElementTree.fromstring(value)
+    except ElementTree.ParseError as error:
+        raise RuntimeError(f"{label} is malformed") from error
+    if root.tag.rsplit("}", 1)[-1] != "table":
+        raise RuntimeError(f"{label} is malformed")
+    result: list[dict[str, str]] = []
+    for row in root:
+        if row.tag.rsplit("}", 1)[-1] != "row":
+            raise RuntimeError(f"{label} is malformed")
+        item: dict[str, str] = {}
+        for field in row:
+            name = field.tag.rsplit("}", 1)[-1]
+            if name in item or field.text is None or list(field):
+                raise RuntimeError(f"{label} is malformed")
+            item[name] = field.text
+        if set(item) != set(fields):
+            raise RuntimeError(f"{label} is malformed")
+        result.append(item)
+    return result
+
+
+def _ledger_pair_matches(
+    native_xml: object,
+    private_xml: object,
     reconciliation: Mapping[str, object],
 ) -> bool:
-    rows = _read_only_query(
-        request,
-        project_ref,
-        """
-SELECT
-  (SELECT COALESCE(jsonb_agg(jsonb_build_object('version', version, 'statements', statements)
-     ORDER BY version), '[]'::jsonb) FROM supabase_migrations.schema_migrations) AS native_rows,
-  (SELECT COALESCE(jsonb_agg(jsonb_build_object('path', path, 'version', version, 'sha256', sha256)
-     ORDER BY path), '[]'::jsonb) FROM public.stock_agent_release_migration_ledger) AS private_rows
-""".strip(),
-        "reconciliation ledger response",
-    )
-    if len(rows) != 1 or set(rows[0]) != {"native_rows", "private_rows"}:
-        return False
-    native = rows[0]["native_rows"]
-    private = rows[0]["private_rows"]
-    if (
-        not isinstance(native, list)
-        or len(native) != 1
-        or not isinstance(native[0], Mapping)
-        or set(native[0]) != {"version", "statements"}
-        or native[0].get("version") != reconciliation["version"]
-        or not isinstance(native[0].get("statements"), list)
-        or not all(isinstance(item, str) for item in native[0]["statements"])
-        or not isinstance(private, list)
-        or private
-        != [
-            {
-                "path": reconciliation["path"],
-                "version": reconciliation["version"],
-                "sha256": reconciliation["sha256"],
-            }
-        ]
-    ):
-        return False
     try:
-        return migration_statements_sha256(native[0]["statements"]) == reconciliation["sha256"]
+        native = _xml_receipt_rows(
+            native_xml,
+            ("version", "statement_count", "statements_sha256"),
+            "native reconciliation receipts",
+        )
+        private = _xml_receipt_rows(
+            private_xml,
+            ("path", "version", "sha256"),
+            "private reconciliation receipts",
+        )
     except RuntimeError:
         return False
+    if native is None or private is None or len(native) != 1 or len(private) != 1:
+        return False
+    expected_statement_count = len(reconciliation["statements"])
+    return native == [
+        {
+            "version": str(reconciliation["version"]),
+            "statement_count": str(expected_statement_count),
+            "statements_sha256": str(reconciliation["sha256"]),
+        }
+    ] and private == [
+        {
+            "path": str(reconciliation["path"]),
+            "version": str(reconciliation["version"]),
+            "sha256": str(reconciliation["sha256"]),
+        }
+    ]
 
 
-def _observe_reconciliation_state(
+def observe_reconciliation_state(
     request: ManagementRequest,
     project_ref: str,
     main_sha: str,
     prior_inventory: Mapping[str, object],
     reconciliation: Mapping[str, object],
 ) -> tuple[str, dict[str, object], list[dict[str, object]] | None]:
-    inventory = inspect_production_schema(request, project_ref, main_sha)
-    presence = inventory["relation_presence"]
-    if inventories_match(prior_inventory, inventory):
-        # The reviewed baseline contains neither ledger relation.  The exact
-        # inventory comparison therefore proves there was no committed writer.
-        return "proven_uncommitted", inventory, prior_inventory["protected_roots"]  # type: ignore[return-value]
-    if not isinstance(presence, Mapping) or not all(
-        presence.get(f"{schema}.{relation}") is True for schema, relation in RELATION_PRESENCE
+    project_ref = _validate_project_ref(project_ref)
+    _validate_main_sha(main_sha)
+    names, columns, expected_roots = _legacy_shape(prior_inventory)
+    response = request(
+        "POST",
+        f"/v1/projects/{project_ref}/database/query",
+        {"query": _observer_query(names, columns)},
+    )
+    _canonical_bytes(response, "locked reconciliation observation", MAX_MANAGEMENT_RESPONSE_BYTES)
+    fields = {
+        "lock_acquired",
+        "role",
+        "transaction_read_only",
+        "superuser",
+        "statement_timeout_ms",
+        "catalog",
+        "relation_presence",
+        "protected_roots",
+        "native_receipts_xml",
+        "private_receipts_xml",
+    }
+    if (
+        not isinstance(response, list)
+        or len(response) != 1
+        or not isinstance(response[0], Mapping)
+        or set(response[0]) != fields
     ):
-        return "ambiguous", inventory, None
-    if not _read_ledger_pair(request, project_ref, reconciliation):
-        return "ambiguous", inventory, None
-    projected = _read_projected_roots(request, project_ref, prior_inventory)
-    if canonical_json(projected) != canonical_json(prior_inventory["protected_roots"]):
-        return "ambiguous", inventory, projected
-    return "committed", inventory, projected
+        raise RuntimeError("locked reconciliation observation is malformed")
+    row = response[0]
+    if (
+        row.get("role") != "postgres"
+        or row.get("transaction_read_only") != "off"
+        or row.get("superuser") is not True
+        or type(row.get("statement_timeout_ms")) is not int
+        or not 1 <= row["statement_timeout_ms"] <= MAX_DB_STATEMENT_TIMEOUT_MS
+    ):
+        raise RuntimeError("locked reconciliation observer identity is unsafe")
+    if row.get("lock_acquired") is not True:
+        return "ambiguous", {"lock_acquired": False}, None
+    catalog = _validate_catalog(row.get("catalog"))
+    presence = _validate_presence(row.get("relation_presence"), catalog["relations"])
+    projected = _validate_roots(row.get("protected_roots"), names)
+    observation: dict[str, object] = {
+        "lock_acquired": True,
+        "catalog": catalog,
+        "relation_presence": presence,
+    }
+    roots_match = canonical_json(projected) == canonical_json(expected_roots)
+    is_exact_prestate = (
+        canonical_json(catalog) == canonical_json(prior_inventory["catalog"])
+        and canonical_json(presence) == canonical_json(prior_inventory["relation_presence"])
+        and roots_match
+        and row.get("native_receipts_xml") is None
+        and row.get("private_receipts_xml") is None
+    )
+    if is_exact_prestate:
+        return "proven_uncommitted", observation, projected
+    if (
+        roots_match
+        and all(
+            presence.get(f"{schema}.{relation}") is True
+            for schema, relation in RELATION_PRESENCE
+        )
+        and _ledger_pair_matches(
+            row.get("native_receipts_xml"),
+            row.get("private_receipts_xml"),
+            reconciliation,
+        )
+    ):
+        return "committed", observation, projected
+    return "ambiguous", observation, projected
 
 
 _RECEIPT_FIELDS: Final[tuple[str, ...]] = (
@@ -886,10 +1067,18 @@ def run_reconciliation(
     prior_inventory_run_id = _validate_run_id(
         prior_inventory_run_id, "prior inventory run ID"
     )
+    if (
+        prior_inventory_run_id != AUTHORIZED_PRIOR_INVENTORY_RUN_ID
+        or prior_inventory_head_sha != AUTHORIZED_PRIOR_INVENTORY_HEAD_SHA
+    ):
+        raise RuntimeError("authorized prior inventory binding is required")
     ci_workflow_run_id = _validate_run_id(ci_workflow_run_id, "CI workflow run ID")
     main_sha = _validate_main_sha(main_sha)
     prior = validate_prior_inventory(
-        prior_inventory_path, project_ref, prior_inventory_head_sha
+        prior_inventory_path,
+        project_ref,
+        prior_inventory_run_id,
+        prior_inventory_head_sha,
     )
     output_dir = Path(output_dir).resolve()
     if not output_dir.is_dir() or output_dir.is_symlink() or any(output_dir.iterdir()):
@@ -915,7 +1104,7 @@ def run_reconciliation(
     mutation_sql = build_mutation_sql(prior, reconciliation)
 
     def classify() -> str:
-        state, _, _ = _observe_reconciliation_state(
+        state, _, _ = observe_reconciliation_state(
             request, project_ref, main_sha, prior, reconciliation
         )
         return state
@@ -923,11 +1112,23 @@ def run_reconciliation(
     transaction = execute_with_uncertainty(
         lambda: _writer_call(request, project_ref, mutation_sql), classify
     )
-    state, after_inventory, projected = _observe_reconciliation_state(
+    state, locked_observation, projected = observe_reconciliation_state(
         request, project_ref, main_sha, prior, reconciliation
     )
     if state != "committed" or projected is None:
         raise RuntimeError("reconciliation postcondition is not a proven commit")
+    after_inventory = inspect_production_schema(request, project_ref, main_sha)
+    if (
+        canonical_json(after_inventory["catalog"])
+        != canonical_json(locked_observation["catalog"])
+        or canonical_json(after_inventory["relation_presence"])
+        != canonical_json(locked_observation["relation_presence"])
+        or not all(
+            after_inventory["relation_presence"].get(f"{schema}.{relation}") is True
+            for schema, relation in RELATION_PRESENCE
+        )
+    ):
+        raise RuntimeError("post-reconciliation inventory differs from the locked observation")
     before_roots_sha = _sha256(canonical_json(prior["protected_roots"]).encode())
     after_roots_sha = _sha256(canonical_json(projected).encode())
     receipt = write_reconciliation_receipt(

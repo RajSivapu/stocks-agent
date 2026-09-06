@@ -47,6 +47,7 @@ jobs:
           test "$(git rev-parse HEAD)" = "$MAIN_SHA" || { echo 'checkout is not current main'; exit 1; }
           test -n "$CI_WORKFLOW_RUN_ID" && [[ "$CI_WORKFLOW_RUN_ID" =~ ^[0-9]+$ ]] || { echo 'numeric CI workflow run ID is required'; exit 1; }
           test -n "$PRIOR_INVENTORY_RUN_ID" && [[ "$PRIOR_INVENTORY_RUN_ID" =~ ^[0-9]+$ ]] || { echo 'numeric prior inventory run ID is required'; exit 1; }
+          test "$PRIOR_INVENTORY_RUN_ID" = "34029103876" || { echo 'prior inventory run is not the approved baseline'; exit 1; }
 
           CI="$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$CI_WORKFLOW_RUN_ID")"
           test "$(jq -r .repository.full_name <<<$CI)" = "$GITHUB_REPOSITORY" || { echo 'required CI belongs to another repository'; exit 1; }
@@ -67,6 +68,7 @@ jobs:
           PRIOR_INVENTORY_HEAD_SHA="$(jq -r .head_sha <<<$PRIOR)"
           PRIOR_INVENTORY_RUN_ATTEMPT="$(jq -r .run_attempt <<<$PRIOR)"
           test -n "$PRIOR_INVENTORY_HEAD_SHA" && [[ "$PRIOR_INVENTORY_HEAD_SHA" =~ ^[0-9a-f]{40}$ ]] || { echo 'prior inventory head SHA is invalid'; exit 1; }
+          test "$PRIOR_INVENTORY_HEAD_SHA" = "849763522216394576ce54969693dd561b44af80" || { echo 'prior inventory head is not the approved baseline'; exit 1; }
           test -n "$PRIOR_INVENTORY_RUN_ATTEMPT" && [[ "$PRIOR_INVENTORY_RUN_ATTEMPT" =~ ^[1-9][0-9]*$ ]] || { echo 'prior inventory run attempt is invalid'; exit 1; }
           echo "MAIN_SHA=$MAIN_SHA" >> "$GITHUB_ENV"
           echo "PRIOR_INVENTORY_HEAD_SHA=$PRIOR_INVENTORY_HEAD_SHA" >> "$GITHUB_ENV"
@@ -88,6 +90,7 @@ jobs:
           PRIOR_ZIP="$RUNNER_TEMP/prior-inventory.zip" PRIOR_DIR="$RUNNER_TEMP/prior-inventory" python - <<'PY'
           import os
           from pathlib import Path
+          import json
           import stat
           import zipfile
 
@@ -100,8 +103,15 @@ jobs:
               member = members[0]
               if member.is_dir() or stat.S_ISLNK(member.external_attr >> 16) or member.file_size > 1_000_000:
                   raise SystemExit("prior inventory archive member is unsafe")
+              raw = archive.read(member)
+              try:
+                  receipt = json.loads(raw)
+              except (UnicodeDecodeError, json.JSONDecodeError):
+                  raise SystemExit("prior inventory receipt is malformed")
+              if receipt.get("receipt_sha256") != "f1f08d635d59bb2e429c57deb1a2a9948d1ce631faa746bc8a19ea51372afb46":
+                  raise SystemExit("prior inventory receipt is not the approved baseline")
               target = destination / "schema-inventory.json"
-              target.write_bytes(archive.read(member))
+              target.write_bytes(raw)
               target.chmod(0o600)
           PY
       - name: Install locked reconciliation dependencies
