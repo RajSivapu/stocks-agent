@@ -4,9 +4,10 @@ Last updated: 2026-09-05
 Canonical release: Personal Stock Agent V1 safety remediation
 Audit baseline: `432d647ef911ff63da427097f02a852e18038b62` on `origin/main`
 Consolidated local-gate candidate: `883d521728b1b3c2700a78dab1d65208105d7a2f`
-Current state: the final Astra fix wave is implemented and review-clean at the local safety boundary.
-The exact candidate passed 1,197 local checks; GPT-6 Astra approved the final scoped re-review.
-Owner-operated native Sites publication and all other protected production receipts remain pending.
+Current state: the Astra remediation is merged, the exact-main CI gate passed, all three reviewed
+Edge functions are deployed with runtime-byte readback, and the private owner Site is live. The
+signed-link-compatible Site refresh is in progress. Remaining release evidence includes that refresh,
+the protected workflow/restore, formal non-owner login, and the next existing scheduled receipts.
 
 This file is the version-controlled source of truth for the Personal Stock Agent V1 rollout.
 `docs/ROADMAP.md` records the implementation sequence and remaining release gates.
@@ -34,18 +35,20 @@ identity and the newly allocated restoration version; the existing function ID m
 It does not resurrect the old version number or accept a foreign ID with matching bytes.
 Final Astra findings 3 and 4 are locally implemented. For finding 5, GPT-6 Astra accepted the
 pre-mutation Sites block as the correct local safety boundary because the native owner-scoped Sites
-connector has no callable GitHub Actions management transport. Owner-operated Sites publication and
-immutable platform receipts remain a production gate; no caller-authored substitute is accepted.
+connector has no callable GitHub Actions management transport. Owner-operated Sites publication is
+now complete; the GitHub protected-workflow receipt remains a separate gate.
 
-The exact Track C range received independent approval after both Important recovery findings were fixed.
-The final consolidated gate and GPT-6 Astra scoped re-review are complete. Exact-head CI, protected
-deployment, live Auth, owner-operated Site deployment/parity, live isolated restore, and the next
-existing scheduled receipts are pending. No scheduled run was triggered.
+The exact Track C range received independent approval after both Important recovery findings were
+fixed. The final consolidated gate, GPT-6 Astra scoped re-review, exact-main CI, owner-operated Site
+publication, database migration readback, Edge deployment/readback, live Auth configuration readback,
+and owner/anonymous API canaries are complete. The GitHub protected workflow, isolated live restore,
+formal non-owner login canary, and next existing scheduled receipts remain pending. No scheduled run
+was triggered merely to collect evidence.
 
 The product remains owner-only, suggestion-only, brokerage-free, and constrained to zero
-incremental cost. It cannot place, modify, or cancel a trade. No remediation task performed a live
-database mutation, deployment, Auth-template change, Telegram send, provider/model call, brokerage
-action, or scheduled run.
+incremental cost. It cannot place, modify, or cancel a trade. The production work did not change the
+free-tier Auth template, send Telegram output, call a brokerage, place a trade, or trigger an extra
+scheduled run.
 
 The GPT-6 Astra audit of `432d647` returned a no-go verdict for trusted portfolio decision support.
 The findings are implemented locally but the no-go is not lifted by local code or fixture tests.
@@ -54,40 +57,43 @@ recovery, and scheduled-receipt gates below.
 
 ## GPT-6 Astra findings
 
-"Implemented locally" means the code exists on this branch and its focused task review was clean.
-It does not mean the change is on `main` or in production.
+Implementation dispositions record code closure. Production evidence varies by finding and is stated
+separately; deployment never substitutes for the protected-workflow, restore, or scheduled receipts.
 
 | Finding | Disposition | Evidence and remaining boundary |
 |---|---|---|
-| F1 — entry above zone/target | Implemented locally | Task 3 requires an executable current price inside the entry range and below target; sizing and reward/risk use that price. Closed through `01374a9`; deployment pending. |
-| F2 — report prose bypasses policy | Implemented locally | Task 4 renders actionable content only from persisted final decisions and derives publication authority. Closed through `4504044`; deployment pending. |
-| F3 — caller-labelled or unrelated evidence | Implemented locally | Tasks 4 and 7 bind timestamps, categories, relationships, membership, conflicts, and report provenance to persisted records. Closed through `4504044` and `84f0839`; production receipt proof pending. |
-| F4 — individually valid but unfunded portfolio plan | Implemented locally | Task 3 reserves reconciled cash, allocation, risk, holdings, existing stop exposure, alternatives, and available shares across the complete proposal set. Closed through `01374a9`; deployment pending. |
-| F5 — decimal parse becomes zero basis | Implemented locally | Task 5 preserves fixed-point values and makes invalid basis/profit visibly unavailable instead of zero. Closed through `c5de624`; deployment pending. |
-| F6 — adapters cannot reach discovery | Implemented locally | Task 7 implements provider-native queries, normalized identifiers/timestamps, discoverable securities, and attributable failures. Closed through `84f0839`; live free-provider health remains a protected gate. |
-| F7 — dedupe/timestamps discard corrections or conflict | Implemented locally | Task 7 separates request provenance from item identity and retains corrections, distinct claims, contradictions, and publication/retrieval/effective/reporting times. Closed through `84f0839`; scheduled evidence pending. |
-| F8 — ordinary tests can mutate production | Implemented locally | Task 1 deselects credentialed tests by default and requires explicit opt-in plus an exact allowlisted non-production project before credentials are loaded. Closed through `d798129`. |
-| F9 — history growth and incomplete scheduled success | Implemented locally | Task 9 bounds relevant history without losing pending state, enforces one slot per market date/phase, required terminal stages, suppression, and overdue detection. Closed through `9ba3bc0`; migration and scheduled proof pending. |
-| F10 — database/Telegram ambiguity | Implemented locally | Task 6 adds durable pending/delivered/failed/uncertain delivery and acknowledgement states, original-receipt recovery, and one publication authority. Closed through `c498177`; live Telegram was not exercised. |
-| F11 — backdated trades corrupt accounting | Implemented locally | Task 5 rejects unsafe chronology changes, preserves the ledger, and returns replay-stable receipts until explicit chronological reconciliation. Closed through `c5de624`; production migration pending. |
-| F12 — verifier accepts stale/wrong evidence | Implemented locally; operational proof pending | Task 10 binds current-main review/CI/deployment identity, recomputed candidate bytes and hashes, stored scheduled stages, original delivery or suppression receipts, and durable recovery. Closed through `6da3e84`; exact-head CI and protected deployment have not run. |
-| F13 — retry/cache/quota accounting | Implemented locally | Task 8 persists per-attempt quota, checkpoints, immutable request costs, cache/predecessor lineage, failure receipts, and restart recovery. Closed through `eff4612`; live provider/database proof pending. |
-| F14 — ranking placeholders/disconnected V1 inputs | Implemented locally | Task 8 supplies protected server-owned holdings, valuation, liquidity, overlap, discovery strength, comparison, and learning inputs; unknown values fail closed. Closed through `eff4612`; production inputs and scheduled output pending. |
-| F15 — misleading outcome/weekly calculations | Implemented locally | Task 11 groups losses per eligible recommendation, aligns benchmark windows, uses session highs/lows, distinguishes fills, and retains veto-only weeks. Closed through `f7af10f`; production observation pending. |
+| F1 — entry above zone/target | Implemented | Task 3 requires an executable current price inside the entry range and below target; sizing and reward/risk use that price. Closed through `01374a9`; deployed, scheduled evidence pending. |
+| F2 — report prose bypasses policy | Implemented | Task 4 renders actionable content only from persisted final decisions and derives publication authority. Closed through `4504044`; deployed, scheduled evidence pending. |
+| F3 — caller-labelled or unrelated evidence | Implemented | Tasks 4 and 7 bind timestamps, categories, relationships, membership, conflicts, and report provenance to persisted records. Closed through `4504044` and `84f0839`; scheduled receipt proof pending. |
+| F4 — individually valid but unfunded portfolio plan | Implemented | Task 3 reserves reconciled cash, allocation, risk, holdings, existing stop exposure, alternatives, and available shares across the complete proposal set. Closed through `01374a9`; deployed, scheduled evidence pending. |
+| F5 — decimal parse becomes zero basis | Implemented | Task 5 preserves fixed-point values and makes invalid basis/profit visibly unavailable instead of zero. Closed through `c5de624`; deployed, production observation pending. |
+| F6 — adapters cannot reach discovery | Implemented | Task 7 implements provider-native queries, normalized identifiers/timestamps, discoverable securities, and attributable failures. Closed through `84f0839`; live free-provider health remains a protected gate. |
+| F7 — dedupe/timestamps discard corrections or conflict | Implemented | Task 7 separates request provenance from item identity and retains corrections, distinct claims, contradictions, and publication/retrieval/effective/reporting times. Closed through `84f0839`; scheduled evidence pending. |
+| F8 — ordinary tests can mutate production | Implemented | Task 1 deselects credentialed tests by default and requires explicit opt-in plus an exact allowlisted non-production project before credentials are loaded. Closed through `d798129`. |
+| F9 — history growth and incomplete scheduled success | Implemented | Task 9 bounds relevant history without losing pending state, enforces one slot per market date/phase, required terminal stages, suppression, and overdue detection. Closed through `9ba3bc0`; remote ledger is current and scheduled proof is pending. |
+| F10 — database/Telegram ambiguity | Implemented | Task 6 adds durable pending/delivered/failed/uncertain delivery and acknowledgement states, original-receipt recovery, and one publication authority. Closed through `c498177`; Telegram v20 is deployed but no extra send was triggered. |
+| F11 — backdated trades corrupt accounting | Implemented | Task 5 rejects unsafe chronology changes, preserves the ledger, and returns replay-stable receipts until explicit chronological reconciliation. Closed through `c5de624`; remote ledger is current and production observation is pending. |
+| F12 — verifier accepts stale/wrong evidence | Implemented; operational proof pending | Task 10 binds current-main review/CI/deployment identity, recomputed candidate bytes and hashes, stored scheduled stages, original delivery or suppression receipts, and durable recovery. Closed through `6da3e84`; exact-main CI and owner deployment completed, protected-workflow receipt pending. |
+| F13 — retry/cache/quota accounting | Implemented | Task 8 persists per-attempt quota, checkpoints, immutable request costs, cache/predecessor lineage, failure receipts, and restart recovery. Closed through `eff4612`; live provider/database proof pending. |
+| F14 — ranking placeholders/disconnected V1 inputs | Implemented | Task 8 supplies protected server-owned holdings, valuation, liquidity, overlap, discovery strength, comparison, and learning inputs; unknown values fail closed. Closed through `eff4612`; scheduled production output pending. |
+| F15 — misleading outcome/weekly calculations | Implemented | Task 11 groups losses per eligible recommendation, aligns benchmark windows, uses session highs/lows, distinguishes fills, and retains veto-only weeks. Closed through `f7af10f`; production observation pending. |
 | F16 — recovery unproven | Local mechanism and disposable drill implemented; live drill pending | Task 10 creates authenticated encrypted exports, exact schema/receipt reconciliation, durable rollback artifacts, and an isolated disposable-runtime restore drill. A protected live isolated restore has not been performed. |
-| F17 — excessive read privilege/unpinned Python | Implemented locally | Task 11 uses a restricted read-only weekly role with verified TLS and installs a complete hash-locked binary dependency set, including recovery cryptography. Closed through `f7af10f`; production role migration pending. |
-| F18 — token refresh defeats idle lock | Implemented locally | Task 2 moves the privacy deadline only on explicit owner activity, never token refresh. Closed through `ce6d9a7`; web deployment pending. |
-| F19 — early close/quote identity gaps | Implemented locally | Task 11 models maintained 2026 early closes, fails closed outside coverage, and rejects wrong symbol/currency or unknown halt/spread/liquidity. Closed through `f7af10f`; production deployment pending. |
+| F17 — excessive read privilege/unpinned Python | Implemented | Task 11 uses a restricted read-only weekly role with verified TLS and installs a complete hash-locked binary dependency set, including recovery cryptography. Closed through `f7af10f`; live runtime is deployed and protected-workflow receipt pending. |
+| F18 — token refresh defeats idle lock | Implemented | Task 2 moves the privacy deadline only on explicit owner activity, never token refresh. Closed through `ce6d9a7`; signed-link-compatible Site refresh pending. |
+| F19 — early close/quote identity gaps | Implemented | Task 11 models maintained 2026 early closes, fails closed outside coverage, and rejects wrong symbol/currency or unknown halt/spread/liquidity. Closed through `f7af10f`; deployed, scheduled evidence pending. |
 
-## Owner email OTP
+## Owner email sign-in
 
-The repository now requires one emailed six-digit numeric OTP and rejects a ConfirmationURL-only or
-non-six-digit Auth configuration. The browser, provisioning checks, and deployment verifier are
-aligned through `ce6d9a7`.
+The owner web app and protected Auth checks support both Supabase email modes: a six-digit numeric
+code (`{{ .Token }}`) or a signed email link (`{{ .ConfirmationURL }}`). The browser explicitly
+redirects the email flow to its deployed origin, consumes signed-link callbacks, retains the session
+only in session storage, and preserves the 30-minute activity-based privacy lock.
 
-The live Supabase Auth email template and OTP length have not been changed or read back in this
-remediation. Production sign-in remains unverified until the protected owner action sets a six-digit
-OTP and a template containing the Supabase token variable, followed by an owner login canary.
+Live Auth was read back on 2026-09-05: signup is disabled, JWT lifetime is 900 seconds, OTP length is
+6, OTP expiry is 600 seconds, the default free-tier template uses `ConfirmationURL`, the Site URL and
+only allowed redirect are the private owner Site, and exactly one confirmed owner exists. The template
+was not changed because custom template modification is unavailable with the project's default
+free-tier mail provider.
 
 ## V1 checkpoints
 
@@ -129,8 +135,10 @@ V1-C4 is reopened.
 - [x] Final-policy report authority, durable report/command delivery, fixed-point accounting,
   outcome corrections, owner inactivity, and read-only weekly audit controls are implemented and
   task-reviewed locally.
-- [ ] Configure and verify the live six-digit Supabase Auth email template.
-- [ ] Deploy the exact reviewed candidate and pass owner, anonymous, and non-owner canaries.
+- [x] Read back the live signup-disabled, 900-second JWT, six-digit/600-second email settings and
+  support the default signed-link template without adding paid SMTP.
+- [x] Deploy the reviewed API candidate and pass owner and anonymous canaries.
+- [ ] Complete a formal non-owner login canary and retain its bounded denial receipt.
 - [ ] Reconcile an original Telegram delivery ID or explicit persisted suppression from the next
   existing scheduled chain.
 
@@ -142,9 +150,11 @@ V1-C5 is reopened.
   encrypted export, and local disposable restore drill are implemented and task-reviewed locally.
 - [x] Consolidated local `npm run test:all` gate passed for the final code at `883d521`.
 - [x] GPT-6 Astra approved the final scoped re-review with no unresolved local Critical or Important finding; the native Sites publication conditional remains a production gate.
-- [ ] Exact-head CI on the final reviewed candidate.
-- [ ] Protected production migrations, functions, private Site, source/static parity, and denial/
-  owner canaries.
+- [x] Exact-head CI passed on reviewed `main` at `c9e3140`.
+- [x] Owner-operated production database readback, three-function runtime parity, private Site
+  publication, and owner/anonymous canaries completed.
+- [ ] Run the GitHub protected production workflow once its independent-review and Sites transport
+  gates are available; do not weaken its fail-closed preflight.
 - [ ] Protected isolated live restore drill and reconciliation.
 - [ ] Next existing post-deployment scheduled intelligence/report/publication receipt chain; never
   trigger a duplicate merely to obtain evidence.
@@ -153,10 +163,10 @@ V1-C6 is reopened and the release remains no-go for trusted use.
 
 ## Immediate next gates
 
-1. Publish the exact candidate through the owner-operated native Sites path and retain its authoritative version/deployment receipt.
-2. Run exact-head CI, then use only the protected deployment/recovery workflow.
-3. Configure and read back live six-digit Auth, pass owner and denial canaries, and perform the
-   isolated restore drill.
+1. Publish the email-link-compatible web build through the owner-operated native Sites path and
+   retain its authoritative version/deployment receipt.
+2. Complete the protected-workflow and isolated live-restore evidence without weakening preflight.
+3. Complete the formal non-owner denial canary.
 4. Reconcile the next existing scheduled chain without triggering a duplicate.
 
 ## Consolidated local evidence
@@ -189,10 +199,11 @@ sync, focused PostgreSQL restore/retry evidence, and `git diff --check` also pas
 
 ## Production truth
 
-Production still reflects the previously documented release on `main`; none of the Astra
-remediation commits are claimed deployed. Earlier production receipts remain historical evidence,
-not evidence for this candidate. No current production version, secret inventory, Auth template,
-restore state, or post-remediation scheduled receipt was inspected during local implementation.
+Production contains the reviewed Astra remediation: gateway version 33, owner-dashboard API version
+4, Telegram function version 20, an up-to-date remote migration ledger, and the private owner Site.
+The owner API returned all nine bounded projections to an ephemeral owner canary and denied anonymous
+access. This is not yet proof of the GitHub protected workflow, an isolated live restore, a formal
+non-owner login denial, or a post-remediation scheduled receipt chain.
 
 ## Decisions and guardrails
 

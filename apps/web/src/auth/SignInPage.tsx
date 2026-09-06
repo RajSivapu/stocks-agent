@@ -28,7 +28,7 @@ export function SignInPage() {
     }
     setCodeSent(true);
     setRetrySeconds(30);
-    setMessage("If this is the owner account, a sign-in code will arrive shortly.");
+    setMessage("If this is the owner account, use the sign-in link in the email or enter its six-digit code.");
   }
 
   async function submit(event: FormEvent) {
@@ -68,7 +68,7 @@ export function SignInPage() {
           />
           {codeSent && (
             <>
-              <label htmlFor="owner-code">Six-digit code</label>
+              <label htmlFor="owner-code">Six-digit code (if shown)</label>
               <input
                 id="owner-code"
                 inputMode="numeric"
@@ -82,7 +82,7 @@ export function SignInPage() {
             </>
           )}
           <button className="primary-button" disabled={busy} type="submit">
-            {busy ? "Please wait…" : codeSent ? "Verify code" : "Send code"}
+            {busy ? "Please wait…" : codeSent ? "Verify code" : "Send code or link"}
           </button>
           {codeSent && (
             <button
@@ -91,7 +91,7 @@ export function SignInPage() {
               type="button"
               onClick={() => void requestCode()}
             >
-              {retrySeconds > 0 ? `Send another code in ${retrySeconds}s` : "Send another code"}
+              {retrySeconds > 0 ? `Send another email in ${retrySeconds}s` : "Send another email"}
             </button>
           )}
         </form>
