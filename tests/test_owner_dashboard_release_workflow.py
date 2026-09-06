@@ -23,13 +23,11 @@ def test_ci_fetches_the_audited_baseline_history():
     assert checkout["with"]["fetch-depth"] == 0
 
 
-def test_protected_release_workflow_binds_a_successful_main_candidate_to_immutable_evidence():
+def test_protected_release_workflow_is_manual_only_and_binds_immutable_evidence():
     workflow = Path(".github/workflows/owner-dashboard-release.yml").read_text()
-    assert "workflow_run:" in workflow
     assert "workflow_dispatch:" in workflow
-    assert "github.event.workflow_run.conclusion == 'success'" in workflow
-    assert "github.event.workflow_run.head_branch == 'main'" in workflow
-    assert "github.event.workflow_run.head_sha" in workflow
+    assert "workflow_run:" not in workflow
+    assert "github.event.workflow_run" not in workflow
     assert "git merge-base --is-ancestor \"$CANDIDATE_SHA\" origin/main" in workflow
     assert "scripts/deploy_owner_dashboard_api.py" in workflow
     assert "repos/$GITHUB_REPOSITORY/deployments" in workflow
@@ -69,6 +67,9 @@ def test_release_workflow_has_all_mutation_preconditions_and_pinned_tools():
     assert "/pulls/$PULL_REQUEST_NUMBER" in workflow
     assert "/reviews" in workflow
     assert '"$CANDIDATE_SHA" = "$MAIN_SHA"' in workflow
+    assert 'export CANDIDATE_SHA' in workflow
+    assert "${{ vars.SUPABASE_PROJECT_REF }}" not in workflow
+    assert "${{ secrets.SUPABASE_PROJECT_REF }}" in workflow
 
 
 def test_release_workflow_retains_and_restores_rollback_source_until_evidence_is_accepted():
@@ -123,6 +124,8 @@ def test_independent_recovery_contract_covers_cancelled_and_lost_release_runners
     assert "RELEASE_RECOVERY_KEY" in recovery
     assert "recovery/release.enc" in recovery
     assert "recovery-metadata/recovery-metadata" not in recovery
+    assert "${{ vars.SUPABASE_PROJECT_REF }}" not in recovery
+    assert "${{ secrets.SUPABASE_PROJECT_REF }}" in recovery
 
 
 def test_protected_release_and_recovery_install_only_the_complete_hashed_lock():

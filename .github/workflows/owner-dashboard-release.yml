@@ -1,10 +1,6 @@
 name: Protected owner dashboard release
 
 on:
-  workflow_run:
-    workflows: ["Owner dashboard verification"]
-    branches: [main]
-    types: [completed]
   workflow_dispatch:
     inputs:
       candidate_sha: {description: Reviewed main SHA (hint only), required: true, type: string}
@@ -25,14 +21,13 @@ concurrency:
 
 jobs:
   release:
-    if: github.event_name == 'workflow_dispatch' || (github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.head_branch == 'main')
     environment: owner-dashboard-production
     runs-on: ubuntu-24.04
     timeout-minutes: 45
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
-          ref: ${{ github.event_name == 'workflow_run' && github.event.workflow_run.head_sha || inputs.candidate_sha }}
+          ref: ${{ inputs.candidate_sha }}
           fetch-depth: 0
       - uses: actions/setup-python@42375524e23c412d93fb67b49958b491fce71c38
         with:
@@ -64,9 +59,6 @@ jobs:
         id: candidate
         env:
           GH_TOKEN: ${{ github.token }}
-          EVENT_NAME: ${{ github.event_name }}
-          EVENT_SHA: ${{ github.event.workflow_run.head_sha }}
-          EVENT_CI_RUN_ID: ${{ github.event.workflow_run.id }}
           INPUT_SHA: ${{ inputs.candidate_sha }}
           INPUT_REVIEWED_SHA: ${{ inputs.reviewed_sha }}
           INPUT_CI_RUN_ID: ${{ inputs.ci_workflow_run_id }}
@@ -74,13 +66,9 @@ jobs:
         run: |
           set -euo pipefail
           MAIN_SHA="$(gh api "repos/$GITHUB_REPOSITORY/git/ref/heads/main" --jq .object.sha)"
-          if [ "$EVENT_NAME" = workflow_run ]; then
-            CANDIDATE_SHA="$EVENT_SHA"; CI_WORKFLOW_RUN_ID="$EVENT_CI_RUN_ID"
-            PULL_REQUEST_NUMBER="$(gh api "repos/$GITHUB_REPOSITORY/commits/$CANDIDATE_SHA/pulls" --jq '.[] | select(.merged_at != null and .base.ref == "main" and .merge_commit_sha == env.CANDIDATE_SHA) | .number' | head -n1)"
-          else
-            CANDIDATE_SHA="$INPUT_SHA"; CI_WORKFLOW_RUN_ID="$INPUT_CI_RUN_ID"; PULL_REQUEST_NUMBER="$INPUT_PR"
-            test "$INPUT_SHA" = "$INPUT_REVIEWED_SHA" || { echo 'candidate SHA/ref mismatch'; exit 1; }
-          fi
+          CANDIDATE_SHA="$INPUT_SHA"; CI_WORKFLOW_RUN_ID="$INPUT_CI_RUN_ID"; PULL_REQUEST_NUMBER="$INPUT_PR"
+          export CANDIDATE_SHA
+          test "$INPUT_SHA" = "$INPUT_REVIEWED_SHA" || { echo 'candidate SHA/ref mismatch'; exit 1; }
           test "$CANDIDATE_SHA" = "$MAIN_SHA" || { echo 'candidate SHA/ref mismatch'; exit 1; }
           test "$(git rev-parse HEAD)" = "$CANDIDATE_SHA" || { echo 'candidate SHA/ref mismatch'; exit 1; }
           git fetch --no-tags origin main
@@ -109,7 +97,7 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           SUPABASE_ACCESS_TOKEN: ${{ secrets.SUPABASE_ACCESS_TOKEN }}
-          PROJECT_REF: ${{ vars.SUPABASE_PROJECT_REF }}
+          PROJECT_REF: ${{ secrets.SUPABASE_PROJECT_REF }}
         run: |
           "$RELEASE_VENV/bin/python" scripts/release_components.py --check-transport
       - name: Create the candidate-bound GitHub Deployment
@@ -136,7 +124,7 @@ jobs:
           SUPAVISOR_SESSION_URL: ${{ secrets.SUPAVISOR_SESSION_URL }}
           SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
           SUPABASE_PUBLISHABLE_KEY: ${{ secrets.SUPABASE_PUBLISHABLE_KEY }}
-          PROJECT_REF: ${{ vars.SUPABASE_PROJECT_REF }}
+          PROJECT_REF: ${{ secrets.SUPABASE_PROJECT_REF }}
           ALLOWED_ORIGIN: ${{ vars.DASHBOARD_ALLOWED_ORIGIN }}
           SITE_ORIGIN: ${{ vars.DASHBOARD_SITE_ORIGIN }}
           CANDIDATE_SHA: ${{ steps.candidate.outputs.candidate_sha }}
@@ -162,7 +150,7 @@ jobs:
           SUPAVISOR_SESSION_URL: ${{ secrets.SUPAVISOR_SESSION_URL }}
           SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
           SUPABASE_PUBLISHABLE_KEY: ${{ secrets.SUPABASE_PUBLISHABLE_KEY }}
-          PROJECT_REF: ${{ vars.SUPABASE_PROJECT_REF }}
+          PROJECT_REF: ${{ secrets.SUPABASE_PROJECT_REF }}
           ALLOWED_ORIGIN: ${{ vars.DASHBOARD_ALLOWED_ORIGIN }}
           SITE_ORIGIN: ${{ vars.DASHBOARD_SITE_ORIGIN }}
           GATEWAY_ROLLBACK_REF: ${{ vars.GATEWAY_ROLLBACK_REF }}
@@ -181,7 +169,7 @@ jobs:
           CI_WORKFLOW_RUN_ID: ${{ steps.candidate.outputs.ci_workflow_run_id }}
           PULL_REQUEST_NUMBER: ${{ steps.candidate.outputs.pull_request_number }}
           DEPLOYMENT_ID: ${{ steps.deployment.outputs.deployment_id }}
-          PROJECT_REF: ${{ vars.SUPABASE_PROJECT_REF }}
+          PROJECT_REF: ${{ secrets.SUPABASE_PROJECT_REF }}
         run: |
           "$RELEASE_VENV/bin/python" scripts/write_protected_release_record.py --receipt "$RELEASE_STATE_DIR/deploy-receipt.json" --dry-run-evidence "$RELEASE_STATE_DIR/dry-run-evidence.json" --output "$RELEASE_STATE_DIR/release-record.json" --candidate-sha "$CANDIDATE_SHA" --ci-workflow-run-id "$CI_WORKFLOW_RUN_ID" --release-workflow-run-id "$GITHUB_RUN_ID" --pull-request-number "$PULL_REQUEST_NUMBER" --deployment-id "$DEPLOYMENT_ID" --rollback-artifact-id "$(jq -r .gateway_rollback_artifact.artifact_id "$RELEASE_STATE_DIR/deploy-receipt.json")" --recovery-metadata-artifact-id "$(jq -r .gateway_rollback_artifact.recovery_metadata_artifact_id "$RELEASE_STATE_DIR/deploy-receipt.json")" --project-ref "$PROJECT_REF"
       - name: Upload immutable release record
@@ -199,7 +187,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           SUPABASE_ACCESS_TOKEN: ${{ secrets.SUPABASE_ACCESS_TOKEN }}
           POSTGRES_URL: ${{ secrets.POSTGRES_URL }}
-          PROJECT_REF: ${{ vars.SUPABASE_PROJECT_REF }}
+          PROJECT_REF: ${{ secrets.SUPABASE_PROJECT_REF }}
         run: |
           set -euo pipefail
           test -n "${RELEASE_STATE_DIR:-}" || exit 0
