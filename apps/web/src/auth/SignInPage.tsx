@@ -27,7 +27,7 @@ export function SignInPage() {
     } finally {
       setEmailSent(true);
       setRetrySeconds(30);
-      setMessage("Check your email and open the secure sign-in link to continue. Supabase sends the link for this private app.");
+      setMessage("If this is the owner account, look for a secure sign-in link from Supabase. Open it to continue.");
       setBusy(false);
     }
   }

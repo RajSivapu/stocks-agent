@@ -68,8 +68,7 @@ it("requests a secure sign-in link with account creation disabled", async () => 
       emailRedirectTo: window.location.origin,
     },
   });
-  expect(await screen.findByText(/check your email and open the secure sign-in link/i)).toBeVisible();
-  expect(screen.getByText(/supabase sends the link/i)).toBeVisible();
+  expect(await screen.findByText(/if this is the owner account, look for a secure sign-in link from supabase/i)).toBeVisible();
   expect(screen.queryByLabelText(/six-digit code/i)).not.toBeInTheDocument();
 });
 
@@ -80,7 +79,7 @@ it("uses the same neutral link-sent state when the request fails", async () => {
   render(<AuthProvider client={authClient}><Screen /></AuthProvider>);
   await user.type(screen.getByLabelText(/email/i), "unknown@example.com");
   await user.click(screen.getByRole("button", { name: /send secure sign-in link/i }));
-  expect(await screen.findByText(/check your email and open the secure sign-in link/i)).toBeVisible();
+  expect(await screen.findByText(/if this is the owner account, look for a secure sign-in link from supabase/i)).toBeVisible();
   expect(screen.queryByLabelText(/six-digit code/i)).not.toBeInTheDocument();
   expect(screen.queryByText(/user not found|could not be sent/i)).not.toBeInTheDocument();
 });
@@ -136,5 +135,5 @@ it("lets the owner correct the email after requesting a link", async () => {
 
   expect(screen.getByLabelText(/email/i)).toBeEnabled();
   expect(screen.getByRole("button", { name: /send secure sign-in link/i })).toBeVisible();
-  expect(screen.queryByText(/check your email and open the secure sign-in link/i)).not.toBeInTheDocument();
+  expect(screen.queryByText(/look for a secure sign-in link from supabase/i)).not.toBeInTheDocument();
 });

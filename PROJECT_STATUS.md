@@ -154,10 +154,12 @@ separately; deployment never substitutes for the protected attestation, restore,
 
 ## Owner email sign-in
 
-The owner web app and protected Auth checks support both Supabase email modes: a six-digit numeric
-code (`{{ .Token }}`) or a signed email link (`{{ .ConfirmationURL }}`). The browser explicitly
+Protected Auth configuration checks accept both Supabase email modes: a six-digit numeric code
+(`{{ .Token }}`) or a signed email link (`{{ .ConfirmationURL }}`). The owner browser deliberately
+matches the live free-tier signed-link template and does not present a numeric-code field. It
 redirects the email flow to its deployed origin, consumes signed-link callbacks, retains the session
-only in session storage, and preserves the 30-minute activity-based privacy lock.
+only in session storage, and preserves the 30-minute activity-based privacy lock. Switching the live
+template to `{{ .Token }}` requires a reviewed browser change first.
 
 Live Auth was read back on 2026-09-05: signup is disabled, JWT lifetime is 900 seconds, OTP length is
 6, OTP expiry is 600 seconds, the default free-tier template uses `ConfirmationURL`, the Site URL and

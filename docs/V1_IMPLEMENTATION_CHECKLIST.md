@@ -20,7 +20,7 @@ An owner-only personal stock agent that uses zero-incremental-cost data sources,
 - [x] Astra remediation merged to protected `main`; exact-main CI passed at `c9e3140`
 - [x] Database ledger read back as current; gateway v33, dashboard API v4, and Telegram v20 deployed with runtime-byte parity
 - [x] Private owner Site v7 published from exact UI `main` merge `a4c8031`; reviewed live-script parity and owner-only access readback passed, while the backend attestation remains bound to `b3f7d70`
-- [x] Live free-tier Auth read back and browser updated to accept its signed email link as well as six-digit codes
+- [x] Live free-tier Auth read back and browser aligned to its signed email-link template; protected configuration verification still recognizes either allowed template
 - [x] Receipt-bound production schema reconciliation completed exactly once in run `34039011879`
 - [x] Protected isolated restore and both cleanup paths completed in run `34042155368`
 - [x] Protected one-time existing-runtime attestation `34055419086`
@@ -29,7 +29,7 @@ An owner-only personal stock agent that uses zero-incremental-cost data sources,
 ## Completed implementation areas
 
 - [x] Credentialed database tests are opt-in and deployment-safe
-- [x] Free-tier signed email link/six-digit code contract and true inactivity timeout
+- [x] Free-tier signed email-link browser flow, configuration drift checks, and true inactivity timeout
 - [x] Executable-price validation and portfolio-wide risk reservations
 - [x] Evidence-authoritative reports and SQL idempotency
 - [x] Decimal-safe and backdated transaction accounting
@@ -71,7 +71,7 @@ An owner-only personal stock agent that uses zero-incremental-cost data sources,
 These require the protected production path and must not be replaced by local evidence.
 
 - [x] Confirm live Auth is signup-disabled with 900-second JWT, six-digit/600-second OTP settings, and a signed-link template
-- [x] Support both the free-tier signed link and optional six-digit code in the browser
+- [x] Match the browser to the live free-tier signed-link template; retain protected detection of either allowed template and require a reviewed UI change before any switch to numeric codes
 - [x] Push/merge the exact reviewed remediation through protected `main`
 - [x] Pass exact-main CI
 - [x] Apply the receipt-bound production schema reconciliation exactly once — **run `34039011879`**
