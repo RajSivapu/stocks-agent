@@ -55,6 +55,31 @@ def test_management_source_rejects_any_non_read_only_identity_before_snapshot():
     assert len(http.calls) == 0
 
 
+def test_management_api_outbound_requests_identify_the_managed_restore_client(monkeypatch):
+    import scripts.managed_isolated_restore as managed
+
+    seen = {}
+    class Response:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        def read(self, _limit):
+            return b"{}"
+    def opener(request, *, timeout):
+        seen["request"] = request
+        assert timeout == 30
+        return Response()
+
+    monkeypatch.setattr(managed, "urlopen", opener)
+    assert managed.SupabaseManagementApi("token")("GET", "/v1/projects") == {}
+    headers = {key.lower(): value for key, value in seen["request"].headers.items()}
+    assert headers["user-agent"] == "stocks-agent-managed-restore/1"
+    assert headers["accept"] == "application/json"
+
+
 def test_direct_script_help_imports_scripts_package_without_pythonpath():
     script = Path(__file__).parents[1] / "scripts" / "managed_isolated_restore.py"
     environment = dict(os.environ)
@@ -614,3 +639,7 @@ def test_workflow_has_separate_always_cleanup_job_for_runner_loss():
     assert "Owner dashboard verification" in cleanup_run and "conclusion == \"success\"" in cleanup_run
     secret_step = next(step for step in cleanup["steps"] if step.get("name", "").startswith("Derive and clean"))
     assert cleanup["steps"].index(cleanup_bind) < cleanup["steps"].index(secret_step)
+    project_ref_sources = [step["env"]["SUPABASE_PROJECT_REF"] for job in workflow["jobs"].values()
+                           for step in job["steps"] if "SUPABASE_PROJECT_REF" in step.get("env", {})]
+    assert project_ref_sources and set(project_ref_sources) == {"${{ secrets.SUPABASE_PROJECT_REF }}"}
+    assert "vars.SUPABASE_PROJECT_REF" not in (Path(__file__).parents[1] / ".github/workflows/managed-isolated-restore.yml").read_text()

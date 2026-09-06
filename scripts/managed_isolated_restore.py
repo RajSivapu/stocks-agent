@@ -65,7 +65,8 @@ class SupabaseManagementApi:
             raise RuntimeError("unsafe Management API request")
         data = None if payload is None else canonical_json(payload).encode()
         request = Request(self._base_url + path, data=data, method=method,
-                          headers={"Authorization": f"Bearer {self._token}", "Content-Type": "application/json"})
+                          headers={"Authorization": f"Bearer {self._token}", "Content-Type": "application/json",
+                                   "Accept": "application/json", "User-Agent": "stocks-agent-managed-restore/1"})
         try:
             with urlopen(request, timeout=30) as response:
                 raw = response.read(MAX_MANAGEMENT_RESPONSE_BYTES + 1)
