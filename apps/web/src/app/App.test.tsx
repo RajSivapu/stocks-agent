@@ -30,7 +30,7 @@ it("clears the authenticated shell and returns to sign-in on a 401", async () =>
   } as unknown as DashboardClient;
   render(<App authClient={auth.client} dashboardClient={dashboard} />);
   await waitFor(() => expect(auth.signOut).toHaveBeenCalledWith({ scope: "global" }));
-  expect(await screen.findByRole("button", { name: /send code/i })).toBeVisible();
+  expect(await screen.findByRole("button", { name: /send secure sign-in link/i })).toBeVisible();
   expect(screen.queryByText(/temporarily unavailable/i)).not.toBeInTheDocument();
 });
 

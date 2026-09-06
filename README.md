@@ -172,14 +172,14 @@ client-side calculations.
 ### Provision owner access and the read-only runtime
 
 1. Create the single owner user directly in Supabase Auth. Public signup remains disabled; the
-   browser requests an email OTP with `shouldCreateUser: false`.
+   browser requests passwordless email sign-in with `shouldCreateUser: false`.
 2. Set the hosted Auth JWT lifetime to 900 seconds and confirm email signup remains disabled. Keep
    the hosted email OTP length at exactly `6`; the matching local value is recorded in
-   `supabase/config.toml`. The owner web app supports both Supabase email modes: a six-digit code
-   template containing `{{ .Token }}`, or the free-tier default signed link containing
-   `{{ .ConfirmationURL }}`. The browser supplies its exact deployed origin as the email redirect,
-   detects the signed callback, clears the callback URL through the Supabase client, and retains the
-   resulting session only in browser session storage.
+   `supabase/config.toml`. Provisioning and protected verification accept a six-digit template
+   containing `{{ .Token }}` or the free-tier default signed link containing
+   `{{ .ConfirmationURL }}`. The owner UI follows the live signed-link template: it supplies its exact
+   deployed origin as the email redirect, detects the signed callback, clears the callback URL
+   through the Supabase client, and retains the resulting session only in browser session storage.
    Supabase supports a [read-only Management API Auth-config endpoint](https://supabase.com/docs/reference/api/v1-get-auth-service-config)
    for a deliberately provisioned token with `auth:read` / `auth_config_read`. This project does not
    provision or store a Management API token, so the protected operator must manually verify those
@@ -230,9 +230,9 @@ npm run build --workspace @stocks-agent/web
 Deploy only `apps/web/dist` to the approved static host. Keep the generated `_headers` file: it
 contains the exact Supabase/API Content Security Policy, frame denial, no-store shell policy, and
 immutable hashed-asset policy. Open the deployed HTTPS URL, enter the pre-created owner email, then
-follow the signed link in the email or enter its six-digit code when the template shows one. Sessions
-use browser session storage, globally sign out on owner request, and privacy-lock after 30 minutes of
-inactivity. A second user must receive an owner-only denial and no portfolio data.
+follow the secure link in the Supabase email. Sessions use browser session storage, globally sign out
+on owner request, and privacy-lock after 30 minutes of inactivity. A second user must receive an
+owner-only denial and no portfolio data.
 
 The optional production canary is GET-only and must be enabled deliberately with `E2E_LIVE=1` plus
 an owner access token; the normal test suite never reads production.

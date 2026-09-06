@@ -48,19 +48,19 @@ it("accepts a signed email-link session from the auth state callback", async () 
   const authClient = client();
   const linkSession = { access_token: "owner-link-token", user: { id: "owner-id" } };
   render(<AuthProvider client={authClient}><Screen /></AuthProvider>);
-  await screen.findByRole("button", { name: /send code/i });
+  await screen.findByRole("button", { name: /send secure sign-in link/i });
 
   act(() => authClient.emitAuth("SIGNED_IN", linkSession));
 
   expect(await screen.findByRole("button", { name: /sign out/i })).toBeVisible();
 });
 
-it("requests OTP with account creation disabled", async () => {
+it("requests a secure sign-in link with account creation disabled", async () => {
   const authClient = client();
   const user = userEvent.setup();
   render(<AuthProvider client={authClient}><Screen /></AuthProvider>);
   await user.type(screen.getByLabelText(/email/i), "owner@example.com");
-  await user.click(screen.getByRole("button", { name: /send code/i }));
+  await user.click(screen.getByRole("button", { name: /send secure sign-in link/i }));
   expect(authClient.signInWithOtp).toHaveBeenCalledWith({
     email: "owner@example.com",
     options: {
@@ -68,22 +68,24 @@ it("requests OTP with account creation disabled", async () => {
       emailRedirectTo: window.location.origin,
     },
   });
-  expect(await screen.findByLabelText(/six-digit code/i)).toBeVisible();
+  expect(await screen.findByText(/check your email and open the secure sign-in link/i)).toBeVisible();
+  expect(screen.getByText(/supabase sends the link/i)).toBeVisible();
+  expect(screen.queryByLabelText(/six-digit code/i)).not.toBeInTheDocument();
 });
 
-it("uses the same neutral code step when the OTP request fails", async () => {
+it("uses the same neutral link-sent state when the request fails", async () => {
   const authClient = client();
   authClient.signInWithOtp.mockResolvedValue({ error: new Error("user not found") });
   const user = userEvent.setup();
   render(<AuthProvider client={authClient}><Screen /></AuthProvider>);
   await user.type(screen.getByLabelText(/email/i), "unknown@example.com");
-  await user.click(screen.getByRole("button", { name: /send code/i }));
-  expect(await screen.findByLabelText(/six-digit code/i)).toBeVisible();
-  expect(screen.getByText(/if this is the owner account/i)).toBeVisible();
+  await user.click(screen.getByRole("button", { name: /send secure sign-in link/i }));
+  expect(await screen.findByText(/check your email and open the secure sign-in link/i)).toBeVisible();
+  expect(screen.queryByLabelText(/six-digit code/i)).not.toBeInTheDocument();
   expect(screen.queryByText(/user not found|could not be sent/i)).not.toBeInTheDocument();
 });
 
-it("verifies the emailed code and signs out globally", async () => {
+it("signs out globally and returns to the link request", async () => {
   const session = { access_token: "owner-token", user: { id: "owner-id" } };
   const authClient = client(session);
   const user = userEvent.setup();
@@ -91,14 +93,14 @@ it("verifies the emailed code and signs out globally", async () => {
   await screen.findByRole("button", { name: /sign out/i });
   await user.click(screen.getByRole("button", { name: /sign out/i }));
   await waitFor(() => expect(authClient.signOut).toHaveBeenCalledWith({ scope: "global" }));
-  expect(screen.getByRole("button", { name: /send code/i })).toBeVisible();
+  expect(screen.getByRole("button", { name: /send secure sign-in link/i })).toBeVisible();
 });
 
 it("does not persist financial data when authentication is absent", async () => {
   const authClient = client();
   const fetchSpy = vi.spyOn(globalThis, "fetch");
   render(<AuthProvider client={authClient}><Screen /></AuthProvider>);
-  expect(await screen.findByRole("button", { name: /send code/i })).toBeVisible();
+  expect(await screen.findByRole("button", { name: /send secure sign-in link/i })).toBeVisible();
   expect(fetchSpy).not.toHaveBeenCalled();
   expect(window.localStorage).toHaveLength(0);
 });
@@ -122,28 +124,17 @@ it("does not extend the privacy deadline when the auth token refreshes", async (
   }
 });
 
-it("accepts exactly six numeric OTP characters", async () => {
+it("lets the owner correct the email after requesting a link", async () => {
   const authClient = client();
   const user = userEvent.setup();
   render(<AuthProvider client={authClient}><Screen /></AuthProvider>);
   await user.type(screen.getByLabelText(/email/i), "owner@example.com");
-  await user.click(screen.getByRole("button", { name: /send code/i }));
-  const code = await screen.findByLabelText(/six-digit code/i);
+  await user.click(screen.getByRole("button", { name: /send secure sign-in link/i }));
+  expect(await screen.findByLabelText(/email/i)).toBeDisabled();
 
-  await user.type(code, "12a3b45678");
+  await user.click(screen.getByRole("button", { name: /use a different email/i }));
 
-  expect(code).toHaveValue("123456");
-});
-
-it("does not submit an OTP with fewer than six numeric characters", async () => {
-  const authClient = client();
-  const user = userEvent.setup();
-  render(<AuthProvider client={authClient}><Screen /></AuthProvider>);
-  await user.type(screen.getByLabelText(/email/i), "owner@example.com");
-  await user.click(screen.getByRole("button", { name: /send code/i }));
-  await user.type(await screen.findByLabelText(/six-digit code/i), "12345");
-
-  await user.click(screen.getByRole("button", { name: /verify code/i }));
-
-  expect(authClient.verifyOtp).not.toHaveBeenCalled();
+  expect(screen.getByLabelText(/email/i)).toBeEnabled();
+  expect(screen.getByRole("button", { name: /send secure sign-in link/i })).toBeVisible();
+  expect(screen.queryByText(/check your email and open the secure sign-in link/i)).not.toBeInTheDocument();
 });

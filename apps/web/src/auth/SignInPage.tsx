@@ -1,15 +1,12 @@
-import { type FormEvent, useEffect, useState } from "react";
+import { type FormEvent, useEffect, useRef, useState } from "react";
 
 import { useAuth } from "./AuthProvider";
 
-const OTP_LENGTH = 6;
-const OTP_PATTERN = `[0-9]{${OTP_LENGTH}}`;
-
 export function SignInPage() {
   const auth = useAuth();
+  const emailInput = useRef<HTMLInputElement>(null);
   const [email, setEmail] = useState("");
-  const [code, setCode] = useState("");
-  const [codeSent, setCodeSent] = useState(false);
+  const [emailSent, setEmailSent] = useState(false);
   const [busy, setBusy] = useState(false);
   const [message, setMessage] = useState<string | null>(null);
   const [retrySeconds, setRetrySeconds] = useState(0);
@@ -20,32 +17,34 @@ export function SignInPage() {
     return () => window.clearTimeout(timer);
   }, [retrySeconds]);
 
-  async function requestCode() {
+  async function requestLink() {
+    setBusy(true);
+    setMessage(null);
     try {
       await auth.sendOtp(email.trim());
     } catch {
       // Keep the browser response neutral; project-level signup disablement is authoritative.
-    }
-    setCodeSent(true);
-    setRetrySeconds(30);
-    setMessage("If this is the owner account, use the sign-in link in the email or enter its six-digit code.");
-  }
-
-  async function submit(event: FormEvent) {
-    event.preventDefault();
-    setBusy(true);
-    setMessage(null);
-    try {
-      if (!codeSent) {
-        await requestCode();
-      } else {
-        await auth.verifyOtp(email.trim(), code.trim());
-      }
-    } catch (error) {
-      setMessage(error instanceof Error ? error.message : "Sign-in is unavailable.");
     } finally {
+      setEmailSent(true);
+      setRetrySeconds(30);
+      setMessage("Check your email and open the secure sign-in link to continue. Supabase sends the link for this private app.");
       setBusy(false);
     }
+  }
+
+  function submit(event: FormEvent) {
+    event.preventDefault();
+    if (!emailSent && !busy) void requestLink();
+  }
+
+  function changeEmail() {
+    setEmailSent(false);
+    setRetrySeconds(0);
+    setMessage(null);
+    window.setTimeout(() => {
+      emailInput.current?.focus();
+      emailInput.current?.select();
+    }, 0);
   }
 
   return (
@@ -55,47 +54,40 @@ export function SignInPage() {
         <h1 id="sign-in-title">Personal Stock Agent</h1>
         <p className="lede">Owner-only research, portfolio context, and receipt history.</p>
         {auth.locked && <p className="notice" role="status">Screen privacy lock activated. Sign in again to continue.</p>}
-        <form onSubmit={(event) => void submit(event)}>
+        <form onSubmit={submit}>
           <label htmlFor="owner-email">Email</label>
           <input
+            ref={emailInput}
             id="owner-email"
             type="email"
             autoComplete="email"
             required
             value={email}
             onChange={(event) => setEmail(event.target.value)}
-            disabled={codeSent || busy}
+            disabled={emailSent || busy}
           />
-          {codeSent && (
-            <>
-              <label htmlFor="owner-code">Six-digit code (if shown)</label>
-              <input
-                id="owner-code"
-                inputMode="numeric"
-                autoComplete="one-time-code"
-                pattern={OTP_PATTERN}
-                maxLength={OTP_LENGTH}
-                required
-                value={code}
-                onChange={(event) => setCode(event.target.value.replace(/\D/g, "").slice(0, OTP_LENGTH))}
-              />
-            </>
-          )}
-          <button className="primary-button" disabled={busy} type="submit">
-            {busy ? "Please wait…" : codeSent ? "Verify code" : "Send code or link"}
-          </button>
-          {codeSent && (
-            <button
-              className="text-button"
-              disabled={busy || retrySeconds > 0}
-              type="button"
-              onClick={() => void requestCode()}
-            >
-              {retrySeconds > 0 ? `Send another email in ${retrySeconds}s` : "Send another email"}
+          {message && <p className="form-message" role="status">{message}</p>}
+          {!emailSent && (
+            <button className="primary-button" disabled={busy} type="submit">
+              {busy ? "Sending…" : "Send secure sign-in link"}
             </button>
           )}
+          {emailSent && (
+            <>
+              <button
+                className="text-button"
+                disabled={busy || retrySeconds > 0}
+                type="button"
+                onClick={() => void requestLink()}
+              >
+                {busy ? "Sending…" : retrySeconds > 0 ? `Send another email in ${retrySeconds}s` : "Send another email"}
+              </button>
+              <button className="text-button" disabled={busy} type="button" onClick={changeEmail}>
+                Use a different email
+              </button>
+            </>
+          )}
         </form>
-        {message && <p className="form-message" role="status">{message}</p>}
         <p className="boundary-note">No public registration · No brokerage access · Suggestions only</p>
       </section>
     </main>

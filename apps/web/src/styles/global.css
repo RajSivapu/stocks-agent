@@ -41,6 +41,7 @@ a { color: inherit; }
 .theme-control legend { width: 100%; margin-bottom: .35rem; font-size: .72rem; font-weight: 800; text-transform: uppercase; }
 .theme-control label { display: flex; align-items: center; gap: .3rem; }
 .text-button { justify-self: start; border: 0; padding: 0; background: none; color: inherit; text-decoration: underline; cursor: pointer; }
+.text-button:disabled { opacity: .6; cursor: not-allowed; text-decoration: none; }
 .workspace { min-width: 0; }
 .data-bar { min-height: 3.25rem; display: flex; align-items: center; gap: .65rem; padding: .75rem clamp(1rem, 4vw, 3.5rem); border-bottom: 1px solid var(--line); background: var(--surface); color: var(--muted); font-size: .82rem; }
 .data-bar strong { color: var(--text); text-transform: capitalize; }
