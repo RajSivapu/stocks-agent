@@ -222,28 +222,34 @@ V1-C6 is reopened and the release remains no-go for trusted use.
 
 ## Remaining release configuration — verified 2026-09-06
 
-Source comparison `git diff 774584e..bd1cee2 -- apps/web supabase/functions` is empty.
+Source comparison `git diff ba3ebc1..6a4c14d -- apps/web .openai supabase/functions` is empty.
 The published Site v5 and Edge functions do not need republishing for these recovery changes.
 The owner app is https://personal-stock-agent.rupesh-sivapu.chatgpt.site; retain its existing access.
 
-The protected environment `owner-dashboard-production` has only `RELEASE_RECOVERY_KEY`,
-`SUPABASE_ACCESS_TOKEN`, and `SUPABASE_PROJECT_REF`; repository secrets and environment variables
-are empty. The workflow additionally references these unavailable secrets:
+The protected environment now contains the pre-existing `RELEASE_RECOVERY_KEY`,
+`SUPABASE_ACCESS_TOKEN`, and `SUPABASE_PROJECT_REF`. Existing Supabase keys and the single confirmed
+owner identity were recovered through authenticated read-only platform access and added without
+rotation as `SUPABASE_SERVICE_ROLE_KEY`, `SUPABASE_PUBLISHABLE_KEY`,
+`DASHBOARD_OWNER_USER_ID`, and `DASHBOARD_OWNER_EMAIL`. The following referenced secrets remain
+unavailable:
 
 - `RELEASE_READONLY_DATABASE_URL`
-- `DASHBOARD_OWNER_USER_ID`, `DASHBOARD_OWNER_EMAIL`, `DASHBOARD_NON_OWNER_ACCESS_TOKEN`
+- `DASHBOARD_NON_OWNER_ACCESS_TOKEN`
 - `POSTGRES_URL`, `SUPAVISOR_SESSION_URL`
-- `SUPABASE_SERVICE_ROLE_KEY`, `SUPABASE_PUBLISHABLE_KEY`
 - `DASHBOARD_PRIOR_MANAGED_SECRETS_JSON`
 
-Missing variables are `DASHBOARD_ALLOWED_ORIGIN`, `DASHBOARD_SITE_ORIGIN`, `GATEWAY_ROLLBACK_REF`,
-`GATEWAY_ROLLBACK_SOURCE_SHA256`, and `GATEWAY_CURRENT_VERSION`. These must be based on verified
-configuration and retained rollback evidence; do not invent values or reset credentials.
+All five referenced environment variables are now configured from verified live/repository state:
+the allowed and Site origins are the live private Site URL, the current gateway is version 33, and
+its rollback source is bound to `dceb76c9a32a94a16e0cdc0f9dab602f465ef186` with source SHA-256
+`955f98817ad5e90a9d33b2a537282209d9d8af466ec757c96719dd73aadd1063`.
 
 There is also a transport blocker: `NativeReleaseAdapter.site = None`. GitHub Actions has no
 configured reviewed Sites capture/publish/readback/restore/recovery-attestation transport. Merely
 adding secrets does not resolve it. Keep the pre-mutation transport check and do not dispatch the
-protected release until both prerequisites are satisfied.
+protected release until both prerequisites are satisfied. A focused GPT-6 Astra review confirmed
+that copying desktop connector JSON into CI would prove only uploader provenance, not an active Site
+identity or recovery authority. The current release planner also generates a new runtime-role
+password on every run; that mutation is prohibited by the no-credential-reset boundary.
 
 The formal scheduled reader in `scripts/protected_evidence.py` requires the missing restricted
 `RELEASE_READONLY_DATABASE_URL`; `scripts/verify_personal_stock_agent_v1.py` validates the persisted

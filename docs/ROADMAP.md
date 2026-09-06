@@ -202,9 +202,12 @@ verified before the owner acts.
 
 ## Exact remaining handoff boundary
 
-Frontend and all Edge function sources are unchanged from `774584e` through `bd1cee2`; retain
+Frontend and all Edge function sources are unchanged from their verified publications through
+current main `6a4c14d`; retain
 Site v5 and the existing owner-only access. No publication is needed for the recovery changes.
-`PROJECT_STATUS.md` lists the missing protected secrets and variables. Separately, the native
+Five verified release variables plus the existing Supabase service/publishable keys and owner
+identity are now configured in the protected environment without credential rotation.
+`PROJECT_STATUS.md` lists the remaining unavailable protected secrets. Separately, the native
 adapter has no configured Sites CI transport (`site = None`), so supplying secrets alone cannot
 unblock the protected release. Do not dispatch until all prerequisites are available.
 The restricted scheduled-evidence reader is also unavailable; observe an existing persisted chain
