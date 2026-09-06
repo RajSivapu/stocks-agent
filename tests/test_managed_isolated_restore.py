@@ -335,6 +335,61 @@ def test_restarted_cleanup_discovers_exact_run_name_after_lost_delete_response_a
     assert restarted.cleanup()["deleted"] is True
 
 
+def test_unknown_ref_cleanup_waits_for_inventory_visibility_then_binds_and_deletes(tmp_path):
+    from scripts.managed_isolated_restore import ManagedProjectProvisioner
+
+    identity = tmp_path / "cleanup.json"
+    original = ManagedProjectProvisioner(lambda *_args: [], "p" * 20, cleanup_identity_path=identity,
+                                         workflow_run_id="42", workflow_attempt="3", cleanup_key=b"k" * 32)
+    name = json.loads(identity.read_text())["name"]
+    inventories = [
+        [],
+        [{"ref": "r" * 20, "name": name, "organization_slug": "owner-org", "region": "us-east-1"}],
+        [],
+    ]
+    calls = []
+    def api(method, path, _payload=None):
+        calls.append((method, path))
+        if path == f"/v1/projects/{'p' * 20}":
+            return {"ref": "p" * 20, "organization_id": "org-1", "organization_slug": "owner-org", "region": "us-east-1"}
+        if path == "/v1/projects" and method == "GET":
+            return inventories.pop(0)
+        if method == "DELETE" and path == f"/v1/projects/{'r' * 20}":
+            return {"ref": "r" * 20}
+        raise AssertionError((method, path))
+
+    restarted = ManagedProjectProvisioner(api, "p" * 20, cleanup_identity_path=identity,
+                                          workflow_run_id="42", workflow_attempt="3", cleanup_key=b"k" * 32,
+                                          sleep=lambda _seconds: None, max_cleanup_checks=3)
+    assert original.created_project_ref is None
+    assert restarted.cleanup()["deleted"] is True
+    assert ("DELETE", f"/v1/projects/{'r' * 20}") in calls
+
+
+def test_unknown_ref_cleanup_proves_stable_inventory_absence_only_after_full_window(tmp_path):
+    from scripts.managed_isolated_restore import ManagedProjectProvisioner
+
+    identity = tmp_path / "cleanup.json"
+    ManagedProjectProvisioner(lambda *_args: [], "p" * 20, cleanup_identity_path=identity,
+                              workflow_run_id="42", workflow_attempt="3", cleanup_key=b"k" * 32)
+    inventories = [[], [], []]
+    list_calls = 0
+    def api(method, path, _payload=None):
+        nonlocal list_calls
+        if path == f"/v1/projects/{'p' * 20}":
+            return {"ref": "p" * 20, "organization_id": "org-1", "organization_slug": "owner-org", "region": "us-east-1"}
+        if path == "/v1/projects" and method == "GET":
+            list_calls += 1
+            return inventories.pop(0)
+        raise AssertionError((method, path))
+
+    provisioner = ManagedProjectProvisioner(api, "p" * 20, cleanup_identity_path=identity,
+                                             workflow_run_id="42", workflow_attempt="3", cleanup_key=b"k" * 32,
+                                             sleep=lambda _seconds: None, max_cleanup_checks=3)
+    assert provisioner.cleanup() == {"attempted": False, "deleted": True, "retained_project_ref": None}
+    assert list_calls == 3
+
+
 def test_recovery_role_contract_requires_exact_dashboard_and_runtime_login_inherit_shapes():
     from scripts.export_recovery_bundle import _validated_records
 
@@ -379,3 +434,7 @@ def test_workflow_has_separate_always_cleanup_job_for_runner_loss():
     cleanup = workflow["jobs"]["cleanup"]
     assert cleanup["needs"] == "restore" and cleanup["if"] == "${{ always() }}"
     assert cleanup["environment"] == "owner-dashboard-production"
+    assert cleanup["steps"][0]["with"]["ref"] == "${{ github.sha }}"
+    bind = next(step["run"] for step in workflow["jobs"]["restore"]["steps"] if step.get("name", "").startswith("Bind checkout"))
+    assert '"${GITHUB_REF:-}" = "refs/heads/main"' in bind
+    assert '"${GITHUB_SHA:-}" = "$MAIN_SHA"' in bind

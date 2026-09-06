@@ -212,6 +212,7 @@ def test_recovery_exports_canonical_data_and_queries_isolated_restore(tmp_path, 
     source = FakeDatabase()
     artifact = export_recovery_bundle(source, tmp_path / "bundle.enc", **commands)
     sidecar = json.loads(artifact.with_suffix(".enc.receipt.json").read_text())
+    assert sidecar["format"] == "stocks-agent-recovery-v5"
     assert "VTI" not in json.dumps(sidecar)
     assert verify_recovery_bundle(artifact, restored(source), production_source=source, decrypt_command=commands["decrypt_command"])["status"] == "verified"
 

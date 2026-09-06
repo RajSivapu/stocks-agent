@@ -29,9 +29,11 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
+          test "${GITHUB_REF:-}" = "refs/heads/main" || { echo 'workflow ref is not main'; exit 1; }
           git fetch --no-tags origin main
           MAIN_SHA="$(gh api "repos/$GITHUB_REPOSITORY/git/ref/heads/main" --jq .object.sha)"
           export MAIN_SHA
+          test "${GITHUB_SHA:-}" = "$MAIN_SHA" || { echo 'workflow SHA is not current main'; exit 1; }
           test "$(git rev-parse HEAD)" = "$MAIN_SHA" || { echo 'checkout is not current main'; exit 1; }
           VERIFIED="$(gh api "repos/$GITHUB_REPOSITORY/actions/workflows/owner-dashboard-ci.yml/runs?head_sha=$MAIN_SHA&status=completed&per_page=100" --jq '[.workflow_runs[] | select(.head_sha == env.MAIN_SHA and .conclusion == "success" and .name == "Owner dashboard verification")] | length')"
           test "$VERIFIED" -ge 1 || { echo 'exact-main Owner dashboard verification is required'; exit 1; }

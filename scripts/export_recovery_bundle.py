@@ -425,7 +425,7 @@ def read_payload(path: Path) -> tuple[dict, dict]:
         manifest = json.loads(files["payload/manifest.json"])
         core = {key: value for key, value in manifest.items() if key != "root_hash"}
         if (set(core) != {"format", "record_sets", "files", "production_identity", "counts", "relationships", "secrets_included"}
-                or core["format"] != "stocks-agent-recovery-v4" or core["record_sets"] != list(REQUIRED_RECOVERY_RECORDS)
+                or core["format"] != "stocks-agent-recovery-v5" or core["record_sets"] != list(REQUIRED_RECOVERY_RECORDS)
                 or core["secrets_included"] is not False or manifest["root_hash"] != sha256(canonical_json(core).encode())
                 or set(core["files"]) != set(REQUIRED_RECOVERY_RECORDS)):
             raise ValueError("manifest root hash or fields invalid")
@@ -481,7 +481,7 @@ def export_recovery_bundle(source: RecoveryDataSource, destination: Path, *, enc
             files = {name: "".join(canonical_json(row) + "\n" for row in rows).encode() for name, rows in normalized.items()}
             if sum(map(len, files.values())) > MAX_PAYLOAD_BYTES - 1024 * 1024:
                 raise RuntimeError("complete recovery snapshot exceeds the payload limit")
-            core = {"format": "stocks-agent-recovery-v4", "record_sets": list(REQUIRED_RECOVERY_RECORDS),
+            core = {"format": "stocks-agent-recovery-v5", "record_sets": list(REQUIRED_RECOVERY_RECORDS),
                     "files": {name: {"path": f"data/{name}.ndjson", "sha256": sha256(raw), "records": counts[name]} for name, raw in files.items()},
                     "production_identity": identity, "counts": counts, "relationships": relationships(normalized), "secrets_included": False}
             manifest = {**core, "root_hash": sha256(canonical_json(core).encode())}

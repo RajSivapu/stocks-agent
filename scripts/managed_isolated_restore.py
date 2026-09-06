@@ -463,20 +463,28 @@ class ManagedProjectProvisioner:
         elif self._cleanup_name is not None:
             try:
                 production = self._production()
-                projects = self._request("GET", "/v1/projects", None)
-                if not isinstance(projects, list) or not all(isinstance(project, Mapping) for project in projects):
-                    raise RuntimeError("cleanup inventory is unavailable")
-                candidates = [project for project in projects if project.get("name") == self._cleanup_name
-                              and project.get("organization_slug") == production["organization_slug"]
-                              and project.get("region") == production["region"]]
-                if len(candidates) > 1:
-                    raise RuntimeError("cleanup identity is ambiguous")
-                if len(candidates) == 1:
-                    ref = _project_ref(candidates[0].get("ref"), "cleanup restore")
-                    if ref == self.production_ref:
-                        raise RuntimeError("cleanup cannot target production")
-                    self.created_project_ref = ref
-                    self._persist_cleanup_identity()
+                # A project accepted immediately before runner cancellation can
+                # be absent from the first inventory response.  Discovery has
+                # no stored ref, so wait through the bounded visibility window
+                # before treating a stable no-match as authoritative absence.
+                for attempt in range(self._max_cleanup_checks):
+                    projects = self._request("GET", "/v1/projects", None)
+                    if not isinstance(projects, list) or not all(isinstance(project, Mapping) for project in projects):
+                        raise RuntimeError("cleanup inventory is unavailable")
+                    candidates = [project for project in projects if project.get("name") == self._cleanup_name
+                                  and project.get("organization_slug") == production["organization_slug"]
+                                  and project.get("region") == production["region"]]
+                    if len(candidates) > 1:
+                        raise RuntimeError("cleanup identity is ambiguous")
+                    if len(candidates) == 1:
+                        ref = _project_ref(candidates[0].get("ref"), "cleanup restore")
+                        if ref == self.production_ref:
+                            raise RuntimeError("cleanup cannot target production")
+                        self.created_project_ref = ref
+                        self._persist_cleanup_identity()
+                        break
+                    if attempt + 1 < self._max_cleanup_checks:
+                        self._sleep(min(5 * (attempt + 1), 30))
             except Exception as error:
                 return {"attempted": False, "deleted": False, "retained_project_ref": None, "error": type(error).__name__}
         if ref is None:
