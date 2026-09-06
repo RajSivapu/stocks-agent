@@ -28,6 +28,7 @@ def main() -> int:
     parser.add_argument("--retain-recovery-artifact", action="store_true")
     parser.add_argument("--lease-owner", required=True)
     parser.add_argument("--release-run-id", type=int)
+    parser.add_argument("--release-run-attempt", type=int, required=True)
     args = parser.parse_args()
     raw = args.release_state.read_bytes() if args.release_state.is_file() else None
     if args.release_run_id is not None or raw is None or not raw.startswith(b"{"):
@@ -36,17 +37,19 @@ def main() -> int:
         candidate = subprocess.check_output(["git", "rev-parse", "HEAD"], text=True).strip()
         adapter = load_native_release_adapter({"project_ref": args.project_ref, "candidate_sha": candidate,
                                                "lease_owner": args.lease_owner,
-                                               "release_run_id": args.release_run_id, "recovery": True})
+                                               "release_run_id": args.release_run_id,
+                                               "release_run_attempt": args.release_run_attempt, "recovery": True})
         if args.release_run_id is not None:
-            raw = adapter.recover_retained(args.release_run_id)
+            raw = adapter.recover_retained(args.release_run_id, args.release_run_attempt)
         if not isinstance(raw, bytes):
             raise RuntimeError("authenticated component recovery artifact is unavailable")
         key = os.environ.get("RELEASE_RECOVERY_KEY", "").encode()
         state = json.loads(Fernet(key).decrypt(raw))
         context = state.get("release_context", {})
         if (context.get("project_ref") != args.project_ref or context.get("candidate_sha") != candidate
+                or str(context.get("release_run_attempt")) != str(args.release_run_attempt)
                 or (args.release_run_id is not None and str(context.get("release_run_id")) != str(args.release_run_id))):
-            raise RuntimeError("component recovery candidate/project/run binding mismatch")
+            raise RuntimeError("component recovery candidate/project/run/attempt binding mismatch")
         sink = EncryptedJournal(args.release_state, key, retain=adapter.retain)
         with DurableMutationLease(args.admin_url, args.lease_owner, "recovery") as lease:
             recover_components(SiteBoundTransport(adapter, adapter.site), state, persist=sink)

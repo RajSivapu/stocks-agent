@@ -23,13 +23,11 @@ def test_ci_fetches_the_audited_baseline_history():
     assert checkout["with"]["fetch-depth"] == 0
 
 
-def test_protected_release_workflow_binds_a_successful_main_candidate_to_immutable_evidence():
+def test_protected_release_workflow_is_manual_only_and_binds_immutable_evidence():
     workflow = Path(".github/workflows/owner-dashboard-release.yml").read_text()
-    assert "workflow_run:" in workflow
     assert "workflow_dispatch:" in workflow
-    assert "github.event.workflow_run.conclusion == 'success'" in workflow
-    assert "github.event.workflow_run.head_branch == 'main'" in workflow
-    assert "github.event.workflow_run.head_sha" in workflow
+    assert "workflow_run:" not in workflow
+    assert "github.event.workflow_run" not in workflow
     assert "git merge-base --is-ancestor \"$CANDIDATE_SHA\" origin/main" in workflow
     assert "scripts/deploy_owner_dashboard_api.py" in workflow
     assert "repos/$GITHUB_REPOSITORY/deployments" in workflow
@@ -37,6 +35,8 @@ def test_protected_release_workflow_binds_a_successful_main_candidate_to_immutab
     assert "actions/upload-artifact@" in workflow
     assert "start_run" not in workflow
     assert "collect_market_intelligence.py" not in workflow
+    assert '"${GITHUB_REF:-}" = "refs/heads/main"' in workflow
+    assert '"${GITHUB_SHA:-}" = "$CANDIDATE_SHA"' in workflow
 
 
 def test_release_workflow_writes_authoritative_non_dry_run_and_candidate_bound_record_fields():
@@ -69,6 +69,9 @@ def test_release_workflow_has_all_mutation_preconditions_and_pinned_tools():
     assert "/pulls/$PULL_REQUEST_NUMBER" in workflow
     assert "/reviews" in workflow
     assert '"$CANDIDATE_SHA" = "$MAIN_SHA"' in workflow
+    assert 'export CANDIDATE_SHA' in workflow
+    assert "${{ vars.SUPABASE_PROJECT_REF }}" not in workflow
+    assert "${{ secrets.SUPABASE_PROJECT_REF }}" in workflow
 
 
 def test_release_workflow_retains_and_restores_rollback_source_until_evidence_is_accepted():
@@ -123,6 +126,50 @@ def test_independent_recovery_contract_covers_cancelled_and_lost_release_runners
     assert "RELEASE_RECOVERY_KEY" in recovery
     assert "recovery/release.enc" in recovery
     assert "recovery-metadata/recovery-metadata" not in recovery
+    assert "${{ vars.SUPABASE_PROJECT_REF }}" not in recovery
+    assert "${{ secrets.SUPABASE_PROJECT_REF }}" in recovery
+    assert "Verify exact failed-release deployment trust marker" in recovery
+    assert "component-recovery-run:$RUN_ID" in recovery
+    assert "RUN_ATTEMPT=\"${{ github.event.workflow_run.run_attempt }}\"" in recovery
+    assert "component-recovery-run:$RUN_ID:$RUN_ATTEMPT" in recovery
+    assert "release_workflow_run_attempt" in recovery
+    assert "release_workflow_run_id" in recovery and "candidate_sha" in recovery
+    assert "steps.trust.outputs.trusted == 'true'" in recovery
+    trust = recovery.split("- name: Verify exact failed-release deployment trust marker", 1)[1].split("- name:", 1)[0]
+    assert "GH_TOKEN: ${{ github.token }}" in trust
+    assert "SUPABASE_ACCESS_TOKEN" not in trust and "RELEASE_RECOVERY_KEY" not in trust and "POSTGRES_URL" not in trust
+
+
+def test_release_deployment_and_recovery_marker_bind_the_original_run_attempt():
+    workflow = Path(".github/workflows/owner-dashboard-release.yml").read_text()
+    recovery = Path(".github/workflows/owner-dashboard-release-recovery.yml").read_text()
+    assert 'release_workflow_run_attempt "$GITHUB_RUN_ATTEMPT"' in workflow
+    assert 'component-recovery-run:$GITHUB_RUN_ID:$GITHUB_RUN_ATTEMPT' in workflow
+    assert "release_workflow_run_attempt" in recovery
+    assert "component-recovery-run:$RUN_ID:$RUN_ATTEMPT" in recovery
+
+
+def test_recovery_journal_invocation_binds_the_exact_release_run_attempt():
+    workflow = Path(".github/workflows/owner-dashboard-release.yml").read_text()
+    recovery = Path(".github/workflows/owner-dashboard-release-recovery.yml").read_text()
+    deployer = Path("scripts/deploy_owner_dashboard_api.py").read_text()
+    restorer = Path("scripts/restore_gateway_after_release_failure.py").read_text()
+    assert '"release_run_attempt": os.environ.get("GITHUB_RUN_ATTEMPT")' in deployer
+    assert 'parser.add_argument("--release-run-attempt", type=int, required=True)' in restorer
+    assert '--release-run-id "$GITHUB_RUN_ID"' in workflow
+    assert '--release-run-attempt "$GITHUB_RUN_ATTEMPT"' in workflow
+    assert '--release-run-attempt "${{ github.event.workflow_run.run_attempt }}"' in recovery
+
+
+def test_recovery_trust_rejects_feature_or_unreviewed_run_before_checkout():
+    recovery = Path(".github/workflows/owner-dashboard-release-recovery.yml").read_text()
+    trust = recovery.split("- name: Verify exact failed-release deployment trust marker", 1)[1].split("- uses: actions/checkout", 1)[0]
+    assert '.path == ".github/workflows/owner-dashboard-release.yml"' in trust
+    assert '.name == "Protected owner dashboard release"' in trust
+    assert '.head_branch == "main"' in trust and '.event == "workflow_dispatch"' in trust
+    assert "Owner dashboard verification" in trust
+    assert ".github/workflows/owner-dashboard-ci.yml" in trust
+    assert "head_sha=$HEAD_SHA" in trust
 
 
 def test_protected_release_and_recovery_install_only_the_complete_hashed_lock():
@@ -143,11 +190,17 @@ def test_release_exports_candidate_for_every_set_u_dry_run_and_recovery_step():
     assert 'state=in_progress' in workflow
 
 
-def test_recovery_uses_exact_candidate_concurrency_and_separate_durable_artifacts():
+def test_release_and_recovery_use_separate_safe_actions_concurrency_boundaries():
     workflow = Path(".github/workflows/owner-dashboard-release.yml").read_text()
     recovery = Path(".github/workflows/owner-dashboard-release-recovery.yml").read_text()
     assert "rollback-source-" in workflow and "recovery-metadata-" in workflow
-    assert "group: protected-owner-dashboard-recovery-${{ github.event.workflow_run.id }}" in recovery
+    assert "group: protected-owner-dashboard-release-production" in workflow
+    assert "group: protected-owner-dashboard-release-production-${{" not in workflow
+    assert "group: protected-owner-dashboard-release-recovery-${{ github.event.workflow_run.id }}-${{ github.event.workflow_run.run_attempt }}" in recovery
+    assert "protected-owner-dashboard-release-production-${{" not in recovery
+    assert "cancel-in-progress: false" in recovery
+    trust = recovery.split("- name: Verify exact failed-release deployment trust marker", 1)[1].split("- name:", 1)[0]
+    assert 'jq -r .run_attempt' not in trust
     assert "ref: ${{ github.event.workflow_run.head_sha }}" in recovery
     assert "--release-run-id" in recovery
     assert "--retain-recovery-artifact" in recovery

@@ -46,6 +46,7 @@ SUPABASE_CLI_VERSION = "2.116.0"
 MIGRATION_LEDGER = "public.stock_agent_release_migration_ledger"
 RELEASE_LEASE = "public.stock_agent_release_mutation_lease"
 RELEASE_LEASE_SECONDS = 900
+CANONICAL_ATTEMPT_LEASE_OWNER = re.compile(r"^(release|recovery)-([1-9][0-9]*)-([1-9][0-9]*)$")
 FUNCTION_NAME = "owner-dashboard-api"
 CHANGED_FUNCTIONS = ("market-briefing-gateway", FUNCTION_NAME, "telegram-portfolio")
 V1_SURFACES = ("portfolio", "ideas", "intelligence", "reports", "system")
@@ -134,6 +135,12 @@ def acquire_protected_release_lock(cursor) -> None:
     cursor.execute("SELECT pg_advisory_lock(hashtextextended('stock_agent_protected_release', 0))")
 
 
+def canonical_attempt_lease_identity(owner: str) -> tuple[int, int] | None:
+    """Return an ordered GitHub run/attempt identity for canonical owners only."""
+    match = CANONICAL_ATTEMPT_LEASE_OWNER.fullmatch(owner)
+    return (int(match.group(2)), int(match.group(3))) if match else None
+
+
 def acquire_durable_release_lease(cursor, owner: str, kind: str) -> None:
     """Record the holder after the shared session lock has been acquired.
 
@@ -155,6 +162,10 @@ def acquire_durable_release_lease(cursor, owner: str, kind: str) -> None:
             raise RuntimeError("protected release lease receipt is malformed")
         current_owner, current_kind, current_state, _active = rows[0]
         same_owner = current_owner == owner and current_kind == kind
+        requested_identity = canonical_attempt_lease_identity(owner)
+        current_identity = canonical_attempt_lease_identity(current_owner)
+        if requested_identity and current_identity and current_identity > requested_identity:
+            raise RuntimeError("a newer protected release attempt already owns the durable lease")
         # A recovery is idempotent and may take over either a lost release or
         # an earlier local recovery.  The session advisory lock above proves
         # none of those owners is in a protected mutation at this instant.
@@ -1203,6 +1214,7 @@ def main() -> int:
     context = {"candidate_sha": git_sha, "project_ref": arguments.project_ref,
                "lease_owner": arguments.lease_owner,
                "release_run_id": os.environ.get("GITHUB_RUN_ID"),
+               "release_run_attempt": os.environ.get("GITHUB_RUN_ATTEMPT"),
                "deployment_id": arguments.deployment_id, "allowed_origin": arguments.allowed_origin,
                "site_origin": arguments.site_origin, "owner_user_id": owner_user_id}
     adapter = load_native_release_adapter(context)

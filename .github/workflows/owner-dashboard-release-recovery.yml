@@ -10,8 +10,10 @@ permissions:
   contents: read
   deployments: write
 
+# Keep distinct recovery obligations pending independently. The durable
+# database advisory lock and ordered lease serialize them against releases.
 concurrency:
-  group: protected-owner-dashboard-recovery-${{ github.event.workflow_run.id }}
+  group: protected-owner-dashboard-release-recovery-${{ github.event.workflow_run.id }}-${{ github.event.workflow_run.run_attempt }}
   cancel-in-progress: false
 
 jobs:
@@ -22,6 +24,26 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     steps:
+      - name: Verify exact failed-release deployment trust marker
+        id: trust
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          RUN_ID="${{ github.event.workflow_run.id }}"
+          RUN_ATTEMPT="${{ github.event.workflow_run.run_attempt }}"
+          HEAD_SHA="${{ github.event.workflow_run.head_sha }}"
+          export HEAD_SHA
+          RUN="$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$RUN_ID")"
+          jq -e --arg repo "$GITHUB_REPOSITORY" --arg sha "$HEAD_SHA" '.repository.full_name == $repo and .head_sha == $sha and .head_branch == "main" and .event == "workflow_dispatch" and .path == ".github/workflows/owner-dashboard-release.yml" and .name == "Protected owner dashboard release"' <<<"$RUN" >/dev/null
+          VERIFIED="$(gh api "repos/$GITHUB_REPOSITORY/actions/workflows/owner-dashboard-ci.yml/runs?head_sha=$HEAD_SHA&status=completed&per_page=100" --jq '[.workflow_runs[] | select(.head_sha == env.HEAD_SHA and .conclusion == "success" and .name == "Owner dashboard verification" and .path == ".github/workflows/owner-dashboard-ci.yml")] | length')"
+          test "$VERIFIED" -ge 1
+          DEPLOYMENTS="$(gh api "repos/$GITHUB_REPOSITORY/deployments?ref=$HEAD_SHA&environment=production&per_page=100")"
+          DEPLOYMENT_ID="$(jq -r --arg sha "$HEAD_SHA" --arg run "$RUN_ID" --arg attempt "$RUN_ATTEMPT" '[.[] | select(.ref == $sha and .environment == "production") | select((.payload | if type == "string" then fromjson? else . end) as $payload | $payload.candidate_sha == $sha and ($payload.release_workflow_run_id | tostring) == $run and ($payload.release_workflow_run_attempt | tostring) == $attempt) | .id] | if length == 1 then .[0] else empty end' <<<"$DEPLOYMENTS")"
+          test -n "$DEPLOYMENT_ID"
+          STATUSES="$(gh api "repos/$GITHUB_REPOSITORY/deployments/$DEPLOYMENT_ID/statuses?per_page=100")"
+          test "$(jq -r --arg marker "component-recovery-run:$RUN_ID:$RUN_ATTEMPT" '[.[] | select(.state == "in_progress" and .description == $marker)] | length' <<<"$STATUSES")" -ge 1
+          echo "trusted=true" >> "$GITHUB_OUTPUT"
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
           ref: ${{ github.event.workflow_run.head_sha }}
@@ -29,17 +51,18 @@ jobs:
         with:
           python-version: "3.14"
       - name: Restore encrypted changed-component journal for the exact failed release
+        if: ${{ steps.trust.outputs.trusted == 'true' }}
         env:
           GH_TOKEN: ${{ github.token }}
           SUPABASE_ACCESS_TOKEN: ${{ secrets.SUPABASE_ACCESS_TOKEN }}
           RELEASE_RECOVERY_KEY: ${{ secrets.RELEASE_RECOVERY_KEY }}
           POSTGRES_URL: ${{ secrets.POSTGRES_URL }}
-          PROJECT_REF: ${{ vars.SUPABASE_PROJECT_REF }}
+          PROJECT_REF: ${{ secrets.SUPABASE_PROJECT_REF }}
         run: |
           set -euo pipefail
           python -m pip install --require-hashes --only-binary=:all: -r requirements.lock
           mkdir -m 700 recovery
           # The native adapter retrieves the latest authenticated encrypted
-          # journal by this exact original run identity. It must reject missing
+          # journal by this exact original run identity and attempt. It must reject missing
           # or ambiguous state; terminal GitHub labels cannot bypass recovery.
-          python scripts/restore_gateway_after_release_failure.py --project-ref "$PROJECT_REF" --admin-url "$POSTGRES_URL" --release-state recovery/release.enc --release-run-id "${{ github.event.workflow_run.id }}" --lease-owner "recovery-${{ github.event.workflow_run.id }}-${{ github.event.workflow_run.run_attempt }}" --retain-recovery-artifact
+          python scripts/restore_gateway_after_release_failure.py --project-ref "$PROJECT_REF" --admin-url "$POSTGRES_URL" --release-state recovery/release.enc --release-run-id "${{ github.event.workflow_run.id }}" --release-run-attempt "${{ github.event.workflow_run.run_attempt }}" --lease-owner "recovery-${{ github.event.workflow_run.id }}-${{ github.event.workflow_run.run_attempt }}" --retain-recovery-artifact

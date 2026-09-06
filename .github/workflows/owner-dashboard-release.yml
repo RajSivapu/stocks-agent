@@ -1,10 +1,6 @@
 name: Protected owner dashboard release
 
 on:
-  workflow_run:
-    workflows: ["Owner dashboard verification"]
-    branches: [main]
-    types: [completed]
   workflow_dispatch:
     inputs:
       candidate_sha: {description: Reviewed main SHA (hint only), required: true, type: string}
@@ -25,14 +21,13 @@ concurrency:
 
 jobs:
   release:
-    if: github.event_name == 'workflow_dispatch' || (github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.head_branch == 'main')
     environment: owner-dashboard-production
     runs-on: ubuntu-24.04
     timeout-minutes: 45
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
-          ref: ${{ github.event_name == 'workflow_run' && github.event.workflow_run.head_sha || inputs.candidate_sha }}
+          ref: ${{ inputs.candidate_sha }}
           fetch-depth: 0
       - uses: actions/setup-python@42375524e23c412d93fb67b49958b491fce71c38
         with:
@@ -64,9 +59,6 @@ jobs:
         id: candidate
         env:
           GH_TOKEN: ${{ github.token }}
-          EVENT_NAME: ${{ github.event_name }}
-          EVENT_SHA: ${{ github.event.workflow_run.head_sha }}
-          EVENT_CI_RUN_ID: ${{ github.event.workflow_run.id }}
           INPUT_SHA: ${{ inputs.candidate_sha }}
           INPUT_REVIEWED_SHA: ${{ inputs.reviewed_sha }}
           INPUT_CI_RUN_ID: ${{ inputs.ci_workflow_run_id }}
@@ -74,13 +66,11 @@ jobs:
         run: |
           set -euo pipefail
           MAIN_SHA="$(gh api "repos/$GITHUB_REPOSITORY/git/ref/heads/main" --jq .object.sha)"
-          if [ "$EVENT_NAME" = workflow_run ]; then
-            CANDIDATE_SHA="$EVENT_SHA"; CI_WORKFLOW_RUN_ID="$EVENT_CI_RUN_ID"
-            PULL_REQUEST_NUMBER="$(gh api "repos/$GITHUB_REPOSITORY/commits/$CANDIDATE_SHA/pulls" --jq '.[] | select(.merged_at != null and .base.ref == "main" and .merge_commit_sha == env.CANDIDATE_SHA) | .number' | head -n1)"
-          else
-            CANDIDATE_SHA="$INPUT_SHA"; CI_WORKFLOW_RUN_ID="$INPUT_CI_RUN_ID"; PULL_REQUEST_NUMBER="$INPUT_PR"
-            test "$INPUT_SHA" = "$INPUT_REVIEWED_SHA" || { echo 'candidate SHA/ref mismatch'; exit 1; }
-          fi
+          CANDIDATE_SHA="$INPUT_SHA"; CI_WORKFLOW_RUN_ID="$INPUT_CI_RUN_ID"; PULL_REQUEST_NUMBER="$INPUT_PR"
+          export CANDIDATE_SHA
+          test "$INPUT_SHA" = "$INPUT_REVIEWED_SHA" || { echo 'candidate SHA/ref mismatch'; exit 1; }
+          test "${GITHUB_REF:-}" = "refs/heads/main" || { echo 'manual release ref is not main'; exit 1; }
+          test "${GITHUB_SHA:-}" = "$CANDIDATE_SHA" || { echo 'manual release SHA does not bind candidate'; exit 1; }
           test "$CANDIDATE_SHA" = "$MAIN_SHA" || { echo 'candidate SHA/ref mismatch'; exit 1; }
           test "$(git rev-parse HEAD)" = "$CANDIDATE_SHA" || { echo 'candidate SHA/ref mismatch'; exit 1; }
           git fetch --no-tags origin main
@@ -109,7 +99,7 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           SUPABASE_ACCESS_TOKEN: ${{ secrets.SUPABASE_ACCESS_TOKEN }}
-          PROJECT_REF: ${{ vars.SUPABASE_PROJECT_REF }}
+          PROJECT_REF: ${{ secrets.SUPABASE_PROJECT_REF }}
         run: |
           "$RELEASE_VENV/bin/python" scripts/release_components.py --check-transport
       - name: Create the candidate-bound GitHub Deployment
@@ -119,7 +109,7 @@ jobs:
           CANDIDATE_SHA: ${{ steps.candidate.outputs.candidate_sha }}
         run: |
           set -euo pipefail
-          payload="$(jq -cn --arg candidate_sha "$CANDIDATE_SHA" --argjson release_workflow_run_id "$GITHUB_RUN_ID" '{candidate_sha:$candidate_sha,release_workflow_run_id:$release_workflow_run_id}')"
+          payload="$(jq -cn --arg candidate_sha "$CANDIDATE_SHA" --argjson release_workflow_run_id "$GITHUB_RUN_ID" --arg release_workflow_run_attempt "$GITHUB_RUN_ATTEMPT" '{candidate_sha:$candidate_sha,release_workflow_run_id:$release_workflow_run_id,release_workflow_run_attempt:$release_workflow_run_attempt}')"
           DEPLOYMENT_ID="$(gh api --method POST "repos/$GITHUB_REPOSITORY/deployments" -f ref="$CANDIDATE_SHA" -f environment=production -F production_environment=true -F auto_merge=false -f payload="$payload" --jq .id)"
           test -n "$DEPLOYMENT_ID" || { echo 'candidate SHA/ref mismatch'; exit 1; }
           echo "deployment_id=$DEPLOYMENT_ID" >> "$GITHUB_OUTPUT"; echo "DEPLOYMENT_ID=$DEPLOYMENT_ID" >> "$GITHUB_ENV"
@@ -136,7 +126,7 @@ jobs:
           SUPAVISOR_SESSION_URL: ${{ secrets.SUPAVISOR_SESSION_URL }}
           SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
           SUPABASE_PUBLISHABLE_KEY: ${{ secrets.SUPABASE_PUBLISHABLE_KEY }}
-          PROJECT_REF: ${{ vars.SUPABASE_PROJECT_REF }}
+          PROJECT_REF: ${{ secrets.SUPABASE_PROJECT_REF }}
           ALLOWED_ORIGIN: ${{ vars.DASHBOARD_ALLOWED_ORIGIN }}
           SITE_ORIGIN: ${{ vars.DASHBOARD_SITE_ORIGIN }}
           CANDIDATE_SHA: ${{ steps.candidate.outputs.candidate_sha }}
@@ -148,7 +138,7 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           DEPLOYMENT_ID: ${{ steps.deployment.outputs.deployment_id }}
-        run: gh api --method POST "repos/$GITHUB_REPOSITORY/deployments/$DEPLOYMENT_ID/statuses" -f state=in_progress -f description="component-recovery-run:$GITHUB_RUN_ID"
+        run: gh api --method POST "repos/$GITHUB_REPOSITORY/deployments/$DEPLOYMENT_ID/statuses" -f state=in_progress -f description="component-recovery-run:$GITHUB_RUN_ID:$GITHUB_RUN_ATTEMPT"
       - name: Execute protected deployment with encrypted component recovery
         env:
           DASHBOARD_PRIOR_MANAGED_SECRETS_JSON: ${{ secrets.DASHBOARD_PRIOR_MANAGED_SECRETS_JSON }}
@@ -162,7 +152,7 @@ jobs:
           SUPAVISOR_SESSION_URL: ${{ secrets.SUPAVISOR_SESSION_URL }}
           SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
           SUPABASE_PUBLISHABLE_KEY: ${{ secrets.SUPABASE_PUBLISHABLE_KEY }}
-          PROJECT_REF: ${{ vars.SUPABASE_PROJECT_REF }}
+          PROJECT_REF: ${{ secrets.SUPABASE_PROJECT_REF }}
           ALLOWED_ORIGIN: ${{ vars.DASHBOARD_ALLOWED_ORIGIN }}
           SITE_ORIGIN: ${{ vars.DASHBOARD_SITE_ORIGIN }}
           GATEWAY_ROLLBACK_REF: ${{ vars.GATEWAY_ROLLBACK_REF }}
@@ -181,7 +171,7 @@ jobs:
           CI_WORKFLOW_RUN_ID: ${{ steps.candidate.outputs.ci_workflow_run_id }}
           PULL_REQUEST_NUMBER: ${{ steps.candidate.outputs.pull_request_number }}
           DEPLOYMENT_ID: ${{ steps.deployment.outputs.deployment_id }}
-          PROJECT_REF: ${{ vars.SUPABASE_PROJECT_REF }}
+          PROJECT_REF: ${{ secrets.SUPABASE_PROJECT_REF }}
         run: |
           "$RELEASE_VENV/bin/python" scripts/write_protected_release_record.py --receipt "$RELEASE_STATE_DIR/deploy-receipt.json" --dry-run-evidence "$RELEASE_STATE_DIR/dry-run-evidence.json" --output "$RELEASE_STATE_DIR/release-record.json" --candidate-sha "$CANDIDATE_SHA" --ci-workflow-run-id "$CI_WORKFLOW_RUN_ID" --release-workflow-run-id "$GITHUB_RUN_ID" --pull-request-number "$PULL_REQUEST_NUMBER" --deployment-id "$DEPLOYMENT_ID" --rollback-artifact-id "$(jq -r .gateway_rollback_artifact.artifact_id "$RELEASE_STATE_DIR/deploy-receipt.json")" --recovery-metadata-artifact-id "$(jq -r .gateway_rollback_artifact.recovery_metadata_artifact_id "$RELEASE_STATE_DIR/deploy-receipt.json")" --project-ref "$PROJECT_REF"
       - name: Upload immutable release record
@@ -199,12 +189,12 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           SUPABASE_ACCESS_TOKEN: ${{ secrets.SUPABASE_ACCESS_TOKEN }}
           POSTGRES_URL: ${{ secrets.POSTGRES_URL }}
-          PROJECT_REF: ${{ vars.SUPABASE_PROJECT_REF }}
+          PROJECT_REF: ${{ secrets.SUPABASE_PROJECT_REF }}
         run: |
           set -euo pipefail
           test -n "${RELEASE_STATE_DIR:-}" || exit 0
           test -f "$RELEASE_STATE_DIR/release-state.json" || exit 0
-          restore_after_failure() { "$RELEASE_VENV/bin/python" scripts/restore_gateway_after_release_failure.py --project-ref "$PROJECT_REF" --admin-url "$POSTGRES_URL" --release-state "$RELEASE_STATE_DIR/release-state.json" --lease-owner "recovery-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"; }
+          restore_after_failure() { "$RELEASE_VENV/bin/python" scripts/restore_gateway_after_release_failure.py --project-ref "$PROJECT_REF" --admin-url "$POSTGRES_URL" --release-state "$RELEASE_STATE_DIR/release-state.json" --release-run-id "$GITHUB_RUN_ID" --release-run-attempt "$GITHUB_RUN_ATTEMPT" --lease-owner "recovery-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"; }
           trap 'restore_after_failure' ERR
           restore_after_failure
       - name: Mark candidate deployment failed after protected restoration

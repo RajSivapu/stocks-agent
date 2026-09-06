@@ -73,7 +73,7 @@ class Supabase:
 
 def native(platform, **kwargs):
     return adapter_module().NativeReleaseAdapter({"project_ref": "p" * 20, "candidate_sha": "a" * 40,
-        "release_run_id": "123"}, runner=platform, environment={
+        "release_run_id": "123", "release_run_attempt": "1"}, runner=platform, environment={
             "DASHBOARD_PRIOR_MANAGED_SECRETS_JSON": json.dumps(platform.secrets)}, **kwargs)
 
 
@@ -188,6 +188,8 @@ def database():
 def database_adapter(database):
     platform = Supabase(); adapter = native(platform)
     adapter.environment["POSTGRES_URL"] = database
+    with psycopg.connect(database, autocommit=True) as connection:
+        connection.execute("UPDATE public.stock_agent_release_mutation_lease SET owner='release-123', state='recovery_required'")
     return platform, adapter
 
 
@@ -225,11 +227,46 @@ def test_native_encrypted_retention_is_committed_bound_and_recoverable_in_new_pr
     sink = release.EncryptedJournal(tmp_path / "state.enc", key, retain=adapter.retain)
     sink(journal)
     second = adapter_module().NativeReleaseAdapter(adapter.context, environment=adapter.environment)
-    raw = second.recover_retained(123)
+    raw = second.recover_retained(123, 1)
     assert b"private-value" not in raw
     assert json.loads(Fernet(key).decrypt(raw)) == journal
     adapter.context["lease_owner"] = "unrelated"
     with pytest.raises(RuntimeError, match="held protected lease"): sink(journal)
+
+
+def test_retained_encrypted_journal_is_selected_and_authenticated_by_run_attempt(database, tmp_path):
+    """A delayed recovery for attempt 1 must never load attempt 2's journal."""
+    from cryptography.fernet import Fernet
+
+    platform, first = database_adapter(database)
+    key = Fernet.generate_key(); first.environment["RELEASE_RECOVERY_KEY"] = key.decode()
+    first.context.update({"lease_owner": "release-123-1", "release_run_attempt": "1"})
+    with psycopg.connect(database, autocommit=True) as connection:
+        connection.execute("UPDATE public.stock_agent_release_mutation_lease SET owner='release-123-1'")
+    first_state = {"release_context": dict(first.context), "prior": "attempt-one"}
+    release.EncryptedJournal(tmp_path / "first.enc", key, retain=first.retain)(first_state)
+
+    second_context = {**first.context, "lease_owner": "release-123-2", "release_run_attempt": "2"}
+    second = adapter_module().NativeReleaseAdapter(second_context, environment=first.environment)
+    with psycopg.connect(database, autocommit=True) as connection:
+        connection.execute("UPDATE public.stock_agent_release_mutation_lease SET owner='release-123-2'")
+    second_state = {"release_context": dict(second.context), "prior": "attempt-two"}
+    release.EncryptedJournal(tmp_path / "second.enc", key, retain=second.retain)(second_state)
+
+    delayed_first = adapter_module().NativeReleaseAdapter(first.context, environment=first.environment)
+    recovered = delayed_first.recover_retained(123, 1)
+    assert json.loads(Fernet(key).decrypt(recovered)) == first_state
+    missing_attempt = adapter_module().NativeReleaseAdapter(
+        {**first.context, "release_run_attempt": "3"}, environment=first.environment
+    )
+    with pytest.raises(RuntimeError, match="unavailable"):
+        missing_attempt.recover_retained(123, 3)
+    # Even a corrupted row that claims to be attempt 1 must be rejected when
+    # its authenticated journal says attempt 2.
+    with psycopg.connect(database, autocommit=True) as connection:
+        connection.execute("UPDATE public.stock_agent_component_recovery_journals SET run_attempt='1' WHERE run_attempt='2'")
+    with pytest.raises(RuntimeError, match="identity mismatch"):
+        delayed_first.recover_retained(123, 1)
 
 
 def test_new_process_secret_recovery_uses_encrypted_attempted_values():

@@ -322,6 +322,60 @@ def test_shared_durable_lease_blocks_new_release_and_allows_recovery_takeover_af
     assert takeover.calls[-1][1] == (recovery_owner, "recovery")
 
 
+def test_durable_lease_allows_matching_recovery_when_a_rerun_has_not_taken_ownership():
+    class Cursor:
+        def __init__(self): self.calls, self.rowcount = [], 1
+        def execute(self, statement, params=None): self.calls.append((statement, params))
+        def fetchall(self): return [("release-123456789-1", "release", "recovery_required", True)]
+
+    cursor = Cursor()
+    deploy.acquire_durable_release_lease(cursor, "recovery-123456789-1", "recovery")
+    assert cursor.calls[-1][1] == ("recovery-123456789-1", "recovery")
+
+
+@pytest.mark.parametrize(
+    ("current_owner", "current_state", "requested_owner"),
+    (
+        ("release-123456789-2", "recovery_required", "recovery-123456789-1"),
+        ("release-123456789-2", "resolved", "recovery-123456789-1"),
+        ("release-123456790-1", "resolved", "recovery-123456789-9"),
+    ),
+)
+def test_durable_lease_rejects_recovery_older_than_the_current_canonical_attempt(current_owner, current_state, requested_owner):
+    class Cursor:
+        def __init__(self): self.calls, self.rowcount = [], 1
+        def execute(self, statement, params=None): self.calls.append((statement, params))
+        def fetchall(self): return [(current_owner, "release", current_state, current_state == "recovery_required")]
+
+    cursor = Cursor()
+    with pytest.raises(RuntimeError, match="newer protected release attempt"):
+        deploy.acquire_durable_release_lease(cursor, requested_owner, "recovery")
+    assert len(cursor.calls) == 2
+
+
+def test_durable_lease_allows_recovery_for_the_current_canonical_attempt():
+    class Cursor:
+        def __init__(self): self.calls, self.rowcount = [], 1
+        def execute(self, statement, params=None): self.calls.append((statement, params))
+        def fetchall(self): return [("release-123456789-2", "release", "resolved", False)]
+
+    cursor = Cursor()
+    deploy.acquire_durable_release_lease(cursor, "recovery-123456789-2", "recovery")
+    assert cursor.calls[-1][1] == ("recovery-123456789-2", "recovery")
+
+
+def test_durable_lease_rejects_an_older_release_after_a_newer_resolved_attempt():
+    class Cursor:
+        def __init__(self): self.calls, self.rowcount = [], 1
+        def execute(self, statement, params=None): self.calls.append((statement, params))
+        def fetchall(self): return [("release-123456790-1", "release", "resolved", False)]
+
+    cursor = Cursor()
+    with pytest.raises(RuntimeError, match="newer protected release attempt"):
+        deploy.acquire_durable_release_lease(cursor, "release-123456789-9", "release")
+    assert len(cursor.calls) == 2
+
+
 def test_candidate_dry_run_installs_dependencies_and_uses_only_protected_vite_values(tmp_path, monkeypatch):
     root = tmp_path / "repo"
     app = root / "apps/web/src/app"; app.mkdir(parents=True)
