@@ -23,7 +23,8 @@ An owner-only personal stock agent that uses zero-incremental-cost data sources,
 - [x] Live free-tier Auth read back and browser updated to accept its signed email link as well as six-digit codes
 - [x] Receipt-bound production schema reconciliation completed exactly once in run `34039011879`
 - [x] Protected isolated restore and both cleanup paths completed in run `34042155368`
-- [ ] Protected one-time existing-runtime attestation and scheduled-chain receipts
+- [x] Protected one-time existing-runtime attestation `34055419086`
+- [ ] Next existing scheduled-chain receipt
 
 ## Completed implementation areas
 
@@ -46,7 +47,7 @@ An owner-only personal stock agent that uses zero-incremental-cost data sources,
 - [x] 2. Use fresh reconciled cash with ledger invalidation; never spend legacy monthly budgets as cash
 - [x] 3. Make deployment upgrade-aware and restore exact prior component state — **native recovery requires proven candidate/partial ownership and stable existing function IDs; independent Track C review approved**
 - [x] 4. Preserve already-applied migration bytes and move changes into additive migrations — **audited bytes restored; actual native-ledger PostgreSQL upgrade/retry passed**
-- [ ] 5. Deploy, verify, and recover every changed component, including Telegram and the owner web site — **owner-operated deployment, runtime parity, and isolated restore are complete; protected existing-runtime attestation remains open**
+- [x] 5. Deploy, verify, and recover every changed component, including Telegram and the owner web site — **owner-operated deployment, runtime parity, isolated restore, and protected existing-runtime attestation are complete**
 - [x] 6. Persist provider attempts before transport and reconcile crash uncertainty without duplicate calls
 - [x] 7. Allow durable no-trigger completion for quiet scheduled intraday runs
 - [x] 8. Propagate the authoritative `start_run` duplicate flag into release evidence
@@ -72,7 +73,7 @@ These require the protected production path and must not be replaced by local ev
 - [x] Push/merge the exact reviewed remediation through protected `main`
 - [x] Pass exact-main CI
 - [x] Apply the receipt-bound production schema reconciliation exactly once — **run `34039011879`**
-- [ ] Run the protected one-time existing-runtime attestation before routine scheduled data advances
+- [x] Run the protected one-time existing-runtime attestation before routine scheduled data advances — **run `34055419086`; artifact `9995809768`; receipt SHA-256 `88bedc1a0488e11e2a0c75bc981087f5eeacc45ec8c9d42dbf5c937104155baf`**
 - [x] Verify owner-operated deployed byte/version parity for gateway, dashboard API, Telegram function, and owner web site
 - [x] Publish the signed-link-compatible web build as Site v5; deployment `appgdep_6a9cd0def8f0819187aa7d30d99a7ada` succeeded
 - [x] Complete an owner email sign-in canary on that new Site build — **owner confirmed the signed email link opened the portfolio dashboard on 2026-09-05**

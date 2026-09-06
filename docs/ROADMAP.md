@@ -12,11 +12,11 @@ and rollout order. `docs/HANDOFF.md` is ignored and is not a source of truth.
 
 ## Current release status
 
-The owner dashboard remains live; V1 trusted use remains **no-go** pending the protected one-time
-existing-runtime attestation and existing scheduled evidence. Approved production schema reconciliation
+The owner dashboard remains live; V1 trusted use remains **no-go** pending the next existing
+scheduled evidence chain. Approved production schema reconciliation
 `34039011879` succeeded exactly once. Managed isolated restore `34042155368` succeeded on main
-`bd1cee2317a8689b8ac5a55fb38b853e7320bbfb`. Current main `eb240bf` passed exact-main CI
-`34052341671`.
+`bd1cee2317a8689b8ac5a55fb38b853e7320bbfb`. Current attested main `b3f7d70` passed exact-main CI
+`34055295512` and protected one-time existing-runtime attestation `34055419086`.
 Restore artifacts were downloaded and validated once against GitHub archive digests and all four
 embedded hashes: 26 verified record sets, identical production roots, no migrations applied on
 retry, temporary project deleted, and both cleanup receipts successful with no retained project.
@@ -40,7 +40,7 @@ history, reconciliation, and audit-evidence surface—not a continuously live tr
   run `34029103876` passed without production mutation.
 - [x] Approved receipt-bound production schema reconciliation (`34039011879`).
 - [x] Managed isolated restore and both cleanup paths (`34042155368`).
-- [ ] Protected one-time existing-runtime attestation receipt.
+- [x] Protected one-time existing-runtime attestation receipt (`34055419086`).
 - [ ] Next existing scheduled receipt, without a duplicate run.
 
 Final fix wave Track C: immutable audited migrations are restored and the additive tail is now
@@ -57,8 +57,8 @@ The unchanged `.openai/hosting.json` remains the sole zero-cost Site target. Its
 transport remains unavailable, so the mutation workflow correctly blocks before mutation. GPT-6 Astra
 accepted that fail-closed boundary. Owner-operated native Site publication now supplies a fresh,
 bounded platform receipt to the approved split-trust attestation; no caller-authored substitute is
-accepted. Protected GitHub readback independently verifies the unchanged Supabase database, Auth,
-managed-secret bindings, deployed Edge bytes, and API behavior. The final focused review,
+accepted. Protected GitHub readback independently verified the unchanged Supabase database, Auth,
+managed-secret bindings, deployed Edge bytes, and API behavior in run `34055419086`. The final focused review,
 consolidated 1,197-test gate, GPT-6 Astra scoped re-review, historical CI, owner-operated Edge
 deployment readback, and private Site publication are complete. Historical database readback does
 not establish the current recovery schema.
@@ -66,11 +66,11 @@ not establish the current recovery schema.
 | Layer | Local candidate | Production status |
 |---|---|---|
 | Test and owner-auth containment | Implemented and task-reviewed | Live Auth read back, signed-link-compatible Site v5 deployed, owner email-click confirmed, and formal non-owner denial passed |
-| Decision, evidence, and publication authority | Implemented and task-reviewed | Function deployment read back; Schema reconciled; protected runtime-attestation and scheduled receipts pending |
+| Decision, evidence, and publication authority | Implemented and task-reviewed | Function deployment, schema, and protected runtime attestation complete; scheduled receipts pending |
 | Portfolio accounting and delivery integrity | Implemented and task-reviewed | Owner/anonymous/non-owner API canaries passed; original delivery receipt pending |
 | Provider, cache, quota, ranking, and lifecycle | Implemented and task-reviewed | Live free-provider health and one existing scheduled chain pending |
 | Outcomes, read privilege, dependency lock, and market sessions | Implemented and task-reviewed | Runtime is live; production observation pending |
-| Candidate-bound release and recovery | Implemented and GPT-6 Astra review-clean; local disposable restore path covered | Schema reconciliation and isolated restore complete; protected runtime-attestation receipt pending |
+| Candidate-bound release and recovery | Implemented and GPT-6 Astra review-clean; local disposable restore path covered | Schema reconciliation, isolated restore, and protected runtime attestation complete |
 
 The final consolidated local-gate code candidate was
 `883d521728b1b3c2700a78dab1d65208105d7a2f`, based on the GPT-6 Astra audit of `origin/main` at
@@ -110,7 +110,7 @@ Implemented locally:
 
 Still required:
 
-- Retain the protected existing-runtime attestation receipt for the reconciled migration/function state.
+- Protected existing-runtime attestation `34055419086` retained for the reconciled migration/function state.
 - Reconcile one post-deployment scheduled packet, evaluation, report, and publication chain.
 
 ### 3. Money and delivery integrity
@@ -164,8 +164,8 @@ Implemented locally:
 
 Still required:
 
-- Retain the protected runtime-attestation receipt for the live restricted runtime and observe production
-  outcomes without changing policy automatically.
+- Protected runtime-attestation receipt `34055419086` retained for the live restricted runtime;
+  observe production outcomes without changing policy automatically.
 - Extend the reviewed market calendar before its maintained coverage expires.
 
 ### 6. Release and recovery
@@ -182,7 +182,7 @@ Still required:
 
 - Exact-head CI `34013930731` and exact-main CI `34014003786` passed for main `774584e`.
 - Schema reconciliation and isolated restore are complete (`34039011879`, `34042155368`); do not rerun.
-- Retain the protected one-time existing-runtime attestation receipt before routine data advances.
+- Protected one-time existing-runtime attestation `34055419086` completed before routine data advances.
 - Observe the next existing scheduled receipt without a duplicate run.
 
 ## Ordered gates to trusted owner use
@@ -196,8 +196,8 @@ Still required:
    signed email link opened the live portfolio dashboard.**
 5. Approved schema reconciliation and protected isolated restore with recovery receipts.
    **Complete** (`34039011879`, `34042155368`); do not rerun.
-6. Protected existing-runtime attestation receipt and next existing scheduled intelligence/report/publication
-   receipt chain, without a duplicate run.
+6. Protected existing-runtime attestation receipt **complete** (`34055419086`); next existing
+   scheduled intelligence/report/publication receipt chain remains, without a duplicate run.
 
 Until all six gates pass, V1-C2 through V1-C6 remain reopened and the system stays in limited
 owner-only research/shadow use. Positions, cash, prices, and calculations must be independently
@@ -206,18 +206,18 @@ verified before the owner acts.
 ## Exact remaining handoff boundary
 
 Frontend and all Edge function sources are unchanged from their verified publications through
-current main `eb240bf`; retain
+current attested main `b3f7d70`; retain
 Site v5 and the existing owner-only access. No publication is needed for the recovery changes.
 Five verified release variables plus the existing Supabase service/publishable keys and owner
 identity are now configured in the protected environment without credential rotation.
 `PROJECT_STATUS.md` lists the original mutation-workflow inputs that remain unavailable. The
 mutation workflow stays blocked and remains the required route for any future changed component.
-For the unchanged V1 runtime, the approved split-trust workflow combines a fresh owner-scoped Sites
-receipt with protected GitHub readback and emits a bounded immutable attestation without production
-or scheduled-run mutation. It intentionally seals full reconciliation-root equality once, before
-normal scheduled data growth. The restricted scheduled-evidence reader is still unavailable;
+For the unchanged V1 runtime, the approved split-trust workflow combined a fresh owner-scoped Sites
+receipt with protected GitHub readback and emitted bounded immutable attestation `34055419086`
+without production or scheduled-run mutation. It sealed full reconciliation-root equality once,
+before normal scheduled data growth, and must not be rerun. The restricted scheduled-evidence reader is still unavailable;
 observe an existing persisted chain when available and never dispatch a duplicate. The live app
-remains limited owner research/shadow use until protected attestation and scheduled gates pass.
+remains limited owner research/shadow use until the scheduled gate passes.
 
 ## Deferred work
 
