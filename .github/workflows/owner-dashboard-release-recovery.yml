@@ -29,15 +29,18 @@ jobs:
         run: |
           set -euo pipefail
           RUN_ID="${{ github.event.workflow_run.id }}"
+          RUN_ATTEMPT="${{ github.event.workflow_run.run_attempt }}"
           HEAD_SHA="${{ github.event.workflow_run.head_sha }}"
+          export HEAD_SHA
           RUN="$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$RUN_ID")"
-          test "$(jq -r .head_sha <<<"$RUN")" = "$HEAD_SHA"
-          test "$(jq -r .repository.full_name <<<"$RUN")" = "$GITHUB_REPOSITORY"
+          jq -e --arg repo "$GITHUB_REPOSITORY" --arg sha "$HEAD_SHA" '.repository.full_name == $repo and .head_sha == $sha and .head_branch == "main" and .event == "workflow_dispatch" and .path == ".github/workflows/owner-dashboard-release.yml" and .name == "Protected owner dashboard release"' <<<"$RUN" >/dev/null
+          VERIFIED="$(gh api "repos/$GITHUB_REPOSITORY/actions/workflows/owner-dashboard-ci.yml/runs?head_sha=$HEAD_SHA&status=completed&per_page=100" --jq '[.workflow_runs[] | select(.head_sha == env.HEAD_SHA and .conclusion == "success" and .name == "Owner dashboard verification" and .path == ".github/workflows/owner-dashboard-ci.yml")] | length')"
+          test "$VERIFIED" -ge 1
           DEPLOYMENTS="$(gh api "repos/$GITHUB_REPOSITORY/deployments?ref=$HEAD_SHA&environment=production&per_page=100")"
-          DEPLOYMENT_ID="$(jq -r --arg sha "$HEAD_SHA" --arg run "$RUN_ID" '[.[] | select(.ref == $sha and .environment == "production") | select((.payload | if type == "string" then fromjson? else . end) as $payload | $payload.candidate_sha == $sha and ($payload.release_workflow_run_id | tostring) == $run) | .id] | if length == 1 then .[0] else empty end' <<<"$DEPLOYMENTS")"
+          DEPLOYMENT_ID="$(jq -r --arg sha "$HEAD_SHA" --arg run "$RUN_ID" --arg attempt "$RUN_ATTEMPT" '[.[] | select(.ref == $sha and .environment == "production") | select((.payload | if type == "string" then fromjson? else . end) as $payload | $payload.candidate_sha == $sha and ($payload.release_workflow_run_id | tostring) == $run and ($payload.release_workflow_run_attempt | tostring) == $attempt) | .id] | if length == 1 then .[0] else empty end' <<<"$DEPLOYMENTS")"
           test -n "$DEPLOYMENT_ID"
           STATUSES="$(gh api "repos/$GITHUB_REPOSITORY/deployments/$DEPLOYMENT_ID/statuses?per_page=100")"
-          test "$(jq -r --arg marker "component-recovery-run:$RUN_ID" '[.[] | select(.state == "in_progress" and .description == $marker)] | length' <<<"$STATUSES")" -ge 1
+          test "$(jq -r --arg marker "component-recovery-run:$RUN_ID:$RUN_ATTEMPT" '[.[] | select(.state == "in_progress" and .description == $marker)] | length' <<<"$STATUSES")" -ge 1
           echo "trusted=true" >> "$GITHUB_OUTPUT"
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:

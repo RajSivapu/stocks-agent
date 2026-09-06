@@ -130,11 +130,34 @@ def test_independent_recovery_contract_covers_cancelled_and_lost_release_runners
     assert "${{ secrets.SUPABASE_PROJECT_REF }}" in recovery
     assert "Verify exact failed-release deployment trust marker" in recovery
     assert "component-recovery-run:$RUN_ID" in recovery
+    assert "RUN_ATTEMPT=\"${{ github.event.workflow_run.run_attempt }}\"" in recovery
+    assert "component-recovery-run:$RUN_ID:$RUN_ATTEMPT" in recovery
+    assert "release_workflow_run_attempt" in recovery
     assert "release_workflow_run_id" in recovery and "candidate_sha" in recovery
     assert "steps.trust.outputs.trusted == 'true'" in recovery
     trust = recovery.split("- name: Verify exact failed-release deployment trust marker", 1)[1].split("- name:", 1)[0]
     assert "GH_TOKEN: ${{ github.token }}" in trust
     assert "SUPABASE_ACCESS_TOKEN" not in trust and "RELEASE_RECOVERY_KEY" not in trust and "POSTGRES_URL" not in trust
+
+
+def test_release_deployment_and_recovery_marker_bind_the_original_run_attempt():
+    workflow = Path(".github/workflows/owner-dashboard-release.yml").read_text()
+    recovery = Path(".github/workflows/owner-dashboard-release-recovery.yml").read_text()
+    assert 'release_workflow_run_attempt "$GITHUB_RUN_ATTEMPT"' in workflow
+    assert 'component-recovery-run:$GITHUB_RUN_ID:$GITHUB_RUN_ATTEMPT' in workflow
+    assert "release_workflow_run_attempt" in recovery
+    assert "component-recovery-run:$RUN_ID:$RUN_ATTEMPT" in recovery
+
+
+def test_recovery_trust_rejects_feature_or_unreviewed_run_before_checkout():
+    recovery = Path(".github/workflows/owner-dashboard-release-recovery.yml").read_text()
+    trust = recovery.split("- name: Verify exact failed-release deployment trust marker", 1)[1].split("- uses: actions/checkout", 1)[0]
+    assert '.path == ".github/workflows/owner-dashboard-release.yml"' in trust
+    assert '.name == "Protected owner dashboard release"' in trust
+    assert '.head_branch == "main"' in trust and '.event == "workflow_dispatch"' in trust
+    assert "Owner dashboard verification" in trust
+    assert ".github/workflows/owner-dashboard-ci.yml" in trust
+    assert "head_sha=$HEAD_SHA" in trust
 
 
 def test_protected_release_and_recovery_install_only_the_complete_hashed_lock():

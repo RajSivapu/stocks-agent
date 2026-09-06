@@ -109,7 +109,7 @@ jobs:
           CANDIDATE_SHA: ${{ steps.candidate.outputs.candidate_sha }}
         run: |
           set -euo pipefail
-          payload="$(jq -cn --arg candidate_sha "$CANDIDATE_SHA" --argjson release_workflow_run_id "$GITHUB_RUN_ID" '{candidate_sha:$candidate_sha,release_workflow_run_id:$release_workflow_run_id}')"
+          payload="$(jq -cn --arg candidate_sha "$CANDIDATE_SHA" --argjson release_workflow_run_id "$GITHUB_RUN_ID" --arg release_workflow_run_attempt "$GITHUB_RUN_ATTEMPT" '{candidate_sha:$candidate_sha,release_workflow_run_id:$release_workflow_run_id,release_workflow_run_attempt:$release_workflow_run_attempt}')"
           DEPLOYMENT_ID="$(gh api --method POST "repos/$GITHUB_REPOSITORY/deployments" -f ref="$CANDIDATE_SHA" -f environment=production -F production_environment=true -F auto_merge=false -f payload="$payload" --jq .id)"
           test -n "$DEPLOYMENT_ID" || { echo 'candidate SHA/ref mismatch'; exit 1; }
           echo "deployment_id=$DEPLOYMENT_ID" >> "$GITHUB_OUTPUT"; echo "DEPLOYMENT_ID=$DEPLOYMENT_ID" >> "$GITHUB_ENV"
@@ -138,7 +138,7 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           DEPLOYMENT_ID: ${{ steps.deployment.outputs.deployment_id }}
-        run: gh api --method POST "repos/$GITHUB_REPOSITORY/deployments/$DEPLOYMENT_ID/statuses" -f state=in_progress -f description="component-recovery-run:$GITHUB_RUN_ID"
+        run: gh api --method POST "repos/$GITHUB_REPOSITORY/deployments/$DEPLOYMENT_ID/statuses" -f state=in_progress -f description="component-recovery-run:$GITHUB_RUN_ID:$GITHUB_RUN_ATTEMPT"
       - name: Execute protected deployment with encrypted component recovery
         env:
           DASHBOARD_PRIOR_MANAGED_SECRETS_JSON: ${{ secrets.DASHBOARD_PRIOR_MANAGED_SECRETS_JSON }}
