@@ -20,7 +20,7 @@ for (const width of [300, 320, 390, 768, 1024, 1440]) {
   test(`dashboard fits ${width}px without page-level horizontal clipping`, async ({ page }) => {
     await page.setViewportSize({ width, height: 900 });
     await page.goto("/portfolio?fixture=complete");
-    await expect(page.getByRole("heading", { name: "Portfolio" })).toBeVisible();
+    await expect(page.getByRole("heading", { name: "Overview" })).toBeVisible();
     const dimensions = await page.evaluate(() => ({ scroll: document.documentElement.scrollWidth, client: document.documentElement.clientWidth }));
     expect(dimensions.scroll).toBeLessThanOrEqual(dimensions.client);
   });

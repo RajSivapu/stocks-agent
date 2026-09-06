@@ -1,4 +1,5 @@
 import { render, screen } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
 import { MemoryRouter } from "react-router-dom";
 import { expect, it } from "vitest";
 
@@ -10,6 +11,7 @@ import type {
   RunsView,
   SystemView,
   TodayView,
+  ReportsView,
 } from "@stocks-agent/dashboard-contracts";
 
 import { AlertsPage } from "./alerts/AlertsPage";
@@ -96,11 +98,14 @@ it("labels closed-session prices with their receipt time and source", () => {
   expect(screen.getByText(/yahoo finance/i)).toBeVisible();
 });
 
-it("renders policy evidence separately from analyst and checker", () => {
+it("preserves policy, analyst, and checker evidence behind an explicit disclosure", async () => {
+  const user = userEvent.setup();
   const data: IdeasView = { ideas: [{ id: "idea", ticker: "MSFT", profile: "balanced", final_action: "watch", policy_status: "approved", policy_version: 17, confidence: "medium", entry_zone_low: "410", entry_zone_high: "420", stop: "395", target: "455", valid_until: "2026-09-10", bull_case: "Revenue held up.", bear_case: "Valuation remains high.", decisive_factor: "Fresh evidence", invalidation: "Close below 395", reason_codes: [], analyst_complete: true, checker_complete: true, sources: [], intelligence_run_id: "7d834dbd-75bb-4313-931f-09732f003932", evidence_as_of: "2026-09-04T13:00:00.000Z", outcome: { result: "open", horizon_days: 21, graded_at: "2026-09-04T13:30:00.000Z" } }] };
   render(<IdeasPage data={data} />);
-  expect(screen.getByRole("heading", { name: /analyst/i })).toBeVisible();
-  expect(screen.getByRole("heading", { name: /checker/i })).toBeVisible();
+  expect(screen.getByRole("heading", { name: /analyst review/i })).not.toBeVisible();
+  await user.click(screen.getByText(/research and receipt details/i));
+  expect(screen.getByRole("heading", { name: /analyst review/i })).toBeVisible();
+  expect(screen.getByRole("heading", { name: /checker review/i })).toBeVisible();
   expect(screen.getByRole("heading", { name: /deterministic policy/i })).toBeVisible();
   expect(screen.getByRole("heading", { name: /relationship and exposure evidence/i })).toBeVisible();
   expect(screen.getByRole("heading", { name: /conditional scenarios/i })).toBeVisible();
@@ -120,10 +125,17 @@ it("portfolio absorbs today's owner summary and companion context", () => {
     recurring_plan_review_eligible: true, horizons: [], contribution_history: null, evidence: [],
     disclaimer: "Historical scenarios are not forecasts.",
   };
-  render(<PortfolioPage data={portfolio} overview={today} companion={companion} />);
+  const currentIdeas: IdeasView = { ideas: [{ id: "current-idea", ticker: "MSFT", profile: "balanced", final_action: "watch", policy_status: "approved", policy_version: 17, confidence: "medium", entry_zone_low: "410", entry_zone_high: "420", stop: "395", target: "455", valid_until: "2026-09-10", bull_case: "Revenue held up.", bear_case: "Valuation remains high.", decisive_factor: "Fresh evidence", invalidation: "Close below 395", reason_codes: [], analyst_complete: true, checker_complete: true, sources: [], intelligence_run_id: "7d834dbd-75bb-4313-931f-09732f003932", evidence_as_of: "2026-09-04T13:00:00.000Z", outcome: null }] };
+  const latestReports: ReportsView = { reports: [{ id: "7d834dbd-75bb-4313-931f-09732f003932", market_date: "2026-09-04", kind: "weekly", title: "Weekly owner report", summary: "Receipt-backed weekly summary.", report_hash: "a".repeat(64), created_at: "2026-09-04T13:30:00.000Z" }], next_cursor: null };
+  const { container } = render(<MemoryRouter><PortfolioPage data={portfolio} overview={today} companion={companion} ideas={currentIdeas} reports={latestReports} /></MemoryRouter>);
+  expect(screen.getByRole("heading", { name: "Overview" })).toBeVisible();
   expect(screen.getByRole("heading", { name: /needs attention/i })).toBeVisible();
+  expect(screen.getByRole("heading", { name: /latest ideas/i })).toBeVisible();
+  expect(screen.getByRole("link", { name: /view all ideas/i })).toHaveAttribute("href", "/ideas");
+  expect(screen.getByRole("link", { name: /weekly owner report/i })).toHaveAttribute("href", "/reports/7d834dbd-75bb-4313-931f-09732f003932");
   expect(screen.getByRole("heading", { name: /companion review/i })).toBeVisible();
-  expect(screen.getByText(/current plan remains unchanged/i)).toBeVisible();
+  expect(container.querySelector("details.companion-disclosure")).not.toHaveAttribute("open");
+  expect(screen.getByText(/current plan remains unchanged/i)).not.toBeVisible();
 });
 
 it("companion uses historical scenario language and preserves the current plan", () => {
@@ -142,7 +154,7 @@ it("companion uses historical scenario language and preserves the current plan",
   expect(screen.queryByText(/winner|best stock|guaranteed/i)).not.toBeInTheDocument();
 });
 
-it("alerts, runs, and system expose receipt and immutable-boundary language", () => {
+it("system summarizes health and keeps immutable receipt diagnostics available", () => {
   const alerts: AlertsView = { alerts: [{ id: "a", kind: "brief", phase: "intraday", state: "suppressed", rendered_text: "No trigger", rendered_hash: "f".repeat(64), template_version: "3", telegram_message_ids: [], attempt_count: 0, created_at: "2026-09-03T18:00:00.000Z", delivered_at: null, suppression_reason: "no_trigger", rule_ticker: null, rule_state: null, event_status: null, owner_action: null, sources: [] }] };
   const runs: RunsView = { runs: [{ id: "7d834dbd-75bb-4313-931f-09732f003932", kind: "intraday", status: "completed", started_at: "2026-09-03T17:00:00.000Z", finished_at: "2026-09-03T17:02:00.000Z", data_as_of: "2026-09-03T17:01:00.000Z", policy_version: 17, evaluation_count: 2, suggestion_count: 0, publication_status: "suppressed" }] };
   const system: SystemView = { product_version: "v1", api_version: "v1", policy_version: 17, alert_mode: "shadow", latest_by_kind: {}, latest_publication_status: "suppressed", boundaries, source_coverage: [{ provider: "gdelt", status: "partial", retrieved_at: null, accepted_count: 2, dropped_count: 1 }], latest_report: null, latest_intelligence_run_id: null };
@@ -150,9 +162,12 @@ it("alerts, runs, and system expose receipt and immutable-boundary language", ()
   expect(screen.getByText(/no telegram message was sent/i)).toBeVisible();
   rerender(<MemoryRouter><RunsPage data={runs} /></MemoryRouter>);
   expect(screen.getByText(/2 evaluations/i)).toBeVisible();
-  rerender(<SystemPage data={system} />);
+  rerender(<MemoryRouter><SystemPage data={system} runs={runs} alerts={alerts} /></MemoryRouter>);
   expect(screen.getByText(/friend invitations disabled/i)).toBeVisible();
   expect(screen.getByText(/brokerage authority none/i)).toBeVisible();
+  const lastRun = screen.getByText(/last run/i);
+  expect(lastRun).toBeVisible();
+  expect(lastRun.parentElement).toHaveTextContent(/completed/i);
   expect(screen.getByRole("heading", { name: /write, send, and deploy boundaries/i })).toBeVisible();
-  expect(screen.getByText(/no browser write route/i)).toBeVisible();
+  expect(screen.getByText(/no browser write route/i)).not.toBeVisible();
 });

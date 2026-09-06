@@ -13,11 +13,12 @@ const reports: ReportsView = {
   next_cursor: null,
 };
 
-it("links to exact immutable report versions", () => {
-  render(<MemoryRouter><ReportsPage data={reports} /></MemoryRouter>);
+it("links to exact report versions and keeps the receipt hash collapsed", () => {
+  const { container } = render(<MemoryRouter><ReportsPage data={reports} /></MemoryRouter>);
   expect(screen.getByRole("link", { name: /weekly owner report/i })).toHaveAttribute("href", `/reports/${reportId}`);
-  expect(screen.getByText(/immutable version/i)).toBeVisible();
-  expect(screen.getByText("a".repeat(64))).toBeVisible();
+  expect(screen.getByText(/receipt details/i)).toBeVisible();
+  expect(container.querySelector("details.report-receipt")).not.toHaveAttribute("open");
+  expect(screen.getByText("a".repeat(64))).not.toBeVisible();
 });
 
 it("renders an explicit empty report state", () => {

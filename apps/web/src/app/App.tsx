@@ -91,8 +91,10 @@ function PortfolioRoute({ client, token, onError, onSignOut }: { client: Dashboa
   const portfolio = useDashboardResource<PortfolioView>(client, "/v1/portfolio", token, onError);
   const overview = useDashboardResource<TodayView>(client, "/v1/today", token, onError);
   const companion = useDashboardResource<CompanionView>(client, "/v1/companion", token, onError);
+  const ideas = useDashboardResource<IdeasView>(client, "/v1/ideas", token, onError);
+  const reports = useDashboardResource<ReportsView>(client, "/v1/reports", token, onError);
   const banner = bannerState(portfolio, [overview, companion]);
-  return <AppShell {...banner} onSignOut={onSignOut}><AsyncView state={portfolio}>{(data) => <PortfolioPage data={data} overviewState={overview} companionState={companion} />}</AsyncView></AppShell>;
+  return <AppShell {...banner} onSignOut={onSignOut}><AsyncView state={portfolio}>{(data) => <PortfolioPage data={data} overviewState={overview} companionState={companion} ideasState={ideas} reportsState={reports} />}</AsyncView></AppShell>;
 }
 
 function SystemRoute({ client, token, onError, onSignOut }: { client: DashboardClient; token: string; onError(error: Error): void; onSignOut(): void }) {
