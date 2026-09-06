@@ -23,33 +23,65 @@ POST_20260909_MARKERS = (
 )
 
 
-def _presence():
-    result = {f"public.{name}": name == "holdings" for name in (*RECOVERY_RELATIONS, *POST_20260909_MARKERS)}
+def _presence(catalog=None):
+    public_relations = {item["name"] for item in (catalog or _catalog())["relations"]}
+    result = {f"public.{name}": name in public_relations for name in (*RECOVERY_RELATIONS, *POST_20260909_MARKERS)}
     result["supabase_migrations.schema_migrations"] = False
     return result
 
 
 def _catalog():
     return {
-        "relations": [{"schema": "public", "name": "holdings", "kind": "r"}],
+        "relations": [
+            {"schema": "public", "name": "dry_powder", "kind": "r", "row_security": False,
+             "force_row_security": False, "owner": "postgres"},
+            {"schema": "public", "name": "holdings", "kind": "r", "row_security": True,
+             "force_row_security": False, "owner": "postgres"},
+            {"schema": "public", "name": "owner_investment_plans", "kind": "p", "row_security": True,
+             "force_row_security": False, "owner": "postgres"},
+            {"schema": "public", "name": "market_intelligence_runs", "kind": "r", "row_security": True,
+             "force_row_security": False, "owner": "postgres"},
+            {"schema": "public", "name": "portfolio_commands", "kind": "r", "row_security": True,
+             "force_row_security": False, "owner": "postgres"},
+            {"schema": "public", "name": "suggestion_grades", "kind": "r", "row_security": True,
+             "force_row_security": False, "owner": "postgres"},
+            {"schema": "public", "name": "suggestions", "kind": "r", "row_security": True,
+             "force_row_security": False, "owner": "postgres"},
+            {"schema": "public", "name": "unexpected_audit_state", "kind": "r", "row_security": False,
+             "force_row_security": False, "owner": "postgres"},
+        ],
         "columns": [{"schema": "public", "relation": "holdings", "name": "ticker", "position": 1,
-                     "type": "text", "not_null": True, "has_default": False,
+                     "type": "text", "not_null": True, "has_default": False, "default_sha256": "a" * 64,
                      "identity": "", "generated": ""}],
         "constraints": [{"schema": "public", "relation": "holdings", "name": "holdings_pkey",
                          "kind": "p", "definition_sha256": "b" * 64}],
         "functions": [{"schema": "public", "identity": "public.normalize_ticker(text)", "language": "plpgsql",
                        "volatility": "i", "security_definer": False, "definition_sha256": "c" * 64}],
+        "indexes": [{"schema": "public", "relation": "holdings", "name": "holdings_pkey",
+                     "definition_sha256": "d" * 64}],
         "triggers": [],
-        "policies": [],
+        "policies": [{"schema": "public", "relation": "holdings", "name": "public_reader", "command": "r",
+                      "roles": ["PUBLIC"], "using_sha256": "e" * 64, "check_sha256": "e" * 64}],
         "acls": [{"object_kind": "relation", "schema": "public", "object": "holdings",
                   "grantee": "dashboard", "grantor": "postgres", "privilege": "SELECT", "grantable": False}],
+        "roles": [
+            {"name": name, "exists": True, "login": login, "inherit": inherit, "superuser": False,
+             "bypassrls": False, "createrole": False, "createdb": False, "replication": False,
+             "member_of": members}
+            for name, login, inherit, members in (
+                ("stock_agent_dashboard", False, False, []),
+                ("stock_agent_dashboard_runtime", True, True, ["stock_agent_dashboard"]),
+                ("stock_agent_release_reader", False, False, []),
+                ("stock_agent_release_reader_runtime", False, False, ["stock_agent_release_reader"]),
+            )
+        ],
     }
 
 
-def _roots():
+def _roots(catalog=None):
     return [
         {"relation": relation, "count": 0, "root_sha256": hashlib.sha256(b"").hexdigest()}
-        for relation in ("holdings", "transactions", "portfolio_commands")
+        for relation in sorted(item["name"] for item in (catalog or _catalog())["relations"] if item["kind"] in {"r", "p"})
     ]
 
 
@@ -57,7 +89,7 @@ class FakeReadOnlyApi:
     def __init__(self, *, identity=None, catalog=None, roots=None):
         self.identity = identity or {"role": "supabase_read_only_user", "transaction_read_only": "on", "database": "postgres"}
         self.catalog = _catalog() if catalog is None else catalog
-        self.roots = _roots() if roots is None else roots
+        self.roots = _roots(self.catalog) if roots is None else roots
         self.calls = []
 
     def __call__(self, method, path, payload=None):
@@ -70,7 +102,7 @@ class FakeReadOnlyApi:
         if "protected_roots" in query:
             return [{"protected_roots": self.roots}]
         if "catalog" in query:
-            return [{"catalog": self.catalog, "relation_presence": _presence()}]
+            return [{"catalog": self.catalog, "relation_presence": _presence(self.catalog)}]
         raise AssertionError(query)
 
 
@@ -87,6 +119,54 @@ def test_inspection_uses_only_read_only_path_and_proves_read_only_identity_first
     assert "current_user AS role" in api.calls[0][2]["query"]
     assert "transaction_read_only" in api.calls[0][2]["query"]
     assert "/database/query\"" not in "\n".join(call[1] for call in api.calls)
+
+
+def test_inspection_roots_every_validated_public_base_or_partitioned_table_and_fingerprints_authorization():
+    from scripts.inspect_production_schema_baseline import inspect_production_schema
+
+    api = FakeReadOnlyApi()
+    receipt = inspect_production_schema(api, PROJECT_REF, MAIN_SHA)
+
+    assert [item["relation"] for item in receipt["protected_roots"]] == sorted(
+        {"dry_powder", "holdings", "owner_investment_plans", "market_intelligence_runs", "portfolio_commands",
+         "suggestion_grades", "suggestions", "unexpected_audit_state"}
+    )
+    roots_query = api.calls[2][2]["query"]
+    assert "public.dry_powder" in roots_query
+    assert "public.owner_investment_plans" in roots_query
+    assert "public.unexpected_audit_state" in roots_query
+    roles = {item["name"]: item for item in receipt["catalog"]["roles"]}
+    assert roles["stock_agent_dashboard_runtime"]["member_of"] == ["stock_agent_dashboard"]
+    assert receipt["catalog"]["policies"][0]["roles"] == ["PUBLIC"]
+    catalog_query = api.calls[1][2]["query"]
+    assert "pg_get_indexdef" in catalog_query
+    assert "default_sha256" in catalog_query
+    assert "relrowsecurity" in catalog_query and "relforcerowsecurity" in catalog_query
+    assert "WHEN role_oid = 0 THEN 'PUBLIC'" in catalog_query
+    assert "rolpassword" not in catalog_query
+
+
+def test_inspection_rejects_inconsistent_post_marker_presence_and_dynamic_root_sets(monkeypatch):
+    import scripts.inspect_production_schema_baseline as inspector
+
+    class BadPresenceApi(FakeReadOnlyApi):
+        def __call__(self, method, path, payload=None):
+            response = super().__call__(method, path, payload)
+            if "catalog" in payload["query"]:
+                response[0]["relation_presence"]["public.market_source_item_provenance"] = True
+            return response
+
+    with pytest.raises(RuntimeError, match="presence"):
+        inspector.inspect_production_schema(BadPresenceApi(), PROJECT_REF, MAIN_SHA)
+
+    missing = _roots()
+    missing.pop()
+    with pytest.raises(RuntimeError, match="root"):
+        inspector.inspect_production_schema(FakeReadOnlyApi(roots=missing), PROJECT_REF, MAIN_SHA)
+
+    monkeypatch.setattr(inspector, "MAX_ROOT_RELATIONS", 2)
+    with pytest.raises(RuntimeError, match="root"):
+        inspector.inspect_production_schema(FakeReadOnlyApi(), PROJECT_REF, MAIN_SHA)
 
 
 def test_inspection_rejects_writer_style_or_non_read_only_identity_before_catalog():
@@ -115,6 +195,11 @@ def test_inspection_fails_closed_on_malformed_catalog_and_root_metadata():
     leaked_shape["relations"] = [{"schema": "public", "name": "holdings", "kind": "r", "rows": []}]
     with pytest.raises(RuntimeError, match="catalog"):
         inspect_production_schema(FakeReadOnlyApi(catalog=leaked_shape), PROJECT_REF, MAIN_SHA)
+
+    unbounded_membership = _catalog()
+    unbounded_membership["roles"][0]["member_of"] = [f"role_{index:03d}" for index in range(65)]
+    with pytest.raises(RuntimeError, match="catalog"):
+        inspect_production_schema(FakeReadOnlyApi(catalog=unbounded_membership), PROJECT_REF, MAIN_SHA)
 
     invalid_root = _roots()
     invalid_root[0]["root_sha256"] = "not-a-digest"

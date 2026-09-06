@@ -34,6 +34,8 @@ from scripts.managed_isolated_restore import (  # noqa: E402
 
 MAIN_SHA = re.compile(r"[0-9a-f]{40}\Z")
 MAX_CATALOG_ROWS = 10_000
+MAX_ROOT_RELATIONS = 256
+MAX_ROLE_MEMBERSHIPS = 64
 MAX_RECEIPT_BYTES = 1_000_000
 _DIGEST = re.compile(r"[0-9a-f]{64}\Z")
 _IDENTIFIER = re.compile(r"[a-z_][a-z0-9_]*\Z")
@@ -79,22 +81,35 @@ RELATION_PRESENCE: Final[tuple[tuple[str, str], ...]] = tuple(
     ("public", name) for name in (*RECOVERY_PUBLIC_RELATIONS, *POST_20260909_MARKER_RELATIONS)
 ) + (("supabase_migrations", "schema_migrations"),)
 
-# These protected legacy roots are only counts and SHA-256 values computed by
-# PostgreSQL.  Their row values do not cross the Management API boundary.
-PROTECTED_ROOT_RELATIONS: Final[tuple[str, ...]] = (
-    "holdings",
-    "transactions",
-    "portfolio_commands",
+AUTHORIZATION_ROLES: Final[tuple[str, ...]] = (
+    "stock_agent_dashboard",
+    "stock_agent_dashboard_runtime",
+    "stock_agent_release_reader",
+    "stock_agent_release_reader_runtime",
 )
 
 _CATALOG_FIELDS: Final[dict[str, tuple[str, ...]]] = {
-    "relations": ("schema", "name", "kind"),
-    "columns": ("schema", "relation", "name", "position", "type", "not_null", "has_default", "identity", "generated"),
+    "relations": ("schema", "name", "kind", "row_security", "force_row_security", "owner"),
+    "columns": ("schema", "relation", "name", "position", "type", "not_null", "has_default", "default_sha256", "identity", "generated"),
     "constraints": ("schema", "relation", "name", "kind", "definition_sha256"),
     "functions": ("schema", "identity", "language", "volatility", "security_definer", "definition_sha256"),
+    "indexes": ("schema", "relation", "name", "definition_sha256"),
     "triggers": ("schema", "relation", "name", "enabled", "definition_sha256"),
     "policies": ("schema", "relation", "name", "command", "roles", "using_sha256", "check_sha256"),
     "acls": ("object_kind", "schema", "object", "grantee", "grantor", "privilege", "grantable"),
+    "roles": ("name", "exists", "login", "inherit", "superuser", "bypassrls", "createrole", "createdb", "replication", "member_of"),
+}
+
+_CATALOG_IDENTITIES: Final[dict[str, tuple[str, ...]]] = {
+    "relations": ("schema", "name"),
+    "columns": ("schema", "relation", "name"),
+    "constraints": ("schema", "relation", "name"),
+    "functions": ("schema", "identity"),
+    "indexes": ("schema", "relation", "name"),
+    "triggers": ("schema", "relation", "name"),
+    "policies": ("schema", "relation", "name"),
+    "acls": ("object_kind", "schema", "object", "grantee", "grantor", "privilege"),
+    "roles": ("name",),
 }
 
 
@@ -126,19 +141,25 @@ def _catalog_query() -> str:
     presence_values = ",".join("('%s','%s')" % pair for pair in RELATION_PRESENCE)
     return f"""
 WITH expected(schema_name, relation_name) AS (VALUES {presence_values}),
+expected_roles(role_name) AS (VALUES {','.join("('%s')" % role for role in AUTHORIZATION_ROLES)}),
 relations AS (
-  SELECT jsonb_build_object('schema', n.nspname, 'name', c.relname, 'kind', c.relkind::text) AS item
+  SELECT jsonb_build_object('schema', n.nspname, 'name', c.relname, 'kind', c.relkind::text,
+    'row_security', c.relrowsecurity, 'force_row_security', c.relforcerowsecurity, 'owner', owner.rolname) AS item
   FROM pg_catalog.pg_class AS c
   JOIN pg_catalog.pg_namespace AS n ON n.oid = c.relnamespace
+  JOIN pg_catalog.pg_roles AS owner ON owner.oid = c.relowner
   WHERE n.nspname = 'public' AND c.relkind IN ('r', 'p', 'v', 'm', 'f', 'S', 'i', 'I', 'c')
 ), columns AS (
   SELECT jsonb_build_object('schema', n.nspname, 'relation', c.relname, 'name', a.attname,
     'position', a.attnum, 'type', pg_catalog.format_type(a.atttypid, a.atttypmod),
-    'not_null', a.attnotnull, 'has_default', a.atthasdef, 'identity', a.attidentity,
+    'not_null', a.attnotnull, 'has_default', a.atthasdef,
+    'default_sha256', encode(extensions.digest(convert_to(COALESCE(pg_catalog.pg_get_expr(d.adbin, d.adrelid), ''), 'UTF8'), 'sha256'), 'hex'),
+    'identity', a.attidentity,
     'generated', a.attgenerated) AS item
   FROM pg_catalog.pg_attribute AS a
   JOIN pg_catalog.pg_class AS c ON c.oid = a.attrelid
   JOIN pg_catalog.pg_namespace AS n ON n.oid = c.relnamespace
+  LEFT JOIN pg_catalog.pg_attrdef AS d ON d.adrelid = a.attrelid AND d.adnum = a.attnum
   WHERE n.nspname = 'public' AND c.relkind IN ('r', 'p', 'v', 'm', 'f', 'S', 'i', 'I', 'c')
     AND a.attnum > 0 AND NOT a.attisdropped
 ), constraints AS (
@@ -157,6 +178,14 @@ relations AS (
   JOIN pg_catalog.pg_namespace AS n ON n.oid = p.pronamespace
   JOIN pg_catalog.pg_language AS l ON l.oid = p.prolang
   WHERE n.nspname = 'public'
+), indexes AS (
+  SELECT jsonb_build_object('schema', n.nspname, 'relation', table_class.relname, 'name', index_class.relname,
+    'definition_sha256', encode(extensions.digest(convert_to(pg_catalog.pg_get_indexdef(index_class.oid), 'UTF8'), 'sha256'), 'hex')) AS item
+  FROM pg_catalog.pg_index AS i
+  JOIN pg_catalog.pg_class AS index_class ON index_class.oid = i.indexrelid
+  JOIN pg_catalog.pg_class AS table_class ON table_class.oid = i.indrelid
+  JOIN pg_catalog.pg_namespace AS n ON n.oid = table_class.relnamespace
+  WHERE n.nspname = 'public'
 ), triggers AS (
   SELECT jsonb_build_object('schema', n.nspname, 'relation', c.relname, 'name', t.tgname,
     'enabled', t.tgenabled::text, 'definition_sha256',
@@ -167,8 +196,9 @@ relations AS (
   WHERE n.nspname = 'public' AND NOT t.tgisinternal
 ), policies AS (
   SELECT jsonb_build_object('schema', n.nspname, 'relation', c.relname, 'name', p.polname,
-    'command', p.polcmd::text, 'roles', COALESCE((SELECT jsonb_agg(r.rolname ORDER BY r.rolname)
-      FROM pg_catalog.pg_roles AS r WHERE r.oid = ANY (p.polroles)), '[]'::jsonb),
+    'command', p.polcmd::text, 'roles', COALESCE((SELECT jsonb_agg(CASE WHEN role_oid = 0 THEN 'PUBLIC' ELSE r.rolname END
+      ORDER BY CASE WHEN role_oid = 0 THEN 'PUBLIC' ELSE r.rolname END)
+      FROM unnest(p.polroles) AS policy_role(role_oid) LEFT JOIN pg_catalog.pg_roles AS r ON r.oid = role_oid), '[]'::jsonb),
     'using_sha256', encode(extensions.digest(convert_to(COALESCE(pg_catalog.pg_get_expr(p.polqual, p.polrelid), ''), 'UTF8'), 'sha256'), 'hex'),
     'check_sha256', encode(extensions.digest(convert_to(COALESCE(pg_catalog.pg_get_expr(p.polwithcheck, p.polrelid), ''), 'UTF8'), 'sha256'), 'hex')) AS item
   FROM pg_catalog.pg_policy AS p
@@ -196,6 +226,18 @@ relations AS (
   LEFT JOIN pg_catalog.pg_roles AS grantee ON grantee.oid = x.grantee
   JOIN pg_catalog.pg_roles AS grantor ON grantor.oid = x.grantor
   WHERE n.nspname = 'public'
+), roles AS (
+  SELECT jsonb_build_object('name', expected_roles.role_name, 'exists', role.oid IS NOT NULL,
+    'login', COALESCE(role.rolcanlogin, false), 'inherit', COALESCE(role.rolinherit, false),
+    'superuser', COALESCE(role.rolsuper, false), 'bypassrls', COALESCE(role.rolbypassrls, false),
+    'createrole', COALESCE(role.rolcreaterole, false), 'createdb', COALESCE(role.rolcreatedb, false),
+    'replication', COALESCE(role.rolreplication, false), 'member_of',
+    COALESCE((SELECT jsonb_agg(parent.rolname ORDER BY parent.rolname)
+      FROM pg_catalog.pg_auth_members AS member
+      JOIN pg_catalog.pg_roles AS parent ON parent.oid = member.roleid
+      WHERE member.member = role.oid), '[]'::jsonb)) AS item
+  FROM expected_roles
+  LEFT JOIN pg_catalog.pg_roles AS role ON role.rolname = expected_roles.role_name
 )
 SELECT
   jsonb_build_object(
@@ -203,9 +245,11 @@ SELECT
     'columns', COALESCE((SELECT jsonb_agg(item ORDER BY item::text) FROM columns), '[]'::jsonb),
     'constraints', COALESCE((SELECT jsonb_agg(item ORDER BY item::text) FROM constraints), '[]'::jsonb),
     'functions', COALESCE((SELECT jsonb_agg(item ORDER BY item::text) FROM functions), '[]'::jsonb),
+    'indexes', COALESCE((SELECT jsonb_agg(item ORDER BY item::text) FROM indexes), '[]'::jsonb),
     'triggers', COALESCE((SELECT jsonb_agg(item ORDER BY item::text) FROM triggers), '[]'::jsonb),
     'policies', COALESCE((SELECT jsonb_agg(item ORDER BY item::text) FROM policies), '[]'::jsonb),
-    'acls', COALESCE((SELECT jsonb_agg(item ORDER BY item::text) FROM acls), '[]'::jsonb)
+    'acls', COALESCE((SELECT jsonb_agg(item ORDER BY item::text) FROM acls), '[]'::jsonb),
+    'roles', COALESCE((SELECT jsonb_agg(item ORDER BY item::text) FROM roles), '[]'::jsonb)
   ) AS catalog,
   (SELECT jsonb_object_agg(schema_name || '.' || relation_name,
     pg_catalog.to_regclass(pg_catalog.format('%I.%I', schema_name, relation_name)) IS NOT NULL)
@@ -213,9 +257,25 @@ SELECT
 """.strip()
 
 
-def _roots_query() -> str:
+def _root_relation_names(relations: list[dict[str, object]]) -> tuple[str, ...]:
+    names = []
+    for relation in relations:
+        if relation["kind"] not in {"r", "p"}:
+            continue
+        name = relation["name"]
+        if not isinstance(name, str) or _IDENTIFIER.fullmatch(name) is None:
+            raise RuntimeError("protected root relation identity is unsafe")
+        names.append(name)
+    if len(names) > MAX_ROOT_RELATIONS:
+        raise RuntimeError("protected root relation count exceeds bounds")
+    return tuple(sorted(names))
+
+
+def _roots_query(relations: tuple[str, ...]) -> str:
+    if not relations:
+        return "SELECT '[]'::jsonb AS protected_roots"
     parts = []
-    for relation in PROTECTED_ROOT_RELATIONS:
+    for relation in relations:
         parts.append(
             "SELECT '%s'::text AS relation, count(*)::bigint AS count, "
             "encode(extensions.digest(convert_to(COALESCE(jsonb_agg(to_jsonb(row) ORDER BY to_jsonb(row)::text), "
@@ -245,17 +305,19 @@ def _validate_catalog(catalog: object) -> dict[str, list[dict[str, object]]]:
             if not isinstance(value, Mapping) or set(value) != set(fields):
                 raise RuntimeError("schema catalog is malformed")
             item = dict(value)
-            if item.get("schema") != "public":
+            if category != "roles" and item.get("schema") != "public":
                 raise RuntimeError("schema catalog contains an unexpected schema")
             for key, field in item.items():
                 if key in {"position"}:
                     if not isinstance(field, int) or field < 1:
                         raise RuntimeError("schema catalog is malformed")
-                elif key in {"not_null", "has_default", "security_definer", "grantable"}:
+                elif key in {"not_null", "has_default", "security_definer", "grantable", "row_security", "force_row_security",
+                             "exists", "login", "inherit", "superuser", "bypassrls", "createrole", "createdb", "replication"}:
                     if not isinstance(field, bool):
                         raise RuntimeError("schema catalog is malformed")
-                elif key == "roles":
-                    if not isinstance(field, list) or not all(isinstance(role, str) and role for role in field):
+                elif key in {"roles", "member_of"}:
+                    if (not isinstance(field, list) or not all(isinstance(role, str) and role for role in field)
+                            or field != sorted(set(field)) or len(field) > MAX_ROLE_MEMBERSHIPS):
                         raise RuntimeError("schema catalog is malformed")
                 elif key.endswith("sha256"):
                     _require_string(field, "digest", pattern=_DIGEST)
@@ -266,12 +328,15 @@ def _validate_catalog(catalog: object) -> dict[str, list[dict[str, object]]]:
                     _require_string(field, key)
             if category == "relations" and item["kind"] not in {"r", "p", "v", "m", "f", "S", "i", "I", "c"}:
                 raise RuntimeError("schema catalog is malformed")
-            identity = tuple(item[key] for key in fields if key not in {"type", "not_null", "has_default", "identity", "generated", "definition_sha256", "enabled", "roles", "using_sha256", "check_sha256", "grantable"})
+            identity = tuple(item[key] for key in _CATALOG_IDENTITIES[category])
             if identity in identities:
                 raise RuntimeError("schema catalog contains duplicate identities")
             identities.add(identity)
             result.append(item)
         checked[category] = sorted(result, key=canonical_json)
+    roles = checked["roles"]
+    if len(roles) != len(AUTHORIZATION_ROLES) or {item["name"] for item in roles} != set(AUTHORIZATION_ROLES):
+        raise RuntimeError("schema authorization roles are malformed")
     return checked
 
 
@@ -280,15 +345,15 @@ def _validate_presence(value: object, relations: list[dict[str, object]]) -> dic
     if not isinstance(value, Mapping) or set(value) != expected or not all(isinstance(present, bool) for present in value.values()):
         raise RuntimeError("schema relation-presence matrix is malformed")
     present_relations = {f"public.{item['name']}" for item in relations}
-    for relation in RECOVERY_PUBLIC_RELATIONS:
+    for relation in (*RECOVERY_PUBLIC_RELATIONS, *POST_20260909_MARKER_RELATIONS):
         key = f"public.{relation}"
         if value[key] != (key in present_relations):
             raise RuntimeError("schema relation-presence matrix is inconsistent")
     return {key: bool(value[key]) for key in sorted(value)}
 
 
-def _validate_roots(value: object) -> list[dict[str, object]]:
-    if not isinstance(value, list) or len(value) != len(PROTECTED_ROOT_RELATIONS):
+def _validate_roots(value: object, expected_relations: tuple[str, ...]) -> list[dict[str, object]]:
+    if not isinstance(value, list) or len(value) != len(expected_relations):
         raise RuntimeError("protected root metadata is malformed")
     by_name: dict[str, dict[str, object]] = {}
     for item in value:
@@ -297,12 +362,12 @@ def _validate_roots(value: object) -> list[dict[str, object]]:
         relation = item.get("relation")
         count = item.get("count")
         digest = item.get("root_sha256")
-        if relation not in PROTECTED_ROOT_RELATIONS or not isinstance(count, int) or count < 0 or not isinstance(digest, str) or _DIGEST.fullmatch(digest) is None:
+        if relation not in expected_relations or not isinstance(count, int) or count < 0 or not isinstance(digest, str) or _DIGEST.fullmatch(digest) is None:
             raise RuntimeError("protected root metadata is malformed")
         if relation in by_name:
             raise RuntimeError("protected root metadata is malformed")
         by_name[relation] = {"relation": relation, "count": count, "root_sha256": digest}
-    if set(by_name) != set(PROTECTED_ROOT_RELATIONS):
+    if set(by_name) != set(expected_relations):
         raise RuntimeError("protected root metadata is malformed")
     return [by_name[name] for name in sorted(by_name)]
 
@@ -326,11 +391,12 @@ def inspect_production_schema(request, project_ref: str, main_sha: str) -> dict[
         raise RuntimeError("schema catalog response is malformed")
     catalog = _validate_catalog(catalog_rows[0]["catalog"])
     presence = _validate_presence(catalog_rows[0]["relation_presence"], catalog["relations"])
+    root_relations = _root_relation_names(catalog["relations"])
 
-    root_rows = _query(request, project_ref, _roots_query())
+    root_rows = _query(request, project_ref, _roots_query(root_relations))
     if len(root_rows) != 1 or set(root_rows[0]) != {"protected_roots"}:
         raise RuntimeError("protected root response is malformed")
-    roots = _validate_roots(root_rows[0]["protected_roots"])
+    roots = _validate_roots(root_rows[0]["protected_roots"], root_relations)
 
     receipt: dict[str, object] = {
         "format": "stocks-production-schema-inventory-v1",
