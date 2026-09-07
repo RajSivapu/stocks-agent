@@ -48,6 +48,12 @@ def test_v1_provider_and_alpha_budget_contract(settings):
         "post-market": 8,
         "on-demand": 4,
     }
+    assert dict(policy.provider_phase_budgets["sec_edgar"]) == {
+        "pre-market": 7,
+        "intraday": 3,
+        "post-market": 5,
+        "on-demand": 3,
+    }
 
 
 def test_budget_for_returns_configured_phase_budget_and_zero_for_unknown_values(settings):
@@ -96,6 +102,7 @@ def test_alpha_vantage_phase_allocation_cannot_exceed_daily_ceiling(settings):
         (("source_capability_version",), 2, "source capability version"),
         (("theme_taxonomy_version",), 2, "theme taxonomy version"),
         (("adaptive_enrichment_budget", "pre-market"), 13, "adaptive enrichment budget"),
+        (("provider_phase_budgets", "sec_edgar", "pre-market"), 8, "provider ceiling"),
     ],
 )
 def test_unapproved_authority_or_bound_is_rejected(settings, path, value, message):

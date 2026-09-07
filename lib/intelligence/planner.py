@@ -82,7 +82,7 @@ _REQUIRED_BASELINE_IDS = (
     "gdelt_theme_search",
 )
 _HEALTH_STATES = frozenset({
-    "enabled", "configuration_missing", "unsupported", "degraded", "disabled"
+    "enabled", "configuration_missing", "unavailable", "unsupported", "degraded", "disabled"
 })
 _REQUIREMENT_TIERS = frozenset({"required_baseline", "optional"})
 _FIXED_ALPHA_TOPICS = frozenset({
@@ -121,8 +121,47 @@ _CAPABILITY_FIELDS = frozenset({
     "provider_priority",
     "query_pack",
 })
+_CAPABILITY_EXTENSION_FIELDS = frozenset({
+    "screen_id",
+    "reviewed_at",
+    "endpoint_version",
+    "parser_version",
+    "status_reasons",
+    "transport_contract",
+})
 _IDENTIFIER_KINDS = frozenset({"issuer_submissions", "filing_document", "quote"})
 _MAX_RUN_REQUESTS = 100
+_YAHOO_SCREEN_IDS = frozenset({
+    "top_gainers", "top_losers", "most_active", "unusual_volume",
+    "near_52w_high_quality", "oversold_quality",
+})
+_INSIDER_SCREEN_REASONS = (
+    "form4_feed_capability_missing",
+    "filing_index_capability_missing",
+    "ownership_xml_capability_missing",
+    "provider_budget_unreserved",
+    "parser_contract_missing",
+)
+_YAHOO_SCREEN_REASONS = (
+    "automation_permission_unproven",
+    "public_api_contract_unavailable",
+    "robots_review_unverified",
+)
+_INACTIVE_SCREEN_TRANSPORT = {
+    "active": False,
+    "request_budget": 0,
+    "all_opens_charged": False,
+    "redirects": False,
+    "retries": False,
+    "cookies": False,
+    "crumbs": False,
+    "challenge_endpoints": False,
+}
+_FUTURE_FORM4_CONTRACTS = {
+    "sec_form4_recent_feed": ("/cgi-bin/browse-edgar", 1, 50),
+    "sec_form4_filing_index": ("/Archives/edgar/data/*/*-index.html", 2, 100),
+    "sec_form4_ownership_xml": ("/Archives/edgar/data/*/*.xml", 2, 100),
+}
 
 
 class _FrozenList(tuple):
@@ -235,11 +274,19 @@ def _validate_query_pack(
     allowed_hosts: frozenset[str],
     path_patterns: tuple[str, ...],
     value: object,
+    *,
+    enabled: bool,
 ) -> Mapping[str, object]:
     if not isinstance(value, Mapping):
         raise ValueError(f"{capability_id} query pack must be an object")
     leaves = _query_leaves(value, query_kind=query_kind, themes=themes)
     for query in leaves:
+        if query_kind == "screener" and query.get("transport") == "inactive":
+            if enabled:
+                raise ValueError(f"{capability_id} cannot enable an inactive transport contract")
+            if set(query) != {"screen_id", "transport"}:
+                raise ValueError(f"{capability_id} inactive screener query is invalid")
+            continue
         host = query.get("host")
         path = query.get("path")
         if host not in allowed_hosts:
@@ -271,6 +318,41 @@ def _validate_query_pack(
                 raise ValueError("alpha vantage requires documented fixed topics")
             if any(topic not in _FIXED_ALPHA_TOPICS for topic in topics.split(",")):
                 raise ValueError("alpha vantage requires documented fixed topics")
+    return _deep_freeze(value)  # type: ignore[return-value]
+
+
+def _status_reasons(value: object, capability_id: str) -> tuple[str, ...]:
+    reasons = _string_sequence(
+        value, f"{capability_id} status reasons", allow_empty=True, maximum=12,
+    )
+    if any(re.fullmatch(r"[a-z][a-z0-9_]{2,79}", reason) is None for reason in reasons):
+        raise ValueError(f"{capability_id} status reasons are invalid")
+    return reasons
+
+
+def _transport_contract(value: object, capability_id: str) -> Mapping[str, object]:
+    if value is None:
+        return MappingProxyType({})
+    if not isinstance(value, Mapping) or not value:
+        raise ValueError(f"{capability_id} transport contract must be an object")
+    allowed = {
+        "active", "request_budget", "all_opens_charged", "redirects", "retries",
+        "cookies", "crumbs", "challenge_endpoints", "max_response_bytes", "max_rows",
+        "min_interval_ms", "max_elapsed_seconds",
+    }
+    if not set(value) <= allowed or "active" not in value or not isinstance(value["active"], bool):
+        raise ValueError(f"{capability_id} transport contract is invalid")
+    for key in {
+        "all_opens_charged", "redirects", "retries", "cookies", "crumbs", "challenge_endpoints",
+    } & set(value):
+        if not isinstance(value[key], bool):
+            raise ValueError(f"{capability_id} transport contract is invalid")
+    for key in {
+        "request_budget", "max_response_bytes", "max_rows", "min_interval_ms",
+        "max_elapsed_seconds",
+    } & set(value):
+        if isinstance(value[key], bool) or not isinstance(value[key], int) or value[key] < 0:
+            raise ValueError(f"{capability_id} transport contract is invalid")
     return _deep_freeze(value)  # type: ignore[return-value]
 
 
@@ -308,7 +390,11 @@ def load_source_capabilities(
     capabilities: dict[str, SourceCapability] = {}
     query_packs: dict[str, Mapping[str, object]] = {}
     for raw in raw_capabilities:
-        if not isinstance(raw, Mapping) or set(raw) != _CAPABILITY_FIELDS:
+        if (
+            not isinstance(raw, Mapping)
+            or not _CAPABILITY_FIELDS <= set(raw)
+            or not set(raw) <= _CAPABILITY_FIELDS | _CAPABILITY_EXTENSION_FIELDS
+        ):
             raise ValueError("capability must contain exactly the reviewed fields")
         capability_id = _bounded_string(raw["capability_id"], "capability ID")
         if not re.fullmatch(r"[a-z][a-z0-9_]{2,79}", capability_id):
@@ -329,13 +415,16 @@ def load_source_capabilities(
         phases = frozenset(_string_sequence(raw["phases"], f"{capability_id} phases"))
         if not phases <= _PHASES:
             raise ValueError(f"{capability_id} uses an unknown phase")
+        inactive_screener = query_kind == "screener"
         allowed_hosts = frozenset(_string_sequence(
-            raw["allowed_hosts"], f"{capability_id} allowed hosts"
+            raw["allowed_hosts"], f"{capability_id} allowed hosts",
+            allow_empty=inactive_screener,
         ))
         if not allowed_hosts <= _APPROVED_HOSTS:
             raise ValueError(f"{capability_id} uses an unapproved host")
         path_patterns = _string_sequence(
-            raw["allowed_path_patterns"], f"{capability_id} path patterns"
+            raw["allowed_path_patterns"], f"{capability_id} path patterns",
+            allow_empty=inactive_screener,
         )
         if any(not pattern.startswith("/") or ".." in pattern for pattern in path_patterns):
             raise ValueError(f"{capability_id} has an invalid path pattern")
@@ -370,7 +459,81 @@ def load_source_capabilities(
             allowed_hosts,
             path_patterns,
             raw["query_pack"],
+            enabled=enabled,
         )
+        screen_id = raw.get("screen_id")
+        if screen_id is not None and (
+            not isinstance(screen_id, str)
+            or re.fullmatch(r"[a-z][a-z0-9_]{2,79}", screen_id) is None
+        ):
+            raise ValueError(f"{capability_id} screen ID is invalid")
+        if query_kind == "screener" and screen_id is None:
+            raise ValueError(f"{capability_id} screen ID is required")
+        if query_kind != "screener" and screen_id is not None:
+            raise ValueError(f"{capability_id} screen ID is not applicable")
+        reviewed_at = raw.get("reviewed_at")
+        if reviewed_at is not None:
+            if not isinstance(reviewed_at, str):
+                raise ValueError(f"{capability_id} review date is invalid")
+            try:
+                if datetime.fromisoformat(f"{reviewed_at}T00:00:00+00:00").date().isoformat() != reviewed_at:
+                    raise ValueError
+            except ValueError:
+                raise ValueError(f"{capability_id} review date is invalid") from None
+        endpoint_version = raw.get("endpoint_version")
+        parser_version = raw.get("parser_version")
+        for value, name in (
+            (endpoint_version, "endpoint version"), (parser_version, "parser version")
+        ):
+            if value is not None:
+                _bounded_string(value, f"{capability_id} {name}", maximum=120)
+        reasons = _status_reasons(raw.get("status_reasons", []), capability_id)
+        transport = _transport_contract(raw.get("transport_contract"), capability_id)
+        if query_kind == "screener":
+            if reviewed_at is None or endpoint_version is None or parser_version is None \
+                    or not reasons or transport.get("active") is not False:
+                raise ValueError(f"{capability_id} screener coverage contract is incomplete")
+            if transport.get("request_budget") != 0:
+                raise ValueError(f"{capability_id} inactive screener request budget must be zero")
+            default_query = query_packs[capability_id].get("default")
+            if not isinstance(default_query, Mapping) or default_query.get("screen_id") != screen_id:
+                raise ValueError(f"{capability_id} screener query has inconsistent identity")
+            if dict(transport) != _INACTIVE_SCREEN_TRANSPORT:
+                raise ValueError(f"{capability_id} inactive screener transport contract is invalid")
+            if screen_id in _YAHOO_SCREEN_IDS:
+                if provider != "yahoo" or health != "disabled" or enabled \
+                        or reasons != _YAHOO_SCREEN_REASONS:
+                    raise ValueError(f"{capability_id} Yahoo screen feasibility state is invalid")
+            elif screen_id == "insider_buying_clusters":
+                if provider != "sec_edgar" or health != "unsupported" or enabled \
+                        or reasons != _INSIDER_SCREEN_REASONS:
+                    raise ValueError(f"{capability_id} insider screen feasibility state is invalid")
+            else:
+                raise ValueError(f"{capability_id} screen ID is not reviewed")
+        if capability_id.startswith("sec_form4_"):
+            required_transport = {
+                "active": False,
+                "request_budget": raw["max_requests_per_run"],
+                "all_opens_charged": True,
+                "redirects": False,
+                "retries": False,
+                "cookies": False,
+                "crumbs": False,
+                "challenge_endpoints": False,
+                "max_response_bytes": 500_000,
+                "max_rows": raw["max_items_per_request"],
+                "min_interval_ms": 1_000,
+                "max_elapsed_seconds": 60,
+            }
+            if dict(transport) != required_transport or enabled or health != "unsupported":
+                raise ValueError(f"{capability_id} future Form 4 transport contract is invalid")
+            expected = _FUTURE_FORM4_CONTRACTS.get(capability_id)
+            if expected is None or provider != "sec_edgar" \
+                    or allowed_hosts != frozenset({"www.sec.gov"}) \
+                    or path_patterns != (expected[0],) \
+                    or raw["max_requests_per_run"] != expected[1] \
+                    or raw["max_items_per_request"] != expected[2]:
+                raise ValueError(f"{capability_id} future Form 4 allowlist is invalid")
         capabilities[capability_id] = SourceCapability(
             capability_id=capability_id,
             provider=provider,
@@ -401,6 +564,12 @@ def load_source_capabilities(
             enabled=enabled,
             provider_priority=priority,
             query_pack=query_packs[capability_id],
+            screen_id=screen_id,
+            reviewed_at=reviewed_at,
+            endpoint_version=endpoint_version,
+            parser_version=parser_version,
+            status_reasons=reasons,
+            transport_contract=transport,
         )
 
     for baseline_id in baseline_ids:
@@ -421,6 +590,13 @@ def load_source_capabilities(
     } - set(baseline_ids)
     if unlisted_required:
         raise ValueError("required baseline capability is not listed in the reviewed baseline")
+    configured_screens = {
+        value.screen_id for value in capabilities.values() if value.query_kind == "screener"
+    }
+    if configured_screens != _YAHOO_SCREEN_IDS | {"insider_buying_clusters"}:
+        raise ValueError("screen capability coverage is incomplete")
+    if not set(_FUTURE_FORM4_CONTRACTS) <= set(capabilities):
+        raise ValueError("future Form 4 capability coverage is incomplete")
     return _CapabilityRegistry(
         capabilities,
         version=1,

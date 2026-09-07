@@ -645,12 +645,21 @@ def build_adapter(
     return adapter_type(http, quota, secret_getter=secret_getter, clock=clock)
 
 
+def __getattr__(name: str) -> object:
+    if name == "YahooScreenAdapter":
+        from .yahoo_screen import YahooScreenAdapter
+
+        return YahooScreenAdapter
+    raise AttributeError(name)
+
+
 __all__ = [
     "CollectionQuery",
     "CollectionResult",
     "RequestReceipt",
     "SourceAdapter",
     "SourceItem",
+    "YahooScreenAdapter",
     "build_adapter",
     "entity_ids",
     "security_ids",

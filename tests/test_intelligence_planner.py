@@ -10,6 +10,7 @@ import pytest
 from lib.config import load_settings
 from lib.intelligence.planner import build_discovery_plan, load_source_capabilities
 from lib.intelligence.policy import load_intelligence_policy
+from lib.intelligence.research_queue import adaptive_provider_reservations
 
 
 WINDOW = {
@@ -148,6 +149,95 @@ def test_planner_reserves_holding_and_adaptive_capacity_before_screens():
         total <= load_intelligence_policy(load_settings()).budget_for(provider, "pre-market")
         for provider, total in plan.provider_request_totals.items()
     )
+
+
+@pytest.mark.parametrize("phase", ["pre-market", "intraday", "post-market", "on-demand"])
+def test_actual_plans_fit_reference_plus_adaptive_sec_ceiling_without_screen_requests(phase):
+    policy = load_intelligence_policy(load_settings())
+    plan = build_discovery_plan(
+        policy,
+        load_source_capabilities(),
+        phase=phase,
+        run_id=RUN_ID,
+        reference_version="sec:fixture-v1",
+        requested_window=WINDOW,
+        available_credentials=frozenset(),
+        required_holding_quote_requests=0,
+        last_completed_scans={},
+    )
+    envelope = adaptive_provider_reservations(phase)
+    aggregate_sec = plan.provider_request_totals.get("sec_edgar", 0) \
+        + envelope["sec_issuer_submissions"] + envelope["sec_filing_document"]
+
+    assert aggregate_sec == policy.budget_for("sec_edgar", phase)
+    assert not any(task.query_kind == "screener" for task in plan.tasks)
+    assert sum(plan.provider_request_totals.values()) \
+        + plan.reserved_holding_quote_requests + plan.reserved_adaptive_requests <= 100
+
+
+def test_screen_and_future_form4_capabilities_are_inactive_explicit_contracts():
+    capabilities = load_source_capabilities()
+    screen_ids = {
+        "top_gainers", "top_losers", "most_active", "unusual_volume",
+        "near_52w_high_quality", "oversold_quality", "insider_buying_clusters",
+    }
+    screens = {
+        row.screen_id: row for row in capabilities.values()
+        if row.query_kind == "screener"
+    }
+
+    assert set(screens) == screen_ids
+    assert all(not row.enabled for row in screens.values())
+    assert all(row.transport_contract["active"] is False for row in screens.values())
+    assert all(row.reviewed_at == "2026-09-07" for row in screens.values())
+    assert all(row.retention_class == "bounded_derived_lead" for row in screens.values())
+    assert set(screens["top_gainers"].status_reasons) == {
+        "automation_permission_unproven",
+        "public_api_contract_unavailable",
+        "robots_review_unverified",
+    }
+    assert screens["insider_buying_clusters"].status_reasons == (
+        "form4_feed_capability_missing",
+        "filing_index_capability_missing",
+        "ownership_xml_capability_missing",
+        "provider_budget_unreserved",
+        "parser_contract_missing",
+    )
+
+    future_ids = {
+        "sec_form4_recent_feed", "sec_form4_filing_index", "sec_form4_ownership_xml",
+    }
+    future = {capability_id: capabilities[capability_id] for capability_id in future_ids}
+    assert all(not row.enabled and row.health == "unsupported" for row in future.values())
+    assert {key: row.max_requests_per_run for key, row in future.items()} == {
+        "sec_form4_recent_feed": 1,
+        "sec_form4_filing_index": 2,
+        "sec_form4_ownership_xml": 2,
+    }
+    assert all(row.transport_contract["all_opens_charged"] is True for row in future.values())
+    assert all(row.transport_contract["max_response_bytes"] == 500_000 for row in future.values())
+    assert all(row.transport_contract["min_interval_ms"] == 1_000 for row in future.values())
+    assert all(row.transport_contract["max_elapsed_seconds"] == 60 for row in future.values())
+    assert all(row.transport_contract["redirects"] is False for row in future.values())
+    assert all(row.transport_contract["retries"] is False for row in future.values())
+    assert all(row.transport_contract["cookies"] is False for row in future.values())
+    assert all(row.transport_contract["crumbs"] is False for row in future.values())
+    assert all(row.transport_contract["challenge_endpoints"] is False for row in future.values())
+
+
+def test_disabled_yahoo_screen_cannot_be_enabled_without_a_reviewed_transport(tmp_path):
+    def enable_disabled_screen(document):
+        screen = next(
+            row for row in document["capabilities"]
+            if row["capability_id"] == "yahoo_top_gainers_screen"
+        )
+        screen["enabled"] = True
+        screen["health"] = "enabled"
+
+    path = _write_source_config(tmp_path, enable_disabled_screen)
+
+    with pytest.raises(ValueError, match="inactive transport contract"):
+        load_source_capabilities(path)
 
 
 @pytest.mark.parametrize(

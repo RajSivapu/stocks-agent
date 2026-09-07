@@ -1101,6 +1101,22 @@ def test_capability_plan_executes_exact_task_cursor_and_persists_each_transition
     assert persisted["result"]["checkpoint"]["receipt"]["metadata"]
     assert persisted["result"]["source_cursor"]["accepted_item_ids"] == []
     assert result.sources[0]["capability_id"] == "gdelt_theme_search"
+    screen_coverage = result.coverage["screen_coverage"]
+    assert screen_coverage == gateway.payloads[-1]["coverage"]["screen_coverage"]
+    assert screen_coverage["screen_definition_count"] == 7
+    assert screen_coverage["surfaced_unique_leads"] == 0
+    assert [row["outcome"] for row in screen_coverage["screen_receipts"]] == [
+        "disabled", "disabled", "disabled", "disabled", "disabled", "disabled",
+        "unsupported",
+    ]
+    assert all(row["request_cost"] == 0 for row in screen_coverage["screen_receipts"])
+    assert result.actual_requests == 1
+    assert gateway.payloads[0]["reservation_plan"]["reservations"] == [{
+        "id": gateway.payloads[0]["reservation_plan"]["reservations"][0]["id"],
+        "provider": "gdelt",
+        "requests": 1,
+        "cache_keys": [],
+    }]
 
     replay_adapter = FakeAdapter()
     replay = IntelligencePipeline(

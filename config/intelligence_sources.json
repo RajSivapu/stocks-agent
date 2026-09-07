@@ -400,6 +400,506 @@
       }
     },
     {
+      "capability_id": "yahoo_top_gainers_screen",
+      "provider": "yahoo",
+      "query_kind": "screener",
+      "themes": [],
+      "phases": [
+        "pre-market",
+        "intraday",
+        "post-market",
+        "on-demand"
+      ],
+      "allowed_hosts": [],
+      "allowed_path_patterns": [],
+      "required_credential": null,
+      "authority": "discovery_lead",
+      "retention_class": "bounded_derived_lead",
+      "max_requests_per_run": 1,
+      "max_items_per_request": 50,
+      "requirement_tier": "optional",
+      "health": "disabled",
+      "enabled": false,
+      "provider_priority": 90,
+      "query_pack": {
+        "default": {
+          "screen_id": "top_gainers",
+          "transport": "inactive"
+        }
+      },
+      "screen_id": "top_gainers",
+      "reviewed_at": "2026-09-07",
+      "endpoint_version": "public-screen-page-no-api-contract-2026-09-07",
+      "parser_version": "unavailable",
+      "status_reasons": [
+        "automation_permission_unproven",
+        "public_api_contract_unavailable",
+        "robots_review_unverified"
+      ],
+      "transport_contract": {
+        "active": false,
+        "request_budget": 0,
+        "all_opens_charged": false,
+        "redirects": false,
+        "retries": false,
+        "cookies": false,
+        "crumbs": false,
+        "challenge_endpoints": false
+      }
+    },
+    {
+      "capability_id": "yahoo_top_losers_screen",
+      "provider": "yahoo",
+      "query_kind": "screener",
+      "themes": [],
+      "phases": [
+        "pre-market",
+        "intraday",
+        "post-market",
+        "on-demand"
+      ],
+      "allowed_hosts": [],
+      "allowed_path_patterns": [],
+      "required_credential": null,
+      "authority": "discovery_lead",
+      "retention_class": "bounded_derived_lead",
+      "max_requests_per_run": 1,
+      "max_items_per_request": 50,
+      "requirement_tier": "optional",
+      "health": "disabled",
+      "enabled": false,
+      "provider_priority": 91,
+      "query_pack": {
+        "default": {
+          "screen_id": "top_losers",
+          "transport": "inactive"
+        }
+      },
+      "screen_id": "top_losers",
+      "reviewed_at": "2026-09-07",
+      "endpoint_version": "public-screen-page-no-api-contract-2026-09-07",
+      "parser_version": "unavailable",
+      "status_reasons": [
+        "automation_permission_unproven",
+        "public_api_contract_unavailable",
+        "robots_review_unverified"
+      ],
+      "transport_contract": {
+        "active": false,
+        "request_budget": 0,
+        "all_opens_charged": false,
+        "redirects": false,
+        "retries": false,
+        "cookies": false,
+        "crumbs": false,
+        "challenge_endpoints": false
+      }
+    },
+    {
+      "capability_id": "yahoo_most_active_screen",
+      "provider": "yahoo",
+      "query_kind": "screener",
+      "themes": [],
+      "phases": [
+        "pre-market",
+        "intraday",
+        "post-market",
+        "on-demand"
+      ],
+      "allowed_hosts": [],
+      "allowed_path_patterns": [],
+      "required_credential": null,
+      "authority": "discovery_lead",
+      "retention_class": "bounded_derived_lead",
+      "max_requests_per_run": 1,
+      "max_items_per_request": 50,
+      "requirement_tier": "optional",
+      "health": "disabled",
+      "enabled": false,
+      "provider_priority": 92,
+      "query_pack": {
+        "default": {
+          "screen_id": "most_active",
+          "transport": "inactive"
+        }
+      },
+      "screen_id": "most_active",
+      "reviewed_at": "2026-09-07",
+      "endpoint_version": "public-screen-page-no-api-contract-2026-09-07",
+      "parser_version": "unavailable",
+      "status_reasons": [
+        "automation_permission_unproven",
+        "public_api_contract_unavailable",
+        "robots_review_unverified"
+      ],
+      "transport_contract": {
+        "active": false,
+        "request_budget": 0,
+        "all_opens_charged": false,
+        "redirects": false,
+        "retries": false,
+        "cookies": false,
+        "crumbs": false,
+        "challenge_endpoints": false
+      }
+    },
+    {
+      "capability_id": "yahoo_unusual_volume_screen",
+      "provider": "yahoo",
+      "query_kind": "screener",
+      "themes": [],
+      "phases": [
+        "pre-market",
+        "intraday",
+        "post-market",
+        "on-demand"
+      ],
+      "allowed_hosts": [],
+      "allowed_path_patterns": [],
+      "required_credential": null,
+      "authority": "discovery_lead",
+      "retention_class": "bounded_derived_lead",
+      "max_requests_per_run": 1,
+      "max_items_per_request": 50,
+      "requirement_tier": "optional",
+      "health": "disabled",
+      "enabled": false,
+      "provider_priority": 93,
+      "query_pack": {
+        "default": {
+          "screen_id": "unusual_volume",
+          "transport": "inactive"
+        }
+      },
+      "screen_id": "unusual_volume",
+      "reviewed_at": "2026-09-07",
+      "endpoint_version": "public-screen-page-no-api-contract-2026-09-07",
+      "parser_version": "unavailable",
+      "status_reasons": [
+        "automation_permission_unproven",
+        "public_api_contract_unavailable",
+        "robots_review_unverified"
+      ],
+      "transport_contract": {
+        "active": false,
+        "request_budget": 0,
+        "all_opens_charged": false,
+        "redirects": false,
+        "retries": false,
+        "cookies": false,
+        "crumbs": false,
+        "challenge_endpoints": false
+      }
+    },
+    {
+      "capability_id": "yahoo_near_52w_high_quality_screen",
+      "provider": "yahoo",
+      "query_kind": "screener",
+      "themes": [],
+      "phases": [
+        "pre-market",
+        "intraday",
+        "post-market",
+        "on-demand"
+      ],
+      "allowed_hosts": [],
+      "allowed_path_patterns": [],
+      "required_credential": null,
+      "authority": "discovery_lead",
+      "retention_class": "bounded_derived_lead",
+      "max_requests_per_run": 1,
+      "max_items_per_request": 50,
+      "requirement_tier": "optional",
+      "health": "disabled",
+      "enabled": false,
+      "provider_priority": 94,
+      "query_pack": {
+        "default": {
+          "screen_id": "near_52w_high_quality",
+          "transport": "inactive"
+        }
+      },
+      "screen_id": "near_52w_high_quality",
+      "reviewed_at": "2026-09-07",
+      "endpoint_version": "public-screen-page-no-api-contract-2026-09-07",
+      "parser_version": "unavailable",
+      "status_reasons": [
+        "automation_permission_unproven",
+        "public_api_contract_unavailable",
+        "robots_review_unverified"
+      ],
+      "transport_contract": {
+        "active": false,
+        "request_budget": 0,
+        "all_opens_charged": false,
+        "redirects": false,
+        "retries": false,
+        "cookies": false,
+        "crumbs": false,
+        "challenge_endpoints": false
+      }
+    },
+    {
+      "capability_id": "yahoo_oversold_quality_screen",
+      "provider": "yahoo",
+      "query_kind": "screener",
+      "themes": [],
+      "phases": [
+        "pre-market",
+        "intraday",
+        "post-market",
+        "on-demand"
+      ],
+      "allowed_hosts": [],
+      "allowed_path_patterns": [],
+      "required_credential": null,
+      "authority": "discovery_lead",
+      "retention_class": "bounded_derived_lead",
+      "max_requests_per_run": 1,
+      "max_items_per_request": 50,
+      "requirement_tier": "optional",
+      "health": "disabled",
+      "enabled": false,
+      "provider_priority": 95,
+      "query_pack": {
+        "default": {
+          "screen_id": "oversold_quality",
+          "transport": "inactive"
+        }
+      },
+      "screen_id": "oversold_quality",
+      "reviewed_at": "2026-09-07",
+      "endpoint_version": "public-screen-page-no-api-contract-2026-09-07",
+      "parser_version": "unavailable",
+      "status_reasons": [
+        "automation_permission_unproven",
+        "public_api_contract_unavailable",
+        "robots_review_unverified"
+      ],
+      "transport_contract": {
+        "active": false,
+        "request_budget": 0,
+        "all_opens_charged": false,
+        "redirects": false,
+        "retries": false,
+        "cookies": false,
+        "crumbs": false,
+        "challenge_endpoints": false
+      }
+    },
+    {
+      "capability_id": "sec_insider_buying_clusters_screen",
+      "provider": "sec_edgar",
+      "query_kind": "screener",
+      "themes": [],
+      "phases": [
+        "pre-market",
+        "intraday",
+        "post-market",
+        "on-demand"
+      ],
+      "allowed_hosts": [],
+      "allowed_path_patterns": [],
+      "required_credential": null,
+      "authority": "discovery_lead",
+      "retention_class": "bounded_derived_lead",
+      "max_requests_per_run": 1,
+      "max_items_per_request": 50,
+      "requirement_tier": "optional",
+      "health": "unsupported",
+      "enabled": false,
+      "provider_priority": 96,
+      "query_pack": {
+        "default": {
+          "screen_id": "insider_buying_clusters",
+          "transport": "inactive"
+        }
+      },
+      "screen_id": "insider_buying_clusters",
+      "reviewed_at": "2026-09-07",
+      "endpoint_version": "future-sec-form4-transport-unreserved",
+      "parser_version": "future-sec-ownership-xml-5.5-2026-03-18",
+      "status_reasons": [
+        "form4_feed_capability_missing",
+        "filing_index_capability_missing",
+        "ownership_xml_capability_missing",
+        "provider_budget_unreserved",
+        "parser_contract_missing"
+      ],
+      "transport_contract": {
+        "active": false,
+        "request_budget": 0,
+        "all_opens_charged": false,
+        "redirects": false,
+        "retries": false,
+        "cookies": false,
+        "crumbs": false,
+        "challenge_endpoints": false
+      }
+    },
+    {
+      "capability_id": "sec_form4_recent_feed",
+      "provider": "sec_edgar",
+      "query_kind": "feed",
+      "themes": [],
+      "phases": [
+        "pre-market",
+        "intraday",
+        "post-market",
+        "on-demand"
+      ],
+      "allowed_hosts": [
+        "www.sec.gov"
+      ],
+      "allowed_path_patterns": [
+        "/cgi-bin/browse-edgar"
+      ],
+      "required_credential": null,
+      "authority": "future_official_insider_discovery",
+      "retention_class": "bounded_primary_document",
+      "max_requests_per_run": 1,
+      "max_items_per_request": 50,
+      "requirement_tier": "optional",
+      "health": "unsupported",
+      "enabled": false,
+      "provider_priority": 97,
+      "query_pack": {
+        "default": {
+          "host": "www.sec.gov",
+          "path": "/cgi-bin/browse-edgar"
+        }
+      },
+      "reviewed_at": "2026-09-07",
+      "endpoint_version": "future-sec-form4-recent-feed",
+      "parser_version": "future-contract-unimplemented",
+      "status_reasons": [
+        "form4_feed_capability_missing",
+        "provider_budget_unreserved"
+      ],
+      "transport_contract": {
+        "active": false,
+        "request_budget": 1,
+        "all_opens_charged": true,
+        "redirects": false,
+        "retries": false,
+        "cookies": false,
+        "crumbs": false,
+        "challenge_endpoints": false,
+        "max_response_bytes": 500000,
+        "max_rows": 50,
+        "min_interval_ms": 1000,
+        "max_elapsed_seconds": 60
+      }
+    },
+    {
+      "capability_id": "sec_form4_filing_index",
+      "provider": "sec_edgar",
+      "query_kind": "feed",
+      "themes": [],
+      "phases": [
+        "pre-market",
+        "intraday",
+        "post-market",
+        "on-demand"
+      ],
+      "allowed_hosts": [
+        "www.sec.gov"
+      ],
+      "allowed_path_patterns": [
+        "/Archives/edgar/data/*/*-index.html"
+      ],
+      "required_credential": null,
+      "authority": "future_official_insider_discovery",
+      "retention_class": "bounded_primary_document",
+      "max_requests_per_run": 2,
+      "max_items_per_request": 100,
+      "requirement_tier": "optional",
+      "health": "unsupported",
+      "enabled": false,
+      "provider_priority": 98,
+      "query_pack": {
+        "default": {
+          "host": "www.sec.gov",
+          "path": "/Archives/edgar/data/#/#-index.html"
+        }
+      },
+      "reviewed_at": "2026-09-07",
+      "endpoint_version": "future-sec-form4-filing-index",
+      "parser_version": "future-contract-unimplemented",
+      "status_reasons": [
+        "filing_index_capability_missing",
+        "provider_budget_unreserved"
+      ],
+      "transport_contract": {
+        "active": false,
+        "request_budget": 2,
+        "all_opens_charged": true,
+        "redirects": false,
+        "retries": false,
+        "cookies": false,
+        "crumbs": false,
+        "challenge_endpoints": false,
+        "max_response_bytes": 500000,
+        "max_rows": 100,
+        "min_interval_ms": 1000,
+        "max_elapsed_seconds": 60
+      }
+    },
+    {
+      "capability_id": "sec_form4_ownership_xml",
+      "provider": "sec_edgar",
+      "query_kind": "feed",
+      "themes": [],
+      "phases": [
+        "pre-market",
+        "intraday",
+        "post-market",
+        "on-demand"
+      ],
+      "allowed_hosts": [
+        "www.sec.gov"
+      ],
+      "allowed_path_patterns": [
+        "/Archives/edgar/data/*/*.xml"
+      ],
+      "required_credential": null,
+      "authority": "future_official_insider_discovery",
+      "retention_class": "bounded_primary_document",
+      "max_requests_per_run": 2,
+      "max_items_per_request": 100,
+      "requirement_tier": "optional",
+      "health": "unsupported",
+      "enabled": false,
+      "provider_priority": 99,
+      "query_pack": {
+        "default": {
+          "host": "www.sec.gov",
+          "path": "/Archives/edgar/data/#/#.xml"
+        }
+      },
+      "reviewed_at": "2026-09-07",
+      "endpoint_version": "future-sec-form4-ownership-xml",
+      "parser_version": "sec-ownership-xml-5.5-2026-03-18",
+      "status_reasons": [
+        "ownership_xml_capability_missing",
+        "provider_budget_unreserved"
+      ],
+      "transport_contract": {
+        "active": false,
+        "request_budget": 2,
+        "all_opens_charged": true,
+        "redirects": false,
+        "retries": false,
+        "cookies": false,
+        "crumbs": false,
+        "challenge_endpoints": false,
+        "max_response_bytes": 500000,
+        "max_rows": 100,
+        "min_interval_ms": 1000,
+        "max_elapsed_seconds": 60
+      }
+    },
+    {
       "capability_id": "yahoo_security_quote",
       "provider": "yahoo",
       "query_kind": "quote",

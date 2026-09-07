@@ -59,6 +59,7 @@ from lib.intelligence.research_queue import (
     selection_manifest_from_payload,
     select_enrichment_queue,
 )
+from lib.intelligence.screening import load_screen_definitions, run_bounded_screens
 from lib.intelligence.relationships import EventRelationship, exposure_kind, propose_relation
 from lib.intelligence.themes import (
     SEED_THEMES,
@@ -1968,6 +1969,31 @@ class IntelligencePipeline:
                 self.context["exposure_facts"] = exposure_facts
             if primary_exposure_required is True:
                 self.context["primary_exposure_required"] = True
+        if self.discovery_plan is not None:
+            reference_coverage = self.context.get("reference_coverage")
+            reference = self.context.get("security_reference")
+            reference_status = (
+                str(reference_coverage.get("reference_status"))
+                if isinstance(reference_coverage, Mapping)
+                else "reference_unavailable"
+            )
+            reference_manifest_id = (
+                reference_coverage.get("reference_manifest_id")
+                if isinstance(reference_coverage, Mapping)
+                else None
+            )
+            screen_run = run_bounded_screens(
+                load_screen_definitions(),
+                payloads={},
+                reference=reference if isinstance(reference, ReferenceSnapshot) else None,
+                reference_status=reference_status,
+                reference_manifest_id=(
+                    reference_manifest_id if isinstance(reference_manifest_id, str) else None
+                ),
+                as_of=request.market_date,
+                observed_at=request.now,
+            )
+            self.context["screen_coverage"] = dict(screen_run.coverage)
         events, relationships, ranked = _discover(discovery_items, self.context, request.now)
         qualified_ids = {
             evidence_key(item)
@@ -2019,6 +2045,9 @@ class IntelligencePipeline:
         reference_coverage = self.context.get("reference_coverage")
         if isinstance(reference_coverage, Mapping):
             coverage.update(reference_coverage)
+        screen_coverage = self.context.get("screen_coverage")
+        if isinstance(screen_coverage, Mapping):
+            coverage["screen_coverage"] = dict(screen_coverage)
         limits = replace(
             self.packet_limits,
             max_serialized_bytes=min(

@@ -48,7 +48,7 @@
       "gdelt": {"pre-market": 80, "intraday": 20, "post-market": 40, "on-demand": 20},
       "finnhub": {"pre-market": 6, "intraday": 3, "post-market": 4, "on-demand": 2},
       "yahoo": {"pre-market": 12, "intraday": 6, "post-market": 8, "on-demand": 4},
-      "sec_edgar": {"pre-market": 6, "intraday": 2, "post-market": 4, "on-demand": 2},
+      "sec_edgar": {"pre-market": 7, "intraday": 3, "post-market": 5, "on-demand": 3},
       "federal_register": {"pre-market": 4, "intraday": 1, "post-market": 2, "on-demand": 2},
       "white_house": {"pre-market": 4, "intraday": 1, "post-market": 2, "on-demand": 2},
       "doe": {"pre-market": 4, "intraday": 1, "post-market": 2, "on-demand": 2},

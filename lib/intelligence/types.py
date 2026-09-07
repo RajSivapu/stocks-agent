@@ -1,4 +1,5 @@
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+from types import MappingProxyType
 from typing import Literal, Mapping
 
 
@@ -59,11 +60,19 @@ class SourceCapability:
     max_items_per_request: int
     requirement_tier: Literal["required_baseline", "optional"]
     health: Literal[
-        "enabled", "configuration_missing", "unsupported", "degraded", "disabled"
+        "enabled", "configuration_missing", "unavailable", "unsupported", "degraded", "disabled"
     ]
     enabled: bool
     provider_priority: int
     query_pack: Mapping[str, object]
+    screen_id: str | None = None
+    reviewed_at: str | None = None
+    endpoint_version: str | None = None
+    parser_version: str | None = None
+    status_reasons: tuple[str, ...] = ()
+    transport_contract: Mapping[str, object] = field(
+        default_factory=lambda: MappingProxyType({})
+    )
 
 
 @dataclass(frozen=True, slots=True)

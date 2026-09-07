@@ -4,11 +4,13 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import date, datetime, timezone
+from decimal import Decimal, InvalidOperation
 import hashlib
 from html.parser import HTMLParser
 import json
 import re
 from urllib.parse import unquote, urlsplit
+import xml.etree.ElementTree as ET
 
 from lib.edgar import sec_user_agent
 from lib.intelligence.http import HttpRequest, HttpResult, SourceFailure
@@ -21,6 +23,9 @@ _ACCESSION = re.compile(r"([0-9]{10})-([0-9]{2})-([0-9]{6})")
 _DOCUMENT = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,254}")
 _SUPPORTED_FORMS = frozenset({"10-K", "10-Q", "8-K", "20-F", "40-F"})
 _MAX_FILING_BYTES = 2_000_000
+_MAX_OWNERSHIP_XML_BYTES = 500_000
+_MAX_OWNERSHIP_TRANSACTIONS = 100
+FORM4_PARSER_VERSION = "sec-ownership-xml-5.5-2026-03-18"
 _VISIBLE_BLOCKS = frozenset({"h1", "h2", "h3", "h4", "h5", "h6", "p", "li", "tr"})
 _IGNORED_TAGS = frozenset({
     "script", "style", "noscript", "nav", "iframe", "object", "embed", "svg",
@@ -118,6 +123,36 @@ class FilingPassage:
     raw_response_hash: str
     normalized_passage_hash: str
     parser_version: str = "sec-visible-passage-v1"
+
+
+@dataclass(frozen=True, slots=True)
+class Form4Transaction:
+    filing_id: str
+    source_url: str
+    issuer_cik: str
+    issuer_symbol: str
+    reporting_person_ciks: tuple[str, ...]
+    transaction_date: date
+    reporting_period: date
+    filed_at: datetime
+    shares: Decimal
+    transaction_code: str
+    acquired_disposed_code: str
+    venue_state: str
+    venue_evidence: tuple[str, ...]
+    limitations: tuple[str, ...]
+    qualifies_for_cluster: bool
+    parser_version: str = FORM4_PARSER_VERSION
+
+
+@dataclass(frozen=True, slots=True)
+class Form4ParseResult:
+    filing_id: str
+    source_url: str
+    state: str
+    transactions: tuple[Form4Transaction, ...]
+    reasons: tuple[str, ...]
+    parser_version: str = FORM4_PARSER_VERSION
 
 
 class _VisibleText(HTMLParser):
@@ -333,6 +368,209 @@ def extract_filing_passage(
     )
 
 
+def _xml_name(tag: object) -> str:
+    if not isinstance(tag, str):
+        return ""
+    return tag.rsplit("}", 1)[-1]
+
+
+def _xml_children(node: ET.Element, name: str) -> tuple[ET.Element, ...]:
+    return tuple(value for value in node.iter() if _xml_name(value.tag) == name)
+
+
+def _xml_text(node: ET.Element, name: str) -> str | None:
+    match = next(iter(_xml_children(node, name)), None)
+    if match is None:
+        return None
+    text = " ".join("".join(match.itertext()).split())
+    return text or None
+
+
+def _form4_result(
+    filing_id: str,
+    source_url: str,
+    state: str,
+    *,
+    transactions: tuple[Form4Transaction, ...] = (),
+    reasons: tuple[str, ...],
+) -> Form4ParseResult:
+    return Form4ParseResult(
+        filing_id=filing_id,
+        source_url=source_url,
+        state=state,
+        transactions=transactions,
+        reasons=reasons,
+    )
+
+
+def parse_form4_ownership_xml(
+    raw: bytes,
+    *,
+    source_url: str,
+    filing_id: str,
+    filed_at: datetime,
+) -> Form4ParseResult:
+    """Parse a bounded, already-fetched Ownership XML document conservatively.
+
+    This function has no transport.  It accepts only a direct SEC archive URL and
+    treats parsing gaps as explicit coverage states instead of absence of activity.
+    """
+    if not isinstance(filing_id, str) or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}", filing_id):
+        raise ValueError("Form 4 filing ID is invalid")
+    try:
+        parsed_url = urlsplit(source_url)
+        port = parsed_url.port
+    except (TypeError, ValueError):
+        raise ValueError("Form 4 source URL is invalid") from None
+    if (
+        parsed_url.scheme != "https" or parsed_url.hostname != "www.sec.gov"
+        or port not in (None, 443) or parsed_url.username is not None
+        or parsed_url.password is not None or parsed_url.query or parsed_url.fragment
+        or not parsed_url.path.startswith("/Archives/edgar/data/")
+        or unquote(parsed_url.path) != parsed_url.path or "\\" in parsed_url.path
+        or any(part in {".", ".."} for part in parsed_url.path.split("/"))
+    ):
+        raise ValueError("Form 4 source URL is invalid")
+    try:
+        filed_at = _utc(filed_at)
+    except SourceFailure:
+        raise ValueError("Form 4 filed timestamp is invalid") from None
+    if not isinstance(raw, bytes) or not raw or len(raw) > _MAX_OWNERSHIP_XML_BYTES:
+        return _form4_result(
+            filing_id, source_url, "overbound", reasons=("ownership_xml_byte_bound_exceeded",),
+        )
+    upper = raw.upper()
+    if b"\x00" in raw or b"<!DOCTYPE" in upper or b"<!ENTITY" in upper or b"SYSTEM " in upper:
+        return _form4_result(
+            filing_id, source_url, "malformed", reasons=("ownership_xml_unsafe_or_malformed",),
+        )
+    try:
+        root = ET.fromstring(raw)
+    except (ET.ParseError, ValueError):
+        return _form4_result(
+            filing_id, source_url, "malformed", reasons=("ownership_xml_malformed",),
+        )
+    if _xml_name(root.tag) != "ownershipDocument":
+        return _form4_result(
+            filing_id, source_url, "malformed", reasons=("ownership_document_root_invalid",),
+        )
+    document_type = (_xml_text(root, "documentType") or "").strip().upper()
+    if document_type == "4/A":
+        return _form4_result(
+            filing_id, source_url, "unsupported", reasons=("form4_amendment_excluded",),
+        )
+    if document_type != "4":
+        return _form4_result(
+            filing_id, source_url, "unsupported", reasons=("non_form4_document_excluded",),
+        )
+    try:
+        reporting_period_text = _xml_text(root, "periodOfReport")
+        if reporting_period_text is None:
+            raise ValueError
+        reporting_period = date.fromisoformat(reporting_period_text)
+        issuer_cik_text = _xml_text(root, "issuerCik")
+        issuer_cik = _cik(issuer_cik_text)
+        issuer_symbol = (_xml_text(root, "issuerTradingSymbol") or "").strip().upper()
+        if re.fullmatch(r"[A-Z][A-Z0-9.-]{0,14}", issuer_symbol) is None:
+            raise ValueError
+    except (SourceFailure, TypeError, ValueError):
+        return _form4_result(
+            filing_id, source_url, "partial", reasons=("ownership_document_identity_incomplete",),
+        )
+    owners: list[str] = []
+    try:
+        for owner in _xml_children(root, "reportingOwner"):
+            owner_cik = _cik(_xml_text(owner, "rptOwnerCik"))
+            if owner_cik not in owners:
+                owners.append(owner_cik)
+    except SourceFailure:
+        return _form4_result(
+            filing_id, source_url, "partial", reasons=("reporting_owner_identity_incomplete",),
+        )
+    if not owners:
+        return _form4_result(
+            filing_id, source_url, "partial", reasons=("reporting_owner_identity_incomplete",),
+        )
+    footnotes = {
+        str(node.attrib.get("id")): " ".join("".join(node.itertext()).split())
+        for node in _xml_children(root, "footnote")
+        if node.attrib.get("id") and " ".join("".join(node.itertext()).split())
+    }
+    transaction_nodes = _xml_children(root, "nonDerivativeTransaction")
+    if len(transaction_nodes) > _MAX_OWNERSHIP_TRANSACTIONS:
+        return _form4_result(
+            filing_id, source_url, "overbound", reasons=("ownership_transaction_bound_exceeded",),
+        )
+    transactions: list[Form4Transaction] = []
+    incomplete = False
+    for transaction in transaction_nodes:
+        code = (_xml_text(transaction, "transactionCode") or "").strip().upper()
+        acquired = (_xml_text(transaction, "transactionAcquiredDisposedCode") or "").strip().upper()
+        swap_state = (_xml_text(transaction, "equitySwapInvolved") or "").strip().upper()
+        if swap_state not in {"", "0", "1", "FALSE", "TRUE", "N", "Y", "NO", "YES"}:
+            incomplete = True
+            continue
+        if code != "P" or acquired != "A" or swap_state in {"1", "TRUE", "Y", "YES"}:
+            continue
+        try:
+            transaction_date_text = _xml_text(transaction, "transactionDate")
+            shares_text = _xml_text(transaction, "transactionShares")
+            if transaction_date_text is None or shares_text is None:
+                raise ValueError
+            transaction_date = date.fromisoformat(transaction_date_text)
+            shares = Decimal(shares_text)
+            if not shares.is_finite() or shares <= 0:
+                raise ValueError
+        except (InvalidOperation, TypeError, ValueError):
+            incomplete = True
+            continue
+        linked_ids = tuple(dict.fromkeys(
+            str(node.attrib["id"])
+            for node in _xml_children(transaction, "footnoteId")
+            if node.attrib.get("id")
+        ))
+        evidence = tuple(footnotes[value] for value in linked_ids if value in footnotes)
+        folded = " ".join(evidence).casefold()
+        positive_open_market = bool(re.search(r"\bopen[ -]market\b", folded))
+        contradictory = bool(re.search(r"\b(?:private|off[ -]market)\b", folded))
+        supported = positive_open_market and not contradictory
+        limitations: list[str] = []
+        if re.search(r"\b10b5[ -]?1\b", folded):
+            limitations.append("rule_10b5_1_transaction")
+        if len(owners) != 1:
+            limitations.append("joint_reporting_ownership")
+        transactions.append(Form4Transaction(
+            filing_id=filing_id,
+            source_url=source_url,
+            issuer_cik=issuer_cik,
+            issuer_symbol=issuer_symbol,
+            reporting_person_ciks=tuple(owners),
+            transaction_date=transaction_date,
+            reporting_period=reporting_period,
+            filed_at=filed_at,
+            shares=shares,
+            transaction_code=code,
+            acquired_disposed_code=acquired,
+            venue_state="open_market_supported" if supported else "purchase_venue_unknown",
+            venue_evidence=evidence,
+            limitations=tuple(limitations),
+            qualifies_for_cluster=supported and len(owners) == 1,
+        ))
+    if incomplete:
+        return _form4_result(
+            filing_id, source_url, "partial", transactions=tuple(transactions),
+            reasons=("ownership_transaction_incomplete",),
+        )
+    if not transactions:
+        return _form4_result(
+            filing_id, source_url, "parsed_empty",
+            reasons=("no_qualifying_non_derivative_purchase",),
+        )
+    return _form4_result(
+        filing_id, source_url, "parsed_nonempty", transactions=tuple(transactions), reasons=(),
+    )
+
+
 def _cik(value: object) -> str:
     if (
         not isinstance(value, str)
@@ -491,8 +729,12 @@ class SecEdgarAdapter(SourceAdapter):
 
 __all__ = [
     "FilingPassage",
+    "FORM4_PARSER_VERSION",
+    "Form4ParseResult",
+    "Form4Transaction",
     "SecEdgarAdapter",
     "SecFilingDescriptor",
     "extract_filing_passage",
+    "parse_form4_ownership_xml",
     "validate_sec_submissions",
 ]
