@@ -371,6 +371,41 @@ def test_reference_unavailable_or_ambiguous_blocks_security_and_action():
     assert all(row.action_eligible is False for row in (*unavailable.leads, *ambiguous.leads))
 
 
+def test_stale_reference_can_support_research_identity_but_never_action():
+    security = _security("AAA", "0000000001")
+    payload = ScreenPayload(
+        screen_id="top_gainers",
+        state="parsed_nonempty",
+        rows=(ScreenObservation(
+            screen_id="top_gainers", symbol="AAA", sector="Technology", rank=1,
+            source_url="https://example.test/screens/aaa", observed_at=NOW,
+        ),),
+        reasons=(),
+    )
+
+    run = run_bounded_screens(
+        (_definition("top_gainers"),),
+        payloads={"top_gainers": payload},
+        reference=_reference(security),
+        reference_status="reference_stale",
+        reference_manifest_id="manifest-current",
+        as_of=date(2026, 9, 7),
+        observed_at=NOW,
+        gateway_market_inputs={
+            security.security_id: GatewayMarketInputs(
+                price=Decimal("25"), average_volume=2_000_000, market_cap=5_000_000_000,
+            ),
+        },
+        primary_exposure_security_ids=frozenset({security.security_id}),
+    )
+
+    assert run.leads[0].security_id == security.security_id
+    assert run.leads[0].reference_state == "reference_stale"
+    assert run.leads[0].research_visible is True
+    assert run.leads[0].action_eligible is False
+    assert "reference_stale" in run.leads[0].reasons
+
+
 def test_form4_parser_requires_transaction_linked_open_market_evidence():
     unknown = parse_form4_ownership_xml(
         _form4(owner_cik="0000000011", transaction_date="2026-09-01", footnote=None),

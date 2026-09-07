@@ -498,7 +498,7 @@ def _active_reference_matches(
     reference_manifest_id: str | None,
     as_of: date,
 ) -> tuple[str, SecurityIdentity | None]:
-    if reference_status == "reference_unavailable" or reference is None \
+    if reference_status not in {"healthy", "reference_stale"} or reference is None \
             or reference_manifest_id is None:
         return "reference_unavailable", None
     matches = []
@@ -513,7 +513,10 @@ def _active_reference_matches(
         return "ambiguous", None
     if not matches:
         return "unresolved", None
-    return "resolved", matches[0]
+    return (
+        "reference_stale" if reference_status == "reference_stale" else "resolved",
+        matches[0],
+    )
 
 
 def _receipt(
@@ -713,6 +716,8 @@ def run_bounded_screens(
             reference_resolved=security is not None,
         )
         reasons = list(eligibility.reasons)
+        if reference_state == "reference_stale":
+            reasons.append("reference_stale")
         if security is not None and not security.eligible:
             reasons.append("reference_ineligible")
         candidates.append(ScreenLead(
@@ -730,7 +735,12 @@ def run_bounded_screens(
             reference_manifest_id=reference_manifest_id if security is not None else None,
             reference_state=reference_state,
             research_visible=True,
-            action_eligible=eligibility.action_eligible and security is not None and security.eligible,
+            action_eligible=(
+                eligibility.action_eligible
+                and security is not None
+                and security.eligible
+                and reference_state == "resolved"
+            ),
             reasons=tuple(dict.fromkeys(reasons)),
             issuer_cik=observation.issuer_cik,
             displayed_price=observation.displayed_price,
