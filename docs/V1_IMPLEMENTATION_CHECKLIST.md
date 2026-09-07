@@ -9,7 +9,7 @@ An owner-only personal stock agent that uses zero-incremental-cost data sources,
 ## Current status
 
 - [x] Design and implementation plan approved
-- [x] Core V1 implementation completed
+- [x] Core V1 safety-remediation implementation completed
 - [x] Initial Astra audit findings F1–F19 implemented
 - [x] Final consolidated local gate passed: 1,197 checks passed, 4 skipped, 4 credentialed database tests intentionally deselected
 - [x] Final whole-repository GPT-6 Astra review completed
@@ -24,7 +24,9 @@ An owner-only personal stock agent that uses zero-incremental-cost data sources,
 - [x] Receipt-bound production schema reconciliation completed exactly once in run `34039011879`
 - [x] Protected isolated restore and both cleanup paths completed in run `34042155368`
 - [x] Protected one-time existing-runtime attestation `34055419086`
+- [x] GPT-6 Astra-reviewed market-wide thematic discovery design and implementation plan approved
 - [ ] Next existing scheduled-chain receipt
+- [ ] Complete market-wide thematic discovery implementation and protected production proof in V1-C3
 
 ## Completed implementation areas
 
@@ -67,6 +69,28 @@ An owner-only personal stock agent that uses zero-incremental-cost data sources,
 - [x] Publish the signed-link-only login correction as owner-only Site v8 and retain Site v7 as rollback
 - [x] Publish the password-primary login and recovery flow as owner-only Site v9 and retain Site v8 as rollback
 
+## Approved work after the September 8 morning evidence
+
+- [ ] Preserve the normal September 8 morning receipt as evidence for the currently deployed chain;
+  do not treat it as proof of market-wide discovery and do not dispatch a duplicate run
+- [ ] Reconcile the later September 8 intraday/post-market receipts and September 11 Friday receipt
+  through the existing verification heartbeat
+- [ ] Implement the approved capability-aware source planner, dated security reference, official
+  source cursors, ticker-independent event/entity resolution, bounded role/theme reverse discovery,
+  value-chain graph, primary exposure facts, broad screens, theme memory, and bounded next-run
+  research nominations
+- [ ] Keep research eligibility, portfolio suitability, and action authorization as separate states;
+  missing suitability may preserve research but cannot authorize an action
+- [ ] Pass the priority-theme, held-out-sector, adversarial, restart, quota, recovery, byte-limit, and
+  honestly-empty-run acceptance gates
+- [ ] Synchronize the official published NYSE 2026–2028 holidays and early closes across Python,
+  gateway session logic, and dashboard freshness; fail closed after maintained coverage
+- [ ] Complete exact-candidate Astra review, exact-head and exact-main CI, protected multi-component
+  release, owner Site publication/readback, rollback capture, and normal scheduled capability receipts
+- [ ] Close V1-C2 through V1-C6 and the active V1 goal only after each checkpoint has its own evidence
+- [ ] Review Alert V3 separately in shadow/canary mode after V1 closes; do not arm a new schedule as
+  part of market-wide discovery
+
 ## Production gates
 
 These require the protected production path and must not be replaced by local evidence.
@@ -88,7 +112,8 @@ These require the protected production path and must not be replaced by local ev
   deleted the temporary project, and passed both cleanup receipts**
 - [x] Retain a formal non-owner login denial receipt — **temporary confirmed non-owner received HTTP 403 `owner_only`, no portfolio data was returned, the temporary user was deleted, and Auth inventory returned to exactly one owner**
 - [ ] Observe fresh scheduled morning/intraday/weekly receipts without triggering duplicate live runs
-- [ ] Close V1-C2 through V1-C6 only when their production receipts exist
+- [ ] Complete and prove the approved V1-C3 market-wide discovery capability on the protected path
+- [ ] Close V1-C2 through V1-C6 only when both their capability gates and production receipts exist
 
 ## Permanent safety rules
 

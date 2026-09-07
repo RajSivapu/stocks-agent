@@ -13,7 +13,8 @@ and rollout order. `docs/HANDOFF.md` is ignored and is not a source of truth.
 ## Current release status
 
 Owner-only Site v9 is live from UI main `e2f9d74`, which passed exact-main CI `34073314211`; V1
-trusted use remains **no-go** pending the next existing scheduled evidence chain. Approved production schema reconciliation
+trusted use remains **no-go** pending the next existing scheduled evidence chain and completion of the
+approved market-wide thematic discovery scope in V1-C3. Approved production schema reconciliation
 `34039011879` succeeded exactly once. Managed isolated restore `34042155368` succeeded on main
 `bd1cee2317a8689b8ac5a55fb38b853e7320bbfb`. The unchanged backend remains attested at main
 `b3f7d70` by protected one-time existing-runtime attestation `34055419086`.
@@ -211,12 +212,14 @@ Still required:
    same signed-link callback reserved for setup, recovery, and fallback.**
 5. Approved schema reconciliation and protected isolated restore with recovery receipts.
    **Complete** (`34039011879`, `34042155368`); do not rerun.
-6. Protected existing-runtime attestation receipt **complete** (`34055419086`); next existing
-   scheduled intelligence/report/publication receipt chain remains, without a duplicate run.
+6. Protected existing-runtime attestation receipt **complete** (`34055419086`); the next existing
+   scheduled intelligence/report/publication receipt chain remains, without a duplicate run, and is
+   operational evidence for the current runtime only. Approved V1-C3 market-wide discovery
+   implementation, protected release, owner Site readback, and new normal receipts also remain.
 
-Until all six gates pass, V1-C2 through V1-C6 remain reopened and the system stays in limited
-owner-only research/shadow use. Positions, cash, prices, and calculations must be independently
-verified before the owner acts.
+Until the six current-runtime gates and the approved V1-C3 market-wide discovery gates pass, V1-C2
+through V1-C6 remain reopened and the system stays in limited owner-only research/shadow use.
+Positions, cash, prices, and calculations must be independently verified before the owner acts.
 
 ## Exact remaining handoff boundary
 
@@ -234,7 +237,38 @@ receipt with protected GitHub readback and emitted bounded immutable attestation
 without production or scheduled-run mutation. It sealed full reconciliation-root equality once,
 before normal scheduled data growth, and must not be rerun. The restricted scheduled-evidence reader is still unavailable;
 observe an existing persisted chain when available and never dispatch a duplicate. The live app
-remains limited owner research/shadow use until the scheduled gate passes.
+remains limited owner research/shadow use until the current scheduled gate, approved V1-C3
+implementation, protected release, owner Site readback, and new capability receipts all pass.
+
+## Approved work after September 8 scheduled evidence
+
+The September 8 morning run validates the currently deployed operational chain. Preserve its normal
+receipt, then let the existing verification heartbeat reconcile the later intraday/post-market and
+September 11 Friday evidence. Do not trigger an extra market or Telegram run for inspection.
+
+Market-wide thematic discovery remains original V1-C3 scope. Two GPT-6 Astra reviews identified the
+remaining gap between configured themes and actual runtime capability. Execute the approved
+`docs/superpowers/specs/2026-09-06-market-wide-thematic-discovery-v1-design.md` and
+`docs/superpowers/plans/2026-09-06-market-wide-thematic-discovery-v1-implementation.md` in this order:
+
+1. Add a versioned capability registry, fair stage planner, durable cursors, and dated U.S.-listed
+   security reference.
+2. Discover ticker-free events, resolve entities and securities, build adverse-aware value-chain
+   paths, run bounded role/theme reverse discovery for previously unseen issuers, and qualify
+   exposure with bounded primary evidence.
+3. Add transparent broad screens where the zero-cost transport passes its feasibility and retention
+   gates; record unsupported and unavailable states explicitly.
+4. Separate research eligibility from portfolio suitability and action authorization, then preserve
+   bounded theme history and next-run research nominations.
+5. Pass thematic, held-out-sector, adversarial, restart, quota, recovery, and capacity acceptance;
+   synchronize the official NYSE calendar through 2028, then obtain exact-candidate Astra review and
+   exact-main CI.
+6. Use the protected multi-component release and readback path, publish and verify the exact owner
+   Site, then wait for normal scheduled capability receipts before closing V1-C3 and the final V1
+   checklist.
+
+Alert V3 remains a later, separately reviewed shadow/canary rollout. The discovery work does not arm
+new alerts, increase schedule frequency, add brokerage authority, or add paid and metered providers.
 
 ## Deferred work
 

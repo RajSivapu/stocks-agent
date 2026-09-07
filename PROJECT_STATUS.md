@@ -8,7 +8,8 @@ Current state: owner-only Site v9 is live from UI main
 `e2f9d74495fa2ff8ed02e72b12d09755918bb9f9`, with successful exact-main CI `34073314211`.
 Production schema reconciliation, managed isolated recovery, and the protected backend-runtime
 attestation are complete; trusted V1 use remains **no-go** pending the next existing scheduled
-evidence chain. The unchanged backend remains attested at
+evidence chain plus implementation and protected production proof for the approved market-wide
+discovery scope in V1-C3. The unchanged backend remains attested at
 `b3f7d706573224d8edfa88570067dfb1b0900672` by protected run `34055419086`.
 
 This file is the version-controlled source of truth for the Personal Stock Agent V1 rollout.
@@ -88,6 +89,31 @@ owner-only. Overview contains attention items, portfolio state, current suggesti
 report; Ideas and Reports hold the daily decision history; Intelligence and Receipts preserve deeper
 research and audit evidence under Advanced. It is not presented as a live trading terminal, and the
 absence of continuous live data is surfaced rather than hidden.
+
+## Approved V1-C3 market-wide discovery completion — 2026-09-06
+
+The owner approved keeping cross-sector thematic discovery inside V1-C3. Two GPT-6 Astra reviews
+confirmed that the current runtime can preserve and rank known security evidence but does not yet
+prove broad discovery beyond the portfolio and watchlist. In particular, ticker-free stories can be
+dropped, unsupported provider/theme pairs can silently narrow the plan, filing metadata does not
+prove business exposure, and missing portfolio suitability can remove otherwise valid research
+candidates.
+
+The approved design is
+`docs/superpowers/specs/2026-09-06-market-wide-thematic-discovery-v1-design.md`; the task-by-task plan
+is `docs/superpowers/plans/2026-09-06-market-wide-thematic-discovery-v1-implementation.md`. The work
+adds capability-aware source planning, a dated U.S.-listed security reference, ticker-independent
+event and entity resolution, bounded official-source enrichment, bounded role/theme reverse
+discovery for previously unseen issuers, primary exposure facts, broad
+screens with explicit feasibility states, durable theme memory, and separate research, portfolio
+suitability, and action-authorization states.
+
+The September 8 morning receipt remains necessary operational evidence for the currently deployed
+chain. It cannot close V1-C3 by itself. After preserving that receipt, implementation continues
+through local acceptance, independent review, protected multi-component release, and normal
+scheduled production receipts for the new discovery capability. A valid quiet run may contain no
+positive suggestion, but it must prove the complete planned source/task lineage and distinguish no
+event from failure, truncation, quota exhaustion, and unsupported capability.
 
 ## Release boundary
 
@@ -215,9 +241,24 @@ V1-C2 remains reopened until scheduled receipt evidence passes.
 - [x] Server-owned ranking inputs, fail-closed unknown values, packet construction, and scheduled
   lifecycle controls are implemented and task-reviewed locally.
 - [x] Complete exact-candidate CI and protected runtime attestation (`34055295512`, `34055419086`).
-- [ ] Observe one non-duplicated scheduled chain.
+- [x] Approve the GPT-6 Astra-reviewed market-wide thematic discovery design and implementation plan.
+- [ ] Observe the current deployed chain on its normal schedule; treat this as operational evidence,
+  not proof of the new discovery capability.
+- [ ] Implement a capability-aware fair planner, official-source cursors, and a dated U.S.-listed
+  security reference without adding paid or metered providers.
+- [ ] Resolve ticker-independent events, public/private entities, securities, value-chain paths, and
+  primary business-exposure evidence outside the owner's portfolio and watchlist.
+- [ ] Preserve research candidates when portfolio suitability is unavailable while keeping action
+  authorization fail-closed.
+- [ ] Pass the magnet, aluminum, data-center energy, uranium, robotics, adversarial, capacity,
+  recovery, and held-out-sector acceptance scenarios without hardcoded company lists.
+- [ ] Replace the separate 2026-only calendar copies with one reviewed NYSE source synchronized
+  through the official published 2028 holiday and early-close schedule; fail closed afterward.
+- [ ] Merge the exact reviewed candidate through protected main, release by the protected
+  multi-component path, publish and read back the exact owner Site, and retain normal scheduled
+  capability receipts without a duplicate run.
 
-V1-C3 is reopened.
+V1-C3 remains open for implementation and production evidence.
 
 ### V1-C4 — Personal comparison brain
 
@@ -270,7 +311,14 @@ V1-C6 is reopened and the release remains no-go for trusted use.
 ## Immediate next gates
 
 1. Preserve the completed schema and isolated recovery gates; do not rerun them.
-2. Observe the next existing scheduled receipt without triggering a duplicate.
+2. Observe and preserve the September 8 morning receipt without triggering a duplicate.
+3. Let the existing verification heartbeat reconcile the later September 8 intraday/post-market
+   evidence and the September 11 Friday evidence.
+4. Execute the approved market-wide discovery implementation plan and pass its local capability,
+   safety, calendar, recovery, and capacity gates.
+5. Complete exact-candidate Astra review, protected-main CI, protected multi-component release, and
+   normal scheduled discovery receipts.
+6. Close V1-C2 through V1-C6 and the active V1 goal only when their own receipt gates pass.
 
 ## Site-only UI releases — completed 2026-09-06
 
