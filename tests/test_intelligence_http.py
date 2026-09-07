@@ -130,6 +130,35 @@ def test_http_follows_an_approved_https_redirect():
     ]
 
 
+def test_http_rejects_an_unreviewed_redirect_before_opening_it():
+    source = (
+        "https://www.defense.gov/DesktopModules/ArticleCS/RSS.ashx"
+        "?ContentType=9&Site=945&max=10"
+    )
+    reviewed_destination = source.replace("www.defense.gov", "www.war.gov")
+    wrong_destination = reviewed_destination.replace("ContentType=9", "ContentType=1")
+    opener = FakeOpener(
+        FakeResponse(status=302, headers={"Location": wrong_destination}),
+        FakeResponse(body=b"<rss/>", url=wrong_destination),
+    )
+    transport = BoundedHttpClient(
+        opener=opener,
+        allowed_hosts={"www.defense.gov", "www.war.gov"},
+        clock=lambda: NOW,
+    )
+
+    with pytest.raises(SourceFailure, match="UNSAFE_URL"):
+        transport.get(
+            HttpRequest(
+                source,
+                expected_document="xml",
+                allowed_redirect_urls=frozenset({reviewed_destination}),
+            )
+        )
+
+    assert len(opener.requests) == 1
+
+
 def test_http_admits_each_open_before_it_reaches_transport():
     opener = FakeOpener(
         FakeResponse(status=302, headers={"Location": "https://data.example.gov/feed"}),
@@ -233,6 +262,24 @@ def test_http_rejects_invalid_content_types_and_malformed_documents(content_type
         client(response).get(HttpRequest("https://api.gdeltproject.org/feed"))
 
     assert failure.value.code in {"INVALID_CONTENT_TYPE", "INVALID_RESPONSE"}
+
+
+def test_http_rejects_xml_dtds_before_document_parsing():
+    response = FakeResponse(
+        body=b'<!DOCTYPE feed [<!ENTITY value "unsafe">]><feed>&value;</feed>',
+        headers={
+            "Content-Type": "application/xml",
+            "Date": format_datetime(NOW, usegmt=True),
+        },
+    )
+
+    with pytest.raises(SourceFailure, match="INVALID_RESPONSE"):
+        client(response).get(
+            HttpRequest(
+                "https://api.gdeltproject.org/feed",
+                expected_document="xml",
+            )
+        )
 
 
 @pytest.mark.parametrize("constant", ["NaN", "Infinity", "-Infinity"])

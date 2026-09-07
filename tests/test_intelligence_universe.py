@@ -13,7 +13,6 @@ import pytest
 from lib.intelligence.http import BoundedHttpClient
 from lib.intelligence.universe import (
     SEC_COMPANY_TICKERS_URL,
-    SEC_REFERENCE_USER_AGENT,
     SecurityIdentity,
     build_reference_transfer,
     eligible_for_research,
@@ -288,7 +287,7 @@ def test_refresh_uses_bounded_http_and_a_descriptive_sec_user_agent():
         allowed_hosts={"www.sec.gov"}, opener=opener, clock=lambda: NOW
     )
 
-    result = refresh_sec_reference(client)
+    result = refresh_sec_reference(client, contact="owner@example.com")
 
     assert result.status == "healthy"
     assert result.snapshot is not None
@@ -296,10 +295,23 @@ def test_refresh_uses_bounded_http_and_a_descriptive_sec_user_agent():
     assert len(opener.requests) == 1
     request, timeout = opener.requests[0]
     assert request.full_url == SEC_COMPANY_TICKERS_URL
-    assert request.get_header("User-agent") == SEC_REFERENCE_USER_AGENT
-    assert "stocks-agent" in SEC_REFERENCE_USER_AGENT
-    assert "@" in SEC_REFERENCE_USER_AGENT
+    assert request.get_header("User-agent") == (
+        "stocks-agent owner research contact=owner@example.com"
+    )
     assert timeout <= 10
+
+
+def test_refresh_without_configured_sec_contact_does_not_open_transport():
+    opener = _Opener(SEC_FIXTURE.read_bytes())
+    client = BoundedHttpClient(
+        allowed_hosts={"www.sec.gov"}, opener=opener, clock=lambda: NOW
+    )
+
+    result = refresh_sec_reference(client, contact=None)
+
+    assert opener.requests == []
+    assert result.status == "reference_unavailable"
+    assert result.error_code == "CONFIGURATION_MISSING"
 
 
 def test_failed_refresh_reuses_last_healthy_snapshot_and_reports_reference_stale():
@@ -308,8 +320,8 @@ def test_failed_refresh_reuses_last_healthy_snapshot_and_reports_reference_stale
         allowed_hosts={"www.sec.gov"}, opener=_FailingOpener(), clock=lambda: NOW
     )
 
-    stale = refresh_sec_reference(client, previous=previous)
-    unavailable = refresh_sec_reference(client)
+    stale = refresh_sec_reference(client, previous=previous, contact="owner@example.com")
+    unavailable = refresh_sec_reference(client, contact="owner@example.com")
 
     assert stale.snapshot == previous
     assert stale.status == "reference_stale"

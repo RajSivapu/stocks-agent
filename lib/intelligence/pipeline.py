@@ -18,7 +18,13 @@ from lib.intelligence.canonical import canonical_event, canonical_ranking
 from lib.intelligence.http import SourceFailure, cache_key
 from lib.intelligence.normalize import SourceItem, normalize_item
 from lib.intelligence.packet import EvidencePacket, build_evidence_packet
-from lib.intelligence.providers import CollectionQuery, CollectionResult, RequestReceipt, RESERVED_OUTBOUND_PROVIDERS
+from lib.intelligence.providers import (
+    CollectionQuery,
+    CollectionResult,
+    RequestReceipt,
+    RESERVED_OUTBOUND_PROVIDERS,
+    SourceAdapter,
+)
 from lib.intelligence.quota import QuotaSession
 from lib.intelligence.ranking import CandidateInput, RankedCandidate, rank_candidates
 from lib.intelligence.relationships import EventRelationship, exposure_kind, propose_relation
@@ -875,13 +881,28 @@ def _checkpoint_item(value: SourceItem) -> dict[str, object]:
 def _failed_receipt(
     provider: str, reservation_id: str, query: CollectionQuery, now: datetime, *, error_code: str
 ) -> RequestReceipt:
+    if error_code == "QUOTA_BLOCKED":
+        status = "quota_blocked"
+        outcome_status = status
+    elif error_code == "CONFIGURATION_MISSING":
+        status = "configuration_missing"
+        outcome_status = status
+    elif error_code == "UNSUPPORTED_QUERY":
+        status = "failed"
+        outcome_status = "unsupported"
+    else:
+        status = "failed"
+        outcome_status = status
     return RequestReceipt(
-        provider=provider, reservation_id=reservation_id, status="quota_blocked" if error_code == "QUOTA_BLOCKED" else "failed",
+        provider=provider, reservation_id=reservation_id, status=status,
         cache_key=hashlib.sha256(f"{provider}:{query.text}".encode()).hexdigest(),
         requested_window={"start": _timestamp(query.start), "end": _timestamp(query.end)},
         requested_limit=query.limit, retrieved_at=_utc(now), observed_at=None, expires_at=None,
         request_cost=0, upstream_remaining=None, returned_count=0, accepted_count=0,
         duplicate_count=0, dropped_count=0, response_hash=None, error_code=error_code,
+        metadata=SourceAdapter._receipt_metadata(
+            query, status=outcome_status, returned=0
+        ),
     )
 
 
@@ -900,12 +921,26 @@ def _receipt_row(value: RequestReceipt, receipt_id: str) -> dict[str, object]:
 
 
 def _source_summary(value: RequestReceipt, receipt_id: str) -> dict[str, object]:
-    return {
+    result = {
         "accepted_count": value.accepted_count, "error_code": value.error_code,
         "provider": value.provider, "receipt_id": receipt_id,
         "reservation_id": value.reservation_id, "response_hash": value.response_hash,
         "status": value.status,
     }
+    for key in (
+        "backlog_remaining",
+        "backlog_token",
+        "capability_id",
+        "coverage_status",
+        "cursor_end",
+        "cursor_start",
+        "next_retry_phase",
+        "overlap_seconds",
+        "truncated",
+    ):
+        if key in value.metadata:
+            result[key] = value.metadata[key]
+    return result
 
 
 def _item_row(
@@ -1017,7 +1052,10 @@ def _collection_cache_key(adapter: object, query: CollectionQuery) -> str:
     window = json.dumps({"start": _utc(query.start).isoformat(), "end": _utc(query.end).isoformat()}, separators=(",", ":"), sort_keys=True)
     return cache_key(str(adapter.provider), {
         "query": query.text, "symbols": ",".join(query.symbols), "cik": query.cik or "",
-        "series_id": query.series_id or "", "limit": str(query.limit),
+        "series_id": query.series_id or "", "capability_id": query.capability_id or "",
+        "cursor_token": query.cursor_token or "", "page": str(query.page),
+        "accession_number": query.accession_number or "",
+        "primary_document": query.primary_document or "", "limit": str(query.limit),
     }, window, 1)
 
 

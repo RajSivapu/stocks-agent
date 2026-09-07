@@ -11,17 +11,26 @@ import datetime
 import json
 import ssl
 import urllib.request
+import re
 
 from lib import config
 
 ctx = ssl.create_default_context()
-UA = {"User-Agent": "stocks-agent (rupesh.sivapu@gmail.com)"}
 CIK_MAP_PATH = config.ROOT / "data" / "edgar_cik_map.json"
 CIK_MAP_MAX_AGE_DAYS = 30
 
 
-def _get(u, t=20):
-    return json.loads(urllib.request.urlopen(urllib.request.Request(u, headers=UA), timeout=t, context=ctx).read())
+def sec_user_agent(contact=None):
+    """Build the SEC identity from required non-secret runtime configuration."""
+    value = contact if contact is not None else config.optional_secret("sec_user_agent_contact")
+    if not isinstance(value, str) or re.fullmatch(r"[^\s\x00-\x1f\x7f]{3,200}", value.strip()) is None:
+        raise ValueError("SEC_USER_AGENT_CONTACT is required")
+    return f"stocks-agent owner research contact={value.strip()}"
+
+
+def _get(u, t=20, *, contact=None):
+    headers = {"User-Agent": sec_user_agent(contact)}
+    return json.loads(urllib.request.urlopen(urllib.request.Request(u, headers=headers), timeout=t, context=ctx).read())
 
 
 def _fetch_cik_map():

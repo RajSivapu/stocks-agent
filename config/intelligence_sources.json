@@ -86,7 +86,7 @@
       "themes": ["macro_and_policy", "energy_nuclear_and_grid_infrastructure", "industrial_infrastructure", "consumer", "defense_trade_and_geopolitics"],
       "phases": ["pre-market", "post-market", "on-demand"],
       "allowed_hosts": ["www.federalregister.gov"],
-      "allowed_path_patterns": ["/api/v1/documents.json"],
+      "allowed_path_patterns": ["/api/v1/documents.json", "/api/v1/documents"],
       "required_credential": null,
       "authority": "official_policy_record",
       "retention_class": "durable_official_record",
@@ -104,6 +104,90 @@
           "consumer": {"host": "www.federalregister.gov", "path": "/api/v1/documents.json", "term": "consumer protection"},
           "defense_trade_and_geopolitics": {"host": "www.federalregister.gov", "path": "/api/v1/documents.json", "term": "defense trade"}
         }
+      }
+    },
+    {
+      "capability_id": "white_house_fact_sheets",
+      "provider": "white_house",
+      "query_kind": "feed",
+      "themes": ["macro_and_policy", "energy_nuclear_and_grid_infrastructure", "industrial_infrastructure", "critical_minerals_and_magnets", "healthcare", "consumer", "defense_trade_and_geopolitics"],
+      "phases": ["pre-market", "post-market", "on-demand"],
+      "allowed_hosts": ["www.whitehouse.gov"],
+      "allowed_path_patterns": ["/fact-sheets/*"],
+      "required_credential": null,
+      "authority": "official_executive_statement",
+      "retention_class": "durable_official_record",
+      "max_requests_per_run": 2,
+      "max_items_per_request": 20,
+      "requirement_tier": "optional",
+      "health": "enabled",
+      "enabled": true,
+      "provider_priority": 20,
+      "query_pack": {
+        "default": {"host": "www.whitehouse.gov", "path": "/fact-sheets/"}
+      }
+    },
+    {
+      "capability_id": "white_house_presidential_actions",
+      "provider": "white_house",
+      "query_kind": "feed",
+      "themes": ["macro_and_policy", "energy_nuclear_and_grid_infrastructure", "industrial_infrastructure", "critical_minerals_and_magnets", "healthcare", "consumer", "defense_trade_and_geopolitics"],
+      "phases": ["pre-market", "post-market", "on-demand"],
+      "allowed_hosts": ["www.whitehouse.gov"],
+      "allowed_path_patterns": ["/presidential-actions/*"],
+      "required_credential": null,
+      "authority": "official_executive_action",
+      "retention_class": "durable_official_record",
+      "max_requests_per_run": 2,
+      "max_items_per_request": 20,
+      "requirement_tier": "optional",
+      "health": "enabled",
+      "enabled": true,
+      "provider_priority": 20,
+      "query_pack": {
+        "default": {"host": "www.whitehouse.gov", "path": "/presidential-actions/"}
+      }
+    },
+    {
+      "capability_id": "white_house_briefings_statements",
+      "provider": "white_house",
+      "query_kind": "feed",
+      "themes": ["macro_and_policy", "energy_nuclear_and_grid_infrastructure", "industrial_infrastructure", "critical_minerals_and_magnets", "healthcare", "consumer", "defense_trade_and_geopolitics"],
+      "phases": ["pre-market", "post-market", "on-demand"],
+      "allowed_hosts": ["www.whitehouse.gov"],
+      "allowed_path_patterns": ["/briefings-statements/*"],
+      "required_credential": null,
+      "authority": "official_executive_statement",
+      "retention_class": "durable_official_record",
+      "max_requests_per_run": 2,
+      "max_items_per_request": 20,
+      "requirement_tier": "optional",
+      "health": "enabled",
+      "enabled": true,
+      "provider_priority": 20,
+      "query_pack": {
+        "default": {"host": "www.whitehouse.gov", "path": "/briefings-statements/"}
+      }
+    },
+    {
+      "capability_id": "white_house_sitemap",
+      "provider": "white_house",
+      "query_kind": "feed",
+      "themes": ["macro_and_policy", "energy_nuclear_and_grid_infrastructure", "industrial_infrastructure", "critical_minerals_and_magnets", "healthcare", "consumer", "defense_trade_and_geopolitics"],
+      "phases": ["pre-market", "post-market", "on-demand"],
+      "allowed_hosts": ["www.whitehouse.gov"],
+      "allowed_path_patterns": ["/sitemap_index.xml", "/post-sitemap*.xml"],
+      "required_credential": null,
+      "authority": "official_executive_index",
+      "retention_class": "bounded_official_index",
+      "max_requests_per_run": 4,
+      "max_items_per_request": 50,
+      "requirement_tier": "optional",
+      "health": "enabled",
+      "enabled": true,
+      "provider_priority": 25,
+      "query_pack": {
+        "default": {"host": "www.whitehouse.gov", "path": "/sitemap_index.xml"}
       }
     },
     {
@@ -125,6 +209,48 @@
       "provider_priority": 20,
       "query_pack": {
         "default": {"host": "www.energy.gov", "path": "/rss/energygov/2193718"}
+      }
+    },
+    {
+      "capability_id": "defense_releases_rss",
+      "provider": "dod",
+      "query_kind": "feed",
+      "themes": ["defense_trade_and_geopolitics", "industrial_infrastructure", "critical_minerals_and_magnets"],
+      "phases": ["pre-market", "post-market", "on-demand"],
+      "allowed_hosts": ["www.defense.gov", "www.war.gov"],
+      "allowed_path_patterns": ["/DesktopModules/ArticleCS/RSS.ashx"],
+      "required_credential": null,
+      "authority": "official_defense_statement",
+      "retention_class": "durable_official_record",
+      "max_requests_per_run": 1,
+      "max_items_per_request": 10,
+      "requirement_tier": "optional",
+      "health": "enabled",
+      "enabled": true,
+      "provider_priority": 20,
+      "query_pack": {
+        "default": {"host": "www.defense.gov", "path": "/DesktopModules/ArticleCS/RSS.ashx", "content_type": 9, "site": 945, "max": 10}
+      }
+    },
+    {
+      "capability_id": "defense_news_rss",
+      "provider": "dod",
+      "query_kind": "feed",
+      "themes": ["defense_trade_and_geopolitics", "industrial_infrastructure", "critical_minerals_and_magnets"],
+      "phases": ["pre-market", "post-market", "on-demand"],
+      "allowed_hosts": ["www.defense.gov", "www.war.gov"],
+      "allowed_path_patterns": ["/DesktopModules/ArticleCS/RSS.ashx"],
+      "required_credential": null,
+      "authority": "official_defense_news",
+      "retention_class": "durable_official_record",
+      "max_requests_per_run": 1,
+      "max_items_per_request": 10,
+      "requirement_tier": "optional",
+      "health": "enabled",
+      "enabled": true,
+      "provider_priority": 20,
+      "query_pack": {
+        "default": {"host": "www.defense.gov", "path": "/DesktopModules/ArticleCS/RSS.ashx", "content_type": 1, "site": 945, "max": 10}
       }
     },
     {
@@ -250,6 +376,27 @@
       "provider_priority": 10,
       "query_pack": {
         "default": {"host": "data.sec.gov", "path": "/submissions/CIK##########.json", "identifier_required": "cik"}
+      }
+    },
+    {
+      "capability_id": "sec_filing_document",
+      "provider": "sec_edgar",
+      "query_kind": "filing_document",
+      "themes": [],
+      "phases": ["pre-market", "intraday", "post-market", "on-demand"],
+      "allowed_hosts": ["www.sec.gov"],
+      "allowed_path_patterns": ["/Archives/edgar/data/*"],
+      "required_credential": null,
+      "authority": "official_issuer_filing",
+      "retention_class": "bounded_primary_document",
+      "max_requests_per_run": 4,
+      "max_items_per_request": 1,
+      "requirement_tier": "optional",
+      "health": "enabled",
+      "enabled": true,
+      "provider_priority": 10,
+      "query_pack": {
+        "default": {"host": "www.sec.gov", "path": "/Archives/edgar/data/#", "identifier_required": "cik", "accession_required": true}
       }
     },
     {

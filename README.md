@@ -53,8 +53,9 @@ research, Analyst/Checker, `evaluate_and_publish`, permitted artifacts/grading, 
 
 - Yahoo Finance chart endpoints: quotes and adjusted/raw OHLC history.
 - Finnhub free tier: fundamentals, news, earnings/events, insider and analyst context.
-- Alpha Vantage is not used by the current release and is intentionally absent from the Routine
-  environment.
+- GDELT plus reviewed SEC, Federal Register, White House, DOE, Defense, and EIA routes provide
+  bounded keyless event and official-source discovery.
+- Alpha Vantage topic news is optional and may use only an existing owner-approved free key.
 - Supabase free-tier project: Postgres and three Edge Functions, including the owner-only read API.
 - Telegram Bot API: fixed brief delivery and deterministic recordkeeping chat.
 - Anthropic plan allowance: scheduled model reasoning; no Anthropic API key in this repo.
@@ -111,15 +112,17 @@ Supabase Edge Function secrets/runtime contain:
   `DASHBOARD_DATABASE_URL` for the owner dashboard;
 - Supabase's injected `SUPABASE_URL` and `SUPABASE_SERVICE_ROLE_KEY`.
 
-Anthropic's personal `stocks-agent` cloud environment contains exactly these variables:
+Anthropic's personal `stocks-agent` cloud environment contains these required values:
 
 - `SUPABASE_URL`;
 - the narrowly scoped `MARKET_AGENT_SECRET`;
-- a read-only `FINNHUB_API_KEY`.
+- a read-only `FINNHUB_API_KEY`;
+- the non-secret `SEC_USER_AGENT_CONTACT` used to identify SEC requests.
 
 The environment uses a custom domain allowlist, no Gmail/Drive connectors, and no setup script. Its
-gateway credential authorizes only the bounded analysis API; server policy remains final. Do not
-configure Alpha Vantage because the current code does not call it. The Routine must never receive
+gateway credential authorizes only the bounded analysis API; server policy remains final. Add
+`ALPHAVANTAGE_API_KEY` only for the optional existing-free-key capability; the official/GDELT
+baseline remains independent. The Routine must never receive
 the service-role key, Telegram credentials, brokerage credentials, or an LLM API key. Prefer
 Claude's protected API-credential proxy if its controls become available, then remove both keys
 from ordinary variables. Generate independent high-entropy gateway and webhook secrets. Rotate any
@@ -154,8 +157,9 @@ dashboard role. RLS remains enabled, and privileged RPC execution is limited to 
 .venv/bin/python scripts/healthcheck.py
 ```
 
-Expected keys are `alerts`, `gateway`, `finnhub`, and `yahoo`. Healthcheck uses dry-run gateway
-operations and sends no Telegram message.
+Expected top-level keys are `alerts`, `gateway`, `zero_key_baseline`, and `capabilities`.
+Healthcheck uses dry-run gateway operations, reports exact reviewed route and configuration status
+without values, and sends no Telegram message.
 
 ### 6. Configure Routines
 

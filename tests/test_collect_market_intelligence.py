@@ -161,7 +161,7 @@ def test_one_reference_stage_call_persists_all_chunks_then_pins_finalized_snapsh
     gateway_client = Gateway()
     coverage = collector._persist_reference_stage(
         gateway_client, RUN_ID := "11111111-1111-4111-8111-111111111111", now,
-        client=Http(), monotonic=lambda: 0.0,
+        client=Http(), monotonic=lambda: 0.0, sec_contact="owner@example.com",
     )
 
     operations = [call[0] for call in gateway_client.calls]
@@ -272,6 +272,7 @@ def test_reference_stage_pages_predecessor_before_assigning_renamed_security_ide
     gateway_client = Gateway()
     coverage = collector._persist_reference_stage(
         gateway_client, run_id, now, client=Http(), monotonic=lambda: 0.0,
+        sec_contact="owner@example.com",
     )
 
     assert [call[0] for call in gateway_client.calls[:2]] == [
@@ -305,7 +306,7 @@ def test_failed_sec_refresh_asks_server_for_last_healthy_and_reports_unavailable
     gateway_client = Gateway()
     coverage = collector._persist_reference_stage(
         gateway_client, "11111111-1111-4111-8111-111111111111", now,
-        client=Http(), monotonic=lambda: 0.0,
+        client=Http(), monotonic=lambda: 0.0, sec_contact="owner@example.com",
     )
     assert [call[0] for call in gateway_client.calls] == [
         "pin_discovery_reference", "pin_discovery_reference",
@@ -352,6 +353,7 @@ def test_reference_stage_time_ceiling_includes_the_sec_refresh():
             now,
             client=Http(),
             monotonic=lambda: elapsed[0],
+            sec_contact="owner@example.com",
         )
     assert gateway_client.calls == []
 
@@ -396,7 +398,7 @@ def test_reference_stage_caps_each_gateway_timeout_by_remaining_deadline():
     gateway_client = Gateway()
     collector._persist_reference_stage(
         gateway_client, "11111111-1111-4111-8111-111111111111", now,
-        client=Http(), monotonic=lambda: elapsed[0],
+        client=Http(), monotonic=lambda: elapsed[0], sec_contact="owner@example.com",
     )
 
     assert gateway_client.timeouts

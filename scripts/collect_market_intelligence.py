@@ -16,7 +16,7 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from lib import gateway  # noqa: E402
+from lib import config, gateway  # noqa: E402
 from lib.config import load_settings  # noqa: E402
 from lib.intelligence.http import BoundedHttpClient  # noqa: E402
 from lib.intelligence.pipeline import IntelligencePipeline, PHASES, PipelineRequest, protected_collection_context  # noqa: E402
@@ -207,6 +207,7 @@ def _persist_reference_stage(
     *,
     client=None,
     monotonic=time.monotonic,
+    sec_contact=None,
 ) -> dict[str, object]:
     """Refresh and bind one complete SEC snapshot inside explicit aggregate bounds."""
     http = client or BoundedHttpClient(allowed_hosts={"www.sec.gov"}, clock=lambda: now)
@@ -252,7 +253,14 @@ def _persist_reference_stage(
             raise ValueError("reference gateway receipt is invalid")
         return data
 
-    refreshed = refresh_sec_reference(http)
+    refreshed = refresh_sec_reference(
+        http,
+        contact=(
+            sec_contact
+            if sec_contact is not None
+            else config.optional_secret("sec_user_agent_contact")
+        ),
+    )
     reference_as_of = now.astimezone(timezone.utc).isoformat(
         timespec="milliseconds"
     ).replace("+00:00", "Z")

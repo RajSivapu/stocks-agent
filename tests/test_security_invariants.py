@@ -641,6 +641,7 @@ def test_routine_documentation_exposes_only_scoped_cloud_credentials():
         "SUPABASE_URL=https://<project-ref>.supabase.co",
         "MARKET_AGENT_SECRET=<dedicated-random-gateway-secret>",
         "FINNHUB_API_KEY=<read-only-key>",
+        "SEC_USER_AGENT_CONTACT=<owner-controlled SEC contact>",
     ]
     for readable_secret in (
         "ALPHAVANTAGE_API_KEY",
@@ -648,7 +649,7 @@ def test_routine_documentation_exposes_only_scoped_cloud_credentials():
         "TELEGRAM_BOT_TOKEN",
     ):
         assert readable_secret not in env_block
-    assert "ALPHAVANTAGE_API_KEY" not in routines
+    assert "leave `ALPHAVANTAGE_API_KEY` absent when it is not enabled" in routines
     for required in (
         "narrowly scoped",
         "read-only",
@@ -658,7 +659,7 @@ def test_routine_documentation_exposes_only_scoped_cloud_credentials():
         "status: suppressed",
     ):
         assert required in routines
-    assert '{"alerts":"ok","gateway":"ok","finnhub":"ok","yahoo":"ok"}' in routines
+    assert '"zero_key_baseline":"ok"' in routines
     assert "sends no Telegram healthcheck or alert" in routines
 
 

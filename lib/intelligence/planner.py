@@ -64,6 +64,7 @@ _APPROVED_HOSTS = frozenset({
     "www.federalregister.gov",
     "www.sec.gov",
     "www.whitehouse.gov",
+    "www.war.gov",
 })
 _SEED_THEMES = frozenset({
     "macro_and_policy",

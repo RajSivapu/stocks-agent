@@ -20,10 +20,10 @@ from typing import Literal
 from uuid import UUID, uuid5
 
 from lib.intelligence.http import BoundedHttpClient, HttpRequest, SourceFailure
+from lib.edgar import sec_user_agent
 
 
 SEC_COMPANY_TICKERS_URL = "https://www.sec.gov/files/company_tickers.json"
-SEC_REFERENCE_USER_AGENT = "stocks-agent security-reference/1.0 (rupesh.sivapu@gmail.com)"
 REFERENCE_PARSER_VERSION = 1
 REFERENCE_SEMANTIC_ENCODING_VERSION = 1
 MAX_REFERENCE_SOURCE_BYTES = 5_000_000
@@ -636,13 +636,20 @@ def refresh_sec_reference(
     client: BoundedHttpClient,
     *,
     previous: ReferenceSnapshot | None = None,
+    contact: str | None = None,
 ) -> ReferenceRefresh:
     """Perform one bounded SEC request and retain a prior snapshot on failure."""
+    try:
+        user_agent = sec_user_agent(contact)
+    except ValueError:
+        if previous is None:
+            return ReferenceRefresh(None, "reference_unavailable", "CONFIGURATION_MISSING")
+        return ReferenceRefresh(previous, "reference_stale", "CONFIGURATION_MISSING")
     request = HttpRequest(
         SEC_COMPANY_TICKERS_URL,
         headers={
             "Accept": "application/json",
-            "User-Agent": SEC_REFERENCE_USER_AGENT,
+            "User-Agent": user_agent,
         },
         timeout_seconds=10,
         max_bytes=MAX_REFERENCE_SOURCE_BYTES,
@@ -914,7 +921,6 @@ __all__ = [
     "ReferenceSnapshot",
     "ReferenceTransfer",
     "SEC_COMPANY_TICKERS_URL",
-    "SEC_REFERENCE_USER_AGENT",
     "SecurityIdentity",
     "build_reference_transfer",
     "eligible_for_research",

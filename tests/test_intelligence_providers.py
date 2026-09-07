@@ -14,7 +14,7 @@ NOW = datetime(2026, 9, 4, 12, 0, tzinfo=timezone.utc)
 
 
 class FixtureHttp:
-    def __init__(self, payload, *, url="https://fixture.invalid/feed", cache_hit=False):
+    def __init__(self, payload, *, url=None, cache_hit=False):
         self.payload = payload
         self.url = url
         self.cache_hit = cache_hit
@@ -23,7 +23,7 @@ class FixtureHttp:
     def get(self, request):
         self.requests.append(request)
         return HttpResult(
-            url=self.url,
+            url=self.url or request.url,
             status=200,
             headers={"content-type": "application/json"},
             body=json.dumps(self.payload).encode(),
@@ -198,6 +198,7 @@ def test_each_declared_provider_yields_discoverable_evidence_or_pre_http_unsuppo
         "alphavantage_api_key": "existing-free-alpha-key",
         "finnhub_api_key": "existing-free-finnhub-key",
         "fred_api_key": "existing-free-fred-key",
+        "sec_user_agent_contact": "owner@example.com",
     }
     adapter = build_adapter(
         adapter_name, http, quota, secret_getter=lambda name: secrets[name], clock=lambda: NOW,
@@ -218,7 +219,6 @@ def test_each_declared_provider_yields_discoverable_evidence_or_pre_http_unsuppo
     assert item.upstream_item_id
     assert item.request_url and item.source_url and item.request_url != item.source_url
     assert item.published_at and item.retrieved_at
-    assert item.security_ids or item.entity_ids
 
 
 @pytest.mark.parametrize("adapter_name", tuple(FIXTURES))
@@ -232,6 +232,7 @@ def test_adapter_returns_bounded_items_and_one_request_receipt(adapter_name):
         "alphavantage_api_key": "existing-free-alpha-key",
         "finnhub_api_key": "existing-free-finnhub-key",
         "fred_api_key": "existing-free-fred-key",
+        "sec_user_agent_contact": "owner@example.com",
     }
 
     query = sample_query(**(
@@ -322,6 +323,7 @@ def test_newly_published_prior_period_filing_is_retained_with_distinct_times():
     result = build_adapter(
         "sec_edgar", FixtureHttp(payload),
         QuotaSession({"sec_edgar": ({"reservation_id": "s2", "reserved_requests": 1},)}),
+        secret_getter=lambda name: "owner@example.com" if name == "sec_user_agent_contact" else "",
         clock=lambda: NOW,
     ).collect(sample_query(cik="0000000001", symbols=("TEST",)))
 

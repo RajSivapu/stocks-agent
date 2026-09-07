@@ -1,20 +1,58 @@
-import re
-from urllib.parse import quote, urlencode
+"""Reviewed official JSON and Defense RSS adapters."""
 
-from lib.edgar import parse_submissions
+from __future__ import annotations
+
+import re
+from types import MappingProxyType
+from urllib.parse import parse_qs, quote, urlencode, urlsplit
+
 from lib.intelligence.http import HttpRequest, SourceFailure
 
-from . import CollectionQuery, SourceAdapter, entity_ids, security_ids
+from . import CollectionQuery, SourceAdapter
+from .energy import DoeAdapter, EiaAdapter
+from .rss import OfficialFeedAdapter
+from .sec import SecEdgarAdapter
+from .white_house import WhiteHouseAdapter
 
 
-class OfficialAdapter(SourceAdapter):
+DEFENSE_RELEASES_URL = (
+    "https://www.defense.gov/DesktopModules/ArticleCS/RSS.ashx"
+    "?ContentType=9&Site=945&max=10"
+)
+DEFENSE_NEWS_URL = (
+    "https://www.defense.gov/DesktopModules/ArticleCS/RSS.ashx"
+    "?ContentType=1&Site=945&max=10"
+)
+
+
+class DefenseAdapter(OfficialFeedAdapter):
+    provider = "dod"
+    authority = "official_defense_statement"
+    allowed_hosts = frozenset({"www.defense.gov", "www.war.gov"})
+    feed_routes = MappingProxyType({
+        "defense_releases_rss": DEFENSE_RELEASES_URL,
+        "defense_news_rss": DEFENSE_NEWS_URL,
+    })
+    response_routes = MappingProxyType({
+        capability_id: frozenset({
+            source,
+            source.replace("www.defense.gov", "www.war.gov"),
+        })
+        for capability_id, source in feed_routes.items()
+    })
+
+    def _authority(self, query: CollectionQuery) -> str:
+        if query.capability_id == "defense_news_rss":
+            return "official_defense_news"
+        return self.authority
+
+
+class OfficialJsonAdapter(SourceAdapter):
     authority = "official"
     max_items_per_request = 50
     endpoint = ""
 
     def _request_reference(self, query: CollectionQuery) -> str:
-        if self.provider == "sec_edgar":
-            return f"https://data.sec.gov/submissions/CIK{str(query.cik).zfill(10)}.json"
         if self.provider == "fred":
             return f"{self.endpoint}?{urlencode({
                 'series_id': query.series_id, 'file_type': 'json',
@@ -23,24 +61,30 @@ class OfficialAdapter(SourceAdapter):
                 'limit': min(query.limit, self.max_items_per_request),
             })}"
         if self.provider == "federal_register":
-            return f"{self.endpoint}?{urlencode({
-                'conditions[term]': ' '.join((query.text, *query.symbols)).strip(),
-                'conditions[publication_date][gte]': query.start.date().isoformat(),
-                'conditions[publication_date][lte]': query.end.date().isoformat(),
-                'per_page': min(query.limit, self.max_items_per_request), 'order': 'newest',
-            })}"
-        return f"{self.endpoint}?{urlencode({'query': query.text, 'limit': min(query.limit, self.max_items_per_request), 'from': query.start.date().isoformat(), 'to': query.end.date().isoformat()})}"
+            params = {
+                "conditions[term]": " ".join((query.text, *query.symbols)).strip(),
+                "conditions[publication_date][gte]": query.start.date().isoformat(),
+                "conditions[publication_date][lte]": query.end.date().isoformat(),
+                "per_page": min(query.limit, self.max_items_per_request),
+                "order": "newest",
+                "format": "json",
+            }
+            if query.cursor_token is not None:
+                if re.fullmatch(r"[A-Za-z0-9._~:-]{1,512}", query.cursor_token) is None:
+                    raise SourceFailure("INVALID_QUERY")
+                params["search_after"] = query.cursor_token
+                endpoint = "https://www.federalregister.gov/api/v1/documents"
+            else:
+                endpoint = self.endpoint
+            return f"{endpoint}?{urlencode(params)}"
+        return f"{self.endpoint}?{urlencode({
+            'query': query.text,
+            'limit': min(query.limit, self.max_items_per_request),
+            'from': query.start.date().isoformat(),
+            'to': query.end.date().isoformat(),
+        })}"
 
     def _request(self, query: CollectionQuery) -> HttpRequest:
-        if self.provider == "sec_edgar":
-            if (
-                not isinstance(query.cik, str)
-                or re.fullmatch(r"[0-9]{1,10}", query.cik) is None
-                or int(query.cik) == 0
-            ):
-                raise SourceFailure("INVALID_QUERY")
-            identifier = query.cik.zfill(10)
-            return HttpRequest(f"https://data.sec.gov/submissions/CIK{quote(identifier)}.json")
         if self.provider == "fred":
             try:
                 key = self.secret_getter("fred_api_key")
@@ -60,63 +104,84 @@ class OfficialAdapter(SourceAdapter):
                 "observation_end": query.end.date().isoformat(),
                 "limit": min(query.limit, self.max_items_per_request),
             })
-            return HttpRequest(f"{self.endpoint}?{params}")
-        if self.provider in {"white_house", "doe", "dod", "eia", "bls", "bea"}:
-            # The approved provider exists, but abstract themes do not identify a
-            # documented free endpoint/series. Do not spend quota guessing one.
+            return HttpRequest(f"{self.endpoint}?{params}", expected_document="json")
+        if self.provider in {"bls", "bea"}:
             raise SourceFailure("UNSUPPORTED_QUERY")
         if self.provider == "federal_register":
-            return HttpRequest(self._request_reference(query))
-        params = urlencode({
-            "query": query.text,
-            "limit": min(query.limit, self.max_items_per_request),
-            "from": query.start.date().isoformat(),
-            "to": query.end.date().isoformat(),
-        })
-        return HttpRequest(f"{self.endpoint}?{params}")
+            return HttpRequest(
+                self._request_reference(query),
+                expected_document="json",
+                allowed_redirect_urls=frozenset(),
+            )
+        raise SourceFailure("UNSUPPORTED_QUERY")
 
     def _records(self, payload, query, response):
-        if self.provider == "sec_edgar":
-            records = parse_submissions(payload, min(query.limit, self.max_items_per_request))
-            return [{
-                **record,
-                "request_url": self._request_reference(query),
-                "item_url": record["source_url"],
-                "reporting_at": record.get("effective_at"),
-                "entity_ids": entity_ids((f"cik:{str(query.cik).zfill(10)}",)),
-                "security_ids": security_ids(query.symbols),
-            } for record in records]
         if self.provider == "federal_register":
-            return self._with_query_identity(self._federal_register(payload), query, self._request_reference(query))
+            return self._federal_register(payload, query, self._request_reference(query))
         if self.provider == "fred":
             return self._fred(payload, query, self._request_reference(query))
-        return self._with_query_identity(
-            self._generic(payload, self._request_reference(query)), query, self._request_reference(query)
-        )
+        raise SourceFailure("UNSUPPORTED_QUERY")
 
     @staticmethod
-    def _with_query_identity(records, query, request_url):
-        return [{
-            **record,
-            "request_url": request_url,
-            "item_url": record.get("source_url") or request_url,
-            "security_ids": security_ids(query.symbols),
-        } for record in records]
-
-    @staticmethod
-    def _federal_register(payload):
+    def _federal_register(payload, query, request_url):
         results = payload.get("results") if isinstance(payload, dict) else None
         if not isinstance(results, list):
             raise ValueError("invalid Federal Register response")
-        return [{
-            "upstream_item_id": item.get("document_number"),
-            "source_url": item.get("html_url"),
-            "title": item.get("title"),
-            "text": item.get("abstract"),
-            "published_at": item.get("publication_date"),
-            "effective_at": item.get("effective_on"),
-            "metadata": {"document_number": item.get("document_number")},
-        } for item in results if isinstance(item, dict)]
+        records = []
+        for item in results:
+            if not isinstance(item, dict):
+                continue
+            records.append({
+                "upstream_item_id": item.get("document_number"),
+                "request_url": request_url,
+                "item_url": item.get("html_url"),
+                "title": item.get("title"),
+                "text": item.get("abstract"),
+                "published_at": item.get("publication_date"),
+                "effective_at": item.get("effective_on"),
+                "metadata": {
+                    "document_number": item.get("document_number"),
+                    "document_status": item.get("type") or item.get("document_type") or "unknown",
+                },
+            })
+        return records
+
+    @staticmethod
+    def _next_cursor(payload) -> str | None:
+        next_page_url = payload.get("next_page_url") if isinstance(payload, dict) else None
+        if next_page_url in (None, ""):
+            return None
+        if not isinstance(next_page_url, str) or len(next_page_url) > 2_048:
+            raise SourceFailure("INVALID_RESPONSE")
+        try:
+            parsed = urlsplit(next_page_url)
+            params = parse_qs(parsed.query, keep_blank_values=True)
+        except ValueError:
+            raise SourceFailure("INVALID_RESPONSE") from None
+        if (
+            parsed.scheme != "https"
+            or parsed.hostname != "www.federalregister.gov"
+            or parsed.username is not None
+            or parsed.password is not None
+            or parsed.port not in (None, 443)
+            or parsed.path not in {"/api/v1/documents", "/api/v1/documents.json"}
+            or len(params.get("search_after", ())) != 1
+        ):
+            raise SourceFailure("INVALID_RESPONSE")
+        cursor = params["search_after"][0]
+        if re.fullmatch(r"[A-Za-z0-9._~:-]{1,512}", cursor) is None:
+            raise SourceFailure("INVALID_RESPONSE")
+        return cursor
+
+    def _progress_metadata(self, payload, query, response, records, bound):
+        if self.provider != "federal_register":
+            return super()._progress_metadata(payload, query, response, records, bound)
+        cursor = self._next_cursor(payload)
+        return MappingProxyType({
+            "truncated": cursor is not None,
+            "backlog_remaining": cursor is not None,
+            **({"backlog_token": cursor} if cursor else {}),
+        })
 
     @staticmethod
     def _fred(payload, query, request_url):
@@ -134,82 +199,31 @@ class OfficialAdapter(SourceAdapter):
             "published_at": item.get("realtime_start") or payload.get("realtime_start"),
             "effective_at": item.get("date"),
             "reporting_at": item.get("date"),
-            "entity_ids": entity_ids((f"series:{series_id}",)),
+            "entity_ids": (f"series:{series_id}",),
             "metadata": {"series_id": series_id, "value": item.get("value")},
         } for item in observations if isinstance(item, dict)]
 
-    def _generic(self, payload, request_url):
-        if not isinstance(payload, dict):
-            raise ValueError("invalid official source response")
-        raw = payload.get("results", payload.get("items", payload.get("data")))
-        if isinstance(raw, dict):
-            raw = raw.get("items", raw.get("results", raw.get("series")))
-        if not isinstance(raw, list):
-            raise ValueError("invalid official source response")
-        records = []
-        for item in raw:
-            if not isinstance(item, dict):
-                continue
-            records.append({
-                "upstream_item_id": item.get("id") or item.get("document_number"),
-                "source_url": item.get("url") or item.get("html_url") or request_url,
-                "title": item.get("title") or item.get("name") or f"{self.provider} release",
-                "text": item.get("summary") or item.get("description") or item.get("value"),
-                "published_at": item.get("published_at") or item.get("publication_date") or item.get("release_date"),
-                "effective_at": item.get("effective_at") or item.get("effective_date") or item.get("observation_date"),
-                "metadata": {},
-            })
-        return records
 
-
-class SecEdgarAdapter(OfficialAdapter):
-    provider = "sec_edgar"
-    allowed_hosts = frozenset({"www.sec.gov", "data.sec.gov"})
-
-
-class FederalRegisterAdapter(OfficialAdapter):
+class FederalRegisterAdapter(OfficialJsonAdapter):
     provider = "federal_register"
+    authority = "official_policy_record"
     allowed_hosts = frozenset({"www.federalregister.gov"})
     endpoint = "https://www.federalregister.gov/api/v1/documents.json"
 
 
-class WhiteHouseAdapter(OfficialAdapter):
-    provider = "white_house"
-    allowed_hosts = frozenset({"www.whitehouse.gov"})
-    endpoint = "https://www.whitehouse.gov/wp-json/wp/v2/search"
-
-
-class DoeAdapter(OfficialAdapter):
-    provider = "doe"
-    allowed_hosts = frozenset({"www.energy.gov"})
-    endpoint = "https://www.energy.gov/api/search"
-
-
-class DodAdapter(OfficialAdapter):
-    provider = "dod"
-    allowed_hosts = frozenset({"www.defense.gov"})
-    endpoint = "https://www.defense.gov/News/Releases"
-
-
-class EiaAdapter(OfficialAdapter):
-    provider = "eia"
-    allowed_hosts = frozenset({"api.eia.gov", "www.eia.gov"})
-    endpoint = "https://api.eia.gov/v2/"
-
-
-class FredAdapter(OfficialAdapter):
+class FredAdapter(OfficialJsonAdapter):
     provider = "fred"
     allowed_hosts = frozenset({"api.stlouisfed.org", "fred.stlouisfed.org"})
     endpoint = "https://api.stlouisfed.org/fred/series/observations"
 
 
-class BlsAdapter(OfficialAdapter):
+class BlsAdapter(OfficialJsonAdapter):
     provider = "bls"
     allowed_hosts = frozenset({"api.bls.gov", "www.bls.gov"})
     endpoint = "https://api.bls.gov/publicAPI/v2/timeseries/data"
 
 
-class BeaAdapter(OfficialAdapter):
+class BeaAdapter(OfficialJsonAdapter):
     provider = "bea"
     allowed_hosts = frozenset({"apps.bea.gov", "www.bea.gov"})
     endpoint = "https://apps.bea.gov/api/data"
@@ -218,7 +232,23 @@ class BeaAdapter(OfficialAdapter):
 OFFICIAL_ADAPTERS = {
     adapter.provider: adapter
     for adapter in (
-        SecEdgarAdapter, FederalRegisterAdapter, WhiteHouseAdapter, DoeAdapter,
-        DodAdapter, EiaAdapter, FredAdapter, BlsAdapter, BeaAdapter,
+        SecEdgarAdapter,
+        FederalRegisterAdapter,
+        WhiteHouseAdapter,
+        DoeAdapter,
+        DefenseAdapter,
+        EiaAdapter,
+        FredAdapter,
+        BlsAdapter,
+        BeaAdapter,
     )
 }
+
+
+__all__ = [
+    "DEFENSE_NEWS_URL",
+    "DEFENSE_RELEASES_URL",
+    "OFFICIAL_ADAPTERS",
+    "DefenseAdapter",
+    "FederalRegisterAdapter",
+]

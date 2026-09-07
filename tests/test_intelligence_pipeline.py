@@ -7,9 +7,20 @@ import pytest
 from datetime import date, datetime, timedelta, timezone
 from types import MappingProxyType
 
-from lib.intelligence.pipeline import IntelligencePipeline, PipelineRequest, _discover
+from lib.intelligence.pipeline import (
+    IntelligencePipeline,
+    PipelineRequest,
+    _discover,
+    _failed_receipt,
+    _source_summary,
+)
 from lib.intelligence.normalize import normalize_item
-from lib.intelligence.providers import CollectionResult, RequestReceipt, SourceItem
+from lib.intelligence.providers import (
+    CollectionQuery,
+    CollectionResult,
+    RequestReceipt,
+    SourceItem,
+)
 from lib.intelligence.themes import SEED_THEMES
 from lib.intelligence.types import PacketLimits
 
@@ -84,6 +95,40 @@ class FakeAdapter:
             return CollectionResult((), receipt(self.provider, status="failed"), query.limit)
         item = raw_item(query.text)
         return CollectionResult((item,), receipt(self.provider), query.limit)
+
+
+@pytest.mark.parametrize(
+    ("error_code", "status", "coverage_status"),
+    [
+        ("CONFIGURATION_MISSING", "configuration_missing", "configuration_missing"),
+        ("UNSUPPORTED_QUERY", "failed", "unsupported"),
+        ("SOURCE_UNAVAILABLE", "failed", "source_failed"),
+    ],
+)
+def test_pipeline_preserves_truthful_pretransport_source_outcomes(
+    error_code, status, coverage_status
+):
+    query = CollectionQuery(
+        "official feed",
+        (),
+        NOW - timedelta(hours=4),
+        NOW,
+        capability_id="doe_energy_news_rss",
+        next_retry_phase="post-market",
+    )
+
+    failed = _failed_receipt(
+        "doe", RESERVATION_ID, query, NOW, error_code=error_code
+    )
+    summary = _source_summary(failed, "33333333-3333-4333-8333-333333333333")
+
+    assert failed.status == status
+    assert failed.request_cost == 0
+    assert failed.metadata["coverage_status"] == coverage_status
+    assert failed.metadata["truncated"] is False
+    assert failed.metadata["backlog_remaining"] is False
+    assert summary["coverage_status"] == coverage_status
+    assert summary["next_retry_phase"] == "post-market"
 
 
 def test_pipeline_rejects_provider_outside_reviewed_registry():
