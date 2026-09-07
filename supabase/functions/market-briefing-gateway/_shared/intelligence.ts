@@ -451,6 +451,16 @@ function nullableUuid(value: unknown, path: string): string | null {
   return value === null ? null : uuidValue(value, path);
 }
 
+function rejectDuplicateDiscoveryRowIds(
+  rows: JsonObject[],
+  path: string,
+): void {
+  const ids = rows.map((row) => row.id);
+  if (new Set(ids).size !== ids.length) {
+    throw new Error(`${path} has duplicate id`);
+  }
+}
+
 export function parseDiscoveryStageTask(value: unknown): DiscoveryStageTask {
   const row = objectValue(value, "discovery task");
   exactKeys(row, [
@@ -709,6 +719,10 @@ export function parseDiscoveryReferencePayload(
     15_000,
   )
     .map(parseSecurityRevision);
+  rejectDuplicateDiscoveryRowIds(
+    securityRevisions,
+    "discovery reference.security_revisions",
+  );
   if (securityRevisions.some((item) => item.manifest_id !== manifest.id)) {
     throw new Error("discovery reference manifest identity mismatch");
   }
@@ -844,6 +858,16 @@ export function parseDiscoveryStageCheckpointPayload(
       "state",
       "rationale",
     ]);
+    const exposureFactIds = arrayValue(
+      parsed.exposure_fact_ids,
+      `${path}.exposure_fact_ids`,
+      32,
+    ).map((id, position) =>
+      uuidValue(id, `${path}.exposure_fact_ids[${position}]`)
+    );
+    if (new Set(exposureFactIds).size !== exposureFactIds.length) {
+      throw new Error(`${path}.exposure_fact_ids is duplicated`);
+    }
     return {
       ...parsed,
       id: uuidValue(parsed.id, `${path}.id`),
@@ -855,17 +879,23 @@ export function parseDiscoveryStageCheckpointPayload(
         parsed.theme_episode_revision_id,
         `${path}.theme_episode_revision_id`,
       ),
-      exposure_fact_ids: arrayValue(
-        parsed.exposure_fact_ids,
-        `${path}.exposure_fact_ids`,
-        32,
-      ).map((id, position) =>
-        uuidValue(id, `${path}.exposure_fact_ids[${position}]`)
-      ),
+      exposure_fact_ids: exposureFactIds,
       state: enumValue(parsed.state, ["nominated"] as const, `${path}.state`),
       rationale: boundedObject(parsed.rationale, `${path}.rationale`, 16_384),
     };
   });
+  rejectDuplicateDiscoveryRowIds(
+    exposureFacts,
+    "discovery checkpoint.exposure_facts",
+  );
+  rejectDuplicateDiscoveryRowIds(
+    episodes,
+    "discovery checkpoint.theme_episode_revisions",
+  );
+  rejectDuplicateDiscoveryRowIds(
+    nominations,
+    "discovery checkpoint.research_nominations",
+  );
   if (
     (episodes.length > 0 && task.stage !== "signals") ||
     (exposureFacts.length > 0 && task.stage !== "enrich") ||

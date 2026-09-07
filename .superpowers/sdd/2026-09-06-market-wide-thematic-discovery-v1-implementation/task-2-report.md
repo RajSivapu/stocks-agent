@@ -374,3 +374,103 @@ exit 0
 - Verified the fixes preserve owner-only, suggestion-only behavior, `execution_allowed = false`, and the no-production/no-network-mutation boundary.
 
 No new material concern was found. The skipped full-suite tests remain pre-existing environment-dependent cases; all disposable PostgreSQL discovery tests executed and passed locally.
+
+## Review fix round 2
+
+The second review found that array length plus per-supplied-row replay checks did not prove child identity-set equality. A persisted `[A, B]` result could be replayed as `[A, A]`. It also found that nomination `exposure_fact_ids` uniqueness was enforced during recovery but not at the gateway parser or protected SQL write boundary.
+
+### RED evidence
+
+TypeScript parser regressions were added for duplicate security revision IDs, every stage result-child collection, and duplicate nomination exposure-fact IDs:
+
+```text
+npx --yes deno@2.9.6 test --config supabase/functions/deno.json --filter "duplicate" supabase/functions/market-briefing-gateway/_shared/intelligence_test.ts
+FAILED | 0 passed | 3 failed | 7 filtered out (12ms)
+```
+
+Disposable PostgreSQL regressions persisted exact two-child manifests and stage results, verified an exact replay, then substituted `[A, A]` for `[A, B]`. Coverage includes security revisions, theme episode revisions, exposure facts, research nominations, and duplicate nomination exposure-fact IDs:
+
+```text
+.venv/bin/python -m pytest tests/test_market_wide_discovery_sql.py -q -k 'reference_replay_is_exact or stage_replay_rejects_duplicate or duplicate_nomination_exposure'
+5 failed, 14 deselected in 1.18s
+```
+
+After the first uniqueness implementation, self-review identified a UUID canonicalization bypass: lowercase and uppercase spellings of the same UUID grouped as different JSON strings even though PostgreSQL casts them to the same identity. The tests were tightened to use case-varied duplicate identities and failed before the SQL grouping fix:
+
+```text
+.venv/bin/python -m pytest tests/test_market_wide_discovery_sql.py -q -k 'reference_replay_is_exact or stage_replay_rejects_duplicate or duplicate_nomination_exposure'
+5 failed, 14 deselected in 1.06s
+```
+
+### Implemented fixes
+
+- The TypeScript reference parser rejects duplicate parsed security revision UUIDs.
+- The TypeScript checkpoint parser rejects duplicate parsed IDs independently in theme episode, exposure fact, and research nomination collections.
+- The TypeScript nomination parser rejects duplicate parsed `exposure_fact_ids`.
+- `record_market_discovery_reference` rejects duplicate security revision UUID identities before manifest or child persistence and before replay comparison.
+- `checkpoint_market_discovery_stage` rejects duplicate child UUID identities in all three stage result arrays before task transition, child persistence, or replay comparison.
+- The checkpoint RPC rejects duplicate nomination exposure-fact UUID identities before lineage validation or persistence.
+- PostgreSQL groups duplicate checks by the UUID value rather than raw JSON text, so case variants cannot bypass identity uniqueness.
+- The audit confirmed the recovery validator already rejects duplicate record identities and duplicate nomination exposure-fact IDs. The gateway, protected database boundary, and recovery verifier now enforce the same identity rule.
+- `sql/schema.sql` retains the exact `20261005_market_wide_discovery.sql` tail. Immutable `20261004_production_schema_reconciliation.sql` remains unchanged.
+
+### GREEN evidence
+
+Direct parser regressions:
+
+```text
+npx --yes deno@2.9.6 test --config supabase/functions/deno.json --filter "duplicate" supabase/functions/market-briefing-gateway/_shared/intelligence_test.ts
+ok | 3 passed | 0 failed | 7 filtered out (6ms)
+```
+
+Direct disposable PostgreSQL regressions after UUID canonicalization:
+
+```text
+.venv/bin/python -m pytest tests/test_market_wide_discovery_sql.py -q -k 'reference_replay_is_exact or stage_replay_rejects_duplicate or duplicate_nomination_exposure'
+5 passed, 14 deselected in 0.97s
+```
+
+Focused SQL and migration-verifier suite:
+
+```text
+.venv/bin/python -m pytest tests/test_market_wide_discovery_sql.py tests/test_verify_market_intelligence_migration.py -q
+88 passed in 1.43s
+```
+
+Focused parser and repository suite:
+
+```text
+npx --yes deno@2.9.6 test --config supabase/functions/deno.json supabase/functions/market-briefing-gateway/_shared/intelligence_test.ts supabase/functions/market-briefing-gateway/_shared/repository_test.ts
+ok | 24 passed | 0 failed (185ms)
+```
+
+Recovery, managed restore, and handler integration remained green:
+
+```text
+.venv/bin/python -m pytest tests/test_recovery_bundle.py tests/test_managed_isolated_restore.py -q
+137 passed in 8.37s
+
+npx --yes deno@2.9.6 test --config supabase/functions/deno.json supabase/functions/market-briefing-gateway/_shared/handler_test.ts
+ok | 53 passed | 0 failed (194ms)
+```
+
+Full regression on the final implementation:
+
+```text
+.venv/bin/python -m pytest -q
+992 passed, 3 skipped, 4 deselected in 54.60s
+
+npx --yes deno@2.9.6 test --config supabase/functions/deno.json supabase/functions/market-briefing-gateway/_shared
+ok | 244 passed | 0 failed (814ms)
+```
+
+### Review-round self-review
+
+- Confirmed duplicate detection uses parsed lowercase UUIDs in TypeScript and PostgreSQL UUID casts in SQL.
+- Confirmed each top-level child collection is checked independently; equal UUIDs in different ledger tables are not conflated.
+- Confirmed duplicate rejection occurs before a protected write or replay receipt can succeed.
+- Confirmed exact `[A, B]` replay still returns `duplicate: true`, while incomplete, changed, and duplicate-substitution payloads fail closed.
+- Confirmed recovery already enforced the same record and nomination lineage uniqueness rules and needed no implementation change.
+- Confirmed no prior migration, deployment script, production database, provider, Telegram, credential, schedule, or network state was changed.
+
+No new material concern was found. The three Python skips remain pre-existing environment-dependent tests; every disposable PostgreSQL discovery test ran and passed on this host.

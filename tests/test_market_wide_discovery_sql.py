@@ -1,4 +1,5 @@
 from pathlib import Path
+import copy
 import shutil
 import socket
 import subprocess
@@ -247,6 +248,30 @@ def create_attempting_task(connection, run_id: str, *, stage: str) -> tuple[str,
     return task_id, payload
 
 
+def exposure_fact_row(*, row_id: str, security_id: str, content_hash: str):
+    return {
+        "id": row_id, "security_revision_id": security_id,
+        "theme_episode_revision_id": None, "exposure_kind": "filing",
+        "fact": {"basis": "10-K"}, "source_ids": [f"sec:{row_id}"],
+        "valid_from": "2026-09-06T00:00:00Z", "valid_to": None,
+        "content_hash": content_hash,
+    }
+
+
+def persist_exposure_fact(connection, run_id: str, security_id: str) -> str:
+    exposure_id = str(uuid.uuid4())
+    _task_id, payload = create_attempting_task(connection, run_id, stage="enrich")
+    payload["task"].update(state="succeeded", result={"fact_count": 1})
+    payload["exposure_facts"] = [exposure_fact_row(
+        row_id=exposure_id, security_id=security_id, content_hash=uuid.uuid4().hex * 2,
+    )]
+    connection.execute(
+        "SELECT public.checkpoint_market_discovery_stage(%s,%s)",
+        (run_id, Jsonb(payload)),
+    )
+    return exposure_id
+
+
 def test_discovery_task_transition_rejects_reselection_after_attempt(discovery_db):
     run_id, task_id = seeded_run(discovery_db), str(uuid.uuid4())
     discovery_db.execute(
@@ -310,6 +335,18 @@ def test_discovery_reference_replay_is_exact_and_altered_child_fails_closed(disc
             (run_id, Jsonb(incomplete)),
         )
 
+    duplicate_child_replay = copy.deepcopy(payload)
+    duplicate_child_replay["security_revisions"] = [
+        copy.deepcopy(payload["security_revisions"][0]),
+        copy.deepcopy(payload["security_revisions"][0]),
+    ]
+    duplicate_child_replay["security_revisions"][1]["id"] = security_id.upper()
+    with pytest.raises(psycopg.errors.InvalidParameterValue, match="duplicate security revision id"):
+        discovery_db.execute(
+            "SELECT public.record_market_discovery_reference(%s,%s)",
+            (run_id, Jsonb(duplicate_child_replay)),
+        )
+
     payload["security_revisions"][0]["ticker"] = "DRIFT"
     with pytest.raises(psycopg.errors.InvalidParameterValue, match="idempotency mismatch"):
         discovery_db.execute(
@@ -349,6 +386,91 @@ def test_discovery_stage_replay_is_exact_and_altered_child_fails_closed(discover
 
     payload["theme_episode_revisions"][0]["episode"] = {"summary": "drift"}
     with pytest.raises(psycopg.errors.InvalidParameterValue, match="idempotency mismatch"):
+        discovery_db.execute(
+            "SELECT public.checkpoint_market_discovery_stage(%s,%s)",
+            (run_id, Jsonb(payload)),
+        )
+
+
+@pytest.mark.parametrize(("stage", "collection"), [
+    ("signals", "theme_episode_revisions"),
+    ("enrich", "exposure_facts"),
+    ("screen", "research_nominations"),
+])
+def test_discovery_stage_replay_rejects_duplicate_child_identity(
+        discovery_db, stage, collection):
+    run_id = seeded_run(discovery_db)
+    manifest_id = str(uuid.uuid4())
+    security_ids = [str(uuid.uuid4()), str(uuid.uuid4())]
+    reference = reference_payload(
+        manifest_id=manifest_id,
+        securities=[
+            (security_ids[0], "FIRST", uuid.uuid4().hex * 2),
+            (security_ids[1], "SECOND", uuid.uuid4().hex * 2),
+        ],
+    )
+    discovery_db.execute(
+        "SELECT public.record_market_discovery_reference(%s,%s)",
+        (run_id, Jsonb(reference)),
+    )
+    exposure_id = persist_exposure_fact(discovery_db, run_id, security_ids[0])
+    _task_id, payload = create_attempting_task(discovery_db, run_id, stage=stage)
+    payload["task"].update(state="succeeded", result={"row_count": 2})
+    if collection == "theme_episode_revisions":
+        children = [{
+            "id": str(uuid.uuid4()), "theme_id": theme_id, "revision": 1,
+            "episode": {"summary": theme_id}, "source_ids": [f"gdelt:{theme_id}"],
+            "valid_from": "2026-09-06T00:00:00Z", "valid_to": None,
+            "content_hash": uuid.uuid4().hex * 2,
+        } for theme_id in ("power_grid", "data_centers")]
+    elif collection == "exposure_facts":
+        children = [exposure_fact_row(
+            row_id=str(uuid.uuid4()), security_id=security_ids[index],
+            content_hash=uuid.uuid4().hex * 2,
+        ) for index in range(2)]
+    else:
+        children = [{
+            "id": str(uuid.uuid4()), "security_revision_id": security_ids[index],
+            "theme_episode_revision_id": None, "exposure_fact_ids": [exposure_id],
+            "state": "nominated", "rationale": {"basis": f"candidate-{index}"},
+        } for index in range(2)]
+    payload[collection] = children
+    discovery_db.execute(
+        "SELECT public.checkpoint_market_discovery_stage(%s,%s)",
+        (run_id, Jsonb(payload)),
+    )
+    replay = discovery_db.execute(
+        "SELECT public.checkpoint_market_discovery_stage(%s,%s)",
+        (run_id, Jsonb(payload)),
+    ).fetchone()[0]
+    assert replay["duplicate"] is True
+
+    duplicate_child_replay = copy.deepcopy(payload)
+    duplicate_child_replay[collection] = [
+        copy.deepcopy(children[0]), copy.deepcopy(children[0]),
+    ]
+    duplicate_child_replay[collection][1]["id"] = children[0]["id"].upper()
+    with pytest.raises(psycopg.errors.InvalidParameterValue, match="duplicate result child id"):
+        discovery_db.execute(
+            "SELECT public.checkpoint_market_discovery_stage(%s,%s)",
+            (run_id, Jsonb(duplicate_child_replay)),
+        )
+
+
+def test_discovery_checkpoint_rejects_duplicate_nomination_exposure_fact_ids(discovery_db):
+    run_id = seeded_run(discovery_db)
+    security_id = record_reference(discovery_db, run_id)
+    exposure_id = persist_exposure_fact(discovery_db, run_id, security_id)
+    _task_id, payload = create_attempting_task(discovery_db, run_id, stage="screen")
+    payload["task"].update(state="succeeded", result={"nomination_count": 1})
+    payload["research_nominations"] = [{
+        "id": str(uuid.uuid4()), "security_revision_id": security_id,
+        "theme_episode_revision_id": None,
+        "exposure_fact_ids": [exposure_id, exposure_id.upper()],
+        "state": "nominated", "rationale": {"basis": "research"},
+    }]
+
+    with pytest.raises(psycopg.errors.InvalidParameterValue, match="duplicate exposure fact id"):
         discovery_db.execute(
             "SELECT public.checkpoint_market_discovery_stage(%s,%s)",
             (run_id, Jsonb(payload)),

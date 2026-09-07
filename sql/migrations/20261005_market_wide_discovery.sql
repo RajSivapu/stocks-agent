@@ -197,6 +197,12 @@ BEGIN
      OR jsonb_array_length(p_payload->'security_revisions')>15000 THEN
     RAISE EXCEPTION 'invalid discovery reference payload' USING ERRCODE='22023';
   END IF;
+  IF EXISTS(
+    SELECT 1 FROM jsonb_array_elements(p_payload->'security_revisions') child
+    GROUP BY (child->>'id')::uuid HAVING count(*)>1
+  ) THEN
+    RAISE EXCEPTION 'duplicate security revision id' USING ERRCODE='22023';
+  END IF;
   IF NOT EXISTS(SELECT 1 FROM public.market_intelligence_runs i JOIN public.analysis_runs a ON a.id=i.id
                 WHERE i.id=p_run_id AND a.status='running') THEN
     RAISE EXCEPTION 'intelligence run is not running' USING ERRCODE='22023';
@@ -286,6 +292,20 @@ BEGIN
      OR jsonb_array_length(p_payload->'theme_episode_revisions')>50
      OR jsonb_array_length(p_payload->'research_nominations')>50 THEN
     RAISE EXCEPTION 'invalid discovery stage checkpoint' USING ERRCODE='22023';
+  END IF;
+  IF EXISTS(
+    SELECT 1 FROM (
+      SELECT (child->>'id')::uuid AS id FROM jsonb_array_elements(p_payload->'exposure_facts') child
+      GROUP BY (child->>'id')::uuid HAVING count(*)>1
+      UNION ALL
+      SELECT (child->>'id')::uuid AS id FROM jsonb_array_elements(p_payload->'theme_episode_revisions') child
+      GROUP BY (child->>'id')::uuid HAVING count(*)>1
+      UNION ALL
+      SELECT (child->>'id')::uuid AS id FROM jsonb_array_elements(p_payload->'research_nominations') child
+      GROUP BY (child->>'id')::uuid HAVING count(*)>1
+    ) duplicated_child
+  ) THEN
+    RAISE EXCEPTION 'duplicate result child id' USING ERRCODE='22023';
   END IF;
   t:=p_payload->'task';
   IF jsonb_typeof(t)<>'object'
@@ -388,6 +408,12 @@ BEGIN
       IF jsonb_typeof(r->'exposure_fact_ids')<>'array'
          OR jsonb_array_length(r->'exposure_fact_ids') NOT BETWEEN 1 AND 32 THEN
         RAISE EXCEPTION 'discovery result lineage mismatch' USING ERRCODE='22023';
+      END IF;
+      IF EXISTS(
+        SELECT 1 FROM jsonb_array_elements_text(r->'exposure_fact_ids') ids(fact_id)
+        GROUP BY fact_id::uuid HAVING count(*)>1
+      ) THEN
+        RAISE EXCEPTION 'duplicate exposure fact id' USING ERRCODE='22023';
       END IF;
       IF NOT EXISTS(
            SELECT 1 FROM public.market_security_reference_revisions s

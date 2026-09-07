@@ -160,6 +160,9 @@ Deno.test("canonical JSON and hashes match Task 2 semantic ordering", () => {
 
 const DISCOVERY_TASK_ID = "00000000-0000-4000-8000-000000000041";
 const OTHER_RUN_TASK_ID = "00000000-0000-4000-8000-000000000099";
+const DISCOVERY_MANIFEST_ID = "00000000-0000-4000-8000-000000000042";
+const DISCOVERY_SECURITY_ID = "00000000-0000-4000-8000-000000000043";
+const DISCOVERY_EXPOSURE_ID = "00000000-0000-4000-8000-000000000044";
 
 function discoveryTask() {
   return {
@@ -178,6 +181,69 @@ function discoveryTask() {
     attempt_count: 0,
     request_budget: 1,
     result: {},
+  };
+}
+
+function discoveryManifest() {
+  return {
+    id: DISCOVERY_MANIFEST_ID,
+    reference_version: "sec:2026-09-06",
+    revision: 1,
+    capability_version: 1,
+    taxonomy_version: 1,
+    source_hash: "b".repeat(64),
+    valid_from: "2026-09-06T00:00:00.000Z",
+    valid_to: null,
+    manifest: { coverage_status: "scope_not_guaranteed" },
+    content_hash: "c".repeat(64),
+  };
+}
+
+function discoverySecurityRevision() {
+  return {
+    id: DISCOVERY_SECURITY_ID,
+    manifest_id: DISCOVERY_MANIFEST_ID,
+    revision: 1,
+    security_id: "NASDAQ:TEST",
+    entity_id: "CIK:0000000001",
+    ticker: "TEST",
+    exchange: "NASDAQ",
+    instrument_type: "COMMON_STOCK",
+    eligible: true,
+    exclusion_reasons: [],
+    aliases: ["Test Corp"],
+    source_ids: ["nasdaq-listed:TEST"],
+    valid_from: "2026-09-06T00:00:00.000Z",
+    valid_to: null,
+    content_hash: "d".repeat(64),
+  };
+}
+
+function succeededDiscoveryCheckpoint(stage: string): Record<string, unknown> {
+  return {
+    task: {
+      ...discoveryTask(),
+      stage,
+      state: "succeeded",
+      attempt_count: 1,
+    },
+    exposure_facts: [],
+    theme_episode_revisions: [],
+    research_nominations: [],
+  };
+}
+
+function discoveryExposureFact() {
+  return {
+    id: DISCOVERY_EXPOSURE_ID,
+    security_revision_id: DISCOVERY_SECURITY_ID,
+    theme_episode_revision_id: null,
+    exposure_kind: "filing",
+    fact: { basis: "10-K" },
+    source_ids: ["sec:fixture"],
+    valid_from: "2026-09-06T00:00:00.000Z",
+    valid_to: null,
+    content_hash: "e".repeat(64),
   };
 }
 
@@ -220,6 +286,78 @@ Deno.test("discovery task parser preserves the planner identity and rejects rese
   assertThrows(
     () => parseDiscoveryStageCheckpointPayload(duplicateDependency),
     "duplicated",
+  );
+});
+
+Deno.test("discovery reference parser rejects duplicate security revision identifiers", () => {
+  const security = discoverySecurityRevision();
+  assertThrows(
+    () =>
+      parseDiscoveryReferencePayload({
+        manifest: discoveryManifest(),
+        security_revisions: [security, structuredClone(security)],
+      }),
+    "security_revisions has duplicate id",
+  );
+});
+
+Deno.test("discovery checkpoint parser rejects duplicate result child identifiers", () => {
+  const cases = [
+    {
+      stage: "signals",
+      collection: "theme_episode_revisions",
+      child: {
+        id: "00000000-0000-4000-8000-000000000045",
+        theme_id: "power_grid",
+        revision: 1,
+        episode: { summary: "grid investment" },
+        source_ids: ["gdelt:fixture"],
+        valid_from: "2026-09-06T00:00:00.000Z",
+        valid_to: null,
+        content_hash: "f".repeat(64),
+      },
+    },
+    {
+      stage: "enrich",
+      collection: "exposure_facts",
+      child: discoveryExposureFact(),
+    },
+    {
+      stage: "screen",
+      collection: "research_nominations",
+      child: {
+        id: "00000000-0000-4000-8000-000000000046",
+        security_revision_id: DISCOVERY_SECURITY_ID,
+        theme_episode_revision_id: null,
+        exposure_fact_ids: [DISCOVERY_EXPOSURE_ID],
+        state: "nominated",
+        rationale: { basis: "research" },
+      },
+    },
+  ];
+  for (const { stage, collection, child } of cases) {
+    const payload = succeededDiscoveryCheckpoint(stage);
+    payload[collection] = [child, structuredClone(child)];
+    assertThrows(
+      () => parseDiscoveryStageCheckpointPayload(payload),
+      `${collection} has duplicate id`,
+    );
+  }
+});
+
+Deno.test("discovery checkpoint parser rejects duplicate nomination exposure fact identifiers", () => {
+  const payload = succeededDiscoveryCheckpoint("screen");
+  payload.research_nominations = [{
+    id: "00000000-0000-4000-8000-000000000046",
+    security_revision_id: DISCOVERY_SECURITY_ID,
+    theme_episode_revision_id: null,
+    exposure_fact_ids: [DISCOVERY_EXPOSURE_ID, DISCOVERY_EXPOSURE_ID],
+    state: "nominated",
+    rationale: { basis: "research" },
+  }];
+  assertThrows(
+    () => parseDiscoveryStageCheckpointPayload(payload),
+    "exposure_fact_ids is duplicated",
   );
 });
 
@@ -308,18 +446,7 @@ Deno.test("discovery stage parser rejects unapproved providers, authority fields
 });
 
 Deno.test("reference and context parsers are exact, bounded, and research-only", () => {
-  const manifest = {
-    id: "00000000-0000-4000-8000-000000000042",
-    reference_version: "sec:2026-09-06",
-    revision: 1,
-    capability_version: 1,
-    taxonomy_version: 1,
-    source_hash: "b".repeat(64),
-    valid_from: "2026-09-06T00:00:00.000Z",
-    valid_to: null,
-    manifest: { coverage_status: "scope_not_guaranteed" },
-    content_hash: "c".repeat(64),
-  };
+  const manifest = discoveryManifest();
   assertEquals(
     parseDiscoveryReferencePayload({ manifest, security_revisions: [] })
       .manifest,
