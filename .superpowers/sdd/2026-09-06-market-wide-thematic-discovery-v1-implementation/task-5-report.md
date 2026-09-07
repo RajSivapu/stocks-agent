@@ -118,3 +118,63 @@ capacity path.
 - Reverse discovery can schedule fewer tasks than the phase reserve when the 100-task protected
   ledger ceiling leaves less room. Coverage is reported through the existing bounded source/task
   receipts rather than implying completeness.
+
+## Important-review fix pass
+
+Four focused RED groups reproduced the review findings before production changes:
+
+- Four eligibility cases showed an excluded preferred share, an excluded ETF, an unknown ticker,
+  and a security under unavailable reference coverage entering discovery. A full-pipeline probe also
+  persisted a ranking and packet candidate for the unknown ticker.
+- Recovery accepted malformed v2 issuer names, a name-only mutation with unchanged hashes, a
+  changed chunk entry with unchanged hashes, and a membership-order substitution.
+- A real GDELT adapter returned no dynamic-theme proposal metadata, so production collection could
+  not create a corroborated episode without test-only metadata injection.
+- The aluminum/copper taxonomy lacked the data-center electricity-cost adverse smelting path.
+
+The GREEN changes now require a dated, available `ReferenceSnapshot` resolution with
+`eligible=true` before creating any relationship or candidate. Missing or unavailable references
+retain events only; legacy v1 snapshots resolve explicit stable IDs and tickers while issuer prose
+remains unavailable. The persisted pipeline regression proves rankings and packet candidates cannot
+bypass this gate.
+
+Recovery now canonicalizes and authenticates every version-specific manifest and security semantic
+document, validates the exact v2 issuer-name schema and same-entity equality, recomputes chunk and
+root hashes, compares finalized membership order and semantic content to the uploaded entries, and
+permits revision reuse only through the sealed immediate predecessor membership. Valid sealed v1,
+v2, and predecessor-reuse fixtures pass; malformed names, name-only tampering, chunk tampering, and
+membership substitution fail closed.
+
+GDELT now derives bounded proposal labels deterministically from retained headline prefixes. The
+pipeline independently derives the same label from normalized source items, then applies the
+existing publisher and upstream independence gates. A production-adapter pipeline fixture creates
+one eligible episode from two independent sources, retains a single-source proposal unresolved, and
+proves the requested taxonomy query is not used as proposal evidence.
+
+The taxonomy now includes `metals_data_center_power_cost`, an adverse US aluminum-smelting path with
+direction, role, geography, near-to-medium horizon, primary evidence requirements, and an explicit
+invalidation rule. The exact typed-hypothesis regression passes.
+
+Review-fix verification:
+
+```text
+.venv/bin/python -m pytest \
+  tests/test_reference_snapshot_transfer_sql.py tests/test_market_wide_discovery_sql.py \
+  tests/test_recovery_bundle.py tests/test_managed_isolated_restore.py \
+  tests/test_reference_issuer_names.py tests/test_production_schema_reconciliation_sql.py \
+  tests/test_verify_market_intelligence_migration.py -q
+292 passed in 105.32s
+
+.venv/bin/python -m pytest -q
+1206 passed, 3 skipped, 4 deselected in 216.12s
+
+npm run test:all
+exit 0: Python 1206 passed/3 skipped/4 deselected; Node 71 passed;
+Deno 311 passed; package tests 6 + 52 passed; typechecks, ESLint, dependency
+licenses, production build, and bundle verification passed; Playwright 21 passed/1 skipped
+```
+
+`git diff --check`, Python compilation, taxonomy JSON parsing, and migration immutability checks
+passed. Migrations `20261004` through `20261008` remain byte-for-byte unchanged from `71d3b472`.
+All review tests used fixtures and local PostgreSQL test containers. No live collector, source,
+Telegram, scheduler, deployment, or production mutation ran.

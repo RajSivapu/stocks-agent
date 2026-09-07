@@ -1,4 +1,5 @@
 import json
+from dataclasses import replace
 from datetime import datetime, timezone
 from urllib.parse import parse_qs, urlsplit
 
@@ -109,6 +110,11 @@ def test_secondary_adapters_normalize_independent_claims_and_syndication():
     assert alpha.metadata["claim_key"] == finn.metadata["claim_key"]
     assert alpha.metadata["polarity"] == finn.metadata["polarity"] == "positive"
     context = {"holdings": {"TEST": "0.1"}, "liquidity_by_ticker": {"TEST": "1"}, "overlap_by_ticker": {"TEST": "0.1"}}
+    from tests.test_intelligence_entities import reference as entity_reference
+    fixture = entity_reference()
+    context["security_reference"] = replace(fixture, securities=(replace(
+        fixture.securities[0], security_id="sec:TEST", ticker="TEST", aliases=("TEST",),
+    ),))
     events, _, ranked = _discover([alpha, finn], context, NOW)
     assert len(events) == 1
     assert ranked[0].components["authority_corroboration"] == Decimal("0.75")

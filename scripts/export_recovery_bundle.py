@@ -29,6 +29,10 @@ from lib.intelligence.cursors import (  # noqa: E402
     parse_time,
     update_cursor,
 )
+from lib.intelligence.universe import (  # noqa: E402
+    reference_manifest_semantic_document,
+    security_revision_semantic_document,
+)
 
 REQUIRED_RECOVERY_RECORDS = (
     "holdings", "transactions", "commands", "command_acknowledgements", "runs",
@@ -225,6 +229,180 @@ class RecoveryDataSource(Protocol):
 
 def canonical_json(value: object) -> str:
     return json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"), allow_nan=False)
+
+
+_REFERENCE_MANIFEST_FIELDS = (
+    "id", "reference_version", "revision", "capability_version", "taxonomy_version",
+    "source_hash", "valid_from", "valid_to", "manifest", "content_hash",
+)
+_REFERENCE_SECURITY_FIELDS_V1 = (
+    "id", "manifest_id", "revision", "security_id", "entity_id", "ticker",
+    "exchange", "instrument_type", "eligible", "exclusion_reasons", "aliases",
+    "source_ids", "valid_from", "valid_to", "content_hash",
+)
+
+
+def _semantic_hash(value: Mapping[str, object]) -> str:
+    return hashlib.sha256(canonical_json(value).encode()).hexdigest()
+
+
+def _chunk_hash(entries: list[Mapping[str, object]]) -> str:
+    return hashlib.sha256("\n".join(
+        "\x1f".join((str(row["security_id"]), str(row["id"]), str(row["content_hash"])))
+        for row in entries
+    ).encode()).hexdigest()
+
+
+def _validate_reference_semantic_lineage(
+    manifests: Mapping[str, dict[str, object]],
+    security_revisions: Mapping[str, dict[str, object]],
+    receipts_by_manifest: Mapping[str, list[dict[str, object]]],
+    memberships_by_manifest: Mapping[str, list[dict[str, object]]],
+    seals: Mapping[str, dict[str, object]],
+) -> None:
+    """Recompute the same versioned reference graph authenticated at ingestion."""
+    try:
+        for manifest in manifests.values():
+            if manifest["content_hash"] != _semantic_hash(
+                reference_manifest_semantic_document(manifest)
+            ):
+                raise ValueError("reference manifest semantic hash mismatch")
+        for revision in security_revisions.values():
+            if revision["content_hash"] != _semantic_hash(
+                security_revision_semantic_document(revision)
+            ):
+                raise ValueError("reference security semantic hash mismatch")
+    except (KeyError, TypeError, ValueError) as exc:
+        raise ValueError("reference semantic content is invalid") from exc
+
+    flattened_by_manifest: dict[str, list[dict[str, object]]] = {}
+    for manifest_id, receipts in receipts_by_manifest.items():
+        begin_rows = [row for row in receipts if row["chunk_index"] == -1]
+        if len(begin_rows) != 1:
+            raise ValueError("reference begin receipt lineage is invalid")
+        begin = begin_rows[0]
+        begin_payload = begin["payload"]
+        if set(begin_payload) != {
+            "manifest", "capability_id", "chunk_count", "security_count",
+            "root_hash", "predecessor_manifest_id",
+        }:
+            raise ValueError("reference begin payload is invalid")
+        payload_manifest = begin_payload["manifest"]
+        if not isinstance(payload_manifest, Mapping) \
+                or set(payload_manifest) != set(_REFERENCE_MANIFEST_FIELDS):
+            raise ValueError("reference begin manifest is invalid")
+        if payload_manifest["id"] != manifest_id \
+                or payload_manifest["content_hash"] != _semantic_hash(
+                    reference_manifest_semantic_document(payload_manifest)
+                ):
+            raise ValueError("reference begin manifest hash mismatch")
+        stored_manifest = manifests.get(manifest_id)
+        if stored_manifest is not None and (
+            payload_manifest["content_hash"] != stored_manifest["content_hash"]
+            or reference_manifest_semantic_document(payload_manifest)
+            != reference_manifest_semantic_document(stored_manifest)
+        ):
+            raise ValueError("reference finalized manifest differs from begin")
+        body = payload_manifest["manifest"]
+        if not isinstance(body, Mapping):
+            raise ValueError("reference manifest body is invalid")
+        version = body.get("format_version", 1)
+        if isinstance(version, bool) or version not in {1, 2}:
+            raise ValueError("reference manifest format is invalid")
+        if begin_payload["capability_id"] != begin["capability_id"] \
+                or begin_payload["chunk_count"] != begin["chunk_count"] \
+                or begin_payload["root_hash"] != begin["chunk_hash"] \
+                or begin_payload["predecessor_manifest_id"] != begin["predecessor_manifest_id"]:
+            raise ValueError("reference begin receipt differs from payload")
+
+        chunks = sorted(
+            (row for row in receipts if row["chunk_index"] >= 0),
+            key=lambda row: row["chunk_index"],
+        )
+        flattened: list[dict[str, object]] = []
+        seen_security_ids: set[str] = set()
+        seen_revision_ids: set[str] = set()
+        issuer_names_by_entity: dict[str, object] = {}
+        security_fields = set(_REFERENCE_SECURITY_FIELDS_V1)
+        if version == 2:
+            security_fields.update({"semantic_encoding_version", "issuer_names"})
+        for chunk in chunks:
+            payload = chunk["payload"]
+            if set(payload) != {
+                "manifest_id", "chunk_index", "chunk_count", "entries", "chunk_hash",
+            } or payload["manifest_id"] != manifest_id \
+                    or payload["chunk_index"] != chunk["chunk_index"] \
+                    or payload["chunk_count"] != chunk["chunk_count"]:
+                raise ValueError("reference chunk payload lineage is invalid")
+            entries = payload["entries"]
+            if not isinstance(entries, list) or len(entries) != chunk["entry_count"] \
+                    or not 1 <= len(entries) <= (88 if version == 2 else 200):
+                raise ValueError("reference chunk entry count is invalid")
+            for entry in entries:
+                if not isinstance(entry, Mapping) or set(entry) != security_fields \
+                        or entry["manifest_id"] != manifest_id \
+                        or entry.get("semantic_encoding_version", 1) != version:
+                    raise ValueError("reference chunk entry schema is invalid")
+                if entry["content_hash"] != _semantic_hash(
+                    security_revision_semantic_document(entry)
+                ):
+                    raise ValueError("reference chunk security hash mismatch")
+                if entry["security_id"] in seen_security_ids or entry["id"] in seen_revision_ids:
+                    raise ValueError("reference chunk identity is duplicated")
+                seen_security_ids.add(str(entry["security_id"]))
+                seen_revision_ids.add(str(entry["id"]))
+                if version == 2:
+                    entity_id = str(entry["entity_id"])
+                    prior_names = issuer_names_by_entity.setdefault(
+                        entity_id, entry["issuer_names"]
+                    )
+                    if prior_names != entry["issuer_names"]:
+                        raise ValueError("reference chunk issuer names mismatch")
+                flattened.append(dict(entry))
+            expected_chunk_hash = _chunk_hash(entries)
+            if payload["chunk_hash"] != expected_chunk_hash \
+                    or chunk["chunk_hash"] != expected_chunk_hash:
+                raise ValueError("reference chunk hash mismatch")
+        root_hash = hashlib.sha256("".join(
+            str(row["chunk_hash"]) for row in chunks
+        ).encode()).hexdigest()
+        if len(chunks) == begin["chunk_count"] and (
+            root_hash != begin["chunk_hash"]
+            or len(flattened) != begin_payload["security_count"]
+        ):
+            raise ValueError("reference transfer root mismatch")
+        flattened_by_manifest[manifest_id] = flattened
+
+    for manifest_id, seal in seals.items():
+        entries = flattened_by_manifest.get(manifest_id)
+        if entries is None or len(entries) != seal["security_count"]:
+            raise ValueError("reference finalized entries are unavailable")
+        manifest = manifests[manifest_id]
+        if manifest["manifest"].get("security_count") != len(entries):
+            raise ValueError("reference manifest security count mismatch")
+        members = sorted(
+            memberships_by_manifest.get(manifest_id, []), key=lambda row: row["ordinal"]
+        )
+        if len(members) != len(entries):
+            raise ValueError("reference membership count mismatch")
+        predecessor_id = seal["predecessor_manifest_id"]
+        predecessor_members = {
+            row["security_id"]: row for row in memberships_by_manifest.get(predecessor_id, [])
+        } if predecessor_id is not None else {}
+        for ordinal, (entry, member) in enumerate(zip(entries, members, strict=True)):
+            revision = security_revisions.get(member["security_revision_id"])
+            if member["ordinal"] != ordinal or member["security_id"] != entry["security_id"] \
+                    or revision is None or revision["security_id"] != entry["security_id"] \
+                    or revision["content_hash"] != entry["content_hash"] \
+                    or security_revision_semantic_document(revision) != \
+                    security_revision_semantic_document(entry):
+                raise ValueError("reference membership semantic lineage mismatch")
+            if member["security_revision_id"] != entry["id"]:
+                predecessor_member = predecessor_members.get(str(entry["security_id"]))
+                if predecessor_member is None or predecessor_member[
+                    "security_revision_id"
+                ] != member["security_revision_id"]:
+                    raise ValueError("reference membership reuse lineage mismatch")
 
 
 def sha256(raw: bytes) -> str:
@@ -482,6 +660,13 @@ def _validated_records(records: Mapping[str, object]) -> dict[str, list[dict[str
                 or (seal["predecessor_manifest_id"] is not None
                     and (predecessor is None or predecessor["capability_id"] != seal["capability_id"]))):
             raise ValueError("discovery reference finalization dependency mismatch")
+    _validate_reference_semantic_lineage(
+        manifests,
+        security_revisions,
+        receipts_by_manifest,
+        memberships_by_manifest,
+        seals,
+    )
     predecessor_pins = {
         (row["run_id"], row["capability_id"]): row
         for row in result["reference_predecessor_pins"]

@@ -48,6 +48,7 @@ from lib.intelligence.themes import (
     build_market_event,
     evidence_key,
     propose_dynamic_theme,
+    source_dynamic_theme_label,
 )
 from lib.intelligence.types import DiscoveryPlan, DiscoveryTask, PacketLimits, SourceCapability
 from lib.intelligence.universe import ReferenceSnapshot
@@ -617,8 +618,8 @@ class IntelligencePipeline:
                 continue
             for raw in result.items:
                 item = normalize_item(raw)
-                label_value = item.metadata.get("dynamic_theme_label")
-                if not isinstance(label_value, str):
+                label_value = source_dynamic_theme_label(item.title)
+                if label_value is None:
                     continue
                 label = " ".join(label_value.split())[:200]
                 if not label:
@@ -1989,6 +1990,14 @@ def _discover(
     taxonomy = load_theme_taxonomy()
     drafts = detect_events(items, taxonomy)
     reference = context.get("security_reference")
+    reference_coverage = context.get("reference_coverage")
+    reference_available = (
+        isinstance(reference, ReferenceSnapshot)
+        and not (
+            isinstance(reference_coverage, Mapping)
+            and reference_coverage.get("reference_status") == "reference_unavailable"
+        )
+    )
     aliases_value = context.get("reviewed_entity_aliases", ())
     aliases = tuple(aliases_value) if isinstance(aliases_value, Sequence) \
         and not isinstance(aliases_value, (str, bytes, bytearray)) else ()
@@ -2017,21 +2026,13 @@ def _discover(
                for evidence in supporting):
             conflicting_events.add(event.event_id)
         resolutions: list[EntityResolution] = []
-        if reference is not None:
+        if reference_available:
             for evidence in supporting:
                 resolutions.extend(resolve_entities(evidence, reference, aliases=aliases))
-        else:
-            for security_id in draft.security_ids:
-                ticker = str(security_id).strip().upper()
-                if re.fullmatch(r"[A-Z][A-Z0-9.-]{0,14}", ticker) is None:
-                    continue
-                resolutions.append(EntityResolution(
-                    mention=ticker, entity_id=None, security_id=ticker, ticker=ticker,
-                    status="resolved", matched_by="explicit_security_id", eligible=True,
-                ))
         unique_resolutions = {
             row.security_id: row for row in resolutions
-            if row.status == "resolved" and row.security_id is not None and row.ticker is not None
+            if row.status == "resolved" and row.eligible
+            and row.security_id is not None and row.ticker is not None
         }
         for security_id in sorted(unique_resolutions):
             resolution = unique_resolutions[security_id]

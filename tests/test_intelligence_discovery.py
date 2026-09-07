@@ -141,6 +141,24 @@ def test_initial_taxonomy_is_versioned_typed_and_contains_no_action_authority():
     )
 
 
+def test_aluminum_taxonomy_models_data_center_electricity_cost_as_adverse_smelting_path():
+    theme = load_theme_taxonomy().themes["aluminum_copper"]
+
+    edge = next(row for row in theme.value_chain
+                if row.role == "data_center_electricity_cost_smelting")
+
+    assert edge.direction == "adverse"
+    assert edge.geography == "United States"
+    assert edge.horizon == "near to medium term"
+    assert edge.evidence_requirement == (
+        "Primary power-price, smelter-cost, curtailment, or capacity evidence"
+    )
+    assert edge.adverse_path is True
+    assert edge.invalidation_rule == (
+        "No verified data-center power-price effect on smelter economics or output"
+    )
+
+
 def test_theme_matching_uses_phrase_boundaries_and_returns_typed_matches():
     taxonomy = load_theme_taxonomy()
     source = item(

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 from dataclasses import replace
 from decimal import Decimal
 import pytest
@@ -20,9 +21,13 @@ from lib.intelligence.providers import (
     CollectionResult,
     RequestReceipt,
     SourceItem,
+    build_adapter,
 )
+from lib.intelligence.http import HttpResult
+from lib.intelligence.quota import QuotaSession
 from lib.intelligence.themes import SEED_THEMES
 from tests.test_intelligence_entities import reference as entity_reference
+from lib.intelligence.universe import SecurityIdentity
 from lib.intelligence.types import DiscoveryPlan, DiscoveryTask, PacketLimits, SourceCapability
 from lib.intelligence.cursors import SourceCursor
 
@@ -57,6 +62,17 @@ def raw_item(domain: str, *, provider: str = "gdelt", official: bool = False) ->
             {"ticker": "TEST", "exposure_kind": "contract"} if official else {}
         ),
     )
+
+
+def ticker_reference(ticker: str = "TEST"):
+    fixture = entity_reference()
+    row = replace(
+        fixture.securities[0],
+        security_id=f"sec:{ticker}",
+        ticker=ticker,
+        aliases=(ticker,),
+    )
+    return replace(fixture, securities=(row,))
 
 
 def receipt(provider: str, *, status: str = "succeeded") -> RequestReceipt:
@@ -413,7 +429,9 @@ def test_pipeline_persists_provider_identity_urls_times_and_discovery_status():
     )
     adapter.collect = lambda query, **kwargs: CollectionResult((source,), receipt(adapter.provider), query.limit)
 
-    result = IntelligencePipeline(gateway, [adapter], context={"holdings": {"TEST": "1"}}).run(
+    result = IntelligencePipeline(gateway, [adapter], context={
+        "holdings": {"TEST": "1"}, "security_reference": ticker_reference(),
+    }).run(
         request("intraday")
     )
 
@@ -461,6 +479,7 @@ def test_near_corroboration_reaches_discovery_and_packet_evidence():
     result = IntelligencePipeline(gateway, [adapter], context={
         "holdings": {"TEST": "0.10"}, "liquidity_by_ticker": {"TEST": "0.75"},
         "overlap_by_ticker": {"TEST": "0.10"},
+        "security_reference": ticker_reference(),
     }).run(
         request("intraday")
     )
@@ -482,7 +501,7 @@ def test_independent_secondary_adapter_items_corroborate_by_normalized_claim_not
         source_url="https://example.com/finnhub/secondary", canonical_content='{"summary":"Issuer raises full year outlook"}',
     )
     events, relations, candidates = _discover(
-        (normalize_item(alpha), normalize_item(finnhub)), {"holdings": {"TEST": "0.1"}, "liquidity_by_ticker": {"TEST": "0.7"}, "overlap_by_ticker": {"TEST": "0.1"}}, NOW,
+        (normalize_item(alpha), normalize_item(finnhub)), {"holdings": {"TEST": "0.1"}, "liquidity_by_ticker": {"TEST": "0.7"}, "overlap_by_ticker": {"TEST": "0.1"}, "security_reference": ticker_reference()}, NOW,
     )
 
     assert len(events) == len(relations) == len(candidates) == 1
@@ -529,6 +548,108 @@ def test_stable_security_id_without_reference_survives_as_unresolved_event():
     assert candidates == []
 
 
+def test_legacy_reference_resolves_only_explicit_security_ids_without_issuer_names():
+    legacy = replace(entity_reference(), issuers=())
+    explicit = replace(
+        raw_item("legacy-explicit", official=True),
+        title="Permanent magnet capacity expands",
+        normalized_text="A named facility expanded permanent magnet capacity.",
+        security_ids=("sec:AAA",),
+        metadata=MappingProxyType({"exposure_kind": "filing"}),
+    )
+    name_only = replace(
+        raw_item("legacy-name-only", official=True),
+        title="Alpha Incorporated expands permanent magnet capacity",
+        normalized_text="Alpha Incorporated expanded permanent magnet capacity.",
+        metadata=MappingProxyType({
+            "organization_names": ["Alpha Incorporated"],
+            "exposure_kind": "filing",
+        }),
+    )
+
+    events, relations, candidates = _discover(
+        (normalize_item(explicit), normalize_item(name_only)),
+        {"security_reference": legacy},
+        NOW,
+    )
+
+    assert len(events) == 2
+    assert [row.security_id for row in relations] == ["sec:AAA"]
+    assert [row.ticker for row in candidates] == ["AAA"]
+
+
+@pytest.mark.parametrize(
+    ("security_id", "instrument_type", "context"),
+    [
+        ("sec:PREFERRED", "PREFERRED", "verified"),
+        ("sec:EXCLUDED-ETF", "ETF", "verified"),
+        ("FAKE", "COMMON_STOCK", "missing"),
+        ("sec:AAA", "COMMON_STOCK", "unavailable"),
+    ],
+)
+def test_unverified_or_ineligible_security_never_creates_relation_or_candidate(
+    security_id, instrument_type, context,
+):
+    fixture = entity_reference()
+    if context == "verified":
+        fixture = replace(fixture, securities=(*fixture.securities, SecurityIdentity(
+            security_id=security_id,
+            entity_id=fixture.issuers[0].entity_id,
+            ticker="PREF" if instrument_type == "PREFERRED" else "XETF",
+            exchange="NASDAQ",
+            instrument_type=instrument_type,
+            valid_from=date(2020, 1, 1),
+            valid_to=None,
+            aliases=("PREF" if instrument_type == "PREFERRED" else "XETF",),
+            source_ids=("fixture",),
+            eligible=False,
+            exclusion_reasons=("excluded_from_eligible_universe",),
+        )))
+        discovery_context = {"security_reference": fixture}
+    elif context == "unavailable":
+        discovery_context = {
+            "security_reference": fixture,
+            "reference_coverage": {"reference_status": "reference_unavailable"},
+        }
+    else:
+        discovery_context = {}
+    source = replace(
+        raw_item(f"eligibility-{security_id}", official=True),
+        title="Permanent magnet capacity expands",
+        normalized_text="A supplier expanded permanent magnet capacity.",
+        security_ids=(security_id,),
+        metadata=MappingProxyType({"exposure_kind": "filing"}),
+    )
+
+    events, relations, candidates = _discover(
+        (normalize_item(source),), discovery_context, NOW,
+    )
+
+    assert len(events) == 1
+    assert relations == []
+    assert candidates == []
+
+
+def test_unverified_ticker_cannot_enter_persisted_ranking_or_packet():
+    class Adapter(FakeAdapter):
+        def collect(self, query, **kwargs):
+            source = replace(
+                raw_item("unverified-fake", official=True),
+                security_ids=("FAKE",),
+                metadata=MappingProxyType({"exposure_kind": "filing"}),
+            )
+            return CollectionResult((source,), receipt(self.provider), query.limit)
+
+    gateway = FakeGateway()
+    result = IntelligencePipeline(gateway, [Adapter()]).run(request("on-demand"))
+
+    persisted = gateway.payloads[-1]
+    assert persisted["events"]
+    assert persisted["relationships"] == []
+    assert persisted["rankings"] == []
+    assert result.packet.to_dict()["candidates"] == []
+
+
 def test_one_event_can_create_multiple_stable_security_relationships():
     source = replace(
         raw_item("agreement", official=True),
@@ -562,7 +683,9 @@ def test_one_event_can_create_multiple_stable_security_relationships():
 
 def test_two_runs_reuse_source_identity_but_scope_event_graph_ids_by_run():
     gateway = FakeGateway()
-    pipeline = IntelligencePipeline(gateway, [FakeAdapter()], context={"holdings": {"TEST": "1"}})
+    pipeline = IntelligencePipeline(gateway, [FakeAdapter()], context={
+        "holdings": {"TEST": "1"}, "security_reference": ticker_reference(),
+    })
     source = replace(raw_item("holding:TEST", official=True), security_ids=("TEST",),
                      metadata=MappingProxyType({"exposure_kind": "filing"}),
                      request_url="https://api.gdeltproject.org/api/v2/doc/doc?query=TEST&start=one")
@@ -753,6 +876,7 @@ def test_production_discovery_vetoes_a_42_percent_holding_from_gateway_context()
     IntelligencePipeline(gateway, [adapter], context={
         "holdings": [{"ticker": "TEST", "market_value": "420"}, {"ticker": "OTHER", "market_value": "580"}],
         "overlap_by_ticker": {"TEST": "0.42"}, "liquidity_by_ticker": {"TEST": "0.75"},
+        "security_reference": ticker_reference(),
     }).run(request("intraday"))
 
     ranking = gateway.payloads[-1]["rankings"][0]
@@ -1059,13 +1183,16 @@ def test_capability_plan_persists_eligible_theme_episode_and_ineligible_research
         def collect(self, query, **kwargs):
             self.queries.append(query)
             eligible_a = replace(raw_item("cooling-a"),
-                metadata=MappingProxyType({"dynamic_theme_label": "liquid cooling loops",
+                title="Liquid cooling loops: first deployment",
+                metadata=MappingProxyType({
                     "publisher_id": "publisher-a", "upstream_identity": "story-a"}))
             eligible_b = replace(raw_item("cooling-b"),
-                metadata=MappingProxyType({"dynamic_theme_label": "liquid cooling loops",
+                title="Liquid cooling loops: second deployment",
+                metadata=MappingProxyType({
                     "publisher_id": "publisher-b", "upstream_identity": "story-b"}))
             unresolved = replace(raw_item("unconfirmed-topic"),
-                metadata=MappingProxyType({"dynamic_theme_label": "novel unconfirmed topic",
+                title="Novel unconfirmed topic: one report",
+                metadata=MappingProxyType({
                     "publisher_id": "publisher-a", "upstream_identity": "story-c"}))
             return CollectionResult(
                 (eligible_a, eligible_b, unresolved), receipt(self.provider), query.limit,
@@ -1087,3 +1214,100 @@ def test_capability_plan_persists_eligible_theme_episode_and_ineligible_research
     unresolved = next(row for row in proposals if row["label"] == "novel unconfirmed topic")
     assert unresolved["research_state"] == "unresolved"
     assert "publisher_independent_corroboration_required" in unresolved["missing_reasons"]
+
+
+def test_production_gdelt_content_proposes_dynamic_themes_without_injected_labels():
+    task_id = "44444444-4444-4444-8444-444444444447"
+    capability = SourceCapability(
+        capability_id="gdelt_theme_search", provider="gdelt", query_kind="theme_search",
+        themes=frozenset({"critical_minerals_magnets"}), phases=frozenset({"pre-market"}),
+        allowed_hosts=frozenset({"api.gdeltproject.org"}),
+        allowed_path_patterns=("/api/v2/doc/doc",), required_credential=None,
+        authority="radar", retention_class="metadata", max_requests_per_run=9,
+        max_items_per_request=20, requirement_tier="required_baseline", health="enabled",
+        enabled=True, provider_priority=1, query_pack=MappingProxyType({}),
+    )
+    task = DiscoveryTask(
+        task_id=task_id, stage="signals", provider="gdelt",
+        capability_id=capability.capability_id, query_kind="theme_search",
+        theme_id="critical_minerals_magnets",
+        query=MappingProxyType({"query": "permanent magnet award"}),
+        window=MappingProxyType({"start": "2026-09-03T12:00:00Z", "end": NOW.isoformat()}),
+        dependencies=(), max_attempts=1, requires_credential=False,
+    )
+    plan = DiscoveryPlan(
+        run_id=RUN_ID, phase="pre-market", reference_version="sec:fixture-v2",
+        capability_version=1, tasks=(task,),
+        capabilities=MappingProxyType({capability.capability_id: capability}),
+        coverage=MappingProxyType({}), provider_request_totals=MappingProxyType({"gdelt": 1}),
+        reserved_holding_quote_requests=0, reserved_adaptive_requests=0,
+    )
+
+    class Http:
+        def get(self, request):
+            return HttpResult(
+                url=request.url,
+                status=200,
+                headers={"content-type": "application/json"},
+                body=json.dumps({"articles": [
+                    {
+                        "url": "https://publisher-a.example/cooling-a",
+                        "domain": "publisher-a.example",
+                        "title": "Liquid cooling loop capacity: first commercial deployment",
+                        "seendate": "20260904T110000Z",
+                    },
+                    {
+                        "url": "https://publisher-b.example/cooling-b",
+                        "domain": "publisher-b.example",
+                        "title": "Liquid cooling loop capacity: second supplier expansion",
+                        "seendate": "20260904T110500Z",
+                    },
+                    {
+                        "url": "https://publisher-a.example/heat-reuse",
+                        "domain": "publisher-a.example",
+                        "title": "Novel heat reuse market: one pilot project",
+                        "seendate": "20260904T111000Z",
+                    },
+                ]}).encode(),
+                retrieved_at=NOW,
+                observed_at=NOW,
+                cache_hit=False,
+            )
+
+    class Gateway(FakeGateway):
+        def __init__(self):
+            super().__init__()
+            self.discovery_tasks = {}
+            self.stage_payloads = []
+
+        def read_discovery_context(self, run_id):
+            return {"tasks": list(self.discovery_tasks.values())}
+
+        def checkpoint_discovery_stage(self, run_id, payload):
+            row = payload["task"]
+            self.discovery_tasks[row["id"]] = row
+            self.stage_payloads.append(payload)
+            return {"task": row, "duplicate": False}
+
+        def checkpoint_intelligence_collection(self, run_id, payload):
+            return {"run_id": run_id, "cache_key": payload["cache_key"]}
+
+    gateway = Gateway()
+    adapter = build_adapter("gdelt", Http(), QuotaSession({"gdelt": ()}), clock=lambda: NOW)
+    IntelligencePipeline(gateway, [adapter], discovery_plan=plan).run(request("pre-market"))
+
+    source_items = gateway.payloads[-1]["items"]
+    assert all("dynamic_theme_label" in row["metadata"] for row in source_items)
+    terminal = next(
+        payload for payload in gateway.stage_payloads
+        if payload["task"]["capability_id"] == "dynamic_theme_evaluation"
+        and payload["task"]["state"] == "succeeded"
+    )
+    assert [row["episode"]["label"] for row in terminal["theme_episode_revisions"]] == [
+        "liquid cooling loop capacity",
+    ]
+    proposals = terminal["task"]["result"]["proposals"]
+    unresolved = next(row for row in proposals if row["label"] == "novel heat reuse market")
+    assert unresolved["research_state"] == "unresolved"
+    assert "publisher_independent_corroboration_required" in unresolved["missing_reasons"]
+    assert all(row["label"] != task.query["query"] for row in proposals)

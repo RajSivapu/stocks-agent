@@ -2,6 +2,7 @@ from datetime import timezone
 from urllib.parse import urlencode
 
 from lib.intelligence.http import HttpRequest
+from lib.intelligence.themes import source_dynamic_theme_label
 
 from . import CollectionQuery, SourceAdapter, publisher_reference, security_ids
 
@@ -42,5 +43,8 @@ class GdeltAdapter(SourceAdapter):
             "metadata": {
                 key: article[key]
                 for key in ("domain", "language", "sourcecountry") if key in article
-            } | publisher_reference(article.get("url")),
+            } | publisher_reference(article.get("url")) | ({
+                "dynamic_theme_label": label,
+                "dynamic_theme_origin": "source_title_prefix",
+            } if (label := source_dynamic_theme_label(article.get("title"))) else {}),
         } for article in articles if isinstance(article, dict)]

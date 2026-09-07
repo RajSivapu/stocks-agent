@@ -18,10 +18,108 @@ import pytest
 from scripts.export_recovery_bundle import _validated_records, export_recovery_bundle, decrypt_verified
 from scripts.protected_evidence import RECOVERY_SQL
 from scripts.verify_recovery_bundle import restore_recovery_records, verify_recovery_bundle
+from lib.intelligence.universe import (
+    reference_manifest_semantic_document,
+    security_revision_semantic_document,
+)
 
 
 def digest(value):
     return hashlib.sha256(json.dumps(value, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+
+
+_REFERENCE_ENTRY_KEYS_V1 = (
+    "id", "manifest_id", "revision", "security_id", "entity_id", "ticker",
+    "exchange", "instrument_type", "eligible", "exclusion_reasons", "aliases",
+    "source_ids", "valid_from", "valid_to", "content_hash",
+)
+
+
+def _seal_reference_lineage(records, *, format_version=1):
+    manifest = records["reference_manifests"][0]
+    manifest_body = manifest["manifest"]
+    manifest_body.update({
+        "coverage_status": "scope_not_guaranteed",
+        "reference_status": "healthy",
+        "source_url": "https://www.sec.gov/files/company_tickers.json",
+        "source_retrieved_at": manifest["valid_from"],
+        "source_timestamp": manifest["valid_from"],
+        "parser_version": 1,
+        "security_count": len(records["security_reference_revisions"]),
+        "conflict_count": 0,
+        "symbol_directory_status": "disabled_pending_https_and_terms_review",
+    })
+    if format_version == 2:
+        manifest_body["format_version"] = 2
+    else:
+        manifest_body.pop("format_version", None)
+    manifest["content_hash"] = digest(reference_manifest_semantic_document(manifest))
+
+    entries = []
+    for row in sorted(records["security_reference_revisions"], key=lambda value: value["security_id"]):
+        row["semantic_encoding_version"] = format_version
+        if format_version == 1:
+            row["issuer_names"] = None
+        elif row["issuer_names"] is None:
+            row["issuer_names"] = {
+                "canonical_name": "Test Corporation",
+                "observed_names": ["Test Corporation", "Test Corporation Class A"],
+                "former_names": [{
+                    "name": "Old Test Corporation",
+                    "valid_from": "2020-01-01",
+                    "valid_to": "2025-12-31",
+                }],
+            }
+        row["content_hash"] = digest(security_revision_semantic_document(row))
+        keys = (*_REFERENCE_ENTRY_KEYS_V1, "semantic_encoding_version", "issuer_names") \
+            if format_version == 2 else _REFERENCE_ENTRY_KEYS_V1
+        entries.append({key: copy.deepcopy(row[key]) for key in keys})
+    chunk_hash = hashlib.sha256("\n".join(
+        "\x1f".join((entry["security_id"], entry["id"], entry["content_hash"]))
+        for entry in entries
+    ).encode()).hexdigest()
+    root_hash = hashlib.sha256(chunk_hash.encode()).hexdigest()
+    capability = "sec_company_tickers_universe"
+    predecessor = records["reference_finalization_seals"][0]["predecessor_manifest_id"]
+    begin_payload = {
+        "manifest": {
+            key: copy.deepcopy(value) for key, value in manifest.items()
+            if key not in {"run_id", "created_at"}
+        },
+        "capability_id": capability,
+        "chunk_count": 1,
+        "security_count": len(entries),
+        "root_hash": root_hash,
+        "predecessor_manifest_id": predecessor,
+    }
+    chunk_payload = {
+        "manifest_id": manifest["id"],
+        "chunk_index": 0,
+        "chunk_count": 1,
+        "entries": entries,
+        "chunk_hash": chunk_hash,
+    }
+    begin, chunk = records["reference_chunk_receipts"]
+    begin.update(
+        capability_id=capability, chunk_count=1, entry_count=0,
+        chunk_hash=root_hash, payload=begin_payload,
+    )
+    chunk.update(
+        capability_id=capability, chunk_count=1, entry_count=len(entries),
+        chunk_hash=chunk_hash, payload=chunk_payload,
+    )
+    records["reference_finalization_seals"][0].update(
+        chunk_count=1, security_count=len(entries), root_hash=root_hash,
+    )
+    created_at = records["reference_snapshot_memberships"][0]["created_at"]
+    records["reference_snapshot_memberships"] = [{
+        "manifest_id": manifest["id"],
+        "security_revision_id": entry["id"],
+        "security_id": entry["security_id"],
+        "ordinal": ordinal,
+        "created_at": created_at,
+    } for ordinal, entry in enumerate(entries)]
+    return records
 
 
 def recovery_records():
@@ -377,7 +475,7 @@ def recovery_records():
         scheduled_phase="post-market", scheduled_market_date="2026-09-05",
         gateway_request_id="55555555-5555-4555-8555-555555555555",
     )
-    return records
+    return _seal_reference_lineage(records)
 
 
 class FakeDatabase:
@@ -454,6 +552,184 @@ def test_recovery_payload_carries_identity_delivery_and_release_state(tmp_path, 
         "collection_checkpoint_history", "collection_completions", "report_origins",
         "cash_ledger_state", "cash_snapshots", "run_terminal_outcomes",
     }
+
+
+def _v2_recovery_records():
+    records = recovery_records()
+    row = records["security_reference_revisions"][0]
+    row["issuer_names"] = {
+        "canonical_name": "Test Corporation",
+        "observed_names": ["Test Corporation", "Test Corporation Class A"],
+        "former_names": [{
+            "name": "Old Test Corporation",
+            "valid_from": "2020-01-01",
+            "valid_to": "2025-12-31",
+        }],
+    }
+    return _seal_reference_lineage(records, format_version=2)
+
+
+def _with_reused_v2_snapshot(records):
+    predecessor_manifest = records["reference_manifests"][0]
+    predecessor_seal = records["reference_finalization_seals"][0]
+    predecessor_entry = records["reference_chunk_receipts"][1]["payload"]["entries"][0]
+    reused_revision = records["security_reference_revisions"][0]
+    run_id = "20000000-0000-4000-8000-000000000001"
+    manifest_id = "20000000-0000-4000-8000-000000000002"
+    revision_id = "20000000-0000-4000-8000-000000000003"
+    run = copy.deepcopy(records["runs"][0])
+    run.update(id=run_id, gateway_request_id=None)
+    records["runs"].append(run)
+    intelligence_run = copy.deepcopy(records["intelligence_runs"][0])
+    intelligence_run["id"] = run_id
+    records["intelligence_runs"].append(intelligence_run)
+    records["intelligence_run_events"].append({
+        "id": "20000000-0000-4000-8000-000000000004",
+        "run_id": run_id,
+        "status": "started",
+        "detail": {},
+        "created_at": "2026-09-06T19:30:00Z",
+    })
+    manifest = copy.deepcopy(predecessor_manifest)
+    manifest.update(
+        id=manifest_id,
+        run_id=run_id,
+        reference_version="us-listed:v2-reuse",
+        valid_from="2026-09-06T19:30:00Z",
+        created_at="2026-09-06T19:31:00Z",
+    )
+    manifest["manifest"]["source_retrieved_at"] = manifest["valid_from"]
+    manifest["manifest"]["source_timestamp"] = manifest["valid_from"]
+    manifest["content_hash"] = digest(reference_manifest_semantic_document(manifest))
+    records["reference_manifests"].append(manifest)
+    entry = copy.deepcopy(predecessor_entry)
+    entry.update(id=revision_id, manifest_id=manifest_id)
+    chunk_hash = hashlib.sha256("\x1f".join((
+        entry["security_id"], entry["id"], entry["content_hash"],
+    )).encode()).hexdigest()
+    root_hash = hashlib.sha256(chunk_hash.encode()).hexdigest()
+    capability = predecessor_seal["capability_id"]
+    begin_payload = {
+        "manifest": {key: copy.deepcopy(value) for key, value in manifest.items()
+                     if key not in {"run_id", "created_at"}},
+        "capability_id": capability,
+        "chunk_count": 1,
+        "security_count": 1,
+        "root_hash": root_hash,
+        "predecessor_manifest_id": predecessor_manifest["id"],
+    }
+    records["reference_chunk_receipts"].extend([{
+        "manifest_id": manifest_id, "run_id": run_id, "capability_id": capability,
+        "chunk_index": -1, "chunk_count": 1, "entry_count": 0,
+        "chunk_hash": root_hash, "predecessor_manifest_id": predecessor_manifest["id"],
+        "payload": begin_payload, "created_at": "2026-09-06T19:30:30Z",
+    }, {
+        "manifest_id": manifest_id, "run_id": run_id, "capability_id": capability,
+        "chunk_index": 0, "chunk_count": 1, "entry_count": 1,
+        "chunk_hash": chunk_hash, "predecessor_manifest_id": predecessor_manifest["id"],
+        "payload": {"manifest_id": manifest_id, "chunk_index": 0, "chunk_count": 1,
+                    "entries": [entry], "chunk_hash": chunk_hash},
+        "created_at": "2026-09-06T19:31:00Z",
+    }])
+    records["reference_finalization_seals"].append({
+        "manifest_id": manifest_id, "run_id": run_id, "capability_id": capability,
+        "predecessor_manifest_id": predecessor_manifest["id"], "chunk_count": 1,
+        "security_count": 1, "root_hash": root_hash,
+        "finalized_at": "2026-09-06T19:31:30Z",
+    })
+    records["reference_snapshot_memberships"].append({
+        "manifest_id": manifest_id, "security_revision_id": reused_revision["id"],
+        "security_id": reused_revision["security_id"], "ordinal": 0,
+        "created_at": "2026-09-06T19:31:31Z",
+    })
+    records["reference_predecessor_pins"].append({
+        "run_id": run_id, "capability_id": capability,
+        "manifest_id": predecessor_manifest["id"], "reference_status": "reference_stale",
+        "reference_as_of": "2026-09-06T19:29:00Z",
+        "source_retrieved_at": predecessor_manifest["valid_from"],
+        "reference_age_seconds": 86_400,
+        "request_payload": {
+            "capability_id": capability, "binding_role": "predecessor",
+            "manifest_id": None, "reference_status": "reference_stale",
+            "reference_as_of": "2026-09-06T19:29:00Z",
+        },
+        "created_at": "2026-09-06T19:29:00Z",
+    })
+    records["reference_run_bindings"].append({
+        "run_id": run_id, "capability_id": capability, "manifest_id": manifest_id,
+        "reference_status": "healthy", "reference_as_of": "2026-09-06T19:32:00Z",
+        "source_retrieved_at": manifest["valid_from"], "reference_age_seconds": 120,
+        "request_payload": {
+            "capability_id": capability, "binding_role": "current",
+            "manifest_id": manifest_id, "reference_status": "healthy",
+            "reference_as_of": "2026-09-06T19:32:00Z",
+        },
+        "created_at": "2026-09-06T19:32:00Z",
+    })
+    return records
+
+
+def test_recovery_accepts_valid_sealed_v1_and_v2_reference_lineage():
+    assert _validated_records(recovery_records())["security_reference_revisions"][0][
+        "semantic_encoding_version"
+    ] == 1
+    assert _validated_records(_v2_recovery_records())["security_reference_revisions"][0][
+        "semantic_encoding_version"
+    ] == 2
+
+
+def test_recovery_accepts_v2_snapshot_membership_reusing_predecessor_revision():
+    records = _with_reused_v2_snapshot(_v2_recovery_records())
+
+    validated = _validated_records(records)
+
+    assert len(validated["reference_manifests"]) == 2
+    assert validated["reference_snapshot_memberships"][1][
+        "security_revision_id"
+    ] == records["security_reference_revisions"][0]["id"]
+
+
+@pytest.mark.parametrize("mutation", [
+    lambda records: records["security_reference_revisions"][0]["issuer_names"].update(
+        observed_names=["Different Observed Name"]
+    ),
+    lambda records: records["security_reference_revisions"][0]["issuer_names"].update(
+        observed_names=["Test Corporation", "Test Corporation"]
+    ),
+    lambda records: records["security_reference_revisions"][0]["issuer_names"].update(
+        canonical_name="Changed Corporation", observed_names=["Changed Corporation"]
+    ),
+    lambda records: records["reference_chunk_receipts"][1]["payload"]["entries"][0].update(
+        ticker="TAMPER"
+    ),
+])
+def test_recovery_rejects_v2_name_or_chunk_tamper_with_unchanged_hashes(mutation):
+    records = _v2_recovery_records()
+    mutation(records)
+
+    with pytest.raises(ValueError, match="reference|issuer|security"):
+        _validated_records(records)
+
+
+def test_recovery_rejects_membership_ordinal_substitution_against_chunk_order():
+    records = _v2_recovery_records()
+    first = records["security_reference_revisions"][0]
+    second = copy.deepcopy(first)
+    second.update(
+        id="10000000-0000-4000-8000-00000000000a",
+        security_id="NASDAQ:SECOND",
+        ticker="SECOND",
+        aliases=["SECOND"],
+    )
+    records["security_reference_revisions"].append(second)
+    _seal_reference_lineage(records, format_version=2)
+    memberships = records["reference_snapshot_memberships"]
+    memberships[0]["ordinal"], memberships[1]["ordinal"] = (
+        memberships[1]["ordinal"], memberships[0]["ordinal"],
+    )
+
+    with pytest.raises(ValueError, match="membership|finalization"):
+        _validated_records(records)
 
 
 def test_recovery_rejects_malformed_terminal_cursor_metadata():

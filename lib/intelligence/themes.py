@@ -32,6 +32,21 @@ SEED_THEMES = (
 _SCORE_QUANTUM = Decimal("0.000001")
 
 
+def source_dynamic_theme_label(title: object) -> str | None:
+    """Derive one bounded proposal only from a retained source headline."""
+    if not isinstance(title, str):
+        return None
+    normalized = " ".join(unicodedata.normalize("NFKC", title).split())
+    if not normalized:
+        return None
+    candidate = re.split(r"\s*(?::|\||—|–)\s*", normalized, maxsplit=1)[0]
+    tokens = re.findall(r"[a-z0-9]+", candidate.casefold())
+    if not 3 <= len(tokens) <= 12 or not any(token.isalpha() for token in tokens):
+        return None
+    label = " ".join(tokens)
+    return label if len(label) <= 120 else None
+
+
 def _fixed_score(value: Decimal | int | str, field: str) -> Decimal:
     try:
         score = Decimal(str(value)).quantize(_SCORE_QUANTUM)
@@ -243,6 +258,7 @@ __all__ = [
     "evidence_key",
     "publisher_identity",
     "propose_dynamic_theme",
+    "source_dynamic_theme_label",
     "theme_fingerprint",
     "upstream_identity",
 ]

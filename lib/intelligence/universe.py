@@ -828,7 +828,12 @@ def _canonical_issuer_names(value: Mapping[str, object]) -> dict[str, object]:
     if not isinstance(observed_raw, (list, tuple)) or not 1 <= len(observed_raw) <= 16 \
             or not isinstance(former_raw, (list, tuple)) or len(former_raw) > 32:
         raise ValueError("issuer names are invalid")
-    observed = tuple(sorted({_name_text(name, "observed issuer name") for name in observed_raw}))
+    observed_values = tuple(
+        _name_text(name, "observed issuer name") for name in observed_raw
+    )
+    if len(set(observed_values)) != len(observed_values):
+        raise ValueError("observed issuer name is duplicated")
+    observed = tuple(sorted(observed_values))
     if canonical not in observed:
         raise ValueError("canonical issuer name must be observed")
     former: list[dict[str, str]] = []
