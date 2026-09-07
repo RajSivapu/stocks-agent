@@ -12,7 +12,7 @@ and rollout order. `docs/HANDOFF.md` is ignored and is not a source of truth.
 
 ## Current release status
 
-Owner-only Site v7 is live from UI main `a4c8031`, which passed exact-main CI `34066973967`; V1
+Owner-only Site v8 is live from UI main `b433a5b`, which passed exact-main CI `34068491038`; V1
 trusted use remains **no-go** pending the next existing scheduled evidence chain. Approved production schema reconciliation
 `34039011879` succeeded exactly once. Managed isolated restore `34042155368` succeeded on main
 `bd1cee2317a8689b8ac5a55fb38b853e7320bbfb`. The unchanged backend remains attested at main
@@ -44,6 +44,9 @@ history, reconciliation, and audit-evidence surface—not a continuously live tr
 - [x] Simplified owner dashboard and UI/UX audit follow-up merged through PRs #28 and #29; Site v7
   deployment `appgdep_6a9df7eee2cc819193fefc13aa39d8bb` succeeded with one allowed owner, no
   groups, zero external visitors, matching live script hashes, and Site v6 retained as rollback.
+- [x] Signed-link-only browser correction merged through PR #31; Site v8 deployment
+  `appgdep_6a9dff357ee88191bf08d54af6f4240f` succeeded with the same owner-only access, matching live
+  script hashes, and Site v7 retained as rollback.
 - [ ] Next existing scheduled receipt, without a duplicate run.
 
 Final fix wave Track C: immutable audited migrations are restored and the additive tail is now
@@ -70,7 +73,7 @@ not establish the current recovery schema.
 
 | Layer | Local candidate | Production status |
 |---|---|---|
-| Test and owner-auth containment | Implemented and task-reviewed | Live Auth read back, owner-only Site v7 deployed, owner email-click confirmed on the signed-link flow, and formal non-owner denial passed |
+| Test and owner-auth containment | Implemented and task-reviewed | Live Auth read back, owner-only Site v8 deployed with a link-only browser flow, owner email-click confirmed, and formal non-owner denial passed |
 | Decision, evidence, and publication authority | Implemented and task-reviewed | Function deployment, schema, and protected runtime attestation complete; scheduled receipts pending |
 | Portfolio accounting and delivery integrity | Implemented and task-reviewed | Owner/anonymous/non-owner API canaries passed; original delivery receipt pending |
 | Provider, cache, quota, ranking, and lifecycle | Implemented and task-reviewed | Live free-provider health and one existing scheduled chain pending |
@@ -81,7 +84,7 @@ The final consolidated local-gate code candidate was
 `883d521728b1b3c2700a78dab1d65208105d7a2f`, based on the GPT-6 Astra audit of `origin/main` at
 `432d647ef911ff63da427097f02a852e18038b62`. Later main `774584e` passed exact-head CI
 `34013930731` and exact-main CI `34014003786`; these historical results are superseded by UI-main CI
-`34066973967`, the backend attestation, and the recovery receipts above.
+`34068491038`, the backend attestation, and the recovery receipts above.
 
 ## Remediation workstreams
 
@@ -194,10 +197,10 @@ Still required:
 ## Ordered gates to trusted owner use
 
 1. Independent whole-branch review with no unresolved Critical or Important finding. **Complete.**
-2. Exact-main CI and current-main/merged-review binding. **Complete** for UI main `a4c8031`
-   (`34066973967`); the backend attestation remains bound to `b3f7d70`.
+2. Exact-main CI and current-main/merged-review binding. **Complete** for UI main `b433a5b`
+   (`34068491038`); the backend attestation remains bound to `b3f7d70`.
 3. Historical owner-operated gateway/API/Site deployment, runtime parity, and owner/anonymous
-   canaries. **Complete for the attested backend runtime; owner-only Site v7 is live from the later
+   canaries. **Complete for the attested backend runtime; owner-only Site v8 is live from the later
    UI-only main, while the production schema reconciliation is complete.**
 4. Live Auth configuration and owner email-link/code canary. **Complete; the owner confirmed the
    signed email link opened the live portfolio dashboard.**
@@ -213,8 +216,8 @@ verified before the owner acts.
 ## Exact remaining handoff boundary
 
 The Edge function and database sources remain at the protected attestation boundary `b3f7d70`.
-The frontend changed through UI-only main `a4c8031`; retain Site v7, its owner-only access, and Site
-v6 as rollback. Receipt `docs/receipts/2026-09-06-native-site-v7.json` binds that publication without
+The frontend changed through UI-only main `b433a5b`; retain Site v8, its owner-only access, and Site
+v7 as rollback. Receipt `docs/receipts/2026-09-06-native-site-v8.json` binds that publication without
 claiming a new backend attestation.
 Five verified release variables plus the existing Supabase service/publishable keys and owner
 identity are now configured in the protected environment without credential rotation.
