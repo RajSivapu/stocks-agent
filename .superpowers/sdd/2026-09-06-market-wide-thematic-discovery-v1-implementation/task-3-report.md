@@ -365,3 +365,40 @@ all passed
 ```
 
 Self-review of `aed2c9e2..HEAD` confirmed that the stale-current insert derives its manifest and status from the immutable predecessor row after the run lock is acquired, no latest-head query remains in the current branch, and exact retries retain the original request and binding. Recovery checks use the run/capability composite identity before any restore mutation or exact comparison. No network request, production RPC, collector invocation, Telegram action, schedule mutation, deployment, or production database mutation was performed.
+
+## Fix round 3 from `9ab204b`
+
+This round closes the remaining recovery-only lineage gap. A recovery artifact cannot claim that a run's own finalized manifest was both its predecessor and its `current/reference_stale` snapshot. A non-null predecessor pin must resolve to a finalized seal for the same capability whose origin run differs from the consuming run. Existing exact predecessor/current manifest and status matching remains required.
+
+### TDD evidence
+
+The validator, ordered-restore, and exact-comparison regressions were written first and observed RED against `9ab204b`:
+
+```text
+.venv/bin/python -m pytest -q tests/test_recovery_bundle.py \
+  -k 'own_finalization_as_stale_predecessor'
+3 failed, 107 deselected in 0.45s
+
+validator: did not raise
+ordered restore: reached the transaction boundary
+exact comparison: reached generic restored-record mismatch
+```
+
+The shared recovery validator now checks the origin run on the predecessor finalization seal. All three entry points use that validation before accepting, restoring, or comparing the impossible state:
+
+```text
+focused validator, ordered restore, and exact-comparison regressions
+3 passed, 107 deselected in 0.40s
+
+.venv/bin/python -m pytest -q
+1063 passed, 3 skipped, 4 deselected in 87.13s
+
+.venv/bin/python -m compileall -q lib scripts tests
+git diff --check
+git diff --exit-code 9ab204b -- \
+  sql/reconciliation/20261004_production_schema_reconciliation.sql \
+  sql/migrations/20261005_market_wide_discovery.sql
+all passed
+```
+
+Self-review of `9ab204b..HEAD` confirmed that the added predicate applies only to non-null predecessor pins with a resolved seal, accepts legitimate cross-run predecessors, retains unavailable predecessor handling, and runs before restore mutation and exact comparison. No migration, SQL schema, gateway, collector, network, Telegram, schedule, deployment, or production state was changed.

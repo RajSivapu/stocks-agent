@@ -476,7 +476,9 @@ def _validated_records(records: Mapping[str, object]) -> dict[str, list[dict[str
                 or unavailable != (row["manifest_id"] is None)
                 or unavailable != (row["source_retrieved_at"] is None)
                 or unavailable != (row["reference_age_seconds"] is None)
-                or (seal is not None and seal["capability_id"] != row["capability_id"])
+                or (seal is not None
+                    and (seal["capability_id"] != row["capability_id"]
+                         or seal["run_id"] == row["run_id"]))
                 or (not unavailable and (seal is None or row["reference_age_seconds"] < 0))):
             raise ValueError("discovery reference predecessor dependency mismatch")
     transfer_operations = {

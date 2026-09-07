@@ -557,6 +557,67 @@ def test_exact_recovery_verifier_rejects_inconsistent_restored_stale_lineage(
         )
 
 
+def _make_own_finalization_a_stale_predecessor(records):
+    _make_stale_current_inconsistent_with_predecessor(records)
+    manifest = records["reference_manifests"][0]
+    manifest_id = manifest["id"]
+    run_id = manifest["run_id"]
+    capability = records["reference_finalization_seals"][0]["capability_id"]
+    current = records["reference_run_bindings"][0]
+    predecessor = records["reference_predecessor_pins"][0]
+    assert current["run_id"] == predecessor["run_id"] == run_id
+    predecessor.update(
+        manifest_id=manifest_id,
+        reference_status="reference_stale",
+        reference_as_of=current["reference_as_of"],
+        source_retrieved_at=current["source_retrieved_at"],
+        reference_age_seconds=current["reference_age_seconds"],
+        request_payload={
+            "capability_id": capability,
+            "binding_role": "predecessor",
+            "manifest_id": None,
+            "reference_status": "reference_stale",
+            "reference_as_of": current["reference_as_of"],
+        },
+    )
+
+
+def test_recovery_rejects_own_finalization_as_stale_predecessor():
+    records = recovery_records()
+    _make_own_finalization_a_stale_predecessor(records)
+
+    with pytest.raises(ValueError, match="predecessor dependency mismatch"):
+        _validated_records(records)
+
+
+def test_ordered_restore_rejects_own_finalization_as_stale_predecessor():
+    records = recovery_records()
+    _make_own_finalization_a_stale_predecessor(records)
+
+    class UnusedConnection:
+        def transaction(self):
+            raise AssertionError("invalid recovery data reached ordered restore")
+
+    with pytest.raises(ValueError, match="predecessor dependency mismatch"):
+        restore_recovery_records(UnusedConnection(), records, isolated_guard=True)
+
+
+def test_exact_recovery_verifier_rejects_own_finalization_as_stale_predecessor(
+        tmp_path, commands):
+    production = FakeDatabase()
+    artifact = export_recovery_bundle(
+        production, tmp_path / "self-predecessor.enc", **commands,
+    )
+    restore = restored(production)
+    _make_own_finalization_a_stale_predecessor(restore.records)
+
+    with pytest.raises(ValueError, match="predecessor dependency mismatch"):
+        verify_recovery_bundle(
+            artifact, restore, production_source=production,
+            decrypt_command=commands["decrypt_command"],
+        )
+
+
 @pytest.mark.parametrize("dataset", DISCOVERY_DATASETS)
 def test_recovery_rejects_missing_discovery_dataset(dataset):
     records = recovery_records()
