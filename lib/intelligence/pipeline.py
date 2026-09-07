@@ -1108,14 +1108,15 @@ def _provider_query_text(provider: str, target: str, symbols: tuple[str, ...]) -
     """Translate internal target labels before they reach an upstream endpoint."""
     if symbols:
         return ",".join(symbols)
-    settings = __import__("lib.config", fromlist=["load_settings"]).load_settings()
-    intelligence = settings.get("intelligence", {}) if isinstance(settings, Mapping) else {}
-    mappings = intelligence.get("provider_query_terms", {}) if isinstance(intelligence, Mapping) else {}
-    values = mappings.get(provider, {}) if isinstance(mappings, Mapping) else {}
-    translated = values.get(target) if isinstance(values, Mapping) else None
-    if not isinstance(translated, str) or not translated.strip():
+    from lib.intelligence.planner import configured_provider_query
+
+    try:
+        translated = configured_provider_query(provider, target)
+    except ValueError as exc:
+        raise SourceFailure("UNSUPPORTED_QUERY") from exc
+    if not translated:
         raise SourceFailure("UNSUPPORTED_QUERY")
-    return translated.strip()
+    return translated
 
 
 def _stored_event_id(run_id: str, event_id: str) -> str:

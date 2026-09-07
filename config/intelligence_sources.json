@@ -1,0 +1,356 @@
+{
+  "version": 1,
+  "theme_taxonomy_version": 1,
+  "paid_fallback_enabled": false,
+  "required_baseline_capability_ids": [
+    "sec_company_tickers_universe",
+    "gdelt_theme_search"
+  ],
+  "capabilities": [
+    {
+      "capability_id": "sec_company_tickers_universe",
+      "provider": "sec_edgar",
+      "query_kind": "universe",
+      "themes": [],
+      "phases": ["pre-market", "intraday", "post-market", "on-demand"],
+      "allowed_hosts": ["www.sec.gov"],
+      "allowed_path_patterns": ["/files/company_tickers.json"],
+      "required_credential": null,
+      "authority": "official_reference",
+      "retention_class": "durable_reference",
+      "max_requests_per_run": 1,
+      "max_items_per_request": 15000,
+      "requirement_tier": "required_baseline",
+      "health": "enabled",
+      "enabled": true,
+      "provider_priority": 0,
+      "query_pack": {
+        "default": {"host": "www.sec.gov", "path": "/files/company_tickers.json"}
+      }
+    },
+    {
+      "capability_id": "gdelt_theme_search",
+      "provider": "gdelt",
+      "query_kind": "theme_search",
+      "themes": [
+        "macro_and_policy",
+        "technology_ai_and_semiconductors",
+        "energy_nuclear_and_grid_infrastructure",
+        "industrial_infrastructure",
+        "critical_minerals_and_magnets",
+        "healthcare",
+        "consumer",
+        "defense_trade_and_geopolitics",
+        "earnings_and_mergers_and_acquisitions"
+      ],
+      "phases": ["pre-market", "intraday", "post-market", "on-demand"],
+      "allowed_hosts": ["api.gdeltproject.org"],
+      "allowed_path_patterns": ["/api/v2/doc/doc"],
+      "required_credential": null,
+      "authority": "broad_event_lead",
+      "retention_class": "bounded_derived_lead",
+      "max_requests_per_run": 20,
+      "max_items_per_request": 20,
+      "requirement_tier": "required_baseline",
+      "health": "enabled",
+      "enabled": true,
+      "provider_priority": 10,
+      "query_pack": {
+        "themes": {
+          "macro_and_policy": {"host": "api.gdeltproject.org", "path": "/api/v2/doc/doc", "query": "economic policy"},
+          "technology_ai_and_semiconductors": {"host": "api.gdeltproject.org", "path": "/api/v2/doc/doc", "query": "semiconductor industry"},
+          "energy_nuclear_and_grid_infrastructure": {"host": "api.gdeltproject.org", "path": "/api/v2/doc/doc", "query": "nuclear energy grid"},
+          "industrial_infrastructure": {"host": "api.gdeltproject.org", "path": "/api/v2/doc/doc", "query": "industrial infrastructure"},
+          "critical_minerals_and_magnets": {"host": "api.gdeltproject.org", "path": "/api/v2/doc/doc", "query": "critical minerals"},
+          "healthcare": {"host": "api.gdeltproject.org", "path": "/api/v2/doc/doc", "query": "healthcare industry"},
+          "consumer": {"host": "api.gdeltproject.org", "path": "/api/v2/doc/doc", "query": "consumer spending"},
+          "defense_trade_and_geopolitics": {"host": "api.gdeltproject.org", "path": "/api/v2/doc/doc", "query": "defense trade geopolitics"},
+          "earnings_and_mergers_and_acquisitions": {"host": "api.gdeltproject.org", "path": "/api/v2/doc/doc", "query": "earnings mergers acquisitions"}
+        },
+        "targets": {
+          "intraday_delta": {"host": "api.gdeltproject.org", "path": "/api/v2/doc/doc", "query": "market developments"},
+          "day_reconciliation": {"host": "api.gdeltproject.org", "path": "/api/v2/doc/doc", "query": "market close"},
+          "on_demand_request": {"host": "api.gdeltproject.org", "path": "/api/v2/doc/doc", "query": "market news"}
+        }
+      }
+    },
+    {
+      "capability_id": "federal_register_document_search",
+      "provider": "federal_register",
+      "query_kind": "theme_search",
+      "themes": ["macro_and_policy", "energy_nuclear_and_grid_infrastructure", "industrial_infrastructure", "consumer", "defense_trade_and_geopolitics"],
+      "phases": ["pre-market", "post-market", "on-demand"],
+      "allowed_hosts": ["www.federalregister.gov"],
+      "allowed_path_patterns": ["/api/v1/documents.json"],
+      "required_credential": null,
+      "authority": "official_policy_record",
+      "retention_class": "durable_official_record",
+      "max_requests_per_run": 4,
+      "max_items_per_request": 20,
+      "requirement_tier": "optional",
+      "health": "enabled",
+      "enabled": true,
+      "provider_priority": 20,
+      "query_pack": {
+        "themes": {
+          "macro_and_policy": {"host": "www.federalregister.gov", "path": "/api/v1/documents.json", "term": "economic policy"},
+          "energy_nuclear_and_grid_infrastructure": {"host": "www.federalregister.gov", "path": "/api/v1/documents.json", "term": "energy infrastructure"},
+          "industrial_infrastructure": {"host": "www.federalregister.gov", "path": "/api/v1/documents.json", "term": "industrial infrastructure"},
+          "consumer": {"host": "www.federalregister.gov", "path": "/api/v1/documents.json", "term": "consumer protection"},
+          "defense_trade_and_geopolitics": {"host": "www.federalregister.gov", "path": "/api/v1/documents.json", "term": "defense trade"}
+        }
+      }
+    },
+    {
+      "capability_id": "doe_energy_news_rss",
+      "provider": "doe",
+      "query_kind": "feed",
+      "themes": ["energy_nuclear_and_grid_infrastructure", "industrial_infrastructure", "critical_minerals_and_magnets"],
+      "phases": ["pre-market", "post-market", "on-demand"],
+      "allowed_hosts": ["www.energy.gov"],
+      "allowed_path_patterns": ["/rss/energygov/2193718"],
+      "required_credential": null,
+      "authority": "official_agency_statement",
+      "retention_class": "durable_official_record",
+      "max_requests_per_run": 1,
+      "max_items_per_request": 50,
+      "requirement_tier": "optional",
+      "health": "enabled",
+      "enabled": true,
+      "provider_priority": 20,
+      "query_pack": {
+        "default": {"host": "www.energy.gov", "path": "/rss/energygov/2193718"}
+      }
+    },
+    {
+      "capability_id": "eia_today_in_energy_rss",
+      "provider": "eia",
+      "query_kind": "feed",
+      "themes": ["energy_nuclear_and_grid_infrastructure"],
+      "phases": ["pre-market", "post-market", "on-demand"],
+      "allowed_hosts": ["www.eia.gov"],
+      "allowed_path_patterns": ["/rss/todayinenergy.xml"],
+      "required_credential": null,
+      "authority": "official_energy_context",
+      "retention_class": "durable_official_record",
+      "max_requests_per_run": 1,
+      "max_items_per_request": 50,
+      "requirement_tier": "optional",
+      "health": "enabled",
+      "enabled": true,
+      "provider_priority": 20,
+      "query_pack": {
+        "default": {"host": "www.eia.gov", "path": "/rss/todayinenergy.xml"}
+      }
+    },
+    {
+      "capability_id": "eia_press_releases_rss",
+      "provider": "eia",
+      "query_kind": "feed",
+      "themes": ["energy_nuclear_and_grid_infrastructure", "macro_and_policy"],
+      "phases": ["pre-market", "post-market", "on-demand"],
+      "allowed_hosts": ["www.eia.gov"],
+      "allowed_path_patterns": ["/rss/press_rss.xml"],
+      "required_credential": null,
+      "authority": "official_energy_context",
+      "retention_class": "durable_official_record",
+      "max_requests_per_run": 1,
+      "max_items_per_request": 50,
+      "requirement_tier": "optional",
+      "health": "enabled",
+      "enabled": true,
+      "provider_priority": 20,
+      "query_pack": {
+        "default": {"host": "www.eia.gov", "path": "/rss/press_rss.xml"}
+      }
+    },
+    {
+      "capability_id": "eia_statistics_v2",
+      "provider": "eia",
+      "query_kind": "series",
+      "themes": ["energy_nuclear_and_grid_infrastructure"],
+      "phases": ["pre-market", "post-market", "on-demand"],
+      "allowed_hosts": ["api.eia.gov"],
+      "allowed_path_patterns": ["/v2/*"],
+      "required_credential": "EIA_API_KEY",
+      "authority": "official_energy_statistics",
+      "retention_class": "durable_official_statistics",
+      "max_requests_per_run": 2,
+      "max_items_per_request": 100,
+      "requirement_tier": "optional",
+      "health": "configuration_missing",
+      "enabled": false,
+      "provider_priority": 30,
+      "query_pack": {
+        "default": {"host": "api.eia.gov", "path": "/v2/electricity/rto/region-data/data/", "identifier_required": "series"}
+      }
+    },
+    {
+      "capability_id": "alpha_vantage_topic_news",
+      "provider": "alpha_vantage",
+      "query_kind": "theme_search",
+      "themes": [
+        "macro_and_policy",
+        "technology_ai_and_semiconductors",
+        "energy_nuclear_and_grid_infrastructure",
+        "industrial_infrastructure",
+        "critical_minerals_and_magnets",
+        "healthcare",
+        "consumer",
+        "defense_trade_and_geopolitics",
+        "earnings_and_mergers_and_acquisitions"
+      ],
+      "phases": ["pre-market", "intraday", "post-market", "on-demand"],
+      "allowed_hosts": ["www.alphavantage.co"],
+      "allowed_path_patterns": ["/query"],
+      "required_credential": "ALPHAVANTAGE_API_KEY",
+      "authority": "third_party_news_index",
+      "retention_class": "bounded_derived_lead",
+      "max_requests_per_run": 8,
+      "max_items_per_request": 20,
+      "requirement_tier": "optional",
+      "health": "enabled",
+      "enabled": true,
+      "provider_priority": 40,
+      "query_pack": {
+        "themes": {
+          "macro_and_policy": {"host": "www.alphavantage.co", "path": "/query", "function": "NEWS_SENTIMENT", "topics": "economy_monetary"},
+          "technology_ai_and_semiconductors": {"host": "www.alphavantage.co", "path": "/query", "function": "NEWS_SENTIMENT", "topics": "technology"},
+          "energy_nuclear_and_grid_infrastructure": {"host": "www.alphavantage.co", "path": "/query", "function": "NEWS_SENTIMENT", "topics": "energy_transportation"},
+          "industrial_infrastructure": {"host": "www.alphavantage.co", "path": "/query", "function": "NEWS_SENTIMENT", "topics": "manufacturing"},
+          "critical_minerals_and_magnets": {"host": "www.alphavantage.co", "path": "/query", "function": "NEWS_SENTIMENT", "topics": "manufacturing"},
+          "healthcare": {"host": "www.alphavantage.co", "path": "/query", "function": "NEWS_SENTIMENT", "topics": "life_sciences"},
+          "consumer": {"host": "www.alphavantage.co", "path": "/query", "function": "NEWS_SENTIMENT", "topics": "retail_wholesale"},
+          "defense_trade_and_geopolitics": {"host": "www.alphavantage.co", "path": "/query", "function": "NEWS_SENTIMENT", "topics": "financial_markets"},
+          "earnings_and_mergers_and_acquisitions": {"host": "www.alphavantage.co", "path": "/query", "function": "NEWS_SENTIMENT", "topics": "earnings,mergers_and_acquisitions"}
+        }
+      }
+    },
+    {
+      "capability_id": "sec_issuer_submissions",
+      "provider": "sec_edgar",
+      "query_kind": "issuer_submissions",
+      "themes": [],
+      "phases": ["pre-market", "intraday", "post-market", "on-demand"],
+      "allowed_hosts": ["data.sec.gov"],
+      "allowed_path_patterns": ["/submissions/CIK*.json"],
+      "required_credential": null,
+      "authority": "official_issuer_filing_index",
+      "retention_class": "durable_official_record",
+      "max_requests_per_run": 4,
+      "max_items_per_request": 100,
+      "requirement_tier": "optional",
+      "health": "enabled",
+      "enabled": true,
+      "provider_priority": 10,
+      "query_pack": {
+        "default": {"host": "data.sec.gov", "path": "/submissions/CIK##########.json", "identifier_required": "cik"}
+      }
+    },
+    {
+      "capability_id": "yahoo_security_quote",
+      "provider": "yahoo",
+      "query_kind": "quote",
+      "themes": [],
+      "phases": ["pre-market", "intraday", "post-market", "on-demand"],
+      "allowed_hosts": ["query1.finance.yahoo.com", "query2.finance.yahoo.com"],
+      "allowed_path_patterns": ["/v8/finance/chart/*", "/v7/finance/quote"],
+      "required_credential": null,
+      "authority": "unofficial_market_quote",
+      "retention_class": "short_lived_market_data",
+      "max_requests_per_run": 12,
+      "max_items_per_request": 100,
+      "requirement_tier": "optional",
+      "health": "enabled",
+      "enabled": true,
+      "provider_priority": 10,
+      "query_pack": {
+        "default": {"host": "query1.finance.yahoo.com", "path": "/v8/finance/chart/{symbol}", "identifier_required": "security"}
+      }
+    },
+    {
+      "capability_id": "finnhub_security_enrichment",
+      "provider": "finnhub",
+      "query_kind": "quote",
+      "themes": [],
+      "phases": ["pre-market", "intraday", "post-market", "on-demand"],
+      "allowed_hosts": ["finnhub.io"],
+      "allowed_path_patterns": ["/api/v1/quote"],
+      "required_credential": "FINNHUB_API_KEY",
+      "authority": "third_party_market_data",
+      "retention_class": "provider_bounded_market_data",
+      "max_requests_per_run": 6,
+      "max_items_per_request": 1,
+      "requirement_tier": "optional",
+      "health": "enabled",
+      "enabled": true,
+      "provider_priority": 20,
+      "query_pack": {
+        "default": {"host": "finnhub.io", "path": "/api/v1/quote", "identifier_required": "security"}
+      }
+    },
+    {
+      "capability_id": "fred_configured_series",
+      "provider": "fred",
+      "query_kind": "series",
+      "themes": ["macro_and_policy"],
+      "phases": ["pre-market", "post-market", "on-demand"],
+      "allowed_hosts": ["api.stlouisfed.org"],
+      "allowed_path_patterns": ["/fred/series/observations"],
+      "required_credential": "FRED_API_KEY",
+      "authority": "official_macro_statistics",
+      "retention_class": "durable_official_statistics",
+      "max_requests_per_run": 2,
+      "max_items_per_request": 100,
+      "requirement_tier": "optional",
+      "health": "configuration_missing",
+      "enabled": false,
+      "provider_priority": 30,
+      "query_pack": {
+        "default": {"host": "api.stlouisfed.org", "path": "/fred/series/observations", "series_id": "CPIAUCSL"}
+      }
+    },
+    {
+      "capability_id": "bls_configured_series",
+      "provider": "bls",
+      "query_kind": "series",
+      "themes": ["macro_and_policy", "consumer"],
+      "phases": ["pre-market", "post-market", "on-demand"],
+      "allowed_hosts": ["api.bls.gov"],
+      "allowed_path_patterns": ["/publicAPI/v2/timeseries/data/"],
+      "required_credential": null,
+      "authority": "official_macro_statistics",
+      "retention_class": "durable_official_statistics",
+      "max_requests_per_run": 1,
+      "max_items_per_request": 100,
+      "requirement_tier": "optional",
+      "health": "enabled",
+      "enabled": true,
+      "provider_priority": 20,
+      "query_pack": {
+        "default": {"host": "api.bls.gov", "path": "/publicAPI/v2/timeseries/data/", "series_ids": ["CUUR0000SA0"]}
+      }
+    },
+    {
+      "capability_id": "bea_configured_series",
+      "provider": "bea",
+      "query_kind": "series",
+      "themes": ["macro_and_policy", "consumer"],
+      "phases": ["pre-market", "post-market", "on-demand"],
+      "allowed_hosts": ["apps.bea.gov"],
+      "allowed_path_patterns": ["/api/data"],
+      "required_credential": "BEA_API_KEY",
+      "authority": "official_macro_statistics",
+      "retention_class": "durable_official_statistics",
+      "max_requests_per_run": 1,
+      "max_items_per_request": 100,
+      "requirement_tier": "optional",
+      "health": "configuration_missing",
+      "enabled": false,
+      "provider_priority": 30,
+      "query_pack": {
+        "default": {"host": "apps.bea.gov", "path": "/api/data", "identifier_required": "series"}
+      }
+    }
+  ]
+}
