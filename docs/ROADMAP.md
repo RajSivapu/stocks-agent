@@ -92,8 +92,9 @@ Implemented locally:
 - F8: credentialed database tests require explicit opt-in and an exact allowlisted isolated
   Supabase project; the ordinary suite and deployment-local verification cannot inherit the opt-in.
 - F18: token refresh cannot extend the 30-minute activity deadline.
-- Owner email mismatch: frontend, provisioning, and verifier accept a six-digit token template or
-  Supabase's free-tier signed confirmation link while retaining session-only storage.
+- Owner email mismatch: provisioning and the protected verifier accept a six-digit token template
+  or Supabase's free-tier signed confirmation link. The owner browser intentionally follows the live
+  signed-link template while retaining session-only storage; it exposes no numeric-code field.
 
 Production receipt:
 
