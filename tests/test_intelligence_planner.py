@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from copy import deepcopy
+from dataclasses import replace
 import json
 from pathlib import Path
 
@@ -66,6 +67,8 @@ def test_plan_is_fair_and_never_round_robins_unsupported_provider_target_pairs()
     scans = {
         ("gdelt_theme_search", "critical_minerals_and_magnets"): "2026-09-03T00:00:00+00:00",
         ("gdelt_theme_search", "energy_nuclear_and_grid_infrastructure"): "2026-09-01T00:00:00+00:00",
+        ("federal_register_document_search", "energy_nuclear_and_grid_infrastructure"):
+            "2026-09-04T00:00:00+00:00",
         ("gdelt_theme_search", "healthcare"): "2026-09-02T00:00:00+00:00",
     }
     plan = _plan(scans=scans)
@@ -198,3 +201,91 @@ def test_missing_credential_is_coverage_not_a_guessed_request():
 
     assert "alpha_vantage_topic_news" in plan.coverage["missing_credentials"]
     assert all(task.capability_id != "alpha_vantage_topic_news" for task in plan.tasks)
+
+
+def test_source_registry_rejects_a_credentialed_required_baseline(tmp_path):
+    def credential_baseline(document):
+        capability = next(
+            item
+            for item in document["capabilities"]
+            if item["capability_id"] == "gdelt_theme_search"
+        )
+        capability["required_credential"] = "GDELT_API_KEY"
+
+    path = _write_source_config(tmp_path, credential_baseline)
+
+    with pytest.raises(ValueError, match="required baseline.*zero-key"):
+        load_source_capabilities(path)
+
+
+def test_planner_revalidates_that_required_baselines_are_zero_key():
+    capabilities = dict(load_source_capabilities())
+    capabilities["gdelt_theme_search"] = replace(
+        capabilities["gdelt_theme_search"],
+        required_credential="GDELT_API_KEY",
+    )
+
+    with pytest.raises(ValueError, match="required baseline.*zero-key"):
+        build_discovery_plan(
+            load_intelligence_policy(load_settings()),
+            capabilities,
+            phase="pre-market",
+            run_id=RUN_ID,
+            reference_version="sec:fixture-v1",
+            requested_window=WINDOW,
+            available_credentials=frozenset({"GDELT_API_KEY"}),
+            required_holding_quote_requests=0,
+            last_completed_scans={},
+        )
+
+
+def test_older_capability_theme_pair_wins_before_provider_priority():
+    plan = _plan(scans={
+        ("gdelt_theme_search", "macro_and_policy"): "2026-09-03T00:00:00+00:00",
+        ("federal_register_document_search", "macro_and_policy"):
+            "2026-09-01T00:00:00+00:00",
+    })
+    first_macro_task = next(
+        task for task in plan.tasks if task.theme_id == "macro_and_policy"
+    )
+
+    assert first_macro_task.capability_id == "federal_register_document_search"
+
+
+def test_reservations_that_cannot_fit_required_discovery_are_rejected():
+    with pytest.raises(ValueError, match="reservations.*required discovery"):
+        _plan(holding_quotes=79)
+
+
+def test_plain_capability_mapping_preserves_queries_and_task_identity():
+    policy = load_intelligence_policy(load_settings())
+    registry = load_source_capabilities()
+    expected = build_discovery_plan(
+        policy,
+        registry,
+        phase="pre-market",
+        run_id=RUN_ID,
+        reference_version="sec:fixture-v1",
+        requested_window=WINDOW,
+        available_credentials=frozenset(),
+        required_holding_quote_requests=0,
+        last_completed_scans={},
+    )
+    actual = build_discovery_plan(
+        policy,
+        dict(registry),
+        phase="pre-market",
+        run_id=RUN_ID,
+        reference_version="sec:fixture-v1",
+        requested_window=WINDOW,
+        available_credentials=frozenset(),
+        required_holding_quote_requests=0,
+        last_completed_scans={},
+    )
+
+    assert [task.task_id for task in actual.tasks] == [
+        task.task_id for task in expected.tasks
+    ]
+    assert [dict(task.query) for task in actual.tasks] == [
+        dict(task.query) for task in expected.tasks
+    ]

@@ -141,11 +141,9 @@ class _CapabilityRegistry(Mapping[str, SourceCapability]):
         values: Mapping[str, SourceCapability],
         *,
         version: int,
-        query_packs: Mapping[str, Mapping[str, object]],
     ) -> None:
         self._values = MappingProxyType(dict(values))
         self.version = version
-        self.query_packs = MappingProxyType(dict(query_packs))
 
     def __getitem__(self, key: str) -> SourceCapability:
         return self._values[key]
@@ -401,6 +399,7 @@ def load_source_capabilities(
             health=health,
             enabled=enabled,
             provider_priority=priority,
+            query_pack=query_packs[capability_id],
         )
 
     for baseline_id in baseline_ids:
@@ -412,6 +411,8 @@ def load_source_capabilities(
             or baseline.health != "enabled"
         ):
             raise ValueError(f"required baseline capability {baseline_id} is missing or disabled")
+        if baseline.required_credential is not None:
+            raise ValueError(f"required baseline capability {baseline_id} must be zero-key")
     unlisted_required = {
         item.capability_id
         for item in capabilities.values()
@@ -422,7 +423,6 @@ def load_source_capabilities(
     return _CapabilityRegistry(
         capabilities,
         version=1,
-        query_packs=query_packs,
     )
 
 
@@ -455,12 +455,9 @@ def _scan_value(
 
 
 def _query_for(
-    registry: Mapping[str, SourceCapability], capability: SourceCapability, theme_id: str | None
+    capability: SourceCapability, theme_id: str | None
 ) -> Mapping[str, object] | None:
-    packs = getattr(registry, "query_packs", {})
-    pack = packs.get(capability.capability_id) if isinstance(packs, Mapping) else None
-    if not isinstance(pack, Mapping):
-        return None
+    pack = capability.query_pack
     if capability.query_kind == "theme_search":
         themes = pack.get("themes")
         value = themes.get(theme_id) if isinstance(themes, Mapping) else None
@@ -491,7 +488,7 @@ def configured_provider_query(provider: str, target: str) -> str:
     for capability in registry.values():
         if capability.provider != provider or capability.query_kind != "theme_search":
             continue
-        pack = registry.query_packs[capability.capability_id]  # type: ignore[attr-defined]
+        pack = capability.query_pack
         values = pack.get("themes") if theme_id is not None else pack.get("targets")
         query = values.get(theme_id or target) if isinstance(values, Mapping) else None
         if not isinstance(query, Mapping):
@@ -591,8 +588,10 @@ def build_discovery_plan(
             or capability.health != "enabled"
         ):
             raise ValueError(f"required baseline capability {baseline_id} is missing or disabled")
+        if capability.required_credential is not None:
+            raise ValueError(f"required baseline capability {baseline_id} must be zero-key")
 
-    task_capacity = _MAX_RUN_REQUESTS - holding_reserve - adaptive_reserve
+    task_capacity = _MAX_RUN_REQUESTS
     tasks: list[DiscoveryTask] = []
     provider_totals: dict[str, int] = {}
     capability_totals: dict[str, int] = {}
@@ -615,7 +614,7 @@ def build_discovery_plan(
         return True
 
     def add_task(capability: SourceCapability, theme_id: str | None) -> bool:
-        query = _query_for(capabilities, capability, theme_id)
+        query = _query_for(capability, theme_id)
         if query is None:
             deferred_capabilities.add(capability.capability_id)
             return False
@@ -679,35 +678,53 @@ def build_discovery_plan(
 
     # First pass: one keyless, capability-matched opportunity for every theme.
     first_opportunities: list[tuple[str, str, int, str, str, SourceCapability]] = []
+    themes_with_opportunities: set[str] = set()
     for theme_id in policy.seed_domains:
-        candidates = [
-            capability
-            for capability in ordered_capabilities
-            if capability.query_kind == "theme_search"
-            and capability.required_credential is None
-            and theme_id in capability.themes
-            and usable(capability)
-            and _query_for(capabilities, capability, theme_id) is not None
-        ]
-        if not candidates:
+        for capability in ordered_capabilities:
+            if (
+                capability.query_kind != "theme_search"
+                or capability.required_credential is not None
+                or theme_id not in capability.themes
+                or not usable(capability)
+                or _query_for(capability, theme_id) is None
+            ):
+                continue
+            themes_with_opportunities.add(theme_id)
+            first_opportunities.append((
+                _scan_value(last_completed_scans, capability, theme_id),
+                theme_id,
+                capability.provider_priority,
+                capability.provider,
+                capability.capability_id,
+                capability,
+            ))
+        if theme_id not in themes_with_opportunities:
             unsupported_pairs.append(MappingProxyType({
                 "theme_id": theme_id,
                 "reason": "no_executable_zero_key_capability",
             }))
-            continue
-        capability = candidates[0]
-        first_opportunities.append((
-            _scan_value(last_completed_scans, capability, theme_id),
-            theme_id,
-            capability.provider_priority,
-            capability.provider,
-            capability.capability_id,
-            capability,
-        ))
+    planned_first_pass_themes: set[str] = set()
     for _scan, theme_id, _priority, _provider, _capability_id, capability in sorted(
         first_opportunities
     ):
-        add_task(capability, theme_id)
+        if theme_id not in planned_first_pass_themes and add_task(capability, theme_id):
+            planned_first_pass_themes.add(theme_id)
+
+    quota_blocked_themes = themes_with_opportunities - planned_first_pass_themes
+    if quota_blocked_themes:
+        raise ValueError("provider budgets cannot fit required discovery")
+
+    for baseline_id in policy.required_baseline_capability_ids:
+        capability = capabilities[baseline_id]
+        if any(task.capability_id == baseline_id for task in tasks):
+            continue
+        baseline_themes = sorted(set(policy.seed_domains) & capability.themes)
+        if not baseline_themes or not add_task(capability, baseline_themes[0]):
+            raise ValueError("provider budgets cannot fit required discovery")
+
+    if len(tasks) + holding_reserve + adaptive_reserve > _MAX_RUN_REQUESTS:
+        raise ValueError("reservations cannot fit required discovery")
+    task_capacity = _MAX_RUN_REQUESTS - holding_reserve - adaptive_reserve
 
     # Static zero-key signals are bounded once per capability.
     for capability in ordered_capabilities:
@@ -732,7 +749,7 @@ def build_discovery_plan(
             ):
                 continue
             for theme_id in capability.themes:
-                if _query_for(capabilities, capability, theme_id) is not None:
+                if _query_for(capability, theme_id) is not None:
                     repeats.append((
                         _scan_value(last_completed_scans, capability, theme_id),
                         theme_id,

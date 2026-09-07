@@ -63,6 +63,7 @@ class SourceCapability:
     ]
     enabled: bool
     provider_priority: int
+    query_pack: Mapping[str, object]
 
 
 @dataclass(frozen=True, slots=True)
