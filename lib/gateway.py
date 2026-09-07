@@ -30,6 +30,9 @@ OPERATIONS = (
     "collect_intelligence_quote",
     "record_report",
     "record_learning",
+    "record_discovery_reference",
+    "checkpoint_discovery_stage",
+    "read_discovery_context",
 )
 MAX_REQUEST_BYTES = 262_144
 MAX_RESPONSE_BYTES = 1_048_576

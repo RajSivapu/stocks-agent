@@ -125,6 +125,39 @@ def test_snapshot_sql_uses_postgres_text_literals_for_dataset_keys():
     assert '"holdings",COALESCE' not in query
 
 
+def test_managed_snapshot_contains_every_discovery_dataset_and_exact_source_table():
+    from scripts.managed_isolated_restore import _snapshot_sql
+
+    query = _snapshot_sql()
+    expected = {
+        "reference_manifests": "public.market_reference_manifests",
+        "security_reference_revisions": "public.market_security_reference_revisions",
+        "discovery_stage_tasks": "public.market_discovery_stage_tasks",
+        "theme_episode_revisions": "public.market_theme_episode_revisions",
+        "exposure_facts": "public.market_exposure_facts",
+        "research_nominations": "public.market_research_nominations",
+    }
+    for dataset, table in expected.items():
+        assert f"'{dataset}',COALESCE" in query
+        assert table in query
+
+
+def test_discovery_restore_registry_is_in_foreign_key_dependency_order():
+    from scripts.verify_recovery_bundle import _RESTORE_TABLES
+
+    datasets = [dataset for dataset, _table, _renames in _RESTORE_TABLES]
+    discovery = [
+        "reference_manifests",
+        "security_reference_revisions",
+        "discovery_stage_tasks",
+        "theme_episode_revisions",
+        "exposure_facts",
+        "research_nominations",
+    ]
+    assert [datasets.index(name) for name in discovery] == sorted(datasets.index(name) for name in discovery)
+    assert datasets.index("intelligence_runs") < datasets.index("reference_manifests")
+
+
 def test_restore_target_refuses_caller_owned_or_production_project_and_never_uses_read_only_write_path():
     from scripts.managed_isolated_restore import ManagedRestoreTarget
 
@@ -207,7 +240,7 @@ def test_restore_receipt_is_bounded_and_never_serializes_secret_values_or_rows(t
         "started_at": "2026-09-05T20:00:00Z", "completed_at": "2026-09-05T20:01:00Z",
         "production_project_ref": "p" * 20, "restore_project_ref": "r" * 20,
         "before_root_hash": "c" * 64, "after_root_hash": "c" * 64,
-        "restore": {"status": "verified", "isolated": True, "restore_applied": True, "record_set_count": 26},
+        "restore": {"status": "verified", "isolated": True, "restore_applied": True, "record_set_count": 32},
         "migration_retry": {"applied": [], "skipped": ["schema"]},
         "artifacts": {"first": {"path": "recovery/first.enc", "sha256": "d" * 64}},
         "workflow": {"run_id": "99", "attempt": "1"},
@@ -215,7 +248,7 @@ def test_restore_receipt_is_bounded_and_never_serializes_secret_values_or_rows(t
         "forbidden": {"password": "super-secret", "rows": [{"ticker": "VTI"}]},
     })
     receipt = json.loads(path.read_text())
-    assert receipt["restore"]["record_set_count"] == 26
+    assert receipt["restore"]["record_set_count"] == 32
     assert receipt["before_root_hash"] == receipt["after_root_hash"]
     assert "super-secret" not in path.read_text() and "VTI" not in path.read_text()
     assert path.stat().st_size < 8 * 1024
@@ -532,13 +565,18 @@ def test_actual_migration_retry_accepts_truthful_baseline_without_writing_histor
     source.parent.mkdir(parents=True)
     source.write_text("SELECT 1;")
     monkeypatch.setattr(deploy, "ROOT", tmp_path)
+    discovery = next(item for item in deploy.candidate_migration_manifest()
+                     if item["path"] == "sql/migrations/20261005_market_wide_discovery.sql")
     queries = []
 
     def api(_method, _path, payload=None):
         query = payload["query"]
         queries.append(query)
         if query.startswith("SELECT path, version, sha256"):
-            return [{"path": path, "version": "20261004", "sha256": hashlib.sha256(b'["SELECT 1"]').hexdigest()}]
+            return [
+                {"path": path, "version": "20261004", "sha256": hashlib.sha256(b'["SELECT 1"]').hexdigest()},
+                discovery,
+            ]
         if query.startswith("SELECT version, statements"):
             return [{"version": "20261004", "statements": ["SELECT 1"]}]
         if query.startswith("CREATE TABLE IF NOT EXISTS public.stock_agent_release_migration_ledger"):
@@ -565,6 +603,31 @@ def test_management_restore_resets_transaction_sequence_like_the_existing_postgr
         return []
     ManagedRestoreTarget(api, "r" * 20, "p" * 20, created_project_ref="r" * 20).restore_records(recovery_records())
     assert "SELECT setval(pg_get_serial_sequence('public.transactions','id'),(SELECT max(id) FROM public.transactions),true)" in queries[-1]
+
+
+def test_management_restore_serializes_discovery_in_dependency_order():
+    from scripts.managed_isolated_restore import ManagedRestoreTarget
+
+    queries = []
+    def api(_method, _path, payload=None):
+        queries.append(payload["query"])
+        if "restore_preflight" in payload["query"]:
+            return [{"restore_preflight": {"tables_empty": True, "native_migrations_empty": True,
+                                            "private_ledger_empty": True}}]
+        return []
+
+    ManagedRestoreTarget(api, "r" * 20, "p" * 20, created_project_ref="r" * 20).restore_records(recovery_records())
+    restore_sql = queries[-1]
+    tables = [
+        "market_reference_manifests",
+        "market_security_reference_revisions",
+        "market_discovery_stage_tasks",
+        "market_theme_episode_revisions",
+        "market_exposure_facts",
+        "market_research_nominations",
+    ]
+    positions = [restore_sql.index(f"INSERT INTO public.{table}") for table in tables]
+    assert positions == sorted(positions)
 
 
 def test_restarted_cleanup_discovers_exact_run_name_after_lost_delete_response_and_proves_absence(tmp_path):

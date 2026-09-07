@@ -22,6 +22,7 @@ MIGRATIONS = (
     ROOT / "sql" / "migrations" / "20260914_provider_evidence_integrity.sql",
     ROOT / "sql" / "migrations" / "20260915_market_source_item_reuse.sql",
     ROOT / "sql" / "migrations" / "20260916_run_scoped_request_provenance.sql",
+    ROOT / "sql" / "migrations" / "20261005_market_wide_discovery.sql",
 )
 GATEWAY_ROLE = "service_role"
 TABLES = (
@@ -47,6 +48,23 @@ RPCS = (
     "read_market_report_decisions(uuid,uuid,jsonb)",
     "record_market_report(uuid,text,jsonb)",
     "record_market_learning(uuid,jsonb)",
+)
+DISCOVERY_TABLES = (
+    "market_reference_manifests",
+    "market_security_reference_revisions",
+    "market_discovery_stage_tasks",
+    "market_exposure_facts",
+    "market_theme_episode_revisions",
+    "market_research_nominations",
+)
+DISCOVERY_TRANSITION_TABLES = {
+    "market_discovery_stage_tasks",
+    "market_research_nominations",
+}
+DISCOVERY_RPCS = (
+    "record_market_discovery_reference(uuid,jsonb)",
+    "checkpoint_market_discovery_stage(uuid,jsonb)",
+    "read_market_discovery_context(uuid,integer)",
 )
 BEHAVIOR_ERRORS = {
     "new_run_not_duplicate": "new run was incorrectly marked duplicate",
@@ -113,6 +131,37 @@ def evaluate_snapshot(snapshot: dict[str, Any]) -> dict[str, object]:
         gateway_only += 1
     _require(public_execute == 0, "PUBLIC execute grant remains on an intelligence RPC")
 
+    discovery_tables = snapshot.get("discovery_tables") or {}
+    _require(set(discovery_tables) == set(DISCOVERY_TABLES),
+             "discovery ledger coverage is incomplete")
+    for table in DISCOVERY_TABLES:
+        details = discovery_tables.get(table) or {}
+        if details.get("rls_enabled") is not True:
+            raise RuntimeError(f"RLS is not enabled for {table}")
+        expected_guard = (
+            f"{table}_transition_guard"
+            if table in DISCOVERY_TRANSITION_TABLES
+            else f"{table}_append_only"
+        )
+        if details.get("guard") != expected_guard:
+            label = "transition guard" if table in DISCOVERY_TRANSITION_TABLES else "append-only trigger"
+            raise RuntimeError(f"{label} is missing for {table}")
+
+    discovery_functions = snapshot.get("discovery_functions") or {}
+    _require(set(discovery_functions) == set(DISCOVERY_RPCS),
+             "discovery RPC coverage is incomplete")
+    discovery_public_execute = 0
+    for signature in DISCOVERY_RPCS:
+        details = discovery_functions.get(signature) or {}
+        if details.get("search_path") != ["pg_catalog"]:
+            raise RuntimeError(f"unsafe search_path for {signature}")
+        if details.get("public_execute"):
+            discovery_public_execute += 1
+        if details.get("gateway_execute") is not True:
+            raise RuntimeError(f"gateway execute is missing for {signature}")
+    _require(discovery_public_execute == 0,
+             "PUBLIC execute grant remains on a discovery RPC")
+
     for grant in snapshot.get("table_grants") or []:
         if not grant.get("is_owner"):
             raise RuntimeError(f"unexpected grant: {grant}")
@@ -146,6 +195,8 @@ def evaluate_snapshot(snapshot: dict[str, Any]) -> dict[str, object]:
         "gateway_only_rpcs": gateway_only,
         "public_execute_grants": public_execute,
         "brokerage_columns": len(brokerage_columns),
+        "discovery_ledgers": len(discovery_tables),
+        "discovery_gateway_only_rpcs": len(discovery_functions),
         **behavior,
     }
 
@@ -214,6 +265,66 @@ def collect_snapshot(cursor, behavior: dict[str, bool]) -> dict[str, Any]:
             "gateway_execute": gateway_execute,
         }
 
+    discovery_table_rows = _fetch_all(
+        cursor,
+        """
+        SELECT class.relname,class.relrowsecurity,
+               CASE
+                 WHEN class.relname=ANY(%s) THEN EXISTS(
+                   SELECT 1 FROM pg_catalog.pg_trigger trigger
+                   WHERE trigger.tgrelid=class.oid AND NOT trigger.tgisinternal
+                     AND trigger.tgname=class.relname || '_transition_guard')
+                 ELSE EXISTS(
+                   SELECT 1 FROM pg_catalog.pg_trigger trigger
+                   WHERE trigger.tgrelid=class.oid AND NOT trigger.tgisinternal
+                     AND trigger.tgname=class.relname || '_append_only')
+               END
+          FROM pg_catalog.pg_class class
+          JOIN pg_catalog.pg_namespace namespace ON namespace.oid=class.relnamespace
+         WHERE namespace.nspname='public' AND class.relname=ANY(%s)
+         ORDER BY class.relname
+        """,
+        (list(DISCOVERY_TRANSITION_TABLES), list(DISCOVERY_TABLES)),
+    )
+    discovery_tables = {
+        table: {
+            "rls_enabled": rls_enabled,
+            "guard": (
+                f"{table}_transition_guard"
+                if table in DISCOVERY_TRANSITION_TABLES and has_guard
+                else f"{table}_append_only" if has_guard else None
+            ),
+        }
+        for table, rls_enabled, has_guard in discovery_table_rows
+    }
+    discovery_functions: dict[str, dict[str, object]] = {}
+    for signature in DISCOVERY_RPCS:
+        rows = _fetch_all(
+            cursor,
+            """
+            SELECT procedure.proconfig,
+                   EXISTS(SELECT 1 FROM pg_catalog.aclexplode(COALESCE(
+                     procedure.proacl,pg_catalog.acldefault('f',procedure.proowner))) acl
+                     WHERE acl.grantee=0 AND acl.privilege_type='EXECUTE'),
+                   pg_catalog.has_function_privilege(%s,procedure.oid,'EXECUTE')
+              FROM pg_catalog.pg_proc procedure
+             WHERE procedure.oid=pg_catalog.to_regprocedure(%s)
+            """,
+            (GATEWAY_ROLE, f"public.{signature}"),
+        )
+        if rows:
+            proconfig, public_execute, gateway_execute = rows[0]
+            search_path = []
+            for setting in proconfig or []:
+                setting_text = setting.decode() if isinstance(setting, bytes) else str(setting)
+                if setting_text.startswith("search_path="):
+                    search_path = setting_text.removeprefix("search_path=").split(", ")
+            discovery_functions[signature] = {
+                "search_path": search_path,
+                "public_execute": public_execute,
+                "gateway_execute": gateway_execute,
+            }
+
     table_grants = [
         {"table": table, "grantee": grantee or "PUBLIC", "privilege": privilege,
          "is_owner": is_owner}
@@ -266,6 +377,8 @@ def collect_snapshot(cursor, behavior: dict[str, bool]) -> dict[str, Any]:
     return {
         "tables": tables,
         "functions": functions,
+        "discovery_tables": discovery_tables,
+        "discovery_functions": discovery_functions,
         "table_grants": table_grants,
         "function_grants": function_grants,
         "unexpected_grants": unexpected_grants,

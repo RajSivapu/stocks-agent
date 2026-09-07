@@ -73,6 +73,8 @@ import {
 } from "./telegram.ts";
 import {
   canonicalJson,
+  type DiscoveryReferencePayload,
+  type DiscoveryStageCheckpointPayload,
   type RecordIntelligencePayload,
   sha256Hex,
   type StartIntelligencePayload,
@@ -122,6 +124,8 @@ export interface GatewayDependencies {
   ) => Promise<TelegramAlertReceipt>;
   dashboardBaseUrl?: string;
   dashboardAllowedOrigins?: string[];
+  ownerUserId?: string;
+  verifyOwner?: (request: Request) => Promise<{ subject: string }>;
 }
 
 const MAX_BODY_BYTES = 262_144;
@@ -408,7 +412,28 @@ export function createGatewayHandler(dependencies: GatewayDependencies) {
       return response(405, { ok: false, code: "METHOD_NOT_ALLOWED" });
     }
     const supplied = request.headers.get("x-market-agent-secret") ?? "";
-    if (!(await secureEqual(supplied, deps.marketAgentSecret))) {
+    const serviceAuthorized = await secureEqual(
+      supplied,
+      deps.marketAgentSecret,
+    );
+    let ownerAuthorized = false;
+    if (!serviceAuthorized && deps.verifyOwner && deps.ownerUserId) {
+      try {
+        const verified = await deps.verifyOwner(request);
+        if (verified.subject !== deps.ownerUserId) {
+          return response(403, { ok: false, code: "OWNER_ONLY" });
+        }
+        ownerAuthorized = true;
+      } catch (error) {
+        if (
+          typeof error === "object" && error !== null &&
+          "status" in error && error.status === 403
+        ) {
+          return response(403, { ok: false, code: "OWNER_ONLY" });
+        }
+        return response(401, { ok: false, code: "UNAUTHORIZED" });
+      }
+    } else if (!serviceAuthorized) {
       return response(401, { ok: false, code: "UNAUTHORIZED" });
     }
 
@@ -422,7 +447,9 @@ export function createGatewayHandler(dependencies: GatewayDependencies) {
         envelope.operation === "checkpoint_intelligence_collection" ||
         envelope.operation === "record_intelligence" ||
         envelope.operation === "record_report" ||
-        envelope.operation === "record_learning"
+        envelope.operation === "record_learning" ||
+        envelope.operation === "record_discovery_reference" ||
+        envelope.operation === "checkpoint_discovery_stage"
       ) {
         prepared = envelope.operation === "record_report"
           ? parseRecordReportPayload(envelope.payload)
@@ -490,11 +517,15 @@ export function createGatewayHandler(dependencies: GatewayDependencies) {
         envelope.operation === "read_context" ||
         envelope.operation === "read_intelligence_completion" ||
         envelope.operation === "read_intelligence_context" ||
+        envelope.operation === "read_discovery_context" ||
         envelope.operation === "finish_run"
       ) {
         requireRun(envelope);
         const row = objectValue(envelope.payload);
-        if (envelope.operation !== "finish_run") exactKeys(row, []);
+        if (
+          envelope.operation !== "finish_run" &&
+          envelope.operation !== "read_discovery_context"
+        ) exactKeys(row, []);
         prepared = envelope.payload;
       }
     } catch (error) {
@@ -502,6 +533,13 @@ export function createGatewayHandler(dependencies: GatewayDependencies) {
         return response(error.status, { ok: false, code: error.code });
       }
       return response(400, { ok: false, code: "INVALID_REQUEST" });
+    }
+
+    if (envelope.operation === "read_discovery_context" && !ownerAuthorized) {
+      return response(403, { ok: false, code: "OWNER_ONLY" });
+    }
+    if (!serviceAuthorized && envelope.operation !== "read_discovery_context") {
+      return response(403, { ok: false, code: "SERVICE_ONLY" });
     }
 
     if (envelope.dry_run) {
@@ -590,6 +628,43 @@ export function createGatewayHandler(dependencies: GatewayDependencies) {
             content_hash: (prepared as RecordLearningPayload).content_hash,
             duplicate: false,
             write_counts: {},
+            telegram_message_ids: [],
+          });
+        }
+        if (envelope.operation === "record_discovery_reference") {
+          return response(200, {
+            ok: true,
+            dry_run: true,
+            manifest_id: (prepared as DiscoveryReferencePayload).manifest.id,
+            security_revision_count:
+              (prepared as DiscoveryReferencePayload).security_revisions.length,
+            duplicate: false,
+            write_counts: {},
+            telegram_message_ids: [],
+          });
+        }
+        if (envelope.operation === "checkpoint_discovery_stage") {
+          return response(200, {
+            ok: true,
+            dry_run: true,
+            task: (prepared as DiscoveryStageCheckpointPayload).task,
+            duplicate: false,
+            write_counts: {},
+            telegram_message_ids: [],
+          });
+        }
+        if (envelope.operation === "read_discovery_context") {
+          return response(200, {
+            ok: true,
+            dry_run: true,
+            context: {
+              manifests: [],
+              security_revisions: [],
+              tasks: [],
+              theme_episodes: [],
+              exposure_facts: [],
+              research_nominations: [],
+            },
             telegram_message_ids: [],
           });
         }
@@ -722,6 +797,66 @@ export function createGatewayHandler(dependencies: GatewayDependencies) {
             quote,
             checkpoint,
           ),
+        });
+      } catch (error) {
+        const code = error instanceof GatewayRepositoryError
+          ? error.code
+          : "PERSISTENCE_FAILED";
+        return response(errorStatus(code), { ok: false, code });
+      }
+    }
+    if (envelope.operation === "read_discovery_context") {
+      try {
+        if (!deps.repository.readDiscoveryContext) {
+          throw new GatewayRepositoryError("PERSISTENCE_FAILED");
+        }
+        return response(200, {
+          ok: true,
+          context: await deps.repository.readDiscoveryContext(
+            requireRun(envelope),
+            (prepared as { limit: number }).limit,
+          ),
+          telegram_message_ids: [],
+        });
+      } catch (error) {
+        const code = error instanceof GatewayRepositoryError
+          ? error.code
+          : "PERSISTENCE_FAILED";
+        return response(errorStatus(code), { ok: false, code });
+      }
+    }
+    if (envelope.operation === "record_discovery_reference") {
+      try {
+        if (!deps.repository.recordDiscoveryReference) {
+          throw new GatewayRepositoryError("PERSISTENCE_FAILED");
+        }
+        return response(200, {
+          ok: true,
+          ...await deps.repository.recordDiscoveryReference(
+            requireRun(envelope),
+            prepared as DiscoveryReferencePayload,
+          ),
+          telegram_message_ids: [],
+        });
+      } catch (error) {
+        const code = error instanceof GatewayRepositoryError
+          ? error.code
+          : "PERSISTENCE_FAILED";
+        return response(errorStatus(code), { ok: false, code });
+      }
+    }
+    if (envelope.operation === "checkpoint_discovery_stage") {
+      try {
+        if (!deps.repository.checkpointDiscoveryStage) {
+          throw new GatewayRepositoryError("PERSISTENCE_FAILED");
+        }
+        return response(200, {
+          ok: true,
+          ...await deps.repository.checkpointDiscoveryStage(
+            requireRun(envelope),
+            prepared as DiscoveryStageCheckpointPayload,
+          ),
+          telegram_message_ids: [],
         });
       } catch (error) {
         const code = error instanceof GatewayRepositoryError

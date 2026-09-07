@@ -1236,6 +1236,7 @@ function request(
     requestId?: string;
     secret?: string;
     method?: string;
+    authorization?: string;
   } = {},
 ) {
   const payloadValue = structuredClone(payload);
@@ -1280,6 +1281,9 @@ function request(
       headers: {
         "content-type": "application/json",
         "x-market-agent-secret": options.secret ?? SECRET,
+        ...(options.authorization
+          ? { authorization: options.authorization }
+          : {}),
       },
       body: options.method === "GET" ? undefined : JSON.stringify({
         schema_version: 1,
@@ -1638,6 +1642,208 @@ Deno.test("method and secret are rejected before repository or body processing",
   assertEquals(unauthorized.status, 401);
   assertEquals(repository.mutationCalls, 0);
   assertEquals(repository.readCalls, 0);
+});
+
+const DISCOVERY_OWNER = "6903b3cc-05b7-4f90-bbc2-7e80a3a59e22";
+
+function discoveryCheckpoint(stage = "signals") {
+  return {
+    task: {
+      id: "00000000-0000-4000-8000-000000000041",
+      stage,
+      provider: "gdelt",
+      capability_id: "gdelt_theme_search",
+      query_kind: "theme_search",
+      query_hash: "a".repeat(64),
+      dependency_ids: [],
+      requested_window: {
+        start: "2026-09-05T00:00:00.000Z",
+        end: "2026-09-06T00:00:00.000Z",
+      },
+      state: "planned",
+      attempt_count: 0,
+      request_budget: 1,
+      result: {},
+    },
+    exposure_facts: [] as Record<string, unknown>[],
+    theme_episode_revisions: [] as Record<string, unknown>[],
+    research_nominations: [] as Record<string, unknown>[],
+  };
+}
+
+function discoveryOwnerVerifier(
+  request: Request,
+): Promise<{ subject: string }> {
+  const token = request.headers.get("authorization");
+  if (token === "Bearer owner") {
+    return Promise.resolve({ subject: DISCOVERY_OWNER });
+  }
+  if (token === "Bearer other") {
+    return Promise.resolve({ subject: "00000000-0000-4000-8000-000000000099" });
+  }
+  return Promise.reject(new Error("missing owner authentication"));
+}
+
+Deno.test("discovery reads require the owner while writes require the collection secret", async () => {
+  const repository = Object.assign(new FakeRepository(), {
+    readDiscoveryContext: () =>
+      Promise.resolve({
+        manifests: [],
+        security_revisions: [],
+        tasks: [],
+        theme_episodes: [],
+        exposure_facts: [],
+        research_nominations: [],
+      }),
+    checkpointDiscoveryStage: (
+      _runId: string,
+      payload: ReturnType<typeof discoveryCheckpoint>,
+    ) => Promise.resolve({ task: payload.task, duplicate: false }),
+  });
+  const setup = makeHandler(repository, {
+    ownerUserId: DISCOVERY_OWNER,
+    verifyOwner: discoveryOwnerVerifier,
+  });
+
+  const anonymous = await setup.handler(request(
+    "read_discovery_context",
+    { limit: 100 },
+    { secret: "" },
+  ));
+  assertEquals(anonymous.status, 401);
+  const nonOwner = await setup.handler(request(
+    "read_discovery_context",
+    { limit: 100 },
+    { secret: "", authorization: "Bearer other" },
+  ));
+  assertEquals(nonOwner.status, 403);
+  const serviceRead = await setup.handler(request(
+    "read_discovery_context",
+    { limit: 100 },
+  ));
+  assertEquals(serviceRead.status, 403);
+  const owner = await setup.handler(request(
+    "read_discovery_context",
+    { limit: 100 },
+    { secret: "", authorization: "Bearer owner" },
+  ));
+  assertEquals(owner.status, 200);
+
+  const ownerWrite = await setup.handler(request(
+    "checkpoint_discovery_stage",
+    discoveryCheckpoint(),
+    { secret: "", authorization: "Bearer owner" },
+  ));
+  assertEquals(ownerWrite.status, 403);
+  const ownerLegacyOperation = await setup.handler(request(
+    "read_context",
+    {},
+    { secret: "", authorization: "Bearer owner" },
+  ));
+  assertEquals(ownerLegacyOperation.status, 403);
+  const serviceWrite = await setup.handler(request(
+    "checkpoint_discovery_stage",
+    discoveryCheckpoint(),
+  ));
+  assertEquals(serviceWrite.status, 200);
+});
+
+Deno.test("discovery read preserves an authenticated non-owner rejection", async () => {
+  const repository = Object.assign(new FakeRepository(), {
+    readDiscoveryContext: () =>
+      Promise.resolve({
+        manifests: [],
+        security_revisions: [],
+        tasks: [],
+        theme_episodes: [],
+        exposure_facts: [],
+        research_nominations: [],
+      }),
+  });
+  const setup = makeHandler(repository, {
+    ownerUserId: DISCOVERY_OWNER,
+    verifyOwner: () =>
+      Promise.reject(Object.assign(new Error("owner only"), { status: 403 })),
+  });
+
+  const response = await setup.handler(request(
+    "read_discovery_context",
+    { limit: 100 },
+    { secret: "", authorization: "Bearer other" },
+  ));
+
+  assertEquals(response.status, 403);
+  assertEquals((await json(response)).code, "OWNER_ONLY");
+});
+
+Deno.test("discovery checkpoint rejects wrong-stage result rows before persistence", async () => {
+  let writes = 0;
+  const repository = Object.assign(new FakeRepository(), {
+    checkpointDiscoveryStage: (
+      _runId: string,
+      payload: ReturnType<typeof discoveryCheckpoint>,
+    ) => {
+      writes += 1;
+      return Promise.resolve({ task: payload.task, duplicate: false });
+    },
+  });
+  const setup = makeHandler(repository, {
+    ownerUserId: DISCOVERY_OWNER,
+    verifyOwner: discoveryOwnerVerifier,
+  });
+  const payload = discoveryCheckpoint("quote");
+  Object.assign(payload.task, {
+    state: "succeeded",
+    attempt_count: 1,
+    result: { count: 1 },
+  });
+  payload.exposure_facts.push({
+    id: "00000000-0000-4000-8000-000000000043",
+    security_revision_id: "00000000-0000-4000-8000-000000000044",
+    theme_episode_revision_id: null,
+    exposure_kind: "filing",
+    fact: { basis: "10-K" },
+    source_ids: ["sec:fixture"],
+    valid_from: "2026-09-06T00:00:00.000Z",
+    valid_to: null,
+    content_hash: "d".repeat(64),
+  });
+  const response = await setup.handler(
+    request("checkpoint_discovery_stage", payload),
+  );
+  assertEquals(response.status, 400);
+  assertEquals(writes, 0);
+});
+
+Deno.test("discovery stage replay returns the durable duplicate receipt", async () => {
+  let writes = 0;
+  const repository = Object.assign(new FakeRepository(), {
+    checkpointDiscoveryStage: (
+      _runId: string,
+      payload: ReturnType<typeof discoveryCheckpoint>,
+    ) => {
+      writes += 1;
+      return Promise.resolve({ task: payload.task, duplicate: writes > 1 });
+    },
+  });
+  const setup = makeHandler(repository, {
+    ownerUserId: DISCOVERY_OWNER,
+    verifyOwner: discoveryOwnerVerifier,
+  });
+  const requestId = "00000000-0000-4000-8000-000000000045";
+  const first = await setup.handler(request(
+    "checkpoint_discovery_stage",
+    discoveryCheckpoint(),
+    { requestId },
+  ));
+  const replay = await setup.handler(request(
+    "checkpoint_discovery_stage",
+    discoveryCheckpoint(),
+    { requestId },
+  ));
+  assertEquals((await json(first)).duplicate, false);
+  assertEquals((await json(replay)).duplicate, true);
+  assertEquals(writes, 2);
 });
 
 Deno.test("malformed and streamed oversized bodies fail before repository", async () => {

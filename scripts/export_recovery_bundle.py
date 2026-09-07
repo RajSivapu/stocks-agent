@@ -24,7 +24,10 @@ sys.path.insert(0, str(ROOT))
 
 REQUIRED_RECOVERY_RECORDS = (
     "holdings", "transactions", "commands", "command_acknowledgements", "runs",
-    "gateway_requests", "policies", "intelligence_runs", "packets", "reports",
+    "gateway_requests", "policies", "intelligence_runs",
+    "reference_manifests", "security_reference_revisions", "discovery_stage_tasks",
+    "theme_episode_revisions", "exposure_facts", "research_nominations",
+    "packets", "reports",
     "intelligence_run_events", "source_quota_reservations", "collection_checkpoints",
     "collection_checkpoint_history", "collection_completions", "report_origins",
     "publications", "evaluation_publications", "cash_ledger_state",
@@ -61,6 +64,41 @@ DATASET_FIELDS = {
     "intelligence_runs": {
         "id": str, "phase": str, "market_date": str, "policy_version": int,
         "reservation_plan": dict, "request_window": (dict, type(None)), "created_at": str,
+    },
+    "reference_manifests": {
+        "id": str, "run_id": str, "reference_version": str, "revision": int,
+        "capability_version": int, "taxonomy_version": int, "source_hash": str,
+        "valid_from": str, "valid_to": NULLABLE_TEXT, "manifest": dict,
+        "content_hash": str, "created_at": str,
+    },
+    "security_reference_revisions": {
+        "id": str, "manifest_id": str, "run_id": str, "revision": int,
+        "security_id": str, "entity_id": str, "ticker": str, "exchange": NULLABLE_TEXT,
+        "instrument_type": str, "eligible": bool, "exclusion_reasons": list,
+        "aliases": list, "source_ids": list, "valid_from": str, "valid_to": NULLABLE_TEXT,
+        "content_hash": str, "created_at": str,
+    },
+    "discovery_stage_tasks": {
+        "id": str, "run_id": str, "stage": str, "capability_id": str, "provider": str,
+        "query_kind": str, "query_hash": str, "dependency_ids": list,
+        "requested_window": dict, "state": str, "attempt_count": int,
+        "request_budget": int, "result": dict, "created_at": str, "updated_at": str,
+    },
+    "theme_episode_revisions": {
+        "id": str, "run_id": str, "task_id": str, "theme_id": str, "revision": int,
+        "episode": dict, "source_ids": list, "valid_from": str, "valid_to": NULLABLE_TEXT,
+        "content_hash": str, "created_at": str,
+    },
+    "exposure_facts": {
+        "id": str, "run_id": str, "task_id": str, "security_revision_id": str,
+        "theme_episode_revision_id": NULLABLE_TEXT, "exposure_kind": str, "fact": dict,
+        "source_ids": list, "valid_from": str, "valid_to": NULLABLE_TEXT,
+        "content_hash": str, "created_at": str,
+    },
+    "research_nominations": {
+        "id": str, "run_id": str, "task_id": str, "security_revision_id": str,
+        "theme_episode_revision_id": NULLABLE_TEXT, "exposure_fact_ids": list,
+        "state": str, "rationale": dict, "created_at": str, "updated_at": str,
     },
     "intelligence_run_events": {
         "id": str, "run_id": str, "status": str, "detail": dict, "created_at": str,
@@ -245,6 +283,127 @@ def _validated_records(records: Mapping[str, object]) -> dict[str, list[dict[str
            for row in result["intelligence_runs"]):
         raise ValueError("intelligence run dependency mismatch")
     intelligence_runs = {row["id"] for row in result["intelligence_runs"]}
+    discovery_providers = {
+        "gdelt", "alpha_vantage", "finnhub", "yahoo", "sec_edgar", "federal_register",
+        "white_house", "doe", "dod", "eia", "fred", "bls", "bea", "social",
+    }
+    discovery_stages = {"reference", "signals", "resolve", "enrich", "screen", "quote"}
+    discovery_query_kinds = {
+        "feed", "theme_search", "issuer_submissions", "filing_document", "series",
+        "screener", "quote", "universe",
+    }
+    forbidden_discovery_fields = {
+        "price", "valuation", "portfolio_overlap", "action", "authority", "execution",
+        "execution_allowed", "broker", "brokerage", "order_id",
+    }
+
+    def valid_discovery_json(value: object, *, max_bytes: int) -> bool:
+        if len(canonical_json(value).encode()) > max_bytes:
+            return False
+        if isinstance(value, Mapping):
+            return (not any(str(key).lower() in forbidden_discovery_fields for key in value)
+                    and all(valid_discovery_json(child, max_bytes=max_bytes) for child in value.values()))
+        if isinstance(value, list):
+            return all(valid_discovery_json(child, max_bytes=max_bytes) for child in value)
+        return True
+
+    manifests = {row["id"]: row for row in result["reference_manifests"]}
+    if any(not UUID.fullmatch(row["id"]) or row["run_id"] not in intelligence_runs
+           or not re.fullmatch(r"[a-z0-9][a-z0-9:._-]{0,127}", row["reference_version"])
+           or not 1 <= row["revision"] <= 10000
+           or not 1 <= row["capability_version"] <= 10000
+           or not 1 <= row["taxonomy_version"] <= 10000
+           or not HASH.fullmatch(row["source_hash"]) or not HASH.fullmatch(row["content_hash"])
+           or not valid_discovery_json(row["manifest"], max_bytes=65536)
+           for row in manifests.values()):
+        raise ValueError("discovery manifest dependency mismatch or invalid content")
+    security_revisions = {row["id"]: row for row in result["security_reference_revisions"]}
+    if any(not UUID.fullmatch(row["id"]) or row["manifest_id"] not in manifests
+           or row["run_id"] not in intelligence_runs
+           or manifests.get(row["manifest_id"], {}).get("run_id") != row["run_id"]
+           or not 1 <= row["revision"] <= 10000
+           or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9:._-]{0,127}", row["security_id"])
+           or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9:._-]{0,127}", row["entity_id"])
+           or not re.fullmatch(r"[A-Z][A-Z0-9.-]{0,14}", row["ticker"])
+           or row["instrument_type"] not in {"COMMON_STOCK", "ADR", "ETF", "PREFERRED", "WARRANT", "OTC_COMMON", "OTHER"}
+           or not 1 <= len(row["source_ids"]) <= 16 or len(set(row["source_ids"])) != len(row["source_ids"])
+           or len(row["aliases"]) > 32 or len(row["exclusion_reasons"]) > 16
+           or not HASH.fullmatch(row["content_hash"])
+           or not valid_discovery_json(row["exclusion_reasons"], max_bytes=4096)
+           or not valid_discovery_json(row["aliases"], max_bytes=4096)
+           or not valid_discovery_json(row["source_ids"], max_bytes=4096)
+           for row in security_revisions.values()):
+        raise ValueError("discovery security dependency mismatch or invalid content")
+    discovery_tasks = {row["id"]: row for row in result["discovery_stage_tasks"]}
+    if any(not UUID.fullmatch(row["id"]) or row["run_id"] not in intelligence_runs
+           or row["stage"] not in discovery_stages or row["provider"] not in discovery_providers
+           or row["query_kind"] not in discovery_query_kinds
+           or not re.fullmatch(r"[a-z][a-z0-9_]{2,79}", row["capability_id"])
+           or not HASH.fullmatch(row["query_hash"])
+           or not 0 <= row["attempt_count"] <= 10 or not 0 <= row["request_budget"] <= 100
+           or row["state"] not in {"planned", "attempting", "succeeded", "failed", "deferred", "uncertain"}
+           or len(row["dependency_ids"]) > 32 or len(set(row["dependency_ids"])) != len(row["dependency_ids"])
+           or any(not isinstance(dependency, str) or not UUID.fullmatch(dependency)
+                  for dependency in row["dependency_ids"])
+           or not valid_discovery_json(row["requested_window"], max_bytes=2048)
+           or not valid_discovery_json(row["result"], max_bytes=65536)
+           for row in discovery_tasks.values()):
+        raise ValueError("discovery task dependency mismatch or invalid content")
+    for row in discovery_tasks.values():
+        for dependency_id in row["dependency_ids"]:
+            dependency = discovery_tasks.get(dependency_id)
+            if (dependency is None or dependency["run_id"] != row["run_id"]
+                    or dependency["state"] != "succeeded"
+                    or dependency["created_at"] >= row["created_at"]):
+                raise ValueError("discovery task dependency mismatch")
+    theme_episodes = {row["id"]: row for row in result["theme_episode_revisions"]}
+    if any(not UUID.fullmatch(row["id"]) or row["run_id"] not in intelligence_runs
+           or row["task_id"] not in discovery_tasks
+           or discovery_tasks.get(row["task_id"], {}).get("run_id") != row["run_id"]
+           or discovery_tasks.get(row["task_id"], {}).get("stage") != "signals"
+           or not re.fullmatch(r"[a-z][a-z0-9_]{2,79}", row["theme_id"])
+           or not 1 <= row["revision"] <= 10000 or not 1 <= len(row["source_ids"]) <= 64
+           or len(set(row["source_ids"])) != len(row["source_ids"])
+           or not HASH.fullmatch(row["content_hash"])
+           or not valid_discovery_json(row["episode"], max_bytes=32768)
+           or not valid_discovery_json(row["source_ids"], max_bytes=8192)
+           for row in theme_episodes.values()):
+        raise ValueError("discovery theme dependency mismatch or invalid content")
+    exposure_facts = {row["id"]: row for row in result["exposure_facts"]}
+    if any(not UUID.fullmatch(row["id"]) or row["run_id"] not in intelligence_runs
+           or row["task_id"] not in discovery_tasks
+           or discovery_tasks.get(row["task_id"], {}).get("run_id") != row["run_id"]
+           or discovery_tasks.get(row["task_id"], {}).get("stage") != "enrich"
+           or row["security_revision_id"] not in security_revisions
+           or security_revisions.get(row["security_revision_id"], {}).get("run_id") != row["run_id"]
+           or (row["theme_episode_revision_id"] is not None
+               and (row["theme_episode_revision_id"] not in theme_episodes
+                    or theme_episodes[row["theme_episode_revision_id"]]["run_id"] != row["run_id"]))
+           or row["exposure_kind"] not in {"filing", "contract", "backlog", "revenue", "capacity", "official_fund", "supply_chain", "customer", "segment"}
+           or not 1 <= len(row["source_ids"]) <= 64 or len(set(row["source_ids"])) != len(row["source_ids"])
+           or not HASH.fullmatch(row["content_hash"])
+           or not valid_discovery_json(row["fact"], max_bytes=32768)
+           or not valid_discovery_json(row["source_ids"], max_bytes=8192)
+           for row in exposure_facts.values()):
+        raise ValueError("discovery exposure dependency mismatch or invalid content")
+    nominations = {row["id"]: row for row in result["research_nominations"]}
+    if any(not UUID.fullmatch(row["id"]) or row["run_id"] not in intelligence_runs
+           or row["task_id"] not in discovery_tasks
+           or discovery_tasks.get(row["task_id"], {}).get("run_id") != row["run_id"]
+           or discovery_tasks.get(row["task_id"], {}).get("stage") != "screen"
+           or row["security_revision_id"] not in security_revisions
+           or security_revisions.get(row["security_revision_id"], {}).get("run_id") != row["run_id"]
+           or (row["theme_episode_revision_id"] is not None
+               and (row["theme_episode_revision_id"] not in theme_episodes
+                    or theme_episodes[row["theme_episode_revision_id"]]["run_id"] != row["run_id"]))
+           or not 1 <= len(row["exposure_fact_ids"]) <= 32
+           or len(set(row["exposure_fact_ids"])) != len(row["exposure_fact_ids"])
+           or any(fact_id not in exposure_facts or exposure_facts[fact_id]["run_id"] != row["run_id"]
+                  for fact_id in row["exposure_fact_ids"])
+           or row["state"] not in {"nominated", "researching", "accepted", "rejected", "deferred"}
+           or not valid_discovery_json(row["rationale"], max_bytes=16384)
+           for row in nominations.values()):
+        raise ValueError("discovery nomination dependency mismatch or invalid content")
     intelligence_events = {row["id"]: row for row in result["intelligence_run_events"]}
     if (any(row["run_id"] not in intelligence_runs or row["status"] not in {"started", "completed", "failed"}
             for row in intelligence_events.values())
@@ -388,6 +547,12 @@ def relationships(records: Mapping[str, list]) -> dict[str, list]:
         "publication_report": sorted([[row["idempotency_key"], row["report_id"]] for row in records["publications"]]),
         "command_acknowledgement": sorted([[row["command_id"], row["telegram_update_id"]] for row in records["command_acknowledgements"]]),
         "intelligence_analysis_run": sorted([[row["id"], row["policy_version"]] for row in records["intelligence_runs"]]),
+        "discovery_manifest_run": sorted([[row["id"], row["run_id"], row["content_hash"]] for row in records["reference_manifests"]]),
+        "discovery_security_manifest_run": sorted([[row["id"], row["manifest_id"], row["run_id"]] for row in records["security_reference_revisions"]]),
+        "discovery_task_run_dependencies": sorted([[row["id"], row["run_id"], row["dependency_ids"]] for row in records["discovery_stage_tasks"]]),
+        "discovery_theme_task_run": sorted([[row["id"], row["task_id"], row["run_id"]] for row in records["theme_episode_revisions"]]),
+        "discovery_exposure_lineage": sorted([[row["id"], row["task_id"], row["security_revision_id"], row["theme_episode_revision_id"]] for row in records["exposure_facts"]]),
+        "discovery_nomination_lineage": sorted([[row["id"], row["task_id"], row["security_revision_id"], row["theme_episode_revision_id"], row["exposure_fact_ids"]] for row in records["research_nominations"]]),
         "intelligence_event_run": sorted([[row["id"], row["run_id"], row["status"]] for row in records["intelligence_run_events"]]),
         "quota_reservation_run": sorted([[row["id"], row["run_id"], row["provider"]] for row in records["source_quota_reservations"]]),
         "checkpoint_run": sorted([[row["run_id"], row["cache_key"], row["source_receipt_id"]] for row in records["collection_checkpoints"]]),

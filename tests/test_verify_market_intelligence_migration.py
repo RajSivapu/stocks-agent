@@ -74,6 +74,36 @@ def complete_snapshot():
             }
             for signature in RPCS
         },
+        "discovery_tables": {
+            table: {
+                "rls_enabled": True,
+                "guard": (
+                    f"{table}_transition_guard"
+                    if table in {"market_discovery_stage_tasks", "market_research_nominations"}
+                    else f"{table}_append_only"
+                ),
+            }
+            for table in (
+                "market_reference_manifests",
+                "market_security_reference_revisions",
+                "market_discovery_stage_tasks",
+                "market_exposure_facts",
+                "market_theme_episode_revisions",
+                "market_research_nominations",
+            )
+        },
+        "discovery_functions": {
+            signature: {
+                "search_path": ["pg_catalog"],
+                "public_execute": False,
+                "gateway_execute": True,
+            }
+            for signature in (
+                "record_market_discovery_reference(uuid,jsonb)",
+                "checkpoint_market_discovery_stage(uuid,jsonb)",
+                "read_market_discovery_context(uuid,integer)",
+            )
+        },
         "table_grants": [],
         "function_grants": [
             {
@@ -215,6 +245,54 @@ def test_missing_trigger_rls_or_gateway_scope_fails_closed():
     wrong_search_path["functions"][RPCS[0]]["search_path"] = ["public", "pg_catalog"]
     with pytest.raises(RuntimeError, match="search_path"):
         evaluate_snapshot(wrong_search_path)
+
+
+def test_discovery_catalog_guards_and_rpc_grants_fail_closed():
+    snapshot = complete_snapshot()
+    snapshot["discovery_tables"] = {
+        table: {
+            "rls_enabled": True,
+            "guard": (
+                f"{table}_transition_guard"
+                if table in {"market_discovery_stage_tasks", "market_research_nominations"}
+                else f"{table}_append_only"
+            ),
+        }
+        for table in (
+            "market_reference_manifests",
+            "market_security_reference_revisions",
+            "market_discovery_stage_tasks",
+            "market_exposure_facts",
+            "market_theme_episode_revisions",
+            "market_research_nominations",
+        )
+    }
+    snapshot["discovery_functions"] = {
+        signature: {
+            "search_path": ["pg_catalog"],
+            "public_execute": False,
+            "gateway_execute": True,
+        }
+        for signature in (
+            "record_market_discovery_reference(uuid,jsonb)",
+            "checkpoint_market_discovery_stage(uuid,jsonb)",
+            "read_market_discovery_context(uuid,integer)",
+        )
+    }
+
+    receipt = evaluate_snapshot(snapshot)
+    assert receipt["discovery_ledgers"] == 6
+    assert receipt["discovery_gateway_only_rpcs"] == 3
+
+    missing_guard = deepcopy(snapshot)
+    missing_guard["discovery_tables"]["market_discovery_stage_tasks"]["guard"] = None
+    with pytest.raises(RuntimeError, match="transition guard"):
+        evaluate_snapshot(missing_guard)
+
+    public_read = deepcopy(snapshot)
+    public_read["discovery_functions"]["read_market_discovery_context(uuid,integer)"]["public_execute"] = True
+    with pytest.raises(RuntimeError, match="PUBLIC execute"):
+        evaluate_snapshot(public_read)
 
 
 def test_schema_declares_complete_bounded_append_only_ledgers_and_rpcs():

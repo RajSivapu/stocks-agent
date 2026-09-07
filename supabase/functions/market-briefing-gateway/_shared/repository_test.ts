@@ -152,6 +152,108 @@ Deno.test("completion recovery reads the immutable completion by run and stable 
   }]);
 });
 
+Deno.test("discovery persistence routes exact run-scoped payloads through protected RPCs", async () => {
+  const calls: unknown[] = [];
+  const task = {
+    id: "00000000-0000-4000-8000-000000000041",
+    stage: "signals" as const,
+    provider: "gdelt" as const,
+    capability_id: "gdelt_theme_search",
+    query_kind: "theme_search" as const,
+    query_hash: "a".repeat(64),
+    dependency_ids: [],
+    requested_window: {
+      start: "2026-09-05T00:00:00.000Z",
+      end: "2026-09-06T00:00:00.000Z",
+    },
+    state: "planned" as const,
+    attempt_count: 0,
+    request_budget: 1,
+    result: {},
+  };
+  const client = {
+    rpc(name: string, parameters?: Record<string, unknown>) {
+      calls.push({ name, parameters });
+      if (name === "record_market_discovery_reference") {
+        return Promise.resolve({
+          data: {
+            manifest_id: "00000000-0000-4000-8000-000000000042",
+            security_revision_count: 0,
+            duplicate: false,
+          },
+          error: null,
+        });
+      }
+      if (name === "checkpoint_market_discovery_stage") {
+        return Promise.resolve({
+          data: { task, duplicate: false },
+          error: null,
+        });
+      }
+      return Promise.resolve({
+        data: {
+          manifests: [],
+          security_revisions: [],
+          tasks: [task],
+          theme_episodes: [],
+          exposure_facts: [],
+          research_nominations: [],
+        },
+        error: null,
+      });
+    },
+  };
+  const repository = createSupabaseGatewayRepository(client);
+  const runId = "00000000-0000-4000-8000-000000000002";
+  const reference = {
+    manifest: {
+      id: "00000000-0000-4000-8000-000000000042",
+      reference_version: "sec:fixture",
+      revision: 1,
+      capability_version: 1,
+      taxonomy_version: 1,
+      source_hash: "b".repeat(64),
+      valid_from: "2026-09-06T00:00:00.000Z",
+      valid_to: null,
+      manifest: {},
+      content_hash: "c".repeat(64),
+    },
+    security_revisions: [],
+  };
+  const checkpoint = {
+    task,
+    exposure_facts: [],
+    theme_episode_revisions: [],
+    research_nominations: [],
+  };
+
+  assertEquals(
+    (await repository.recordDiscoveryReference!(runId, reference)).duplicate,
+    false,
+  );
+  assertEquals(
+    (await repository.checkpointDiscoveryStage!(runId, checkpoint)).task,
+    task,
+  );
+  assertEquals((await repository.readDiscoveryContext!(runId, 100)).tasks, [
+    task,
+  ]);
+  assertEquals(calls, [
+    {
+      name: "record_market_discovery_reference",
+      parameters: { p_run_id: runId, p_payload: reference },
+    },
+    {
+      name: "checkpoint_market_discovery_stage",
+      parameters: { p_run_id: runId, p_payload: checkpoint },
+    },
+    {
+      name: "read_market_discovery_context",
+      parameters: { p_run_id: runId, p_limit: 100 },
+    },
+  ]);
+});
+
 Deno.test("relevant suggestion context keeps unresolved work when old completed history exceeds the bound", () => {
   const unresolved = [{
     id: 999,

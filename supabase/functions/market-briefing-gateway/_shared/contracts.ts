@@ -1,5 +1,10 @@
 import {
+  type DiscoveryReferencePayload,
+  type DiscoveryStageCheckpointPayload,
   parseCheckpointIntelligencePayload,
+  parseDiscoveryContextRequest,
+  parseDiscoveryReferencePayload,
+  parseDiscoveryStageCheckpointPayload,
   parseRecordIntelligencePayload,
   parseStartIntelligencePayload,
   type RecordIntelligencePayload,
@@ -26,7 +31,10 @@ export type Operation =
   | "read_intelligence_context"
   | "collect_intelligence_quote"
   | "record_report"
-  | "record_learning";
+  | "record_learning"
+  | "record_discovery_reference"
+  | "checkpoint_discovery_stage"
+  | "read_discovery_context";
 export type Phase = "pre-market" | "intraday" | "post-market" | "on-demand";
 export type Action =
   | "buy"
@@ -659,6 +667,9 @@ const OPERATIONS: readonly Operation[] = [
   "collect_intelligence_quote",
   "record_report",
   "record_learning",
+  "record_discovery_reference",
+  "checkpoint_discovery_stage",
+  "read_discovery_context",
 ];
 const PHASES: readonly Phase[] = [
   "pre-market",
@@ -1075,6 +1086,21 @@ export function parseGatewayEnvelope(value: unknown): GatewayEnvelope {
       throw new Error("run_id is required for record_learning");
     }
     payload = parseRecordLearningPayload(row.payload);
+  } else if (operation === "record_discovery_reference") {
+    if (row.run_id === null) {
+      throw new Error("run_id is required for record_discovery_reference");
+    }
+    payload = parseDiscoveryReferencePayload(row.payload);
+  } else if (operation === "checkpoint_discovery_stage") {
+    if (row.run_id === null) {
+      throw new Error("run_id is required for checkpoint_discovery_stage");
+    }
+    payload = parseDiscoveryStageCheckpointPayload(row.payload);
+  } else if (operation === "read_discovery_context") {
+    if (row.run_id === null) {
+      throw new Error("run_id is required for read_discovery_context");
+    }
+    payload = parseDiscoveryContextRequest(row.payload);
   }
   return {
     schema_version: 1,
@@ -1087,7 +1113,10 @@ export function parseGatewayEnvelope(value: unknown): GatewayEnvelope {
       | StartIntelligencePayload
       | RecordIntelligencePayload
       | RecordReportPayload
-      | RecordLearningPayload,
+      | RecordLearningPayload
+      | DiscoveryReferencePayload
+      | DiscoveryStageCheckpointPayload
+      | { limit: number },
   };
 }
 

@@ -37,6 +37,14 @@ def recovery_records():
     report_request = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
     reservation = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb"
     source_receipt = "cccccccc-cccc-4ccc-8ccc-cccccccccccc"
+    manifest_id = "10000000-0000-4000-8000-000000000001"
+    security_revision_id = "10000000-0000-4000-8000-000000000002"
+    signals_task_id = "10000000-0000-4000-8000-000000000003"
+    theme_episode_id = "10000000-0000-4000-8000-000000000004"
+    enrich_task_id = "10000000-0000-4000-8000-000000000005"
+    exposure_fact_id = "10000000-0000-4000-8000-000000000006"
+    screen_task_id = "10000000-0000-4000-8000-000000000007"
+    nomination_id = "10000000-0000-4000-8000-000000000008"
     packet = {"candidates": [], "evidence": [], "coverage": {}, "limitations": [], "policy_version": 1}
     report = {"summary": "Suggestion only.", "packet_hash": digest(packet)}
     records = {
@@ -71,6 +79,64 @@ def recovery_records():
                 "start": "2026-09-05T12:00:00Z", "end": "2026-09-05T20:00:00Z",
                 "timezone": "America/Chicago", "market_date": "2026-09-05", "phase": "post-market",
             }, "created_at": "2026-09-05T19:30:00Z",
+        }],
+        "reference_manifests": [{
+            "id": manifest_id, "run_id": run, "reference_version": "us-listed:v1",
+            "revision": 1, "capability_version": 1, "taxonomy_version": 1,
+            "source_hash": "1" * 64, "valid_from": "2026-09-05T19:30:00Z", "valid_to": None,
+            "manifest": {"universe": "eligible_us_listed"}, "content_hash": "2" * 64,
+            "created_at": "2026-09-05T19:31:00Z",
+        }],
+        "security_reference_revisions": [{
+            "id": security_revision_id, "manifest_id": manifest_id, "run_id": run, "revision": 1,
+            "security_id": "NASDAQ:TEST", "entity_id": "CIK:0000000001", "ticker": "TEST",
+            "exchange": "NASDAQ", "instrument_type": "COMMON_STOCK", "eligible": True,
+            "exclusion_reasons": [], "aliases": ["Test Corp"], "source_ids": ["nasdaq-listed"],
+            "valid_from": "2026-09-05T19:30:00Z", "valid_to": None, "content_hash": "3" * 64,
+            "created_at": "2026-09-05T19:31:00Z",
+        }],
+        "discovery_stage_tasks": [{
+            "id": signals_task_id, "run_id": run, "stage": "signals", "capability_id": "gdelt_theme_search",
+            "provider": "gdelt", "query_kind": "theme_search", "query_hash": "4" * 64,
+            "dependency_ids": [], "requested_window": {"start": "2026-09-05T12:00:00Z", "end": "2026-09-05T20:00:00Z"},
+            "state": "succeeded", "attempt_count": 1, "request_budget": 1,
+            "result": {"theme_episode_revision_ids": [theme_episode_id]},
+            "created_at": "2026-09-05T19:32:00Z", "updated_at": "2026-09-05T19:33:00Z",
+        }, {
+            "id": enrich_task_id, "run_id": run, "stage": "enrich", "capability_id": "sec_issuer_submissions",
+            "provider": "sec_edgar", "query_kind": "issuer_submissions", "query_hash": "5" * 64,
+            "dependency_ids": [signals_task_id], "requested_window": {"start": "2026-09-05T12:00:00Z", "end": "2026-09-05T20:00:00Z"},
+            "state": "succeeded", "attempt_count": 1, "request_budget": 1,
+            "result": {"exposure_fact_ids": [exposure_fact_id]},
+            "created_at": "2026-09-05T19:34:00Z", "updated_at": "2026-09-05T19:35:00Z",
+        }, {
+            "id": screen_task_id, "run_id": run, "stage": "screen", "capability_id": "finnhub_basic_financials",
+            "provider": "finnhub", "query_kind": "screener", "query_hash": "6" * 64,
+            "dependency_ids": [enrich_task_id], "requested_window": {"start": "2026-09-05T12:00:00Z", "end": "2026-09-05T20:00:00Z"},
+            "state": "succeeded", "attempt_count": 1, "request_budget": 1,
+            "result": {"research_nomination_ids": [nomination_id]},
+            "created_at": "2026-09-05T19:36:00Z", "updated_at": "2026-09-05T19:37:00Z",
+        }],
+        "theme_episode_revisions": [{
+            "id": theme_episode_id, "run_id": run, "task_id": signals_task_id,
+            "theme_id": "grid_modernization", "revision": 1,
+            "episode": {"summary": "Grid investment signals"}, "source_ids": ["gdelt:1"],
+            "valid_from": "2026-09-05T19:32:00Z", "valid_to": None, "content_hash": "7" * 64,
+            "created_at": "2026-09-05T19:33:00Z",
+        }],
+        "exposure_facts": [{
+            "id": exposure_fact_id, "run_id": run, "task_id": enrich_task_id,
+            "security_revision_id": security_revision_id, "theme_episode_revision_id": theme_episode_id,
+            "exposure_kind": "filing", "fact": {"summary": "Grid segment disclosure"},
+            "source_ids": ["sec:1"], "valid_from": "2026-09-05T19:34:00Z", "valid_to": None,
+            "content_hash": "8" * 64, "created_at": "2026-09-05T19:35:00Z",
+        }],
+        "research_nominations": [{
+            "id": nomination_id, "run_id": run, "task_id": screen_task_id,
+            "security_revision_id": security_revision_id, "theme_episode_revision_id": theme_episode_id,
+            "exposure_fact_ids": [exposure_fact_id], "state": "nominated",
+            "rationale": {"summary": "Research candidate only"},
+            "created_at": "2026-09-05T19:37:00Z", "updated_at": "2026-09-05T19:37:00Z",
         }],
         "intelligence_run_events": [
             {"id": started_event, "run_id": run, "status": "started", "detail": {},
@@ -302,12 +368,82 @@ INTELLIGENCE_DEPENDENT_DATASETS = (
 EMPTY_INTELLIGENCE_PACKET_REPORT_HISTORY = (
     "intelligence_runs",
     *INTELLIGENCE_DEPENDENT_DATASETS,
+    "reference_manifests",
+    "security_reference_revisions",
+    "discovery_stage_tasks",
+    "theme_episode_revisions",
+    "exposure_facts",
+    "research_nominations",
     "packets",
     "reports",
     "report_origins",
     "publications",
     "policy_comparisons",
 )
+
+
+DISCOVERY_DATASETS = (
+    "reference_manifests",
+    "security_reference_revisions",
+    "discovery_stage_tasks",
+    "theme_episode_revisions",
+    "exposure_facts",
+    "research_nominations",
+)
+
+
+def test_recovery_validates_complete_discovery_lineage_and_exact_fields():
+    records = recovery_records()
+
+    validated = _validated_records(records)
+
+    assert {name: len(validated[name]) for name in DISCOVERY_DATASETS} == {
+        "reference_manifests": 1,
+        "security_reference_revisions": 1,
+        "discovery_stage_tasks": 3,
+        "theme_episode_revisions": 1,
+        "exposure_facts": 1,
+        "research_nominations": 1,
+    }
+
+
+@pytest.mark.parametrize("dataset", DISCOVERY_DATASETS)
+def test_recovery_rejects_missing_discovery_dataset(dataset):
+    records = recovery_records()
+    records.pop(dataset)
+
+    with pytest.raises(ValueError, match="exact allowlisted datasets"):
+        _validated_records(records)
+
+
+@pytest.mark.parametrize(("dataset", "field", "replacement"), [
+    ("reference_manifests", "run_id", "20000000-0000-4000-8000-000000000001"),
+    ("security_reference_revisions", "manifest_id", "20000000-0000-4000-8000-000000000002"),
+    ("discovery_stage_tasks", "dependency_ids", ["20000000-0000-4000-8000-000000000003"]),
+    ("theme_episode_revisions", "task_id", "10000000-0000-4000-8000-000000000005"),
+    ("exposure_facts", "security_revision_id", "20000000-0000-4000-8000-000000000004"),
+    ("research_nominations", "exposure_fact_ids", ["20000000-0000-4000-8000-000000000005"]),
+])
+def test_recovery_rejects_orphaned_discovery_records(dataset, field, replacement):
+    records = recovery_records()
+    records[dataset][-1][field] = replacement
+
+    with pytest.raises(ValueError, match="discovery.*dependency mismatch"):
+        _validated_records(records)
+
+
+@pytest.mark.parametrize(("dataset", "field", "replacement"), [
+    ("reference_manifests", "content_hash", "altered"),
+    ("discovery_stage_tasks", "query_hash", "altered"),
+    ("discovery_stage_tasks", "provider", "paid_provider"),
+    ("research_nominations", "rationale", {"action": "buy"}),
+])
+def test_recovery_rejects_altered_or_authoritative_discovery_records(dataset, field, replacement):
+    records = recovery_records()
+    records[dataset][0][field] = replacement
+
+    with pytest.raises(ValueError, match="discovery"):
+        _validated_records(records)
 
 
 def test_recovery_accepts_empty_intelligence_packet_report_history_when_all_dependents_are_empty():

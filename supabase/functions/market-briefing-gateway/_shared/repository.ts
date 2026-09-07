@@ -24,8 +24,14 @@ import type {
 } from "./outcomes.ts";
 import { formatFixed, parseFixed } from "./fixed-point.ts";
 import {
+  type DiscoveryContext,
+  type DiscoveryReferencePayload,
+  type DiscoveryStageCheckpointPayload,
+  type DiscoveryStageTask,
   type IntelligenceRecordReceipt,
   type IntelligenceStartReceipt,
+  parseDiscoveryContext,
+  parseDiscoveryStageTask,
   parseIntelligenceRecordReceipt,
   parseIntelligenceStartReceipt,
   type RecordIntelligencePayload,
@@ -330,6 +336,20 @@ export interface GatewayRepository {
       items: Record<string, unknown>[];
     },
   ): Promise<{ run_id: string; cache_key: string }>;
+  recordDiscoveryReference?(
+    runId: string,
+    payload: DiscoveryReferencePayload,
+  ): Promise<
+    { manifest_id: string; security_revision_count: number; duplicate: boolean }
+  >;
+  checkpointDiscoveryStage?(
+    runId: string,
+    payload: DiscoveryStageCheckpointPayload,
+  ): Promise<{ task: DiscoveryStageTask; duplicate: boolean }>;
+  readDiscoveryContext?(
+    runId: string,
+    limit: number,
+  ): Promise<DiscoveryContext>;
   readIntelligenceCompletion?(
     runId: string,
     completionId: string,
@@ -984,6 +1004,56 @@ export function createSupabaseGatewayRepository(
         run_id: text(row.run_id, 36),
         cache_key: text(row.cache_key, 512),
       };
+    },
+
+    async recordDiscoveryReference(runId, payload) {
+      const result = await client.rpc("record_market_discovery_reference", {
+        p_run_id: runId,
+        p_payload: payload,
+      });
+      if (result.error) throw new GatewayRepositoryError("PERSISTENCE_FAILED");
+      const row = oneObject(result);
+      if (typeof row.duplicate !== "boolean") {
+        throw new GatewayRepositoryError("INVALID_PERSISTED_DATA");
+      }
+      return {
+        manifest_id: text(row.manifest_id, 36),
+        security_revision_count: integer(row.security_revision_count),
+        duplicate: row.duplicate,
+      };
+    },
+
+    async checkpointDiscoveryStage(runId, payload) {
+      const result = await client.rpc("checkpoint_market_discovery_stage", {
+        p_run_id: runId,
+        p_payload: payload,
+      });
+      if (result.error) throw new GatewayRepositoryError("PERSISTENCE_FAILED");
+      const row = oneObject(result);
+      if (typeof row.duplicate !== "boolean") {
+        throw new GatewayRepositoryError("INVALID_PERSISTED_DATA");
+      }
+      try {
+        return {
+          task: parseDiscoveryStageTask(row.task),
+          duplicate: row.duplicate,
+        };
+      } catch {
+        throw new GatewayRepositoryError("INVALID_PERSISTED_DATA");
+      }
+    },
+
+    async readDiscoveryContext(runId, limit) {
+      const result = await client.rpc("read_market_discovery_context", {
+        p_run_id: runId,
+        p_limit: limit,
+      });
+      if (result.error) throw new GatewayRepositoryError("PERSISTENCE_FAILED");
+      try {
+        return parseDiscoveryContext(result.data);
+      } catch {
+        throw new GatewayRepositoryError("INVALID_PERSISTED_DATA");
+      }
     },
 
     async readIntelligenceCompletion(runId, completionId) {

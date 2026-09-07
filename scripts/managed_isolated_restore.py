@@ -591,7 +591,9 @@ def write_restore_receipt(destination: Path, values: Mapping[str, object]) -> Pa
     temporary = _project_ref(values.get("restore_project_ref"), "restore")
     if temporary == production:
         raise RuntimeError("restore receipt identities are not isolated")
-    if restore.get("status") != "verified" or restore.get("isolated") is not True or restore.get("restore_applied") is not True or restore.get("record_set_count") != 26:
+    if (restore.get("status") != "verified" or restore.get("isolated") is not True
+            or restore.get("restore_applied") is not True
+            or restore.get("record_set_count") != len(REQUIRED_RECOVERY_RECORDS)):
         raise RuntimeError("restore receipt result is incomplete")
     if not isinstance(cleanup.get("attempted"), bool) or not isinstance(cleanup.get("deleted"), bool):
         raise RuntimeError("cleanup receipt is incomplete")
@@ -618,7 +620,8 @@ def write_restore_receipt(destination: Path, values: Mapping[str, object]) -> Pa
         "production_project_ref": production, "restore_project_ref": temporary,
         "before_root_hash": _digest(values.get("before_root_hash"), "before root hash"),
         "after_root_hash": _digest(values.get("after_root_hash"), "after root hash"),
-        "restore": {"status": "verified", "isolated": True, "restore_applied": True, "record_set_count": 26},
+        "restore": {"status": "verified", "isolated": True, "restore_applied": True,
+                    "record_set_count": len(REQUIRED_RECOVERY_RECORDS)},
         "migration_retry": {"applied": list(migration.get("applied", [])), "skipped": list(migration.get("skipped", []))},
         "artifacts": clean_artifacts,
         "workflow": {"run_id": str(workflow.get("run_id", "")), "attempt": str(workflow.get("attempt", ""))},
