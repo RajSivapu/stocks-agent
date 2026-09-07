@@ -139,7 +139,7 @@ export function AuthProvider({
       if (!active) return;
       setSession(nextSession);
       if (event === "PASSWORD_RECOVERY") setRecoveryMode(true);
-      if (event === "SIGNED_IN" || event === "SIGNED_OUT") setRecoveryMode(false);
+      if (event === "SIGNED_OUT") setRecoveryMode(false);
       if (nextSession && event !== "TOKEN_REFRESHED") setLocked(false);
       setLoading(false);
     });

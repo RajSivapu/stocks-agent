@@ -120,6 +120,11 @@ it("keeps password recovery ahead of the owner workspace after a reload", async 
   render(<AuthProvider client={authClient}><Screen /></AuthProvider>);
 
   expect(await screen.findByRole("heading", { name: /choose a new password/i })).toBeVisible();
+
+  act(() => authClient.emitAuth("SIGNED_IN", ownerSession));
+
+  expect(screen.getByRole("heading", { name: /choose a new password/i })).toBeVisible();
+  expect(window.sessionStorage.getItem(PASSWORD_RECOVERY_STORAGE_KEY)).toBe("pending");
 });
 
 it("requests a secure sign-in link with account creation disabled", async () => {

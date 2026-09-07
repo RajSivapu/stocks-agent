@@ -51,6 +51,8 @@ it("keeps a reloaded recovery session out of private routes", async () => {
   render(<App authClient={auth.client} dashboardClient={dashboard} />);
 
   expect(await screen.findByRole("heading", { name: /choose a new password/i })).toBeVisible();
+  act(() => auth.emitAuth("SIGNED_IN", auth.ownerSession));
+  expect(screen.getByRole("heading", { name: /choose a new password/i })).toBeVisible();
   expect(dashboard.get).not.toHaveBeenCalled();
 });
 
