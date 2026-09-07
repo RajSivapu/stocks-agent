@@ -17,9 +17,20 @@ a { color: inherit; }
 .auth-card form { display: grid; gap: .55rem; margin-top: 2rem; }
 .auth-card label { margin-top: .5rem; font-weight: 750; }
 .auth-card input { width: 100%; padding: .8rem .9rem; border: 1px solid var(--line); border-radius: .65rem; background: var(--canvas); }
+.password-field { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: .5rem; }
+.password-toggle { min-width: 4.5rem; min-height: 2.75rem; border: 1px solid var(--line); border-radius: .65rem; background: var(--surface-raised); cursor: pointer; font-weight: 750; }
+.password-toggle:hover, .password-toggle[aria-pressed="true"] { border-color: var(--gold); background: var(--gold-soft); }
 .primary-button { margin-top: .8rem; border: 0; border-radius: .65rem; padding: .85rem 1rem; background: var(--gold); color: var(--on-gold); font-weight: 800; cursor: pointer; }
 .primary-button:disabled { opacity: .6; cursor: wait; }
 .notice, .form-message { padding: .75rem; border-left: 3px solid var(--gold); background: var(--gold-soft); }
+.form-error { margin: .3rem 0 0; padding: .75rem; border-left: 3px solid var(--negative); background: var(--surface-raised); color: var(--negative); }
+.field-help { margin: .15rem 0 .35rem; color: var(--muted); font-size: .82rem; }
+.auth-options { display: grid; gap: .15rem; margin-top: .65rem; }
+.auth-text-button { min-height: 2.75rem; padding: .45rem 0; text-align: left; }
+.auth-back-button { margin-top: .75rem; }
+.auth-mode-heading { margin-top: 1.5rem; }
+.auth-mode-heading h2 { margin-bottom: .45rem; font-size: 1.35rem; }
+.auth-mode-heading p { margin-bottom: 0; color: var(--muted); }
 .boundary-note { margin: 1.5rem 0 0; color: var(--muted); font-size: .78rem; }
 .app-shell { min-height: 100vh; display: grid; grid-template-columns: 16.5rem minmax(0, 1fr); }
 .skip-link { position: fixed; z-index: 1000; top: .75rem; left: .75rem; padding: .7rem 1rem; border-radius: .55rem; background: var(--gold); color: var(--on-gold); font-weight: 800; text-decoration: none; transform: translateY(calc(-100% - 1.5rem)); }

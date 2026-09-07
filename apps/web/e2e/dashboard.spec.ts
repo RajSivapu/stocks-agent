@@ -3,6 +3,35 @@ import { expect, test } from "@playwright/test";
 
 const routes = ["/portfolio", "/ideas", "/intelligence", "/reports", "/reports/7d834dbd-75bb-4313-931f-09732f003932", "/system", "/runs/7d834dbd-75bb-4313-931f-09732f003932"];
 
+test("password sign-in and email recovery are accessible", async ({ page }) => {
+  await page.goto("/?fixture=auth");
+  await expect(page.getByRole("button", { name: /^sign in$/i })).toBeVisible();
+  await expect(page.getByLabel(/^password$/i)).toHaveAttribute("autocomplete", "current-password");
+  let results = await new AxeBuilder({ page }).analyze();
+  expect(results.violations).toEqual([]);
+
+  await page.getByRole("button", { name: /set up or reset password/i }).click();
+  await expect(page.getByRole("heading", { name: /set up or reset your password/i })).toBeVisible();
+  results = await new AxeBuilder({ page }).analyze();
+  expect(results.violations).toEqual([]);
+
+  await page.goto("/?fixture=auth-recovery");
+  await expect(page.getByRole("heading", { name: /choose a new password/i })).toBeVisible();
+  await expect(page.getByLabel(/^new password$/i)).toHaveAttribute("autocomplete", "new-password");
+  results = await new AxeBuilder({ page }).analyze();
+  expect(results.violations).toEqual([]);
+});
+
+for (const width of [300, 390, 1024]) {
+  test(`authentication fits ${width}px without page-level horizontal clipping`, async ({ page }) => {
+    await page.setViewportSize({ width, height: 900 });
+    await page.goto("/?fixture=auth");
+    await expect(page.getByRole("button", { name: /^sign in$/i })).toBeVisible();
+    const dimensions = await page.evaluate(() => ({ scroll: document.documentElement.scrollWidth, client: document.documentElement.clientWidth }));
+    expect(dimensions.scroll).toBeLessThanOrEqual(dimensions.client);
+  });
+}
+
 test("owner dashboard is keyboard usable in light and dark modes", async ({ page }) => {
   await page.goto("/portfolio?fixture=complete");
   await expect(page.getByRole("navigation", { name: "Primary" })).toBeVisible();

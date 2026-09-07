@@ -172,14 +172,19 @@ client-side calculations.
 ### Provision owner access and the read-only runtime
 
 1. Create the single owner user directly in Supabase Auth. Public signup remains disabled; the
-   browser requests passwordless email sign-in with `shouldCreateUser: false`.
+   browser uses email and password for routine sign-in and never creates accounts. The owner can
+   use **Set up or reset password** to receive one recovery link, choose a password on the returning
+   page, and then sign in without another email. A signed email link remains available as a fallback
+   and uses `shouldCreateUser: false`.
 2. Set the hosted Auth JWT lifetime to 900 seconds and confirm email signup remains disabled. Keep
    the hosted email OTP length at exactly `6`; the matching local value is recorded in
    `supabase/config.toml`. Provisioning and protected verification accept a six-digit template
    containing `{{ .Token }}` or the free-tier default signed link containing
-   `{{ .ConfirmationURL }}`. The owner UI follows the live signed-link template: it supplies its exact
-   deployed origin as the email redirect, detects the signed callback, clears the callback URL
-   through the Supabase client, and retains the resulting session only in browser session storage.
+   `{{ .ConfirmationURL }}`. The owner UI supplies its exact deployed origin for sign-in and recovery
+   redirects, detects signed callbacks, routes `PASSWORD_RECOVERY` sessions to the new-password form,
+   and retains the resulting session only in browser session storage. Add that exact origin as both
+   the Auth Site URL and a redirect URL; do not use a wildcard. Supabase's default sender is a
+   best-effort, rate-limited setup path for project-team addresses, so it is not a delivery guarantee.
    Supabase supports a [read-only Management API Auth-config endpoint](https://supabase.com/docs/reference/api/v1-get-auth-service-config)
    for a deliberately provisioned token with `auth:read` / `auth_config_read`. This project does not
    provision or store a Management API token, so the protected operator must manually verify those

@@ -17,14 +17,16 @@ export interface AuthClient {
   onAuthStateChange(callback: (event: string, session: AuthSession | null) => void): {
     data: { subscription: { unsubscribe(): void } };
   };
+  signInWithPassword(input: { email: string; password: string }): Promise<{
+    data: { session: AuthSession | null };
+    error: unknown;
+  }>;
   signInWithOtp(input: {
     email: string;
     options: { shouldCreateUser: false; emailRedirectTo: string };
   }): Promise<{ error: unknown }>;
-  verifyOtp(input: { email: string; token: string; type: "email" }): Promise<{
-    data: { session: AuthSession | null };
-    error: unknown;
-  }>;
+  resetPasswordForEmail(email: string, options: { redirectTo: string }): Promise<{ error: unknown }>;
+  updateUser(input: { password: string }): Promise<{ error: unknown }>;
   signOut(input: { scope: "global" | "local" }): Promise<{ error: unknown }>;
 }
 
@@ -32,8 +34,11 @@ interface AuthContextValue {
   session: AuthSession | null;
   loading: boolean;
   locked: boolean;
-  sendOtp(email: string): Promise<void>;
-  verifyOtp(email: string, token: string): Promise<void>;
+  recovering: boolean;
+  signInWithPassword(email: string, password: string): Promise<void>;
+  sendSignInLink(email: string): Promise<void>;
+  sendPasswordReset(email: string): Promise<void>;
+  updatePassword(password: string): Promise<void>;
   signOut(): Promise<void>;
 }
 
@@ -50,8 +55,10 @@ function adapter(client: SupabaseClient): AuthClient {
   return {
     getSession: async () => await client.auth.getSession(),
     onAuthStateChange: (callback) => client.auth.onAuthStateChange((event, session) => callback(event, session)),
+    signInWithPassword: async (input) => await client.auth.signInWithPassword(input),
     signInWithOtp: async (input) => await client.auth.signInWithOtp(input),
-    verifyOtp: async (input) => await client.auth.verifyOtp(input),
+    resetPasswordForEmail: async (email, options) => await client.auth.resetPasswordForEmail(email, options),
+    updateUser: async (input) => await client.auth.updateUser(input),
     signOut: async (input) => await client.auth.signOut(input),
   };
 }
@@ -80,6 +87,7 @@ export function AuthProvider({
   const [session, setSession] = useState<AuthSession | null>(null);
   const [loading, setLoading] = useState(true);
   const [locked, setLocked] = useState(false);
+  const [recovering, setRecovering] = useState(false);
   const timer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const lastActivityAt = useRef<number | null>(null);
 
@@ -87,6 +95,7 @@ export function AuthProvider({
     lastActivityAt.current = null;
     setSession(null);
     setLocked(true);
+    setRecovering(false);
     void client.signOut({ scope: "local" }).catch(() => undefined);
   }, [client]);
 
@@ -102,6 +111,8 @@ export function AuthProvider({
     const { data } = client.onAuthStateChange((event, nextSession) => {
       if (!active) return;
       setSession(nextSession);
+      if (event === "PASSWORD_RECOVERY") setRecovering(true);
+      if (event === "SIGNED_IN" || event === "SIGNED_OUT") setRecovering(false);
       if (nextSession && event !== "TOKEN_REFRESHED") setLocked(false);
       setLoading(false);
     });
@@ -144,7 +155,15 @@ export function AuthProvider({
     session,
     loading,
     locked,
-    sendOtp: async (email) => {
+    recovering,
+    signInWithPassword: async (email, password) => {
+      const result = await client.signInWithPassword({ email, password });
+      if (result.error || !result.data.session) throw new Error("Email or password is incorrect.");
+      setSession(result.data.session);
+      setLocked(false);
+      setRecovering(false);
+    },
+    sendSignInLink: async (email) => {
       const result = await client.signInWithOtp({
         email,
         options: {
@@ -154,11 +173,14 @@ export function AuthProvider({
       });
       if (result.error) throw new Error("The sign-in email could not be sent.");
     },
-    verifyOtp: async (email, token) => {
-      const result = await client.verifyOtp({ email, token, type: "email" });
-      if (result.error || !result.data.session) throw new Error("That code is invalid or expired.");
-      setSession(result.data.session);
-      setLocked(false);
+    sendPasswordReset: async (email) => {
+      const result = await client.resetPasswordForEmail(email, { redirectTo: window.location.origin });
+      if (result.error) throw new Error("The password setup email could not be sent.");
+    },
+    updatePassword: async (password) => {
+      const result = await client.updateUser({ password });
+      if (result.error) throw new Error("The password could not be updated.");
+      setRecovering(false);
     },
     signOut: async () => {
       try {
@@ -167,10 +189,11 @@ export function AuthProvider({
         lastActivityAt.current = null;
         setSession(null);
         setLocked(false);
+        setRecovering(false);
         window.sessionStorage.clear();
       }
     },
-  }), [client, loading, locked, session]);
+  }), [client, loading, locked, recovering, session]);
 
   return <AuthContext.Provider value={value}>{children}</AuthContext.Provider>;
 }
