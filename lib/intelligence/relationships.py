@@ -43,6 +43,7 @@ class EventRelationship:
     source_key: str
     target_kind: str
     target_key: str
+    security_id: str
     ticker: str
     role: str
     relationship_type: str
@@ -59,6 +60,7 @@ def propose_relation(
     event: MarketEvent,
     *,
     ticker: str,
+    security_id: str | None = None,
     role: str,
     evidence: Sequence[SourceItem],
 ) -> EventRelationship:
@@ -80,12 +82,16 @@ def propose_relation(
     if not exposures:
         missing.append("authoritative_exposure_required")
     relationship_type = "direct" if role_value in _DIRECT_ROLES else "second_order"
+    security_value = str(security_id or ticker_value).strip()
+    if not security_value or len(security_value) > 160:
+        raise ValueError("security ID must be bounded")
     return EventRelationship(
         event_id=event.event_id,
         source_kind="event",
         source_key=event.event_id,
         target_kind="security",
-        target_key=ticker_value,
+        target_key=security_value,
+        security_id=security_value,
         ticker=ticker_value,
         role=role_value,
         relationship_type=relationship_type,

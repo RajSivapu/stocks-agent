@@ -89,6 +89,90 @@ function referenceEntry() {
   };
 }
 
+function referenceV2Entry() {
+  const row = {
+    ...referenceEntry(),
+    semantic_encoding_version: 2,
+    issuer_names: {
+      canonical_name: "Test Company",
+      observed_names: ["Test Company", "Test Company Class A"],
+      former_names: [{
+        name: "Old Test Company",
+        valid_from: "2020-01-01",
+        valid_to: "2025-12-31",
+      }],
+    },
+  };
+  const { content_hash: _oldHash, ...semantic } = row;
+  return {
+    ...semantic,
+    content_hash: sha256Hex(
+      canonicalJson(securityRevisionSemanticDocument(semantic)),
+    ),
+  };
+}
+
+Deno.test("v2 reference rows bind bounded issuer names while v1 remains readable", () => {
+  const manifest = referenceManifest();
+  const v2Manifest = {
+    ...manifest,
+    manifest: { ...manifest.manifest, format_version: 2 },
+  };
+  const { content_hash: _oldManifestHash, ...manifestSemantic } = v2Manifest;
+  v2Manifest.content_hash = sha256Hex(
+    canonicalJson(referenceManifestSemanticDocument(manifestSemantic)),
+  );
+  const entry = referenceV2Entry();
+  assertEquals(
+    entry.content_hash,
+    "6ed1594329bb40358f01357932fbae01bf5d241336d6f2989634a6f2ba630759",
+  );
+  const chunk = parseReferenceChunkPayload({
+    manifest_id: manifest.id,
+    chunk_index: 0,
+    chunk_count: 1,
+    entries: [entry],
+    chunk_hash: "e".repeat(64),
+  });
+
+  assertEquals(chunk.entries[0].issuer_names, entry.issuer_names);
+  assertEquals(
+    securityRevisionSemanticDocument(entry).semantic_encoding_version,
+    2,
+  );
+  assertEquals(
+    parseReferencePage({
+      binding: {
+        binding_role: "current",
+        manifest_id: manifest.id,
+        reference_status: "healthy",
+        source_retrieved_at: "2026-09-06T12:00:00.000Z",
+        reference_age_seconds: 0,
+        issuer_names_status: "available",
+      },
+      manifest: v2Manifest,
+      securities: [entry],
+      next_after_security_id: null,
+      complete: true,
+    }).securities[0].issuer_names,
+    entry.issuer_names,
+  );
+  assertThrows(
+    () => parseReferenceChunkPayload({
+      manifest_id: manifest.id,
+      chunk_index: 0,
+      chunk_count: 1,
+      entries: Array(89).fill(entry).map((row, index) => ({
+        ...row,
+        id: `00000000-0000-4000-8000-${String(index + 200).padStart(12, "0")}`,
+        security_id: `sec:${index}`,
+      })),
+      chunk_hash: "e".repeat(64),
+    }),
+    "at most 88 items",
+  );
+});
+
 Deno.test("reference transfer parsers keep every call bounded and exact", () => {
   const manifest = referenceManifest();
   const begin = {
@@ -198,6 +282,7 @@ Deno.test("reference pages reject inconsistent bindings, pagination, and identit
       reference_status: "healthy",
       source_retrieved_at: "2026-09-06T12:00:00.000Z",
       reference_age_seconds: 0,
+      issuer_names_status: "issuer_names_unavailable",
     },
     manifest: referenceManifest(),
     securities: [referenceEntry()],
@@ -215,6 +300,7 @@ Deno.test("reference pages reject inconsistent bindings, pagination, and identit
           reference_status: "reference_unavailable",
           source_retrieved_at: "2026-09-06T12:00:00.000Z",
           reference_age_seconds: 0,
+          issuer_names_status: "issuer_names_unavailable",
         },
         manifest: null,
         securities: [],

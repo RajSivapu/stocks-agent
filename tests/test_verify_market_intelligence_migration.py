@@ -64,6 +64,7 @@ DISCOVERY_TABLES = (
     "market_reference_run_bindings",
     "market_reference_predecessor_pins",
     "market_reference_transfer_requests",
+    "market_reference_transfer_responses",
     "market_discovery_stage_tasks",
     "market_exposure_facts",
     "market_theme_episode_revisions",
@@ -362,7 +363,7 @@ def test_discovery_catalog_guards_and_rpc_grants_fail_closed():
     }
 
     receipt = evaluate_snapshot(snapshot)
-    assert receipt["discovery_ledgers"] == 12
+    assert receipt["discovery_ledgers"] == 13
     assert receipt["discovery_gateway_only_rpcs"] == 9
 
     missing_guard = deepcopy(snapshot)

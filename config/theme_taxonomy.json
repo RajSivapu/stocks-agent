@@ -1,0 +1,95 @@
+{
+  "version": 1,
+  "execution_allowed": false,
+  "themes": [
+    {
+      "theme_id": "critical_minerals_magnets",
+      "label": "Critical minerals and permanent magnets",
+      "synonyms": ["critical minerals", "rare earth", "permanent magnet", "magnet manufacturing", "neodymium", "samarium cobalt"],
+      "geography": "United States and allied supply chains",
+      "horizon": "near to long term",
+      "value_chain": [
+        {"edge_id":"magnets_mining","direction":"upstream","role":"mining","query_terms":["rare earth mining","critical mineral mine"],"geography":"United States and allied markets","horizon":"near to long term","evidence_requirement":"Primary mine ownership, output, or project evidence","adverse_path":false,"invalidation_rule":"No verified mineral project or relevant output"},
+        {"edge_id":"magnets_separation","direction":"upstream","role":"separation","query_terms":["rare earth separation","mineral processing"],"geography":"United States and allied markets","horizon":"near to medium term","evidence_requirement":"Primary separation capacity or contract evidence","adverse_path":false,"invalidation_rule":"No verified separation capacity or customer relationship"},
+        {"edge_id":"magnets_alloys","direction":"upstream","role":"metals_alloys","query_terms":["magnet alloy","rare earth metals"],"geography":"United States and allied markets","horizon":"near to medium term","evidence_requirement":"Primary metals or alloy production evidence","adverse_path":false,"invalidation_rule":"No verified relevant alloy production"},
+        {"edge_id":"magnets_manufacturing","direction":"direct","role":"magnet_manufacturing","query_terms":["permanent magnet manufacturing","magnet factory"],"geography":"United States and allied markets","horizon":"near to medium term","evidence_requirement":"Primary manufacturing capacity or awarded contract evidence","adverse_path":false,"invalidation_rule":"No verified magnet production or awarded demand"},
+        {"edge_id":"magnets_recycling","direction":"upstream","role":"recycling","query_terms":["rare earth recycling","magnet recycling"],"geography":"United States and allied markets","horizon":"medium to long term","evidence_requirement":"Primary recovery technology and operating capacity evidence","adverse_path":false,"invalidation_rule":"No verified recovery yield or commercial capacity"},
+        {"edge_id":"magnets_substitutes","direction":"adverse","role":"substitutes","query_terms":["rare earth free magnet","magnet substitute"],"geography":"global markets","horizon":"medium to long term","evidence_requirement":"Primary commercial substitute performance and adoption evidence","adverse_path":true,"invalidation_rule":"Substitute lacks commercial performance or adoption"},
+        {"edge_id":"magnets_motors","direction":"downstream","role":"downstream_motors","query_terms":["permanent magnet motor","electric motor demand"],"geography":"global markets","horizon":"near to long term","evidence_requirement":"Primary product bill-of-material or procurement evidence","adverse_path":false,"invalidation_rule":"No verified magnet intensity or demand linkage"}
+      ]
+    },
+    {
+      "theme_id": "aluminum_copper",
+      "label": "Aluminum and copper value chains",
+      "synonyms": ["aluminum", "aluminium", "copper", "conductors", "smelting", "semifabrication"],
+      "geography": "United States and global metals markets",
+      "horizon": "near to long term",
+      "value_chain": [
+        {"edge_id":"metals_extraction","direction":"upstream","role":"extraction","query_terms":["copper mining","bauxite mining"],"geography":"global markets","horizon":"near to long term","evidence_requirement":"Primary reserve, production, or project evidence","adverse_path":false,"invalidation_rule":"No verified relevant reserves or production"},
+        {"edge_id":"metals_smelting","direction":"upstream","role":"refining_smelting","query_terms":["copper refining","aluminum smelting"],"geography":"United States and allied markets","horizon":"near to medium term","evidence_requirement":"Primary refining or smelting capacity evidence","adverse_path":false,"invalidation_rule":"No verified capacity or economic operation"},
+        {"edge_id":"metals_recycling","direction":"upstream","role":"recycling","query_terms":["copper recycling","aluminum recycling"],"geography":"United States and allied markets","horizon":"medium to long term","evidence_requirement":"Primary recycled feedstock and operating capacity evidence","adverse_path":false,"invalidation_rule":"No verified relevant recovery capacity"},
+        {"edge_id":"metals_semifabrication","direction":"direct","role":"semifabrication","query_terms":["copper semifabrication","aluminum extrusion"],"geography":"United States and allied markets","horizon":"near to medium term","evidence_requirement":"Primary product mix and shipment evidence","adverse_path":false,"invalidation_rule":"No verified relevant product or demand"},
+        {"edge_id":"metals_conductors","direction":"downstream","role":"conductors","query_terms":["electrical conductor","power cable"],"geography":"United States","horizon":"near to medium term","evidence_requirement":"Primary conductor capacity and customer evidence","adverse_path":false,"invalidation_rule":"No verified metal intensity or demand linkage"},
+        {"edge_id":"metals_cooling","direction":"downstream","role":"cooling","query_terms":["data center cooling","heat exchanger metals"],"geography":"global markets","horizon":"near to medium term","evidence_requirement":"Primary product exposure and demand evidence","adverse_path":false,"invalidation_rule":"No verified metals intensity in delivered systems"},
+        {"edge_id":"metals_structures","direction":"downstream","role":"structures","query_terms":["aluminum structures","copper infrastructure"],"geography":"United States","horizon":"near to long term","evidence_requirement":"Primary project or product exposure evidence","adverse_path":false,"invalidation_rule":"No verified material intensity or awarded project"},
+        {"edge_id":"metals_substitution","direction":"adverse","role":"material_substitution","query_terms":["copper substitution","aluminum substitution"],"geography":"global markets","horizon":"medium to long term","evidence_requirement":"Primary redesign and commercial adoption evidence","adverse_path":true,"invalidation_rule":"Substitution lacks qualification or commercial adoption"}
+      ]
+    },
+    {
+      "theme_id": "data_center_power",
+      "label": "Data-center power infrastructure",
+      "synonyms": ["data center", "data centre", "transformers", "switchgear", "power electronics", "cooling", "battery storage"],
+      "geography": "United States",
+      "horizon": "near to long term",
+      "value_chain": [
+        {"edge_id":"dc_generation","direction":"upstream","role":"generation","query_terms":["data center generation","power generation capacity"],"geography":"United States","horizon":"near to long term","evidence_requirement":"Primary generation capacity and offtake evidence","adverse_path":false,"invalidation_rule":"No verified generation or data-center offtake"},
+        {"edge_id":"dc_fuel","direction":"upstream","role":"fuel","query_terms":["power generation fuel","natural gas supply"],"geography":"United States","horizon":"near to long term","evidence_requirement":"Primary fuel supply and contracted demand evidence","adverse_path":false,"invalidation_rule":"No verified fuel demand linkage"},
+        {"edge_id":"dc_transmission","direction":"upstream","role":"transmission","query_terms":["grid transmission","data center interconnection"],"geography":"United States","horizon":"medium to long term","evidence_requirement":"Primary interconnection, rate-base, or project evidence","adverse_path":false,"invalidation_rule":"No verified project approval or data-center linkage"},
+        {"edge_id":"dc_transformers","direction":"direct","role":"transformers_switchgear","query_terms":["power transformer","switchgear backlog"],"geography":"United States and allied markets","horizon":"near to medium term","evidence_requirement":"Primary backlog, capacity, or customer evidence","adverse_path":false,"invalidation_rule":"No verified relevant backlog or capacity"},
+        {"edge_id":"dc_power_electronics","direction":"direct","role":"power_electronics","query_terms":["data center power electronics","uninterruptible power supply"],"geography":"global markets","horizon":"near to medium term","evidence_requirement":"Primary segment revenue or customer evidence","adverse_path":false,"invalidation_rule":"No verified data-center product exposure"},
+        {"edge_id":"dc_cooling","direction":"direct","role":"cooling","query_terms":["data center cooling","liquid cooling infrastructure"],"geography":"global markets","horizon":"near to medium term","evidence_requirement":"Primary cooling product, capacity, or customer evidence","adverse_path":false,"invalidation_rule":"No verified data-center cooling exposure"},
+        {"edge_id":"dc_storage","direction":"direct","role":"storage","query_terms":["data center battery storage","backup power storage"],"geography":"United States","horizon":"near to medium term","evidence_requirement":"Primary installed capacity or awarded project evidence","adverse_path":false,"invalidation_rule":"No verified storage deployment linkage"},
+        {"edge_id":"dc_construction","direction":"downstream","role":"construction","query_terms":["data center electrical construction","data center infrastructure contractor"],"geography":"United States","horizon":"near to medium term","evidence_requirement":"Primary awarded project or backlog evidence","adverse_path":false,"invalidation_rule":"No verified project award or relevant backlog"},
+        {"edge_id":"dc_efficiency","direction":"adverse","role":"efficiency_demand_reduction","query_terms":["data center energy efficiency","compute power reduction"],"geography":"global markets","horizon":"medium to long term","evidence_requirement":"Primary measured efficiency and adoption evidence","adverse_path":true,"invalidation_rule":"Efficiency gain lacks measured demand effect or adoption"}
+      ]
+    },
+    {
+      "theme_id": "nuclear_uranium",
+      "label": "Nuclear fuel cycle and reactor infrastructure",
+      "synonyms": ["nuclear", "uranium", "haleu", "enrichment", "fuel fabrication", "reactor"],
+      "geography": "United States and allied fuel-cycle markets",
+      "horizon": "near to long term",
+      "value_chain": [
+        {"edge_id":"nuclear_mining","direction":"upstream","role":"mining","query_terms":["uranium mining","uranium production"],"geography":"United States and allied markets","horizon":"near to long term","evidence_requirement":"Primary reserves, output, or project evidence","adverse_path":false,"invalidation_rule":"No verified uranium reserves or output"},
+        {"edge_id":"nuclear_holdings","direction":"upstream","role":"physical_holdings","query_terms":["physical uranium holdings","uranium inventory"],"geography":"global markets","horizon":"near to medium term","evidence_requirement":"Audited holdings and custody evidence","adverse_path":false,"invalidation_rule":"No verified physical inventory or custody"},
+        {"edge_id":"nuclear_conversion","direction":"upstream","role":"conversion","query_terms":["uranium conversion","uranium hexafluoride"],"geography":"United States and allied markets","horizon":"near to long term","evidence_requirement":"Primary conversion capacity or contract evidence","adverse_path":false,"invalidation_rule":"No verified conversion capacity or demand"},
+        {"edge_id":"nuclear_enrichment","direction":"upstream","role":"enrichment_swu","query_terms":["uranium enrichment","separative work units"],"geography":"United States and allied markets","horizon":"near to long term","evidence_requirement":"Primary enrichment capacity or contract evidence","adverse_path":false,"invalidation_rule":"No verified enrichment capacity or demand"},
+        {"edge_id":"nuclear_haleu","direction":"upstream","role":"haleu","query_terms":["haleu production","high assay low enriched uranium"],"geography":"United States","horizon":"medium to long term","evidence_requirement":"Primary licensed capacity and awarded demand evidence","adverse_path":false,"invalidation_rule":"No verified license, capacity, or customer"},
+        {"edge_id":"nuclear_fabrication","direction":"direct","role":"fuel_fabrication","query_terms":["nuclear fuel fabrication","fuel assembly manufacturing"],"geography":"United States and allied markets","horizon":"near to long term","evidence_requirement":"Primary fabrication capacity and customer evidence","adverse_path":false,"invalidation_rule":"No verified fuel fabrication capacity"},
+        {"edge_id":"nuclear_equipment","direction":"direct","role":"reactor_equipment","query_terms":["nuclear reactor equipment","reactor components"],"geography":"global markets","horizon":"medium to long term","evidence_requirement":"Primary equipment backlog or awarded project evidence","adverse_path":false,"invalidation_rule":"No verified reactor-related backlog"},
+        {"edge_id":"nuclear_operators","direction":"downstream","role":"operators","query_terms":["nuclear plant operator","nuclear generation fleet"],"geography":"United States","horizon":"near to long term","evidence_requirement":"Primary fleet output, license, and economics evidence","adverse_path":false,"invalidation_rule":"No verified operating fleet or economic benefit"},
+        {"edge_id":"nuclear_waste","direction":"downstream","role":"waste","query_terms":["nuclear waste services","spent fuel storage"],"geography":"United States","horizon":"long term","evidence_requirement":"Primary licensed service and contract evidence","adverse_path":false,"invalidation_rule":"No verified license or customer contract"},
+        {"edge_id":"nuclear_decommissioning","direction":"adverse","role":"decommissioning","query_terms":["nuclear decommissioning","reactor closure"],"geography":"global markets","horizon":"near to long term","evidence_requirement":"Primary closure decision and contracted work evidence","adverse_path":true,"invalidation_rule":"No final closure decision or funded work"}
+      ]
+    },
+    {
+      "theme_id": "robotics",
+      "label": "Robotics value chain",
+      "synonyms": ["robotics", "industrial robots", "humanoid robot", "actuators", "reducers", "machine vision"],
+      "geography": "global markets",
+      "horizon": "near to long term",
+      "value_chain": [
+        {"edge_id":"robotics_oems","direction":"direct","role":"oems","query_terms":["industrial robot manufacturer","robotics oem"],"geography":"global markets","horizon":"near to long term","evidence_requirement":"Primary shipment, backlog, or segment evidence","adverse_path":false,"invalidation_rule":"No verified robotics product or commercial demand"},
+        {"edge_id":"robotics_actuators","direction":"upstream","role":"actuators_motors","query_terms":["robot actuator","servo motor"],"geography":"global markets","horizon":"near to long term","evidence_requirement":"Primary product and robotics customer evidence","adverse_path":false,"invalidation_rule":"No verified robotics component exposure"},
+        {"edge_id":"robotics_gears","direction":"upstream","role":"gears_reducers","query_terms":["robot gear reducer","precision reducer"],"geography":"global markets","horizon":"near to long term","evidence_requirement":"Primary product and robotics customer evidence","adverse_path":false,"invalidation_rule":"No verified robotics reducer exposure"},
+        {"edge_id":"robotics_sensors","direction":"upstream","role":"sensors_vision","query_terms":["robot sensor","machine vision"],"geography":"global markets","horizon":"near to long term","evidence_requirement":"Primary product and robotics segment evidence","adverse_path":false,"invalidation_rule":"No verified robotics sensing exposure"},
+        {"edge_id":"robotics_controls","direction":"upstream","role":"controls","query_terms":["robot motion control","industrial controls"],"geography":"global markets","horizon":"near to long term","evidence_requirement":"Primary controls product and customer evidence","adverse_path":false,"invalidation_rule":"No verified robotics controls exposure"},
+        {"edge_id":"robotics_compute","direction":"upstream","role":"chips_compute","query_terms":["robotics compute","robotics semiconductor"],"geography":"global markets","horizon":"near to long term","evidence_requirement":"Primary design-win or segment evidence","adverse_path":false,"invalidation_rule":"No verified robotics compute demand"},
+        {"edge_id":"robotics_integrators","direction":"downstream","role":"integrators","query_terms":["robotics systems integrator","factory automation integration"],"geography":"global markets","horizon":"near to medium term","evidence_requirement":"Primary project backlog or customer evidence","adverse_path":false,"invalidation_rule":"No verified robotics integration backlog"},
+        {"edge_id":"robotics_batteries","direction":"upstream","role":"batteries","query_terms":["robot battery","mobile robot battery"],"geography":"global markets","horizon":"medium to long term","evidence_requirement":"Primary product qualification and demand evidence","adverse_path":false,"invalidation_rule":"No verified robotics battery exposure"},
+        {"edge_id":"robotics_magnets","direction":"upstream","role":"magnets","query_terms":["robot motor magnet","permanent magnet robotics"],"geography":"global markets","horizon":"near to long term","evidence_requirement":"Primary material intensity and customer evidence","adverse_path":false,"invalidation_rule":"No verified magnet intensity or robotics demand"},
+        {"edge_id":"robotics_labor_substitution","direction":"adverse","role":"adoption_constraints","query_terms":["robotics adoption delay","automation project cancellation"],"geography":"global markets","horizon":"near to medium term","evidence_requirement":"Primary cancellation, delay, or return-on-investment evidence","adverse_path":true,"invalidation_rule":"No verified adoption delay or economic constraint"}
+      ]
+    }
+  ]
+}

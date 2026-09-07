@@ -640,23 +640,92 @@ export function referenceManifestSemanticDocument(row: JsonObject): JsonObject {
 }
 
 export function securityRevisionSemanticDocument(row: JsonObject): JsonObject {
+  const version = row.semantic_encoding_version ?? 1;
+  if (version !== 1 && version !== 2) {
+    throw new Error("security semantic encoding version is invalid");
+  }
+  const value: JsonObject = {
+    revision: row.revision,
+    security_id: row.security_id,
+    entity_id: row.entity_id,
+    ticker: row.ticker,
+    exchange: row.exchange,
+    instrument_type: row.instrument_type,
+    eligible: row.eligible,
+    exclusion_reasons: row.exclusion_reasons,
+    aliases: row.aliases,
+    source_ids: row.source_ids,
+    valid_from: canonicalReferenceTimestamp(row.valid_from),
+    valid_to: canonicalReferenceTimestamp(row.valid_to),
+  };
+  if (version === 2) value.issuer_names = canonicalIssuerNames(row.issuer_names);
   return {
     kind: "security_revision",
-    semantic_encoding_version: 1,
-    value: {
-      revision: row.revision,
-      security_id: row.security_id,
-      entity_id: row.entity_id,
-      ticker: row.ticker,
-      exchange: row.exchange,
-      instrument_type: row.instrument_type,
-      eligible: row.eligible,
-      exclusion_reasons: row.exclusion_reasons,
-      aliases: row.aliases,
-      source_ids: row.source_ids,
-      valid_from: canonicalReferenceTimestamp(row.valid_from),
-      valid_to: canonicalReferenceTimestamp(row.valid_to),
-    },
+    semantic_encoding_version: version,
+    value,
+  };
+}
+
+function issuerNameDate(value: unknown, path: string): string {
+  const text = stringValue(value, path, 10);
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(text) ||
+    new Date(`${text}T00:00:00.000Z`).toISOString().slice(0, 10) !== text) {
+    throw new Error(`${path} is invalid`);
+  }
+  return text;
+}
+
+function canonicalIssuerNames(value: unknown): JsonObject {
+  const row = objectValue(value, "security issuer_names");
+  exactKeys(
+    row,
+    ["canonical_name", "observed_names", "former_names"],
+    "security issuer_names",
+  );
+  const canonicalName = stringValue(
+    row.canonical_name,
+    "security issuer_names.canonical_name",
+    300,
+  );
+  const observedNames = arrayValue(
+    row.observed_names,
+    "security issuer_names.observed_names",
+    16,
+  ).map((name, index) =>
+    stringValue(name, `security issuer_names.observed_names[${index}]`, 300)
+  ).sort();
+  if (observedNames.length === 0 ||
+    new Set(observedNames).size !== observedNames.length ||
+    !observedNames.includes(canonicalName)) {
+    throw new Error("security issuer_names observed names are invalid");
+  }
+  const formerNames = arrayValue(
+    row.former_names,
+    "security issuer_names.former_names",
+    32,
+  ).map((value, index) => {
+    const path = `security issuer_names.former_names[${index}]`;
+    const former = objectValue(value, path);
+    exactKeys(former, ["name", "valid_from", "valid_to"], path);
+    const result = {
+      name: stringValue(former.name, `${path}.name`, 300),
+      valid_from: issuerNameDate(former.valid_from, `${path}.valid_from`),
+      valid_to: issuerNameDate(former.valid_to, `${path}.valid_to`),
+    };
+    if (result.valid_to < result.valid_from || observedNames.includes(result.name)) {
+      throw new Error(`${path} is invalid`);
+    }
+    return result;
+  }).sort((left, right) =>
+    JSON.stringify(left).localeCompare(JSON.stringify(right))
+  );
+  if (new Set(formerNames.map((row) => JSON.stringify(row))).size !== formerNames.length) {
+    throw new Error("security issuer_names former names are duplicated");
+  }
+  return {
+    canonical_name: canonicalName,
+    observed_names: observedNames,
+    former_names: formerNames,
   };
 }
 
@@ -734,6 +803,10 @@ function parseDiscoveryManifest(value: unknown): JsonObject {
 function parseSecurityRevision(value: unknown, index: number): JsonObject {
   const path = `discovery reference.security_revisions[${index}]`;
   const row = objectValue(value, path);
+  const version = row.semantic_encoding_version ?? 1;
+  if (version !== 1 && version !== 2) {
+    throw new Error(`${path}.semantic_encoding_version is invalid`);
+  }
   exactKeys(row, [
     "id",
     "manifest_id",
@@ -750,11 +823,12 @@ function parseSecurityRevision(value: unknown, index: number): JsonObject {
     "valid_from",
     "valid_to",
     "content_hash",
+    ...(version === 2 ? ["semantic_encoding_version", "issuer_names"] : []),
   ], path);
   if (typeof row.eligible !== "boolean") {
     throw new Error(`${path}.eligible must be boolean`);
   }
-  const result = {
+  const result: JsonObject = {
     id: uuidValue(row.id, `${path}.id`),
     manifest_id: uuidValue(row.manifest_id, `${path}.manifest_id`),
     revision: integer(row.revision, `${path}.revision`, 1, 10_000),
@@ -794,6 +868,10 @@ function parseSecurityRevision(value: unknown, index: number): JsonObject {
     valid_to: timestamp(row.valid_to, `${path}.valid_to`, true),
     content_hash: hashValue(row.content_hash, `${path}.content_hash`),
   };
+  if (version === 2) {
+    result.semantic_encoding_version = 2;
+    result.issuer_names = canonicalIssuerNames(row.issuer_names);
+  }
   rejectDiscoveryAuthority(result, path);
   if (
     result.content_hash !==
@@ -824,7 +902,32 @@ export function parseDiscoveryReferencePayload(
   if (securityRevisions.some((item) => item.manifest_id !== manifest.id)) {
     throw new Error("discovery reference manifest identity mismatch");
   }
+  validateReferenceFormatAndIssuerNames(manifest, securityRevisions);
   return { manifest, security_revisions: securityRevisions };
+}
+
+function validateReferenceFormatAndIssuerNames(
+  manifest: JsonObject,
+  rows: JsonObject[],
+): void {
+  const metadata = objectValue(manifest.manifest, "reference manifest metadata");
+  const formatVersion = metadata.format_version ?? 1;
+  if (formatVersion !== 1 && formatVersion !== 2) {
+    throw new Error("reference manifest format_version is invalid");
+  }
+  if (rows.some((row) => (row.semantic_encoding_version ?? 1) !== formatVersion)) {
+    throw new Error("reference row format does not match manifest");
+  }
+  const namesByEntity = new Map<string, string>();
+  for (const row of rows) {
+    if (formatVersion !== 2) continue;
+    const encoded = canonicalJson(row.issuer_names);
+    const prior = namesByEntity.get(row.entity_id as string);
+    if (prior !== undefined && prior !== encoded) {
+      throw new Error("same entity must have identical issuer names");
+    }
+    namesByEntity.set(row.entity_id as string, encoded);
+  }
 }
 
 function referenceCapability(value: unknown, path: string): string {
@@ -905,12 +1008,30 @@ export function parseReferenceChunkPayload(
     "entries",
     "chunk_hash",
   ], "reference chunk");
-  const entries = arrayValue(row.entries, "reference chunk.entries", 200)
-    .map(parseSecurityRevision);
+  const rawEntries = arrayValue(row.entries, "reference chunk.entries", 200);
+  if (
+    rawEntries.some((entry) =>
+      typeof entry === "object" && entry !== null && !Array.isArray(entry) &&
+      (entry as JsonObject).semantic_encoding_version === 2
+    ) && rawEntries.length > 88
+  ) {
+    throw new Error("reference chunk.entries must contain at most 88 items");
+  }
+  const entries = rawEntries.map(parseSecurityRevision);
   if (entries.length === 0) {
     throw new Error("reference chunk.entries must not be empty");
   }
   rejectDuplicateDiscoveryRowIds(entries, "reference chunk.entries");
+  const namesByEntity = new Map<string, string>();
+  for (const entry of entries) {
+    if (entry.semantic_encoding_version !== 2) continue;
+    const encoded = canonicalJson(entry.issuer_names);
+    const prior = namesByEntity.get(entry.entity_id as string);
+    if (prior !== undefined && prior !== encoded) {
+      throw new Error("same entity must have identical issuer names");
+    }
+    namesByEntity.set(entry.entity_id as string, encoded);
+  }
   const manifestId = uuidValue(row.manifest_id, "reference chunk.manifest_id");
   if (entries.some((entry) => entry.manifest_id !== manifestId)) {
     throw new Error("reference chunk manifest identity mismatch");
@@ -1035,6 +1156,7 @@ export function parseReferencePage(value: unknown): ReferencePage {
     "reference_status",
     "source_retrieved_at",
     "reference_age_seconds",
+    "issuer_names_status",
   ], "reference page.binding");
   const status = enumValue(
     binding.reference_status,
@@ -1058,6 +1180,11 @@ export function parseReferencePage(value: unknown): ReferencePage {
     "reference page.binding.reference_age_seconds",
     0,
     Number.MAX_SAFE_INTEGER,
+  );
+  const issuerNamesStatus = enumValue(
+    binding.issuer_names_status,
+    ["available", "issuer_names_unavailable"] as const,
+    "reference page.binding.issuer_names_status",
   );
   if ((status === "reference_unavailable") !== (manifestId === null)) {
     throw new Error("reference page binding is inconsistent");
@@ -1086,6 +1213,14 @@ export function parseReferencePage(value: unknown): ReferencePage {
   ) {
     throw new Error("reference page manifest identity mismatch");
   }
+  if (manifest !== null) validateReferenceFormatAndIssuerNames(manifest, securities);
+  const formatVersion = manifest === null
+    ? 1
+    : ((manifest.manifest as JsonObject).format_version ?? 1);
+  if (
+    issuerNamesStatus !==
+      (formatVersion === 2 ? "available" : "issuer_names_unavailable")
+  ) throw new Error("reference page issuer name availability is inconsistent");
   if (typeof row.complete !== "boolean") {
     throw new Error("reference page.complete must be boolean");
   }
@@ -1114,6 +1249,7 @@ export function parseReferencePage(value: unknown): ReferencePage {
       reference_status: status,
       source_retrieved_at: sourceRetrievedAt,
       reference_age_seconds: age,
+      issuer_names_status: issuerNamesStatus,
     },
     manifest,
     securities,

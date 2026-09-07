@@ -225,18 +225,22 @@ def test_one_reference_stage_call_persists_all_chunks_then_pins_finalized_snapsh
             return {"ok": True, "data": data}
 
     gateway_client = Gateway()
+    installed = []
     coverage = collector._persist_reference_stage(
         gateway_client, RUN_ID := "11111111-1111-4111-8111-111111111111", now,
         client=Http(), monotonic=lambda: 0.0, sec_contact="owner@example.com",
+        snapshot_sink=installed.append,
     )
 
     operations = [call[0] for call in gateway_client.calls]
     assert operations == ["pin_discovery_reference", "begin_discovery_reference"] + [
         "record_discovery_reference_chunk"
-    ] * 6 + ["finalize_discovery_reference", "pin_discovery_reference"]
+    ] * 12 + ["finalize_discovery_reference", "pin_discovery_reference"]
     assert all(call[2]["run_id"] == RUN_ID for call in gateway_client.calls)
     assert coverage["reference_status"] == "healthy"
     assert coverage["execution_allowed"] is False
+    assert len(installed) == 1 and len(installed[0].issuers) == 1005
+    assert gateway_client.calls[1][1]["manifest"]["manifest"]["format_version"] == 2
     assert len(json.dumps(gateway_client.calls, default=str).encode()) <= collector.MAX_REFERENCE_TRANSFER_BYTES
 
 
@@ -272,6 +276,7 @@ def test_reference_stage_pages_predecessor_before_assigning_renamed_security_ide
             "security_count": 1,
             "conflict_count": 0,
             "symbol_directory_status": "disabled_pending_https_and_terms_review",
+            "format_version": 2,
         },
         "content_hash": "b" * 64,
     }
@@ -290,8 +295,19 @@ def test_reference_stage_pages_predecessor_before_assigning_renamed_security_ide
         "source_ids": ["sec-company-tickers:0000000001"],
         "valid_from": "2020-01-02T00:00:00.000Z",
         "valid_to": None,
-        "content_hash": "c" * 64,
+        "semantic_encoding_version": 2,
+        "issuer_names": {
+            "canonical_name": "Old Company",
+            "observed_names": ["Old Company"],
+            "former_names": [],
+        },
     }
+    from lib.intelligence.universe import security_revision_semantic_document
+    import hashlib
+    prior_security["content_hash"] = hashlib.sha256(json.dumps(
+        security_revision_semantic_document(prior_security),
+        separators=(",", ":"), sort_keys=True,
+    ).encode()).hexdigest()
 
     class Gateway:
         def __init__(self):
@@ -314,6 +330,7 @@ def test_reference_stage_pages_predecessor_before_assigning_renamed_security_ide
                         "reference_status": "reference_stale",
                         "source_retrieved_at": "2026-09-06T12:00:00.000Z",
                         "reference_age_seconds": 86_400,
+                        "issuer_names_status": "available",
                     },
                     "manifest": prior_manifest, "securities": [prior_security],
                     "next_after_security_id": None, "complete": True,
@@ -387,6 +404,75 @@ def test_failed_sec_refresh_asks_server_for_last_healthy_and_reports_unavailable
         "reference_age_seconds": None,
         "execution_allowed": False,
     }
+
+
+def test_restart_hydrates_the_complete_current_v2_pin_without_contacting_sec():
+    import scripts.collect_market_intelligence as collector
+    from lib.intelligence.universe import build_reference_transfer, parse_sec_company_tickers
+
+    run_id = "11111111-1111-4111-8111-111111111111"
+    now = datetime(2026, 9, 7, 12, tzinfo=timezone.utc)
+    source = json.dumps({str(index): {
+        "cik_str": index + 1,
+        "ticker": f"T{index:05d}",
+        "title": f"Fixture Company {index}",
+    } for index in range(177)}, separators=(",", ":")).encode()
+    snapshot = parse_sec_company_tickers(source, retrieved_at=now)
+    transfer = build_reference_transfer(
+        snapshot,
+        run_id=run_id,
+        capability_version=1,
+        taxonomy_version=1,
+        semantic_encoding_version=2,
+    )
+    manifest = transfer.begin["manifest"]
+    entries = [entry for chunk in transfer.chunks for entry in chunk["entries"]]
+
+    class Gateway:
+        def __init__(self):
+            self.calls = []
+            self.issuer_names_status = "available"
+
+        def call(self, operation, payload, **kwargs):
+            assert operation == "read_discovery_reference"
+            self.calls.append((payload, kwargs))
+            start = 0 if payload["after_security_id"] is None else next(
+                index + 1 for index, row in enumerate(entries)
+                if row["security_id"] == payload["after_security_id"]
+            )
+            page_rows = entries[start:start + 61]
+            complete = start + len(page_rows) == len(entries)
+            return {"data": {"reference": {
+                "binding": {
+                    "binding_role": "current",
+                    "manifest_id": manifest["id"],
+                    "reference_status": "healthy",
+                    "source_retrieved_at": now.isoformat(),
+                    "reference_age_seconds": 0,
+                    "issuer_names_status": self.issuer_names_status,
+                },
+                "manifest": manifest,
+                "securities": page_rows,
+                "next_after_security_id": None if complete else page_rows[-1]["security_id"],
+                "complete": complete,
+            }}}
+
+    gateway_client = Gateway()
+    hydrated = collector._read_current_reference_snapshot(
+        gateway_client, run_id, monotonic=lambda: 0.0,
+    )
+
+    assert hydrated is not None
+    assert hydrated.issuers == snapshot.issuers
+    assert hydrated.securities == snapshot.securities
+    assert len(gateway_client.calls) == 3
+
+    gateway_client.calls.clear()
+    gateway_client.issuer_names_status = "issuer_names_unavailable"
+    with pytest.raises(ValueError, match="issuer name availability"):
+        collector._read_current_reference_snapshot(
+            gateway_client, run_id, monotonic=lambda: 0.0,
+        )
 
 
 def test_reference_stage_time_ceiling_includes_the_sec_refresh():
@@ -468,7 +554,8 @@ def test_reference_stage_caps_each_gateway_timeout_by_remaining_deadline():
     )
 
     assert gateway_client.timeouts
-    assert all(isinstance(value, float) and 0 < value <= 24.75
+    assert all(isinstance(value, float) and 0 < value <= 30.0
                for value in gateway_client.timeouts)
-    assert collector.MAX_REFERENCE_TRANSFER_CALLS == 160
-    assert collector.MAX_REFERENCE_TRANSFER_BYTES == 32 * 1024 * 1024
+    assert collector.MAX_REFERENCE_TRANSFER_CALLS == 384
+    assert collector.MAX_REFERENCE_TRANSFER_BYTES == 48 * 1024 * 1024
+    assert collector.MAX_REFERENCE_RESPONSE_BYTES == 64 * 1024 * 1024

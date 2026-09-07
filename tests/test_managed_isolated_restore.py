@@ -138,6 +138,7 @@ def test_managed_snapshot_contains_every_discovery_dataset_and_exact_source_tabl
         "reference_run_bindings": "public.market_reference_run_bindings",
         "reference_predecessor_pins": "public.market_reference_predecessor_pins",
         "reference_transfer_requests": "public.market_reference_transfer_requests",
+        "reference_transfer_responses": "public.market_reference_transfer_responses",
         "discovery_stage_tasks": "public.market_discovery_stage_tasks",
         "theme_episode_revisions": "public.market_theme_episode_revisions",
         "exposure_facts": "public.market_exposure_facts",
@@ -161,6 +162,7 @@ def test_discovery_restore_registry_is_in_foreign_key_dependency_order():
         "reference_run_bindings",
         "reference_predecessor_pins",
         "reference_transfer_requests",
+        "reference_transfer_responses",
         "discovery_stage_tasks",
         "theme_episode_revisions",
         "exposure_facts",
@@ -587,6 +589,8 @@ def test_actual_migration_retry_accepts_truthful_baseline_without_writing_histor
                   if item["path"] == "sql/migrations/20261007_discovery_cursor_context.sql")
     official = next(item for item in deploy.candidate_migration_manifest()
                     if item["path"] == "sql/migrations/20261008_official_source_completion_contract.sql")
+    issuer_names = next(item for item in deploy.candidate_migration_manifest()
+                        if item["path"] == "sql/migrations/20261009_reference_issuer_names.sql")
     queries = []
 
     def api(_method, _path, payload=None):
@@ -595,7 +599,7 @@ def test_actual_migration_retry_accepts_truthful_baseline_without_writing_histor
         if query.startswith("SELECT path, version, sha256"):
             return [
                 {"path": path, "version": "20261004", "sha256": hashlib.sha256(b'["SELECT 1"]').hexdigest()},
-                discovery, transfer, cursor, official,
+                    discovery, transfer, cursor, official, issuer_names,
             ]
         if query.startswith("SELECT version, statements"):
             return [{"version": "20261004", "statements": ["SELECT 1"]}]

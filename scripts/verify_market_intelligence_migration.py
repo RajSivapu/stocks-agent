@@ -26,6 +26,7 @@ MIGRATIONS = (
     ROOT / "sql" / "migrations" / "20261006_reference_snapshot_transfer.sql",
     ROOT / "sql" / "migrations" / "20261007_discovery_cursor_context.sql",
     ROOT / "sql" / "migrations" / "20261008_official_source_completion_contract.sql",
+    ROOT / "sql" / "migrations" / "20261009_reference_issuer_names.sql",
 )
 GATEWAY_ROLE = "service_role"
 TABLES = (
@@ -61,6 +62,7 @@ DISCOVERY_TABLES = (
     "market_reference_run_bindings",
     "market_reference_predecessor_pins",
     "market_reference_transfer_requests",
+    "market_reference_transfer_responses",
     "market_discovery_stage_tasks",
     "market_exposure_facts",
     "market_theme_episode_revisions",

@@ -52,7 +52,8 @@ RECOVERY_SQL = {
         created_at::text AS created_at FROM public.market_reference_manifests""",
     "security_reference_revisions": """SELECT id::text AS id,manifest_id::text AS manifest_id,run_id::text AS run_id,revision,
         security_id,entity_id,ticker,exchange,instrument_type,eligible,exclusion_reasons,aliases,source_ids,
-        valid_from::text AS valid_from,valid_to::text AS valid_to,content_hash,created_at::text AS created_at
+        valid_from::text AS valid_from,valid_to::text AS valid_to,content_hash,
+        semantic_encoding_version,issuer_names,created_at::text AS created_at
         FROM public.market_security_reference_revisions""",
     "reference_chunk_receipts": """SELECT manifest_id::text AS manifest_id,run_id::text AS run_id,capability_id,
         chunk_index,chunk_count,entry_count,chunk_hash,predecessor_manifest_id::text AS predecessor_manifest_id,
@@ -72,6 +73,9 @@ RECOVERY_SQL = {
     "reference_transfer_requests": """SELECT request_id::text AS request_id,run_id::text AS run_id,operation,
         encoded_bytes,request_hash,request_payload,created_at::text AS created_at
         FROM public.market_reference_transfer_requests""",
+    "reference_transfer_responses": """SELECT request_id::text AS request_id,run_id::text AS run_id,
+        encoded_bytes,response_hash,created_at::text AS created_at
+        FROM public.market_reference_transfer_responses""",
     "discovery_stage_tasks": """SELECT id::text AS id,run_id::text AS run_id,stage,capability_id,provider,query_kind,query_hash,
         dependency_ids,requested_window,state,attempt_count,request_budget,result,created_at::text AS created_at,
         updated_at::text AS updated_at FROM public.market_discovery_stage_tasks""",
@@ -148,6 +152,7 @@ READ_TABLES = (
     "market_reference_chunk_receipts", "market_reference_snapshot_memberships",
     "market_reference_finalization_seals", "market_reference_run_bindings",
     "market_reference_predecessor_pins", "market_reference_transfer_requests",
+    "market_reference_transfer_responses",
     "market_theme_episode_revisions", "market_exposure_facts", "market_research_nominations",
     "stock_agent_release_migration_ledger",
 )
@@ -251,6 +256,7 @@ class PostgresReadOnlySource:
             "reference_run_bindings": RECOVERY_SQL["reference_run_bindings"] + " WHERE run_id=%s::uuid",
             "reference_predecessor_pins": RECOVERY_SQL["reference_predecessor_pins"] + " WHERE run_id=%s::uuid",
             "reference_transfer_requests": RECOVERY_SQL["reference_transfer_requests"] + " WHERE run_id=%s::uuid",
+            "reference_transfer_responses": RECOVERY_SQL["reference_transfer_responses"] + " WHERE run_id=%s::uuid",
             "discovery_stage_tasks": RECOVERY_SQL["discovery_stage_tasks"] + " WHERE run_id=%s::uuid",
             "theme_episode_revisions": RECOVERY_SQL["theme_episode_revisions"] + " WHERE run_id=%s::uuid",
             "exposure_facts": RECOVERY_SQL["exposure_facts"] + " WHERE run_id=%s::uuid",

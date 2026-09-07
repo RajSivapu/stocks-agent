@@ -13,6 +13,13 @@ from decimal import Decimal
 from zoneinfo import ZoneInfo
 
 from lib.intelligence.dedupe import RunItemDisposition, deduplicate
+from lib.intelligence.discovery import (
+    build_reverse_discovery_tasks,
+    detect_events,
+    expand_value_chain,
+    load_theme_taxonomy,
+)
+from lib.intelligence.entities import EntityResolution, ReviewedAlias, resolve_entities
 from lib.intelligence.cache import ResumableCollectionCache, collection_from_checkpoint
 from lib.intelligence.canonical import canonical_event, canonical_ranking
 from lib.intelligence.cursors import (
@@ -35,8 +42,15 @@ from lib.intelligence.providers import (
 from lib.intelligence.quota import QuotaSession
 from lib.intelligence.ranking import CandidateInput, RankedCandidate, rank_candidates
 from lib.intelligence.relationships import EventRelationship, exposure_kind, propose_relation
-from lib.intelligence.themes import SEED_THEMES, MarketEvent, build_market_event, evidence_key
+from lib.intelligence.themes import (
+    SEED_THEMES,
+    MarketEvent,
+    build_market_event,
+    evidence_key,
+    propose_dynamic_theme,
+)
 from lib.intelligence.types import DiscoveryPlan, DiscoveryTask, PacketLimits, SourceCapability
+from lib.intelligence.universe import ReferenceSnapshot
 
 
 PHASES = ("pre-market", "intraday", "post-market", "on-demand")
@@ -45,6 +59,7 @@ UNTRUSTED_DATA_INSTRUCTION = (
 )
 MAX_OUTPUT_BYTES = 96 * 1024
 _OUTPUT_PACKET_BYTES = 72 * 1024
+_MAX_DISCOVERY_TASKS = 100
 
 
 class _CheckpointFailure(RuntimeError):
@@ -225,6 +240,7 @@ class IntelligencePipeline:
         packet_limits: PacketLimits = PacketLimits(),
         cache: ResumableCollectionCache | None = None,
         reference_stage: object | None = None,
+        reference_snapshot_loader: object | None = None,
         discovery_plan: DiscoveryPlan | None = None,
         source_cursors: Mapping[str, SourceCursor] | None = None,
     ) -> None:
@@ -244,6 +260,9 @@ class IntelligencePipeline:
         if reference_stage is not None and not callable(reference_stage):
             raise ValueError("reference_stage must be callable")
         self.reference_stage = reference_stage
+        if reference_snapshot_loader is not None and not callable(reference_snapshot_loader):
+            raise ValueError("reference_snapshot_loader must be callable")
+        self.reference_snapshot_loader = reference_snapshot_loader
         if discovery_plan is not None and not isinstance(discovery_plan, DiscoveryPlan):
             raise ValueError("discovery_plan must be a DiscoveryPlan")
         self.discovery_plan = discovery_plan
@@ -319,6 +338,7 @@ class IntelligencePipeline:
                 if isinstance(age, bool) or not isinstance(age, int) or age < 0:
                     raise ValueError("reference stage result is invalid")
             self.context["reference_coverage"] = dict(reference)
+            self._hydrate_reference_snapshot(run_id)
         request_window = _request_window(start.get("request_window"), request)
         checkpoint_entries = start.get("cache_entries")
         if not isinstance(checkpoint_entries, Sequence) or isinstance(checkpoint_entries, (str, bytes, bytearray)):
@@ -347,12 +367,26 @@ class IntelligencePipeline:
         if missing:
             raise ValueError("discovery plan has no adapter for a planned provider")
 
-        providers = tuple(sorted({task.provider for task in collection_tasks}))
+        adaptive_capability = self._adaptive_capability(plan, adapters)
+        static_adaptive_calls = sum(
+            task.capability_id == "gdelt_theme_search" for task in collection_tasks
+        )
+        adaptive_capacity = 0 if adaptive_capability is None else min(
+            plan.reserved_adaptive_requests,
+            12,
+            max(0, adaptive_capability.max_requests_per_run - static_adaptive_calls),
+        )
+        providers = tuple(sorted({
+            *(task.provider for task in collection_tasks),
+            *((adaptive_capability.provider,) if adaptive_capacity else ()),
+        }))
         global_window = _initial_request_window(request)
         plan_rows = [{
             "id": _uuid("reservation", request.request_id, provider),
             "provider": provider,
-            "requests": sum(task.provider == provider for task in collection_tasks),
+            "requests": sum(task.provider == provider for task in collection_tasks)
+            + (adaptive_capacity if adaptive_capability is not None
+               and adaptive_capability.provider == provider else 0),
             "cache_keys": [],
         } for provider in providers]
         start_payload = {
@@ -394,6 +428,7 @@ class IntelligencePipeline:
                 persisted[task.task_id] = self._checkpoint_discovery_task(run_id, row)
 
         self._run_planned_reference(run_id, request, persisted)
+        self._hydrate_reference_snapshot(run_id)
         results: list[CollectionResult] = []
         plan_by_provider = {str(row["provider"]): row for row in plan_rows}
         for task in collection_tasks:
@@ -409,12 +444,300 @@ class IntelligencePipeline:
             )
             results.append(result)
 
+        task_results: list[tuple[DiscoveryTask, CollectionResult]] = list(
+            zip(collection_tasks, results, strict=True)
+        )
+        reverse_tasks = self._reverse_discovery_tasks(
+            run_id,
+            request_window,
+            task_results,
+            min(adaptive_capacity, max(0, _MAX_DISCOVERY_TASKS - 1 - len(plan.tasks))),
+        )
+        if adaptive_capability is not None and reverse_tasks:
+            reservation = plan_by_provider[adaptive_capability.provider]
+            for task in reverse_tasks:
+                if task.task_id not in persisted:
+                    _cursor_key, task_cursor = self._cursor_for_task(task)
+                    task_window = _collection_window_for_task(task, task_cursor)
+                    planned = self._task_row(
+                        task, state="planned", attempt_count=0, result={},
+                        window=task_window, cursor=task_cursor,
+                    )
+                    persisted[task.task_id] = self._checkpoint_discovery_task(
+                        run_id, planned
+                    )
+                result = self._run_planned_collection_task(
+                    run_id,
+                    request,
+                    request_window,
+                    task,
+                    adaptive_capability,
+                    adapters[adaptive_capability.provider],
+                    reservation,
+                    persisted,
+                )
+                results.append(result)
+                task_results.append((task, result))
+
+        self._persist_dynamic_theme_evaluation(
+            run_id, request_window, task_results, persisted
+        )
+
         targets = tuple(
-            task.theme_id or task.capability_id for task in collection_tasks
+            task.theme_id or task.capability_id
+            for task in (*collection_tasks, *reverse_tasks)
         )
         receipt = self._complete(request, run_id, targets, results)
         self.cache.put_run(request.request_id, receipt)
         return receipt
+
+    @staticmethod
+    def _adaptive_capability(
+        plan: DiscoveryPlan, adapters: Mapping[str, object]
+    ) -> SourceCapability | None:
+        if plan.reserved_adaptive_requests == 0:
+            return None
+        capability = plan.capabilities.get("gdelt_theme_search")
+        if capability is None or capability.provider != "gdelt" \
+                or capability.query_kind != "theme_search" \
+                or capability.required_credential is not None \
+                or not capability.enabled or capability.health not in {"enabled", "degraded"} \
+                or plan.phase not in capability.phases:
+            raise ValueError("adaptive reserve requires the approved keyless GDELT capability")
+        if capability.provider not in adapters:
+            raise ValueError("adaptive reserve has no adapter for its approved provider")
+        return capability
+
+    def _reverse_discovery_tasks(
+        self,
+        run_id: str,
+        request_window: Mapping[str, str],
+        task_results: Sequence[tuple[DiscoveryTask, CollectionResult]],
+        capacity: int,
+    ) -> tuple[DiscoveryTask, ...]:
+        if capacity <= 0:
+            return ()
+        items_by_key: dict[str, SourceItem] = {}
+        task_ids_by_item: dict[str, set[str]] = {}
+        for task, result in task_results:
+            if result.receipt.status not in {"succeeded", "cache_hit"}:
+                continue
+            for raw in result.items:
+                item = normalize_item(raw)
+                key = evidence_key(item)
+                items_by_key[key] = item
+                task_ids_by_item.setdefault(key, set()).add(task.task_id)
+        if not items_by_key:
+            return ()
+        taxonomy = load_theme_taxonomy()
+        reference = self.context.get("security_reference")
+        aliases_value = self.context.get("reviewed_entity_aliases", ())
+        aliases = tuple(aliases_value) if isinstance(aliases_value, Sequence) \
+            and not isinstance(aliases_value, (str, bytes, bytearray)) else ()
+        per_event: list[list[object]] = []
+        for event in detect_events(tuple(items_by_key.values()), taxonomy):
+            resolved = False
+            if isinstance(reference, ReferenceSnapshot):
+                resolved = any(
+                    row.status == "resolved" and row.eligible
+                    for item in event.evidence
+                    for row in resolve_entities(item, reference, aliases=aliases)
+                )
+            elif event.security_ids:
+                resolved = True
+            if resolved:
+                continue
+            hypotheses = expand_value_chain(event, taxonomy)
+            rows = list(build_reverse_discovery_tasks(
+                event, hypotheses, max_tasks=min(12, capacity)
+            ))
+            if rows:
+                per_event.append(rows)
+        selected: list[object] = []
+        per_event.sort(key=lambda values: values[0].event_id)
+        while len(selected) < capacity and any(per_event):
+            remaining: list[list[object]] = []
+            for values in per_event:
+                if len(selected) >= capacity:
+                    remaining.append(values)
+                    continue
+                selected.append(values.pop(0))
+                if values:
+                    remaining.append(values)
+            per_event = remaining
+        tasks: list[DiscoveryTask] = []
+        for row in selected:
+            dependencies = tuple(sorted({
+                task_id
+                for source_id in row.dependency_ids
+                for task_id in task_ids_by_item.get(source_id, ())
+            }))[:32]
+            hypothesis = {
+                "adverse_path": row.adverse_path,
+                "direction": row.direction,
+                "evidence_requirement": row.evidence_requirement,
+                "exposure_supported": False,
+                "geography": row.geography,
+                "horizon": row.horizon,
+                "invalidation_rule": row.invalidation_rule,
+                "role": row.role,
+                "status": "hypothesis",
+            }
+            tasks.append(DiscoveryTask(
+                task_id=_uuid("reverse-discovery-task", run_id, row.task_id),
+                stage="resolve",
+                provider=row.provider,
+                capability_id=row.capability_id,
+                query_kind=row.query_kind,
+                theme_id=row.theme_id,
+                query={
+                    "event_id": row.event_id,
+                    "hypothesis": hypothesis,
+                    "query": row.query_text,
+                    "source_item_ids": list(row.dependency_ids)[:32],
+                },
+                window=dict(request_window),
+                dependencies=dependencies,
+                max_attempts=row.max_attempts,
+                requires_credential=False,
+            ))
+        return tuple(tasks)
+
+    def _persist_dynamic_theme_evaluation(
+        self,
+        run_id: str,
+        request_window: Mapping[str, str],
+        task_results: Sequence[tuple[DiscoveryTask, CollectionResult]],
+        persisted: dict[str, Mapping[str, object]],
+    ) -> None:
+        grouped: dict[str, list[SourceItem]] = {}
+        task_ids_by_item: dict[str, set[str]] = {}
+        for task, result in task_results:
+            if result.receipt.status not in {"succeeded", "cache_hit"}:
+                continue
+            for raw in result.items:
+                item = normalize_item(raw)
+                label_value = item.metadata.get("dynamic_theme_label")
+                if not isinstance(label_value, str):
+                    continue
+                label = " ".join(label_value.split())[:200]
+                if not label:
+                    continue
+                grouped.setdefault(label, []).append(item)
+                task_ids_by_item.setdefault(evidence_key(item), set()).add(task.task_id)
+        labels = sorted(grouped)[:50]
+        if not labels:
+            return
+        coverage_label = "bounded sources: " + ",".join(sorted({
+            item.provider for label in labels for item in grouped[label]
+        }))
+        proposals = tuple(
+            propose_dynamic_theme(
+                label, grouped[label], coverage_label=coverage_label
+            )
+            for label in labels
+        )
+        source_ids = tuple(sorted({
+            evidence_key(item) for proposal in proposals for item in proposal.evidence
+        }))
+        dependencies = tuple(sorted({
+            task_id
+            for source_id in source_ids
+            for task_id in task_ids_by_item.get(source_id, ())
+        }))[:32]
+        task = DiscoveryTask(
+            task_id=_uuid(
+                "dynamic-theme-evaluation", run_id,
+                hashlib.sha256(_canonical({
+                    "labels": labels, "source_ids": source_ids,
+                }).encode()).hexdigest(),
+            ),
+            stage="signals",
+            provider="gdelt",
+            capability_id="dynamic_theme_evaluation",
+            query_kind="theme_search",
+            theme_id=None,
+            query={"query": "dynamic-theme-evaluation", "labels": labels},
+            window=dict(request_window),
+            dependencies=dependencies,
+            max_attempts=1,
+            requires_credential=False,
+        )
+        current = persisted.get(task.task_id)
+        if current is None:
+            planned = self._task_row(task, state="planned", attempt_count=0, result={})
+            persisted[task.task_id] = self._checkpoint_discovery_task(run_id, planned)
+            current = persisted[task.task_id]
+        state = str(current.get("state") or "")
+        if state == "succeeded":
+            return
+        if state == "planned":
+            attempting = self._task_row(task, state="attempting", attempt_count=1, result={})
+            persisted[task.task_id] = self._checkpoint_discovery_task(run_id, attempting)
+            current = persisted[task.task_id]
+            state = str(current.get("state") or "")
+        if state != "attempting":
+            raise ValueError("persisted dynamic theme task state is invalid")
+        result_rows = [{
+            "eligible": proposal.eligible,
+            "fingerprint": proposal.fingerprint,
+            "label": proposal.label,
+            "missing_reasons": list(proposal.missing_reasons),
+            "research_state": "observed" if proposal.eligible else "unresolved",
+            "theme_id": proposal.theme_id,
+        } for proposal in proposals]
+        episode_rows: list[dict[str, object]] = []
+        for proposal in proposals:
+            if not proposal.eligible:
+                continue
+            evidence_ids = sorted({evidence_key(item) for item in proposal.evidence})[:64]
+            observed = min(
+                item.published_at or item.effective_at or item.retrieved_at
+                for item in proposal.evidence
+            )
+            episode_rows.append(_semantic_row("theme-episode", {
+                "theme_id": proposal.theme_id,
+                "revision": 1,
+                "episode": {
+                    "coverage_label": proposal.coverage_label,
+                    "fingerprint": proposal.fingerprint,
+                    "label": proposal.label,
+                    "missing_reasons": [],
+                    "research_state": "observed",
+                },
+                "source_ids": evidence_ids,
+                "valid_from": _timestamp(observed),
+                "valid_to": None,
+            }))
+        terminal = self._task_row(
+            task,
+            state="succeeded",
+            attempt_count=int(current.get("attempt_count") or 1),
+            result={
+                "episode_count": len(episode_rows),
+                "labels_truncated": max(0, len(grouped) - len(labels)),
+                "proposals": result_rows,
+                "research_state": "observed" if episode_rows else "unresolved",
+            },
+        )
+        persisted[task.task_id] = self._checkpoint_discovery_task(
+            run_id, terminal, theme_episode_revisions=episode_rows
+        )
+
+    def _hydrate_reference_snapshot(self, run_id: str) -> None:
+        coverage = self.context.get("reference_coverage")
+        if not isinstance(coverage, Mapping) \
+                or coverage.get("reference_status") == "reference_unavailable":
+            return
+        if self.reference_snapshot_loader is None:
+            return
+        snapshot = self.reference_snapshot_loader(run_id)
+        if not isinstance(snapshot, ReferenceSnapshot):
+            raise ValueError("reference snapshot loader returned an invalid snapshot")
+        manifest_id = coverage.get("reference_manifest_id")
+        if not isinstance(manifest_id, str) or not manifest_id:
+            raise ValueError("reference snapshot coverage is invalid")
+        self.context["security_reference"] = snapshot
 
     def _read_discovery_tasks(self, run_id: str) -> dict[str, Mapping[str, object]]:
         method = getattr(self.gateway, "read_discovery_context", None)
@@ -445,12 +768,16 @@ class IntelligencePipeline:
         return result
 
     def _checkpoint_discovery_task(
-        self, run_id: str, row: Mapping[str, object]
+        self,
+        run_id: str,
+        row: Mapping[str, object],
+        *,
+        theme_episode_revisions: Sequence[Mapping[str, object]] = (),
     ) -> Mapping[str, object]:
         payload = {
             "task": dict(row),
             "exposure_facts": [],
-            "theme_episode_revisions": [],
+            "theme_episode_revisions": [dict(value) for value in theme_episode_revisions],
             "research_nominations": [],
         }
         method = getattr(self.gateway, "checkpoint_discovery_stage", None)
@@ -680,7 +1007,7 @@ class IntelligencePipeline:
                 task,
                 state="attempting",
                 attempt_count=1,
-                result={"request_cursor": cursor.to_mapping()},
+                result={},
                 window=window,
                 cursor=cursor,
             )
@@ -758,22 +1085,26 @@ class IntelligencePipeline:
                 raise _CheckpointFailure("durable checkpoint failed") from exc
             self.cache.put_collection(key, market_result)
         terminal_state = _discovery_terminal_state(source_result.receipt)
+        terminal_result = {
+            "cursor_key": f"{task.capability_id}:{task.theme_id or 'default'}",
+            "theme_id": task.theme_id,
+            "checkpoint": {
+                "cache_key": key,
+                "receipt": _checkpoint_receipt(
+                    source_result.receipt, include_metadata=True
+                ),
+            },
+            "request_cursor": cursor.to_mapping(),
+            "source_cursor": updated.to_mapping(),
+        }
+        hypothesis = task.query.get("hypothesis")
+        if task.stage == "resolve" and isinstance(hypothesis, Mapping):
+            terminal_result["hypothesis"] = dict(hypothesis)
         terminal = self._task_row(
             task,
             state=terminal_state,
             attempt_count=1,
-            result={
-                "cursor_key": f"{task.capability_id}:{task.theme_id or 'default'}",
-                "theme_id": task.theme_id,
-                "checkpoint": {
-                    "cache_key": key,
-                    "receipt": _checkpoint_receipt(
-                        source_result.receipt, include_metadata=True
-                    ),
-                },
-                "request_cursor": cursor.to_mapping(),
-                "source_cursor": updated.to_mapping(),
-            },
+            result=terminal_result,
             window=window,
             cursor=cursor,
         )
@@ -993,10 +1324,18 @@ class IntelligencePipeline:
         ]
         if callable(getattr(self.gateway, "call", None)):
             reference_coverage = self.context.get("reference_coverage")
+            security_reference = self.context.get("security_reference")
+            reviewed_aliases = self.context.get("reviewed_entity_aliases")
             context_response = self.gateway.call("read_intelligence_context", {}, run_id=run_id)
             self.context = protected_collection_context(_gateway_data(context_response)["context"])
             if isinstance(reference_coverage, Mapping):
                 self.context["reference_coverage"] = dict(reference_coverage)
+            if isinstance(security_reference, ReferenceSnapshot):
+                self.context["security_reference"] = security_reference
+            if isinstance(reviewed_aliases, Sequence) and not isinstance(
+                reviewed_aliases, (str, bytes, bytearray)
+            ):
+                self.context["reviewed_entity_aliases"] = tuple(reviewed_aliases)
         events, relationships, ranked = _discover(discovery_items, self.context, request.now)
         qualified_ids = {
             evidence_key(item)
@@ -1647,59 +1986,84 @@ def _discover(
     candidates: list[CandidateInput] = []
     events: list[MarketEvent] = []
     relations: list[EventRelationship] = []
-    grouped: dict[tuple[str, str, str], list[SourceItem]] = {}
-    for item in items:
-        ticker = str(item.metadata.get("ticker") or item.metadata.get("symbol") or "").upper()
-        if not ticker and item.security_ids:
-            ticker = item.security_ids[0]
-        if not ticker:
-            continue
-        grouped.setdefault(_claim_key(item, ticker), []).append(item)
-    polarities: dict[tuple[str, str], set[str]] = {}
-    for ticker, claim, polarity in grouped:
-        polarities.setdefault((ticker, claim), set()).add(polarity)
-    conflicting_claims = {key for key, values in polarities.items()
-                          if {"positive", "negative"} <= values}
+    taxonomy = load_theme_taxonomy()
+    drafts = detect_events(items, taxonomy)
+    reference = context.get("security_reference")
+    aliases_value = context.get("reviewed_entity_aliases", ())
+    aliases = tuple(aliases_value) if isinstance(aliases_value, Sequence) \
+        and not isinstance(aliases_value, (str, bytes, bytearray)) else ()
+    claim_polarities: dict[str, set[str]] = {}
+    for draft in drafts:
+        for evidence in draft.evidence:
+            _ticker, claim, polarity = _claim_key(evidence, "")
+            claim_polarities.setdefault(claim, set()).add(polarity)
+    conflicting_claims = {
+        claim for claim, values in claim_polarities.items()
+        if {"positive", "negative"} <= values
+    }
     conflicting_events: set[str] = set()
-    for (_ticker, _claim, _polarity), supporting_items in grouped.items():
-        item = supporting_items[0]
-        ticker = _ticker
-        # Claim identity is normalized retained evidence plus entity/ticker and
-        # polarity—not an adapter's display title.
-        supporting = tuple(supporting_items)
+    for draft in drafts:
+        item = draft.evidence[0]
+        supporting = draft.evidence
         event = build_market_event(
-            event_type="provider_event", title=item.title, summary=item.summary,
+            event_type=draft.event_type, title=draft.title, summary=draft.summary,
             materiality=item.metadata.get("materiality", "0.5"),
             confidence=item.metadata.get("confidence", "0.5"), evidence=supporting,
-            theme_ids=(str(item.metadata.get("theme_id") or "dynamic_provider_event"),),
-            occurred_at=item.published_at, effective_at=item.effective_at,
+            theme_ids=draft.theme_ids,
+            occurred_at=draft.occurred_at, effective_at=draft.effective_at,
         )
-        relation = propose_relation(event, ticker=ticker,
-                                    role=str(item.metadata.get("role") or "exposure"), evidence=supporting)
         events.append(event)
-        if (_ticker, _claim) in conflicting_claims:
+        if any(_claim_key(evidence, "")[1] in conflicting_claims
+               for evidence in supporting):
             conflicting_events.add(event.event_id)
-        relations.append(relation)
-        observed_at = item.published_at or item.retrieved_at
-        age_seconds = max(0.0, (_utc(now) - _utc(observed_at)).total_seconds())
-        liquidity = _liquidity_score(item, context, ticker)
-        holding_weights = _holding_weights(context.get("holdings"))
-        holding_weight = (
-            holding_weights.get(ticker, Decimal("0"))
-            if holding_weights is not None else None
-        )
-        overlap = _overlap_score(context, ticker, holding_weight)
-        candidates.append(CandidateInput(
-            ticker=ticker, event=event, relation=relation, evidence=supporting,
-            authority_corroboration=_authority_score(relation.evidence),
-            exposure_strength=(Decimal(len(relation.exposure_evidence)) / Decimal(len(relation.evidence))
-                               if relation.evidence else None),
-            recency=max(Decimal("0"), Decimal("1") - Decimal(str(age_seconds)) / Decimal("604800")),
-            portfolio_relevance=(max(holding_weight, overlap)
-                                 if holding_weight is not None and overlap is not None else None),
-            liquidity=liquidity,
-            holding_weight=holding_weight, overlap=overlap, concentration=holding_weight,
-        ))
+        resolutions: list[EntityResolution] = []
+        if reference is not None:
+            for evidence in supporting:
+                resolutions.extend(resolve_entities(evidence, reference, aliases=aliases))
+        else:
+            for security_id in draft.security_ids:
+                ticker = str(security_id).strip().upper()
+                if re.fullmatch(r"[A-Z][A-Z0-9.-]{0,14}", ticker) is None:
+                    continue
+                resolutions.append(EntityResolution(
+                    mention=ticker, entity_id=None, security_id=ticker, ticker=ticker,
+                    status="resolved", matched_by="explicit_security_id", eligible=True,
+                ))
+        unique_resolutions = {
+            row.security_id: row for row in resolutions
+            if row.status == "resolved" and row.security_id is not None and row.ticker is not None
+        }
+        for security_id in sorted(unique_resolutions):
+            resolution = unique_resolutions[security_id]
+            ticker = str(resolution.ticker)
+            relation = propose_relation(
+                event,
+                ticker=ticker,
+                security_id=security_id,
+                role=str(item.metadata.get("role") or "exposure"),
+                evidence=supporting,
+            )
+            relations.append(relation)
+            observed_at = item.published_at or item.retrieved_at
+            age_seconds = max(0.0, (_utc(now) - _utc(observed_at)).total_seconds())
+            liquidity = _liquidity_score(item, context, ticker)
+            holding_weights = _holding_weights(context.get("holdings"))
+            holding_weight = (
+                holding_weights.get(ticker, Decimal("0"))
+                if holding_weights is not None else None
+            )
+            overlap = _overlap_score(context, ticker, holding_weight)
+            candidates.append(CandidateInput(
+                ticker=ticker, event=event, relation=relation, evidence=supporting,
+                authority_corroboration=_authority_score(relation.evidence),
+                exposure_strength=(Decimal(len(relation.exposure_evidence)) / Decimal(len(relation.evidence))
+                                   if relation.evidence else None),
+                recency=max(Decimal("0"), Decimal("1") - Decimal(str(age_seconds)) / Decimal("604800")),
+                portfolio_relevance=(max(holding_weight, overlap)
+                                     if holding_weight is not None and overlap is not None else None),
+                liquidity=liquidity,
+                holding_weight=holding_weight, overlap=overlap, concentration=holding_weight,
+            ))
     holdings = _holding_weights(context.get("holdings"))
     plans = context.get("owner_plans", context.get("plans"))
     ranked = rank_candidates(candidates, holdings=holdings, plans=plans)

@@ -19,7 +19,11 @@ import pytest
 from pglast import parse_sql
 from pglast.stream import RawStream
 
-from lib.intelligence.universe import build_reference_transfer, parse_sec_company_tickers
+from lib.intelligence.universe import (
+    build_reference_transfer,
+    parse_sec_company_tickers,
+    security_revision_semantic_document,
+)
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -28,6 +32,7 @@ SCHEMA = ROOT / "sql" / "schema.sql"
 PREVIOUS = ROOT / "sql" / "migrations" / "20261005_market_wide_discovery.sql"
 CURSOR_CONTEXT = ROOT / "sql" / "migrations" / "20261007_discovery_cursor_context.sql"
 OFFICIAL_COMPLETION = ROOT / "sql" / "migrations" / "20261008_official_source_completion_contract.sql"
+ISSUER_NAMES = ROOT / "sql" / "migrations" / "20261009_reference_issuer_names.sql"
 
 TABLES = (
     "market_reference_chunk_receipts",
@@ -129,7 +134,8 @@ def test_new_schema_tail_is_additive_and_prior_migrations_are_unchanged():
     schema = SCHEMA.read_text()
     assert MIGRATION.read_text() in schema
     assert CURSOR_CONTEXT.read_text() in schema
-    assert schema.endswith(OFFICIAL_COMPLETION.read_text())
+    assert OFFICIAL_COMPLETION.read_text() in schema
+    assert schema.endswith(ISSUER_NAMES.read_text())
     import subprocess
 
     prior_at_base = subprocess.run(
@@ -175,6 +181,7 @@ def transfer_db():
             )
             connection.execute(PREVIOUS.read_text())
             connection.execute(MIGRATION.read_text())
+            connection.execute(ISSUER_NAMES.read_text())
             yield connection
         finally:
             if connection is not None:
@@ -192,12 +199,20 @@ def _run(connection) -> str:
     return run_id
 
 
-def _transfer(run_id: str, count: int, retrieved_at: str, capability_id: str):
+def _transfer(
+    run_id: str,
+    count: int,
+    retrieved_at: str,
+    capability_id: str,
+    *,
+    semantic_encoding_version: int = 1,
+    shared_cik: bool = False,
+):
     source = json.dumps({
         str(index): {
-            "cik_str": index + 1,
+            "cik_str": 1 if shared_cik else index + 1,
             "ticker": f"T{index:05d}",
-            "title": f"Fixture Company {index}",
+            "title": "Fixture Company" if shared_cik else f"Fixture Company {index}",
         }
         for index in range(count)
     }, separators=(",", ":")).encode()
@@ -207,6 +222,7 @@ def _transfer(run_id: str, count: int, retrieved_at: str, capability_id: str):
     return build_reference_transfer(
         snapshot, run_id=run_id, capability_version=1, taxonomy_version=1,
         capability_id=capability_id,
+        semantic_encoding_version=semantic_encoding_version,
     )
 
 
@@ -241,12 +257,13 @@ def _pin_predecessor(connection, run_id: str, capability: str, as_of: str):
     })
 
 
-def _upload(connection, run_id: str, transfer):
+def _upload(connection, run_id: str, transfer, *, pin_predecessor: bool = True):
     capability = transfer.begin["capability_id"]
-    _pin_predecessor(
-        connection, run_id, capability,
-        transfer.begin["manifest"]["valid_from"],
-    )
+    if pin_predecessor:
+        _pin_predecessor(
+            connection, run_id, capability,
+            transfer.begin["manifest"]["valid_from"],
+        )
     predecessor = connection.execute(
         "SELECT manifest_id FROM public.market_reference_predecessor_pins "
         "WHERE run_id=%s AND capability_id=%s", (run_id, capability),
@@ -307,6 +324,111 @@ def test_security_semantic_hash_is_recomputed_before_first_chunk_write(transfer_
 
     with pytest.raises(psycopg.errors.InvalidParameterValue, match="security hash"):
         _rpc(transfer_db, "record_market_discovery_reference_chunk", run_id, forged_chunk)
+
+
+def test_v2_reference_round_trip_returns_bound_issuer_names(transfer_db):
+    run_id = _run(transfer_db)
+    capability = "sec_company_tickers_issuer_names_round_trip"
+    transfer = _transfer(
+        run_id,
+        2,
+        "2026-09-06T12:00:00Z",
+        capability,
+        semantic_encoding_version=2,
+        shared_cik=True,
+    )
+    _upload(transfer_db, run_id, transfer)
+    _rpc(transfer_db, "pin_market_discovery_reference", run_id, {
+        "capability_id": capability,
+        "binding_role": "current",
+        "manifest_id": transfer.begin["manifest"]["id"],
+        "reference_status": "healthy",
+        "reference_as_of": "2026-09-06T12:00:01Z",
+    })
+
+    page = _rpc(transfer_db, "read_market_discovery_reference", run_id, {
+        "capability_id": capability,
+        "binding_role": "current",
+        "after_security_id": None,
+        "limit": 500,
+    })
+
+    assert page["binding"]["issuer_names_status"] == "available"
+    assert len(page["securities"]) == 2
+    assert all(row["semantic_encoding_version"] == 2 for row in page["securities"])
+    assert page["securities"][0]["issuer_names"] == page["securities"][1]["issuer_names"]
+
+
+def test_v1_reference_round_trip_marks_issuer_names_unavailable(transfer_db):
+    run_id = _run(transfer_db)
+    capability = "sec_company_tickers_legacy_name_limit"
+    transfer = _transfer(run_id, 1, "2026-09-06T12:00:00Z", capability)
+    _upload(transfer_db, run_id, transfer)
+    _rpc(transfer_db, "pin_market_discovery_reference", run_id, {
+        "capability_id": capability,
+        "binding_role": "current",
+        "manifest_id": transfer.begin["manifest"]["id"],
+        "reference_status": "healthy",
+        "reference_as_of": "2026-09-06T12:00:01Z",
+    })
+
+    page = _rpc(transfer_db, "read_market_discovery_reference", run_id, {
+        "capability_id": capability,
+        "binding_role": "current",
+        "after_security_id": None,
+        "limit": 500,
+    })
+
+    assert page["binding"]["issuer_names_status"] == "issuer_names_unavailable"
+    assert "semantic_encoding_version" not in page["securities"][0]
+    assert "issuer_names" not in page["securities"][0]
+
+
+def test_v2_finalization_rejects_different_names_for_same_entity_across_chunks(transfer_db):
+    run_id = _run(transfer_db)
+    capability = "sec_company_tickers_cross_chunk_names"
+    transfer = _transfer(
+        run_id,
+        89,
+        "2026-09-06T12:00:00Z",
+        capability,
+        semantic_encoding_version=2,
+        shared_cik=True,
+    )
+    assert len(transfer.chunks) == 2
+    forged = copy.deepcopy(transfer)
+    entry = forged.chunks[1]["entries"][0]
+    entry["issuer_names"] = {
+        "canonical_name": "Different Company",
+        "observed_names": ["Different Company"],
+        "former_names": [],
+    }
+    entry["content_hash"] = hashlib.sha256(json.dumps(
+        security_revision_semantic_document(entry),
+        allow_nan=False,
+        ensure_ascii=False,
+        separators=(",", ":"),
+        sort_keys=True,
+    ).encode()).hexdigest()
+    forged.chunks[1]["chunk_hash"] = _chunk_hash(forged.chunks[1]["entries"])
+    forged.begin["root_hash"] = hashlib.sha256("".join(
+        chunk["chunk_hash"] for chunk in forged.chunks
+    ).encode()).hexdigest()
+    _pin_predecessor(
+        transfer_db,
+        run_id,
+        capability,
+        forged.begin["manifest"]["valid_from"],
+    )
+    _rpc(transfer_db, "begin_market_discovery_reference", run_id, forged.begin)
+    for chunk in forged.chunks:
+        _rpc(transfer_db, "record_market_discovery_reference_chunk", run_id, chunk)
+
+    with pytest.raises(psycopg.errors.InvalidParameterValue, match="identical issuer names"):
+        _rpc(transfer_db, "finalize_market_discovery_reference", run_id, {
+            "manifest_id": forged.begin["manifest"]["id"],
+            "root_hash": forged.begin["root_hash"],
+        })
 
 
 def test_legacy_reference_rpc_recomputes_semantic_hashes_before_first_write(transfer_db):
@@ -387,7 +509,7 @@ def test_partial_snapshot_is_invisible_and_unknown_outcome_retries_are_exact(tra
         _rpc(transfer_db, "record_market_discovery_reference_chunk", run_id, altered)
 
 
-def test_server_receipts_enforce_exact_retry_and_160_call_transfer_budget(transfer_db):
+def test_server_receipts_enforce_exact_retry_and_384_call_transfer_budget(transfer_db):
     run_id = _run(transfer_db)
     capability = "sec_company_tickers_transfer_budget"
     pin_payload = {
@@ -418,7 +540,7 @@ def test_server_receipts_enforce_exact_retry_and_160_call_transfer_budget(transf
         "after_security_id": None,
         "limit": 500,
     }
-    for _ in range(159):
+    for _ in range(383):
         page = _rpc(
             transfer_db, "read_market_discovery_reference", run_id, read_payload,
         )
@@ -429,8 +551,8 @@ def test_server_receipts_enforce_exact_retry_and_160_call_transfer_budget(transf
         "SELECT count(*),sum(encoded_bytes) FROM public.market_reference_transfer_requests "
         "WHERE run_id=%s", (run_id,),
     ).fetchone()
-    assert count == 160
-    assert total <= 32 * 1024 * 1024
+    assert count == 384
+    assert total <= 48 * 1024 * 1024
 
 
 def test_actual_gateway_repository_and_postgres_transfer_all_15000_members(transfer_db):
@@ -569,6 +691,70 @@ def test_actual_gateway_repository_and_postgres_transfer_all_15000_members(trans
     ).fetchone()
     assert receipt_count == summary["calls"]
     assert receipt_bytes == summary["total_bytes"]
+
+
+def test_v2_real_15000_predecessor_upload_and_restart_hydration_stay_bounded(transfer_db):
+    capability = "sec_company_tickers_v2_full_capacity"
+    first_run = _run(transfer_db)
+    first = _transfer(
+        first_run,
+        15_000,
+        "2026-09-06T12:00:00Z",
+        capability,
+        semantic_encoding_version=2,
+    )
+    _upload(transfer_db, first_run, first)
+
+    run_id = _run(transfer_db)
+    predecessor = _pin_predecessor(
+        transfer_db, run_id, capability, "2026-09-07T12:00:00Z",
+    )
+    assert predecessor["manifest_id"] == first.begin["manifest"]["id"]
+
+    def read_all(binding_role):
+        after = None
+        rows = []
+        while True:
+            page = _rpc(transfer_db, "read_market_discovery_reference", run_id, {
+                "capability_id": capability,
+                "binding_role": binding_role,
+                "after_security_id": after,
+                "limit": 500,
+            })
+            rows.extend(page["securities"])
+            if page["complete"]:
+                return rows
+            after = page["next_after_security_id"]
+
+    assert len(read_all("predecessor")) == 15_000
+    current = _transfer(
+        run_id,
+        15_000,
+        "2026-09-07T11:00:00Z",
+        capability,
+        semantic_encoding_version=2,
+    )
+    _upload(transfer_db, run_id, current, pin_predecessor=False)
+    _rpc(transfer_db, "pin_market_discovery_reference", run_id, {
+        "capability_id": capability,
+        "binding_role": "current",
+        "manifest_id": current.begin["manifest"]["id"],
+        "reference_status": "healthy",
+        "reference_as_of": "2026-09-07T12:00:01Z",
+    })
+    assert len(read_all("current")) == 15_000
+
+    request_count, request_bytes = transfer_db.execute(
+        "SELECT count(*),sum(encoded_bytes) FROM public.market_reference_transfer_requests "
+        "WHERE run_id=%s", (run_id,),
+    ).fetchone()
+    response_bytes = transfer_db.execute(
+        "SELECT sum(encoded_bytes) FROM public.market_reference_transfer_responses "
+        "WHERE run_id=%s", (run_id,),
+    ).fetchone()[0]
+    assert request_count <= 384
+    assert request_bytes <= 48 * 1024 * 1024
+    assert response_bytes <= 64 * 1024 * 1024
 
 
 def test_concurrent_exact_begin_and_chunk_retries_return_existing_receipts(transfer_db):

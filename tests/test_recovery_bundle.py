@@ -111,6 +111,7 @@ def recovery_records():
             "exchange": "NASDAQ", "instrument_type": "COMMON_STOCK", "eligible": True,
             "exclusion_reasons": [], "aliases": ["Test Corp"], "source_ids": ["nasdaq-listed"],
             "valid_from": "2026-09-05T19:30:00Z", "valid_to": None, "content_hash": "3" * 64,
+            "semantic_encoding_version": 1, "issuer_names": None,
             "created_at": "2026-09-05T19:31:00Z",
         }],
         "reference_chunk_receipts": [{
@@ -172,6 +173,11 @@ def recovery_records():
             "encoded_bytes": len(transfer_encoded),
             "request_hash": hashlib.sha256(transfer_encoded).hexdigest(),
             "request_payload": current_pin_payload,
+            "created_at": "2026-09-05T19:32:00Z",
+        }],
+        "reference_transfer_responses": [{
+            "request_id": transfer_request_id, "run_id": run,
+            "encoded_bytes": 96, "response_hash": "d" * 64,
             "created_at": "2026-09-05T19:32:00Z",
         }],
         "discovery_stage_tasks": [{
@@ -553,6 +559,7 @@ EMPTY_INTELLIGENCE_PACKET_REPORT_HISTORY = (
     "reference_run_bindings",
     "reference_predecessor_pins",
     "reference_transfer_requests",
+    "reference_transfer_responses",
     "discovery_stage_tasks",
     "theme_episode_revisions",
     "exposure_facts",
@@ -574,6 +581,7 @@ DISCOVERY_DATASETS = (
     "reference_run_bindings",
     "reference_predecessor_pins",
     "reference_transfer_requests",
+    "reference_transfer_responses",
     "discovery_stage_tasks",
     "theme_episode_revisions",
     "exposure_facts",
@@ -595,6 +603,7 @@ def test_recovery_validates_complete_discovery_lineage_and_exact_fields():
         "reference_run_bindings": 1,
         "reference_predecessor_pins": 1,
         "reference_transfer_requests": 1,
+        "reference_transfer_responses": 1,
         "discovery_stage_tasks": 3,
         "theme_episode_revisions": 1,
         "exposure_facts": 1,

@@ -44,6 +44,7 @@ _RESTORE_TABLES = (
     ("reference_run_bindings", "market_reference_run_bindings", {}),
     ("reference_predecessor_pins", "market_reference_predecessor_pins", {}),
     ("reference_transfer_requests", "market_reference_transfer_requests", {}),
+    ("reference_transfer_responses", "market_reference_transfer_responses", {}),
     ("discovery_stage_tasks", "market_discovery_stage_tasks", {}),
     ("theme_episode_revisions", "market_theme_episode_revisions", {}),
     ("exposure_facts", "market_exposure_facts", {}),

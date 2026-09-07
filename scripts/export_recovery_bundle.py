@@ -36,7 +36,7 @@ REQUIRED_RECOVERY_RECORDS = (
     "reference_manifests", "security_reference_revisions", "discovery_stage_tasks",
     "reference_chunk_receipts", "reference_snapshot_memberships",
     "reference_finalization_seals", "reference_run_bindings",
-    "reference_predecessor_pins", "reference_transfer_requests",
+    "reference_predecessor_pins", "reference_transfer_requests", "reference_transfer_responses",
     "theme_episode_revisions", "exposure_facts", "research_nominations",
     "packets", "reports",
     "intelligence_run_events", "source_quota_reservations", "collection_checkpoints",
@@ -87,7 +87,8 @@ DATASET_FIELDS = {
         "security_id": str, "entity_id": str, "ticker": str, "exchange": NULLABLE_TEXT,
         "instrument_type": str, "eligible": bool, "exclusion_reasons": list,
         "aliases": list, "source_ids": list, "valid_from": str, "valid_to": NULLABLE_TEXT,
-        "content_hash": str, "created_at": str,
+        "content_hash": str, "semantic_encoding_version": int,
+        "issuer_names": (dict, type(None)), "created_at": str,
     },
     "reference_chunk_receipts": {
         "manifest_id": str, "run_id": str, "capability_id": str,
@@ -120,6 +121,10 @@ DATASET_FIELDS = {
         "request_id": str, "run_id": str, "operation": str,
         "encoded_bytes": int, "request_hash": str, "request_payload": dict,
         "created_at": str,
+    },
+    "reference_transfer_responses": {
+        "request_id": str, "run_id": str, "encoded_bytes": int,
+        "response_hash": str, "created_at": str,
     },
     "discovery_stage_tasks": {
         "id": str, "run_id": str, "stage": str, "capability_id": str, "provider": str,
@@ -277,6 +282,7 @@ def _validated_records(records: Mapping[str, object]) -> dict[str, list[dict[str
             "reference_run_bindings": ("run_id", "capability_id"),
             "reference_predecessor_pins": ("run_id", "capability_id"),
             "reference_transfer_requests": "request_id",
+            "reference_transfer_responses": "request_id",
         }.get(name, "id")
         if isinstance(identity_fields, str):
             identity_fields = (identity_fields,)
@@ -414,8 +420,22 @@ def _validated_records(records: Mapping[str, object]) -> dict[str, list[dict[str
            or not valid_discovery_json(row["exclusion_reasons"], max_bytes=4096)
            or not valid_discovery_json(row["aliases"], max_bytes=4096)
            or not valid_discovery_json(row["source_ids"], max_bytes=4096)
+           or row["semantic_encoding_version"] not in {1, 2}
+           or row["semantic_encoding_version"] != manifests[row["manifest_id"]]["manifest"].get("format_version", 1)
+           or (row["semantic_encoding_version"] == 1) != (row["issuer_names"] is None)
+           or (row["issuer_names"] is not None
+               and (set(row["issuer_names"]) != {"canonical_name", "observed_names", "former_names"}
+                    or not valid_discovery_json(row["issuer_names"], max_bytes=32768)))
            for row in security_revisions.values()):
         raise ValueError("discovery security dependency mismatch or invalid content")
+    issuer_names_by_entity: dict[tuple[str, str], object] = {}
+    for row in security_revisions.values():
+        if row["semantic_encoding_version"] != 2:
+            continue
+        key = (row["manifest_id"], row["entity_id"])
+        prior = issuer_names_by_entity.setdefault(key, row["issuer_names"])
+        if prior != row["issuer_names"]:
+            raise ValueError("discovery security issuer names mismatch")
     seals = {row["manifest_id"]: row for row in result["reference_finalization_seals"]}
     receipts_by_manifest: dict[str, list[dict[str, object]]] = {}
     for row in result["reference_chunk_receipts"]:
@@ -425,6 +445,8 @@ def _validated_records(records: Mapping[str, object]) -> dict[str, list[dict[str
                 or not -1 <= row["chunk_index"] <= 511
                 or not 1 <= row["chunk_count"] <= 512
                 or not 0 <= row["entry_count"] <= 200
+                or (manifests.get(row["manifest_id"], {}).get("manifest", {}).get("format_version", 1) == 2
+                    and row["chunk_index"] >= 0 and row["entry_count"] > 88)
                 or not HASH.fullmatch(row["chunk_hash"])
                 or not valid_discovery_json(row["payload"], max_bytes=196608)):
             raise ValueError("discovery reference transfer dependency mismatch")
@@ -539,9 +561,23 @@ def _validated_records(records: Mapping[str, object]) -> dict[str, list[dict[str
                 or not valid_discovery_json(row["request_payload"], max_bytes=196608)):
             raise ValueError("discovery reference transfer request dependency mismatch")
         transfer_by_run.setdefault(row["run_id"], []).append(row)
-    if any(len(rows) > 160 or sum(row["encoded_bytes"] for row in rows) > 33554432
+    if any(len(rows) > 384 or sum(row["encoded_bytes"] for row in rows) > 50331648
            for rows in transfer_by_run.values()):
         raise ValueError("discovery reference transfer request dependency mismatch")
+    requests_by_transfer_id = {
+        row["request_id"]: row for row in result["reference_transfer_requests"]
+    }
+    response_by_run: dict[str, list[dict]] = {}
+    for row in result["reference_transfer_responses"]:
+        request = requests_by_transfer_id.get(row["request_id"])
+        if request is None or row["run_id"] != request["run_id"] \
+                or not 1 <= row["encoded_bytes"] <= 196608 \
+                or not HASH.fullmatch(row["response_hash"]):
+            raise ValueError("discovery reference transfer response dependency mismatch")
+        response_by_run.setdefault(row["run_id"], []).append(row)
+    if any(sum(row["encoded_bytes"] for row in rows) > 67108864
+           for rows in response_by_run.values()):
+        raise ValueError("discovery reference transfer response dependency mismatch")
     discovery_tasks = {row["id"]: row for row in result["discovery_stage_tasks"]}
     if any(not UUID.fullmatch(row["id"]) or row["run_id"] not in intelligence_runs
            or row["stage"] not in discovery_stages or row["provider"] not in discovery_providers
@@ -935,6 +971,7 @@ def relationships(records: Mapping[str, list]) -> dict[str, list]:
         "discovery_reference_bindings": sorted([[row["run_id"], row["capability_id"], row["manifest_id"], row["reference_status"]] for row in records["reference_run_bindings"]]),
         "discovery_reference_predecessor_pins": sorted([[row["run_id"], row["capability_id"], row["manifest_id"], row["reference_status"]] for row in records["reference_predecessor_pins"]]),
         "discovery_reference_transfer_requests": sorted([[row["request_id"], row["run_id"], row["operation"], row["encoded_bytes"], row["request_hash"]] for row in records["reference_transfer_requests"]]),
+        "discovery_reference_transfer_responses": sorted([[row["request_id"], row["run_id"], row["encoded_bytes"], row["response_hash"]] for row in records["reference_transfer_responses"]]),
         "discovery_task_run_dependencies": sorted([[row["id"], row["run_id"], row["dependency_ids"]] for row in records["discovery_stage_tasks"]]),
         "discovery_theme_task_run": sorted([[row["id"], row["task_id"], row["run_id"]] for row in records["theme_episode_revisions"]]),
         "discovery_exposure_lineage": sorted([[row["id"], row["task_id"], row["security_revision_id"], row["theme_episode_revision_id"]] for row in records["exposure_facts"]]),

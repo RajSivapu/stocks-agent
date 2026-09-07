@@ -7,6 +7,7 @@ import json
 import re
 import unicodedata
 import uuid
+from urllib.parse import urlsplit
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from decimal import Decimal
@@ -66,6 +67,37 @@ def evidence_key(item: SourceItem) -> str:
     return str(uuid.uuid5(uuid.NAMESPACE_URL, f"market-source:{item.content_hash}"))
 
 
+def publisher_identity(item: SourceItem) -> str:
+    """Return a stable publisher identity rather than an adapter identity."""
+    supplied = (
+        item.metadata.get("publisher_id")
+        or item.metadata.get("publisher_domain")
+        or item.metadata.get("domain")
+    ) if hasattr(item.metadata, "get") else None
+    if supplied:
+        return str(supplied).strip().casefold()[:200]
+    if item.canonical_url:
+        try:
+            host = urlsplit(item.canonical_url).hostname
+        except ValueError:
+            host = None
+        if host:
+            return host.casefold().rstrip(".")
+    return item.provider
+
+
+def upstream_identity(item: SourceItem) -> str:
+    """Return an original-story identity so syndicated copies count once."""
+    supplied = (
+        item.metadata.get("upstream_identity")
+        or item.metadata.get("syndication_id")
+        or item.metadata.get("canonical_article_id")
+    ) if hasattr(item.metadata, "get") else None
+    return str(
+        supplied or item.upstream_item_id or item.canonical_url or item.content_hash
+    ).strip().casefold()[:512]
+
+
 def _accepted_items(
     items: Iterable[SourceItem | RunItemDisposition],
 ) -> tuple[SourceItem, ...]:
@@ -104,17 +136,16 @@ def propose_dynamic_theme(
     fingerprint = theme_fingerprint(label)
     accepted = _accepted_items(evidence)
     coverage = " ".join(str(coverage_label or "").split())[:500]
-    non_hypothesis_providers = {
-        item.provider for item in accepted if item.authority != "hypothesis"
-    }
-    corroborated = any(item.authority == "official" for item in accepted) or len(
-        non_hypothesis_providers
-    ) >= 2
+    non_hypothesis = tuple(item for item in accepted if item.authority != "hypothesis")
+    corroborated = (
+        len({publisher_identity(item) for item in non_hypothesis}) >= 2
+        and len({upstream_identity(item) for item in non_hypothesis}) >= 2
+    )
     missing: list[str] = []
     if len(accepted) < 2:
         missing.append("requires_two_accepted_items")
     if not corroborated:
-        missing.append("authoritative_or_corroborating_source_required")
+        missing.append("publisher_independent_corroboration_required")
     if fingerprint in {theme_fingerprint(seed) for seed in SEED_THEMES}:
         missing.append("not_novel_from_seed_taxonomy")
     if not coverage:
@@ -210,6 +241,8 @@ __all__ = [
     "ThemeProposal",
     "build_market_event",
     "evidence_key",
+    "publisher_identity",
     "propose_dynamic_theme",
     "theme_fingerprint",
+    "upstream_identity",
 ]

@@ -26,6 +26,7 @@ MIGRATION = ROOT / "sql" / "migrations" / "20261005_market_wide_discovery.sql"
 TRANSFER_MIGRATION = ROOT / "sql" / "migrations" / "20261006_reference_snapshot_transfer.sql"
 CURSOR_MIGRATION = ROOT / "sql" / "migrations" / "20261007_discovery_cursor_context.sql"
 OFFICIAL_COMPLETION_MIGRATION = ROOT / "sql" / "migrations" / "20261008_official_source_completion_contract.sql"
+ISSUER_NAMES_MIGRATION = ROOT / "sql" / "migrations" / "20261009_reference_issuer_names.sql"
 SCHEMA = ROOT / "sql" / "schema.sql"
 
 TABLES = (
@@ -139,7 +140,8 @@ def test_schema_appends_the_new_immutable_migration_verbatim():
     assert migration in schema
     assert TRANSFER_MIGRATION.read_text() in schema
     assert CURSOR_MIGRATION.read_text() in schema
-    assert schema.endswith(OFFICIAL_COMPLETION_MIGRATION.read_text())
+    assert OFFICIAL_COMPLETION_MIGRATION.read_text() in schema
+    assert schema.endswith(ISSUER_NAMES_MIGRATION.read_text())
 
 
 def test_cursor_context_rpc_is_static_service_only_and_preserves_prior_migrations():

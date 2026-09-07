@@ -338,6 +338,7 @@ Deno.test("reference transfer repository routes all bounded protocol RPCs", asyn
             reference_status: "reference_unavailable",
             source_retrieved_at: null,
             reference_age_seconds: null,
+            issuer_names_status: "issuer_names_unavailable",
           },
           manifest: null,
           securities: [],

@@ -1,3 +1,4 @@
+from dataclasses import replace
 from datetime import datetime, timezone
 from decimal import Decimal
 
@@ -14,13 +15,17 @@ NOW = datetime(2026, 9, 4, 14, tzinfo=timezone.utc)
 
 
 def source_item(index: int, *, authority: str = "radar", provider: str = "gdelt", exposure_kind=None):
-    metadata = {"item_id": f"00000000-0000-4000-8000-{index:012d}"}
+    metadata = {
+        "item_id": f"00000000-0000-4000-8000-{index:012d}",
+        "publisher_id": provider,
+        "upstream_identity": f"original-{index}",
+    }
     if exposure_kind is not None:
         metadata["exposure_kind"] = exposure_kind
     return SourceItem(
         provider=provider,
         upstream_item_id=f"item-{index}",
-        canonical_url=f"https://example.com/{index}",
+        canonical_url=f"https://{provider}.example/{index}",
         title=f"Evidence {index}",
         summary=f"Bounded evidence {index}",
         canonical_content=f"content-{index}",
@@ -83,9 +88,35 @@ def test_dynamic_theme_requires_evidence_corroboration_novelty_and_coverage():
     assert "not_novel_from_seed_taxonomy" in seed_duplicate.missing_reasons
     assert set(uncovered.missing_reasons) == {
         "requires_two_accepted_items",
-        "authoritative_or_corroborating_source_required",
+        "publisher_independent_corroboration_required",
         "coverage_label_required",
     }
+
+
+def test_syndicated_copies_do_not_count_as_dynamic_theme_corroboration():
+    first = source_item(20, provider="gdelt")
+    syndicated = replace(
+        source_item(21, provider="finnhub"),
+        metadata={
+            **source_item(21, provider="finnhub").metadata,
+            "publisher_id": "same-publisher",
+            "upstream_identity": "wire-story-1",
+        },
+    )
+    first = replace(first, metadata={
+        **first.metadata,
+        "publisher_id": "same-publisher",
+        "upstream_identity": "wire-story-1",
+    })
+
+    proposal = propose_dynamic_theme(
+        "novel cooling loop",
+        (first, syndicated),
+        coverage_label="two adapters; one upstream story",
+    )
+
+    assert proposal.eligible is False
+    assert "publisher_independent_corroboration_required" in proposal.missing_reasons
 
 
 def test_market_event_and_direct_or_second_order_links_keep_evidence():
