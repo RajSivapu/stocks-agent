@@ -1,0 +1,223 @@
+{
+  "format": "stocks-native-sites-ui-release-v1",
+  "captured_at": "2026-09-07T01:39:18Z",
+  "trust_domain": "codex-native-sites-connector",
+  "release_scope": {
+    "kind": "owner-site-only-auth-ux",
+    "changed_components": [
+      "owner_site",
+      "auth_configuration_attestation"
+    ],
+    "unchanged_components": [
+      "production_database",
+      "supabase_auth",
+      "gateway_edge_function",
+      "dashboard_api_edge_function",
+      "telegram_edge_function",
+      "scheduled_workflows"
+    ],
+    "scheduled_runs_started": 0,
+    "secret_rotations": 0,
+    "backend_attestation_reference": {
+      "run_id": 34055419086,
+      "attested_main_sha": "b3f7d706573224d8edfa88570067dfb1b0900672"
+    },
+    "pull_requests": [
+      33
+    ],
+    "reviewed_head_sha": "13551e54e3604403720e4ecbfac087d816afd8bc",
+    "exact_main_ci_runs": [
+      34073314211
+    ]
+  },
+  "site": {
+    "project_id": "appgprj_6a9a35fb60648191b30e2bb973a2347f",
+    "status": "active",
+    "live_url": "https://personal-stock-agent.rupesh-sivapu.chatgpt.site",
+    "latest_version_number": 9,
+    "current_user_role": "owner",
+    "access_mode": "custom",
+    "allowed_owner_count": 1,
+    "allowed_user_count": 1,
+    "external_visitor_count": 0,
+    "allowed_group_count": 0,
+    "custom_domain_count": 0
+  },
+  "active_version": {
+    "id": "appgprj_6a9a35fb60648191b30e2bb973a2347f~appgver_21e646b56cec81918f65833c784e8535",
+    "version_number": 9,
+    "source_commit_sha": "e2f9d74495fa2ff8ed02e72b12d09755918bb9f9",
+    "archive_format": "tar",
+    "archive_content_hash": "sha256:d21629b094212d1529996268557c00cc64e2101bdb133c28b10b4238992070bc",
+    "local_archive_sha256": "65582e11a6bf05ae3e1b755078bca77fb6745669a0fc14ebd9e585e8f79685ea",
+    "file_count": 16,
+    "size_bytes": 542720
+  },
+  "active_deployment": {
+    "id": "appgdep_6a9e15085f048191a80497d9e75fd253",
+    "version_id": "appgprj_6a9a35fb60648191b30e2bb973a2347f~appgver_21e646b56cec81918f65833c784e8535",
+    "type": "publish",
+    "status": "succeeded",
+    "url": "https://personal-stock-agent.rupesh-sivapu.chatgpt.site",
+    "env_set_revision": 0,
+    "updated_at": "2026-09-07T01:36:17.659472+00:00"
+  },
+  "rollback_version": {
+    "id": "appgprj_6a9a35fb60648191b30e2bb973a2347f~appgver_698c6bf251c88191a7e5741f91638c42",
+    "version_number": 8,
+    "source_commit_sha": "b433a5b2030bc7d5636cbc4c7110e9247905347c",
+    "deployment_id": "appgdep_6a9dff357ee88191bf08d54af6f4240f"
+  },
+  "auth_flow": {
+    "primary_browser_mode": "email_password",
+    "password_setup_and_recovery_mode": "signed_email_link",
+    "magic_link_fallback_enabled": true,
+    "visible_numeric_code_field": false,
+    "password_minimum_length": 12,
+    "unknown_account_response_is_neutral": true,
+    "signup_enabled": false,
+    "session_storage_scope": "tab",
+    "activity_lock_minutes": 30,
+    "recovery_marker_scope": "tab",
+    "dashboard_requests_before_recovery_completion": 0,
+    "site_url": "https://personal-stock-agent.rupesh-sivapu.chatgpt.site",
+    "allowed_redirect_urls": [
+      "https://personal-stock-agent.rupesh-sivapu.chatgpt.site"
+    ],
+    "mailer_otp_length": 6,
+    "mailer_otp_expiry_seconds": 600,
+    "mailer_templates_magic_link_variable": "ConfirmationURL",
+    "mailer_templates_recovery_variable": "ConfirmationURL",
+    "custom_smtp_enabled": false
+  },
+  "review": {
+    "model": "GPT-5.6 Sol",
+    "reasoning_effort": "xhigh",
+    "decision": "approved",
+    "reviewed_head_sha": "13551e54e3604403720e4ecbfac087d816afd8bc",
+    "open_critical_findings": 0,
+    "open_important_findings": 0
+  },
+  "verification": {
+    "exact_main_ci_run": 34073314211,
+    "exact_main_sha": "e2f9d74495fa2ff8ed02e72b12d09755918bb9f9",
+    "exact_main_ci_status": "success",
+    "local_suite": {
+      "python_passed": 922,
+      "python_skipped": 3,
+      "credentialed_database_tests_deselected": 4,
+      "node_passed": 71,
+      "deno_passed": 290,
+      "dashboard_contract_passed": 6,
+      "web_unit_passed": 52,
+      "playwright_passed": 21,
+      "playwright_live_canary_skipped": 1
+    }
+  },
+  "build": {
+    "api_origin": "https://hlxpxbxhqctwsqizwjjy.supabase.co/functions/v1/owner-dashboard-api",
+    "asset_hashes": [
+      {
+        "file": "_headers",
+        "sha256": "23024334411c251734b729dc3f3898000b5d9f49a79b9ba75cac61f71e973118"
+      },
+      {
+        "file": "assets/IdeasPage-QcdSYONE.js",
+        "sha256": "280156f47876dd40e9969cd3c0f4f40f82ee192708923c54facf22c50eb3c2e4"
+      },
+      {
+        "file": "assets/IntelligencePage-nI0vwE5X.js",
+        "sha256": "9959f40c7eb28f23371f8eb0e0b4804b8c8d5c5a9c92b487e419d93859120217"
+      },
+      {
+        "file": "assets/PortfolioPage-BgsIbu-L.js",
+        "sha256": "4a7c44c4c52cf2888c29989ed4140ce07cdff0f75b10c20bad9d7989cb65496c"
+      },
+      {
+        "file": "assets/ReceiptTimeline-CQhwHRA6.js",
+        "sha256": "73602d67e2bbcfda0c611967d88bda338a02506cf6a77e18abc70adaccb4d7a6"
+      },
+      {
+        "file": "assets/ReportDetailPage-gYdBg4Iz.js",
+        "sha256": "c7e97fbe40edeb7e384e5aca29f499ebbe8673b8f56f736add5200659bf9da88"
+      },
+      {
+        "file": "assets/ReportsPage-BiZl4P_u.js",
+        "sha256": "f926cee1f87de775c4c513b41315e0e08cb79bd09c4d098b3be5a1d77fa0a74b"
+      },
+      {
+        "file": "assets/RunDetailPage-BSxl6srX.js",
+        "sha256": "a11d2966357866c79ebb58d18e33af629e36acda8af46cfa6346167e158b7973"
+      },
+      {
+        "file": "assets/SafeSourceLink-BsunJdPQ.js",
+        "sha256": "4cde767954aedd4138f8a6a5ff451420039aee3f3db69419c0444bb7e34f6257"
+      },
+      {
+        "file": "assets/SystemPage--aYUfaqW.js",
+        "sha256": "41c4142eef4dbe3df38fe68bb90fe0e847fc05197bd92a4945bfc0bc11b282c4"
+      },
+      {
+        "file": "assets/ideaVersions-BkLbKlnd.js",
+        "sha256": "5d38118380b9c56a6ceffef54653d8200d4813160b48c03ebfeb0b2309a76754"
+      },
+      {
+        "file": "assets/index-CJjrRGl8.css",
+        "sha256": "9c0ecb1e8a3892a6f0c77847ac6e3026f9a297d31a3e2bfbf2e91ef0b37823a4"
+      },
+      {
+        "file": "assets/index-p7iEOpWx.js",
+        "sha256": "a3d9d2f286cb33fff08fcd9bff680b2e18369e29b2caab0d8b964ed8927587a2"
+      },
+      {
+        "file": "index.html",
+        "sha256": "f22001fbbe1cea62e1f8ed1e2f5cea3fe235177718c08175b0f0608aa841ba2d"
+      },
+      {
+        "file": "theme-bootstrap.js",
+        "sha256": "6fa252c83c9f670c11d7cce88dc803ec14f0dd40c12fd4a3e32c96232e0df921"
+      }
+    ],
+    "built_at": "2026-09-07T01:35:03.396537Z",
+    "file_count": 15,
+    "initial_js_gzip_bytes": 132926,
+    "project_ref_digest": "610d1c4379ea1257",
+    "site_origin": "https://personal-stock-agent.rupesh-sivapu.chatgpt.site",
+    "static_directory": "dist",
+    "status": "verified"
+  },
+  "live_bundle": {
+    "served_file_count": 14,
+    "byte_identical_file_count": 13,
+    "host_transformed_html": {
+      "transform": "cloudflare_request_specific_challenge_script",
+      "local_html_sha256": "f22001fbbe1cea62e1f8ed1e2f5cea3fe235177718c08175b0f0608aa841ba2d",
+      "challenge_script_count": 1,
+      "normalized_live_html_sha256": "f22001fbbe1cea62e1f8ed1e2f5cea3fe235177718c08175b0f0608aa841ba2d",
+      "normalized_matches_built": true
+    },
+    "script_assets": [
+      {
+        "url": "https://personal-stock-agent.rupesh-sivapu.chatgpt.site/theme-bootstrap.js",
+        "sha256": "6fa252c83c9f670c11d7cce88dc803ec14f0dd40c12fd4a3e32c96232e0df921",
+        "bytes": 293
+      },
+      {
+        "url": "https://personal-stock-agent.rupesh-sivapu.chatgpt.site/assets/index-p7iEOpWx.js",
+        "sha256": "a3d9d2f286cb33fff08fcd9bff680b2e18369e29b2caab0d8b964ed8927587a2",
+        "bytes": 464219
+      }
+    ],
+    "required_auth_text_present": {
+      "Set up or reset password": true,
+      "Email password setup link": true,
+      "Choose a new password": true,
+      "personal-stock-agent-password-recovery": true
+    },
+    "project_ref_present": true,
+    "api_url_present": true,
+    "supabase_project_ref": "hlxpxbxhqctwsqizwjjy",
+    "dashboard_api_url": "https://hlxpxbxhqctwsqizwjjy.supabase.co/functions/v1/owner-dashboard-api"
+  },
+  "live_application_assets_match_built": true
+}

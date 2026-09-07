@@ -19,8 +19,8 @@ An owner-only personal stock agent that uses zero-incremental-cost data sources,
 - [x] Final GPT-6 Astra re-review approved at exact code commit `883d521`
 - [x] Astra remediation merged to protected `main`; exact-main CI passed at `c9e3140`
 - [x] Database ledger read back as current; gateway v33, dashboard API v4, and Telegram v20 deployed with runtime-byte parity
-- [x] Private owner Site v8 published from exact UI `main` merge `b433a5b`; signed-link-only browser flow, reviewed live-script parity, and owner-only access readback passed, while the backend attestation remains bound to `b3f7d70`
-- [x] Live free-tier Auth read back and browser aligned to its signed email-link template; protected configuration verification still recognizes either allowed template
+- [x] Private owner Site v9 published from exact UI `main` merge `e2f9d74`; email-and-password login, signed-link setup/recovery, reviewed live-asset parity, and owner-only access readback passed, while the backend attestation remains bound to `b3f7d70`
+- [x] Live free-tier Auth read back with signup disabled, exact Site/redirect URLs, and `ConfirmationURL` magic-link and recovery templates; the browser uses email-and-password by default with signed-link setup/recovery and a magic-link fallback
 - [x] Receipt-bound production schema reconciliation completed exactly once in run `34039011879`
 - [x] Protected isolated restore and both cleanup paths completed in run `34042155368`
 - [x] Protected one-time existing-runtime attestation `34055419086`
@@ -29,7 +29,7 @@ An owner-only personal stock agent that uses zero-incremental-cost data sources,
 ## Completed implementation areas
 
 - [x] Credentialed database tests are opt-in and deployment-safe
-- [x] Free-tier signed email-link browser flow, configuration drift checks, and true inactivity timeout
+- [x] Free-tier email-and-password browser flow, signed-link setup/recovery and fallback, configuration drift checks, and true inactivity timeout
 - [x] Executable-price validation and portfolio-wide risk reservations
 - [x] Evidence-authoritative reports and SQL idempotency
 - [x] Decimal-safe and backdated transaction accounting
@@ -65,13 +65,14 @@ An owner-only personal stock agent that uses zero-incremental-cost data sources,
 - [x] Run one scoped GPT-6 Astra re-review of the 11 findings — **approved**
 - [x] Update this checklist and the formal status/rollout records
 - [x] Publish the signed-link-only login correction as owner-only Site v8 and retain Site v7 as rollback
+- [x] Publish the password-primary login and recovery flow as owner-only Site v9 and retain Site v8 as rollback
 
 ## Production gates
 
 These require the protected production path and must not be replaced by local evidence.
 
-- [x] Confirm live Auth is signup-disabled with 900-second JWT, six-digit/600-second OTP settings, and a signed-link template
-- [x] Match the browser to the live free-tier signed-link template; retain protected detection of either allowed template and require a reviewed UI change before any switch to numeric codes
+- [x] Confirm live Auth is signup-disabled with 900-second JWT, six-digit/600-second OTP settings, and `ConfirmationURL` magic-link and recovery templates
+- [x] Match the browser to the live free-tier templates: email-and-password by default, signed-link setup/recovery, and signed magic-link fallback; require both link templates in protected configuration verification
 - [x] Push/merge the exact reviewed remediation through protected `main`
 - [x] Pass exact-main CI
 - [x] Apply the receipt-bound production schema reconciliation exactly once — **run `34039011879`**
@@ -80,7 +81,8 @@ These require the protected production path and must not be replaced by local ev
 - [x] Publish the signed-link-compatible web build as Site v5; deployment `appgdep_6a9cd0def8f0819187aa7d30d99a7ada` succeeded
 - [x] Publish the simplified and accessibility-reviewed UI as owner-only Site v7 from exact main `a4c8031`; deployment `appgdep_6a9df7eee2cc819193fefc13aa39d8bb` succeeded and `docs/receipts/2026-09-06-native-site-v7.json` binds the source, build, live scripts, access, and rollback
 - [x] Publish the link-only owner Auth correction as owner-only Site v8 from exact main `b433a5b`; deployment `appgdep_6a9dff357ee88191bf08d54af6f4240f` succeeded and `docs/receipts/2026-09-06-native-site-v8.json` binds the source, build, live scripts, access, and v7 rollback
-- [x] Complete an owner email sign-in canary on signed-link Site v5 — **owner confirmed the signed email link opened the portfolio dashboard on 2026-09-05; later Site v8 preserves the same callback flow**
+- [x] Publish password-primary owner Auth with signed-link setup/recovery as owner-only Site v9 from exact main `e2f9d74`; deployment `appgdep_6a9e15085f048191a80497d9e75fd253` succeeded and `docs/receipts/2026-09-06-native-site-v9.json` binds the source, build, Auth readback, live assets, Sol review, access, and v8 rollback
+- [x] Complete an owner email sign-in canary on signed-link Site v5 — **owner confirmed the signed email link opened the portfolio dashboard on 2026-09-05; Site v9 preserves the same callback as setup/recovery and fallback**
 - [x] Perform the protected restore drill and retain its receipt — **run `34042155368` restored and
   verified 26 record sets, preserved identical production roots, applied no migrations on retry,
   deleted the temporary project, and passed both cleanup receipts**

@@ -4,8 +4,8 @@ Last updated: 2026-09-06
 Canonical release: Personal Stock Agent V1 safety remediation
 Audit baseline: `432d647ef911ff63da427097f02a852e18038b62` on `origin/main`
 Consolidated local-gate candidate: `883d521728b1b3c2700a78dab1d65208105d7a2f`
-Current state: owner-only Site v8 is live from UI main
-`b433a5b2030bc7d5636cbc4c7110e9247905347c`, with successful exact-main CI `34068491038`.
+Current state: owner-only Site v9 is live from UI main
+`e2f9d74495fa2ff8ed02e72b12d09755918bb9f9`, with successful exact-main CI `34073314211`.
 Production schema reconciliation, managed isolated recovery, and the protected backend-runtime
 attestation are complete; trusted V1 use remains **no-go** pending the next existing scheduled
 evidence chain. The unchanged backend remains attested at
@@ -72,6 +72,14 @@ This file is the version-controlled source of truth for the Personal Stock Agent
   `appgdep_6a9dff357ee88191bf08d54af6f4240f` succeeded with one allowed owner, no groups, and zero
   external visitors. The live entry scripts match the verified build; Site v7 is the immediate
   rollback. Receipt: `docs/receipts/2026-09-06-native-site-v8.json`.
+- [x] PR #33 made email-and-password the primary owner login, added signed-link password setup and
+  recovery, preserved signed magic-link fallback, and prevented dashboard reads until recovery is
+  completed. Sol xhigh review approved exact head `13551e5`; protected main `e2f9d74` passed
+  exact-main CI `34073314211`. Owner-only Site v9 deployment
+  `appgdep_6a9e15085f048191a80497d9e75fd253` succeeded with one allowed owner, no groups, and zero
+  external visitors. All application assets match the verified build after excluding Cloudflare's
+  request-specific HTML challenge injection; Site v8 is the immediate rollback. Receipt:
+  `docs/receipts/2026-09-06-native-site-v9.json`.
 
 ## Product interface direction
 
@@ -160,18 +168,22 @@ separately; deployment never substitutes for the protected attestation, restore,
 
 ## Owner email sign-in
 
-Protected Auth configuration checks accept both Supabase email modes: a six-digit numeric code
-(`{{ .Token }}`) or a signed email link (`{{ .ConfirmationURL }}`). The owner browser deliberately
-matches the live free-tier signed-link template and does not present a numeric-code field. It
-redirects the email flow to its deployed origin, consumes signed-link callbacks, retains the session
-only in session storage, and preserves the 30-minute activity-based privacy lock. Switching the live
-template to `{{ .Token }}` requires a reviewed browser change first.
+Email-and-password is the primary owner login. Initial password setup and password recovery use
+Supabase's signed recovery link, and signed magic-link login remains available as a fallback. The
+browser does not present a numeric-code field. It redirects both link flows to the exact deployed
+origin, consumes their signed callbacks, retains the session only in session storage, and preserves
+the 30-minute activity-based privacy lock. A tab-scoped recovery marker keeps the password-reset
+screen ahead of private dashboard reads until the new password is saved or the owner signs out.
 
-Live Auth was read back on 2026-09-05: signup is disabled, JWT lifetime is 900 seconds, OTP length is
-6, OTP expiry is 600 seconds, the default free-tier template uses `ConfirmationURL`, the Site URL and
-only allowed redirect are the private owner Site, and exactly one confirmed owner exists. The template
-was not changed because custom template modification is unavailable with the project's default
-free-tier mail provider.
+Protected Auth configuration checks now require both the magic-link and recovery templates to use
+`{{ .ConfirmationURL }}`. They do not accept `{{ .Token }}` because this browser intentionally has no
+numeric-code entry step.
+
+Live Auth was read back again on 2026-09-06: signup is disabled, the Email provider is enabled, JWT
+lifetime is 900 seconds, OTP length is 6, OTP expiry is 600 seconds, both the default magic-link and
+recovery templates use `ConfirmationURL`, the Site URL and only allowed redirect are the private
+owner Site, and exactly one confirmed owner exists. The templates were not changed because custom
+template modification is unavailable with the project's default free-tier mail provider.
 
 The owner confirmed on 2026-09-05 that the signed email link opened the live portfolio dashboard.
 A separate bounded canary created one temporary confirmed non-owner without sending email, verified
@@ -221,13 +233,15 @@ V1-C4 is reopened.
   outcome corrections, owner inactivity, and read-only weekly audit controls are implemented and
   task-reviewed locally.
 - [x] Read back the live signup-disabled, 900-second JWT, six-digit/600-second email settings and
-  support the default signed-link template without adding paid SMTP.
+  support the default signed magic-link and recovery templates without adding paid SMTP.
 - [x] Deploy the reviewed API candidate and pass owner and anonymous canaries.
 - [x] Complete the owner email-click canary; the owner confirmed the live dashboard appeared.
 - [x] Complete a formal non-owner login canary and retain its bounded denial receipt: HTTP 403
   `owner_only`, no portfolio data, temporary user deleted, and exactly one owner afterward.
 - [x] Publish the signed-link-only owner login correction as owner-only Site v8 from exact main
   `b433a5b`; retain Site v7 as rollback.
+- [x] Publish password-primary login with signed-link setup/recovery and fallback as owner-only Site
+  v9 from exact main `e2f9d74`; retain Site v8 as rollback.
 - [ ] Reconcile an original Telegram delivery ID or explicit persisted suppression from the next
   existing scheduled chain.
 
@@ -241,7 +255,7 @@ V1-C5 is reopened.
 - [x] GPT-6 Astra approved the final scoped re-review with no unresolved local Critical or Important
   finding; the final split-trust review also returned CLEAN with no Critical/P1/P2 finding.
 - [x] Exact-head CI `34055169909` and exact-main CI `34055295512` passed for attested backend main
-  `b3f7d70`; later UI-only main `b433a5b` passed exact-main CI `34068491038`.
+  `b3f7d70`; later UI-only main `e2f9d74` passed exact-main CI `34073314211`.
 - [x] Historical production runtime readback, three-function parity, private Site publication, and
   owner/anonymous canaries completed; schema reconciliation is now complete above.
 - [x] Approved receipt-bound schema reconciliation completed (`34039011879`); do not rerun.
@@ -260,13 +274,14 @@ V1-C6 is reopened and the release remains no-go for trusted use.
 
 ## Site-only UI releases — completed 2026-09-06
 
-PRs #28 and #29 produced the simplified private Site v7. PR #31 then removed the browser's
-misleading numeric-code step and aligned it with the live Supabase signed-link template. Current UI
-main `b433a5b` passed exact-main CI `34068491038`, and private Site v8 is live. Native readback
-confirmed custom access with exactly one allowed owner, no allowed groups, and zero external
-visitors. The live entry scripts match the verified local build, and Site v7 is retained as the
-immediate rollback. The current bounded receipt is
-`docs/receipts/2026-09-06-native-site-v8.json`; the v7 receipt remains historical evidence.
+PRs #28 and #29 produced the simplified private Site v7. PR #31 removed the browser's misleading
+numeric-code step and produced Site v8. PR #33 then added password-primary login with signed-link
+setup/recovery and magic-link fallback. Current UI main `e2f9d74` passed exact-main CI `34073314211`,
+and private Site v9 is live. Native readback confirmed custom access with exactly one allowed owner,
+no allowed groups, and zero external visitors. The live application assets match the verified local
+build after excluding Cloudflare's request-specific HTML challenge injection, and Site v8 is retained
+as the immediate rollback. The current bounded receipt is
+`docs/receipts/2026-09-06-native-site-v9.json`; the v7 and v8 receipts remain historical evidence.
 
 This release did not mutate the production database, Supabase Auth, any Edge function, managed
 secrets, Telegram, or scheduled workflows. The protected backend attestation at `b3f7d70` remains the
@@ -350,10 +365,10 @@ sync, focused PostgreSQL restore/retry evidence, and `git diff --check` also pas
 
 ## Production truth
 
-Production contains owner-only Site v8 and the reviewed backend runtime. Approved schema reconciliation
+Production contains owner-only Site v9 and the reviewed backend runtime. Approved schema reconciliation
 `34039011879`, isolated live restore `34042155368`, and protected existing-runtime attestation
 `34055419086` passed. These do not substitute for a post-remediation scheduled receipt chain. The owner email-click and
-formal non-owner denial canaries remain complete. Native Site v8 readback confirms one allowed owner,
+formal non-owner denial canaries remain complete. Native Site v9 readback confirms one allowed owner,
 no groups, and zero external visitors. Its receipt explicitly separates the UI-only publication from
 the unchanged backend and the still-pending scheduled chain.
 
