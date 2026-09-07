@@ -396,15 +396,21 @@ function identifierArray(
 const DISCOVERY_FORBIDDEN_FIELDS = new Set([
   "price",
   "valuation",
-  "portfolio_overlap",
+  "portfoliooverlap",
   "action",
   "authority",
   "execution",
-  "execution_allowed",
+  "executionallowed",
   "broker",
   "brokerage",
-  "order_id",
+  "order",
+  "orderid",
+  "orderdetails",
 ]);
+
+function discoveryFieldSemantic(key: string): string {
+  return key.toLowerCase().replace(/[^a-z0-9]/g, "");
+}
 
 function rejectDiscoveryAuthority(value: unknown, path: string): void {
   if (Array.isArray(value)) {
@@ -413,7 +419,7 @@ function rejectDiscoveryAuthority(value: unknown, path: string): void {
     );
   } else if (typeof value === "object" && value !== null) {
     for (const [key, child] of Object.entries(value as JsonObject)) {
-      if (DISCOVERY_FORBIDDEN_FIELDS.has(key.toLowerCase())) {
+      if (DISCOVERY_FORBIDDEN_FIELDS.has(discoveryFieldSemantic(key))) {
         throw new Error(`${path} has forbidden field: ${key}`);
       }
       rejectDiscoveryAuthority(child, `${path}.${key}`);

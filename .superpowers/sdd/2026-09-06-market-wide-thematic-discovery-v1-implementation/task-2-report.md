@@ -259,3 +259,118 @@ The skipped tests are environment-dependent existing tests; the disposable Postg
 ## Concerns
 
 No material implementation concern remains. Live deployment and protected production restore were intentionally not performed under Task 2's no-production/no-network-mutation boundary; verification used static parsers, exact registries, and a disposable local PostgreSQL instance.
+
+## Review fix round 1
+
+The first review identified two critical lineage/idempotency gaps and four important validation and verification gaps. I added executable regression cases before changing production code.
+
+### RED evidence
+
+Incomplete replay, cross-run/orphan lineage, terminal-run writes, and actual PostgreSQL grant collection:
+
+```text
+.venv/bin/python -m pytest tests/test_market_wide_discovery_sql.py -q
+7 failed, 8 passed in 1.39s
+```
+
+The failures demonstrated that an incomplete reference replay was accepted, a valid cross-run security reference was accepted, completed/failed parent runs could create or advance checkpoints, and discovery ACLs were absent from the collected catalog snapshot. The same suite also added valid cross-run theme/exposure-fact IDs and orphan exposure-fact IDs so every protected-write lineage variant executes against PostgreSQL.
+
+Recursive authority-key parsing:
+
+```text
+npx --yes deno@2.9.6 test --config supabase/functions/deno.json supabase/functions/market-briefing-gateway/_shared/intelligence_test.ts
+FAILED | 6 passed | 1 failed (20ms)
+```
+
+Nested `order`, `order_details`, `portfolioOverlap`, `executionAllowed`, and `ORDER-ID` keys were not all rejected after canonicalization.
+
+Recovery parser parity:
+
+```text
+.venv/bin/python -m pytest tests/test_recovery_bundle.py -q
+4 failed, 93 passed in 7.76s
+```
+
+Camel-case and order-semantic authority keys passed through the manifest, task-result, exposure-fact, or nomination recovery validators.
+
+Exact grant-drift verification:
+
+```text
+.venv/bin/python -m pytest tests/test_verify_market_intelligence_migration.py -q
+28 failed, 41 passed in 0.76s
+```
+
+The verifier rejected the intended discovery grants because it did not model them, and it could not report extra discovery table, column, or function grants from actual ACLs.
+
+### Implemented fixes
+
+- Exact discovery-reference replay now compares the complete persisted security-child count and every supplied identity/content tuple. A subset, extra child, or changed child fails closed.
+- `checkpoint_discovery_stage` locks and requires a market-intelligence row linked to a running parent analysis run for both first writes and advances.
+- Every security, theme, exposure-fact, and nomination relationship is checked against `p_run_id` before persistence. Orphan and cross-run UUIDs fail at the protected RPC boundary.
+- TypeScript and recovery JSON validators collapse key names to lowercase alphanumerics and reject the promised authority, execution, portfolio-overlap, broker, and order semantics at any nesting level.
+- The migration verifier collects grants for every discovery table and function plus discovery dashboard column ACLs, compares them to the exact intended role/grant sets, and derives `unexpected_grants` from catalog data.
+- Trigger helpers explicitly revoke execute from `PUBLIC`, `anon`, `authenticated`, and `service_role`; only the protected security-definer RPCs retain the exact service-role execution grants.
+- The wrong-run gateway test now uses a structurally valid UUID from another run so TypeScript accepts the wire shape and PostgreSQL remains responsible for same-run enforcement.
+- The additive migration remains `20261005_market_wide_discovery.sql`; immutable `20261004_production_schema_reconciliation.sql` and its collision rejection remain unchanged.
+
+### GREEN evidence
+
+Focused SQL and migration-verifier suite:
+
+```text
+.venv/bin/python -m pytest tests/test_market_wide_discovery_sql.py tests/test_verify_market_intelligence_migration.py -q
+84 passed in 1.67s
+```
+
+Focused parser and repository suite:
+
+```text
+npx --yes deno@2.9.6 test --config supabase/functions/deno.json supabase/functions/market-briefing-gateway/_shared/intelligence_test.ts supabase/functions/market-briefing-gateway/_shared/repository_test.ts
+ok | 21 passed | 0 failed (148ms)
+```
+
+Focused recovery and managed-restore suite:
+
+```text
+.venv/bin/python -m pytest tests/test_recovery_bundle.py tests/test_managed_isolated_restore.py -q
+137 passed in 8.82s
+```
+
+Gateway handler suite:
+
+```text
+npx --yes deno@2.9.6 test --config supabase/functions/deno.json supabase/functions/market-briefing-gateway/_shared/handler_test.ts
+ok | 53 passed | 0 failed (183ms)
+```
+
+Full regression after the final implementation changes:
+
+```text
+.venv/bin/python -m pytest -q
+988 passed, 3 skipped, 4 deselected in 53.88s
+
+npx --yes deno@2.9.6 test --config supabase/functions/deno.json supabase/functions/market-briefing-gateway/_shared
+ok | 241 passed | 0 failed (860ms)
+```
+
+Formatting, compile, and whitespace checks:
+
+```text
+npx --yes deno@2.9.6 fmt --check supabase/functions/market-briefing-gateway/_shared/intelligence.ts supabase/functions/market-briefing-gateway/_shared/intelligence_test.ts
+Checked 2 files
+
+.venv/bin/python -m py_compile <changed Python implementation and test files>
+git diff --check
+exit 0
+```
+
+### Review-round self-review
+
+- Verified the incomplete-replay check runs after child comparison and also rejects a newly supplied child when the manifest identity already exists.
+- Verified same-run checks occur before inserts, including nomination exposure IDs supplied as a bounded JSON array.
+- Verified completed and failed parent states reject both create and advance while valid running-state replay remains idempotent.
+- Verified grant collection reads real PostgreSQL information-schema and catalog ACLs; fixtures cover missing intended grants and extra table, column, and helper-function grants.
+- Verified `sql/schema.sql` contains the exact updated `20261005` migration tail and no `20261004` bytes changed.
+- Verified the fixes preserve owner-only, suggestion-only behavior, `execution_allowed = false`, and the no-production/no-network-mutation boundary.
+
+No new material concern was found. The skipped full-suite tests remain pre-existing environment-dependent cases; all disposable PostgreSQL discovery tests executed and passed locally.

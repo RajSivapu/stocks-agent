@@ -436,7 +436,11 @@ def test_recovery_rejects_orphaned_discovery_records(dataset, field, replacement
     ("reference_manifests", "content_hash", "altered"),
     ("discovery_stage_tasks", "query_hash", "altered"),
     ("discovery_stage_tasks", "provider", "paid_provider"),
+    ("reference_manifests", "manifest", {"nested": {"executionAllowed": False}}),
+    ("discovery_stage_tasks", "result", {"portfolioOverlap": {"ticker": "TEST"}}),
+    ("exposure_facts", "fact", {"nested": {"order": {"side": "buy"}}}),
     ("research_nominations", "rationale", {"action": "buy"}),
+    ("research_nominations", "rationale", {"nested": {"order_details": {"side": "buy"}}}),
 ])
 def test_recovery_rejects_altered_or_authoritative_discovery_records(dataset, field, replacement):
     records = recovery_records()

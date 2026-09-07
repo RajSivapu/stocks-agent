@@ -293,15 +293,18 @@ def _validated_records(records: Mapping[str, object]) -> dict[str, list[dict[str
         "screener", "quote", "universe",
     }
     forbidden_discovery_fields = {
-        "price", "valuation", "portfolio_overlap", "action", "authority", "execution",
-        "execution_allowed", "broker", "brokerage", "order_id",
+        "price", "valuation", "portfoliooverlap", "action", "authority", "execution",
+        "executionallowed", "broker", "brokerage", "order", "orderid", "orderdetails",
     }
+
+    def discovery_field_semantic(key: object) -> str:
+        return re.sub(r"[^a-z0-9]", "", str(key).lower())
 
     def valid_discovery_json(value: object, *, max_bytes: int) -> bool:
         if len(canonical_json(value).encode()) > max_bytes:
             return False
         if isinstance(value, Mapping):
-            return (not any(str(key).lower() in forbidden_discovery_fields for key in value)
+            return (not any(discovery_field_semantic(key) in forbidden_discovery_fields for key in value)
                     and all(valid_discovery_json(child, max_bytes=max_bytes) for child in value.values()))
         if isinstance(value, list):
             return all(valid_discovery_json(child, max_bytes=max_bytes) for child in value)

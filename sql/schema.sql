@@ -8294,12 +8294,20 @@ BEGIN
         RAISE EXCEPTION 'discovery reference idempotency mismatch' USING ERRCODE='22023';
       END IF;
     ELSE
+      IF v_duplicate THEN
+        RAISE EXCEPTION 'discovery reference idempotency mismatch' USING ERRCODE='22023';
+      END IF;
       INSERT INTO public.market_security_reference_revisions(id,manifest_id,run_id,revision,security_id,entity_id,ticker,exchange,instrument_type,eligible,exclusion_reasons,aliases,source_ids,valid_from,valid_to,content_hash)
       VALUES((r->>'id')::uuid,(r->>'manifest_id')::uuid,p_run_id,(r->>'revision')::int,r->>'security_id',r->>'entity_id',r->>'ticker',r->>'exchange',r->>'instrument_type',(r->>'eligible')::boolean,r->'exclusion_reasons',r->'aliases',r->'source_ids',(r->>'valid_from')::timestamptz,(r->>'valid_to')::timestamptz,r->>'content_hash');
-      v_duplicate:=false;
     END IF;
     v_count:=v_count+1;
   END LOOP;
+  IF v_duplicate AND (
+    SELECT count(*) FROM public.market_security_reference_revisions
+    WHERE manifest_id=(m->>'id')::uuid
+  )<>v_count THEN
+    RAISE EXCEPTION 'discovery reference idempotency mismatch' USING ERRCODE='22023';
+  END IF;
   RETURN jsonb_build_object('manifest_id',m->>'id','security_revision_count',v_count,'duplicate',v_duplicate);
 EXCEPTION WHEN invalid_text_representation OR datetime_field_overflow OR numeric_value_out_of_range THEN
   RAISE EXCEPTION 'invalid discovery reference payload' USING ERRCODE='22023';
@@ -8328,10 +8336,16 @@ BEGIN
      OR jsonb_typeof(t->'result')<>'object' OR octet_length((t->'result')::text)>65536 THEN
     RAISE EXCEPTION 'invalid discovery stage task' USING ERRCODE='22023';
   END IF;
-  IF NOT EXISTS(SELECT 1 FROM public.market_intelligence_runs WHERE id=p_run_id)
-     OR EXISTS(SELECT 1 FROM jsonb_array_elements_text(t->'dependency_ids') dependency
-               WHERE dependency !~ '^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$'
-                  OR NOT EXISTS(SELECT 1 FROM public.market_discovery_stage_tasks d WHERE d.id=dependency::uuid AND d.run_id=p_run_id AND d.state='succeeded')) THEN
+  PERFORM 1 FROM public.analysis_runs a
+  JOIN public.market_intelligence_runs i ON i.id=a.id
+  WHERE i.id=p_run_id AND a.status='running'
+  FOR UPDATE OF a;
+  IF NOT FOUND THEN
+    RAISE EXCEPTION 'intelligence run is not running' USING ERRCODE='22023';
+  END IF;
+  IF EXISTS(SELECT 1 FROM jsonb_array_elements_text(t->'dependency_ids') dependency
+            WHERE dependency !~ '^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$'
+               OR NOT EXISTS(SELECT 1 FROM public.market_discovery_stage_tasks d WHERE d.id=dependency::uuid AND d.run_id=p_run_id AND d.state='succeeded')) THEN
     RAISE EXCEPTION 'discovery task dependency mismatch' USING ERRCODE='22023';
   END IF;
   SELECT * INTO v_existing FROM public.market_discovery_stage_tasks WHERE id=(t->>'id')::uuid FOR UPDATE;
@@ -8381,6 +8395,17 @@ BEGIN
       END IF;
     END LOOP;
     FOR r IN SELECT value FROM jsonb_array_elements(p_payload->'exposure_facts') LOOP
+      IF NOT EXISTS(
+           SELECT 1 FROM public.market_security_reference_revisions s
+           WHERE s.id=(r->>'security_revision_id')::uuid AND s.run_id=p_run_id
+         ) OR (
+           r->>'theme_episode_revision_id' IS NOT NULL AND NOT EXISTS(
+             SELECT 1 FROM public.market_theme_episode_revisions e
+             WHERE e.id=(r->>'theme_episode_revision_id')::uuid AND e.run_id=p_run_id
+           )
+         ) THEN
+        RAISE EXCEPTION 'discovery result lineage mismatch' USING ERRCODE='22023';
+      END IF;
       IF v_duplicate THEN
         IF NOT EXISTS(
           SELECT 1 FROM public.market_exposure_facts f
@@ -8400,6 +8425,28 @@ BEGIN
       END IF;
     END LOOP;
     FOR r IN SELECT value FROM jsonb_array_elements(p_payload->'research_nominations') LOOP
+      IF jsonb_typeof(r->'exposure_fact_ids')<>'array'
+         OR jsonb_array_length(r->'exposure_fact_ids') NOT BETWEEN 1 AND 32 THEN
+        RAISE EXCEPTION 'discovery result lineage mismatch' USING ERRCODE='22023';
+      END IF;
+      IF NOT EXISTS(
+           SELECT 1 FROM public.market_security_reference_revisions s
+           WHERE s.id=(r->>'security_revision_id')::uuid AND s.run_id=p_run_id
+         ) OR (
+           r->>'theme_episode_revision_id' IS NOT NULL AND NOT EXISTS(
+             SELECT 1 FROM public.market_theme_episode_revisions e
+             WHERE e.id=(r->>'theme_episode_revision_id')::uuid AND e.run_id=p_run_id
+           )
+         ) OR EXISTS(
+           SELECT 1 FROM jsonb_array_elements_text(r->'exposure_fact_ids') fact_id
+           WHERE fact_id !~ '^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$'
+              OR NOT EXISTS(
+                SELECT 1 FROM public.market_exposure_facts f
+                WHERE f.id=fact_id::uuid AND f.run_id=p_run_id
+              )
+         ) THEN
+        RAISE EXCEPTION 'discovery result lineage mismatch' USING ERRCODE='22023';
+      END IF;
       IF v_duplicate THEN
         IF NOT EXISTS(
           SELECT 1 FROM public.market_research_nominations n
@@ -8430,6 +8477,10 @@ EXCEPTION WHEN invalid_text_representation OR datetime_field_overflow OR numeric
   RAISE EXCEPTION 'invalid discovery stage checkpoint' USING ERRCODE='22023';
 END;
 $$;
+
+REVOKE ALL ON FUNCTION public.reject_market_discovery_mutation() FROM PUBLIC,anon,authenticated,service_role;
+REVOKE ALL ON FUNCTION public.enforce_market_discovery_stage_task_transition() FROM PUBLIC,anon,authenticated,service_role;
+REVOKE ALL ON FUNCTION public.enforce_market_research_nomination_transition() FROM PUBLIC,anon,authenticated,service_role;
 
 CREATE OR REPLACE FUNCTION public.read_market_discovery_context(p_run_id UUID, p_limit INT DEFAULT 100)
 RETURNS JSONB LANGUAGE plpgsql SECURITY DEFINER SET search_path=pg_catalog AS $$

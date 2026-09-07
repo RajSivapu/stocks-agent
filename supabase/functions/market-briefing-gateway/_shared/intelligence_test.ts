@@ -159,6 +159,7 @@ Deno.test("canonical JSON and hashes match Task 2 semantic ordering", () => {
 });
 
 const DISCOVERY_TASK_ID = "00000000-0000-4000-8000-000000000041";
+const OTHER_RUN_TASK_ID = "00000000-0000-4000-8000-000000000099";
 
 function discoveryTask() {
   return {
@@ -201,11 +202,11 @@ Deno.test("discovery task parser preserves the planner identity and rejects rese
 
   const badDependency = structuredClone(payload) as Record<string, unknown>;
   (badDependency.task as Record<string, unknown>).dependency_ids = [
-    "wrong-run",
+    OTHER_RUN_TASK_ID,
   ];
-  assertThrows(
-    () => parseDiscoveryStageCheckpointPayload(badDependency),
-    "must be a UUID",
+  assertEquals(
+    parseDiscoveryStageCheckpointPayload(badDependency).task.dependency_ids,
+    [OTHER_RUN_TASK_ID],
   );
 
   const duplicateDependency = structuredClone(payload) as Record<
@@ -220,6 +221,29 @@ Deno.test("discovery task parser preserves the planner identity and rejects rese
     () => parseDiscoveryStageCheckpointPayload(duplicateDependency),
     "duplicated",
   );
+});
+
+Deno.test("discovery parser rejects normalized nested authority and order semantics", () => {
+  for (
+    const result of [
+      { nested: { order: { side: "buy" } } },
+      { nested: { order_details: { side: "buy" } } },
+      { portfolioOverlap: { ticker: "TEST" } },
+      { executionAllowed: false },
+      { nested: { "ORDER-ID": "fixture" } },
+    ]
+  ) {
+    const payload = {
+      task: { ...discoveryTask(), result },
+      exposure_facts: [],
+      theme_episode_revisions: [],
+      research_nominations: [],
+    };
+    assertThrows(
+      () => parseDiscoveryStageCheckpointPayload(payload),
+      "forbidden field",
+    );
+  }
 });
 
 Deno.test("discovery stage parser rejects unapproved providers, authority fields, and oversized results", () => {

@@ -11,6 +11,8 @@ import pytest
 from pglast import parse_sql
 from pglast.stream import RawStream
 
+from scripts.verify_market_intelligence_migration import collect_snapshot
+
 
 ROOT = Path(__file__).resolve().parents[1]
 MIGRATION = ROOT / "sql" / "migrations" / "20261005_market_wide_discovery.sql"
@@ -192,6 +194,59 @@ def task_payload(task_id: str, *, state: str, attempt_count: int, query_hash: st
     }
 
 
+def reference_payload(*, manifest_id: str, securities: list[tuple[str, str, str]]):
+    return {
+        "manifest": {
+            "id": manifest_id, "reference_version": f"fixture:{manifest_id}", "revision": 1,
+            "capability_version": 1, "taxonomy_version": 1, "source_hash": "c" * 64,
+            "valid_from": "2026-09-06T00:00:00Z", "valid_to": None,
+            "manifest": {"universe": "eligible_us_listed"}, "content_hash": "d" * 64,
+        },
+        "security_revisions": [{
+            "id": security_id, "manifest_id": manifest_id, "revision": 1,
+            "security_id": f"NASDAQ:{ticker}", "entity_id": f"CIK:{index:010d}",
+            "ticker": ticker, "exchange": "NASDAQ", "instrument_type": "COMMON_STOCK",
+            "eligible": True, "exclusion_reasons": [], "aliases": [f"{ticker} Corp"],
+            "source_ids": [f"nasdaq-listed:{ticker}"],
+            "valid_from": "2026-09-06T00:00:00Z", "valid_to": None,
+            "content_hash": content_hash,
+        } for index, (security_id, ticker, content_hash) in enumerate(securities, start=1)],
+    }
+
+
+def record_reference(connection, run_id: str, *, ticker: str = "TEST") -> str:
+    security_id = str(uuid.uuid4())
+    payload = reference_payload(
+        manifest_id=str(uuid.uuid4()), securities=[(security_id, ticker, "e" * 64)],
+    )
+    connection.execute(
+        "SELECT public.record_market_discovery_reference(%s,%s)",
+        (run_id, Jsonb(payload)),
+    )
+    return security_id
+
+
+def create_attempting_task(connection, run_id: str, *, stage: str) -> tuple[str, dict]:
+    task_id = str(uuid.uuid4())
+    payload = task_payload(task_id, state="planned", attempt_count=0)
+    payload["task"].update(
+        stage=stage,
+        capability_id=f"gdelt_{stage}_fixture",
+        query_kind="theme_search",
+        query_hash=uuid.uuid4().hex * 2,
+    )
+    connection.execute(
+        "SELECT public.checkpoint_market_discovery_stage(%s,%s)",
+        (run_id, Jsonb(payload)),
+    )
+    payload["task"].update(state="attempting", attempt_count=1)
+    connection.execute(
+        "SELECT public.checkpoint_market_discovery_stage(%s,%s)",
+        (run_id, Jsonb(payload)),
+    )
+    return task_id, payload
+
+
 def test_discovery_task_transition_rejects_reselection_after_attempt(discovery_db):
     run_id, task_id = seeded_run(discovery_db), str(uuid.uuid4())
     discovery_db.execute(
@@ -219,22 +274,16 @@ def test_discovery_task_transition_rejects_reselection_after_attempt(discovery_d
 
 def test_discovery_reference_replay_is_exact_and_altered_child_fails_closed(discovery_db):
     run_id = seeded_run(discovery_db)
-    manifest_id, security_id = str(uuid.uuid4()), str(uuid.uuid4())
-    payload = {
-        "manifest": {
-            "id": manifest_id, "reference_version": "us-listed:v1", "revision": 1,
-            "capability_version": 1, "taxonomy_version": 1, "source_hash": "c" * 64,
-            "valid_from": "2026-09-06T00:00:00Z", "valid_to": None,
-            "manifest": {"universe": "eligible_us_listed"}, "content_hash": "d" * 64,
-        },
-        "security_revisions": [{
-            "id": security_id, "manifest_id": manifest_id, "revision": 1,
-            "security_id": "NASDAQ:TEST", "entity_id": "CIK:0000000001", "ticker": "TEST",
-            "exchange": "NASDAQ", "instrument_type": "COMMON_STOCK", "eligible": True,
-            "exclusion_reasons": [], "aliases": ["Test Corp"], "source_ids": ["nasdaq-listed"],
-            "valid_from": "2026-09-06T00:00:00Z", "valid_to": None, "content_hash": "e" * 64,
-        }],
-    }
+    manifest_id, security_id, second_security_id = (
+        str(uuid.uuid4()), str(uuid.uuid4()), str(uuid.uuid4())
+    )
+    payload = reference_payload(
+        manifest_id=manifest_id,
+        securities=[
+            (security_id, "TEST", "e" * 64),
+            (second_security_id, "NEXT", "f" * 64),
+        ],
+    )
 
     first = discovery_db.execute(
         "SELECT public.record_market_discovery_reference(%s,%s)", (run_id, Jsonb(payload)),
@@ -247,7 +296,19 @@ def test_discovery_reference_replay_is_exact_and_altered_child_fails_closed(disc
     context = discovery_db.execute(
         "SELECT public.read_market_discovery_context(%s,100)", (run_id,),
     ).fetchone()[0]
-    assert context["security_revisions"][0]["id"] == security_id
+    assert {row["id"] for row in context["security_revisions"]} == {
+        security_id, second_security_id,
+    }
+
+    incomplete = {
+        "manifest": payload["manifest"],
+        "security_revisions": payload["security_revisions"][:1],
+    }
+    with pytest.raises(psycopg.errors.InvalidParameterValue, match="idempotency mismatch"):
+        discovery_db.execute(
+            "SELECT public.record_market_discovery_reference(%s,%s)",
+            (run_id, Jsonb(incomplete)),
+        )
 
     payload["security_revisions"][0]["ticker"] = "DRIFT"
     with pytest.raises(psycopg.errors.InvalidParameterValue, match="idempotency mismatch"):
@@ -292,3 +353,181 @@ def test_discovery_stage_replay_is_exact_and_altered_child_fails_closed(discover
             "SELECT public.checkpoint_market_discovery_stage(%s,%s)",
             (run_id, Jsonb(payload)),
         )
+
+
+def test_discovery_checkpoint_rejects_valid_cross_run_dependency(discovery_db):
+    dependency_run, target_run = seeded_run(discovery_db), seeded_run(discovery_db)
+    dependency_id, dependency = create_attempting_task(
+        discovery_db, dependency_run, stage="signals",
+    )
+    dependency["task"].update(state="succeeded", result={"count": 0})
+    discovery_db.execute(
+        "SELECT public.checkpoint_market_discovery_stage(%s,%s)",
+        (dependency_run, Jsonb(dependency)),
+    )
+    target_id = str(uuid.uuid4())
+    target = task_payload(target_id, state="planned", attempt_count=0, query_hash="b" * 64)
+    target["task"]["dependency_ids"] = [dependency_id]
+
+    with pytest.raises(psycopg.errors.InvalidParameterValue, match="dependency mismatch"):
+        discovery_db.execute(
+            "SELECT public.checkpoint_market_discovery_stage(%s,%s)",
+            (target_run, Jsonb(target)),
+        )
+
+
+def test_discovery_checkpoint_rejects_cross_run_security_and_orphan_exposure(discovery_db):
+    source_run, target_run = seeded_run(discovery_db), seeded_run(discovery_db)
+    cross_run_security_id = record_reference(discovery_db, source_run, ticker="CROSS")
+    _task_id, enrich = create_attempting_task(discovery_db, target_run, stage="enrich")
+    enrich["task"].update(state="succeeded", result={"fact_count": 1})
+    enrich["exposure_facts"] = [{
+        "id": str(uuid.uuid4()), "security_revision_id": cross_run_security_id,
+        "theme_episode_revision_id": None, "exposure_kind": "filing",
+        "fact": {"basis": "10-K"}, "source_ids": ["sec:fixture"],
+        "valid_from": "2026-09-06T00:00:00Z", "valid_to": None,
+        "content_hash": "1" * 64,
+    }]
+    with pytest.raises(psycopg.errors.InvalidParameterValue, match="lineage mismatch"):
+        discovery_db.execute(
+            "SELECT public.checkpoint_market_discovery_stage(%s,%s)",
+            (target_run, Jsonb(enrich)),
+        )
+
+    same_run_security_id = record_reference(discovery_db, target_run, ticker="LOCAL")
+    _task_id, signals = create_attempting_task(discovery_db, source_run, stage="signals")
+    cross_run_theme_id = str(uuid.uuid4())
+    signals["task"].update(state="succeeded", result={"episode_count": 1})
+    signals["theme_episode_revisions"] = [{
+        "id": cross_run_theme_id, "theme_id": "power_grid", "revision": 1,
+        "episode": {"summary": "source run"}, "source_ids": ["gdelt:source"],
+        "valid_from": "2026-09-06T00:00:00Z", "valid_to": None,
+        "content_hash": "2" * 64,
+    }]
+    discovery_db.execute(
+        "SELECT public.checkpoint_market_discovery_stage(%s,%s)",
+        (source_run, Jsonb(signals)),
+    )
+    enrich["exposure_facts"][0].update(
+        security_revision_id=same_run_security_id,
+        theme_episode_revision_id=cross_run_theme_id,
+        content_hash="3" * 64,
+    )
+    with pytest.raises(psycopg.errors.InvalidParameterValue, match="lineage mismatch"):
+        discovery_db.execute(
+            "SELECT public.checkpoint_market_discovery_stage(%s,%s)",
+            (target_run, Jsonb(enrich)),
+        )
+
+    _task_id, source_enrich = create_attempting_task(discovery_db, source_run, stage="enrich")
+    cross_run_exposure_id = str(uuid.uuid4())
+    source_enrich["task"].update(state="succeeded", result={"fact_count": 1})
+    source_enrich["exposure_facts"] = [{
+        "id": cross_run_exposure_id, "security_revision_id": cross_run_security_id,
+        "theme_episode_revision_id": None, "exposure_kind": "filing",
+        "fact": {"basis": "10-K"}, "source_ids": ["sec:source"],
+        "valid_from": "2026-09-06T00:00:00Z", "valid_to": None,
+        "content_hash": "4" * 64,
+    }]
+    discovery_db.execute(
+        "SELECT public.checkpoint_market_discovery_stage(%s,%s)",
+        (source_run, Jsonb(source_enrich)),
+    )
+    _task_id, screen = create_attempting_task(discovery_db, target_run, stage="screen")
+    screen["task"].update(state="succeeded", result={"nomination_count": 1})
+    screen["research_nominations"] = [{
+        "id": str(uuid.uuid4()), "security_revision_id": same_run_security_id,
+        "theme_episode_revision_id": None, "exposure_fact_ids": [cross_run_exposure_id],
+        "state": "nominated", "rationale": {"basis": "research"},
+    }]
+    with pytest.raises(psycopg.errors.InvalidParameterValue, match="lineage mismatch"):
+        discovery_db.execute(
+            "SELECT public.checkpoint_market_discovery_stage(%s,%s)",
+            (target_run, Jsonb(screen)),
+        )
+    screen["research_nominations"][0]["exposure_fact_ids"] = [str(uuid.uuid4())]
+    with pytest.raises(psycopg.errors.InvalidParameterValue, match="lineage mismatch"):
+        discovery_db.execute(
+            "SELECT public.checkpoint_market_discovery_stage(%s,%s)",
+            (target_run, Jsonb(screen)),
+        )
+
+
+@pytest.mark.parametrize(("terminal_status", "advance"), [
+    ("completed", False), ("failed", False), ("completed", True), ("failed", True),
+])
+def test_discovery_checkpoint_rejects_terminal_parent_run(discovery_db, terminal_status, advance):
+    run_id = seeded_run(discovery_db)
+    task_id = str(uuid.uuid4())
+    payload = task_payload(task_id, state="planned", attempt_count=0)
+    if advance:
+        discovery_db.execute(
+            "SELECT public.checkpoint_market_discovery_stage(%s,%s)",
+            (run_id, Jsonb(payload)),
+        )
+        payload["task"].update(state="attempting", attempt_count=1)
+    discovery_db.execute(
+        "UPDATE public.analysis_runs SET status=%s WHERE id=%s", (terminal_status, run_id),
+    )
+
+    with pytest.raises(psycopg.errors.InvalidParameterValue, match="intelligence run is not running"):
+        discovery_db.execute(
+            "SELECT public.checkpoint_market_discovery_stage(%s,%s)",
+            (run_id, Jsonb(payload)),
+        )
+
+
+def test_verifier_collects_exact_discovery_relation_column_and_function_grants(discovery_db):
+    snapshot = collect_snapshot(discovery_db.cursor(), {})
+    discovery_table_grants = {
+        (row["table"], row["grantee"], row["privilege"])
+        for row in snapshot["table_grants"] if not row["is_owner"]
+        and row["table"] in TABLES
+    }
+    assert discovery_table_grants == {
+        (table, "stock_agent_release_reader", "SELECT") for table in TABLES
+    }
+    discovery_column_grants = {
+        (row["table"], row["column"], row["grantee"], row["privilege"])
+        for row in snapshot["column_grants"] if not row["is_owner"]
+    }
+    assert discovery_column_grants == {
+        (table, column, "stock_agent_dashboard", "SELECT")
+        for table, columns in {
+            "market_reference_manifests": (
+                "id", "reference_version", "revision", "capability_version", "taxonomy_version",
+                "source_hash", "valid_from", "valid_to", "manifest", "content_hash", "created_at",
+            ),
+            "market_security_reference_revisions": (
+                "id", "security_id", "entity_id", "ticker", "exchange", "instrument_type",
+                "eligible", "exclusion_reasons", "aliases", "valid_from", "valid_to",
+                "content_hash", "created_at",
+            ),
+            "market_discovery_stage_tasks": (
+                "id", "stage", "capability_id", "provider", "query_kind", "query_hash", "state",
+                "attempt_count", "request_budget", "created_at", "updated_at",
+            ),
+            "market_exposure_facts": (
+                "id", "security_revision_id", "theme_episode_revision_id", "exposure_kind",
+                "fact", "source_ids", "valid_from", "valid_to", "content_hash", "created_at",
+            ),
+            "market_theme_episode_revisions": (
+                "id", "theme_id", "revision", "episode", "source_ids", "valid_from", "valid_to",
+                "content_hash", "created_at",
+            ),
+            "market_research_nominations": (
+                "id", "security_revision_id", "theme_episode_revision_id", "exposure_fact_ids",
+                "state", "rationale", "created_at", "updated_at",
+            ),
+        }.items()
+        for column in columns
+    }
+    assert {
+        (row["signature"], row["grantee"], row["privilege"])
+        for row in snapshot["function_grants"] if not row["is_owner"]
+    } == {
+        ("record_market_discovery_reference(uuid,jsonb)", "service_role", "EXECUTE"),
+        ("checkpoint_market_discovery_stage(uuid,jsonb)", "service_role", "EXECUTE"),
+        ("read_market_discovery_context(uuid,integer)", "service_role", "EXECUTE"),
+    }
+    assert snapshot["unexpected_grants"] == []
