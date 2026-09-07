@@ -189,10 +189,14 @@ def _source_cursors(context: dict[str, object]) -> dict[str, SourceCursor]:
         cursor_keys = {
             "provider", "capability_id", "completed_through", "active_window_start",
             "active_window_end", "backlog_token", "page", "accepted_item_ids",
-            "next_retry_phase",
+            "next_retry_phase", "continuation_token_history",
         }
+        legacy_cursor_keys = cursor_keys - {"continuation_token_history"}
         provenance_keys = {"source_run_id", "source_task_id", "source_updated_at"}
-        if set(row) != {"task_key", *cursor_keys, *provenance_keys}:
+        if set(row) not in (
+            {"task_key", *cursor_keys, *provenance_keys},
+            {"task_key", *legacy_cursor_keys, *provenance_keys},
+        ):
             raise ValueError("protected source cursor provenance is invalid")
         try:
             if not all(
@@ -205,7 +209,7 @@ def _source_cursors(context: dict[str, object]) -> dict[str, SourceCursor]:
             raise ValueError("protected source cursor provenance is invalid") from None
         if updated_at.tzinfo is None or updated_at > datetime.now(timezone.utc):
             raise ValueError("protected source cursor provenance is invalid")
-        value = {key: row[key] for key in cursor_keys}
+        value = {key: row[key] for key in cursor_keys if key in row}
         cursor = SourceCursor.from_mapping(value)
         current = datetime.now(timezone.utc)
         if any(timestamp is not None and timestamp > current for timestamp in (

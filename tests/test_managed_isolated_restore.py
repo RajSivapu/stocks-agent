@@ -583,6 +583,10 @@ def test_actual_migration_retry_accepts_truthful_baseline_without_writing_histor
                      if item["path"] == "sql/migrations/20261005_market_wide_discovery.sql")
     transfer = next(item for item in deploy.candidate_migration_manifest()
                     if item["path"] == "sql/migrations/20261006_reference_snapshot_transfer.sql")
+    cursor = next(item for item in deploy.candidate_migration_manifest()
+                  if item["path"] == "sql/migrations/20261007_discovery_cursor_context.sql")
+    official = next(item for item in deploy.candidate_migration_manifest()
+                    if item["path"] == "sql/migrations/20261008_official_source_completion_contract.sql")
     queries = []
 
     def api(_method, _path, payload=None):
@@ -591,7 +595,7 @@ def test_actual_migration_retry_accepts_truthful_baseline_without_writing_histor
         if query.startswith("SELECT path, version, sha256"):
             return [
                 {"path": path, "version": "20261004", "sha256": hashlib.sha256(b'["SELECT 1"]').hexdigest()},
-                discovery, transfer,
+                discovery, transfer, cursor, official,
             ]
         if query.startswith("SELECT version, statements"):
             return [{"version": "20261004", "statements": ["SELECT 1"]}]

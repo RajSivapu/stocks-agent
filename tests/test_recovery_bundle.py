@@ -187,15 +187,44 @@ def recovery_records():
                     "completed_through": None, "active_window_start": None,
                     "active_window_end": None, "backlog_token": None, "page": 1,
                     "accepted_item_ids": [], "next_retry_phase": None,
+                    "continuation_token_history": [],
                 },
                 "source_cursor": {
                     "provider": "gdelt", "capability_id": "gdelt_theme_search",
-                    "completed_through": "2026-09-05T19:33:00Z",
+                    "completed_through": "2026-09-05T20:00:00Z",
                     "active_window_start": None, "active_window_end": None,
                     "backlog_token": None, "page": 1,
                     "accepted_item_ids": [], "next_retry_phase": None,
+                    "continuation_token_history": [],
                 },
-                "checkpoint": {"cache_key": "4" * 64, "receipt": {"metadata": {}}},
+                "checkpoint": {
+                    "cache_key": "d" * 64,
+                    "receipt": {
+                        "provider": "gdelt", "reservation_id": reservation,
+                        "status": "succeeded", "cache_key": "d" * 64,
+                        "requested_window": {
+                            "start": "2026-09-05T12:00:00Z",
+                            "end": "2026-09-05T20:00:00Z",
+                        },
+                        "requested_limit": 20, "retrieved_at": "2026-09-05T19:40:00Z",
+                        "observed_at": "2026-09-05T19:40:00Z",
+                        "expires_at": "2026-09-05T19:55:00Z", "request_cost": 1,
+                        "upstream_remaining": None, "returned_count": 0,
+                        "accepted_count": 0, "duplicate_count": 0, "dropped_count": 0,
+                        "response_hash": "f" * 64, "error_code": None,
+                        "source_receipt_id": source_receipt,
+                        "cache_predecessor_receipt_id": None,
+                        "metadata": {
+                            "backlog_remaining": False,
+                            "capability_id": "gdelt_theme_search",
+                            "coverage_status": "success_empty",
+                            "cursor_end": "2026-09-05T20:00:00+00:00",
+                            "cursor_start": "2026-09-05T12:00:00+00:00",
+                            "next_retry_phase": "post-market", "overlap_seconds": 7200,
+                            "page": 1, "truncated": False, "exhausted": True,
+                        },
+                    },
+                },
             },
             "created_at": "2026-09-05T19:32:00Z", "updated_at": "2026-09-05T19:33:00Z",
         }, {
@@ -250,8 +279,22 @@ def recovery_records():
             "request_window": {"start": "2026-09-05T12:00:00Z", "end": "2026-09-05T20:00:00Z",
                                "timezone": "America/Chicago", "market_date": "2026-09-05", "phase": "post-market"},
             "source_receipt_id": source_receipt,
-            "payload": {"receipt": {"provider": "gdelt", "reservation_id": reservation,
-                                      "status": "succeeded", "request_cost": 1}, "items": []},
+            "payload": {"receipt": {
+                "provider": "gdelt", "reservation_id": reservation,
+                "status": "succeeded", "cache_key": "d" * 64,
+                "requested_window": {
+                    "start": "2026-09-05T12:00:00Z", "end": "2026-09-05T20:00:00Z",
+                    "timezone": "America/Chicago", "market_date": "2026-09-05",
+                    "phase": "post-market",
+                },
+                "requested_limit": 20, "retrieved_at": "2026-09-05T19:40:00Z",
+                "observed_at": "2026-09-05T19:40:00Z",
+                "expires_at": "2026-09-05T19:55:00Z", "request_cost": 1,
+                "upstream_remaining": None, "returned_count": 0, "accepted_count": 0,
+                "duplicate_count": 0, "dropped_count": 0, "response_hash": "f" * 64,
+                "error_code": None, "source_receipt_id": source_receipt,
+                "cache_predecessor_receipt_id": None,
+            }, "items": []},
             "created_at": "2026-09-05T19:40:00Z",
         }],
         "collection_checkpoint_history": [],
@@ -399,7 +442,7 @@ def test_recovery_payload_carries_identity_delivery_and_release_state(tmp_path, 
         if row["capability_id"] == "gdelt_theme_search"
     )
     assert cursor_result["cursor_key"] == "gdelt_theme_search:grid_modernization"
-    assert cursor_result["source_cursor"]["completed_through"] == "2026-09-05T19:33:00Z"
+    assert cursor_result["source_cursor"]["completed_through"] == "2026-09-05T20:00:00Z"
     assert set(records) >= {
         "intelligence_run_events", "source_quota_reservations", "collection_checkpoints",
         "collection_checkpoint_history", "collection_completions", "report_origins",
@@ -414,6 +457,29 @@ def test_recovery_rejects_malformed_terminal_cursor_metadata():
 
     with pytest.raises(ValueError, match="discovery task.*invalid content"):
         _validated_records(records)
+
+
+@pytest.mark.parametrize("mutation", [
+    lambda task, checkpoint: task["source_cursor"].update(completed_through="2026-09-05T19:59:00Z"),
+    lambda task, checkpoint: task["checkpoint"].update(cache_key="e" * 64),
+    lambda task, checkpoint: task["checkpoint"]["receipt"].update(status="failed"),
+    lambda task, checkpoint: task["checkpoint"]["receipt"]["metadata"].update(truncated=True),
+    lambda task, checkpoint: task["checkpoint"]["receipt"]["metadata"].update(backlog_remaining=True),
+    lambda task, checkpoint: task["checkpoint"]["receipt"]["metadata"].update(capability_id="doe_energy_news_rss"),
+    lambda task, checkpoint: checkpoint["payload"]["receipt"].update(source_receipt_id="99999999-9999-4999-8999-999999999999"),
+])
+def test_recovery_rejects_impossible_cursor_checkpoint_transition_before_restore(mutation):
+    records = recovery_records()
+    task = records["discovery_stage_tasks"][0]["result"]
+    checkpoint = records["collection_checkpoints"][0]
+    mutation(task, checkpoint)
+
+    class UnusedConnection:
+        def transaction(self):
+            raise AssertionError("invalid cursor transition reached restore mutation")
+
+    with pytest.raises(ValueError, match="discovery task.*invalid content"):
+        restore_recovery_records(UnusedConnection(), records, isolated_guard=True)
 
 
 @pytest.mark.parametrize("change", [

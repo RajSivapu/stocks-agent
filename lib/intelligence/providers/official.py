@@ -16,11 +16,11 @@ from .white_house import WhiteHouseAdapter
 
 
 DEFENSE_RELEASES_URL = (
-    "https://www.defense.gov/DesktopModules/ArticleCS/RSS.ashx"
+    "https://www.war.gov/DesktopModules/ArticleCS/RSS.ashx"
     "?ContentType=9&Site=945&max=10"
 )
 DEFENSE_NEWS_URL = (
-    "https://www.defense.gov/DesktopModules/ArticleCS/RSS.ashx"
+    "https://www.war.gov/DesktopModules/ArticleCS/RSS.ashx"
     "?ContentType=1&Site=945&max=10"
 )
 
@@ -34,10 +34,7 @@ class DefenseAdapter(OfficialFeedAdapter):
         "defense_news_rss": DEFENSE_NEWS_URL,
     })
     response_routes = MappingProxyType({
-        capability_id: frozenset({
-            source,
-            source.replace("www.defense.gov", "www.war.gov"),
-        })
+        capability_id: frozenset({source})
         for capability_id, source in feed_routes.items()
     })
     item_path_patterns = MappingProxyType({

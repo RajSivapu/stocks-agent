@@ -22,7 +22,13 @@ from typing import Mapping, Protocol, runtime_checkable
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
-from lib.intelligence.cursors import SourceCursor  # noqa: E402
+from lib.intelligence.cursors import (  # noqa: E402
+    CollectionPage,
+    CollectionWindow,
+    SourceCursor,
+    parse_time,
+    update_cursor,
+)
 
 REQUIRED_RECOVERY_RECORDS = (
     "holdings", "transactions", "commands", "command_acknowledgements", "runs",
@@ -619,12 +625,183 @@ def _validated_records(records: Mapping[str, object]) -> dict[str, list[dict[str
            for row in result["source_quota_reservations"]):
         raise ValueError("source quota reservation dependency mismatch")
     reservation_ids = {row["id"] for row in result["source_quota_reservations"]}
+    reservations = {row["id"]: row for row in result["source_quota_reservations"]}
     for name in ("collection_checkpoints", "collection_checkpoint_history"):
         if any(row["run_id"] not in intelligence_runs
                or not UUID.fullmatch(row["source_receipt_id"])
                or row["payload"].get("receipt", {}).get("reservation_id") not in reservation_ids
                for row in result[name]):
             raise ValueError("collection checkpoint dependency mismatch")
+
+    durable_checkpoints = {
+        (row["run_id"], row["cache_key"], row["source_receipt_id"]): row
+        for name in ("collection_checkpoints", "collection_checkpoint_history")
+        for row in result[name]
+    }
+    receipt_fields = {
+        "provider", "reservation_id", "status", "cache_key", "requested_window",
+        "requested_limit", "retrieved_at", "observed_at", "expires_at", "request_cost",
+        "upstream_remaining", "returned_count", "accepted_count", "duplicate_count",
+        "dropped_count", "response_hash", "error_code", "source_receipt_id",
+        "cache_predecessor_receipt_id",
+    }
+
+    def valid_cursor_transition(row: Mapping[str, object]) -> bool:
+        task_result = row["result"]
+        if not isinstance(task_result, Mapping) or "request_cursor" not in task_result:
+            return True
+        checkpoint = task_result.get("checkpoint")
+        if not isinstance(checkpoint, Mapping) or set(checkpoint) != {"cache_key", "receipt"}:
+            return False
+        receipt = checkpoint.get("receipt")
+        if not isinstance(receipt, Mapping) or set(receipt) != receipt_fields | {"metadata"}:
+            return False
+        metadata = receipt.get("metadata")
+        if not isinstance(metadata, Mapping) or not {
+            "capability_id", "coverage_status", "cursor_start", "cursor_end",
+            "overlap_seconds", "page", "truncated", "backlog_remaining", "exhausted",
+        }.issubset(metadata):
+            return False
+        try:
+            request_cursor = SourceCursor.from_mapping(task_result["request_cursor"])
+            source_cursor = SourceCursor.from_mapping(task_result["source_cursor"])
+            requested_window = row["requested_window"]
+            receipt_window = receipt["requested_window"]
+            if not isinstance(requested_window, Mapping) or set(requested_window) != {"start", "end"}:
+                return False
+            if not isinstance(receipt_window, Mapping) or set(receipt_window) != {"start", "end"}:
+                return False
+            start = parse_time(requested_window["start"])
+            end = parse_time(requested_window["end"])
+            if (
+                parse_time(receipt_window["start"]) != start
+                or parse_time(receipt_window["end"]) != end
+                or parse_time(metadata["cursor_start"]) != start
+                or parse_time(metadata["cursor_end"]) != end
+            ):
+                return False
+            if any(isinstance(metadata[key], bool) or not isinstance(metadata[key], int)
+                   for key in ("overlap_seconds", "page")):
+                return False
+            if any(not isinstance(metadata[key], bool)
+                   for key in ("truncated", "backlog_remaining", "exhausted")):
+                return False
+            if metadata["capability_id"] != row["capability_id"] \
+                    or metadata["page"] != request_cursor.page:
+                return False
+            cache_key = checkpoint["cache_key"]
+            source_receipt_id = receipt["source_receipt_id"]
+            if (
+                not isinstance(cache_key, str) or HASH.fullmatch(cache_key) is None
+                or receipt["cache_key"] != cache_key
+                or not isinstance(source_receipt_id, str)
+                or UUID.fullmatch(source_receipt_id) is None
+                or receipt["provider"] != row["provider"]
+            ):
+                return False
+            reservation = reservations.get(receipt["reservation_id"])
+            if reservation is None or reservation["run_id"] != row["run_id"] \
+                    or reservation["provider"] != row["provider"]:
+                return False
+
+            status = receipt["status"]
+            coverage = metadata["coverage_status"]
+            if status in {"succeeded", "cache_hit"}:
+                cursor_status = status
+                expected_state = "succeeded"
+            elif status == "configuration_missing":
+                cursor_status, expected_state = "configuration_missing", "deferred"
+            elif status == "quota_blocked":
+                cursor_status, expected_state = "quota_blocked", "deferred"
+            elif status == "failed" and coverage == "unsupported":
+                cursor_status, expected_state = "unsupported", "deferred"
+            elif status == "failed":
+                cursor_status, expected_state = "failed", "failed"
+            else:
+                return False
+
+            uncertain = row["state"] == "uncertain"
+            if not uncertain and row["state"] != expected_state:
+                return False
+            successful = cursor_status in {"succeeded", "cache_hit"}
+            exhausted = metadata["exhausted"]
+            truncated = metadata["truncated"]
+            backlog_remaining = metadata["backlog_remaining"]
+            if exhausted is not (successful and not truncated and not backlog_remaining):
+                return False
+            backlog_token = metadata.get("backlog_token")
+            if backlog_token is not None and (
+                not isinstance(backlog_token, str) or not backlog_token or not backlog_remaining
+            ):
+                return False
+
+            durable = durable_checkpoints.get((row["run_id"], cache_key, source_receipt_id))
+            request_cost = receipt["request_cost"]
+            if isinstance(request_cost, bool) or not isinstance(request_cost, int) \
+                    or not 0 <= request_cost <= row["request_budget"]:
+                return False
+            items: object = []
+            if request_cost > 0:
+                if durable is None or durable["cache_key"] != cache_key:
+                    return False
+                durable_payload = durable["payload"]
+                if not isinstance(durable_payload, Mapping) \
+                        or set(durable_payload) != {"receipt", "items"}:
+                    return False
+                durable_receipt = durable_payload["receipt"]
+                items = durable_payload["items"]
+                if not isinstance(durable_receipt, Mapping) or set(durable_receipt) != receipt_fields \
+                        or not isinstance(items, list):
+                    return False
+                for field in receipt_fields - {"requested_window"}:
+                    if receipt[field] != durable_receipt[field]:
+                        return False
+                if durable_receipt["cache_key"] != cache_key \
+                        or durable_receipt["source_receipt_id"] != durable["source_receipt_id"]:
+                    return False
+            elif durable is not None:
+                return False
+
+            if not isinstance(items, list) or any(
+                not isinstance(item, Mapping) or item.get("provider") != row["provider"]
+                or not isinstance(item.get("content_hash"), str)
+                or HASH.fullmatch(item["content_hash"]) is None
+                for item in items
+            ):
+                return False
+            if receipt["accepted_count"] != len(items) \
+                    or receipt["returned_count"] < receipt["accepted_count"]:
+                return False
+            if uncertain:
+                return (
+                    source_cursor == request_cursor
+                    and metadata.get("cursor_outcome_unavailable") is True
+                    and metadata.get("coverage_gap") is True
+                )
+            accepted_ids = tuple(
+                item.get("upstream_item_id") or item["content_hash"] for item in items
+            )
+            expected_cursor = update_cursor(
+                request_cursor,
+                CollectionPage(
+                    window=CollectionWindow(
+                        start=start, end=end, overlap_seconds=metadata["overlap_seconds"],
+                        backlog_token=request_cursor.backlog_token,
+                    ),
+                    status=cursor_status,
+                    exhausted=exhausted,
+                    truncated=truncated or (successful and backlog_remaining),
+                    backlog_token=backlog_token,
+                    accepted_item_ids=accepted_ids,
+                    next_retry_phase=metadata.get("next_retry_phase"),
+                ),
+            )
+        except (KeyError, TypeError, ValueError):
+            return False
+        return expected_cursor == source_cursor
+
+    if any(not valid_cursor_transition(row) for row in discovery_tasks.values()):
+        raise ValueError("discovery task dependency mismatch or invalid content")
     if any(not UUID.fullmatch(row["completion_id"]) or row["run_id"] not in intelligence_runs
            or row["completion_id"] not in intelligence_events
            or intelligence_events[row["completion_id"]]["run_id"] != row["run_id"]

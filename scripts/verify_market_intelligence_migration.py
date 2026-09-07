@@ -25,6 +25,7 @@ MIGRATIONS = (
     ROOT / "sql" / "migrations" / "20261005_market_wide_discovery.sql",
     ROOT / "sql" / "migrations" / "20261006_reference_snapshot_transfer.sql",
     ROOT / "sql" / "migrations" / "20261007_discovery_cursor_context.sql",
+    ROOT / "sql" / "migrations" / "20261008_official_source_completion_contract.sql",
 )
 GATEWAY_ROLE = "service_role"
 TABLES = (

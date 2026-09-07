@@ -57,7 +57,7 @@ def databases():
             subprocess.run([binaries["pg_ctl"], "-D", str(root / "db"), "-m", "immediate", "-w", "stop"], check=True, capture_output=True)
 
 
-def prepared_run(connection, *, provider="gdelt", cache=False, checkpoint=True, run_id=None, phase="intraday", market_date=None):
+def prepared_run(connection, *, provider="gdelt", cache=False, checkpoint=True, run_id=None, phase="intraday", market_date=None, returned_count=0, accepted_count=0):
     generated_run, reservation, original, hit, completion = [str(uuid.uuid4()) for _ in range(5)]
     run = str(run_id or generated_run)
     now = connection.execute("SELECT statement_timestamp()").fetchone()[0]
@@ -72,7 +72,8 @@ def prepared_run(connection, *, provider="gdelt", cache=False, checkpoint=True, 
     receipt = {"id": hit if cache else original, "reservation_id": reservation, "status": "cache_hit" if cache else "succeeded",
         "cache_key": "a" * 64, "requested_window": {"start": window["start"], "end": window["end"]},
         "retrieved_at": now.isoformat(), "expires_at": (now + timedelta(minutes=15)).isoformat(),
-        "request_cost": 0 if cache else 1, "upstream_remaining": None, "returned_count": 0, "accepted_count": 0,
+        "request_cost": 0 if cache else 1, "upstream_remaining": None,
+        "returned_count": returned_count, "accepted_count": accepted_count,
         "duplicate_count": 0, "dropped_count": 0, "error": None, "response_hash": "b" * 64,
         "cache_predecessor_receipt_id": original if cache else None}
     checkpoint_row = dict(receipt, provider=provider, status="succeeded", request_cost=1, source_receipt_id=original,
@@ -151,6 +152,69 @@ def test_exact_key_recorder_preserves_actual_cost_and_distinct_lineage(databases
     recovered = db.execute("SELECT public.read_market_intelligence_completion(%s,%s)", (run, completion)).fetchone()[0]
     assert recovered["payload"] == payload
     assert recovered["receipt"]["completion_id"] == completion
+
+
+def _official_completion_item(payload, *, request_url, canonical_url):
+    canonical_content = json.dumps({"title": "Defense industrial award"}, separators=(",", ":"))
+    return {
+        "id": str(uuid.uuid4()), "run_item_id": str(uuid.uuid4()),
+        "receipt_id": payload["receipts"][0]["id"], "provider": "dod",
+        "upstream_item_id": "dod-release-1", "canonical_url": canonical_url,
+        "request_url": request_url, "published_at": None,
+        "retrieved_at": payload["receipts"][0]["retrieved_at"],
+        "effective_at": None, "reporting_at": None,
+        "entity_ids": [], "security_ids": [], "discovery_status": "no_event",
+        "title": "Defense industrial award", "normalized_text": "Official release.",
+        "canonical_content": canonical_content,
+        "content_hash": hashlib.sha256(canonical_content.encode()).hexdigest(),
+        "metadata": {}, "disposition": "accepted", "drop_reason": None,
+    }
+
+
+@pytest.mark.parametrize("kind", ["fresh", "ordered"])
+@pytest.mark.parametrize(("host", "content_type", "item_path"), [
+    ("www.war.gov", 9, "/News/Releases/Release/Article/1/award/"),
+    ("www.defense.gov", 1, "/News/News-Stories/Article/1/update/"),
+])
+def test_protected_completion_accepts_only_reviewed_defense_feed_and_item_paths(
+    databases, kind, host, content_type, item_path,
+):
+    db = databases[kind]
+    run, completion, _original, payload = prepared_run(
+        db, provider="dod", phase="pre-market", returned_count=1, accepted_count=1,
+    )
+    request_url = (
+        f"https://{host}/DesktopModules/ArticleCS/RSS.ashx"
+        f"?ContentType={content_type}&Site=945&max=10"
+    )
+    payload["items"] = [_official_completion_item(
+        payload, request_url=request_url, canonical_url=f"https://{host}{item_path}",
+    )]
+    result = db.execute(
+        "SELECT public.record_market_intelligence(%s,%s,%s)",
+        (run, completion, Jsonb(payload)),
+    ).fetchone()[0]
+    assert result["counts"]["source_items"] == 1
+
+
+@pytest.mark.parametrize("bad_url", [
+    "https://www.war.gov/search/?ContentType=9&Site=945&max=10",
+    "https://www.war.gov/DesktopModules/ArticleCS/RSS.ashx?ContentType=9&Site=945&max=100",
+])
+def test_protected_completion_rejects_unreviewed_defense_request_paths(databases, bad_url):
+    db = databases["fresh"]
+    run, completion, _original, payload = prepared_run(
+        db, provider="dod", phase="pre-market", returned_count=1, accepted_count=1,
+    )
+    payload["items"] = [_official_completion_item(
+        payload, request_url=bad_url,
+        canonical_url="https://www.war.gov/News/Releases/Release/Article/1/award/",
+    )]
+    with pytest.raises(psycopg.errors.InvalidParameterValue):
+        db.execute(
+            "SELECT public.record_market_intelligence(%s,%s,%s)",
+            (run, completion, Jsonb(payload)),
+        )
 
 
 def test_ordered_and_fresh_final_function_contracts_are_identical(databases):

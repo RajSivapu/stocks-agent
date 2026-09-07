@@ -741,3 +741,41 @@ def test_capability_plan_executes_exact_task_cursor_and_persists_each_transition
     assert replay.cache_hits == 1
     assert replay.sources[0]["capability_id"] == "gdelt_theme_search"
     assert replay.sources[0]["cursor_start"] == "2026-09-03T06:00:00+00:00"
+
+    # A terminal task row is only an audit record. It cannot manufacture an
+    # empty successful collection after its durable evidence expires.
+    gateway.collection_checkpoints.clear()
+    unavailable_adapter = FakeAdapter()
+    unavailable = IntelligencePipeline(
+        gateway, [unavailable_adapter], discovery_plan=plan,
+        source_cursors={task_id: source_cursor},
+    ).run(request("pre-market"))
+
+    assert unavailable_adapter.queries == []
+    assert unavailable.actual_requests == 0
+    assert unavailable.cache_hits == 0
+    assert unavailable.sources[0]["status"] == "failed"
+    assert unavailable.sources[0]["error_code"] == "EVIDENCE_UNAVAILABLE"
+    assert unavailable.sources[0]["coverage_status"] == "source_failed"
+    assert unavailable.coverage["discovery_outcomes"] == [{
+        "provider": "gdelt", "status": "insufficient_coverage",
+    }]
+
+    gateway.discovery_tasks[task_id] = {
+        **gateway.discovery_tasks[task_id],
+        "state": "attempting",
+        "result": {"request_cursor": source_cursor.to_mapping()},
+    }
+    uncertain_adapter = FakeAdapter()
+    IntelligencePipeline(
+        gateway, [uncertain_adapter], discovery_plan=plan,
+        source_cursors={task_id: source_cursor},
+    ).run(request("pre-market"))
+    uncertain = gateway.discovery_tasks[task_id]
+    uncertain_checkpoint = uncertain["result"]["checkpoint"]
+    uncertain_receipt = uncertain_checkpoint["receipt"]
+    assert uncertain_adapter.queries == []
+    assert uncertain["state"] == "uncertain"
+    assert uncertain_receipt["cache_key"] == uncertain_checkpoint["cache_key"]
+    assert uncertain_receipt["source_receipt_id"]
+    assert uncertain_receipt["requested_window"] == uncertain["requested_window"]

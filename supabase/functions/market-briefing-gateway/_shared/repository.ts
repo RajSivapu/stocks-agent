@@ -681,8 +681,7 @@ function discoveryCursorContext(
     throw new GatewayRepositoryError("CONTEXT_TOO_LARGE");
   }
   const sourceCursors = cursorRows.map((row): DiscoverySourceCursor => {
-    if (
-      !exactKeys(row, [
+    const legacyCursorKeys = [
         "task_key",
         "provider",
         "capability_id",
@@ -696,7 +695,10 @@ function discoveryCursorContext(
         "source_run_id",
         "source_task_id",
         "source_updated_at",
-      ])
+    ];
+    if (
+      !exactKeys(row, legacyCursorKeys) &&
+      !exactKeys(row, [...legacyCursorKeys, "continuation_token_history"])
     ) throw new GatewayRepositoryError("INVALID_PERSISTED_DATA");
     const provider = strictPattern(row.provider, PROVIDER_PATTERN);
     const capabilityId = strictPattern(row.capability_id, CAPABILITY_PATTERN);
@@ -724,6 +726,16 @@ function discoveryCursorContext(
       })
       : null;
     const token = row.backlog_token === null ? null : row.backlog_token;
+    const history = row.continuation_token_history === undefined
+      ? []
+      : Array.isArray(row.continuation_token_history)
+      ? row.continuation_token_history.map((identity) => {
+        if (typeof identity !== "string" || !/^[0-9a-f]{64}$/.test(identity)) {
+          throw new GatewayRepositoryError("INVALID_PERSISTED_DATA");
+        }
+        return identity;
+      })
+      : null;
     const retry = row.next_retry_phase === null ? null : row.next_retry_phase;
     if (
       (activeStart === null) !== (activeEnd === null) ||
@@ -733,8 +745,11 @@ function discoveryCursorContext(
         Date.parse(activeStart) > Date.parse(completed)) ||
       (completed !== null && activeEnd !== null &&
         Date.parse(completed) > Date.parse(activeEnd)) ||
-      page < 1 || page > 10 || ids === null || ids.length > 500 ||
+      page < 1 || page > (capabilityId === "white_house_sitemap" ? 2001 : 10) ||
+      ids === null || ids.length > 500 ||
       new Set(ids).size !== ids.length ||
+      history === null || history.length > 64 ||
+      new Set(history).size !== history.length ||
       (token !== null &&
         (typeof token !== "string" || token.length < 1 || token.length > 2048 ||
           /[\x00-\x1f]/.test(token) || activeStart === null || page < 2)) ||
@@ -756,6 +771,7 @@ function discoveryCursorContext(
       page,
       accepted_item_ids: ids,
       next_retry_phase: retry as DiscoverySourceCursor["next_retry_phase"],
+      continuation_token_history: history,
       source_run_id: strictPattern(row.source_run_id, UUID_PATTERN),
       source_task_id: strictPattern(row.source_task_id, UUID_PATTERN),
       source_updated_at: protectedTimestamp(row.source_updated_at, current)!,

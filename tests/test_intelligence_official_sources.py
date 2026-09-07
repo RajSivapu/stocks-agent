@@ -79,10 +79,10 @@ def test_registry_exposes_only_the_verified_official_routes():
         "eia_today_in_energy_rss": ("www.eia.gov", "/rss/todayinenergy.xml"),
         "eia_press_releases_rss": ("www.eia.gov", "/rss/press_rss.xml"),
         "defense_releases_rss": (
-            "www.defense.gov", "/DesktopModules/ArticleCS/RSS.ashx"
+            "www.war.gov", "/DesktopModules/ArticleCS/RSS.ashx"
         ),
         "defense_news_rss": (
-            "www.defense.gov", "/DesktopModules/ArticleCS/RSS.ashx"
+            "www.war.gov", "/DesktopModules/ArticleCS/RSS.ashx"
         ),
         "white_house_fact_sheets": ("www.whitehouse.gov", "/fact-sheets/"),
         "white_house_presidential_actions": (
@@ -212,9 +212,11 @@ def test_doe_adapter_accepts_valid_xml_even_when_mime_is_text_html():
         "coverage_status": "success_nonempty",
         "cursor_end": "2026-09-08T11:30:00+00:00",
         "cursor_start": "2026-09-04T18:00:00+00:00",
-        "next_retry_phase": "post-market",
-        "overlap_seconds": 7200,
-        "truncated": False,
+            "next_retry_phase": "post-market",
+            "overlap_seconds": 7200,
+            "page": 1,
+            "truncated": False,
+            "exhausted": True,
     }
 
 
@@ -314,25 +316,39 @@ def test_eia_statistics_uses_only_the_configured_route_with_a_free_key():
 
 
 @pytest.mark.parametrize("content_type", (1, 9))
-def test_defense_feed_uses_exact_type_and_accepts_only_matching_war_redirect(content_type):
+def test_defense_feed_requests_verified_war_route_directly_once(content_type):
     source = (
-        "https://www.defense.gov/DesktopModules/ArticleCS/RSS.ashx"
+        "https://www.war.gov/DesktopModules/ArticleCS/RSS.ashx"
         f"?ContentType={content_type}&Site=945&max=10"
     )
-    destination = source.replace("www.defense.gov", "www.war.gov")
     raw = b"""<?xml version='1.0'?><rss><channel><item><guid>dod-1</guid><title>Defense industrial award</title><link>https://www.war.gov/News/Releases/Release/Article/1/award/</link><description>Official release.</description><pubDate>Mon, 07 Sep 2026 14:00:00 GMT</pubDate></item></channel></rss>"""
-    http = FixtureHttp(raw, url=destination, content_type="text/xml")
+    http = FixtureHttp(raw, url=source, content_type="text/xml")
 
     result = adapter("dod", http).collect(query(
         "defense_news_rss" if content_type == 1 else "defense_releases_rss"
     ))
 
     assert http.requests[0].url == source
+    assert len(http.requests) == 1
     assert len(result.items) == 1
     assert urlsplit(result.items[0].source_url).hostname == "www.war.gov"
     assert result.items[0].authority == (
         "official_defense_news" if content_type == 1 else "official_defense_statement"
     )
+
+
+def test_white_house_page_bound_is_capability_specific():
+    query("white_house_sitemap", page=21)
+
+    with pytest.raises(ValueError, match="page"):
+        query("federal_register_documents", page=21)
+
+    SourceCursor = __import__(
+        "lib.intelligence.cursors", fromlist=["SourceCursor"]
+    ).SourceCursor
+    SourceCursor(provider="white_house", capability_id="white_house_sitemap", page=21)
+    with pytest.raises(ValueError, match="page"):
+        SourceCursor(provider="federal_register", capability_id="federal_register_documents", page=21)
 
 
 def test_defense_feed_rejects_a_redirect_that_changes_the_reviewed_query():
@@ -424,6 +440,61 @@ def test_white_house_sitemap_cursor_visits_every_discovered_child_with_index_and
     assert third.receipt.metadata["backlog_remaining"] is False
     assert "backlog_token" not in third.receipt.metadata
     assert [request.url for request in http.requests] == [index_url, child_one, child_two]
+
+
+def test_white_house_sitemap_can_traverse_all_twenty_admitted_children():
+    index_url = "https://www.whitehouse.gov/sitemap_index.xml"
+    children = tuple(
+        f"https://www.whitehouse.gov/post-sitemap{index or ''}.xml"
+        for index in range(20)
+    )
+    index = (
+        "<sitemapindex>" + "".join(
+            f"<sitemap><loc>{child}</loc></sitemap>" for child in children
+        ) + "</sitemapindex>"
+    ).encode()
+    pages = {index_url: index}
+    pages.update({
+        child: (
+            "<urlset><url><loc>"
+            f"https://www.whitehouse.gov/fact-sheets/2026/09/item-{number}/"
+            "</loc></url></urlset>"
+        ).encode()
+        for number, child in enumerate(children)
+    })
+
+    class SitemapHttp:
+        def __init__(self):
+            self.requests = []
+
+        def get(self, request):
+            self.requests.append(request)
+            return HttpResult(
+                url=request.url, status=200, headers={"content-type": "text/xml"},
+                body=pages[request.url], retrieved_at=NOW, observed_at=NOW,
+            )
+
+    http = SitemapHttp()
+    source = adapter("white_house", http)
+    source.quota = QuotaSession({
+        "white_house": ({
+            "reservation_id": "white-house-twenty", "reserved_requests": 21,
+        },),
+    })
+    result = source.collect(query("white_house_sitemap", page=1))
+    found = []
+    page = 2
+    while result.receipt.metadata["backlog_remaining"]:
+        token = result.receipt.metadata["backlog_token"]
+        result = source.collect(query(
+            "white_house_sitemap", cursor_token=token, page=page,
+        ))
+        found.extend(item.source_url for item in result.items)
+        page += 1
+
+    assert len(http.requests) == 21
+    assert len(found) == 20
+    assert result.receipt.metadata["exhausted"] is True
 
 
 def test_white_house_post_sitemap_filters_paths_and_does_not_treat_lastmod_as_publication():

@@ -155,6 +155,52 @@ def test_pageable_cursor_rejects_a_repeated_continuation_token():
         update_cursor(previous, page)
 
 
+def test_pageable_cursor_rejects_a_nonadjacent_continuation_cycle():
+    previous = _cursor()
+    first = update_cursor(
+        previous,
+        CollectionPage(
+            window=_window(), status="succeeded", exhausted=False,
+            truncated=True, backlog_token="cursor:A",
+        ),
+    )
+    second = update_cursor(
+        first,
+        CollectionPage(
+            window=_window(), status="succeeded", exhausted=False,
+            truncated=True, backlog_token="cursor:B",
+        ),
+    )
+
+    with pytest.raises(ValueError, match="repeated"):
+        update_cursor(
+            second,
+            CollectionPage(
+                window=_window(), status="succeeded", exhausted=False,
+                truncated=True, backlog_token="cursor:A",
+            ),
+        )
+
+
+def test_completed_cursor_resets_bounded_continuation_history():
+    active = update_cursor(
+        _cursor(),
+        CollectionPage(
+            window=_window(), status="succeeded", exhausted=False,
+            truncated=True, backlog_token="cursor:A",
+        ),
+    )
+    completed = update_cursor(
+        active,
+        CollectionPage(
+            window=_window(), status="succeeded", exhausted=True,
+            truncated=False, backlog_token=None,
+        ),
+    )
+
+    assert completed.continuation_token_history == ()
+
+
 def test_failure_retains_watermark_and_safe_resume_state():
     previous = _cursor(
         active_window_start=parse_time("2026-09-04T18:00:00Z"),

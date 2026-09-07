@@ -630,24 +630,10 @@ class IntelligencePipeline:
                 self.source_cursors[cursor_key] = terminal_cursor
             if cached is not None:
                 return cached
-            if isinstance(saved_checkpoint, Mapping):
-                try:
-                    restored = collection_from_checkpoint({
-                        "receipt": saved_checkpoint["receipt"], "items": [],
-                    })
-                    return _market_checkpoint_result(
-                        restored,
-                        global_window=global_window,
-                        cache_key_value=key,
-                        reservation_id=str(reservation["id"]),
-                        source_receipt_id=source_receipt_id,
-                    )
-                except (KeyError, TypeError, ValueError):
-                    pass
             return CollectionResult(
                 (), _failed_receipt(
                     task.provider, str(reservation["id"]), query, request.now,
-                    error_code="CHECKPOINT_UNAVAILABLE",
+                    error_code="EVIDENCE_UNAVAILABLE",
                 ), query.limit,
             )
         if state == "attempting":
@@ -657,12 +643,21 @@ class IntelligencePipeline:
                     error_code="TRANSPORT_OUTCOME_UNCERTAIN",
                 ), query.limit,
             )
-            frozen = replace(frozen, receipt=replace(frozen.receipt, metadata={
-                **dict(frozen.receipt.metadata),
-                "capability_id": task.capability_id,
-                "coverage_gap": True,
-                "cursor_outcome_unavailable": True,
-            }))
+            frozen = replace(frozen, receipt=replace(
+                frozen.receipt,
+                cache_key=key,
+                reservation_id=str(reservation["id"]),
+                source_receipt_id=frozen.receipt.source_receipt_id or source_receipt_id,
+                requested_window={
+                    "start": _timestamp(window.start), "end": _timestamp(window.end),
+                },
+                metadata={
+                    **dict(frozen.receipt.metadata),
+                    "capability_id": task.capability_id,
+                    "coverage_gap": True,
+                    "cursor_outcome_unavailable": True,
+                },
+            ))
             terminal = self._task_row(
                 task, state="uncertain", attempt_count=int(current.get("attempt_count") or 1),
                 result={

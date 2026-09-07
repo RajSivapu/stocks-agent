@@ -229,7 +229,7 @@
       "enabled": true,
       "provider_priority": 20,
       "query_pack": {
-        "default": {"host": "www.defense.gov", "path": "/DesktopModules/ArticleCS/RSS.ashx", "content_type": 9, "site": 945, "max": 10}
+        "default": {"host": "www.war.gov", "path": "/DesktopModules/ArticleCS/RSS.ashx", "content_type": 9, "site": 945, "max": 10}
       }
     },
     {
@@ -250,7 +250,7 @@
       "enabled": true,
       "provider_priority": 20,
       "query_pack": {
-        "default": {"host": "www.defense.gov", "path": "/DesktopModules/ArticleCS/RSS.ashx", "content_type": 1, "site": 945, "max": 10}
+        "default": {"host": "www.war.gov", "path": "/DesktopModules/ArticleCS/RSS.ashx", "content_type": 1, "site": 945, "max": 10}
       }
     },
     {

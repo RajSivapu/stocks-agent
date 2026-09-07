@@ -16,6 +16,7 @@ from urllib.parse import urlsplit
 
 from lib import config
 from lib.intelligence.policy import _PROVIDERS
+from lib.intelligence.limits import maximum_collection_page
 from lib.intelligence.http import (
     BoundedHttpClient,
     HttpRequest,
@@ -85,8 +86,9 @@ class CollectionQuery:
             or any(ord(character) < 32 for character in self.cursor_token)
         ):
             raise ValueError("collection cursor token is invalid")
-        if isinstance(self.page, bool) or not isinstance(self.page, int) or not 1 <= self.page <= 10:
-            raise ValueError("collection page must be between 1 and 10")
+        max_page = maximum_collection_page(self.capability_id)
+        if isinstance(self.page, bool) or not isinstance(self.page, int) or not 1 <= self.page <= max_page:
+            raise ValueError(f"collection page must be between 1 and {max_page}")
         if (
             isinstance(self.overlap_seconds, bool)
             or not isinstance(self.overlap_seconds, int)
@@ -218,7 +220,7 @@ def publisher_reference(url: object) -> dict[str, str]:
     }
 
 
-def _bounded_metadata_value(value: object, depth: int = 0) -> object:
+def _bounded_metadata_value(value: object, depth: int = 0, key_name: str | None = None) -> object:
     if depth >= _MAX_METADATA_DEPTH:
         return None
     if value is None or isinstance(value, (bool, int)):
@@ -226,12 +228,16 @@ def _bounded_metadata_value(value: object, depth: int = 0) -> object:
     if isinstance(value, float):
         return value if math.isfinite(value) else None
     if isinstance(value, str):
-        return value[:_MAX_METADATA_STRING_CHARACTERS]
+        limit = 2_048 if key_name == "backlog_token" else _MAX_METADATA_STRING_CHARACTERS
+        return value[:limit]
     if isinstance(value, Mapping):
         bounded = {}
         entries = sorted(value.items(), key=lambda entry: str(entry[0]))
         for key, nested in entries[:_MAX_METADATA_ENTRIES]:
-            bounded[str(key)[:100]] = _bounded_metadata_value(nested, depth + 1)
+            normalized_key = str(key)[:100]
+            bounded[normalized_key] = _bounded_metadata_value(
+                nested, depth + 1, normalized_key,
+            )
         return bounded
     if isinstance(value, (list, tuple)):
         return [
@@ -353,10 +359,16 @@ class SourceAdapter(ABC):
             "cursor_start": _utc(query.start).isoformat(),
             "next_retry_phase": query.next_retry_phase,
             "overlap_seconds": query.overlap_seconds,
+            "page": query.page,
             "truncated": False,
         }
         if progress:
             metadata.update(progress)
+        metadata["exhausted"] = (
+            status in {"succeeded", "cache_hit"}
+            and not bool(metadata.get("truncated"))
+            and not bool(metadata.get("backlog_remaining"))
+        )
         return bounded_metadata({key: value for key, value in metadata.items() if value is not None})
 
     def collect(

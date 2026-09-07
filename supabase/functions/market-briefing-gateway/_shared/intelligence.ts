@@ -48,7 +48,7 @@ const PROVIDER_HOSTS: Readonly<Record<string, readonly string[]>> = {
   federal_register: ["www.federalregister.gov"],
   white_house: ["www.whitehouse.gov"],
   doe: ["www.energy.gov"],
-  dod: ["www.defense.gov"],
+  dod: ["www.defense.gov", "www.war.gov"],
   eia: ["api.eia.gov", "www.eia.gov"],
   fred: ["api.stlouisfed.org", "fred.stlouisfed.org"],
   bls: ["api.bls.gov", "www.bls.gov"],

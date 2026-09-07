@@ -73,6 +73,7 @@ DISCOVERY_RPCS = (
     "record_market_discovery_reference(uuid,jsonb)",
     "checkpoint_market_discovery_stage(uuid,jsonb)",
     "read_market_discovery_context(uuid,integer)",
+    "read_market_discovery_cursor_context(uuid,integer)",
     "begin_market_discovery_reference(uuid,jsonb,uuid,integer,text)",
     "record_market_discovery_reference_chunk(uuid,jsonb,uuid,integer,text)",
     "finalize_market_discovery_reference(uuid,jsonb,uuid,integer,text)",
@@ -362,7 +363,7 @@ def test_discovery_catalog_guards_and_rpc_grants_fail_closed():
 
     receipt = evaluate_snapshot(snapshot)
     assert receipt["discovery_ledgers"] == 12
-    assert receipt["discovery_gateway_only_rpcs"] == 8
+    assert receipt["discovery_gateway_only_rpcs"] == 9
 
     missing_guard = deepcopy(snapshot)
     missing_guard["discovery_tables"]["market_discovery_stage_tasks"]["guard"] = None

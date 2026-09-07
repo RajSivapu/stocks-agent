@@ -5,13 +5,17 @@ from __future__ import annotations
 from collections.abc import Mapping
 from dataclasses import dataclass, replace
 from datetime import datetime, timedelta, timezone
+import hashlib
 import re
 from typing import Literal
+
+from lib.intelligence.limits import maximum_collection_page
 
 
 _MINIMUM_OVERLAP = timedelta(hours=2)
 _MAX_ACCEPTED_ITEM_IDS = 500
 _MAX_TOKEN_CHARACTERS = 2_048
+_MAX_TOKEN_IDENTITIES = 64
 _PHASES = frozenset({"pre-market", "intraday", "post-market", "on-demand"})
 _CURSOR_STATUSES = frozenset({
     "succeeded",
@@ -71,6 +75,23 @@ def _item_ids(values: object) -> tuple[str, ...]:
     return tuple(values)
 
 
+def _token_identity(token: str) -> str:
+    return hashlib.sha256(token.encode("utf-8")).hexdigest()
+
+
+def _token_identities(values: object) -> tuple[str, ...]:
+    if not isinstance(values, (tuple, list)) or len(values) > _MAX_TOKEN_IDENTITIES:
+        raise ValueError("continuation token history is invalid")
+    if any(
+        not isinstance(value, str) or re.fullmatch(r"[0-9a-f]{64}", value) is None
+        for value in values
+    ):
+        raise ValueError("continuation token identity is invalid")
+    if len(set(values)) != len(values):
+        raise ValueError("continuation token identities must be unique")
+    return tuple(values)
+
+
 @dataclass(frozen=True, slots=True)
 class SourceCursor:
     provider: str
@@ -82,6 +103,7 @@ class SourceCursor:
     page: int = 1
     accepted_item_ids: tuple[str, ...] = ()
     next_retry_phase: str | None = None
+    continuation_token_history: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
         if not isinstance(self.provider, str) or re.fullmatch(
@@ -105,11 +127,22 @@ class SourceCursor:
         if backlog is not None and active_start is None:
             raise ValueError("backlog token requires an active window")
         page = self.page
-        if isinstance(page, bool) or not isinstance(page, int) or not 1 <= page <= 10:
+        if (
+            isinstance(page, bool)
+            or not isinstance(page, int)
+            or not 1 <= page <= maximum_collection_page(self.capability_id)
+        ):
             raise ValueError("cursor page is invalid")
         if backlog is not None and page == 1:
             page = 2
         ids = _item_ids(self.accepted_item_ids)
+        history = _token_identities(self.continuation_token_history)
+        if backlog is not None:
+            identity = _token_identity(backlog)
+            if not history:
+                history = (identity,)
+            elif identity not in history:
+                raise ValueError("active backlog token is absent from continuation history")
         phase = self.next_retry_phase
         if phase is not None and phase not in _PHASES:
             raise ValueError("next retry phase is invalid")
@@ -119,6 +152,7 @@ class SourceCursor:
         object.__setattr__(self, "backlog_token", backlog)
         object.__setattr__(self, "page", page)
         object.__setattr__(self, "accepted_item_ids", ids)
+        object.__setattr__(self, "continuation_token_history", history)
 
     def to_mapping(self) -> dict[str, object]:
         def encoded(value: datetime | None) -> str | None:
@@ -134,6 +168,7 @@ class SourceCursor:
             "page": self.page,
             "accepted_item_ids": list(self.accepted_item_ids),
             "next_retry_phase": self.next_retry_phase,
+            "continuation_token_history": list(self.continuation_token_history),
         }
 
     @classmethod
@@ -150,8 +185,9 @@ class SourceCursor:
             "next_retry_phase",
         }
         legacy = expected - {"page"}
+        current = expected | {"continuation_token_history"}
         if not isinstance(value, Mapping) or frozenset(value) not in {
-            frozenset(expected), frozenset(legacy)
+            frozenset(current), frozenset(expected), frozenset(legacy)
         }:
             raise ValueError("persisted source cursor has invalid keys")
         return cls(
@@ -164,6 +200,7 @@ class SourceCursor:
             page=value.get("page", 1),  # type: ignore[arg-type]
             accepted_item_ids=value["accepted_item_ids"],  # type: ignore[arg-type]
             next_retry_phase=value["next_retry_phase"],  # type: ignore[arg-type]
+            continuation_token_history=value.get("continuation_token_history", ()),  # type: ignore[arg-type]
         )
 
 
@@ -324,8 +361,12 @@ def update_cursor(cursor: SourceCursor, page: CollectionPage) -> SourceCursor:
         raise ValueError("page window is not contiguous with the completed watermark")
     accepted = _merged_ids(cursor.accepted_item_ids, page.accepted_item_ids)
     if not page.exhausted:
-        if cursor.backlog_token is not None and page.backlog_token == cursor.backlog_token:
+        identity = _token_identity(page.backlog_token) if page.backlog_token is not None else None
+        if identity is not None and identity in cursor.continuation_token_history:
             raise ValueError("page repeated the active backlog token")
+        history = cursor.continuation_token_history
+        if identity is not None:
+            history = (*history, identity)[-_MAX_TOKEN_IDENTITIES:]
         return replace(
             cursor,
             active_window_start=page.window.start,
@@ -334,6 +375,7 @@ def update_cursor(cursor: SourceCursor, page: CollectionPage) -> SourceCursor:
             page=cursor.page + 1 if page.backlog_token is not None else cursor.page,
             accepted_item_ids=accepted,
             next_retry_phase=page.next_retry_phase,
+            continuation_token_history=history,
         )
     return replace(
         cursor,
@@ -346,6 +388,7 @@ def update_cursor(cursor: SourceCursor, page: CollectionPage) -> SourceCursor:
         # guard. Durable item hashes remain the cross-window dedupe authority.
         accepted_item_ids=(),
         next_retry_phase=None,
+        continuation_token_history=(),
     )
 
 

@@ -129,7 +129,7 @@ def test_scheduled_collector_passes_one_persisted_capability_plan_and_source_cur
                 "completed_through": "2026-09-03T12:00:00Z",
                 "active_window_start": None, "active_window_end": None,
                 "backlog_token": None, "page": 1, "accepted_item_ids": [],
-                "next_retry_phase": None,
+                "next_retry_phase": None, "continuation_token_history": [],
                 "source_run_id": "22222222-2222-4222-8222-222222222222",
                 "source_task_id": "33333333-3333-4333-8333-333333333333",
                 "source_updated_at": "2026-09-03T12:01:00Z",

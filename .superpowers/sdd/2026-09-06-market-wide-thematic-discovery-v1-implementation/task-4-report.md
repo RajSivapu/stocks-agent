@@ -247,3 +247,109 @@ also passed in this fix round. Final `py_compile` for all modified Python module
   no duplicate collector or provider call was introduced.
 - No test used a live source. No collector, Telegram, schedule, deployment, or production mutation
   ran during the fix.
+
+## Fix round 2 — completion evidence, cursor ordering, and recovery semantics
+
+Base: `38d4a1d874df505c75a2165976a09924faf31cf3`
+
+Same-run terminal replay now requires its durable collection checkpoint and accepted items. When
+that evidence is unavailable, the pipeline returns a zero-cost failed receipt with
+`EVIDENCE_UNAVAILABLE`, `source_failed`, and `insufficient_coverage`; it does not synthesize a
+successful empty result or call the provider again. The terminal task remains an audit record, and
+its independently validated cursor can still seed a later run. An interrupted `attempting` task
+also retains the exact protected cache key, reservation, source-receipt identity, and task-local
+requested window in its uncertain receipt.
+
+Scheduled Defense collection now requests the verified final `www.war.gov` RSS endpoints directly,
+using one request per task. Health and compatibility checks retain the exact reviewed
+Defense-to-war.gov redirect pairs. The additive
+`sql/migrations/20261008_official_source_completion_contract.sql` admits provider `dod` completion
+only for the two exact feed queries and their reviewed defense.gov/war.gov article path families.
+It also replaces the protected cursor reader so a source run must finish strictly before the
+consuming run starts; a restarted older run cannot consume a cursor from a later completion.
+Migrations 20261004 through 20261007 remain byte-for-byte unchanged.
+
+Pageable cursors now retain at most 64 unique SHA-256 continuation-token identities and reject a
+nonadjacent cycle such as A to B to A. The history clears only after an exhausted contiguous
+window. White House sitemap traversal has its own bound of 2,001 pages: one index plus 20 admitted
+children at up to 5,000 entries in 50-item pages. Other providers retain the 10-page bound.
+
+Recovery now validates the persisted request cursor, recomputes the exact cursor transition from
+the task-local window and receipt outcome, and compares it with the persisted source cursor before
+opening a restore transaction. It binds provider, capability, theme/cursor key, task window,
+reservation, cache key, source receipt, durable checkpoint/items, receipt status, request cost,
+accepted IDs, page, overlap, truncation, backlog, exhaustion, and coverage metadata. Impossible
+transitions and substituted checkpoint identities fail closed.
+
+### Fix-round-2 TDD evidence
+
+- Replay RED: a terminal task without its durable checkpoint replayed as succeeded with zero items.
+  The regression is GREEN with `EVIDENCE_UNAVAILABLE` and proves the provider is not called.
+- Defense RED: both scheduled capabilities requested defense.gov and depended on a redirect;
+  protected PostgreSQL completion also rejected the legitimate war.gov request. Both capabilities
+  now issue one direct war.gov request, and fresh/ordered PostgreSQL schemas accept only the exact
+  reviewed request and article families.
+- Ordering RED: a source run completed after an older consuming run started was returned by the
+  20261007 reader. The 20261008 replacement rejects that row using terminal `finished_at` ordering
+  and nonfuture cursor timestamps.
+- Token RED: a pageable A-to-B-to-A sequence was accepted. It is now rejected by bounded canonical
+  token history, while an exhausted window resets the history.
+- Sitemap RED: the global ten-page limit could not represent all 20 admitted White House sitemap
+  children and offsets. The capability-specific bound traverses the full 20-child fixture in 21
+  requests; a non-White-House page 21 remains invalid.
+- Recovery RED: seven mutations of cursor, cache identity, receipt status, truncation, backlog,
+  capability, or durable receipt lineage reached restore mutation. All seven now fail semantic
+  validation before a transaction begins.
+- Uncertain identity RED: a reconstructed uncertain receipt could use a text-derived cache identity
+  and omit the source receipt. It now preserves the task checkpoint identity and local window; the
+  regression also proves there is no duplicate adapter call.
+
+### Fix-round-2 verification
+
+```text
+.venv/bin/python -m pytest -q tests/test_intelligence_cursors.py \
+  tests/test_intelligence_official_sources.py tests/test_intelligence_pipeline.py \
+  tests/test_collect_market_intelligence.py tests/test_recovery_bundle.py \
+  tests/test_market_wide_discovery_sql.py tests/test_intelligence_controller_sql.py
+271 passed in 18.33s
+
+combined targeted replay/recovery/SQL regression slice
+82 passed
+
+env -u RUN_DB_INTEGRATION_TESTS .venv/bin/python -m pytest -q -m 'not db_integration'
+1144 passed, 3 skipped, 4 deselected in 150.63s
+
+npx --yes deno@2.9.6 test --config supabase/functions/deno.json \
+  supabase/functions/market-briefing-gateway/_shared \
+  supabase/functions/owner-dashboard-api
+ok | 310 passed | 0 failed
+
+npx --yes deno@2.9.6 check --config supabase/functions/deno.json \
+  supabase/functions/telegram-portfolio/index.ts \
+  supabase/functions/market-briefing-gateway/index.ts \
+  supabase/functions/owner-dashboard-api/index.ts
+exit 0
+```
+
+The first broad `npm run test:all` reached Python with 1109 passed, 3 skipped, and 4 deselected,
+then exposed four stale migration-tail/RPC expectations plus 31 dependent fixture failures. After
+updating those expectations for the additive 20261007/20261008 sequence, the targeted 82-test
+regression passed and the complete non-database Python suite passed as shown above. Node tests
+(71), dashboard contract tests (6), web unit tests (52), both TypeScript typechecks, ESLint,
+dependency-license checks, the production build/bundle, and Playwright (21 passed, 1 skipped) also
+passed. `py_compile`, Deno checks, and `git diff --check` exited 0.
+
+### Fix-round-2 self-review
+
+- Completion remains service mediated and owner-only. No function grant broadens access to owners,
+  dashboard readers, anonymous, or authenticated roles; suggestion-only behavior and
+  `execution_allowed=false` are unchanged.
+- The cursor history stores only bounded hashes, never raw additional tokens. The active raw token
+  remains separately capped at 2,048 characters, and protected SQL/gateway readers validate the
+  same 64-entry identity bound.
+- The 2,001-page allowance applies only to `white_house_sitemap`; all other capabilities keep the
+  ten-page limit. Request quotas still bound work per run.
+- The migration is additive and schema parity ends with its exact bytes. Reviewed migrations
+  20261004, 20261005, 20261006, and 20261007 are unchanged.
+- All source and scheduled-path tests used fixtures or test doubles. No live source, production
+  collector, Telegram delivery, schedule, deployment, or production mutation was run.

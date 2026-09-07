@@ -17,6 +17,8 @@ RECONCILIATION = ROOT / "sql/reconciliation/20261004_production_schema_reconcili
 ACL_CLOSURE = MIGRATIONS / "20261003_release_ledger_acl_closure.sql"
 DISCOVERY = MIGRATIONS / "20261005_market_wide_discovery.sql"
 REFERENCE_TRANSFER = MIGRATIONS / "20261006_reference_snapshot_transfer.sql"
+CURSOR_CONTEXT = MIGRATIONS / "20261007_discovery_cursor_context.sql"
+OFFICIAL_COMPLETION = MIGRATIONS / "20261008_official_source_completion_contract.sql"
 
 # The original pre-20260901 tables. Historical migrations run only in this
 # disposable fixture, before representative legacy facts are inserted.
@@ -134,6 +136,8 @@ def test_exact_legacy_reconciliation_preserves_facts_matches_fresh_and_refuses_r
             assert projected_rows("legacy") == before
             execute("legacy", "BEGIN;" + DISCOVERY.read_text() + "COMMIT;")
             execute("legacy", "BEGIN;" + REFERENCE_TRANSFER.read_text() + "COMMIT;")
+            execute("legacy", "BEGIN;" + CURSOR_CONTEXT.read_text() + "COMMIT;")
+            execute("legacy", "BEGIN;" + OFFICIAL_COMPLETION.read_text() + "COMMIT;")
             assert projected_rows("legacy") == before
             after_catalog = catalog("legacy")
             after_tables = {row["name"] for row in after_catalog["relations"] if row["kind"] in {"r", "p"}}

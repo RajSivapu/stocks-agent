@@ -779,6 +779,7 @@ Deno.test("readContext carries protected prior cursor provenance into a new run"
     page: 1,
     accepted_item_ids: [],
     next_retry_phase: null,
+    continuation_token_history: [],
     source_run_id: sourceRunId,
     source_task_id: sourceTaskId,
     source_updated_at: "2026-09-05T20:01:00Z",

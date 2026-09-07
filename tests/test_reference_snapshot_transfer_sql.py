@@ -26,6 +26,8 @@ ROOT = Path(__file__).resolve().parents[1]
 MIGRATION = ROOT / "sql" / "migrations" / "20261006_reference_snapshot_transfer.sql"
 SCHEMA = ROOT / "sql" / "schema.sql"
 PREVIOUS = ROOT / "sql" / "migrations" / "20261005_market_wide_discovery.sql"
+CURSOR_CONTEXT = ROOT / "sql" / "migrations" / "20261007_discovery_cursor_context.sql"
+OFFICIAL_COMPLETION = ROOT / "sql" / "migrations" / "20261008_official_source_completion_contract.sql"
 
 TABLES = (
     "market_reference_chunk_receipts",
@@ -124,7 +126,10 @@ def test_transfer_finalization_verifies_root_contiguity_and_unique_membership_se
 
 
 def test_new_schema_tail_is_additive_and_prior_migrations_are_unchanged():
-    assert SCHEMA.read_text().endswith(MIGRATION.read_text())
+    schema = SCHEMA.read_text()
+    assert MIGRATION.read_text() in schema
+    assert CURSOR_CONTEXT.read_text() in schema
+    assert schema.endswith(OFFICIAL_COMPLETION.read_text())
     import subprocess
 
     prior_at_base = subprocess.run(

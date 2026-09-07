@@ -343,6 +343,7 @@ def test_gateway_repository_uses_only_fixed_tables_and_named_rpcs():
             "read_market_discovery_reference",
             "read_market_intelligence_completion",
             "read_market_discovery_context",
+            "read_market_discovery_cursor_context",
         "read_market_report_decisions",
         "read_reconciled_cash_snapshot",
         "record_market_run_outcome",

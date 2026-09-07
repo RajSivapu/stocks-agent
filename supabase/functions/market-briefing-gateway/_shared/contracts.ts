@@ -647,6 +647,7 @@ export interface DiscoverySourceCursor {
   page: number;
   accepted_item_ids: string[];
   next_retry_phase: Phase | null;
+  continuation_token_history: string[];
   source_run_id: string;
   source_task_id: string;
   source_updated_at: string;

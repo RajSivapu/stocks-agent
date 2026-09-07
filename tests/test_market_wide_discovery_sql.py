@@ -25,6 +25,7 @@ ROOT = Path(__file__).resolve().parents[1]
 MIGRATION = ROOT / "sql" / "migrations" / "20261005_market_wide_discovery.sql"
 TRANSFER_MIGRATION = ROOT / "sql" / "migrations" / "20261006_reference_snapshot_transfer.sql"
 CURSOR_MIGRATION = ROOT / "sql" / "migrations" / "20261007_discovery_cursor_context.sql"
+OFFICIAL_COMPLETION_MIGRATION = ROOT / "sql" / "migrations" / "20261008_official_source_completion_contract.sql"
 SCHEMA = ROOT / "sql" / "schema.sql"
 
 TABLES = (
@@ -137,7 +138,8 @@ def test_schema_appends_the_new_immutable_migration_verbatim():
     schema = SCHEMA.read_text()
     assert migration in schema
     assert TRANSFER_MIGRATION.read_text() in schema
-    assert schema.endswith(CURSOR_MIGRATION.read_text())
+    assert CURSOR_MIGRATION.read_text() in schema
+    assert schema.endswith(OFFICIAL_COMPLETION_MIGRATION.read_text())
 
 
 def test_cursor_context_rpc_is_static_service_only_and_preserves_prior_migrations():
@@ -156,6 +158,22 @@ def test_cursor_context_rpc_is_static_service_only_and_preserves_prior_migration
         "GRANT EXECUTE ON FUNCTION public.read_market_discovery_cursor_context "
         "(uuid, integer) TO service_role"
     ) in normalized
+    assert "TO authenticated" not in normalized
+
+
+def test_official_completion_migration_redefines_only_reviewed_protected_contracts():
+    statements = parsed_statements(OFFICIAL_COMPLETION_MIGRATION)
+    normalized = "\n".join(statements)
+    assert len(statements_starting(
+        statements,
+        "CREATE OR REPLACE FUNCTION public.record_market_intelligence_provider_v2(",
+    )) == 1
+    assert len(statements_starting(
+        statements,
+        "CREATE OR REPLACE FUNCTION public.read_market_discovery_cursor_context(",
+    )) == 1
+    assert "www.defense.gov" in normalized and "defense|war" in normalized
+    assert "finished_at<v_consuming_started_at" in normalized
     assert "TO authenticated" not in normalized
 
 
@@ -191,12 +209,15 @@ def discovery_db():
                 "CREATE ROLE stock_agent_dashboard; CREATE ROLE stock_agent_release_reader;"
                 "CREATE ROLE stock_agent_release_reader_runtime;"
                 "CREATE SCHEMA extensions; CREATE EXTENSION pgcrypto WITH SCHEMA extensions;"
-                "CREATE TABLE public.analysis_runs(id uuid PRIMARY KEY,status text NOT NULL);"
+                "CREATE TABLE public.analysis_runs(id uuid PRIMARY KEY,status text NOT NULL,"
+                "started_at timestamptz NOT NULL DEFAULT statement_timestamp(),finished_at timestamptz);"
                 "CREATE TABLE public.market_intelligence_runs(id uuid PRIMARY KEY REFERENCES public.analysis_runs(id))"
             )
             connection.execute(MIGRATION.read_text())
             connection.execute(TRANSFER_MIGRATION.read_text())
             connection.execute(CURSOR_MIGRATION.read_text())
+            if OFFICIAL_COMPLETION_MIGRATION.exists():
+                connection.execute(OFFICIAL_COMPLETION_MIGRATION.read_text())
             yield connection
         finally:
             if connection is not None:
@@ -207,11 +228,21 @@ def discovery_db():
             )
 
 
-def seeded_run(connection) -> str:
+def seeded_run(connection, *, started_at=None) -> str:
     run_id = str(uuid.uuid4())
-    connection.execute("INSERT INTO public.analysis_runs VALUES(%s,'running')", (run_id,))
+    connection.execute(
+        "INSERT INTO public.analysis_runs(id,status,started_at) VALUES(%s,'running',COALESCE(%s,statement_timestamp()))",
+        (run_id, started_at),
+    )
     connection.execute("INSERT INTO public.market_intelligence_runs VALUES(%s)", (run_id,))
     return run_id
+
+
+def complete_run(connection, run_id: str) -> None:
+    connection.execute(
+        "UPDATE public.analysis_runs SET status='completed',finished_at=statement_timestamp() WHERE id=%s",
+        (run_id,),
+    )
 
 
 def task_payload(task_id: str, *, state: str, attempt_count: int, query_hash: str = "a" * 64):
@@ -300,6 +331,7 @@ def _cursor_result(*, completed: str, theme_id: str = "macro_and_policy"):
         "page": 1,
         "accepted_item_ids": [],
         "next_retry_phase": None,
+        "continuation_token_history": [],
     }
     return {
         "cursor_key": f"gdelt_theme_search:{theme_id}",
@@ -332,34 +364,26 @@ def test_cross_run_cursor_context_uses_latest_success_and_ignores_failed_or_curr
     _persist_terminal_cursor(
         discovery_db, older_run, state="succeeded", completed="2000-01-04T00:00:00Z",
     )
-    discovery_db.execute(
-        "UPDATE public.analysis_runs SET status='completed' WHERE id=%s", (older_run,),
-    )
+    complete_run(discovery_db, older_run)
 
     prior_run = seeded_run(discovery_db)
     successful_task = _persist_terminal_cursor(
         discovery_db, prior_run, state="succeeded", completed="2000-01-05T00:00:00Z",
     )
-    discovery_db.execute(
-        "UPDATE public.analysis_runs SET status='completed' WHERE id=%s", (prior_run,),
-    )
+    complete_run(discovery_db, prior_run)
 
     failed_run = seeded_run(discovery_db)
     _persist_terminal_cursor(
         discovery_db, failed_run, state="failed", completed="2099-01-05T00:00:00Z",
     )
-    discovery_db.execute(
-        "UPDATE public.analysis_runs SET status='completed' WHERE id=%s", (failed_run,),
-    )
+    complete_run(discovery_db, failed_run)
 
     future_run = seeded_run(discovery_db)
     _persist_terminal_cursor(
         discovery_db, future_run, state="succeeded", completed="2099-01-05T00:00:00Z",
         theme_id="consumer_demand",
     )
-    discovery_db.execute(
-        "UPDATE public.analysis_runs SET status='completed' WHERE id=%s", (future_run,),
-    )
+    complete_run(discovery_db, future_run)
 
     current_run = seeded_run(discovery_db)
     current_task, current_payload = create_attempting_task(
@@ -391,6 +415,22 @@ def test_cross_run_cursor_context_uses_latest_success_and_ignores_failed_or_curr
         "source_run_id": str(prior_run),
         "source_task_id": successful_task,
     }]
+
+
+def test_cursor_context_rejects_a_later_completed_run_when_an_older_run_restarts(discovery_db):
+    older_consumer = seeded_run(discovery_db, started_at="2026-09-01T12:00:00Z")
+    later_source = seeded_run(discovery_db, started_at="2026-09-02T12:00:00Z")
+    _persist_terminal_cursor(
+        discovery_db, later_source, state="succeeded", completed="2026-09-02T13:00:00Z",
+    )
+    complete_run(discovery_db, later_source)
+
+    context = discovery_db.execute(
+        "SELECT public.read_market_discovery_cursor_context(%s,100)", (older_consumer,),
+    ).fetchone()[0]
+
+    assert context["source_cursors"] == []
+    assert context["last_completed_scans"] == []
 
 
 def exposure_fact_row(*, row_id: str, security_id: str, content_hash: str):
