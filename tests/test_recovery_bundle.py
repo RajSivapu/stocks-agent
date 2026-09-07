@@ -669,6 +669,45 @@ def _with_reused_v2_snapshot(records):
     return records
 
 
+def _with_changed_materialized_v2_snapshot(records):
+    records = _with_reused_v2_snapshot(records)
+    run_id = "20000000-0000-4000-8000-000000000001"
+    manifest_id = "20000000-0000-4000-8000-000000000002"
+    chunk = next(
+        row for row in records["reference_chunk_receipts"]
+        if row["manifest_id"] == manifest_id and row["chunk_index"] == 0
+    )
+    entry = chunk["payload"]["entries"][0]
+    entry.update(ticker="TEST2", aliases=["TEST2"])
+    entry["content_hash"] = digest(security_revision_semantic_document(entry))
+    chunk_hash = hashlib.sha256("\x1f".join((
+        entry["security_id"], entry["id"], entry["content_hash"],
+    )).encode()).hexdigest()
+    root_hash = hashlib.sha256(chunk_hash.encode()).hexdigest()
+    chunk.update(chunk_hash=chunk_hash)
+    chunk["payload"]["chunk_hash"] = chunk_hash
+    begin = next(
+        row for row in records["reference_chunk_receipts"]
+        if row["manifest_id"] == manifest_id and row["chunk_index"] == -1
+    )
+    begin.update(chunk_hash=root_hash)
+    begin["payload"]["root_hash"] = root_hash
+    seal = next(
+        row for row in records["reference_finalization_seals"]
+        if row["manifest_id"] == manifest_id
+    )
+    seal["root_hash"] = root_hash
+    revision = copy.deepcopy(entry)
+    revision.update(run_id=run_id, created_at="2026-09-06T19:31:30Z")
+    records["security_reference_revisions"].append(revision)
+    membership = next(
+        row for row in records["reference_snapshot_memberships"]
+        if row["manifest_id"] == manifest_id
+    )
+    membership["security_revision_id"] = entry["id"]
+    return records
+
+
 def test_recovery_accepts_valid_sealed_v1_and_v2_reference_lineage():
     assert _validated_records(recovery_records())["security_reference_revisions"][0][
         "semantic_encoding_version"
@@ -687,6 +726,65 @@ def test_recovery_accepts_v2_snapshot_membership_reusing_predecessor_revision():
     assert validated["reference_snapshot_memberships"][1][
         "security_revision_id"
     ] == records["security_reference_revisions"][0]["id"]
+
+
+def test_recovery_accepts_materialized_revision_when_predecessor_content_changed():
+    records = _with_changed_materialized_v2_snapshot(_v2_recovery_records())
+
+    validated = _validated_records(records)
+
+    assert len(validated["security_reference_revisions"]) == 2
+    assert validated["reference_snapshot_memberships"][1][
+        "security_revision_id"
+    ] == "20000000-0000-4000-8000-000000000003"
+
+
+def test_recovery_rejects_reuse_when_consuming_run_predecessor_pin_is_unavailable():
+    records = _with_reused_v2_snapshot(_v2_recovery_records())
+    consuming_run = "20000000-0000-4000-8000-000000000001"
+    pin = next(
+        row for row in records["reference_predecessor_pins"]
+        if row["run_id"] == consuming_run
+    )
+    pin.update(
+        manifest_id=None,
+        reference_status="reference_unavailable",
+        source_retrieved_at=None,
+        reference_age_seconds=None,
+    )
+
+    with pytest.raises(ValueError, match="predecessor"):
+        _validated_records(records)
+
+
+def test_recovery_rejects_materialized_revision_when_seal_disagrees_with_begin_predecessor():
+    records = _with_reused_v2_snapshot(_v2_recovery_records())
+    consuming_run = "20000000-0000-4000-8000-000000000001"
+    manifest_id = "20000000-0000-4000-8000-000000000002"
+    entry = next(
+        row["payload"]["entries"][0]
+        for row in records["reference_chunk_receipts"]
+        if row["manifest_id"] == manifest_id and row["chunk_index"] == 0
+    )
+    materialized = copy.deepcopy(entry)
+    materialized.update(
+        run_id=consuming_run,
+        created_at="2026-09-06T19:31:30Z",
+    )
+    records["security_reference_revisions"].append(materialized)
+    membership = next(
+        row for row in records["reference_snapshot_memberships"]
+        if row["manifest_id"] == manifest_id
+    )
+    membership["security_revision_id"] = entry["id"]
+    seal = next(
+        row for row in records["reference_finalization_seals"]
+        if row["manifest_id"] == manifest_id
+    )
+    seal["predecessor_manifest_id"] = None
+
+    with pytest.raises(ValueError, match="predecessor"):
+        _validated_records(records)
 
 
 @pytest.mark.parametrize("mutation", [

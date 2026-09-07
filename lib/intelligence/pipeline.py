@@ -613,7 +613,11 @@ class IntelligencePipeline:
     ) -> None:
         grouped: dict[str, list[SourceItem]] = {}
         task_ids_by_item: dict[str, set[str]] = {}
+        requested_labels: set[str] = set()
         for task, result in task_results:
+            for value in (task.query.get("query"), task.theme_id):
+                if isinstance(value, str) and value.strip():
+                    requested_labels.add(value)
             if result.receipt.status not in {"succeeded", "cache_hit"}:
                 continue
             for raw in result.items:
@@ -634,7 +638,10 @@ class IntelligencePipeline:
         }))
         proposals = tuple(
             propose_dynamic_theme(
-                label, grouped[label], coverage_label=coverage_label
+                label,
+                grouped[label],
+                coverage_label=coverage_label,
+                requested_labels=requested_labels,
             )
             for label in labels
         )
@@ -685,6 +692,9 @@ class IntelligencePipeline:
             "label": proposal.label,
             "missing_reasons": list(proposal.missing_reasons),
             "research_state": "observed" if proposal.eligible else "unresolved",
+            "source_ids": sorted({
+                evidence_key(item) for item in proposal.evidence
+            })[:64],
             "theme_id": proposal.theme_id,
         } for proposal in proposals]
         episode_rows: list[dict[str, object]] = []

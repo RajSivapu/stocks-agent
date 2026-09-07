@@ -178,3 +178,61 @@ licenses, production build, and bundle verification passed; Playwright 21 passed
 passed. Migrations `20261004` through `20261008` remain byte-for-byte unchanged from `71d3b472`.
 All review tests used fixtures and local PostgreSQL test containers. No live collector, source,
 Telegram, scheduler, deployment, or production mutation ran.
+
+## Important-review fix pass 2
+
+Two further RED groups reproduced cross-ledger and syndication gaps on `b726cc19`:
+
+- Recovery accepted a consuming run whose predecessor pin said `reference_unavailable` while its
+  begin receipt, begin payload, finalization seal, and reused membership named a predecessor.
+  Recovery also accepted a materialized current revision after the seal predecessor was cleared but
+  the begin receipt and payload still named the old predecessor.
+- Two byte-identical GDELT headlines on different mirror domains and URLs passed the publisher and
+  upstream counts. Two reworded mirror copies carrying the same wire-story attribution also passed.
+
+The recovery GREEN binds every transfer receipt to the begin run, capability, manifest, and
+predecessor; binds the begin payload and finalization seal to that same state; and requires the
+consuming run's predecessor pin to be exactly stale with that manifest or unavailable with no
+manifest. Finalized manifests and seals are atomic. Memberships must reuse an identical revision
+from the pinned immediate predecessor and must materialize the uploaded revision when predecessor
+content differs. Valid controls cover unavailable/no predecessor, stale/current cross-run reuse,
+and changed-content materialization with all derived hashes recomputed.
+
+Dynamic-theme corroboration now groups source items by a mirror-independent normalized
+headline/claim fingerprint and by explicit wire-story attribution when supplied. All mirrored items
+remain in the unresolved proposal's `source_ids` for audit, with
+`syndicated_evidence_not_independent` and the existing publisher-independence reason. Two reports
+qualify only when separate story groups also provide distinct publisher and upstream identities.
+Requested query or taxonomy identifiers add `requested_taxonomy_label_not_evidence` and cannot
+promote an episode. Reversing production-adapter input preserves the task, proposal, episode, and
+evidence identities.
+
+Fix-pass-2 verification:
+
+```text
+.venv/bin/python -m pytest \
+  tests/test_recovery_bundle.py tests/test_intelligence_discovery.py \
+  tests/test_intelligence_providers.py tests/test_intelligence_pipeline.py \
+  tests/test_intelligence_themes.py -q
+248 passed in 8.85s
+
+.venv/bin/python -m pytest \
+  tests/test_reference_snapshot_transfer_sql.py tests/test_market_wide_discovery_sql.py \
+  tests/test_recovery_bundle.py tests/test_managed_isolated_restore.py \
+  tests/test_reference_issuer_names.py tests/test_production_schema_reconciliation_sql.py \
+  tests/test_verify_market_intelligence_migration.py -q
+295 passed in 104.61s
+
+.venv/bin/python -m pytest -q
+1211 passed, 3 skipped, 4 deselected in 217.82s
+
+npm run test:all
+exit 0: Python 1211 passed/3 skipped/4 deselected; Node 71 passed;
+Deno 311 passed; package tests 6 + 52 passed; typechecks, ESLint, dependency
+licenses, production build, and bundle verification passed; Playwright 21 passed/1 skipped
+```
+
+`git diff --check`, Python compilation, and migration immutability checks passed. Migrations
+`20261004` through `20261008` remain unchanged from `b726cc19`. All tests used fixtures and local
+PostgreSQL test containers; no live collector, source, Telegram, scheduler, deployment, or
+production mutation ran.

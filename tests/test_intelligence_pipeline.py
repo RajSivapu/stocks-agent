@@ -1243,32 +1243,75 @@ def test_production_gdelt_content_proposes_dynamic_themes_without_injected_label
         reserved_holding_quote_requests=0, reserved_adaptive_requests=0,
     )
 
+    articles = [
+        {
+            "url": "https://publisher-a.example/cooling-a",
+            "domain": "publisher-a.example",
+            "title": "Liquid cooling loop capacity: first commercial deployment",
+            "seendate": "20260904T110000Z",
+        },
+        {
+            "url": "https://publisher-b.example/cooling-b",
+            "domain": "publisher-b.example",
+            "title": "Liquid cooling loop capacity: second supplier expansion",
+            "seendate": "20260904T110500Z",
+        },
+        {
+            "url": "https://publisher-a.example/heat-reuse",
+            "domain": "publisher-a.example",
+            "title": "Novel heat reuse market: one pilot project",
+            "seendate": "20260904T111000Z",
+        },
+        {
+            "url": "https://mirror-a.example/wire/immersion?id=9",
+            "domain": "mirror-a.example",
+            "title": "Mirrored immersion cooling market: shared wire report",
+            "seendate": "20260904T111500Z",
+        },
+        {
+            "url": "https://mirror-b.example/news/immersion?copy=9",
+            "domain": "mirror-b.example",
+            "title": "Mirrored immersion cooling market: shared wire report",
+            "seendate": "20260904T112000Z",
+        },
+        {
+            "url": "https://mirror-a.example/wire/heat?id=77",
+            "domain": "mirror-a.example",
+            "title": "Shared wire heat recovery: original wording",
+            "syndication_id": "wire-story-77",
+            "seendate": "20260904T112500Z",
+        },
+        {
+            "url": "https://mirror-b.example/news/heat?copy=77",
+            "domain": "mirror-b.example",
+            "title": "Shared wire heat recovery: altered mirror wording",
+            "syndication_id": "wire-story-77",
+            "seendate": "20260904T113000Z",
+        },
+        {
+            "url": "https://publisher-a.example/requested-label-a",
+            "domain": "publisher-a.example",
+            "title": "Permanent magnet award: first requested-query echo",
+            "seendate": "20260904T113500Z",
+        },
+        {
+            "url": "https://publisher-b.example/requested-label-b",
+            "domain": "publisher-b.example",
+            "title": "Permanent magnet award: second requested-query echo",
+            "seendate": "20260904T114000Z",
+        },
+    ]
+
     class Http:
+        def __init__(self, rows):
+            self.rows = rows
+
         def get(self, request):
             return HttpResult(
                 url=request.url,
                 status=200,
                 headers={"content-type": "application/json"},
-                body=json.dumps({"articles": [
-                    {
-                        "url": "https://publisher-a.example/cooling-a",
-                        "domain": "publisher-a.example",
-                        "title": "Liquid cooling loop capacity: first commercial deployment",
-                        "seendate": "20260904T110000Z",
-                    },
-                    {
-                        "url": "https://publisher-b.example/cooling-b",
-                        "domain": "publisher-b.example",
-                        "title": "Liquid cooling loop capacity: second supplier expansion",
-                        "seendate": "20260904T110500Z",
-                    },
-                    {
-                        "url": "https://publisher-a.example/heat-reuse",
-                        "domain": "publisher-a.example",
-                        "title": "Novel heat reuse market: one pilot project",
-                        "seendate": "20260904T111000Z",
-                    },
-                ]}).encode(),
+                body=json.dumps({"articles": self.rows}).encode(),
                 retrieved_at=NOW,
                 observed_at=NOW,
                 cache_hit=False,
@@ -1292,17 +1335,30 @@ def test_production_gdelt_content_proposes_dynamic_themes_without_injected_label
         def checkpoint_intelligence_collection(self, run_id, payload):
             return {"run_id": run_id, "cache_key": payload["cache_key"]}
 
-    gateway = Gateway()
-    adapter = build_adapter("gdelt", Http(), QuotaSession({"gdelt": ()}), clock=lambda: NOW)
-    IntelligencePipeline(gateway, [adapter], discovery_plan=plan).run(request("pre-market"))
+    def execute(rows):
+        gateway = Gateway()
+        adapter = build_adapter(
+            "gdelt", Http(rows), QuotaSession({"gdelt": ()}), clock=lambda: NOW,
+        )
+        IntelligencePipeline(gateway, [adapter], discovery_plan=plan).run(
+            request("pre-market")
+        )
+        terminal = next(
+            payload for payload in gateway.stage_payloads
+            if payload["task"]["capability_id"] == "dynamic_theme_evaluation"
+            and payload["task"]["state"] == "succeeded"
+        )
+        return gateway.payloads[-1]["items"], terminal
 
-    source_items = gateway.payloads[-1]["items"]
+    source_items, terminal = execute(articles)
+    _, reversed_terminal = execute(list(reversed(articles)))
     assert all("dynamic_theme_label" in row["metadata"] for row in source_items)
-    terminal = next(
-        payload for payload in gateway.stage_payloads
-        if payload["task"]["capability_id"] == "dynamic_theme_evaluation"
-        and payload["task"]["state"] == "succeeded"
-    )
+    assert all("syndication_fingerprint" in row["metadata"] for row in source_items)
+    mirrored_fingerprints = {
+        row["metadata"]["syndication_fingerprint"] for row in source_items
+        if row["title"].startswith("Mirrored immersion cooling market")
+    }
+    assert len(mirrored_fingerprints) == 1
     assert [row["episode"]["label"] for row in terminal["theme_episode_revisions"]] == [
         "liquid cooling loop capacity",
     ]
@@ -1310,4 +1366,16 @@ def test_production_gdelt_content_proposes_dynamic_themes_without_injected_label
     unresolved = next(row for row in proposals if row["label"] == "novel heat reuse market")
     assert unresolved["research_state"] == "unresolved"
     assert "publisher_independent_corroboration_required" in unresolved["missing_reasons"]
-    assert all(row["label"] != task.query["query"] for row in proposals)
+    for label in ("mirrored immersion cooling market", "shared wire heat recovery"):
+        syndicated = next(row for row in proposals if row["label"] == label)
+        assert syndicated["research_state"] == "unresolved"
+        assert "syndicated_evidence_not_independent" in syndicated["missing_reasons"]
+        assert len(syndicated["source_ids"]) == 2
+    requested = next(row for row in proposals if row["label"] == task.query["query"])
+    assert requested["research_state"] == "unresolved"
+    assert "requested_taxonomy_label_not_evidence" in requested["missing_reasons"]
+    assert terminal["theme_episode_revisions"] == reversed_terminal[
+        "theme_episode_revisions"
+    ]
+    assert terminal["task"]["id"] == reversed_terminal["task"]["id"]
+    assert proposals == reversed_terminal["task"]["result"]["proposals"]

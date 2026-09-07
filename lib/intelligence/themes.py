@@ -47,6 +47,29 @@ def source_dynamic_theme_label(title: object) -> str | None:
     return label if len(label) <= 120 else None
 
 
+def source_syndication_fingerprint(title: object, claim: object = None) -> str | None:
+    """Identify equivalent source wording without publisher or mirror URL data."""
+    if not isinstance(title, str):
+        return None
+    headline = " ".join(re.findall(
+        r"[a-z0-9]+", unicodedata.normalize("NFKC", title).casefold()
+    ))[:500]
+    if not headline:
+        return None
+    claim_text = ""
+    if isinstance(claim, str):
+        claim_text = " ".join(re.findall(
+            r"[a-z0-9]+", unicodedata.normalize("NFKC", claim).casefold()
+        ))[:2_000]
+    canonical = json.dumps(
+        {"claim": claim_text, "headline": headline},
+        ensure_ascii=False,
+        separators=(",", ":"),
+        sort_keys=True,
+    )
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
 def _fixed_score(value: Decimal | int | str, field: str) -> Decimal:
     try:
         score = Decimal(str(value)).quantize(_SCORE_QUANTUM)
@@ -113,6 +136,77 @@ def upstream_identity(item: SourceItem) -> str:
     ).strip().casefold()[:512]
 
 
+def syndication_fingerprint(item: SourceItem) -> str:
+    """Return a mirror-independent content identity for corroboration."""
+    if not isinstance(item, SourceItem):
+        raise TypeError("syndication evidence must be a canonical SourceItem")
+    claim = item.metadata.get("claim_key") if hasattr(item.metadata, "get") else None
+    fingerprint = source_syndication_fingerprint(item.title, claim)
+    if fingerprint is None:
+        raise ValueError("syndication evidence requires a headline")
+    return fingerprint
+
+
+def _syndication_attribution(item: SourceItem) -> str | None:
+    if not hasattr(item.metadata, "get"):
+        return None
+    supplied = (
+        item.metadata.get("syndication_id")
+        or item.metadata.get("canonical_article_id")
+        or item.metadata.get("wire_story_id")
+        or item.metadata.get("original_story_id")
+    )
+    if not isinstance(supplied, str):
+        return None
+    normalized = " ".join(re.findall(
+        r"[a-z0-9]+", unicodedata.normalize("NFKC", supplied).casefold()
+    ))[:512]
+    return normalized or None
+
+
+def _syndication_groups(items: Sequence[SourceItem]) -> tuple[tuple[SourceItem, ...], ...]:
+    parent = list(range(len(items)))
+
+    def find(index: int) -> int:
+        while parent[index] != index:
+            parent[index] = parent[parent[index]]
+            index = parent[index]
+        return index
+
+    def union(left: int, right: int) -> None:
+        left_root, right_root = find(left), find(right)
+        if left_root != right_root:
+            parent[max(left_root, right_root)] = min(left_root, right_root)
+
+    key_owner: dict[str, int] = {}
+    for index, item in enumerate(items):
+        keys = {f"content:{syndication_fingerprint(item)}"}
+        attribution = _syndication_attribution(item)
+        if attribution is not None:
+            keys.add(f"attribution:{attribution}")
+        for key in sorted(keys):
+            owner = key_owner.setdefault(key, index)
+            union(index, owner)
+    grouped: dict[int, list[SourceItem]] = {}
+    for index, item in enumerate(items):
+        grouped.setdefault(find(index), []).append(item)
+    return tuple(tuple(grouped[key]) for key in sorted(grouped))
+
+
+def _independent_story_corroboration(
+    groups: Sequence[Sequence[SourceItem]],
+) -> bool:
+    for left_index, left in enumerate(groups):
+        for right in groups[left_index + 1:]:
+            if any(
+                publisher_identity(left_item) != publisher_identity(right_item)
+                and upstream_identity(left_item) != upstream_identity(right_item)
+                for left_item in left for right_item in right
+            ):
+                return True
+    return False
+
+
 def _accepted_items(
     items: Iterable[SourceItem | RunItemDisposition],
 ) -> tuple[SourceItem, ...]:
@@ -146,21 +240,28 @@ def propose_dynamic_theme(
     evidence: Iterable[SourceItem | RunItemDisposition],
     *,
     coverage_label: str,
+    requested_labels: Iterable[str] = (),
 ) -> ThemeProposal:
     """Return a stable proposal while making every failed gate explicit."""
     fingerprint = theme_fingerprint(label)
     accepted = _accepted_items(evidence)
     coverage = " ".join(str(coverage_label or "").split())[:500]
     non_hypothesis = tuple(item for item in accepted if item.authority != "hypothesis")
-    corroborated = (
-        len({publisher_identity(item) for item in non_hypothesis}) >= 2
-        and len({upstream_identity(item) for item in non_hypothesis}) >= 2
-    )
+    story_groups = _syndication_groups(non_hypothesis)
+    corroborated = _independent_story_corroboration(story_groups)
     missing: list[str] = []
     if len(accepted) < 2:
         missing.append("requires_two_accepted_items")
+    if len(non_hypothesis) >= 2 and len(story_groups) < 2:
+        missing.append("syndicated_evidence_not_independent")
     if not corroborated:
         missing.append("publisher_independent_corroboration_required")
+    requested_fingerprints = {
+        theme_fingerprint(value) for value in requested_labels
+        if isinstance(value, str) and value.strip()
+    }
+    if fingerprint in requested_fingerprints:
+        missing.append("requested_taxonomy_label_not_evidence")
     if fingerprint in {theme_fingerprint(seed) for seed in SEED_THEMES}:
         missing.append("not_novel_from_seed_taxonomy")
     if not coverage:
@@ -259,6 +360,8 @@ __all__ = [
     "publisher_identity",
     "propose_dynamic_theme",
     "source_dynamic_theme_label",
+    "source_syndication_fingerprint",
+    "syndication_fingerprint",
     "theme_fingerprint",
     "upstream_identity",
 ]

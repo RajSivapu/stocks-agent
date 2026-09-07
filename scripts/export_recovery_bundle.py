@@ -373,6 +373,8 @@ def _validate_reference_semantic_lineage(
             raise ValueError("reference transfer root mismatch")
         flattened_by_manifest[manifest_id] = flattened
 
+    if set(manifests) != set(seals):
+        raise ValueError("reference manifest finalization lineage mismatch")
     for manifest_id, seal in seals.items():
         entries = flattened_by_manifest.get(manifest_id)
         if entries is None or len(entries) != seal["security_count"]:
@@ -403,6 +405,57 @@ def _validate_reference_semantic_lineage(
                     "security_revision_id"
                 ] != member["security_revision_id"]:
                     raise ValueError("reference membership reuse lineage mismatch")
+            predecessor_member = predecessor_members.get(str(entry["security_id"]))
+            predecessor_revision = security_revisions.get(
+                predecessor_member["security_revision_id"]
+            ) if predecessor_member is not None else None
+            reusable_revision_id = (
+                predecessor_member["security_revision_id"]
+                if predecessor_revision is not None
+                and predecessor_revision["content_hash"] == entry["content_hash"]
+                and security_revision_semantic_document(predecessor_revision)
+                == security_revision_semantic_document(entry)
+                else None
+            )
+            expected_revision_id = reusable_revision_id or entry["id"]
+            if member["security_revision_id"] != expected_revision_id:
+                raise ValueError("reference membership materialization lineage mismatch")
+
+
+def _validate_reference_cross_ledger_lineage(
+    receipts_by_manifest: Mapping[str, list[dict[str, object]]],
+    seals: Mapping[str, dict[str, object]],
+    predecessor_pins: Mapping[tuple[str, str], dict[str, object]],
+) -> None:
+    """Bind transfer receipts to the predecessor state the consuming run pinned."""
+    for manifest_id, receipts in receipts_by_manifest.items():
+        begin_rows = [row for row in receipts if row["chunk_index"] == -1]
+        if len(begin_rows) != 1:
+            raise ValueError("reference begin receipt lineage is invalid")
+        begin = begin_rows[0]
+        run_id = str(begin["run_id"])
+        capability_id = str(begin["capability_id"])
+        predecessor_id = begin["predecessor_manifest_id"]
+        pin = predecessor_pins.get((run_id, capability_id))
+        expected_status = "reference_stale" if predecessor_id is not None \
+            else "reference_unavailable"
+        if pin is None or pin["manifest_id"] != predecessor_id \
+                or pin["reference_status"] != expected_status:
+            raise ValueError("reference predecessor pin lineage mismatch")
+        for receipt in receipts:
+            if receipt["manifest_id"] != manifest_id \
+                    or receipt["run_id"] != run_id \
+                    or receipt["capability_id"] != capability_id \
+                    or receipt["predecessor_manifest_id"] != predecessor_id:
+                raise ValueError("reference receipt predecessor lineage mismatch")
+        seal = seals.get(manifest_id)
+        if seal is not None and (
+            seal["manifest_id"] != manifest_id
+            or seal["run_id"] != run_id
+            or seal["capability_id"] != capability_id
+            or seal["predecessor_manifest_id"] != predecessor_id
+        ):
+            raise ValueError("reference finalization predecessor lineage mismatch")
 
 
 def sha256(raw: bytes) -> str:
@@ -725,6 +778,11 @@ def _validated_records(records: Mapping[str, object]) -> dict[str, list[dict[str
                          or seal["run_id"] == row["run_id"]))
                 or (not unavailable and (seal is None or row["reference_age_seconds"] < 0))):
             raise ValueError("discovery reference predecessor dependency mismatch")
+    _validate_reference_cross_ledger_lineage(
+        receipts_by_manifest,
+        seals,
+        predecessor_pins,
+    )
     transfer_operations = {
         "begin_discovery_reference", "record_discovery_reference_chunk",
         "finalize_discovery_reference", "pin_discovery_reference",
