@@ -681,6 +681,7 @@ RETURNS JSONB LANGUAGE plpgsql SECURITY DEFINER SET search_path=pg_catalog AS $$
 DECLARE
   v_existing public.market_reference_run_bindings%ROWTYPE;
   v_predecessor_existing public.market_reference_predecessor_pins%ROWTYPE;
+  v_predecessor_pin public.market_reference_predecessor_pins%ROWTYPE;
   v_manifest_id UUID;
   v_status TEXT;
   v_as_of TIMESTAMPTZ;
@@ -792,27 +793,32 @@ BEGIN
       RAISE EXCEPTION 'reference snapshot is not finalized' USING ERRCODE='22023';
     END IF;
   ELSIF v_status='reference_stale' THEN
-    IF p_payload->>'manifest_id' IS NULL THEN
-      SELECT s.manifest_id INTO v_manifest_id
-      FROM public.market_reference_finalization_seals s
-      WHERE s.capability_id=v_capability AND s.run_id<>p_run_id
-      ORDER BY s.finalized_at DESC,s.manifest_id DESC LIMIT 1;
-    ELSE
-      v_manifest_id:=(p_payload->>'manifest_id')::uuid;
+    SELECT * INTO v_predecessor_pin
+    FROM public.market_reference_predecessor_pins
+    WHERE run_id=p_run_id AND capability_id=v_capability;
+    IF NOT FOUND
+       OR (p_payload->>'manifest_id' IS NOT NULL
+           AND (p_payload->>'manifest_id')::uuid IS DISTINCT FROM v_predecessor_pin.manifest_id) THEN
+      RAISE EXCEPTION 'reference predecessor pin mismatch' USING ERRCODE='22023';
     END IF;
-    IF v_manifest_id IS NULL THEN
+    v_manifest_id:=v_predecessor_pin.manifest_id;
+    IF v_predecessor_pin.reference_status='reference_unavailable' THEN
       v_status:='reference_unavailable';
-    ELSIF NOT EXISTS(
+    ELSIF v_predecessor_pin.reference_status<>'reference_stale'
+       OR v_manifest_id IS NULL OR NOT EXISTS(
       SELECT 1 FROM public.market_reference_finalization_seals s
       WHERE s.manifest_id=v_manifest_id AND s.capability_id=v_capability
     ) THEN
-      RAISE EXCEPTION 'reference snapshot is not finalized' USING ERRCODE='22023';
+      RAISE EXCEPTION 'reference predecessor pin mismatch' USING ERRCODE='22023';
     END IF;
   ELSE
-    IF p_payload->>'manifest_id' IS NOT NULL OR EXISTS(
-      SELECT 1 FROM public.market_reference_finalization_seals s WHERE s.capability_id=v_capability
-    ) THEN
-      RAISE EXCEPTION 'reference unavailable conflicts with finalized snapshot' USING ERRCODE='22023';
+    SELECT * INTO v_predecessor_pin
+    FROM public.market_reference_predecessor_pins
+    WHERE run_id=p_run_id AND capability_id=v_capability;
+    IF NOT FOUND OR p_payload->>'manifest_id' IS NOT NULL
+       OR v_predecessor_pin.reference_status<>'reference_unavailable'
+       OR v_predecessor_pin.manifest_id IS NOT NULL THEN
+      RAISE EXCEPTION 'reference predecessor pin mismatch' USING ERRCODE='22023';
     END IF;
     v_manifest_id:=NULL;
   END IF;

@@ -711,6 +711,7 @@ export function createGatewayHandler(dependencies: GatewayDependencies) {
             dry_run: true,
             reference: {
               binding: {
+                binding_role: (prepared as ReferenceReadPayload).binding_role,
                 manifest_id: null,
                 reference_status: "reference_unavailable",
                 source_retrieved_at: null,

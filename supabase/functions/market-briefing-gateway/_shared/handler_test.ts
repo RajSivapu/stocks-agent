@@ -1850,6 +1850,31 @@ Deno.test("pinned reference read is service-only while owner discovery read stay
   assertEquals((await json(ownerRead)).code, "SERVICE_ONLY");
 });
 
+Deno.test("dry-run reference read reports the requested binding role", async () => {
+  const { handler } = makeHandler();
+  const response = await handler(request(
+    "read_discovery_reference",
+    {
+      capability_id: "sec_company_tickers_universe",
+      binding_role: "predecessor",
+      after_security_id: null,
+      limit: 500,
+    },
+    { dry: true },
+  ));
+
+  assertEquals(response.status, 200);
+  const body = await json(response);
+  assertEquals(
+    ((body.reference as Record<string, unknown>).binding as Record<
+      string,
+      unknown
+    >)
+      .binding_role,
+    "predecessor",
+  );
+});
+
 Deno.test("discovery checkpoint rejects wrong-stage result rows before persistence", async () => {
   let writes = 0;
   const repository = Object.assign(new FakeRepository(), {

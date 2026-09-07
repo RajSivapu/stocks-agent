@@ -423,9 +423,14 @@ def _validated_records(records: Mapping[str, object]) -> dict[str, list[dict[str
                 or (seal["predecessor_manifest_id"] is not None
                     and (predecessor is None or predecessor["capability_id"] != seal["capability_id"]))):
             raise ValueError("discovery reference finalization dependency mismatch")
+    predecessor_pins = {
+        (row["run_id"], row["capability_id"]): row
+        for row in result["reference_predecessor_pins"]
+    }
     for row in result["reference_run_bindings"]:
         seal = seals.get(row["manifest_id"]) if row["manifest_id"] else None
         unavailable = row["reference_status"] == "reference_unavailable"
+        predecessor = predecessor_pins.get((row["run_id"], row["capability_id"]))
         request = row["request_payload"]
         request_status = request.get("reference_status") if isinstance(request, dict) else None
         request_manifest = request.get("manifest_id") if isinstance(request, dict) else None
@@ -448,10 +453,14 @@ def _validated_records(records: Mapping[str, object]) -> dict[str, list[dict[str
                 or unavailable != (row["manifest_id"] is None)
                 or unavailable != (row["source_retrieved_at"] is None)
                 or unavailable != (row["reference_age_seconds"] is None)
+                or (row["reference_status"] in {"reference_stale", "reference_unavailable"}
+                    and (predecessor is None
+                         or predecessor["manifest_id"] != row["manifest_id"]
+                         or predecessor["reference_status"] != row["reference_status"]))
                 or (seal is not None and seal["capability_id"] != row["capability_id"])
                 or (not unavailable and (seal is None or row["reference_age_seconds"] < 0))):
             raise ValueError("discovery reference binding dependency mismatch")
-    for row in result["reference_predecessor_pins"]:
+    for row in predecessor_pins.values():
         seal = seals.get(row["manifest_id"]) if row["manifest_id"] else None
         unavailable = row["reference_status"] == "reference_unavailable"
         request = row["request_payload"]

@@ -286,3 +286,82 @@ The safety posture remains owner-only, suggestion-only, receipt-supported, and z
 
 - The SEC company-ticker file still does not guarantee complete U.S.-listing scope or provide a stable listing identifier/exchange. `scope_not_guaranteed` remains explicit, and ambiguous same-CIK class changes remain unresolved rather than guessed.
 - Nasdaq symbol-directory ingestion remains disabled pending a reviewed HTTPS capability and terms decision.
+
+## Fix round 2 from `aed2c9e2`
+
+This round fixes stale-reference lineage so a run cannot switch from the predecessor it selected before refresh to a newer snapshot that finalizes while the run is in progress. The five-operation transfer interface, its independent 160-call/32-MiB/45-second budget, ordinary decision quotas, and owner discovery reader are unchanged.
+
+### RED evidence
+
+The regressions were added before the production fixes and observed failing against `aed2c9e2`:
+
+```text
+.venv/bin/python -m pytest -q tests/test_reference_snapshot_transfer_sql.py \
+  -k 'current_stale_pin_uses or current_stale_pin_rejects or unavailable_predecessor_cannot'
+3 failed, 20 deselected in 1.31s
+
+null current/reference_stale selected newer finalized B instead of pinned A
+explicit caller-selected finalized B was accepted
+an unavailable predecessor pin was upgraded to a later finalized snapshot
+
+.venv/bin/python -m pytest -q tests/test_recovery_bundle.py \
+  -k '<three inconsistent stale-current/predecessor lineage tests>'
+3 failed, 104 deselected in 1.11s
+
+recovery validation accepted inconsistent lineage
+restore reached the database mutation boundary
+exact comparison reached record comparison instead of rejecting lineage first
+
+npx --yes deno@2.9.6 test --config supabase/functions/deno.json \
+  supabase/functions/market-briefing-gateway/_shared/handler_test.ts \
+  --filter 'dry-run reference read reports the requested binding role'
+0 passed, 1 failed, 54 filtered out
+expected predecessor; received undefined
+```
+
+### Lineage correction
+
+- A `current/reference_stale` pin now resolves only the immutable predecessor pin for the same run and capability. A null manifest selects that exact predecessor; an explicit manifest is accepted only when it equals the predecessor. A different finalized manifest fails closed.
+- If the predecessor pin recorded `reference_unavailable`, a later finalization cannot upgrade it. The current binding is recorded as `reference_unavailable`. A caller that directly requests `reference_unavailable` must also match an unavailable predecessor pin.
+- Recovery validation now requires every stale or unavailable current binding to match the same run/capability predecessor manifest and status. Export validation, pre-mutation restore validation, and exact recovery comparison therefore reject inconsistent lineage.
+- Dry-run `read_discovery_reference` responses now include the requested `binding_role`, matching the live response contract.
+- The reviewed `20261004` reconciliation and `20261005` market-wide discovery migrations remain byte-identical. The correction is confined to `20261006`, the consolidated schema, recovery validation, the gateway response, and their tests.
+
+### GREEN evidence
+
+```text
+focused real PostgreSQL stale-lineage cases
+4 passed, 19 deselected in 1.18s
+
+focused recovery validation, restore, and exact-comparison cases
+3 passed, 104 deselected in 0.40s
+
+complete recovery and managed-restore surface
+147 passed in 8.72s
+
+focused Deno gateway handler/contracts/parser surface
+90 passed, 0 failed
+
+.venv/bin/python -m pytest -q
+1060 passed, 3 skipped, 4 deselected in 86.66s
+
+npx --yes deno@2.9.6 test --config supabase/functions/deno.json \
+  supabase/functions/market-briefing-gateway/_shared \
+  supabase/functions/owner-dashboard-api
+309 passed, 0 failed
+
+.venv/bin/python -m compileall -q lib scripts tests
+npx --yes deno@2.9.6 check --config supabase/functions/deno.json \
+  supabase/functions/market-briefing-gateway/index.ts \
+  supabase/functions/owner-dashboard-api/index.ts
+npx --yes deno@2.9.6 fmt --check \
+  supabase/functions/market-briefing-gateway/_shared/handler.ts \
+  supabase/functions/market-briefing-gateway/_shared/handler_test.ts
+pglast.parse_sql(20261006 migration and consolidated schema)
+schema tail equals 20261006 migration
+git diff --check
+git diff --exit-code aed2c9e2 -- 20261004 reconciliation 20261005 migration
+all passed
+```
+
+Self-review of `aed2c9e2..HEAD` confirmed that the stale-current insert derives its manifest and status from the immutable predecessor row after the run lock is acquired, no latest-head query remains in the current branch, and exact retries retain the original request and binding. Recovery checks use the run/capability composite identity before any restore mutation or exact comparison. No network request, production RPC, collector invocation, Telegram action, schedule mutation, deployment, or production database mutation was performed.

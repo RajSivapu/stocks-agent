@@ -787,6 +787,82 @@ def test_stale_pin_replay_keeps_original_snapshot_after_a_newer_finalize(transfe
     assert replay["manifest_id"] == pinned["manifest_id"] == first.begin["manifest"]["id"]
 
 
+def test_current_stale_pin_uses_the_run_pinned_predecessor_not_a_newer_head(transfer_db):
+    capability = "sec_company_tickers_stale_predecessor"
+    first_run = _run(transfer_db)
+    first = _transfer(first_run, 1, "2026-09-06T12:00:00Z", capability)
+    _upload(transfer_db, first_run, first)
+
+    stale_run = _run(transfer_db)
+    predecessor = _pin_predecessor(
+        transfer_db, stale_run, capability, "2026-09-07T12:00:00Z",
+    )
+    assert predecessor["manifest_id"] == first.begin["manifest"]["id"]
+
+    newer_run = _run(transfer_db)
+    newer = _transfer(newer_run, 1, "2026-09-07T11:00:00Z", capability)
+    _upload(transfer_db, newer_run, newer)
+
+    current = _rpc(transfer_db, "pin_market_discovery_reference", stale_run, {
+        "capability_id": capability,
+        "binding_role": "current",
+        "manifest_id": None,
+        "reference_status": "reference_stale",
+        "reference_as_of": "2026-09-07T12:00:00Z",
+    })
+    assert current["manifest_id"] == first.begin["manifest"]["id"]
+    assert current["manifest_id"] != newer.begin["manifest"]["id"]
+
+
+def test_current_stale_pin_rejects_an_alternate_finalized_manifest(transfer_db):
+    capability = "sec_company_tickers_stale_alternate"
+    first_run = _run(transfer_db)
+    first = _transfer(first_run, 1, "2026-09-06T12:00:00Z", capability)
+    _upload(transfer_db, first_run, first)
+
+    stale_run = _run(transfer_db)
+    _pin_predecessor(
+        transfer_db, stale_run, capability, "2026-09-07T12:00:00Z",
+    )
+    newer_run = _run(transfer_db)
+    newer = _transfer(newer_run, 1, "2026-09-07T11:00:00Z", capability)
+    _upload(transfer_db, newer_run, newer)
+
+    with pytest.raises(
+        psycopg.errors.InvalidParameterValue, match="predecessor pin mismatch",
+    ):
+        _rpc(transfer_db, "pin_market_discovery_reference", stale_run, {
+            "capability_id": capability,
+            "binding_role": "current",
+            "manifest_id": newer.begin["manifest"]["id"],
+            "reference_status": "reference_stale",
+            "reference_as_of": "2026-09-07T12:00:00Z",
+        })
+
+
+def test_unavailable_predecessor_cannot_be_upgraded_by_a_later_finalization(transfer_db):
+    capability = "sec_company_tickers_pinned_unavailable"
+    stale_run = _run(transfer_db)
+    predecessor = _pin_predecessor(
+        transfer_db, stale_run, capability, "2026-09-07T12:00:00Z",
+    )
+    assert predecessor["reference_status"] == "reference_unavailable"
+
+    later_run = _run(transfer_db)
+    later = _transfer(later_run, 1, "2026-09-07T11:00:00Z", capability)
+    _upload(transfer_db, later_run, later)
+
+    current = _rpc(transfer_db, "pin_market_discovery_reference", stale_run, {
+        "capability_id": capability,
+        "binding_role": "current",
+        "manifest_id": None,
+        "reference_status": "reference_stale",
+        "reference_as_of": "2026-09-07T12:00:00Z",
+    })
+    assert current["manifest_id"] is None
+    assert current["reference_status"] == "reference_unavailable"
+
+
 def test_transfer_rpcs_are_service_only_and_binding_is_immutable(transfer_db):
     capability = "sec_company_tickers_auth"
     run_id = _run(transfer_db)
@@ -881,6 +957,10 @@ def test_concurrent_exact_pin_retry_returns_existing_binding(transfer_db):
 
 def test_stale_pin_without_any_healthy_snapshot_records_reference_unavailable(transfer_db):
     run_id = _run(transfer_db)
+    _pin_predecessor(
+        transfer_db, run_id, "sec_company_tickers_empty",
+        "2026-09-07T12:00:00Z",
+    )
     payload = {
         "capability_id": "sec_company_tickers_empty",
         "binding_role": "current",

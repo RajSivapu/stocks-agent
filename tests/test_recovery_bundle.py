@@ -504,6 +504,59 @@ def test_recovery_validates_complete_discovery_lineage_and_exact_fields():
     }
 
 
+def _make_stale_current_inconsistent_with_predecessor(records):
+    manifest_id = records["reference_manifests"][0]["id"]
+    current = records["reference_run_bindings"][0]
+    current.update(
+        manifest_id=manifest_id,
+        reference_status="reference_stale",
+        request_payload={
+            "capability_id": current["capability_id"],
+            "binding_role": "current",
+            "manifest_id": manifest_id,
+            "reference_status": "reference_stale",
+            "reference_as_of": current["reference_as_of"],
+        },
+    )
+    assert records["reference_predecessor_pins"][0]["manifest_id"] is None
+
+
+def test_recovery_rejects_stale_current_that_differs_from_predecessor_pin():
+    records = recovery_records()
+    _make_stale_current_inconsistent_with_predecessor(records)
+
+    with pytest.raises(ValueError, match="binding dependency mismatch"):
+        _validated_records(records)
+
+
+def test_restore_rejects_stale_current_that_differs_from_predecessor_pin():
+    records = recovery_records()
+    _make_stale_current_inconsistent_with_predecessor(records)
+
+    class UnusedConnection:
+        def transaction(self):
+            raise AssertionError("invalid recovery data reached restore mutation")
+
+    with pytest.raises(ValueError, match="binding dependency mismatch"):
+        restore_recovery_records(UnusedConnection(), records, isolated_guard=True)
+
+
+def test_exact_recovery_verifier_rejects_inconsistent_restored_stale_lineage(
+        tmp_path, commands):
+    production = FakeDatabase()
+    artifact = export_recovery_bundle(
+        production, tmp_path / "stale-lineage.enc", **commands,
+    )
+    restore = restored(production)
+    _make_stale_current_inconsistent_with_predecessor(restore.records)
+
+    with pytest.raises(ValueError, match="binding dependency mismatch"):
+        verify_recovery_bundle(
+            artifact, restore, production_source=production,
+            decrypt_command=commands["decrypt_command"],
+        )
+
+
 @pytest.mark.parametrize("dataset", DISCOVERY_DATASETS)
 def test_recovery_rejects_missing_discovery_dataset(dataset):
     records = recovery_records()
