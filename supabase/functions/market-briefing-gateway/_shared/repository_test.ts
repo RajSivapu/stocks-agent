@@ -324,6 +324,7 @@ Deno.test("reference transfer repository routes all bounded protocol RPCs", asyn
         }
         : name === "pin_market_discovery_reference"
         ? {
+          binding_role: "current",
           manifest_id: null,
           reference_status: "reference_unavailable",
           source_retrieved_at: null,
@@ -332,6 +333,7 @@ Deno.test("reference transfer repository routes all bounded protocol RPCs", asyn
         }
         : {
           binding: {
+            binding_role: "current",
             manifest_id: null,
             reference_status: "reference_unavailable",
             source_retrieved_at: null,
@@ -348,6 +350,11 @@ Deno.test("reference transfer repository routes all bounded protocol RPCs", asyn
   const repository = createSupabaseGatewayRepository(client);
   const runId = "00000000-0000-4000-8000-000000000102";
   const manifestId = "00000000-0000-4000-8000-000000000101";
+  const claim = {
+    request_id: "00000000-0000-4000-8000-000000000103",
+    encoded_bytes: 100,
+    request_hash: "f".repeat(64),
+  };
   const begin = {
     manifest: {},
     capability_id: "sec_company_tickers_universe",
@@ -363,23 +370,25 @@ Deno.test("reference transfer repository routes all bounded protocol RPCs", asyn
     entries: [],
     chunk_hash: "b".repeat(64),
   } as never;
-  await repository.beginDiscoveryReference!(runId, begin);
-  await repository.recordDiscoveryReferenceChunk!(runId, chunk);
+  await repository.beginDiscoveryReference!(runId, begin, claim);
+  await repository.recordDiscoveryReferenceChunk!(runId, chunk, claim);
   await repository.finalizeDiscoveryReference!(runId, {
     manifest_id: manifestId,
     root_hash: "a".repeat(64),
-  });
+  }, claim);
   await repository.pinDiscoveryReference!(runId, {
     capability_id: "sec_company_tickers_universe",
+    binding_role: "current",
     manifest_id: null,
     reference_status: "reference_unavailable",
     reference_as_of: "2026-09-07T12:00:00.000Z",
-  });
+  }, claim);
   const page = await repository.readDiscoveryReference!(runId, {
     capability_id: "sec_company_tickers_universe",
+    binding_role: "current",
     after_security_id: null,
     limit: 500,
-  });
+  }, claim);
   assertEquals(page.complete, true);
   assertEquals(calls.map((call) => (call as { name: string }).name), [
     "begin_market_discovery_reference",
@@ -388,6 +397,13 @@ Deno.test("reference transfer repository routes all bounded protocol RPCs", asyn
     "pin_market_discovery_reference",
     "read_market_discovery_reference",
   ]);
+  for (const call of calls) {
+    const parameters =
+      (call as { parameters: Record<string, unknown> }).parameters;
+    assertEquals(parameters.p_request_id, claim.request_id);
+    assertEquals(parameters.p_encoded_bytes, claim.encoded_bytes);
+    assertEquals(parameters.p_request_hash, claim.request_hash);
+  }
 });
 
 Deno.test("three losing horizons for one recommendation count as one loss", () => {

@@ -63,6 +63,7 @@ import {
   type PersistableArtifactMutationBatch,
   type PersistedBundle,
   type PublicationReceipt,
+  type ReferenceTransferClaim,
 } from "./repository.ts";
 import {
   sendTelegramAlert,
@@ -168,7 +169,11 @@ async function secureEqual(left: string, right: string): Promise<boolean> {
   return mismatch === 0 && left.length === right.length;
 }
 
-async function readBody(request: Request): Promise<unknown> {
+async function readBody(request: Request): Promise<{
+  value: unknown;
+  encodedBytes: number;
+  rawText: string;
+}> {
   const declared = request.headers.get("content-length");
   if (
     declared !== null &&
@@ -197,7 +202,8 @@ async function readBody(request: Request): Promise<unknown> {
     offset += chunk.byteLength;
   }
   try {
-    return JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(body));
+    const rawText = new TextDecoder("utf-8", { fatal: true }).decode(body);
+    return { value: JSON.parse(rawText), encodedBytes: length, rawText };
   } catch {
     throw new GatewayHttpError(400, "INVALID_REQUEST");
   }
@@ -444,9 +450,11 @@ export function createGatewayHandler(dependencies: GatewayDependencies) {
 
     let envelope: GatewayEnvelope;
     let prepared: unknown;
+    let referenceTransferClaim: ReferenceTransferClaim | null = null;
     const currentDate = chicagoDate(deps.now());
     try {
-      envelope = parseGatewayEnvelope(await readBody(request));
+      const body = await readBody(request);
+      envelope = parseGatewayEnvelope(body.value);
       if (
         envelope.operation === "start_intelligence_run" ||
         envelope.operation === "checkpoint_intelligence_collection" ||
@@ -473,6 +481,25 @@ export function createGatewayHandler(dependencies: GatewayDependencies) {
             ) !==
             (prepared as RecordLearningPayload).content_hash
         ) throw new GatewayHttpError(400, "INVALID_REQUEST");
+        if (
+          [
+            "begin_discovery_reference",
+            "record_discovery_reference_chunk",
+            "finalize_discovery_reference",
+            "pin_discovery_reference",
+            "read_discovery_reference",
+          ].includes(envelope.operation)
+        ) {
+          const canonical = canonicalJson({ ...envelope, payload: prepared });
+          if (body.rawText !== canonical) {
+            throw new GatewayHttpError(400, "INVALID_REQUEST");
+          }
+          referenceTransferClaim = {
+            request_id: envelope.request_id,
+            encoded_bytes: body.encodedBytes,
+            request_hash: sha256Hex(canonical),
+          };
+        }
       } else if (envelope.operation === "collect_intelligence_quote") {
         requireRun(envelope);
         const row = objectValue(envelope.payload);
@@ -881,6 +908,7 @@ export function createGatewayHandler(dependencies: GatewayDependencies) {
           reference: await deps.repository.readDiscoveryReference(
             requireRun(envelope),
             prepared as ReferenceReadPayload,
+            referenceTransferClaim!,
           ),
           telegram_message_ids: [],
         });
@@ -905,20 +933,24 @@ export function createGatewayHandler(dependencies: GatewayDependencies) {
           ? await deps.repository.beginDiscoveryReference?.(
             runId,
             prepared as ReferenceBeginPayload,
+            referenceTransferClaim!,
           )
           : envelope.operation === "record_discovery_reference_chunk"
           ? await deps.repository.recordDiscoveryReferenceChunk?.(
             runId,
             prepared as ReferenceChunkPayload,
+            referenceTransferClaim!,
           )
           : envelope.operation === "finalize_discovery_reference"
           ? await deps.repository.finalizeDiscoveryReference?.(
             runId,
             prepared as ReferenceFinalizePayload,
+            referenceTransferClaim!,
           )
           : await deps.repository.pinDiscoveryReference?.(
             runId,
             prepared as ReferencePinPayload,
+            referenceTransferClaim!,
           );
         if (!result) throw new GatewayRepositoryError("PERSISTENCE_FAILED");
         return response(200, { ok: true, ...result, telegram_message_ids: [] });

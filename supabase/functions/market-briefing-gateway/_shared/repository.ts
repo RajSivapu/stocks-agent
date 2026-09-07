@@ -360,6 +360,7 @@ export interface GatewayRepository {
   beginDiscoveryReference?(
     runId: string,
     payload: ReferenceBeginPayload,
+    claim: ReferenceTransferClaim,
   ): Promise<
     {
       manifest_id: string;
@@ -370,20 +371,24 @@ export interface GatewayRepository {
   recordDiscoveryReferenceChunk?(
     runId: string,
     payload: ReferenceChunkPayload,
+    claim: ReferenceTransferClaim,
   ): Promise<{ manifest_id: string; chunk_index: number; duplicate: boolean }>;
   finalizeDiscoveryReference?(
     runId: string,
     payload: ReferenceFinalizePayload,
+    claim: ReferenceTransferClaim,
   ): Promise<
     { manifest_id: string; security_count: number; duplicate: boolean }
   >;
   pinDiscoveryReference?(
     runId: string,
     payload: ReferencePinPayload,
+    claim: ReferenceTransferClaim,
   ): Promise<Record<string, unknown>>;
   readDiscoveryReference?(
     runId: string,
     payload: ReferenceReadPayload,
+    claim: ReferenceTransferClaim,
   ): Promise<ReferencePage>;
   readIntelligenceCompletion?(
     runId: string,
@@ -483,6 +488,12 @@ export interface GatewayRepository {
     updated: number;
     incomplete: number;
   }>;
+}
+
+export interface ReferenceTransferClaim {
+  request_id: string;
+  encoded_bytes: number;
+  request_hash: string;
 }
 
 export class GatewayRepositoryError extends Error {
@@ -1091,10 +1102,13 @@ export function createSupabaseGatewayRepository(
       }
     },
 
-    async beginDiscoveryReference(runId, payload) {
+    async beginDiscoveryReference(runId, payload, claim) {
       const result = await client.rpc("begin_market_discovery_reference", {
         p_run_id: runId,
         p_payload: payload,
+        p_request_id: claim.request_id,
+        p_encoded_bytes: claim.encoded_bytes,
+        p_request_hash: claim.request_hash,
       });
       if (result.error) throw new GatewayRepositoryError("PERSISTENCE_FAILED");
       const row = oneObject(result);
@@ -1105,12 +1119,15 @@ export function createSupabaseGatewayRepository(
       };
     },
 
-    async recordDiscoveryReferenceChunk(runId, payload) {
+    async recordDiscoveryReferenceChunk(runId, payload, claim) {
       const result = await client.rpc(
         "record_market_discovery_reference_chunk",
         {
           p_run_id: runId,
           p_payload: payload,
+          p_request_id: claim.request_id,
+          p_encoded_bytes: claim.encoded_bytes,
+          p_request_hash: claim.request_hash,
         },
       );
       if (result.error) throw new GatewayRepositoryError("PERSISTENCE_FAILED");
@@ -1122,10 +1139,13 @@ export function createSupabaseGatewayRepository(
       };
     },
 
-    async finalizeDiscoveryReference(runId, payload) {
+    async finalizeDiscoveryReference(runId, payload, claim) {
       const result = await client.rpc("finalize_market_discovery_reference", {
         p_run_id: runId,
         p_payload: payload,
+        p_request_id: claim.request_id,
+        p_encoded_bytes: claim.encoded_bytes,
+        p_request_hash: claim.request_hash,
       });
       if (result.error) throw new GatewayRepositoryError("PERSISTENCE_FAILED");
       const row = oneObject(result);
@@ -1136,14 +1156,18 @@ export function createSupabaseGatewayRepository(
       };
     },
 
-    async pinDiscoveryReference(runId, payload) {
+    async pinDiscoveryReference(runId, payload, claim) {
       const result = await client.rpc("pin_market_discovery_reference", {
         p_run_id: runId,
         p_payload: payload,
+        p_request_id: claim.request_id,
+        p_encoded_bytes: claim.encoded_bytes,
+        p_request_hash: claim.request_hash,
       });
       if (result.error) throw new GatewayRepositoryError("PERSISTENCE_FAILED");
       const row = oneObject(result);
       return {
+        binding_role: text(row.binding_role, 11),
         manifest_id: nullableText(row.manifest_id, 36),
         reference_status: text(row.reference_status, 32),
         source_retrieved_at: nullableText(row.source_retrieved_at, 40),
@@ -1154,10 +1178,13 @@ export function createSupabaseGatewayRepository(
       };
     },
 
-    async readDiscoveryReference(runId, payload) {
+    async readDiscoveryReference(runId, payload, claim) {
       const result = await client.rpc("read_market_discovery_reference", {
         p_run_id: runId,
         p_payload: payload,
+        p_request_id: claim.request_id,
+        p_encoded_bytes: claim.encoded_bytes,
+        p_request_hash: claim.request_hash,
       });
       if (result.error) throw new GatewayRepositoryError("PERSISTENCE_FAILED");
       try {

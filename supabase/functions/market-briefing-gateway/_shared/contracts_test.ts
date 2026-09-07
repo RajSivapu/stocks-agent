@@ -634,6 +634,7 @@ Deno.test("reference snapshot transfer operations require a run and parse servic
     operation: "read_discovery_reference",
     payload: {
       capability_id: "sec_company_tickers_universe",
+      binding_role: "current",
       after_security_id: null,
       limit: 500,
     },
@@ -647,6 +648,7 @@ Deno.test("reference snapshot transfer operations require a run and parse servic
       operation: "pin_discovery_reference",
       payload: {
         capability_id: "sec_company_tickers_universe",
+        binding_role: "current",
         manifest_id: null,
         reference_status: "reference_unavailable",
         reference_as_of: "2026-09-07T12:00:00.000Z",

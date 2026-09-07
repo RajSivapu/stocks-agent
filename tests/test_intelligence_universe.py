@@ -20,7 +20,9 @@ from lib.intelligence.universe import (
     merge_reference_sources,
     parse_sec_company_tickers,
     parse_symbol_directory,
+    reference_manifest_semantic_document,
     refresh_sec_reference,
+    security_revision_semantic_document,
 )
 
 
@@ -118,6 +120,22 @@ def test_sec_parser_types_clear_instruments_and_rejects_malformed_rows():
     broken = json.dumps({"0": {"cik_str": "not-a-cik", "ticker": "", "title": "X"}}).encode()
     with pytest.raises(ValueError, match="SEC company ticker row"):
         parse_sec_company_tickers(broken, retrieved_at=NOW)
+
+
+def test_preferred_depositary_shares_are_excluded_before_generic_adr_classification():
+    raw = json.dumps({
+        "0": {
+            "cik_str": 1900003,
+            "ticker": "ACPRA",
+            "title": "ACME Depositary Shares Each Representing Preferred Stock",
+        }
+    }).encode()
+
+    security = parse_sec_company_tickers(raw, retrieved_at=NOW).by_ticker["ACPRA"]
+
+    assert security.instrument_type == "PREFERRED"
+    assert security.eligible is False
+    assert security.exclusion_reasons == ("instrument_type_excluded",)
 
 
 def test_sec_parser_rejects_conflicting_duplicate_symbols_instead_of_choosing_one():
@@ -362,14 +380,52 @@ def test_reference_transfer_matches_protected_ledger_and_stays_inside_every_call
     assert transfer.begin["root_hash"] == hashlib.sha256(
         "".join(chunk["chunk_hash"] for chunk in transfer.chunks).encode()
     ).hexdigest()
+    from lib.intelligence.universe import reference_manifest_semantic_document
     manifest_content = dict(transfer.begin["manifest"])
     manifest_hash = manifest_content.pop("content_hash")
     expected = hashlib.sha256(
         json.dumps(
-            manifest_content, ensure_ascii=False, separators=(",", ":"), sort_keys=True
+            reference_manifest_semantic_document(manifest_content),
+            ensure_ascii=False, separators=(",", ":"), sort_keys=True
         ).encode()
     ).hexdigest()
     assert manifest_hash == expected
+
+
+def test_reference_semantic_encoding_normalizes_timestamps_to_milliseconds():
+    manifest = {
+        "id": "22222222-2222-4222-8222-222222222222",
+        "reference_version": "fixture:v1",
+        "revision": 1,
+        "capability_version": 1,
+        "taxonomy_version": 1,
+        "source_hash": "a" * 64,
+        "valid_from": "2026-09-06T12:00:00Z",
+        "valid_to": None,
+        "manifest": {"coverage_status": "scope_not_guaranteed"},
+    }
+    security_row = {
+        "revision": 1,
+        "security_id": "sec-cik:0000000001:listing-origin:TEST",
+        "entity_id": "sec-cik:0000000001",
+        "ticker": "TEST",
+        "exchange": None,
+        "instrument_type": "COMMON_STOCK",
+        "eligible": True,
+        "exclusion_reasons": [],
+        "aliases": ["TEST"],
+        "source_ids": ["sec-company-tickers:0000000001"],
+        "valid_from": "2026-09-06T00:00:00Z",
+        "valid_to": "2026-09-07T00:00:00+00:00",
+    }
+
+    manifest_document = reference_manifest_semantic_document(manifest)
+    security_document = security_revision_semantic_document(security_row)
+
+    assert manifest_document["semantic_encoding_version"] == 1
+    assert manifest_document["value"]["valid_from"] == "2026-09-06T12:00:00.000Z"
+    assert security_document["value"]["valid_from"] == "2026-09-06T00:00:00.000Z"
+    assert security_document["value"]["valid_to"] == "2026-09-07T00:00:00.000Z"
 
 
 def test_reference_transfer_chunks_the_full_supported_snapshot_without_raising_limits():
@@ -399,7 +455,7 @@ def test_reference_transfer_chunks_the_full_supported_snapshot_without_raising_l
 
     assert len(transfer.chunks) == 75
     assert sum(len(chunk["entries"]) for chunk in transfer.chunks) == 15_000
-    assert len(transfer.chunks) + 3 <= 80  # begin, finalize, and pin
+    assert len(transfer.chunks) + 4 <= 160  # predecessor pin, begin, finalize, current pin
     encoded_total = 0
     for index, chunk in enumerate(transfer.chunks):
         assert chunk["chunk_index"] == index

@@ -25,6 +25,7 @@ from lib.intelligence.http import BoundedHttpClient, HttpRequest, SourceFailure
 SEC_COMPANY_TICKERS_URL = "https://www.sec.gov/files/company_tickers.json"
 SEC_REFERENCE_USER_AGENT = "stocks-agent security-reference/1.0 (rupesh.sivapu@gmail.com)"
 REFERENCE_PARSER_VERSION = 1
+REFERENCE_SEMANTIC_ENCODING_VERSION = 1
 MAX_REFERENCE_SOURCE_BYTES = 5_000_000
 MAX_REFERENCE_SECURITIES = 15_000
 _TICKER = re.compile(r"[A-Z][A-Z0-9.-]{0,14}")
@@ -171,12 +172,12 @@ def _instrument_type(name: str, *, etf: bool = False, exchange: str | None = Non
         return "OTC_COMMON"
     if etf or re.search(r"\bETF\b", upper):
         return "ETF"
+    if "PREFERRED" in upper or "PREFERENCE" in upper:
+        return "PREFERRED"
     if "AMERICAN DEPOSITARY" in upper or "DEPOSITARY SHARES" in upper or re.search(
         r"\bADS\b", upper
     ):
         return "ADR"
-    if "PREFERRED" in upper or "PREFERENCE" in upper:
-        return "PREFERRED"
     if "WARRANT" in upper:
         return "WARRANT"
     if re.search(r"\b(RIGHT|RIGHTS|UNIT|UNITS)\b", upper):
@@ -608,6 +609,29 @@ def merge_reference_sources(
     )
 
 
+def merge_reference_snapshot(
+    current: ReferenceSnapshot,
+    predecessor_securities: Sequence[SecurityIdentity],
+) -> ReferenceSnapshot:
+    """Carry forward only unambiguous predecessor identities into fresh SEC data."""
+    marker = "prior-manifest:validated"
+    marked = tuple(
+        replace(row, source_ids=(*row.source_ids, marker))
+        for row in predecessor_securities
+    )
+    merged = merge_reference_sources(
+        current.securities, marked, as_of=current.manifest.retrieved_at.date()
+    )
+    cleaned = tuple(
+        replace(
+            row,
+            source_ids=tuple(source for source in row.source_ids if source != marker),
+        )
+        for row in merged.securities
+    )
+    return replace(current, securities=cleaned, conflicts=merged.conflicts)
+
+
 def refresh_sec_reference(
     client: BoundedHttpClient,
     *,
@@ -650,10 +674,62 @@ def _canonical_json(value: object) -> bytes:
     ).encode("utf-8")
 
 
+def _canonical_timestamp(value: datetime) -> str:
+    return _utc(value).isoformat(timespec="milliseconds").replace("+00:00", "Z")
+
+
 def _timestamp_for_date(value: date) -> str:
-    return datetime.combine(value, datetime.min.time(), tzinfo=timezone.utc).isoformat().replace(
-        "+00:00", "Z"
+    return _canonical_timestamp(
+        datetime.combine(value, datetime.min.time(), tzinfo=timezone.utc)
     )
+
+
+def _semantic_timestamp(value: object) -> str | None:
+    if value is None:
+        return None
+    if isinstance(value, datetime):
+        parsed = value
+    elif isinstance(value, str):
+        try:
+            parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+        except ValueError:
+            raise ValueError("reference semantic timestamp is invalid") from None
+    else:
+        raise TypeError("reference semantic timestamp is invalid")
+    if parsed.tzinfo is None:
+        raise ValueError("reference semantic timestamp must include a timezone")
+    return _canonical_timestamp(parsed)
+
+
+def reference_manifest_semantic_document(row: Mapping[str, object]) -> dict[str, object]:
+    """Return the one versioned semantic document hashed by every protocol layer."""
+    value = {key: row[key] for key in (
+        "id", "reference_version", "revision", "capability_version",
+        "taxonomy_version", "source_hash", "valid_from", "valid_to", "manifest",
+    )}
+    value["valid_from"] = _semantic_timestamp(value["valid_from"])
+    value["valid_to"] = _semantic_timestamp(value["valid_to"])
+    return {
+        "kind": "reference_manifest",
+        "semantic_encoding_version": REFERENCE_SEMANTIC_ENCODING_VERSION,
+        "value": value,
+    }
+
+
+def security_revision_semantic_document(row: Mapping[str, object]) -> dict[str, object]:
+    """Exclude transfer identities while authenticating every revision field."""
+    value = {key: row[key] for key in (
+        "revision", "security_id", "entity_id", "ticker", "exchange",
+        "instrument_type", "eligible", "exclusion_reasons", "aliases",
+        "source_ids", "valid_from", "valid_to",
+    )}
+    value["valid_from"] = _semantic_timestamp(value["valid_from"])
+    value["valid_to"] = _semantic_timestamp(value["valid_to"])
+    return {
+        "kind": "security_revision",
+        "semantic_encoding_version": REFERENCE_SEMANTIC_ENCODING_VERSION,
+        "value": value,
+    }
 
 
 def _security_transfer_row(
@@ -662,7 +738,8 @@ def _security_transfer_row(
     manifest_id: str,
     run_id: str,
 ) -> dict[str, object]:
-    content = {
+    content: dict[str, object] = {
+        "revision": 1,
         "security_id": row.security_id,
         "entity_id": row.entity_id,
         "ticker": row.ticker,
@@ -675,19 +752,15 @@ def _security_transfer_row(
         "valid_from": _timestamp_for_date(row.valid_from),
         "valid_to": _timestamp_for_date(row.valid_to) if row.valid_to is not None else None,
     }
-    # The revision's effective start is ledger metadata, not part of the
-    # security description.  Excluding it lets a later dated manifest reuse
-    # an unchanged predecessor revision while memberships still preserve the
-    # manifest in which that revision first became effective.
-    semantic_content = {key: value for key, value in content.items() if key != "valid_from"}
-    content_hash = hashlib.sha256(_canonical_json(semantic_content)).hexdigest()
+    content_hash = hashlib.sha256(
+        _canonical_json(security_revision_semantic_document(content))
+    ).hexdigest()
     revision_id = str(
         uuid5(UUID(run_id), f"reference-security:{row.security_id}:{content_hash}")
     )
     return {
         "id": revision_id,
         "manifest_id": manifest_id,
-        "revision": 1,
         **content,
         "content_hash": content_hash,
     }
@@ -795,12 +868,9 @@ def build_reference_transfer(
         "coverage_status": snapshot.manifest.coverage_status,
         "reference_status": reference_status,
         "source_url": snapshot.manifest.source_url,
-        "source_retrieved_at": snapshot.manifest.retrieved_at.isoformat().replace(
-            "+00:00", "Z"
-        ),
-        "source_timestamp": snapshot.manifest.source_timestamp.isoformat().replace(
-            "+00:00", "Z"
-        ) if snapshot.manifest.source_timestamp is not None else None,
+        "source_retrieved_at": _canonical_timestamp(snapshot.manifest.retrieved_at),
+        "source_timestamp": _canonical_timestamp(snapshot.manifest.source_timestamp)
+        if snapshot.manifest.source_timestamp is not None else None,
         "parser_version": snapshot.manifest.parser_version,
         "security_count": len(ordered),
         "conflict_count": len(snapshot.conflicts),
@@ -813,11 +883,13 @@ def build_reference_transfer(
         "capability_version": capability_version,
         "taxonomy_version": taxonomy_version,
         "source_hash": snapshot.manifest.source_hash,
-        "valid_from": snapshot.manifest.retrieved_at.isoformat().replace("+00:00", "Z"),
+        "valid_from": _canonical_timestamp(snapshot.manifest.retrieved_at),
         "valid_to": None,
         "manifest": manifest_body,
     }
-    manifest["content_hash"] = hashlib.sha256(_canonical_json(manifest)).hexdigest()
+    manifest["content_hash"] = hashlib.sha256(
+        _canonical_json(reference_manifest_semantic_document(manifest))
+    ).hexdigest()
     begin = {
         "manifest": manifest,
         "capability_id": capability_id,
@@ -835,6 +907,7 @@ __all__ = [
     "Eligibility",
     "IssuerIdentity",
     "MAX_REFERENCE_SECURITIES",
+    "REFERENCE_SEMANTIC_ENCODING_VERSION",
     "ReferenceConflict",
     "ReferenceManifest",
     "ReferenceRefresh",
@@ -846,7 +919,10 @@ __all__ = [
     "build_reference_transfer",
     "eligible_for_research",
     "merge_reference_sources",
+    "merge_reference_snapshot",
     "parse_sec_company_tickers",
     "parse_symbol_directory",
     "refresh_sec_reference",
+    "reference_manifest_semantic_document",
+    "security_revision_semantic_document",
 ]

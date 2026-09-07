@@ -47,6 +47,22 @@ def recovery_records():
     nomination_id = "10000000-0000-4000-8000-000000000008"
     reference_chunk_hash = "9" * 64
     reference_root_hash = hashlib.sha256(reference_chunk_hash.encode()).hexdigest()
+    transfer_request_id = "10000000-0000-4000-8000-000000000009"
+    current_pin_payload = {
+        "capability_id": "sec_company_tickers_universe",
+        "binding_role": "current",
+        "manifest_id": manifest_id,
+        "reference_status": "healthy",
+        "reference_as_of": "2026-09-05T19:32:00Z",
+    }
+    transfer_envelope = {
+        "dry_run": False, "operation": "pin_discovery_reference",
+        "payload": current_pin_payload, "request_id": transfer_request_id,
+        "run_id": run, "schema_version": 1,
+    }
+    transfer_encoded = json.dumps(
+        transfer_envelope, sort_keys=True, separators=(",", ":")
+    ).encode()
     packet = {"candidates": [], "evidence": [], "coverage": {}, "limitations": [], "policy_version": 1}
     report = {"summary": "Suggestion only.", "packet_hash": digest(packet)}
     records = {
@@ -130,11 +146,33 @@ def recovery_records():
             "source_retrieved_at": "2026-09-05T19:30:00Z",
             "request_payload": {
                 "capability_id": "sec_company_tickers_universe",
+                "binding_role": "current",
                 "manifest_id": manifest_id,
                 "reference_status": "healthy",
                 "reference_as_of": "2026-09-05T19:32:00Z",
             },
             "reference_age_seconds": 120, "created_at": "2026-09-05T19:32:00Z",
+        }],
+        "reference_predecessor_pins": [{
+            "run_id": run, "capability_id": "sec_company_tickers_universe",
+            "manifest_id": None, "reference_status": "reference_unavailable",
+            "reference_as_of": "2026-09-05T19:29:00Z",
+            "source_retrieved_at": None, "reference_age_seconds": None,
+            "request_payload": {
+                "capability_id": "sec_company_tickers_universe",
+                "binding_role": "predecessor", "manifest_id": None,
+                "reference_status": "reference_stale",
+                "reference_as_of": "2026-09-05T19:29:00Z",
+            },
+            "created_at": "2026-09-05T19:29:00Z",
+        }],
+        "reference_transfer_requests": [{
+            "request_id": transfer_request_id, "run_id": run,
+            "operation": "pin_discovery_reference",
+            "encoded_bytes": len(transfer_encoded),
+            "request_hash": hashlib.sha256(transfer_encoded).hexdigest(),
+            "request_payload": current_pin_payload,
+            "created_at": "2026-09-05T19:32:00Z",
         }],
         "discovery_stage_tasks": [{
             "id": signals_task_id, "run_id": run, "stage": "signals", "capability_id": "gdelt_theme_search",
@@ -415,6 +453,8 @@ EMPTY_INTELLIGENCE_PACKET_REPORT_HISTORY = (
     "reference_finalization_seals",
     "reference_snapshot_memberships",
     "reference_run_bindings",
+    "reference_predecessor_pins",
+    "reference_transfer_requests",
     "discovery_stage_tasks",
     "theme_episode_revisions",
     "exposure_facts",
@@ -434,6 +474,8 @@ DISCOVERY_DATASETS = (
     "reference_finalization_seals",
     "reference_snapshot_memberships",
     "reference_run_bindings",
+    "reference_predecessor_pins",
+    "reference_transfer_requests",
     "discovery_stage_tasks",
     "theme_episode_revisions",
     "exposure_facts",
@@ -453,6 +495,8 @@ def test_recovery_validates_complete_discovery_lineage_and_exact_fields():
         "reference_finalization_seals": 1,
         "reference_snapshot_memberships": 1,
         "reference_run_bindings": 1,
+        "reference_predecessor_pins": 1,
+        "reference_transfer_requests": 1,
         "discovery_stage_tasks": 3,
         "theme_episode_revisions": 1,
         "exposure_facts": 1,

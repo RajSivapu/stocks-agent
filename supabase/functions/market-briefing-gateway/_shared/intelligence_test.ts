@@ -11,6 +11,8 @@ import {
   parseReferencePage,
   parseReferencePinPayload,
   parseReferenceReadPayload,
+  referenceManifestSemanticDocument,
+  securityRevisionSemanticDocument,
   sha256Hex,
 } from "./intelligence.ts";
 
@@ -33,7 +35,7 @@ function assertThrows(fn: () => unknown, message: string): void {
 }
 
 function referenceManifest() {
-  return {
+  const row = {
     id: "00000000-0000-4000-8000-000000000101",
     reference_version: "sec:2026-09-06:fixture",
     revision: 1,
@@ -53,12 +55,17 @@ function referenceManifest() {
       conflict_count: 0,
       symbol_directory_status: "disabled_pending_https_and_terms_review",
     },
-    content_hash: "b".repeat(64),
+  };
+  return {
+    ...row,
+    content_hash: sha256Hex(
+      canonicalJson(referenceManifestSemanticDocument(row)),
+    ),
   };
 }
 
 function referenceEntry() {
-  return {
+  const row = {
     id: "00000000-0000-4000-8000-000000000102",
     manifest_id: "00000000-0000-4000-8000-000000000101",
     revision: 1,
@@ -73,7 +80,12 @@ function referenceEntry() {
     source_ids: ["sec-company-tickers:0000000001"],
     valid_from: "2026-09-06T00:00:00.000Z",
     valid_to: null,
-    content_hash: "c".repeat(64),
+  };
+  return {
+    ...row,
+    content_hash: sha256Hex(
+      canonicalJson(securityRevisionSemanticDocument(row)),
+    ),
   };
 }
 
@@ -106,6 +118,7 @@ Deno.test("reference transfer parsers keep every call bounded and exact", () => 
   assertEquals(
     parseReferencePinPayload({
       capability_id: "sec_company_tickers_universe",
+      binding_role: "predecessor",
       manifest_id: null,
       reference_status: "reference_stale",
       reference_as_of: "2026-09-07T12:00:00.000Z",
@@ -115,6 +128,7 @@ Deno.test("reference transfer parsers keep every call bounded and exact", () => 
   assertEquals(
     parseReferenceReadPayload({
       capability_id: "sec_company_tickers_universe",
+      binding_role: "predecessor",
       after_security_id: null,
       limit: 500,
     }).limit,
@@ -133,6 +147,7 @@ Deno.test("reference transfer parsers keep every call bounded and exact", () => 
     () =>
       parseReferenceReadPayload({
         capability_id: "sec_company_tickers_universe",
+        binding_role: "predecessor",
         after_security_id: null,
         limit: 501,
       }),
@@ -144,9 +159,41 @@ Deno.test("reference transfer parsers keep every call bounded and exact", () => 
   );
 });
 
+Deno.test("reference transfer parsers reject forged semantic hashes", () => {
+  const manifest = referenceManifest();
+  const forgedManifest = structuredClone(manifest);
+  forgedManifest.manifest.source_url = "https://forged.invalid/reference";
+  assertThrows(
+    () =>
+      parseReferenceBeginPayload({
+        manifest: forgedManifest,
+        capability_id: "sec_company_tickers_universe",
+        chunk_count: 1,
+        security_count: 1,
+        root_hash: "d".repeat(64),
+        predecessor_manifest_id: null,
+      }),
+    "manifest content hash mismatch",
+  );
+
+  const entry = referenceEntry();
+  assertThrows(
+    () =>
+      parseReferenceChunkPayload({
+        manifest_id: manifest.id,
+        chunk_index: 0,
+        chunk_count: 1,
+        entries: [{ ...entry, ticker: "DRIFT" }],
+        chunk_hash: "e".repeat(64),
+      }),
+    "security content hash mismatch",
+  );
+});
+
 Deno.test("reference pages reject inconsistent bindings, pagination, and identities", () => {
   const page = {
     binding: {
+      binding_role: "predecessor",
       manifest_id: referenceManifest().id,
       reference_status: "healthy",
       source_retrieved_at: "2026-09-06T12:00:00.000Z",
@@ -163,6 +210,7 @@ Deno.test("reference pages reject inconsistent bindings, pagination, and identit
       parseReferencePage({
         ...page,
         binding: {
+          binding_role: "predecessor",
           manifest_id: null,
           reference_status: "reference_unavailable",
           source_retrieved_at: "2026-09-06T12:00:00.000Z",
@@ -346,7 +394,7 @@ function discoveryTask() {
 }
 
 function discoveryManifest() {
-  return {
+  const row = {
     id: DISCOVERY_MANIFEST_ID,
     reference_version: "sec:2026-09-06",
     revision: 1,
@@ -356,12 +404,17 @@ function discoveryManifest() {
     valid_from: "2026-09-06T00:00:00.000Z",
     valid_to: null,
     manifest: { coverage_status: "scope_not_guaranteed" },
-    content_hash: "c".repeat(64),
+  };
+  return {
+    ...row,
+    content_hash: sha256Hex(
+      canonicalJson(referenceManifestSemanticDocument(row)),
+    ),
   };
 }
 
 function discoverySecurityRevision() {
-  return {
+  const row = {
     id: DISCOVERY_SECURITY_ID,
     manifest_id: DISCOVERY_MANIFEST_ID,
     revision: 1,
@@ -376,7 +429,12 @@ function discoverySecurityRevision() {
     source_ids: ["nasdaq-listed:TEST"],
     valid_from: "2026-09-06T00:00:00.000Z",
     valid_to: null,
-    content_hash: "d".repeat(64),
+  };
+  return {
+    ...row,
+    content_hash: sha256Hex(
+      canonicalJson(securityRevisionSemanticDocument(row)),
+    ),
   };
 }
 

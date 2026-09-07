@@ -1285,7 +1285,7 @@ function request(
           ? { authorization: options.authorization }
           : {}),
       },
-      body: options.method === "GET" ? undefined : JSON.stringify({
+      body: options.method === "GET" ? undefined : canonicalJson({
         schema_version: 1,
         operation,
         request_id: options.requestId ?? nextRequestId(),
@@ -1782,6 +1782,7 @@ Deno.test("pinned reference read is service-only while owner discovery read stay
     pinDiscoveryReference: () => {
       calls.push("pin");
       return Promise.resolve({
+        binding_role: "current",
         manifest_id: null,
         reference_status: "reference_unavailable",
         source_retrieved_at: null,
@@ -1793,6 +1794,7 @@ Deno.test("pinned reference read is service-only while owner discovery read stay
       calls.push("read");
       return Promise.resolve({
         binding: {
+          binding_role: "current",
           manifest_id: null,
           reference_status: "reference_unavailable",
           source_retrieved_at: null,
@@ -1814,6 +1816,7 @@ Deno.test("pinned reference read is service-only while owner discovery read stay
     "pin_discovery_reference",
     {
       capability_id: "sec_company_tickers_universe",
+      binding_role: "current",
       manifest_id: null,
       reference_status: "reference_unavailable",
       reference_as_of: "2026-09-07T12:00:00.000Z",
@@ -1824,6 +1827,7 @@ Deno.test("pinned reference read is service-only while owner discovery read stay
     "read_discovery_reference",
     {
       capability_id: "sec_company_tickers_universe",
+      binding_role: "current",
       after_security_id: null,
       limit: 500,
     },
@@ -1836,6 +1840,7 @@ Deno.test("pinned reference read is service-only while owner discovery read stay
     "read_discovery_reference",
     {
       capability_id: "sec_company_tickers_universe",
+      binding_role: "current",
       after_security_id: null,
       limit: 500,
     },

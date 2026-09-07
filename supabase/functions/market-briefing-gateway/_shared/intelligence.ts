@@ -163,6 +163,7 @@ export interface ReferenceFinalizePayload {
 
 export interface ReferencePinPayload {
   capability_id: string;
+  binding_role: "predecessor" | "current";
   manifest_id: string | null;
   reference_status: "healthy" | "reference_stale" | "reference_unavailable";
   reference_as_of: string;
@@ -170,6 +171,7 @@ export interface ReferencePinPayload {
 
 export interface ReferenceReadPayload {
   capability_id: string;
+  binding_role: "predecessor" | "current";
   after_security_id: string | null;
   limit: number;
 }
@@ -614,6 +616,50 @@ export function parseDiscoveryStageTask(value: unknown): DiscoveryStageTask {
   };
 }
 
+function canonicalReferenceTimestamp(value: unknown): string | null {
+  if (value === null) return null;
+  return new Date(value as string).toISOString();
+}
+
+export function referenceManifestSemanticDocument(row: JsonObject): JsonObject {
+  return {
+    kind: "reference_manifest",
+    semantic_encoding_version: 1,
+    value: {
+      id: row.id,
+      reference_version: row.reference_version,
+      revision: row.revision,
+      capability_version: row.capability_version,
+      taxonomy_version: row.taxonomy_version,
+      source_hash: row.source_hash,
+      valid_from: canonicalReferenceTimestamp(row.valid_from),
+      valid_to: canonicalReferenceTimestamp(row.valid_to),
+      manifest: row.manifest,
+    },
+  };
+}
+
+export function securityRevisionSemanticDocument(row: JsonObject): JsonObject {
+  return {
+    kind: "security_revision",
+    semantic_encoding_version: 1,
+    value: {
+      revision: row.revision,
+      security_id: row.security_id,
+      entity_id: row.entity_id,
+      ticker: row.ticker,
+      exchange: row.exchange,
+      instrument_type: row.instrument_type,
+      eligible: row.eligible,
+      exclusion_reasons: row.exclusion_reasons,
+      aliases: row.aliases,
+      source_ids: row.source_ids,
+      valid_from: canonicalReferenceTimestamp(row.valid_from),
+      valid_to: canonicalReferenceTimestamp(row.valid_to),
+    },
+  };
+}
+
 function parseDiscoveryManifest(value: unknown): JsonObject {
   const row = objectValue(value, "discovery reference.manifest");
   exactKeys(row, [
@@ -634,7 +680,7 @@ function parseDiscoveryManifest(value: unknown): JsonObject {
     65_536,
   );
   rejectDiscoveryAuthority(manifest, "discovery reference.manifest.manifest");
-  return {
+  const result = {
     id: uuidValue(row.id, "discovery reference.manifest.id"),
     reference_version: stringValue(
       row.reference_version,
@@ -678,6 +724,11 @@ function parseDiscoveryManifest(value: unknown): JsonObject {
       "discovery reference.manifest.content_hash",
     ),
   };
+  if (
+    result.content_hash !==
+      sha256Hex(canonicalJson(referenceManifestSemanticDocument(result)))
+  ) throw new Error("manifest content hash mismatch");
+  return result;
 }
 
 function parseSecurityRevision(value: unknown, index: number): JsonObject {
@@ -744,6 +795,10 @@ function parseSecurityRevision(value: unknown, index: number): JsonObject {
     content_hash: hashValue(row.content_hash, `${path}.content_hash`),
   };
   rejectDiscoveryAuthority(result, path);
+  if (
+    result.content_hash !==
+      sha256Hex(canonicalJson(securityRevisionSemanticDocument(result)))
+  ) throw new Error("security content hash mismatch");
   return result;
 }
 
@@ -894,6 +949,7 @@ export function parseReferencePinPayload(value: unknown): ReferencePinPayload {
   const row = boundedReferenceCall(value, "reference pin");
   exactKeys(row, [
     "capability_id",
+    "binding_role",
     "manifest_id",
     "reference_status",
     "reference_as_of",
@@ -921,6 +977,11 @@ export function parseReferencePinPayload(value: unknown): ReferencePinPayload {
       row.capability_id,
       "reference pin.capability_id",
     ),
+    binding_role: enumValue(
+      row.binding_role,
+      ["predecessor", "current"] as const,
+      "reference pin.binding_role",
+    ),
     manifest_id: manifestId,
     reference_status: status,
     reference_as_of: timestamp(
@@ -936,13 +997,18 @@ export function parseReferenceReadPayload(
   const row = boundedReferenceCall(value, "reference read");
   exactKeys(
     row,
-    ["capability_id", "after_security_id", "limit"],
+    ["capability_id", "binding_role", "after_security_id", "limit"],
     "reference read",
   );
   return {
     capability_id: referenceCapability(
       row.capability_id,
       "reference read.capability_id",
+    ),
+    binding_role: enumValue(
+      row.binding_role,
+      ["predecessor", "current"] as const,
+      "reference read.binding_role",
     ),
     after_security_id: nullableString(
       row.after_security_id,
@@ -964,6 +1030,7 @@ export function parseReferencePage(value: unknown): ReferencePage {
   ], "reference page");
   const binding = boundedObject(row.binding, "reference page.binding", 2_048);
   exactKeys(binding, [
+    "binding_role",
     "manifest_id",
     "reference_status",
     "source_retrieved_at",
@@ -1038,6 +1105,11 @@ export function parseReferencePage(value: unknown): ReferencePage {
   }
   return {
     binding: {
+      binding_role: enumValue(
+        binding.binding_role,
+        ["predecessor", "current"] as const,
+        "reference page.binding.binding_role",
+      ),
       manifest_id: manifestId,
       reference_status: status,
       source_retrieved_at: sourceRetrievedAt,

@@ -141,12 +141,19 @@ def test_one_reference_stage_call_persists_all_chunks_then_pins_finalized_snapsh
         def call(self, operation, payload, **kwargs):
             self.calls.append((operation, payload, kwargs))
             manifest_id = payload.get("manifest_id") or payload.get("manifest", {}).get("id")
-            if operation == "begin_discovery_reference":
+            if operation == "pin_discovery_reference" and payload["binding_role"] == "predecessor":
+                data = {"binding_role": "predecessor", "manifest_id": None,
+                        "reference_status": "reference_unavailable",
+                        "source_retrieved_at": None, "reference_age_seconds": None,
+                        "duplicate": False}
+            elif operation == "pin_discovery_reference":
+                data = {"binding_role": "current", "manifest_id": manifest_id,
+                        "reference_status": "healthy", "source_retrieved_at": now.isoformat(),
+                        "reference_age_seconds": 0, "duplicate": False}
+            elif operation == "begin_discovery_reference":
                 data = {"manifest_id": manifest_id, "predecessor_manifest_id": None, "duplicate": False}
             elif operation == "finalize_discovery_reference":
                 data = {"manifest_id": manifest_id, "security_count": 1005, "duplicate": False}
-            elif operation == "pin_discovery_reference":
-                data = {"manifest_id": manifest_id, "reference_status": "healthy", "source_retrieved_at": now.isoformat(), "reference_age_seconds": 0, "duplicate": False}
             else:
                 data = {"manifest_id": manifest_id, "chunk_index": payload["chunk_index"], "duplicate": False}
             return {"ok": True, "data": data}
@@ -158,13 +165,125 @@ def test_one_reference_stage_call_persists_all_chunks_then_pins_finalized_snapsh
     )
 
     operations = [call[0] for call in gateway_client.calls]
-    assert operations == ["begin_discovery_reference"] + [
+    assert operations == ["pin_discovery_reference", "begin_discovery_reference"] + [
         "record_discovery_reference_chunk"
     ] * 6 + ["finalize_discovery_reference", "pin_discovery_reference"]
     assert all(call[2]["run_id"] == RUN_ID for call in gateway_client.calls)
     assert coverage["reference_status"] == "healthy"
     assert coverage["execution_allowed"] is False
     assert len(json.dumps(gateway_client.calls, default=str).encode()) <= collector.MAX_REFERENCE_TRANSFER_BYTES
+
+
+def test_reference_stage_pages_predecessor_before_assigning_renamed_security_identity():
+    import scripts.collect_market_intelligence as collector
+    run_id = "11111111-1111-4111-8111-111111111111"
+    predecessor_id = "22222222-2222-4222-8222-222222222222"
+    now = datetime(2026, 9, 7, 12, tzinfo=timezone.utc)
+    source = json.dumps({
+        "0": {"cik_str": 1, "ticker": "NEW", "title": "Renamed Company"},
+    }, separators=(",", ":")).encode()
+
+    class Http:
+        def get(self, _request):
+            return SimpleNamespace(body=source, retrieved_at=now, observed_at=now)
+
+    prior_manifest = {
+        "id": predecessor_id,
+        "reference_version": "sec:2026-09-06:prior",
+        "revision": 1,
+        "capability_version": 1,
+        "taxonomy_version": 1,
+        "source_hash": "a" * 64,
+        "valid_from": "2026-09-06T12:00:00.000Z",
+        "valid_to": None,
+        "manifest": {
+            "coverage_status": "scope_not_guaranteed",
+            "reference_status": "healthy",
+            "source_url": "https://www.sec.gov/files/company_tickers.json",
+            "source_retrieved_at": "2026-09-06T12:00:00.000Z",
+            "source_timestamp": "2026-09-06T12:00:00.000Z",
+            "parser_version": 1,
+            "security_count": 1,
+            "conflict_count": 0,
+            "symbol_directory_status": "disabled_pending_https_and_terms_review",
+        },
+        "content_hash": "b" * 64,
+    }
+    prior_security = {
+        "id": "33333333-3333-4333-8333-333333333333",
+        "manifest_id": predecessor_id,
+        "revision": 1,
+        "security_id": "sec-cik:0000000001:listing-origin:OLD",
+        "entity_id": "sec-cik:0000000001",
+        "ticker": "OLD",
+        "exchange": None,
+        "instrument_type": "COMMON_STOCK",
+        "eligible": True,
+        "exclusion_reasons": [],
+        "aliases": ["OLD"],
+        "source_ids": ["sec-company-tickers:0000000001"],
+        "valid_from": "2020-01-02T00:00:00.000Z",
+        "valid_to": None,
+        "content_hash": "c" * 64,
+    }
+
+    class Gateway:
+        def __init__(self):
+            self.calls = []
+            self.uploaded = []
+
+        def call(self, operation, payload, **kwargs):
+            self.calls.append((operation, payload, kwargs))
+            if operation == "pin_discovery_reference" and payload["binding_role"] == "predecessor":
+                return {"data": {
+                    "binding_role": "predecessor", "manifest_id": predecessor_id,
+                    "reference_status": "reference_stale",
+                    "source_retrieved_at": "2026-09-06T12:00:00.000Z",
+                    "reference_age_seconds": 86_400, "duplicate": False,
+                }}
+            if operation == "read_discovery_reference":
+                return {"data": {"reference": {
+                    "binding": {
+                        "binding_role": "predecessor", "manifest_id": predecessor_id,
+                        "reference_status": "reference_stale",
+                        "source_retrieved_at": "2026-09-06T12:00:00.000Z",
+                        "reference_age_seconds": 86_400,
+                    },
+                    "manifest": prior_manifest, "securities": [prior_security],
+                    "next_after_security_id": None, "complete": True,
+                }}}
+            manifest_id = payload.get("manifest_id") or payload.get("manifest", {}).get("id")
+            if operation == "begin_discovery_reference":
+                assert payload["predecessor_manifest_id"] == predecessor_id
+                return {"data": {"manifest_id": manifest_id, "predecessor_manifest_id": predecessor_id, "duplicate": False}}
+            if operation == "record_discovery_reference_chunk":
+                self.uploaded.extend(payload["entries"])
+                return {"data": {"manifest_id": manifest_id, "chunk_index": payload["chunk_index"], "duplicate": False}}
+            if operation == "finalize_discovery_reference":
+                return {"data": {"manifest_id": manifest_id, "security_count": 1, "duplicate": False}}
+            if operation == "pin_discovery_reference" and payload["binding_role"] == "current":
+                return {"data": {
+                    "binding_role": "current", "manifest_id": manifest_id,
+                    "reference_status": "healthy", "source_retrieved_at": now.isoformat(),
+                    "reference_age_seconds": 0, "duplicate": False,
+                }}
+            raise AssertionError(operation)
+
+    gateway_client = Gateway()
+    coverage = collector._persist_reference_stage(
+        gateway_client, run_id, now, client=Http(), monotonic=lambda: 0.0,
+    )
+
+    assert [call[0] for call in gateway_client.calls[:2]] == [
+        "pin_discovery_reference", "read_discovery_reference",
+    ]
+    assert gateway_client.calls[1][1]["binding_role"] == "predecessor"
+    renamed = gateway_client.uploaded[0]
+    assert renamed["ticker"] == "NEW"
+    assert renamed["security_id"] == prior_security["security_id"]
+    assert renamed["aliases"] == ["NEW", "OLD"]
+    assert gateway_client.calls[-1][1]["binding_role"] == "current"
+    assert coverage["reference_status"] == "healthy"
 
 
 def test_failed_sec_refresh_asks_server_for_last_healthy_and_reports_unavailable_exactly():
@@ -178,15 +297,22 @@ def test_failed_sec_refresh_asks_server_for_last_healthy_and_reports_unavailable
         def __init__(self): self.calls = []
         def call(self, operation, payload, **kwargs):
             self.calls.append((operation, payload, kwargs))
-            return {"data": {"manifest_id": None, "reference_status": "reference_unavailable", "source_retrieved_at": None, "reference_age_seconds": None, "duplicate": False}}
+            return {"data": {"binding_role": payload["binding_role"],
+                "manifest_id": None, "reference_status": "reference_unavailable",
+                "source_retrieved_at": None, "reference_age_seconds": None,
+                "duplicate": False}}
 
     gateway_client = Gateway()
     coverage = collector._persist_reference_stage(
         gateway_client, "11111111-1111-4111-8111-111111111111", now,
         client=Http(), monotonic=lambda: 0.0,
     )
-    assert [call[0] for call in gateway_client.calls] == ["pin_discovery_reference"]
-    assert gateway_client.calls[0][1]["reference_status"] == "reference_stale"
+    assert [call[0] for call in gateway_client.calls] == [
+        "pin_discovery_reference", "pin_discovery_reference",
+    ]
+    assert [call[1]["binding_role"] for call in gateway_client.calls] == [
+        "predecessor", "current",
+    ]
     assert coverage == {
         "coverage_status": "scope_not_guaranteed",
         "reference_status": "reference_unavailable",
@@ -228,3 +354,53 @@ def test_reference_stage_time_ceiling_includes_the_sec_refresh():
             monotonic=lambda: elapsed[0],
         )
     assert gateway_client.calls == []
+
+
+def test_reference_stage_caps_each_gateway_timeout_by_remaining_deadline():
+    import scripts.collect_market_intelligence as collector
+    now = datetime(2026, 9, 7, 12, tzinfo=timezone.utc)
+    elapsed = [0.0]
+    source = (Path(__file__).parent / "fixtures" / "intelligence" /
+              "sec_company_tickers.json").read_bytes()
+
+    class Http:
+        def get(self, _request):
+            elapsed[0] = 20.25
+            return SimpleNamespace(body=source, retrieved_at=now, observed_at=now)
+
+    class Gateway:
+        def __init__(self): self.timeouts = []
+
+        def call(self, operation, payload, **kwargs):
+            self.timeouts.append(kwargs.get("timeout"))
+            if operation == "pin_discovery_reference" and payload["binding_role"] == "predecessor":
+                return {"data": {
+                    "binding_role": "predecessor", "manifest_id": None,
+                    "reference_status": "reference_unavailable",
+                    "source_retrieved_at": None, "reference_age_seconds": None,
+                    "duplicate": False,
+                }}
+            manifest_id = payload.get("manifest_id") or payload.get("manifest", {}).get("id")
+            if operation == "begin_discovery_reference":
+                return {"data": {"manifest_id": manifest_id, "predecessor_manifest_id": None, "duplicate": False}}
+            if operation == "record_discovery_reference_chunk":
+                return {"data": {"manifest_id": manifest_id, "chunk_index": payload["chunk_index"], "duplicate": False}}
+            if operation == "finalize_discovery_reference":
+                return {"data": {"manifest_id": manifest_id, "security_count": 5, "duplicate": False}}
+            return {"data": {
+                "binding_role": "current", "manifest_id": manifest_id,
+                "reference_status": "healthy", "source_retrieved_at": now.isoformat(),
+                "reference_age_seconds": 0, "duplicate": False,
+            }}
+
+    gateway_client = Gateway()
+    collector._persist_reference_stage(
+        gateway_client, "11111111-1111-4111-8111-111111111111", now,
+        client=Http(), monotonic=lambda: elapsed[0],
+    )
+
+    assert gateway_client.timeouts
+    assert all(isinstance(value, float) and 0 < value <= 24.75
+               for value in gateway_client.timeouts)
+    assert collector.MAX_REFERENCE_TRANSFER_CALLS == 160
+    assert collector.MAX_REFERENCE_TRANSFER_BYTES == 32 * 1024 * 1024

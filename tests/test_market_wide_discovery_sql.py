@@ -1,5 +1,7 @@
 from pathlib import Path
 import copy
+import hashlib
+import json
 import shutil
 import socket
 import subprocess
@@ -13,6 +15,10 @@ from pglast import parse_sql
 from pglast.stream import RawStream
 
 from scripts.verify_market_intelligence_migration import collect_snapshot
+from lib.intelligence.universe import (
+    reference_manifest_semantic_document,
+    security_revision_semantic_document,
+)
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -163,6 +169,7 @@ def discovery_db():
                 "CREATE ROLE anon; CREATE ROLE authenticated; CREATE ROLE service_role;"
                 "CREATE ROLE stock_agent_dashboard; CREATE ROLE stock_agent_release_reader;"
                 "CREATE ROLE stock_agent_release_reader_runtime;"
+                "CREATE SCHEMA extensions; CREATE EXTENSION pgcrypto WITH SCHEMA extensions;"
                 "CREATE TABLE public.analysis_runs(id uuid PRIMARY KEY,status text NOT NULL);"
                 "CREATE TABLE public.market_intelligence_runs(id uuid PRIMARY KEY REFERENCES public.analysis_runs(id))"
             )
@@ -199,23 +206,30 @@ def task_payload(task_id: str, *, state: str, attempt_count: int, query_hash: st
 
 
 def reference_payload(*, manifest_id: str, securities: list[tuple[str, str, str]]):
-    return {
-        "manifest": {
-            "id": manifest_id, "reference_version": f"fixture:{manifest_id}", "revision": 1,
-            "capability_version": 1, "taxonomy_version": 1, "source_hash": "c" * 64,
-            "valid_from": "2026-09-06T00:00:00Z", "valid_to": None,
-            "manifest": {"universe": "eligible_us_listed"}, "content_hash": "d" * 64,
-        },
-        "security_revisions": [{
+    manifest = {
+        "id": manifest_id, "reference_version": f"fixture:{manifest_id}", "revision": 1,
+        "capability_version": 1, "taxonomy_version": 1, "source_hash": "c" * 64,
+        "valid_from": "2026-09-06T00:00:00.000Z", "valid_to": None,
+        "manifest": {"universe": "eligible_us_listed"},
+    }
+    manifest["content_hash"] = hashlib.sha256(json.dumps(
+        reference_manifest_semantic_document(manifest), ensure_ascii=False,
+        separators=(",", ":"), sort_keys=True,
+    ).encode()).hexdigest()
+    revisions = [{
             "id": security_id, "manifest_id": manifest_id, "revision": 1,
             "security_id": f"NASDAQ:{ticker}", "entity_id": f"CIK:{index:010d}",
             "ticker": ticker, "exchange": "NASDAQ", "instrument_type": "COMMON_STOCK",
             "eligible": True, "exclusion_reasons": [], "aliases": [f"{ticker} Corp"],
             "source_ids": [f"nasdaq-listed:{ticker}"],
-            "valid_from": "2026-09-06T00:00:00Z", "valid_to": None,
-            "content_hash": content_hash,
-        } for index, (security_id, ticker, content_hash) in enumerate(securities, start=1)],
-    }
+            "valid_from": "2026-09-06T00:00:00.000Z", "valid_to": None,
+        } for index, (security_id, ticker, _content_hash) in enumerate(securities, start=1)]
+    for revision in revisions:
+        revision["content_hash"] = hashlib.sha256(json.dumps(
+            security_revision_semantic_document(revision), ensure_ascii=False,
+            separators=(",", ":"), sort_keys=True,
+        ).encode()).hexdigest()
+    return {"manifest": manifest, "security_revisions": revisions}
 
 
 def record_reference(connection, run_id: str, *, ticker: str = "TEST") -> str:
@@ -351,7 +365,7 @@ def test_discovery_reference_replay_is_exact_and_altered_child_fails_closed(disc
         )
 
     payload["security_revisions"][0]["ticker"] = "DRIFT"
-    with pytest.raises(psycopg.errors.InvalidParameterValue, match="idempotency mismatch"):
+    with pytest.raises(psycopg.errors.InvalidParameterValue, match="security hash mismatch"):
         discovery_db.execute(
             "SELECT public.record_market_discovery_reference(%s,%s)", (run_id, Jsonb(payload)),
         )
@@ -654,10 +668,10 @@ def test_verifier_collects_exact_discovery_relation_column_and_function_grants(d
         ("record_market_discovery_reference(uuid,jsonb)", "service_role", "EXECUTE"),
         ("checkpoint_market_discovery_stage(uuid,jsonb)", "service_role", "EXECUTE"),
         ("read_market_discovery_context(uuid,integer)", "service_role", "EXECUTE"),
-        ("begin_market_discovery_reference(uuid,jsonb)", "service_role", "EXECUTE"),
-        ("record_market_discovery_reference_chunk(uuid,jsonb)", "service_role", "EXECUTE"),
-        ("finalize_market_discovery_reference(uuid,jsonb)", "service_role", "EXECUTE"),
-        ("pin_market_discovery_reference(uuid,jsonb)", "service_role", "EXECUTE"),
-        ("read_market_discovery_reference(uuid,jsonb)", "service_role", "EXECUTE"),
+        ("begin_market_discovery_reference(uuid,jsonb,uuid,integer,text)", "service_role", "EXECUTE"),
+        ("record_market_discovery_reference_chunk(uuid,jsonb,uuid,integer,text)", "service_role", "EXECUTE"),
+        ("finalize_market_discovery_reference(uuid,jsonb,uuid,integer,text)", "service_role", "EXECUTE"),
+        ("pin_market_discovery_reference(uuid,jsonb,uuid,integer,text)", "service_role", "EXECUTE"),
+        ("read_market_discovery_reference(uuid,jsonb,uuid,integer,text)", "service_role", "EXECUTE"),
     }
     assert snapshot["unexpected_grants"] == []

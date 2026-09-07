@@ -62,6 +62,8 @@ DISCOVERY_TABLES = (
     "market_reference_snapshot_memberships",
     "market_reference_finalization_seals",
     "market_reference_run_bindings",
+    "market_reference_predecessor_pins",
+    "market_reference_transfer_requests",
     "market_discovery_stage_tasks",
     "market_exposure_facts",
     "market_theme_episode_revisions",
@@ -71,11 +73,11 @@ DISCOVERY_RPCS = (
     "record_market_discovery_reference(uuid,jsonb)",
     "checkpoint_market_discovery_stage(uuid,jsonb)",
     "read_market_discovery_context(uuid,integer)",
-    "begin_market_discovery_reference(uuid,jsonb)",
-    "record_market_discovery_reference_chunk(uuid,jsonb)",
-    "finalize_market_discovery_reference(uuid,jsonb)",
-    "pin_market_discovery_reference(uuid,jsonb)",
-    "read_market_discovery_reference(uuid,jsonb)",
+    "begin_market_discovery_reference(uuid,jsonb,uuid,integer,text)",
+    "record_market_discovery_reference_chunk(uuid,jsonb,uuid,integer,text)",
+    "finalize_market_discovery_reference(uuid,jsonb,uuid,integer,text)",
+    "pin_market_discovery_reference(uuid,jsonb,uuid,integer,text)",
+    "read_market_discovery_reference(uuid,jsonb,uuid,integer,text)",
 )
 DISCOVERY_DASHBOARD_COLUMNS = {
     "market_reference_manifests": (
@@ -359,7 +361,7 @@ def test_discovery_catalog_guards_and_rpc_grants_fail_closed():
     }
 
     receipt = evaluate_snapshot(snapshot)
-    assert receipt["discovery_ledgers"] == 10
+    assert receipt["discovery_ledgers"] == 12
     assert receipt["discovery_gateway_only_rpcs"] == 8
 
     missing_guard = deepcopy(snapshot)

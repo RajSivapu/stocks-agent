@@ -102,6 +102,22 @@ def test_call_sends_only_scoped_header_and_compact_decimal_payload(monkeypatch):
     assert b"SUPABASE_SERVICE_ROLE_KEY" not in request.data
 
 
+def test_call_accepts_fractional_timeout_for_a_shared_deadline(monkeypatch):
+    configured(monkeypatch)
+    captured = {}
+
+    def opener(_request, **kwargs):
+        captured.update(kwargs)
+        return FakeResponse({"ok": True, "data": {"run_id": RUN_ID}})
+
+    gateway.call(
+        "start_run", {}, dry_run=True, request_id=REQUEST_ID,
+        timeout=0.125, _opener=opener,
+    )
+
+    assert captured["timeout"] == 0.125
+
+
 def test_call_allows_credential_proxy_to_inject_scoped_header(monkeypatch):
     def proxy_configuration(name):
         if name == "supabase_url":

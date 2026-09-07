@@ -23,11 +23,17 @@ from lib.intelligence.pipeline import IntelligencePipeline, PHASES, PipelineRequ
 from lib.intelligence.policy import load_intelligence_policy  # noqa: E402
 from lib.intelligence.providers import build_adapter  # noqa: E402
 from lib.intelligence.quota import QuotaSession  # noqa: E402
-from lib.intelligence.universe import build_reference_transfer, refresh_sec_reference  # noqa: E402
+from lib.intelligence.universe import (  # noqa: E402
+    MAX_REFERENCE_SECURITIES,
+    SecurityIdentity,
+    build_reference_transfer,
+    merge_reference_snapshot,
+    refresh_sec_reference,
+)
 
 
-MAX_REFERENCE_TRANSFER_CALLS = 80
-MAX_REFERENCE_TRANSFER_BYTES = 16 * 1024 * 1024
+MAX_REFERENCE_TRANSFER_CALLS = 160
+MAX_REFERENCE_TRANSFER_BYTES = 32 * 1024 * 1024
 MAX_REFERENCE_TRANSFER_SECONDS = 45.0
 _REFERENCE_CAPABILITY = "sec_company_tickers_universe"
 
@@ -156,6 +162,44 @@ def _read_context(run_id: str):
     return gateway.call("read_intelligence_context", {}, run_id=run_id)
 
 
+def _security_from_reference_row(value: object) -> SecurityIdentity:
+    if not isinstance(value, dict):
+        raise ValueError("reference predecessor security is invalid")
+    try:
+        valid_from = date.fromisoformat(str(value["valid_from"])[:10])
+        valid_to_value = value.get("valid_to")
+        valid_to = (
+            date.fromisoformat(str(valid_to_value)[:10])
+            if valid_to_value is not None else None
+        )
+        aliases = value["aliases"]
+        source_ids = value["source_ids"]
+        exclusions = value["exclusion_reasons"]
+        if not all(isinstance(items, list) and all(isinstance(item, str) for item in items)
+                   for items in (aliases, source_ids, exclusions)):
+            raise ValueError
+        if not isinstance(value["eligible"], bool):
+            raise ValueError
+        row = SecurityIdentity(
+            security_id=str(value["security_id"]),
+            entity_id=str(value["entity_id"]),
+            ticker=str(value["ticker"]),
+            exchange=str(value["exchange"]) if value.get("exchange") is not None else None,
+            instrument_type=str(value["instrument_type"]),
+            valid_from=valid_from,
+            valid_to=valid_to,
+            aliases=tuple(aliases),
+            source_ids=tuple(source_ids),
+            eligible=value["eligible"],
+            exclusion_reasons=tuple(exclusions),
+        )
+    except (KeyError, TypeError, ValueError):
+        raise ValueError("reference predecessor security is invalid") from None
+    if not row.security_id or not row.entity_id or not row.ticker:
+        raise ValueError("reference predecessor security is invalid")
+    return row
+
+
 def _persist_reference_stage(
     gateway_client,
     run_id: str,
@@ -167,7 +211,6 @@ def _persist_reference_stage(
     """Refresh and bind one complete SEC snapshot inside explicit aggregate bounds."""
     http = client or BoundedHttpClient(allowed_hosts={"www.sec.gov"}, clock=lambda: now)
     started = monotonic()
-    refreshed = refresh_sec_reference(http)
     call_count = 0
     byte_count = 0
 
@@ -188,14 +231,17 @@ def _persist_reference_stage(
         ).encode()
         if len(encoded) > gateway.MAX_REQUEST_BYTES:
             raise ValueError("reference transfer call exceeds gateway bound")
+        elapsed = monotonic() - started
         if (
             call_count + 1 > MAX_REFERENCE_TRANSFER_CALLS
             or byte_count + len(encoded) > MAX_REFERENCE_TRANSFER_BYTES
-            or monotonic() - started > MAX_REFERENCE_TRANSFER_SECONDS
+            or elapsed >= MAX_REFERENCE_TRANSFER_SECONDS
         ):
             raise ValueError("reference transfer exceeds aggregate bound")
+        remaining = MAX_REFERENCE_TRANSFER_SECONDS - elapsed
         result = gateway_client.call(
             operation, payload, run_id=run_id, request_id=request_id,
+            timeout=float(min(30.0, remaining)),
         )
         call_count += 1
         byte_count += len(encoded)
@@ -206,13 +252,69 @@ def _persist_reference_stage(
             raise ValueError("reference gateway receipt is invalid")
         return data
 
+    refreshed = refresh_sec_reference(http)
+    reference_as_of = now.astimezone(timezone.utc).isoformat(
+        timespec="milliseconds"
+    ).replace("+00:00", "Z")
+    predecessor_pin = invoke("pin_discovery_reference", {
+        "capability_id": _REFERENCE_CAPABILITY,
+        "binding_role": "predecessor",
+        "manifest_id": None,
+        "reference_status": "reference_stale",
+        "reference_as_of": reference_as_of,
+    })
+    if predecessor_pin.get("binding_role") != "predecessor":
+        raise ValueError("reference predecessor pin receipt is invalid")
+    predecessor_manifest_id = predecessor_pin.get("manifest_id")
+    predecessor_rows: list[SecurityIdentity] = []
+    if predecessor_manifest_id is not None:
+        if not isinstance(predecessor_manifest_id, str):
+            raise ValueError("reference predecessor pin receipt is invalid")
+        after = None
+        while True:
+            page = invoke("read_discovery_reference", {
+                "capability_id": _REFERENCE_CAPABILITY,
+                "binding_role": "predecessor",
+                "after_security_id": after,
+                "limit": 500,
+            })
+            reference = page.get("reference", page)
+            if not isinstance(reference, dict):
+                raise ValueError("reference predecessor page is invalid")
+            binding = reference.get("binding")
+            rows = reference.get("securities")
+            if (
+                not isinstance(binding, dict)
+                or binding.get("binding_role") != "predecessor"
+                or binding.get("manifest_id") != predecessor_manifest_id
+                or not isinstance(rows, list)
+            ):
+                raise ValueError("reference predecessor page is invalid")
+            predecessor_rows.extend(_security_from_reference_row(row) for row in rows)
+            if len(predecessor_rows) > MAX_REFERENCE_SECURITIES:
+                raise ValueError("reference predecessor exceeds item bound")
+            complete = reference.get("complete")
+            next_after = reference.get("next_after_security_id")
+            if complete is True:
+                if next_after is not None:
+                    raise ValueError("reference predecessor page is invalid")
+                break
+            if complete is not False or not isinstance(next_after, str) or next_after == after:
+                raise ValueError("reference predecessor page is invalid")
+            after = next_after
+
     manifest_id = None
     if refreshed.status == "healthy" and refreshed.snapshot is not None:
+        snapshot = (
+            merge_reference_snapshot(refreshed.snapshot, predecessor_rows)
+            if predecessor_rows else refreshed.snapshot
+        )
         transfer = build_reference_transfer(
-            refreshed.snapshot,
+            snapshot,
             run_id=run_id,
             capability_version=1,
             taxonomy_version=1,
+            predecessor_manifest_id=predecessor_manifest_id,
             capability_id=_REFERENCE_CAPABILITY,
         )
         begin = invoke("begin_discovery_reference", transfer.begin)
@@ -227,18 +329,22 @@ def _persist_reference_stage(
             "manifest_id": manifest_id,
             "root_hash": transfer.begin["root_hash"],
         })
-        if finalized.get("manifest_id") != manifest_id or finalized.get("security_count") != len(refreshed.snapshot.securities):
+        if finalized.get("manifest_id") != manifest_id or finalized.get("security_count") != len(snapshot.securities):
             raise ValueError("reference finalization receipt is invalid")
         requested_status = "healthy"
     else:
         requested_status = "reference_stale"
+        manifest_id = predecessor_manifest_id
 
     pinned = invoke("pin_discovery_reference", {
         "capability_id": _REFERENCE_CAPABILITY,
+        "binding_role": "current",
         "manifest_id": manifest_id,
         "reference_status": requested_status,
-        "reference_as_of": now.astimezone(timezone.utc).isoformat().replace("+00:00", "Z"),
+        "reference_as_of": reference_as_of,
     })
+    if pinned.get("binding_role") != "current":
+        raise ValueError("reference pin receipt is invalid")
     status = pinned.get("reference_status")
     pinned_manifest = pinned.get("manifest_id")
     age = pinned.get("reference_age_seconds")
