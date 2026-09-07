@@ -24,6 +24,9 @@ from lib.intelligence.research_queue import (
 ROOT = Path(__file__).resolve().parents[1]
 MIGRATION = ROOT / "sql/migrations/20261010_bounded_adaptive_enrichment.sql"
 SCHEMA = ROOT / "sql/schema.sql"
+EXPOSURE_VECTORS = json.loads(
+    (ROOT / "tests/fixtures/exposure_fact_hash_vectors.json").read_text()
+)
 PROTECTED = {
     "sql/reconciliation/20261004_production_schema_reconciliation.sql": "db8486083b6c36a7d574a6135e432f01fa0d1602a3ca560b57743949c6fedc87",
     "sql/migrations/20261005_market_wide_discovery.sql": "708df0bf998e025158294c1902d147cead6cc1e08dd3e246aa9dc8f5465dafea",
@@ -86,10 +89,14 @@ def test_protected_enrichment_accepts_prior_run_pin_and_rejects_replay_or_lineag
         form="10-Q", primary_document="alpha-20260630.htm", source_url=source_url,
         source_response_hash=response_hash,
         submissions_response_hash="e" * 64,
-        passage="We manufacture permanent magnets at our Alpha facility.",
+        passage=(
+            "We manufacture permanent magnets at our Alpha facility, which generated "
+            "12.5% of our revenue."
+        ),
         source_locator="item-2:magnetics",
         normalized_passage_hash=hashlib.sha256(
-            b"We manufacture permanent magnets at our Alpha facility."
+            b"We manufacture permanent magnets at our Alpha facility, which generated "
+            b"12.5% of our revenue."
         ).hexdigest(),
         parser_version="sec-visible-passage-v1",
         filing_rule_version="sec-submissions-binding-v1", schema_version=1,
@@ -389,9 +396,39 @@ def test_protected_enrichment_accepts_prior_run_pin_and_rejects_replay_or_lineag
             task["query_hash"] = document_selection["requests"][0]["descriptor_hash"]
             task["dependency_ids"] = [selected.request_id]
 
+            vector = EXPOSURE_VECTORS["supported_percent_of_revenue"]
+            assert execute(
+                f"SELECT market_exposure_fact_semantic_hash_v1({quoted(vector['fact'])});"
+            ).stdout.strip() == vector["content_hash"]
             assert execute(
                 f"SELECT market_exposure_fact_semantic_hash_v1({quoted(fact_row['fact'])});"
             ).stdout.strip() == fact_row["content_hash"]
+
+            mutations = list(EXPOSURE_VECTORS["invalid_supported_mutations"])
+            mutations.append({
+                "values": {
+                    "financial_materiality": "supported", "metric": "business_exposure",
+                    "unit": None, "value": None,
+                },
+            })
+            for mutation in mutations:
+                forged_payload = json.loads(json.dumps(fact_payload))
+                forged = forged_payload["exposure_facts"][0]
+                changes = mutation["values"] if "values" in mutation else {
+                    mutation["field"]: mutation["value"],
+                }
+                forged["fact"]["value"].update(changes)
+                forged["content_hash"] = hashlib.sha256(json.dumps(
+                    forged["fact"], allow_nan=False, ensure_ascii=False,
+                    separators=(",", ":"), sort_keys=True,
+                ).encode()).hexdigest()
+                forged["id"] = str(uuid.uuid5(
+                    uuid.NAMESPACE_URL, f"market-exposure:{forged['content_hash']}",
+                ))
+                assert execute(
+                    f"SELECT checkpoint_market_discovery_stage('{run_id}',{quoted(forged_payload)});",
+                    check=False,
+                ).returncode != 0
 
             saved = json.loads(execute(
                 f"SELECT checkpoint_market_discovery_stage('{run_id}',{quoted(fact_payload)});"

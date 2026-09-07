@@ -1263,11 +1263,152 @@ function parseDiscoveryResultRow(
   value: unknown,
   path: string,
   keys: readonly string[],
+  typedExposure = false,
 ): JsonObject {
   const row = objectValue(value, path);
   exactKeys(row, keys, path);
-  rejectDiscoveryAuthority(row, path);
+  if (typedExposure && (row.fact as JsonObject | undefined)?.kind === "exposure_fact") {
+    validateTypedExposureFact(row, path);
+  } else {
+    rejectDiscoveryAuthority(row, path);
+  }
   return row;
+}
+
+const TYPED_EXPOSURE_VALUE_FIELDS = [
+  "accepted_at", "accession_number", "business_exposure", "claim_state",
+  "effective_at", "entity_id", "event_ids", "execution_allowed", "filing_date",
+  "filing_rule_version", "financial_materiality", "form", "is_amendment",
+  "hypothesis_ids", "issuer_cik", "limitations", "metric",
+  "normalized_passage_hash", "parser_version", "passage", "period_end",
+  "period_start", "primary_document", "reference_manifest_id",
+  "reporting_period_end", "retrieved_at", "role", "schema_version",
+  "security_id", "security_revision_id", "source_cache_key",
+  "source_item_content_hash", "source_item_id", "source_locator",
+  "source_receipt_id", "source_response_hash", "source_url", "status",
+  "submissions_response_hash", "ticker", "unit", "value",
+] as const;
+
+function validateTypedExposureFact(row: JsonObject, path: string): void {
+  const fact = objectValue(row.fact, `${path}.fact`);
+  exactKeys(fact, ["kind", "semantic_encoding_version", "value"], `${path}.fact`);
+  if (fact.kind !== "exposure_fact" || fact.semantic_encoding_version !== 1) {
+    throw new Error(`${path}.fact is invalid`);
+  }
+  const value = objectValue(fact.value, `${path}.fact.value`);
+  exactKeys(value, TYPED_EXPOSURE_VALUE_FIELDS, `${path}.fact.value`);
+  if (value.execution_allowed !== false || value.schema_version !== 1) {
+    throw new Error(`${path}.fact.value is not suggestion-only`);
+  }
+  const metric = enumValue(
+    value.metric, ["business_exposure", "revenue_share"] as const,
+    `${path}.fact.value.metric`,
+  );
+  const financial = enumValue(
+    value.financial_materiality,
+    ["supported", "contradicted", "unknown"] as const,
+    `${path}.fact.value.financial_materiality`,
+  );
+  const claim = enumValue(
+    value.claim_state,
+    ["operational", "planned", "forecast", "customer", "contradicted", "insufficient"] as const,
+    `${path}.fact.value.claim_state`,
+  );
+  const business = enumValue(
+    value.business_exposure, ["supported", "contradicted", "unresolved"] as const,
+    `${path}.fact.value.business_exposure`,
+  );
+  const status = enumValue(
+    value.status, ["supported", "contradicted", "superseded", "insufficient"] as const,
+    `${path}.fact.value.status`,
+  );
+  const periodEnd = value.period_end === null ? null : dateValue(
+    value.period_end, `${path}.fact.value.period_end`,
+  );
+  const reportingPeriodEnd = value.reporting_period_end === null ? null : dateValue(
+    value.reporting_period_end, `${path}.fact.value.reporting_period_end`,
+  );
+  const decimal = typeof value.value === "string" && value.value.length <= 32 &&
+    /^(?:0|[1-9]\d*)(?:\.\d+)?$/.test(value.value)
+    ? Number(value.value)
+    : Number.NaN;
+  const validSupportedMateriality = metric === "revenue_share" &&
+    Number.isFinite(decimal) && decimal >= 0 && decimal <= 100 &&
+    value.unit === "percent_of_revenue" && periodEnd !== null &&
+    periodEnd === reportingPeriodEnd && claim === "operational" &&
+    business === "supported" && status === "supported";
+  if (
+    (financial === "supported" && !validSupportedMateriality) ||
+    (metric === "business_exposure" &&
+      (value.value !== null || value.unit !== null || financial !== "unknown")) ||
+    (metric === "revenue_share" &&
+      (!Number.isFinite(decimal) || decimal < 0 || decimal > 100 ||
+        value.unit !== "percent_of_revenue"))
+  ) {
+    throw new Error(`${path}.fact.value financial materiality is invalid`);
+  }
+  if (
+    (status === "supported" && (claim !== "operational" || business !== "supported")) ||
+    (status === "contradicted" && (claim !== "contradicted" || business !== "contradicted")) ||
+    (status === "insufficient" &&
+      (!["planned", "forecast", "customer", "insufficient"].includes(claim) ||
+        business !== "unresolved"))
+  ) {
+    throw new Error(`${path}.fact.value state is invalid`);
+  }
+  const passage = stringValue(value.passage, `${path}.fact.value.passage`, 2_000);
+  const cik = stringValue(value.issuer_cik, `${path}.fact.value.issuer_cik`, 10);
+  const accession = stringValue(
+    value.accession_number, `${path}.fact.value.accession_number`, 20,
+  );
+  const document = stringValue(
+    value.primary_document, `${path}.fact.value.primary_document`, 255,
+  );
+  const expectedUrl = /^0{0,9}[1-9]\d*$/.test(cik) &&
+      /^\d{10}-\d{2}-\d{6}$/.test(accession) &&
+      /^[A-Za-z0-9][A-Za-z0-9._-]{0,254}$/.test(document)
+    ? `https://www.sec.gov/Archives/edgar/data/${BigInt(cik)}/${accession.replaceAll("-", "")}/${document}`
+    : "";
+  if (
+    hashValue(value.normalized_passage_hash, `${path}.fact.value.normalized_passage_hash`) !==
+      sha256Hex(passage) ||
+    hashValue(row.content_hash, `${path}.content_hash`) !== sha256Hex(canonicalJson(fact)) ||
+    row.security_revision_id !== value.security_revision_id ||
+    !Array.isArray(row.source_ids) || row.source_ids.length !== 1 ||
+    row.source_ids[0] !== value.source_item_id || row.exposure_kind !== "filing" ||
+    value.entity_id !== `sec-cik:${cik}` || value.source_url !== expectedUrl ||
+    typeof value.ticker !== "string" || !/^[A-Z][A-Z0-9.-]{0,14}$/.test(value.ticker) ||
+    typeof value.form !== "string" ||
+      !/^(?:10-K|10-Q|8-K|20-F|40-F)(?:\/A)?$/.test(value.form) ||
+    typeof value.is_amendment !== "boolean"
+  ) {
+    throw new Error(`${path}.fact semantic hash or source binding is invalid`);
+  }
+  for (const key of [
+    "source_response_hash", "submissions_response_hash", "source_item_content_hash",
+    "source_cache_key",
+  ]) hashValue(value[key], `${path}.fact.value.${key}`);
+  uuidValue(value.security_revision_id, `${path}.fact.value.security_revision_id`);
+  uuidValue(value.reference_manifest_id, `${path}.fact.value.reference_manifest_id`);
+  uuidValue(value.source_item_id, `${path}.fact.value.source_item_id`);
+  uuidValue(value.source_receipt_id, `${path}.fact.value.source_receipt_id`);
+  stringValue(value.source_locator, `${path}.fact.value.source_locator`, 256);
+  stringValue(value.parser_version, `${path}.fact.value.parser_version`, 80);
+  stringValue(value.filing_rule_version, `${path}.fact.value.filing_rule_version`, 80);
+  const eventIds = discoveryStringArray(
+    value.event_ids, `${path}.fact.value.event_ids`, 64, 160, true,
+  );
+  const hypothesisIds = discoveryStringArray(
+    value.hypothesis_ids, `${path}.fact.value.hypothesis_ids`, 64, 160, true,
+  );
+  if (eventIds.length === 0 || hypothesisIds.length === 0) {
+    throw new Error(`${path}.fact.value source binding is invalid`);
+  }
+  dateValue(value.filing_date, `${path}.fact.value.filing_date`);
+  if (value.period_start !== null) dateValue(value.period_start, `${path}.fact.value.period_start`);
+  if (value.accepted_at !== null) timestamp(value.accepted_at, `${path}.fact.value.accepted_at`);
+  if (value.effective_at !== null) timestamp(value.effective_at, `${path}.fact.value.effective_at`);
+  timestamp(value.retrieved_at, `${path}.fact.value.retrieved_at`);
 }
 
 export function parseDiscoveryStageCheckpointPayload(
@@ -1300,7 +1441,7 @@ export function parseDiscoveryStageCheckpointPayload(
       "valid_from",
       "valid_to",
       "content_hash",
-    ]);
+    ], true);
     return {
       ...parsed,
       id: uuidValue(parsed.id, `${path}.id`),
@@ -1335,7 +1476,9 @@ export function parseDiscoveryStageCheckpointPayload(
         256,
         true,
       ),
-      valid_from: timestamp(parsed.valid_from, `${path}.valid_from`),
+      valid_from: (parsed.fact as JsonObject | undefined)?.kind === "exposure_fact"
+        ? dateValue(parsed.valid_from, `${path}.valid_from`)
+        : timestamp(parsed.valid_from, `${path}.valid_from`),
       valid_to: timestamp(parsed.valid_to, `${path}.valid_to`, true),
       content_hash: hashValue(parsed.content_hash, `${path}.content_hash`),
     };
@@ -1482,6 +1625,23 @@ export function parseDiscoveryContext(value: unknown): DiscoveryContext {
       rejectDiscoveryAuthority(parsed, `discovery context.${key}[${index}]`);
       return parsed;
     });
+  const exposureFacts = arrayValue(
+    row.exposure_facts, "discovery context.exposure_facts", 100,
+  ).map((item, index) => {
+    const path = `discovery context.exposure_facts[${index}]`;
+    const parsed = boundedObject(item, path, 65_536);
+    exactKeys(parsed, [
+      "id", "task_id", "security_revision_id", "theme_episode_revision_id",
+      "exposure_kind", "fact", "source_ids", "valid_from", "valid_to",
+      "content_hash", "created_at",
+    ], path);
+    if ((parsed.fact as JsonObject | undefined)?.kind === "exposure_fact") {
+      validateTypedExposureFact(parsed, path);
+    } else {
+      rejectDiscoveryAuthority(parsed, path);
+    }
+    return parsed;
+  });
   return {
     manifests: opaque("manifests", [
       "id",
@@ -1529,19 +1689,7 @@ export function parseDiscoveryContext(value: unknown): DiscoveryContext {
       "content_hash",
       "created_at",
     ]),
-    exposure_facts: opaque("exposure_facts", [
-      "id",
-      "task_id",
-      "security_revision_id",
-      "theme_episode_revision_id",
-      "exposure_kind",
-      "fact",
-      "source_ids",
-      "valid_from",
-      "valid_to",
-      "content_hash",
-      "created_at",
-    ]),
+    exposure_facts: exposureFacts,
     research_nominations: opaque("research_nominations", [
       "id",
       "task_id",

@@ -6,6 +6,7 @@ import argparse
 import base64
 import binascii
 from datetime import datetime
+from decimal import Decimal, InvalidOperation
 import hashlib
 import io
 import json
@@ -905,14 +906,31 @@ def _validate_typed_exposure_lineage(
                    for name in ("entity_id", "security_id", "ticker"))
         ):
             raise ValueError("discovery typed exposure dependency mismatch or invalid content")
+        percent_valid = False
+        if isinstance(value["value"], str) and len(value["value"]) <= 32 \
+                and re.fullmatch(r"(?:0|[1-9][0-9]*)(?:\.[0-9]+)?", value["value"]):
+            try:
+                percent = Decimal(value["value"])
+                percent_valid = percent.is_finite() and Decimal("0") <= percent <= Decimal("100")
+            except InvalidOperation:
+                percent_valid = False
         if value["metric"] == "business_exposure":
-            if value["value"] is not None or value["unit"] is not None:
+            if value["value"] is not None or value["unit"] is not None \
+                    or value["financial_materiality"] != "unknown":
                 raise ValueError("discovery typed exposure materiality mismatch")
         elif (
-            not isinstance(value["value"], str)
-            or re.fullmatch(r"(?:0|[1-9][0-9]*)(?:\.[0-9]+)?", value["value"]) is None
+            not percent_valid
             or value["unit"] != "percent_of_revenue"
-            or float(value["value"]) > 100
+        ):
+            raise ValueError("discovery typed exposure materiality mismatch")
+        if value["financial_materiality"] == "supported" and (
+            value["metric"] != "revenue_share" or not percent_valid
+            or value["unit"] != "percent_of_revenue"
+            or value["period_end"] is None
+            or value["period_end"] != value["reporting_period_end"]
+            or value["claim_state"] != "operational"
+            or value["business_exposure"] != "supported"
+            or value["status"] != "supported"
         ):
             raise ValueError("discovery typed exposure materiality mismatch")
         if (

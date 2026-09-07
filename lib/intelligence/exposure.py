@@ -4,10 +4,11 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import date, datetime, timezone
+from decimal import Decimal, InvalidOperation
 import hashlib
 import json
 import re
-from typing import Literal, Sequence
+from typing import Literal, Mapping, Sequence
 from urllib.parse import unquote, urlsplit
 import uuid
 
@@ -183,6 +184,25 @@ class FilingEvidence:
 ExposureStatus = Literal["supported", "contradicted", "superseded", "insufficient"]
 ClaimState = Literal["operational", "planned", "forecast", "customer", "contradicted", "insufficient"]
 
+_FACT_VALUE_FIELDS = frozenset({
+    "accepted_at", "accession_number", "business_exposure", "claim_state",
+    "effective_at", "entity_id", "event_ids", "execution_allowed", "filing_date",
+    "filing_rule_version", "financial_materiality", "form", "is_amendment",
+    "hypothesis_ids", "issuer_cik", "limitations", "metric",
+    "normalized_passage_hash", "parser_version", "passage", "period_end",
+    "period_start", "primary_document", "reference_manifest_id",
+    "reporting_period_end", "retrieved_at", "role", "schema_version",
+    "security_id", "security_revision_id", "source_cache_key",
+    "source_item_content_hash", "source_item_id", "source_locator",
+    "source_receipt_id", "source_response_hash", "source_url", "status",
+    "submissions_response_hash", "ticker", "unit", "value",
+})
+_PERSISTENCE_FIELDS = frozenset({
+    "id", "security_revision_id", "theme_episode_revision_id", "exposure_kind",
+    "fact", "source_ids", "valid_from", "valid_to", "content_hash",
+})
+_DECIMAL = re.compile(r"(?:0|[1-9][0-9]*)(?:\.[0-9]+)?")
+
 
 @dataclass(frozen=True, slots=True)
 class ExposureFact:
@@ -228,6 +248,125 @@ class ExposureFact:
     limitations: tuple[str, ...]
     is_amendment: bool
     execution_allowed: bool = False
+
+    def __post_init__(self) -> None:
+        if _CIK.fullmatch(self.issuer_cik) is None or int(self.issuer_cik) == 0 \
+                or self.entity_id != f"sec-cik:{self.issuer_cik}":
+            raise ValueError("exposure issuer identity is invalid")
+        for value, label in (
+            (self.security_id, "security ID"),
+            (self.security_revision_id, "security revision ID"),
+            (self.reference_manifest_id, "reference manifest ID"),
+        ):
+            _text(value, label, 160)
+        if _TICKER.fullmatch(self.ticker) is None:
+            raise ValueError("exposure ticker is invalid")
+        role = _text(self.role, "exposure role", 80)
+        if role not in _REVIEWED_ROLES:
+            raise ValueError("exposure role is invalid")
+        for values, label, maximum in (
+            (self.event_ids, "exposure event IDs", 64),
+            (self.hypothesis_ids, "exposure hypothesis IDs", 64),
+            (self.limitations, "exposure limitations", 16),
+        ):
+            if not isinstance(values, tuple) or len(values) > maximum \
+                    or any(_text(value, label, 160) != value for value in values):
+                raise ValueError(f"{label} are invalid")
+        if tuple(sorted(set(self.event_ids))) != self.event_ids \
+                or tuple(sorted(set(self.hypothesis_ids))) != self.hypothesis_ids:
+            raise ValueError("exposure evidence identities are invalid")
+        if self.metric not in {"business_exposure", "revenue_share"}:
+            raise ValueError("exposure metric is invalid")
+        passage = _text(self.passage, "exposure passage", 2_000)
+        locator = _text(self.source_locator, "exposure locator", 256)
+        object.__setattr__(self, "passage", passage)
+        object.__setattr__(self, "source_locator", locator)
+        if hashlib.sha256(passage.encode()).hexdigest() != self.normalized_passage_hash:
+            raise ValueError("exposure passage hash mismatch")
+        for value in (
+            self.source_response_hash, self.submissions_response_hash,
+            self.source_item_content_hash, self.source_cache_key,
+            self.normalized_passage_hash,
+        ):
+            if _HASH.fullmatch(value) is None:
+                raise ValueError("exposure source hash is invalid")
+        try:
+            for value in (
+                self.security_revision_id, self.reference_manifest_id,
+                self.source_item_id, self.source_receipt_id,
+            ):
+                if str(uuid.UUID(value)) != value:
+                    raise ValueError
+        except (TypeError, ValueError, AttributeError):
+            raise ValueError("exposure source identity is invalid") from None
+        if re.fullmatch(r"[0-9]{10}-[0-9]{2}-[0-9]{6}", self.accession_number) is None \
+                or re.fullmatch(r"(?:10-K|10-Q|8-K|20-F|40-F)(?:/A)?", self.form) is None \
+                or re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,254}", self.primary_document) is None:
+            raise ValueError("exposure filing identity is invalid")
+        _safe_archive_url(
+            self.source_url, self.issuer_cik, self.accession_number, self.primary_document,
+        )
+        _text(self.parser_version, "parser version", 80)
+        _text(self.filing_rule_version, "filing rule version", 80)
+        if self.schema_version != 1 or not isinstance(self.is_amendment, bool) \
+                or self.execution_allowed is not False:
+            raise ValueError("exposure schema is invalid")
+        _date(self.filing_date, "filing date")
+        _date(self.period_start, "metric period start")
+        _date(self.period_end, "metric period end")
+        _date(self.reporting_period_end, "reporting period end")
+        if self.accepted_at is not None:
+            _utc(self.accepted_at)
+        if self.effective_at is not None:
+            _utc(self.effective_at)
+        _utc(self.retrieved_at)
+        if self.claim_state not in {
+            "operational", "planned", "forecast", "customer", "contradicted", "insufficient",
+        } or self.business_exposure not in {"supported", "contradicted", "unresolved"} \
+                or self.financial_materiality not in {"supported", "contradicted", "unknown"} \
+                or self.status not in {"supported", "contradicted", "superseded", "insufficient"}:
+            raise ValueError("exposure state is invalid")
+        if self.status == "supported" and (
+            self.claim_state != "operational" or self.business_exposure != "supported"
+        ):
+            raise ValueError("exposure state is invalid")
+        if self.status == "contradicted" and (
+            self.claim_state != "contradicted" or self.business_exposure != "contradicted"
+        ):
+            raise ValueError("exposure state is invalid")
+        if self.status == "insufficient" and (
+            self.claim_state not in {"planned", "forecast", "customer", "insufficient"}
+            or self.business_exposure != "unresolved"
+        ):
+            raise ValueError("exposure state is invalid")
+        supported_materiality = self.financial_materiality == "supported"
+        valid_percent = False
+        if isinstance(self.value, str) and len(self.value) <= 32 \
+                and _DECIMAL.fullmatch(self.value) is not None:
+            try:
+                decimal = Decimal(self.value)
+                valid_percent = decimal.is_finite() and Decimal("0") <= decimal <= Decimal("100")
+            except InvalidOperation:
+                valid_percent = False
+        if supported_materiality and not (
+            self.metric == "revenue_share" and valid_percent
+            and self.unit == "percent_of_revenue"
+            and self.period_end is not None
+            and self.period_end == self.reporting_period_end
+            and self.claim_state == "operational"
+            and self.business_exposure == "supported"
+            and self.status == "supported"
+        ):
+            raise ValueError("financial materiality support is invalid")
+        if self.metric == "business_exposure" and (
+            self.value is not None or self.unit is not None
+            or self.financial_materiality != "unknown"
+        ):
+            raise ValueError("financial materiality support is invalid")
+        if self.metric == "revenue_share" and (
+            not valid_percent or self.unit != "percent_of_revenue"
+        ):
+            raise ValueError("financial materiality support is invalid")
 
     def semantic_document(self) -> dict[str, object]:
         return {
@@ -301,6 +440,125 @@ class ExposureFact:
         }
 
 
+def _parsed_timestamp(value: object, label: str, *, nullable: bool = False) -> datetime | None:
+    if value is None and nullable:
+        return None
+    if not isinstance(value, str):
+        raise ValueError(f"{label} is invalid")
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        raise ValueError(f"{label} is invalid") from None
+    return _utc(parsed)
+
+
+def _parsed_date(value: object, label: str, *, nullable: bool = False) -> date | None:
+    if value is None and nullable:
+        return None
+    if not isinstance(value, str):
+        raise ValueError(f"{label} is invalid")
+    try:
+        parsed = date.fromisoformat(value)
+    except ValueError:
+        raise ValueError(f"{label} is invalid") from None
+    if parsed.isoformat() != value:
+        raise ValueError(f"{label} is invalid")
+    return parsed
+
+
+def exposure_fact_from_persistence(row: object) -> ExposureFact:
+    """Validate and rebuild one immutable typed exposure fact from protected storage."""
+    if not isinstance(row, Mapping):
+        raise ValueError("persisted exposure fact is invalid")
+    source = dict(row)
+    optional = {"task_id", "run_id", "created_at"}
+    if not _PERSISTENCE_FIELDS <= source.keys() or set(source) - _PERSISTENCE_FIELDS - optional:
+        raise ValueError("persisted exposure fact is invalid")
+    if source.get("theme_episode_revision_id") is not None \
+            or source.get("exposure_kind") != "filing" \
+            or source.get("valid_to") is not None:
+        raise ValueError("persisted exposure fact is invalid")
+    semantic = source.get("fact")
+    if not isinstance(semantic, Mapping):
+        raise ValueError("persisted exposure fact is invalid")
+    semantic = dict(semantic)
+    if set(semantic) != {"kind", "semantic_encoding_version", "value"} \
+            or semantic.get("kind") != "exposure_fact" \
+            or semantic.get("semantic_encoding_version") != 1:
+        raise ValueError("persisted exposure fact is invalid")
+    value = semantic.get("value")
+    if not isinstance(value, Mapping):
+        raise ValueError("persisted exposure fact is invalid")
+    value = dict(value)
+    if set(value) != _FACT_VALUE_FIELDS:
+        raise ValueError("persisted exposure fact is invalid")
+    try:
+        fact = ExposureFact(
+            entity_id=value["entity_id"], security_id=value["security_id"],
+            security_revision_id=value["security_revision_id"],
+            reference_manifest_id=value["reference_manifest_id"],
+            issuer_cik=value["issuer_cik"], ticker=value["ticker"], role=value["role"],
+            event_ids=tuple(value["event_ids"]), hypothesis_ids=tuple(value["hypothesis_ids"]),
+            metric=value["metric"], value=value["value"], unit=value["unit"],
+            period_start=_parsed_date(value["period_start"], "metric period start", nullable=True),
+            period_end=_parsed_date(value["period_end"], "metric period end", nullable=True),
+            passage=value["passage"], source_locator=value["source_locator"],
+            source_item_id=value["source_item_id"], source_url=value["source_url"],
+            source_response_hash=value["source_response_hash"],
+            accession_number=value["accession_number"], form=value["form"],
+            primary_document=value["primary_document"],
+            submissions_response_hash=value["submissions_response_hash"],
+            source_item_content_hash=value["source_item_content_hash"],
+            source_receipt_id=value["source_receipt_id"],
+            source_cache_key=value["source_cache_key"],
+            normalized_passage_hash=value["normalized_passage_hash"],
+            parser_version=value["parser_version"],
+            filing_rule_version=value["filing_rule_version"],
+            schema_version=value["schema_version"],
+            filing_date=_parsed_date(value["filing_date"], "filing date"),
+            accepted_at=_parsed_timestamp(value["accepted_at"], "accepted at", nullable=True),
+            reporting_period_end=_parsed_date(
+                value["reporting_period_end"], "reporting period end", nullable=True,
+            ),
+            effective_at=_parsed_timestamp(value["effective_at"], "effective at", nullable=True),
+            retrieved_at=_parsed_timestamp(value["retrieved_at"], "retrieved at"),
+            claim_state=value["claim_state"], business_exposure=value["business_exposure"],
+            financial_materiality=value["financial_materiality"], status=value["status"],
+            limitations=tuple(value["limitations"]), is_amendment=value["is_amendment"],
+            execution_allowed=value["execution_allowed"],
+        )
+    except (KeyError, TypeError):
+        raise ValueError("persisted exposure fact is invalid") from None
+    if fact.semantic_document() != semantic \
+            or source.get("content_hash") != fact.semantic_hash \
+            or source.get("id") != fact.fact_id \
+            or source.get("security_revision_id") != fact.security_revision_id \
+            or source.get("source_ids") != [fact.source_item_id]:
+        raise ValueError("persisted exposure fact semantic hash is invalid")
+    if not fact.event_ids or not fact.hypothesis_ids \
+            or tuple(sorted(set(fact.limitations))) != fact.limitations:
+        raise ValueError("persisted exposure fact evidence binding is invalid")
+    valid_from = source.get("valid_from")
+    if isinstance(valid_from, str) and "T" in valid_from:
+        parsed_valid_from = _parsed_timestamp(valid_from, "exposure valid from")
+        if parsed_valid_from is None or parsed_valid_from.time() != datetime.min.time():
+            raise ValueError("persisted exposure fact is invalid")
+        valid_date = parsed_valid_from.date()
+    else:
+        valid_date = _parsed_date(valid_from, "exposure valid from")
+    if valid_date != fact.filing_date:
+        raise ValueError("persisted exposure fact is invalid")
+    if "task_id" in source:
+        try:
+            if str(uuid.UUID(str(source["task_id"]))) != source["task_id"]:
+                raise ValueError
+        except (TypeError, ValueError, AttributeError):
+            raise ValueError("persisted exposure fact task identity is invalid") from None
+    if "created_at" in source:
+        _parsed_timestamp(source["created_at"], "exposure created at")
+    return fact
+
+
 @dataclass(frozen=True, slots=True)
 class ExposureEvaluation:
     business_exposure: Literal["supported", "contradicted", "unresolved"]
@@ -337,8 +595,10 @@ def _classification(passage: str, issuer_name: str) -> ClaimState:
     return "insufficient"
 
 
-def _materiality(passage: str, state: ClaimState) -> tuple[str, str | None, str | None]:
-    if state != "operational":
+def _materiality(
+    passage: str, state: ClaimState, reporting_period_end: date | None,
+) -> tuple[str, str | None, str | None]:
+    if state != "operational" or reporting_period_end is None:
         return "unknown", None, None
     percent = re.search(
         r"(?P<value>[0-9]+(?:\.[0-9]+)?)\s*%\s+of\s+(?:our\s+|consolidated\s+)?revenue",
@@ -346,7 +606,10 @@ def _materiality(passage: str, state: ClaimState) -> tuple[str, str | None, str 
         re.I,
     )
     if percent:
-        return "supported", percent.group("value"), "percent_of_revenue"
+        value = Decimal(percent.group("value"))
+        if value.is_finite() and Decimal("0") <= value <= Decimal("100"):
+            canonical = format(value.normalize(), "f")
+            return "supported", "0" if canonical == "-0" else canonical, "percent_of_revenue"
     return "unknown", None, None
 
 
@@ -380,7 +643,9 @@ def extract_exposure_facts(
     else:
         status = "insufficient"
         business = "unresolved"
-    financial, value, unit = _materiality(document.passage, claim_state)
+    financial, value, unit = _materiality(
+        document.passage, claim_state, document.reporting_period_end,
+    )
     limitations: list[str] = []
     if financial == "unknown":
         limitations.append("financial_materiality_unknown")
@@ -429,7 +694,7 @@ def extract_exposure_facts(
         business_exposure=business,
         financial_materiality=financial,  # type: ignore[arg-type]
         status=status,
-        limitations=tuple(limitations),
+        limitations=tuple(sorted(limitations)),
         is_amendment=is_amendment,
         execution_allowed=False,
     )
@@ -487,5 +752,6 @@ __all__ = [
     "FilingEvidence",
     "IssuerExposureBinding",
     "evaluate_exposure",
+    "exposure_fact_from_persistence",
     "extract_exposure_facts",
 ]

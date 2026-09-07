@@ -114,6 +114,10 @@ class ResumableCollectionCache:
             receipt=replace(result.receipt, metadata=bounded_metadata(metadata)),
         )
 
+    def collection_for_lineage(self, key: str) -> CollectionResult | None:
+        """Return the exact protected checkpoint value without deriving a cache-hit receipt."""
+        return self._collections.get(key)
+
     def put_run(self, run_id: str, receipt: object) -> None:
         if not isinstance(run_id, str) or not run_id:
             raise ValueError("invalid run cache key")

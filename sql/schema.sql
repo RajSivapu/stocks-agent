@@ -11252,7 +11252,26 @@ BEGIN
        OR v_value->>'retrieved_at' !~ '^[0-9]{4}-[0-9]{2}-[0-9]{2}T'
        OR r->>'valid_from'<>v_value->>'filing_date' OR r->'valid_to'<>'null'::jsonb
        OR ((v_value->>'metric'='business_exposure')<>(v_value->'value'='null'::jsonb AND v_value->'unit'='null'::jsonb))
-       OR (v_value->>'metric'='revenue_share' AND (v_value->>'value' !~ '^(0|[1-9][0-9]*)(\.[0-9]+)?$' OR (v_value->>'value')::numeric NOT BETWEEN 0 AND 100 OR v_value->>'unit'<>'percent_of_revenue'))
+       OR (v_value->>'metric'='business_exposure' AND v_value->>'financial_materiality' IS DISTINCT FROM 'unknown')
+       OR (v_value->>'metric'='revenue_share' AND (
+         length(v_value->>'value') NOT BETWEEN 1 AND 32
+         OR jsonb_typeof(v_value->'value') IS DISTINCT FROM 'string'
+         OR v_value->>'value' !~ '^(0|[1-9][0-9]*)(\.[0-9]+)?$'
+         OR (v_value->>'value')::numeric NOT BETWEEN 0 AND 100
+         OR v_value->>'unit' IS DISTINCT FROM 'percent_of_revenue'
+       ))
+       OR (v_value->>'financial_materiality'='supported' AND (
+         v_value->>'metric' IS DISTINCT FROM 'revenue_share'
+         OR jsonb_typeof(v_value->'value') IS DISTINCT FROM 'string'
+         OR v_value->>'value' !~ '^(0|[1-9][0-9]*)(\.[0-9]+)?$'
+         OR (v_value->>'value')::numeric NOT BETWEEN 0 AND 100
+         OR v_value->>'unit' IS DISTINCT FROM 'percent_of_revenue'
+         OR v_value->'period_end'='null'::jsonb
+         OR v_value->>'period_end' IS DISTINCT FROM v_value->>'reporting_period_end'
+         OR v_value->>'claim_state' IS DISTINCT FROM 'operational'
+         OR v_value->>'business_exposure' IS DISTINCT FROM 'supported'
+         OR v_value->>'status' IS DISTINCT FROM 'supported'
+       ))
        OR (v_value->>'status'='supported' AND (v_value->>'claim_state'<>'operational' OR v_value->>'business_exposure'<>'supported'))
        OR (v_value->>'status'='contradicted' AND (v_value->>'claim_state'<>'contradicted' OR v_value->>'business_exposure'<>'contradicted'))
        OR (v_value->>'status'='insufficient' AND (v_value->>'claim_state' NOT IN ('planned','forecast','customer','insufficient') OR v_value->>'business_exposure'<>'unresolved'))

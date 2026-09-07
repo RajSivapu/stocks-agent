@@ -137,3 +137,54 @@ or production call was made.
   index or historical-page membership.
 - Quantitative materiality is recognized only for an explicit percentage of revenue retained with
   its passage context. Other financial metrics remain unknown rather than being inferred.
+
+## Review fix round 1
+
+Base: `3c3f3ef5a533489bc796e825e894066cef33df01`
+
+The first RED restart test crashed because the protected reader returned `exposure_facts` but the
+pipeline hydrated only tasks and frozen selections. A fresh pipeline after a durable fact checkpoint
+therefore lost the fact from qualification even though the terminal document task correctly caused
+zero additional transport. GREEN now validates each stored typed fact and restores it only when its
+semantic hash and deterministic fact ID match its current pinned security, frozen descriptor,
+terminal task, exact collection checkpoint, source receipt, and retained source item. Exact replays
+deduplicate by fact ID; conflicting or altered stored facts fail closed. The crash/restart regression
+proves zero second transport and identical fact content, ID, relation eligibility, and qualification.
+
+The second RED set rehashed a forged `financial_materiality=supported` fact with a business-exposure
+metric and null value/unit. PostgreSQL and recovery validation accepted the internally consistent
+hash before the fix. GREEN applies the same invariant in Python, TypeScript, PostgreSQL, and recovery:
+supported financial materiality requires the explicit `revenue_share` metric, a canonical finite
+decimal from 0 through 100, `percent_of_revenue`, a metric period bound to the reporting period, and
+operational supported claim/business/status semantics. Business exposure and missing or invalid
+metric inputs remain unknown or are rejected. One shared fixture supplies the accepted semantic hash
+and eleven rehashed negative vectors across runtimes. PostgreSQL uses null-safe comparisons so a
+missing unit, metric, period, or state cannot bypass validation.
+
+Verification for this review fix:
+
+```text
+.venv/bin/python -m pytest -q \
+  tests/test_enrichment_sql.py tests/test_recovery_bundle.py \
+  tests/test_intelligence_exposure.py tests/test_intelligence_pipeline.py
+257 passed in 10.74s
+
+.venv/bin/python -m pytest -q
+1305 passed, 3 skipped, 4 deselected in 213.52s
+
+npx --yes deno@2.9.6 test --config supabase/functions/deno.json \
+  supabase/functions/market-briefing-gateway/_shared/intelligence_test.ts \
+  supabase/functions/market-briefing-gateway/_shared/repository_test.ts \
+  supabase/functions/market-briefing-gateway/_shared/handler_test.ts
+88 passed, 0 failed
+
+npm run test:all
+exit 0: Python 1305 passed/3 skipped/4 deselected; Node 71 passed;
+Deno 314 passed; package tests 6 + 52 passed; typechecks, ESLint, dependency
+licenses, production build, and bundle verification passed; Playwright 21 passed/1 skipped
+```
+
+The final review checks also cover fresh-schema parity, byte-for-byte immutability of migrations
+`20261004` through `20261009`, `git diff --check`, and Python compilation. All tests remain local and
+fixture-backed; no live provider, collector, Telegram, schedule, deployment, production, brokerage,
+paid/trial source, or metered LLM call was made.

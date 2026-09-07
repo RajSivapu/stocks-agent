@@ -1483,7 +1483,7 @@ def test_empty_enrichment_selection_and_document_stage_are_sealed_with_stable_de
     assert gateway.selections[1]["requests"] == []
 
 
-def test_sealed_submissions_then_document_persists_typed_fact_and_replays_without_transport():
+def test_crash_after_durable_fact_checkpoint_hydrates_exact_fact_without_second_transport():
     capabilities = {
         capability_id: SourceCapability(
             capability_id=capability_id, provider="sec_edgar", query_kind=query_kind,
@@ -1508,12 +1508,29 @@ def test_sealed_submissions_then_document_persists_typed_fact_and_replays_withou
     )
     manifest_id = "00000000-0000-4000-8000-000000000099"
     revision_id = "00000000-0000-4000-8000-000000000098"
+    reference = entity_reference()
+    reference = replace(reference, securities=(replace(
+        reference.securities[0], revision_id=revision_id,
+        reference_manifest_id=manifest_id,
+    ), *reference.securities[1:]))
+    radar = replace(
+        raw_item("restart-primary-exposure"),
+        title="Alpha Incorporated permanent magnet opportunity",
+        normalized_text="Permanent magnet manufacturing may expand.",
+        security_ids=("sec:AAA",),
+    )
+    radar_item = normalize_item(radar)
+    event = _discover((radar_item,), {
+        "security_reference": reference,
+        "liquidity_by_ticker": {"AAA": "0.7"},
+        "overlap_by_ticker": {"AAA": "0.1"},
+    }, NOW)[0][0]
     selected = EnrichmentRequest(
         request_id="77777777-7777-4777-8777-777777777771",
         entity_id="sec-cik:0000000001", security_id="sec:AAA",
         security_revision_id=revision_id, reference_manifest_id=manifest_id,
         cik="0000000001", ticker="AAA", instrument_type="COMMON_STOCK",
-        event_ids=("event",), theme_id="critical_minerals_magnets",
+        event_ids=(event.event_id,), theme_id="critical_minerals_magnets",
         role="magnet_manufacturing", hypothesis_ids=("hypothesis",),
         source_item_ids=("source",), dependency_task_ids=(), provider="sec_edgar",
         capability_id="sec_issuer_submissions", query_kind="issuer_submissions",
@@ -1588,9 +1605,23 @@ def test_sealed_submissions_then_document_persists_typed_fact_and_replays_withou
             self.tasks = {}
             self.selections = []
             self.fact_checkpoints = []
+            self.exposure_facts = []
+            self.collection_checkpoints = {}
+
+        def read_discovery_context(self, _run):
+            return {
+                "tasks": list(self.tasks.values()),
+                "enrichment_selections": list(self.selections),
+                "exposure_facts": list(self.exposure_facts),
+            }
 
         def seal_enrichment_selection(self, _run, payload):
-            self.selections.append(payload)
+            duplicate = any(
+                row["manifest"]["manifest_id"] == payload["manifest"]["manifest_id"]
+                for row in self.selections
+            )
+            if not duplicate:
+                self.selections.append(payload)
             for row in payload["requests"]:
                 self.tasks.setdefault(row["task_id"], {
                     "id": row["task_id"], "stage": row["stage"],
@@ -1602,7 +1633,7 @@ def test_sealed_submissions_then_document_persists_typed_fact_and_replays_withou
                 })
             return {
                 "manifest_id": payload["manifest"]["manifest_id"],
-                "request_count": len(payload["requests"]), "duplicate": False,
+                "request_count": len(payload["requests"]), "duplicate": duplicate,
             }
 
         def checkpoint_discovery_stage(self, _run, payload):
@@ -1610,21 +1641,29 @@ def test_sealed_submissions_then_document_persists_typed_fact_and_replays_withou
             self.tasks[row["id"]] = row
             if payload["exposure_facts"]:
                 self.fact_checkpoints.append(payload)
+                for fact in payload["exposure_facts"]:
+                    stored = json.loads(json.dumps(fact))
+                    stored.update({
+                        "task_id": row["id"],
+                        "created_at": NOW.isoformat(),
+                        "valid_from": f"{stored['valid_from']}T00:00:00+00:00",
+                    })
+                    self.exposure_facts.append(stored)
             return {"task": row, "duplicate": False}
 
         def checkpoint_intelligence_collection(self, run_id, payload):
+            self.collection_checkpoints[payload["cache_key"]] = payload
             return {"run_id": run_id, "cache_key": payload["cache_key"]}
 
     gateway = Gateway()
     adapter = Adapter()
-    reference = entity_reference()
-    reference = replace(reference, securities=(replace(
-        reference.securities[0], revision_id=revision_id,
-        reference_manifest_id=manifest_id,
-    ), *reference.securities[1:]))
     pipeline = IntelligencePipeline(
         gateway, [adapter], discovery_plan=plan,
-        context={"security_reference": reference},
+        context={
+            "security_reference": reference, "primary_exposure_required": True,
+            "holdings": {"AAA": "0.05"}, "liquidity_by_ticker": {"AAA": "0.7"},
+            "overlap_by_ticker": {"AAA": "0.1"},
+        },
     )
     reservation_id = str(uuid.uuid5(uuid.NAMESPACE_URL, f"market-intelligence:reservation:{RUN_ID}:sec_edgar"))
     reservations = {"sec_edgar": {"id": reservation_id, "provider": "sec_edgar", "requests": 2}}
@@ -1635,9 +1674,40 @@ def test_sealed_submissions_then_document_persists_typed_fact_and_replays_withou
         RUN_ID, request("on-demand"), window, (selected,), reservations,
         persisted, adaptive_provider_reservations("on-demand"), selection_stage="initial",
     )
-    replay = pipeline._seal_and_run_enrichment_requests(
-        RUN_ID, request("on-demand"), window, (selected,), reservations,
-        persisted, adaptive_provider_reservations("on-demand"), selection_stage="initial",
+    original_fact = pipeline.context["exposure_facts"][0]
+    first_items = tuple(normalize_item(item) for result in first for item in result.items)
+    original_discovery = _discover(
+        (radar_item, *first_items), pipeline.context, NOW,
+    )
+
+    restarted = IntelligencePipeline(
+        gateway, [adapter], discovery_plan=plan,
+        context={
+            "primary_exposure_required": True,
+            "reference_coverage": {
+                "reference_status": "healthy", "reference_manifest_id": manifest_id,
+            },
+            "holdings": {"AAA": "0.05"}, "liquidity_by_ticker": {"AAA": "0.7"},
+            "overlap_by_ticker": {"AAA": "0.1"},
+        },
+        reference_snapshot_loader=lambda run_id: reference,
+    )
+    restarted.cache.hydrate_collections(
+        gateway.collection_checkpoints.values(), now=NOW,
+    )
+    restarted_persisted = restarted._read_discovery_tasks(RUN_ID)
+    assert "exposure_facts" not in restarted.context
+    restarted._hydrate_reference_snapshot(RUN_ID)
+    frozen = restarted._frozen_enrichment_selection(RUN_ID, "on-demand", "initial")
+    assert frozen is not None
+    replay = restarted._seal_and_run_enrichment_requests(
+        RUN_ID, request("on-demand"), window, frozen.requests, reservations,
+        restarted_persisted, adaptive_provider_reservations("on-demand"),
+        selection_stage="initial", frozen_manifest=frozen,
+    )
+    replay_items = tuple(normalize_item(item) for result in replay for item in result.items)
+    replay_discovery = _discover(
+        (radar_item, *replay_items), restarted.context, NOW,
     )
 
     assert len(first) == len(replay) == 2
@@ -1649,9 +1719,55 @@ def test_sealed_submissions_then_document_persists_typed_fact_and_replays_withou
         gateway.selections[1]["requests"][0]["descriptor"]["source_receipt_id"],
     ]
     assert [payload["manifest"]["selection_stage"] for payload in gateway.selections] == [
-        "initial", "filing_documents", "initial", "filing_documents",
+        "initial", "filing_documents",
     ]
     assert len(gateway.fact_checkpoints) == 1
+    assert len(restarted.context["exposure_facts"]) == 1
+    restarted_fact = restarted.context["exposure_facts"][0]
+    restarted._read_discovery_tasks(RUN_ID)
+    assert len(restarted.context["exposure_facts"]) == 1
+    assert restarted_fact.fact_id == original_fact.fact_id
+    assert restarted_fact.semantic_document() == original_fact.semantic_document()
+    assert [row.eligible_for_ranking for row in replay_discovery[1]] == [
+        row.eligible_for_ranking for row in original_discovery[1]
+    ]
+    assert [row.qualified for row in replay_discovery[2]] == [
+        row.qualified for row in original_discovery[2]
+    ]
+    assert any(row.qualified for row in replay_discovery[2]), (
+        replay_discovery[1], replay_discovery[2]
+    )
+    durable_fact = gateway.exposure_facts[0]
+    for field, replacement_value in (
+        ("ticker", "BBB"),
+        ("role", "mining"),
+        ("source_response_hash", "0" * 64),
+    ):
+        tampered = json.loads(json.dumps(durable_fact))
+        tampered["fact"]["value"][field] = replacement_value
+        tampered["content_hash"] = hashlib.sha256(json.dumps(
+            tampered["fact"], allow_nan=False, ensure_ascii=False,
+            separators=(",", ":"), sort_keys=True,
+        ).encode()).hexdigest()
+        tampered["id"] = str(uuid.uuid5(
+            uuid.NAMESPACE_URL, f"market-exposure:{tampered['content_hash']}",
+        ))
+        gateway.exposure_facts = [tampered]
+        invalid_restart = IntelligencePipeline(
+            gateway, [adapter], discovery_plan=plan,
+            context={
+                "security_reference": reference,
+                "reference_coverage": {
+                    "reference_status": "healthy", "reference_manifest_id": manifest_id,
+                },
+            },
+        )
+        invalid_restart.cache.hydrate_collections(
+            gateway.collection_checkpoints.values(), now=NOW,
+        )
+        with pytest.raises(ValueError, match="persisted exposure"):
+            invalid_restart._read_discovery_tasks(RUN_ID)
+    gateway.exposure_facts = [durable_fact]
     fact = gateway.fact_checkpoints[0]["exposure_facts"][0]["fact"]["value"]
     assert fact["security_id"] == "sec:AAA"
     assert fact["status"] == "supported"

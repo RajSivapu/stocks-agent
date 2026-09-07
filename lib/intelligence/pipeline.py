@@ -26,6 +26,7 @@ from lib.intelligence.exposure import (
     FilingEvidence,
     IssuerExposureBinding,
     evaluate_exposure,
+    exposure_fact_from_persistence,
     extract_exposure_facts,
 )
 from lib.intelligence.cache import ResumableCollectionCache, collection_from_checkpoint
@@ -1157,6 +1158,7 @@ class IntelligencePipeline:
         if not isinstance(manifest_id, str) or not manifest_id:
             raise ValueError("reference snapshot coverage is invalid")
         self.context["security_reference"] = snapshot
+        self._hydrate_persisted_exposure_facts(run_id)
 
     def _read_discovery_tasks(self, run_id: str) -> dict[str, Mapping[str, object]]:
         method = getattr(self.gateway, "read_discovery_context", None)
@@ -1198,7 +1200,169 @@ class IntelligencePipeline:
                 raise ValueError("persisted enrichment selection identity is invalid")
             selections[manifest.selection_stage] = manifest
         self.context["_frozen_enrichment_selections"] = MappingProxyType(selections)
+        raw_facts = context.get("exposure_facts", ())
+        if not isinstance(raw_facts, Sequence) or isinstance(
+            raw_facts, (str, bytes, bytearray)
+        ) or len(raw_facts) > 100 or any(not isinstance(row, Mapping) for row in raw_facts):
+            raise ValueError("persisted exposure facts are invalid")
+        self.context["_persisted_exposure_fact_rows"] = tuple(raw_facts)
+        self.context["_persisted_discovery_tasks"] = MappingProxyType(result)
+        self._hydrate_persisted_exposure_facts(run_id)
         return result
+
+    def _hydrate_persisted_exposure_facts(self, run_id: str) -> None:
+        raw_rows = self.context.get("_persisted_exposure_fact_rows", ())
+        if not raw_rows:
+            return
+        reference = self.context.get("security_reference")
+        if not isinstance(reference, ReferenceSnapshot):
+            return
+        coverage = self.context.get("reference_coverage")
+        if not isinstance(coverage, Mapping) or coverage.get("reference_status") not in {
+            "healthy", "reference_stale",
+        } or not isinstance(coverage.get("reference_manifest_id"), str):
+            raise ValueError("persisted exposure current pin is unavailable")
+        selections = self.context.get("_frozen_enrichment_selections")
+        tasks = self.context.get("_persisted_discovery_tasks")
+        if not isinstance(selections, Mapping) or not isinstance(tasks, Mapping):
+            raise ValueError("persisted exposure lineage is unavailable")
+        selected: dict[str, EnrichmentRequest] = {}
+        for manifest in selections.values():
+            if not isinstance(manifest, SelectionManifest) or manifest.run_id != run_id:
+                raise ValueError("persisted exposure selection is invalid")
+            for request_row in manifest.requests:
+                if request_row.request_id in selected:
+                    raise ValueError("persisted exposure selection is duplicated")
+                selected[request_row.request_id] = request_row
+        hydrated: dict[str, ExposureFact] = {}
+        current = self.context.get("exposure_facts", ())
+        if isinstance(current, Sequence) and not isinstance(current, (str, bytes, bytearray)):
+            for fact in current:
+                if isinstance(fact, ExposureFact):
+                    hydrated[fact.fact_id] = fact
+        for raw in raw_rows:
+            fact = exposure_fact_from_persistence(raw)
+            if raw.get("run_id") not in {None, run_id}:
+                raise ValueError("persisted exposure run binding is invalid")
+            task_id = raw.get("task_id")
+            task = tasks.get(task_id)
+            request_row = selected.get(str(task_id))
+            security = reference.by_ticker.get(fact.ticker)
+            issuer = reference.issuers_by_id.get(fact.entity_id)
+            if not isinstance(task_id, str) or not isinstance(task, Mapping) \
+                    or task.get("id") != task_id or task.get("state") != "succeeded" \
+                    or task.get("stage") != "enrich" \
+                    or task.get("provider") != "sec_edgar" \
+                    or task.get("capability_id") != "sec_filing_document" \
+                    or task.get("query_kind") != "filing_document" \
+                    or request_row is None or request_row.query_kind != "filing_document" \
+                    or request_row.capability_id != "sec_filing_document" \
+                    or task.get("query_hash") != request_row.descriptor_hash \
+                    or security is None or issuer is None or not security.eligible \
+                    or security.entity_id != fact.entity_id \
+                    or security.security_id != fact.security_id \
+                    or security.revision_id != fact.security_revision_id \
+                    or security.reference_manifest_id != fact.reference_manifest_id \
+                    or coverage.get("reference_manifest_id") != fact.reference_manifest_id \
+                    or issuer.cik != fact.issuer_cik:
+                raise ValueError("persisted exposure pin or task binding is invalid")
+            descriptor = request_row.descriptor
+            task_result = task.get("result")
+            task_checkpoint = task_result.get("checkpoint") \
+                if isinstance(task_result, Mapping) else None
+            task_receipt = task_checkpoint.get("receipt") \
+                if isinstance(task_checkpoint, Mapping) else None
+            if not isinstance(task_checkpoint, Mapping) \
+                    or task_checkpoint.get("cache_key") != fact.source_cache_key \
+                    or (isinstance(task_receipt, Mapping) and (
+                        task_receipt.get("cache_key") != fact.source_cache_key
+                        or task_receipt.get("source_receipt_id") != fact.source_receipt_id
+                        or task_receipt.get("response_hash") != fact.source_response_hash
+                    )):
+                raise ValueError("persisted exposure task checkpoint is invalid")
+            expected = {
+                "reference_manifest_id": fact.reference_manifest_id,
+                "security_revision_id": fact.security_revision_id,
+                "security_id": fact.security_id,
+                "entity_id": fact.entity_id,
+                "ticker": fact.ticker,
+                "cik": fact.issuer_cik,
+                "accession_number": fact.accession_number,
+                "form": fact.form,
+                "primary_document": fact.primary_document,
+                "submissions_response_hash": fact.submissions_response_hash,
+                "source_receipt_id": fact.source_receipt_id,
+                "cache_key": fact.source_cache_key,
+                "filing_date": fact.filing_date.isoformat(),
+                "reporting_period_end": (
+                    fact.reporting_period_end.isoformat() if fact.reporting_period_end else None
+                ),
+            }
+            if any(descriptor.get(key) != value for key, value in expected.items()) \
+                    or tuple(descriptor.get("event_ids", ())) != fact.event_ids \
+                    or tuple(descriptor.get("hypothesis_ids", ())) != fact.hypothesis_ids \
+                    or descriptor.get("role") != fact.role:
+                raise ValueError("persisted exposure descriptor binding is invalid")
+            accepted = descriptor.get("accepted_at")
+            try:
+                accepted_at = datetime.fromisoformat(str(accepted).replace("Z", "+00:00")) \
+                    if accepted is not None else None
+            except ValueError:
+                raise ValueError("persisted exposure descriptor binding is invalid") from None
+            if (accepted_at is None) != (fact.accepted_at is None) or (
+                accepted_at is not None and _utc(accepted_at) != _utc(fact.accepted_at)
+            ):
+                raise ValueError("persisted exposure descriptor binding is invalid")
+            checkpoint = self.cache.collection_for_lineage(fact.source_cache_key)
+            if checkpoint is None or checkpoint.receipt.source_receipt_id != fact.source_receipt_id \
+                    or checkpoint.receipt.response_hash != fact.source_response_hash \
+                    or checkpoint.receipt.cache_key != fact.source_cache_key \
+                    or checkpoint.receipt.provider != "sec_edgar" \
+                    or checkpoint.receipt.status != "succeeded" \
+                    or checkpoint.receipt.reservation_id != descriptor.get("reservation_id") \
+                    or len(checkpoint.items) != 1:
+                raise ValueError("persisted exposure source checkpoint is invalid")
+            matches = []
+            for raw_item in checkpoint.items:
+                item = normalize_item(raw_item)
+                metadata = item.metadata
+                if (
+                    item.provider == "sec_edgar"
+                    and item.authority in {"official", "official_issuer_filing"}
+                    and evidence_key(item) == fact.source_item_id
+                    and item.content_hash == fact.source_item_content_hash
+                    and item.source_url == fact.source_url
+                    and item.request_url == fact.source_url
+                    and item.summary == fact.passage
+                    and len(item.canonical_content.encode()) <= 8_192
+                    and {
+                        "accession_number", "filing_rule_version",
+                        "normalized_passage_hash", "parser_version", "primary_document",
+                        "raw_response_hash", "source_locator",
+                    } <= set(metadata)
+                    and set(metadata) <= {
+                        "accession_number", "filing_rule_version",
+                        "normalized_passage_hash", "parser_version", "primary_document",
+                        "raw_response_hash", "source_locator", "exposure_kind",
+                        "entity_ids", "security_ids",
+                    }
+                    and metadata.get("exposure_kind") in {None, "filing"}
+                    and metadata.get("raw_response_hash") == fact.source_response_hash
+                    and metadata.get("normalized_passage_hash") == fact.normalized_passage_hash
+                    and metadata.get("source_locator") == fact.source_locator
+                    and metadata.get("parser_version") == fact.parser_version
+                    and metadata.get("filing_rule_version") == fact.filing_rule_version
+                    and metadata.get("accession_number") in {None, fact.accession_number}
+                    and metadata.get("primary_document") in {None, fact.primary_document}
+                ):
+                    matches.append(item)
+            if len(matches) != 1:
+                raise ValueError("persisted exposure source item is invalid")
+            duplicate = hydrated.get(fact.fact_id)
+            if duplicate is not None and duplicate != fact:
+                raise ValueError("persisted exposure replay is inconsistent")
+            hydrated[fact.fact_id] = fact
+        self.context["exposure_facts"] = [hydrated[key] for key in sorted(hydrated)]
 
     def _checkpoint_discovery_task(
         self,

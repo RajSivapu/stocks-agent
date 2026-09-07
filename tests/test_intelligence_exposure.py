@@ -1,13 +1,17 @@
 from dataclasses import replace
 from datetime import date, datetime, timezone
 import hashlib
+import json
 from pathlib import Path
+import uuid
 
 import pytest
 
 from lib.intelligence.exposure import (
+    ExposureFact,
     FilingEvidence,
     IssuerExposureBinding,
+    exposure_fact_from_persistence,
     evaluate_exposure,
     extract_exposure_facts,
 )
@@ -18,6 +22,7 @@ from lib.intelligence.providers.sec import (
 )
 
 
+VECTORS = json.loads((Path(__file__).parent / "fixtures/exposure_fact_hash_vectors.json").read_text())
 NOW = datetime(2026, 9, 6, 12, tzinfo=timezone.utc)
 FIXTURE = Path(__file__).parent / "fixtures" / "intelligence" / "sec_filing_exposure.html"
 
@@ -242,3 +247,48 @@ def test_comparable_quantitative_conflict_never_counts_as_supported_exposure():
     assert evaluation.financial_materiality == "unknown"
     assert evaluation.supported_fact_ids == ()
     assert "unresolved_comparable_claim_conflict" in evaluation.limitations
+
+
+def test_supported_percent_of_revenue_shared_hash_vector_round_trips():
+    row = VECTORS["supported_percent_of_revenue"]
+
+    fact = exposure_fact_from_persistence(row)
+
+    assert isinstance(fact, ExposureFact)
+    assert fact.semantic_hash == row["content_hash"]
+    assert fact.fact_id == row["id"]
+    assert fact.financial_materiality == "supported"
+
+
+@pytest.mark.parametrize(("passage", "reporting_period_end", "expected_value"), [
+    ("We manufacture magnets, which generated 101% of our revenue.", date(2026, 6, 30), None),
+    ("We manufacture magnets, which generated 12.5% of our revenue.", None, None),
+    ("We manufacture magnets, which generated 012.500% of our revenue.", date(2026, 6, 30), "12.5"),
+])
+def test_revenue_materiality_requires_bounded_value_and_bound_reporting_period(
+    passage, reporting_period_end, expected_value,
+):
+    fact = extract_exposure_facts(
+        filing(passage, reporting_period_end=reporting_period_end),
+        issuer=issuer(), role="magnet_manufacturing",
+    )[0]
+    assert fact.value == expected_value
+    assert fact.financial_materiality == (
+        "supported" if expected_value is not None else "unknown"
+    )
+
+
+@pytest.mark.parametrize("mutation", VECTORS["invalid_supported_mutations"])
+def test_supported_financial_materiality_rejects_forged_semantics(mutation):
+    row = json.loads(json.dumps(VECTORS["supported_percent_of_revenue"]))
+    row["fact"]["value"][mutation["field"]] = mutation["value"]
+    row["content_hash"] = hashlib.sha256(json.dumps(
+        row["fact"], allow_nan=False, ensure_ascii=False,
+        separators=(",", ":"), sort_keys=True,
+    ).encode()).hexdigest()
+    row["id"] = str(uuid.uuid5(
+        uuid.NAMESPACE_URL, f"market-exposure:{row['content_hash']}",
+    ))
+
+    with pytest.raises(ValueError, match="invalid"):
+        exposure_fact_from_persistence(row)

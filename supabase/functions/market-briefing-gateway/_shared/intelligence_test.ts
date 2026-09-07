@@ -1,4 +1,5 @@
 import { parseGatewayEnvelope } from "./contracts.ts";
+import exposureFactVectors from "../../../../tests/fixtures/exposure_fact_hash_vectors.json" with { type: "json" };
 import {
   canonicalJson,
   parseDiscoveryContext,
@@ -648,6 +649,58 @@ Deno.test("discovery checkpoint parser rejects duplicate result child identifier
       `${collection} has duplicate id`,
     );
   }
+});
+
+Deno.test("typed exposure parser shares the percent-of-revenue hash vector and rejects rehashed forgeries", () => {
+  const vector = structuredClone(
+    exposureFactVectors.supported_percent_of_revenue,
+  ) as Record<string, unknown>;
+  const payload = succeededDiscoveryCheckpoint("enrich");
+  payload.exposure_facts = [vector];
+  const parsed = parseDiscoveryStageCheckpointPayload(payload);
+  assertEquals(parsed.exposure_facts[0].content_hash, vector.content_hash);
+
+  for (const mutation of exposureFactVectors.invalid_supported_mutations) {
+    const changed = structuredClone(vector) as Record<string, unknown>;
+    const fact = changed.fact as Record<string, unknown>;
+    const value = fact.value as Record<string, unknown>;
+    value[mutation.field] = mutation.value;
+    changed.content_hash = sha256Hex(canonicalJson(fact));
+    const forged = succeededDiscoveryCheckpoint("enrich");
+    forged.exposure_facts = [changed];
+    assertThrows(
+      () => parseDiscoveryStageCheckpointPayload(forged),
+      "financial materiality",
+    );
+  }
+});
+
+Deno.test("discovery context rejects a rehashed forged persisted materiality fact", () => {
+  const vector = structuredClone(
+    exposureFactVectors.supported_percent_of_revenue,
+  ) as Record<string, unknown>;
+  Object.assign(vector, {
+    task_id: DISCOVERY_TASK_ID,
+    valid_from: "2026-08-08T00:00:00.000Z",
+    created_at: "2026-09-06T12:01:00.000Z",
+  });
+  const context = {
+    manifests: [], security_revisions: [], tasks: [], theme_episodes: [],
+    exposure_facts: [vector], research_nominations: [], enrichment_selections: [],
+  };
+  assertEquals(parseDiscoveryContext(context).exposure_facts.length, 1);
+
+  const forged = structuredClone(vector) as Record<string, unknown>;
+  const fact = forged.fact as Record<string, unknown>;
+  const value = fact.value as Record<string, unknown>;
+  Object.assign(value, {
+    financial_materiality: "supported", metric: "business_exposure",
+    unit: null, value: null,
+  });
+  forged.content_hash = sha256Hex(canonicalJson(fact));
+  const changed = structuredClone(context);
+  changed.exposure_facts = [forged];
+  assertThrows(() => parseDiscoveryContext(changed), "financial materiality");
 });
 
 Deno.test("discovery checkpoint parser rejects duplicate nomination exposure fact identifiers", () => {

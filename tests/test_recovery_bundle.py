@@ -36,6 +36,11 @@ from lib.intelligence.universe import (
 )
 
 
+EXPOSURE_VECTORS = json.loads(
+    (Path(__file__).parent / "fixtures/exposure_fact_hash_vectors.json").read_text()
+)
+
+
 def digest(value):
     return hashlib.sha256(json.dumps(value, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
 
@@ -608,7 +613,10 @@ def typed_exposure_recovery_records():
     submissions_item_id = str(uuid.uuid5(
         uuid.NAMESPACE_URL, f"market-source:{submissions_item_hash}",
     ))
-    passage = "We manufacture permanent magnets at our Texas facility."
+    passage = (
+        "We manufacture permanent magnets at our Texas facility, which generated "
+        "12.5% of our revenue."
+    )
     passage_hash = hashlib.sha256(passage.encode()).hexdigest()
     canonical_content = json.dumps({"passage": passage}, sort_keys=True)
     item_hash = hashlib.sha256(canonical_content.encode()).hexdigest()
@@ -1372,6 +1380,8 @@ def test_recovery_validates_typed_exposure_against_frozen_request_and_checkpoint
     validated = _validated_records(records)
 
     assert validated["exposure_facts"][0]["fact"]["value"]["status"] == "supported"
+    vector = EXPOSURE_VECTORS["supported_percent_of_revenue"]
+    assert digest(vector["fact"]) == vector["content_hash"]
 
 
 def test_recovery_rejects_document_selection_without_bound_parent_submission_checkpoint():
@@ -1484,6 +1494,38 @@ def test_recovery_rejects_rehashed_typed_exposure_with_changed_checkpoint_bindin
     records["research_nominations"][0]["exposure_fact_ids"] = [row["id"]]
 
     with pytest.raises(ValueError, match="discovery typed exposure request binding"):
+        _validated_records(records)
+
+
+def test_recovery_rejects_rehashed_supported_materiality_without_revenue_metric():
+    records = typed_exposure_recovery_records()
+    row = records["exposure_facts"][0]
+    row["fact"]["value"].update({
+        "financial_materiality": "supported", "metric": "business_exposure",
+        "unit": None, "value": None,
+    })
+    row["content_hash"] = digest(row["fact"])
+    row["id"] = str(uuid.uuid5(
+        uuid.NAMESPACE_URL, f"market-exposure:{row['content_hash']}",
+    ))
+    records["research_nominations"][0]["exposure_fact_ids"] = [row["id"]]
+
+    with pytest.raises(ValueError, match="materiality mismatch"):
+        _validated_records(records)
+
+
+@pytest.mark.parametrize("mutation", EXPOSURE_VECTORS["invalid_supported_mutations"])
+def test_recovery_rejects_shared_rehashed_materiality_forgeries(mutation):
+    records = typed_exposure_recovery_records()
+    row = records["exposure_facts"][0]
+    row["fact"]["value"][mutation["field"]] = mutation["value"]
+    row["content_hash"] = digest(row["fact"])
+    row["id"] = str(uuid.uuid5(
+        uuid.NAMESPACE_URL, f"market-exposure:{row['content_hash']}",
+    ))
+    records["research_nominations"][0]["exposure_fact_ids"] = [row["id"]]
+
+    with pytest.raises(ValueError, match="typed exposure"):
         _validated_records(records)
 
 
