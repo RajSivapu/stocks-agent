@@ -1,8 +1,16 @@
 import { act, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { expect, it, vi } from "vitest";
+import { afterEach, expect, it, vi } from "vitest";
 
-import { BROWSER_AUTH_FLOW, AuthProvider, useAuth, type AuthClient, type AuthSession } from "./AuthProvider";
+import {
+  BROWSER_AUTH_FLOW,
+  PASSWORD_RECOVERY_STORAGE_KEY,
+  AuthProvider,
+  isPasswordRecoveryCallback,
+  useAuth,
+  type AuthClient,
+  type AuthSession,
+} from "./AuthProvider";
 import { ResetPasswordPage } from "./ResetPasswordPage";
 import { SignInPage } from "./SignInPage";
 
@@ -10,6 +18,8 @@ const ownerSession = {
   access_token: "owner-token",
   user: { id: "owner-id", email: "owner@example.com" },
 } as AuthSession;
+
+afterEach(() => window.sessionStorage.clear());
 
 function client(session: AuthSession | null = null): AuthClient & {
   signInWithPassword: ReturnType<typeof vi.fn>;
@@ -98,6 +108,20 @@ it("accepts a signed email-link session from the auth state callback", async () 
   expect(await screen.findByRole("button", { name: /sign out/i })).toBeVisible();
 });
 
+it("detects only an explicit recovery callback marker", () => {
+  expect(isPasswordRecoveryCallback("#access_token=secret&type=recovery")).toBe(true);
+  expect(isPasswordRecoveryCallback("#access_token=secret&type=magiclink")).toBe(false);
+  expect(isPasswordRecoveryCallback("?type=recovery")).toBe(false);
+});
+
+it("keeps password recovery ahead of the owner workspace after a reload", async () => {
+  window.sessionStorage.setItem(PASSWORD_RECOVERY_STORAGE_KEY, "pending");
+  const authClient = client(ownerSession);
+  render(<AuthProvider client={authClient}><Screen /></AuthProvider>);
+
+  expect(await screen.findByRole("heading", { name: /choose a new password/i })).toBeVisible();
+});
+
 it("requests a secure sign-in link with account creation disabled", async () => {
   const authClient = client();
   const user = userEvent.setup();
@@ -160,6 +184,38 @@ it("validates a new password before updating the recovery session", async () => 
   expect(authClient.updateUser).not.toHaveBeenCalled();
 });
 
+it("requires both new-password entries to match", async () => {
+  const authClient = client();
+  const user = userEvent.setup();
+  render(<AuthProvider client={authClient}><Screen /></AuthProvider>);
+  await screen.findByRole("button", { name: /^sign in$/i });
+  act(() => authClient.emitAuth("PASSWORD_RECOVERY", ownerSession));
+
+  await user.type(await screen.findByLabelText(/^new password$/i), "first-secure-password");
+  await user.type(screen.getByLabelText(/confirm new password/i), "second-secure-password");
+  await user.click(screen.getByRole("button", { name: /save password/i }));
+
+  expect(screen.getByRole("alert")).toHaveTextContent(/passwords do not match/i);
+  expect(authClient.updateUser).not.toHaveBeenCalled();
+});
+
+it("keeps the recovery form available when Supabase rejects the update", async () => {
+  const authClient = client();
+  authClient.updateUser.mockResolvedValue({ error: new Error("expired recovery session") });
+  const user = userEvent.setup();
+  render(<AuthProvider client={authClient}><Screen /></AuthProvider>);
+  await screen.findByRole("button", { name: /^sign in$/i });
+  act(() => authClient.emitAuth("PASSWORD_RECOVERY", ownerSession));
+
+  await user.type(await screen.findByLabelText(/^new password$/i), "a-secure-owner-password");
+  await user.type(screen.getByLabelText(/confirm new password/i), "a-secure-owner-password");
+  await user.click(screen.getByRole("button", { name: /save password/i }));
+
+  expect(await screen.findByRole("alert")).toHaveTextContent(/request a new setup link/i);
+  expect(screen.getByRole("heading", { name: /choose a new password/i })).toBeVisible();
+  expect(window.sessionStorage.getItem(PASSWORD_RECOVERY_STORAGE_KEY)).toBe("pending");
+});
+
 it("updates the password and continues into the owner workspace", async () => {
   const authClient = client();
   const user = userEvent.setup();
@@ -172,6 +228,7 @@ it("updates the password and continues into the owner workspace", async () => {
   await user.click(screen.getByRole("button", { name: /save password/i }));
 
   expect(authClient.updateUser).toHaveBeenCalledWith({ password: "a-secure-owner-password" });
+  expect(window.sessionStorage.getItem(PASSWORD_RECOVERY_STORAGE_KEY)).toBeNull();
   expect(await screen.findByRole("button", { name: /sign out/i })).toBeVisible();
 });
 

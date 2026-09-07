@@ -178,9 +178,9 @@ client-side calculations.
    and uses `shouldCreateUser: false`.
 2. Set the hosted Auth JWT lifetime to 900 seconds and confirm email signup remains disabled. Keep
    the hosted email OTP length at exactly `6`; the matching local value is recorded in
-   `supabase/config.toml`. Provisioning and protected verification accept a six-digit template
-   containing `{{ .Token }}` or the free-tier default signed link containing
-   `{{ .ConfirmationURL }}`. The owner UI supplies its exact deployed origin for sign-in and recovery
+   `supabase/config.toml`. Provisioning and protected verification require both the magic-link and
+   recovery templates to contain the free-tier signed link variable `{{ .ConfirmationURL }}`. The
+   owner UI supplies its exact deployed origin for sign-in and recovery
    redirects, detects signed callbacks, routes `PASSWORD_RECOVERY` sessions to the new-password form,
    and retains the resulting session only in browser session storage. Add that exact origin as both
    the Auth Site URL and a redirect URL; do not use a wildcard. Supabase's default sender is a
@@ -188,17 +188,17 @@ client-side calculations.
    Supabase supports a [read-only Management API Auth-config endpoint](https://supabase.com/docs/reference/api/v1-get-auth-service-config)
    for a deliberately provisioned token with `auth:read` / `auth_config_read`. This project does not
    provision or store a Management API token, so the protected operator must manually verify those
-   two dashboard settings and save only this minimal local receipt (no owner email, URL, key, or
+   three dashboard settings and save only this minimal local receipt (no owner email, URL, key, or
    rendered email) outside version control:
 
 ```json
-{"mailer_otp_length":6,"mailer_templates_magic_link_content":"Follow {{ .ConfirmationURL }} to sign in"}
+{"mailer_otp_length":6,"mailer_templates_magic_link_content":"Follow {{ .ConfirmationURL }} to sign in","mailer_templates_recovery_content":"Follow {{ .ConfirmationURL }} to reset the password"}
 ```
 
    Pass that receipt to both protected Auth commands with
    `--auth-config-receipt /secure/path/auth-email-otp.json`. They fail closed before any Auth admin
-   request or deployment canary when it is absent, malformed, not six digits, or lacks both supported
-   variables. The scripts print only the bounded flow type, never the template body.
+   request or deployment canary when it is absent, malformed, not six digits, or either template
+   lacks the signed-link variable. The scripts print only the bounded flow types, never template bodies.
 3. Apply `sql/migrations/20260906_owner_dashboard_read_role.sql` with the normal protected migration
    path.
 4. Put `DASHBOARD_OWNER_USER_ID` and the exact deployed HTTPS origin in

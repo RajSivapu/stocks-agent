@@ -1,10 +1,12 @@
 import { act, render, screen, waitFor } from "@testing-library/react";
-import { expect, it, vi } from "vitest";
+import { afterEach, expect, it, vi } from "vitest";
 
 import { DashboardApiError, type DashboardClient } from "../api/client";
-import type { AuthClient, AuthSession } from "../auth/AuthProvider";
+import { PASSWORD_RECOVERY_STORAGE_KEY, type AuthClient, type AuthSession } from "../auth/AuthProvider";
 import type { ResourceState } from "../api/useDashboardResource";
 import { App, bannerState } from "./App";
+
+afterEach(() => window.sessionStorage.clear());
 
 function authClient(initialSession?: AuthSession | null) {
   let authStateChange: ((event: string, session: AuthSession | null) => void) | undefined;
@@ -37,6 +39,16 @@ it("routes a password-recovery session to password setup before loading private 
   await screen.findByRole("button", { name: /^sign in$/i });
 
   act(() => auth.emitAuth("PASSWORD_RECOVERY", auth.ownerSession));
+
+  expect(await screen.findByRole("heading", { name: /choose a new password/i })).toBeVisible();
+  expect(dashboard.get).not.toHaveBeenCalled();
+});
+
+it("keeps a reloaded recovery session out of private routes", async () => {
+  window.sessionStorage.setItem(PASSWORD_RECOVERY_STORAGE_KEY, "pending");
+  const auth = authClient();
+  const dashboard = { get: vi.fn() } as unknown as DashboardClient;
+  render(<App authClient={auth.client} dashboardClient={dashboard} />);
 
   expect(await screen.findByRole("heading", { name: /choose a new password/i })).toBeVisible();
   expect(dashboard.get).not.toHaveBeenCalled();

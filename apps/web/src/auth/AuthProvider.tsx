@@ -11,6 +11,23 @@ import {
 } from "react";
 
 export type AuthSession = Pick<Session, "access_token" | "user" | "expires_at">;
+export const PASSWORD_RECOVERY_STORAGE_KEY = "personal-stock-agent-password-recovery";
+
+export function isPasswordRecoveryCallback(hash: string): boolean {
+  if (!hash.startsWith("#")) return false;
+  return new URLSearchParams(hash.slice(1)).get("type") === "recovery";
+}
+
+function recoveryMarkerIsSet(): boolean {
+  if (typeof window === "undefined") return false;
+  return window.sessionStorage.getItem(PASSWORD_RECOVERY_STORAGE_KEY) === "pending";
+}
+
+function storeRecoveryMarker(active: boolean): void {
+  if (typeof window === "undefined") return;
+  if (active) window.sessionStorage.setItem(PASSWORD_RECOVERY_STORAGE_KEY, "pending");
+  else window.sessionStorage.removeItem(PASSWORD_RECOVERY_STORAGE_KEY);
+}
 
 export interface AuthClient {
   getSession(): Promise<{ data: { session: AuthSession | null }; error: unknown }>;
@@ -71,6 +88,7 @@ export function createBrowserAuthClient(): AuthClient {
   if (parsed.protocol !== "https:" || !parsed.hostname.endsWith(".supabase.co") || parsed.origin !== url) {
     throw new Error("Public authentication configuration is invalid.");
   }
+  if (isPasswordRecoveryCallback(window.location.hash)) storeRecoveryMarker(true);
   return adapter(createClient(url, key, {
     auth: {
       storage: window.sessionStorage,
@@ -87,17 +105,26 @@ export function AuthProvider({
   const [session, setSession] = useState<AuthSession | null>(null);
   const [loading, setLoading] = useState(true);
   const [locked, setLocked] = useState(false);
-  const [recovering, setRecovering] = useState(false);
+  const [recovering, setRecovering] = useState(() => {
+    const pending = recoveryMarkerIsSet() || isPasswordRecoveryCallback(window.location.hash);
+    if (pending) storeRecoveryMarker(true);
+    return pending;
+  });
   const timer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const lastActivityAt = useRef<number | null>(null);
+
+  const setRecoveryMode = useCallback((active: boolean) => {
+    storeRecoveryMarker(active);
+    setRecovering(active);
+  }, []);
 
   const lock = useCallback(() => {
     lastActivityAt.current = null;
     setSession(null);
     setLocked(true);
-    setRecovering(false);
+    setRecoveryMode(false);
     void client.signOut({ scope: "local" }).catch(() => undefined);
-  }, [client]);
+  }, [client, setRecoveryMode]);
 
   useEffect(() => {
     let active = true;
@@ -111,8 +138,8 @@ export function AuthProvider({
     const { data } = client.onAuthStateChange((event, nextSession) => {
       if (!active) return;
       setSession(nextSession);
-      if (event === "PASSWORD_RECOVERY") setRecovering(true);
-      if (event === "SIGNED_IN" || event === "SIGNED_OUT") setRecovering(false);
+      if (event === "PASSWORD_RECOVERY") setRecoveryMode(true);
+      if (event === "SIGNED_IN" || event === "SIGNED_OUT") setRecoveryMode(false);
       if (nextSession && event !== "TOKEN_REFRESHED") setLocked(false);
       setLoading(false);
     });
@@ -120,7 +147,7 @@ export function AuthProvider({
       active = false;
       data.subscription.unsubscribe();
     };
-  }, [client]);
+  }, [client, setRecoveryMode]);
 
   useEffect(() => {
     if (!session) {
@@ -161,7 +188,7 @@ export function AuthProvider({
       if (result.error || !result.data.session) throw new Error("Email or password is incorrect.");
       setSession(result.data.session);
       setLocked(false);
-      setRecovering(false);
+      setRecoveryMode(false);
     },
     sendSignInLink: async (email) => {
       const result = await client.signInWithOtp({
@@ -180,7 +207,7 @@ export function AuthProvider({
     updatePassword: async (password) => {
       const result = await client.updateUser({ password });
       if (result.error) throw new Error("The password could not be updated.");
-      setRecovering(false);
+      setRecoveryMode(false);
     },
     signOut: async () => {
       try {
@@ -189,11 +216,11 @@ export function AuthProvider({
         lastActivityAt.current = null;
         setSession(null);
         setLocked(false);
-        setRecovering(false);
+        setRecoveryMode(false);
         window.sessionStorage.clear();
       }
     },
-  }), [client, loading, locked, recovering, session]);
+  }), [client, loading, locked, recovering, session, setRecoveryMode]);
 
   return <AuthContext.Provider value={value}>{children}</AuthContext.Provider>;
 }
