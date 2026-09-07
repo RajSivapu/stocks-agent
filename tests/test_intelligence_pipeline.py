@@ -166,6 +166,31 @@ def test_pre_market_runs_all_seed_domains_and_persists_once():
     assert result.packet_hash == result.packet.packet_hash
 
 
+def test_reference_stage_runs_once_after_durable_start_and_enters_persisted_coverage():
+    gateway = FakeGateway()
+    calls = []
+
+    def reference_stage(run_id, request_value):
+        calls.append((run_id, request_value.now))
+        assert gateway.operations == ["start_intelligence_run"]
+        return {
+            "coverage_status": "scope_not_guaranteed",
+            "reference_status": "reference_stale",
+            "reference_manifest_id": "00000000-0000-4000-8000-000000000099",
+            "reference_age_seconds": 86_400,
+            "execution_allowed": False,
+        }
+
+    result = IntelligencePipeline(
+        gateway, [FakeAdapter()], reference_stage=reference_stage,
+    ).run(request("pre-market"))
+
+    assert calls == [(RUN_ID, NOW)]
+    assert result.coverage["reference_status"] == "reference_stale"
+    assert result.packet.coverage["reference_manifest_id"] == "00000000-0000-4000-8000-000000000099"
+    assert gateway.payloads[-1]["coverage"]["execution_allowed"] is False
+
+
 def test_production_collection_routes_quotes_through_protected_producer_and_unwraps_context():
     from lib.intelligence.pipeline import _checkpoint_receipt
     class Gateway(FakeGateway):

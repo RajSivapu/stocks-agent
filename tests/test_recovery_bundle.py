@@ -45,6 +45,8 @@ def recovery_records():
     exposure_fact_id = "10000000-0000-4000-8000-000000000006"
     screen_task_id = "10000000-0000-4000-8000-000000000007"
     nomination_id = "10000000-0000-4000-8000-000000000008"
+    reference_chunk_hash = "9" * 64
+    reference_root_hash = hashlib.sha256(reference_chunk_hash.encode()).hexdigest()
     packet = {"candidates": [], "evidence": [], "coverage": {}, "limitations": [], "policy_version": 1}
     report = {"summary": "Suggestion only.", "packet_hash": digest(packet)}
     records = {
@@ -94,6 +96,45 @@ def recovery_records():
             "exclusion_reasons": [], "aliases": ["Test Corp"], "source_ids": ["nasdaq-listed"],
             "valid_from": "2026-09-05T19:30:00Z", "valid_to": None, "content_hash": "3" * 64,
             "created_at": "2026-09-05T19:31:00Z",
+        }],
+        "reference_chunk_receipts": [{
+            "manifest_id": manifest_id, "run_id": run,
+            "capability_id": "sec_company_tickers_universe", "chunk_index": -1,
+            "chunk_count": 1, "entry_count": 0, "chunk_hash": reference_root_hash,
+            "predecessor_manifest_id": None, "payload": {"manifest_id": manifest_id},
+            "created_at": "2026-09-05T19:30:30Z",
+        }, {
+            "manifest_id": manifest_id, "run_id": run,
+            "capability_id": "sec_company_tickers_universe", "chunk_index": 0,
+            "chunk_count": 1, "entry_count": 1, "chunk_hash": reference_chunk_hash,
+            "predecessor_manifest_id": None,
+            "payload": {"manifest_id": manifest_id, "entries": [{"security_id": "NASDAQ:TEST"}]},
+            "created_at": "2026-09-05T19:31:00Z",
+        }],
+        "reference_finalization_seals": [{
+            "manifest_id": manifest_id, "run_id": run,
+            "capability_id": "sec_company_tickers_universe",
+            "predecessor_manifest_id": None, "chunk_count": 1,
+            "security_count": 1, "root_hash": reference_root_hash,
+            "finalized_at": "2026-09-05T19:31:30Z",
+        }],
+        "reference_snapshot_memberships": [{
+            "manifest_id": manifest_id, "security_revision_id": security_revision_id,
+            "security_id": "NASDAQ:TEST", "ordinal": 0,
+            "created_at": "2026-09-05T19:31:31Z",
+        }],
+        "reference_run_bindings": [{
+            "run_id": run, "capability_id": "sec_company_tickers_universe",
+            "manifest_id": manifest_id, "reference_status": "healthy",
+            "reference_as_of": "2026-09-05T19:32:00Z",
+            "source_retrieved_at": "2026-09-05T19:30:00Z",
+            "request_payload": {
+                "capability_id": "sec_company_tickers_universe",
+                "manifest_id": manifest_id,
+                "reference_status": "healthy",
+                "reference_as_of": "2026-09-05T19:32:00Z",
+            },
+            "reference_age_seconds": 120, "created_at": "2026-09-05T19:32:00Z",
         }],
         "discovery_stage_tasks": [{
             "id": signals_task_id, "run_id": run, "stage": "signals", "capability_id": "gdelt_theme_search",
@@ -370,6 +411,10 @@ EMPTY_INTELLIGENCE_PACKET_REPORT_HISTORY = (
     *INTELLIGENCE_DEPENDENT_DATASETS,
     "reference_manifests",
     "security_reference_revisions",
+    "reference_chunk_receipts",
+    "reference_finalization_seals",
+    "reference_snapshot_memberships",
+    "reference_run_bindings",
     "discovery_stage_tasks",
     "theme_episode_revisions",
     "exposure_facts",
@@ -385,6 +430,10 @@ EMPTY_INTELLIGENCE_PACKET_REPORT_HISTORY = (
 DISCOVERY_DATASETS = (
     "reference_manifests",
     "security_reference_revisions",
+    "reference_chunk_receipts",
+    "reference_finalization_seals",
+    "reference_snapshot_memberships",
+    "reference_run_bindings",
     "discovery_stage_tasks",
     "theme_episode_revisions",
     "exposure_facts",
@@ -400,6 +449,10 @@ def test_recovery_validates_complete_discovery_lineage_and_exact_fields():
     assert {name: len(validated[name]) for name in DISCOVERY_DATASETS} == {
         "reference_manifests": 1,
         "security_reference_revisions": 1,
+        "reference_chunk_receipts": 2,
+        "reference_finalization_seals": 1,
+        "reference_snapshot_memberships": 1,
+        "reference_run_bindings": 1,
         "discovery_stage_tasks": 3,
         "theme_episode_revisions": 1,
         "exposure_facts": 1,
@@ -437,6 +490,7 @@ def test_recovery_rejects_orphaned_discovery_records(dataset, field, replacement
     ("discovery_stage_tasks", "query_hash", "altered"),
     ("discovery_stage_tasks", "provider", "paid_provider"),
     ("reference_manifests", "manifest", {"nested": {"executionAllowed": False}}),
+    ("reference_run_bindings", "request_payload", {"reference_status": "healthy"}),
     ("discovery_stage_tasks", "result", {"portfolioOverlap": {"ticker": "TEST"}}),
     ("exposure_facts", "fact", {"nested": {"order": {"side": "buy"}}}),
     ("research_nominations", "rationale", {"action": "buy"}),

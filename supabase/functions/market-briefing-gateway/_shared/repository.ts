@@ -34,7 +34,14 @@ import {
   parseDiscoveryStageTask,
   parseIntelligenceRecordReceipt,
   parseIntelligenceStartReceipt,
+  parseReferencePage,
   type RecordIntelligencePayload,
+  type ReferenceBeginPayload,
+  type ReferenceChunkPayload,
+  type ReferenceFinalizePayload,
+  type ReferencePage,
+  type ReferencePinPayload,
+  type ReferenceReadPayload,
   type StartIntelligencePayload,
 } from "./intelligence.ts";
 import {
@@ -350,6 +357,34 @@ export interface GatewayRepository {
     runId: string,
     limit: number,
   ): Promise<DiscoveryContext>;
+  beginDiscoveryReference?(
+    runId: string,
+    payload: ReferenceBeginPayload,
+  ): Promise<
+    {
+      manifest_id: string;
+      predecessor_manifest_id: string | null;
+      duplicate: boolean;
+    }
+  >;
+  recordDiscoveryReferenceChunk?(
+    runId: string,
+    payload: ReferenceChunkPayload,
+  ): Promise<{ manifest_id: string; chunk_index: number; duplicate: boolean }>;
+  finalizeDiscoveryReference?(
+    runId: string,
+    payload: ReferenceFinalizePayload,
+  ): Promise<
+    { manifest_id: string; security_count: number; duplicate: boolean }
+  >;
+  pinDiscoveryReference?(
+    runId: string,
+    payload: ReferencePinPayload,
+  ): Promise<Record<string, unknown>>;
+  readDiscoveryReference?(
+    runId: string,
+    payload: ReferenceReadPayload,
+  ): Promise<ReferencePage>;
   readIntelligenceCompletion?(
     runId: string,
     completionId: string,
@@ -1051,6 +1086,82 @@ export function createSupabaseGatewayRepository(
       if (result.error) throw new GatewayRepositoryError("PERSISTENCE_FAILED");
       try {
         return parseDiscoveryContext(result.data);
+      } catch {
+        throw new GatewayRepositoryError("INVALID_PERSISTED_DATA");
+      }
+    },
+
+    async beginDiscoveryReference(runId, payload) {
+      const result = await client.rpc("begin_market_discovery_reference", {
+        p_run_id: runId,
+        p_payload: payload,
+      });
+      if (result.error) throw new GatewayRepositoryError("PERSISTENCE_FAILED");
+      const row = oneObject(result);
+      return {
+        manifest_id: text(row.manifest_id, 36),
+        predecessor_manifest_id: nullableText(row.predecessor_manifest_id, 36),
+        duplicate: boole(row.duplicate),
+      };
+    },
+
+    async recordDiscoveryReferenceChunk(runId, payload) {
+      const result = await client.rpc(
+        "record_market_discovery_reference_chunk",
+        {
+          p_run_id: runId,
+          p_payload: payload,
+        },
+      );
+      if (result.error) throw new GatewayRepositoryError("PERSISTENCE_FAILED");
+      const row = oneObject(result);
+      return {
+        manifest_id: text(row.manifest_id, 36),
+        chunk_index: integer(row.chunk_index),
+        duplicate: boole(row.duplicate),
+      };
+    },
+
+    async finalizeDiscoveryReference(runId, payload) {
+      const result = await client.rpc("finalize_market_discovery_reference", {
+        p_run_id: runId,
+        p_payload: payload,
+      });
+      if (result.error) throw new GatewayRepositoryError("PERSISTENCE_FAILED");
+      const row = oneObject(result);
+      return {
+        manifest_id: text(row.manifest_id, 36),
+        security_count: integer(row.security_count),
+        duplicate: boole(row.duplicate),
+      };
+    },
+
+    async pinDiscoveryReference(runId, payload) {
+      const result = await client.rpc("pin_market_discovery_reference", {
+        p_run_id: runId,
+        p_payload: payload,
+      });
+      if (result.error) throw new GatewayRepositoryError("PERSISTENCE_FAILED");
+      const row = oneObject(result);
+      return {
+        manifest_id: nullableText(row.manifest_id, 36),
+        reference_status: text(row.reference_status, 32),
+        source_retrieved_at: nullableText(row.source_retrieved_at, 40),
+        reference_age_seconds: row.reference_age_seconds === null
+          ? null
+          : integer(row.reference_age_seconds),
+        duplicate: boole(row.duplicate),
+      };
+    },
+
+    async readDiscoveryReference(runId, payload) {
+      const result = await client.rpc("read_market_discovery_reference", {
+        p_run_id: runId,
+        p_payload: payload,
+      });
+      if (result.error) throw new GatewayRepositoryError("PERSISTENCE_FAILED");
+      try {
+        return parseReferencePage(result.data);
       } catch {
         throw new GatewayRepositoryError("INVALID_PERSISTED_DATA");
       }

@@ -132,6 +132,10 @@ def test_managed_snapshot_contains_every_discovery_dataset_and_exact_source_tabl
     expected = {
         "reference_manifests": "public.market_reference_manifests",
         "security_reference_revisions": "public.market_security_reference_revisions",
+        "reference_chunk_receipts": "public.market_reference_chunk_receipts",
+        "reference_finalization_seals": "public.market_reference_finalization_seals",
+        "reference_snapshot_memberships": "public.market_reference_snapshot_memberships",
+        "reference_run_bindings": "public.market_reference_run_bindings",
         "discovery_stage_tasks": "public.market_discovery_stage_tasks",
         "theme_episode_revisions": "public.market_theme_episode_revisions",
         "exposure_facts": "public.market_exposure_facts",
@@ -147,15 +151,19 @@ def test_discovery_restore_registry_is_in_foreign_key_dependency_order():
 
     datasets = [dataset for dataset, _table, _renames in _RESTORE_TABLES]
     discovery = [
+        "reference_chunk_receipts",
         "reference_manifests",
         "security_reference_revisions",
+        "reference_finalization_seals",
+        "reference_snapshot_memberships",
+        "reference_run_bindings",
         "discovery_stage_tasks",
         "theme_episode_revisions",
         "exposure_facts",
         "research_nominations",
     ]
     assert [datasets.index(name) for name in discovery] == sorted(datasets.index(name) for name in discovery)
-    assert datasets.index("intelligence_runs") < datasets.index("reference_manifests")
+    assert datasets.index("intelligence_runs") < datasets.index("reference_chunk_receipts")
 
 
 def test_restore_target_refuses_caller_owned_or_production_project_and_never_uses_read_only_write_path():
@@ -233,6 +241,7 @@ def test_provisioner_fails_closed_on_unknown_inventory_status_before_project_cre
 
 def test_restore_receipt_is_bounded_and_never_serializes_secret_values_or_rows(tmp_path):
     from scripts.managed_isolated_restore import write_restore_receipt
+    from scripts.export_recovery_bundle import REQUIRED_RECOVERY_RECORDS
 
     path = tmp_path / "receipt.json"
     write_restore_receipt(path, {
@@ -240,7 +249,8 @@ def test_restore_receipt_is_bounded_and_never_serializes_secret_values_or_rows(t
         "started_at": "2026-09-05T20:00:00Z", "completed_at": "2026-09-05T20:01:00Z",
         "production_project_ref": "p" * 20, "restore_project_ref": "r" * 20,
         "before_root_hash": "c" * 64, "after_root_hash": "c" * 64,
-        "restore": {"status": "verified", "isolated": True, "restore_applied": True, "record_set_count": 32},
+            "restore": {"status": "verified", "isolated": True, "restore_applied": True,
+                        "record_set_count": len(REQUIRED_RECOVERY_RECORDS)},
         "migration_retry": {"applied": [], "skipped": ["schema"]},
         "artifacts": {"first": {"path": "recovery/first.enc", "sha256": "d" * 64}},
         "workflow": {"run_id": "99", "attempt": "1"},
@@ -248,7 +258,7 @@ def test_restore_receipt_is_bounded_and_never_serializes_secret_values_or_rows(t
         "forbidden": {"password": "super-secret", "rows": [{"ticker": "VTI"}]},
     })
     receipt = json.loads(path.read_text())
-    assert receipt["restore"]["record_set_count"] == 32
+    assert receipt["restore"]["record_set_count"] == len(REQUIRED_RECOVERY_RECORDS)
     assert receipt["before_root_hash"] == receipt["after_root_hash"]
     assert "super-secret" not in path.read_text() and "VTI" not in path.read_text()
     assert path.stat().st_size < 8 * 1024
@@ -567,6 +577,8 @@ def test_actual_migration_retry_accepts_truthful_baseline_without_writing_histor
     monkeypatch.setattr(deploy, "ROOT", tmp_path)
     discovery = next(item for item in deploy.candidate_migration_manifest()
                      if item["path"] == "sql/migrations/20261005_market_wide_discovery.sql")
+    transfer = next(item for item in deploy.candidate_migration_manifest()
+                    if item["path"] == "sql/migrations/20261006_reference_snapshot_transfer.sql")
     queries = []
 
     def api(_method, _path, payload=None):
@@ -575,7 +587,7 @@ def test_actual_migration_retry_accepts_truthful_baseline_without_writing_histor
         if query.startswith("SELECT path, version, sha256"):
             return [
                 {"path": path, "version": "20261004", "sha256": hashlib.sha256(b'["SELECT 1"]').hexdigest()},
-                discovery,
+                discovery, transfer,
             ]
         if query.startswith("SELECT version, statements"):
             return [{"version": "20261004", "statements": ["SELECT 1"]}]

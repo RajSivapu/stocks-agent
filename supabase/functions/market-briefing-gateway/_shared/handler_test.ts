@@ -1776,6 +1776,75 @@ Deno.test("discovery read preserves an authenticated non-owner rejection", async
   assertEquals((await json(response)).code, "OWNER_ONLY");
 });
 
+Deno.test("pinned reference read is service-only while owner discovery read stays owner-only", async () => {
+  const calls: string[] = [];
+  const repository = Object.assign(new FakeRepository(), {
+    pinDiscoveryReference: () => {
+      calls.push("pin");
+      return Promise.resolve({
+        manifest_id: null,
+        reference_status: "reference_unavailable",
+        source_retrieved_at: null,
+        reference_age_seconds: null,
+        duplicate: false,
+      });
+    },
+    readDiscoveryReference: () => {
+      calls.push("read");
+      return Promise.resolve({
+        binding: {
+          manifest_id: null,
+          reference_status: "reference_unavailable",
+          source_retrieved_at: null,
+          reference_age_seconds: null,
+        },
+        manifest: null,
+        securities: [],
+        next_after_security_id: null,
+        complete: true,
+      });
+    },
+  });
+  const setup = makeHandler(repository, {
+    ownerUserId: DISCOVERY_OWNER,
+    verifyOwner: discoveryOwnerVerifier,
+  });
+  const runId = "00000000-0000-4000-8000-000000000002";
+  const servicePin = await setup.handler(request(
+    "pin_discovery_reference",
+    {
+      capability_id: "sec_company_tickers_universe",
+      manifest_id: null,
+      reference_status: "reference_unavailable",
+      reference_as_of: "2026-09-07T12:00:00.000Z",
+    },
+    { runId },
+  ));
+  const serviceRead = await setup.handler(request(
+    "read_discovery_reference",
+    {
+      capability_id: "sec_company_tickers_universe",
+      after_security_id: null,
+      limit: 500,
+    },
+    { runId },
+  ));
+  assertEquals(servicePin.status, 200);
+  assertEquals(serviceRead.status, 200);
+  assertEquals(calls, ["pin", "read"]);
+  const ownerRead = await setup.handler(request(
+    "read_discovery_reference",
+    {
+      capability_id: "sec_company_tickers_universe",
+      after_security_id: null,
+      limit: 500,
+    },
+    { runId, secret: "", authorization: "Bearer owner" },
+  ));
+  assertEquals(ownerRead.status, 403);
+  assertEquals((await json(ownerRead)).code, "SERVICE_ONLY");
+});
+
 Deno.test("discovery checkpoint rejects wrong-stage result rows before persistence", async () => {
   let writes = 0;
   const repository = Object.assign(new FakeRepository(), {

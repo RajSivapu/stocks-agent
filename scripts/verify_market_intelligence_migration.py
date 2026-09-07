@@ -23,6 +23,7 @@ MIGRATIONS = (
     ROOT / "sql" / "migrations" / "20260915_market_source_item_reuse.sql",
     ROOT / "sql" / "migrations" / "20260916_run_scoped_request_provenance.sql",
     ROOT / "sql" / "migrations" / "20261005_market_wide_discovery.sql",
+    ROOT / "sql" / "migrations" / "20261006_reference_snapshot_transfer.sql",
 )
 GATEWAY_ROLE = "service_role"
 TABLES = (
@@ -52,6 +53,10 @@ RPCS = (
 DISCOVERY_TABLES = (
     "market_reference_manifests",
     "market_security_reference_revisions",
+    "market_reference_chunk_receipts",
+    "market_reference_snapshot_memberships",
+    "market_reference_finalization_seals",
+    "market_reference_run_bindings",
     "market_discovery_stage_tasks",
     "market_exposure_facts",
     "market_theme_episode_revisions",
@@ -65,6 +70,11 @@ DISCOVERY_RPCS = (
     "record_market_discovery_reference(uuid,jsonb)",
     "checkpoint_market_discovery_stage(uuid,jsonb)",
     "read_market_discovery_context(uuid,integer)",
+    "begin_market_discovery_reference(uuid,jsonb)",
+    "record_market_discovery_reference_chunk(uuid,jsonb)",
+    "finalize_market_discovery_reference(uuid,jsonb)",
+    "pin_market_discovery_reference(uuid,jsonb)",
+    "read_market_discovery_reference(uuid,jsonb)",
 )
 DISCOVERY_FUNCTIONS = (
     "reject_market_discovery_mutation()",

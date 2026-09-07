@@ -6,8 +6,18 @@ import {
   parseDiscoveryReferencePayload,
   parseDiscoveryStageCheckpointPayload,
   parseRecordIntelligencePayload,
+  parseReferenceBeginPayload,
+  parseReferenceChunkPayload,
+  parseReferenceFinalizePayload,
+  parseReferencePinPayload,
+  parseReferenceReadPayload,
   parseStartIntelligencePayload,
   type RecordIntelligencePayload,
+  type ReferenceBeginPayload,
+  type ReferenceChunkPayload,
+  type ReferenceFinalizePayload,
+  type ReferencePinPayload,
+  type ReferenceReadPayload,
   type StartIntelligencePayload,
 } from "./intelligence.ts";
 import {
@@ -34,7 +44,12 @@ export type Operation =
   | "record_learning"
   | "record_discovery_reference"
   | "checkpoint_discovery_stage"
-  | "read_discovery_context";
+  | "read_discovery_context"
+  | "begin_discovery_reference"
+  | "record_discovery_reference_chunk"
+  | "finalize_discovery_reference"
+  | "pin_discovery_reference"
+  | "read_discovery_reference";
 export type Phase = "pre-market" | "intraday" | "post-market" | "on-demand";
 export type Action =
   | "buy"
@@ -670,6 +685,11 @@ const OPERATIONS: readonly Operation[] = [
   "record_discovery_reference",
   "checkpoint_discovery_stage",
   "read_discovery_context",
+  "begin_discovery_reference",
+  "record_discovery_reference_chunk",
+  "finalize_discovery_reference",
+  "pin_discovery_reference",
+  "read_discovery_reference",
 ];
 const PHASES: readonly Phase[] = [
   "pre-market",
@@ -1101,6 +1121,33 @@ export function parseGatewayEnvelope(value: unknown): GatewayEnvelope {
       throw new Error("run_id is required for read_discovery_context");
     }
     payload = parseDiscoveryContextRequest(row.payload);
+  } else if (operation === "begin_discovery_reference") {
+    if (row.run_id === null) {
+      throw new Error("run_id is required for begin_discovery_reference");
+    }
+    payload = parseReferenceBeginPayload(row.payload);
+  } else if (operation === "record_discovery_reference_chunk") {
+    if (row.run_id === null) {
+      throw new Error(
+        "run_id is required for record_discovery_reference_chunk",
+      );
+    }
+    payload = parseReferenceChunkPayload(row.payload);
+  } else if (operation === "finalize_discovery_reference") {
+    if (row.run_id === null) {
+      throw new Error("run_id is required for finalize_discovery_reference");
+    }
+    payload = parseReferenceFinalizePayload(row.payload);
+  } else if (operation === "pin_discovery_reference") {
+    if (row.run_id === null) {
+      throw new Error("run_id is required for pin_discovery_reference");
+    }
+    payload = parseReferencePinPayload(row.payload);
+  } else if (operation === "read_discovery_reference") {
+    if (row.run_id === null) {
+      throw new Error("run_id is required for read_discovery_reference");
+    }
+    payload = parseReferenceReadPayload(row.payload);
   }
   return {
     schema_version: 1,
@@ -1116,6 +1163,11 @@ export function parseGatewayEnvelope(value: unknown): GatewayEnvelope {
       | RecordLearningPayload
       | DiscoveryReferencePayload
       | DiscoveryStageCheckpointPayload
+      | ReferenceBeginPayload
+      | ReferenceChunkPayload
+      | ReferenceFinalizePayload
+      | ReferencePinPayload
+      | ReferenceReadPayload
       | { limit: number },
   };
 }

@@ -33,6 +33,11 @@ OPERATIONS = (
     "record_discovery_reference",
     "checkpoint_discovery_stage",
     "read_discovery_context",
+    "begin_discovery_reference",
+    "record_discovery_reference_chunk",
+    "finalize_discovery_reference",
+    "pin_discovery_reference",
+    "read_discovery_reference",
 )
 MAX_REQUEST_BYTES = 262_144
 MAX_RESPONSE_BYTES = 1_048_576

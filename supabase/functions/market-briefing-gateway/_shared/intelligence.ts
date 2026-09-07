@@ -139,6 +139,49 @@ export interface DiscoveryReferencePayload {
   security_revisions: JsonObject[];
 }
 
+export interface ReferenceBeginPayload {
+  manifest: JsonObject;
+  capability_id: string;
+  chunk_count: number;
+  security_count: number;
+  root_hash: string;
+  predecessor_manifest_id: string | null;
+}
+
+export interface ReferenceChunkPayload {
+  manifest_id: string;
+  chunk_index: number;
+  chunk_count: number;
+  entries: JsonObject[];
+  chunk_hash: string;
+}
+
+export interface ReferenceFinalizePayload {
+  manifest_id: string;
+  root_hash: string;
+}
+
+export interface ReferencePinPayload {
+  capability_id: string;
+  manifest_id: string | null;
+  reference_status: "healthy" | "reference_stale" | "reference_unavailable";
+  reference_as_of: string;
+}
+
+export interface ReferenceReadPayload {
+  capability_id: string;
+  after_security_id: string | null;
+  limit: number;
+}
+
+export interface ReferencePage {
+  binding: JsonObject;
+  manifest: JsonObject | null;
+  securities: JsonObject[];
+  next_after_security_id: string | null;
+  complete: boolean;
+}
+
 export interface DiscoveryStageCheckpointPayload {
   task: DiscoveryStageTask;
   exposure_facts: JsonObject[];
@@ -727,6 +770,284 @@ export function parseDiscoveryReferencePayload(
     throw new Error("discovery reference manifest identity mismatch");
   }
   return { manifest, security_revisions: securityRevisions };
+}
+
+function referenceCapability(value: unknown, path: string): string {
+  const capability = stringValue(value, path, 80);
+  if (!/^[a-z][a-z0-9_]{2,79}$/.test(capability)) {
+    throw new Error(`${path} is invalid`);
+  }
+  return capability;
+}
+
+function boundedReferenceCall(value: unknown, path: string): JsonObject {
+  const row = objectValue(value, path);
+  if (byteLength(row) > 196_608) throw new Error(`${path} exceeds byte limit`);
+  return row;
+}
+
+export function parseReferenceBeginPayload(
+  value: unknown,
+): ReferenceBeginPayload {
+  const row = boundedReferenceCall(value, "reference begin");
+  exactKeys(row, [
+    "manifest",
+    "capability_id",
+    "chunk_count",
+    "security_count",
+    "root_hash",
+    "predecessor_manifest_id",
+  ], "reference begin");
+  const manifest = parseDiscoveryManifest(row.manifest);
+  const metadata = objectValue(
+    manifest.manifest,
+    "reference begin.manifest.manifest",
+  );
+  if (
+    metadata.coverage_status !== "scope_not_guaranteed" ||
+    metadata.reference_status !== "healthy"
+  ) throw new Error("reference begin manifest status is invalid");
+  const securityCount = integer(
+    row.security_count,
+    "reference begin.security_count",
+    1,
+    15_000,
+  );
+  if (metadata.security_count !== securityCount) {
+    throw new Error("reference begin security count mismatch");
+  }
+  return {
+    manifest,
+    capability_id: referenceCapability(
+      row.capability_id,
+      "reference begin.capability_id",
+    ),
+    chunk_count: integer(
+      row.chunk_count,
+      "reference begin.chunk_count",
+      1,
+      512,
+    ),
+    security_count: securityCount,
+    root_hash: hashValue(row.root_hash, "reference begin.root_hash"),
+    predecessor_manifest_id: row.predecessor_manifest_id === null
+      ? null
+      : uuidValue(
+        row.predecessor_manifest_id,
+        "reference begin.predecessor_manifest_id",
+      ),
+  };
+}
+
+export function parseReferenceChunkPayload(
+  value: unknown,
+): ReferenceChunkPayload {
+  const row = boundedReferenceCall(value, "reference chunk");
+  exactKeys(row, [
+    "manifest_id",
+    "chunk_index",
+    "chunk_count",
+    "entries",
+    "chunk_hash",
+  ], "reference chunk");
+  const entries = arrayValue(row.entries, "reference chunk.entries", 200)
+    .map(parseSecurityRevision);
+  if (entries.length === 0) {
+    throw new Error("reference chunk.entries must not be empty");
+  }
+  rejectDuplicateDiscoveryRowIds(entries, "reference chunk.entries");
+  const manifestId = uuidValue(row.manifest_id, "reference chunk.manifest_id");
+  if (entries.some((entry) => entry.manifest_id !== manifestId)) {
+    throw new Error("reference chunk manifest identity mismatch");
+  }
+  return {
+    manifest_id: manifestId,
+    chunk_index: integer(
+      row.chunk_index,
+      "reference chunk.chunk_index",
+      0,
+      511,
+    ),
+    chunk_count: integer(
+      row.chunk_count,
+      "reference chunk.chunk_count",
+      1,
+      512,
+    ),
+    entries,
+    chunk_hash: hashValue(row.chunk_hash, "reference chunk.chunk_hash"),
+  };
+}
+
+export function parseReferenceFinalizePayload(
+  value: unknown,
+): ReferenceFinalizePayload {
+  const row = boundedReferenceCall(value, "reference finalize");
+  exactKeys(row, ["manifest_id", "root_hash"], "reference finalize");
+  return {
+    manifest_id: uuidValue(row.manifest_id, "reference finalize.manifest_id"),
+    root_hash: hashValue(row.root_hash, "reference finalize.root_hash"),
+  };
+}
+
+export function parseReferencePinPayload(value: unknown): ReferencePinPayload {
+  const row = boundedReferenceCall(value, "reference pin");
+  exactKeys(row, [
+    "capability_id",
+    "manifest_id",
+    "reference_status",
+    "reference_as_of",
+  ], "reference pin");
+  const status = enumValue(
+    row.reference_status,
+    [
+      "healthy",
+      "reference_stale",
+      "reference_unavailable",
+    ] as const,
+    "reference pin.reference_status",
+  );
+  const manifestId = row.manifest_id === null
+    ? null
+    : uuidValue(row.manifest_id, "reference pin.manifest_id");
+  if (
+    (status === "healthy" && manifestId === null) ||
+    (status === "reference_unavailable" && manifestId !== null)
+  ) {
+    throw new Error("reference pin status does not match manifest");
+  }
+  return {
+    capability_id: referenceCapability(
+      row.capability_id,
+      "reference pin.capability_id",
+    ),
+    manifest_id: manifestId,
+    reference_status: status,
+    reference_as_of: timestamp(
+      row.reference_as_of,
+      "reference pin.reference_as_of",
+    ) as string,
+  };
+}
+
+export function parseReferenceReadPayload(
+  value: unknown,
+): ReferenceReadPayload {
+  const row = boundedReferenceCall(value, "reference read");
+  exactKeys(
+    row,
+    ["capability_id", "after_security_id", "limit"],
+    "reference read",
+  );
+  return {
+    capability_id: referenceCapability(
+      row.capability_id,
+      "reference read.capability_id",
+    ),
+    after_security_id: nullableString(
+      row.after_security_id,
+      "reference read.after_security_id",
+      128,
+    ),
+    limit: integer(row.limit, "reference read.limit", 1, 500),
+  };
+}
+
+export function parseReferencePage(value: unknown): ReferencePage {
+  const row = boundedReferenceCall(value, "reference page");
+  exactKeys(row, [
+    "binding",
+    "manifest",
+    "securities",
+    "next_after_security_id",
+    "complete",
+  ], "reference page");
+  const binding = boundedObject(row.binding, "reference page.binding", 2_048);
+  exactKeys(binding, [
+    "manifest_id",
+    "reference_status",
+    "source_retrieved_at",
+    "reference_age_seconds",
+  ], "reference page.binding");
+  const status = enumValue(
+    binding.reference_status,
+    [
+      "healthy",
+      "reference_stale",
+      "reference_unavailable",
+    ] as const,
+    "reference page.binding.reference_status",
+  );
+  const manifestId = binding.manifest_id === null
+    ? null
+    : uuidValue(binding.manifest_id, "reference page.binding.manifest_id");
+  const sourceRetrievedAt = timestamp(
+    binding.source_retrieved_at,
+    "reference page.binding.source_retrieved_at",
+    true,
+  );
+  const age = binding.reference_age_seconds === null ? null : integer(
+    binding.reference_age_seconds,
+    "reference page.binding.reference_age_seconds",
+    0,
+    Number.MAX_SAFE_INTEGER,
+  );
+  if ((status === "reference_unavailable") !== (manifestId === null)) {
+    throw new Error("reference page binding is inconsistent");
+  }
+  if (
+    status === "reference_unavailable"
+      ? sourceRetrievedAt !== null || age !== null
+      : sourceRetrievedAt === null || age === null
+  ) {
+    throw new Error("reference page binding is inconsistent");
+  }
+  const manifest = row.manifest === null
+    ? null
+    : parseDiscoveryManifest(row.manifest);
+  const securities = arrayValue(
+    row.securities,
+    "reference page.securities",
+    500,
+  )
+    .map(parseSecurityRevision);
+  rejectDuplicateDiscoveryRowIds(securities, "reference page.securities");
+  if (
+    (manifest === null) !== (manifestId === null) ||
+    (manifest !== null && manifest.id !== manifestId) ||
+    securities.some((entry) => entry.manifest_id !== manifestId)
+  ) {
+    throw new Error("reference page manifest identity mismatch");
+  }
+  if (typeof row.complete !== "boolean") {
+    throw new Error("reference page.complete must be boolean");
+  }
+  const next = nullableString(
+    row.next_after_security_id,
+    "reference page.next_after_security_id",
+    128,
+  );
+  if (
+    (row.complete && next !== null) ||
+    (!row.complete && (securities.length === 0 ||
+      next !== securities[securities.length - 1].security_id)) ||
+    (status === "reference_unavailable" &&
+      (!row.complete || securities.length !== 0))
+  ) {
+    throw new Error("reference page pagination is inconsistent");
+  }
+  return {
+    binding: {
+      manifest_id: manifestId,
+      reference_status: status,
+      source_retrieved_at: sourceRetrievedAt,
+      reference_age_seconds: age,
+    },
+    manifest,
+    securities,
+    next_after_security_id: next,
+    complete: row.complete,
+  };
 }
 
 function parseDiscoveryResultRow(

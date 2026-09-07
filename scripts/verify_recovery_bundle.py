@@ -36,8 +36,12 @@ _RESTORE_TABLES = (
     ("runs", "analysis_runs", {"phase": "kind"}),
     ("gateway_requests", "market_gateway_requests", {}),
     ("intelligence_runs", "market_intelligence_runs", {}),
+    ("reference_chunk_receipts", "market_reference_chunk_receipts", {}),
     ("reference_manifests", "market_reference_manifests", {}),
     ("security_reference_revisions", "market_security_reference_revisions", {}),
+    ("reference_finalization_seals", "market_reference_finalization_seals", {}),
+    ("reference_snapshot_memberships", "market_reference_snapshot_memberships", {}),
+    ("reference_run_bindings", "market_reference_run_bindings", {}),
     ("discovery_stage_tasks", "market_discovery_stage_tasks", {}),
     ("theme_episode_revisions", "market_theme_episode_revisions", {}),
     ("exposure_facts", "market_exposure_facts", {}),
@@ -58,6 +62,29 @@ _RESTORE_TABLES = (
     ("cash_snapshots", "reconciled_cash_snapshots", {}),
     ("run_terminal_outcomes", "market_run_terminal_outcomes", {}),
 )
+
+
+def ordered_restore_rows(dataset: str, rows: list[dict[str, object]]) -> list[dict[str, object]]:
+    """Return deterministic parent-first rows for self-referencing ledgers."""
+    if dataset != "reference_finalization_seals":
+        return rows
+    pending = list(rows)
+    ordered: list[dict[str, object]] = []
+    restored: set[object] = set()
+    while pending:
+        ready = [
+            row for row in pending
+            if row.get("predecessor_manifest_id") is None
+            or row.get("predecessor_manifest_id") in restored
+        ]
+        if not ready:
+            raise ValueError("reference finalization predecessor chain is not restorable")
+        ready.sort(key=lambda row: str(row.get("manifest_id")))
+        for row in ready:
+            pending.remove(row)
+            ordered.append(row)
+            restored.add(row.get("manifest_id"))
+    return ordered
 
 
 class PostgresIsolatedRestoreTarget:
@@ -135,7 +162,7 @@ def restore_recovery_records(connection, records: Mapping[str, object], *, isola
 
         run_gateway_ids = {row["id"]: row["gateway_request_id"] for row in normalized["runs"]}
         for dataset, table, renames in _RESTORE_TABLES:
-            for source_row in normalized[dataset]:
+            for source_row in ordered_restore_rows(dataset, normalized[dataset]):
                 row = {renames.get(key, key): value for key, value in source_row.items()}
                 if dataset == "runs":
                     row["gateway_request_id"] = None

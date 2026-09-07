@@ -5,6 +5,12 @@ import {
   parseDiscoveryContextRequest,
   parseDiscoveryReferencePayload,
   parseDiscoveryStageCheckpointPayload,
+  parseReferenceBeginPayload,
+  parseReferenceChunkPayload,
+  parseReferenceFinalizePayload,
+  parseReferencePage,
+  parseReferencePinPayload,
+  parseReferenceReadPayload,
   sha256Hex,
 } from "./intelligence.ts";
 
@@ -25,6 +31,161 @@ function assertThrows(fn: () => unknown, message: string): void {
   }
   throw new Error(`expected error containing ${message}`);
 }
+
+function referenceManifest() {
+  return {
+    id: "00000000-0000-4000-8000-000000000101",
+    reference_version: "sec:2026-09-06:fixture",
+    revision: 1,
+    capability_version: 1,
+    taxonomy_version: 1,
+    source_hash: "a".repeat(64),
+    valid_from: "2026-09-06T12:00:00.000Z",
+    valid_to: null,
+    manifest: {
+      coverage_status: "scope_not_guaranteed",
+      reference_status: "healthy",
+      source_url: "https://www.sec.gov/files/company_tickers.json",
+      source_retrieved_at: "2026-09-06T12:00:00.000Z",
+      source_timestamp: null,
+      parser_version: 1,
+      security_count: 1,
+      conflict_count: 0,
+      symbol_directory_status: "disabled_pending_https_and_terms_review",
+    },
+    content_hash: "b".repeat(64),
+  };
+}
+
+function referenceEntry() {
+  return {
+    id: "00000000-0000-4000-8000-000000000102",
+    manifest_id: "00000000-0000-4000-8000-000000000101",
+    revision: 1,
+    security_id: "sec-cik:0000000001:listing-origin:TEST",
+    entity_id: "sec-cik:0000000001",
+    ticker: "TEST",
+    exchange: null,
+    instrument_type: "COMMON_STOCK",
+    eligible: true,
+    exclusion_reasons: [],
+    aliases: ["TEST"],
+    source_ids: ["sec-company-tickers:0000000001"],
+    valid_from: "2026-09-06T00:00:00.000Z",
+    valid_to: null,
+    content_hash: "c".repeat(64),
+  };
+}
+
+Deno.test("reference transfer parsers keep every call bounded and exact", () => {
+  const manifest = referenceManifest();
+  const begin = {
+    manifest,
+    capability_id: "sec_company_tickers_universe",
+    chunk_count: 1,
+    security_count: 1,
+    root_hash: "d".repeat(64),
+    predecessor_manifest_id: null,
+  };
+  const chunk = {
+    manifest_id: manifest.id,
+    chunk_index: 0,
+    chunk_count: 1,
+    entries: [referenceEntry()],
+    chunk_hash: "e".repeat(64),
+  };
+  assertEquals(parseReferenceBeginPayload(begin), begin);
+  assertEquals(parseReferenceChunkPayload(chunk), chunk);
+  assertEquals(
+    parseReferenceFinalizePayload({
+      manifest_id: manifest.id,
+      root_hash: "d".repeat(64),
+    }),
+    { manifest_id: manifest.id, root_hash: "d".repeat(64) },
+  );
+  assertEquals(
+    parseReferencePinPayload({
+      capability_id: "sec_company_tickers_universe",
+      manifest_id: null,
+      reference_status: "reference_stale",
+      reference_as_of: "2026-09-07T12:00:00.000Z",
+    }).reference_status,
+    "reference_stale",
+  );
+  assertEquals(
+    parseReferenceReadPayload({
+      capability_id: "sec_company_tickers_universe",
+      after_security_id: null,
+      limit: 500,
+    }).limit,
+    500,
+  );
+
+  assertThrows(
+    () =>
+      parseReferenceChunkPayload({
+        ...chunk,
+        entries: Array(201).fill(referenceEntry()),
+      }),
+    "at most 200 items",
+  );
+  assertThrows(
+    () =>
+      parseReferenceReadPayload({
+        capability_id: "sec_company_tickers_universe",
+        after_security_id: null,
+        limit: 501,
+      }),
+    "must be a bounded integer",
+  );
+  assertThrows(
+    () => parseReferenceBeginPayload({ ...begin, execution_allowed: false }),
+    "unexpected key",
+  );
+});
+
+Deno.test("reference pages reject inconsistent bindings, pagination, and identities", () => {
+  const page = {
+    binding: {
+      manifest_id: referenceManifest().id,
+      reference_status: "healthy",
+      source_retrieved_at: "2026-09-06T12:00:00.000Z",
+      reference_age_seconds: 0,
+    },
+    manifest: referenceManifest(),
+    securities: [referenceEntry()],
+    next_after_security_id: null,
+    complete: true,
+  };
+  assertEquals(parseReferencePage(page).complete, true);
+  assertThrows(
+    () =>
+      parseReferencePage({
+        ...page,
+        binding: {
+          manifest_id: null,
+          reference_status: "reference_unavailable",
+          source_retrieved_at: "2026-09-06T12:00:00.000Z",
+          reference_age_seconds: 0,
+        },
+        manifest: null,
+        securities: [],
+      }),
+    "binding is inconsistent",
+  );
+  assertThrows(
+    () => parseReferencePage({ ...page, complete: false }),
+    "pagination is inconsistent",
+  );
+  assertThrows(
+    () =>
+      parseReferencePage({
+        ...page,
+        securities: [referenceEntry(), referenceEntry()],
+      }),
+    "duplicate",
+  );
+});
 
 function validRecordIntelligenceEnvelope() {
   const canonicalContent = canonicalJson({

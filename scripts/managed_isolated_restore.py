@@ -266,13 +266,13 @@ class ManagedRestoreTarget:
 
     def restore_records(self, records: Mapping[str, list[dict[str, object]]]) -> None:
         from scripts.export_recovery_bundle import _validated_records
-        from scripts.verify_recovery_bundle import _RESTORE_TABLES
+        from scripts.verify_recovery_bundle import _RESTORE_TABLES, ordered_restore_rows
         normalized = _validated_records(records)
         self.preflight_empty()
         statements = ["BEGIN"]
         run_gateway_ids = {row["id"]: row["gateway_request_id"] for row in normalized["runs"]}
         for dataset, table, renames in _RESTORE_TABLES:
-            for source_row in normalized[dataset]:
+            for source_row in ordered_restore_rows(dataset, normalized[dataset]):
                 row = {renames.get(key, key): value for key, value in source_row.items()}
                 if dataset == "runs":
                     row["gateway_request_id"] = None

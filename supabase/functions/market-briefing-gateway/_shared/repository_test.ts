@@ -299,6 +299,97 @@ Deno.test("newer completed history cannot displace unresolved suggestion context
   assertEquals(selected.map((row) => row.ticker), ["PENDING"]);
 });
 
+Deno.test("reference transfer repository routes all bounded protocol RPCs", async () => {
+  const calls: unknown[] = [];
+  const client = {
+    rpc(name: string, parameters?: Record<string, unknown>) {
+      calls.push({ name, parameters });
+      const data = name === "begin_market_discovery_reference"
+        ? {
+          manifest_id: "00000000-0000-4000-8000-000000000101",
+          predecessor_manifest_id: null,
+          duplicate: false,
+        }
+        : name === "record_market_discovery_reference_chunk"
+        ? {
+          manifest_id: "00000000-0000-4000-8000-000000000101",
+          chunk_index: 0,
+          duplicate: false,
+        }
+        : name === "finalize_market_discovery_reference"
+        ? {
+          manifest_id: "00000000-0000-4000-8000-000000000101",
+          security_count: 1,
+          duplicate: false,
+        }
+        : name === "pin_market_discovery_reference"
+        ? {
+          manifest_id: null,
+          reference_status: "reference_unavailable",
+          source_retrieved_at: null,
+          reference_age_seconds: null,
+          duplicate: false,
+        }
+        : {
+          binding: {
+            manifest_id: null,
+            reference_status: "reference_unavailable",
+            source_retrieved_at: null,
+            reference_age_seconds: null,
+          },
+          manifest: null,
+          securities: [],
+          next_after_security_id: null,
+          complete: true,
+        };
+      return Promise.resolve({ data, error: null });
+    },
+  };
+  const repository = createSupabaseGatewayRepository(client);
+  const runId = "00000000-0000-4000-8000-000000000102";
+  const manifestId = "00000000-0000-4000-8000-000000000101";
+  const begin = {
+    manifest: {},
+    capability_id: "sec_company_tickers_universe",
+    chunk_count: 1,
+    security_count: 1,
+    root_hash: "a".repeat(64),
+    predecessor_manifest_id: null,
+  } as never;
+  const chunk = {
+    manifest_id: "00000000-0000-4000-8000-000000000101",
+    chunk_index: 0,
+    chunk_count: 1,
+    entries: [],
+    chunk_hash: "b".repeat(64),
+  } as never;
+  await repository.beginDiscoveryReference!(runId, begin);
+  await repository.recordDiscoveryReferenceChunk!(runId, chunk);
+  await repository.finalizeDiscoveryReference!(runId, {
+    manifest_id: manifestId,
+    root_hash: "a".repeat(64),
+  });
+  await repository.pinDiscoveryReference!(runId, {
+    capability_id: "sec_company_tickers_universe",
+    manifest_id: null,
+    reference_status: "reference_unavailable",
+    reference_as_of: "2026-09-07T12:00:00.000Z",
+  });
+  const page = await repository.readDiscoveryReference!(runId, {
+    capability_id: "sec_company_tickers_universe",
+    after_security_id: null,
+    limit: 500,
+  });
+  assertEquals(page.complete, true);
+  assertEquals(calls.map((call) => (call as { name: string }).name), [
+    "begin_market_discovery_reference",
+    "record_market_discovery_reference_chunk",
+    "finalize_market_discovery_reference",
+    "pin_market_discovery_reference",
+    "read_market_discovery_reference",
+  ]);
+});
+
 Deno.test("three losing horizons for one recommendation count as one loss", () => {
   assertEquals(
     consecutiveRecommendationLosses([

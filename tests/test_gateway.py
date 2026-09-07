@@ -192,6 +192,11 @@ def test_alert_evaluation_is_allowlisted_and_standalone(monkeypatch):
         ("record_discovery_reference", RUN_ID),
         ("checkpoint_discovery_stage", RUN_ID),
         ("read_discovery_context", RUN_ID),
+        ("begin_discovery_reference", RUN_ID),
+        ("record_discovery_reference_chunk", RUN_ID),
+        ("finalize_discovery_reference", RUN_ID),
+        ("pin_discovery_reference", RUN_ID),
+        ("read_discovery_reference", RUN_ID),
     ],
 )
 def test_intelligence_persistence_operations_are_allowlisted(monkeypatch, operation, run_id):

@@ -26,6 +26,8 @@ REQUIRED_RECOVERY_RECORDS = (
     "holdings", "transactions", "commands", "command_acknowledgements", "runs",
     "gateway_requests", "policies", "intelligence_runs",
     "reference_manifests", "security_reference_revisions", "discovery_stage_tasks",
+    "reference_chunk_receipts", "reference_snapshot_memberships",
+    "reference_finalization_seals", "reference_run_bindings",
     "theme_episode_revisions", "exposure_facts", "research_nominations",
     "packets", "reports",
     "intelligence_run_events", "source_quota_reservations", "collection_checkpoints",
@@ -77,6 +79,27 @@ DATASET_FIELDS = {
         "instrument_type": str, "eligible": bool, "exclusion_reasons": list,
         "aliases": list, "source_ids": list, "valid_from": str, "valid_to": NULLABLE_TEXT,
         "content_hash": str, "created_at": str,
+    },
+    "reference_chunk_receipts": {
+        "manifest_id": str, "run_id": str, "capability_id": str,
+        "chunk_index": int, "chunk_count": int, "entry_count": int,
+        "chunk_hash": str, "predecessor_manifest_id": NULLABLE_TEXT,
+        "payload": dict, "created_at": str,
+    },
+    "reference_snapshot_memberships": {
+        "manifest_id": str, "security_revision_id": str, "security_id": str,
+        "ordinal": int, "created_at": str,
+    },
+    "reference_finalization_seals": {
+        "manifest_id": str, "run_id": str, "capability_id": str,
+        "predecessor_manifest_id": NULLABLE_TEXT, "chunk_count": int,
+        "security_count": int, "root_hash": str, "finalized_at": str,
+    },
+    "reference_run_bindings": {
+        "run_id": str, "capability_id": str, "manifest_id": NULLABLE_TEXT,
+        "reference_status": str, "reference_as_of": str,
+        "source_retrieved_at": NULLABLE_TEXT, "request_payload": dict,
+        "reference_age_seconds": (int, type(None)), "created_at": str,
     },
     "discovery_stage_tasks": {
         "id": str, "run_id": str, "stage": str, "capability_id": str, "provider": str,
@@ -228,11 +251,16 @@ def _validated_records(records: Mapping[str, object]) -> dict[str, list[dict[str
             "collection_checkpoints": ("run_id", "cache_key"),
             "collection_checkpoint_history": ("run_id", "cache_key", "source_receipt_id"),
             "collection_completions": "completion_id", "report_origins": "request_id",
+            "reference_chunk_receipts": ("manifest_id", "chunk_index"),
+            "reference_snapshot_memberships": ("manifest_id", "security_id"),
+            "reference_finalization_seals": "manifest_id",
+            "reference_run_bindings": ("run_id", "capability_id"),
         }.get(name, "id")
         if isinstance(identity_fields, str):
             identity_fields = (identity_fields,)
         identities = [tuple(row[field] for field in identity_fields) for row in clean]
-        if any(not all(identity) for identity in identities) or len(set(identities)) != len(identities):
+        if any(any(value is None or value == "" for value in identity) for identity in identities) \
+                or len(set(identities)) != len(identities):
             raise ValueError(f"recovery dataset {name} has duplicate or missing identities")
         result[name] = sorted(clean, key=canonical_json)
     expected_role_shapes = {
@@ -337,6 +365,77 @@ def _validated_records(records: Mapping[str, object]) -> dict[str, list[dict[str
            or not valid_discovery_json(row["source_ids"], max_bytes=4096)
            for row in security_revisions.values()):
         raise ValueError("discovery security dependency mismatch or invalid content")
+    seals = {row["manifest_id"]: row for row in result["reference_finalization_seals"]}
+    receipts_by_manifest: dict[str, list[dict[str, object]]] = {}
+    for row in result["reference_chunk_receipts"]:
+        receipts_by_manifest.setdefault(row["manifest_id"], []).append(row)
+        if (not UUID.fullmatch(row["manifest_id"]) or row["run_id"] not in intelligence_runs
+                or not re.fullmatch(r"[a-z][a-z0-9_]{2,79}", row["capability_id"])
+                or not -1 <= row["chunk_index"] <= 511
+                or not 1 <= row["chunk_count"] <= 512
+                or not 0 <= row["entry_count"] <= 200
+                or not HASH.fullmatch(row["chunk_hash"])
+                or not valid_discovery_json(row["payload"], max_bytes=196608)):
+            raise ValueError("discovery reference transfer dependency mismatch")
+    memberships_by_manifest: dict[str, list[dict[str, object]]] = {}
+    for row in result["reference_snapshot_memberships"]:
+        memberships_by_manifest.setdefault(row["manifest_id"], []).append(row)
+        revision = security_revisions.get(row["security_revision_id"])
+        if (row["manifest_id"] not in manifests or revision is None
+                or row["security_id"] != revision["security_id"]
+                or not 0 <= row["ordinal"] <= 14999):
+            raise ValueError("discovery reference membership dependency mismatch")
+    for manifest_id, seal in seals.items():
+        predecessor = seals.get(seal["predecessor_manifest_id"]) if seal["predecessor_manifest_id"] else None
+        receipts = receipts_by_manifest.get(manifest_id, [])
+        chunks = sorted((row for row in receipts if row["chunk_index"] >= 0), key=lambda row: row["chunk_index"])
+        begin = next((row for row in receipts if row["chunk_index"] == -1), None)
+        members = memberships_by_manifest.get(manifest_id, [])
+        if (manifest_id not in manifests or seal["run_id"] not in intelligence_runs
+                or manifests[manifest_id]["run_id"] != seal["run_id"]
+                or not re.fullmatch(r"[a-z][a-z0-9_]{2,79}", seal["capability_id"])
+                or not 1 <= seal["chunk_count"] <= 512
+                or not 1 <= seal["security_count"] <= 15000
+                or not HASH.fullmatch(seal["root_hash"])
+                or begin is None or begin["run_id"] != seal["run_id"]
+                or begin["capability_id"] != seal["capability_id"]
+                or begin["chunk_hash"] != seal["root_hash"]
+                or [row["chunk_index"] for row in chunks] != list(range(seal["chunk_count"]))
+                or any(row["chunk_count"] != seal["chunk_count"] for row in receipts)
+                or sum(row["entry_count"] for row in chunks) != seal["security_count"]
+                or hashlib.sha256("".join(row["chunk_hash"] for row in chunks).encode()).hexdigest() != seal["root_hash"]
+                or len(members) != seal["security_count"]
+                or sorted(row["ordinal"] for row in members) != list(range(seal["security_count"]))
+                or (seal["predecessor_manifest_id"] is not None
+                    and (predecessor is None or predecessor["capability_id"] != seal["capability_id"]))):
+            raise ValueError("discovery reference finalization dependency mismatch")
+    for row in result["reference_run_bindings"]:
+        seal = seals.get(row["manifest_id"]) if row["manifest_id"] else None
+        unavailable = row["reference_status"] == "reference_unavailable"
+        request = row["request_payload"]
+        request_status = request.get("reference_status") if isinstance(request, dict) else None
+        request_manifest = request.get("manifest_id") if isinstance(request, dict) else None
+        if (row["run_id"] not in intelligence_runs
+                or not re.fullmatch(r"[a-z][a-z0-9_]{2,79}", row["capability_id"])
+                or row["reference_status"] not in {"healthy", "reference_stale", "reference_unavailable"}
+                or not valid_discovery_json(request, max_bytes=196608)
+                or set(request) != {"capability_id", "manifest_id", "reference_status", "reference_as_of"}
+                or request.get("capability_id") != row["capability_id"]
+                or not isinstance(request.get("reference_as_of"), str)
+                or request_status not in {"healthy", "reference_stale", "reference_unavailable"}
+                or (row["reference_status"] == "healthy"
+                    and (request_status != "healthy" or request_manifest != row["manifest_id"]))
+                or (row["reference_status"] == "reference_stale"
+                    and (request_status != "reference_stale"
+                         or request_manifest not in {None, row["manifest_id"]}))
+                or (unavailable and (request_status not in {"reference_stale", "reference_unavailable"}
+                                     or request_manifest is not None))
+                or unavailable != (row["manifest_id"] is None)
+                or unavailable != (row["source_retrieved_at"] is None)
+                or unavailable != (row["reference_age_seconds"] is None)
+                or (seal is not None and seal["capability_id"] != row["capability_id"])
+                or (not unavailable and (seal is None or row["reference_age_seconds"] < 0))):
+            raise ValueError("discovery reference binding dependency mismatch")
     discovery_tasks = {row["id"]: row for row in result["discovery_stage_tasks"]}
     if any(not UUID.fullmatch(row["id"]) or row["run_id"] not in intelligence_runs
            or row["stage"] not in discovery_stages or row["provider"] not in discovery_providers
@@ -552,6 +651,10 @@ def relationships(records: Mapping[str, list]) -> dict[str, list]:
         "intelligence_analysis_run": sorted([[row["id"], row["policy_version"]] for row in records["intelligence_runs"]]),
         "discovery_manifest_run": sorted([[row["id"], row["run_id"], row["content_hash"]] for row in records["reference_manifests"]]),
         "discovery_security_manifest_run": sorted([[row["id"], row["manifest_id"], row["run_id"]] for row in records["security_reference_revisions"]]),
+        "discovery_reference_chunks": sorted([[row["manifest_id"], row["chunk_index"], row["chunk_hash"]] for row in records["reference_chunk_receipts"]]),
+        "discovery_reference_memberships": sorted([[row["manifest_id"], row["security_revision_id"], row["security_id"], row["ordinal"]] for row in records["reference_snapshot_memberships"]]),
+        "discovery_reference_finalization": sorted([[row["manifest_id"], row["run_id"], row["predecessor_manifest_id"], row["root_hash"]] for row in records["reference_finalization_seals"]]),
+        "discovery_reference_bindings": sorted([[row["run_id"], row["capability_id"], row["manifest_id"], row["reference_status"]] for row in records["reference_run_bindings"]]),
         "discovery_task_run_dependencies": sorted([[row["id"], row["run_id"], row["dependency_ids"]] for row in records["discovery_stage_tasks"]]),
         "discovery_theme_task_run": sorted([[row["id"], row["task_id"], row["run_id"]] for row in records["theme_episode_revisions"]]),
         "discovery_exposure_lineage": sorted([[row["id"], row["task_id"], row["security_revision_id"], row["theme_episode_revision_id"]] for row in records["exposure_facts"]]),

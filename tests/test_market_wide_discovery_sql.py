@@ -17,6 +17,7 @@ from scripts.verify_market_intelligence_migration import collect_snapshot
 
 ROOT = Path(__file__).resolve().parents[1]
 MIGRATION = ROOT / "sql" / "migrations" / "20261005_market_wide_discovery.sql"
+TRANSFER_MIGRATION = ROOT / "sql" / "migrations" / "20261006_reference_snapshot_transfer.sql"
 SCHEMA = ROOT / "sql" / "schema.sql"
 
 TABLES = (
@@ -127,7 +128,8 @@ def test_discovery_rpcs_are_static_security_definers_with_least_privilege():
 def test_schema_appends_the_new_immutable_migration_verbatim():
     migration = MIGRATION.read_text()
     schema = SCHEMA.read_text()
-    assert schema.endswith(migration)
+    assert migration in schema
+    assert schema.endswith(TRANSFER_MIGRATION.read_text())
 
 
 def test_postgresql_parser_rejects_a_malformed_discovery_fixture():
@@ -165,6 +167,7 @@ def discovery_db():
                 "CREATE TABLE public.market_intelligence_runs(id uuid PRIMARY KEY REFERENCES public.analysis_runs(id))"
             )
             connection.execute(MIGRATION.read_text())
+            connection.execute(TRANSFER_MIGRATION.read_text())
             yield connection
         finally:
             if connection is not None:
@@ -651,5 +654,10 @@ def test_verifier_collects_exact_discovery_relation_column_and_function_grants(d
         ("record_market_discovery_reference(uuid,jsonb)", "service_role", "EXECUTE"),
         ("checkpoint_market_discovery_stage(uuid,jsonb)", "service_role", "EXECUTE"),
         ("read_market_discovery_context(uuid,integer)", "service_role", "EXECUTE"),
+        ("begin_market_discovery_reference(uuid,jsonb)", "service_role", "EXECUTE"),
+        ("record_market_discovery_reference_chunk(uuid,jsonb)", "service_role", "EXECUTE"),
+        ("finalize_market_discovery_reference(uuid,jsonb)", "service_role", "EXECUTE"),
+        ("pin_market_discovery_reference(uuid,jsonb)", "service_role", "EXECUTE"),
+        ("read_market_discovery_reference(uuid,jsonb)", "service_role", "EXECUTE"),
     }
     assert snapshot["unexpected_grants"] == []

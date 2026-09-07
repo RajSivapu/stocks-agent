@@ -211,6 +211,7 @@ class IntelligencePipeline:
         context: Mapping[str, object] | None = None,
         packet_limits: PacketLimits = PacketLimits(),
         cache: ResumableCollectionCache | None = None,
+        reference_stage: object | None = None,
     ) -> None:
         self.gateway = gateway
         values = tuple(adapters.values()) if isinstance(adapters, Mapping) else tuple(adapters)
@@ -225,6 +226,9 @@ class IntelligencePipeline:
             raise ValueError("comparison and learning provenance require typed gateway operations")
         self.packet_limits = packet_limits
         self.cache = cache or ResumableCollectionCache()
+        if reference_stage is not None and not callable(reference_stage):
+            raise ValueError("reference_stage must be callable")
+        self.reference_stage = reference_stage
 
     def run(self, request: PipelineRequest) -> PipelineReceipt:
         targets = self._targets(request.phase)
@@ -257,6 +261,34 @@ class IntelligencePipeline:
         run_id = str(start.get("run_id") or "")
         if run_id != request.request_id:
             raise ValueError("gateway start receipt run_id does not match request_id")
+        if self.reference_stage is not None:
+            reference = self.reference_stage(run_id, request)
+            if not isinstance(reference, Mapping):
+                raise ValueError("reference stage result is invalid")
+            allowed = {
+                "coverage_status", "reference_status", "reference_manifest_id",
+                "reference_age_seconds", "execution_allowed",
+            }
+            if set(reference) != allowed or reference.get("coverage_status") != "scope_not_guaranteed" \
+                    or reference.get("reference_status") not in {
+                        "healthy", "reference_stale", "reference_unavailable"
+                    } or reference.get("execution_allowed") is not False:
+                raise ValueError("reference stage result is invalid")
+            manifest_id = reference.get("reference_manifest_id")
+            age = reference.get("reference_age_seconds")
+            status = reference["reference_status"]
+            if status == "reference_unavailable":
+                if manifest_id is not None or age is not None:
+                    raise ValueError("reference stage result is invalid")
+            else:
+                try:
+                    if str(uuid.UUID(str(manifest_id))) != manifest_id:
+                        raise ValueError
+                except (TypeError, ValueError, AttributeError):
+                    raise ValueError("reference stage result is invalid") from None
+                if isinstance(age, bool) or not isinstance(age, int) or age < 0:
+                    raise ValueError("reference stage result is invalid")
+            self.context["reference_coverage"] = dict(reference)
         request_window = _request_window(start.get("request_window"), request)
         checkpoint_entries = start.get("cache_entries")
         if not isinstance(checkpoint_entries, Sequence) or isinstance(checkpoint_entries, (str, bytes, bytearray)):
@@ -527,6 +559,9 @@ class IntelligencePipeline:
                 if value.disposition == "duplicate"
             ],
         })
+        reference_coverage = self.context.get("reference_coverage")
+        if isinstance(reference_coverage, Mapping):
+            coverage.update(reference_coverage)
         limits = replace(
             self.packet_limits,
             max_serialized_bytes=min(

@@ -25,7 +25,12 @@
       "enabled": true,
       "provider_priority": 0,
       "query_pack": {
-        "default": {"host": "www.sec.gov", "path": "/files/company_tickers.json"}
+        "default": {
+          "host": "www.sec.gov",
+          "path": "/files/company_tickers.json",
+          "coverage_status": "scope_not_guaranteed",
+          "symbol_directory_ingestion": "disabled_pending_https_and_terms_review"
+        }
       }
     },
     {

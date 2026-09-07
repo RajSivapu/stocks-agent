@@ -246,8 +246,11 @@ Deno.test("gateway envelope accepts scoped intelligence controller operations", 
       policy_version: 1,
       reservation_plan: { reservations: [] },
       request_window: {
-        start: "2026-09-04T11:00:00.000Z", end: "2026-09-04T12:00:00.000Z",
-        timezone: "America/Chicago", market_date: "2026-09-04", phase: "pre-market",
+        start: "2026-09-04T11:00:00.000Z",
+        end: "2026-09-04T12:00:00.000Z",
+        timezone: "America/Chicago",
+        market_date: "2026-09-04",
+        phase: "pre-market",
       },
     },
   };
@@ -257,7 +260,10 @@ Deno.test("gateway envelope accepts scoped intelligence controller operations", 
     operation: "checkpoint_intelligence_collection",
     payload: { cache_key: "a".repeat(64), receipt: {}, items: [] },
   };
-  assertEquals(parseGatewayEnvelope(checkpoint).operation, "checkpoint_intelligence_collection");
+  assertEquals(
+    parseGatewayEnvelope(checkpoint).operation,
+    "checkpoint_intelligence_collection",
+  );
 });
 
 Deno.test("gateway envelope rejects unknown and extra authority fields", () => {
@@ -303,7 +309,10 @@ Deno.test("gateway envelope accepts only a bounded review-only learning record",
   assertThrows(() => parseGatewayEnvelope(executable), "unexpected key");
 
   const mutationTarget = structuredClone(envelope);
-  (mutationTarget.payload.observation.proposed_change as Record<string, unknown>)
+  (mutationTarget.payload.observation.proposed_change as Record<
+    string,
+    unknown
+  >)
     .operation = "update_policy";
   assertThrows(() => parseGatewayEnvelope(mutationTarget), "unexpected key");
 });
@@ -611,4 +620,36 @@ Deno.test("artifact parser rejects dynamic tables and caller-owned close fields"
       }),
     "unexpected key",
   );
+});
+
+Deno.test("reference snapshot transfer operations require a run and parse service payloads", () => {
+  const base = {
+    schema_version: 1 as const,
+    request_id: "00000000-0000-4000-8000-000000000091",
+    run_id: "00000000-0000-4000-8000-000000000092",
+    dry_run: false,
+  };
+  const read = parseGatewayEnvelope({
+    ...base,
+    operation: "read_discovery_reference",
+    payload: {
+      capability_id: "sec_company_tickers_universe",
+      after_security_id: null,
+      limit: 500,
+    },
+  });
+  assertEquals(read.operation, "read_discovery_reference");
+  assertEquals((read.payload as { limit: number }).limit, 500);
+  assertThrows(() =>
+    parseGatewayEnvelope({
+      ...base,
+      run_id: null,
+      operation: "pin_discovery_reference",
+      payload: {
+        capability_id: "sec_company_tickers_universe",
+        manifest_id: null,
+        reference_status: "reference_unavailable",
+        reference_as_of: "2026-09-07T12:00:00.000Z",
+      },
+    }), "run_id is required");
 });

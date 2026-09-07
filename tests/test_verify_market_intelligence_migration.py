@@ -58,6 +58,10 @@ RPCS = (
 DISCOVERY_TABLES = (
     "market_reference_manifests",
     "market_security_reference_revisions",
+    "market_reference_chunk_receipts",
+    "market_reference_snapshot_memberships",
+    "market_reference_finalization_seals",
+    "market_reference_run_bindings",
     "market_discovery_stage_tasks",
     "market_exposure_facts",
     "market_theme_episode_revisions",
@@ -67,6 +71,11 @@ DISCOVERY_RPCS = (
     "record_market_discovery_reference(uuid,jsonb)",
     "checkpoint_market_discovery_stage(uuid,jsonb)",
     "read_market_discovery_context(uuid,integer)",
+    "begin_market_discovery_reference(uuid,jsonb)",
+    "record_market_discovery_reference_chunk(uuid,jsonb)",
+    "finalize_market_discovery_reference(uuid,jsonb)",
+    "pin_market_discovery_reference(uuid,jsonb)",
+    "read_market_discovery_reference(uuid,jsonb)",
 )
 DISCOVERY_DASHBOARD_COLUMNS = {
     "market_reference_manifests": (
@@ -338,14 +347,7 @@ def test_discovery_catalog_guards_and_rpc_grants_fail_closed():
                 else f"{table}_append_only"
             ),
         }
-        for table in (
-            "market_reference_manifests",
-            "market_security_reference_revisions",
-            "market_discovery_stage_tasks",
-            "market_exposure_facts",
-            "market_theme_episode_revisions",
-            "market_research_nominations",
-        )
+        for table in DISCOVERY_TABLES
     }
     snapshot["discovery_functions"] = {
         signature: {
@@ -353,16 +355,12 @@ def test_discovery_catalog_guards_and_rpc_grants_fail_closed():
             "public_execute": False,
             "gateway_execute": True,
         }
-        for signature in (
-            "record_market_discovery_reference(uuid,jsonb)",
-            "checkpoint_market_discovery_stage(uuid,jsonb)",
-            "read_market_discovery_context(uuid,integer)",
-        )
+        for signature in DISCOVERY_RPCS
     }
 
     receipt = evaluate_snapshot(snapshot)
-    assert receipt["discovery_ledgers"] == 6
-    assert receipt["discovery_gateway_only_rpcs"] == 3
+    assert receipt["discovery_ledgers"] == 10
+    assert receipt["discovery_gateway_only_rpcs"] == 8
 
     missing_guard = deepcopy(snapshot)
     missing_guard["discovery_tables"]["market_discovery_stage_tasks"]["guard"] = None

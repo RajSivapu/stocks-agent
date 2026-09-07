@@ -76,6 +76,11 @@ import {
   type DiscoveryReferencePayload,
   type DiscoveryStageCheckpointPayload,
   type RecordIntelligencePayload,
+  type ReferenceBeginPayload,
+  type ReferenceChunkPayload,
+  type ReferenceFinalizePayload,
+  type ReferencePinPayload,
+  type ReferenceReadPayload,
   sha256Hex,
   type StartIntelligencePayload,
   summarizeIntelligencePayload,
@@ -449,7 +454,12 @@ export function createGatewayHandler(dependencies: GatewayDependencies) {
         envelope.operation === "record_report" ||
         envelope.operation === "record_learning" ||
         envelope.operation === "record_discovery_reference" ||
-        envelope.operation === "checkpoint_discovery_stage"
+        envelope.operation === "checkpoint_discovery_stage" ||
+        envelope.operation === "begin_discovery_reference" ||
+        envelope.operation === "record_discovery_reference_chunk" ||
+        envelope.operation === "finalize_discovery_reference" ||
+        envelope.operation === "pin_discovery_reference" ||
+        envelope.operation === "read_discovery_reference"
       ) {
         prepared = envelope.operation === "record_report"
           ? parseRecordReportPayload(envelope.payload)
@@ -668,6 +678,42 @@ export function createGatewayHandler(dependencies: GatewayDependencies) {
             telegram_message_ids: [],
           });
         }
+        if (envelope.operation === "read_discovery_reference") {
+          return response(200, {
+            ok: true,
+            dry_run: true,
+            reference: {
+              binding: {
+                manifest_id: null,
+                reference_status: "reference_unavailable",
+                source_retrieved_at: null,
+                reference_age_seconds: null,
+              },
+              manifest: null,
+              securities: [],
+              next_after_security_id: null,
+              complete: true,
+            },
+            write_counts: {},
+            telegram_message_ids: [],
+          });
+        }
+        if (
+          [
+            "begin_discovery_reference",
+            "record_discovery_reference_chunk",
+            "finalize_discovery_reference",
+            "pin_discovery_reference",
+          ].includes(envelope.operation)
+        ) {
+          return response(200, {
+            ok: true,
+            dry_run: true,
+            duplicate: false,
+            write_counts: {},
+            telegram_message_ids: [],
+          });
+        }
         if (envelope.operation === "start_run") {
           return response(200, {
             ok: true,
@@ -818,6 +864,64 @@ export function createGatewayHandler(dependencies: GatewayDependencies) {
           ),
           telegram_message_ids: [],
         });
+      } catch (error) {
+        const code = error instanceof GatewayRepositoryError
+          ? error.code
+          : "PERSISTENCE_FAILED";
+        return response(errorStatus(code), { ok: false, code });
+      }
+    }
+    if (envelope.operation === "read_discovery_reference") {
+      try {
+        if (!deps.repository.readDiscoveryReference) {
+          throw new GatewayRepositoryError("PERSISTENCE_FAILED");
+        }
+        return response(200, {
+          ok: true,
+          reference: await deps.repository.readDiscoveryReference(
+            requireRun(envelope),
+            prepared as ReferenceReadPayload,
+          ),
+          telegram_message_ids: [],
+        });
+      } catch (error) {
+        const code = error instanceof GatewayRepositoryError
+          ? error.code
+          : "PERSISTENCE_FAILED";
+        return response(errorStatus(code), { ok: false, code });
+      }
+    }
+    if (
+      [
+        "begin_discovery_reference",
+        "record_discovery_reference_chunk",
+        "finalize_discovery_reference",
+        "pin_discovery_reference",
+      ].includes(envelope.operation)
+    ) {
+      try {
+        const runId = requireRun(envelope);
+        const result = envelope.operation === "begin_discovery_reference"
+          ? await deps.repository.beginDiscoveryReference?.(
+            runId,
+            prepared as ReferenceBeginPayload,
+          )
+          : envelope.operation === "record_discovery_reference_chunk"
+          ? await deps.repository.recordDiscoveryReferenceChunk?.(
+            runId,
+            prepared as ReferenceChunkPayload,
+          )
+          : envelope.operation === "finalize_discovery_reference"
+          ? await deps.repository.finalizeDiscoveryReference?.(
+            runId,
+            prepared as ReferenceFinalizePayload,
+          )
+          : await deps.repository.pinDiscoveryReference?.(
+            runId,
+            prepared as ReferencePinPayload,
+          );
+        if (!result) throw new GatewayRepositoryError("PERSISTENCE_FAILED");
+        return response(200, { ok: true, ...result, telegram_message_ids: [] });
       } catch (error) {
         const code = error instanceof GatewayRepositoryError
           ? error.code
