@@ -19,6 +19,7 @@ import type {
 import { DashboardApiError, type DashboardClient } from "../api/client";
 import { useDashboardResource, type ResourceState } from "../api/useDashboardResource";
 import { AuthProvider, type AuthClient, useAuth } from "../auth/AuthProvider";
+import { ResetPasswordPage } from "../auth/ResetPasswordPage";
 import { SignInPage } from "../auth/SignInPage";
 import { AsyncView } from "../components/AsyncView";
 import { ThemeProvider } from "../theme/theme";
@@ -115,6 +116,7 @@ function SystemRoute({ client, token, onError, onSignOut }: { client: DashboardC
 function ProtectedApplication({ dashboardClient }: { dashboardClient: DashboardClient }) {
   const auth = useAuth();
   if (auth.loading) return <main className="initial-shell"><p>Opening private workspace…</p></main>;
+  if (auth.recovering && auth.session) return <ResetPasswordPage />;
   if (!auth.session || auth.locked) return <SignInPage />;
   return <AuthenticatedApplication dashboardClient={dashboardClient} token={auth.session.access_token} onSignOut={auth.signOut} />;
 }

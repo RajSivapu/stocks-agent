@@ -18,32 +18,32 @@ from urllib.request import Request, urlopen
 PROJECT_HOST = re.compile(r"^[a-z0-9]{20}\.supabase\.co$")
 EMAIL = re.compile(r"^[^\s@]+@[^\s@]+\.[^\s@]+$")
 UUID = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$", re.IGNORECASE)
-TOKEN_TEMPLATE = re.compile(r"{{\s*\.Token\s*}}")
 CONFIRMATION_URL_TEMPLATE = re.compile(r"{{\s*\.ConfirmationURL\s*}}")
 AUTH_EMAIL_OTP_RECEIPT_KEYS = frozenset({
     "mailer_otp_length",
     "mailer_templates_magic_link_content",
+    "mailer_templates_recovery_content",
 })
 
 
 def validate_email_otp_configuration(config: Mapping[str, object]) -> dict[str, object]:
-    """Fail closed unless hosted Auth emits a supported code or signed-link flow."""
+    """Fail closed unless hosted Auth emits the signed links implemented by the owner UI."""
     if set(config) != AUTH_EMAIL_OTP_RECEIPT_KEYS:
-        raise RuntimeError("Auth configuration receipt must contain exactly the OTP length and email template")
+        raise RuntimeError("Auth configuration receipt must contain exactly the OTP length and email templates")
     otp_length = config.get("mailer_otp_length")
     if not isinstance(otp_length, int) or isinstance(otp_length, bool) or otp_length != 6:
         raise RuntimeError("Supabase Auth email OTP must use a six-digit code")
-    template = config.get("mailer_templates_magic_link_content")
-    uses_token = isinstance(template, str) and TOKEN_TEMPLATE.search(template) is not None
-    uses_confirmation_url = (
-        isinstance(template, str) and CONFIRMATION_URL_TEMPLATE.search(template) is not None
-    )
-    if not uses_token and not uses_confirmation_url:
-        raise RuntimeError("Supabase Auth email template must contain the Token or ConfirmationURL variable")
+    magic_link_template = config.get("mailer_templates_magic_link_content")
+    if not isinstance(magic_link_template, str) or CONFIRMATION_URL_TEMPLATE.search(magic_link_template) is None:
+        raise RuntimeError("Supabase Auth magic-link template must contain the ConfirmationURL variable")
+    recovery_template = config.get("mailer_templates_recovery_content")
+    if not isinstance(recovery_template, str) or CONFIRMATION_URL_TEMPLATE.search(recovery_template) is None:
+        raise RuntimeError("Supabase Auth recovery template must contain the ConfirmationURL variable")
     return {
         "status": "verified",
         "otp_length": 6,
-        "email_flow": "code" if uses_token else "link",
+        "email_flow": "link",
+        "recovery_flow": "link",
     }
 
 

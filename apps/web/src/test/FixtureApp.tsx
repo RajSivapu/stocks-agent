@@ -15,6 +15,9 @@ import type {
 } from "@stocks-agent/dashboard-contracts";
 
 import { AppShell } from "../app/AppShell";
+import { AuthProvider, useAuth, type AuthClient, type AuthSession } from "../auth/AuthProvider";
+import { ResetPasswordPage } from "../auth/ResetPasswordPage";
+import { SignInPage } from "../auth/SignInPage";
 import { IntelligencePage } from "../features/intelligence/IntelligencePage";
 import { IdeasPage } from "../features/ideas/IdeasPage";
 import { PortfolioPage } from "../features/portfolio/PortfolioPage";
@@ -131,9 +134,42 @@ const normalAlert = {
   sources: [{ label: "Evidence source", url: "https://example.com/evidence" }],
 };
 
+const fixtureAuthClient: AuthClient = {
+  getSession: async () => ({ data: { session: null }, error: null }),
+  onAuthStateChange: () => ({ data: { subscription: { unsubscribe() {} } } }),
+  signInWithPassword: async () => ({ data: { session: null }, error: new Error("fixture rejection") }),
+  signInWithOtp: async () => ({ error: null }),
+  resetPasswordForEmail: async () => ({ error: null }),
+  updateUser: async () => ({ error: null }),
+  signOut: async () => ({ error: null }),
+};
+
+const fixtureRecoverySession = {
+  access_token: "fixture-recovery-token",
+  user: { id: "fixture-owner", email: "owner@example.com" },
+} as AuthSession;
+
+const fixtureRecoveryAuthClient: AuthClient = {
+  ...fixtureAuthClient,
+  getSession: async () => ({ data: { session: fixtureRecoverySession }, error: null }),
+  onAuthStateChange: (callback) => {
+    const timer = window.setTimeout(() => callback("PASSWORD_RECOVERY", fixtureRecoverySession), 0);
+    return { data: { subscription: { unsubscribe: () => window.clearTimeout(timer) } } };
+  },
+};
+
+function FixtureAuthSurface() {
+  const auth = useAuth();
+  if (auth.loading) return <main className="initial-shell"><p>Opening private workspace…</p></main>;
+  if (auth.recovering && auth.session) return <ResetPasswordPage />;
+  return <SignInPage />;
+}
+
 function FixtureSurface() {
   const location = useLocation();
   const mode = new URLSearchParams(location.search).get("fixture") ?? "complete";
+  if (mode === "auth") return <AuthProvider client={fixtureAuthClient}><FixtureAuthSurface /></AuthProvider>;
+  if (mode === "auth-recovery") return <AuthProvider client={fixtureRecoveryAuthClient}><FixtureAuthSurface /></AuthProvider>;
   if (mode === "owner-denied") return <main className="auth-layout"><section className="auth-card"><p className="eyebrow">Private workspace</p><h1>Owner only</h1><p>This dashboard is restricted to its owner.</p></section></main>;
   if (mode === "expired") return <main className="auth-layout"><section className="auth-card"><p className="eyebrow">Protected view paused</p><h1>Session expired</h1><p>Sign in again to continue.</p></section></main>;
   const stale = mode === "stale";

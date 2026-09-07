@@ -307,9 +307,11 @@ def test_auth_attestation_is_read_only_and_redacts_owner_identity():
         "mailer_secure_email_change_enabled": True,
         "site_url": origin,
         "uri_allow_list": origin,
-        "mailer_templates_magic_link_content": "Your code is {{ .Token }}",
+        "mailer_templates_magic_link_content": "Sign in: {{ .ConfirmationURL }}",
+        "mailer_templates_recovery_content": "Reset: {{ .ConfirmationURL }}",
     }
-    assert validate_auth_configuration(config, origin)["email_flow"] == "code"
+    assert validate_auth_configuration(config, origin)["email_flow"] == "link"
+    assert validate_auth_configuration(config, origin)["recovery_flow"] == "link"
     assert validate_auth_configuration(config, origin)["jwt_expiry_seconds"] == 900
 
     calls = []

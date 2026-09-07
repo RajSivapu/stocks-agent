@@ -408,10 +408,11 @@ def validate_auth_configuration(config: Mapping[str, object], site_origin: str) 
         "uri_allow_list": site_origin,
     }
     require(all(config.get(key) == value for key, value in required.items()), "hosted Auth configuration is unsafe")
-    email_flow = validate_email_otp_configuration({
+    email_configuration = validate_email_otp_configuration({
         "mailer_otp_length": config.get("mailer_otp_length"),
         "mailer_templates_magic_link_content": config.get("mailer_templates_magic_link_content"),
-    })["email_flow"]
+        "mailer_templates_recovery_content": config.get("mailer_templates_recovery_content"),
+    })
     return {
         "status": "verified",
         "signup_disabled": True,
@@ -420,7 +421,8 @@ def validate_auth_configuration(config: Mapping[str, object], site_origin: str) 
         "jwt_expiry_seconds": 900,
         "otp_length": 6,
         "otp_expiry_seconds": 600,
-        "email_flow": email_flow,
+        "email_flow": email_configuration["email_flow"],
+        "recovery_flow": email_configuration["recovery_flow"],
         "redirect_origin": site_origin,
     }
 

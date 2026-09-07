@@ -53,21 +53,18 @@ def test_canary_routes_are_get_only_and_bounded():
     assert verify.CANARY_METHOD == "GET"
 
 
-def test_deployment_auth_configuration_accepts_link_or_code_templates():
+def test_deployment_auth_configuration_requires_link_templates():
     assert verify.validate_deployment_auth_configuration({
         "mailer_otp_length": 6,
         "mailer_templates_magic_link_content": "{{ .ConfirmationURL }}",
-    }) == {"status": "verified", "otp_length": 6, "email_flow": "link"}
-
-    assert verify.validate_deployment_auth_configuration({
-        "mailer_otp_length": 6,
-        "mailer_templates_magic_link_content": "Your code: {{ .Token }}",
-    }) == {"status": "verified", "otp_length": 6, "email_flow": "code"}
+        "mailer_templates_recovery_content": "{{ .ConfirmationURL }}",
+    }) == {"status": "verified", "otp_length": 6, "email_flow": "link", "recovery_flow": "link"}
 
     with pytest.raises(RuntimeError, match="exactly"):
         verify.validate_deployment_auth_configuration({
             "mailer_otp_length": 6,
-            "mailer_templates_magic_link_content": "Your code: {{ .Token }}",
+            "mailer_templates_magic_link_content": "{{ .ConfirmationURL }}",
+            "mailer_templates_recovery_content": "{{ .ConfirmationURL }}",
             "secret": "must-not-be-accepted",
         })
 
