@@ -22,6 +22,8 @@ from typing import Mapping, Protocol, runtime_checkable
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
+from lib.intelligence.cursors import SourceCursor  # noqa: E402
+
 REQUIRED_RECOVERY_RECORDS = (
     "holdings", "transactions", "commands", "command_acknowledgements", "runs",
     "gateway_requests", "policies", "intelligence_runs",
@@ -352,6 +354,35 @@ def _validated_records(records: Mapping[str, object]) -> dict[str, list[dict[str
             return all(valid_discovery_json(child, max_bytes=max_bytes) for child in value)
         return True
 
+    def valid_discovery_cursor_result(row: Mapping[str, object]) -> bool:
+        task_result = row["result"]
+        if not isinstance(task_result, Mapping):
+            return False
+        cursor_fields = {"request_cursor", "source_cursor", "cursor_key", "theme_id", "checkpoint"}
+        if not cursor_fields.intersection(task_result):
+            return True
+        if set(task_result) != cursor_fields or not isinstance(task_result["checkpoint"], Mapping):
+            return False
+        try:
+            request_cursor = SourceCursor.from_mapping(task_result["request_cursor"])
+            source_cursor = SourceCursor.from_mapping(task_result["source_cursor"])
+        except (TypeError, ValueError):
+            return False
+        theme = task_result["theme_id"]
+        if theme is not None and (
+            not isinstance(theme, str)
+            or re.fullmatch(r"[a-z][a-z0-9_]{2,79}", theme) is None
+        ):
+            return False
+        return (
+            request_cursor.provider == row["provider"]
+            and request_cursor.capability_id == row["capability_id"]
+            and source_cursor.provider == row["provider"]
+            and source_cursor.capability_id == row["capability_id"]
+            and task_result["cursor_key"]
+            == f"{row['capability_id']}:{theme or 'default'}"
+        )
+
     manifests = {row["id"]: row for row in result["reference_manifests"]}
     if any(not UUID.fullmatch(row["id"]) or row["run_id"] not in intelligence_runs
            or not re.fullmatch(r"[a-z0-9][a-z0-9:._-]{0,127}", row["reference_version"])
@@ -518,6 +549,7 @@ def _validated_records(records: Mapping[str, object]) -> dict[str, list[dict[str
                   for dependency in row["dependency_ids"])
            or not valid_discovery_json(row["requested_window"], max_bytes=2048)
            or not valid_discovery_json(row["result"], max_bytes=65536)
+           or not valid_discovery_cursor_result(row)
            for row in discovery_tasks.values()):
         raise ValueError("discovery task dependency mismatch or invalid content")
     for row in discovery_tasks.values():

@@ -24,6 +24,7 @@ from lib.intelligence.universe import (
 ROOT = Path(__file__).resolve().parents[1]
 MIGRATION = ROOT / "sql" / "migrations" / "20261005_market_wide_discovery.sql"
 TRANSFER_MIGRATION = ROOT / "sql" / "migrations" / "20261006_reference_snapshot_transfer.sql"
+CURSOR_MIGRATION = ROOT / "sql" / "migrations" / "20261007_discovery_cursor_context.sql"
 SCHEMA = ROOT / "sql" / "schema.sql"
 
 TABLES = (
@@ -135,7 +136,27 @@ def test_schema_appends_the_new_immutable_migration_verbatim():
     migration = MIGRATION.read_text()
     schema = SCHEMA.read_text()
     assert migration in schema
-    assert schema.endswith(TRANSFER_MIGRATION.read_text())
+    assert TRANSFER_MIGRATION.read_text() in schema
+    assert schema.endswith(CURSOR_MIGRATION.read_text())
+
+
+def test_cursor_context_rpc_is_static_service_only_and_preserves_prior_migrations():
+    statements = parsed_statements(CURSOR_MIGRATION)
+    functions = statements_starting(
+        statements,
+        "CREATE OR REPLACE FUNCTION public.read_market_discovery_cursor_context(",
+    )
+    assert len(functions) == 1
+    body = functions[0]
+    assert "SECURITY DEFINER" in body
+    assert "SET search_path TO 'pg_catalog'" in body
+    assert "EXECUTE format" not in body
+    normalized = "\n".join(statements)
+    assert (
+        "GRANT EXECUTE ON FUNCTION public.read_market_discovery_cursor_context "
+        "(uuid, integer) TO service_role"
+    ) in normalized
+    assert "TO authenticated" not in normalized
 
 
 def test_postgresql_parser_rejects_a_malformed_discovery_fixture():
@@ -175,6 +196,7 @@ def discovery_db():
             )
             connection.execute(MIGRATION.read_text())
             connection.execute(TRANSFER_MIGRATION.read_text())
+            connection.execute(CURSOR_MIGRATION.read_text())
             yield connection
         finally:
             if connection is not None:
@@ -244,12 +266,14 @@ def record_reference(connection, run_id: str, *, ticker: str = "TEST") -> str:
     return security_id
 
 
-def create_attempting_task(connection, run_id: str, *, stage: str) -> tuple[str, dict]:
+def create_attempting_task(
+    connection, run_id: str, *, stage: str, capability_id: str | None = None,
+) -> tuple[str, dict]:
     task_id = str(uuid.uuid4())
     payload = task_payload(task_id, state="planned", attempt_count=0)
     payload["task"].update(
         stage=stage,
-        capability_id=f"gdelt_{stage}_fixture",
+        capability_id=capability_id or f"gdelt_{stage}_fixture",
         query_kind="theme_search",
         query_hash=uuid.uuid4().hex * 2,
     )
@@ -263,6 +287,110 @@ def create_attempting_task(connection, run_id: str, *, stage: str) -> tuple[str,
         (run_id, Jsonb(payload)),
     )
     return task_id, payload
+
+
+def _cursor_result(*, completed: str, theme_id: str = "macro_and_policy"):
+    cursor = {
+        "provider": "gdelt",
+        "capability_id": "gdelt_theme_search",
+        "completed_through": completed,
+        "active_window_start": None,
+        "active_window_end": None,
+        "backlog_token": None,
+        "page": 1,
+        "accepted_item_ids": [],
+        "next_retry_phase": None,
+    }
+    return {
+        "cursor_key": f"gdelt_theme_search:{theme_id}",
+        "theme_id": theme_id,
+        "request_cursor": cursor,
+        "source_cursor": cursor,
+        "checkpoint": {"cache_key": "a" * 64, "receipt": {"metadata": {}}},
+    }
+
+
+def _persist_terminal_cursor(
+    connection, run_id: str, *, state: str, completed: str,
+    theme_id: str = "macro_and_policy",
+):
+    task_id, payload = create_attempting_task(
+        connection, run_id, stage="signals", capability_id="gdelt_theme_search",
+    )
+    payload["task"].update(
+        state=state, result=_cursor_result(completed=completed, theme_id=theme_id),
+    )
+    connection.execute(
+        "SELECT public.checkpoint_market_discovery_stage(%s,%s)",
+        (run_id, Jsonb(payload)),
+    )
+    return task_id
+
+
+def test_cross_run_cursor_context_uses_latest_success_and_ignores_failed_or_current(discovery_db):
+    older_run = seeded_run(discovery_db)
+    _persist_terminal_cursor(
+        discovery_db, older_run, state="succeeded", completed="2000-01-04T00:00:00Z",
+    )
+    discovery_db.execute(
+        "UPDATE public.analysis_runs SET status='completed' WHERE id=%s", (older_run,),
+    )
+
+    prior_run = seeded_run(discovery_db)
+    successful_task = _persist_terminal_cursor(
+        discovery_db, prior_run, state="succeeded", completed="2000-01-05T00:00:00Z",
+    )
+    discovery_db.execute(
+        "UPDATE public.analysis_runs SET status='completed' WHERE id=%s", (prior_run,),
+    )
+
+    failed_run = seeded_run(discovery_db)
+    _persist_terminal_cursor(
+        discovery_db, failed_run, state="failed", completed="2099-01-05T00:00:00Z",
+    )
+    discovery_db.execute(
+        "UPDATE public.analysis_runs SET status='completed' WHERE id=%s", (failed_run,),
+    )
+
+    future_run = seeded_run(discovery_db)
+    _persist_terminal_cursor(
+        discovery_db, future_run, state="succeeded", completed="2099-01-05T00:00:00Z",
+        theme_id="consumer_demand",
+    )
+    discovery_db.execute(
+        "UPDATE public.analysis_runs SET status='completed' WHERE id=%s", (future_run,),
+    )
+
+    current_run = seeded_run(discovery_db)
+    current_task, current_payload = create_attempting_task(
+        discovery_db, current_run, stage="signals",
+    )
+    current_payload["task"].update(
+        state="succeeded", result=_cursor_result(completed="2099-01-06T00:00:00Z"),
+    )
+    discovery_db.execute(
+        "SELECT public.checkpoint_market_discovery_stage(%s,%s)",
+        (current_run, Jsonb(current_payload)),
+    )
+
+    context = discovery_db.execute(
+        "SELECT public.read_market_discovery_cursor_context(%s,100)", (current_run,),
+    ).fetchone()[0]
+
+    assert len(context["source_cursors"]) == 1
+    row = context["source_cursors"][0]
+    assert row["task_key"] == "gdelt_theme_search:macro_and_policy"
+    assert row["completed_through"] == "2000-01-05T00:00:00Z"
+    assert row["source_run_id"] == str(prior_run)
+    assert row["source_task_id"] == successful_task
+    assert row["source_task_id"] != current_task
+    assert context["last_completed_scans"] == [{
+        "capability_id": "gdelt_theme_search",
+        "theme_id": "macro_and_policy",
+        "completed_through": "2000-01-05T00:00:00Z",
+        "source_run_id": str(prior_run),
+        "source_task_id": successful_task,
+    }]
 
 
 def exposure_fact_row(*, row_id: str, security_id: str, content_hash: str):
@@ -668,6 +796,7 @@ def test_verifier_collects_exact_discovery_relation_column_and_function_grants(d
         ("record_market_discovery_reference(uuid,jsonb)", "service_role", "EXECUTE"),
         ("checkpoint_market_discovery_stage(uuid,jsonb)", "service_role", "EXECUTE"),
         ("read_market_discovery_context(uuid,integer)", "service_role", "EXECUTE"),
+        ("read_market_discovery_cursor_context(uuid,integer)", "service_role", "EXECUTE"),
         ("begin_market_discovery_reference(uuid,jsonb,uuid,integer,text)", "service_role", "EXECUTE"),
         ("record_market_discovery_reference_chunk(uuid,jsonb,uuid,integer,text)", "service_role", "EXECUTE"),
         ("finalize_market_discovery_reference(uuid,jsonb,uuid,integer,text)", "service_role", "EXECUTE"),

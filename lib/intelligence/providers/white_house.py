@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
+import base64
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from html.parser import HTMLParser
+import json
 import re
 from types import MappingProxyType
 from urllib.parse import urljoin, urlsplit, urlunsplit
@@ -28,6 +30,7 @@ _APPROVED_NEWS_PATH = re.compile(
     r"/(?:fact-sheets|presidential-actions|briefings-statements)/.+/"
 )
 _POST_SITEMAP_PATH = re.compile(r"/post-sitemap(?:[0-9]+)?\.xml")
+_SITEMAP_TOKEN_PREFIX = "whs1."
 
 
 def _safe_white_house_url(value: str) -> str:
@@ -43,6 +46,8 @@ def _safe_white_house_url(value: str) -> str:
         or parsed.password is not None
         or port not in (None, 443)
         or not parsed.path.startswith("/")
+        or parsed.query
+        or parsed.fragment
     ):
         raise SourceFailure("UNSAFE_URL")
     return value
@@ -136,7 +141,8 @@ def parse_white_house_listing(
         except SourceFailure:
             continue
         path = urlsplit(url).path
-        if not path.startswith(root) or _APPROVED_NEWS_PATH.fullmatch(path) is None:
+        if not path.startswith(root) or _listing_root(path) is not None \
+                or _APPROVED_NEWS_PATH.fullmatch(path) is None:
             continue
         title = bounded_text(record.get("title"))[:500]
         published = parse_timestamp(record.get("published_at"))
@@ -164,6 +170,58 @@ def parse_white_house_listing(
 class WhiteHouseSitemap:
     child_sitemaps: tuple[str, ...]
     items: tuple[FeedItem, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class _SitemapCursor:
+    children: tuple[str, ...]
+    child_index: int
+    offset: int
+
+
+def _encode_sitemap_cursor(cursor: _SitemapCursor) -> str:
+    raw = json.dumps({
+        "children": list(cursor.children), "child_index": cursor.child_index,
+        "offset": cursor.offset, "version": 1,
+    }, separators=(",", ":"), sort_keys=True).encode()
+    token = _SITEMAP_TOKEN_PREFIX + base64.urlsafe_b64encode(raw).decode().rstrip("=")
+    if len(token) > 2_048:
+        raise SourceFailure("INVALID_RESPONSE")
+    return token
+
+
+def _decode_sitemap_cursor(value: str) -> _SitemapCursor:
+    if not isinstance(value, str) or not value.startswith(_SITEMAP_TOKEN_PREFIX):
+        raise SourceFailure("INVALID_QUERY")
+    try:
+        encoded = value[len(_SITEMAP_TOKEN_PREFIX):]
+        raw = base64.b64decode(encoded + "=" * (-len(encoded) % 4), altchars=b"-_", validate=True)
+        payload = json.loads(raw)
+    except (ValueError, UnicodeDecodeError, json.JSONDecodeError):
+        raise SourceFailure("INVALID_QUERY") from None
+    if not isinstance(payload, dict) or set(payload) != {
+        "children", "child_index", "offset", "version"
+    } or payload["version"] != 1:
+        raise SourceFailure("INVALID_QUERY")
+    children = payload["children"]
+    child_index = payload["child_index"]
+    offset = payload["offset"]
+    if (
+        not isinstance(children, list) or not 1 <= len(children) <= 20
+        or len(set(children)) != len(children)
+        or isinstance(child_index, bool) or not isinstance(child_index, int)
+        or not 0 <= child_index < len(children)
+        or isinstance(offset, bool) or not isinstance(offset, int)
+        or not 0 <= offset <= 5_000
+    ):
+        raise SourceFailure("INVALID_QUERY")
+    for child in children:
+        if not isinstance(child, str) or len(child) > 160:
+            raise SourceFailure("INVALID_QUERY")
+        _safe_white_house_url(child)
+        if _POST_SITEMAP_PATH.fullmatch(urlsplit(child).path) is None:
+            raise SourceFailure("INVALID_QUERY")
+    return _SitemapCursor(tuple(children), child_index, offset)
 
 
 def parse_white_house_sitemap(
@@ -220,7 +278,10 @@ def parse_white_house_sitemap(
                 continue
             if _POST_SITEMAP_PATH.fullmatch(urlsplit(location).path):
                 children.append(location)
-        return WhiteHouseSitemap(tuple(dict.fromkeys(children[:20])), ())
+        children = list(dict.fromkeys(children))
+        if len(children) > 20:
+            raise SourceFailure("INVALID_RESPONSE")
+        return WhiteHouseSitemap(tuple(children), ())
     if root_name != "urlset" or _POST_SITEMAP_PATH.fullmatch(source_path) is None:
         raise SourceFailure("INVALID_RESPONSE")
     items = []
@@ -230,7 +291,7 @@ def parse_white_house_sitemap(
         except SourceFailure:
             continue
         path = urlsplit(location).path
-        if _APPROVED_NEWS_PATH.fullmatch(path) is None:
+        if _listing_root(path) is not None or _APPROVED_NEWS_PATH.fullmatch(path) is None:
             continue
         slug = path.rstrip("/").rsplit("/", 1)[-1].replace("-", " ")
         items.append(FeedItem(
@@ -285,11 +346,8 @@ class WhiteHouseAdapter(SourceAdapter):
         if query.capability_id == "white_house_sitemap":
             if query.cursor_token is None:
                 return WHITE_HOUSE_SITEMAP_INDEX
-            value, _offset = _without_fragment(query.cursor_token)
-            _safe_white_house_url(value)
-            if _POST_SITEMAP_PATH.fullmatch(urlsplit(value).path) is None:
-                raise SourceFailure("UNSAFE_URL")
-            return value
+            cursor = _decode_sitemap_cursor(query.cursor_token)
+            return cursor.children[cursor.child_index]
         raise SourceFailure("UNSUPPORTED_QUERY")
 
     def _request(self, query: CollectionQuery) -> HttpRequest:
@@ -321,8 +379,13 @@ class WhiteHouseAdapter(SourceAdapter):
                 max_bytes=self.max_source_bytes,
                 max_items=5_000,
             )
-            _url, offset = _without_fragment(query.cursor_token) if query.cursor_token else (response.url, 0)
-            items = parsed.items[offset:offset + self.max_items_per_request]
+            if query.cursor_token is None:
+                items = ()
+            else:
+                cursor = _decode_sitemap_cursor(query.cursor_token)
+                if response.url != cursor.children[cursor.child_index]:
+                    raise SourceFailure("UNSAFE_URL")
+                items = parsed.items[cursor.offset:cursor.offset + self.max_items_per_request]
         request_url = self._request_url(query)
         return tuple({
             "upstream_item_id": item.upstream_item_id,
@@ -356,20 +419,37 @@ class WhiteHouseAdapter(SourceAdapter):
             max_items=5_000,
         )
         if parsed.child_sitemaps:
+            cursor = _SitemapCursor(parsed.child_sitemaps, 0, 0)
             return MappingProxyType({
                 "truncated": True,
                 "backlog_remaining": True,
-                "backlog_token": parsed.child_sitemaps[0],
+                "backlog_token": _encode_sitemap_cursor(cursor),
                 "sitemap_children": list(parsed.child_sitemaps),
+                "sitemap_child_index": 0,
+                "sitemap_offset": 0,
             })
-        _url, offset = _without_fragment(query.cursor_token) if query.cursor_token else (response.url, 0)
-        next_offset = offset + len(records)
+        if query.cursor_token is None:
+            raise SourceFailure("INVALID_RESPONSE")
+        cursor = _decode_sitemap_cursor(query.cursor_token)
+        next_offset = cursor.offset + len(records)
         more = next_offset < len(parsed.items)
-        token = f"{response.url}#offset={next_offset}" if more else None
+        if more:
+            next_cursor = _SitemapCursor(cursor.children, cursor.child_index, next_offset)
+        elif cursor.child_index + 1 < len(cursor.children):
+            next_cursor = _SitemapCursor(cursor.children, cursor.child_index + 1, 0)
+        else:
+            next_cursor = None
+        token = _encode_sitemap_cursor(next_cursor) if next_cursor is not None else None
+        if token == query.cursor_token:
+            raise SourceFailure("INVALID_RESPONSE")
         return MappingProxyType({
-            "truncated": more,
-            "backlog_remaining": more,
+            "truncated": next_cursor is not None,
+            "backlog_remaining": next_cursor is not None,
             **({"backlog_token": token} if token else {}),
+            **({
+                "sitemap_child_index": next_cursor.child_index,
+                "sitemap_offset": next_cursor.offset,
+            } if next_cursor is not None else {}),
         })
 
 

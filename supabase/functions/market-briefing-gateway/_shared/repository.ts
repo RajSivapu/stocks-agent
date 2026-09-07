@@ -6,6 +6,8 @@ import type {
   AlertSession,
   AlertSourceSummary,
   ArtifactMutation,
+  DiscoveryCompletedScan,
+  DiscoverySourceCursor,
   EvidencePacket,
   GatewayEnvelope,
   GatewayReadContext,
@@ -616,6 +618,200 @@ function nullableText(value: unknown, max = 1000): string | null {
   return value === null || value === undefined
     ? null
     : text(String(value), max);
+}
+
+const UUID_PATTERN =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
+const CAPABILITY_PATTERN = /^[a-z][a-z0-9_]{2,79}$/;
+const PROVIDER_PATTERN = /^[a-z][a-z0-9_]{1,79}$/;
+const THEME_PATTERN = /^(?:default|[a-z][a-z0-9_]{2,79})$/;
+
+function exactKeys(row: Record<string, unknown>, expected: string[]): boolean {
+  const actual = Object.keys(row).sort();
+  return actual.length === expected.length &&
+    actual.every((key, index) => key === [...expected].sort()[index]);
+}
+
+function strictPattern(value: unknown, pattern: RegExp): string {
+  if (typeof value !== "string" || !pattern.test(value)) {
+    throw new GatewayRepositoryError("INVALID_PERSISTED_DATA");
+  }
+  return value;
+}
+
+function protectedTimestamp(
+  value: unknown,
+  current: Date,
+  nullable = false,
+): string | null {
+  if (nullable && value === null) return null;
+  if (typeof value !== "string" || value.length > 80) {
+    throw new GatewayRepositoryError("INVALID_PERSISTED_DATA");
+  }
+  const parsed = Date.parse(value);
+  if (!Number.isFinite(parsed) || parsed > current.getTime()) {
+    throw new GatewayRepositoryError("INVALID_PERSISTED_DATA");
+  }
+  return value;
+}
+
+function discoveryCursorContext(
+  value: unknown,
+  current: Date,
+): {
+  source_cursors: DiscoverySourceCursor[];
+  last_completed_scans: DiscoveryCompletedScan[];
+} {
+  const root = oneObject(
+    { data: value, error: null },
+    "INVALID_PERSISTED_DATA",
+  );
+  if (!exactKeys(root, ["source_cursors", "last_completed_scans"])) {
+    throw new GatewayRepositoryError("INVALID_PERSISTED_DATA");
+  }
+  const cursorRows = rows(
+    { data: root.source_cursors, error: null },
+    "INVALID_PERSISTED_DATA",
+  );
+  const scanRows = rows(
+    { data: root.last_completed_scans, error: null },
+    "INVALID_PERSISTED_DATA",
+  );
+  if (cursorRows.length > 100 || scanRows.length > 100) {
+    throw new GatewayRepositoryError("CONTEXT_TOO_LARGE");
+  }
+  const sourceCursors = cursorRows.map((row): DiscoverySourceCursor => {
+    if (
+      !exactKeys(row, [
+        "task_key",
+        "provider",
+        "capability_id",
+        "completed_through",
+        "active_window_start",
+        "active_window_end",
+        "backlog_token",
+        "page",
+        "accepted_item_ids",
+        "next_retry_phase",
+        "source_run_id",
+        "source_task_id",
+        "source_updated_at",
+      ])
+    ) throw new GatewayRepositoryError("INVALID_PERSISTED_DATA");
+    const provider = strictPattern(row.provider, PROVIDER_PATTERN);
+    const capabilityId = strictPattern(row.capability_id, CAPABILITY_PATTERN);
+    const taskKey = strictPattern(
+      row.task_key,
+      new RegExp(`^${capabilityId}:(?:default|[a-z][a-z0-9_]{2,79})$`),
+    );
+    const activeStart = protectedTimestamp(
+      row.active_window_start,
+      current,
+      true,
+    );
+    const activeEnd = protectedTimestamp(row.active_window_end, current, true);
+    const completed = protectedTimestamp(row.completed_through, current, true);
+    const page = integer(row.page);
+    const ids = Array.isArray(row.accepted_item_ids)
+      ? row.accepted_item_ids.map((id) => {
+        if (
+          typeof id !== "string" || id.length < 1 || id.length > 512 ||
+          /[\x00-\x1f]/.test(id)
+        ) {
+          throw new GatewayRepositoryError("INVALID_PERSISTED_DATA");
+        }
+        return id;
+      })
+      : null;
+    const token = row.backlog_token === null ? null : row.backlog_token;
+    const retry = row.next_retry_phase === null ? null : row.next_retry_phase;
+    if (
+      (activeStart === null) !== (activeEnd === null) ||
+      (activeStart !== null && activeEnd !== null &&
+        Date.parse(activeStart) > Date.parse(activeEnd)) ||
+      (completed !== null && activeStart !== null &&
+        Date.parse(activeStart) > Date.parse(completed)) ||
+      (completed !== null && activeEnd !== null &&
+        Date.parse(completed) > Date.parse(activeEnd)) ||
+      page < 1 || page > 10 || ids === null || ids.length > 500 ||
+      new Set(ids).size !== ids.length ||
+      (token !== null &&
+        (typeof token !== "string" || token.length < 1 || token.length > 2048 ||
+          /[\x00-\x1f]/.test(token) || activeStart === null || page < 2)) ||
+      (retry !== null &&
+        !["pre-market", "intraday", "post-market", "on-demand"].includes(
+          String(retry),
+        ))
+    ) {
+      throw new GatewayRepositoryError("INVALID_PERSISTED_DATA");
+    }
+    return {
+      task_key: taskKey,
+      provider,
+      capability_id: capabilityId,
+      completed_through: completed,
+      active_window_start: activeStart,
+      active_window_end: activeEnd,
+      backlog_token: token as string | null,
+      page,
+      accepted_item_ids: ids,
+      next_retry_phase: retry as DiscoverySourceCursor["next_retry_phase"],
+      source_run_id: strictPattern(row.source_run_id, UUID_PATTERN),
+      source_task_id: strictPattern(row.source_task_id, UUID_PATTERN),
+      source_updated_at: protectedTimestamp(row.source_updated_at, current)!,
+    };
+  });
+  if (
+    new Set(sourceCursors.map((cursor) => cursor.task_key)).size !==
+      sourceCursors.length
+  ) {
+    throw new GatewayRepositoryError("INVALID_PERSISTED_DATA");
+  }
+  const byKey = new Map(
+    sourceCursors.map((cursor) => [cursor.task_key, cursor]),
+  );
+  const completedScans = scanRows.map((row): DiscoveryCompletedScan => {
+    if (
+      !exactKeys(row, [
+        "capability_id",
+        "theme_id",
+        "completed_through",
+        "source_run_id",
+        "source_task_id",
+      ])
+    ) throw new GatewayRepositoryError("INVALID_PERSISTED_DATA");
+    const capabilityId = strictPattern(row.capability_id, CAPABILITY_PATTERN);
+    const themeId = strictPattern(row.theme_id, THEME_PATTERN);
+    const sourceRunId = strictPattern(row.source_run_id, UUID_PATTERN);
+    const sourceTaskId = strictPattern(row.source_task_id, UUID_PATTERN);
+    const completed = protectedTimestamp(row.completed_through, current)!;
+    const cursor = byKey.get(`${capabilityId}:${themeId}`);
+    if (
+      cursor === undefined || cursor.completed_through !== completed ||
+      cursor.source_run_id !== sourceRunId ||
+      cursor.source_task_id !== sourceTaskId
+    ) {
+      throw new GatewayRepositoryError("INVALID_PERSISTED_DATA");
+    }
+    return {
+      capability_id: capabilityId,
+      theme_id: themeId,
+      completed_through: completed,
+      source_run_id: sourceRunId,
+      source_task_id: sourceTaskId,
+    };
+  });
+  if (
+    new Set(
+      completedScans.map((scan) => `${scan.capability_id}:${scan.theme_id}`),
+    ).size !== completedScans.length
+  ) {
+    throw new GatewayRepositoryError("INVALID_PERSISTED_DATA");
+  }
+  return {
+    source_cursors: sourceCursors,
+    last_completed_scans: completedScans,
+  };
 }
 
 function decimalMap(value: unknown): Record<string, string> {
@@ -1638,6 +1834,15 @@ export function createSupabaseGatewayRepository(
         client.rpc("read_reconciled_cash_snapshot", {
           p_now: current.toISOString(),
         }),
+        _runId
+          ? client.rpc("read_market_discovery_cursor_context", {
+            p_run_id: _runId,
+            p_limit: 100,
+          })
+          : Promise.resolve({
+            data: { source_cursors: [], last_completed_scans: [] },
+            error: null,
+          }),
       ]);
       const holdings = rows(results[0], "CONTEXT_TOO_LARGE");
       const unresolvedSuggestions = rows(results[1], "CONTEXT_TOO_LARGE");
@@ -1663,6 +1868,10 @@ export function createSupabaseGatewayRepository(
       const cashSnapshot = results[13].data === null
         ? null
         : oneObject(results[13]);
+      if (results[14].error) {
+        throw new GatewayRepositoryError("PERSISTENCE_FAILED");
+      }
+      const cursorContext = discoveryCursorContext(results[14].data, current);
       if (
         holdings.length > 100 || unresolvedSuggestions.length > 100 ||
         plans.length > 20 ||
@@ -1732,6 +1941,18 @@ export function createSupabaseGatewayRepository(
                   text(id, 36)
                 )
                 : [],
+            source_cursors: cursorContext.source_cursors,
+            last_completed_scans: cursorContext.last_completed_scans,
+          }
+          : _runId
+          ? {
+            holding_market_values: {},
+            liquidity_by_ticker: {},
+            overlap_by_ticker: {},
+            current_quotes: {},
+            quote_receipt_ids: [],
+            source_cursors: cursorContext.source_cursors,
+            last_completed_scans: cursorContext.last_completed_scans,
           }
           : undefined,
         realized_pnl_today: coverage ? formatFixed(pnlMicros, 6) : null,

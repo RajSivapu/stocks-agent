@@ -30,6 +30,9 @@ class DoeAdapter(OfficialFeedAdapter):
         "doe_energy_news_rss": frozenset({DOE_ENERGY_NEWS_URL}),
     })
     allow_text_html_xml = True
+    item_path_patterns = MappingProxyType({
+        "doe_energy_news_rss": (re.compile(r"/articles/[A-Za-z0-9._~!$&'()*+,;=:@%/-]+"),),
+    })
 
 
 class EiaAdapter(OfficialFeedAdapter):
@@ -43,6 +46,19 @@ class EiaAdapter(OfficialFeedAdapter):
     response_routes = MappingProxyType({
         "eia_today_in_energy_rss": frozenset({EIA_TODAY_IN_ENERGY_URL}),
         "eia_press_releases_rss": frozenset({EIA_PRESS_RELEASES_URL}),
+    })
+    item_path_patterns = MappingProxyType({
+        # Both official EIA feeds can cross-link approved Today in Energy and
+        # press-room records.  Validate the evidence route, while retaining
+        # those two reviewed publication namespaces for either feed.
+        "eia_today_in_energy_rss": (
+            re.compile(r"/todayinenergy/detail\.php"),
+            re.compile(r"/pressroom/[A-Za-z0-9._~!$&'()*+,;=:@%/-]+"),
+        ),
+        "eia_press_releases_rss": (
+            re.compile(r"/todayinenergy/detail\.php"),
+            re.compile(r"/pressroom/[A-Za-z0-9._~!$&'()*+,;=:@%/-]+"),
+        ),
     })
 
     def _authority(self, query: CollectionQuery) -> str:

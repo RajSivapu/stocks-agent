@@ -40,6 +40,10 @@ class DefenseAdapter(OfficialFeedAdapter):
         })
         for capability_id, source in feed_routes.items()
     })
+    item_path_patterns = MappingProxyType({
+        "defense_releases_rss": (re.compile(r"/News/(?:Releases|Contracts)/.+", re.IGNORECASE),),
+        "defense_news_rss": (re.compile(r"/News/(?:News-Stories|Features|Releases)/.+", re.IGNORECASE),),
+    })
 
     def _authority(self, query: CollectionQuery) -> str:
         if query.capability_id == "defense_news_rss":
@@ -131,10 +135,35 @@ class OfficialJsonAdapter(SourceAdapter):
         for item in results:
             if not isinstance(item, dict):
                 continue
+            document_number = item.get("document_number")
+            item_url = item.get("html_url")
+            if not isinstance(document_number, str) or re.fullmatch(
+                r"[A-Za-z0-9][A-Za-z0-9._-]{0,79}", document_number
+            ) is None or not isinstance(item_url, str):
+                continue
+            try:
+                parsed_item_url = urlsplit(item_url)
+                port = parsed_item_url.port
+            except ValueError:
+                continue
+            if (
+                parsed_item_url.scheme != "https"
+                or parsed_item_url.hostname != "www.federalregister.gov"
+                or parsed_item_url.username is not None
+                or parsed_item_url.password is not None
+                or port not in (None, 443)
+                or parsed_item_url.query
+                or parsed_item_url.fragment
+                or re.fullmatch(
+                    rf"/documents/[0-9]{{4}}/[0-9]{{2}}/[0-9]{{2}}/{re.escape(document_number)}/[A-Za-z0-9._~%-]+",
+                    parsed_item_url.path,
+                ) is None
+            ):
+                continue
             records.append({
-                "upstream_item_id": item.get("document_number"),
+                "upstream_item_id": document_number,
                 "request_url": request_url,
-                "item_url": item.get("html_url"),
+                "item_url": item_url,
                 "title": item.get("title"),
                 "text": item.get("abstract"),
                 "published_at": item.get("publication_date"),
@@ -177,6 +206,8 @@ class OfficialJsonAdapter(SourceAdapter):
         if self.provider != "federal_register":
             return super()._progress_metadata(payload, query, response, records, bound)
         cursor = self._next_cursor(payload)
+        if cursor is not None and cursor == query.cursor_token:
+            raise SourceFailure("INVALID_RESPONSE")
         return MappingProxyType({
             "truncated": cursor is not None,
             "backlog_remaining": cursor is not None,

@@ -5,10 +5,12 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 import sys
+from uuid import UUID
 import time
 import uuid
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Sequence, TextIO
 
@@ -18,8 +20,10 @@ if str(ROOT) not in sys.path:
 
 from lib import config, gateway  # noqa: E402
 from lib.config import load_settings  # noqa: E402
+from lib.intelligence.cursors import SourceCursor, parse_time  # noqa: E402
 from lib.intelligence.http import BoundedHttpClient  # noqa: E402
 from lib.intelligence.pipeline import IntelligencePipeline, PHASES, PipelineRequest, protected_collection_context  # noqa: E402
+from lib.intelligence.planner import build_discovery_plan, load_source_capabilities  # noqa: E402
 from lib.intelligence.policy import load_intelligence_policy  # noqa: E402
 from lib.intelligence.providers import build_adapter  # noqa: E402
 from lib.intelligence.quota import QuotaSession  # noqa: E402
@@ -139,8 +143,17 @@ def main(argv: Sequence[str] | None = None, *, stdout: TextIO | None = None) -> 
             # obtains holdings and every ranking value from the protected reader.
             context = protected_collection_context(data["context"])
             policy = load_intelligence_policy(load_settings())
+            discovery_supported = callable(getattr(gateway, "call", None)) or (
+                callable(getattr(gateway, "read_discovery_context", None))
+                and callable(getattr(gateway, "checkpoint_discovery_stage", None))
+            )
+            planned = {
+                "discovery_plan": _build_capability_plan(policy, context, request),
+                "source_cursors": _source_cursors(context),
+            } if discovery_supported else {}
             pipeline = IntelligencePipeline(
                 gateway, _adapters(policy, now), context=context, packet_limits=policy.packet,
+                **planned,
                 reference_stage=(
                     lambda run_id, request: _persist_reference_stage(
                         gateway, run_id, request.now,
@@ -160,6 +173,136 @@ def main(argv: Sequence[str] | None = None, *, stdout: TextIO | None = None) -> 
 
 def _read_context(run_id: str):
     return gateway.call("read_intelligence_context", {}, run_id=run_id)
+
+
+def _source_cursors(context: dict[str, object]) -> dict[str, SourceCursor]:
+    rows = context.get("source_cursors", [])
+    if not isinstance(rows, list) or len(rows) > 100:
+        raise ValueError("protected source cursors are invalid")
+    result: dict[str, SourceCursor] = {}
+    for row in rows:
+        if not isinstance(row, dict):
+            raise ValueError("protected source cursor is invalid")
+        task_key = row.get("task_key")
+        if not isinstance(task_key, str) or not task_key or len(task_key) > 200:
+            raise ValueError("protected source cursor key is invalid")
+        cursor_keys = {
+            "provider", "capability_id", "completed_through", "active_window_start",
+            "active_window_end", "backlog_token", "page", "accepted_item_ids",
+            "next_retry_phase",
+        }
+        provenance_keys = {"source_run_id", "source_task_id", "source_updated_at"}
+        if set(row) != {"task_key", *cursor_keys, *provenance_keys}:
+            raise ValueError("protected source cursor provenance is invalid")
+        try:
+            if not all(
+                isinstance(row[key], str) and str(UUID(row[key])) == row[key]
+                for key in ("source_run_id", "source_task_id")
+            ):
+                raise ValueError
+            updated_at = datetime.fromisoformat(str(row["source_updated_at"]).replace("Z", "+00:00"))
+        except (TypeError, ValueError):
+            raise ValueError("protected source cursor provenance is invalid") from None
+        if updated_at.tzinfo is None or updated_at > datetime.now(timezone.utc):
+            raise ValueError("protected source cursor provenance is invalid")
+        value = {key: row[key] for key in cursor_keys}
+        cursor = SourceCursor.from_mapping(value)
+        current = datetime.now(timezone.utc)
+        if any(timestamp is not None and timestamp > current for timestamp in (
+            cursor.completed_through, cursor.active_window_start, cursor.active_window_end,
+        )):
+            raise ValueError("protected source cursor timestamp is in the future")
+        theme_id = task_key.rsplit(":", 1)[-1]
+        if (
+            task_key != f"{cursor.capability_id}:{theme_id}"
+            or re.fullmatch(r"(?:default|[a-z][a-z0-9_]{2,79})", theme_id) is None
+        ):
+            raise ValueError("protected source cursor key is invalid")
+        if task_key in result:
+            raise ValueError("protected source cursor key is duplicated")
+        result[task_key] = cursor
+    return result
+
+
+def _last_completed_scans(
+    context: dict[str, object], cursors: dict[str, SourceCursor]
+) -> dict[tuple[str, str], str]:
+    rows = context.get("last_completed_scans", [])
+    if not isinstance(rows, list) or len(rows) > 100:
+        raise ValueError("protected completed scans are invalid")
+    result: dict[tuple[str, str], str] = {}
+    cursor_rows = context.get("source_cursors", [])
+    provenance = {
+        row["task_key"]: (row["source_run_id"], row["source_task_id"])
+        for row in cursor_rows if isinstance(row, dict)
+    }
+    for row in rows:
+        if not isinstance(row, dict) or set(row) != {
+            "capability_id", "theme_id", "completed_through",
+            "source_run_id", "source_task_id",
+        }:
+            raise ValueError("protected completed scan is invalid")
+        capability_id = row["capability_id"]
+        theme_id = row["theme_id"]
+        completed = row["completed_through"]
+        if not all(isinstance(value, str) and value for value in (
+            capability_id, theme_id, completed, row["source_run_id"], row["source_task_id"],
+        )):
+            raise ValueError("protected completed scan is invalid")
+        task_key = f"{capability_id}:{theme_id}"
+        cursor = cursors.get(task_key)
+        if cursor is None or cursor.completed_through is None \
+                or cursor.completed_through != parse_time(completed) \
+                or provenance.get(task_key) != (row["source_run_id"], row["source_task_id"]):
+            raise ValueError("protected completed scan does not match its source cursor")
+        scan_key = (capability_id, theme_id)
+        if scan_key in result:
+            raise ValueError("protected completed scan is duplicated")
+        result[scan_key] = completed
+    for task_key, cursor in cursors.items():
+        if cursor.completed_through is None:
+            continue
+        prefix = f"{cursor.capability_id}:"
+        if task_key.startswith(prefix):
+            result.setdefault(
+                (cursor.capability_id, task_key[len(prefix):]),
+                cursor.completed_through.isoformat(),
+            )
+    return result
+
+
+def _build_capability_plan(policy, context: dict[str, object], request: PipelineRequest):
+    capabilities = load_source_capabilities()
+    available_credentials = frozenset(
+        capability.required_credential
+        for capability in capabilities.values()
+        if capability.required_credential is not None
+        and config.optional_secret(capability.required_credential.lower())
+    )
+    cursors = _source_cursors(context)
+    reference_version = context.get("reference_version")
+    if not isinstance(reference_version, str) or not reference_version:
+        reference_version = "sec:unresolved"
+    duration = {
+        "pre-market": timedelta(hours=16),
+        "intraday": timedelta(hours=6),
+        "post-market": timedelta(hours=12),
+        "on-demand": timedelta(days=2),
+    }[request.phase]
+    return build_discovery_plan(
+        policy,
+        capabilities,
+        phase=request.phase,
+        run_id=request.request_id,
+        reference_version=reference_version,
+        requested_window={
+            "start": (request.now - duration).astimezone(timezone.utc).isoformat(),
+            "end": request.now.astimezone(timezone.utc).isoformat(),
+        },
+        available_credentials=available_credentials,
+        required_holding_quote_requests=0,
+        last_completed_scans=_last_completed_scans(context, cursors),
+    )
 
 
 def _security_from_reference_row(value: object) -> SecurityIdentity:

@@ -575,7 +575,7 @@ def test_future_effective_timestamp_does_not_drop_newly_published_fact():
         "document_number": "2026-99999",
         "title": "Future rule",
         "abstract": "Published now, effective later",
-        "html_url": "https://www.federalregister.gov/documents/2026/09/04/future-rule",
+        "html_url": "https://www.federalregister.gov/documents/2026/09/04/2026-99999/future-rule",
         "publication_date": "2026-09-04",
         "effective_on": "2026-09-04T12:00:01Z",
     }]}

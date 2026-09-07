@@ -111,6 +111,72 @@ def test_scheduled_collector_consumes_protected_context_and_ignores_scratch_auth
     assert json.loads(output.getvalue())["domains_checked"] == ["holding:OTHER", "holding:TEST"]
 
 
+def test_scheduled_collector_passes_one_persisted_capability_plan_and_source_cursors(monkeypatch):
+    import scripts.collect_market_intelligence as collector
+    from test_intelligence_pipeline import NOW, RUN_ID
+
+    plan = object()
+    captured = {}
+    protected = {
+        "holdings": [], "owner_plans": [],
+        "intelligence_collection_context": {
+            "holding_market_values": {}, "liquidity_by_ticker": {},
+            "overlap_by_ticker": {},
+            "reference_version": "sec:fixture-v1",
+            "source_cursors": [{
+                "task_key": "gdelt_theme_search:macro_and_policy",
+                "provider": "gdelt", "capability_id": "gdelt_theme_search",
+                "completed_through": "2026-09-03T12:00:00Z",
+                "active_window_start": None, "active_window_end": None,
+                "backlog_token": None, "page": 1, "accepted_item_ids": [],
+                "next_retry_phase": None,
+                "source_run_id": "22222222-2222-4222-8222-222222222222",
+                "source_task_id": "33333333-3333-4333-8333-333333333333",
+                "source_updated_at": "2026-09-03T12:01:00Z",
+            }],
+            "last_completed_scans": [{
+                "capability_id": "gdelt_theme_search",
+                "theme_id": "macro_and_policy",
+                "completed_through": "2026-09-03T12:00:00Z",
+                "source_run_id": "22222222-2222-4222-8222-222222222222",
+                "source_task_id": "33333333-3333-4333-8333-333333333333",
+            }],
+        },
+    }
+
+    class Result:
+        def to_json_bytes(self):
+            return b'{"ok":true}'
+
+    class Pipeline:
+        def __init__(self, gateway, adapters, *, discovery_plan, source_cursors, **kwargs):
+            captured["plan"] = discovery_plan
+            captured["source_cursors"] = source_cursors
+
+        def run(self, request):
+            captured["run_count"] = captured.get("run_count", 0) + 1
+            return Result()
+
+    monkeypatch.setattr(collector, "_read_context", lambda _run_id: {"data": {"context": protected}})
+    monkeypatch.setattr(collector, "_adapters", lambda *_args: [])
+    monkeypatch.setattr(collector, "load_intelligence_policy", lambda _settings: SimpleNamespace(packet=object()))
+    monkeypatch.setattr(collector, "load_settings", lambda: {})
+    monkeypatch.setattr(collector, "IntelligencePipeline", Pipeline)
+    monkeypatch.setattr(
+        collector, "_build_capability_plan",
+        lambda *_args, **_kwargs: plan,
+        raising=False,
+    )
+    output = io.StringIO()
+
+    assert collector.main([
+        "--phase", "pre-market", "--run-id", RUN_ID, "--now", NOW.isoformat(),
+    ], stdout=output) == 0
+    assert captured["plan"] is plan
+    assert captured["run_count"] == 1
+    assert set(captured["source_cursors"]) == {"gdelt_theme_search:macro_and_policy"}
+
+
 def test_protected_context_unwraps_values_and_never_uses_supplied_current_price():
     from lib.intelligence.pipeline import protected_collection_context
     result = protected_collection_context({"holdings": [{"ticker": "TEST", "shares": "2", "current_price": "999"}],

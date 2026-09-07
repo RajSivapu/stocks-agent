@@ -142,6 +142,37 @@ def test_bounded_feed_parser_accepts_atom_entries():
 
 
 @pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("guid", "&lt;script&gt;identity&lt;/script&gt;"),
+        ("title", "&lt;img src=x onerror=alert(1)&gt;"),
+        ("description", "javascript:alert(1)"),
+    ],
+)
+def test_bounded_feed_rejects_decoded_active_markup_in_retained_fields(field, value):
+    values = {
+        "guid": "safe-id",
+        "title": "Safe title",
+        "description": "Safe summary",
+    }
+    values[field] = value
+    raw = f"""<rss><channel><item><guid>{values['guid']}</guid>
+      <title>{values['title']}</title>
+      <link>https://www.energy.gov/articles/grid-update</link>
+      <description>{values['description']}</description>
+      <pubDate>Mon, 07 Sep 2026 14:00:00 GMT</pubDate>
+    </item></channel></rss>""".encode()
+
+    with pytest.raises(SourceFailure, match="INVALID_FEED"):
+        parse_bounded_feed(
+            raw,
+            source_url="https://www.energy.gov/rss/energygov/2193718",
+            max_bytes=100_000,
+            max_items=10,
+        )
+
+
+@pytest.mark.parametrize(
     "raw",
     [
         b'<!DOCTYPE rss [<!ENTITY xxe SYSTEM "file:///etc/passwd">]><rss>&xxe;</rss>',
@@ -185,6 +216,46 @@ def test_doe_adapter_accepts_valid_xml_even_when_mime_is_text_html():
         "overlap_seconds": 7200,
         "truncated": False,
     }
+
+
+def test_unpageable_feed_overflow_is_a_truthful_frozen_coverage_gap():
+    source_url = "https://www.energy.gov/rss/energygov/2193718"
+    entries = "".join(
+        f"""<item><guid>doe-{index}</guid><title>Energy item {index}</title>
+        <link>https://www.energy.gov/articles/energy-item-{index}</link>
+        <description>Official summary.</description>
+        <pubDate>Mon, 07 Sep 2026 14:00:00 GMT</pubDate></item>"""
+        for index in range(21)
+    )
+    http = FixtureHttp(
+        f"<rss><channel>{entries}</channel></rss>".encode(),
+        url=source_url,
+        content_type="application/rss+xml",
+    )
+
+    result = adapter("doe", http).collect(query("doe_energy_news_rss", limit=20))
+
+    assert len(result.items) == 20
+    assert result.receipt.returned_count == 21
+    assert result.receipt.metadata["truncated"] is True
+    assert result.receipt.metadata["backlog_remaining"] is True
+    assert result.receipt.metadata["continuation_unavailable"] is True
+    assert result.receipt.metadata["coverage_gap"] is True
+    assert "backlog_token" not in result.receipt.metadata
+
+
+def test_official_feed_rejects_an_unapproved_item_path():
+    source_url = "https://www.energy.gov/rss/energygov/2193718"
+    raw = b"""<rss><channel><item><guid>doe-admin</guid><title>Unsafe path</title>
+      <link>https://www.energy.gov/admin/config</link><description>Summary.</description>
+      <pubDate>Mon, 07 Sep 2026 14:00:00 GMT</pubDate></item></channel></rss>"""
+    result = adapter(
+        "doe", FixtureHttp(raw, url=source_url, content_type="application/rss+xml")
+    ).collect(query("doe_energy_news_rss"))
+
+    assert result.items == ()
+    assert result.receipt.status == "failed"
+    assert result.receipt.error_code == "INVALID_FEED"
 
 
 @pytest.mark.parametrize(
@@ -310,6 +381,51 @@ def test_white_house_sitemap_index_keeps_only_current_post_sitemaps():
     assert parsed.items == ()
 
 
+def test_white_house_sitemap_cursor_visits_every_discovered_child_with_index_and_offset():
+    index_url = "https://www.whitehouse.gov/sitemap_index.xml"
+    child_one = "https://www.whitehouse.gov/post-sitemap.xml"
+    child_two = "https://www.whitehouse.gov/post-sitemap2.xml"
+    index = (FIXTURES / "white_house_sitemap.xml").read_bytes()
+    pages = {
+        index_url: index,
+        child_one: b"""<urlset><url><loc>https://www.whitehouse.gov/fact-sheets/2026/09/one/</loc></url></urlset>""",
+        child_two: b"""<urlset><url><loc>https://www.whitehouse.gov/presidential-actions/2026/09/two/</loc></url></urlset>""",
+    }
+
+    class SitemapHttp:
+        def __init__(self):
+            self.requests = []
+
+        def get(self, request):
+            self.requests.append(request)
+            return HttpResult(
+                url=request.url, status=200, headers={"content-type": "text/xml"},
+                body=pages[request.url], retrieved_at=NOW, observed_at=NOW,
+            )
+
+    http = SitemapHttp()
+    source = adapter("white_house", http)
+    source.quota = QuotaSession({
+        "white_house": ({"reservation_id": "white-house-pages", "reserved_requests": 3},)
+    })
+    first = source.collect(query("white_house_sitemap"))
+    first_token = first.receipt.metadata["backlog_token"]
+    assert first.receipt.metadata["sitemap_child_index"] == 0
+    assert first.receipt.metadata["sitemap_offset"] == 0
+
+    second = source.collect(query("white_house_sitemap", cursor_token=first_token))
+    second_token = second.receipt.metadata["backlog_token"]
+    assert second.items[0].source_url.endswith("/one/")
+    assert second.receipt.metadata["sitemap_child_index"] == 1
+    assert second.receipt.metadata["sitemap_offset"] == 0
+
+    third = source.collect(query("white_house_sitemap", cursor_token=second_token))
+    assert third.items[0].source_url.endswith("/two/")
+    assert third.receipt.metadata["backlog_remaining"] is False
+    assert "backlog_token" not in third.receipt.metadata
+    assert [request.url for request in http.requests] == [index_url, child_one, child_two]
+
+
 def test_white_house_post_sitemap_filters_paths_and_does_not_treat_lastmod_as_publication():
     raw = b"""<?xml version='1.0'?><urlset xmlns='http://www.sitemaps.org/schemas/sitemap/0.9'><url><loc>https://www.whitehouse.gov/fact-sheets/2026/09/grid/</loc><lastmod>2026-09-08T09:00:00Z</lastmod></url><url><loc>https://www.whitehouse.gov/about-the-white-house/</loc><lastmod>2026-09-08T09:00:00Z</lastmod></url></urlset>"""
     parsed = parse_white_house_sitemap(
@@ -365,6 +481,53 @@ def test_federal_register_continuation_uses_validated_search_after_cursor():
     assert params["search_after"] == ["cursor-2"]
 
 
+def test_federal_register_rejects_a_repeated_search_after_cursor():
+    next_url = (
+        "https://www.federalregister.gov/api/v1/documents"
+        "?format=json&search_after=cursor-2"
+    )
+    http = FixtureHttp(
+        {"count": 0, "next_page_url": next_url, "results": []},
+        url=next_url,
+        content_type="application/json",
+    )
+
+    result = adapter("federal_register", http).collect(query(
+        "federal_register_document_search", cursor_token="cursor-2"
+    ))
+
+    assert result.items == ()
+    assert result.receipt.status == "failed"
+    assert result.receipt.error_code == "INVALID_RESPONSE"
+
+
+def test_federal_register_drops_document_url_that_does_not_match_document_identity():
+    payload = {
+        "count": 1,
+        "next_page_url": None,
+        "results": [{
+            "document_number": "2026-12345",
+            "type": "Rule",
+            "title": "Grid rule",
+            "abstract": "Rule summary",
+            "html_url": "https://www.federalregister.gov/documents/2026/09/07/WRONG/grid-rule",
+            "publication_date": "2026-09-07",
+        }],
+    }
+    http = FixtureHttp(
+        payload,
+        url="https://www.federalregister.gov/api/v1/documents.json",
+        content_type="application/json",
+    )
+
+    result = adapter("federal_register", http).collect(
+        query("federal_register_document_search")
+    )
+
+    assert result.items == ()
+    assert result.receipt.returned_count == 0
+
+
 def test_sec_routes_require_configured_contact_and_validate_filing_identity():
     missing_http = FixtureHttp({}, url="https://data.sec.gov/submissions/CIK0000000001.json", content_type="application/json")
     with pytest.raises(SourceFailure) as failure:
@@ -417,6 +580,43 @@ def test_sec_routes_require_configured_contact_and_validate_filing_identity():
     assert filing.items[0].upstream_item_id == "0000000001-26-000001:test-8k.htm"
     assert filing.items[0].authority == "official_issuer_filing"
     assert filing.items[0].published_at is None
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    [
+        {"cik": "2"},
+        {"accessionNumber": ["0000000002-26-000001"]},
+        {"primaryDocument": ["../other-8k.htm"]},
+    ],
+)
+def test_sec_submissions_payload_identity_must_match_requested_cik_and_routes(mutation):
+    recent = {
+        "accessionNumber": ["0000000001-26-000001"],
+        "filingDate": ["2026-09-07"],
+        "reportDate": ["2026-09-01"],
+        "form": ["8-K"],
+        "primaryDocument": ["test-8k.htm"],
+    }
+    payload = {"cik": "1", "name": "Test Issuer", "filings": {"recent": recent}}
+    if "cik" in mutation:
+        payload["cik"] = mutation["cik"]
+    else:
+        recent.update(mutation)
+    http = FixtureHttp(
+        payload,
+        url="https://data.sec.gov/submissions/CIK0000000001.json",
+        content_type="application/json",
+    )
+
+    result = adapter(
+        "sec_edgar", http,
+        secret_getter=lambda name: "owner@example.com" if name == "sec_user_agent_contact" else "",
+    ).collect(query("sec_issuer_submissions", cik="1"))
+
+    assert result.items == ()
+    assert result.receipt.status == "failed"
+    assert result.receipt.error_code == "INVALID_RESPONSE"
 
 
 def test_sec_filing_route_rejects_path_injection_before_http():

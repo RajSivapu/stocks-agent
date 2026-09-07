@@ -96,7 +96,7 @@ def test_saved_backlog_resumes_the_exact_active_window():
 
 
 def test_exhausted_empty_window_advances_completed_window():
-    previous = _cursor()
+    previous = _cursor(accepted_item_ids=("doe:already-seen",))
     page = CollectionPage(
         window=_window(),
         status="succeeded",
@@ -111,6 +111,48 @@ def test_exhausted_empty_window_advances_completed_window():
     assert updated.active_window_start is None
     assert updated.active_window_end is None
     assert updated.backlog_token is None
+    assert updated.accepted_item_ids == ()
+
+
+def test_unpageable_rolling_feed_overflow_freezes_window_without_fake_cursor():
+    previous = _cursor()
+    page = CollectionPage(
+        window=_window(),
+        status="succeeded",
+        exhausted=False,
+        truncated=True,
+        backlog_token=None,
+        accepted_item_ids=("doe:1",),
+        next_retry_phase="post-market",
+    )
+
+    updated = update_cursor(previous, page)
+
+    assert updated.completed_through == previous.completed_through
+    assert updated.active_window_start == page.window.start
+    assert updated.active_window_end == page.window.end
+    assert updated.backlog_token is None
+    assert updated.accepted_item_ids == ("doe:1",)
+    assert updated.next_retry_phase == "post-market"
+
+
+def test_pageable_cursor_rejects_a_repeated_continuation_token():
+    previous = _cursor(
+        active_window_start=parse_time("2026-09-04T18:00:00Z"),
+        active_window_end=RUN_AT,
+        backlog_token="cursor:older-page-2",
+    )
+    page = CollectionPage(
+        window=_window(),
+        status="succeeded",
+        exhausted=False,
+        truncated=True,
+        backlog_token="cursor:older-page-2",
+        next_retry_phase="post-market",
+    )
+
+    with pytest.raises(ValueError, match="repeated"):
+        update_cursor(previous, page)
 
 
 def test_failure_retains_watermark_and_safe_resume_state():

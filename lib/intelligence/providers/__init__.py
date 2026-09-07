@@ -38,6 +38,11 @@ _MAX_METADATA_ENTRIES = 32
 _MAX_METADATA_STRING_CHARACTERS = 500
 _MAX_RECEIPT_COUNT = 10_000
 _CACHE_TTL = timedelta(minutes=15)
+_ACTIVE_MARKUP = re.compile(
+    r"(?:<\s*/?\s*(?:script|iframe|object|embed|style|svg|math|img|link|meta|form|input|video|audio)\b|"
+    r"\bon[a-z]{2,40}\s*=|\bjavascript\s*:)",
+    re.IGNORECASE,
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -184,6 +189,10 @@ def parse_timestamp(value: object) -> datetime | None:
 
 def bounded_text(value: object) -> str:
     return re.sub(r"\s+", " ", str(value or "")).strip()[:_MAX_TEXT_CHARACTERS]
+
+
+def contains_active_markup(value: object) -> bool:
+    return _ACTIVE_MARKUP.search(str(value or "")) is not None
 
 
 def publisher_reference(url: object) -> dict[str, str]:
@@ -541,6 +550,8 @@ class SourceAdapter(ABC):
         text = bounded_text(record.get("text"))
         upstream_id = record.get("upstream_item_id")
         if upstream_id is None or not str(upstream_id).strip():
+            return None
+        if any(contains_active_markup(value) for value in (upstream_id, title, text)):
             return None
         metadata = bounded_metadata(record.get("metadata"))
         raw_published_at = record.get("published_at")

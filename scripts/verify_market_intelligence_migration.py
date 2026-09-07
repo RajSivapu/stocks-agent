@@ -24,6 +24,7 @@ MIGRATIONS = (
     ROOT / "sql" / "migrations" / "20260916_run_scoped_request_provenance.sql",
     ROOT / "sql" / "migrations" / "20261005_market_wide_discovery.sql",
     ROOT / "sql" / "migrations" / "20261006_reference_snapshot_transfer.sql",
+    ROOT / "sql" / "migrations" / "20261007_discovery_cursor_context.sql",
 )
 GATEWAY_ROLE = "service_role"
 TABLES = (
@@ -72,6 +73,7 @@ DISCOVERY_RPCS = (
     "record_market_discovery_reference(uuid,jsonb)",
     "checkpoint_market_discovery_stage(uuid,jsonb)",
     "read_market_discovery_context(uuid,integer)",
+    "read_market_discovery_cursor_context(uuid,integer)",
     "begin_market_discovery_reference(uuid,jsonb,uuid,integer,text)",
     "record_market_discovery_reference_chunk(uuid,jsonb,uuid,integer,text)",
     "finalize_market_discovery_reference(uuid,jsonb,uuid,integer,text)",

@@ -724,6 +724,110 @@ Deno.test("unresolved suggestion overflow fails closed instead of dropping pendi
   assertEquals((error as GatewayRepositoryError).code, "CONTEXT_TOO_LARGE");
 });
 
+Deno.test("readContext carries protected prior cursor provenance into a new run", async () => {
+  class EmptyQuery {
+    select(): EmptyQuery {
+      return this;
+    }
+    eq(): EmptyQuery {
+      return this;
+    }
+    is(): EmptyQuery {
+      return this;
+    }
+    gte(): EmptyQuery {
+      return this;
+    }
+    lt(): EmptyQuery {
+      return this;
+    }
+    or(): EmptyQuery {
+      return this;
+    }
+    in(): EmptyQuery {
+      return this;
+    }
+    order(): EmptyQuery {
+      return this;
+    }
+    limit(): EmptyQuery {
+      return this;
+    }
+    update(): EmptyQuery {
+      return this;
+    }
+    single(): EmptyQuery {
+      return this;
+    }
+    then(
+      resolve?: (value: { data: unknown[]; error: null }) => unknown,
+    ): Promise<unknown> {
+      return Promise.resolve({ data: [], error: null }).then(resolve);
+    }
+  }
+  const runId = "00000000-0000-4000-8000-000000000020";
+  const sourceRunId = "00000000-0000-4000-8000-000000000010";
+  const sourceTaskId = "00000000-0000-4000-8000-000000000011";
+  const cursor = {
+    task_key: "gdelt_theme_search:macro_and_policy",
+    provider: "gdelt",
+    capability_id: "gdelt_theme_search",
+    completed_through: "2026-09-05T20:00:00Z",
+    active_window_start: null,
+    active_window_end: null,
+    backlog_token: null,
+    page: 1,
+    accepted_item_ids: [],
+    next_retry_phase: null,
+    source_run_id: sourceRunId,
+    source_task_id: sourceTaskId,
+    source_updated_at: "2026-09-05T20:01:00Z",
+  };
+  const repository = createSupabaseGatewayRepository({
+    from() {
+      return new EmptyQuery();
+    },
+    rpc(name: string, parameters?: Record<string, unknown>) {
+      if (name === "refresh_market_intelligence_context") {
+        assertEquals(parameters, { p_run_id: runId });
+        return Promise.resolve({ data: null, error: null });
+      }
+      if (name === "read_market_discovery_cursor_context") {
+        assertEquals(parameters, { p_run_id: runId, p_limit: 100 });
+        return Promise.resolve({
+          data: {
+            source_cursors: [cursor],
+            last_completed_scans: [{
+              capability_id: "gdelt_theme_search",
+              theme_id: "macro_and_policy",
+              completed_through: "2026-09-05T20:00:00Z",
+              source_run_id: sourceRunId,
+              source_task_id: sourceTaskId,
+            }],
+          },
+          error: null,
+        });
+      }
+      if (name === "read_reconciled_cash_snapshot") {
+        return Promise.resolve({ data: null, error: null });
+      }
+      throw new Error(`unexpected RPC ${name}`);
+    },
+  });
+
+  const context = await repository.readContext(runId);
+  assertEquals(context.intelligence_collection_context?.source_cursors, [
+    cursor,
+  ]);
+  assertEquals(context.intelligence_collection_context?.last_completed_scans, [{
+    capability_id: "gdelt_theme_search",
+    theme_id: "macro_and_policy",
+    completed_through: "2026-09-05T20:00:00Z",
+    source_run_id: sourceRunId,
+    source_task_id: sourceTaskId,
+  }]);
+});
+
 function rejects(value: unknown): boolean {
   try {
     validatePolicy(value);

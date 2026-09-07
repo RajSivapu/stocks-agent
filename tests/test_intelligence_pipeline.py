@@ -22,7 +22,8 @@ from lib.intelligence.providers import (
     SourceItem,
 )
 from lib.intelligence.themes import SEED_THEMES
-from lib.intelligence.types import PacketLimits
+from lib.intelligence.types import DiscoveryPlan, DiscoveryTask, PacketLimits, SourceCapability
+from lib.intelligence.cursors import SourceCursor
 
 
 NOW = datetime(2026, 9, 4, 12, 0, tzinfo=timezone.utc)
@@ -639,3 +640,104 @@ def test_production_discovery_vetoes_a_42_percent_holding_from_gateway_context()
     ranking = gateway.payloads[-1]["rankings"][0]
     assert ranking["qualified"] is False
     assert "HOLDING_WEIGHT_CONCENTRATED" in ranking["veto_reasons"]
+
+
+def test_capability_plan_executes_exact_task_cursor_and_persists_each_transition():
+    task_id = "44444444-4444-4444-8444-444444444444"
+    capability = SourceCapability(
+        capability_id="gdelt_theme_search", provider="gdelt",
+        query_kind="theme_search", themes=frozenset({"macro_and_policy"}),
+        phases=frozenset({"pre-market"}),
+        allowed_hosts=frozenset({"api.gdeltproject.org"}),
+        allowed_path_patterns=("/api/v2/doc/doc",), required_credential=None,
+        authority="radar", retention_class="metadata", max_requests_per_run=9,
+        max_items_per_request=20, requirement_tier="required_baseline",
+        health="enabled", enabled=True, provider_priority=1,
+        query_pack=MappingProxyType({}),
+    )
+    task = DiscoveryTask(
+        task_id=task_id, stage="signals", provider="gdelt",
+        capability_id=capability.capability_id, query_kind="theme_search",
+        theme_id="macro_and_policy",
+        query=MappingProxyType({"query": "economic policy"}),
+        window=MappingProxyType({
+            "start": "2026-09-03T12:00:00Z", "end": NOW.isoformat(),
+        }), dependencies=(), max_attempts=1, requires_credential=False,
+    )
+    plan = DiscoveryPlan(
+        run_id=RUN_ID, phase="pre-market", reference_version="sec:fixture-v1",
+        capability_version=1, tasks=(task,),
+        capabilities=MappingProxyType({capability.capability_id: capability}),
+        coverage=MappingProxyType({}), provider_request_totals=MappingProxyType({"gdelt": 1}),
+        reserved_holding_quote_requests=0, reserved_adaptive_requests=0,
+    )
+    source_cursor = SourceCursor(
+        provider="gdelt", capability_id="gdelt_theme_search",
+        completed_through=datetime(2026, 9, 3, 8, tzinfo=timezone.utc),
+        active_window_start=datetime(2026, 9, 3, 6, tzinfo=timezone.utc),
+        active_window_end=NOW, backlog_token="older-page-2",
+        accepted_item_ids=("prior-item",), next_retry_phase="pre-market",
+    )
+
+    class PlannedGateway(FakeGateway):
+        def __init__(self):
+            super().__init__()
+            self.discovery_tasks = {}
+            self.collection_checkpoints = {}
+
+        def start_intelligence_run(self, payload):
+            result = super().start_intelligence_run(payload)
+            result["cache_entries"] = list(self.collection_checkpoints.values())
+            return result
+
+        def read_discovery_context(self, run_id):
+            assert run_id == RUN_ID
+            return {"tasks": list(self.discovery_tasks.values())}
+
+        def checkpoint_discovery_stage(self, run_id, payload):
+            assert run_id == RUN_ID
+            row = payload["task"]
+            self.discovery_tasks[row["id"]] = row
+            return {"task": row, "duplicate": False}
+
+        def checkpoint_intelligence_collection(self, run_id, payload):
+            self.collection_checkpoints[payload["cache_key"]] = payload
+            return {"run_id": run_id, "cache_key": payload["cache_key"]}
+
+    gateway = PlannedGateway()
+    adapter = FakeAdapter()
+    result = IntelligencePipeline(
+        gateway, [adapter], discovery_plan=plan,
+        source_cursors={task_id: source_cursor},
+    ).run(request("pre-market"))
+
+    assert len(adapter.queries) == 1
+    planned_query = adapter.queries[0]
+    assert planned_query.text == "economic policy"
+    assert planned_query.capability_id == "gdelt_theme_search"
+    assert planned_query.start == source_cursor.active_window_start
+    assert planned_query.end == source_cursor.active_window_end
+    assert planned_query.cursor_token == "older-page-2"
+    assert planned_query.page == 2
+    assert [row["state"] for row in gateway.payloads if "state" in row] == []
+    persisted = gateway.discovery_tasks[task_id]
+    assert persisted["state"] == "succeeded"
+    assert persisted["requested_window"] == {
+        "start": "2026-09-03T06:00:00.000Z",
+        "end": "2026-09-04T12:00:00.000Z",
+    }
+    assert persisted["result"]["checkpoint"]["receipt"]["metadata"]
+    assert persisted["result"]["source_cursor"]["accepted_item_ids"] == []
+    assert result.sources[0]["capability_id"] == "gdelt_theme_search"
+
+    replay_adapter = FakeAdapter()
+    replay = IntelligencePipeline(
+        gateway, [replay_adapter], discovery_plan=plan,
+        source_cursors={task_id: source_cursor},
+    ).run(request("pre-market"))
+
+    assert replay_adapter.queries == []
+    assert replay.actual_requests == 0
+    assert replay.cache_hits == 1
+    assert replay.sources[0]["capability_id"] == "gdelt_theme_search"
+    assert replay.sources[0]["cursor_start"] == "2026-09-03T06:00:00+00:00"

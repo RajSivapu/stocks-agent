@@ -55,6 +55,9 @@ research, Analyst/Checker, `evaluate_and_publish`, permitted artifacts/grading, 
 - Finnhub free tier: fundamentals, news, earnings/events, insider and analyst context.
 - GDELT plus reviewed SEC, Federal Register, White House, DOE, Defense, and EIA routes provide
   bounded keyless event and official-source discovery.
+- Scheduled discovery records capability tasks and durable overlapping source cursors. Backlogged
+  pages keep the same collection window, and an unpageable rolling-feed overflow reports a coverage
+  gap without advancing its watermark.
 - Alpha Vantage topic news is optional and may use only an existing owner-approved free key.
 - Supabase free-tier project: Postgres and three Edge Functions, including the owner-only read API.
 - Telegram Bot API: fixed brief delivery and deterministic recordkeeping chat.

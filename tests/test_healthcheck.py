@@ -1,4 +1,6 @@
 import json
+from email.message import Message
+from urllib.error import HTTPError
 
 from lib.intelligence.health import build_capability_health
 
@@ -109,3 +111,45 @@ def test_disabled_eia_statistics_reports_present_key_without_enabling_route():
     assert eia["declared_health"] == "configuration_missing"
     assert eia["configuration_status"] == "present"
     assert eia["status"] == "configuration_missing"
+
+
+def test_health_probe_opens_only_an_exact_validated_defense_redirect(monkeypatch):
+    import scripts.healthcheck as healthcheck
+    from lib.intelligence.health import _defense_request
+
+    request = _defense_request("defense_releases_rss", content_type=9)
+    destination = request.allowed_final_urls[-1]
+    calls = []
+
+    class Response:
+        status = 200
+        headers = Message()
+
+        def geturl(self):
+            return destination
+
+        def close(self):
+            pass
+
+    class Opener:
+        def open(self, outgoing, timeout):
+            calls.append(outgoing.full_url)
+            if len(calls) == 1:
+                headers = Message()
+                headers["Location"] = destination
+                raise HTTPError(outgoing.full_url, 302, "redirect", headers, None)
+            return Response()
+
+    monkeypatch.setattr(
+        healthcheck.urllib.request,
+        "urlopen",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("automatic redirect transport was used")
+        ),
+    )
+    monkeypatch.setattr(
+        healthcheck.urllib.request, "build_opener", lambda *_handlers: Opener()
+    )
+
+    assert healthcheck._probe(request) == destination
+    assert calls == [request.resolved_url(), destination]

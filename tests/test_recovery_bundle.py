@@ -179,7 +179,24 @@ def recovery_records():
             "provider": "gdelt", "query_kind": "theme_search", "query_hash": "4" * 64,
             "dependency_ids": [], "requested_window": {"start": "2026-09-05T12:00:00Z", "end": "2026-09-05T20:00:00Z"},
             "state": "succeeded", "attempt_count": 1, "request_budget": 1,
-            "result": {"theme_episode_revision_ids": [theme_episode_id]},
+            "result": {
+                "cursor_key": "gdelt_theme_search:grid_modernization",
+                "theme_id": "grid_modernization",
+                "request_cursor": {
+                    "provider": "gdelt", "capability_id": "gdelt_theme_search",
+                    "completed_through": None, "active_window_start": None,
+                    "active_window_end": None, "backlog_token": None, "page": 1,
+                    "accepted_item_ids": [], "next_retry_phase": None,
+                },
+                "source_cursor": {
+                    "provider": "gdelt", "capability_id": "gdelt_theme_search",
+                    "completed_through": "2026-09-05T19:33:00Z",
+                    "active_window_start": None, "active_window_end": None,
+                    "backlog_token": None, "page": 1,
+                    "accepted_item_ids": [], "next_retry_phase": None,
+                },
+                "checkpoint": {"cache_key": "4" * 64, "receipt": {"metadata": {}}},
+            },
             "created_at": "2026-09-05T19:32:00Z", "updated_at": "2026-09-05T19:33:00Z",
         }, {
             "id": enrich_task_id, "run_id": run, "stage": "enrich", "capability_id": "sec_issuer_submissions",
@@ -377,11 +394,26 @@ def test_recovery_payload_carries_identity_delivery_and_release_state(tmp_path, 
     )
     assert records["schema_version"][0]["statements"] == ["SELECT 1"]
     assert records["release_migration_ledger"] == []
+    cursor_result = next(
+        row["result"] for row in records["discovery_stage_tasks"]
+        if row["capability_id"] == "gdelt_theme_search"
+    )
+    assert cursor_result["cursor_key"] == "gdelt_theme_search:grid_modernization"
+    assert cursor_result["source_cursor"]["completed_through"] == "2026-09-05T19:33:00Z"
     assert set(records) >= {
         "intelligence_run_events", "source_quota_reservations", "collection_checkpoints",
         "collection_checkpoint_history", "collection_completions", "report_origins",
         "cash_ledger_state", "cash_snapshots", "run_terminal_outcomes",
     }
+
+
+def test_recovery_rejects_malformed_terminal_cursor_metadata():
+    records = recovery_records()
+    cursor = records["discovery_stage_tasks"][0]["result"]["source_cursor"]
+    cursor["accepted_item_ids"] = ["duplicate", "duplicate"]
+
+    with pytest.raises(ValueError, match="discovery task.*invalid content"):
+        _validated_records(records)
 
 
 @pytest.mark.parametrize("change", [

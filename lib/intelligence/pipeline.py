@@ -15,6 +15,13 @@ from zoneinfo import ZoneInfo
 from lib.intelligence.dedupe import RunItemDisposition, deduplicate
 from lib.intelligence.cache import ResumableCollectionCache, collection_from_checkpoint
 from lib.intelligence.canonical import canonical_event, canonical_ranking
+from lib.intelligence.cursors import (
+    CollectionPage,
+    CollectionWindow,
+    SourceCursor,
+    update_cursor,
+    window_from_cursor,
+)
 from lib.intelligence.http import SourceFailure, cache_key
 from lib.intelligence.normalize import SourceItem, normalize_item
 from lib.intelligence.packet import EvidencePacket, build_evidence_packet
@@ -29,7 +36,7 @@ from lib.intelligence.quota import QuotaSession
 from lib.intelligence.ranking import CandidateInput, RankedCandidate, rank_candidates
 from lib.intelligence.relationships import EventRelationship, exposure_kind, propose_relation
 from lib.intelligence.themes import SEED_THEMES, MarketEvent, build_market_event, evidence_key
-from lib.intelligence.types import PacketLimits
+from lib.intelligence.types import DiscoveryPlan, DiscoveryTask, PacketLimits, SourceCapability
 
 
 PHASES = ("pre-market", "intraday", "post-market", "on-demand")
@@ -218,6 +225,8 @@ class IntelligencePipeline:
         packet_limits: PacketLimits = PacketLimits(),
         cache: ResumableCollectionCache | None = None,
         reference_stage: object | None = None,
+        discovery_plan: DiscoveryPlan | None = None,
+        source_cursors: Mapping[str, SourceCursor] | None = None,
     ) -> None:
         self.gateway = gateway
         values = tuple(adapters.values()) if isinstance(adapters, Mapping) else tuple(adapters)
@@ -235,6 +244,18 @@ class IntelligencePipeline:
         if reference_stage is not None and not callable(reference_stage):
             raise ValueError("reference_stage must be callable")
         self.reference_stage = reference_stage
+        if discovery_plan is not None and not isinstance(discovery_plan, DiscoveryPlan):
+            raise ValueError("discovery_plan must be a DiscoveryPlan")
+        self.discovery_plan = discovery_plan
+        if source_cursors is None:
+            self.source_cursors: dict[str, SourceCursor] = {}
+        elif not isinstance(source_cursors, Mapping) or any(
+            not isinstance(key, str) or not isinstance(value, SourceCursor)
+            for key, value in source_cursors.items()
+        ):
+            raise ValueError("source_cursors must contain validated SourceCursor values")
+        else:
+            self.source_cursors = dict(source_cursors)
 
     def run(self, request: PipelineRequest) -> PipelineReceipt:
         targets = self._targets(request.phase)
@@ -249,6 +270,9 @@ class IntelligencePipeline:
         recovered = self._read_completion(request.request_id)
         if recovered is not None:
             return recovered
+
+        if self.discovery_plan is not None:
+            return self._run_capability_plan(request)
 
         providers = tuple(str(adapter.provider) for adapter in self.adapters)
         if not providers:
@@ -311,6 +335,464 @@ class IntelligencePipeline:
         receipt = self._complete(request, run_id, targets, results)
         self.cache.put_run(request.request_id, receipt)
         return receipt
+
+    def _run_capability_plan(self, request: PipelineRequest) -> PipelineReceipt:
+        """Execute the persisted Task 1 plan through the existing collection path."""
+        plan = self.discovery_plan
+        if plan is None or plan.run_id != request.request_id or plan.phase != request.phase:
+            raise ValueError("discovery plan does not match the collection request")
+        adapters = {str(adapter.provider): adapter for adapter in self.adapters}
+        collection_tasks = tuple(task for task in plan.tasks if task.stage != "reference")
+        missing = sorted({task.provider for task in collection_tasks} - set(adapters))
+        if missing:
+            raise ValueError("discovery plan has no adapter for a planned provider")
+
+        providers = tuple(sorted({task.provider for task in collection_tasks}))
+        global_window = _initial_request_window(request)
+        plan_rows = [{
+            "id": _uuid("reservation", request.request_id, provider),
+            "provider": provider,
+            "requests": sum(task.provider == provider for task in collection_tasks),
+            "cache_keys": [],
+        } for provider in providers]
+        start_payload = {
+            "phase": request.phase,
+            "market_date": request.market_date.isoformat(),
+            "policy_version": 1,
+            "request_window": global_window,
+            "reservation_plan": {"reservations": plan_rows},
+        }
+        start = self._start(start_payload, request.request_id)
+        run_id = str(start.get("run_id") or "")
+        if run_id != request.request_id:
+            raise ValueError("gateway start receipt run_id does not match request_id")
+        request_window = _request_window(start.get("request_window"), request)
+        checkpoint_entries = start.get("cache_entries")
+        if not isinstance(checkpoint_entries, Sequence) or isinstance(
+            checkpoint_entries, (str, bytes, bytearray)
+        ) or any(not isinstance(entry, Mapping) for entry in checkpoint_entries):
+            raise ValueError("gateway start receipt checkpoints are invalid")
+        self.cache.hydrate_collections(checkpoint_entries, now=_utc(request.now))
+        self._install_quota(plan_rows, start.get("reservation_usage", {}))
+
+        persisted = self._read_discovery_tasks(run_id)
+        for task in plan.tasks:
+            if task.task_id not in persisted:
+                if task.stage == "reference":
+                    row = self._task_row(task, state="planned", attempt_count=0, result={})
+                else:
+                    _cursor_key, task_cursor = self._cursor_for_task(task)
+                    task_window = _collection_window_for_task(task, task_cursor)
+                    row = self._task_row(
+                        task,
+                        state="planned",
+                        attempt_count=0,
+                        result={},
+                        window=task_window,
+                        cursor=task_cursor,
+                    )
+                persisted[task.task_id] = self._checkpoint_discovery_task(run_id, row)
+
+        self._run_planned_reference(run_id, request, persisted)
+        results: list[CollectionResult] = []
+        plan_by_provider = {str(row["provider"]): row for row in plan_rows}
+        for task in collection_tasks:
+            result = self._run_planned_collection_task(
+                run_id,
+                request,
+                request_window,
+                task,
+                plan.capabilities[task.capability_id],
+                adapters[task.provider],
+                plan_by_provider[task.provider],
+                persisted,
+            )
+            results.append(result)
+
+        targets = tuple(
+            task.theme_id or task.capability_id for task in collection_tasks
+        )
+        receipt = self._complete(request, run_id, targets, results)
+        self.cache.put_run(request.request_id, receipt)
+        return receipt
+
+    def _read_discovery_tasks(self, run_id: str) -> dict[str, Mapping[str, object]]:
+        method = getattr(self.gateway, "read_discovery_context", None)
+        if callable(method):
+            response = method(run_id)
+        elif callable(getattr(self.gateway, "call", None)):
+            response = self.gateway.call(
+                "read_discovery_context", {"limit": 100}, run_id=run_id,
+                request_id=_uuid("read-discovery-context", run_id),
+            )
+        else:
+            raise ValueError("planned collection requires discovery checkpoint support")
+        data = _gateway_data(response)
+        context = data.get("context", data)
+        if not isinstance(context, Mapping):
+            raise ValueError("persisted discovery context is invalid")
+        rows = context.get("tasks")
+        if not isinstance(rows, Sequence) or isinstance(rows, (str, bytes, bytearray)):
+            raise ValueError("persisted discovery tasks are invalid")
+        result: dict[str, Mapping[str, object]] = {}
+        for row in rows:
+            if not isinstance(row, Mapping) or not isinstance(row.get("id"), str):
+                raise ValueError("persisted discovery task is invalid")
+            task_id = str(row["id"])
+            if task_id in result:
+                raise ValueError("persisted discovery task identity is duplicated")
+            result[task_id] = row
+        return result
+
+    def _checkpoint_discovery_task(
+        self, run_id: str, row: Mapping[str, object]
+    ) -> Mapping[str, object]:
+        payload = {
+            "task": dict(row),
+            "exposure_facts": [],
+            "theme_episode_revisions": [],
+            "research_nominations": [],
+        }
+        method = getattr(self.gateway, "checkpoint_discovery_stage", None)
+        if callable(method):
+            response = method(run_id, payload)
+        elif callable(getattr(self.gateway, "call", None)):
+            response = self.gateway.call(
+                "checkpoint_discovery_stage", payload, run_id=run_id,
+                request_id=_uuid(
+                    "discovery-stage", run_id, row["id"], row["state"], row["attempt_count"]
+                ),
+            )
+        else:
+            raise ValueError("planned collection requires discovery checkpoint support")
+        returned = _gateway_data(response).get("task")
+        if not isinstance(returned, Mapping) or returned.get("id") != row["id"] \
+                or returned.get("state") != row["state"]:
+            raise ValueError("discovery checkpoint receipt mismatch")
+        return returned
+
+    @staticmethod
+    def _task_row(
+        task: DiscoveryTask,
+        *,
+        state: str,
+        attempt_count: int,
+        result: Mapping[str, object],
+        window: CollectionWindow | None = None,
+        cursor: SourceCursor | None = None,
+    ) -> dict[str, object]:
+        requested = task.window if window is None else {
+            "start": _timestamp(window.start), "end": _timestamp(window.end),
+        }
+        return {
+            "id": task.task_id,
+            "stage": task.stage,
+            "provider": task.provider,
+            "capability_id": task.capability_id,
+            "query_kind": task.query_kind,
+            "query_hash": hashlib.sha256(_canonical({
+                "capability_id": task.capability_id,
+                "query": dict(task.query),
+                "cursor": cursor.to_mapping() if cursor is not None else None,
+                "requested_window": dict(requested),
+                "theme_id": task.theme_id,
+            }).encode()).hexdigest(),
+            "dependency_ids": list(task.dependencies),
+            "requested_window": {
+                "start": str(requested["start"]), "end": str(requested["end"]),
+            },
+            "state": state,
+            "attempt_count": attempt_count,
+            "request_budget": task.max_attempts,
+            "result": dict(result),
+        }
+
+    def _run_planned_reference(
+        self,
+        run_id: str,
+        request: PipelineRequest,
+        persisted: dict[str, Mapping[str, object]],
+    ) -> None:
+        plan = self.discovery_plan
+        if plan is None:
+            return
+        for task in (value for value in plan.tasks if value.stage == "reference"):
+            current = persisted[task.task_id]
+            state = str(current.get("state") or "")
+            saved = current.get("result")
+            if state in {"succeeded", "deferred"} and isinstance(saved, Mapping):
+                coverage = saved.get("reference_coverage")
+                if isinstance(coverage, Mapping):
+                    self.context["reference_coverage"] = {
+                        **dict(coverage), "execution_allowed": False,
+                    }
+                continue
+            if state == "attempting":
+                coverage = {
+                    "coverage_status": "scope_not_guaranteed",
+                    "reference_status": "reference_unavailable",
+                    "reference_manifest_id": None,
+                    "reference_age_seconds": None,
+                    "execution_allowed": False,
+                }
+                row = self._task_row(
+                    task, state="uncertain", attempt_count=1,
+                    result={"error_code": "REFERENCE_OUTCOME_UNCERTAIN"},
+                )
+                persisted[task.task_id] = self._checkpoint_discovery_task(run_id, row)
+                self.context["reference_coverage"] = coverage
+                continue
+            attempting = self._task_row(task, state="attempting", attempt_count=1, result={})
+            persisted[task.task_id] = self._checkpoint_discovery_task(run_id, attempting)
+            if self.reference_stage is None:
+                coverage = {
+                    "coverage_status": "scope_not_guaranteed",
+                    "reference_status": "reference_unavailable",
+                    "reference_manifest_id": None,
+                    "reference_age_seconds": None,
+                    "execution_allowed": False,
+                }
+                terminal = self._task_row(
+                    task, state="deferred", attempt_count=1,
+                    result={"reference_coverage": {
+                        key: value for key, value in coverage.items()
+                        if key != "execution_allowed"
+                    }},
+                )
+            else:
+                try:
+                    coverage = _validated_reference_coverage(
+                        self.reference_stage(run_id, request)
+                    )
+                except Exception:
+                    terminal = self._task_row(
+                        task, state="failed", attempt_count=1,
+                        result={"error_code": "REFERENCE_STAGE_FAILED"},
+                    )
+                    persisted[task.task_id] = self._checkpoint_discovery_task(run_id, terminal)
+                    raise
+                terminal = self._task_row(
+                    task, state="succeeded", attempt_count=1,
+                    result={"reference_coverage": {
+                        key: value for key, value in coverage.items()
+                        if key != "execution_allowed"
+                    }},
+                )
+            persisted[task.task_id] = self._checkpoint_discovery_task(run_id, terminal)
+            self.context["reference_coverage"] = coverage
+
+    def _run_planned_collection_task(
+        self,
+        run_id: str,
+        request: PipelineRequest,
+        global_window: Mapping[str, str],
+        task: DiscoveryTask,
+        capability: SourceCapability,
+        adapter: object,
+        reservation: Mapping[str, object],
+        persisted: dict[str, Mapping[str, object]],
+    ) -> CollectionResult:
+        current = persisted[task.task_id]
+        state = str(current.get("state") or "")
+        saved = current.get("result")
+        saved_checkpoint = saved.get("checkpoint") if isinstance(saved, Mapping) else None
+        saved_request_cursor = saved.get("request_cursor") if isinstance(saved, Mapping) else None
+        cursor_key, cursor = self._cursor_for_task(task)
+        if isinstance(saved_request_cursor, Mapping):
+            cursor = SourceCursor.from_mapping(saved_request_cursor)
+            if cursor.provider != task.provider or cursor.capability_id != task.capability_id:
+                raise ValueError("persisted request cursor does not match its task")
+        window = _collection_window_for_task(task, cursor)
+        query = _query_for_task(task, capability, cursor, window, request.phase)
+        computed_key = _collection_cache_key(adapter, query)
+        saved_key = saved_checkpoint.get("cache_key") if isinstance(saved_checkpoint, Mapping) else None
+        key = str(saved_key) if state in {
+            "succeeded", "failed", "deferred", "uncertain"
+        } and isinstance(saved_key, str) else computed_key
+        source_receipt_id = _uuid("receipt", run_id, task.task_id)
+        if isinstance(saved_checkpoint, Mapping):
+            receipt_row = saved_checkpoint.get("receipt")
+            if isinstance(receipt_row, Mapping) and isinstance(receipt_row.get("metadata"), Mapping):
+                self.cache.attach_collection_metadata(key, receipt_row["metadata"])
+        cached = self.cache.get_collection(
+            key,
+            reservation_id=str(reservation["id"]),
+            source_receipt_id=source_receipt_id,
+            now=_utc(request.now),
+        )
+        if state in {"succeeded", "failed", "deferred", "uncertain"}:
+            saved_source_cursor = saved.get("source_cursor") if isinstance(saved, Mapping) else None
+            if isinstance(saved_source_cursor, Mapping):
+                terminal_cursor = SourceCursor.from_mapping(saved_source_cursor)
+                if terminal_cursor.provider != task.provider \
+                        or terminal_cursor.capability_id != task.capability_id:
+                    raise ValueError("persisted source cursor does not match its task")
+                self.source_cursors[cursor_key] = terminal_cursor
+            if cached is not None:
+                return cached
+            if isinstance(saved_checkpoint, Mapping):
+                try:
+                    restored = collection_from_checkpoint({
+                        "receipt": saved_checkpoint["receipt"], "items": [],
+                    })
+                    return _market_checkpoint_result(
+                        restored,
+                        global_window=global_window,
+                        cache_key_value=key,
+                        reservation_id=str(reservation["id"]),
+                        source_receipt_id=source_receipt_id,
+                    )
+                except (KeyError, TypeError, ValueError):
+                    pass
+            return CollectionResult(
+                (), _failed_receipt(
+                    task.provider, str(reservation["id"]), query, request.now,
+                    error_code="CHECKPOINT_UNAVAILABLE",
+                ), query.limit,
+            )
+        if state == "attempting":
+            frozen = cached if cached is not None else CollectionResult(
+                (), _failed_receipt(
+                    task.provider, str(reservation["id"]), query, request.now,
+                    error_code="TRANSPORT_OUTCOME_UNCERTAIN",
+                ), query.limit,
+            )
+            frozen = replace(frozen, receipt=replace(frozen.receipt, metadata={
+                **dict(frozen.receipt.metadata),
+                "capability_id": task.capability_id,
+                "coverage_gap": True,
+                "cursor_outcome_unavailable": True,
+            }))
+            terminal = self._task_row(
+                task, state="uncertain", attempt_count=int(current.get("attempt_count") or 1),
+                result={
+                    "cursor_key": f"{task.capability_id}:{task.theme_id or 'default'}",
+                    "theme_id": task.theme_id,
+                    "checkpoint": {
+                        "cache_key": key,
+                        "receipt": _checkpoint_receipt(frozen.receipt, include_metadata=True),
+                    },
+                    "request_cursor": cursor.to_mapping(),
+                    "source_cursor": cursor.to_mapping(),
+                }, window=window, cursor=cursor,
+            )
+            persisted[task.task_id] = self._checkpoint_discovery_task(run_id, terminal)
+            return frozen
+        if state not in {"planned", "attempting"}:
+            raise ValueError("persisted discovery task state is invalid")
+        if state == "planned":
+            attempting = self._task_row(
+                task,
+                state="attempting",
+                attempt_count=1,
+                result={"request_cursor": cursor.to_mapping()},
+                window=window,
+                cursor=cursor,
+            )
+            persisted[task.task_id] = self._checkpoint_discovery_task(run_id, attempting)
+
+        def checkpoint_attempt(barrier: RequestReceipt) -> None:
+            market = _market_checkpoint_result(
+                CollectionResult((), barrier, query.limit),
+                global_window=global_window,
+                cache_key_value=key,
+                reservation_id=str(reservation["id"]),
+                source_receipt_id=source_receipt_id,
+            )
+            try:
+                self._checkpoint(run_id, key, market, required=True)
+            except Exception as exc:
+                raise _CheckpointFailure("durable provider attempt barrier failed") from exc
+
+        try:
+            if task.provider == "yahoo" and callable(getattr(self.gateway, "call", None)):
+                collected = self.gateway.call("collect_intelligence_quote", {
+                    "ticker": query.symbols[0], "cache_key": key,
+                    "reservation_id": str(reservation["id"]),
+                    "source_receipt_id": source_receipt_id,
+                }, run_id=run_id)
+                result = collection_from_checkpoint(_gateway_data(collected)["checkpoint"])
+            elif task.provider in RESERVED_OUTBOUND_PROVIDERS:
+                result = adapter.collect(
+                    query,
+                    source_receipt_id=source_receipt_id,
+                    before_transport_attempt=checkpoint_attempt,
+                )
+            else:
+                result = adapter.collect(query)
+            if not isinstance(result, CollectionResult):
+                raise TypeError("adapter returned an invalid collection result")
+        except _CheckpointFailure:
+            raise
+        except Exception as exc:
+            result = CollectionResult(
+                (), _failed_receipt(
+                    task.provider, str(reservation["id"]), query, request.now,
+                    error_code=getattr(exc, "code", "SOURCE_UNAVAILABLE"),
+                ), query.limit,
+            )
+
+        source_result = replace(result, receipt=replace(
+            result.receipt,
+            cache_key=key,
+            reservation_id=str(reservation["id"]),
+            source_receipt_id=result.receipt.source_receipt_id or source_receipt_id,
+            requested_window={
+                "start": _timestamp(window.start), "end": _timestamp(window.end),
+            },
+            metadata=SourceAdapter._receipt_metadata(
+                query,
+                status=_cursor_status(result.receipt),
+                returned=result.receipt.accepted_count,
+                progress=result.receipt.metadata,
+            ),
+        ))
+        updated = _updated_source_cursor(cursor, window, source_result)
+        self.source_cursors[cursor_key] = updated
+        market_result = _market_checkpoint_result(
+            source_result,
+            global_window=global_window,
+            cache_key_value=key,
+            reservation_id=str(reservation["id"]),
+            source_receipt_id=source_receipt_id,
+        )
+        if market_result.receipt.request_cost > 0:
+            try:
+                self._checkpoint(run_id, key, market_result)
+            except Exception as exc:
+                raise _CheckpointFailure("durable checkpoint failed") from exc
+            self.cache.put_collection(key, market_result)
+        terminal_state = _discovery_terminal_state(source_result.receipt)
+        terminal = self._task_row(
+            task,
+            state=terminal_state,
+            attempt_count=1,
+            result={
+                "cursor_key": f"{task.capability_id}:{task.theme_id or 'default'}",
+                "theme_id": task.theme_id,
+                "checkpoint": {
+                    "cache_key": key,
+                    "receipt": _checkpoint_receipt(
+                        source_result.receipt, include_metadata=True
+                    ),
+                },
+                "request_cursor": cursor.to_mapping(),
+                "source_cursor": updated.to_mapping(),
+            },
+            window=window,
+            cursor=cursor,
+        )
+        persisted[task.task_id] = self._checkpoint_discovery_task(run_id, terminal)
+        return market_result
+
+    def _cursor_for_task(self, task: DiscoveryTask) -> tuple[str, SourceCursor]:
+        durable_key = f"{task.capability_id}:{task.theme_id or 'default'}"
+        value = self.source_cursors.get(task.task_id, self.source_cursors.get(durable_key))
+        if value is None:
+            value = SourceCursor(provider=task.provider, capability_id=task.capability_id)
+        if value.provider != task.provider or value.capability_id != task.capability_id:
+            raise ValueError("source cursor does not match its planned capability")
+        return (task.task_id if task.task_id in self.source_cursors else durable_key), value
 
     def _planned_cache_keys(
         self, request: PipelineRequest, targets: Sequence[str], request_window: Mapping[str, str]
@@ -515,8 +997,11 @@ class IntelligencePipeline:
             if value.disposition in {"accepted", "near_duplicate"}
         ]
         if callable(getattr(self.gateway, "call", None)):
+            reference_coverage = self.context.get("reference_coverage")
             context_response = self.gateway.call("read_intelligence_context", {}, run_id=run_id)
             self.context = protected_collection_context(_gateway_data(context_response)["context"])
+            if isinstance(reference_coverage, Mapping):
+                self.context["reference_coverage"] = dict(reference_coverage)
         events, relationships, ranked = _discover(discovery_items, self.context, request.now)
         qualified_ids = {
             evidence_key(item)
@@ -740,6 +1225,185 @@ class IntelligencePipeline:
             raise ValueError("gateway checkpoint receipt mismatch")
 
 
+def _validated_reference_coverage(value: object) -> dict[str, object]:
+    if not isinstance(value, Mapping):
+        raise ValueError("reference stage result is invalid")
+    allowed = {
+        "coverage_status", "reference_status", "reference_manifest_id",
+        "reference_age_seconds", "execution_allowed",
+    }
+    if set(value) != allowed or value.get("coverage_status") != "scope_not_guaranteed" \
+            or value.get("reference_status") not in {
+                "healthy", "reference_stale", "reference_unavailable"
+            } or value.get("execution_allowed") is not False:
+        raise ValueError("reference stage result is invalid")
+    result = dict(value)
+    manifest_id = result["reference_manifest_id"]
+    age = result["reference_age_seconds"]
+    if result["reference_status"] == "reference_unavailable":
+        if manifest_id is not None or age is not None:
+            raise ValueError("reference stage result is invalid")
+    else:
+        try:
+            if str(uuid.UUID(str(manifest_id))) != manifest_id:
+                raise ValueError
+        except (TypeError, ValueError, AttributeError):
+            raise ValueError("reference stage result is invalid") from None
+        if isinstance(age, bool) or not isinstance(age, int) or age < 0:
+            raise ValueError("reference stage result is invalid")
+    return result
+
+
+def _collection_window_for_task(
+    task: DiscoveryTask, cursor: SourceCursor
+) -> CollectionWindow:
+    start = _window_timestamp(task.window, "start")
+    end = _window_timestamp(task.window, "end")
+    duration = end - start
+    overlap = timedelta(hours=2)
+    if duration < overlap:
+        if cursor.active_window_start is not None:
+            return CollectionWindow(
+                cursor.active_window_start,
+                cursor.active_window_end,
+                int(overlap.total_seconds()),
+                cursor.backlog_token,
+            )
+        cursor_start = start
+        if cursor.completed_through is not None:
+            cursor_start = max(start, cursor.completed_through - overlap)
+        return CollectionWindow(cursor_start, end, int(overlap.total_seconds()))
+    if duration > timedelta(days=31):
+        raise ValueError("planned collection window exceeds cursor bound")
+    return window_from_cursor(
+        cursor, run_at=end, overlap=overlap, max_backfill=duration
+    )
+
+
+def _query_for_task(
+    task: DiscoveryTask,
+    capability: SourceCapability,
+    cursor: SourceCursor,
+    window: CollectionWindow,
+    phase: str,
+) -> CollectionQuery:
+    if capability.capability_id != task.capability_id \
+            or capability.provider != task.provider \
+            or capability.query_kind != task.query_kind:
+        raise ValueError("planned capability does not match its task")
+    query = task.query
+    text_value = next((
+        query[key] for key in ("query", "term", "topics", "path")
+        if key in query
+    ), task.capability_id)
+    if isinstance(text_value, Sequence) and not isinstance(
+        text_value, (str, bytes, bytearray)
+    ):
+        text_value = ",".join(str(item) for item in text_value)
+    text_value = str(text_value).strip() or task.capability_id
+    symbol_value = query.get("symbol", query.get("security"))
+    symbols = (str(symbol_value).strip().upper(),) if isinstance(
+        symbol_value, str
+    ) and symbol_value.strip() else ()
+    next_retry_phase = _next_retry_phase(capability.phases, phase)
+    return CollectionQuery(
+        text=text_value,
+        symbols=symbols,
+        cik=str(query["cik"]) if isinstance(query.get("cik"), str) else None,
+        series_id=str(query["series_id"])
+        if isinstance(query.get("series_id"), str) else None,
+        start=window.start,
+        end=window.end,
+        limit=min(50, capability.max_items_per_request),
+        capability_id=task.capability_id,
+        cursor_token=window.backlog_token,
+        page=cursor.page,
+        overlap_seconds=window.overlap_seconds,
+        next_retry_phase=next_retry_phase,
+        accession_number=str(query["accession_number"])
+        if isinstance(query.get("accession_number"), str) else None,
+        primary_document=str(query["primary_document"])
+        if isinstance(query.get("primary_document"), str) else None,
+    )
+
+
+def _next_retry_phase(phases: frozenset[str], phase: str) -> str:
+    order = ("pre-market", "intraday", "post-market", "on-demand")
+    start = order.index(phase)
+    for offset in range(1, len(order) + 1):
+        candidate = order[(start + offset) % len(order)]
+        if candidate in phases:
+            return candidate
+    return phase
+
+
+def _cursor_status(receipt: RequestReceipt) -> str:
+    if receipt.status in {"succeeded", "cache_hit", "quota_blocked"}:
+        return receipt.status
+    coverage = receipt.metadata.get("coverage_status")
+    if coverage in {"configuration_missing", "unsupported"}:
+        return str(coverage)
+    return "failed"
+
+
+def _updated_source_cursor(
+    cursor: SourceCursor,
+    window: CollectionWindow,
+    result: CollectionResult,
+) -> SourceCursor:
+    metadata = result.receipt.metadata
+    status = _cursor_status(result.receipt)
+    successful = status in {"succeeded", "cache_hit"}
+    truncated = bool(metadata.get("truncated", False)) if successful else False
+    backlog = metadata.get("backlog_token")
+    token = backlog if isinstance(backlog, str) and backlog else None
+    page = CollectionPage(
+        window=window,
+        status=status,
+        exhausted=successful and not truncated and not bool(
+            metadata.get("backlog_remaining", False)
+        ),
+        truncated=truncated or (
+            successful and bool(metadata.get("backlog_remaining", False))
+        ),
+        backlog_token=token,
+        accepted_item_ids=tuple(dict.fromkeys(
+            (item.upstream_item_id or item.content_hash) for item in result.items
+        )),
+        next_retry_phase=metadata.get("next_retry_phase")
+        if isinstance(metadata.get("next_retry_phase"), str) else None,
+    )
+    return update_cursor(cursor, page)
+
+
+def _market_checkpoint_result(
+    result: CollectionResult,
+    *,
+    global_window: Mapping[str, str],
+    cache_key_value: str,
+    reservation_id: str,
+    source_receipt_id: str,
+) -> CollectionResult:
+    return replace(result, receipt=replace(
+        result.receipt,
+        cache_key=cache_key_value,
+        reservation_id=reservation_id,
+        source_receipt_id=result.receipt.source_receipt_id or source_receipt_id,
+        requested_window={
+            "start": global_window["start"], "end": global_window["end"],
+        },
+    ))
+
+
+def _discovery_terminal_state(receipt: RequestReceipt) -> str:
+    status = _cursor_status(receipt)
+    if status in {"succeeded", "cache_hit"}:
+        return "succeeded"
+    if status in {"configuration_missing", "quota_blocked", "unsupported"}:
+        return "deferred"
+    return "failed"
+
+
 def _gateway_data(result: object) -> Mapping[str, object]:
     if not isinstance(result, Mapping):
         raise ValueError("gateway returned an invalid receipt")
@@ -763,6 +1427,9 @@ def protected_collection_context(value: object) -> dict[str, object]:
         "qualified_candidates": value.get("qualified_candidates", []),
         "liquidity_by_ticker": dict(_mapping(trusted.get("liquidity_by_ticker"))),
         "overlap_by_ticker": dict(_mapping(trusted.get("overlap_by_ticker"))),
+        "reference_version": trusted.get("reference_version"),
+        "source_cursors": trusted.get("source_cursors", []),
+        "last_completed_scans": trusted.get("last_completed_scans", []),
     }
 
 
@@ -850,8 +1517,10 @@ def _window_timestamp(window: Mapping[str, str], key: str) -> datetime:
     return _utc(value)
 
 
-def _checkpoint_receipt(value: RequestReceipt) -> dict[str, object]:
-    return {
+def _checkpoint_receipt(
+    value: RequestReceipt, *, include_metadata: bool = False
+) -> dict[str, object]:
+    result = {
         "provider": value.provider, "reservation_id": value.reservation_id, "status": value.status,
         "cache_key": value.cache_key, "requested_window": dict(value.requested_window),
         "requested_limit": value.requested_limit, "retrieved_at": _timestamp(value.retrieved_at),
@@ -863,6 +1532,9 @@ def _checkpoint_receipt(value: RequestReceipt) -> dict[str, object]:
         "source_receipt_id": value.source_receipt_id,
         "cache_predecessor_receipt_id": value.cache_predecessor_receipt_id,
     }
+    if include_metadata:
+        result["metadata"] = dict(value.metadata)
+    return result
 
 
 def _checkpoint_item(value: SourceItem) -> dict[str, object]:
@@ -934,6 +1606,9 @@ def _source_summary(value: RequestReceipt, receipt_id: str) -> dict[str, object]
         "coverage_status",
         "cursor_end",
         "cursor_start",
+        "continuation_unavailable",
+        "coverage_gap",
+        "cursor_outcome_unavailable",
         "next_retry_phase",
         "overlap_seconds",
         "truncated",

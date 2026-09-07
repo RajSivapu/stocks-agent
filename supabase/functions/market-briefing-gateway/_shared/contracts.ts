@@ -593,6 +593,8 @@ export interface GatewayReadContext extends PolicyContext {
     overlap_by_ticker: Record<string, string>;
     current_quotes?: Record<string, { price: string; as_of: string }>;
     quote_receipt_ids?: string[];
+    source_cursors?: DiscoverySourceCursor[];
+    last_completed_scans?: DiscoveryCompletedScan[];
   };
   recent_suggestions: ContextSuggestion[];
   observations: Array<{
@@ -632,6 +634,30 @@ export interface GatewayReadContext extends PolicyContext {
     rolled_months: number;
   }>;
   paper_watches: PaperWatchState[];
+}
+
+export interface DiscoverySourceCursor {
+  task_key: string;
+  provider: string;
+  capability_id: string;
+  completed_through: string | null;
+  active_window_start: string | null;
+  active_window_end: string | null;
+  backlog_token: string | null;
+  page: number;
+  accepted_item_ids: string[];
+  next_retry_phase: Phase | null;
+  source_run_id: string;
+  source_task_id: string;
+  source_updated_at: string;
+}
+
+export interface DiscoveryCompletedScan {
+  capability_id: string;
+  theme_id: string;
+  completed_through: string;
+  source_run_id: string;
+  source_task_id: string;
 }
 
 export interface PolicyConfig {

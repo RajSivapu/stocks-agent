@@ -148,3 +148,102 @@ base.
 - BLS and BEA abstract series adapters remain explicitly unsupported/configuration-missing as
   established by the capability registry; Task 4 did not invent series identifiers or broaden
   those routes.
+
+## Fix round 1 — scheduled execution, adversarial sources, and cross-run cursors
+
+Base: `169859e8f38e9b3b06eb6fd0ce3d259d9d3cb500`
+
+The sole scheduled collector now executes Task 1's exact persisted capability plan. It hydrates
+each task's durable capability/theme cursor, derives the bounded window/page/token query, writes
+planned and attempting checkpoints before transport, and persists terminal cursor plus receipt
+metadata in the existing task result/checkpoint fields. Terminal replay reconstructs the cached
+receipt without calling a provider again. Configuration and programmer validation errors retain
+their established adapter contract; the pipeline alone converts expected source outcomes into
+truthful receipts.
+
+Source hardening now disables automatic health-probe redirects and admits only the two reviewed
+Defense-to-war.gov path/query pairs. Rolling unpageable RSS overflow freezes its watermark/window
+and reports `truncated`, `backlog_remaining`, `continuation_unavailable`, and `coverage_gap`.
+Pageable adapters reject repeated continuation tokens. White House sitemap continuation carries
+the sitemap-child index and child offset and visits every approved child within its fixed bounds.
+Every retained item is checked against its official host/path; Federal Register and SEC payload
+identities must match the requested document. Decoded active markup is rejected from identity,
+title, and summary fields. Accepted IDs clear only after a fully exhausted contiguous window.
+
+Cross-run catch-up uses the additive
+`sql/migrations/20261007_discovery_cursor_context.sql`. Its service-only RPC returns at most 100
+unique latest cursors per capability/theme from prior completed runs and succeeded terminal tasks.
+It rejects malformed, future-dated, or mismatched cursor state and attaches the exact source
+run/task/update provenance. Failed, uncertain, current-run, and future-watermark records cannot
+advance a later run. The gateway validates the complete RPC shape and provenance pair before
+placing it in `intelligence_collection_context`; the service collector checks the same pairing
+before hydrating `SourceCursor`. Recovery preserves the terminal task result verbatim and rejects
+malformed cursor metadata. The reviewed 20261004, 20261005, and 20261006 migrations remain
+unchanged.
+
+### Fix-round TDD evidence
+
+- Scheduled-path RED: planned capabilities and persisted cursors never reached the only production
+  pipeline invocation. The new integration first failed with no `discovery_plan` or
+  `source_cursors`, then passed with one collector call and durable planned/attempting/terminal
+  transitions.
+- Redirect RED: the health transport followed redirects before validating the destination. The
+  regression now proves redirects are disabled and only each exact Defense-to-war.gov pair is
+  admitted.
+- Cursor/feed RED: eight adversarial cases exposed pre-slice overflow loss, fabricated
+  continuation, repeated tokens, incomplete sitemap-child traversal, and premature accepted-ID
+  clearing. The corrected adversarial source slice passed all 49 cases.
+- Provenance RED: five cases accepted off-domain item links, Federal Register identity drift, SEC
+  CIK/accession/document drift, or decoded active markup. All now fail closed before retention.
+- Cross-run RED: no 20261007 migration existed and a new run's protected context contained neither
+  `source_cursors` nor `last_completed_scans`. The first PostgreSQL test returned zero rows
+  until task and cursor capability identity were made exact. The repository test then failed its
+  typecheck because both context fields were absent, and a second RED proved cursor hydration was
+  incorrectly conditional on quote-context availability. Each test now passes.
+
+### Fix-round verification
+
+```text
+.venv/bin/python -m pytest -q tests/test_market_wide_discovery_sql.py \
+  tests/test_collect_market_intelligence.py tests/test_recovery_bundle.py
+145 passed in 9.45s
+
+.venv/bin/python -m pytest -q tests/test_market_wide_discovery_sql.py \
+  tests/test_collect_market_intelligence.py tests/test_recovery_bundle.py \
+  tests/test_intelligence_pipeline.py tests/test_intelligence_cursors.py \
+  tests/test_intelligence_official_sources.py tests/test_healthcheck.py
+220 passed in 9.07s
+
+.venv/bin/python -m pytest -q tests/test_intelligence_controller_sql.py
+38 passed in 9.80s
+
+npx --yes deno@2.9.6 test --config supabase/functions/deno.json \
+  supabase/functions/market-briefing-gateway/_shared \
+  supabase/functions/owner-dashboard-api
+ok | 310 passed | 0 failed
+
+npx --yes deno@2.9.6 check --config supabase/functions/deno.json \
+  supabase/functions/telegram-portfolio/index.ts \
+  supabase/functions/market-briefing-gateway/index.ts \
+  supabase/functions/owner-dashboard-api/index.ts
+exit 0
+```
+
+The complete Python suite passed earlier in this fix round with `1122 passed, 3 skipped,
+4 deselected in 154.84s`. Later changes were limited to the additive 20261007 SQL, protected
+gateway mapping, collector validation, and recovery validation; the affected suites above were
+rerun instead of repeating the unchanged full suite. Node tests (71), workspace typechecks,
+ESLint, dependency-license checks, production build/bundle, and Playwright (21 passed, 1 skipped)
+also passed in this fix round. Final `py_compile` for all modified Python modules and
+`git diff --check` exited 0.
+
+### Fix-round self-review
+
+- The new RPC is `SECURITY DEFINER` with `search_path=pg_catalog`; execute is granted only to
+  `service_role`. Owner/dashboard roles receive no cursor-result access.
+- Cross-run selection is bounded, unique, prior-run-only, non-future, and provenance-carrying.
+  Same-run replay stays on the existing run-scoped discovery context.
+- Cursor and receipt state are stored inside existing protected task fields and recovery datasets;
+  no duplicate collector or provider call was introduced.
+- No test used a live source. No collector, Telegram, schedule, deployment, or production mutation
+  ran during the fix.

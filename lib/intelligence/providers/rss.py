@@ -17,6 +17,11 @@ from . import CollectionQuery, SourceAdapter, bounded_text
 
 
 _MAX_FEED_ITEMS = 500
+_ACTIVE_MARKUP = re.compile(
+    r"(?:<\s*/?\s*(?:script|iframe|object|embed|style|svg|math|img|link|meta|form|input|video|audio)\b|"
+    r"\bon[a-z]{2,40}\s*=|\bjavascript\s*:)",
+    re.IGNORECASE,
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -76,7 +81,15 @@ def _timestamp(value: str) -> datetime | None:
     return parsed.astimezone(timezone.utc)
 
 
-def _safe_https_url(value: str, allowed_hosts: frozenset[str]) -> str:
+def contains_active_markup(value: object) -> bool:
+    return _ACTIVE_MARKUP.search(str(value or "")) is not None
+
+
+def _safe_https_url(
+    value: str,
+    allowed_hosts: frozenset[str],
+    allowed_path_patterns: tuple[re.Pattern[str], ...] = (),
+) -> str:
     try:
         parsed = urlsplit(value)
         port = parsed.port
@@ -90,6 +103,10 @@ def _safe_https_url(value: str, allowed_hosts: frozenset[str]) -> str:
         or parsed.password is not None
         or port not in (None, 443)
         or not parsed.path.startswith("/")
+        or (
+            allowed_path_patterns
+            and not any(pattern.fullmatch(parsed.path) for pattern in allowed_path_patterns)
+        )
     ):
         raise SourceFailure("INVALID_FEED")
     return value
@@ -102,6 +119,7 @@ def parse_bounded_feed(
     max_bytes: int,
     max_items: int,
     allowed_hosts: frozenset[str] | None = None,
+    allowed_path_patterns: tuple[re.Pattern[str], ...] = (),
 ) -> tuple[FeedItem, ...]:
     """Parse RSS/Atom bytes without DTDs, entities, active HTML, or unsafe links."""
     if (
@@ -147,8 +165,8 @@ def parse_bounded_feed(
         published_at = _timestamp(raw_date)
         if not identity or not title or not url or not raw_date or published_at is None:
             raise SourceFailure("INVALID_FEED")
-        _safe_https_url(url, hosts)
-        if re.search(r"<\s*(script|iframe|object|embed)\b", summary, re.IGNORECASE):
+        _safe_https_url(url, hosts, allowed_path_patterns)
+        if any(contains_active_markup(value) for value in (identity, title, summary)):
             raise SourceFailure("INVALID_FEED")
         items.append(FeedItem(
             upstream_item_id=identity[:512],
@@ -166,6 +184,7 @@ class OfficialFeedAdapter(SourceAdapter):
 
     feed_routes: Mapping[str, str] = MappingProxyType({})
     response_routes: Mapping[str, frozenset[str]] = MappingProxyType({})
+    item_path_patterns: Mapping[str, tuple[re.Pattern[str], ...]] = MappingProxyType({})
     allow_text_html_xml = False
     max_source_bytes = 1_000_000
 
@@ -215,8 +234,11 @@ class OfficialFeedAdapter(SourceAdapter):
             payload,
             source_url=response.url,
             max_bytes=self.max_source_bytes,
-            max_items=self.max_items_per_request,
+            # Retain enough bounded records for the adapter layer to detect an
+            # unpageable rolling-feed overflow before applying the item bound.
+            max_items=_MAX_FEED_ITEMS,
             allowed_hosts=self.allowed_hosts,
+            allowed_path_patterns=self.item_path_patterns.get(query.capability_id or "", ()),
         )
         request_url = self._route(query)
         return tuple({
@@ -230,5 +252,18 @@ class OfficialFeedAdapter(SourceAdapter):
             "metadata": dict(item.metadata),
         } for item in records)
 
+    def _progress_metadata(self, payload, query, response, records, bound):
+        overflow = len(records) > bound
+        progress: dict[str, object] = {
+            "truncated": overflow,
+            "backlog_remaining": overflow,
+        }
+        if overflow:
+            progress.update({
+                "continuation_unavailable": True,
+                "coverage_gap": True,
+            })
+        return MappingProxyType(progress)
 
-__all__ = ["FeedItem", "OfficialFeedAdapter", "parse_bounded_feed"]
+
+__all__ = ["FeedItem", "OfficialFeedAdapter", "contains_active_markup", "parse_bounded_feed"]

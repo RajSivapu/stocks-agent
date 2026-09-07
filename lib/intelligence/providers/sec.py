@@ -125,15 +125,36 @@ class SecEdgarAdapter(SourceAdapter):
             raise SourceFailure("UNSAFE_URL")
         cik = _cik(query.cik)
         if query.capability_id in {None, "sec_issuer_submissions"}:
+            try:
+                payload_cik = _cik(str(payload.get("cik")))
+            except (AttributeError, SourceFailure):
+                raise SourceFailure("INVALID_RESPONSE") from None
+            if payload_cik != cik:
+                raise SourceFailure("INVALID_RESPONSE")
             records = parse_submissions(payload, min(query.limit, self.max_items_per_request))
-            return [{
-                **record,
-                "request_url": request_url,
-                "item_url": record["source_url"],
-                "reporting_at": record.get("effective_at"),
-                "entity_ids": entity_ids((f"cik:{cik}",)),
-                "security_ids": security_ids(query.symbols),
-            } for record in records]
+            validated = []
+            for record in records:
+                accession = str(record.get("upstream_item_id") or "")
+                document = str(record.get("source_url") or "").rsplit("/", 1)[-1]
+                match = _ACCESSION.fullmatch(accession)
+                if match is None or match.group(1) != cik or _DOCUMENT.fullmatch(document) is None:
+                    raise SourceFailure("INVALID_RESPONSE")
+                expected = _filing_url(CollectionQuery(
+                    text=query.text, symbols=query.symbols, start=query.start, end=query.end,
+                    limit=query.limit, cik=cik, capability_id="sec_filing_document",
+                    accession_number=accession, primary_document=document,
+                ))
+                if record.get("source_url") != expected:
+                    raise SourceFailure("INVALID_RESPONSE")
+                validated.append({
+                    **record,
+                    "request_url": request_url,
+                    "item_url": expected,
+                    "reporting_at": record.get("effective_at"),
+                    "entity_ids": entity_ids((f"cik:{cik}",)),
+                    "security_ids": security_ids(query.symbols),
+                })
+            return validated
         if not isinstance(payload, bytes):
             raise SourceFailure("INVALID_RESPONSE")
         parser = _VisibleText()

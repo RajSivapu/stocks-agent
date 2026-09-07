@@ -79,6 +79,7 @@ class SourceCursor:
     active_window_start: datetime | str | None = None
     active_window_end: datetime | str | None = None
     backlog_token: str | None = None
+    page: int = 1
     accepted_item_ids: tuple[str, ...] = ()
     next_retry_phase: str | None = None
 
@@ -103,6 +104,11 @@ class SourceCursor:
         backlog = _bounded_token(self.backlog_token, "backlog token")
         if backlog is not None and active_start is None:
             raise ValueError("backlog token requires an active window")
+        page = self.page
+        if isinstance(page, bool) or not isinstance(page, int) or not 1 <= page <= 10:
+            raise ValueError("cursor page is invalid")
+        if backlog is not None and page == 1:
+            page = 2
         ids = _item_ids(self.accepted_item_ids)
         phase = self.next_retry_phase
         if phase is not None and phase not in _PHASES:
@@ -111,6 +117,7 @@ class SourceCursor:
         object.__setattr__(self, "active_window_start", active_start)
         object.__setattr__(self, "active_window_end", active_end)
         object.__setattr__(self, "backlog_token", backlog)
+        object.__setattr__(self, "page", page)
         object.__setattr__(self, "accepted_item_ids", ids)
 
     def to_mapping(self) -> dict[str, object]:
@@ -124,6 +131,7 @@ class SourceCursor:
             "active_window_start": encoded(self.active_window_start),
             "active_window_end": encoded(self.active_window_end),
             "backlog_token": self.backlog_token,
+            "page": self.page,
             "accepted_item_ids": list(self.accepted_item_ids),
             "next_retry_phase": self.next_retry_phase,
         }
@@ -137,10 +145,14 @@ class SourceCursor:
             "active_window_start",
             "active_window_end",
             "backlog_token",
+            "page",
             "accepted_item_ids",
             "next_retry_phase",
         }
-        if not isinstance(value, Mapping) or set(value) != expected:
+        legacy = expected - {"page"}
+        if not isinstance(value, Mapping) or frozenset(value) not in {
+            frozenset(expected), frozenset(legacy)
+        }:
             raise ValueError("persisted source cursor has invalid keys")
         return cls(
             provider=value["provider"],  # type: ignore[arg-type]
@@ -149,6 +161,7 @@ class SourceCursor:
             active_window_start=value["active_window_start"],  # type: ignore[arg-type]
             active_window_end=value["active_window_end"],  # type: ignore[arg-type]
             backlog_token=value["backlog_token"],  # type: ignore[arg-type]
+            page=value.get("page", 1),  # type: ignore[arg-type]
             accepted_item_ids=value["accepted_item_ids"],  # type: ignore[arg-type]
             next_retry_phase=value["next_retry_phase"],  # type: ignore[arg-type]
         )
@@ -203,8 +216,6 @@ class CollectionPage:
         if not successful and self.accepted_item_ids:
             raise ValueError("a failed page cannot accept item IDs")
         token = _bounded_token(self.backlog_token, "backlog token")
-        if successful and not self.exhausted and token is None:
-            raise ValueError("an unexhausted successful page requires a backlog token")
         if self.exhausted and token is not None:
             raise ValueError("an exhausted page cannot retain a backlog token")
         if self.next_retry_phase is not None and self.next_retry_phase not in _PHASES:
@@ -297,6 +308,7 @@ def update_cursor(cursor: SourceCursor, page: CollectionPage) -> SourceCursor:
             active_window_start=cursor.active_window_start or page.window.start,
             active_window_end=cursor.active_window_end or page.window.end,
             backlog_token=cursor.backlog_token or page.backlog_token,
+            page=cursor.page,
             next_retry_phase=page.next_retry_phase,
         )
 
@@ -312,11 +324,14 @@ def update_cursor(cursor: SourceCursor, page: CollectionPage) -> SourceCursor:
         raise ValueError("page window is not contiguous with the completed watermark")
     accepted = _merged_ids(cursor.accepted_item_ids, page.accepted_item_ids)
     if not page.exhausted:
+        if cursor.backlog_token is not None and page.backlog_token == cursor.backlog_token:
+            raise ValueError("page repeated the active backlog token")
         return replace(
             cursor,
             active_window_start=page.window.start,
             active_window_end=page.window.end,
             backlog_token=page.backlog_token,
+            page=cursor.page + 1 if page.backlog_token is not None else cursor.page,
             accepted_item_ids=accepted,
             next_retry_phase=page.next_retry_phase,
         )
@@ -326,7 +341,10 @@ def update_cursor(cursor: SourceCursor, page: CollectionPage) -> SourceCursor:
         active_window_start=None,
         active_window_end=None,
         backlog_token=None,
-        accepted_item_ids=accepted,
+        page=1,
+        # A completed contiguous window no longer needs the overlap-local ID
+        # guard. Durable item hashes remain the cross-window dedupe authority.
+        accepted_item_ids=(),
         next_retry_phase=None,
     )
 
