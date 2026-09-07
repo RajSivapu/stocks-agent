@@ -4,8 +4,8 @@ Last updated: 2026-09-06
 Canonical release: Personal Stock Agent V1 safety remediation
 Audit baseline: `432d647ef911ff63da427097f02a852e18038b62` on `origin/main`
 Consolidated local-gate candidate: `883d521728b1b3c2700a78dab1d65208105d7a2f`
-Current state: owner-only Site v7 is live from UI main
-`a4c8031f30ffd324bf35965bd2f31e60f41165b6`, with successful exact-main CI `34066973967`.
+Current state: owner-only Site v8 is live from UI main
+`b433a5b2030bc7d5636cbc4c7110e9247905347c`, with successful exact-main CI `34068491038`.
 Production schema reconciliation, managed isolated recovery, and the protected backend-runtime
 attestation are complete; trusted V1 use remains **no-go** pending the next existing scheduled
 evidence chain. The unchanged backend remains attested at
@@ -66,6 +66,12 @@ This file is the version-controlled source of truth for the Personal Stock Agent
   `appgdep_6a9df7eee2cc819193fefc13aa39d8bb` succeeded with one allowed owner, no groups, and zero
   external visitors. Its live script hashes match the verified build; Site v6 remains the immediate
   rollback. Receipt: `docs/receipts/2026-09-06-native-site-v7.json`.
+- [x] PR #31 aligned owner sign-in with the live Supabase signed-link template and removed the
+  misleading numeric-code step. Sol review approved exact head `7c6e09f`; protected main
+  `b433a5b` passed exact-main CI `34068491038`. Owner-only Site v8 deployment
+  `appgdep_6a9dff357ee88191bf08d54af6f4240f` succeeded with one allowed owner, no groups, and zero
+  external visitors. The live entry scripts match the verified build; Site v7 is the immediate
+  rollback. Receipt: `docs/receipts/2026-09-06-native-site-v8.json`.
 
 ## Product interface direction
 
@@ -220,8 +226,8 @@ V1-C4 is reopened.
 - [x] Complete the owner email-click canary; the owner confirmed the live dashboard appeared.
 - [x] Complete a formal non-owner login canary and retain its bounded denial receipt: HTTP 403
   `owner_only`, no portfolio data, temporary user deleted, and exactly one owner afterward.
-- [x] Publish the simplified, progressive-disclosure owner UI and accessibility follow-up as
-  owner-only Site v7 from exact main `a4c8031`; retain Site v6 as rollback.
+- [x] Publish the signed-link-only owner login correction as owner-only Site v8 from exact main
+  `b433a5b`; retain Site v7 as rollback.
 - [ ] Reconcile an original Telegram delivery ID or explicit persisted suppression from the next
   existing scheduled chain.
 
@@ -235,7 +241,7 @@ V1-C5 is reopened.
 - [x] GPT-6 Astra approved the final scoped re-review with no unresolved local Critical or Important
   finding; the final split-trust review also returned CLEAN with no Critical/P1/P2 finding.
 - [x] Exact-head CI `34055169909` and exact-main CI `34055295512` passed for attested backend main
-  `b3f7d70`; later UI-only main `a4c8031` passed exact-main CI `34066973967`.
+  `b3f7d70`; later UI-only main `b433a5b` passed exact-main CI `34068491038`.
 - [x] Historical production runtime readback, three-function parity, private Site publication, and
   owner/anonymous canaries completed; schema reconciliation is now complete above.
 - [x] Approved receipt-bound schema reconciliation completed (`34039011879`); do not rerun.
@@ -252,13 +258,15 @@ V1-C6 is reopened and the release remains no-go for trusted use.
 1. Preserve the completed schema and isolated recovery gates; do not rerun them.
 2. Observe the next existing scheduled receipt without triggering a duplicate.
 
-## Site-only UI release — completed 2026-09-06
+## Site-only UI releases — completed 2026-09-06
 
-PRs #28 and #29 changed only the owner Site. The final UI main `a4c8031` passed exact-main CI
-`34066973967`, and its private Site v7 deployment succeeded. Native readback confirmed custom access
-with exactly one allowed owner, no allowed groups, and zero external visitors. The live entry scripts
-match the verified local build, and Site v6 is retained as the immediate rollback. The bounded receipt
-is `docs/receipts/2026-09-06-native-site-v7.json`.
+PRs #28 and #29 produced the simplified private Site v7. PR #31 then removed the browser's
+misleading numeric-code step and aligned it with the live Supabase signed-link template. Current UI
+main `b433a5b` passed exact-main CI `34068491038`, and private Site v8 is live. Native readback
+confirmed custom access with exactly one allowed owner, no allowed groups, and zero external
+visitors. The live entry scripts match the verified local build, and Site v7 is retained as the
+immediate rollback. The current bounded receipt is
+`docs/receipts/2026-09-06-native-site-v8.json`; the v7 receipt remains historical evidence.
 
 This release did not mutate the production database, Supabase Auth, any Edge function, managed
 secrets, Telegram, or scheduled workflows. The protected backend attestation at `b3f7d70` remains the
@@ -342,10 +350,10 @@ sync, focused PostgreSQL restore/retry evidence, and `git diff --check` also pas
 
 ## Production truth
 
-Production contains owner-only Site v7 and the reviewed backend runtime. Approved schema reconciliation
+Production contains owner-only Site v8 and the reviewed backend runtime. Approved schema reconciliation
 `34039011879`, isolated live restore `34042155368`, and protected existing-runtime attestation
 `34055419086` passed. These do not substitute for a post-remediation scheduled receipt chain. The owner email-click and
-formal non-owner denial canaries remain complete. Native Site v7 readback confirms one allowed owner,
+formal non-owner denial canaries remain complete. Native Site v8 readback confirms one allowed owner,
 no groups, and zero external visitors. Its receipt explicitly separates the UI-only publication from
 the unchanged backend and the still-pending scheduled chain.
 

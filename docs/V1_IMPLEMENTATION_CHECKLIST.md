@@ -19,7 +19,7 @@ An owner-only personal stock agent that uses zero-incremental-cost data sources,
 - [x] Final GPT-6 Astra re-review approved at exact code commit `883d521`
 - [x] Astra remediation merged to protected `main`; exact-main CI passed at `c9e3140`
 - [x] Database ledger read back as current; gateway v33, dashboard API v4, and Telegram v20 deployed with runtime-byte parity
-- [x] Private owner Site v7 published from exact UI `main` merge `a4c8031`; reviewed live-script parity and owner-only access readback passed, while the backend attestation remains bound to `b3f7d70`
+- [x] Private owner Site v8 published from exact UI `main` merge `b433a5b`; signed-link-only browser flow, reviewed live-script parity, and owner-only access readback passed, while the backend attestation remains bound to `b3f7d70`
 - [x] Live free-tier Auth read back and browser aligned to its signed email-link template; protected configuration verification still recognizes either allowed template
 - [x] Receipt-bound production schema reconciliation completed exactly once in run `34039011879`
 - [x] Protected isolated restore and both cleanup paths completed in run `34042155368`
@@ -64,7 +64,7 @@ An owner-only personal stock agent that uses zero-incremental-cost data sources,
 - [x] Run one consolidated repository gate after the fixes — **1,197 passed**
 - [x] Run one scoped GPT-6 Astra re-review of the 11 findings — **approved**
 - [x] Update this checklist and the formal status/rollout records
-- [x] Publish the UI/UX-audited dashboard as owner-only Site v7 and retain Site v6 as rollback
+- [x] Publish the signed-link-only login correction as owner-only Site v8 and retain Site v7 as rollback
 
 ## Production gates
 
@@ -79,7 +79,8 @@ These require the protected production path and must not be replaced by local ev
 - [x] Verify owner-operated deployed byte/version parity for gateway, dashboard API, and Telegram function at the protected backend boundary; verify the later Site-only UI release separately
 - [x] Publish the signed-link-compatible web build as Site v5; deployment `appgdep_6a9cd0def8f0819187aa7d30d99a7ada` succeeded
 - [x] Publish the simplified and accessibility-reviewed UI as owner-only Site v7 from exact main `a4c8031`; deployment `appgdep_6a9df7eee2cc819193fefc13aa39d8bb` succeeded and `docs/receipts/2026-09-06-native-site-v7.json` binds the source, build, live scripts, access, and rollback
-- [x] Complete an owner email sign-in canary on signed-link Site v5 — **owner confirmed the signed email link opened the portfolio dashboard on 2026-09-05; later Site v7 preserves the same Auth flow**
+- [x] Publish the link-only owner Auth correction as owner-only Site v8 from exact main `b433a5b`; deployment `appgdep_6a9dff357ee88191bf08d54af6f4240f` succeeded and `docs/receipts/2026-09-06-native-site-v8.json` binds the source, build, live scripts, access, and v7 rollback
+- [x] Complete an owner email sign-in canary on signed-link Site v5 — **owner confirmed the signed email link opened the portfolio dashboard on 2026-09-05; later Site v8 preserves the same callback flow**
 - [x] Perform the protected restore drill and retain its receipt — **run `34042155368` restored and
   verified 26 record sets, preserved identical production roots, applied no migrations on retry,
   deleted the temporary project, and passed both cleanup receipts**
