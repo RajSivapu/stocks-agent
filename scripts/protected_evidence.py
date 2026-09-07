@@ -79,6 +79,12 @@ RECOVERY_SQL = {
     "discovery_stage_tasks": """SELECT id::text AS id,run_id::text AS run_id,stage,capability_id,provider,query_kind,query_hash,
         dependency_ids,requested_window,state,attempt_count,request_budget,result,created_at::text AS created_at,
         updated_at::text AS updated_at FROM public.market_discovery_stage_tasks""",
+    "enrichment_selection_manifests": """SELECT id::text AS id,run_id::text AS run_id,selection_stage,phase,
+        request_count,provider_reservations,deferred_reasons,manifest,content_hash,created_at::text AS created_at
+        FROM public.market_enrichment_selection_manifests""",
+    "enrichment_request_descriptors": """SELECT id::text AS id,manifest_id::text AS manifest_id,run_id::text AS run_id,
+        task_id::text AS task_id,provider,capability_id,query_kind,descriptor,content_hash,created_at::text AS created_at
+        FROM public.market_enrichment_request_descriptors""",
     "theme_episode_revisions": """SELECT id::text AS id,run_id::text AS run_id,task_id::text AS task_id,theme_id,revision,
         episode,source_ids,valid_from::text AS valid_from,valid_to::text AS valid_to,content_hash,
         created_at::text AS created_at FROM public.market_theme_episode_revisions""",
@@ -153,6 +159,7 @@ READ_TABLES = (
     "market_reference_finalization_seals", "market_reference_run_bindings",
     "market_reference_predecessor_pins", "market_reference_transfer_requests",
     "market_reference_transfer_responses",
+    "market_enrichment_selection_manifests", "market_enrichment_request_descriptors",
     "market_theme_episode_revisions", "market_exposure_facts", "market_research_nominations",
     "stock_agent_release_migration_ledger",
 )
@@ -258,6 +265,8 @@ class PostgresReadOnlySource:
             "reference_transfer_requests": RECOVERY_SQL["reference_transfer_requests"] + " WHERE run_id=%s::uuid",
             "reference_transfer_responses": RECOVERY_SQL["reference_transfer_responses"] + " WHERE run_id=%s::uuid",
             "discovery_stage_tasks": RECOVERY_SQL["discovery_stage_tasks"] + " WHERE run_id=%s::uuid",
+            "enrichment_selection_manifests": RECOVERY_SQL["enrichment_selection_manifests"] + " WHERE run_id=%s::uuid",
+            "enrichment_request_descriptors": RECOVERY_SQL["enrichment_request_descriptors"] + " WHERE run_id=%s::uuid",
             "theme_episode_revisions": RECOVERY_SQL["theme_episode_revisions"] + " WHERE run_id=%s::uuid",
             "exposure_facts": RECOVERY_SQL["exposure_facts"] + " WHERE run_id=%s::uuid",
             "research_nominations": RECOVERY_SQL["research_nominations"] + " WHERE run_id=%s::uuid",

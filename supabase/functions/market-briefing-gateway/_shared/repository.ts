@@ -355,6 +355,10 @@ export interface GatewayRepository {
     runId: string,
     payload: DiscoveryStageCheckpointPayload,
   ): Promise<{ task: DiscoveryStageTask; duplicate: boolean }>;
+  sealEnrichmentSelection?(
+    runId: string,
+    payload: Record<string, unknown>,
+  ): Promise<{ manifest_id: string; request_count: number; duplicate: boolean }>;
   readDiscoveryContext?(
     runId: string,
     limit: number,
@@ -1299,6 +1303,23 @@ export function createSupabaseGatewayRepository(
       } catch {
         throw new GatewayRepositoryError("INVALID_PERSISTED_DATA");
       }
+    },
+
+    async sealEnrichmentSelection(runId, payload) {
+      const result = await client.rpc("seal_market_enrichment_selection", {
+        p_run_id: runId,
+        p_payload: payload,
+      });
+      if (result.error) throw new GatewayRepositoryError("PERSISTENCE_FAILED");
+      const row = oneObject(result);
+      if (typeof row.duplicate !== "boolean") {
+        throw new GatewayRepositoryError("INVALID_PERSISTED_DATA");
+      }
+      return {
+        manifest_id: text(row.manifest_id, 36),
+        request_count: integer(row.request_count),
+        duplicate: row.duplicate,
+      };
     },
 
     async readDiscoveryContext(runId, limit) {

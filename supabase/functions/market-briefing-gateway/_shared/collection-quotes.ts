@@ -8,6 +8,8 @@ export interface CollectionQuote {
   as_of: string;
   instrument_type: "EQUITY" | "ETF";
   average_daily_dollar_volume: string | null;
+  liquidity_sample_count: number;
+  liquidity_window: { start: string; end: string } | null;
   retrieved_at: string;
   response_hash: string;
 }
@@ -17,7 +19,12 @@ function decimal(value: unknown): string {
   return value.toFixed(6).replace(/\.?0+$/, "");
 }
 
-export async function fetchCollectionQuote(ticker: string, now: Date, fetchImpl: FetchLike = fetch): Promise<CollectionQuote> {
+export async function fetchCollectionQuote(
+  ticker: string,
+  now: Date,
+  expectedInstrumentType: "COMMON_STOCK" | "ADR" | "ETF",
+  fetchImpl: FetchLike = fetch,
+): Promise<CollectionQuote> {
   if (!/^[A-Z][A-Z0-9.-]{0,14}$/.test(ticker)) throw new Error("INVALID_QUOTE");
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), 10_000);
@@ -44,21 +51,33 @@ export async function fetchCollectionQuote(ticker: string, now: Date, fetchImpl:
     if (payload.chart?.result?.length !== 1) throw new Error("INVALID_QUOTE");
     const result = payload.chart.result[0];
     const meta = result.meta;
-    if (meta.symbol !== ticker || meta.currency !== "USD" || !["EQUITY", "ETF"].includes(meta.instrumentType)
+    const expectedYahooType = expectedInstrumentType === "ETF" ? "ETF" : "EQUITY";
+    if (meta.symbol !== ticker || meta.currency !== "USD" || meta.instrumentType !== expectedYahooType
       || !Number.isSafeInteger(meta.regularMarketTime)) throw new Error("INVALID_QUOTE");
     const asOf = new Date(meta.regularMarketTime * 1_000);
     if (asOf.valueOf() > now.valueOf() || now.valueOf() - asOf.valueOf() > 20 * 60_000) throw new Error("STALE_QUOTE");
     const observations = result.indicators?.quote?.[0];
-    let liquidity: string | null = null;
-    if (Array.isArray(result.timestamp) && result.timestamp.length >= 1 && result.timestamp.length <= 10
+    let sampleCount = 0;
+    let sampleWindow: { start: string; end: string } | null = null;
+    if (Array.isArray(result.timestamp) && result.timestamp.length >= 1 && result.timestamp.length <= 5
       && observations?.close?.length === result.timestamp.length && observations?.volume?.length === result.timestamp.length) {
       try {
-        const values = observations.close.map((close: unknown, index: number) => Number(decimal(close)) * Number(decimal(observations.volume[index])));
-        liquidity = decimal(values.reduce((total: number, value: number) => total + value, 0) / values.length);
+        observations.close.forEach((close: unknown, index: number) => {
+          decimal(close);
+          decimal(observations.volume[index]);
+          const timestamp = result.timestamp[index];
+          if (!Number.isSafeInteger(timestamp)) throw new Error("INVALID_QUOTE");
+          const instant = new Date(timestamp * 1_000);
+          if (instant.valueOf() > now.valueOf()) throw new Error("INVALID_QUOTE");
+        });
+        const timestamps = result.timestamp.map((value: number) => new Date(value * 1_000).toISOString());
+        sampleCount = timestamps.length;
+        sampleWindow = { start: timestamps[0], end: timestamps[timestamps.length - 1] };
       } catch { /* Incomplete volume is unavailable, never a neutral liquidity score. */ }
     }
     return { ticker, currency: "USD", price: decimal(meta.regularMarketPrice), as_of: asOf.toISOString(),
-      instrument_type: meta.instrumentType, average_daily_dollar_volume: liquidity,
+      instrument_type: meta.instrumentType, average_daily_dollar_volume: null,
+      liquidity_sample_count: sampleCount, liquidity_window: sampleWindow,
       retrieved_at: now.toISOString(), response_hash: sha256Hex(text) };
   } finally { clearTimeout(timeout); }
 }

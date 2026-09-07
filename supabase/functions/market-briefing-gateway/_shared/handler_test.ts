@@ -1334,6 +1334,11 @@ Deno.test("protected quote producer reserves before fetching and resumes without
   const { fetchCollectionQuote } = await import("./collection-quotes.ts");
   const input = {
     ticker: "TEST",
+    instrument_type: "COMMON_STOCK",
+    security_revision_id: "00000000-0000-4000-8000-000000000083",
+    reference_manifest_id: "00000000-0000-4000-8000-000000000084",
+    selection_manifest_id: "00000000-0000-4000-8000-000000000085",
+    selected_task_id: "00000000-0000-4000-8000-000000000086",
     cache_key: "a".repeat(64),
     source_receipt_id: "00000000-0000-4000-8000-000000000081",
     reservation_id: "00000000-0000-4000-8000-000000000082",
@@ -1365,11 +1370,12 @@ Deno.test("protected quote producer reserves before fetching and resumes without
     },
   });
   const setup = makeHandler(repo, {
-    fetchCollectionQuote: (ticker: string, now: Date) => {
+    fetchCollectionQuote: (ticker: string, now: Date, instrumentType: "COMMON_STOCK" | "ADR" | "ETF") => {
       calls.push("fetch");
       return fetchCollectionQuote(
         ticker,
         now,
+        instrumentType,
         () =>
           Promise.resolve(Response.json({
             chart: {
@@ -1430,6 +1436,44 @@ Deno.test("protected quote producer reserves before fetching and resumes without
   );
   assertEquals(repo.claims.size, 0);
   assertEquals(setup.sent, []);
+});
+
+Deno.test("enrichment selection is persisted as an exact service-only manifest before transport", async () => {
+  const payload = {
+    manifest: {
+      manifest_id: "00000000-0000-4000-8000-000000000091",
+      run_id: RUN_ID,
+      phase: "on-demand",
+      selection_stage: "initial",
+      schema_version: 1,
+      execution_allowed: false,
+      provider_reservations: { sec_issuer_submissions: 1, sec_filing_document: 1, yahoo_security_quote: 1, gdelt_reverse: 1 },
+      deferred_reasons: {},
+      request_descriptors: [],
+      semantic_hash: "a".repeat(64),
+    },
+    requests: [],
+  };
+  let received: unknown = null;
+  const repo = Object.assign(new FakeRepository(), {
+    sealEnrichmentSelection: (_run: string, value: unknown) => {
+      received = value;
+      return Promise.resolve({ manifest_id: payload.manifest.manifest_id, request_count: 0, duplicate: false });
+    },
+  });
+  const setup = makeHandler(repo);
+  const result = await setup.handler(request("seal_enrichment_selection", payload));
+  assertEquals(result.status, 200);
+  assert(
+    (received as typeof payload).manifest.manifest_id === payload.manifest.manifest_id,
+    "handler must preserve the sealed manifest identity",
+  );
+  assert(
+    (received as typeof payload).requests.length === 0,
+    "handler must preserve an explicitly empty bounded selection",
+  );
+  assertEquals((await json(result)).request_count, 0);
+  assertEquals((await setup.handler(request("seal_enrichment_selection", { ...payload, extra: true }))).status, 400);
 });
 
 Deno.test("scheduled discovery requires the persisted packet hash before market work", async () => {
@@ -1694,6 +1738,7 @@ Deno.test("discovery reads require the owner while writes require the collection
         theme_episodes: [],
         exposure_facts: [],
         research_nominations: [],
+        enrichment_selections: [],
       }),
     checkpointDiscoveryStage: (
       _runId: string,
@@ -1758,6 +1803,7 @@ Deno.test("discovery read preserves an authenticated non-owner rejection", async
         theme_episodes: [],
         exposure_facts: [],
         research_nominations: [],
+        enrichment_selections: [],
       }),
   });
   const setup = makeHandler(repository, {

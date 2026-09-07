@@ -591,6 +591,8 @@ def test_actual_migration_retry_accepts_truthful_baseline_without_writing_histor
                     if item["path"] == "sql/migrations/20261008_official_source_completion_contract.sql")
     issuer_names = next(item for item in deploy.candidate_migration_manifest()
                         if item["path"] == "sql/migrations/20261009_reference_issuer_names.sql")
+    enrichment = next(item for item in deploy.candidate_migration_manifest()
+                      if item["path"] == "sql/migrations/20261010_bounded_adaptive_enrichment.sql")
     queries = []
 
     def api(_method, _path, payload=None):
@@ -599,7 +601,7 @@ def test_actual_migration_retry_accepts_truthful_baseline_without_writing_histor
         if query.startswith("SELECT path, version, sha256"):
             return [
                 {"path": path, "version": "20261004", "sha256": hashlib.sha256(b'["SELECT 1"]').hexdigest()},
-                    discovery, transfer, cursor, official, issuer_names,
+                    discovery, transfer, cursor, official, issuer_names, enrichment,
             ]
         if query.startswith("SELECT version, statements"):
             return [{"version": "20261004", "statements": ["SELECT 1"]}]

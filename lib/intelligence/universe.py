@@ -76,6 +76,8 @@ class SecurityIdentity:
     source_ids: tuple[str, ...]
     eligible: bool
     exclusion_reasons: tuple[str, ...]
+    revision_id: str | None = None
+    reference_manifest_id: str | None = None
 
     @property
     def cik(self) -> str | None:
@@ -1157,6 +1159,10 @@ def reference_snapshot_from_rows(
             source_ids=tuple(_bounded_text(value, "security source", 256) for value in sources),
             eligible=eligible,
             exclusion_reasons=tuple(_bounded_text(value, "security exclusion", 128) for value in exclusions),
+            revision_id=_bounded_text(raw.get("id"), "security revision ID", 36),
+            reference_manifest_id=_bounded_text(
+                raw.get("manifest_id"), "reference manifest ID", 36,
+            ),
         ))
         entity_sources[entity_id].update(str(value) for value in sources)
         entity_dates[entity_id].append(valid_from)

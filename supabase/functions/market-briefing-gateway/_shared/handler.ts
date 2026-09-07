@@ -109,6 +109,7 @@ export interface GatewayDependencies {
   fetchCollectionQuote?: (
     ticker: string,
     now: Date,
+    instrumentType: "COMMON_STOCK" | "ADR" | "ETF",
   ) => Promise<CollectionQuote>;
   fetchHistory?: (
     ticker: string,
@@ -463,6 +464,7 @@ export function createGatewayHandler(dependencies: GatewayDependencies) {
         envelope.operation === "record_learning" ||
         envelope.operation === "record_discovery_reference" ||
         envelope.operation === "checkpoint_discovery_stage" ||
+        envelope.operation === "seal_enrichment_selection" ||
         envelope.operation === "begin_discovery_reference" ||
         envelope.operation === "record_discovery_reference_chunk" ||
         envelope.operation === "finalize_discovery_reference" ||
@@ -474,6 +476,24 @@ export function createGatewayHandler(dependencies: GatewayDependencies) {
           : envelope.operation === "record_learning"
           ? parseRecordLearningPayload(envelope.payload)
           : envelope.payload;
+        if (envelope.operation === "seal_enrichment_selection") {
+          const selection = objectValue(prepared);
+          exactKeys(selection, ["manifest", "requests"]);
+          if (!Array.isArray(selection.requests) || selection.requests.length > 100) {
+            throw new GatewayHttpError(400, "INVALID_REQUEST");
+          }
+          const manifest = objectValue(selection.manifest);
+          exactKeys(manifest, [
+            "manifest_id", "run_id", "phase", "selection_stage", "schema_version", "execution_allowed",
+            "provider_reservations", "deferred_reasons", "request_descriptors", "semantic_hash",
+          ]);
+          if (manifest.run_id !== envelope.run_id || !["holding_quotes", "initial", "filing_documents"].includes(String(manifest.selection_stage)) || manifest.schema_version !== 1 ||
+            manifest.execution_allowed !== false || !Array.isArray(manifest.request_descriptors) ||
+            manifest.request_descriptors.length !== selection.requests.length ||
+            typeof manifest.semantic_hash !== "string" || !/^[0-9a-f]{64}$/.test(manifest.semantic_hash)) {
+            throw new GatewayHttpError(400, "INVALID_REQUEST");
+          }
+        }
         if (
           envelope.operation === "record_learning" &&
           sha256Hex(
@@ -505,6 +525,11 @@ export function createGatewayHandler(dependencies: GatewayDependencies) {
         const row = objectValue(envelope.payload);
         exactKeys(row, [
           "ticker",
+          "instrument_type",
+          "security_revision_id",
+          "reference_manifest_id",
+          "selection_manifest_id",
+          "selected_task_id",
           "reservation_id",
           "source_receipt_id",
           "cache_key",
@@ -512,9 +537,12 @@ export function createGatewayHandler(dependencies: GatewayDependencies) {
         if (
           typeof row.ticker !== "string" ||
           !/^[A-Z][A-Z0-9.-]{0,14}$/.test(row.ticker) ||
+          typeof row.instrument_type !== "string" ||
+          !["COMMON_STOCK", "ADR", "ETF"].includes(row.instrument_type) ||
           typeof row.cache_key !== "string" ||
           !/^[a-f0-9]{64}$/.test(row.cache_key) ||
-          [row.reservation_id, row.source_receipt_id].some((value) =>
+          [row.reservation_id, row.source_receipt_id, row.security_revision_id,
+            row.reference_manifest_id, row.selection_manifest_id, row.selected_task_id].some((value) =>
             typeof value !== "string" || !/^[a-f0-9-]{36}$/.test(value)
           )
         ) {
@@ -701,6 +729,7 @@ export function createGatewayHandler(dependencies: GatewayDependencies) {
               theme_episodes: [],
               exposure_facts: [],
               research_nominations: [],
+              enrichment_selections: [],
             },
             telegram_message_ids: [],
           });
@@ -855,6 +884,7 @@ export function createGatewayHandler(dependencies: GatewayDependencies) {
           quote = await deps.fetchCollectionQuote(
             input.ticker as string,
             deps.now(),
+            input.instrument_type as "COMMON_STOCK" | "ADR" | "ETF",
           );
         } catch { /* A real failed attempt still costs one. */ }
         const checkpoint = quoteCheckpoint(
@@ -876,6 +906,24 @@ export function createGatewayHandler(dependencies: GatewayDependencies) {
         const code = error instanceof GatewayRepositoryError
           ? error.code
           : "PERSISTENCE_FAILED";
+        return response(errorStatus(code), { ok: false, code });
+      }
+    }
+    if (envelope.operation === "seal_enrichment_selection") {
+      try {
+        if (!deps.repository.sealEnrichmentSelection) {
+          throw new GatewayRepositoryError("PERSISTENCE_FAILED");
+        }
+        return response(200, {
+          ok: true,
+          ...await deps.repository.sealEnrichmentSelection(
+            requireRun(envelope),
+            prepared as Record<string, unknown>,
+          ),
+          telegram_message_ids: [],
+        });
+      } catch (error) {
+        const code = error instanceof GatewayRepositoryError ? error.code : "PERSISTENCE_FAILED";
         return response(errorStatus(code), { ok: false, code });
       }
     }

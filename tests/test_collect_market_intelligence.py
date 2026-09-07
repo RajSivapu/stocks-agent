@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import io
 import json
+from dataclasses import replace
 from pathlib import Path
 import tempfile
 from types import SimpleNamespace
@@ -464,7 +465,10 @@ def test_restart_hydrates_the_complete_current_v2_pin_without_contacting_sec():
 
     assert hydrated is not None
     assert hydrated.issuers == snapshot.issuers
-    assert hydrated.securities == snapshot.securities
+    assert tuple(
+        replace(row, revision_id=None, reference_manifest_id=None)
+        for row in hydrated.securities
+    ) == snapshot.securities
     assert len(gateway_client.calls) == 3
 
     gateway_client.calls.clear()

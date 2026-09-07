@@ -198,6 +198,7 @@ Deno.test("discovery persistence routes exact run-scoped payloads through protec
           theme_episodes: [],
           exposure_facts: [],
           research_nominations: [],
+          enrichment_selections: [],
         },
         error: null,
       });

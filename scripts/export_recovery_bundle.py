@@ -18,6 +18,7 @@ import sys
 import tarfile
 import tempfile
 from typing import Mapping, Protocol, runtime_checkable
+import uuid
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
@@ -41,6 +42,7 @@ REQUIRED_RECOVERY_RECORDS = (
     "reference_chunk_receipts", "reference_snapshot_memberships",
     "reference_finalization_seals", "reference_run_bindings",
     "reference_predecessor_pins", "reference_transfer_requests", "reference_transfer_responses",
+    "enrichment_selection_manifests", "enrichment_request_descriptors",
     "theme_episode_revisions", "exposure_facts", "research_nominations",
     "packets", "reports",
     "intelligence_run_events", "source_quota_reservations", "collection_checkpoints",
@@ -135,6 +137,17 @@ DATASET_FIELDS = {
         "query_kind": str, "query_hash": str, "dependency_ids": list,
         "requested_window": dict, "state": str, "attempt_count": int,
         "request_budget": int, "result": dict, "created_at": str, "updated_at": str,
+    },
+    "enrichment_selection_manifests": {
+        "id": str, "run_id": str, "selection_stage": str, "phase": str,
+        "request_count": int, "provider_reservations": dict,
+        "deferred_reasons": dict, "manifest": dict, "content_hash": str,
+        "created_at": str,
+    },
+    "enrichment_request_descriptors": {
+        "id": str, "manifest_id": str, "run_id": str, "task_id": str,
+        "provider": str, "capability_id": str, "query_kind": str,
+        "descriptor": dict, "content_hash": str, "created_at": str,
     },
     "theme_episode_revisions": {
         "id": str, "run_id": str, "task_id": str, "theme_id": str, "revision": int,
@@ -482,6 +495,515 @@ def _no_secrets(value: object) -> None:
     elif isinstance(value, list):
         for child in value:
             _no_secrets(child)
+
+
+_ENRICHMENT_PHASE_ENVELOPES = {
+    "pre-market": {"sec_issuer_submissions": 3, "sec_filing_document": 3,
+                   "yahoo_security_quote": 4, "gdelt_reverse": 2},
+    "intraday": {"sec_issuer_submissions": 1, "sec_filing_document": 1,
+                 "yahoo_security_quote": 1, "gdelt_reverse": 1},
+    "post-market": {"sec_issuer_submissions": 2, "sec_filing_document": 2,
+                    "yahoo_security_quote": 2, "gdelt_reverse": 2},
+    "on-demand": {"sec_issuer_submissions": 1, "sec_filing_document": 1,
+                  "yahoo_security_quote": 1, "gdelt_reverse": 1},
+}
+_ENRICHMENT_COMMON_DESCRIPTOR_FIELDS = {
+    "adverse_path", "cache_key", "cik", "dependency_task_ids", "entity_id",
+    "event_ids", "hypothesis_ids", "instrument_type", "priority",
+    "reference_manifest_id", "reservation_id", "role", "security_id",
+    "security_revision_id", "source_item_ids", "source_receipt_id", "theme_id",
+    "ticker",
+}
+_ENRICHMENT_QUERY_CONTRACTS = {
+    "issuer_submissions": (
+        "sec_edgar", "sec_issuer_submissions",
+        _ENRICHMENT_COMMON_DESCRIPTOR_FIELDS | {"issuer_entity_id"},
+    ),
+    "filing_document": (
+        "sec_edgar", "sec_filing_document",
+        _ENRICHMENT_COMMON_DESCRIPTOR_FIELDS | {
+            "accepted_at", "accession_number", "filing_date", "form",
+            "primary_document", "reporting_period_end", "submissions_response_hash",
+        },
+    ),
+    "quote": ("yahoo", "yahoo_security_quote", _ENRICHMENT_COMMON_DESCRIPTOR_FIELDS),
+}
+_TYPED_EXPOSURE_VALUE_FIELDS = {
+    "accepted_at", "accession_number", "business_exposure", "claim_state",
+    "effective_at", "entity_id", "event_ids", "execution_allowed", "filing_date",
+    "filing_rule_version", "financial_materiality", "form", "is_amendment",
+    "hypothesis_ids", "issuer_cik", "limitations", "metric",
+    "normalized_passage_hash", "parser_version", "passage", "period_end",
+    "period_start", "primary_document", "reference_manifest_id",
+    "reporting_period_end", "retrieved_at", "role", "schema_version", "security_id",
+    "security_revision_id", "source_cache_key", "source_item_content_hash",
+    "source_item_id", "source_locator", "source_receipt_id", "source_response_hash",
+    "source_url", "status", "submissions_response_hash", "ticker", "unit", "value",
+}
+
+
+def _validate_enrichment_lineage(result: Mapping[str, list[dict[str, object]]]) -> None:
+    tasks = {row["id"]: row for row in result["discovery_stage_tasks"]}
+    securities = {row["id"]: row for row in result["security_reference_revisions"]}
+    reservations = {row["id"]: row for row in result["source_quota_reservations"]}
+    manifests = {row["id"]: row for row in result["enrichment_selection_manifests"]}
+    descriptors = {row["id"]: row for row in result["enrichment_request_descriptors"]}
+    intelligence_runs = {row["id"] for row in result["intelligence_runs"]}
+    current_pins = {
+        (row["run_id"], row["manifest_id"])
+        for row in result["reference_run_bindings"]
+        if row["manifest_id"] is not None
+        and row["reference_status"] in {"healthy", "reference_stale"}
+    }
+    memberships = {
+        (row["manifest_id"], row["security_revision_id"])
+        for row in result["reference_snapshot_memberships"]
+    }
+    checkpoints = [
+        *result["collection_checkpoints"], *result["collection_checkpoint_history"],
+    ]
+    by_manifest: dict[str, list[dict[str, object]]] = {}
+    for row in descriptors.values():
+        manifest = manifests.get(row["manifest_id"])
+        task = tasks.get(row["task_id"])
+        contract = _ENRICHMENT_QUERY_CONTRACTS.get(row["query_kind"])
+        descriptor = row["descriptor"]
+        security = securities.get(descriptor.get("security_revision_id"))
+        reservation = reservations.get(descriptor.get("reservation_id"))
+        if (
+            not UUID.fullmatch(row["id"]) or row["id"] != row["task_id"]
+            or manifest is None or row["run_id"] != manifest["run_id"]
+            or task is None or task["run_id"] != row["run_id"] or contract is None
+            or (row["provider"], row["capability_id"]) != contract[:2]
+            or (task["provider"], task["capability_id"], task["query_kind"])
+            != (row["provider"], row["capability_id"], row["query_kind"])
+            or set(descriptor) != contract[2]
+            or len(canonical_json(descriptor).encode()) > 32768
+            or descriptor.get("dependency_task_ids") != task["dependency_ids"]
+            or not isinstance(descriptor.get("adverse_path"), bool)
+            or isinstance(descriptor.get("priority"), bool)
+            or not isinstance(descriptor.get("priority"), int)
+            or not 0 <= descriptor["priority"] <= 100
+            or not isinstance(descriptor.get("cik"), str)
+            or re.fullmatch(r"[0-9]{10}", descriptor["cik"]) is None
+            or descriptor["cik"] == "0000000000"
+            or not isinstance(descriptor.get("cache_key"), str)
+            or HASH.fullmatch(descriptor["cache_key"]) is None
+            or not isinstance(descriptor.get("source_receipt_id"), str)
+            or UUID.fullmatch(descriptor["source_receipt_id"]) is None
+            or not all(isinstance(descriptor.get(name), str) and descriptor[name]
+                       for name in ("entity_id", "reference_manifest_id", "role", "security_id",
+                                    "security_revision_id", "theme_id", "ticker"))
+            or not all(isinstance(descriptor.get(name), list)
+                       for name in ("dependency_task_ids", "event_ids", "hypothesis_ids", "source_item_ids"))
+            or not 1 <= len(descriptor["event_ids"]) <= 64
+            or not 1 <= len(descriptor["hypothesis_ids"]) <= 64
+            or len(descriptor["source_item_ids"]) > 64
+            or any(not isinstance(item, str) or not item or len(item) > 160
+                   for name in ("event_ids", "hypothesis_ids", "source_item_ids")
+                   for item in descriptor[name])
+            or any(len(descriptor[name]) != len(set(descriptor[name]))
+                   for name in ("event_ids", "hypothesis_ids", "source_item_ids"))
+            or (row["run_id"], descriptor["reference_manifest_id"]) not in current_pins
+            or (descriptor["reference_manifest_id"], descriptor["security_revision_id"])
+            not in memberships
+            or security is None
+            or any(security[field] != descriptor[field]
+                   for field in ("entity_id", "security_id", "ticker", "instrument_type"))
+            or reservation is None or reservation["run_id"] != row["run_id"]
+            or reservation["provider"] != row["provider"]
+        ):
+            raise ValueError("discovery enrichment descriptor dependency mismatch")
+        request_document = {
+            "request_id": row["id"], "task_id": row["task_id"], "stage": task["stage"],
+            "provider": row["provider"], "capability_id": row["capability_id"],
+            "descriptor": descriptor, "query_kind": row["query_kind"],
+            "dependency_ids": task["dependency_ids"], "requested_window": task["requested_window"],
+            "request_budget": task["request_budget"], "execution_allowed": False,
+        }
+        if row["content_hash"] != _semantic_hash(request_document) \
+                or task["query_hash"] != row["content_hash"]:
+            raise ValueError("discovery enrichment descriptor semantic hash mismatch")
+        if row["query_kind"] == "filing_document":
+            dependencies = task["dependency_ids"]
+            parent = tasks.get(dependencies[0]) if len(dependencies) == 1 else None
+            parent_request = descriptors.get(dependencies[0]) if dependencies else None
+            if (
+                parent is None or parent_request is None or parent["run_id"] != row["run_id"]
+                or parent["state"] != "succeeded"
+                or (parent["provider"], parent["capability_id"], parent["query_kind"])
+                != ("sec_edgar", "sec_issuer_submissions", "issuer_submissions")
+                or (parent_request["provider"], parent_request["capability_id"],
+                    parent_request["query_kind"])
+                != ("sec_edgar", "sec_issuer_submissions", "issuer_submissions")
+                or parent["query_hash"] != parent_request["content_hash"]
+                or any(parent_request["descriptor"].get(field) != descriptor.get(field)
+                       for field in ("entity_id", "security_id", "security_revision_id",
+                                     "reference_manifest_id", "cik"))
+            ):
+                raise ValueError("discovery enrichment filing membership mismatch")
+            parent_result = parent.get("result")
+            parent_checkpoint = parent_result.get("checkpoint") \
+                if isinstance(parent_result, Mapping) else None
+            parent_cache_key = parent_checkpoint.get("cache_key") \
+                if isinstance(parent_checkpoint, Mapping) else None
+            expected_url = (
+                f"https://www.sec.gov/Archives/edgar/data/{int(descriptor['cik'])}/"
+                f"{descriptor['accession_number'].replace('-', '')}/"
+                f"{descriptor['primary_document']}"
+            )
+            expected_request_url = (
+                f"https://data.sec.gov/submissions/CIK{descriptor['cik']}.json"
+            )
+            matched = False
+            for checkpoint in checkpoints:
+                if (
+                    checkpoint["run_id"] != row["run_id"]
+                    or checkpoint["cache_key"] != parent_cache_key
+                    or checkpoint["cache_key"] != parent_request["descriptor"].get("cache_key")
+                    or checkpoint["source_receipt_id"]
+                       != parent_request["descriptor"].get("source_receipt_id")
+                ):
+                    continue
+                payload = checkpoint.get("payload")
+                receipt = payload.get("receipt") if isinstance(payload, Mapping) else None
+                items = payload.get("items") if isinstance(payload, Mapping) else None
+                if (
+                    not isinstance(receipt, Mapping) or not isinstance(items, list)
+                    or receipt.get("provider") != "sec_edgar"
+                    or receipt.get("status") not in {"succeeded", "cache_hit"}
+                    or receipt.get("cache_key") != checkpoint["cache_key"]
+                    or receipt.get("source_receipt_id") != checkpoint["source_receipt_id"]
+                    or receipt.get("response_hash") != descriptor["submissions_response_hash"]
+                ):
+                    continue
+                accession_items = [
+                    item for item in items if isinstance(item, Mapping)
+                    and isinstance(item.get("metadata"), Mapping)
+                    and item["metadata"].get("accession_number")
+                    == descriptor["accession_number"]
+                ]
+                if len(accession_items) != 1:
+                    continue
+                item = accession_items[0]
+                metadata = item["metadata"]
+                try:
+                    accepted_matches = (
+                        (metadata.get("accepted_at") is None
+                         and descriptor.get("accepted_at") is None)
+                        or (
+                            metadata.get("accepted_at") is not None
+                            and descriptor.get("accepted_at") is not None
+                            and parse_time(metadata["accepted_at"])
+                            == parse_time(descriptor["accepted_at"])
+                        )
+                    )
+                except (TypeError, ValueError):
+                    accepted_matches = False
+                evidence_id = str(uuid.uuid5(
+                    uuid.NAMESPACE_URL, f"market-source:{item.get('content_hash')}",
+                ))
+                if (
+                    item.get("provider") == "sec_edgar"
+                    and item.get("authority") == "official"
+                    and item.get("request_url") == expected_request_url
+                    and item.get("source_url") == expected_url
+                    and metadata.get("issuer_cik") == descriptor["cik"]
+                    and metadata.get("form") == descriptor["form"]
+                    and metadata.get("primary_document") == descriptor["primary_document"]
+                    and metadata.get("filing_date") == descriptor["filing_date"]
+                    and metadata.get("reporting_period_end")
+                       == descriptor.get("reporting_period_end")
+                    and metadata.get("submissions_response_hash")
+                       == descriptor["submissions_response_hash"]
+                    and accepted_matches
+                    and isinstance(item.get("content_hash"), str)
+                    and HASH.fullmatch(item["content_hash"]) is not None
+                    and evidence_id in descriptor["source_item_ids"]
+                ):
+                    matched = True
+            if not matched:
+                raise ValueError("discovery enrichment filing membership mismatch")
+        by_manifest.setdefault(row["manifest_id"], []).append(row)
+    if set(by_manifest) - set(manifests):
+        raise ValueError("discovery enrichment descriptor dependency mismatch")
+    for reservation in reservations.values():
+        selected_count = sum(
+            row["run_id"] == reservation["run_id"]
+            and row["provider"] == reservation["provider"]
+            for row in descriptors.values()
+        )
+        if selected_count > reservation["reserved_requests"]:
+            raise ValueError("discovery enrichment reservation capacity mismatch")
+    for row in manifests.values():
+        manifest = row["manifest"]
+        envelope = _ENRICHMENT_PHASE_ENVELOPES.get(row["phase"])
+        children = by_manifest.get(row["id"], [])
+        if (
+            not UUID.fullmatch(row["id"]) or row["run_id"] not in intelligence_runs
+            or row["selection_stage"] not in {"holding_quotes", "initial", "filing_documents"}
+            or envelope is None or row["provider_reservations"] != envelope
+            or not isinstance(row["deferred_reasons"], dict)
+            or any(not isinstance(key, str) or not key or not isinstance(value, str) or not value
+                   for key, value in row["deferred_reasons"].items())
+            or len(canonical_json(row["deferred_reasons"]).encode()) > 16384
+            or row["request_count"] != len(children) or not 0 <= row["request_count"] <= 100
+            or not isinstance(manifest, Mapping)
+            or set(manifest) != {"deferred_reasons", "execution_allowed", "manifest_id", "phase",
+                                 "provider_reservations", "request_descriptors", "run_id",
+                                 "schema_version", "selection_stage", "semantic_hash"}
+            or manifest["manifest_id"] != row["id"] or manifest["run_id"] != row["run_id"]
+            or manifest["phase"] != row["phase"]
+            or manifest["selection_stage"] != row["selection_stage"]
+            or manifest["provider_reservations"] != row["provider_reservations"]
+            or manifest["deferred_reasons"] != row["deferred_reasons"]
+            or manifest["execution_allowed"] is not False or manifest["schema_version"] != 1
+            or not isinstance(manifest["request_descriptors"], list)
+        ):
+            raise ValueError("discovery enrichment manifest dependency mismatch")
+        semantic = dict(manifest)
+        semantic.pop("manifest_id")
+        semantic.pop("semantic_hash")
+        digest = _semantic_hash(semantic)
+        expected_id = str(uuid.uuid5(uuid.UUID(row["run_id"]), f"enrichment-selection:{digest}"))
+        expected_children = sorted(
+            ({"request_id": item["id"], "descriptor_hash": item["content_hash"]}
+             for item in children), key=canonical_json,
+        )
+        if (digest != row["content_hash"] or digest != manifest["semantic_hash"]
+                or row["id"] != expected_id
+                or sorted(manifest["request_descriptors"], key=canonical_json) != expected_children):
+            raise ValueError("discovery enrichment manifest semantic hash mismatch")
+        counts = {query: sum(item["query_kind"] == query for item in children)
+                  for query in _ENRICHMENT_QUERY_CONTRACTS}
+        allowed = {"holding_quotes": {"quote"}, "initial": {"issuer_submissions", "quote"},
+                   "filing_documents": {"filing_document"}}[row["selection_stage"]]
+        if (any(item["query_kind"] not in allowed for item in children)
+                or counts["issuer_submissions"] > envelope["sec_issuer_submissions"]
+                or counts["filing_document"] > envelope["sec_filing_document"]
+                or counts["quote"] > envelope["yahoo_security_quote"]
+                or (row["selection_stage"] == "initial"
+                    and len({item["descriptor"]["entity_id"] for item in children}) > 4)):
+            raise ValueError("discovery enrichment manifest capacity mismatch")
+
+
+def _validate_typed_exposure_lineage(
+    result: Mapping[str, list[dict[str, object]]],
+) -> None:
+    tasks = {row["id"]: row for row in result["discovery_stage_tasks"]}
+    securities = {row["id"]: row for row in result["security_reference_revisions"]}
+    descriptors = {row["task_id"]: row for row in result["enrichment_request_descriptors"]}
+    pins = {
+        (row["run_id"], row["manifest_id"])
+        for row in result["reference_run_bindings"]
+        if row["manifest_id"] is not None
+        and row["reference_status"] in {"healthy", "reference_stale"}
+    }
+    memberships = {
+        (row["manifest_id"], row["security_revision_id"])
+        for row in result["reference_snapshot_memberships"]
+    }
+    checkpoints: list[dict[str, object]] = [
+        *result["collection_checkpoints"], *result["collection_checkpoint_history"],
+    ]
+
+    def timestamp(value: object, *, nullable: bool = False) -> bool:
+        if value is None:
+            return nullable
+        if not isinstance(value, str):
+            return False
+        try:
+            parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+        except ValueError:
+            return False
+        return parsed.tzinfo is not None
+
+    def iso_date(value: object, *, nullable: bool = False) -> bool:
+        if value is None:
+            return nullable
+        if not isinstance(value, str):
+            return False
+        try:
+            datetime.strptime(value, "%Y-%m-%d")
+        except ValueError:
+            return False
+        return True
+
+    for row in result["exposure_facts"]:
+        fact = row["fact"]
+        if not isinstance(fact, Mapping) or fact.get("kind") != "exposure_fact":
+            continue
+        value = fact.get("value")
+        task = tasks.get(row["task_id"])
+        descriptor_row = descriptors.get(row["task_id"])
+        security = securities.get(row["security_revision_id"])
+        if (
+            set(fact) != {"kind", "semantic_encoding_version", "value"}
+            or fact.get("semantic_encoding_version") != 1
+            or not isinstance(value, Mapping) or set(value) != _TYPED_EXPOSURE_VALUE_FIELDS
+            or value.get("execution_allowed") is not False
+            or value.get("schema_version") != 1
+            or not isinstance(value.get("is_amendment"), bool)
+            or value.get("status") not in {"supported", "contradicted", "superseded", "insufficient"}
+            or value.get("claim_state") not in {"operational", "planned", "forecast", "customer", "contradicted", "insufficient"}
+            or value.get("business_exposure") not in {"supported", "contradicted", "unresolved"}
+            or value.get("financial_materiality") not in {"supported", "contradicted", "unknown"}
+            or value.get("metric") not in {"business_exposure", "revenue_share"}
+            or not isinstance(value.get("issuer_cik"), str)
+            or re.fullmatch(r"[0-9]{10}", value["issuer_cik"]) is None
+            or value["issuer_cik"] == "0000000000"
+            or value.get("entity_id") != f"sec-cik:{value.get('issuer_cik')}"
+            or not isinstance(value.get("ticker"), str)
+            or re.fullmatch(r"[A-Z][A-Z0-9.-]{0,14}", value["ticker"]) is None
+            or value.get("security_revision_id") != row["security_revision_id"]
+            or not isinstance(value.get("accession_number"), str)
+            or re.fullmatch(r"[0-9]{10}-[0-9]{2}-[0-9]{6}", value["accession_number"]) is None
+            or not isinstance(value.get("primary_document"), str)
+            or re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,254}", value["primary_document"]) is None
+            or not isinstance(value.get("form"), str)
+            or re.fullmatch(r"(?:10-K|10-Q|8-K|20-F|40-F)(?:/A)?", value["form"]) is None
+            or any(not isinstance(value.get(name), str) or HASH.fullmatch(value[name]) is None
+                   for name in ("normalized_passage_hash", "source_cache_key",
+                                "source_item_content_hash", "source_response_hash",
+                                "submissions_response_hash"))
+            or any(not isinstance(value.get(name), str) or UUID.fullmatch(value[name]) is None
+                   for name in ("source_item_id", "source_receipt_id"))
+            or not isinstance(value.get("passage"), str)
+            or not 1 <= len(value["passage"]) <= 2000
+            or not isinstance(value.get("source_locator"), str)
+            or not 1 <= len(value["source_locator"]) <= 256
+            or hashlib.sha256(value["passage"].encode()).hexdigest()
+               != value.get("normalized_passage_hash")
+            or any(not isinstance(value.get(name), str) or not value[name]
+                   or len(value[name]) > 80 for name in ("parser_version", "filing_rule_version", "role"))
+            or any(not isinstance(value.get(name), list) or len(value[name]) > maximum
+                   or any(not isinstance(item, str) or not 1 <= len(item) <= 160
+                          for item in value[name])
+                   or value[name] != sorted(set(value[name]))
+                   for name, maximum in (("event_ids", 64), ("hypothesis_ids", 64),
+                                         ("limitations", 16)))
+            or not value["event_ids"] or not value["hypothesis_ids"]
+            or not iso_date(value.get("filing_date"))
+            or not iso_date(value.get("reporting_period_end"), nullable=True)
+            or not iso_date(value.get("period_start"), nullable=True)
+            or not iso_date(value.get("period_end"), nullable=True)
+            or not timestamp(value.get("accepted_at"), nullable=True)
+            or not timestamp(value.get("effective_at"), nullable=True)
+            or not timestamp(value.get("retrieved_at"))
+            or row["valid_from"] != value.get("filing_date") or row["valid_to"] is not None
+            or row["source_ids"] != [value.get("source_item_id")]
+            or row["content_hash"] != _semantic_hash(fact)
+            or row["id"] != str(uuid.uuid5(
+                uuid.NAMESPACE_URL, f"market-exposure:{row['content_hash']}",
+            ))
+            or task is None or task.get("stage") != "enrich"
+            or descriptor_row is None or descriptor_row.get("query_kind") != "filing_document"
+            or security is None
+            or (row["run_id"], value.get("reference_manifest_id")) not in pins
+            or (value.get("reference_manifest_id"), row["security_revision_id"]) not in memberships
+            or any(security.get(name) != value.get(name)
+                   for name in ("entity_id", "security_id", "ticker"))
+        ):
+            raise ValueError("discovery typed exposure dependency mismatch or invalid content")
+        if value["metric"] == "business_exposure":
+            if value["value"] is not None or value["unit"] is not None:
+                raise ValueError("discovery typed exposure materiality mismatch")
+        elif (
+            not isinstance(value["value"], str)
+            or re.fullmatch(r"(?:0|[1-9][0-9]*)(?:\.[0-9]+)?", value["value"]) is None
+            or value["unit"] != "percent_of_revenue"
+            or float(value["value"]) > 100
+        ):
+            raise ValueError("discovery typed exposure materiality mismatch")
+        if (
+            value["status"] == "supported"
+            and (value["claim_state"] != "operational" or value["business_exposure"] != "supported")
+        ) or (
+            value["status"] == "contradicted"
+            and (value["claim_state"] != "contradicted" or value["business_exposure"] != "contradicted")
+        ) or (
+            value["status"] == "insufficient"
+            and (value["claim_state"] not in {"planned", "forecast", "customer", "insufficient"}
+                 or value["business_exposure"] != "unresolved")
+        ):
+            raise ValueError("discovery typed exposure state mismatch")
+        descriptor = descriptor_row["descriptor"]
+        expected_source_url = (
+            f"https://www.sec.gov/Archives/edgar/data/{int(value['issuer_cik'])}/"
+            f"{value['accession_number'].replace('-', '')}/{value['primary_document']}"
+        )
+        exact_descriptor_fields = {
+            "reference_manifest_id", "security_revision_id", "security_id", "entity_id",
+            "ticker", "cik", "accession_number", "form", "primary_document",
+            "submissions_response_hash", "filing_date",
+            "reporting_period_end", "source_receipt_id", "cache_key",
+        }
+        if (
+            any(descriptor.get(name) != value.get({
+                "cik": "issuer_cik", "cache_key": "source_cache_key",
+            }.get(name, name)) for name in exact_descriptor_fields)
+            or timestamp(descriptor.get("accepted_at"), nullable=True)
+               is not timestamp(value.get("accepted_at"), nullable=True)
+            or (descriptor.get("accepted_at") is None) != (value.get("accepted_at") is None)
+            or (descriptor.get("accepted_at") is not None and datetime.fromisoformat(
+                    str(descriptor["accepted_at"]).replace("Z", "+00:00")
+                ) != datetime.fromisoformat(str(value["accepted_at"]).replace("Z", "+00:00")))
+            or value["source_url"] != expected_source_url
+        ):
+            raise ValueError("discovery typed exposure request binding mismatch")
+        matching_checkpoints = [checkpoint for checkpoint in checkpoints
+                                if checkpoint["run_id"] == row["run_id"]
+                                and checkpoint["cache_key"] == value["source_cache_key"]
+                                and checkpoint["source_receipt_id"] == value["source_receipt_id"]]
+        matched = False
+        for checkpoint in matching_checkpoints:
+            payload = checkpoint["payload"]
+            receipt = payload.get("receipt") if isinstance(payload, Mapping) else None
+            items = payload.get("items") if isinstance(payload, Mapping) else None
+            if not isinstance(receipt, Mapping) or not isinstance(items, list) \
+                    or receipt.get("response_hash") != value["source_response_hash"]:
+                continue
+            for item in items:
+                if not isinstance(item, Mapping):
+                    continue
+                metadata = item.get("metadata")
+                source_item_id = str(uuid.uuid5(
+                    uuid.NAMESPACE_URL, f"market-source:{item.get('content_hash')}",
+                ))
+                if (
+                    set(item) == {
+                        "provider", "upstream_item_id", "source_url", "title",
+                        "normalized_text", "canonical_content", "content_hash",
+                        "published_at", "effective_at", "retrieved_at", "authority",
+                        "metadata", "request_url", "reporting_at", "entity_ids",
+                        "security_ids",
+                    }
+                    and item.get("provider") == "sec_edgar"
+                    and item.get("authority") == "official"
+                    and item.get("content_hash") == value["source_item_content_hash"]
+                    and source_item_id == value["source_item_id"]
+                    and item.get("source_url") == expected_source_url
+                    and item.get("request_url") == expected_source_url
+                    and item.get("normalized_text") == value["passage"]
+                    and isinstance(item.get("canonical_content"), str)
+                    and len(item["canonical_content"].encode()) <= 8192
+                    and isinstance(metadata, Mapping)
+                    and set(metadata) == {
+                        "accession_number", "filing_rule_version",
+                        "normalized_passage_hash", "parser_version", "primary_document",
+                        "raw_response_hash", "source_locator",
+                    }
+                    and metadata.get("accession_number") == value["accession_number"]
+                    and metadata.get("primary_document") == value["primary_document"]
+                    and metadata.get("raw_response_hash") == value["source_response_hash"]
+                    and metadata.get("normalized_passage_hash") == value["normalized_passage_hash"]
+                    and metadata.get("source_locator") == value["source_locator"]
+                    and metadata.get("parser_version") == value["parser_version"]
+                    and metadata.get("filing_rule_version") == value["filing_rule_version"]
+                ):
+                    matched = True
+        if not matched:
+            raise ValueError("discovery typed exposure checkpoint binding mismatch")
 
 
 def _validated_records(records: Mapping[str, object]) -> dict[str, list[dict[str, object]]]:
@@ -844,6 +1366,7 @@ def _validated_records(records: Mapping[str, object]) -> dict[str, list[dict[str
                     or dependency["state"] != "succeeded"
                     or dependency["created_at"] >= row["created_at"]):
                 raise ValueError("discovery task dependency mismatch")
+    _validate_enrichment_lineage(result)
     theme_episodes = {row["id"]: row for row in result["theme_episode_revisions"]}
     if any(not UUID.fullmatch(row["id"]) or row["run_id"] not in intelligence_runs
            or row["task_id"] not in discovery_tasks
@@ -857,23 +1380,39 @@ def _validated_records(records: Mapping[str, object]) -> dict[str, list[dict[str
            or not valid_discovery_json(row["source_ids"], max_bytes=8192)
            for row in theme_episodes.values()):
         raise ValueError("discovery theme dependency mismatch or invalid content")
+    current_pins = {
+        (row["run_id"], row["manifest_id"])
+        for row in result["reference_run_bindings"]
+        if row["manifest_id"] is not None
+        and row["reference_status"] in {"healthy", "reference_stale"}
+    }
+    memberships = {
+        (row["manifest_id"], row["security_revision_id"])
+        for row in result["reference_snapshot_memberships"]
+    }
     exposure_facts = {row["id"]: row for row in result["exposure_facts"]}
     if any(not UUID.fullmatch(row["id"]) or row["run_id"] not in intelligence_runs
            or row["task_id"] not in discovery_tasks
            or discovery_tasks.get(row["task_id"], {}).get("run_id") != row["run_id"]
            or discovery_tasks.get(row["task_id"], {}).get("stage") != "enrich"
            or row["security_revision_id"] not in security_revisions
-           or security_revisions.get(row["security_revision_id"], {}).get("run_id") != row["run_id"]
+           or (row["run_id"], security_revisions.get(
+               row["security_revision_id"], {}
+           ).get("manifest_id")) not in current_pins
+           or (security_revisions.get(row["security_revision_id"], {}).get("manifest_id"),
+               row["security_revision_id"]) not in memberships
            or (row["theme_episode_revision_id"] is not None
                and (row["theme_episode_revision_id"] not in theme_episodes
                     or theme_episodes[row["theme_episode_revision_id"]]["run_id"] != row["run_id"]))
            or row["exposure_kind"] not in {"filing", "contract", "backlog", "revenue", "capacity", "official_fund", "supply_chain", "customer", "segment"}
            or not 1 <= len(row["source_ids"]) <= 64 or len(set(row["source_ids"])) != len(row["source_ids"])
            or not HASH.fullmatch(row["content_hash"])
-           or not valid_discovery_json(row["fact"], max_bytes=32768)
+           or (row["fact"].get("kind") != "exposure_fact"
+               and not valid_discovery_json(row["fact"], max_bytes=32768))
            or not valid_discovery_json(row["source_ids"], max_bytes=8192)
            for row in exposure_facts.values()):
         raise ValueError("discovery exposure dependency mismatch or invalid content")
+    _validate_typed_exposure_lineage(result)
     nominations = {row["id"]: row for row in result["research_nominations"]}
     if any(not UUID.fullmatch(row["id"]) or row["run_id"] not in intelligence_runs
            or row["task_id"] not in discovery_tasks
@@ -1215,6 +1754,8 @@ def relationships(records: Mapping[str, list]) -> dict[str, list]:
         "discovery_reference_predecessor_pins": sorted([[row["run_id"], row["capability_id"], row["manifest_id"], row["reference_status"]] for row in records["reference_predecessor_pins"]]),
         "discovery_reference_transfer_requests": sorted([[row["request_id"], row["run_id"], row["operation"], row["encoded_bytes"], row["request_hash"]] for row in records["reference_transfer_requests"]]),
         "discovery_reference_transfer_responses": sorted([[row["request_id"], row["run_id"], row["encoded_bytes"], row["response_hash"]] for row in records["reference_transfer_responses"]]),
+        "enrichment_selection_run": sorted([[row["id"], row["run_id"], row["selection_stage"], row["content_hash"]] for row in records["enrichment_selection_manifests"]]),
+        "enrichment_request_lineage": sorted([[row["id"], row["manifest_id"], row["task_id"], row["content_hash"]] for row in records["enrichment_request_descriptors"]]),
         "discovery_task_run_dependencies": sorted([[row["id"], row["run_id"], row["dependency_ids"]] for row in records["discovery_stage_tasks"]]),
         "discovery_theme_task_run": sorted([[row["id"], row["task_id"], row["run_id"]] for row in records["theme_episode_revisions"]]),
         "discovery_exposure_lineage": sorted([[row["id"], row["task_id"], row["security_revision_id"], row["theme_episode_revision_id"]] for row in records["exposure_facts"]]),

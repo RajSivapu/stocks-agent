@@ -776,6 +776,7 @@ Deno.test("reference and context parsers are exact, bounded, and research-only",
         theme_episodes: [],
         exposure_facts: [],
         research_nominations: [],
+        enrichment_selections: [],
       }),
     "unexpected key",
   );

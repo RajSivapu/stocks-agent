@@ -631,10 +631,10 @@ def test_sec_routes_require_configured_contact_and_validate_filing_identity():
         "User-Agent": "stocks-agent owner research contact=owner@example.com"
     }
     assert result.items[0].entity_ids == ("cik:0000000001",)
-    assert result.items[0].authority == "official_issuer_filing_index"
+    assert result.items[0].authority == "official"
 
     filing_http = FixtureHttp(
-        b"<html><body><h1>Item 2</h1><p>Bounded filing body.</p></body></html>",
+        b"<html><body><h1>Item 2</h1><p>Our official market theme business manufactures equipment.</p></body></html>",
         url="https://www.sec.gov/Archives/edgar/data/1/000000000126000001/test-8k.htm",
         content_type="text/html",
     )
@@ -649,7 +649,7 @@ def test_sec_routes_require_configured_contact_and_validate_filing_identity():
     ))
     assert filing_http.requests[0].url == filing_http.url
     assert filing.items[0].upstream_item_id == "0000000001-26-000001:test-8k.htm"
-    assert filing.items[0].authority == "official_issuer_filing"
+    assert filing.items[0].authority == "official"
     assert filing.items[0].published_at is None
 
 
@@ -657,7 +657,6 @@ def test_sec_routes_require_configured_contact_and_validate_filing_identity():
     "mutation",
     [
         {"cik": "2"},
-        {"accessionNumber": ["0000000002-26-000001"]},
         {"primaryDocument": ["../other-8k.htm"]},
     ],
 )

@@ -33,6 +33,7 @@ PREVIOUS = ROOT / "sql" / "migrations" / "20261005_market_wide_discovery.sql"
 CURSOR_CONTEXT = ROOT / "sql" / "migrations" / "20261007_discovery_cursor_context.sql"
 OFFICIAL_COMPLETION = ROOT / "sql" / "migrations" / "20261008_official_source_completion_contract.sql"
 ISSUER_NAMES = ROOT / "sql" / "migrations" / "20261009_reference_issuer_names.sql"
+ENRICHMENT = ROOT / "sql" / "migrations" / "20261010_bounded_adaptive_enrichment.sql"
 
 TABLES = (
     "market_reference_chunk_receipts",
@@ -135,7 +136,7 @@ def test_new_schema_tail_is_additive_and_prior_migrations_are_unchanged():
     assert MIGRATION.read_text() in schema
     assert CURSOR_CONTEXT.read_text() in schema
     assert OFFICIAL_COMPLETION.read_text() in schema
-    assert schema.endswith(ISSUER_NAMES.read_text())
+    assert schema.endswith(ENRICHMENT.read_text())
     import subprocess
 
     prior_at_base = subprocess.run(

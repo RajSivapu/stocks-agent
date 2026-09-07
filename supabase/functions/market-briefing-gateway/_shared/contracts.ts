@@ -40,6 +40,7 @@ export type Operation =
   | "read_intelligence_completion"
   | "read_intelligence_context"
   | "collect_intelligence_quote"
+  | "seal_enrichment_selection"
   | "record_report"
   | "record_learning"
   | "record_discovery_reference"
@@ -707,6 +708,7 @@ const OPERATIONS: readonly Operation[] = [
   "read_intelligence_completion",
   "read_intelligence_context",
   "collect_intelligence_quote",
+  "seal_enrichment_selection",
   "record_report",
   "record_learning",
   "record_discovery_reference",

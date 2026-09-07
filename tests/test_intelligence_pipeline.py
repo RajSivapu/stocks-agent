@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import uuid
 from dataclasses import replace
 from decimal import Decimal
 import pytest
@@ -12,6 +13,7 @@ from lib.intelligence.pipeline import (
     IntelligencePipeline,
     PipelineRequest,
     _discover,
+    _enrichment_candidates,
     _failed_receipt,
     _source_summary,
 )
@@ -24,12 +26,22 @@ from lib.intelligence.providers import (
     build_adapter,
 )
 from lib.intelligence.http import HttpResult
+from lib.intelligence.exposure import (
+    FilingEvidence,
+    IssuerExposureBinding,
+    extract_exposure_facts,
+)
 from lib.intelligence.quota import QuotaSession
-from lib.intelligence.themes import SEED_THEMES
+from lib.intelligence.themes import SEED_THEMES, evidence_key
 from tests.test_intelligence_entities import reference as entity_reference
 from lib.intelligence.universe import SecurityIdentity
 from lib.intelligence.types import DiscoveryPlan, DiscoveryTask, PacketLimits, SourceCapability
 from lib.intelligence.cursors import SourceCursor
+from lib.intelligence.research_queue import (
+    EnrichmentRequest,
+    adaptive_provider_reservations,
+    build_selection_manifest,
+)
 
 
 NOW = datetime(2026, 9, 4, 12, 0, tzinfo=timezone.utc)
@@ -650,6 +662,124 @@ def test_unverified_ticker_cannot_enter_persisted_ranking_or_packet():
     assert result.packet.to_dict()["candidates"] == []
 
 
+def test_hypothesis_and_quote_never_replace_supported_primary_exposure():
+    manifest_id = "00000000-0000-4000-8000-000000000099"
+    revision_id = "00000000-0000-4000-8000-000000000098"
+    reference = entity_reference()
+    reference = replace(reference, securities=(replace(
+        reference.securities[0], revision_id=revision_id,
+        reference_manifest_id=manifest_id,
+    ), *reference.securities[1:]))
+    radar = replace(
+        raw_item("primary-required"),
+        title="Alpha Incorporated permanent magnet opportunity",
+        normalized_text="Permanent magnet manufacturing may expand.",
+        security_ids=("sec:AAA",),
+    )
+    base_context = {
+        "security_reference": reference,
+        "holdings": {"AAA": "0.05"},
+        "liquidity_by_ticker": {"AAA": "0.7"},
+        "overlap_by_ticker": {"AAA": "0.1"},
+        "primary_exposure_required": True,
+    }
+    event = _discover((normalize_item(radar),), {
+        key: value for key, value in base_context.items()
+        if key != "primary_exposure_required"
+    }, NOW)[0][0]
+    quote = replace(
+        raw_item("quote", provider="yahoo"), authority="market_data",
+        title="AAA market quote", normalized_text="AAA price 12.34 USD.",
+        security_ids=("sec:AAA",), metadata=MappingProxyType({"ticker": "AAA"}),
+    )
+
+    _events, relations, candidates = _discover(
+        (normalize_item(radar), normalize_item(quote)), base_context, NOW,
+    )
+
+    relation = next(row for row in relations if row.event_id == event.event_id)
+    candidate = next(row for row in candidates if row.event_id == event.event_id)
+    assert relation.hypothesis is True
+    assert relation.eligible_for_ranking is False
+    assert candidate.qualified is False
+    assert "supported_primary_exposure_required" in candidate.veto_reasons
+
+
+def test_supported_bound_exposure_fact_qualifies_original_event_with_its_passage_source():
+    manifest_id = "00000000-0000-4000-8000-000000000099"
+    revision_id = "00000000-0000-4000-8000-000000000098"
+    reference = entity_reference()
+    reference = replace(reference, securities=(replace(
+        reference.securities[0], revision_id=revision_id,
+        reference_manifest_id=manifest_id,
+    ), *reference.securities[1:]))
+    radar = replace(
+        raw_item("primary-supported"),
+        title="Alpha Incorporated permanent magnet opportunity",
+        normalized_text="Permanent magnet manufacturing may expand.",
+        security_ids=("sec:AAA",),
+    )
+    context = {
+        "security_reference": reference,
+        "holdings": {"AAA": "0.05"},
+        "liquidity_by_ticker": {"AAA": "0.7"},
+        "overlap_by_ticker": {"AAA": "0.1"},
+    }
+    event = _discover((normalize_item(radar),), context, NOW)[0][0]
+    passage = "We manufacture permanent magnets at our Texas facility."
+    canonical = json.dumps({"passage": passage}, sort_keys=True)
+    filing_item = replace(
+        raw_item("filing", provider="sec_edgar", official=True),
+        upstream_item_id="0001193125-26-200001:alpha.htm",
+        source_url=("https://www.sec.gov/Archives/edgar/data/1/"
+                    "000119312526200001/alpha.htm"),
+        request_url=("https://www.sec.gov/Archives/edgar/data/1/"
+                     "000119312526200001/alpha.htm"),
+        title="SEC filing passage", normalized_text=passage,
+        canonical_content=canonical,
+        content_hash=hashlib.sha256(canonical.encode()).hexdigest(),
+        security_ids=("sec:AAA",),
+        metadata=MappingProxyType({"exposure_kind": "filing"}),
+    )
+    normalized_filing = normalize_item(filing_item)
+    fact = extract_exposure_facts(
+        FilingEvidence(
+            issuer_cik="0000000001", accession_number="0001193125-26-200001",
+            form="10-Q", primary_document="alpha.htm", source_url=filing_item.source_url,
+            source_response_hash="a" * 64, submissions_response_hash="b" * 64,
+            passage=passage, source_locator="item-2:magnetics",
+            normalized_passage_hash=hashlib.sha256(passage.encode()).hexdigest(),
+            parser_version="sec-visible-passage-v1",
+            filing_rule_version="sec-submissions-binding-v1", schema_version=1,
+            filing_date=date(2026, 8, 8), accepted_at=None,
+            reporting_period_end=date(2026, 6, 30), retrieved_at=NOW,
+            source_item_id=evidence_key(normalized_filing),
+            source_item_content_hash=normalized_filing.content_hash,
+            source_receipt_id="44444444-4444-4444-8444-444444444444",
+            source_cache_key="c" * 64,
+        ),
+        issuer=IssuerExposureBinding(
+            entity_id="sec-cik:0000000001", security_id="sec:AAA",
+            security_revision_id=revision_id, reference_manifest_id=manifest_id,
+            cik="0000000001", canonical_name="Alpha Incorporated", ticker="AAA",
+        ),
+        role="magnet_manufacturing", event_ids=(event.event_id,),
+        hypothesis_ids=("hypothesis-1",),
+    )[0]
+
+    _events, relations, candidates = _discover(
+        (normalize_item(radar), normalized_filing),
+        {**context, "primary_exposure_required": True, "exposure_facts": [fact]}, NOW,
+    )
+
+    relation = next(row for row in relations if row.event_id == event.event_id)
+    candidate = next(row for row in candidates if row.event_id == event.event_id)
+    assert relation.hypothesis is False
+    assert relation.eligible_for_ranking is True
+    assert tuple(map(evidence_key, relation.exposure_evidence)) == (fact.source_item_id,)
+    assert candidate.qualified is True
+
+
 def test_one_event_can_create_multiple_stable_security_relationships():
     source = replace(
         raw_item("agreement", official=True),
@@ -1132,6 +1262,401 @@ def test_capability_plan_persists_bounded_reverse_tasks_before_transport_and_res
     assert replay.cache_hits == 3
     assert len([row for row in gateway.discovery_tasks.values()
                 if row["stage"] == "resolve"]) == 2
+
+
+def test_enrichment_candidates_require_exact_hydrated_current_reference_membership():
+    reference = entity_reference()
+    manifest_id = "00000000-0000-4000-8000-000000000099"
+    security = replace(
+        reference.securities[0],
+        revision_id="00000000-0000-4000-8000-000000000098",
+        reference_manifest_id=manifest_id,
+    )
+    reference = replace(reference, securities=(security, *reference.securities[1:]))
+    source = replace(
+        raw_item("alpha-magnets"),
+        title="Alpha Incorporated expands permanent magnet capacity",
+        normalized_text="Alpha Incorporated supplies permanent magnet alloy capacity.",
+        metadata=MappingProxyType({"organization_names": ["Alpha Incorporated"]}),
+    )
+    task = DiscoveryTask(
+        task_id="44444444-4444-4444-8444-444444444499", stage="signals",
+        provider="gdelt", capability_id="gdelt_theme_search", query_kind="theme_search",
+        theme_id="critical_minerals_magnets", query=MappingProxyType({"query": "magnets"}),
+        window=MappingProxyType({"start": NOW.isoformat(), "end": NOW.isoformat()}),
+        dependencies=(), max_attempts=1, requires_credential=False,
+    )
+    values = _enrichment_candidates(
+        ((task, CollectionResult((source,), receipt("gdelt"), 20)),),
+        {"security_reference": reference, "reference_coverage": {
+            "reference_status": "healthy", "reference_manifest_id": manifest_id,
+        }},
+    )
+    assert values
+    assert {value.security_revision_id for value in values} == {security.revision_id}
+    assert {value.reference_manifest_id for value in values} == {manifest_id}
+    assert _enrichment_candidates(
+        ((task, CollectionResult((source,), receipt("gdelt"), 20)),),
+        {"security_reference": reference, "reference_coverage": {
+            "reference_status": "healthy", "reference_manifest_id": str(uuid.uuid4()),
+        }},
+    ) == ()
+
+
+def test_frozen_enrichment_quote_replays_without_duplicate_transport():
+    from lib.intelligence.pipeline import _checkpoint_receipt
+
+    capability = SourceCapability(
+        capability_id="yahoo_security_quote", provider="yahoo", query_kind="quote",
+        themes=frozenset(), phases=frozenset({"on-demand"}),
+        allowed_hosts=frozenset({"query1.finance.yahoo.com"}),
+        allowed_path_patterns=("/v8/finance/chart/",), required_credential=None,
+        authority="market_data", retention_class="metadata", max_requests_per_run=4,
+        max_items_per_request=1, requirement_tier="optional", health="enabled",
+        enabled=True, provider_priority=1, query_pack=MappingProxyType({}),
+    )
+    plan = DiscoveryPlan(
+        run_id=RUN_ID, phase="on-demand", reference_version="fixture:v2",
+        capability_version=1, tasks=(),
+        capabilities=MappingProxyType({capability.capability_id: capability}),
+        coverage=MappingProxyType({}), provider_request_totals=MappingProxyType({}),
+        reserved_holding_quote_requests=0, reserved_adaptive_requests=4,
+    )
+    selected = EnrichmentRequest(
+        request_id="77777777-7777-4777-8777-777777777777",
+        entity_id="sec-cik:0000000001", security_id="sec:AAA",
+        security_revision_id="00000000-0000-4000-8000-000000000098",
+        reference_manifest_id="00000000-0000-4000-8000-000000000099",
+        cik="0000000001", ticker="AAA", instrument_type="COMMON_STOCK",
+        event_ids=("event",), theme_id="critical_minerals_magnets", role="mining",
+        hypothesis_ids=("hypothesis",), source_item_ids=("source",),
+        dependency_task_ids=(), provider="yahoo", capability_id="yahoo_security_quote",
+        query_kind="quote", descriptor=MappingProxyType({
+            "instrument_type": "COMMON_STOCK", "reference_manifest_id": "00000000-0000-4000-8000-000000000099",
+            "security_id": "sec:AAA", "security_revision_id": "00000000-0000-4000-8000-000000000098",
+            "ticker": "AAA",
+        }), adverse_path=False, priority=1,
+    )
+
+    class Gateway:
+        def __init__(self):
+            self.tasks = {}
+            self.calls = []
+
+        def seal_enrichment_selection(self, _run, payload):
+            self.calls.append("seal")
+            for row in payload["requests"]:
+                self.tasks.setdefault(row["task_id"], {
+                    "id": row["task_id"], "stage": row["stage"], "provider": row["provider"],
+                    "capability_id": row["capability_id"], "query_kind": row["query_kind"],
+                    "query_hash": row["descriptor_hash"], "dependency_ids": row["dependency_ids"],
+                    "requested_window": row["requested_window"], "state": "planned",
+                    "attempt_count": 0, "request_budget": 1, "result": {},
+                })
+            return {"manifest_id": payload["manifest"]["manifest_id"], "request_count": len(payload["requests"]), "duplicate": False}
+
+        def checkpoint_discovery_stage(self, _run, payload):
+            self.tasks[payload["task"]["id"]] = payload["task"]
+            return {"task": payload["task"], "duplicate": False}
+
+        def checkpoint_intelligence_collection(self, run_id, payload):
+            return {"run_id": run_id, "cache_key": payload["cache_key"]}
+
+        def call(self, operation, payload, **_kwargs):
+            assert operation == "collect_intelligence_quote"
+            self.calls.append("transport")
+            quote_receipt = replace(
+                receipt("yahoo"), source_receipt_id=payload["source_receipt_id"],
+                reservation_id=payload["reservation_id"], cache_key=payload["cache_key"],
+                returned_count=0, accepted_count=0,
+            )
+            return {"checkpoint": {"cache_key": payload["cache_key"], "receipt": _checkpoint_receipt(quote_receipt), "items": []}}
+
+    gateway = Gateway()
+    adapter = FakeAdapter(); adapter.provider = "yahoo"
+    pipeline = IntelligencePipeline(gateway, [adapter], discovery_plan=plan)
+    reservation_id = str(uuid.uuid5(uuid.NAMESPACE_URL, f"market-intelligence:reservation:{RUN_ID}:yahoo"))
+    reservations = {"yahoo": {"id": reservation_id, "provider": "yahoo", "requests": 1}}
+    window = {"start": "2026-09-04T10:00:00Z", "end": NOW.isoformat()}
+    persisted = {}
+    first = pipeline._seal_and_run_enrichment_requests(
+        RUN_ID, request("on-demand"), window, (selected,), reservations,
+        persisted, adaptive_provider_reservations("on-demand"), selection_stage="initial",
+    )
+    replay = pipeline._seal_and_run_enrichment_requests(
+        RUN_ID, request("on-demand"), window, (selected,), reservations,
+        persisted, adaptive_provider_reservations("on-demand"), selection_stage="initial",
+    )
+    assert len(first) == len(replay) == 1
+    assert gateway.calls.count("transport") == 1
+    assert persisted[selected.request_id]["state"] == "succeeded"
+
+
+def test_restart_loads_and_executes_frozen_selection_without_reselecting():
+    plan = DiscoveryPlan(
+        run_id=RUN_ID, phase="on-demand", reference_version="fixture:v2",
+        capability_version=1, tasks=(), capabilities=MappingProxyType({}),
+        coverage=MappingProxyType({}), provider_request_totals=MappingProxyType({}),
+        reserved_holding_quote_requests=0, reserved_adaptive_requests=4,
+    )
+    selected = EnrichmentRequest(
+        request_id="77777777-7777-4777-8777-777777777779",
+        entity_id="sec-cik:0000000001", security_id="sec:AAA",
+        security_revision_id="00000000-0000-4000-8000-000000000098",
+        reference_manifest_id="00000000-0000-4000-8000-000000000099",
+        cik="0000000001", ticker="AAA", instrument_type="COMMON_STOCK",
+        event_ids=("event",), theme_id="critical_minerals_magnets", role="mining",
+        hypothesis_ids=("hypothesis",), source_item_ids=("source",),
+        dependency_task_ids=(), provider="yahoo", capability_id="yahoo_security_quote",
+        query_kind="quote", descriptor=MappingProxyType({
+            "instrument_type": "COMMON_STOCK",
+            "reference_manifest_id": "00000000-0000-4000-8000-000000000099",
+            "security_id": "sec:AAA",
+            "security_revision_id": "00000000-0000-4000-8000-000000000098",
+            "ticker": "AAA",
+        }), adverse_path=False, priority=1,
+    )
+    window = {"start": "2026-09-04T10:00:00Z", "end": NOW.isoformat()}
+    frozen = build_selection_manifest(
+        run_id=RUN_ID, phase="on-demand", requests=(selected,), deferred_reasons={},
+        provider_reservations=adaptive_provider_reservations("on-demand"),
+        request_window=window,
+    )
+
+    class Gateway:
+        def read_discovery_context(self, _run):
+            return {"tasks": [], "enrichment_selections": [frozen.persistence_payload()]}
+
+    class CapturingPipeline(IntelligencePipeline):
+        def _seal_and_run_enrichment_requests(self, *args, **kwargs):
+            self.captured = (args[3], kwargs.get("frozen_manifest"))
+            return []
+
+    pipeline = CapturingPipeline(Gateway(), [FakeAdapter()], discovery_plan=plan)
+    persisted = pipeline._read_discovery_tasks(RUN_ID)
+    assert persisted == {}
+    assert pipeline._run_adaptive_enrichment(
+        RUN_ID, request("on-demand"), window, (), {}, persisted,
+        adaptive_provider_reservations("on-demand"),
+    ) == []
+    requests, frozen_manifest = pipeline.captured
+    assert [row.ticker for row in requests] == ["AAA"]
+    assert frozen_manifest == frozen
+
+
+def test_empty_enrichment_selection_and_document_stage_are_sealed_with_stable_deferrals():
+    plan = DiscoveryPlan(
+        run_id=RUN_ID, phase="on-demand", reference_version="fixture:v2",
+        capability_version=1, tasks=(), capabilities=MappingProxyType({}),
+        coverage=MappingProxyType({}), provider_request_totals=MappingProxyType({}),
+        reserved_holding_quote_requests=0, reserved_adaptive_requests=4,
+    )
+
+    class Gateway:
+        def __init__(self):
+            self.selections = []
+
+        def seal_enrichment_selection(self, _run, payload):
+            self.selections.append(payload)
+            return {
+                "manifest_id": payload["manifest"]["manifest_id"],
+                "request_count": len(payload["requests"]), "duplicate": False,
+            }
+
+    gateway = Gateway()
+    pipeline = IntelligencePipeline(gateway, [FakeAdapter()], discovery_plan=plan)
+    results = pipeline._seal_and_run_enrichment_requests(
+        RUN_ID, request("on-demand"),
+        {"start": "2026-09-04T10:00:00Z", "end": NOW.isoformat()},
+        (), {}, {}, adaptive_provider_reservations("on-demand"),
+        selection_stage="initial",
+        deferred_reasons={"adaptive_enrichment": "no_currently_bound_candidates"},
+    )
+
+    assert results == []
+    assert [row["manifest"]["selection_stage"] for row in gateway.selections] == [
+        "initial", "filing_documents",
+    ]
+    assert gateway.selections[0]["manifest"]["deferred_reasons"] == {
+        "adaptive_enrichment": "no_currently_bound_candidates",
+    }
+    assert gateway.selections[1]["requests"] == []
+
+
+def test_sealed_submissions_then_document_persists_typed_fact_and_replays_without_transport():
+    capabilities = {
+        capability_id: SourceCapability(
+            capability_id=capability_id, provider="sec_edgar", query_kind=query_kind,
+            themes=frozenset(), phases=frozenset({"on-demand"}),
+            allowed_hosts=frozenset({"data.sec.gov", "www.sec.gov"}),
+            allowed_path_patterns=("/submissions/", "/Archives/edgar/data/"),
+            required_credential=None, authority="official_issuer_filing",
+            retention_class="passage", max_requests_per_run=1,
+            max_items_per_request=1, requirement_tier="optional", health="enabled",
+            enabled=True, provider_priority=1, query_pack=MappingProxyType({}),
+        )
+        for capability_id, query_kind in (
+            ("sec_issuer_submissions", "issuer_submissions"),
+            ("sec_filing_document", "filing_document"),
+        )
+    }
+    plan = DiscoveryPlan(
+        run_id=RUN_ID, phase="on-demand", reference_version="fixture:v2",
+        capability_version=1, tasks=(), capabilities=MappingProxyType(capabilities),
+        coverage=MappingProxyType({}), provider_request_totals=MappingProxyType({}),
+        reserved_holding_quote_requests=0, reserved_adaptive_requests=4,
+    )
+    manifest_id = "00000000-0000-4000-8000-000000000099"
+    revision_id = "00000000-0000-4000-8000-000000000098"
+    selected = EnrichmentRequest(
+        request_id="77777777-7777-4777-8777-777777777771",
+        entity_id="sec-cik:0000000001", security_id="sec:AAA",
+        security_revision_id=revision_id, reference_manifest_id=manifest_id,
+        cik="0000000001", ticker="AAA", instrument_type="COMMON_STOCK",
+        event_ids=("event",), theme_id="critical_minerals_magnets",
+        role="magnet_manufacturing", hypothesis_ids=("hypothesis",),
+        source_item_ids=("source",), dependency_task_ids=(), provider="sec_edgar",
+        capability_id="sec_issuer_submissions", query_kind="issuer_submissions",
+        descriptor=MappingProxyType({
+            "cik": "0000000001", "issuer_entity_id": "sec-cik:0000000001",
+            "reference_manifest_id": manifest_id, "security_revision_id": revision_id,
+        }), adverse_path=False, priority=1,
+    )
+    accession = "0001193125-26-200001"
+    document = "alpha-20260630.htm"
+    archive_url = (
+        "https://www.sec.gov/Archives/edgar/data/1/"
+        "000119312526200001/alpha-20260630.htm"
+    )
+    raw_filing_hash = "d" * 64
+
+    class Adapter:
+        provider = "sec_edgar"
+
+        def __init__(self):
+            self.queries = []
+            self.source_receipt_ids = []
+
+        def collect(self, query, *, source_receipt_id=None, before_transport_attempt=None):
+            self.queries.append(query)
+            self.source_receipt_ids.append(source_receipt_id)
+            if query.capability_id == "sec_issuer_submissions":
+                canonical = json.dumps({"accession": accession}, sort_keys=True)
+                item = SourceItem(
+                    provider=self.provider, upstream_item_id=accession,
+                    source_url=archive_url, title="10-Q filing",
+                    normalized_text="10-Q filed 2026-08-08", canonical_content=canonical,
+                    content_hash=hashlib.sha256(canonical.encode()).hexdigest(),
+                    published_at=NOW, effective_at=None, retrieved_at=NOW,
+                    authority="official_issuer_filing_index", metadata=MappingProxyType({
+                        "accession_number": accession, "accepted_at": "2026-08-08T16:30:00+00:00",
+                        "filing_date": "2026-08-08", "form": "10-Q",
+                        "issuer_cik": "0000000001", "primary_document": document,
+                        "reporting_period_end": "2026-06-30",
+                        "submissions_response_hash": "c" * 64,
+                    }), request_url="https://data.sec.gov/submissions/CIK0000000001.json",
+                    entity_ids=("cik:0000000001",), security_ids=("AAA",),
+                )
+                response_hash = "c" * 64
+            else:
+                passage = "We manufacture permanent magnets at our Alpha facility."
+                canonical = json.dumps({"passage": passage}, sort_keys=True)
+                item = SourceItem(
+                    provider=self.provider, upstream_item_id=f"{accession}:{document}",
+                    source_url=archive_url, title="SEC filing passage",
+                    normalized_text=passage, canonical_content=canonical,
+                    content_hash=hashlib.sha256(canonical.encode()).hexdigest(),
+                    published_at=None, effective_at=None, retrieved_at=NOW,
+                    authority="official_issuer_filing", metadata=MappingProxyType({
+                        "accession_number": accession,
+                        "filing_rule_version": "sec-submissions-binding-v1",
+                        "normalized_passage_hash": hashlib.sha256(passage.encode()).hexdigest(),
+                        "parser_version": "sec-visible-passage-v1",
+                        "primary_document": document, "raw_response_hash": raw_filing_hash,
+                        "source_locator": "item-2:magnetics",
+                    }), request_url=archive_url,
+                    entity_ids=("cik:0000000001",), security_ids=("AAA",),
+                )
+                response_hash = raw_filing_hash
+            return CollectionResult((item,), replace(
+                receipt(self.provider), source_receipt_id=source_receipt_id,
+                response_hash=response_hash,
+            ), 1)
+
+    class Gateway:
+        def __init__(self):
+            self.tasks = {}
+            self.selections = []
+            self.fact_checkpoints = []
+
+        def seal_enrichment_selection(self, _run, payload):
+            self.selections.append(payload)
+            for row in payload["requests"]:
+                self.tasks.setdefault(row["task_id"], {
+                    "id": row["task_id"], "stage": row["stage"],
+                    "provider": row["provider"], "capability_id": row["capability_id"],
+                    "query_kind": row["query_kind"], "query_hash": row["descriptor_hash"],
+                    "dependency_ids": row["dependency_ids"],
+                    "requested_window": row["requested_window"], "state": "planned",
+                    "attempt_count": 0, "request_budget": 1, "result": {},
+                })
+            return {
+                "manifest_id": payload["manifest"]["manifest_id"],
+                "request_count": len(payload["requests"]), "duplicate": False,
+            }
+
+        def checkpoint_discovery_stage(self, _run, payload):
+            row = payload["task"]
+            self.tasks[row["id"]] = row
+            if payload["exposure_facts"]:
+                self.fact_checkpoints.append(payload)
+            return {"task": row, "duplicate": False}
+
+        def checkpoint_intelligence_collection(self, run_id, payload):
+            return {"run_id": run_id, "cache_key": payload["cache_key"]}
+
+    gateway = Gateway()
+    adapter = Adapter()
+    reference = entity_reference()
+    reference = replace(reference, securities=(replace(
+        reference.securities[0], revision_id=revision_id,
+        reference_manifest_id=manifest_id,
+    ), *reference.securities[1:]))
+    pipeline = IntelligencePipeline(
+        gateway, [adapter], discovery_plan=plan,
+        context={"security_reference": reference},
+    )
+    reservation_id = str(uuid.uuid5(uuid.NAMESPACE_URL, f"market-intelligence:reservation:{RUN_ID}:sec_edgar"))
+    reservations = {"sec_edgar": {"id": reservation_id, "provider": "sec_edgar", "requests": 2}}
+    window = {"start": "2026-09-04T10:00:00Z", "end": NOW.isoformat()}
+    persisted = {}
+
+    first = pipeline._seal_and_run_enrichment_requests(
+        RUN_ID, request("on-demand"), window, (selected,), reservations,
+        persisted, adaptive_provider_reservations("on-demand"), selection_stage="initial",
+    )
+    replay = pipeline._seal_and_run_enrichment_requests(
+        RUN_ID, request("on-demand"), window, (selected,), reservations,
+        persisted, adaptive_provider_reservations("on-demand"), selection_stage="initial",
+    )
+
+    assert len(first) == len(replay) == 2
+    assert [query.capability_id for query in adapter.queries] == [
+        "sec_issuer_submissions", "sec_filing_document",
+    ]
+    assert adapter.source_receipt_ids == [
+        gateway.selections[0]["requests"][0]["descriptor"]["source_receipt_id"],
+        gateway.selections[1]["requests"][0]["descriptor"]["source_receipt_id"],
+    ]
+    assert [payload["manifest"]["selection_stage"] for payload in gateway.selections] == [
+        "initial", "filing_documents", "initial", "filing_documents",
+    ]
+    assert len(gateway.fact_checkpoints) == 1
+    fact = gateway.fact_checkpoints[0]["exposure_facts"][0]["fact"]["value"]
+    assert fact["security_id"] == "sec:AAA"
+    assert fact["status"] == "supported"
+    assert fact["financial_materiality"] == "unknown"
+    assert fact["source_response_hash"] == raw_filing_hash
 
 
 def test_capability_plan_persists_eligible_theme_episode_and_ineligible_research_reasons():

@@ -241,7 +241,9 @@ def test_protected_context_producer_uses_persisted_quote_receipts(databases, kin
     r = payload["receipts"][0]
     now = r["retrieved_at"]
     input_value = {"ticker": "TEST", "reservation_id": r["reservation_id"], "source_receipt_id": original, "cache_key": r["cache_key"]}
-    assert db.execute("SELECT public.claim_market_intelligence_quote(%s,%s)", (run, Jsonb(input_value))).fetchone()[0]["status"] == "claimed"
+    # Exercise the legacy quote receipt mechanics directly; the public Task 6
+    # wrapper additionally requires a frozen selected descriptor.
+    assert db.execute("SELECT public.claim_market_intelligence_quote_v1_internal(%s,%s)", (run, Jsonb(input_value))).fetchone()[0]["status"] == "claimed"
     quote = {"ticker": "TEST", "currency": "USD", "price": "100", "as_of": now,
              "instrument_type": "EQUITY", "average_daily_dollar_volume": "5000000", "response_hash": r["response_hash"]}
     cr = dict(r, provider="yahoo", requested_limit=20, observed_at=now, error_code=None, source_receipt_id=original)
@@ -280,8 +282,8 @@ def test_pending_server_quote_cannot_be_erased_by_restart_or_terminal_payload(da
     run, completion, original, payload = prepared_run(db, provider="yahoo", checkpoint=False)
     r = payload["receipts"][0]
     input_value = {"ticker": "TEST", "reservation_id": r["reservation_id"], "source_receipt_id": original, "cache_key": r["cache_key"]}
-    assert db.execute("SELECT public.claim_market_intelligence_quote(%s,%s)", (run, Jsonb(input_value))).fetchone()[0]["status"] == "claimed"
-    assert db.execute("SELECT public.claim_market_intelligence_quote(%s,%s)", (run, Jsonb(input_value))).fetchone()[0]["status"] == "uncertain"
+    assert db.execute("SELECT public.claim_market_intelligence_quote_v1_internal(%s,%s)", (run, Jsonb(input_value))).fetchone()[0]["status"] == "claimed"
+    assert db.execute("SELECT public.claim_market_intelligence_quote_v1_internal(%s,%s)", (run, Jsonb(input_value))).fetchone()[0]["status"] == "uncertain"
     window = db.execute("SELECT request_window FROM market_intelligence_runs WHERE id=%s", (run,)).fetchone()[0]
     with pytest.raises(psycopg.errors.ObjectNotInPrerequisiteState, match="uncertain"):
         db.execute("SELECT public.start_market_intelligence_run(%s,'intraday',%s,1,%s,%s)", (run, window["market_date"], Jsonb({"reservations": []}), Jsonb(window)))

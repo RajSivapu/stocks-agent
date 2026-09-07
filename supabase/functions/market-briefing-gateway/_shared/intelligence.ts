@@ -198,6 +198,7 @@ export interface DiscoveryContext {
   theme_episodes: JsonObject[];
   exposure_facts: JsonObject[];
   research_nominations: JsonObject[];
+  enrichment_selections: JsonObject[];
 }
 
 function objectValue(value: unknown, path: string): JsonObject {
@@ -1465,6 +1466,7 @@ export function parseDiscoveryContext(value: unknown): DiscoveryContext {
     "theme_episodes",
     "exposure_facts",
     "research_nominations",
+    "enrichment_selections",
   ], "discovery context");
   if (byteLength(row) > 1_048_576) {
     throw new Error("discovery context exceeds byte limit");
@@ -1550,6 +1552,10 @@ export function parseDiscoveryContext(value: unknown): DiscoveryContext {
       "rationale",
       "created_at",
       "updated_at",
+    ]),
+    enrichment_selections: opaque("enrichment_selections", [
+      "manifest",
+      "requests",
     ]),
   };
 }

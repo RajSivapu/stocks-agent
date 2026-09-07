@@ -20,6 +20,7 @@ REFERENCE_TRANSFER = MIGRATIONS / "20261006_reference_snapshot_transfer.sql"
 CURSOR_CONTEXT = MIGRATIONS / "20261007_discovery_cursor_context.sql"
 OFFICIAL_COMPLETION = MIGRATIONS / "20261008_official_source_completion_contract.sql"
 ISSUER_NAMES = MIGRATIONS / "20261009_reference_issuer_names.sql"
+ENRICHMENT = MIGRATIONS / "20261010_bounded_adaptive_enrichment.sql"
 
 # The original pre-20260901 tables. Historical migrations run only in this
 # disposable fixture, before representative legacy facts are inserted.
@@ -140,10 +141,11 @@ def test_exact_legacy_reconciliation_preserves_facts_matches_fresh_and_refuses_r
             execute("legacy", "BEGIN;" + CURSOR_CONTEXT.read_text() + "COMMIT;")
             execute("legacy", "BEGIN;" + OFFICIAL_COMPLETION.read_text() + "COMMIT;")
             execute("legacy", "BEGIN;" + ISSUER_NAMES.read_text() + "COMMIT;")
+            execute("legacy", "BEGIN;" + ENRICHMENT.read_text() + "COMMIT;")
             assert projected_rows("legacy") == before
             after_catalog = catalog("legacy")
             after_tables = {row["name"] for row in after_catalog["relations"] if row["kind"] in {"r", "p"}}
-            assert len(after_tables - before_tables) == 30
+            assert len(after_tables - before_tables) == 32
             assert scalar("legacy", "SELECT count(*) FROM supabase_migrations.schema_migrations;") == 0
             assert scalar("legacy", "SELECT count(*) FROM public.stock_agent_release_migration_ledger;") == 0
             assert scalar("legacy", "SELECT jsonb_agg(jsonb_build_object('singleton',singleton,'revision',revision)) FROM portfolio_cash_ledger_state;") == [{"singleton": True, "revision": 0}]

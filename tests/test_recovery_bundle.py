@@ -1,4 +1,5 @@
 import copy
+from datetime import date, datetime, timezone
 import hashlib
 import json
 import shlex
@@ -10,14 +11,25 @@ import socket
 import subprocess
 import tarfile
 import tempfile
+import uuid
 
 import psycopg
 from psycopg.rows import dict_row
 import pytest
 
-from scripts.export_recovery_bundle import _validated_records, export_recovery_bundle, decrypt_verified
+from scripts.export_recovery_bundle import (
+    REQUIRED_RECOVERY_RECORDS,
+    _validated_records,
+    decrypt_verified,
+    export_recovery_bundle,
+)
 from scripts.protected_evidence import RECOVERY_SQL
 from scripts.verify_recovery_bundle import restore_recovery_records, verify_recovery_bundle
+from lib.intelligence.exposure import (
+    FilingEvidence,
+    IssuerExposureBinding,
+    extract_exposure_facts,
+)
 from lib.intelligence.universe import (
     reference_manifest_semantic_document,
     security_revision_semantic_document,
@@ -134,6 +146,7 @@ def recovery_records():
     completion_event = "99999999-9999-4999-8999-999999999999"
     report_request = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
     reservation = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb"
+    sec_reservation = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbc"
     source_receipt = "cccccccc-cccc-4ccc-8ccc-cccccccccccc"
     manifest_id = "10000000-0000-4000-8000-000000000001"
     security_revision_id = "10000000-0000-4000-8000-000000000002"
@@ -205,7 +218,7 @@ def recovery_records():
         }],
         "security_reference_revisions": [{
             "id": security_revision_id, "manifest_id": manifest_id, "run_id": run, "revision": 1,
-            "security_id": "NASDAQ:TEST", "entity_id": "CIK:0000000001", "ticker": "TEST",
+            "security_id": "NASDAQ:TEST", "entity_id": "sec-cik:0000000001", "ticker": "TEST",
             "exchange": "NASDAQ", "instrument_type": "COMMON_STOCK", "eligible": True,
             "exclusion_reasons": [], "aliases": ["Test Corp"], "source_ids": ["nasdaq-listed"],
             "valid_from": "2026-09-05T19:30:00Z", "valid_to": None, "content_hash": "3" * 64,
@@ -377,6 +390,11 @@ def recovery_records():
             "id": reservation, "run_id": run, "provider": "gdelt", "market_date": "2026-09-05",
             "phase": "post-market", "reserved_requests": 1, "cache_keys": ["d" * 64],
             "created_at": "2026-09-05T19:30:00Z",
+        }, {
+            "id": sec_reservation, "run_id": run, "provider": "sec_edgar",
+            "market_date": "2026-09-05", "phase": "post-market",
+            "reserved_requests": 2, "cache_keys": [],
+            "created_at": "2026-09-05T19:30:00Z",
         }],
         "collection_checkpoints": [{
             "run_id": run, "cache_key": "d" * 64,
@@ -475,7 +493,333 @@ def recovery_records():
         scheduled_phase="post-market", scheduled_market_date="2026-09-05",
         gateway_request_id="55555555-5555-4555-8555-555555555555",
     )
-    return _seal_reference_lineage(records)
+    records = _seal_reference_lineage(records)
+    selection_descriptor = {
+        "adverse_path": False,
+        "cache_key": "a" * 64,
+        "cik": "0000000001",
+        "dependency_task_ids": [signals_task_id],
+        "entity_id": "sec-cik:0000000001",
+        "event_ids": ["event-1"],
+        "hypothesis_ids": ["hypothesis-1"],
+        "instrument_type": "COMMON_STOCK",
+        "issuer_entity_id": "sec-cik:0000000001",
+        "priority": 1,
+        "reference_manifest_id": manifest_id,
+        "reservation_id": sec_reservation,
+        "role": "generation",
+        "security_id": "NASDAQ:TEST",
+        "security_revision_id": security_revision_id,
+        "source_item_ids": ["gdelt:1"],
+        "source_receipt_id": source_receipt,
+        "theme_id": "grid_modernization",
+        "ticker": "TEST",
+    }
+    request_document = {
+        "request_id": enrich_task_id,
+        "task_id": enrich_task_id,
+        "stage": "enrich",
+        "provider": "sec_edgar",
+        "capability_id": "sec_issuer_submissions",
+        "descriptor": selection_descriptor,
+        "query_kind": "issuer_submissions",
+        "dependency_ids": [signals_task_id],
+        "requested_window": {
+            "start": "2026-09-05T12:00:00Z", "end": "2026-09-05T20:00:00Z",
+        },
+        "request_budget": 1,
+        "execution_allowed": False,
+    }
+    request_hash = digest(request_document)
+    next(row for row in records["discovery_stage_tasks"] if row["id"] == enrich_task_id)[
+        "query_hash"
+    ] = request_hash
+    manifest_document = {
+        "deferred_reasons": {},
+        "execution_allowed": False,
+        "phase": "post-market",
+        "provider_reservations": {
+            "gdelt_reverse": 2,
+            "sec_filing_document": 2,
+            "sec_issuer_submissions": 2,
+            "yahoo_security_quote": 2,
+        },
+        "request_descriptors": [{
+            "request_id": enrich_task_id, "descriptor_hash": request_hash,
+        }],
+        "run_id": run,
+        "schema_version": 1,
+        "selection_stage": "initial",
+    }
+    manifest_hash = digest(manifest_document)
+    selection_manifest_id = str(uuid.uuid5(
+        uuid.UUID(run), f"enrichment-selection:{manifest_hash}",
+    ))
+    records["enrichment_selection_manifests"] = [{
+        "id": selection_manifest_id,
+        "run_id": run,
+        "selection_stage": "initial",
+        "phase": "post-market",
+        "request_count": 1,
+        "provider_reservations": manifest_document["provider_reservations"],
+        "deferred_reasons": {},
+        "manifest": {
+            "manifest_id": selection_manifest_id,
+            **manifest_document,
+            "semantic_hash": manifest_hash,
+        },
+        "content_hash": manifest_hash,
+        "created_at": "2026-09-05T19:33:30Z",
+    }]
+    records["enrichment_request_descriptors"] = [{
+        "id": enrich_task_id,
+        "manifest_id": selection_manifest_id,
+        "run_id": run,
+        "task_id": enrich_task_id,
+        "provider": "sec_edgar",
+        "capability_id": "sec_issuer_submissions",
+        "query_kind": "issuer_submissions",
+        "descriptor": selection_descriptor,
+        "content_hash": request_hash,
+        "created_at": "2026-09-05T19:34:00Z",
+    }]
+    return records
+
+
+def typed_exposure_recovery_records():
+    records = recovery_records()
+    run_id = records["intelligence_runs"][0]["id"]
+    security = records["security_reference_revisions"][0]
+    manifest_id = security["manifest_id"]
+    issuer_task = records["enrichment_request_descriptors"][0]["task_id"]
+    document_task = "30000000-0000-4000-8000-000000000001"
+    source_receipt_id = "30000000-0000-4000-8000-000000000002"
+    cache_key = "8" * 64
+    response_hash = "9" * 64
+    submissions_hash = "a" * 64
+    accession = "0001193125-26-200001"
+    document = "test-20260630.htm"
+    source_url = (
+        "https://www.sec.gov/Archives/edgar/data/1/"
+        "000119312526200001/test-20260630.htm"
+    )
+    submissions_request_url = "https://data.sec.gov/submissions/CIK0000000001.json"
+    submissions_item_hash = "b" * 64
+    submissions_item_id = str(uuid.uuid5(
+        uuid.NAMESPACE_URL, f"market-source:{submissions_item_hash}",
+    ))
+    passage = "We manufacture permanent magnets at our Texas facility."
+    passage_hash = hashlib.sha256(passage.encode()).hexdigest()
+    canonical_content = json.dumps({"passage": passage}, sort_keys=True)
+    item_hash = hashlib.sha256(canonical_content.encode()).hexdigest()
+    source_item_id = str(uuid.uuid5(uuid.NAMESPACE_URL, f"market-source:{item_hash}"))
+    retrieved = datetime(2026, 9, 5, 19, 36, tzinfo=timezone.utc)
+    evidence = FilingEvidence(
+        issuer_cik="0000000001", accession_number=accession, form="10-Q",
+        primary_document=document, source_url=source_url,
+        source_response_hash=response_hash, submissions_response_hash=submissions_hash,
+        passage=passage, source_locator="item-2:magnetics",
+        normalized_passage_hash=passage_hash, parser_version="sec-visible-passage-v1",
+        filing_rule_version="sec-submissions-binding-v1", schema_version=1,
+        filing_date=date(2026, 8, 8),
+        accepted_at=datetime(2026, 8, 8, 16, 30, tzinfo=timezone.utc),
+        reporting_period_end=date(2026, 6, 30), retrieved_at=retrieved,
+        source_item_id=source_item_id, source_item_content_hash=item_hash,
+        source_receipt_id=source_receipt_id, source_cache_key=cache_key,
+    )
+    fact = extract_exposure_facts(
+        evidence,
+        issuer=IssuerExposureBinding(
+            entity_id=security["entity_id"], security_id=security["security_id"],
+            security_revision_id=security["id"], reference_manifest_id=manifest_id,
+            cik="0000000001", canonical_name="Test Corporation", ticker="TEST",
+        ),
+        role="magnet_manufacturing", event_ids=("event-1",),
+        hypothesis_ids=("hypothesis-1",),
+    )[0]
+    descriptor = {
+        "adverse_path": False, "cache_key": cache_key, "cik": "0000000001",
+        "dependency_task_ids": [issuer_task], "entity_id": security["entity_id"],
+        "event_ids": ["event-1"], "hypothesis_ids": ["hypothesis-1"],
+        "instrument_type": security["instrument_type"], "priority": 1,
+        "reference_manifest_id": manifest_id,
+        "reservation_id": records["source_quota_reservations"][1]["id"],
+        "role": "magnet_manufacturing", "security_id": security["security_id"],
+        "security_revision_id": security["id"],
+        "source_item_ids": sorted(["gdelt:1", submissions_item_id]),
+        "source_receipt_id": source_receipt_id, "theme_id": "grid_modernization",
+        "ticker": "TEST", "accepted_at": "2026-08-08T16:30:00Z",
+        "accession_number": accession, "filing_date": "2026-08-08", "form": "10-Q",
+        "primary_document": document, "reporting_period_end": "2026-06-30",
+        "submissions_response_hash": submissions_hash,
+    }
+    requested_window = {
+        "start": "2026-09-05T12:00:00Z", "end": "2026-09-05T20:00:00Z",
+    }
+    request_document = {
+        "request_id": document_task, "task_id": document_task, "stage": "enrich",
+        "provider": "sec_edgar", "capability_id": "sec_filing_document",
+        "descriptor": descriptor, "query_kind": "filing_document",
+        "dependency_ids": [issuer_task], "requested_window": requested_window,
+        "request_budget": 1, "execution_allowed": False,
+    }
+    request_hash = digest(request_document)
+    issuer_descriptor = records["enrichment_request_descriptors"][0]["descriptor"]
+    issuer_cache_key = issuer_descriptor["cache_key"]
+    issuer_receipt_id = issuer_descriptor["source_receipt_id"]
+    issuer_reservation_id = issuer_descriptor["reservation_id"]
+    cursor = {
+        "provider": "sec_edgar", "capability_id": "sec_issuer_submissions",
+        "completed_through": None, "active_window_start": None,
+        "active_window_end": None, "backlog_token": None, "page": 1,
+        "accepted_item_ids": [], "next_retry_phase": None,
+        "continuation_token_history": [],
+    }
+    completed_cursor = {
+        **cursor, "completed_through": requested_window["end"],
+    }
+    issuer_receipt = {
+        "provider": "sec_edgar", "reservation_id": issuer_reservation_id,
+        "status": "succeeded", "cache_key": issuer_cache_key,
+        "requested_window": requested_window, "requested_limit": 1,
+        "retrieved_at": "2026-09-05T19:35:00Z",
+        "observed_at": "2026-09-05T19:35:00Z",
+        "expires_at": "2026-09-05T19:50:00Z", "request_cost": 1,
+        "upstream_remaining": None, "returned_count": 1, "accepted_count": 1,
+        "duplicate_count": 0, "dropped_count": 0,
+        "response_hash": submissions_hash, "error_code": None,
+        "source_receipt_id": issuer_receipt_id,
+        "cache_predecessor_receipt_id": None,
+    }
+    issuer_metadata = {
+        "backlog_remaining": False,
+        "capability_id": "sec_issuer_submissions",
+        "coverage_status": "success_nonempty",
+        "cursor_end": requested_window["end"],
+        "cursor_start": requested_window["start"],
+        "next_retry_phase": None, "overlap_seconds": 7200, "page": 1,
+        "truncated": False, "exhausted": True,
+    }
+    issuer_checkpoint_item = {
+        "provider": "sec_edgar", "upstream_item_id": accession,
+        "source_url": source_url, "title": f"10-Q filing {accession}",
+        "normalized_text": "10-Q filed 2026-08-08",
+        "canonical_content": json.dumps({"accession_number": accession}, sort_keys=True),
+        "content_hash": submissions_item_hash, "published_at": "2026-08-08T00:00:00Z",
+        "effective_at": "2026-06-30T00:00:00Z",
+        "retrieved_at": "2026-09-05T19:35:00Z", "authority": "official",
+        "metadata": {
+            "accession_number": accession, "accepted_at": "2026-08-08T16:30:00Z",
+            "filing_date": "2026-08-08", "form": "10-Q",
+            "issuer_cik": "0000000001", "primary_document": document,
+            "reporting_period_end": "2026-06-30",
+            "submissions_response_hash": submissions_hash,
+        },
+        "request_url": submissions_request_url,
+        "reporting_at": "2026-06-30T00:00:00Z",
+        "entity_ids": [security["entity_id"]], "security_ids": [security["security_id"]],
+    }
+    issuer_task_row = next(
+        row for row in records["discovery_stage_tasks"] if row["id"] == issuer_task
+    )
+    issuer_task_row["result"] = {
+        "cursor_key": "sec_issuer_submissions:grid_modernization",
+        "theme_id": "grid_modernization",
+        "checkpoint": {
+            "cache_key": issuer_cache_key,
+            "receipt": {**issuer_receipt, "metadata": issuer_metadata},
+        },
+        "request_cursor": cursor, "source_cursor": completed_cursor,
+    }
+    records["collection_checkpoints"].append({
+        "run_id": run_id, "cache_key": issuer_cache_key,
+        "request_window": {
+            **requested_window, "timezone": "America/Chicago",
+            "market_date": "2026-09-05", "phase": "post-market",
+        },
+        "source_receipt_id": issuer_receipt_id,
+        "payload": {"receipt": issuer_receipt, "items": [issuer_checkpoint_item]},
+        "created_at": "2026-09-05T19:35:00Z",
+    })
+    records["discovery_stage_tasks"].append({
+        "id": document_task, "run_id": run_id, "stage": "enrich",
+        "capability_id": "sec_filing_document", "provider": "sec_edgar",
+        "query_kind": "filing_document", "query_hash": request_hash,
+        "dependency_ids": [issuer_task], "requested_window": requested_window,
+        "state": "succeeded", "attempt_count": 1, "request_budget": 1,
+        "result": {"exposure_fact_ids": [fact.fact_id]},
+        "created_at": "2026-09-05T19:35:30Z", "updated_at": "2026-09-05T19:36:00Z",
+    })
+    manifest_document = {
+        "deferred_reasons": {}, "execution_allowed": False, "phase": "post-market",
+        "provider_reservations": {
+            "gdelt_reverse": 2, "sec_filing_document": 2,
+            "sec_issuer_submissions": 2, "yahoo_security_quote": 2,
+        },
+        "request_descriptors": [{
+            "request_id": document_task, "descriptor_hash": request_hash,
+        }],
+        "run_id": run_id, "schema_version": 1, "selection_stage": "filing_documents",
+    }
+    manifest_hash = digest(manifest_document)
+    selection_id = str(uuid.uuid5(
+        uuid.UUID(run_id), f"enrichment-selection:{manifest_hash}",
+    ))
+    records["enrichment_selection_manifests"].append({
+        "id": selection_id, "run_id": run_id, "selection_stage": "filing_documents",
+        "phase": "post-market", "request_count": 1,
+        "provider_reservations": manifest_document["provider_reservations"],
+        "deferred_reasons": {}, "manifest": {
+            "manifest_id": selection_id, **manifest_document, "semantic_hash": manifest_hash,
+        }, "content_hash": manifest_hash, "created_at": "2026-09-05T19:35:15Z",
+    })
+    records["enrichment_request_descriptors"].append({
+        "id": document_task, "manifest_id": selection_id, "run_id": run_id,
+        "task_id": document_task, "provider": "sec_edgar",
+        "capability_id": "sec_filing_document", "query_kind": "filing_document",
+        "descriptor": descriptor, "content_hash": request_hash,
+        "created_at": "2026-09-05T19:35:30Z",
+    })
+    checkpoint_item = {
+        "provider": "sec_edgar", "upstream_item_id": f"{accession}:{document}",
+        "source_url": source_url, "title": "SEC filing passage",
+        "normalized_text": passage, "canonical_content": canonical_content,
+        "content_hash": item_hash, "published_at": None, "effective_at": None,
+        "retrieved_at": "2026-09-05T19:36:00.000Z",
+        "authority": "official", "metadata": {
+            "accession_number": accession,
+            "filing_rule_version": "sec-submissions-binding-v1",
+            "normalized_passage_hash": passage_hash,
+            "parser_version": "sec-visible-passage-v1", "primary_document": document,
+            "raw_response_hash": response_hash, "source_locator": "item-2:magnetics",
+        }, "request_url": source_url, "reporting_at": None,
+        "entity_ids": [security["entity_id"]], "security_ids": [security["security_id"]],
+    }
+    records["collection_checkpoints"].append({
+        "run_id": run_id, "cache_key": cache_key,
+        "request_window": {
+            **requested_window, "timezone": "America/Chicago", "market_date": "2026-09-05",
+            "phase": "post-market",
+        },
+        "source_receipt_id": source_receipt_id,
+        "payload": {"receipt": {
+            "provider": "sec_edgar",
+            "reservation_id": records["source_quota_reservations"][1]["id"],
+            "status": "succeeded", "cache_key": cache_key,
+            "requested_window": requested_window, "requested_limit": 1,
+            "retrieved_at": "2026-09-05T19:36:00.000Z", "observed_at": None,
+            "expires_at": None, "request_cost": 1, "upstream_remaining": None,
+            "returned_count": 1, "accepted_count": 1, "duplicate_count": 0,
+            "dropped_count": 0, "response_hash": response_hash, "error_code": None,
+            "source_receipt_id": source_receipt_id, "cache_predecessor_receipt_id": None,
+        }, "items": [checkpoint_item]}, "created_at": "2026-09-05T19:36:00Z",
+    })
+    fact_row = fact.to_persistence_row()
+    fact_row.update(run_id=run_id, task_id=document_task,
+                    created_at="2026-09-05T19:36:00Z")
+    records["exposure_facts"] = [fact_row]
+    records["research_nominations"][0]["exposure_fact_ids"] = [fact.fact_id]
+    return records
 
 
 class FakeDatabase:
@@ -934,6 +1278,8 @@ EMPTY_INTELLIGENCE_PACKET_REPORT_HISTORY = (
     "reference_predecessor_pins",
     "reference_transfer_requests",
     "reference_transfer_responses",
+    "enrichment_selection_manifests",
+    "enrichment_request_descriptors",
     "discovery_stage_tasks",
     "theme_episode_revisions",
     "exposure_facts",
@@ -960,7 +1306,195 @@ DISCOVERY_DATASETS = (
     "theme_episode_revisions",
     "exposure_facts",
     "research_nominations",
+    "enrichment_selection_manifests",
+    "enrichment_request_descriptors",
 )
+
+
+def test_recovery_contract_includes_frozen_enrichment_selection_and_request_descriptors():
+    assert "enrichment_selection_manifests" in REQUIRED_RECOVERY_RECORDS
+    assert "enrichment_request_descriptors" in REQUIRED_RECOVERY_RECORDS
+    from scripts.protected_evidence import READ_TABLES, RECOVERY_SQL
+    from scripts.verify_recovery_bundle import _RESTORE_TABLES
+
+    assert "market_enrichment_selection_manifests" in READ_TABLES
+    assert "market_enrichment_request_descriptors" in READ_TABLES
+    assert "market_enrichment_selection_manifests" in RECOVERY_SQL["enrichment_selection_manifests"]
+    assert "market_enrichment_request_descriptors" in RECOVERY_SQL["enrichment_request_descriptors"]
+    assert ("enrichment_selection_manifests", "market_enrichment_selection_manifests", {}) in _RESTORE_TABLES
+    assert ("enrichment_request_descriptors", "market_enrichment_request_descriptors", {}) in _RESTORE_TABLES
+
+
+@pytest.mark.parametrize(("dataset", "field", "replacement"), [
+    ("enrichment_selection_manifests", "content_hash", "0" * 64),
+    ("enrichment_selection_manifests", "provider_reservations", {
+        "gdelt_reverse": 2, "sec_filing_document": 2,
+        "sec_issuer_submissions": 3, "yahoo_security_quote": 2,
+    }),
+    ("enrichment_request_descriptors", "content_hash", "0" * 64),
+    ("enrichment_request_descriptors", "provider", "yahoo"),
+])
+def test_recovery_rejects_tampered_frozen_enrichment_ledgers(dataset, field, replacement):
+    records = recovery_records()
+    records[dataset][0][field] = replacement
+
+    with pytest.raises(ValueError, match="discovery enrichment"):
+        _validated_records(records)
+
+
+def test_recovery_rejects_tampered_or_full_filing_request_descriptors():
+    records = recovery_records()
+    records["enrichment_request_descriptors"][0]["descriptor"]["security_revision_id"] = (
+        "20000000-0000-4000-8000-000000000002"
+    )
+    with pytest.raises(ValueError, match="discovery enrichment"):
+        _validated_records(records)
+
+    records = recovery_records()
+    records["enrichment_request_descriptors"][0]["descriptor"]["full_filing_html"] = "<html/>"
+    with pytest.raises(ValueError, match="discovery enrichment"):
+        _validated_records(records)
+
+
+def test_recovery_rejects_tampered_manifest_child_hash():
+    records = recovery_records()
+    records["enrichment_selection_manifests"][0]["manifest"]["request_descriptors"][0][
+        "descriptor_hash"
+    ] = "0" * 64
+
+    with pytest.raises(ValueError, match="discovery enrichment manifest semantic hash"):
+        _validated_records(records)
+
+
+def test_recovery_validates_typed_exposure_against_frozen_request_and_checkpoint():
+    records = typed_exposure_recovery_records()
+
+    validated = _validated_records(records)
+
+    assert validated["exposure_facts"][0]["fact"]["value"]["status"] == "supported"
+
+
+def test_recovery_rejects_document_selection_without_bound_parent_submission_checkpoint():
+    records = typed_exposure_recovery_records()
+    issuer_task = next(
+        row for row in records["discovery_stage_tasks"]
+        if row["query_kind"] == "issuer_submissions"
+    )
+    issuer_task["result"] = {}
+
+    with pytest.raises(ValueError, match="discovery enrichment filing membership"):
+        _validated_records(records)
+
+
+def test_recovery_rejects_enrichment_above_exact_provider_reservation():
+    records = typed_exposure_recovery_records()
+    sec_reservation = next(
+        row for row in records["source_quota_reservations"]
+        if row["provider"] == "sec_edgar"
+    )
+    sec_reservation["reserved_requests"] = 1
+
+    with pytest.raises(ValueError, match="discovery enrichment reservation capacity"):
+        _validated_records(records)
+
+
+@pytest.mark.parametrize(("field", "replacement"), [
+    ("issuer_cik", "0000000002"),
+    ("accession_number", "0001193125-26-200002"),
+    ("accepted_at", "2026-08-08T16:31:00Z"),
+    ("form", "8-K"),
+    ("primary_document", "other.htm"),
+    ("filing_date", "2026-08-09"),
+    ("reporting_period_end", "2026-06-29"),
+    ("submissions_response_hash", "0" * 64),
+])
+def test_recovery_rejects_tampered_parent_submission_membership(field, replacement):
+    records = typed_exposure_recovery_records()
+    checkpoint = next(
+        row for row in records["collection_checkpoints"]
+        if row["payload"]["receipt"]["provider"] == "sec_edgar"
+        and row["payload"]["items"][0]["request_url"].startswith("https://data.sec.gov/")
+    )
+    checkpoint["payload"]["items"][0]["metadata"][field] = replacement
+
+    with pytest.raises(ValueError, match="discovery enrichment filing membership"):
+        _validated_records(records)
+
+
+def test_recovery_rejects_conflicting_duplicate_parent_accession():
+    records = typed_exposure_recovery_records()
+    checkpoint = next(
+        row for row in records["collection_checkpoints"]
+        if row["payload"]["receipt"]["provider"] == "sec_edgar"
+        and row["payload"]["items"][0]["request_url"].startswith("https://data.sec.gov/")
+    )
+    conflicting = copy.deepcopy(checkpoint["payload"]["items"][0])
+    conflicting["metadata"]["primary_document"] = "conflict.htm"
+    conflicting["content_hash"] = "0" * 64
+    checkpoint["payload"]["items"].append(conflicting)
+    checkpoint["payload"]["receipt"]["accepted_count"] = 2
+    checkpoint["payload"]["receipt"]["returned_count"] = 2
+
+    with pytest.raises(ValueError, match="discovery enrichment filing membership"):
+        _validated_records(records)
+
+
+@pytest.mark.parametrize(("field", "replacement"), [
+    ("request_url", "https://data.sec.gov/submissions/CIK0000000002.json"),
+    ("source_url", "https://www.sec.gov/Archives/edgar/data/1/000119312526200001/arbitrary.htm"),
+])
+def test_recovery_rejects_tampered_parent_submission_endpoint(field, replacement):
+    records = typed_exposure_recovery_records()
+    checkpoint = next(
+        row for row in records["collection_checkpoints"]
+        if row["payload"]["receipt"]["provider"] == "sec_edgar"
+        and row["payload"]["items"][0]["request_url"].startswith("https://data.sec.gov/")
+    )
+    checkpoint["payload"]["items"][0][field] = replacement
+
+    with pytest.raises(ValueError, match="discovery enrichment filing membership"):
+        _validated_records(records)
+
+
+@pytest.mark.parametrize(("field", "replacement"), [
+    ("filing_date", "2026-08-09"),
+    ("issuer_cik", "0000000002"),
+    ("security_id", "NASDAQ:OTHER"),
+    ("source_cache_key", "7" * 64),
+    ("source_item_content_hash", "6" * 64),
+    ("source_response_hash", "5" * 64),
+    ("retrieved_at", "2026-09-06T19:36:00.000Z"),
+])
+def test_recovery_rejects_typed_exposure_semantic_tampering(field, replacement):
+    records = typed_exposure_recovery_records()
+    records["exposure_facts"][0]["fact"]["value"][field] = replacement
+
+    with pytest.raises(ValueError, match="discovery typed exposure"):
+        _validated_records(records)
+
+
+def test_recovery_rejects_rehashed_typed_exposure_with_changed_checkpoint_binding():
+    records = typed_exposure_recovery_records()
+    row = records["exposure_facts"][0]
+    row["fact"]["value"]["source_cache_key"] = "7" * 64
+    row["content_hash"] = digest(row["fact"])
+    row["id"] = str(uuid.uuid5(
+        uuid.NAMESPACE_URL, f"market-exposure:{row['content_hash']}",
+    ))
+    records["research_nominations"][0]["exposure_fact_ids"] = [row["id"]]
+
+    with pytest.raises(ValueError, match="discovery typed exposure request binding"):
+        _validated_records(records)
+
+
+def test_recovery_rejects_full_filing_body_in_durable_checkpoint():
+    records = typed_exposure_recovery_records()
+    records["collection_checkpoints"][-1]["payload"]["items"][0]["raw_body"] = (
+        "<html>entire filing</html>"
+    )
+
+    with pytest.raises(ValueError, match="discovery typed exposure checkpoint binding"):
+        _validated_records(records)
 
 
 def test_recovery_validates_complete_discovery_lineage_and_exact_fields():
@@ -982,6 +1516,8 @@ def test_recovery_validates_complete_discovery_lineage_and_exact_fields():
         "theme_episode_revisions": 1,
         "exposure_facts": 1,
         "research_nominations": 1,
+        "enrichment_selection_manifests": 1,
+        "enrichment_request_descriptors": 1,
     }
 
 
