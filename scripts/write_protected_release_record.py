@@ -9,7 +9,7 @@ import json
 from pathlib import Path
 import re
 
-from lib.release_baseline import allowed_pre_migration_omissions
+from lib.release_baseline import expected_snapshot_tables
 
 
 def tree(root: Path) -> str:
@@ -92,11 +92,18 @@ def main() -> int:
     args = parser.parse_args()
     receipt = json.loads(args.receipt.read_text()); dry = json.loads(args.dry_run_evidence.read_text())
     validate_release_identity(receipt, args.candidate_sha, args.reviewed_sha)
-    allowed_omissions = allowed_pre_migration_omissions()
+    before = dry.get("before")
+    after = dry.get("after")
+    omissions = before.get("pre_migration_omissions") if isinstance(before, dict) else None
+    expected_snapshot_table_names = expected_snapshot_tables(omissions)
     if (receipt.get("deployment_outcome") != "succeeded" or not isinstance(dry.get("table_deltas"), dict)
-            or not isinstance(dry.get("before"), dict) or not isinstance(dry.get("after"), dict)
-            or dry["before"].get("pre_migration_omissions") != dry["after"].get("pre_migration_omissions")
-            or dry["before"].get("pre_migration_omissions") not in allowed_omissions
+            or not isinstance(before, dict) or not isinstance(after, dict)
+            or omissions != after.get("pre_migration_omissions")
+            or expected_snapshot_table_names is None
+            or not isinstance(before.get("tables"), dict) or not isinstance(after.get("tables"), dict)
+            or set(before["tables"]) != set(expected_snapshot_table_names)
+            or set(after["tables"]) != set(expected_snapshot_table_names)
+            or set(dry["table_deltas"]) != set(expected_snapshot_table_names)
             or [row.get("component") for row in receipt.get("component_readbacks", [])] != [
                 "market-briefing-gateway", "owner-dashboard-api", "telegram-portfolio"]):
         raise SystemExit("protected receipts are incomplete")

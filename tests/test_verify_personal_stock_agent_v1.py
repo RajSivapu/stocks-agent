@@ -12,7 +12,7 @@ import uuid
 
 import pytest
 
-from lib.release_baseline import pre_migration_omissions
+from lib.release_baseline import expected_snapshot_tables, pre_migration_omissions
 from scripts import verify_personal_stock_agent_v1 as release_verifier
 from scripts.verify_personal_stock_agent_v1 import verify_release
 from scripts.verify_owner_dashboard_deployment import migration_statements_sha256, normalize_migration_statements
@@ -1570,6 +1570,10 @@ def release(tmp_path):
     static = tmp_path / "static"; static.mkdir()
     for path, content in static_files.items():
         target = static / path; target.parent.mkdir(parents=True, exist_ok=True); target.write_bytes(content)
+    snapshot_tables = {
+        name: {"count": 0, "rows_sha256": hashlib.sha256(b"").hexdigest()}
+        for name in expected_snapshot_tables(pre_migration_omissions()) or ()
+    }
     source = FakeReleaseSource()
     source.ci_record = {"id": 43, "head_sha": sha, "head_branch": "main", "event": "push",
         "name": "Owner dashboard verification", "repository": {"full_name": "owner/stocks-agent"},
@@ -1606,7 +1610,7 @@ def release(tmp_path):
             "files": {path: hashlib.sha256(content).hexdigest()
                 for path, content in static_files.items()}},
         "dry_run": False,
-        "dry_run_evidence": {"before": {"source": {"project_ref": "p" * 20}, "tables": {"scheduled_runs": {"count": 1, "rows_sha256": "a" * 64}, "transactions": {"count": 0, "rows_sha256": "b" * 64}}, "pre_migration_omissions": pre_migration_omissions()}, "after": {"source": {"project_ref": "p" * 20}, "tables": {"scheduled_runs": {"count": 1, "rows_sha256": "a" * 64}, "transactions": {"count": 0, "rows_sha256": "b" * 64}}, "pre_migration_omissions": pre_migration_omissions()}, "table_deltas": {"scheduled_runs": 0, "transactions": 0}, "safe_command_argv": ["python", "scripts/deploy_owner_dashboard_api.py", "--dry-run", "--candidate-sha", sha], "candidate_script_sha256": hashlib.sha256(raw["scripts/deploy_owner_dashboard_api.py"]).hexdigest(), "safe_command_sha256": hashlib.sha256(json.dumps({"argv": ["python", "scripts/deploy_owner_dashboard_api.py", "--dry-run", "--candidate-sha", sha], "candidate_sha": sha, "candidate_script_sha256": hashlib.sha256(raw["scripts/deploy_owner_dashboard_api.py"]).hexdigest()}, sort_keys=True, separators=(",", ":")).encode()).hexdigest(), "safe_command_exit_code": 0},
+        "dry_run_evidence": {"before": {"source": {"project_ref": "p" * 20}, "tables": copy.deepcopy(snapshot_tables), "pre_migration_omissions": pre_migration_omissions()}, "after": {"source": {"project_ref": "p" * 20}, "tables": copy.deepcopy(snapshot_tables), "pre_migration_omissions": pre_migration_omissions()}, "table_deltas": {name: 0 for name in snapshot_tables}, "safe_command_argv": ["python", "scripts/deploy_owner_dashboard_api.py", "--dry-run", "--candidate-sha", sha], "candidate_script_sha256": hashlib.sha256(raw["scripts/deploy_owner_dashboard_api.py"]).hexdigest(), "safe_command_sha256": hashlib.sha256(json.dumps({"argv": ["python", "scripts/deploy_owner_dashboard_api.py", "--dry-run", "--candidate-sha", sha], "candidate_sha": sha, "candidate_script_sha256": hashlib.sha256(raw["scripts/deploy_owner_dashboard_api.py"]).hexdigest()}, sort_keys=True, separators=(",", ":")).encode()).hexdigest(), "safe_command_exit_code": 0},
         "canaries": {"owner": 200, "anonymous": 401, "non_owner": 403},
         "deployment_outcome": "succeeded",
         "release_artifact": {"artifact_id": 101, "name": "release-record-42",
@@ -1934,7 +1938,7 @@ def test_release_record_must_name_the_exact_approved_pr_head(release):
 
 def test_release_rejects_in_place_dry_run_row_mutation_with_unchanged_count(release):
     source, args = release
-    source.record["dry_run_evidence"]["after"]["tables"]["scheduled_runs"]["rows_sha256"] = "f" * 64
+    source.record["dry_run_evidence"]["after"]["tables"]["analysis_runs"]["rows_sha256"] = "f" * 64
     with pytest.raises(RuntimeError, match="side-effect"):
         verify_release(source, **args)
 
@@ -1947,6 +1951,15 @@ def test_release_rejects_an_unapproved_pre_migration_omission(release):
     source.record["dry_run_evidence"]["after"]["pre_migration_omissions"][
         "absent_tables"
     ].append("holdings")
+    with pytest.raises(RuntimeError, match="side-effect"):
+        verify_release(source, **args)
+
+
+def test_release_rejects_a_table_removed_from_both_dry_run_snapshots(release):
+    source, args = release
+    for phase in ("before", "after"):
+        del source.record["dry_run_evidence"][phase]["tables"]["holdings"]
+    del source.record["dry_run_evidence"]["table_deltas"]["holdings"]
     with pytest.raises(RuntimeError, match="side-effect"):
         verify_release(source, **args)
 

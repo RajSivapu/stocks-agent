@@ -1,4 +1,5 @@
 from pathlib import Path
+import copy
 import hashlib
 import json
 import re
@@ -348,7 +349,7 @@ def test_release_record_rejects_a_receipt_from_another_candidate():
 def test_release_record_writer_emits_backend_only_evidence_contract(tmp_path, monkeypatch):
     import json
     import sys
-    from lib.release_baseline import pre_migration_omissions
+    from lib.release_baseline import expected_snapshot_tables, pre_migration_omissions
     from scripts import write_protected_release_record as writer
 
     (tmp_path / "apps/web").mkdir(parents=True)
@@ -369,10 +370,12 @@ def test_release_record_writer_emits_backend_only_evidence_contract(tmp_path, mo
         "canary": {"status": "verified", "source_reconciliation": "verified",
             "financial_write_routes": 0, "brokerage_authority": "none",
             "friend_invitations": "disabled"}}
+    names = expected_snapshot_tables(pre_migration_omissions()) or ()
+    tables = {name: {"count": 0, "rows_sha256": "0" * 64} for name in names}
     dry = {
-        "before": {"pre_migration_omissions": pre_migration_omissions()},
-        "after": {"pre_migration_omissions": pre_migration_omissions()},
-        "table_deltas": {},
+        "before": {"tables": tables, "pre_migration_omissions": pre_migration_omissions()},
+        "after": {"tables": copy.deepcopy(tables), "pre_migration_omissions": pre_migration_omissions()},
+        "table_deltas": {name: 0 for name in names},
     }
     receipt_path, dry_path, output = (tmp_path / name for name in ("receipt.json", "dry.json", "record.json"))
     receipt_path.write_text(json.dumps(receipt)); dry_path.write_text(json.dumps(dry))
