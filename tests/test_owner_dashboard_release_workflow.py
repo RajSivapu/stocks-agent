@@ -1,4 +1,5 @@
 from pathlib import Path
+import hashlib
 import json
 import re
 import shutil
@@ -14,6 +15,18 @@ def test_protected_release_and_recovery_are_valid_workflow_yaml():
     ):
         workflow = yaml.safe_load((Path(".github/workflows") / name).read_text())
         assert workflow["jobs"]
+
+
+def test_protected_release_pins_the_supabase_database_root_ca():
+    workflow = yaml.safe_load(Path(".github/workflows/owner-dashboard-release.yml").read_text())
+    release = workflow["jobs"]["release"]
+    assert release["env"]["PGSSLROOTCERT"] == (
+        "${{ github.workspace }}/config/supabase-prod-ca-2021.crt"
+    )
+    certificate = Path("config/supabase-prod-ca-2021.crt").read_bytes()
+    assert hashlib.sha256(certificate).hexdigest() == (
+        "700723581420dd1ac98fd7e9ac529f0ef210eadcaf87fc868a3ad7d114c2f3b7"
+    )
 
 
 def test_ci_fetches_the_audited_baseline_history():

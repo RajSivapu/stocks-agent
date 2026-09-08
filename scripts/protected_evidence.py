@@ -233,7 +233,8 @@ READ_TABLES = (
 
 
 class PostgresReadOnlySource:
-    def __init__(self, database_url: str, project_ref: str, *, isolated_guard: bool = False, production_project_ref: str | None = None):
+    def __init__(self, database_url: str, project_ref: str, *, isolated_guard: bool = False,
+                 production_project_ref: str | None = None, allow_missing_tables: bool = False):
         parsed = urlparse(database_url)
         require(bool(re.fullmatch(r"[a-z0-9]{20}", project_ref)), "exact database project identity is required")
         user = unquote(parsed.username or "")
@@ -248,7 +249,9 @@ class PostgresReadOnlySource:
         self._url = database_url
         self.project_ref = project_ref
         self.isolated_guard = isolated_guard
+        self.allow_missing_tables = allow_missing_tables
         self.connection = None
+        self._read_tables: tuple[str, ...] = ()
 
     def __enter__(self):
         try:
@@ -261,9 +264,18 @@ class PostgresReadOnlySource:
                 FROM pg_catalog.pg_roles WHERE rolname=current_user""")[0]
             require(row["role"] == READER and row["read_only"] == "on" and not row["rolsuper"] and not row["rolbypassrls"]
                     and row["server"] and row["database"], "queried database identity is not a restricted read-only source")
+            readable_tables = []
             for table in READ_TABLES:
+                presence = self.query("SELECT to_regclass(%s) IS NOT NULL AS present", (f"public.{table}",))
+                require(len(presence) == 1 and type(presence[0].get("present")) is bool,
+                        "release table identity is unavailable")
+                if not presence[0]["present"]:
+                    require(self.allow_missing_tables, "release table is missing")
+                    continue
                 privileges = self.query("SELECT has_table_privilege(current_user,%s,'SELECT') AS readable,has_table_privilege(current_user,%s,'INSERT,UPDATE,DELETE,TRUNCATE,TRIGGER') AS writable", (f"public.{table}", f"public.{table}"))[0]
                 require(privileges["readable"] is True and privileges["writable"] is False, "read-only database source lacks SELECT or has write authority")
+                readable_tables.append(table)
+            self._read_tables = tuple(readable_tables)
             self._identity = {"project_ref": self.project_ref, "connection_id": hashlib.sha256(f"{row['server']}:{row['port']}/{row['database']}".encode()).hexdigest(),
                               "read_only": True, "isolated_guard": self.isolated_guard}
             return self
@@ -306,7 +318,7 @@ class PostgresReadOnlySource:
         """Hash canonical full rows across every release write surface."""
         self.identity()
         tables = {}
-        for name in READ_TABLES:
+        for name in self._read_tables:
             rows = self.query(f"SELECT to_jsonb(t) AS row FROM public.{name} AS t ORDER BY to_jsonb(t)::text")
             canonical_rows = [json.dumps(row["row"], sort_keys=True, separators=(",", ":"), ensure_ascii=False) for row in rows]
             require(all(isinstance(value, str) for value in canonical_rows), "dry-run rows are malformed")

@@ -386,12 +386,89 @@ def test_protected_reader_rejects_incomplete_policy_table_privileges(monkeypatch
     def query(sql, params=()):
         if not params: return [{"role": evidence.READER, "read_only": "on", "rolsuper": False,
             "rolbypassrls": False, "server": "127.0.0.1", "port": 5432, "database": "postgres"}]
+        if "to_regclass" in sql:
+            return [{"present": True}]
         checked.append(params[0])
         return [{"readable": readable if params[0] == "public." + table else True,
                  "writable": writable if params[0] == "public." + table else False}]
     source.query = query
     with pytest.raises(RuntimeError, match="lacks SELECT or has write authority"): source.__enter__()
     assert "public." + table in checked and connection.closed
+
+
+def test_protected_dry_run_reader_records_only_tables_present_before_migration(monkeypatch):
+    from scripts import protected_evidence as evidence
+    missing = "market_reference_manifests"
+    class Connection:
+        closed = False
+        def execute(self, _sql): pass
+        def rollback(self): pass
+        def close(self): self.closed = True
+    connection = Connection()
+    monkeypatch.setattr(evidence.psycopg, "connect", lambda *a, **k: connection)
+    source = evidence.PostgresReadOnlySource(
+        f"postgresql://{evidence.READER}:password@db.{'p' * 20}.supabase.co:5432/postgres",
+        "p" * 20, allow_missing_tables=True,
+    )
+    def query(statement, params=()):
+        if "current_user AS role" in statement:
+            return [{"role": evidence.READER, "read_only": "on", "rolsuper": False,
+                "rolbypassrls": False, "server": "127.0.0.1", "port": 5432,
+                "database": "postgres"}]
+        if "to_regclass" in statement:
+            return [{"present": params[0] != "public." + missing}]
+        if "has_table_privilege" in statement:
+            return [{"readable": True, "writable": False}]
+        if "to_jsonb" in statement:
+            return []
+        raise AssertionError(statement)
+    source.query = query
+    with source:
+        snapshot = source.dry_run_snapshot()
+    assert missing not in snapshot["tables"]
+    assert set(snapshot["tables"]) == set(evidence.READ_TABLES) - {missing}
+
+
+def test_normal_protected_reader_rejects_a_missing_release_table(monkeypatch):
+    from scripts import protected_evidence as evidence
+    class Connection:
+        closed = False
+        def execute(self, _sql): pass
+        def close(self): self.closed = True
+    connection = Connection()
+    monkeypatch.setattr(evidence.psycopg, "connect", lambda *a, **k: connection)
+    source = evidence.PostgresReadOnlySource(
+        f"postgresql://{evidence.READER}:password@db.{'p' * 20}.supabase.co:5432/postgres",
+        "p" * 20,
+    )
+    def query(statement, params=()):
+        if "current_user AS role" in statement:
+            return [{"role": evidence.READER, "read_only": "on", "rolsuper": False,
+                "rolbypassrls": False, "server": "127.0.0.1", "port": 5432,
+                "database": "postgres"}]
+        if "to_regclass" in statement:
+            return [{"present": False}]
+        raise AssertionError(statement)
+    source.query = query
+    with pytest.raises(RuntimeError, match="release table is missing"):
+        source.__enter__()
+    assert connection.closed
+
+
+def test_candidate_dry_run_uses_the_pre_migration_reader_mode():
+    script = (release.ROOT / "scripts/collect_protected_dry_run_evidence.py").read_text()
+    assert "PostgresReadOnlySource(url, project_ref, allow_missing_tables=True)" in script
+
+
+def test_release_reader_scope_includes_existing_market_source_tables():
+    migration = (release.ROOT / "sql/migrations/20261015_release_reader_source_tables.sql").read_text()
+    for table in (
+        "market_source_items", "market_intelligence_run_items",
+        "market_source_item_provenance", "market_run_source_item_provenance",
+    ):
+        assert f"'{table}'" in migration
+    assert "GRANT SELECT ON public.%I TO stock_agent_release_reader" in migration
+    assert "REVOKE ALL ON public.%I FROM stock_agent_release_reader,stock_agent_release_reader_runtime" in migration
 
 
 def test_protected_workflow_passes_recoverable_prior_secret_values():

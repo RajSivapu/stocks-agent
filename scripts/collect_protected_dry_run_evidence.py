@@ -16,7 +16,7 @@ from scripts.protected_evidence import PostgresReadOnlySource
 def snapshot(url: str, project_ref: str) -> dict:
     # Separate read-only transactions are essential: a repeatable-read reader
     # cannot prove an after state from its own snapshot.
-    with PostgresReadOnlySource(url, project_ref) as source:
+    with PostgresReadOnlySource(url, project_ref, allow_missing_tables=True) as source:
         return source.dry_run_snapshot()
 
 

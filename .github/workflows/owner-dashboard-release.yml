@@ -26,6 +26,8 @@ jobs:
     environment: owner-dashboard-production
     runs-on: ubuntu-24.04
     timeout-minutes: 45
+    env:
+      PGSSLROOTCERT: ${{ github.workspace }}/config/supabase-prod-ca-2021.crt
     steps:
       - name: Authenticate exact reviewed main candidate without candidate code
         id: candidate
