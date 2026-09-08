@@ -381,8 +381,9 @@ V1-C6 is reopened and the release remains no-go for trusted use.
    evidence and the September 11 Friday evidence.
 4. Execute the approved market-wide discovery implementation plan and pass its local capability,
    safety, calendar, recovery, and capacity gates.
-5. Complete exact-candidate Astra review, protected-main CI, protected backend release, fresh direct
-   native Sites observation with authenticated live-file parity, and normal scheduled discovery receipts.
+5. Preserve the CLEAN Sol and flagship reviews at exact executable code `f7e8236`; complete
+   protected-main CI, protected backend release, fresh direct native Sites observation with
+   authenticated live-file parity, and normal scheduled discovery receipts.
 6. Close V1-C2 through V1-C6 and the active V1 goal only when their own receipt gates pass.
 
 ## Site-only UI releases — completed 2026-09-06

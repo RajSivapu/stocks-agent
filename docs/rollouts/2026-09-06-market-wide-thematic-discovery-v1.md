@@ -1,7 +1,7 @@
 # Market-Wide Thematic Discovery V1 — Release Candidate Record
 
-Status: **Tasks 1–10 are complete locally; exact-candidate review, protected release, and normal
-scheduled receipts remain pending.**
+Status: **Implementation and exact-code review are complete locally; protected release, native Site
+readback, and normal scheduled receipts remain pending.**
 
 This record defines the V1-C3 market-wide release boundary. It does not authorize deployment,
 provider collection, Telegram delivery, schedule changes, brokerage execution, Alert V3, or any
@@ -11,8 +11,9 @@ production mutation. Production checkpoints remain open until the evidence below
 
 - Plan base: `17cbe10` on `origin/main`.
 - Locally reviewed Tasks 1–10 boundary: `18386b5c76c7a7aa8b3eeda870b12d3aba2399e1`.
-- Local Task 11 release-candidate identity: the commit containing this record. Its exact SHA must be
-  captured in the independent review, protected CI, and release receipts.
+- Final reviewed executable-code boundary: `f7e823680d406b3bcfd4832352405dd16937005c`.
+- The release-candidate commit adds only the reconciled status records after that boundary. Its exact
+  SHA must be captured in protected CI and release receipts.
 - Product boundary: owner-only, suggestion-only, brokerage-free, and zero incremental cost.
 - Market claim: bounded cross-sector discovery. `complete_market_coverage` is always `false`.
 - Alert V3 remains disabled and shadow-only.
@@ -49,6 +50,14 @@ bundle checks passed. That gate contains **2,030 passing checks**. It directly c
 official-source research lineage, honest empty reports, quiet intraday terminal outcomes,
 credential-isolated release subprocesses, durable preparation evidence before planning/capture, and
 local Site package/protected-build parity without treating copied JSON as connector proof.
+
+The final reviewed code boundary `f7e8236` passed the consolidated gate with Python 1,543 tests,
+3 skipped and 4 credentialed tests deselected, Node 71, Deno 334, package tests 7 + 53, and
+Playwright 24 with 1 skipped. Typecheck, lint, license, production build, and bundle checks passed.
+That gate contains **2,032 passing checks**. Sol replayed the planned-window, GDELT-inflation, and
+non-GDELT plan-inflation attacks; all rejected. Sol and the independent flagship review returned
+CLEAN on the exact code boundary, including producer/verifier capacity agreement in all four phases.
+This local evidence does not close protected release, native Site, or scheduled receipt gates.
 
 ## Additive migration boundary
 

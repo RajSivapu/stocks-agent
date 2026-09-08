@@ -40,6 +40,13 @@ An owner-only personal stock agent that uses zero-incremental-cost data sources,
   Deno 334, package tests 7 + 53, and Playwright 24; 3 Python and 1 Playwright tests skipped, with
   4 credentialed database tests intentionally deselected; typecheck, lint, license, production
   build, and bundle checks also passed
+- [x] Final exact-code gate at `f7e8236`: **2,032 checks** — Python 1,543, Node 71, Deno 334,
+  package tests 7 + 53, and Playwright 24; 3 Python and 1 Playwright tests skipped, with 4
+  credentialed database tests intentionally deselected; typecheck, lint, license, production build,
+  and bundle checks passed
+- [x] Sol attack replay and independent flagship review returned CLEAN on exact code `f7e8236`;
+  planned-window, GDELT-inflation, and non-GDELT plan-inflation attacks reject, and all four phase
+  capacities match the producer
 - [x] Honest empty morning/post-market reports and receipt-bound quiet intraday `no_trigger`
   outcomes close without fabricated source, policy, report, or Telegram identifiers
 - [x] Successful optional official sources can support research candidates while required baseline
@@ -48,15 +55,16 @@ An owner-only personal stock agent that uses zero-incremental-cost data sources,
   preparation evidence exists before fallible planning/capture; the local Site package comparator binds the
   exact candidate package to the protected build without claiming connector provenance
 - [ ] Next existing scheduled-chain receipt
-- [ ] Complete exact-candidate review, protected backend release, separate native Sites publication
-  and readback, and normal scheduled V1-C3 capability proof
+- [ ] Complete protected backend release, separate native Sites publication and readback, and normal
+  scheduled V1-C3 capability proof
 
 ## September 8 closeout sequence
 
 The implementation is complete locally. The remaining work is operational and must occur in this
 order on one exact reviewed candidate:
 
-1. Obtain clean Sol and GPT-6 Astra re-reviews of the exact candidate SHA.
+1. **Complete:** Sol and the independent flagship reviewer returned CLEAN on exact executable code
+   `f7e8236`; the release-candidate child changes status records only.
 2. Push the reviewed head, pass exact-head CI, merge it to protected `main`, and pass exact-main CI.
 3. Run the manual protected backend release and verify the immutable migration, function,
    runtime-role, managed-secret, canary, artifact, and recovery receipts.
@@ -128,8 +136,9 @@ order on one exact reviewed candidate:
   honestly-empty-run acceptance gates
 - [x] Synchronize the official published NYSE 2026–2028 holidays and early closes across Python,
   gateway session logic, and dashboard freshness; fail closed after maintained coverage
-- [ ] Complete exact-candidate Astra review, exact-head and exact-main CI, protected backend release,
-  native Sites publication/readback, backend recovery capture, and normal scheduled capability receipts
+- [x] Complete exact-code Sol and flagship review at `f7e8236`
+- [ ] Complete exact-head and exact-main CI, protected backend release, native Sites
+  publication/readback, backend recovery capture, and normal scheduled capability receipts
 - [ ] Close V1-C2 through V1-C6 and the active V1 goal only after each checkpoint has its own evidence
 - [ ] Review Alert V3 separately in shadow/canary mode after V1 closes; do not arm a new schedule as
   part of market-wide discovery
