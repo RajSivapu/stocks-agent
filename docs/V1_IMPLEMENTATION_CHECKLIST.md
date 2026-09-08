@@ -36,9 +36,38 @@ An owner-only personal stock agent that uses zero-incremental-cost data sources,
   package tests 7 + 53, and Playwright 24; 3 Python and 1 Playwright tests skipped, with 4
   credentialed database tests intentionally deselected; typecheck, lint, license, build, and bundle
   checks also passed
+- [x] September 8 release-hardening gate passed: **2,013 checks** — Python 1,524, Node 71,
+  Deno 334, package tests 7 + 53, and Playwright 24; 3 Python and 1 Playwright tests skipped, with
+  4 credentialed database tests intentionally deselected; typecheck, lint, license, production
+  build, and bundle checks also passed
+- [x] Honest empty morning/post-market reports and receipt-bound quiet intraday `no_trigger`
+  outcomes close without fabricated source, policy, report, or Telegram identifiers
+- [x] Successful optional official sources can support research candidates while required baseline
+  sources still fail closed and optional failures remain visible
+- [x] Static build and Supabase CLI subprocesses receive strict environment allowlists; durable
+  preparation evidence exists before fallible planning/capture; the native Site receipt binds the
+  downloaded source archive, exact candidate build, independently read live bytes, and retained
+  rollback version
 - [ ] Next existing scheduled-chain receipt
 - [ ] Complete exact-candidate review, protected backend release, separate native Sites publication
   and readback, and normal scheduled V1-C3 capability proof
+
+## September 8 closeout sequence
+
+The implementation is complete locally. The remaining work is operational and must occur in this
+order on one exact reviewed candidate:
+
+1. Obtain clean Sol and GPT-6 Astra re-reviews of the exact candidate SHA.
+2. Push the reviewed head, pass exact-head CI, merge it to protected `main`, and pass exact-main CI.
+3. Run the manual protected backend release and verify the immutable migration, function,
+   runtime-role, managed-secret, canary, artifact, and recovery receipts.
+4. Publish the same candidate with the owner-scoped native Sites connector. Keep the previous
+   version rollback-eligible and verify the downloaded source archive plus every served live file
+   against the exact local build.
+5. Wait for the next existing normal scheduled run. Do not create another run for evidence. Accept
+   either the complete report/publication chain or the exact receipt-backed quiet intraday
+   `no_trigger` chain.
+6. Close the operational and V1-C3 capability receipts, then close this checklist and the V1 goal.
 
 ## Completed implementation areas
 

@@ -42,7 +42,11 @@ def test_static_release_build_never_returns_the_public_key(tmp_path):
             output = "build complete"
         return type("Result", (), {"returncode": 0, "stdout": output, "stderr": ""})()
 
-    receipt = build.build_static_release(PROJECT_REF, SITE_ORIGIN, tmp_path, runner)
+    receipt = build.build_static_release(
+        PROJECT_REF, SITE_ORIGIN, tmp_path, runner,
+        environment={"PATH": "/usr/bin", "POSTGRES_URL": "private-admin",
+                     "SUPABASE_SERVICE_ROLE_KEY": "private-service"},
+    )
     assert receipt["status"] == "verified"
     assert receipt["site_origin"] == SITE_ORIGIN
     assert receipt["static_directory"] == "dist"
@@ -50,6 +54,30 @@ def test_static_release_build_never_returns_the_public_key(tmp_path):
     assert public_key not in json.dumps(receipt)
     build_call = next(options for command, options in commands if command[:2] == ["npm", "run"])
     assert build_call["env"]["VITE_SUPABASE_PUBLISHABLE_KEY"] == public_key
+    assert "POSTGRES_URL" not in build_call["env"]
+    assert "SUPABASE_SERVICE_ROLE_KEY" not in build_call["env"]
+
+
+def test_preapproved_publishable_key_build_skips_supabase_cli(tmp_path):
+    built = tmp_path / "apps/web/dist"; built.mkdir(parents=True)
+    (built / "index.html").write_text("site")
+    commands = []
+    def runner(command, **_options):
+        commands.append(command)
+        output = (json.dumps({"status": "verified", "file_count": 1,
+            "initial_js_gzip_bytes": 10, "hashes": [{"file": "index.html", "sha256": "a" * 64}]})
+            if command[0] == "node" else "ok")
+        return type("Result", (), {"returncode": 0, "stdout": output, "stderr": ""})()
+
+    receipt = build.build_static_release(
+        PROJECT_REF, SITE_ORIGIN, tmp_path, runner,
+        publishable_key="sb_publishable_123456789012345678901234567890",
+        candidate_sha="a" * 40,
+    )
+
+    assert not any("supabase@" in " ".join(command) for command in commands)
+    assert receipt["candidate_sha"] == "a" * 40
+    assert receipt["files"]["index.html"]
 
 
 def test_release_refuses_symlinks_in_static_output(tmp_path):

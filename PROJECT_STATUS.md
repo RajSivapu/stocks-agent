@@ -26,6 +26,12 @@ skipped, with typecheck, lint, license, build, and bundle checks green. The fina
 passed Python 1,509 passed/3 skipped/4 credentialed tests deselected, Node 71, Deno 333, package
 tests 7 + 53, and Playwright 24 passed/1 skipped; typecheck, lint, license, build, and bundle checks
 also passed. That gate contains 1,997 passing checks. The final release-candidate
+hardening gate then passed Python 1,524 passed/3 skipped/4 credentialed tests deselected, Node 71,
+Deno 334, package tests 7 + 53, and Playwright 24 passed/1 skipped; typecheck, lint, license,
+production build, and bundle checks also passed. That gate contains **2,013 passing checks** and
+covers optional official-source lineage, honest empty reports, quiet intraday terminal outcomes,
+credential-isolated child processes, pre-mutation recovery state, and exact Site archive/live-byte
+parity with a retained rollback version. The final release-candidate
 identity is the commit containing this record. Its independent exact-SHA reviews, protected backend
 CI/release identities, separate native Site receipt, and normal scheduled receipts remain open.
 

@@ -106,10 +106,25 @@ def test_release_uses_latest_review_per_reviewer_before_exposing_production_secr
         "- name: Authenticate exact reviewed main candidate without candidate code", 1
     )[1].split("- uses: actions/checkout", 1)[0]
     assert "group_by(.user.id)" in trust
-    assert 'max_by(.submitted_at // "")' in trust
+    assert 'max_by([.submitted_at // "", .id])' in trust
     assert 'all(.state != "CHANGES_REQUESTED")' in trust
     assert '.state == "APPROVED"' in trust
     assert "SUPABASE_ACCESS_TOKEN" not in trust
+
+
+def test_candidate_dry_run_and_site_build_steps_do_not_receive_privileged_secrets():
+    workflow = yaml.safe_load(Path(".github/workflows/owner-dashboard-release.yml").read_text())
+    steps = {row.get("name"): row for row in workflow["jobs"]["release"]["steps"]}
+    privileged = {"SUPABASE_ACCESS_TOKEN", "RELEASE_RECOVERY_KEY", "POSTGRES_URL",
+        "SUPABASE_SERVICE_ROLE_KEY", "DASHBOARD_PRIOR_MANAGED_SECRETS_JSON"}
+    dry = steps["Derive protected no-side-effect evidence around the real candidate dry-run"]
+    build = steps["Build candidate Site assets without privileged production credentials"]
+
+    assert privileged.isdisjoint(dry.get("env", {}))
+    assert privileged.isdisjoint(build.get("env", {}))
+    assert "--static-build-receipt" in steps[
+        "Execute protected deployment with encrypted component recovery"
+    ]["run"]
 
 
 def test_protected_workflows_use_the_same_exact_main_ci_trust_contract():
@@ -197,6 +212,8 @@ def test_release_record_writer_emits_backend_only_evidence_contract(tmp_path, mo
         "captured_at": "2026-09-08T12:00:00Z", "ciphertext_sha256": "d" * 64}
     receipt = {"candidate_sha": "a" * 40, "deployment_outcome": "succeeded",
         "migrations": [], "migration_application": {}, "functions": [],
+        "static_assets": {"status": "verified", "candidate_sha": "a" * 40,
+            "files": {"index.html": "f" * 64}},
         "component_readbacks": [{"component": name, "prior": {"exists": True}}
             for name in ("market-briefing-gateway", "owner-dashboard-api", "telegram-portfolio")],
         "backend_evidence": {"manifest_sha256": "b" * 64,
@@ -377,6 +394,8 @@ def test_release_and_recovery_use_separate_safe_actions_concurrency_boundaries()
     finalizer = Path("scripts/finalize_protected_release.py").read_text()
     assert "finalize_protected_release.py" in workflow and "state=success" in finalizer
     assert workflow.index("Upload immutable release record") < workflow.index("Mark candidate deployment successful")
+    assert workflow.index("Mark candidate deployment successful") < workflow.index("Restore changed components if any post-deploy evidence step failed")
+    assert workflow.index("Restore changed components if any post-deploy evidence step failed") < workflow.index("Mark candidate deployment failed after protected restoration")
     assert "steps.deployment.outputs.required" not in recovery
     assert "Restore encrypted changed-component journal" in recovery
 

@@ -106,6 +106,47 @@ Deno.test("report payload verifies canonical hashes and derived UUID", () => {
     parseRecordReportPayload({ ...report(), id: crypto.randomUUID() })
   );
 });
+
+Deno.test("receipt-backed empty V2 packet produces a canonical suppressed report", () => {
+  const packet = {
+    action_candidates: [],
+    contract_version: 2,
+    coverage: { complete_market_coverage: false, mode: "bounded" },
+    evidence: [],
+    execution_allowed: false,
+    limitations: [],
+    observed_at: "2026-09-02T17:00:00.000Z",
+    omissions: [],
+    policy_version: 1,
+    research_candidates: [],
+    run_id: "00000000-0000-4000-8000-000000000011",
+  } as EvidencePacketV2;
+  const value = report("weekly");
+  value.report.policy_decision_ids = [];
+  value.report.source_ids = [];
+  value.report_hash = sha256Hex(canonicalJson(value.report));
+  const packetHash = sha256Hex(canonicalJson(packet));
+  value.idempotency_key = sha256Hex(
+    `v2:${value.kind}:${value.market_date}:${packetHash}:${value.report_hash}`,
+  );
+  value.id = reportIdFromKey(value.idempotency_key);
+
+  const delivery = renderReportDelivery(value, [], OPTIONS, packet);
+
+  assertEquals(delivery.status, "suppressed");
+  assertEquals(delivery.reason, "not_actionable");
+  assertEquals(delivery.payload?.report.source_ids, []);
+  assertEquals(delivery.payload?.report.policy_decision_ids, []);
+  assert(
+    delivery.payload?.report.full_markdown.includes("0 research candidate(s)") ===
+      false,
+    "empty report should retain coverage without inventing a candidate",
+  );
+  assert(
+    delivery.payload?.report.full_markdown.includes("Coverage:") === true,
+    "empty report omitted bounded coverage",
+  );
+});
 Deno.test("weekly monthly theme links address generated canonical report and omit caller URL data", () => {
   for (const kind of ["weekly", "monthly", "theme"] as const) {
     const rendered = renderReportDelivery(report(kind), [decision()], OPTIONS);

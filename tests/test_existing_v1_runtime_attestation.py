@@ -10,6 +10,35 @@ import yaml
 
 
 PROJECT_REF = "p" * 20
+SITE_URL = "https://example.chatgpt.site"
+API_URL = f"https://{PROJECT_REF}.supabase.co/functions/v1/owner-dashboard-api"
+SITE_FILES = {
+    "index.html": b'<script src="/assets/index.js"></script>',
+    "assets/index.js": f'const project="{PROJECT_REF}";const api="{API_URL}";'.encode(),
+    "_headers": b"/*\n  X-Content-Type-Options: nosniff\n",
+}
+SITE_SOURCE_FILES = {
+    ".openai/hosting.json": json.dumps({
+        "project_id": "appgprj_test",
+        "static": {"directory": "dist", "not_found_handling": "single-page-application"},
+    }).encode(),
+    "apps/web/src/main.tsx": b"export const app = 'v1';\n",
+    "packages/dashboard-contracts/src/index.ts": b"export type Status = 'ready';\n",
+    "package.json": b'{"private":true}\n',
+    "package-lock.json": b'{"lockfileVersion":3}\n',
+}
+
+
+def _tree(files: dict[str, bytes]) -> str:
+    digest = hashlib.sha256()
+    for path, raw in sorted(files.items()):
+        digest.update(path.encode() + b"\0" + raw + b"\0")
+    return digest.hexdigest()
+
+
+def _site_live_reader(url: str) -> bytes:
+    path = "index.html" if url == SITE_URL + "/" else url.removeprefix(SITE_URL + "/")
+    return SITE_FILES[path]
 
 
 def _git(repo: Path, *args: str) -> str:
@@ -25,20 +54,14 @@ def _site_repo(tmp_path: Path) -> tuple[Path, str, str]:
     _git(repo, "init", "-q")
     _git(repo, "config", "user.email", "test@example.com")
     _git(repo, "config", "user.name", "Test")
-    files = {
-        ".openai/hosting.json": json.dumps({
-            "project_id": "appgprj_test",
-            "static": {"directory": "dist", "not_found_handling": "single-page-application"},
-        }),
-        "apps/web/src/main.tsx": "export const app = 'v1';\n",
-        "packages/dashboard-contracts/src/index.ts": "export type Status = 'ready';\n",
-        "package.json": '{"private":true}\n',
-        "package-lock.json": '{"lockfileVersion":3}\n',
-    }
-    for name, contents in files.items():
+    for name, contents in SITE_SOURCE_FILES.items():
         path = repo / name
         path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(contents)
+        path.write_bytes(contents)
+    for name, contents in SITE_FILES.items():
+        path = repo / "dist" / name
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(contents)
     _git(repo, "add", ".")
     _git(repo, "commit", "-qm", "site source")
     source_sha = _git(repo, "rev-parse", "HEAD")
@@ -50,13 +73,13 @@ def _site_repo(tmp_path: Path) -> tuple[Path, str, str]:
 
 def _site_receipt(source_sha: str) -> dict[str, object]:
     return {
-        "format": "stocks-native-sites-attestation-v1",
+        "format": "stocks-native-sites-release-v2",
         "captured_at": datetime.now(UTC).isoformat(timespec="seconds").replace("+00:00", "Z"),
         "trust_domain": "codex-native-sites-connector",
         "site": {
             "project_id": "appgprj_test",
             "status": "active",
-            "live_url": "https://example.chatgpt.site",
+            "live_url": SITE_URL,
             "latest_version_number": 5,
             "current_user_role": "owner",
             "access_mode": "custom",
@@ -64,13 +87,22 @@ def _site_receipt(source_sha: str) -> dict[str, object]:
             "external_visitor_count": 0,
             "allowed_group_count": 0,
         },
+        "retained_prior_version": {
+            "id": "appgver_prior", "version_number": 4,
+            "deployment_id": "appgdep_prior",
+            "archive_content_hash": "sha256:" + "d" * 64,
+            "rollback_eligible": True,
+        },
         "active_version": {
             "id": "appgver_test",
             "version_number": 5,
             "source_commit_sha": source_sha,
             "archive_format": "tar",
             "archive_content_hash": "sha256:" + "a" * 64,
-            "file_count": 15,
+            "archive_files": {path: hashlib.sha256(raw).hexdigest()
+                for path, raw in SITE_SOURCE_FILES.items()},
+            "archive_tree_sha256": _tree(SITE_SOURCE_FILES),
+            "file_count": len(SITE_SOURCE_FILES),
             "size_bytes": 512000,
         },
         "active_deployment": {
@@ -78,19 +110,22 @@ def _site_receipt(source_sha: str) -> dict[str, object]:
             "version_id": "appgver_test",
             "type": "publish",
             "status": "succeeded",
-            "url": "https://example.chatgpt.site",
+            "url": SITE_URL,
+        },
+        "candidate_build": {
+            "candidate_sha": source_sha,
+            "build_sha256": _tree(SITE_FILES),
+            "files": {path: hashlib.sha256(raw).hexdigest() for path, raw in SITE_FILES.items()},
         },
         "live_bundle": {
-            "html_sha256": "b" * 64,
-            "script_assets": [{
-                "url": "https://example.chatgpt.site/assets/index-test.js",
-                "sha256": "c" * 64,
-                "bytes": 100,
-            }],
+            "files": [{
+                "path": path,
+                "url": SITE_URL + ("/" if path == "index.html" else "/" + path),
+                "sha256": hashlib.sha256(raw).hexdigest(),
+                "bytes": len(raw),
+            } for path, raw in SITE_FILES.items() if not path.startswith("_")],
             "supabase_project_ref": PROJECT_REF,
-            "dashboard_api_url": f"https://{PROJECT_REF}.supabase.co/functions/v1/owner-dashboard-api",
-            "project_ref_present": True,
-            "api_url_present": True,
+            "dashboard_api_url": API_URL,
         },
     }
 
@@ -99,7 +134,10 @@ def test_native_site_receipt_accepts_docs_only_descendant_and_rejects_web_drift(
     from scripts.attest_existing_v1_runtime import validate_native_site_receipt
 
     repo, source_sha, candidate_sha = _site_repo(tmp_path)
-    verified = validate_native_site_receipt(_site_receipt(source_sha), candidate_sha, PROJECT_REF, repo)
+    verified = validate_native_site_receipt(
+        _site_receipt(source_sha), candidate_sha, PROJECT_REF, repo,
+        live_reader=_site_live_reader,
+    )
     assert verified["status"] == "verified"
     assert verified["version_number"] == 5
     assert verified["source_commit_sha"] == source_sha
@@ -110,6 +148,7 @@ def test_native_site_receipt_accepts_docs_only_descendant_and_rejects_web_drift(
     with pytest.raises(RuntimeError, match="Site source differs"):
         validate_native_site_receipt(
             _site_receipt(source_sha), _git(repo, "rev-parse", "HEAD"), PROJECT_REF, repo,
+            live_reader=_site_live_reader,
         )
 
 
@@ -120,7 +159,9 @@ def test_native_site_receipt_rejects_any_non_owner_access(tmp_path):
     receipt = _site_receipt(source_sha)
     receipt["site"]["external_visitor_count"] = 1
     with pytest.raises(RuntimeError, match="owner-only"):
-        validate_native_site_receipt(receipt, candidate_sha, PROJECT_REF, repo)
+        validate_native_site_receipt(
+            receipt, candidate_sha, PROJECT_REF, repo, live_reader=_site_live_reader,
+        )
 
 
 def test_native_site_receipt_rejects_stale_or_wrong_backend_binding(tmp_path):
@@ -130,12 +171,47 @@ def test_native_site_receipt_rejects_stale_or_wrong_backend_binding(tmp_path):
     stale = _site_receipt(source_sha)
     stale["captured_at"] = (datetime.now(UTC) - timedelta(hours=25)).isoformat().replace("+00:00", "Z")
     with pytest.raises(RuntimeError, match="fresh"):
-        validate_native_site_receipt(stale, candidate_sha, PROJECT_REF, repo)
+        validate_native_site_receipt(
+            stale, candidate_sha, PROJECT_REF, repo, live_reader=_site_live_reader,
+        )
 
     wrong_backend = _site_receipt(source_sha)
     wrong_backend["live_bundle"]["supabase_project_ref"] = "q" * 20
     with pytest.raises(RuntimeError, match="backend"):
-        validate_native_site_receipt(wrong_backend, candidate_sha, PROJECT_REF, repo)
+        validate_native_site_receipt(
+            wrong_backend, candidate_sha, PROJECT_REF, repo, live_reader=_site_live_reader,
+        )
+
+
+def test_native_site_receipt_rejects_forged_hashes_and_missing_rollback_version(tmp_path):
+    from scripts.attest_existing_v1_runtime import validate_native_site_receipt
+
+    repo, source_sha, candidate_sha = _site_repo(tmp_path)
+    forged = _site_receipt(source_sha)
+    forged["candidate_build"]["build_sha256"] = "0" * 64
+    forged["live_bundle"]["files"][0]["sha256"] = "1" * 64
+    with pytest.raises(RuntimeError, match="candidate build|live-bundle"):
+        validate_native_site_receipt(
+            forged, candidate_sha, PROJECT_REF, repo, live_reader=_site_live_reader,
+        )
+
+    missing_prior = _site_receipt(source_sha)
+    missing_prior["retained_prior_version"]["rollback_eligible"] = False
+    with pytest.raises(RuntimeError, match="prior version"):
+        validate_native_site_receipt(
+            missing_prior, candidate_sha, PROJECT_REF, repo, live_reader=_site_live_reader,
+        )
+
+
+def test_native_site_receipt_rejects_live_bytes_that_differ_from_candidate(tmp_path):
+    from scripts.attest_existing_v1_runtime import validate_native_site_receipt
+
+    repo, source_sha, candidate_sha = _site_repo(tmp_path)
+    with pytest.raises(RuntimeError, match="live bytes"):
+        validate_native_site_receipt(
+            _site_receipt(source_sha), candidate_sha, PROJECT_REF, repo,
+            live_reader=lambda _url: b"tampered",
+        )
 
 
 class FakeFunctionAdapter:

@@ -499,13 +499,15 @@ def test_candidate_dry_run_installs_dependencies_and_uses_only_protected_vite_va
         return type("Result", (), {"returncode": 0, "stdout": "", "stderr": ""})()
     receipt = deploy.run_protected_candidate_dry_run(
         project_ref=PROJECT_REF, owner_user_id=OWNER_ID, allowed_origin=ORIGIN, site_origin=ORIGIN,
-        candidate_sha="a" * 40, reviewed_sha="a" * 40, admin_url=ADMIN_URL, session_template=SESSION_TEMPLATE,
+        candidate_sha="a" * 40, reviewed_sha="a" * 40,
         publishable_key="sb_publishable_abcdefghijklmnopqrstuvwx", repo_root=root, runner=runner,
     )
     assert commands[0][0] == ["npm", "ci", "--ignore-scripts"]
     assert commands[1][1]["VITE_SUPABASE_URL"] == f"https://{PROJECT_REF}.supabase.co"
     assert commands[1][1]["VITE_DASHBOARD_API_URL"].endswith("/owner-dashboard-api")
     assert commands[1][1]["VITE_SUPABASE_PUBLISHABLE_KEY"].startswith("sb_publishable_")
+    assert "POSTGRES_URL" not in commands[0][1]
+    assert "SUPABASE_SERVICE_ROLE_KEY" not in commands[1][1]
     assert receipt["request_plan"]["telegram_mutations"] == 0
 
 

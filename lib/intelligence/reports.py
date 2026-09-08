@@ -199,12 +199,16 @@ def _research_catalog_markdown(packet: Mapping[str, object] | None) -> str:
     return rendered
 
 
-def _is_v2_research_only(packet: Mapping[str, object] | None) -> bool:
+def _is_v2_non_action(packet: Mapping[str, object] | None) -> bool:
     if packet is None or packet.get("contract_version") != 2:
         return False
     candidates = packet.get("research_candidates")
     actions = packet.get("action_candidates")
-    return isinstance(candidates, list) and bool(candidates) and actions == []
+    evidence = packet.get("evidence")
+    return (
+        isinstance(candidates, list) and actions == []
+        and (bool(candidates) or evidence == [])
+    )
 
 
 def build_report(value: ReportInput) -> MarketReport:
@@ -227,7 +231,8 @@ def build_report(value: ReportInput) -> MarketReport:
         raise ValueError("report text must be bounded")
     if value.kind == "urgent" and not (value.actionable_risk or value.material_thesis_change):
         raise ValueError("urgent report requires actionable risk or material thesis change")
-    if value.kind == "intraday" and not value.intraday_triggered:
+    v2_non_action = _is_v2_non_action(value.research_packet)
+    if value.kind == "intraday" and not value.intraday_triggered and not v2_non_action:
         raise ValueError("intraday report requires a trigger")
 
     source_ids = _sorted_unique(value.source_ids, "source_ids")
@@ -235,7 +240,13 @@ def build_report(value: ReportInput) -> MarketReport:
     comparison_ids = _sorted_unique(value.comparison_ids, "comparison_ids")
     if comparison_ids:
         raise ValueError("comparison_ids require a durable comparison ledger")
-    if not source_ids or (not policy_ids and not _is_v2_research_only(value.research_packet)):
+    empty_v2 = (
+        v2_non_action
+        and value.research_packet is not None
+        and value.research_packet.get("research_candidates") == []
+        and value.research_packet.get("evidence") == []
+    )
+    if (not source_ids and not empty_v2) or (not policy_ids and not v2_non_action):
         raise ValueError("report requires source and policy decision receipts")
     markdown = value.full_markdown.rstrip()
     research_catalog = _research_catalog_markdown(value.research_packet)

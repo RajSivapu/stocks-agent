@@ -307,9 +307,6 @@ export function parseRecordReportPayload(value: unknown): RecordReportPayload {
     intraday_triggered: reportRow.intraday_triggered === true,
     suggestion_only: true,
   };
-  if (report.source_ids.length === 0) {
-    throw new Error("report requires source and policy decision receipts");
-  }
   if (
     reportRow.suggestion_only !== true ||
     typeof reportRow.actionable_risk !== "boolean" ||
@@ -435,7 +432,6 @@ export function renderReportDelivery(
       if (
         finalEvaluations.length !== 0 || !researchPacket ||
         !isEvidencePacketV2(researchPacket) ||
-        researchPacket.research_candidates.length === 0 ||
         researchPacket.action_candidates.length !== 0
       ) throw new Error("REPORT_POLICY_MISMATCH");
       const evidenceIds = [
@@ -445,8 +441,14 @@ export function renderReportDelivery(
           ),
         ),
       ].sort();
+      const packetEvidenceIds = researchPacket.evidence.map((evidence) =>
+        evidence.item_id
+      ).sort();
       if (
-        canonicalJson(evidenceIds) !== canonicalJson(value.report.source_ids)
+        canonicalJson(evidenceIds) !== canonicalJson(value.report.source_ids) ||
+        canonicalJson(packetEvidenceIds) !== canonicalJson(evidenceIds) ||
+        (researchPacket.research_candidates.length === 0 &&
+          researchPacket.evidence.length !== 0)
       ) {
         throw new Error("REPORT_POLICY_MISMATCH");
       }
@@ -455,6 +457,9 @@ export function renderReportDelivery(
       v2ReportPacket = researchPacket;
       packetHash = sha256Hex(canonicalJson(researchPacket));
     } else {
+      if (value.report.source_ids.length === 0) {
+        throw new Error("REPORT_POLICY_MISMATCH");
+      }
       decisions = parseReportDecisions(
         finalEvaluations,
         finalEvaluations[0]?.run_id,

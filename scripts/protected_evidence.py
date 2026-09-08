@@ -370,6 +370,7 @@ class PostgresReadOnlySource:
             "events": f"""SELECT id::text AS id,run_id::text AS run_id,content_hash,{EVENT_CANONICAL_SQL} AS canonical FROM public.market_events WHERE run_id=%s::uuid""",
             "rankings": f"""SELECT id::text AS id,run_id::text AS run_id,event_id::text AS event_id,content_hash,{RANKING_CANONICAL_SQL} AS canonical FROM public.market_candidate_rankings WHERE run_id=%s::uuid""",
             "evaluation_publications": "SELECT id::text AS id,run_id::text AS run_id,status,phase,market_date::text AS market_date FROM public.market_publications WHERE run_id=%s::uuid",
+            "run_outcomes": RECOVERY_SQL["run_terminal_outcomes"] + " WHERE run_id=%s::uuid",
             "origins": "SELECT request_id::text AS request_id,run_id::text AS run_id,requested_packet_id::text AS requested_packet_id,scheduled_phase,market_date::text AS market_date,requested_kind,requested_report_id::text AS requested_report_id,requested_idempotency_key,requested_report_hash FROM public.market_report_request_origins WHERE run_id=%s::uuid",
             "quota": "SELECT q.id::text AS id,q.run_id::text AS run_id,q.provider,q.reserved_requests,COALESCE((SELECT sum(r.request_cost) FROM public.market_source_receipts r WHERE r.reservation_id=q.id),0)::int AS actual_requests FROM public.market_source_quota_reservations q WHERE q.run_id=%s::uuid",
         }
@@ -508,8 +509,13 @@ class GitHubProductionDataSource:
             if row["state"] in {"APPROVED", "CHANGES_REQUESTED", "DISMISSED"}:
                 reviewer = row.get("user", {}).get("id")
                 require(type(reviewer) is int and reviewer > 0, "reviewer identity is unavailable")
+                review_id = row.get("id")
+                require(type(review_id) is int and review_id > 0, "review identity is unavailable")
                 current = latest.get(reviewer)
-                if current is None or str(row.get("submitted_at") or "") > str(current.get("submitted_at") or ""):
+                row_order = (str(row.get("submitted_at") or ""), review_id)
+                current_order = ((str(current.get("submitted_at") or ""), current["id"])
+                                 if current is not None else None)
+                if current_order is None or row_order > current_order:
                     latest[reviewer] = row
         return list(latest.values())
 

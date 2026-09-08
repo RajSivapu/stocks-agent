@@ -128,6 +128,10 @@ def recover_components(transport: ComponentTransport, journal: dict, *, persist:
     """
     if journal.get("format") != 1:
         raise RuntimeError("complete release recovery journal is required")
+    if journal.get("status") == "preparing" and journal.get("components") == {}:
+        journal["status"] = "rolled_back"
+        persist(copy.deepcopy(journal))
+        return {"status": "rolled_back", "components": []}
     components = _journal_components(journal)
     errors = []
     for name in reversed(components):
@@ -343,10 +347,22 @@ def load_native_release_adapter(context: Mapping, *, repo_root: Path = ROOT):
 
 def run_native_release(adapter, context: Mapping, *, repo_root: Path, journal_path: Path, key: bytes,
                        migrate: Callable[[], None], checkpoint=lambda _name: None,
-                       verify_receipt: Callable[[dict], None] | None = None) -> dict:
+                       verify_receipt: Callable[[dict], None] | None = None,
+                       on_unjournaled_failure: Callable[[], None] = lambda: None) -> dict:
     """Shared production orchestration, including postdeployment failure recovery."""
     sink = EncryptedJournal(journal_path, key, retain=adapter.retain)
     def persist(journal): sink({**journal, "release_context": dict(context)})
+    # The durable lease is already recovery_required when this function starts.
+    # Retain a no-mutation phase before candidate planning, validation, or remote
+    # capture. Independent recovery can safely close it because no component
+    # mutation is reachable before execute_release replaces this phase.
+    try:
+        persist({"format": 1, "status": "preparing",
+                 "captured_at": datetime.now(timezone.utc).isoformat(), "components": {}})
+    except Exception:
+        on_unjournaled_failure()
+        raise
+    candidates = adapter.plan(dict(context))
     receipt = {}
     def verify():
         checkpoint("verification")
@@ -355,7 +371,7 @@ def run_native_release(adapter, context: Mapping, *, repo_root: Path, journal_pa
             verify_receipt(receipt)
         else:
             adapter.verify(receipt)
-    result = execute_release(adapter, adapter.plan(dict(context)), components=BACKEND_COMPONENTS,
+    result = execute_release(adapter, candidates, components=BACKEND_COMPONENTS,
         persist=persist, checkpoint=checkpoint, before_mutations=migrate, after_mutations=verify)
     recovery = (adapter.journal_receipt() if callable(getattr(adapter, "journal_receipt", None))
                 else {"format": 1, "encrypted": True})

@@ -367,9 +367,34 @@ def _verify_discovery_capability(receipt: Mapping[str, object]) -> VerificationR
         and len(completion_by_id) == len(completion_receipts),
         "discovery source receipt identities are invalid or duplicated",
     )
+    required_task_ids = {str(row["task_id"]) for row in required_tasks}
+    verified_receipt_ids: set[str] = set()
     required_receipt_ids: set[str] = set()
-    for due, task in planned_task_by_due.items():
-        if due == (reference_id, None):
+    for task_id in planned_ids:
+        task = tasks[task_id]
+        capability_id = task.get("capability_id")
+        capability = registry.get(str(capability_id))
+        expected_stage = ({
+            "universe": "reference",
+            "screener": "screen",
+            "quote": "quote",
+            "issuer_submissions": "enrich",
+            "filing_document": "enrich",
+        }.get(capability.query_kind, "signals") if capability is not None else None)
+        required = task_id in required_task_ids
+        label = "required capability" if required else "planned capability"
+        require(
+            capability is not None
+            and capability.enabled and capability.health in {"enabled", "degraded"}
+            and task.get("provider") == capability.provider
+            and task.get("query_kind") == capability.query_kind
+            and task.get("stage") == expected_stage
+            and (not required or task.get("state") == "succeeded"),
+            f"discovery {label} task does not match its registry or success state",
+        )
+        if capability_id == reference_id:
+            continue
+        if task.get("state") != "succeeded":
             continue
         result = task.get("result")
         checkpoint = result.get("checkpoint") if isinstance(result, Mapping) else None
@@ -384,7 +409,7 @@ def _verify_discovery_capability(receipt: Mapping[str, object]) -> VerificationR
         ))
         require(
             isinstance(receipt_id, str) and receipt_id == expected_receipt_id
-            and receipt_id not in required_receipt_ids
+            and receipt_id not in verified_receipt_ids
             and isinstance(checkpoint, Mapping)
             and checkpoint.get("cache_key") == parsed.get("cache_key")
             and isinstance(stored, Mapping)
@@ -437,9 +462,11 @@ def _verify_discovery_capability(receipt: Mapping[str, object]) -> VerificationR
             and stored.get("reservation_id") in reservations
             and reservations[stored["reservation_id"]].get("run_id") == run_id
             and reservations[stored["reservation_id"]].get("provider") == stored.get("provider"),
-            "discovery required capability lacks a parsed receipt-backed success",
+            f"discovery {label} lacks a parsed receipt-backed success",
         )
-        required_receipt_ids.add(receipt_id)
+        verified_receipt_ids.add(receipt_id)
+        if required:
+            required_receipt_ids.add(receipt_id)
         returned = stored.get("returned_count")
         accepted = stored.get("accepted_count")
         duplicates = stored.get("duplicate_count")
@@ -529,6 +556,12 @@ def _verify_discovery_capability(receipt: Mapping[str, object]) -> VerificationR
                     and str(scoped_provenance.get("request_url", "")).startswith("https://"),
                     "discovery success_nonempty saved item provenance is invalid",
                 )
+
+    require(
+        required_receipt_ids <= verified_receipt_ids
+        and len(required_receipt_ids) == len(required_task_ids) - 1,
+        "discovery required capability receipt coverage is incomplete",
+    )
 
     packet_evidence = packet.get("evidence")
     research = packet.get("research_candidates")
@@ -693,7 +726,7 @@ def _verify_discovery_capability(receipt: Mapping[str, object]) -> VerificationR
                 and evidence["source_identity"].get("upstream_item_id") == item.get("upstream_item_id")
                 and evidence["source_identity"].get("receipt_id") == receipt_ids.get(item_id)
                 and receipt_ids.get(item_id) == current_receipt_id
-                and current_receipt_id in required_receipt_ids
+                and current_receipt_id in verified_receipt_ids
                 and item.get("source_receipt_id") in persisted_receipts,
                 "discovery research source lineage is invalid",
             )
@@ -993,6 +1026,68 @@ def verify_scheduled(rows: Mapping, run_id: str, deployed: datetime, now: dateti
     evaluation_publication = one([row for row in rows["evaluation_publications"] if row["id"] == evaluation["response"]["publication_id"]], "evaluation publication")
     require(UUID.fullmatch(evaluation_publication["id"]) and evaluation_publication["run_id"] == run_id and evaluation_publication["phase"] == phase
             and evaluation_publication["market_date"] == market_date and evaluation_publication["status"] == "suppressed", "scheduled evaluation publication mismatch")
+    run_outcomes = rows.get("run_outcomes")
+    require(isinstance(run_outcomes, list), "scheduled terminal outcome evidence is missing")
+    if run_outcomes:
+        outcome = one(run_outcomes, "terminal outcome")
+        response = evaluation.get("response")
+        research = packet["packet"].get("research_candidates")
+        source_ids = sorted({
+            evidence["item_id"]
+            for candidate in research if isinstance(candidate, Mapping)
+            for evidence in candidate.get("evidence", []) if isinstance(evidence, Mapping)
+        }) if isinstance(research, list) else None
+        expected_outcome = {"run_id": run_id, "outcome": "no_trigger", "duplicate": False}
+        require(
+            phase == "intraday" and run.get("telegram_message_ids") == []
+            and outcome.get("run_id") == run_id
+            and outcome.get("evaluation_request_id") == evaluation.get("request_id")
+            and outcome.get("outcome") == "no_trigger"
+            and start <= timestamp(outcome.get("created_at")) <= end
+            and isinstance(response, Mapping)
+            and response.get("run_id") == run_id
+            and response.get("publication_id") == evaluation_publication["id"]
+            and response.get("publication_status") == "suppressed"
+            and response.get("telegram_message_ids") == []
+            and response.get("evaluation_count") == 0
+            and response.get("policy_decision_ids") == []
+            and response.get("source_ids") == source_ids
+            and response.get("intelligence_packet") == {
+                "id": packet["id"], "content_hash": packet["packet_hash"],
+            }
+            and response.get("run_outcome") == expected_outcome
+            and rows["origins"] == [] and rows["reports"] == []
+            and rows["publications"] == [],
+            "scheduled quiet intraday outcome is incomplete or mismatched",
+        )
+        require(rows["quota"] and all(
+            row["run_id"] == run_id and UUID.fullmatch(row["id"])
+            and type(row["actual_requests"]) is int
+            and type(row["reserved_requests"]) is int
+            and 0 <= row["actual_requests"] <= row["reserved_requests"]
+            for row in rows["quota"]
+        ), "scheduled quota receipts are incomplete")
+        capability = verify_discovery_capability(rows)
+        return {
+            "run_id": run_id, "packet_id": packet["id"],
+            "packet_hash": packet["packet_hash"], "report_id": None,
+            "report_hash": None,
+            "stage_ids": {"collection": completion["completion_id"],
+                "packet": packet["id"], "evaluation": evaluation["request_id"],
+                "report": None, "publication": evaluation_publication["id"]},
+            "publication_key": None,
+            "publication_receipt": {"status": "no_trigger", "telegram_message_ids": []},
+            "discovery_capability": {"ok": capability.ok,
+                "required_capability_ids": list(capability.required_capability_ids),
+                "optional_failures": list(capability.optional_failures)},
+            "operational_receipt": {"status": "verified", "run_id": run_id,
+                "packet_id": packet["id"], "report_id": None,
+                "publication": "no_trigger"},
+            "capability_receipt": {"status": "verified", "checkpoint": "V1-C3",
+                "run_id": run_id,
+                "required_capability_ids": list(capability.required_capability_ids),
+                "optional_failures": list(capability.optional_failures)},
+        }
     origin = one(rows["origins"], "report origin")
     report_request = one([row for row in requests if row["request_id"] == origin["request_id"] and row["operation"] == "record_report" and row["run_id"] is None and row["status"] == "completed"], "report request")
     report = one([row for row in rows["reports"] if row["id"] == report_request["response"]["report_id"]], "report")
@@ -1041,7 +1136,8 @@ def verify_scheduled(rows: Mapping, run_id: str, deployed: datetime, now: dateti
 
 def verify_release(source: ReleaseDataSource, *, deployment_id: int, native_site_receipt: Mapping[str, object],
                    repo_root: Path = ROOT, static_root: Path = ROOT / "dist",
-                   clock: Callable[[], datetime] = lambda: datetime.now(timezone.utc)) -> dict[str, object]:
+                   clock: Callable[[], datetime] = lambda: datetime.now(timezone.utc),
+                   site_live_reader=None) -> dict[str, object]:
     require(not isinstance(source, Mapping) and isinstance(source, ReleaseDataSource), "protected production data source is required")
     try:
         now = clock()
@@ -1096,6 +1192,7 @@ def verify_release(source: ReleaseDataSource, *, deployment_id: int, native_site
         from scripts.verify_native_site_release import verify_native_site_release
         owner_site = verify_native_site_release(
             native_site_receipt, candidate, record["project_ref"], repo_root, now=now,
+            static_root=static_root, live_reader=site_live_reader,
         )
         require(record.get("dry_run") is False, "protected deployment dry-run authority must be false")
         dry = record["dry_run_evidence"]

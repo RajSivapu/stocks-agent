@@ -106,8 +106,10 @@ def main() -> int:
         prior = row.get("prior")
         if isinstance(prior, dict) and prior.get("exists") is True:
             prior["artifact_id"] = artifact_id
-    static_root = Path("dist")
-    files = {path.relative_to(static_root).as_posix(): hashlib.sha256(path.read_bytes()).hexdigest() for path in static_root.rglob("*") if path.is_file()}
+    static = receipt.get("static_assets")
+    if (not isinstance(static, dict) or static.get("candidate_sha") != args.candidate_sha
+            or not isinstance(static.get("files"), dict) or not static["files"]):
+        raise SystemExit("candidate static build receipt is incomplete")
     record = {
         "candidate_sha": args.candidate_sha, "reviewed_sha": args.reviewed_sha,
         "repository": args.repository, "project_ref": args.project_ref,
@@ -115,7 +117,7 @@ def main() -> int:
         "release_workflow_run_attempt": run_attempt,
         "pull_request_number": integer(args.pull_request_number), "deployment_id": integer(args.deployment_id),
         "migrations": receipt["migrations"], "migration_application": receipt["migration_application"], "functions": receipt["functions"],
-        "static_assets": {"candidate_sha": args.candidate_sha, "source_sha256": tree(Path("apps/web")), "files": files},
+        "static_assets": copy.deepcopy(static),
         "dry_run": False, "dry_run_evidence": dry, "canaries": {"owner": 200, "anonymous": 401, "non_owner": 403},
         "deployment_outcome": "succeeded",
         "component_readbacks": component_readbacks,

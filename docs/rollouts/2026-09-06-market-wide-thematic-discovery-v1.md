@@ -42,6 +42,13 @@ only and does not close any protected release or scheduled-run checkpoint. The f
 gate passed Python 1,509 tests with 3 skipped and 4 credentialed tests deselected, Node 71, Deno 333,
 package tests 7 + 53, and Playwright 24 with 1 skipped; typecheck, lint, license, build, and bundle
 also passed. That final gate contains 1,997 passing checks.
+After the final Sol/Astra findings were corrected, the September 8 release-hardening gate passed
+Python 1,524 tests with 3 skipped and 4 credentialed tests deselected, Node 71, Deno 334, package
+tests 7 + 53, and Playwright 24 with 1 skipped. Typecheck, lint, license, production build, and
+bundle checks passed. That gate contains **2,013 passing checks**. It directly covers optional
+official-source research lineage, honest empty reports, quiet intraday terminal outcomes,
+credential-isolated release subprocesses, durable preparation evidence before planning/capture, and
+native Site downloaded-archive plus live-byte parity with a retained prior version.
 
 ## Additive migration boundary
 
@@ -126,7 +133,8 @@ Known limits are part of the release contract:
    and protected runtime configuration. Retain the encrypted backend recovery journal and verify its
    immutable artifact, readbacks, and owner/anonymous/non-owner canaries.
 4. Publish the exact same candidate through the native owner-scoped Sites connector. Preserve the
-   previous active version for rollback and validate the fresh native Sites receipt with
+   previous active version for rollback, independently read every served file, compare the
+   downloaded source archive and live bytes to the exact candidate/build, and validate the fresh native Sites receipt with
    `scripts/verify_native_site_release.py`. The backend release record must keep `owner_site` pending;
    only this separate receipt can verify that evidence class.
 5. Wait for the existing normal schedule. Do not trigger collector, provider, Telegram, or another

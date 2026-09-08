@@ -30,7 +30,7 @@ from scripts.provision_dashboard_runtime_role import (
     provision_dashboard_role,
     runtime_url,
 )
-from scripts.build_owner_dashboard_static import build_static_release
+from scripts.build_owner_dashboard_static import build_static_release, _child_environment
 from scripts.verify_owner_dashboard_role import verify_dashboard_role
 from scripts.verify_owner_dashboard_deployment import (
     collect_source_receipts,
@@ -375,12 +375,10 @@ def construct_protected_release_requests(project_ref: str, candidate_sha: str, m
 
 def run_protected_candidate_dry_run(
     *, project_ref: str, owner_user_id: str, allowed_origin: str, site_origin: str,
-    candidate_sha: str, reviewed_sha: str, admin_url: str, session_template: str,
-    publishable_key: str,
+    candidate_sha: str, reviewed_sha: str, publishable_key: str,
     repo_root: Path = ROOT, runner: Callable[..., object] = subprocess.run,
 ) -> dict[str, object]:
     """Build and validate a candidate in a disposable checkout without remote mutation."""
-    validate_release_database_endpoints(project_ref, admin_url, session_template)
     validate_static_configuration(project_ref, owner_user_id, allowed_origin, DASHBOARD_SECRET_NAMES)
     git_sha = verify_git_release(repo_root, runner, candidate_sha)
     verify_reviewed_sha(git_sha, reviewed_sha)
@@ -389,13 +387,16 @@ def run_protected_candidate_dry_run(
     if not re.fullmatch(r"sb_publishable_[A-Za-z0-9_-]{24,128}", publishable_key):
         raise RuntimeError("protected publishable key is unavailable")
     project_url = f"https://{project_ref}.supabase.co"
-    build_env = {**os.environ, "VITE_SUPABASE_URL": project_url,
+    process_environment = dict(os.environ)
+    base_environment = _child_environment(process_environment)
+    build_env = {**base_environment, "VITE_SUPABASE_URL": project_url,
                  "VITE_DASHBOARD_API_URL": f"{project_url}/functions/v1/{FUNCTION_NAME}",
                  "VITE_SUPABASE_PUBLISHABLE_KEY": publishable_key}
     with tempfile.TemporaryDirectory(prefix="stocks-release-candidate-") as raw:
         isolated = Path(raw) / "candidate"
         shutil.copytree(repo_root, isolated, ignore=shutil.ignore_patterns(".git", "node_modules", ".venv", "dist", "__pycache__"))
-        installed = _run(["npm", "ci", "--ignore-scripts"], cwd=isolated, runner=runner)
+        installed = _run(["npm", "ci", "--ignore-scripts"], cwd=isolated, runner=runner,
+                         env=base_environment)
         if getattr(installed, "returncode", 1) != 0:
             raise RuntimeError("candidate dry-run dependency installation failed")
         built = _run(["npm", "run", "build", "--workspace", "@stocks-agent/web"], cwd=isolated, runner=runner, env=build_env)
@@ -1242,38 +1243,43 @@ def main() -> int:
     parser.add_argument("--rollback-worktree", type=Path)
     parser.add_argument("--keep-rollback-worktree", action="store_true")
     parser.add_argument("--release-state", type=Path, required=True)
+    parser.add_argument("--static-build-receipt", type=Path)
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument("--prepare-recovery", action="store_true")
     parser.add_argument("--deployment-id", type=int)
     parser.add_argument("--lease-owner")
     arguments = parser.parse_args()
-    if not os.environ.get("SUPABASE_ACCESS_TOKEN", "").strip():
-        raise SystemExit("SUPABASE_ACCESS_TOKEN is required for protected Supabase mutation")
     owner_user_id = os.environ.get("DASHBOARD_OWNER_USER_ID", "").strip()
-    owner_email = os.environ.get("DASHBOARD_OWNER_EMAIL", "").strip()
-    service_key = os.environ.get("SUPABASE_SERVICE_ROLE_KEY", "").strip()
     publishable_key = os.environ.get("SUPABASE_PUBLISHABLE_KEY", "").strip()
-    non_owner_access_token = os.environ.get("DASHBOARD_NON_OWNER_ACCESS_TOKEN", "").strip()
-    admin_url = os.environ.get("POSTGRES_URL", "").strip()
-    session_template = os.environ.get("SUPAVISOR_SESSION_URL", "").strip()
-    if not admin_url or not session_template or not owner_email or not service_key or not publishable_key or not non_owner_access_token:
-        raise SystemExit(
-            "POSTGRES_URL, SUPAVISOR_SESSION_URL, DASHBOARD_OWNER_EMAIL, "
-            "SUPABASE_SERVICE_ROLE_KEY, SUPABASE_PUBLISHABLE_KEY, and "
-            "DASHBOARD_NON_OWNER_ACCESS_TOKEN are required"
-        )
-
     if arguments.dry_run:
+        if not owner_user_id or not publishable_key:
+            raise SystemExit("DASHBOARD_OWNER_USER_ID and SUPABASE_PUBLISHABLE_KEY are required")
         receipt = run_protected_candidate_dry_run(
             project_ref=arguments.project_ref, owner_user_id=owner_user_id, allowed_origin=arguments.allowed_origin,
             site_origin=arguments.site_origin, candidate_sha=arguments.candidate_sha or "", reviewed_sha=arguments.reviewed_sha,
-            admin_url=admin_url, session_template=session_template, publishable_key=publishable_key,
+            publishable_key=publishable_key,
         )
         print(json.dumps(receipt, sort_keys=True, separators=(",", ":")))
         return 0
 
     if arguments.prepare_recovery:
         raise SystemExit("recovery capture now occurs under the lease in the component release engine")
+    if not os.environ.get("SUPABASE_ACCESS_TOKEN", "").strip():
+        raise SystemExit("SUPABASE_ACCESS_TOKEN is required for protected Supabase mutation")
+    owner_email = os.environ.get("DASHBOARD_OWNER_EMAIL", "").strip()
+    service_key = os.environ.get("SUPABASE_SERVICE_ROLE_KEY", "").strip()
+    non_owner_access_token = os.environ.get("DASHBOARD_NON_OWNER_ACCESS_TOKEN", "").strip()
+    admin_url = os.environ.get("POSTGRES_URL", "").strip()
+    session_template = os.environ.get("SUPAVISOR_SESSION_URL", "").strip()
+    if (not admin_url or not session_template or not owner_email or not service_key
+            or not publishable_key or not non_owner_access_token):
+        raise SystemExit(
+            "POSTGRES_URL, SUPAVISOR_SESSION_URL, DASHBOARD_OWNER_EMAIL, "
+            "SUPABASE_SERVICE_ROLE_KEY, SUPABASE_PUBLISHABLE_KEY, and "
+            "DASHBOARD_NON_OWNER_ACCESS_TOKEN are required"
+        )
+    if arguments.static_build_receipt is None:
+        raise SystemExit("--static-build-receipt is required for protected production mutation")
     validate_release_database_endpoints(arguments.project_ref, admin_url, session_template)
     validate_static_configuration(arguments.project_ref, owner_user_id, arguments.allowed_origin, DASHBOARD_SECRET_NAMES)
     if not arguments.lease_owner:
@@ -1290,7 +1296,8 @@ def main() -> int:
                "release_run_attempt": os.environ.get("GITHUB_RUN_ATTEMPT"),
                "deployment_id": arguments.deployment_id, "evidence_directory": str(arguments.evidence_directory),
                "allowed_origin": arguments.allowed_origin,
-               "site_origin": arguments.site_origin, "owner_user_id": owner_user_id}
+               "site_origin": arguments.site_origin, "owner_user_id": owner_user_id,
+               "static_build_receipt": str(arguments.static_build_receipt)}
     adapter = load_native_release_adapter(context)
     manifest = candidate_migration_manifest()
     migrations = {}
@@ -1318,7 +1325,7 @@ def main() -> int:
         receipt = run_native_release(
             adapter, context, repo_root=ROOT, journal_path=arguments.release_state,
             key=key, migrate=migrate, checkpoint=lambda _boundary: lease.heartbeat(),
-            verify_receipt=verify,
+            verify_receipt=verify, on_unjournaled_failure=lease.resolve,
         )
     print(json.dumps(receipt, sort_keys=True, separators=(",", ":")))
     # Keep the durable lease unresolved until the workflow records success.

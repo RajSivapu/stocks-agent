@@ -85,6 +85,26 @@ def test_native_backend_factory_is_lazy_and_performs_no_platform_operation(monke
     assert isinstance(adapter, module.NativeReleaseAdapter)
 
 
+def test_supabase_cli_subprocess_receives_only_allowlisted_runtime_and_token_values():
+    platform = Supabase()
+    captured = []
+    def runner(command, **options):
+        captured.append(options["env"])
+        return platform(command, **options)
+    adapter = adapter_module().NativeReleaseAdapter(
+        {"project_ref": "p" * 20, "candidate_sha": "a" * 40}, runner=runner,
+        environment={"PATH": "/usr/bin", "HOME": "/tmp/home",
+            "SUPABASE_ACCESS_TOKEN": "token", "POSTGRES_URL": "private-admin",
+            "SUPABASE_SERVICE_ROLE_KEY": "private-service",
+            "RELEASE_RECOVERY_KEY": "private-recovery"},
+    )
+
+    adapter.managed_secret_digests()
+
+    assert captured == [{"PATH": "/usr/bin", "HOME": "/tmp/home",
+        "SUPABASE_ACCESS_TOKEN": "token"}]
+
+
 def test_backend_receipt_requires_an_explicit_absolute_evidence_directory():
     adapter = native(Supabase())
     adapter.static_receipt = {}

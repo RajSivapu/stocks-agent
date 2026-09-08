@@ -144,6 +144,26 @@ def test_v2_research_only_report_requires_real_sources_but_no_fake_policy_decisi
         ))
 
 
+@pytest.mark.parametrize("kind", ["morning", "weekly", "intraday"])
+def test_v2_honestly_empty_report_needs_no_invented_source_or_policy_ids(kind):
+    packet = {
+        "contract_version": 2,
+        "action_candidates": [],
+        "coverage": {"complete_market_coverage": False, "mode": "bounded"},
+        "evidence": [],
+        "research_candidates": [],
+    }
+
+    report = build_report(report_input(
+        kind=kind, intraday_triggered=False, source_ids=(), policy_decision_ids=(),
+        research_packet=packet,
+    ))
+
+    assert report.source_ids == ()
+    assert report.policy_decision_ids == ()
+    assert "Coverage:" in report.full_markdown
+
+
 def test_report_text_bounds_are_utf8_bytes_not_code_points():
     with pytest.raises(ValueError, match="bounded"):
         build_report(report_input(full_markdown="磁" * 4_667))
@@ -202,3 +222,45 @@ def test_report_cli_accepts_terminal_v2_research_receipt_without_fake_evaluation
     rendered = json.loads(capsys.readouterr().out)
     assert rendered["report"]["policy_decision_ids"] == []
     assert "unresolved:magnet-supplier — RESEARCH ONLY" in rendered["rendered_text"]
+
+
+def test_report_cli_accepts_receipt_backed_honestly_empty_v2_packet(
+    tmp_path, monkeypatch, capsys,
+):
+    run_id = "00000000-0000-4000-8000-000000000021"
+    packet = {
+        "contract_version": 2, "run_id": run_id, "action_candidates": [],
+        "coverage": {"complete_market_coverage": False, "mode": "bounded"},
+        "evidence": [], "research_candidates": [],
+    }
+    packet_hash = hashlib.sha256(json.dumps(
+        packet, ensure_ascii=False, separators=(",", ":"), sort_keys=True,
+    ).encode()).hexdigest()
+    payload = {
+        "collection_receipt": {
+            "completion_id": "00000000-0000-4000-8000-000000000022",
+            "run_id": run_id, "packet_id": "00000000-0000-4000-8000-000000000020",
+            "packet_hash": packet_hash, "packet": packet,
+        },
+        "evaluation_receipt": {
+            "ok": True, "run_id": run_id, "policy_decision_ids": [], "source_ids": [],
+            "intelligence_packet": {
+                "id": "00000000-0000-4000-8000-000000000020",
+                "content_hash": packet_hash,
+            },
+        },
+        "comparison_receipts": [],
+        "content": {
+            "market_date": "2026-09-04", "kind": "morning",
+            "title": "Morning owner research", "summary": "No qualifying candidates.",
+            "full_markdown": "# Morning owner research\n\nNo qualifying candidates.",
+        },
+    }
+    input_path = tmp_path / "empty-report.json"
+    input_path.write_text(json.dumps(payload))
+    monkeypatch.setattr(sys, "argv", ["build_market_report.py", str(input_path)])
+
+    assert build_market_report_main() == 0
+    rendered = json.loads(capsys.readouterr().out)
+    assert rendered["report"]["source_ids"] == []
+    assert rendered["report"]["policy_decision_ids"] == []

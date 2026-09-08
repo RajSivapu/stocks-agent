@@ -71,7 +71,8 @@ _DIGEST = re.compile(r"[0-9a-f]{64}\Z")
 _SITE_HASH = re.compile(r"sha256:([0-9a-f]{64})\Z")
 _TEST_SOURCE = re.compile(r"(?:^|/)(?:[^/]+_test|[^/]+\.test)\.(?:js|mjs|ts|tsx)\Z")
 _SITE_RECEIPT_KEYS = {
-    "format", "captured_at", "trust_domain", "site", "active_version", "active_deployment", "live_bundle",
+    "format", "captured_at", "trust_domain", "site", "retained_prior_version",
+    "active_version", "active_deployment", "candidate_build", "live_bundle",
 }
 
 
@@ -114,11 +115,33 @@ def _timestamp(value: object) -> datetime:
     return parsed.astimezone(UTC)
 
 
+def _static_build_files(root: Path) -> dict[str, bytes]:
+    require(root.is_dir() and not root.is_symlink(), "candidate Site build is unavailable")
+    require(not any(path.is_symlink() for path in root.rglob("*")),
+            "candidate Site build contains a symlink")
+    files = {path.relative_to(root).as_posix(): path.read_bytes()
+             for path in sorted(root.rglob("*")) if path.is_file()}
+    require("index.html" in files and files, "candidate Site build is incomplete")
+    return files
+
+
+def _read_live_asset(url: str) -> bytes:
+    try:
+        with urlopen(Request(url, headers={"Cache-Control": "no-cache"}), timeout=20) as response:
+            raw = response.read(10_000_001)
+    except (HTTPError, URLError, TimeoutError) as error:
+        raise RuntimeError("native Site live asset readback failed") from error
+    require(len(raw) <= 10_000_000, "native Site live asset exceeds the bounded receipt")
+    return raw
+
+
 def validate_native_site_receipt(receipt: Mapping[str, object], candidate_sha: str, project_ref: str,
-                                 repo_root: Path = ROOT, *, now: datetime | None = None) -> dict[str, object]:
-    """Bind a minimal native Sites receipt to unchanged candidate source."""
+                                 repo_root: Path = ROOT, *, now: datetime | None = None,
+                                 static_root: Path | None = None,
+                                 live_reader: Callable[[str], bytes] | None = None) -> dict[str, object]:
+    """Bind authenticated native metadata and independent live bytes to one build."""
     require(isinstance(receipt, Mapping) and set(receipt) == _SITE_RECEIPT_KEYS, "native Site receipt is malformed")
-    require(receipt.get("format") == "stocks-native-sites-attestation-v1"
+    require(receipt.get("format") == "stocks-native-sites-release-v2"
             and receipt.get("trust_domain") == "codex-native-sites-connector", "native Site receipt provenance is malformed")
     captured_at = _timestamp(receipt.get("captured_at"))
     observed_at = (now or datetime.now(UTC)).astimezone(UTC)
@@ -126,8 +149,10 @@ def validate_native_site_receipt(receipt: Mapping[str, object], candidate_sha: s
     require(0 <= age <= MAX_NATIVE_SITE_RECEIPT_AGE_SECONDS, "native Site observation is not fresh")
     require(PROJECT_REF.fullmatch(project_ref) is not None, "exact production project identity is required")
     site = receipt.get("site")
+    prior = receipt.get("retained_prior_version")
     version = receipt.get("active_version")
     deployment = receipt.get("active_deployment")
+    candidate_build = receipt.get("candidate_build")
     bundle = receipt.get("live_bundle")
     require(isinstance(site, Mapping) and set(site) == {
         "project_id", "status", "live_url", "latest_version_number", "current_user_role",
@@ -135,14 +160,19 @@ def validate_native_site_receipt(receipt: Mapping[str, object], candidate_sha: s
     }, "native Site receipt is malformed")
     require(isinstance(version, Mapping) and set(version) == {
         "id", "version_number", "source_commit_sha", "archive_format", "archive_content_hash",
-        "file_count", "size_bytes",
+        "archive_files", "archive_tree_sha256", "file_count", "size_bytes",
     }, "native Site version receipt is malformed")
     require(isinstance(deployment, Mapping) and set(deployment) == {
         "id", "version_id", "type", "status", "url",
     }, "native Site deployment receipt is malformed")
+    require(isinstance(prior, Mapping) and set(prior) == {
+        "id", "version_number", "deployment_id", "archive_content_hash", "rollback_eligible",
+    }, "native Site retained prior-version receipt is malformed")
+    require(isinstance(candidate_build, Mapping) and set(candidate_build) == {
+        "candidate_sha", "build_sha256", "files",
+    }, "native Site candidate-build receipt is malformed")
     require(isinstance(bundle, Mapping) and set(bundle) == {
-        "html_sha256", "script_assets", "supabase_project_ref", "dashboard_api_url",
-        "project_ref_present", "api_url_present",
+        "files", "supabase_project_ref", "dashboard_api_url",
     }, "native Site live-bundle receipt is malformed")
 
     try:
@@ -178,6 +208,16 @@ def validate_native_site_receipt(receipt: Mapping[str, object], candidate_sha: s
             and type(version.get("file_count")) is int and version["file_count"] > 0
             and type(version.get("size_bytes")) is int and 0 < version["size_bytes"] <= 100_000_000,
             "native Site archive receipt is malformed")
+    require(isinstance(prior.get("id"), str) and prior["id"]
+            and prior["id"] != version["id"]
+            and isinstance(prior.get("deployment_id"), str) and prior["deployment_id"]
+            and prior["deployment_id"] != deployment["id"]
+            and type(prior.get("version_number")) is int
+            and 0 < prior["version_number"] < version["version_number"]
+            and isinstance(prior.get("archive_content_hash"), str)
+            and _SITE_HASH.fullmatch(prior["archive_content_hash"]) is not None
+            and prior.get("rollback_eligible") is True,
+            "native Site retained prior version is unavailable for rollback")
     source_sha = version.get("source_commit_sha")
     require(isinstance(source_sha, str) and SHA.fullmatch(source_sha) is not None, "native Site source SHA is malformed")
     ancestor = subprocess.run(
@@ -190,23 +230,47 @@ def validate_native_site_receipt(receipt: Mapping[str, object], candidate_sha: s
     require(all(path in source_files for path in (".openai/hosting.json", "package.json", "package-lock.json")),
             "complete Site source is unavailable")
     require(source_files == candidate_files, "Site source differs from the active native version")
+    source_hashes = {path: hashlib.sha256(raw).hexdigest() for path, raw in source_files.items()}
+    require(version.get("archive_files") == source_hashes
+            and version.get("archive_tree_sha256") == tree_sha256(source_files)
+            and version.get("file_count") == len(source_files),
+            "native Site downloaded archive differs from candidate source")
+    build_files = _static_build_files(static_root or repo_root / "dist")
+    build_hashes = {path: hashlib.sha256(raw).hexdigest() for path, raw in build_files.items()}
+    require(candidate_build.get("candidate_sha") == source_sha
+            and candidate_build.get("files") == build_hashes
+            and candidate_build.get("build_sha256") == tree_sha256(build_files),
+            "native Site candidate build differs from exact local bytes")
     expected_api_url = f"https://{project_ref}.supabase.co/functions/v1/owner-dashboard-api"
-    assets = bundle.get("script_assets")
-    require(isinstance(bundle.get("html_sha256"), str) and _DIGEST.fullmatch(bundle["html_sha256"]) is not None
-            and isinstance(assets, list) and 1 <= len(assets) <= 20, "native Site live-bundle receipt is malformed")
-    asset_urls = set()
+    assets = bundle.get("files")
+    served_files = {path: raw for path, raw in build_files.items() if not path.startswith("_")}
+    require(isinstance(assets, list) and len(assets) == len(served_files),
+            "native Site live-bundle receipt is malformed")
+    asset_paths: set[str] = set()
+    read_live = live_reader or _read_live_asset
+    live_bytes: dict[str, bytes] = {}
     for asset in assets:
-        require(isinstance(asset, Mapping) and set(asset) == {"url", "sha256", "bytes"}
-                and isinstance(asset.get("url"), str) and asset["url"].startswith(live_url + "/")
-                and asset["url"] not in asset_urls
-                and isinstance(asset.get("sha256"), str) and _DIGEST.fullmatch(asset["sha256"]) is not None
-                and type(asset.get("bytes")) is int and 0 < asset["bytes"] <= 10_000_000,
-                "native Site live-bundle asset receipt is malformed")
-        asset_urls.add(asset["url"])
+        path = asset.get("path") if isinstance(asset, Mapping) else None
+        expected_url = live_url + ("/" if path == "index.html" else "/" + str(path))
+        require(isinstance(asset, Mapping) and set(asset) == {"path", "url", "sha256", "bytes"}
+                and isinstance(path, str) and path in served_files and path not in asset_paths
+                and asset.get("url") == expected_url
+                and asset.get("sha256") == hashlib.sha256(served_files[path]).hexdigest()
+                and asset.get("bytes") == len(served_files[path])
+                and 0 < len(served_files[path]) <= 10_000_000,
+                "native Site live-bundle asset receipt differs from candidate build")
+        observed = read_live(expected_url)
+        require(observed == served_files[path],
+                "native Site live bytes differ from candidate build")
+        asset_paths.add(path)
+        live_bytes[path] = observed
+    require(asset_paths == set(served_files), "native Site live-bundle coverage is incomplete")
+    combined = b"\n".join(live_bytes.values())
     require(bundle.get("supabase_project_ref") == project_ref
             and bundle.get("dashboard_api_url") == expected_api_url
-            and bundle.get("project_ref_present") is True
-            and bundle.get("api_url_present") is True, "native Site backend binding differs from protected Supabase")
+            and project_ref.encode() in combined
+            and expected_api_url.encode() in combined,
+            "native Site backend binding differs from protected Supabase")
     return {
         "status": "verified",
         "trust_domain": receipt["trust_domain"],
@@ -224,8 +288,10 @@ def validate_native_site_receipt(receipt: Mapping[str, object], candidate_sha: s
         "source_sha256": tree_sha256(source_files),
         "archive_content_hash": version["archive_content_hash"],
         "archive_file_count": version["file_count"],
-        "live_html_sha256": bundle["html_sha256"],
-        "live_script_assets": list(assets),
+        "retained_prior_version_id": prior["id"],
+        "retained_prior_deployment_id": prior["deployment_id"],
+        "candidate_build_sha256": candidate_build["build_sha256"],
+        "live_files": list(assets),
         "supabase_project_ref": project_ref,
         "dashboard_api_url": expected_api_url,
     }

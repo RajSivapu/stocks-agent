@@ -359,6 +359,46 @@ def test_failed_pre_mutation_journal_retention_never_restores_untouched_componen
     assert platform.mutations == [] and platform.state == platform.original
 
 
+def test_native_release_retains_recoverable_preparation_before_fallible_plan(tmp_path):
+    from cryptography.fernet import Fernet
+    release = module(); key = Fernet.generate_key(); retained = []
+    class Adapter:
+        def retain(self, encrypted): retained.append(encrypted)
+        def plan(self, _context): raise RuntimeError("plan failed")
+    path = tmp_path / "release.enc"
+
+    with pytest.raises(RuntimeError, match="plan failed"):
+        release.run_native_release(
+            Adapter(), {"candidate_sha": "a" * 40}, repo_root=ROOT,
+            journal_path=path, key=key, migrate=lambda: None,
+        )
+
+    journal = release.EncryptedJournal(path, key, retain=lambda _raw: None).read()
+    assert journal["status"] == "preparing" and journal["components"] == {}
+    writes = []
+    result = release.recover_components(object(), journal, persist=lambda value: writes.append(value))
+    assert result == {"status": "rolled_back", "components": []}
+    assert writes[-1]["status"] == "rolled_back"
+    assert retained
+
+
+def test_native_release_resolves_exact_lease_when_initial_journal_cannot_be_retained(tmp_path):
+    from cryptography.fernet import Fernet
+    release = module(); callbacks = []
+    class Adapter:
+        def retain(self, _encrypted): raise RuntimeError("retention failed")
+        def plan(self, _context): pytest.fail("plan must not run")
+
+    with pytest.raises(RuntimeError, match="retention failed"):
+        release.run_native_release(
+            Adapter(), {"candidate_sha": "a" * 40}, repo_root=ROOT,
+            journal_path=tmp_path / "release.enc", key=Fernet.generate_key(),
+            migrate=lambda: None, on_unjournaled_failure=lambda: callbacks.append("resolved"),
+        )
+
+    assert callbacks == ["resolved"]
+
+
 def test_actual_postgres_additive_upgrade_from_native_baseline():
     binaries = {name: shutil.which(name) for name in ("initdb", "pg_ctl")}
     if not all(binaries.values()): pytest.skip("disposable PostgreSQL binaries unavailable")

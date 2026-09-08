@@ -110,9 +110,13 @@ class NativeReleaseAdapter:
         return project
 
     def _command(self, args, *, cwd=None, json_output=False):
+        allowed = ("PATH", "HOME", "TMPDIR", "CI", "NO_COLOR", "NPM_CONFIG_CACHE",
+                   "XDG_CONFIG_HOME", "SUPABASE_ACCESS_TOKEN")
+        environment = {key: self.environment[key] for key in allowed
+                       if isinstance(self.environment.get(key), str)}
         result = self.runner([*CLI, *args, "--project-ref", self._project()],
             cwd=cwd or self.root, capture_output=True, text=True, check=False,
-            env={**os.environ, **self.environment})
+            env=environment)
         if result.returncode != 0:
             # CLI stderr can contain credentials, function bytes, or signed URLs.
             raise RuntimeError("protected Supabase command failed: " + " ".join(args[:2]))
@@ -400,7 +404,6 @@ class NativeReleaseAdapter:
         return current["version"] == "1"
 
     def plan(self, context):
-        from scripts.build_owner_dashboard_static import build_static_release
         from scripts.verify_personal_stock_agent_v1 import git_files
         password = secrets.token_urlsafe(36)
         with self._connection() as connection:
@@ -425,7 +428,6 @@ class NativeReleaseAdapter:
                 "files": {path: base64.b64encode(raw).decode() for path, raw in git_files(self.root, context["candidate_sha"], f"supabase/functions/{name}").items()},
                 "configuration": {"verify_jwt": cfg["verify_jwt"], "entrypoint": function_path(cfg["entrypoint"], name),
                     "import_map": function_path(cfg["import_map"], name) if cfg.get("import_map") else None}}
-        self.static_receipt = build_static_release(context["project_ref"], context["site_origin"], repo_root=self.root, runner=self.runner)
         if tuple(candidates) != BACKEND_COMPONENTS:
             raise RuntimeError("complete protected backend candidate is required")
         return candidates
@@ -503,12 +505,33 @@ class NativeReleaseAdapter:
 
     def receipt(self, candidate_sha):
         from scripts.verify_personal_stock_agent_v1 import git_files
-        if (candidate_sha != self.context.get("candidate_sha") or self.static_receipt is None
+        if (candidate_sha != self.context.get("candidate_sha")
                 or not isinstance(self.captured_at, str)):
             raise RuntimeError("protected backend receipt candidate is incomplete")
         evidence_directory = self.context.get("evidence_directory")
         if not isinstance(evidence_directory, str) or not evidence_directory:
             raise RuntimeError("protected backend evidence directory is unavailable or unsafe")
+        static_receipt_path = self.context.get("static_build_receipt")
+        if not isinstance(static_receipt_path, str):
+            raise RuntimeError("candidate static build receipt is unavailable")
+        try:
+            static_receipt = json.loads(Path(static_receipt_path).read_text())
+        except (OSError, ValueError) as error:
+            raise RuntimeError("candidate static build receipt is unavailable") from error
+        static_root = self.root / "dist"
+        static_bytes = {path.relative_to(static_root).as_posix(): path.read_bytes()
+                        for path in sorted(static_root.rglob("*")) if path.is_file() and not path.is_symlink()}
+        static_files = {path: hashlib.sha256(raw).hexdigest() for path, raw in static_bytes.items()}
+        if (not isinstance(static_receipt, dict) or static_receipt.get("status") != "verified"
+                or static_receipt.get("candidate_sha") != candidate_sha
+                or static_receipt.get("files") != static_files or not static_files
+                or static_receipt.get("build_sha256") != self._tree_sha256(static_bytes)
+                or any(path.is_symlink() for path in static_root.rglob("*"))):
+            raise RuntimeError("candidate static build receipt differs from exact build bytes")
+        static_receipt["source_sha256"] = self._tree_sha256(
+            git_files(self.root, candidate_sha, "apps/web")
+        )
+        self.static_receipt = static_receipt
         evidence_parent = Path(evidence_directory)
         evidence_root = evidence_parent / "backend-component-evidence"
         if (not evidence_parent.is_absolute() or not evidence_parent.is_dir()
@@ -560,7 +583,7 @@ class NativeReleaseAdapter:
         (evidence_root / "manifest.json").write_bytes(manifest_raw)
         (evidence_root / "manifest.json").chmod(0o600)
         return {"candidate_sha": candidate_sha, "functions": functions,
-            "static_assets": {**dict(self.static_receipt), "candidate_sha": candidate_sha},
+            "static_assets": copy.deepcopy(self.static_receipt),
             "component_readbacks": readbacks,
             "backend_evidence": {"directory": str(evidence_root),
                 "manifest_sha256": hashlib.sha256(manifest_raw).hexdigest()}}

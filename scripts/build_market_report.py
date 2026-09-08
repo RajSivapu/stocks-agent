@@ -41,12 +41,12 @@ def main() -> int:
         sources = evaluation.get("source_ids")
         reference = evaluation.get("intelligence_packet")
         packet_body = packet.get("packet")
-        research_only = (
+        v2_non_action = (
             isinstance(packet_body, dict)
             and packet_body.get("contract_version") == 2
             and isinstance(packet_body.get("research_candidates"), list)
-            and bool(packet_body["research_candidates"])
             and packet_body.get("action_candidates") == []
+            and (bool(packet_body["research_candidates"]) or packet_body.get("evidence") == [])
         )
         if isinstance(packet_body, dict) and packet_body.get("contract_version") == 2:
             packet_sources = {
@@ -65,8 +65,8 @@ def main() -> int:
             ).encode()).hexdigest() if isinstance(packet_body, dict) else None
         )
         if (not isinstance(content, dict) or not isinstance(policies, list) or
-                (not policies and not research_only) or
-                len(policies) > 50 or not isinstance(sources, list) or not sources or
+                (not policies and not v2_non_action) or
+                len(policies) > 50 or not isinstance(sources, list) or
                 evaluation.get("run_id") != packet.get("run_id") or
                 not isinstance(reference, dict) or reference != {
                     "id": packet.get("packet_id"), "content_hash": packet.get("packet_hash")
@@ -76,7 +76,11 @@ def main() -> int:
                  packet_body.get("run_id") != packet.get("run_id")) or
                 not set(sources) <= packet_sources or
                 (packet_body.get("contract_version") == 2 and
-                 set(sources) != packet_sources)):
+                 set(sources) != packet_sources) or
+                (not sources and not (
+                    v2_non_action and packet_body.get("research_candidates") == []
+                    and packet_body.get("evidence") == []
+                ))):
             raise ValueError("bounded accepted policy receipts required")
         if value["comparison_receipts"] != []:
             raise ValueError("comparison ledger unavailable")

@@ -470,6 +470,111 @@ def test_discovery_capability_accepts_unresolved_candidate_with_null_reference_l
     assert _verify_capability(rows).ok is True
 
 
+def test_discovery_capability_accepts_research_from_a_successful_optional_official_source():
+    rows = _capability_rows()
+    candidate = _add_unresolved_research_candidate(rows)
+    packet = rows["packets"][0]["packet"]
+    item = rows["source_items"][0]
+    item_id = item["id"]
+    run_item = rows["intelligence_run_items"][0]
+    required_receipt_id = run_item["source_receipt_id"]
+    required_task = next(
+        row for row in rows["discovery_stage_tasks"]
+        if row.get("result", {}).get("checkpoint", {}).get("receipt", {}).get(
+            "source_receipt_id"
+        ) == required_receipt_id
+    )
+    required_parsed = required_task["result"]["checkpoint"]["receipt"]
+    required_stored = next(
+        row for row in rows["source_receipts"] if row["id"] == required_receipt_id
+    )
+    required_completion = next(
+        row for row in rows["completions"][0]["payload"]["receipts"]
+        if row["id"] == required_receipt_id
+    )
+    required_reservation = next(
+        row for row in rows["source_quota_reservations"]
+        if row["id"] == required_stored["reservation_id"]
+    )
+
+    optional_task_id = str(uuid.uuid5(uuid.UUID(RUN), "optional:white-house:fact-sheets"))
+    optional_receipt_id = str(uuid.uuid5(
+        uuid.NAMESPACE_URL,
+        f"market-intelligence:receipt:{RUN}:{optional_task_id}",
+    ))
+    optional_reservation_id = str(uuid.uuid5(
+        uuid.UUID(RUN), "reservation:white-house:fact-sheets",
+    ))
+    optional_task = copy.deepcopy(required_task)
+    optional_task.update(
+        id=optional_task_id, provider="white_house",
+        capability_id="white_house_fact_sheets", query_kind="feed",
+        query_hash=hashlib.sha256(b"white-house-fact-sheets").hexdigest(),
+    )
+    optional_parsed = optional_task["result"]["checkpoint"]["receipt"]
+    optional_parsed.update(
+        provider="white_house", reservation_id=optional_reservation_id,
+        source_receipt_id=optional_receipt_id,
+    )
+    optional_parsed["metadata"]["capability_id"] = "white_house_fact_sheets"
+    optional_task["result"]["theme_id"] = "macro_and_policy"
+    optional_stored = copy.deepcopy(required_stored)
+    optional_stored.update(
+        id=optional_receipt_id, provider="white_house",
+        reservation_id=optional_reservation_id,
+    )
+    optional_completion = copy.deepcopy(required_completion)
+    optional_completion.update(
+        id=optional_receipt_id, reservation_id=optional_reservation_id,
+    )
+    optional_reservation = copy.deepcopy(required_reservation)
+    optional_reservation.update(
+        id=optional_reservation_id, provider="white_house",
+        cache_keys=[optional_parsed["cache_key"]],
+    )
+    rows["discovery_stage_tasks"].append(optional_task)
+    rows["source_receipts"].append(optional_stored)
+    rows["completions"][0]["payload"]["receipts"].append(optional_completion)
+    rows["source_quota_reservations"].append(optional_reservation)
+
+    empty_hash = hashlib.sha256(b"required-empty").hexdigest()
+    for receipt in (required_parsed, required_stored, required_completion):
+        receipt.update(
+            returned_count=0, accepted_count=0, duplicate_count=0,
+            dropped_count=0, response_hash=empty_hash,
+        )
+    required_parsed["metadata"]["coverage_status"] = "success_empty"
+
+    item.update(source_receipt_id=optional_receipt_id, provider="white_house")
+    run_item["source_receipt_id"] = optional_receipt_id
+    rows["source_item_provenance"][0].update(
+        provider="white_house", request_url="https://www.whitehouse.gov/fact-sheets/",
+    )
+    rows["run_source_item_provenance"][0].update(
+        provider="white_house", source_receipt_id=optional_receipt_id,
+        request_url="https://www.whitehouse.gov/fact-sheets/",
+    )
+    packet["evidence"][0]["source_identity"].update(
+        provider="white_house", receipt_id=optional_receipt_id,
+    )
+    candidate["suitability"]["lineage"]["evidence_receipt_ids"][item_id] = optional_receipt_id
+    suitability_body = {
+        key: value for key, value in candidate["suitability"].items()
+        if key != "evaluation_hash"
+    }
+    candidate["suitability"]["evaluation_hash"] = digest(suitability_body)
+    candidate_body = {key: value for key, value in candidate.items() if key != "candidate_hash"}
+    candidate["candidate_hash"] = digest(candidate_body)
+    source_plan = packet["coverage"]["source_plan"]
+    source_plan["planned_task_ids"].append(optional_task_id)
+    source_plan["plan_hash"] = digest({
+        key: value for key, value in source_plan.items() if key != "plan_hash"
+    })
+    _rebind_packet_completion(rows)
+
+    assert _verify_capability(rows).ok is True
+
+
 def test_discovery_capability_accepts_success_empty_when_all_returned_rows_are_dropped():
     rows = _capability_rows()
     task = next(
@@ -515,7 +620,7 @@ def test_discovery_capability_keeps_optional_failures_visible_without_blocking_c
     optional_task_id = str(uuid.uuid5(uuid.UUID(RUN), "optional:white-house"))
     rows["discovery_stage_tasks"].append({
         "id": optional_task_id, "run_id": RUN, "stage": "signals",
-        "provider": "white_house", "capability_id": "white_house_news",
+        "provider": "white_house", "capability_id": "white_house_fact_sheets",
         "query_kind": "feed", "query_hash": "f" * 64,
         "dependency_ids": [],
         "requested_window": {
@@ -535,7 +640,7 @@ def test_discovery_capability_keeps_optional_failures_visible_without_blocking_c
     result = _verify_capability(rows)
 
     assert result.ok is True
-    assert result.optional_failures == ("white_house_news:failed",)
+    assert result.optional_failures == ("white_house_fact_sheets:failed",)
 
 
 @pytest.mark.parametrize("terminal_state", [
@@ -712,7 +817,17 @@ def release(tmp_path):
     merge_env = {**env, "GIT_AUTHOR_DATE": "2026-09-05T18:30:00Z", "GIT_COMMITTER_DATE": "2026-09-05T18:30:00Z"}
     subprocess.run(["git", "-c", "user.name=Test", "-c", "user.email=test@example.invalid", "commit", "--allow-empty", "-qm", "merge candidate"], cwd=repo, env=merge_env, check=True)
     sha = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=repo, text=True).strip()
-    static = tmp_path / "static"; static.mkdir(); (static / "index.html").write_bytes(b"<main>Private</main>")
+    project_ref = "p" * 20
+    api_url = f"https://{project_ref}.supabase.co/functions/v1/owner-dashboard-api"
+    site_url = "https://example.chatgpt.site"
+    static_files = {
+        "index.html": b'<script src="/assets/index.js"></script>',
+        "assets/index.js": f'const project="{project_ref}";const api="{api_url}";'.encode(),
+        "_headers": b"/*\n  X-Content-Type-Options: nosniff\n",
+    }
+    static = tmp_path / "static"; static.mkdir()
+    for path, content in static_files.items():
+        target = static / path; target.parent.mkdir(parents=True, exist_ok=True); target.write_bytes(content)
     source = FakeReleaseSource()
     source.ci_record = {"id": 43, "head_sha": sha, "head_branch": "main", "event": "push",
         "name": "Owner dashboard verification", "repository": {"full_name": "owner/stocks-agent"},
@@ -732,7 +847,13 @@ def release(tmp_path):
         "run_id": RUN, "candidate_sha": sha, "reviewed_sha": reviewed_sha,
         "migrations": [{"path": "sql/migrations/20260926_suppression_reasons.sql", "version": "20260926", "sha256": migration_statements_sha256(normalize_migration_statements(raw["sql/migrations/20260926_suppression_reasons.sql"].decode()))}],
         "functions": [{"function": name, "deployment_id": name + "-deployment", "git_sha": sha, "function_version": 5, "source_sha256": tree_hash({"index.ts": raw[f"supabase/functions/{name}/index.ts"]})} for name in ("market-briefing-gateway", "owner-dashboard-api", "telegram-portfolio")],
-        "static_assets": {"candidate_sha": sha, "source_sha256": tree_hash({"src/main.tsx": b"web source\n"}), "files": {"index.html": hashlib.sha256(b"<main>Private</main>").hexdigest()}},
+        "static_assets": {"status": "verified", "candidate_sha": sha,
+            "source_sha256": tree_hash({"src/main.tsx": b"web source\n"}),
+            "build_sha256": tree_hash(static_files),
+            "asset_hashes": [{"file": path, "sha256": hashlib.sha256(content).hexdigest()}
+                for path, content in static_files.items()],
+            "files": {path: hashlib.sha256(content).hexdigest()
+                for path, content in static_files.items()}},
         "dry_run": False,
         "dry_run_evidence": {"before": {"source": {"project_ref": "p" * 20}, "tables": {"scheduled_runs": {"count": 1, "rows_sha256": "a" * 64}, "transactions": {"count": 0, "rows_sha256": "b" * 64}}}, "after": {"source": {"project_ref": "p" * 20}, "tables": {"scheduled_runs": {"count": 1, "rows_sha256": "a" * 64}, "transactions": {"count": 0, "rows_sha256": "b" * 64}}}, "table_deltas": {"scheduled_runs": 0, "transactions": 0}, "safe_command_argv": ["python", "scripts/deploy_owner_dashboard_api.py", "--dry-run", "--candidate-sha", sha], "candidate_script_sha256": hashlib.sha256(raw["scripts/deploy_owner_dashboard_api.py"]).hexdigest(), "safe_command_sha256": hashlib.sha256(json.dumps({"argv": ["python", "scripts/deploy_owner_dashboard_api.py", "--dry-run", "--candidate-sha", sha], "candidate_sha": sha, "candidate_script_sha256": hashlib.sha256(raw["scripts/deploy_owner_dashboard_api.py"]).hexdigest()}, sort_keys=True, separators=(",", ":")).encode()).hexdigest(), "safe_command_exit_code": 0},
         "canaries": {"owner": 200, "anonymous": 401, "non_owner": 403},
@@ -802,6 +923,7 @@ def release(tmp_path):
         "reports": [{**report, "id": REPORT, "run_id": RUN, "packet_id": PACKET, "idempotency_key": REPORT_KEY, "market_date": "2026-09-05", "kind": "weekly"}],
         "publications": [{**recovery["publications"][0], "report_id": REPORT, "idempotency_key": REPORT_KEY}],
         "evaluation_publications": [{"id": PUBLICATION, "run_id": RUN, "status": "suppressed", "phase": "post-market", "market_date": "2026-09-05"}],
+        "run_outcomes": [],
         "requests": [
             {"request_id": START, "run_id": RUN, "operation": "start_run", "status": "completed", "response": {"run_id": RUN, "duplicate": False}},
             {"request_id": EVALUATION, "run_id": RUN, "operation": "evaluate_and_publish", "status": "completed", "response": {"run_id": RUN, "publication_id": PUBLICATION}},
@@ -842,27 +964,51 @@ def release(tmp_path):
         requested_report_hash=report["report_hash"],
     )
     site_receipt = {
-        "format": "stocks-native-sites-attestation-v1",
+        "format": "stocks-native-sites-release-v2",
         "captured_at": "2026-09-05T20:30:00Z",
         "trust_domain": "codex-native-sites-connector",
         "site": {"project_id": "appgprj_fixture", "status": "active",
-            "live_url": "https://example.chatgpt.site", "latest_version_number": 10,
+            "live_url": site_url, "latest_version_number": 10,
             "current_user_role": "owner", "access_mode": "custom", "allowed_owner_count": 1,
             "external_visitor_count": 0, "allowed_group_count": 0},
+        "retained_prior_version": {"id": "appgver_prior", "version_number": 9,
+            "deployment_id": "appgdep_prior", "archive_content_hash": "sha256:" + "4" * 64,
+            "rollback_eligible": True},
         "active_version": {"id": "appgver_candidate", "version_number": 10,
             "source_commit_sha": sha, "archive_format": "tar",
             "archive_content_hash": "sha256:" + "1" * 64,
-            "file_count": 10, "size_bytes": 500_000},
+            "archive_files": {path: hashlib.sha256(content).hexdigest()
+                for path, content in raw.items() if path == ".openai/hosting.json"
+                or path in {"package.json", "package-lock.json"}
+                or path.startswith("apps/web/")
+                or path.startswith("packages/dashboard-contracts/")},
+            "archive_tree_sha256": tree_hash({path: content
+                for path, content in raw.items() if path == ".openai/hosting.json"
+                or path in {"package.json", "package-lock.json"}
+                or path.startswith("apps/web/")
+                or path.startswith("packages/dashboard-contracts/")}),
+            "file_count": len([path for path in raw if path == ".openai/hosting.json"
+                or path in {"package.json", "package-lock.json"}
+                or path.startswith("apps/web/")
+                or path.startswith("packages/dashboard-contracts/")]),
+            "size_bytes": 500_000},
         "active_deployment": {"id": "appgdep_candidate", "version_id": "appgver_candidate",
-            "type": "publish", "status": "succeeded", "url": "https://example.chatgpt.site"},
-        "live_bundle": {"html_sha256": "2" * 64,
-            "script_assets": [{"url": "https://example.chatgpt.site/assets/index.js",
-                "sha256": "3" * 64, "bytes": 100}], "supabase_project_ref": "p" * 20,
-            "dashboard_api_url": f"https://{'p' * 20}.supabase.co/functions/v1/owner-dashboard-api",
-            "project_ref_present": True, "api_url_present": True},
+            "type": "publish", "status": "succeeded", "url": site_url},
+        "candidate_build": {"candidate_sha": sha, "build_sha256": tree_hash(static_files),
+            "files": {path: hashlib.sha256(content).hexdigest()
+                for path, content in static_files.items()}},
+        "live_bundle": {"files": [{"path": path,
+                "url": site_url + ("/" if path == "index.html" else "/" + path),
+                "sha256": hashlib.sha256(content).hexdigest(), "bytes": len(content)}
+                for path, content in static_files.items() if not path.startswith("_")],
+            "supabase_project_ref": "p" * 20, "dashboard_api_url": api_url},
     }
+    def site_live_reader(url):
+        path = "index.html" if url == site_url + "/" else url.removeprefix(site_url + "/")
+        return static_files[path]
     return source, {"deployment_id": 42, "native_site_receipt": site_receipt,
-        "repo_root": repo, "static_root": static, "clock": lambda: NOW}
+        "repo_root": repo, "static_root": static, "clock": lambda: NOW,
+        "site_live_reader": site_live_reader}
 
 
 def test_release_queries_sources_and_binds_exact_receipts(release):
@@ -891,6 +1037,57 @@ def test_release_queries_sources_and_binds_exact_receipts(release):
     }
     source.record.pop("run_id")
     assert verify_release(source, **args)["run_id"] == RUN
+
+
+def test_release_accepts_receipt_backed_quiet_intraday_without_a_report(release):
+    source, args = release
+    packet = source.rows["packets"][0]
+    source_ids = sorted({
+        evidence["item_id"]
+        for candidate in packet["packet"]["research_candidates"]
+        for evidence in candidate["evidence"]
+    })
+    source.rows["run"][0].update(
+        kind="intraday", scheduled_phase="intraday", status="suppressed",
+        telegram_message_ids=[],
+    )
+    source.rows["intelligence_runs"][0]["phase"] = "intraday"
+    source.rows["evaluation_publications"][0]["phase"] = "intraday"
+    source.rows["reports"] = []
+    source.rows["publications"] = []
+    source.rows["origins"] = []
+    source.rows["requests"] = source.rows["requests"][:2]
+    source.rows["requests"][1]["response"].update({
+        "publication_status": "suppressed", "telegram_message_ids": [],
+        "evaluation_count": 0, "policy_decision_ids": [],
+        "source_ids": source_ids,
+        "intelligence_packet": {"id": packet["id"], "content_hash": packet["packet_hash"]},
+        "run_outcome": {"run_id": RUN, "outcome": "no_trigger", "duplicate": False},
+    })
+    source.rows["run_outcomes"] = [{
+        "run_id": RUN, "evaluation_request_id": EVALUATION,
+        "outcome": "no_trigger", "created_at": "2026-09-05T19:50:00Z",
+    }]
+
+    result = verify_release(source, **args)
+
+    assert result["report_id"] is None
+    assert result["publication_receipt"] == {
+        "status": "no_trigger", "telegram_message_ids": [],
+    }
+    assert result["operational_receipt"]["publication"] == "no_trigger"
+    assert result["capability_receipt"]["checkpoint"] == "V1-C3"
+
+
+def test_release_rejects_unbound_quiet_terminal_outcome(release):
+    source, args = release
+    source.rows["run_outcomes"] = [{
+        "run_id": RUN, "evaluation_request_id": EVALUATION,
+        "outcome": "no_trigger", "created_at": "2026-09-05T19:50:00Z",
+    }]
+
+    with pytest.raises(RuntimeError, match="quiet intraday"):
+        verify_release(source, **args)
 
 
 def test_release_blocks_when_required_discovery_evidence_is_missing(release):
@@ -1111,6 +1308,19 @@ def test_production_source_keeps_only_each_reviewers_latest_decision(monkeypatch
     assert {row["id"] for row in source.reviews(44)} == {2, 3}
 
 
+def test_production_source_uses_review_id_to_break_same_second_ties(monkeypatch):
+    from scripts.protected_evidence import GitHubProductionDataSource
+
+    source = GitHubProductionDataSource("owner/stocks-agent", "p" * 20, object())
+    rows = [
+        {"id": 8, "state": "APPROVED", "submitted_at": "2026-09-05T17:50:00Z", "user": {"id": 7}},
+        {"id": 9, "state": "CHANGES_REQUESTED", "submitted_at": "2026-09-05T17:50:00Z", "user": {"id": 7}},
+    ]
+    monkeypatch.setattr(source, "_get", lambda _path: rows)
+
+    assert source.reviews(44) == [rows[1]]
+
+
 def test_protected_release_extraction_reads_reused_reference_and_full_source_lineage(monkeypatch):
     from scripts.protected_evidence import PostgresReadOnlySource
 
@@ -1128,7 +1338,7 @@ def test_protected_release_extraction_reads_reused_reference_and_full_source_lin
     assert {
         "source_quota_reservations", "source_receipts", "source_items",
         "intelligence_run_items", "source_item_provenance",
-        "run_source_item_provenance",
+        "run_source_item_provenance", "run_outcomes",
     } <= set(rows)
     assert "payload" in sql_by_key["completions"]
     assert "market_reference_run_bindings" in sql_by_key["reference_manifests"]
@@ -1138,6 +1348,7 @@ def test_protected_release_extraction_reads_reused_reference_and_full_source_lin
     assert "market_intelligence_run_items" in sql_by_key["source_receipts"]
     assert "market_source_items" in sql_by_key["source_receipts"]
     assert "market_source_receipts" in sql_by_key["source_quota_reservations"]
+    assert "market_run_terminal_outcomes" in sql_by_key["run_outcomes"]
     source_receipt_query = queries[list(rows).index("source_receipts")]
     reservation_query = queries[list(rows).index("source_quota_reservations")]
     assert source_receipt_query[1] == (RUN, RUN)

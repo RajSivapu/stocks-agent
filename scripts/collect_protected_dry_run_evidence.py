@@ -33,7 +33,13 @@ def main() -> int:
     if not url or not command or not args.candidate_script.is_file() or args.candidate_sha not in command:
         raise SystemExit("a protected reader and candidate-bound read-only command are required")
     before = snapshot(url, args.production_project_ref)
-    result = subprocess.run(command, capture_output=True, text=True, check=False)
+    allowed = ("PATH", "HOME", "TMPDIR", "CI", "NO_COLOR", "NPM_CONFIG_CACHE",
+               "DASHBOARD_OWNER_USER_ID", "SUPABASE_PUBLISHABLE_KEY")
+    child_environment = {key: os.environ[key] for key in allowed
+                         if isinstance(os.environ.get(key), str)}
+    result = subprocess.run(
+        command, capture_output=True, text=True, check=False, env=child_environment,
+    )
     if result.returncode != 0:
         raise SystemExit("safe dry-run command failed")
     after = snapshot(url, args.production_project_ref)
