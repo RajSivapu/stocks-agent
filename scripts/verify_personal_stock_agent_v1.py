@@ -28,7 +28,7 @@ from lib.intelligence.policy import load_intelligence_policy
 from lib.intelligence.themes import (
     evidence_key,
     propose_dynamic_theme,
-    source_dynamic_theme_label,
+    select_dynamic_theme_evidence,
     theme_fingerprint,
 )
 from scripts.export_recovery_bundle import (
@@ -503,6 +503,9 @@ def _verified_source_item(
     source_id: str,
     source_items: Mapping[object, Mapping[str, object]],
     persisted_receipts: Mapping[object, Mapping[str, object]],
+    *,
+    retrieved_at: datetime | None = None,
+    source_provenance: Mapping[object, Mapping[str, object]] | None = None,
 ) -> SourceItem:
     row = source_items.get(source_id)
     require(isinstance(row, Mapping), "discovery adaptive source item is missing")
@@ -516,14 +519,18 @@ def _verified_source_item(
     )
     published = timestamp(row["published_at"]) if row.get("published_at") is not None else None
     effective = timestamp(row["effective_at"]) if row.get("effective_at") is not None else None
-    retrieved = timestamp(receipt.get("retrieved_at"))
+    retrieved = retrieved_at or timestamp(receipt.get("retrieved_at"))
+    provenance = source_provenance.get(source_id) \
+        if isinstance(source_provenance, Mapping) else None
+    canonical_url = provenance.get("canonical_item_url") \
+        if isinstance(provenance, Mapping) else row.get("canonical_url")
     item = SourceItem(
         provider=str(row.get("provider")),
         upstream_item_id=(
             str(row["upstream_item_id"])
             if row.get("upstream_item_id") is not None else None
         ),
-        canonical_url=str(row.get("canonical_url") or ""),
+        canonical_url=str(canonical_url or ""),
         title=str(row.get("title") or ""),
         summary=str(row.get("normalized_text") or ""),
         canonical_content=str(row.get("canonical_content") or ""),
@@ -551,6 +558,12 @@ def _verify_dynamic_theme_semantics(
     tasks: Mapping[str, Mapping[str, object]],
     source_items: Mapping[object, Mapping[str, object]],
     persisted_receipts: Mapping[object, Mapping[str, object]],
+    source_provenance: Mapping[object, Mapping[str, object]],
+    run_items: list[Mapping[str, object]],
+    run_provenance: Mapping[object, Mapping[str, object]],
+    receipt_id_by_task: Mapping[str, str],
+    duplicate_references: list[Mapping[str, object]],
+    candidate_task_ids: set[str],
 ) -> None:
     episode_rows = receipt.get("theme_episode_revisions", [])
     require(isinstance(episode_rows, list),
@@ -560,30 +573,71 @@ def _verify_dynamic_theme_semantics(
             continue
         result = task["result"]
         proposals = result["proposals"]
-        requested_labels = result["requested_labels"]
-        source_ids = sorted({
-            source_id for proposal in proposals for source_id in proposal["source_ids"]
-        })
+        observations: list[tuple[str, SourceItem]] = []
+        for source_task_id in sorted(candidate_task_ids):
+            receipt_id = receipt_id_by_task.get(source_task_id)
+            persisted_receipt = persisted_receipts.get(receipt_id)
+            require(isinstance(persisted_receipt, Mapping),
+                    "discovery dynamic theme candidate receipt is missing")
+            direct = [
+                row for row in run_items
+                if row.get("run_id") == run_id
+                and row.get("source_receipt_id") == receipt_id
+                and row.get("disposition") in {"accepted", "near_duplicate"}
+            ]
+            source_ids = {
+                str(row["source_item_id"]) for row in direct
+                if isinstance(row.get("source_item_id"), str)
+            } | {
+                str(row["item_id"]) for row in duplicate_references
+                if row.get("receipt_id") == receipt_id
+            }
+            retrieved_candidates = [
+                timestamp(run_provenance[row["id"]].get("retrieved_at"))
+                for row in direct
+                if isinstance(run_provenance.get(row.get("id")), Mapping)
+            ]
+            receipt_retrieved = timestamp(persisted_receipt.get("retrieved_at"))
+            retrieved_at = max((*retrieved_candidates, receipt_retrieved))
+            for source_id in sorted(source_ids):
+                observations.append((source_task_id, _verified_source_item(
+                    source_id, source_items, persisted_receipts,
+                    retrieved_at=retrieved_at,
+                    source_provenance=source_provenance,
+                )))
+        selection = select_dynamic_theme_evidence(observations)
+        requested_labels = _expected_requested_labels(
+            list(selection.dependency_ids), tasks
+        )
+        expected_sources_by_label = {
+            label: sorted(evidence_key(item) for item in selection.evidence_by_label[label])
+            for label in selection.labels
+        }
+        declared_sources_by_label = {
+            proposal["label"]: proposal["source_ids"] for proposal in proposals
+        }
+        require(
+            task.get("dependency_ids") == list(selection.dependency_ids)
+            and result["requested_labels"] == requested_labels
+            and result["labels_truncated"] == selection.labels_truncated
+            and result["source_ids_truncated"] == selection.source_ids_truncated
+            and declared_sources_by_label == expected_sources_by_label,
+            "discovery dynamic theme evidence selection is incomplete",
+        )
         verified = {
-            source_id: _verified_source_item(
-                source_id, source_items, persisted_receipts
-            )
-            for source_id in source_ids
+            evidence_key(item): item
+            for label in selection.labels
+            for item in selection.evidence_by_label[label]
         }
         coverage_label = "bounded sources: " + ",".join(sorted({
             item.provider for item in verified.values()
         }))
         expected_proposals = []
         eligible = {}
-        for proposal in proposals:
-            evidence = tuple(verified[source_id] for source_id in proposal["source_ids"])
-            require(
-                all(source_dynamic_theme_label(item.title) == proposal["label"]
-                    for item in evidence),
-                "discovery dynamic theme label is not source-derived",
-            )
+        for label in selection.labels:
+            evidence = selection.evidence_by_label[label]
             expected = propose_dynamic_theme(
-                proposal["label"], evidence,
+                label, evidence,
                 coverage_label=coverage_label,
                 requested_labels=requested_labels,
             )
@@ -840,7 +894,7 @@ def _verify_discovery_capability(receipt: Mapping[str, object]) -> VerificationR
     terminal_states = {"succeeded", "failed", "deferred", "uncertain"}
     require(all(task.get("state") in terminal_states for task in tasks.values()),
             "discovery task plan is not terminal")
-    _authorized_dynamic_task_ids(
+    dynamic_task_ids = _authorized_dynamic_task_ids(
         receipt, run_id=run_id, phase=intelligence.get("phase"), tasks=tasks,
         planned_ids=planned_id_set,
     )
@@ -1230,6 +1284,19 @@ def _verify_discovery_capability(receipt: Mapping[str, object]) -> VerificationR
         tasks=tasks,
         source_items=source_items,
         persisted_receipts=persisted_receipts,
+        source_provenance=source_provenance,
+        run_items=run_items,
+        run_provenance=run_provenance,
+        receipt_id_by_task=receipt_id_by_task,
+        duplicate_references=duplicate_references,
+        candidate_task_ids={
+            task_id for task_id in receipt_id_by_task
+            if task_id in planned_id_set
+            or (
+                task_id in dynamic_task_ids
+                and tasks[task_id].get("stage") == "resolve"
+            )
+        },
     )
     for task_id, task in tasks.items():
         if task_id in planned_id_set or task.get("stage") != "resolve":
@@ -1259,7 +1326,8 @@ def _verify_discovery_capability(receipt: Mapping[str, object]) -> VerificationR
             require(bool(origin_receipts & dependency_receipts),
                     "discovery reverse source lineage is invalid")
             reverse_items.append(_verified_source_item(
-                source_id, source_items, persisted_receipts
+                source_id, source_items, persisted_receipts,
+                source_provenance=source_provenance,
             ))
         events = detect_events(tuple(reverse_items), load_theme_taxonomy())
         matching_events = [

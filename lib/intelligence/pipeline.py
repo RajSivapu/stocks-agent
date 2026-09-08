@@ -73,7 +73,7 @@ from lib.intelligence.themes import (
     evidence_key,
     propose_dynamic_theme,
     revise_theme_episode,
-    source_dynamic_theme_label,
+    select_dynamic_theme_evidence,
     theme_episode_revision_from_persistence,
 )
 from lib.intelligence.types import DiscoveryPlan, DiscoveryTask, PacketLimits, SourceCapability
@@ -87,7 +87,6 @@ UNTRUSTED_DATA_INSTRUCTION = (
 MAX_OUTPUT_BYTES = 96 * 1024
 _OUTPUT_PACKET_BYTES = 72 * 1024
 _MAX_DISCOVERY_TASKS = 100
-_MAX_DYNAMIC_THEME_EVIDENCE = 64
 _MAX_REVERSE_DISCOVERY_EVIDENCE = 32
 
 
@@ -1178,53 +1177,26 @@ class IntelligencePipeline:
         task_results: Sequence[tuple[DiscoveryTask, CollectionResult]],
         persisted: dict[str, Mapping[str, object]],
     ) -> None:
-        grouped: dict[str, list[SourceItem]] = {}
-        task_ids_by_item: dict[str, set[str]] = {}
+        observations: list[tuple[str, SourceItem]] = []
         for task, result in task_results:
             if result.receipt.status not in {"succeeded", "cache_hit"}:
                 continue
             for raw in result.items:
                 item = normalize_item(raw)
-                label_value = source_dynamic_theme_label(item.title)
-                if label_value is None:
-                    continue
-                label = " ".join(label_value.split())[:200]
-                if not label:
-                    continue
-                grouped.setdefault(label, []).append(item)
-                task_ids_by_item.setdefault(evidence_key(item), set()).add(task.task_id)
-        selected_dependency_ids = tuple(sorted({
-            task_id
-            for source_id in task_ids_by_item
-            for task_id in task_ids_by_item[source_id]
-        })[:32])
-        selected_dependency_id_set = set(selected_dependency_ids)
-        eligible_source_ids_by_label = {
-            label: sorted({
-                evidence_key(item) for item in items
-                if task_ids_by_item.get(evidence_key(item), set())
-                & selected_dependency_id_set
-            })
-            for label, items in grouped.items()
-        }
-        labels = sorted(
-            label for label, source_ids in eligible_source_ids_by_label.items()
-            if source_ids
-        )[:50]
+                observations.append((task.task_id, item))
+        selection = select_dynamic_theme_evidence(observations)
+        labels = selection.labels
         if not labels:
             return
-        bounded: dict[str, tuple[SourceItem, ...]] = {}
-        source_ids_truncated = 0
-        for label in labels:
-            distinct = {evidence_key(item): item for item in grouped[label]}
-            eligible_ids = eligible_source_ids_by_label[label]
-            retained_ids = eligible_ids[:_MAX_DYNAMIC_THEME_EVIDENCE]
-            bounded[label] = tuple(distinct[source_id] for source_id in retained_ids)
-            source_ids_truncated += len(distinct) - len(retained_ids)
+        bounded = selection.evidence_by_label
+        bounded_source_ids = tuple(sorted({
+            evidence_key(item) for label in labels for item in bounded[label]
+        }))
+        dependencies = selection.dependency_ids
         task_by_id = {task.task_id: task for task, _result in task_results}
         requested_labels = sorted({
             value
-            for task_id in selected_dependency_ids
+            for task_id in dependencies
             for value in (
                 task_by_id[task_id].query.get("query"), task_by_id[task_id].theme_id,
             )
@@ -1245,12 +1217,8 @@ class IntelligencePipeline:
         source_ids = tuple(sorted({
             evidence_key(item) for proposal in proposals for item in proposal.evidence
         }))
-        dependencies = tuple(sorted({
-            task_id
-            for source_id in source_ids
-            for task_id in task_ids_by_item.get(source_id, ())
-            if task_id in selected_dependency_id_set
-        }))
+        if source_ids != bounded_source_ids:
+            raise ValueError("dynamic theme proposal changed bounded source identity")
         task = DiscoveryTask(
             task_id=_uuid(
                 "dynamic-theme-evaluation", run_id,
@@ -1331,11 +1299,11 @@ class IntelligencePipeline:
             attempt_count=int(current.get("attempt_count") or 1),
             result={
                 "episode_count": len(episode_rows),
-                "labels_truncated": max(0, len(grouped) - len(labels)),
+                "labels_truncated": selection.labels_truncated,
                 "proposals": result_rows,
                 "requested_labels": requested_labels,
                 "research_state": "observed" if episode_rows else "unresolved",
-                "source_ids_truncated": source_ids_truncated,
+                "source_ids_truncated": selection.source_ids_truncated,
             },
         )
         persisted[task.task_id] = self._checkpoint_discovery_task(
@@ -1790,18 +1758,23 @@ class IntelligencePipeline:
                     "cursor_outcome_unavailable": True,
                 },
             ))
+            recovery_result = {
+                "cursor_key": f"{task.capability_id}:{task.theme_id or 'default'}",
+                "theme_id": task.theme_id,
+                "checkpoint": {
+                    "cache_key": key,
+                    "receipt": _checkpoint_receipt(frozen.receipt, include_metadata=True),
+                },
+                "request_cursor": cursor.to_mapping(),
+                "source_cursor": cursor.to_mapping(),
+            }
+            hypothesis = task.query.get("hypothesis")
+            if task.stage == "resolve" and isinstance(hypothesis, Mapping):
+                recovery_result["hypothesis"] = dict(hypothesis)
+                recovery_result["reverse_descriptor"] = dict(task.query)
             terminal = self._task_row(
                 task, state="uncertain", attempt_count=int(current.get("attempt_count") or 1),
-                result={
-                    "cursor_key": f"{task.capability_id}:{task.theme_id or 'default'}",
-                    "theme_id": task.theme_id,
-                    "checkpoint": {
-                        "cache_key": key,
-                        "receipt": _checkpoint_receipt(frozen.receipt, include_metadata=True),
-                    },
-                    "request_cursor": cursor.to_mapping(),
-                    "source_cursor": cursor.to_mapping(),
-                }, window=window, cursor=cursor,
+                result=recovery_result, window=window, cursor=cursor,
             )
             persisted[task.task_id] = self._checkpoint_discovery_task(run_id, terminal)
             return frozen

@@ -12,6 +12,7 @@ from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
 from collections.abc import Mapping
+from types import MappingProxyType
 from typing import Iterable, Literal, Sequence
 
 from lib.intelligence.dedupe import RunItemDisposition
@@ -104,6 +105,90 @@ def evidence_key(item: SourceItem) -> str:
     if supplied:
         return str(supplied)
     return str(uuid.uuid5(uuid.NAMESPACE_URL, f"market-source:{item.content_hash}"))
+
+
+@dataclass(frozen=True, slots=True)
+class DynamicThemeEvidenceSelection:
+    """The bounded source set used to derive dynamic theme proposals."""
+
+    labels: tuple[str, ...]
+    evidence_by_label: Mapping[str, tuple[SourceItem, ...]]
+    dependency_ids: tuple[str, ...]
+    labels_truncated: int
+    source_ids_truncated: int
+
+
+def select_dynamic_theme_evidence(
+    observations: Iterable[tuple[str, SourceItem]],
+    *,
+    max_dependencies: int = 32,
+    max_labels: int = 50,
+    max_sources_per_label: int = 64,
+) -> DynamicThemeEvidenceSelection:
+    """Select dynamic-theme evidence with one deterministic, replayable rule."""
+    grouped: dict[str, list[SourceItem]] = {}
+    task_ids_by_item: dict[str, set[str]] = {}
+    for task_id, item in observations:
+        if not isinstance(task_id, str) or not task_id:
+            raise ValueError("dynamic theme evidence task identity is required")
+        if not isinstance(item, SourceItem):
+            raise TypeError("dynamic theme evidence must be a canonical SourceItem")
+        label_value = source_dynamic_theme_label(item.title)
+        if label_value is None:
+            continue
+        label = " ".join(label_value.split())[:200]
+        if not label:
+            continue
+        grouped.setdefault(label, []).append(item)
+        task_ids_by_item.setdefault(evidence_key(item), set()).add(task_id)
+
+    selected_dependencies = tuple(sorted({
+        task_id
+        for task_ids in task_ids_by_item.values()
+        for task_id in task_ids
+    })[:max_dependencies])
+    selected_dependency_set = set(selected_dependencies)
+    eligible_source_ids_by_label = {
+        label: sorted({
+            evidence_key(item) for item in items
+            if task_ids_by_item.get(evidence_key(item), set())
+            & selected_dependency_set
+        })
+        for label, items in grouped.items()
+    }
+    labels = tuple(sorted(
+        label for label, source_ids in eligible_source_ids_by_label.items()
+        if source_ids
+    )[:max_labels])
+    bounded: dict[str, tuple[SourceItem, ...]] = {}
+    source_ids_truncated = 0
+    for label in labels:
+        distinct: dict[str, SourceItem] = {}
+        for item in grouped[label]:
+            source_id = evidence_key(item)
+            current = distinct.get(source_id)
+            if current is None or item.retrieved_at > current.retrieved_at:
+                distinct[source_id] = item
+        retained_ids = eligible_source_ids_by_label[label][:max_sources_per_label]
+        bounded[label] = tuple(distinct[source_id] for source_id in retained_ids)
+        source_ids_truncated += len(distinct) - len(retained_ids)
+
+    bounded_source_ids = {
+        evidence_key(item) for label in labels for item in bounded[label]
+    }
+    dependencies = tuple(sorted({
+        task_id
+        for source_id in bounded_source_ids
+        for task_id in task_ids_by_item.get(source_id, ())
+        if task_id in selected_dependency_set
+    }))
+    return DynamicThemeEvidenceSelection(
+        labels=labels,
+        evidence_by_label=MappingProxyType(bounded),
+        dependency_ids=dependencies,
+        labels_truncated=max(0, len(grouped) - len(labels)),
+        source_ids_truncated=source_ids_truncated,
+    )
 
 
 def publisher_identity(item: SourceItem) -> str:

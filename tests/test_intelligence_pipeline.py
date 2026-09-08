@@ -1593,6 +1593,26 @@ def test_capability_plan_persists_bounded_reverse_tasks_before_transport_and_res
     assert len([row for row in gateway.discovery_tasks.values()
                 if row["stage"] == "resolve"]) == 2
 
+    recovering = reverse_rows[0]
+    recovery_cursor = recovering["result"]["request_cursor"]
+    recovery_key = recovering["result"]["checkpoint"]["cache_key"]
+    gateway.collection_checkpoints.pop(recovery_key)
+    gateway.discovery_tasks[recovering["id"]] = {
+        **recovering,
+        "state": "attempting",
+        "result": {"request_cursor": recovery_cursor},
+    }
+    IntelligencePipeline(
+        gateway, [Adapter()], discovery_plan=plan,
+        context={"security_reference": entity_reference()},
+    ).run(request("pre-market"))
+    recovered = gateway.discovery_tasks[recovering["id"]]
+    assert recovered["state"] == "uncertain"
+    assert recovered["result"]["hypothesis"] == recovering["result"]["hypothesis"]
+    assert recovered["result"]["reverse_descriptor"] == recovering["result"][
+        "reverse_descriptor"
+    ]
+
 
 def test_enrichment_candidates_require_exact_hydrated_current_reference_membership():
     reference = entity_reference()

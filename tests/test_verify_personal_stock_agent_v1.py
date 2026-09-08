@@ -754,7 +754,9 @@ def test_discovery_capability_accepts_pipeline_generated_dynamic_theme_task():
     rows = _capability_rows()
     _make_first_required_receipt_nonempty(rows, persist_lineage=True)
     source = rows["source_items"][0]
+    current_receipt_id = source["source_receipt_id"]
     source.update(
+        published_at=None,
         title="Liquid cooling loop: first deployment",
         metadata={
             "item_id": source["id"], "publisher_id": "publisher-a",
@@ -769,15 +771,27 @@ def test_discovery_capability_accepts_pipeline_generated_dynamic_theme_task():
     )
     parsed = source_task["result"]["checkpoint"]["receipt"]
     retrieved_at = datetime.fromisoformat(parsed["retrieved_at"].replace("Z", "+00:00"))
+    prior_receipt_id = str(uuid.uuid5(uuid.UUID(RUN), "prior-source-receipt"))
+    prior_receipt = copy.deepcopy(next(
+        row for row in rows["source_receipts"] if row["id"] == current_receipt_id
+    ))
+    prior_receipt.update(
+        id=prior_receipt_id,
+        retrieved_at="2026-09-04T19:40:00Z",
+        created_at="2026-09-04T19:40:00Z",
+    )
+    rows["source_receipts"].append(prior_receipt)
+    source["source_receipt_id"] = prior_receipt_id
+    rows["source_item_provenance"][0]["retrieved_at"] = "2026-09-04T19:40:00Z"
     second_content = "independent liquid cooling evidence"
     second_hash = hashlib.sha256(second_content.encode()).hexdigest()
     second_id = str(uuid.uuid5(uuid.NAMESPACE_URL, f"market-source:{second_hash}"))
     second_run_item_id = str(uuid.uuid5(uuid.UUID(RUN), f"run-item:{second_id}"))
     second_source = {
-        "id": second_id, "source_receipt_id": source["source_receipt_id"],
+        "id": second_id, "source_receipt_id": prior_receipt_id,
         "provider": "gdelt", "upstream_item_id": "nonempty-2",
         "canonical_url": "https://second-publisher.example/nonempty-2",
-        "published_at": "2026-09-05T19:36:00Z", "effective_at": None,
+        "published_at": None, "effective_at": None,
         "title": "Liquid cooling loop: second deployment",
         "normalized_text": "Independent liquid cooling evidence",
         "canonical_content": second_content, "content_hash": second_hash,
@@ -790,20 +804,20 @@ def test_discovery_capability_accepts_pipeline_generated_dynamic_theme_task():
     rows["source_items"].append(second_source)
     rows["intelligence_run_items"].append({
         "id": second_run_item_id, "run_id": RUN, "source_item_id": second_id,
-        "source_receipt_id": source["source_receipt_id"], "disposition": "accepted",
+        "source_receipt_id": current_receipt_id, "disposition": "accepted",
         "drop_reason": None, "created_at": "2026-09-05T19:40:00Z",
     })
     rows["source_item_provenance"].append({
         "source_item_id": second_id, "provider": "gdelt",
         "canonical_item_url": second_source["canonical_url"],
         "request_url": "https://api.gdeltproject.org/api/v2/doc/doc",
-        "retrieved_at": parsed["retrieved_at"], "reporting_at": None,
+        "retrieved_at": "2026-09-04T19:40:00Z", "reporting_at": None,
         "entity_ids": [], "security_ids": [], "discovery_status": "qualified",
         "created_at": "2026-09-05T19:40:00Z",
     })
     rows["run_source_item_provenance"].append({
         "run_item_id": second_run_item_id, "run_id": RUN,
-        "source_item_id": second_id, "source_receipt_id": source["source_receipt_id"],
+        "source_item_id": second_id, "source_receipt_id": current_receipt_id,
         "provider": "gdelt",
         "request_url": "https://api.gdeltproject.org/api/v2/doc/doc",
         "retrieved_at": parsed["retrieved_at"], "reporting_at": None,
@@ -813,9 +827,9 @@ def test_discovery_capability_accepts_pipeline_generated_dynamic_theme_task():
     for receipt_row in (
         parsed,
         next(row for row in rows["source_receipts"]
-             if row["id"] == source["source_receipt_id"]),
+             if row["id"] == current_receipt_id),
         next(row for row in rows["completions"][0]["payload"]["receipts"]
-             if row["id"] == source["source_receipt_id"]),
+             if row["id"] == current_receipt_id),
     ):
         receipt_row.update(returned_count=2, accepted_count=2)
     item = SourceItem(
@@ -824,7 +838,7 @@ def test_discovery_capability_accepts_pipeline_generated_dynamic_theme_task():
         title="Liquid cooling loop: first deployment",
         normalized_text=source["normalized_text"],
         canonical_content=source["canonical_content"], content_hash=source["content_hash"],
-        published_at=datetime.fromisoformat(source["published_at"].replace("Z", "+00:00")),
+        published_at=None,
         effective_at=None, retrieved_at=retrieved_at, authority="radar",
         metadata=MappingProxyType({
             "item_id": source["id"], "publisher_id": "publisher-a",
@@ -836,7 +850,7 @@ def test_discovery_capability_accepts_pipeline_generated_dynamic_theme_task():
         source_url=second_source["canonical_url"], title=second_source["title"],
         normalized_text=second_source["normalized_text"],
         canonical_content=second_content, content_hash=second_hash,
-        published_at=datetime.fromisoformat("2026-09-05T19:36:00+00:00"),
+        published_at=None,
         effective_at=None, retrieved_at=retrieved_at, authority="radar",
         metadata=MappingProxyType(second_source["metadata"]),
     )
@@ -879,6 +893,40 @@ def test_discovery_capability_accepts_pipeline_generated_dynamic_theme_task():
     rows["discovery_stage_tasks"].extend(persisted.values())
 
     assert _verify_capability(rows).ok is True
+    omitted = copy.deepcopy(rows)
+    omitted_task = next(
+        row for row in omitted["discovery_stage_tasks"]
+        if row["capability_id"] == "dynamic_theme_evaluation"
+    )
+    omitted_result = omitted_task["result"]
+    omitted_proposal = omitted_result["proposals"][0]
+    omitted_proposal.update(
+        eligible=False,
+        missing_reasons=[
+            "requires_two_accepted_items",
+            "publisher_independent_corroboration_required",
+        ],
+        research_state="unresolved",
+        source_ids=omitted_proposal["source_ids"][:1],
+    )
+    omitted_result.update(
+        episode_count=0,
+        research_state="unresolved",
+        source_ids_truncated=0,
+    )
+    omitted["theme_episode_revisions"] = []
+    selector_hash = digest({
+        "labels": [omitted_proposal["label"]],
+        "requested_labels": omitted_result["requested_labels"],
+        "source_ids": omitted_proposal["source_ids"],
+    })
+    omitted_task["id"] = str(uuid.uuid5(
+        uuid.NAMESPACE_URL,
+        f"market-intelligence:dynamic-theme-evaluation:{RUN}:{selector_hash}",
+    ))
+    with pytest.raises(RuntimeError, match="dynamic theme evidence selection"):
+        _verify_capability(omitted)
+
     forged = copy.deepcopy(rows)
     episode = forged["theme_episode_revisions"][0]
     episode["valid_from"] = "2099-01-01T00:00:00Z"
@@ -893,11 +941,16 @@ def test_discovery_capability_accepts_pipeline_generated_dynamic_theme_task():
 
 
 @pytest.mark.parametrize(
-    ("item_count", "batch_size", "truncated", "retained"),
-    [(64, 20, 0, 64), (65, 20, 1, 64), (33, 1, 1, 32)],
+    ("item_count", "batch_size", "truncated", "retained", "mixed_last"),
+    [
+        (64, 20, 0, 64, False),
+        (65, 20, 1, 64, False),
+        (33, 1, 1, 32, False),
+        (65, 16, 1, 64, True),
+    ],
 )
 def test_dynamic_theme_generator_and_verifier_share_the_64_source_boundary(
-    item_count, batch_size, truncated, retained,
+    item_count, batch_size, truncated, retained, mixed_last,
 ):
     from types import MappingProxyType
 
@@ -910,6 +963,11 @@ def test_dynamic_theme_generator_and_verifier_share_the_64_source_boundary(
     for index in range(item_count):
         canonical = json.dumps({"index": index}, separators=(",", ":"))
         content_hash = hashlib.sha256(canonical.encode()).hexdigest()
+        item_id = (
+            "ffffffff-ffff-4fff-bfff-ffffffffffff"
+            if mixed_last and index == item_count - 1
+            else str(uuid.uuid5(uuid.NAMESPACE_URL, f"market-source:{content_hash}"))
+        )
         items.append(SourceItem(
             provider="gdelt", upstream_item_id=f"cooling-{index:03d}",
             source_url=f"https://publisher-{index % 2}.example/cooling-{index:03d}",
@@ -918,7 +976,7 @@ def test_dynamic_theme_generator_and_verifier_share_the_64_source_boundary(
             canonical_content=canonical, content_hash=content_hash,
             published_at=NOW, effective_at=None, retrieved_at=NOW, authority="radar",
             metadata=MappingProxyType({
-                "item_id": str(uuid.uuid5(uuid.NAMESPACE_URL, f"market-source:{content_hash}")),
+                "item_id": item_id,
                 "publisher_id": f"publisher-{index % 2}",
                 "upstream_identity": f"story-{index:03d}",
             }),
@@ -928,11 +986,15 @@ def test_dynamic_theme_generator_and_verifier_share_the_64_source_boundary(
     source_rows = {}
     for batch, start in enumerate(range(0, item_count, batch_size)):
         task_id = str(uuid.uuid5(uuid.UUID(RUN), f"dynamic-boundary-source:{batch}"))
+        is_mixed_tail = mixed_last and start + batch_size >= item_count
         task = DiscoveryTask(
             task_id=task_id, stage="signals", provider="gdelt",
             capability_id="gdelt_theme_search", query_kind="theme_search",
-            theme_id="critical_minerals_and_magnets",
-            query=MappingProxyType({"query": "critical minerals"}),
+            theme_id=("macro_and_policy" if is_mixed_tail
+                      else "critical_minerals_and_magnets"),
+            query=MappingProxyType({
+                "query": "economic policy" if is_mixed_tail else "critical minerals",
+            }),
             window=MappingProxyType(window), dependencies=(), max_attempts=1,
             requires_credential=False,
         )
@@ -979,6 +1041,10 @@ def test_dynamic_theme_generator_and_verifier_share_the_64_source_boundary(
     assert dynamic["result"]["source_ids_truncated"] == truncated
     assert len(dynamic["result"]["proposals"][0]["source_ids"]) == retained
     assert len(dynamic["dependency_ids"]) <= 32
+    if mixed_last:
+        assert dynamic["result"]["requested_labels"] == [
+            "critical minerals", "critical_minerals_and_magnets",
+        ]
     assert release_verifier._authorized_dynamic_task_ids(
         {
             "enrichment_selection_manifests": [],
