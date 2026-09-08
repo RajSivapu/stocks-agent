@@ -88,7 +88,8 @@ def _capability_rows():
         "updated_at": "2026-09-05T19:31:00Z",
     }]
     receipts = []
-    reservations = []
+    reservation_id = str(uuid.uuid5(uuid.UUID(RUN), "reservation:gdelt"))
+    cache_keys = []
     required_tasks = [{
         "task_id": reference_task_id,
         "capability_id": "sec_company_tickers_universe",
@@ -100,8 +101,8 @@ def _capability_rows():
             uuid.NAMESPACE_URL,
             f"market-intelligence:receipt:{RUN}:{task_id}",
         ))
-        reservation_id = str(uuid.uuid5(uuid.UUID(RUN), f"reservation:{theme}"))
         cache_key = hashlib.sha256(theme.encode()).hexdigest()
+        cache_keys.append(cache_key)
         window = {"start": "2026-09-05T12:00:00Z", "end": "2026-09-05T20:00:00Z"}
         receipt = {
             "provider": "gdelt", "reservation_id": reservation_id,
@@ -142,15 +143,15 @@ def _capability_rows():
             "duplicate_count": 0, "dropped_count": 0, "error": None,
             "response_hash": receipt["response_hash"], "created_at": receipt["retrieved_at"],
         })
-        reservations.append({
-            "id": reservation_id, "run_id": RUN, "provider": "gdelt",
-            "market_date": "2026-09-05", "phase": "post-market",
-            "reserved_requests": 1, "cache_keys": [cache_key],
-            "created_at": "2026-09-05T19:30:00Z",
-        })
         required_tasks.append({
             "task_id": task_id, "capability_id": "gdelt_theme_search", "theme_id": theme,
         })
+    reservations = [{
+        "id": reservation_id, "run_id": RUN, "provider": "gdelt",
+        "market_date": "2026-09-05", "phase": "post-market",
+        "reserved_requests": len(themes) + 2, "cache_keys": cache_keys,
+        "created_at": "2026-09-05T19:30:00Z",
+    }]
     plan_body = {
         "version": 1,
         "source_capability_version": 1,
@@ -200,8 +201,14 @@ def _capability_rows():
         "run": [{"id": RUN, "scheduled_phase": "post-market", "scheduled_market_date": "2026-09-05"}],
         "intelligence_runs": [{
             "id": RUN, "phase": "post-market", "market_date": "2026-09-05",
+            "reservation_plan": {"reservations": [{
+                "id": reservation_id, "provider": "gdelt",
+                "requests": len(themes) + 2, "cache_keys": [],
+            }]},
             "request_window": {
                 "start": "2026-09-05T12:00:00Z", "end": "2026-09-05T20:00:00Z",
+                "timezone": "America/Chicago", "market_date": "2026-09-05",
+                "phase": "post-market",
             },
         }],
         "reference_manifests": records["reference_manifests"],
@@ -293,12 +300,22 @@ def _reverse_descriptor_for_source(rows, item_id):
 
 
 def test_discovery_capability_accepts_receipt_backed_success_empty_for_every_due_task():
-    result = _verify_capability(_capability_rows())
+    rows = _capability_rows()
+    result = _verify_capability(rows)
 
     assert result.ok is True
     assert result.required_capability_ids == (
         "sec_company_tickers_universe", "gdelt_theme_search",
     )
+    for field, value in (
+        ("timezone", "UTC"),
+        ("market_date", "2026-09-04"),
+        ("phase", "intraday"),
+    ):
+        inconsistent = copy.deepcopy(rows)
+        inconsistent["intelligence_runs"][0]["request_window"][field] = value
+        with pytest.raises(RuntimeError, match="reverse selection inputs"):
+            _verify_capability(inconsistent)
 
 
 def _make_first_required_receipt_nonempty(rows, *, persist_lineage):
@@ -631,12 +648,16 @@ def test_discovery_capability_accepts_research_from_authorized_additional_source
     optional_reservation = copy.deepcopy(required_reservation)
     optional_reservation.update(
         id=optional_reservation_id, provider=provider,
-        cache_keys=[optional_parsed["cache_key"]],
+        reserved_requests=1, cache_keys=[optional_parsed["cache_key"]],
     )
     rows["discovery_stage_tasks"].append(optional_task)
     rows["source_receipts"].append(optional_stored)
     rows["completions"][0]["payload"]["receipts"].append(optional_completion)
     rows["source_quota_reservations"].append(optional_reservation)
+    rows["intelligence_runs"][0]["reservation_plan"]["reservations"].append({
+        "id": optional_reservation_id, "provider": provider,
+        "requests": 1, "cache_keys": [],
+    })
 
     empty_hash = hashlib.sha256(b"required-empty").hexdigest()
     for receipt in (required_parsed, required_stored, required_completion):
@@ -1107,7 +1128,12 @@ def test_discovery_capability_accepts_honest_uncertain_reverse_task():
         uncertain["result"]["reverse_descriptor"] = descriptor
         uncertain["result"]["request_cursor"] = SourceCursor(
             provider="gdelt", capability_id="gdelt_theme_search",
+            completed_through="2026-09-05T18:00:00Z",
         ).to_mapping()
+        uncertain["requested_window"] = {
+            "start": "2026-09-05T16:00:00.000Z",
+            "end": "2026-09-05T20:00:00.000Z",
+        }
         uncertain["query_hash"] = digest({
             "capability_id": "gdelt_theme_search",
             "query": descriptor,
@@ -1489,6 +1515,8 @@ def release(tmp_path):
             "id": RUN, "phase": "post-market", "market_date": "2026-09-05",
             "request_window": {
                 "start": "2026-09-05T12:00:00Z", "end": "2026-09-05T20:00:00Z",
+                "timezone": "America/Chicago", "market_date": "2026-09-05",
+                "phase": "post-market",
             },
         }],
         "completions": [{"completion_id": COLLECTION, "run_id": RUN, "receipt": {"packet_id": PACKET, "packet_hash": packet["packet_hash"]}}],
@@ -1509,6 +1537,7 @@ def release(tmp_path):
     }
     capability = _capability_rows()
     for key in (
+        "intelligence_runs",
         "reference_manifests", "security_reference_revisions", "reference_chunk_receipts",
         "reference_snapshot_memberships", "reference_finalization_seals",
         "reference_run_bindings", "reference_predecessor_pins", "discovery_stage_tasks",
@@ -1593,6 +1622,9 @@ def test_release_accepts_receipt_backed_quiet_intraday_without_a_report(release)
         telegram_message_ids=[],
     )
     source.rows["intelligence_runs"][0]["phase"] = "intraday"
+    source.rows["intelligence_runs"][0]["request_window"]["phase"] = "intraday"
+    for reservation in source.rows["source_quota_reservations"]:
+        reservation["phase"] = "intraday"
     source.rows["evaluation_publications"][0]["phase"] = "intraday"
     source.rows["reports"] = []
     source.rows["publications"] = []
@@ -1885,6 +1917,8 @@ def test_protected_release_extraction_reads_reused_reference_and_full_source_lin
         "run_source_item_provenance", "run_outcomes",
     } <= set(rows)
     assert "payload" in sql_by_key["completions"]
+    assert "reservation_plan" in sql_by_key["intelligence_runs"]
+    assert "request_window" in sql_by_key["intelligence_runs"]
     assert "market_reference_run_bindings" in sql_by_key["reference_manifests"]
     assert "market_reference_run_bindings" in sql_by_key["reference_chunk_receipts"]
     assert "market_reference_snapshot_memberships" in sql_by_key["security_reference_revisions"]

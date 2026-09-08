@@ -27,6 +27,10 @@ from lib.intelligence.discovery import (
     select_reverse_discovery_tasks,
 )
 from lib.intelligence.normalize import SourceItem, _claim_polarity
+from lib.intelligence.pipeline import (
+    _collection_window_for_task,
+    _timestamp as _pipeline_timestamp,
+)
 from lib.intelligence.planner import load_source_capabilities
 from lib.intelligence.policy import load_intelligence_policy
 from lib.intelligence.themes import (
@@ -36,6 +40,7 @@ from lib.intelligence.themes import (
     theme_fingerprint,
 )
 from lib.intelligence.universe import reference_snapshot_from_rows
+from lib.intelligence.types import DiscoveryTask
 from scripts.export_recovery_bundle import (
     _ENRICHMENT_PHASE_ENVELOPES,
     _ENRICHMENT_QUERY_CONTRACTS,
@@ -1338,22 +1343,96 @@ def _verify_discovery_capability(receipt: Mapping[str, object]) -> VerificationR
         duplicate_references=duplicate_references,
     )
     phase = str(intelligence.get("phase"))
+    reservation_plan = intelligence.get("reservation_plan")
+    plan_reservation_rows = (
+        reservation_plan.get("reservations")
+        if isinstance(reservation_plan, Mapping) else None
+    )
     request_window = intelligence.get("request_window")
     adaptive_envelope = _ENRICHMENT_PHASE_ENVELOPES.get(phase)
     reverse_capability = registry.get("gdelt_theme_search")
+    valid_plan_reservations = (
+        isinstance(reservation_plan, Mapping)
+        and set(reservation_plan) == {"reservations"}
+        and isinstance(plan_reservation_rows, list)
+        and bool(plan_reservation_rows)
+        and all(
+            isinstance(row, Mapping)
+            and set(row) == {"id", "provider", "requests", "cache_keys"}
+            and isinstance(row.get("id"), str)
+            and UUID.fullmatch(row["id"]) is not None
+            and isinstance(row.get("provider"), str) and bool(row["provider"])
+            and type(row.get("requests")) is int and row["requests"] > 0
+            and isinstance(row.get("cache_keys"), list)
+            and all(
+                isinstance(key, str) and re.fullmatch(r"[0-9a-f]{64}", key)
+                for key in row["cache_keys"]
+            )
+            for row in plan_reservation_rows
+        )
+    )
+    plan_reservations_by_provider = {
+        str(row["provider"]): row for row in plan_reservation_rows
+    } if valid_plan_reservations else {}
+    plan_reservation_ids = {
+        str(row["id"]) for row in plan_reservation_rows
+    } if valid_plan_reservations else set()
+    current_reservation_ids = {
+        str(row_id) for row_id, row in reservations.items()
+        if row.get("run_id") == run_id
+    }
+    valid_plan_reservations = (
+        valid_plan_reservations
+        and len(plan_reservations_by_provider) == len(plan_reservation_rows)
+        and plan_reservation_ids == current_reservation_ids
+        and all(
+            reservations[row["id"]].get("provider") == row["provider"]
+            and reservations[row["id"]].get("reserved_requests") == row["requests"]
+            and reservations[row["id"]].get("market_date") == intelligence.get("market_date")
+            and reservations[row["id"]].get("phase") == phase
+            for row in plan_reservation_rows
+        )
+    )
     static_reverse_calls = sum(
         tasks[task_id].get("capability_id") == "gdelt_theme_search"
         for task_id in planned_ids
         if tasks[task_id].get("stage") != "reference"
     )
-    require(
+    static_gdelt_calls = sum(
+        tasks[task_id].get("provider") == "gdelt"
+        for task_id in planned_ids
+        if tasks[task_id].get("stage") != "reference"
+    )
+    gdelt_plan = plan_reservations_by_provider.get("gdelt")
+    gdelt_reserved_requests = (
+        gdelt_plan.get("requests") if isinstance(gdelt_plan, Mapping) else None
+    )
+    valid_request_window = (
         isinstance(request_window, Mapping)
-        and set(request_window) == {"start", "end"}
+        and set(request_window) == {"start", "end", "timezone", "market_date", "phase"}
+        and all(isinstance(value, str) for value in request_window.values())
+        and request_window.get("timezone") == "America/Chicago"
+        and request_window.get("market_date") == intelligence.get("market_date")
+        and request_window.get("phase") == phase
+    )
+    if valid_request_window:
+        try:
+            valid_request_window = (
+                timestamp(request_window["start"]) < timestamp(request_window["end"])
+            )
+        except RuntimeError:
+            valid_request_window = False
+    require(
+        valid_request_window and valid_plan_reservations
         and isinstance(adaptive_envelope, Mapping)
-        and reverse_capability is not None,
+        and reverse_capability is not None
+        and type(gdelt_reserved_requests) is int
+        and gdelt_reserved_requests >= static_gdelt_calls,
         "discovery reverse selection inputs are invalid",
     )
+    reserved_reverse_capacity = gdelt_reserved_requests - static_gdelt_calls
     reverse_capacity = min(
+        reserved_reverse_capacity,
         int(policy.adaptive_enrichment_budget.get(phase, 0)),
         int(adaptive_envelope["gdelt_reverse"]),
         max(0, reverse_capability.max_requests_per_run - static_reverse_calls),
@@ -1400,9 +1479,32 @@ def _verify_discovery_capability(receipt: Mapping[str, object]) -> VerificationR
     for task_id, (selection, descriptor) in expected_reverse_by_id.items():
         task = tasks[task_id]
         result = task.get("result")
+        request_cursor = result.get("request_cursor") if isinstance(result, Mapping) else None
+        try:
+            cursor = SourceCursor.from_mapping(request_cursor)  # type: ignore[arg-type]
+            expected_task = DiscoveryTask(
+                task_id=task_id,
+                stage="resolve",
+                provider=selection.task.provider,
+                capability_id=selection.task.capability_id,
+                query_kind=selection.task.query_kind,  # type: ignore[arg-type]
+                theme_id=selection.task.theme_id,
+                query=descriptor,
+                window=request_window,
+                dependencies=selection.dependency_task_ids,
+                max_attempts=selection.task.max_attempts,
+                requires_credential=False,
+            )
+            expected_window = _collection_window_for_task(expected_task, cursor)
+            expected_requested_window = {
+                "start": _pipeline_timestamp(expected_window.start),
+                "end": _pipeline_timestamp(expected_window.end),
+            }
+        except (TypeError, ValueError):
+            expected_requested_window = None
         require(
             task.get("dependency_ids") == list(selection.dependency_task_ids)
-            and task.get("requested_window") == request_window
+            and task.get("requested_window") == expected_requested_window
             and isinstance(result, Mapping)
             and result.get("reverse_descriptor") == descriptor,
             "discovery reverse evidence selection is inconsistent",

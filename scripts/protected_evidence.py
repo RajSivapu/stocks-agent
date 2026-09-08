@@ -324,7 +324,7 @@ class PostgresReadOnlySource:
         )
         queries = {
             "run": "SELECT id::text AS id,kind,scheduled_phase,scheduled_market_date::text AS scheduled_market_date,status,started_at::text AS started_at,finished_at::text AS finished_at,gateway_request_id::text AS gateway_request_id,telegram_message_ids FROM public.analysis_runs WHERE id=%s::uuid",
-            "intelligence_runs": "SELECT id::text AS id,phase,market_date::text AS market_date FROM public.market_intelligence_runs WHERE id=%s::uuid",
+            "intelligence_runs": "SELECT id::text AS id,phase,market_date::text AS market_date,reservation_plan,request_window FROM public.market_intelligence_runs WHERE id=%s::uuid",
             "reference_manifests": RECOVERY_SQL["reference_manifests"] + f" WHERE id IN ({selected_manifests})",
             "security_reference_revisions": RECOVERY_SQL["security_reference_revisions"] + f" WHERE id IN (SELECT security_revision_id FROM public.market_reference_snapshot_memberships WHERE manifest_id IN ({selected_manifests}))",
             "reference_chunk_receipts": RECOVERY_SQL["reference_chunk_receipts"] + f" WHERE manifest_id IN ({selected_manifests})",
