@@ -446,11 +446,11 @@ def _persist_reference_stage(
         raise ValueError("reference predecessor pin receipt is invalid")
     predecessor_manifest_id = predecessor_pin.get("manifest_id")
     predecessor_snapshot: ReferenceSnapshot | None = None
+    predecessor_manifest: dict[str, object] | None = None
     if predecessor_manifest_id is not None:
         if not isinstance(predecessor_manifest_id, str):
             raise ValueError("reference predecessor pin receipt is invalid")
         after = None
-        predecessor_manifest = None
         predecessor_rows: list[dict[str, object]] = []
         while True:
             page = invoke("read_discovery_reference", {
@@ -500,6 +500,7 @@ def _persist_reference_stage(
         )
 
     manifest_id = None
+    selected_manifest_record: dict[str, object] | None = None
     if refreshed.status == "healthy" and refreshed.snapshot is not None:
         snapshot = (
             merge_reference_snapshot(refreshed.snapshot, predecessor_snapshot)
@@ -530,10 +531,12 @@ def _persist_reference_stage(
             raise ValueError("reference finalization receipt is invalid")
         requested_status = "healthy"
         selected_snapshot = snapshot
+        selected_manifest_record = transfer.begin["manifest"]
     else:
         requested_status = "reference_stale"
         manifest_id = predecessor_manifest_id
         selected_snapshot = predecessor_snapshot
+        selected_manifest_record = predecessor_manifest
 
     pinned = invoke("pin_discovery_reference", {
         "capability_id": _REFERENCE_CAPABILITY,
@@ -556,13 +559,34 @@ def _persist_reference_stage(
         raise ValueError("reference pin receipt is invalid")
     if selected_snapshot is not None and callable(snapshot_sink):
         snapshot_sink(selected_snapshot)
-    return {
+    revision = (
+        selected_manifest_record.get("revision")
+        if isinstance(selected_manifest_record, dict) else None
+    )
+    source_retrieved = (
+        selected_manifest_record.get("manifest", {}).get("source_retrieved_at")
+        if isinstance(selected_manifest_record, dict)
+        and isinstance(selected_manifest_record.get("manifest"), dict) else None
+    )
+    reference_expires_at = None
+    if isinstance(source_retrieved, str):
+        reference_expires_at = (
+            datetime.fromisoformat(source_retrieved.replace("Z", "+00:00"))
+            + timedelta(hours=24)
+        ).astimezone(timezone.utc).isoformat(timespec="milliseconds").replace("+00:00", "Z")
+    coverage = {
         "coverage_status": "scope_not_guaranteed",
         "reference_status": status,
         "reference_manifest_id": pinned_manifest,
         "reference_age_seconds": age,
         "execution_allowed": False,
     }
+    if revision is not None and reference_expires_at is not None:
+        coverage.update(
+            reference_revision=revision,
+            reference_expires_at=reference_expires_at,
+        )
+    return coverage
 
 
 def _read_current_reference_snapshot(

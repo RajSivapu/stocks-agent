@@ -5,6 +5,7 @@ import json
 import uuid
 from dataclasses import replace
 from decimal import Decimal
+from types import SimpleNamespace
 import pytest
 from datetime import date, datetime, timedelta, timezone
 from types import MappingProxyType
@@ -15,7 +16,9 @@ from lib.intelligence.pipeline import (
     _discover,
     _enrichment_candidates,
     _failed_receipt,
+    _retain_v2_relation_evidence,
     _source_summary,
+    protected_collection_context,
 )
 from lib.intelligence.normalize import normalize_item
 from lib.intelligence.providers import (
@@ -32,6 +35,7 @@ from lib.intelligence.exposure import (
     extract_exposure_facts,
 )
 from lib.intelligence.quota import QuotaSession
+from lib.intelligence.relationships import EventRelationship
 from lib.intelligence.themes import SEED_THEMES, evidence_key
 from tests.test_intelligence_entities import reference as entity_reference
 from lib.intelligence.universe import SecurityIdentity
@@ -780,6 +784,59 @@ def test_supported_bound_exposure_fact_qualifies_original_event_with_its_passage
     assert candidate.qualified is True
 
 
+def test_v2_relation_pressure_retains_adverse_and_records_evidence_and_fact_omissions():
+    adverse = normalize_item(replace(
+        raw_item("adverse-pressure"),
+        metadata=MappingProxyType({
+            "adverse_path": True,
+            "adverse_path_id": "supply-chain-reversal",
+            "claim_polarity": "denied",
+        }),
+    ))
+    primary = tuple(
+        normalize_item(replace(
+            raw_item(f"primary-pressure-{index}", provider="sec_edgar", official=True),
+            upstream_item_id=f"0001193125-26-{index:06d}:alpha.htm",
+            source_url=("https://www.sec.gov/Archives/edgar/data/1/"
+                        f"000119312526{index:06d}/alpha.htm"),
+            metadata=MappingProxyType({"exposure_kind": "filing"}),
+        ))
+        for index in range(1, 10)
+    )
+    relation = EventRelationship(
+        event_id="event-1", source_kind="event", source_key="event-1",
+        target_kind="security", target_key="sec:AAA", security_id="sec:AAA",
+        ticker="AAA", role="magnet_manufacturing", relationship_type="direct",
+        evidence=(adverse,), exposure_evidence=(), exposure_status="insufficient",
+        eligible_for_ranking=False, hypothesis=True, missing_reasons=(),
+        dropped_evidence_keys=(),
+    )
+    facts = tuple(
+        SimpleNamespace(
+            fact_id=f"00000000-0000-4000-8000-{index:012d}",
+            source_item_id=evidence_key(item),
+        )
+        for index, item in enumerate(primary, 1)
+    )
+
+    retained, retained_facts, dropped_evidence, dropped_facts = (
+        _retain_v2_relation_evidence(
+            relation, facts, {evidence_key(item): item for item in primary},
+        )
+    )
+
+    retained_ids = {evidence_key(item) for item in retained.evidence}
+    assert len(retained.evidence) == 8
+    assert evidence_key(adverse) in retained_ids
+    assert retained.exposure_evidence
+    assert len(dropped_evidence) == 2
+    assert set(dropped_evidence).isdisjoint(retained_ids)
+    assert len(dropped_facts) == 2
+    assert {fact.fact_id for fact in retained_facts}.isdisjoint(dropped_facts)
+    assert set(retained.dropped_evidence_keys) == set(dropped_evidence)
+    assert set(retained.dropped_exposure_fact_ids) == set(dropped_facts)
+
+
 def test_one_event_can_create_multiple_stable_security_relationships():
     source = replace(
         raw_item("agreement", official=True),
@@ -862,6 +919,82 @@ def test_pipeline_rejects_untyped_comparison_and_learning_coverage_inputs():
             "comparison_ids": [comparison_id],
             "learning_inputs": {"observation_ids": [learning_id], "coverage": "bounded"},
         })
+
+
+def test_protected_collection_context_retains_quote_receipts_and_revision_lineage():
+    value = protected_collection_context({
+        "holdings": [{"ticker": "AAA", "shares": "2"}],
+        "owner_plans": [],
+        "reconciled_cash_snapshot": {"ledger_watermark": "9"},
+        "intelligence_collection_context": {
+            "holding_market_values": {"AAA": "200"},
+            "liquidity_by_ticker": {"AAA": "0.8"},
+            "overlap_by_ticker": {"AAA": "0.1"},
+            "current_quotes": {"AAA": {"price": "100", "as_of": "2026-09-04T11:59:00.000Z"}},
+            "quote_receipt_ids": ["44444444-4444-4444-8444-444444444444"],
+            "portfolio_valuation_complete": True,
+            "portfolio_revision": "portfolio:7",
+        },
+    })
+
+    assert value["current_quotes"]["AAA"]["price"] == "100"
+    assert value["quote_receipt_ids"] == ["44444444-4444-4444-8444-444444444444"]
+    assert value["portfolio_revision"] == "portfolio:7"
+    assert value["cash_revision"] == "9"
+    assert value["portfolio_valuation_complete"] is True
+
+
+def test_v2_conflicting_claims_are_a_suitability_veto_and_cannot_be_promoted():
+    affirmed = replace(
+        raw_item("conflict-positive", official=True),
+        security_ids=("sec:TEST",),
+        canonical_content='{"claim":"capacity","polarity":"positive"}',
+        content_hash=hashlib.sha256(
+            b'{"claim":"capacity","polarity":"positive"}'
+        ).hexdigest(),
+        metadata=MappingProxyType({
+            "claim_key": "TEST capacity expansion",
+            "polarity": "positive",
+            "claim_polarity": "affirmed",
+            "exposure_kind": "filing",
+        }),
+    )
+    denied = replace(
+        affirmed,
+        upstream_item_id="gdelt-conflict-negative",
+        source_url="https://example.com/gdelt/conflict-negative",
+        canonical_content='{"claim":"capacity","polarity":"negative"}',
+        content_hash=hashlib.sha256(
+            b'{"claim":"capacity","polarity":"negative"}'
+        ).hexdigest(),
+        metadata=MappingProxyType({
+            "claim_key": "TEST capacity expansion",
+            "polarity": "negative",
+            "claim_polarity": "denied",
+            "exposure_kind": "filing",
+        }),
+    )
+    normalized = (normalize_item(affirmed), normalize_item(denied))
+    receipt_ids = {
+        evidence_key(item): f"44444444-4444-4444-8444-{index:012d}"
+        for index, item in enumerate(normalized, 1)
+    }
+
+    _events, _relations, candidates = _discover(normalized, {
+        "_packet_contract_version": 2,
+        "_run_id": RUN_ID,
+        "_observed_at": "2026-09-04T12:00:00.000Z",
+        "_evidence_receipt_ids": receipt_ids,
+        "security_reference": ticker_reference(),
+    }, NOW)
+
+    assert len(candidates) == 2
+    assert all(candidate.suitability.state == "vetoed" for candidate in candidates)
+    assert all(
+        "conflicting_claim_polarity" in candidate.suitability.veto_reasons
+        for candidate in candidates
+    )
+    assert all(candidate.qualified is False for candidate in candidates)
 
 
 def test_new_pipeline_instance_rehydrates_completed_collection_with_new_run_receipt_lineage():

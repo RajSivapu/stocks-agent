@@ -1,9 +1,13 @@
+import hashlib
+import json
+import sys
 from dataclasses import replace
 from datetime import date
 
 import pytest
 
 from lib.intelligence.reports import ReportInput, build_report, report_id_from_key, report_idempotency_key
+from scripts.build_market_report import main as build_market_report_main
 
 SOURCE_A = "00000000-0000-4000-8000-000000000001"
 SOURCE_B = "00000000-0000-4000-8000-000000000002"
@@ -71,3 +75,130 @@ def test_urgent_and_intraday_reports_fail_closed():
         build_report(report_input(kind="intraday", intraday_triggered=False))
     with pytest.raises(ValueError, match="requires source"):
         build_report(report_input(source_ids=()))
+
+
+def test_v2_research_report_stores_distinct_suitability_opposition_and_review_state():
+    packet = {
+        "contract_version": 2,
+        "action_candidates": [],
+        "coverage": {"complete_market_coverage": False, "mode": "bounded"},
+        "research_candidates": [{
+            "candidate_key": "sec:TEST", "ticker": "TEST",
+            "research_state": "analysis_ready",
+            "suitability": {
+                "state": "unknown", "missing_reasons": ["valuation_missing"],
+                "veto_reasons": [],
+            },
+            "adverse_paths": ["demand-downside"],
+            "limitations": ["portfolio_overlap_missing"],
+            "evidence": [{"item_id": SOURCE_A, "role": "supporting"}, {
+                "item_id": SOURCE_B, "role": "opposing",
+            }],
+        }],
+    }
+
+    report = build_report(report_input(research_packet=packet))
+
+    assert "RESEARCH ONLY" in report.full_markdown
+    assert "Suitability: unknown (valuation_missing)" in report.full_markdown
+    assert "Opposing evidence: 00000000-0000-4000-8000-000000000002" in report.full_markdown
+    assert "Invalidation: demand-downside, portfolio_overlap_missing" in report.full_markdown
+    assert 'Coverage: {"complete_market_coverage":false,"mode":"bounded"}' in report.full_markdown
+    assert "Next review: unavailable" in report.full_markdown
+
+
+def test_v2_research_only_report_requires_real_sources_but_no_fake_policy_decision():
+    packet = {
+        "contract_version": 2,
+        "action_candidates": [],
+        "coverage": {"complete_market_coverage": False, "mode": "bounded"},
+        "research_candidates": [{
+            "candidate_key": "unresolved:magnet-supplier",
+            "ticker": None,
+            "research_state": "unresolved",
+            "suitability": {
+                "state": "unknown", "missing_reasons": ["security_identity_unresolved"],
+                "veto_reasons": [],
+            },
+            "adverse_paths": [],
+            "limitations": ["security_identity_unresolved"],
+            "evidence": [{"item_id": SOURCE_A, "role": "supporting"}],
+        }],
+    }
+
+    report = build_report(report_input(
+        source_ids=(SOURCE_A,), policy_decision_ids=(), research_packet=packet,
+    ))
+
+    assert report.policy_decision_ids == ()
+    assert "unresolved:magnet-supplier — RESEARCH ONLY" in report.full_markdown
+    assert "Suitability: unknown (security_identity_unresolved)" in report.full_markdown
+
+    action_packet = {
+        **packet,
+        "action_candidates": [{"candidate_key": "unresolved:magnet-supplier"}],
+    }
+    with pytest.raises(ValueError, match="policy decision"):
+        build_report(report_input(
+            source_ids=(SOURCE_A,), policy_decision_ids=(), research_packet=action_packet,
+        ))
+
+
+def test_report_text_bounds_are_utf8_bytes_not_code_points():
+    with pytest.raises(ValueError, match="bounded"):
+        build_report(report_input(full_markdown="磁" * 4_667))
+
+
+def test_report_cli_accepts_terminal_v2_research_receipt_without_fake_evaluation(
+    tmp_path, monkeypatch, capsys,
+):
+    run_id = "00000000-0000-4000-8000-000000000021"
+    packet = {
+        "contract_version": 2,
+        "run_id": run_id,
+        "action_candidates": [],
+        "coverage": {"complete_market_coverage": False, "mode": "bounded"},
+        "research_candidates": [{
+            "candidate_key": "unresolved:magnet-supplier",
+            "ticker": None,
+            "research_state": "unresolved",
+            "suitability": {
+                "state": "unknown", "missing_reasons": ["security_identity_unresolved"],
+                "veto_reasons": [],
+            },
+            "adverse_paths": [], "limitations": ["security_identity_unresolved"],
+            "evidence": [{"item_id": SOURCE_A, "role": "supporting"}],
+        }],
+    }
+    packet_hash = hashlib.sha256(json.dumps(
+        packet, ensure_ascii=False, separators=(",", ":"), sort_keys=True,
+    ).encode()).hexdigest()
+    payload = {
+        "collection_receipt": {
+            "completion_id": "00000000-0000-4000-8000-000000000022",
+            "run_id": run_id, "packet_id": "00000000-0000-4000-8000-000000000020",
+            "packet_hash": packet_hash, "packet": packet,
+        },
+        "evaluation_receipt": {
+            "ok": True, "run_id": run_id, "policy_decision_ids": [],
+            "source_ids": [SOURCE_A],
+            "intelligence_packet": {
+                "id": "00000000-0000-4000-8000-000000000020",
+                "content_hash": packet_hash,
+            },
+        },
+        "comparison_receipts": [],
+        "content": {
+            "market_date": "2026-09-04", "kind": "weekly",
+            "title": "Weekly owner research", "summary": "Research requires more evidence.",
+            "full_markdown": "# Weekly owner research\n\nNo action is eligible.",
+        },
+    }
+    input_path = tmp_path / "report.json"
+    input_path.write_text(json.dumps(payload))
+    monkeypatch.setattr(sys, "argv", ["build_market_report.py", str(input_path)])
+
+    assert build_market_report_main() == 0
+    rendered = json.loads(capsys.readouterr().out)
+    assert rendered["report"]["policy_decision_ids"] == []
+    assert "unresolved:magnet-supplier — RESEARCH ONLY" in rendered["rendered_text"]

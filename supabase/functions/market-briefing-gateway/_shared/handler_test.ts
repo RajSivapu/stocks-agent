@@ -165,6 +165,89 @@ Deno.test("report handler loads exact persisted decisions before generating deli
   );
 });
 
+Deno.test("scheduled v2 research persists a real report and suppression receipt without a fake evaluation", async () => {
+  const packet = researchOnlyPacket();
+  class ResearchOnlyRepository extends FakeRepository {
+    override loadIntelligencePacket() {
+      this.packetReadCalls += 1;
+      return Promise.resolve({
+        id: PACKET_ID,
+        run_id: RUN_ID,
+        content_hash: sha256Hex(canonicalJson(packet)),
+        packet,
+        evidence_facts: [],
+        exposure_facts: [],
+      });
+    }
+  }
+  const repo = new ResearchOnlyRepository();
+  repo.scheduledReportPhase = "post-market";
+  const payload = researchOnlyReportFixture(packet);
+  const setup = makeHandler(repo);
+
+  const response = await setup.handler(request("record_report", payload));
+
+  assertEquals(response.status, 200);
+  const result = await json(response);
+  assertEquals(result.publication_receipt, {
+    status: "suppressed",
+    suppression_reason: "not_actionable",
+    telegram_message_ids: [],
+    retry_allowed: false,
+  });
+  assertEquals(repo.reportDecisionReads, []);
+  assertEquals(repo.packetReadCalls, 1);
+  assertEquals(setup.sent, []);
+  assertEquals(repo.reportOrigins.length, 1);
+  assert(
+    JSON.stringify(repo.storedReport).includes("unresolved:magnet-supplier") &&
+      !JSON.stringify(repo.storedReport).includes("fabricated ticker") &&
+      !JSON.stringify(repo.storedReport).includes("999999"),
+    "research report did not retain canonical packet state",
+  );
+});
+
+Deno.test("v2 research evaluation receipt returns packet sources without manufacturing decisions", async () => {
+  const packet = researchOnlyPacket();
+  const packetHash = sha256Hex(canonicalJson(packet));
+  class ResearchOnlyRepository extends FakeRepository {
+    override loadIntelligencePacket() {
+      this.packetReadCalls += 1;
+      return Promise.resolve({
+        id: PACKET_ID,
+        run_id: RUN_ID,
+        content_hash: packetHash,
+        packet,
+        evidence_facts: [],
+        exposure_facts: [],
+      });
+    }
+  }
+  const repo = new ResearchOnlyRepository();
+  const setup = makeHandler(repo);
+
+  const response = await setup.handler(request("evaluate_and_publish", {
+    phase: "post-market",
+    market_date: "2026-09-02",
+    title: "Bounded research",
+    candidates: [],
+    intelligence_packet: {
+      id: PACKET_ID,
+      content_hash: packetHash,
+      coverage: "partial",
+    },
+  }));
+
+  assertEquals(response.status, 200);
+  const result = await json(response);
+  assertEquals(result.policy_decision_ids, []);
+  assertEquals(result.source_ids, [
+    "00000000-0000-4000-8000-000000000031",
+  ]);
+  assertEquals(result.telegram_message_ids, []);
+  assertEquals(setup.sent, []);
+});
+
 Deno.test("stored report delivery becomes uncertain after a send crash and same report key is never resent", async () => {
   const repo = new FakeRepository();
   const payload = reportFixture();
@@ -605,6 +688,114 @@ function evidencePacket(): EvidencePacket {
     coverage: { mode: "bounded", complete_market_coverage: false },
     limitations: [],
     policy_version: 1,
+  };
+}
+
+function researchOnlyPacket(): EvidencePacket {
+  const suitabilityBody = {
+    component_scores: {
+      concentration_penalty: "0.000000",
+      duplication_penalty: "0.000000",
+      liquidity: "0.000000",
+      portfolio_relevance: "0.000000",
+    },
+    lineage: null,
+    missing_reasons: ["security_identity_unresolved"],
+    state: "unknown" as const,
+    veto_reasons: [],
+  };
+  const candidateBody = {
+    adverse_paths: [],
+    candidate_key: "unresolved:magnet-supplier",
+    entity_id: "unresolved:magnet-supplier",
+    event_ids: ["00000000-0000-4000-8000-000000000041"],
+    evidence: [{
+      claim_type: "event",
+      item_id: "00000000-0000-4000-8000-000000000031",
+      relationship_eligible: false,
+      role: "supporting" as const,
+    }],
+    exposure_fact_ids: [],
+    limitations: ["security_identity_unresolved"],
+    priority_components: {
+      authority_corroboration: "1.000000",
+      exposure: "0.000000",
+      materiality: "0.000000",
+      recency: "1.000000",
+    },
+    priority_score: "2.000000",
+    research_state: "unresolved" as const,
+    roles: [],
+    security_id: null,
+    suitability: {
+      ...suitabilityBody,
+      evaluation_hash: sha256Hex(canonicalJson(suitabilityBody)),
+    },
+    theme_ids: ["critical-minerals"],
+    ticker: null,
+  };
+  return {
+    action_candidates: [],
+    contract_version: 2,
+    coverage: { complete_market_coverage: false, mode: "bounded" },
+    evidence: [{
+      authority: "official",
+      canonical_url: "https://example.test/item",
+      claim_type: "event",
+      content_hash: "a".repeat(64),
+      effective_at: null,
+      item_id: "00000000-0000-4000-8000-000000000031",
+      normalized_text: "Official event.",
+      published_at: "2026-09-02T16:00:00.000Z",
+      reporting_at: null,
+      retrieved_at: "2026-09-02T16:01:00.000Z",
+      source_identity: {
+        provider: "official",
+        receipt_id: "00000000-0000-4000-8000-000000000042",
+        upstream_item_id: "item-1",
+      },
+    }],
+    execution_allowed: false,
+    limitations: [],
+    observed_at: "2026-09-02T17:00:00.000Z",
+    omissions: [],
+    policy_version: 1,
+    research_candidates: [{
+      ...candidateBody,
+      candidate_hash: sha256Hex(canonicalJson(candidateBody)),
+    }],
+    run_id: RUN_ID,
+  };
+}
+
+function researchOnlyReportFixture(packet: EvidencePacket) {
+  const body = {
+    title: "Caller title",
+    summary: "BUY a fabricated ticker",
+    full_markdown: "Caller BUY 999999",
+    source_ids: ["00000000-0000-4000-8000-000000000031"],
+    policy_decision_ids: [],
+    comparison_ids: [],
+    actionable_risk: true,
+    material_thesis_change: false,
+    intraday_triggered: false,
+    suggestion_only: true,
+  };
+  const reportHash = sha256Hex(canonicalJson(body));
+  const packetHash = sha256Hex(canonicalJson(packet));
+  const key = sha256Hex(
+    `v2:weekly:2026-09-02:${packetHash}:${reportHash}`,
+  );
+  return {
+    id: reportIdFromKey(key),
+    idempotency_key: key,
+    packet_id: PACKET_ID,
+    market_date: "2026-09-02",
+    kind: "weekly" as const,
+    report: body,
+    report_hash: reportHash,
+    rendered_text: body.full_markdown,
+    rendered_hash: sha256Hex(body.full_markdown),
   };
 }
 
@@ -1232,6 +1423,7 @@ function request(
   payload: unknown,
   options: {
     dry?: boolean;
+    packet?: boolean;
     runId?: string | null;
     requestId?: string;
     secret?: string;
@@ -1246,7 +1438,7 @@ function request(
   ) {
     const row = payloadValue as Record<string, unknown>;
     const phase = row.phase;
-    if (!("intelligence_packet" in row)) {
+    if (!("intelligence_packet" in row) && options.packet !== false) {
       if (options.dry) {
         const packet = packetForCandidates(
           row.candidates as Array<Record<string, unknown>>,
@@ -1300,6 +1492,30 @@ function request(
     },
   );
 }
+
+Deno.test("every evaluation mode requires a packet before prior suggestions can be considered", async () => {
+  for (
+    const phase of [
+      "on-demand",
+      "pre-market",
+      "intraday",
+      "post-market",
+    ] as const
+  ) {
+    const setup = makeHandler();
+    const value = candidate(phase, "brief") as Record<string, unknown>;
+    value.prior_suggestion_ids = ["00000000-0000-4000-8000-000000000099"];
+    const response = await setup.handler(request("evaluate_and_publish", {
+      phase,
+      market_date: "2026-09-02",
+      title: "packet bypass attempt",
+      candidates: [value],
+    }, { dry: true, packet: false }));
+    assertEquals((await json(response)).code, "INTELLIGENCE_PACKET_INVALID");
+    assertEquals(setup.fetched, []);
+    assertEquals(setup.repository.applyCalls, 0);
+  }
+});
 
 Deno.test("protected completion recovery bypasses new request claims and refuses authored payloads", async () => {
   const REQUEST_ID = "00000000-0000-4000-8000-000000000071";
@@ -1370,7 +1586,11 @@ Deno.test("protected quote producer reserves before fetching and resumes without
     },
   });
   const setup = makeHandler(repo, {
-    fetchCollectionQuote: (ticker: string, now: Date, instrumentType: "COMMON_STOCK" | "ADR" | "ETF") => {
+    fetchCollectionQuote: (
+      ticker: string,
+      now: Date,
+      instrumentType: "COMMON_STOCK" | "ADR" | "ETF",
+    ) => {
       calls.push("fetch");
       return fetchCollectionQuote(
         ticker,
@@ -1447,7 +1667,12 @@ Deno.test("enrichment selection is persisted as an exact service-only manifest b
       selection_stage: "initial",
       schema_version: 1,
       execution_allowed: false,
-      provider_reservations: { sec_issuer_submissions: 1, sec_filing_document: 1, yahoo_security_quote: 1, gdelt_reverse: 1 },
+      provider_reservations: {
+        sec_issuer_submissions: 1,
+        sec_filing_document: 1,
+        yahoo_security_quote: 1,
+        gdelt_reverse: 1,
+      },
       deferred_reasons: {},
       request_descriptors: [],
       semantic_hash: "a".repeat(64),
@@ -1458,14 +1683,21 @@ Deno.test("enrichment selection is persisted as an exact service-only manifest b
   const repo = Object.assign(new FakeRepository(), {
     sealEnrichmentSelection: (_run: string, value: unknown) => {
       received = value;
-      return Promise.resolve({ manifest_id: payload.manifest.manifest_id, request_count: 0, duplicate: false });
+      return Promise.resolve({
+        manifest_id: payload.manifest.manifest_id,
+        request_count: 0,
+        duplicate: false,
+      });
     },
   });
   const setup = makeHandler(repo);
-  const result = await setup.handler(request("seal_enrichment_selection", payload));
+  const result = await setup.handler(
+    request("seal_enrichment_selection", payload),
+  );
   assertEquals(result.status, 200);
   assert(
-    (received as typeof payload).manifest.manifest_id === payload.manifest.manifest_id,
+    (received as typeof payload).manifest.manifest_id ===
+      payload.manifest.manifest_id,
     "handler must preserve the sealed manifest identity",
   );
   assert(
@@ -1473,7 +1705,12 @@ Deno.test("enrichment selection is persisted as an exact service-only manifest b
     "handler must preserve an explicitly empty bounded selection",
   );
   assertEquals((await json(result)).request_count, 0);
-  assertEquals((await setup.handler(request("seal_enrichment_selection", { ...payload, extra: true }))).status, 400);
+  assertEquals(
+    (await setup.handler(
+      request("seal_enrichment_selection", { ...payload, extra: true }),
+    )).status,
+    400,
+  );
 });
 
 Deno.test("scheduled discovery requires the persisted packet hash before market work", async () => {

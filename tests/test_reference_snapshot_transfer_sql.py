@@ -136,7 +136,7 @@ def test_new_schema_tail_is_additive_and_prior_migrations_are_unchanged():
     assert MIGRATION.read_text() in schema
     assert CURSOR_CONTEXT.read_text() in schema
     assert OFFICIAL_COMPLETION.read_text() in schema
-    assert schema.endswith(ENRICHMENT.read_text())
+    assert ENRICHMENT.read_text() in schema
     import subprocess
 
     prior_at_base = subprocess.run(

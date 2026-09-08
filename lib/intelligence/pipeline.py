@@ -49,7 +49,12 @@ from lib.intelligence.providers import (
     SourceAdapter,
 )
 from lib.intelligence.quota import QuotaSession
-from lib.intelligence.ranking import CandidateInput, RankedCandidate, rank_candidates
+from lib.intelligence.ranking import (
+    CandidateInput,
+    CandidateLineage,
+    RankedCandidate,
+    rank_candidates,
+)
 from lib.intelligence.research_queue import (
     EnrichmentCandidate,
     EnrichmentRequest,
@@ -336,9 +341,11 @@ class IntelligencePipeline:
                 raise ValueError("reference stage result is invalid")
             allowed = {
                 "coverage_status", "reference_status", "reference_manifest_id",
-                "reference_age_seconds", "execution_allowed",
+                "reference_age_seconds", "reference_revision",
+                "reference_expires_at", "execution_allowed",
             }
-            if set(reference) != allowed or reference.get("coverage_status") != "scope_not_guaranteed" \
+            required = allowed - {"reference_revision", "reference_expires_at"}
+            if not required <= set(reference) <= allowed or reference.get("coverage_status") != "scope_not_guaranteed" \
                     or reference.get("reference_status") not in {
                         "healthy", "reference_stale", "reference_unavailable"
                     } or reference.get("execution_allowed") is not False:
@@ -1994,6 +2001,12 @@ class IntelligencePipeline:
                 observed_at=request.now,
             )
             self.context["screen_coverage"] = dict(screen_run.coverage)
+        self.context["_packet_contract_version"] = 2 if self.discovery_plan is not None else 1
+        self.context["_run_id"] = run_id
+        self.context["_observed_at"] = _timestamp(request.now)
+        self.context["_evidence_receipt_ids"] = {
+            evidence_key(item): receipt_id for item, receipt_id in raw_items
+        }
         events, relationships, ranked = _discover(discovery_items, self.context, request.now)
         qualified_ids = {
             evidence_key(item)
@@ -2054,18 +2067,65 @@ class IntelligencePipeline:
                 self.packet_limits.max_serialized_bytes, _OUTPUT_PACKET_BYTES
             ),
         )
-        evidence_packet = build_evidence_packet(ranked, limits, coverage=coverage)
+        collection_drops = tuple(
+            {
+                "candidate_key": "",
+                "item_id": evidence_key(value.item),
+                "kind": "source_item",
+                "reason": str(value.reason),
+                "stage": "deduplication",
+            }
+            for value in dispositions
+            if value.disposition == "duplicate"
+        )
+        relation_drops = tuple(
+            {
+                "candidate_key": relation.security_id,
+                "item_id": item_id,
+                "kind": "evidence",
+                "reason": "relationship_evidence_limit",
+                "stage": "relationship",
+            }
+            for relation in relationships
+            for item_id in relation.dropped_evidence_keys
+        ) + tuple(
+            {
+                "candidate_key": relation.security_id,
+                "item_id": fact_id,
+                "kind": "exposure_fact",
+                "reason": "relationship_evidence_limit",
+                "stage": "relationship",
+            }
+            for relation in relationships
+            for fact_id in relation.dropped_exposure_fact_ids
+        )
+        evidence_packet = build_evidence_packet(
+            ranked, limits, coverage=coverage,
+            contract_version=2 if self.discovery_plan is not None else 1,
+            run_id=run_id if self.discovery_plan is not None else None,
+            observed_at=_timestamp(request.now) if self.discovery_plan is not None else None,
+            omissions=collection_drops + relation_drops,
+        )
         packet_dict = evidence_packet.to_dict()
         packet_hash = hashlib.sha256(_canonical(packet_dict).encode()).hexdigest()
         packet_id = _uuid("packet", run_id, packet_hash)
         persisted_packet = PersistedPacket(packet_id, packet_hash, evidence_packet)
         packet_row = {
             "id": packet_id,
-            "candidate_count": len(evidence_packet.candidates),
+            "candidate_count": (len(evidence_packet.research_candidates)
+                                if evidence_packet.contract_version == 2
+                                else len(evidence_packet.candidates)),
             "evidence_count": len(packet_dict["evidence"]),
             "packet": packet_dict,
             "packet_hash": packet_hash,
         }
+        persisted_rankings = []
+        persisted_candidate_keys: set[str] = set()
+        for candidate in ranked:
+            if candidate.candidate_key in persisted_candidate_keys:
+                continue
+            persisted_candidate_keys.add(candidate.candidate_key)
+            persisted_rankings.append(_ranking_row(run_id, candidate))
         payload = {
             "status": "completed",
             "coverage": coverage,
@@ -2073,26 +2133,16 @@ class IntelligencePipeline:
             "items": item_rows,
             "events": [_event_row(run_id, event) for event in events],
             "relationships": [_relationship_row(run_id, relation) for relation in relationships],
-            "rankings": [_ranking_row(run_id, candidate) for candidate in ranked],
+            "rankings": persisted_rankings,
             "packet": packet_row,
             "error": None,
         }
-        collection_drops = tuple(
-            {
-                "candidate_key": "",
-                "item_id": evidence_key(value.item),
-                "kind": "source_item",
-                "reason": str(value.reason),
-            }
-            for value in dispositions
-            if value.disposition == "duplicate"
-        )
         packet_drops = tuple(
             {"candidate_key": drop.candidate_key, "item_id": drop.item_id,
              "kind": drop.kind, "reason": drop.reason}
             for drop in evidence_packet.drops
         )
-        coverage["collector_drops"] = list(collection_drops + packet_drops)
+        coverage["collector_drops"] = list(collection_drops + relation_drops + packet_drops)
         final = self._record(run_id, payload, _uuid("completion-request", request.request_id))
         limitations = tuple(failure_codes) + tuple(packet_dict["limitations"])
         counts = final.get("counts") if isinstance(final.get("counts"), Mapping) else {}
@@ -2100,7 +2150,7 @@ class IntelligencePipeline:
             run_id=run_id,
             packet=persisted_packet,
             sources=tuple(sources),
-            drops=collection_drops + packet_drops,
+            drops=collection_drops + relation_drops + packet_drops,
             coverage=coverage,
             write_counts={str(key): int(value) for key, value in counts.items()},
             domains_checked=targets,
@@ -2225,9 +2275,10 @@ def _validated_reference_coverage(value: object) -> dict[str, object]:
         raise ValueError("reference stage result is invalid")
     allowed = {
         "coverage_status", "reference_status", "reference_manifest_id",
-        "reference_age_seconds", "execution_allowed",
+        "reference_age_seconds", "reference_revision", "reference_expires_at",
     }
-    if set(value) != allowed or value.get("coverage_status") != "scope_not_guaranteed" \
+    required = allowed - {"reference_revision", "reference_expires_at"}
+    if not required <= set(value) <= allowed or value.get("coverage_status") != "scope_not_guaranteed" \
             or value.get("reference_status") not in {
                 "healthy", "reference_stale", "reference_unavailable"
             } or value.get("execution_allowed") is not False:
@@ -2245,6 +2296,14 @@ def _validated_reference_coverage(value: object) -> dict[str, object]:
         except (TypeError, ValueError, AttributeError):
             raise ValueError("reference stage result is invalid") from None
         if isinstance(age, bool) or not isinstance(age, int) or age < 0:
+            raise ValueError("reference stage result is invalid")
+        revision = result.get("reference_revision")
+        expires_at = result.get("reference_expires_at")
+        if (revision is not None and (
+            isinstance(revision, bool) or not isinstance(revision, int) or revision < 1
+        )) or (expires_at is not None and (
+            not isinstance(expires_at, str) or not expires_at.endswith("Z")
+        )):
             raise ValueError("reference stage result is invalid")
     return result
 
@@ -2415,6 +2474,11 @@ def protected_collection_context(value: object) -> dict[str, object]:
     holdings = value.get("holdings", [])
     if not isinstance(holdings, list):
         raise ValueError("protected holdings must be rows")
+    quotes = _mapping(trusted.get("current_quotes"))
+    quote_receipt_ids = trusted.get("quote_receipt_ids", [])
+    if not isinstance(quote_receipt_ids, list):
+        raise ValueError("protected quote receipt identities must be rows")
+    cash = _mapping(value.get("reconciled_cash_snapshot"))
     return {
         "holdings": [{"ticker": row["ticker"], "shares": row.get("shares"),
                       "market_value": valuations.get(row["ticker"])} for row in holdings if isinstance(row, Mapping)],
@@ -2422,6 +2486,14 @@ def protected_collection_context(value: object) -> dict[str, object]:
         "qualified_candidates": value.get("qualified_candidates", []),
         "liquidity_by_ticker": dict(_mapping(trusted.get("liquidity_by_ticker"))),
         "overlap_by_ticker": dict(_mapping(trusted.get("overlap_by_ticker"))),
+        "current_quotes": {
+            str(ticker): dict(raw) for ticker, raw in quotes.items()
+            if isinstance(raw, Mapping)
+        },
+        "quote_receipt_ids": list(quote_receipt_ids),
+        "portfolio_valuation_complete": trusted.get("portfolio_valuation_complete") is True,
+        "portfolio_revision": trusted.get("portfolio_revision"),
+        "cash_revision": cash.get("ledger_watermark"),
         "reference_version": trusted.get("reference_version"),
         "source_cursors": trusted.get("source_cursors", []),
         "last_completed_scans": trusted.get("last_completed_scans", []),
@@ -2648,6 +2720,7 @@ def _discover(
     events: list[MarketEvent] = []
     relations: list[EventRelationship] = []
     taxonomy = load_theme_taxonomy()
+    contract_version = 2 if context.get("_packet_contract_version") == 2 else 1
     drafts = detect_events(items, taxonomy)
     reference = context.get("security_reference")
     reference_coverage = context.get("reference_coverage")
@@ -2671,6 +2744,7 @@ def _discover(
         if {"positive", "negative"} <= values
     }
     items_by_id = {evidence_key(item): item for item in items}
+    source_receipts = _mapping(context.get("_evidence_receipt_ids"))
     conflicting_events: set[str] = set()
     for draft in drafts:
         item = draft.evidence[0]
@@ -2695,6 +2769,49 @@ def _discover(
             if row.status == "resolved" and row.eligible
             and row.security_id is not None and row.ticker is not None
         }
+        if contract_version == 2 and not unique_resolutions:
+            evidence_ids = tuple(evidence_key(value) for value in supporting)
+            unresolved_lineage = CandidateLineage(
+                run_id=str(context.get("_run_id") or ""),
+                observed_at=str(context.get("_observed_at") or ""),
+                policy_version=int(context.get("policy_version") or 1),
+                reference_manifest_id=None,
+                reference_revision=None,
+                reference_expires_at=None,
+                security_revision_id=None,
+                quote_receipt_id=None,
+                quote_as_of=None,
+                quote_expires_at=None,
+                evidence_receipt_ids={
+                    item_id: str(source_receipts[item_id])
+                    for item_id in evidence_ids if item_id in source_receipts
+                },
+                portfolio_revision=(str(context["portfolio_revision"])
+                                    if context.get("portfolio_revision") is not None else None),
+                cash_revision=(str(context["cash_revision"])
+                               if context.get("cash_revision") is not None else None),
+            )
+            candidates.append(CandidateInput(
+                ticker=None,
+                event=event,
+                relation=None,
+                evidence=tuple(supporting),
+                authority_corroboration=_authority_score(supporting),
+                exposure_strength=None,
+                recency=_research_recency(supporting, now),
+                portfolio_relevance=None,
+                liquidity=None,
+                contract_version=2,
+                entity_id=f"unresolved:{event.event_id}",
+                theme_ids=event.theme_ids,
+                explicit_unresolved_identity=True,
+                supporting_evidence_ids=evidence_ids,
+                lineage=unresolved_lineage,
+                limitations=(
+                    "reference_unavailable" if not reference_available
+                    else "security_identity_unresolved",
+                ),
+            ))
         for security_id in sorted(unique_resolutions):
             resolution = unique_resolutions[security_id]
             ticker = str(resolution.ticker)
@@ -2704,6 +2821,11 @@ def _discover(
                 security_id=security_id,
                 role=str(item.metadata.get("role") or "exposure"),
                 evidence=supporting,
+            )
+            required_evidence_did_not_fit = any(
+                evidence_key(value) in relation.dropped_evidence_keys
+                and _is_opposing_evidence(value)
+                for value in supporting
             )
             typed_facts = context.get("exposure_facts", ())
             matching_facts = tuple(
@@ -2725,24 +2847,19 @@ def _discover(
             )
             if context.get("primary_exposure_required") is True:
                 if supported_facts:
-                    exposure_items = tuple(sorted(
-                        {fact.source_item_id: items_by_id[fact.source_item_id]
-                         for fact in supported_facts}.values(),
-                        key=evidence_key,
-                    ))[:8]
-                    combined = tuple(sorted(
-                        {evidence_key(value): value
-                         for value in (*relation.evidence, *exposure_items)}.values(),
-                        key=evidence_key,
-                    ))[:8]
-                    relation = replace(
-                        relation, evidence=combined, exposure_evidence=exposure_items,
-                        exposure_status="qualified", eligible_for_ranking=True,
-                        hypothesis=False,
-                        missing_reasons=tuple(
-                            reason for reason in relation.missing_reasons
-                            if reason != "authoritative_exposure_required"
-                        ),
+                    relation, supported_facts, dropped_evidence, dropped_facts = (
+                        _retain_v2_relation_evidence(
+                            relation, supported_facts, items_by_id,
+                        )
+                    )
+                    required_evidence_did_not_fit = (
+                        required_evidence_did_not_fit
+                        or bool(dropped_facts)
+                        or any(
+                            item_id in items_by_id
+                            and _is_opposing_evidence(items_by_id[item_id])
+                            for item_id in dropped_evidence
+                        )
                     )
                 else:
                     missing = "contradicted_primary_exposure" if contradicted else (
@@ -2759,7 +2876,11 @@ def _discover(
             observed_at = item.published_at or item.retrieved_at
             age_seconds = max(0.0, (_utc(now) - _utc(observed_at)).total_seconds())
             liquidity = _liquidity_score(item, context, ticker)
-            holding_weights = _holding_weights(context.get("holdings"))
+            holding_weights = (
+                _holding_weights(context.get("holdings"))
+                if contract_version == 1 or context.get("portfolio_valuation_complete") is True
+                else None
+            )
             holding_weight = (
                 holding_weights.get(ticker, Decimal("0"))
                 if holding_weights is not None else None
@@ -2772,6 +2893,68 @@ def _discover(
                     Decimal(len(relation.exposure_evidence)) / Decimal(len(relation.evidence))
                     if relation.evidence else None
                 )
+            all_evidence_ids = {evidence_key(value) for value in relation.evidence}
+            opposing_ids = tuple(sorted(
+                evidence_key(value) for value in relation.evidence
+                if value.claim_polarity == "denied"
+                or value.metadata.get("adverse_path") is True
+                or value.metadata.get("role") == "opposing"
+            ))
+            supporting_ids = tuple(sorted(all_evidence_ids - set(opposing_ids)))
+            current_quotes = _mapping(context.get("current_quotes"))
+            quote = _mapping(current_quotes.get(ticker))
+            quote_receipts = context.get("quote_receipt_ids")
+            quote_receipt_id = (
+                str(quote["receipt_id"]) if quote.get("receipt_id") else
+                str(quote_receipts[0]) if isinstance(quote_receipts, list)
+                and len(quote_receipts) == 1 else None
+            )
+            reference_status = (
+                str(reference_coverage.get("reference_status"))
+                if isinstance(reference_coverage, Mapping) else "reference_unavailable"
+            )
+            reference_state = {
+                "healthy": "current", "reference_stale": "stale",
+                "reference_unavailable": "unavailable",
+            }.get(reference_status, "unavailable")
+            lineage = None
+            if contract_version == 2:
+                lineage = CandidateLineage(
+                    run_id=str(context.get("_run_id") or ""),
+                    observed_at=str(context.get("_observed_at") or ""),
+                    policy_version=int(context.get("policy_version") or 1),
+                    reference_manifest_id=(
+                        str(reference_coverage.get("reference_manifest_id"))
+                        if isinstance(reference_coverage, Mapping)
+                        and reference_coverage.get("reference_manifest_id") else None
+                    ),
+                    reference_revision=(
+                        int(reference_coverage["reference_revision"])
+                        if isinstance(reference_coverage, Mapping)
+                        and isinstance(reference_coverage.get("reference_revision"), int)
+                        else None
+                    ),
+                    reference_expires_at=(
+                        str(reference_coverage["reference_expires_at"])
+                        if isinstance(reference_coverage, Mapping)
+                        and isinstance(reference_coverage.get("reference_expires_at"), str)
+                        else None
+                    ),
+                    security_revision_id=next((
+                        fact.security_revision_id for fact in supported_facts
+                    ), None),
+                    quote_receipt_id=quote_receipt_id,
+                    quote_as_of=str(quote.get("as_of")) if quote.get("as_of") else None,
+                    quote_expires_at=str(quote.get("expires_at")) if quote.get("expires_at") else None,
+                    evidence_receipt_ids={
+                        item_id: str(source_receipts[item_id])
+                        for item_id in all_evidence_ids if item_id in source_receipts
+                    },
+                    portfolio_revision=(str(context["portfolio_revision"])
+                                        if context.get("portfolio_revision") else None),
+                    cash_revision=(str(context["cash_revision"])
+                                  if context.get("cash_revision") else None),
+                )
             candidates.append(CandidateInput(
                 ticker=ticker, event=event, relation=relation, evidence=relation.evidence,
                 authority_corroboration=_authority_score(relation.evidence),
@@ -2781,14 +2964,142 @@ def _discover(
                                      if holding_weight is not None and overlap is not None else None),
                 liquidity=liquidity,
                 holding_weight=holding_weight, overlap=overlap, concentration=holding_weight,
+                contract_version=contract_version,
+                security_id=security_id,
+                entity_id=resolution.entity_id,
+                theme_ids=event.theme_ids,
+                roles=tuple(sorted({fact.role for fact in supported_facts})) or (relation.role,),
+                exposure_fact_ids=tuple(sorted(fact.fact_id for fact in supported_facts)),
+                supporting_evidence_ids=supporting_ids,
+                opposing_evidence_ids=opposing_ids,
+                lineage=lineage,
+                reference_state=reference_state,  # type: ignore[arg-type]
+                valuation_state=str(context.get("valuation_state_by_ticker", {}).get(ticker, "missing"))
+                if isinstance(context.get("valuation_state_by_ticker"), Mapping) else "missing",
+                quote_state="passed" if quote and quote_receipt_id else "missing",
+                portfolio_state="passed" if context.get("portfolio_valuation_complete") is True else "unavailable",
+                cash_state="passed" if context.get("cash_revision") else "unavailable",
+                limitations=(
+                    ("required_evidence_did_not_fit",)
+                    if required_evidence_did_not_fit
+                    else ()
+                ),
+                adverse_paths=tuple(sorted(
+                    str(value.metadata.get("adverse_path_id"))
+                    for value in relation.evidence if value.metadata.get("adverse_path_id")
+                )),
             ))
     holdings = _holding_weights(context.get("holdings"))
     plans = context.get("owner_plans", context.get("plans"))
-    ranked = rank_candidates(candidates, holdings=holdings, plans=plans)
-    ranked = [replace(candidate, qualified=False,
-        veto_reasons=(*candidate.veto_reasons, "CONFLICTING_CLAIM_POLARITY"))
-        if candidate.event_id in conflicting_events else candidate for candidate in ranked]
+    ranked = rank_candidates(
+        candidates, holdings=holdings, plans=plans, contract_version=contract_version,
+    )
+    conflicting_ranked: list[RankedCandidate] = []
+    for candidate in ranked:
+        if candidate.event_id not in conflicting_events:
+            conflicting_ranked.append(candidate)
+            continue
+        suitability = candidate.suitability
+        if suitability is not None:
+            suitability = replace(
+                suitability,
+                state="vetoed",
+                veto_reasons=tuple(dict.fromkeys((
+                    *suitability.veto_reasons, "conflicting_claim_polarity",
+                ))),
+            )
+        conflicting_ranked.append(replace(
+            candidate,
+            qualified=False,
+            suitability=suitability,
+            veto_reasons=tuple(dict.fromkeys((
+                *candidate.veto_reasons, "CONFLICTING_CLAIM_POLARITY",
+            ))),
+        ))
+    ranked = conflicting_ranked
     return events, relations, ranked
+
+
+def _research_recency(items: Sequence[SourceItem], now: datetime) -> Decimal:
+    observed = max((item.published_at or item.retrieved_at for item in items), default=now)
+    age_seconds = max(0.0, (_utc(now) - _utc(observed)).total_seconds())
+    return max(Decimal("0"), Decimal("1") - Decimal(str(age_seconds)) / Decimal("604800"))
+
+
+def _is_opposing_evidence(item: SourceItem) -> bool:
+    return (
+        item.claim_polarity == "denied"
+        or item.metadata.get("claim_polarity") == "denied"
+        or item.metadata.get("adverse_path") is True
+        or item.metadata.get("role") == "opposing"
+    )
+
+
+def _retain_v2_relation_evidence(
+    relation: EventRelationship,
+    supported_facts: Sequence[ExposureFact],
+    items_by_id: Mapping[str, SourceItem],
+) -> tuple[
+    EventRelationship,
+    tuple[ExposureFact, ...],
+    tuple[str, ...],
+    tuple[str, ...],
+]:
+    """Retain one primary source and adverse evidence before optional support."""
+    primary_by_id = {
+        fact.source_item_id: items_by_id[fact.source_item_id]
+        for fact in supported_facts if fact.source_item_id in items_by_id
+    }
+    evidence_by_id = {
+        evidence_key(item): item for item in (*relation.evidence, *primary_by_id.values())
+    }
+    primary_ids = sorted(primary_by_id)
+    adverse_ids = sorted(
+        item_id for item_id, item in evidence_by_id.items()
+        if _is_opposing_evidence(item)
+    )
+    ordered_ids: list[str] = []
+    if primary_ids:
+        ordered_ids.append(primary_ids[0])
+    ordered_ids.extend(adverse_ids)
+    ordered_ids.extend(primary_ids)
+    ordered_ids.extend(sorted(evidence_by_id))
+    ordered_ids = list(dict.fromkeys(ordered_ids))
+    retained_ids: list[str] = []
+    dropped_ids: list[str] = []
+    for item_id in ordered_ids:
+        if len(retained_ids) < 8:
+            retained_ids.append(item_id)
+        else:
+            dropped_ids.append(item_id)
+    retained_id_set = set(retained_ids)
+    retained_facts = tuple(
+        fact for fact in supported_facts if fact.source_item_id in retained_id_set
+    )
+    dropped_fact_ids = tuple(sorted(
+        fact.fact_id for fact in supported_facts
+        if fact.source_item_id not in retained_id_set
+    ))
+    retained_exposure = tuple(
+        evidence_by_id[item_id] for item_id in retained_ids if item_id in primary_by_id
+    )
+    retained_relation = replace(
+        relation,
+        evidence=tuple(evidence_by_id[item_id] for item_id in retained_ids),
+        exposure_evidence=retained_exposure,
+        exposure_status="qualified" if retained_exposure else "insufficient",
+        eligible_for_ranking=bool(retained_exposure),
+        hypothesis=not bool(retained_exposure),
+        missing_reasons=tuple(
+            reason for reason in relation.missing_reasons
+            if reason != "authoritative_exposure_required" or not retained_exposure
+        ),
+        dropped_evidence_keys=tuple(sorted(set((
+            *relation.dropped_evidence_keys, *dropped_ids,
+        )))),
+        dropped_exposure_fact_ids=dropped_fact_ids,
+    )
+    return retained_relation, retained_facts, tuple(dropped_ids), dropped_fact_ids
 
 
 def _enrichment_candidates(

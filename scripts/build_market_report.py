@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import sys
 from datetime import date
@@ -40,14 +41,42 @@ def main() -> int:
         sources = evaluation.get("source_ids")
         reference = evaluation.get("intelligence_packet")
         packet_body = packet.get("packet")
-        packet_sources = ({row.get("item_id") for row in packet_body.get("evidence", [])
-                           if isinstance(row, dict)} if isinstance(packet_body, dict) else set())
-        if (not isinstance(content, dict) or not isinstance(policies, list) or not policies or
+        research_only = (
+            isinstance(packet_body, dict)
+            and packet_body.get("contract_version") == 2
+            and isinstance(packet_body.get("research_candidates"), list)
+            and bool(packet_body["research_candidates"])
+            and packet_body.get("action_candidates") == []
+        )
+        if isinstance(packet_body, dict) and packet_body.get("contract_version") == 2:
+            packet_sources = {
+                evidence.get("item_id")
+                for candidate in packet_body.get("research_candidates", [])
+                if isinstance(candidate, dict)
+                for evidence in candidate.get("evidence", [])
+                if isinstance(evidence, dict)
+            }
+        else:
+            packet_sources = ({row.get("item_id") for row in packet_body.get("evidence", [])
+                               if isinstance(row, dict)} if isinstance(packet_body, dict) else set())
+        canonical_packet_hash = (
+            hashlib.sha256(json.dumps(
+                packet_body, ensure_ascii=False, separators=(",", ":"), sort_keys=True,
+            ).encode()).hexdigest() if isinstance(packet_body, dict) else None
+        )
+        if (not isinstance(content, dict) or not isinstance(policies, list) or
+                (not policies and not research_only) or
                 len(policies) > 50 or not isinstance(sources, list) or not sources or
                 evaluation.get("run_id") != packet.get("run_id") or
                 not isinstance(reference, dict) or reference != {
                     "id": packet.get("packet_id"), "content_hash": packet.get("packet_hash")
-                } or not isinstance(packet_body, dict) or not set(sources) <= packet_sources):
+                } or not isinstance(packet_body, dict) or
+                packet.get("packet_hash") != canonical_packet_hash or
+                (packet_body.get("contract_version") == 2 and
+                 packet_body.get("run_id") != packet.get("run_id")) or
+                not set(sources) <= packet_sources or
+                (packet_body.get("contract_version") == 2 and
+                 set(sources) != packet_sources)):
             raise ValueError("bounded accepted policy receipts required")
         if value["comparison_receipts"] != []:
             raise ValueError("comparison ledger unavailable")
@@ -60,6 +89,7 @@ def main() -> int:
             actionable_risk=content.get("actionable_risk", False),
             material_thesis_change=content.get("material_thesis_change", False),
             intraday_triggered=content.get("intraday_triggered", False),
+            research_packet=packet_body,
         ))
         print(json.dumps(report.to_gateway_payload(), sort_keys=True, separators=(",", ":")))
         return 0

@@ -45,6 +45,238 @@ def digest(value):
     return hashlib.sha256(json.dumps(value, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
 
 
+def _research_v2_recovery_records():
+    records = typed_exposure_recovery_records()
+    packet_row = records["packets"][0]
+    run_id = packet_row["run_id"]
+    fact = records["exposure_facts"][0]
+    fact_value = fact["fact"]["value"]
+    security = next(
+        row for row in records["security_reference_revisions"]
+        if row["id"] == fact["security_revision_id"]
+    )
+    manifest = next(
+        row for row in records["reference_manifests"]
+        if row["id"] == security["manifest_id"]
+    )
+    supporting_checkpoint = next(
+        row for row in records["collection_checkpoints"]
+        if row["source_receipt_id"] == fact_value["source_receipt_id"]
+    )
+    supporting_item = supporting_checkpoint["payload"]["items"][0]
+    support_item_id = fact_value["source_item_id"]
+    support_receipt_id = fact_value["source_receipt_id"]
+
+    evidence = [
+        {
+            "authority": supporting_item["authority"],
+            "canonical_url": supporting_item["source_url"],
+            "claim_type": "issuer_exposure",
+            "content_hash": supporting_item["content_hash"],
+            "effective_at": supporting_item["effective_at"],
+            "item_id": support_item_id,
+            "normalized_text": supporting_item["normalized_text"],
+            "published_at": supporting_item["published_at"],
+            "reporting_at": supporting_item["reporting_at"],
+            "retrieved_at": supporting_item["retrieved_at"],
+            "source_identity": {
+                "provider": supporting_item["provider"],
+                "receipt_id": support_receipt_id,
+                "upstream_item_id": supporting_item["upstream_item_id"],
+            },
+        },
+    ]
+    observed_at = "2026-09-05T19:40:00.000Z"
+    lineage = {
+        "cash_revision": None,
+        "evidence_receipt_ids": {
+            support_item_id: support_receipt_id,
+        },
+        "observed_at": observed_at,
+        "policy_version": packet_row["policy_version"],
+        "portfolio_revision": None,
+        "quote_as_of": None,
+        "quote_expires_at": None,
+        "quote_receipt_id": None,
+        "reference_expires_at": "2026-09-06T19:40:00.000Z",
+        "reference_manifest_id": manifest["id"],
+        "reference_revision": manifest["revision"],
+        "run_id": run_id,
+        "security_revision_id": security["id"],
+    }
+    suitability_body = {
+        "component_scores": {
+            "concentration_penalty": "0.000000", "duplication_penalty": "0.000000",
+            "liquidity": "0.000000", "portfolio_relevance": "0.000000",
+        }, "lineage": lineage,
+        "missing_reasons": ["valuation_missing"], "state": "unknown",
+        "veto_reasons": [],
+    }
+    suitability = {
+        **suitability_body,
+        "evaluation_hash": digest(suitability_body),
+    }
+    candidate_body = {
+        "adverse_paths": [],
+        "candidate_key": security["security_id"],
+        "entity_id": security["entity_id"],
+        "event_ids": fact_value["event_ids"],
+        "evidence": [
+            {"claim_type": "issuer_exposure", "item_id": support_item_id,
+             "relationship_eligible": True, "role": "supporting"},
+        ],
+        "exposure_fact_ids": [fact["id"]],
+        "limitations": ["valuation_missing"],
+        "priority_components": {
+            "authority_corroboration": "0.000000", "exposure": "1.000000",
+            "materiality": "0.000000", "recency": "0.000000",
+        },
+        "priority_score": "1.000000",
+        "research_state": "exposure_supported",
+        "roles": [fact_value["role"]],
+        "security_id": security["security_id"],
+        "suitability": suitability,
+        "theme_ids": ["magnets"],
+        "ticker": security["ticker"],
+    }
+    candidate = {**candidate_body, "candidate_hash": digest(candidate_body)}
+    packet = {
+        "action_candidates": [], "contract_version": 2,
+        "coverage": {"complete_market_coverage": False, "mode": "bounded"},
+        "evidence": evidence, "execution_allowed": False,
+        "limitations": ["valuation_missing"], "observed_at": observed_at,
+        "omissions": [], "policy_version": packet_row["policy_version"],
+        "research_candidates": [candidate], "run_id": run_id,
+    }
+    packet_row.update(
+        candidate_count=1, evidence_count=1, packet=packet, packet_hash=digest(packet),
+    )
+    supporting_checkpoint["payload"]["receipt"]["expires_at"] = (
+        "2026-09-06T19:36:00.000Z"
+    )
+    run_item_id = str(uuid.uuid5(
+        uuid.UUID(run_id), f"run-source:{support_item_id}:{support_receipt_id}",
+    ))
+    event_id = candidate["event_ids"][0]
+    records["source_receipts"] = [{
+        "id": support_receipt_id,
+        "run_id": run_id,
+        "reservation_id": supporting_checkpoint["payload"]["receipt"]["reservation_id"],
+        "provider": supporting_item["provider"],
+        "status": "succeeded",
+        "cache_key": supporting_checkpoint["cache_key"],
+        "requested_window": supporting_checkpoint["request_window"],
+        "retrieved_at": supporting_item["retrieved_at"],
+        "expires_at": "2026-09-06T19:36:00.000Z",
+        "request_cost": 1,
+        "upstream_remaining": None,
+        "returned_count": 1,
+        "accepted_count": 1,
+        "duplicate_count": 0,
+        "dropped_count": 0,
+        "error": None,
+        "response_hash": supporting_checkpoint["payload"]["receipt"]["response_hash"],
+        "created_at": supporting_checkpoint["created_at"],
+    }]
+    records["source_items"] = [{
+        "id": support_item_id,
+        "source_receipt_id": support_receipt_id,
+        "provider": supporting_item["provider"],
+        "upstream_item_id": supporting_item["upstream_item_id"],
+        "canonical_url": supporting_item["source_url"],
+        "published_at": supporting_item["published_at"],
+        "effective_at": supporting_item["effective_at"],
+        "title": supporting_item["title"],
+        "normalized_text": supporting_item["normalized_text"],
+        "canonical_content": supporting_item["canonical_content"],
+        "content_hash": supporting_item["content_hash"],
+        "metadata": {**supporting_item["metadata"], "authority": supporting_item["authority"]},
+        "created_at": supporting_checkpoint["created_at"],
+    }]
+    records["intelligence_run_items"] = [{
+        "id": run_item_id, "run_id": run_id, "source_item_id": support_item_id,
+        "source_receipt_id": support_receipt_id, "disposition": "accepted",
+        "drop_reason": None, "created_at": supporting_checkpoint["created_at"],
+    }]
+    records["source_item_provenance"] = [{
+        "source_item_id": support_item_id, "provider": supporting_item["provider"],
+        "canonical_item_url": supporting_item["source_url"],
+        "request_url": supporting_item["request_url"],
+        "retrieved_at": supporting_item["retrieved_at"],
+        "reporting_at": supporting_item["reporting_at"],
+        "entity_ids": supporting_item["entity_ids"],
+        "security_ids": supporting_item["security_ids"],
+        "discovery_status": "qualified", "created_at": supporting_checkpoint["created_at"],
+    }]
+    records["run_source_item_provenance"] = [{
+        "run_item_id": run_item_id, "run_id": run_id,
+        "source_item_id": support_item_id, "source_receipt_id": support_receipt_id,
+        "provider": supporting_item["provider"], "request_url": supporting_item["request_url"],
+        "retrieved_at": supporting_item["retrieved_at"],
+        "reporting_at": supporting_item["reporting_at"],
+        "entity_ids": supporting_item["entity_ids"],
+        "security_ids": supporting_item["security_ids"],
+        "discovery_status": "qualified", "created_at": supporting_checkpoint["created_at"],
+    }]
+    event_body = {
+        "event_type": "thematic_event", "title": "Permanent magnet operating exposure",
+        "summary": "Fixture event", "occurred_at": None, "effective_at": None,
+        "materiality": "0.500000", "confidence": "0.500000",
+        "evidence_item_ids": [support_item_id],
+    }
+    records["events"] = [{
+        "id": event_id, "run_id": run_id, **event_body,
+        "content_hash": digest(event_body), "created_at": supporting_checkpoint["created_at"],
+    }]
+    ranking_body = {
+        "event_id": event_id, "candidate_key": candidate["candidate_key"],
+        "ticker": candidate["ticker"], "rank": 1,
+        "component_scores": candidate["priority_components"],
+        "total_score": candidate["priority_score"], "qualified": False,
+        "veto_reasons": candidate["suitability"]["missing_reasons"],
+        "exposure_item_ids": [support_item_id],
+    }
+    ranking_hash = digest(ranking_body)
+    records["candidate_rankings"] = [{
+        "id": str(uuid.uuid5(
+            uuid.NAMESPACE_URL, f"market-intelligence:ranking:{ranking_hash}",
+        )),
+        "run_id": run_id, **ranking_body, "content_hash": ranking_hash,
+        "created_at": supporting_checkpoint["created_at"],
+    }]
+    records["collection_completions"][0]["receipt"].update(
+        packet_id=packet_row["id"], packet_hash=packet_row["packet_hash"],
+    )
+    report = records["reports"][0]
+    report_body = {
+        "title": "WEEKLY RESEARCH", "summary": "TEST: INSUFFICIENT. No action terms approved.",
+        "full_markdown": "TEST: INSUFFICIENT. No action terms approved.",
+        "source_ids": [support_item_id], "policy_decision_ids": [], "comparison_ids": [],
+        "actionable_risk": False, "material_thesis_change": False,
+        "intraday_triggered": False, "suggestion_only": True,
+    }
+    report.update(
+        packet_id=packet_row["id"], kind="weekly", report=report_body,
+        report_hash=digest(report_body), rendered_text="TEST: INSUFFICIENT. No action terms approved.",
+    )
+    report["rendered_hash"] = hashlib.sha256(report["rendered_text"].encode()).hexdigest()
+    origin = records["report_origins"][0]
+    origin.update(
+        requested_report_id=report["id"], requested_packet_id=packet_row["id"],
+        requested_idempotency_key=report["idempotency_key"],
+        requested_report_hash=report["report_hash"],
+    )
+    records["publications"][0].update(
+        report_id=report["id"], idempotency_key=report["idempotency_key"],
+        status="suppressed", telegram_message_ids=[], telegram_accepted_at=None,
+        suppression_reason="not_actionable", attempt_count=0,
+    )
+    records["evaluation_publications"] = []
+    records["decision_evaluations"] = []
+    records["policy_comparisons"] = []
+    return records
+
+
 _REFERENCE_ENTRY_KEYS_V1 = (
     "id", "manifest_id", "revision", "security_id", "entity_id", "ticker",
     "exchange", "instrument_type", "eligible", "exclusion_reasons", "aliases",
@@ -401,6 +633,13 @@ def recovery_records():
             "reserved_requests": 2, "cache_keys": [],
             "created_at": "2026-09-05T19:30:00Z",
         }],
+        "source_receipts": [],
+        "source_items": [],
+        "intelligence_run_items": [],
+        "source_item_provenance": [],
+        "run_source_item_provenance": [],
+        "events": [],
+        "candidate_rankings": [],
         "collection_checkpoints": [{
             "run_id": run, "cache_key": "d" * 64,
             "request_window": {"start": "2026-09-05T12:00:00Z", "end": "2026-09-05T20:00:00Z",
@@ -505,7 +744,7 @@ def recovery_records():
         "cik": "0000000001",
         "dependency_task_ids": [signals_task_id],
         "entity_id": "sec-cik:0000000001",
-        "event_ids": ["event-1"],
+        "event_ids": ["90000000-0000-4000-8000-000000000001"],
         "hypothesis_ids": ["hypothesis-1"],
         "instrument_type": "COMMON_STOCK",
         "issuer_entity_id": "sec-cik:0000000001",
@@ -642,13 +881,13 @@ def typed_exposure_recovery_records():
             security_revision_id=security["id"], reference_manifest_id=manifest_id,
             cik="0000000001", canonical_name="Test Corporation", ticker="TEST",
         ),
-        role="magnet_manufacturing", event_ids=("event-1",),
+        role="magnet_manufacturing", event_ids=("90000000-0000-4000-8000-000000000001",),
         hypothesis_ids=("hypothesis-1",),
     )[0]
     descriptor = {
         "adverse_path": False, "cache_key": cache_key, "cik": "0000000001",
         "dependency_task_ids": [issuer_task], "entity_id": security["entity_id"],
-        "event_ids": ["event-1"], "hypothesis_ids": ["hypothesis-1"],
+        "event_ids": ["90000000-0000-4000-8000-000000000001"], "hypothesis_ids": ["hypothesis-1"],
         "instrument_type": security["instrument_type"], "priority": 1,
         "reference_manifest_id": manifest_id,
         "reservation_id": records["source_quota_reservations"][1]["id"],
@@ -1731,6 +1970,94 @@ def test_recovery_accepts_empty_intelligence_packet_report_history_when_all_depe
     assert all(validated[dataset] == [] for dataset in EMPTY_INTELLIGENCE_PACKET_REPORT_HISTORY)
 
 
+def test_recovery_validates_v2_research_packet_fact_source_and_completion_lineage():
+    records = _research_v2_recovery_records()
+
+    validated = _validated_records(records)
+
+    assert validated["packets"][0]["packet"]["contract_version"] == 2
+
+
+@pytest.mark.parametrize("mutation", (
+    "candidate_identity", "event", "fact", "source", "receipt", "suitability",
+    "evidence_omission", "action_promotion", "completion",
+))
+def test_recovery_rejects_rehashed_v2_packet_lineage_substitutions(mutation):
+    records = _research_v2_recovery_records()
+    packet = records["packets"][0]["packet"]
+    candidate = packet["research_candidates"][0]
+    if mutation == "candidate_identity":
+        candidate["ticker"] = "FAKE"
+    elif mutation == "event":
+        candidate["event_ids"] = ["aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"]
+    elif mutation == "fact":
+        candidate["exposure_fact_ids"] = ["aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"]
+    elif mutation == "source":
+        packet["evidence"][0]["content_hash"] = "a" * 64
+    elif mutation == "receipt":
+        candidate["suitability"]["lineage"]["evidence_receipt_ids"][
+            candidate["evidence"][0]["item_id"]
+        ] = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
+    elif mutation == "suitability":
+        candidate["suitability"]["state"] = "eligible"
+        candidate["suitability"]["missing_reasons"] = []
+    elif mutation == "evidence_omission":
+        candidate["evidence"] = []
+    elif mutation == "action_promotion":
+        packet["action_candidates"] = [{
+            "candidate_hash": candidate["candidate_hash"],
+            "candidate_key": candidate["candidate_key"],
+            "suitability_hash": candidate["suitability"]["evaluation_hash"],
+        }]
+    else:
+        records["collection_completions"][0]["receipt"]["packet_hash"] = "a" * 64
+    if mutation not in {"source", "completion", "action_promotion"}:
+        suitability_body = {
+            key: value for key, value in candidate["suitability"].items()
+            if key != "evaluation_hash"
+        }
+        candidate["suitability"]["evaluation_hash"] = digest(suitability_body)
+    if mutation != "completion":
+        candidate_body = {
+            key: value for key, value in candidate.items() if key != "candidate_hash"
+        }
+        candidate["candidate_hash"] = digest(candidate_body)
+        if packet["action_candidates"]:
+            packet["action_candidates"][0].update(
+                candidate_hash=candidate["candidate_hash"],
+                suitability_hash=candidate["suitability"]["evaluation_hash"],
+            )
+        records["packets"][0]["packet_hash"] = digest(packet)
+        records["collection_completions"][0]["receipt"]["packet_hash"] = records["packets"][0]["packet_hash"]
+
+    with pytest.raises(ValueError, match="packet v2"):
+        _validated_records(records)
+
+
+@pytest.mark.parametrize("mutation", ("missing_report", "missing_origin", "telegram_delivery", "uncertain_retry"))
+def test_recovery_requires_scheduled_v2_research_suppression_receipts(mutation):
+    records = _research_v2_recovery_records()
+    if mutation == "missing_report":
+        records["reports"] = []
+        records["report_origins"] = []
+        records["publications"] = []
+    elif mutation == "missing_origin":
+        records["report_origins"] = []
+    elif mutation == "telegram_delivery":
+        records["publications"][0].update(
+            status="delivered", telegram_message_ids=[7],
+            telegram_accepted_at="2026-09-05T20:00:00Z", suppression_reason=None,
+            attempt_count=1,
+        )
+    else:
+        records["publications"][0].update(
+            status="uncertain", suppression_reason=None, attempt_count=2,
+        )
+
+    with pytest.raises(ValueError, match="packet v2"):
+        _validated_records(records)
+
+
 @pytest.mark.parametrize("orphan_dataset", INTELLIGENCE_DEPENDENT_DATASETS)
 def test_recovery_rejects_each_intelligence_dependent_without_its_run(orphan_dataset):
     records = recovery_records()
@@ -2012,6 +2339,77 @@ def test_verifier_applies_actual_isolated_postgres_restore_and_retains_uncertain
         finally:
             for connection in connections:
                 connection.close()
+            subprocess.run(
+                [binaries["pg_ctl"], "-D", str(root / "db"), "-m", "immediate", "-w", "stop"],
+                check=True, capture_output=True,
+            )
+
+
+def test_v2_packet_actual_isolated_restore_preserves_exact_read_contract():
+    binaries = {name: shutil.which(name) for name in ("initdb", "pg_ctl")}
+    if not all(binaries.values()):
+        pytest.skip("disposable PostgreSQL binaries unavailable")
+    with tempfile.TemporaryDirectory(prefix="recovery-v2-postgres-") as directory:
+        root = Path(directory)
+        with socket.socket() as probe:
+            probe.bind(("127.0.0.1", 0)); port = probe.getsockname()[1]
+        subprocess.run(
+            [binaries["initdb"], "-D", str(root / "db"), "-A", "trust", "-E", "UTF8", "--no-locale"],
+            check=True, capture_output=True,
+        )
+        subprocess.run(
+            [binaries["pg_ctl"], "-D", str(root / "db"), "-l", str(root / "postgres.log"),
+             "-o", f"-k {root} -h '' -p {port}", "-w", "start"],
+            check=True, capture_output=True,
+        )
+        try:
+            with psycopg.connect(
+                f"host={root} port={port} dbname=postgres", autocommit=True, row_factory=dict_row,
+            ) as db:
+                db.execute("CREATE ROLE anon; CREATE ROLE authenticated; CREATE ROLE service_role")
+                db.execute(
+                    "CREATE SCHEMA supabase_migrations; "
+                    "CREATE TABLE supabase_migrations.schema_migrations("
+                    "version text PRIMARY KEY,statements text[])"
+                )
+                db.execute((Path(__file__).parents[1] / "sql/schema.sql").read_text())
+                records = _research_v2_recovery_records()
+                restore_recovery_records(db, records, isolated_guard=True)
+                packet = records["packets"][0]
+                restored = db.execute(
+                    "SELECT public.read_market_evidence_packet(%s::uuid,%s::uuid) AS value",
+                    (packet["id"], packet["run_id"]),
+                ).fetchone()["value"]
+                assert restored["packet"] == packet["packet"]
+                assert restored["packet_hash"] == packet["packet_hash"]
+                assert restored["exposure_facts"][0]["candidate_key"] == "TEST"
+                report_body = {
+                    "title": "THEME RESEARCH", "summary": "Research requires more evidence.",
+                    "full_markdown": "TEST: research only. Suggestion only; no order was placed.",
+                    "source_ids": [packet["packet"]["evidence"][0]["item_id"]],
+                    "policy_decision_ids": [], "comparison_ids": [],
+                    "actionable_risk": False, "material_thesis_change": False,
+                    "intraday_triggered": False, "suggestion_only": True,
+                }
+                report_hash = digest(report_body)
+                key = hashlib.sha256(
+                    f"v2:theme:2026-09-05:{packet['packet_hash']}:{report_hash}".encode()
+                ).hexdigest()
+                report_id = f"{key[:8]}-{key[8:12]}-5{key[13:16]}-8{key[17:20]}-{key[20:32]}"
+                rendered = report_body["full_markdown"]
+                report_payload = {
+                    "id": report_id, "packet_id": packet["id"],
+                    "market_date": "2026-09-05", "kind": "theme",
+                    "report": report_body, "report_hash": report_hash,
+                    "rendered_text": rendered,
+                    "rendered_hash": hashlib.sha256(rendered.encode()).hexdigest(),
+                }
+                receipt = db.execute(
+                    "SELECT public.record_market_report(%s::uuid,%s,%s::jsonb) AS value",
+                    (packet["run_id"], key, json.dumps(report_payload)),
+                ).fetchone()["value"]
+                assert receipt["report_id"] == report_id
+        finally:
             subprocess.run(
                 [binaries["pg_ctl"], "-D", str(root / "db"), "-m", "immediate", "-w", "stop"],
                 check=True, capture_output=True,

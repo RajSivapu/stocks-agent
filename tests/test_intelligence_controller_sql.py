@@ -786,7 +786,7 @@ def test_reconciled_cash_snapshot_is_explicit_fresh_and_invalidated_by_ledger_mu
         "SELECT public.read_reconciled_cash_snapshot(%s)", (now,)
     ).fetchone()[0] is None
     with pytest.raises(
-        psycopg.errors.ObjectNotInPrerequisiteState, match="CASH_UNAVAILABLE"
+        psycopg.errors.ObjectNotInPrerequisiteState, match="ACTION_LANE_REQUIRED"
     ):
         db.execute(
             "SELECT public.apply_market_decision_bundle_with_cash_snapshot("

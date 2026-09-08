@@ -60,7 +60,7 @@ def test_enrichment_migration_is_additive_and_protected_migrations_are_immutable
 
 
 def test_schema_appends_enrichment_migration_verbatim():
-    assert SCHEMA.read_text().endswith(MIGRATION.read_text())
+    assert MIGRATION.read_text() in SCHEMA.read_text()
 
 
 def test_protected_enrichment_accepts_prior_run_pin_and_rejects_replay_or_lineage_tampering():

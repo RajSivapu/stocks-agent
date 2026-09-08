@@ -6,6 +6,8 @@ import {
   type ArtifactMutation,
   type EvidencePacket,
   type GatewayEnvelope,
+  isEvidencePacketV2,
+  packetEvidenceIds,
   parseArtifactMutationBatch,
   parseDecisionBundle,
   parseGatewayEnvelope,
@@ -479,18 +481,36 @@ export function createGatewayHandler(dependencies: GatewayDependencies) {
         if (envelope.operation === "seal_enrichment_selection") {
           const selection = objectValue(prepared);
           exactKeys(selection, ["manifest", "requests"]);
-          if (!Array.isArray(selection.requests) || selection.requests.length > 100) {
+          if (
+            !Array.isArray(selection.requests) ||
+            selection.requests.length > 100
+          ) {
             throw new GatewayHttpError(400, "INVALID_REQUEST");
           }
           const manifest = objectValue(selection.manifest);
           exactKeys(manifest, [
-            "manifest_id", "run_id", "phase", "selection_stage", "schema_version", "execution_allowed",
-            "provider_reservations", "deferred_reasons", "request_descriptors", "semantic_hash",
+            "manifest_id",
+            "run_id",
+            "phase",
+            "selection_stage",
+            "schema_version",
+            "execution_allowed",
+            "provider_reservations",
+            "deferred_reasons",
+            "request_descriptors",
+            "semantic_hash",
           ]);
-          if (manifest.run_id !== envelope.run_id || !["holding_quotes", "initial", "filing_documents"].includes(String(manifest.selection_stage)) || manifest.schema_version !== 1 ||
-            manifest.execution_allowed !== false || !Array.isArray(manifest.request_descriptors) ||
+          if (
+            manifest.run_id !== envelope.run_id ||
+            !["holding_quotes", "initial", "filing_documents"].includes(
+              String(manifest.selection_stage),
+            ) || manifest.schema_version !== 1 ||
+            manifest.execution_allowed !== false ||
+            !Array.isArray(manifest.request_descriptors) ||
             manifest.request_descriptors.length !== selection.requests.length ||
-            typeof manifest.semantic_hash !== "string" || !/^[0-9a-f]{64}$/.test(manifest.semantic_hash)) {
+            typeof manifest.semantic_hash !== "string" ||
+            !/^[0-9a-f]{64}$/.test(manifest.semantic_hash)
+          ) {
             throw new GatewayHttpError(400, "INVALID_REQUEST");
           }
         }
@@ -541,8 +561,14 @@ export function createGatewayHandler(dependencies: GatewayDependencies) {
           !["COMMON_STOCK", "ADR", "ETF"].includes(row.instrument_type) ||
           typeof row.cache_key !== "string" ||
           !/^[a-f0-9]{64}$/.test(row.cache_key) ||
-          [row.reservation_id, row.source_receipt_id, row.security_revision_id,
-            row.reference_manifest_id, row.selection_manifest_id, row.selected_task_id].some((value) =>
+          [
+            row.reservation_id,
+            row.source_receipt_id,
+            row.security_revision_id,
+            row.reference_manifest_id,
+            row.selection_manifest_id,
+            row.selected_task_id,
+          ].some((value) =>
             typeof value !== "string" || !/^[a-f0-9-]{36}$/.test(value)
           )
         ) {
@@ -654,25 +680,21 @@ export function createGatewayHandler(dependencies: GatewayDependencies) {
         }
         if (envelope.operation === "record_report") {
           const payload = prepared as RecordReportPayload;
-          const decisions = parseReportDecisions(
-            await deps.repository.loadReportDecisions(
-              requireRun(envelope),
-              payload.packet_id,
-              payload.report.policy_decision_ids,
-            ),
+          const evidence = await resolveReportEvidence(
             requireRun(envelope),
-            payload.packet_id,
-            payload.report.policy_decision_ids,
+            payload,
+            deps.repository,
           );
           const delivery = renderReportDelivery(
             payload,
-            decisions,
+            evidence.decisions,
             {
               dashboardBaseUrl: dependencies.dashboardBaseUrl ??
                 "https://invalid.local",
               allowedDashboardOrigins: dependencies.dashboardAllowedOrigins ??
                 [],
             },
+            evidence.researchPacket,
           );
           return response(200, {
             ok: true,
@@ -923,7 +945,9 @@ export function createGatewayHandler(dependencies: GatewayDependencies) {
           telegram_message_ids: [],
         });
       } catch (error) {
-        const code = error instanceof GatewayRepositoryError ? error.code : "PERSISTENCE_FAILED";
+        const code = error instanceof GatewayRepositoryError
+          ? error.code
+          : "PERSISTENCE_FAILED";
         return response(errorStatus(code), { ok: false, code });
       }
     }
@@ -1197,21 +1221,21 @@ export function createGatewayHandler(dependencies: GatewayDependencies) {
           requireRun(envelope),
           payload,
         );
-        const decisions = parseReportDecisions(
-          await deps.repository.loadReportDecisions(
-            requireRun(envelope),
-            payload.packet_id,
-            payload.report.policy_decision_ids,
-          ),
+        const evidence = await resolveReportEvidence(
           requireRun(envelope),
-          payload.packet_id,
-          payload.report.policy_decision_ids,
+          payload,
+          deps.repository,
         );
-        const delivery = renderReportDelivery(payload, decisions, {
-          dashboardBaseUrl: dependencies.dashboardBaseUrl ??
-            "https://invalid.local",
-          allowedDashboardOrigins: dependencies.dashboardAllowedOrigins ?? [],
-        });
+        const delivery = renderReportDelivery(
+          payload,
+          evidence.decisions,
+          {
+            dashboardBaseUrl: dependencies.dashboardBaseUrl ??
+              "https://invalid.local",
+            allowedDashboardOrigins: dependencies.dashboardAllowedOrigins ?? [],
+          },
+          evidence.researchPacket,
+        );
         let result: Record<string, unknown>;
         if (delivery.status === "suppressed") {
           if (
@@ -1558,6 +1582,53 @@ type ResolvedDependencies = GatewayDependencies & {
     token: string,
   ) => Promise<TelegramAlertReceipt>;
 };
+
+async function resolveReportEvidence(
+  runId: string,
+  payload: RecordReportPayload,
+  repository: GatewayRepository,
+): Promise<{
+  decisions: ReturnType<typeof parseReportDecisions>;
+  researchPacket?: EvidencePacket;
+}> {
+  if (payload.report.policy_decision_ids.length > 0) {
+    const decisions = parseReportDecisions(
+      await repository.loadReportDecisions(
+        runId,
+        payload.packet_id,
+        payload.report.policy_decision_ids,
+      ),
+      runId,
+      payload.packet_id,
+      payload.report.policy_decision_ids,
+    );
+    const persisted = await repository.loadIntelligencePacket(
+      payload.packet_id,
+      runId,
+    );
+    if (
+      persisted.id !== payload.packet_id || persisted.run_id !== runId ||
+      persisted.content_hash !== decisions[0].packet_hash ||
+      persisted.content_hash !== sha256Hex(canonicalJson(persisted.packet))
+    ) throw new GatewayRepositoryError("REPORT_POLICY_MISMATCH");
+    return {
+      decisions,
+      ...(isEvidencePacketV2(persisted.packet)
+        ? { researchPacket: persisted.packet }
+        : {}),
+    };
+  }
+  const persisted = await repository.loadIntelligencePacket(
+    payload.packet_id,
+    runId,
+  );
+  if (
+    persisted.id !== payload.packet_id || persisted.run_id !== runId ||
+    !isEvidencePacketV2(persisted.packet) ||
+    persisted.content_hash !== sha256Hex(canonicalJson(persisted.packet))
+  ) throw new GatewayRepositoryError("REPORT_POLICY_MISMATCH");
+  return { decisions: [], researchPacket: persisted.packet };
+}
 
 type AlertOperationPublicationStatus =
   | PublicationReceipt["status"]
@@ -2360,9 +2431,13 @@ async function evaluateAndPublish(
     ).sort(),
     source_ids: [
       ...new Set(
-        evaluations.flatMap((evaluation) =>
-          evaluation.candidate.evidence.map((item) => item.id)
-        ),
+        packet && isEvidencePacketV2(packet.packet)
+          ? packet.packet.research_candidates.flatMap((candidate) =>
+            candidate.evidence.map((item) => item.item_id)
+          )
+          : evaluations.flatMap((evaluation) =>
+            evaluation.candidate.evidence.map((item) => item.id)
+          ),
       ),
     ].sort(),
     intelligence_packet: bundle.intelligence_packet
@@ -2421,12 +2496,8 @@ async function resolveIntelligencePacket(
   } | null
 > {
   const reference = bundle.intelligence_packet;
-  const scheduled = bundle.phase !== "on-demand";
   if (!reference) {
-    if (scheduled) {
-      throw new GatewayRepositoryError("INTELLIGENCE_PACKET_INVALID");
-    }
-    return null;
+    throw new GatewayRepositoryError("INTELLIGENCE_PACKET_INVALID");
   }
   if (
     bundle.candidates.length > 12 ||
@@ -2443,7 +2514,7 @@ async function resolveIntelligencePacket(
       throw new GatewayRepositoryError("INTELLIGENCE_PACKET_INVALID");
     }
     packet = reference.packet;
-    facts = packet.facts ?? [];
+    facts = isEvidencePacketV2(packet) ? [] : packet.facts ?? [];
     for (const candidate of bundle.candidates) {
       qualifiedExposureIds.set(
         candidate.ticker,
@@ -2483,13 +2554,32 @@ async function resolveIntelligencePacket(
   if (sha256Hex(canonicalJson(packet)) !== reference.content_hash) {
     throw new GatewayRepositoryError("INTELLIGENCE_PACKET_MISMATCH");
   }
+  if (isEvidencePacketV2(packet)) {
+    for (const research of packet.research_candidates) {
+      const suitabilityBody = { ...research.suitability } as Record<
+        string,
+        unknown
+      >;
+      delete suitabilityBody.evaluation_hash;
+      if (
+        sha256Hex(canonicalJson(suitabilityBody)) !==
+          research.suitability.evaluation_hash
+      ) throw new GatewayRepositoryError("INTELLIGENCE_PACKET_MISMATCH");
+      const candidateBody = { ...research } as Record<string, unknown>;
+      delete candidateBody.candidate_hash;
+      if (sha256Hex(canonicalJson(candidateBody)) !== research.candidate_hash) {
+        throw new GatewayRepositoryError("INTELLIGENCE_PACKET_MISMATCH");
+      }
+    }
+  }
   for (const candidate of bundle.candidates) {
     if (validatePacketEvidence(candidate, packet).length > 0) {
       throw new GatewayRepositoryError("EVIDENCE_NOT_IN_PACKET");
     }
-    const expected = packet.candidates.find((row) =>
-      row.candidate_key === candidate.ticker
-    )!.evidence_ids;
+    const expected = packetEvidenceIds(packet, candidate.ticker);
+    if (expected === null) {
+      throw new GatewayRepositoryError("EVIDENCE_NOT_IN_PACKET");
+    }
     const stored = facts.filter((row) =>
       row.candidate_key === candidate.ticker
     );

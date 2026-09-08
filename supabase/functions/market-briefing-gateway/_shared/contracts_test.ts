@@ -1,11 +1,16 @@
 import {
   parseArtifactMutationBatch,
   parseDecisionBundle,
+  parseEvidencePacket,
   parseGatewayEnvelope,
   parseTrustedEvidenceFacts,
   type Phase,
   validatePacketEvidence,
 } from "./contracts.ts";
+import { canonicalJson, sha256Hex } from "./intelligence.ts";
+import HASH_VECTORS from "../../../../tests/fixtures/research_suitability_hash_vectors.json" with {
+  type: "json",
+};
 
 function assertEquals<T>(actual: T, expected: T): void {
   if (JSON.stringify(actual) !== JSON.stringify(expected)) {
@@ -105,6 +110,198 @@ function fixturePacket() {
   };
 }
 
+function fixturePacketV2(actionEligible = true) {
+  const itemId = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+  const opposingId = "abababab-abab-4bab-8bab-abababababab";
+  const suitabilityBody = {
+    component_scores: {
+      concentration_penalty: "0.000000",
+      duplication_penalty: "0.000000",
+      liquidity: "0.500000",
+      portfolio_relevance: "0.000000",
+    },
+    lineage: {
+      cash_revision: "cash:9",
+      evidence_receipt_ids: {
+        [itemId]: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+        [opposingId]: "bcbcbcbc-bcbc-4bcb-8bcb-bcbcbcbcbcbc",
+      },
+      observed_at: "2026-09-04T12:00:00.000Z",
+      policy_version: 1,
+      portfolio_revision: "portfolio:7",
+      quote_as_of: "2026-09-04T11:59:00.000Z",
+      quote_expires_at: "2026-09-04T12:05:00.000Z",
+      quote_receipt_id: "cccccccc-cccc-4ccc-8ccc-cccccccccccc",
+      reference_expires_at: "2026-09-05T12:00:00.000Z",
+      reference_manifest_id: "dddddddd-dddd-4ddd-8ddd-dddddddddddd",
+      reference_revision: 2,
+      run_id: "11111111-1111-4111-8111-111111111111",
+      security_revision_id: "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee",
+    },
+    missing_reasons: actionEligible ? [] : ["valuation_missing"],
+    state: actionEligible ? "eligible" : "unknown",
+    veto_reasons: [],
+  };
+  const suitability = {
+    ...suitabilityBody,
+    evaluation_hash: sha256Hex(canonicalJson(suitabilityBody)),
+  };
+  const candidateBody = {
+    adverse_paths: ["demand-downside"],
+    candidate_key: "sec-cik:0000000001:listing-origin:CENX",
+    entity_id: "sec-cik:0000000001",
+    event_ids: ["12121212-1212-4121-8121-121212121212"],
+    evidence: [
+      {
+        claim_type: "issuer_exposure",
+        item_id: itemId,
+        relationship_eligible: true,
+        role: "supporting",
+      },
+      {
+        claim_type: "event",
+        item_id: opposingId,
+        relationship_eligible: false,
+        role: "opposing",
+      },
+    ],
+    exposure_fact_ids: ["13131313-1313-4131-8131-131313131313"],
+    limitations: [],
+    priority_components: {
+      authority_corroboration: "0.500000",
+      exposure: "1.000000",
+      materiality: "0.500000",
+      recency: "0.900000",
+    },
+    priority_score: "2.900000",
+    research_state: "analysis_ready",
+    roles: ["supplier"],
+    security_id: "sec-cik:0000000001:listing-origin:CENX",
+    suitability,
+    theme_ids: ["magnets"],
+    ticker: "CENX",
+  };
+  const candidate = {
+    ...candidateBody,
+    candidate_hash: sha256Hex(canonicalJson(candidateBody)),
+  };
+  return {
+    action_candidates: actionEligible
+      ? [{
+        candidate_hash: candidate.candidate_hash,
+        candidate_key: candidate.candidate_key,
+        suitability_hash: suitability.evaluation_hash,
+      }]
+      : [],
+    contract_version: 2,
+    coverage: { complete_market_coverage: false, mode: "bounded" },
+    evidence: [
+      {
+        authority: "official",
+        canonical_url: "https://www.sec.gov/source",
+        claim_type: "issuer_exposure",
+        content_hash: "f".repeat(64),
+        effective_at: null,
+        item_id: itemId,
+        normalized_text: "Primary exposure statement.",
+        published_at: "2026-09-04T10:00:00.000Z",
+        reporting_at: null,
+        retrieved_at: "2026-09-04T10:01:00.000Z",
+        source_identity: {
+          provider: "sec_edgar",
+          receipt_id: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+          upstream_item_id: "filing-1",
+        },
+      },
+      {
+        authority: "corroborating",
+        canonical_url: "https://example.com/adverse",
+        claim_type: "event",
+        content_hash: "e".repeat(64),
+        effective_at: null,
+        item_id: opposingId,
+        normalized_text: "Opposing demand evidence.",
+        published_at: "2026-09-04T09:00:00.000Z",
+        reporting_at: null,
+        retrieved_at: "2026-09-04T09:01:00.000Z",
+        source_identity: {
+          provider: "gdelt",
+          receipt_id: "bcbcbcbc-bcbc-4bcb-8bcb-bcbcbcbcbcbc",
+          upstream_item_id: "story-2",
+        },
+      },
+    ],
+    execution_allowed: false,
+    limitations: [],
+    observed_at: "2026-09-04T12:00:00.000Z",
+    omissions: [],
+    policy_version: 1,
+    research_candidates: [candidate],
+    run_id: "11111111-1111-4111-8111-111111111111",
+  };
+}
+
+Deno.test("v2 packet parses exact research and action lanes and rejects rehashed substitutions", () => {
+  const parsed = parseEvidencePacket(fixturePacketV2());
+  if (!("contract_version" in parsed)) throw new Error("v2 packet was not selected");
+  assertEquals(parsed.research_candidates.length, 1);
+  assertEquals(parsed.action_candidates.length, 1);
+
+  const forged = structuredClone(fixturePacketV2());
+  forged.research_candidates[0].ticker = "SWAP";
+  assertThrows(() => parseEvidencePacket(forged), "candidate_hash");
+
+  const identitySwap = structuredClone(fixturePacketV2());
+  identitySwap.research_candidates[0].candidate_key = "sec:substituted";
+  const identityBody = { ...identitySwap.research_candidates[0] } as Record<string, unknown>;
+  delete identityBody.candidate_hash;
+  identitySwap.research_candidates[0].candidate_hash = sha256Hex(canonicalJson(identityBody));
+  identitySwap.action_candidates[0].candidate_key = "sec:substituted";
+  identitySwap.action_candidates[0].candidate_hash = identitySwap.research_candidates[0].candidate_hash;
+  assertThrows(() => parseEvidencePacket(identitySwap), "resolved security identity");
+
+  const insecureUrl = structuredClone(fixturePacketV2());
+  insecureUrl.evidence[0].canonical_url = "http://www.sec.gov/source";
+  assertThrows(() => parseEvidencePacket(insecureUrl), "canonical HTTPS");
+
+  const missingReceipt = structuredClone(fixturePacketV2());
+  missingReceipt.evidence[0].source_identity.receipt_id = null as never;
+  assertThrows(() => parseEvidencePacket(missingReceipt), "receipt_id");
+});
+
+Deno.test("v2 packet cannot bind one ticker to two security identities", () => {
+  const duplicate = structuredClone(fixturePacketV2(false));
+  const second = structuredClone(duplicate.research_candidates[0]);
+  second.candidate_key = "sec-cik:0000000002:listing-origin:CENX";
+  second.security_id = second.candidate_key;
+  const body = { ...second } as Record<string, unknown>;
+  delete body.candidate_hash;
+  second.candidate_hash = sha256Hex(canonicalJson(body));
+  duplicate.research_candidates.push(second);
+  assertThrows(() => parseEvidencePacket(duplicate), "duplicate ticker identities");
+});
+
+Deno.test("v2 research-only candidate cannot be promoted by analyst or checker", () => {
+  const packet = parseEvidencePacket(fixturePacketV2(false));
+  const candidate = validCandidate();
+  candidate.evidence[0].id = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+  candidate.analyst.action = "buy";
+  candidate.checker.verdict = "approve";
+  assertEquals(validatePacketEvidence(candidate as never, packet), [
+    "RESEARCH_ONLY_CANDIDATE",
+  ]);
+});
+
+Deno.test("research suitability canonical hashes match shared golden vectors", () => {
+  for (const vector of HASH_VECTORS.vectors) {
+    assertEquals(canonicalJson(vector.value), vector.canonical_json);
+    assertEquals(sha256Hex(vector.canonical_json), vector.sha256);
+  }
+  if (HASH_VECTORS.vectors[1].sha256 === HASH_VECTORS.vectors[2].sha256) {
+    throw new Error("absent and explicit null keys must remain distinct");
+  }
+});
+
 Deno.test("persisted facts reject duplicate IDs and missing authority fields", () => {
   const fact = {
     candidate_key: "CENX",
@@ -180,11 +377,10 @@ Deno.test("decision bundle parses an exact intelligence packet reference and bou
       packet: fixturePacket(),
     },
   });
-  assertEquals(
-    parseDecisionBundle(dry, "intraday").intelligence_packet!.packet?.candidates
-      .length,
-    1,
-  );
+  const parsedPacket = parseDecisionBundle(dry, "intraday")
+    .intelligence_packet!.packet!;
+  if ("contract_version" in parsedPacket) throw new Error("expected v1 fixture");
+  assertEquals(parsedPacket.candidates.length, 1);
 });
 
 Deno.test("inline intelligence packet enforces candidate, evidence, and byte bounds", () => {

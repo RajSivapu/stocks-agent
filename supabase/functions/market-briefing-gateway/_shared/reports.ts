@@ -1,5 +1,10 @@
 import { canonicalJson, sha256Hex } from "./intelligence.ts";
 import type { ApprovedTerms } from "./policy.ts";
+import {
+  type EvidencePacket,
+  type EvidencePacketV2,
+  isEvidencePacketV2,
+} from "./contracts.ts";
 
 const UUID =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
@@ -208,7 +213,8 @@ function bounded(
   allowEmpty = false,
 ): string {
   if (
-    typeof value !== "string" || value.length > max ||
+    typeof value !== "string" ||
+    new TextEncoder().encode(value).byteLength > max ||
     (!allowEmpty && value.trim().length === 0)
   ) throw new Error(`${path} must be bounded`);
   return value;
@@ -301,9 +307,7 @@ export function parseRecordReportPayload(value: unknown): RecordReportPayload {
     intraday_triggered: reportRow.intraday_triggered === true,
     suggestion_only: true,
   };
-  if (
-    report.source_ids.length === 0 || report.policy_decision_ids.length === 0
-  ) {
+  if (report.source_ids.length === 0) {
     throw new Error("report requires source and policy decision receipts");
   }
   if (
@@ -375,25 +379,109 @@ function reportUrl(
   return `${base.origin}/reports/${id}`;
 }
 
+function researchCatalogMarkdown(packet: EvidencePacketV2): string {
+  const nextReview = typeof packet.coverage.next_review_at === "string" &&
+      packet.coverage.next_review_at.trim()
+    ? packet.coverage.next_review_at
+    : "unavailable";
+  const actionKeys = new Set(
+    packet.action_candidates.map((candidate) => candidate.candidate_key),
+  );
+  const lines = [`Coverage: ${canonicalJson(packet.coverage)}`];
+  for (const candidate of packet.research_candidates) {
+    const identity = candidate.ticker ?? candidate.candidate_key;
+    const missing = candidate.suitability.missing_reasons.join(", ") || "none";
+    const opposing = candidate.evidence.filter((evidence) =>
+      evidence.role === "opposing"
+    ).map((evidence) => evidence.item_id).join(", ") || "none retained";
+    const invalidation = [
+      ...new Set([
+        ...candidate.adverse_paths,
+        ...candidate.limitations,
+        ...candidate.suitability.veto_reasons,
+      ]),
+    ].sort().join(", ") || "none recorded";
+    lines.push(
+      "",
+      `## ${identity} — ${
+        actionKeys.has(candidate.candidate_key)
+          ? "ACTION LANE"
+          : "RESEARCH ONLY"
+      }`,
+      `Research state: ${candidate.research_state}`,
+      `Suitability: ${candidate.suitability.state} (${missing})`,
+      `Opposing evidence: ${opposing}`,
+      `Invalidation: ${invalidation}`,
+      `Next review: ${nextReview}`,
+    );
+  }
+  return lines.join("\n");
+}
+
 export function renderReportDelivery(
   input: RecordReportPayload,
   finalEvaluations: readonly ReportPolicyDecision[],
   options: ReportDeliveryOptions,
+  researchPacket?: EvidencePacket,
 ): RenderedReportDelivery {
   if (!options) throw new Error("report delivery options are required");
   const value = parseRecordReportPayload(input);
   let decisions: ReportPolicyDecision[];
+  let packetHash: string;
+  let researchOnlyPacket: EvidencePacketV2 | null = null;
+  let v2ReportPacket: EvidencePacketV2 | null = null;
   try {
-    decisions = parseReportDecisions(
-      finalEvaluations,
-      finalEvaluations[0]?.run_id,
-      value.packet_id,
-      value.report.policy_decision_ids,
-    );
+    if (value.report.policy_decision_ids.length === 0) {
+      if (
+        finalEvaluations.length !== 0 || !researchPacket ||
+        !isEvidencePacketV2(researchPacket) ||
+        researchPacket.research_candidates.length === 0 ||
+        researchPacket.action_candidates.length !== 0
+      ) throw new Error("REPORT_POLICY_MISMATCH");
+      const evidenceIds = [
+        ...new Set(
+          researchPacket.research_candidates.flatMap((candidate) =>
+            candidate.evidence.map((evidence) => evidence.item_id)
+          ),
+        ),
+      ].sort();
+      if (
+        canonicalJson(evidenceIds) !== canonicalJson(value.report.source_ids)
+      ) {
+        throw new Error("REPORT_POLICY_MISMATCH");
+      }
+      decisions = [];
+      researchOnlyPacket = researchPacket;
+      v2ReportPacket = researchPacket;
+      packetHash = sha256Hex(canonicalJson(researchPacket));
+    } else {
+      decisions = parseReportDecisions(
+        finalEvaluations,
+        finalEvaluations[0]?.run_id,
+        value.packet_id,
+        value.report.policy_decision_ids,
+      );
+      packetHash = decisions[0].packet_hash;
+      if (researchPacket) {
+        if (
+          !isEvidencePacketV2(researchPacket) ||
+          sha256Hex(canonicalJson(researchPacket)) !== packetHash
+        ) throw new Error("REPORT_POLICY_MISMATCH");
+        const evidenceIds = [
+          ...new Set(
+            researchPacket.research_candidates.flatMap((candidate) =>
+              candidate.evidence.map((evidence) => evidence.item_id)
+            ),
+          ),
+        ].sort();
+        if (
+          canonicalJson(evidenceIds) !== canonicalJson(value.report.source_ids)
+        ) throw new Error("REPORT_POLICY_MISMATCH");
+        v2ReportPacket = researchPacket;
+      }
+    }
     const key = sha256Hex(
-      `v2:${value.kind}:${value.market_date}:${
-        decisions[0].packet_hash
-      }:${value.report_hash}`,
+      `v2:${value.kind}:${value.market_date}:${packetHash}:${value.report_hash}`,
     );
     if (value.idempotency_key !== key) {
       throw new Error("REPORT_POLICY_MISMATCH");
@@ -404,6 +492,53 @@ export function renderReportDelivery(
       body: "",
       parts: [],
       reason: "REPORT_POLICY_MISMATCH",
+    };
+  }
+  if (researchOnlyPacket) {
+    const lines = [
+      `# ${value.kind.toUpperCase()} RESEARCH — ${value.market_date}`,
+      "",
+      researchCatalogMarkdown(researchOnlyPacket),
+    ];
+    lines.push("", "Suggestion only; review manually. No order was placed.");
+    const fullMarkdown = lines.join("\n");
+    if (new TextEncoder().encode(fullMarkdown).byteLength > 14_000) {
+      return {
+        status: "suppressed",
+        body: "",
+        parts: [],
+        reason: "REPORT_POLICY_MISMATCH",
+      };
+    }
+    const canonicalReport: ReportBody = {
+      ...value.report,
+      title: `${value.kind.toUpperCase()} RESEARCH — ${value.market_date}`,
+      summary:
+        `${researchOnlyPacket.research_candidates.length} research candidate(s); no action is eligible.`,
+      full_markdown: fullMarkdown,
+      actionable_risk: false,
+      material_thesis_change: false,
+      intraday_triggered: false,
+    };
+    const reportHash = sha256Hex(canonicalJson(canonicalReport));
+    const key = sha256Hex(
+      `v2:${value.kind}:${value.market_date}:${packetHash}:${reportHash}`,
+    );
+    const payload: RecordReportPayload = {
+      ...value,
+      id: reportIdFromKey(key),
+      idempotency_key: key,
+      report: canonicalReport,
+      report_hash: reportHash,
+      rendered_text: fullMarkdown,
+      rendered_hash: sha256Hex(fullMarkdown),
+    };
+    return {
+      status: "suppressed",
+      body: "",
+      parts: [],
+      reason: value.kind === "intraday" ? "no_trigger" : "not_actionable",
+      payload,
     };
   }
   const actionableFields = decisions.filter((row) =>
@@ -460,21 +595,31 @@ export function renderReportDelivery(
         terms.target ?? "unavailable"
       }; ${terms.urgency}.`;
   });
+  const reportDetail = lines.join("\n\n") +
+    (v2ReportPacket
+      ? `\n\n## Research catalog\n\n${researchCatalogMarkdown(v2ReportPacket)}`
+      : "") +
+    "\n\nSuggestion only; review manually. No order was placed.";
+  if (new TextEncoder().encode(reportDetail).byteLength > 14_000) {
+    return {
+      status: "suppressed",
+      body: "",
+      parts: [],
+      reason: "REPORT_POLICY_MISMATCH",
+    };
+  }
   const approvedReport: ReportBody = {
     ...value.report,
     title: `${heading} — ${value.market_date}`,
     summary: compact(lines.join(" "), 720),
-    full_markdown: lines.join("\n\n") +
-      "\n\nSuggestion only; review manually. No order was placed.",
+    full_markdown: reportDetail,
     actionable_risk: urgent,
     material_thesis_change: urgent,
     intraday_triggered: actionableFields.length > 0 || finalAlertTriggered,
   };
   const approvedHash = sha256Hex(canonicalJson(approvedReport));
   const approvedKey = sha256Hex(
-    `v2:${finalKind}:${value.market_date}:${
-      decisions[0].packet_hash
-    }:${approvedHash}`,
+    `v2:${finalKind}:${value.market_date}:${packetHash}:${approvedHash}`,
   );
   const approvedId = reportIdFromKey(approvedKey);
   let body = `<b>${heading} — ${value.market_date}</b>\n${
@@ -500,15 +645,12 @@ export function renderReportDelivery(
     rendered_text: body,
     rendered_hash: sha256Hex(body),
   };
-  if (
-    finalKind === "intraday" && actionableFields.length === 0 &&
-    !finalAlertTriggered
-  ) {
+  if (actionableFields.length === 0 && !finalAlertTriggered) {
     return {
       status: "suppressed",
       body: "",
       parts: [],
-      reason: "no_trigger",
+      reason: finalKind === "intraday" ? "no_trigger" : "not_actionable",
       payload: canonicalPayload,
     };
   }

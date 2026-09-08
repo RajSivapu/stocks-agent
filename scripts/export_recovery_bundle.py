@@ -31,6 +31,7 @@ from lib.intelligence.cursors import (  # noqa: E402
     parse_time,
     update_cursor,
 )
+from lib.intelligence.canonical import canonical_event, canonical_ranking  # noqa: E402
 from lib.intelligence.universe import (  # noqa: E402
     reference_manifest_semantic_document,
     security_revision_semantic_document,
@@ -47,6 +48,8 @@ REQUIRED_RECOVERY_RECORDS = (
     "theme_episode_revisions", "exposure_facts", "research_nominations",
     "packets", "reports",
     "intelligence_run_events", "source_quota_reservations", "collection_checkpoints",
+    "source_receipts", "source_items", "intelligence_run_items",
+    "source_item_provenance", "run_source_item_provenance", "events", "candidate_rankings",
     "collection_checkpoint_history", "collection_completions", "report_origins",
     "publications", "evaluation_publications", "cash_ledger_state",
     "cash_snapshots", "run_terminal_outcomes", "decision_evaluations", "policy_comparisons", "roles", "schema_version", "release_migration_ledger",
@@ -172,6 +175,50 @@ DATASET_FIELDS = {
     "source_quota_reservations": {
         "id": str, "run_id": str, "provider": str, "market_date": str, "phase": str,
         "reserved_requests": int, "cache_keys": list, "created_at": str,
+    },
+    "source_receipts": {
+        "id": str, "run_id": str, "reservation_id": str, "provider": str,
+        "status": str, "cache_key": str, "requested_window": dict,
+        "retrieved_at": str, "expires_at": NULLABLE_TEXT, "request_cost": int,
+        "upstream_remaining": (int, type(None)), "returned_count": int,
+        "accepted_count": int, "duplicate_count": int, "dropped_count": int,
+        "error": (dict, type(None)), "response_hash": NULLABLE_TEXT, "created_at": str,
+    },
+    "source_items": {
+        "id": str, "source_receipt_id": str, "provider": str,
+        "upstream_item_id": NULLABLE_TEXT, "canonical_url": NULLABLE_TEXT,
+        "published_at": NULLABLE_TEXT, "effective_at": NULLABLE_TEXT,
+        "title": str, "normalized_text": str, "canonical_content": str,
+        "content_hash": str, "metadata": dict, "created_at": str,
+    },
+    "intelligence_run_items": {
+        "id": str, "run_id": str, "source_item_id": str, "source_receipt_id": str,
+        "disposition": str, "drop_reason": NULLABLE_TEXT, "created_at": str,
+    },
+    "source_item_provenance": {
+        "source_item_id": str, "provider": str, "canonical_item_url": str,
+        "request_url": str, "retrieved_at": str, "reporting_at": NULLABLE_TEXT,
+        "entity_ids": list, "security_ids": list, "discovery_status": str,
+        "created_at": str,
+    },
+    "run_source_item_provenance": {
+        "run_item_id": str, "run_id": str, "source_item_id": str,
+        "source_receipt_id": str, "provider": str, "request_url": str,
+        "retrieved_at": str, "reporting_at": NULLABLE_TEXT, "entity_ids": list,
+        "security_ids": list, "discovery_status": str, "created_at": str,
+    },
+    "events": {
+        "id": str, "run_id": str, "event_type": str, "title": str,
+        "summary": str, "occurred_at": NULLABLE_TEXT, "effective_at": NULLABLE_TEXT,
+        "materiality": str, "confidence": str, "evidence_item_ids": list,
+        "content_hash": str, "created_at": str,
+    },
+    "candidate_rankings": {
+        "id": str, "run_id": str, "event_id": NULLABLE_TEXT,
+        "candidate_key": str, "ticker": NULLABLE_TEXT, "rank": int,
+        "component_scores": dict, "total_score": str, "qualified": bool,
+        "veto_reasons": list, "exposure_item_ids": list, "content_hash": str,
+        "created_at": str,
     },
     "collection_checkpoints": {
         "run_id": str, "cache_key": str, "request_window": dict,
@@ -550,6 +597,121 @@ def _validate_enrichment_lineage(result: Mapping[str, list[dict[str, object]]]) 
     manifests = {row["id"]: row for row in result["enrichment_selection_manifests"]}
     descriptors = {row["id"]: row for row in result["enrichment_request_descriptors"]}
     intelligence_runs = {row["id"] for row in result["intelligence_runs"]}
+    reservations = {row["id"]: row for row in result["source_quota_reservations"]}
+    if any(
+        not UUID.fullmatch(row["id"]) or row["run_id"] not in intelligence_runs
+        or row["provider"] not in {
+            "gdelt", "alpha_vantage", "finnhub", "yahoo", "sec_edgar",
+            "federal_register", "white_house", "doe", "dod", "eia", "fred",
+            "bls", "bea", "social",
+        }
+        or not 1 <= row["reserved_requests"] <= 100
+        for row in reservations.values()
+    ):
+        raise ValueError("source reservation recovery lineage mismatch")
+    source_receipts = {row["id"]: row for row in result["source_receipts"]}
+    if any(
+        not UUID.fullmatch(row["id"]) or row["run_id"] not in intelligence_runs
+        or row["reservation_id"] not in reservations
+        or reservations[row["reservation_id"]]["run_id"] != row["run_id"]
+        or reservations[row["reservation_id"]]["provider"] != row["provider"]
+        or row["status"] not in {
+            "succeeded", "failed", "cache_hit", "quota_blocked", "configuration_missing",
+        }
+        or not 0 <= row["request_cost"] <= 100
+        or any(row[name] < 0 for name in (
+            "returned_count", "accepted_count", "duplicate_count", "dropped_count",
+        ))
+        or row["accepted_count"] + row["duplicate_count"] + row["dropped_count"]
+           > row["returned_count"]
+        or (row["status"] in {"succeeded", "cache_hit"}) != (
+            row["expires_at"] is not None and row["response_hash"] is not None
+            and row["error"] is None
+        )
+        or row["response_hash"] is not None and not HASH.fullmatch(row["response_hash"])
+        for row in source_receipts.values()
+    ):
+        raise ValueError("source receipt recovery lineage mismatch")
+    source_items = {row["id"]: row for row in result["source_items"]}
+    if any(
+        not UUID.fullmatch(row["id"]) or row["source_receipt_id"] not in source_receipts
+        or row["provider"] != source_receipts[row["source_receipt_id"]]["provider"]
+        or not HASH.fullmatch(row["content_hash"])
+        or row["id"] != str(uuid.uuid5(
+            uuid.NAMESPACE_URL, f"market-source:{row['content_hash']}",
+        ))
+        or row["canonical_url"] is not None
+           and not str(row["canonical_url"]).startswith("https://")
+        for row in source_items.values()
+    ):
+        raise ValueError("source item recovery lineage mismatch")
+    run_items = {row["id"]: row for row in result["intelligence_run_items"]}
+    if any(
+        not UUID.fullmatch(row["id"]) or row["run_id"] not in intelligence_runs
+        or row["source_item_id"] not in source_items
+        or row["source_receipt_id"] not in source_receipts
+        or source_receipts[row["source_receipt_id"]]["run_id"] != row["run_id"]
+        or row["disposition"] not in {"accepted", "duplicate", "near_duplicate", "dropped"}
+        or (row["disposition"] == "accepted") != (row["drop_reason"] is None)
+        for row in run_items.values()
+    ):
+        raise ValueError("run source item recovery lineage mismatch")
+    source_provenance = {
+        row["source_item_id"]: row for row in result["source_item_provenance"]
+    }
+    if any(
+        item_id not in source_items or row["provider"] != source_items[item_id]["provider"]
+        or row["canonical_item_url"] != source_items[item_id]["canonical_url"]
+        or not row["request_url"].startswith("https://")
+        or row["discovery_status"] not in {"qualified", "no_event", "insufficient_coverage"}
+        for item_id, row in source_provenance.items()
+    ):
+        raise ValueError("source item provenance recovery lineage mismatch")
+    run_provenance = {
+        row["run_item_id"]: row for row in result["run_source_item_provenance"]
+    }
+    if any(
+        run_item_id not in run_items or row["run_id"] != run_items[run_item_id]["run_id"]
+        or row["source_item_id"] != run_items[run_item_id]["source_item_id"]
+        or row["source_receipt_id"] != run_items[run_item_id]["source_receipt_id"]
+        or row["provider"] != source_items[row["source_item_id"]]["provider"]
+        or not row["request_url"].startswith("https://")
+        or row["discovery_status"] not in {"qualified", "no_event", "insufficient_coverage"}
+        for run_item_id, row in run_provenance.items()
+    ):
+        raise ValueError("run source item provenance recovery lineage mismatch")
+    events = {row["id"]: row for row in result["events"]}
+    if any(
+        not UUID.fullmatch(row["id"]) or row["run_id"] not in intelligence_runs
+        or not row["evidence_item_ids"] or row["evidence_item_ids"] != sorted(set(row["evidence_item_ids"]))
+        or any(item_id not in source_items for item_id in row["evidence_item_ids"])
+        or not HASH.fullmatch(row["content_hash"])
+        or row["content_hash"] != _semantic_hash(canonical_event({
+            key: row[key] for key in (
+                "event_type", "title", "summary", "occurred_at", "effective_at",
+                "materiality", "confidence", "evidence_item_ids",
+            )
+        }))
+        for row in events.values()
+    ):
+        raise ValueError("event recovery lineage mismatch")
+    candidate_rankings = {row["id"]: row for row in result["candidate_rankings"]}
+    if any(
+        not UUID.fullmatch(row["id"]) or row["run_id"] not in intelligence_runs
+        or row["event_id"] not in events or events[row["event_id"]]["run_id"] != row["run_id"]
+        or not 1 <= row["rank"] <= 100
+        or row["exposure_item_ids"] != sorted(set(row["exposure_item_ids"]))
+        or any(item_id not in source_items for item_id in row["exposure_item_ids"])
+        or not HASH.fullmatch(row["content_hash"])
+        or row["content_hash"] != _semantic_hash(canonical_ranking({
+            key: row[key] for key in (
+                "event_id", "candidate_key", "ticker", "rank", "component_scores",
+                "total_score", "qualified", "veto_reasons", "exposure_item_ids",
+            )
+        }))
+        for row in candidate_rankings.values()
+    ):
+        raise ValueError("candidate ranking recovery lineage mismatch")
     current_pins = {
         (row["run_id"], row["manifest_id"])
         for row in result["reference_run_bindings"]
@@ -1024,6 +1186,467 @@ def _validate_typed_exposure_lineage(
             raise ValueError("discovery typed exposure checkpoint binding mismatch")
 
 
+_PACKET_V2_KEYS = {
+    "action_candidates", "contract_version", "coverage", "evidence",
+    "execution_allowed", "limitations", "observed_at", "omissions",
+    "policy_version", "research_candidates", "run_id",
+}
+_PACKET_V2_CANDIDATE_KEYS = {
+    "adverse_paths", "candidate_hash", "candidate_key", "entity_id", "event_ids",
+    "evidence", "exposure_fact_ids", "limitations", "priority_components",
+    "priority_score", "research_state", "roles", "security_id", "suitability",
+    "theme_ids", "ticker",
+}
+_PACKET_V2_LINEAGE_KEYS = {
+    "cash_revision", "evidence_receipt_ids", "observed_at", "policy_version",
+    "portfolio_revision", "quote_as_of", "quote_expires_at", "quote_receipt_id",
+    "reference_expires_at", "reference_manifest_id", "reference_revision", "run_id",
+    "security_revision_id",
+}
+_PACKET_V2_TIME = re.compile(
+    r"[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}\.[0-9]{3}Z"
+)
+_PACKET_V2_FIXED = re.compile(r"(?:0|-[1-9][0-9]*|[1-9][0-9]*)\.[0-9]{6}")
+
+
+def _packet_v2_time(value: object, *, nullable: bool = False) -> bool:
+    return value is None and nullable or (
+        isinstance(value, str) and _PACKET_V2_TIME.fullmatch(value) is not None
+    )
+
+
+def _packet_v2_same_time(left: object, right: object) -> bool:
+    if left is None or right is None:
+        return left is right
+    try:
+        return datetime.fromisoformat(str(left).replace("Z", "+00:00")) == datetime.fromisoformat(
+            str(right).replace("Z", "+00:00")
+        )
+    except ValueError:
+        return False
+
+
+def _packet_v2_sorted_strings(value: object, *, maximum: int, nonempty: bool = False) -> bool:
+    return (
+        isinstance(value, list) and len(value) <= maximum
+        and (not nonempty or bool(value))
+        and all(isinstance(item, str) for item in value)
+        and value == sorted(set(value))
+    )
+
+
+def _validate_evidence_packet_v2_recovery(
+    row: Mapping[str, object], result: Mapping[str, list[dict[str, object]]],
+) -> None:
+    """Authenticate v2 packet lanes against sealed recovery ledgers."""
+    try:
+        packet = row["packet"]
+        if (
+            not isinstance(packet, Mapping) or set(packet) != _PACKET_V2_KEYS
+            or packet["contract_version"] != 2 or packet["execution_allowed"] is not False
+            or packet["run_id"] != row["run_id"]
+            or packet["policy_version"] != row["policy_version"]
+            or not _packet_v2_time(packet["observed_at"])
+            or len(canonical_json(packet).encode()) > 98_304
+            or not isinstance(packet["coverage"], Mapping)
+            or not _packet_v2_sorted_strings(packet["limitations"], maximum=100)
+            or not isinstance(packet["omissions"], list) or len(packet["omissions"]) > 1_000
+            or not isinstance(packet["research_candidates"], list)
+            or len(packet["research_candidates"]) > 12
+            or not isinstance(packet["action_candidates"], list)
+            or len(packet["action_candidates"]) > 12
+            or not isinstance(packet["evidence"], list) or len(packet["evidence"]) > 96
+            or row["candidate_count"] != len(packet["research_candidates"])
+            or row["evidence_count"] != len(packet["evidence"])
+        ):
+            raise ValueError
+        for omission in packet["omissions"]:
+            if (
+                not isinstance(omission, Mapping)
+                or set(omission) != {"candidate_key", "item_id", "kind", "reason", "stage"}
+                or not all(isinstance(omission[name], str) for name in ("candidate_key", "kind", "reason", "stage"))
+                or (omission["item_id"] is not None and (
+                    not isinstance(omission["item_id"], str) or UUID.fullmatch(omission["item_id"]) is None
+                ))
+            ):
+                raise ValueError
+
+        checkpoint_items: dict[tuple[str, str], list[Mapping[str, object]]] = {}
+        for checkpoint in [
+            *result["collection_checkpoints"], *result["collection_checkpoint_history"],
+        ]:
+            payload = checkpoint["payload"]
+            receipt = payload.get("receipt") if isinstance(payload, Mapping) else None
+            items = payload.get("items") if isinstance(payload, Mapping) else None
+            if not isinstance(receipt, Mapping) or not isinstance(items, list):
+                continue
+            receipt_id = receipt.get("source_receipt_id")
+            for item in items:
+                if not isinstance(item, Mapping) or not isinstance(item.get("content_hash"), str):
+                    continue
+                item_id = str(uuid.uuid5(uuid.NAMESPACE_URL, f"market-source:{item['content_hash']}"))
+                checkpoint_items.setdefault((item_id, str(receipt_id)), []).append(item)
+        raw_items = {item["id"]: item for item in result["source_items"]}
+        raw_receipts = {receipt["id"]: receipt for receipt in result["source_receipts"]}
+        raw_run_items = {
+            item["source_item_id"]: item
+            for item in result["intelligence_run_items"]
+            if item["run_id"] == row["run_id"] and item["disposition"] == "accepted"
+        }
+        raw_source_provenance = {
+            value["source_item_id"]: value for value in result["source_item_provenance"]
+        }
+        raw_run_provenance = {
+            value["source_item_id"]: value
+            for value in result["run_source_item_provenance"]
+            if value["run_id"] == row["run_id"]
+        }
+
+        evidence_by_id: dict[str, Mapping[str, object]] = {}
+        evidence_keys = {
+            "authority", "canonical_url", "claim_type", "content_hash", "effective_at",
+            "item_id", "normalized_text", "published_at", "reporting_at", "retrieved_at",
+            "source_identity",
+        }
+        for evidence in packet["evidence"]:
+            if not isinstance(evidence, Mapping) or set(evidence) != evidence_keys:
+                raise ValueError
+            source = evidence["source_identity"]
+            if (
+                not isinstance(source, Mapping)
+                or set(source) != {"provider", "receipt_id", "upstream_item_id"}
+                or not isinstance(evidence["item_id"], str) or UUID.fullmatch(evidence["item_id"]) is None
+                or not isinstance(evidence["content_hash"], str) or HASH.fullmatch(evidence["content_hash"]) is None
+                or str(uuid.uuid5(uuid.NAMESPACE_URL, f"market-source:{evidence['content_hash']}")) != evidence["item_id"]
+                or not isinstance(evidence["canonical_url"], str) or not evidence["canonical_url"].startswith("https://")
+                or not isinstance(evidence["authority"], str) or not evidence["authority"]
+                or not isinstance(evidence["claim_type"], str) or not evidence["claim_type"]
+                or not isinstance(evidence["normalized_text"], str) or not 1 <= len(evidence["normalized_text"]) <= 2_000
+                or not _packet_v2_time(evidence["retrieved_at"])
+                or not _packet_v2_time(evidence["published_at"], nullable=True)
+                or not _packet_v2_time(evidence["reporting_at"], nullable=True)
+                or not _packet_v2_time(evidence["effective_at"], nullable=True)
+                or not isinstance(source.get("provider"), str)
+                or not isinstance(source.get("upstream_item_id"), str)
+                or not isinstance(source.get("receipt_id"), str)
+                or UUID.fullmatch(source["receipt_id"]) is None
+                or evidence["item_id"] in evidence_by_id
+            ):
+                raise ValueError
+            matches = checkpoint_items.get((evidence["item_id"], source["receipt_id"]), [])
+            raw_item = raw_items.get(evidence["item_id"])
+            raw_receipt = raw_receipts.get(source["receipt_id"])
+            raw_run_item = raw_run_items.get(evidence["item_id"])
+            raw_source = raw_source_provenance.get(evidence["item_id"])
+            raw_run = raw_run_provenance.get(evidence["item_id"])
+            if not any(
+                item.get("provider") == source["provider"]
+                and item.get("upstream_item_id") == source["upstream_item_id"]
+                and item.get("content_hash") == evidence["content_hash"]
+                and item.get("source_url") == evidence["canonical_url"]
+                and item.get("normalized_text") == evidence["normalized_text"]
+                and item.get("authority") == evidence["authority"]
+                and _packet_v2_same_time(item.get("published_at"), evidence["published_at"])
+                and _packet_v2_same_time(item.get("reporting_at"), evidence["reporting_at"])
+                and _packet_v2_same_time(item.get("effective_at"), evidence["effective_at"])
+                and _packet_v2_same_time(item.get("retrieved_at"), evidence["retrieved_at"])
+                for item in matches
+            ) or (
+                raw_item is None or raw_receipt is None or raw_run_item is None
+                or raw_source is None or raw_run is None
+                or raw_receipt["run_id"] != row["run_id"]
+                or raw_receipt["status"] not in {"succeeded", "cache_hit"}
+                or raw_run_item["source_receipt_id"] != source["receipt_id"]
+                or raw_item["content_hash"] != evidence["content_hash"]
+                or raw_item["provider"] != source["provider"]
+                or raw_item["upstream_item_id"] != source["upstream_item_id"]
+                or raw_item["normalized_text"] != evidence["normalized_text"]
+                or raw_source["canonical_item_url"] != evidence["canonical_url"]
+                or raw_item["metadata"].get("authority") != evidence["authority"]
+                or not _packet_v2_same_time(raw_item["published_at"], evidence["published_at"])
+                or not _packet_v2_same_time(raw_item["effective_at"], evidence["effective_at"])
+                or not _packet_v2_same_time(raw_run["reporting_at"], evidence["reporting_at"])
+                or not _packet_v2_same_time(raw_run["retrieved_at"], evidence["retrieved_at"])
+            ):
+                raise ValueError
+            evidence_by_id[evidence["item_id"]] = evidence
+        if list(evidence_by_id) != sorted(evidence_by_id):
+            raise ValueError
+
+        facts = {fact["id"]: fact for fact in result["exposure_facts"]}
+        manifests = {manifest["id"]: manifest for manifest in result["reference_manifests"]}
+        securities = {security["id"]: security for security in result["security_reference_revisions"]}
+        memberships = {
+            (member["manifest_id"], member["security_revision_id"])
+            for member in result["reference_snapshot_memberships"]
+        }
+        healthy_bindings = {
+            (binding["run_id"], binding["manifest_id"])
+            for binding in result["reference_run_bindings"]
+            if binding["reference_status"] == "healthy"
+        }
+        candidates: dict[str, Mapping[str, object]] = {}
+        reference_keys = {"claim_type", "item_id", "relationship_eligible", "role"}
+        suitability_keys = {
+            "component_scores", "evaluation_hash", "lineage", "missing_reasons", "state",
+            "veto_reasons",
+        }
+        for candidate in packet["research_candidates"]:
+            if (
+                not isinstance(candidate, Mapping) or set(candidate) != _PACKET_V2_CANDIDATE_KEYS
+                or not isinstance(candidate["candidate_key"], str) or not candidate["candidate_key"]
+                or candidate["candidate_key"] in candidates
+                or not isinstance(candidate["candidate_hash"], str) or HASH.fullmatch(candidate["candidate_hash"]) is None
+                or candidate["candidate_hash"] != _semantic_hash({
+                    key: value for key, value in candidate.items() if key != "candidate_hash"
+                })
+                or candidate["research_state"] not in {
+                    "research_rejected", "observed", "unresolved", "resolved",
+                    "exposure_supported", "analysis_ready",
+                }
+                or not _packet_v2_sorted_strings(candidate["event_ids"], maximum=50, nonempty=True)
+                or not _packet_v2_sorted_strings(candidate["exposure_fact_ids"], maximum=50)
+                or not _packet_v2_sorted_strings(candidate["roles"], maximum=50)
+                or not _packet_v2_sorted_strings(candidate["theme_ids"], maximum=50)
+                or not _packet_v2_sorted_strings(candidate["limitations"], maximum=100)
+                or not _packet_v2_sorted_strings(candidate["adverse_paths"], maximum=50)
+                or any(UUID.fullmatch(value) is None for value in candidate["exposure_fact_ids"])
+                or not isinstance(candidate["priority_components"], Mapping)
+                or set(candidate["priority_components"]) != {
+                    "authority_corroboration", "exposure", "materiality", "recency",
+                }
+                or any(not isinstance(value, str) or _PACKET_V2_FIXED.fullmatch(value) is None
+                       for value in candidate["priority_components"].values())
+                or not isinstance(candidate["priority_score"], str)
+                or _PACKET_V2_FIXED.fullmatch(candidate["priority_score"]) is None
+                or not isinstance(candidate["evidence"], list)
+                or not 1 <= len(candidate["evidence"]) <= 8
+            ):
+                raise ValueError
+            references: dict[str, Mapping[str, object]] = {}
+            for reference in candidate["evidence"]:
+                if (
+                    not isinstance(reference, Mapping) or set(reference) != reference_keys
+                    or reference.get("item_id") not in evidence_by_id
+                    or reference.get("role") not in {"supporting", "opposing"}
+                    or type(reference.get("relationship_eligible")) is not bool
+                    or reference["item_id"] in references
+                ):
+                    raise ValueError
+                references[reference["item_id"]] = reference
+            if not any(
+                ranking["run_id"] == row["run_id"]
+                and ranking["candidate_key"] == candidate["candidate_key"]
+                and any(
+                    event["run_id"] == row["run_id"]
+                    and event["id"] == ranking["event_id"]
+                    and bool(set(event["evidence_item_ids"]) & set(references))
+                    for event in result["events"]
+                )
+                for ranking in result["candidate_rankings"]
+            ):
+                raise ValueError
+            suitability = candidate["suitability"]
+            if not isinstance(suitability, Mapping) or set(suitability) != suitability_keys:
+                raise ValueError
+            if (
+                suitability.get("state") not in {"unknown", "eligible", "vetoed"}
+                or not isinstance(suitability.get("component_scores"), Mapping)
+                or set(suitability["component_scores"]) != {
+                    "concentration_penalty", "duplication_penalty", "liquidity", "portfolio_relevance",
+                }
+                or any(not isinstance(value, str) or _PACKET_V2_FIXED.fullmatch(value) is None
+                       for value in suitability["component_scores"].values())
+                or not _packet_v2_sorted_strings(suitability.get("missing_reasons"), maximum=50)
+                or not _packet_v2_sorted_strings(suitability.get("veto_reasons"), maximum=50)
+                or not isinstance(suitability.get("evaluation_hash"), str)
+                or suitability["evaluation_hash"] != _semantic_hash({
+                    key: value for key, value in suitability.items() if key != "evaluation_hash"
+                })
+                or suitability["state"] == "unknown" and not suitability["missing_reasons"]
+                or suitability["state"] == "vetoed" and not suitability["veto_reasons"]
+            ):
+                raise ValueError
+            lineage = suitability["lineage"]
+            if lineage is not None:
+                if (
+                    not isinstance(lineage, Mapping) or set(lineage) != _PACKET_V2_LINEAGE_KEYS
+                    or lineage["run_id"] != row["run_id"]
+                    or lineage["policy_version"] != row["policy_version"]
+                    or lineage["observed_at"] != packet["observed_at"]
+                    or not isinstance(lineage["evidence_receipt_ids"], Mapping)
+                    or len(lineage["evidence_receipt_ids"]) > 8
+                    or any(
+                        lineage["evidence_receipt_ids"].get(item_id)
+                        != evidence_by_id[item_id]["source_identity"]["receipt_id"]
+                        for item_id in references
+                    )
+                ):
+                    raise ValueError
+            unresolved = candidate["security_id"] is None or candidate["ticker"] is None
+            if unresolved != (candidate["research_state"] == "unresolved"):
+                raise ValueError
+            for fact_id in candidate["exposure_fact_ids"]:
+                fact = facts.get(fact_id)
+                value = fact.get("fact", {}).get("value") if fact else None
+                source_id = value.get("source_item_id") if isinstance(value, Mapping) else None
+                reference = references.get(source_id)
+                if (
+                    fact is None or lineage is None or not isinstance(value, Mapping)
+                    or fact["run_id"] != row["run_id"]
+                    or fact["security_revision_id"] != lineage["security_revision_id"]
+                    or value.get("security_id") != candidate["security_id"]
+                    or value.get("entity_id") != candidate["entity_id"]
+                    or value.get("ticker") != candidate["ticker"]
+                    or value.get("status") != "supported"
+                    or value.get("claim_state") != "operational"
+                    or value.get("business_exposure") != "supported"
+                    or value.get("role") not in candidate["roles"]
+                    or not set(value.get("event_ids", [])).issubset(candidate["event_ids"])
+                    or reference is None or reference["claim_type"] != "issuer_exposure"
+                    or reference["relationship_eligible"] is not True
+                ):
+                    raise ValueError
+            if any(
+                reference["relationship_eligible"] and not any(
+                    facts[fact_id]["fact"]["value"].get("source_item_id") == item_id
+                    for fact_id in candidate["exposure_fact_ids"] if fact_id in facts
+                ) for item_id, reference in references.items()
+            ):
+                raise ValueError
+            if candidate["research_state"] == "analysis_ready":
+                manifest = manifests.get(lineage.get("reference_manifest_id")) if isinstance(lineage, Mapping) else None
+                security = securities.get(lineage.get("security_revision_id")) if isinstance(lineage, Mapping) else None
+                if (
+                    not candidate["exposure_fact_ids"] or lineage is None
+                    or not any(ref["role"] == "supporting" for ref in references.values())
+                    or not any(ref["role"] == "opposing" for ref in references.values())
+                    or manifest is None or security is None or not security["eligible"]
+                    or manifest["revision"] != lineage["reference_revision"]
+                    or (row["run_id"], manifest["id"]) not in healthy_bindings
+                    or (manifest["id"], security["id"]) not in memberships
+                    or any(security[name] != candidate[name] for name in ("security_id", "entity_id", "ticker"))
+                    or not _packet_v2_time(lineage["reference_expires_at"])
+                    or datetime.fromisoformat(lineage["reference_expires_at"].replace("Z", "+00:00"))
+                       <= datetime.fromisoformat(packet["observed_at"].replace("Z", "+00:00"))
+                ):
+                    raise ValueError
+            if suitability["state"] == "eligible" and (
+                candidate["research_state"] != "analysis_ready"
+                or suitability["missing_reasons"] or suitability["veto_reasons"]
+                or lineage is None or any(lineage[name] in {None, ""} for name in (
+                    "cash_revision", "portfolio_revision", "quote_as_of", "quote_expires_at",
+                    "quote_receipt_id", "reference_expires_at", "reference_manifest_id",
+                    "reference_revision", "security_revision_id",
+                ))
+            ):
+                raise ValueError
+            candidates[candidate["candidate_key"]] = candidate
+
+        seen_actions: set[str] = set()
+        for action in packet["action_candidates"]:
+            if not isinstance(action, Mapping) or set(action) != {
+                "candidate_hash", "candidate_key", "suitability_hash",
+            } or not isinstance(action["candidate_key"], str) or action["candidate_key"] in seen_actions:
+                raise ValueError
+            candidate = candidates.get(action["candidate_key"])
+            if (
+                candidate is None or action["candidate_hash"] != candidate["candidate_hash"]
+                or action["suitability_hash"] != candidate["suitability"]["evaluation_hash"]
+                or candidate["research_state"] != "analysis_ready"
+                or candidate["suitability"]["state"] != "eligible"
+            ):
+                raise ValueError
+            seen_actions.add(action["candidate_key"])
+
+        completions = [
+            completion for completion in result["collection_completions"]
+            if completion["run_id"] == row["run_id"]
+            and completion["receipt"].get("packet_id") == row["id"]
+            and completion["receipt"].get("packet_hash") == row["packet_hash"]
+        ]
+        if len(completions) != 1:
+            raise ValueError
+        action_tickers = {
+            candidates[action["candidate_key"]]["ticker"]
+            for action in packet["action_candidates"]
+        }
+        packet_evaluation_ids: set[str] = set()
+        actionable_evaluation_ids: set[str] = set()
+        alert_evaluation_ids: set[str] = set()
+        for evaluation in result["decision_evaluations"]:
+            analyst = evaluation["analyst"]
+            if not isinstance(analyst, Mapping) or analyst.get("packet_id") != row["id"]:
+                continue
+            packet_evaluation_ids.add(evaluation["id"])
+            normalized = evaluation["normalized"]
+            ticker = normalized.get("ticker") if isinstance(normalized, Mapping) else None
+            if evaluation["policy_status"] == "approved" and evaluation["final_action"] in {
+                "buy", "add", "reduce", "sell",
+            }:
+                if ticker not in action_tickers:
+                    raise ValueError
+                actionable_evaluation_ids.add(evaluation["id"])
+            if (
+                evaluation["policy_status"] == "approved"
+                and evaluation["final_action"] == "hold"
+                and isinstance(normalized, Mapping)
+                and normalized.get("final_alert_urgency") in {"urgent", "routine"}
+            ):
+                alert_evaluation_ids.add(evaluation["id"])
+
+        packet_reports = [
+            report for report in result["reports"] if report["packet_id"] == row["id"]
+        ]
+        run = next(
+            (run for run in result["intelligence_runs"] if run["id"] == row["run_id"]),
+            None,
+        )
+        if run is None:
+            raise ValueError
+        if run["phase"] in {"pre-market", "post-market"} and not packet_reports:
+            raise ValueError
+        for report in packet_reports:
+            body = report["report"]
+            decision_ids = body.get("policy_decision_ids") if isinstance(body, Mapping) else None
+            source_ids = body.get("source_ids") if isinstance(body, Mapping) else None
+            if (
+                not isinstance(decision_ids, list) or len(set(decision_ids)) != len(decision_ids)
+                or not set(decision_ids).issubset(packet_evaluation_ids)
+                or not isinstance(source_ids, list) or not set(source_ids).issubset(evidence_by_id)
+                or body.get("suggestion_only") is not True
+            ):
+                raise ValueError
+            origins = [
+                origin for origin in result["report_origins"]
+                if origin["requested_report_id"] == report["id"]
+                and origin["requested_packet_id"] == row["id"]
+                and origin["requested_idempotency_key"] == report["idempotency_key"]
+                and origin["requested_report_hash"] == report["report_hash"]
+            ]
+            publications = [
+                publication for publication in result["publications"]
+                if publication["report_id"] == report["id"]
+                and publication["idempotency_key"] == report["idempotency_key"]
+            ]
+            if len(origins) != 1 or len(publications) != 1:
+                raise ValueError
+            publication = publications[0]
+            actionable = bool(set(decision_ids) & actionable_evaluation_ids)
+            holding_alert = bool(set(decision_ids) & alert_evaluation_ids)
+            if not actionable and not holding_alert and (
+                publication["status"] != "suppressed"
+                or publication["suppression_reason"] not in {"no_trigger", "not_actionable"}
+                or publication["telegram_message_ids"]
+                or publication["telegram_accepted_at"] is not None
+            ):
+                raise ValueError
+            if publication["status"] == "uncertain" and publication["attempt_count"] > 1:
+                raise ValueError
+    except (KeyError, TypeError, ValueError, InvalidOperation, OverflowError):
+        raise ValueError("packet v2 recovery lineage mismatch") from None
+
+
 def _validated_records(records: Mapping[str, object]) -> dict[str, list[dict[str, object]]]:
     if not isinstance(records, Mapping) or set(records) != set(REQUIRED_RECOVERY_RECORDS):
         raise ValueError("recovery records require exact allowlisted datasets")
@@ -1047,6 +1670,8 @@ def _validated_records(records: Mapping[str, object]) -> dict[str, list[dict[str
             "collection_checkpoints": ("run_id", "cache_key"),
             "collection_checkpoint_history": ("run_id", "cache_key", "source_receipt_id"),
             "collection_completions": "completion_id", "report_origins": "request_id",
+            "source_item_provenance": "source_item_id",
+            "run_source_item_provenance": "run_item_id",
             "reference_chunk_receipts": ("manifest_id", "chunk_index"),
             "reference_snapshot_memberships": ("manifest_id", "security_id"),
             "reference_finalization_seals": "manifest_id",
@@ -1651,6 +2276,8 @@ def _validated_records(records: Mapping[str, object]) -> dict[str, list[dict[str
                 or row["candidate_count"] < 0 or row["evidence_count"] < 0
                 or sha256(canonical_json(row["packet"]).encode()) != row["packet_hash"]):
             raise ValueError("packet content or run relationship mismatch")
+        if row["packet"].get("contract_version") == 2:
+            _validate_evidence_packet_v2_recovery(row, result)
     for row in reports.values():
         packet = packets.get(row["packet_id"])
         if (packet is None or row["run_id"] not in runs or packet["run_id"] != row["run_id"]
@@ -1780,6 +2407,33 @@ def relationships(records: Mapping[str, list]) -> dict[str, list]:
         "discovery_nomination_lineage": sorted([[row["id"], row["task_id"], row["security_revision_id"], row["theme_episode_revision_id"], row["exposure_fact_ids"]] for row in records["research_nominations"]]),
         "intelligence_event_run": sorted([[row["id"], row["run_id"], row["status"]] for row in records["intelligence_run_events"]]),
         "quota_reservation_run": sorted([[row["id"], row["run_id"], row["provider"]] for row in records["source_quota_reservations"]]),
+        "source_receipt_reservation_run": sorted([
+            [row["id"], row["reservation_id"], row["run_id"]]
+            for row in records["source_receipts"]
+        ]),
+        "source_item_receipt": sorted([
+            [row["id"], row["source_receipt_id"]] for row in records["source_items"]
+        ]),
+        "run_source_item_receipt": sorted([
+            [row["id"], row["run_id"], row["source_item_id"], row["source_receipt_id"]]
+            for row in records["intelligence_run_items"]
+        ]),
+        "source_item_provenance": sorted([
+            [row["source_item_id"], row["provider"]]
+            for row in records["source_item_provenance"]
+        ]),
+        "run_source_item_provenance": sorted([
+            [row["run_item_id"], row["run_id"], row["source_item_id"], row["source_receipt_id"]]
+            for row in records["run_source_item_provenance"]
+        ]),
+        "market_event_run": sorted([
+            [row["id"], row["run_id"], row["evidence_item_ids"]]
+            for row in records["events"]
+        ]),
+        "candidate_ranking_event_run": sorted([
+            [row["id"], row["run_id"], row["event_id"], row["candidate_key"]]
+            for row in records["candidate_rankings"]
+        ]),
         "checkpoint_run": sorted([[row["run_id"], row["cache_key"], row["source_receipt_id"]] for row in records["collection_checkpoints"]]),
         "checkpoint_history_run": sorted([[row["run_id"], row["cache_key"], row["source_receipt_id"]] for row in records["collection_checkpoint_history"]]),
         "collection_completion_run": sorted([[row["completion_id"], row["run_id"]] for row in records["collection_completions"]]),

@@ -1,4 +1,5 @@
 import {
+  canonicalJson,
   type DiscoveryReferencePayload,
   type DiscoveryStageCheckpointPayload,
   parseCheckpointIntelligencePayload,
@@ -18,6 +19,7 @@ import {
   type ReferenceFinalizePayload,
   type ReferencePinPayload,
   type ReferenceReadPayload,
+  sha256Hex,
   type StartIntelligencePayload,
 } from "./intelligence.ts";
 import {
@@ -232,13 +234,114 @@ export interface EvidenceBlock {
   exposure_kind?: ExposureKind | null;
 }
 
-export interface EvidencePacket {
+export interface EvidencePacketV1 {
   candidates: Array<{ candidate_key: string; evidence_ids: string[] }>;
   evidence: Array<{ item_id: string; normalized_text: string }>;
   coverage: Record<string, unknown>;
   limitations: string[];
   policy_version: number;
   facts?: TrustedEvidenceFact[];
+}
+
+export interface CandidateLineageV2 {
+  run_id: string;
+  observed_at: string;
+  policy_version: number;
+  reference_manifest_id: string | null;
+  reference_revision: number | null;
+  reference_expires_at: string | null;
+  security_revision_id: string | null;
+  quote_receipt_id: string | null;
+  quote_as_of: string | null;
+  quote_expires_at: string | null;
+  evidence_receipt_ids: Record<string, string>;
+  portfolio_revision: string | null;
+  cash_revision: string | null;
+}
+
+export interface SuitabilityEvaluationV2 {
+  component_scores: Record<string, string>;
+  evaluation_hash: string;
+  lineage: CandidateLineageV2 | null;
+  missing_reasons: string[];
+  state: "unknown" | "eligible" | "vetoed";
+  veto_reasons: string[];
+}
+
+export interface ResearchCandidateV2 {
+  adverse_paths: string[];
+  candidate_hash: string;
+  candidate_key: string;
+  entity_id: string | null;
+  event_ids: string[];
+  evidence: Array<{
+    claim_type: string;
+    item_id: string;
+    relationship_eligible: boolean;
+    role: "supporting" | "opposing";
+  }>;
+  exposure_fact_ids: string[];
+  limitations: string[];
+  priority_components: Record<string, string>;
+  priority_score: string;
+  research_state:
+    | "unresolved"
+    | "resolved"
+    | "exposure_supported"
+    | "analysis_ready";
+  roles: string[];
+  security_id: string | null;
+  suitability: SuitabilityEvaluationV2;
+  theme_ids: string[];
+  ticker: string | null;
+}
+
+export interface EvidencePacketV2 {
+  action_candidates: Array<{
+    candidate_hash: string;
+    candidate_key: string;
+    suitability_hash: string;
+  }>;
+  contract_version: 2;
+  coverage: Record<string, unknown>;
+  evidence: Array<{
+    authority: string;
+    canonical_url: string;
+    claim_type: string;
+    content_hash: string;
+    effective_at: string | null;
+    item_id: string;
+    normalized_text: string;
+    published_at: string | null;
+    reporting_at: string | null;
+    retrieved_at: string;
+    source_identity: {
+      provider: string;
+      receipt_id: string;
+      upstream_item_id: string;
+    };
+  }>;
+  execution_allowed: false;
+  limitations: string[];
+  observed_at: string;
+  omissions: Array<{
+    candidate_key: string;
+    item_id: string | null;
+    kind: string;
+    reason: string;
+    stage: string;
+  }>;
+  policy_version: number;
+  research_candidates: ResearchCandidateV2[];
+  run_id: string;
+}
+
+export type EvidencePacket = EvidencePacketV1 | EvidencePacketV2;
+
+export function isEvidencePacketV2(
+  packet: EvidencePacket,
+): packet is EvidencePacketV2 {
+  return "contract_version" in packet && packet.contract_version === 2;
 }
 
 /** Only populated by the persisted packet read (or an explicit dry-run fixture). */
@@ -592,8 +695,16 @@ export interface GatewayReadContext extends PolicyContext {
     holding_market_values: Record<string, string>;
     liquidity_by_ticker: Record<string, string>;
     overlap_by_ticker: Record<string, string>;
-    current_quotes?: Record<string, { price: string; as_of: string }>;
+    current_quotes?: Record<string, {
+      price: string;
+      as_of: string;
+      expires_at: string;
+      receipt_id: string;
+    }>;
     quote_receipt_ids?: string[];
+    portfolio_revision?: string;
+    portfolio_valuation_complete?: boolean;
+    cash_revision?: string;
     source_cursors?: DiscoverySourceCursor[];
     last_completed_scans?: DiscoveryCompletedScan[];
   };
@@ -1494,7 +1605,7 @@ function parseCandidate(
   };
 }
 
-export function parseEvidencePacket(value: unknown): EvidencePacket {
+function parseEvidencePacketV1(value: unknown): EvidencePacketV1 {
   const path = "intelligence packet";
   const row = objectValue(value, path);
   if (new TextEncoder().encode(JSON.stringify(row)).byteLength > 98_304) {
@@ -1586,6 +1697,719 @@ export function parseEvidencePacket(value: unknown): EvidencePacket {
   };
 }
 
+function hashValue(value: unknown, path: string): string {
+  const result = stringValue(value, path, 64);
+  if (!/^[0-9a-f]{64}$/.test(result)) {
+    throw new Error(`${path} must be a lowercase SHA-256 hash`);
+  }
+  return result;
+}
+
+function canonicalTimestampValue(value: unknown, path: string): string {
+  const result = timestampValue(value, path);
+  if (!/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/.test(result)) {
+    throw new Error(`${path} must be a millisecond UTC timestamp`);
+  }
+  if (new Date(result).toISOString() !== result) {
+    throw new Error(`${path} must be a canonical UTC timestamp`);
+  }
+  return result;
+}
+
+function nullableCanonicalTimestamp(
+  value: unknown,
+  path: string,
+): string | null {
+  return value === null ? null : canonicalTimestampValue(value, path);
+}
+
+function fixedPointValue(value: unknown, path: string): string {
+  const result = stringValue(value, path, 100);
+  if (!/^-?(?:0|[1-9]\d*)\.\d{6}$/.test(result) || result === "-0.000000") {
+    throw new Error(`${path} must be a canonical six-place decimal`);
+  }
+  return result;
+}
+
+function utf8Compare(left: string, right: string): number {
+  const encoder = new TextEncoder();
+  const leftBytes = encoder.encode(left);
+  const rightBytes = encoder.encode(right);
+  for (
+    let index = 0;
+    index < Math.min(leftBytes.length, rightBytes.length);
+    index += 1
+  ) {
+    if (leftBytes[index] !== rightBytes[index]) {
+      return leftBytes[index] - rightBytes[index];
+    }
+  }
+  return leftBytes.length - rightBytes.length;
+}
+
+function sortedUniqueStrings(
+  value: unknown,
+  path: string,
+  maxLength: number,
+  itemLimit = 256,
+): string[] {
+  const result = arrayValue(value, path, maxLength).map((item, index) =>
+    stringValue(item, `${path}[${index}]`, itemLimit)
+  );
+  if (
+    new Set(result).size !== result.length ||
+    result.some((item, index) =>
+      index > 0 && utf8Compare(result[index - 1], item) >= 0
+    )
+  ) throw new Error(`${path} must be sorted and unique`);
+  return result;
+}
+
+function nullableBoundedString(
+  value: unknown,
+  path: string,
+  limit: number,
+): string | null {
+  return value === null ? null : stringValue(value, path, limit);
+}
+
+function parseLineageV2(
+  value: unknown,
+  path: string,
+): CandidateLineageV2 | null {
+  if (value === null) return null;
+  const row = objectValue(value, path);
+  exactKeys(row, [
+    "cash_revision",
+    "evidence_receipt_ids",
+    "observed_at",
+    "policy_version",
+    "portfolio_revision",
+    "quote_as_of",
+    "quote_expires_at",
+    "quote_receipt_id",
+    "reference_expires_at",
+    "reference_manifest_id",
+    "reference_revision",
+    "run_id",
+    "security_revision_id",
+  ], path);
+  const receiptRow = objectValue(
+    row.evidence_receipt_ids,
+    `${path}.evidence_receipt_ids`,
+  );
+  if (Object.keys(receiptRow).length > 8) {
+    throw new Error(`${path}.evidence_receipt_ids exceeds evidence bound`);
+  }
+  const evidence_receipt_ids: Record<string, string> = {};
+  const receiptKeys = Object.keys(receiptRow);
+  if (
+    receiptKeys.some((key, index) =>
+      index > 0 && utf8Compare(receiptKeys[index - 1], key) >= 0
+    )
+  ) {
+    throw new Error(`${path}.evidence_receipt_ids keys must be sorted`);
+  }
+  for (const itemId of receiptKeys) {
+    uuidValue(itemId, `${path}.evidence_receipt_ids key`);
+    evidence_receipt_ids[itemId] = uuidValue(
+      receiptRow[itemId],
+      `${path}.evidence_receipt_ids.${itemId}`,
+    );
+  }
+  return {
+    cash_revision: nullableBoundedString(
+      row.cash_revision,
+      `${path}.cash_revision`,
+      256,
+    ),
+    evidence_receipt_ids,
+    observed_at: canonicalTimestampValue(
+      row.observed_at,
+      `${path}.observed_at`,
+    ),
+    policy_version: integerValue(
+      row.policy_version,
+      `${path}.policy_version`,
+      1,
+    ),
+    portfolio_revision: nullableBoundedString(
+      row.portfolio_revision,
+      `${path}.portfolio_revision`,
+      256,
+    ),
+    quote_as_of: nullableCanonicalTimestamp(
+      row.quote_as_of,
+      `${path}.quote_as_of`,
+    ),
+    quote_expires_at: nullableCanonicalTimestamp(
+      row.quote_expires_at,
+      `${path}.quote_expires_at`,
+    ),
+    quote_receipt_id: row.quote_receipt_id === null
+      ? null
+      : uuidValue(row.quote_receipt_id, `${path}.quote_receipt_id`),
+    reference_expires_at: nullableCanonicalTimestamp(
+      row.reference_expires_at,
+      `${path}.reference_expires_at`,
+    ),
+    reference_manifest_id: row.reference_manifest_id === null
+      ? null
+      : uuidValue(row.reference_manifest_id, `${path}.reference_manifest_id`),
+    reference_revision: row.reference_revision === null
+      ? null
+      : integerValue(row.reference_revision, `${path}.reference_revision`, 1),
+    run_id: uuidValue(row.run_id, `${path}.run_id`),
+    security_revision_id: row.security_revision_id === null
+      ? null
+      : uuidValue(row.security_revision_id, `${path}.security_revision_id`),
+  };
+}
+
+function componentScoresV2(
+  value: unknown,
+  path: string,
+  keys: readonly string[],
+): Record<string, string> {
+  const row = objectValue(value, path);
+  exactKeys(row, [...keys], path);
+  return Object.fromEntries(keys.map((key) => [
+    key,
+    fixedPointValue(row[key], `${path}.${key}`),
+  ]));
+}
+
+function parseEvidencePacketV2(value: unknown): EvidencePacketV2 {
+  const path = "intelligence packet";
+  const row = objectValue(value, path);
+  if (new TextEncoder().encode(JSON.stringify(row)).byteLength > 98_304) {
+    throw new Error(`${path} exceeds 96 KiB`);
+  }
+  exactKeys(row, [
+    "action_candidates",
+    "contract_version",
+    "coverage",
+    "evidence",
+    "execution_allowed",
+    "limitations",
+    "observed_at",
+    "omissions",
+    "policy_version",
+    "research_candidates",
+    "run_id",
+  ], path);
+  if (row.contract_version !== 2) {
+    throw new Error(`${path}.contract_version must be 2`);
+  }
+  if (row.execution_allowed !== false) {
+    throw new Error(`${path}.execution_allowed must be false`);
+  }
+  const run_id = uuidValue(row.run_id, `${path}.run_id`);
+  const observed_at = canonicalTimestampValue(
+    row.observed_at,
+    `${path}.observed_at`,
+  );
+  const policy_version = integerValue(
+    row.policy_version,
+    `${path}.policy_version`,
+    1,
+  );
+  const evidence = arrayValue(row.evidence, `${path}.evidence`, 96).map(
+    (value, index) => {
+      const evidencePath = `${path}.evidence[${index}]`;
+      const item = objectValue(value, evidencePath);
+      exactKeys(item, [
+        "authority",
+        "canonical_url",
+        "claim_type",
+        "content_hash",
+        "effective_at",
+        "item_id",
+        "normalized_text",
+        "published_at",
+        "reporting_at",
+        "retrieved_at",
+        "source_identity",
+      ], evidencePath);
+      const source = objectValue(
+        item.source_identity,
+        `${evidencePath}.source_identity`,
+      );
+      exactKeys(
+        source,
+        ["provider", "receipt_id", "upstream_item_id"],
+        `${evidencePath}.source_identity`,
+      );
+      const canonical_url = stringValue(
+        item.canonical_url,
+        `${evidencePath}.canonical_url`,
+        2_048,
+      );
+      const parsedUrl = new URL(canonical_url);
+      if (parsedUrl.protocol !== "https:" || parsedUrl.href !== canonical_url) {
+        throw new Error(
+          `${evidencePath}.canonical_url must be canonical HTTPS`,
+        );
+      }
+      return {
+        authority: stringValue(item.authority, `${evidencePath}.authority`, 80),
+        canonical_url,
+        claim_type: stringValue(
+          item.claim_type,
+          `${evidencePath}.claim_type`,
+          80,
+        ),
+        content_hash: hashValue(
+          item.content_hash,
+          `${evidencePath}.content_hash`,
+        ),
+        effective_at: nullableCanonicalTimestamp(
+          item.effective_at,
+          `${evidencePath}.effective_at`,
+        ),
+        item_id: uuidValue(item.item_id, `${evidencePath}.item_id`),
+        normalized_text: stringValue(
+          item.normalized_text,
+          `${evidencePath}.normalized_text`,
+          2_000,
+          true,
+        ),
+        published_at: nullableCanonicalTimestamp(
+          item.published_at,
+          `${evidencePath}.published_at`,
+        ),
+        reporting_at: nullableCanonicalTimestamp(
+          item.reporting_at,
+          `${evidencePath}.reporting_at`,
+        ),
+        retrieved_at: canonicalTimestampValue(
+          item.retrieved_at,
+          `${evidencePath}.retrieved_at`,
+        ),
+        source_identity: {
+          provider: stringValue(
+            source.provider,
+            `${evidencePath}.source_identity.provider`,
+            120,
+          ),
+          receipt_id: uuidValue(
+            source.receipt_id,
+            `${evidencePath}.source_identity.receipt_id`,
+          ),
+          upstream_item_id: stringValue(
+            source.upstream_item_id,
+            `${evidencePath}.source_identity.upstream_item_id`,
+            512,
+          ),
+        },
+      };
+    },
+  );
+  const evidenceIds = evidence.map((item) => item.item_id);
+  if (
+    new Set(evidenceIds).size !== evidenceIds.length ||
+    evidenceIds.some((item, index) =>
+      index > 0 && utf8Compare(evidenceIds[index - 1], item) >= 0
+    )
+  ) throw new Error(`${path}.evidence must have sorted unique ids`);
+  const knownEvidence = new Set(evidenceIds);
+
+  const research_candidates = arrayValue(
+    row.research_candidates,
+    `${path}.research_candidates`,
+    12,
+  ).map((value, index) => {
+    const candidatePath = `${path}.research_candidates[${index}]`;
+    const candidate = objectValue(value, candidatePath);
+    exactKeys(candidate, [
+      "adverse_paths",
+      "candidate_hash",
+      "candidate_key",
+      "entity_id",
+      "event_ids",
+      "evidence",
+      "exposure_fact_ids",
+      "limitations",
+      "priority_components",
+      "priority_score",
+      "research_state",
+      "roles",
+      "security_id",
+      "suitability",
+      "theme_ids",
+      "ticker",
+    ], candidatePath);
+    const references = arrayValue(
+      candidate.evidence,
+      `${candidatePath}.evidence`,
+      8,
+    ).map((value, evidenceIndex) => {
+      const refPath = `${candidatePath}.evidence[${evidenceIndex}]`;
+      const ref = objectValue(value, refPath);
+      exactKeys(
+        ref,
+        ["claim_type", "item_id", "relationship_eligible", "role"],
+        refPath,
+      );
+      if (typeof ref.relationship_eligible !== "boolean") {
+        throw new Error(`${refPath}.relationship_eligible must be boolean`);
+      }
+      const item_id = uuidValue(ref.item_id, `${refPath}.item_id`);
+      if (!knownEvidence.has(item_id)) {
+        throw new Error(`${refPath} references unknown evidence`);
+      }
+      return {
+        claim_type: stringValue(ref.claim_type, `${refPath}.claim_type`, 80),
+        item_id,
+        relationship_eligible: ref.relationship_eligible,
+        role: enumValue(
+          ref.role,
+          ["supporting", "opposing"] as const,
+          `${refPath}.role`,
+        ),
+      };
+    });
+    if (
+      new Set(references.map((item) => item.item_id)).size !== references.length
+    ) {
+      throw new Error(`${candidatePath}.evidence has duplicate ids`);
+    }
+    const suitabilityPath = `${candidatePath}.suitability`;
+    const suitabilityRow = objectValue(candidate.suitability, suitabilityPath);
+    exactKeys(suitabilityRow, [
+      "component_scores",
+      "evaluation_hash",
+      "lineage",
+      "missing_reasons",
+      "state",
+      "veto_reasons",
+    ], suitabilityPath);
+    const suitability: SuitabilityEvaluationV2 = {
+      component_scores: componentScoresV2(
+        suitabilityRow.component_scores,
+        `${suitabilityPath}.component_scores`,
+        [
+          "concentration_penalty",
+          "duplication_penalty",
+          "liquidity",
+          "portfolio_relevance",
+        ],
+      ),
+      evaluation_hash: hashValue(
+        suitabilityRow.evaluation_hash,
+        `${suitabilityPath}.evaluation_hash`,
+      ),
+      lineage: parseLineageV2(
+        suitabilityRow.lineage,
+        `${suitabilityPath}.lineage`,
+      ),
+      missing_reasons: sortedUniqueStrings(
+        suitabilityRow.missing_reasons,
+        `${suitabilityPath}.missing_reasons`,
+        50,
+        200,
+      ),
+      state: enumValue(
+        suitabilityRow.state,
+        ["unknown", "eligible", "vetoed"] as const,
+        `${suitabilityPath}.state`,
+      ),
+      veto_reasons: sortedUniqueStrings(
+        suitabilityRow.veto_reasons,
+        `${suitabilityPath}.veto_reasons`,
+        50,
+        200,
+      ),
+    };
+    const ticker = candidate.ticker === null
+      ? null
+      : tickerValue(candidate.ticker, `${candidatePath}.ticker`);
+    const result: ResearchCandidateV2 = {
+      adverse_paths: sortedUniqueStrings(
+        candidate.adverse_paths,
+        `${candidatePath}.adverse_paths`,
+        50,
+        256,
+      ),
+      candidate_hash: hashValue(
+        candidate.candidate_hash,
+        `${candidatePath}.candidate_hash`,
+      ),
+      candidate_key: stringValue(
+        candidate.candidate_key,
+        `${candidatePath}.candidate_key`,
+        256,
+      ),
+      entity_id: nullableBoundedString(
+        candidate.entity_id,
+        `${candidatePath}.entity_id`,
+        256,
+      ),
+      event_ids: sortedUniqueStrings(
+        candidate.event_ids,
+        `${candidatePath}.event_ids`,
+        50,
+        100,
+      ),
+      evidence: references,
+      exposure_fact_ids: sortedUniqueStrings(
+        candidate.exposure_fact_ids,
+        `${candidatePath}.exposure_fact_ids`,
+        50,
+        100,
+      ),
+      limitations: sortedUniqueStrings(
+        candidate.limitations,
+        `${candidatePath}.limitations`,
+        100,
+        500,
+      ),
+      priority_components: componentScoresV2(
+        candidate.priority_components,
+        `${candidatePath}.priority_components`,
+        [
+          "authority_corroboration",
+          "exposure",
+          "materiality",
+          "recency",
+        ],
+      ),
+      priority_score: fixedPointValue(
+        candidate.priority_score,
+        `${candidatePath}.priority_score`,
+      ),
+      research_state: enumValue(
+        candidate.research_state,
+        [
+          "unresolved",
+          "resolved",
+          "exposure_supported",
+          "analysis_ready",
+        ] as const,
+        `${candidatePath}.research_state`,
+      ),
+      roles: sortedUniqueStrings(
+        candidate.roles,
+        `${candidatePath}.roles`,
+        50,
+        80,
+      ),
+      security_id: nullableBoundedString(
+        candidate.security_id,
+        `${candidatePath}.security_id`,
+        256,
+      ),
+      suitability,
+      theme_ids: sortedUniqueStrings(
+        candidate.theme_ids,
+        `${candidatePath}.theme_ids`,
+        50,
+        256,
+      ),
+      ticker,
+    };
+    const suitabilityBody = { ...suitability } as Record<string, unknown>;
+    delete suitabilityBody.evaluation_hash;
+    if (
+      sha256Hex(canonicalJson(suitabilityBody)) !== suitability.evaluation_hash
+    ) {
+      throw new Error(
+        `${suitabilityPath}.evaluation_hash does not match canonical content`,
+      );
+    }
+    const candidateBody = { ...result } as Record<string, unknown>;
+    delete candidateBody.candidate_hash;
+    if (sha256Hex(canonicalJson(candidateBody)) !== result.candidate_hash) {
+      throw new Error(
+        `${candidatePath}.candidate_hash does not match canonical content`,
+      );
+    }
+    if (
+      (result.security_id === null || result.ticker === null) &&
+      result.research_state !== "unresolved"
+    ) {
+      throw new Error(
+        `${candidatePath} unresolved identity has invalid research state`,
+      );
+    }
+    if (
+      result.research_state === "unresolved" && (
+        result.security_id !== null || result.ticker !== null ||
+        result.entity_id === null || !result.entity_id.startsWith("unresolved:")
+      )
+    ) {
+      throw new Error(
+        `${candidatePath} explicit unresolved identity is invalid`,
+      );
+    }
+    if (
+      result.security_id !== null && result.candidate_key !== result.security_id
+    ) {
+      throw new Error(
+        `${candidatePath}.candidate_key must equal the resolved security identity`,
+      );
+    }
+    if (
+      result.research_state === "analysis_ready" && (
+        result.security_id === null || result.ticker === null ||
+        result.exposure_fact_ids.length === 0 ||
+        !result.evidence.some((item) => item.role === "supporting") ||
+        !result.evidence.some((item) => item.role === "opposing") ||
+        !result.evidence.some((item) =>
+          item.relationship_eligible && item.claim_type === "issuer_exposure"
+        ) || suitability.lineage === null
+      )
+    ) throw new Error(`${candidatePath} analysis_ready evidence is incomplete`);
+    if (
+      suitability.state === "eligible" && (
+        result.research_state !== "analysis_ready" ||
+        suitability.missing_reasons.length !== 0 ||
+        suitability.veto_reasons.length !== 0 ||
+        suitability.lineage === null ||
+        Object.values(suitability.lineage).some((value) =>
+          value === null || value === ""
+        )
+      )
+    ) {
+      throw new Error(
+        `${suitabilityPath} eligible protected lineage is incomplete`,
+      );
+    }
+    if (
+      suitability.state === "unknown" &&
+      suitability.missing_reasons.length === 0
+    ) {
+      throw new Error(`${suitabilityPath} unknown requires missing reasons`);
+    }
+    if (
+      suitability.state === "vetoed" && suitability.veto_reasons.length === 0
+    ) {
+      throw new Error(`${suitabilityPath} vetoed requires veto reasons`);
+    }
+    if (
+      suitability.lineage !== null && (
+        suitability.lineage.run_id !== run_id ||
+        suitability.lineage.observed_at !== observed_at ||
+        suitability.lineage.policy_version !== policy_version
+      )
+    ) throw new Error(`${suitabilityPath}.lineage packet binding mismatch`);
+    return result;
+  });
+  if (
+    new Set(research_candidates.map((item) => item.candidate_key)).size !==
+      research_candidates.length
+  ) {
+    throw new Error(`${path}.research_candidates has duplicate identities`);
+  }
+  const resolvedTickers = research_candidates.flatMap((item) =>
+    item.ticker === null ? [] : [item.ticker]
+  );
+  if (new Set(resolvedTickers).size !== resolvedTickers.length) {
+    throw new Error(
+      `${path}.research_candidates has duplicate ticker identities`,
+    );
+  }
+  const researchByKey = new Map(
+    research_candidates.map((item) => [item.candidate_key, item]),
+  );
+  const action_candidates = arrayValue(
+    row.action_candidates,
+    `${path}.action_candidates`,
+    12,
+  ).map((value, index) => {
+    const actionPath = `${path}.action_candidates[${index}]`;
+    const action = objectValue(value, actionPath);
+    exactKeys(
+      action,
+      ["candidate_hash", "candidate_key", "suitability_hash"],
+      actionPath,
+    );
+    const candidate_key = stringValue(
+      action.candidate_key,
+      `${actionPath}.candidate_key`,
+      256,
+    );
+    const research = researchByKey.get(candidate_key);
+    const result = {
+      candidate_hash: hashValue(
+        action.candidate_hash,
+        `${actionPath}.candidate_hash`,
+      ),
+      candidate_key,
+      suitability_hash: hashValue(
+        action.suitability_hash,
+        `${actionPath}.suitability_hash`,
+      ),
+    };
+    if (
+      !research || research.candidate_hash !== result.candidate_hash ||
+      research.suitability.evaluation_hash !== result.suitability_hash ||
+      research.research_state !== "analysis_ready" ||
+      research.suitability.state !== "eligible"
+    ) throw new Error(`${actionPath} is not an exact eligible research subset`);
+    return result;
+  });
+  if (
+    new Set(action_candidates.map((item) => item.candidate_key)).size !==
+      action_candidates.length
+  ) {
+    throw new Error(`${path}.action_candidates has duplicate identities`);
+  }
+  const limitations = sortedUniqueStrings(
+    row.limitations,
+    `${path}.limitations`,
+    100,
+    500,
+  );
+  const omissions = arrayValue(row.omissions, `${path}.omissions`, 1_000).map(
+    (value, index) => {
+      const omissionPath = `${path}.omissions[${index}]`;
+      const omission = objectValue(value, omissionPath);
+      exactKeys(omission, [
+        "candidate_key",
+        "item_id",
+        "kind",
+        "reason",
+        "stage",
+      ], omissionPath);
+      return {
+        candidate_key: stringValue(
+          omission.candidate_key,
+          `${omissionPath}.candidate_key`,
+          256,
+          true,
+        ),
+        item_id: omission.item_id === null
+          ? null
+          : uuidValue(omission.item_id, `${omissionPath}.item_id`),
+        kind: stringValue(omission.kind, `${omissionPath}.kind`, 80),
+        reason: stringValue(omission.reason, `${omissionPath}.reason`, 200),
+        stage: stringValue(omission.stage, `${omissionPath}.stage`, 80),
+      };
+    },
+  );
+  return {
+    action_candidates,
+    contract_version: 2,
+    coverage: objectValue(row.coverage, `${path}.coverage`),
+    evidence,
+    execution_allowed: false,
+    limitations,
+    observed_at,
+    omissions,
+    policy_version,
+    research_candidates,
+    run_id,
+  };
+}
+
+export function parseEvidencePacket(value: unknown): EvidencePacket {
+  const row = objectValue(value, "intelligence packet");
+  return row.contract_version === 2
+    ? parseEvidencePacketV2(row)
+    : parseEvidencePacketV1(row);
+}
+
 function parseIntelligencePacketRef(value: unknown): IntelligencePacketRef {
   const path = "bundle.intelligence_packet";
   const row = objectValue(value, path);
@@ -1621,6 +2445,24 @@ export function validatePacketEvidence(
   candidate: DecisionCandidate,
   packet: EvidencePacket,
 ): string[] {
+  if (isEvidencePacketV2(packet)) {
+    const research = packet.research_candidates.find((row) =>
+      row.ticker === candidate.ticker
+    );
+    if (!research) return ["EVIDENCE_NOT_IN_PACKET"];
+    const action = packet.action_candidates.find((row) =>
+      row.candidate_key === research.candidate_key &&
+      row.candidate_hash === research.candidate_hash &&
+      row.suitability_hash === research.suitability.evaluation_hash
+    );
+    if (!action) return ["RESEARCH_ONLY_CANDIDATE"];
+    const allowed = new Set(research.evidence.map((item) => item.item_id));
+    const supplied = new Set(candidate.evidence.map((item) => item.id));
+    return supplied.size === allowed.size &&
+        [...allowed].every((id) => supplied.has(id))
+      ? []
+      : ["EVIDENCE_NOT_IN_PACKET"];
+  }
   const packetCandidate = packet.candidates.find((row) =>
     row.candidate_key === candidate.ticker
   );
@@ -1631,6 +2473,28 @@ export function validatePacketEvidence(
       [...allowed].every((id) => supplied.has(id))
     ? []
     : ["EVIDENCE_NOT_IN_PACKET"];
+}
+
+export function packetEvidenceIds(
+  packet: EvidencePacket,
+  ticker: string,
+): string[] | null {
+  if (isEvidencePacketV2(packet)) {
+    const research = packet.research_candidates.find((row) =>
+      row.ticker === ticker
+    );
+    if (
+      !research ||
+      !packet.action_candidates.some((row) =>
+        row.candidate_key === research.candidate_key &&
+        row.candidate_hash === research.candidate_hash &&
+        row.suitability_hash === research.suitability.evaluation_hash
+      )
+    ) return null;
+    return research.evidence.map((item) => item.item_id);
+  }
+  return packet.candidates.find((row) => row.candidate_key === ticker)
+    ?.evidence_ids ?? null;
 }
 
 export function parseDecisionBundle(

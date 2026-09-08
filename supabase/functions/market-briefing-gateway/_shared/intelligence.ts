@@ -2200,6 +2200,173 @@ function validateRanking(row: JsonObject, index: number): void {
   }
 }
 
+function parsePacketV2(
+  envelope: JsonObject,
+  packet: JsonObject,
+  policyVersionHint?: number,
+): JsonObject {
+  const path = "payload.packet.packet";
+  exactKeys(packet, [
+    "action_candidates",
+    "contract_version",
+    "coverage",
+    "evidence",
+    "execution_allowed",
+    "limitations",
+    "observed_at",
+    "omissions",
+    "policy_version",
+    "research_candidates",
+    "run_id",
+  ], path);
+  if (packet.contract_version !== 2 || packet.execution_allowed !== false) {
+    throw new Error(`${path} must be v2 and non-executable`);
+  }
+  uuidValue(packet.run_id, `${path}.run_id`);
+  timestamp(packet.observed_at, `${path}.observed_at`);
+  const policyVersion = integer(packet.policy_version, `${path}.policy_version`, 1, 2_147_483_647);
+  if (policyVersionHint !== undefined && policyVersion !== policyVersionHint) {
+    throw new Error(`${path}.policy_version mismatch`);
+  }
+  boundedObject(packet.coverage, `${path}.coverage`, 32_768);
+  arrayValue(packet.limitations, `${path}.limitations`, 100).forEach((item, index) =>
+    stringValue(item, `${path}.limitations[${index}]`, 500)
+  );
+  const omissions = arrayValue(packet.omissions, `${path}.omissions`, 1_000);
+  omissions.forEach((value, index) => {
+    const omissionPath = `${path}.omissions[${index}]`;
+    const row = objectValue(value, omissionPath);
+    exactKeys(row, ["candidate_key", "item_id", "kind", "reason", "stage"], omissionPath);
+    stringValue(row.candidate_key, `${omissionPath}.candidate_key`, 256, true);
+    if (row.item_id !== null) uuidValue(row.item_id, `${omissionPath}.item_id`);
+    stringValue(row.kind, `${omissionPath}.kind`, 80);
+    stringValue(row.reason, `${omissionPath}.reason`, 200);
+    stringValue(row.stage, `${omissionPath}.stage`, 80);
+  });
+  const evidence = arrayValue(packet.evidence, `${path}.evidence`, 96);
+  const evidenceIds = new Set<string>();
+  evidence.forEach((value, index) => {
+    const evidencePath = `${path}.evidence[${index}]`;
+    const row = objectValue(value, evidencePath);
+    exactKeys(row, [
+      "authority", "canonical_url", "claim_type", "content_hash", "effective_at",
+      "item_id", "normalized_text", "published_at", "reporting_at", "retrieved_at",
+      "source_identity",
+    ], evidencePath);
+    const itemId = uuidValue(row.item_id, `${evidencePath}.item_id`);
+    if (evidenceIds.has(itemId)) throw new Error(`${path}.evidence has duplicate ids`);
+    evidenceIds.add(itemId);
+    stringValue(row.authority, `${evidencePath}.authority`, 80);
+    canonicalizeUrl(stringValue(row.canonical_url, `${evidencePath}.canonical_url`, 2_048), `${evidencePath}.canonical_url`);
+    stringValue(row.claim_type, `${evidencePath}.claim_type`, 80);
+    hashValue(row.content_hash, `${evidencePath}.content_hash`);
+    timestamp(row.effective_at, `${evidencePath}.effective_at`, true);
+    stringValue(row.normalized_text, `${evidencePath}.normalized_text`, 2_000, true);
+    timestamp(row.published_at, `${evidencePath}.published_at`, true);
+    timestamp(row.reporting_at, `${evidencePath}.reporting_at`, true);
+    timestamp(row.retrieved_at, `${evidencePath}.retrieved_at`);
+    const source = objectValue(row.source_identity, `${evidencePath}.source_identity`);
+    exactKeys(source, ["provider", "receipt_id", "upstream_item_id"], `${evidencePath}.source_identity`);
+    stringValue(source.provider, `${evidencePath}.source_identity.provider`, 120);
+    if (source.receipt_id !== null) uuidValue(source.receipt_id, `${evidencePath}.source_identity.receipt_id`);
+    stringValue(source.upstream_item_id, `${evidencePath}.source_identity.upstream_item_id`, 512);
+  });
+  const research = arrayValue(packet.research_candidates, `${path}.research_candidates`, 12);
+  const researchByKey = new Map<string, JsonObject>();
+  research.forEach((value, index) => {
+    const candidatePath = `${path}.research_candidates[${index}]`;
+    const row = objectValue(value, candidatePath);
+    exactKeys(row, [
+      "adverse_paths", "candidate_hash", "candidate_key", "entity_id", "event_ids",
+      "evidence", "exposure_fact_ids", "limitations", "priority_components",
+      "priority_score", "research_state", "roles", "security_id", "suitability",
+      "theme_ids", "ticker",
+    ], candidatePath);
+    const candidateKey = stringValue(row.candidate_key, `${candidatePath}.candidate_key`, 256);
+    if (researchByKey.has(candidateKey)) throw new Error(`${path}.research_candidates has duplicate identities`);
+    researchByKey.set(candidateKey, row);
+    hashValue(row.candidate_hash, `${candidatePath}.candidate_hash`);
+    if (row.entity_id !== null) stringValue(row.entity_id, `${candidatePath}.entity_id`, 256);
+    if (row.security_id !== null) stringValue(row.security_id, `${candidatePath}.security_id`, 256);
+    if (row.ticker !== null && !/^[A-Z][A-Z0-9.-]{0,14}$/.test(String(row.ticker))) {
+      throw new Error(`${candidatePath}.ticker must be canonical`);
+    }
+    uuidArray(row.event_ids, `${candidatePath}.event_ids`, 1, 50);
+    uuidArray(row.exposure_fact_ids, `${candidatePath}.exposure_fact_ids`, 0, 50);
+    for (const field of ["adverse_paths", "limitations", "roles", "theme_ids"] as const) {
+      arrayValue(row[field], `${candidatePath}.${field}`, 100).forEach((item, itemIndex) =>
+        stringValue(item, `${candidatePath}.${field}[${itemIndex}]`, 500)
+      );
+    }
+    boundedObject(row.priority_components, `${candidatePath}.priority_components`, 4_096);
+    decimalNumber(row.priority_score, `${candidatePath}.priority_score`, -100_000, 100_000);
+    enumValue(row.research_state, [
+      "research_rejected", "observed", "unresolved", "resolved", "exposure_supported", "analysis_ready",
+    ] as const, `${candidatePath}.research_state`);
+    const refs = arrayValue(row.evidence, `${candidatePath}.evidence`, 8);
+    const refIds = new Set<string>();
+    refs.forEach((item, itemIndex) => {
+      const refPath = `${candidatePath}.evidence[${itemIndex}]`;
+      const ref = objectValue(item, refPath);
+      exactKeys(ref, ["claim_type", "item_id", "relationship_eligible", "role"], refPath);
+      const itemId = uuidValue(ref.item_id, `${refPath}.item_id`);
+      if (!evidenceIds.has(itemId) || refIds.has(itemId)) throw new Error(`${refPath} has invalid evidence identity`);
+      refIds.add(itemId);
+      stringValue(ref.claim_type, `${refPath}.claim_type`, 80);
+      if (typeof ref.relationship_eligible !== "boolean") throw new Error(`${refPath}.relationship_eligible must be boolean`);
+      enumValue(ref.role, ["supporting", "opposing"] as const, `${refPath}.role`);
+    });
+    const suitability = objectValue(row.suitability, `${candidatePath}.suitability`);
+    exactKeys(suitability, [
+      "component_scores", "evaluation_hash", "lineage", "missing_reasons", "state", "veto_reasons",
+    ], `${candidatePath}.suitability`);
+    boundedObject(suitability.component_scores, `${candidatePath}.suitability.component_scores`, 4_096);
+    enumValue(suitability.state, ["unknown", "eligible", "vetoed"] as const, `${candidatePath}.suitability.state`);
+    for (const field of ["missing_reasons", "veto_reasons"] as const) {
+      arrayValue(suitability[field], `${candidatePath}.suitability.${field}`, 50).forEach((item, itemIndex) =>
+        stringValue(item, `${candidatePath}.suitability.${field}[${itemIndex}]`, 200)
+      );
+    }
+    const suitabilityBody = { ...suitability };
+    delete suitabilityBody.evaluation_hash;
+    assertHash(suitability.evaluation_hash, canonicalJson(suitabilityBody), `${candidatePath}.suitability.evaluation_hash`);
+    const candidateBody = { ...row };
+    delete candidateBody.candidate_hash;
+    assertHash(row.candidate_hash, canonicalJson(candidateBody), `${candidatePath}.candidate_hash`);
+  });
+  const action = arrayValue(packet.action_candidates, `${path}.action_candidates`, 12);
+  const actionKeys = new Set<string>();
+  action.forEach((value, index) => {
+    const actionPath = `${path}.action_candidates[${index}]`;
+    const row = objectValue(value, actionPath);
+    exactKeys(row, ["candidate_hash", "candidate_key", "suitability_hash"], actionPath);
+    const key = stringValue(row.candidate_key, `${actionPath}.candidate_key`, 256);
+    const candidate = researchByKey.get(key);
+    if (
+      !candidate || actionKeys.has(key) ||
+      hashValue(row.candidate_hash, `${actionPath}.candidate_hash`) !== candidate.candidate_hash
+    ) throw new Error(`${actionPath} is not an exact research subset`);
+    actionKeys.add(key);
+    const suitability = objectValue(candidate.suitability, `${actionPath}.suitability`);
+    if (
+      hashValue(row.suitability_hash, `${actionPath}.suitability_hash`) !== suitability.evaluation_hash ||
+      candidate.research_state !== "analysis_ready" || suitability.state !== "eligible"
+    ) throw new Error(`${actionPath} is not action eligible`);
+  });
+  const candidateCount = integer(envelope.candidate_count, "payload.packet.candidate_count", 0, 12);
+  const evidenceCount = integer(envelope.evidence_count, "payload.packet.evidence_count", 0, 96);
+  if (candidateCount !== research.length || evidenceCount !== evidence.length) {
+    throw new Error("payload.packet counts do not match packet arrays");
+  }
+  return {
+    id: uuidValue(envelope.id, "payload.packet.id"),
+    candidate_count: candidateCount,
+    evidence_count: evidenceCount,
+    packet,
+    packet_hash: assertHash(envelope.packet_hash, canonicalJson(packet), "payload.packet.packet_hash"),
+  };
+}
+
 function parsePacket(value: unknown, policyVersionHint?: number): JsonObject {
   const row = objectValue(value, "payload.packet");
   exactKeys(row, [
@@ -2210,6 +2377,9 @@ function parsePacket(value: unknown, policyVersionHint?: number): JsonObject {
     "packet_hash",
   ], "payload.packet");
   const packet = boundedObject(row.packet, "payload.packet.packet", 98_304);
+  if (packet.contract_version === 2) {
+    return parsePacketV2(row, packet, policyVersionHint);
+  }
   exactKeys(packet, [
     "candidates",
     "evidence",

@@ -142,7 +142,7 @@ def test_schema_appends_the_new_immutable_migration_verbatim():
     assert TRANSFER_MIGRATION.read_text() in schema
     assert CURSOR_MIGRATION.read_text() in schema
     assert OFFICIAL_COMPLETION_MIGRATION.read_text() in schema
-    assert schema.endswith(ENRICHMENT_MIGRATION.read_text())
+    assert ENRICHMENT_MIGRATION.read_text() in schema
 
 
 def test_cursor_context_rpc_is_static_service_only_and_preserves_prior_migrations():

@@ -1969,6 +1969,8 @@ export function createSupabaseGatewayRepository(
                 return [ticker, {
                   price: decimal(quote.price),
                   as_of: text(quote.as_of, 40),
+                  expires_at: text(quote.expires_at, 40),
+                  receipt_id: text(quote.receipt_id, 36),
                 }];
               }),
             ),
@@ -1978,6 +1980,14 @@ export function createSupabaseGatewayRepository(
                   text(id, 36)
                 )
                 : [],
+            portfolio_revision: text(
+              intelligenceInputs[0].portfolio_revision,
+              256,
+            ),
+            portfolio_valuation_complete: boole(
+              intelligenceInputs[0].portfolio_valuation_complete,
+            ),
+            cash_revision: text(intelligenceInputs[0].cash_revision, 256),
             source_cursors: cursorContext.source_cursors,
             last_completed_scans: cursorContext.last_completed_scans,
           }
@@ -1988,6 +1998,9 @@ export function createSupabaseGatewayRepository(
             overlap_by_ticker: {},
             current_quotes: {},
             quote_receipt_ids: [],
+            portfolio_revision: "",
+            portfolio_valuation_complete: false,
+            cash_revision: "",
             source_cursors: cursorContext.source_cursors,
             last_completed_scans: cursorContext.last_completed_scans,
           }
