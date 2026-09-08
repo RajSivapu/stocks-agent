@@ -568,44 +568,50 @@ def _verify_dynamic_theme_semantics(
     episode_rows = receipt.get("theme_episode_revisions", [])
     require(isinstance(episode_rows, list),
             "discovery dynamic theme episode evidence is invalid")
-    for task_id, task in tasks.items():
-        if task.get("capability_id") != "dynamic_theme_evaluation":
-            continue
+    observations: list[tuple[str, SourceItem]] = []
+    for source_task_id in sorted(candidate_task_ids):
+        receipt_id = receipt_id_by_task.get(source_task_id)
+        persisted_receipt = persisted_receipts.get(receipt_id)
+        require(isinstance(persisted_receipt, Mapping),
+                "discovery dynamic theme candidate receipt is missing")
+        direct = [
+            row for row in run_items
+            if row.get("run_id") == run_id
+            and row.get("source_receipt_id") == receipt_id
+            and row.get("disposition") in {"accepted", "near_duplicate"}
+        ]
+        source_ids = {
+            str(row["source_item_id"]) for row in direct
+            if isinstance(row.get("source_item_id"), str)
+        } | {
+            str(row["item_id"]) for row in duplicate_references
+            if row.get("receipt_id") == receipt_id
+        }
+        retrieved_candidates = [
+            timestamp(run_provenance[row["id"]].get("retrieved_at"))
+            for row in direct
+            if isinstance(run_provenance.get(row.get("id")), Mapping)
+        ]
+        receipt_retrieved = timestamp(persisted_receipt.get("retrieved_at"))
+        retrieved_at = max((*retrieved_candidates, receipt_retrieved))
+        for source_id in sorted(source_ids):
+            observations.append((source_task_id, _verified_source_item(
+                source_id, source_items, persisted_receipts,
+                retrieved_at=retrieved_at,
+                source_provenance=source_provenance,
+            )))
+    selection = select_dynamic_theme_evidence(observations)
+    dynamic_tasks = [
+        (task_id, task) for task_id, task in tasks.items()
+        if task.get("capability_id") == "dynamic_theme_evaluation"
+    ]
+    require(
+        len(dynamic_tasks) == (1 if selection.labels else 0),
+        "discovery dynamic theme evidence selection is incomplete",
+    )
+    for task_id, task in dynamic_tasks:
         result = task["result"]
         proposals = result["proposals"]
-        observations: list[tuple[str, SourceItem]] = []
-        for source_task_id in sorted(candidate_task_ids):
-            receipt_id = receipt_id_by_task.get(source_task_id)
-            persisted_receipt = persisted_receipts.get(receipt_id)
-            require(isinstance(persisted_receipt, Mapping),
-                    "discovery dynamic theme candidate receipt is missing")
-            direct = [
-                row for row in run_items
-                if row.get("run_id") == run_id
-                and row.get("source_receipt_id") == receipt_id
-                and row.get("disposition") in {"accepted", "near_duplicate"}
-            ]
-            source_ids = {
-                str(row["source_item_id"]) for row in direct
-                if isinstance(row.get("source_item_id"), str)
-            } | {
-                str(row["item_id"]) for row in duplicate_references
-                if row.get("receipt_id") == receipt_id
-            }
-            retrieved_candidates = [
-                timestamp(run_provenance[row["id"]].get("retrieved_at"))
-                for row in direct
-                if isinstance(run_provenance.get(row.get("id")), Mapping)
-            ]
-            receipt_retrieved = timestamp(persisted_receipt.get("retrieved_at"))
-            retrieved_at = max((*retrieved_candidates, receipt_retrieved))
-            for source_id in sorted(source_ids):
-                observations.append((source_task_id, _verified_source_item(
-                    source_id, source_items, persisted_receipts,
-                    retrieved_at=retrieved_at,
-                    source_provenance=source_provenance,
-                )))
-        selection = select_dynamic_theme_evidence(observations)
         requested_labels = _expected_requested_labels(
             list(selection.dependency_ids), tasks
         )

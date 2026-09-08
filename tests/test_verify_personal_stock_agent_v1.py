@@ -314,7 +314,7 @@ def _make_first_required_receipt_nonempty(rows, *, persist_lineage):
         "id": item_id, "source_receipt_id": receipt_id, "provider": "gdelt",
         "upstream_item_id": "nonempty-1", "canonical_url": "https://publisher.example/nonempty-1",
         "published_at": "2026-09-05T19:35:00Z", "effective_at": None,
-        "title": "Parsed market event", "normalized_text": "Parsed market evidence",
+        "title": "Market event", "normalized_text": "Parsed market evidence",
         "canonical_content": "parsed nonempty evidence", "content_hash": content_hash,
         "metadata": {}, "created_at": "2026-09-05T19:40:00Z",
     }]
@@ -893,6 +893,15 @@ def test_discovery_capability_accepts_pipeline_generated_dynamic_theme_task():
     rows["discovery_stage_tasks"].extend(persisted.values())
 
     assert _verify_capability(rows).ok is True
+    missing_task = copy.deepcopy(rows)
+    missing_task["discovery_stage_tasks"] = [
+        row for row in missing_task["discovery_stage_tasks"]
+        if row["capability_id"] != "dynamic_theme_evaluation"
+    ]
+    missing_task["theme_episode_revisions"] = []
+    with pytest.raises(RuntimeError, match="dynamic theme evidence selection"):
+        _verify_capability(missing_task)
+
     omitted = copy.deepcopy(rows)
     omitted_task = next(
         row for row in omitted["discovery_stage_tasks"]
