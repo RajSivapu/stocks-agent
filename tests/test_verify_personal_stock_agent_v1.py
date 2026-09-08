@@ -1272,6 +1272,33 @@ def test_discovery_capability_accepts_honest_uncertain_reverse_task():
     with pytest.raises(RuntimeError, match="reverse selection inputs"):
         _verify_capability(inflated)
 
+    non_gdelt_inflated = copy.deepcopy(omitted)
+    source_plan = non_gdelt_inflated["packets"][0]["packet"]["coverage"][
+        "source_plan"
+    ]
+    template = next(
+        row for row in non_gdelt_inflated["discovery_stage_tasks"]
+        if row["capability_id"] == "gdelt_theme_search"
+    )
+    for index in range(89):
+        forged_id = str(uuid.uuid5(
+            uuid.UUID(RUN), f"forged-static-white-house:{index}",
+        ))
+        forged = copy.deepcopy(template)
+        forged.update(
+            id=forged_id, state="failed", provider="white_house",
+            capability_id="white_house_fact_sheets", query_kind="feed",
+            result={"coverage_status": "source_failed"},
+        )
+        non_gdelt_inflated["discovery_stage_tasks"].append(forged)
+        source_plan["planned_task_ids"].append(forged_id)
+    source_plan["plan_hash"] = digest({
+        key: value for key, value in source_plan.items() if key != "plan_hash"
+    })
+    _rebind_packet_completion(non_gdelt_inflated)
+    with pytest.raises(RuntimeError, match="reverse selection inputs"):
+        _verify_capability(non_gdelt_inflated)
+
     partial = copy.deepcopy(rows)
     partial["discovery_stage_tasks"] = [
         row for row in partial["discovery_stage_tasks"]

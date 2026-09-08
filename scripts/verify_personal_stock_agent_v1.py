@@ -1488,23 +1488,26 @@ def _verify_discovery_capability(receipt: Mapping[str, object]) -> VerificationR
             )
         except RuntimeError:
             valid_request_window = False
+    adaptive_budget = int(policy.adaptive_enrichment_budget.get(phase, -1))
+    planned_task_ceiling = max(0, 100 - adaptive_budget)
     require(
         valid_request_window and valid_plan_reservations
         and isinstance(adaptive_envelope, Mapping)
         and reverse_capability is not None
         and planned_gdelt_task_ids == required_gdelt_task_ids
+        and adaptive_budget >= 0
+        and len(planned_ids) <= planned_task_ceiling
         and type(gdelt_reserved_requests) is int
         and gdelt_reserved_requests
             == static_gdelt_calls + int(adaptive_envelope["gdelt_reverse"])
-        and int(policy.adaptive_enrichment_budget.get(phase, -1))
-            == sum(int(value) for value in adaptive_envelope.values()),
+        and adaptive_budget == sum(int(value) for value in adaptive_envelope.values()),
         "discovery reverse selection inputs are invalid",
     )
     reverse_capacity = min(
-        int(policy.adaptive_enrichment_budget.get(phase, 0)),
+        adaptive_budget,
         int(adaptive_envelope["gdelt_reverse"]),
         max(0, reverse_capability.max_requests_per_run - static_reverse_calls),
-        max(0, 100 - 1 - len(planned_ids)),
+        max(0, 100 - 1 - planned_task_ceiling),
     )
     expected_reverse = select_reverse_discovery_tasks(
         tuple(initial_observations), reference_snapshot, max_tasks=reverse_capacity,
