@@ -1,0 +1,47 @@
+{
+  "canonicalization_version": 1,
+  "invalid_fixed_point": [
+    "-0.000000",
+    "1.0",
+    "01.000000"
+  ],
+  "vectors": [
+    {
+      "name": "unicode_fixed_and_ordered",
+      "value": {
+        "fixed_zero": "0.000000",
+        "nullable": null,
+        "ordered": [
+          "zeta",
+          "alpha"
+        ],
+        "set_like": [
+          "alpha",
+          "zeta"
+        ],
+        "text": "磁石 café 😀 \"quoted\" \\ path"
+      },
+      "canonical_json": "{\"fixed_zero\":\"0.000000\",\"nullable\":null,\"ordered\":[\"zeta\",\"alpha\"],\"set_like\":[\"alpha\",\"zeta\"],\"text\":\"磁石 café 😀 \\\"quoted\\\" \\\\ path\"}",
+      "sha256": "37b90592aa05725431122f9591fa6129ffdaab0b532c349413ec6ccff881f747"
+    },
+    {
+      "name": "absent_key",
+      "value": {
+        "fixed_value": "12.340000",
+        "text": "line\nfeed"
+      },
+      "canonical_json": "{\"fixed_value\":\"12.340000\",\"text\":\"line\\nfeed\"}",
+      "sha256": "28d520c7a2d21ac27913548dc618579a024d3ebfc28b4ba7364f5b953634bd5f"
+    },
+    {
+      "name": "present_null",
+      "value": {
+        "fixed_value": "12.340000",
+        "optional": null,
+        "text": "line\nfeed"
+      },
+      "canonical_json": "{\"fixed_value\":\"12.340000\",\"optional\":null,\"text\":\"line\\nfeed\"}",
+      "sha256": "6cfc76d7f9bc265253fe65c35b23c2b9ce0702272a9d2e049faed3ea269d0153"
+    }
+  ]
+}

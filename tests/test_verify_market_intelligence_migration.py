@@ -55,6 +55,58 @@ RPCS = (
     "record_market_report(uuid,text,jsonb)",
     "record_market_learning(uuid,jsonb)",
 )
+DISCOVERY_TABLES = (
+    "market_reference_manifests",
+    "market_security_reference_revisions",
+    "market_reference_chunk_receipts",
+    "market_reference_snapshot_memberships",
+    "market_reference_finalization_seals",
+    "market_reference_run_bindings",
+    "market_reference_predecessor_pins",
+    "market_reference_transfer_requests",
+    "market_reference_transfer_responses",
+    "market_discovery_stage_tasks",
+    "market_exposure_facts",
+    "market_theme_episode_revisions",
+    "market_research_nominations",
+)
+DISCOVERY_RPCS = (
+    "record_market_discovery_reference(uuid,jsonb)",
+    "checkpoint_market_discovery_stage(uuid,jsonb)",
+    "read_market_discovery_context(uuid,integer)",
+    "read_market_discovery_cursor_context(uuid,integer)",
+    "begin_market_discovery_reference(uuid,jsonb,uuid,integer,text)",
+    "record_market_discovery_reference_chunk(uuid,jsonb,uuid,integer,text)",
+    "finalize_market_discovery_reference(uuid,jsonb,uuid,integer,text)",
+    "pin_market_discovery_reference(uuid,jsonb,uuid,integer,text)",
+    "read_market_discovery_reference(uuid,jsonb,uuid,integer,text)",
+)
+DISCOVERY_DASHBOARD_COLUMNS = {
+    "market_reference_manifests": (
+        "id", "reference_version", "revision", "capability_version", "taxonomy_version",
+        "source_hash", "valid_from", "valid_to", "manifest", "content_hash", "created_at",
+    ),
+    "market_security_reference_revisions": (
+        "id", "security_id", "entity_id", "ticker", "exchange", "instrument_type", "eligible",
+        "exclusion_reasons", "aliases", "valid_from", "valid_to", "content_hash", "created_at",
+    ),
+    "market_discovery_stage_tasks": (
+        "id", "stage", "capability_id", "provider", "query_kind", "query_hash", "state",
+        "attempt_count", "request_budget", "created_at", "updated_at",
+    ),
+    "market_exposure_facts": (
+        "id", "security_revision_id", "theme_episode_revision_id", "exposure_kind", "fact",
+        "source_ids", "valid_from", "valid_to", "content_hash", "created_at",
+    ),
+    "market_theme_episode_revisions": (
+        "id", "theme_id", "revision", "episode", "source_ids", "valid_from", "valid_to",
+        "content_hash", "created_at",
+    ),
+    "market_research_nominations": (
+        "id", "security_revision_id", "theme_episode_revision_id", "exposure_fact_ids", "state",
+        "rationale", "created_at", "updated_at",
+    ),
+}
 
 
 def complete_snapshot():
@@ -74,7 +126,45 @@ def complete_snapshot():
             }
             for signature in RPCS
         },
-        "table_grants": [],
+        "discovery_tables": {
+            table: {
+                "rls_enabled": True,
+                "guard": (
+                    f"{table}_transition_guard"
+                    if table in {"market_discovery_stage_tasks", "market_research_nominations"}
+                    else f"{table}_append_only"
+                ),
+            }
+            for table in DISCOVERY_TABLES
+        },
+        "discovery_functions": {
+            signature: {
+                "search_path": ["pg_catalog"],
+                "public_execute": False,
+                "gateway_execute": True,
+            }
+            for signature in DISCOVERY_RPCS
+        },
+        "table_grants": [
+            {
+                "table": table,
+                "grantee": "stock_agent_release_reader",
+                "privilege": "SELECT",
+                "is_owner": False,
+            }
+            for table in DISCOVERY_TABLES
+        ],
+        "column_grants": [
+            {
+                "table": table,
+                "column": column,
+                "grantee": "stock_agent_dashboard",
+                "privilege": "SELECT",
+                "is_owner": False,
+            }
+            for table, columns in DISCOVERY_DASHBOARD_COLUMNS.items()
+            for column in columns
+        ],
         "function_grants": [
             {
                 "signature": signature,
@@ -82,7 +172,7 @@ def complete_snapshot():
                 "privilege": "EXECUTE",
                 "is_owner": False,
             }
-            for signature in RPCS
+            for signature in (*RPCS, *DISCOVERY_RPCS)
         ],
         "unexpected_grants": [],
         "brokerage_columns": [],
@@ -162,6 +252,39 @@ def test_any_non_owner_table_or_function_grant_fails_closed():
         evaluate_snapshot(function_grant)
 
 
+def test_discovery_relation_column_and_helper_function_grant_drift_fails_closed():
+    missing_relation = complete_snapshot()
+    missing_relation["table_grants"].pop()
+    with pytest.raises(RuntimeError, match="unexpected grant"):
+        evaluate_snapshot(missing_relation)
+
+    missing_column = complete_snapshot()
+    missing_column["column_grants"].pop()
+    with pytest.raises(RuntimeError, match="unexpected grant"):
+        evaluate_snapshot(missing_column)
+
+    extra_column = complete_snapshot()
+    extra_column["column_grants"].append({
+        "table": "market_discovery_stage_tasks",
+        "column": "result",
+        "grantee": "stock_agent_dashboard",
+        "privilege": "SELECT",
+        "is_owner": False,
+    })
+    with pytest.raises(RuntimeError, match="unexpected grant"):
+        evaluate_snapshot(extra_column)
+
+    public_helper = complete_snapshot()
+    public_helper["function_grants"].append({
+        "signature": "reject_market_discovery_mutation()",
+        "grantee": "PUBLIC",
+        "privilege": "EXECUTE",
+        "is_owner": False,
+    })
+    with pytest.raises(RuntimeError, match="unexpected grant"):
+        evaluate_snapshot(public_helper)
+
+
 @pytest.mark.parametrize(
     ("field", "message"),
     (
@@ -215,6 +338,43 @@ def test_missing_trigger_rls_or_gateway_scope_fails_closed():
     wrong_search_path["functions"][RPCS[0]]["search_path"] = ["public", "pg_catalog"]
     with pytest.raises(RuntimeError, match="search_path"):
         evaluate_snapshot(wrong_search_path)
+
+
+def test_discovery_catalog_guards_and_rpc_grants_fail_closed():
+    snapshot = complete_snapshot()
+    snapshot["discovery_tables"] = {
+        table: {
+            "rls_enabled": True,
+            "guard": (
+                f"{table}_transition_guard"
+                if table in {"market_discovery_stage_tasks", "market_research_nominations"}
+                else f"{table}_append_only"
+            ),
+        }
+        for table in DISCOVERY_TABLES
+    }
+    snapshot["discovery_functions"] = {
+        signature: {
+            "search_path": ["pg_catalog"],
+            "public_execute": False,
+            "gateway_execute": True,
+        }
+        for signature in DISCOVERY_RPCS
+    }
+
+    receipt = evaluate_snapshot(snapshot)
+    assert receipt["discovery_ledgers"] == 13
+    assert receipt["discovery_gateway_only_rpcs"] == 9
+
+    missing_guard = deepcopy(snapshot)
+    missing_guard["discovery_tables"]["market_discovery_stage_tasks"]["guard"] = None
+    with pytest.raises(RuntimeError, match="transition guard"):
+        evaluate_snapshot(missing_guard)
+
+    public_read = deepcopy(snapshot)
+    public_read["discovery_functions"]["read_market_discovery_context(uuid,integer)"]["public_execute"] = True
+    with pytest.raises(RuntimeError, match="PUBLIC execute"):
+        evaluate_snapshot(public_read)
 
 
 def test_schema_declares_complete_bounded_append_only_ledgers_and_rpcs():

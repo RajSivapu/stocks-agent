@@ -1,6 +1,7 @@
 # Locked, no-cost release verification dependencies.  Update deliberately with
 # the workflow and lock exact versions rather than resolving on deployment.
 pytest==9.1.0
+pglast==8.4
 psycopg[binary]==3.3.4
 supabase==2.31.0
 cryptography==46.0.5

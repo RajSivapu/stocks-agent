@@ -145,12 +145,12 @@ it("companion uses historical scenario language and preserves the current plan",
     plan_unchanged: true, recurring_plan_review_eligible: true,
     horizons: [{ years: 3, baseline_annualized_percent: "7", companion_annualized_percent: "5", baseline_max_drawdown_percent: "20", companion_max_drawdown_percent: "25", correlation: "0.7" }],
     contribution_history: { contributed: "1200", lower_ending_value: "980", median_ending_value: "1240", higher_ending_value: "1410", sample_count: 50 },
-    evidence: [{ label: "Gateway evidence", url: "https://www.sec.gov/evidence" }], disclaimer: "Historical scenarios are not forecasts.",
+    evidence: [{ label: "Gateway evidence", url: "https://www.sec.gov/Archives/edgar/data/1/filing.htm" }], disclaimer: "Historical scenarios are not forecasts.",
   };
   render(<CompanionPage data={data} />);
   expect(screen.getByText(/current plan remains unchanged/i)).toBeVisible();
   expect(screen.getByText(/historical scenarios are not forecasts/i)).toBeVisible();
-  expect(screen.getByRole("link", { name: /gateway evidence/i })).toHaveAttribute("href", "https://www.sec.gov/evidence");
+  expect(screen.getByRole("link", { name: /gateway evidence/i })).toHaveAttribute("href", "https://www.sec.gov/Archives/edgar/data/1/filing.htm");
   expect(screen.queryByText(/winner|best stock|guaranteed/i)).not.toBeInTheDocument();
 });
 
@@ -174,7 +174,7 @@ it("system summarizes health and keeps immutable receipt diagnostics available",
 
 it("keeps the complete safe alert audit record inside a per-alert disclosure", async () => {
   const user = userEvent.setup();
-  const alerts: AlertsView = { alerts: [{ id: "a", kind: "brief", phase: "intraday", state: "delivered", rendered_text: "Rendered owner alert", rendered_hash: "f".repeat(64), template_version: "3", telegram_message_ids: [42], attempt_count: 1, created_at: "2026-09-03T18:00:00.000Z", delivered_at: "2026-09-03T18:01:00.000Z", suppression_reason: null, rule_ticker: "MSFT", rule_state: "active", event_status: "triggered", owner_action: "acknowledged", sources: [{ label: "Official evidence", url: "https://www.sec.gov/example" }] }] };
+  const alerts: AlertsView = { alerts: [{ id: "a", kind: "brief", phase: "intraday", state: "delivered", rendered_text: "Rendered owner alert", rendered_hash: "f".repeat(64), template_version: "3", telegram_message_ids: [42], attempt_count: 1, created_at: "2026-09-03T18:00:00.000Z", delivered_at: "2026-09-03T18:01:00.000Z", suppression_reason: null, rule_ticker: "MSFT", rule_state: "active", event_status: "triggered", owner_action: "acknowledged", sources: [{ label: "Official evidence", url: "https://www.sec.gov/Archives/edgar/data/1/filing.htm" }] }] };
   const system: SystemView = { product_version: "v1", api_version: "v1", policy_version: 17, alert_mode: "shadow", latest_by_kind: {}, latest_publication_status: "delivered", boundaries, source_coverage: [], latest_report: null, latest_intelligence_run_id: null };
   render(<MemoryRouter><SystemPage data={system} runs={{ runs: [] }} alerts={alerts} /></MemoryRouter>);
 
@@ -185,7 +185,7 @@ it("keeps the complete safe alert audit record inside a per-alert disclosure", a
   expect(screen.getByText("f".repeat(64))).toBeVisible();
   expect(screen.getByText(/template 3/i)).toBeVisible();
   expect(screen.getByText(/MSFT/i)).toBeVisible();
-  expect(screen.getByRole("link", { name: /official evidence/i })).toHaveAttribute("href", "https://www.sec.gov/example");
+  expect(screen.getByRole("link", { name: /official evidence/i })).toHaveAttribute("href", "https://www.sec.gov/Archives/edgar/data/1/filing.htm");
 });
 
 it("keeps run timing and policy metadata inside a per-run disclosure", async () => {

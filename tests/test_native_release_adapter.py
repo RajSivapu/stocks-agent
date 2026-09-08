@@ -77,12 +77,40 @@ def native(platform, **kwargs):
             "DASHBOARD_PRIOR_MANAGED_SECRETS_JSON": json.dumps(platform.secrets)}, **kwargs)
 
 
-def test_native_factory_is_lazy_and_site_gate_precedes_every_platform_operation(monkeypatch):
+def test_native_backend_factory_is_lazy_and_performs_no_platform_operation(monkeypatch):
     module = adapter_module()
-    monkeypatch.setattr(module.subprocess, "run", lambda *a, **k: pytest.fail("no CLI before Sites gate"))
-    monkeypatch.setattr(module.psycopg, "connect", lambda *a, **k: pytest.fail("no DB before Sites gate"))
-    with pytest.raises(RuntimeError, match="Sites.*transport"):
-        release.load_native_release_adapter({"project_ref": "p" * 20})
+    monkeypatch.setattr(module.subprocess, "run", lambda *a, **k: pytest.fail("no CLI during construction"))
+    monkeypatch.setattr(module.psycopg, "connect", lambda *a, **k: pytest.fail("no DB during construction"))
+    adapter = release.load_native_release_adapter({"project_ref": "p" * 20})
+    assert isinstance(adapter, module.NativeReleaseAdapter)
+
+
+def test_supabase_cli_subprocess_receives_only_allowlisted_runtime_and_token_values():
+    platform = Supabase()
+    captured = []
+    def runner(command, **options):
+        captured.append(options["env"])
+        return platform(command, **options)
+    adapter = adapter_module().NativeReleaseAdapter(
+        {"project_ref": "p" * 20, "candidate_sha": "a" * 40}, runner=runner,
+        environment={"PATH": "/usr/bin", "HOME": "/tmp/home",
+            "SUPABASE_ACCESS_TOKEN": "token", "POSTGRES_URL": "private-admin",
+            "SUPABASE_SERVICE_ROLE_KEY": "private-service",
+            "RELEASE_RECOVERY_KEY": "private-recovery"},
+    )
+
+    adapter.managed_secret_digests()
+
+    assert captured == [{"PATH": "/usr/bin", "HOME": "/tmp/home",
+        "SUPABASE_ACCESS_TOKEN": "token"}]
+
+
+def test_backend_receipt_requires_an_explicit_absolute_evidence_directory():
+    adapter = native(Supabase())
+    adapter.static_receipt = {}
+    adapter.captured_at = "2026-09-08T12:00:00Z"
+    with pytest.raises(RuntimeError, match="evidence directory"):
+        adapter.receipt("a" * 40)
 
 
 @pytest.mark.parametrize("name", release.FUNCTIONS)
@@ -301,12 +329,11 @@ class Site:
 
 
 @pytest.mark.parametrize("first_install", [False, True])
-@pytest.mark.parametrize("boundary", ["preflight", *release.COMPONENTS, "verification"])
+@pytest.mark.parametrize("boundary", ["preflight", *release.BACKEND_COMPONENTS, "verification"])
 def test_native_production_engine_failure_boundaries(database, tmp_path, monkeypatch, first_install, boundary):
     from cryptography.fernet import Fernet
     from scripts import build_owner_dashboard_static, verify_personal_stock_agent_v1
     platform, adapter = database_adapter(database)
-    site = Site(); adapter.site = site
     if first_install:
         platform.functions = {}; platform.secrets = {}
         adapter.environment["DASHBOARD_PRIOR_MANAGED_SECRETS_JSON"] = "{}"
@@ -317,8 +344,7 @@ def test_native_production_engine_failure_boundaries(database, tmp_path, monkeyp
         "owner_user_id": "owner", "lease_owner": "release-123"})
     adapter.environment["SUPAVISOR_SESSION_URL"] = "postgresql://postgres.pppppppppppppppppppp:admin-template-password@aws-0-us-east-1.pooler.supabase.com:5432/postgres"
     key = Fernet.generate_key(); adapter.environment["RELEASE_RECOVERY_KEY"] = key.decode()
-    original = {name: adapter.capture(name) for name in release.COMPONENTS if name != "owner-web-site"}
-    original_site = site.capture("owner-web-site")
+    original = {name: adapter.capture(name) for name in release.BACKEND_COMPONENTS}
     monkeypatch.setattr(build_owner_dashboard_static, "build_static_release", lambda *a, **k: {"status": "verified"})
     monkeypatch.setattr(verify_personal_stock_agent_v1, "git_files", lambda *a: {"index.ts": b"candidate"})
     def checkpoint(name):
@@ -340,7 +366,6 @@ def test_native_production_engine_failure_boundaries(database, tmp_path, monkeyp
                 assert {k: v for k, v in prior.items() if k not in {"identity", "version"}} == {
                     k: v for k, v in current.items() if k not in {"identity", "version"}}
             else: assert current == prior
-        assert site.state == original_site
     finally:
         with psycopg.connect(database, autocommit=True) as connection:
             connection.execute("DROP ROLE IF EXISTS stock_agent_dashboard_runtime")
@@ -361,12 +386,217 @@ def test_protected_reader_rejects_incomplete_policy_table_privileges(monkeypatch
     def query(sql, params=()):
         if not params: return [{"role": evidence.READER, "read_only": "on", "rolsuper": False,
             "rolbypassrls": False, "server": "127.0.0.1", "port": 5432, "database": "postgres"}]
+        if "to_regclass" in sql:
+            return [{"present": True}]
+        if "relrowsecurity AS rls_enabled" in sql:
+            return [{"rls_enabled": True, "reader_is_not_owner": True,
+                "unrestricted_select": True, "no_restrictive_filter": True}]
         checked.append(params[0])
         return [{"readable": readable if params[0] == "public." + table else True,
                  "writable": writable if params[0] == "public." + table else False}]
     source.query = query
     with pytest.raises(RuntimeError, match="lacks SELECT or has write authority"): source.__enter__()
     assert "public." + table in checked and connection.closed
+
+
+def test_protected_dry_run_reader_records_only_tables_present_before_migration(monkeypatch):
+    from scripts import protected_evidence as evidence
+    class Connection:
+        closed = False
+        def execute(self, _sql): pass
+        def rollback(self): pass
+        def close(self): self.closed = True
+    connection = Connection()
+    monkeypatch.setattr(evidence.psycopg, "connect", lambda *a, **k: connection)
+    source = evidence.PostgresReadOnlySource(
+        f"postgresql://{evidence.READER}:password@db.{'p' * 20}.supabase.co:5432/postgres",
+        "p" * 20, pre_migration_baseline=True,
+    )
+    def query(statement, params=()):
+        if "current_user AS role" in statement:
+            return [{"role": evidence.READER, "read_only": "on", "rolsuper": False,
+                "rolbypassrls": False, "server": "127.0.0.1", "port": 5432,
+                "database": "postgres"}]
+        if "to_regclass" in statement:
+            table = params[0].removeprefix("public.")
+            return [{"present": table not in evidence.PRE_MIGRATION_ABSENT_TABLES}]
+        if "has_table_privilege" in statement:
+            table = params[0].removeprefix("public.")
+            return [{"readable": table not in evidence.PRE_MIGRATION_UNREADABLE_TABLES,
+                "writable": False}]
+        if "relrowsecurity AS rls_enabled" in statement:
+            return [{"rls_enabled": True, "reader_is_not_owner": True,
+                "unrestricted_select": True, "no_restrictive_filter": True}]
+        if "to_jsonb" in statement:
+            return []
+        raise AssertionError(statement)
+    source.query = query
+    with source:
+        snapshot = source.dry_run_snapshot()
+    deferred = set(evidence.PRE_MIGRATION_ABSENT_TABLES) | set(
+        evidence.PRE_MIGRATION_UNREADABLE_TABLES
+    )
+    assert set(snapshot["tables"]) == set(evidence.READ_TABLES) - deferred
+    assert snapshot["pre_migration_omissions"] == {
+        "reason": "candidate migrations have not been applied",
+        "absent_tables": list(evidence.PRE_MIGRATION_ABSENT_TABLES),
+        "unreadable_tables": list(evidence.PRE_MIGRATION_UNREADABLE_TABLES),
+    }
+
+
+def test_pre_migration_reader_rejects_unexpected_missing_baseline_table(monkeypatch):
+    from scripts import protected_evidence as evidence
+    class Connection:
+        closed = False
+        def execute(self, _sql): pass
+        def close(self): self.closed = True
+    connection = Connection()
+    monkeypatch.setattr(evidence.psycopg, "connect", lambda *a, **k: connection)
+    source = evidence.PostgresReadOnlySource(
+        f"postgresql://{evidence.READER}:password@db.{'p' * 20}.supabase.co:5432/postgres",
+        "p" * 20, pre_migration_baseline=True,
+    )
+    def query(statement, params=()):
+        if "current_user AS role" in statement:
+            return [{"role": evidence.READER, "read_only": "on", "rolsuper": False,
+                "rolbypassrls": False, "server": "127.0.0.1", "port": 5432,
+                "database": "postgres"}]
+        table = params[0].removeprefix("public.")
+        if "to_regclass" in statement:
+            return [{"present": table != "holdings" and table not in evidence.PRE_MIGRATION_ABSENT_TABLES}]
+        if "has_table_privilege" in statement:
+            return [{"readable": table not in evidence.PRE_MIGRATION_UNREADABLE_TABLES,
+                "writable": False}]
+        if "relrowsecurity AS rls_enabled" in statement:
+            return [{"rls_enabled": True, "reader_is_not_owner": True,
+                "unrestricted_select": True, "no_restrictive_filter": True}]
+        raise AssertionError(statement)
+    source.query = query
+    with pytest.raises(RuntimeError, match="pre-migration release reader baseline mismatch"):
+        source.__enter__()
+    assert connection.closed
+
+
+def test_pre_migration_reader_accepts_fully_migrated_retry_state(monkeypatch):
+    from scripts import protected_evidence as evidence
+    class Connection:
+        closed = False
+        def execute(self, _sql): pass
+        def rollback(self): pass
+        def close(self): self.closed = True
+    connection = Connection()
+    monkeypatch.setattr(evidence.psycopg, "connect", lambda *a, **k: connection)
+    source = evidence.PostgresReadOnlySource(
+        f"postgresql://{evidence.READER}:password@db.{'p' * 20}.supabase.co:5432/postgres",
+        "p" * 20, pre_migration_baseline=True,
+    )
+    def query(statement, params=()):
+        if "current_user AS role" in statement:
+            return [{"role": evidence.READER, "read_only": "on", "rolsuper": False,
+                "rolbypassrls": False, "server": "127.0.0.1", "port": 5432,
+                "database": "postgres"}]
+        if "to_regclass" in statement:
+            return [{"present": True}]
+        if "has_table_privilege" in statement:
+            return [{"readable": True, "writable": False}]
+        if "relrowsecurity AS rls_enabled" in statement:
+            return [{"rls_enabled": True, "reader_is_not_owner": True,
+                "unrestricted_select": True, "no_restrictive_filter": True}]
+        if "to_jsonb" in statement:
+            return []
+        raise AssertionError(statement)
+    source.query = query
+    with source:
+        snapshot = source.dry_run_snapshot()
+    assert set(snapshot["tables"]) == set(evidence.READ_TABLES)
+    assert snapshot["pre_migration_omissions"] == {
+        "reason": "candidate migrations are already applied",
+        "absent_tables": [],
+        "unreadable_tables": [],
+    }
+
+
+@pytest.mark.parametrize("policy_field", [
+    "rls_enabled", "reader_is_not_owner", "unrestricted_select",
+    "no_restrictive_filter",
+])
+def test_protected_reader_rejects_incomplete_row_security_coverage(monkeypatch, policy_field):
+    from scripts import protected_evidence as evidence
+    class Connection:
+        closed = False
+        def execute(self, _sql): pass
+        def close(self): self.closed = True
+    connection = Connection()
+    monkeypatch.setattr(evidence.psycopg, "connect", lambda *a, **k: connection)
+    source = evidence.PostgresReadOnlySource(
+        f"postgresql://{evidence.READER}:password@db.{'p' * 20}.supabase.co:5432/postgres",
+        "p" * 20,
+    )
+    def query(statement, params=()):
+        if "current_user AS role" in statement:
+            return [{"role": evidence.READER, "read_only": "on", "rolsuper": False,
+                "rolbypassrls": False, "server": "127.0.0.1", "port": 5432,
+                "database": "postgres"}]
+        if "to_regclass" in statement:
+            return [{"present": True}]
+        if "has_table_privilege" in statement:
+            return [{"readable": True, "writable": False}]
+        if "relrowsecurity AS rls_enabled" in statement:
+            policy = {"rls_enabled": True, "reader_is_not_owner": True,
+                "unrestricted_select": True, "no_restrictive_filter": True}
+            if params[0] == "holdings":
+                policy[policy_field] = False
+            return [policy]
+        raise AssertionError(statement)
+    source.query = query
+    with pytest.raises(RuntimeError, match="incomplete row security coverage"):
+        source.__enter__()
+    assert connection.closed
+
+
+def test_normal_protected_reader_rejects_a_missing_release_table(monkeypatch):
+    from scripts import protected_evidence as evidence
+    class Connection:
+        closed = False
+        def execute(self, _sql): pass
+        def close(self): self.closed = True
+    connection = Connection()
+    monkeypatch.setattr(evidence.psycopg, "connect", lambda *a, **k: connection)
+    source = evidence.PostgresReadOnlySource(
+        f"postgresql://{evidence.READER}:password@db.{'p' * 20}.supabase.co:5432/postgres",
+        "p" * 20,
+    )
+    def query(statement, params=()):
+        if "current_user AS role" in statement:
+            return [{"role": evidence.READER, "read_only": "on", "rolsuper": False,
+                "rolbypassrls": False, "server": "127.0.0.1", "port": 5432,
+                "database": "postgres"}]
+        if "to_regclass" in statement:
+            return [{"present": False}]
+        raise AssertionError(statement)
+    source.query = query
+    with pytest.raises(RuntimeError, match="release table is missing"):
+        source.__enter__()
+    assert connection.closed
+
+
+def test_candidate_dry_run_uses_the_pre_migration_reader_mode():
+    script = (release.ROOT / "scripts/collect_protected_dry_run_evidence.py").read_text()
+    assert "PostgresReadOnlySource(url, project_ref, pre_migration_baseline=True)" in script
+
+
+def test_release_reader_scope_repairs_every_legacy_and_enrichment_table():
+    migration = (release.ROOT / "sql/migrations/20261015_release_reader_source_tables.sql").read_text()
+    for table in (
+        "market_source_items", "market_intelligence_run_items",
+        "market_source_item_provenance", "market_run_source_item_provenance",
+        "market_enrichment_selection_manifests",
+        "market_enrichment_request_descriptors",
+    ):
+        assert f"'{table}'" in migration
+    assert "GRANT SELECT ON public.%I TO stock_agent_release_reader" in migration
+    assert "REVOKE ALL ON public.%I FROM stock_agent_release_reader,stock_agent_release_reader_runtime" in migration
+    assert "CREATE POLICY release_evidence_select ON public.%I" in migration
 
 
 def test_protected_workflow_passes_recoverable_prior_secret_values():
@@ -405,12 +635,16 @@ def test_active_release_artifact_readback_is_exact_run_bound_and_does_not_weaken
     from scripts import protected_evidence as evidence
     payload = io.BytesIO()
     with zipfile.ZipFile(payload, "w") as archive: archive.writestr("index.ts", b"downloaded")
+    archive_digest = "sha256:" + hashlib.sha256(payload.getvalue()).hexdigest()
     def get(self, path, **kwargs):
         if path.endswith("/zip"): return payload.getvalue()
         if "/actions/runs/" in path:
             return {"id": 123, "head_sha": "a" * 40, "head_branch": "main", "status": "in_progress",
-                    "conclusion": None, "path": ".github/workflows/owner-dashboard-release.yml"}
-        return {"expired": False, "workflow_run": {"id": 123, "head_sha": "a" * 40}}
+                    "conclusion": None, "path": ".github/workflows/owner-dashboard-release.yml",
+                    "repository": {"full_name": "owner/repo"}, "event": "workflow_dispatch",
+                    "name": "Protected owner dashboard release", "run_attempt": 1}
+        return {"id": 17, "name": "backend-component-evidence-123-1", "digest": archive_digest,
+                "expired": False, "workflow_run": {"id": 123, "head_sha": "a" * 40}}
     monkeypatch.setattr(evidence.GitHubProductionDataSource, "_get", get)
     adapter = native(Supabase()); adapter.environment["GITHUB_REPOSITORY"] = "owner/repo"
     assert adapter.artifact(17) == {"index.ts": b"downloaded"}

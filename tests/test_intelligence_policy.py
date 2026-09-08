@@ -25,6 +25,35 @@ def test_v1_provider_and_alpha_budget_contract(settings):
     assert policy.packet.max_evidence_per_candidate == 8
     assert policy.packet.max_item_characters == 2_000
     assert policy.packet.max_serialized_bytes == 98_304
+    assert policy.seed_domains == (
+        "macro_and_policy",
+        "technology_ai_and_semiconductors",
+        "energy_nuclear_and_grid_infrastructure",
+        "industrial_infrastructure",
+        "critical_minerals_and_magnets",
+        "healthcare",
+        "consumer",
+        "defense_trade_and_geopolitics",
+        "earnings_and_mergers_and_acquisitions",
+    )
+    assert policy.source_capability_version == 1
+    assert policy.theme_taxonomy_version == 1
+    assert policy.required_baseline_capability_ids == (
+        "sec_company_tickers_universe",
+        "gdelt_theme_search",
+    )
+    assert dict(policy.adaptive_enrichment_budget) == {
+        "pre-market": 12,
+        "intraday": 4,
+        "post-market": 8,
+        "on-demand": 4,
+    }
+    assert dict(policy.provider_phase_budgets["sec_edgar"]) == {
+        "pre-market": 7,
+        "intraday": 3,
+        "post-market": 5,
+        "on-demand": 3,
+    }
 
 
 def test_budget_for_returns_configured_phase_budget_and_zero_for_unknown_values(settings):
@@ -70,6 +99,10 @@ def test_alpha_vantage_phase_allocation_cannot_exceed_daily_ceiling(settings):
         (("packet", "max_evidence_per_candidate"), 9, "packet limit"),
         (("packet", "max_item_characters"), 2_001, "packet limit"),
         (("packet", "max_serialized_bytes"), 98_305, "packet limit"),
+        (("source_capability_version",), 2, "source capability version"),
+        (("theme_taxonomy_version",), 2, "theme taxonomy version"),
+        (("adaptive_enrichment_budget", "pre-market"), 13, "adaptive enrichment budget"),
+        (("provider_phase_budgets", "sec_edgar", "pre-market"), 8, "provider ceiling"),
     ],
 )
 def test_unapproved_authority_or_bound_is_rejected(settings, path, value, message):

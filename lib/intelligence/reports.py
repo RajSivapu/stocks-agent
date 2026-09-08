@@ -7,7 +7,7 @@ import json
 import uuid
 from dataclasses import dataclass
 from datetime import date
-from typing import Literal
+from typing import Literal, Mapping
 
 
 ReportKind = Literal["morning", "urgent", "weekly", "monthly", "theme", "on-demand", "intraday"]
@@ -51,6 +51,7 @@ class ReportInput:
     actionable_risk: bool
     material_thesis_change: bool
     intraday_triggered: bool
+    research_packet: Mapping[str, object] | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -117,6 +118,99 @@ def report_id_from_key(key: str) -> str:
     return str(uuid.UUID("".join(value)))
 
 
+def _research_catalog_markdown(packet: Mapping[str, object] | None) -> str:
+    if packet is None:
+        return ""
+    if packet.get("contract_version") != 2:
+        return ""
+    candidates = packet.get("research_candidates")
+    actions = packet.get("action_candidates")
+    coverage = packet.get("coverage")
+    if (
+        not isinstance(candidates, list) or len(candidates) > 12
+        or not isinstance(actions, list) or len(actions) > 12
+        or not isinstance(coverage, Mapping)
+    ):
+        raise ValueError("v2 research report packet is invalid")
+    action_keys = {
+        value.get("candidate_key") for value in actions if isinstance(value, Mapping)
+    }
+    coverage_text = json.dumps(
+        coverage, ensure_ascii=False, separators=(",", ":"), sort_keys=True,
+    )
+    if len(coverage_text.encode()) > 32_768:
+        raise ValueError("v2 research report coverage is too large")
+    next_review = coverage.get("next_review_at")
+    if not isinstance(next_review, str) or not next_review.strip():
+        next_review = "unavailable"
+    lines = ["## Research catalog", "", f"Coverage: {coverage_text}"]
+    for candidate in candidates:
+        if not isinstance(candidate, Mapping):
+            raise ValueError("v2 research report candidate is invalid")
+        candidate_key = candidate.get("candidate_key")
+        ticker = candidate.get("ticker")
+        state = candidate.get("research_state")
+        suitability = candidate.get("suitability")
+        evidence = candidate.get("evidence")
+        if (
+            not isinstance(candidate_key, str) or not candidate_key
+            or ticker is not None and not isinstance(ticker, str)
+            or not isinstance(state, str) or not state
+            or not isinstance(suitability, Mapping)
+            or not isinstance(evidence, list) or len(evidence) > 8
+        ):
+            raise ValueError("v2 research report candidate is invalid")
+        suitability_state = suitability.get("state")
+        missing = suitability.get("missing_reasons")
+        vetoes = suitability.get("veto_reasons")
+        limitations = candidate.get("limitations")
+        adverse = candidate.get("adverse_paths")
+        if (
+            suitability_state not in {"unknown", "eligible", "vetoed"}
+            or not all(isinstance(values, list) for values in (missing, vetoes, limitations, adverse))
+        ):
+            raise ValueError("v2 research report suitability is invalid")
+        opposing = []
+        for reference in evidence:
+            if not isinstance(reference, Mapping):
+                raise ValueError("v2 research report evidence is invalid")
+            if reference.get("role") == "opposing":
+                item_id = reference.get("item_id")
+                if not isinstance(item_id, str):
+                    raise ValueError("v2 research report evidence is invalid")
+                opposing.append(item_id)
+        label = "ACTION LANE" if candidate_key in action_keys else "RESEARCH ONLY"
+        identity = ticker or candidate_key
+        missing_text = ", ".join(str(value) for value in missing) or "none"
+        opposing_text = ", ".join(opposing) or "none retained"
+        invalidation = sorted({
+            str(value) for values in (adverse, limitations, vetoes) for value in values
+        })
+        lines.extend([
+            "", f"### {identity} — {label}", f"Research state: {state}",
+            f"Suitability: {suitability_state} ({missing_text})",
+            f"Opposing evidence: {opposing_text}",
+            f"Invalidation: {', '.join(invalidation) or 'none recorded'}",
+            f"Next review: {next_review}",
+        ])
+    rendered = "\n".join(lines)
+    if len(rendered.encode()) > 14_000:
+        raise ValueError("v2 research report is too large")
+    return rendered
+
+
+def _is_v2_non_action(packet: Mapping[str, object] | None) -> bool:
+    if packet is None or packet.get("contract_version") != 2:
+        return False
+    candidates = packet.get("research_candidates")
+    actions = packet.get("action_candidates")
+    evidence = packet.get("evidence")
+    return (
+        isinstance(candidates, list) and actions == []
+        and (bool(candidates) or evidence == [])
+    )
+
+
 def build_report(value: ReportInput) -> MarketReport:
     if value.kind not in {"morning", "urgent", "weekly", "monthly", "theme", "on-demand", "intraday"}:
         raise ValueError("unsupported report kind")
@@ -127,13 +221,18 @@ def build_report(value: ReportInput) -> MarketReport:
         raise ValueError("packet_id must be a canonical UUID") from None
     if packet_id != value.packet_id:
         raise ValueError("packet_id must be a canonical UUID")
-    if not value.title.strip() or len(value.title) > 200 or len(value.summary) > 1_000:
+    if (
+        not value.title.strip()
+        or len(value.title.encode()) > 200
+        or len(value.summary.encode()) > 1_000
+    ):
         raise ValueError("report text must be bounded")
-    if not value.full_markdown.strip() or len(value.full_markdown) > 14_000:
+    if not value.full_markdown.strip() or len(value.full_markdown.encode()) > 14_000:
         raise ValueError("report text must be bounded")
     if value.kind == "urgent" and not (value.actionable_risk or value.material_thesis_change):
         raise ValueError("urgent report requires actionable risk or material thesis change")
-    if value.kind == "intraday" and not value.intraday_triggered:
+    v2_non_action = _is_v2_non_action(value.research_packet)
+    if value.kind == "intraday" and not value.intraday_triggered and not v2_non_action:
         raise ValueError("intraday report requires a trigger")
 
     source_ids = _sorted_unique(value.source_ids, "source_ids")
@@ -141,11 +240,22 @@ def build_report(value: ReportInput) -> MarketReport:
     comparison_ids = _sorted_unique(value.comparison_ids, "comparison_ids")
     if comparison_ids:
         raise ValueError("comparison_ids require a durable comparison ledger")
-    if not source_ids or not policy_ids:
+    empty_v2 = (
+        v2_non_action
+        and value.research_packet is not None
+        and value.research_packet.get("research_candidates") == []
+        and value.research_packet.get("evidence") == []
+    )
+    if (not source_ids and not empty_v2) or (not policy_ids and not v2_non_action):
         raise ValueError("report requires source and policy decision receipts")
     markdown = value.full_markdown.rstrip()
+    research_catalog = _research_catalog_markdown(value.research_packet)
+    if research_catalog:
+        markdown = f"{markdown}\n\n{research_catalog}"
     if "suggestion only" not in markdown.lower():
         markdown += "\n\nSuggestion only; no order was placed."
+    if len(markdown.encode()) > 14_000:
+        raise ValueError("report text must be bounded")
     body = {
         "actionable_risk": value.actionable_risk,
         "comparison_ids": list(comparison_ids),

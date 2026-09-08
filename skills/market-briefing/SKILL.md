@@ -17,7 +17,9 @@ python scripts/market_gateway.py OPERATION [--run-id UUID] [--request-id UUID] [
 ```
 
 Send exactly one JSON object on stdin. Use only `start_run`, `read_context`, `record_artifacts`,
-`grade_due_decisions`, `evaluate_and_publish`, `record_report`, `evaluate_alert_rules`, and `finish_run`. Never call a
+`grade_due_decisions`, `evaluate_and_publish`, `record_report`, `evaluate_alert_rules`, `finish_run`,
+`record_theme_episode_revision_v2`, `record_research_review_identity_v2`,
+`record_research_nominations`, and `transition_research_nomination_v2`. Never call a
 database client, Supabase table/REST endpoint, messaging endpoint, brokerage endpoint, or order tool
 directly. Never read broad database credentials or messaging credentials. `config/settings.json`
 and `config/watchlist.json` are read-only.
@@ -44,7 +46,9 @@ not JSON numbers or exponent notation. Follow the exact structures and bounds in
    receipt says holiday or suppressed with no run ID, report only that receipt and stop. Do not fetch
    market data first.
 3. Call `read_context` with the returned run ID. This bounded response is the only portfolio,
-   suggestion, plan, lesson, radar, watch, or prior-run state you may use.
+   suggestion, plan, lesson, radar, watch, theme-memory, nomination, or prior-run state you may use.
+   Frozen version-two theme memory may prioritize current research, but it cannot become packet
+   evidence, exposure proof, suitability, or action authority without current-run validation.
 4. Invoke `python scripts/collect_market_intelligence.py` exactly once with `--run-id` set to the
    exact analysis run ID from `start_run`, this phase, the
    gateway-owned market date, and only the relevant bounded `read_context` fields in a scratch
@@ -70,6 +74,15 @@ not JSON numbers or exponent notation. Follow the exact structures and bounds in
    For scheduled intraday, preserve an authoritative `run_outcome` receipt returned by the gateway.
    A `no_trigger` or `not_actionable` outcome is the durable quiet completion path: create no report
    and no publication for it, then proceed to `finish_run`.
+   If an Analyst or Checker proposes a follow-up, first record that reviewer's exact current packet
+   identity with `record_research_review_identity_v2`; the Checker receipt names the Analyst receipt
+   as predecessor, and the same actor identity cannot fill both roles. Submit no more than three
+   combined follow-ups for the run through `record_research_nominations`, grouped by reviewer
+   receipt. Each nomination contains only theme, packet-known nullable entity/security, reviewed
+   relationship role, a bounded reason, one to eight candidate-bound packet evidence IDs, required
+   evidence kind, and priority. Never include URLs, query instructions, prices, scores, actions,
+   owner state, or nested fields. These receipts remain pending research and do not alter the
+   watchlist, holdings, plans, alerts, policy, qualification, radar, or action lane.
 6. After an accepted `evaluate_and_publish`, build exactly one report input from the unchanged
    collector receipt and the exact `run_id`, `intelligence_packet`, `policy_decision_ids`, and
    `source_ids` returned by `evaluate_and_publish`, plus bounded checked
@@ -97,6 +110,20 @@ On any stable gateway error, stop the affected workflow. Do not bypass it with a
 path. If a run ID exists and the gateway remains reachable, call `finish_run`; its status is
 server-derived. `DELIVERY_FAILED` and `DELIVERY_UNKNOWN` are final for the routine: do not resend and
 do not claim delivery. A persistence failure must produce no notification claim.
+
+## Theme-memory follow-up boundary
+
+Persist an episode revision only when the collector returns the exact validated version-two row for
+the current run; do not author, rehash, branch, rebase, or infer its identity. Exact repeats make no
+new revision. Corrections and contradictions append history, and expired or closed episodes require
+an explicit source-supported successor reason before reopening.
+
+Only a later scheduled run or explicit owner on-demand run may select a pending research nomination.
+Selection requires the exact frozen Task 6 request descriptor and uncertain-outcome barrier to be
+persisted before transport. Deferral records another pending receipt and a bounded reason. Retries
+and rereads reuse the exact request identity and cannot extend nomination or episode expiry.
+Resolution remains research-only and cannot promote a candidate, populate the v2 action lane, or
+authorize execution.
 
 ## Fresh-analysis rule
 

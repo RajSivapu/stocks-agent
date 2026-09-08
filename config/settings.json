@@ -25,6 +25,18 @@
       "defense_trade_and_geopolitics",
       "earnings_and_mergers_and_acquisitions"
     ],
+    "source_capability_version": 1,
+    "theme_taxonomy_version": 1,
+    "required_baseline_capability_ids": [
+      "sec_company_tickers_universe",
+      "gdelt_theme_search"
+    ],
+    "adaptive_enrichment_budget": {
+      "pre-market": 12,
+      "intraday": 4,
+      "post-market": 8,
+      "on-demand": 4
+    },
     "alpha_vantage_daily_ceiling": 20,
     "alpha_vantage_phase_budget": {
       "pre-market": 8,
@@ -36,7 +48,7 @@
       "gdelt": {"pre-market": 80, "intraday": 20, "post-market": 40, "on-demand": 20},
       "finnhub": {"pre-market": 6, "intraday": 3, "post-market": 4, "on-demand": 2},
       "yahoo": {"pre-market": 12, "intraday": 6, "post-market": 8, "on-demand": 4},
-      "sec_edgar": {"pre-market": 6, "intraday": 2, "post-market": 4, "on-demand": 2},
+      "sec_edgar": {"pre-market": 7, "intraday": 3, "post-market": 5, "on-demand": 3},
       "federal_register": {"pre-market": 4, "intraday": 1, "post-market": 2, "on-demand": 2},
       "white_house": {"pre-market": 4, "intraday": 1, "post-market": 2, "on-demand": 2},
       "doe": {"pre-market": 4, "intraday": 1, "post-market": 2, "on-demand": 2},
@@ -54,26 +66,6 @@
       },
       "series_by_provider": {
         "fred": "CPIAUCSL"
-      }
-    },
-    "provider_query_terms": {
-      "gdelt": {
-        "macro_policy": "economic policy",
-        "technology_ai_semiconductors": "semiconductor industry",
-        "energy_nuclear_grid": "nuclear energy grid",
-        "industrial_infrastructure": "industrial infrastructure",
-        "critical_minerals_magnets": "critical minerals",
-        "healthcare": "healthcare industry",
-        "consumer": "consumer spending",
-        "defense_trade_geopolitics": "defense trade geopolitics",
-        "earnings_ma": "earnings mergers acquisitions",
-        "intraday_delta": "market developments",
-        "day_reconciliation": "market close",
-        "on_demand_request": "market news"
-      },
-      "federal_register": {
-        "macro_policy": "economic policy",
-        "energy_nuclear_grid": "energy infrastructure"
       }
     },
     "packet": {

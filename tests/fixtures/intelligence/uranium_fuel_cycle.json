@@ -1,0 +1,12 @@
+{
+  "theme_id": "nuclear_uranium",
+  "title": "Uranium enrichment and fuel fabrication capacity forecast to grow",
+  "summary": "FuelCore Energy expects new HALEU enrichment and nuclear fuel fabrication capacity for advanced reactors.",
+  "event_type": "forecast",
+  "role": "uranium_fuel_cycle",
+  "issuers": [
+    {"name": "FuelCore Energy", "cik": "0000001004", "public": true, "ticker": "FUEL", "exchange": "NYSE", "security_id": "sec:FUEL"}
+  ],
+  "organizations": ["FuelCore Energy"],
+  "expected_candidate_keys": ["sec:FUEL"]
+}

@@ -8,7 +8,7 @@ import math
 import re
 from abc import ABC, abstractmethod
 from collections.abc import Callable, Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from types import MappingProxyType
 from typing import Any
@@ -16,6 +16,7 @@ from urllib.parse import urlsplit
 
 from lib import config
 from lib.intelligence.policy import _PROVIDERS
+from lib.intelligence.limits import maximum_collection_page
 from lib.intelligence.http import (
     BoundedHttpClient,
     HttpRequest,
@@ -38,6 +39,11 @@ _MAX_METADATA_ENTRIES = 32
 _MAX_METADATA_STRING_CHARACTERS = 500
 _MAX_RECEIPT_COUNT = 10_000
 _CACHE_TTL = timedelta(minutes=15)
+_ACTIVE_MARKUP = re.compile(
+    r"(?:<\s*/?\s*(?:script|iframe|object|embed|style|svg|math|img|link|meta|form|input|video|audio)\b|"
+    r"\bon[a-z]{2,40}\s*=|\bjavascript\s*:)",
+    re.IGNORECASE,
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -49,6 +55,13 @@ class CollectionQuery:
     limit: int = 20
     cik: str | None = None
     series_id: str | None = None
+    capability_id: str | None = None
+    cursor_token: str | None = None
+    page: int = 1
+    overlap_seconds: int = 7_200
+    next_retry_phase: str | None = None
+    accession_number: str | None = None
+    primary_document: str | None = None
 
     def __post_init__(self) -> None:
         if not isinstance(self.text, str) or not self.text.strip():
@@ -61,6 +74,42 @@ class CollectionQuery:
             raise ValueError("collection window must be ordered and timezone-aware")
         if isinstance(self.limit, bool) or not isinstance(self.limit, int) or not 1 <= self.limit <= 50:
             raise ValueError("collection limit must be between 1 and 50")
+        if self.capability_id is not None and (
+            not isinstance(self.capability_id, str)
+            or re.fullmatch(r"[a-z][a-z0-9_]{2,79}", self.capability_id) is None
+        ):
+            raise ValueError("collection capability ID is invalid")
+        if self.cursor_token is not None and (
+            not isinstance(self.cursor_token, str)
+            or not self.cursor_token
+            or len(self.cursor_token) > 2_048
+            or any(ord(character) < 32 for character in self.cursor_token)
+        ):
+            raise ValueError("collection cursor token is invalid")
+        max_page = maximum_collection_page(self.capability_id)
+        if isinstance(self.page, bool) or not isinstance(self.page, int) or not 1 <= self.page <= max_page:
+            raise ValueError(f"collection page must be between 1 and {max_page}")
+        if (
+            isinstance(self.overlap_seconds, bool)
+            or not isinstance(self.overlap_seconds, int)
+            or not 7_200 <= self.overlap_seconds <= 31 * 24 * 60 * 60
+        ):
+            raise ValueError("collection overlap must be at least two hours and bounded")
+        if self.next_retry_phase is not None and self.next_retry_phase not in {
+            "pre-market", "intraday", "post-market", "on-demand"
+        }:
+            raise ValueError("collection retry phase is invalid")
+        for value, label in (
+            (self.accession_number, "accession number"),
+            (self.primary_document, "primary document"),
+        ):
+            if value is not None and (
+                not isinstance(value, str)
+                or not value
+                or len(value) > 255
+                or any(ord(character) < 32 for character in value)
+            ):
+                raise ValueError(f"collection {label} is invalid")
 
 
 @dataclass(frozen=True, slots=True)
@@ -104,6 +153,7 @@ class RequestReceipt:
     error_code: str | None = None
     source_receipt_id: str | None = None
     cache_predecessor_receipt_id: str | None = None
+    metadata: Mapping[str, object] = field(default_factory=lambda: MappingProxyType({}))
 
 
 @dataclass(frozen=True, slots=True)
@@ -143,6 +193,10 @@ def bounded_text(value: object) -> str:
     return re.sub(r"\s+", " ", str(value or "")).strip()[:_MAX_TEXT_CHARACTERS]
 
 
+def contains_active_markup(value: object) -> bool:
+    return _ACTIVE_MARKUP.search(str(value or "")) is not None
+
+
 def publisher_reference(url: object) -> dict[str, str]:
     """Retain a bounded publisher link as untrusted metadata, never as source authority."""
     if not isinstance(url, str) or len(url) > 2_048:
@@ -166,7 +220,7 @@ def publisher_reference(url: object) -> dict[str, str]:
     }
 
 
-def _bounded_metadata_value(value: object, depth: int = 0) -> object:
+def _bounded_metadata_value(value: object, depth: int = 0, key_name: str | None = None) -> object:
     if depth >= _MAX_METADATA_DEPTH:
         return None
     if value is None or isinstance(value, (bool, int)):
@@ -174,12 +228,16 @@ def _bounded_metadata_value(value: object, depth: int = 0) -> object:
     if isinstance(value, float):
         return value if math.isfinite(value) else None
     if isinstance(value, str):
-        return value[:_MAX_METADATA_STRING_CHARACTERS]
+        limit = 2_048 if key_name == "backlog_token" else _MAX_METADATA_STRING_CHARACTERS
+        return value[:limit]
     if isinstance(value, Mapping):
         bounded = {}
         entries = sorted(value.items(), key=lambda entry: str(entry[0]))
         for key, nested in entries[:_MAX_METADATA_ENTRIES]:
-            bounded[str(key)[:100]] = _bounded_metadata_value(nested, depth + 1)
+            normalized_key = str(key)[:100]
+            bounded[normalized_key] = _bounded_metadata_value(
+                nested, depth + 1, normalized_key,
+            )
         return bounded
     if isinstance(value, (list, tuple)):
         return [
@@ -260,6 +318,65 @@ class SourceAdapter(ABC):
     ) -> Sequence[Mapping[str, object]]:
         raise NotImplementedError
 
+    def _decode_response(self, response: HttpResult) -> object:
+        return json.loads(
+            response.body,
+            parse_constant=lambda _value: (_ for _ in ()).throw(ValueError()),
+        )
+
+    def _authority(self, query: CollectionQuery) -> str:
+        return self.authority
+
+    def _progress_metadata(
+        self,
+        payload: object,
+        query: CollectionQuery,
+        response: HttpResult,
+        records: Sequence[Mapping[str, object]],
+        bound: int,
+    ) -> Mapping[str, object]:
+        return MappingProxyType({
+            "truncated": len(records) > bound,
+            "backlog_remaining": False,
+        })
+
+    @staticmethod
+    def _receipt_metadata(
+        query: CollectionQuery,
+        *,
+        status: str,
+        returned: int,
+        progress: Mapping[str, object] | None = None,
+    ) -> Mapping[str, object]:
+        from lib.intelligence.cursors import source_outcome
+
+        outcome = source_outcome(status=status, returned=returned)
+        metadata: dict[str, object] = {
+            "backlog_remaining": False,
+            "capability_id": query.capability_id,
+            "coverage_status": outcome.coverage_status,
+            "cursor_end": _utc(query.end).isoformat(),
+            "cursor_start": _utc(query.start).isoformat(),
+            "next_retry_phase": query.next_retry_phase,
+            "overlap_seconds": query.overlap_seconds,
+            "page": query.page,
+            "truncated": False,
+        }
+        if progress:
+            metadata.update(progress)
+        if (
+            metadata.get("coverage_gap") is True
+            and metadata.get("continuation_unavailable") is True
+            and not bool(metadata.get("backlog_remaining"))
+        ):
+            metadata.pop("next_retry_phase", None)
+        metadata["exhausted"] = (
+            status in {"succeeded", "cache_hit"}
+            and not bool(metadata.get("truncated"))
+            and not bool(metadata.get("backlog_remaining"))
+        )
+        return bounded_metadata({key: value for key, value in metadata.items() if value is not None})
+
     def collect(
         self,
         query: CollectionQuery,
@@ -279,6 +396,11 @@ class SourceAdapter(ABC):
                 "symbols": ",".join(query.symbols),
                 "cik": query.cik or "",
                 "series_id": query.series_id or "",
+                "capability_id": query.capability_id or "",
+                "cursor_token": query.cursor_token or "",
+                "page": str(query.page),
+                "accession_number": query.accession_number or "",
+                "primary_document": query.primary_document or "",
                 "limit": str(query.limit),
             },
             json.dumps(dict(requested_window), separators=(",", ":"), sort_keys=True),
@@ -329,10 +451,7 @@ class SourceAdapter(ABC):
             else:  # deterministic fixture transport has one declared outbound attempt
                 admit_attempt()
                 response = self.http.get(request)
-            payload = json.loads(
-                response.body,
-                parse_constant=lambda _value: (_ for _ in ()).throw(ValueError()),
-            )
+            payload = self._decode_response(response)
             records = self._records(payload, query, response)
             if not isinstance(records, Sequence) or isinstance(records, (str, bytes, bytearray)):
                 raise ValueError("records must be a sequence")
@@ -351,6 +470,7 @@ class SourceAdapter(ABC):
                 else:
                     items.append(item)
             body_hash = hashlib.sha256(response.body).hexdigest()
+            progress = self._progress_metadata(payload, query, response, records, bound)
             receipt = RequestReceipt(
                 provider=self.provider,
                 reservation_id=reservation_id,
@@ -369,6 +489,12 @@ class SourceAdapter(ABC):
                 dropped_count=dropped,
                 response_hash=body_hash,
                 source_receipt_id=source_receipt_id,
+                metadata=self._receipt_metadata(
+                    query,
+                    status="cache_hit" if response.cache_hit else "succeeded",
+                    returned=len(items),
+                    progress=progress,
+                ),
             )
             return CollectionResult(tuple(items), receipt, query.limit)
         except (SourceFailure, QuotaExceeded, UnicodeDecodeError, ValueError, TypeError, KeyError) as exc:
@@ -392,6 +518,19 @@ class SourceAdapter(ABC):
                 response_hash=None,
                 error_code=(exc.code if isinstance(exc, SourceFailure) else "QUOTA_BLOCKED" if isinstance(exc, QuotaExceeded) else "INVALID_RESPONSE"),
                 source_receipt_id=source_receipt_id,
+                metadata=self._receipt_metadata(
+                    query,
+                    status=(
+                        "quota_blocked"
+                        if isinstance(exc, QuotaExceeded)
+                        else "configuration_missing"
+                        if isinstance(exc, SourceFailure) and exc.code == "CONFIGURATION_MISSING"
+                        else "unsupported"
+                        if isinstance(exc, SourceFailure) and exc.code == "UNSUPPORTED_QUERY"
+                        else "failed"
+                    ),
+                    returned=0,
+                ),
             )
             return CollectionResult((), receipt, query.limit)
 
@@ -429,6 +568,8 @@ class SourceAdapter(ABC):
         text = bounded_text(record.get("text"))
         upstream_id = record.get("upstream_item_id")
         if upstream_id is None or not str(upstream_id).strip():
+            return None
+        if any(contains_active_markup(value) for value in (upstream_id, title, text)):
             return None
         metadata = bounded_metadata(record.get("metadata"))
         raw_published_at = record.get("published_at")
@@ -471,7 +612,7 @@ class SourceAdapter(ABC):
             published_at=published_at,
             effective_at=effective_at,
             retrieved_at=retrieved_at,
-            authority=self.authority,
+            authority=self._authority(query),
             metadata=bounded_metadata(source_metadata),
             request_url=request_url[:2048],
             reporting_at=reporting_at,
@@ -510,12 +651,21 @@ def build_adapter(
     return adapter_type(http, quota, secret_getter=secret_getter, clock=clock)
 
 
+def __getattr__(name: str) -> object:
+    if name == "YahooScreenAdapter":
+        from .yahoo_screen import YahooScreenAdapter
+
+        return YahooScreenAdapter
+    raise AttributeError(name)
+
+
 __all__ = [
     "CollectionQuery",
     "CollectionResult",
     "RequestReceipt",
     "SourceAdapter",
     "SourceItem",
+    "YahooScreenAdapter",
     "build_adapter",
     "entity_ids",
     "security_ids",

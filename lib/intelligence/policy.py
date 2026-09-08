@@ -34,9 +34,39 @@ _SEED_DOMAINS = (
     "earnings_and_mergers_and_acquisitions",
 )
 _MAX_PACKET_LIMITS = PacketLimits()
+_SOURCE_CAPABILITY_VERSION = 1
+_THEME_TAXONOMY_VERSION = 1
+_REQUIRED_BASELINE_CAPABILITY_IDS = (
+    "sec_company_tickers_universe",
+    "gdelt_theme_search",
+)
+_MAX_ADAPTIVE_ENRICHMENT_BUDGET = {
+    "pre-market": 12,
+    "intraday": 4,
+    "post-market": 8,
+    "on-demand": 4,
+}
+_MAX_PROVIDER_PHASE_BUDGETS = {
+    "gdelt": {"pre-market": 80, "intraday": 20, "post-market": 40, "on-demand": 20},
+    "finnhub": {"pre-market": 6, "intraday": 3, "post-market": 4, "on-demand": 2},
+    "yahoo": {"pre-market": 12, "intraday": 6, "post-market": 8, "on-demand": 4},
+    "sec_edgar": {"pre-market": 7, "intraday": 3, "post-market": 5, "on-demand": 3},
+    "federal_register": {"pre-market": 4, "intraday": 1, "post-market": 2, "on-demand": 2},
+    "white_house": {"pre-market": 4, "intraday": 1, "post-market": 2, "on-demand": 2},
+    "doe": {"pre-market": 4, "intraday": 1, "post-market": 2, "on-demand": 2},
+    "dod": {"pre-market": 4, "intraday": 1, "post-market": 2, "on-demand": 2},
+    "eia": {"pre-market": 4, "intraday": 1, "post-market": 2, "on-demand": 2},
+    "fred": {"pre-market": 4, "intraday": 1, "post-market": 2, "on-demand": 2},
+    "bls": {"pre-market": 4, "intraday": 1, "post-market": 2, "on-demand": 2},
+    "bea": {"pre-market": 4, "intraday": 1, "post-market": 2, "on-demand": 2},
+}
 _INTELLIGENCE_KEYS = frozenset({
     "providers",
     "seed_domains",
+    "source_capability_version",
+    "theme_taxonomy_version",
+    "required_baseline_capability_ids",
+    "adaptive_enrichment_budget",
     "alpha_vantage_daily_ceiling",
     "alpha_vantage_phase_budget",
     "provider_phase_budgets",
@@ -110,7 +140,7 @@ def load_intelligence_policy(settings: Mapping[str, object]) -> IntelligencePoli
     """Validate checked-in V1 settings and return an immutable policy view."""
     intelligence = _mapping(settings, "intelligence")
     guardrails = _mapping(settings, "guardrails")
-    unexpected = set(intelligence) - _INTELLIGENCE_KEYS - {"provider_query_identifiers", "provider_query_terms"}
+    unexpected = set(intelligence) - _INTELLIGENCE_KEYS - {"provider_query_identifiers"}
     missing = _INTELLIGENCE_KEYS - set(intelligence)
     if unexpected or missing:
         raise ValueError("intelligence settings must contain exactly the approved keys")
@@ -122,20 +152,27 @@ def load_intelligence_policy(settings: Mapping[str, object]) -> IntelligencePoli
             values = _mapping(identifiers, name)
             if len(values) > 100 or any(not isinstance(key, str) or not isinstance(value, str) or len(value) > 160 for key, value in values.items()):
                 raise ValueError("provider identifiers exceed bounds")
-    if "provider_query_terms" in intelligence:
-        terms = _mapping(intelligence, "provider_query_terms")
-        if not set(terms) <= set(_PROVIDERS):
-            raise ValueError("provider query terms use an unapproved provider")
-        for provider in terms:
-            values = _mapping(terms, provider)
-            if len(values) > 100 or any(not isinstance(key, str) or not isinstance(value, str) or not 1 <= len(value) <= 500 for key, value in values.items()):
-                raise ValueError("provider query terms exceed bounds")
-
     providers = _required(intelligence, "providers")
     if not isinstance(providers, list) or tuple(providers) != _PROVIDERS:
         raise ValueError("provider allowlist must match the approved V1 providers")
     if _required(intelligence, "seed_domains") != list(_SEED_DOMAINS):
         raise ValueError("seed domains must match the approved V1 taxonomy")
+    if _required(intelligence, "source_capability_version") != _SOURCE_CAPABILITY_VERSION:
+        raise ValueError("source capability version must match the reviewed version")
+    if _required(intelligence, "theme_taxonomy_version") != _THEME_TAXONOMY_VERSION:
+        raise ValueError("theme taxonomy version must match the reviewed version")
+    baseline_ids = _required(intelligence, "required_baseline_capability_ids")
+    if baseline_ids != list(_REQUIRED_BASELINE_CAPABILITY_IDS):
+        raise ValueError("required baseline capability IDs must match the reviewed baseline")
+    adaptive_budget = _phase_budget(
+        _required(intelligence, "adaptive_enrichment_budget"),
+        "adaptive enrichment budget",
+    )
+    if any(
+        adaptive_budget[phase] > _MAX_ADAPTIVE_ENRICHMENT_BUDGET[phase]
+        for phase in _PHASES
+    ):
+        raise ValueError("adaptive enrichment budget exceeds the approved maximum")
 
     for key in (
         "paid_fallback_enabled",
@@ -175,9 +212,20 @@ def load_intelligence_policy(settings: Mapping[str, object]) -> IntelligencePoli
         for provider in _PROVIDERS
         if provider != "alpha_vantage"
     })
+    if any(
+        provider_budgets[provider][phase] > _MAX_PROVIDER_PHASE_BUDGETS[provider][phase]
+        for provider in provider_budgets
+        for phase in _PHASES
+    ):
+        raise ValueError("provider phase budget exceeds the approved provider ceiling")
 
     return IntelligencePolicy(
         providers=_PROVIDERS,
+        seed_domains=_SEED_DOMAINS,
+        source_capability_version=_SOURCE_CAPABILITY_VERSION,
+        theme_taxonomy_version=_THEME_TAXONOMY_VERSION,
+        required_baseline_capability_ids=_REQUIRED_BASELINE_CAPABILITY_IDS,
+        adaptive_enrichment_budget=adaptive_budget,
         alpha_vantage_daily_ceiling=daily_ceiling,
         alpha_vantage_phase_budget=alpha_budget,
         provider_phase_budgets=provider_budgets,

@@ -102,6 +102,22 @@ def test_call_sends_only_scoped_header_and_compact_decimal_payload(monkeypatch):
     assert b"SUPABASE_SERVICE_ROLE_KEY" not in request.data
 
 
+def test_call_accepts_fractional_timeout_for_a_shared_deadline(monkeypatch):
+    configured(monkeypatch)
+    captured = {}
+
+    def opener(_request, **kwargs):
+        captured.update(kwargs)
+        return FakeResponse({"ok": True, "data": {"run_id": RUN_ID}})
+
+    gateway.call(
+        "start_run", {}, dry_run=True, request_id=REQUEST_ID,
+        timeout=0.125, _opener=opener,
+    )
+
+    assert captured["timeout"] == 0.125
+
+
 def test_call_allows_credential_proxy_to_inject_scoped_header(monkeypatch):
     def proxy_configuration(name):
         if name == "supabase_url":
@@ -189,6 +205,14 @@ def test_alert_evaluation_is_allowlisted_and_standalone(monkeypatch):
         ("record_intelligence", RUN_ID),
         ("record_report", RUN_ID),
         ("record_learning", RUN_ID),
+        ("record_discovery_reference", RUN_ID),
+        ("checkpoint_discovery_stage", RUN_ID),
+        ("read_discovery_context", RUN_ID),
+        ("begin_discovery_reference", RUN_ID),
+        ("record_discovery_reference_chunk", RUN_ID),
+        ("finalize_discovery_reference", RUN_ID),
+        ("pin_discovery_reference", RUN_ID),
+        ("read_discovery_reference", RUN_ID),
     ],
 )
 def test_intelligence_persistence_operations_are_allowlisted(monkeypatch, operation, run_id):
@@ -331,7 +355,9 @@ def test_cli_is_bounded_and_never_prints_raw_errors(monkeypatch, capsys):
     assert json.loads(capsys.readouterr().out) == {"code": "RATE_LIMITED", "ok": False}
 
 
-def test_healthcheck_allows_finnhub_proxy_to_inject_header(monkeypatch, capsys):
+def test_healthcheck_reports_missing_source_configuration_without_secret_values(
+    monkeypatch, capsys
+):
     requests = []
 
     def fake_gateway_call(_operation, _payload, **_kwargs):
@@ -342,7 +368,10 @@ def test_healthcheck_allows_finnhub_proxy_to_inject_header(monkeypatch, capsys):
 
     def fake_urlopen(request, **_kwargs):
         requests.append(request)
-        return FakeResponse(b"{}")
+        response = FakeResponse(b"{}")
+        response.geturl = lambda: request.full_url
+        response.close = lambda: None
+        return response
 
     monkeypatch.setattr(gateway, "call", fake_gateway_call)
     monkeypatch.setattr(config, "secret", missing_secret)
@@ -351,6 +380,13 @@ def test_healthcheck_allows_finnhub_proxy_to_inject_header(monkeypatch, capsys):
     runpy.run_path(str(ROOT / "scripts" / "healthcheck.py"), run_name="__main__")
     result = json.loads(capsys.readouterr().out)
 
-    assert result == {"alerts": "ok", "gateway": "ok", "finnhub": "ok", "yahoo": "ok"}
-    finnhub_request = next(r for r in requests if "finnhub.io" in r.full_url)
-    assert "X-finnhub-token" not in finnhub_request.headers
+    assert result["alerts"] == result["gateway"] == "ok"
+    assert result["zero_key_baseline"] == "configuration_missing"
+    assert result["capabilities"]["finnhub_security_enrichment"]["status"] == (
+        "configuration_missing"
+    )
+    assert result["capabilities"]["sec_company_tickers_universe"]["status"] == (
+        "configuration_missing"
+    )
+    assert not any("finnhub.io" in request.full_url for request in requests)
+    assert "test-value" not in json.dumps(result)

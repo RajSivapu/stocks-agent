@@ -1,7 +1,10 @@
 import type { Freshness, MarketState } from "../../../packages/dashboard-contracts/src/index.ts";
+import { NYSE_CALENDAR } from "./nyse-calendar.generated.ts";
 
 export interface MarketCalendar {
   holidays: readonly string[];
+  earlyCloses: readonly string[];
+  coverage: { startYear: number; endYear: number };
 }
 
 export interface FreshnessInput {
@@ -49,8 +52,21 @@ function weekend(date: string): boolean {
   return day === 0 || day === 6;
 }
 
+function maintained(date: string, calendar: MarketCalendar): boolean {
+  if (!DATE_PATTERN.test(date)) return false;
+  const instant = new Date(`${date}T12:00:00.000Z`);
+  const year = Number(date.slice(0, 4));
+  return !Number.isNaN(instant.valueOf()) && instant.toISOString().slice(0, 10) === date &&
+    year >= calendar.coverage.startYear && year <= calendar.coverage.endYear;
+}
+
 function tradingDay(date: string, calendar: MarketCalendar): boolean {
-  return DATE_PATTERN.test(date) && !weekend(date) && !calendar.holidays.includes(date);
+  return maintained(date, calendar) && !weekend(date) && !calendar.holidays.includes(date);
+}
+
+function sessionCloseMinutes(date: string, calendar: MarketCalendar): number | null {
+  if (!tradingDay(date, calendar)) return null;
+  return calendar.earlyCloses.includes(date) ? 13 * 60 : 16 * 60;
 }
 
 const SCHEDULED_PHASES = ["pre-market", "intraday", "post-market"] as const;
@@ -83,16 +99,19 @@ function previousTradingDay(date: string, calendar: MarketCalendar): string {
 
 function currentMarketState(now: Date, calendar: MarketCalendar): MarketState {
   const local = localParts(now);
+  if (!maintained(local.date, calendar)) return "unknown";
   if (weekend(local.date)) return "closed";
   if (calendar.holidays.includes(local.date)) return "holiday";
   if (local.minutes < 9 * 60 + 30) return "pre_market";
-  if (local.minutes < 16 * 60) return "regular";
+  const close = sessionCloseMinutes(local.date, calendar);
+  if (close !== null && local.minutes < close) return "regular";
   return "post_market";
 }
 
 function latestCompletedSession(now: Date, calendar: MarketCalendar): string {
   const local = localParts(now);
-  if (tradingDay(local.date, calendar) && local.minutes >= 16 * 60) return local.date;
+  const close = sessionCloseMinutes(local.date, calendar);
+  if (close !== null && local.minutes >= close) return local.date;
   return previousTradingDay(local.date, calendar);
 }
 
@@ -110,6 +129,7 @@ export function classifyFreshness(
   if (Number.isNaN(instant.valueOf()) || instant > now) return unavailable();
   const canonical = instant.toISOString();
   const state = currentMarketState(now, calendar);
+  if (state === "unknown") return unavailable();
 
   if (input.kind === "price") {
     const sourceState = (input.sourceMarketState ?? "").toUpperCase();
@@ -156,15 +176,13 @@ export function classifyFreshness(
   };
 }
 
-export const NYSE_HOLIDAYS_2026 = [
-  "2026-01-01",
-  "2026-01-19",
-  "2026-02-16",
-  "2026-04-03",
-  "2026-05-25",
-  "2026-06-19",
-  "2026-07-03",
-  "2026-09-07",
-  "2026-11-26",
-  "2026-12-25",
-] as const;
+export const NYSE_MARKET_CALENDAR: MarketCalendar = {
+  holidays: Object.values(NYSE_CALENDAR.years).flatMap((year) => year.full_day_closures),
+  earlyCloses: Object.values(NYSE_CALENDAR.years).flatMap((year) =>
+    year.early_closes.map((row) => row.date)
+  ),
+  coverage: {
+    startYear: NYSE_CALENDAR.coverage.start_year,
+    endYear: NYSE_CALENDAR.coverage.end_year,
+  },
+};

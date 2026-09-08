@@ -281,6 +281,7 @@ def test_gateway_entrypoint_uses_only_pinned_dependencies_and_scoped_secrets():
     assert set(re.findall(r'requiredEnvironment\("([A-Z0-9_]+)"\)', source)) == {
         "SUPABASE_URL",
         "SUPABASE_SERVICE_ROLE_KEY",
+            "DASHBOARD_OWNER_USER_ID",
             "MARKET_AGENT_SECRET",
             "OWNER_DASHBOARD_ORIGIN",
             "OWNER_DASHBOARD_URL",
@@ -314,10 +315,11 @@ def test_gateway_repository_uses_only_fixed_tables_and_named_rpcs():
         "suggestions",
         "transactions",
     }
-    assert set(re.findall(r'\.rpc\(\s*"([a-z_]+)"', source)) == {
+    assert set(re.findall(r'\.rpc\(\s*"([a-z0-9_]+)"', source)) == {
         "apply_market_artifacts",
         "apply_market_decision_bundle_with_cash_snapshot",
-        "checkpoint_market_intelligence_collection",
+            "checkpoint_market_intelligence_collection",
+            "checkpoint_market_discovery_stage",
         "claim_market_gateway_request",
         "claim_market_intelligence_quote",
         "claim_market_publication",
@@ -332,8 +334,17 @@ def test_gateway_repository_uses_only_fixed_tables_and_named_rpcs():
         "finish_market_publication",
         "finish_market_report_publication",
         "get_due_market_decisions",
-        "record_market_alert_evaluations",
-        "read_market_intelligence_completion",
+            "record_market_alert_evaluations",
+            "record_market_discovery_reference",
+            "begin_market_discovery_reference",
+            "record_market_discovery_reference_chunk",
+            "finalize_market_discovery_reference",
+            "pin_market_discovery_reference",
+            "read_market_discovery_reference",
+            "read_market_intelligence_completion",
+            "read_market_discovery_context",
+            "seal_market_enrichment_selection",
+            "read_market_discovery_cursor_context",
         "read_market_report_decisions",
         "read_reconciled_cash_snapshot",
         "record_market_run_outcome",
@@ -342,11 +353,15 @@ def test_gateway_repository_uses_only_fixed_tables_and_named_rpcs():
         "record_market_learning",
         "record_market_report",
         "record_market_report_origin",
+        "record_research_nominations",
+        "record_research_review_identity_v2",
+        "record_theme_episode_revision_v2",
         "read_market_evidence_packet",
         "refresh_market_intelligence_context",
         "start_market_analysis_run",
         "start_market_intelligence_run",
         "suppress_market_report_publication",
+        "transition_research_nomination_v2",
         "upsert_market_outcome_grades",
     }
     assert not re.search(r"client\.from\((?!\")[^)]+\)", source)
@@ -632,6 +647,7 @@ def test_routine_documentation_exposes_only_scoped_cloud_credentials():
         "SUPABASE_URL=https://<project-ref>.supabase.co",
         "MARKET_AGENT_SECRET=<dedicated-random-gateway-secret>",
         "FINNHUB_API_KEY=<read-only-key>",
+        "SEC_USER_AGENT_CONTACT=<owner-controlled SEC contact>",
     ]
     for readable_secret in (
         "ALPHAVANTAGE_API_KEY",
@@ -639,7 +655,7 @@ def test_routine_documentation_exposes_only_scoped_cloud_credentials():
         "TELEGRAM_BOT_TOKEN",
     ):
         assert readable_secret not in env_block
-    assert "ALPHAVANTAGE_API_KEY" not in routines
+    assert "leave `ALPHAVANTAGE_API_KEY` absent when it is not enabled" in routines
     for required in (
         "narrowly scoped",
         "read-only",
@@ -649,7 +665,7 @@ def test_routine_documentation_exposes_only_scoped_cloud_credentials():
         "status: suppressed",
     ):
         assert required in routines
-    assert '{"alerts":"ok","gateway":"ok","finnhub":"ok","yahoo":"ok"}' in routines
+    assert '"zero_key_baseline":"ok"' in routines
     assert "sends no Telegram healthcheck or alert" in routines
 
 

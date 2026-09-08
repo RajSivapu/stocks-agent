@@ -1,0 +1,11 @@
+{
+  "issuers": [
+    {"name": "Private Atlas Labs", "cik": null, "public": false},
+    {"name": "Public Atlas Labs", "cik": "0000001101", "public": true, "ticker": "ATLS", "exchange": "NASDAQ", "security_id": "sec:ATLS"},
+    {"name": "Multiple One Corporation", "cik": "0000001102", "public": true, "ticker": "MONE", "exchange": "NYSE", "security_id": "sec:MONE"},
+    {"name": "Multiple Two Corporation", "cik": "0000001103", "public": true, "ticker": "MTWO", "exchange": "NASDAQ", "security_id": "sec:MTWO"},
+    {"name": "Ordinary Word Holdings", "cik": "0000001104", "public": true, "ticker": "ON", "exchange": "NYSE", "security_id": "sec:ON"},
+    {"name": "Dual Class Group", "cik": "0000001105", "public": true, "ticker": "DUAL.A", "exchange": "NYSE", "security_id": "sec:DUALA", "second_ticker": "DUAL.C", "second_security_id": "sec:DUALC"},
+    {"name": "Renamed Company", "former_name": "Former Company", "cik": "0000001106", "public": true, "ticker": "NEW", "former_ticker": "OLD", "exchange": "NASDAQ", "security_id": "sec:RENAME"}
+  ]
+}

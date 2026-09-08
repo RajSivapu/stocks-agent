@@ -1,15 +1,85 @@
 # Personal Stock Agent Project Status
 
-Last updated: 2026-09-06
-Canonical release: Personal Stock Agent V1 safety remediation
+Last updated: 2026-09-08
+Canonical release: Personal Stock Agent V1 market-wide discovery candidate
 Audit baseline: `432d647ef911ff63da427097f02a852e18038b62` on `origin/main`
-Consolidated local-gate candidate: `883d521728b1b3c2700a78dab1d65208105d7a2f`
+Market-wide implementation boundary: `18386b5c76c7a7aa8b3eeda870b12d3aba2399e1`
 Current state: owner-only Site v9 is live from UI main
 `e2f9d74495fa2ff8ed02e72b12d09755918bb9f9`, with successful exact-main CI `34073314211`.
 Production schema reconciliation, managed isolated recovery, and the protected backend-runtime
 attestation are complete; trusted V1 use remains **no-go** pending the next existing scheduled
-evidence chain. The unchanged backend remains attested at
+evidence chain plus protected production proof for the locally implemented market-wide discovery
+scope in V1-C3. The unchanged backend remains attested at
 `b3f7d706573224d8edfa88570067dfb1b0900672` by protected run `34055419086`.
+
+## Local market-wide release candidate — production pending
+
+Tasks 1–10 of the approved market-wide plan are implemented and independently reviewed through
+`18386b5c76c7a7aa8b3eeda870b12d3aba2399e1`. The latest full local gate at that boundary passed
+Python 1,469 passed/3 skipped/4 credentialed tests deselected, Node 71, Deno 332, package tests
+7 + 53, and Playwright 24 passed/1 skipped. The Task 11 candidate gate then passed Python 1,480
+passed/3 skipped/4 credentialed tests deselected, Node 71, Deno 333, package tests 7 + 53, and
+Playwright 24 passed/1 skipped, with typecheck, lint, license, build, and bundle checks green. This is
+local evidence only. The post-review runtime-correction gate passed Python 1,500 passed/3 skipped/4
+credentialed tests deselected, Node 71, Deno 333, package tests 7 + 53, and Playwright 24 passed/1
+skipped, with typecheck, lint, license, build, and bundle checks green. The final release-trust gate
+passed Python 1,509 passed/3 skipped/4 credentialed tests deselected, Node 71, Deno 333, package
+tests 7 + 53, and Playwright 24 passed/1 skipped; typecheck, lint, license, build, and bundle checks
+also passed. That gate contains 1,997 passing checks. The final release-candidate
+hardening gate then passed Python 1,541 passed/3 skipped/4 credentialed tests deselected, Node 71,
+Deno 334, package tests 7 + 53, and Playwright 24 passed/1 skipped; typecheck, lint, license,
+production build, and bundle checks also passed. That gate contains **2,030 passing checks** and
+covers optional official-source lineage, honest empty reports, quiet intraday terminal outcomes,
+credential-isolated child processes, pre-mutation recovery state, and exact local Site package/build parity while native deployment, access, live-byte, and retained rollback-target proof stay separate.
+PR #35 CI run `34267466157` then exposed one hermetic-packaging omission: the SQL parser used by six
+test modules was present locally but absent from `requirements.lock`. Commit `b789e0e` adds `pglast
+8.4` to the declared test inputs and regenerated hash-locked binary-only requirements. A fresh Python
+3.14 environment installed the lock and passed all 72 tests in the six affected modules; the focused
+V1 verifier passed 96/96. Runtime code is unchanged. The corrected PR head still requires independent
+review and protected CI before merge. Protected backend release, direct native Site observation, and
+normal scheduled receipts remain open.
+
+The protected release workflow also assumed a separate GitHub collaborator could submit an
+`APPROVED` review. This owner-only repository has one collaborator and GitHub forbids a PR author
+from approving the same PR. Commit `248366e` preserves the independent-review path and adds a
+solo-owner authorization that must name the exact reviewed head and successful PR CI run in an
+owner-authored PR comment created after that CI and before merge. The release re-reads the PR CI,
+repository-owner identity, exact comment, merge, exact-main CI, and candidate tree before checkout or
+production-secret exposure; the immutable release record retains the authorization kind and IDs.
+
+| Task | Reviewed closing commit | Local result |
+|---|---|---|
+| 1 — capability planner | `cffb47d` | Required free baseline and bounded phase budgets fail closed. |
+| 2 — protected discovery ledgers | `e0411ae` | Additive persistence, ACL, export, restore, and recovery contracts pass. |
+| 3 — dated security reference | `2e6b8ff` | SEC reference transfer/restart/capacity pass; scope remains `scope_not_guaranteed`. |
+| 4 — official feeds and cursors | `899b69d` | DOE, EIA, Defense, White House, Federal Register, and SEC adapters retain truthful coverage. |
+| 5 — ticker-free resolution | `284ad02` | Event-first entity resolution, value chains, syndication, and lineage pass. |
+| 6 — primary exposure enrichment | `157a826` | Bounded primary-document enrichment and explicit revenue-share materiality pass. |
+| 7 — broad screens | `e2f734f` | Feasibility states pass; all screen transports remain zero-request. |
+| 8 — research/action split | `9f71e61` | Research survives missing suitability; action remains fail closed. |
+| 9 — theme memory | `95ffbfb` | The normal collector persists canonical V2 episode revisions and consumes due research nominations within the three-task adaptive cap; projection and recovery pass. |
+| 10 — acceptance and calendar | `18386b5` | Thematic/held-out/adversarial/capacity gates and NYSE 2026–2028 calendar pass. |
+
+The protected migration boundary is the immutable additive chain
+`20261005_market_wide_discovery.sql` through
+`20261015_release_reader_source_tables.sql`. The `20261004` artifact is the separate immutable
+production-schema reconciliation baseline; there is no `20261004_market_wide_discovery.sql` and the
+release must never invent or apply one. The eleven discovery/runtime and release-security migration
+file SHA-256 values are
+recorded in `docs/rollouts/2026-09-06-market-wide-thematic-discovery-v1.md`.
+
+Known V1 limits remain visible: `complete_market_coverage` is always false; free sources and request
+budgets are bounded; six Yahoo screens are disabled; SEC Form 4 transport is unsupported and only
+offline parser/cluster semantics exist; and the V2 action lane remains empty because no protected
+issuer-valuation ledger exists. Research candidates remain suggestion-only. The NYSE calendar is
+maintained through 2028 and fails closed outside that reviewed range.
+
+Any September 8 receipt from the already deployed runtime is operational evidence for that earlier
+runtime only. It does not prove this candidate's V1-C3 discovery capability. V1-C3 and all reopened
+production checkpoints stay unchecked until the exact reviewed candidate reaches protected main,
+the protected backend and owner-only Site both pass their separate receipt gates, and a normal
+post-release scheduled run produces separate operational and capability receipts. Alert V3 remains
+disabled and shadow-only.
 
 This file is the version-controlled source of truth for the Personal Stock Agent V1 rollout.
 `docs/ROADMAP.md` records the implementation sequence and remaining release gates.
@@ -89,6 +159,38 @@ report; Ideas and Reports hold the daily decision history; Intelligence and Rece
 research and audit evidence under Advanced. It is not presented as a live trading terminal, and the
 absence of continuous live data is surfaced rather than hidden.
 
+## Approved V1-C3 market-wide discovery scope and local implementation — 2026-09-06
+
+The owner approved keeping cross-sector thematic discovery inside V1-C3. Two GPT-6 Astra reviews
+confirmed that the current runtime can preserve and rank known security evidence but does not yet
+prove broad discovery beyond the portfolio and watchlist. In particular, ticker-free stories can be
+dropped, unsupported provider/theme pairs can silently narrow the plan, filing metadata does not
+prove business exposure, and missing portfolio suitability can remove otherwise valid research
+candidates.
+
+The approved design is
+`docs/superpowers/specs/2026-09-06-market-wide-thematic-discovery-v1-design.md`; the task-by-task plan
+is `docs/superpowers/plans/2026-09-06-market-wide-thematic-discovery-v1-implementation.md`. The work
+adds capability-aware source planning, a dated U.S.-listed security reference, ticker-independent
+event and entity resolution, bounded official-source enrichment, bounded role/theme reverse
+discovery for previously unseen issuers, primary exposure facts, broad
+screens with explicit feasibility states, durable theme memory, and separate research, portfolio
+suitability, and action-authorization states.
+
+The post-review runtime integration closes the local producer-to-ledger gap: the normal collector
+records the exact V2 evidence packet, persists canonical theme revisions, schedules eligible due
+nominations as bounded research-only follow-ups, and proves actual nonempty, honestly empty,
+overlapping-query duplicate, restart, and cross-run item-reuse shapes through a disposable
+PostgreSQL database and the read-only capability verifier. The action lane remains empty while the
+protected issuer-valuation ledger is unavailable.
+
+The September 8 morning receipt remains necessary operational evidence for the currently deployed
+chain. It cannot close V1-C3 by itself. Local implementation and acceptance are complete through
+Task 10; final exact-candidate review, protected backend release, native Sites publication, and normal scheduled
+production receipts for the new discovery capability remain. A valid quiet run may contain no
+positive suggestion, but it must prove the complete planned source/task lineage and distinguish no
+event from failure, truncation, quota exhaustion, and unsupported capability.
+
 ## Release boundary
 
 Final fix wave Track C restored every audited migration's exact bytes and moved the required
@@ -97,9 +199,10 @@ retains the documented `20260907` file hash `79aeb682eba5ddaa2832d72c8ffea24caa2
 an actual disposable PostgreSQL upgrade and idempotent retry passed.
 
 The protected CLI now uses one encrypted, per-component capture/mutation/readback/recovery engine
-for the runtime role, managed secrets, gateway, dashboard API, Telegram function, and owner Site.
-The final verifier requires downloaded artifact bytes and exact identities for all four deployed
-artifacts. The configured private Site manifest is unchanged. The repository-native adapter now
+for the runtime role, managed secrets, gateway, dashboard API, and Telegram function. The final
+backend verifier requires downloaded artifact bytes and exact identities for all three deployed
+Edge functions plus exact GitHub repository/workflow/event/branch/run/artifact identities and
+archive digests. The configured private Site manifest is unchanged. The repository-native adapter now
 implements transactional runtime-role restoration, recoverable managed-secret rotation, exact
 downloaded Edge bytes/configuration, and committed encrypted recovery journals. Recovery reads
 current state first and never restores/deletes/unsets an attempted component that did not change.
@@ -109,11 +212,13 @@ recovery journal unresolved without overwriting another actor's change.
 Supabase restoration preserves prior bytes/configuration and records both the original captured
 identity and the newly allocated restoration version; the existing function ID must stay exact.
 It does not resurrect the old version number or accept a foreign ID with matching bytes.
-Final Astra findings 3 and 4 are locally implemented. For finding 5, GPT-6 Astra accepted the
-pre-mutation Sites block as the correct local safety boundary because the native owner-scoped Sites
-connector has no callable GitHub Actions management transport. Owner-operated Sites publication is
-now complete. The approved split-trust gate combined its fresh native receipt with protected GitHub
-readback of Supabase, Auth, function bytes, and API behavior in run `34055419086`.
+GitHub Actions has no native Sites connector, so it receives no Sites write credential. The protected
+workflow releases and recovers only the backend. The owner then publishes the exact same candidate
+through the native owner-scoped Sites connector. `scripts/verify_native_site_release.py` compares the
+local package with the protected build but deliberately leaves `owner_site` pending; only fresh direct
+connector access, version, deployment, and retained-prior-version observations plus authenticated live
+asset readback can close it. Historical Site v9 and protected run `34055419086` remain
+evidence for the earlier runtime; they cannot be relabeled as receipts for this market-wide candidate.
 
 The exact Track C range received independent approval after both Important recovery findings were
 fixed. The final consolidated gate, GPT-6 Astra scoped re-review, historical exact-main CI,
@@ -215,9 +320,24 @@ V1-C2 remains reopened until scheduled receipt evidence passes.
 - [x] Server-owned ranking inputs, fail-closed unknown values, packet construction, and scheduled
   lifecycle controls are implemented and task-reviewed locally.
 - [x] Complete exact-candidate CI and protected runtime attestation (`34055295512`, `34055419086`).
-- [ ] Observe one non-duplicated scheduled chain.
+- [x] Approve the GPT-6 Astra-reviewed market-wide thematic discovery design and implementation plan.
+- [ ] Observe the current deployed chain on its normal schedule; treat this as operational evidence,
+  not proof of the new discovery capability.
+- [x] Implement a capability-aware fair planner, official-source cursors, and a dated U.S.-listed
+  security reference without adding paid or metered providers.
+- [x] Resolve ticker-independent events, public/private entities, securities, value-chain paths, and
+  primary business-exposure evidence outside the owner's portfolio and watchlist.
+- [x] Preserve research candidates when portfolio suitability is unavailable while keeping action
+  authorization fail-closed.
+- [x] Pass the magnet, aluminum, data-center energy, uranium, robotics, adversarial, capacity,
+  recovery, and held-out-sector acceptance scenarios without hardcoded company lists.
+- [x] Replace the separate 2026-only calendar copies with one reviewed NYSE source synchronized
+  through the official published 2028 holiday and early-close schedule; fail closed afterward.
+- [ ] Merge the exact reviewed candidate through protected main, complete the protected backend
+  release, publish and read back the exact candidate through native Sites, and retain normal scheduled
+  capability receipts without a duplicate run.
 
-V1-C3 is reopened.
+V1-C3 remains open for exact-candidate release and normal scheduled production evidence.
 
 ### V1-C4 — Personal comparison brain
 
@@ -270,7 +390,15 @@ V1-C6 is reopened and the release remains no-go for trusted use.
 ## Immediate next gates
 
 1. Preserve the completed schema and isolated recovery gates; do not rerun them.
-2. Observe the next existing scheduled receipt without triggering a duplicate.
+2. Observe and preserve the September 8 morning receipt without triggering a duplicate.
+3. Let the existing verification heartbeat reconcile the later September 8 intraday/post-market
+   evidence and the September 11 Friday evidence.
+4. Execute the approved market-wide discovery implementation plan and pass its local capability,
+   safety, calendar, recovery, and capacity gates.
+5. Preserve the CLEAN Sol and flagship reviews at exact executable code `f7e8236`; complete
+   protected-main CI, protected backend release, fresh direct native Sites observation with
+   authenticated live-file parity, and normal scheduled discovery receipts.
+6. Close V1-C2 through V1-C6 and the active V1 goal only when their own receipt gates pass.
 
 ## Site-only UI releases — completed 2026-09-06
 
@@ -314,10 +442,12 @@ the allowed and Site origins are the live private Site URL, the current gateway 
 its rollback source is bound to `dceb76c9a32a94a16e0cdc0f9dab602f465ef186` with source SHA-256
 `955f98817ad5e90a9d33b2a537282209d9d8af466ec757c96719dd73aadd1063`.
 
-The original mutation workflow remains correctly blocked because `NativeReleaseAdapter.site = None`
-and its runtime-role planner would rotate credentials. It remains the required path for a future
-backend or multi-component release. It was not needed for the unchanged-runtime attestation or the
-later bounded Site-only UI release.
+The protected mutation workflow now has a concrete backend-only transport for migrations, the
+runtime role, managed secrets, and all three Edge functions. It authenticates the exact reviewed
+candidate before checkout or production-secret exposure and retains encrypted recovery state before
+mutation. Native Sites publication remains a separate owner-scoped step and receipt because GitHub
+Actions has no native Sites connector. The unchanged-runtime attestation and Site-only UI releases
+remain historical evidence for their own candidates.
 
 The approved one-time workflow used two independent trust domains: a fresh, bounded native Sites
 receipt captured through the owner-scoped connector, and protected GitHub readback of current main,
@@ -330,8 +460,9 @@ the scheduled-chain receipt instead of rerunning this bridge. Protected run `340
 its artifact and receipt hashes are recorded in the verified checkpoint above. Do not rerun it.
 
 The formal scheduled reader in `scripts/protected_evidence.py` requires the missing restricted
-`RELEASE_READONLY_DATABASE_URL`; `scripts/verify_personal_stock_agent_v1.py` validates the persisted
-chain, original Telegram delivery or explicit suppression, and quota lineage. Never send another
+`RELEASE_READONLY_DATABASE_URL`; `scripts/verify_personal_stock_agent_v1.py` requires the protected
+backend artifact, then validates the persisted chain,
+original Telegram delivery or explicit suppression, and quota lineage. Never send another
 report to manufacture evidence. The existing one-shot heartbeat will inspect the next normal market
 session after the protected attestation; it must not dispatch a duplicate run.
 

@@ -1,9 +1,9 @@
 """Repository-native PostgreSQL/Supabase release and recovery transport.
 
-Construction performs no I/O. The production loader requires the manifest-bound
-Sites transport before any database or Supabase command. No CI Sites transport
-is configured: `site` deliberately remains None. There is no executable/env/API
-escape hatch for that missing capability.
+Construction performs no I/O. This adapter owns the protected database, runtime
+role, managed secrets, and Supabase Edge functions. Native Sites publication is
+performed separately by the owner through the Sites connector and yields its own
+exact-source receipt; GitHub Actions never receives a Sites write credential.
 
 Snapshots contain base64 file bytes and recoverable credentials. They belong in
 the authenticated encrypted journal, never stdout or a public release receipt.
@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import base64
 import copy
+from datetime import datetime, timezone
 import hashlib
 import hmac
 import json
@@ -29,8 +30,8 @@ import psycopg
 from psycopg import sql
 from psycopg.rows import dict_row
 
-from scripts.release_components import (FUNCTIONS, MANAGED_SECRETS, ROOT, canonical,
-    capture_managed_secrets, require_site_transport, same_content, validate_snapshot)
+from scripts.release_components import (BACKEND_COMPONENTS, FUNCTIONS, MANAGED_SECRETS, ROOT, canonical,
+    capture_managed_secrets, same_content, validate_snapshot)
 from scripts.provision_dashboard_runtime_role import RUNTIME_ROLE, PRIVILEGE_ROLE, runtime_url
 
 CLI = ["npx", "--yes", "supabase@2.116.0"]
@@ -90,17 +91,18 @@ def literal_secret_values(values):
 
 
 class NativeReleaseAdapter:
-    site = None
-
     def __init__(self, context, *, runner=None, connector=None, environment=None, repo_root=ROOT):
         self.context = dict(context)
         self.runner = runner or subprocess.run
         self.connector = connector or psycopg.connect
         self.environment = dict(os.environ if environment is None else environment)
         self.root = Path(repo_root)
-        self.known_secrets = None  # parse only after the Sites gate
+        self.known_secrets = None  # parse only after candidate trust and backend preflight
         self.original = {}
         self.readbacks = {}
+        self.captured_at = None
+        self.last_journal = None
+        self.static_receipt = None
 
     def _project(self):
         project = self.context.get("project_ref", "")
@@ -108,9 +110,13 @@ class NativeReleaseAdapter:
         return project
 
     def _command(self, args, *, cwd=None, json_output=False):
+        allowed = ("PATH", "HOME", "TMPDIR", "CI", "NO_COLOR", "NPM_CONFIG_CACHE",
+                   "XDG_CONFIG_HOME", "SUPABASE_ACCESS_TOKEN")
+        environment = {key: self.environment[key] for key in allowed
+                       if isinstance(self.environment.get(key), str)}
         result = self.runner([*CLI, *args, "--project-ref", self._project()],
             cwd=cwd or self.root, capture_output=True, text=True, check=False,
-            env={**os.environ, **self.environment})
+            env=environment)
         if result.returncode != 0:
             # CLI stderr can contain credentials, function bytes, or signed URLs.
             raise RuntimeError("protected Supabase command failed: " + " ".join(args[:2]))
@@ -205,6 +211,8 @@ class NativeReleaseAdapter:
                     "configuration": configuration, "files": {}, "values": values}
 
     def capture(self, name):
+        if not self.original:
+            self.captured_at = datetime.now(timezone.utc).isoformat()
         if name in FUNCTIONS: snapshot = self._capture_function(name)
         elif name == "runtime-role": snapshot = self._capture_role()
         elif name == "dashboard-secrets":
@@ -396,13 +404,11 @@ class NativeReleaseAdapter:
         return current["version"] == "1"
 
     def plan(self, context):
-        require_site_transport(self.root, adapter=self.site)
-        from scripts.build_owner_dashboard_static import build_static_release
         from scripts.verify_personal_stock_agent_v1 import git_files
         password = secrets.token_urlsafe(36)
         with self._connection() as connection:
             grantor = connection.execute("SELECT current_user AS name").fetchone()["name"]
-        previous_role = self.capture("runtime-role")
+        previous_role = validate_snapshot("runtime-role", self._capture_role())
         role = {"exists": True, "identity": RUNTIME_ROLE, "version": None, "files": {},
             "values": {"password_verifier": scram_verifier(password)}, "configuration": {
                 "attributes": {"rolsuper": False, "rolinherit": True, "rolcreaterole": False, "rolcreatedb": False,
@@ -422,8 +428,8 @@ class NativeReleaseAdapter:
                 "files": {path: base64.b64encode(raw).decode() for path, raw in git_files(self.root, context["candidate_sha"], f"supabase/functions/{name}").items()},
                 "configuration": {"verify_jwt": cfg["verify_jwt"], "entrypoint": function_path(cfg["entrypoint"], name),
                     "import_map": function_path(cfg["import_map"], name) if cfg.get("import_map") else None}}
-        self.static_receipt = build_static_release(context["project_ref"], context["site_origin"], repo_root=self.root, runner=self.runner)
-        candidates["owner-web-site"] = self.site.plan(context)
+        if tuple(candidates) != BACKEND_COMPONENTS:
+            raise RuntimeError("complete protected backend candidate is required")
         return candidates
 
     def retain(self, encrypted):
@@ -458,8 +464,11 @@ class NativeReleaseAdapter:
                     connection.execute(sql.SQL("REVOKE ALL ON {}.{} FROM {}").format(
                         sql.Identifier("public"), sql.Identifier(JOURNALS.split(".")[1]), sql.Identifier(role)))
             connection.execute(f"ALTER TABLE {JOURNALS} ENABLE ROW LEVEL SECURITY")
-            connection.execute(f"INSERT INTO {JOURNALS}(project_ref,candidate_sha,run_id,run_attempt,ciphertext) VALUES(%s,%s,%s,%s,%s)",
-                               (self._project(), self.context["candidate_sha"], run_id, run_attempt, encrypted))
+            row = connection.execute(f"INSERT INTO {JOURNALS}(project_ref,candidate_sha,run_id,run_attempt,ciphertext) VALUES(%s,%s,%s,%s,%s) RETURNING sequence,captured_at",
+                               (self._project(), self.context["candidate_sha"], run_id, run_attempt, encrypted)).fetchone()
+            self.last_journal = {"sequence": int(row["sequence"]), "run_id": int(run_id),
+                "run_attempt": int(run_attempt), "captured_at": row["captured_at"].isoformat(),
+                "ciphertext_sha256": hashlib.sha256(encrypted).hexdigest()}
 
     def recover_retained(self, run_id, run_attempt):
         run_id, run_attempt = str(run_id), str(run_attempt)
@@ -483,12 +492,118 @@ class NativeReleaseAdapter:
             raise RuntimeError("retained encrypted component journal identity mismatch")
         return encrypted
 
+    @staticmethod
+    def _decoded_files(snapshot):
+        return {path: base64.b64decode(raw, validate=True) for path, raw in snapshot["files"].items()}
+
+    @staticmethod
+    def _tree_sha256(files):
+        digest = hashlib.sha256()
+        for path, raw in sorted(files.items()):
+            digest.update(path.encode() + b"\0" + raw + b"\0")
+        return digest.hexdigest()
+
     def receipt(self, candidate_sha):
-        # Publication requires real immutable artifact IDs, including the Site's
-        # management-plane downloads. That final integration belongs to the
-        # absent reviewed Sites transport; never manufacture artifact receipts.
-        require_site_transport(self.root, adapter=self.site)
-        return self.site.release_receipt(candidate_sha, copy.deepcopy(self.original), copy.deepcopy(self.readbacks), self.static_receipt)
+        from scripts.verify_personal_stock_agent_v1 import git_files
+        if (candidate_sha != self.context.get("candidate_sha")
+                or not isinstance(self.captured_at, str)):
+            raise RuntimeError("protected backend receipt candidate is incomplete")
+        evidence_directory = self.context.get("evidence_directory")
+        if not isinstance(evidence_directory, str) or not evidence_directory:
+            raise RuntimeError("protected backend evidence directory is unavailable or unsafe")
+        static_receipt_path = self.context.get("static_build_receipt")
+        if not isinstance(static_receipt_path, str):
+            raise RuntimeError("candidate static build receipt is unavailable")
+        try:
+            static_receipt = json.loads(Path(static_receipt_path).read_text())
+        except (OSError, ValueError) as error:
+            raise RuntimeError("candidate static build receipt is unavailable") from error
+        static_root = self.root / "dist"
+        static_bytes = {path.relative_to(static_root).as_posix(): path.read_bytes()
+                        for path in sorted(static_root.rglob("*")) if path.is_file() and not path.is_symlink()}
+        static_files = {path: hashlib.sha256(raw).hexdigest() for path, raw in static_bytes.items()}
+        if (not isinstance(static_receipt, dict) or static_receipt.get("status") != "verified"
+                or static_receipt.get("candidate_sha") != candidate_sha
+                or static_receipt.get("files") != static_files or not static_files
+                or static_receipt.get("build_sha256") != self._tree_sha256(static_bytes)
+                or any(path.is_symlink() for path in static_root.rglob("*"))):
+            raise RuntimeError("candidate static build receipt differs from exact build bytes")
+        static_receipt["source_sha256"] = self._tree_sha256(
+            git_files(self.root, candidate_sha, "apps/web")
+        )
+        self.static_receipt = static_receipt
+        evidence_parent = Path(evidence_directory)
+        evidence_root = evidence_parent / "backend-component-evidence"
+        if (not evidence_parent.is_absolute() or not evidence_parent.is_dir()
+                or evidence_parent.is_symlink() or evidence_root.exists()):
+            raise RuntimeError("protected backend evidence directory is unavailable or reused")
+        evidence_root.mkdir(mode=0o700)
+        functions = []
+        readbacks = []
+        manifest_components = []
+        for name in FUNCTIONS:
+            current = validate_snapshot(name, self.readbacks.get(name) or self.capture(name))
+            expected = git_files(self.root, candidate_sha, f"supabase/functions/{name}")
+            files = self._decoded_files(current)
+            if files != expected:
+                raise RuntimeError("protected backend readback differs from candidate bytes")
+            deployed_hash = self._tree_sha256(files)
+            deployed_prefix = f"deployed/{name}"
+            for path, raw in files.items():
+                target = evidence_root / deployed_prefix / path
+                target.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+                target.write_bytes(raw)
+                target.chmod(0o600)
+            prior = validate_snapshot(name, self.original[name])
+            prior_row = {"exists": prior["exists"], "deployment_id": prior["identity"],
+                "version": prior["version"], "configuration": prior["configuration"],
+                "captured_at": self.captured_at, "artifact_prefix": None, "source_sha256": None}
+            if prior["exists"]:
+                prior_files = self._decoded_files(prior)
+                prior_prefix = f"prior/{name}"
+                for path, raw in prior_files.items():
+                    target = evidence_root / prior_prefix / path
+                    target.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+                    target.write_bytes(raw)
+                    target.chmod(0o600)
+                prior_row.update(artifact_prefix=prior_prefix, source_sha256=self._tree_sha256(prior_files))
+            functions.append({"function": name, "deployment_id": current["identity"], "git_sha": candidate_sha,
+                "function_version": int(current["version"]), "source_sha256": deployed_hash})
+            readbacks.append({"component": name, "candidate_sha": candidate_sha,
+                "deployment_id": current["identity"], "version": current["version"],
+                "configuration": current["configuration"], "origin": "management_plane_download",
+                "artifact_prefix": deployed_prefix, "deployed_sha256": deployed_hash, "prior": prior_row})
+            manifest_components.append({"component": name, "deployed_prefix": deployed_prefix,
+                "deployed_sha256": deployed_hash, "prior_prefix": prior_row["artifact_prefix"],
+                "prior_sha256": prior_row["source_sha256"]})
+        manifest = {"format": "stocks-protected-backend-evidence-v1", "candidate_sha": candidate_sha,
+            "project_ref": self._project(), "release_run_id": int(self.context["release_run_id"]),
+            "release_run_attempt": int(self.context["release_run_attempt"]), "components": manifest_components}
+        manifest_raw = canonical(manifest)
+        (evidence_root / "manifest.json").write_bytes(manifest_raw)
+        (evidence_root / "manifest.json").chmod(0o600)
+        return {"candidate_sha": candidate_sha, "functions": functions,
+            "static_assets": copy.deepcopy(self.static_receipt),
+            "component_readbacks": readbacks,
+            "backend_evidence": {"directory": str(evidence_root),
+                "manifest_sha256": hashlib.sha256(manifest_raw).hexdigest()}}
+
+    def journal_receipt(self):
+        if not isinstance(self.last_journal, dict):
+            raise RuntimeError("protected recovery journal receipt is unavailable")
+        return copy.deepcopy(self.last_journal)
+
+    def finalize_backend_evidence(self, receipt, recovery):
+        root = Path(receipt["backend_evidence"]["directory"])
+        if not root.is_dir() or set(recovery) != {
+            "sequence", "run_id", "run_attempt", "captured_at", "ciphertext_sha256"
+        }:
+            raise RuntimeError("protected backend recovery evidence is malformed")
+        raw = canonical(recovery)
+        target = root / "recovery-metadata.json"
+        target.write_bytes(raw)
+        target.chmod(0o600)
+        receipt["backend_evidence"]["recovery_metadata_sha256"] = hashlib.sha256(raw).hexdigest()
 
     def artifact(self, artifact_id):
         from scripts.protected_evidence import GitHubProductionDataSource

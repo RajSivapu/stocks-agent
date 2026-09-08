@@ -1,4 +1,5 @@
 import copy
+from datetime import date, datetime, timedelta, timezone
 import hashlib
 import json
 import shlex
@@ -10,18 +11,634 @@ import socket
 import subprocess
 import tarfile
 import tempfile
+import uuid
 
 import psycopg
 from psycopg.rows import dict_row
 import pytest
 
-from scripts.export_recovery_bundle import _validated_records, export_recovery_bundle, decrypt_verified
+from scripts.export_recovery_bundle import (
+    REQUIRED_RECOVERY_RECORDS,
+    _validate_theme_memory_v2_lineage,
+    _validated_records,
+    decrypt_verified,
+    export_recovery_bundle,
+)
 from scripts.protected_evidence import RECOVERY_SQL
 from scripts.verify_recovery_bundle import restore_recovery_records, verify_recovery_bundle
+from lib.intelligence.exposure import (
+    FilingEvidence,
+    IssuerExposureBinding,
+    extract_exposure_facts,
+)
+from lib.intelligence.universe import (
+    reference_manifest_semantic_document,
+    security_revision_semantic_document,
+)
+from lib.intelligence.themes import (
+    revise_theme_episode,
+    theme_episode_v2_anchor_document,
+    theme_episode_v2_episode_id,
+    theme_episode_v2_persistence_document,
+    theme_episode_v2_revision_id,
+)
+
+
+EXPOSURE_VECTORS = json.loads(
+    (Path(__file__).parent / "fixtures/exposure_fact_hash_vectors.json").read_text()
+)
 
 
 def digest(value):
     return hashlib.sha256(json.dumps(value, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+
+
+def _theme_v2_recovery_records():
+    records = _research_v2_recovery_records()
+    run_id = records["intelligence_runs"][0]["id"]
+    source = records["source_items"][0]
+    receipt = records["source_receipts"][0]
+    observed_at = receipt["retrieved_at"]
+    observed = datetime.fromisoformat(observed_at.replace("Z", "+00:00"))
+    event = {
+        "theme_id": "critical_minerals_magnets",
+        "theme_mechanism": "domestic_magnet_capacity",
+        "subject_identity": "entity:niron-magnetics",
+        "jurisdiction": "US",
+        "effective_period": {"start": "2026-09-01", "end": "2026-12-31"},
+        "authoritative_id": "award:doe:MAGNET-2026-17",
+        "observed_at": observed_at,
+        "source_evidence": [{
+            "evidence_id": source["id"],
+            "story_identity": source["upstream_item_id"],
+            "polarity": "supporting",
+        }],
+        "investigated_entity_ids": ["entity:niron-magnetics"],
+        "missing_questions": ["Which public suppliers have current primary exposure?"],
+        "invalidation_conditions": ["Program award is rescinded"],
+        "next_review_at": (observed + timedelta(days=3)).isoformat().replace("+00:00", "Z"),
+        "expires_at": (observed + timedelta(days=20)).isoformat().replace("+00:00", "Z"),
+    }
+    row = revise_theme_episode(None, event, origin_run_id=run_id).to_persistence_row()
+    row["created_at"] = observed_at
+    records["theme_episode_revisions_v2"] = [row]
+    return records
+
+
+def _rehash_theme_v2_row(row, *, anchor=False):
+    canonical = lambda value: json.dumps(
+        value, ensure_ascii=False, separators=(",", ":"), sort_keys=True,
+    )
+    if anchor:
+        row["anchor_hash"] = hashlib.sha256(canonical(
+            theme_episode_v2_anchor_document(row),
+        ).encode()).hexdigest()
+        row["episode_id"] = theme_episode_v2_episode_id(row["anchor_hash"])
+    row["content_hash"] = hashlib.sha256(canonical(
+        theme_episode_v2_persistence_document(row),
+    ).encode()).hexdigest()
+    row["revision_id"] = theme_episode_v2_revision_id(
+        row["episode_id"], row["revision"], row["content_hash"],
+    )
+
+
+def _standalone_theme_v2_lineage():
+    run_ids = [
+        "11111111-1111-4111-8111-111111111111",
+        "22222222-2222-4222-8222-222222222222",
+        "33333333-3333-4333-8333-333333333333",
+    ]
+    evidence_ids = [
+        "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+        "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+        "cccccccc-cccc-4ccc-8ccc-cccccccccccc",
+    ]
+    receipt_ids = [
+        "dddddddd-dddd-4ddd-8ddd-dddddddddddd",
+        "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee",
+        "ffffffff-ffff-4fff-8fff-ffffffffffff",
+    ]
+    observed = [
+        "2026-09-05T19:36:00.000Z",
+        "2026-09-06T19:36:00.000Z",
+        "2026-09-07T19:36:00.000Z",
+    ]
+    base = {
+        "theme_id": "critical_minerals_magnets",
+        "theme_mechanism": "domestic_magnet_capacity",
+        "subject_identity": "entity:niron-magnetics",
+        "jurisdiction": "US",
+        "effective_period": {"start": "2026-09-01", "end": "2026-12-31"},
+        "authoritative_id": "award:doe:MAGNET-2026-17",
+        "investigated_entity_ids": ["entity:niron-magnetics"],
+        "missing_questions": ["Which public suppliers have current primary exposure?"],
+        "invalidation_conditions": ["Program award is rescinded"],
+        "next_review_at": "2026-09-08T19:36:00.000Z",
+        "expires_at": "2026-09-25T19:36:00.000Z",
+    }
+
+    def event(index, *, story=None, polarity="supporting"):
+        return {
+            **base,
+            "observed_at": observed[index],
+            "source_evidence": [{
+                "evidence_id": evidence_ids[index],
+                "story_identity": story or f"independent-story-{index}",
+                "polarity": polarity,
+            }],
+        }
+
+    first = revise_theme_episode(None, event(0), origin_run_id=run_ids[0])
+    second = revise_theme_episode(first, event(1), origin_run_id=run_ids[1])
+    result = {
+        "intelligence_runs": [{"id": run_id} for run_id in run_ids],
+        "packets": [{
+            "id": str(uuid.uuid5(uuid.UUID(run_id), "theme-packet")),
+            "run_id": run_id,
+            "status": "completed",
+            "packet": {"contract_version": 2, "evidence": [{"item_id": evidence_id}]},
+        } for run_id, evidence_id in zip(run_ids, evidence_ids)],
+        "reference_manifests": [],
+        "source_items": [{
+            "id": evidence_id, "source_receipt_id": receipt_id,
+        } for evidence_id, receipt_id in zip(evidence_ids, receipt_ids)],
+        "source_receipts": [{
+            "id": receipt_id, "run_id": run_id, "status": "succeeded",
+            "retrieved_at": seen,
+        } for receipt_id, run_id, seen in zip(receipt_ids, run_ids, observed)],
+        "intelligence_run_items": [{
+            "source_item_id": evidence_id, "source_receipt_id": receipt_id,
+            "run_id": run_id, "disposition": "accepted",
+        } for evidence_id, receipt_id, run_id in zip(evidence_ids, receipt_ids, run_ids)],
+        "theme_episode_revisions_v2": [
+            first.to_persistence_row(), second.to_persistence_row(),
+        ],
+        "reviewer_identity_receipts_v2": [],
+        "research_nomination_requests_v2": [],
+        "research_nominations_v2": [],
+        "research_nomination_lifecycle_v2": [],
+        "intelligence_memory_context_bindings_v2": [],
+    }
+    return result, first, second, event
+
+
+@pytest.mark.parametrize(("field", "replacement"), [
+    ("anchor_hash", "0" * 64),
+    ("content_hash", "0" * 64),
+    ("episode_id", "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"),
+    ("revision_id", "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb"),
+    ("supporting_source_ids", []),
+    ("opposing_source_ids", ["cccccccc-cccc-4ccc-8ccc-cccccccccccc"]),
+    ("added_source_ids", ["cccccccc-cccc-4ccc-8ccc-cccccccccccc"]),
+    ("state", "active"),
+])
+def test_recovery_rejects_forged_theme_v2_semantics(field, replacement):
+    records = _theme_v2_recovery_records()
+    records["theme_episode_revisions_v2"][0][field] = replacement
+
+    with pytest.raises(ValueError, match="theme memory v2"):
+        _validated_records(records)
+
+
+@pytest.mark.parametrize(("field", "replacement", "anchor"), [
+    ("first_seen", "2026-09-05T19:36:00+00:00", False),
+    ("effective_period_start", "2026-9-1", True),
+    ("identity_version", 3, True),
+    ("origin_run_id", "99999999-9999-4999-8999-999999999999", False),
+    ("predecessor_revision_id", "99999999-9999-4999-8999-999999999999", False),
+])
+def test_recovery_rejects_rehashed_theme_v2_identity_time_and_lineage_substitutions(
+        field, replacement, anchor):
+    records = _theme_v2_recovery_records()
+    row = records["theme_episode_revisions_v2"][0]
+    row[field] = replacement
+    if field == "predecessor_revision_id":
+        row["revision"] = 2
+        row["predecessor_content_hash"] = "d" * 64
+    _rehash_theme_v2_row(row, anchor=anchor)
+
+    with pytest.raises(ValueError, match="theme memory v2"):
+        _validated_records(records)
+
+
+def test_restore_rejects_forged_theme_v2_before_any_database_mutation():
+    records = _theme_v2_recovery_records()
+    records["theme_episode_revisions_v2"][0]["content_hash"] = "0" * 64
+
+    class UnusedConnection:
+        def transaction(self):
+            raise AssertionError("forged theme memory reached restore mutation")
+
+    with pytest.raises(ValueError, match="theme memory v2"):
+        restore_recovery_records(UnusedConnection(), records, isolated_guard=True)
+
+
+def test_theme_v2_recovery_query_preserves_canonical_hashed_timestamps():
+    query = RECOVERY_SQL["theme_episode_revisions_v2"]
+    for field in ("first_seen", "last_seen", "next_review_at", "expires_at"):
+        assert (
+            f"to_char({field} AT TIME ZONE 'UTC',"
+            "'YYYY-MM-DD\"T\"HH24:MI:SS.MS\"Z\"') "
+            f"AS {field}"
+        ) in query
+    assert (
+        "to_char(retrieved_at AT TIME ZONE 'UTC',"
+        "'YYYY-MM-DD\"T\"HH24:MI:SS.MS\"Z\"') AS retrieved_at"
+    ) in RECOVERY_SQL["source_receipts"]
+
+
+def test_recovery_accepts_valid_cross_run_paraphrase_repeat_and_correction_history():
+    records, first, second, event = _standalone_theme_v2_lineage()
+    _validate_theme_memory_v2_lineage(records)
+    assert second.episode_id == first.episode_id
+    assert second.revision == 2
+    assert revise_theme_episode(
+        first, {**event(0), "wording": "Same evidence, paraphrased"},
+        origin_run_id="22222222-2222-4222-8222-222222222222",
+    ) is first
+
+    correction = revise_theme_episode(
+        first,
+        event(1, story="independent-story-0", polarity="opposing"),
+        origin_run_id="22222222-2222-4222-8222-222222222222",
+    )
+    records["theme_episode_revisions_v2"] = [
+        first.to_persistence_row(), correction.to_persistence_row(),
+    ]
+    _validate_theme_memory_v2_lineage(records)
+    assert correction.opposing_source_ids == (
+        "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+    )
+
+
+@pytest.mark.parametrize(("field", "replacement"), [
+    ("predecessor_content_hash", "d" * 64),
+    ("first_seen", "2026-09-06T19:36:00.000Z"),
+    ("last_seen", "2026-09-05T19:36:00.000Z"),
+    ("added_source_ids", ["aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"]),
+    ("origin_run_id", "33333333-3333-4333-8333-333333333333"),
+])
+def test_recovery_rejects_rehashed_theme_v2_predecessor_source_and_time_substitution(
+        field, replacement):
+    records, _first, _second, _event = _standalone_theme_v2_lineage()
+    successor = records["theme_episode_revisions_v2"][1]
+    successor[field] = replacement
+    _rehash_theme_v2_row(successor)
+
+    with pytest.raises(ValueError, match="theme memory v2"):
+        _validate_theme_memory_v2_lineage(records)
+
+
+def test_recovery_rejects_two_rehashed_successors_for_one_predecessor():
+    records, first, _second, event = _standalone_theme_v2_lineage()
+    competing = revise_theme_episode(
+        first, event(2, polarity="opposing"),
+        origin_run_id="33333333-3333-4333-8333-333333333333",
+    )
+    records["theme_episode_revisions_v2"].append(competing.to_persistence_row())
+
+    with pytest.raises(ValueError, match="theme memory v2"):
+        _validate_theme_memory_v2_lineage(records)
+
+
+def test_recovery_rejects_rehashed_theme_v2_predecessor_cycle():
+    records, _first, second, _event = _standalone_theme_v2_lineage()
+    initial = records["theme_episode_revisions_v2"][0]
+    initial.update(
+        revision=3,
+        predecessor_revision_id=second.revision_id,
+        predecessor_content_hash=second.content_hash,
+    )
+    _rehash_theme_v2_row(initial)
+
+    with pytest.raises(ValueError, match="theme memory v2"):
+        _validate_theme_memory_v2_lineage(records)
+
+
+def _research_v2_recovery_records():
+    records = typed_exposure_recovery_records()
+    packet_row = records["packets"][0]
+    run_id = packet_row["run_id"]
+    fact = records["exposure_facts"][0]
+    fact_value = fact["fact"]["value"]
+    security = next(
+        row for row in records["security_reference_revisions"]
+        if row["id"] == fact["security_revision_id"]
+    )
+    manifest = next(
+        row for row in records["reference_manifests"]
+        if row["id"] == security["manifest_id"]
+    )
+    supporting_checkpoint = next(
+        row for row in records["collection_checkpoints"]
+        if row["source_receipt_id"] == fact_value["source_receipt_id"]
+    )
+    supporting_item = supporting_checkpoint["payload"]["items"][0]
+    support_item_id = fact_value["source_item_id"]
+    support_receipt_id = fact_value["source_receipt_id"]
+
+    evidence = [
+        {
+            "authority": supporting_item["authority"],
+            "canonical_url": supporting_item["source_url"],
+            "claim_type": "issuer_exposure",
+            "content_hash": supporting_item["content_hash"],
+            "effective_at": supporting_item["effective_at"],
+            "item_id": support_item_id,
+            "normalized_text": supporting_item["normalized_text"],
+            "published_at": supporting_item["published_at"],
+            "reporting_at": supporting_item["reporting_at"],
+            "retrieved_at": supporting_item["retrieved_at"],
+            "source_identity": {
+                "provider": supporting_item["provider"],
+                "receipt_id": support_receipt_id,
+                "upstream_item_id": supporting_item["upstream_item_id"],
+            },
+        },
+    ]
+    observed_at = "2026-09-05T19:40:00.000Z"
+    lineage = {
+        "cash_revision": None,
+        "evidence_receipt_ids": {
+            support_item_id: support_receipt_id,
+        },
+        "observed_at": observed_at,
+        "policy_version": packet_row["policy_version"],
+        "portfolio_revision": None,
+        "quote_as_of": None,
+        "quote_expires_at": None,
+        "quote_receipt_id": None,
+        "reference_expires_at": "2026-09-06T19:40:00.000Z",
+        "reference_manifest_id": manifest["id"],
+        "reference_revision": manifest["revision"],
+        "run_id": run_id,
+        "security_revision_id": security["id"],
+    }
+    suitability_body = {
+        "component_scores": {
+            "concentration_penalty": "0.000000", "duplication_penalty": "0.000000",
+            "liquidity": "0.000000", "portfolio_relevance": "0.000000",
+        }, "lineage": lineage,
+        "missing_reasons": ["valuation_missing"], "state": "unknown",
+        "veto_reasons": [],
+    }
+    suitability = {
+        **suitability_body,
+        "evaluation_hash": digest(suitability_body),
+    }
+    candidate_body = {
+        "adverse_paths": [],
+        "candidate_key": security["security_id"],
+        "entity_id": security["entity_id"],
+        "event_ids": fact_value["event_ids"],
+        "evidence": [
+            {"claim_type": "issuer_exposure", "item_id": support_item_id,
+             "relationship_eligible": True, "role": "supporting"},
+        ],
+        "exposure_fact_ids": [fact["id"]],
+        "limitations": ["valuation_missing"],
+        "priority_components": {
+            "authority_corroboration": "0.000000", "exposure": "1.000000",
+            "materiality": "0.000000", "recency": "0.000000",
+        },
+        "priority_score": "1.000000",
+        "research_state": "exposure_supported",
+        "roles": [fact_value["role"]],
+        "security_id": security["security_id"],
+        "suitability": suitability,
+        "theme_ids": ["magnets"],
+        "ticker": security["ticker"],
+    }
+    candidate = {**candidate_body, "candidate_hash": digest(candidate_body)}
+    packet = {
+        "action_candidates": [], "contract_version": 2,
+        "coverage": {"complete_market_coverage": False, "mode": "bounded"},
+        "evidence": evidence, "execution_allowed": False,
+        "limitations": ["valuation_missing"], "observed_at": observed_at,
+        "omissions": [], "policy_version": packet_row["policy_version"],
+        "research_candidates": [candidate], "run_id": run_id,
+    }
+    packet_row.update(
+        candidate_count=1, evidence_count=1, packet=packet, packet_hash=digest(packet),
+    )
+    supporting_checkpoint["payload"]["receipt"]["expires_at"] = (
+        "2026-09-06T19:36:00.000Z"
+    )
+    run_item_id = str(uuid.uuid5(
+        uuid.UUID(run_id), f"run-source:{support_item_id}:{support_receipt_id}",
+    ))
+    event_id = candidate["event_ids"][0]
+    records["source_receipts"] = [{
+        "id": support_receipt_id,
+        "run_id": run_id,
+        "reservation_id": supporting_checkpoint["payload"]["receipt"]["reservation_id"],
+        "provider": supporting_item["provider"],
+        "status": "succeeded",
+        "cache_key": supporting_checkpoint["cache_key"],
+        "requested_window": supporting_checkpoint["request_window"],
+        "retrieved_at": supporting_item["retrieved_at"],
+        "expires_at": "2026-09-06T19:36:00.000Z",
+        "request_cost": 1,
+        "upstream_remaining": None,
+        "returned_count": 1,
+        "accepted_count": 1,
+        "duplicate_count": 0,
+        "dropped_count": 0,
+        "error": None,
+        "response_hash": supporting_checkpoint["payload"]["receipt"]["response_hash"],
+        "created_at": supporting_checkpoint["created_at"],
+    }]
+    records["source_items"] = [{
+        "id": support_item_id,
+        "source_receipt_id": support_receipt_id,
+        "provider": supporting_item["provider"],
+        "upstream_item_id": supporting_item["upstream_item_id"],
+        "canonical_url": supporting_item["source_url"],
+        "published_at": supporting_item["published_at"],
+        "effective_at": supporting_item["effective_at"],
+        "title": supporting_item["title"],
+        "normalized_text": supporting_item["normalized_text"],
+        "canonical_content": supporting_item["canonical_content"],
+        "content_hash": supporting_item["content_hash"],
+        "metadata": {**supporting_item["metadata"], "authority": supporting_item["authority"]},
+        "created_at": supporting_checkpoint["created_at"],
+    }]
+    records["intelligence_run_items"] = [{
+        "id": run_item_id, "run_id": run_id, "source_item_id": support_item_id,
+        "source_receipt_id": support_receipt_id, "disposition": "accepted",
+        "drop_reason": None, "created_at": supporting_checkpoint["created_at"],
+    }]
+    records["source_item_provenance"] = [{
+        "source_item_id": support_item_id, "provider": supporting_item["provider"],
+        "canonical_item_url": supporting_item["source_url"],
+        "request_url": supporting_item["request_url"],
+        "retrieved_at": supporting_item["retrieved_at"],
+        "reporting_at": supporting_item["reporting_at"],
+        "entity_ids": supporting_item["entity_ids"],
+        "security_ids": supporting_item["security_ids"],
+        "discovery_status": "qualified", "created_at": supporting_checkpoint["created_at"],
+    }]
+    records["run_source_item_provenance"] = [{
+        "run_item_id": run_item_id, "run_id": run_id,
+        "source_item_id": support_item_id, "source_receipt_id": support_receipt_id,
+        "provider": supporting_item["provider"], "request_url": supporting_item["request_url"],
+        "retrieved_at": supporting_item["retrieved_at"],
+        "reporting_at": supporting_item["reporting_at"],
+        "entity_ids": supporting_item["entity_ids"],
+        "security_ids": supporting_item["security_ids"],
+        "discovery_status": "qualified", "created_at": supporting_checkpoint["created_at"],
+    }]
+    event_body = {
+        "event_type": "thematic_event", "title": "Permanent magnet operating exposure",
+        "summary": "Fixture event", "occurred_at": None, "effective_at": None,
+        "materiality": "0.500000", "confidence": "0.500000",
+        "evidence_item_ids": [support_item_id],
+    }
+    records["events"] = [{
+        "id": event_id, "run_id": run_id, **event_body,
+        "content_hash": digest(event_body), "created_at": supporting_checkpoint["created_at"],
+    }]
+    ranking_body = {
+        "event_id": event_id, "candidate_key": candidate["candidate_key"],
+        "ticker": candidate["ticker"], "rank": 1,
+        "component_scores": candidate["priority_components"],
+        "total_score": candidate["priority_score"], "qualified": False,
+        "veto_reasons": candidate["suitability"]["missing_reasons"],
+        "exposure_item_ids": [support_item_id],
+    }
+    ranking_hash = digest(ranking_body)
+    records["candidate_rankings"] = [{
+        "id": str(uuid.uuid5(
+            uuid.NAMESPACE_URL, f"market-intelligence:ranking:{ranking_hash}",
+        )),
+        "run_id": run_id, **ranking_body, "content_hash": ranking_hash,
+        "created_at": supporting_checkpoint["created_at"],
+    }]
+    records["collection_completions"][0]["receipt"].update(
+        packet_id=packet_row["id"], packet_hash=packet_row["packet_hash"],
+    )
+    report = records["reports"][0]
+    report_body = {
+        "title": "WEEKLY RESEARCH", "summary": "TEST: INSUFFICIENT. No action terms approved.",
+        "full_markdown": "TEST: INSUFFICIENT. No action terms approved.",
+        "source_ids": [support_item_id], "policy_decision_ids": [], "comparison_ids": [],
+        "actionable_risk": False, "material_thesis_change": False,
+        "intraday_triggered": False, "suggestion_only": True,
+    }
+    report.update(
+        packet_id=packet_row["id"], kind="weekly", report=report_body,
+        report_hash=digest(report_body), rendered_text="TEST: INSUFFICIENT. No action terms approved.",
+    )
+    report["rendered_hash"] = hashlib.sha256(report["rendered_text"].encode()).hexdigest()
+    origin = records["report_origins"][0]
+    origin.update(
+        requested_report_id=report["id"], requested_packet_id=packet_row["id"],
+        requested_idempotency_key=report["idempotency_key"],
+        requested_report_hash=report["report_hash"],
+    )
+    records["publications"][0].update(
+        report_id=report["id"], idempotency_key=report["idempotency_key"],
+        status="suppressed", telegram_message_ids=[], telegram_accepted_at=None,
+        suppression_reason="not_actionable", attempt_count=0,
+    )
+    records["evaluation_publications"] = []
+    records["decision_evaluations"] = []
+    records["policy_comparisons"] = []
+    return records
+
+
+_REFERENCE_ENTRY_KEYS_V1 = (
+    "id", "manifest_id", "revision", "security_id", "entity_id", "ticker",
+    "exchange", "instrument_type", "eligible", "exclusion_reasons", "aliases",
+    "source_ids", "valid_from", "valid_to", "content_hash",
+)
+
+
+def _seal_reference_lineage(records, *, format_version=1):
+    manifest = records["reference_manifests"][0]
+    manifest_body = manifest["manifest"]
+    manifest_body.update({
+        "coverage_status": "scope_not_guaranteed",
+        "reference_status": "healthy",
+        "source_url": "https://www.sec.gov/files/company_tickers.json",
+        "source_retrieved_at": manifest["valid_from"],
+        "source_timestamp": manifest["valid_from"],
+        "parser_version": 1,
+        "security_count": len(records["security_reference_revisions"]),
+        "conflict_count": 0,
+        "symbol_directory_status": "disabled_pending_https_and_terms_review",
+    })
+    if format_version == 2:
+        manifest_body["format_version"] = 2
+    else:
+        manifest_body.pop("format_version", None)
+    manifest["content_hash"] = digest(reference_manifest_semantic_document(manifest))
+
+    entries = []
+    for row in sorted(records["security_reference_revisions"], key=lambda value: value["security_id"]):
+        row["semantic_encoding_version"] = format_version
+        if format_version == 1:
+            row["issuer_names"] = None
+        elif row["issuer_names"] is None:
+            row["issuer_names"] = {
+                "canonical_name": "Test Corporation",
+                "observed_names": ["Test Corporation", "Test Corporation Class A"],
+                "former_names": [{
+                    "name": "Old Test Corporation",
+                    "valid_from": "2020-01-01",
+                    "valid_to": "2025-12-31",
+                }],
+            }
+        row["content_hash"] = digest(security_revision_semantic_document(row))
+        keys = (*_REFERENCE_ENTRY_KEYS_V1, "semantic_encoding_version", "issuer_names") \
+            if format_version == 2 else _REFERENCE_ENTRY_KEYS_V1
+        entries.append({key: copy.deepcopy(row[key]) for key in keys})
+    chunk_hash = hashlib.sha256("\n".join(
+        "\x1f".join((entry["security_id"], entry["id"], entry["content_hash"]))
+        for entry in entries
+    ).encode()).hexdigest()
+    root_hash = hashlib.sha256(chunk_hash.encode()).hexdigest()
+    capability = "sec_company_tickers_universe"
+    predecessor = records["reference_finalization_seals"][0]["predecessor_manifest_id"]
+    begin_payload = {
+        "manifest": {
+            key: copy.deepcopy(value) for key, value in manifest.items()
+            if key not in {"run_id", "created_at"}
+        },
+        "capability_id": capability,
+        "chunk_count": 1,
+        "security_count": len(entries),
+        "root_hash": root_hash,
+        "predecessor_manifest_id": predecessor,
+    }
+    chunk_payload = {
+        "manifest_id": manifest["id"],
+        "chunk_index": 0,
+        "chunk_count": 1,
+        "entries": entries,
+        "chunk_hash": chunk_hash,
+    }
+    begin, chunk = records["reference_chunk_receipts"]
+    begin.update(
+        capability_id=capability, chunk_count=1, entry_count=0,
+        chunk_hash=root_hash, payload=begin_payload,
+    )
+    chunk.update(
+        capability_id=capability, chunk_count=1, entry_count=len(entries),
+        chunk_hash=chunk_hash, payload=chunk_payload,
+    )
+    records["reference_finalization_seals"][0].update(
+        chunk_count=1, security_count=len(entries), root_hash=root_hash,
+    )
+    created_at = records["reference_snapshot_memberships"][0]["created_at"]
+    records["reference_snapshot_memberships"] = [{
+        "manifest_id": manifest["id"],
+        "security_revision_id": entry["id"],
+        "security_id": entry["security_id"],
+        "ordinal": ordinal,
+        "created_at": created_at,
+    } for ordinal, entry in enumerate(entries)]
+    return records
 
 
 def recovery_records():
@@ -36,7 +653,34 @@ def recovery_records():
     completion_event = "99999999-9999-4999-8999-999999999999"
     report_request = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
     reservation = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb"
+    sec_reservation = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbc"
     source_receipt = "cccccccc-cccc-4ccc-8ccc-cccccccccccc"
+    manifest_id = "10000000-0000-4000-8000-000000000001"
+    security_revision_id = "10000000-0000-4000-8000-000000000002"
+    signals_task_id = "10000000-0000-4000-8000-000000000003"
+    theme_episode_id = "10000000-0000-4000-8000-000000000004"
+    enrich_task_id = "10000000-0000-4000-8000-000000000005"
+    exposure_fact_id = "10000000-0000-4000-8000-000000000006"
+    screen_task_id = "10000000-0000-4000-8000-000000000007"
+    nomination_id = "10000000-0000-4000-8000-000000000008"
+    reference_chunk_hash = "9" * 64
+    reference_root_hash = hashlib.sha256(reference_chunk_hash.encode()).hexdigest()
+    transfer_request_id = "10000000-0000-4000-8000-000000000009"
+    current_pin_payload = {
+        "capability_id": "sec_company_tickers_universe",
+        "binding_role": "current",
+        "manifest_id": manifest_id,
+        "reference_status": "healthy",
+        "reference_as_of": "2026-09-05T19:32:00Z",
+    }
+    transfer_envelope = {
+        "dry_run": False, "operation": "pin_discovery_reference",
+        "payload": current_pin_payload, "request_id": transfer_request_id,
+        "run_id": run, "schema_version": 1,
+    }
+    transfer_encoded = json.dumps(
+        transfer_envelope, sort_keys=True, separators=(",", ":")
+    ).encode()
     packet = {"candidates": [], "evidence": [], "coverage": {}, "limitations": [], "policy_version": 1}
     report = {"summary": "Suggestion only.", "packet_hash": digest(packet)}
     records = {
@@ -72,6 +716,183 @@ def recovery_records():
                 "timezone": "America/Chicago", "market_date": "2026-09-05", "phase": "post-market",
             }, "created_at": "2026-09-05T19:30:00Z",
         }],
+        "reference_manifests": [{
+            "id": manifest_id, "run_id": run, "reference_version": "us-listed:v1",
+            "revision": 1, "capability_version": 1, "taxonomy_version": 1,
+            "source_hash": "1" * 64, "valid_from": "2026-09-05T19:30:00Z", "valid_to": None,
+            "manifest": {"universe": "eligible_us_listed"}, "content_hash": "2" * 64,
+            "created_at": "2026-09-05T19:31:00Z",
+        }],
+        "security_reference_revisions": [{
+            "id": security_revision_id, "manifest_id": manifest_id, "run_id": run, "revision": 1,
+            "security_id": "NASDAQ:TEST", "entity_id": "sec-cik:0000000001", "ticker": "TEST",
+            "exchange": "NASDAQ", "instrument_type": "COMMON_STOCK", "eligible": True,
+            "exclusion_reasons": [], "aliases": ["Test Corp"], "source_ids": ["nasdaq-listed"],
+            "valid_from": "2026-09-05T19:30:00Z", "valid_to": None, "content_hash": "3" * 64,
+            "semantic_encoding_version": 1, "issuer_names": None,
+            "created_at": "2026-09-05T19:31:00Z",
+        }],
+        "reference_chunk_receipts": [{
+            "manifest_id": manifest_id, "run_id": run,
+            "capability_id": "sec_company_tickers_universe", "chunk_index": -1,
+            "chunk_count": 1, "entry_count": 0, "chunk_hash": reference_root_hash,
+            "predecessor_manifest_id": None, "payload": {"manifest_id": manifest_id},
+            "created_at": "2026-09-05T19:30:30Z",
+        }, {
+            "manifest_id": manifest_id, "run_id": run,
+            "capability_id": "sec_company_tickers_universe", "chunk_index": 0,
+            "chunk_count": 1, "entry_count": 1, "chunk_hash": reference_chunk_hash,
+            "predecessor_manifest_id": None,
+            "payload": {"manifest_id": manifest_id, "entries": [{"security_id": "NASDAQ:TEST"}]},
+            "created_at": "2026-09-05T19:31:00Z",
+        }],
+        "reference_finalization_seals": [{
+            "manifest_id": manifest_id, "run_id": run,
+            "capability_id": "sec_company_tickers_universe",
+            "predecessor_manifest_id": None, "chunk_count": 1,
+            "security_count": 1, "root_hash": reference_root_hash,
+            "finalized_at": "2026-09-05T19:31:30Z",
+        }],
+        "reference_snapshot_memberships": [{
+            "manifest_id": manifest_id, "security_revision_id": security_revision_id,
+            "security_id": "NASDAQ:TEST", "ordinal": 0,
+            "created_at": "2026-09-05T19:31:31Z",
+        }],
+        "reference_run_bindings": [{
+            "run_id": run, "capability_id": "sec_company_tickers_universe",
+            "manifest_id": manifest_id, "reference_status": "healthy",
+            "reference_as_of": "2026-09-05T19:32:00Z",
+            "source_retrieved_at": "2026-09-05T19:30:00Z",
+            "request_payload": {
+                "capability_id": "sec_company_tickers_universe",
+                "binding_role": "current",
+                "manifest_id": manifest_id,
+                "reference_status": "healthy",
+                "reference_as_of": "2026-09-05T19:32:00Z",
+            },
+            "reference_age_seconds": 120, "created_at": "2026-09-05T19:32:00Z",
+        }],
+        "reference_predecessor_pins": [{
+            "run_id": run, "capability_id": "sec_company_tickers_universe",
+            "manifest_id": None, "reference_status": "reference_unavailable",
+            "reference_as_of": "2026-09-05T19:29:00Z",
+            "source_retrieved_at": None, "reference_age_seconds": None,
+            "request_payload": {
+                "capability_id": "sec_company_tickers_universe",
+                "binding_role": "predecessor", "manifest_id": None,
+                "reference_status": "reference_stale",
+                "reference_as_of": "2026-09-05T19:29:00Z",
+            },
+            "created_at": "2026-09-05T19:29:00Z",
+        }],
+        "reference_transfer_requests": [{
+            "request_id": transfer_request_id, "run_id": run,
+            "operation": "pin_discovery_reference",
+            "encoded_bytes": len(transfer_encoded),
+            "request_hash": hashlib.sha256(transfer_encoded).hexdigest(),
+            "request_payload": current_pin_payload,
+            "created_at": "2026-09-05T19:32:00Z",
+        }],
+        "reference_transfer_responses": [{
+            "request_id": transfer_request_id, "run_id": run,
+            "encoded_bytes": 96, "response_hash": "d" * 64,
+            "created_at": "2026-09-05T19:32:00Z",
+        }],
+        "discovery_stage_tasks": [{
+            "id": signals_task_id, "run_id": run, "stage": "signals", "capability_id": "gdelt_theme_search",
+            "provider": "gdelt", "query_kind": "theme_search", "query_hash": "4" * 64,
+            "dependency_ids": [], "requested_window": {"start": "2026-09-05T12:00:00Z", "end": "2026-09-05T20:00:00Z"},
+            "state": "succeeded", "attempt_count": 1, "request_budget": 1,
+            "result": {
+                "cursor_key": "gdelt_theme_search:grid_modernization",
+                "theme_id": "grid_modernization",
+                "request_cursor": {
+                    "provider": "gdelt", "capability_id": "gdelt_theme_search",
+                    "completed_through": None, "active_window_start": None,
+                    "active_window_end": None, "backlog_token": None, "page": 1,
+                    "accepted_item_ids": [], "next_retry_phase": None,
+                    "continuation_token_history": [],
+                },
+                "source_cursor": {
+                    "provider": "gdelt", "capability_id": "gdelt_theme_search",
+                    "completed_through": "2026-09-05T20:00:00Z",
+                    "active_window_start": None, "active_window_end": None,
+                    "backlog_token": None, "page": 1,
+                    "accepted_item_ids": [], "next_retry_phase": None,
+                    "continuation_token_history": [],
+                },
+                "checkpoint": {
+                    "cache_key": "d" * 64,
+                    "receipt": {
+                        "provider": "gdelt", "reservation_id": reservation,
+                        "status": "succeeded", "cache_key": "d" * 64,
+                        "requested_window": {
+                            "start": "2026-09-05T12:00:00Z",
+                            "end": "2026-09-05T20:00:00Z",
+                        },
+                        "requested_limit": 20, "retrieved_at": "2026-09-05T19:40:00Z",
+                        "observed_at": "2026-09-05T19:40:00Z",
+                        "expires_at": "2026-09-05T19:55:00Z", "request_cost": 1,
+                        "upstream_remaining": None, "returned_count": 0,
+                        "accepted_count": 0, "duplicate_count": 0, "dropped_count": 0,
+                        "response_hash": "f" * 64, "error_code": None,
+                        "source_receipt_id": source_receipt,
+                        "cache_predecessor_receipt_id": None,
+                        "metadata": {
+                            "backlog_remaining": False,
+                            "capability_id": "gdelt_theme_search",
+                            "coverage_status": "success_empty",
+                            "cursor_end": "2026-09-05T20:00:00+00:00",
+                            "cursor_start": "2026-09-05T12:00:00+00:00",
+                            "next_retry_phase": "post-market", "overlap_seconds": 7200,
+                            "page": 1, "truncated": False, "exhausted": True,
+                        },
+                    },
+                },
+            },
+            "created_at": "2026-09-05T19:32:00Z", "updated_at": "2026-09-05T19:33:00Z",
+        }, {
+            "id": enrich_task_id, "run_id": run, "stage": "enrich", "capability_id": "sec_issuer_submissions",
+            "provider": "sec_edgar", "query_kind": "issuer_submissions", "query_hash": "5" * 64,
+            "dependency_ids": [signals_task_id], "requested_window": {"start": "2026-09-05T12:00:00Z", "end": "2026-09-05T20:00:00Z"},
+            "state": "succeeded", "attempt_count": 1, "request_budget": 1,
+            "result": {"exposure_fact_ids": [exposure_fact_id]},
+            "created_at": "2026-09-05T19:34:00Z", "updated_at": "2026-09-05T19:35:00Z",
+        }, {
+            "id": screen_task_id, "run_id": run, "stage": "screen", "capability_id": "finnhub_basic_financials",
+            "provider": "finnhub", "query_kind": "screener", "query_hash": "6" * 64,
+            "dependency_ids": [enrich_task_id], "requested_window": {"start": "2026-09-05T12:00:00Z", "end": "2026-09-05T20:00:00Z"},
+            "state": "succeeded", "attempt_count": 1, "request_budget": 1,
+            "result": {"research_nomination_ids": [nomination_id]},
+            "created_at": "2026-09-05T19:36:00Z", "updated_at": "2026-09-05T19:37:00Z",
+        }],
+        "theme_episode_revisions": [{
+            "id": theme_episode_id, "run_id": run, "task_id": signals_task_id,
+            "theme_id": "grid_modernization", "revision": 1,
+            "episode": {"summary": "Grid investment signals"}, "source_ids": ["gdelt:1"],
+            "valid_from": "2026-09-05T19:32:00Z", "valid_to": None, "content_hash": "7" * 64,
+            "created_at": "2026-09-05T19:33:00Z",
+        }],
+        "exposure_facts": [{
+            "id": exposure_fact_id, "run_id": run, "task_id": enrich_task_id,
+            "security_revision_id": security_revision_id, "theme_episode_revision_id": theme_episode_id,
+            "exposure_kind": "filing", "fact": {"summary": "Grid segment disclosure"},
+            "source_ids": ["sec:1"], "valid_from": "2026-09-05T19:34:00Z", "valid_to": None,
+            "content_hash": "8" * 64, "created_at": "2026-09-05T19:35:00Z",
+        }],
+        "research_nominations": [{
+            "id": nomination_id, "run_id": run, "task_id": screen_task_id,
+            "security_revision_id": security_revision_id, "theme_episode_revision_id": theme_episode_id,
+            "exposure_fact_ids": [exposure_fact_id], "state": "nominated",
+            "rationale": {"summary": "Research candidate only"},
+            "created_at": "2026-09-05T19:37:00Z", "updated_at": "2026-09-05T19:37:00Z",
+        }],
+        "theme_episode_revisions_v2": [],
+        "reviewer_identity_receipts_v2": [],
+        "research_nomination_requests_v2": [],
+        "research_nominations_v2": [],
+        "research_nomination_lifecycle_v2": [],
+        "intelligence_memory_context_bindings_v2": [],
         "intelligence_run_events": [
             {"id": started_event, "run_id": run, "status": "started", "detail": {},
              "created_at": "2026-09-05T19:30:00Z"},
@@ -82,14 +903,40 @@ def recovery_records():
             "id": reservation, "run_id": run, "provider": "gdelt", "market_date": "2026-09-05",
             "phase": "post-market", "reserved_requests": 1, "cache_keys": ["d" * 64],
             "created_at": "2026-09-05T19:30:00Z",
+        }, {
+            "id": sec_reservation, "run_id": run, "provider": "sec_edgar",
+            "market_date": "2026-09-05", "phase": "post-market",
+            "reserved_requests": 2, "cache_keys": [],
+            "created_at": "2026-09-05T19:30:00Z",
         }],
+        "source_receipts": [],
+        "source_items": [],
+        "intelligence_run_items": [],
+        "source_item_provenance": [],
+        "run_source_item_provenance": [],
+        "events": [],
+        "candidate_rankings": [],
         "collection_checkpoints": [{
             "run_id": run, "cache_key": "d" * 64,
             "request_window": {"start": "2026-09-05T12:00:00Z", "end": "2026-09-05T20:00:00Z",
                                "timezone": "America/Chicago", "market_date": "2026-09-05", "phase": "post-market"},
             "source_receipt_id": source_receipt,
-            "payload": {"receipt": {"provider": "gdelt", "reservation_id": reservation,
-                                      "status": "succeeded", "request_cost": 1}, "items": []},
+            "payload": {"receipt": {
+                "provider": "gdelt", "reservation_id": reservation,
+                "status": "succeeded", "cache_key": "d" * 64,
+                "requested_window": {
+                    "start": "2026-09-05T12:00:00Z", "end": "2026-09-05T20:00:00Z",
+                    "timezone": "America/Chicago", "market_date": "2026-09-05",
+                    "phase": "post-market",
+                },
+                "requested_limit": 20, "retrieved_at": "2026-09-05T19:40:00Z",
+                "observed_at": "2026-09-05T19:40:00Z",
+                "expires_at": "2026-09-05T19:55:00Z", "request_cost": 1,
+                "upstream_remaining": None, "returned_count": 0, "accepted_count": 0,
+                "duplicate_count": 0, "dropped_count": 0, "response_hash": "f" * 64,
+                "error_code": None, "source_receipt_id": source_receipt,
+                "cache_predecessor_receipt_id": None,
+            }, "items": []},
             "created_at": "2026-09-05T19:40:00Z",
         }],
         "collection_checkpoint_history": [],
@@ -166,6 +1013,335 @@ def recovery_records():
         scheduled_phase="post-market", scheduled_market_date="2026-09-05",
         gateway_request_id="55555555-5555-4555-8555-555555555555",
     )
+    records = _seal_reference_lineage(records)
+    selection_descriptor = {
+        "adverse_path": False,
+        "cache_key": "a" * 64,
+        "cik": "0000000001",
+        "dependency_task_ids": [signals_task_id],
+        "entity_id": "sec-cik:0000000001",
+        "event_ids": ["90000000-0000-4000-8000-000000000001"],
+        "hypothesis_ids": ["hypothesis-1"],
+        "instrument_type": "COMMON_STOCK",
+        "issuer_entity_id": "sec-cik:0000000001",
+        "priority": 1,
+        "reference_manifest_id": manifest_id,
+        "reservation_id": sec_reservation,
+        "role": "generation",
+        "security_id": "NASDAQ:TEST",
+        "security_revision_id": security_revision_id,
+        "source_item_ids": ["gdelt:1"],
+        "source_receipt_id": source_receipt,
+        "theme_id": "grid_modernization",
+        "ticker": "TEST",
+    }
+    request_document = {
+        "request_id": enrich_task_id,
+        "task_id": enrich_task_id,
+        "stage": "enrich",
+        "provider": "sec_edgar",
+        "capability_id": "sec_issuer_submissions",
+        "descriptor": selection_descriptor,
+        "query_kind": "issuer_submissions",
+        "dependency_ids": [signals_task_id],
+        "requested_window": {
+            "start": "2026-09-05T12:00:00Z", "end": "2026-09-05T20:00:00Z",
+        },
+        "request_budget": 1,
+        "execution_allowed": False,
+    }
+    request_hash = digest(request_document)
+    next(row for row in records["discovery_stage_tasks"] if row["id"] == enrich_task_id)[
+        "query_hash"
+    ] = request_hash
+    manifest_document = {
+        "deferred_reasons": {},
+        "execution_allowed": False,
+        "phase": "post-market",
+        "provider_reservations": {
+            "gdelt_reverse": 2,
+            "sec_filing_document": 2,
+            "sec_issuer_submissions": 2,
+            "yahoo_security_quote": 2,
+        },
+        "request_descriptors": [{
+            "request_id": enrich_task_id, "descriptor_hash": request_hash,
+        }],
+        "run_id": run,
+        "schema_version": 1,
+        "selection_stage": "initial",
+    }
+    manifest_hash = digest(manifest_document)
+    selection_manifest_id = str(uuid.uuid5(
+        uuid.UUID(run), f"enrichment-selection:{manifest_hash}",
+    ))
+    records["enrichment_selection_manifests"] = [{
+        "id": selection_manifest_id,
+        "run_id": run,
+        "selection_stage": "initial",
+        "phase": "post-market",
+        "request_count": 1,
+        "provider_reservations": manifest_document["provider_reservations"],
+        "deferred_reasons": {},
+        "manifest": {
+            "manifest_id": selection_manifest_id,
+            **manifest_document,
+            "semantic_hash": manifest_hash,
+        },
+        "content_hash": manifest_hash,
+        "created_at": "2026-09-05T19:33:30Z",
+    }]
+    records["enrichment_request_descriptors"] = [{
+        "id": enrich_task_id,
+        "manifest_id": selection_manifest_id,
+        "run_id": run,
+        "task_id": enrich_task_id,
+        "provider": "sec_edgar",
+        "capability_id": "sec_issuer_submissions",
+        "query_kind": "issuer_submissions",
+        "descriptor": selection_descriptor,
+        "content_hash": request_hash,
+        "created_at": "2026-09-05T19:34:00Z",
+    }]
+    return records
+
+
+def typed_exposure_recovery_records():
+    records = recovery_records()
+    run_id = records["intelligence_runs"][0]["id"]
+    security = records["security_reference_revisions"][0]
+    manifest_id = security["manifest_id"]
+    issuer_task = records["enrichment_request_descriptors"][0]["task_id"]
+    document_task = "30000000-0000-4000-8000-000000000001"
+    source_receipt_id = "30000000-0000-4000-8000-000000000002"
+    cache_key = "8" * 64
+    response_hash = "9" * 64
+    submissions_hash = "a" * 64
+    accession = "0001193125-26-200001"
+    document = "test-20260630.htm"
+    source_url = (
+        "https://www.sec.gov/Archives/edgar/data/1/"
+        "000119312526200001/test-20260630.htm"
+    )
+    submissions_request_url = "https://data.sec.gov/submissions/CIK0000000001.json"
+    submissions_item_hash = "b" * 64
+    submissions_item_id = str(uuid.uuid5(
+        uuid.NAMESPACE_URL, f"market-source:{submissions_item_hash}",
+    ))
+    passage = (
+        "We manufacture permanent magnets at our Texas facility, which generated "
+        "12.5% of our revenue."
+    )
+    passage_hash = hashlib.sha256(passage.encode()).hexdigest()
+    canonical_content = json.dumps({"passage": passage}, sort_keys=True)
+    item_hash = hashlib.sha256(canonical_content.encode()).hexdigest()
+    source_item_id = str(uuid.uuid5(uuid.NAMESPACE_URL, f"market-source:{item_hash}"))
+    retrieved = datetime(2026, 9, 5, 19, 36, tzinfo=timezone.utc)
+    evidence = FilingEvidence(
+        issuer_cik="0000000001", accession_number=accession, form="10-Q",
+        primary_document=document, source_url=source_url,
+        source_response_hash=response_hash, submissions_response_hash=submissions_hash,
+        passage=passage, source_locator="item-2:magnetics",
+        normalized_passage_hash=passage_hash, parser_version="sec-visible-passage-v1",
+        filing_rule_version="sec-submissions-binding-v1", schema_version=1,
+        filing_date=date(2026, 8, 8),
+        accepted_at=datetime(2026, 8, 8, 16, 30, tzinfo=timezone.utc),
+        reporting_period_end=date(2026, 6, 30), retrieved_at=retrieved,
+        source_item_id=source_item_id, source_item_content_hash=item_hash,
+        source_receipt_id=source_receipt_id, source_cache_key=cache_key,
+    )
+    fact = extract_exposure_facts(
+        evidence,
+        issuer=IssuerExposureBinding(
+            entity_id=security["entity_id"], security_id=security["security_id"],
+            security_revision_id=security["id"], reference_manifest_id=manifest_id,
+            cik="0000000001", canonical_name="Test Corporation", ticker="TEST",
+        ),
+        role="magnet_manufacturing", event_ids=("90000000-0000-4000-8000-000000000001",),
+        hypothesis_ids=("hypothesis-1",),
+    )[0]
+    descriptor = {
+        "adverse_path": False, "cache_key": cache_key, "cik": "0000000001",
+        "dependency_task_ids": [issuer_task], "entity_id": security["entity_id"],
+        "event_ids": ["90000000-0000-4000-8000-000000000001"], "hypothesis_ids": ["hypothesis-1"],
+        "instrument_type": security["instrument_type"], "priority": 1,
+        "reference_manifest_id": manifest_id,
+        "reservation_id": records["source_quota_reservations"][1]["id"],
+        "role": "magnet_manufacturing", "security_id": security["security_id"],
+        "security_revision_id": security["id"],
+        "source_item_ids": sorted(["gdelt:1", submissions_item_id]),
+        "source_receipt_id": source_receipt_id, "theme_id": "grid_modernization",
+        "ticker": "TEST", "accepted_at": "2026-08-08T16:30:00Z",
+        "accession_number": accession, "filing_date": "2026-08-08", "form": "10-Q",
+        "primary_document": document, "reporting_period_end": "2026-06-30",
+        "submissions_response_hash": submissions_hash,
+    }
+    requested_window = {
+        "start": "2026-09-05T12:00:00Z", "end": "2026-09-05T20:00:00Z",
+    }
+    request_document = {
+        "request_id": document_task, "task_id": document_task, "stage": "enrich",
+        "provider": "sec_edgar", "capability_id": "sec_filing_document",
+        "descriptor": descriptor, "query_kind": "filing_document",
+        "dependency_ids": [issuer_task], "requested_window": requested_window,
+        "request_budget": 1, "execution_allowed": False,
+    }
+    request_hash = digest(request_document)
+    issuer_descriptor = records["enrichment_request_descriptors"][0]["descriptor"]
+    issuer_cache_key = issuer_descriptor["cache_key"]
+    issuer_receipt_id = issuer_descriptor["source_receipt_id"]
+    issuer_reservation_id = issuer_descriptor["reservation_id"]
+    cursor = {
+        "provider": "sec_edgar", "capability_id": "sec_issuer_submissions",
+        "completed_through": None, "active_window_start": None,
+        "active_window_end": None, "backlog_token": None, "page": 1,
+        "accepted_item_ids": [], "next_retry_phase": None,
+        "continuation_token_history": [],
+    }
+    completed_cursor = {
+        **cursor, "completed_through": requested_window["end"],
+    }
+    issuer_receipt = {
+        "provider": "sec_edgar", "reservation_id": issuer_reservation_id,
+        "status": "succeeded", "cache_key": issuer_cache_key,
+        "requested_window": requested_window, "requested_limit": 1,
+        "retrieved_at": "2026-09-05T19:35:00Z",
+        "observed_at": "2026-09-05T19:35:00Z",
+        "expires_at": "2026-09-05T19:50:00Z", "request_cost": 1,
+        "upstream_remaining": None, "returned_count": 1, "accepted_count": 1,
+        "duplicate_count": 0, "dropped_count": 0,
+        "response_hash": submissions_hash, "error_code": None,
+        "source_receipt_id": issuer_receipt_id,
+        "cache_predecessor_receipt_id": None,
+    }
+    issuer_metadata = {
+        "backlog_remaining": False,
+        "capability_id": "sec_issuer_submissions",
+        "coverage_status": "success_nonempty",
+        "cursor_end": requested_window["end"],
+        "cursor_start": requested_window["start"],
+        "next_retry_phase": None, "overlap_seconds": 7200, "page": 1,
+        "truncated": False, "exhausted": True,
+    }
+    issuer_checkpoint_item = {
+        "provider": "sec_edgar", "upstream_item_id": accession,
+        "source_url": source_url, "title": f"10-Q filing {accession}",
+        "normalized_text": "10-Q filed 2026-08-08",
+        "canonical_content": json.dumps({"accession_number": accession}, sort_keys=True),
+        "content_hash": submissions_item_hash, "published_at": "2026-08-08T00:00:00Z",
+        "effective_at": "2026-06-30T00:00:00Z",
+        "retrieved_at": "2026-09-05T19:35:00Z", "authority": "official",
+        "metadata": {
+            "accession_number": accession, "accepted_at": "2026-08-08T16:30:00Z",
+            "filing_date": "2026-08-08", "form": "10-Q",
+            "issuer_cik": "0000000001", "primary_document": document,
+            "reporting_period_end": "2026-06-30",
+            "submissions_response_hash": submissions_hash,
+        },
+        "request_url": submissions_request_url,
+        "reporting_at": "2026-06-30T00:00:00Z",
+        "entity_ids": [security["entity_id"]], "security_ids": [security["security_id"]],
+    }
+    issuer_task_row = next(
+        row for row in records["discovery_stage_tasks"] if row["id"] == issuer_task
+    )
+    issuer_task_row["result"] = {
+        "cursor_key": "sec_issuer_submissions:grid_modernization",
+        "theme_id": "grid_modernization",
+        "checkpoint": {
+            "cache_key": issuer_cache_key,
+            "receipt": {**issuer_receipt, "metadata": issuer_metadata},
+        },
+        "request_cursor": cursor, "source_cursor": completed_cursor,
+    }
+    records["collection_checkpoints"].append({
+        "run_id": run_id, "cache_key": issuer_cache_key,
+        "request_window": {
+            **requested_window, "timezone": "America/Chicago",
+            "market_date": "2026-09-05", "phase": "post-market",
+        },
+        "source_receipt_id": issuer_receipt_id,
+        "payload": {"receipt": issuer_receipt, "items": [issuer_checkpoint_item]},
+        "created_at": "2026-09-05T19:35:00Z",
+    })
+    records["discovery_stage_tasks"].append({
+        "id": document_task, "run_id": run_id, "stage": "enrich",
+        "capability_id": "sec_filing_document", "provider": "sec_edgar",
+        "query_kind": "filing_document", "query_hash": request_hash,
+        "dependency_ids": [issuer_task], "requested_window": requested_window,
+        "state": "succeeded", "attempt_count": 1, "request_budget": 1,
+        "result": {"exposure_fact_ids": [fact.fact_id]},
+        "created_at": "2026-09-05T19:35:30Z", "updated_at": "2026-09-05T19:36:00Z",
+    })
+    manifest_document = {
+        "deferred_reasons": {}, "execution_allowed": False, "phase": "post-market",
+        "provider_reservations": {
+            "gdelt_reverse": 2, "sec_filing_document": 2,
+            "sec_issuer_submissions": 2, "yahoo_security_quote": 2,
+        },
+        "request_descriptors": [{
+            "request_id": document_task, "descriptor_hash": request_hash,
+        }],
+        "run_id": run_id, "schema_version": 1, "selection_stage": "filing_documents",
+    }
+    manifest_hash = digest(manifest_document)
+    selection_id = str(uuid.uuid5(
+        uuid.UUID(run_id), f"enrichment-selection:{manifest_hash}",
+    ))
+    records["enrichment_selection_manifests"].append({
+        "id": selection_id, "run_id": run_id, "selection_stage": "filing_documents",
+        "phase": "post-market", "request_count": 1,
+        "provider_reservations": manifest_document["provider_reservations"],
+        "deferred_reasons": {}, "manifest": {
+            "manifest_id": selection_id, **manifest_document, "semantic_hash": manifest_hash,
+        }, "content_hash": manifest_hash, "created_at": "2026-09-05T19:35:15Z",
+    })
+    records["enrichment_request_descriptors"].append({
+        "id": document_task, "manifest_id": selection_id, "run_id": run_id,
+        "task_id": document_task, "provider": "sec_edgar",
+        "capability_id": "sec_filing_document", "query_kind": "filing_document",
+        "descriptor": descriptor, "content_hash": request_hash,
+        "created_at": "2026-09-05T19:35:30Z",
+    })
+    checkpoint_item = {
+        "provider": "sec_edgar", "upstream_item_id": f"{accession}:{document}",
+        "source_url": source_url, "title": "SEC filing passage",
+        "normalized_text": passage, "canonical_content": canonical_content,
+        "content_hash": item_hash, "published_at": None, "effective_at": None,
+        "retrieved_at": "2026-09-05T19:36:00.000Z",
+        "authority": "official", "metadata": {
+            "accession_number": accession,
+            "filing_rule_version": "sec-submissions-binding-v1",
+            "normalized_passage_hash": passage_hash,
+            "parser_version": "sec-visible-passage-v1", "primary_document": document,
+            "raw_response_hash": response_hash, "source_locator": "item-2:magnetics",
+        }, "request_url": source_url, "reporting_at": None,
+        "entity_ids": [security["entity_id"]], "security_ids": [security["security_id"]],
+    }
+    records["collection_checkpoints"].append({
+        "run_id": run_id, "cache_key": cache_key,
+        "request_window": {
+            **requested_window, "timezone": "America/Chicago", "market_date": "2026-09-05",
+            "phase": "post-market",
+        },
+        "source_receipt_id": source_receipt_id,
+        "payload": {"receipt": {
+            "provider": "sec_edgar",
+            "reservation_id": records["source_quota_reservations"][1]["id"],
+            "status": "succeeded", "cache_key": cache_key,
+            "requested_window": requested_window, "requested_limit": 1,
+            "retrieved_at": "2026-09-05T19:36:00.000Z", "observed_at": None,
+            "expires_at": None, "request_cost": 1, "upstream_remaining": None,
+            "returned_count": 1, "accepted_count": 1, "duplicate_count": 0,
+            "dropped_count": 0, "response_hash": response_hash, "error_code": None,
+            "source_receipt_id": source_receipt_id, "cache_predecessor_receipt_id": None,
+        }, "items": [checkpoint_item]}, "created_at": "2026-09-05T19:36:00Z",
+    })
+    fact_row = fact.to_persistence_row()
+    fact_row.update(run_id=run_id, task_id=document_task,
+                    created_at="2026-09-05T19:36:00Z")
+    records["exposure_facts"] = [fact_row]
+    records["research_nominations"][0]["exposure_fact_ids"] = [fact.fact_id]
     return records
 
 
@@ -232,11 +1408,325 @@ def test_recovery_payload_carries_identity_delivery_and_release_state(tmp_path, 
     )
     assert records["schema_version"][0]["statements"] == ["SELECT 1"]
     assert records["release_migration_ledger"] == []
+    cursor_result = next(
+        row["result"] for row in records["discovery_stage_tasks"]
+        if row["capability_id"] == "gdelt_theme_search"
+    )
+    assert cursor_result["cursor_key"] == "gdelt_theme_search:grid_modernization"
+    assert cursor_result["source_cursor"]["completed_through"] == "2026-09-05T20:00:00Z"
     assert set(records) >= {
         "intelligence_run_events", "source_quota_reservations", "collection_checkpoints",
         "collection_checkpoint_history", "collection_completions", "report_origins",
         "cash_ledger_state", "cash_snapshots", "run_terminal_outcomes",
     }
+
+
+def _v2_recovery_records():
+    records = recovery_records()
+    row = records["security_reference_revisions"][0]
+    row["issuer_names"] = {
+        "canonical_name": "Test Corporation",
+        "observed_names": ["Test Corporation", "Test Corporation Class A"],
+        "former_names": [{
+            "name": "Old Test Corporation",
+            "valid_from": "2020-01-01",
+            "valid_to": "2025-12-31",
+        }],
+    }
+    return _seal_reference_lineage(records, format_version=2)
+
+
+def _with_reused_v2_snapshot(records):
+    predecessor_manifest = records["reference_manifests"][0]
+    predecessor_seal = records["reference_finalization_seals"][0]
+    predecessor_entry = records["reference_chunk_receipts"][1]["payload"]["entries"][0]
+    reused_revision = records["security_reference_revisions"][0]
+    run_id = "20000000-0000-4000-8000-000000000001"
+    manifest_id = "20000000-0000-4000-8000-000000000002"
+    revision_id = "20000000-0000-4000-8000-000000000003"
+    run = copy.deepcopy(records["runs"][0])
+    run.update(id=run_id, gateway_request_id=None)
+    records["runs"].append(run)
+    intelligence_run = copy.deepcopy(records["intelligence_runs"][0])
+    intelligence_run["id"] = run_id
+    records["intelligence_runs"].append(intelligence_run)
+    records["intelligence_run_events"].append({
+        "id": "20000000-0000-4000-8000-000000000004",
+        "run_id": run_id,
+        "status": "started",
+        "detail": {},
+        "created_at": "2026-09-06T19:30:00Z",
+    })
+    manifest = copy.deepcopy(predecessor_manifest)
+    manifest.update(
+        id=manifest_id,
+        run_id=run_id,
+        reference_version="us-listed:v2-reuse",
+        valid_from="2026-09-06T19:30:00Z",
+        created_at="2026-09-06T19:31:00Z",
+    )
+    manifest["manifest"]["source_retrieved_at"] = manifest["valid_from"]
+    manifest["manifest"]["source_timestamp"] = manifest["valid_from"]
+    manifest["content_hash"] = digest(reference_manifest_semantic_document(manifest))
+    records["reference_manifests"].append(manifest)
+    entry = copy.deepcopy(predecessor_entry)
+    entry.update(id=revision_id, manifest_id=manifest_id)
+    chunk_hash = hashlib.sha256("\x1f".join((
+        entry["security_id"], entry["id"], entry["content_hash"],
+    )).encode()).hexdigest()
+    root_hash = hashlib.sha256(chunk_hash.encode()).hexdigest()
+    capability = predecessor_seal["capability_id"]
+    begin_payload = {
+        "manifest": {key: copy.deepcopy(value) for key, value in manifest.items()
+                     if key not in {"run_id", "created_at"}},
+        "capability_id": capability,
+        "chunk_count": 1,
+        "security_count": 1,
+        "root_hash": root_hash,
+        "predecessor_manifest_id": predecessor_manifest["id"],
+    }
+    records["reference_chunk_receipts"].extend([{
+        "manifest_id": manifest_id, "run_id": run_id, "capability_id": capability,
+        "chunk_index": -1, "chunk_count": 1, "entry_count": 0,
+        "chunk_hash": root_hash, "predecessor_manifest_id": predecessor_manifest["id"],
+        "payload": begin_payload, "created_at": "2026-09-06T19:30:30Z",
+    }, {
+        "manifest_id": manifest_id, "run_id": run_id, "capability_id": capability,
+        "chunk_index": 0, "chunk_count": 1, "entry_count": 1,
+        "chunk_hash": chunk_hash, "predecessor_manifest_id": predecessor_manifest["id"],
+        "payload": {"manifest_id": manifest_id, "chunk_index": 0, "chunk_count": 1,
+                    "entries": [entry], "chunk_hash": chunk_hash},
+        "created_at": "2026-09-06T19:31:00Z",
+    }])
+    records["reference_finalization_seals"].append({
+        "manifest_id": manifest_id, "run_id": run_id, "capability_id": capability,
+        "predecessor_manifest_id": predecessor_manifest["id"], "chunk_count": 1,
+        "security_count": 1, "root_hash": root_hash,
+        "finalized_at": "2026-09-06T19:31:30Z",
+    })
+    records["reference_snapshot_memberships"].append({
+        "manifest_id": manifest_id, "security_revision_id": reused_revision["id"],
+        "security_id": reused_revision["security_id"], "ordinal": 0,
+        "created_at": "2026-09-06T19:31:31Z",
+    })
+    records["reference_predecessor_pins"].append({
+        "run_id": run_id, "capability_id": capability,
+        "manifest_id": predecessor_manifest["id"], "reference_status": "reference_stale",
+        "reference_as_of": "2026-09-06T19:29:00Z",
+        "source_retrieved_at": predecessor_manifest["valid_from"],
+        "reference_age_seconds": 86_400,
+        "request_payload": {
+            "capability_id": capability, "binding_role": "predecessor",
+            "manifest_id": None, "reference_status": "reference_stale",
+            "reference_as_of": "2026-09-06T19:29:00Z",
+        },
+        "created_at": "2026-09-06T19:29:00Z",
+    })
+    records["reference_run_bindings"].append({
+        "run_id": run_id, "capability_id": capability, "manifest_id": manifest_id,
+        "reference_status": "healthy", "reference_as_of": "2026-09-06T19:32:00Z",
+        "source_retrieved_at": manifest["valid_from"], "reference_age_seconds": 120,
+        "request_payload": {
+            "capability_id": capability, "binding_role": "current",
+            "manifest_id": manifest_id, "reference_status": "healthy",
+            "reference_as_of": "2026-09-06T19:32:00Z",
+        },
+        "created_at": "2026-09-06T19:32:00Z",
+    })
+    return records
+
+
+def _with_changed_materialized_v2_snapshot(records):
+    records = _with_reused_v2_snapshot(records)
+    run_id = "20000000-0000-4000-8000-000000000001"
+    manifest_id = "20000000-0000-4000-8000-000000000002"
+    chunk = next(
+        row for row in records["reference_chunk_receipts"]
+        if row["manifest_id"] == manifest_id and row["chunk_index"] == 0
+    )
+    entry = chunk["payload"]["entries"][0]
+    entry.update(ticker="TEST2", aliases=["TEST2"])
+    entry["content_hash"] = digest(security_revision_semantic_document(entry))
+    chunk_hash = hashlib.sha256("\x1f".join((
+        entry["security_id"], entry["id"], entry["content_hash"],
+    )).encode()).hexdigest()
+    root_hash = hashlib.sha256(chunk_hash.encode()).hexdigest()
+    chunk.update(chunk_hash=chunk_hash)
+    chunk["payload"]["chunk_hash"] = chunk_hash
+    begin = next(
+        row for row in records["reference_chunk_receipts"]
+        if row["manifest_id"] == manifest_id and row["chunk_index"] == -1
+    )
+    begin.update(chunk_hash=root_hash)
+    begin["payload"]["root_hash"] = root_hash
+    seal = next(
+        row for row in records["reference_finalization_seals"]
+        if row["manifest_id"] == manifest_id
+    )
+    seal["root_hash"] = root_hash
+    revision = copy.deepcopy(entry)
+    revision.update(run_id=run_id, created_at="2026-09-06T19:31:30Z")
+    records["security_reference_revisions"].append(revision)
+    membership = next(
+        row for row in records["reference_snapshot_memberships"]
+        if row["manifest_id"] == manifest_id
+    )
+    membership["security_revision_id"] = entry["id"]
+    return records
+
+
+def test_recovery_accepts_valid_sealed_v1_and_v2_reference_lineage():
+    assert _validated_records(recovery_records())["security_reference_revisions"][0][
+        "semantic_encoding_version"
+    ] == 1
+    assert _validated_records(_v2_recovery_records())["security_reference_revisions"][0][
+        "semantic_encoding_version"
+    ] == 2
+
+
+def test_recovery_accepts_v2_snapshot_membership_reusing_predecessor_revision():
+    records = _with_reused_v2_snapshot(_v2_recovery_records())
+
+    validated = _validated_records(records)
+
+    assert len(validated["reference_manifests"]) == 2
+    assert validated["reference_snapshot_memberships"][1][
+        "security_revision_id"
+    ] == records["security_reference_revisions"][0]["id"]
+
+
+def test_recovery_accepts_materialized_revision_when_predecessor_content_changed():
+    records = _with_changed_materialized_v2_snapshot(_v2_recovery_records())
+
+    validated = _validated_records(records)
+
+    assert len(validated["security_reference_revisions"]) == 2
+    assert validated["reference_snapshot_memberships"][1][
+        "security_revision_id"
+    ] == "20000000-0000-4000-8000-000000000003"
+
+
+def test_recovery_rejects_reuse_when_consuming_run_predecessor_pin_is_unavailable():
+    records = _with_reused_v2_snapshot(_v2_recovery_records())
+    consuming_run = "20000000-0000-4000-8000-000000000001"
+    pin = next(
+        row for row in records["reference_predecessor_pins"]
+        if row["run_id"] == consuming_run
+    )
+    pin.update(
+        manifest_id=None,
+        reference_status="reference_unavailable",
+        source_retrieved_at=None,
+        reference_age_seconds=None,
+    )
+
+    with pytest.raises(ValueError, match="predecessor"):
+        _validated_records(records)
+
+
+def test_recovery_rejects_materialized_revision_when_seal_disagrees_with_begin_predecessor():
+    records = _with_reused_v2_snapshot(_v2_recovery_records())
+    consuming_run = "20000000-0000-4000-8000-000000000001"
+    manifest_id = "20000000-0000-4000-8000-000000000002"
+    entry = next(
+        row["payload"]["entries"][0]
+        for row in records["reference_chunk_receipts"]
+        if row["manifest_id"] == manifest_id and row["chunk_index"] == 0
+    )
+    materialized = copy.deepcopy(entry)
+    materialized.update(
+        run_id=consuming_run,
+        created_at="2026-09-06T19:31:30Z",
+    )
+    records["security_reference_revisions"].append(materialized)
+    membership = next(
+        row for row in records["reference_snapshot_memberships"]
+        if row["manifest_id"] == manifest_id
+    )
+    membership["security_revision_id"] = entry["id"]
+    seal = next(
+        row for row in records["reference_finalization_seals"]
+        if row["manifest_id"] == manifest_id
+    )
+    seal["predecessor_manifest_id"] = None
+
+    with pytest.raises(ValueError, match="predecessor"):
+        _validated_records(records)
+
+
+@pytest.mark.parametrize("mutation", [
+    lambda records: records["security_reference_revisions"][0]["issuer_names"].update(
+        observed_names=["Different Observed Name"]
+    ),
+    lambda records: records["security_reference_revisions"][0]["issuer_names"].update(
+        observed_names=["Test Corporation", "Test Corporation"]
+    ),
+    lambda records: records["security_reference_revisions"][0]["issuer_names"].update(
+        canonical_name="Changed Corporation", observed_names=["Changed Corporation"]
+    ),
+    lambda records: records["reference_chunk_receipts"][1]["payload"]["entries"][0].update(
+        ticker="TAMPER"
+    ),
+])
+def test_recovery_rejects_v2_name_or_chunk_tamper_with_unchanged_hashes(mutation):
+    records = _v2_recovery_records()
+    mutation(records)
+
+    with pytest.raises(ValueError, match="reference|issuer|security"):
+        _validated_records(records)
+
+
+def test_recovery_rejects_membership_ordinal_substitution_against_chunk_order():
+    records = _v2_recovery_records()
+    first = records["security_reference_revisions"][0]
+    second = copy.deepcopy(first)
+    second.update(
+        id="10000000-0000-4000-8000-00000000000a",
+        security_id="NASDAQ:SECOND",
+        ticker="SECOND",
+        aliases=["SECOND"],
+    )
+    records["security_reference_revisions"].append(second)
+    _seal_reference_lineage(records, format_version=2)
+    memberships = records["reference_snapshot_memberships"]
+    memberships[0]["ordinal"], memberships[1]["ordinal"] = (
+        memberships[1]["ordinal"], memberships[0]["ordinal"],
+    )
+
+    with pytest.raises(ValueError, match="membership|finalization"):
+        _validated_records(records)
+
+
+def test_recovery_rejects_malformed_terminal_cursor_metadata():
+    records = recovery_records()
+    cursor = records["discovery_stage_tasks"][0]["result"]["source_cursor"]
+    cursor["accepted_item_ids"] = ["duplicate", "duplicate"]
+
+    with pytest.raises(ValueError, match="discovery task.*invalid content"):
+        _validated_records(records)
+
+
+@pytest.mark.parametrize("mutation", [
+    lambda task, checkpoint: task["source_cursor"].update(completed_through="2026-09-05T19:59:00Z"),
+    lambda task, checkpoint: task["checkpoint"].update(cache_key="e" * 64),
+    lambda task, checkpoint: task["checkpoint"]["receipt"].update(status="failed"),
+    lambda task, checkpoint: task["checkpoint"]["receipt"]["metadata"].update(truncated=True),
+    lambda task, checkpoint: task["checkpoint"]["receipt"]["metadata"].update(backlog_remaining=True),
+    lambda task, checkpoint: task["checkpoint"]["receipt"]["metadata"].update(capability_id="doe_energy_news_rss"),
+    lambda task, checkpoint: checkpoint["payload"]["receipt"].update(source_receipt_id="99999999-9999-4999-8999-999999999999"),
+])
+def test_recovery_rejects_impossible_cursor_checkpoint_transition_before_restore(mutation):
+    records = recovery_records()
+    task = records["discovery_stage_tasks"][0]["result"]
+    checkpoint = records["collection_checkpoints"][0]
+    mutation(task, checkpoint)
+
+    class UnusedConnection:
+        def transaction(self):
+            raise AssertionError("invalid cursor transition reached restore mutation")
+
+    with pytest.raises(ValueError, match="discovery task.*invalid content"):
+        restore_recovery_records(UnusedConnection(), records, isolated_guard=True)
 
 
 @pytest.mark.parametrize("change", [
@@ -302,12 +1792,481 @@ INTELLIGENCE_DEPENDENT_DATASETS = (
 EMPTY_INTELLIGENCE_PACKET_REPORT_HISTORY = (
     "intelligence_runs",
     *INTELLIGENCE_DEPENDENT_DATASETS,
+    "reference_manifests",
+    "security_reference_revisions",
+    "reference_chunk_receipts",
+    "reference_finalization_seals",
+    "reference_snapshot_memberships",
+    "reference_run_bindings",
+    "reference_predecessor_pins",
+    "reference_transfer_requests",
+    "reference_transfer_responses",
+    "enrichment_selection_manifests",
+    "enrichment_request_descriptors",
+    "discovery_stage_tasks",
+    "theme_episode_revisions",
+    "exposure_facts",
+    "research_nominations",
     "packets",
     "reports",
     "report_origins",
     "publications",
     "policy_comparisons",
 )
+
+
+DISCOVERY_DATASETS = (
+    "reference_manifests",
+    "security_reference_revisions",
+    "reference_chunk_receipts",
+    "reference_finalization_seals",
+    "reference_snapshot_memberships",
+    "reference_run_bindings",
+    "reference_predecessor_pins",
+    "reference_transfer_requests",
+    "reference_transfer_responses",
+    "discovery_stage_tasks",
+    "theme_episode_revisions",
+    "exposure_facts",
+    "research_nominations",
+    "enrichment_selection_manifests",
+    "enrichment_request_descriptors",
+)
+
+
+def test_recovery_contract_includes_frozen_enrichment_selection_and_request_descriptors():
+    assert "enrichment_selection_manifests" in REQUIRED_RECOVERY_RECORDS
+    assert "enrichment_request_descriptors" in REQUIRED_RECOVERY_RECORDS
+    from scripts.protected_evidence import READ_TABLES, RECOVERY_SQL
+    from scripts.verify_recovery_bundle import _RESTORE_TABLES
+
+    assert "market_enrichment_selection_manifests" in READ_TABLES
+    assert "market_enrichment_request_descriptors" in READ_TABLES
+    assert "market_enrichment_selection_manifests" in RECOVERY_SQL["enrichment_selection_manifests"]
+    assert "market_enrichment_request_descriptors" in RECOVERY_SQL["enrichment_request_descriptors"]
+    assert ("enrichment_selection_manifests", "market_enrichment_selection_manifests", {}) in _RESTORE_TABLES
+    assert ("enrichment_request_descriptors", "market_enrichment_request_descriptors", {}) in _RESTORE_TABLES
+
+
+def test_recovery_contract_includes_theme_memory_v2_parent_first_ledgers():
+    from scripts.protected_evidence import READ_TABLES, RECOVERY_SQL
+    from scripts.verify_recovery_bundle import _RESTORE_TABLES, ordered_restore_rows
+
+    datasets = [dataset for dataset, _table, _renames in _RESTORE_TABLES]
+    expected = {
+        "theme_episode_revisions_v2": "market_theme_episode_revisions_v2",
+        "reviewer_identity_receipts_v2": "market_reviewer_identity_receipts_v2",
+        "research_nomination_requests_v2": "market_research_nomination_requests_v2",
+        "research_nominations_v2": "market_research_nominations_v2",
+        "research_nomination_lifecycle_v2": "market_research_nomination_lifecycle_v2",
+        "intelligence_memory_context_bindings_v2": "market_intelligence_memory_context_bindings_v2",
+    }
+    for dataset, table in expected.items():
+        assert dataset in REQUIRED_RECOVERY_RECORDS
+        assert table in READ_TABLES
+        assert table in RECOVERY_SQL[dataset]
+    assert datasets.index("packets") < datasets.index("reviewer_identity_receipts_v2")
+    assert datasets.index("reviewer_identity_receipts_v2") < datasets.index("research_nomination_requests_v2")
+    assert datasets.index("research_nomination_requests_v2") < datasets.index("research_nominations_v2")
+    assert datasets.index("research_nominations_v2") < datasets.index("research_nomination_lifecycle_v2")
+
+    predecessor = "11111111-1111-4111-8111-111111111111"
+    successor = "22222222-2222-4222-8222-222222222222"
+    rows = [
+        {"receipt_id": successor, "predecessor_receipt_id": predecessor},
+        {"receipt_id": predecessor, "predecessor_receipt_id": None},
+    ]
+    assert [row["receipt_id"] for row in ordered_restore_rows(
+        "research_nomination_lifecycle_v2", rows
+    )] == [predecessor, successor]
+
+
+@pytest.mark.parametrize(("dataset", "field", "replacement"), [
+    ("enrichment_selection_manifests", "content_hash", "0" * 64),
+    ("enrichment_selection_manifests", "provider_reservations", {
+        "gdelt_reverse": 2, "sec_filing_document": 2,
+        "sec_issuer_submissions": 3, "yahoo_security_quote": 2,
+    }),
+    ("enrichment_request_descriptors", "content_hash", "0" * 64),
+    ("enrichment_request_descriptors", "provider", "yahoo"),
+])
+def test_recovery_rejects_tampered_frozen_enrichment_ledgers(dataset, field, replacement):
+    records = recovery_records()
+    records[dataset][0][field] = replacement
+
+    with pytest.raises(ValueError, match="discovery enrichment"):
+        _validated_records(records)
+
+
+def test_recovery_rejects_tampered_or_full_filing_request_descriptors():
+    records = recovery_records()
+    records["enrichment_request_descriptors"][0]["descriptor"]["security_revision_id"] = (
+        "20000000-0000-4000-8000-000000000002"
+    )
+    with pytest.raises(ValueError, match="discovery enrichment"):
+        _validated_records(records)
+
+    records = recovery_records()
+    records["enrichment_request_descriptors"][0]["descriptor"]["full_filing_html"] = "<html/>"
+    with pytest.raises(ValueError, match="discovery enrichment"):
+        _validated_records(records)
+
+
+def test_recovery_rejects_tampered_manifest_child_hash():
+    records = recovery_records()
+    records["enrichment_selection_manifests"][0]["manifest"]["request_descriptors"][0][
+        "descriptor_hash"
+    ] = "0" * 64
+
+    with pytest.raises(ValueError, match="discovery enrichment manifest semantic hash"):
+        _validated_records(records)
+
+
+def test_recovery_validates_typed_exposure_against_frozen_request_and_checkpoint():
+    records = typed_exposure_recovery_records()
+
+    validated = _validated_records(records)
+
+    assert validated["exposure_facts"][0]["fact"]["value"]["status"] == "supported"
+    vector = EXPOSURE_VECTORS["supported_percent_of_revenue"]
+    assert digest(vector["fact"]) == vector["content_hash"]
+
+
+def test_recovery_rejects_document_selection_without_bound_parent_submission_checkpoint():
+    records = typed_exposure_recovery_records()
+    issuer_task = next(
+        row for row in records["discovery_stage_tasks"]
+        if row["query_kind"] == "issuer_submissions"
+    )
+    issuer_task["result"] = {}
+
+    with pytest.raises(ValueError, match="discovery enrichment filing membership"):
+        _validated_records(records)
+
+
+def test_recovery_rejects_enrichment_above_exact_provider_reservation():
+    records = typed_exposure_recovery_records()
+    sec_reservation = next(
+        row for row in records["source_quota_reservations"]
+        if row["provider"] == "sec_edgar"
+    )
+    sec_reservation["reserved_requests"] = 1
+
+    with pytest.raises(ValueError, match="discovery enrichment reservation capacity"):
+        _validated_records(records)
+
+
+@pytest.mark.parametrize(("field", "replacement"), [
+    ("issuer_cik", "0000000002"),
+    ("accession_number", "0001193125-26-200002"),
+    ("accepted_at", "2026-08-08T16:31:00Z"),
+    ("form", "8-K"),
+    ("primary_document", "other.htm"),
+    ("filing_date", "2026-08-09"),
+    ("reporting_period_end", "2026-06-29"),
+    ("submissions_response_hash", "0" * 64),
+])
+def test_recovery_rejects_tampered_parent_submission_membership(field, replacement):
+    records = typed_exposure_recovery_records()
+    checkpoint = next(
+        row for row in records["collection_checkpoints"]
+        if row["payload"]["receipt"]["provider"] == "sec_edgar"
+        and row["payload"]["items"][0]["request_url"].startswith("https://data.sec.gov/")
+    )
+    checkpoint["payload"]["items"][0]["metadata"][field] = replacement
+
+    with pytest.raises(ValueError, match="discovery enrichment filing membership"):
+        _validated_records(records)
+
+
+def test_recovery_rejects_conflicting_duplicate_parent_accession():
+    records = typed_exposure_recovery_records()
+    checkpoint = next(
+        row for row in records["collection_checkpoints"]
+        if row["payload"]["receipt"]["provider"] == "sec_edgar"
+        and row["payload"]["items"][0]["request_url"].startswith("https://data.sec.gov/")
+    )
+    conflicting = copy.deepcopy(checkpoint["payload"]["items"][0])
+    conflicting["metadata"]["primary_document"] = "conflict.htm"
+    conflicting["content_hash"] = "0" * 64
+    checkpoint["payload"]["items"].append(conflicting)
+    checkpoint["payload"]["receipt"]["accepted_count"] = 2
+    checkpoint["payload"]["receipt"]["returned_count"] = 2
+
+    with pytest.raises(ValueError, match="discovery enrichment filing membership"):
+        _validated_records(records)
+
+
+@pytest.mark.parametrize(("field", "replacement"), [
+    ("request_url", "https://data.sec.gov/submissions/CIK0000000002.json"),
+    ("source_url", "https://www.sec.gov/Archives/edgar/data/1/000119312526200001/arbitrary.htm"),
+])
+def test_recovery_rejects_tampered_parent_submission_endpoint(field, replacement):
+    records = typed_exposure_recovery_records()
+    checkpoint = next(
+        row for row in records["collection_checkpoints"]
+        if row["payload"]["receipt"]["provider"] == "sec_edgar"
+        and row["payload"]["items"][0]["request_url"].startswith("https://data.sec.gov/")
+    )
+    checkpoint["payload"]["items"][0][field] = replacement
+
+    with pytest.raises(ValueError, match="discovery enrichment filing membership"):
+        _validated_records(records)
+
+
+@pytest.mark.parametrize(("field", "replacement"), [
+    ("filing_date", "2026-08-09"),
+    ("issuer_cik", "0000000002"),
+    ("security_id", "NASDAQ:OTHER"),
+    ("source_cache_key", "7" * 64),
+    ("source_item_content_hash", "6" * 64),
+    ("source_response_hash", "5" * 64),
+    ("retrieved_at", "2026-09-06T19:36:00.000Z"),
+])
+def test_recovery_rejects_typed_exposure_semantic_tampering(field, replacement):
+    records = typed_exposure_recovery_records()
+    records["exposure_facts"][0]["fact"]["value"][field] = replacement
+
+    with pytest.raises(ValueError, match="discovery typed exposure"):
+        _validated_records(records)
+
+
+def test_recovery_rejects_rehashed_typed_exposure_with_changed_checkpoint_binding():
+    records = typed_exposure_recovery_records()
+    row = records["exposure_facts"][0]
+    row["fact"]["value"]["source_cache_key"] = "7" * 64
+    row["content_hash"] = digest(row["fact"])
+    row["id"] = str(uuid.uuid5(
+        uuid.NAMESPACE_URL, f"market-exposure:{row['content_hash']}",
+    ))
+    records["research_nominations"][0]["exposure_fact_ids"] = [row["id"]]
+
+    with pytest.raises(ValueError, match="discovery typed exposure request binding"):
+        _validated_records(records)
+
+
+def test_recovery_rejects_rehashed_supported_materiality_without_revenue_metric():
+    records = typed_exposure_recovery_records()
+    row = records["exposure_facts"][0]
+    row["fact"]["value"].update({
+        "financial_materiality": "supported", "metric": "business_exposure",
+        "unit": None, "value": None,
+    })
+    row["content_hash"] = digest(row["fact"])
+    row["id"] = str(uuid.uuid5(
+        uuid.NAMESPACE_URL, f"market-exposure:{row['content_hash']}",
+    ))
+    records["research_nominations"][0]["exposure_fact_ids"] = [row["id"]]
+
+    with pytest.raises(ValueError, match="materiality mismatch"):
+        _validated_records(records)
+
+
+@pytest.mark.parametrize("mutation", EXPOSURE_VECTORS["invalid_supported_mutations"])
+def test_recovery_rejects_shared_rehashed_materiality_forgeries(mutation):
+    records = typed_exposure_recovery_records()
+    row = records["exposure_facts"][0]
+    row["fact"]["value"][mutation["field"]] = mutation["value"]
+    row["content_hash"] = digest(row["fact"])
+    row["id"] = str(uuid.uuid5(
+        uuid.NAMESPACE_URL, f"market-exposure:{row['content_hash']}",
+    ))
+    records["research_nominations"][0]["exposure_fact_ids"] = [row["id"]]
+
+    with pytest.raises(ValueError, match="typed exposure"):
+        _validated_records(records)
+
+
+def test_recovery_rejects_full_filing_body_in_durable_checkpoint():
+    records = typed_exposure_recovery_records()
+    records["collection_checkpoints"][-1]["payload"]["items"][0]["raw_body"] = (
+        "<html>entire filing</html>"
+    )
+
+    with pytest.raises(ValueError, match="discovery typed exposure checkpoint binding"):
+        _validated_records(records)
+
+
+def test_recovery_validates_complete_discovery_lineage_and_exact_fields():
+    records = recovery_records()
+
+    validated = _validated_records(records)
+
+    assert {name: len(validated[name]) for name in DISCOVERY_DATASETS} == {
+        "reference_manifests": 1,
+        "security_reference_revisions": 1,
+        "reference_chunk_receipts": 2,
+        "reference_finalization_seals": 1,
+        "reference_snapshot_memberships": 1,
+        "reference_run_bindings": 1,
+        "reference_predecessor_pins": 1,
+        "reference_transfer_requests": 1,
+        "reference_transfer_responses": 1,
+        "discovery_stage_tasks": 3,
+        "theme_episode_revisions": 1,
+        "exposure_facts": 1,
+        "research_nominations": 1,
+        "enrichment_selection_manifests": 1,
+        "enrichment_request_descriptors": 1,
+    }
+
+
+def _make_stale_current_inconsistent_with_predecessor(records):
+    manifest_id = records["reference_manifests"][0]["id"]
+    current = records["reference_run_bindings"][0]
+    current.update(
+        manifest_id=manifest_id,
+        reference_status="reference_stale",
+        request_payload={
+            "capability_id": current["capability_id"],
+            "binding_role": "current",
+            "manifest_id": manifest_id,
+            "reference_status": "reference_stale",
+            "reference_as_of": current["reference_as_of"],
+        },
+    )
+    assert records["reference_predecessor_pins"][0]["manifest_id"] is None
+
+
+def test_recovery_rejects_stale_current_that_differs_from_predecessor_pin():
+    records = recovery_records()
+    _make_stale_current_inconsistent_with_predecessor(records)
+
+    with pytest.raises(ValueError, match="binding dependency mismatch"):
+        _validated_records(records)
+
+
+def test_restore_rejects_stale_current_that_differs_from_predecessor_pin():
+    records = recovery_records()
+    _make_stale_current_inconsistent_with_predecessor(records)
+
+    class UnusedConnection:
+        def transaction(self):
+            raise AssertionError("invalid recovery data reached restore mutation")
+
+    with pytest.raises(ValueError, match="binding dependency mismatch"):
+        restore_recovery_records(UnusedConnection(), records, isolated_guard=True)
+
+
+def test_exact_recovery_verifier_rejects_inconsistent_restored_stale_lineage(
+        tmp_path, commands):
+    production = FakeDatabase()
+    artifact = export_recovery_bundle(
+        production, tmp_path / "stale-lineage.enc", **commands,
+    )
+    restore = restored(production)
+    _make_stale_current_inconsistent_with_predecessor(restore.records)
+
+    with pytest.raises(ValueError, match="binding dependency mismatch"):
+        verify_recovery_bundle(
+            artifact, restore, production_source=production,
+            decrypt_command=commands["decrypt_command"],
+        )
+
+
+def _make_own_finalization_a_stale_predecessor(records):
+    _make_stale_current_inconsistent_with_predecessor(records)
+    manifest = records["reference_manifests"][0]
+    manifest_id = manifest["id"]
+    run_id = manifest["run_id"]
+    capability = records["reference_finalization_seals"][0]["capability_id"]
+    current = records["reference_run_bindings"][0]
+    predecessor = records["reference_predecessor_pins"][0]
+    assert current["run_id"] == predecessor["run_id"] == run_id
+    predecessor.update(
+        manifest_id=manifest_id,
+        reference_status="reference_stale",
+        reference_as_of=current["reference_as_of"],
+        source_retrieved_at=current["source_retrieved_at"],
+        reference_age_seconds=current["reference_age_seconds"],
+        request_payload={
+            "capability_id": capability,
+            "binding_role": "predecessor",
+            "manifest_id": None,
+            "reference_status": "reference_stale",
+            "reference_as_of": current["reference_as_of"],
+        },
+    )
+
+
+def test_recovery_rejects_own_finalization_as_stale_predecessor():
+    records = recovery_records()
+    _make_own_finalization_a_stale_predecessor(records)
+
+    with pytest.raises(ValueError, match="predecessor dependency mismatch"):
+        _validated_records(records)
+
+
+def test_ordered_restore_rejects_own_finalization_as_stale_predecessor():
+    records = recovery_records()
+    _make_own_finalization_a_stale_predecessor(records)
+
+    class UnusedConnection:
+        def transaction(self):
+            raise AssertionError("invalid recovery data reached ordered restore")
+
+    with pytest.raises(ValueError, match="predecessor dependency mismatch"):
+        restore_recovery_records(UnusedConnection(), records, isolated_guard=True)
+
+
+def test_exact_recovery_verifier_rejects_own_finalization_as_stale_predecessor(
+        tmp_path, commands):
+    production = FakeDatabase()
+    artifact = export_recovery_bundle(
+        production, tmp_path / "self-predecessor.enc", **commands,
+    )
+    restore = restored(production)
+    _make_own_finalization_a_stale_predecessor(restore.records)
+
+    with pytest.raises(ValueError, match="predecessor dependency mismatch"):
+        verify_recovery_bundle(
+            artifact, restore, production_source=production,
+            decrypt_command=commands["decrypt_command"],
+        )
+
+
+@pytest.mark.parametrize("dataset", DISCOVERY_DATASETS)
+def test_recovery_rejects_missing_discovery_dataset(dataset):
+    records = recovery_records()
+    records.pop(dataset)
+
+    with pytest.raises(ValueError, match="exact allowlisted datasets"):
+        _validated_records(records)
+
+
+@pytest.mark.parametrize(("dataset", "field", "replacement"), [
+    ("reference_manifests", "run_id", "20000000-0000-4000-8000-000000000001"),
+    ("security_reference_revisions", "manifest_id", "20000000-0000-4000-8000-000000000002"),
+    ("discovery_stage_tasks", "dependency_ids", ["20000000-0000-4000-8000-000000000003"]),
+    ("theme_episode_revisions", "task_id", "10000000-0000-4000-8000-000000000005"),
+    ("exposure_facts", "security_revision_id", "20000000-0000-4000-8000-000000000004"),
+    ("research_nominations", "exposure_fact_ids", ["20000000-0000-4000-8000-000000000005"]),
+])
+def test_recovery_rejects_orphaned_discovery_records(dataset, field, replacement):
+    records = recovery_records()
+    records[dataset][-1][field] = replacement
+
+    with pytest.raises(ValueError, match="discovery.*dependency mismatch"):
+        _validated_records(records)
+
+
+@pytest.mark.parametrize(("dataset", "field", "replacement"), [
+    ("reference_manifests", "content_hash", "altered"),
+    ("discovery_stage_tasks", "query_hash", "altered"),
+    ("discovery_stage_tasks", "provider", "paid_provider"),
+    ("reference_manifests", "manifest", {"nested": {"executionAllowed": False}}),
+    ("reference_run_bindings", "request_payload", {"reference_status": "healthy"}),
+    ("discovery_stage_tasks", "result", {"portfolioOverlap": {"ticker": "TEST"}}),
+    ("exposure_facts", "fact", {"nested": {"order": {"side": "buy"}}}),
+    ("research_nominations", "rationale", {"action": "buy"}),
+    ("research_nominations", "rationale", {"nested": {"order_details": {"side": "buy"}}}),
+])
+def test_recovery_rejects_altered_or_authoritative_discovery_records(dataset, field, replacement):
+    records = recovery_records()
+    records[dataset][0][field] = replacement
+
+    with pytest.raises(ValueError, match="discovery"):
+        _validated_records(records)
 
 
 def test_recovery_accepts_empty_intelligence_packet_report_history_when_all_dependents_are_empty():
@@ -318,6 +2277,114 @@ def test_recovery_accepts_empty_intelligence_packet_report_history_when_all_depe
     validated = _validated_records(records)
 
     assert all(validated[dataset] == [] for dataset in EMPTY_INTELLIGENCE_PACKET_REPORT_HISTORY)
+
+
+def test_recovery_validates_v2_research_packet_fact_source_and_completion_lineage():
+    records = _research_v2_recovery_records()
+
+    validated = _validated_records(records)
+
+    assert validated["packets"][0]["packet"]["contract_version"] == 2
+
+
+@pytest.mark.parametrize("mutation", (
+    "candidate_identity", "event", "fact", "source", "receipt", "suitability",
+    "evidence_omission", "action_promotion", "rehashed_eligible_action", "completion",
+))
+def test_recovery_rejects_rehashed_v2_packet_lineage_substitutions(mutation):
+    records = _research_v2_recovery_records()
+    packet = records["packets"][0]["packet"]
+    candidate = packet["research_candidates"][0]
+    if mutation == "candidate_identity":
+        candidate["ticker"] = "FAKE"
+    elif mutation == "event":
+        candidate["event_ids"] = ["aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"]
+    elif mutation == "fact":
+        candidate["exposure_fact_ids"] = ["aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"]
+    elif mutation == "source":
+        packet["evidence"][0]["content_hash"] = "a" * 64
+    elif mutation == "receipt":
+        candidate["suitability"]["lineage"]["evidence_receipt_ids"][
+            candidate["evidence"][0]["item_id"]
+        ] = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
+    elif mutation == "suitability":
+        candidate["suitability"]["state"] = "eligible"
+        candidate["suitability"]["missing_reasons"] = []
+    elif mutation == "evidence_omission":
+        candidate["evidence"] = []
+    elif mutation == "action_promotion":
+        packet["action_candidates"] = [{
+            "candidate_hash": candidate["candidate_hash"],
+            "candidate_key": candidate["candidate_key"],
+            "suitability_hash": candidate["suitability"]["evaluation_hash"],
+        }]
+    elif mutation == "rehashed_eligible_action":
+        candidate["evidence"][0].update(
+            claim_type="issuer_exposure", relationship_eligible=True,
+            role="opposing",
+        )
+        candidate["roles"] = ["supplier"]
+        candidate["suitability"]["component_scores"] = {
+            "concentration_penalty": "0.000000",
+            "duplication_penalty": "0.000000",
+            "liquidity": "1.000000",
+            "portfolio_relevance": "1.000000",
+        }
+        candidate["suitability"]["state"] = "eligible"
+        candidate["suitability"]["missing_reasons"] = []
+        candidate["suitability"]["veto_reasons"] = []
+        packet["action_candidates"] = [{
+            "candidate_hash": candidate["candidate_hash"],
+            "candidate_key": candidate["candidate_key"],
+            "suitability_hash": candidate["suitability"]["evaluation_hash"],
+        }]
+    else:
+        records["collection_completions"][0]["receipt"]["packet_hash"] = "a" * 64
+    if mutation not in {"source", "completion", "action_promotion"}:
+        suitability_body = {
+            key: value for key, value in candidate["suitability"].items()
+            if key != "evaluation_hash"
+        }
+        candidate["suitability"]["evaluation_hash"] = digest(suitability_body)
+    if mutation != "completion":
+        candidate_body = {
+            key: value for key, value in candidate.items() if key != "candidate_hash"
+        }
+        candidate["candidate_hash"] = digest(candidate_body)
+        if packet["action_candidates"]:
+            packet["action_candidates"][0].update(
+                candidate_hash=candidate["candidate_hash"],
+                suitability_hash=candidate["suitability"]["evaluation_hash"],
+            )
+        records["packets"][0]["packet_hash"] = digest(packet)
+        records["collection_completions"][0]["receipt"]["packet_hash"] = records["packets"][0]["packet_hash"]
+
+    with pytest.raises(ValueError, match="packet v2"):
+        _validated_records(records)
+
+
+@pytest.mark.parametrize("mutation", ("missing_report", "missing_origin", "telegram_delivery", "uncertain_retry"))
+def test_recovery_requires_scheduled_v2_research_suppression_receipts(mutation):
+    records = _research_v2_recovery_records()
+    if mutation == "missing_report":
+        records["reports"] = []
+        records["report_origins"] = []
+        records["publications"] = []
+    elif mutation == "missing_origin":
+        records["report_origins"] = []
+    elif mutation == "telegram_delivery":
+        records["publications"][0].update(
+            status="delivered", telegram_message_ids=[7],
+            telegram_accepted_at="2026-09-05T20:00:00Z", suppression_reason=None,
+            attempt_count=1,
+        )
+    else:
+        records["publications"][0].update(
+            status="uncertain", suppression_reason=None, attempt_count=2,
+        )
+
+    with pytest.raises(ValueError, match="packet v2"):
+        _validated_records(records)
 
 
 @pytest.mark.parametrize("orphan_dataset", INTELLIGENCE_DEPENDENT_DATASETS)
@@ -601,6 +2668,77 @@ def test_verifier_applies_actual_isolated_postgres_restore_and_retains_uncertain
         finally:
             for connection in connections:
                 connection.close()
+            subprocess.run(
+                [binaries["pg_ctl"], "-D", str(root / "db"), "-m", "immediate", "-w", "stop"],
+                check=True, capture_output=True,
+            )
+
+
+def test_v2_packet_actual_isolated_restore_preserves_exact_read_contract():
+    binaries = {name: shutil.which(name) for name in ("initdb", "pg_ctl")}
+    if not all(binaries.values()):
+        pytest.skip("disposable PostgreSQL binaries unavailable")
+    with tempfile.TemporaryDirectory(prefix="recovery-v2-postgres-") as directory:
+        root = Path(directory)
+        with socket.socket() as probe:
+            probe.bind(("127.0.0.1", 0)); port = probe.getsockname()[1]
+        subprocess.run(
+            [binaries["initdb"], "-D", str(root / "db"), "-A", "trust", "-E", "UTF8", "--no-locale"],
+            check=True, capture_output=True,
+        )
+        subprocess.run(
+            [binaries["pg_ctl"], "-D", str(root / "db"), "-l", str(root / "postgres.log"),
+             "-o", f"-k {root} -h '' -p {port}", "-w", "start"],
+            check=True, capture_output=True,
+        )
+        try:
+            with psycopg.connect(
+                f"host={root} port={port} dbname=postgres", autocommit=True, row_factory=dict_row,
+            ) as db:
+                db.execute("CREATE ROLE anon; CREATE ROLE authenticated; CREATE ROLE service_role")
+                db.execute(
+                    "CREATE SCHEMA supabase_migrations; "
+                    "CREATE TABLE supabase_migrations.schema_migrations("
+                    "version text PRIMARY KEY,statements text[])"
+                )
+                db.execute((Path(__file__).parents[1] / "sql/schema.sql").read_text())
+                records = _research_v2_recovery_records()
+                restore_recovery_records(db, records, isolated_guard=True)
+                packet = records["packets"][0]
+                restored = db.execute(
+                    "SELECT public.read_market_evidence_packet(%s::uuid,%s::uuid) AS value",
+                    (packet["id"], packet["run_id"]),
+                ).fetchone()["value"]
+                assert restored["packet"] == packet["packet"]
+                assert restored["packet_hash"] == packet["packet_hash"]
+                assert restored["exposure_facts"][0]["candidate_key"] == "TEST"
+                report_body = {
+                    "title": "THEME RESEARCH", "summary": "Research requires more evidence.",
+                    "full_markdown": "TEST: research only. Suggestion only; no order was placed.",
+                    "source_ids": [packet["packet"]["evidence"][0]["item_id"]],
+                    "policy_decision_ids": [], "comparison_ids": [],
+                    "actionable_risk": False, "material_thesis_change": False,
+                    "intraday_triggered": False, "suggestion_only": True,
+                }
+                report_hash = digest(report_body)
+                key = hashlib.sha256(
+                    f"v2:theme:2026-09-05:{packet['packet_hash']}:{report_hash}".encode()
+                ).hexdigest()
+                report_id = f"{key[:8]}-{key[8:12]}-5{key[13:16]}-8{key[17:20]}-{key[20:32]}"
+                rendered = report_body["full_markdown"]
+                report_payload = {
+                    "id": report_id, "packet_id": packet["id"],
+                    "market_date": "2026-09-05", "kind": "theme",
+                    "report": report_body, "report_hash": report_hash,
+                    "rendered_text": rendered,
+                    "rendered_hash": hashlib.sha256(rendered.encode()).hexdigest(),
+                }
+                receipt = db.execute(
+                    "SELECT public.record_market_report(%s::uuid,%s,%s::jsonb) AS value",
+                    (packet["run_id"], key, json.dumps(report_payload)),
+                ).fetchone()["value"]
+                assert receipt["report_id"] == report_id
+        finally:
             subprocess.run(
                 [binaries["pg_ctl"], "-D", str(root / "db"), "-m", "immediate", "-w", "stop"],
                 check=True, capture_output=True,

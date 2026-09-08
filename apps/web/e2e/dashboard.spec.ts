@@ -61,6 +61,38 @@ for (const width of [300, 320, 390, 768, 1024, 1440]) {
   });
 }
 
+for (const width of [300, 390]) {
+  test(`intelligence wraps at ${width}px without horizontal clipping`, async ({ page }) => {
+    await page.setViewportSize({ width, height: 900 });
+    await page.goto("/intelligence?fixture=complete");
+    await expect(page.getByRole("heading", { name: "What changed" })).toBeVisible();
+    const dimensions = await page.evaluate(() => ({
+      scroll: document.documentElement.scrollWidth,
+      client: document.documentElement.clientWidth,
+    }));
+    expect(dimensions.scroll).toBeLessThanOrEqual(dimensions.client);
+  });
+}
+
+test("intelligence disclosures follow visual keyboard order and respect reduced motion", async ({ page }) => {
+  await page.emulateMedia({ reducedMotion: "reduce" });
+  await page.goto("/intelligence?fixture=complete");
+  const history = page.getByText("History, questions, and invalidation");
+  const diagnostics = page.locator("summary").filter({ hasText: "Evidence and diagnostics" });
+  await history.focus();
+  await expect(history).toBeFocused();
+  await page.keyboard.press("Enter");
+  await expect(page.getByRole("heading", { name: "Missing inputs" }).first()).toBeVisible();
+  await diagnostics.focus();
+  await expect(diagnostics).toBeFocused();
+  await page.keyboard.press("Enter");
+  await expect(page.getByRole("heading", { name: "Evidence passages" })).toBeVisible();
+  const transitionSeconds = await diagnostics.evaluate((node) =>
+    Number.parseFloat(getComputedStyle(node).transitionDuration)
+  );
+  expect(transitionSeconds).toBeLessThanOrEqual(0.00001);
+});
+
 for (const route of routes) {
   test(`receipt fixture is accessible at ${route}`, async ({ page }) => {
     await page.goto(`${route}?fixture=complete`);

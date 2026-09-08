@@ -1,0 +1,12 @@
+{
+  "theme_id": "robotics",
+  "title": "Humanoid robot production forecast lifts actuator demand",
+  "summary": "MotionForge Holdings forecasts industrial robots and humanoid robot production will increase demand for actuators and reducers.",
+  "event_type": "forecast",
+  "role": "robot_actuators",
+  "issuers": [
+    {"name": "MotionForge Holdings", "cik": "0000001005", "public": true, "ticker": "MFOR", "exchange": "NASDAQ", "security_id": "sec:MFOR"}
+  ],
+  "organizations": ["MotionForge Holdings"],
+  "expected_candidate_keys": ["sec:MFOR"]
+}

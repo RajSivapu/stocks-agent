@@ -1,0 +1,13 @@
+{
+  "theme_id": "critical_minerals_magnets",
+  "title": "Private magnet recipient expands permanent magnet capacity with Arc Magnetics",
+  "summary": "Niron Research LLC received funding and Arc Magnetics Corporation will supply permanent magnet manufacturing equipment.",
+  "event_type": "awarded_funding",
+  "role": "magnet_manufacturing",
+  "issuers": [
+    {"name": "Niron Research LLC", "cik": null, "public": false},
+    {"name": "Arc Magnetics Corporation", "cik": "0000001001", "public": true, "ticker": "ARCM", "exchange": "NASDAQ", "security_id": "sec:ARCM"}
+  ],
+  "organizations": ["Niron Research LLC", "Arc Magnetics Corporation"],
+  "expected_candidate_keys": ["sec:ARCM"]
+}

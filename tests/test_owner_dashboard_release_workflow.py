@@ -1,5 +1,10 @@
 from pathlib import Path
+import copy
+import hashlib
+import json
 import re
+import shutil
+import subprocess
 import yaml
 
 
@@ -11,6 +16,18 @@ def test_protected_release_and_recovery_are_valid_workflow_yaml():
     ):
         workflow = yaml.safe_load((Path(".github/workflows") / name).read_text())
         assert workflow["jobs"]
+
+
+def test_protected_release_pins_the_supabase_database_root_ca():
+    workflow = yaml.safe_load(Path(".github/workflows/owner-dashboard-release.yml").read_text())
+    release = workflow["jobs"]["release"]
+    assert release["env"]["PGSSLROOTCERT"] == (
+        "${{ github.workspace }}/config/supabase-prod-ca-2021.crt"
+    )
+    certificate = Path("config/supabase-prod-ca-2021.crt").read_bytes()
+    assert hashlib.sha256(certificate).hexdigest() == (
+        "700723581420dd1ac98fd7e9ac529f0ef210eadcaf87fc868a3ad7d114c2f3b7"
+    )
 
 
 def test_ci_fetches_the_audited_baseline_history():
@@ -74,13 +91,329 @@ def test_release_workflow_has_all_mutation_preconditions_and_pinned_tools():
     assert "${{ secrets.SUPABASE_PROJECT_REF }}" in workflow
 
 
-def test_release_workflow_retains_and_restores_rollback_source_until_evidence_is_accepted():
+def test_release_binds_the_approved_pr_head_and_exact_main_ci_metadata():
+    workflow = Path(".github/workflows/owner-dashboard-release.yml").read_text()
+    assert "Exact approved PR head SHA" in workflow
+    assert 'test "$INPUT_REVIEWED_SHA" = "$PR_HEAD_SHA"' in workflow
+    assert "required CI belongs to another repository" in workflow
+    assert "required CI workflow name mismatch" in workflow
+    assert "required CI was not an exact-main push" in workflow
+    assert "reviewed_sha=$PR_HEAD_SHA" in workflow
+
+
+def test_release_authenticates_candidate_before_checkout_dependencies_or_production_secrets():
+    workflow = Path(".github/workflows/owner-dashboard-release.yml").read_text()
+    trust = workflow.index("Authenticate exact reviewed main candidate without candidate code")
+    checkout = workflow.index("uses: actions/checkout@")
+    install = workflow.index("npm ci --ignore-scripts")
+    production_secret = workflow.index("SUPABASE_ACCESS_TOKEN: ${{ secrets.SUPABASE_ACCESS_TOKEN }}")
+    assert trust < checkout < install < production_secret
+    pre_checkout = workflow[trust:checkout]
+    assert "SUPABASE_ACCESS_TOKEN" not in pre_checkout
+    assert "RELEASE_RECOVERY_KEY" not in pre_checkout
+    assert "POSTGRES_URL" not in pre_checkout
+    assert "git/commits/$PR_HEAD_SHA" in pre_checkout
+    assert "git/commits/$CANDIDATE_SHA" in pre_checkout
+    assert "reviewed and candidate Git trees differ" in pre_checkout
+
+
+def test_release_uses_latest_review_per_reviewer_before_exposing_production_secrets():
+    workflow = Path(".github/workflows/owner-dashboard-release.yml").read_text()
+    trust = workflow.split(
+        "- name: Authenticate exact reviewed main candidate without candidate code", 1
+    )[1].split("- uses: actions/checkout", 1)[0]
+    assert "group_by(.user.id)" in trust
+    assert 'max_by([.submitted_at // "", .id])' in trust
+    assert 'all(.state != "CHANGES_REQUESTED")' in trust
+    assert '.state == "APPROVED"' in trust
+    assert "SUPABASE_ACCESS_TOKEN" not in trust
+
+
+def test_release_allows_a_pr_ci_bound_owner_authorization_for_a_solo_repository():
+    workflow = Path(".github/workflows/owner-dashboard-release.yml").read_text()
+    trust = workflow.split(
+        "- name: Authenticate exact reviewed main candidate without candidate code", 1
+    )[1].split("- uses: actions/checkout", 1)[0]
+    assert "pr_ci_workflow_run_id" in workflow
+    assert "PR_CI_WORKFLOW_RUN_ID" in trust
+    assert 'event <<<"$PR_CI")" = pull_request' in trust
+    assert 'head_sha <<<"$PR_CI")" = "$PR_HEAD_SHA"' in trust
+    assert "/issues/$PULL_REQUEST_NUMBER/comments?per_page=100" in trust
+    assert "OWNER_RELEASE_APPROVAL_V1" in trust
+    assert '.author_association == "OWNER"' in trust
+    assert ".user.id == $owner" in trust
+    assert '.created_at >= $pr_ci and .created_at <= .updated_at and .updated_at <= $merged' in trust
+    assert "authorization_kind" in trust and "authorization_id" in trust
+    assert "SUPABASE_ACCESS_TOKEN" not in trust
+
+
+def test_owner_comment_authorization_rejects_a_post_merge_edit():
+    jq = shutil.which("jq")
+    if jq is None:
+        raise AssertionError("jq is required to verify the owner authorization filter")
+    workflow = Path(".github/workflows/owner-dashboard-release.yml").read_text()
+    trust = workflow.split(
+        "- name: Authenticate exact reviewed main candidate without candidate code", 1
+    )[1].split("- uses: actions/checkout", 1)[0]
+    filter_line = next(
+        line.strip() for line in trust.splitlines()
+        if line.strip().startswith('OWNER_APPROVAL="$(jq -c')
+    )
+    owner_filter = filter_line.split(" '[", 1)[1].rsplit("' <<<", 1)[0]
+    owner_filter = "[" + owner_filter
+    body = "OWNER_RELEASE_APPROVAL_V1\nreviewed_sha=" + "a" * 40 + "\npr_ci_workflow_run_id=41"
+
+    def accepted(updated_at):
+        comment = [{"id": 46, "user": {"id": 7}, "author_association": "OWNER",
+            "created_at": "2026-09-05T17:55:00Z", "updated_at": updated_at,
+            "body": body}]
+        result = subprocess.run([
+            jq, "-e", "--arg", "body", body, "--argjson", "owner", "7",
+            "--arg", "pr_ci", "2026-09-05T17:50:00Z",
+            "--arg", "merged", "2026-09-05T18:00:00Z", owner_filter,
+        ], input=json.dumps(comment), text=True, capture_output=True)
+        return result.returncode == 0 and bool(result.stdout.strip())
+
+    assert accepted("2026-09-05T17:55:00Z")
+    assert not accepted("2026-09-05T18:05:00Z")
+
+
+def test_release_requires_pr_ci_to_complete_before_merge():
+    workflow = Path(".github/workflows/owner-dashboard-release.yml").read_text()
+    trust = workflow.split(
+        "- name: Authenticate exact reviewed main candidate without candidate code", 1
+    )[1].split("- uses: actions/checkout", 1)[0]
+    assert '.updated_at >= $head and .updated_at <= $merged' in trust
+
+
+def test_recorded_review_authorization_is_a_current_review_decision():
+    jq = shutil.which("jq")
+    if jq is None:
+        raise AssertionError("jq is required to verify review authorization selection")
+    workflow = Path(".github/workflows/owner-dashboard-release.yml").read_text()
+    trust = workflow.split(
+        "- name: Authenticate exact reviewed main candidate without candidate code", 1
+    )[1].split("- uses: actions/checkout", 1)[0]
+    selection_line = next(
+        line.strip() for line in trust.splitlines()
+        if line.strip().startswith('AUTHORIZATION_ID="$(jq -r --arg sha')
+    )
+    review_filter = selection_line.split(" '[", 1)[1].rsplit("' <<<", 1)[0]
+    review_filter = "[" + review_filter
+    sha = "a" * 40
+    rows = [
+        {"id": 1, "state": "APPROVED", "user": {"id": 11}, "commit_id": sha,
+            "submitted_at": "2026-09-05T17:45:00Z"},
+        {"id": 2, "state": "APPROVED", "user": {"id": 10}, "commit_id": sha,
+            "submitted_at": "2026-09-05T17:46:00Z"},
+        {"id": 3, "state": "DISMISSED", "user": {"id": 10}, "commit_id": sha,
+            "submitted_at": "2026-09-05T17:47:00Z"},
+    ]
+    result = subprocess.run([
+        jq, "-r", "--arg", "sha", sha,
+        "--arg", "head", "2026-09-05T17:40:00Z",
+        "--arg", "merged", "2026-09-05T18:00:00Z", review_filter,
+    ], input=json.dumps(rows), text=True, capture_output=True, check=True)
+    assert result.stdout.strip() == "1"
+
+
+def test_release_executes_exact_review_filter_for_latest_decisions_and_ties():
+    jq = shutil.which("jq")
+    if jq is None:
+        raise AssertionError("jq is required to verify the protected review filter")
+    workflow = Path(".github/workflows/owner-dashboard-release.yml").read_text()
+    trust = workflow.split(
+        "- name: Authenticate exact reviewed main candidate without candidate code", 1
+    )[1].split("- uses: actions/checkout", 1)[0]
+    filter_line = next(
+        line.strip() for line in trust.splitlines()
+        if line.strip().startswith("'[.[] | select(")
+    )
+    review_filter = filter_line.removesuffix(" \\").removeprefix("'").removesuffix("'")
+    sha = "a" * 40
+    base = {
+        "commit_id": sha, "submitted_at": "2026-09-05T17:45:00Z",
+    }
+
+    def accepted(rows):
+        result = subprocess.run([
+            jq, "-e", "--arg", "sha", sha,
+            "--arg", "head", "2026-09-05T17:40:00Z",
+            "--arg", "merged", "2026-09-05T18:00:00Z",
+            "--arg", "candidate", "2026-09-05T18:00:00Z", review_filter,
+        ], input=json.dumps(rows), text=True, capture_output=True)
+        return result.returncode == 0
+
+    assert accepted([{**base, "id": 1, "state": "APPROVED", "user": {"id": 10}}])
+    assert not accepted([
+        {**base, "id": 1, "state": "APPROVED", "user": {"id": 10}},
+        {**base, "id": 2, "state": "CHANGES_REQUESTED", "user": {"id": 10}},
+    ])
+    assert accepted([
+        {**base, "id": 1, "state": "CHANGES_REQUESTED", "user": {"id": 10}},
+        {**base, "id": 2, "state": "DISMISSED", "user": {"id": 10}},
+        {**base, "id": 3, "state": "APPROVED", "user": {"id": 11}},
+    ])
+    assert not accepted([
+        {**base, "id": 1, "state": "APPROVED", "user": {"id": 10}},
+        {**base, "id": 0, "state": "DISMISSED", "user": {"id": 11}},
+    ])
+
+
+def test_candidate_dry_run_and_site_build_steps_do_not_receive_privileged_secrets():
+    workflow = yaml.safe_load(Path(".github/workflows/owner-dashboard-release.yml").read_text())
+    steps = {row.get("name"): row for row in workflow["jobs"]["release"]["steps"]}
+    privileged = {"SUPABASE_ACCESS_TOKEN", "RELEASE_RECOVERY_KEY", "POSTGRES_URL",
+        "SUPABASE_SERVICE_ROLE_KEY", "DASHBOARD_PRIOR_MANAGED_SECRETS_JSON"}
+    dry = steps["Derive protected no-side-effect evidence around the real candidate dry-run"]
+    build = steps["Build candidate Site assets without privileged production credentials"]
+
+    assert privileged.isdisjoint(dry.get("env", {}))
+    assert privileged.isdisjoint(build.get("env", {}))
+    assert "--static-build-receipt" in steps[
+        "Execute protected deployment with encrypted component recovery"
+    ]["run"]
+
+
+def test_protected_workflows_use_the_same_exact_main_ci_trust_contract():
+    required = (
+        "required CI belongs to another repository",
+        "Owner dashboard verification",
+        ".github/workflows/owner-dashboard-ci.yml",
+        "required CI was not an exact-main push",
+    )
+    for path in (
+        ".github/workflows/owner-dashboard-release.yml",
+        ".github/workflows/owner-dashboard-release-recovery.yml",
+        ".github/workflows/managed-isolated-restore.yml",
+    ):
+        workflow = Path(path).read_text()
+        assert all(value in workflow for value in required), path
+
+
+def test_release_record_keeps_release_and_later_scheduled_receipts_distinct():
+    from scripts import write_protected_release_record as writer
+
+    classify = getattr(writer, "release_evidence_classes", None)
+    assert callable(classify)
+    result = classify({
+        "candidate_sha": "a" * 40,
+        "canary": {
+            "status": "verified",
+            "source_reconciliation": "verified",
+            "financial_write_routes": 0,
+            "brokerage_authority": "none",
+            "friend_invitations": "disabled",
+        },
+    })
+    assert result == {
+        "protected_backend": {"status": "verified", "candidate_sha": "a" * 40},
+        "owner_site": {
+            "status": "pending",
+            "required_evidence": "current_authenticated_native_connector_observation",
+        },
+        "operational_scheduled": {
+            "status": "pending",
+            "required_evidence": "normal_post_release_scheduled_receipt",
+        },
+        "discovery_capability": {
+            "status": "pending",
+            "checkpoint": "V1-C3",
+            "required_evidence": "normal_post_release_scheduled_capability_receipt",
+        },
+    }
+
+
+def test_release_record_rejects_a_receipt_from_another_candidate():
+    from scripts import write_protected_release_record as writer
+
+    validate = getattr(writer, "validate_release_identity", None)
+    assert callable(validate)
+    assert validate({"candidate_sha": "a" * 40}, "a" * 40, "b" * 40) == (
+        "a" * 40,
+        "b" * 40,
+    )
+    for receipt, candidate, reviewed in (
+        ({"candidate_sha": "b" * 40}, "a" * 40, "b" * 40),
+        ({"candidate_sha": "a" * 40}, "not-a-sha", "b" * 40),
+        ({"candidate_sha": "a" * 40}, "a" * 40, "NOT-A-SHA"),
+    ):
+        try:
+            validate(receipt, candidate, reviewed)
+        except RuntimeError as error:
+            assert "release identity" in str(error)
+        else:
+            raise AssertionError("invalid release identity was accepted")
+
+
+def test_release_record_writer_emits_backend_only_evidence_contract(tmp_path, monkeypatch):
+    import json
+    import sys
+    from lib.release_baseline import expected_snapshot_tables, pre_migration_omissions
+    from scripts import write_protected_release_record as writer
+
+    (tmp_path / "apps/web").mkdir(parents=True)
+    (tmp_path / "apps/web/main.tsx").write_text("web")
+    (tmp_path / "dist").mkdir()
+    (tmp_path / "dist/index.html").write_text("site")
+    recovery = {"sequence": 1, "run_id": 50, "run_attempt": 2,
+        "captured_at": "2026-09-08T12:00:00Z", "ciphertext_sha256": "d" * 64}
+    receipt = {"candidate_sha": "a" * 40, "deployment_outcome": "succeeded",
+        "migrations": [], "migration_application": {}, "functions": [],
+        "static_assets": {"status": "verified", "candidate_sha": "a" * 40,
+            "files": {"index.html": "f" * 64}},
+        "component_readbacks": [{"component": name, "prior": {"exists": True}}
+            for name in ("market-briefing-gateway", "owner-dashboard-api", "telegram-portfolio")],
+        "backend_evidence": {"manifest_sha256": "b" * 64,
+            "recovery_metadata_sha256": "c" * 64},
+        "recovery_journal": recovery,
+        "canary": {"status": "verified", "source_reconciliation": "verified",
+            "financial_write_routes": 0, "brokerage_authority": "none",
+            "friend_invitations": "disabled"}}
+    names = expected_snapshot_tables(pre_migration_omissions()) or ()
+    tables = {name: {"count": 0, "rows_sha256": "0" * 64} for name in names}
+    dry = {
+        "before": {"tables": tables, "pre_migration_omissions": pre_migration_omissions()},
+        "after": {"tables": copy.deepcopy(tables), "pre_migration_omissions": pre_migration_omissions()},
+        "table_deltas": {name: 0 for name in names},
+    }
+    receipt_path, dry_path, output = (tmp_path / name for name in ("receipt.json", "dry.json", "record.json"))
+    receipt_path.write_text(json.dumps(receipt)); dry_path.write_text(json.dumps(dry))
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(sys, "argv", ["writer", "--receipt", str(receipt_path),
+        "--dry-run-evidence", str(dry_path), "--output", str(output),
+        "--candidate-sha", "a" * 40, "--reviewed-sha", "f" * 40,
+        "--repository", "owner/stocks-agent", "--ci-workflow-run-id", "40",
+        "--pr-ci-workflow-run-id", "39", "--authorization-kind", "owner_comment",
+        "--authorization-id", "38",
+        "--release-workflow-run-id", "50", "--release-workflow-run-attempt", "2",
+        "--pull-request-number", "44", "--deployment-id", "42",
+        "--backend-evidence-artifact-id", "60",
+        "--backend-evidence-artifact-name", "backend-component-evidence-50-2",
+        "--backend-evidence-artifact-digest", "sha256:" + "e" * 64,
+        "--project-ref", "p" * 20])
+
+    assert writer.main() == 0
+    record = json.loads(output.read_text())
+    assert record["backend_evidence_artifact"] == {"artifact_id": 60,
+        "name": "backend-component-evidence-50-2", "digest": "sha256:" + "e" * 64,
+        "manifest_sha256": "b" * 64, "recovery_metadata_sha256": "c" * 64}
+    assert record["recovery_journal"] == recovery
+    assert record["release_authorization"] == {"kind": "owner_comment", "id": 38,
+        "pr_ci_workflow_run_id": 39}
+    assert record["evidence_classes"]["owner_site"]["status"] == "pending"
+    assert all(row["artifact_id"] == 60 for row in record["component_readbacks"])
+
+
+def test_release_workflow_retains_and_restores_encrypted_backend_state_until_evidence_is_accepted():
     workflow = Path(".github/workflows/owner-dashboard-release.yml").read_text()
     assert "restore_gateway_after_release_failure.py" in workflow
     assert "trap 'restore_after_failure' ERR" in workflow
     assert "RELEASE_RECOVERY_KEY" in workflow
     assert "Release local rollback worktree" not in workflow
-    assert "rollback_readiness" in Path("scripts/write_protected_release_record.py").read_text()
+    writer = Path("scripts/write_protected_release_record.py").read_text()
+    assert '"recovery_journal"' in writer
+    assert '"backend_evidence_artifact"' in writer
     assert "dry-run-evidence.json" in workflow
 
 
@@ -105,17 +438,29 @@ def test_final_release_workflow_keeps_all_ephemera_outside_the_checkout_and_uses
     assert "npx playwright install --with-deps chromium" in workflow
     assert "cryptography==" in Path("requirements.lock").read_text()
     assert '"$PR_HEAD_SHA"' in workflow
-    assert "reviewed head does not bind candidate" in workflow
+    assert "reviewed and candidate Git trees differ" in workflow
 
 
 def test_release_workflow_binds_review_times_and_durable_pre_mutation_recovery():
     workflow = Path(".github/workflows/owner-dashboard-release.yml").read_text()
     assert 'PYTHON_BIN="$RELEASE_VENV/bin/python"' in workflow
-    assert 'head_commit_time <= review.submitted_at <= merged_at <= candidate_commit_time' in workflow
+    assert 'head_commit_time <= latest review.submitted_at <= merged_at <= candidate_commit_time' in workflow
     assert "component-recovery-run:$GITHUB_RUN_ID" in workflow
-    assert "release_components.py --check-transport" in workflow
+    assert "release_components.py --check-backend-transport" in workflow
     assert Path(".github/workflows/owner-dashboard-release-recovery.yml").is_file()
-    assert workflow.index("release_components.py --check-transport") < workflow.index("Create the candidate-bound GitHub Deployment")
+    assert workflow.index("release_components.py --check-backend-transport") < workflow.index("Create the candidate-bound GitHub Deployment")
+
+
+def test_backend_release_does_not_claim_or_require_native_site_deployment():
+    workflow = Path(".github/workflows/owner-dashboard-release.yml").read_text()
+    writer = Path("scripts/write_protected_release_record.py").read_text()
+    assert "--check-transport" not in workflow
+    assert "--check-backend-transport" in workflow
+    assert "owner-web-site" not in writer.split("component_readbacks", 1)[1].split("]", 1)[0]
+    assert '"owner_site"' in writer
+    rollout = Path("docs/rollouts/2026-09-06-market-wide-thematic-discovery-v1.md").read_text()
+    assert "Fresh direct connector observations" in rollout
+    assert "saved JSON copy" in rollout
 
 
 def test_independent_recovery_contract_covers_cancelled_and_lost_release_runners():
@@ -185,7 +530,7 @@ def test_protected_release_and_recovery_install_only_the_complete_hashed_lock():
 
 def test_release_exports_candidate_for_every_set_u_dry_run_and_recovery_step():
     workflow = Path(".github/workflows/owner-dashboard-release.yml").read_text()
-    assert 'echo "CANDIDATE_SHA=$CANDIDATE_SHA" >> "$GITHUB_ENV"' in workflow
+    assert 'echo "CANDIDATE_SHA=${{ steps.candidate.outputs.candidate_sha }}" >> "$GITHUB_ENV"' in workflow
     assert 'CANDIDATE_SHA: ${{ steps.candidate.outputs.candidate_sha }}' in workflow
     assert 'state=in_progress' in workflow
 
@@ -193,7 +538,8 @@ def test_release_exports_candidate_for_every_set_u_dry_run_and_recovery_step():
 def test_release_and_recovery_use_separate_safe_actions_concurrency_boundaries():
     workflow = Path(".github/workflows/owner-dashboard-release.yml").read_text()
     recovery = Path(".github/workflows/owner-dashboard-release-recovery.yml").read_text()
-    assert "rollback-source-" in workflow and "recovery-metadata-" in workflow
+    assert "backend-component-evidence-" in workflow
+    assert "recovery-metadata.json" in Path("scripts/configured_native_release_adapter.py").read_text()
     assert "group: protected-owner-dashboard-release-production" in workflow
     assert "group: protected-owner-dashboard-release-production-${{" not in workflow
     assert "group: protected-owner-dashboard-release-recovery-${{ github.event.workflow_run.id }}-${{ github.event.workflow_run.run_attempt }}" in recovery
@@ -208,6 +554,8 @@ def test_release_and_recovery_use_separate_safe_actions_concurrency_boundaries()
     finalizer = Path("scripts/finalize_protected_release.py").read_text()
     assert "finalize_protected_release.py" in workflow and "state=success" in finalizer
     assert workflow.index("Upload immutable release record") < workflow.index("Mark candidate deployment successful")
+    assert workflow.index("Mark candidate deployment successful") < workflow.index("Restore changed components if any post-deploy evidence step failed")
+    assert workflow.index("Restore changed components if any post-deploy evidence step failed") < workflow.index("Mark candidate deployment failed after protected restoration")
     assert "steps.deployment.outputs.required" not in recovery
     assert "Restore encrypted changed-component journal" in recovery
 

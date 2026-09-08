@@ -36,6 +36,15 @@ def _evidence_priority(item: SourceItem) -> tuple[int, str]:
     return authority, evidence_key(item)
 
 
+def _is_adverse(item: SourceItem) -> bool:
+    return (
+        item.claim_polarity == "denied"
+        or item.metadata.get("claim_polarity") == "denied"
+        or item.metadata.get("adverse_path") is True
+        or item.metadata.get("role") == "opposing"
+    )
+
+
 @dataclass(frozen=True, slots=True)
 class EventRelationship:
     event_id: str
@@ -43,6 +52,7 @@ class EventRelationship:
     source_key: str
     target_kind: str
     target_key: str
+    security_id: str
     ticker: str
     role: str
     relationship_type: str
@@ -53,12 +63,14 @@ class EventRelationship:
     hypothesis: bool
     missing_reasons: tuple[str, ...]
     dropped_evidence_keys: tuple[str, ...]
+    dropped_exposure_fact_ids: tuple[str, ...] = ()
 
 
 def propose_relation(
     event: MarketEvent,
     *,
     ticker: str,
+    security_id: str | None = None,
     role: str,
     evidence: Sequence[SourceItem],
 ) -> EventRelationship:
@@ -70,8 +82,20 @@ def propose_relation(
         raise ValueError("relationship role is required")
     unique = {evidence_key(item): item for item in evidence}
     ordered = sorted(unique.values(), key=_evidence_priority)
-    retained = tuple(ordered[:8])
-    dropped = tuple(evidence_key(item) for item in reversed(ordered[8:]))
+    decisive = next((item for item in ordered if qualifies_exposure((item,))), None)
+    prioritized: list[SourceItem] = []
+    prioritized_ids: set[str] = set()
+    for item in (
+        *((decisive,) if decisive is not None else ()),
+        *(value for value in ordered if _is_adverse(value)),
+        *ordered,
+    ):
+        item_id = evidence_key(item)
+        if item_id not in prioritized_ids:
+            prioritized.append(item)
+            prioritized_ids.add(item_id)
+    retained = tuple(prioritized[:8])
+    dropped = tuple(evidence_key(item) for item in reversed(prioritized[8:]))
     exposures = tuple(item for item in retained if qualifies_exposure((item,)))
     eligible = bool(retained) and bool(exposures)
     missing: list[str] = []
@@ -80,12 +104,16 @@ def propose_relation(
     if not exposures:
         missing.append("authoritative_exposure_required")
     relationship_type = "direct" if role_value in _DIRECT_ROLES else "second_order"
+    security_value = str(security_id or ticker_value).strip()
+    if not security_value or len(security_value) > 160:
+        raise ValueError("security ID must be bounded")
     return EventRelationship(
         event_id=event.event_id,
         source_kind="event",
         source_key=event.event_id,
         target_kind="security",
-        target_key=ticker_value,
+        target_key=security_value,
+        security_id=security_value,
         ticker=ticker_value,
         role=role_value,
         relationship_type=relationship_type,

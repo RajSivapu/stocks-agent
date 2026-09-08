@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<rss version="2.0">
+  <channel>
+    <title>Today in Energy</title>
+    <link>https://www.eia.gov/todayinenergy/</link>
+    <description>U.S. Energy Information Administration analysis</description>
+    <item>
+      <guid isPermaLink="false">eia-tie-2001</guid>
+      <title>Regional electricity demand reached a new seasonal high</title>
+      <link>https://www.eia.gov/todayinenergy/detail.php?id=2001</link>
+      <description>Demand and generation data for the latest reporting period.</description>
+      <pubDate>Mon, 07 Sep 2026 13:00:00 GMT</pubDate>
+    </item>
+  </channel>
+</rss>

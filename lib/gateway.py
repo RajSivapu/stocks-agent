@@ -30,6 +30,14 @@ OPERATIONS = (
     "collect_intelligence_quote",
     "record_report",
     "record_learning",
+    "record_discovery_reference",
+    "checkpoint_discovery_stage",
+    "read_discovery_context",
+    "begin_discovery_reference",
+    "record_discovery_reference_chunk",
+    "finalize_discovery_reference",
+    "pin_discovery_reference",
+    "read_discovery_reference",
 )
 MAX_REQUEST_BYTES = 262_144
 MAX_RESPONSE_BYTES = 1_048_576
@@ -94,7 +102,7 @@ def call(
     run_id: str | None = None,
     dry_run: bool = False,
     request_id: str | None = None,
-    timeout: int = 30,
+    timeout: float = 30,
     _opener: Callable[..., Any] | None = None,
 ) -> dict[str, Any]:
     """Call one allow-listed operation without exposing broad Supabase credentials."""
@@ -111,8 +119,11 @@ def call(
         raise ValueError("run_id must be a canonical UUID")
     if not isinstance(dry_run, bool):
         raise ValueError("dry_run must be boolean")
-    if not isinstance(timeout, int) or isinstance(timeout, bool) or not 1 <= timeout <= 60:
-        raise ValueError("timeout must be between 1 and 60 seconds")
+    if (
+        not isinstance(timeout, (int, float)) or isinstance(timeout, bool)
+        or not 0 < timeout <= 60
+    ):
+        raise ValueError("timeout must be greater than 0 and at most 60 seconds")
 
     envelope = {
         "dry_run": dry_run,

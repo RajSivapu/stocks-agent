@@ -1,6 +1,10 @@
-import { classifyFreshness } from "./freshness.ts";
+import { classifyFreshness, NYSE_MARKET_CALENDAR } from "./freshness.ts";
 
-const calendar = { holidays: ["2026-09-07", "2026-11-26", "2026-12-25"] };
+const calendar = {
+  holidays: ["2026-09-07", "2026-11-26", "2026-12-25"],
+  earlyCloses: [],
+  coverage: { startYear: 2026, endYear: 2028 },
+};
 
 function assertEquals(actual: unknown, expected: unknown): void {
   if (JSON.stringify(actual) !== JSON.stringify(expected)) {
@@ -73,4 +77,26 @@ Deno.test("the prior close becomes stale after the next pre-market deadline", ()
   }, new Date("2026-09-08T12:05:00.000Z"), calendar);
   assertEquals(result.freshness, "stale");
   assertEquals(result.marketState, "pre_market");
+});
+
+Deno.test("canonical dashboard calendar uses 2027-2028 closures and fails closed in 2029", () => {
+  assertEquals(classifyFreshness({
+    kind: "price", dataAsOf: "2027-07-02T20:00:00.000Z", sourceMarketState: "CLOSED",
+  }, new Date("2027-07-05T16:00:00.000Z"), NYSE_MARKET_CALENDAR).marketState, "as_of_close");
+  assertEquals(classifyFreshness({
+    kind: "price", dataAsOf: "2029-01-02T16:00:00.000Z", sourceMarketState: "REGULAR",
+  }, new Date("2029-01-02T16:05:00.000Z"), NYSE_MARKET_CALENDAR).freshness, "unavailable");
+});
+
+Deno.test("early close drives price freshness while report freshness keeps its configured deadlines", () => {
+  const now = new Date("2028-07-03T17:10:00.000Z"); // 13:10 ET
+  const price = classifyFreshness({
+    kind: "price", dataAsOf: "2028-07-03T17:00:00.000Z", sourceMarketState: "CLOSED",
+  }, now, NYSE_MARKET_CALENDAR);
+  assertEquals(price.freshness, "fresh");
+  assertEquals(price.marketState, "as_of_close");
+  assertEquals(classifyFreshness({
+    kind: "brief", phase: "pre-market", status: "delivered",
+    dataAsOf: "2028-07-03T12:05:00.000Z",
+  }, now, NYSE_MARKET_CALENDAR).freshness, "fresh");
 });

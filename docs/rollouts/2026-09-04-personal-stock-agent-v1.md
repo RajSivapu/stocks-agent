@@ -2,6 +2,12 @@
 
 Status: **implementation deployed; the next existing scheduled V1 intelligence/report receipt is pending**.
 
+This is the immutable operational record for the September 4/current-runtime release. September 8
+receipts from that runtime may close its own scheduled-operation checks, but they cannot prove the
+later market-wide V1-C3 capability. The separate local candidate, protected-release requirements,
+and post-release capability receipt are recorded in
+`docs/rollouts/2026-09-06-market-wide-thematic-discovery-v1.md`.
+
 ## Immutable release boundary
 
 - Owner-only, friend invitations disabled, suggestion-only, brokerage-free, and zero incremental cost.
@@ -60,3 +66,8 @@ Status: **implementation deployed; the next existing scheduled V1 intelligence/r
 ## Remaining scheduled gate
 
 The 2026-09-04 post-market run (`9dfee973-e678-4910-8e1e-a1f541a68806`) completed successfully but began before V1 reached `main`; it produced no V1 intelligence or report rows and is not claimed as V1 evidence. The existing rollout heartbeat is scheduled to inspect the next eligible routine after the merge, without starting a duplicate. C6 and the full V1 completion claim remain fail-closed until one scheduled run provides the linked analysis run, intelligence run, packet/hash, report/hash, gateway publication receipt, source/quota receipts, and dashboard/database reconciliation.
+
+This gate applies only to the runtime identified above. It must remain separate from both the
+protected multi-component release receipt for the market-wide candidate and that candidate's first
+normal scheduled V1-C3 capability receipt. No historical operational receipt may be relabeled as
+market-wide capability evidence.

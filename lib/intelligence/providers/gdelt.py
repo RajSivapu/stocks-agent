@@ -1,7 +1,12 @@
 from datetime import timezone
+from types import MappingProxyType
 from urllib.parse import urlencode
 
 from lib.intelligence.http import HttpRequest
+from lib.intelligence.themes import (
+    source_dynamic_theme_label,
+    source_syndication_fingerprint,
+)
 
 from . import CollectionQuery, SourceAdapter, publisher_reference, security_ids
 
@@ -41,6 +46,28 @@ class GdeltAdapter(SourceAdapter):
             "security_ids": security_ids(query.symbols),
             "metadata": {
                 key: article[key]
-                for key in ("domain", "language", "sourcecountry") if key in article
-            } | publisher_reference(article.get("url")),
+                for key in (
+                    "domain", "language", "sourcecountry", "syndication_id",
+                    "canonical_article_id", "wire_story_id", "original_story_id",
+                ) if key in article
+            } | publisher_reference(article.get("url")) | ({
+                "dynamic_theme_label": label,
+                "dynamic_theme_origin": "source_title_prefix",
+            } if (label := source_dynamic_theme_label(article.get("title"))) else {}) | ({
+                "syndication_fingerprint": fingerprint,
+                "syndication_origin": "normalized_source_headline",
+            } if (fingerprint := source_syndication_fingerprint(
+                article.get("title")
+            )) else {}),
         } for article in articles if isinstance(article, dict)]
+
+    def _progress_metadata(self, payload, query, response, records, bound):
+        saturated = len(records) >= bound
+        return MappingProxyType({
+            "truncated": saturated,
+            "backlog_remaining": False,
+            **({
+                "continuation_unavailable": True,
+                "coverage_gap": True,
+            } if saturated else {}),
+        })

@@ -1,0 +1,180 @@
+{
+  "anchor_canonical_json": "{\"authoritative_id\":\"award:doe:MAGNET-2026-17\",\"effective_period\":{\"end\":null,\"start\":\"2026-09-01\"},\"identity_version\":2,\"jurisdiction\":\"US\",\"subject_identity\":\"entity:niron-magnetics\",\"theme_id\":\"critical_minerals_magnets\",\"theme_mechanism\":\"domestic_magnet_capacity\"}",
+  "anchor_document": {
+    "authoritative_id": "award:doe:MAGNET-2026-17",
+    "effective_period": {
+      "end": null,
+      "start": "2026-09-01"
+    },
+    "identity_version": 2,
+    "jurisdiction": "US",
+    "subject_identity": "entity:niron-magnetics",
+    "theme_id": "critical_minerals_magnets",
+    "theme_mechanism": "domestic_magnet_capacity"
+  },
+  "anchor_hash": "dfdc8e5b74d6cedf77ff47edbe7b6d2a4d9e71fa8ed1254ef9f6adeb7efcd62d",
+  "content_hash": "ac29093d453dedcf6ae071395cacf84ceac468c9ff86e058123fc7af66b99b66",
+  "episode_id": "e29c5777-0616-5e33-849a-850e99020ab5",
+  "event": {
+    "authoritative_id": "award:doe:MAGNET-2026-17",
+    "effective_period": {
+      "end": null,
+      "start": "2026-09-01"
+    },
+    "expires_at": "2026-10-02T14:00:00.000Z",
+    "invalidation_conditions": [
+      "Program award is rescinded"
+    ],
+    "investigated_entity_ids": [
+      "entity:niron-magnetics"
+    ],
+    "jurisdiction": "US",
+    "missing_questions": [
+      "\ud800\udc00 supplementary question",
+      "\ue000 private-use question"
+    ],
+    "next_review_at": "2026-09-15T14:00:00.000Z",
+    "observed_at": "2026-09-12T14:00:00.000Z",
+    "source_evidence": [
+      {
+        "evidence_id": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+        "polarity": "supporting",
+        "story_identity": "\ud800\udc00-supplementary-story"
+      },
+      {
+        "evidence_id": "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+        "polarity": "opposing",
+        "story_identity": "\ue000-private-use-story"
+      }
+    ],
+    "subject_identity": "entity:niron-magnetics",
+    "theme_id": "critical_minerals_magnets",
+    "theme_mechanism": "domestic_magnet_capacity",
+    "wording": "New magnet plant"
+  },
+  "origin_run_id": "11111111-1111-4111-8111-111111111111",
+  "persistence_canonical_json": "{\"added_source_ids\":[\"aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa\",\"bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb\"],\"anchor_hash\":\"dfdc8e5b74d6cedf77ff47edbe7b6d2a4d9e71fa8ed1254ef9f6adeb7efcd62d\",\"authoritative_id\":\"award:doe:MAGNET-2026-17\",\"closure_reason\":null,\"effective_period_end\":null,\"effective_period_start\":\"2026-09-01\",\"episode_id\":\"e29c5777-0616-5e33-849a-850e99020ab5\",\"execution_allowed\":false,\"expires_at\":\"2026-10-02T14:00:00.000Z\",\"first_seen\":\"2026-09-12T14:00:00.000Z\",\"identity_version\":2,\"invalidation_conditions\":[\"Program award is rescinded\"],\"investigated_entity_ids\":[\"entity:niron-magnetics\"],\"jurisdiction\":\"US\",\"last_seen\":\"2026-09-12T14:00:00.000Z\",\"missing_questions\":[\"\ue000 private-use question\",\"\ud800\udc00 supplementary question\"],\"next_review_at\":\"2026-09-15T14:00:00.000Z\",\"opposing_source_ids\":[\"bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb\"],\"origin_run_id\":\"11111111-1111-4111-8111-111111111111\",\"predecessor_content_hash\":null,\"predecessor_revision_id\":null,\"reopen_reason\":null,\"revision\":1,\"source_ids\":[\"aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa\",\"bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb\"],\"source_membership\":[{\"evidence_id\":\"bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb\",\"polarity\":\"opposing\",\"story_identity\":\"\ue000-private-use-story\"},{\"evidence_id\":\"aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa\",\"polarity\":\"supporting\",\"story_identity\":\"\ud800\udc00-supplementary-story\"}],\"state\":\"open\",\"subject_identity\":\"entity:niron-magnetics\",\"supporting_source_ids\":[\"aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa\"],\"theme_id\":\"critical_minerals_magnets\",\"theme_mechanism\":\"domestic_magnet_capacity\"}",
+  "persistence_document": {
+    "added_source_ids": [
+      "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+      "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb"
+    ],
+    "anchor_hash": "dfdc8e5b74d6cedf77ff47edbe7b6d2a4d9e71fa8ed1254ef9f6adeb7efcd62d",
+    "authoritative_id": "award:doe:MAGNET-2026-17",
+    "closure_reason": null,
+    "effective_period_end": null,
+    "effective_period_start": "2026-09-01",
+    "episode_id": "e29c5777-0616-5e33-849a-850e99020ab5",
+    "execution_allowed": false,
+    "expires_at": "2026-10-02T14:00:00.000Z",
+    "first_seen": "2026-09-12T14:00:00.000Z",
+    "identity_version": 2,
+    "invalidation_conditions": [
+      "Program award is rescinded"
+    ],
+    "investigated_entity_ids": [
+      "entity:niron-magnetics"
+    ],
+    "jurisdiction": "US",
+    "last_seen": "2026-09-12T14:00:00.000Z",
+    "missing_questions": [
+      "\ue000 private-use question",
+      "\ud800\udc00 supplementary question"
+    ],
+    "next_review_at": "2026-09-15T14:00:00.000Z",
+    "opposing_source_ids": [
+      "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb"
+    ],
+    "origin_run_id": "11111111-1111-4111-8111-111111111111",
+    "predecessor_content_hash": null,
+    "predecessor_revision_id": null,
+    "reopen_reason": null,
+    "revision": 1,
+    "source_ids": [
+      "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+      "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb"
+    ],
+    "source_membership": [
+      {
+        "evidence_id": "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+        "polarity": "opposing",
+        "story_identity": "\ue000-private-use-story"
+      },
+      {
+        "evidence_id": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+        "polarity": "supporting",
+        "story_identity": "\ud800\udc00-supplementary-story"
+      }
+    ],
+    "state": "open",
+    "subject_identity": "entity:niron-magnetics",
+    "supporting_source_ids": [
+      "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
+    ],
+    "theme_id": "critical_minerals_magnets",
+    "theme_mechanism": "domestic_magnet_capacity"
+  },
+  "persistence_row": {
+    "added_source_ids": [
+      "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+      "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb"
+    ],
+    "anchor_hash": "dfdc8e5b74d6cedf77ff47edbe7b6d2a4d9e71fa8ed1254ef9f6adeb7efcd62d",
+    "authoritative_id": "award:doe:MAGNET-2026-17",
+    "closure_reason": null,
+    "content_hash": "ac29093d453dedcf6ae071395cacf84ceac468c9ff86e058123fc7af66b99b66",
+    "effective_period_end": null,
+    "effective_period_start": "2026-09-01",
+    "episode_id": "e29c5777-0616-5e33-849a-850e99020ab5",
+    "execution_allowed": false,
+    "expires_at": "2026-10-02T14:00:00.000Z",
+    "first_seen": "2026-09-12T14:00:00.000Z",
+    "identity_version": 2,
+    "invalidation_conditions": [
+      "Program award is rescinded"
+    ],
+    "investigated_entity_ids": [
+      "entity:niron-magnetics"
+    ],
+    "jurisdiction": "US",
+    "last_seen": "2026-09-12T14:00:00.000Z",
+    "missing_questions": [
+      "\ue000 private-use question",
+      "\ud800\udc00 supplementary question"
+    ],
+    "next_review_at": "2026-09-15T14:00:00.000Z",
+    "opposing_source_ids": [
+      "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb"
+    ],
+    "origin_run_id": "11111111-1111-4111-8111-111111111111",
+    "predecessor_content_hash": null,
+    "predecessor_revision_id": null,
+    "reopen_reason": null,
+    "revision": 1,
+    "revision_id": "e5b0382d-d35e-5b0e-ae0e-7a7a07dd1dae",
+    "source_ids": [
+      "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+      "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb"
+    ],
+    "source_membership": [
+      {
+        "evidence_id": "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+        "polarity": "opposing",
+        "story_identity": "\ue000-private-use-story"
+      },
+      {
+        "evidence_id": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+        "polarity": "supporting",
+        "story_identity": "\ud800\udc00-supplementary-story"
+      }
+    ],
+    "state": "open",
+    "subject_identity": "entity:niron-magnetics",
+    "supporting_source_ids": [
+      "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
+    ],
+    "theme_id": "critical_minerals_magnets",
+    "theme_mechanism": "domestic_magnet_capacity"
+  },
+  "revision_id": "e5b0382d-d35e-5b0e-ae0e-7a7a07dd1dae"
+}

@@ -1,6 +1,6 @@
 # Stocks Agent — Roadmap and Deployment Status
 
-Last updated: 2026-09-06.
+Last updated: 2026-09-08.
 
 This repository is owner-only, suggestion-only decision support plus portfolio recordkeeping. It
 has no brokerage credentials or order endpoints and never places, modifies, or cancels a trade.
@@ -13,7 +13,9 @@ and rollout order. `docs/HANDOFF.md` is ignored and is not a source of truth.
 ## Current release status
 
 Owner-only Site v9 is live from UI main `e2f9d74`, which passed exact-main CI `34073314211`; V1
-trusted use remains **no-go** pending the next existing scheduled evidence chain. Approved production schema reconciliation
+trusted use remains **no-go** pending the next existing scheduled evidence chain and the protected
+release plus normal capability proof for the locally complete market-wide V1-C3 implementation.
+Approved production schema reconciliation
 `34039011879` succeeded exactly once. Managed isolated restore `34042155368` succeeded on main
 `bd1cee2317a8689b8ac5a55fb38b853e7320bbfb`. The unchanged backend remains attested at main
 `b3f7d70` by protected one-time existing-runtime attestation `34055419086`.
@@ -24,6 +26,24 @@ See `PROJECT_STATUS.md` for archive hashes. Do not rerun reconciliation or resto
 
 Telegram is the primary timely decision surface. The owner-only web app is a compact portfolio,
 history, reconciliation, and audit-evidence surface—not a continuously live trading terminal.
+
+The approved market-wide implementation is locally complete and review-clean through Task 10 at
+`18386b5c76c7a7aa8b3eeda870b12d3aba2399e1`. It adds the capability planner, dated SEC reference,
+official-source collection and cursors, ticker-free event/entity resolution, bounded primary
+exposure enrichment, explicit screen feasibility, separate research/suitability/action lanes, theme
+memory and research nominations, a release-blocking capability verifier, and one canonical NYSE
+calendar through 2028. The local acceptance gate passed; no protected release or scheduled run was
+triggered. The final corrected release-candidate gate passed 2,030 checks, with only documented skips and
+credentialed test deselections. See `docs/rollouts/2026-09-06-market-wide-thematic-discovery-v1.md`
+for the exact boundary.
+
+The next release uses the protected GitHub path for the database, all three changed Edge functions,
+and managed runtime configuration, followed by native owner-scoped Sites publication of the exact
+same candidate. Its immutable discovery migration tail
+starts at `20261005_market_wide_discovery.sql` and ends at
+`20261014_honest_empty_report_persistence.sql`; `20261004` remains the separate historical
+reconciliation baseline. Protected backend proof, native Sites proof, normal scheduled operational
+proof, and V1-C3 capability proof are four distinct receipts. None of the new production receipts exists yet.
 
 - [x] PR #10 fixed the Management API `User-Agent` and moved the production reference binding to a
   masked environment secret; exact-main `4003437` CI passed.
@@ -53,8 +73,9 @@ history, reconciliation, and audit-evidence surface—not a continuously live tr
 - [ ] Next existing scheduled receipt, without a duplicate run.
 
 Final fix wave Track C: immutable audited migrations are restored and the additive tail is now
-`20261001_immutable_history_closure.sql`. Local upgrade, encrypted recovery, four-artifact verifier,
-and workflow tests are covered, including an actual disposable PostgreSQL upgrade and restore.
+`20261001_immutable_history_closure.sql`. Local upgrade, encrypted recovery, backend-component
+verification, the separate native Site package comparator, and workflow tests are covered,
+including an actual disposable PostgreSQL upgrade and restore.
 Recovery now includes policy comparisons and their decision-evaluation dependencies.
 
 The protected main/recovery entrypoints share the component engine and the concrete
@@ -62,12 +83,13 @@ The protected main/recovery entrypoints share the component engine and the concr
 restores runtime role attributes/verifier/memberships/settings, recoverable secret values/digests,
 and exact downloaded bytes/configuration for all three Edge functions. Unchanged readback is a
 recovery no-op; restored Edge versions are newly allocated and recorded alongside prior identities.
-The unchanged `.openai/hosting.json` remains the sole zero-cost Site target. Its callable CI management
-transport remains unavailable, so the mutation workflow correctly blocks before mutation. GPT-6 Astra
-accepted that fail-closed boundary. Owner-operated native Site publication now supplies a fresh,
-bounded platform receipt to the approved split-trust attestation; no caller-authored substitute is
-accepted. The later Site-only UI release uses the same native owner-scoped path with exact source,
-verified build, owner-only access, deployment, live-script, and rollback evidence; it changes no
+The unchanged `.openai/hosting.json` remains the sole zero-cost Site target. GitHub Actions has no
+native Sites connector and receives no Sites write credential, so the protected mutation workflow
+now releases only the backend. Owner-operated native Site publication is verified from fresh direct connector reads for the exact
+same candidate. `scripts/verify_native_site_release.py` compares the local package to the protected
+build and always leaves `owner_site` pending; copied JSON cannot establish connector provenance. The
+later Site-only UI release uses the same native owner-scoped path with exact source, verified build,
+owner-only access, deployment, authenticated live-script parity, and a provider-retained rollback target; it changes no
 backend component. Protected GitHub readback independently verified the unchanged Supabase database, Auth,
 managed-secret bindings, deployed Edge bytes, and API behavior in run `34055419086`. The final focused review,
 consolidated 1,197-test gate, GPT-6 Astra scoped re-review, historical CI, owner-operated Edge
@@ -211,12 +233,14 @@ Still required:
    same signed-link callback reserved for setup, recovery, and fallback.**
 5. Approved schema reconciliation and protected isolated restore with recovery receipts.
    **Complete** (`34039011879`, `34042155368`); do not rerun.
-6. Protected existing-runtime attestation receipt **complete** (`34055419086`); next existing
-   scheduled intelligence/report/publication receipt chain remains, without a duplicate run.
+6. Protected existing-runtime attestation receipt **complete** (`34055419086`); the next existing
+   scheduled intelligence/report/publication receipt chain remains, without a duplicate run, and is
+   operational evidence for the current runtime only. Approved V1-C3 market-wide discovery
+   implementation, protected release, owner Site readback, and new normal receipts also remain.
 
-Until all six gates pass, V1-C2 through V1-C6 remain reopened and the system stays in limited
-owner-only research/shadow use. Positions, cash, prices, and calculations must be independently
-verified before the owner acts.
+Until the six current-runtime gates and the approved V1-C3 market-wide discovery gates pass, V1-C2
+through V1-C6 remain reopened and the system stays in limited owner-only research/shadow use.
+Positions, cash, prices, and calculations must be independently verified before the owner acts.
 
 ## Exact remaining handoff boundary
 
@@ -234,7 +258,43 @@ receipt with protected GitHub readback and emitted bounded immutable attestation
 without production or scheduled-run mutation. It sealed full reconciliation-root equality once,
 before normal scheduled data growth, and must not be rerun. The restricted scheduled-evidence reader is still unavailable;
 observe an existing persisted chain when available and never dispatch a duplicate. The live app
-remains limited owner research/shadow use until the scheduled gate passes.
+remains limited owner research/shadow use until the current scheduled gate, approved V1-C3
+implementation, protected release, owner Site readback, and new capability receipts all pass.
+
+## Approved work after September 8 scheduled evidence
+
+The September 8 morning run validates the currently deployed operational chain. Preserve its normal
+receipt, then let the existing verification heartbeat reconcile the later intraday/post-market and
+September 11 Friday evidence. Do not trigger an extra market or Telegram run for inspection.
+
+Market-wide thematic discovery remains original V1-C3 scope. Two GPT-6 Astra reviews identified the
+gap between configured themes and actual runtime capability. The approved
+`docs/superpowers/specs/2026-09-06-market-wide-thematic-discovery-v1-design.md` and
+`docs/superpowers/plans/2026-09-06-market-wide-thematic-discovery-v1-implementation.md` now have this
+status:
+
+1. **Complete locally:** versioned capability registry, fair stage planner, durable cursors, and
+   dated U.S.-listed security reference.
+2. **Complete locally:** ticker-free events, entity/security resolution, adverse-aware value-chain
+   paths, bounded role/theme reverse discovery for previously unseen issuers, and bounded primary
+   exposure evidence.
+3. **Complete locally:** broad-screen feasibility states. Transports that do not pass zero-cost and
+   retention review remain disabled or unsupported with zero requests.
+4. **Complete locally:** separate research eligibility, portfolio suitability, and action
+   authorization, plus bounded theme history and next-run research nominations.
+5. **Complete locally:** thematic, held-out-sector, adversarial, restart, quota, recovery, capacity,
+   and 2026–2028 NYSE calendar acceptance. Exact-code Sol and flagship reviews are CLEAN at
+   `f7e8236`. PR #35's first protected CI exposed a missing test-only `pglast` lock entry; `b789e0e`
+   corrected the hash-locked requirements and passed a clean-environment reproduction. `248366e`
+   adds the exact-head, successful-PR-CI-bound owner authorization required by this single-owner
+   repository while retaining separate GitHub review support. **Pending:** corrected-head review and
+   protected CI.
+6. **Pending production:** protected backend release/readback, separate exact-candidate native Sites
+   publication with fresh direct connector and live-file proof, retained prior-version proof, then normal scheduled operational and capability receipts before V1-C3 and
+   the final V1 checklist close.
+
+Alert V3 remains a later, separately reviewed shadow/canary rollout. The discovery work does not arm
+new alerts, increase schedule frequency, add brokerage authority, or add paid and metered providers.
 
 ## Deferred work
 

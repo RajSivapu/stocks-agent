@@ -58,6 +58,37 @@ function policy(): PolicyConfig {
   };
 }
 
+Deno.test("theme-memory repository routes only the four reviewed service RPCs", async () => {
+  const calls: unknown[] = [];
+  const repository = createSupabaseGatewayRepository({
+    rpc(name: string, parameters?: Record<string, unknown>) {
+      calls.push({ name, parameters });
+      const data = name === "record_research_nominations"
+        ? { accepted_count: 1, duplicate: false, nominations: [{ nomination_id: "00000000-0000-4000-8000-000000000015" }] }
+        : { receipt_id: "00000000-0000-4000-8000-000000000016" };
+      return Promise.resolve({ data, error: null });
+    },
+  });
+  const runId = "00000000-0000-4000-8000-000000000011";
+  const requestId = "00000000-0000-4000-8000-000000000012";
+  const reviewerId = "00000000-0000-4000-8000-000000000013";
+  const nominationId = "00000000-0000-4000-8000-000000000014";
+  const episode = { revision_id: "00000000-0000-4000-8000-000000000017", execution_allowed: false };
+  const review = { actor_identity: "analyst-fixture", reviewed_role: "analyst", predecessor_receipt_id: null };
+  const nominations = { reviewer_receipt_id: reviewerId, nominations: [{ theme_id: "grid" }] } as never;
+  const lifecycle = { state: "pending", reason: "Await current official filing.", selection_descriptor: null };
+  await repository.recordThemeEpisodeRevisionV2!(runId, episode);
+  await repository.recordResearchReviewIdentityV2!(runId, requestId, review);
+  await repository.recordResearchNominations!(runId, requestId, nominations);
+  await repository.transitionResearchNominationV2!(runId, nominationId, lifecycle);
+  assertEquals(calls, [
+    { name: "record_theme_episode_revision_v2", parameters: { p_run_id: runId, p_revision: episode } },
+    { name: "record_research_review_identity_v2", parameters: { p_run_id: runId, p_receipt_id: requestId, p_review: review } },
+    { name: "record_research_nominations", parameters: { p_run_id: runId, p_request_id: requestId, p_payload: nominations } },
+    { name: "transition_research_nomination_v2", parameters: { p_run_id: runId, p_nomination_id: nominationId, p_payload: lifecycle } },
+  ]);
+});
+
 Deno.test("report suppression RPC persists the typed reason and rejects an error alias", async () => {
   const calls: unknown[] = [];
   let legacy = false;
@@ -152,6 +183,109 @@ Deno.test("completion recovery reads the immutable completion by run and stable 
   }]);
 });
 
+Deno.test("discovery persistence routes exact run-scoped payloads through protected RPCs", async () => {
+  const calls: unknown[] = [];
+  const task = {
+    id: "00000000-0000-4000-8000-000000000041",
+    stage: "signals" as const,
+    provider: "gdelt" as const,
+    capability_id: "gdelt_theme_search",
+    query_kind: "theme_search" as const,
+    query_hash: "a".repeat(64),
+    dependency_ids: [],
+    requested_window: {
+      start: "2026-09-05T00:00:00.000Z",
+      end: "2026-09-06T00:00:00.000Z",
+    },
+    state: "planned" as const,
+    attempt_count: 0,
+    request_budget: 1,
+    result: {},
+  };
+  const client = {
+    rpc(name: string, parameters?: Record<string, unknown>) {
+      calls.push({ name, parameters });
+      if (name === "record_market_discovery_reference") {
+        return Promise.resolve({
+          data: {
+            manifest_id: "00000000-0000-4000-8000-000000000042",
+            security_revision_count: 0,
+            duplicate: false,
+          },
+          error: null,
+        });
+      }
+      if (name === "checkpoint_market_discovery_stage") {
+        return Promise.resolve({
+          data: { task, duplicate: false },
+          error: null,
+        });
+      }
+      return Promise.resolve({
+        data: {
+          manifests: [],
+          security_revisions: [],
+          tasks: [task],
+          theme_episodes: [],
+          exposure_facts: [],
+          research_nominations: [],
+          enrichment_selections: [],
+        },
+        error: null,
+      });
+    },
+  };
+  const repository = createSupabaseGatewayRepository(client);
+  const runId = "00000000-0000-4000-8000-000000000002";
+  const reference = {
+    manifest: {
+      id: "00000000-0000-4000-8000-000000000042",
+      reference_version: "sec:fixture",
+      revision: 1,
+      capability_version: 1,
+      taxonomy_version: 1,
+      source_hash: "b".repeat(64),
+      valid_from: "2026-09-06T00:00:00.000Z",
+      valid_to: null,
+      manifest: {},
+      content_hash: "c".repeat(64),
+    },
+    security_revisions: [],
+  };
+  const checkpoint = {
+    task,
+    exposure_facts: [],
+    theme_episode_revisions: [],
+    research_nominations: [],
+  };
+
+  assertEquals(
+    (await repository.recordDiscoveryReference!(runId, reference)).duplicate,
+    false,
+  );
+  assertEquals(
+    (await repository.checkpointDiscoveryStage!(runId, checkpoint)).task,
+    task,
+  );
+  assertEquals((await repository.readDiscoveryContext!(runId, 100)).tasks, [
+    task,
+  ]);
+  assertEquals(calls, [
+    {
+      name: "record_market_discovery_reference",
+      parameters: { p_run_id: runId, p_payload: reference },
+    },
+    {
+      name: "checkpoint_market_discovery_stage",
+      parameters: { p_run_id: runId, p_payload: checkpoint },
+    },
+    {
+      name: "read_market_discovery_context",
+      parameters: { p_run_id: runId, p_limit: 100 },
+    },
+  ]);
+});
+
 Deno.test("relevant suggestion context keeps unresolved work when old completed history exceeds the bound", () => {
   const unresolved = [{
     id: 999,
@@ -195,6 +329,114 @@ Deno.test("newer completed history cannot displace unresolved suggestion context
     1,
   );
   assertEquals(selected.map((row) => row.ticker), ["PENDING"]);
+});
+
+Deno.test("reference transfer repository routes all bounded protocol RPCs", async () => {
+  const calls: unknown[] = [];
+  const client = {
+    rpc(name: string, parameters?: Record<string, unknown>) {
+      calls.push({ name, parameters });
+      const data = name === "begin_market_discovery_reference"
+        ? {
+          manifest_id: "00000000-0000-4000-8000-000000000101",
+          predecessor_manifest_id: null,
+          duplicate: false,
+        }
+        : name === "record_market_discovery_reference_chunk"
+        ? {
+          manifest_id: "00000000-0000-4000-8000-000000000101",
+          chunk_index: 0,
+          duplicate: false,
+        }
+        : name === "finalize_market_discovery_reference"
+        ? {
+          manifest_id: "00000000-0000-4000-8000-000000000101",
+          security_count: 1,
+          duplicate: false,
+        }
+        : name === "pin_market_discovery_reference"
+        ? {
+          binding_role: "current",
+          manifest_id: null,
+          reference_status: "reference_unavailable",
+          source_retrieved_at: null,
+          reference_age_seconds: null,
+          duplicate: false,
+        }
+        : {
+          binding: {
+            binding_role: "current",
+            manifest_id: null,
+            reference_status: "reference_unavailable",
+            source_retrieved_at: null,
+            reference_age_seconds: null,
+            issuer_names_status: "issuer_names_unavailable",
+          },
+          manifest: null,
+          securities: [],
+          next_after_security_id: null,
+          complete: true,
+        };
+      return Promise.resolve({ data, error: null });
+    },
+  };
+  const repository = createSupabaseGatewayRepository(client);
+  const runId = "00000000-0000-4000-8000-000000000102";
+  const manifestId = "00000000-0000-4000-8000-000000000101";
+  const claim = {
+    request_id: "00000000-0000-4000-8000-000000000103",
+    encoded_bytes: 100,
+    request_hash: "f".repeat(64),
+  };
+  const begin = {
+    manifest: {},
+    capability_id: "sec_company_tickers_universe",
+    chunk_count: 1,
+    security_count: 1,
+    root_hash: "a".repeat(64),
+    predecessor_manifest_id: null,
+  } as never;
+  const chunk = {
+    manifest_id: "00000000-0000-4000-8000-000000000101",
+    chunk_index: 0,
+    chunk_count: 1,
+    entries: [],
+    chunk_hash: "b".repeat(64),
+  } as never;
+  await repository.beginDiscoveryReference!(runId, begin, claim);
+  await repository.recordDiscoveryReferenceChunk!(runId, chunk, claim);
+  await repository.finalizeDiscoveryReference!(runId, {
+    manifest_id: manifestId,
+    root_hash: "a".repeat(64),
+  }, claim);
+  await repository.pinDiscoveryReference!(runId, {
+    capability_id: "sec_company_tickers_universe",
+    binding_role: "current",
+    manifest_id: null,
+    reference_status: "reference_unavailable",
+    reference_as_of: "2026-09-07T12:00:00.000Z",
+  }, claim);
+  const page = await repository.readDiscoveryReference!(runId, {
+    capability_id: "sec_company_tickers_universe",
+    binding_role: "current",
+    after_security_id: null,
+    limit: 500,
+  }, claim);
+  assertEquals(page.complete, true);
+  assertEquals(calls.map((call) => (call as { name: string }).name), [
+    "begin_market_discovery_reference",
+    "record_market_discovery_reference_chunk",
+    "finalize_market_discovery_reference",
+    "pin_market_discovery_reference",
+    "read_market_discovery_reference",
+  ]);
+  for (const call of calls) {
+    const parameters =
+      (call as { parameters: Record<string, unknown> }).parameters;
+    assertEquals(parameters.p_request_id, claim.request_id);
+    assertEquals(parameters.p_encoded_bytes, claim.encoded_bytes);
+    assertEquals(parameters.p_request_hash, claim.request_hash);
+  }
 });
 
 Deno.test("three losing horizons for one recommendation count as one loss", () => {
@@ -513,6 +755,123 @@ Deno.test("unresolved suggestion overflow fails closed instead of dropping pendi
     "overflow must reject context",
   );
   assertEquals((error as GatewayRepositoryError).code, "CONTEXT_TOO_LARGE");
+});
+
+Deno.test("readContext carries protected prior cursor provenance into a new run", async () => {
+  class EmptyQuery {
+    select(): EmptyQuery {
+      return this;
+    }
+    eq(): EmptyQuery {
+      return this;
+    }
+    is(): EmptyQuery {
+      return this;
+    }
+    gte(): EmptyQuery {
+      return this;
+    }
+    lt(): EmptyQuery {
+      return this;
+    }
+    or(): EmptyQuery {
+      return this;
+    }
+    in(): EmptyQuery {
+      return this;
+    }
+    order(): EmptyQuery {
+      return this;
+    }
+    limit(): EmptyQuery {
+      return this;
+    }
+    update(): EmptyQuery {
+      return this;
+    }
+    single(): EmptyQuery {
+      return this;
+    }
+    then(
+      resolve?: (value: { data: unknown[]; error: null }) => unknown,
+    ): Promise<unknown> {
+      return Promise.resolve({ data: [], error: null }).then(resolve);
+    }
+  }
+  const runId = "00000000-0000-4000-8000-000000000020";
+  const sourceRunId = "00000000-0000-4000-8000-000000000010";
+  const sourceTaskId = "00000000-0000-4000-8000-000000000011";
+  const cursor = {
+    task_key: "gdelt_theme_search:macro_and_policy",
+    provider: "gdelt",
+    capability_id: "gdelt_theme_search",
+    completed_through: "2026-09-05T20:00:00Z",
+    active_window_start: null,
+    active_window_end: null,
+    backlog_token: null,
+    page: 1,
+    accepted_item_ids: [],
+    next_retry_phase: null,
+    continuation_token_history: [],
+    source_run_id: sourceRunId,
+    source_task_id: sourceTaskId,
+    source_updated_at: "2026-09-05T20:01:00Z",
+  };
+  const repository = createSupabaseGatewayRepository({
+    from() {
+      return new EmptyQuery();
+    },
+    rpc(name: string, parameters?: Record<string, unknown>) {
+      if (name === "refresh_market_intelligence_context") {
+        assertEquals(parameters, { p_run_id: runId });
+        return Promise.resolve({ data: {
+          holding_market_values: {}, liquidity_by_ticker: {}, overlap_by_ticker: {},
+          current_quotes: {}, quote_receipt_ids: [], portfolio_revision: "portfolio-1",
+          portfolio_valuation_complete: false, cash_revision: "0",
+          valuation_status: "unavailable", valuation_state_by_ticker: {},
+          valuation_provenance_by_ticker: {}, liquidity_state_by_ticker: {},
+          liquidity_provenance_by_ticker: {}, overlap_state_by_ticker: {},
+          overlap_provenance_by_ticker: {}, current_reference_state: "unavailable",
+          current_reference_provenance: {},
+        }, error: null });
+      }
+      if (name === "read_market_discovery_cursor_context") {
+        assertEquals(parameters, { p_run_id: runId, p_limit: 100 });
+        return Promise.resolve({
+          data: {
+            source_cursors: [cursor],
+            last_completed_scans: [{
+              capability_id: "gdelt_theme_search",
+              theme_id: "macro_and_policy",
+              completed_through: "2026-09-05T20:00:00Z",
+              source_run_id: sourceRunId,
+              source_task_id: sourceTaskId,
+            }],
+          },
+          error: null,
+        });
+      }
+      if (name === "read_reconciled_cash_snapshot") {
+        return Promise.resolve({ data: null, error: null });
+      }
+      throw new Error(`unexpected RPC ${name}`);
+    },
+  });
+
+  const context = await repository.readContext(runId);
+  assertEquals(context.intelligence_collection_context?.source_cursors, [
+    cursor,
+  ]);
+  assertEquals(context.intelligence_collection_context?.last_completed_scans, [{
+    capability_id: "gdelt_theme_search",
+    theme_id: "macro_and_policy",
+    completed_through: "2026-09-05T20:00:00Z",
+    source_run_id: sourceRunId,
+    source_task_id: sourceTaskId,
+  }]);
+  assertEquals(context.intelligence_collection_context?.valuation_status, "unavailable");
+  assertEquals(context.intelligence_collection_context?.valuation_state_by_ticker, {});
+  assertEquals(context.intelligence_collection_context?.current_reference_state, "unavailable");
 });
 
 function rejects(value: unknown): boolean {

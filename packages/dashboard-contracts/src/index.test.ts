@@ -4,6 +4,8 @@ import {
   type IntelligenceView,
   parseDashboardEnvelope,
   parseDashboardErrorEnvelope,
+  parseIntelligenceView,
+  safeSourceUrl,
   type ReportDetailView,
   type ReportsView,
 } from "./index";
@@ -60,15 +62,39 @@ describe("dashboard response contracts", () => {
     const fixture = {
       ...base,
       data: {
+        intelligence_version: 2,
         run_id: "7d834dbd-75bb-4313-931f-09732f003932",
         data_as_of: "2026-09-03T19:55:00.000Z",
-        themes: [], events: [], candidates: [], limitations: [],
-        sources: [{ provider: "gdelt", status: "complete", retrieved_at: "2026-09-03T19:55:00.000Z", accepted_count: 3, dropped_count: 0 }],
+        themes: [], companies: [], evidence: [],
+        coverage: { mode: "bounded", complete_market_coverage: false }, omissions: [],
+        source_health: [{ provider: "gdelt", status: "complete", retrieved_at: "2026-09-03T19:55:00.000Z", accepted_count: 3, dropped_count: 0 }],
+        reference: { state: "unavailable" },
+        scope: { research_only: true, market_wide: true },
+        backlog: { available: 0, returned: 0, deferred: 0, byte_truncated: false },
+        boundaries: { research_only: true, execution_disabled: true, valuation_unavailable: true },
       },
     };
-    const view: IntelligenceView = parseDashboardEnvelope<IntelligenceView>(fixture).data;
-    expect(view.sources[0]).toEqual(expect.objectContaining({ provider: "gdelt", status: "complete" }));
+    const view: IntelligenceView = parseIntelligenceView(parseDashboardEnvelope(fixture).data);
+    expect(view.source_health[0]).toEqual(expect.objectContaining({ provider: "gdelt", status: "complete" }));
     expect(JSON.stringify(view)).not.toContain("raw_payload");
+    expect(() => parseIntelligenceView({ ...fixture.data, nested: { raw_payload: "secret" } })).toThrow("unexpected fields");
+    expect(() => parseIntelligenceView({
+      ...fixture.data,
+      coverage: { ...fixture.data.coverage, raw_packet: "secret" },
+    })).toThrow("unexpected fields");
+  });
+
+  it("keeps only allowlisted HTTPS source paths without credentials, ports, or fragments", () => {
+    expect(safeSourceUrl("https://www.sec.gov/Archives/edgar/data/1/filing.htm"))
+      .toBe("https://www.sec.gov/Archives/edgar/data/1/filing.htm");
+    for (const unsafe of [
+      "http://www.sec.gov/Archives/edgar/data/1/filing.htm",
+      "https://user@www.sec.gov/Archives/edgar/data/1/filing.htm",
+      "https://www.sec.gov:443/Archives/edgar/data/1/filing.htm",
+      "https://www.sec.gov/private/filing.htm",
+      "https://www.sec.gov/Archives/filing.htm#preview",
+      "javascript:alert(1)",
+    ]) expect(safeSourceUrl(unsafe)).toBeNull();
   });
 
   it("exports bounded report list and detail contracts", () => {

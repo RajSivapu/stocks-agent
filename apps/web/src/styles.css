@@ -1,2 +1,40 @@
 @import "./styles/tokens.css";
 @import "./styles/global.css";
+/* Research memory stays readable at narrow widths and exposes every control to the keyboard. */
+.intelligence-view,
+.intelligence-view .card,
+.intelligence-view blockquote,
+.intelligence-view li,
+.intelligence-view dd {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.intelligence-grid {
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 18rem), 1fr));
+}
+
+.intelligence-view summary {
+  cursor: pointer;
+}
+
+.intelligence-view summary:focus-visible,
+.intelligence-view a:focus-visible {
+  outline: 3px solid var(--gold);
+  outline-offset: 3px;
+}
+
+.evidence-adverse {
+  border-inline-start: 0.3rem solid var(--negative);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .intelligence-view *,
+  .intelligence-view *::before,
+  .intelligence-view *::after {
+    scroll-behavior: auto !important;
+    transition-duration: 0.01ms !important;
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+  }
+}

@@ -1,0 +1,26 @@
+{
+  "schema_version": 1,
+  "screen_id": "top_gainers",
+  "as_of": "2026-09-07T15:00:00+00:00",
+  "truncated": false,
+  "rows": [
+    {
+      "symbol": "AAA",
+      "sector": "Technology",
+      "rank": 1,
+      "source_url": "https://example.test/screens/aaa",
+      "displayed_price": "12.50",
+      "displayed_average_volume": 1500000,
+      "displayed_market_cap": 2500000000
+    },
+    {
+      "symbol": "BBB",
+      "sector": null,
+      "rank": 2,
+      "source_url": "https://example.test/screens/bbb",
+      "displayed_price": null,
+      "displayed_average_volume": null,
+      "displayed_market_cap": null
+    }
+  ]
+}

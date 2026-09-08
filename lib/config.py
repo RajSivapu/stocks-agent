@@ -17,6 +17,7 @@ def secret(name: str) -> str:
         "supabase_url": "SUPABASE_URL",
         "supabase_service_role_key": "SUPABASE_SERVICE_ROLE_KEY",
         "market_agent_secret": "MARKET_AGENT_SECRET",
+        "sec_user_agent_contact": "SEC_USER_AGENT_CONTACT",
     }
     v = os.environ.get(env_map.get(name, name.upper()))
     if v:

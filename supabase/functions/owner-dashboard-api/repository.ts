@@ -1,7 +1,6 @@
 import type {
   AlertsView,
   IdeasView,
-  IntelligenceView,
   PortfolioView,
   ReportsView,
   RunDetailView,
@@ -9,15 +8,15 @@ import type {
   SystemView,
   TodayView,
 } from "../../../packages/dashboard-contracts/src/index.ts";
+import { parseIntelligenceView } from "../../../packages/dashboard-contracts/src/index.ts";
 
 import { createDashboardDatabase, type DashboardDatabaseFactory, validateDashboardDatabaseUrl } from "./database.ts";
 import { DashboardHttpError } from "./errors.ts";
-import { classifyFreshness, NYSE_HOLIDAYS_2026 } from "./freshness.ts";
+import { classifyFreshness, NYSE_MARKET_CALENDAR } from "./freshness.ts";
 import type { DashboardReader, DashboardReadResult } from "./handler.ts";
 import {
   mapCompanionResponse,
   mapIdea,
-  mapIntelligence,
   mapPortfolio,
   mapPublicationReceipt,
   mapRun,
@@ -137,35 +136,14 @@ const RUN_EVALUATIONS = `SELECT s.id, s.ticker, s.action, s.bucket, s.depth AS p
 const ACTIVE_POLICY = `SELECT version, config, activated_at FROM public.market_policy_config
  WHERE active = true ORDER BY version DESC LIMIT 1`;
 
-const LATEST_INTELLIGENCE = `SELECT r.id, r.phase, r.market_date, r.policy_version, r.created_at AS data_as_of
-  FROM public.market_intelligence_runs r
- WHERE EXISTS (SELECT 1 FROM public.market_intelligence_run_events e WHERE e.run_id = r.id AND e.status = 'completed')
- ORDER BY r.created_at DESC, r.id DESC LIMIT 1`;
-
-const INTELLIGENCE_EVENTS = `SELECT e.id, e.event_type, e.title, e.summary, e.occurred_at,
-       e.effective_at, e.materiality, e.confidence,
-       COALESCE((SELECT jsonb_agg(jsonb_build_object('title', i.title, 'url', i.canonical_url) ORDER BY i.id)
-                   FROM public.market_source_items i
-                  WHERE i.id::text IN (SELECT jsonb_array_elements_text(e.evidence_item_ids))), '[]'::jsonb) AS evidence
-  FROM public.market_events e WHERE e.run_id = $1::uuid
- ORDER BY e.materiality DESC, e.id LIMIT 50`;
-
-const INTELLIGENCE_CANDIDATES = `SELECT c.id, c.event_id, c.candidate_key, c.ticker, c.rank,
-       c.total_score, c.qualified, c.veto_reasons,
-       COALESCE((SELECT jsonb_agg(jsonb_build_object('title', i.title, 'url', i.canonical_url) ORDER BY i.id)
-                   FROM public.market_source_items i
-                  WHERE i.id::text IN (SELECT jsonb_array_elements_text(c.exposure_item_ids))), '[]'::jsonb) AS evidence
-  FROM public.market_candidate_rankings c WHERE c.run_id = $1::uuid
- ORDER BY c.rank LIMIT 12`;
-
-const INTELLIGENCE_RELATIONSHIPS = `SELECT source_key, target_kind, target_key,
-       relationship_type, evidence_item_ids
-  FROM public.market_event_relationships WHERE run_id = $1::uuid
- ORDER BY target_key, id LIMIT 100`;
-
-const INTELLIGENCE_SOURCES = `SELECT provider, status, retrieved_at, accepted_count, dropped_count
-  FROM public.market_source_receipts WHERE run_id = $1::uuid
- ORDER BY provider, retrieved_at DESC LIMIT 50`;
+const OWNER_INTELLIGENCE_V2 = `SELECT public.read_owner_intelligence_v2($1::int) AS projection`;
+const EMPTY_INTELLIGENCE_V2 = {
+  intelligence_version: 2, run_id: null, data_as_of: null, themes: [], companies: [], evidence: [],
+  source_health: [], coverage: { mode: "bounded", complete_market_coverage: false }, reference: { state: "unavailable" },
+  scope: { research_only: true, market_wide: true },
+  backlog: { available: 0, returned: 0, deferred: 0, byte_truncated: false }, omissions: [],
+  boundaries: { research_only: true, execution_disabled: true, valuation_unavailable: true },
+};
 
 const REPORTS = `SELECT id, run_id, market_date, kind, report, report_hash, created_at
   FROM public.market_reports
@@ -188,8 +166,7 @@ const REPORT_PUBLICATIONS = `SELECT request_id, status, attempt_count, finished_
 const STATEMENTS = new Set([
   HOLDINGS, PLANS, TRANSACTIONS, IDEAS, COMPANION, ALERTS, RUNS, RUN_DETAIL,
   RUN_REQUESTS, RUN_EVALUATIONS, ACTIVE_POLICY,
-  LATEST_INTELLIGENCE, INTELLIGENCE_EVENTS, INTELLIGENCE_CANDIDATES,
-  INTELLIGENCE_RELATIONSHIPS, INTELLIGENCE_SOURCES, REPORTS, REPORT_DETAIL,
+  OWNER_INTELLIGENCE_V2, REPORTS, REPORT_DETAIL,
   REPORT_SOURCES, REPORT_PUBLICATIONS,
 ]);
 
@@ -292,7 +269,7 @@ export function createDashboardRepository(
     if (!STATEMENTS.has(statement)) throw new Error("dashboard query is not allowlisted");
     return database.query(statement, parameters);
   };
-  const calendar = { holidays: NYSE_HOLIDAYS_2026 };
+  const calendar = NYSE_MARKET_CALENDAR;
 
   async function holdings(): Promise<Row[]> {
     const rows = await query(HOLDINGS);
@@ -317,11 +294,11 @@ export function createDashboardRepository(
       holdings(),
       query(PLANS),
       query(TRANSACTIONS, [null]),
-      query(LATEST_INTELLIGENCE),
+      query(OWNER_INTELLIGENCE_V2, [1]),
     ]);
     const dataAsOf = latestTimestamp(holdingRows, ["price_as_of"]);
     const mapped = mapPortfolio(holdingRows, planRows, transactionRows);
-    mapped.latest_intelligence_run_id = typeof intelligenceRows[0]?.id === "string" ? intelligenceRows[0].id : null;
+    mapped.latest_intelligence_run_id = parseIntelligenceView(intelligenceRows[0]?.projection ?? EMPTY_INTELLIGENCE_V2).run_id;
     const freshness = mapped.holdings.length === 0
       ? "unavailable"
       : mapped.holdings.some((item) => item.freshness !== "fresh") ? "partial" : "fresh";
@@ -446,6 +423,7 @@ export function createDashboardRepository(
       : alertsConfig.shadow === true
       ? "shadow"
       : "unavailable";
+    const intelligenceView = parseIntelligenceView(intelligenceResult.data);
     const data: SystemView = {
       product_version: "personal-stock-agent-web-v1",
       api_version: "v1",
@@ -454,9 +432,9 @@ export function createDashboardRepository(
       latest_by_kind: latestByKind,
       latest_publication_status: alertRows[0] ? mapPublicationReceipt(alertRows[0]).state : null,
       boundaries,
-      source_coverage: (intelligenceResult.data as IntelligenceView).sources,
+      source_coverage: intelligenceView.source_health,
       latest_report: (reportResult.data as ReportsView).reports[0] ?? null,
-      latest_intelligence_run_id: (intelligenceResult.data as IntelligenceView).run_id === "unknown" ? null : (intelligenceResult.data as IntelligenceView).run_id,
+      latest_intelligence_run_id: intelligenceView.run_id,
     };
     const dataAsOf = latestTimestamp(runRows, ["data_as_of", "finished_at"]);
     const state = classifyFreshness({ kind: "run", dataAsOf, phase: String(runRows[0]?.kind ?? ""), status: String(runRows[0]?.status ?? "") }, now(), calendar);
@@ -464,18 +442,12 @@ export function createDashboardRepository(
   }
 
   async function intelligence(): Promise<DashboardReadResult> {
-    const runRows = await query(LATEST_INTELLIGENCE);
-    const run = runRows[0];
-    const id = typeof run?.id === "string" ? run.id : null;
-    const [events, candidates, relationships, sources] = await Promise.all([
-      query(INTELLIGENCE_EVENTS, [id]), query(INTELLIGENCE_CANDIDATES, [id]),
-      query(INTELLIGENCE_RELATIONSHIPS, [id]), query(INTELLIGENCE_SOURCES, [id]),
-    ]);
-    const data = mapIntelligence(runRows, events, candidates, relationships, sources);
-    if (!run) {
+    const rows = await query(OWNER_INTELLIGENCE_V2, [25]);
+    const data = parseIntelligenceView(rows[0]?.projection ?? EMPTY_INTELLIGENCE_V2);
+    if (!data.run_id) {
       return { data, dataAsOf: null, freshness: "unavailable", marketState: "unknown" };
     }
-    const state = classifyFreshness({ kind: "run", phase: String(run.phase ?? "on-demand"), status: "completed", dataAsOf: data.data_as_of }, now(), calendar);
+    const state = classifyFreshness({ kind: "run", phase: "on-demand", status: "completed", dataAsOf: data.data_as_of }, now(), calendar);
     return { data, dataAsOf: data.data_as_of, freshness: state.freshness, marketState: state.marketState };
   }
 

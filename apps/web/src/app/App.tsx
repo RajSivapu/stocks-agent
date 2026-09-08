@@ -15,6 +15,7 @@ import type {
   SystemView,
   TodayView,
 } from "@stocks-agent/dashboard-contracts";
+import { parseIntelligenceView } from "@stocks-agent/dashboard-contracts";
 
 import { DashboardApiError, type DashboardClient } from "../api/client";
 import { useDashboardResource, type ResourceState } from "../api/useDashboardResource";
@@ -99,10 +100,9 @@ function PortfolioRoute({ client, token, onError, onSignOut }: { client: Dashboa
 }
 
 function IntelligenceRoute({ client, token, onError, onSignOut }: { client: DashboardClient; token: string; onError(error: Error): void; onSignOut(): void }) {
-  const intelligence = useDashboardResource<IntelligenceView>(client, "/v1/intelligence", token, onError);
-  const portfolio = useDashboardResource<PortfolioView>(client, "/v1/portfolio", token, onError);
-  const banner = bannerState(intelligence, [portfolio]);
-  return <AppShell {...banner} onSignOut={onSignOut}><AsyncView state={intelligence}>{(data) => <AsyncView state={portfolio}>{(portfolioData) => <IntelligencePage data={data} portfolioTickers={[...portfolioData.holdings.map((holding) => holding.ticker), ...portfolioData.plans.filter((plan) => plan.active).map((plan) => plan.ticker)]} />}</AsyncView>}</AsyncView></AppShell>;
+  const intelligence = useDashboardResource<IntelligenceView>(client, "/v1/intelligence", token, onError, parseIntelligenceView);
+  const banner = bannerState(intelligence);
+  return <AppShell {...banner} onSignOut={onSignOut}><AsyncView state={intelligence}>{(data) => <IntelligencePage data={data} />}</AsyncView></AppShell>;
 }
 
 function SystemRoute({ client, token, onError, onSignOut }: { client: DashboardClient; token: string; onError(error: Error): void; onSignOut(): void }) {

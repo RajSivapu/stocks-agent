@@ -10,20 +10,74 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from datetime import date, datetime, time, timedelta, timezone
 from decimal import Decimal
+from types import MappingProxyType
 from zoneinfo import ZoneInfo
 
 from lib.intelligence.dedupe import RunItemDisposition, deduplicate
+from lib.intelligence.discovery import (
+    detect_events,
+    expand_value_chain,
+    load_theme_taxonomy,
+    select_reverse_discovery_tasks,
+)
+from lib.intelligence.entities import EntityResolution, ReviewedAlias, resolve_entities
+from lib.intelligence.exposure import (
+    ExposureFact,
+    FilingEvidence,
+    IssuerExposureBinding,
+    evaluate_exposure,
+    exposure_fact_from_persistence,
+    extract_exposure_facts,
+)
 from lib.intelligence.cache import ResumableCollectionCache, collection_from_checkpoint
 from lib.intelligence.canonical import canonical_event, canonical_ranking
+from lib.intelligence.cursors import (
+    CollectionPage,
+    CollectionWindow,
+    SourceCursor,
+    update_cursor,
+    window_from_cursor,
+)
 from lib.intelligence.http import SourceFailure, cache_key
 from lib.intelligence.normalize import SourceItem, normalize_item
 from lib.intelligence.packet import EvidencePacket, build_evidence_packet
-from lib.intelligence.providers import CollectionQuery, CollectionResult, RequestReceipt, RESERVED_OUTBOUND_PROVIDERS
+from lib.intelligence.providers import (
+    CollectionQuery,
+    CollectionResult,
+    RequestReceipt,
+    RESERVED_OUTBOUND_PROVIDERS,
+    SourceAdapter,
+)
 from lib.intelligence.quota import QuotaSession
-from lib.intelligence.ranking import CandidateInput, RankedCandidate, rank_candidates
+from lib.intelligence.ranking import (
+    CandidateInput,
+    CandidateLineage,
+    RankedCandidate,
+    rank_candidates,
+)
+from lib.intelligence.research_queue import (
+    EnrichmentCandidate,
+    EnrichmentRequest,
+    SelectionManifest,
+    adaptive_provider_reservations,
+    build_selection_manifest,
+    selection_manifest_from_payload,
+    select_enrichment_queue,
+)
+from lib.intelligence.screening import load_screen_definitions, run_bounded_screens
 from lib.intelligence.relationships import EventRelationship, exposure_kind, propose_relation
-from lib.intelligence.themes import SEED_THEMES, MarketEvent, build_market_event, evidence_key
-from lib.intelligence.types import PacketLimits
+from lib.intelligence.themes import (
+    SEED_THEMES,
+    MarketEvent,
+    build_market_event,
+    evidence_key,
+    propose_dynamic_theme,
+    revise_theme_episode,
+    select_dynamic_theme_evidence,
+    theme_episode_revision_from_persistence,
+)
+from lib.intelligence.types import DiscoveryPlan, DiscoveryTask, PacketLimits, SourceCapability
+from lib.intelligence.universe import ReferenceSnapshot, SecurityIdentity
 
 
 PHASES = ("pre-market", "intraday", "post-market", "on-demand")
@@ -32,6 +86,7 @@ UNTRUSTED_DATA_INSTRUCTION = (
 )
 MAX_OUTPUT_BYTES = 96 * 1024
 _OUTPUT_PACKET_BYTES = 72 * 1024
+_MAX_DISCOVERY_TASKS = 100
 
 
 class _CheckpointFailure(RuntimeError):
@@ -71,6 +126,35 @@ def _canonical(value: object) -> str:
         separators=(",", ":"),
         sort_keys=True,
     )
+
+
+def _frozen_source_plan(plan: DiscoveryPlan) -> dict[str, object]:
+    """Freeze the reviewed capability order and the exact due task set."""
+    required_capabilities = [
+        capability.capability_id
+        for capability in plan.capabilities.values()
+        if capability.requirement_tier == "required_baseline"
+    ]
+    plan_body: dict[str, object] = {
+        "version": 1,
+        "source_capability_version": plan.capability_version,
+        "reference_version": plan.reference_version,
+        "required_baseline_capability_ids": required_capabilities,
+        "planned_task_ids": [task.task_id for task in plan.tasks],
+        "required_tasks": [
+            {
+                "task_id": task.task_id,
+                "capability_id": task.capability_id,
+                "theme_id": task.theme_id,
+            }
+            for task in plan.tasks
+            if task.capability_id in required_capabilities
+        ],
+    }
+    return {
+        **plan_body,
+        "plan_hash": hashlib.sha256(_canonical(plan_body).encode()).hexdigest(),
+    }
 
 
 def _semantic_row(
@@ -211,6 +295,10 @@ class IntelligencePipeline:
         context: Mapping[str, object] | None = None,
         packet_limits: PacketLimits = PacketLimits(),
         cache: ResumableCollectionCache | None = None,
+        reference_stage: object | None = None,
+        reference_snapshot_loader: object | None = None,
+        discovery_plan: DiscoveryPlan | None = None,
+        source_cursors: Mapping[str, SourceCursor] | None = None,
     ) -> None:
         self.gateway = gateway
         values = tuple(adapters.values()) if isinstance(adapters, Mapping) else tuple(adapters)
@@ -225,6 +313,24 @@ class IntelligencePipeline:
             raise ValueError("comparison and learning provenance require typed gateway operations")
         self.packet_limits = packet_limits
         self.cache = cache or ResumableCollectionCache()
+        if reference_stage is not None and not callable(reference_stage):
+            raise ValueError("reference_stage must be callable")
+        self.reference_stage = reference_stage
+        if reference_snapshot_loader is not None and not callable(reference_snapshot_loader):
+            raise ValueError("reference_snapshot_loader must be callable")
+        self.reference_snapshot_loader = reference_snapshot_loader
+        if discovery_plan is not None and not isinstance(discovery_plan, DiscoveryPlan):
+            raise ValueError("discovery_plan must be a DiscoveryPlan")
+        self.discovery_plan = discovery_plan
+        if source_cursors is None:
+            self.source_cursors: dict[str, SourceCursor] = {}
+        elif not isinstance(source_cursors, Mapping) or any(
+            not isinstance(key, str) or not isinstance(value, SourceCursor)
+            for key, value in source_cursors.items()
+        ):
+            raise ValueError("source_cursors must contain validated SourceCursor values")
+        else:
+            self.source_cursors = dict(source_cursors)
 
     def run(self, request: PipelineRequest) -> PipelineReceipt:
         targets = self._targets(request.phase)
@@ -239,6 +345,9 @@ class IntelligencePipeline:
         recovered = self._read_completion(request.request_id)
         if recovered is not None:
             return recovered
+
+        if self.discovery_plan is not None:
+            return self._run_capability_plan(request)
 
         providers = tuple(str(adapter.provider) for adapter in self.adapters)
         if not providers:
@@ -257,6 +366,37 @@ class IntelligencePipeline:
         run_id = str(start.get("run_id") or "")
         if run_id != request.request_id:
             raise ValueError("gateway start receipt run_id does not match request_id")
+        if self.reference_stage is not None:
+            reference = self.reference_stage(run_id, request)
+            if not isinstance(reference, Mapping):
+                raise ValueError("reference stage result is invalid")
+            allowed = {
+                "coverage_status", "reference_status", "reference_manifest_id",
+                "reference_age_seconds", "reference_revision",
+                "reference_expires_at", "execution_allowed",
+            }
+            required = allowed - {"reference_revision", "reference_expires_at"}
+            if not required <= set(reference) <= allowed or reference.get("coverage_status") != "scope_not_guaranteed" \
+                    or reference.get("reference_status") not in {
+                        "healthy", "reference_stale", "reference_unavailable"
+                    } or reference.get("execution_allowed") is not False:
+                raise ValueError("reference stage result is invalid")
+            manifest_id = reference.get("reference_manifest_id")
+            age = reference.get("reference_age_seconds")
+            status = reference["reference_status"]
+            if status == "reference_unavailable":
+                if manifest_id is not None or age is not None:
+                    raise ValueError("reference stage result is invalid")
+            else:
+                try:
+                    if str(uuid.UUID(str(manifest_id))) != manifest_id:
+                        raise ValueError
+                except (TypeError, ValueError, AttributeError):
+                    raise ValueError("reference stage result is invalid") from None
+                if isinstance(age, bool) or not isinstance(age, int) or age < 0:
+                    raise ValueError("reference stage result is invalid")
+            self.context["reference_coverage"] = dict(reference)
+            self._hydrate_reference_snapshot(run_id)
         request_window = _request_window(start.get("request_window"), request)
         checkpoint_entries = start.get("cache_entries")
         if not isinstance(checkpoint_entries, Sequence) or isinstance(checkpoint_entries, (str, bytes, bytearray)):
@@ -273,6 +413,1468 @@ class IntelligencePipeline:
         receipt = self._complete(request, run_id, targets, results)
         self.cache.put_run(request.request_id, receipt)
         return receipt
+
+    def _run_capability_plan(self, request: PipelineRequest) -> PipelineReceipt:
+        """Execute the persisted Task 1 plan through the existing collection path."""
+        plan = self.discovery_plan
+        if plan is None or plan.run_id != request.request_id or plan.phase != request.phase:
+            raise ValueError("discovery plan does not match the collection request")
+        adapters = {str(adapter.provider): adapter for adapter in self.adapters}
+        collection_tasks = tuple(task for task in plan.tasks if task.stage != "reference")
+        missing = sorted({task.provider for task in collection_tasks} - set(adapters))
+        if missing:
+            raise ValueError("discovery plan has no adapter for a planned provider")
+
+        adaptive_capability = self._adaptive_capability(plan, adapters)
+        envelope = adaptive_provider_reservations(request.phase)
+        static_adaptive_calls = sum(
+            task.capability_id == "gdelt_theme_search" for task in collection_tasks
+        )
+        adaptive_capacity = 0 if adaptive_capability is None else min(
+            plan.reserved_adaptive_requests,
+            envelope["gdelt_reverse"],
+            max(0, adaptive_capability.max_requests_per_run - static_adaptive_calls),
+        )
+        adaptive_provider_counts: dict[str, int] = {}
+        if plan.reserved_adaptive_requests == sum(envelope.values()):
+            required = {
+                "sec_issuer_submissions": "sec_edgar",
+                "sec_filing_document": "sec_edgar",
+                "yahoo_security_quote": "yahoo",
+                "gdelt_reverse": "gdelt",
+            }
+            for capability_id, count in envelope.items():
+                if count == 0:
+                    continue
+                real_id = "gdelt_theme_search" if capability_id == "gdelt_reverse" else capability_id
+                capability = plan.capabilities.get(real_id)
+                provider = required[capability_id]
+                if capability is None or capability.provider != provider or provider not in adapters:
+                    raise ValueError("adaptive reserve lacks an approved provider capability")
+                adaptive_provider_counts[provider] = adaptive_provider_counts.get(provider, 0) + count
+        elif plan.reserved_adaptive_requests:
+            # Compatibility for persisted Task 5 plans that reserved only reverse search.
+            adaptive_provider_counts["gdelt"] = adaptive_capacity
+        providers = tuple(sorted({
+            *(task.provider for task in collection_tasks),
+            *adaptive_provider_counts,
+            *(("yahoo",) if plan.reserved_holding_quote_requests else ()),
+        }))
+        global_window = _initial_request_window(request)
+        plan_rows = [{
+            "id": _uuid("reservation", request.request_id, provider),
+            "provider": provider,
+            "requests": sum(task.provider == provider for task in collection_tasks)
+            + adaptive_provider_counts.get(provider, 0)
+            + (plan.reserved_holding_quote_requests if provider == "yahoo" else 0),
+            "cache_keys": [],
+        } for provider in providers]
+        start_payload = {
+            "phase": request.phase,
+            "market_date": request.market_date.isoformat(),
+            "policy_version": 1,
+            "request_window": global_window,
+            "reservation_plan": {"reservations": plan_rows},
+        }
+        start = self._start(start_payload, request.request_id)
+        run_id = str(start.get("run_id") or "")
+        if run_id != request.request_id:
+            raise ValueError("gateway start receipt run_id does not match request_id")
+        request_window = _request_window(start.get("request_window"), request)
+        checkpoint_entries = start.get("cache_entries")
+        if not isinstance(checkpoint_entries, Sequence) or isinstance(
+            checkpoint_entries, (str, bytes, bytearray)
+        ) or any(not isinstance(entry, Mapping) for entry in checkpoint_entries):
+            raise ValueError("gateway start receipt checkpoints are invalid")
+        self.cache.hydrate_collections(checkpoint_entries, now=_utc(request.now))
+        self._install_quota(plan_rows, start.get("reservation_usage", {}))
+
+        persisted = self._read_discovery_tasks(run_id)
+        for task in plan.tasks:
+            if task.task_id not in persisted:
+                if task.stage == "reference":
+                    row = self._task_row(task, state="planned", attempt_count=0, result={})
+                else:
+                    _cursor_key, task_cursor = self._cursor_for_task(task)
+                    task_window = _collection_window_for_task(task, task_cursor)
+                    row = self._task_row(
+                        task,
+                        state="planned",
+                        attempt_count=0,
+                        result={},
+                        window=task_window,
+                        cursor=task_cursor,
+                    )
+                persisted[task.task_id] = self._checkpoint_discovery_task(run_id, row)
+
+        self._run_planned_reference(run_id, request, persisted)
+        self._hydrate_reference_snapshot(run_id)
+        plan_by_provider = {str(row["provider"]): row for row in plan_rows}
+        results: list[CollectionResult] = []
+        collection_results: list[CollectionResult] = []
+        frozen_holding = self._frozen_enrichment_selection(run_id, request.phase, "holding_quotes")
+        holding_requests = frozen_holding.requests if frozen_holding is not None else \
+            self._holding_quote_requests(run_id, plan.reserved_holding_quote_requests)
+        if holding_requests or frozen_holding is not None:
+            results.extend(self._seal_and_run_enrichment_requests(
+                run_id, request, request_window, holding_requests, plan_by_provider,
+                persisted, envelope, selection_stage="holding_quotes",
+                frozen_manifest=frozen_holding,
+            ))
+        for task in collection_tasks:
+            result = self._run_planned_collection_task(
+                run_id,
+                request,
+                request_window,
+                task,
+                plan.capabilities[task.capability_id],
+                adapters[task.provider],
+                plan_by_provider[task.provider],
+                persisted,
+            )
+            collection_results.append(result)
+            results.append(result)
+
+        task_results: list[tuple[DiscoveryTask, CollectionResult]] = list(
+            zip(collection_tasks, collection_results, strict=True)
+        )
+        reverse_tasks = self._reverse_discovery_tasks(
+            run_id,
+            request_window,
+            tuple(
+                (task, result) for task, result in task_results
+                if persisted.get(task.task_id, {}).get("state") == "succeeded"
+            ),
+            min(adaptive_capacity, max(0, _MAX_DISCOVERY_TASKS - 1 - len(plan.tasks))),
+        )
+        if adaptive_capability is not None and reverse_tasks:
+            reservation = plan_by_provider[adaptive_capability.provider]
+            for task in reverse_tasks:
+                if task.task_id not in persisted:
+                    _cursor_key, task_cursor = self._cursor_for_task(task)
+                    task_window = _collection_window_for_task(task, task_cursor)
+                    planned = self._task_row(
+                        task, state="planned", attempt_count=0, result={},
+                        window=task_window, cursor=task_cursor,
+                    )
+                    persisted[task.task_id] = self._checkpoint_discovery_task(
+                        run_id, planned
+                    )
+                result = self._run_planned_collection_task(
+                    run_id,
+                    request,
+                    request_window,
+                    task,
+                    adaptive_capability,
+                    adapters[adaptive_capability.provider],
+                    reservation,
+                    persisted,
+                )
+                results.append(result)
+                task_results.append((task, result))
+
+        self._persist_dynamic_theme_evaluation(
+            run_id, request_window, task_results, persisted
+        )
+
+        enrichment_results = self._run_adaptive_enrichment(
+            run_id, request, request_window, task_results, plan_by_provider,
+            persisted, envelope,
+        )
+        results.extend(enrichment_results)
+
+        targets = tuple(
+            task.theme_id or task.capability_id
+            for task in (*collection_tasks, *reverse_tasks)
+        )
+        receipt = self._complete(request, run_id, targets, results)
+        self.cache.put_run(request.request_id, receipt)
+        return receipt
+
+    def _run_adaptive_enrichment(
+        self,
+        run_id: str,
+        request: PipelineRequest,
+        request_window: Mapping[str, str],
+        task_results: Sequence[tuple[DiscoveryTask, CollectionResult]],
+        reservations: Mapping[str, Mapping[str, object]],
+        persisted: dict[str, Mapping[str, object]],
+        envelope: Mapping[str, int],
+    ) -> list[CollectionResult]:
+        plan = self.discovery_plan
+        if plan is None or plan.reserved_adaptive_requests != sum(envelope.values()):
+            return []
+        self.context["primary_exposure_required"] = True
+        frozen = self._frozen_enrichment_selection(run_id, request.phase, "initial")
+        if frozen is not None:
+            return self._seal_and_run_enrichment_requests(
+                run_id, request, request_window, frozen.requests, reservations, persisted,
+                envelope, selection_stage="initial",
+                deferred_reasons=frozen.deferred_reasons, frozen_manifest=frozen,
+            )
+        candidates = _enrichment_candidates(task_results, self.context)
+        if not candidates:
+            return self._seal_and_run_enrichment_requests(
+                run_id, request, request_window, (), reservations, persisted,
+                envelope, selection_stage="initial",
+                deferred_reasons={"adaptive_enrichment": "no_currently_bound_candidates"},
+            )
+        candidates = _prioritize_due_nomination_candidates(
+            candidates, self.context.get("theme_memory"), run_id=run_id, now=request.now,
+        )
+        selected = select_enrichment_queue(
+            candidates,
+            max_entities=4,
+            max_requests=plan.reserved_adaptive_requests + plan.reserved_holding_quote_requests,
+            required_holding_quote_requests=plan.reserved_holding_quote_requests,
+            provider_limits={
+                "sec_edgar": envelope["sec_issuer_submissions"],
+                "yahoo": envelope["yahoo_security_quote"],
+            },
+        )
+        selected_hypotheses = {
+            hypothesis_id for row in selected for hypothesis_id in row.hypothesis_ids
+        }
+        deferred = {
+            row.hypothesis.hypothesis_id: "not_selected_within_phase_capacity"
+            for row in sorted(candidates, key=lambda value: value.hypothesis.hypothesis_id)
+            if row.hypothesis.hypothesis_id not in selected_hypotheses
+        }
+        return self._seal_and_run_enrichment_requests(
+            run_id, request, request_window, selected, reservations, persisted,
+            envelope, selection_stage="initial", deferred_reasons=deferred,
+        )
+
+    def _holding_quote_requests(
+        self, run_id: str, capacity: int,
+    ) -> tuple[EnrichmentRequest, ...]:
+        reference = self.context.get("security_reference")
+        coverage = self.context.get("reference_coverage")
+        if capacity <= 0 or not isinstance(reference, ReferenceSnapshot) \
+                or not isinstance(coverage, Mapping):
+            return ()
+        manifest_id = coverage.get("reference_manifest_id")
+        if not isinstance(manifest_id, str):
+            return ()
+        output: list[EnrichmentRequest] = []
+        for ticker in sorted(_holding_tickers(self.context.get("holdings"))
+                             | _active_plan_tickers(self.context.get("owner_plans"))):
+            security = reference.by_ticker.get(ticker)
+            if security is None or not security.eligible or security.revision_id is None \
+                    or security.reference_manifest_id != manifest_id or security.cik is None:
+                continue
+            identity = _uuid("holding-quote-task", run_id, security.security_id)
+            output.append(EnrichmentRequest(
+                request_id=identity, entity_id=security.entity_id,
+                security_id=security.security_id, security_revision_id=security.revision_id,
+                reference_manifest_id=manifest_id, cik=security.cik, ticker=security.ticker,
+                instrument_type=security.instrument_type, event_ids=(f"holding:{ticker}",),
+                theme_id="portfolio_holdings", role="issuer_operations",
+                hypothesis_ids=(f"holding:{ticker}",), source_item_ids=(),
+                dependency_task_ids=(), provider="yahoo",
+                capability_id="yahoo_security_quote", query_kind="quote",
+                descriptor=MappingProxyType({
+                    "instrument_type": security.instrument_type,
+                    "reference_manifest_id": manifest_id,
+                    "security_id": security.security_id,
+                    "security_revision_id": security.revision_id,
+                    "ticker": security.ticker,
+                }), adverse_path=False, priority=0, execution_allowed=False,
+            ))
+            if len(output) >= capacity:
+                break
+        return tuple(output)
+
+    def _exposure_rows(
+        self, request_row: EnrichmentRequest, result: CollectionResult,
+    ) -> tuple[Mapping[str, object], ...]:
+        reference = self.context.get("security_reference")
+        if not isinstance(reference, ReferenceSnapshot) or len(result.items) != 1:
+            return ()
+        issuer = reference.issuers_by_id.get(request_row.entity_id)
+        if issuer is None:
+            return ()
+        item = normalize_item(result.items[0])
+        descriptor = request_row.descriptor
+        try:
+            if result.receipt.response_hash != item.metadata.get("raw_response_hash"):
+                raise ValueError("filing response hash mismatch")
+            filing_date = date.fromisoformat(str(descriptor["filing_date"]))
+            period_value = descriptor.get("reporting_period_end")
+            period_end = date.fromisoformat(str(period_value)) if period_value else None
+            accepted_value = descriptor.get("accepted_at")
+            accepted = datetime.fromisoformat(str(accepted_value).replace("Z", "+00:00")) \
+                if accepted_value else None
+            evidence = FilingEvidence(
+                issuer_cik=request_row.cik,
+                accession_number=str(descriptor["accession_number"]),
+                form=str(descriptor["form"]),
+                primary_document=str(descriptor["primary_document"]),
+                source_url=item.source_url,
+                source_response_hash=str(item.metadata["raw_response_hash"]),
+                submissions_response_hash=str(descriptor["submissions_response_hash"]),
+                passage=item.summary,
+                source_locator=str(item.metadata["source_locator"]),
+                normalized_passage_hash=str(item.metadata["normalized_passage_hash"]),
+                parser_version=str(item.metadata["parser_version"]),
+                filing_rule_version=str(item.metadata["filing_rule_version"]),
+                schema_version=1,
+                filing_date=filing_date,
+                accepted_at=accepted,
+                reporting_period_end=period_end,
+                retrieved_at=item.retrieved_at,
+                source_item_id=evidence_key(item),
+                source_item_content_hash=item.content_hash,
+                source_receipt_id=str(result.receipt.source_receipt_id),
+                source_cache_key=str(result.receipt.cache_key),
+            )
+            binding = IssuerExposureBinding(
+                entity_id=request_row.entity_id,
+                security_id=str(request_row.security_id),
+                security_revision_id=request_row.security_revision_id,
+                reference_manifest_id=request_row.reference_manifest_id,
+                cik=request_row.cik,
+                canonical_name=issuer.canonical_name,
+                ticker=str(request_row.ticker),
+                reference_status="current",
+            )
+            facts = extract_exposure_facts(
+                evidence, issuer=binding, role=request_row.role,
+                event_ids=request_row.event_ids,
+                hypothesis_ids=request_row.hypothesis_ids,
+            )
+            stored = self.context.setdefault("exposure_facts", [])
+            if isinstance(stored, list):
+                stored.extend(facts)
+            return tuple(fact.to_persistence_row() for fact in facts)
+        except (KeyError, TypeError, ValueError):
+            return ()
+
+    @staticmethod
+    def _filing_document_requests(
+        manifest: object,
+        results: Sequence[CollectionResult],
+        capacity: int,
+    ) -> tuple[EnrichmentRequest, ...]:
+        requests = getattr(manifest, "requests", ())
+        output: list[EnrichmentRequest] = []
+        for request_row, result in zip(requests, results, strict=True):
+            if request_row.query_kind != "issuer_submissions" \
+                    or result.receipt.status not in {"succeeded", "cache_hit"}:
+                continue
+            records = sorted(
+                (normalize_item(raw) for raw in result.items),
+                key=lambda item: (
+                    str(item.metadata.get("filing_date") or ""),
+                    str(item.metadata.get("accession_number") or ""),
+                ),
+                reverse=True,
+            )
+            if not records:
+                continue
+            item = records[0]
+            metadata = item.metadata
+            required = {
+                "accession_number", "filing_date", "form", "issuer_cik",
+                "primary_document", "submissions_response_hash",
+            }
+            if not required <= metadata.keys() or metadata.get("issuer_cik") != request_row.cik:
+                continue
+            digest = hashlib.sha256(_canonical({
+                "issuer": request_row.entity_id,
+                "accession": metadata["accession_number"],
+                "document": metadata["primary_document"],
+                "hypotheses": request_row.hypothesis_ids,
+            }).encode()).hexdigest()
+            output.append(EnrichmentRequest(
+                request_id=str(uuid.uuid5(uuid.NAMESPACE_URL, f"enrichment-document:{digest}")),
+                entity_id=request_row.entity_id,
+                security_id=request_row.security_id,
+                security_revision_id=request_row.security_revision_id,
+                reference_manifest_id=request_row.reference_manifest_id,
+                cik=request_row.cik,
+                ticker=request_row.ticker,
+                instrument_type=request_row.instrument_type,
+                event_ids=request_row.event_ids,
+                theme_id=request_row.theme_id,
+                role=request_row.role,
+                hypothesis_ids=request_row.hypothesis_ids,
+                source_item_ids=tuple(sorted({*request_row.source_item_ids, evidence_key(item)})),
+                dependency_task_ids=(request_row.request_id,),
+                provider="sec_edgar",
+                capability_id="sec_filing_document",
+                query_kind="filing_document",
+                descriptor=MappingProxyType({
+                    "accession_number": metadata["accession_number"],
+                    "accepted_at": metadata.get("accepted_at"),
+                    "filing_date": metadata["filing_date"],
+                    "form": metadata["form"],
+                    "primary_document": metadata["primary_document"],
+                    "reporting_period_end": metadata.get("reporting_period_end"),
+                    "submissions_response_hash": metadata["submissions_response_hash"],
+                }),
+                adverse_path=request_row.adverse_path,
+                priority=request_row.priority,
+                execution_allowed=False,
+            ))
+            if len(output) >= capacity:
+                break
+        return tuple(output)
+
+    def _seal_and_run_enrichment_requests(
+        self,
+        run_id: str,
+        request: PipelineRequest,
+        request_window: Mapping[str, str],
+        selected: Sequence[EnrichmentRequest],
+        reservations: Mapping[str, Mapping[str, object]],
+        persisted: dict[str, Mapping[str, object]],
+        envelope: Mapping[str, int],
+        *,
+        selection_stage: str,
+        deferred_reasons: Mapping[str, str] = MappingProxyType({}),
+        frozen_manifest: SelectionManifest | None = None,
+    ) -> list[CollectionResult]:
+        plan = self.discovery_plan
+        if plan is None:
+            raise ValueError("enrichment requests require a discovery plan")
+        manifest = frozen_manifest if frozen_manifest is not None else build_selection_manifest(
+            run_id=run_id, phase=request.phase, requests=selected,
+            deferred_reasons=deferred_reasons, provider_reservations=envelope,
+            request_window=request_window, selection_stage=selection_stage,  # type: ignore[arg-type]
+        )
+        if not hasattr(manifest, "persistence_payload") \
+                or getattr(manifest, "run_id", None) != run_id \
+                or getattr(manifest, "phase", None) != request.phase \
+                or getattr(manifest, "selection_stage", None) != selection_stage:
+            raise ValueError("frozen enrichment selection does not match the run")
+        payload = manifest.persistence_payload()
+        method = getattr(self.gateway, "seal_enrichment_selection", None)
+        if callable(method):
+            response = method(run_id, payload)
+        elif callable(getattr(self.gateway, "call", None)):
+            response = self.gateway.call(
+                "seal_enrichment_selection", payload, run_id=run_id,
+                request_id=_uuid("seal-enrichment-selection", run_id, manifest.manifest_id),
+            )
+        else:
+            raise ValueError("adaptive enrichment requires protected selection persistence")
+        data = _gateway_data(response)
+        if data.get("manifest_id") != manifest.manifest_id \
+                or int(data.get("request_count", -1)) != len(manifest.requests):
+            raise ValueError("enrichment selection receipt mismatch")
+        for raw in payload["requests"]:
+            task_id = str(raw["task_id"])
+            if task_id not in persisted:
+                persisted[task_id] = {
+                    "id": task_id, "stage": raw["stage"], "provider": raw["provider"],
+                    "capability_id": raw["capability_id"], "query_kind": raw["query_kind"],
+                    "query_hash": raw["descriptor_hash"], "dependency_ids": raw["dependency_ids"],
+                    "requested_window": raw["requested_window"], "state": "planned",
+                    "attempt_count": 0, "request_budget": 1, "result": {},
+                }
+        if selection_stage == "initial":
+            self._transition_due_nominations(run_id, manifest.requests, request.now)
+        output: list[CollectionResult] = []
+        for request_row in manifest.requests:
+            capability = plan.capabilities.get(request_row.capability_id)
+            reservation = reservations.get(request_row.provider)
+            if capability is None or reservation is None:
+                raise ValueError("selected enrichment capability is unavailable")
+            task = DiscoveryTask(
+                task_id=request_row.request_id,
+                stage="quote" if request_row.query_kind == "quote" else "enrich",
+                provider=request_row.provider,
+                capability_id=request_row.capability_id,
+                query_kind=request_row.query_kind,
+                theme_id=request_row.theme_id,
+                query=MappingProxyType({
+                    **dict(request_row.descriptor),
+                    "symbol": request_row.ticker,
+                    "query": request_row.role.replace("_", " "),
+                    "_descriptor_hash": request_row.descriptor_hash,
+                    "_selection_manifest_id": manifest.manifest_id,
+                }),
+                window=MappingProxyType(dict(request_window)),
+                dependencies=request_row.dependency_task_ids,
+                max_attempts=1,
+                requires_credential=False,
+            )
+            output.append(self._run_planned_collection_task(
+                run_id, request, request_window, task, capability,
+                next(adapter for adapter in self.adapters if str(adapter.provider) == request_row.provider),
+                reservation, persisted,
+                exposure_request=request_row if request_row.query_kind == "filing_document" else None,
+            ))
+        if selection_stage == "initial":
+            frozen_documents = self._frozen_enrichment_selection(
+                run_id, request.phase, "filing_documents"
+            )
+            documents = frozen_documents.requests if frozen_documents is not None else \
+                self._filing_document_requests(
+                    manifest, output, envelope["sec_filing_document"],
+                )
+            document_parent_ids = {
+                row.dependency_task_ids[0] for row in documents
+                if row.dependency_task_ids
+            }
+            document_deferrals = dict(frozen_documents.deferred_reasons) if frozen_documents \
+                is not None else {
+                row.request_id: "no_validated_primary_filing_document"
+                for row in manifest.requests
+                if row.query_kind == "issuer_submissions"
+                and row.request_id not in document_parent_ids
+            }
+            output.extend(self._seal_and_run_enrichment_requests(
+                run_id, request, request_window, documents, reservations, persisted,
+                envelope, selection_stage="filing_documents",
+                deferred_reasons=document_deferrals,
+                frozen_manifest=frozen_documents,
+            ))
+        return output
+
+    def _transition_due_nominations(
+        self,
+        run_id: str,
+        requests: Sequence[EnrichmentRequest],
+        now: datetime,
+    ) -> None:
+        memory = self.context.get("theme_memory")
+        if memory is None:
+            return
+        if not isinstance(memory, Mapping):
+            raise ValueError("protected theme memory is invalid")
+        raw_due = memory.get("due_nominations", [])
+        if not isinstance(raw_due, Sequence) or isinstance(
+            raw_due, (str, bytes, bytearray)
+        ) or len(raw_due) > 12:
+            raise ValueError("protected due nominations are invalid")
+        current = _utc(now)
+        due: list[tuple[int, datetime, str, Mapping[str, object]]] = []
+        supported_evidence = {
+            "primary_exposure", "contradictory_primary", "current_filing",
+            "official_program", "entity_identity", "relationship", "current_reference",
+        }
+        for raw in raw_due:
+            if not isinstance(raw, Mapping):
+                raise ValueError("protected due nomination is invalid")
+            nomination_id = raw.get("nomination_id")
+            origin_run_id = raw.get("origin_run_id")
+            try:
+                if str(uuid.UUID(str(nomination_id))) != nomination_id \
+                        or str(uuid.UUID(str(origin_run_id))) != origin_run_id:
+                    raise ValueError
+                created = datetime.fromisoformat(str(raw.get("created_at")).replace("Z", "+00:00"))
+                expiry = datetime.fromisoformat(str(raw.get("expires_at")).replace("Z", "+00:00"))
+            except (TypeError, ValueError, AttributeError) as exc:
+                raise ValueError("protected due nomination is invalid") from exc
+            priority = raw.get("priority")
+            evidence_ids = raw.get("evidence_ids")
+            if (
+                raw.get("execution_allowed") is not False
+                or origin_run_id == run_id
+                or isinstance(priority, bool) or not isinstance(priority, int)
+                or not 1 <= priority <= 5
+                or created.tzinfo is None or expiry.tzinfo is None
+                or not created.astimezone(timezone.utc) <= current < expiry.astimezone(timezone.utc)
+                or raw.get("required_evidence_kind") not in supported_evidence
+                or not isinstance(evidence_ids, Sequence)
+                or isinstance(evidence_ids, (str, bytes, bytearray))
+                or not 1 <= len(evidence_ids) <= 8
+                or any(not isinstance(value, str) for value in evidence_ids)
+                or len(set(evidence_ids)) != len(evidence_ids)
+            ):
+                continue
+            due.append((-priority, expiry.astimezone(timezone.utc), nomination_id, raw))
+        selected_count = 0
+        for _priority, _expiry, nomination_id, nomination in sorted(due):
+            nominated_evidence = set(nomination["evidence_ids"])  # type: ignore[arg-type]
+            matched = next((
+                row for row in sorted(
+                    requests,
+                    key=lambda value: (
+                        value.priority, 0 if value.provider == "sec_edgar" else 1,
+                        value.request_id,
+                    ),
+                )
+                if row.theme_id == nomination.get("theme_id")
+                and row.entity_id == nomination.get("entity_id")
+                and row.security_id == nomination.get("security_id")
+                and row.role == nomination.get("relationship_role")
+                and nominated_evidence <= set(row.source_item_ids)
+                and row.execution_allowed is False
+            ), None)
+            if matched is None:
+                continue
+            lifecycle = {
+                "state": "selected",
+                "reason": "Scheduled bounded research-only follow-up.",
+                "selection_descriptor": {
+                    "request_id": matched.request_id,
+                    "descriptor_hash": matched.descriptor_hash,
+                    "uncertain_outcome_barrier": True,
+                    "execution_allowed": False,
+                },
+            }
+            method = getattr(self.gateway, "transition_research_nomination_v2", None)
+            if callable(method):
+                response = method(run_id, nomination_id, lifecycle)
+            elif callable(getattr(self.gateway, "call", None)):
+                response = self.gateway.call(
+                    "transition_research_nomination_v2",
+                    {"nomination_id": nomination_id, **lifecycle}, run_id=run_id,
+                    request_id=_uuid(
+                        "transition-research-nomination-v2", run_id,
+                        nomination_id, matched.request_id,
+                    ),
+                )
+            else:
+                raise ValueError("due nomination requires protected lifecycle persistence")
+            data = _gateway_data(response)
+            if data.get("nomination_id") != nomination_id or data.get("state") != "selected":
+                raise ValueError("research nomination lifecycle receipt mismatch")
+            selected_count += 1
+            if selected_count >= 3:
+                break
+
+    def _frozen_enrichment_selection(
+        self, run_id: str, phase: str, selection_stage: str,
+    ) -> SelectionManifest | None:
+        values = self.context.get("_frozen_enrichment_selections", {})
+        if not isinstance(values, Mapping):
+            raise ValueError("persisted enrichment selections are invalid")
+        manifest = values.get(selection_stage)
+        if manifest is not None and (
+            getattr(manifest, "run_id", None) != run_id
+            or getattr(manifest, "phase", None) != phase
+            or getattr(manifest, "selection_stage", None) != selection_stage
+        ):
+            raise ValueError("persisted enrichment selection identity is invalid")
+        return manifest
+
+    @staticmethod
+    def _adaptive_capability(
+        plan: DiscoveryPlan, adapters: Mapping[str, object]
+    ) -> SourceCapability | None:
+        if plan.reserved_adaptive_requests == 0:
+            return None
+        capability = plan.capabilities.get("gdelt_theme_search")
+        if capability is None or capability.provider != "gdelt" \
+                or capability.query_kind != "theme_search" \
+                or capability.required_credential is not None \
+                or not capability.enabled or capability.health not in {"enabled", "degraded"} \
+                or plan.phase not in capability.phases:
+            raise ValueError("adaptive reserve requires the approved keyless GDELT capability")
+        if capability.provider not in adapters:
+            raise ValueError("adaptive reserve has no adapter for its approved provider")
+        return capability
+
+    def _reverse_discovery_tasks(
+        self,
+        run_id: str,
+        request_window: Mapping[str, str],
+        task_results: Sequence[tuple[DiscoveryTask, CollectionResult]],
+        capacity: int,
+    ) -> tuple[DiscoveryTask, ...]:
+        observations: list[tuple[str, SourceItem]] = []
+        for task, result in task_results:
+            if result.receipt.status not in {"succeeded", "cache_hit"}:
+                continue
+            for raw in result.items:
+                item = normalize_item(raw)
+                observations.append((task.task_id, item))
+        reference = self.context.get("security_reference")
+        tasks: list[DiscoveryTask] = []
+        for selection in select_reverse_discovery_tasks(
+            tuple(observations),
+            reference if isinstance(reference, ReferenceSnapshot) else None,
+            max_tasks=capacity,
+        ):
+            row = selection.task
+            hypothesis = {
+                "adverse_path": row.adverse_path,
+                "direction": row.direction,
+                "evidence_requirement": row.evidence_requirement,
+                "exposure_supported": False,
+                "geography": row.geography,
+                "horizon": row.horizon,
+                "invalidation_rule": row.invalidation_rule,
+                "role": row.role,
+                "status": "hypothesis",
+            }
+            tasks.append(DiscoveryTask(
+                task_id=_uuid("reverse-discovery-task", run_id, row.task_id),
+                stage="resolve",
+                provider=row.provider,
+                capability_id=row.capability_id,
+                query_kind=row.query_kind,
+                theme_id=row.theme_id,
+                query={
+                    "event_id": row.event_id,
+                    "hypothesis": hypothesis,
+                    "hypothesis_id": row.hypothesis_id,
+                    "query": row.query_text,
+                    "selection_task_id": row.task_id,
+                    "source_item_ids": list(row.dependency_ids)[:32],
+                },
+                window=dict(request_window),
+                dependencies=selection.dependency_task_ids,
+                max_attempts=row.max_attempts,
+                requires_credential=False,
+            ))
+        return tuple(tasks)
+
+    def _persist_dynamic_theme_evaluation(
+        self,
+        run_id: str,
+        request_window: Mapping[str, str],
+        task_results: Sequence[tuple[DiscoveryTask, CollectionResult]],
+        persisted: dict[str, Mapping[str, object]],
+    ) -> None:
+        observations: list[tuple[str, SourceItem]] = []
+        for task, result in task_results:
+            persisted_task = persisted.get(task.task_id)
+            if isinstance(persisted_task, Mapping) \
+                    and persisted_task.get("state") != "succeeded":
+                continue
+            if result.receipt.status not in {"succeeded", "cache_hit"}:
+                continue
+            for raw in result.items:
+                item = normalize_item(raw)
+                observations.append((task.task_id, item))
+        selection = select_dynamic_theme_evidence(observations)
+        labels = selection.labels
+        if not labels:
+            return
+        bounded = selection.evidence_by_label
+        bounded_source_ids = tuple(sorted({
+            evidence_key(item) for label in labels for item in bounded[label]
+        }))
+        dependencies = selection.dependency_ids
+        task_by_id = {task.task_id: task for task, _result in task_results}
+        requested_labels = sorted({
+            value
+            for task_id in dependencies
+            for value in (
+                task_by_id[task_id].query.get("query"), task_by_id[task_id].theme_id,
+            )
+            if isinstance(value, str) and value.strip()
+        })
+        coverage_label = "bounded sources: " + ",".join(sorted({
+            item.provider for label in labels for item in bounded[label]
+        }))
+        proposals = tuple(
+            propose_dynamic_theme(
+                label,
+                bounded[label],
+                coverage_label=coverage_label,
+                requested_labels=requested_labels,
+            )
+            for label in labels
+        )
+        source_ids = tuple(sorted({
+            evidence_key(item) for proposal in proposals for item in proposal.evidence
+        }))
+        if source_ids != bounded_source_ids:
+            raise ValueError("dynamic theme proposal changed bounded source identity")
+        task = DiscoveryTask(
+            task_id=_uuid(
+                "dynamic-theme-evaluation", run_id,
+                hashlib.sha256(_canonical({
+                    "labels": labels, "requested_labels": requested_labels,
+                    "source_ids": source_ids,
+                }).encode()).hexdigest(),
+            ),
+            stage="signals",
+            provider="gdelt",
+            capability_id="dynamic_theme_evaluation",
+            query_kind="theme_search",
+            theme_id=None,
+            query={
+                "query": "dynamic-theme-evaluation", "labels": labels,
+                "requested_labels": requested_labels,
+            },
+            window={
+                "start": request_window["start"],
+                "end": request_window["end"],
+            },
+            dependencies=dependencies,
+            max_attempts=1,
+            requires_credential=False,
+        )
+        current = persisted.get(task.task_id)
+        if current is None:
+            planned = self._task_row(task, state="planned", attempt_count=0, result={})
+            persisted[task.task_id] = self._checkpoint_discovery_task(run_id, planned)
+            current = persisted[task.task_id]
+        state = str(current.get("state") or "")
+        if state == "succeeded":
+            return
+        if state == "planned":
+            attempting = self._task_row(task, state="attempting", attempt_count=1, result={})
+            persisted[task.task_id] = self._checkpoint_discovery_task(run_id, attempting)
+            current = persisted[task.task_id]
+            state = str(current.get("state") or "")
+        if state != "attempting":
+            raise ValueError("persisted dynamic theme task state is invalid")
+        result_rows = [{
+            "eligible": proposal.eligible,
+            "fingerprint": proposal.fingerprint,
+            "label": proposal.label,
+            "missing_reasons": list(proposal.missing_reasons),
+            "research_state": "observed" if proposal.eligible else "unresolved",
+            "source_ids": sorted({
+                evidence_key(item) for item in proposal.evidence
+            })[:64],
+            "theme_id": proposal.theme_id,
+        } for proposal in proposals]
+        episode_rows: list[dict[str, object]] = []
+        for proposal in proposals:
+            if not proposal.eligible:
+                continue
+            evidence_ids = sorted({evidence_key(item) for item in proposal.evidence})[:64]
+            observed = min(
+                item.published_at or item.effective_at or item.retrieved_at
+                for item in proposal.evidence
+            )
+            episode_rows.append(_semantic_row("theme-episode", {
+                "theme_id": proposal.theme_id,
+                "revision": 1,
+                "episode": {
+                    "coverage_label": proposal.coverage_label,
+                    "fingerprint": proposal.fingerprint,
+                    "label": proposal.label,
+                    "missing_reasons": [],
+                    "research_state": "observed",
+                },
+                "source_ids": evidence_ids,
+                "valid_from": _timestamp(observed),
+                "valid_to": None,
+            }))
+        terminal = self._task_row(
+            task,
+            state="succeeded",
+            attempt_count=int(current.get("attempt_count") or 1),
+            result={
+                "episode_count": len(episode_rows),
+                "labels_truncated": selection.labels_truncated,
+                "proposals": result_rows,
+                "requested_labels": requested_labels,
+                "research_state": "observed" if episode_rows else "unresolved",
+                "source_ids_truncated": selection.source_ids_truncated,
+            },
+        )
+        persisted[task.task_id] = self._checkpoint_discovery_task(
+            run_id, terminal, theme_episode_revisions=episode_rows
+        )
+
+    def _hydrate_reference_snapshot(self, run_id: str) -> None:
+        coverage = self.context.get("reference_coverage")
+        if not isinstance(coverage, Mapping) \
+                or coverage.get("reference_status") == "reference_unavailable":
+            return
+        if self.reference_snapshot_loader is None:
+            return
+        snapshot = self.reference_snapshot_loader(run_id)
+        if not isinstance(snapshot, ReferenceSnapshot):
+            raise ValueError("reference snapshot loader returned an invalid snapshot")
+        manifest_id = coverage.get("reference_manifest_id")
+        if not isinstance(manifest_id, str) or not manifest_id:
+            raise ValueError("reference snapshot coverage is invalid")
+        self.context["security_reference"] = snapshot
+        self._hydrate_persisted_exposure_facts(run_id)
+
+    def _read_discovery_tasks(self, run_id: str) -> dict[str, Mapping[str, object]]:
+        method = getattr(self.gateway, "read_discovery_context", None)
+        if callable(method):
+            response = method(run_id)
+        elif callable(getattr(self.gateway, "call", None)):
+            response = self.gateway.call(
+                "read_discovery_context", {"limit": 100}, run_id=run_id,
+                request_id=_uuid("read-discovery-context", run_id),
+            )
+        else:
+            raise ValueError("planned collection requires discovery checkpoint support")
+        data = _gateway_data(response)
+        context = data.get("context", data)
+        if not isinstance(context, Mapping):
+            raise ValueError("persisted discovery context is invalid")
+        rows = context.get("tasks")
+        if not isinstance(rows, Sequence) or isinstance(rows, (str, bytes, bytearray)):
+            raise ValueError("persisted discovery tasks are invalid")
+        result: dict[str, Mapping[str, object]] = {}
+        for row in rows:
+            if not isinstance(row, Mapping) or not isinstance(row.get("id"), str):
+                raise ValueError("persisted discovery task is invalid")
+            task_id = str(row["id"])
+            if task_id in result:
+                raise ValueError("persisted discovery task identity is duplicated")
+            result[task_id] = row
+        raw_selections = context.get("enrichment_selections", ())
+        if not isinstance(raw_selections, Sequence) or isinstance(
+            raw_selections, (str, bytes, bytearray)
+        ) or len(raw_selections) > 3:
+            raise ValueError("persisted enrichment selections are invalid")
+        selections: dict[str, SelectionManifest] = {}
+        for raw in raw_selections:
+            if not isinstance(raw, Mapping):
+                raise ValueError("persisted enrichment selection is invalid")
+            manifest = selection_manifest_from_payload(raw)
+            if manifest.run_id != run_id or manifest.selection_stage in selections:
+                raise ValueError("persisted enrichment selection identity is invalid")
+            selections[manifest.selection_stage] = manifest
+        self.context["_frozen_enrichment_selections"] = MappingProxyType(selections)
+        raw_facts = context.get("exposure_facts", ())
+        if not isinstance(raw_facts, Sequence) or isinstance(
+            raw_facts, (str, bytes, bytearray)
+        ) or len(raw_facts) > 100 or any(not isinstance(row, Mapping) for row in raw_facts):
+            raise ValueError("persisted exposure facts are invalid")
+        self.context["_persisted_exposure_fact_rows"] = tuple(raw_facts)
+        self.context["_persisted_discovery_tasks"] = MappingProxyType(result)
+        self._hydrate_persisted_exposure_facts(run_id)
+        return result
+
+    def _hydrate_persisted_exposure_facts(self, run_id: str) -> None:
+        raw_rows = self.context.get("_persisted_exposure_fact_rows", ())
+        if not raw_rows:
+            return
+        reference = self.context.get("security_reference")
+        if not isinstance(reference, ReferenceSnapshot):
+            return
+        coverage = self.context.get("reference_coverage")
+        if not isinstance(coverage, Mapping) or coverage.get("reference_status") not in {
+            "healthy", "reference_stale",
+        } or not isinstance(coverage.get("reference_manifest_id"), str):
+            raise ValueError("persisted exposure current pin is unavailable")
+        selections = self.context.get("_frozen_enrichment_selections")
+        tasks = self.context.get("_persisted_discovery_tasks")
+        if not isinstance(selections, Mapping) or not isinstance(tasks, Mapping):
+            raise ValueError("persisted exposure lineage is unavailable")
+        selected: dict[str, EnrichmentRequest] = {}
+        for manifest in selections.values():
+            if not isinstance(manifest, SelectionManifest) or manifest.run_id != run_id:
+                raise ValueError("persisted exposure selection is invalid")
+            for request_row in manifest.requests:
+                if request_row.request_id in selected:
+                    raise ValueError("persisted exposure selection is duplicated")
+                selected[request_row.request_id] = request_row
+        hydrated: dict[str, ExposureFact] = {}
+        current = self.context.get("exposure_facts", ())
+        if isinstance(current, Sequence) and not isinstance(current, (str, bytes, bytearray)):
+            for fact in current:
+                if isinstance(fact, ExposureFact):
+                    hydrated[fact.fact_id] = fact
+        for raw in raw_rows:
+            fact = exposure_fact_from_persistence(raw)
+            if raw.get("run_id") not in {None, run_id}:
+                raise ValueError("persisted exposure run binding is invalid")
+            task_id = raw.get("task_id")
+            task = tasks.get(task_id)
+            request_row = selected.get(str(task_id))
+            security = reference.by_ticker.get(fact.ticker)
+            issuer = reference.issuers_by_id.get(fact.entity_id)
+            if not isinstance(task_id, str) or not isinstance(task, Mapping) \
+                    or task.get("id") != task_id or task.get("state") != "succeeded" \
+                    or task.get("stage") != "enrich" \
+                    or task.get("provider") != "sec_edgar" \
+                    or task.get("capability_id") != "sec_filing_document" \
+                    or task.get("query_kind") != "filing_document" \
+                    or request_row is None or request_row.query_kind != "filing_document" \
+                    or request_row.capability_id != "sec_filing_document" \
+                    or task.get("query_hash") != request_row.descriptor_hash \
+                    or security is None or issuer is None or not security.eligible \
+                    or security.entity_id != fact.entity_id \
+                    or security.security_id != fact.security_id \
+                    or security.revision_id != fact.security_revision_id \
+                    or security.reference_manifest_id != fact.reference_manifest_id \
+                    or coverage.get("reference_manifest_id") != fact.reference_manifest_id \
+                    or issuer.cik != fact.issuer_cik:
+                raise ValueError("persisted exposure pin or task binding is invalid")
+            descriptor = request_row.descriptor
+            task_result = task.get("result")
+            task_checkpoint = task_result.get("checkpoint") \
+                if isinstance(task_result, Mapping) else None
+            task_receipt = task_checkpoint.get("receipt") \
+                if isinstance(task_checkpoint, Mapping) else None
+            if not isinstance(task_checkpoint, Mapping) \
+                    or task_checkpoint.get("cache_key") != fact.source_cache_key \
+                    or (isinstance(task_receipt, Mapping) and (
+                        task_receipt.get("cache_key") != fact.source_cache_key
+                        or task_receipt.get("source_receipt_id") != fact.source_receipt_id
+                        or task_receipt.get("response_hash") != fact.source_response_hash
+                    )):
+                raise ValueError("persisted exposure task checkpoint is invalid")
+            expected = {
+                "reference_manifest_id": fact.reference_manifest_id,
+                "security_revision_id": fact.security_revision_id,
+                "security_id": fact.security_id,
+                "entity_id": fact.entity_id,
+                "ticker": fact.ticker,
+                "cik": fact.issuer_cik,
+                "accession_number": fact.accession_number,
+                "form": fact.form,
+                "primary_document": fact.primary_document,
+                "submissions_response_hash": fact.submissions_response_hash,
+                "source_receipt_id": fact.source_receipt_id,
+                "cache_key": fact.source_cache_key,
+                "filing_date": fact.filing_date.isoformat(),
+                "reporting_period_end": (
+                    fact.reporting_period_end.isoformat() if fact.reporting_period_end else None
+                ),
+            }
+            if any(descriptor.get(key) != value for key, value in expected.items()) \
+                    or tuple(descriptor.get("event_ids", ())) != fact.event_ids \
+                    or tuple(descriptor.get("hypothesis_ids", ())) != fact.hypothesis_ids \
+                    or descriptor.get("role") != fact.role:
+                raise ValueError("persisted exposure descriptor binding is invalid")
+            accepted = descriptor.get("accepted_at")
+            try:
+                accepted_at = datetime.fromisoformat(str(accepted).replace("Z", "+00:00")) \
+                    if accepted is not None else None
+            except ValueError:
+                raise ValueError("persisted exposure descriptor binding is invalid") from None
+            if (accepted_at is None) != (fact.accepted_at is None) or (
+                accepted_at is not None and _utc(accepted_at) != _utc(fact.accepted_at)
+            ):
+                raise ValueError("persisted exposure descriptor binding is invalid")
+            checkpoint = self.cache.collection_for_lineage(fact.source_cache_key)
+            if checkpoint is None or checkpoint.receipt.source_receipt_id != fact.source_receipt_id \
+                    or checkpoint.receipt.response_hash != fact.source_response_hash \
+                    or checkpoint.receipt.cache_key != fact.source_cache_key \
+                    or checkpoint.receipt.provider != "sec_edgar" \
+                    or checkpoint.receipt.status != "succeeded" \
+                    or checkpoint.receipt.reservation_id != descriptor.get("reservation_id") \
+                    or len(checkpoint.items) != 1:
+                raise ValueError("persisted exposure source checkpoint is invalid")
+            matches = []
+            for raw_item in checkpoint.items:
+                item = normalize_item(raw_item)
+                metadata = item.metadata
+                if (
+                    item.provider == "sec_edgar"
+                    and item.authority in {"official", "official_issuer_filing"}
+                    and evidence_key(item) == fact.source_item_id
+                    and item.content_hash == fact.source_item_content_hash
+                    and item.source_url == fact.source_url
+                    and item.request_url == fact.source_url
+                    and item.summary == fact.passage
+                    and len(item.canonical_content.encode()) <= 8_192
+                    and {
+                        "accession_number", "filing_rule_version",
+                        "normalized_passage_hash", "parser_version", "primary_document",
+                        "raw_response_hash", "source_locator",
+                    } <= set(metadata)
+                    and set(metadata) <= {
+                        "accession_number", "filing_rule_version",
+                        "normalized_passage_hash", "parser_version", "primary_document",
+                        "raw_response_hash", "source_locator", "exposure_kind",
+                        "entity_ids", "security_ids",
+                    }
+                    and metadata.get("exposure_kind") in {None, "filing"}
+                    and metadata.get("raw_response_hash") == fact.source_response_hash
+                    and metadata.get("normalized_passage_hash") == fact.normalized_passage_hash
+                    and metadata.get("source_locator") == fact.source_locator
+                    and metadata.get("parser_version") == fact.parser_version
+                    and metadata.get("filing_rule_version") == fact.filing_rule_version
+                    and metadata.get("accession_number") in {None, fact.accession_number}
+                    and metadata.get("primary_document") in {None, fact.primary_document}
+                ):
+                    matches.append(item)
+            if len(matches) != 1:
+                raise ValueError("persisted exposure source item is invalid")
+            duplicate = hydrated.get(fact.fact_id)
+            if duplicate is not None and duplicate != fact:
+                raise ValueError("persisted exposure replay is inconsistent")
+            hydrated[fact.fact_id] = fact
+        self.context["exposure_facts"] = [hydrated[key] for key in sorted(hydrated)]
+
+    def _checkpoint_discovery_task(
+        self,
+        run_id: str,
+        row: Mapping[str, object],
+        *,
+        theme_episode_revisions: Sequence[Mapping[str, object]] = (),
+        exposure_facts: Sequence[Mapping[str, object]] = (),
+    ) -> Mapping[str, object]:
+        payload = {
+            "task": dict(row),
+            "exposure_facts": [dict(value) for value in exposure_facts],
+            "theme_episode_revisions": [dict(value) for value in theme_episode_revisions],
+            "research_nominations": [],
+        }
+        method = getattr(self.gateway, "checkpoint_discovery_stage", None)
+        if callable(method):
+            response = method(run_id, payload)
+        elif callable(getattr(self.gateway, "call", None)):
+            response = self.gateway.call(
+                "checkpoint_discovery_stage", payload, run_id=run_id,
+                request_id=_uuid(
+                    "discovery-stage", run_id, row["id"], row["state"], row["attempt_count"]
+                ),
+            )
+        else:
+            raise ValueError("planned collection requires discovery checkpoint support")
+        returned = _gateway_data(response).get("task")
+        if not isinstance(returned, Mapping) or returned.get("id") != row["id"] \
+                or returned.get("state") != row["state"]:
+            raise ValueError("discovery checkpoint receipt mismatch")
+        return returned
+
+    @staticmethod
+    def _task_row(
+        task: DiscoveryTask,
+        *,
+        state: str,
+        attempt_count: int,
+        result: Mapping[str, object],
+        window: CollectionWindow | None = None,
+        cursor: SourceCursor | None = None,
+    ) -> dict[str, object]:
+        requested = task.window if window is None else {
+            "start": _timestamp(window.start), "end": _timestamp(window.end),
+        }
+        frozen_hash = task.query.get("_descriptor_hash")
+        query_hash = str(frozen_hash) if isinstance(frozen_hash, str) \
+            and re.fullmatch(r"[0-9a-f]{64}", frozen_hash) else hashlib.sha256(_canonical({
+                "capability_id": task.capability_id,
+                "query": dict(task.query),
+                "cursor": cursor.to_mapping() if cursor is not None else None,
+                "requested_window": dict(requested),
+                "theme_id": task.theme_id,
+            }).encode()).hexdigest()
+        return {
+            "id": task.task_id,
+            "stage": task.stage,
+            "provider": task.provider,
+            "capability_id": task.capability_id,
+            "query_kind": task.query_kind,
+            "query_hash": query_hash,
+            "dependency_ids": list(task.dependencies),
+            "requested_window": {
+                "start": str(requested["start"]), "end": str(requested["end"]),
+            },
+            "state": state,
+            "attempt_count": attempt_count,
+            "request_budget": task.max_attempts,
+            "result": dict(result),
+        }
+
+    def _run_planned_reference(
+        self,
+        run_id: str,
+        request: PipelineRequest,
+        persisted: dict[str, Mapping[str, object]],
+    ) -> None:
+        plan = self.discovery_plan
+        if plan is None:
+            return
+        for task in (value for value in plan.tasks if value.stage == "reference"):
+            current = persisted[task.task_id]
+            state = str(current.get("state") or "")
+            saved = current.get("result")
+            if state in {"succeeded", "deferred"} and isinstance(saved, Mapping):
+                coverage = saved.get("reference_coverage")
+                if isinstance(coverage, Mapping):
+                    self.context["reference_coverage"] = {
+                        **dict(coverage), "execution_allowed": False,
+                    }
+                continue
+            if state == "attempting":
+                coverage = {
+                    "coverage_status": "scope_not_guaranteed",
+                    "reference_status": "reference_unavailable",
+                    "reference_manifest_id": None,
+                    "reference_age_seconds": None,
+                    "execution_allowed": False,
+                }
+                row = self._task_row(
+                    task, state="uncertain", attempt_count=1,
+                    result={"error_code": "REFERENCE_OUTCOME_UNCERTAIN"},
+                )
+                persisted[task.task_id] = self._checkpoint_discovery_task(run_id, row)
+                self.context["reference_coverage"] = coverage
+                continue
+            attempting = self._task_row(task, state="attempting", attempt_count=1, result={})
+            persisted[task.task_id] = self._checkpoint_discovery_task(run_id, attempting)
+            if self.reference_stage is None:
+                coverage = {
+                    "coverage_status": "scope_not_guaranteed",
+                    "reference_status": "reference_unavailable",
+                    "reference_manifest_id": None,
+                    "reference_age_seconds": None,
+                    "execution_allowed": False,
+                }
+                terminal = self._task_row(
+                    task, state="deferred", attempt_count=1,
+                    result={"reference_coverage": {
+                        key: value for key, value in coverage.items()
+                        if key != "execution_allowed"
+                    }},
+                )
+            else:
+                try:
+                    coverage = _validated_reference_coverage(
+                        self.reference_stage(run_id, request)
+                    )
+                except Exception:
+                    terminal = self._task_row(
+                        task, state="failed", attempt_count=1,
+                        result={"error_code": "REFERENCE_STAGE_FAILED"},
+                    )
+                    persisted[task.task_id] = self._checkpoint_discovery_task(run_id, terminal)
+                    raise
+                terminal = self._task_row(
+                    task, state="succeeded", attempt_count=1,
+                    result={"reference_coverage": {
+                        key: value for key, value in coverage.items()
+                        if key != "execution_allowed"
+                    }},
+                )
+            persisted[task.task_id] = self._checkpoint_discovery_task(run_id, terminal)
+            self.context["reference_coverage"] = coverage
+
+    def _run_planned_collection_task(
+        self,
+        run_id: str,
+        request: PipelineRequest,
+        global_window: Mapping[str, str],
+        task: DiscoveryTask,
+        capability: SourceCapability,
+        adapter: object,
+        reservation: Mapping[str, object],
+        persisted: dict[str, Mapping[str, object]],
+        exposure_request: EnrichmentRequest | None = None,
+    ) -> CollectionResult:
+        current = persisted[task.task_id]
+        state = str(current.get("state") or "")
+        saved = current.get("result")
+        saved_checkpoint = saved.get("checkpoint") if isinstance(saved, Mapping) else None
+        saved_request_cursor = saved.get("request_cursor") if isinstance(saved, Mapping) else None
+        cursor_key, cursor = self._cursor_for_task(task)
+        if isinstance(saved_request_cursor, Mapping):
+            cursor = SourceCursor.from_mapping(saved_request_cursor)
+            if cursor.provider != task.provider or cursor.capability_id != task.capability_id:
+                raise ValueError("persisted request cursor does not match its task")
+        window = _collection_window_for_task(task, cursor)
+        query = _query_for_task(task, capability, cursor, window, request.phase)
+        computed_key = _collection_cache_key(adapter, query)
+        selected_key = task.query.get("cache_key")
+        if isinstance(task.query.get("_descriptor_hash"), str):
+            if not isinstance(selected_key, str) or re.fullmatch(r"[0-9a-f]{64}", selected_key) is None:
+                raise ValueError("selected enrichment cache key is invalid")
+            computed_key = selected_key
+        saved_key = saved_checkpoint.get("cache_key") if isinstance(saved_checkpoint, Mapping) else None
+        key = str(saved_key) if state in {
+            "succeeded", "failed", "deferred", "uncertain"
+        } and isinstance(saved_key, str) else computed_key
+        source_receipt_id = _uuid("receipt", run_id, task.task_id)
+        if isinstance(saved_checkpoint, Mapping):
+            receipt_row = saved_checkpoint.get("receipt")
+            if isinstance(receipt_row, Mapping) and isinstance(receipt_row.get("metadata"), Mapping):
+                self.cache.attach_collection_metadata(key, receipt_row["metadata"])
+        cached = self.cache.get_collection(
+            key,
+            reservation_id=str(reservation["id"]),
+            source_receipt_id=source_receipt_id,
+            now=_utc(request.now),
+        )
+        if state in {"succeeded", "failed", "deferred", "uncertain"}:
+            saved_source_cursor = saved.get("source_cursor") if isinstance(saved, Mapping) else None
+            if isinstance(saved_source_cursor, Mapping):
+                terminal_cursor = SourceCursor.from_mapping(saved_source_cursor)
+                if terminal_cursor.provider != task.provider \
+                        or terminal_cursor.capability_id != task.capability_id:
+                    raise ValueError("persisted source cursor does not match its task")
+                self.source_cursors[cursor_key] = terminal_cursor
+            if cached is not None:
+                return cached
+            return CollectionResult(
+                (), _failed_receipt(
+                    task.provider, str(reservation["id"]), query, request.now,
+                    error_code="EVIDENCE_UNAVAILABLE",
+                ), query.limit,
+            )
+        if state == "attempting":
+            frozen = cached if cached is not None else CollectionResult(
+                (), _failed_receipt(
+                    task.provider, str(reservation["id"]), query, request.now,
+                    error_code="TRANSPORT_OUTCOME_UNCERTAIN",
+                ), query.limit,
+            )
+            frozen = replace(frozen, receipt=replace(
+                frozen.receipt,
+                cache_key=key,
+                reservation_id=str(reservation["id"]),
+                source_receipt_id=frozen.receipt.source_receipt_id or source_receipt_id,
+                requested_window={
+                    "start": _timestamp(window.start), "end": _timestamp(window.end),
+                },
+                metadata={
+                    **dict(frozen.receipt.metadata),
+                    "capability_id": task.capability_id,
+                    "coverage_gap": True,
+                    "cursor_outcome_unavailable": True,
+                },
+            ))
+            recovery_result = {
+                "cursor_key": f"{task.capability_id}:{task.theme_id or 'default'}",
+                "theme_id": task.theme_id,
+                "checkpoint": {
+                    "cache_key": key,
+                    "receipt": _checkpoint_receipt(frozen.receipt, include_metadata=True),
+                },
+                "request_cursor": cursor.to_mapping(),
+                "source_cursor": cursor.to_mapping(),
+            }
+            hypothesis = task.query.get("hypothesis")
+            if task.stage == "resolve" and isinstance(hypothesis, Mapping):
+                recovery_result["hypothesis"] = dict(hypothesis)
+                recovery_result["reverse_descriptor"] = dict(task.query)
+            terminal = self._task_row(
+                task, state="uncertain", attempt_count=int(current.get("attempt_count") or 1),
+                result=recovery_result, window=window, cursor=cursor,
+            )
+            persisted[task.task_id] = self._checkpoint_discovery_task(run_id, terminal)
+            return frozen
+        if state not in {"planned", "attempting"}:
+            raise ValueError("persisted discovery task state is invalid")
+        if state == "planned":
+            attempting = self._task_row(
+                task,
+                state="attempting",
+                attempt_count=1,
+                result={},
+                window=window,
+                cursor=cursor,
+            )
+            persisted[task.task_id] = self._checkpoint_discovery_task(run_id, attempting)
+
+        def checkpoint_attempt(barrier: RequestReceipt) -> None:
+            market = _market_checkpoint_result(
+                CollectionResult((), barrier, query.limit),
+                global_window=global_window,
+                cache_key_value=key,
+                reservation_id=str(reservation["id"]),
+                source_receipt_id=source_receipt_id,
+            )
+            try:
+                self._checkpoint(run_id, key, market, required=True)
+            except Exception as exc:
+                raise _CheckpointFailure("durable provider attempt barrier failed") from exc
+
+        try:
+            if task.provider == "yahoo" and callable(getattr(self.gateway, "call", None)):
+                selected_manifest = task.query.get("_selection_manifest_id")
+                required_quote = {
+                    "instrument_type", "security_revision_id", "reference_manifest_id",
+                    "reservation_id", "source_receipt_id", "cache_key",
+                }
+                if not isinstance(selected_manifest, str) or not required_quote <= task.query.keys():
+                    raise ValueError("protected quote requires a frozen selected descriptor")
+                collected = self.gateway.call("collect_intelligence_quote", {
+                    "ticker": query.symbols[0],
+                    "instrument_type": task.query["instrument_type"],
+                    "security_revision_id": task.query["security_revision_id"],
+                    "reference_manifest_id": task.query["reference_manifest_id"],
+                    "selection_manifest_id": selected_manifest,
+                    "selected_task_id": task.task_id,
+                    "cache_key": task.query["cache_key"],
+                    "reservation_id": task.query["reservation_id"],
+                    "source_receipt_id": task.query["source_receipt_id"],
+                }, run_id=run_id)
+                result = collection_from_checkpoint(_gateway_data(collected)["checkpoint"])
+            elif task.provider in RESERVED_OUTBOUND_PROVIDERS:
+                result = adapter.collect(
+                    query,
+                    source_receipt_id=source_receipt_id,
+                    before_transport_attempt=checkpoint_attempt,
+                )
+            else:
+                result = adapter.collect(query)
+            if not isinstance(result, CollectionResult):
+                raise TypeError("adapter returned an invalid collection result")
+        except _CheckpointFailure:
+            raise
+        except Exception as exc:
+            result = CollectionResult(
+                (), _failed_receipt(
+                    task.provider, str(reservation["id"]), query, request.now,
+                    error_code=getattr(exc, "code", "SOURCE_UNAVAILABLE"),
+                ), query.limit,
+            )
+
+        source_result = replace(result, receipt=replace(
+            result.receipt,
+            cache_key=key,
+            reservation_id=str(reservation["id"]),
+            source_receipt_id=result.receipt.source_receipt_id or source_receipt_id,
+            requested_window={
+                "start": _timestamp(window.start), "end": _timestamp(window.end),
+            },
+            metadata=SourceAdapter._receipt_metadata(
+                query,
+                status=_cursor_status(result.receipt),
+                returned=result.receipt.accepted_count,
+                progress=result.receipt.metadata,
+            ),
+        ))
+        updated = _updated_source_cursor(cursor, window, source_result)
+        self.source_cursors[cursor_key] = updated
+        market_result = _market_checkpoint_result(
+            source_result,
+            global_window=global_window,
+            cache_key_value=key,
+            reservation_id=str(reservation["id"]),
+            source_receipt_id=source_receipt_id,
+        )
+        if market_result.receipt.request_cost > 0:
+            try:
+                self._checkpoint(run_id, key, market_result)
+            except Exception as exc:
+                raise _CheckpointFailure("durable checkpoint failed") from exc
+            self.cache.put_collection(key, market_result)
+        terminal_state = _discovery_terminal_state(source_result.receipt)
+        terminal_result = {
+            "cursor_key": f"{task.capability_id}:{task.theme_id or 'default'}",
+            "theme_id": task.theme_id,
+            "checkpoint": {
+                "cache_key": key,
+                "receipt": _checkpoint_receipt(
+                    source_result.receipt, include_metadata=True
+                ),
+            },
+            "request_cursor": cursor.to_mapping(),
+            "source_cursor": updated.to_mapping(),
+        }
+        hypothesis = task.query.get("hypothesis")
+        if task.stage == "resolve" and isinstance(hypothesis, Mapping):
+            terminal_result["hypothesis"] = dict(hypothesis)
+            terminal_result["reverse_descriptor"] = dict(task.query)
+        terminal = self._task_row(
+            task,
+            state=terminal_state,
+            attempt_count=1,
+            result=terminal_result,
+            window=window,
+            cursor=cursor,
+        )
+        exposure_rows: tuple[Mapping[str, object], ...] = ()
+        if terminal_state == "succeeded" and exposure_request is not None \
+                and task.capability_id == "sec_filing_document":
+            exposure_rows = self._exposure_rows(exposure_request, source_result)
+        persisted[task.task_id] = self._checkpoint_discovery_task(
+            run_id, terminal, exposure_facts=exposure_rows,
+        )
+        return market_result
+
+    def _cursor_for_task(self, task: DiscoveryTask) -> tuple[str, SourceCursor]:
+        durable_key = f"{task.capability_id}:{task.theme_id or 'default'}"
+        value = self.source_cursors.get(task.task_id, self.source_cursors.get(durable_key))
+        if value is None:
+            value = SourceCursor(provider=task.provider, capability_id=task.capability_id)
+        if value.provider != task.provider or value.capability_id != task.capability_id:
+            raise ValueError("source cursor does not match its planned capability")
+        return (task.task_id if task.task_id in self.source_cursors else durable_key), value
 
     def _planned_cache_keys(
         self, request: PipelineRequest, targets: Sequence[str], request_window: Mapping[str, str]
@@ -477,8 +2079,58 @@ class IntelligencePipeline:
             if value.disposition in {"accepted", "near_duplicate"}
         ]
         if callable(getattr(self.gateway, "call", None)):
+            reference_coverage = self.context.get("reference_coverage")
+            security_reference = self.context.get("security_reference")
+            reviewed_aliases = self.context.get("reviewed_entity_aliases")
+            exposure_facts = self.context.get("exposure_facts")
+            primary_exposure_required = self.context.get("primary_exposure_required")
             context_response = self.gateway.call("read_intelligence_context", {}, run_id=run_id)
             self.context = protected_collection_context(_gateway_data(context_response)["context"])
+            if isinstance(reference_coverage, Mapping):
+                self.context["reference_coverage"] = dict(reference_coverage)
+            if isinstance(security_reference, ReferenceSnapshot):
+                self.context["security_reference"] = security_reference
+            if isinstance(reviewed_aliases, Sequence) and not isinstance(
+                reviewed_aliases, (str, bytes, bytearray)
+            ):
+                self.context["reviewed_entity_aliases"] = tuple(reviewed_aliases)
+            if isinstance(exposure_facts, list):
+                self.context["exposure_facts"] = exposure_facts
+            if primary_exposure_required is True:
+                self.context["primary_exposure_required"] = True
+        if self.discovery_plan is not None:
+            reference_coverage = self.context.get("reference_coverage")
+            reference = self.context.get("security_reference")
+            reference_status = (
+                str(reference_coverage.get("reference_status"))
+                if isinstance(reference_coverage, Mapping)
+                else "reference_unavailable"
+            )
+            reference_manifest_id = (
+                reference_coverage.get("reference_manifest_id")
+                if isinstance(reference_coverage, Mapping)
+                else None
+            )
+            screen_run = run_bounded_screens(
+                load_screen_definitions(),
+                payloads={},
+                reference=reference if isinstance(reference, ReferenceSnapshot) else None,
+                reference_status=reference_status,
+                reference_manifest_id=(
+                    reference_manifest_id if isinstance(reference_manifest_id, str) else None
+                ),
+                as_of=request.market_date,
+                observed_at=request.now,
+            )
+            self.context["screen_coverage"] = dict(screen_run.coverage)
+        self.context["_packet_contract_version"] = 2 if self.discovery_plan is not None else 1
+        self.context["_run_id"] = run_id
+        self.context["_observed_at"] = _timestamp(request.now)
+        evidence_receipt_ids: dict[str, str] = {}
+        for disposition, receipt_id in zip(dispositions, receipt_ids, strict=True):
+            if disposition.disposition in {"accepted", "near_duplicate"}:
+                evidence_receipt_ids[evidence_key(disposition.item)] = receipt_id
+        self.context["_evidence_receipt_ids"] = evidence_receipt_ids
         events, relationships, ranked = _discover(discovery_items, self.context, request.now)
         qualified_ids = {
             evidence_key(item)
@@ -527,24 +2179,79 @@ class IntelligencePipeline:
                 if value.disposition == "duplicate"
             ],
         })
+        reference_coverage = self.context.get("reference_coverage")
+        if isinstance(reference_coverage, Mapping):
+            coverage.update(reference_coverage)
+        if self.discovery_plan is not None:
+            coverage["source_plan"] = _frozen_source_plan(self.discovery_plan)
+        screen_coverage = self.context.get("screen_coverage")
+        if isinstance(screen_coverage, Mapping):
+            coverage["screen_coverage"] = dict(screen_coverage)
         limits = replace(
             self.packet_limits,
             max_serialized_bytes=min(
                 self.packet_limits.max_serialized_bytes, _OUTPUT_PACKET_BYTES
             ),
         )
-        evidence_packet = build_evidence_packet(ranked, limits, coverage=coverage)
+        collection_drops = tuple(
+            {
+                "candidate_key": "",
+                "item_id": evidence_key(value.item),
+                "kind": "source_item",
+                "reason": str(value.reason),
+                "stage": "deduplication",
+            }
+            for value in dispositions
+            if value.disposition == "duplicate"
+        )
+        relation_drops = tuple(
+            {
+                "candidate_key": relation.security_id,
+                "item_id": item_id,
+                "kind": "evidence",
+                "reason": "relationship_evidence_limit",
+                "stage": "relationship",
+            }
+            for relation in relationships
+            for item_id in relation.dropped_evidence_keys
+        ) + tuple(
+            {
+                "candidate_key": relation.security_id,
+                "item_id": fact_id,
+                "kind": "exposure_fact",
+                "reason": "relationship_evidence_limit",
+                "stage": "relationship",
+            }
+            for relation in relationships
+            for fact_id in relation.dropped_exposure_fact_ids
+        )
+        evidence_packet = build_evidence_packet(
+            ranked, limits, coverage=coverage,
+            contract_version=2 if self.discovery_plan is not None else 1,
+            run_id=run_id if self.discovery_plan is not None else None,
+            observed_at=_timestamp(request.now) if self.discovery_plan is not None else None,
+            omissions=collection_drops + relation_drops,
+        )
         packet_dict = evidence_packet.to_dict()
         packet_hash = hashlib.sha256(_canonical(packet_dict).encode()).hexdigest()
         packet_id = _uuid("packet", run_id, packet_hash)
         persisted_packet = PersistedPacket(packet_id, packet_hash, evidence_packet)
         packet_row = {
             "id": packet_id,
-            "candidate_count": len(evidence_packet.candidates),
+            "candidate_count": (len(evidence_packet.research_candidates)
+                                if evidence_packet.contract_version == 2
+                                else len(evidence_packet.candidates)),
             "evidence_count": len(packet_dict["evidence"]),
             "packet": packet_dict,
             "packet_hash": packet_hash,
         }
+        persisted_rankings = []
+        persisted_candidate_keys: set[str] = set()
+        for candidate in ranked:
+            if candidate.candidate_key in persisted_candidate_keys:
+                continue
+            persisted_candidate_keys.add(candidate.candidate_key)
+            persisted_rankings.append(_ranking_row(run_id, candidate))
         payload = {
             "status": "completed",
             "coverage": coverage,
@@ -552,34 +2259,26 @@ class IntelligencePipeline:
             "items": item_rows,
             "events": [_event_row(run_id, event) for event in events],
             "relationships": [_relationship_row(run_id, relation) for relation in relationships],
-            "rankings": [_ranking_row(run_id, candidate) for candidate in ranked],
+            "rankings": persisted_rankings,
             "packet": packet_row,
             "error": None,
         }
-        collection_drops = tuple(
-            {
-                "candidate_key": "",
-                "item_id": evidence_key(value.item),
-                "kind": "source_item",
-                "reason": str(value.reason),
-            }
-            for value in dispositions
-            if value.disposition == "duplicate"
-        )
         packet_drops = tuple(
             {"candidate_key": drop.candidate_key, "item_id": drop.item_id,
              "kind": drop.kind, "reason": drop.reason}
             for drop in evidence_packet.drops
         )
-        coverage["collector_drops"] = list(collection_drops + packet_drops)
+        coverage["collector_drops"] = list(collection_drops + relation_drops + packet_drops)
         final = self._record(run_id, payload, _uuid("completion-request", request.request_id))
+        if self.discovery_plan is not None:
+            self._persist_theme_episode_revisions(run_id, payload, request.now)
         limitations = tuple(failure_codes) + tuple(packet_dict["limitations"])
         counts = final.get("counts") if isinstance(final.get("counts"), Mapping) else {}
         return PipelineReceipt(
             run_id=run_id,
             packet=persisted_packet,
             sources=tuple(sources),
-            drops=collection_drops + packet_drops,
+            drops=collection_drops + relation_drops + packet_drops,
             coverage=coverage,
             write_counts={str(key): int(value) for key, value in counts.items()},
             domains_checked=targets,
@@ -638,6 +2337,33 @@ class IntelligencePipeline:
         )
         return _gateway_data(result)
 
+    def _persist_theme_episode_revisions(
+        self, run_id: str, payload: Mapping[str, object], observed_at: datetime,
+    ) -> None:
+        rows = _theme_episode_revision_rows(
+            run_id, payload, self.context.get("theme_memory"), observed_at,
+        )
+        if not callable(getattr(self.gateway, "record_theme_episode_revision_v2", None)) \
+                and not callable(getattr(self.gateway, "call", None)):
+            # Compatibility for local typed test gateways. The scheduled path
+            # always has the protected gateway client.
+            return
+        for row in rows:
+            method = getattr(self.gateway, "record_theme_episode_revision_v2", None)
+            if callable(method):
+                response = method(run_id, row)
+            elif callable(getattr(self.gateway, "call", None)):
+                response = self.gateway.call(
+                    "record_theme_episode_revision_v2", row, run_id=run_id,
+                    request_id=_uuid("record-theme-episode-v2", run_id, row["revision_id"]),
+                )
+            else:
+                raise ValueError("theme memory requires protected revision persistence")
+            data = _gateway_data(response)
+            if data.get("revision_id") != row["revision_id"] \
+                    or data.get("episode_id") != row["episode_id"]:
+                raise ValueError("theme episode revision receipt mismatch")
+
     def _read_completion(self, run_id: str) -> PipelineReceipt | None:
         completion_id = _uuid("completion-request", run_id)
         method = getattr(self.gateway, "read_intelligence_completion", None)
@@ -666,6 +2392,11 @@ class IntelligencePipeline:
             "reservation_id": row["reservation_id"], "response_hash": row["response_hash"],
             "status": row["status"]} for row in payload["receipts"])
         coverage = payload["coverage"]
+        if packet["packet"].get("contract_version") == 2:
+            observed_at = datetime.fromisoformat(
+                str(packet["packet"]["observed_at"]).replace("Z", "+00:00")
+            )
+            self._persist_theme_episode_revisions(run_id, payload, observed_at)
         return PipelineReceipt(run_id=run_id,
             packet=PersistedPacket(packet["id"], packet["packet_hash"], packet["packet"]),
             sources=sources, drops=tuple(coverage.get("collector_drops", [])), coverage=coverage,
@@ -699,6 +2430,202 @@ class IntelligencePipeline:
             raise ValueError("gateway checkpoint receipt mismatch")
 
 
+def _validated_reference_coverage(value: object) -> dict[str, object]:
+    if not isinstance(value, Mapping):
+        raise ValueError("reference stage result is invalid")
+    allowed = {
+        "coverage_status", "reference_status", "reference_manifest_id",
+        "reference_age_seconds", "reference_revision", "reference_expires_at",
+        "execution_allowed",
+    }
+    required = allowed - {"reference_revision", "reference_expires_at"}
+    if not required <= set(value) <= allowed or value.get("coverage_status") != "scope_not_guaranteed" \
+            or value.get("reference_status") not in {
+                "healthy", "reference_stale", "reference_unavailable"
+            } or value.get("execution_allowed") is not False:
+        raise ValueError("reference stage result is invalid")
+    result = dict(value)
+    manifest_id = result["reference_manifest_id"]
+    age = result["reference_age_seconds"]
+    if result["reference_status"] == "reference_unavailable":
+        if manifest_id is not None or age is not None:
+            raise ValueError("reference stage result is invalid")
+    else:
+        try:
+            if str(uuid.UUID(str(manifest_id))) != manifest_id:
+                raise ValueError
+        except (TypeError, ValueError, AttributeError):
+            raise ValueError("reference stage result is invalid") from None
+        if isinstance(age, bool) or not isinstance(age, int) or age < 0:
+            raise ValueError("reference stage result is invalid")
+        revision = result.get("reference_revision")
+        expires_at = result.get("reference_expires_at")
+        if (revision is not None and (
+            isinstance(revision, bool) or not isinstance(revision, int) or revision < 1
+        )) or (expires_at is not None and (
+            not isinstance(expires_at, str) or not expires_at.endswith("Z")
+        )):
+            raise ValueError("reference stage result is invalid")
+    return result
+
+
+def _collection_window_for_task(
+    task: DiscoveryTask, cursor: SourceCursor
+) -> CollectionWindow:
+    start = _window_timestamp(task.window, "start")
+    end = _window_timestamp(task.window, "end")
+    duration = end - start
+    overlap = timedelta(hours=2)
+    if duration < overlap:
+        if cursor.active_window_start is not None:
+            return CollectionWindow(
+                cursor.active_window_start,
+                cursor.active_window_end,
+                int(overlap.total_seconds()),
+                cursor.backlog_token,
+            )
+        cursor_start = start
+        if cursor.completed_through is not None:
+            cursor_start = max(start, cursor.completed_through - overlap)
+        return CollectionWindow(cursor_start, end, int(overlap.total_seconds()))
+    if duration > timedelta(days=31):
+        raise ValueError("planned collection window exceeds cursor bound")
+    return window_from_cursor(
+        cursor, run_at=end, overlap=overlap, max_backfill=duration
+    )
+
+
+def _query_for_task(
+    task: DiscoveryTask,
+    capability: SourceCapability,
+    cursor: SourceCursor,
+    window: CollectionWindow,
+    phase: str,
+) -> CollectionQuery:
+    if capability.capability_id != task.capability_id \
+            or capability.provider != task.provider \
+            or capability.query_kind != task.query_kind:
+        raise ValueError("planned capability does not match its task")
+    query = task.query
+    text_value = next((
+        query[key] for key in ("query", "term", "topics", "path")
+        if key in query
+    ), task.capability_id)
+    if isinstance(text_value, Sequence) and not isinstance(
+        text_value, (str, bytes, bytearray)
+    ):
+        text_value = ",".join(str(item) for item in text_value)
+    text_value = str(text_value).strip() or task.capability_id
+    symbol_value = query.get("symbol", query.get("security"))
+    symbols = (str(symbol_value).strip().upper(),) if isinstance(
+        symbol_value, str
+    ) and symbol_value.strip() else ()
+    next_retry_phase = _next_retry_phase(capability.phases, phase)
+    return CollectionQuery(
+        text=text_value,
+        symbols=symbols,
+        cik=str(query["cik"]) if isinstance(query.get("cik"), str) else None,
+        series_id=str(query["series_id"])
+        if isinstance(query.get("series_id"), str) else None,
+        start=window.start,
+        end=window.end,
+        limit=min(50, capability.max_items_per_request),
+        capability_id=task.capability_id,
+        cursor_token=window.backlog_token,
+        page=cursor.page,
+        overlap_seconds=window.overlap_seconds,
+        next_retry_phase=next_retry_phase,
+        accession_number=str(query["accession_number"])
+        if isinstance(query.get("accession_number"), str) else None,
+        primary_document=str(query["primary_document"])
+        if isinstance(query.get("primary_document"), str) else None,
+    )
+
+
+def _next_retry_phase(phases: frozenset[str], phase: str) -> str:
+    order = ("pre-market", "intraday", "post-market", "on-demand")
+    start = order.index(phase)
+    for offset in range(1, len(order) + 1):
+        candidate = order[(start + offset) % len(order)]
+        if candidate in phases:
+            return candidate
+    return phase
+
+
+def _cursor_status(receipt: RequestReceipt) -> str:
+    if receipt.status in {"succeeded", "cache_hit", "quota_blocked"}:
+        return receipt.status
+    coverage = receipt.metadata.get("coverage_status")
+    if coverage in {"configuration_missing", "unsupported"}:
+        return str(coverage)
+    return "failed"
+
+
+def _updated_source_cursor(
+    cursor: SourceCursor,
+    window: CollectionWindow,
+    result: CollectionResult,
+) -> SourceCursor:
+    metadata = result.receipt.metadata
+    status = _cursor_status(result.receipt)
+    successful = status in {"succeeded", "cache_hit"}
+    truncated = bool(metadata.get("truncated", False)) if successful else False
+    backlog = metadata.get("backlog_token")
+    token = backlog if isinstance(backlog, str) and backlog else None
+    backlog_remaining = successful and bool(metadata.get("backlog_remaining", False))
+    terminal_gap = (
+        successful
+        and truncated
+        and bool(metadata.get("coverage_gap", False))
+        and bool(metadata.get("continuation_unavailable", False))
+        and not backlog_remaining
+        and token is None
+    )
+    page = CollectionPage(
+        window=window,
+        status=status,
+        # The durable receipt preserves an explicit coverage gap. With no
+        # continuation available, replaying the same window cannot close it.
+        exhausted=successful and (terminal_gap or (not truncated and not backlog_remaining)),
+        truncated=False if terminal_gap else truncated or backlog_remaining,
+        backlog_token=token,
+        accepted_item_ids=tuple(dict.fromkeys(
+            (item.upstream_item_id or item.content_hash) for item in result.items
+        )),
+        next_retry_phase=metadata.get("next_retry_phase")
+        if isinstance(metadata.get("next_retry_phase"), str) else None,
+    )
+    return update_cursor(cursor, page)
+
+
+def _market_checkpoint_result(
+    result: CollectionResult,
+    *,
+    global_window: Mapping[str, str],
+    cache_key_value: str,
+    reservation_id: str,
+    source_receipt_id: str,
+) -> CollectionResult:
+    return replace(result, receipt=replace(
+        result.receipt,
+        cache_key=cache_key_value,
+        reservation_id=reservation_id,
+        source_receipt_id=result.receipt.source_receipt_id or source_receipt_id,
+        requested_window={
+            "start": global_window["start"], "end": global_window["end"],
+        },
+    ))
+
+
+def _discovery_terminal_state(receipt: RequestReceipt) -> str:
+    status = _cursor_status(receipt)
+    if status in {"succeeded", "cache_hit"}:
+        return "succeeded"
+    if status in {"configuration_missing", "quota_blocked", "unsupported"}:
+        return "deferred"
+    return "failed"
+
+
 def _gateway_data(result: object) -> Mapping[str, object]:
     if not isinstance(result, Mapping):
         raise ValueError("gateway returned an invalid receipt")
@@ -715,6 +2642,73 @@ def protected_collection_context(value: object) -> dict[str, object]:
     holdings = value.get("holdings", [])
     if not isinstance(holdings, list):
         raise ValueError("protected holdings must be rows")
+    quotes = _mapping(trusted.get("current_quotes"))
+    quote_receipt_ids = trusted.get("quote_receipt_ids", [])
+    if not isinstance(quote_receipt_ids, list):
+        raise ValueError("protected quote receipt identities must be rows")
+    cash = _mapping(value.get("reconciled_cash_snapshot"))
+    liquidity_states = _mapping(trusted.get("liquidity_state_by_ticker"))
+    overlap_states = _mapping(trusted.get("overlap_state_by_ticker"))
+    reference_state = trusted.get("current_reference_state")
+    if reference_state not in {"current", "stale", "ambiguous", "unavailable"}:
+        reference_state = "unavailable"
+    memory_value = trusted.get("theme_memory")
+    memory: dict[str, object] | None = None
+    if memory_value is not None:
+        if not isinstance(memory_value, Mapping):
+            raise ValueError("invalid protected theme memory")
+        if (
+            memory_value.get("memory_version") != 2
+            or memory_value.get("research_only") is not True
+            or memory_value.get("execution_allowed") is not False
+            or (
+                "snapshot_hash" in memory_value
+                and not re.fullmatch(r"[0-9a-f]{64}", str(memory_value.get("snapshot_hash", "")))
+            )
+        ):
+            raise ValueError("invalid protected theme memory authority")
+        limits = {
+            "active_theme_heads": 25,
+            "due_nominations": 12,
+            "urgent_events": 10,
+            "high_materiality_themes": 10,
+            "radar": 20,
+            "source_cursors": 100,
+        }
+        for key, maximum in limits.items():
+            rows = memory_value.get(key)
+            if (
+                not isinstance(rows, list)
+                or len(rows) > maximum
+                or any(not isinstance(row, Mapping) for row in rows)
+            ):
+                raise ValueError(f"invalid protected theme memory {key}")
+        for key in ("available_counts", "returned_counts", "deferred_counts"):
+            if not isinstance(memory_value.get(key), Mapping):
+                raise ValueError(f"invalid protected theme memory {key}")
+        if len(json.dumps(memory_value, ensure_ascii=False, separators=(",", ":")).encode("utf-8")) > 65_536:
+            raise ValueError("protected theme memory exceeds byte limit")
+        # A JSON round-trip removes caller-owned mapping/list references while
+        # retaining the exact server-frozen context and its ordering.
+        memory = json.loads(json.dumps(memory_value, ensure_ascii=False))
+
+    radar = memory["radar"] if memory is not None else value.get("radar", [])
+    if not isinstance(radar, list):
+        radar = []
+    source_cursors = memory["source_cursors"] if memory is not None else trusted.get("source_cursors", [])
+
+    def priority_labels(key: str, preferred: tuple[str, ...]) -> list[str]:
+        if memory is None:
+            return []
+        labels: list[str] = []
+        for row in memory[key]:
+            for field in preferred:
+                candidate = row.get(field)
+                if isinstance(candidate, str) and candidate.strip():
+                    labels.append(candidate.strip())
+                    break
+        return labels
+
     return {
         "holdings": [{"ticker": row["ticker"], "shares": row.get("shares"),
                       "market_value": valuations.get(row["ticker"])} for row in holdings if isinstance(row, Mapping)],
@@ -722,6 +2716,41 @@ def protected_collection_context(value: object) -> dict[str, object]:
         "qualified_candidates": value.get("qualified_candidates", []),
         "liquidity_by_ticker": dict(_mapping(trusted.get("liquidity_by_ticker"))),
         "overlap_by_ticker": dict(_mapping(trusted.get("overlap_by_ticker"))),
+        # No protected issuer-valuation source exists in the current schema.
+        # An empty map plus explicit unavailable status prevents scratch or
+        # caller values from becoming action authority.
+        "valuation_state_by_ticker": {},
+        "valuation_provenance_by_ticker": {},
+        "valuation_status": "unavailable",
+        "liquidity_state_by_ticker": dict(liquidity_states),
+        "liquidity_provenance_by_ticker": dict(_mapping(
+            trusted.get("liquidity_provenance_by_ticker")
+        )),
+        "overlap_state_by_ticker": dict(overlap_states),
+        "overlap_provenance_by_ticker": dict(_mapping(
+            trusted.get("overlap_provenance_by_ticker")
+        )),
+        "current_reference_state": reference_state,
+        "current_reference_provenance": dict(_mapping(
+            trusted.get("current_reference_provenance")
+        )),
+        "current_quotes": {
+            str(ticker): dict(raw) for ticker, raw in quotes.items()
+            if isinstance(raw, Mapping)
+        },
+        "quote_receipt_ids": list(quote_receipt_ids),
+        "portfolio_valuation_complete": trusted.get("portfolio_valuation_complete") is True,
+        "portfolio_revision": trusted.get("portfolio_revision"),
+        "cash_revision": cash.get("ledger_watermark"),
+        "reference_version": trusted.get("reference_version"),
+        "theme_memory": memory,
+        "radar": radar,
+        "urgent_events": priority_labels("urgent_events", ("title", "event_id", "id")),
+        "high_materiality_themes": priority_labels(
+            "high_materiality_themes", ("mechanism", "title", "theme_id")
+        ),
+        "source_cursors": source_cursors,
+        "last_completed_scans": trusted.get("last_completed_scans", []),
     }
 
 
@@ -809,8 +2838,10 @@ def _window_timestamp(window: Mapping[str, str], key: str) -> datetime:
     return _utc(value)
 
 
-def _checkpoint_receipt(value: RequestReceipt) -> dict[str, object]:
-    return {
+def _checkpoint_receipt(
+    value: RequestReceipt, *, include_metadata: bool = False
+) -> dict[str, object]:
+    result = {
         "provider": value.provider, "reservation_id": value.reservation_id, "status": value.status,
         "cache_key": value.cache_key, "requested_window": dict(value.requested_window),
         "requested_limit": value.requested_limit, "retrieved_at": _timestamp(value.retrieved_at),
@@ -822,6 +2853,9 @@ def _checkpoint_receipt(value: RequestReceipt) -> dict[str, object]:
         "source_receipt_id": value.source_receipt_id,
         "cache_predecessor_receipt_id": value.cache_predecessor_receipt_id,
     }
+    if include_metadata:
+        result["metadata"] = dict(value.metadata)
+    return result
 
 
 def _checkpoint_item(value: SourceItem) -> dict[str, object]:
@@ -840,13 +2874,28 @@ def _checkpoint_item(value: SourceItem) -> dict[str, object]:
 def _failed_receipt(
     provider: str, reservation_id: str, query: CollectionQuery, now: datetime, *, error_code: str
 ) -> RequestReceipt:
+    if error_code == "QUOTA_BLOCKED":
+        status = "quota_blocked"
+        outcome_status = status
+    elif error_code == "CONFIGURATION_MISSING":
+        status = "configuration_missing"
+        outcome_status = status
+    elif error_code == "UNSUPPORTED_QUERY":
+        status = "failed"
+        outcome_status = "unsupported"
+    else:
+        status = "failed"
+        outcome_status = status
     return RequestReceipt(
-        provider=provider, reservation_id=reservation_id, status="quota_blocked" if error_code == "QUOTA_BLOCKED" else "failed",
+        provider=provider, reservation_id=reservation_id, status=status,
         cache_key=hashlib.sha256(f"{provider}:{query.text}".encode()).hexdigest(),
         requested_window={"start": _timestamp(query.start), "end": _timestamp(query.end)},
         requested_limit=query.limit, retrieved_at=_utc(now), observed_at=None, expires_at=None,
         request_cost=0, upstream_remaining=None, returned_count=0, accepted_count=0,
         duplicate_count=0, dropped_count=0, response_hash=None, error_code=error_code,
+        metadata=SourceAdapter._receipt_metadata(
+            query, status=outcome_status, returned=0
+        ),
     )
 
 
@@ -864,13 +2913,190 @@ def _receipt_row(value: RequestReceipt, receipt_id: str) -> dict[str, object]:
     }
 
 
+def _theme_episode_revision_rows(
+    run_id: str,
+    payload: Mapping[str, object],
+    theme_memory: object,
+    observed_at: datetime,
+) -> tuple[dict[str, object], ...]:
+    """Derive exact v2 memory rows from the just-persisted evidence packet."""
+    packet_row = payload.get("packet")
+    if not isinstance(packet_row, Mapping):
+        raise ValueError("theme memory packet is invalid")
+    packet = packet_row.get("packet")
+    if not isinstance(packet, Mapping) or packet.get("contract_version") != 2 \
+            or packet.get("run_id") != run_id or packet.get("execution_allowed") is not False:
+        raise ValueError("theme memory packet is invalid")
+    candidates = packet.get("research_candidates")
+    events = payload.get("events")
+    items = payload.get("items")
+    for value, label in (
+        (candidates, "candidates"), (events, "events"), (items, "items"),
+    ):
+        if not isinstance(value, Sequence) or isinstance(value, (str, bytes, bytearray)) \
+                or any(not isinstance(row, Mapping) for row in value):
+            raise ValueError(f"theme memory {label} are invalid")
+    item_by_id = {str(row["id"]): row for row in items}  # type: ignore[union-attr]
+    if len(item_by_id) != len(items):
+        raise ValueError("theme memory evidence identities are duplicated")
+    existing_by_anchor: dict[str, object] = {}
+    existing_by_subject: dict[tuple[str, str, str, str, object], list[object]] = {}
+    if theme_memory is not None:
+        if not isinstance(theme_memory, Mapping):
+            raise ValueError("theme memory context is invalid")
+        heads = theme_memory.get("active_theme_heads", [])
+        if not isinstance(heads, Sequence) or isinstance(heads, (str, bytes, bytearray)):
+            raise ValueError("theme memory heads are invalid")
+        for raw in heads:
+            parsed = theme_episode_revision_from_persistence(raw)
+            if parsed.anchor_hash in existing_by_anchor:
+                raise ValueError("theme memory head anchor is duplicated")
+            existing_by_anchor[parsed.anchor_hash] = parsed
+            existing_by_subject.setdefault((
+                parsed.theme_id, parsed.theme_mechanism, parsed.subject_identity,
+                parsed.jurisdiction, parsed.authoritative_id,
+            ), []).append(parsed)
+    current = observed_at.astimezone(timezone.utc)
+    output: list[dict[str, object]] = []
+    produced_anchors: set[str] = set()
+    for event in events:  # type: ignore[union-attr]
+        event_evidence = {
+            str(value) for value in event.get("evidence_item_ids", [])
+            if str(value) in item_by_id
+        }
+        if not event_evidence:
+            continue
+        matching = []
+        for candidate in candidates:  # type: ignore[union-attr]
+            refs = candidate.get("evidence", [])
+            if not isinstance(refs, Sequence) or isinstance(refs, (str, bytes, bytearray)):
+                raise ValueError("theme memory candidate evidence is invalid")
+            candidate_ids = {
+                str(ref.get("item_id")) for ref in refs if isinstance(ref, Mapping)
+            }
+            if event_evidence & candidate_ids:
+                matching.append((candidate, refs))
+        for candidate, refs in matching:
+            theme_ids = candidate.get("theme_ids", [])
+            if not isinstance(theme_ids, Sequence) or isinstance(
+                theme_ids, (str, bytes, bytearray)
+            ):
+                raise ValueError("theme memory candidate themes are invalid")
+            entity_id = candidate.get("entity_id")
+            candidate_key = candidate.get("candidate_key")
+            subject = entity_id if isinstance(entity_id, str) and entity_id else candidate_key
+            if not isinstance(subject, str) or not subject:
+                continue
+            subject = re.sub(r"[^A-Za-z0-9:._/-]+", "-", subject).strip("-")[:256]
+            mechanism = re.sub(
+                r"[^a-z0-9_]+", "_", str(event.get("event_type") or "market_event").casefold(),
+            ).strip("_")[:80]
+            if len(mechanism) < 3:
+                mechanism = "market_event"
+            effective = event.get("effective_at") or event.get("occurred_at")
+            try:
+                effective_day = datetime.fromisoformat(
+                    str(effective or packet.get("observed_at")).replace("Z", "+00:00")
+                ).date().isoformat()
+            except ValueError as exc:
+                raise ValueError("theme memory event period is invalid") from exc
+            source_evidence = []
+            for ref in refs:
+                if not isinstance(ref, Mapping):
+                    raise ValueError("theme memory candidate evidence is invalid")
+                item_id = str(ref.get("item_id") or "")
+                if item_id not in event_evidence:
+                    continue
+                item = item_by_id[item_id]
+                metadata = item.get("metadata")
+                metadata = metadata if isinstance(metadata, Mapping) else {}
+                story = (
+                    metadata.get("syndication_id")
+                    or metadata.get("canonical_article_id")
+                    or metadata.get("wire_story_id")
+                    or item.get("upstream_item_id")
+                    or item.get("canonical_url")
+                    or item.get("content_hash")
+                )
+                source_evidence.append({
+                    "evidence_id": item_id,
+                    "story_identity": str(story)[:512],
+                    "polarity": "opposing" if ref.get("role") == "opposing" else "supporting",
+                })
+            if not source_evidence:
+                continue
+            missing = candidate.get("limitations", [])
+            missing_questions = [
+                str(value)[:500] for value in missing
+                if isinstance(value, str) and value.strip()
+            ][:16]
+            if not missing_questions:
+                missing_questions = ["Verify current primary exposure for the candidate."]
+            for theme_id in sorted({str(value) for value in theme_ids if isinstance(value, str)}):
+                episode_event = {
+                    "theme_id": theme_id,
+                    "theme_mechanism": mechanism,
+                    "subject_identity": subject,
+                    "jurisdiction": "US",
+                    "effective_period": {"start": effective_day, "end": None},
+                    "authoritative_id": None,
+                    "observed_at": _timestamp(current),
+                    "source_evidence": source_evidence,
+                    "investigated_entity_ids": [subject],
+                    "missing_questions": missing_questions,
+                    "invalidation_conditions": [
+                        "New evidence contradicts the observed theme.",
+                    ],
+                    "next_review_at": _timestamp(current + timedelta(days=3)),
+                    "expires_at": _timestamp(current + timedelta(days=30)),
+                }
+                continuations = existing_by_subject.get((
+                    theme_id, mechanism.casefold(), subject.casefold(), "US", None,
+                ), [])
+                if len(continuations) == 1:
+                    continuation = continuations[0]
+                    episode_event["effective_period"] = {
+                        "start": continuation.effective_period_start,  # type: ignore[union-attr]
+                        "end": continuation.effective_period_end,  # type: ignore[union-attr]
+                    }
+                initial = revise_theme_episode(None, episode_event, origin_run_id=run_id)
+                existing = existing_by_anchor.get(initial.anchor_hash)
+                revision = revise_theme_episode(
+                    existing, episode_event, origin_run_id=run_id,  # type: ignore[arg-type]
+                )
+                if revision is existing or revision.anchor_hash in produced_anchors:
+                    continue
+                produced_anchors.add(revision.anchor_hash)
+                output.append(revision.to_persistence_row())
+                if len(output) >= 25:
+                    return tuple(output)
+    return tuple(output)
+
+
 def _source_summary(value: RequestReceipt, receipt_id: str) -> dict[str, object]:
-    return {
+    result = {
         "accepted_count": value.accepted_count, "error_code": value.error_code,
         "provider": value.provider, "receipt_id": receipt_id,
         "reservation_id": value.reservation_id, "response_hash": value.response_hash,
         "status": value.status,
     }
+    for key in (
+        "backlog_remaining",
+        "backlog_token",
+        "capability_id",
+        "coverage_status",
+        "cursor_end",
+        "cursor_start",
+        "continuation_unavailable",
+        "coverage_gap",
+        "cursor_outcome_unavailable",
+        "next_retry_phase",
+        "overlap_seconds",
+        "truncated",
+    ):
+        if key in value.metadata:
+            result[key] = value.metadata[key]
+    return result
 
 
 def _item_row(
@@ -907,66 +3133,510 @@ def _discover(
     candidates: list[CandidateInput] = []
     events: list[MarketEvent] = []
     relations: list[EventRelationship] = []
-    grouped: dict[tuple[str, str, str], list[SourceItem]] = {}
-    for item in items:
-        ticker = str(item.metadata.get("ticker") or item.metadata.get("symbol") or "").upper()
-        if not ticker and item.security_ids:
-            ticker = item.security_ids[0]
-        if not ticker:
-            continue
-        grouped.setdefault(_claim_key(item, ticker), []).append(item)
-    polarities: dict[tuple[str, str], set[str]] = {}
-    for ticker, claim, polarity in grouped:
-        polarities.setdefault((ticker, claim), set()).add(polarity)
-    conflicting_claims = {key for key, values in polarities.items()
-                          if {"positive", "negative"} <= values}
+    taxonomy = load_theme_taxonomy()
+    contract_version = 2 if context.get("_packet_contract_version") == 2 else 1
+    drafts = detect_events(items, taxonomy)
+    reference = context.get("security_reference")
+    reference_coverage = context.get("reference_coverage")
+    reference_available = (
+        isinstance(reference, ReferenceSnapshot)
+        and not (
+            isinstance(reference_coverage, Mapping)
+            and reference_coverage.get("reference_status") == "reference_unavailable"
+        )
+    )
+    aliases_value = context.get("reviewed_entity_aliases", ())
+    aliases = tuple(aliases_value) if isinstance(aliases_value, Sequence) \
+        and not isinstance(aliases_value, (str, bytes, bytearray)) else ()
+    claim_polarities: dict[str, set[str]] = {}
+    for draft in drafts:
+        for evidence in draft.evidence:
+            _ticker, claim, polarity = _claim_key(evidence, "")
+            claim_polarities.setdefault(claim, set()).add(polarity)
+    conflicting_claims = {
+        claim for claim, values in claim_polarities.items()
+        if {"positive", "negative"} <= values
+    }
+    items_by_id = {evidence_key(item): item for item in items}
+    source_receipts = _mapping(context.get("_evidence_receipt_ids"))
     conflicting_events: set[str] = set()
-    for (_ticker, _claim, _polarity), supporting_items in grouped.items():
-        item = supporting_items[0]
-        ticker = _ticker
-        # Claim identity is normalized retained evidence plus entity/ticker and
-        # polarity—not an adapter's display title.
-        supporting = tuple(supporting_items)
+    for draft in drafts:
+        item = draft.evidence[0]
+        supporting = draft.evidence
         event = build_market_event(
-            event_type="provider_event", title=item.title, summary=item.summary,
+            event_type=draft.event_type, title=draft.title, summary=draft.summary,
             materiality=item.metadata.get("materiality", "0.5"),
             confidence=item.metadata.get("confidence", "0.5"), evidence=supporting,
-            theme_ids=(str(item.metadata.get("theme_id") or "dynamic_provider_event"),),
-            occurred_at=item.published_at, effective_at=item.effective_at,
+            theme_ids=draft.theme_ids,
+            occurred_at=draft.occurred_at, effective_at=draft.effective_at,
         )
-        relation = propose_relation(event, ticker=ticker,
-                                    role=str(item.metadata.get("role") or "exposure"), evidence=supporting)
         events.append(event)
-        if (_ticker, _claim) in conflicting_claims:
+        if any(_claim_key(evidence, "")[1] in conflicting_claims
+               for evidence in supporting):
             conflicting_events.add(event.event_id)
-        relations.append(relation)
-        observed_at = item.published_at or item.retrieved_at
-        age_seconds = max(0.0, (_utc(now) - _utc(observed_at)).total_seconds())
-        liquidity = _liquidity_score(item, context, ticker)
-        holding_weights = _holding_weights(context.get("holdings"))
-        holding_weight = (
-            holding_weights.get(ticker, Decimal("0"))
-            if holding_weights is not None else None
-        )
-        overlap = _overlap_score(context, ticker, holding_weight)
-        candidates.append(CandidateInput(
-            ticker=ticker, event=event, relation=relation, evidence=supporting,
-            authority_corroboration=_authority_score(relation.evidence),
-            exposure_strength=(Decimal(len(relation.exposure_evidence)) / Decimal(len(relation.evidence))
-                               if relation.evidence else None),
-            recency=max(Decimal("0"), Decimal("1") - Decimal(str(age_seconds)) / Decimal("604800")),
-            portfolio_relevance=(max(holding_weight, overlap)
-                                 if holding_weight is not None and overlap is not None else None),
-            liquidity=liquidity,
-            holding_weight=holding_weight, overlap=overlap, concentration=holding_weight,
-        ))
+        resolutions: list[EntityResolution] = []
+        if reference_available:
+            for evidence in supporting:
+                resolutions.extend(resolve_entities(evidence, reference, aliases=aliases))
+        unique_resolutions = {
+            row.security_id: row for row in resolutions
+            if row.status == "resolved" and row.eligible
+            and row.security_id is not None and row.ticker is not None
+        }
+        if contract_version == 2 and not unique_resolutions:
+            evidence_ids = tuple(evidence_key(value) for value in supporting)
+            unresolved_lineage = CandidateLineage(
+                run_id=str(context.get("_run_id") or ""),
+                observed_at=str(context.get("_observed_at") or ""),
+                policy_version=int(context.get("policy_version") or 1),
+                reference_manifest_id=None,
+                reference_revision=None,
+                reference_expires_at=None,
+                security_revision_id=None,
+                quote_receipt_id=None,
+                quote_as_of=None,
+                quote_expires_at=None,
+                evidence_receipt_ids={
+                    item_id: str(source_receipts[item_id])
+                    for item_id in evidence_ids if item_id in source_receipts
+                },
+                portfolio_revision=(str(context["portfolio_revision"])
+                                    if context.get("portfolio_revision") is not None else None),
+                cash_revision=(str(context["cash_revision"])
+                               if context.get("cash_revision") is not None else None),
+            )
+            candidates.append(CandidateInput(
+                ticker=None,
+                event=event,
+                relation=None,
+                evidence=tuple(supporting),
+                authority_corroboration=_authority_score(supporting),
+                exposure_strength=None,
+                recency=_research_recency(supporting, now),
+                portfolio_relevance=None,
+                liquidity=None,
+                contract_version=2,
+                entity_id=f"unresolved:{event.event_id}",
+                theme_ids=event.theme_ids,
+                explicit_unresolved_identity=True,
+                supporting_evidence_ids=evidence_ids,
+                lineage=unresolved_lineage,
+                limitations=(
+                    "reference_unavailable" if not reference_available
+                    else "security_identity_unresolved",
+                ),
+            ))
+        for security_id in sorted(unique_resolutions):
+            resolution = unique_resolutions[security_id]
+            ticker = str(resolution.ticker)
+            relation = propose_relation(
+                event,
+                ticker=ticker,
+                security_id=security_id,
+                role=str(item.metadata.get("role") or "exposure"),
+                evidence=supporting,
+            )
+            required_evidence_did_not_fit = any(
+                evidence_key(value) in relation.dropped_evidence_keys
+                and _is_opposing_evidence(value)
+                for value in supporting
+            )
+            typed_facts = context.get("exposure_facts", ())
+            matching_facts = tuple(
+                fact for fact in typed_facts
+                if isinstance(fact, ExposureFact) and fact.ticker == ticker
+                and event.event_id in fact.event_ids
+            ) if isinstance(typed_facts, Sequence) and not isinstance(
+                typed_facts, (str, bytes, bytearray)
+            ) else ()
+            exposure_evaluation = evaluate_exposure(matching_facts)
+            contradicted = exposure_evaluation.business_exposure == "contradicted"
+            supported_fact_ids = set(exposure_evaluation.supported_fact_ids)
+            supported_facts = tuple(
+                fact for fact in matching_facts
+                if fact.fact_id in supported_fact_ids
+                and fact.source_item_id in items_by_id
+                and items_by_id[fact.source_item_id].content_hash == fact.source_item_content_hash
+                and items_by_id[fact.source_item_id].source_url == fact.source_url
+            )
+            if context.get("primary_exposure_required") is True:
+                if supported_facts:
+                    relation, supported_facts, dropped_evidence, dropped_facts = (
+                        _retain_v2_relation_evidence(
+                            relation, supported_facts, items_by_id,
+                        )
+                    )
+                    required_evidence_did_not_fit = (
+                        required_evidence_did_not_fit
+                        or bool(dropped_facts)
+                        or any(
+                            item_id in items_by_id
+                            and _is_opposing_evidence(items_by_id[item_id])
+                            for item_id in dropped_evidence
+                        )
+                    )
+                else:
+                    missing = "contradicted_primary_exposure" if contradicted else (
+                        "conflicting_primary_exposure"
+                        if "unresolved_comparable_claim_conflict" in exposure_evaluation.limitations
+                        else "supported_primary_exposure_required"
+                    )
+                    relation = replace(
+                        relation, exposure_evidence=(), exposure_status="insufficient",
+                        eligible_for_ranking=False, hypothesis=True,
+                        missing_reasons=tuple(dict.fromkeys((*relation.missing_reasons, missing))),
+                    )
+            relations.append(relation)
+            observed_at = item.published_at or item.retrieved_at
+            age_seconds = max(0.0, (_utc(now) - _utc(observed_at)).total_seconds())
+            liquidity = _liquidity_score(item, context, ticker)
+            holding_weights = (
+                _holding_weights(context.get("holdings"))
+                if contract_version == 1 or context.get("portfolio_valuation_complete") is True
+                else None
+            )
+            holding_weight = (
+                holding_weights.get(ticker, Decimal("0"))
+                if holding_weights is not None else None
+            )
+            overlap = _overlap_score(context, ticker, holding_weight)
+            if context.get("primary_exposure_required") is True:
+                exposure_strength = Decimal("1") if supported_facts else None
+            else:
+                exposure_strength = (
+                    Decimal(len(relation.exposure_evidence)) / Decimal(len(relation.evidence))
+                    if relation.evidence else None
+                )
+            all_evidence_ids = {evidence_key(value) for value in relation.evidence}
+            opposing_ids = tuple(sorted(
+                evidence_key(value) for value in relation.evidence
+                if value.claim_polarity == "denied"
+                or value.metadata.get("adverse_path") is True
+                or value.metadata.get("role") == "opposing"
+            ))
+            supporting_ids = tuple(sorted(all_evidence_ids - set(opposing_ids)))
+            current_quotes = _mapping(context.get("current_quotes"))
+            quote = _mapping(current_quotes.get(ticker))
+            quote_receipts = context.get("quote_receipt_ids")
+            quote_receipt_id = (
+                str(quote["receipt_id"]) if quote.get("receipt_id") else
+                str(quote_receipts[0]) if isinstance(quote_receipts, list)
+                and len(quote_receipts) == 1 else None
+            )
+            reference_status = (
+                str(reference_coverage.get("reference_status"))
+                if isinstance(reference_coverage, Mapping) else "reference_unavailable"
+            )
+            reference_state = {
+                "healthy": "current", "reference_stale": "stale",
+                "reference_unavailable": "unavailable",
+            }.get(reference_status, "unavailable")
+            lineage = None
+            if contract_version == 2:
+                lineage = CandidateLineage(
+                    run_id=str(context.get("_run_id") or ""),
+                    observed_at=str(context.get("_observed_at") or ""),
+                    policy_version=int(context.get("policy_version") or 1),
+                    reference_manifest_id=(
+                        str(reference_coverage.get("reference_manifest_id"))
+                        if isinstance(reference_coverage, Mapping)
+                        and reference_coverage.get("reference_manifest_id") else None
+                    ),
+                    reference_revision=(
+                        int(reference_coverage["reference_revision"])
+                        if isinstance(reference_coverage, Mapping)
+                        and isinstance(reference_coverage.get("reference_revision"), int)
+                        else None
+                    ),
+                    reference_expires_at=(
+                        str(reference_coverage["reference_expires_at"])
+                        if isinstance(reference_coverage, Mapping)
+                        and isinstance(reference_coverage.get("reference_expires_at"), str)
+                        else None
+                    ),
+                    security_revision_id=next((
+                        fact.security_revision_id for fact in supported_facts
+                    ), None),
+                    quote_receipt_id=quote_receipt_id,
+                    quote_as_of=str(quote.get("as_of")) if quote.get("as_of") else None,
+                    quote_expires_at=str(quote.get("expires_at")) if quote.get("expires_at") else None,
+                    evidence_receipt_ids={
+                        item_id: str(source_receipts[item_id])
+                        for item_id in all_evidence_ids if item_id in source_receipts
+                    },
+                    portfolio_revision=(str(context["portfolio_revision"])
+                                        if context.get("portfolio_revision") else None),
+                    cash_revision=(str(context["cash_revision"])
+                                  if context.get("cash_revision") else None),
+                )
+            candidates.append(CandidateInput(
+                ticker=ticker, event=event, relation=relation, evidence=relation.evidence,
+                authority_corroboration=_authority_score(relation.evidence),
+                exposure_strength=exposure_strength,
+                recency=max(Decimal("0"), Decimal("1") - Decimal(str(age_seconds)) / Decimal("604800")),
+                portfolio_relevance=(max(holding_weight, overlap)
+                                     if holding_weight is not None and overlap is not None else None),
+                liquidity=liquidity,
+                holding_weight=holding_weight, overlap=overlap, concentration=holding_weight,
+                contract_version=contract_version,
+                security_id=security_id,
+                entity_id=resolution.entity_id,
+                theme_ids=event.theme_ids,
+                roles=tuple(sorted({fact.role for fact in supported_facts})) or (relation.role,),
+                exposure_fact_ids=tuple(sorted(fact.fact_id for fact in supported_facts)),
+                supporting_evidence_ids=supporting_ids,
+                opposing_evidence_ids=opposing_ids,
+                lineage=lineage,
+                reference_state=reference_state,  # type: ignore[arg-type]
+                valuation_state=str(context.get("valuation_state_by_ticker", {}).get(ticker, "missing"))
+                if isinstance(context.get("valuation_state_by_ticker"), Mapping) else "missing",
+                quote_state="passed" if quote and quote_receipt_id else "missing",
+                portfolio_state="passed" if context.get("portfolio_valuation_complete") is True else "unavailable",
+                cash_state="passed" if context.get("cash_revision") else "unavailable",
+                limitations=(
+                    ("required_evidence_did_not_fit",)
+                    if required_evidence_did_not_fit
+                    else ()
+                ),
+                adverse_paths=tuple(sorted(
+                    str(value.metadata.get("adverse_path_id"))
+                    for value in relation.evidence if value.metadata.get("adverse_path_id")
+                )),
+            ))
     holdings = _holding_weights(context.get("holdings"))
     plans = context.get("owner_plans", context.get("plans"))
-    ranked = rank_candidates(candidates, holdings=holdings, plans=plans)
-    ranked = [replace(candidate, qualified=False,
-        veto_reasons=(*candidate.veto_reasons, "CONFLICTING_CLAIM_POLARITY"))
-        if candidate.event_id in conflicting_events else candidate for candidate in ranked]
+    ranked = rank_candidates(
+        candidates, holdings=holdings, plans=plans, contract_version=contract_version,
+    )
+    conflicting_ranked: list[RankedCandidate] = []
+    for candidate in ranked:
+        if candidate.event_id not in conflicting_events:
+            conflicting_ranked.append(candidate)
+            continue
+        suitability = candidate.suitability
+        if suitability is not None:
+            suitability = replace(
+                suitability,
+                state="vetoed",
+                veto_reasons=tuple(dict.fromkeys((
+                    *suitability.veto_reasons, "conflicting_claim_polarity",
+                ))),
+            )
+        conflicting_ranked.append(replace(
+            candidate,
+            qualified=False,
+            suitability=suitability,
+            veto_reasons=tuple(dict.fromkeys((
+                *candidate.veto_reasons, "CONFLICTING_CLAIM_POLARITY",
+            ))),
+        ))
+    ranked = conflicting_ranked
     return events, relations, ranked
+
+
+def _research_recency(items: Sequence[SourceItem], now: datetime) -> Decimal:
+    observed = max((item.published_at or item.retrieved_at for item in items), default=now)
+    age_seconds = max(0.0, (_utc(now) - _utc(observed)).total_seconds())
+    return max(Decimal("0"), Decimal("1") - Decimal(str(age_seconds)) / Decimal("604800"))
+
+
+def _is_opposing_evidence(item: SourceItem) -> bool:
+    return (
+        item.claim_polarity == "denied"
+        or item.metadata.get("claim_polarity") == "denied"
+        or item.metadata.get("adverse_path") is True
+        or item.metadata.get("role") == "opposing"
+    )
+
+
+def _retain_v2_relation_evidence(
+    relation: EventRelationship,
+    supported_facts: Sequence[ExposureFact],
+    items_by_id: Mapping[str, SourceItem],
+) -> tuple[
+    EventRelationship,
+    tuple[ExposureFact, ...],
+    tuple[str, ...],
+    tuple[str, ...],
+]:
+    """Retain one primary source and adverse evidence before optional support."""
+    primary_by_id = {
+        fact.source_item_id: items_by_id[fact.source_item_id]
+        for fact in supported_facts if fact.source_item_id in items_by_id
+    }
+    evidence_by_id = {
+        evidence_key(item): item for item in (*relation.evidence, *primary_by_id.values())
+    }
+    primary_ids = sorted(primary_by_id)
+    adverse_ids = sorted(
+        item_id for item_id, item in evidence_by_id.items()
+        if _is_opposing_evidence(item)
+    )
+    ordered_ids: list[str] = []
+    if primary_ids:
+        ordered_ids.append(primary_ids[0])
+    ordered_ids.extend(adverse_ids)
+    ordered_ids.extend(primary_ids)
+    ordered_ids.extend(sorted(evidence_by_id))
+    ordered_ids = list(dict.fromkeys(ordered_ids))
+    retained_ids: list[str] = []
+    dropped_ids: list[str] = []
+    for item_id in ordered_ids:
+        if len(retained_ids) < 8:
+            retained_ids.append(item_id)
+        else:
+            dropped_ids.append(item_id)
+    retained_id_set = set(retained_ids)
+    retained_facts = tuple(
+        fact for fact in supported_facts if fact.source_item_id in retained_id_set
+    )
+    dropped_fact_ids = tuple(sorted(
+        fact.fact_id for fact in supported_facts
+        if fact.source_item_id not in retained_id_set
+    ))
+    retained_exposure = tuple(
+        evidence_by_id[item_id] for item_id in retained_ids if item_id in primary_by_id
+    )
+    retained_relation = replace(
+        relation,
+        evidence=tuple(evidence_by_id[item_id] for item_id in retained_ids),
+        exposure_evidence=retained_exposure,
+        exposure_status="qualified" if retained_exposure else "insufficient",
+        eligible_for_ranking=bool(retained_exposure),
+        hypothesis=not bool(retained_exposure),
+        missing_reasons=tuple(
+            reason for reason in relation.missing_reasons
+            if reason != "authoritative_exposure_required" or not retained_exposure
+        ),
+        dropped_evidence_keys=tuple(sorted(set((
+            *relation.dropped_evidence_keys, *dropped_ids,
+        )))),
+        dropped_exposure_fact_ids=dropped_fact_ids,
+    )
+    return retained_relation, retained_facts, tuple(dropped_ids), dropped_fact_ids
+
+
+def _prioritize_due_nomination_candidates(
+    candidates: Sequence[EnrichmentCandidate],
+    theme_memory: object,
+    *,
+    run_id: str,
+    now: datetime,
+) -> tuple[EnrichmentCandidate, ...]:
+    """Promote at most three due, exact, currently evidenced research follow-ups."""
+    if theme_memory is None:
+        return tuple(candidates)
+    if not isinstance(theme_memory, Mapping):
+        raise ValueError("protected theme memory is invalid")
+    raw_due = theme_memory.get("due_nominations", [])
+    if not isinstance(raw_due, Sequence) or isinstance(
+        raw_due, (str, bytes, bytearray)
+    ) or len(raw_due) > 12:
+        raise ValueError("protected due nominations are invalid")
+    current = _utc(now)
+    due: list[tuple[int, datetime, str, Mapping[str, object]]] = []
+    for raw in raw_due:
+        if not isinstance(raw, Mapping) or raw.get("execution_allowed") is not False \
+                or raw.get("origin_run_id") == run_id:
+            continue
+        try:
+            nomination_id = str(raw["nomination_id"])
+            if str(uuid.UUID(nomination_id)) != nomination_id:
+                raise ValueError
+            expiry = datetime.fromisoformat(str(raw["expires_at"]).replace("Z", "+00:00"))
+            created = datetime.fromisoformat(str(raw["created_at"]).replace("Z", "+00:00"))
+            priority = raw["priority"]
+        except (KeyError, TypeError, ValueError, AttributeError):
+            continue
+        evidence_ids = raw.get("evidence_ids")
+        if (
+            isinstance(priority, bool) or not isinstance(priority, int)
+            or not 1 <= priority <= 5
+            or created.tzinfo is None or expiry.tzinfo is None
+            or not created.astimezone(timezone.utc) <= current < expiry.astimezone(timezone.utc)
+            or not isinstance(evidence_ids, Sequence)
+            or isinstance(evidence_ids, (str, bytes, bytearray))
+            or not 1 <= len(evidence_ids) <= 8
+            or any(not isinstance(value, str) for value in evidence_ids)
+        ):
+            continue
+        due.append((-priority, expiry.astimezone(timezone.utc), nomination_id, raw))
+    selected = tuple(row[3] for row in sorted(due)[:3])
+    output: list[EnrichmentCandidate] = []
+    for candidate in candidates:
+        matched = any(
+            nomination.get("theme_id") == candidate.hypothesis.theme_id
+            and nomination.get("entity_id") == candidate.entity_id
+            and nomination.get("security_id") == candidate.security_id
+            and nomination.get("relationship_role") == candidate.hypothesis.role
+            and set(nomination.get("evidence_ids", ())) <= set(candidate.source_item_ids)
+            for nomination in selected
+        )
+        output.append(replace(
+            candidate,
+            official_support=candidate.official_support or matched,
+            novelty=max(candidate.novelty, 100) if matched else candidate.novelty,
+        ))
+    return tuple(output)
+
+
+def _enrichment_candidates(
+    task_results: Sequence[tuple[DiscoveryTask, CollectionResult]],
+    context: Mapping[str, object],
+) -> tuple[EnrichmentCandidate, ...]:
+    """Resolve hypotheses only against exact persisted current-snapshot members."""
+    reference = context.get("security_reference")
+    coverage = context.get("reference_coverage")
+    if not isinstance(reference, ReferenceSnapshot) or not isinstance(coverage, Mapping):
+        return ()
+    manifest_id = coverage.get("reference_manifest_id")
+    if not isinstance(manifest_id, str) or coverage.get("reference_status") not in {
+        "healthy", "reference_stale",
+    }:
+        return ()
+    items: dict[str, SourceItem] = {}
+    dependencies: dict[str, set[str]] = {}
+    for task, result in task_results:
+        if result.receipt.status not in {"succeeded", "cache_hit"}:
+            continue
+        for raw in result.items:
+            item = normalize_item(raw)
+            key = evidence_key(item)
+            items[key] = item
+            dependencies.setdefault(key, set()).add(task.task_id)
+    taxonomy = load_theme_taxonomy()
+    candidates: list[EnrichmentCandidate] = []
+    for event in detect_events(tuple(items.values()), taxonomy):
+        resolved: dict[str, tuple[SecurityIdentity, SourceItem]] = {}
+        for item in event.evidence:
+            for result in resolve_entities(item, reference):
+                if result.status != "resolved" or not result.eligible or result.ticker is None:
+                    continue
+                security = reference.by_ticker.get(result.ticker)
+                if security is None or security.revision_id is None \
+                        or security.reference_manifest_id != manifest_id or security.cik is None:
+                    continue
+                resolved[security.security_id] = (security, item)
+        for hypothesis in expand_value_chain(event, taxonomy):
+            for security, item in resolved.values():
+                candidates.append(EnrichmentCandidate(
+                    hypothesis=hypothesis,
+                    entity_id=security.entity_id,
+                    security_id=security.security_id,
+                    security_revision_id=security.revision_id,
+                    reference_manifest_id=manifest_id,
+                    cik=security.cik,
+                    ticker=security.ticker,
+                    instrument_type=security.instrument_type,
+                    source_item_ids=tuple(sorted(evidence_key(value) for value in event.evidence)),
+                    dependency_task_ids=tuple(sorted({
+                        task_id for value in event.evidence
+                        for task_id in dependencies.get(evidence_key(value), ())
+                    })),
+                    official_support=any(value.authority == "official" for value in event.evidence),
+                    novelty=1,
+                ))
+    return tuple(candidates)
 
 
 def _claim_key(item: SourceItem, ticker: str) -> tuple[str, str, str]:
@@ -982,7 +3652,10 @@ def _collection_cache_key(adapter: object, query: CollectionQuery) -> str:
     window = json.dumps({"start": _utc(query.start).isoformat(), "end": _utc(query.end).isoformat()}, separators=(",", ":"), sort_keys=True)
     return cache_key(str(adapter.provider), {
         "query": query.text, "symbols": ",".join(query.symbols), "cik": query.cik or "",
-        "series_id": query.series_id or "", "limit": str(query.limit),
+        "series_id": query.series_id or "", "capability_id": query.capability_id or "",
+        "cursor_token": query.cursor_token or "", "page": str(query.page),
+        "accession_number": query.accession_number or "",
+        "primary_document": query.primary_document or "", "limit": str(query.limit),
     }, window, 1)
 
 
@@ -1108,14 +3781,15 @@ def _provider_query_text(provider: str, target: str, symbols: tuple[str, ...]) -
     """Translate internal target labels before they reach an upstream endpoint."""
     if symbols:
         return ",".join(symbols)
-    settings = __import__("lib.config", fromlist=["load_settings"]).load_settings()
-    intelligence = settings.get("intelligence", {}) if isinstance(settings, Mapping) else {}
-    mappings = intelligence.get("provider_query_terms", {}) if isinstance(intelligence, Mapping) else {}
-    values = mappings.get(provider, {}) if isinstance(mappings, Mapping) else {}
-    translated = values.get(target) if isinstance(values, Mapping) else None
-    if not isinstance(translated, str) or not translated.strip():
+    from lib.intelligence.planner import configured_provider_query
+
+    try:
+        translated = configured_provider_query(provider, target)
+    except ValueError as exc:
+        raise SourceFailure("UNSUPPORTED_QUERY") from exc
+    if not translated:
         raise SourceFailure("UNSUPPORTED_QUERY")
-    return translated.strip()
+    return translated
 
 
 def _stored_event_id(run_id: str, event_id: str) -> str:

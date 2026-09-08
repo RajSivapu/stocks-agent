@@ -19,6 +19,12 @@ import psycopg
 from psycopg.rows import dict_row
 
 from lib.intelligence.canonical import EVENT_CANONICAL_SQL, RANKING_CANONICAL_SQL
+from lib.release_baseline import (
+    PROTECTED_RELEASE_READ_TABLES,
+    PRE_MIGRATION_ABSENT_TABLES,
+    PRE_MIGRATION_UNREADABLE_TABLES,
+    pre_migration_omissions,
+)
 from scripts.export_recovery_bundle import MAX_PAYLOAD_BYTES
 from scripts.verify_personal_stock_agent_v1 import path_is_safe, require
 
@@ -47,10 +53,121 @@ RECOVERY_SQL = {
     "policies": "SELECT version,config,active,created_at::text AS created_at,activated_at::text AS activated_at FROM public.market_policy_config",
     "intelligence_runs": """SELECT id::text AS id,phase,market_date::text AS market_date,policy_version,reservation_plan,request_window,
         created_at::text AS created_at FROM public.market_intelligence_runs""",
+    "reference_manifests": """SELECT id::text AS id,run_id::text AS run_id,reference_version,revision,capability_version,
+        taxonomy_version,source_hash,valid_from::text AS valid_from,valid_to::text AS valid_to,manifest,content_hash,
+        created_at::text AS created_at FROM public.market_reference_manifests""",
+    "security_reference_revisions": """SELECT id::text AS id,manifest_id::text AS manifest_id,run_id::text AS run_id,revision,
+        security_id,entity_id,ticker,exchange,instrument_type,eligible,exclusion_reasons,aliases,source_ids,
+        valid_from::text AS valid_from,valid_to::text AS valid_to,content_hash,
+        semantic_encoding_version,issuer_names,created_at::text AS created_at
+        FROM public.market_security_reference_revisions""",
+    "reference_chunk_receipts": """SELECT manifest_id::text AS manifest_id,run_id::text AS run_id,capability_id,
+        chunk_index,chunk_count,entry_count,chunk_hash,predecessor_manifest_id::text AS predecessor_manifest_id,
+        payload,created_at::text AS created_at FROM public.market_reference_chunk_receipts""",
+    "reference_snapshot_memberships": """SELECT manifest_id::text AS manifest_id,
+        security_revision_id::text AS security_revision_id,security_id,ordinal,created_at::text AS created_at
+        FROM public.market_reference_snapshot_memberships""",
+    "reference_finalization_seals": """SELECT manifest_id::text AS manifest_id,run_id::text AS run_id,capability_id,
+        predecessor_manifest_id::text AS predecessor_manifest_id,chunk_count,security_count,root_hash,
+        finalized_at::text AS finalized_at FROM public.market_reference_finalization_seals""",
+    "reference_run_bindings": """SELECT run_id::text AS run_id,capability_id,manifest_id::text AS manifest_id,
+        reference_status,reference_as_of::text AS reference_as_of,source_retrieved_at::text AS source_retrieved_at,
+        reference_age_seconds,request_payload,created_at::text AS created_at FROM public.market_reference_run_bindings""",
+    "reference_predecessor_pins": """SELECT run_id::text AS run_id,capability_id,manifest_id::text AS manifest_id,
+        reference_status,reference_as_of::text AS reference_as_of,source_retrieved_at::text AS source_retrieved_at,
+        reference_age_seconds,request_payload,created_at::text AS created_at FROM public.market_reference_predecessor_pins""",
+    "reference_transfer_requests": """SELECT request_id::text AS request_id,run_id::text AS run_id,operation,
+        encoded_bytes,request_hash,request_payload,created_at::text AS created_at
+        FROM public.market_reference_transfer_requests""",
+    "reference_transfer_responses": """SELECT request_id::text AS request_id,run_id::text AS run_id,
+        encoded_bytes,response_hash,created_at::text AS created_at
+        FROM public.market_reference_transfer_responses""",
+    "discovery_stage_tasks": """SELECT id::text AS id,run_id::text AS run_id,stage,capability_id,provider,query_kind,query_hash,
+        dependency_ids,requested_window,state,attempt_count,request_budget,result,created_at::text AS created_at,
+        updated_at::text AS updated_at FROM public.market_discovery_stage_tasks""",
+    "enrichment_selection_manifests": """SELECT id::text AS id,run_id::text AS run_id,selection_stage,phase,
+        request_count,provider_reservations,deferred_reasons,manifest,content_hash,created_at::text AS created_at
+        FROM public.market_enrichment_selection_manifests""",
+    "enrichment_request_descriptors": """SELECT id::text AS id,manifest_id::text AS manifest_id,run_id::text AS run_id,
+        task_id::text AS task_id,provider,capability_id,query_kind,descriptor,content_hash,created_at::text AS created_at
+        FROM public.market_enrichment_request_descriptors""",
+    "theme_episode_revisions": """SELECT id::text AS id,run_id::text AS run_id,task_id::text AS task_id,theme_id,revision,
+        episode,source_ids,valid_from::text AS valid_from,valid_to::text AS valid_to,content_hash,
+        created_at::text AS created_at FROM public.market_theme_episode_revisions""",
+    "exposure_facts": """SELECT id::text AS id,run_id::text AS run_id,task_id::text AS task_id,
+        security_revision_id::text AS security_revision_id,theme_episode_revision_id::text AS theme_episode_revision_id,
+        exposure_kind,fact,source_ids,valid_from::text AS valid_from,valid_to::text AS valid_to,content_hash,
+        created_at::text AS created_at FROM public.market_exposure_facts""",
+    "research_nominations": """SELECT id::text AS id,run_id::text AS run_id,task_id::text AS task_id,
+        security_revision_id::text AS security_revision_id,theme_episode_revision_id::text AS theme_episode_revision_id,
+        exposure_fact_ids,state,rationale,created_at::text AS created_at,updated_at::text AS updated_at
+        FROM public.market_research_nominations""",
+    "theme_episode_revisions_v2": """SELECT revision_id::text AS revision_id,theme_id,episode_id::text AS episode_id,
+        revision,identity_version,anchor_hash,origin_run_id::text AS origin_run_id,
+        predecessor_revision_id::text AS predecessor_revision_id,predecessor_content_hash,theme_mechanism,
+        subject_identity,jurisdiction,effective_period_start::text AS effective_period_start,
+        effective_period_end::text AS effective_period_end,authoritative_id,source_membership,source_ids,
+        supporting_source_ids,opposing_source_ids,added_source_ids,investigated_entity_ids,missing_questions,
+        invalidation_conditions,
+        to_char(first_seen AT TIME ZONE 'UTC','YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') AS first_seen,
+        to_char(last_seen AT TIME ZONE 'UTC','YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') AS last_seen,
+        to_char(next_review_at AT TIME ZONE 'UTC','YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') AS next_review_at,
+        to_char(expires_at AT TIME ZONE 'UTC','YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') AS expires_at,
+        state,closure_reason,reopen_reason,
+        content_hash,execution_allowed,created_at::text AS created_at FROM public.market_theme_episode_revisions_v2""",
+    "reviewer_identity_receipts_v2": """SELECT receipt_id::text AS receipt_id,run_id::text AS run_id,
+        packet_id::text AS packet_id,packet_hash,reference_manifest_id::text AS reference_manifest_id,
+        actor_identity,reviewed_role,predecessor_receipt_id::text AS predecessor_receipt_id,review_hash,
+        reviewed_at::text AS reviewed_at,execution_allowed FROM public.market_reviewer_identity_receipts_v2""",
+    "research_nomination_requests_v2": """SELECT request_id::text AS request_id,run_id::text AS run_id,
+        packet_id::text AS packet_id,reviewer_receipt_id::text AS reviewer_receipt_id,request_hash,
+        accepted_count,response,created_at::text AS created_at FROM public.market_research_nomination_requests_v2""",
+    "research_nominations_v2": """SELECT nomination_id::text AS nomination_id,request_id::text AS request_id,
+        origin_run_id::text AS origin_run_id,packet_id::text AS packet_id,packet_hash,
+        reviewer_receipt_id::text AS reviewer_receipt_id,actor_identity,reviewed_role,
+        reference_manifest_id::text AS reference_manifest_id,theme_id,entity_id,security_id,relationship_role,
+        reason,evidence_ids,required_evidence_kind,priority,created_at::text AS created_at,
+        expires_at::text AS expires_at,execution_allowed FROM public.market_research_nominations_v2""",
+    "research_nomination_lifecycle_v2": """SELECT receipt_id::text AS receipt_id,
+        nomination_id::text AS nomination_id,transition_run_id::text AS transition_run_id,
+        predecessor_receipt_id::text AS predecessor_receipt_id,state,reason,selection_descriptor,
+        created_at::text AS created_at,receipt_hash,execution_allowed FROM public.market_research_nomination_lifecycle_v2""",
+    "intelligence_memory_context_bindings_v2": """SELECT run_id::text AS run_id,as_of::text AS as_of,
+        reference_manifest_id::text AS reference_manifest_id,reference_hash,selected_revision_ids,
+        selected_nomination_ids,context,snapshot_hash,created_at::text AS created_at
+        FROM public.market_intelligence_memory_context_bindings_v2""",
     "intelligence_run_events": """SELECT id::text AS id,run_id::text AS run_id,status,detail,created_at::text AS created_at
         FROM public.market_intelligence_run_events""",
     "source_quota_reservations": """SELECT id::text AS id,run_id::text AS run_id,provider,market_date::text AS market_date,
         phase,reserved_requests,cache_keys,created_at::text AS created_at FROM public.market_source_quota_reservations""",
+    "source_receipts": """SELECT id::text AS id,run_id::text AS run_id,reservation_id::text AS reservation_id,
+        provider,status,cache_key,requested_window,
+        to_char(retrieved_at AT TIME ZONE 'UTC','YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') AS retrieved_at,
+        expires_at::text AS expires_at,
+        request_cost,upstream_remaining,returned_count,accepted_count,duplicate_count,dropped_count,error,response_hash,
+        created_at::text AS created_at FROM public.market_source_receipts""",
+    "source_items": """SELECT id::text AS id,source_receipt_id::text AS source_receipt_id,provider,upstream_item_id,
+        canonical_url,published_at::text AS published_at,effective_at::text AS effective_at,title,normalized_text,
+        canonical_content,content_hash,metadata,created_at::text AS created_at FROM public.market_source_items""",
+    "intelligence_run_items": """SELECT id::text AS id,run_id::text AS run_id,source_item_id::text AS source_item_id,
+        source_receipt_id::text AS source_receipt_id,disposition,drop_reason,created_at::text AS created_at
+        FROM public.market_intelligence_run_items""",
+    "source_item_provenance": """SELECT source_item_id::text AS source_item_id,provider,canonical_item_url,request_url,
+        retrieved_at::text AS retrieved_at,reporting_at::text AS reporting_at,entity_ids,security_ids,discovery_status,
+        created_at::text AS created_at FROM public.market_source_item_provenance""",
+    "run_source_item_provenance": """SELECT run_item_id::text AS run_item_id,run_id::text AS run_id,
+        source_item_id::text AS source_item_id,source_receipt_id::text AS source_receipt_id,provider,request_url,
+        retrieved_at::text AS retrieved_at,reporting_at::text AS reporting_at,entity_ids,security_ids,discovery_status,
+        created_at::text AS created_at FROM public.market_run_source_item_provenance""",
+    "events": """SELECT id::text AS id,run_id::text AS run_id,event_type,title,summary,
+        CASE WHEN occurred_at IS NULL THEN NULL ELSE to_char(occurred_at AT TIME ZONE 'UTC','YYYY-MM-DD\"T\"HH24:MI:SS.MS\"Z\"') END AS occurred_at,
+        CASE WHEN effective_at IS NULL THEN NULL ELSE to_char(effective_at AT TIME ZONE 'UTC','YYYY-MM-DD\"T\"HH24:MI:SS.MS\"Z\"') END AS effective_at,
+        materiality::text AS materiality,
+        confidence::text AS confidence,evidence_item_ids,content_hash,created_at::text AS created_at
+        FROM public.market_events""",
+    "candidate_rankings": """SELECT id::text AS id,run_id::text AS run_id,event_id::text AS event_id,candidate_key,ticker,
+        rank,component_scores,total_score::text AS total_score,qualified,veto_reasons,exposure_item_ids,content_hash,
+        created_at::text AS created_at FROM public.market_candidate_rankings""",
     "collection_checkpoints": """SELECT run_id::text AS run_id,cache_key,request_window,source_receipt_id::text AS source_receipt_id,
         payload,created_at::text AS created_at FROM public.market_collection_checkpoints""",
     "collection_checkpoint_history": """SELECT run_id::text AS run_id,cache_key,source_receipt_id::text AS source_receipt_id,
@@ -98,19 +215,12 @@ RECOVERY_SQL = {
     "release_migration_ledger": """SELECT path,version,sha256,applied_at::text
                                   FROM public.stock_agent_release_migration_ledger""",
 }
-READ_TABLES = (
-    "holdings", "transactions", "portfolio_commands", "portfolio_command_acknowledgements", "analysis_runs", "market_policy_config", "market_evidence_packets", "market_reports",
-    "market_report_publications", "market_intelligence_runs", "market_intelligence_collection_completions", "market_intelligence_run_events",
-    "market_collection_checkpoints", "market_collection_checkpoint_history", "market_events", "market_candidate_rankings", "market_gateway_requests",
-    "market_report_request_origins", "market_publications", "market_source_quota_reservations", "market_source_receipts",
-    "market_alert_drafts", "market_alert_events", "market_alert_actions", "portfolio_cash_ledger_state",
-    "reconciled_cash_snapshots", "market_run_terminal_outcomes", "decision_evaluations", "market_policy_comparisons",
-    "stock_agent_release_migration_ledger",
-)
-
+READ_TABLES = PROTECTED_RELEASE_READ_TABLES
 
 class PostgresReadOnlySource:
-    def __init__(self, database_url: str, project_ref: str, *, isolated_guard: bool = False, production_project_ref: str | None = None):
+    def __init__(self, database_url: str, project_ref: str, *, isolated_guard: bool = False,
+                 production_project_ref: str | None = None,
+                 pre_migration_baseline: bool = False):
         parsed = urlparse(database_url)
         require(bool(re.fullmatch(r"[a-z0-9]{20}", project_ref)), "exact database project identity is required")
         user = unquote(parsed.username or "")
@@ -125,7 +235,10 @@ class PostgresReadOnlySource:
         self._url = database_url
         self.project_ref = project_ref
         self.isolated_guard = isolated_guard
+        self.pre_migration_baseline = pre_migration_baseline
         self.connection = None
+        self._read_tables: tuple[str, ...] = ()
+        self._pre_migration_omissions: dict[str, object] | None = None
 
     def __enter__(self):
         try:
@@ -138,9 +251,68 @@ class PostgresReadOnlySource:
                 FROM pg_catalog.pg_roles WHERE rolname=current_user""")[0]
             require(row["role"] == READER and row["read_only"] == "on" and not row["rolsuper"] and not row["rolbypassrls"]
                     and row["server"] and row["database"], "queried database identity is not a restricted read-only source")
+            readable_tables = []
+            absent_tables = []
+            unreadable_tables = []
             for table in READ_TABLES:
-                privileges = self.query("SELECT has_table_privilege(current_user,%s,'SELECT') AS readable,has_table_privilege(current_user,%s,'INSERT,UPDATE,DELETE,TRUNCATE,TRIGGER') AS writable", (f"public.{table}", f"public.{table}"))[0]
-                require(privileges["readable"] is True and privileges["writable"] is False, "read-only database source lacks SELECT or has write authority")
+                presence = self.query("SELECT to_regclass(%s) IS NOT NULL AS present", (f"public.{table}",))
+                require(len(presence) == 1 and type(presence[0].get("present")) is bool,
+                        "release table identity is unavailable")
+                if not presence[0]["present"]:
+                    absent_tables.append(table)
+                    continue
+                privileges = self.query("SELECT has_table_privilege(current_user,%s,'SELECT') AS readable,has_table_privilege(current_user,%s,'INSERT,UPDATE,DELETE,TRUNCATE,TRIGGER') AS writable", (f"public.{table}", f"public.{table}"))
+                require(len(privileges) == 1
+                        and type(privileges[0].get("readable")) is bool
+                        and type(privileges[0].get("writable")) is bool,
+                        "release table privileges are unavailable")
+                require(privileges[0]["writable"] is False,
+                        "read-only database source lacks SELECT or has write authority")
+                if privileges[0]["readable"] is not True:
+                    unreadable_tables.append(table)
+                    continue
+                policy = self.query("""SELECT c.relrowsecurity AS rls_enabled,
+                    NOT pg_has_role(current_user,c.relowner,'MEMBER') AS reader_is_not_owner,
+                    EXISTS (
+                        SELECT 1 FROM pg_catalog.pg_policy p
+                        WHERE p.polrelid=c.oid AND p.polcmd IN ('r','*') AND p.polpermissive
+                          AND pg_get_expr(p.polqual,p.polrelid)='true'
+                          AND EXISTS (
+                              SELECT 1 FROM unnest(p.polroles) AS role_oid
+                              WHERE role_oid=0 OR pg_has_role(current_user,role_oid,'MEMBER')
+                          )
+                    ) AS unrestricted_select,
+                    NOT EXISTS (
+                        SELECT 1 FROM pg_catalog.pg_policy p
+                        WHERE p.polrelid=c.oid AND p.polcmd IN ('r','*') AND NOT p.polpermissive
+                          AND pg_get_expr(p.polqual,p.polrelid) IS DISTINCT FROM 'true'
+                          AND EXISTS (
+                              SELECT 1 FROM unnest(p.polroles) AS role_oid
+                              WHERE role_oid=0 OR pg_has_role(current_user,role_oid,'MEMBER')
+                          )
+                    ) AS no_restrictive_filter
+                    FROM pg_catalog.pg_class c
+                    JOIN pg_catalog.pg_namespace n ON n.oid=c.relnamespace
+                    WHERE n.nspname='public' AND c.relname=%s""", (table,))
+                require(len(policy) == 1
+                        and policy[0].get("rls_enabled") is True
+                        and policy[0].get("reader_is_not_owner") is True
+                        and policy[0].get("unrestricted_select") is True
+                        and policy[0].get("no_restrictive_filter") is True,
+                        "read-only database source has incomplete row security coverage")
+                readable_tables.append(table)
+            if self.pre_migration_baseline:
+                unmigrated = (tuple(absent_tables) == PRE_MIGRATION_ABSENT_TABLES
+                              and tuple(unreadable_tables) == PRE_MIGRATION_UNREADABLE_TABLES)
+                migrated = not absent_tables and not unreadable_tables
+                require(unmigrated or migrated,
+                        "pre-migration release reader baseline mismatch")
+                self._pre_migration_omissions = pre_migration_omissions(migrated=migrated)
+            else:
+                require(not absent_tables, "release table is missing")
+                require(not unreadable_tables,
+                        "read-only database source lacks SELECT or has write authority")
+            self._read_tables = tuple(readable_tables)
             self._identity = {"project_ref": self.project_ref, "connection_id": hashlib.sha256(f"{row['server']}:{row['port']}/{row['database']}".encode()).hexdigest(),
                               "read_only": True, "isolated_guard": self.isolated_guard}
             return self
@@ -183,7 +355,7 @@ class PostgresReadOnlySource:
         """Hash canonical full rows across every release write surface."""
         self.identity()
         tables = {}
-        for name in READ_TABLES:
+        for name in self._read_tables:
             rows = self.query(f"SELECT to_jsonb(t) AS row FROM public.{name} AS t ORDER BY to_jsonb(t)::text")
             canonical_rows = [json.dumps(row["row"], sort_keys=True, separators=(",", ":"), ensure_ascii=False) for row in rows]
             require(all(isinstance(value, str) for value in canonical_rows), "dry-run rows are malformed")
@@ -191,15 +363,57 @@ class PostgresReadOnlySource:
                 "count": len(canonical_rows),
                 "rows_sha256": hashlib.sha256("\n".join(canonical_rows).encode()).hexdigest(),
             }
-        return {"source": self.identity(), "tables": tables}
+        snapshot = {"source": self.identity(), "tables": tables}
+        if self._pre_migration_omissions is not None:
+            snapshot["pre_migration_omissions"] = dict(self._pre_migration_omissions)
+        return snapshot
 
     def release_rows(self, run_id: str) -> dict:
         require(bool(re.fullmatch(r"[0-9a-f-]{36}", run_id)), "run UUID is required")
-        parameter = (run_id,)
+        selected_manifests = (
+            "SELECT manifest_id FROM public.market_reference_run_bindings "
+            "WHERE run_id=%s::uuid AND manifest_id IS NOT NULL"
+        )
         queries = {
             "run": "SELECT id::text AS id,kind,scheduled_phase,scheduled_market_date::text AS scheduled_market_date,status,started_at::text AS started_at,finished_at::text AS finished_at,gateway_request_id::text AS gateway_request_id,telegram_message_ids FROM public.analysis_runs WHERE id=%s::uuid",
-            "intelligence_runs": "SELECT id::text AS id,phase,market_date::text AS market_date FROM public.market_intelligence_runs WHERE id=%s::uuid",
-            "completions": "SELECT completion_id::text AS completion_id,run_id::text AS run_id,receipt FROM public.market_intelligence_collection_completions WHERE run_id=%s::uuid",
+            "intelligence_runs": "SELECT id::text AS id,phase,market_date::text AS market_date,reservation_plan,request_window FROM public.market_intelligence_runs WHERE id=%s::uuid",
+            "reference_manifests": RECOVERY_SQL["reference_manifests"] + f" WHERE id IN ({selected_manifests})",
+            "security_reference_revisions": RECOVERY_SQL["security_reference_revisions"] + f" WHERE id IN (SELECT security_revision_id FROM public.market_reference_snapshot_memberships WHERE manifest_id IN ({selected_manifests}))",
+            "reference_chunk_receipts": RECOVERY_SQL["reference_chunk_receipts"] + f" WHERE manifest_id IN ({selected_manifests})",
+            "reference_snapshot_memberships": RECOVERY_SQL["reference_snapshot_memberships"] + f" WHERE manifest_id IN ({selected_manifests})",
+            "reference_finalization_seals": RECOVERY_SQL["reference_finalization_seals"] + f" WHERE manifest_id IN ({selected_manifests})",
+            "reference_run_bindings": RECOVERY_SQL["reference_run_bindings"] + " WHERE run_id=%s::uuid",
+            "reference_predecessor_pins": RECOVERY_SQL["reference_predecessor_pins"] + " WHERE run_id=%s::uuid",
+            "reference_transfer_requests": RECOVERY_SQL["reference_transfer_requests"] + " WHERE run_id=%s::uuid",
+            "reference_transfer_responses": RECOVERY_SQL["reference_transfer_responses"] + " WHERE run_id=%s::uuid",
+            "discovery_stage_tasks": RECOVERY_SQL["discovery_stage_tasks"] + " WHERE run_id=%s::uuid",
+            "enrichment_selection_manifests": RECOVERY_SQL["enrichment_selection_manifests"] + " WHERE run_id=%s::uuid",
+            "enrichment_request_descriptors": RECOVERY_SQL["enrichment_request_descriptors"] + " WHERE run_id=%s::uuid",
+            "theme_episode_revisions": RECOVERY_SQL["theme_episode_revisions"] + " WHERE run_id=%s::uuid",
+            "exposure_facts": RECOVERY_SQL["exposure_facts"] + " WHERE run_id=%s::uuid",
+            "research_nominations": RECOVERY_SQL["research_nominations"] + " WHERE run_id=%s::uuid",
+            "theme_episode_revisions_v2": RECOVERY_SQL["theme_episode_revisions_v2"] + " WHERE origin_run_id=%s::uuid",
+            "reviewer_identity_receipts_v2": RECOVERY_SQL["reviewer_identity_receipts_v2"] + " WHERE run_id=%s::uuid",
+            "research_nomination_requests_v2": RECOVERY_SQL["research_nomination_requests_v2"] + " WHERE run_id=%s::uuid",
+            "research_nominations_v2": RECOVERY_SQL["research_nominations_v2"] + " WHERE origin_run_id=%s::uuid",
+            "research_nomination_lifecycle_v2": RECOVERY_SQL["research_nomination_lifecycle_v2"] + " WHERE transition_run_id=%s::uuid",
+            "intelligence_memory_context_bindings_v2": RECOVERY_SQL["intelligence_memory_context_bindings_v2"] + " WHERE run_id=%s::uuid",
+            "source_quota_reservations": RECOVERY_SQL["source_quota_reservations"] + """ WHERE run_id=%s::uuid OR id IN (
+                SELECT receipt.reservation_id FROM public.market_source_receipts receipt
+                JOIN public.market_source_items item ON item.source_receipt_id=receipt.id
+                JOIN public.market_intelligence_run_items run_item ON run_item.source_item_id=item.id
+                WHERE run_item.run_id=%s::uuid
+            )""",
+            "source_receipts": RECOVERY_SQL["source_receipts"] + """ WHERE run_id=%s::uuid OR id IN (
+                SELECT item.source_receipt_id FROM public.market_source_items item
+                JOIN public.market_intelligence_run_items run_item ON run_item.source_item_id=item.id
+                WHERE run_item.run_id=%s::uuid
+            )""",
+            "source_items": RECOVERY_SQL["source_items"] + " WHERE id IN (SELECT source_item_id FROM public.market_intelligence_run_items WHERE run_id=%s::uuid)",
+            "intelligence_run_items": RECOVERY_SQL["intelligence_run_items"] + " WHERE run_id=%s::uuid",
+            "source_item_provenance": RECOVERY_SQL["source_item_provenance"] + " WHERE source_item_id IN (SELECT source_item_id FROM public.market_intelligence_run_items WHERE run_id=%s::uuid)",
+            "run_source_item_provenance": RECOVERY_SQL["run_source_item_provenance"] + " WHERE run_id=%s::uuid",
+            "completions": RECOVERY_SQL["collection_completions"] + " WHERE run_id=%s::uuid",
             "run_events": "SELECT id::text AS id,run_id::text AS run_id,status FROM public.market_intelligence_run_events WHERE run_id=%s::uuid",
             "checkpoints": "SELECT run_id::text AS run_id,cache_key FROM public.market_collection_checkpoints WHERE run_id=%s::uuid",
             "packets": RECOVERY_SQL["packets"] + " WHERE run_id=%s::uuid",
@@ -208,10 +422,14 @@ class PostgresReadOnlySource:
             "events": f"""SELECT id::text AS id,run_id::text AS run_id,content_hash,{EVENT_CANONICAL_SQL} AS canonical FROM public.market_events WHERE run_id=%s::uuid""",
             "rankings": f"""SELECT id::text AS id,run_id::text AS run_id,event_id::text AS event_id,content_hash,{RANKING_CANONICAL_SQL} AS canonical FROM public.market_candidate_rankings WHERE run_id=%s::uuid""",
             "evaluation_publications": "SELECT id::text AS id,run_id::text AS run_id,status,phase,market_date::text AS market_date FROM public.market_publications WHERE run_id=%s::uuid",
+            "run_outcomes": RECOVERY_SQL["run_terminal_outcomes"] + " WHERE run_id=%s::uuid",
             "origins": "SELECT request_id::text AS request_id,run_id::text AS run_id,requested_packet_id::text AS requested_packet_id,scheduled_phase,market_date::text AS market_date,requested_kind,requested_report_id::text AS requested_report_id,requested_idempotency_key,requested_report_hash FROM public.market_report_request_origins WHERE run_id=%s::uuid",
             "quota": "SELECT q.id::text AS id,q.run_id::text AS run_id,q.provider,q.reserved_requests,COALESCE((SELECT sum(r.request_cost) FROM public.market_source_receipts r WHERE r.reservation_id=q.id),0)::int AS actual_requests FROM public.market_source_quota_reservations q WHERE q.run_id=%s::uuid",
         }
-        result = {name: self.query(sql, parameter) for name, sql in queries.items()}
+        result = {
+            name: self.query(sql, (run_id,) * sql.count("%s"))
+            for name, sql in queries.items()
+        }
         result["requests"] = self.query("""SELECT request_id::text AS request_id,run_id::text AS run_id,operation,status,response FROM public.market_gateway_requests
             WHERE run_id=%s::uuid OR request_id IN (SELECT request_id FROM public.market_report_request_origins WHERE run_id=%s::uuid)""", (run_id, run_id))
         return result
@@ -222,8 +440,11 @@ class GitHubProductionDataSource:
         require(bool(re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", repository)), "GitHub repository must be exact owner/name")
         require(bool(re.fullmatch(r"[a-z0-9]{20}", project_ref)), "production project identity is required")
         self.prefix = f"repos/{repository}"
+        self.repository = repository
         self.project_ref, self.database = project_ref, database
         self.candidate = None
+        self._artifact_cache = {}
+        self._artifact_identities = {}
 
     def _get(self, path: str, *, binary: bool = False):
         require(path.startswith(self.prefix + "/") and ".." not in path and not path.startswith("-"), "unsafe protected record path")
@@ -239,6 +460,18 @@ class GitHubProductionDataSource:
         statuses = self._get(f"{self.prefix}/deployments/{deployment_id}/statuses")
         require(statuses and statuses[0].get("state") == "success", "latest production deployment status is not successful")
         self.candidate = deployment["sha"]
+        payload = deployment.get("payload")
+        if isinstance(payload, str):
+            try:
+                payload = json.loads(payload)
+            except ValueError as error:
+                raise RuntimeError("protected deployment payload is malformed") from error
+        require(isinstance(payload, Mapping) and payload.get("candidate_sha") == self.candidate
+                and type(payload.get("release_workflow_run_id")) is int
+                and payload["release_workflow_run_id"] > 0
+                and str(payload.get("release_workflow_run_attempt", "")).isdigit()
+                and int(payload["release_workflow_run_attempt"]) > 0,
+                "protected deployment payload identity is incomplete")
         match = re.fullmatch(r"release-artifact:([1-9][0-9]*)", str(statuses[0].get("description", "")))
         require(match is not None, "protected deployment status lacks immutable release artifact identity")
         artifact_id = int(match.group(1))
@@ -246,11 +479,34 @@ class GitHubProductionDataSource:
         require(set(files) == {"release-record.json"}, "release artifact has unexpected files")
         record = json.loads(files["release-record.json"])
         require(record["candidate_sha"] == self.candidate and record["project_ref"] == self.project_ref
-                and record["deployment_id"] == deployment["id"], "protected deployment candidate/project mismatch")
-        return {**record, "id": deployment["id"], "sha": deployment["sha"], "environment": deployment["environment"], "deployed_at": statuses[0]["created_at"]}
+                and record["deployment_id"] == deployment["id"]
+                and record.get("repository") == self.repository
+                and record.get("release_workflow_run_id") == payload["release_workflow_run_id"]
+                and record.get("release_workflow_run_attempt") == int(payload["release_workflow_run_attempt"]),
+                "protected deployment candidate/project/run mismatch")
+        release_identity = self._artifact_identities[artifact_id]
+        require(release_identity["name"] == f"release-record-{deployment['id']}"
+                and release_identity["workflow_run_id"] == record.get("release_workflow_run_id")
+                and release_identity["workflow_run_attempt"] == record.get("release_workflow_run_attempt"),
+                "release artifact identity is inconsistent")
+        backend = record.get("backend_evidence_artifact")
+        require(isinstance(backend, Mapping) and backend.get("artifact_id") != artifact_id,
+                "protected backend artifact identity is missing or aliases the release record")
+        self.artifact(backend.get("artifact_id"))
+        backend_identity = self._artifact_identities[backend["artifact_id"]]
+        require({key: backend_identity[key] for key in ("artifact_id", "name", "digest")} == {
+            "artifact_id": backend.get("artifact_id"), "name": backend.get("name"), "digest": backend.get("digest")}
+            and backend_identity["workflow_run_id"] == record.get("release_workflow_run_id")
+            and backend_identity["workflow_run_attempt"] == record.get("release_workflow_run_attempt"),
+            "protected backend artifact metadata is inconsistent")
+        return {**record, "release_artifact": release_identity,
+            "id": deployment["id"], "sha": deployment["sha"], "environment": deployment["environment"],
+            "deployed_at": statuses[0]["created_at"]}
 
     def artifact(self, artifact_id: int, *, active_run_id: int | None = None) -> dict[str, bytes]:
         require(type(artifact_id) is int and artifact_id > 0, "numeric protected artifact ID required")
+        if artifact_id in self._artifact_cache:
+            return dict(self._artifact_cache[artifact_id])
         metadata = self._get(f"{self.prefix}/actions/artifacts/{artifact_id}")
         run = self._get(f"{self.prefix}/actions/runs/{metadata['workflow_run']['id']}")
         # Only the in-process protected deployment verifier can inspect its own
@@ -258,16 +514,36 @@ class GitHubProductionDataSource:
         active = (type(active_run_id) is int and active_run_id > 0
                   and run.get("id") == metadata["workflow_run"]["id"] == active_run_id
                   and run.get("status") == "in_progress" and run.get("conclusion") is None)
-        require(not metadata["expired"] and metadata["workflow_run"]["head_sha"] == self.candidate
-                and run["head_sha"] == self.candidate and run["head_branch"] == "main" and (run["conclusion"] == "success" or active)
-                and run["path"] == ".github/workflows/owner-dashboard-release.yml", "artifact did not originate in the protected candidate release workflow")
+        require(metadata.get("id") == artifact_id and not metadata["expired"]
+                and isinstance(metadata.get("name"), str) and metadata["name"]
+                and re.fullmatch(r"sha256:[0-9a-f]{64}", str(metadata.get("digest", "")))
+                and metadata["workflow_run"]["head_sha"] == self.candidate
+                and run.get("id") == metadata["workflow_run"]["id"]
+                and run.get("repository", {}).get("full_name") == self.repository
+                and run.get("head_sha") == self.candidate and run.get("head_branch") == "main"
+                and run.get("event") == "workflow_dispatch"
+                and run.get("name") == "Protected owner dashboard release"
+                and (run.get("conclusion") == "success" or active)
+                and run.get("path") == ".github/workflows/owner-dashboard-release.yml"
+                and type(run.get("run_attempt")) is int and run["run_attempt"] > 0,
+                "artifact did not originate in the protected candidate release workflow")
         raw = self._get(f"{self.prefix}/actions/artifacts/{artifact_id}/zip", binary=True)
+        require(metadata["digest"] == "sha256:" + hashlib.sha256(raw).hexdigest(),
+                "protected artifact archive digest mismatch")
         with zipfile.ZipFile(io.BytesIO(raw)) as archive:
             members = archive.infolist()
-            require(members and len({member.filename for member in members}) == len(members)
+            require(members and len(members) <= 1_000
+                    and len({member.filename for member in members}) == len(members)
                     and all(path_is_safe(member.filename) and not member.is_dir() and (member.external_attr >> 16) & 0o170000 != 0o120000 for member in members)
                     and sum(member.file_size for member in members) <= MAX_PAYLOAD_BYTES, "protected artifact has unsafe paths or members")
-            return {member.filename: archive.read(member) for member in members}
+            files = {member.filename: archive.read(member) for member in members}
+        self._artifact_identities[artifact_id] = {"artifact_id": artifact_id,
+            "name": metadata["name"], "digest": metadata["digest"],
+            "workflow_run_id": run["id"], "workflow_run_attempt": run["run_attempt"],
+            "repository": self.repository, "workflow_name": run["name"], "workflow_path": run["path"],
+            "event": run["event"], "head_branch": run["head_branch"], "head_sha": run["head_sha"]}
+        self._artifact_cache[artifact_id] = dict(files)
+        return files
 
     def ci(self, workflow_run_id: int):
         require(type(workflow_run_id) is int and workflow_run_id > 0, "numeric CI run ID required")
@@ -283,8 +559,29 @@ class GitHubProductionDataSource:
         latest = {}
         for row in rows:
             if row["state"] in {"APPROVED", "CHANGES_REQUESTED", "DISMISSED"}:
-                latest[row["user"]["id"]] = row
+                reviewer = row.get("user", {}).get("id")
+                require(type(reviewer) is int and reviewer > 0, "reviewer identity is unavailable")
+                review_id = row.get("id")
+                require(type(review_id) is int and review_id > 0, "review identity is unavailable")
+                current = latest.get(reviewer)
+                row_order = (str(row.get("submitted_at") or ""), review_id)
+                current_order = ((str(current.get("submitted_at") or ""), current["id"])
+                                 if current is not None else None)
+                if current_order is None or row_order > current_order:
+                    latest[reviewer] = row
         return list(latest.values())
+
+    def authorization_comments(self, number: int):
+        require(type(number) is int and number > 0, "numeric pull request ID required")
+        rows = self._get(f"{self.prefix}/issues/{number}/comments?per_page=100")
+        require(len(rows) < 100, "owner authorization evidence exceeds bounded page; cannot infer completeness")
+        return rows
+
+    def repository_owner_id(self):
+        row = self._get(self.prefix)
+        owner_id = row.get("owner", {}).get("id")
+        require(type(owner_id) is int and owner_id > 0, "repository owner identity is unavailable")
+        return owner_id
 
     def release_rows(self, run_id: str):
         require(self.database.identity()["project_ref"] == self.project_ref, "queried production database identity mismatch")

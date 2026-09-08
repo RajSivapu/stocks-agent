@@ -1,13 +1,15 @@
 #!/usr/bin/env python3
-"""Seal the unchanged production V1 runtime baseline without mutating it.
+"""Retained validator for the completed, unchanged production V1 baseline.
 
 Sites evidence comes from the native Codex Sites connector because GitHub Actions
 has no equivalent Sites transport. Database, Auth, and Edge evidence is read
-again inside the protected GitHub environment. The resulting artifact contains
-identities and digests only; it never contains source bytes, portfolio rows, or
-credentials.
+again inside the protected GitHub environment. The protected result contains
+identities and digests only. Its native input may contain bounded source and
+live-asset bytes captured by the authenticated Sites connector; it never
+contains portfolio rows or credentials.
 
-This is a one-time bridge for the already-deployed V1 runtime. It intentionally
+This was a one-time bridge for the already-deployed V1 runtime and its workflow
+is now retired. It intentionally
 requires full database inventory equality with the completed reconciliation.
 Routine scheduled data growth invalidates that equality; later code releases use
 the normal protected deployment and recovery workflow.
@@ -20,15 +22,15 @@ import binascii
 from collections.abc import Callable, Mapping
 from datetime import UTC, datetime
 import hashlib
+import io
 import json
 import os
 from pathlib import Path, PurePosixPath
 import re
 import subprocess
 import sys
+import tarfile
 import tomllib
-from urllib.error import HTTPError, URLError
-from urllib.request import Request, urlopen
 
 if __package__ in {None, ""}:
     _REPOSITORY_ROOT = str(Path(__file__).resolve().parents[1])
@@ -49,11 +51,13 @@ from scripts.verify_owner_dashboard_deployment import (
     obtain_ephemeral_owner_access_token,
     revoke_ephemeral_owner_session,
 )
-from scripts.verify_personal_stock_agent_v1 import FUNCTIONS, SHA, git_files, tree_sha256
+from scripts.verify_personal_stock_agent_v1 import (
+    FUNCTIONS, SHA, git_files, path_is_safe, tree_sha256,
+)
 
 
 ROOT = Path(__file__).resolve().parents[1]
-MAX_RECEIPT_BYTES = 1_000_000
+MAX_RECEIPT_BYTES = 250_000_000
 MAX_NATIVE_SITE_RECEIPT_AGE_SECONDS = 24 * 60 * 60
 SITE_SOURCE_PATHS = (
     ".openai/hosting.json",
@@ -71,7 +75,9 @@ _DIGEST = re.compile(r"[0-9a-f]{64}\Z")
 _SITE_HASH = re.compile(r"sha256:([0-9a-f]{64})\Z")
 _TEST_SOURCE = re.compile(r"(?:^|/)(?:[^/]+_test|[^/]+\.test)\.(?:js|mjs|ts|tsx)\Z")
 _SITE_RECEIPT_KEYS = {
-    "format", "captured_at", "trust_domain", "site", "active_version", "active_deployment", "live_bundle",
+    "format", "captured_at", "trust_domain", "site", "retained_prior_version",
+    "active_version", "active_deployment", "candidate_build", "archive_captures",
+    "live_bundle",
 }
 
 
@@ -114,11 +120,105 @@ def _timestamp(value: object) -> datetime:
     return parsed.astimezone(UTC)
 
 
+def _static_build_files(root: Path) -> dict[str, bytes]:
+    require(root.is_dir() and not root.is_symlink(), "candidate Site build is unavailable")
+    require(not any(path.is_symlink() for path in root.rglob("*")),
+            "candidate Site build contains a symlink")
+    files = {path.relative_to(root).as_posix(): path.read_bytes()
+             for path in sorted(root.rglob("*")) if path.is_file()}
+    require("index.html" in files and files, "candidate Site build is incomplete")
+    return files
+
+
+def _captured_archive(value: object, *, version_id: object, expected_hash: object) -> dict[str, bytes]:
+    require(isinstance(value, Mapping) and set(value) == {
+        "version_id", "capture_method", "content_base64",
+    }, "native Site archive capture is malformed")
+    require(
+        value.get("version_id") == version_id
+        and value.get("capture_method") == "owner_authenticated_native_connector"
+        and isinstance(value.get("content_base64"), str),
+        "native Site archive capture is not owner-authenticated",
+    )
+    try:
+        raw = base64.b64decode(value["content_base64"], validate=True)
+    except (ValueError, binascii.Error) as error:
+        raise RuntimeError("native Site archive capture is malformed") from error
+    require(
+        0 < len(raw) <= 100_000_000
+        and expected_hash == "sha256:" + hashlib.sha256(raw).hexdigest(),
+        "native Site archive capture digest is invalid",
+    )
+    try:
+        with tarfile.open(fileobj=io.BytesIO(raw), mode="r:*") as archive:
+            members = archive.getmembers()
+            require(
+                members and len(members) <= 10_000
+                and len({member.name for member in members}) == len(members)
+                and all(
+                    member.isfile() and path_is_safe(member.name)
+                    and member.size <= 10_000_000
+                    for member in members
+                )
+                and sum(member.size for member in members) <= 100_000_000,
+                "native Site archive capture contains unsafe members",
+            )
+            files = {
+                member.name: archive.extractfile(member).read()  # type: ignore[union-attr]
+                for member in members
+            }
+    except (tarfile.TarError, OSError) as error:
+        raise RuntimeError("native Site archive capture is unreadable") from error
+    return files
+
+
+def _captured_live_asset(value: object) -> bytes:
+    require(isinstance(value, str), "native Site live capture is malformed")
+    try:
+        raw = base64.b64decode(value, validate=True)
+    except (ValueError, binascii.Error) as error:
+        raise RuntimeError("native Site live capture is malformed") from error
+    require(0 < len(raw) <= 10_000_000, "native Site live capture exceeds its bound")
+    return raw
+
+
+def _validate_restorable_site_archive(files: Mapping[str, bytes], project_id: object) -> None:
+    """Require enough bounded source and the exact manifest to rebuild a prior Site."""
+    required_files = {".openai/hosting.json", "package.json", "package-lock.json"}
+    require(
+        required_files <= set(files)
+        and any(path.startswith("apps/web/") for path in files)
+        and any(path.startswith("packages/dashboard-contracts/") for path in files),
+        "native Site retained prior archive is not restorable",
+    )
+    try:
+        hosting = json.loads(files[".openai/hosting.json"])
+    except (json.JSONDecodeError, UnicodeDecodeError) as error:
+        raise RuntimeError("native Site retained prior archive is not restorable") from error
+    require(
+        hosting == {
+            "project_id": project_id,
+            "static": {
+                "directory": "dist",
+                "not_found_handling": "single-page-application",
+            },
+        },
+        "native Site retained prior archive is not restorable",
+    )
+
+
 def validate_native_site_receipt(receipt: Mapping[str, object], candidate_sha: str, project_ref: str,
-                                 repo_root: Path = ROOT, *, now: datetime | None = None) -> dict[str, object]:
-    """Bind a minimal native Sites receipt to unchanged candidate source."""
+                                 repo_root: Path = ROOT, *, now: datetime | None = None,
+                                 static_root: Path | None = None,
+                                 protected_build_receipt: Mapping[str, object] | None = None) -> dict[str, object]:
+    """Compare copied Site metadata/bytes without treating the copy as provenance.
+
+    This deterministic boundary can reject inconsistent content, but caller-supplied
+    JSON cannot prove that an authenticated Sites connector produced it. Only a
+    current root-agent connector observation may close the owner-Site evidence class.
+    """
     require(isinstance(receipt, Mapping) and set(receipt) == _SITE_RECEIPT_KEYS, "native Site receipt is malformed")
-    require(receipt.get("format") == "stocks-native-sites-attestation-v1"
+    require(receipt.get("format") == "stocks-native-sites-release-v3"
             and receipt.get("trust_domain") == "codex-native-sites-connector", "native Site receipt provenance is malformed")
     captured_at = _timestamp(receipt.get("captured_at"))
     observed_at = (now or datetime.now(UTC)).astimezone(UTC)
@@ -126,8 +226,11 @@ def validate_native_site_receipt(receipt: Mapping[str, object], candidate_sha: s
     require(0 <= age <= MAX_NATIVE_SITE_RECEIPT_AGE_SECONDS, "native Site observation is not fresh")
     require(PROJECT_REF.fullmatch(project_ref) is not None, "exact production project identity is required")
     site = receipt.get("site")
+    prior = receipt.get("retained_prior_version")
     version = receipt.get("active_version")
     deployment = receipt.get("active_deployment")
+    candidate_build = receipt.get("candidate_build")
+    captures = receipt.get("archive_captures")
     bundle = receipt.get("live_bundle")
     require(isinstance(site, Mapping) and set(site) == {
         "project_id", "status", "live_url", "latest_version_number", "current_user_role",
@@ -135,15 +238,22 @@ def validate_native_site_receipt(receipt: Mapping[str, object], candidate_sha: s
     }, "native Site receipt is malformed")
     require(isinstance(version, Mapping) and set(version) == {
         "id", "version_number", "source_commit_sha", "archive_format", "archive_content_hash",
-        "file_count", "size_bytes",
+        "archive_files", "archive_tree_sha256", "file_count", "size_bytes",
     }, "native Site version receipt is malformed")
     require(isinstance(deployment, Mapping) and set(deployment) == {
         "id", "version_id", "type", "status", "url",
     }, "native Site deployment receipt is malformed")
+    require(isinstance(prior, Mapping) and set(prior) == {
+        "id", "version_number", "deployment_id", "archive_content_hash", "rollback_eligible",
+    }, "native Site retained prior-version receipt is malformed")
+    require(isinstance(candidate_build, Mapping) and set(candidate_build) == {
+        "candidate_sha", "build_sha256", "files",
+    }, "native Site candidate-build receipt is malformed")
     require(isinstance(bundle, Mapping) and set(bundle) == {
-        "html_sha256", "script_assets", "supabase_project_ref", "dashboard_api_url",
-        "project_ref_present", "api_url_present",
+        "files", "supabase_project_ref", "dashboard_api_url",
     }, "native Site live-bundle receipt is malformed")
+    require(isinstance(captures, Mapping) and set(captures) == {"active", "prior"},
+            "native Site archive captures are malformed")
 
     try:
         hosting = json.loads(_git(repo_root, "show", f"{candidate_sha}:.openai/hosting.json"))
@@ -178,6 +288,16 @@ def validate_native_site_receipt(receipt: Mapping[str, object], candidate_sha: s
             and type(version.get("file_count")) is int and version["file_count"] > 0
             and type(version.get("size_bytes")) is int and 0 < version["size_bytes"] <= 100_000_000,
             "native Site archive receipt is malformed")
+    require(isinstance(prior.get("id"), str) and prior["id"]
+            and prior["id"] != version["id"]
+            and isinstance(prior.get("deployment_id"), str) and prior["deployment_id"]
+            and prior["deployment_id"] != deployment["id"]
+            and type(prior.get("version_number")) is int
+            and 0 < prior["version_number"] < version["version_number"]
+            and isinstance(prior.get("archive_content_hash"), str)
+            and _SITE_HASH.fullmatch(prior["archive_content_hash"]) is not None
+            and prior.get("rollback_eligible") is True,
+            "native Site retained prior version is unavailable for rollback")
     source_sha = version.get("source_commit_sha")
     require(isinstance(source_sha, str) and SHA.fullmatch(source_sha) is not None, "native Site source SHA is malformed")
     ancestor = subprocess.run(
@@ -185,31 +305,79 @@ def validate_native_site_receipt(receipt: Mapping[str, object], candidate_sha: s
         capture_output=True, check=False,
     )
     require(ancestor.returncode == 0, "native Site source is not an ancestor of the candidate")
+    active_archive_files = _captured_archive(
+        captures["active"], version_id=version["id"],
+        expected_hash=version["archive_content_hash"],
+    )
+    prior_archive_files = _captured_archive(
+        captures["prior"], version_id=prior["id"],
+        expected_hash=prior["archive_content_hash"],
+    )
+    _validate_restorable_site_archive(prior_archive_files, site.get("project_id"))
     source_files = _git_files_for_paths(repo_root, source_sha, SITE_SOURCE_PATHS)
     candidate_files = _git_files_for_paths(repo_root, candidate_sha, SITE_SOURCE_PATHS)
     require(all(path in source_files for path in (".openai/hosting.json", "package.json", "package-lock.json")),
             "complete Site source is unavailable")
     require(source_files == candidate_files, "Site source differs from the active native version")
+    archive_source_files = {
+        path: raw for path, raw in active_archive_files.items()
+        if any(path == allowed or path.startswith(allowed + "/") for allowed in SITE_SOURCE_PATHS)
+    }
+    archive_hashes = {
+        path: hashlib.sha256(raw).hexdigest() for path, raw in active_archive_files.items()
+    }
+    require(archive_source_files == source_files
+            and version.get("archive_files") == archive_hashes
+            and version.get("archive_tree_sha256") == tree_sha256(active_archive_files)
+            and version.get("file_count") == len(active_archive_files)
+            and version.get("size_bytes") == sum(len(raw) for raw in active_archive_files.values()),
+            "native Site downloaded archive differs from candidate source")
+    build_files = _static_build_files(static_root or repo_root / "dist")
+    build_hashes = {path: hashlib.sha256(raw).hexdigest() for path, raw in build_files.items()}
+    require(candidate_build.get("candidate_sha") == source_sha
+            and candidate_build.get("files") == build_hashes
+            and candidate_build.get("build_sha256") == tree_sha256(build_files)
+            and isinstance(protected_build_receipt, Mapping)
+            and protected_build_receipt.get("status") == "verified"
+            and protected_build_receipt.get("candidate_sha") == candidate_sha
+            and protected_build_receipt.get("files") == build_hashes
+            and protected_build_receipt.get("build_sha256") == tree_sha256(build_files),
+            "native Site candidate build differs from the protected build receipt")
     expected_api_url = f"https://{project_ref}.supabase.co/functions/v1/owner-dashboard-api"
-    assets = bundle.get("script_assets")
-    require(isinstance(bundle.get("html_sha256"), str) and _DIGEST.fullmatch(bundle["html_sha256"]) is not None
-            and isinstance(assets, list) and 1 <= len(assets) <= 20, "native Site live-bundle receipt is malformed")
-    asset_urls = set()
+    assets = bundle.get("files")
+    served_files = {path: raw for path, raw in build_files.items() if not path.startswith("_")}
+    require(isinstance(assets, list) and len(assets) == len(served_files),
+            "native Site live-bundle receipt is malformed")
+    asset_paths: set[str] = set()
+    live_bytes: dict[str, bytes] = {}
     for asset in assets:
-        require(isinstance(asset, Mapping) and set(asset) == {"url", "sha256", "bytes"}
-                and isinstance(asset.get("url"), str) and asset["url"].startswith(live_url + "/")
-                and asset["url"] not in asset_urls
-                and isinstance(asset.get("sha256"), str) and _DIGEST.fullmatch(asset["sha256"]) is not None
-                and type(asset.get("bytes")) is int and 0 < asset["bytes"] <= 10_000_000,
-                "native Site live-bundle asset receipt is malformed")
-        asset_urls.add(asset["url"])
+        path = asset.get("path") if isinstance(asset, Mapping) else None
+        expected_url = live_url + ("/" if path == "index.html" else "/" + str(path))
+        require(isinstance(asset, Mapping) and set(asset) == {
+                    "path", "url", "sha256", "bytes", "capture_method", "content_base64",
+                }
+                and isinstance(path, str) and path in served_files and path not in asset_paths
+                and asset.get("url") == expected_url
+                and asset.get("sha256") == hashlib.sha256(served_files[path]).hexdigest()
+                and asset.get("bytes") == len(served_files[path])
+                and asset.get("capture_method") == "owner_authenticated_native_connector"
+                and 0 < len(served_files[path]) <= 10_000_000,
+                "native Site live-bundle asset receipt differs from candidate build")
+        observed = _captured_live_asset(asset.get("content_base64"))
+        require(observed == served_files[path],
+                "native Site live bytes differ from candidate build")
+        asset_paths.add(path)
+        live_bytes[path] = observed
+    require(asset_paths == set(served_files), "native Site live-bundle coverage is incomplete")
+    combined = b"\n".join(live_bytes.values())
     require(bundle.get("supabase_project_ref") == project_ref
             and bundle.get("dashboard_api_url") == expected_api_url
-            and bundle.get("project_ref_present") is True
-            and bundle.get("api_url_present") is True, "native Site backend binding differs from protected Supabase")
+            and project_ref.encode() in combined
+            and expected_api_url.encode() in combined,
+            "native Site backend binding differs from protected Supabase")
     return {
-        "status": "verified",
-        "trust_domain": receipt["trust_domain"],
+        "status": "content_consistent",
+        "provenance": "offline_copy_only",
         "captured_at": receipt["captured_at"],
         "project_id": site["project_id"],
         "live_url": live_url,
@@ -224,8 +392,12 @@ def validate_native_site_receipt(receipt: Mapping[str, object], candidate_sha: s
         "source_sha256": tree_sha256(source_files),
         "archive_content_hash": version["archive_content_hash"],
         "archive_file_count": version["file_count"],
-        "live_html_sha256": bundle["html_sha256"],
-        "live_script_assets": list(assets),
+        "retained_prior_version_id": prior["id"],
+        "retained_prior_deployment_id": prior["deployment_id"],
+        "candidate_build_sha256": candidate_build["build_sha256"],
+        "live_files": [{
+            key: asset[key] for key in ("path", "url", "sha256", "bytes")
+        } for asset in assets],
         "supabase_project_ref": project_ref,
         "dashboard_api_url": expected_api_url,
     }
@@ -589,6 +761,7 @@ def _load_json(path: Path, label: str) -> Mapping[str, object]:
 
 
 def create_attestation(candidate_sha: str, project_ref: str, native_site_receipt: Mapping[str, object],
+                       protected_build_receipt: Mapping[str, object],
                        reconciliation_receipt: Mapping[str, object], reconciliation_provenance: Mapping[str, object],
                        *, repo_root: Path = ROOT, management_request=None,
                        adapter: object | None = None) -> dict[str, object]:
@@ -602,7 +775,10 @@ def create_attestation(candidate_sha: str, project_ref: str, native_site_receipt
     require(access_token and service_key and publishable_key and owner_email and database_url_sha256,
             "protected attestation configuration is incomplete")
     management = SupabaseManagementApi(access_token, request=management_request)
-    site = validate_native_site_receipt(native_site_receipt, candidate_sha, project_ref, repo_root)
+    site = validate_native_site_receipt(
+        native_site_receipt, candidate_sha, project_ref, repo_root,
+        protected_build_receipt=protected_build_receipt,
+    )
     inventory = inspect_production_schema(management, project_ref, candidate_sha)
     schema = validate_reconciliation_continuity(
         inventory, reconciliation_receipt, project_ref, candidate_sha, repo_root,
@@ -676,34 +852,17 @@ def main() -> int:
     parser.add_argument("--candidate-sha", required=True)
     parser.add_argument("--production-project-ref", required=True)
     parser.add_argument("--native-site-receipt", type=Path, required=True)
+    parser.add_argument("--protected-build-receipt", type=Path, required=True)
     parser.add_argument("--reconciliation-receipt", type=Path, required=True)
     parser.add_argument("--reconciliation-workflow-run-id", type=int, required=True)
     parser.add_argument("--reconciliation-artifact-id", type=int, required=True)
     parser.add_argument("--reconciliation-artifact-digest", required=True)
     parser.add_argument("--output", type=Path, required=True)
-    arguments = parser.parse_args()
-    output = arguments.output.resolve()
-    if output.name != "existing-v1-runtime-attestation.json" or not output.parent.is_dir():
-        raise SystemExit("output must be an existing directory ending in existing-v1-runtime-attestation.json")
-    receipt = create_attestation(
-        arguments.candidate_sha,
-        arguments.production_project_ref,
-        _load_json(arguments.native_site_receipt, "native Site receipt"),
-        _load_json(arguments.reconciliation_receipt, "schema reconciliation receipt"),
-        {
-            "workflow_run_id": arguments.reconciliation_workflow_run_id,
-            "artifact_id": arguments.reconciliation_artifact_id,
-            "artifact_digest": arguments.reconciliation_artifact_digest,
-        },
+    parser.parse_args()
+    raise SystemExit(
+        "the one-time existing-runtime attestation is retired; use the current "
+        "protected release and direct native Sites connector sequence"
     )
-    output.write_text(canonical_json(receipt) + "\n", encoding="utf-8")
-    print(canonical_json({
-        "status": "verified",
-        "candidate_sha": arguments.candidate_sha,
-        "receipt_sha256": receipt["receipt_sha256"],
-        "mutation_counts": receipt["mutation_counts"],
-    }))
-    return 0
 
 
 if __name__ == "__main__":

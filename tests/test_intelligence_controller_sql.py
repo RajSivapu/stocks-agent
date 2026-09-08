@@ -2,6 +2,7 @@
 
 Never reads credentials or connects to an existing server.
 """
+import copy
 import hashlib
 import json
 from datetime import datetime, timedelta
@@ -16,6 +17,41 @@ from psycopg.types.json import Jsonb
 import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
+
+
+def protected_release_reader_policy_state(connection, table):
+    return connection.execute(
+        """SELECT has_table_privilege('stock_agent_release_reader_runtime',
+                   format('public.%%I', c.relname),'SELECT') AS readable,
+                  NOT has_table_privilege('stock_agent_release_reader_runtime',
+                   format('public.%%I', c.relname),'INSERT,UPDATE,DELETE,TRUNCATE,TRIGGER') AS read_only,
+                  c.relrowsecurity AS rls_enabled,
+                  NOT pg_has_role('stock_agent_release_reader_runtime',c.relowner,'MEMBER') AS reader_is_not_owner,
+                  EXISTS (
+                    SELECT 1 FROM pg_catalog.pg_policy p
+                    WHERE p.polrelid=c.oid AND p.polcmd IN ('r','*') AND p.polpermissive
+                      AND pg_get_expr(p.polqual,p.polrelid)='true'
+                      AND EXISTS (
+                        SELECT 1 FROM unnest(p.polroles) AS role_oid
+                        WHERE role_oid=0 OR pg_has_role(
+                          'stock_agent_release_reader_runtime',role_oid,'MEMBER')
+                      )
+                  ) AS unrestricted_select,
+                  NOT EXISTS (
+                    SELECT 1 FROM pg_catalog.pg_policy p
+                    WHERE p.polrelid=c.oid AND p.polcmd IN ('r','*') AND NOT p.polpermissive
+                      AND pg_get_expr(p.polqual,p.polrelid) IS DISTINCT FROM 'true'
+                      AND EXISTS (
+                        SELECT 1 FROM unnest(p.polroles) AS role_oid
+                        WHERE role_oid=0 OR pg_has_role(
+                          'stock_agent_release_reader_runtime',role_oid,'MEMBER')
+                      )
+                  ) AS no_restrictive_filter
+           FROM pg_catalog.pg_class c
+           JOIN pg_catalog.pg_namespace n ON n.oid=c.relnamespace
+           WHERE n.nspname='public' AND c.relname=%s""",
+        (table,),
+    ).fetchone()
 
 
 @pytest.fixture(scope="module")
@@ -57,7 +93,7 @@ def databases():
             subprocess.run([binaries["pg_ctl"], "-D", str(root / "db"), "-m", "immediate", "-w", "stop"], check=True, capture_output=True)
 
 
-def prepared_run(connection, *, provider="gdelt", cache=False, checkpoint=True, run_id=None, phase="intraday", market_date=None):
+def prepared_run(connection, *, provider="gdelt", cache=False, checkpoint=True, run_id=None, phase="intraday", market_date=None, returned_count=0, accepted_count=0):
     generated_run, reservation, original, hit, completion = [str(uuid.uuid4()) for _ in range(5)]
     run = str(run_id or generated_run)
     now = connection.execute("SELECT statement_timestamp()").fetchone()[0]
@@ -72,7 +108,8 @@ def prepared_run(connection, *, provider="gdelt", cache=False, checkpoint=True, 
     receipt = {"id": hit if cache else original, "reservation_id": reservation, "status": "cache_hit" if cache else "succeeded",
         "cache_key": "a" * 64, "requested_window": {"start": window["start"], "end": window["end"]},
         "retrieved_at": now.isoformat(), "expires_at": (now + timedelta(minutes=15)).isoformat(),
-        "request_cost": 0 if cache else 1, "upstream_remaining": None, "returned_count": 0, "accepted_count": 0,
+        "request_cost": 0 if cache else 1, "upstream_remaining": None,
+        "returned_count": returned_count, "accepted_count": accepted_count,
         "duplicate_count": 0, "dropped_count": 0, "error": None, "response_hash": "b" * 64,
         "cache_predecessor_receipt_id": original if cache else None}
     checkpoint_row = dict(receipt, provider=provider, status="succeeded", request_cost=1, source_receipt_id=original,
@@ -86,6 +123,21 @@ def prepared_run(connection, *, provider="gdelt", cache=False, checkpoint=True, 
         "packet": {"id": str(uuid.uuid4()), "candidate_count": 0, "evidence_count": 0, "packet": packet,
                    "packet_hash": hashlib.sha256(canonical.encode()).hexdigest()}, "error": None}
     return run, completion, original, payload
+
+
+@pytest.mark.parametrize("kind", ["fresh", "ordered"])
+def test_complete_schema_has_effective_release_reader_policy_for_all_55_tables(databases, kind):
+    from lib.release_baseline import PROTECTED_RELEASE_READ_TABLES
+
+    states = {
+        table: protected_release_reader_policy_state(databases[kind], table)
+        for table in PROTECTED_RELEASE_READ_TABLES
+    }
+    assert len(states) == 55
+    assert all(state == (True, True, True, True, True, True) for state in states.values()), {
+        table: state for table, state in states.items()
+        if state != (True, True, True, True, True, True)
+    }
 
 
 @pytest.mark.parametrize("kind", ["fresh", "ordered"])
@@ -153,15 +205,107 @@ def test_exact_key_recorder_preserves_actual_cost_and_distinct_lineage(databases
     assert recovered["receipt"]["completion_id"] == completion
 
 
+def _official_completion_item(payload, *, request_url, canonical_url):
+    canonical_content = json.dumps({"title": "Defense industrial award"}, separators=(",", ":"))
+    return {
+        "id": str(uuid.uuid4()), "run_item_id": str(uuid.uuid4()),
+        "receipt_id": payload["receipts"][0]["id"], "provider": "dod",
+        "upstream_item_id": "dod-release-1", "canonical_url": canonical_url,
+        "request_url": request_url, "published_at": None,
+        "retrieved_at": payload["receipts"][0]["retrieved_at"],
+        "effective_at": None, "reporting_at": None,
+        "entity_ids": [], "security_ids": [], "discovery_status": "no_event",
+        "title": "Defense industrial award", "normalized_text": "Official release.",
+        "canonical_content": canonical_content,
+        "content_hash": hashlib.sha256(canonical_content.encode()).hexdigest(),
+        "metadata": {}, "disposition": "accepted", "drop_reason": None,
+    }
+
+
+@pytest.mark.parametrize("kind", ["fresh", "ordered"])
+@pytest.mark.parametrize(("host", "content_type", "item_path"), [
+    ("www.war.gov", 9, "/News/Releases/Release/Article/1/award/"),
+    ("www.defense.gov", 1, "/News/News-Stories/Article/1/update/"),
+])
+def test_protected_completion_accepts_only_reviewed_defense_feed_and_item_paths(
+    databases, kind, host, content_type, item_path,
+):
+    db = databases[kind]
+    run, completion, _original, payload = prepared_run(
+        db, provider="dod", phase="pre-market", returned_count=1, accepted_count=1,
+    )
+    request_url = (
+        f"https://{host}/DesktopModules/ArticleCS/RSS.ashx"
+        f"?ContentType={content_type}&Site=945&max=10"
+    )
+    payload["items"] = [_official_completion_item(
+        payload, request_url=request_url, canonical_url=f"https://{host}{item_path}",
+    )]
+    result = db.execute(
+        "SELECT public.record_market_intelligence(%s,%s,%s)",
+        (run, completion, Jsonb(payload)),
+    ).fetchone()[0]
+    assert result["counts"]["source_items"] == 1
+
+
+@pytest.mark.parametrize("bad_url", [
+    "https://www.war.gov/search/?ContentType=9&Site=945&max=10",
+    "https://www.war.gov/DesktopModules/ArticleCS/RSS.ashx?ContentType=9&Site=945&max=100",
+])
+def test_protected_completion_rejects_unreviewed_defense_request_paths(databases, bad_url):
+    db = databases["fresh"]
+    run, completion, _original, payload = prepared_run(
+        db, provider="dod", phase="pre-market", returned_count=1, accepted_count=1,
+    )
+    payload["items"] = [_official_completion_item(
+        payload, request_url=bad_url,
+        canonical_url="https://www.war.gov/News/Releases/Release/Article/1/award/",
+    )]
+    with pytest.raises(psycopg.errors.InvalidParameterValue):
+        db.execute(
+            "SELECT public.record_market_intelligence(%s,%s,%s)",
+            (run, completion, Jsonb(payload)),
+        )
+
+
 def test_ordered_and_fresh_final_function_contracts_are_identical(databases):
-    names = ["record_market_intelligence", "record_market_intelligence_provider_v2", "record_market_intelligence_legacy",
-             "checkpoint_market_intelligence_collection", "read_market_intelligence_completion", "refresh_market_intelligence_context"]
+    names = [
+        "record_market_intelligence", "record_market_intelligence_v2_completion",
+        "record_market_intelligence_v4_internal", "record_market_intelligence_provider_v2",
+        "record_market_intelligence_legacy", "checkpoint_market_intelligence_collection",
+        "read_market_intelligence_completion", "refresh_market_intelligence_context",
+    ]
     def definitions(db):
         rows = db.execute("SELECT proname,pg_get_functiondef(oid) FROM pg_proc WHERE pronamespace='public'::regnamespace AND proname=ANY(%s) ORDER BY proname", (names,)).fetchall()
         assert {name for name, _ in rows} == set(names)
         return rows
     assert definitions(databases["fresh"]) == definitions(databases["ordered"])
     for db in databases.values():
+        function_definitions = dict(definitions(db))
+        for name in (
+            "record_market_intelligence", "record_market_intelligence_v2_completion",
+            "record_market_intelligence_v4_internal", "record_market_intelligence_legacy",
+        ):
+            assert "SECURITY DEFINER" in function_definitions[name]
+            assert "SET search_path TO 'pg_catalog'" in function_definitions[name]
+        assert db.execute(
+            "SELECT has_function_privilege('service_role',"
+            "'public.record_market_intelligence(uuid,uuid,jsonb)','EXECUTE')"
+        ).fetchone()[0]
+        assert not db.execute(
+            "SELECT has_function_privilege('authenticated',"
+            "'public.record_market_intelligence(uuid,uuid,jsonb)','EXECUTE')"
+        ).fetchone()[0]
+        for signature in (
+            "public.record_market_intelligence_v2_completion(uuid,uuid,jsonb)",
+            "public.record_market_intelligence_v4_internal(uuid,uuid,jsonb)",
+            "public.record_market_intelligence_legacy(uuid,uuid,jsonb)",
+            "public.promote_market_evidence_packet_v2()",
+        ):
+            assert not db.execute(
+                "SELECT has_function_privilege('service_role',%s,'EXECUTE')",
+                (signature,),
+            ).fetchone()[0]
         for signature in ("read_market_evidence_packet(uuid,uuid)", "read_market_report_decisions(uuid,uuid,jsonb)",
                           "record_market_report(uuid,text,jsonb)", "record_market_learning(uuid,jsonb)"):
             assert db.execute("SELECT has_function_privilege('service_role',%s,'EXECUTE')", (signature,)).fetchone()[0]
@@ -177,7 +321,9 @@ def test_protected_context_producer_uses_persisted_quote_receipts(databases, kin
     r = payload["receipts"][0]
     now = r["retrieved_at"]
     input_value = {"ticker": "TEST", "reservation_id": r["reservation_id"], "source_receipt_id": original, "cache_key": r["cache_key"]}
-    assert db.execute("SELECT public.claim_market_intelligence_quote(%s,%s)", (run, Jsonb(input_value))).fetchone()[0]["status"] == "claimed"
+    # Exercise the legacy quote receipt mechanics directly; the public Task 6
+    # wrapper additionally requires a frozen selected descriptor.
+    assert db.execute("SELECT public.claim_market_intelligence_quote_v1_internal(%s,%s)", (run, Jsonb(input_value))).fetchone()[0]["status"] == "claimed"
     quote = {"ticker": "TEST", "currency": "USD", "price": "100", "as_of": now,
              "instrument_type": "EQUITY", "average_daily_dollar_volume": "5000000", "response_hash": r["response_hash"]}
     cr = dict(r, provider="yahoo", requested_limit=20, observed_at=now, error_code=None, source_receipt_id=original)
@@ -192,6 +338,14 @@ def test_protected_context_producer_uses_persisted_quote_receipts(databases, kin
     assert context["holding_market_values"] == {"TEST": "200"}
     assert context["liquidity_by_ticker"] == {"TEST": "0.500000"}
     assert context["overlap_by_ticker"] == {"TEST": "1.000000"}
+    assert context["valuation_status"] == "unavailable"
+    assert context["valuation_state_by_ticker"] == {}
+    assert context["valuation_provenance_by_ticker"] == {}
+    assert context["liquidity_state_by_ticker"] == {"TEST": "passed"}
+    assert context["liquidity_provenance_by_ticker"]["TEST"]["source"] == "market_intelligence_quote_attempts"
+    assert context["overlap_state_by_ticker"] == {"TEST": "passed"}
+    assert context["overlap_provenance_by_ticker"]["TEST"]["source"] == "holdings_and_verified_quotes"
+    assert context["current_reference_state"] == "unavailable"
     assert context["quote_receipt_ids"] == [checkpoint["receipt"]["source_receipt_id"]]
     db.execute("SET ROLE authenticated")
     try:
@@ -216,8 +370,8 @@ def test_pending_server_quote_cannot_be_erased_by_restart_or_terminal_payload(da
     run, completion, original, payload = prepared_run(db, provider="yahoo", checkpoint=False)
     r = payload["receipts"][0]
     input_value = {"ticker": "TEST", "reservation_id": r["reservation_id"], "source_receipt_id": original, "cache_key": r["cache_key"]}
-    assert db.execute("SELECT public.claim_market_intelligence_quote(%s,%s)", (run, Jsonb(input_value))).fetchone()[0]["status"] == "claimed"
-    assert db.execute("SELECT public.claim_market_intelligence_quote(%s,%s)", (run, Jsonb(input_value))).fetchone()[0]["status"] == "uncertain"
+    assert db.execute("SELECT public.claim_market_intelligence_quote_v1_internal(%s,%s)", (run, Jsonb(input_value))).fetchone()[0]["status"] == "claimed"
+    assert db.execute("SELECT public.claim_market_intelligence_quote_v1_internal(%s,%s)", (run, Jsonb(input_value))).fetchone()[0]["status"] == "uncertain"
     window = db.execute("SELECT request_window FROM market_intelligence_runs WHERE id=%s", (run,)).fetchone()[0]
     with pytest.raises(psycopg.errors.ObjectNotInPrerequisiteState, match="uncertain"):
         db.execute("SELECT public.start_market_intelligence_run(%s,'intraday',%s,1,%s,%s)", (run, window["market_date"], Jsonb({"reservations": []}), Jsonb(window)))
@@ -513,6 +667,325 @@ def test_independent_worker_hydrates_successful_checkpoint_with_distinct_receipt
     assert db.execute("SELECT sum(request_cost) FROM market_source_receipts WHERE run_id=%s", (run_id,)).fetchone()[0] == 1
 
 
+def test_normal_capability_producer_round_trips_through_protected_read_only_verifier(databases):
+    """Exercise actual producer shapes through protected RPCs and the release reader."""
+    from dataclasses import replace
+    from datetime import timezone
+    from types import MappingProxyType, SimpleNamespace
+    from zoneinfo import ZoneInfo
+
+    import scripts.collect_market_intelligence as collector
+    from lib.config import load_settings
+    from lib.intelligence.normalize import normalize_item
+    from lib.intelligence.pipeline import IntelligencePipeline, PipelineRequest
+    from lib.intelligence.planner import build_discovery_plan, load_source_capabilities
+    from lib.intelligence.policy import load_intelligence_policy
+    from lib.intelligence.providers import CollectionResult, RequestReceipt, SourceItem
+    from scripts.protected_evidence import PostgresReadOnlySource
+    from scripts.verify_personal_stock_agent_v1 import verify_discovery_capability
+
+    db = databases["fresh"]
+    now = db.execute("SELECT statement_timestamp()").fetchone()[0].astimezone(timezone.utc)
+    sec_source = json.dumps({
+        "0": {
+            "cik_str": 1001,
+            "ticker": "ARCM",
+            "title": "Arc Magnetics Corporation",
+        },
+    }, separators=(",", ":")).encode()
+    canonical_content = json.dumps({
+        "summary": "Niron Research LLC received funding for permanent magnet manufacturing.",
+        "title": "Private magnet recipient expands permanent magnet capacity",
+    }, sort_keys=True, separators=(",", ":"))
+    source_item = normalize_item(SourceItem(
+        provider="gdelt", upstream_item_id="shared-private-magnet-story",
+        source_url="https://publisher.example/private-magnet-story",
+        title="Private magnet recipient expands permanent magnet capacity",
+        normalized_text=(
+            "Niron Research LLC received funding for permanent magnet manufacturing."
+        ),
+        canonical_content=canonical_content,
+        content_hash=hashlib.sha256(canonical_content.encode()).hexdigest(),
+        published_at=now, effective_at=None, retrieved_at=now, authority="radar",
+        metadata=MappingProxyType({
+            "theme_id": "critical_minerals_magnets",
+            "event_type": "awarded_funding",
+            "role": "magnet_manufacturing",
+            "organization_names": ["Niron Research LLC"],
+            "publisher_id": "acceptance-publisher",
+            "materiality": "0.7", "confidence": "0.7",
+        }),
+        request_url="https://api.gdeltproject.org/api/v2/doc/doc?query=magnet",
+    ))
+
+    class Gateway:
+        def call(self, operation, payload, *, run_id=None, request_id=None, **_kwargs):
+            if operation == "read_intelligence_completion":
+                saved = db.execute(
+                    "SELECT public.read_market_intelligence_completion(%s,%s)",
+                    (run_id, request_id),
+                ).fetchone()[0]
+                return {"completion": saved}
+            if operation == "start_intelligence_run":
+                return db.execute(
+                    "SELECT public.start_market_intelligence_run(%s,%s,%s,%s,%s,%s)",
+                    (request_id, payload["phase"], payload["market_date"],
+                     payload["policy_version"], Jsonb(payload["reservation_plan"]),
+                     Jsonb(payload["request_window"])),
+                ).fetchone()[0]
+            if operation == "read_discovery_context":
+                return db.execute(
+                    "SELECT public.read_market_discovery_context(%s,%s)",
+                    (run_id, payload["limit"]),
+                ).fetchone()[0]
+            if operation == "checkpoint_discovery_stage":
+                return db.execute(
+                    "SELECT public.checkpoint_market_discovery_stage(%s,%s)",
+                    (run_id, Jsonb(payload)),
+                ).fetchone()[0]
+            if operation == "checkpoint_intelligence_collection":
+                return db.execute(
+                    "SELECT public.checkpoint_market_intelligence_collection(%s,%s)",
+                    (run_id, Jsonb(payload)),
+                ).fetchone()[0]
+            if operation == "read_intelligence_context":
+                return {"context": {
+                    "holdings": [],
+                    "intelligence_collection_context": db.execute(
+                        "SELECT public.refresh_market_intelligence_context(%s)",
+                        (run_id,),
+                    ).fetchone()[0],
+                }}
+            if operation == "record_intelligence":
+                return db.execute(
+                    "SELECT public.record_market_intelligence(%s,%s,%s)",
+                    (run_id, request_id, Jsonb(payload)),
+                ).fetchone()[0]
+            if operation == "record_theme_episode_revision_v2":
+                return db.execute(
+                    "SELECT public.record_theme_episode_revision_v2(%s,%s)",
+                    (run_id, Jsonb(payload)),
+                ).fetchone()[0]
+            if operation in {
+                "begin_discovery_reference", "record_discovery_reference_chunk",
+                "finalize_discovery_reference", "pin_discovery_reference",
+                "read_discovery_reference",
+            }:
+                envelope = {
+                    "dry_run": False, "operation": operation, "payload": payload,
+                    "request_id": request_id, "run_id": run_id, "schema_version": 1,
+                }
+                encoded = json.dumps(
+                    envelope, ensure_ascii=False, separators=(",", ":"), sort_keys=True,
+                ).encode()
+                function = {
+                    "begin_discovery_reference": "begin_market_discovery_reference",
+                    "record_discovery_reference_chunk": (
+                        "record_market_discovery_reference_chunk"
+                    ),
+                    "finalize_discovery_reference": "finalize_market_discovery_reference",
+                    "pin_discovery_reference": "pin_market_discovery_reference",
+                    "read_discovery_reference": "read_market_discovery_reference",
+                }[operation]
+                return db.execute(
+                    f"SELECT public.{function}(%s,%s,%s,%s,%s)",
+                    (run_id, Jsonb(payload), request_id, len(encoded),
+                     hashlib.sha256(encoded).hexdigest()),
+                ).fetchone()[0]
+            raise AssertionError(operation)
+
+    class SecHttp:
+        def get(self, _request):
+            return SimpleNamespace(body=sec_source, retrieved_at=now, observed_at=now)
+
+    class Adapter:
+        provider = "gdelt"
+
+        def __init__(self, *, empty=False, request_tag="first"):
+            self.empty = empty
+            self.request_tag = request_tag
+            self.transport_attempts = 0
+
+        def collect(self, query, *, source_receipt_id=None, before_transport_attempt=None):
+            self.transport_attempts += 1
+            window = {"start": query.start.isoformat(), "end": query.end.isoformat()}
+            if before_transport_attempt is not None:
+                before_transport_attempt(RequestReceipt(
+                    provider="gdelt", reservation_id="pending", status="failed",
+                    cache_key="0" * 64, requested_window=window,
+                    requested_limit=query.limit, retrieved_at=now, observed_at=None,
+                    expires_at=None, request_cost=1, upstream_remaining=None,
+                    returned_count=0, accepted_count=0, duplicate_count=0,
+                    dropped_count=0, response_hash=None,
+                    error_code="TRANSPORT_OUTCOME_UNCERTAIN",
+                    source_receipt_id=source_receipt_id,
+                ))
+            items = () if self.empty else (replace(
+                source_item,
+                request_url=(
+                    "https://api.gdeltproject.org/api/v2/doc/doc?query=magnet"
+                    f"&request={self.request_tag}"
+                ),
+            ),)
+            response_hash = hashlib.sha256(
+                ("empty" if self.empty else canonical_content).encode()
+            ).hexdigest()
+            return CollectionResult(items, RequestReceipt(
+                provider="gdelt", reservation_id="pending", status="succeeded",
+                cache_key="0" * 64, requested_window=window,
+                requested_limit=query.limit, retrieved_at=now, observed_at=now,
+                expires_at=now + timedelta(minutes=15), request_cost=1,
+                upstream_remaining=None, returned_count=len(items),
+                accepted_count=len(items), duplicate_count=0, dropped_count=0,
+                response_hash=response_hash, source_receipt_id=source_receipt_id,
+            ), query.limit)
+
+    policy = load_intelligence_policy(load_settings())
+    capabilities = load_source_capabilities()
+    required_ids = tuple(policy.required_baseline_capability_ids)
+    gateway = Gateway()
+
+    def build_plan(run_id):
+        window = {
+            "start": (now - timedelta(hours=16)).isoformat(),
+            "end": now.isoformat(),
+        }
+        full = build_discovery_plan(
+            policy, capabilities, phase="pre-market", run_id=run_id,
+            reference_version="sec:unresolved", requested_window=window,
+            available_credentials=frozenset(), required_holding_quote_requests=0,
+            last_completed_scans={},
+        )
+        tasks = tuple(task for task in full.tasks if task.capability_id in required_ids)
+        return replace(
+            full, tasks=tasks,
+            capabilities=MappingProxyType({key: capabilities[key] for key in required_ids}),
+            provider_request_totals=MappingProxyType({
+                "sec_edgar": 1,
+                "gdelt": sum(task.provider == "gdelt" for task in tasks),
+            }),
+            reserved_adaptive_requests=2,
+        )
+
+    def seed_run(run_id):
+        db.execute("INSERT INTO analysis_runs(id,kind) VALUES(%s,'pre-market')", (run_id,))
+
+    snapshots = []
+
+    def fresh_reference(run_id, _request):
+        return collector._persist_reference_stage(
+            gateway, run_id, now, client=SecHttp(), monotonic=lambda: 0.0,
+            sec_contact="owner@example.com", snapshot_sink=snapshots.append,
+        )
+
+    def read_only_rows(run_id):
+        with psycopg.connect(db.info.dsn, row_factory=__import__(
+            "psycopg.rows", fromlist=["dict_row"]
+        ).dict_row) as reader:
+            reader.execute("BEGIN TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY")
+            reader.execute("SET ROLE stock_agent_release_reader")
+            source = object.__new__(PostgresReadOnlySource)
+            source.connection = reader
+            return source.release_rows(run_id)
+
+    first_run = str(uuid.uuid4())
+    seed_run(first_run)
+    first_adapter = Adapter()
+    first_plan = build_plan(first_run)
+    first = IntelligencePipeline(
+        gateway, [first_adapter], context={}, discovery_plan=first_plan,
+        reference_stage=fresh_reference,
+        reference_snapshot_loader=lambda _run_id: snapshots[-1],
+    ).run(PipelineRequest(
+        "pre-market", now.astimezone(ZoneInfo("America/Chicago")).date(), now,
+        request_id=first_run,
+    ))
+    first_rows = read_only_rows(first_run)
+    assert verify_discovery_capability(first_rows).ok is True
+    assert first_rows["packets"][0]["packet"]["coverage"]["source_plan"][
+        "reference_version"
+    ] == "sec:unresolved"
+    assert len(first_rows["packets"][0]["packet"]["coverage"][
+        "duplicate_references"
+    ]) == 10
+    assert {row["research_state"] for row in first_rows["packets"][0]["packet"][
+        "research_candidates"
+    ]} == {"unresolved"}
+    completion = first_rows["completions"][0]
+    replay = db.execute(
+        "SELECT public.record_market_intelligence(%s,%s,%s)",
+        (first_run, completion["completion_id"], Jsonb(completion["payload"])),
+    ).fetchone()[0]
+    assert replay["duplicate"] is True
+    assert replay["packet_hash"] == first.packet_hash
+    conflicting = copy.deepcopy(completion["payload"])
+    conflicting["coverage"]["mode"] = "forged"
+    with pytest.raises(
+        psycopg.errors.InvalidParameterValue,
+        match="intelligence completion idempotency mismatch",
+    ):
+        db.execute(
+            "SELECT public.record_market_intelligence(%s,%s,%s)",
+            (first_run, completion["completion_id"], Jsonb(conflicting)),
+        )
+
+    attempts = first_adapter.transport_attempts
+    restarted = IntelligencePipeline(
+        gateway, [Adapter()], context={}, discovery_plan=first_plan,
+        reference_stage=lambda *_args: (_ for _ in ()).throw(
+            AssertionError("restart must return before reference or collection")
+        ),
+    ).run(PipelineRequest(
+        "pre-market", now.astimezone(ZoneInfo("America/Chicago")).date(), now,
+        request_id=first_run,
+    ))
+    assert restarted.packet_hash == first.packet_hash
+    assert first_adapter.transport_attempts == attempts
+
+    second_run = str(uuid.uuid4())
+    seed_run(second_run)
+    IntelligencePipeline(
+        gateway, [Adapter(request_tag="second")], context={"theme_memory": {
+            "active_theme_heads": first_rows["theme_episode_revisions_v2"],
+        }}, discovery_plan=build_plan(second_run),
+        reference_stage=fresh_reference,
+        reference_snapshot_loader=lambda _run_id: snapshots[-1],
+    ).run(PipelineRequest(
+        "pre-market", now.astimezone(ZoneInfo("America/Chicago")).date(), now,
+        request_id=second_run,
+    ))
+    second_rows = read_only_rows(second_run)
+    assert verify_discovery_capability(second_rows).ok is True
+    assert second_rows["source_items"][0]["source_receipt_id"] in {
+        row["id"] for row in first_rows["source_receipts"]
+    }
+    assert second_rows["intelligence_run_items"][0]["source_receipt_id"] in {
+        row["id"] for row in second_rows["completions"][0]["payload"]["receipts"]
+    }
+    assert first_rows["run_source_item_provenance"][0]["request_url"] \
+        != second_rows["run_source_item_provenance"][0]["request_url"]
+    assert second_rows["source_item_provenance"][0]["request_url"] \
+        == first_rows["run_source_item_provenance"][0]["request_url"]
+
+    empty_run = str(uuid.uuid4())
+    seed_run(empty_run)
+    IntelligencePipeline(
+        gateway, [Adapter(empty=True)], context={}, discovery_plan=build_plan(empty_run),
+        reference_stage=fresh_reference,
+        reference_snapshot_loader=lambda _run_id: snapshots[-1],
+    ).run(PipelineRequest(
+        "pre-market", now.astimezone(ZoneInfo("America/Chicago")).date(), now,
+        request_id=empty_run,
+    ))
+    empty_rows = read_only_rows(empty_run)
+    assert verify_discovery_capability(empty_rows).ok is True
+    assert not empty_rows["source_items"]
+    assert all(
+        row["accepted_count"] == 0 for row in empty_rows["source_receipts"]
+        if row["run_id"] == empty_run
+    )
+
+
 @pytest.mark.parametrize("kind", ["fresh", "ordered"])
 def test_scheduled_lifecycle_uses_one_slot_run_binds_retries_and_keeps_prior_overdue_slots(databases, kind):
     """Exercise the installed final RPCs without an external database or scheduler."""
@@ -720,7 +1193,7 @@ def test_reconciled_cash_snapshot_is_explicit_fresh_and_invalidated_by_ledger_mu
         "SELECT public.read_reconciled_cash_snapshot(%s)", (now,)
     ).fetchone()[0] is None
     with pytest.raises(
-        psycopg.errors.ObjectNotInPrerequisiteState, match="CASH_UNAVAILABLE"
+        psycopg.errors.ObjectNotInPrerequisiteState, match="ACTION_LANE_REQUIRED"
     ):
         db.execute(
             "SELECT public.apply_market_decision_bundle_with_cash_snapshot("

@@ -34,14 +34,25 @@ const DISPOSITIONS = [
   "near_duplicate",
   "dropped",
 ] as const;
-const DISCOVERY_STATUSES = ["qualified", "no_event", "insufficient_coverage"] as const;
+const DISCOVERY_STATUSES = [
+  "qualified",
+  "no_event",
+  "insufficient_coverage",
+] as const;
 const PROVIDER_HOSTS: Readonly<Record<string, readonly string[]>> = {
-  gdelt: ["api.gdeltproject.org"], alpha_vantage: ["www.alphavantage.co"],
-  finnhub: ["finnhub.io"], yahoo: ["query1.finance.yahoo.com"],
-  sec_edgar: ["www.sec.gov", "data.sec.gov"], federal_register: ["www.federalregister.gov"],
-  white_house: ["www.whitehouse.gov"], doe: ["www.energy.gov"], dod: ["www.defense.gov"],
-  eia: ["api.eia.gov", "www.eia.gov"], fred: ["api.stlouisfed.org", "fred.stlouisfed.org"],
-  bls: ["api.bls.gov", "www.bls.gov"], bea: ["apps.bea.gov", "www.bea.gov"],
+  gdelt: ["api.gdeltproject.org"],
+  alpha_vantage: ["www.alphavantage.co"],
+  finnhub: ["finnhub.io"],
+  yahoo: ["query1.finance.yahoo.com"],
+  sec_edgar: ["www.sec.gov", "data.sec.gov"],
+  federal_register: ["www.federalregister.gov"],
+  white_house: ["www.whitehouse.gov"],
+  doe: ["www.energy.gov"],
+  dod: ["www.defense.gov", "www.war.gov"],
+  eia: ["api.eia.gov", "www.eia.gov"],
+  fred: ["api.stlouisfed.org", "fred.stlouisfed.org"],
+  bls: ["api.bls.gov", "www.bls.gov"],
+  bea: ["apps.bea.gov", "www.bea.gov"],
   social: ["www.reddit.com", "oauth.reddit.com"],
 };
 
@@ -90,6 +101,104 @@ export interface IntelligenceRecordReceipt {
   packet_id: string | null;
   packet_hash: string | null;
   duplicate: boolean;
+}
+
+export type DiscoveryQueryKind =
+  | "feed"
+  | "theme_search"
+  | "issuer_submissions"
+  | "filing_document"
+  | "series"
+  | "screener"
+  | "quote"
+  | "universe";
+
+export interface DiscoveryStageTask {
+  id: string;
+  stage: "reference" | "signals" | "resolve" | "enrich" | "screen" | "quote";
+  provider: typeof INTELLIGENCE_PROVIDERS[number];
+  capability_id: string;
+  query_kind: DiscoveryQueryKind;
+  query_hash: string;
+  dependency_ids: string[];
+  requested_window: Record<string, string>;
+  state:
+    | "planned"
+    | "attempting"
+    | "succeeded"
+    | "failed"
+    | "deferred"
+    | "uncertain";
+  attempt_count: number;
+  request_budget: number;
+  result: JsonObject;
+}
+
+export interface DiscoveryReferencePayload {
+  manifest: JsonObject;
+  security_revisions: JsonObject[];
+}
+
+export interface ReferenceBeginPayload {
+  manifest: JsonObject;
+  capability_id: string;
+  chunk_count: number;
+  security_count: number;
+  root_hash: string;
+  predecessor_manifest_id: string | null;
+}
+
+export interface ReferenceChunkPayload {
+  manifest_id: string;
+  chunk_index: number;
+  chunk_count: number;
+  entries: JsonObject[];
+  chunk_hash: string;
+}
+
+export interface ReferenceFinalizePayload {
+  manifest_id: string;
+  root_hash: string;
+}
+
+export interface ReferencePinPayload {
+  capability_id: string;
+  binding_role: "predecessor" | "current";
+  manifest_id: string | null;
+  reference_status: "healthy" | "reference_stale" | "reference_unavailable";
+  reference_as_of: string;
+}
+
+export interface ReferenceReadPayload {
+  capability_id: string;
+  binding_role: "predecessor" | "current";
+  after_security_id: string | null;
+  limit: number;
+}
+
+export interface ReferencePage {
+  binding: JsonObject;
+  manifest: JsonObject | null;
+  securities: JsonObject[];
+  next_after_security_id: string | null;
+  complete: boolean;
+}
+
+export interface DiscoveryStageCheckpointPayload {
+  task: DiscoveryStageTask;
+  exposure_facts: JsonObject[];
+  theme_episode_revisions: JsonObject[];
+  research_nominations: JsonObject[];
+}
+
+export interface DiscoveryContext {
+  manifests: JsonObject[];
+  security_revisions: JsonObject[];
+  tasks: DiscoveryStageTask[];
+  theme_episodes: JsonObject[];
+  exposure_facts: JsonObject[];
+  research_nominations: JsonObject[];
+  enrichment_selections: JsonObject[];
 }
 
 function objectValue(value: unknown, path: string): JsonObject {
@@ -251,8 +360,9 @@ function percentEncodePath(value: string): string {
 
 function percentEncodeQuery(value: string): string {
   return encodeURIComponent(value)
-    .replace(/[!'()*]/g, (character) =>
-      `%${character.charCodeAt(0).toString(16).toUpperCase()}`
+    .replace(
+      /[!'()*]/g,
+      (character) => `%${character.charCodeAt(0).toString(16).toUpperCase()}`,
     )
     .replace(/%20/g, "+");
 }
@@ -286,17 +396,25 @@ function canonicalizeUrl(value: string, path: string): string {
   const query = queryPairs.map(([key, item]) =>
     `${percentEncodeQuery(key)}=${percentEncodeQuery(item)}`
   ).join("&");
-  const canonical = `https://${parsed.hostname.toLowerCase().replace(/\.$/, "")}${
-    percentEncodePath(decodedPath)
-  }${query ? `?${query}` : ""}`;
+  const canonical = `https://${
+    parsed.hostname.toLowerCase().replace(/\.$/, "")
+  }${percentEncodePath(decodedPath)}${query ? `?${query}` : ""}`;
   if (canonical.length > 2_048) throw new Error(`${path} exceeds URL limit`);
   return canonical;
 }
 
-function providerRequestUrl(value: unknown, provider: unknown, path: string): string {
+function providerRequestUrl(
+  value: unknown,
+  provider: unknown,
+  path: string,
+): string {
   const url = canonicalizeUrl(stringValue(value, path, 2_048), path);
   const parsed = new URL(url);
-  if (/(?:api[_-]?key|token|secret|password)=/i.test(`${parsed.pathname}?${parsed.search}`)) {
+  if (
+    /(?:api[_-]?key|token|secret|password)=/i.test(
+      `${parsed.pathname}?${parsed.search}`,
+    )
+  ) {
     throw new Error(`${path} contains a secret-bearing query or path`);
   }
   const host = parsed.hostname;
@@ -306,11 +424,1288 @@ function providerRequestUrl(value: unknown, provider: unknown, path: string): st
   return url;
 }
 
-function identifierArray(value: unknown, path: string, maxLength: number): string[] {
+function identifierArray(
+  value: unknown,
+  path: string,
+  maxLength: number,
+): string[] {
   const rows = arrayValue(value, path, 32);
-  const values = rows.map((entry, index) => stringValue(entry, `${path}[${index}]`, maxLength));
-  if (new Set(values).size !== values.length) throw new Error(`${path} is duplicated`);
+  const values = rows.map((entry, index) =>
+    stringValue(entry, `${path}[${index}]`, maxLength)
+  );
+  if (new Set(values).size !== values.length) {
+    throw new Error(`${path} is duplicated`);
+  }
   return values;
+}
+
+const DISCOVERY_FORBIDDEN_FIELDS = new Set([
+  "price",
+  "valuation",
+  "portfoliooverlap",
+  "action",
+  "authority",
+  "execution",
+  "executionallowed",
+  "broker",
+  "brokerage",
+  "order",
+  "orderid",
+  "orderdetails",
+]);
+
+function discoveryFieldSemantic(key: string): string {
+  return key.toLowerCase().replace(/[^a-z0-9]/g, "");
+}
+
+function rejectDiscoveryAuthority(value: unknown, path: string): void {
+  if (Array.isArray(value)) {
+    value.forEach((item, index) =>
+      rejectDiscoveryAuthority(item, `${path}[${index}]`)
+    );
+  } else if (typeof value === "object" && value !== null) {
+    for (const [key, child] of Object.entries(value as JsonObject)) {
+      if (DISCOVERY_FORBIDDEN_FIELDS.has(discoveryFieldSemantic(key))) {
+        throw new Error(`${path} has forbidden field: ${key}`);
+      }
+      rejectDiscoveryAuthority(child, `${path}.${key}`);
+    }
+  }
+}
+
+function discoveryStringArray(
+  value: unknown,
+  path: string,
+  maxItems: number,
+  maxLength: number,
+  requireOne = false,
+): string[] {
+  const rows = arrayValue(value, path, maxItems);
+  if (requireOne && rows.length === 0) {
+    throw new Error(`${path} must not be empty`);
+  }
+  const result = rows.map((item, index) =>
+    stringValue(item, `${path}[${index}]`, maxLength)
+  );
+  if (new Set(result).size !== result.length) {
+    throw new Error(`${path} is duplicated`);
+  }
+  return result;
+}
+
+function nullableUuid(value: unknown, path: string): string | null {
+  return value === null ? null : uuidValue(value, path);
+}
+
+function rejectDuplicateDiscoveryRowIds(
+  rows: JsonObject[],
+  path: string,
+): void {
+  const ids = rows.map((row) => row.id);
+  if (new Set(ids).size !== ids.length) {
+    throw new Error(`${path} has duplicate id`);
+  }
+}
+
+export function parseDiscoveryStageTask(value: unknown): DiscoveryStageTask {
+  const row = objectValue(value, "discovery task");
+  exactKeys(row, [
+    "id",
+    "stage",
+    "provider",
+    "capability_id",
+    "query_kind",
+    "query_hash",
+    "dependency_ids",
+    "requested_window",
+    "state",
+    "attempt_count",
+    "request_budget",
+    "result",
+  ], "discovery task");
+  const capabilityId = stringValue(
+    row.capability_id,
+    "discovery task.capability_id",
+    80,
+  );
+  if (!/^[a-z][a-z0-9_]{2,79}$/.test(capabilityId)) {
+    throw new Error("discovery task.capability_id is invalid");
+  }
+  const window = objectValue(
+    row.requested_window,
+    "discovery task.requested_window",
+  );
+  exactKeys(window, ["start", "end"], "discovery task.requested_window");
+  const start = timestamp(
+    window.start,
+    "discovery task.requested_window.start",
+  ) as string;
+  const end = timestamp(
+    window.end,
+    "discovery task.requested_window.end",
+  ) as string;
+  if (Date.parse(end) <= Date.parse(start)) {
+    throw new Error("discovery task.requested_window is invalid");
+  }
+  const result = boundedObject(row.result, "discovery task.result", 65_536);
+  rejectDiscoveryAuthority(result, "discovery task.result");
+  const dependencyIds = arrayValue(
+    row.dependency_ids,
+    "discovery task.dependency_ids",
+    32,
+  ).map(
+    (item, index) => uuidValue(item, `discovery task.dependency_ids[${index}]`),
+  );
+  if (new Set(dependencyIds).size !== dependencyIds.length) {
+    throw new Error("discovery task.dependency_ids is duplicated");
+  }
+  return {
+    id: uuidValue(row.id, "discovery task.id"),
+    stage: enumValue(
+      row.stage,
+      ["reference", "signals", "resolve", "enrich", "screen", "quote"] as const,
+      "discovery task.stage",
+    ),
+    provider: enumValue(
+      row.provider,
+      INTELLIGENCE_PROVIDERS,
+      "discovery task.provider",
+    ),
+    capability_id: capabilityId,
+    query_kind: enumValue(
+      row.query_kind,
+      [
+        "feed",
+        "theme_search",
+        "issuer_submissions",
+        "filing_document",
+        "series",
+        "screener",
+        "quote",
+        "universe",
+      ] as const,
+      "discovery task.query_kind",
+    ),
+    query_hash: hashValue(row.query_hash, "discovery task.query_hash"),
+    dependency_ids: dependencyIds,
+    requested_window: { start, end },
+    state: enumValue(
+      row.state,
+      [
+        "planned",
+        "attempting",
+        "succeeded",
+        "failed",
+        "deferred",
+        "uncertain",
+      ] as const,
+      "discovery task.state",
+    ),
+    attempt_count: integer(
+      row.attempt_count,
+      "discovery task.attempt_count",
+      0,
+      10,
+    ),
+    request_budget: integer(
+      row.request_budget,
+      "discovery task.request_budget",
+      0,
+      100,
+    ),
+    result,
+  };
+}
+
+function canonicalReferenceTimestamp(value: unknown): string | null {
+  if (value === null) return null;
+  return new Date(value as string).toISOString();
+}
+
+export function referenceManifestSemanticDocument(row: JsonObject): JsonObject {
+  return {
+    kind: "reference_manifest",
+    semantic_encoding_version: 1,
+    value: {
+      id: row.id,
+      reference_version: row.reference_version,
+      revision: row.revision,
+      capability_version: row.capability_version,
+      taxonomy_version: row.taxonomy_version,
+      source_hash: row.source_hash,
+      valid_from: canonicalReferenceTimestamp(row.valid_from),
+      valid_to: canonicalReferenceTimestamp(row.valid_to),
+      manifest: row.manifest,
+    },
+  };
+}
+
+export function securityRevisionSemanticDocument(row: JsonObject): JsonObject {
+  const version = row.semantic_encoding_version ?? 1;
+  if (version !== 1 && version !== 2) {
+    throw new Error("security semantic encoding version is invalid");
+  }
+  const value: JsonObject = {
+    revision: row.revision,
+    security_id: row.security_id,
+    entity_id: row.entity_id,
+    ticker: row.ticker,
+    exchange: row.exchange,
+    instrument_type: row.instrument_type,
+    eligible: row.eligible,
+    exclusion_reasons: row.exclusion_reasons,
+    aliases: row.aliases,
+    source_ids: row.source_ids,
+    valid_from: canonicalReferenceTimestamp(row.valid_from),
+    valid_to: canonicalReferenceTimestamp(row.valid_to),
+  };
+  if (version === 2) value.issuer_names = canonicalIssuerNames(row.issuer_names);
+  return {
+    kind: "security_revision",
+    semantic_encoding_version: version,
+    value,
+  };
+}
+
+function issuerNameDate(value: unknown, path: string): string {
+  const text = stringValue(value, path, 10);
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(text) ||
+    new Date(`${text}T00:00:00.000Z`).toISOString().slice(0, 10) !== text) {
+    throw new Error(`${path} is invalid`);
+  }
+  return text;
+}
+
+function canonicalIssuerNames(value: unknown): JsonObject {
+  const row = objectValue(value, "security issuer_names");
+  exactKeys(
+    row,
+    ["canonical_name", "observed_names", "former_names"],
+    "security issuer_names",
+  );
+  const canonicalName = stringValue(
+    row.canonical_name,
+    "security issuer_names.canonical_name",
+    300,
+  );
+  const observedNames = arrayValue(
+    row.observed_names,
+    "security issuer_names.observed_names",
+    16,
+  ).map((name, index) =>
+    stringValue(name, `security issuer_names.observed_names[${index}]`, 300)
+  ).sort();
+  if (observedNames.length === 0 ||
+    new Set(observedNames).size !== observedNames.length ||
+    !observedNames.includes(canonicalName)) {
+    throw new Error("security issuer_names observed names are invalid");
+  }
+  const formerNames = arrayValue(
+    row.former_names,
+    "security issuer_names.former_names",
+    32,
+  ).map((value, index) => {
+    const path = `security issuer_names.former_names[${index}]`;
+    const former = objectValue(value, path);
+    exactKeys(former, ["name", "valid_from", "valid_to"], path);
+    const result = {
+      name: stringValue(former.name, `${path}.name`, 300),
+      valid_from: issuerNameDate(former.valid_from, `${path}.valid_from`),
+      valid_to: issuerNameDate(former.valid_to, `${path}.valid_to`),
+    };
+    if (result.valid_to < result.valid_from || observedNames.includes(result.name)) {
+      throw new Error(`${path} is invalid`);
+    }
+    return result;
+  }).sort((left, right) =>
+    JSON.stringify(left).localeCompare(JSON.stringify(right))
+  );
+  if (new Set(formerNames.map((row) => JSON.stringify(row))).size !== formerNames.length) {
+    throw new Error("security issuer_names former names are duplicated");
+  }
+  return {
+    canonical_name: canonicalName,
+    observed_names: observedNames,
+    former_names: formerNames,
+  };
+}
+
+function parseDiscoveryManifest(value: unknown): JsonObject {
+  const row = objectValue(value, "discovery reference.manifest");
+  exactKeys(row, [
+    "id",
+    "reference_version",
+    "revision",
+    "capability_version",
+    "taxonomy_version",
+    "source_hash",
+    "valid_from",
+    "valid_to",
+    "manifest",
+    "content_hash",
+  ], "discovery reference.manifest");
+  const manifest = boundedObject(
+    row.manifest,
+    "discovery reference.manifest.manifest",
+    65_536,
+  );
+  rejectDiscoveryAuthority(manifest, "discovery reference.manifest.manifest");
+  const result = {
+    id: uuidValue(row.id, "discovery reference.manifest.id"),
+    reference_version: stringValue(
+      row.reference_version,
+      "discovery reference.manifest.reference_version",
+      128,
+    ),
+    revision: integer(
+      row.revision,
+      "discovery reference.manifest.revision",
+      1,
+      10_000,
+    ),
+    capability_version: integer(
+      row.capability_version,
+      "discovery reference.manifest.capability_version",
+      1,
+      10_000,
+    ),
+    taxonomy_version: integer(
+      row.taxonomy_version,
+      "discovery reference.manifest.taxonomy_version",
+      1,
+      10_000,
+    ),
+    source_hash: hashValue(
+      row.source_hash,
+      "discovery reference.manifest.source_hash",
+    ),
+    valid_from: timestamp(
+      row.valid_from,
+      "discovery reference.manifest.valid_from",
+    ) as string,
+    valid_to: timestamp(
+      row.valid_to,
+      "discovery reference.manifest.valid_to",
+      true,
+    ),
+    manifest,
+    content_hash: hashValue(
+      row.content_hash,
+      "discovery reference.manifest.content_hash",
+    ),
+  };
+  if (
+    result.content_hash !==
+      sha256Hex(canonicalJson(referenceManifestSemanticDocument(result)))
+  ) throw new Error("manifest content hash mismatch");
+  return result;
+}
+
+function parseSecurityRevision(value: unknown, index: number): JsonObject {
+  const path = `discovery reference.security_revisions[${index}]`;
+  const row = objectValue(value, path);
+  const version = row.semantic_encoding_version ?? 1;
+  if (version !== 1 && version !== 2) {
+    throw new Error(`${path}.semantic_encoding_version is invalid`);
+  }
+  exactKeys(row, [
+    "id",
+    "manifest_id",
+    "revision",
+    "security_id",
+    "entity_id",
+    "ticker",
+    "exchange",
+    "instrument_type",
+    "eligible",
+    "exclusion_reasons",
+    "aliases",
+    "source_ids",
+    "valid_from",
+    "valid_to",
+    "content_hash",
+    ...(version === 2 ? ["semantic_encoding_version", "issuer_names"] : []),
+  ], path);
+  if (typeof row.eligible !== "boolean") {
+    throw new Error(`${path}.eligible must be boolean`);
+  }
+  const result: JsonObject = {
+    id: uuidValue(row.id, `${path}.id`),
+    manifest_id: uuidValue(row.manifest_id, `${path}.manifest_id`),
+    revision: integer(row.revision, `${path}.revision`, 1, 10_000),
+    security_id: stringValue(row.security_id, `${path}.security_id`, 128),
+    entity_id: stringValue(row.entity_id, `${path}.entity_id`, 128),
+    ticker: stringValue(row.ticker, `${path}.ticker`, 15),
+    exchange: nullableString(row.exchange, `${path}.exchange`, 32),
+    instrument_type: enumValue(
+      row.instrument_type,
+      [
+        "COMMON_STOCK",
+        "ADR",
+        "ETF",
+        "PREFERRED",
+        "WARRANT",
+        "OTC_COMMON",
+        "OTHER",
+      ] as const,
+      `${path}.instrument_type`,
+    ),
+    eligible: row.eligible,
+    exclusion_reasons: discoveryStringArray(
+      row.exclusion_reasons,
+      `${path}.exclusion_reasons`,
+      16,
+      128,
+    ),
+    aliases: discoveryStringArray(row.aliases, `${path}.aliases`, 32, 32),
+    source_ids: discoveryStringArray(
+      row.source_ids,
+      `${path}.source_ids`,
+      16,
+      256,
+      true,
+    ),
+    valid_from: timestamp(row.valid_from, `${path}.valid_from`) as string,
+    valid_to: timestamp(row.valid_to, `${path}.valid_to`, true),
+    content_hash: hashValue(row.content_hash, `${path}.content_hash`),
+  };
+  if (version === 2) {
+    result.semantic_encoding_version = 2;
+    result.issuer_names = canonicalIssuerNames(row.issuer_names);
+  }
+  rejectDiscoveryAuthority(result, path);
+  if (
+    result.content_hash !==
+      sha256Hex(canonicalJson(securityRevisionSemanticDocument(result)))
+  ) throw new Error("security content hash mismatch");
+  return result;
+}
+
+export function parseDiscoveryReferencePayload(
+  value: unknown,
+): DiscoveryReferencePayload {
+  const row = objectValue(value, "discovery reference");
+  exactKeys(row, ["manifest", "security_revisions"], "discovery reference");
+  if (byteLength(row) > 1_048_576) {
+    throw new Error("discovery reference exceeds byte limit");
+  }
+  const manifest = parseDiscoveryManifest(row.manifest);
+  const securityRevisions = arrayValue(
+    row.security_revisions,
+    "discovery reference.security_revisions",
+    15_000,
+  )
+    .map(parseSecurityRevision);
+  rejectDuplicateDiscoveryRowIds(
+    securityRevisions,
+    "discovery reference.security_revisions",
+  );
+  if (securityRevisions.some((item) => item.manifest_id !== manifest.id)) {
+    throw new Error("discovery reference manifest identity mismatch");
+  }
+  validateReferenceFormatAndIssuerNames(manifest, securityRevisions);
+  return { manifest, security_revisions: securityRevisions };
+}
+
+function validateReferenceFormatAndIssuerNames(
+  manifest: JsonObject,
+  rows: JsonObject[],
+): void {
+  const metadata = objectValue(manifest.manifest, "reference manifest metadata");
+  const formatVersion = metadata.format_version ?? 1;
+  if (formatVersion !== 1 && formatVersion !== 2) {
+    throw new Error("reference manifest format_version is invalid");
+  }
+  if (rows.some((row) => (row.semantic_encoding_version ?? 1) !== formatVersion)) {
+    throw new Error("reference row format does not match manifest");
+  }
+  const namesByEntity = new Map<string, string>();
+  for (const row of rows) {
+    if (formatVersion !== 2) continue;
+    const encoded = canonicalJson(row.issuer_names);
+    const prior = namesByEntity.get(row.entity_id as string);
+    if (prior !== undefined && prior !== encoded) {
+      throw new Error("same entity must have identical issuer names");
+    }
+    namesByEntity.set(row.entity_id as string, encoded);
+  }
+}
+
+function referenceCapability(value: unknown, path: string): string {
+  const capability = stringValue(value, path, 80);
+  if (!/^[a-z][a-z0-9_]{2,79}$/.test(capability)) {
+    throw new Error(`${path} is invalid`);
+  }
+  return capability;
+}
+
+function boundedReferenceCall(value: unknown, path: string): JsonObject {
+  const row = objectValue(value, path);
+  if (byteLength(row) > 196_608) throw new Error(`${path} exceeds byte limit`);
+  return row;
+}
+
+export function parseReferenceBeginPayload(
+  value: unknown,
+): ReferenceBeginPayload {
+  const row = boundedReferenceCall(value, "reference begin");
+  exactKeys(row, [
+    "manifest",
+    "capability_id",
+    "chunk_count",
+    "security_count",
+    "root_hash",
+    "predecessor_manifest_id",
+  ], "reference begin");
+  const manifest = parseDiscoveryManifest(row.manifest);
+  const metadata = objectValue(
+    manifest.manifest,
+    "reference begin.manifest.manifest",
+  );
+  if (
+    metadata.coverage_status !== "scope_not_guaranteed" ||
+    metadata.reference_status !== "healthy"
+  ) throw new Error("reference begin manifest status is invalid");
+  const securityCount = integer(
+    row.security_count,
+    "reference begin.security_count",
+    1,
+    15_000,
+  );
+  if (metadata.security_count !== securityCount) {
+    throw new Error("reference begin security count mismatch");
+  }
+  return {
+    manifest,
+    capability_id: referenceCapability(
+      row.capability_id,
+      "reference begin.capability_id",
+    ),
+    chunk_count: integer(
+      row.chunk_count,
+      "reference begin.chunk_count",
+      1,
+      512,
+    ),
+    security_count: securityCount,
+    root_hash: hashValue(row.root_hash, "reference begin.root_hash"),
+    predecessor_manifest_id: row.predecessor_manifest_id === null
+      ? null
+      : uuidValue(
+        row.predecessor_manifest_id,
+        "reference begin.predecessor_manifest_id",
+      ),
+  };
+}
+
+export function parseReferenceChunkPayload(
+  value: unknown,
+): ReferenceChunkPayload {
+  const row = boundedReferenceCall(value, "reference chunk");
+  exactKeys(row, [
+    "manifest_id",
+    "chunk_index",
+    "chunk_count",
+    "entries",
+    "chunk_hash",
+  ], "reference chunk");
+  const rawEntries = arrayValue(row.entries, "reference chunk.entries", 200);
+  if (
+    rawEntries.some((entry) =>
+      typeof entry === "object" && entry !== null && !Array.isArray(entry) &&
+      (entry as JsonObject).semantic_encoding_version === 2
+    ) && rawEntries.length > 88
+  ) {
+    throw new Error("reference chunk.entries must contain at most 88 items");
+  }
+  const entries = rawEntries.map(parseSecurityRevision);
+  if (entries.length === 0) {
+    throw new Error("reference chunk.entries must not be empty");
+  }
+  rejectDuplicateDiscoveryRowIds(entries, "reference chunk.entries");
+  const namesByEntity = new Map<string, string>();
+  for (const entry of entries) {
+    if (entry.semantic_encoding_version !== 2) continue;
+    const encoded = canonicalJson(entry.issuer_names);
+    const prior = namesByEntity.get(entry.entity_id as string);
+    if (prior !== undefined && prior !== encoded) {
+      throw new Error("same entity must have identical issuer names");
+    }
+    namesByEntity.set(entry.entity_id as string, encoded);
+  }
+  const manifestId = uuidValue(row.manifest_id, "reference chunk.manifest_id");
+  if (entries.some((entry) => entry.manifest_id !== manifestId)) {
+    throw new Error("reference chunk manifest identity mismatch");
+  }
+  return {
+    manifest_id: manifestId,
+    chunk_index: integer(
+      row.chunk_index,
+      "reference chunk.chunk_index",
+      0,
+      511,
+    ),
+    chunk_count: integer(
+      row.chunk_count,
+      "reference chunk.chunk_count",
+      1,
+      512,
+    ),
+    entries,
+    chunk_hash: hashValue(row.chunk_hash, "reference chunk.chunk_hash"),
+  };
+}
+
+export function parseReferenceFinalizePayload(
+  value: unknown,
+): ReferenceFinalizePayload {
+  const row = boundedReferenceCall(value, "reference finalize");
+  exactKeys(row, ["manifest_id", "root_hash"], "reference finalize");
+  return {
+    manifest_id: uuidValue(row.manifest_id, "reference finalize.manifest_id"),
+    root_hash: hashValue(row.root_hash, "reference finalize.root_hash"),
+  };
+}
+
+export function parseReferencePinPayload(value: unknown): ReferencePinPayload {
+  const row = boundedReferenceCall(value, "reference pin");
+  exactKeys(row, [
+    "capability_id",
+    "binding_role",
+    "manifest_id",
+    "reference_status",
+    "reference_as_of",
+  ], "reference pin");
+  const status = enumValue(
+    row.reference_status,
+    [
+      "healthy",
+      "reference_stale",
+      "reference_unavailable",
+    ] as const,
+    "reference pin.reference_status",
+  );
+  const manifestId = row.manifest_id === null
+    ? null
+    : uuidValue(row.manifest_id, "reference pin.manifest_id");
+  if (
+    (status === "healthy" && manifestId === null) ||
+    (status === "reference_unavailable" && manifestId !== null)
+  ) {
+    throw new Error("reference pin status does not match manifest");
+  }
+  return {
+    capability_id: referenceCapability(
+      row.capability_id,
+      "reference pin.capability_id",
+    ),
+    binding_role: enumValue(
+      row.binding_role,
+      ["predecessor", "current"] as const,
+      "reference pin.binding_role",
+    ),
+    manifest_id: manifestId,
+    reference_status: status,
+    reference_as_of: timestamp(
+      row.reference_as_of,
+      "reference pin.reference_as_of",
+    ) as string,
+  };
+}
+
+export function parseReferenceReadPayload(
+  value: unknown,
+): ReferenceReadPayload {
+  const row = boundedReferenceCall(value, "reference read");
+  exactKeys(
+    row,
+    ["capability_id", "binding_role", "after_security_id", "limit"],
+    "reference read",
+  );
+  return {
+    capability_id: referenceCapability(
+      row.capability_id,
+      "reference read.capability_id",
+    ),
+    binding_role: enumValue(
+      row.binding_role,
+      ["predecessor", "current"] as const,
+      "reference read.binding_role",
+    ),
+    after_security_id: nullableString(
+      row.after_security_id,
+      "reference read.after_security_id",
+      128,
+    ),
+    limit: integer(row.limit, "reference read.limit", 1, 500),
+  };
+}
+
+export function parseReferencePage(value: unknown): ReferencePage {
+  const row = boundedReferenceCall(value, "reference page");
+  exactKeys(row, [
+    "binding",
+    "manifest",
+    "securities",
+    "next_after_security_id",
+    "complete",
+  ], "reference page");
+  const binding = boundedObject(row.binding, "reference page.binding", 2_048);
+  exactKeys(binding, [
+    "binding_role",
+    "manifest_id",
+    "reference_status",
+    "source_retrieved_at",
+    "reference_age_seconds",
+    "issuer_names_status",
+  ], "reference page.binding");
+  const status = enumValue(
+    binding.reference_status,
+    [
+      "healthy",
+      "reference_stale",
+      "reference_unavailable",
+    ] as const,
+    "reference page.binding.reference_status",
+  );
+  const manifestId = binding.manifest_id === null
+    ? null
+    : uuidValue(binding.manifest_id, "reference page.binding.manifest_id");
+  const sourceRetrievedAt = timestamp(
+    binding.source_retrieved_at,
+    "reference page.binding.source_retrieved_at",
+    true,
+  );
+  const age = binding.reference_age_seconds === null ? null : integer(
+    binding.reference_age_seconds,
+    "reference page.binding.reference_age_seconds",
+    0,
+    Number.MAX_SAFE_INTEGER,
+  );
+  const issuerNamesStatus = enumValue(
+    binding.issuer_names_status,
+    ["available", "issuer_names_unavailable"] as const,
+    "reference page.binding.issuer_names_status",
+  );
+  if ((status === "reference_unavailable") !== (manifestId === null)) {
+    throw new Error("reference page binding is inconsistent");
+  }
+  if (
+    status === "reference_unavailable"
+      ? sourceRetrievedAt !== null || age !== null
+      : sourceRetrievedAt === null || age === null
+  ) {
+    throw new Error("reference page binding is inconsistent");
+  }
+  const manifest = row.manifest === null
+    ? null
+    : parseDiscoveryManifest(row.manifest);
+  const securities = arrayValue(
+    row.securities,
+    "reference page.securities",
+    500,
+  )
+    .map(parseSecurityRevision);
+  rejectDuplicateDiscoveryRowIds(securities, "reference page.securities");
+  if (
+    (manifest === null) !== (manifestId === null) ||
+    (manifest !== null && manifest.id !== manifestId) ||
+    securities.some((entry) => entry.manifest_id !== manifestId)
+  ) {
+    throw new Error("reference page manifest identity mismatch");
+  }
+  if (manifest !== null) validateReferenceFormatAndIssuerNames(manifest, securities);
+  const formatVersion = manifest === null
+    ? 1
+    : ((manifest.manifest as JsonObject).format_version ?? 1);
+  if (
+    issuerNamesStatus !==
+      (formatVersion === 2 ? "available" : "issuer_names_unavailable")
+  ) throw new Error("reference page issuer name availability is inconsistent");
+  if (typeof row.complete !== "boolean") {
+    throw new Error("reference page.complete must be boolean");
+  }
+  const next = nullableString(
+    row.next_after_security_id,
+    "reference page.next_after_security_id",
+    128,
+  );
+  if (
+    (row.complete && next !== null) ||
+    (!row.complete && (securities.length === 0 ||
+      next !== securities[securities.length - 1].security_id)) ||
+    (status === "reference_unavailable" &&
+      (!row.complete || securities.length !== 0))
+  ) {
+    throw new Error("reference page pagination is inconsistent");
+  }
+  return {
+    binding: {
+      binding_role: enumValue(
+        binding.binding_role,
+        ["predecessor", "current"] as const,
+        "reference page.binding.binding_role",
+      ),
+      manifest_id: manifestId,
+      reference_status: status,
+      source_retrieved_at: sourceRetrievedAt,
+      reference_age_seconds: age,
+      issuer_names_status: issuerNamesStatus,
+    },
+    manifest,
+    securities,
+    next_after_security_id: next,
+    complete: row.complete,
+  };
+}
+
+function parseDiscoveryResultRow(
+  value: unknown,
+  path: string,
+  keys: readonly string[],
+  typedExposure = false,
+): JsonObject {
+  const row = objectValue(value, path);
+  exactKeys(row, keys, path);
+  if (typedExposure && (row.fact as JsonObject | undefined)?.kind === "exposure_fact") {
+    validateTypedExposureFact(row, path);
+  } else {
+    rejectDiscoveryAuthority(row, path);
+  }
+  return row;
+}
+
+const TYPED_EXPOSURE_VALUE_FIELDS = [
+  "accepted_at", "accession_number", "business_exposure", "claim_state",
+  "effective_at", "entity_id", "event_ids", "execution_allowed", "filing_date",
+  "filing_rule_version", "financial_materiality", "form", "is_amendment",
+  "hypothesis_ids", "issuer_cik", "limitations", "metric",
+  "normalized_passage_hash", "parser_version", "passage", "period_end",
+  "period_start", "primary_document", "reference_manifest_id",
+  "reporting_period_end", "retrieved_at", "role", "schema_version",
+  "security_id", "security_revision_id", "source_cache_key",
+  "source_item_content_hash", "source_item_id", "source_locator",
+  "source_receipt_id", "source_response_hash", "source_url", "status",
+  "submissions_response_hash", "ticker", "unit", "value",
+] as const;
+
+function validateTypedExposureFact(row: JsonObject, path: string): void {
+  const fact = objectValue(row.fact, `${path}.fact`);
+  exactKeys(fact, ["kind", "semantic_encoding_version", "value"], `${path}.fact`);
+  if (fact.kind !== "exposure_fact" || fact.semantic_encoding_version !== 1) {
+    throw new Error(`${path}.fact is invalid`);
+  }
+  const value = objectValue(fact.value, `${path}.fact.value`);
+  exactKeys(value, TYPED_EXPOSURE_VALUE_FIELDS, `${path}.fact.value`);
+  if (value.execution_allowed !== false || value.schema_version !== 1) {
+    throw new Error(`${path}.fact.value is not suggestion-only`);
+  }
+  const metric = enumValue(
+    value.metric, ["business_exposure", "revenue_share"] as const,
+    `${path}.fact.value.metric`,
+  );
+  const financial = enumValue(
+    value.financial_materiality,
+    ["supported", "contradicted", "unknown"] as const,
+    `${path}.fact.value.financial_materiality`,
+  );
+  const claim = enumValue(
+    value.claim_state,
+    ["operational", "planned", "forecast", "customer", "contradicted", "insufficient"] as const,
+    `${path}.fact.value.claim_state`,
+  );
+  const business = enumValue(
+    value.business_exposure, ["supported", "contradicted", "unresolved"] as const,
+    `${path}.fact.value.business_exposure`,
+  );
+  const status = enumValue(
+    value.status, ["supported", "contradicted", "superseded", "insufficient"] as const,
+    `${path}.fact.value.status`,
+  );
+  const periodEnd = value.period_end === null ? null : dateValue(
+    value.period_end, `${path}.fact.value.period_end`,
+  );
+  const reportingPeriodEnd = value.reporting_period_end === null ? null : dateValue(
+    value.reporting_period_end, `${path}.fact.value.reporting_period_end`,
+  );
+  const decimal = typeof value.value === "string" && value.value.length <= 32 &&
+    /^(?:0|[1-9]\d*)(?:\.\d+)?$/.test(value.value)
+    ? Number(value.value)
+    : Number.NaN;
+  const validSupportedMateriality = metric === "revenue_share" &&
+    Number.isFinite(decimal) && decimal >= 0 && decimal <= 100 &&
+    value.unit === "percent_of_revenue" && periodEnd !== null &&
+    periodEnd === reportingPeriodEnd && claim === "operational" &&
+    business === "supported" && status === "supported";
+  if (
+    (financial === "supported" && !validSupportedMateriality) ||
+    (metric === "business_exposure" &&
+      (value.value !== null || value.unit !== null || financial !== "unknown")) ||
+    (metric === "revenue_share" &&
+      (!Number.isFinite(decimal) || decimal < 0 || decimal > 100 ||
+        value.unit !== "percent_of_revenue"))
+  ) {
+    throw new Error(`${path}.fact.value financial materiality is invalid`);
+  }
+  if (
+    (status === "supported" && (claim !== "operational" || business !== "supported")) ||
+    (status === "contradicted" && (claim !== "contradicted" || business !== "contradicted")) ||
+    (status === "insufficient" &&
+      (!["planned", "forecast", "customer", "insufficient"].includes(claim) ||
+        business !== "unresolved"))
+  ) {
+    throw new Error(`${path}.fact.value state is invalid`);
+  }
+  const passage = stringValue(value.passage, `${path}.fact.value.passage`, 2_000);
+  const cik = stringValue(value.issuer_cik, `${path}.fact.value.issuer_cik`, 10);
+  const accession = stringValue(
+    value.accession_number, `${path}.fact.value.accession_number`, 20,
+  );
+  const document = stringValue(
+    value.primary_document, `${path}.fact.value.primary_document`, 255,
+  );
+  const expectedUrl = /^0{0,9}[1-9]\d*$/.test(cik) &&
+      /^\d{10}-\d{2}-\d{6}$/.test(accession) &&
+      /^[A-Za-z0-9][A-Za-z0-9._-]{0,254}$/.test(document)
+    ? `https://www.sec.gov/Archives/edgar/data/${BigInt(cik)}/${accession.replaceAll("-", "")}/${document}`
+    : "";
+  if (
+    hashValue(value.normalized_passage_hash, `${path}.fact.value.normalized_passage_hash`) !==
+      sha256Hex(passage) ||
+    hashValue(row.content_hash, `${path}.content_hash`) !== sha256Hex(canonicalJson(fact)) ||
+    row.security_revision_id !== value.security_revision_id ||
+    !Array.isArray(row.source_ids) || row.source_ids.length !== 1 ||
+    row.source_ids[0] !== value.source_item_id || row.exposure_kind !== "filing" ||
+    value.entity_id !== `sec-cik:${cik}` || value.source_url !== expectedUrl ||
+    typeof value.ticker !== "string" || !/^[A-Z][A-Z0-9.-]{0,14}$/.test(value.ticker) ||
+    typeof value.form !== "string" ||
+      !/^(?:10-K|10-Q|8-K|20-F|40-F)(?:\/A)?$/.test(value.form) ||
+    typeof value.is_amendment !== "boolean"
+  ) {
+    throw new Error(`${path}.fact semantic hash or source binding is invalid`);
+  }
+  for (const key of [
+    "source_response_hash", "submissions_response_hash", "source_item_content_hash",
+    "source_cache_key",
+  ]) hashValue(value[key], `${path}.fact.value.${key}`);
+  uuidValue(value.security_revision_id, `${path}.fact.value.security_revision_id`);
+  uuidValue(value.reference_manifest_id, `${path}.fact.value.reference_manifest_id`);
+  uuidValue(value.source_item_id, `${path}.fact.value.source_item_id`);
+  uuidValue(value.source_receipt_id, `${path}.fact.value.source_receipt_id`);
+  stringValue(value.source_locator, `${path}.fact.value.source_locator`, 256);
+  stringValue(value.parser_version, `${path}.fact.value.parser_version`, 80);
+  stringValue(value.filing_rule_version, `${path}.fact.value.filing_rule_version`, 80);
+  const eventIds = discoveryStringArray(
+    value.event_ids, `${path}.fact.value.event_ids`, 64, 160, true,
+  );
+  const hypothesisIds = discoveryStringArray(
+    value.hypothesis_ids, `${path}.fact.value.hypothesis_ids`, 64, 160, true,
+  );
+  if (eventIds.length === 0 || hypothesisIds.length === 0) {
+    throw new Error(`${path}.fact.value source binding is invalid`);
+  }
+  dateValue(value.filing_date, `${path}.fact.value.filing_date`);
+  if (value.period_start !== null) dateValue(value.period_start, `${path}.fact.value.period_start`);
+  if (value.accepted_at !== null) timestamp(value.accepted_at, `${path}.fact.value.accepted_at`);
+  if (value.effective_at !== null) timestamp(value.effective_at, `${path}.fact.value.effective_at`);
+  timestamp(value.retrieved_at, `${path}.fact.value.retrieved_at`);
+}
+
+export function parseDiscoveryStageCheckpointPayload(
+  value: unknown,
+): DiscoveryStageCheckpointPayload {
+  const row = objectValue(value, "discovery checkpoint");
+  exactKeys(row, [
+    "task",
+    "exposure_facts",
+    "theme_episode_revisions",
+    "research_nominations",
+  ], "discovery checkpoint");
+  if (byteLength(row) > 262_144) {
+    throw new Error("discovery checkpoint exceeds byte limit");
+  }
+  const task = parseDiscoveryStageTask(row.task);
+  const exposureFacts = arrayValue(
+    row.exposure_facts,
+    "discovery checkpoint.exposure_facts",
+    100,
+  ).map((item, index) => {
+    const path = `discovery checkpoint.exposure_facts[${index}]`;
+    const parsed = parseDiscoveryResultRow(item, path, [
+      "id",
+      "security_revision_id",
+      "theme_episode_revision_id",
+      "exposure_kind",
+      "fact",
+      "source_ids",
+      "valid_from",
+      "valid_to",
+      "content_hash",
+    ], true);
+    return {
+      ...parsed,
+      id: uuidValue(parsed.id, `${path}.id`),
+      security_revision_id: uuidValue(
+        parsed.security_revision_id,
+        `${path}.security_revision_id`,
+      ),
+      theme_episode_revision_id: nullableUuid(
+        parsed.theme_episode_revision_id,
+        `${path}.theme_episode_revision_id`,
+      ),
+      exposure_kind: enumValue(
+        parsed.exposure_kind,
+        [
+          "filing",
+          "contract",
+          "backlog",
+          "revenue",
+          "capacity",
+          "official_fund",
+          "supply_chain",
+          "customer",
+          "segment",
+        ] as const,
+        `${path}.exposure_kind`,
+      ),
+      fact: boundedObject(parsed.fact, `${path}.fact`, 32_768),
+      source_ids: discoveryStringArray(
+        parsed.source_ids,
+        `${path}.source_ids`,
+        64,
+        256,
+        true,
+      ),
+      valid_from: (parsed.fact as JsonObject | undefined)?.kind === "exposure_fact"
+        ? dateValue(parsed.valid_from, `${path}.valid_from`)
+        : timestamp(parsed.valid_from, `${path}.valid_from`),
+      valid_to: timestamp(parsed.valid_to, `${path}.valid_to`, true),
+      content_hash: hashValue(parsed.content_hash, `${path}.content_hash`),
+    };
+  });
+  const episodes = arrayValue(
+    row.theme_episode_revisions,
+    "discovery checkpoint.theme_episode_revisions",
+    50,
+  ).map((item, index) => {
+    const path = `discovery checkpoint.theme_episode_revisions[${index}]`;
+    const parsed = parseDiscoveryResultRow(item, path, [
+      "id",
+      "theme_id",
+      "revision",
+      "episode",
+      "source_ids",
+      "valid_from",
+      "valid_to",
+      "content_hash",
+    ]);
+    return {
+      ...parsed,
+      id: uuidValue(parsed.id, `${path}.id`),
+      theme_id: stringValue(parsed.theme_id, `${path}.theme_id`, 80),
+      revision: integer(parsed.revision, `${path}.revision`, 1, 10_000),
+      episode: boundedObject(parsed.episode, `${path}.episode`, 32_768),
+      source_ids: discoveryStringArray(
+        parsed.source_ids,
+        `${path}.source_ids`,
+        64,
+        256,
+        true,
+      ),
+      valid_from: timestamp(parsed.valid_from, `${path}.valid_from`),
+      valid_to: timestamp(parsed.valid_to, `${path}.valid_to`, true),
+      content_hash: hashValue(parsed.content_hash, `${path}.content_hash`),
+    };
+  });
+  const nominations = arrayValue(
+    row.research_nominations,
+    "discovery checkpoint.research_nominations",
+    50,
+  ).map((item, index) => {
+    const path = `discovery checkpoint.research_nominations[${index}]`;
+    const parsed = parseDiscoveryResultRow(item, path, [
+      "id",
+      "security_revision_id",
+      "theme_episode_revision_id",
+      "exposure_fact_ids",
+      "state",
+      "rationale",
+    ]);
+    const exposureFactIds = arrayValue(
+      parsed.exposure_fact_ids,
+      `${path}.exposure_fact_ids`,
+      32,
+    ).map((id, position) =>
+      uuidValue(id, `${path}.exposure_fact_ids[${position}]`)
+    );
+    if (new Set(exposureFactIds).size !== exposureFactIds.length) {
+      throw new Error(`${path}.exposure_fact_ids is duplicated`);
+    }
+    return {
+      ...parsed,
+      id: uuidValue(parsed.id, `${path}.id`),
+      security_revision_id: uuidValue(
+        parsed.security_revision_id,
+        `${path}.security_revision_id`,
+      ),
+      theme_episode_revision_id: nullableUuid(
+        parsed.theme_episode_revision_id,
+        `${path}.theme_episode_revision_id`,
+      ),
+      exposure_fact_ids: exposureFactIds,
+      state: enumValue(parsed.state, ["nominated"] as const, `${path}.state`),
+      rationale: boundedObject(parsed.rationale, `${path}.rationale`, 16_384),
+    };
+  });
+  rejectDuplicateDiscoveryRowIds(
+    exposureFacts,
+    "discovery checkpoint.exposure_facts",
+  );
+  rejectDuplicateDiscoveryRowIds(
+    episodes,
+    "discovery checkpoint.theme_episode_revisions",
+  );
+  rejectDuplicateDiscoveryRowIds(
+    nominations,
+    "discovery checkpoint.research_nominations",
+  );
+  if (
+    (episodes.length > 0 && task.stage !== "signals") ||
+    (exposureFacts.length > 0 && task.stage !== "enrich") ||
+    (nominations.length > 0 && task.stage !== "screen")
+  ) {
+    throw new Error("discovery result does not match stage");
+  }
+  if (
+    task.state !== "succeeded" &&
+    (episodes.length > 0 || exposureFacts.length > 0 || nominations.length > 0)
+  ) {
+    throw new Error("non-success discovery checkpoint has result rows");
+  }
+  return {
+    task,
+    exposure_facts: exposureFacts,
+    theme_episode_revisions: episodes,
+    research_nominations: nominations,
+  };
+}
+
+export function parseDiscoveryContextRequest(
+  value: unknown,
+): { limit: number } {
+  const row = objectValue(value, "discovery context request");
+  exactKeys(row, ["limit"], "discovery context request");
+  return {
+    limit: integer(row.limit, "discovery context request.limit", 1, 100),
+  };
+}
+
+export function parseDiscoveryContext(value: unknown): DiscoveryContext {
+  const row = objectValue(value, "discovery context");
+  exactKeys(row, [
+    "manifests",
+    "security_revisions",
+    "tasks",
+    "theme_episodes",
+    "exposure_facts",
+    "research_nominations",
+    "enrichment_selections",
+  ], "discovery context");
+  if (byteLength(row) > 1_048_576) {
+    throw new Error("discovery context exceeds byte limit");
+  }
+  const opaque = (key: string, keys: readonly string[]) =>
+    arrayValue(row[key], `discovery context.${key}`, 100).map((item, index) => {
+      const parsed = boundedObject(
+        item,
+        `discovery context.${key}[${index}]`,
+        65_536,
+      );
+      exactKeys(parsed, keys, `discovery context.${key}[${index}]`);
+      rejectDiscoveryAuthority(parsed, `discovery context.${key}[${index}]`);
+      return parsed;
+    });
+  const exposureFacts = arrayValue(
+    row.exposure_facts, "discovery context.exposure_facts", 100,
+  ).map((item, index) => {
+    const path = `discovery context.exposure_facts[${index}]`;
+    const parsed = boundedObject(item, path, 65_536);
+    exactKeys(parsed, [
+      "id", "task_id", "security_revision_id", "theme_episode_revision_id",
+      "exposure_kind", "fact", "source_ids", "valid_from", "valid_to",
+      "content_hash", "created_at",
+    ], path);
+    if ((parsed.fact as JsonObject | undefined)?.kind === "exposure_fact") {
+      validateTypedExposureFact(parsed, path);
+    } else {
+      rejectDiscoveryAuthority(parsed, path);
+    }
+    return parsed;
+  });
+  return {
+    manifests: opaque("manifests", [
+      "id",
+      "reference_version",
+      "revision",
+      "capability_version",
+      "taxonomy_version",
+      "source_hash",
+      "valid_from",
+      "valid_to",
+      "manifest",
+      "content_hash",
+      "created_at",
+    ]),
+    security_revisions: opaque("security_revisions", [
+      "id",
+      "manifest_id",
+      "revision",
+      "security_id",
+      "entity_id",
+      "ticker",
+      "exchange",
+      "instrument_type",
+      "eligible",
+      "exclusion_reasons",
+      "aliases",
+      "source_ids",
+      "valid_from",
+      "valid_to",
+      "content_hash",
+      "created_at",
+    ]),
+    tasks: arrayValue(row.tasks, "discovery context.tasks", 100).map(
+      parseDiscoveryStageTask,
+    ),
+    theme_episodes: opaque("theme_episodes", [
+      "id",
+      "task_id",
+      "theme_id",
+      "revision",
+      "episode",
+      "source_ids",
+      "valid_from",
+      "valid_to",
+      "content_hash",
+      "created_at",
+    ]),
+    exposure_facts: exposureFacts,
+    research_nominations: opaque("research_nominations", [
+      "id",
+      "task_id",
+      "security_revision_id",
+      "theme_episode_revision_id",
+      "exposure_fact_ids",
+      "state",
+      "rationale",
+      "created_at",
+      "updated_at",
+    ]),
+    enrichment_selections: opaque("enrichment_selections", [
+      "manifest",
+      "requests",
+    ]),
+  };
 }
 
 function canonicalValue(value: unknown): unknown {
@@ -364,7 +1759,13 @@ export function parseStartIntelligencePayload(
   const row = objectValue(value, "payload");
   exactKeys(
     row,
-    ["phase", "market_date", "policy_version", "reservation_plan", "request_window"],
+    [
+      "phase",
+      "market_date",
+      "policy_version",
+      "reservation_plan",
+      "request_window",
+    ],
     "payload",
   );
   const plan = objectValue(row.reservation_plan, "payload.reservation_plan");
@@ -421,22 +1822,42 @@ export function parseStartIntelligencePayload(
 
 function parseRequestWindow(value: unknown): JsonObject {
   const row = objectValue(value, "payload.request_window");
-  exactKeys(row, ["start", "end", "timezone", "market_date", "phase"], "payload.request_window");
+  exactKeys(
+    row,
+    ["start", "end", "timezone", "market_date", "phase"],
+    "payload.request_window",
+  );
   const start = timestamp(row.start, "payload.request_window.start")!;
   const end = timestamp(row.end, "payload.request_window.end")!;
-  if (Date.parse(start) >= Date.parse(end) || row.timezone !== "America/Chicago") {
+  if (
+    Date.parse(start) >= Date.parse(end) || row.timezone !== "America/Chicago"
+  ) {
     throw new Error("payload.request_window is invalid");
   }
-  return { start, end, timezone: "America/Chicago", market_date: dateValue(row.market_date, "payload.request_window.market_date"), phase: enumValue(row.phase, PHASES, "payload.request_window.phase") };
+  return {
+    start,
+    end,
+    timezone: "America/Chicago",
+    market_date: dateValue(
+      row.market_date,
+      "payload.request_window.market_date",
+    ),
+    phase: enumValue(row.phase, PHASES, "payload.request_window.phase"),
+  };
 }
 
-export function parseCheckpointIntelligencePayload(value: unknown): CheckpointIntelligencePayload {
+export function parseCheckpointIntelligencePayload(
+  value: unknown,
+): CheckpointIntelligencePayload {
   const row = objectValue(value, "checkpoint payload");
   exactKeys(row, ["cache_key", "receipt", "items"], "checkpoint payload");
   return {
     cache_key: stringValue(row.cache_key, "checkpoint payload.cache_key", 512),
     receipt: boundedObject(row.receipt, "checkpoint payload.receipt", 16_384),
-    items: arrayValue(row.items, "checkpoint payload.items", 50).map((item, index) => boundedObject(item, `checkpoint payload.items[${index}]`, 16_384)),
+    items: arrayValue(row.items, "checkpoint payload.items", 50).map((
+      item,
+      index,
+    ) => boundedObject(item, `checkpoint payload.items[${index}]`, 16_384)),
   };
 }
 
@@ -524,7 +1945,10 @@ function parseReceipt(value: unknown, index: number): JsonObject {
       : hashValue(row.response_hash, `${path}.response_hash`),
     cache_predecessor_receipt_id: row.cache_predecessor_receipt_id === null
       ? null
-      : uuidValue(row.cache_predecessor_receipt_id, `${path}.cache_predecessor_receipt_id`),
+      : uuidValue(
+        row.cache_predecessor_receipt_id,
+        `${path}.cache_predecessor_receipt_id`,
+      ),
   };
 }
 
@@ -595,13 +2019,31 @@ function parseItem(value: unknown, index: number): JsonObject {
   const normalizedCanonicalUrl = canonicalUrl === null
     ? null
     : canonicalizeUrl(canonicalUrl, `${path}.canonical_url`);
-  const provider = enumValue(row.provider, INTELLIGENCE_PROVIDERS, `${path}.provider`);
-  const requestUrl = providerRequestUrl(row.request_url, provider, `${path}.request_url`);
+  const provider = enumValue(
+    row.provider,
+    INTELLIGENCE_PROVIDERS,
+    `${path}.provider`,
+  );
+  const requestUrl = providerRequestUrl(
+    row.request_url,
+    provider,
+    `${path}.request_url`,
+  );
   const entityIds = identifierArray(row.entity_ids, `${path}.entity_ids`, 160);
-  const securityIds = identifierArray(row.security_ids, `${path}.security_ids`, 32);
-  const discoveryStatus = enumValue(row.discovery_status, DISCOVERY_STATUSES, `${path}.discovery_status`);
+  const securityIds = identifierArray(
+    row.security_ids,
+    `${path}.security_ids`,
+    32,
+  );
+  const discoveryStatus = enumValue(
+    row.discovery_status,
+    DISCOVERY_STATUSES,
+    `${path}.discovery_status`,
+  );
   if (discoveryStatus === "qualified" && securityIds.length === 0) {
-    throw new Error(`${path}.qualified evidence requires a security identifier`);
+    throw new Error(
+      `${path}.qualified evidence requires a security identifier`,
+    );
   }
   return {
     id: uuidValue(row.id, `${path}.id`),
@@ -758,6 +2200,173 @@ function validateRanking(row: JsonObject, index: number): void {
   }
 }
 
+function parsePacketV2(
+  envelope: JsonObject,
+  packet: JsonObject,
+  policyVersionHint?: number,
+): JsonObject {
+  const path = "payload.packet.packet";
+  exactKeys(packet, [
+    "action_candidates",
+    "contract_version",
+    "coverage",
+    "evidence",
+    "execution_allowed",
+    "limitations",
+    "observed_at",
+    "omissions",
+    "policy_version",
+    "research_candidates",
+    "run_id",
+  ], path);
+  if (packet.contract_version !== 2 || packet.execution_allowed !== false) {
+    throw new Error(`${path} must be v2 and non-executable`);
+  }
+  uuidValue(packet.run_id, `${path}.run_id`);
+  timestamp(packet.observed_at, `${path}.observed_at`);
+  const policyVersion = integer(packet.policy_version, `${path}.policy_version`, 1, 2_147_483_647);
+  if (policyVersionHint !== undefined && policyVersion !== policyVersionHint) {
+    throw new Error(`${path}.policy_version mismatch`);
+  }
+  boundedObject(packet.coverage, `${path}.coverage`, 32_768);
+  arrayValue(packet.limitations, `${path}.limitations`, 100).forEach((item, index) =>
+    stringValue(item, `${path}.limitations[${index}]`, 500)
+  );
+  const omissions = arrayValue(packet.omissions, `${path}.omissions`, 1_000);
+  omissions.forEach((value, index) => {
+    const omissionPath = `${path}.omissions[${index}]`;
+    const row = objectValue(value, omissionPath);
+    exactKeys(row, ["candidate_key", "item_id", "kind", "reason", "stage"], omissionPath);
+    stringValue(row.candidate_key, `${omissionPath}.candidate_key`, 256, true);
+    if (row.item_id !== null) uuidValue(row.item_id, `${omissionPath}.item_id`);
+    stringValue(row.kind, `${omissionPath}.kind`, 80);
+    stringValue(row.reason, `${omissionPath}.reason`, 200);
+    stringValue(row.stage, `${omissionPath}.stage`, 80);
+  });
+  const evidence = arrayValue(packet.evidence, `${path}.evidence`, 96);
+  const evidenceIds = new Set<string>();
+  evidence.forEach((value, index) => {
+    const evidencePath = `${path}.evidence[${index}]`;
+    const row = objectValue(value, evidencePath);
+    exactKeys(row, [
+      "authority", "canonical_url", "claim_type", "content_hash", "effective_at",
+      "item_id", "normalized_text", "published_at", "reporting_at", "retrieved_at",
+      "source_identity",
+    ], evidencePath);
+    const itemId = uuidValue(row.item_id, `${evidencePath}.item_id`);
+    if (evidenceIds.has(itemId)) throw new Error(`${path}.evidence has duplicate ids`);
+    evidenceIds.add(itemId);
+    stringValue(row.authority, `${evidencePath}.authority`, 80);
+    canonicalizeUrl(stringValue(row.canonical_url, `${evidencePath}.canonical_url`, 2_048), `${evidencePath}.canonical_url`);
+    stringValue(row.claim_type, `${evidencePath}.claim_type`, 80);
+    hashValue(row.content_hash, `${evidencePath}.content_hash`);
+    timestamp(row.effective_at, `${evidencePath}.effective_at`, true);
+    stringValue(row.normalized_text, `${evidencePath}.normalized_text`, 2_000, true);
+    timestamp(row.published_at, `${evidencePath}.published_at`, true);
+    timestamp(row.reporting_at, `${evidencePath}.reporting_at`, true);
+    timestamp(row.retrieved_at, `${evidencePath}.retrieved_at`);
+    const source = objectValue(row.source_identity, `${evidencePath}.source_identity`);
+    exactKeys(source, ["provider", "receipt_id", "upstream_item_id"], `${evidencePath}.source_identity`);
+    stringValue(source.provider, `${evidencePath}.source_identity.provider`, 120);
+    if (source.receipt_id !== null) uuidValue(source.receipt_id, `${evidencePath}.source_identity.receipt_id`);
+    stringValue(source.upstream_item_id, `${evidencePath}.source_identity.upstream_item_id`, 512);
+  });
+  const research = arrayValue(packet.research_candidates, `${path}.research_candidates`, 12);
+  const researchByKey = new Map<string, JsonObject>();
+  research.forEach((value, index) => {
+    const candidatePath = `${path}.research_candidates[${index}]`;
+    const row = objectValue(value, candidatePath);
+    exactKeys(row, [
+      "adverse_paths", "candidate_hash", "candidate_key", "entity_id", "event_ids",
+      "evidence", "exposure_fact_ids", "limitations", "priority_components",
+      "priority_score", "research_state", "roles", "security_id", "suitability",
+      "theme_ids", "ticker",
+    ], candidatePath);
+    const candidateKey = stringValue(row.candidate_key, `${candidatePath}.candidate_key`, 256);
+    if (researchByKey.has(candidateKey)) throw new Error(`${path}.research_candidates has duplicate identities`);
+    researchByKey.set(candidateKey, row);
+    hashValue(row.candidate_hash, `${candidatePath}.candidate_hash`);
+    if (row.entity_id !== null) stringValue(row.entity_id, `${candidatePath}.entity_id`, 256);
+    if (row.security_id !== null) stringValue(row.security_id, `${candidatePath}.security_id`, 256);
+    if (row.ticker !== null && !/^[A-Z][A-Z0-9.-]{0,14}$/.test(String(row.ticker))) {
+      throw new Error(`${candidatePath}.ticker must be canonical`);
+    }
+    uuidArray(row.event_ids, `${candidatePath}.event_ids`, 1, 50);
+    uuidArray(row.exposure_fact_ids, `${candidatePath}.exposure_fact_ids`, 0, 50);
+    for (const field of ["adverse_paths", "limitations", "roles", "theme_ids"] as const) {
+      arrayValue(row[field], `${candidatePath}.${field}`, 100).forEach((item, itemIndex) =>
+        stringValue(item, `${candidatePath}.${field}[${itemIndex}]`, 500)
+      );
+    }
+    boundedObject(row.priority_components, `${candidatePath}.priority_components`, 4_096);
+    decimalNumber(row.priority_score, `${candidatePath}.priority_score`, -100_000, 100_000);
+    enumValue(row.research_state, [
+      "research_rejected", "observed", "unresolved", "resolved", "exposure_supported", "analysis_ready",
+    ] as const, `${candidatePath}.research_state`);
+    const refs = arrayValue(row.evidence, `${candidatePath}.evidence`, 8);
+    const refIds = new Set<string>();
+    refs.forEach((item, itemIndex) => {
+      const refPath = `${candidatePath}.evidence[${itemIndex}]`;
+      const ref = objectValue(item, refPath);
+      exactKeys(ref, ["claim_type", "item_id", "relationship_eligible", "role"], refPath);
+      const itemId = uuidValue(ref.item_id, `${refPath}.item_id`);
+      if (!evidenceIds.has(itemId) || refIds.has(itemId)) throw new Error(`${refPath} has invalid evidence identity`);
+      refIds.add(itemId);
+      stringValue(ref.claim_type, `${refPath}.claim_type`, 80);
+      if (typeof ref.relationship_eligible !== "boolean") throw new Error(`${refPath}.relationship_eligible must be boolean`);
+      enumValue(ref.role, ["supporting", "opposing"] as const, `${refPath}.role`);
+    });
+    const suitability = objectValue(row.suitability, `${candidatePath}.suitability`);
+    exactKeys(suitability, [
+      "component_scores", "evaluation_hash", "lineage", "missing_reasons", "state", "veto_reasons",
+    ], `${candidatePath}.suitability`);
+    boundedObject(suitability.component_scores, `${candidatePath}.suitability.component_scores`, 4_096);
+    enumValue(suitability.state, ["unknown", "eligible", "vetoed"] as const, `${candidatePath}.suitability.state`);
+    for (const field of ["missing_reasons", "veto_reasons"] as const) {
+      arrayValue(suitability[field], `${candidatePath}.suitability.${field}`, 50).forEach((item, itemIndex) =>
+        stringValue(item, `${candidatePath}.suitability.${field}[${itemIndex}]`, 200)
+      );
+    }
+    const suitabilityBody = { ...suitability };
+    delete suitabilityBody.evaluation_hash;
+    assertHash(suitability.evaluation_hash, canonicalJson(suitabilityBody), `${candidatePath}.suitability.evaluation_hash`);
+    const candidateBody = { ...row };
+    delete candidateBody.candidate_hash;
+    assertHash(row.candidate_hash, canonicalJson(candidateBody), `${candidatePath}.candidate_hash`);
+  });
+  const action = arrayValue(packet.action_candidates, `${path}.action_candidates`, 12);
+  const actionKeys = new Set<string>();
+  action.forEach((value, index) => {
+    const actionPath = `${path}.action_candidates[${index}]`;
+    const row = objectValue(value, actionPath);
+    exactKeys(row, ["candidate_hash", "candidate_key", "suitability_hash"], actionPath);
+    const key = stringValue(row.candidate_key, `${actionPath}.candidate_key`, 256);
+    const candidate = researchByKey.get(key);
+    if (
+      !candidate || actionKeys.has(key) ||
+      hashValue(row.candidate_hash, `${actionPath}.candidate_hash`) !== candidate.candidate_hash
+    ) throw new Error(`${actionPath} is not an exact research subset`);
+    actionKeys.add(key);
+    const suitability = objectValue(candidate.suitability, `${actionPath}.suitability`);
+    if (
+      hashValue(row.suitability_hash, `${actionPath}.suitability_hash`) !== suitability.evaluation_hash ||
+      candidate.research_state !== "analysis_ready" || suitability.state !== "eligible"
+    ) throw new Error(`${actionPath} is not action eligible`);
+  });
+  const candidateCount = integer(envelope.candidate_count, "payload.packet.candidate_count", 0, 12);
+  const evidenceCount = integer(envelope.evidence_count, "payload.packet.evidence_count", 0, 96);
+  if (candidateCount !== research.length || evidenceCount !== evidence.length) {
+    throw new Error("payload.packet counts do not match packet arrays");
+  }
+  return {
+    id: uuidValue(envelope.id, "payload.packet.id"),
+    candidate_count: candidateCount,
+    evidence_count: evidenceCount,
+    packet,
+    packet_hash: assertHash(envelope.packet_hash, canonicalJson(packet), "payload.packet.packet_hash"),
+  };
+}
+
 function parsePacket(value: unknown, policyVersionHint?: number): JsonObject {
   const row = objectValue(value, "payload.packet");
   exactKeys(row, [
@@ -768,6 +2377,9 @@ function parsePacket(value: unknown, policyVersionHint?: number): JsonObject {
     "packet_hash",
   ], "payload.packet");
   const packet = boundedObject(row.packet, "payload.packet.packet", 98_304);
+  if (packet.contract_version === 2) {
+    return parsePacketV2(row, packet, policyVersionHint);
+  }
   exactKeys(packet, [
     "candidates",
     "evidence",
@@ -997,7 +2609,14 @@ export function parseIntelligenceStartReceipt(
   const row = objectValue(value, "start intelligence receipt");
   exactKeys(
     row,
-    ["run_id", "reservation_ids", "cache_entries", "request_window", "duplicate", ...("reservation_usage" in row ? ["reservation_usage"] : [])],
+    [
+      "run_id",
+      "reservation_ids",
+      "cache_entries",
+      "request_window",
+      "duplicate",
+      ...("reservation_usage" in row ? ["reservation_usage"] : []),
+    ],
     "start intelligence receipt",
   );
   const cacheEntries = arrayValue(
@@ -1024,10 +2643,20 @@ export function parseIntelligenceStartReceipt(
       ),
     cache_entries: cacheEntries,
     request_window: parseRequestWindow(row.request_window),
-    ...("reservation_usage" in row ? { reservation_usage: Object.fromEntries(
-      Object.entries(objectValue(row.reservation_usage, "reservation usage")).map(([key, value]) =>
-        [uuidValue(key, "reservation usage id"), integer(value, "reservation usage count", 0, 100)]),
-    ) } : {}),
+    ...("reservation_usage" in row
+      ? {
+        reservation_usage: Object.fromEntries(
+          Object.entries(
+            objectValue(row.reservation_usage, "reservation usage"),
+          ).map((
+            [key, value],
+          ) => [
+            uuidValue(key, "reservation usage id"),
+            integer(value, "reservation usage count", 0, 100),
+          ]),
+        ),
+      }
+      : {}),
     duplicate: typeof row.duplicate === "boolean" ? row.duplicate : (() => {
       throw new Error("start intelligence receipt.duplicate must be boolean");
     })(),

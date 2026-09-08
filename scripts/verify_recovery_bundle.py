@@ -36,12 +36,40 @@ _RESTORE_TABLES = (
     ("runs", "analysis_runs", {"phase": "kind"}),
     ("gateway_requests", "market_gateway_requests", {}),
     ("intelligence_runs", "market_intelligence_runs", {}),
-    ("intelligence_run_events", "market_intelligence_run_events", {}),
     ("source_quota_reservations", "market_source_quota_reservations", {}),
+    ("source_receipts", "market_source_receipts", {}),
+    ("source_items", "market_source_items", {}),
+    ("intelligence_run_items", "market_intelligence_run_items", {}),
+    ("source_item_provenance", "market_source_item_provenance", {}),
+    ("run_source_item_provenance", "market_run_source_item_provenance", {}),
+    ("events", "market_events", {}),
+    ("candidate_rankings", "market_candidate_rankings", {}),
+    ("reference_chunk_receipts", "market_reference_chunk_receipts", {}),
+    ("reference_manifests", "market_reference_manifests", {}),
+    ("security_reference_revisions", "market_security_reference_revisions", {}),
+    ("reference_finalization_seals", "market_reference_finalization_seals", {}),
+    ("reference_snapshot_memberships", "market_reference_snapshot_memberships", {}),
+    ("reference_run_bindings", "market_reference_run_bindings", {}),
+    ("reference_predecessor_pins", "market_reference_predecessor_pins", {}),
+    ("reference_transfer_requests", "market_reference_transfer_requests", {}),
+    ("reference_transfer_responses", "market_reference_transfer_responses", {}),
+    ("enrichment_selection_manifests", "market_enrichment_selection_manifests", {}),
+    ("discovery_stage_tasks", "market_discovery_stage_tasks", {}),
+    ("enrichment_request_descriptors", "market_enrichment_request_descriptors", {}),
+    ("theme_episode_revisions", "market_theme_episode_revisions", {}),
+    ("theme_episode_revisions_v2", "market_theme_episode_revisions_v2", {}),
+    ("exposure_facts", "market_exposure_facts", {}),
+    ("research_nominations", "market_research_nominations", {}),
+    ("intelligence_run_events", "market_intelligence_run_events", {}),
     ("collection_checkpoints", "market_collection_checkpoints", {}),
     ("collection_checkpoint_history", "market_collection_checkpoint_history", {}),
     ("collection_completions", "market_intelligence_collection_completions", {}),
     ("packets", "market_evidence_packets", {}),
+    ("reviewer_identity_receipts_v2", "market_reviewer_identity_receipts_v2", {}),
+    ("research_nomination_requests_v2", "market_research_nomination_requests_v2", {}),
+    ("research_nominations_v2", "market_research_nominations_v2", {}),
+    ("research_nomination_lifecycle_v2", "market_research_nomination_lifecycle_v2", {}),
+    ("intelligence_memory_context_bindings_v2", "market_intelligence_memory_context_bindings_v2", {}),
     ("decision_evaluations", "decision_evaluations", {}),
     ("policy_comparisons", "market_policy_comparisons", {}),
     ("reports", "market_reports", {}),
@@ -52,6 +80,36 @@ _RESTORE_TABLES = (
     ("cash_snapshots", "reconciled_cash_snapshots", {}),
     ("run_terminal_outcomes", "market_run_terminal_outcomes", {}),
 )
+
+
+def ordered_restore_rows(dataset: str, rows: list[dict[str, object]]) -> list[dict[str, object]]:
+    """Return deterministic parent-first rows for self-referencing ledgers."""
+    predecessor_fields = {
+        "reference_finalization_seals": ("manifest_id", "predecessor_manifest_id"),
+        "theme_episode_revisions_v2": ("revision_id", "predecessor_revision_id"),
+        "reviewer_identity_receipts_v2": ("receipt_id", "predecessor_receipt_id"),
+        "research_nomination_lifecycle_v2": ("receipt_id", "predecessor_receipt_id"),
+    }
+    if dataset not in predecessor_fields:
+        return rows
+    identity_field, predecessor_field = predecessor_fields[dataset]
+    pending = list(rows)
+    ordered: list[dict[str, object]] = []
+    restored: set[object] = set()
+    while pending:
+        ready = [
+            row for row in pending
+            if row.get(predecessor_field) is None
+            or row.get(predecessor_field) in restored
+        ]
+        if not ready:
+            raise ValueError(f"{dataset} predecessor chain is not restorable")
+        ready.sort(key=lambda row: str(row.get(identity_field)))
+        for row in ready:
+            pending.remove(row)
+            ordered.append(row)
+            restored.add(row.get(identity_field))
+    return ordered
 
 
 class PostgresIsolatedRestoreTarget:
@@ -129,7 +187,7 @@ def restore_recovery_records(connection, records: Mapping[str, object], *, isola
 
         run_gateway_ids = {row["id"]: row["gateway_request_id"] for row in normalized["runs"]}
         for dataset, table, renames in _RESTORE_TABLES:
-            for source_row in normalized[dataset]:
+            for source_row in ordered_restore_rows(dataset, normalized[dataset]):
                 row = {renames.get(key, key): value for key, value in source_row.items()}
                 if dataset == "runs":
                     row["gateway_request_id"] = None

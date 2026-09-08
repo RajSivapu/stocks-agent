@@ -1,0 +1,8 @@
+ACT Symbol|Security Name|Exchange|CQS Symbol|ETF|Round Lot Size|Test Issue|NASDAQ Symbol
+BABA|Alibaba Group Holding Limited American Depositary Shares|N|BABA|N|100|N|BABA
+SPY|SPDR S&P 500 ETF Trust|P|SPY|Y|100|N|SPY
+ACMEP|Acme Industries 5.00% Preferred Stock|N|ACMEP|N|100|N|ACMEP
+ACMEW|Acme Technologies Warrant|N|ACMEW|N|100|N|ACMEW
+OTCM|OTC Markets Group Inc. Class A Common Stock|U|OTCM|N|100|N|OTCM
+DUPE|Duplicate Class B Common Stock|N|DUPE|N|100|N|DUPE
+File Creation Time: 2026090418:04||||||||

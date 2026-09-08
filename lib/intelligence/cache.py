@@ -11,7 +11,13 @@ from typing import Any
 import uuid
 
 from lib.intelligence.http import cache_key
-from lib.intelligence.providers import CollectionResult, RequestReceipt, SourceItem, parse_timestamp
+from lib.intelligence.providers import (
+    CollectionResult,
+    RequestReceipt,
+    SourceItem,
+    bounded_metadata,
+    parse_timestamp,
+)
 
 
 class ResumableCollectionCache:
@@ -96,6 +102,22 @@ class ResumableCollectionCache:
         )
         return replace(result, receipt=receipt)
 
+    def attach_collection_metadata(
+        self, key: str, metadata: Mapping[str, object]
+    ) -> None:
+        """Restore task-ledger receipt metadata onto a legacy cache checkpoint."""
+        result = self._collections.get(key)
+        if result is None:
+            return
+        self._collections[key] = replace(
+            result,
+            receipt=replace(result.receipt, metadata=bounded_metadata(metadata)),
+        )
+
+    def collection_for_lineage(self, key: str) -> CollectionResult | None:
+        """Return the exact protected checkpoint value without deriving a cache-hit receipt."""
+        return self._collections.get(key)
+
     def put_run(self, run_id: str, receipt: object) -> None:
         if not isinstance(run_id, str) or not run_id:
             raise ValueError("invalid run cache key")
@@ -127,7 +149,9 @@ def _receipt_from_checkpoint(row: Mapping[str, object]) -> RequestReceipt:
         "returned_count", "accepted_count", "duplicate_count", "dropped_count", "response_hash",
         "error_code", "source_receipt_id", "cache_predecessor_receipt_id",
     }
-    if set(row) != required or not isinstance(row["requested_window"], Mapping):
+    allowed = required | {"metadata"}
+    keys = set(row)
+    if (keys != required and keys != allowed) or not isinstance(row["requested_window"], Mapping):
         raise ValueError("invalid persisted receipt checkpoint")
     if not isinstance(row["source_receipt_id"], str) or not row["source_receipt_id"]:
         raise ValueError("invalid persisted receipt checkpoint")
@@ -145,6 +169,7 @@ def _receipt_from_checkpoint(row: Mapping[str, object]) -> RequestReceipt:
             error_code=None if row["error_code"] is None else str(row["error_code"]),
             source_receipt_id=row["source_receipt_id"],
             cache_predecessor_receipt_id=None if row["cache_predecessor_receipt_id"] is None else str(row["cache_predecessor_receipt_id"]),
+            metadata=bounded_metadata(row.get("metadata", {})),
         )
     except (TypeError, ValueError):
         raise ValueError("invalid persisted receipt checkpoint") from None

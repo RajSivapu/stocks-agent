@@ -1,0 +1,936 @@
+from concurrent.futures import ThreadPoolExecutor
+import hashlib
+import json
+import os
+from pathlib import Path
+import shutil
+import socket
+import subprocess
+import tempfile
+import uuid
+
+import psycopg
+from psycopg.rows import dict_row
+from psycopg.types.json import Jsonb
+from pglast import parse_sql
+import pytest
+
+from lib.intelligence.themes import (
+    revise_theme_episode,
+    theme_episode_v2_anchor_document,
+    theme_episode_v2_episode_id,
+    theme_episode_v2_persistence_document,
+    theme_episode_v2_revision_id,
+)
+from scripts.export_recovery_bundle import _validate_theme_memory_v2_lineage
+from scripts.protected_evidence import RECOVERY_SQL
+
+
+ROOT = Path(__file__).resolve().parents[1]
+MIGRATION = ROOT / "sql/migrations/20261012_theme_memory_research_nominations.sql"
+RUNTIME_COMPLETION_MIGRATION = (
+    ROOT / "sql/migrations/20261013_v2_runtime_completion.sql"
+)
+HONEST_EMPTY_REPORT_MIGRATION = (
+    ROOT / "sql/migrations/20261014_honest_empty_report_persistence.sql"
+)
+RELEASE_READER_MIGRATION = (
+    ROOT / "sql/migrations/20261015_release_reader_source_tables.sql"
+)
+SCHEMA = ROOT / "sql/schema.sql"
+
+
+TABLES = (
+    "market_theme_episode_revisions_v2",
+    "market_reviewer_identity_receipts_v2",
+    "market_research_nomination_requests_v2",
+    "market_research_nominations_v2",
+    "market_research_nomination_lifecycle_v2",
+    "market_intelligence_memory_context_bindings_v2",
+)
+
+
+def test_task9_migration_is_additive_parseable_and_appended_verbatim():
+    statements = parse_sql(MIGRATION.read_text())
+    assert statements
+    assert MIGRATION.read_bytes() in SCHEMA.read_bytes()
+    migration = MIGRATION.read_text()
+    for table in TABLES:
+        assert f"CREATE TABLE IF NOT EXISTS public.{table}" in migration
+        assert f"ALTER TABLE public.{table} ENABLE ROW LEVEL SECURITY" in migration
+    assert "20261005_market_wide_discovery" not in migration
+
+
+def test_v2_runtime_completion_and_honest_empty_tail_are_parseable_and_ordered():
+    statements = parse_sql(RUNTIME_COMPLETION_MIGRATION.read_text())
+    assert statements
+    honest_empty = parse_sql(HONEST_EMPTY_REPORT_MIGRATION.read_text())
+    assert honest_empty
+    release_reader = parse_sql(RELEASE_READER_MIGRATION.read_text())
+    assert release_reader
+    schema = SCHEMA.read_bytes()
+    assert RUNTIME_COMPLETION_MIGRATION.read_bytes() in schema
+    assert HONEST_EMPTY_REPORT_MIGRATION.read_bytes() in schema
+    assert schema.endswith(RELEASE_READER_MIGRATION.read_bytes())
+    migration = RUNTIME_COMPLETION_MIGRATION.read_text()
+    assert "SECURITY DEFINER SET search_path=pg_catalog" in migration
+    assert "record_market_intelligence_v2_completion" in migration
+    assert "record_market_intelligence_v4_internal" in migration
+    assert "GRANT EXECUTE ON FUNCTION public.record_market_intelligence(UUID,UUID,JSONB)" in migration
+
+
+def test_v2_episode_ledger_has_cross_run_identity_and_no_global_row_collision():
+    migration = MIGRATION.read_text()
+    assert "UNIQUE (episode_id, revision)" in migration
+    assert "UNIQUE (predecessor_revision_id)" in migration
+    assert "theme_id TEXT NOT NULL" in migration
+    assert "theme_id ~ '^[a-z][a-z0-9_]{2,79}$'" in migration
+    assert "theme_id ~ '^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$'" in migration
+    assert "origin_run_id UUID NOT NULL" in migration
+    assert "identity_version INT NOT NULL DEFAULT 2 CHECK (identity_version=2)" in migration
+    assert "expires_at<=first_seen+INTERVAL '30 days'" in migration
+    assert "execution_allowed BOOLEAN NOT NULL DEFAULT false CHECK (NOT execution_allowed)" in migration
+
+
+def test_nomination_rpc_is_exact_service_only_atomic_and_replay_safe():
+    migration = MIGRATION.read_text()
+    assert "CREATE OR REPLACE FUNCTION public.record_research_nominations(" in migration
+    assert "pg_advisory_xact_lock" in migration
+    assert "accepted nomination limit exceeded" in migration
+    assert "research nomination request replay mismatch" in migration
+    assert "candidate evidence relationship mismatch" in migration
+    assert "GRANT EXECUTE ON FUNCTION public.record_research_nominations(UUID,UUID,JSONB) TO service_role" in migration
+    assert "TO authenticated" not in migration.split(
+        "GRANT EXECUTE ON FUNCTION public.record_research_nominations", 1
+    )[1].split(";", 1)[0]
+
+
+def test_memory_context_is_frozen_bounded_and_preserves_priority_surfaces():
+    migration = MIGRATION.read_text()
+    assert "CREATE OR REPLACE FUNCTION public.read_theme_memory_context(" in migration
+    assert "octet_length(context::text)<=65536" in migration
+    for key, cap in (
+        ("active_theme_heads", 25),
+        ("due_nominations", 12),
+        ("urgent_events", 10),
+        ("high_materiality_themes", 10),
+        ("radar", 20),
+        ("source_cursors", 100),
+    ):
+        assert f"'{key}'" in migration
+        assert f"LIMIT {cap}" in migration
+    assert "ON CONFLICT (run_id) DO NOTHING" in migration
+    assert "memory context hash mismatch" in migration
+
+
+def test_v2_tables_are_append_only_rls_protected_and_dashboard_is_bounded():
+    migration = MIGRATION.read_text()
+    for table in TABLES:
+        assert f"ON public.{table}" in migration
+        assert f"REVOKE ALL ON public.{table}" in migration
+    assert "CREATE OR REPLACE FUNCTION public.read_owner_intelligence_v2(" in migration
+    assert "'intelligence_version',2" in migration
+    assert "'research_only',true" in migration
+    assert "'execution_disabled',true" in migration
+    assert "'valuation_unavailable',true" in migration
+    assert "octet_length(v_result::text)>98304" in migration
+    assert "GRANT EXECUTE ON FUNCTION public.read_owner_intelligence_v2(INT) TO stock_agent_dashboard" in migration
+
+
+@pytest.fixture(scope="module")
+def theme_memory_dsn():
+    binaries = {name: shutil.which(name) for name in ("initdb", "pg_ctl")}
+    if not all(binaries.values()) or os.geteuid() == 0:
+        pytest.skip("disposable PostgreSQL requires local binaries and a non-root user")
+    with tempfile.TemporaryDirectory(prefix="theme-memory-sql-") as directory:
+        root = Path(directory)
+        with socket.socket() as probe:
+            probe.bind(("127.0.0.1", 0))
+            port = probe.getsockname()[1]
+        subprocess.run(
+            [binaries["initdb"], "-D", str(root / "db"), "-A", "trust", "-E", "UTF8", "--no-locale"],
+            check=True,
+            capture_output=True,
+        )
+        subprocess.run(
+            [binaries["pg_ctl"], "-D", str(root / "db"), "-l", str(root / "postgres.log"),
+             "-o", f"-k {root} -h '' -p {port}", "-w", "start"],
+            check=True,
+            capture_output=True,
+        )
+        dsn = f"host={root} port={port} dbname=postgres"
+        try:
+            with psycopg.connect(dsn, autocommit=True) as db:
+                db.execute("CREATE ROLE anon; CREATE ROLE authenticated; CREATE ROLE service_role")
+                db.execute("CREATE ROLE stock_agent_dashboard; CREATE ROLE stock_agent_release_reader; CREATE ROLE stock_agent_release_reader_runtime")
+                db.execute(SCHEMA.read_text())
+            yield dsn
+        finally:
+            subprocess.run(
+                [binaries["pg_ctl"], "-D", str(root / "db"), "-m", "immediate", "-w", "stop"],
+                check=True,
+                capture_output=True,
+            )
+
+
+def _seed_protected_nomination_packet(db):
+    run_id, packet_id, manifest_id, reviewer_id, evidence_id = [str(uuid.uuid4()) for _ in range(5)]
+    candidate = {
+        "candidate_key": "ACME",
+        "ticker": "ACME",
+        "theme_ids": ["theme_one", "theme_two", "theme_three", "theme_four"],
+        "entity_id": "CIK:0000000001",
+        "security_id": "NASDAQ:ACME",
+        "roles": ["program_to_supplier"],
+        "evidence": [{"item_id": evidence_id, "role": "supporting", "relationship_eligible": True}],
+        "suitability": {"missing_reasons": ["Current issuer valuation is unavailable"]},
+    }
+    packet = {
+        "contract_version": 2,
+        "execution_allowed": False,
+        "research_candidates": [candidate],
+        "evidence": [{
+            "item_id": evidence_id,
+            "source_identity": {"provider": "fixture"},
+            "canonical_url": "javascript:alert(1)",
+            "normalized_text": "<img src=x onerror=alert(1)> remains inert evidence text.",
+            "retrieved_at": "2026-09-08T12:00:00Z",
+        }],
+        "coverage": {"source_scope": "fixture"},
+    }
+    packet_hash = db.execute(
+        "SELECT encode(extensions.digest(convert_to(market_canonical_jsonb(%s),'UTF8'),'sha256'),'hex')",
+        (Jsonb(packet),),
+    ).fetchone()[0]
+    db.execute("SET session_replication_role=replica")
+    db.execute("INSERT INTO market_policy_config(version,config,active) VALUES(90210,'{}',false) ON CONFLICT DO NOTHING")
+    db.execute(
+        "INSERT INTO analysis_runs(id,kind,status,finished_at) VALUES(%s,'market-intelligence','completed',statement_timestamp())",
+        (run_id,),
+    )
+    db.execute("INSERT INTO market_intelligence_runs(id,phase,market_date,policy_version,reservation_plan) VALUES(%s,'on-demand',CURRENT_DATE,90210,'{}')", (run_id,))
+    db.execute("INSERT INTO market_intelligence_run_events(id,run_id,status) VALUES(%s,%s,'completed')", (str(uuid.uuid4()), run_id))
+    db.execute(
+        "INSERT INTO market_reference_manifests(id,run_id,reference_version,revision,capability_version,taxonomy_version,source_hash,valid_from,manifest,content_hash) VALUES(%s,%s,%s,1,1,1,%s,statement_timestamp(),'{}',%s)",
+        (manifest_id, run_id, f"fixture:{manifest_id}", "a" * 64, "b" * 64),
+    )
+    db.execute(
+        "INSERT INTO market_reference_finalization_seals(manifest_id,run_id,capability_id,chunk_count,security_count,root_hash) VALUES(%s,%s,'sec_company_tickers_universe',1,1,%s)",
+        (manifest_id, run_id, "d" * 64),
+    )
+    db.execute(
+        "INSERT INTO market_reference_run_bindings(run_id,capability_id,manifest_id,reference_status,reference_as_of,source_retrieved_at,reference_age_seconds,request_payload) VALUES(%s,'sec_company_tickers_universe',%s,'healthy',statement_timestamp(),statement_timestamp(),0,'{}')",
+        (run_id, manifest_id),
+    )
+    db.execute(
+        "INSERT INTO market_evidence_packets(id,run_id,policy_version,status,candidate_count,evidence_count,packet,packet_hash) VALUES(%s,%s,90210,'completed',1,1,%s,%s)",
+        (packet_id, run_id, Jsonb(packet), packet_hash),
+    )
+    db.execute(
+        "INSERT INTO market_reviewer_identity_receipts_v2(receipt_id,run_id,packet_id,packet_hash,reference_manifest_id,actor_identity,reviewed_role,review_hash) VALUES(%s,%s,%s,%s,%s,'analyst-fixture','analyst',%s)",
+        (reviewer_id, run_id, packet_id, packet_hash, manifest_id, "c" * 64),
+    )
+    db.execute("SET session_replication_role=origin")
+    return run_id, reviewer_id, evidence_id
+
+
+def _nomination(theme_id, evidence_id):
+    return {
+        "theme_id": theme_id,
+        "entity_id": "CIK:0000000001",
+        "security_id": "NASDAQ:ACME",
+        "role": "program_to_supplier",
+        "reason": "Confirm the current primary-source relationship.",
+        "evidence_ids": [evidence_id],
+        "required_evidence_kind": "primary_exposure",
+        "priority": 3,
+    }
+
+
+def test_actual_postgres_reviewer_identity_binds_current_packet_role_and_distinct_actor(theme_memory_dsn):
+    with psycopg.connect(theme_memory_dsn, autocommit=True) as db:
+        run_id, analyst_id, _evidence_id = _seed_protected_nomination_packet(db)
+        checker_id = str(uuid.uuid4())
+        db.execute("SET ROLE service_role")
+        receipt = db.execute(
+            "SELECT record_research_review_identity_v2(%s,%s,%s)",
+            (run_id, checker_id, Jsonb({
+                "actor_identity": "checker-fixture", "reviewed_role": "checker",
+                "predecessor_receipt_id": analyst_id,
+            })),
+        ).fetchone()[0]
+        replay = db.execute(
+            "SELECT record_research_review_identity_v2(%s,%s,%s)",
+            (run_id, checker_id, Jsonb({
+                "actor_identity": "checker-fixture", "reviewed_role": "checker",
+                "predecessor_receipt_id": analyst_id,
+            })),
+        ).fetchone()[0]
+        assert replay == {**receipt, "duplicate": True}
+        with pytest.raises(psycopg.errors.InvalidParameterValue):
+            db.execute(
+                "SELECT record_research_review_identity_v2(%s,%s,%s)",
+                (run_id, str(uuid.uuid4()), Jsonb({
+                    "actor_identity": "analyst-fixture", "reviewed_role": "checker",
+                    "predecessor_receipt_id": analyst_id,
+                })),
+            )
+        db.execute("RESET ROLE")
+        packet_id, packet_hash, reference_id, role, predecessor = db.execute(
+            "SELECT packet_id,packet_hash,reference_manifest_id,reviewed_role,predecessor_receipt_id FROM market_reviewer_identity_receipts_v2 WHERE receipt_id=%s",
+            (checker_id,),
+        ).fetchone()
+        assert role == "checker" and predecessor == uuid.UUID(analyst_id)
+        assert db.execute(
+            "SELECT id,packet_hash FROM market_evidence_packets WHERE id=%s AND run_id=%s",
+            (packet_id, run_id),
+        ).fetchone() == (packet_id, packet_hash)
+        assert db.execute(
+            "SELECT manifest_id FROM market_reference_run_bindings WHERE run_id=%s AND reference_status='healthy'",
+            (run_id,),
+        ).fetchone() == (reference_id,)
+
+
+def test_actual_postgres_nomination_three_plus_one_race_and_exact_replay(theme_memory_dsn):
+    with psycopg.connect(theme_memory_dsn, autocommit=True) as db:
+        run_id, reviewer_id, evidence_id = _seed_protected_nomination_packet(db)
+    request_three, request_one = str(uuid.uuid4()), str(uuid.uuid4())
+    payload_three = {"reviewer_receipt_id": reviewer_id, "nominations": [
+        _nomination("theme_one", evidence_id), _nomination("theme_two", evidence_id),
+        _nomination("theme_three", evidence_id),
+    ]}
+    payload_one = {"reviewer_receipt_id": reviewer_id, "nominations": [_nomination("theme_four", evidence_id)]}
+
+    def submit(request_id, payload):
+        try:
+            with psycopg.connect(theme_memory_dsn, autocommit=True) as db:
+                db.execute("SET ROLE service_role")
+                return db.execute(
+                    "SELECT record_research_nominations(%s,%s,%s)",
+                    (run_id, request_id, Jsonb(payload)),
+                ).fetchone()[0]
+        except psycopg.Error as exc:
+            return exc.sqlstate
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        outcomes = list(pool.map(lambda pair: submit(*pair), ((request_three, payload_three), (request_one, payload_one))))
+    assert sum(isinstance(outcome, dict) for outcome in outcomes) == 1
+    assert "22023" in outcomes
+    with psycopg.connect(theme_memory_dsn, autocommit=True) as db:
+        accepted = db.execute(
+            "SELECT count(*) FROM market_research_nominations_v2 WHERE origin_run_id=%s", (run_id,)
+        ).fetchone()[0]
+        assert accepted in (1, 3)
+        winner_index = 0 if isinstance(outcomes[0], dict) else 1
+        winner_request, winner_payload = ((request_three, payload_three), (request_one, payload_one))[winner_index]
+        replay = submit(winner_request, winner_payload)
+        assert replay == outcomes[winner_index]
+        changed = dict(winner_payload)
+        changed["nominations"] = [dict(changed["nominations"][0], priority=4)]
+        assert submit(winner_request, changed) == "22023"
+        with pytest.raises(psycopg.errors.InsufficientPrivilege):
+            db.execute("SET ROLE authenticated; SELECT * FROM market_research_nominations_v2")
+
+
+def test_actual_postgres_owner_projection_is_bounded_redacted_and_independent_of_action(theme_memory_dsn):
+    with psycopg.connect(theme_memory_dsn, autocommit=True) as db:
+        run_id, _reviewer_id, evidence_id = _seed_protected_nomination_packet(db)
+        db.execute("SET ROLE stock_agent_dashboard")
+        projection = db.execute("SELECT read_owner_intelligence_v2(25)").fetchone()[0]
+        encoded = json.dumps(projection, ensure_ascii=False, separators=(",", ":")).encode()
+        assert len(encoded) <= 98_304
+        assert projection["intelligence_version"] == 2
+        assert projection["run_id"] == run_id
+        assert projection["coverage"] == {"mode": "bounded", "complete_market_coverage": False}
+        assert projection["companies"][0]["outside_watchlist"] is True
+        assert projection["companies"][0]["evidence_ids"] == [evidence_id]
+        assert projection["evidence"][0]["url"] is None
+        assert projection["evidence"][0]["passage"].startswith("<img")
+        assert not ({"action", "qualified", "score", "price"} & set(projection))
+        db.execute("RESET ROLE")
+        with pytest.raises(psycopg.errors.InsufficientPrivilege):
+            db.execute("SET ROLE authenticated; SELECT read_owner_intelligence_v2(25)")
+
+
+def test_actual_postgres_nomination_deferral_and_later_frozen_selection_barrier(theme_memory_dsn):
+    with psycopg.connect(theme_memory_dsn, autocommit=True) as db:
+        origin_run, reviewer_id, evidence_id = _seed_protected_nomination_packet(db)
+        request_id = str(uuid.uuid4())
+        db.execute("SET ROLE service_role")
+        response = db.execute(
+            "SELECT record_research_nominations(%s,%s,%s)",
+            (origin_run, request_id, Jsonb({
+                "reviewer_receipt_id": reviewer_id,
+                "nominations": [_nomination("theme_one", evidence_id)],
+            })),
+        ).fetchone()[0]
+        nomination_id = response["nominations"][0]["nomination_id"]
+        deferred = db.execute(
+            "SELECT transition_research_nomination_v2(%s,%s,%s)",
+            (origin_run, nomination_id, Jsonb({
+                "state": "pending", "reason": "Official filing remains unavailable.",
+                "selection_descriptor": None,
+            })),
+        ).fetchone()[0]
+        assert deferred["state"] == "pending"
+        with pytest.raises(psycopg.errors.InvalidParameterValue):
+            db.execute(
+                "SELECT transition_research_nomination_v2(%s,%s,%s)",
+                (origin_run, nomination_id, Jsonb({
+                    "state": "selected", "reason": "Same-run selection is forbidden.",
+                    "selection_descriptor": {
+                        "request_id": str(uuid.uuid4()), "descriptor_hash": "d" * 64,
+                        "uncertain_outcome_barrier": True, "execution_allowed": False,
+                    },
+                })),
+            )
+        db.execute("RESET ROLE")
+
+        later_run, task_id, manifest_id, descriptor_id = [str(uuid.uuid4()) for _ in range(4)]
+        descriptor_hash = "d" * 64
+        db.execute("SET session_replication_role=replica")
+        db.execute(
+            "INSERT INTO analysis_runs(id,kind,status,scheduled_phase,scheduled_market_date) VALUES(%s,'market-intelligence','running','post-market',CURRENT_DATE)",
+            (later_run,),
+        )
+        db.execute(
+            "INSERT INTO market_intelligence_runs(id,phase,market_date,policy_version,reservation_plan) VALUES(%s,'post-market',CURRENT_DATE,90210,'{}')",
+            (later_run,),
+        )
+        db.execute(
+            "INSERT INTO market_discovery_stage_tasks(id,run_id,stage,capability_id,provider,query_kind,query_hash,dependency_ids,requested_window,state,attempt_count,request_budget,result) VALUES(%s,%s,'enrich','sec_issuer_submissions','sec_edgar','issuer_submissions',%s,'[]','{}','planned',0,1,'{}')",
+            (task_id, later_run, descriptor_hash),
+        )
+        db.execute(
+            "INSERT INTO market_enrichment_selection_manifests(id,run_id,selection_stage,phase,request_count,provider_reservations,deferred_reasons,manifest,content_hash) VALUES(%s,%s,'initial','post-market',1,'{}','{}','{}',%s)",
+            (manifest_id, later_run, "e" * 64),
+        )
+        db.execute(
+            "INSERT INTO market_enrichment_request_descriptors(id,manifest_id,run_id,task_id,provider,capability_id,query_kind,descriptor,content_hash) VALUES(%s,%s,%s,%s,'sec_edgar','sec_issuer_submissions','issuer_submissions','{}',%s)",
+            (descriptor_id, manifest_id, later_run, task_id, descriptor_hash),
+        )
+        db.execute("SET session_replication_role=origin")
+        db.execute("SET ROLE service_role")
+        selected = db.execute(
+            "SELECT transition_research_nomination_v2(%s,%s,%s)",
+            (later_run, nomination_id, Jsonb({
+                "state": "selected", "reason": "Scheduled bounded primary-source follow-up.",
+                "selection_descriptor": {
+                    "request_id": descriptor_id, "descriptor_hash": descriptor_hash,
+                    "uncertain_outcome_barrier": True, "execution_allowed": False,
+                },
+            })),
+        ).fetchone()[0]
+        assert selected["state"] == "selected"
+        db.execute("RESET ROLE")
+        assert db.execute(
+            "SELECT state FROM market_discovery_stage_tasks WHERE id=%s", (task_id,)
+        ).fetchone() == ("planned",)
+        assert db.execute(
+            "SELECT count(*) FROM market_source_receipts WHERE run_id=%s", (later_run,)
+        ).fetchone() == (0,)
+        assert db.execute(
+            "SELECT state,reason,selection_descriptor->>'descriptor_hash' FROM market_research_nomination_lifecycle_v2 WHERE nomination_id=%s ORDER BY created_at,receipt_id",
+            (nomination_id,),
+        ).fetchall()[-2:] == [
+            ("pending", "Official filing remains unavailable.", None),
+            ("selected", "Scheduled bounded primary-source follow-up.", descriptor_hash),
+        ]
+
+
+def _seed_episode_run(db):
+    run_id, reservation_id, receipt_id = [str(uuid.uuid4()) for _ in range(3)]
+    evidence_ids = [str(uuid.uuid4()), str(uuid.uuid4())]
+    db.execute("SET session_replication_role=replica")
+    db.execute("INSERT INTO analysis_runs(id,kind,status) VALUES(%s,'market-intelligence','running')", (run_id,))
+    db.execute("INSERT INTO market_intelligence_runs(id,phase,market_date,policy_version,reservation_plan) VALUES(%s,'on-demand',CURRENT_DATE,90210,'{}')", (run_id,))
+    db.execute("INSERT INTO market_intelligence_run_events(id,run_id,status) VALUES(%s,%s,'started')", (str(uuid.uuid4()), run_id))
+    db.execute("INSERT INTO market_source_quota_reservations(id,run_id,provider,market_date,phase,reserved_requests,cache_keys) VALUES(%s,%s,'gdelt',CURRENT_DATE,'on-demand',1,'[]')", (reservation_id, run_id))
+    db.execute("INSERT INTO market_source_receipts(id,run_id,reservation_id,provider,status,cache_key,requested_window,retrieved_at,expires_at,request_cost,returned_count,accepted_count,duplicate_count,dropped_count,response_hash) VALUES(%s,%s,%s,'gdelt','succeeded','episode-fixture','{}','2026-09-07T12:10:00Z','2026-09-08T12:10:00Z',1,2,2,0,0,%s)", (receipt_id, run_id, reservation_id, "e" * 64))
+    for index, evidence_id in enumerate(evidence_ids):
+        db.execute("INSERT INTO market_source_items(id,source_receipt_id,provider,upstream_item_id,canonical_url,published_at,title,normalized_text,canonical_content,content_hash,metadata) VALUES(%s,%s,'gdelt',%s,%s,%s,%s,%s,%s,%s,'{}')", (evidence_id, receipt_id, f"story-{index}", f"https://api.gdeltproject.org/api/v2/story-{index}", f"2026-09-07T12:0{index}:00Z", f"Episode source {index}", f"Episode source passage {index}", f"Episode source passage {index}", str(index + 1) * 64))
+        db.execute("INSERT INTO market_intelligence_run_items(id,run_id,source_item_id,source_receipt_id,disposition) VALUES(%s,%s,%s,%s,'accepted')", (str(uuid.uuid4()), run_id, evidence_id, receipt_id))
+    packet = {
+        "contract_version": 2,
+        "execution_allowed": False,
+        "research_candidates": [],
+        "action_candidates": [],
+        "evidence": [{"item_id": evidence_id} for evidence_id in evidence_ids],
+        "coverage": {"source_scope": "fixture"},
+    }
+    packet_hash = _episode_hash(db, packet)
+    db.execute("INSERT INTO market_policy_config(version,config,active) VALUES(90210,'{}',false) ON CONFLICT DO NOTHING")
+    db.execute(
+        "INSERT INTO market_evidence_packets(id,run_id,policy_version,status,candidate_count,evidence_count,packet,packet_hash) VALUES(%s,%s,90210,'completed',0,%s,%s,%s)",
+        (str(uuid.uuid4()), run_id, len(evidence_ids), Jsonb(packet), packet_hash),
+    )
+    db.execute("SET session_replication_role=origin")
+    return run_id, evidence_ids
+
+
+def _episode_hash(db, value):
+    return db.execute(
+        "SELECT encode(extensions.digest(convert_to(market_canonical_jsonb(%s),'UTF8'),'sha256'),'hex')",
+        (Jsonb(value),),
+    ).fetchone()[0]
+
+
+def _rehash_episode_row(value, *, anchor=False):
+    canonical = lambda document: json.dumps(
+        document, ensure_ascii=False, separators=(",", ":"), sort_keys=True,
+    )
+    if anchor:
+        value["anchor_hash"] = hashlib.sha256(canonical(
+            theme_episode_v2_anchor_document(value),
+        ).encode()).hexdigest()
+        value["episode_id"] = theme_episode_v2_episode_id(value["anchor_hash"])
+    value["content_hash"] = hashlib.sha256(canonical(
+        theme_episode_v2_persistence_document(value),
+    ).encode()).hexdigest()
+    value["revision_id"] = theme_episode_v2_revision_id(
+        value["episode_id"], value["revision"], value["content_hash"],
+    )
+    return value
+
+
+def _parse_episode_through_gateway(run_id, row):
+    source = """
+import { canonicalJson } from './supabase/functions/market-briefing-gateway/_shared/intelligence.ts';
+import { parseGatewayEnvelope } from './supabase/functions/market-briefing-gateway/_shared/contracts.ts';
+const raw = await new Response(Deno.stdin.readable).text();
+const value = JSON.parse(raw);
+console.log(canonicalJson(parseGatewayEnvelope(value).payload));
+"""
+    envelope = {
+        "schema_version": 1,
+        "operation": "record_theme_episode_revision_v2",
+        "request_id": str(uuid.uuid4()),
+        "run_id": run_id,
+        "dry_run": False,
+        "payload": row,
+    }
+    result = subprocess.run(
+        ["npx", "--yes", "deno@2.9.6", "eval", source],
+        cwd=ROOT, input=json.dumps(envelope), text=True, capture_output=True, check=True,
+    )
+    return json.loads(result.stdout)
+
+
+def test_python_gateway_postgres_episode_golden_roundtrip_and_exact_replay(theme_memory_dsn):
+    with psycopg.connect(theme_memory_dsn, autocommit=True) as db:
+        run_id, evidence_ids = _seed_episode_run(db)
+        event = {
+            "theme_id": "critical_minerals_magnets",
+            "theme_mechanism": "domestic_magnet_capacity",
+            "subject_identity": "entity:niron-magnetics",
+            "jurisdiction": "US",
+            "effective_period": {"start": "2026-09-01", "end": "2026-12-31"},
+            "authoritative_id": "award:doe:MAGNET-2026-17",
+            "observed_at": "2026-09-07T12:10:00.000Z",
+            "source_evidence": [
+                {
+                    "evidence_id": evidence_ids[0],
+                    "story_identity": "\U00010000-supplementary-story",
+                    "polarity": "supporting",
+                },
+                {
+                    "evidence_id": evidence_ids[1],
+                    "story_identity": "\ue000-private-use-story",
+                    "polarity": "opposing",
+                },
+            ],
+            "investigated_entity_ids": ["entity:niron-magnetics"],
+            "missing_questions": ["Which public suppliers have current primary exposure?"],
+            "invalidation_conditions": ["Program award is rescinded"],
+            "next_review_at": "2026-09-10T12:10:00.000Z",
+            "expires_at": "2026-09-27T12:10:00.000Z",
+        }
+        produced = revise_theme_episode(None, event, origin_run_id=run_id).to_persistence_row()
+        parsed = _parse_episode_through_gateway(run_id, produced)
+        assert parsed == produced
+
+        db.execute("SET ROLE service_role")
+        inserted = db.execute(
+            "SELECT record_theme_episode_revision_v2(%s,%s)", (run_id, Jsonb(parsed)),
+        ).fetchone()[0]
+        replay = db.execute(
+            "SELECT record_theme_episode_revision_v2(%s,%s)", (run_id, Jsonb(parsed)),
+        ).fetchone()[0]
+        db.execute("RESET ROLE")
+        assert inserted == {
+            "revision_id": produced["revision_id"], "episode_id": produced["episode_id"],
+            "revision": 1, "duplicate": False,
+        }
+        assert replay == {**inserted, "duplicate": True}
+        assert db.execute(
+            "SELECT origin_run_id::text,anchor_hash,content_hash FROM market_theme_episode_revisions_v2 WHERE revision_id=%s",
+            (produced["revision_id"],),
+        ).fetchone() == (run_id, produced["anchor_hash"], produced["content_hash"])
+
+        changed_event = {
+            **event,
+            "missing_questions": ["Which public suppliers have verified primary exposure?"],
+        }
+        changed = _parse_episode_through_gateway(
+            run_id,
+            revise_theme_episode(None, changed_event, origin_run_id=run_id).to_persistence_row(),
+        )
+        db.execute("SET ROLE service_role")
+        with pytest.raises(psycopg.Error) as conflict:
+            db.execute(
+                "SELECT record_theme_episode_revision_v2(%s,%s)",
+                (run_id, Jsonb(changed)),
+            )
+        db.execute("RESET ROLE")
+        assert conflict.value.sqlstate == "22023"
+
+        noncanonical_date = dict(produced)
+        noncanonical_date["effective_period_start"] = "2026-9-1"
+        _rehash_episode_row(noncanonical_date, anchor=True)
+        db.execute("SET ROLE service_role")
+        with pytest.raises(psycopg.Error) as invalid_date:
+            db.execute(
+                "SELECT record_theme_episode_revision_v2(%s,%s)",
+                (run_id, Jsonb(noncanonical_date)),
+            )
+        db.execute("RESET ROLE")
+        assert invalid_date.value.sqlstate == "22023"
+
+        target_run, _ = _seed_episode_run(db)
+        db.execute("SET ROLE service_role")
+        with pytest.raises(psycopg.Error) as origin_bypass:
+            db.execute(
+                "SELECT record_theme_episode_revision_v2(%s,%s)",
+                (target_run, Jsonb(parsed)),
+            )
+        db.execute("RESET ROLE")
+        assert origin_bypass.value.sqlstate == "22023"
+
+        db.execute("SET session_replication_role=replica")
+        db.execute(
+            "UPDATE analysis_runs SET status='completed',finished_at=statement_timestamp() WHERE id=%s",
+            (run_id,),
+        )
+        db.execute(
+            "INSERT INTO market_intelligence_run_events(id,run_id,status) VALUES(%s,%s,'completed')",
+            (str(uuid.uuid4()), run_id),
+        )
+        db.execute("SET session_replication_role=origin")
+        db.execute("SET ROLE service_role")
+        context = db.execute(
+            "SELECT read_theme_memory_context(%s,statement_timestamp())", (target_run,),
+        ).fetchone()[0]
+        restarted = db.execute(
+            "SELECT read_theme_memory_context(%s,statement_timestamp()+INTERVAL '1 hour')",
+            (target_run,),
+        ).fetchone()[0]
+        db.execute("RESET ROLE")
+        assert restarted == context
+        assert [row["revision_id"] for row in context["active_theme_heads"]] == [
+            produced["revision_id"],
+        ]
+
+        with db.cursor(row_factory=dict_row) as cursor:
+            recovered = cursor.execute(
+                RECOVERY_SQL["theme_episode_revisions_v2"] + " WHERE revision_id=%s",
+                (produced["revision_id"],),
+            ).fetchone()
+            packet = cursor.execute(
+                RECOVERY_SQL["packets"] + " WHERE run_id=%s", (run_id,),
+            ).fetchone()
+            source_items = cursor.execute(
+                RECOVERY_SQL["source_items"] + " WHERE id=ANY(%s::uuid[])",
+                (evidence_ids,),
+            ).fetchall()
+            source_receipts = cursor.execute(
+                RECOVERY_SQL["source_receipts"] + " WHERE run_id=%s", (run_id,),
+            ).fetchall()
+            run_items = cursor.execute(
+                RECOVERY_SQL["intelligence_run_items"] + " WHERE run_id=%s", (run_id,),
+            ).fetchall()
+        assert recovered["content_hash"] == produced["content_hash"]
+        assert recovered["revision_id"] == produced["revision_id"]
+        _validate_theme_memory_v2_lineage({
+            "intelligence_runs": [{"id": run_id}],
+            "packets": [dict(packet)],
+            "reference_manifests": [],
+            "source_items": [dict(row) for row in source_items],
+            "source_receipts": [dict(row) for row in source_receipts],
+            "intelligence_run_items": [dict(row) for row in run_items],
+            "theme_episode_revisions_v2": [dict(recovered)],
+            "reviewer_identity_receipts_v2": [],
+            "research_nomination_requests_v2": [],
+            "research_nominations_v2": [],
+            "research_nomination_lifecycle_v2": [],
+            "intelligence_memory_context_bindings_v2": [],
+        })
+
+
+def test_open_ended_episode_roundtrips_python_gateway_postgres_read_and_recovery(
+        theme_memory_dsn):
+    with psycopg.connect(theme_memory_dsn, autocommit=True) as db:
+        run_id, evidence_ids = _seed_episode_run(db)
+        event = {
+            "theme_id": "industrial_infrastructure",
+            "theme_mechanism": "grid_capacity_program",
+            "subject_identity": "program:open-ended-grid-award",
+            "jurisdiction": "US",
+            "effective_period": {"start": "2026-09-01", "end": None},
+            "authoritative_id": "award:doe:OPEN-2026-1",
+            "observed_at": "2026-09-07T12:10:00.000Z",
+            "source_evidence": [{
+                "evidence_id": evidence_ids[0],
+                "story_identity": "open-ended-official-program",
+                "polarity": "supporting",
+            }],
+            "investigated_entity_ids": ["program:open-ended-grid-award"],
+            "missing_questions": ["When will the agency publish an end date?"],
+            "invalidation_conditions": ["Official program cancellation"],
+            "next_review_at": "2026-09-10T12:10:00.000Z",
+            "expires_at": "2026-09-27T12:10:00.000Z",
+        }
+        produced = revise_theme_episode(
+            None, event, origin_run_id=run_id,
+        ).to_persistence_row()
+        assert produced["effective_period_end"] is None
+        parsed = _parse_episode_through_gateway(run_id, produced)
+        assert parsed == produced
+
+        db.execute("SET ROLE service_role")
+        inserted = db.execute(
+            "SELECT record_theme_episode_revision_v2(%s,%s)",
+            (run_id, Jsonb(parsed)),
+        ).fetchone()[0]
+        db.execute("RESET ROLE")
+        assert inserted["revision_id"] == produced["revision_id"]
+        assert db.execute(
+            "SELECT effective_period_end,anchor_hash,content_hash "
+            "FROM market_theme_episode_revisions_v2 WHERE revision_id=%s",
+            (produced["revision_id"],),
+        ).fetchone() == (None, produced["anchor_hash"], produced["content_hash"])
+
+        with db.cursor(row_factory=dict_row) as cursor:
+            recovered = cursor.execute(
+                RECOVERY_SQL["theme_episode_revisions_v2"] + " WHERE revision_id=%s",
+                (produced["revision_id"],),
+            ).fetchone()
+            packet = cursor.execute(
+                RECOVERY_SQL["packets"] + " WHERE run_id=%s", (run_id,),
+            ).fetchone()
+            source_items = cursor.execute(
+                RECOVERY_SQL["source_items"] + " WHERE id=%s", (evidence_ids[0],),
+            ).fetchall()
+            source_receipts = cursor.execute(
+                RECOVERY_SQL["source_receipts"] + " WHERE run_id=%s", (run_id,),
+            ).fetchall()
+            run_items = cursor.execute(
+                RECOVERY_SQL["intelligence_run_items"] +
+                " WHERE run_id=%s AND source_item_id=%s",
+                (run_id, evidence_ids[0]),
+            ).fetchall()
+        assert recovered["effective_period_end"] is None
+        assert recovered["content_hash"] == produced["content_hash"]
+        _validate_theme_memory_v2_lineage({
+            "intelligence_runs": [{"id": run_id}],
+            "packets": [dict(packet)],
+            "reference_manifests": [],
+            "source_items": [dict(row) for row in source_items],
+            "source_receipts": [dict(row) for row in source_receipts],
+            "intelligence_run_items": [dict(row) for row in run_items],
+            "theme_episode_revisions_v2": [dict(recovered)],
+            "reviewer_identity_receipts_v2": [],
+            "research_nomination_requests_v2": [],
+            "research_nominations_v2": [],
+            "research_nomination_lifecycle_v2": [],
+            "intelligence_memory_context_bindings_v2": [],
+        })
+
+
+def test_actual_postgres_allows_one_cross_run_successor_for_uuid_theme_identity(theme_memory_dsn):
+    with psycopg.connect(theme_memory_dsn, autocommit=True) as db:
+        predecessor_run, predecessor_evidence = _seed_episode_run(db)
+        successor_run, successor_evidence = _seed_episode_run(db)
+        db.execute("SET session_replication_role=replica")
+        db.execute(
+            "UPDATE market_source_receipts SET retrieved_at='2026-09-07T12:11:00Z' WHERE run_id=%s",
+            (successor_run,),
+        )
+        db.execute("SET session_replication_role=origin")
+        theme_id = str(uuid.uuid4())
+        base_event = {
+            "theme_id": theme_id, "theme_mechanism": "grid_award_program",
+            "subject_identity": "entity:united-states-transmission", "jurisdiction": "US",
+            "effective_period": {"start": "2026-09-01", "end": "2026-12-31"},
+            "authoritative_id": None, "observed_at": "2026-09-07T12:10:00.000Z",
+            "source_evidence": [{
+                "evidence_id": predecessor_evidence[0], "story_identity": "story-a",
+                "polarity": "supporting",
+            }],
+            "investigated_entity_ids": ["entity:united-states-transmission"],
+            "missing_questions": ["Is funding current?"],
+            "invalidation_conditions": ["Program cancellation"],
+            "next_review_at": "2026-09-10T12:10:00.000Z",
+            "expires_at": "2026-09-27T12:10:00.000Z",
+        }
+        predecessor = revise_theme_episode(None, base_event, origin_run_id=predecessor_run)
+        db.execute("SET ROLE service_role")
+        db.execute(
+            "SELECT record_theme_episode_revision_v2(%s,%s)",
+            (predecessor_run, Jsonb(predecessor.to_persistence_row())),
+        )
+        db.execute("RESET ROLE")
+
+        competing = []
+        for index, evidence_id in enumerate(successor_evidence):
+            event = {
+                **base_event,
+                "observed_at": "2026-09-07T12:11:00.000Z",
+                "source_evidence": [{
+                    "evidence_id": evidence_id, "story_identity": f"story-{index + 1}",
+                    "polarity": "opposing",
+                }],
+            }
+            competing.append(
+                revise_theme_episode(predecessor, event, origin_run_id=successor_run).to_persistence_row()
+            )
+
+    def successor(value):
+        with psycopg.connect(theme_memory_dsn, autocommit=True) as db:
+            try:
+                db.execute("SET ROLE service_role")
+                return db.execute("SELECT record_theme_episode_revision_v2(%s,%s)", (successor_run, Jsonb(value))).fetchone()[0]
+            except psycopg.Error as exc:
+                return exc.sqlstate
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        outcomes = list(pool.map(successor, competing))
+    assert sum(isinstance(outcome, dict) for outcome in outcomes) == 1
+    assert "22023" in outcomes
+    with psycopg.connect(theme_memory_dsn, autocommit=True) as db:
+        assert db.execute("SELECT count(*) FROM market_theme_episode_revisions_v2 WHERE predecessor_revision_id=%s", (predecessor.revision_id,)).fetchone() == (1,)
+        assert db.execute("SELECT theme_id FROM market_theme_episode_revisions_v2 WHERE predecessor_revision_id=%s", (predecessor.revision_id,)).fetchone() == (theme_id,)
+
+
+def test_actual_postgres_v2_acl_separates_browser_service_dashboard_and_release_reader(theme_memory_dsn):
+    with psycopg.connect(theme_memory_dsn, autocommit=True) as db:
+        for table in TABLES:
+            for role in ("anon", "authenticated", "service_role", "stock_agent_dashboard"):
+                assert db.execute(
+                    "SELECT has_table_privilege(%s,%s,'SELECT,INSERT,UPDATE,DELETE')",
+                    (role, f"public.{table}"),
+                ).fetchone() == (False,)
+            assert db.execute(
+                "SELECT has_table_privilege('stock_agent_release_reader',%s,'SELECT')",
+                (f"public.{table}",),
+            ).fetchone() == (True,)
+            assert db.execute(
+                "SELECT has_table_privilege('stock_agent_release_reader_runtime',%s,'SELECT')",
+                (f"public.{table}",),
+            ).fetchone() == (True,)
+        for role in (
+            "anon", "authenticated", "service_role", "stock_agent_dashboard",
+            "stock_agent_release_reader", "stock_agent_release_reader_runtime",
+        ):
+            assert db.execute(
+                "SELECT has_function_privilege(%s,'public.market_theme_episode_uuid_v5(uuid,text)','EXECUTE')",
+                (role,),
+            ).fetchone() == (False,)
+
+        assert db.execute(
+            "SELECT has_function_privilege('service_role','public.record_research_nominations(uuid,uuid,jsonb)','EXECUTE')"
+        ).fetchone() == (True,)
+        assert db.execute(
+            "SELECT has_function_privilege('authenticated','public.record_research_nominations(uuid,uuid,jsonb)','EXECUTE')"
+        ).fetchone() == (False,)
+        assert db.execute(
+            "SELECT has_function_privilege('stock_agent_dashboard','public.read_owner_intelligence_v2(integer)','EXECUTE')"
+        ).fetchone() == (True,)
+        for role in ("anon", "authenticated", "service_role", "stock_agent_release_reader"):
+            assert db.execute(
+                "SELECT has_function_privilege(%s,'public.read_owner_intelligence_v2(integer)','EXECUTE')",
+                (role,),
+            ).fetchone() == (False,)
+
+        db.execute("SET ROLE stock_agent_dashboard")
+        projection = db.execute("SELECT read_owner_intelligence_v2(25)").fetchone()[0]
+        assert set(projection) == {
+            "intelligence_version", "run_id", "data_as_of", "themes", "companies",
+            "evidence", "source_health", "coverage", "reference", "scope", "backlog",
+            "omissions", "boundaries",
+        }
+        assert projection["boundaries"] == {
+            "research_only": True, "execution_disabled": True, "valuation_unavailable": True,
+        }
+
+
+def test_actual_postgres_freezes_unicode_bounded_memory_without_dropping_priority_surfaces(theme_memory_dsn):
+    with psycopg.connect(theme_memory_dsn, autocommit=True) as db:
+        source_run, evidence_ids = _seed_episode_run(db)
+        target_run = str(uuid.uuid4())
+        db.execute("SET session_replication_role=replica")
+        db.execute(
+            "UPDATE analysis_runs SET status='completed',finished_at='2026-09-07T12:20:00Z' WHERE id=%s",
+            (source_run,),
+        )
+        db.execute(
+            "INSERT INTO market_intelligence_run_events(id,run_id,status) VALUES(%s,%s,'completed')",
+            (str(uuid.uuid4()), source_run),
+        )
+        db.execute(
+            "INSERT INTO analysis_runs(id,kind,status) VALUES(%s,'market-intelligence','running')",
+            (target_run,),
+        )
+        db.execute(
+            "INSERT INTO market_intelligence_runs(id,phase,market_date,policy_version,reservation_plan) VALUES(%s,'on-demand','2026-09-08',90210,'{}')",
+            (target_run,),
+        )
+        db.execute(
+            "INSERT INTO market_events(id,run_id,event_type,title,summary,materiality,confidence,evidence_item_ids,content_hash,created_at) VALUES(%s,%s,'official_program','Urgent grid award','Current official program evidence',0.99,0.9,%s,%s,'2026-09-07T12:15:00Z')",
+            (str(uuid.uuid4()), source_run, Jsonb(evidence_ids[:1]), "a" * 64),
+        )
+        db.execute(
+            "INSERT INTO radar(ticker,added,last_seen,days_relevant,reason,promoted) VALUES('FROZEN','2026-09-07','2026-09-07',3,'Frozen radar row',false) ON CONFLICT(ticker) DO UPDATE SET reason=EXCLUDED.reason,last_seen=EXCLUDED.last_seen"
+        )
+        for index in range(25):
+            db.execute(
+                "INSERT INTO market_theme_episode_revisions_v2(revision_id,theme_id,episode_id,revision,anchor_hash,origin_run_id,theme_mechanism,subject_identity,jurisdiction,effective_period_start,source_membership,source_ids,supporting_source_ids,opposing_source_ids,added_source_ids,missing_questions,invalidation_conditions,first_seen,last_seen,next_review_at,expires_at,state,content_hash,created_at) VALUES(%s,%s,%s,1,%s,%s,%s,%s,'US','2026-09-01',%s,%s,%s,%s,%s,%s,%s,'2026-09-07T12:00:00Z','2026-09-07T12:10:00Z','2026-09-07T12:30:00Z','2026-09-27T12:00:00Z','open',%s,'2026-09-07T12:10:00Z')",
+                (
+                    str(uuid.uuid4()), f"theme_{index:02d}", str(uuid.uuid4()), f"{index + 100:064x}",
+                    source_run, f"Grid mechanism {index}", f"US grid subject {index}",
+                    Jsonb([{"evidence_id": evidence_ids[0], "story_identity": "one-story", "polarity": "supporting"}]),
+                    Jsonb(evidence_ids[:1]), Jsonb(evidence_ids[:1]), Jsonb(evidence_ids[:1] if index == 0 else []),
+                    Jsonb(evidence_ids[:1]), Jsonb(["⚠" * 2000]), Jsonb(["Recheck official status"]),
+                    f"{index + 1000:064x}",
+                ),
+            )
+        db.execute("SET session_replication_role=origin")
+        db.execute("SET ROLE service_role")
+        first = db.execute(
+            "SELECT read_theme_memory_context(%s,'2026-09-08T12:00:00Z')", (target_run,)
+        ).fetchone()[0]
+        assert first["byte_truncated"] is True
+        assert len(first["active_theme_heads"]) < 25
+        assert len(first["urgent_events"]) == 1
+        assert len(first["high_materiality_themes"]) == 10
+        assert any(row["ticker"] == "FROZEN" for row in first["radar"])
+        assert len(json.dumps(first, ensure_ascii=False, separators=(",", ":")).encode()) <= 65_536
+        db.execute("RESET ROLE")
+        db.execute("UPDATE radar SET reason='Changed after freeze' WHERE ticker='FROZEN'")
+        db.execute("SET ROLE service_role")
+        restarted = db.execute(
+            "SELECT read_theme_memory_context(%s,'2026-09-09T12:00:00Z')", (target_run,)
+        ).fetchone()[0]
+        refreshed = db.execute("SELECT refresh_market_intelligence_context(%s)", (target_run,)).fetchone()[0]
+        db.execute("RESET ROLE")
+        binding = db.execute(
+            "SELECT snapshot_hash,selected_revision_ids,selected_nomination_ids FROM market_intelligence_memory_context_bindings_v2 WHERE run_id=%s",
+            (target_run,),
+        ).fetchone()
+        assert restarted == first
+        assert refreshed["theme_memory"] == first
+        assert refreshed["radar"] == first["radar"]
+        assert refreshed["urgent_events"] == first["urgent_events"]
+        assert refreshed["high_materiality_themes"] == first["high_materiality_themes"]
+        assert refreshed["theme_memory_snapshot_hash"] == binding[0]
+        assert binding[1] == [row["revision_id"] for row in first["active_theme_heads"]]
+        assert binding[2] == [row["nomination_id"] for row in first["due_nominations"]]

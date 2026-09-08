@@ -6,6 +6,8 @@ import {
   type ArtifactMutation,
   type EvidencePacket,
   type GatewayEnvelope,
+  isEvidencePacketV2,
+  packetEvidenceIds,
   parseArtifactMutationBatch,
   parseDecisionBundle,
   parseGatewayEnvelope,
@@ -63,6 +65,7 @@ import {
   type PersistableArtifactMutationBatch,
   type PersistedBundle,
   type PublicationReceipt,
+  type ReferenceTransferClaim,
 } from "./repository.ts";
 import {
   sendTelegramAlert,
@@ -73,7 +76,14 @@ import {
 } from "./telegram.ts";
 import {
   canonicalJson,
+  type DiscoveryReferencePayload,
+  type DiscoveryStageCheckpointPayload,
   type RecordIntelligencePayload,
+  type ReferenceBeginPayload,
+  type ReferenceChunkPayload,
+  type ReferenceFinalizePayload,
+  type ReferencePinPayload,
+  type ReferenceReadPayload,
   sha256Hex,
   type StartIntelligencePayload,
   summarizeIntelligencePayload,
@@ -101,6 +111,7 @@ export interface GatewayDependencies {
   fetchCollectionQuote?: (
     ticker: string,
     now: Date,
+    instrumentType: "COMMON_STOCK" | "ADR" | "ETF",
   ) => Promise<CollectionQuote>;
   fetchHistory?: (
     ticker: string,
@@ -122,6 +133,8 @@ export interface GatewayDependencies {
   ) => Promise<TelegramAlertReceipt>;
   dashboardBaseUrl?: string;
   dashboardAllowedOrigins?: string[];
+  ownerUserId?: string;
+  verifyOwner?: (request: Request) => Promise<{ subject: string }>;
 }
 
 const MAX_BODY_BYTES = 262_144;
@@ -159,7 +172,11 @@ async function secureEqual(left: string, right: string): Promise<boolean> {
   return mismatch === 0 && left.length === right.length;
 }
 
-async function readBody(request: Request): Promise<unknown> {
+async function readBody(request: Request): Promise<{
+  value: unknown;
+  encodedBytes: number;
+  rawText: string;
+}> {
   const declared = request.headers.get("content-length");
   if (
     declared !== null &&
@@ -188,7 +205,8 @@ async function readBody(request: Request): Promise<unknown> {
     offset += chunk.byteLength;
   }
   try {
-    return JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(body));
+    const rawText = new TextDecoder("utf-8", { fatal: true }).decode(body);
+    return { value: JSON.parse(rawText), encodedBytes: length, rawText };
   } catch {
     throw new GatewayHttpError(400, "INVALID_REQUEST");
   }
@@ -408,27 +426,98 @@ export function createGatewayHandler(dependencies: GatewayDependencies) {
       return response(405, { ok: false, code: "METHOD_NOT_ALLOWED" });
     }
     const supplied = request.headers.get("x-market-agent-secret") ?? "";
-    if (!(await secureEqual(supplied, deps.marketAgentSecret))) {
+    const serviceAuthorized = await secureEqual(
+      supplied,
+      deps.marketAgentSecret,
+    );
+    let ownerAuthorized = false;
+    if (!serviceAuthorized && deps.verifyOwner && deps.ownerUserId) {
+      try {
+        const verified = await deps.verifyOwner(request);
+        if (verified.subject !== deps.ownerUserId) {
+          return response(403, { ok: false, code: "OWNER_ONLY" });
+        }
+        ownerAuthorized = true;
+      } catch (error) {
+        if (
+          typeof error === "object" && error !== null &&
+          "status" in error && error.status === 403
+        ) {
+          return response(403, { ok: false, code: "OWNER_ONLY" });
+        }
+        return response(401, { ok: false, code: "UNAUTHORIZED" });
+      }
+    } else if (!serviceAuthorized) {
       return response(401, { ok: false, code: "UNAUTHORIZED" });
     }
 
     let envelope: GatewayEnvelope;
     let prepared: unknown;
+    let referenceTransferClaim: ReferenceTransferClaim | null = null;
     const currentDate = chicagoDate(deps.now());
     try {
-      envelope = parseGatewayEnvelope(await readBody(request));
+      const body = await readBody(request);
+      envelope = parseGatewayEnvelope(body.value);
       if (
         envelope.operation === "start_intelligence_run" ||
         envelope.operation === "checkpoint_intelligence_collection" ||
         envelope.operation === "record_intelligence" ||
         envelope.operation === "record_report" ||
-        envelope.operation === "record_learning"
+        envelope.operation === "record_learning" ||
+        envelope.operation === "record_discovery_reference" ||
+        envelope.operation === "checkpoint_discovery_stage" ||
+        envelope.operation === "seal_enrichment_selection" ||
+        envelope.operation === "begin_discovery_reference" ||
+        envelope.operation === "record_discovery_reference_chunk" ||
+        envelope.operation === "finalize_discovery_reference" ||
+        envelope.operation === "pin_discovery_reference" ||
+        envelope.operation === "read_discovery_reference" ||
+        envelope.operation === "record_theme_episode_revision_v2" ||
+        envelope.operation === "record_research_review_identity_v2" ||
+        envelope.operation === "record_research_nominations" ||
+        envelope.operation === "transition_research_nomination_v2"
       ) {
         prepared = envelope.operation === "record_report"
           ? parseRecordReportPayload(envelope.payload)
           : envelope.operation === "record_learning"
           ? parseRecordLearningPayload(envelope.payload)
           : envelope.payload;
+        if (envelope.operation === "seal_enrichment_selection") {
+          const selection = objectValue(prepared);
+          exactKeys(selection, ["manifest", "requests"]);
+          if (
+            !Array.isArray(selection.requests) ||
+            selection.requests.length > 100
+          ) {
+            throw new GatewayHttpError(400, "INVALID_REQUEST");
+          }
+          const manifest = objectValue(selection.manifest);
+          exactKeys(manifest, [
+            "manifest_id",
+            "run_id",
+            "phase",
+            "selection_stage",
+            "schema_version",
+            "execution_allowed",
+            "provider_reservations",
+            "deferred_reasons",
+            "request_descriptors",
+            "semantic_hash",
+          ]);
+          if (
+            manifest.run_id !== envelope.run_id ||
+            !["holding_quotes", "initial", "filing_documents"].includes(
+              String(manifest.selection_stage),
+            ) || manifest.schema_version !== 1 ||
+            manifest.execution_allowed !== false ||
+            !Array.isArray(manifest.request_descriptors) ||
+            manifest.request_descriptors.length !== selection.requests.length ||
+            typeof manifest.semantic_hash !== "string" ||
+            !/^[0-9a-f]{64}$/.test(manifest.semantic_hash)
+          ) {
+            throw new GatewayHttpError(400, "INVALID_REQUEST");
+          }
+        }
         if (
           envelope.operation === "record_learning" &&
           sha256Hex(
@@ -436,11 +525,35 @@ export function createGatewayHandler(dependencies: GatewayDependencies) {
             ) !==
             (prepared as RecordLearningPayload).content_hash
         ) throw new GatewayHttpError(400, "INVALID_REQUEST");
+        if (
+          [
+            "begin_discovery_reference",
+            "record_discovery_reference_chunk",
+            "finalize_discovery_reference",
+            "pin_discovery_reference",
+            "read_discovery_reference",
+          ].includes(envelope.operation)
+        ) {
+          const canonical = canonicalJson({ ...envelope, payload: prepared });
+          if (body.rawText !== canonical) {
+            throw new GatewayHttpError(400, "INVALID_REQUEST");
+          }
+          referenceTransferClaim = {
+            request_id: envelope.request_id,
+            encoded_bytes: body.encodedBytes,
+            request_hash: sha256Hex(canonical),
+          };
+        }
       } else if (envelope.operation === "collect_intelligence_quote") {
         requireRun(envelope);
         const row = objectValue(envelope.payload);
         exactKeys(row, [
           "ticker",
+          "instrument_type",
+          "security_revision_id",
+          "reference_manifest_id",
+          "selection_manifest_id",
+          "selected_task_id",
           "reservation_id",
           "source_receipt_id",
           "cache_key",
@@ -448,9 +561,18 @@ export function createGatewayHandler(dependencies: GatewayDependencies) {
         if (
           typeof row.ticker !== "string" ||
           !/^[A-Z][A-Z0-9.-]{0,14}$/.test(row.ticker) ||
+          typeof row.instrument_type !== "string" ||
+          !["COMMON_STOCK", "ADR", "ETF"].includes(row.instrument_type) ||
           typeof row.cache_key !== "string" ||
           !/^[a-f0-9]{64}$/.test(row.cache_key) ||
-          [row.reservation_id, row.source_receipt_id].some((value) =>
+          [
+            row.reservation_id,
+            row.source_receipt_id,
+            row.security_revision_id,
+            row.reference_manifest_id,
+            row.selection_manifest_id,
+            row.selected_task_id,
+          ].some((value) =>
             typeof value !== "string" || !/^[a-f0-9-]{36}$/.test(value)
           )
         ) {
@@ -490,11 +612,15 @@ export function createGatewayHandler(dependencies: GatewayDependencies) {
         envelope.operation === "read_context" ||
         envelope.operation === "read_intelligence_completion" ||
         envelope.operation === "read_intelligence_context" ||
+        envelope.operation === "read_discovery_context" ||
         envelope.operation === "finish_run"
       ) {
         requireRun(envelope);
         const row = objectValue(envelope.payload);
-        if (envelope.operation !== "finish_run") exactKeys(row, []);
+        if (
+          envelope.operation !== "finish_run" &&
+          envelope.operation !== "read_discovery_context"
+        ) exactKeys(row, []);
         prepared = envelope.payload;
       }
     } catch (error) {
@@ -502,6 +628,13 @@ export function createGatewayHandler(dependencies: GatewayDependencies) {
         return response(error.status, { ok: false, code: error.code });
       }
       return response(400, { ok: false, code: "INVALID_REQUEST" });
+    }
+
+    if (envelope.operation === "read_discovery_context" && !ownerAuthorized) {
+      return response(403, { ok: false, code: "OWNER_ONLY" });
+    }
+    if (!serviceAuthorized && envelope.operation !== "read_discovery_context") {
+      return response(403, { ok: false, code: "SERVICE_ONLY" });
     }
 
     if (envelope.dry_run) {
@@ -551,25 +684,21 @@ export function createGatewayHandler(dependencies: GatewayDependencies) {
         }
         if (envelope.operation === "record_report") {
           const payload = prepared as RecordReportPayload;
-          const decisions = parseReportDecisions(
-            await deps.repository.loadReportDecisions(
-              requireRun(envelope),
-              payload.packet_id,
-              payload.report.policy_decision_ids,
-            ),
+          const evidence = await resolveReportEvidence(
             requireRun(envelope),
-            payload.packet_id,
-            payload.report.policy_decision_ids,
+            payload,
+            deps.repository,
           );
           const delivery = renderReportDelivery(
             payload,
-            decisions,
+            evidence.decisions,
             {
               dashboardBaseUrl: dependencies.dashboardBaseUrl ??
                 "https://invalid.local",
               allowedDashboardOrigins: dependencies.dashboardAllowedOrigins ??
                 [],
             },
+            evidence.researchPacket,
           );
           return response(200, {
             ok: true,
@@ -588,6 +717,99 @@ export function createGatewayHandler(dependencies: GatewayDependencies) {
             dry_run: true,
             observation_id: (prepared as RecordLearningPayload).id,
             content_hash: (prepared as RecordLearningPayload).content_hash,
+            duplicate: false,
+            write_counts: {},
+            telegram_message_ids: [],
+          });
+        }
+        if (envelope.operation === "record_discovery_reference") {
+          return response(200, {
+            ok: true,
+            dry_run: true,
+            manifest_id: (prepared as DiscoveryReferencePayload).manifest.id,
+            security_revision_count:
+              (prepared as DiscoveryReferencePayload).security_revisions.length,
+            duplicate: false,
+            write_counts: {},
+            telegram_message_ids: [],
+          });
+        }
+        if (envelope.operation === "checkpoint_discovery_stage") {
+          return response(200, {
+            ok: true,
+            dry_run: true,
+            task: (prepared as DiscoveryStageCheckpointPayload).task,
+            duplicate: false,
+            write_counts: {},
+            telegram_message_ids: [],
+          });
+        }
+        if (envelope.operation === "record_research_nominations") {
+          return response(200, {
+            ok: true,
+            dry_run: true,
+            request_id: envelope.request_id,
+            accepted_count: (prepared as { nominations: unknown[] }).nominations.length,
+            nominations: [],
+            duplicate: false,
+            telegram_message_ids: [],
+          });
+        }
+        if (
+          envelope.operation === "record_theme_episode_revision_v2" ||
+          envelope.operation === "record_research_review_identity_v2" ||
+          envelope.operation === "transition_research_nomination_v2"
+        ) {
+          return response(200, { ok: true, dry_run: true, duplicate: false, telegram_message_ids: [] });
+        }
+        if (envelope.operation === "read_discovery_context") {
+          return response(200, {
+            ok: true,
+            dry_run: true,
+            context: {
+              manifests: [],
+              security_revisions: [],
+              tasks: [],
+              theme_episodes: [],
+              exposure_facts: [],
+              research_nominations: [],
+              enrichment_selections: [],
+            },
+            telegram_message_ids: [],
+          });
+        }
+        if (envelope.operation === "read_discovery_reference") {
+          return response(200, {
+            ok: true,
+            dry_run: true,
+            reference: {
+              binding: {
+                binding_role: (prepared as ReferenceReadPayload).binding_role,
+                manifest_id: null,
+                reference_status: "reference_unavailable",
+                source_retrieved_at: null,
+                reference_age_seconds: null,
+              },
+              manifest: null,
+              securities: [],
+              next_after_security_id: null,
+              complete: true,
+            },
+            write_counts: {},
+            telegram_message_ids: [],
+          });
+        }
+        if (
+          [
+            "begin_discovery_reference",
+            "record_discovery_reference_chunk",
+            "finalize_discovery_reference",
+            "pin_discovery_reference",
+          ].includes(envelope.operation)
+        ) {
+          return response(200, {
+            ok: true,
+            dry_run: true,
             duplicate: false,
             write_counts: {},
             telegram_message_ids: [],
@@ -706,6 +928,7 @@ export function createGatewayHandler(dependencies: GatewayDependencies) {
           quote = await deps.fetchCollectionQuote(
             input.ticker as string,
             deps.now(),
+            input.instrument_type as "COMMON_STOCK" | "ADR" | "ETF",
           );
         } catch { /* A real failed attempt still costs one. */ }
         const checkpoint = quoteCheckpoint(
@@ -727,6 +950,187 @@ export function createGatewayHandler(dependencies: GatewayDependencies) {
         const code = error instanceof GatewayRepositoryError
           ? error.code
           : "PERSISTENCE_FAILED";
+        return response(errorStatus(code), { ok: false, code });
+      }
+    }
+    if (envelope.operation === "seal_enrichment_selection") {
+      try {
+        if (!deps.repository.sealEnrichmentSelection) {
+          throw new GatewayRepositoryError("PERSISTENCE_FAILED");
+        }
+        return response(200, {
+          ok: true,
+          ...await deps.repository.sealEnrichmentSelection(
+            requireRun(envelope),
+            prepared as Record<string, unknown>,
+          ),
+          telegram_message_ids: [],
+        });
+      } catch (error) {
+        const code = error instanceof GatewayRepositoryError
+          ? error.code
+          : "PERSISTENCE_FAILED";
+        return response(errorStatus(code), { ok: false, code });
+      }
+    }
+    if (envelope.operation === "read_discovery_context") {
+      try {
+        if (!deps.repository.readDiscoveryContext) {
+          throw new GatewayRepositoryError("PERSISTENCE_FAILED");
+        }
+        return response(200, {
+          ok: true,
+          context: await deps.repository.readDiscoveryContext(
+            requireRun(envelope),
+            (prepared as { limit: number }).limit,
+          ),
+          telegram_message_ids: [],
+        });
+      } catch (error) {
+        const code = error instanceof GatewayRepositoryError
+          ? error.code
+          : "PERSISTENCE_FAILED";
+        return response(errorStatus(code), { ok: false, code });
+      }
+    }
+    if (envelope.operation === "read_discovery_reference") {
+      try {
+        if (!deps.repository.readDiscoveryReference) {
+          throw new GatewayRepositoryError("PERSISTENCE_FAILED");
+        }
+        return response(200, {
+          ok: true,
+          reference: await deps.repository.readDiscoveryReference(
+            requireRun(envelope),
+            prepared as ReferenceReadPayload,
+            referenceTransferClaim!,
+          ),
+          telegram_message_ids: [],
+        });
+      } catch (error) {
+        const code = error instanceof GatewayRepositoryError
+          ? error.code
+          : "PERSISTENCE_FAILED";
+        return response(errorStatus(code), { ok: false, code });
+      }
+    }
+    if (
+      [
+        "begin_discovery_reference",
+        "record_discovery_reference_chunk",
+        "finalize_discovery_reference",
+        "pin_discovery_reference",
+      ].includes(envelope.operation)
+    ) {
+      try {
+        const runId = requireRun(envelope);
+        const result = envelope.operation === "begin_discovery_reference"
+          ? await deps.repository.beginDiscoveryReference?.(
+            runId,
+            prepared as ReferenceBeginPayload,
+            referenceTransferClaim!,
+          )
+          : envelope.operation === "record_discovery_reference_chunk"
+          ? await deps.repository.recordDiscoveryReferenceChunk?.(
+            runId,
+            prepared as ReferenceChunkPayload,
+            referenceTransferClaim!,
+          )
+          : envelope.operation === "finalize_discovery_reference"
+          ? await deps.repository.finalizeDiscoveryReference?.(
+            runId,
+            prepared as ReferenceFinalizePayload,
+            referenceTransferClaim!,
+          )
+          : await deps.repository.pinDiscoveryReference?.(
+            runId,
+            prepared as ReferencePinPayload,
+            referenceTransferClaim!,
+          );
+        if (!result) throw new GatewayRepositoryError("PERSISTENCE_FAILED");
+        return response(200, { ok: true, ...result, telegram_message_ids: [] });
+      } catch (error) {
+        const code = error instanceof GatewayRepositoryError
+          ? error.code
+          : "PERSISTENCE_FAILED";
+        return response(errorStatus(code), { ok: false, code });
+      }
+    }
+    if (envelope.operation === "record_discovery_reference") {
+      try {
+        if (!deps.repository.recordDiscoveryReference) {
+          throw new GatewayRepositoryError("PERSISTENCE_FAILED");
+        }
+        return response(200, {
+          ok: true,
+          ...await deps.repository.recordDiscoveryReference(
+            requireRun(envelope),
+            prepared as DiscoveryReferencePayload,
+          ),
+          telegram_message_ids: [],
+        });
+      } catch (error) {
+        const code = error instanceof GatewayRepositoryError
+          ? error.code
+          : "PERSISTENCE_FAILED";
+        return response(errorStatus(code), { ok: false, code });
+      }
+    }
+    if (envelope.operation === "checkpoint_discovery_stage") {
+      try {
+        if (!deps.repository.checkpointDiscoveryStage) {
+          throw new GatewayRepositoryError("PERSISTENCE_FAILED");
+        }
+        return response(200, {
+          ok: true,
+          ...await deps.repository.checkpointDiscoveryStage(
+            requireRun(envelope),
+            prepared as DiscoveryStageCheckpointPayload,
+          ),
+          telegram_message_ids: [],
+        });
+      } catch (error) {
+        const code = error instanceof GatewayRepositoryError
+          ? error.code
+          : "PERSISTENCE_FAILED";
+        return response(errorStatus(code), { ok: false, code });
+      }
+    }
+    if (envelope.operation === "record_theme_episode_revision_v2") {
+      try {
+        if (!deps.repository.recordThemeEpisodeRevisionV2) throw new GatewayRepositoryError("PERSISTENCE_FAILED");
+        return response(200, { ok: true, ...await deps.repository.recordThemeEpisodeRevisionV2(requireRun(envelope), prepared as Record<string, unknown>), telegram_message_ids: [] });
+      } catch (error) {
+        const code = error instanceof GatewayRepositoryError ? error.code : "PERSISTENCE_FAILED";
+        return response(errorStatus(code), { ok: false, code });
+      }
+    }
+    if (envelope.operation === "record_research_review_identity_v2") {
+      try {
+        if (!deps.repository.recordResearchReviewIdentityV2) throw new GatewayRepositoryError("PERSISTENCE_FAILED");
+        return response(200, { ok: true, ...await deps.repository.recordResearchReviewIdentityV2(requireRun(envelope), envelope.request_id, prepared as Record<string, unknown>), telegram_message_ids: [] });
+      } catch (error) {
+        const code = error instanceof GatewayRepositoryError ? error.code : "PERSISTENCE_FAILED";
+        return response(errorStatus(code), { ok: false, code });
+      }
+    }
+    if (envelope.operation === "record_research_nominations") {
+      try {
+        if (!deps.repository.recordResearchNominations) throw new GatewayRepositoryError("PERSISTENCE_FAILED");
+        return response(200, { ok: true, ...await deps.repository.recordResearchNominations(requireRun(envelope), envelope.request_id, prepared as import("./contracts.ts").RecordResearchNominationsPayloadV2), telegram_message_ids: [] });
+      } catch (error) {
+        const code = error instanceof GatewayRepositoryError ? error.code : "PERSISTENCE_FAILED";
+        return response(errorStatus(code), { ok: false, code });
+      }
+    }
+    if (envelope.operation === "transition_research_nomination_v2") {
+      try {
+        if (!deps.repository.transitionResearchNominationV2) throw new GatewayRepositoryError("PERSISTENCE_FAILED");
+        const lifecycle = prepared as Record<string, unknown>;
+        const nominationId = String(lifecycle.nomination_id);
+        return response(200, { ok: true, ...await deps.repository.transitionResearchNominationV2(requireRun(envelope), nominationId, { state: lifecycle.state, reason: lifecycle.reason, selection_descriptor: lifecycle.selection_descriptor }), telegram_message_ids: [] });
+      } catch (error) {
+        const code = error instanceof GatewayRepositoryError ? error.code : "PERSISTENCE_FAILED";
         return response(errorStatus(code), { ok: false, code });
       }
     }
@@ -877,21 +1281,21 @@ export function createGatewayHandler(dependencies: GatewayDependencies) {
           requireRun(envelope),
           payload,
         );
-        const decisions = parseReportDecisions(
-          await deps.repository.loadReportDecisions(
-            requireRun(envelope),
-            payload.packet_id,
-            payload.report.policy_decision_ids,
-          ),
+        const evidence = await resolveReportEvidence(
           requireRun(envelope),
-          payload.packet_id,
-          payload.report.policy_decision_ids,
+          payload,
+          deps.repository,
         );
-        const delivery = renderReportDelivery(payload, decisions, {
-          dashboardBaseUrl: dependencies.dashboardBaseUrl ??
-            "https://invalid.local",
-          allowedDashboardOrigins: dependencies.dashboardAllowedOrigins ?? [],
-        });
+        const delivery = renderReportDelivery(
+          payload,
+          evidence.decisions,
+          {
+            dashboardBaseUrl: dependencies.dashboardBaseUrl ??
+              "https://invalid.local",
+            allowedDashboardOrigins: dependencies.dashboardAllowedOrigins ?? [],
+          },
+          evidence.researchPacket,
+        );
         let result: Record<string, unknown>;
         if (delivery.status === "suppressed") {
           if (
@@ -1238,6 +1642,53 @@ type ResolvedDependencies = GatewayDependencies & {
     token: string,
   ) => Promise<TelegramAlertReceipt>;
 };
+
+async function resolveReportEvidence(
+  runId: string,
+  payload: RecordReportPayload,
+  repository: GatewayRepository,
+): Promise<{
+  decisions: ReturnType<typeof parseReportDecisions>;
+  researchPacket?: EvidencePacket;
+}> {
+  if (payload.report.policy_decision_ids.length > 0) {
+    const decisions = parseReportDecisions(
+      await repository.loadReportDecisions(
+        runId,
+        payload.packet_id,
+        payload.report.policy_decision_ids,
+      ),
+      runId,
+      payload.packet_id,
+      payload.report.policy_decision_ids,
+    );
+    const persisted = await repository.loadIntelligencePacket(
+      payload.packet_id,
+      runId,
+    );
+    if (
+      persisted.id !== payload.packet_id || persisted.run_id !== runId ||
+      persisted.content_hash !== decisions[0].packet_hash ||
+      persisted.content_hash !== sha256Hex(canonicalJson(persisted.packet))
+    ) throw new GatewayRepositoryError("REPORT_POLICY_MISMATCH");
+    return {
+      decisions,
+      ...(isEvidencePacketV2(persisted.packet)
+        ? { researchPacket: persisted.packet }
+        : {}),
+    };
+  }
+  const persisted = await repository.loadIntelligencePacket(
+    payload.packet_id,
+    runId,
+  );
+  if (
+    persisted.id !== payload.packet_id || persisted.run_id !== runId ||
+    !isEvidencePacketV2(persisted.packet) ||
+    persisted.content_hash !== sha256Hex(canonicalJson(persisted.packet))
+  ) throw new GatewayRepositoryError("REPORT_POLICY_MISMATCH");
+  return { decisions: [], researchPacket: persisted.packet };
+}
 
 type AlertOperationPublicationStatus =
   | PublicationReceipt["status"]
@@ -2040,9 +2491,13 @@ async function evaluateAndPublish(
     ).sort(),
     source_ids: [
       ...new Set(
-        evaluations.flatMap((evaluation) =>
-          evaluation.candidate.evidence.map((item) => item.id)
-        ),
+        packet && isEvidencePacketV2(packet.packet)
+          ? packet.packet.research_candidates.flatMap((candidate) =>
+            candidate.evidence.map((item) => item.item_id)
+          )
+          : evaluations.flatMap((evaluation) =>
+            evaluation.candidate.evidence.map((item) => item.id)
+          ),
       ),
     ].sort(),
     intelligence_packet: bundle.intelligence_packet
@@ -2101,12 +2556,8 @@ async function resolveIntelligencePacket(
   } | null
 > {
   const reference = bundle.intelligence_packet;
-  const scheduled = bundle.phase !== "on-demand";
   if (!reference) {
-    if (scheduled) {
-      throw new GatewayRepositoryError("INTELLIGENCE_PACKET_INVALID");
-    }
-    return null;
+    throw new GatewayRepositoryError("INTELLIGENCE_PACKET_INVALID");
   }
   if (
     bundle.candidates.length > 12 ||
@@ -2123,7 +2574,7 @@ async function resolveIntelligencePacket(
       throw new GatewayRepositoryError("INTELLIGENCE_PACKET_INVALID");
     }
     packet = reference.packet;
-    facts = packet.facts ?? [];
+    facts = isEvidencePacketV2(packet) ? [] : packet.facts ?? [];
     for (const candidate of bundle.candidates) {
       qualifiedExposureIds.set(
         candidate.ticker,
@@ -2163,13 +2614,32 @@ async function resolveIntelligencePacket(
   if (sha256Hex(canonicalJson(packet)) !== reference.content_hash) {
     throw new GatewayRepositoryError("INTELLIGENCE_PACKET_MISMATCH");
   }
+  if (isEvidencePacketV2(packet)) {
+    for (const research of packet.research_candidates) {
+      const suitabilityBody = { ...research.suitability } as Record<
+        string,
+        unknown
+      >;
+      delete suitabilityBody.evaluation_hash;
+      if (
+        sha256Hex(canonicalJson(suitabilityBody)) !==
+          research.suitability.evaluation_hash
+      ) throw new GatewayRepositoryError("INTELLIGENCE_PACKET_MISMATCH");
+      const candidateBody = { ...research } as Record<string, unknown>;
+      delete candidateBody.candidate_hash;
+      if (sha256Hex(canonicalJson(candidateBody)) !== research.candidate_hash) {
+        throw new GatewayRepositoryError("INTELLIGENCE_PACKET_MISMATCH");
+      }
+    }
+  }
   for (const candidate of bundle.candidates) {
     if (validatePacketEvidence(candidate, packet).length > 0) {
       throw new GatewayRepositoryError("EVIDENCE_NOT_IN_PACKET");
     }
-    const expected = packet.candidates.find((row) =>
-      row.candidate_key === candidate.ticker
-    )!.evidence_ids;
+    const expected = packetEvidenceIds(packet, candidate.ticker);
+    if (expected === null) {
+      throw new GatewayRepositoryError("EVIDENCE_NOT_IN_PACKET");
+    }
     const stored = facts.filter((row) =>
       row.candidate_key === candidate.ticker
     );

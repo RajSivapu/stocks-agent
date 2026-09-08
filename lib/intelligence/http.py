@@ -44,10 +44,28 @@ class HttpRequest:
     headers: Mapping[str, str] | None = None
     timeout_seconds: float = 10.0
     max_bytes: int = 1_000_000
+    expected_document: str | None = None
+    allow_mislabeled_xml: bool = False
+    allowed_redirect_urls: frozenset[str] | None = None
 
     def __post_init__(self) -> None:
         if self.timeout_seconds <= 0 or self.max_bytes <= 0:
             raise ValueError("HTTP bounds must be positive")
+        if self.expected_document not in {None, "json", "xml", "html"}:
+            raise ValueError("expected HTTP document type is invalid")
+        if not isinstance(self.allow_mislabeled_xml, bool) or (
+            self.allow_mislabeled_xml and self.expected_document != "xml"
+        ):
+            raise ValueError("mislabeled XML is allowed only for an expected XML document")
+        if self.allowed_redirect_urls is not None and (
+            not isinstance(self.allowed_redirect_urls, frozenset)
+            or len(self.allowed_redirect_urls) > _MAX_REDIRECTS
+            or any(
+                not isinstance(url, str) or not url or len(url) > 2_048
+                for url in self.allowed_redirect_urls
+            )
+        ):
+            raise ValueError("allowed redirect URLs must be a bounded frozenset")
 
 
 @dataclass(frozen=True, slots=True)
@@ -198,6 +216,11 @@ class BoundedHttpClient:
                         raise SourceFailure("UNSAFE_URL")
                     redirected_url = urljoin(current_url, location)
                     self._validate_url(redirected_url)
+                    if (
+                        request.allowed_redirect_urls is not None
+                        and redirected_url not in request.allowed_redirect_urls
+                    ):
+                        raise SourceFailure("UNSAFE_URL")
                     if self._origin(current_url) != self._origin(redirected_url):
                         current_headers = self._without_sensitive_headers(current_headers)
                     current_url = redirected_url
@@ -210,6 +233,8 @@ class BoundedHttpClient:
                     status=status,
                     headers=headers,
                     max_bytes=request.max_bytes,
+                    expected_document=request.expected_document,
+                    allow_mislabeled_xml=request.allow_mislabeled_xml,
                 )
             except SourceFailure:
                 raise
@@ -285,9 +310,15 @@ class BoundedHttpClient:
         status: int,
         headers: Mapping[str, str],
         max_bytes: int,
+        expected_document: str | None,
+        allow_mislabeled_xml: bool,
     ) -> HttpResult:
         content_type = headers.get("content-type", "").split(";", 1)[0].strip().lower()
-        document_type = self._document_type(content_type)
+        document_type = self._document_type(
+            content_type,
+            expected_document=expected_document,
+            allow_mislabeled_xml=allow_mislabeled_xml,
+        )
         retrieved_at = self._as_utc(self._clock())
         observed_at = self._observed_at(headers.get("date"), retrieved_at)
         body = self._read_body(response, headers.get("content-encoding", ""), max_bytes)
@@ -304,10 +335,27 @@ class BoundedHttpClient:
         )
 
     @staticmethod
-    def _document_type(content_type: str) -> str:
+    def _document_type(
+        content_type: str,
+        *,
+        expected_document: str | None,
+        allow_mislabeled_xml: bool,
+    ) -> str:
         if content_type == "application/json" or content_type.endswith("+json"):
-            return "json"
-        if content_type in {"application/xml", "text/xml"} or content_type.endswith("+xml"):
+            actual = "json"
+        elif content_type in {"application/xml", "text/xml"} or content_type.endswith("+xml"):
+            actual = "xml"
+        elif content_type == "text/html":
+            actual = "html"
+        else:
+            raise SourceFailure("INVALID_CONTENT_TYPE")
+        if expected_document is None:
+            if actual == "html":
+                raise SourceFailure("INVALID_CONTENT_TYPE")
+            return actual
+        if actual == expected_document:
+            return actual
+        if actual == "html" and expected_document == "xml" and allow_mislabeled_xml:
             return "xml"
         raise SourceFailure("INVALID_CONTENT_TYPE")
 
@@ -363,13 +411,21 @@ class BoundedHttpClient:
 
     @staticmethod
     def _validate_document(body: bytes, document_type: str) -> None:
+        if document_type == "xml" and (
+            b"<!DOCTYPE" in body.upper() or b"<!ENTITY" in body.upper()
+        ):
+            raise SourceFailure("INVALID_RESPONSE")
         try:
             if document_type == "json":
                 json.loads(
                     body,
                     parse_constant=lambda _value: (_ for _ in ()).throw(ValueError()),
                 )
-            else:
+            elif document_type == "xml":
                 ElementTree.fromstring(body)
+            else:
+                if b"\x00" in body:
+                    raise ValueError
+                body.decode("utf-8")
         except (UnicodeDecodeError, ValueError, ElementTree.ParseError):
             raise SourceFailure("INVALID_RESPONSE") from None

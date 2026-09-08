@@ -5,6 +5,7 @@ validated without coercion, and activated explicitly by an owner-run script.
 """
 
 from decimal import Decimal, InvalidOperation
+from datetime import date
 import re
 
 from lib.marketdata import nyse_holidays
@@ -104,7 +105,7 @@ def _validate_etfs(value):
     return sorted(value)
 
 
-def build_policy_config(settings: dict) -> dict:
+def build_policy_config(settings: dict, *, today: date | None = None) -> dict:
     """Project checked-in settings into the exact gateway PolicyConfig contract."""
     strategy = _mapping(settings, "strategy")
     risk = _mapping(settings, "risk")
@@ -139,7 +140,7 @@ def build_policy_config(settings: dict) -> dict:
     if self_tuning is not False:
         raise ValueError("self_tuning_enabled must be false")
 
-    calendar_year = 2026
+    calendar_year = (today or date.today()).year
     policy = {
         "version": 3,
         "allocation_bps": allocation,

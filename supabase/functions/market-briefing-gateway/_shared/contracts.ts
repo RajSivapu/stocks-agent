@@ -1,8 +1,25 @@
 import {
+  canonicalJson,
+  type DiscoveryReferencePayload,
+  type DiscoveryStageCheckpointPayload,
   parseCheckpointIntelligencePayload,
+  parseDiscoveryContextRequest,
+  parseDiscoveryReferencePayload,
+  parseDiscoveryStageCheckpointPayload,
   parseRecordIntelligencePayload,
+  parseReferenceBeginPayload,
+  parseReferenceChunkPayload,
+  parseReferenceFinalizePayload,
+  parseReferencePinPayload,
+  parseReferenceReadPayload,
   parseStartIntelligencePayload,
   type RecordIntelligencePayload,
+  type ReferenceBeginPayload,
+  type ReferenceChunkPayload,
+  type ReferenceFinalizePayload,
+  type ReferencePinPayload,
+  type ReferenceReadPayload,
+  sha256Hex,
   type StartIntelligencePayload,
 } from "./intelligence.ts";
 import {
@@ -10,6 +27,7 @@ import {
   type RecordReportPayload,
 } from "./reports.ts";
 import type { RecordLearningPayload } from "./outcomes.ts";
+import { createHash } from "node:crypto";
 
 export type Operation =
   | "start_run"
@@ -25,8 +43,62 @@ export type Operation =
   | "read_intelligence_completion"
   | "read_intelligence_context"
   | "collect_intelligence_quote"
+  | "seal_enrichment_selection"
   | "record_report"
-  | "record_learning";
+  | "record_learning"
+  | "record_discovery_reference"
+  | "checkpoint_discovery_stage"
+  | "read_discovery_context"
+  | "begin_discovery_reference"
+  | "record_discovery_reference_chunk"
+  | "finalize_discovery_reference"
+  | "pin_discovery_reference"
+  | "read_discovery_reference"
+  | "record_theme_episode_revision_v2"
+  | "record_research_review_identity_v2"
+  | "record_research_nominations"
+  | "transition_research_nomination_v2";
+
+export interface ResearchNominationInputV2 {
+  theme_id: string;
+  entity_id: string | null;
+  security_id: string | null;
+  role: string;
+  reason: string;
+  evidence_ids: string[];
+  required_evidence_kind:
+    | "primary_exposure"
+    | "contradictory_primary"
+    | "current_filing"
+    | "official_program"
+    | "entity_identity"
+    | "relationship"
+    | "current_reference";
+  priority: number;
+}
+
+export interface RecordResearchNominationsPayloadV2 {
+  reviewer_receipt_id: string;
+  nominations: ResearchNominationInputV2[];
+}
+
+export interface ReviewIdentityPayloadV2 {
+  actor_identity: string;
+  reviewed_role: "analyst" | "checker";
+  predecessor_receipt_id: string | null;
+}
+
+export interface NominationLifecyclePayloadV2 {
+  nomination_id: string;
+  state: "pending" | "selected" | "resolved" | "rejected" | "expired";
+  reason: string | null;
+  selection_descriptor: {
+    request_id: string;
+    descriptor_hash: string;
+    uncertain_outcome_barrier: true;
+    execution_allowed: false;
+  } | null;
+}
 export type Phase = "pre-market" | "intraday" | "post-market" | "on-demand";
 export type Action =
   | "buy"
@@ -208,13 +280,114 @@ export interface EvidenceBlock {
   exposure_kind?: ExposureKind | null;
 }
 
-export interface EvidencePacket {
+export interface EvidencePacketV1 {
   candidates: Array<{ candidate_key: string; evidence_ids: string[] }>;
   evidence: Array<{ item_id: string; normalized_text: string }>;
   coverage: Record<string, unknown>;
   limitations: string[];
   policy_version: number;
   facts?: TrustedEvidenceFact[];
+}
+
+export interface CandidateLineageV2 {
+  run_id: string;
+  observed_at: string;
+  policy_version: number;
+  reference_manifest_id: string | null;
+  reference_revision: number | null;
+  reference_expires_at: string | null;
+  security_revision_id: string | null;
+  quote_receipt_id: string | null;
+  quote_as_of: string | null;
+  quote_expires_at: string | null;
+  evidence_receipt_ids: Record<string, string>;
+  portfolio_revision: string | null;
+  cash_revision: string | null;
+}
+
+export interface SuitabilityEvaluationV2 {
+  component_scores: Record<string, string>;
+  evaluation_hash: string;
+  lineage: CandidateLineageV2 | null;
+  missing_reasons: string[];
+  state: "unknown" | "eligible" | "vetoed";
+  veto_reasons: string[];
+}
+
+export interface ResearchCandidateV2 {
+  adverse_paths: string[];
+  candidate_hash: string;
+  candidate_key: string;
+  entity_id: string | null;
+  event_ids: string[];
+  evidence: Array<{
+    claim_type: string;
+    item_id: string;
+    relationship_eligible: boolean;
+    role: "supporting" | "opposing";
+  }>;
+  exposure_fact_ids: string[];
+  limitations: string[];
+  priority_components: Record<string, string>;
+  priority_score: string;
+  research_state:
+    | "unresolved"
+    | "resolved"
+    | "exposure_supported"
+    | "analysis_ready";
+  roles: string[];
+  security_id: string | null;
+  suitability: SuitabilityEvaluationV2;
+  theme_ids: string[];
+  ticker: string | null;
+}
+
+export interface EvidencePacketV2 {
+  action_candidates: Array<{
+    candidate_hash: string;
+    candidate_key: string;
+    suitability_hash: string;
+  }>;
+  contract_version: 2;
+  coverage: Record<string, unknown>;
+  evidence: Array<{
+    authority: string;
+    canonical_url: string;
+    claim_type: string;
+    content_hash: string;
+    effective_at: string | null;
+    item_id: string;
+    normalized_text: string;
+    published_at: string | null;
+    reporting_at: string | null;
+    retrieved_at: string;
+    source_identity: {
+      provider: string;
+      receipt_id: string;
+      upstream_item_id: string;
+    };
+  }>;
+  execution_allowed: false;
+  limitations: string[];
+  observed_at: string;
+  omissions: Array<{
+    candidate_key: string;
+    item_id: string | null;
+    kind: string;
+    reason: string;
+    stage: string;
+  }>;
+  policy_version: number;
+  research_candidates: ResearchCandidateV2[];
+  run_id: string;
+}
+
+export type EvidencePacket = EvidencePacketV1 | EvidencePacketV2;
+
+export function isEvidencePacketV2(
+  packet: EvidencePacket,
+): packet is EvidencePacketV2 {
+  return "contract_version" in packet && packet.contract_version === 2;
 }
 
 /** Only populated by the persisted packet read (or an explicit dry-run fixture). */
@@ -568,8 +741,48 @@ export interface GatewayReadContext extends PolicyContext {
     holding_market_values: Record<string, string>;
     liquidity_by_ticker: Record<string, string>;
     overlap_by_ticker: Record<string, string>;
-    current_quotes?: Record<string, { price: string; as_of: string }>;
+    valuation_status: "unavailable";
+    valuation_state_by_ticker: Record<string, "passed" | "failed" | "missing" | "stale" | "ambiguous" | "unverified" | "unavailable">;
+    valuation_provenance_by_ticker: Record<string, Record<string, unknown>>;
+    liquidity_state_by_ticker: Record<string, "passed" | "failed" | "missing" | "stale" | "ambiguous" | "unverified" | "unavailable">;
+    liquidity_provenance_by_ticker: Record<string, Record<string, unknown>>;
+    overlap_state_by_ticker: Record<string, "passed" | "failed" | "missing" | "stale" | "ambiguous" | "unverified" | "unavailable">;
+    overlap_provenance_by_ticker: Record<string, Record<string, unknown>>;
+    current_reference_state: "current" | "stale" | "ambiguous" | "unavailable";
+    current_reference_provenance: Record<string, unknown>;
+    current_quotes?: Record<string, {
+      price: string;
+      as_of: string;
+      expires_at: string;
+      receipt_id: string;
+    }>;
     quote_receipt_ids?: string[];
+    portfolio_revision?: string;
+    portfolio_valuation_complete?: boolean;
+    cash_revision?: string;
+    source_cursors?: DiscoverySourceCursor[];
+    last_completed_scans?: DiscoveryCompletedScan[];
+    theme_memory?: {
+      memory_version: 2;
+      as_of: string;
+      reference_manifest_id: string | null;
+      reference_hash: string | null;
+      snapshot_hash: string;
+      active_theme_heads: Record<string, unknown>[];
+      due_nominations: Record<string, unknown>[];
+      urgent_events: Record<string, unknown>[];
+      high_materiality_themes: Record<string, unknown>[];
+      radar: Record<string, unknown>[];
+      source_cursors: Record<string, unknown>[];
+      available_counts: Record<string, unknown>;
+      returned_counts: Record<string, unknown>;
+      deferred_counts: Record<string, unknown>;
+      byte_truncated: boolean;
+      research_only: true;
+      execution_allowed: false;
+    };
+    urgent_events?: Record<string, unknown>[];
+    high_materiality_themes?: Record<string, unknown>[];
   };
   recent_suggestions: ContextSuggestion[];
   observations: Array<{
@@ -609,6 +822,31 @@ export interface GatewayReadContext extends PolicyContext {
     rolled_months: number;
   }>;
   paper_watches: PaperWatchState[];
+}
+
+export interface DiscoverySourceCursor {
+  task_key: string;
+  provider: string;
+  capability_id: string;
+  completed_through: string | null;
+  active_window_start: string | null;
+  active_window_end: string | null;
+  backlog_token: string | null;
+  page: number;
+  accepted_item_ids: string[];
+  next_retry_phase: Phase | null;
+  continuation_token_history: string[];
+  source_run_id: string;
+  source_task_id: string;
+  source_updated_at: string;
+}
+
+export interface DiscoveryCompletedScan {
+  capability_id: string;
+  theme_id: string;
+  completed_through: string;
+  source_run_id: string;
+  source_task_id: string;
 }
 
 export interface PolicyConfig {
@@ -657,8 +895,21 @@ const OPERATIONS: readonly Operation[] = [
   "read_intelligence_completion",
   "read_intelligence_context",
   "collect_intelligence_quote",
+  "seal_enrichment_selection",
   "record_report",
   "record_learning",
+  "record_discovery_reference",
+  "checkpoint_discovery_stage",
+  "read_discovery_context",
+  "begin_discovery_reference",
+  "record_discovery_reference_chunk",
+  "finalize_discovery_reference",
+  "pin_discovery_reference",
+  "read_discovery_reference",
+  "record_theme_episode_revision_v2",
+  "record_research_review_identity_v2",
+  "record_research_nominations",
+  "transition_research_nomination_v2",
 ];
 const PHASES: readonly Phase[] = [
   "pre-market",
@@ -1075,6 +1326,64 @@ export function parseGatewayEnvelope(value: unknown): GatewayEnvelope {
       throw new Error("run_id is required for record_learning");
     }
     payload = parseRecordLearningPayload(row.payload);
+  } else if (operation === "record_discovery_reference") {
+    if (row.run_id === null) {
+      throw new Error("run_id is required for record_discovery_reference");
+    }
+    payload = parseDiscoveryReferencePayload(row.payload);
+  } else if (operation === "checkpoint_discovery_stage") {
+    if (row.run_id === null) {
+      throw new Error("run_id is required for checkpoint_discovery_stage");
+    }
+    payload = parseDiscoveryStageCheckpointPayload(row.payload);
+  } else if (operation === "read_discovery_context") {
+    if (row.run_id === null) {
+      throw new Error("run_id is required for read_discovery_context");
+    }
+    payload = parseDiscoveryContextRequest(row.payload);
+  } else if (operation === "begin_discovery_reference") {
+    if (row.run_id === null) {
+      throw new Error("run_id is required for begin_discovery_reference");
+    }
+    payload = parseReferenceBeginPayload(row.payload);
+  } else if (operation === "record_discovery_reference_chunk") {
+    if (row.run_id === null) {
+      throw new Error(
+        "run_id is required for record_discovery_reference_chunk",
+      );
+    }
+    payload = parseReferenceChunkPayload(row.payload);
+  } else if (operation === "finalize_discovery_reference") {
+    if (row.run_id === null) {
+      throw new Error("run_id is required for finalize_discovery_reference");
+    }
+    payload = parseReferenceFinalizePayload(row.payload);
+  } else if (operation === "pin_discovery_reference") {
+    if (row.run_id === null) {
+      throw new Error("run_id is required for pin_discovery_reference");
+    }
+    payload = parseReferencePinPayload(row.payload);
+  } else if (operation === "read_discovery_reference") {
+    if (row.run_id === null) {
+      throw new Error("run_id is required for read_discovery_reference");
+    }
+    payload = parseReferenceReadPayload(row.payload);
+  } else if (operation === "record_research_nominations") {
+    if (row.run_id === null) {
+      throw new Error("run_id is required for record_research_nominations");
+    }
+    payload = parseResearchNominationsPayloadV2(row.payload);
+  } else if (
+    operation === "record_theme_episode_revision_v2"
+  ) {
+    if (row.run_id === null) throw new Error(`run_id is required for ${operation}`);
+    payload = parseThemeEpisodeRevisionPayloadV2(row.payload);
+  } else if (operation === "record_research_review_identity_v2") {
+    if (row.run_id === null) throw new Error(`run_id is required for ${operation}`);
+    payload = parseReviewIdentityPayloadV2(row.payload);
+  } else if (operation === "transition_research_nomination_v2") {
+    if (row.run_id === null) throw new Error(`run_id is required for ${operation}`);
+    payload = parseNominationLifecyclePayloadV2(row.payload);
   }
   return {
     schema_version: 1,
@@ -1087,7 +1396,334 @@ export function parseGatewayEnvelope(value: unknown): GatewayEnvelope {
       | StartIntelligencePayload
       | RecordIntelligencePayload
       | RecordReportPayload
-      | RecordLearningPayload,
+      | RecordLearningPayload
+      | DiscoveryReferencePayload
+      | DiscoveryStageCheckpointPayload
+      | ReferenceBeginPayload
+      | ReferenceChunkPayload
+      | ReferenceFinalizePayload
+      | ReferencePinPayload
+      | ReferenceReadPayload
+      | { limit: number },
+  };
+}
+
+export function parseReviewIdentityPayloadV2(value: unknown): ReviewIdentityPayloadV2 {
+  const row = objectValue(value, "review identity");
+  exactKeys(row, ["actor_identity", "reviewed_role", "predecessor_receipt_id"], "review identity");
+  const role = enumValue(row.reviewed_role, ["analyst", "checker"] as const, "review identity.reviewed_role");
+  const predecessor = row.predecessor_receipt_id === null ? null : uuidValue(row.predecessor_receipt_id, "review identity.predecessor_receipt_id");
+  if ((role === "analyst") !== (predecessor === null)) throw new Error("review identity role lineage mismatch");
+  const actor = stringValue(row.actor_identity, "review identity.actor_identity", 128);
+  if (!/^[A-Za-z0-9][A-Za-z0-9:._-]{2,127}$/.test(actor)) throw new Error("review identity actor invalid");
+  return { actor_identity: actor, reviewed_role: role, predecessor_receipt_id: predecessor };
+}
+
+export function parseNominationLifecyclePayloadV2(value: unknown): NominationLifecyclePayloadV2 {
+  const row = objectValue(value, "nomination lifecycle");
+  exactKeys(row, ["nomination_id", "state", "reason", "selection_descriptor"], "nomination lifecycle");
+  const state = enumValue(row.state, ["pending", "selected", "resolved", "rejected", "expired"] as const, "nomination lifecycle.state");
+  const reason = row.reason === null ? null : stringValue(row.reason, "nomination lifecycle.reason", 500);
+  if (state === "pending" && (!reason || reason.trim().length < 3)) throw new Error("nomination deferral reason required");
+  const rawDescriptor = row.selection_descriptor === null ? null : objectValue(row.selection_descriptor, "nomination lifecycle.selection_descriptor");
+  if (rawDescriptor) exactKeys(rawDescriptor, ["request_id", "descriptor_hash", "uncertain_outcome_barrier", "execution_allowed"], "nomination lifecycle.selection_descriptor");
+  if (rawDescriptor && (rawDescriptor.execution_allowed !== false || rawDescriptor.uncertain_outcome_barrier !== true)) throw new Error("nomination selection safety mismatch");
+  const descriptor = rawDescriptor === null ? null : {
+    request_id: uuidValue(rawDescriptor.request_id, "nomination lifecycle.selection_descriptor.request_id"),
+    descriptor_hash: hashValue(rawDescriptor.descriptor_hash, "nomination lifecycle.selection_descriptor.descriptor_hash"),
+    uncertain_outcome_barrier: true as const,
+    execution_allowed: false as const,
+  };
+  if ((state === "selected") !== (descriptor !== null)) throw new Error("nomination lifecycle descriptor mismatch");
+  return {
+    nomination_id: uuidValue(row.nomination_id, "nomination lifecycle.nomination_id"),
+    state,
+    reason,
+    selection_descriptor: descriptor,
+  };
+}
+
+export function parseThemeEpisodeRevisionPayloadV2(value: unknown): Record<string, unknown> {
+  const row = objectValue(value, "theme episode revision");
+  const keys = [
+    "revision_id", "theme_id", "episode_id", "revision", "identity_version", "anchor_hash",
+    "origin_run_id", "predecessor_revision_id", "predecessor_content_hash", "theme_mechanism", "subject_identity",
+    "jurisdiction", "effective_period_start", "effective_period_end", "authoritative_id",
+    "source_membership", "source_ids", "supporting_source_ids", "opposing_source_ids",
+    "added_source_ids", "investigated_entity_ids", "missing_questions", "invalidation_conditions",
+    "first_seen", "last_seen", "next_review_at", "expires_at", "state", "closure_reason",
+    "reopen_reason", "content_hash", "execution_allowed",
+  ];
+  exactKeys(row, keys, "theme episode revision");
+  const revisionId = canonicalUuid(row.revision_id, "theme episode revision.revision_id");
+  const episodeId = canonicalUuid(row.episode_id, "theme episode revision.episode_id");
+  const originRunId = canonicalUuid(row.origin_run_id, "theme episode revision.origin_run_id");
+  if (row.identity_version !== 2 || row.execution_allowed !== false) throw new Error("theme episode revision authority mismatch");
+  for (const hash of ["anchor_hash", "content_hash"]) {
+    if (typeof row[hash] !== "string" || !/^[0-9a-f]{64}$/.test(row[hash] as string)) throw new Error(`theme episode revision.${hash} invalid`);
+  }
+  const revision = integerValue(row.revision, "theme episode revision.revision", 1, 10000);
+  const themeId = stringValue(row.theme_id, "theme episode revision.theme_id", 80);
+  if (!/^(?:[a-z][a-z0-9_]{2,79}|[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12})$/.test(themeId)) {
+    throw new Error("theme episode revision.theme_id invalid");
+  }
+  const mechanism = canonicalEpisodeToken(row.theme_mechanism, "theme_mechanism", 240, "lower");
+  const subject = canonicalEpisodeToken(row.subject_identity, "subject_identity", 240, "lower");
+  const jurisdiction = canonicalEpisodeToken(row.jurisdiction, "jurisdiction", 80, "upper");
+  const authoritativeId = row.authoritative_id === null
+    ? null
+    : canonicalEpisodeToken(row.authoritative_id, "authoritative_id", 256, "exact");
+  const periodStart = dateValue(row.effective_period_start, "theme episode revision.effective_period_start");
+  const periodEnd = row.effective_period_end === null
+    ? null
+    : dateValue(row.effective_period_end, "theme episode revision.effective_period_end");
+  if (periodEnd !== null && periodEnd < periodStart) throw new Error("theme episode revision effective period invalid");
+  const predecessorId = row.predecessor_revision_id === null
+    ? null
+    : canonicalUuid(row.predecessor_revision_id, "theme episode revision.predecessor_revision_id");
+  const predecessorHash = row.predecessor_content_hash === null
+    ? null
+    : hashValue(row.predecessor_content_hash, "theme episode revision.predecessor_content_hash");
+  if ((revision === 1) !== (predecessorId === null && predecessorHash === null)) {
+    throw new Error("theme episode revision predecessor shape mismatch");
+  }
+  const membership = parseEpisodeMembership(row.source_membership);
+  const sourceIds = canonicalUuidArray(row.source_ids, "source_ids", 64, 1);
+  const supportingIds = canonicalUuidArray(row.supporting_source_ids, "supporting_source_ids", 64);
+  const opposingIds = canonicalUuidArray(row.opposing_source_ids, "opposing_source_ids", 64);
+  const addedIds = canonicalUuidArray(row.added_source_ids, "added_source_ids", 64, 1);
+  const memberIds = membership.map((entry) => entry.evidence_id).sort();
+  const expectedSupporting = membership.filter((entry) => entry.polarity === "supporting").map((entry) => entry.evidence_id).sort();
+  const expectedOpposing = membership.filter((entry) => entry.polarity === "opposing").map((entry) => entry.evidence_id).sort();
+  if (
+    canonicalJson(sourceIds) !== canonicalJson(memberIds) ||
+    canonicalJson(supportingIds) !== canonicalJson(expectedSupporting) ||
+    canonicalJson(opposingIds) !== canonicalJson(expectedOpposing) ||
+    addedIds.some((id) => !sourceIds.includes(id))
+  ) throw new Error("theme episode revision source partition mismatch");
+  const investigated = canonicalEpisodeStrings(row.investigated_entity_ids, "investigated_entity_ids", 32, 256);
+  const questions = canonicalEpisodeStrings(row.missing_questions, "missing_questions", 16, 500);
+  const invalidation = canonicalEpisodeStrings(row.invalidation_conditions, "invalidation_conditions", 16, 500);
+  const firstSeen = canonicalEpisodeTimestamp(row.first_seen, "first_seen");
+  const lastSeen = canonicalEpisodeTimestamp(row.last_seen, "last_seen");
+  const nextReview = canonicalEpisodeTimestamp(row.next_review_at, "next_review_at");
+  const expires = canonicalEpisodeTimestamp(row.expires_at, "expires_at");
+  const firstMillis = Date.parse(firstSeen);
+  if (
+    Date.parse(lastSeen) < firstMillis || Date.parse(nextReview) < firstMillis ||
+    Date.parse(nextReview) > Date.parse(expires) || Date.parse(expires) <= firstMillis ||
+    Date.parse(expires) > firstMillis + 30 * 24 * 60 * 60 * 1000
+  ) throw new Error("theme episode revision time bounds mismatch");
+  const state = enumValue(row.state, ["open", "closed"] as const, "theme episode revision.state");
+  const closureReason = canonicalEpisodeNullableText(row.closure_reason, "closure_reason");
+  const reopenReason = canonicalEpisodeNullableText(row.reopen_reason, "reopen_reason");
+  if ((state === "closed") !== (closureReason !== null) || (revision === 1 && reopenReason !== null)) {
+    throw new Error("theme episode revision state mismatch");
+  }
+  const document: Record<string, unknown> = {
+    theme_id: themeId, episode_id: episodeId, revision, identity_version: 2,
+    anchor_hash: row.anchor_hash, origin_run_id: originRunId,
+    predecessor_revision_id: predecessorId, predecessor_content_hash: predecessorHash,
+    theme_mechanism: mechanism, subject_identity: subject, jurisdiction,
+    effective_period_start: periodStart, effective_period_end: periodEnd,
+    authoritative_id: authoritativeId, source_membership: membership, source_ids: sourceIds,
+    supporting_source_ids: supportingIds, opposing_source_ids: opposingIds,
+    added_source_ids: addedIds, investigated_entity_ids: investigated,
+    missing_questions: questions, invalidation_conditions: invalidation,
+    first_seen: firstSeen, last_seen: lastSeen, next_review_at: nextReview,
+    expires_at: expires, state, closure_reason: closureReason, reopen_reason: reopenReason,
+    execution_allowed: false,
+  };
+  const anchor = {
+    authoritative_id: authoritativeId,
+    effective_period: { end: periodEnd, start: periodStart },
+    identity_version: 2,
+    jurisdiction,
+    subject_identity: subject,
+    theme_id: themeId,
+    theme_mechanism: mechanism,
+  };
+  const expectedAnchorHash = sha256Hex(canonicalJson(anchor));
+  if (row.anchor_hash !== expectedAnchorHash) throw new Error("theme episode revision anchor hash mismatch");
+  const expectedEpisodeId = uuidV5Url(`market-theme-episode-v2:${expectedAnchorHash}`);
+  if (episodeId !== expectedEpisodeId) throw new Error("theme episode revision episode id mismatch");
+  const expectedContentHash = sha256Hex(canonicalJson(document));
+  if (row.content_hash !== expectedContentHash) throw new Error("theme episode revision content hash mismatch");
+  if (revisionId !== uuidV5Url(`market-theme-episode-revision-v2:${episodeId}:${revision}:${expectedContentHash}`)) {
+    throw new Error("theme episode revision revision id mismatch");
+  }
+  return { revision_id: revisionId, ...document, content_hash: expectedContentHash };
+}
+
+function canonicalUuid(value: unknown, path: string): string {
+  const parsed = uuidValue(value, path);
+  if (parsed !== value) throw new Error(`${path} must be a canonical UUID`);
+  return parsed;
+}
+
+function canonicalEpisodeToken(value: unknown, field: string, maximum: number, casing: "lower" | "upper" | "exact"): string {
+  const parsed = stringValue(value, `theme episode revision.${field}`, maximum);
+  if (!/^[A-Za-z0-9][A-Za-z0-9:._/-]*$/.test(parsed)) throw new Error(`theme episode revision.${field} invalid`);
+  const expected = casing === "lower" ? parsed.toLowerCase() : casing === "upper" ? parsed.toUpperCase() : parsed;
+  if (parsed !== expected) throw new Error(`theme episode revision.${field} is not canonical`);
+  return parsed;
+}
+
+function canonicalEpisodeTimestamp(value: unknown, field: string): string {
+  const parsed = timestampValue(value, `theme episode revision.${field}`);
+  if (!/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/.test(parsed) || new Date(parsed).toISOString() !== parsed) {
+    throw new Error(`theme episode revision.${field} is not canonical`);
+  }
+  return parsed;
+}
+
+function canonicalEpisodeNullableText(value: unknown, field: string): string | null {
+  if (value === null) return null;
+  return canonicalEpisodeText(value, field, 500, 3);
+}
+
+function canonicalEpisodeText(value: unknown, field: string, maximum: number, minimum = 1): string {
+  if (typeof value !== "string") throw new Error(`theme episode revision.${field} must be text`);
+  const normalized = value.trim().split(/\s+/u).join(" ");
+  const length = [...value].length;
+  if (value !== normalized || length < minimum || length > maximum) {
+    throw new Error(`theme episode revision.${field} is not canonical`);
+  }
+  return value;
+}
+
+function compareUtf8(left: string, right: string): number {
+  const encoder = new TextEncoder();
+  const leftBytes = encoder.encode(left);
+  const rightBytes = encoder.encode(right);
+  const length = Math.min(leftBytes.length, rightBytes.length);
+  for (let index = 0; index < length; index += 1) {
+    if (leftBytes[index] !== rightBytes[index]) return leftBytes[index] - rightBytes[index];
+  }
+  return leftBytes.length - rightBytes.length;
+}
+
+function canonicalEpisodeStrings(value: unknown, field: string, maximum: number, length: number): string[] {
+  const values = arrayValue(value, `theme episode revision.${field}`, maximum).map((item, index) => {
+    return canonicalEpisodeText(item, `${field}[${index}]`, length);
+  });
+  const sorted = [...values].sort(compareUtf8);
+  if (new Set(values).size !== values.length || canonicalJson(values) !== canonicalJson(sorted)) {
+    throw new Error(`theme episode revision.${field} must be distinct and sorted`);
+  }
+  return values;
+}
+
+function canonicalUuidArray(value: unknown, field: string, maximum: number, minimum = 0): string[] {
+  const values = arrayValue(value, `theme episode revision.${field}`, maximum)
+    .map((item, index) => canonicalUuid(item, `theme episode revision.${field}[${index}]`));
+  if (values.length < minimum || new Set(values).size !== values.length || canonicalJson(values) !== canonicalJson([...values].sort())) {
+    throw new Error(`theme episode revision.${field} must be distinct and sorted`);
+  }
+  return values;
+}
+
+function parseEpisodeMembership(value: unknown): Array<{ evidence_id: string; story_identity: string; polarity: "supporting" | "opposing" }> {
+  const entries = arrayValue(value, "theme episode revision.source_membership", 64);
+  if (entries.length === 0) throw new Error("theme episode revision.source_membership is empty");
+  const result = entries.map((item, index) => {
+    const row = objectValue(item, `theme episode revision.source_membership[${index}]`);
+    exactKeys(row, ["evidence_id", "story_identity", "polarity"], `theme episode revision.source_membership[${index}]`);
+    return {
+      evidence_id: canonicalUuid(row.evidence_id, `theme episode revision.source_membership[${index}].evidence_id`),
+      story_identity: canonicalEpisodeText(row.story_identity, `source_membership[${index}].story_identity`, 512),
+      polarity: enumValue(row.polarity, ["supporting", "opposing"] as const, `theme episode revision.source_membership[${index}].polarity`),
+    };
+  });
+  const sorted = [...result].sort((left, right) =>
+    compareUtf8(left.story_identity, right.story_identity) || compareUtf8(left.evidence_id, right.evidence_id)
+  );
+  if (
+    new Set(result.map((entry) => entry.story_identity)).size !== result.length ||
+    new Set(result.map((entry) => entry.evidence_id)).size !== result.length ||
+    canonicalJson(result) !== canonicalJson(sorted)
+  ) throw new Error("theme episode revision.source_membership must be distinct and sorted");
+  return result;
+}
+
+function uuidV5Url(name: string): string {
+  const namespace = Uint8Array.from("6ba7b8119dad11d180b400c04fd430c8".match(/../g)!.map((part) => Number.parseInt(part, 16)));
+  const digest = createHash("sha1").update(namespace).update(name, "utf8").digest();
+  digest[6] = (digest[6] & 0x0f) | 0x50;
+  digest[8] = (digest[8] & 0x3f) | 0x80;
+  const hex = digest.subarray(0, 16).toString("hex");
+  return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
+}
+
+export function parseResearchNominationsPayloadV2(
+  value: unknown,
+): RecordResearchNominationsPayloadV2 {
+  const row = objectValue(value, "research nominations");
+  exactKeys(row, ["reviewer_receipt_id", "nominations"], "research nominations");
+  const nominations = arrayValue(row.nominations, "research nominations.nominations", 3);
+  if (nominations.length === 0) throw new Error("research nominations empty");
+  return {
+    reviewer_receipt_id: uuidValue(row.reviewer_receipt_id, "research nominations.reviewer_receipt_id"),
+    nominations: nominations.map((value, index) => {
+      const path = `research nominations.nominations[${index}]`;
+      const nomination = objectValue(value, path);
+      exactKeys(nomination, [
+        "theme_id",
+        "entity_id",
+        "security_id",
+        "role",
+        "reason",
+        "evidence_ids",
+        "required_evidence_kind",
+        "priority",
+      ], path);
+      const reason = stringValue(nomination.reason, `${path}.reason`, 500);
+      if (
+        reason.length < 20 ||
+        /(https?:\/\/|www\.|\b(?:buy|sell|price|score|watchlist|holding|portfolio|cash|alert|policy|allocation|browse|search|query)\b)/iu.test(reason)
+      ) throw new Error(`${path}.reason is unsafe`);
+      const evidenceIds = arrayValue(nomination.evidence_ids, `${path}.evidence_ids`, 8)
+        .map((id, evidenceIndex) => uuidValue(id, `${path}.evidence_ids[${evidenceIndex}]`));
+      if (evidenceIds.length === 0 || new Set(evidenceIds).size !== evidenceIds.length) {
+        throw new Error(`${path}.evidence_ids invalid`);
+      }
+      const entityId = nomination.entity_id === null ? null : stringValue(
+        nomination.entity_id,
+        `${path}.entity_id`,
+        128,
+      );
+      const securityId = nomination.security_id === null ? null : stringValue(
+        nomination.security_id,
+        `${path}.security_id`,
+        128,
+      );
+      const themeId = stringValue(nomination.theme_id, `${path}.theme_id`, 80);
+      if (!/^(?:[a-z][a-z0-9_]{2,79}|[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12})$/u.test(themeId)) {
+        throw new Error(`${path}.theme_id invalid`);
+      }
+      return {
+        theme_id: themeId,
+        entity_id: entityId,
+        security_id: securityId,
+        role: (() => {
+          const role = stringValue(nomination.role, `${path}.role`, 80);
+          if (!/^[a-z][a-z0-9_]{2,79}$/u.test(role)) throw new Error(`${path}.role invalid`);
+          return role;
+        })(),
+        reason,
+        evidence_ids: evidenceIds,
+        required_evidence_kind: enumValue(nomination.required_evidence_kind, [
+          "primary_exposure",
+          "contradictory_primary",
+          "current_filing",
+          "official_program",
+          "entity_identity",
+          "relationship",
+          "current_reference",
+        ] as const, `${path}.required_evidence_kind`),
+        priority: integerValue(nomination.priority, `${path}.priority`, 1, 5),
+      };
+    }),
   };
 }
 
@@ -1384,7 +2020,7 @@ function parseCandidate(
   };
 }
 
-export function parseEvidencePacket(value: unknown): EvidencePacket {
+function parseEvidencePacketV1(value: unknown): EvidencePacketV1 {
   const path = "intelligence packet";
   const row = objectValue(value, path);
   if (new TextEncoder().encode(JSON.stringify(row)).byteLength > 98_304) {
@@ -1476,6 +2112,719 @@ export function parseEvidencePacket(value: unknown): EvidencePacket {
   };
 }
 
+function hashValue(value: unknown, path: string): string {
+  const result = stringValue(value, path, 64);
+  if (!/^[0-9a-f]{64}$/.test(result)) {
+    throw new Error(`${path} must be a lowercase SHA-256 hash`);
+  }
+  return result;
+}
+
+function canonicalTimestampValue(value: unknown, path: string): string {
+  const result = timestampValue(value, path);
+  if (!/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/.test(result)) {
+    throw new Error(`${path} must be a millisecond UTC timestamp`);
+  }
+  if (new Date(result).toISOString() !== result) {
+    throw new Error(`${path} must be a canonical UTC timestamp`);
+  }
+  return result;
+}
+
+function nullableCanonicalTimestamp(
+  value: unknown,
+  path: string,
+): string | null {
+  return value === null ? null : canonicalTimestampValue(value, path);
+}
+
+function fixedPointValue(value: unknown, path: string): string {
+  const result = stringValue(value, path, 100);
+  if (!/^-?(?:0|[1-9]\d*)\.\d{6}$/.test(result) || result === "-0.000000") {
+    throw new Error(`${path} must be a canonical six-place decimal`);
+  }
+  return result;
+}
+
+function utf8Compare(left: string, right: string): number {
+  const encoder = new TextEncoder();
+  const leftBytes = encoder.encode(left);
+  const rightBytes = encoder.encode(right);
+  for (
+    let index = 0;
+    index < Math.min(leftBytes.length, rightBytes.length);
+    index += 1
+  ) {
+    if (leftBytes[index] !== rightBytes[index]) {
+      return leftBytes[index] - rightBytes[index];
+    }
+  }
+  return leftBytes.length - rightBytes.length;
+}
+
+function sortedUniqueStrings(
+  value: unknown,
+  path: string,
+  maxLength: number,
+  itemLimit = 256,
+): string[] {
+  const result = arrayValue(value, path, maxLength).map((item, index) =>
+    stringValue(item, `${path}[${index}]`, itemLimit)
+  );
+  if (
+    new Set(result).size !== result.length ||
+    result.some((item, index) =>
+      index > 0 && utf8Compare(result[index - 1], item) >= 0
+    )
+  ) throw new Error(`${path} must be sorted and unique`);
+  return result;
+}
+
+function nullableBoundedString(
+  value: unknown,
+  path: string,
+  limit: number,
+): string | null {
+  return value === null ? null : stringValue(value, path, limit);
+}
+
+function parseLineageV2(
+  value: unknown,
+  path: string,
+): CandidateLineageV2 | null {
+  if (value === null) return null;
+  const row = objectValue(value, path);
+  exactKeys(row, [
+    "cash_revision",
+    "evidence_receipt_ids",
+    "observed_at",
+    "policy_version",
+    "portfolio_revision",
+    "quote_as_of",
+    "quote_expires_at",
+    "quote_receipt_id",
+    "reference_expires_at",
+    "reference_manifest_id",
+    "reference_revision",
+    "run_id",
+    "security_revision_id",
+  ], path);
+  const receiptRow = objectValue(
+    row.evidence_receipt_ids,
+    `${path}.evidence_receipt_ids`,
+  );
+  if (Object.keys(receiptRow).length > 8) {
+    throw new Error(`${path}.evidence_receipt_ids exceeds evidence bound`);
+  }
+  const evidence_receipt_ids: Record<string, string> = {};
+  const receiptKeys = Object.keys(receiptRow);
+  if (
+    receiptKeys.some((key, index) =>
+      index > 0 && utf8Compare(receiptKeys[index - 1], key) >= 0
+    )
+  ) {
+    throw new Error(`${path}.evidence_receipt_ids keys must be sorted`);
+  }
+  for (const itemId of receiptKeys) {
+    uuidValue(itemId, `${path}.evidence_receipt_ids key`);
+    evidence_receipt_ids[itemId] = uuidValue(
+      receiptRow[itemId],
+      `${path}.evidence_receipt_ids.${itemId}`,
+    );
+  }
+  return {
+    cash_revision: nullableBoundedString(
+      row.cash_revision,
+      `${path}.cash_revision`,
+      256,
+    ),
+    evidence_receipt_ids,
+    observed_at: canonicalTimestampValue(
+      row.observed_at,
+      `${path}.observed_at`,
+    ),
+    policy_version: integerValue(
+      row.policy_version,
+      `${path}.policy_version`,
+      1,
+    ),
+    portfolio_revision: nullableBoundedString(
+      row.portfolio_revision,
+      `${path}.portfolio_revision`,
+      256,
+    ),
+    quote_as_of: nullableCanonicalTimestamp(
+      row.quote_as_of,
+      `${path}.quote_as_of`,
+    ),
+    quote_expires_at: nullableCanonicalTimestamp(
+      row.quote_expires_at,
+      `${path}.quote_expires_at`,
+    ),
+    quote_receipt_id: row.quote_receipt_id === null
+      ? null
+      : uuidValue(row.quote_receipt_id, `${path}.quote_receipt_id`),
+    reference_expires_at: nullableCanonicalTimestamp(
+      row.reference_expires_at,
+      `${path}.reference_expires_at`,
+    ),
+    reference_manifest_id: row.reference_manifest_id === null
+      ? null
+      : uuidValue(row.reference_manifest_id, `${path}.reference_manifest_id`),
+    reference_revision: row.reference_revision === null
+      ? null
+      : integerValue(row.reference_revision, `${path}.reference_revision`, 1),
+    run_id: uuidValue(row.run_id, `${path}.run_id`),
+    security_revision_id: row.security_revision_id === null
+      ? null
+      : uuidValue(row.security_revision_id, `${path}.security_revision_id`),
+  };
+}
+
+function componentScoresV2(
+  value: unknown,
+  path: string,
+  keys: readonly string[],
+): Record<string, string> {
+  const row = objectValue(value, path);
+  exactKeys(row, [...keys], path);
+  return Object.fromEntries(keys.map((key) => [
+    key,
+    fixedPointValue(row[key], `${path}.${key}`),
+  ]));
+}
+
+function parseEvidencePacketV2(value: unknown): EvidencePacketV2 {
+  const path = "intelligence packet";
+  const row = objectValue(value, path);
+  if (new TextEncoder().encode(JSON.stringify(row)).byteLength > 98_304) {
+    throw new Error(`${path} exceeds 96 KiB`);
+  }
+  exactKeys(row, [
+    "action_candidates",
+    "contract_version",
+    "coverage",
+    "evidence",
+    "execution_allowed",
+    "limitations",
+    "observed_at",
+    "omissions",
+    "policy_version",
+    "research_candidates",
+    "run_id",
+  ], path);
+  if (row.contract_version !== 2) {
+    throw new Error(`${path}.contract_version must be 2`);
+  }
+  if (row.execution_allowed !== false) {
+    throw new Error(`${path}.execution_allowed must be false`);
+  }
+  const run_id = uuidValue(row.run_id, `${path}.run_id`);
+  const observed_at = canonicalTimestampValue(
+    row.observed_at,
+    `${path}.observed_at`,
+  );
+  const policy_version = integerValue(
+    row.policy_version,
+    `${path}.policy_version`,
+    1,
+  );
+  const evidence = arrayValue(row.evidence, `${path}.evidence`, 96).map(
+    (value, index) => {
+      const evidencePath = `${path}.evidence[${index}]`;
+      const item = objectValue(value, evidencePath);
+      exactKeys(item, [
+        "authority",
+        "canonical_url",
+        "claim_type",
+        "content_hash",
+        "effective_at",
+        "item_id",
+        "normalized_text",
+        "published_at",
+        "reporting_at",
+        "retrieved_at",
+        "source_identity",
+      ], evidencePath);
+      const source = objectValue(
+        item.source_identity,
+        `${evidencePath}.source_identity`,
+      );
+      exactKeys(
+        source,
+        ["provider", "receipt_id", "upstream_item_id"],
+        `${evidencePath}.source_identity`,
+      );
+      const canonical_url = stringValue(
+        item.canonical_url,
+        `${evidencePath}.canonical_url`,
+        2_048,
+      );
+      const parsedUrl = new URL(canonical_url);
+      if (parsedUrl.protocol !== "https:" || parsedUrl.href !== canonical_url) {
+        throw new Error(
+          `${evidencePath}.canonical_url must be canonical HTTPS`,
+        );
+      }
+      return {
+        authority: stringValue(item.authority, `${evidencePath}.authority`, 80),
+        canonical_url,
+        claim_type: stringValue(
+          item.claim_type,
+          `${evidencePath}.claim_type`,
+          80,
+        ),
+        content_hash: hashValue(
+          item.content_hash,
+          `${evidencePath}.content_hash`,
+        ),
+        effective_at: nullableCanonicalTimestamp(
+          item.effective_at,
+          `${evidencePath}.effective_at`,
+        ),
+        item_id: uuidValue(item.item_id, `${evidencePath}.item_id`),
+        normalized_text: stringValue(
+          item.normalized_text,
+          `${evidencePath}.normalized_text`,
+          2_000,
+          true,
+        ),
+        published_at: nullableCanonicalTimestamp(
+          item.published_at,
+          `${evidencePath}.published_at`,
+        ),
+        reporting_at: nullableCanonicalTimestamp(
+          item.reporting_at,
+          `${evidencePath}.reporting_at`,
+        ),
+        retrieved_at: canonicalTimestampValue(
+          item.retrieved_at,
+          `${evidencePath}.retrieved_at`,
+        ),
+        source_identity: {
+          provider: stringValue(
+            source.provider,
+            `${evidencePath}.source_identity.provider`,
+            120,
+          ),
+          receipt_id: uuidValue(
+            source.receipt_id,
+            `${evidencePath}.source_identity.receipt_id`,
+          ),
+          upstream_item_id: stringValue(
+            source.upstream_item_id,
+            `${evidencePath}.source_identity.upstream_item_id`,
+            512,
+          ),
+        },
+      };
+    },
+  );
+  const evidenceIds = evidence.map((item) => item.item_id);
+  if (
+    new Set(evidenceIds).size !== evidenceIds.length ||
+    evidenceIds.some((item, index) =>
+      index > 0 && utf8Compare(evidenceIds[index - 1], item) >= 0
+    )
+  ) throw new Error(`${path}.evidence must have sorted unique ids`);
+  const knownEvidence = new Set(evidenceIds);
+
+  const research_candidates = arrayValue(
+    row.research_candidates,
+    `${path}.research_candidates`,
+    12,
+  ).map((value, index) => {
+    const candidatePath = `${path}.research_candidates[${index}]`;
+    const candidate = objectValue(value, candidatePath);
+    exactKeys(candidate, [
+      "adverse_paths",
+      "candidate_hash",
+      "candidate_key",
+      "entity_id",
+      "event_ids",
+      "evidence",
+      "exposure_fact_ids",
+      "limitations",
+      "priority_components",
+      "priority_score",
+      "research_state",
+      "roles",
+      "security_id",
+      "suitability",
+      "theme_ids",
+      "ticker",
+    ], candidatePath);
+    const references = arrayValue(
+      candidate.evidence,
+      `${candidatePath}.evidence`,
+      8,
+    ).map((value, evidenceIndex) => {
+      const refPath = `${candidatePath}.evidence[${evidenceIndex}]`;
+      const ref = objectValue(value, refPath);
+      exactKeys(
+        ref,
+        ["claim_type", "item_id", "relationship_eligible", "role"],
+        refPath,
+      );
+      if (typeof ref.relationship_eligible !== "boolean") {
+        throw new Error(`${refPath}.relationship_eligible must be boolean`);
+      }
+      const item_id = uuidValue(ref.item_id, `${refPath}.item_id`);
+      if (!knownEvidence.has(item_id)) {
+        throw new Error(`${refPath} references unknown evidence`);
+      }
+      return {
+        claim_type: stringValue(ref.claim_type, `${refPath}.claim_type`, 80),
+        item_id,
+        relationship_eligible: ref.relationship_eligible,
+        role: enumValue(
+          ref.role,
+          ["supporting", "opposing"] as const,
+          `${refPath}.role`,
+        ),
+      };
+    });
+    if (
+      new Set(references.map((item) => item.item_id)).size !== references.length
+    ) {
+      throw new Error(`${candidatePath}.evidence has duplicate ids`);
+    }
+    const suitabilityPath = `${candidatePath}.suitability`;
+    const suitabilityRow = objectValue(candidate.suitability, suitabilityPath);
+    exactKeys(suitabilityRow, [
+      "component_scores",
+      "evaluation_hash",
+      "lineage",
+      "missing_reasons",
+      "state",
+      "veto_reasons",
+    ], suitabilityPath);
+    const suitability: SuitabilityEvaluationV2 = {
+      component_scores: componentScoresV2(
+        suitabilityRow.component_scores,
+        `${suitabilityPath}.component_scores`,
+        [
+          "concentration_penalty",
+          "duplication_penalty",
+          "liquidity",
+          "portfolio_relevance",
+        ],
+      ),
+      evaluation_hash: hashValue(
+        suitabilityRow.evaluation_hash,
+        `${suitabilityPath}.evaluation_hash`,
+      ),
+      lineage: parseLineageV2(
+        suitabilityRow.lineage,
+        `${suitabilityPath}.lineage`,
+      ),
+      missing_reasons: sortedUniqueStrings(
+        suitabilityRow.missing_reasons,
+        `${suitabilityPath}.missing_reasons`,
+        50,
+        200,
+      ),
+      state: enumValue(
+        suitabilityRow.state,
+        ["unknown", "eligible", "vetoed"] as const,
+        `${suitabilityPath}.state`,
+      ),
+      veto_reasons: sortedUniqueStrings(
+        suitabilityRow.veto_reasons,
+        `${suitabilityPath}.veto_reasons`,
+        50,
+        200,
+      ),
+    };
+    const ticker = candidate.ticker === null
+      ? null
+      : tickerValue(candidate.ticker, `${candidatePath}.ticker`);
+    const result: ResearchCandidateV2 = {
+      adverse_paths: sortedUniqueStrings(
+        candidate.adverse_paths,
+        `${candidatePath}.adverse_paths`,
+        50,
+        256,
+      ),
+      candidate_hash: hashValue(
+        candidate.candidate_hash,
+        `${candidatePath}.candidate_hash`,
+      ),
+      candidate_key: stringValue(
+        candidate.candidate_key,
+        `${candidatePath}.candidate_key`,
+        256,
+      ),
+      entity_id: nullableBoundedString(
+        candidate.entity_id,
+        `${candidatePath}.entity_id`,
+        256,
+      ),
+      event_ids: sortedUniqueStrings(
+        candidate.event_ids,
+        `${candidatePath}.event_ids`,
+        50,
+        100,
+      ),
+      evidence: references,
+      exposure_fact_ids: sortedUniqueStrings(
+        candidate.exposure_fact_ids,
+        `${candidatePath}.exposure_fact_ids`,
+        50,
+        100,
+      ),
+      limitations: sortedUniqueStrings(
+        candidate.limitations,
+        `${candidatePath}.limitations`,
+        100,
+        500,
+      ),
+      priority_components: componentScoresV2(
+        candidate.priority_components,
+        `${candidatePath}.priority_components`,
+        [
+          "authority_corroboration",
+          "exposure",
+          "materiality",
+          "recency",
+        ],
+      ),
+      priority_score: fixedPointValue(
+        candidate.priority_score,
+        `${candidatePath}.priority_score`,
+      ),
+      research_state: enumValue(
+        candidate.research_state,
+        [
+          "unresolved",
+          "resolved",
+          "exposure_supported",
+          "analysis_ready",
+        ] as const,
+        `${candidatePath}.research_state`,
+      ),
+      roles: sortedUniqueStrings(
+        candidate.roles,
+        `${candidatePath}.roles`,
+        50,
+        80,
+      ),
+      security_id: nullableBoundedString(
+        candidate.security_id,
+        `${candidatePath}.security_id`,
+        256,
+      ),
+      suitability,
+      theme_ids: sortedUniqueStrings(
+        candidate.theme_ids,
+        `${candidatePath}.theme_ids`,
+        50,
+        256,
+      ),
+      ticker,
+    };
+    const suitabilityBody = { ...suitability } as Record<string, unknown>;
+    delete suitabilityBody.evaluation_hash;
+    if (
+      sha256Hex(canonicalJson(suitabilityBody)) !== suitability.evaluation_hash
+    ) {
+      throw new Error(
+        `${suitabilityPath}.evaluation_hash does not match canonical content`,
+      );
+    }
+    const candidateBody = { ...result } as Record<string, unknown>;
+    delete candidateBody.candidate_hash;
+    if (sha256Hex(canonicalJson(candidateBody)) !== result.candidate_hash) {
+      throw new Error(
+        `${candidatePath}.candidate_hash does not match canonical content`,
+      );
+    }
+    // No protected issuer-valuation ledger exists in this schema version.
+    // Structural hashes authenticate bytes, not the truth of a caller's gate
+    // claims, so a v2 packet cannot carry eligible suitability yet.
+    if (
+      suitability.state === "eligible" ||
+      !suitability.missing_reasons.includes("valuation_missing")
+    ) {
+      throw new Error(
+        `${suitabilityPath} protected issuer valuation is unavailable`,
+      );
+    }
+    if (
+      (result.security_id === null || result.ticker === null) &&
+      result.research_state !== "unresolved"
+    ) {
+      throw new Error(
+        `${candidatePath} unresolved identity has invalid research state`,
+      );
+    }
+    if (
+      result.research_state === "unresolved" && (
+        result.security_id !== null || result.ticker !== null ||
+        result.entity_id === null || !result.entity_id.startsWith("unresolved:")
+      )
+    ) {
+      throw new Error(
+        `${candidatePath} explicit unresolved identity is invalid`,
+      );
+    }
+    if (
+      result.security_id !== null && result.candidate_key !== result.security_id
+    ) {
+      throw new Error(
+        `${candidatePath}.candidate_key must equal the resolved security identity`,
+      );
+    }
+    if (
+      result.research_state === "analysis_ready" && (
+        result.security_id === null || result.ticker === null ||
+        result.exposure_fact_ids.length === 0 ||
+        !result.evidence.some((item) => item.role === "supporting") ||
+        !result.evidence.some((item) => item.role === "opposing") ||
+        !result.evidence.some((item) =>
+          item.relationship_eligible && item.claim_type === "issuer_exposure"
+        ) || suitability.lineage === null
+      )
+    ) throw new Error(`${candidatePath} analysis_ready evidence is incomplete`);
+    if (
+      suitability.state === "unknown" &&
+      suitability.missing_reasons.length === 0
+    ) {
+      throw new Error(`${suitabilityPath} unknown requires missing reasons`);
+    }
+    if (
+      suitability.state === "vetoed" && suitability.veto_reasons.length === 0
+    ) {
+      throw new Error(`${suitabilityPath} vetoed requires veto reasons`);
+    }
+    if (
+      suitability.lineage !== null && (
+        suitability.lineage.run_id !== run_id ||
+        suitability.lineage.observed_at !== observed_at ||
+        suitability.lineage.policy_version !== policy_version
+      )
+    ) throw new Error(`${suitabilityPath}.lineage packet binding mismatch`);
+    return result;
+  });
+  if (
+    new Set(research_candidates.map((item) => item.candidate_key)).size !==
+      research_candidates.length
+  ) {
+    throw new Error(`${path}.research_candidates has duplicate identities`);
+  }
+  const resolvedTickers = research_candidates.flatMap((item) =>
+    item.ticker === null ? [] : [item.ticker]
+  );
+  if (new Set(resolvedTickers).size !== resolvedTickers.length) {
+    throw new Error(
+      `${path}.research_candidates has duplicate ticker identities`,
+    );
+  }
+  const researchByKey = new Map(
+    research_candidates.map((item) => [item.candidate_key, item]),
+  );
+  const actionValues = arrayValue(
+    row.action_candidates,
+    `${path}.action_candidates`,
+    12,
+  );
+  if (actionValues.length !== 0) {
+    throw new Error(`${path}.action_candidates requires protected valuation`);
+  }
+  const action_candidates = actionValues.map((value, index) => {
+    const actionPath = `${path}.action_candidates[${index}]`;
+    const action = objectValue(value, actionPath);
+    exactKeys(
+      action,
+      ["candidate_hash", "candidate_key", "suitability_hash"],
+      actionPath,
+    );
+    const candidate_key = stringValue(
+      action.candidate_key,
+      `${actionPath}.candidate_key`,
+      256,
+    );
+    const research = researchByKey.get(candidate_key);
+    const result = {
+      candidate_hash: hashValue(
+        action.candidate_hash,
+        `${actionPath}.candidate_hash`,
+      ),
+      candidate_key,
+      suitability_hash: hashValue(
+        action.suitability_hash,
+        `${actionPath}.suitability_hash`,
+      ),
+    };
+    if (
+      !research || research.candidate_hash !== result.candidate_hash ||
+      research.suitability.evaluation_hash !== result.suitability_hash ||
+      research.research_state !== "analysis_ready" ||
+      research.suitability.state !== "eligible"
+    ) throw new Error(`${actionPath} is not an exact eligible research subset`);
+    return result;
+  });
+  if (
+    new Set(action_candidates.map((item) => item.candidate_key)).size !==
+      action_candidates.length
+  ) {
+    throw new Error(`${path}.action_candidates has duplicate identities`);
+  }
+  const limitations = sortedUniqueStrings(
+    row.limitations,
+    `${path}.limitations`,
+    100,
+    500,
+  );
+  const omissions = arrayValue(row.omissions, `${path}.omissions`, 1_000).map(
+    (value, index) => {
+      const omissionPath = `${path}.omissions[${index}]`;
+      const omission = objectValue(value, omissionPath);
+      exactKeys(omission, [
+        "candidate_key",
+        "item_id",
+        "kind",
+        "reason",
+        "stage",
+      ], omissionPath);
+      return {
+        candidate_key: stringValue(
+          omission.candidate_key,
+          `${omissionPath}.candidate_key`,
+          256,
+          true,
+        ),
+        item_id: omission.item_id === null
+          ? null
+          : uuidValue(omission.item_id, `${omissionPath}.item_id`),
+        kind: stringValue(omission.kind, `${omissionPath}.kind`, 80),
+        reason: stringValue(omission.reason, `${omissionPath}.reason`, 200),
+        stage: stringValue(omission.stage, `${omissionPath}.stage`, 80),
+      };
+    },
+  );
+  return {
+    action_candidates,
+    contract_version: 2,
+    coverage: objectValue(row.coverage, `${path}.coverage`),
+    evidence,
+    execution_allowed: false,
+    limitations,
+    observed_at,
+    omissions,
+    policy_version,
+    research_candidates,
+    run_id,
+  };
+}
+
+export function parseEvidencePacket(value: unknown): EvidencePacket {
+  const row = objectValue(value, "intelligence packet");
+  return row.contract_version === 2
+    ? parseEvidencePacketV2(row)
+    : parseEvidencePacketV1(row);
+}
+
 function parseIntelligencePacketRef(value: unknown): IntelligencePacketRef {
   const path = "bundle.intelligence_packet";
   const row = objectValue(value, path);
@@ -1511,6 +2860,24 @@ export function validatePacketEvidence(
   candidate: DecisionCandidate,
   packet: EvidencePacket,
 ): string[] {
+  if (isEvidencePacketV2(packet)) {
+    const research = packet.research_candidates.find((row) =>
+      row.ticker === candidate.ticker
+    );
+    if (!research) return ["EVIDENCE_NOT_IN_PACKET"];
+    const action = packet.action_candidates.find((row) =>
+      row.candidate_key === research.candidate_key &&
+      row.candidate_hash === research.candidate_hash &&
+      row.suitability_hash === research.suitability.evaluation_hash
+    );
+    if (!action) return ["RESEARCH_ONLY_CANDIDATE"];
+    const allowed = new Set(research.evidence.map((item) => item.item_id));
+    const supplied = new Set(candidate.evidence.map((item) => item.id));
+    return supplied.size === allowed.size &&
+        [...allowed].every((id) => supplied.has(id))
+      ? []
+      : ["EVIDENCE_NOT_IN_PACKET"];
+  }
   const packetCandidate = packet.candidates.find((row) =>
     row.candidate_key === candidate.ticker
   );
@@ -1521,6 +2888,28 @@ export function validatePacketEvidence(
       [...allowed].every((id) => supplied.has(id))
     ? []
     : ["EVIDENCE_NOT_IN_PACKET"];
+}
+
+export function packetEvidenceIds(
+  packet: EvidencePacket,
+  ticker: string,
+): string[] | null {
+  if (isEvidencePacketV2(packet)) {
+    const research = packet.research_candidates.find((row) =>
+      row.ticker === ticker
+    );
+    if (
+      !research ||
+      !packet.action_candidates.some((row) =>
+        row.candidate_key === research.candidate_key &&
+        row.candidate_hash === research.candidate_hash &&
+        row.suitability_hash === research.suitability.evaluation_hash
+      )
+    ) return null;
+    return research.evidence.map((item) => item.item_id);
+  }
+  return packet.candidates.find((row) => row.candidate_key === ticker)
+    ?.evidence_ids ?? null;
 }
 
 export function parseDecisionBundle(

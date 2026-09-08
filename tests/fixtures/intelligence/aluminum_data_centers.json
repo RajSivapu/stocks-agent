@@ -1,0 +1,12 @@
+{
+  "theme_id": "aluminum_copper",
+  "title": "Aluminum conductor demand rises for data center construction",
+  "summary": "AluGrid Industries expects aluminum conductor demand from new data center campuses to expand production capacity.",
+  "event_type": "demand",
+  "role": "aluminum_conductors",
+  "issuers": [
+    {"name": "AluGrid Industries", "cik": "0000001002", "public": true, "ticker": "ALUG", "exchange": "NYSE", "security_id": "sec:ALUG"}
+  ],
+  "organizations": ["AluGrid Industries"],
+  "expected_candidate_keys": ["sec:ALUG"]
+}

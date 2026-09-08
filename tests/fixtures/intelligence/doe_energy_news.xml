@@ -1,0 +1,22 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<rss version="2.0">
+  <channel>
+    <title>Energy.gov Energy News</title>
+    <link>https://www.energy.gov/</link>
+    <description>Official Department of Energy news</description>
+    <item>
+      <guid isPermaLink="false">doe-energy-1001</guid>
+      <title>Department of Energy Announces Grid Manufacturing Awards</title>
+      <link>https://www.energy.gov/articles/grid-manufacturing-awards</link>
+      <description>Funding awards expand domestic grid component manufacturing.</description>
+      <pubDate>Mon, 07 Sep 2026 14:30:00 GMT</pubDate>
+    </item>
+    <item>
+      <guid isPermaLink="false">doe-energy-1000</guid>
+      <title>New Critical Minerals Demonstration Program</title>
+      <link>https://www.energy.gov/articles/critical-minerals-demonstration-program</link>
+      <description>A new demonstration program supports domestic processing.</description>
+      <pubDate>Fri, 04 Sep 2026 18:00:00 GMT</pubDate>
+    </item>
+  </channel>
+</rss>

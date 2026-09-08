@@ -1,6 +1,7 @@
 import {
   parseDashboardEnvelope,
   parseDashboardErrorEnvelope,
+  parseIntelligenceView,
   type DashboardEnvelope,
 } from "@stocks-agent/dashboard-contracts";
 
@@ -61,6 +62,10 @@ export function createDashboardClient(
         throw new DashboardApiError(response.status, parsed.error.code, parsed.error.message);
       }
       return parseDashboardEnvelope<T>(value);
+    },
+    async getIntelligence(path: "/v1/intelligence", token: string) {
+      const envelope = await this.get<unknown>(path, token);
+      return { ...envelope, data: parseIntelligenceView(envelope.data) };
     },
   };
 }

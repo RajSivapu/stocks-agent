@@ -7,6 +7,7 @@ data rather than raising, so callers can mark partials.
 """
 import datetime
 import json, ssl, urllib.request
+from pathlib import Path
 ctx = ssl.create_default_context(); UA = {"User-Agent": "Mozilla/5.0"}
 
 _MAX_FUTURE_CLOCK_SKEW_MINUTES = 5
@@ -105,34 +106,45 @@ def indicators(closes):
             "macd": _macd(closes)}
 
 
-# NYSE full-day closures. Static and authoritative — a pre-market call can never see
-# "today's" bar yet (trading hasn't started), so inferring holidays from live intraday
-# state defaulted to "holiday" whenever Yahoo's marketState was ambiguously CLOSED at
-# 06:30 CT, even on ordinary trading days — this fired live on the weekday right after
-# a real holiday and sent a false "market closed" brief. Update this each December for
-# the coming year; if the current year is missing, fail OPEN (assume trading day) —
-# missing a real morning brief is worse than one harmless extra run on an unlisted day.
-_NYSE_HOLIDAYS_BY_YEAR = {
-    2026: frozenset({
-        "2026-01-01",  # New Year's Day
-        "2026-01-19",  # Martin Luther King Jr. Day
-        "2026-02-16",  # Washington's Birthday (Presidents' Day)
-        "2026-04-03",  # Good Friday
-        "2026-05-25",  # Memorial Day
-        "2026-06-19",  # Juneteenth National Independence Day
-        "2026-07-03",  # Independence Day (observed; Jul 4 falls on a Saturday)
-        "2026-09-07",  # Labor Day
-        "2026-11-26",  # Thanksgiving Day
-        "2026-12-25",  # Christmas Day
-    }),
-}
+_CALENDAR_PATH = Path(__file__).resolve().parents[1] / "config" / "nyse_calendar.json"
+
+
+def _load_nyse_calendar():
+    try:
+        document = json.loads(_CALENDAR_PATH.read_text())
+        coverage = document["coverage"]
+        years = document["years"]
+        if document["version"] != 1 or document["exchange"] != "NYSE" \
+                or document["timezone"] != "America/New_York" \
+                or coverage != {"start_year": 2026, "end_year": 2028} \
+                or list(years) != ["2026", "2027", "2028"]:
+            raise ValueError
+        return document
+    except (OSError, KeyError, TypeError, ValueError, json.JSONDecodeError) as exc:
+        raise RuntimeError("reviewed NYSE calendar is unavailable") from exc
+
+
+_NYSE_CALENDAR = _load_nyse_calendar()
 
 
 def nyse_holidays(year):
     """Return the reviewed full-day NYSE closures for ``year`` as a new tuple."""
     if type(year) is not int:
         raise ValueError("year must be an integer")
-    return tuple(sorted(_NYSE_HOLIDAYS_BY_YEAR.get(year, ())))
+    row = _NYSE_CALENDAR["years"].get(str(year))
+    if row is None:
+        raise ValueError("calendar coverage is unavailable")
+    return tuple(row["full_day_closures"])
+
+
+def nyse_early_closes(year):
+    """Return reviewed ``(date, local_time)`` early-close pairs for ``year``."""
+    if type(year) is not int:
+        raise ValueError("year must be an integer")
+    row = _NYSE_CALENDAR["years"].get(str(year))
+    if row is None:
+        raise ValueError("calendar coverage is unavailable")
+    return tuple((value["date"], value["local_time"]) for value in row["early_closes"])
 
 
 def is_market_holiday(today=None):
@@ -146,4 +158,4 @@ def is_market_holiday(today=None):
         today = datetime.date.today()
     if today.weekday() >= 5:
         return False
-    return str(today) in _NYSE_HOLIDAYS_BY_YEAR.get(today.year, ())
+    return str(today) in nyse_holidays(today.year)

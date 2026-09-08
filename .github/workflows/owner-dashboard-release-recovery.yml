@@ -36,8 +36,8 @@ jobs:
           export HEAD_SHA
           RUN="$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$RUN_ID")"
           jq -e --arg repo "$GITHUB_REPOSITORY" --arg sha "$HEAD_SHA" '.repository.full_name == $repo and .head_sha == $sha and .head_branch == "main" and .event == "workflow_dispatch" and .path == ".github/workflows/owner-dashboard-release.yml" and .name == "Protected owner dashboard release"' <<<"$RUN" >/dev/null
-          VERIFIED="$(gh api "repos/$GITHUB_REPOSITORY/actions/workflows/owner-dashboard-ci.yml/runs?head_sha=$HEAD_SHA&status=completed&per_page=100" --jq '[.workflow_runs[] | select(.head_sha == env.HEAD_SHA and .conclusion == "success" and .name == "Owner dashboard verification" and .path == ".github/workflows/owner-dashboard-ci.yml")] | length')"
-          test "$VERIFIED" -ge 1
+          VERIFIED="$(gh api "repos/$GITHUB_REPOSITORY/actions/workflows/owner-dashboard-ci.yml/runs?head_sha=$HEAD_SHA&status=completed&per_page=100" --jq '[.workflow_runs[] | select(.repository.full_name == env.GITHUB_REPOSITORY and .head_sha == env.HEAD_SHA and .conclusion == "success" and .name == "Owner dashboard verification" and .path == ".github/workflows/owner-dashboard-ci.yml" and .event == "push" and .head_branch == "main")] | length')"
+          test "$VERIFIED" -ge 1 || { echo 'required CI belongs to another repository, has the wrong workflow, or required CI was not an exact-main push'; exit 1; }
           DEPLOYMENTS="$(gh api "repos/$GITHUB_REPOSITORY/deployments?ref=$HEAD_SHA&environment=production&per_page=100")"
           DEPLOYMENT_ID="$(jq -r --arg sha "$HEAD_SHA" --arg run "$RUN_ID" --arg attempt "$RUN_ATTEMPT" '[.[] | select(.ref == $sha and .environment == "production") | select((.payload | if type == "string" then fromjson? else . end) as $payload | $payload.candidate_sha == $sha and ($payload.release_workflow_run_id | tostring) == $run and ($payload.release_workflow_run_attempt | tostring) == $attempt) | .id] | if length == 1 then .[0] else empty end' <<<"$DEPLOYMENTS")"
           test -n "$DEPLOYMENT_ID"

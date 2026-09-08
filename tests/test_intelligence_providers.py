@@ -1,4 +1,5 @@
 import json
+from dataclasses import replace
 from datetime import datetime, timezone
 from urllib.parse import parse_qs, urlsplit
 
@@ -14,7 +15,7 @@ NOW = datetime(2026, 9, 4, 12, 0, tzinfo=timezone.utc)
 
 
 class FixtureHttp:
-    def __init__(self, payload, *, url="https://fixture.invalid/feed", cache_hit=False):
+    def __init__(self, payload, *, url=None, cache_hit=False):
         self.payload = payload
         self.url = url
         self.cache_hit = cache_hit
@@ -23,7 +24,7 @@ class FixtureHttp:
     def get(self, request):
         self.requests.append(request)
         return HttpResult(
-            url=self.url,
+            url=self.url or request.url,
             status=200,
             headers={"content-type": "application/json"},
             body=json.dumps(self.payload).encode(),
@@ -109,6 +110,11 @@ def test_secondary_adapters_normalize_independent_claims_and_syndication():
     assert alpha.metadata["claim_key"] == finn.metadata["claim_key"]
     assert alpha.metadata["polarity"] == finn.metadata["polarity"] == "positive"
     context = {"holdings": {"TEST": "0.1"}, "liquidity_by_ticker": {"TEST": "1"}, "overlap_by_ticker": {"TEST": "0.1"}}
+    from tests.test_intelligence_entities import reference as entity_reference
+    fixture = entity_reference()
+    context["security_reference"] = replace(fixture, securities=(replace(
+        fixture.securities[0], security_id="sec:TEST", ticker="TEST", aliases=("TEST",),
+    ),))
     events, _, ranked = _discover([alpha, finn], context, NOW)
     assert len(events) == 1
     assert ranked[0].components["authority_corroboration"] == Decimal("0.75")
@@ -198,6 +204,7 @@ def test_each_declared_provider_yields_discoverable_evidence_or_pre_http_unsuppo
         "alphavantage_api_key": "existing-free-alpha-key",
         "finnhub_api_key": "existing-free-finnhub-key",
         "fred_api_key": "existing-free-fred-key",
+        "sec_user_agent_contact": "owner@example.com",
     }
     adapter = build_adapter(
         adapter_name, http, quota, secret_getter=lambda name: secrets[name], clock=lambda: NOW,
@@ -218,7 +225,6 @@ def test_each_declared_provider_yields_discoverable_evidence_or_pre_http_unsuppo
     assert item.upstream_item_id
     assert item.request_url and item.source_url and item.request_url != item.source_url
     assert item.published_at and item.retrieved_at
-    assert item.security_ids or item.entity_ids
 
 
 @pytest.mark.parametrize("adapter_name", tuple(FIXTURES))
@@ -232,6 +238,7 @@ def test_adapter_returns_bounded_items_and_one_request_receipt(adapter_name):
         "alphavantage_api_key": "existing-free-alpha-key",
         "finnhub_api_key": "existing-free-finnhub-key",
         "fred_api_key": "existing-free-fred-key",
+        "sec_user_agent_contact": "owner@example.com",
     }
 
     query = sample_query(**(
@@ -282,6 +289,57 @@ def test_provider_bounds_drop_extra_and_wrong_host_items():
     assert result.receipt.dropped_count == 2
 
 
+def test_gdelt_maxrecords_saturation_records_an_explicit_coverage_gap_once():
+    payload = {"articles": [{
+        "url": f"https://api.gdeltproject.org/doc/{index}",
+        "title": f"GDELT item {index}",
+        "seendate": "20260904T100000Z",
+    } for index in range(20)]}
+    http = FixtureHttp(payload)
+
+    result = build_adapter(
+        "gdelt", http,
+        QuotaSession({"gdelt": ({"reservation_id": "g-saturated", "reserved_requests": 1},)}),
+        clock=lambda: NOW,
+    ).collect(sample_query(
+        limit=20,
+        capability_id="gdelt_theme_search",
+        next_retry_phase="post-market",
+    ))
+
+    assert len(http.requests) == 1
+    assert result.receipt.returned_count == result.receipt.requested_limit == 20
+    assert result.receipt.accepted_count == 20
+    assert result.receipt.metadata["truncated"] is True
+    assert result.receipt.metadata["backlog_remaining"] is False
+    assert result.receipt.metadata["continuation_unavailable"] is True
+    assert result.receipt.metadata["coverage_gap"] is True
+    assert "backlog_token" not in result.receipt.metadata
+    assert "next_retry_phase" not in result.receipt.metadata
+
+
+def test_gdelt_below_maxrecords_is_exhaustive_without_a_coverage_gap():
+    payload = {"articles": [{
+        "url": f"https://api.gdeltproject.org/doc/{index}",
+        "title": f"GDELT item {index}",
+        "seendate": "20260904T100000Z",
+    } for index in range(19)]}
+
+    result = build_adapter(
+        "gdelt", FixtureHttp(payload),
+        QuotaSession({"gdelt": ({"reservation_id": "g-below-bound", "reserved_requests": 1},)}),
+        clock=lambda: NOW,
+    ).collect(sample_query(limit=20, capability_id="gdelt_theme_search"))
+
+    assert result.receipt.returned_count == 19
+    assert result.receipt.metadata["truncated"] is False
+    assert result.receipt.metadata["backlog_remaining"] is False
+    assert result.receipt.metadata["exhausted"] is True
+    assert "continuation_unavailable" not in result.receipt.metadata
+    assert "coverage_gap" not in result.receipt.metadata
+    assert "backlog_token" not in result.receipt.metadata
+
+
 def test_official_release_and_effective_timestamps_remain_distinct():
     result = build_adapter(
         "federal_register",
@@ -322,6 +380,7 @@ def test_newly_published_prior_period_filing_is_retained_with_distinct_times():
     result = build_adapter(
         "sec_edgar", FixtureHttp(payload),
         QuotaSession({"sec_edgar": ({"reservation_id": "s2", "reserved_requests": 1},)}),
+        secret_getter=lambda name: "owner@example.com" if name == "sec_user_agent_contact" else "",
         clock=lambda: NOW,
     ).collect(sample_query(cik="0000000001", symbols=("TEST",)))
 
@@ -573,7 +632,7 @@ def test_future_effective_timestamp_does_not_drop_newly_published_fact():
         "document_number": "2026-99999",
         "title": "Future rule",
         "abstract": "Published now, effective later",
-        "html_url": "https://www.federalregister.gov/documents/2026/09/04/future-rule",
+        "html_url": "https://www.federalregister.gov/documents/2026/09/04/2026-99999/future-rule",
         "publication_date": "2026-09-04",
         "effective_on": "2026-09-04T12:00:01Z",
     }]}

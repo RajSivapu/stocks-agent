@@ -8,7 +8,7 @@ it("renders the tiny Telegram formatting allowlist while keeping hostile markup 
     text={'<img src=x onerror="alert(1)"><b>HOOD</b>'}
     links={[
       { label: "bad", url: "javascript:alert(1)" },
-      { label: "good", url: "https://www.sec.gov/evidence" },
+      { label: "good", url: "https://www.sec.gov/Archives/edgar/data/1/filing.htm" },
     ]}
   />);
   expect(screen.getByText(/<img src=x/)).toBeVisible();

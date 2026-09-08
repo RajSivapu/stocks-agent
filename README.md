@@ -53,8 +53,12 @@ research, Analyst/Checker, `evaluate_and_publish`, permitted artifacts/grading, 
 
 - Yahoo Finance chart endpoints: quotes and adjusted/raw OHLC history.
 - Finnhub free tier: fundamentals, news, earnings/events, insider and analyst context.
-- Alpha Vantage is not used by the current release and is intentionally absent from the Routine
-  environment.
+- GDELT plus reviewed SEC, Federal Register, White House, DOE, Defense, and EIA routes provide
+  bounded keyless event and official-source discovery.
+- Scheduled discovery records capability tasks and durable overlapping source cursors. Backlogged
+  pages keep the same collection window, and an unpageable rolling-feed overflow reports a coverage
+  gap without advancing its watermark.
+- Alpha Vantage topic news is optional and may use only an existing owner-approved free key.
 - Supabase free-tier project: Postgres and three Edge Functions, including the owner-only read API.
 - Telegram Bot API: fixed brief delivery and deterministic recordkeeping chat.
 - Anthropic plan allowance: scheduled model reasoning; no Anthropic API key in this repo.
@@ -111,15 +115,17 @@ Supabase Edge Function secrets/runtime contain:
   `DASHBOARD_DATABASE_URL` for the owner dashboard;
 - Supabase's injected `SUPABASE_URL` and `SUPABASE_SERVICE_ROLE_KEY`.
 
-Anthropic's personal `stocks-agent` cloud environment contains exactly these variables:
+Anthropic's personal `stocks-agent` cloud environment contains these required values:
 
 - `SUPABASE_URL`;
 - the narrowly scoped `MARKET_AGENT_SECRET`;
-- a read-only `FINNHUB_API_KEY`.
+- a read-only `FINNHUB_API_KEY`;
+- the non-secret `SEC_USER_AGENT_CONTACT` used to identify SEC requests.
 
 The environment uses a custom domain allowlist, no Gmail/Drive connectors, and no setup script. Its
-gateway credential authorizes only the bounded analysis API; server policy remains final. Do not
-configure Alpha Vantage because the current code does not call it. The Routine must never receive
+gateway credential authorizes only the bounded analysis API; server policy remains final. Add
+`ALPHAVANTAGE_API_KEY` only for the optional existing-free-key capability; the official/GDELT
+baseline remains independent. The Routine must never receive
 the service-role key, Telegram credentials, brokerage credentials, or an LLM API key. Prefer
 Claude's protected API-credential proxy if its controls become available, then remove both keys
 from ordinary variables. Generate independent high-entropy gateway and webhook secrets. Rotate any
@@ -154,8 +160,9 @@ dashboard role. RLS remains enabled, and privileged RPC execution is limited to 
 .venv/bin/python scripts/healthcheck.py
 ```
 
-Expected keys are `alerts`, `gateway`, `finnhub`, and `yahoo`. Healthcheck uses dry-run gateway
-operations and sends no Telegram message.
+Expected top-level keys are `alerts`, `gateway`, `zero_key_baseline`, and `capabilities`.
+Healthcheck uses dry-run gateway operations, reports exact reviewed route and configuration status
+without values, and sends no Telegram message.
 
 ### 6. Configure Routines
 
@@ -434,22 +441,22 @@ The release verifier also accepts no caller receipt JSON:
 ```bash
 python scripts/verify_personal_stock_agent_v1.py \
   --repository OWNER/REPOSITORY --deployment-id DEPLOYMENT_ID \
-  --production-project-ref PRODUCTION_PROJECT_REF --static-root /absolute/path/to/dist
+  --production-project-ref PRODUCTION_PROJECT_REF --static-root /absolute/path/to/dist \
+  --native-site-receipt /absolute/path/to/native-site-receipt.json
 ```
 
 It uses `gh` read access plus `RELEASE_READONLY_DATABASE_URL`. The protected production GitHub
-deployment must reference an immutable `release_artifact_id`; its sole `release-record.json` file
-contains the candidate/project, CI run and PR IDs, complete migration paths/hashes, function versions
-and source hashes, static source/file hashes, measured dry-run/canary evidence, and the rollback
-capture/exercise records. Artifact provenance must match a successful candidate run of the protected
-`owner-dashboard-release.yml` workflow on main. This evidence publication is a protected rollout
-prerequisite; a missing record/workflow fails verification and is not a deployment claim.
+deployment must reference an immutable release-record artifact. That record binds the candidate,
+repository, exact CI/release workflow identities, latest review state, PR, migration application,
+three Edge readbacks, and one immutable backend evidence artifact with an encrypted-journal receipt.
+Artifact provenance and archive digests must match the successful protected
+`owner-dashboard-release.yml` workflow on `main`.
 
-The deploy tool's required `--evidence-directory` retains predeployment gateway bytes under
-`gateway-source` plus `rollback-capture.json` before any gateway change. Publish those source files
-as the immutable rollback artifact and bind its numeric ID in the protected release record. The
-verifier recomputes local Git commit/time/tree hashes, migration/function/static bytes, captured
-rollback bytes, and exact queried stage/origin/report/outbox identities. It discovers the next
+GitHub Actions releases and recovers the backend only. Publish the exact same candidate through the
+native owner-scoped Sites connector, preserve its prior active version, and supply the resulting
+fresh owner-only receipt to the verifier. The verifier recomputes local Git commit/tree hashes,
+migration/function/static bytes, backend capture bytes, native Site source/backend binding, and exact
+queried stage/origin/report/outbox identities. It discovers the next
 existing scheduled postdeployment run without starting one. Suppression requires its dedicated
 reason; old reasonless rows remain unverified rather than receiving an invented historical reason.
 

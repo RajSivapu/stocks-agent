@@ -1,22 +1,37 @@
 import type {
   AlertView,
+  CandidateRelationshipView,
   CompanionHorizonView,
   CompanionView,
   HoldingView,
   IdeaView,
-  IntelligenceView,
   InvestmentPlanView,
   LearningObservationView,
+  MarketEventView,
   PortfolioView,
   ReceiptStatus,
   ReportDetailView,
   ReportSummaryView,
   RunSummaryView,
+  SourceCoverageView,
   SourceLink,
+  ThemeView,
   TransactionView,
 } from "../../../packages/dashboard-contracts/src/index.ts";
+import { safeSourceUrl } from "../../../packages/dashboard-contracts/src/index.ts";
 
 type Row = Record<string, unknown>;
+
+interface LegacyIntelligenceView {
+  run_id: string;
+  data_as_of: string | null;
+  themes: ThemeView[];
+  events: MarketEventView[];
+  candidates: CandidateRelationshipView[];
+  sources: SourceCoverageView[];
+  learning_observations?: LearningObservationView[];
+  limitations: string[];
+}
 
 function record(value: unknown): Row {
   return value && typeof value === "object" && !Array.isArray(value)
@@ -55,14 +70,7 @@ function sourceLinks(value: unknown): SourceLink[] {
     if (!label) return [];
     const rawUrl = text(row.url, 1_024);
     let url: string | null = null;
-    if (rawUrl) {
-      try {
-        const parsed = new URL(rawUrl);
-        if (parsed.protocol === "https:") url = parsed.href;
-      } catch {
-        url = null;
-      }
-    }
+    if (rawUrl) url = safeSourceUrl(rawUrl);
     return [{ label, url }];
   });
 }
@@ -288,7 +296,7 @@ export function mapIntelligence(
   relationshipRows: readonly Row[],
   sourceRows: readonly Row[],
   learningRows: readonly Row[] = [],
-): IntelligenceView {
+): LegacyIntelligenceView {
   const run = runRows[0] ?? {};
   const themeMap = new Map<string, { relationship_count: number; evidence: Set<string> }>();
   for (const row of relationshipRows.slice(0, 100)) {

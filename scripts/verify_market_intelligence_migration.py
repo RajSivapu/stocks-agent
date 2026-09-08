@@ -22,6 +22,11 @@ MIGRATIONS = (
     ROOT / "sql" / "migrations" / "20260914_provider_evidence_integrity.sql",
     ROOT / "sql" / "migrations" / "20260915_market_source_item_reuse.sql",
     ROOT / "sql" / "migrations" / "20260916_run_scoped_request_provenance.sql",
+    ROOT / "sql" / "migrations" / "20261005_market_wide_discovery.sql",
+    ROOT / "sql" / "migrations" / "20261006_reference_snapshot_transfer.sql",
+    ROOT / "sql" / "migrations" / "20261007_discovery_cursor_context.sql",
+    ROOT / "sql" / "migrations" / "20261008_official_source_completion_contract.sql",
+    ROOT / "sql" / "migrations" / "20261009_reference_issuer_names.sql",
 )
 GATEWAY_ROLE = "service_role"
 TABLES = (
@@ -48,6 +53,68 @@ RPCS = (
     "record_market_report(uuid,text,jsonb)",
     "record_market_learning(uuid,jsonb)",
 )
+DISCOVERY_TABLES = (
+    "market_reference_manifests",
+    "market_security_reference_revisions",
+    "market_reference_chunk_receipts",
+    "market_reference_snapshot_memberships",
+    "market_reference_finalization_seals",
+    "market_reference_run_bindings",
+    "market_reference_predecessor_pins",
+    "market_reference_transfer_requests",
+    "market_reference_transfer_responses",
+    "market_discovery_stage_tasks",
+    "market_exposure_facts",
+    "market_theme_episode_revisions",
+    "market_research_nominations",
+)
+DISCOVERY_TRANSITION_TABLES = {
+    "market_discovery_stage_tasks",
+    "market_research_nominations",
+}
+DISCOVERY_RPCS = (
+    "record_market_discovery_reference(uuid,jsonb)",
+    "checkpoint_market_discovery_stage(uuid,jsonb)",
+    "read_market_discovery_context(uuid,integer)",
+    "read_market_discovery_cursor_context(uuid,integer)",
+    "begin_market_discovery_reference(uuid,jsonb,uuid,integer,text)",
+    "record_market_discovery_reference_chunk(uuid,jsonb,uuid,integer,text)",
+    "finalize_market_discovery_reference(uuid,jsonb,uuid,integer,text)",
+    "pin_market_discovery_reference(uuid,jsonb,uuid,integer,text)",
+    "read_market_discovery_reference(uuid,jsonb,uuid,integer,text)",
+)
+DISCOVERY_FUNCTIONS = (
+    "reject_market_discovery_mutation()",
+    "enforce_market_discovery_stage_task_transition()",
+    "enforce_market_research_nomination_transition()",
+    *DISCOVERY_RPCS,
+)
+DISCOVERY_DASHBOARD_COLUMNS = {
+    "market_reference_manifests": (
+        "id", "reference_version", "revision", "capability_version", "taxonomy_version",
+        "source_hash", "valid_from", "valid_to", "manifest", "content_hash", "created_at",
+    ),
+    "market_security_reference_revisions": (
+        "id", "security_id", "entity_id", "ticker", "exchange", "instrument_type", "eligible",
+        "exclusion_reasons", "aliases", "valid_from", "valid_to", "content_hash", "created_at",
+    ),
+    "market_discovery_stage_tasks": (
+        "id", "stage", "capability_id", "provider", "query_kind", "query_hash", "state",
+        "attempt_count", "request_budget", "created_at", "updated_at",
+    ),
+    "market_exposure_facts": (
+        "id", "security_revision_id", "theme_episode_revision_id", "exposure_kind", "fact",
+        "source_ids", "valid_from", "valid_to", "content_hash", "created_at",
+    ),
+    "market_theme_episode_revisions": (
+        "id", "theme_id", "revision", "episode", "source_ids", "valid_from", "valid_to",
+        "content_hash", "created_at",
+    ),
+    "market_research_nominations": (
+        "id", "security_revision_id", "theme_episode_revision_id", "exposure_fact_ids", "state",
+        "rationale", "created_at", "updated_at",
+    ),
+}
 BEHAVIOR_ERRORS = {
     "new_run_not_duplicate": "new run was incorrectly marked duplicate",
     "duplicate_idempotency": "duplicate idempotency was not preserved",
@@ -113,11 +180,66 @@ def evaluate_snapshot(snapshot: dict[str, Any]) -> dict[str, object]:
         gateway_only += 1
     _require(public_execute == 0, "PUBLIC execute grant remains on an intelligence RPC")
 
-    for grant in snapshot.get("table_grants") or []:
-        if not grant.get("is_owner"):
-            raise RuntimeError(f"unexpected grant: {grant}")
+    discovery_tables = snapshot.get("discovery_tables") or {}
+    _require(set(discovery_tables) == set(DISCOVERY_TABLES),
+             "discovery ledger coverage is incomplete")
+    for table in DISCOVERY_TABLES:
+        details = discovery_tables.get(table) or {}
+        if details.get("rls_enabled") is not True:
+            raise RuntimeError(f"RLS is not enabled for {table}")
+        expected_guard = (
+            f"{table}_transition_guard"
+            if table in DISCOVERY_TRANSITION_TABLES
+            else f"{table}_append_only"
+        )
+        if details.get("guard") != expected_guard:
+            label = "transition guard" if table in DISCOVERY_TRANSITION_TABLES else "append-only trigger"
+            raise RuntimeError(f"{label} is missing for {table}")
+
+    discovery_functions = snapshot.get("discovery_functions") or {}
+    _require(set(discovery_functions) == set(DISCOVERY_RPCS),
+             "discovery RPC coverage is incomplete")
+    discovery_public_execute = 0
+    for signature in DISCOVERY_RPCS:
+        details = discovery_functions.get(signature) or {}
+        if details.get("search_path") != ["pg_catalog"]:
+            raise RuntimeError(f"unsafe search_path for {signature}")
+        if details.get("public_execute"):
+            discovery_public_execute += 1
+        if details.get("gateway_execute") is not True:
+            raise RuntimeError(f"gateway execute is missing for {signature}")
+    _require(discovery_public_execute == 0,
+             "PUBLIC execute grant remains on a discovery RPC")
+
+    expected_table_grants = {
+        (table, "stock_agent_release_reader", "SELECT") for table in DISCOVERY_TABLES
+    }
+    actual_table_grants = {
+        (grant.get("table"), grant.get("grantee"), grant.get("privilege"))
+        for grant in snapshot.get("table_grants") or []
+        if not grant.get("is_owner")
+    }
+    if actual_table_grants != expected_table_grants:
+        raise RuntimeError(
+            f"unexpected grant: {sorted(actual_table_grants ^ expected_table_grants)!r}"
+        )
+    expected_column_grants = {
+        (table, column, "stock_agent_dashboard", "SELECT")
+        for table, columns in DISCOVERY_DASHBOARD_COLUMNS.items()
+        for column in columns
+    }
+    actual_column_grants = {
+        (grant.get("table"), grant.get("column"), grant.get("grantee"),
+         grant.get("privilege"))
+        for grant in snapshot.get("column_grants") or []
+        if not grant.get("is_owner")
+    }
+    if actual_column_grants != expected_column_grants:
+        raise RuntimeError(
+            f"unexpected grant: {sorted(actual_column_grants ^ expected_column_grants)!r}"
+        )
     expected_function_grants = {
-        (signature, GATEWAY_ROLE, "EXECUTE") for signature in RPCS
+        (signature, GATEWAY_ROLE, "EXECUTE") for signature in (*RPCS, *DISCOVERY_RPCS)
     }
     actual_function_grants = {
         (grant.get("signature"), grant.get("grantee"), grant.get("privilege"))
@@ -146,6 +268,8 @@ def evaluate_snapshot(snapshot: dict[str, Any]) -> dict[str, object]:
         "gateway_only_rpcs": gateway_only,
         "public_execute_grants": public_execute,
         "brokerage_columns": len(brokerage_columns),
+        "discovery_ledgers": len(discovery_tables),
+        "discovery_gateway_only_rpcs": len(discovery_functions),
         **behavior,
     }
 
@@ -214,6 +338,66 @@ def collect_snapshot(cursor, behavior: dict[str, bool]) -> dict[str, Any]:
             "gateway_execute": gateway_execute,
         }
 
+    discovery_table_rows = _fetch_all(
+        cursor,
+        """
+        SELECT class.relname,class.relrowsecurity,
+               CASE
+                 WHEN class.relname=ANY(%s) THEN EXISTS(
+                   SELECT 1 FROM pg_catalog.pg_trigger trigger
+                   WHERE trigger.tgrelid=class.oid AND NOT trigger.tgisinternal
+                     AND trigger.tgname=class.relname || '_transition_guard')
+                 ELSE EXISTS(
+                   SELECT 1 FROM pg_catalog.pg_trigger trigger
+                   WHERE trigger.tgrelid=class.oid AND NOT trigger.tgisinternal
+                     AND trigger.tgname=class.relname || '_append_only')
+               END
+          FROM pg_catalog.pg_class class
+          JOIN pg_catalog.pg_namespace namespace ON namespace.oid=class.relnamespace
+         WHERE namespace.nspname='public' AND class.relname=ANY(%s)
+         ORDER BY class.relname
+        """,
+        (list(DISCOVERY_TRANSITION_TABLES), list(DISCOVERY_TABLES)),
+    )
+    discovery_tables = {
+        table: {
+            "rls_enabled": rls_enabled,
+            "guard": (
+                f"{table}_transition_guard"
+                if table in DISCOVERY_TRANSITION_TABLES and has_guard
+                else f"{table}_append_only" if has_guard else None
+            ),
+        }
+        for table, rls_enabled, has_guard in discovery_table_rows
+    }
+    discovery_functions: dict[str, dict[str, object]] = {}
+    for signature in DISCOVERY_RPCS:
+        rows = _fetch_all(
+            cursor,
+            """
+            SELECT procedure.proconfig,
+                   EXISTS(SELECT 1 FROM pg_catalog.aclexplode(COALESCE(
+                     procedure.proacl,pg_catalog.acldefault('f',procedure.proowner))) acl
+                     WHERE acl.grantee=0 AND acl.privilege_type='EXECUTE'),
+                   pg_catalog.has_function_privilege(%s,procedure.oid,'EXECUTE')
+              FROM pg_catalog.pg_proc procedure
+             WHERE procedure.oid=pg_catalog.to_regprocedure(%s)
+            """,
+            (GATEWAY_ROLE, f"public.{signature}"),
+        )
+        if rows:
+            proconfig, public_execute, gateway_execute = rows[0]
+            search_path = []
+            for setting in proconfig or []:
+                setting_text = setting.decode() if isinstance(setting, bytes) else str(setting)
+                if setting_text.startswith("search_path="):
+                    search_path = setting_text.removeprefix("search_path=").split(", ")
+            discovery_functions[signature] = {
+                "search_path": search_path,
+                "public_execute": public_execute,
+                "gateway_execute": gateway_execute,
+            }
+
     table_grants = [
         {"table": table, "grantee": grantee or "PUBLIC", "privilege": privilege,
          "is_owner": is_owner}
@@ -228,7 +412,23 @@ def collect_snapshot(cursor, behavior: dict[str, bool]) -> dict[str, Any]:
             LEFT JOIN pg_catalog.pg_roles grantee ON grantee.oid=acl.grantee
             WHERE namespace.nspname='public' AND class.relname=ANY(%s)
             ORDER BY class.relname, grantee.rolname, acl.privilege_type
-        """, (list(TABLES),))
+        """, (list(TABLES + DISCOVERY_TABLES),))
+    ]
+    column_grants = [
+        {"table": table, "column": column, "grantee": grantee or "PUBLIC",
+         "privilege": privilege, "is_owner": is_owner}
+        for table, column, grantee, privilege, is_owner in _fetch_all(cursor, """
+            SELECT class.relname,attribute.attname,grantee.rolname,
+                   acl.privilege_type,acl.grantee=class.relowner
+            FROM pg_catalog.pg_class class
+            JOIN pg_catalog.pg_namespace namespace ON namespace.oid=class.relnamespace
+            JOIN pg_catalog.pg_attribute attribute ON attribute.attrelid=class.oid
+            CROSS JOIN LATERAL pg_catalog.aclexplode(attribute.attacl) acl
+            LEFT JOIN pg_catalog.pg_roles grantee ON grantee.oid=acl.grantee
+            WHERE namespace.nspname='public' AND class.relname=ANY(%s)
+              AND attribute.attnum>0 AND NOT attribute.attisdropped
+            ORDER BY class.relname,attribute.attname,grantee.rolname,acl.privilege_type
+        """, (list(DISCOVERY_TABLES),))
     ]
     function_grants = [
         {"signature": signature.removeprefix("public."),
@@ -245,10 +445,38 @@ def collect_snapshot(cursor, behavior: dict[str, bool]) -> dict[str, Any]:
             LEFT JOIN pg_catalog.pg_roles grantee ON grantee.oid=acl.grantee
             WHERE namespace.nspname='public' AND procedure.proname=ANY(%s)
             ORDER BY procedure.oid::regprocedure::text, grantee.rolname, acl.privilege_type
-        """, ([signature.split("(", 1)[0] for signature in RPCS]
+        """, ([signature.split("(", 1)[0] for signature in (*RPCS, *DISCOVERY_FUNCTIONS)]
                 + ["reject_market_intelligence_mutation", "market_canonical_jsonb"],))
     ]
-    unexpected_grants: list[str] = []
+    expected_table_grants = {
+        (table, "stock_agent_release_reader", "SELECT") for table in DISCOVERY_TABLES
+    }
+    expected_column_grants = {
+        (table, column, "stock_agent_dashboard", "SELECT")
+        for table, columns in DISCOVERY_DASHBOARD_COLUMNS.items()
+        for column in columns
+    }
+    expected_function_grants = {
+        (signature, GATEWAY_ROLE, "EXECUTE") for signature in (*RPCS, *DISCOVERY_RPCS)
+    }
+    unexpected_grants = [
+        f"table:{row['table']}:{row['grantee']}:{row['privilege']}"
+        for row in table_grants
+        if not row["is_owner"]
+        and (row["table"], row["grantee"], row["privilege"]) not in expected_table_grants
+    ] + [
+        f"column:{row['table']}.{row['column']}:{row['grantee']}:{row['privilege']}"
+        for row in column_grants
+        if not row["is_owner"]
+        and (row["table"], row["column"], row["grantee"], row["privilege"])
+        not in expected_column_grants
+    ] + [
+        f"function:{row['signature']}:{row['grantee']}:{row['privilege']}"
+        for row in function_grants
+        if not row["is_owner"]
+        and (row["signature"], row["grantee"], row["privilege"])
+        not in expected_function_grants
+    ]
     brokerage_columns = [
         f"{table}.{column}"
         for table, column in _fetch_all(
@@ -260,13 +488,16 @@ def collect_snapshot(cursor, behavior: dict[str, bool]) -> dict[str, Any]:
                AND lower(column_name) ~ '(broker|order_id|api_key|api_secret|credential)'
              ORDER BY table_name, column_name
             """,
-            (list(TABLES),),
+            (list(TABLES + DISCOVERY_TABLES),),
         )
     ]
     return {
         "tables": tables,
         "functions": functions,
+        "discovery_tables": discovery_tables,
+        "discovery_functions": discovery_functions,
         "table_grants": table_grants,
+        "column_grants": column_grants,
         "function_grants": function_grants,
         "unexpected_grants": unexpected_grants,
         "brokerage_columns": brokerage_columns,
