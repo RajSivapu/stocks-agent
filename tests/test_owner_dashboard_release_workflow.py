@@ -18,6 +18,23 @@ def test_protected_release_and_recovery_are_valid_workflow_yaml():
         assert workflow["jobs"]
 
 
+def test_protected_release_python_entrypoints_preserve_repository_package_imports():
+    release = Path(".github/workflows/owner-dashboard-release.yml").read_text()
+    recovery = Path(".github/workflows/owner-dashboard-release-recovery.yml").read_text()
+    for module in (
+        "release_components",
+        "collect_protected_dry_run_evidence",
+        "build_owner_dashboard_static",
+        "deploy_owner_dashboard_api",
+        "write_protected_release_record",
+        "finalize_protected_release",
+        "restore_gateway_after_release_failure",
+    ):
+        assert f"-m scripts.{module}" in release
+    assert "-m scripts.restore_gateway_after_release_failure" in recovery
+    assert '"$PYTHON_BIN -m scripts.deploy_owner_dashboard_api --dry-run' in release
+
+
 def test_protected_release_pins_the_supabase_database_root_ca():
     workflow = yaml.safe_load(Path(".github/workflows/owner-dashboard-release.yml").read_text())
     release = workflow["jobs"]["release"]
@@ -61,7 +78,7 @@ def test_release_workflow_writes_authoritative_non_dry_run_and_candidate_bound_r
     writer = Path("scripts/write_protected_release_record.py").read_text()
     for field in ('"candidate_sha"', '"workflow_run_id"', '"deployment_id"', '"dry_run": False', '"migrations"'):
         assert field in writer
-    assert "write_protected_release_record.py" in workflow
+    assert "-m scripts.write_protected_release_record" in workflow
     assert "candidate SHA/ref mismatch" in workflow
 
 
@@ -463,7 +480,7 @@ def test_release_record_writer_emits_backend_only_evidence_contract(tmp_path, mo
 
 def test_release_workflow_retains_and_restores_encrypted_backend_state_until_evidence_is_accepted():
     workflow = Path(".github/workflows/owner-dashboard-release.yml").read_text()
-    assert "restore_gateway_after_release_failure.py" in workflow
+    assert "-m scripts.restore_gateway_after_release_failure" in workflow
     assert "trap 'restore_after_failure' ERR" in workflow
     assert "RELEASE_RECOVERY_KEY" in workflow
     assert "Release local rollback worktree" not in workflow
@@ -502,9 +519,9 @@ def test_release_workflow_binds_review_times_and_durable_pre_mutation_recovery()
     assert 'PYTHON_BIN="$RELEASE_VENV/bin/python"' in workflow
     assert 'head_commit_time <= latest review.submitted_at <= merged_at <= candidate_commit_time' in workflow
     assert "component-recovery-run:$GITHUB_RUN_ID" in workflow
-    assert "release_components.py --check-backend-transport" in workflow
+    assert "scripts.release_components --check-backend-transport" in workflow
     assert Path(".github/workflows/owner-dashboard-release-recovery.yml").is_file()
-    assert workflow.index("release_components.py --check-backend-transport") < workflow.index("Create the candidate-bound GitHub Deployment")
+    assert workflow.index("scripts.release_components --check-backend-transport") < workflow.index("Create the candidate-bound GitHub Deployment")
 
 
 def test_backend_release_does_not_claim_or_require_native_site_deployment():
@@ -608,7 +625,7 @@ def test_release_and_recovery_use_separate_safe_actions_concurrency_boundaries()
     assert "--retain-recovery-artifact" in recovery
     assert "conclusion != 'success'" in recovery
     finalizer = Path("scripts/finalize_protected_release.py").read_text()
-    assert "finalize_protected_release.py" in workflow and "state=success" in finalizer
+    assert "-m scripts.finalize_protected_release" in workflow and "state=success" in finalizer
     assert workflow.index("Upload immutable release record") < workflow.index("Mark candidate deployment successful")
     assert workflow.index("Mark candidate deployment successful") < workflow.index("Restore changed components if any post-deploy evidence step failed")
     assert workflow.index("Restore changed components if any post-deploy evidence step failed") < workflow.index("Mark candidate deployment failed after protected restoration")
@@ -626,4 +643,4 @@ def test_database_lease_is_the_authoritative_release_recovery_serialization_boun
     assert "actions/runs?event=workflow_run&status=in_progress" not in workflow
     assert "DurableMutationLease" in deployer and "pg_advisory_lock" in deployer
     assert "recovery_required" in deployer and "lease.resolve()" in restorer
-    assert "finalize_protected_release.py" in workflow
+    assert "-m scripts.finalize_protected_release" in workflow
