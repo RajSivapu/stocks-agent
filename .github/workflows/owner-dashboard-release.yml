@@ -156,7 +156,6 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           SUPABASE_ACCESS_TOKEN: ${{ secrets.SUPABASE_ACCESS_TOKEN }}
           PROJECT_REF: ${{ secrets.SUPABASE_PROJECT_REF }}
-          POSTGRES_URL: ${{ secrets.POSTGRES_URL }}
           SUPAVISOR_SESSION_URL: ${{ secrets.SUPAVISOR_SESSION_URL }}
         run: |
           "$RELEASE_VENV/bin/python" -m scripts.release_components --check-backend-transport
@@ -207,7 +206,6 @@ jobs:
           DASHBOARD_OWNER_USER_ID: ${{ secrets.DASHBOARD_OWNER_USER_ID }}
           DASHBOARD_OWNER_EMAIL: ${{ secrets.DASHBOARD_OWNER_EMAIL }}
           DASHBOARD_NON_OWNER_ACCESS_TOKEN: ${{ secrets.DASHBOARD_NON_OWNER_ACCESS_TOKEN }}
-          POSTGRES_URL: ${{ secrets.POSTGRES_URL }}
           SUPAVISOR_SESSION_URL: ${{ secrets.SUPAVISOR_SESSION_URL }}
           SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
           SUPABASE_PUBLISHABLE_KEY: ${{ secrets.SUPABASE_PUBLISHABLE_KEY }}

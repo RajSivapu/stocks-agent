@@ -533,9 +533,8 @@ def test_release_preflights_and_uses_the_project_bound_admin_pooler_everywhere()
     preflight = steps[
         "Require configured protected backend capture deployment readback and recovery transport"
     ]
-    assert set(preflight["env"]) >= {
-        "PROJECT_REF", "POSTGRES_URL", "SUPAVISOR_SESSION_URL",
-    }
+    assert set(preflight["env"]) >= {"PROJECT_REF", "SUPAVISOR_SESSION_URL"}
+    assert "POSTGRES_URL" not in preflight["env"]
     assert "scripts.release_components --check-database-connectivity" in preflight["run"]
 
     source = Path(".github/workflows/owner-dashboard-release.yml").read_text()
@@ -548,6 +547,8 @@ def test_release_preflights_and_uses_the_project_bound_admin_pooler_everywhere()
     inline = steps["Restore changed components if any post-deploy evidence step failed"]
     assert "SUPAVISOR_SESSION_URL" in inline["env"]
     assert "--admin-url \"$SUPAVISOR_SESSION_URL\"" in inline["run"]
+    execute = steps["Execute protected deployment with encrypted component recovery"]
+    assert "POSTGRES_URL" not in execute["env"]
 
     recovery = yaml.safe_load(
         Path(".github/workflows/owner-dashboard-release-recovery.yml").read_text()

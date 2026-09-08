@@ -57,27 +57,20 @@ def test_static_configuration_can_be_validated_before_database_mutation():
         deploy.validate_static_configuration(PROJECT_REF, "", ORIGIN, deploy.DASHBOARD_SECRET_NAMES)
 
 
-def test_database_endpoints_are_bound_to_the_exact_project_before_mutation():
-    result = deploy.validate_release_database_endpoints(PROJECT_REF, ADMIN_URL, SESSION_TEMPLATE)
-    assert result == {"admin_database": "verified", "session_pooler": "verified"}
-
-    assert deploy.release_admin_database_url(
-        PROJECT_REF, ADMIN_URL, SESSION_TEMPLATE,
+def test_admin_session_pooler_is_bound_to_the_exact_project_before_mutation():
+    assert deploy.validate_release_admin_session_url(
+        PROJECT_REF, SESSION_TEMPLATE,
     ) == SESSION_TEMPLATE
-    assert deploy.release_admin_database_url(
-        PROJECT_REF, ADMIN_URL.replace(":5432", ""), SESSION_TEMPLATE,
-    ) == SESSION_TEMPLATE
+    existing_short_password = SESSION_TEMPLATE.replace(
+        "admin-password-longer-than-24", "short",
+    )
+    assert deploy.validate_release_admin_session_url(
+        PROJECT_REF, existing_short_password,
+    ) == existing_short_password
 
-    with pytest.raises(ValueError, match="project-matched administrator"):
-        deploy.validate_release_database_endpoints(
-            PROJECT_REF,
-            ADMIN_URL.replace(PROJECT_REF, "aaaaaaaaaaaaaaaaaaaa"),
-            SESSION_TEMPLATE,
-        )
     with pytest.raises(ValueError, match="project-matched administrator Supavisor"):
-        deploy.validate_release_database_endpoints(
+        deploy.validate_release_admin_session_url(
             PROJECT_REF,
-            ADMIN_URL,
             SESSION_TEMPLATE.replace(PROJECT_REF, "aaaaaaaaaaaaaaaaaaaa"),
         )
 
@@ -90,13 +83,13 @@ def test_database_endpoints_are_bound_to_the_exact_project_before_mutation():
         SESSION_TEMPLATE.replace("pooler.supabase.com", "example.com"),
         SESSION_TEMPLATE.replace(":5432/postgres", ":6543/postgres"),
         SESSION_TEMPLATE.replace("/postgres", "/template1"),
-        SESSION_TEMPLATE.replace("admin-password-longer-than-24", "short"),
+        SESSION_TEMPLATE.replace("admin-password-longer-than-24", ""),
         SESSION_TEMPLATE + "?sslmode=require",
     ),
 )
-def test_release_admin_database_url_rejects_unbound_pooler_templates(session_template):
+def test_release_admin_session_url_rejects_unbound_pooler_templates(session_template):
     with pytest.raises(ValueError, match="project-matched administrator Supavisor"):
-        deploy.release_admin_database_url(PROJECT_REF, ADMIN_URL, session_template)
+        deploy.validate_release_admin_session_url(PROJECT_REF, session_template)
 
 
 def test_release_database_transport_connects_read_only_through_the_admin_pooler():
@@ -134,7 +127,7 @@ def test_release_database_transport_connects_read_only_through_the_admin_pooler(
         return Connection()
 
     result = deploy.verify_release_database_transport(
-        PROJECT_REF, ADMIN_URL, SESSION_TEMPLATE, connector=connector,
+        PROJECT_REF, SESSION_TEMPLATE, connector=connector,
     )
 
     assert connected == {

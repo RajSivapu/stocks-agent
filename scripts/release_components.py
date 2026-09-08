@@ -393,12 +393,11 @@ if __name__ == "__main__":
     else:
         from scripts.deploy_owner_dashboard_api import verify_release_database_transport
         project_ref = os.environ.get("PROJECT_REF", "").strip()
-        admin_url = os.environ.get("POSTGRES_URL", "").strip()
         session_template = os.environ.get("SUPAVISOR_SESSION_URL", "").strip()
-        if not project_ref or not admin_url or not session_template:
+        if not project_ref or not session_template:
             raise SystemExit(
-                "PROJECT_REF, POSTGRES_URL, and SUPAVISOR_SESSION_URL are required"
+                "PROJECT_REF and SUPAVISOR_SESSION_URL are required"
             )
         print(json.dumps(verify_release_database_transport(
-            project_ref, admin_url, session_template,
+            project_ref, session_template,
         ), sort_keys=True, separators=(",", ":")))
