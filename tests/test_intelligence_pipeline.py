@@ -16,6 +16,7 @@ from lib.intelligence.pipeline import (
     _discover,
     _enrichment_candidates,
     _failed_receipt,
+    _frozen_source_plan,
     _retain_v2_relation_evidence,
     _source_summary,
     protected_collection_context,
@@ -1201,6 +1202,54 @@ def test_production_discovery_vetoes_a_42_percent_holding_from_gateway_context()
     assert "HOLDING_WEIGHT_CONCENTRATED" in ranking["veto_reasons"]
 
 
+def test_frozen_source_plan_preserves_required_capability_and_task_order():
+    def required_capability(capability_id: str) -> SourceCapability:
+        return SourceCapability(
+            capability_id=capability_id, provider="gdelt",
+            query_kind="theme_search", themes=frozenset({"macro_and_policy"}),
+            phases=frozenset({"pre-market"}),
+            allowed_hosts=frozenset({"api.gdeltproject.org"}),
+            allowed_path_patterns=("/api/v2/doc/doc",), required_credential=None,
+            authority="radar", retention_class="metadata", max_requests_per_run=1,
+            max_items_per_request=1, requirement_tier="required_baseline",
+            health="enabled", enabled=True, provider_priority=1,
+            query_pack=MappingProxyType({}),
+        )
+
+    capability_ids = ("zeta_reference", "alpha_radar")
+    capabilities = {
+        capability_id: required_capability(capability_id)
+        for capability_id in capability_ids
+    }
+    tasks = tuple(
+        DiscoveryTask(
+            task_id=str(uuid.uuid5(uuid.UUID(RUN_ID), capability_id)),
+            stage="signals", provider="gdelt", capability_id=capability_id,
+            query_kind="theme_search", theme_id=f"theme-{index}",
+            query=MappingProxyType({"query": capability_id}),
+            window=MappingProxyType({
+                "start": "2026-09-03T12:00:00Z", "end": NOW.isoformat(),
+            }),
+            dependencies=(), max_attempts=1, requires_credential=False,
+        )
+        for index, capability_id in enumerate(capability_ids)
+    )
+    plan = DiscoveryPlan(
+        run_id=RUN_ID, phase="pre-market", reference_version="sec:fixture-v1",
+        capability_version=1, tasks=tasks,
+        capabilities=MappingProxyType(capabilities),
+        coverage=MappingProxyType({}),
+        provider_request_totals=MappingProxyType({"gdelt": 2}),
+        reserved_holding_quote_requests=0, reserved_adaptive_requests=0,
+    )
+
+    source_plan = _frozen_source_plan(plan)
+
+    assert source_plan["required_baseline_capability_ids"] == list(capability_ids)
+    assert source_plan["planned_task_ids"] == [task.task_id for task in tasks]
+    assert [row["capability_id"] for row in source_plan["required_tasks"]] == list(capability_ids)
+
+
 def test_capability_plan_executes_exact_task_cursor_and_persists_each_transition():
     task_id = "44444444-4444-4444-8444-444444444444"
     capability = SourceCapability(
@@ -1298,6 +1347,21 @@ def test_capability_plan_executes_exact_task_cursor_and_persists_each_transition
     ]
     assert all(row["request_cost"] == 0 for row in screen_coverage["screen_receipts"])
     assert result.actual_requests == 1
+    source_plan = result.packet.coverage["source_plan"]
+    assert source_plan["version"] == 1
+    assert source_plan["source_capability_version"] == 1
+    assert source_plan["reference_version"] == "sec:fixture-v1"
+    assert source_plan["required_baseline_capability_ids"] == ["gdelt_theme_search"]
+    assert source_plan["planned_task_ids"] == [task_id]
+    assert source_plan["required_tasks"] == [{
+        "task_id": task_id,
+        "capability_id": "gdelt_theme_search",
+        "theme_id": "macro_and_policy",
+    }]
+    assert source_plan["plan_hash"] == hashlib.sha256(json.dumps(
+        {key: value for key, value in source_plan.items() if key != "plan_hash"},
+        sort_keys=True, separators=(",", ":"),
+    ).encode()).hexdigest()
     assert gateway.payloads[0]["reservation_plan"]["reservations"] == [{
         "id": gateway.payloads[0]["reservation_plan"]["reservations"][0]["id"],
         "provider": "gdelt",
@@ -1354,6 +1418,30 @@ def test_capability_plan_executes_exact_task_cursor_and_persists_each_transition
     assert uncertain_receipt["cache_key"] == uncertain_checkpoint["cache_key"]
     assert uncertain_receipt["source_receipt_id"]
     assert uncertain_receipt["requested_window"] == uncertain["requested_window"]
+
+
+@pytest.mark.parametrize("reference_status", ["reference_stale", "reference_unavailable"])
+def test_capability_verifier_rejects_succeeded_pipeline_task_with_reference_fallback(
+    reference_status,
+):
+    from scripts.verify_personal_stock_agent_v1 import verify_discovery_capability
+    from tests.test_verify_personal_stock_agent_v1 import (
+        _capability_rows,
+        _rebind_packet_completion,
+    )
+
+    rows = _capability_rows()
+    reference_task = next(
+        row for row in rows["discovery_stage_tasks"]
+        if row["capability_id"] == "sec_company_tickers_universe"
+    )
+    assert reference_task["state"] == "succeeded"
+    rows["reference_run_bindings"][0]["reference_status"] = reference_status
+    rows["packets"][0]["packet"]["coverage"]["reference_status"] = reference_status
+    _rebind_packet_completion(rows)
+
+    with pytest.raises(RuntimeError, match="reference"):
+        verify_discovery_capability(rows)
 
 
 def test_capability_plan_persists_bounded_reverse_tasks_before_transport_and_resolves_returned_issuer():

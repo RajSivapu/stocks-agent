@@ -319,14 +319,18 @@ class PostgresReadOnlySource:
     def release_rows(self, run_id: str) -> dict:
         require(bool(re.fullmatch(r"[0-9a-f-]{36}", run_id)), "run UUID is required")
         parameter = (run_id,)
+        selected_manifests = (
+            "SELECT manifest_id FROM public.market_reference_run_bindings "
+            "WHERE run_id=%s::uuid AND manifest_id IS NOT NULL"
+        )
         queries = {
             "run": "SELECT id::text AS id,kind,scheduled_phase,scheduled_market_date::text AS scheduled_market_date,status,started_at::text AS started_at,finished_at::text AS finished_at,gateway_request_id::text AS gateway_request_id,telegram_message_ids FROM public.analysis_runs WHERE id=%s::uuid",
             "intelligence_runs": "SELECT id::text AS id,phase,market_date::text AS market_date FROM public.market_intelligence_runs WHERE id=%s::uuid",
-            "reference_manifests": RECOVERY_SQL["reference_manifests"] + " WHERE run_id=%s::uuid",
-            "security_reference_revisions": RECOVERY_SQL["security_reference_revisions"] + " WHERE run_id=%s::uuid",
-            "reference_chunk_receipts": RECOVERY_SQL["reference_chunk_receipts"] + " WHERE run_id=%s::uuid",
-            "reference_snapshot_memberships": RECOVERY_SQL["reference_snapshot_memberships"] + " WHERE manifest_id IN (SELECT id FROM public.market_reference_manifests WHERE run_id=%s::uuid)",
-            "reference_finalization_seals": RECOVERY_SQL["reference_finalization_seals"] + " WHERE run_id=%s::uuid",
+            "reference_manifests": RECOVERY_SQL["reference_manifests"] + f" WHERE id IN ({selected_manifests})",
+            "security_reference_revisions": RECOVERY_SQL["security_reference_revisions"] + f" WHERE id IN (SELECT security_revision_id FROM public.market_reference_snapshot_memberships WHERE manifest_id IN ({selected_manifests}))",
+            "reference_chunk_receipts": RECOVERY_SQL["reference_chunk_receipts"] + f" WHERE manifest_id IN ({selected_manifests})",
+            "reference_snapshot_memberships": RECOVERY_SQL["reference_snapshot_memberships"] + f" WHERE manifest_id IN ({selected_manifests})",
+            "reference_finalization_seals": RECOVERY_SQL["reference_finalization_seals"] + f" WHERE manifest_id IN ({selected_manifests})",
             "reference_run_bindings": RECOVERY_SQL["reference_run_bindings"] + " WHERE run_id=%s::uuid",
             "reference_predecessor_pins": RECOVERY_SQL["reference_predecessor_pins"] + " WHERE run_id=%s::uuid",
             "reference_transfer_requests": RECOVERY_SQL["reference_transfer_requests"] + " WHERE run_id=%s::uuid",
@@ -343,7 +347,13 @@ class PostgresReadOnlySource:
             "research_nominations_v2": RECOVERY_SQL["research_nominations_v2"] + " WHERE origin_run_id=%s::uuid",
             "research_nomination_lifecycle_v2": RECOVERY_SQL["research_nomination_lifecycle_v2"] + " WHERE transition_run_id=%s::uuid",
             "intelligence_memory_context_bindings_v2": RECOVERY_SQL["intelligence_memory_context_bindings_v2"] + " WHERE run_id=%s::uuid",
-            "completions": "SELECT completion_id::text AS completion_id,run_id::text AS run_id,receipt FROM public.market_intelligence_collection_completions WHERE run_id=%s::uuid",
+            "source_quota_reservations": RECOVERY_SQL["source_quota_reservations"] + " WHERE run_id=%s::uuid",
+            "source_receipts": RECOVERY_SQL["source_receipts"] + " WHERE run_id=%s::uuid",
+            "source_items": RECOVERY_SQL["source_items"] + " WHERE id IN (SELECT source_item_id FROM public.market_intelligence_run_items WHERE run_id=%s::uuid)",
+            "intelligence_run_items": RECOVERY_SQL["intelligence_run_items"] + " WHERE run_id=%s::uuid",
+            "source_item_provenance": RECOVERY_SQL["source_item_provenance"] + " WHERE source_item_id IN (SELECT source_item_id FROM public.market_intelligence_run_items WHERE run_id=%s::uuid)",
+            "run_source_item_provenance": RECOVERY_SQL["run_source_item_provenance"] + " WHERE run_id=%s::uuid",
+            "completions": RECOVERY_SQL["collection_completions"] + " WHERE run_id=%s::uuid",
             "run_events": "SELECT id::text AS id,run_id::text AS run_id,status FROM public.market_intelligence_run_events WHERE run_id=%s::uuid",
             "checkpoints": "SELECT run_id::text AS run_id,cache_key FROM public.market_collection_checkpoints WHERE run_id=%s::uuid",
             "packets": RECOVERY_SQL["packets"] + " WHERE run_id=%s::uuid",

@@ -221,8 +221,13 @@ def rank_candidates(
             candidate.relation.exposure_evidence if candidate.relation is not None else ()
         )
         event_consistent = candidate.relation is None or candidate.event.event_id == candidate.relation.event_id
+        # V2 deliberately retains resolved research leads before typed primary
+        # exposure exists.  The suitability lane remains unknown and cannot be
+        # promoted, while the legacy lane still requires exposure evidence.
         evidence_consistent = bool(candidate_evidence) and (
-            bool(relation_exposure) if candidate.relation is not None else True
+            bool(relation_exposure)
+            if contract_version == 1 and candidate.relation is not None
+            else True
         )
         evidence_consistent = (
             evidence_consistent

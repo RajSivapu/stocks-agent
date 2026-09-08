@@ -1,0 +1,12 @@
+{
+  "theme_id": "data_center_power",
+  "title": "Data center power buildout increases transformer and switchgear capacity",
+  "summary": "VoltSwitch Systems announced a factory expansion for transformers and switchgear serving data center power demand.",
+  "event_type": "capacity",
+  "role": "grid_equipment",
+  "issuers": [
+    {"name": "VoltSwitch Systems", "cik": "0000001003", "public": true, "ticker": "VOLT", "exchange": "NASDAQ", "security_id": "sec:VOLT"}
+  ],
+  "organizations": ["VoltSwitch Systems"],
+  "expected_candidate_keys": ["sec:VOLT"]
+}

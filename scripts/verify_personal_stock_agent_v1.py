@@ -11,17 +11,439 @@ from pathlib import Path, PurePosixPath
 import re
 import subprocess
 import sys
+import uuid
+from dataclasses import dataclass
 from typing import Callable, Mapping, Protocol, runtime_checkable
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
-from scripts.export_recovery_bundle import canonical_json, sha256
+from lib.config import load_settings
+from lib.intelligence.planner import load_source_capabilities
+from lib.intelligence.policy import load_intelligence_policy
+from scripts.export_recovery_bundle import (
+    _validate_reference_semantic_lineage,
+    canonical_json,
+    sha256,
+)
 from scripts.verify_owner_dashboard_deployment import migration_statements_sha256, normalize_migration_statements
 
 MAX_SCHEDULED_RECEIPT_AGE_SECONDS = 7 * 24 * 60 * 60
 SHA = re.compile(r"[0-9a-f]{40}")
 UUID = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}")
 FUNCTIONS = ("market-briefing-gateway", "owner-dashboard-api", "telegram-portfolio")
+
+
+@dataclass(frozen=True, slots=True)
+class VerificationResult:
+    ok: bool
+    required_capability_ids: tuple[str, ...] = ()
+    optional_failures: tuple[str, ...] = ()
+
+
+def _verify_discovery_capability(receipt: Mapping[str, object]) -> VerificationResult:
+    """Verify V1-C3 from frozen plans and protected, receipt-backed stage rows."""
+    require(isinstance(receipt, Mapping), "discovery capability receipt is required")
+    run = one(receipt.get("run"), "capability run")
+    intelligence = one(receipt.get("intelligence_runs"), "capability intelligence run")
+    run_id = run.get("id")
+    require(
+        isinstance(run_id, str) and UUID.fullmatch(run_id) is not None
+        and intelligence.get("id") == run_id,
+        "discovery capability run identity is invalid",
+    )
+
+    packet_row = one(receipt.get("packets"), "capability packet")
+    completion = one(receipt.get("completions"), "capability completion")
+    packet = packet_row.get("packet")
+    payload = completion.get("payload")
+    require(
+        isinstance(packet, Mapping) and packet.get("contract_version") == 2
+        and packet.get("run_id") == run_id and packet.get("execution_allowed") is False
+        and packet_row.get("run_id") == run_id
+        and packet_row.get("status") == "completed"
+        and packet_row.get("packet_hash") == sha256(canonical_json(packet).encode())
+        and completion.get("run_id") == run_id and isinstance(payload, Mapping)
+        and isinstance(completion.get("receipt"), Mapping)
+        and completion["receipt"].get("packet_id") == packet_row.get("id")
+        and completion["receipt"].get("packet_hash") == packet_row.get("packet_hash")
+        and isinstance(payload.get("packet"), Mapping)
+        and payload["packet"].get("id") == packet_row.get("id")
+        and payload["packet"].get("packet_hash") == packet_row.get("packet_hash")
+        and payload["packet"].get("packet") == packet,
+        "discovery capability packet or completion lineage is invalid",
+    )
+    coverage = packet.get("coverage")
+    require(
+        isinstance(coverage, Mapping) and coverage.get("complete_market_coverage") is False
+        and payload.get("coverage") == coverage,
+        "discovery capability coverage is invalid",
+    )
+    source_plan = coverage.get("source_plan")
+    plan_keys = {
+        "version", "source_capability_version", "reference_version",
+        "required_baseline_capability_ids", "planned_task_ids", "required_tasks",
+        "plan_hash",
+    }
+    require(isinstance(source_plan, Mapping) and set(source_plan) == plan_keys,
+            "discovery required source plan is missing or malformed")
+    plan_body = {key: source_plan[key] for key in source_plan if key != "plan_hash"}
+    require(
+        source_plan.get("version") == 1
+        and source_plan.get("plan_hash") == sha256(canonical_json(plan_body).encode()),
+        "discovery required source plan hash is invalid",
+    )
+
+    policy = load_intelligence_policy(load_settings())
+    registry = load_source_capabilities()
+    required_ids = tuple(policy.required_baseline_capability_ids)
+    require(
+        source_plan.get("source_capability_version") == policy.source_capability_version
+        and source_plan.get("required_baseline_capability_ids") == list(required_ids)
+        and all(
+            capability_id in registry
+            and registry[capability_id].requirement_tier == "required_baseline"
+            and registry[capability_id].enabled
+            and registry[capability_id].health == "enabled"
+            and registry[capability_id].required_credential is None
+            for capability_id in required_ids
+        ),
+        "discovery required capability registry or policy binding is invalid",
+    )
+    expected_due = {
+        (capability_id, theme_id)
+        for capability_id in required_ids
+        for theme_id in (
+            tuple(theme for theme in policy.seed_domains if theme in registry[capability_id].themes)
+            if registry[capability_id].query_kind == "theme_search"
+            else (None,)
+        )
+    }
+    required_tasks = source_plan.get("required_tasks")
+    planned_ids = source_plan.get("planned_task_ids")
+    require(
+        isinstance(required_tasks, list) and isinstance(planned_ids, list)
+        and planned_ids and len(planned_ids) == len(set(planned_ids))
+        and all(isinstance(value, str) and UUID.fullmatch(value) for value in planned_ids)
+        and all(isinstance(row, Mapping) and set(row) == {"task_id", "capability_id", "theme_id"}
+                and isinstance(row.get("task_id"), str) and UUID.fullmatch(row["task_id"])
+                and row["task_id"] in planned_ids for row in required_tasks),
+        "discovery required task plan is invalid",
+    )
+    planned_due = {
+        (str(row["capability_id"]), row.get("theme_id")) for row in required_tasks
+    }
+    require(
+        len(required_tasks) == len(planned_due) == len(expected_due)
+        and planned_due == expected_due,
+        "discovery required task coverage is incomplete",
+    )
+
+    task_rows = receipt.get("discovery_stage_tasks")
+    require(isinstance(task_rows, list), "discovery required task evidence is missing")
+    tasks = {
+        str(row.get("id")): row for row in task_rows
+        if isinstance(row, Mapping) and isinstance(row.get("id"), str)
+    }
+    require(
+        len(tasks) == len(task_rows)
+        and set(planned_ids) <= set(tasks)
+        and all(tasks[task_id].get("run_id") == run_id for task_id in planned_ids),
+        "discovery required task evidence is incomplete",
+    )
+    terminal_states = {"succeeded", "failed", "deferred", "uncertain"}
+    require(all(tasks[task_id].get("state") in terminal_states for task_id in planned_ids),
+            "discovery task plan is not terminal")
+    planned_task_by_due: dict[tuple[str, object], Mapping[str, object]] = {}
+    for planned in required_tasks:
+        task = tasks[str(planned["task_id"])]
+        capability_id = str(planned["capability_id"])
+        capability = registry[capability_id]
+        expected_stage = {
+            "universe": "reference",
+            "screener": "screen",
+            "quote": "quote",
+            "issuer_submissions": "enrich",
+            "filing_document": "enrich",
+        }.get(capability.query_kind, "signals")
+        result = task.get("result")
+        theme_id = result.get("theme_id") if isinstance(result, Mapping) else None
+        due = (str(task.get("capability_id")), theme_id)
+        require(
+            due == (planned.get("capability_id"), planned.get("theme_id"))
+            and task.get("provider") == capability.provider
+            and task.get("query_kind") == capability.query_kind
+            and task.get("stage") == expected_stage
+            and task.get("state") == "succeeded",
+            "discovery required capability task does not match its registry or success state",
+        )
+        planned_task_by_due[due] = task
+    require(set(planned_task_by_due) == expected_due,
+            "discovery required task evidence is incomplete")
+
+    reference_id = "sec_company_tickers_universe"
+    reference_task = planned_task_by_due.get((reference_id, None))
+    require(reference_task is not None, "discovery required reference task is missing")
+    reference_result = reference_task.get("result")
+    reference_coverage = reference_result.get("reference_coverage") \
+        if isinstance(reference_result, Mapping) else None
+    manifest_id = coverage.get("reference_manifest_id")
+    require(
+        coverage.get("reference_status") == "healthy"
+        and isinstance(manifest_id, str) and UUID.fullmatch(manifest_id)
+        and isinstance(reference_coverage, Mapping)
+        and reference_coverage.get("reference_status") == "healthy"
+        and reference_coverage.get("reference_manifest_id") == manifest_id,
+        "discovery reference must be a healthy selected manifest",
+    )
+    bindings = [row for row in receipt.get("reference_run_bindings", [])
+                if isinstance(row, Mapping) and row.get("run_id") == run_id
+                and row.get("capability_id") == reference_id]
+    require(
+        len(bindings) == 1 and bindings[0].get("reference_status") == "healthy"
+        and bindings[0].get("manifest_id") == manifest_id,
+        "discovery reference binding is unavailable or stale",
+    )
+    manifests = {row.get("id"): row for row in receipt.get("reference_manifests", [])
+                 if isinstance(row, Mapping)}
+    manifest = manifests.get(manifest_id)
+    require(
+        isinstance(manifest, Mapping)
+        and manifest.get("reference_version") == source_plan.get("reference_version")
+        and manifest.get("revision") == reference_coverage.get("reference_revision"),
+        "discovery reference manifest version or revision is invalid",
+    )
+    selected_receipts = [row for row in receipt.get("reference_chunk_receipts", [])
+                         if isinstance(row, Mapping) and row.get("manifest_id") == manifest_id]
+    selected_memberships = [row for row in receipt.get("reference_snapshot_memberships", [])
+                            if isinstance(row, Mapping) and row.get("manifest_id") == manifest_id]
+    selected_seals = [row for row in receipt.get("reference_finalization_seals", [])
+                      if isinstance(row, Mapping) and row.get("manifest_id") == manifest_id]
+    revisions_by_id = {row.get("id"): row for row in receipt.get("security_reference_revisions", [])
+                       if isinstance(row, Mapping)}
+    require(
+        len(selected_seals) == 1 and selected_receipts and selected_memberships
+        and all(row.get("security_revision_id") in revisions_by_id for row in selected_memberships),
+        "discovery reference finalized membership evidence is incomplete",
+    )
+    try:
+        _validate_reference_semantic_lineage(
+            {manifest_id: dict(manifest)},
+            {str(row["security_revision_id"]): dict(revisions_by_id[row["security_revision_id"]])
+             for row in selected_memberships},
+            {manifest_id: [dict(row) for row in selected_receipts]},
+            {manifest_id: [dict(row) for row in selected_memberships]},
+            {manifest_id: dict(selected_seals[0])},
+        )
+    except ValueError as error:
+        raise RuntimeError("discovery reference semantic lineage is invalid") from error
+
+    persisted_receipt_rows = receipt.get("source_receipts", [])
+    persisted_receipts = {row.get("id"): row for row in persisted_receipt_rows
+                          if isinstance(row, Mapping)}
+    reservations = {row.get("id"): row for row in receipt.get("source_quota_reservations", [])
+                    if isinstance(row, Mapping)}
+    source_items = {row.get("id"): row for row in receipt.get("source_items", [])
+                    if isinstance(row, Mapping)}
+    run_items = [row for row in receipt.get("intelligence_run_items", [])
+                 if isinstance(row, Mapping)]
+    source_provenance = {row.get("source_item_id"): row
+                         for row in receipt.get("source_item_provenance", [])
+                         if isinstance(row, Mapping)}
+    run_provenance = {row.get("run_item_id"): row
+                      for row in receipt.get("run_source_item_provenance", [])
+                      if isinstance(row, Mapping)}
+    completion_receipts = payload.get("receipts")
+    require(isinstance(completion_receipts, list),
+            "discovery required parsed receipt evidence is missing")
+    completion_by_id = {
+        row.get("source_receipt_id"): row for row in completion_receipts
+        if isinstance(row, Mapping)
+    }
+    require(
+        isinstance(persisted_receipt_rows, list)
+        and len(persisted_receipts) == len(persisted_receipt_rows)
+        and len(completion_by_id) == len(completion_receipts),
+        "discovery source receipt identities are invalid or duplicated",
+    )
+    required_receipt_ids: set[str] = set()
+    for due, task in planned_task_by_due.items():
+        if due == (reference_id, None):
+            continue
+        result = task.get("result")
+        checkpoint = result.get("checkpoint") if isinstance(result, Mapping) else None
+        parsed = checkpoint.get("receipt") if isinstance(checkpoint, Mapping) else None
+        receipt_id = parsed.get("source_receipt_id") if isinstance(parsed, Mapping) else None
+        stored = persisted_receipts.get(receipt_id)
+        coverage_status = parsed.get("metadata", {}).get("coverage_status") \
+            if isinstance(parsed, Mapping) and isinstance(parsed.get("metadata"), Mapping) else None
+        expected_receipt_id = str(uuid.uuid5(
+            uuid.NAMESPACE_URL,
+            f"market-intelligence:receipt:{run_id}:{task.get('id')}",
+        ))
+        require(
+            isinstance(receipt_id, str) and receipt_id == expected_receipt_id
+            and receipt_id not in required_receipt_ids
+            and isinstance(checkpoint, Mapping)
+            and checkpoint.get("cache_key") == parsed.get("cache_key")
+            and isinstance(stored, Mapping) and completion_by_id.get(receipt_id) == parsed
+            and parsed.get("provider") == task.get("provider") == stored.get("provider")
+            and parsed.get("requested_window") == task.get("requested_window")
+            and isinstance(parsed.get("metadata"), Mapping)
+            and parsed["metadata"].get("capability_id") == task.get("capability_id")
+            and parsed.get("status") in {"succeeded", "cache_hit"}
+            and stored.get("status") in {"succeeded", "cache_hit"}
+            and coverage_status in {"success_empty", "success_nonempty"}
+            and all(parsed.get(key) == stored.get(db_key) for key, db_key in (
+                ("provider", "provider"), ("reservation_id", "reservation_id"),
+                ("cache_key", "cache_key"), ("requested_window", "requested_window"),
+                ("retrieved_at", "retrieved_at"), ("expires_at", "expires_at"),
+                ("request_cost", "request_cost"), ("returned_count", "returned_count"),
+                ("accepted_count", "accepted_count"), ("duplicate_count", "duplicate_count"),
+                ("dropped_count", "dropped_count"), ("response_hash", "response_hash"),
+            ))
+            and stored.get("run_id") == run_id
+            and stored.get("reservation_id") in reservations
+            and reservations[stored["reservation_id"]].get("run_id") == run_id
+            and reservations[stored["reservation_id"]].get("provider") == stored.get("provider"),
+            "discovery required capability lacks a parsed receipt-backed success",
+        )
+        required_receipt_ids.add(receipt_id)
+        returned = stored.get("returned_count")
+        accepted = stored.get("accepted_count")
+        duplicates = stored.get("duplicate_count")
+        dropped = stored.get("dropped_count")
+        require(
+            type(returned) is int and returned >= 0
+            and type(accepted) is int and 0 <= accepted <= returned
+            and type(duplicates) is int and duplicates >= 0
+            and type(dropped) is int and dropped >= 0
+            and (coverage_status == "success_empty") == (accepted == 0),
+            "discovery required capability empty/nonempty receipt semantics are invalid",
+        )
+        persisted_run_items = [row for row in run_items
+                               if row.get("source_receipt_id") == receipt_id]
+        if coverage_status == "success_empty":
+            require(not persisted_run_items,
+                    "discovery success_empty receipt unexpectedly has saved items")
+        else:
+            require(persisted_run_items,
+                    "discovery success_nonempty receipt lacks saved item provenance")
+            for run_item in persisted_run_items:
+                item_id = run_item.get("source_item_id")
+                item = source_items.get(item_id)
+                item_provenance = source_provenance.get(item_id)
+                scoped_provenance = run_provenance.get(run_item.get("id"))
+                require(
+                    isinstance(item, Mapping) and isinstance(item_provenance, Mapping)
+                    and isinstance(scoped_provenance, Mapping)
+                    and isinstance(item_id, str) and UUID.fullmatch(item_id)
+                    and isinstance(item.get("content_hash"), str)
+                    and re.fullmatch(r"[0-9a-f]{64}", item["content_hash"])
+                    and item_id == str(uuid.uuid5(
+                        uuid.NAMESPACE_URL,
+                        f"market-source:{item['content_hash']}",
+                    ))
+                    and item.get("source_receipt_id") == receipt_id
+                    and item.get("provider") == stored.get("provider")
+                    and run_item.get("run_id") == run_id
+                    and run_item.get("disposition") in {"accepted", "near_duplicate"}
+                    and run_item.get("drop_reason") is None
+                    and item_provenance.get("provider") == item.get("provider")
+                    and item_provenance.get("canonical_item_url") == item.get("canonical_url")
+                    and str(item_provenance.get("request_url", "")).startswith("https://")
+                    and scoped_provenance.get("run_id") == run_id
+                    and scoped_provenance.get("source_item_id") == item_id
+                    and scoped_provenance.get("source_receipt_id") == receipt_id
+                    and scoped_provenance.get("provider") == item.get("provider")
+                    and str(scoped_provenance.get("request_url", "")).startswith("https://"),
+                    "discovery success_nonempty saved item provenance is invalid",
+                )
+
+    packet_evidence = packet.get("evidence")
+    research = packet.get("research_candidates")
+    actions = packet.get("action_candidates")
+    require(isinstance(packet_evidence, list) and isinstance(research, list)
+            and isinstance(actions, list), "discovery research/action lanes are invalid")
+    evidence_by_id = {row.get("item_id"): row for row in packet_evidence
+                      if isinstance(row, Mapping)}
+    research_by_key: dict[str, Mapping[str, object]] = {}
+    for candidate in research:
+        require(isinstance(candidate, Mapping), "discovery research candidate is invalid")
+        suitability = candidate.get("suitability")
+        require(isinstance(suitability, Mapping), "discovery suitability lineage is missing")
+        suitability_body = {key: value for key, value in suitability.items()
+                            if key != "evaluation_hash"}
+        candidate_body = {key: value for key, value in candidate.items()
+                          if key != "candidate_hash"}
+        key = candidate.get("candidate_key")
+        lineage = suitability.get("lineage")
+        refs = candidate.get("evidence")
+        require(
+            isinstance(key, str) and key not in research_by_key
+            and suitability.get("evaluation_hash") == sha256(canonical_json(suitability_body).encode())
+            and candidate.get("candidate_hash") == sha256(canonical_json(candidate_body).encode())
+            and isinstance(lineage, Mapping) and lineage.get("run_id") == run_id
+            and lineage.get("policy_version") == packet.get("policy_version")
+            and lineage.get("reference_manifest_id") == manifest_id
+            and lineage.get("reference_revision") == manifest.get("revision")
+            and isinstance(refs, list),
+            "discovery research suitability hash or lineage is invalid",
+        )
+        receipt_ids = lineage.get("evidence_receipt_ids")
+        require(isinstance(receipt_ids, Mapping),
+                "discovery research receipt lineage is invalid")
+        for ref in refs:
+            item_id = ref.get("item_id") if isinstance(ref, Mapping) else None
+            evidence = evidence_by_id.get(item_id)
+            item = source_items.get(item_id)
+            require(
+                isinstance(evidence, Mapping) and isinstance(item, Mapping)
+                and evidence.get("content_hash") == item.get("content_hash")
+                and isinstance(evidence.get("source_identity"), Mapping)
+                and evidence["source_identity"].get("receipt_id") == receipt_ids.get(item_id)
+                and receipt_ids.get(item_id) == item.get("source_receipt_id")
+                and item.get("source_receipt_id") in persisted_receipts,
+                "discovery research source lineage is invalid",
+            )
+        research_by_key[key] = candidate
+    for action in actions:
+        candidate = research_by_key.get(action.get("candidate_key")) \
+            if isinstance(action, Mapping) else None
+        suitability = candidate.get("suitability") if isinstance(candidate, Mapping) else None
+        require(
+            isinstance(action, Mapping) and isinstance(candidate, Mapping)
+            and isinstance(suitability, Mapping)
+            and candidate.get("research_state") == "analysis_ready"
+            and suitability.get("state") == "eligible"
+            and action.get("candidate_hash") == candidate.get("candidate_hash")
+            and action.get("suitability_hash") == suitability.get("evaluation_hash"),
+            "discovery research-to-action promotion is invalid",
+        )
+
+    optional_failures = tuple(sorted(
+        f"{row.get('capability_id')}:{row.get('state')}"
+        for row in task_rows
+        if isinstance(row, Mapping)
+        and row.get("capability_id") not in required_ids
+        and row.get("state") != "succeeded"
+    ))
+    return VerificationResult(
+        ok=True,
+        required_capability_ids=required_ids,
+        optional_failures=optional_failures,
+    )
+
+
+def verify_discovery_capability(receipt: Mapping[str, object]) -> VerificationResult:
+    """Fail closed with one stable public error type for malformed protected rows."""
+    try:
+        return _verify_discovery_capability(receipt)
+    except RuntimeError:
+        raise
+    except (KeyError, TypeError, ValueError, IndexError, AttributeError) as error:
+        raise RuntimeError(
+            "discovery capability evidence is unavailable or malformed"
+        ) from error
 
 
 def verify_component_artifacts(repo: Path, candidate: str, record: Mapping, source: ReleaseDataSource, *, deployed_at: datetime | None = None) -> None:
@@ -247,9 +669,13 @@ def verify_scheduled(rows: Mapping, run_id: str, deployed: datetime, now: dateti
         delivery = {"status": "suppressed", "telegram_message_ids": [], "suppression_reason": reason}
     require(rows["quota"] and all(row["run_id"] == run_id and UUID.fullmatch(row["id"]) and type(row["actual_requests"]) is int
             and type(row["reserved_requests"]) is int and 0 <= row["actual_requests"] <= row["reserved_requests"] for row in rows["quota"]), "scheduled quota receipts are incomplete")
+    capability = verify_discovery_capability(rows)
     return {"run_id": run_id, "packet_id": packet["id"], "packet_hash": packet["packet_hash"], "report_id": report["id"], "report_hash": report["report_hash"],
             "stage_ids": {"collection": completion["completion_id"], "packet": packet["id"], "evaluation": evaluation["request_id"], "report": report_request["request_id"], "publication": publication["report_id"]},
-            "publication_key": publication["idempotency_key"], "publication_receipt": delivery}
+            "publication_key": publication["idempotency_key"], "publication_receipt": delivery,
+            "discovery_capability": {"ok": capability.ok,
+                                     "required_capability_ids": list(capability.required_capability_ids),
+                                     "optional_failures": list(capability.optional_failures)}}
 
 
 def verify_release(source: ReleaseDataSource, *, deployment_id: int, repo_root: Path = ROOT, static_root: Path = ROOT / "dist",

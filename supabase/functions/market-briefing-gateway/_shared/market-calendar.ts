@@ -1,8 +1,17 @@
 import type { Phase, VerifiedQuote } from "./contracts.ts";
+import { NYSE_CALENDAR } from "./nyse-calendar.generated.ts";
 
 const DATE_PATTERN = /^\d{4}-\d{2}-\d{2}$/;
-const MAINTAINED_YEAR = "2026";
-const EARLY_CLOSES = new Set(["2026-11-27", "2026-12-24"]);
+const COVERAGE_START = NYSE_CALENDAR.coverage.start_year;
+const COVERAGE_END = NYSE_CALENDAR.coverage.end_year;
+const FULL_DAY_CLOSURES = new Set<string>(
+  Object.values(NYSE_CALENDAR.years).flatMap((year) => year.full_day_closures),
+);
+const EARLY_CLOSES = new Set<string>(
+  Object.values(NYSE_CALENDAR.years).flatMap((year) =>
+    year.early_closes.map((value) => value.date)
+  ),
+);
 
 function localParts(
   instant: Date,
@@ -39,7 +48,11 @@ function isWeekend(date: string): boolean {
 }
 
 function hasMaintainedCoverage(date: string): boolean {
-  return DATE_PATTERN.test(date) && date.slice(0, 4) === MAINTAINED_YEAR;
+  if (!DATE_PATTERN.test(date)) return false;
+  const instant = new Date(`${date}T12:00:00.000Z`);
+  const year = Number(date.slice(0, 4));
+  return !Number.isNaN(instant.valueOf()) && instant.toISOString().slice(0, 10) === date &&
+    year >= COVERAGE_START && year <= COVERAGE_END;
 }
 
 function sessionCloseMinutes(date: string, holidays: readonly string[]): number | null {
@@ -67,14 +80,14 @@ export function isNyseHoliday(
   holidays: readonly string[],
 ): boolean {
   if (!DATE_PATTERN.test(localDate) || isWeekend(localDate)) return false;
-  return holidays.includes(localDate);
+  return FULL_DAY_CLOSURES.has(localDate) || holidays.includes(localDate);
 }
 
 export function isFirstNyseSessionOfMonth(
   localDate: string,
   holidays: readonly string[],
 ): boolean {
-  if (!DATE_PATTERN.test(localDate)) return false;
+  if (!hasMaintainedCoverage(localDate)) return false;
   const instant = new Date(`${localDate}T12:00:00.000Z`);
   if (
     Number.isNaN(instant.valueOf()) ||

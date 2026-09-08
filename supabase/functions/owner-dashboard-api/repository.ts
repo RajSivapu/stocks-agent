@@ -12,7 +12,7 @@ import { parseIntelligenceView } from "../../../packages/dashboard-contracts/src
 
 import { createDashboardDatabase, type DashboardDatabaseFactory, validateDashboardDatabaseUrl } from "./database.ts";
 import { DashboardHttpError } from "./errors.ts";
-import { classifyFreshness, NYSE_HOLIDAYS_2026 } from "./freshness.ts";
+import { classifyFreshness, NYSE_MARKET_CALENDAR } from "./freshness.ts";
 import type { DashboardReader, DashboardReadResult } from "./handler.ts";
 import {
   mapCompanionResponse,
@@ -269,7 +269,7 @@ export function createDashboardRepository(
     if (!STATEMENTS.has(statement)) throw new Error("dashboard query is not allowlisted");
     return database.query(statement, parameters);
   };
-  const calendar = { holidays: NYSE_HOLIDAYS_2026 };
+  const calendar = NYSE_MARKET_CALENDAR;
 
   async function holdings(): Promise<Row[]> {
     const rows = await query(HOLDINGS);

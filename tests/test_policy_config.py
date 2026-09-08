@@ -1,6 +1,7 @@
 """Tests for the owner-reviewed market gateway policy projection."""
 
 from copy import deepcopy
+from datetime import date
 
 import pytest
 
@@ -57,6 +58,17 @@ def test_build_policy_config_uses_reviewed_safety_values():
         "draft_ttl_hours": 24,
         "drafts_per_hour": 5,
     }
+
+
+def test_build_policy_config_selects_a_reviewed_calendar_year_and_rejects_2029():
+    policy = build_policy_config(load_settings(), today=date(2028, 1, 3))
+
+    assert policy["market_calendar_year"] == 2028
+    assert "2028-07-04" in policy["nyse_holidays"]
+    assert "2027-12-31" not in policy["nyse_holidays"]
+
+    with pytest.raises(ValueError, match="calendar coverage"):
+        build_policy_config(load_settings(), today=date(2029, 1, 2))
 
 
 def test_build_policy_config_rejects_allocation_not_equal_to_100_percent():

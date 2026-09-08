@@ -5,9 +5,11 @@ import json
 import os
 from pathlib import Path
 import subprocess
+import uuid
 
 import pytest
 
+from scripts import verify_personal_stock_agent_v1 as release_verifier
 from scripts.verify_personal_stock_agent_v1 import verify_release
 from scripts.verify_owner_dashboard_deployment import migration_statements_sha256, normalize_migration_statements
 from test_recovery_bundle import recovery_records, digest
@@ -24,6 +26,416 @@ def tree_hash(files):
     for path, raw in sorted(files.items()):
         hasher.update(path.encode() + b"\0" + raw + b"\0")
     return hasher.hexdigest()
+
+
+def test_release_exposes_a_separate_discovery_capability_verifier():
+    assert callable(getattr(release_verifier, "verify_discovery_capability", None))
+
+
+def _capability_rows():
+    records = recovery_records()
+    manifest = records["reference_manifests"][0]
+    # The selected finalized manifest may originate in an earlier run, while
+    # the current run must persist its own healthy binding to that exact ID.
+    records["reference_run_bindings"][0]["run_id"] = RUN
+    themes = [
+        "macro_and_policy",
+        "technology_ai_and_semiconductors",
+        "energy_nuclear_and_grid_infrastructure",
+        "industrial_infrastructure",
+        "critical_minerals_and_magnets",
+        "healthcare",
+        "consumer",
+        "defense_trade_and_geopolitics",
+        "earnings_and_mergers_and_acquisitions",
+    ]
+    reference_task_id = str(uuid.uuid5(uuid.UUID(RUN), "required:reference"))
+    tasks = [{
+        "id": reference_task_id,
+        "run_id": RUN,
+        "stage": "reference",
+        "provider": "sec_edgar",
+        "capability_id": "sec_company_tickers_universe",
+        "query_kind": "universe",
+        "query_hash": "1" * 64,
+        "dependency_ids": [],
+        "requested_window": {"start": "2026-09-05T12:00:00Z", "end": "2026-09-05T20:00:00Z"},
+        "state": "succeeded",
+        "attempt_count": 1,
+        "request_budget": 1,
+        "result": {"reference_coverage": {
+            "coverage_status": "scope_not_guaranteed",
+            "reference_status": "healthy",
+            "reference_manifest_id": manifest["id"],
+            "reference_age_seconds": 120,
+            "reference_revision": manifest["revision"],
+        }},
+        "created_at": "2026-09-05T19:30:00Z",
+        "updated_at": "2026-09-05T19:31:00Z",
+    }]
+    receipts = []
+    reservations = []
+    required_tasks = [{
+        "task_id": reference_task_id,
+        "capability_id": "sec_company_tickers_universe",
+        "theme_id": None,
+    }]
+    for index, theme in enumerate(themes, 1):
+        task_id = str(uuid.uuid5(uuid.UUID(RUN), f"required:gdelt:{theme}"))
+        receipt_id = str(uuid.uuid5(
+            uuid.NAMESPACE_URL,
+            f"market-intelligence:receipt:{RUN}:{task_id}",
+        ))
+        reservation_id = str(uuid.uuid5(uuid.UUID(RUN), f"reservation:{theme}"))
+        cache_key = hashlib.sha256(theme.encode()).hexdigest()
+        window = {"start": "2026-09-05T12:00:00Z", "end": "2026-09-05T20:00:00Z"}
+        receipt = {
+            "provider": "gdelt", "reservation_id": reservation_id,
+            "status": "succeeded", "cache_key": cache_key,
+            "requested_window": window, "requested_limit": 20,
+            "retrieved_at": "2026-09-05T19:40:00Z",
+            "observed_at": "2026-09-05T19:40:00Z",
+            "expires_at": "2026-09-05T19:55:00Z", "request_cost": 1,
+            "upstream_remaining": None, "returned_count": 0,
+            "accepted_count": 0, "duplicate_count": 0, "dropped_count": 0,
+            "response_hash": hashlib.sha256(f"empty:{theme}".encode()).hexdigest(),
+            "error_code": None, "source_receipt_id": receipt_id,
+            "cache_predecessor_receipt_id": None,
+            "metadata": {
+                "capability_id": "gdelt_theme_search", "coverage_status": "success_empty",
+                "cursor_start": window["start"], "cursor_end": window["end"],
+                "overlap_seconds": 7200, "page": 1, "truncated": False,
+                "backlog_remaining": False, "exhausted": True,
+                "next_retry_phase": "post-market",
+            },
+        }
+        tasks.append({
+            "id": task_id, "run_id": RUN, "stage": "signals", "provider": "gdelt",
+            "capability_id": "gdelt_theme_search", "query_kind": "theme_search",
+            "query_hash": hashlib.sha256(f"query:{theme}".encode()).hexdigest(),
+            "dependency_ids": [], "requested_window": window, "state": "succeeded",
+            "attempt_count": 1, "request_budget": 1,
+            "result": {"theme_id": theme, "checkpoint": {"cache_key": cache_key, "receipt": receipt}},
+            "created_at": f"2026-09-05T19:{31 + index:02d}:00Z",
+            "updated_at": f"2026-09-05T19:{32 + index:02d}:00Z",
+        })
+        receipts.append({
+            "id": receipt_id, "run_id": RUN, "reservation_id": reservation_id,
+            "provider": "gdelt", "status": "succeeded", "cache_key": cache_key,
+            "requested_window": window, "retrieved_at": receipt["retrieved_at"],
+            "expires_at": receipt["expires_at"], "request_cost": 1,
+            "upstream_remaining": None, "returned_count": 0, "accepted_count": 0,
+            "duplicate_count": 0, "dropped_count": 0, "error": None,
+            "response_hash": receipt["response_hash"], "created_at": receipt["retrieved_at"],
+        })
+        reservations.append({
+            "id": reservation_id, "run_id": RUN, "provider": "gdelt",
+            "market_date": "2026-09-05", "phase": "post-market",
+            "reserved_requests": 1, "cache_keys": [cache_key],
+            "created_at": "2026-09-05T19:30:00Z",
+        })
+        required_tasks.append({
+            "task_id": task_id, "capability_id": "gdelt_theme_search", "theme_id": theme,
+        })
+    plan_body = {
+        "version": 1,
+        "source_capability_version": 1,
+        "reference_version": manifest["reference_version"],
+        "required_baseline_capability_ids": ["sec_company_tickers_universe", "gdelt_theme_search"],
+        "planned_task_ids": [row["id"] for row in tasks],
+        "required_tasks": required_tasks,
+    }
+    source_plan = {**plan_body, "plan_hash": digest(plan_body)}
+    coverage = {
+        "complete_market_coverage": False, "mode": "bounded",
+        "reference_manifest_id": manifest["id"], "reference_status": "healthy",
+        "source_plan": source_plan,
+    }
+    packet = {
+        "action_candidates": [], "contract_version": 2, "coverage": coverage,
+        "evidence": [], "execution_allowed": False, "limitations": [],
+        "observed_at": "2026-09-05T19:40:00.000Z", "omissions": [],
+        "policy_version": 1, "research_candidates": [], "run_id": RUN,
+    }
+    packet_row = {
+        "id": PACKET, "run_id": RUN, "policy_version": 1, "status": "completed",
+        "candidate_count": 0, "evidence_count": 0, "packet_hash": digest(packet),
+        "packet": packet, "created_at": "2026-09-05T19:45:00Z",
+    }
+    return {
+        "run": [{"id": RUN, "scheduled_phase": "post-market", "scheduled_market_date": "2026-09-05"}],
+        "intelligence_runs": [{"id": RUN, "phase": "post-market", "market_date": "2026-09-05"}],
+        "reference_manifests": records["reference_manifests"],
+        "security_reference_revisions": records["security_reference_revisions"],
+        "reference_chunk_receipts": records["reference_chunk_receipts"],
+        "reference_snapshot_memberships": records["reference_snapshot_memberships"],
+        "reference_finalization_seals": records["reference_finalization_seals"],
+        "reference_run_bindings": records["reference_run_bindings"],
+        "reference_predecessor_pins": [],
+        "discovery_stage_tasks": tasks,
+        "source_quota_reservations": reservations,
+        "source_receipts": receipts,
+        "source_items": [], "intelligence_run_items": [],
+        "source_item_provenance": [], "run_source_item_provenance": [],
+        "packets": [packet_row],
+        "completions": [{
+            "completion_id": COLLECTION, "run_id": RUN,
+            "payload": {"receipts": [row["result"]["checkpoint"]["receipt"] for row in tasks[1:]],
+                        "packet": packet_row, "coverage": coverage},
+            "receipt": {"packet_id": PACKET, "packet_hash": packet_row["packet_hash"]},
+        }],
+    }
+
+
+def _verify_capability(rows):
+    verifier = getattr(release_verifier, "verify_discovery_capability", None)
+    assert callable(verifier)
+    return verifier(rows)
+
+
+def _rebind_packet_completion(rows):
+    packet_row = rows["packets"][0]
+    packet_row["packet_hash"] = digest(packet_row["packet"])
+    rows["completions"][0]["receipt"]["packet_hash"] = packet_row["packet_hash"]
+    rows["completions"][0]["payload"]["packet"] = copy.deepcopy(packet_row)
+    rows["completions"][0]["payload"]["coverage"] = copy.deepcopy(
+        packet_row["packet"]["coverage"]
+    )
+
+
+def test_discovery_capability_accepts_receipt_backed_success_empty_for_every_due_task():
+    result = _verify_capability(_capability_rows())
+
+    assert result.ok is True
+    assert result.required_capability_ids == (
+        "sec_company_tickers_universe", "gdelt_theme_search",
+    )
+
+
+def _make_first_required_receipt_nonempty(rows, *, persist_lineage):
+    task = next(
+        row for row in rows["discovery_stage_tasks"]
+        if row["capability_id"] == "gdelt_theme_search"
+    )
+    parsed = task["result"]["checkpoint"]["receipt"]
+    receipt_id = parsed["source_receipt_id"]
+    parsed.update(returned_count=1, accepted_count=1)
+    parsed["metadata"]["coverage_status"] = "success_nonempty"
+    completion = next(
+        row for row in rows["completions"][0]["payload"]["receipts"]
+        if row["source_receipt_id"] == receipt_id
+    )
+    completion.update(returned_count=1, accepted_count=1)
+    completion["metadata"]["coverage_status"] = "success_nonempty"
+    stored = next(row for row in rows["source_receipts"] if row["id"] == receipt_id)
+    stored.update(returned_count=1, accepted_count=1)
+    if not persist_lineage:
+        return
+    content_hash = hashlib.sha256(b"parsed nonempty evidence").hexdigest()
+    item_id = str(uuid.uuid5(uuid.NAMESPACE_URL, f"market-source:{content_hash}"))
+    run_item_id = str(uuid.uuid5(uuid.UUID(RUN), f"run-item:{item_id}"))
+    rows["source_items"] = [{
+        "id": item_id, "source_receipt_id": receipt_id, "provider": "gdelt",
+        "upstream_item_id": "nonempty-1", "canonical_url": "https://publisher.example/nonempty-1",
+        "published_at": "2026-09-05T19:35:00Z", "effective_at": None,
+        "title": "Parsed market event", "normalized_text": "Parsed market evidence",
+        "canonical_content": "parsed nonempty evidence", "content_hash": content_hash,
+        "metadata": {}, "created_at": "2026-09-05T19:40:00Z",
+    }]
+    rows["intelligence_run_items"] = [{
+        "id": run_item_id, "run_id": RUN, "source_item_id": item_id,
+        "source_receipt_id": receipt_id, "disposition": "accepted", "drop_reason": None,
+        "created_at": "2026-09-05T19:40:00Z",
+    }]
+    rows["source_item_provenance"] = [{
+        "source_item_id": item_id, "provider": "gdelt",
+        "canonical_item_url": "https://publisher.example/nonempty-1",
+        "request_url": "https://api.gdeltproject.org/api/v2/doc/doc",
+        "retrieved_at": "2026-09-05T19:40:00Z", "reporting_at": None,
+        "entity_ids": [], "security_ids": [], "discovery_status": "qualified",
+        "created_at": "2026-09-05T19:40:00Z",
+    }]
+    rows["run_source_item_provenance"] = [{
+        "run_item_id": run_item_id, "run_id": RUN, "source_item_id": item_id,
+        "source_receipt_id": receipt_id, "provider": "gdelt",
+        "request_url": "https://api.gdeltproject.org/api/v2/doc/doc",
+        "retrieved_at": "2026-09-05T19:40:00Z", "reporting_at": None,
+        "entity_ids": [], "security_ids": [], "discovery_status": "qualified",
+        "created_at": "2026-09-05T19:40:00Z",
+    }]
+
+
+def test_discovery_capability_rejects_success_nonempty_without_saved_item_provenance():
+    rows = _capability_rows()
+    _make_first_required_receipt_nonempty(rows, persist_lineage=False)
+
+    with pytest.raises(RuntimeError, match="nonempty|provenance|item"):
+        _verify_capability(rows)
+
+
+def test_discovery_capability_accepts_success_nonempty_with_saved_item_provenance():
+    rows = _capability_rows()
+    _make_first_required_receipt_nonempty(rows, persist_lineage=True)
+
+    assert _verify_capability(rows).ok is True
+
+
+def test_discovery_capability_accepts_success_empty_when_all_returned_rows_are_dropped():
+    rows = _capability_rows()
+    task = next(
+        row for row in rows["discovery_stage_tasks"]
+        if row["capability_id"] == "gdelt_theme_search"
+    )
+    parsed = task["result"]["checkpoint"]["receipt"]
+    receipt_id = parsed["source_receipt_id"]
+    completion = next(
+        row for row in rows["completions"][0]["payload"]["receipts"]
+        if row["source_receipt_id"] == receipt_id
+    )
+    stored = next(row for row in rows["source_receipts"] if row["id"] == receipt_id)
+    for row in (parsed, completion, stored):
+        row.update(returned_count=1, accepted_count=0, dropped_count=1)
+
+    assert _verify_capability(rows).ok is True
+
+
+def test_discovery_capability_rejects_nonempty_label_when_accepted_count_is_zero():
+    rows = _capability_rows()
+    _make_first_required_receipt_nonempty(rows, persist_lineage=True)
+    task = next(
+        row for row in rows["discovery_stage_tasks"]
+        if row["capability_id"] == "gdelt_theme_search"
+    )
+    parsed = task["result"]["checkpoint"]["receipt"]
+    receipt_id = parsed["source_receipt_id"]
+    completion = next(
+        row for row in rows["completions"][0]["payload"]["receipts"]
+        if row["source_receipt_id"] == receipt_id
+    )
+    stored = next(row for row in rows["source_receipts"] if row["id"] == receipt_id)
+    for row in (parsed, completion, stored):
+        row["accepted_count"] = 0
+
+    with pytest.raises(RuntimeError, match="empty/nonempty"):
+        _verify_capability(rows)
+
+
+def test_discovery_capability_keeps_optional_failures_visible_without_blocking_closure():
+    rows = _capability_rows()
+    optional_task_id = str(uuid.uuid5(uuid.UUID(RUN), "optional:white-house"))
+    rows["discovery_stage_tasks"].append({
+        "id": optional_task_id, "run_id": RUN, "stage": "signals",
+        "provider": "white_house", "capability_id": "white_house_news",
+        "query_kind": "feed", "query_hash": "f" * 64,
+        "dependency_ids": [],
+        "requested_window": {
+            "start": "2026-09-05T12:00:00Z", "end": "2026-09-05T20:00:00Z",
+        },
+        "state": "failed", "attempt_count": 1, "request_budget": 1,
+        "result": {"coverage_status": "source_failed"},
+        "created_at": "2026-09-05T19:35:00Z",
+        "updated_at": "2026-09-05T19:36:00Z",
+    })
+    source_plan = rows["packets"][0]["packet"]["coverage"]["source_plan"]
+    source_plan["planned_task_ids"].append(optional_task_id)
+    plan_body = {key: value for key, value in source_plan.items() if key != "plan_hash"}
+    source_plan["plan_hash"] = digest(plan_body)
+    _rebind_packet_completion(rows)
+
+    result = _verify_capability(rows)
+
+    assert result.ok is True
+    assert result.optional_failures == ("white_house_news:failed",)
+
+
+@pytest.mark.parametrize("terminal_state", [
+    "failed", "disabled", "unsupported", "deferred", "uncertain",
+    "quota_blocked", "configuration_missing",
+])
+def test_discovery_capability_rejects_non_success_required_states(terminal_state):
+    rows = _capability_rows()
+    task = next(row for row in rows["discovery_stage_tasks"] if row["capability_id"] == "gdelt_theme_search")
+    task["state"] = "failed" if terminal_state == "failed" else "uncertain" if terminal_state == "uncertain" else "deferred"
+    task["result"] = {"theme_id": task["result"]["theme_id"], "coverage_status": terminal_state}
+
+    with pytest.raises(RuntimeError, match="required.*capability|capability.*required"):
+        _verify_capability(rows)
+
+
+def test_discovery_capability_derives_due_tasks_even_if_task_and_plan_are_rehashed_away():
+    rows = _capability_rows()
+    removed = next(row for row in rows["discovery_stage_tasks"] if row["result"].get("theme_id") == "healthcare")
+    rows["discovery_stage_tasks"].remove(removed)
+    source_plan = rows["packets"][0]["packet"]["coverage"]["source_plan"]
+    source_plan["planned_task_ids"].remove(removed["id"])
+    source_plan["required_tasks"] = [row for row in source_plan["required_tasks"] if row["task_id"] != removed["id"]]
+    body = {key: value for key, value in source_plan.items() if key != "plan_hash"}
+    source_plan["plan_hash"] = digest(body)
+    _rebind_packet_completion(rows)
+
+    with pytest.raises(RuntimeError, match="required.*task|healthcare"):
+        _verify_capability(rows)
+
+
+def test_discovery_capability_rejects_reusing_one_receipt_for_every_due_theme():
+    rows = _capability_rows()
+    theme_tasks = [
+        row for row in rows["discovery_stage_tasks"]
+        if row["capability_id"] == "gdelt_theme_search"
+    ]
+    reused = copy.deepcopy(theme_tasks[0]["result"]["checkpoint"]["receipt"])
+    for task in theme_tasks[1:]:
+        task["result"]["checkpoint"]["receipt"] = copy.deepcopy(reused)
+
+    with pytest.raises(RuntimeError, match="receipt|task"):
+        _verify_capability(rows)
+
+
+def test_discovery_capability_binds_required_task_shape_to_reviewed_registry():
+    rows = _capability_rows()
+    task = next(
+        row for row in rows["discovery_stage_tasks"]
+        if row["capability_id"] == "gdelt_theme_search"
+    )
+    parsed = task["result"]["checkpoint"]["receipt"]
+    stored = next(
+        row for row in rows["source_receipts"]
+        if row["id"] == parsed["source_receipt_id"]
+    )
+    reservation = next(
+        row for row in rows["source_quota_reservations"]
+        if row["id"] == parsed["reservation_id"]
+    )
+    task.update(provider="white_house", query_kind="feed")
+    parsed["provider"] = "white_house"
+    stored["provider"] = "white_house"
+    reservation["provider"] = "white_house"
+
+    with pytest.raises(RuntimeError, match="registry|task|capability"):
+        _verify_capability(rows)
+
+
+@pytest.mark.parametrize("reference_status", ["reference_stale", "reference_unavailable"])
+def test_discovery_capability_rejects_fallback_reference_even_when_task_says_succeeded(reference_status):
+    rows = _capability_rows()
+    rows["reference_run_bindings"][0]["reference_status"] = reference_status
+    rows["packets"][0]["packet"]["coverage"]["reference_status"] = reference_status
+    _rebind_packet_completion(rows)
+
+    with pytest.raises(RuntimeError, match="reference"):
+        _verify_capability(rows)
+
+
+def test_discovery_capability_rejects_research_to_action_promotion():
+    rows = _capability_rows()
+    rows["packets"][0]["packet"]["action_candidates"] = [{
+        "candidate_key": "sec:FORGED", "candidate_hash": "a" * 64,
+        "suitability_hash": "b" * 64,
+    }]
+    _rebind_packet_completion(rows)
+
+    with pytest.raises(RuntimeError, match="action|promotion"):
+        _verify_capability(rows)
 
 
 class FakeReleaseSource:
@@ -131,6 +543,37 @@ def release(tmp_path):
         "origins": [{"request_id": REQUEST, "run_id": RUN, "requested_packet_id": PACKET, "scheduled_phase": "post-market", "market_date": "2026-09-05", "requested_kind": "weekly", "requested_report_id": REPORT, "requested_idempotency_key": REPORT_KEY, "requested_report_hash": report["report_hash"]}],
         "quota": [{"id": "99999999-1111-4111-8111-111111111111", "run_id": RUN, "provider": "gdelt", "reserved_requests": 2, "actual_requests": 1}],
     }
+    capability = _capability_rows()
+    for key in (
+        "reference_manifests", "security_reference_revisions", "reference_chunk_receipts",
+        "reference_snapshot_memberships", "reference_finalization_seals",
+        "reference_run_bindings", "reference_predecessor_pins", "discovery_stage_tasks",
+        "source_quota_reservations", "source_receipts", "source_items",
+        "intelligence_run_items", "source_item_provenance", "run_source_item_provenance",
+        "packets", "completions",
+    ):
+        source.rows[key] = copy.deepcopy(capability[key])
+    capability_packet = source.rows["packets"][0]
+    report["report"]["packet_hash"] = capability_packet["packet_hash"]
+    report["report_hash"] = digest(report["report"])
+    report_key = hashlib.sha256(
+        f"v2:weekly:2026-09-05:{capability_packet['packet_hash']}:{report['report_hash']}".encode()
+    ).hexdigest()
+    report_id = f"{report_key[:8]}-{report_key[8:12]}-5{report_key[13:16]}-8{report_key[17:20]}-{report_key[20:32]}"
+    source.expected_report_id = report_id
+    source.expected_report_key = report_key
+    source.rows["reports"][0].update({
+        **report, "id": report_id, "run_id": RUN, "packet_id": PACKET,
+        "idempotency_key": report_key, "market_date": "2026-09-05", "kind": "weekly",
+    })
+    source.rows["publications"][0].update(report_id=report_id, idempotency_key=report_key)
+    source.rows["requests"][2]["response"].update(
+        report_id=report_id, report_hash=report["report_hash"],
+    )
+    source.rows["origins"][0].update(
+        requested_report_id=report_id, requested_idempotency_key=report_key,
+        requested_report_hash=report["report_hash"],
+    )
     return source, {"deployment_id": 42, "repo_root": repo, "static_root": static, "clock": lambda: NOW}
 
 
@@ -138,11 +581,19 @@ def test_release_queries_sources_and_binds_exact_receipts(release):
     source, args = release
     result = verify_release(source, **args)
     assert result["candidate_sha"] == source.record["sha"]
-    assert result["stage_ids"] == {"collection": COLLECTION, "packet": PACKET, "evaluation": EVALUATION, "report": REQUEST, "publication": REPORT}
-    assert result["publication_key"] == REPORT_KEY
+    assert result["stage_ids"] == {"collection": COLLECTION, "packet": PACKET, "evaluation": EVALUATION, "report": REQUEST, "publication": source.expected_report_id}
+    assert result["publication_key"] == source.expected_report_key
+    assert result["discovery_capability"]["ok"] is True
     assert result["publication_receipt"]["telegram_message_ids"] == [7]
     source.record.pop("run_id")
     assert verify_release(source, **args)["run_id"] == RUN
+
+
+def test_release_blocks_when_required_discovery_evidence_is_missing(release):
+    source, args = release
+    source.rows["source_receipts"] = []
+    with pytest.raises(RuntimeError, match="required capability"):
+        verify_release(source, **args)
 
 
 def test_release_requires_readback_of_all_four_deployed_artifacts(release):
@@ -278,6 +729,32 @@ def test_production_source_reads_deployment_and_protected_artifact_instead_of_ca
     assert result["deployed_at"] == "2026-09-05T19:00:00Z"
     assert result["id"] == 42
     assert len(calls) == 2
+
+
+def test_protected_release_extraction_reads_reused_reference_and_full_source_lineage(monkeypatch):
+    from scripts.protected_evidence import PostgresReadOnlySource
+
+    source = PostgresReadOnlySource.__new__(PostgresReadOnlySource)
+    queries = []
+
+    def query(sql, parameters=()):
+        queries.append((sql, parameters))
+        return []
+
+    monkeypatch.setattr(source, "query", query)
+    rows = source.release_rows(RUN)
+    sql_by_key = {key: queries[index][0] for index, key in enumerate(rows) if key != "requests"}
+
+    assert {
+        "source_quota_reservations", "source_receipts", "source_items",
+        "intelligence_run_items", "source_item_provenance",
+        "run_source_item_provenance",
+    } <= set(rows)
+    assert "payload" in sql_by_key["completions"]
+    assert "market_reference_run_bindings" in sql_by_key["reference_manifests"]
+    assert "market_reference_run_bindings" in sql_by_key["reference_chunk_receipts"]
+    assert "market_reference_snapshot_memberships" in sql_by_key["security_reference_revisions"]
+    assert "market_intelligence_run_items" in sql_by_key["source_items"]
 
 
 def test_production_source_refuses_unprotected_deployment(monkeypatch):

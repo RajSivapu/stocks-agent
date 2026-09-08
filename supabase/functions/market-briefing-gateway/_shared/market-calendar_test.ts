@@ -34,6 +34,17 @@ Deno.test("NYSE holiday lookup is exact and weekends are not mislabeled holidays
   );
 });
 
+Deno.test("canonical closures cannot be omitted by caller policy", () => {
+  assert(
+    isNyseHoliday("2027-07-05", []),
+    "the generated observed Independence Day closure was omitted",
+  );
+  assert(
+    !isRegularSession(new Date("2027-07-05T16:00:00.000Z"), []),
+    "an official closure was treated as a regular session",
+  );
+});
+
 Deno.test("first NYSE session of month accounts for weekends and configured holidays", () => {
   assert(
     isFirstNyseSessionOfMonth("2026-09-01", holidays),
@@ -157,9 +168,21 @@ Deno.test("intraday rejects a regular-state quote after an early close", () => {
 });
 
 Deno.test("market session checks fail closed outside maintained calendar coverage", () => {
-  const now = new Date("2027-01-04T17:00:00.000Z");
-  assert(!isRegularSession(now, []), "unreviewed 2027 session was accepted");
+  const now = new Date("2029-01-02T17:00:00.000Z");
+  assert(!isRegularSession(now, []), "unreviewed 2029 session was accepted");
+  assert(
+    !isFirstNyseSessionOfMonth("2029-01-01", []),
+    "unreviewed 2029 date was accepted as a monthly session",
+  );
   assert(!quoteAllowedForPhase(
-    "intraday", quote("2027-01-04T16:59:00.000Z", "REGULAR"), now, [], 20,
-  ), "unreviewed 2027 quote was accepted");
+    "intraday", quote("2029-01-02T16:59:00.000Z", "REGULAR"), now, [], 20,
+  ), "unreviewed 2029 quote was accepted");
+});
+
+Deno.test("reviewed 2027 and 2028 sessions use the official early closes", () => {
+  for (const [date, closeUtcHour] of [["2027-11-26", 18], ["2028-07-03", 17], ["2028-11-24", 18]] as const) {
+    assert(isRegularSession(new Date(`${date}T${String(closeUtcHour - 1).padStart(2, "0")}:59:00.000Z`), []), `${date} should be open at 12:59 ET`);
+    assert(!isRegularSession(new Date(`${date}T${closeUtcHour}:00:00.000Z`), []), `${date} should close at 13:00 ET`);
+  }
+  assert(isRegularSession(new Date("2027-12-31T19:00:00.000Z"), []), "2027-12-31 must remain an ordinary session");
 });

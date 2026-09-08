@@ -1,0 +1,12 @@
+{
+  "theme_id": "healthcare",
+  "title": "Healthcare diagnostic manufacturing capacity expands",
+  "summary": "MedNova Diagnostics announced a new manufacturing facility after demand for hospital diagnostic systems increased.",
+  "event_type": "capacity",
+  "role": "diagnostic_equipment",
+  "issuers": [
+    {"name": "MedNova Diagnostics", "cik": "0000001006", "public": true, "ticker": "MEDN", "exchange": "NASDAQ", "security_id": "sec:MEDN"}
+  ],
+  "organizations": ["MedNova Diagnostics"],
+  "expected_candidate_keys": ["sec:MEDN"]
+}

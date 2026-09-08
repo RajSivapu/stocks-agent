@@ -126,6 +126,35 @@ def _canonical(value: object) -> str:
     )
 
 
+def _frozen_source_plan(plan: DiscoveryPlan) -> dict[str, object]:
+    """Freeze the reviewed capability order and the exact due task set."""
+    required_capabilities = [
+        capability.capability_id
+        for capability in plan.capabilities.values()
+        if capability.requirement_tier == "required_baseline"
+    ]
+    plan_body: dict[str, object] = {
+        "version": 1,
+        "source_capability_version": plan.capability_version,
+        "reference_version": plan.reference_version,
+        "required_baseline_capability_ids": required_capabilities,
+        "planned_task_ids": [task.task_id for task in plan.tasks],
+        "required_tasks": [
+            {
+                "task_id": task.task_id,
+                "capability_id": task.capability_id,
+                "theme_id": task.theme_id,
+            }
+            for task in plan.tasks
+            if task.capability_id in required_capabilities
+        ],
+    }
+    return {
+        **plan_body,
+        "plan_hash": hashlib.sha256(_canonical(plan_body).encode()).hexdigest(),
+    }
+
+
 def _semantic_row(
     kind: str, row: dict[str, object], *, row_id: str | None = None
 ) -> dict[str, object]:
@@ -2058,6 +2087,8 @@ class IntelligencePipeline:
         reference_coverage = self.context.get("reference_coverage")
         if isinstance(reference_coverage, Mapping):
             coverage.update(reference_coverage)
+        if self.discovery_plan is not None:
+            coverage["source_plan"] = _frozen_source_plan(self.discovery_plan)
         screen_coverage = self.context.get("screen_coverage")
         if isinstance(screen_coverage, Mapping):
             coverage["screen_coverage"] = dict(screen_coverage)
@@ -2276,6 +2307,7 @@ def _validated_reference_coverage(value: object) -> dict[str, object]:
     allowed = {
         "coverage_status", "reference_status", "reference_manifest_id",
         "reference_age_seconds", "reference_revision", "reference_expires_at",
+        "execution_allowed",
     }
     required = allowed - {"reference_revision", "reference_expires_at"}
     if not required <= set(value) <= allowed or value.get("coverage_status") != "scope_not_guaranteed" \

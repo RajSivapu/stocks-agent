@@ -1,5 +1,6 @@
 """Pure-math tests for the local indicators (no network)."""
 import datetime
+import pytest
 from lib import marketdata as m
 
 
@@ -79,8 +80,13 @@ def test_nyse_holidays_returns_copy_safe_known_year():
     assert holidays == tuple(sorted(holidays))
 
 
-def test_nyse_holidays_unknown_year_is_empty():
-    assert m.nyse_holidays(2027) == ()
+def test_nyse_holidays_are_maintained_through_2028_and_fail_closed_afterward():
+    assert "2027-03-26" in m.nyse_holidays(2027)
+    assert "2027-07-05" in m.nyse_holidays(2027)
+    assert "2028-04-14" in m.nyse_holidays(2028)
+    assert "2027-12-31" not in m.nyse_holidays(2027)
+    with pytest.raises(ValueError, match="calendar coverage"):
+        m.nyse_holidays(2029)
 
 
 def test_sma():
