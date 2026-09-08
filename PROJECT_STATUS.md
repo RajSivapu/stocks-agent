@@ -1,16 +1,61 @@
 # Personal Stock Agent Project Status
 
-Last updated: 2026-09-06
-Canonical release: Personal Stock Agent V1 safety remediation
+Last updated: 2026-09-08
+Canonical release: Personal Stock Agent V1 market-wide discovery candidate
 Audit baseline: `432d647ef911ff63da427097f02a852e18038b62` on `origin/main`
-Consolidated local-gate candidate: `883d521728b1b3c2700a78dab1d65208105d7a2f`
+Market-wide implementation boundary: `18386b5c76c7a7aa8b3eeda870b12d3aba2399e1`
 Current state: owner-only Site v9 is live from UI main
 `e2f9d74495fa2ff8ed02e72b12d09755918bb9f9`, with successful exact-main CI `34073314211`.
 Production schema reconciliation, managed isolated recovery, and the protected backend-runtime
 attestation are complete; trusted V1 use remains **no-go** pending the next existing scheduled
-evidence chain plus implementation and protected production proof for the approved market-wide
-discovery scope in V1-C3. The unchanged backend remains attested at
+evidence chain plus protected production proof for the locally implemented market-wide discovery
+scope in V1-C3. The unchanged backend remains attested at
 `b3f7d706573224d8edfa88570067dfb1b0900672` by protected run `34055419086`.
+
+## Local market-wide release candidate — production pending
+
+Tasks 1–10 of the approved market-wide plan are implemented and independently reviewed through
+`18386b5c76c7a7aa8b3eeda870b12d3aba2399e1`. The latest full local gate at that boundary passed
+Python 1,469 passed/3 skipped/4 credentialed tests deselected, Node 71, Deno 332, package tests
+7 + 53, and Playwright 24 passed/1 skipped. The Task 11 candidate gate then passed Python 1,480
+passed/3 skipped/4 credentialed tests deselected, Node 71, Deno 333, package tests 7 + 53, and
+Playwright 24 passed/1 skipped, with typecheck, lint, license, build, and bundle checks green. This is
+local evidence only. The final release-candidate identity is the Task 11 commit containing this
+record. Its independent exact-SHA reviews, protected CI/release identities, owner Site receipt, and
+normal scheduled receipts remain open.
+
+| Task | Reviewed closing commit | Local result |
+|---|---|---|
+| 1 — capability planner | `cffb47d` | Required free baseline and bounded phase budgets fail closed. |
+| 2 — protected discovery ledgers | `e0411ae` | Additive persistence, ACL, export, restore, and recovery contracts pass. |
+| 3 — dated security reference | `2e6b8ff` | SEC reference transfer/restart/capacity pass; scope remains `scope_not_guaranteed`. |
+| 4 — official feeds and cursors | `899b69d` | DOE, EIA, Defense, White House, Federal Register, and SEC adapters retain truthful coverage. |
+| 5 — ticker-free resolution | `284ad02` | Event-first entity resolution, value chains, syndication, and lineage pass. |
+| 6 — primary exposure enrichment | `157a826` | Bounded primary-document enrichment and explicit revenue-share materiality pass. |
+| 7 — broad screens | `e2f734f` | Feasibility states pass; all screen transports remain zero-request. |
+| 8 — research/action split | `9f71e61` | Research survives missing suitability; action remains fail closed. |
+| 9 — theme memory | `95ffbfb` | Bounded cross-run memory, nominations, projection, and recovery pass. |
+| 10 — acceptance and calendar | `18386b5` | Thematic/held-out/adversarial/capacity gates and NYSE 2026–2028 calendar pass. |
+
+The protected migration boundary is the immutable additive chain
+`20261005_market_wide_discovery.sql` through
+`20261012_theme_memory_research_nominations.sql`. The `20261004` artifact is the separate immutable
+production-schema reconciliation baseline; there is no `20261004_market_wide_discovery.sql` and the
+release must never invent or apply one. The eight discovery migration file SHA-256 values are
+recorded in `docs/rollouts/2026-09-06-market-wide-thematic-discovery-v1.md`.
+
+Known V1 limits remain visible: `complete_market_coverage` is always false; free sources and request
+budgets are bounded; six Yahoo screens are disabled; SEC Form 4 transport is unsupported and only
+offline parser/cluster semantics exist; and the V2 action lane remains empty because no protected
+issuer-valuation ledger exists. Research candidates remain suggestion-only. The NYSE calendar is
+maintained through 2028 and fails closed outside that reviewed range.
+
+Any September 8 receipt from the already deployed runtime is operational evidence for that earlier
+runtime only. It does not prove this candidate's V1-C3 discovery capability. V1-C3 and all reopened
+production checkpoints stay unchecked until the exact reviewed candidate reaches protected main,
+the multi-component backend and owner-only Site both pass readback/rollback gates, and a normal
+post-release scheduled run produces separate operational and capability receipts. Alert V3 remains
+disabled and shadow-only.
 
 This file is the version-controlled source of truth for the Personal Stock Agent V1 rollout.
 `docs/ROADMAP.md` records the implementation sequence and remaining release gates.
@@ -90,7 +135,7 @@ report; Ideas and Reports hold the daily decision history; Intelligence and Rece
 research and audit evidence under Advanced. It is not presented as a live trading terminal, and the
 absence of continuous live data is surfaced rather than hidden.
 
-## Approved V1-C3 market-wide discovery completion — 2026-09-06
+## Approved V1-C3 market-wide discovery scope and local implementation — 2026-09-06
 
 The owner approved keeping cross-sector thematic discovery inside V1-C3. Two GPT-6 Astra reviews
 confirmed that the current runtime can preserve and rank known security evidence but does not yet
@@ -109,9 +154,9 @@ screens with explicit feasibility states, durable theme memory, and separate res
 suitability, and action-authorization states.
 
 The September 8 morning receipt remains necessary operational evidence for the currently deployed
-chain. It cannot close V1-C3 by itself. After preserving that receipt, implementation continues
-through local acceptance, independent review, protected multi-component release, and normal
-scheduled production receipts for the new discovery capability. A valid quiet run may contain no
+chain. It cannot close V1-C3 by itself. Local implementation and acceptance are complete through
+Task 10; final exact-candidate review, protected multi-component release, and normal scheduled
+production receipts for the new discovery capability remain. A valid quiet run may contain no
 positive suggestion, but it must prove the complete planned source/task lineage and distinguish no
 event from failure, truncation, quota exhaustion, and unsupported capability.
 
@@ -244,21 +289,21 @@ V1-C2 remains reopened until scheduled receipt evidence passes.
 - [x] Approve the GPT-6 Astra-reviewed market-wide thematic discovery design and implementation plan.
 - [ ] Observe the current deployed chain on its normal schedule; treat this as operational evidence,
   not proof of the new discovery capability.
-- [ ] Implement a capability-aware fair planner, official-source cursors, and a dated U.S.-listed
+- [x] Implement a capability-aware fair planner, official-source cursors, and a dated U.S.-listed
   security reference without adding paid or metered providers.
-- [ ] Resolve ticker-independent events, public/private entities, securities, value-chain paths, and
+- [x] Resolve ticker-independent events, public/private entities, securities, value-chain paths, and
   primary business-exposure evidence outside the owner's portfolio and watchlist.
-- [ ] Preserve research candidates when portfolio suitability is unavailable while keeping action
+- [x] Preserve research candidates when portfolio suitability is unavailable while keeping action
   authorization fail-closed.
-- [ ] Pass the magnet, aluminum, data-center energy, uranium, robotics, adversarial, capacity,
+- [x] Pass the magnet, aluminum, data-center energy, uranium, robotics, adversarial, capacity,
   recovery, and held-out-sector acceptance scenarios without hardcoded company lists.
-- [ ] Replace the separate 2026-only calendar copies with one reviewed NYSE source synchronized
+- [x] Replace the separate 2026-only calendar copies with one reviewed NYSE source synchronized
   through the official published 2028 holiday and early-close schedule; fail closed afterward.
 - [ ] Merge the exact reviewed candidate through protected main, release by the protected
   multi-component path, publish and read back the exact owner Site, and retain normal scheduled
   capability receipts without a duplicate run.
 
-V1-C3 remains open for implementation and production evidence.
+V1-C3 remains open for exact-candidate release and normal scheduled production evidence.
 
 ### V1-C4 — Personal comparison brain
 

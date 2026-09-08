@@ -47,7 +47,10 @@ New focused modules:
 - `lib/intelligence/providers/white_house.py`: bounded category/sitemap collection.
 - `lib/intelligence/providers/energy.py`: DOE and EIA feed/statistics adapters.
 - `lib/intelligence/providers/sec.py`: issuer map, submissions, Company Facts, filing index/document, and Form 4 parsing.
-- `sql/migrations/20261004_market_wide_discovery.sql`: additive reference, task, exposure, theme, and nomination ledger.
+- `sql/migrations/20261005_market_wide_discovery.sql` through
+  `sql/migrations/20261012_theme_memory_research_nominations.sql`: immutable additive discovery,
+  reference-transfer, cursor, official-source, issuer-name, enrichment, research/suitability, and
+  theme-memory ledgers. `20261004` is the separate immutable production reconciliation baseline.
 
 Existing files retain these responsibilities:
 
@@ -213,7 +216,7 @@ git commit -m "feat: add capability-aware discovery planning"
 ### Task 2: Add durable discovery reference and stage ledgers
 
 **Files:**
-- Create: `sql/migrations/20261004_market_wide_discovery.sql`
+- Create: `sql/migrations/20261005_market_wide_discovery.sql`
 - Create: `tests/test_market_wide_discovery_sql.py`
 - Modify: `sql/schema.sql`
 - Modify: `scripts/verify_market_intelligence_migration.py`
@@ -338,7 +341,7 @@ wrong-run cases covered.
 - [ ] **Step 7: Commit the durable ledger**
 
 ```bash
-git add sql/migrations/20261004_market_wide_discovery.sql sql/schema.sql scripts/verify_market_intelligence_migration.py tests/test_market_wide_discovery_sql.py tests/test_verify_market_intelligence_migration.py supabase/functions/market-briefing-gateway/_shared/contracts.ts supabase/functions/market-briefing-gateway/_shared/handler.ts supabase/functions/market-briefing-gateway/_shared/handler_test.ts supabase/functions/market-briefing-gateway/_shared/intelligence.ts supabase/functions/market-briefing-gateway/_shared/intelligence_test.ts supabase/functions/market-briefing-gateway/_shared/repository.ts supabase/functions/market-briefing-gateway/_shared/repository_test.ts lib/gateway.py scripts/protected_evidence.py scripts/export_recovery_bundle.py scripts/verify_recovery_bundle.py scripts/managed_isolated_restore.py tests/test_recovery_bundle.py tests/test_managed_isolated_restore.py
+git add sql/migrations/20261005_market_wide_discovery.sql sql/schema.sql scripts/verify_market_intelligence_migration.py tests/test_market_wide_discovery_sql.py tests/test_verify_market_intelligence_migration.py supabase/functions/market-briefing-gateway/_shared/contracts.ts supabase/functions/market-briefing-gateway/_shared/handler.ts supabase/functions/market-briefing-gateway/_shared/handler_test.ts supabase/functions/market-briefing-gateway/_shared/intelligence.ts supabase/functions/market-briefing-gateway/_shared/intelligence_test.ts supabase/functions/market-briefing-gateway/_shared/repository.ts supabase/functions/market-briefing-gateway/_shared/repository_test.ts lib/gateway.py scripts/protected_evidence.py scripts/export_recovery_bundle.py scripts/verify_recovery_bundle.py scripts/managed_isolated_restore.py tests/test_recovery_bundle.py tests/test_managed_isolated_restore.py
 git commit -m "feat: persist market discovery stages and references"
 ```
 
@@ -886,7 +889,7 @@ git commit -m "feat: add bounded cross-market screens"
 - Modify: `supabase/functions/market-briefing-gateway/_shared/contracts.ts`
 - Modify: `supabase/functions/market-briefing-gateway/_shared/intelligence.ts`
 - Modify: `supabase/functions/market-briefing-gateway/_shared/intelligence_test.ts`
-- Modify: `sql/migrations/20261004_market_wide_discovery.sql`
+- Create: `sql/migrations/20261011_research_suitability_packet_contract.sql`
 - Modify: `sql/schema.sql`
 
 **Interfaces:**
@@ -971,7 +974,7 @@ Expected: PASS for empty portfolios, ETF-only portfolios, missing valuation/over
 - [ ] **Step 8: Commit the two-lane decision contract**
 
 ```bash
-git add lib/intelligence/ranking.py lib/intelligence/packet.py lib/intelligence/types.py lib/intelligence/reports.py lib/intelligence/pipeline.py tests/test_intelligence_ranking.py tests/test_intelligence_packet.py tests/test_intelligence_reports.py tests/test_intelligence_pipeline.py supabase/functions/market-briefing-gateway/_shared/contracts.ts supabase/functions/market-briefing-gateway/_shared/intelligence.ts supabase/functions/market-briefing-gateway/_shared/intelligence_test.ts sql/migrations/20261004_market_wide_discovery.sql sql/schema.sql
+git add lib/intelligence/ranking.py lib/intelligence/packet.py lib/intelligence/types.py lib/intelligence/reports.py lib/intelligence/pipeline.py tests/test_intelligence_ranking.py tests/test_intelligence_packet.py tests/test_intelligence_reports.py tests/test_intelligence_pipeline.py supabase/functions/market-briefing-gateway/_shared/contracts.ts supabase/functions/market-briefing-gateway/_shared/intelligence.ts supabase/functions/market-briefing-gateway/_shared/intelligence_test.ts sql/migrations/20261011_research_suitability_packet_contract.sql sql/schema.sql
 git commit -m "feat: separate research from action eligibility"
 ```
 
@@ -1284,7 +1287,8 @@ SHA, and verify exact-main CI. Do not deploy an unreviewed descendant.
 
 - [ ] **Step 6: Use the protected multi-component release path and publish the reviewed owner Site**
 
-Apply `20261004_market_wide_discovery.sql`, publish changed Edge Functions, update the scheduled
+Apply the immutable additive discovery chain from `20261005_market_wide_discovery.sql` through
+`20261012_theme_memory_research_nominations.sql`, publish changed Edge Functions, update the scheduled
 environment's approved domains and credential-presence configuration, and retain encrypted rollback
 state. Read back exact migration bytes, table/ACL state, source manifests, Edge bytes/configuration,
 environment capability status, owner/anonymous API behavior, and rollback identities. If any

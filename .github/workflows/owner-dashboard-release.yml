@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
     inputs:
       candidate_sha: {description: Reviewed main SHA (hint only), required: true, type: string}
-      reviewed_sha: {description: Reviewed SHA (hint only), required: true, type: string}
+      reviewed_sha: {description: Exact approved PR head SHA (hint only), required: true, type: string}
       ci_workflow_run_id: {description: Required CI run (hint only), required: true, type: string}
       pull_request_number: {description: Reviewed merged PR (hint only), required: true, type: string}
 
@@ -68,7 +68,6 @@ jobs:
           MAIN_SHA="$(gh api "repos/$GITHUB_REPOSITORY/git/ref/heads/main" --jq .object.sha)"
           CANDIDATE_SHA="$INPUT_SHA"; CI_WORKFLOW_RUN_ID="$INPUT_CI_RUN_ID"; PULL_REQUEST_NUMBER="$INPUT_PR"
           export CANDIDATE_SHA
-          test "$INPUT_SHA" = "$INPUT_REVIEWED_SHA" || { echo 'candidate SHA/ref mismatch'; exit 1; }
           test "${GITHUB_REF:-}" = "refs/heads/main" || { echo 'manual release ref is not main'; exit 1; }
           test "${GITHUB_SHA:-}" = "$CANDIDATE_SHA" || { echo 'manual release SHA does not bind candidate'; exit 1; }
           test "$CANDIDATE_SHA" = "$MAIN_SHA" || { echo 'candidate SHA/ref mismatch'; exit 1; }
@@ -76,12 +75,16 @@ jobs:
           git fetch --no-tags origin main
           git merge-base --is-ancestor "$CANDIDATE_SHA" origin/main || { echo 'candidate SHA/ref mismatch'; exit 1; }
           CI="$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$CI_WORKFLOW_RUN_ID")"
+          test "$(jq -r .repository.full_name <<<"$CI")" = "$GITHUB_REPOSITORY" || { echo 'required CI belongs to another repository'; exit 1; }
           test "$(jq -r .head_sha <<<"$CI")" = "$CANDIDATE_SHA" || { echo 'candidate SHA/ref mismatch'; exit 1; }
           test "$(jq -r .status <<<"$CI")" = completed && test "$(jq -r .conclusion <<<"$CI")" = success || { echo 'required CI was not successful'; exit 1; }
           test "$(jq -r .path <<<"$CI")" = .github/workflows/owner-dashboard-ci.yml || { echo 'wrong required CI workflow'; exit 1; }
+          test "$(jq -r .name <<<"$CI")" = "Owner dashboard verification" || { echo 'required CI workflow name mismatch'; exit 1; }
+          test "$(jq -r .event <<<"$CI")" = push && test "$(jq -r .head_branch <<<"$CI")" = main || { echo 'required CI was not an exact-main push'; exit 1; }
           PR="$(gh api "repos/$GITHUB_REPOSITORY/pulls/$PULL_REQUEST_NUMBER")"
           test "$(jq -r .merged <<<"$PR")" = true && test "$(jq -r .base.ref <<<"$PR")" = main && test "$(jq -r .merge_commit_sha <<<"$PR")" = "$CANDIDATE_SHA" || { echo 'candidate SHA/ref mismatch'; exit 1; }
           PR_HEAD_SHA="$(jq -r .head.sha <<<"$PR")"
+          test "$INPUT_REVIEWED_SHA" = "$PR_HEAD_SHA" || { echo 'input reviewed SHA is not the exact PR head'; exit 1; }
           gh api "repos/$GITHUB_REPOSITORY/pulls/$PULL_REQUEST_NUMBER/reviews" --paginate > "$RELEASE_STATE_DIR/reviews.json"
           HEAD_COMMIT="$(gh api "repos/$GITHUB_REPOSITORY/git/commits/$PR_HEAD_SHA")"
           CANDIDATE_COMMIT="$(gh api "repos/$GITHUB_REPOSITORY/git/commits/$CANDIDATE_SHA")"
@@ -93,7 +96,10 @@ jobs:
           test "$CANDIDATE_COMMIT_TIME" = "$MERGED_AT" || test "$CANDIDATE_COMMIT_TIME" '>' "$MERGED_AT" || { echo 'candidate commit predates merge'; exit 1; }
           git fetch --no-tags origin "$PR_HEAD_SHA" || true
           git merge-base --is-ancestor "$PR_HEAD_SHA" "$CANDIDATE_SHA" || test "$(git rev-parse "$PR_HEAD_SHA^{tree}")" = "$(git rev-parse "$CANDIDATE_SHA^{tree}")" || { echo 'reviewed head does not bind candidate'; exit 1; }
-          printf 'candidate_sha=%s\nreviewed_sha=%s\nci_workflow_run_id=%s\npull_request_number=%s\n' "$CANDIDATE_SHA" "$CANDIDATE_SHA" "$CI_WORKFLOW_RUN_ID" "$PULL_REQUEST_NUMBER" >> "$GITHUB_OUTPUT"
+          echo "candidate_sha=$CANDIDATE_SHA" >> "$GITHUB_OUTPUT"
+          echo "reviewed_sha=$PR_HEAD_SHA" >> "$GITHUB_OUTPUT"
+          echo "ci_workflow_run_id=$CI_WORKFLOW_RUN_ID" >> "$GITHUB_OUTPUT"
+          echo "pull_request_number=$PULL_REQUEST_NUMBER" >> "$GITHUB_OUTPUT"
           echo "CANDIDATE_SHA=$CANDIDATE_SHA" >> "$GITHUB_ENV"
       - name: Require configured private Sites capture deployment readback and recovery transport
         env:
@@ -173,7 +179,7 @@ jobs:
           DEPLOYMENT_ID: ${{ steps.deployment.outputs.deployment_id }}
           PROJECT_REF: ${{ secrets.SUPABASE_PROJECT_REF }}
         run: |
-          "$RELEASE_VENV/bin/python" scripts/write_protected_release_record.py --receipt "$RELEASE_STATE_DIR/deploy-receipt.json" --dry-run-evidence "$RELEASE_STATE_DIR/dry-run-evidence.json" --output "$RELEASE_STATE_DIR/release-record.json" --candidate-sha "$CANDIDATE_SHA" --ci-workflow-run-id "$CI_WORKFLOW_RUN_ID" --release-workflow-run-id "$GITHUB_RUN_ID" --pull-request-number "$PULL_REQUEST_NUMBER" --deployment-id "$DEPLOYMENT_ID" --rollback-artifact-id "$(jq -r .gateway_rollback_artifact.artifact_id "$RELEASE_STATE_DIR/deploy-receipt.json")" --recovery-metadata-artifact-id "$(jq -r .gateway_rollback_artifact.recovery_metadata_artifact_id "$RELEASE_STATE_DIR/deploy-receipt.json")" --project-ref "$PROJECT_REF"
+          "$RELEASE_VENV/bin/python" scripts/write_protected_release_record.py --receipt "$RELEASE_STATE_DIR/deploy-receipt.json" --dry-run-evidence "$RELEASE_STATE_DIR/dry-run-evidence.json" --output "$RELEASE_STATE_DIR/release-record.json" --candidate-sha "$CANDIDATE_SHA" --reviewed-sha "${{ steps.candidate.outputs.reviewed_sha }}" --ci-workflow-run-id "$CI_WORKFLOW_RUN_ID" --release-workflow-run-id "$GITHUB_RUN_ID" --pull-request-number "$PULL_REQUEST_NUMBER" --deployment-id "$DEPLOYMENT_ID" --rollback-artifact-id "$(jq -r .gateway_rollback_artifact.artifact_id "$RELEASE_STATE_DIR/deploy-receipt.json")" --recovery-metadata-artifact-id "$(jq -r .gateway_rollback_artifact.recovery_metadata_artifact_id "$RELEASE_STATE_DIR/deploy-receipt.json")" --project-ref "$PROJECT_REF"
       - name: Upload immutable release record
         id: release_artifact
         uses: actions/upload-artifact@65462800fd760344b1a7b4382951275a0abb4808

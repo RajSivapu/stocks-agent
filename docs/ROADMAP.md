@@ -1,6 +1,6 @@
 # Stocks Agent — Roadmap and Deployment Status
 
-Last updated: 2026-09-06.
+Last updated: 2026-09-08.
 
 This repository is owner-only, suggestion-only decision support plus portfolio recordkeeping. It
 has no brokerage credentials or order endpoints and never places, modifies, or cancels a trade.
@@ -13,8 +13,9 @@ and rollout order. `docs/HANDOFF.md` is ignored and is not a source of truth.
 ## Current release status
 
 Owner-only Site v9 is live from UI main `e2f9d74`, which passed exact-main CI `34073314211`; V1
-trusted use remains **no-go** pending the next existing scheduled evidence chain and completion of the
-approved market-wide thematic discovery scope in V1-C3. Approved production schema reconciliation
+trusted use remains **no-go** pending the next existing scheduled evidence chain and the protected
+release plus normal capability proof for the locally complete market-wide V1-C3 implementation.
+Approved production schema reconciliation
 `34039011879` succeeded exactly once. Managed isolated restore `34042155368` succeeded on main
 `bd1cee2317a8689b8ac5a55fb38b853e7320bbfb`. The unchanged backend remains attested at main
 `b3f7d70` by protected one-time existing-runtime attestation `34055419086`.
@@ -25,6 +26,21 @@ See `PROJECT_STATUS.md` for archive hashes. Do not rerun reconciliation or resto
 
 Telegram is the primary timely decision surface. The owner-only web app is a compact portfolio,
 history, reconciliation, and audit-evidence surface—not a continuously live trading terminal.
+
+The approved market-wide implementation is locally complete and review-clean through Task 10 at
+`18386b5c76c7a7aa8b3eeda870b12d3aba2399e1`. It adds the capability planner, dated SEC reference,
+official-source collection and cursors, ticker-free event/entity resolution, bounded primary
+exposure enrichment, explicit screen feasibility, separate research/suitability/action lanes, theme
+memory and research nominations, a release-blocking capability verifier, and one canonical NYSE
+calendar through 2028. The local acceptance gate passed; no protected release or scheduled run was
+triggered. See `docs/rollouts/2026-09-06-market-wide-thematic-discovery-v1.md` for the exact boundary.
+
+The next release uses the protected multi-component path for the database, all three changed Edge
+functions, managed runtime configuration, and the owner Site. Its immutable discovery migration tail
+starts at `20261005_market_wide_discovery.sql` and ends at
+`20261012_theme_memory_research_nominations.sql`; `20261004` remains the separate historical
+reconciliation baseline. Protected release proof, normal scheduled operational proof, and V1-C3
+capability proof are three distinct receipts. None of the new production receipts exists yet.
 
 - [x] PR #10 fixed the Management API `User-Agent` and moved the production reference binding to a
   masked environment secret; exact-main `4003437` CI passed.
@@ -247,25 +263,25 @@ receipt, then let the existing verification heartbeat reconcile the later intrad
 September 11 Friday evidence. Do not trigger an extra market or Telegram run for inspection.
 
 Market-wide thematic discovery remains original V1-C3 scope. Two GPT-6 Astra reviews identified the
-remaining gap between configured themes and actual runtime capability. Execute the approved
+gap between configured themes and actual runtime capability. The approved
 `docs/superpowers/specs/2026-09-06-market-wide-thematic-discovery-v1-design.md` and
-`docs/superpowers/plans/2026-09-06-market-wide-thematic-discovery-v1-implementation.md` in this order:
+`docs/superpowers/plans/2026-09-06-market-wide-thematic-discovery-v1-implementation.md` now have this
+status:
 
-1. Add a versioned capability registry, fair stage planner, durable cursors, and dated U.S.-listed
-   security reference.
-2. Discover ticker-free events, resolve entities and securities, build adverse-aware value-chain
-   paths, run bounded role/theme reverse discovery for previously unseen issuers, and qualify
-   exposure with bounded primary evidence.
-3. Add transparent broad screens where the zero-cost transport passes its feasibility and retention
-   gates; record unsupported and unavailable states explicitly.
-4. Separate research eligibility from portfolio suitability and action authorization, then preserve
-   bounded theme history and next-run research nominations.
-5. Pass thematic, held-out-sector, adversarial, restart, quota, recovery, and capacity acceptance;
-   synchronize the official NYSE calendar through 2028, then obtain exact-candidate Astra review and
-   exact-main CI.
-6. Use the protected multi-component release and readback path, publish and verify the exact owner
-   Site, then wait for normal scheduled capability receipts before closing V1-C3 and the final V1
-   checklist.
+1. **Complete locally:** versioned capability registry, fair stage planner, durable cursors, and
+   dated U.S.-listed security reference.
+2. **Complete locally:** ticker-free events, entity/security resolution, adverse-aware value-chain
+   paths, bounded role/theme reverse discovery for previously unseen issuers, and bounded primary
+   exposure evidence.
+3. **Complete locally:** broad-screen feasibility states. Transports that do not pass zero-cost and
+   retention review remain disabled or unsupported with zero requests.
+4. **Complete locally:** separate research eligibility, portfolio suitability, and action
+   authorization, plus bounded theme history and next-run research nominations.
+5. **Complete locally:** thematic, held-out-sector, adversarial, restart, quota, recovery, capacity,
+   and 2026–2028 NYSE calendar acceptance. **Pending:** final exact-candidate reviews and protected CI.
+6. **Pending production:** protected multi-component release/readback, exact owner Site publication
+   and rollback proof, then normal scheduled operational and capability receipts before V1-C3 and
+   the final V1 checklist close.
 
 Alert V3 remains a later, separately reviewed shadow/canary rollout. The discovery work does not arm
 new alerts, increase schedule frequency, add brokerage authority, or add paid and metered providers.

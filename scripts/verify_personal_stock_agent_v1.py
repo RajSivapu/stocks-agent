@@ -675,7 +675,16 @@ def verify_scheduled(rows: Mapping, run_id: str, deployed: datetime, now: dateti
             "publication_key": publication["idempotency_key"], "publication_receipt": delivery,
             "discovery_capability": {"ok": capability.ok,
                                      "required_capability_ids": list(capability.required_capability_ids),
-                                     "optional_failures": list(capability.optional_failures)}}
+                                     "optional_failures": list(capability.optional_failures)},
+            "operational_receipt": {
+                "status": "verified", "run_id": run_id, "packet_id": packet["id"],
+                "report_id": report["id"], "publication": delivery["status"],
+            },
+            "capability_receipt": {
+                "status": "verified", "checkpoint": "V1-C3", "run_id": run_id,
+                "required_capability_ids": list(capability.required_capability_ids),
+                "optional_failures": list(capability.optional_failures),
+            }}
 
 
 def verify_release(source: ReleaseDataSource, *, deployment_id: int, repo_root: Path = ROOT, static_root: Path = ROOT / "dist",
@@ -695,7 +704,9 @@ def verify_release(source: ReleaseDataSource, *, deployment_id: int, repo_root: 
                 and merge["merged"] is True and merge["merge_commit_sha"] == candidate
                 and merged <= candidate_commit_time < deployed <= now and candidate_commit_time <= timestamp(ci["updated_at"]) <= deployed, "protected CI/merge/deployment candidate SHA or time mismatch")
         reviewed_head = merge["head"]["sha"]
-        require(bool(re.fullmatch(r"[0-9a-f]{40}", reviewed_head)), "reviewed PR head is malformed")
+        require(bool(re.fullmatch(r"[0-9a-f]{40}", reviewed_head))
+                and record.get("reviewed_sha") == reviewed_head,
+                "release record does not bind the exact reviewed PR head")
         reviewed_head_time = git_commit(repo_root, reviewed_head)
         reviews = source.reviews(record["pull_request_number"])
         require(any(row["state"] == "APPROVED" and row["commit_id"] == reviewed_head

@@ -1,6 +1,6 @@
 # Personal Stock Agent V1 — Implementation Checklist
 
-Last updated: 2026-09-06
+Last updated: 2026-09-08
 
 ## What we are building
 
@@ -25,8 +25,16 @@ An owner-only personal stock agent that uses zero-incremental-cost data sources,
 - [x] Protected isolated restore and both cleanup paths completed in run `34042155368`
 - [x] Protected one-time existing-runtime attestation `34055419086`
 - [x] GPT-6 Astra-reviewed market-wide thematic discovery design and implementation plan approved
+- [x] Market-wide Tasks 1–10 implemented and independently reviewed through `18386b5`; latest full
+  local gate passed Python 1,469, Node 71, Deno 332, package tests 7 + 53, and Playwright 24
+- [x] Release-blocking V1-C3 verifier separates required capability success from operational receipt
+  integrity and accepts an empty result only with parsed, persisted, receipt-backed success
+- [x] Canonical NYSE calendar synchronized through 2028 with fail-closed behavior outside coverage
+- [x] Task 11 release-candidate gate passed: Python 1,480, Node 71, Deno 333, package tests 7 + 53,
+  Playwright 24, plus typecheck, lint, license, build, and bundle checks
 - [ ] Next existing scheduled-chain receipt
-- [ ] Complete market-wide thematic discovery implementation and protected production proof in V1-C3
+- [ ] Complete exact-candidate review, protected release/Site readback, and normal scheduled V1-C3
+  capability proof
 
 ## Completed implementation areas
 
@@ -75,15 +83,15 @@ An owner-only personal stock agent that uses zero-incremental-cost data sources,
   do not treat it as proof of market-wide discovery and do not dispatch a duplicate run
 - [ ] Reconcile the later September 8 intraday/post-market receipts and September 11 Friday receipt
   through the existing verification heartbeat
-- [ ] Implement the approved capability-aware source planner, dated security reference, official
+- [x] Implement the approved capability-aware source planner, dated security reference, official
   source cursors, ticker-independent event/entity resolution, bounded role/theme reverse discovery,
   value-chain graph, primary exposure facts, broad screens, theme memory, and bounded next-run
   research nominations
-- [ ] Keep research eligibility, portfolio suitability, and action authorization as separate states;
+- [x] Keep research eligibility, portfolio suitability, and action authorization as separate states;
   missing suitability may preserve research but cannot authorize an action
-- [ ] Pass the priority-theme, held-out-sector, adversarial, restart, quota, recovery, byte-limit, and
+- [x] Pass the priority-theme, held-out-sector, adversarial, restart, quota, recovery, byte-limit, and
   honestly-empty-run acceptance gates
-- [ ] Synchronize the official published NYSE 2026–2028 holidays and early closes across Python,
+- [x] Synchronize the official published NYSE 2026–2028 holidays and early closes across Python,
   gateway session logic, and dashboard freshness; fail closed after maintained coverage
 - [ ] Complete exact-candidate Astra review, exact-head and exact-main CI, protected multi-component
   release, owner Site publication/readback, rollback capture, and normal scheduled capability receipts
@@ -94,6 +102,13 @@ An owner-only personal stock agent that uses zero-incremental-cost data sources,
 ## Production gates
 
 These require the protected production path and must not be replaced by local evidence.
+
+The September 8 currently-deployed operational evidence, the new protected release receipt, and the
+new V1-C3 scheduled capability receipt are separate artifacts. Existing evidence cannot be relabeled
+as candidate capability proof. Market-wide migrations are the immutable additive chain from
+`20261005_market_wide_discovery.sql` through
+`20261012_theme_memory_research_nominations.sql`; `20261004` remains the separate reconciliation
+baseline.
 
 - [x] Confirm live Auth is signup-disabled with 900-second JWT, six-digit/600-second OTP settings, and `ConfirmationURL` magic-link and recovery templates
 - [x] Match the browser to the live free-tier templates: email-and-password by default, signed-link setup/recovery, and signed magic-link fallback; require both link templates in protected configuration verification

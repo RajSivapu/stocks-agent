@@ -74,6 +74,84 @@ def test_release_workflow_has_all_mutation_preconditions_and_pinned_tools():
     assert "${{ secrets.SUPABASE_PROJECT_REF }}" in workflow
 
 
+def test_release_binds_the_approved_pr_head_and_exact_main_ci_metadata():
+    workflow = Path(".github/workflows/owner-dashboard-release.yml").read_text()
+    assert "Exact approved PR head SHA" in workflow
+    assert 'test "$INPUT_REVIEWED_SHA" = "$PR_HEAD_SHA"' in workflow
+    assert "required CI belongs to another repository" in workflow
+    assert "required CI workflow name mismatch" in workflow
+    assert "required CI was not an exact-main push" in workflow
+    assert "reviewed_sha=$PR_HEAD_SHA" in workflow
+
+
+def test_protected_workflows_use_the_same_exact_main_ci_trust_contract():
+    required = (
+        "required CI belongs to another repository",
+        "Owner dashboard verification",
+        ".github/workflows/owner-dashboard-ci.yml",
+        "required CI was not an exact-main push",
+    )
+    for path in (
+        ".github/workflows/owner-dashboard-release.yml",
+        ".github/workflows/owner-dashboard-release-recovery.yml",
+        ".github/workflows/managed-isolated-restore.yml",
+        ".github/workflows/existing-v1-runtime-attestation.yml",
+    ):
+        workflow = Path(path).read_text()
+        assert all(value in workflow for value in required), path
+
+
+def test_release_record_keeps_release_and_later_scheduled_receipts_distinct():
+    from scripts import write_protected_release_record as writer
+
+    classify = getattr(writer, "release_evidence_classes", None)
+    assert callable(classify)
+    result = classify({
+        "candidate_sha": "a" * 40,
+        "canary": {
+            "status": "verified",
+            "source_reconciliation": "verified",
+            "financial_write_routes": 0,
+            "brokerage_authority": "none",
+            "friend_invitations": "disabled",
+        },
+    })
+    assert result == {
+        "protected_release": {"status": "verified", "candidate_sha": "a" * 40},
+        "operational_scheduled": {
+            "status": "pending",
+            "required_evidence": "normal_post_release_scheduled_receipt",
+        },
+        "discovery_capability": {
+            "status": "pending",
+            "checkpoint": "V1-C3",
+            "required_evidence": "normal_post_release_scheduled_capability_receipt",
+        },
+    }
+
+
+def test_release_record_rejects_a_receipt_from_another_candidate():
+    from scripts import write_protected_release_record as writer
+
+    validate = getattr(writer, "validate_release_identity", None)
+    assert callable(validate)
+    assert validate({"candidate_sha": "a" * 40}, "a" * 40, "b" * 40) == (
+        "a" * 40,
+        "b" * 40,
+    )
+    for receipt, candidate, reviewed in (
+        ({"candidate_sha": "b" * 40}, "a" * 40, "b" * 40),
+        ({"candidate_sha": "a" * 40}, "not-a-sha", "b" * 40),
+        ({"candidate_sha": "a" * 40}, "a" * 40, "NOT-A-SHA"),
+    ):
+        try:
+            validate(receipt, candidate, reviewed)
+        except RuntimeError as error:
+            assert "release identity" in str(error)
+        else:
+            raise AssertionError("invalid release identity was accepted")
+
+
 def test_release_workflow_retains_and_restores_rollback_source_until_evidence_is_accepted():
     workflow = Path(".github/workflows/owner-dashboard-release.yml").read_text()
     assert "restore_gateway_after_release_failure.py" in workflow

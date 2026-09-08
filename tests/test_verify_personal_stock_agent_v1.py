@@ -501,7 +501,7 @@ def release(tmp_path):
     source.record = {
         "id": 42, "sha": sha, "environment": "production", "project_ref": "p" * 20,
         "deployed_at": "2026-09-05T19:00:00Z", "workflow_run_id": 43, "pull_request_number": 44,
-        "run_id": RUN, "candidate_sha": sha,
+        "run_id": RUN, "candidate_sha": sha, "reviewed_sha": reviewed_sha,
         "migrations": [{"path": "sql/migrations/20260926_suppression_reasons.sql", "version": "20260926", "sha256": migration_statements_sha256(normalize_migration_statements(raw["sql/migrations/20260926_suppression_reasons.sql"].decode()))}],
         "functions": [{"function": name, "deployment_id": name + "-deployment", "git_sha": sha, "function_version": 5, "source_sha256": tree_hash({"index.ts": raw[f"supabase/functions/{name}/index.ts"]})} for name in ("market-briefing-gateway", "owner-dashboard-api", "telegram-portfolio")],
         "static_assets": {"candidate_sha": sha, "source_sha256": tree_hash({"src/main.tsx": b"web source\n"}), "files": {"index.html": hashlib.sha256(b"<main>Private</main>").hexdigest()}},
@@ -585,6 +585,22 @@ def test_release_queries_sources_and_binds_exact_receipts(release):
     assert result["publication_key"] == source.expected_report_key
     assert result["discovery_capability"]["ok"] is True
     assert result["publication_receipt"]["telegram_message_ids"] == [7]
+    assert result["operational_receipt"] == {
+        "status": "verified",
+        "run_id": RUN,
+        "packet_id": PACKET,
+        "report_id": source.expected_report_id,
+        "publication": "accepted_by_telegram",
+    }
+    assert result["capability_receipt"] == {
+        "status": "verified",
+        "checkpoint": "V1-C3",
+        "run_id": RUN,
+        "required_capability_ids": [
+            "sec_company_tickers_universe", "gdelt_theme_search",
+        ],
+        "optional_failures": [],
+    }
     source.record.pop("run_id")
     assert verify_release(source, **args)["run_id"] == RUN
 
@@ -630,6 +646,13 @@ def test_release_rejects_an_approval_after_merge_even_when_the_candidate_matches
     source, args = release
     source.review_records[0]["submitted_at"] = "2026-09-05T18:01:00Z"
     with pytest.raises(RuntimeError, match="independent review"):
+        verify_release(source, **args)
+
+
+def test_release_record_must_name_the_exact_approved_pr_head(release):
+    source, args = release
+    source.record["reviewed_sha"] = "f" * 40
+    with pytest.raises(RuntimeError, match="reviewed"):
         verify_release(source, **args)
 
 

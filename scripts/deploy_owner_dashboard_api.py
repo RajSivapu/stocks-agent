@@ -314,9 +314,39 @@ def verify_git_release(
     return local_sha
 
 
-def verify_reviewed_sha(candidate_sha: str, reviewed_sha: str) -> str:
-    if not re.fullmatch(r"[0-9a-f]{40}", reviewed_sha) or reviewed_sha != candidate_sha:
-        raise RuntimeError("deployment requires independent review of the exact candidate SHA")
+def verify_reviewed_sha(
+    candidate_sha: str,
+    reviewed_sha: str,
+    repo_root: Path = ROOT,
+    runner: Callable[..., object] = subprocess.run,
+) -> str:
+    """Bind the approved PR head to the exact merge candidate tree."""
+    if not re.fullmatch(r"[0-9a-f]{40}", candidate_sha) or not re.fullmatch(
+        r"[0-9a-f]{40}", reviewed_sha
+    ):
+        raise RuntimeError("deployment requires an exact reviewed SHA")
+    if reviewed_sha == candidate_sha:
+        return candidate_sha
+    ancestor = _run(
+        ["git", "merge-base", "--is-ancestor", reviewed_sha, candidate_sha],
+        cwd=repo_root,
+        runner=runner,
+    )
+    if getattr(ancestor, "returncode", 1) == 0:
+        return candidate_sha
+    reviewed_tree = _run(
+        ["git", "rev-parse", f"{reviewed_sha}^{{tree}}"], cwd=repo_root, runner=runner
+    )
+    candidate_tree = _run(
+        ["git", "rev-parse", f"{candidate_sha}^{{tree}}"], cwd=repo_root, runner=runner
+    )
+    if (
+        getattr(reviewed_tree, "returncode", 1) != 0
+        or getattr(candidate_tree, "returncode", 1) != 0
+        or str(getattr(reviewed_tree, "stdout", "")).strip()
+        != str(getattr(candidate_tree, "stdout", "")).strip()
+    ):
+        raise RuntimeError("deployment candidate is not bound to the exact reviewed SHA")
     return candidate_sha
 
 

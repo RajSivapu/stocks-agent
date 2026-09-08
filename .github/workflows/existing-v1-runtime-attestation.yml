@@ -52,8 +52,7 @@ jobs:
           test "$(jq -r .status <<<"$CI")" = completed && test "$(jq -r .conclusion <<<"$CI")" = success || { echo 'required CI was not successful'; exit 1; }
           test "$(jq -r .path <<<"$CI")" = .github/workflows/owner-dashboard-ci.yml || { echo 'wrong required CI workflow'; exit 1; }
           test "$(jq -r .name <<<"$CI")" = "Owner dashboard verification" || { echo 'wrong required CI workflow name'; exit 1; }
-          test "$(jq -r .event <<<"$CI")" = push || { echo 'required CI was not a push run'; exit 1; }
-          test "$(jq -r .head_branch <<<"$CI")" = main || { echo 'required CI was not for the main branch'; exit 1; }
+          test "$(jq -r .event <<<"$CI")" = push && test "$(jq -r .head_branch <<<"$CI")" = main || { echo 'required CI was not an exact-main push'; exit 1; }
           test -n "$RECONCILIATION_WORKFLOW_RUN_ID" && [[ "$RECONCILIATION_WORKFLOW_RUN_ID" =~ ^[0-9]+$ ]] || { echo 'numeric reconciliation workflow run ID is required'; exit 1; }
           RECONCILIATION="$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$RECONCILIATION_WORKFLOW_RUN_ID")"
           test "$(jq -r .repository.full_name <<<"$RECONCILIATION")" = "$GITHUB_REPOSITORY" || { echo 'reconciliation belongs to another repository'; exit 1; }
