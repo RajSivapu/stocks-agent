@@ -525,6 +525,99 @@ class ThemeEpisodeRevision:
         }
 
 
+def theme_episode_revision_from_persistence(value: object) -> ThemeEpisodeRevision:
+    """Restore one exact producer row without accepting a rehashed lookalike."""
+    required = {*THEME_EPISODE_V2_PERSISTENCE_FIELDS, "revision_id", "content_hash"}
+    if not isinstance(value, Mapping) or set(value) != required:
+        raise ValueError("theme episode persistence shape is invalid")
+    membership_raw = value["source_membership"]
+    if not isinstance(membership_raw, Sequence) or isinstance(
+        membership_raw, (str, bytes, bytearray)
+    ):
+        raise ValueError("theme episode persistence shape is invalid")
+    membership: list[tuple[str, str, str]] = []
+    for raw in membership_raw:
+        if not isinstance(raw, Mapping) or set(raw) != {
+            "evidence_id", "story_identity", "polarity",
+        }:
+            raise ValueError("theme episode persistence shape is invalid")
+        membership.append((
+            str(raw["evidence_id"]), str(raw["story_identity"]), str(raw["polarity"]),
+        ))
+    revision = value["revision"]
+    identity_version = value["identity_version"]
+    execution_allowed = value["execution_allowed"]
+    if isinstance(revision, bool) or not isinstance(revision, int) or revision < 1 \
+            or identity_version != 2 or execution_allowed is not False:
+        raise ValueError("theme episode persistence shape is invalid")
+    try:
+        parsed = ThemeEpisodeRevision(
+            theme_id=str(value["theme_id"]), episode_id=str(value["episode_id"]),
+            revision_id=str(value["revision_id"]), revision=revision,
+            identity_version=2, anchor_hash=str(value["anchor_hash"]),
+            theme_mechanism=str(value["theme_mechanism"]),
+            subject_identity=str(value["subject_identity"]),
+            jurisdiction=str(value["jurisdiction"]),
+            effective_period_start=str(value["effective_period_start"]),
+            effective_period_end=(str(value["effective_period_end"])
+                                  if value["effective_period_end"] is not None else None),
+            authoritative_id=(str(value["authoritative_id"])
+                              if value["authoritative_id"] is not None else None),
+            origin_run_id=str(value["origin_run_id"]),
+            predecessor_revision_id=(str(value["predecessor_revision_id"])
+                                     if value["predecessor_revision_id"] is not None else None),
+            predecessor_content_hash=(str(value["predecessor_content_hash"])
+                                      if value["predecessor_content_hash"] is not None else None),
+            source_membership=tuple(membership),
+            source_ids=tuple(str(row) for row in value["source_ids"]),
+            supporting_source_ids=tuple(str(row) for row in value["supporting_source_ids"]),
+            opposing_source_ids=tuple(str(row) for row in value["opposing_source_ids"]),
+            added_source_ids=tuple(str(row) for row in value["added_source_ids"]),
+            investigated_entity_ids=tuple(str(row) for row in value["investigated_entity_ids"]),
+            missing_questions=tuple(str(row) for row in value["missing_questions"]),
+            invalidation_conditions=tuple(str(row) for row in value["invalidation_conditions"]),
+            first_seen=_episode_timestamp(value["first_seen"], "first seen"),
+            last_seen=_episode_timestamp(value["last_seen"], "last seen"),
+            next_review_at=_episode_timestamp(value["next_review_at"], "next review"),
+            expires_at=_episode_timestamp(value["expires_at"], "expiry"),
+            state=str(value["state"]),  # type: ignore[arg-type]
+            closure_reason=(str(value["closure_reason"])
+                            if value["closure_reason"] is not None else None),
+            reopen_reason=(str(value["reopen_reason"])
+                           if value["reopen_reason"] is not None else None),
+            content_hash=str(value["content_hash"]), execution_allowed=False,
+        )
+    except (KeyError, TypeError, ValueError) as exc:
+        raise ValueError("theme episode persistence shape is invalid") from exc
+    normalized_value = dict(value)
+    normalized_value.update({
+        "first_seen": _timestamp_value(parsed.first_seen),
+        "last_seen": _timestamp_value(parsed.last_seen),
+        "next_review_at": _timestamp_value(parsed.next_review_at),
+        "expires_at": _timestamp_value(parsed.expires_at),
+    })
+    if parsed.to_persistence_row() != normalized_value:
+        raise ValueError("theme episode persistence shape is invalid")
+    anchor_hash = hashlib.sha256(json.dumps(
+        theme_episode_v2_anchor_document(normalized_value),
+        ensure_ascii=False, separators=(",", ":"), sort_keys=True,
+    ).encode("utf-8")).hexdigest()
+    content_hash = hashlib.sha256(json.dumps(
+        theme_episode_v2_persistence_document(normalized_value),
+        ensure_ascii=False, separators=(",", ":"), sort_keys=True,
+    ).encode("utf-8")).hexdigest()
+    if (
+        parsed.anchor_hash != anchor_hash
+        or parsed.episode_id != theme_episode_v2_episode_id(anchor_hash)
+        or parsed.content_hash != content_hash
+        or parsed.revision_id != theme_episode_v2_revision_id(
+            parsed.episode_id, parsed.revision, content_hash,
+        )
+    ):
+        raise ValueError("theme episode persistence hash is invalid")
+    return parsed
+
+
 def _timestamp_value(value: datetime) -> str:
     return value.astimezone(timezone.utc).isoformat(timespec="milliseconds").replace("+00:00", "Z")
 

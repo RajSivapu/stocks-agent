@@ -20,9 +20,11 @@ Python 1,469 passed/3 skipped/4 credentialed tests deselected, Node 71, Deno 332
 7 + 53, and Playwright 24 passed/1 skipped. The Task 11 candidate gate then passed Python 1,480
 passed/3 skipped/4 credentialed tests deselected, Node 71, Deno 333, package tests 7 + 53, and
 Playwright 24 passed/1 skipped, with typecheck, lint, license, build, and bundle checks green. This is
-local evidence only. The final release-candidate identity is the Task 11 commit containing this
-record. Its independent exact-SHA reviews, protected CI/release identities, owner Site receipt, and
-normal scheduled receipts remain open.
+local evidence only. The post-review runtime-correction gate passed Python 1,500 passed/3 skipped/4
+credentialed tests deselected, Node 71, Deno 333, package tests 7 + 53, and Playwright 24 passed/1
+skipped, with typecheck, lint, license, build, and bundle checks green. The final release-candidate
+identity is the commit containing this record. Its independent exact-SHA reviews, protected
+CI/release identities, owner Site receipt, and normal scheduled receipts remain open.
 
 | Task | Reviewed closing commit | Local result |
 |---|---|---|
@@ -34,14 +36,14 @@ normal scheduled receipts remain open.
 | 6 — primary exposure enrichment | `157a826` | Bounded primary-document enrichment and explicit revenue-share materiality pass. |
 | 7 — broad screens | `e2f734f` | Feasibility states pass; all screen transports remain zero-request. |
 | 8 — research/action split | `9f71e61` | Research survives missing suitability; action remains fail closed. |
-| 9 — theme memory | `95ffbfb` | Bounded cross-run memory, nominations, projection, and recovery pass. |
+| 9 — theme memory | `95ffbfb` | The normal collector persists canonical V2 episode revisions and consumes due research nominations within the three-task adaptive cap; projection and recovery pass. |
 | 10 — acceptance and calendar | `18386b5` | Thematic/held-out/adversarial/capacity gates and NYSE 2026–2028 calendar pass. |
 
 The protected migration boundary is the immutable additive chain
 `20261005_market_wide_discovery.sql` through
-`20261012_theme_memory_research_nominations.sql`. The `20261004` artifact is the separate immutable
+`20261013_v2_runtime_completion.sql`. The `20261004` artifact is the separate immutable
 production-schema reconciliation baseline; there is no `20261004_market_wide_discovery.sql` and the
-release must never invent or apply one. The eight discovery migration file SHA-256 values are
+release must never invent or apply one. The nine discovery/runtime migration file SHA-256 values are
 recorded in `docs/rollouts/2026-09-06-market-wide-thematic-discovery-v1.md`.
 
 Known V1 limits remain visible: `complete_market_coverage` is always false; free sources and request
@@ -152,6 +154,13 @@ event and entity resolution, bounded official-source enrichment, bounded role/th
 discovery for previously unseen issuers, primary exposure facts, broad
 screens with explicit feasibility states, durable theme memory, and separate research, portfolio
 suitability, and action-authorization states.
+
+The post-review runtime integration closes the local producer-to-ledger gap: the normal collector
+records the exact V2 evidence packet, persists canonical theme revisions, schedules eligible due
+nominations as bounded research-only follow-ups, and proves actual nonempty, honestly empty,
+overlapping-query duplicate, restart, and cross-run item-reuse shapes through a disposable
+PostgreSQL database and the read-only capability verifier. The action lane remains empty while the
+protected issuer-valuation ledger is unavailable.
 
 The September 8 morning receipt remains necessary operational evidence for the currently deployed
 chain. It cannot close V1-C3 by itself. Local implementation and acceptance are complete through

@@ -27,7 +27,7 @@ production mutation. Production checkpoints remain open until the evidence below
 | 6 — adaptive enrichment | `157a826` | Frozen enrichment stages and primary-document exposure facts with explicit materiality. |
 | 7 — broad screens | `e2f734f` | Durable feasibility states with zero transport for unavailable screens. |
 | 8 — research/action split | `9f71e61` | Research candidates survive unknown suitability; unbacked action eligibility is rejected. |
-| 9 — theme memory | `95ffbfb` | Bounded cross-run episodes, research nominations, owner projection, and exact recovery. |
+| 9 — theme memory | `95ffbfb` | The normal collector writes bounded cross-run episodes and consumes eligible due nominations within the three-task research-only cap; owner projection and exact recovery pass. |
 | 10 — acceptance/calendar | `18386b5` | Thematic, held-out, adversarial, pressure, recovery, capability, and 2026–2028 NYSE calendar gates. |
 
 The latest full local Task 10 gate passed Python 1,469 tests with 3 skipped and 4 credentialed tests
@@ -35,12 +35,15 @@ deselected, Node 71, Deno 332, package tests 7 + 53, and Playwright 24 with 1 sk
 results and do not establish deployment or live provider behavior. The Task 11 release-candidate
 gate passed Python 1,480 tests with 3 skipped and 4 credentialed tests deselected, Node 71, Deno 333,
 package tests 7 + 53, and Playwright 24 with 1 skipped; typecheck, lint, license, build, and bundle
-checks also passed.
+checks also passed. The post-review runtime-correction gate passed Python 1,500 tests with 3 skipped
+and 4 credentialed tests deselected, Node 71, Deno 333, package tests 7 + 53, and Playwright 24 with
+1 skipped; the same typecheck, lint, license, build, and bundle gates passed. This is local evidence
+only and does not close any protected release or scheduled-run checkpoint.
 
 ## Additive migration boundary
 
 Market-wide discovery starts at `20261005_market_wide_discovery.sql` and ends at
-`20261012_theme_memory_research_nominations.sql`. The `20261004` artifact is the separate immutable
+`20261013_v2_runtime_completion.sql`. The `20261004` artifact is the separate immutable
 production-schema reconciliation baseline. There is no `20261004_market_wide_discovery.sql`, and the
 release must not invent or apply one.
 
@@ -54,17 +57,19 @@ release must not invent or apply one.
 | `20261010_bounded_adaptive_enrichment.sql` | `a3a195b99b2059125bd595f2ca2f1a382fb2c84b8a8a212add7ff8144c5a5d65` |
 | `20261011_research_suitability_packet_contract.sql` | `f6e178ef986265d6008dcc381293e05e61802c2f90465b4c69b7410ab668dbe6` |
 | `20261012_theme_memory_research_nominations.sql` | `a7274c8c4af3046cbbf6145e169a79e1852edcd8ccbdfa0b8885a3da8c9c365d` |
+| `20261013_v2_runtime_completion.sql` | `5a5e4138ab3d816df0218d03a00f5e5f49005d1cc65ec9bd5e81500dacac6ea0` |
 
-Every migration above and `sql/schema.sql` must remain byte-identical to the Task 10 parent while
-Task 11 changes only the release controls and records. The protected release uses the repository's
-complete immutable migration manifest and applies only byte-verified pending versions.
+The reviewed `20261005` through `20261012` migration bytes remain unchanged. The `20261013`
+migration is the additive runtime completion fix, and `sql/schema.sql` ends with its exact bytes.
+The protected release uses the repository's complete immutable migration manifest and applies only
+byte-verified pending versions.
 
 ## Changed release components
 
 The approved candidate changes protected database state, runtime behavior, and the owner audit UI.
 It therefore requires the protected multi-component release path for the exact reviewed SHA:
 
-- the eight additive discovery migrations above;
+- the nine additive discovery/runtime migrations above;
 - `market-briefing-gateway`, `owner-dashboard-api`, and `telegram-portfolio` Edge Functions;
 - scheduled-runtime approved-domain and credential-presence configuration, without recording secret
   values;

@@ -28,6 +28,9 @@ from scripts.protected_evidence import RECOVERY_SQL
 
 ROOT = Path(__file__).resolve().parents[1]
 MIGRATION = ROOT / "sql/migrations/20261012_theme_memory_research_nominations.sql"
+RUNTIME_COMPLETION_MIGRATION = (
+    ROOT / "sql/migrations/20261013_v2_runtime_completion.sql"
+)
 SCHEMA = ROOT / "sql/schema.sql"
 
 
@@ -44,12 +47,23 @@ TABLES = (
 def test_task9_migration_is_additive_parseable_and_appended_verbatim():
     statements = parse_sql(MIGRATION.read_text())
     assert statements
-    assert SCHEMA.read_bytes().endswith(MIGRATION.read_bytes())
+    assert MIGRATION.read_bytes() in SCHEMA.read_bytes()
     migration = MIGRATION.read_text()
     for table in TABLES:
         assert f"CREATE TABLE IF NOT EXISTS public.{table}" in migration
         assert f"ALTER TABLE public.{table} ENABLE ROW LEVEL SECURITY" in migration
     assert "20261005_market_wide_discovery" not in migration
+
+
+def test_v2_runtime_completion_migration_is_parseable_and_final_schema_tail():
+    statements = parse_sql(RUNTIME_COMPLETION_MIGRATION.read_text())
+    assert statements
+    assert SCHEMA.read_bytes().endswith(RUNTIME_COMPLETION_MIGRATION.read_bytes())
+    migration = RUNTIME_COMPLETION_MIGRATION.read_text()
+    assert "SECURITY DEFINER SET search_path=pg_catalog" in migration
+    assert "record_market_intelligence_v2_completion" in migration
+    assert "record_market_intelligence_v4_internal" in migration
+    assert "GRANT EXECUTE ON FUNCTION public.record_market_intelligence(UUID,UUID,JSONB)" in migration
 
 
 def test_v2_episode_ledger_has_cross_run_identity_and_no_global_row_collision():
@@ -866,7 +880,7 @@ def test_actual_postgres_freezes_unicode_bounded_memory_without_dropping_priorit
         )
         for index in range(25):
             db.execute(
-                "INSERT INTO market_theme_episode_revisions_v2(revision_id,theme_id,episode_id,revision,anchor_hash,origin_run_id,theme_mechanism,subject_identity,jurisdiction,effective_period_start,source_membership,source_ids,supporting_source_ids,opposing_source_ids,added_source_ids,missing_questions,invalidation_conditions,first_seen,last_seen,next_review_at,expires_at,state,content_hash) VALUES(%s,%s,%s,1,%s,%s,%s,%s,'US','2026-09-01',%s,%s,%s,%s,%s,%s,%s,'2026-09-07T12:00:00Z','2026-09-07T12:10:00Z','2026-09-07T12:30:00Z','2026-09-27T12:00:00Z','open',%s)",
+                "INSERT INTO market_theme_episode_revisions_v2(revision_id,theme_id,episode_id,revision,anchor_hash,origin_run_id,theme_mechanism,subject_identity,jurisdiction,effective_period_start,source_membership,source_ids,supporting_source_ids,opposing_source_ids,added_source_ids,missing_questions,invalidation_conditions,first_seen,last_seen,next_review_at,expires_at,state,content_hash,created_at) VALUES(%s,%s,%s,1,%s,%s,%s,%s,'US','2026-09-01',%s,%s,%s,%s,%s,%s,%s,'2026-09-07T12:00:00Z','2026-09-07T12:10:00Z','2026-09-07T12:30:00Z','2026-09-27T12:00:00Z','open',%s,'2026-09-07T12:10:00Z')",
                 (
                     str(uuid.uuid4()), f"theme_{index:02d}", str(uuid.uuid4()), f"{index + 100:064x}",
                     source_run, f"Grid mechanism {index}", f"US grid subject {index}",

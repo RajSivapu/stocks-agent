@@ -23,6 +23,7 @@ ISSUER_NAMES = MIGRATIONS / "20261009_reference_issuer_names.sql"
 ENRICHMENT = MIGRATIONS / "20261010_bounded_adaptive_enrichment.sql"
 RESEARCH_SUITABILITY = MIGRATIONS / "20261011_research_suitability_packet_contract.sql"
 THEME_MEMORY = MIGRATIONS / "20261012_theme_memory_research_nominations.sql"
+RUNTIME_COMPLETION = MIGRATIONS / "20261013_v2_runtime_completion.sql"
 
 # The original pre-20260901 tables. Historical migrations run only in this
 # disposable fixture, before representative legacy facts are inserted.
@@ -146,6 +147,7 @@ def test_exact_legacy_reconciliation_preserves_facts_matches_fresh_and_refuses_r
             execute("legacy", "BEGIN;" + ENRICHMENT.read_text() + "COMMIT;")
             execute("legacy", "BEGIN;" + RESEARCH_SUITABILITY.read_text() + "COMMIT;")
             execute("legacy", "BEGIN;" + THEME_MEMORY.read_text() + "COMMIT;")
+            execute("legacy", "BEGIN;" + RUNTIME_COMPLETION.read_text() + "COMMIT;")
             assert projected_rows("legacy") == before
             after_catalog = catalog("legacy")
             after_tables = {row["name"] for row in after_catalog["relations"] if row["kind"] in {"r", "p"}}

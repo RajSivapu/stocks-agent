@@ -72,7 +72,9 @@ from lib.intelligence.themes import (
     build_market_event,
     evidence_key,
     propose_dynamic_theme,
+    revise_theme_episode,
     source_dynamic_theme_label,
+    theme_episode_revision_from_persistence,
 )
 from lib.intelligence.types import DiscoveryPlan, DiscoveryTask, PacketLimits, SourceCapability
 from lib.intelligence.universe import ReferenceSnapshot, SecurityIdentity
@@ -614,6 +616,9 @@ class IntelligencePipeline:
                 envelope, selection_stage="initial",
                 deferred_reasons={"adaptive_enrichment": "no_currently_bound_candidates"},
             )
+        candidates = _prioritize_due_nomination_candidates(
+            candidates, self.context.get("theme_memory"), run_id=run_id, now=request.now,
+        )
         selected = select_enrichment_queue(
             candidates,
             max_entities=4,
@@ -865,6 +870,8 @@ class IntelligencePipeline:
                     "requested_window": raw["requested_window"], "state": "planned",
                     "attempt_count": 0, "request_budget": 1, "result": {},
                 }
+        if selection_stage == "initial":
+            self._transition_due_nominations(run_id, manifest.requests, request.now)
         output: list[CollectionResult] = []
         for request_row in manifest.requests:
             capability = plan.capabilities.get(request_row.capability_id)
@@ -922,6 +929,110 @@ class IntelligencePipeline:
                 frozen_manifest=frozen_documents,
             ))
         return output
+
+    def _transition_due_nominations(
+        self,
+        run_id: str,
+        requests: Sequence[EnrichmentRequest],
+        now: datetime,
+    ) -> None:
+        memory = self.context.get("theme_memory")
+        if memory is None:
+            return
+        if not isinstance(memory, Mapping):
+            raise ValueError("protected theme memory is invalid")
+        raw_due = memory.get("due_nominations", [])
+        if not isinstance(raw_due, Sequence) or isinstance(
+            raw_due, (str, bytes, bytearray)
+        ) or len(raw_due) > 12:
+            raise ValueError("protected due nominations are invalid")
+        current = _utc(now)
+        due: list[tuple[int, datetime, str, Mapping[str, object]]] = []
+        supported_evidence = {
+            "primary_exposure", "contradictory_primary", "current_filing",
+            "official_program", "entity_identity", "relationship", "current_reference",
+        }
+        for raw in raw_due:
+            if not isinstance(raw, Mapping):
+                raise ValueError("protected due nomination is invalid")
+            nomination_id = raw.get("nomination_id")
+            origin_run_id = raw.get("origin_run_id")
+            try:
+                if str(uuid.UUID(str(nomination_id))) != nomination_id \
+                        or str(uuid.UUID(str(origin_run_id))) != origin_run_id:
+                    raise ValueError
+                created = datetime.fromisoformat(str(raw.get("created_at")).replace("Z", "+00:00"))
+                expiry = datetime.fromisoformat(str(raw.get("expires_at")).replace("Z", "+00:00"))
+            except (TypeError, ValueError, AttributeError) as exc:
+                raise ValueError("protected due nomination is invalid") from exc
+            priority = raw.get("priority")
+            evidence_ids = raw.get("evidence_ids")
+            if (
+                raw.get("execution_allowed") is not False
+                or origin_run_id == run_id
+                or isinstance(priority, bool) or not isinstance(priority, int)
+                or not 1 <= priority <= 5
+                or created.tzinfo is None or expiry.tzinfo is None
+                or not created.astimezone(timezone.utc) <= current < expiry.astimezone(timezone.utc)
+                or raw.get("required_evidence_kind") not in supported_evidence
+                or not isinstance(evidence_ids, Sequence)
+                or isinstance(evidence_ids, (str, bytes, bytearray))
+                or not 1 <= len(evidence_ids) <= 8
+                or any(not isinstance(value, str) for value in evidence_ids)
+                or len(set(evidence_ids)) != len(evidence_ids)
+            ):
+                continue
+            due.append((-priority, expiry.astimezone(timezone.utc), nomination_id, raw))
+        selected_count = 0
+        for _priority, _expiry, nomination_id, nomination in sorted(due):
+            nominated_evidence = set(nomination["evidence_ids"])  # type: ignore[arg-type]
+            matched = next((
+                row for row in sorted(
+                    requests,
+                    key=lambda value: (
+                        value.priority, 0 if value.provider == "sec_edgar" else 1,
+                        value.request_id,
+                    ),
+                )
+                if row.theme_id == nomination.get("theme_id")
+                and row.entity_id == nomination.get("entity_id")
+                and row.security_id == nomination.get("security_id")
+                and row.role == nomination.get("relationship_role")
+                and nominated_evidence <= set(row.source_item_ids)
+                and row.execution_allowed is False
+            ), None)
+            if matched is None:
+                continue
+            lifecycle = {
+                "state": "selected",
+                "reason": "Scheduled bounded research-only follow-up.",
+                "selection_descriptor": {
+                    "request_id": matched.request_id,
+                    "descriptor_hash": matched.descriptor_hash,
+                    "uncertain_outcome_barrier": True,
+                    "execution_allowed": False,
+                },
+            }
+            method = getattr(self.gateway, "transition_research_nomination_v2", None)
+            if callable(method):
+                response = method(run_id, nomination_id, lifecycle)
+            elif callable(getattr(self.gateway, "call", None)):
+                response = self.gateway.call(
+                    "transition_research_nomination_v2",
+                    {"nomination_id": nomination_id, **lifecycle}, run_id=run_id,
+                    request_id=_uuid(
+                        "transition-research-nomination-v2", run_id,
+                        nomination_id, matched.request_id,
+                    ),
+                )
+            else:
+                raise ValueError("due nomination requires protected lifecycle persistence")
+            data = _gateway_data(response)
+            if data.get("nomination_id") != nomination_id or data.get("state") != "selected":
+                raise ValueError("research nomination lifecycle receipt mismatch")
+            selected_count += 1
+            if selected_count >= 3:
+                break
 
     def _frozen_enrichment_selection(
         self, run_id: str, phase: str, selection_stage: str,
@@ -2033,9 +2144,11 @@ class IntelligencePipeline:
         self.context["_packet_contract_version"] = 2 if self.discovery_plan is not None else 1
         self.context["_run_id"] = run_id
         self.context["_observed_at"] = _timestamp(request.now)
-        self.context["_evidence_receipt_ids"] = {
-            evidence_key(item): receipt_id for item, receipt_id in raw_items
-        }
+        evidence_receipt_ids: dict[str, str] = {}
+        for disposition, receipt_id in zip(dispositions, receipt_ids, strict=True):
+            if disposition.disposition in {"accepted", "near_duplicate"}:
+                evidence_receipt_ids[evidence_key(disposition.item)] = receipt_id
+        self.context["_evidence_receipt_ids"] = evidence_receipt_ids
         events, relationships, ranked = _discover(discovery_items, self.context, request.now)
         qualified_ids = {
             evidence_key(item)
@@ -2175,6 +2288,8 @@ class IntelligencePipeline:
         )
         coverage["collector_drops"] = list(collection_drops + relation_drops + packet_drops)
         final = self._record(run_id, payload, _uuid("completion-request", request.request_id))
+        if self.discovery_plan is not None:
+            self._persist_theme_episode_revisions(run_id, payload, request.now)
         limitations = tuple(failure_codes) + tuple(packet_dict["limitations"])
         counts = final.get("counts") if isinstance(final.get("counts"), Mapping) else {}
         return PipelineReceipt(
@@ -2240,6 +2355,33 @@ class IntelligencePipeline:
         )
         return _gateway_data(result)
 
+    def _persist_theme_episode_revisions(
+        self, run_id: str, payload: Mapping[str, object], observed_at: datetime,
+    ) -> None:
+        rows = _theme_episode_revision_rows(
+            run_id, payload, self.context.get("theme_memory"), observed_at,
+        )
+        if not callable(getattr(self.gateway, "record_theme_episode_revision_v2", None)) \
+                and not callable(getattr(self.gateway, "call", None)):
+            # Compatibility for local typed test gateways. The scheduled path
+            # always has the protected gateway client.
+            return
+        for row in rows:
+            method = getattr(self.gateway, "record_theme_episode_revision_v2", None)
+            if callable(method):
+                response = method(run_id, row)
+            elif callable(getattr(self.gateway, "call", None)):
+                response = self.gateway.call(
+                    "record_theme_episode_revision_v2", row, run_id=run_id,
+                    request_id=_uuid("record-theme-episode-v2", run_id, row["revision_id"]),
+                )
+            else:
+                raise ValueError("theme memory requires protected revision persistence")
+            data = _gateway_data(response)
+            if data.get("revision_id") != row["revision_id"] \
+                    or data.get("episode_id") != row["episode_id"]:
+                raise ValueError("theme episode revision receipt mismatch")
+
     def _read_completion(self, run_id: str) -> PipelineReceipt | None:
         completion_id = _uuid("completion-request", run_id)
         method = getattr(self.gateway, "read_intelligence_completion", None)
@@ -2268,6 +2410,11 @@ class IntelligencePipeline:
             "reservation_id": row["reservation_id"], "response_hash": row["response_hash"],
             "status": row["status"]} for row in payload["receipts"])
         coverage = payload["coverage"]
+        if packet["packet"].get("contract_version") == 2:
+            observed_at = datetime.fromisoformat(
+                str(packet["packet"]["observed_at"]).replace("Z", "+00:00")
+            )
+            self._persist_theme_episode_revisions(run_id, payload, observed_at)
         return PipelineReceipt(run_id=run_id,
             packet=PersistedPacket(packet["id"], packet["packet_hash"], packet["packet"]),
             sources=sources, drops=tuple(coverage.get("collector_drops", [])), coverage=coverage,
@@ -2784,6 +2931,166 @@ def _receipt_row(value: RequestReceipt, receipt_id: str) -> dict[str, object]:
     }
 
 
+def _theme_episode_revision_rows(
+    run_id: str,
+    payload: Mapping[str, object],
+    theme_memory: object,
+    observed_at: datetime,
+) -> tuple[dict[str, object], ...]:
+    """Derive exact v2 memory rows from the just-persisted evidence packet."""
+    packet_row = payload.get("packet")
+    if not isinstance(packet_row, Mapping):
+        raise ValueError("theme memory packet is invalid")
+    packet = packet_row.get("packet")
+    if not isinstance(packet, Mapping) or packet.get("contract_version") != 2 \
+            or packet.get("run_id") != run_id or packet.get("execution_allowed") is not False:
+        raise ValueError("theme memory packet is invalid")
+    candidates = packet.get("research_candidates")
+    events = payload.get("events")
+    items = payload.get("items")
+    for value, label in (
+        (candidates, "candidates"), (events, "events"), (items, "items"),
+    ):
+        if not isinstance(value, Sequence) or isinstance(value, (str, bytes, bytearray)) \
+                or any(not isinstance(row, Mapping) for row in value):
+            raise ValueError(f"theme memory {label} are invalid")
+    item_by_id = {str(row["id"]): row for row in items}  # type: ignore[union-attr]
+    if len(item_by_id) != len(items):
+        raise ValueError("theme memory evidence identities are duplicated")
+    existing_by_anchor: dict[str, object] = {}
+    existing_by_subject: dict[tuple[str, str, str, str, object], list[object]] = {}
+    if theme_memory is not None:
+        if not isinstance(theme_memory, Mapping):
+            raise ValueError("theme memory context is invalid")
+        heads = theme_memory.get("active_theme_heads", [])
+        if not isinstance(heads, Sequence) or isinstance(heads, (str, bytes, bytearray)):
+            raise ValueError("theme memory heads are invalid")
+        for raw in heads:
+            parsed = theme_episode_revision_from_persistence(raw)
+            if parsed.anchor_hash in existing_by_anchor:
+                raise ValueError("theme memory head anchor is duplicated")
+            existing_by_anchor[parsed.anchor_hash] = parsed
+            existing_by_subject.setdefault((
+                parsed.theme_id, parsed.theme_mechanism, parsed.subject_identity,
+                parsed.jurisdiction, parsed.authoritative_id,
+            ), []).append(parsed)
+    current = observed_at.astimezone(timezone.utc)
+    output: list[dict[str, object]] = []
+    produced_anchors: set[str] = set()
+    for event in events:  # type: ignore[union-attr]
+        event_evidence = {
+            str(value) for value in event.get("evidence_item_ids", [])
+            if str(value) in item_by_id
+        }
+        if not event_evidence:
+            continue
+        matching = []
+        for candidate in candidates:  # type: ignore[union-attr]
+            refs = candidate.get("evidence", [])
+            if not isinstance(refs, Sequence) or isinstance(refs, (str, bytes, bytearray)):
+                raise ValueError("theme memory candidate evidence is invalid")
+            candidate_ids = {
+                str(ref.get("item_id")) for ref in refs if isinstance(ref, Mapping)
+            }
+            if event_evidence & candidate_ids:
+                matching.append((candidate, refs))
+        for candidate, refs in matching:
+            theme_ids = candidate.get("theme_ids", [])
+            if not isinstance(theme_ids, Sequence) or isinstance(
+                theme_ids, (str, bytes, bytearray)
+            ):
+                raise ValueError("theme memory candidate themes are invalid")
+            entity_id = candidate.get("entity_id")
+            candidate_key = candidate.get("candidate_key")
+            subject = entity_id if isinstance(entity_id, str) and entity_id else candidate_key
+            if not isinstance(subject, str) or not subject:
+                continue
+            subject = re.sub(r"[^A-Za-z0-9:._/-]+", "-", subject).strip("-")[:256]
+            mechanism = re.sub(
+                r"[^a-z0-9_]+", "_", str(event.get("event_type") or "market_event").casefold(),
+            ).strip("_")[:80]
+            if len(mechanism) < 3:
+                mechanism = "market_event"
+            effective = event.get("effective_at") or event.get("occurred_at")
+            try:
+                effective_day = datetime.fromisoformat(
+                    str(effective or packet.get("observed_at")).replace("Z", "+00:00")
+                ).date().isoformat()
+            except ValueError as exc:
+                raise ValueError("theme memory event period is invalid") from exc
+            source_evidence = []
+            for ref in refs:
+                if not isinstance(ref, Mapping):
+                    raise ValueError("theme memory candidate evidence is invalid")
+                item_id = str(ref.get("item_id") or "")
+                if item_id not in event_evidence:
+                    continue
+                item = item_by_id[item_id]
+                metadata = item.get("metadata")
+                metadata = metadata if isinstance(metadata, Mapping) else {}
+                story = (
+                    metadata.get("syndication_id")
+                    or metadata.get("canonical_article_id")
+                    or metadata.get("wire_story_id")
+                    or item.get("upstream_item_id")
+                    or item.get("canonical_url")
+                    or item.get("content_hash")
+                )
+                source_evidence.append({
+                    "evidence_id": item_id,
+                    "story_identity": str(story)[:512],
+                    "polarity": "opposing" if ref.get("role") == "opposing" else "supporting",
+                })
+            if not source_evidence:
+                continue
+            missing = candidate.get("limitations", [])
+            missing_questions = [
+                str(value)[:500] for value in missing
+                if isinstance(value, str) and value.strip()
+            ][:16]
+            if not missing_questions:
+                missing_questions = ["Verify current primary exposure for the candidate."]
+            for theme_id in sorted({str(value) for value in theme_ids if isinstance(value, str)}):
+                episode_event = {
+                    "theme_id": theme_id,
+                    "theme_mechanism": mechanism,
+                    "subject_identity": subject,
+                    "jurisdiction": "US",
+                    "effective_period": {"start": effective_day, "end": None},
+                    "authoritative_id": None,
+                    "observed_at": _timestamp(current),
+                    "source_evidence": source_evidence,
+                    "investigated_entity_ids": [subject],
+                    "missing_questions": missing_questions,
+                    "invalidation_conditions": [
+                        "New evidence contradicts the observed theme.",
+                    ],
+                    "next_review_at": _timestamp(current + timedelta(days=3)),
+                    "expires_at": _timestamp(current + timedelta(days=30)),
+                }
+                continuations = existing_by_subject.get((
+                    theme_id, mechanism.casefold(), subject.casefold(), "US", None,
+                ), [])
+                if len(continuations) == 1:
+                    continuation = continuations[0]
+                    episode_event["effective_period"] = {
+                        "start": continuation.effective_period_start,  # type: ignore[union-attr]
+                        "end": continuation.effective_period_end,  # type: ignore[union-attr]
+                    }
+                initial = revise_theme_episode(None, episode_event, origin_run_id=run_id)
+                existing = existing_by_anchor.get(initial.anchor_hash)
+                revision = revise_theme_episode(
+                    existing, episode_event, origin_run_id=run_id,  # type: ignore[arg-type]
+                )
+                if revision is existing or revision.anchor_hash in produced_anchors:
+                    continue
+                produced_anchors.add(revision.anchor_hash)
+                output.append(revision.to_persistence_row())
+                if len(output) >= 25:
+                    return tuple(output)
+    return tuple(output)
+
+
 def _source_summary(value: RequestReceipt, receipt_id: str) -> dict[str, object]:
     result = {
         "accepted_count": value.accepted_count, "error_code": value.error_code,
@@ -3225,6 +3532,70 @@ def _retain_v2_relation_evidence(
         dropped_exposure_fact_ids=dropped_fact_ids,
     )
     return retained_relation, retained_facts, tuple(dropped_ids), dropped_fact_ids
+
+
+def _prioritize_due_nomination_candidates(
+    candidates: Sequence[EnrichmentCandidate],
+    theme_memory: object,
+    *,
+    run_id: str,
+    now: datetime,
+) -> tuple[EnrichmentCandidate, ...]:
+    """Promote at most three due, exact, currently evidenced research follow-ups."""
+    if theme_memory is None:
+        return tuple(candidates)
+    if not isinstance(theme_memory, Mapping):
+        raise ValueError("protected theme memory is invalid")
+    raw_due = theme_memory.get("due_nominations", [])
+    if not isinstance(raw_due, Sequence) or isinstance(
+        raw_due, (str, bytes, bytearray)
+    ) or len(raw_due) > 12:
+        raise ValueError("protected due nominations are invalid")
+    current = _utc(now)
+    due: list[tuple[int, datetime, str, Mapping[str, object]]] = []
+    for raw in raw_due:
+        if not isinstance(raw, Mapping) or raw.get("execution_allowed") is not False \
+                or raw.get("origin_run_id") == run_id:
+            continue
+        try:
+            nomination_id = str(raw["nomination_id"])
+            if str(uuid.UUID(nomination_id)) != nomination_id:
+                raise ValueError
+            expiry = datetime.fromisoformat(str(raw["expires_at"]).replace("Z", "+00:00"))
+            created = datetime.fromisoformat(str(raw["created_at"]).replace("Z", "+00:00"))
+            priority = raw["priority"]
+        except (KeyError, TypeError, ValueError, AttributeError):
+            continue
+        evidence_ids = raw.get("evidence_ids")
+        if (
+            isinstance(priority, bool) or not isinstance(priority, int)
+            or not 1 <= priority <= 5
+            or created.tzinfo is None or expiry.tzinfo is None
+            or not created.astimezone(timezone.utc) <= current < expiry.astimezone(timezone.utc)
+            or not isinstance(evidence_ids, Sequence)
+            or isinstance(evidence_ids, (str, bytes, bytearray))
+            or not 1 <= len(evidence_ids) <= 8
+            or any(not isinstance(value, str) for value in evidence_ids)
+        ):
+            continue
+        due.append((-priority, expiry.astimezone(timezone.utc), nomination_id, raw))
+    selected = tuple(row[3] for row in sorted(due)[:3])
+    output: list[EnrichmentCandidate] = []
+    for candidate in candidates:
+        matched = any(
+            nomination.get("theme_id") == candidate.hypothesis.theme_id
+            and nomination.get("entity_id") == candidate.entity_id
+            and nomination.get("security_id") == candidate.security_id
+            and nomination.get("relationship_role") == candidate.hypothesis.role
+            and set(nomination.get("evidence_ids", ())) <= set(candidate.source_item_ids)
+            for nomination in selected
+        )
+        output.append(replace(
+            candidate,
+            official_support=candidate.official_support or matched,
+            novelty=max(candidate.novelty, 100) if matched else candidate.novelty,
+        ))
+    return tuple(output)
 
 
 def _enrichment_candidates(

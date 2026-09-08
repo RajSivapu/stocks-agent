@@ -17,8 +17,10 @@ from lib.intelligence.pipeline import (
     _enrichment_candidates,
     _failed_receipt,
     _frozen_source_plan,
+    _prioritize_due_nomination_candidates,
     _retain_v2_relation_evidence,
     _source_summary,
+    _theme_episode_revision_rows,
     _updated_source_cursor,
     protected_collection_context,
 )
@@ -38,15 +40,18 @@ from lib.intelligence.exposure import (
 )
 from lib.intelligence.quota import QuotaSession
 from lib.intelligence.relationships import EventRelationship
+from lib.intelligence.discovery import ValueChainHypothesis
 from lib.intelligence.themes import SEED_THEMES, evidence_key
 from tests.test_intelligence_entities import reference as entity_reference
 from lib.intelligence.universe import SecurityIdentity
 from lib.intelligence.types import DiscoveryPlan, DiscoveryTask, PacketLimits, SourceCapability
 from lib.intelligence.cursors import CollectionWindow, SourceCursor
 from lib.intelligence.research_queue import (
+    EnrichmentCandidate,
     EnrichmentRequest,
     adaptive_provider_reservations,
     build_selection_manifest,
+    select_enrichment_queue,
 )
 
 
@@ -1715,6 +1720,212 @@ def test_frozen_enrichment_quote_replays_without_duplicate_transport():
     assert len(first) == len(replay) == 1
     assert gateway.calls.count("transport") == 1
     assert persisted[selected.request_id]["state"] == "succeeded"
+
+
+def test_due_reviewed_nomination_transitions_only_after_frozen_research_selection():
+    from lib.intelligence.pipeline import _checkpoint_receipt
+
+    evidence_id = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
+    nomination_id = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb"
+    capability = SourceCapability(
+        capability_id="yahoo_security_quote", provider="yahoo", query_kind="quote",
+        themes=frozenset(), phases=frozenset({"on-demand"}),
+        allowed_hosts=frozenset({"query1.finance.yahoo.com"}),
+        allowed_path_patterns=("/v8/finance/chart/",), required_credential=None,
+        authority="market_data", retention_class="metadata", max_requests_per_run=4,
+        max_items_per_request=1, requirement_tier="optional", health="enabled",
+        enabled=True, provider_priority=1, query_pack=MappingProxyType({}),
+    )
+    plan = DiscoveryPlan(
+        run_id=RUN_ID, phase="on-demand", reference_version="fixture:v2",
+        capability_version=1, tasks=(),
+        capabilities=MappingProxyType({capability.capability_id: capability}),
+        coverage=MappingProxyType({}), provider_request_totals=MappingProxyType({}),
+        reserved_holding_quote_requests=0, reserved_adaptive_requests=4,
+    )
+    selected = EnrichmentRequest(
+        request_id="77777777-7777-4777-8777-777777777780",
+        entity_id="sec-cik:0000000001", security_id="sec:AAA",
+        security_revision_id="00000000-0000-4000-8000-000000000098",
+        reference_manifest_id="00000000-0000-4000-8000-000000000099",
+        cik="0000000001", ticker="AAA", instrument_type="COMMON_STOCK",
+        event_ids=("event",), theme_id="critical_minerals_magnets", role="mining",
+        hypothesis_ids=("hypothesis",), source_item_ids=(evidence_id,),
+        dependency_task_ids=(), provider="yahoo", capability_id="yahoo_security_quote",
+        query_kind="quote", descriptor=MappingProxyType({
+            "instrument_type": "COMMON_STOCK",
+            "reference_manifest_id": "00000000-0000-4000-8000-000000000099",
+            "security_id": "sec:AAA",
+            "security_revision_id": "00000000-0000-4000-8000-000000000098",
+            "ticker": "AAA",
+        }), adverse_path=False, priority=1, execution_allowed=False,
+    )
+
+    class Gateway:
+        def __init__(self):
+            self.order = []
+            self.sealed = None
+
+        def seal_enrichment_selection(self, _run, payload):
+            self.order.append("sealed")
+            if payload["manifest"]["selection_stage"] == "initial":
+                self.sealed = payload
+            return {
+                "manifest_id": payload["manifest"]["manifest_id"],
+                "request_count": len(payload["requests"]), "duplicate": False,
+            }
+
+        def transition_research_nomination_v2(self, run_id, requested_nomination_id, payload):
+            assert run_id == RUN_ID
+            assert requested_nomination_id == nomination_id
+            self.order.append(("selected", payload))
+            return {"nomination_id": nomination_id, "state": "selected"}
+
+        def checkpoint_discovery_stage(self, _run, payload):
+            return {"task": payload["task"], "duplicate": False}
+
+        def checkpoint_intelligence_collection(self, run_id, payload):
+            return {"run_id": run_id, "cache_key": payload["cache_key"]}
+
+        def call(self, operation, payload, **_kwargs):
+            assert operation == "collect_intelligence_quote"
+            self.order.append("transport")
+            quote_receipt = replace(
+                receipt("yahoo"), source_receipt_id=payload["source_receipt_id"],
+                reservation_id=payload["reservation_id"], cache_key=payload["cache_key"],
+                returned_count=0, accepted_count=0,
+            )
+            return {"checkpoint": {"cache_key": payload["cache_key"],
+                                    "receipt": _checkpoint_receipt(quote_receipt), "items": []}}
+
+    context = {"theme_memory": {"due_nominations": [{
+        "nomination_id": nomination_id,
+        "origin_run_id": "99999999-9999-4999-8999-999999999999",
+        "theme_id": selected.theme_id, "entity_id": selected.entity_id,
+        "security_id": selected.security_id, "relationship_role": selected.role,
+        "evidence_ids": [evidence_id], "required_evidence_kind": "current_reference",
+        "priority": 5, "created_at": (NOW - timedelta(days=1)).isoformat(),
+        "expires_at": (NOW + timedelta(days=1)).isoformat(),
+        "execution_allowed": False,
+    }]}}
+    gateway = Gateway()
+    adapter = FakeAdapter(); adapter.provider = "yahoo"
+    pipeline = IntelligencePipeline(gateway, [adapter], discovery_plan=plan, context=context)
+    reservation_id = str(uuid.uuid5(
+        uuid.NAMESPACE_URL, f"market-intelligence:reservation:{RUN_ID}:yahoo",
+    ))
+    pipeline._seal_and_run_enrichment_requests(
+        RUN_ID, request("on-demand"),
+        {"start": "2026-09-04T10:00:00Z", "end": NOW.isoformat()},
+        (selected,), {"yahoo": {"id": reservation_id, "provider": "yahoo", "requests": 1}},
+        {}, adaptive_provider_reservations("on-demand"), selection_stage="initial",
+    )
+
+    assert gateway.order[0] == "sealed"
+    state, lifecycle = gateway.order[1]
+    assert state == "selected"
+    assert lifecycle == {
+        "state": "selected",
+        "reason": "Scheduled bounded research-only follow-up.",
+        "selection_descriptor": {
+            "request_id": selected.request_id,
+                "descriptor_hash": gateway.sealed["requests"][0]["descriptor_hash"],
+            "uncertain_outcome_barrier": True,
+            "execution_allowed": False,
+        },
+    }
+    assert gateway.order[2] == "transport"
+
+
+def test_due_nomination_prioritizes_exact_current_evidence_candidate_within_bound():
+    hypothesis = ValueChainHypothesis(
+        hypothesis_id="due-hypothesis", event_id="due-event",
+        theme_id="critical_minerals_magnets", direction="downstream", role="mining",
+        query_terms=("mining",), theme_terms=("magnets",), geography="US",
+        horizon="near", evidence_requirement="issuer_filing", adverse_path=False,
+        invalidation_rule="Current filing denies the relationship.",
+    )
+    due = EnrichmentCandidate(
+        hypothesis=hypothesis, entity_id="sec-cik:0000000001", security_id="sec:AAA",
+        security_revision_id="revision:AAA", reference_manifest_id="manifest:current",
+        cik="0000000001", ticker="AAA", instrument_type="COMMON_STOCK",
+        source_item_ids=("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",),
+        dependency_task_ids=("task:due",), official_support=False, novelty=0,
+    )
+    other = replace(
+        due,
+        hypothesis=replace(hypothesis, hypothesis_id="other-hypothesis", event_id="other-event"),
+        entity_id="sec-cik:0000000002", security_id="sec:BBB",
+        security_revision_id="revision:BBB", cik="0000000002", ticker="BBB",
+        source_item_ids=("bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",),
+        dependency_task_ids=("task:other",), novelty=100,
+    )
+    memory = {"due_nominations": [{
+        "nomination_id": "cccccccc-cccc-4ccc-8ccc-cccccccccccc",
+        "origin_run_id": "99999999-9999-4999-8999-999999999999",
+        "theme_id": due.hypothesis.theme_id, "entity_id": due.entity_id,
+        "security_id": due.security_id, "relationship_role": due.hypothesis.role,
+        "evidence_ids": list(due.source_item_ids), "required_evidence_kind": "current_filing",
+        "priority": 5, "created_at": (NOW - timedelta(days=1)).isoformat(),
+        "expires_at": (NOW + timedelta(days=1)).isoformat(), "execution_allowed": False,
+    }]}
+
+    prioritized = _prioritize_due_nomination_candidates(
+        (other, due), memory, run_id=RUN_ID, now=NOW,
+    )
+    selected = select_enrichment_queue(
+        prioritized, max_entities=1, max_requests=1, required_holding_quote_requests=0,
+        provider_limits={"sec_edgar": 1, "yahoo": 0},
+    )
+
+    assert [row.entity_id for row in selected] == [due.entity_id]
+
+
+def test_consecutive_normal_payloads_append_exact_theme_head_across_observation_days():
+    def payload(run_id, item_id, day):
+        return {
+            "items": [{
+                "id": item_id, "provider": "gdelt", "upstream_item_id": f"story-{day}",
+                "canonical_url": f"https://example.com/story-{day}", "content_hash": "a" * 64,
+                "metadata": {},
+            }],
+            "events": [{
+                "event_type": "awarded_funding", "occurred_at": f"2026-09-{day:02d}T12:00:00Z",
+                "effective_at": None, "evidence_item_ids": [item_id],
+            }],
+            "packet": {"packet": {
+                "contract_version": 2, "run_id": run_id, "execution_allowed": False,
+                "observed_at": f"2026-09-{day:02d}T12:00:00.000Z",
+                "research_candidates": [{
+                    "candidate_key": "sec:AAA", "entity_id": "sec-cik:0000000001",
+                    "theme_ids": ["critical_minerals_magnets"],
+                    "limitations": ["typed_primary_exposure_missing"],
+                    "evidence": [{"item_id": item_id, "role": "supporting"}],
+                }],
+            }},
+        }
+
+    first_run = "11111111-1111-4111-8111-111111111111"
+    second_run = "22222222-2222-4222-8222-222222222222"
+    first = _theme_episode_revision_rows(
+        first_run, payload(first_run, "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", 4),
+        None, datetime(2026, 9, 4, 12, tzinfo=timezone.utc),
+    )[0]
+    memory = {"active_theme_heads": [first]}
+
+    second = _theme_episode_revision_rows(
+        second_run, payload(second_run, "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb", 5),
+        memory, datetime(2026, 9, 5, 12, tzinfo=timezone.utc),
+    )[0]
+
+    assert second["episode_id"] == first["episode_id"]
+    assert second["revision"] == 2
+    assert second["predecessor_revision_id"] == first["revision_id"]
+    assert second["added_source_ids"] == ["bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb"]
+    assert second["source_ids"] == [
+        "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+        "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+    ]
 
 
 def test_restart_loads_and_executes_frozen_selection_without_reselecting():

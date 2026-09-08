@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 from datetime import datetime, timezone
+from decimal import Decimal, InvalidOperation
 import hashlib
 import json
 import os
@@ -40,6 +41,39 @@ class VerificationResult:
     optional_failures: tuple[str, ...] = ()
 
 
+def _sorted_unique_strings(value: object, *, maximum: int) -> bool:
+    return (
+        isinstance(value, list)
+        and len(value) <= maximum
+        and all(isinstance(row, str) and bool(row) for row in value)
+        and value == sorted(set(value))
+    )
+
+
+def _fixed_scores(value: Mapping[object, object]) -> bool:
+    for raw in value.values():
+        if not isinstance(raw, str) or re.fullmatch(r"(?:0|1)\.[0-9]{6}", raw) is None:
+            return False
+        try:
+            parsed = Decimal(raw)
+        except InvalidOperation:
+            return False
+        if parsed < 0 or parsed > 1:
+            return False
+    return True
+
+
+def _fixed_sum(values: Mapping[object, object], raw_total: object) -> bool:
+    if not isinstance(raw_total, str) or re.fullmatch(r"[0-4]\.[0-9]{6}", raw_total) is None:
+        return False
+    try:
+        return Decimal(raw_total) == sum(
+            (Decimal(str(raw)) for raw in values.values()), Decimal("0"),
+        )
+    except InvalidOperation:
+        return False
+
+
 def _verify_discovery_capability(receipt: Mapping[str, object]) -> VerificationResult:
     """Verify V1-C3 from frozen plans and protected, receipt-backed stage rows."""
     require(isinstance(receipt, Mapping), "discovery capability receipt is required")
@@ -58,6 +92,11 @@ def _verify_discovery_capability(receipt: Mapping[str, object]) -> VerificationR
     payload = completion.get("payload")
     require(
         isinstance(packet, Mapping) and packet.get("contract_version") == 2
+        and set(packet) == {
+            "action_candidates", "contract_version", "coverage", "evidence",
+            "execution_allowed", "limitations", "observed_at", "omissions",
+            "policy_version", "research_candidates", "run_id",
+        }
         and packet.get("run_id") == run_id and packet.get("execution_allowed") is False
         and packet_row.get("run_id") == run_id
         and packet_row.get("status") == "completed"
@@ -73,9 +112,37 @@ def _verify_discovery_capability(receipt: Mapping[str, object]) -> VerificationR
         "discovery capability packet or completion lineage is invalid",
     )
     coverage = packet.get("coverage")
+    payload_coverage = payload.get("coverage")
+    collector_drops = (
+        payload_coverage.get("collector_drops", [])
+        if isinstance(payload_coverage, Mapping) else None
+    )
+    persisted_coverage = (
+        {key: value for key, value in payload_coverage.items()
+         if key != "collector_drops"}
+        if isinstance(payload_coverage, Mapping) else None
+    )
     require(
         isinstance(coverage, Mapping) and coverage.get("complete_market_coverage") is False
-        and payload.get("coverage") == coverage,
+        and isinstance(payload_coverage, Mapping)
+        and (payload_coverage == coverage or persisted_coverage == coverage)
+        and isinstance(collector_drops, list) and len(collector_drops) <= 3000
+        and all(
+            isinstance(row, Mapping)
+            and set(row) in ({"candidate_key", "item_id", "kind", "reason", "stage"},
+                             {"candidate_key", "item_id", "kind", "reason"})
+            and isinstance(row.get("candidate_key"), str)
+            and (row.get("item_id") is None or (
+                isinstance(row.get("item_id"), str)
+                and UUID.fullmatch(row["item_id"]) is not None
+            ))
+            and isinstance(row.get("kind"), str) and bool(row.get("kind"))
+            and isinstance(row.get("reason"), str) and bool(row.get("reason"))
+            and ("stage" not in row or (
+                isinstance(row.get("stage"), str) and bool(row.get("stage"))
+            ))
+            for row in collector_drops
+        ),
         "discovery capability coverage is invalid",
     )
     source_plan = coverage.get("source_plan")
@@ -208,7 +275,9 @@ def _verify_discovery_capability(receipt: Mapping[str, object]) -> VerificationR
     manifest = manifests.get(manifest_id)
     require(
         isinstance(manifest, Mapping)
-        and manifest.get("reference_version") == source_plan.get("reference_version")
+        and source_plan.get("reference_version") in {
+            "sec:unresolved", manifest.get("reference_version"),
+        }
         and manifest.get("revision") == reference_coverage.get("reference_revision"),
         "discovery reference manifest version or revision is invalid",
     )
@@ -252,11 +321,43 @@ def _verify_discovery_capability(receipt: Mapping[str, object]) -> VerificationR
     run_provenance = {row.get("run_item_id"): row
                       for row in receipt.get("run_source_item_provenance", [])
                       if isinstance(row, Mapping)}
+    duplicate_references = coverage.get("duplicate_references", [])
+    require(
+        isinstance(duplicate_references, list)
+        and all(
+            isinstance(row, Mapping)
+            and set(row) == {"item_id", "receipt_id", "reason"}
+            and isinstance(row.get("item_id"), str)
+            and UUID.fullmatch(row["item_id"]) is not None
+            and isinstance(row.get("receipt_id"), str)
+            and UUID.fullmatch(row["receipt_id"]) is not None
+            and row.get("reason") in {"same_content_hash", "same_upstream_item_id"}
+            for row in duplicate_references
+        )
+        and len({
+            (row["item_id"], row["receipt_id"])
+            for row in duplicate_references
+        }) == len(duplicate_references),
+        "discovery duplicate receipt references are invalid or duplicated",
+    )
+    require(
+        {(row["item_id"], row["reason"]) for row in duplicate_references}
+        == {
+            (row["item_id"], row["reason"])
+            for row in collector_drops
+            if row.get("kind") == "source_item"
+            and row.get("stage") == "deduplication"
+        },
+        "discovery duplicate receipt drops do not reconcile",
+    )
+    duplicate_references_by_receipt: dict[str, list[Mapping[str, object]]] = {}
+    for row in duplicate_references:
+        duplicate_references_by_receipt.setdefault(str(row["receipt_id"]), []).append(row)
     completion_receipts = payload.get("receipts")
     require(isinstance(completion_receipts, list),
             "discovery required parsed receipt evidence is missing")
     completion_by_id = {
-        row.get("source_receipt_id"): row for row in completion_receipts
+        row.get("id"): row for row in completion_receipts
         if isinstance(row, Mapping)
     }
     require(
@@ -285,7 +386,8 @@ def _verify_discovery_capability(receipt: Mapping[str, object]) -> VerificationR
             and receipt_id not in required_receipt_ids
             and isinstance(checkpoint, Mapping)
             and checkpoint.get("cache_key") == parsed.get("cache_key")
-            and isinstance(stored, Mapping) and completion_by_id.get(receipt_id) == parsed
+            and isinstance(stored, Mapping)
+            and isinstance(completion_by_id.get(receipt_id), Mapping)
             and parsed.get("provider") == task.get("provider") == stored.get("provider")
             and parsed.get("requested_window") == task.get("requested_window")
             and isinstance(parsed.get("metadata"), Mapping)
@@ -296,11 +398,40 @@ def _verify_discovery_capability(receipt: Mapping[str, object]) -> VerificationR
             and all(parsed.get(key) == stored.get(db_key) for key, db_key in (
                 ("provider", "provider"), ("reservation_id", "reservation_id"),
                 ("cache_key", "cache_key"), ("requested_window", "requested_window"),
-                ("retrieved_at", "retrieved_at"), ("expires_at", "expires_at"),
                 ("request_cost", "request_cost"), ("returned_count", "returned_count"),
                 ("accepted_count", "accepted_count"), ("duplicate_count", "duplicate_count"),
                 ("dropped_count", "dropped_count"), ("response_hash", "response_hash"),
             ))
+            and timestamp(parsed.get("retrieved_at")) == timestamp(stored.get("retrieved_at"))
+            and (
+                parsed.get("expires_at") is None and stored.get("expires_at") is None
+                or parsed.get("expires_at") is not None and stored.get("expires_at") is not None
+                and timestamp(parsed["expires_at"]) == timestamp(stored["expires_at"])
+            )
+            and all(completion_by_id[receipt_id].get(key) == stored.get(db_key)
+                    for key, db_key in (
+                        ("id", "id"), ("reservation_id", "reservation_id"),
+                        ("status", "status"), ("cache_key", "cache_key"),
+                        ("requested_window", "requested_window"),
+                        ("request_cost", "request_cost"),
+                        ("upstream_remaining", "upstream_remaining"),
+                        ("returned_count", "returned_count"),
+                        ("accepted_count", "accepted_count"),
+                        ("duplicate_count", "duplicate_count"),
+                        ("dropped_count", "dropped_count"),
+                        ("response_hash", "response_hash"),
+                    ))
+            and timestamp(completion_by_id[receipt_id].get("retrieved_at"))
+                == timestamp(stored.get("retrieved_at"))
+            and (
+                completion_by_id[receipt_id].get("expires_at") is None
+                and stored.get("expires_at") is None
+                or completion_by_id[receipt_id].get("expires_at") is not None
+                and stored.get("expires_at") is not None
+                and timestamp(completion_by_id[receipt_id]["expires_at"])
+                    == timestamp(stored["expires_at"])
+            )
+            and completion_by_id[receipt_id].get("error") == stored.get("error")
             and stored.get("run_id") == run_id
             and stored.get("reservation_id") in reservations
             and reservations[stored["reservation_id"]].get("run_id") == run_id
@@ -322,12 +453,42 @@ def _verify_discovery_capability(receipt: Mapping[str, object]) -> VerificationR
         )
         persisted_run_items = [row for row in run_items
                                if row.get("source_receipt_id") == receipt_id]
+        duplicate_item_references = duplicate_references_by_receipt.get(receipt_id, [])
         if coverage_status == "success_empty":
-            require(not persisted_run_items,
+            require(not persisted_run_items and not duplicate_item_references,
                     "discovery success_empty receipt unexpectedly has saved items")
         else:
-            require(persisted_run_items,
+            require(persisted_run_items or duplicate_item_references,
                     "discovery success_nonempty receipt lacks saved item provenance")
+            for duplicate_reference in duplicate_item_references:
+                duplicate_item_id = duplicate_reference["item_id"]
+                duplicate_item = source_items.get(duplicate_item_id)
+                canonical_run_items = [
+                    row for row in run_items
+                    if row.get("run_id") == run_id
+                    and row.get("source_item_id") == duplicate_item_id
+                ]
+                require(
+                    isinstance(duplicate_item, Mapping)
+                    and duplicate_item.get("source_receipt_id") in persisted_receipts
+                    and isinstance(duplicate_item.get("content_hash"), str)
+                    and re.fullmatch(r"[0-9a-f]{64}", duplicate_item["content_hash"])
+                    and duplicate_item_id == str(uuid.uuid5(
+                        uuid.NAMESPACE_URL,
+                        f"market-source:{duplicate_item['content_hash']}",
+                    ))
+                    and canonical_run_items
+                    and all(
+                        isinstance(run_provenance.get(row.get("id")), Mapping)
+                        and run_provenance[row["id"]].get("run_id") == run_id
+                        and run_provenance[row["id"]].get("source_item_id") == duplicate_item_id
+                        and str(run_provenance[row["id"]].get("request_url", "")).startswith(
+                            "https://"
+                        )
+                        for row in canonical_run_items
+                    ),
+                    "discovery duplicate receipt item provenance is invalid",
+                )
             for run_item in persisted_run_items:
                 item_id = run_item.get("source_item_id")
                 item = source_items.get(item_id)
@@ -343,13 +504,22 @@ def _verify_discovery_capability(receipt: Mapping[str, object]) -> VerificationR
                         uuid.NAMESPACE_URL,
                         f"market-source:{item['content_hash']}",
                     ))
-                    and item.get("source_receipt_id") == receipt_id
+                    and item.get("source_receipt_id") in persisted_receipts
                     and item.get("provider") == stored.get("provider")
                     and run_item.get("run_id") == run_id
                     and run_item.get("disposition") in {"accepted", "near_duplicate"}
-                    and run_item.get("drop_reason") is None
+                    and (
+                        (run_item.get("disposition") == "accepted"
+                         and run_item.get("drop_reason") is None)
+                        or (run_item.get("disposition") == "near_duplicate"
+                            and isinstance(run_item.get("drop_reason"), str)
+                            and bool(run_item.get("drop_reason")))
+                    )
                     and item_provenance.get("provider") == item.get("provider")
-                    and item_provenance.get("canonical_item_url") == item.get("canonical_url")
+                    and str(item.get("canonical_url", "")).startswith("https://")
+                    and str(item_provenance.get("canonical_item_url", "")).startswith(
+                        "https://"
+                    )
                     and str(item_provenance.get("request_url", "")).startswith("https://")
                     and scoped_provenance.get("run_id") == run_id
                     and scoped_provenance.get("source_item_id") == item_id
@@ -366,11 +536,24 @@ def _verify_discovery_capability(receipt: Mapping[str, object]) -> VerificationR
             and isinstance(actions, list), "discovery research/action lanes are invalid")
     evidence_by_id = {row.get("item_id"): row for row in packet_evidence
                       if isinstance(row, Mapping)}
+    require(len(evidence_by_id) == len(packet_evidence),
+            "discovery packet evidence identities are invalid or duplicated")
     research_by_key: dict[str, Mapping[str, object]] = {}
+    referenced_evidence_ids: set[str] = set()
     for candidate in research:
         require(isinstance(candidate, Mapping), "discovery research candidate is invalid")
+        require(set(candidate) == {
+            "adverse_paths", "candidate_hash", "candidate_key", "entity_id",
+            "event_ids", "evidence", "exposure_fact_ids", "limitations",
+            "priority_components", "priority_score", "research_state", "roles",
+            "security_id", "suitability", "theme_ids", "ticker",
+        }, "discovery research candidate shape is invalid")
         suitability = candidate.get("suitability")
         require(isinstance(suitability, Mapping), "discovery suitability lineage is missing")
+        require(set(suitability) == {
+            "component_scores", "evaluation_hash", "lineage", "missing_reasons",
+            "state", "veto_reasons",
+        }, "discovery suitability shape is invalid")
         suitability_body = {key: value for key, value in suitability.items()
                             if key != "evaluation_hash"}
         candidate_body = {key: value for key, value in candidate.items()
@@ -378,47 +561,148 @@ def _verify_discovery_capability(receipt: Mapping[str, object]) -> VerificationR
         key = candidate.get("candidate_key")
         lineage = suitability.get("lineage")
         refs = candidate.get("evidence")
+        component_scores = suitability.get("component_scores")
+        priority_components = candidate.get("priority_components")
         require(
             isinstance(key, str) and key not in research_by_key
             and suitability.get("evaluation_hash") == sha256(canonical_json(suitability_body).encode())
             and candidate.get("candidate_hash") == sha256(canonical_json(candidate_body).encode())
-            and isinstance(lineage, Mapping) and lineage.get("run_id") == run_id
+            and isinstance(lineage, Mapping) and set(lineage) == {
+                "cash_revision", "evidence_receipt_ids", "observed_at",
+                "policy_version", "portfolio_revision", "quote_as_of",
+                "quote_expires_at", "quote_receipt_id", "reference_expires_at",
+                "reference_manifest_id", "reference_revision", "run_id",
+                "security_revision_id",
+            }
+            and lineage.get("run_id") == run_id
+            and lineage.get("observed_at") == packet.get("observed_at")
             and lineage.get("policy_version") == packet.get("policy_version")
-            and lineage.get("reference_manifest_id") == manifest_id
-            and lineage.get("reference_revision") == manifest.get("revision")
-            and isinstance(refs, list),
+            and (
+                (candidate.get("security_id") is None
+                 and lineage.get("reference_manifest_id") is None
+                 and lineage.get("reference_revision") is None
+                 and lineage.get("security_revision_id") is None)
+                or (isinstance(candidate.get("security_id"), str)
+                    and lineage.get("reference_manifest_id") == manifest_id
+                    and lineage.get("reference_revision") == manifest.get("revision"))
+            )
+            and isinstance(refs, list) and 1 <= len(refs) <= 8
+            and isinstance(component_scores, Mapping)
+            and set(component_scores) == {
+                "concentration_penalty", "duplication_penalty", "liquidity",
+                "portfolio_relevance",
+            }
+            and isinstance(priority_components, Mapping)
+            and set(priority_components) == {
+                "authority_corroboration", "exposure", "materiality", "recency",
+            }
+            and _fixed_scores(component_scores)
+            and _fixed_scores(priority_components)
+            and _fixed_sum(priority_components, candidate.get("priority_score")),
             "discovery research suitability hash or lineage is invalid",
         )
         receipt_ids = lineage.get("evidence_receipt_ids")
         require(isinstance(receipt_ids, Mapping),
                 "discovery research receipt lineage is invalid")
+        require(
+            candidate.get("research_state") in {
+                "unresolved", "resolved", "exposure_supported", "analysis_ready",
+            }
+            and suitability.get("state") in {"unknown", "vetoed", "eligible"}
+            and not (
+                candidate.get("research_state") == "analysis_ready"
+                and suitability.get("state") == "eligible"
+            )
+            and isinstance(suitability.get("missing_reasons"), list)
+            and isinstance(suitability.get("veto_reasons"), list)
+            and _sorted_unique_strings(suitability["missing_reasons"], maximum=32)
+            and _sorted_unique_strings(suitability["veto_reasons"], maximum=32)
+            and _sorted_unique_strings(candidate.get("adverse_paths"), maximum=32)
+            and _sorted_unique_strings(candidate.get("event_ids"), maximum=32)
+            and _sorted_unique_strings(candidate.get("exposure_fact_ids"), maximum=64)
+            and _sorted_unique_strings(candidate.get("limitations"), maximum=64)
+            and _sorted_unique_strings(candidate.get("roles"), maximum=32)
+            and _sorted_unique_strings(candidate.get("theme_ids"), maximum=32)
+            and (
+                suitability.get("state") == "unknown"
+                and bool(suitability.get("missing_reasons"))
+                or suitability.get("state") == "vetoed"
+                and bool(suitability.get("veto_reasons"))
+                or suitability.get("state") == "eligible"
+                and not suitability.get("missing_reasons")
+                and not suitability.get("veto_reasons")
+            )
+            and (
+                candidate.get("research_state") == "unresolved"
+                and candidate.get("security_id") is None
+                and candidate.get("ticker") is None
+                and not candidate.get("exposure_fact_ids")
+                and all(isinstance(ref, Mapping)
+                        and ref.get("relationship_eligible") is False for ref in refs)
+                or candidate.get("research_state") in {
+                    "resolved", "exposure_supported", "analysis_ready",
+                }
+                and isinstance(candidate.get("security_id"), str)
+                and isinstance(candidate.get("ticker"), str)
+            )
+            and (
+                candidate.get("research_state") != "resolved"
+                or not candidate.get("exposure_fact_ids")
+            )
+            and (
+                candidate.get("research_state") not in {"exposure_supported", "analysis_ready"}
+                or bool(candidate.get("exposure_fact_ids"))
+                and any(isinstance(ref, Mapping)
+                        and ref.get("relationship_eligible") is True for ref in refs)
+            ),
+            "discovery research suitability semantics are invalid",
+        )
         for ref in refs:
             item_id = ref.get("item_id") if isinstance(ref, Mapping) else None
             evidence = evidence_by_id.get(item_id)
             item = source_items.get(item_id)
+            current_run_item = next((
+                row for row in run_items
+                if row.get("run_id") == run_id and row.get("source_item_id") == item_id
+                and row.get("disposition") in {"accepted", "near_duplicate"}
+            ), None)
+            current_receipt_id = (
+                current_run_item.get("source_receipt_id")
+                if isinstance(current_run_item, Mapping) else None
+            )
             require(
-                isinstance(evidence, Mapping) and isinstance(item, Mapping)
+                isinstance(ref, Mapping) and set(ref) == {
+                    "claim_type", "item_id", "relationship_eligible", "role",
+                }
+                and isinstance(ref.get("claim_type"), str)
+                and ref.get("role") in {"supporting", "opposing"}
+                and type(ref.get("relationship_eligible")) is bool
+                and isinstance(evidence, Mapping) and set(evidence) == {
+                    "authority", "canonical_url", "claim_type", "content_hash",
+                    "effective_at", "item_id", "normalized_text", "published_at",
+                    "reporting_at", "retrieved_at", "source_identity",
+                }
+                and isinstance(item, Mapping) and isinstance(current_run_item, Mapping)
                 and evidence.get("content_hash") == item.get("content_hash")
                 and isinstance(evidence.get("source_identity"), Mapping)
+                and set(evidence["source_identity"]) == {
+                    "provider", "receipt_id", "upstream_item_id",
+                }
+                and evidence["source_identity"].get("provider") == item.get("provider")
+                and evidence["source_identity"].get("upstream_item_id") == item.get("upstream_item_id")
                 and evidence["source_identity"].get("receipt_id") == receipt_ids.get(item_id)
-                and receipt_ids.get(item_id) == item.get("source_receipt_id")
+                and receipt_ids.get(item_id) == current_receipt_id
+                and current_receipt_id in required_receipt_ids
                 and item.get("source_receipt_id") in persisted_receipts,
                 "discovery research source lineage is invalid",
             )
+            referenced_evidence_ids.add(str(item_id))
         research_by_key[key] = candidate
-    for action in actions:
-        candidate = research_by_key.get(action.get("candidate_key")) \
-            if isinstance(action, Mapping) else None
-        suitability = candidate.get("suitability") if isinstance(candidate, Mapping) else None
-        require(
-            isinstance(action, Mapping) and isinstance(candidate, Mapping)
-            and isinstance(suitability, Mapping)
-            and candidate.get("research_state") == "analysis_ready"
-            and suitability.get("state") == "eligible"
-            and action.get("candidate_hash") == candidate.get("candidate_hash")
-            and action.get("suitability_hash") == suitability.get("evaluation_hash"),
-            "discovery research-to-action promotion is invalid",
-        )
+    require(referenced_evidence_ids == set(evidence_by_id),
+            "discovery packet evidence membership is invalid")
+    # The protected V1 schema has no issuer-valuation authority.  Market-wide
+    # research is useful, but no rehashed packet can promote it to action.
+    require(not actions, "discovery research-to-action promotion is invalid")
 
     optional_failures = tuple(sorted(
         f"{row.get('capability_id')}:{row.get('state')}"

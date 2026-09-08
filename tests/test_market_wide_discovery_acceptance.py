@@ -17,7 +17,9 @@ from lib.intelligence.dedupe import deduplicate
 from lib.intelligence.discovery import load_theme_taxonomy
 from lib.intelligence.entities import resolve_entities
 from lib.intelligence.normalize import normalize_item
-from lib.intelligence.pipeline import IntelligencePipeline, PipelineRequest, UNTRUSTED_DATA_INSTRUCTION
+from lib.intelligence.pipeline import (
+    IntelligencePipeline, PipelineRequest, UNTRUSTED_DATA_INSTRUCTION, _uuid,
+)
 from lib.intelligence.planner import build_discovery_plan, load_source_capabilities
 from lib.intelligence.policy import load_intelligence_policy
 from lib.intelligence.providers import CollectionResult, RequestReceipt, SourceItem
@@ -59,6 +61,8 @@ class AcceptanceResult:
     collection_checkpoints: int
     omission_reasons: tuple[str, ...]
     packet_bytes: int
+    theme_episode_revisions: tuple[dict[str, object], ...]
+    persisted_payload: dict[str, object]
 
 
 def _slug(value: str) -> str:
@@ -143,6 +147,7 @@ class _AcceptanceGateway:
         self.transitions: list[tuple[str, str]] = []
         self.collection_rows: list[dict[str, object]] = []
         self.final_payload: dict[str, object] | None = None
+        self.theme_episode_revisions: list[dict[str, object]] = []
 
     def start_intelligence_run(self, payload):
         return {
@@ -185,6 +190,15 @@ class _AcceptanceGateway:
             "packet_hash": payload["packet"]["packet_hash"],
             "duplicate": False,
             "telegram_message_ids": [],
+        }
+
+    def record_theme_episode_revision_v2(self, run_id, payload):
+        assert run_id == RUN_ID
+        self.theme_episode_revisions.append(copy.deepcopy(payload))
+        return {
+            "revision_id": payload["revision_id"],
+            "episode_id": payload["episode_id"],
+            "duplicate": False,
         }
 
 
@@ -315,6 +329,8 @@ def run_acceptance_fixture(
         packet_bytes=len(json.dumps(
             packet, sort_keys=True, separators=(",", ":"),
         ).encode()),
+        theme_episode_revisions=tuple(gateway.theme_episode_revisions),
+        persisted_payload=copy.deepcopy(gateway.final_payload),
     )
 
 
@@ -354,6 +370,68 @@ def test_acceptance_fixture_crosses_planner_pipeline_and_durable_stage_boundary(
     assert result.stage_states.count("succeeded") == 2
     assert result.transport_attempts == 1
     assert result.collection_checkpoints >= 1
+
+
+def test_normal_collector_persists_canonical_v2_theme_memory_revision():
+    result = run_acceptance_fixture(
+        "magnets_private_recipient", holdings=[], plans=[], radar=[], watchlist=[],
+    )
+
+    assert len(result.theme_episode_revisions) == 1
+    revision = result.theme_episode_revisions[0]
+    assert revision["revision"] == 1
+    assert revision["theme_id"] == "critical_minerals_magnets"
+    assert revision["source_ids"]
+    assert revision["added_source_ids"] == revision["source_ids"]
+    assert revision["execution_allowed"] is False
+
+
+def test_restart_replays_post_completion_theme_persistence_without_collection():
+    first = run_acceptance_fixture(
+        "magnets_private_recipient", holdings=[], plans=[], radar=[], watchlist=[],
+    )
+    payload = first.persisted_payload
+    packet = payload["packet"]
+    completion_id = _uuid("completion-request", RUN_ID)
+
+    class RecoveryGateway:
+        def __init__(self):
+            self.replayed = []
+
+        def read_intelligence_completion(self, run_id, requested_completion_id):
+            assert run_id == RUN_ID
+            assert requested_completion_id == completion_id
+            return {"completion": {
+                "receipt": {
+                    "run_id": RUN_ID, "completion_id": completion_id,
+                    "packet_id": packet["id"], "packet_hash": packet["packet_hash"],
+                    "counts": {},
+                },
+                "payload": payload,
+                "providers": {
+                    row["reservation_id"]: "gdelt" for row in payload["receipts"]
+                },
+            }}
+
+        def record_theme_episode_revision_v2(self, run_id, revision):
+            assert run_id == RUN_ID
+            self.replayed.append(copy.deepcopy(revision))
+            return {
+                "revision_id": revision["revision_id"],
+                "episode_id": revision["episode_id"], "duplicate": True,
+            }
+
+        def start_intelligence_run(self, _payload):
+            raise AssertionError("restart must return before collection")
+
+    gateway = RecoveryGateway()
+    recovered = IntelligencePipeline(gateway, []).run(PipelineRequest(
+        phase="pre-market", market_date=date(2026, 9, 8), now=NOW,
+        dry_run=False, request_id=RUN_ID,
+    ))
+
+    assert recovered.packet_hash == packet["packet_hash"]
+    assert gateway.replayed == list(first.theme_episode_revisions)
 
 
 @pytest.mark.parametrize("fixture_name", [

@@ -13,6 +13,7 @@ from lib.intelligence.themes import (
     ThemeEpisodeRevision,
     episode_is_active,
     revise_theme_episode,
+    theme_episode_revision_from_persistence,
 )
 
 
@@ -86,6 +87,25 @@ def test_open_ended_episode_persistence_matches_null_v2_golden_document():
     assert revision.content_hash == vector["content_hash"]
     assert revision.revision_id == vector["revision_id"]
     assert revision.to_persistence_row() == vector["persistence_row"]
+
+
+def test_persisted_episode_head_round_trips_through_the_canonical_v2_type():
+    row = THEME_EPISODE_VECTOR["persistence_row"]
+
+    parsed = theme_episode_revision_from_persistence(row)
+
+    assert parsed.to_persistence_row() == row
+
+
+def test_persisted_episode_head_rejects_rehashed_or_extra_shape():
+    row = {**THEME_EPISODE_VECTOR["persistence_row"], "invented": True}
+    with pytest.raises(ValueError, match="shape"):
+        theme_episode_revision_from_persistence(row)
+
+    row = dict(THEME_EPISODE_VECTOR["persistence_row"])
+    row["content_hash"] = "0" * 64
+    with pytest.raises(ValueError, match="hash"):
+        theme_episode_revision_from_persistence(row)
 
 
 def test_episode_persistence_normalizes_story_identity_and_rejects_short_state_reason():

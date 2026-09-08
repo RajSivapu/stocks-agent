@@ -86,7 +86,8 @@ An owner-only personal stock agent that uses zero-incremental-cost data sources,
 - [x] Implement the approved capability-aware source planner, dated security reference, official
   source cursors, ticker-independent event/entity resolution, bounded role/theme reverse discovery,
   value-chain graph, primary exposure facts, broad screens, theme memory, and bounded next-run
-  research nominations
+  research nominations; the normal collector persists canonical V2 episode revisions and consumes
+  eligible due nominations within the three-task research-only cap
 - [x] Keep research eligibility, portfolio suitability, and action authorization as separate states;
   missing suitability may preserve research but cannot authorize an action
 - [x] Pass the priority-theme, held-out-sector, adversarial, restart, quota, recovery, byte-limit, and
@@ -107,7 +108,7 @@ The September 8 currently-deployed operational evidence, the new protected relea
 new V1-C3 scheduled capability receipt are separate artifacts. Existing evidence cannot be relabeled
 as candidate capability proof. Market-wide migrations are the immutable additive chain from
 `20261005_market_wide_discovery.sql` through
-`20261012_theme_memory_research_nominations.sql`; `20261004` remains the separate reconciliation
+`20261013_v2_runtime_completion.sql`; `20261004` remains the separate reconciliation
 baseline.
 
 - [x] Confirm live Auth is signup-disabled with 900-second JWT, six-digit/600-second OTP settings, and `ConfirmationURL` magic-link and recovery templates

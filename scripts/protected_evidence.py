@@ -318,7 +318,6 @@ class PostgresReadOnlySource:
 
     def release_rows(self, run_id: str) -> dict:
         require(bool(re.fullmatch(r"[0-9a-f-]{36}", run_id)), "run UUID is required")
-        parameter = (run_id,)
         selected_manifests = (
             "SELECT manifest_id FROM public.market_reference_run_bindings "
             "WHERE run_id=%s::uuid AND manifest_id IS NOT NULL"
@@ -347,8 +346,17 @@ class PostgresReadOnlySource:
             "research_nominations_v2": RECOVERY_SQL["research_nominations_v2"] + " WHERE origin_run_id=%s::uuid",
             "research_nomination_lifecycle_v2": RECOVERY_SQL["research_nomination_lifecycle_v2"] + " WHERE transition_run_id=%s::uuid",
             "intelligence_memory_context_bindings_v2": RECOVERY_SQL["intelligence_memory_context_bindings_v2"] + " WHERE run_id=%s::uuid",
-            "source_quota_reservations": RECOVERY_SQL["source_quota_reservations"] + " WHERE run_id=%s::uuid",
-            "source_receipts": RECOVERY_SQL["source_receipts"] + " WHERE run_id=%s::uuid",
+            "source_quota_reservations": RECOVERY_SQL["source_quota_reservations"] + """ WHERE run_id=%s::uuid OR id IN (
+                SELECT receipt.reservation_id FROM public.market_source_receipts receipt
+                JOIN public.market_source_items item ON item.source_receipt_id=receipt.id
+                JOIN public.market_intelligence_run_items run_item ON run_item.source_item_id=item.id
+                WHERE run_item.run_id=%s::uuid
+            )""",
+            "source_receipts": RECOVERY_SQL["source_receipts"] + """ WHERE run_id=%s::uuid OR id IN (
+                SELECT item.source_receipt_id FROM public.market_source_items item
+                JOIN public.market_intelligence_run_items run_item ON run_item.source_item_id=item.id
+                WHERE run_item.run_id=%s::uuid
+            )""",
             "source_items": RECOVERY_SQL["source_items"] + " WHERE id IN (SELECT source_item_id FROM public.market_intelligence_run_items WHERE run_id=%s::uuid)",
             "intelligence_run_items": RECOVERY_SQL["intelligence_run_items"] + " WHERE run_id=%s::uuid",
             "source_item_provenance": RECOVERY_SQL["source_item_provenance"] + " WHERE source_item_id IN (SELECT source_item_id FROM public.market_intelligence_run_items WHERE run_id=%s::uuid)",
@@ -365,7 +373,10 @@ class PostgresReadOnlySource:
             "origins": "SELECT request_id::text AS request_id,run_id::text AS run_id,requested_packet_id::text AS requested_packet_id,scheduled_phase,market_date::text AS market_date,requested_kind,requested_report_id::text AS requested_report_id,requested_idempotency_key,requested_report_hash FROM public.market_report_request_origins WHERE run_id=%s::uuid",
             "quota": "SELECT q.id::text AS id,q.run_id::text AS run_id,q.provider,q.reserved_requests,COALESCE((SELECT sum(r.request_cost) FROM public.market_source_receipts r WHERE r.reservation_id=q.id),0)::int AS actual_requests FROM public.market_source_quota_reservations q WHERE q.run_id=%s::uuid",
         }
-        result = {name: self.query(sql, parameter) for name, sql in queries.items()}
+        result = {
+            name: self.query(sql, (run_id,) * sql.count("%s"))
+            for name, sql in queries.items()
+        }
         result["requests"] = self.query("""SELECT request_id::text AS request_id,run_id::text AS run_id,operation,status,response FROM public.market_gateway_requests
             WHERE run_id=%s::uuid OR request_id IN (SELECT request_id FROM public.market_report_request_origins WHERE run_id=%s::uuid)""", (run_id, run_id))
         return result

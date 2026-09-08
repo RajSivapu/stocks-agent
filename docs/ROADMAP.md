@@ -38,7 +38,7 @@ triggered. See `docs/rollouts/2026-09-06-market-wide-thematic-discovery-v1.md` f
 The next release uses the protected multi-component path for the database, all three changed Edge
 functions, managed runtime configuration, and the owner Site. Its immutable discovery migration tail
 starts at `20261005_market_wide_discovery.sql` and ends at
-`20261012_theme_memory_research_nominations.sql`; `20261004` remains the separate historical
+`20261013_v2_runtime_completion.sql`; `20261004` remains the separate historical
 reconciliation baseline. Protected release proof, normal scheduled operational proof, and V1-C3
 capability proof are three distinct receipts. None of the new production receipts exists yet.
 

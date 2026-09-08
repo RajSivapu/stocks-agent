@@ -162,6 +162,26 @@ def _capability_rows():
         "candidate_count": 0, "evidence_count": 0, "packet_hash": digest(packet),
         "packet": packet, "created_at": "2026-09-05T19:45:00Z",
     }
+    completion_receipts = []
+    for checkpoint_receipt in (row["result"]["checkpoint"]["receipt"] for row in tasks[1:]):
+        completion_receipts.append({
+            "id": checkpoint_receipt["source_receipt_id"],
+            "reservation_id": checkpoint_receipt["reservation_id"],
+            "status": checkpoint_receipt["status"],
+            "cache_key": checkpoint_receipt["cache_key"],
+            "requested_window": checkpoint_receipt["requested_window"],
+            "retrieved_at": checkpoint_receipt["retrieved_at"],
+            "expires_at": checkpoint_receipt["expires_at"],
+            "request_cost": checkpoint_receipt["request_cost"],
+            "upstream_remaining": checkpoint_receipt["upstream_remaining"],
+            "returned_count": checkpoint_receipt["returned_count"],
+            "accepted_count": checkpoint_receipt["accepted_count"],
+            "duplicate_count": checkpoint_receipt["duplicate_count"],
+            "dropped_count": checkpoint_receipt["dropped_count"],
+            "error": None,
+            "response_hash": checkpoint_receipt["response_hash"],
+            "cache_predecessor_receipt_id": None,
+        })
     return {
         "run": [{"id": RUN, "scheduled_phase": "post-market", "scheduled_market_date": "2026-09-05"}],
         "intelligence_runs": [{"id": RUN, "phase": "post-market", "market_date": "2026-09-05"}],
@@ -180,7 +200,7 @@ def _capability_rows():
         "packets": [packet_row],
         "completions": [{
             "completion_id": COLLECTION, "run_id": RUN,
-            "payload": {"receipts": [row["result"]["checkpoint"]["receipt"] for row in tasks[1:]],
+            "payload": {"receipts": completion_receipts,
                         "packet": packet_row, "coverage": coverage},
             "receipt": {"packet_id": PACKET, "packet_hash": packet_row["packet_hash"]},
         }],
@@ -223,10 +243,9 @@ def _make_first_required_receipt_nonempty(rows, *, persist_lineage):
     parsed["metadata"]["coverage_status"] = "success_nonempty"
     completion = next(
         row for row in rows["completions"][0]["payload"]["receipts"]
-        if row["source_receipt_id"] == receipt_id
+        if row["id"] == receipt_id
     )
     completion.update(returned_count=1, accepted_count=1)
-    completion["metadata"]["coverage_status"] = "success_nonempty"
     stored = next(row for row in rows["source_receipts"] if row["id"] == receipt_id)
     stored.update(returned_count=1, accepted_count=1)
     if not persist_lineage:
@@ -280,6 +299,177 @@ def test_discovery_capability_accepts_success_nonempty_with_saved_item_provenanc
     assert _verify_capability(rows).ok is True
 
 
+def test_discovery_capability_accepts_overlapping_query_duplicate_receipt_lineage():
+    rows = _capability_rows()
+    _make_first_required_receipt_nonempty(rows, persist_lineage=True)
+    duplicate_task = next(
+        row for row in rows["discovery_stage_tasks"][2:]
+        if row["capability_id"] == "gdelt_theme_search"
+    )
+    parsed = duplicate_task["result"]["checkpoint"]["receipt"]
+    duplicate_receipt_id = parsed["source_receipt_id"]
+    parsed.update(returned_count=1, accepted_count=1)
+    parsed["metadata"]["coverage_status"] = "success_nonempty"
+    next(
+        row for row in rows["completions"][0]["payload"]["receipts"]
+        if row["id"] == duplicate_receipt_id
+    ).update(returned_count=1, accepted_count=1)
+    next(
+        row for row in rows["source_receipts"] if row["id"] == duplicate_receipt_id
+    ).update(returned_count=1, accepted_count=1)
+    rows["packets"][0]["packet"]["coverage"]["duplicate_references"] = [{
+        "item_id": rows["source_items"][0]["id"],
+        "receipt_id": duplicate_receipt_id,
+        "reason": "same_content_hash",
+    }]
+    _rebind_packet_completion(rows)
+    rows["completions"][0]["payload"]["coverage"]["collector_drops"] = [{
+        "candidate_key": "",
+        "item_id": rows["source_items"][0]["id"],
+        "kind": "source_item",
+        "reason": "same_content_hash",
+        "stage": "deduplication",
+    }]
+
+    assert _verify_capability(rows).ok is True
+
+
+def test_discovery_capability_accepts_pre_refresh_unresolved_plan_bound_to_fresh_manifest():
+    rows = _capability_rows()
+    source_plan = rows["packets"][0]["packet"]["coverage"]["source_plan"]
+    source_plan["reference_version"] = "sec:unresolved"
+    source_plan["plan_hash"] = digest({
+        key: value for key, value in source_plan.items() if key != "plan_hash"
+    })
+    _rebind_packet_completion(rows)
+
+    assert _verify_capability(rows).ok is True
+
+
+def test_discovery_capability_accepts_distinct_persisted_task_request_windows():
+    rows = _capability_rows()
+    task = next(
+        row for row in rows["discovery_stage_tasks"]
+        if row["capability_id"] == "gdelt_theme_search"
+    )
+    window = {"start": "2026-09-05T11:00:00Z", "end": "2026-09-05T19:00:00Z"}
+    task["requested_window"] = window
+    checkpoint = task["result"]["checkpoint"]["receipt"]
+    checkpoint["requested_window"] = window
+    receipt_id = checkpoint["source_receipt_id"]
+    next(row for row in rows["source_receipts"] if row["id"] == receipt_id)[
+        "requested_window"
+    ] = window
+    next(
+        row for row in rows["completions"][0]["payload"]["receipts"]
+        if row["id"] == receipt_id
+    )["requested_window"] = window
+
+    assert _verify_capability(rows).ok is True
+
+
+def test_discovery_capability_accepts_cross_run_content_addressed_source_item_reuse():
+    rows = _capability_rows()
+    _add_unresolved_research_candidate(rows)
+    current_receipt_id = rows["intelligence_run_items"][0]["source_receipt_id"]
+    current_receipt = next(
+        row for row in rows["source_receipts"] if row["id"] == current_receipt_id
+    )
+    prior_run_id = "99999999-9999-4999-8999-999999999999"
+    prior_receipt_id = "88888888-8888-4888-8888-888888888888"
+    prior_reservation_id = "77777777-7777-4777-8777-777777777777"
+    rows["source_receipts"].append({
+        **copy.deepcopy(current_receipt), "id": prior_receipt_id,
+        "run_id": prior_run_id, "reservation_id": prior_reservation_id,
+    })
+    rows["source_quota_reservations"].append({
+        "id": prior_reservation_id, "run_id": prior_run_id, "provider": "gdelt",
+        "market_date": "2026-09-04", "phase": "post-market",
+        "reserved_requests": 1, "cache_keys": [current_receipt["cache_key"]],
+        "created_at": "2026-09-04T19:30:00Z",
+    })
+    rows["source_items"][0]["source_receipt_id"] = prior_receipt_id
+
+    assert _verify_capability(rows).ok is True
+
+
+def test_discovery_capability_accepts_truthful_near_duplicate_disposition():
+    rows = _capability_rows()
+    _make_first_required_receipt_nonempty(rows, persist_lineage=True)
+    rows["intelligence_run_items"][0].update(
+        disposition="near_duplicate", drop_reason="same_story_different_source",
+    )
+
+    assert _verify_capability(rows).ok is True
+
+
+def _add_unresolved_research_candidate(rows):
+    _make_first_required_receipt_nonempty(rows, persist_lineage=True)
+    item = rows["source_items"][0]
+    receipt_id = rows["intelligence_run_items"][0]["source_receipt_id"]
+    item_id = item["id"]
+    evidence = {
+        "authority": "radar", "canonical_url": item["canonical_url"],
+        "claim_type": "event", "content_hash": item["content_hash"],
+        "effective_at": None, "item_id": item_id,
+        "normalized_text": item["normalized_text"],
+        "published_at": item["published_at"], "reporting_at": None,
+        "retrieved_at": "2026-09-05T19:40:00Z",
+        "source_identity": {
+            "provider": "gdelt", "receipt_id": receipt_id,
+            "upstream_item_id": item["upstream_item_id"],
+        },
+    }
+    lineage = {
+        "cash_revision": None, "evidence_receipt_ids": {item_id: receipt_id},
+        "observed_at": "2026-09-05T19:40:00.000Z", "policy_version": 1,
+        "portfolio_revision": None, "quote_as_of": None, "quote_expires_at": None,
+        "quote_receipt_id": None, "reference_expires_at": None,
+        "reference_manifest_id": None, "reference_revision": None,
+        "run_id": RUN, "security_revision_id": None,
+    }
+    suitability_body = {
+        "component_scores": {
+            "concentration_penalty": "0.000000", "duplication_penalty": "0.000000",
+            "liquidity": "0.000000", "portfolio_relevance": "0.000000",
+        },
+        "lineage": lineage, "missing_reasons": ["analysis_not_ready"],
+        "state": "unknown", "veto_reasons": [],
+    }
+    suitability = {
+        **suitability_body, "evaluation_hash": digest(suitability_body),
+    }
+    candidate_body = {
+        "adverse_paths": [], "candidate_key": "unresolved:event-one",
+        "entity_id": "unresolved:event-one", "event_ids": ["event-one"],
+        "evidence": [{
+            "claim_type": "event", "item_id": item_id,
+            "relationship_eligible": False, "role": "supporting",
+        }],
+        "exposure_fact_ids": [], "limitations": ["security_identity_unresolved"],
+        "priority_components": {
+            "authority_corroboration": "0.000000", "exposure": "0.000000",
+            "materiality": "0.500000", "recency": "1.000000",
+        },
+        "priority_score": "1.500000", "research_state": "unresolved",
+        "roles": [], "security_id": None, "suitability": suitability,
+        "theme_ids": ["critical_minerals_magnets"], "ticker": None,
+    }
+    candidate = {**candidate_body, "candidate_hash": digest(candidate_body)}
+    packet = rows["packets"][0]["packet"]
+    packet["evidence"] = [evidence]
+    packet["research_candidates"] = [candidate]
+    _rebind_packet_completion(rows)
+    return candidate
+
+
+def test_discovery_capability_accepts_unresolved_candidate_with_null_reference_lineage():
+    rows = _capability_rows()
+    _add_unresolved_research_candidate(rows)
+
+    assert _verify_capability(rows).ok is True
+
+
 def test_discovery_capability_accepts_success_empty_when_all_returned_rows_are_dropped():
     rows = _capability_rows()
     task = next(
@@ -290,7 +480,7 @@ def test_discovery_capability_accepts_success_empty_when_all_returned_rows_are_d
     receipt_id = parsed["source_receipt_id"]
     completion = next(
         row for row in rows["completions"][0]["payload"]["receipts"]
-        if row["source_receipt_id"] == receipt_id
+        if row["id"] == receipt_id
     )
     stored = next(row for row in rows["source_receipts"] if row["id"] == receipt_id)
     for row in (parsed, completion, stored):
@@ -310,7 +500,7 @@ def test_discovery_capability_rejects_nonempty_label_when_accepted_count_is_zero
     receipt_id = parsed["source_receipt_id"]
     completion = next(
         row for row in rows["completions"][0]["payload"]["receipts"]
-        if row["source_receipt_id"] == receipt_id
+        if row["id"] == receipt_id
     )
     stored = next(row for row in rows["source_receipts"] if row["id"] == receipt_id)
     for row in (parsed, completion, stored):
@@ -435,6 +625,33 @@ def test_discovery_capability_rejects_research_to_action_promotion():
     _rebind_packet_completion(rows)
 
     with pytest.raises(RuntimeError, match="action|promotion"):
+        _verify_capability(rows)
+
+
+def test_discovery_capability_rejects_rehashed_evidence_free_analysis_ready_promotion():
+    rows = _capability_rows()
+    candidate = _add_unresolved_research_candidate(rows)
+    packet = rows["packets"][0]["packet"]
+    candidate["research_state"] = "analysis_ready"
+    candidate["evidence"] = []
+    candidate["limitations"] = []
+    suitability = candidate["suitability"]
+    suitability.update(state="eligible", missing_reasons=[], veto_reasons=[])
+    suitability["evaluation_hash"] = digest({
+        key: value for key, value in suitability.items() if key != "evaluation_hash"
+    })
+    candidate["candidate_hash"] = digest({
+        key: value for key, value in candidate.items() if key != "candidate_hash"
+    })
+    packet["evidence"] = []
+    packet["action_candidates"] = [{
+        "candidate_key": candidate["candidate_key"],
+        "candidate_hash": candidate["candidate_hash"],
+        "suitability_hash": suitability["evaluation_hash"],
+    }]
+    _rebind_packet_completion(rows)
+
+    with pytest.raises(RuntimeError, match="action|promotion|semantics|research|lineage"):
         _verify_capability(rows)
 
 
@@ -778,6 +995,13 @@ def test_protected_release_extraction_reads_reused_reference_and_full_source_lin
     assert "market_reference_run_bindings" in sql_by_key["reference_chunk_receipts"]
     assert "market_reference_snapshot_memberships" in sql_by_key["security_reference_revisions"]
     assert "market_intelligence_run_items" in sql_by_key["source_items"]
+    assert "market_intelligence_run_items" in sql_by_key["source_receipts"]
+    assert "market_source_items" in sql_by_key["source_receipts"]
+    assert "market_source_receipts" in sql_by_key["source_quota_reservations"]
+    source_receipt_query = queries[list(rows).index("source_receipts")]
+    reservation_query = queries[list(rows).index("source_quota_reservations")]
+    assert source_receipt_query[1] == (RUN, RUN)
+    assert reservation_query[1] == (RUN, RUN)
 
 
 def test_production_source_refuses_unprotected_deployment(monkeypatch):
