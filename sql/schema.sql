@@ -14305,9 +14305,9 @@ GRANT EXECUTE ON FUNCTION public.record_market_report(UUID,TEXT,JSONB)
 -- Consolidated from sql/migrations/20261015_release_reader_source_tables.sql
 BEGIN;
 
--- The source/provenance tables predate the dedicated release reader. Include
--- them in its evidence-only scope so pre/post release snapshots cover every
--- persisted market input without granting direct privileges to the login.
+-- Repair the complete protected evidence-reader scope for tables created
+-- before and after the dedicated reader. This keeps pre/post release snapshots
+-- complete without granting direct privileges to the login role.
 DO $$
 DECLARE name TEXT;
 BEGIN
@@ -14315,7 +14315,9 @@ BEGIN
     'market_source_items',
     'market_intelligence_run_items',
     'market_source_item_provenance',
-    'market_run_source_item_provenance'
+    'market_run_source_item_provenance',
+    'market_enrichment_selection_manifests',
+    'market_enrichment_request_descriptors'
   ] LOOP
     IF to_regclass(format('public.%I', name)) IS NULL THEN
       RAISE EXCEPTION 'release evidence relation missing: %', name USING ERRCODE = '42P01';

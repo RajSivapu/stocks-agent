@@ -585,15 +585,18 @@ def test_candidate_dry_run_uses_the_pre_migration_reader_mode():
     assert "PostgresReadOnlySource(url, project_ref, pre_migration_baseline=True)" in script
 
 
-def test_release_reader_scope_includes_existing_market_source_tables():
+def test_release_reader_scope_repairs_every_legacy_and_enrichment_table():
     migration = (release.ROOT / "sql/migrations/20261015_release_reader_source_tables.sql").read_text()
     for table in (
         "market_source_items", "market_intelligence_run_items",
         "market_source_item_provenance", "market_run_source_item_provenance",
+        "market_enrichment_selection_manifests",
+        "market_enrichment_request_descriptors",
     ):
         assert f"'{table}'" in migration
     assert "GRANT SELECT ON public.%I TO stock_agent_release_reader" in migration
     assert "REVOKE ALL ON public.%I FROM stock_agent_release_reader,stock_agent_release_reader_runtime" in migration
+    assert "CREATE POLICY release_evidence_select ON public.%I" in migration
 
 
 def test_protected_workflow_passes_recoverable_prior_secret_values():

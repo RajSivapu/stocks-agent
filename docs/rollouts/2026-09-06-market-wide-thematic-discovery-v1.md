@@ -95,13 +95,14 @@ release must not invent or apply one.
 | `20261012_theme_memory_research_nominations.sql` | `a7274c8c4af3046cbbf6145e169a79e1852edcd8ccbdfa0b8885a3da8c9c365d` |
 | `20261013_v2_runtime_completion.sql` | `5a5e4138ab3d816df0218d03a00f5e5f49005d1cc65ec9bd5e81500dacac6ea0` |
 | `20261014_honest_empty_report_persistence.sql` | `872400cd1b5a6701056b837a346add08c0785cf782cad2abb6e34e4cc6713a36` |
-| `20261015_release_reader_source_tables.sql` | `c3184f0e875e9ab967eac1a9ec0cd5a87c14e771931b090a69467f39bd300c60` |
+| `20261015_release_reader_source_tables.sql` | `24fa602aaea899438adc1fe32091ed9c13a845efd547e820f6799b3514f8722a` |
 
 The reviewed `20261005` through `20261013` migration bytes remain unchanged. The `20261014`
 migration is the additive honest-empty report persistence fix. The `20261015` migration is the
-additive release-security fix that grants the existing source/provenance tables to the restricted
-reader; its normalized migration-statements SHA-256 is
-`36d1bcf8a4add8e1726d4a755d7001def082134c50947c828bf70c2b8374454b`, and `sql/schema.sql` ends
+additive release-security fix that grants the legacy source/provenance and enrichment tables to the
+restricted reader and supplies their unconditional evidence-reader policies; its normalized
+migration-statements SHA-256 is
+`8d0efee3cbc4639478b2433540674b27220d10e97e7c691015a2dcaedc8becd4`, and `sql/schema.sql` ends
 with its exact bytes. The protected dry-run accepts only the exact `20261004` omission set or the
 fully migrated zero-omission retry state; any partial or unexpected table drift fails closed.
 The protected release uses the repository's complete immutable migration manifest and applies only

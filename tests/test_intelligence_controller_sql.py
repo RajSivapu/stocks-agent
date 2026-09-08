@@ -19,6 +19,41 @@ import pytest
 ROOT = Path(__file__).resolve().parents[1]
 
 
+def protected_release_reader_policy_state(connection, table):
+    return connection.execute(
+        """SELECT has_table_privilege('stock_agent_release_reader_runtime',
+                   format('public.%%I', c.relname),'SELECT') AS readable,
+                  NOT has_table_privilege('stock_agent_release_reader_runtime',
+                   format('public.%%I', c.relname),'INSERT,UPDATE,DELETE,TRUNCATE,TRIGGER') AS read_only,
+                  c.relrowsecurity AS rls_enabled,
+                  NOT pg_has_role('stock_agent_release_reader_runtime',c.relowner,'MEMBER') AS reader_is_not_owner,
+                  EXISTS (
+                    SELECT 1 FROM pg_catalog.pg_policy p
+                    WHERE p.polrelid=c.oid AND p.polcmd IN ('r','*') AND p.polpermissive
+                      AND pg_get_expr(p.polqual,p.polrelid)='true'
+                      AND EXISTS (
+                        SELECT 1 FROM unnest(p.polroles) AS role_oid
+                        WHERE role_oid=0 OR pg_has_role(
+                          'stock_agent_release_reader_runtime',role_oid,'MEMBER')
+                      )
+                  ) AS unrestricted_select,
+                  NOT EXISTS (
+                    SELECT 1 FROM pg_catalog.pg_policy p
+                    WHERE p.polrelid=c.oid AND p.polcmd IN ('r','*') AND NOT p.polpermissive
+                      AND pg_get_expr(p.polqual,p.polrelid) IS DISTINCT FROM 'true'
+                      AND EXISTS (
+                        SELECT 1 FROM unnest(p.polroles) AS role_oid
+                        WHERE role_oid=0 OR pg_has_role(
+                          'stock_agent_release_reader_runtime',role_oid,'MEMBER')
+                      )
+                  ) AS no_restrictive_filter
+           FROM pg_catalog.pg_class c
+           JOIN pg_catalog.pg_namespace n ON n.oid=c.relnamespace
+           WHERE n.nspname='public' AND c.relname=%s""",
+        (table,),
+    ).fetchone()
+
+
 @pytest.fixture(scope="module")
 def databases():
     binaries = {name: shutil.which(name) for name in ("initdb", "pg_ctl")}
@@ -88,6 +123,21 @@ def prepared_run(connection, *, provider="gdelt", cache=False, checkpoint=True, 
         "packet": {"id": str(uuid.uuid4()), "candidate_count": 0, "evidence_count": 0, "packet": packet,
                    "packet_hash": hashlib.sha256(canonical.encode()).hexdigest()}, "error": None}
     return run, completion, original, payload
+
+
+@pytest.mark.parametrize("kind", ["fresh", "ordered"])
+def test_complete_schema_has_effective_release_reader_policy_for_all_55_tables(databases, kind):
+    from lib.release_baseline import PROTECTED_RELEASE_READ_TABLES
+
+    states = {
+        table: protected_release_reader_policy_state(databases[kind], table)
+        for table in PROTECTED_RELEASE_READ_TABLES
+    }
+    assert len(states) == 55
+    assert all(state == (True, True, True, True, True, True) for state in states.values()), {
+        table: state for table, state in states.items()
+        if state != (True, True, True, True, True, True)
+    }
 
 
 @pytest.mark.parametrize("kind", ["fresh", "ordered"])
