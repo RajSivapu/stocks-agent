@@ -526,6 +526,9 @@ def test_release_workflow_binds_review_times_and_durable_pre_mutation_recovery()
 
 def test_release_preflights_and_uses_the_project_bound_admin_pooler_everywhere():
     workflow = yaml.safe_load(Path(".github/workflows/owner-dashboard-release.yml").read_text())
+    release_env = workflow["jobs"]["release"]["env"]
+    assert release_env["PGSSLMODE"] == "verify-full"
+    assert release_env["PGSSLROOTCERT"] == "${{ github.workspace }}/config/supabase-prod-ca-2021.crt"
     steps = {row.get("name"): row for row in workflow["jobs"]["release"]["steps"]}
     preflight = steps[
         "Require configured protected backend capture deployment readback and recovery transport"
@@ -549,6 +552,9 @@ def test_release_preflights_and_uses_the_project_bound_admin_pooler_everywhere()
     recovery = yaml.safe_load(
         Path(".github/workflows/owner-dashboard-release-recovery.yml").read_text()
     )
+    recovery_env = recovery["jobs"]["recover"]["env"]
+    assert recovery_env["PGSSLMODE"] == "verify-full"
+    assert recovery_env["PGSSLROOTCERT"] == "${{ github.workspace }}/config/supabase-prod-ca-2021.crt"
     independent = next(
         row for row in recovery["jobs"]["recover"]["steps"]
         if row.get("name") == "Restore encrypted changed-component journal for the exact failed release"

@@ -128,6 +128,14 @@ def release_admin_database_url(
     ):
         raise ValueError("a project-matched administrator database URL is required")
 
+    return validate_release_admin_session_url(project_ref, session_template)
+
+
+def validate_release_admin_session_url(project_ref: str, session_template: str) -> str:
+    """Validate the project-bound administrator Supavisor session URL."""
+    if not PROJECT_REF_PATTERN.fullmatch(project_ref):
+        raise ValueError("a canonical Supabase project reference is required")
+
     session = urlparse(session_template)
     try:
         session_port = session.port

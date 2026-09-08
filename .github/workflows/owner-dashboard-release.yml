@@ -27,6 +27,7 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 45
     env:
+      PGSSLMODE: verify-full
       PGSSLROOTCERT: ${{ github.workspace }}/config/supabase-prod-ca-2021.crt
     steps:
       - name: Authenticate exact reviewed main candidate without candidate code

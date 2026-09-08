@@ -23,6 +23,9 @@ jobs:
     environment: owner-dashboard-production
     runs-on: ubuntu-24.04
     timeout-minutes: 20
+    env:
+      PGSSLMODE: verify-full
+      PGSSLROOTCERT: ${{ github.workspace }}/config/supabase-prod-ca-2021.crt
     steps:
       - name: Verify exact failed-release deployment trust marker
         id: trust
