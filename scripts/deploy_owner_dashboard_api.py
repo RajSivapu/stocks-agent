@@ -327,13 +327,6 @@ def verify_reviewed_sha(
         raise RuntimeError("deployment requires an exact reviewed SHA")
     if reviewed_sha == candidate_sha:
         return candidate_sha
-    ancestor = _run(
-        ["git", "merge-base", "--is-ancestor", reviewed_sha, candidate_sha],
-        cwd=repo_root,
-        runner=runner,
-    )
-    if getattr(ancestor, "returncode", 1) == 0:
-        return candidate_sha
     reviewed_tree = _run(
         ["git", "rev-parse", f"{reviewed_sha}^{{tree}}"], cwd=repo_root, runner=runner
     )
@@ -1291,12 +1284,12 @@ def main() -> int:
     if not key:
         raise SystemExit("RELEASE_RECOVERY_KEY is required for authenticated encrypted component recovery")
     from scripts.release_components import load_native_release_adapter, run_native_release
-    from scripts.verify_personal_stock_agent_v1 import verify_component_artifacts
     context = {"candidate_sha": git_sha, "project_ref": arguments.project_ref,
                "lease_owner": arguments.lease_owner,
                "release_run_id": os.environ.get("GITHUB_RUN_ID"),
                "release_run_attempt": os.environ.get("GITHUB_RUN_ATTEMPT"),
-               "deployment_id": arguments.deployment_id, "allowed_origin": arguments.allowed_origin,
+               "deployment_id": arguments.deployment_id, "evidence_directory": str(arguments.evidence_directory),
+               "allowed_origin": arguments.allowed_origin,
                "site_origin": arguments.site_origin, "owner_user_id": owner_user_id}
     adapter = load_native_release_adapter(context)
     manifest = candidate_migration_manifest()
@@ -1310,15 +1303,17 @@ def main() -> int:
         receipt["migrations"] = migrations["candidate"]
         receipt["migration_application"] = migrations
         verify_release_artifact_receipts(git_sha, receipt, manifest)
-        verify_component_artifacts(ROOT, git_sha, receipt, adapter)
+        if [row.get("component") for row in receipt.get("component_readbacks", [])] != list(CHANGED_FUNCTIONS):
+            raise RuntimeError("protected backend readback receipt is incomplete")
         captured = adapter.capture("dashboard-secrets")
         database_url = captured["values"]["DASHBOARD_DATABASE_URL"]
         receipt["canary"] = run_post_deploy_canary(
             arguments.project_ref, arguments.allowed_origin, database_url, owner_email,
             service_key, publishable_key, non_owner_access_token,
         )
-    # There is one mutation path. Capture and encrypted retention occur before
-    # migrate(), role/secret changes, Edge writes, or the Site deployment.
+    # There is one protected backend mutation path. Capture and encrypted
+    # retention occur before migrate(), role/secret changes, or Edge writes.
+    # Owner-only Sites publication is a separate native operation and receipt.
     with DurableMutationLease(admin_url, arguments.lease_owner, "release") as lease:
         receipt = run_native_release(
             adapter, context, repo_root=ROOT, journal_path=arguments.release_state,

@@ -32,9 +32,13 @@ An owner-only personal stock agent that uses zero-incremental-cost data sources,
 - [x] Canonical NYSE calendar synchronized through 2028 with fail-closed behavior outside coverage
 - [x] Task 11 release-candidate gate passed: Python 1,480, Node 71, Deno 333, package tests 7 + 53,
   Playwright 24, plus typecheck, lint, license, build, and bundle checks
+- [x] Final release-trust gate passed: **1,997 checks** — Python 1,509, Node 71, Deno 333,
+  package tests 7 + 53, and Playwright 24; 3 Python and 1 Playwright tests skipped, with 4
+  credentialed database tests intentionally deselected; typecheck, lint, license, build, and bundle
+  checks also passed
 - [ ] Next existing scheduled-chain receipt
-- [ ] Complete exact-candidate review, protected release/Site readback, and normal scheduled V1-C3
-  capability proof
+- [ ] Complete exact-candidate review, protected backend release, separate native Sites publication
+  and readback, and normal scheduled V1-C3 capability proof
 
 ## Completed implementation areas
 
@@ -94,8 +98,8 @@ An owner-only personal stock agent that uses zero-incremental-cost data sources,
   honestly-empty-run acceptance gates
 - [x] Synchronize the official published NYSE 2026–2028 holidays and early closes across Python,
   gateway session logic, and dashboard freshness; fail closed after maintained coverage
-- [ ] Complete exact-candidate Astra review, exact-head and exact-main CI, protected multi-component
-  release, owner Site publication/readback, rollback capture, and normal scheduled capability receipts
+- [ ] Complete exact-candidate Astra review, exact-head and exact-main CI, protected backend release,
+  native Sites publication/readback, backend recovery capture, and normal scheduled capability receipts
 - [ ] Close V1-C2 through V1-C6 and the active V1 goal only after each checkpoint has its own evidence
 - [ ] Review Alert V3 separately in shadow/canary mode after V1 closes; do not arm a new schedule as
   part of market-wide discovery
@@ -104,9 +108,9 @@ An owner-only personal stock agent that uses zero-incremental-cost data sources,
 
 These require the protected production path and must not be replaced by local evidence.
 
-The September 8 currently-deployed operational evidence, the new protected release receipt, and the
-new V1-C3 scheduled capability receipt are separate artifacts. Existing evidence cannot be relabeled
-as candidate capability proof. Market-wide migrations are the immutable additive chain from
+The September 8 currently-deployed operational evidence, the new protected backend receipt, the
+new native Sites receipt, and the new V1-C3 scheduled capability receipt are separate artifacts.
+Existing evidence cannot be relabeled as candidate capability proof. Market-wide migrations are the immutable additive chain from
 `20261005_market_wide_discovery.sql` through
 `20261013_v2_runtime_completion.sql`; `20261004` remains the separate reconciliation
 baseline.
@@ -122,6 +126,8 @@ baseline.
 - [x] Publish the simplified and accessibility-reviewed UI as owner-only Site v7 from exact main `a4c8031`; deployment `appgdep_6a9df7eee2cc819193fefc13aa39d8bb` succeeded and `docs/receipts/2026-09-06-native-site-v7.json` binds the source, build, live scripts, access, and rollback
 - [x] Publish the link-only owner Auth correction as owner-only Site v8 from exact main `b433a5b`; deployment `appgdep_6a9dff357ee88191bf08d54af6f4240f` succeeded and `docs/receipts/2026-09-06-native-site-v8.json` binds the source, build, live scripts, access, and v7 rollback
 - [x] Publish password-primary owner Auth with signed-link setup/recovery as owner-only Site v9 from exact main `e2f9d74`; deployment `appgdep_6a9e15085f048191a80497d9e75fd253` succeeded and `docs/receipts/2026-09-06-native-site-v9.json` binds the source, build, Auth readback, live assets, Sol review, access, and v8 rollback
+- [ ] Release the exact market-wide candidate backend through the protected GitHub workflow and verify its immutable component/recovery artifact
+- [ ] Publish that same exact candidate as the private owner Site through the native Sites connector and validate its native Sites receipt with `scripts/verify_native_site_release.py`
 - [x] Complete an owner email sign-in canary on signed-link Site v5 — **owner confirmed the signed email link opened the portfolio dashboard on 2026-09-05; Site v9 preserves the same callback as setup/recovery and fallback**
 - [x] Perform the protected restore drill and retain its receipt — **run `34042155368` restored and
   verified 26 record sets, preserved identical production roots, applied no migrations on retry,

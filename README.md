@@ -441,22 +441,22 @@ The release verifier also accepts no caller receipt JSON:
 ```bash
 python scripts/verify_personal_stock_agent_v1.py \
   --repository OWNER/REPOSITORY --deployment-id DEPLOYMENT_ID \
-  --production-project-ref PRODUCTION_PROJECT_REF --static-root /absolute/path/to/dist
+  --production-project-ref PRODUCTION_PROJECT_REF --static-root /absolute/path/to/dist \
+  --native-site-receipt /absolute/path/to/native-site-receipt.json
 ```
 
 It uses `gh` read access plus `RELEASE_READONLY_DATABASE_URL`. The protected production GitHub
-deployment must reference an immutable `release_artifact_id`; its sole `release-record.json` file
-contains the candidate/project, CI run and PR IDs, complete migration paths/hashes, function versions
-and source hashes, static source/file hashes, measured dry-run/canary evidence, and the rollback
-capture/exercise records. Artifact provenance must match a successful candidate run of the protected
-`owner-dashboard-release.yml` workflow on main. This evidence publication is a protected rollout
-prerequisite; a missing record/workflow fails verification and is not a deployment claim.
+deployment must reference an immutable release-record artifact. That record binds the candidate,
+repository, exact CI/release workflow identities, latest review state, PR, migration application,
+three Edge readbacks, and one immutable backend evidence artifact with an encrypted-journal receipt.
+Artifact provenance and archive digests must match the successful protected
+`owner-dashboard-release.yml` workflow on `main`.
 
-The deploy tool's required `--evidence-directory` retains predeployment gateway bytes under
-`gateway-source` plus `rollback-capture.json` before any gateway change. Publish those source files
-as the immutable rollback artifact and bind its numeric ID in the protected release record. The
-verifier recomputes local Git commit/time/tree hashes, migration/function/static bytes, captured
-rollback bytes, and exact queried stage/origin/report/outbox identities. It discovers the next
+GitHub Actions releases and recovers the backend only. Publish the exact same candidate through the
+native owner-scoped Sites connector, preserve its prior active version, and supply the resulting
+fresh owner-only receipt to the verifier. The verifier recomputes local Git commit/tree hashes,
+migration/function/static bytes, backend capture bytes, native Site source/backend binding, and exact
+queried stage/origin/report/outbox identities. It discovers the next
 existing scheduled postdeployment run without starting one. Suppression requires its dedicated
 reason; old reasonless rows remain unverified rather than receiving an invented historical reason.
 

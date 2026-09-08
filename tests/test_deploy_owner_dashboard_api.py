@@ -109,27 +109,30 @@ def test_git_release_refuses_dirty_and_unpushed_commits(tmp_path):
         deploy.verify_git_release(tmp_path, unpushed_runner)
 
 
-def test_reviewed_sha_accepts_only_the_exact_candidate_or_a_bound_reviewed_ancestor(tmp_path):
+def test_reviewed_sha_accepts_only_the_exact_candidate_or_identical_reviewed_tree(tmp_path):
     candidate = "a" * 40
     reviewed = "b" * 40
     calls = []
 
-    def ancestor_runner(command, **_options):
+    trees = iter(["shared-tree\n", "shared-tree\n"])
+
+    def identical_tree_runner(command, **_options):
         calls.append(command)
-        return type("Result", (), {"returncode": 0, "stdout": "", "stderr": ""})()
-
-    assert deploy.verify_reviewed_sha(candidate, reviewed, tmp_path, ancestor_runner) == candidate
-    assert calls == [["git", "merge-base", "--is-ancestor", reviewed, candidate]]
-
-    trees = iter(["reviewed-tree\n", "candidate-tree\n"])
-
-    def unrelated_runner(command, **_options):
-        if "merge-base" in command:
-            return type("Result", (), {"returncode": 1, "stdout": "", "stderr": ""})()
         return type("Result", (), {"returncode": 0, "stdout": next(trees), "stderr": ""})()
 
+    assert deploy.verify_reviewed_sha(candidate, reviewed, tmp_path, identical_tree_runner) == candidate
+    assert calls == [
+        ["git", "rev-parse", f"{reviewed}^{{tree}}"],
+        ["git", "rev-parse", f"{candidate}^{{tree}}"],
+    ]
+
+    different_trees = iter(["reviewed-tree\n", "candidate-tree\n"])
+
+    def ancestor_with_different_tree_runner(command, **_options):
+        return type("Result", (), {"returncode": 0, "stdout": next(different_trees), "stderr": ""})()
+
     with pytest.raises(RuntimeError, match="exact reviewed"):
-        deploy.verify_reviewed_sha(candidate, reviewed, tmp_path, unrelated_runner)
+        deploy.verify_reviewed_sha(candidate, reviewed, tmp_path, ancestor_with_different_tree_runner)
 
 
 def test_local_suite_failure_stops_deployment(tmp_path):

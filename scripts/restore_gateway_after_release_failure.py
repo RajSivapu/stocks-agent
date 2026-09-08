@@ -33,7 +33,7 @@ def main() -> int:
     raw = args.release_state.read_bytes() if args.release_state.is_file() else None
     if args.release_run_id is not None or raw is None or not raw.startswith(b"{"):
         from cryptography.fernet import Fernet
-        from scripts.release_components import EncryptedJournal, SiteBoundTransport, load_native_release_adapter, recover_components
+        from scripts.release_components import EncryptedJournal, load_native_release_adapter, recover_components
         candidate = subprocess.check_output(["git", "rev-parse", "HEAD"], text=True).strip()
         adapter = load_native_release_adapter({"project_ref": args.project_ref, "candidate_sha": candidate,
                                                "lease_owner": args.lease_owner,
@@ -52,7 +52,7 @@ def main() -> int:
             raise RuntimeError("component recovery candidate/project/run/attempt binding mismatch")
         sink = EncryptedJournal(args.release_state, key, retain=adapter.retain)
         with DurableMutationLease(args.admin_url, args.lease_owner, "recovery") as lease:
-            recover_components(SiteBoundTransport(adapter, adapter.site), state, persist=sink)
+            recover_components(adapter, state, persist=sink)
             lease.heartbeat()
             lease.resolve()
         return 0

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import copy
 import hashlib
 import json
 from pathlib import Path
@@ -53,7 +54,11 @@ def release_evidence_classes(receipt: dict[str, object]) -> dict[str, object]:
     ):
         raise RuntimeError("protected release canary receipt is incomplete")
     return {
-        "protected_release": {"status": "verified", "candidate_sha": candidate_sha},
+        "protected_backend": {"status": "verified", "candidate_sha": candidate_sha},
+        "owner_site": {
+            "status": "pending",
+            "required_evidence": "exact_candidate_owner_only_native_site_receipt",
+        },
         "operational_scheduled": {
             "status": "pending",
             "required_evidence": "normal_post_release_scheduled_receipt",
@@ -71,31 +76,55 @@ def main() -> int:
     parser.add_argument("--receipt", required=True, type=Path); parser.add_argument("--dry-run-evidence", required=True, type=Path)
     parser.add_argument("--output", required=True, type=Path); parser.add_argument("--candidate-sha", required=True)
     parser.add_argument("--reviewed-sha", required=True)
+    parser.add_argument("--repository", required=True)
     parser.add_argument("--ci-workflow-run-id", required=True); parser.add_argument("--release-workflow-run-id", required=True)
+    parser.add_argument("--release-workflow-run-attempt", required=True)
     parser.add_argument("--pull-request-number", required=True); parser.add_argument("--deployment-id", required=True)
-    parser.add_argument("--rollback-artifact-id", required=True); parser.add_argument("--recovery-metadata-artifact-id", required=True); parser.add_argument("--project-ref", required=True)
+    parser.add_argument("--backend-evidence-artifact-id", required=True)
+    parser.add_argument("--backend-evidence-artifact-name", required=True)
+    parser.add_argument("--backend-evidence-artifact-digest", required=True)
+    parser.add_argument("--project-ref", required=True)
     args = parser.parse_args()
     receipt = json.loads(args.receipt.read_text()); dry = json.loads(args.dry_run_evidence.read_text())
     validate_release_identity(receipt, args.candidate_sha, args.reviewed_sha)
     if (receipt.get("deployment_outcome") != "succeeded" or not isinstance(dry.get("table_deltas"), dict)
             or [row.get("component") for row in receipt.get("component_readbacks", [])] != [
-                "market-briefing-gateway", "owner-dashboard-api", "telegram-portfolio", "owner-web-site"]):
+                "market-briefing-gateway", "owner-dashboard-api", "telegram-portfolio"]):
         raise SystemExit("protected receipts are incomplete")
+    if (re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", args.repository) is None
+            or re.fullmatch(r"backend-component-evidence-[1-9][0-9]*-[1-9][0-9]*", args.backend_evidence_artifact_name) is None
+            or re.fullmatch(r"sha256:[0-9a-f]{64}", args.backend_evidence_artifact_digest) is None):
+        raise SystemExit("protected backend artifact identity is malformed")
+    artifact_id = integer(args.backend_evidence_artifact_id)
+    run_id = integer(args.release_workflow_run_id)
+    run_attempt = integer(args.release_workflow_run_attempt)
+    if args.backend_evidence_artifact_name != f"backend-component-evidence-{run_id}-{run_attempt}":
+        raise SystemExit("protected backend artifact identity is mismatched")
+    component_readbacks = copy.deepcopy(receipt["component_readbacks"])
+    for row in component_readbacks:
+        row["artifact_id"] = artifact_id
+        prior = row.get("prior")
+        if isinstance(prior, dict) and prior.get("exists") is True:
+            prior["artifact_id"] = artifact_id
     static_root = Path("dist")
     files = {path.relative_to(static_root).as_posix(): hashlib.sha256(path.read_bytes()).hexdigest() for path in static_root.rglob("*") if path.is_file()}
-    capture = receipt["gateway_rollback_artifact"]
     record = {
         "candidate_sha": args.candidate_sha, "reviewed_sha": args.reviewed_sha,
-        "project_ref": args.project_ref,
-        "workflow_run_id": integer(args.ci_workflow_run_id), "release_workflow_run_id": integer(args.release_workflow_run_id),
+        "repository": args.repository, "project_ref": args.project_ref,
+        "workflow_run_id": integer(args.ci_workflow_run_id), "release_workflow_run_id": run_id,
+        "release_workflow_run_attempt": run_attempt,
         "pull_request_number": integer(args.pull_request_number), "deployment_id": integer(args.deployment_id),
         "migrations": receipt["migrations"], "migration_application": receipt["migration_application"], "functions": receipt["functions"],
         "static_assets": {"candidate_sha": args.candidate_sha, "source_sha256": tree(Path("apps/web")), "files": files},
         "dry_run": False, "dry_run_evidence": dry, "canaries": {"owner": 200, "anonymous": 401, "non_owner": 403},
         "deployment_outcome": "succeeded",
-        "component_readbacks": receipt["component_readbacks"],
-        "rollback_capture": {"artifact_id": integer(args.rollback_artifact_id), "recovery_metadata_artifact_id": integer(args.recovery_metadata_artifact_id), "commit_sha": capture["commit_sha"], "captured_at": capture["captured_at"], "source_sha256": capture["source_sha256"]},
-        "rollback_readiness": receipt["rollback_readiness"],
+        "component_readbacks": component_readbacks,
+        "backend_evidence_artifact": {"artifact_id": artifact_id,
+            "name": args.backend_evidence_artifact_name,
+            "digest": args.backend_evidence_artifact_digest,
+            "manifest_sha256": receipt["backend_evidence"]["manifest_sha256"],
+            "recovery_metadata_sha256": receipt["backend_evidence"]["recovery_metadata_sha256"]},
+        "recovery_journal": receipt["recovery_journal"],
         "evidence_classes": release_evidence_classes(receipt),
     }
     args.output.write_text(json.dumps(record, sort_keys=True, separators=(",", ":")) + "\n")

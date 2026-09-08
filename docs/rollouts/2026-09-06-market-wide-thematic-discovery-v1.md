@@ -38,7 +38,10 @@ package tests 7 + 53, and Playwright 24 with 1 skipped; typecheck, lint, license
 checks also passed. The post-review runtime-correction gate passed Python 1,500 tests with 3 skipped
 and 4 credentialed tests deselected, Node 71, Deno 333, package tests 7 + 53, and Playwright 24 with
 1 skipped; the same typecheck, lint, license, build, and bundle gates passed. This is local evidence
-only and does not close any protected release or scheduled-run checkpoint.
+only and does not close any protected release or scheduled-run checkpoint. The final release-trust
+gate passed Python 1,509 tests with 3 skipped and 4 credentialed tests deselected, Node 71, Deno 333,
+package tests 7 + 53, and Playwright 24 with 1 skipped; typecheck, lint, license, build, and bundle
+also passed. That final gate contains 1,997 passing checks.
 
 ## Additive migration boundary
 
@@ -67,20 +70,24 @@ byte-verified pending versions.
 ## Changed release components
 
 The approved candidate changes protected database state, runtime behavior, and the owner audit UI.
-It therefore requires the protected multi-component release path for the exact reviewed SHA:
+It therefore requires two candidate-bound release steps for the exact reviewed SHA:
 
 - the nine additive discovery/runtime migrations above;
 - `market-briefing-gateway`, `owner-dashboard-api`, and `telegram-portfolio` Edge Functions;
 - scheduled-runtime approved-domain and credential-presence configuration, without recording secret
   values;
-- the static owner Site built by the checked-in supply-chain verifier.
+- the static owner Site built by the checked-in supply-chain verifier and published through the
+  native owner-scoped Sites connector.
 
-A Site-only publication cannot release this candidate. The protected path must capture encrypted
-pre-release database/function/runtime state, validate the current deployment, apply the exact
-candidate, and read back migration bytes, protected relations and ACLs, runtime source configuration,
-all three Edge source trees/configuration, canaries, and recovery identities. The owner Site then
-needs a separate exact-asset receipt proving one allowed owner, no groups, zero external visitors,
-the expected API origin, and the login/recovery flow.
+A Site-only publication cannot release this candidate. The protected GitHub workflow releases the
+backend: it captures encrypted pre-release database/function/runtime state, applies the exact
+candidate, and reads back migration bytes, protected relations and ACLs, runtime configuration, all
+three Edge source trees/configuration, canaries, and recovery identities. GitHub Actions does not
+receive a Sites write credential. After that backend receipt passes, the owner publishes the same
+candidate through the native Sites connector. A separate native Sites receipt must prove the exact
+candidate source, one allowed owner, no groups, zero external visitors, the expected API origin,
+successful deployment, live assets, and a retained prior version. Either missing receipt keeps the
+release open.
 
 ## Source capability status and limits
 
@@ -114,12 +121,14 @@ Known limits are part of the release contract:
    security/recovery review on that exact SHA. Resolve every Critical, Important, P1, and P2 finding.
 2. Push the reviewed PR head, pass CI on that exact head, merge without an unreviewed descendant,
    then pass the named CI workflow on the exact `main` SHA.
-3. Run the manual protected release with the exact approved PR head, exact `main` candidate, exact
-   merged PR, and exact-main CI run. Release the migration manifest, all three Edge Functions,
-   protected runtime configuration, and owner Site as one candidate-bound operation.
-4. Retain the encrypted pre-release component capture until migration/function/runtime readback,
-   owner/anonymous/non-owner canaries, and the separate owner Site access/asset receipt all pass.
-   Recover from the captured identity if any post-mutation gate fails.
+3. Run the manual protected backend release with the exact approved PR head, exact `main` candidate,
+   exact merged PR, and exact-main CI run. Release the migration manifest, all three Edge Functions,
+   and protected runtime configuration. Retain the encrypted backend recovery journal and verify its
+   immutable artifact, readbacks, and owner/anonymous/non-owner canaries.
+4. Publish the exact same candidate through the native owner-scoped Sites connector. Preserve the
+   previous active version for rollback and validate the fresh native Sites receipt with
+   `scripts/verify_native_site_release.py`. The backend release record must keep `owner_site` pending;
+   only this separate receipt can verify that evidence class.
 5. Wait for the existing normal schedule. Do not trigger collector, provider, Telegram, or another
    scheduled run to manufacture evidence.
 6. Verify the normal run twice: first as an operational chain, then as the V1-C3 discovery capability
@@ -135,7 +144,8 @@ must record its own exact pre-release component identities and encrypted artifac
 | Evidence class | Status | What it proves |
 |---|---|---|
 | September 8 current-runtime operational receipt | Historical/current-runtime only; preserve separately | The already deployed chain operated normally. It cannot prove the new source plan or V1-C3 capability. |
-| Candidate protected release receipt | **Pending** | Exact reviewed SHA, main/PR/CI binding, migration/function/runtime readback, owner API canaries, rollback readiness, and separate owner Site receipt. |
+| Candidate protected backend receipt | **Pending** | Exact reviewed SHA, main/PR/CI/workflow/artifact binding, migration/function/runtime readback, owner API canaries, and durable encrypted backend recovery. |
+| Candidate native Sites receipt | **Pending** | Exact candidate source, owner-only access, successful private deployment, live asset/backend binding, and retained prior version. |
 | Candidate normal operational receipt | **Pending** | One existing scheduled analysis/intelligence/report/publication or explicit-suppression chain completed without duplicate dispatch. |
 | Candidate V1-C3 capability receipt | **Pending** | Required capability plan, reference/cursor/stage lineage, outside-watchlist discovery semantics, research/action integrity, and every due required baseline source outcome. |
 

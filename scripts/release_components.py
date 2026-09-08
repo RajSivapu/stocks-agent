@@ -26,6 +26,7 @@ sys.path.insert(0, str(ROOT))
 FUNCTIONS = ("market-briefing-gateway", "owner-dashboard-api", "telegram-portfolio")
 ARTIFACTS = (*FUNCTIONS, "owner-web-site")
 COMPONENTS = ("runtime-role", "dashboard-secrets", *ARTIFACTS)
+BACKEND_COMPONENTS = ("runtime-role", "dashboard-secrets", *FUNCTIONS)
 MANAGED_SECRETS = ("DASHBOARD_ALLOWED_ORIGINS", "DASHBOARD_DATABASE_URL", "DASHBOARD_OWNER_USER_ID")
 CONTENT_KEYS = ("exists", "configuration", "files", "values")
 
@@ -109,6 +110,13 @@ def verify_component_readback(name: str, expected: Mapping, observed: Mapping) -
             "snapshot_sha256": hashlib.sha256(canonical(observed)).hexdigest(), "readback": "verified"}
 
 
+def _journal_components(journal: Mapping) -> tuple[str, ...]:
+    names = tuple(journal.get("components", {}))
+    if names not in (COMPONENTS, BACKEND_COMPONENTS):
+        raise RuntimeError("complete release recovery journal is required")
+    return names
+
+
 def recover_components(transport: ComponentTransport, journal: dict, *, persist: Callable[[dict], None]) -> dict:
     """An unchanged component is never passed to a mutation operation.
 
@@ -118,10 +126,11 @@ def recover_components(transport: ComponentTransport, journal: dict, *, persist:
     adapter's explicit attestation authorizes recovery writes. Unknown drift is
     retained for intervention. Other components still receive recovery checks.
     """
-    if journal.get("format") != 1 or set(journal.get("components", {})) != set(COMPONENTS):
+    if journal.get("format") != 1:
         raise RuntimeError("complete release recovery journal is required")
+    components = _journal_components(journal)
     errors = []
-    for name in reversed(COMPONENTS):
+    for name in reversed(components):
         entry = journal["components"][name]
         if type(entry.get("changed")) is not bool:
             raise RuntimeError("component mutation boundary is unknown")
@@ -174,23 +183,24 @@ def recover_components(transport: ComponentTransport, journal: dict, *, persist:
     persist(copy.deepcopy(journal))
     if errors:
         raise RuntimeError("component recovery remains incomplete: " + ", ".join(errors))
-    return {"status": "rolled_back", "components": list(COMPONENTS)}
+    return {"status": "rolled_back", "components": list(components)}
 
 
 def execute_release(transport: ComponentTransport, candidates: Mapping, *, persist: Callable[[dict], None],
                     checkpoint: Callable[[str], None] = lambda _name: None,
                     before_mutations: Callable[[], None] = lambda: None,
-                    after_mutations: Callable[[], None] = lambda: None) -> dict:
+                    after_mutations: Callable[[], None] = lambda: None,
+                    components: tuple[str, ...] = COMPONENTS) -> dict:
     """Capture *all* prior state before the first attempted component write.
 
     `persist` is a required durable, authenticated encrypted journal sink; it
     must finish successfully before mutation. A caller must hold the protected
     database lease throughout capture, mutation, verification, and recovery.
     """
-    if set(candidates) != set(COMPONENTS):
+    if components not in (COMPONENTS, BACKEND_COMPONENTS) or tuple(candidates) != components:
         raise RuntimeError("complete release candidate is required")
-    candidates = {name: validate_snapshot(name, candidates[name], candidate=True) for name in COMPONENTS}
-    prior = {name: validate_snapshot(name, transport.capture(name)) for name in COMPONENTS}
+    candidates = {name: validate_snapshot(name, candidates[name], candidate=True) for name in components}
+    prior = {name: validate_snapshot(name, transport.capture(name)) for name in components}
     journal = {"format": 1, "status": "prepared", "captured_at": datetime.now(timezone.utc).isoformat(), "components": {
         name: {"changed": False, "prior": value, "prior_sha256": hashlib.sha256(canonical(value)).hexdigest()}
         for name, value in prior.items()}}
@@ -199,7 +209,7 @@ def execute_release(transport: ComponentTransport, candidates: Mapping, *, persi
     try:
         checkpoint("preflight")
         before_mutations()
-        for name in COMPONENTS:
+        for name in components:
             if prior[name] == candidates[name]:
                 continue
             pending = copy.deepcopy(journal)
@@ -312,20 +322,22 @@ def execute_protected_release(transport: ComponentTransport, candidates: Mapping
 def load_native_release_adapter(context: Mapping, *, repo_root: Path = ROOT):
     """Load only the reviewed repository-native transport, never an env command.
 
-    Sites currently exposes a desktop connector, not a repository CI adapter.
-    Absence is an explicit preflight failure. Configuring this capability means
-    adding this fixed module through the same reviewed candidate process.
+    This adapter owns the protected database, runtime role, secrets, and Edge
+    functions. Native Sites publication is a separate owner-only operation with
+    its own exact-source receipt because the Sites connector is not available to
+    GitHub Actions.
     """
     site_configuration(repo_root)
     name = "scripts.configured_native_release_adapter"
     specification = importlib.util.find_spec(name)
     expected = repo_root / "scripts/configured_native_release_adapter.py"
     if specification is None or specification.origin is None or Path(specification.origin).resolve() != expected.resolve():
-        raise RuntimeError("protected native Sites transport is not configured; release blocked before mutation")
+        raise RuntimeError("protected native backend transport is not configured; release blocked before mutation")
     adapter = importlib.import_module(name).create_adapter(dict(context))
-    if any(not callable(getattr(adapter, method, None)) for method in ("capture", "apply", "restore", "plan", "retain", "receipt", "artifact", "recover_retained")):
+    if any(not callable(getattr(adapter, method, None)) for method in (
+            "capture", "apply", "restore", "plan", "retain", "receipt", "artifact",
+            "recover_retained", "journal_receipt", "finalize_backend_evidence")):
         raise RuntimeError("native component capture/deployment/readback/recovery capabilities are incomplete")
-    require_site_transport(repo_root, adapter=getattr(adapter, "site", None), inspect_current=context.get("recovery") is not True)
     return adapter
 
 
@@ -333,7 +345,6 @@ def run_native_release(adapter, context: Mapping, *, repo_root: Path, journal_pa
                        migrate: Callable[[], None], checkpoint=lambda _name: None,
                        verify_receipt: Callable[[dict], None] | None = None) -> dict:
     """Shared production orchestration, including postdeployment failure recovery."""
-    require_site_transport(repo_root, adapter=getattr(adapter, "site", None))
     sink = EncryptedJournal(journal_path, key, retain=adapter.retain)
     def persist(journal): sink({**journal, "release_context": dict(context)})
     receipt = {}
@@ -344,16 +355,19 @@ def run_native_release(adapter, context: Mapping, *, repo_root: Path, journal_pa
             verify_receipt(receipt)
         else:
             adapter.verify(receipt)
-    result = execute_protected_release(adapter, adapter.plan(dict(context)), repo_root=repo_root,
-        site_adapter=adapter.site, persist=persist, checkpoint=checkpoint,
-        before_mutations=migrate, after_mutations=verify)
+    result = execute_release(adapter, adapter.plan(dict(context)), components=BACKEND_COMPONENTS,
+        persist=persist, checkpoint=checkpoint, before_mutations=migrate, after_mutations=verify)
+    recovery = (adapter.journal_receipt() if callable(getattr(adapter, "journal_receipt", None))
+                else {"format": 1, "encrypted": True})
+    if callable(getattr(adapter, "finalize_backend_evidence", None)):
+        adapter.finalize_backend_evidence(receipt, recovery)
     return {**receipt, "deployment_outcome": "succeeded", "component_mutations": result,
-            "recovery_journal": {"format": 1, "encrypted": True}}
+            "recovery_journal": recovery}
 
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--check-transport", action="store_true", required=True)
+    parser.add_argument("--check-backend-transport", action="store_true", required=True)
     parser.parse_args()
     load_native_release_adapter({"project_ref": os.environ.get("PROJECT_REF"),
                                  "candidate_sha": os.environ.get("CANDIDATE_SHA")})

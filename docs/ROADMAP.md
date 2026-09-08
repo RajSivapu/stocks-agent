@@ -33,14 +33,17 @@ official-source collection and cursors, ticker-free event/entity resolution, bou
 exposure enrichment, explicit screen feasibility, separate research/suitability/action lanes, theme
 memory and research nominations, a release-blocking capability verifier, and one canonical NYSE
 calendar through 2028. The local acceptance gate passed; no protected release or scheduled run was
-triggered. See `docs/rollouts/2026-09-06-market-wide-thematic-discovery-v1.md` for the exact boundary.
+triggered. The final release-trust gate passed 1,997 checks, with only documented skips and
+credentialed test deselections. See `docs/rollouts/2026-09-06-market-wide-thematic-discovery-v1.md`
+for the exact boundary.
 
-The next release uses the protected multi-component path for the database, all three changed Edge
-functions, managed runtime configuration, and the owner Site. Its immutable discovery migration tail
+The next release uses the protected GitHub path for the database, all three changed Edge functions,
+and managed runtime configuration, followed by native owner-scoped Sites publication of the exact
+same candidate. Its immutable discovery migration tail
 starts at `20261005_market_wide_discovery.sql` and ends at
 `20261013_v2_runtime_completion.sql`; `20261004` remains the separate historical
-reconciliation baseline. Protected release proof, normal scheduled operational proof, and V1-C3
-capability proof are three distinct receipts. None of the new production receipts exists yet.
+reconciliation baseline. Protected backend proof, native Sites proof, normal scheduled operational
+proof, and V1-C3 capability proof are four distinct receipts. None of the new production receipts exists yet.
 
 - [x] PR #10 fixed the Management API `User-Agent` and moved the production reference binding to a
   masked environment secret; exact-main `4003437` CI passed.
@@ -70,8 +73,8 @@ capability proof are three distinct receipts. None of the new production receipt
 - [ ] Next existing scheduled receipt, without a duplicate run.
 
 Final fix wave Track C: immutable audited migrations are restored and the additive tail is now
-`20261001_immutable_history_closure.sql`. Local upgrade, encrypted recovery, four-artifact verifier,
-and workflow tests are covered, including an actual disposable PostgreSQL upgrade and restore.
+`20261001_immutable_history_closure.sql`. Local upgrade, encrypted recovery, backend-component and
+separate native Site verifiers, and workflow tests are covered, including an actual disposable PostgreSQL upgrade and restore.
 Recovery now includes policy comparisons and their decision-evaluation dependencies.
 
 The protected main/recovery entrypoints share the component engine and the concrete
@@ -79,11 +82,11 @@ The protected main/recovery entrypoints share the component engine and the concr
 restores runtime role attributes/verifier/memberships/settings, recoverable secret values/digests,
 and exact downloaded bytes/configuration for all three Edge functions. Unchanged readback is a
 recovery no-op; restored Edge versions are newly allocated and recorded alongside prior identities.
-The unchanged `.openai/hosting.json` remains the sole zero-cost Site target. Its callable CI management
-transport remains unavailable, so the mutation workflow correctly blocks before mutation. GPT-6 Astra
-accepted that fail-closed boundary. Owner-operated native Site publication now supplies a fresh,
-bounded platform receipt to the approved split-trust attestation; no caller-authored substitute is
-accepted. The later Site-only UI release uses the same native owner-scoped path with exact source,
+The unchanged `.openai/hosting.json` remains the sole zero-cost Site target. GitHub Actions has no
+native Sites connector and receives no Sites write credential, so the protected mutation workflow
+now releases only the backend. Owner-operated native Site publication supplies a fresh, bounded
+platform receipt for the exact same candidate; `scripts/verify_native_site_release.py` requires exact
+candidate source and accepts no caller-authored substitute. The later Site-only UI release uses the same native owner-scoped path with exact source,
 verified build, owner-only access, deployment, live-script, and rollback evidence; it changes no
 backend component. Protected GitHub readback independently verified the unchanged Supabase database, Auth,
 managed-secret bindings, deployed Edge bytes, and API behavior in run `34055419086`. The final focused review,
@@ -279,8 +282,8 @@ status:
    authorization, plus bounded theme history and next-run research nominations.
 5. **Complete locally:** thematic, held-out-sector, adversarial, restart, quota, recovery, capacity,
    and 2026–2028 NYSE calendar acceptance. **Pending:** final exact-candidate reviews and protected CI.
-6. **Pending production:** protected multi-component release/readback, exact owner Site publication
-   and rollback proof, then normal scheduled operational and capability receipts before V1-C3 and
+6. **Pending production:** protected backend release/readback, separate exact-candidate native Sites
+   publication and retained prior-version proof, then normal scheduled operational and capability receipts before V1-C3 and
    the final V1 checklist close.
 
 Alert V3 remains a later, separately reviewed shadow/canary rollout. The discovery work does not arm

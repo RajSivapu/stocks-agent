@@ -387,8 +387,11 @@ class GitHubProductionDataSource:
         require(bool(re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", repository)), "GitHub repository must be exact owner/name")
         require(bool(re.fullmatch(r"[a-z0-9]{20}", project_ref)), "production project identity is required")
         self.prefix = f"repos/{repository}"
+        self.repository = repository
         self.project_ref, self.database = project_ref, database
         self.candidate = None
+        self._artifact_cache = {}
+        self._artifact_identities = {}
 
     def _get(self, path: str, *, binary: bool = False):
         require(path.startswith(self.prefix + "/") and ".." not in path and not path.startswith("-"), "unsafe protected record path")
@@ -404,6 +407,18 @@ class GitHubProductionDataSource:
         statuses = self._get(f"{self.prefix}/deployments/{deployment_id}/statuses")
         require(statuses and statuses[0].get("state") == "success", "latest production deployment status is not successful")
         self.candidate = deployment["sha"]
+        payload = deployment.get("payload")
+        if isinstance(payload, str):
+            try:
+                payload = json.loads(payload)
+            except ValueError as error:
+                raise RuntimeError("protected deployment payload is malformed") from error
+        require(isinstance(payload, Mapping) and payload.get("candidate_sha") == self.candidate
+                and type(payload.get("release_workflow_run_id")) is int
+                and payload["release_workflow_run_id"] > 0
+                and str(payload.get("release_workflow_run_attempt", "")).isdigit()
+                and int(payload["release_workflow_run_attempt"]) > 0,
+                "protected deployment payload identity is incomplete")
         match = re.fullmatch(r"release-artifact:([1-9][0-9]*)", str(statuses[0].get("description", "")))
         require(match is not None, "protected deployment status lacks immutable release artifact identity")
         artifact_id = int(match.group(1))
@@ -411,11 +426,34 @@ class GitHubProductionDataSource:
         require(set(files) == {"release-record.json"}, "release artifact has unexpected files")
         record = json.loads(files["release-record.json"])
         require(record["candidate_sha"] == self.candidate and record["project_ref"] == self.project_ref
-                and record["deployment_id"] == deployment["id"], "protected deployment candidate/project mismatch")
-        return {**record, "id": deployment["id"], "sha": deployment["sha"], "environment": deployment["environment"], "deployed_at": statuses[0]["created_at"]}
+                and record["deployment_id"] == deployment["id"]
+                and record.get("repository") == self.repository
+                and record.get("release_workflow_run_id") == payload["release_workflow_run_id"]
+                and record.get("release_workflow_run_attempt") == int(payload["release_workflow_run_attempt"]),
+                "protected deployment candidate/project/run mismatch")
+        release_identity = self._artifact_identities[artifact_id]
+        require(release_identity["name"] == f"release-record-{deployment['id']}"
+                and release_identity["workflow_run_id"] == record.get("release_workflow_run_id")
+                and release_identity["workflow_run_attempt"] == record.get("release_workflow_run_attempt"),
+                "release artifact identity is inconsistent")
+        backend = record.get("backend_evidence_artifact")
+        require(isinstance(backend, Mapping) and backend.get("artifact_id") != artifact_id,
+                "protected backend artifact identity is missing or aliases the release record")
+        self.artifact(backend.get("artifact_id"))
+        backend_identity = self._artifact_identities[backend["artifact_id"]]
+        require({key: backend_identity[key] for key in ("artifact_id", "name", "digest")} == {
+            "artifact_id": backend.get("artifact_id"), "name": backend.get("name"), "digest": backend.get("digest")}
+            and backend_identity["workflow_run_id"] == record.get("release_workflow_run_id")
+            and backend_identity["workflow_run_attempt"] == record.get("release_workflow_run_attempt"),
+            "protected backend artifact metadata is inconsistent")
+        return {**record, "release_artifact": release_identity,
+            "id": deployment["id"], "sha": deployment["sha"], "environment": deployment["environment"],
+            "deployed_at": statuses[0]["created_at"]}
 
     def artifact(self, artifact_id: int, *, active_run_id: int | None = None) -> dict[str, bytes]:
         require(type(artifact_id) is int and artifact_id > 0, "numeric protected artifact ID required")
+        if artifact_id in self._artifact_cache:
+            return dict(self._artifact_cache[artifact_id])
         metadata = self._get(f"{self.prefix}/actions/artifacts/{artifact_id}")
         run = self._get(f"{self.prefix}/actions/runs/{metadata['workflow_run']['id']}")
         # Only the in-process protected deployment verifier can inspect its own
@@ -423,16 +461,36 @@ class GitHubProductionDataSource:
         active = (type(active_run_id) is int and active_run_id > 0
                   and run.get("id") == metadata["workflow_run"]["id"] == active_run_id
                   and run.get("status") == "in_progress" and run.get("conclusion") is None)
-        require(not metadata["expired"] and metadata["workflow_run"]["head_sha"] == self.candidate
-                and run["head_sha"] == self.candidate and run["head_branch"] == "main" and (run["conclusion"] == "success" or active)
-                and run["path"] == ".github/workflows/owner-dashboard-release.yml", "artifact did not originate in the protected candidate release workflow")
+        require(metadata.get("id") == artifact_id and not metadata["expired"]
+                and isinstance(metadata.get("name"), str) and metadata["name"]
+                and re.fullmatch(r"sha256:[0-9a-f]{64}", str(metadata.get("digest", "")))
+                and metadata["workflow_run"]["head_sha"] == self.candidate
+                and run.get("id") == metadata["workflow_run"]["id"]
+                and run.get("repository", {}).get("full_name") == self.repository
+                and run.get("head_sha") == self.candidate and run.get("head_branch") == "main"
+                and run.get("event") == "workflow_dispatch"
+                and run.get("name") == "Protected owner dashboard release"
+                and (run.get("conclusion") == "success" or active)
+                and run.get("path") == ".github/workflows/owner-dashboard-release.yml"
+                and type(run.get("run_attempt")) is int and run["run_attempt"] > 0,
+                "artifact did not originate in the protected candidate release workflow")
         raw = self._get(f"{self.prefix}/actions/artifacts/{artifact_id}/zip", binary=True)
+        require(metadata["digest"] == "sha256:" + hashlib.sha256(raw).hexdigest(),
+                "protected artifact archive digest mismatch")
         with zipfile.ZipFile(io.BytesIO(raw)) as archive:
             members = archive.infolist()
-            require(members and len({member.filename for member in members}) == len(members)
+            require(members and len(members) <= 1_000
+                    and len({member.filename for member in members}) == len(members)
                     and all(path_is_safe(member.filename) and not member.is_dir() and (member.external_attr >> 16) & 0o170000 != 0o120000 for member in members)
                     and sum(member.file_size for member in members) <= MAX_PAYLOAD_BYTES, "protected artifact has unsafe paths or members")
-            return {member.filename: archive.read(member) for member in members}
+            files = {member.filename: archive.read(member) for member in members}
+        self._artifact_identities[artifact_id] = {"artifact_id": artifact_id,
+            "name": metadata["name"], "digest": metadata["digest"],
+            "workflow_run_id": run["id"], "workflow_run_attempt": run["run_attempt"],
+            "repository": self.repository, "workflow_name": run["name"], "workflow_path": run["path"],
+            "event": run["event"], "head_branch": run["head_branch"], "head_sha": run["head_sha"]}
+        self._artifact_cache[artifact_id] = dict(files)
+        return files
 
     def ci(self, workflow_run_id: int):
         require(type(workflow_run_id) is int and workflow_run_id > 0, "numeric CI run ID required")
@@ -448,7 +506,11 @@ class GitHubProductionDataSource:
         latest = {}
         for row in rows:
             if row["state"] in {"APPROVED", "CHANGES_REQUESTED", "DISMISSED"}:
-                latest[row["user"]["id"]] = row
+                reviewer = row.get("user", {}).get("id")
+                require(type(reviewer) is int and reviewer > 0, "reviewer identity is unavailable")
+                current = latest.get(reviewer)
+                if current is None or str(row.get("submitted_at") or "") > str(current.get("submitted_at") or ""):
+                    latest[reviewer] = row
         return list(latest.values())
 
     def release_rows(self, run_id: str):

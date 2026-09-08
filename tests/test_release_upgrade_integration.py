@@ -19,6 +19,7 @@ from scripts import deploy_owner_dashboard_api as deploy
 ROOT = Path(__file__).resolve().parents[1]
 BASE = "432d647ef911ff63da427097f02a852e18038b62"
 COMPONENTS = ("runtime-role", "dashboard-secrets", "market-briefing-gateway", "owner-dashboard-api", "telegram-portfolio", "owner-web-site")
+BACKEND_COMPONENTS = COMPONENTS[:-1]
 
 
 def test_unchanged_legacy_recovery_never_mutates_existing_components():
@@ -114,11 +115,10 @@ def test_missing_site_transport_fails_before_any_component_capture(tmp_path):
         release.require_site_transport(ROOT, {})
 
 
-def test_workflow_cli_reports_missing_transport_without_pythonpath_injection():
-    result = subprocess.run([sys.executable, str(ROOT / "scripts/release_components.py"), "--check-transport"],
+def test_workflow_cli_finds_reviewed_backend_transport_without_pythonpath_injection():
+    result = subprocess.run([sys.executable, str(ROOT / "scripts/release_components.py"), "--check-backend-transport"],
         cwd=ROOT, env={"PATH": os.environ["PATH"], "PYTHONPATH": ""}, capture_output=True, text=True)
-    assert result.returncode != 0
-    assert "Sites" in result.stderr and "transport" in result.stderr
+    assert result.returncode == 0, result.stderr
 
 
 @pytest.mark.parametrize("absent", [(), COMPONENTS])
@@ -292,16 +292,14 @@ def test_protected_entrypoint_missing_site_adapter_never_captures_or_mutates():
     assert platform.mutations == [] and platform.state == platform.original
 
 
-@pytest.mark.parametrize("absent", [(), COMPONENTS])
-@pytest.mark.parametrize("boundary", ["preflight", *COMPONENTS, "verification"])
+@pytest.mark.parametrize("absent", [(), BACKEND_COMPONENTS])
+@pytest.mark.parametrize("boundary", ["preflight", *BACKEND_COMPONENTS, "verification"])
 def test_production_orchestration_uses_component_engine_and_recovers(tmp_path, absent, boundary):
     release = module(); platform = Platform(absent)
-    platform.project_id = release.site_configuration(ROOT)["project_id"]
-    platform.site = platform
     platform.plan = lambda context: {name: {**copy.deepcopy(old), "exists": True,
                                            "identity": old["identity"] if name in release.FUNCTIONS and old["exists"] else name + "-4", "version": "4",
                                            "files": {"index": "candidate"}, "values": {"credential": "new-secret"}}
-                                     for name, old in platform.state.items()}
+                                     for name, old in platform.state.items() if name in release.BACKEND_COMPONENTS}
     retained = []
     platform.retain = retained.append
     platform.receipt = lambda candidate: {"candidate_sha": candidate}
@@ -314,7 +312,7 @@ def test_production_orchestration_uses_component_engine_and_recovers(tmp_path, a
             repo_root=ROOT, journal_path=tmp_path / "release.enc", key=Fernet.generate_key(),
             migrate=lambda: None, checkpoint=checkpoint)
     assert platform.state == platform.original
-    changed = [] if boundary == "preflight" else list(COMPONENTS if boundary == "verification" else COMPONENTS[:COMPONENTS.index(boundary) + 1])
+    changed = [] if boundary == "preflight" else list(BACKEND_COMPONENTS if boundary == "verification" else BACKEND_COMPONENTS[:BACKEND_COMPONENTS.index(boundary) + 1])
     assert platform.mutations == changed + ["restore:" + name for name in reversed(changed)]
 
 

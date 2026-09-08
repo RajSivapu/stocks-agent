@@ -77,12 +77,20 @@ def native(platform, **kwargs):
             "DASHBOARD_PRIOR_MANAGED_SECRETS_JSON": json.dumps(platform.secrets)}, **kwargs)
 
 
-def test_native_factory_is_lazy_and_site_gate_precedes_every_platform_operation(monkeypatch):
+def test_native_backend_factory_is_lazy_and_performs_no_platform_operation(monkeypatch):
     module = adapter_module()
-    monkeypatch.setattr(module.subprocess, "run", lambda *a, **k: pytest.fail("no CLI before Sites gate"))
-    monkeypatch.setattr(module.psycopg, "connect", lambda *a, **k: pytest.fail("no DB before Sites gate"))
-    with pytest.raises(RuntimeError, match="Sites.*transport"):
-        release.load_native_release_adapter({"project_ref": "p" * 20})
+    monkeypatch.setattr(module.subprocess, "run", lambda *a, **k: pytest.fail("no CLI during construction"))
+    monkeypatch.setattr(module.psycopg, "connect", lambda *a, **k: pytest.fail("no DB during construction"))
+    adapter = release.load_native_release_adapter({"project_ref": "p" * 20})
+    assert isinstance(adapter, module.NativeReleaseAdapter)
+
+
+def test_backend_receipt_requires_an_explicit_absolute_evidence_directory():
+    adapter = native(Supabase())
+    adapter.static_receipt = {}
+    adapter.captured_at = "2026-09-08T12:00:00Z"
+    with pytest.raises(RuntimeError, match="evidence directory"):
+        adapter.receipt("a" * 40)
 
 
 @pytest.mark.parametrize("name", release.FUNCTIONS)
@@ -301,12 +309,11 @@ class Site:
 
 
 @pytest.mark.parametrize("first_install", [False, True])
-@pytest.mark.parametrize("boundary", ["preflight", *release.COMPONENTS, "verification"])
+@pytest.mark.parametrize("boundary", ["preflight", *release.BACKEND_COMPONENTS, "verification"])
 def test_native_production_engine_failure_boundaries(database, tmp_path, monkeypatch, first_install, boundary):
     from cryptography.fernet import Fernet
     from scripts import build_owner_dashboard_static, verify_personal_stock_agent_v1
     platform, adapter = database_adapter(database)
-    site = Site(); adapter.site = site
     if first_install:
         platform.functions = {}; platform.secrets = {}
         adapter.environment["DASHBOARD_PRIOR_MANAGED_SECRETS_JSON"] = "{}"
@@ -317,8 +324,7 @@ def test_native_production_engine_failure_boundaries(database, tmp_path, monkeyp
         "owner_user_id": "owner", "lease_owner": "release-123"})
     adapter.environment["SUPAVISOR_SESSION_URL"] = "postgresql://postgres.pppppppppppppppppppp:admin-template-password@aws-0-us-east-1.pooler.supabase.com:5432/postgres"
     key = Fernet.generate_key(); adapter.environment["RELEASE_RECOVERY_KEY"] = key.decode()
-    original = {name: adapter.capture(name) for name in release.COMPONENTS if name != "owner-web-site"}
-    original_site = site.capture("owner-web-site")
+    original = {name: adapter.capture(name) for name in release.BACKEND_COMPONENTS}
     monkeypatch.setattr(build_owner_dashboard_static, "build_static_release", lambda *a, **k: {"status": "verified"})
     monkeypatch.setattr(verify_personal_stock_agent_v1, "git_files", lambda *a: {"index.ts": b"candidate"})
     def checkpoint(name):
@@ -340,7 +346,6 @@ def test_native_production_engine_failure_boundaries(database, tmp_path, monkeyp
                 assert {k: v for k, v in prior.items() if k not in {"identity", "version"}} == {
                     k: v for k, v in current.items() if k not in {"identity", "version"}}
             else: assert current == prior
-        assert site.state == original_site
     finally:
         with psycopg.connect(database, autocommit=True) as connection:
             connection.execute("DROP ROLE IF EXISTS stock_agent_dashboard_runtime")
@@ -405,12 +410,16 @@ def test_active_release_artifact_readback_is_exact_run_bound_and_does_not_weaken
     from scripts import protected_evidence as evidence
     payload = io.BytesIO()
     with zipfile.ZipFile(payload, "w") as archive: archive.writestr("index.ts", b"downloaded")
+    archive_digest = "sha256:" + hashlib.sha256(payload.getvalue()).hexdigest()
     def get(self, path, **kwargs):
         if path.endswith("/zip"): return payload.getvalue()
         if "/actions/runs/" in path:
             return {"id": 123, "head_sha": "a" * 40, "head_branch": "main", "status": "in_progress",
-                    "conclusion": None, "path": ".github/workflows/owner-dashboard-release.yml"}
-        return {"expired": False, "workflow_run": {"id": 123, "head_sha": "a" * 40}}
+                    "conclusion": None, "path": ".github/workflows/owner-dashboard-release.yml",
+                    "repository": {"full_name": "owner/repo"}, "event": "workflow_dispatch",
+                    "name": "Protected owner dashboard release", "run_attempt": 1}
+        return {"id": 17, "name": "backend-component-evidence-123-1", "digest": archive_digest,
+                "expired": False, "workflow_run": {"id": 123, "head_sha": "a" * 40}}
     monkeypatch.setattr(evidence.GitHubProductionDataSource, "_get", get)
     adapter = native(Supabase()); adapter.environment["GITHUB_REPOSITORY"] = "owner/repo"
     assert adapter.artifact(17) == {"index.ts": b"downloaded"}

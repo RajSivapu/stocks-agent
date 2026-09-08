@@ -691,7 +691,10 @@ def release(tmp_path):
            "supabase/functions/market-briefing-gateway/index.ts": b"gateway\n",
            "supabase/functions/owner-dashboard-api/index.ts": b"dashboard\n",
            "supabase/functions/telegram-portfolio/index.ts": b"telegram\n",
-           ".openai/hosting.json": b'{"project_id":"appgprj_fixture","static":{"directory":"dist"}}',
+           "supabase/config.toml": b'''[functions."telegram-portfolio"]\nenabled = true\nverify_jwt = false\nentrypoint = "./functions/telegram-portfolio/index.ts"\n\n[functions."market-briefing-gateway"]\nenabled = true\nverify_jwt = false\nentrypoint = "./functions/market-briefing-gateway/index.ts"\n\n[functions."owner-dashboard-api"]\nenabled = true\nverify_jwt = false\nentrypoint = "./functions/owner-dashboard-api/index.ts"\n''',
+           ".openai/hosting.json": b'{"project_id":"appgprj_fixture","static":{"directory":"dist","not_found_handling":"single-page-application"}}',
+           "package.json": b'{"private":true}\n',
+           "package-lock.json": b'{"lockfileVersion":3}\n',
            "apps/web/src/main.tsx": b"web source\n",
            "scripts/deploy_owner_dashboard_api.py": b"deploy verifier\n"}
     for path, content in raw.items():
@@ -711,13 +714,21 @@ def release(tmp_path):
     sha = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=repo, text=True).strip()
     static = tmp_path / "static"; static.mkdir(); (static / "index.html").write_bytes(b"<main>Private</main>")
     source = FakeReleaseSource()
-    source.ci_record = {"id": 43, "head_sha": sha, "conclusion": "success", "status": "completed", "path": ".github/workflows/owner-dashboard-ci.yml", "updated_at": "2026-09-05T18:40:00Z"}
-    source.merge_record = {"number": 44, "merged": True, "merge_commit_sha": sha, "merged_at": "2026-09-05T18:00:00Z", "head": {"sha": reviewed_sha}}
+    source.ci_record = {"id": 43, "head_sha": sha, "head_branch": "main", "event": "push",
+        "name": "Owner dashboard verification", "repository": {"full_name": "owner/stocks-agent"},
+        "conclusion": "success", "status": "completed", "path": ".github/workflows/owner-dashboard-ci.yml",
+        "updated_at": "2026-09-05T18:40:00Z"}
+    source.merge_record = {"number": 44, "merged": True, "merge_commit_sha": sha,
+        "merged_at": "2026-09-05T18:00:00Z", "head": {"sha": reviewed_sha},
+        "base": {"ref": "main", "repo": {"full_name": "owner/stocks-agent"}}}
     source.review_records = [{"id": 45, "state": "APPROVED", "commit_id": reviewed_sha, "submitted_at": "2026-09-05T17:45:00Z"}]
-    source.artifacts = {46: {"index.ts": b"prior gateway\n"}}
+    evidence_id, release_run_id, release_run_attempt = 100, 47, 1
+    source.artifacts = {evidence_id: {}}
     source.record = {
         "id": 42, "sha": sha, "environment": "production", "project_ref": "p" * 20,
-        "deployed_at": "2026-09-05T19:00:00Z", "workflow_run_id": 43, "pull_request_number": 44,
+        "repository": "owner/stocks-agent", "deployed_at": "2026-09-05T19:00:00Z",
+        "workflow_run_id": 43, "release_workflow_run_id": release_run_id,
+        "release_workflow_run_attempt": release_run_attempt, "pull_request_number": 44,
         "run_id": RUN, "candidate_sha": sha, "reviewed_sha": reviewed_sha,
         "migrations": [{"path": "sql/migrations/20260926_suppression_reasons.sql", "version": "20260926", "sha256": migration_statements_sha256(normalize_migration_statements(raw["sql/migrations/20260926_suppression_reasons.sql"].decode()))}],
         "functions": [{"function": name, "deployment_id": name + "-deployment", "git_sha": sha, "function_version": 5, "source_sha256": tree_hash({"index.ts": raw[f"supabase/functions/{name}/index.ts"]})} for name in ("market-briefing-gateway", "owner-dashboard-api", "telegram-portfolio")],
@@ -725,22 +736,61 @@ def release(tmp_path):
         "dry_run": False,
         "dry_run_evidence": {"before": {"source": {"project_ref": "p" * 20}, "tables": {"scheduled_runs": {"count": 1, "rows_sha256": "a" * 64}, "transactions": {"count": 0, "rows_sha256": "b" * 64}}}, "after": {"source": {"project_ref": "p" * 20}, "tables": {"scheduled_runs": {"count": 1, "rows_sha256": "a" * 64}, "transactions": {"count": 0, "rows_sha256": "b" * 64}}}, "table_deltas": {"scheduled_runs": 0, "transactions": 0}, "safe_command_argv": ["python", "scripts/deploy_owner_dashboard_api.py", "--dry-run", "--candidate-sha", sha], "candidate_script_sha256": hashlib.sha256(raw["scripts/deploy_owner_dashboard_api.py"]).hexdigest(), "safe_command_sha256": hashlib.sha256(json.dumps({"argv": ["python", "scripts/deploy_owner_dashboard_api.py", "--dry-run", "--candidate-sha", sha], "candidate_sha": sha, "candidate_script_sha256": hashlib.sha256(raw["scripts/deploy_owner_dashboard_api.py"]).hexdigest()}, sort_keys=True, separators=(",", ":")).encode()).hexdigest(), "safe_command_exit_code": 0},
         "canaries": {"owner": 200, "anonymous": 401, "non_owner": 403},
-        "rollback_capture": {"artifact_id": 46, "commit_sha": prior, "captured_at": "2026-09-05T18:15:00Z", "source_sha256": tree_hash(source.artifacts[46])},
         "deployment_outcome": "succeeded",
-        "rollback_readiness": {"status": "ready", "function_version": 4, "source_sha256": tree_hash(source.artifacts[46]), "isolated_drill": {"status": "verified", "isolated": True, "source_sha256": tree_hash(source.artifacts[46]), "started_at": "2026-09-05T18:16:00Z", "completed_at": "2026-09-05T18:17:00Z"}},
+        "release_artifact": {"artifact_id": 101, "name": "release-record-42",
+            "digest": "sha256:" + "c" * 64, "workflow_run_id": release_run_id,
+            "workflow_run_attempt": release_run_attempt, "repository": "owner/stocks-agent",
+            "workflow_name": "Protected owner dashboard release",
+            "workflow_path": ".github/workflows/owner-dashboard-release.yml",
+            "event": "workflow_dispatch", "head_branch": "main", "head_sha": sha},
+        "recovery_journal": {"sequence": 9, "run_id": release_run_id,
+            "run_attempt": release_run_attempt, "captured_at": "2026-09-05T18:15:00Z",
+            "ciphertext_sha256": "d" * 64},
+        "evidence_classes": {
+            "protected_backend": {"status": "verified", "candidate_sha": sha},
+            "owner_site": {"status": "pending", "required_evidence": "exact_candidate_owner_only_native_site_receipt"},
+            "operational_scheduled": {"status": "pending", "required_evidence": "normal_post_release_scheduled_receipt"},
+            "discovery_capability": {"status": "pending", "checkpoint": "V1-C3",
+                "required_evidence": "normal_post_release_scheduled_capability_receipt"},
+        },
     }
+    source.record["migration_application"] = {"candidate": copy.deepcopy(source.record["migrations"]),
+        "applied": copy.deepcopy(source.record["migrations"]), "skipped": []}
     source.record["component_readbacks"] = []
-    for index, name in enumerate(("market-briefing-gateway", "owner-dashboard-api", "telegram-portfolio", "owner-web-site")):
-        files = {"index.ts": raw[f"supabase/functions/{name}/index.ts"]} if name != "owner-web-site" else {"index.html": b"<main>Private</main>"}
-        source.artifacts[100 + index] = files
+    manifest_components = []
+    for name in ("market-briefing-gateway", "owner-dashboard-api", "telegram-portfolio"):
+        files = {"index.ts": raw[f"supabase/functions/{name}/index.ts"]}
+        prior_files = {"index.ts": ("prior " + name + "\n").encode()}
+        deployed_prefix, prior_prefix = f"deployed/{name}", f"prior/{name}"
+        source.artifacts[evidence_id][f"{deployed_prefix}/index.ts"] = files["index.ts"]
+        source.artifacts[evidence_id][f"{prior_prefix}/index.ts"] = prior_files["index.ts"]
         source.record["component_readbacks"].append({
             "component": name, "candidate_sha": sha, "deployment_id": name + "-deployment", "version": "5",
-            "project_id": "appgprj_fixture", "origin": "management_plane_download", "artifact_id": 100 + index,
-            "deployed_sha256": tree_hash(files),
+            "origin": "management_plane_download", "artifact_id": evidence_id,
+            "artifact_prefix": deployed_prefix, "deployed_sha256": tree_hash(files),
+            "configuration": {"verify_jwt": False, "entrypoint": "index.ts", "import_map": None},
             "prior": {"exists": True, "deployment_id": name + "-prior", "version": "4", "configuration": {},
                       "captured_at": "2026-09-05T18:15:00Z",
-                      "artifact_id": 46, "source_sha256": tree_hash(source.artifacts[46])},
+                      "artifact_id": evidence_id, "artifact_prefix": prior_prefix,
+                      "source_sha256": tree_hash(prior_files)},
         })
+        manifest_components.append({"component": name, "deployed_prefix": deployed_prefix,
+            "deployed_sha256": tree_hash(files), "prior_prefix": prior_prefix,
+            "prior_sha256": tree_hash(prior_files)})
+    manifest = {"format": "stocks-protected-backend-evidence-v1", "candidate_sha": sha,
+        "project_ref": "p" * 20, "release_run_id": release_run_id,
+        "release_run_attempt": release_run_attempt, "components": manifest_components}
+    manifest_raw = json.dumps(manifest, sort_keys=True, separators=(",", ":")).encode()
+    recovery_raw = json.dumps(source.record["recovery_journal"], sort_keys=True, separators=(",", ":")).encode()
+    source.artifacts[evidence_id]["manifest.json"] = manifest_raw
+    source.artifacts[evidence_id]["recovery-metadata.json"] = recovery_raw
+    source.record["backend_evidence_artifact"] = {
+        "artifact_id": evidence_id,
+        "name": f"backend-component-evidence-{release_run_id}-{release_run_attempt}",
+        "digest": "sha256:" + "e" * 64,
+        "manifest_sha256": hashlib.sha256(manifest_raw).hexdigest(),
+        "recovery_metadata_sha256": hashlib.sha256(recovery_raw).hexdigest(),
+    }
     recovery = recovery_records(); packet = recovery["packets"][0]; report = recovery["reports"][0]
     source.rows = {
         "run": [{"id": RUN, "kind": "post-market", "scheduled_phase": "post-market", "scheduled_market_date": "2026-09-05", "status": "completed", "started_at": "2026-09-05T19:10:00Z", "finished_at": "2026-09-05T20:00:00Z", "gateway_request_id": START, "telegram_message_ids": [7]}],
@@ -791,7 +841,28 @@ def release(tmp_path):
         requested_report_id=report_id, requested_idempotency_key=report_key,
         requested_report_hash=report["report_hash"],
     )
-    return source, {"deployment_id": 42, "repo_root": repo, "static_root": static, "clock": lambda: NOW}
+    site_receipt = {
+        "format": "stocks-native-sites-attestation-v1",
+        "captured_at": "2026-09-05T20:30:00Z",
+        "trust_domain": "codex-native-sites-connector",
+        "site": {"project_id": "appgprj_fixture", "status": "active",
+            "live_url": "https://example.chatgpt.site", "latest_version_number": 10,
+            "current_user_role": "owner", "access_mode": "custom", "allowed_owner_count": 1,
+            "external_visitor_count": 0, "allowed_group_count": 0},
+        "active_version": {"id": "appgver_candidate", "version_number": 10,
+            "source_commit_sha": sha, "archive_format": "tar",
+            "archive_content_hash": "sha256:" + "1" * 64,
+            "file_count": 10, "size_bytes": 500_000},
+        "active_deployment": {"id": "appgdep_candidate", "version_id": "appgver_candidate",
+            "type": "publish", "status": "succeeded", "url": "https://example.chatgpt.site"},
+        "live_bundle": {"html_sha256": "2" * 64,
+            "script_assets": [{"url": "https://example.chatgpt.site/assets/index.js",
+                "sha256": "3" * 64, "bytes": 100}], "supabase_project_ref": "p" * 20,
+            "dashboard_api_url": f"https://{'p' * 20}.supabase.co/functions/v1/owner-dashboard-api",
+            "project_ref_present": True, "api_url_present": True},
+    }
+    return source, {"deployment_id": 42, "native_site_receipt": site_receipt,
+        "repo_root": repo, "static_root": static, "clock": lambda: NOW}
 
 
 def test_release_queries_sources_and_binds_exact_receipts(release):
@@ -829,29 +900,37 @@ def test_release_blocks_when_required_discovery_evidence_is_missing(release):
         verify_release(source, **args)
 
 
-def test_release_requires_readback_of_all_four_deployed_artifacts(release):
+def test_release_blocks_without_the_exact_candidate_native_site_receipt(release):
+    source, args = release
+    args["native_site_receipt"] = {}
+    with pytest.raises(RuntimeError, match="native Site|exact candidate"):
+        verify_release(source, **args)
+
+
+def test_release_requires_readback_of_all_three_protected_backend_functions(release):
     source, args = release
     source.record.pop("component_readbacks", None)
     with pytest.raises(RuntimeError, match="component|readback"):
         verify_release(source, **args)
 
 
-def test_release_rejects_site_prior_capture_after_deployment(release):
+def test_release_rejects_backend_prior_capture_after_deployment(release):
     source, args = release
-    source.record["component_readbacks"][3]["prior"]["captured_at"] = "2026-09-05T20:00:00Z"
+    source.record["component_readbacks"][2]["prior"]["captured_at"] = "2026-09-05T20:00:00Z"
     with pytest.raises(RuntimeError, match="predeployment"):
         verify_release(source, **args)
 
 
-@pytest.mark.parametrize("index", range(4))
+@pytest.mark.parametrize("index", range(3))
 def test_release_rejects_each_component_deployed_byte_drift(release, index):
     source, args = release
-    source.artifacts[100 + index] = {"index": b"unreviewed deployed bytes"}
+    row = source.record["component_readbacks"][index]
+    source.artifacts[100][row["artifact_prefix"] + "/index.ts"] = b"unreviewed deployed bytes"
     with pytest.raises(RuntimeError, match="component.*bytes"):
         verify_release(source, **args)
 
 
-@pytest.mark.parametrize("index", range(4))
+@pytest.mark.parametrize("index", range(3))
 def test_release_rejects_each_component_missing_prior_identity(release, index):
     source, args = release
     source.record["component_readbacks"][index]["prior"]["deployment_id"] = None
@@ -862,6 +941,14 @@ def test_release_rejects_each_component_missing_prior_identity(release, index):
 def test_release_rejects_an_approval_after_merge_even_when_the_candidate_matches(release):
     source, args = release
     source.review_records[0]["submitted_at"] = "2026-09-05T18:01:00Z"
+    with pytest.raises(RuntimeError, match="independent review"):
+        verify_release(source, **args)
+
+
+def test_release_rejects_a_current_changes_requested_review(release):
+    source, args = release
+    source.review_records.append({"id": 46, "state": "CHANGES_REQUESTED",
+        "commit_id": source.record["reviewed_sha"], "submitted_at": "2026-09-05T17:50:00Z"})
     with pytest.raises(RuntimeError, match="independent review"):
         verify_release(source, **args)
 
@@ -891,7 +978,10 @@ def test_release_rejects_caller_json_even_when_labeled_authoritative(release):
     lambda s: s.ci_record.update(head_sha="a" * 40),
     lambda s: s.merge_record.update(merge_commit_sha="a" * 40),
     lambda s: s.record["functions"][0].update(source_sha256="b" * 64),
+    lambda s: s.record["component_readbacks"][0]["configuration"].update(verify_jwt=True),
     lambda s: s.record["migrations"][0].update(sha256="b" * 64),
+    lambda s: s.record["migration_application"].update(applied=[], skipped=[]),
+    lambda s: s.artifacts[100].update({"unexpected.txt": b"unbound"}),
     lambda s: s.record["static_assets"]["files"].update({"index.html": "b" * 64}),
     lambda s: s.rows["run"][0].update(started_at="2020-01-01T20:00:00Z", finished_at="2020-01-01T21:00:00Z"),
     lambda s: s.rows["run"][0].update(finished_at="2027-01-01T20:00:00Z"),
@@ -909,8 +999,8 @@ def test_release_rejects_caller_json_even_when_labeled_authoritative(release):
     lambda s: s.rows["publications"][0].update(telegram_message_ids=[]),
     lambda s: s.rows["publications"][0].update(telegram_accepted_at=None),
     lambda s: s.rows["publications"][0].update(status="suppressed", telegram_message_ids=[], telegram_accepted_at=None, error="not an explicit suppression reason"),
-    lambda s: s.record["rollback_readiness"]["isolated_drill"].update(source_sha256="b" * 64),
-    lambda s: s.artifacts[46].update({"index.ts": b"changed rollback"}),
+    lambda s: s.record["recovery_journal"].update(ciphertext_sha256="b" * 64),
+    lambda s: s.artifacts[100].update({"recovery-metadata.json": b"{}"}),
 ])
 def test_release_rejects_relabeling_invented_stages_and_hash_mismatches(release, mutation):
     source, args = release; mutation(source)
@@ -921,7 +1011,7 @@ def test_release_rejects_relabeling_invented_stages_and_hash_mismatches(release,
 def test_release_rejects_ancient_records_even_when_every_claimed_time_is_relabelled(release):
     source, args = release
     args["clock"] = lambda: datetime(2026, 10, 1, tzinfo=timezone.utc)
-    with pytest.raises(RuntimeError, match="stale|scheduled"):
+    with pytest.raises(RuntimeError, match="stale|scheduled|fresh"):
         verify_release(source, **args)
 
 
@@ -951,24 +1041,74 @@ def test_release_requires_authoritative_non_dry_run_boolean(release, value):
 
 
 def test_production_source_reads_deployment_and_protected_artifact_instead_of_caller_json(monkeypatch):
+    import io
+    import zipfile
     from scripts import protected_evidence as evidence
     database = object()
     source = evidence.GitHubProductionDataSource("owner/stocks-agent", "p" * 20, database)
     calls = []
-    def get(path):
+    record = {"candidate_sha": "a" * 40, "project_ref": "p" * 20,
+        "repository": "owner/stocks-agent", "deployment_id": 42,
+        "release_workflow_run_id": 50, "release_workflow_run_attempt": 1,
+        "backend_evidence_artifact": {"artifact_id": 47,
+            "name": "backend-component-evidence-50-1", "digest": None}}
+    def archive(files):
+        buffer = io.BytesIO()
+        with zipfile.ZipFile(buffer, "w") as zipped:
+            for name, raw in files.items():
+                zipped.writestr(name, raw)
+        return buffer.getvalue()
+    archives = {
+        46: archive({"release-record.json": json.dumps(record).encode()}),
+        47: archive({"manifest.json": b"{}"}),
+    }
+    digests = {key: "sha256:" + hashlib.sha256(raw).hexdigest() for key, raw in archives.items()}
+    record["backend_evidence_artifact"]["digest"] = digests[47]
+    archives[46] = archive({"release-record.json": json.dumps(record).encode()})
+    digests[46] = "sha256:" + hashlib.sha256(archives[46]).hexdigest()
+    def get(path, *, binary=False):
         calls.append(path)
         if path.endswith("/deployments/42"):
             return {"id": 42, "sha": "a" * 40, "environment": "production", "production_environment": True,
-                    "payload": {"release_artifact_id": 46}, "created_at": "2026-09-05T18:00:00Z"}
+                    "payload": {"candidate_sha": "a" * 40, "release_workflow_run_id": 50,
+                                "release_workflow_run_attempt": "1"},
+                    "created_at": "2026-09-05T18:00:00Z"}
         if path.endswith("/deployments/42/statuses"):
             return [{"state": "success", "created_at": "2026-09-05T19:00:00Z", "description": "release-artifact:46"}]
+        if path.endswith("/actions/runs/50"):
+            return {"id": 50, "head_sha": "a" * 40, "head_branch": "main",
+                "status": "completed", "conclusion": "success", "run_attempt": 1,
+                "event": "workflow_dispatch", "name": "Protected owner dashboard release",
+                "path": ".github/workflows/owner-dashboard-release.yml",
+                "repository": {"full_name": "owner/stocks-agent"}}
+        for artifact_id, name in ((46, "release-record-42"), (47, "backend-component-evidence-50-1")):
+            if path.endswith(f"/actions/artifacts/{artifact_id}"):
+                return {"id": artifact_id, "name": name, "digest": digests[artifact_id],
+                    "expired": False, "workflow_run": {"id": 50, "head_sha": "a" * 40}}
+            if path.endswith(f"/actions/artifacts/{artifact_id}/zip"):
+                assert binary is True
+                return archives[artifact_id]
         raise AssertionError(path)
     monkeypatch.setattr(source, "_get", get)
-    monkeypatch.setattr(source, "artifact", lambda artifact_id: {"release-record.json": b'{"candidate_sha":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","project_ref":"pppppppppppppppppppp","deployment_id":42}'})
     result = source.deployment(42)
     assert result["deployed_at"] == "2026-09-05T19:00:00Z"
     assert result["id"] == 42
-    assert len(calls) == 2
+    assert result["release_artifact"]["name"] == "release-record-42"
+    assert len(calls) == 8
+
+
+def test_production_source_keeps_only_each_reviewers_latest_decision(monkeypatch):
+    from scripts.protected_evidence import GitHubProductionDataSource
+
+    source = GitHubProductionDataSource("owner/stocks-agent", "p" * 20, object())
+    rows = [
+        {"id": 3, "state": "CHANGES_REQUESTED", "submitted_at": "2026-09-05T17:50:00Z", "user": {"id": 7}},
+        {"id": 1, "state": "APPROVED", "submitted_at": "2026-09-05T17:40:00Z", "user": {"id": 7}},
+        {"id": 2, "state": "APPROVED", "submitted_at": "2026-09-05T17:45:00Z", "user": {"id": 8}},
+    ]
+    monkeypatch.setattr(source, "_get", lambda _path: rows)
+
+    assert {row["id"] for row in source.reviews(44)} == {2, 3}
 
 
 def test_protected_release_extraction_reads_reused_reference_and_full_source_lineage(monkeypatch):

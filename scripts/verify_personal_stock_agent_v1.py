@@ -12,6 +12,7 @@ from pathlib import Path, PurePosixPath
 import re
 import subprocess
 import sys
+import tomllib
 import uuid
 from dataclasses import dataclass
 from typing import Callable, Mapping, Protocol, runtime_checkable
@@ -731,30 +732,86 @@ def verify_discovery_capability(receipt: Mapping[str, object]) -> VerificationRe
 
 
 def verify_component_artifacts(repo: Path, candidate: str, record: Mapping, source: ReleaseDataSource, *, deployed_at: datetime | None = None) -> None:
-    """Bind protected management-plane readbacks to all changed candidate bytes."""
-    names = (*FUNCTIONS, "owner-web-site")
+    """Bind protected backend readbacks to candidate bytes and one exact artifact."""
+    names = FUNCTIONS
     rows = record.get("component_readbacks")
     require(isinstance(rows, list) and [row.get("component") for row in rows] == list(names),
-            "all four component readbacks are required")
-    hosting = json.loads(git(repo, "show", f"{candidate}:.openai/hosting.json"))
+            "all protected backend component readbacks are required")
+    evidence = record.get("backend_evidence_artifact")
+    require(isinstance(evidence, Mapping) and set(evidence) == {
+        "artifact_id", "name", "digest", "manifest_sha256", "recovery_metadata_sha256"
+    } and type(evidence.get("artifact_id")) is int and evidence["artifact_id"] > 0
+        and evidence.get("name") == f"backend-component-evidence-{record.get('release_workflow_run_id')}-{record.get('release_workflow_run_attempt')}"
+        and isinstance(evidence.get("digest"), str) and re.fullmatch(r"sha256:[0-9a-f]{64}", evidence["digest"])
+        and all(isinstance(evidence.get(key), str) and re.fullmatch(r"[0-9a-f]{64}", evidence[key])
+                for key in ("manifest_sha256", "recovery_metadata_sha256")),
+        "protected backend evidence artifact identity is incomplete")
+    artifact = source.artifact(evidence["artifact_id"])
+    require("manifest.json" in artifact and "recovery-metadata.json" in artifact
+            and sha256(artifact["manifest.json"]) == evidence["manifest_sha256"]
+            and sha256(artifact["recovery-metadata.json"]) == evidence["recovery_metadata_sha256"],
+            "protected backend evidence manifest or recovery metadata mismatch")
+    manifest = json.loads(artifact["manifest.json"])
+    require(manifest == {"format": "stocks-protected-backend-evidence-v1",
+            "candidate_sha": candidate, "project_ref": record.get("project_ref"),
+            "release_run_id": record.get("release_workflow_run_id"),
+            "release_run_attempt": record.get("release_workflow_run_attempt"),
+            "components": [{"component": row["component"],
+                "deployed_prefix": row["artifact_prefix"], "deployed_sha256": row["deployed_sha256"],
+                "prior_prefix": row["prior"].get("artifact_prefix"),
+                "prior_sha256": row["prior"].get("source_sha256")} for row in rows]},
+            "protected backend evidence manifest is inconsistent")
+    require(json.loads(artifact["recovery-metadata.json"]) == record.get("recovery_journal"),
+            "protected recovery journal receipt is inconsistent")
+
+    consumed_paths = {"manifest.json", "recovery-metadata.json"}
+
+    def files_at(prefix: str) -> dict[str, bytes]:
+        marker = prefix + "/"
+        files = {path[len(marker):]: raw for path, raw in artifact.items() if path.startswith(marker)}
+        require(files and all(path_is_safe(path) for path in files), "component artifact prefix is empty or unsafe")
+        consumed_paths.update(marker + path for path in files)
+        return files
+
+    try:
+        function_config = tomllib.loads(git(repo, "show", f"{candidate}:supabase/config.toml").decode())["functions"]
+    except (UnicodeDecodeError, tomllib.TOMLDecodeError, KeyError, TypeError) as error:
+        raise RuntimeError("candidate function configuration is malformed") from error
+
     for row in rows:
         name = row["component"]
         require(row.get("candidate_sha") == candidate and isinstance(row.get("deployment_id"), str)
                 and row["deployment_id"] and isinstance(row.get("version"), str) and row["version"]
-                and row.get("origin") == "management_plane_download", "component platform identity is incomplete")
-        expected = (git_files(repo, candidate, f"supabase/functions/{name}") if name in FUNCTIONS else None)
-        files = source.artifact(row["artifact_id"])
+                and row.get("origin") == "management_plane_download"
+                and row.get("artifact_id") == evidence["artifact_id"]
+                and isinstance(row.get("artifact_prefix"), str), "component platform identity is incomplete")
+        expected = git_files(repo, candidate, f"supabase/functions/{name}")
+        files = files_at(row["artifact_prefix"])
         digest = tree_sha256(files)
         require(digest == row["deployed_sha256"], "component readback artifact bytes mismatch")
-        if expected is not None:
-            function = next(item for item in record["functions"] if item["function"] == name)
-            require(files == expected and row["deployment_id"] == function.get("deployment_id")
-                    and row["version"] == str(function["function_version"]), "component deployed byte/version parity mismatch")
-        else:
-            require(row.get("project_id") == hosting.get("project_id")
-                    and hosting.get("static", {}).get("directory") == "dist"
-                    and {path: sha256(raw) for path, raw in files.items()} == record["static_assets"]["files"],
-                    "Site deployment identity or deployed bytes mismatch")
+        function = next(item for item in record["functions"] if item["function"] == name)
+        configured = function_config.get(name)
+        prefix = f"./functions/{name}/"
+        require(isinstance(configured, Mapping) and configured.get("enabled") is True
+                and type(configured.get("verify_jwt")) is bool
+                and isinstance(configured.get("entrypoint"), str)
+                and configured["entrypoint"].startswith(prefix)
+                and path_is_safe(configured["entrypoint"][len(prefix):])
+                and configured["entrypoint"][len(prefix):] in expected,
+                "candidate function configuration is incomplete")
+        expected_configuration = {"verify_jwt": configured["verify_jwt"],
+            "entrypoint": configured["entrypoint"][len(prefix):], "import_map": None}
+        if configured.get("import_map") is not None:
+            require(isinstance(configured["import_map"], str)
+                    and configured["import_map"].startswith(prefix)
+                    and path_is_safe(configured["import_map"][len(prefix):])
+                    and configured["import_map"][len(prefix):] in expected,
+                    "candidate function import-map configuration is incomplete")
+            expected_configuration["import_map"] = configured["import_map"][len(prefix):]
+        require(files == expected and row["deployment_id"] == function.get("deployment_id")
+                and row["version"] == str(function["function_version"])
+                and row.get("configuration") == expected_configuration,
+                "component deployed byte/version/configuration parity mismatch")
         prior = row.get("prior")
         require(isinstance(prior, Mapping) and type(prior.get("exists")) is bool
                 and isinstance(prior.get("configuration"), Mapping), "component prior-state rollback capture is incomplete")
@@ -763,11 +820,15 @@ def verify_component_artifacts(repo: Path, candidate: str, record: Mapping, sour
         if prior["exists"]:
             require(isinstance(prior.get("deployment_id"), str) and prior["deployment_id"]
                     and isinstance(prior.get("version"), str) and prior["version"]
-                    and tree_sha256(source.artifact(prior["artifact_id"])) == prior["source_sha256"],
+                    and prior.get("artifact_id") == evidence["artifact_id"]
+                    and isinstance(prior.get("artifact_prefix"), str)
+                    and tree_sha256(files_at(prior["artifact_prefix"])) == prior["source_sha256"],
                     "component prior rollback bytes or identity mismatch")
         else:
             require(prior.get("deployment_id") is None and prior.get("version") is None
-                    and prior.get("artifact_id") is None, "component absence proof is inconsistent")
+                    and prior.get("artifact_id") is None and prior.get("artifact_prefix") is None,
+                    "component absence proof is inconsistent")
+    require(set(artifact) == consumed_paths, "protected backend artifact has unexpected files")
 
 
 @runtime_checkable
@@ -842,6 +903,18 @@ def verify_artifacts(repo: Path, static_root: Path, candidate: str, record: Mapp
                             "sha256": migration_statements_sha256(normalize_migration_statements(raw.decode("utf-8")))}
                            for path, raw in sorted(migrations.items()) if path.endswith(".sql")]
     require(record["migrations"] == expected_migrations, "migration byte hashes or complete version set differ from candidate")
+    application = record.get("migration_application")
+    require(isinstance(application, Mapping) and set(application) == {"candidate", "applied", "skipped"}
+            and application["candidate"] == expected_migrations
+            and all(isinstance(rows, list) for rows in (application["applied"], application["skipped"])),
+            "migration application receipt is incomplete")
+    applied = [canonical_json(row) for row in application["applied"]]
+    skipped = [canonical_json(row) for row in application["skipped"]]
+    expected = [canonical_json(row) for row in expected_migrations]
+    require(len(applied) == len(set(applied)) and len(skipped) == len(set(skipped))
+            and not set(applied).intersection(skipped)
+            and set(applied).union(skipped) == set(expected),
+            "migration application receipt does not partition the candidate manifest")
     functions = record["functions"]
     require(isinstance(functions, list) and [row["function"] for row in functions] == list(FUNCTIONS), "function evidence is incomplete")
     for row in functions:
@@ -856,28 +929,23 @@ def verify_artifacts(repo: Path, static_root: Path, candidate: str, record: Mapp
         if path.is_file():
             local_files[path.relative_to(static_root).as_posix()] = sha256(path.read_bytes())
     require(local_files and "index.html" in local_files and local_files == static["files"], "static artifact bytes do not match protected deployment")
-    capture = record["rollback_capture"]
-    captured = timestamp(capture["captured_at"])
-    require(captured < deployed <= now and git_commit(repo, capture["commit_sha"]) <= captured, "rollback capture is not predeployment")
-    captured_files = source.artifact(capture["artifact_id"])
-    captured_hash = tree_sha256(captured_files)
-    require(captured_files == git_files(repo, capture["commit_sha"], "supabase/functions/market-briefing-gateway")
-            and captured_hash == capture["source_sha256"], "captured rollback artifact bytes mismatch")
+    recovery = record.get("recovery_journal")
+    require(isinstance(recovery, Mapping) and set(recovery) == {
+        "sequence", "run_id", "run_attempt", "captured_at", "ciphertext_sha256"
+    } and type(recovery.get("sequence")) is int and recovery["sequence"] > 0
+        and recovery.get("run_id") == record.get("release_workflow_run_id")
+        and recovery.get("run_attempt") == record.get("release_workflow_run_attempt")
+        and re.fullmatch(r"[0-9a-f]{64}", str(recovery.get("ciphertext_sha256", "")))
+        and timestamp(recovery.get("captured_at")) <= deployed,
+        "protected recovery journal identity is incomplete")
     outcome = record.get("deployment_outcome")
     if outcome == "succeeded":
-        ready = record["rollback_readiness"]
-        drill = ready["isolated_drill"]
-        require(ready["status"] == "ready" and type(ready["function_version"]) is int and ready["function_version"] > 0
-                and ready["source_sha256"] == captured_hash and drill["status"] == "verified" and drill["isolated"] is True
-                and drill["source_sha256"] == captured_hash and timestamp(drill["started_at"]) <= timestamp(drill["completed_at"]), "successful deployment rollback readiness is incomplete")
-    elif outcome == "failed":
-        rollback = record["rollback"]
-        gateway, runtime = rollback["gateway"], rollback["runtime_login"]
-        require(rollback["status"] == "rolled_back" and gateway["status"] == "restored" and gateway["commit_sha"] == capture["commit_sha"]
-                and gateway["source_sha256"] == captured_hash and type(gateway["function_version"]) is int and gateway["function_version"] > 0
-                and captured <= timestamp(rollback["gateway_restored_at"]) <= timestamp(rollback["dashboard_cleaned_at"]) < deployed
-                and runtime["login"] is False and runtime["memberships"] == 0
-                and rollback["dashboard_secrets_unset"] == ["DASHBOARD_ALLOWED_ORIGINS", "DASHBOARD_DATABASE_URL", "DASHBOARD_OWNER_USER_ID"], "gateway-first rollback evidence is incomplete")
+        require(record.get("evidence_classes", {}).get("protected_backend") == {
+            "status": "verified", "candidate_sha": candidate},
+            "successful protected backend evidence class is incomplete")
+        require(record.get("evidence_classes", {}).get("owner_site") == {
+            "status": "pending", "required_evidence": "exact_candidate_owner_only_native_site_receipt"},
+            "owner Site evidence must remain pending in the backend release record")
     else:
         raise RuntimeError("deployment outcome is missing or unsafe")
 
@@ -971,7 +1039,8 @@ def verify_scheduled(rows: Mapping, run_id: str, deployed: datetime, now: dateti
             }}
 
 
-def verify_release(source: ReleaseDataSource, *, deployment_id: int, repo_root: Path = ROOT, static_root: Path = ROOT / "dist",
+def verify_release(source: ReleaseDataSource, *, deployment_id: int, native_site_receipt: Mapping[str, object],
+                   repo_root: Path = ROOT, static_root: Path = ROOT / "dist",
                    clock: Callable[[], datetime] = lambda: datetime.now(timezone.utc)) -> dict[str, object]:
     require(not isinstance(source, Mapping) and isinstance(source, ReleaseDataSource), "protected production data source is required")
     try:
@@ -983,25 +1052,51 @@ def verify_release(source: ReleaseDataSource, *, deployment_id: int, repo_root: 
         ci, merge = source.ci(record["workflow_run_id"]), source.merge(record["pull_request_number"])
         deployed, merged = timestamp(record["deployed_at"]), timestamp(merge["merged_at"])
         require(record["id"] == deployment_id and record["environment"] == "production" and record["candidate_sha"] == candidate
+                and record.get("repository") == ci.get("repository", {}).get("full_name")
                 and ci["head_sha"] == candidate and ci["status"] == "completed" and ci["conclusion"] == "success"
-                and ci["path"] == ".github/workflows/owner-dashboard-ci.yml" and ci["id"] == record["workflow_run_id"]
+                and ci.get("name") == "Owner dashboard verification"
+                and ci["path"] == ".github/workflows/owner-dashboard-ci.yml"
+                and ci.get("event") == "push" and ci.get("head_branch") == "main"
+                and ci["id"] == record["workflow_run_id"]
+                and merge.get("number") == record["pull_request_number"]
+                and merge.get("base", {}).get("repo", {}).get("full_name") == record.get("repository")
+                and merge.get("base", {}).get("ref") == "main"
                 and merge["merged"] is True and merge["merge_commit_sha"] == candidate
                 and merged <= candidate_commit_time < deployed <= now and candidate_commit_time <= timestamp(ci["updated_at"]) <= deployed, "protected CI/merge/deployment candidate SHA or time mismatch")
+        release_artifact = record.get("release_artifact")
+        require(isinstance(release_artifact, Mapping)
+                and type(release_artifact.get("artifact_id")) is int and release_artifact["artifact_id"] > 0
+                and release_artifact.get("name") == f"release-record-{deployment_id}"
+                and re.fullmatch(r"sha256:[0-9a-f]{64}", str(release_artifact.get("digest", "")))
+                and release_artifact.get("workflow_run_id") == record.get("release_workflow_run_id")
+                and release_artifact.get("workflow_run_attempt") == record.get("release_workflow_run_attempt")
+                and release_artifact.get("repository") == record.get("repository")
+                and release_artifact.get("workflow_name") == "Protected owner dashboard release"
+                and release_artifact.get("workflow_path") == ".github/workflows/owner-dashboard-release.yml"
+                and release_artifact.get("event") == "workflow_dispatch"
+                and release_artifact.get("head_branch") == "main"
+                and release_artifact.get("head_sha") == candidate,
+                "protected release artifact workflow identity is incomplete")
         reviewed_head = merge["head"]["sha"]
         require(bool(re.fullmatch(r"[0-9a-f]{40}", reviewed_head))
                 and record.get("reviewed_sha") == reviewed_head,
                 "release record does not bind the exact reviewed PR head")
         reviewed_head_time = git_commit(repo_root, reviewed_head)
         reviews = source.reviews(record["pull_request_number"])
-        require(any(row["state"] == "APPROVED" and row["commit_id"] == reviewed_head
+        require(not any(row.get("state") == "CHANGES_REQUESTED" for row in reviews)
+                and any(row["state"] == "APPROVED" and row["commit_id"] == reviewed_head
                     and reviewed_head_time <= timestamp(row["submitted_at"]) <= merged <= candidate_commit_time <= deployed for row in reviews), "independent review of exact PR head is missing")
         if reviewed_head != candidate:
-            ancestor = subprocess.run(["git", "merge-base", "--is-ancestor", reviewed_head, candidate], cwd=repo_root, capture_output=True, check=False)
-            if ancestor.returncode != 0:
-                reviewed_tree = subprocess.run(["git", "rev-parse", f"{reviewed_head}^{{tree}}"], cwd=repo_root, text=True, capture_output=True, check=False)
-                candidate_tree = subprocess.run(["git", "rev-parse", f"{candidate}^{{tree}}"], cwd=repo_root, text=True, capture_output=True, check=False)
-                require(reviewed_tree.returncode == candidate_tree.returncode == 0 and reviewed_tree.stdout == candidate_tree.stdout, "reviewed PR head does not bind candidate merge/tree")
+            reviewed_tree = subprocess.run(["git", "rev-parse", f"{reviewed_head}^{{tree}}"], cwd=repo_root, text=True, capture_output=True, check=False)
+            candidate_tree = subprocess.run(["git", "rev-parse", f"{candidate}^{{tree}}"], cwd=repo_root, text=True, capture_output=True, check=False)
+            require(reviewed_tree.returncode == candidate_tree.returncode == 0
+                    and reviewed_tree.stdout == candidate_tree.stdout,
+                    "reviewed PR head does not bind candidate merge/tree")
         verify_artifacts(repo_root, static_root, candidate, record, source, now, deployed)
+        from scripts.verify_native_site_release import verify_native_site_release
+        owner_site = verify_native_site_release(
+            native_site_receipt, candidate, record["project_ref"], repo_root, now=now,
+        )
         require(record.get("dry_run") is False, "protected deployment dry-run authority must be false")
         dry = record["dry_run_evidence"]
         before, after = dry["before"], dry["after"]
@@ -1023,7 +1118,8 @@ def verify_release(source: ReleaseDataSource, *, deployment_id: int, repo_root: 
         require(record["canaries"] == {"owner": 200, "anonymous": 401, "non_owner": 403}, "protected owner/denial canaries are incomplete")
         run_id = source.scheduled_run(record["deployed_at"])
         chain = verify_scheduled(source.release_rows(run_id), run_id, deployed, now)
-        return {"status": "verified", "candidate_sha": candidate, "deployment_id": deployment_id, **chain}
+        return {"status": "verified", "candidate_sha": candidate, "deployment_id": deployment_id,
+                "owner_site_receipt": owner_site, **chain}
     except (KeyError, TypeError, ValueError, IndexError, AttributeError) as error:
         raise RuntimeError("protected release evidence is unavailable or malformed") from error
 
@@ -1035,10 +1131,14 @@ def main() -> int:
     parser.add_argument("--deployment-id", type=int, required=True)
     parser.add_argument("--production-project-ref", required=True)
     parser.add_argument("--static-root", type=Path, required=True)
+    parser.add_argument("--native-site-receipt", type=Path, required=True)
     args = parser.parse_args()
     with PostgresReadOnlySource(os.environ.get("RELEASE_READONLY_DATABASE_URL", ""), args.production_project_ref) as database:
         source = GitHubProductionDataSource(args.repository, args.production_project_ref, database)
-        print(json.dumps(verify_release(source, deployment_id=args.deployment_id, static_root=args.static_root), sort_keys=True))
+        from scripts.verify_native_site_release import _load_receipt
+        print(json.dumps(verify_release(source, deployment_id=args.deployment_id,
+            native_site_receipt=_load_receipt(args.native_site_receipt),
+            static_root=args.static_root), sort_keys=True))
     return 0
 
 

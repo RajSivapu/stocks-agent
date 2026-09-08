@@ -1285,10 +1285,10 @@ git commit -m "docs: prepare market discovery rollout"
 Push the feature branch, open the normal pull request, verify exact-head CI, merge only the reviewed
 SHA, and verify exact-main CI. Do not deploy an unreviewed descendant.
 
-- [ ] **Step 6: Use the protected multi-component release path and publish the reviewed owner Site**
+- [ ] **Step 6: Release the protected backend, then publish the exact candidate through native Sites**
 
 Apply the immutable additive discovery chain from `20261005_market_wide_discovery.sql` through
-`20261012_theme_memory_research_nominations.sql`, publish changed Edge Functions, update the scheduled
+`20261013_v2_runtime_completion.sql`, publish changed Edge Functions, update the scheduled
 environment's approved domains and credential-presence configuration, and retain encrypted rollback
 state. Read back exact migration bytes, table/ACL state, source manifests, Edge bytes/configuration,
 environment capability status, owner/anonymous API behavior, and rollback identities. If any
@@ -1298,8 +1298,8 @@ After the backend release and owner API canaries pass, build the exact reviewed 
 the existing static supply-chain verifier and publish it with the owner-scoped Sites path. Retain the
 current Site v9 deployment as rollback until the new Site passes readback for exact application asset
 hashes, sole-owner allowlist, no groups, zero external visitors, API origin, and login/recovery flow.
-Store a bounded Site receipt beside the protected backend release receipt; neither receipt substitutes
-for the other.
+Validate the bounded native Sites receipt with `scripts/verify_native_site_release.py` and keep it
+beside the protected backend release receipt; neither receipt substitutes for the other.
 
 - [ ] **Step 7: Observe normal scheduled shadow discovery**
 

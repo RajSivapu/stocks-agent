@@ -84,6 +84,34 @@ def test_release_binds_the_approved_pr_head_and_exact_main_ci_metadata():
     assert "reviewed_sha=$PR_HEAD_SHA" in workflow
 
 
+def test_release_authenticates_candidate_before_checkout_dependencies_or_production_secrets():
+    workflow = Path(".github/workflows/owner-dashboard-release.yml").read_text()
+    trust = workflow.index("Authenticate exact reviewed main candidate without candidate code")
+    checkout = workflow.index("uses: actions/checkout@")
+    install = workflow.index("npm ci --ignore-scripts")
+    production_secret = workflow.index("SUPABASE_ACCESS_TOKEN: ${{ secrets.SUPABASE_ACCESS_TOKEN }}")
+    assert trust < checkout < install < production_secret
+    pre_checkout = workflow[trust:checkout]
+    assert "SUPABASE_ACCESS_TOKEN" not in pre_checkout
+    assert "RELEASE_RECOVERY_KEY" not in pre_checkout
+    assert "POSTGRES_URL" not in pre_checkout
+    assert "git/commits/$PR_HEAD_SHA" in pre_checkout
+    assert "git/commits/$CANDIDATE_SHA" in pre_checkout
+    assert "reviewed and candidate Git trees differ" in pre_checkout
+
+
+def test_release_uses_latest_review_per_reviewer_before_exposing_production_secrets():
+    workflow = Path(".github/workflows/owner-dashboard-release.yml").read_text()
+    trust = workflow.split(
+        "- name: Authenticate exact reviewed main candidate without candidate code", 1
+    )[1].split("- uses: actions/checkout", 1)[0]
+    assert "group_by(.user.id)" in trust
+    assert 'max_by(.submitted_at // "")' in trust
+    assert 'all(.state != "CHANGES_REQUESTED")' in trust
+    assert '.state == "APPROVED"' in trust
+    assert "SUPABASE_ACCESS_TOKEN" not in trust
+
+
 def test_protected_workflows_use_the_same_exact_main_ci_trust_contract():
     required = (
         "required CI belongs to another repository",
@@ -117,7 +145,11 @@ def test_release_record_keeps_release_and_later_scheduled_receipts_distinct():
         },
     })
     assert result == {
-        "protected_release": {"status": "verified", "candidate_sha": "a" * 40},
+        "protected_backend": {"status": "verified", "candidate_sha": "a" * 40},
+        "owner_site": {
+            "status": "pending",
+            "required_evidence": "exact_candidate_owner_only_native_site_receipt",
+        },
         "operational_scheduled": {
             "status": "pending",
             "required_evidence": "normal_post_release_scheduled_receipt",
@@ -152,13 +184,61 @@ def test_release_record_rejects_a_receipt_from_another_candidate():
             raise AssertionError("invalid release identity was accepted")
 
 
-def test_release_workflow_retains_and_restores_rollback_source_until_evidence_is_accepted():
+def test_release_record_writer_emits_backend_only_evidence_contract(tmp_path, monkeypatch):
+    import json
+    import sys
+    from scripts import write_protected_release_record as writer
+
+    (tmp_path / "apps/web").mkdir(parents=True)
+    (tmp_path / "apps/web/main.tsx").write_text("web")
+    (tmp_path / "dist").mkdir()
+    (tmp_path / "dist/index.html").write_text("site")
+    recovery = {"sequence": 1, "run_id": 50, "run_attempt": 2,
+        "captured_at": "2026-09-08T12:00:00Z", "ciphertext_sha256": "d" * 64}
+    receipt = {"candidate_sha": "a" * 40, "deployment_outcome": "succeeded",
+        "migrations": [], "migration_application": {}, "functions": [],
+        "component_readbacks": [{"component": name, "prior": {"exists": True}}
+            for name in ("market-briefing-gateway", "owner-dashboard-api", "telegram-portfolio")],
+        "backend_evidence": {"manifest_sha256": "b" * 64,
+            "recovery_metadata_sha256": "c" * 64},
+        "recovery_journal": recovery,
+        "canary": {"status": "verified", "source_reconciliation": "verified",
+            "financial_write_routes": 0, "brokerage_authority": "none",
+            "friend_invitations": "disabled"}}
+    dry = {"table_deltas": {}}
+    receipt_path, dry_path, output = (tmp_path / name for name in ("receipt.json", "dry.json", "record.json"))
+    receipt_path.write_text(json.dumps(receipt)); dry_path.write_text(json.dumps(dry))
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(sys, "argv", ["writer", "--receipt", str(receipt_path),
+        "--dry-run-evidence", str(dry_path), "--output", str(output),
+        "--candidate-sha", "a" * 40, "--reviewed-sha", "f" * 40,
+        "--repository", "owner/stocks-agent", "--ci-workflow-run-id", "40",
+        "--release-workflow-run-id", "50", "--release-workflow-run-attempt", "2",
+        "--pull-request-number", "44", "--deployment-id", "42",
+        "--backend-evidence-artifact-id", "60",
+        "--backend-evidence-artifact-name", "backend-component-evidence-50-2",
+        "--backend-evidence-artifact-digest", "sha256:" + "e" * 64,
+        "--project-ref", "p" * 20])
+
+    assert writer.main() == 0
+    record = json.loads(output.read_text())
+    assert record["backend_evidence_artifact"] == {"artifact_id": 60,
+        "name": "backend-component-evidence-50-2", "digest": "sha256:" + "e" * 64,
+        "manifest_sha256": "b" * 64, "recovery_metadata_sha256": "c" * 64}
+    assert record["recovery_journal"] == recovery
+    assert record["evidence_classes"]["owner_site"]["status"] == "pending"
+    assert all(row["artifact_id"] == 60 for row in record["component_readbacks"])
+
+
+def test_release_workflow_retains_and_restores_encrypted_backend_state_until_evidence_is_accepted():
     workflow = Path(".github/workflows/owner-dashboard-release.yml").read_text()
     assert "restore_gateway_after_release_failure.py" in workflow
     assert "trap 'restore_after_failure' ERR" in workflow
     assert "RELEASE_RECOVERY_KEY" in workflow
     assert "Release local rollback worktree" not in workflow
-    assert "rollback_readiness" in Path("scripts/write_protected_release_record.py").read_text()
+    writer = Path("scripts/write_protected_release_record.py").read_text()
+    assert '"recovery_journal"' in writer
+    assert '"backend_evidence_artifact"' in writer
     assert "dry-run-evidence.json" in workflow
 
 
@@ -183,17 +263,27 @@ def test_final_release_workflow_keeps_all_ephemera_outside_the_checkout_and_uses
     assert "npx playwright install --with-deps chromium" in workflow
     assert "cryptography==" in Path("requirements.lock").read_text()
     assert '"$PR_HEAD_SHA"' in workflow
-    assert "reviewed head does not bind candidate" in workflow
+    assert "reviewed and candidate Git trees differ" in workflow
 
 
 def test_release_workflow_binds_review_times_and_durable_pre_mutation_recovery():
     workflow = Path(".github/workflows/owner-dashboard-release.yml").read_text()
     assert 'PYTHON_BIN="$RELEASE_VENV/bin/python"' in workflow
-    assert 'head_commit_time <= review.submitted_at <= merged_at <= candidate_commit_time' in workflow
+    assert 'head_commit_time <= latest review.submitted_at <= merged_at <= candidate_commit_time' in workflow
     assert "component-recovery-run:$GITHUB_RUN_ID" in workflow
-    assert "release_components.py --check-transport" in workflow
+    assert "release_components.py --check-backend-transport" in workflow
     assert Path(".github/workflows/owner-dashboard-release-recovery.yml").is_file()
-    assert workflow.index("release_components.py --check-transport") < workflow.index("Create the candidate-bound GitHub Deployment")
+    assert workflow.index("release_components.py --check-backend-transport") < workflow.index("Create the candidate-bound GitHub Deployment")
+
+
+def test_backend_release_does_not_claim_or_require_native_site_deployment():
+    workflow = Path(".github/workflows/owner-dashboard-release.yml").read_text()
+    writer = Path("scripts/write_protected_release_record.py").read_text()
+    assert "--check-transport" not in workflow
+    assert "--check-backend-transport" in workflow
+    assert "owner-web-site" not in writer.split("component_readbacks", 1)[1].split("]", 1)[0]
+    assert '"owner_site"' in writer
+    assert "native Sites receipt" in Path("docs/rollouts/2026-09-06-market-wide-thematic-discovery-v1.md").read_text()
 
 
 def test_independent_recovery_contract_covers_cancelled_and_lost_release_runners():
@@ -263,7 +353,7 @@ def test_protected_release_and_recovery_install_only_the_complete_hashed_lock():
 
 def test_release_exports_candidate_for_every_set_u_dry_run_and_recovery_step():
     workflow = Path(".github/workflows/owner-dashboard-release.yml").read_text()
-    assert 'echo "CANDIDATE_SHA=$CANDIDATE_SHA" >> "$GITHUB_ENV"' in workflow
+    assert 'echo "CANDIDATE_SHA=${{ steps.candidate.outputs.candidate_sha }}" >> "$GITHUB_ENV"' in workflow
     assert 'CANDIDATE_SHA: ${{ steps.candidate.outputs.candidate_sha }}' in workflow
     assert 'state=in_progress' in workflow
 
@@ -271,7 +361,8 @@ def test_release_exports_candidate_for_every_set_u_dry_run_and_recovery_step():
 def test_release_and_recovery_use_separate_safe_actions_concurrency_boundaries():
     workflow = Path(".github/workflows/owner-dashboard-release.yml").read_text()
     recovery = Path(".github/workflows/owner-dashboard-release-recovery.yml").read_text()
-    assert "rollback-source-" in workflow and "recovery-metadata-" in workflow
+    assert "backend-component-evidence-" in workflow
+    assert "recovery-metadata.json" in Path("scripts/configured_native_release_adapter.py").read_text()
     assert "group: protected-owner-dashboard-release-production" in workflow
     assert "group: protected-owner-dashboard-release-production-${{" not in workflow
     assert "group: protected-owner-dashboard-release-recovery-${{ github.event.workflow_run.id }}-${{ github.event.workflow_run.run_attempt }}" in recovery
