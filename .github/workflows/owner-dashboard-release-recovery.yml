@@ -23,6 +23,9 @@ jobs:
     environment: owner-dashboard-production
     runs-on: ubuntu-24.04
     timeout-minutes: 20
+    env:
+      PGSSLMODE: verify-full
+      PGSSLROOTCERT: ${{ github.workspace }}/config/supabase-prod-ca-2021.crt
     steps:
       - name: Verify exact failed-release deployment trust marker
         id: trust
@@ -56,7 +59,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           SUPABASE_ACCESS_TOKEN: ${{ secrets.SUPABASE_ACCESS_TOKEN }}
           RELEASE_RECOVERY_KEY: ${{ secrets.RELEASE_RECOVERY_KEY }}
-          POSTGRES_URL: ${{ secrets.POSTGRES_URL }}
+          SUPAVISOR_SESSION_URL: ${{ secrets.SUPAVISOR_SESSION_URL }}
           PROJECT_REF: ${{ secrets.SUPABASE_PROJECT_REF }}
         run: |
           set -euo pipefail
@@ -65,4 +68,4 @@ jobs:
           # The native adapter retrieves the latest authenticated encrypted
           # journal by this exact original run identity and attempt. It must reject missing
           # or ambiguous state; terminal GitHub labels cannot bypass recovery.
-          python -m scripts.restore_gateway_after_release_failure --project-ref "$PROJECT_REF" --admin-url "$POSTGRES_URL" --release-state recovery/release.enc --release-run-id "${{ github.event.workflow_run.id }}" --release-run-attempt "${{ github.event.workflow_run.run_attempt }}" --lease-owner "recovery-${{ github.event.workflow_run.id }}-${{ github.event.workflow_run.run_attempt }}" --retain-recovery-artifact
+          python -m scripts.restore_gateway_after_release_failure --project-ref "$PROJECT_REF" --admin-url "$SUPAVISOR_SESSION_URL" --release-state recovery/release.enc --release-run-id "${{ github.event.workflow_run.id }}" --release-run-attempt "${{ github.event.workflow_run.run_attempt }}" --lease-owner "recovery-${{ github.event.workflow_run.id }}-${{ github.event.workflow_run.run_attempt }}" --retain-recovery-artifact

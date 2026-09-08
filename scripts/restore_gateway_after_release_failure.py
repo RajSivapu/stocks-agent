@@ -15,6 +15,7 @@ from scripts.deploy_owner_dashboard_api import (
     DurableMutationLease,
     release_gateway_rollback_artifact,
     recover_gateway_from_state,
+    validate_release_admin_session_url,
 )
 
 
@@ -30,6 +31,10 @@ def main() -> int:
     parser.add_argument("--release-run-id", type=int)
     parser.add_argument("--release-run-attempt", type=int, required=True)
     args = parser.parse_args()
+    admin_url = validate_release_admin_session_url(args.project_ref, args.admin_url)
+    # Recovery adapters snapshot the process environment before retrieving the
+    # encrypted journal. Bind their database transport to the validated pooler.
+    os.environ["POSTGRES_URL"] = admin_url
     raw = args.release_state.read_bytes() if args.release_state.is_file() else None
     if args.release_run_id is not None or raw is None or not raw.startswith(b"{"):
         from cryptography.fernet import Fernet
@@ -51,7 +56,7 @@ def main() -> int:
                 or (args.release_run_id is not None and str(context.get("release_run_id")) != str(args.release_run_id))):
             raise RuntimeError("component recovery candidate/project/run/attempt binding mismatch")
         sink = EncryptedJournal(args.release_state, key, retain=adapter.retain)
-        with DurableMutationLease(args.admin_url, args.lease_owner, "recovery") as lease:
+        with DurableMutationLease(admin_url, args.lease_owner, "recovery") as lease:
             recover_components(adapter, state, persist=sink)
             lease.heartbeat()
             lease.resolve()
@@ -60,9 +65,9 @@ def main() -> int:
     # Acquiring the same durable session lock makes recovery a safe takeover
     # after a release runner disappears, while an active release cannot be
     # raced between a preflight check and its first remote mutation.
-    with DurableMutationLease(args.admin_url, args.lease_owner, "recovery") as lease:
+    with DurableMutationLease(admin_url, args.lease_owner, "recovery") as lease:
         recover_gateway_from_state(
-            state, args.project_ref, args.admin_url, recovery_root=args.recovery_root,
+            state, args.project_ref, admin_url, recovery_root=args.recovery_root,
             releaser=(lambda _artifact: None) if args.retain_recovery_artifact else release_gateway_rollback_artifact,
         )
         lease.heartbeat()

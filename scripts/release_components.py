@@ -383,7 +383,22 @@ def run_native_release(adapter, context: Mapping, *, repo_root: Path, journal_pa
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--check-backend-transport", action="store_true", required=True)
-    parser.parse_args()
-    load_native_release_adapter({"project_ref": os.environ.get("PROJECT_REF"),
-                                 "candidate_sha": os.environ.get("CANDIDATE_SHA")})
+    checks = parser.add_mutually_exclusive_group(required=True)
+    checks.add_argument("--check-backend-transport", action="store_true")
+    checks.add_argument("--check-database-connectivity", action="store_true")
+    arguments = parser.parse_args()
+    if arguments.check_backend_transport:
+        load_native_release_adapter({"project_ref": os.environ.get("PROJECT_REF"),
+                                     "candidate_sha": os.environ.get("CANDIDATE_SHA")})
+    else:
+        from scripts.deploy_owner_dashboard_api import verify_release_database_transport
+        project_ref = os.environ.get("PROJECT_REF", "").strip()
+        admin_url = os.environ.get("POSTGRES_URL", "").strip()
+        session_template = os.environ.get("SUPAVISOR_SESSION_URL", "").strip()
+        if not project_ref or not admin_url or not session_template:
+            raise SystemExit(
+                "PROJECT_REF, POSTGRES_URL, and SUPAVISOR_SESSION_URL are required"
+            )
+        print(json.dumps(verify_release_database_transport(
+            project_ref, admin_url, session_template,
+        ), sort_keys=True, separators=(",", ":")))

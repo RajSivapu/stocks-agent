@@ -27,6 +27,7 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 45
     env:
+      PGSSLMODE: verify-full
       PGSSLROOTCERT: ${{ github.workspace }}/config/supabase-prod-ca-2021.crt
     steps:
       - name: Authenticate exact reviewed main candidate without candidate code
@@ -155,8 +156,11 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           SUPABASE_ACCESS_TOKEN: ${{ secrets.SUPABASE_ACCESS_TOKEN }}
           PROJECT_REF: ${{ secrets.SUPABASE_PROJECT_REF }}
+          POSTGRES_URL: ${{ secrets.POSTGRES_URL }}
+          SUPAVISOR_SESSION_URL: ${{ secrets.SUPAVISOR_SESSION_URL }}
         run: |
           "$RELEASE_VENV/bin/python" -m scripts.release_components --check-backend-transport
+          "$RELEASE_VENV/bin/python" -m scripts.release_components --check-database-connectivity
       - name: Create the candidate-bound GitHub Deployment
         id: deployment
         env:
@@ -249,24 +253,24 @@ jobs:
         if: ${{ success() }}
         env:
           GH_TOKEN: ${{ github.token }}
-          POSTGRES_URL: ${{ secrets.POSTGRES_URL }}
+          SUPAVISOR_SESSION_URL: ${{ secrets.SUPAVISOR_SESSION_URL }}
           DEPLOYMENT_ID: ${{ steps.deployment.outputs.deployment_id }}
           RELEASE_ARTIFACT_ID: ${{ steps.release_artifact.outputs.artifact-id }}
         run: |
-          "$RELEASE_VENV/bin/python" -m scripts.finalize_protected_release --admin-url "$POSTGRES_URL" --lease-owner "$RELEASE_LEASE_OWNER" --deployment-id "$DEPLOYMENT_ID" --release-artifact-id "$RELEASE_ARTIFACT_ID" --log-url "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
+          "$RELEASE_VENV/bin/python" -m scripts.finalize_protected_release --admin-url "$SUPAVISOR_SESSION_URL" --lease-owner "$RELEASE_LEASE_OWNER" --deployment-id "$DEPLOYMENT_ID" --release-artifact-id "$RELEASE_ARTIFACT_ID" --log-url "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
       - name: Restore changed components if any post-deploy evidence step failed
         if: ${{ failure() }}
         env:
           RELEASE_RECOVERY_KEY: ${{ secrets.RELEASE_RECOVERY_KEY }}
           GH_TOKEN: ${{ github.token }}
           SUPABASE_ACCESS_TOKEN: ${{ secrets.SUPABASE_ACCESS_TOKEN }}
-          POSTGRES_URL: ${{ secrets.POSTGRES_URL }}
+          SUPAVISOR_SESSION_URL: ${{ secrets.SUPAVISOR_SESSION_URL }}
           PROJECT_REF: ${{ secrets.SUPABASE_PROJECT_REF }}
         run: |
           set -euo pipefail
           test -n "${RELEASE_STATE_DIR:-}" || exit 0
           test -f "$RELEASE_STATE_DIR/release-state.json" || exit 0
-          restore_after_failure() { "$RELEASE_VENV/bin/python" -m scripts.restore_gateway_after_release_failure --project-ref "$PROJECT_REF" --admin-url "$POSTGRES_URL" --release-state "$RELEASE_STATE_DIR/release-state.json" --release-run-id "$GITHUB_RUN_ID" --release-run-attempt "$GITHUB_RUN_ATTEMPT" --lease-owner "recovery-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"; }
+          restore_after_failure() { "$RELEASE_VENV/bin/python" -m scripts.restore_gateway_after_release_failure --project-ref "$PROJECT_REF" --admin-url "$SUPAVISOR_SESSION_URL" --release-state "$RELEASE_STATE_DIR/release-state.json" --release-run-id "$GITHUB_RUN_ID" --release-run-attempt "$GITHUB_RUN_ATTEMPT" --lease-owner "recovery-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"; }
           trap 'restore_after_failure' ERR
           restore_after_failure
       - name: Mark candidate deployment failed after protected restoration
