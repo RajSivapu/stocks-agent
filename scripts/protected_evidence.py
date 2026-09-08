@@ -519,6 +519,18 @@ class GitHubProductionDataSource:
                     latest[reviewer] = row
         return list(latest.values())
 
+    def authorization_comments(self, number: int):
+        require(type(number) is int and number > 0, "numeric pull request ID required")
+        rows = self._get(f"{self.prefix}/issues/{number}/comments?per_page=100")
+        require(len(rows) < 100, "owner authorization evidence exceeds bounded page; cannot infer completeness")
+        return rows
+
+    def repository_owner_id(self):
+        row = self._get(self.prefix)
+        owner_id = row.get("owner", {}).get("id")
+        require(type(owner_id) is int and owner_id > 0, "repository owner identity is unavailable")
+        return owner_id
+
     def release_rows(self, run_id: str):
         require(self.database.identity()["project_ref"] == self.project_ref, "queried production database identity mismatch")
         return self.database.release_rows(run_id)

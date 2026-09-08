@@ -1977,6 +1977,8 @@ class ReleaseDataSource(Protocol):
     def ci(self, workflow_run_id: int) -> Mapping: ...
     def merge(self, pull_request_number: int) -> Mapping: ...
     def reviews(self, pull_request_number: int) -> list[Mapping]: ...
+    def authorization_comments(self, pull_request_number: int) -> list[Mapping]: ...
+    def repository_owner_id(self) -> int: ...
     def release_rows(self, run_id: str) -> Mapping: ...
     def artifact(self, artifact_id: int) -> Mapping[str, bytes]: ...
 
@@ -2284,10 +2286,48 @@ def verify_release(source: ReleaseDataSource, *, deployment_id: int,
                 and record.get("reviewed_sha") == reviewed_head,
                 "release record does not bind the exact reviewed PR head")
         reviewed_head_time = git_commit(repo_root, reviewed_head)
+        authorization = record.get("release_authorization")
+        require(isinstance(authorization, Mapping)
+                and authorization.get("kind") in {"github_review", "owner_comment"}
+                and type(authorization.get("id")) is int and authorization["id"] > 0
+                and type(authorization.get("pr_ci_workflow_run_id")) is int
+                and authorization["pr_ci_workflow_run_id"] > 0,
+                "release authorization identity is incomplete")
+        pr_ci = source.ci(authorization["pr_ci_workflow_run_id"])
+        require(pr_ci.get("id") == authorization["pr_ci_workflow_run_id"]
+                and pr_ci.get("repository", {}).get("full_name") == record.get("repository")
+                and pr_ci.get("head_sha") == reviewed_head
+                and pr_ci.get("status") == "completed" and pr_ci.get("conclusion") == "success"
+                and pr_ci.get("name") == "Owner dashboard verification"
+                and pr_ci.get("path") == ".github/workflows/owner-dashboard-ci.yml"
+                and pr_ci.get("event") == "pull_request"
+                and any(row.get("number") == record["pull_request_number"]
+                        for row in pr_ci.get("pull_requests", []))
+                and reviewed_head_time <= timestamp(pr_ci.get("updated_at")) <= merged,
+                "release authorization PR CI identity is incomplete")
         reviews = source.reviews(record["pull_request_number"])
-        require(not any(row.get("state") == "CHANGES_REQUESTED" for row in reviews)
-                and any(row["state"] == "APPROVED" and row["commit_id"] == reviewed_head
-                    and reviewed_head_time <= timestamp(row["submitted_at"]) <= merged <= candidate_commit_time <= deployed for row in reviews), "independent review of exact PR head is missing")
+        require(not any(row.get("state") == "CHANGES_REQUESTED" for row in reviews),
+                "release authorization is blocked by a current changes-requested review")
+        if authorization["kind"] == "github_review":
+            require(any(row.get("id") == authorization["id"] and row.get("state") == "APPROVED"
+                    and row.get("commit_id") == reviewed_head
+                    and reviewed_head_time <= timestamp(row.get("submitted_at")) <= merged
+                    <= candidate_commit_time <= deployed for row in reviews),
+                    "independent review of exact PR head is missing")
+        else:
+            expected_body = ("OWNER_RELEASE_APPROVAL_V1\n"
+                f"reviewed_sha={reviewed_head}\n"
+                f"pr_ci_workflow_run_id={authorization['pr_ci_workflow_run_id']}")
+            owner_id = source.repository_owner_id()
+            require(type(owner_id) is int and owner_id > 0, "release authorization owner identity is unavailable")
+            comments = source.authorization_comments(record["pull_request_number"])
+            require(any(row.get("id") == authorization["id"]
+                    and row.get("user", {}).get("id") == owner_id
+                    and row.get("author_association") == "OWNER"
+                    and row.get("body") == expected_body
+                    and timestamp(pr_ci["updated_at"]) <= timestamp(row.get("created_at")) <= merged
+                    <= candidate_commit_time <= deployed for row in comments),
+                    "CI-bound owner release authorization is missing")
         if reviewed_head != candidate:
             reviewed_tree = subprocess.run(["git", "rev-parse", f"{reviewed_head}^{{tree}}"], cwd=repo_root, text=True, capture_output=True, check=False)
             candidate_tree = subprocess.run(["git", "rev-parse", f"{candidate}^{{tree}}"], cwd=repo_root, text=True, capture_output=True, check=False)

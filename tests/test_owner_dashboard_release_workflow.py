@@ -115,6 +115,24 @@ def test_release_uses_latest_review_per_reviewer_before_exposing_production_secr
     assert "SUPABASE_ACCESS_TOKEN" not in trust
 
 
+def test_release_allows_a_pr_ci_bound_owner_authorization_for_a_solo_repository():
+    workflow = Path(".github/workflows/owner-dashboard-release.yml").read_text()
+    trust = workflow.split(
+        "- name: Authenticate exact reviewed main candidate without candidate code", 1
+    )[1].split("- uses: actions/checkout", 1)[0]
+    assert "pr_ci_workflow_run_id" in workflow
+    assert "PR_CI_WORKFLOW_RUN_ID" in trust
+    assert 'event <<<"$PR_CI")" = pull_request' in trust
+    assert 'head_sha <<<"$PR_CI")" = "$PR_HEAD_SHA"' in trust
+    assert "/issues/$PULL_REQUEST_NUMBER/comments?per_page=100" in trust
+    assert "OWNER_RELEASE_APPROVAL_V1" in trust
+    assert '.author_association == "OWNER"' in trust
+    assert ".user.id == $owner" in trust
+    assert '.created_at >= $pr_ci and .created_at <= $merged' in trust
+    assert "authorization_kind" in trust and "authorization_id" in trust
+    assert "SUPABASE_ACCESS_TOKEN" not in trust
+
+
 def test_release_executes_exact_review_filter_for_latest_decisions_and_ties():
     jq = shutil.which("jq")
     if jq is None:
@@ -275,6 +293,8 @@ def test_release_record_writer_emits_backend_only_evidence_contract(tmp_path, mo
         "--dry-run-evidence", str(dry_path), "--output", str(output),
         "--candidate-sha", "a" * 40, "--reviewed-sha", "f" * 40,
         "--repository", "owner/stocks-agent", "--ci-workflow-run-id", "40",
+        "--pr-ci-workflow-run-id", "39", "--authorization-kind", "owner_comment",
+        "--authorization-id", "38",
         "--release-workflow-run-id", "50", "--release-workflow-run-attempt", "2",
         "--pull-request-number", "44", "--deployment-id", "42",
         "--backend-evidence-artifact-id", "60",
@@ -288,6 +308,8 @@ def test_release_record_writer_emits_backend_only_evidence_contract(tmp_path, mo
         "name": "backend-component-evidence-50-2", "digest": "sha256:" + "e" * 64,
         "manifest_sha256": "b" * 64, "recovery_metadata_sha256": "c" * 64}
     assert record["recovery_journal"] == recovery
+    assert record["release_authorization"] == {"kind": "owner_comment", "id": 38,
+        "pr_ci_workflow_run_id": 39}
     assert record["evidence_classes"]["owner_site"]["status"] == "pending"
     assert all(row["artifact_id"] == 60 for row in record["component_readbacks"])
 

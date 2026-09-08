@@ -77,7 +77,10 @@ def main() -> int:
     parser.add_argument("--output", required=True, type=Path); parser.add_argument("--candidate-sha", required=True)
     parser.add_argument("--reviewed-sha", required=True)
     parser.add_argument("--repository", required=True)
+    parser.add_argument("--pr-ci-workflow-run-id", required=True)
     parser.add_argument("--ci-workflow-run-id", required=True); parser.add_argument("--release-workflow-run-id", required=True)
+    parser.add_argument("--authorization-kind", choices=("github_review", "owner_comment"), required=True)
+    parser.add_argument("--authorization-id", required=True)
     parser.add_argument("--release-workflow-run-attempt", required=True)
     parser.add_argument("--pull-request-number", required=True); parser.add_argument("--deployment-id", required=True)
     parser.add_argument("--backend-evidence-artifact-id", required=True)
@@ -116,6 +119,9 @@ def main() -> int:
         "workflow_run_id": integer(args.ci_workflow_run_id), "release_workflow_run_id": run_id,
         "release_workflow_run_attempt": run_attempt,
         "pull_request_number": integer(args.pull_request_number), "deployment_id": integer(args.deployment_id),
+        "release_authorization": {"kind": args.authorization_kind,
+            "id": integer(args.authorization_id),
+            "pr_ci_workflow_run_id": integer(args.pr_ci_workflow_run_id)},
         "migrations": receipt["migrations"], "migration_application": receipt["migration_application"], "functions": receipt["functions"],
         "static_assets": copy.deepcopy(static),
         "dry_run": False, "dry_run_evidence": dry, "canaries": {"owner": 200, "anonymous": 401, "non_owner": 403},

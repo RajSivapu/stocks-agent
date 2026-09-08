@@ -1502,8 +1502,8 @@ class FakeReleaseSource:
         return copy.deepcopy(self.record)
 
     def ci(self, run_id):
-        assert run_id == 43
-        return copy.deepcopy(self.ci_record)
+        assert run_id in {41, 43}
+        return copy.deepcopy(self.pr_ci_record if run_id == 41 else self.ci_record)
 
     def merge(self, number):
         assert number == 44
@@ -1512,6 +1512,13 @@ class FakeReleaseSource:
     def reviews(self, number):
         assert number == 44
         return copy.deepcopy(self.review_records)
+
+    def authorization_comments(self, number):
+        assert number == 44
+        return copy.deepcopy(self.authorization_comment_records)
+
+    def repository_owner_id(self):
+        return self.owner_id
 
     def release_rows(self, run_id):
         assert run_id == RUN
@@ -1567,10 +1574,17 @@ def release(tmp_path):
         "name": "Owner dashboard verification", "repository": {"full_name": "owner/stocks-agent"},
         "conclusion": "success", "status": "completed", "path": ".github/workflows/owner-dashboard-ci.yml",
         "updated_at": "2026-09-05T18:40:00Z"}
+    source.pr_ci_record = {"id": 41, "head_sha": reviewed_sha,
+        "head_branch": "candidate", "event": "pull_request",
+        "name": "Owner dashboard verification", "repository": {"full_name": "owner/stocks-agent"},
+        "conclusion": "success", "status": "completed", "path": ".github/workflows/owner-dashboard-ci.yml",
+        "pull_requests": [{"number": 44}], "updated_at": "2026-09-05T17:50:00Z"}
     source.merge_record = {"number": 44, "merged": True, "merge_commit_sha": sha,
         "merged_at": "2026-09-05T18:00:00Z", "head": {"sha": reviewed_sha},
         "base": {"ref": "main", "repo": {"full_name": "owner/stocks-agent"}}}
     source.review_records = [{"id": 45, "state": "APPROVED", "commit_id": reviewed_sha, "submitted_at": "2026-09-05T17:45:00Z"}]
+    source.owner_id = 7
+    source.authorization_comment_records = []
     evidence_id, release_run_id, release_run_attempt = 100, 47, 1
     source.artifacts = {evidence_id: {}}
     source.record = {
@@ -1579,6 +1593,8 @@ def release(tmp_path):
         "workflow_run_id": 43, "release_workflow_run_id": release_run_id,
         "release_workflow_run_attempt": release_run_attempt, "pull_request_number": 44,
         "run_id": RUN, "candidate_sha": sha, "reviewed_sha": reviewed_sha,
+        "release_authorization": {"kind": "github_review", "id": 45,
+            "pr_ci_workflow_run_id": 41},
         "migrations": [{"path": "sql/migrations/20260926_suppression_reasons.sql", "version": "20260926", "sha256": migration_statements_sha256(normalize_migration_statements(raw["sql/migrations/20260926_suppression_reasons.sql"].decode()))}],
         "functions": [{"function": name, "deployment_id": name + "-deployment", "git_sha": sha, "function_version": 5, "source_sha256": tree_hash({"index.ts": raw[f"supabase/functions/{name}/index.ts"]})} for name in ("market-briefing-gateway", "owner-dashboard-api", "telegram-portfolio")],
         "static_assets": {"status": "verified", "candidate_sha": sha,
@@ -1864,7 +1880,44 @@ def test_release_rejects_a_current_changes_requested_review(release):
     source, args = release
     source.review_records.append({"id": 46, "state": "CHANGES_REQUESTED",
         "commit_id": source.record["reviewed_sha"], "submitted_at": "2026-09-05T17:50:00Z"})
-    with pytest.raises(RuntimeError, match="independent review"):
+    with pytest.raises(RuntimeError, match="authorization"):
+        verify_release(source, **args)
+
+
+def test_release_accepts_exact_pr_ci_bound_owner_comment_for_solo_repository(release):
+    source, args = release
+    reviewed = source.record["reviewed_sha"]
+    source.review_records = []
+    source.record["release_authorization"] = {"kind": "owner_comment", "id": 46,
+        "pr_ci_workflow_run_id": 41}
+    source.authorization_comment_records = [{"id": 46, "user": {"id": 7},
+        "author_association": "OWNER", "created_at": "2026-09-05T17:55:00Z",
+        "body": "OWNER_RELEASE_APPROVAL_V1\n"
+            f"reviewed_sha={reviewed}\npr_ci_workflow_run_id=41"}]
+
+    result = verify_release(source, **args)
+    assert result["candidate_sha"] == source.record["candidate_sha"]
+
+
+@pytest.mark.parametrize("field,value", [
+    ("author_association", "NONE"),
+    ("created_at", "2026-09-05T17:49:59Z"),
+    ("body", "OWNER_RELEASE_APPROVAL_V1\nreviewed_sha=wrong\npr_ci_workflow_run_id=41"),
+])
+def test_release_rejects_invalid_owner_comment_authorization(release, field, value):
+    source, args = release
+    reviewed = source.record["reviewed_sha"]
+    source.review_records = []
+    source.record["release_authorization"] = {"kind": "owner_comment", "id": 46,
+        "pr_ci_workflow_run_id": 41}
+    comment = {"id": 46, "user": {"id": 7}, "author_association": "OWNER",
+        "created_at": "2026-09-05T17:55:00Z",
+        "body": "OWNER_RELEASE_APPROVAL_V1\n"
+            f"reviewed_sha={reviewed}\npr_ci_workflow_run_id=41"}
+    comment[field] = value
+    source.authorization_comment_records = [comment]
+
+    with pytest.raises(RuntimeError, match="authorization"):
         verify_release(source, **args)
 
 
