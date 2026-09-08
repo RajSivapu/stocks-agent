@@ -39,6 +39,14 @@ V1 verifier passed 96/96. Runtime code is unchanged. The corrected PR head still
 review and protected CI before merge. Protected backend release, direct native Site observation, and
 normal scheduled receipts remain open.
 
+The protected release workflow also assumed a separate GitHub collaborator could submit an
+`APPROVED` review. This owner-only repository has one collaborator and GitHub forbids a PR author
+from approving the same PR. Commit `248366e` preserves the independent-review path and adds a
+solo-owner authorization that must name the exact reviewed head and successful PR CI run in an
+owner-authored PR comment created after that CI and before merge. The release re-reads the PR CI,
+repository-owner identity, exact comment, merge, exact-main CI, and candidate tree before checkout or
+production-secret exposure; the immutable release record retains the authorization kind and IDs.
+
 | Task | Reviewed closing commit | Local result |
 |---|---|---|
 | 1 — capability planner | `cffb47d` | Required free baseline and bounded phase budgets fail closed. |

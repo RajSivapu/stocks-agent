@@ -57,6 +57,9 @@ An owner-only personal stock agent that uses zero-incremental-cost data sources,
 - [x] PR #35's first protected CI run correctly failed because `pglast` was missing from the committed
   test lock; `b789e0e` declares and hash-locks version 8.4, and a clean Python 3.14 environment passed
   all 72 formerly uncollectable SQL tests plus the 96-test focused V1 verifier
+- [x] Solo-owner release authorization at `248366e` keeps independent GitHub approvals when present
+  and otherwise requires an exact-head, successful-PR-CI-bound owner comment after CI and before
+  merge; the workflow re-reads and records every authorization identity before secrets or checkout
 - [ ] Next existing scheduled-chain receipt
 - [ ] Complete protected backend release, separate native Sites publication and readback, and normal
   scheduled V1-C3 capability proof
@@ -68,7 +71,8 @@ order on one exact reviewed candidate:
 
 1. **Complete locally:** Sol and the independent flagship reviewer returned CLEAN on exact runtime
    code `f7e8236`; the release-candidate descendants contain status records and the test-only locked
-   dependency correction at `b789e0e`. The corrected final PR head must be reviewed again.
+   dependency correction at `b789e0e` and the CI-bound solo-owner release authorization at
+   `248366e`. The corrected final PR head must be reviewed again.
 2. Push the reviewed head, pass exact-head CI, merge it to protected `main`, and pass exact-main CI.
 3. Run the manual protected backend release and verify the immutable migration, function,
    runtime-role, managed-secret, canary, artifact, and recovery receipts.
