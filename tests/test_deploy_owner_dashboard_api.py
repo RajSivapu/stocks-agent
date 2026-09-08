@@ -61,18 +61,98 @@ def test_database_endpoints_are_bound_to_the_exact_project_before_mutation():
     result = deploy.validate_release_database_endpoints(PROJECT_REF, ADMIN_URL, SESSION_TEMPLATE)
     assert result == {"admin_database": "verified", "session_pooler": "verified"}
 
+    assert deploy.release_admin_database_url(
+        PROJECT_REF, ADMIN_URL, SESSION_TEMPLATE,
+    ) == SESSION_TEMPLATE
+    assert deploy.release_admin_database_url(
+        PROJECT_REF, ADMIN_URL.replace(":5432", ""), SESSION_TEMPLATE,
+    ) == SESSION_TEMPLATE
+
     with pytest.raises(ValueError, match="project-matched administrator"):
         deploy.validate_release_database_endpoints(
             PROJECT_REF,
             ADMIN_URL.replace(PROJECT_REF, "aaaaaaaaaaaaaaaaaaaa"),
             SESSION_TEMPLATE,
         )
-    with pytest.raises(ValueError, match="project-matched scoped"):
+    with pytest.raises(ValueError, match="project-matched administrator Supavisor"):
         deploy.validate_release_database_endpoints(
             PROJECT_REF,
             ADMIN_URL,
             SESSION_TEMPLATE.replace(PROJECT_REF, "aaaaaaaaaaaaaaaaaaaa"),
         )
+
+
+@pytest.mark.parametrize(
+    "session_template",
+    (
+        SESSION_TEMPLATE.replace(f"postgres.{PROJECT_REF}", f"service_role.{PROJECT_REF}"),
+        SESSION_TEMPLATE.replace(PROJECT_REF, "aaaaaaaaaaaaaaaaaaaa"),
+        SESSION_TEMPLATE.replace("pooler.supabase.com", "example.com"),
+        SESSION_TEMPLATE.replace(":5432/postgres", ":6543/postgres"),
+        SESSION_TEMPLATE.replace("/postgres", "/template1"),
+        SESSION_TEMPLATE.replace("admin-password-longer-than-24", "short"),
+        SESSION_TEMPLATE + "?sslmode=require",
+    ),
+)
+def test_release_admin_database_url_rejects_unbound_pooler_templates(session_template):
+    with pytest.raises(ValueError, match="project-matched administrator Supavisor"):
+        deploy.release_admin_database_url(PROJECT_REF, ADMIN_URL, session_template)
+
+
+def test_release_database_transport_connects_read_only_through_the_admin_pooler():
+    calls = []
+
+    class Cursor:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        def execute(self, statement):
+            calls.append(statement)
+
+        def fetchone(self):
+            if calls[-1] == "SHOW transaction_read_only":
+                return ("on",)
+            return ("postgres", "postgres")
+
+    class Connection:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        def cursor(self):
+            return Cursor()
+
+    connected = {}
+
+    def connector(url, **options):
+        connected.update(url=url, options=options)
+        return Connection()
+
+    result = deploy.verify_release_database_transport(
+        PROJECT_REF, ADMIN_URL, SESSION_TEMPLATE, connector=connector,
+    )
+
+    assert connected == {
+        "url": SESSION_TEMPLATE,
+        "options": {
+            "connect_timeout": 15,
+        },
+    }
+    assert calls == [
+        "BEGIN READ ONLY",
+        "SHOW transaction_read_only",
+        "SELECT current_user, current_database()",
+    ]
+    assert result == {
+        "admin_database": "verified",
+        "session_pooler": "verified",
+        "read_only_connectivity": "verified",
+    }
 
 
 @pytest.mark.parametrize(

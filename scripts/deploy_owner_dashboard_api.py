@@ -101,31 +101,101 @@ def _validate_database_url(value: str, project_ref: str) -> None:
         raise ValueError("a project-matched scoped Supavisor session URL on port 5432 is required")
 
 
+def release_admin_database_url(
+    project_ref: str,
+    direct_admin_url: str,
+    session_template: str,
+) -> str:
+    """Return the project-bound administrator session-pooler transport."""
+    if not PROJECT_REF_PATTERN.fullmatch(project_ref):
+        raise ValueError("a canonical Supabase project reference is required")
+    direct = urlparse(direct_admin_url)
+    try:
+        direct_port = direct.port
+    except ValueError:
+        direct_port = -1
+    query = parse_qsl(direct.query, keep_blank_values=True)
+    if (
+        direct.scheme not in {"postgres", "postgresql"}
+        or direct.hostname != f"db.{project_ref}.supabase.co"
+        or direct_port not in {None, 5432}
+        or unquote(direct.username or "") != "postgres"
+        or len(unquote(direct.password or "")) < 24
+        or direct.path != "/postgres"
+        or direct.params
+        or direct.fragment
+        or query not in ([], [("sslmode", "require")])
+    ):
+        raise ValueError("a project-matched administrator database URL is required")
+
+    session = urlparse(session_template)
+    try:
+        session_port = session.port
+    except ValueError:
+        session_port = -1
+    if (
+        session.scheme not in {"postgres", "postgresql"}
+        or not session.hostname
+        or not session.hostname.endswith(".pooler.supabase.com")
+        or session_port != 5432
+        or unquote(session.username or "") != f"postgres.{project_ref}"
+        or len(unquote(session.password or "")) < 24
+        or session.path != "/postgres"
+        or session.params
+        or session.query
+        or session.fragment
+    ):
+        raise ValueError(
+            "a project-matched administrator Supavisor session URL on port 5432 is required"
+        )
+    candidate = runtime_url(session_template, RUNTIME_ROLE, "x" * 32)
+    _validate_database_url(candidate, project_ref)
+    return session_template
+
+
 def validate_release_database_endpoints(
     project_ref: str,
     admin_url: str,
     session_template: str,
 ) -> dict[str, str]:
     """Bind both privileged database endpoints to the requested project before mutation."""
-    if not PROJECT_REF_PATTERN.fullmatch(project_ref):
-        raise ValueError("a canonical Supabase project reference is required")
-    parsed = urlparse(admin_url)
-    query = parse_qsl(parsed.query, keep_blank_values=True)
-    if (
-        parsed.scheme not in {"postgres", "postgresql"}
-        or parsed.hostname != f"db.{project_ref}.supabase.co"
-        or parsed.port != 5432
-        or unquote(parsed.username or "") != "postgres"
-        or len(unquote(parsed.password or "")) < 24
-        or parsed.path != "/postgres"
-        or parsed.params
-        or parsed.fragment
-        or query not in ([], [("sslmode", "require")])
-    ):
-        raise ValueError("a project-matched administrator database URL is required")
-    candidate = runtime_url(session_template, RUNTIME_ROLE, "x" * 32)
-    _validate_database_url(candidate, project_ref)
+    release_admin_database_url(project_ref, admin_url, session_template)
     return {"admin_database": "verified", "session_pooler": "verified"}
+
+
+def verify_release_database_transport(
+    project_ref: str,
+    admin_url: str,
+    session_template: str,
+    *,
+    connector: Callable[..., object] = psycopg.connect,
+) -> dict[str, str]:
+    """Prove the administrator pooler is reachable through a read-only session."""
+    transport_url = release_admin_database_url(project_ref, admin_url, session_template)
+    try:
+        with connector(
+            transport_url,
+            connect_timeout=15,
+        ) as connection:
+            with connection.cursor() as cursor:
+                cursor.execute("BEGIN READ ONLY")
+                cursor.execute("SHOW transaction_read_only")
+                read_only = cursor.fetchone()
+                cursor.execute("SELECT current_user, current_database()")
+                identity = cursor.fetchone()
+    except Exception:
+        raise RuntimeError(
+            "the protected release administrator session pooler is unreachable"
+        ) from None
+    if read_only != ("on",) or identity != ("postgres", "postgres"):
+        raise RuntimeError(
+            "the protected release administrator session pooler identity is invalid"
+        )
+    return {
+        "admin_database": "verified",
+        "session_pooler": "verified",
+        "read_only_connectivity": "verified",
+    }
 
 
 def acquire_protected_release_lock(cursor) -> None:
@@ -1280,7 +1350,10 @@ def main() -> int:
         )
     if arguments.static_build_receipt is None:
         raise SystemExit("--static-build-receipt is required for protected production mutation")
-    validate_release_database_endpoints(arguments.project_ref, admin_url, session_template)
+    admin_url = release_admin_database_url(arguments.project_ref, admin_url, session_template)
+    # The native adapter snapshots its environment when constructed. Point all
+    # release and recovery database work at the reachable session pooler.
+    os.environ["POSTGRES_URL"] = admin_url
     validate_static_configuration(arguments.project_ref, owner_user_id, arguments.allowed_origin, DASHBOARD_SECRET_NAMES)
     if not arguments.lease_owner:
         raise SystemExit("--lease-owner is required for protected production mutation")

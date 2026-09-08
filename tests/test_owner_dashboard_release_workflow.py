@@ -524,6 +524,39 @@ def test_release_workflow_binds_review_times_and_durable_pre_mutation_recovery()
     assert workflow.index("scripts.release_components --check-backend-transport") < workflow.index("Create the candidate-bound GitHub Deployment")
 
 
+def test_release_preflights_and_uses_the_project_bound_admin_pooler_everywhere():
+    workflow = yaml.safe_load(Path(".github/workflows/owner-dashboard-release.yml").read_text())
+    steps = {row.get("name"): row for row in workflow["jobs"]["release"]["steps"]}
+    preflight = steps[
+        "Require configured protected backend capture deployment readback and recovery transport"
+    ]
+    assert set(preflight["env"]) >= {
+        "PROJECT_REF", "POSTGRES_URL", "SUPAVISOR_SESSION_URL",
+    }
+    assert "scripts.release_components --check-database-connectivity" in preflight["run"]
+
+    source = Path(".github/workflows/owner-dashboard-release.yml").read_text()
+    assert source.index("--check-database-connectivity") < source.index(
+        "Create the candidate-bound GitHub Deployment"
+    )
+    finalize = steps["Mark candidate deployment successful with immutable artifact identity"]
+    assert "SUPAVISOR_SESSION_URL" in finalize["env"]
+    assert "--admin-url \"$SUPAVISOR_SESSION_URL\"" in finalize["run"]
+    inline = steps["Restore changed components if any post-deploy evidence step failed"]
+    assert "SUPAVISOR_SESSION_URL" in inline["env"]
+    assert "--admin-url \"$SUPAVISOR_SESSION_URL\"" in inline["run"]
+
+    recovery = yaml.safe_load(
+        Path(".github/workflows/owner-dashboard-release-recovery.yml").read_text()
+    )
+    independent = next(
+        row for row in recovery["jobs"]["recover"]["steps"]
+        if row.get("name") == "Restore encrypted changed-component journal for the exact failed release"
+    )
+    assert "SUPAVISOR_SESSION_URL" in independent["env"]
+    assert "--admin-url \"$SUPAVISOR_SESSION_URL\"" in independent["run"]
+
+
 def test_backend_release_does_not_claim_or_require_native_site_deployment():
     workflow = Path(".github/workflows/owner-dashboard-release.yml").read_text()
     writer = Path("scripts/write_protected_release_record.py").read_text()
