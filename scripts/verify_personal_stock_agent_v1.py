@@ -31,7 +31,7 @@ from lib.intelligence.pipeline import (
     _collection_window_for_task,
     _timestamp as _pipeline_timestamp,
 )
-from lib.intelligence.planner import load_source_capabilities
+from lib.intelligence.planner import _query_for as _planned_query, load_source_capabilities
 from lib.intelligence.policy import load_intelligence_policy
 from lib.intelligence.themes import (
     evidence_key,
@@ -1170,6 +1170,48 @@ def _verify_discovery_capability(receipt: Mapping[str, object]) -> VerificationR
         parsed = checkpoint.get("receipt") if isinstance(checkpoint, Mapping) else None
         receipt_id = parsed.get("source_receipt_id") if isinstance(parsed, Mapping) else None
         stored = persisted_receipts.get(receipt_id)
+        expected_planned_window = None
+        expected_planned_query_hash = None
+        if task_id in planned_id_set and isinstance(result, Mapping) \
+                and capability is not None:
+            request_cursor = result.get("request_cursor")
+            theme_id = result.get("theme_id")
+            planned_query = _planned_query(capability, theme_id)
+            try:
+                cursor = SourceCursor.from_mapping(request_cursor)  # type: ignore[arg-type]
+                planned_task = DiscoveryTask(
+                    task_id=task_id,
+                    stage=task.get("stage"),  # type: ignore[arg-type]
+                    provider=capability.provider,
+                    capability_id=capability.capability_id,
+                    query_kind=capability.query_kind,
+                    theme_id=theme_id if isinstance(theme_id, str) else None,
+                    query=planned_query or {},
+                    window=persisted_request_window,  # type: ignore[arg-type]
+                    dependencies=tuple(task.get("dependency_ids", ())),
+                    max_attempts=int(task.get("request_budget", 0)),
+                    requires_credential=capability.required_credential is not None,
+                )
+                expected_collection_window = _collection_window_for_task(
+                    planned_task, cursor,
+                )
+                expected_planned_window = {
+                    "start": _pipeline_timestamp(expected_collection_window.start),
+                    "end": _pipeline_timestamp(expected_collection_window.end),
+                }
+                expected_planned_query_hash = sha256(canonical_json({
+                    "capability_id": capability.capability_id,
+                    "query": dict(planned_query or {}),
+                    "cursor": cursor.to_mapping(),
+                    "requested_window": expected_planned_window,
+                    "theme_id": planned_task.theme_id,
+                }).encode())
+                if cursor.to_mapping() != request_cursor or planned_query is None:
+                    expected_planned_window = None
+                    expected_planned_query_hash = None
+            except (TypeError, ValueError):
+                expected_planned_window = None
+                expected_planned_query_hash = None
         coverage_status = parsed.get("metadata", {}).get("coverage_status") \
             if isinstance(parsed, Mapping) and isinstance(parsed.get("metadata"), Mapping) else None
         expected_receipt_id = str(uuid.uuid5(
@@ -1185,6 +1227,11 @@ def _verify_discovery_capability(receipt: Mapping[str, object]) -> VerificationR
             and isinstance(completion_by_id.get(receipt_id), Mapping)
             and parsed.get("provider") == task.get("provider") == stored.get("provider")
             and parsed.get("requested_window") == task.get("requested_window")
+            and (
+                task_id not in planned_id_set
+                or task.get("requested_window") == expected_planned_window
+                and task.get("query_hash") == expected_planned_query_hash
+            )
             and stored.get("requested_window") == global_receipt_window
             and isinstance(parsed.get("metadata"), Mapping)
             and parsed["metadata"].get("capability_id") == task.get("capability_id")
@@ -1412,6 +1459,16 @@ def _verify_discovery_capability(receipt: Mapping[str, object]) -> VerificationR
         for task_id in planned_ids
         if tasks[task_id].get("stage") != "reference"
     )
+    required_gdelt_task_ids = {
+        str(row["task_id"])
+        for row in required_tasks
+        if row.get("capability_id") == "gdelt_theme_search"
+    }
+    planned_gdelt_task_ids = {
+        task_id for task_id in planned_ids
+        if tasks[task_id].get("provider") == "gdelt"
+        and tasks[task_id].get("stage") != "reference"
+    }
     gdelt_plan = plan_reservations_by_provider.get("gdelt")
     gdelt_reserved_requests = (
         gdelt_plan.get("requests") if isinstance(gdelt_plan, Mapping) else None
@@ -1435,6 +1492,7 @@ def _verify_discovery_capability(receipt: Mapping[str, object]) -> VerificationR
         valid_request_window and valid_plan_reservations
         and isinstance(adaptive_envelope, Mapping)
         and reverse_capability is not None
+        and planned_gdelt_task_ids == required_gdelt_task_ids
         and type(gdelt_reserved_requests) is int
         and gdelt_reserved_requests
             == static_gdelt_calls + int(adaptive_envelope["gdelt_reverse"])

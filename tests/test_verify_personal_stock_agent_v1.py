@@ -47,6 +47,9 @@ def test_release_exposes_a_separate_discovery_capability_verifier():
 
 
 def _capability_rows():
+    from lib.intelligence.cursors import SourceCursor
+    from lib.intelligence.planner import _query_for, load_source_capabilities
+
     records = recovery_records()
     manifest = records["reference_manifests"][0]
     # The selected finalized manifest may originate in an earlier run, while
@@ -95,6 +98,7 @@ def _capability_rows():
         "capability_id": "sec_company_tickers_universe",
         "theme_id": None,
     }]
+    gdelt_capability = load_source_capabilities()["gdelt_theme_search"]
     for index, theme in enumerate(themes, 1):
         task_id = str(uuid.uuid5(uuid.UUID(RUN), f"required:gdelt:{theme}"))
         receipt_id = str(uuid.uuid5(
@@ -103,7 +107,21 @@ def _capability_rows():
         ))
         cache_key = hashlib.sha256(theme.encode()).hexdigest()
         cache_keys.append(cache_key)
-        window = {"start": "2026-09-05T12:00:00Z", "end": "2026-09-05T20:00:00Z"}
+        window = {
+            "start": "2026-09-05T12:00:00.000Z",
+            "end": "2026-09-05T20:00:00.000Z",
+        }
+        request_cursor = SourceCursor(
+            provider="gdelt", capability_id="gdelt_theme_search",
+        ).to_mapping()
+        planned_query = _query_for(gdelt_capability, theme)
+        query_hash = digest({
+            "capability_id": "gdelt_theme_search",
+            "query": dict(planned_query),
+            "cursor": request_cursor,
+            "requested_window": window,
+            "theme_id": theme,
+        })
         receipt = {
             "provider": "gdelt", "reservation_id": reservation_id,
             "status": "succeeded", "cache_key": cache_key,
@@ -127,10 +145,13 @@ def _capability_rows():
         tasks.append({
             "id": task_id, "run_id": RUN, "stage": "signals", "provider": "gdelt",
             "capability_id": "gdelt_theme_search", "query_kind": "theme_search",
-            "query_hash": hashlib.sha256(f"query:{theme}".encode()).hexdigest(),
+            "query_hash": query_hash,
             "dependency_ids": [], "requested_window": window, "state": "succeeded",
             "attempt_count": 1, "request_budget": 1,
-            "result": {"theme_id": theme, "checkpoint": {"cache_key": cache_key, "receipt": receipt}},
+            "result": {
+                "theme_id": theme, "request_cursor": request_cursor,
+                "checkpoint": {"cache_key": cache_key, "receipt": receipt},
+            },
             "created_at": f"2026-09-05T19:{31 + index:02d}:00Z",
             "updated_at": f"2026-09-05T19:{32 + index:02d}:00Z",
         })
@@ -206,7 +227,8 @@ def _capability_rows():
                 "requests": len(themes) + 2, "cache_keys": [],
             }]},
             "request_window": {
-                "start": "2026-09-05T12:00:00Z", "end": "2026-09-05T20:00:00Z",
+                "start": "2026-09-05T12:00:00.000Z",
+                "end": "2026-09-05T20:00:00.000Z",
                 "timezone": "America/Chicago", "market_date": "2026-09-05",
                 "phase": "post-market",
             },
@@ -433,15 +455,34 @@ def test_discovery_capability_accepts_pre_refresh_unresolved_plan_bound_to_fresh
 
 
 def test_discovery_capability_accepts_distinct_persisted_task_request_windows():
+    from lib.intelligence.cursors import SourceCursor
+    from lib.intelligence.planner import _query_for, load_source_capabilities
+
     rows = _capability_rows()
     task = next(
         row for row in rows["discovery_stage_tasks"]
         if row["capability_id"] == "gdelt_theme_search"
     )
-    window = {"start": "2026-09-05T11:00:00Z", "end": "2026-09-05T19:00:00Z"}
+    window = {
+        "start": "2026-09-05T17:00:00.000Z",
+        "end": "2026-09-05T20:00:00.000Z",
+    }
+    request_cursor = SourceCursor(
+        provider="gdelt", capability_id="gdelt_theme_search",
+        completed_through="2026-09-05T19:00:00Z",
+    ).to_mapping()
     task["requested_window"] = window
+    task["result"]["request_cursor"] = request_cursor
     checkpoint = task["result"]["checkpoint"]["receipt"]
     checkpoint["requested_window"] = window
+    query = _query_for(
+        load_source_capabilities()["gdelt_theme_search"], task["result"]["theme_id"],
+    )
+    task["query_hash"] = digest({
+        "capability_id": "gdelt_theme_search", "query": dict(query),
+        "cursor": request_cursor, "requested_window": window,
+        "theme_id": task["result"]["theme_id"],
+    })
 
     assert _verify_capability(rows).ok is True
 
@@ -456,6 +497,22 @@ def test_discovery_capability_accepts_distinct_persisted_task_request_windows():
     )["requested_window"] = window
     with pytest.raises(RuntimeError, match="receipt-backed success"):
         _verify_capability(forged)
+
+    self_attested = copy.deepcopy(rows)
+    self_attested_task = next(
+        row for row in self_attested["discovery_stage_tasks"]
+        if row["id"] == task["id"]
+    )
+    self_attested_window = {
+        "start": "2099-01-01T00:00:00Z",
+        "end": "2099-01-02T00:00:00Z",
+    }
+    self_attested_task["requested_window"] = self_attested_window
+    self_attested_task["result"]["checkpoint"]["receipt"][
+        "requested_window"
+    ] = self_attested_window
+    with pytest.raises(RuntimeError, match="receipt-backed success"):
+        _verify_capability(self_attested)
 
 
 def test_discovery_capability_accepts_cross_run_content_addressed_source_item_reuse():
@@ -624,7 +681,11 @@ def test_discovery_capability_accepts_research_from_authorized_additional_source
         source_receipt_id=optional_receipt_id,
     )
     optional_parsed["metadata"]["capability_id"] = capability_id
-    optional_task["result"]["theme_id"] = reverse_theme_id or "macro_and_policy"
+    optional_task["result"]["theme_id"] = (
+        reverse_theme_id if lineage == "reverse"
+        else None if lineage == "planned"
+        else "macro_and_policy"
+    )
     if lineage == "reverse":
         from lib.intelligence.cursors import SourceCursor
 
@@ -639,6 +700,22 @@ def test_discovery_capability_accepts_research_from_authorized_additional_source
             "cursor": optional_task["result"]["request_cursor"],
             "requested_window": optional_task["requested_window"],
             "theme_id": reverse_theme_id,
+        })
+    elif lineage == "planned":
+        from lib.intelligence.cursors import SourceCursor
+        from lib.intelligence.planner import _query_for, load_source_capabilities
+
+        capability = load_source_capabilities()[capability_id]
+        request_cursor = SourceCursor(
+            provider=provider, capability_id=capability_id,
+        ).to_mapping()
+        planned_query = _query_for(capability, None)
+        optional_task["result"]["request_cursor"] = request_cursor
+        optional_task["query_hash"] = digest({
+            "capability_id": capability_id, "query": dict(planned_query),
+            "cursor": request_cursor,
+            "requested_window": optional_task["requested_window"],
+            "theme_id": None,
         })
     optional_stored = copy.deepcopy(required_stored)
     optional_stored.update(
@@ -1171,6 +1248,29 @@ def test_discovery_capability_accepts_honest_uncertain_reverse_task():
     reduced["source_quota_reservations"][0]["reserved_requests"] -= 2
     with pytest.raises(RuntimeError, match="reverse selection inputs"):
         _verify_capability(reduced)
+
+    inflated = copy.deepcopy(omitted)
+    source_plan = inflated["packets"][0]["packet"]["coverage"]["source_plan"]
+    template = next(
+        row for row in inflated["discovery_stage_tasks"]
+        if row["capability_id"] == "gdelt_theme_search"
+    )
+    for index in range(11):
+        forged_id = str(uuid.uuid5(uuid.UUID(RUN), f"forged-static-gdelt:{index}"))
+        forged = copy.deepcopy(template)
+        forged.update(id=forged_id, state="failed", result={})
+        inflated["discovery_stage_tasks"].append(forged)
+        source_plan["planned_task_ids"].append(forged_id)
+    source_plan["plan_hash"] = digest({
+        key: value for key, value in source_plan.items() if key != "plan_hash"
+    })
+    _rebind_packet_completion(inflated)
+    inflated["intelligence_runs"][0]["reservation_plan"]["reservations"][0][
+        "requests"
+    ] += 11
+    inflated["source_quota_reservations"][0]["reserved_requests"] += 11
+    with pytest.raises(RuntimeError, match="reverse selection inputs"):
+        _verify_capability(inflated)
 
     partial = copy.deepcopy(rows)
     partial["discovery_stage_tasks"] = [
