@@ -65,4 +65,4 @@ jobs:
           # The native adapter retrieves the latest authenticated encrypted
           # journal by this exact original run identity and attempt. It must reject missing
           # or ambiguous state; terminal GitHub labels cannot bypass recovery.
-          python scripts/restore_gateway_after_release_failure.py --project-ref "$PROJECT_REF" --admin-url "$POSTGRES_URL" --release-state recovery/release.enc --release-run-id "${{ github.event.workflow_run.id }}" --release-run-attempt "${{ github.event.workflow_run.run_attempt }}" --lease-owner "recovery-${{ github.event.workflow_run.id }}-${{ github.event.workflow_run.run_attempt }}" --retain-recovery-artifact
+          python -m scripts.restore_gateway_after_release_failure --project-ref "$PROJECT_REF" --admin-url "$POSTGRES_URL" --release-state recovery/release.enc --release-run-id "${{ github.event.workflow_run.id }}" --release-run-attempt "${{ github.event.workflow_run.run_attempt }}" --lease-owner "recovery-${{ github.event.workflow_run.id }}-${{ github.event.workflow_run.run_attempt }}" --retain-recovery-artifact

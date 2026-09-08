@@ -156,7 +156,7 @@ jobs:
           SUPABASE_ACCESS_TOKEN: ${{ secrets.SUPABASE_ACCESS_TOKEN }}
           PROJECT_REF: ${{ secrets.SUPABASE_PROJECT_REF }}
         run: |
-          "$RELEASE_VENV/bin/python" scripts/release_components.py --check-backend-transport
+          "$RELEASE_VENV/bin/python" -m scripts.release_components --check-backend-transport
       - name: Create the candidate-bound GitHub Deployment
         id: deployment
         env:
@@ -180,7 +180,7 @@ jobs:
         run: |
           set -euo pipefail
           test -n "$RELEASE_READONLY_DATABASE_URL" || { echo 'release reader is required'; exit 1; }
-          "$PYTHON_BIN" scripts/collect_protected_dry_run_evidence.py --production-project-ref "$PROJECT_REF" --output "$RELEASE_STATE_DIR/dry-run-evidence.json" --candidate-script scripts/deploy_owner_dashboard_api.py --candidate-sha "$CANDIDATE_SHA" --safe-command "$PYTHON_BIN scripts/deploy_owner_dashboard_api.py --dry-run --project-ref $PROJECT_REF --allowed-origin $ALLOWED_ORIGIN --site-origin $SITE_ORIGIN --reviewed-sha $CANDIDATE_SHA --candidate-sha $CANDIDATE_SHA --gateway-rollback-ref unused --gateway-rollback-source-sha256 $(printf '0%.0s' {1..64}) --gateway-current-version 1 --evidence-directory $RELEASE_STATE_DIR/dry-run-capture --release-state $RELEASE_STATE_DIR/dry-run-state.json"
+          "$PYTHON_BIN" -m scripts.collect_protected_dry_run_evidence --production-project-ref "$PROJECT_REF" --output "$RELEASE_STATE_DIR/dry-run-evidence.json" --candidate-script scripts/deploy_owner_dashboard_api.py --candidate-sha "$CANDIDATE_SHA" --safe-command "$PYTHON_BIN -m scripts.deploy_owner_dashboard_api --dry-run --project-ref $PROJECT_REF --allowed-origin $ALLOWED_ORIGIN --site-origin $SITE_ORIGIN --reviewed-sha $CANDIDATE_SHA --candidate-sha $CANDIDATE_SHA --gateway-rollback-ref unused --gateway-rollback-source-sha256 $(printf '0%.0s' {1..64}) --gateway-current-version 1 --evidence-directory $RELEASE_STATE_DIR/dry-run-capture --release-state $RELEASE_STATE_DIR/dry-run-state.json"
       - name: Build candidate Site assets without privileged production credentials
         env:
           SUPABASE_PUBLISHABLE_KEY: ${{ secrets.SUPABASE_PUBLISHABLE_KEY }}
@@ -188,7 +188,7 @@ jobs:
           SITE_ORIGIN: ${{ vars.DASHBOARD_SITE_ORIGIN }}
           CANDIDATE_SHA: ${{ steps.candidate.outputs.candidate_sha }}
         run: |
-          "$RELEASE_VENV/bin/python" scripts/build_owner_dashboard_static.py --project-ref "$PROJECT_REF" --site-origin "$SITE_ORIGIN" --publishable-key "$SUPABASE_PUBLISHABLE_KEY" --candidate-sha "$CANDIDATE_SHA" --output "$RELEASE_STATE_DIR/static-build-receipt.json"
+          "$RELEASE_VENV/bin/python" -m scripts.build_owner_dashboard_static --project-ref "$PROJECT_REF" --site-origin "$SITE_ORIGIN" --publishable-key "$SUPABASE_PUBLISHABLE_KEY" --candidate-sha "$CANDIDATE_SHA" --output "$RELEASE_STATE_DIR/static-build-receipt.json"
       - name: Bind deployment to durable component recovery
         env:
           GH_TOKEN: ${{ github.token }}
@@ -219,7 +219,7 @@ jobs:
           set -euo pipefail; umask 077
           PYTHON_BIN="$RELEASE_VENV/bin/python"
           export PYTHON_BIN
-          "$RELEASE_VENV/bin/python" scripts/deploy_owner_dashboard_api.py --project-ref "$PROJECT_REF" --allowed-origin "$ALLOWED_ORIGIN" --site-origin "$SITE_ORIGIN" --reviewed-sha "$REVIEWED_SHA" --candidate-sha "$CANDIDATE_SHA" --gateway-rollback-ref "$GATEWAY_ROLLBACK_REF" --gateway-rollback-source-sha256 "$GATEWAY_ROLLBACK_SOURCE_SHA256" --gateway-current-version "$GATEWAY_CURRENT_VERSION" --evidence-directory "$RELEASE_STATE_DIR/capture" --rollback-worktree "$RELEASE_STATE_DIR/rollback-worktree" --release-state "$RELEASE_STATE_DIR/release-state.json" --static-build-receipt "$RELEASE_STATE_DIR/static-build-receipt.json" --lease-owner "$RELEASE_LEASE_OWNER" --deployment-id "$DEPLOYMENT_ID" > "$RELEASE_STATE_DIR/deploy-receipt.json"
+          "$RELEASE_VENV/bin/python" -m scripts.deploy_owner_dashboard_api --project-ref "$PROJECT_REF" --allowed-origin "$ALLOWED_ORIGIN" --site-origin "$SITE_ORIGIN" --reviewed-sha "$REVIEWED_SHA" --candidate-sha "$CANDIDATE_SHA" --gateway-rollback-ref "$GATEWAY_ROLLBACK_REF" --gateway-rollback-source-sha256 "$GATEWAY_ROLLBACK_SOURCE_SHA256" --gateway-current-version "$GATEWAY_CURRENT_VERSION" --evidence-directory "$RELEASE_STATE_DIR/capture" --rollback-worktree "$RELEASE_STATE_DIR/rollback-worktree" --release-state "$RELEASE_STATE_DIR/release-state.json" --static-build-receipt "$RELEASE_STATE_DIR/static-build-receipt.json" --lease-owner "$RELEASE_LEASE_OWNER" --deployment-id "$DEPLOYMENT_ID" > "$RELEASE_STATE_DIR/deploy-receipt.json"
       - name: Upload immutable backend component evidence
         id: backend_evidence
         uses: actions/upload-artifact@65462800fd760344b1a7b4382951275a0abb4808
@@ -236,7 +236,7 @@ jobs:
           DEPLOYMENT_ID: ${{ steps.deployment.outputs.deployment_id }}
           PROJECT_REF: ${{ secrets.SUPABASE_PROJECT_REF }}
         run: |
-          "$RELEASE_VENV/bin/python" scripts/write_protected_release_record.py --receipt "$RELEASE_STATE_DIR/deploy-receipt.json" --dry-run-evidence "$RELEASE_STATE_DIR/dry-run-evidence.json" --output "$RELEASE_STATE_DIR/release-record.json" --repository "$GITHUB_REPOSITORY" --candidate-sha "$CANDIDATE_SHA" --reviewed-sha "${{ steps.candidate.outputs.reviewed_sha }}" --pr-ci-workflow-run-id "${{ steps.candidate.outputs.pr_ci_workflow_run_id }}" --ci-workflow-run-id "$CI_WORKFLOW_RUN_ID" --authorization-kind "${{ steps.candidate.outputs.authorization_kind }}" --authorization-id "${{ steps.candidate.outputs.authorization_id }}" --release-workflow-run-id "$GITHUB_RUN_ID" --release-workflow-run-attempt "$GITHUB_RUN_ATTEMPT" --pull-request-number "$PULL_REQUEST_NUMBER" --deployment-id "$DEPLOYMENT_ID" --backend-evidence-artifact-id "${{ steps.backend_evidence.outputs.artifact-id }}" --backend-evidence-artifact-name "backend-component-evidence-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT" --backend-evidence-artifact-digest "${{ steps.backend_evidence.outputs.artifact-digest }}" --project-ref "$PROJECT_REF"
+          "$RELEASE_VENV/bin/python" -m scripts.write_protected_release_record --receipt "$RELEASE_STATE_DIR/deploy-receipt.json" --dry-run-evidence "$RELEASE_STATE_DIR/dry-run-evidence.json" --output "$RELEASE_STATE_DIR/release-record.json" --repository "$GITHUB_REPOSITORY" --candidate-sha "$CANDIDATE_SHA" --reviewed-sha "${{ steps.candidate.outputs.reviewed_sha }}" --pr-ci-workflow-run-id "${{ steps.candidate.outputs.pr_ci_workflow_run_id }}" --ci-workflow-run-id "$CI_WORKFLOW_RUN_ID" --authorization-kind "${{ steps.candidate.outputs.authorization_kind }}" --authorization-id "${{ steps.candidate.outputs.authorization_id }}" --release-workflow-run-id "$GITHUB_RUN_ID" --release-workflow-run-attempt "$GITHUB_RUN_ATTEMPT" --pull-request-number "$PULL_REQUEST_NUMBER" --deployment-id "$DEPLOYMENT_ID" --backend-evidence-artifact-id "${{ steps.backend_evidence.outputs.artifact-id }}" --backend-evidence-artifact-name "backend-component-evidence-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT" --backend-evidence-artifact-digest "${{ steps.backend_evidence.outputs.artifact-digest }}" --project-ref "$PROJECT_REF"
       - name: Upload immutable release record
         id: release_artifact
         uses: actions/upload-artifact@65462800fd760344b1a7b4382951275a0abb4808
@@ -253,7 +253,7 @@ jobs:
           DEPLOYMENT_ID: ${{ steps.deployment.outputs.deployment_id }}
           RELEASE_ARTIFACT_ID: ${{ steps.release_artifact.outputs.artifact-id }}
         run: |
-          "$RELEASE_VENV/bin/python" scripts/finalize_protected_release.py --admin-url "$POSTGRES_URL" --lease-owner "$RELEASE_LEASE_OWNER" --deployment-id "$DEPLOYMENT_ID" --release-artifact-id "$RELEASE_ARTIFACT_ID" --log-url "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
+          "$RELEASE_VENV/bin/python" -m scripts.finalize_protected_release --admin-url "$POSTGRES_URL" --lease-owner "$RELEASE_LEASE_OWNER" --deployment-id "$DEPLOYMENT_ID" --release-artifact-id "$RELEASE_ARTIFACT_ID" --log-url "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
       - name: Restore changed components if any post-deploy evidence step failed
         if: ${{ failure() }}
         env:
@@ -266,7 +266,7 @@ jobs:
           set -euo pipefail
           test -n "${RELEASE_STATE_DIR:-}" || exit 0
           test -f "$RELEASE_STATE_DIR/release-state.json" || exit 0
-          restore_after_failure() { "$RELEASE_VENV/bin/python" scripts/restore_gateway_after_release_failure.py --project-ref "$PROJECT_REF" --admin-url "$POSTGRES_URL" --release-state "$RELEASE_STATE_DIR/release-state.json" --release-run-id "$GITHUB_RUN_ID" --release-run-attempt "$GITHUB_RUN_ATTEMPT" --lease-owner "recovery-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"; }
+          restore_after_failure() { "$RELEASE_VENV/bin/python" -m scripts.restore_gateway_after_release_failure --project-ref "$PROJECT_REF" --admin-url "$POSTGRES_URL" --release-state "$RELEASE_STATE_DIR/release-state.json" --release-run-id "$GITHUB_RUN_ID" --release-run-attempt "$GITHUB_RUN_ATTEMPT" --lease-owner "recovery-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"; }
           trap 'restore_after_failure' ERR
           restore_after_failure
       - name: Mark candidate deployment failed after protected restoration
