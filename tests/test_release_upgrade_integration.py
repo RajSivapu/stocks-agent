@@ -399,6 +399,23 @@ def test_native_release_resolves_exact_lease_when_initial_journal_cannot_be_reta
     assert callbacks == ["resolved"]
 
 
+def test_native_release_resolves_exact_lease_when_journal_key_is_invalid(tmp_path):
+    release = module(); callbacks = []
+    class Adapter:
+        def retain(self, _encrypted): pytest.fail("retain must not run")
+        def plan(self, _context): pytest.fail("plan must not run")
+
+    with pytest.raises(ValueError, match="Fernet key"):
+        release.run_native_release(
+            Adapter(), {"candidate_sha": "a" * 40}, repo_root=ROOT,
+            journal_path=tmp_path / "release.enc", key=b"invalid",
+            migrate=lambda: None, on_unjournaled_failure=lambda: callbacks.append("resolved"),
+        )
+
+    assert callbacks == ["resolved"]
+    assert not (tmp_path / "release.enc").exists()
+
+
 def test_actual_postgres_additive_upgrade_from_native_baseline():
     binaries = {name: shutil.which(name) for name in ("initdb", "pg_ctl")}
     if not all(binaries.values()): pytest.skip("disposable PostgreSQL binaries unavailable")

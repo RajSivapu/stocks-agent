@@ -68,7 +68,7 @@ jobs:
           test "$(jq 'length' <<<"$REVIEWS")" -lt 100 || { echo 'review evidence exceeds bounded page'; exit 1; }
           # head_commit_time <= latest review.submitted_at <= merged_at <= candidate_commit_time
           jq -e --arg sha "$PR_HEAD_SHA" --arg head "$HEAD_COMMIT_TIME" --arg merged "$MERGED_AT" --arg candidate "$CANDIDATE_COMMIT_TIME" \
-            '[.[] | select(.state == "APPROVED" or .state == "CHANGES_REQUESTED" or .state == "DISMISSED")] | (all(.id; type == "number" and . > 0) and (group_by(.user.id) | map(max_by([.submitted_at // "", .id])) | (all(.state != "CHANGES_REQUESTED") and any(.state == "APPROVED" and .commit_id == $sha and (.submitted_at >= $head and .submitted_at <= $merged) and ($merged <= $candidate)))))' \
+            '[.[] | select(.state == "APPROVED" or .state == "CHANGES_REQUESTED" or .state == "DISMISSED")] | (all(.[]; (.id | type == "number" and . > 0)) and (group_by(.user.id) | map(max_by([.submitted_at // "", .id])) | (all(.state != "CHANGES_REQUESTED") and any(.state == "APPROVED" and .commit_id == $sha and (.submitted_at >= $head and .submitted_at <= $merged) and ($merged <= $candidate)))))' \
             <<<"$REVIEWS" >/dev/null || { echo 'latest required review approval is missing'; exit 1; }
           echo "candidate_sha=$CANDIDATE_SHA" >> "$GITHUB_OUTPUT"
           echo "reviewed_sha=$PR_HEAD_SHA" >> "$GITHUB_OUTPUT"

@@ -1,10 +1,13 @@
 import copy
+import base64
 from datetime import datetime, timezone
 import hashlib
+import io
 import json
 import os
 from pathlib import Path
 import subprocess
+import tarfile
 import uuid
 
 import pytest
@@ -26,6 +29,17 @@ def tree_hash(files):
     for path, raw in sorted(files.items()):
         hasher.update(path.encode() + b"\0" + raw + b"\0")
     return hasher.hexdigest()
+
+
+def tar_bytes(files):
+    output = io.BytesIO()
+    with tarfile.open(fileobj=output, mode="w") as archive:
+        for name, raw in sorted(files.items()):
+            info = tarfile.TarInfo(name)
+            info.size = len(raw)
+            info.mtime = 0
+            archive.addfile(info, io.BytesIO(raw))
+    return output.getvalue()
 
 
 def test_release_exposes_a_separate_discovery_capability_verifier():
@@ -470,7 +484,15 @@ def test_discovery_capability_accepts_unresolved_candidate_with_null_reference_l
     assert _verify_capability(rows).ok is True
 
 
-def test_discovery_capability_accepts_research_from_a_successful_optional_official_source():
+@pytest.mark.parametrize(("provider", "capability_id", "query_kind", "stage", "lineage", "tamper"), [
+    ("white_house", "white_house_fact_sheets", "feed", "signals", "planned", False),
+    ("gdelt", "gdelt_theme_search", "theme_search", "resolve", "reverse", False),
+    ("yahoo", "yahoo_security_quote", "quote", "quote", "enrichment", False),
+    ("yahoo", "yahoo_security_quote", "quote", "quote", "enrichment", True),
+])
+def test_discovery_capability_accepts_research_from_authorized_additional_source(
+    provider, capability_id, query_kind, stage, lineage, tamper,
+):
     rows = _capability_rows()
     candidate = _add_unresolved_research_candidate(rows)
     packet = rows["packets"][0]["packet"]
@@ -497,30 +519,40 @@ def test_discovery_capability_accepts_research_from_a_successful_optional_offici
         if row["id"] == required_stored["reservation_id"]
     )
 
-    optional_task_id = str(uuid.uuid5(uuid.UUID(RUN), "optional:white-house:fact-sheets"))
+    optional_task_id = str(uuid.uuid5(
+        uuid.UUID(RUN), f"additional:{provider}:{capability_id}:{stage}",
+    ))
     optional_receipt_id = str(uuid.uuid5(
         uuid.NAMESPACE_URL,
         f"market-intelligence:receipt:{RUN}:{optional_task_id}",
     ))
     optional_reservation_id = str(uuid.uuid5(
-        uuid.UUID(RUN), "reservation:white-house:fact-sheets",
+        uuid.UUID(RUN), f"reservation:{provider}:{capability_id}:{stage}",
     ))
     optional_task = copy.deepcopy(required_task)
     optional_task.update(
-        id=optional_task_id, provider="white_house",
-        capability_id="white_house_fact_sheets", query_kind="feed",
-        query_hash=hashlib.sha256(b"white-house-fact-sheets").hexdigest(),
+        id=optional_task_id, provider=provider, stage=stage,
+        capability_id=capability_id, query_kind=query_kind,
+        query_hash=hashlib.sha256(f"{provider}:{capability_id}:{stage}".encode()).hexdigest(),
+        dependency_ids=[required_task["id"]] if lineage == "reverse" else [],
     )
     optional_parsed = optional_task["result"]["checkpoint"]["receipt"]
     optional_parsed.update(
-        provider="white_house", reservation_id=optional_reservation_id,
+        provider=provider, reservation_id=optional_reservation_id,
         source_receipt_id=optional_receipt_id,
     )
-    optional_parsed["metadata"]["capability_id"] = "white_house_fact_sheets"
+    optional_parsed["metadata"]["capability_id"] = capability_id
     optional_task["result"]["theme_id"] = "macro_and_policy"
+    if lineage == "reverse":
+        optional_task["result"]["hypothesis"] = {
+            "adverse_path": False, "direction": "beneficiary",
+            "evidence_requirement": "named supplier", "exposure_supported": False,
+            "geography": "US", "horizon": "medium", "invalidation_rule": "none",
+            "role": "magnet_supplier", "status": "hypothesis",
+        }
     optional_stored = copy.deepcopy(required_stored)
     optional_stored.update(
-        id=optional_receipt_id, provider="white_house",
+        id=optional_receipt_id, provider=provider,
         reservation_id=optional_reservation_id,
     )
     optional_completion = copy.deepcopy(required_completion)
@@ -529,7 +561,7 @@ def test_discovery_capability_accepts_research_from_a_successful_optional_offici
     )
     optional_reservation = copy.deepcopy(required_reservation)
     optional_reservation.update(
-        id=optional_reservation_id, provider="white_house",
+        id=optional_reservation_id, provider=provider,
         cache_keys=[optional_parsed["cache_key"]],
     )
     rows["discovery_stage_tasks"].append(optional_task)
@@ -545,17 +577,18 @@ def test_discovery_capability_accepts_research_from_a_successful_optional_offici
         )
     required_parsed["metadata"]["coverage_status"] = "success_empty"
 
-    item.update(source_receipt_id=optional_receipt_id, provider="white_house")
+    item.update(source_receipt_id=optional_receipt_id, provider=provider)
     run_item["source_receipt_id"] = optional_receipt_id
-    rows["source_item_provenance"][0].update(
-        provider="white_house", request_url="https://www.whitehouse.gov/fact-sheets/",
+    request_url = (
+        "https://www.whitehouse.gov/fact-sheets/" if provider == "white_house"
+        else "https://api.gdeltproject.org/api/v2/doc/doc"
     )
+    rows["source_item_provenance"][0].update(provider=provider, request_url=request_url)
     rows["run_source_item_provenance"][0].update(
-        provider="white_house", source_receipt_id=optional_receipt_id,
-        request_url="https://www.whitehouse.gov/fact-sheets/",
+        provider=provider, source_receipt_id=optional_receipt_id, request_url=request_url,
     )
     packet["evidence"][0]["source_identity"].update(
-        provider="white_house", receipt_id=optional_receipt_id,
+        provider=provider, receipt_id=optional_receipt_id,
     )
     candidate["suitability"]["lineage"]["evidence_receipt_ids"][item_id] = optional_receipt_id
     suitability_body = {
@@ -565,14 +598,93 @@ def test_discovery_capability_accepts_research_from_a_successful_optional_offici
     candidate["suitability"]["evaluation_hash"] = digest(suitability_body)
     candidate_body = {key: value for key, value in candidate.items() if key != "candidate_hash"}
     candidate["candidate_hash"] = digest(candidate_body)
-    source_plan = packet["coverage"]["source_plan"]
-    source_plan["planned_task_ids"].append(optional_task_id)
-    source_plan["plan_hash"] = digest({
-        key: value for key, value in source_plan.items() if key != "plan_hash"
-    })
+    if lineage == "planned":
+        source_plan = packet["coverage"]["source_plan"]
+        source_plan["planned_task_ids"].append(optional_task_id)
+        source_plan["plan_hash"] = digest({
+            key: value for key, value in source_plan.items() if key != "plan_hash"
+        })
+    elif lineage == "enrichment":
+        security = rows["security_reference_revisions"][0]
+        descriptor = {
+            "adverse_path": False, "cache_key": required_parsed["cache_key"],
+            "cik": "0000000001", "dependency_task_ids": [],
+            "entity_id": security["entity_id"], "event_ids": ["event-one"],
+            "hypothesis_ids": ["hypothesis-one"],
+            "instrument_type": security["instrument_type"], "priority": 50,
+            "reference_manifest_id": security["manifest_id"],
+            "reservation_id": optional_reservation_id, "role": "holding_quote",
+            "security_id": security["security_id"],
+            "security_revision_id": security["id"], "source_item_ids": [item_id],
+            "source_receipt_id": required_receipt_id,
+            "theme_id": "critical_minerals_magnets", "ticker": security["ticker"],
+        }
+        request_document = {
+            "request_id": optional_task_id, "task_id": optional_task_id,
+            "stage": "quote", "provider": provider, "capability_id": capability_id,
+            "descriptor": descriptor, "query_kind": query_kind,
+            "dependency_ids": [], "requested_window": optional_task["requested_window"],
+            "request_budget": optional_task["request_budget"], "execution_allowed": False,
+        }
+        descriptor_hash = digest(request_document)
+        optional_task["query_hash"] = descriptor_hash
+        envelope = {
+            "sec_issuer_submissions": 2, "sec_filing_document": 2,
+            "yahoo_security_quote": 2, "gdelt_reverse": 2,
+        }
+        manifest_body = {
+            "deferred_reasons": {}, "execution_allowed": False,
+            "phase": "post-market", "provider_reservations": envelope,
+            "request_descriptors": [{
+                "request_id": optional_task_id, "descriptor_hash": descriptor_hash,
+            }],
+            "run_id": RUN, "schema_version": 1,
+            "selection_stage": "holding_quotes",
+        }
+        manifest_hash = digest(manifest_body)
+        manifest_id = str(uuid.uuid5(
+            uuid.UUID(RUN), f"enrichment-selection:{manifest_hash}",
+        ))
+        rows["enrichment_request_descriptors"] = [{
+            "id": optional_task_id, "manifest_id": manifest_id, "run_id": RUN,
+            "task_id": optional_task_id, "provider": provider,
+            "capability_id": capability_id, "query_kind": query_kind,
+            "descriptor": descriptor, "content_hash": descriptor_hash,
+            "created_at": "2026-09-05T19:39:00Z",
+        }]
+        rows["enrichment_selection_manifests"] = [{
+            "id": manifest_id, "run_id": RUN, "selection_stage": "holding_quotes",
+            "phase": "post-market", "request_count": 1,
+            "provider_reservations": envelope, "deferred_reasons": {},
+            "manifest": {
+                **manifest_body, "manifest_id": manifest_id,
+                "semantic_hash": manifest_hash,
+            },
+            "content_hash": manifest_hash, "created_at": "2026-09-05T19:39:00Z",
+        }]
+        if tamper:
+            rows["enrichment_request_descriptors"][0]["descriptor"]["ticker"] = "TAMPER"
     _rebind_packet_completion(rows)
 
-    assert _verify_capability(rows).ok is True
+    if tamper:
+        with pytest.raises(RuntimeError, match="adaptive request"):
+            _verify_capability(rows)
+    else:
+        assert _verify_capability(rows).ok is True
+
+
+def test_discovery_capability_rejects_unplanned_task_without_dynamic_lineage():
+    rows = _capability_rows()
+    forged = copy.deepcopy(rows["discovery_stage_tasks"][0])
+    forged.update(
+        id=str(uuid.uuid4()), stage="signals", provider="white_house",
+        capability_id="white_house_fact_sheets", query_kind="feed",
+        query_hash="9" * 64, dependency_ids=[],
+    )
+    rows["discovery_stage_tasks"].append(forged)
+
+    with pytest.raises(RuntimeError, match="reverse task lineage"):
+        _verify_capability(rows)
 
 
 def test_discovery_capability_accepts_success_empty_when_all_returned_rows_are_dropped():
@@ -963,8 +1075,14 @@ def release(tmp_path):
         requested_report_id=report_id, requested_idempotency_key=report_key,
         requested_report_hash=report["report_hash"],
     )
+    site_source_files = {path: content for path, content in raw.items()
+        if path == ".openai/hosting.json"
+        or path in {"package.json", "package-lock.json"}
+        or path.startswith("apps/web/")
+        or path.startswith("packages/dashboard-contracts/")}
+    site_archive = tar_bytes(site_source_files)
     site_receipt = {
-        "format": "stocks-native-sites-release-v2",
+        "format": "stocks-native-sites-release-v3",
         "captured_at": "2026-09-05T20:30:00Z",
         "trust_domain": "codex-native-sites-connector",
         "site": {"project_id": "appgprj_fixture", "status": "active",
@@ -972,43 +1090,37 @@ def release(tmp_path):
             "current_user_role": "owner", "access_mode": "custom", "allowed_owner_count": 1,
             "external_visitor_count": 0, "allowed_group_count": 0},
         "retained_prior_version": {"id": "appgver_prior", "version_number": 9,
-            "deployment_id": "appgdep_prior", "archive_content_hash": "sha256:" + "4" * 64,
+            "deployment_id": "appgdep_prior",
+            "archive_content_hash": "sha256:" + hashlib.sha256(site_archive).hexdigest(),
             "rollback_eligible": True},
         "active_version": {"id": "appgver_candidate", "version_number": 10,
             "source_commit_sha": sha, "archive_format": "tar",
-            "archive_content_hash": "sha256:" + "1" * 64,
+            "archive_content_hash": "sha256:" + hashlib.sha256(site_archive).hexdigest(),
             "archive_files": {path: hashlib.sha256(content).hexdigest()
-                for path, content in raw.items() if path == ".openai/hosting.json"
-                or path in {"package.json", "package-lock.json"}
-                or path.startswith("apps/web/")
-                or path.startswith("packages/dashboard-contracts/")},
-            "archive_tree_sha256": tree_hash({path: content
-                for path, content in raw.items() if path == ".openai/hosting.json"
-                or path in {"package.json", "package-lock.json"}
-                or path.startswith("apps/web/")
-                or path.startswith("packages/dashboard-contracts/")}),
-            "file_count": len([path for path in raw if path == ".openai/hosting.json"
-                or path in {"package.json", "package-lock.json"}
-                or path.startswith("apps/web/")
-                or path.startswith("packages/dashboard-contracts/")]),
-            "size_bytes": 500_000},
+                for path, content in site_source_files.items()},
+            "archive_tree_sha256": tree_hash(site_source_files),
+            "file_count": len(site_source_files),
+            "size_bytes": sum(len(content) for content in site_source_files.values())},
         "active_deployment": {"id": "appgdep_candidate", "version_id": "appgver_candidate",
             "type": "publish", "status": "succeeded", "url": site_url},
         "candidate_build": {"candidate_sha": sha, "build_sha256": tree_hash(static_files),
             "files": {path: hashlib.sha256(content).hexdigest()
                 for path, content in static_files.items()}},
+        "archive_captures": {name: {
+            "version_id": "appgver_candidate" if name == "active" else "appgver_prior",
+            "capture_method": "owner_authenticated_native_connector",
+            "content_base64": base64.b64encode(site_archive).decode(),
+        } for name in ("active", "prior")},
         "live_bundle": {"files": [{"path": path,
                 "url": site_url + ("/" if path == "index.html" else "/" + path),
-                "sha256": hashlib.sha256(content).hexdigest(), "bytes": len(content)}
+                "sha256": hashlib.sha256(content).hexdigest(), "bytes": len(content),
+                "capture_method": "owner_authenticated_native_connector",
+                "content_base64": base64.b64encode(content).decode()}
                 for path, content in static_files.items() if not path.startswith("_")],
             "supabase_project_ref": "p" * 20, "dashboard_api_url": api_url},
     }
-    def site_live_reader(url):
-        path = "index.html" if url == site_url + "/" else url.removeprefix(site_url + "/")
-        return static_files[path]
     return source, {"deployment_id": 42, "native_site_receipt": site_receipt,
-        "repo_root": repo, "static_root": static, "clock": lambda: NOW,
-        "site_live_reader": site_live_reader}
+        "repo_root": repo, "static_root": static, "clock": lambda: NOW}
 
 
 def test_release_queries_sources_and_binds_exact_receipts(release):

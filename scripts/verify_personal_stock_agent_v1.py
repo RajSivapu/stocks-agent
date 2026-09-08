@@ -23,6 +23,9 @@ from lib.config import load_settings
 from lib.intelligence.planner import load_source_capabilities
 from lib.intelligence.policy import load_intelligence_policy
 from scripts.export_recovery_bundle import (
+    _ENRICHMENT_PHASE_ENVELOPES,
+    _ENRICHMENT_QUERY_CONTRACTS,
+    _semantic_hash,
     _validate_reference_semantic_lineage,
     canonical_json,
     sha256,
@@ -33,6 +36,185 @@ MAX_SCHEDULED_RECEIPT_AGE_SECONDS = 7 * 24 * 60 * 60
 SHA = re.compile(r"[0-9a-f]{40}")
 UUID = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}")
 FUNCTIONS = ("market-briefing-gateway", "owner-dashboard-api", "telegram-portfolio")
+
+
+def _authorized_dynamic_task_ids(
+    receipt: Mapping[str, object],
+    *,
+    run_id: str,
+    phase: object,
+    tasks: Mapping[str, Mapping[str, object]],
+    planned_ids: set[str],
+) -> set[str]:
+    """Bind post-plan tasks to reverse dependencies or sealed enrichment requests."""
+    dynamic_ids = set(tasks) - planned_ids
+    envelope = _ENRICHMENT_PHASE_ENVELOPES.get(str(phase))
+    require(isinstance(envelope, Mapping), "discovery adaptive phase is invalid")
+    raw_manifests = receipt.get("enrichment_selection_manifests", [])
+    raw_descriptors = receipt.get("enrichment_request_descriptors", [])
+    require(
+        isinstance(raw_manifests, list) and len(raw_manifests) <= 3
+        and isinstance(raw_descriptors, list) and len(raw_descriptors) <= 100,
+        "discovery adaptive selection evidence is invalid",
+    )
+    manifests = {
+        str(row.get("id")): row for row in raw_manifests
+        if isinstance(row, Mapping) and isinstance(row.get("id"), str)
+    }
+    descriptors = {
+        str(row.get("task_id")): row for row in raw_descriptors
+        if isinstance(row, Mapping) and isinstance(row.get("task_id"), str)
+    }
+    require(
+        len(manifests) == len(raw_manifests)
+        and len(descriptors) == len(raw_descriptors)
+        and set(descriptors) <= dynamic_ids,
+        "discovery adaptive selection identities are invalid",
+    )
+
+    enrichment_ids: set[str] = set()
+    by_manifest: dict[str, list[Mapping[str, object]]] = {}
+    for task_id, row in descriptors.items():
+        task = tasks.get(task_id)
+        manifest_id = row.get("manifest_id")
+        manifest = manifests.get(str(manifest_id))
+        query_kind = row.get("query_kind")
+        contract = _ENRICHMENT_QUERY_CONTRACTS.get(str(query_kind))
+        descriptor = row.get("descriptor")
+        expected_stage = "quote" if query_kind == "quote" else "enrich"
+        require(
+            isinstance(task, Mapping) and isinstance(manifest, Mapping)
+            and isinstance(contract, tuple) and isinstance(descriptor, Mapping)
+            and row.get("id") == task_id and row.get("run_id") == run_id
+            and manifest.get("run_id") == run_id
+            and (row.get("provider"), row.get("capability_id")) == contract[:2]
+            and (task.get("provider"), task.get("capability_id"), task.get("query_kind"))
+                == (row.get("provider"), row.get("capability_id"), query_kind)
+            and task.get("stage") == expected_stage
+            and set(descriptor) == contract[2]
+            and len(canonical_json(descriptor).encode()) <= 32_768
+            and descriptor.get("dependency_task_ids") == task.get("dependency_ids")
+            and row.get("content_hash") == task.get("query_hash"),
+            "discovery adaptive request descriptor is invalid",
+        )
+        request_document = {
+            "request_id": row["id"], "task_id": task_id, "stage": task["stage"],
+            "provider": row["provider"], "capability_id": row["capability_id"],
+            "descriptor": descriptor, "query_kind": query_kind,
+            "dependency_ids": task["dependency_ids"],
+            "requested_window": task["requested_window"],
+            "request_budget": task["request_budget"], "execution_allowed": False,
+        }
+        require(
+            row.get("content_hash") == _semantic_hash(request_document)
+            and isinstance(descriptor.get("dependency_task_ids"), list)
+            and all(dependency in tasks for dependency in descriptor["dependency_task_ids"]),
+            "discovery adaptive request semantic lineage is invalid",
+        )
+        if query_kind == "filing_document":
+            dependencies = descriptor["dependency_task_ids"]
+            parent = tasks.get(dependencies[0]) if len(dependencies) == 1 else None
+            parent_descriptor = descriptors.get(dependencies[0]) if dependencies else None
+            require(
+                isinstance(parent, Mapping) and parent.get("state") == "succeeded"
+                and isinstance(parent_descriptor, Mapping)
+                and parent.get("query_kind") == "issuer_submissions"
+                and parent_descriptor.get("query_kind") == "issuer_submissions"
+                and all(
+                    parent_descriptor.get("descriptor", {}).get(field) == descriptor.get(field)
+                    for field in (
+                        "entity_id", "security_id", "security_revision_id",
+                        "reference_manifest_id", "cik",
+                    )
+                ),
+                "discovery adaptive filing dependency is invalid",
+            )
+        by_manifest.setdefault(str(manifest_id), []).append(row)
+        enrichment_ids.add(task_id)
+
+    for manifest_id, row in manifests.items():
+        manifest = row.get("manifest")
+        children = by_manifest.get(manifest_id, [])
+        selection_stage = row.get("selection_stage")
+        allowed = {
+            "holding_quotes": {"quote"},
+            "initial": {"issuer_submissions", "quote"},
+            "filing_documents": {"filing_document"},
+        }.get(str(selection_stage))
+        require(
+            isinstance(manifest, Mapping) and isinstance(envelope, Mapping)
+            and isinstance(allowed, set) and row.get("run_id") == run_id
+            and row.get("phase") == phase and row.get("provider_reservations") == envelope
+            and row.get("request_count") == len(children)
+            and set(manifest) == {
+                "deferred_reasons", "execution_allowed", "manifest_id", "phase",
+                "provider_reservations", "request_descriptors", "run_id",
+                "schema_version", "selection_stage", "semantic_hash",
+            }
+            and manifest.get("manifest_id") == manifest_id
+            and manifest.get("run_id") == run_id and manifest.get("phase") == phase
+            and manifest.get("selection_stage") == selection_stage
+            and manifest.get("provider_reservations") == envelope
+            and manifest.get("deferred_reasons") == row.get("deferred_reasons")
+            and manifest.get("execution_allowed") is False
+            and manifest.get("schema_version") == 1
+            and isinstance(manifest.get("request_descriptors"), list)
+            and all(child.get("query_kind") in allowed for child in children),
+            "discovery adaptive selection manifest is invalid",
+        )
+        semantic = dict(manifest)
+        semantic.pop("manifest_id")
+        semantic.pop("semantic_hash")
+        content_hash = _semantic_hash(semantic)
+        expected_id = str(uuid.uuid5(uuid.UUID(run_id), f"enrichment-selection:{content_hash}"))
+        expected_children = sorted(({
+            "request_id": child["id"], "descriptor_hash": child["content_hash"],
+        } for child in children), key=canonical_json)
+        require(
+            manifest_id == expected_id and row.get("content_hash") == content_hash
+            and manifest.get("semantic_hash") == content_hash
+            and sorted(manifest["request_descriptors"], key=canonical_json) == expected_children,
+            "discovery adaptive selection semantic lineage is invalid",
+        )
+        counts = {
+            query_kind: sum(child.get("query_kind") == query_kind for child in children)
+            for query_kind in _ENRICHMENT_QUERY_CONTRACTS
+        }
+        require(
+            counts["issuer_submissions"] <= envelope["sec_issuer_submissions"]
+            and counts["filing_document"] <= envelope["sec_filing_document"]
+            and counts["quote"] <= envelope["yahoo_security_quote"],
+            "discovery adaptive selection capacity is invalid",
+        )
+
+    reverse_ids = dynamic_ids - enrichment_ids
+    require(len(reverse_ids) <= envelope["gdelt_reverse"],
+            "discovery reverse task capacity is invalid")
+    for task_id in reverse_ids:
+        task = tasks[task_id]
+        dependencies = task.get("dependency_ids")
+        hypothesis = task.get("result", {}).get("hypothesis") \
+            if isinstance(task.get("result"), Mapping) else None
+        require(
+            task.get("stage") == "resolve" and task.get("provider") == "gdelt"
+            and task.get("capability_id") == "gdelt_theme_search"
+            and task.get("query_kind") == "theme_search"
+            and isinstance(task.get("query_hash"), str)
+            and re.fullmatch(r"[0-9a-f]{64}", task["query_hash"]) is not None
+            and isinstance(dependencies, list) and 1 <= len(dependencies) <= 32
+            and dependencies == sorted(set(dependencies))
+            and set(dependencies) <= planned_ids
+            and all(tasks[dependency].get("state") == "succeeded" for dependency in dependencies)
+            and isinstance(hypothesis, Mapping)
+            and set(hypothesis) == {
+                "adverse_path", "direction", "evidence_requirement", "exposure_supported",
+                "geography", "horizon", "invalidation_rule", "role", "status",
+            }
+            and hypothesis.get("exposure_supported") is False
+            and hypothesis.get("status") == "hypothesis",
+            "discovery reverse task lineage is invalid",
+        )
+    return dynamic_ids
 
 
 @dataclass(frozen=True, slots=True)
@@ -212,15 +394,21 @@ def _verify_discovery_capability(receipt: Mapping[str, object]) -> VerificationR
         str(row.get("id")): row for row in task_rows
         if isinstance(row, Mapping) and isinstance(row.get("id"), str)
     }
+    planned_id_set = set(planned_ids)
     require(
-        len(tasks) == len(task_rows)
-        and set(planned_ids) <= set(tasks)
-        and all(tasks[task_id].get("run_id") == run_id for task_id in planned_ids),
+        len(task_rows) <= 100 and len(tasks) == len(task_rows)
+        and planned_id_set <= set(tasks)
+        and all(UUID.fullmatch(task_id) is not None for task_id in tasks)
+        and all(task.get("run_id") == run_id for task in tasks.values()),
         "discovery required task evidence is incomplete",
     )
     terminal_states = {"succeeded", "failed", "deferred", "uncertain"}
-    require(all(tasks[task_id].get("state") in terminal_states for task_id in planned_ids),
+    require(all(task.get("state") in terminal_states for task in tasks.values()),
             "discovery task plan is not terminal")
+    _authorized_dynamic_task_ids(
+        receipt, run_id=run_id, phase=intelligence.get("phase"), tasks=tasks,
+        planned_ids=planned_id_set,
+    )
     planned_task_by_due: dict[tuple[str, object], Mapping[str, object]] = {}
     for planned in required_tasks:
         task = tasks[str(planned["task_id"])]
@@ -370,7 +558,7 @@ def _verify_discovery_capability(receipt: Mapping[str, object]) -> VerificationR
     required_task_ids = {str(row["task_id"]) for row in required_tasks}
     verified_receipt_ids: set[str] = set()
     required_receipt_ids: set[str] = set()
-    for task_id in planned_ids:
+    for task_id in tasks:
         task = tasks[task_id]
         capability_id = task.get("capability_id")
         capability = registry.get(str(capability_id))
@@ -382,13 +570,16 @@ def _verify_discovery_capability(receipt: Mapping[str, object]) -> VerificationR
             "filing_document": "enrich",
         }.get(capability.query_kind, "signals") if capability is not None else None)
         required = task_id in required_task_ids
-        label = "required capability" if required else "planned capability"
+        dynamic = task_id not in planned_id_set
+        label = "required capability" if required else (
+            "adaptive capability" if dynamic else "planned capability"
+        )
         require(
             capability is not None
             and capability.enabled and capability.health in {"enabled", "degraded"}
             and task.get("provider") == capability.provider
             and task.get("query_kind") == capability.query_kind
-            and task.get("stage") == expected_stage
+            and (dynamic or task.get("stage") == expected_stage)
             and (not required or task.get("state") == "succeeded"),
             f"discovery {label} task does not match its registry or success state",
         )
@@ -1136,8 +1327,7 @@ def verify_scheduled(rows: Mapping, run_id: str, deployed: datetime, now: dateti
 
 def verify_release(source: ReleaseDataSource, *, deployment_id: int, native_site_receipt: Mapping[str, object],
                    repo_root: Path = ROOT, static_root: Path = ROOT / "dist",
-                   clock: Callable[[], datetime] = lambda: datetime.now(timezone.utc),
-                   site_live_reader=None) -> dict[str, object]:
+                   clock: Callable[[], datetime] = lambda: datetime.now(timezone.utc)) -> dict[str, object]:
     require(not isinstance(source, Mapping) and isinstance(source, ReleaseDataSource), "protected production data source is required")
     try:
         now = clock()
@@ -1192,7 +1382,7 @@ def verify_release(source: ReleaseDataSource, *, deployment_id: int, native_site
         from scripts.verify_native_site_release import verify_native_site_release
         owner_site = verify_native_site_release(
             native_site_receipt, candidate, record["project_ref"], repo_root, now=now,
-            static_root=static_root, live_reader=site_live_reader,
+            static_root=static_root, protected_build_receipt=record.get("static_assets"),
         )
         require(record.get("dry_run") is False, "protected deployment dry-run authority must be false")
         dry = record["dry_run_evidence"]

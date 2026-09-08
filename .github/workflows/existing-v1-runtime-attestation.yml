@@ -33,6 +33,10 @@ jobs:
       - uses: actions/setup-python@42375524e23c412d93fb67b49958b491fce71c38
         with:
           python-version: "3.14"
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with:
+          node-version: "24"
+          cache: npm
       - name: Bind checkout to current main and its successful owner verification
         env:
           GH_TOKEN: ${{ github.token }}
@@ -75,8 +79,9 @@ jobs:
           echo "RECONCILIATION_ARTIFACT_DIGEST=$RECONCILIATION_ARTIFACT_DIGEST" >> "$GITHUB_ENV"
           echo "RECONCILIATION_ARTIFACT_NAME=$ARTIFACT_NAME" >> "$GITHUB_ENV"
       - name: Install locked attestation dependencies
-        run: >-
+        run: |
           python -m pip install --require-hashes --only-binary=:all: -r requirements.lock
+          npm ci --ignore-scripts
       - name: Download the exact completed reconciliation receipt
         env:
           GH_TOKEN: ${{ github.token }}
@@ -107,10 +112,17 @@ jobs:
           test -n "$DASHBOARD_OWNER_EMAIL" && test -n "$SUPABASE_ACCESS_TOKEN"
           test -n "$SUPABASE_PROJECT_REF" && test -n "$SUPABASE_PUBLISHABLE_KEY"
           test -n "$SUPABASE_SERVICE_ROLE_KEY" && test -n "$DASHBOARD_DATABASE_URL_SHA256"
+          python scripts/build_owner_dashboard_static.py \
+            --project-ref "$SUPABASE_PROJECT_REF" \
+            --site-origin "$(jq -r .site.live_url docs/receipts/2026-09-06-native-site-v5.json)" \
+            --publishable-key "$SUPABASE_PUBLISHABLE_KEY" \
+            --candidate-sha "$MAIN_SHA" \
+            --output "$RUNNER_TEMP/protected-build-receipt.json"
           python scripts/attest_existing_v1_runtime.py \
             --candidate-sha "$MAIN_SHA" \
             --production-project-ref "$SUPABASE_PROJECT_REF" \
             --native-site-receipt docs/receipts/2026-09-06-native-site-v5.json \
+            --protected-build-receipt "$RUNNER_TEMP/protected-build-receipt.json" \
             --reconciliation-receipt "$RUNNER_TEMP/reconciliation/schema-reconciliation-receipt.json" \
             --reconciliation-workflow-run-id "$RECONCILIATION_WORKFLOW_RUN_ID" \
             --reconciliation-artifact-id "$RECONCILIATION_ARTIFACT_ID" \

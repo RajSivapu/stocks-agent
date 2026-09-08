@@ -1,5 +1,8 @@
 from pathlib import Path
+import json
 import re
+import shutil
+import subprocess
 import yaml
 
 
@@ -110,6 +113,49 @@ def test_release_uses_latest_review_per_reviewer_before_exposing_production_secr
     assert 'all(.state != "CHANGES_REQUESTED")' in trust
     assert '.state == "APPROVED"' in trust
     assert "SUPABASE_ACCESS_TOKEN" not in trust
+
+
+def test_release_executes_exact_review_filter_for_latest_decisions_and_ties():
+    jq = shutil.which("jq")
+    if jq is None:
+        raise AssertionError("jq is required to verify the protected review filter")
+    workflow = Path(".github/workflows/owner-dashboard-release.yml").read_text()
+    trust = workflow.split(
+        "- name: Authenticate exact reviewed main candidate without candidate code", 1
+    )[1].split("- uses: actions/checkout", 1)[0]
+    filter_line = next(
+        line.strip() for line in trust.splitlines()
+        if line.strip().startswith("'[.[] | select(")
+    )
+    review_filter = filter_line.removesuffix(" \\").removeprefix("'").removesuffix("'")
+    sha = "a" * 40
+    base = {
+        "commit_id": sha, "submitted_at": "2026-09-05T17:45:00Z",
+    }
+
+    def accepted(rows):
+        result = subprocess.run([
+            jq, "-e", "--arg", "sha", sha,
+            "--arg", "head", "2026-09-05T17:40:00Z",
+            "--arg", "merged", "2026-09-05T18:00:00Z",
+            "--arg", "candidate", "2026-09-05T18:00:00Z", review_filter,
+        ], input=json.dumps(rows), text=True, capture_output=True)
+        return result.returncode == 0
+
+    assert accepted([{**base, "id": 1, "state": "APPROVED", "user": {"id": 10}}])
+    assert not accepted([
+        {**base, "id": 1, "state": "APPROVED", "user": {"id": 10}},
+        {**base, "id": 2, "state": "CHANGES_REQUESTED", "user": {"id": 10}},
+    ])
+    assert accepted([
+        {**base, "id": 1, "state": "CHANGES_REQUESTED", "user": {"id": 10}},
+        {**base, "id": 2, "state": "DISMISSED", "user": {"id": 10}},
+        {**base, "id": 3, "state": "APPROVED", "user": {"id": 11}},
+    ])
+    assert not accepted([
+        {**base, "id": 1, "state": "APPROVED", "user": {"id": 10}},
+        {**base, "id": 0, "state": "DISMISSED", "user": {"id": 11}},
+    ])
 
 
 def test_candidate_dry_run_and_site_build_steps_do_not_receive_privileged_secrets():

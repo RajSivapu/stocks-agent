@@ -25,7 +25,7 @@ def verify_native_site_release(
     *,
     now: datetime | None = None,
     static_root: Path | None = None,
-    live_reader=None,
+    protected_build_receipt: Mapping[str, object] | None = None,
 ) -> dict[str, object]:
     """Close the owner-Site class without relabeling backend or scheduled proof."""
     version = receipt.get("active_version") if isinstance(receipt, Mapping) else None
@@ -33,7 +33,7 @@ def verify_native_site_release(
         raise RuntimeError("native Site release does not bind the exact candidate")
     verified = validate_native_site_receipt(
         receipt, candidate_sha, project_ref, repo_root, now=now,
-        static_root=static_root, live_reader=live_reader,
+        static_root=static_root, protected_build_receipt=protected_build_receipt,
     )
     return {
         "status": "verified",
@@ -63,10 +63,12 @@ def main() -> int:
     parser.add_argument("--output", required=True, type=Path)
     parser.add_argument("--repo-root", type=Path, default=ROOT)
     parser.add_argument("--static-root", type=Path, default=ROOT / "dist")
+    parser.add_argument("--protected-build-receipt", required=True, type=Path)
     arguments = parser.parse_args()
     result = verify_native_site_release(
         _load_receipt(arguments.receipt), arguments.candidate_sha,
         arguments.project_ref, arguments.repo_root, static_root=arguments.static_root,
+        protected_build_receipt=_load_receipt(arguments.protected_build_receipt),
     )
     arguments.output.write_text(
         json.dumps(result, sort_keys=True, separators=(",", ":")) + "\n"

@@ -7,7 +7,7 @@ import sys
 import pytest
 
 from test_existing_v1_runtime_attestation import (
-    PROJECT_REF, _site_live_reader, _site_receipt, _site_repo,
+    PROJECT_REF, _site_build_receipt, _site_receipt, _site_repo,
 )
 
 
@@ -29,7 +29,7 @@ def test_exact_candidate_native_site_receipt_closes_only_owner_site_evidence(tmp
     repo, _source_sha, candidate_sha = _site_repo(tmp_path)
     result = verify_native_site_release(
         _site_receipt(candidate_sha), candidate_sha, PROJECT_REF, repo,
-        live_reader=_site_live_reader,
+        protected_build_receipt=_site_build_receipt(candidate_sha),
     )
 
     assert result["candidate_sha"] == candidate_sha
@@ -47,7 +47,7 @@ def test_native_site_release_rejects_ui_identical_ancestor_for_exact_release(tmp
     with pytest.raises(RuntimeError, match="exact candidate"):
         verify_native_site_release(
             _site_receipt(source_sha), candidate_sha, PROJECT_REF, repo,
-            live_reader=_site_live_reader,
+            protected_build_receipt=_site_build_receipt(candidate_sha),
         )
 
 
@@ -59,5 +59,6 @@ def test_native_site_release_preserves_underlying_owner_only_validation(tmp_path
     receipt["site"]["allowed_owner_count"] = 2
     with pytest.raises(RuntimeError, match="owner-only"):
         verify_native_site_release(
-            receipt, candidate_sha, PROJECT_REF, repo, live_reader=_site_live_reader,
+            receipt, candidate_sha, PROJECT_REF, repo,
+            protected_build_receipt=_site_build_receipt(candidate_sha),
         )

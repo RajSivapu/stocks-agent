@@ -350,13 +350,13 @@ def run_native_release(adapter, context: Mapping, *, repo_root: Path, journal_pa
                        verify_receipt: Callable[[dict], None] | None = None,
                        on_unjournaled_failure: Callable[[], None] = lambda: None) -> dict:
     """Shared production orchestration, including postdeployment failure recovery."""
-    sink = EncryptedJournal(journal_path, key, retain=adapter.retain)
-    def persist(journal): sink({**journal, "release_context": dict(context)})
     # The durable lease is already recovery_required when this function starts.
     # Retain a no-mutation phase before candidate planning, validation, or remote
     # capture. Independent recovery can safely close it because no component
     # mutation is reachable before execute_release replaces this phase.
     try:
+        sink = EncryptedJournal(journal_path, key, retain=adapter.retain)
+        def persist(journal): sink({**journal, "release_context": dict(context)})
         persist({"format": 1, "status": "preparing",
                  "captured_at": datetime.now(timezone.utc).isoformat(), "components": {}})
     except Exception:

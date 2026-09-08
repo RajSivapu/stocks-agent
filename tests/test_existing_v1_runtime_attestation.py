@@ -1,9 +1,11 @@
 import base64
 from datetime import UTC, datetime, timedelta
 import hashlib
+import io
 import json
 from pathlib import Path
 import subprocess
+import tarfile
 
 import pytest
 import yaml
@@ -36,9 +38,23 @@ def _tree(files: dict[str, bytes]) -> str:
     return digest.hexdigest()
 
 
-def _site_live_reader(url: str) -> bytes:
-    path = "index.html" if url == SITE_URL + "/" else url.removeprefix(SITE_URL + "/")
-    return SITE_FILES[path]
+def _tar(files: dict[str, bytes]) -> bytes:
+    output = io.BytesIO()
+    with tarfile.open(fileobj=output, mode="w") as archive:
+        for name, raw in sorted(files.items()):
+            info = tarfile.TarInfo(name)
+            info.size = len(raw)
+            info.mtime = 0
+            archive.addfile(info, io.BytesIO(raw))
+    return output.getvalue()
+
+
+def _site_build_receipt(candidate_sha: str) -> dict[str, object]:
+    return {
+        "status": "verified", "candidate_sha": candidate_sha,
+        "build_sha256": _tree(SITE_FILES),
+        "files": {path: hashlib.sha256(raw).hexdigest() for path, raw in SITE_FILES.items()},
+    }
 
 
 def _git(repo: Path, *args: str) -> str:
@@ -72,8 +88,9 @@ def _site_repo(tmp_path: Path) -> tuple[Path, str, str]:
 
 
 def _site_receipt(source_sha: str) -> dict[str, object]:
+    archive = _tar(SITE_SOURCE_FILES)
     return {
-        "format": "stocks-native-sites-release-v2",
+        "format": "stocks-native-sites-release-v3",
         "captured_at": datetime.now(UTC).isoformat(timespec="seconds").replace("+00:00", "Z"),
         "trust_domain": "codex-native-sites-connector",
         "site": {
@@ -90,7 +107,7 @@ def _site_receipt(source_sha: str) -> dict[str, object]:
         "retained_prior_version": {
             "id": "appgver_prior", "version_number": 4,
             "deployment_id": "appgdep_prior",
-            "archive_content_hash": "sha256:" + "d" * 64,
+            "archive_content_hash": "sha256:" + hashlib.sha256(archive).hexdigest(),
             "rollback_eligible": True,
         },
         "active_version": {
@@ -98,12 +115,12 @@ def _site_receipt(source_sha: str) -> dict[str, object]:
             "version_number": 5,
             "source_commit_sha": source_sha,
             "archive_format": "tar",
-            "archive_content_hash": "sha256:" + "a" * 64,
+            "archive_content_hash": "sha256:" + hashlib.sha256(archive).hexdigest(),
             "archive_files": {path: hashlib.sha256(raw).hexdigest()
                 for path, raw in SITE_SOURCE_FILES.items()},
             "archive_tree_sha256": _tree(SITE_SOURCE_FILES),
             "file_count": len(SITE_SOURCE_FILES),
-            "size_bytes": 512000,
+            "size_bytes": sum(len(raw) for raw in SITE_SOURCE_FILES.values()),
         },
         "active_deployment": {
             "id": "appgdep_test",
@@ -117,12 +134,22 @@ def _site_receipt(source_sha: str) -> dict[str, object]:
             "build_sha256": _tree(SITE_FILES),
             "files": {path: hashlib.sha256(raw).hexdigest() for path, raw in SITE_FILES.items()},
         },
+        "archive_captures": {
+            name: {
+                "version_id": "appgver_test" if name == "active" else "appgver_prior",
+                "capture_method": "owner_authenticated_native_connector",
+                "content_base64": base64.b64encode(archive).decode(),
+            }
+            for name in ("active", "prior")
+        },
         "live_bundle": {
             "files": [{
                 "path": path,
                 "url": SITE_URL + ("/" if path == "index.html" else "/" + path),
                 "sha256": hashlib.sha256(raw).hexdigest(),
                 "bytes": len(raw),
+                "capture_method": "owner_authenticated_native_connector",
+                "content_base64": base64.b64encode(raw).decode(),
             } for path, raw in SITE_FILES.items() if not path.startswith("_")],
             "supabase_project_ref": PROJECT_REF,
             "dashboard_api_url": API_URL,
@@ -136,7 +163,7 @@ def test_native_site_receipt_accepts_docs_only_descendant_and_rejects_web_drift(
     repo, source_sha, candidate_sha = _site_repo(tmp_path)
     verified = validate_native_site_receipt(
         _site_receipt(source_sha), candidate_sha, PROJECT_REF, repo,
-        live_reader=_site_live_reader,
+        protected_build_receipt=_site_build_receipt(candidate_sha),
     )
     assert verified["status"] == "verified"
     assert verified["version_number"] == 5
@@ -145,10 +172,11 @@ def test_native_site_receipt_accepts_docs_only_descendant_and_rejects_web_drift(
     (repo / "apps/web/src/main.tsx").write_text("export const app = 'changed';\n")
     _git(repo, "add", "apps/web/src/main.tsx")
     _git(repo, "commit", "-qm", "web drift")
+    drift_sha = _git(repo, "rev-parse", "HEAD")
     with pytest.raises(RuntimeError, match="Site source differs"):
         validate_native_site_receipt(
-            _site_receipt(source_sha), _git(repo, "rev-parse", "HEAD"), PROJECT_REF, repo,
-            live_reader=_site_live_reader,
+            _site_receipt(source_sha), drift_sha, PROJECT_REF, repo,
+            protected_build_receipt=_site_build_receipt(drift_sha),
         )
 
 
@@ -160,7 +188,8 @@ def test_native_site_receipt_rejects_any_non_owner_access(tmp_path):
     receipt["site"]["external_visitor_count"] = 1
     with pytest.raises(RuntimeError, match="owner-only"):
         validate_native_site_receipt(
-            receipt, candidate_sha, PROJECT_REF, repo, live_reader=_site_live_reader,
+            receipt, candidate_sha, PROJECT_REF, repo,
+            protected_build_receipt=_site_build_receipt(candidate_sha),
         )
 
 
@@ -172,14 +201,16 @@ def test_native_site_receipt_rejects_stale_or_wrong_backend_binding(tmp_path):
     stale["captured_at"] = (datetime.now(UTC) - timedelta(hours=25)).isoformat().replace("+00:00", "Z")
     with pytest.raises(RuntimeError, match="fresh"):
         validate_native_site_receipt(
-            stale, candidate_sha, PROJECT_REF, repo, live_reader=_site_live_reader,
+            stale, candidate_sha, PROJECT_REF, repo,
+            protected_build_receipt=_site_build_receipt(candidate_sha),
         )
 
     wrong_backend = _site_receipt(source_sha)
     wrong_backend["live_bundle"]["supabase_project_ref"] = "q" * 20
     with pytest.raises(RuntimeError, match="backend"):
         validate_native_site_receipt(
-            wrong_backend, candidate_sha, PROJECT_REF, repo, live_reader=_site_live_reader,
+            wrong_backend, candidate_sha, PROJECT_REF, repo,
+            protected_build_receipt=_site_build_receipt(candidate_sha),
         )
 
 
@@ -192,14 +223,46 @@ def test_native_site_receipt_rejects_forged_hashes_and_missing_rollback_version(
     forged["live_bundle"]["files"][0]["sha256"] = "1" * 64
     with pytest.raises(RuntimeError, match="candidate build|live-bundle"):
         validate_native_site_receipt(
-            forged, candidate_sha, PROJECT_REF, repo, live_reader=_site_live_reader,
+            forged, candidate_sha, PROJECT_REF, repo,
+            protected_build_receipt=_site_build_receipt(candidate_sha),
         )
 
     missing_prior = _site_receipt(source_sha)
     missing_prior["retained_prior_version"]["rollback_eligible"] = False
     with pytest.raises(RuntimeError, match="prior version"):
         validate_native_site_receipt(
-            missing_prior, candidate_sha, PROJECT_REF, repo, live_reader=_site_live_reader,
+            missing_prior, candidate_sha, PROJECT_REF, repo,
+            protected_build_receipt=_site_build_receipt(candidate_sha),
+        )
+
+
+def test_native_site_receipt_rejects_self_declared_archive_hashes(tmp_path):
+    from scripts.attest_existing_v1_runtime import validate_native_site_receipt
+
+    repo, source_sha, candidate_sha = _site_repo(tmp_path)
+    receipt = _site_receipt(source_sha)
+    forged_hash = "sha256:" + "7" * 64
+    receipt["active_version"]["archive_content_hash"] = forged_hash
+    receipt["retained_prior_version"]["archive_content_hash"] = forged_hash
+
+    with pytest.raises(RuntimeError, match="archive capture digest"):
+        validate_native_site_receipt(
+            receipt, candidate_sha, PROJECT_REF, repo,
+            protected_build_receipt=_site_build_receipt(candidate_sha),
+        )
+
+
+def test_native_site_receipt_rejects_self_declared_build_without_protected_receipt(tmp_path):
+    from scripts.attest_existing_v1_runtime import validate_native_site_receipt
+
+    repo, source_sha, candidate_sha = _site_repo(tmp_path)
+    forged = _site_build_receipt(candidate_sha)
+    forged["build_sha256"] = "8" * 64
+
+    with pytest.raises(RuntimeError, match="protected build receipt"):
+        validate_native_site_receipt(
+            _site_receipt(source_sha), candidate_sha, PROJECT_REF, repo,
+            protected_build_receipt=forged,
         )
 
 
@@ -207,10 +270,12 @@ def test_native_site_receipt_rejects_live_bytes_that_differ_from_candidate(tmp_p
     from scripts.attest_existing_v1_runtime import validate_native_site_receipt
 
     repo, source_sha, candidate_sha = _site_repo(tmp_path)
+    receipt = _site_receipt(source_sha)
+    receipt["live_bundle"]["files"][0]["content_base64"] = base64.b64encode(b"tampered").decode()
     with pytest.raises(RuntimeError, match="live bytes"):
         validate_native_site_receipt(
-            _site_receipt(source_sha), candidate_sha, PROJECT_REF, repo,
-            live_reader=lambda _url: b"tampered",
+            receipt, candidate_sha, PROJECT_REF, repo,
+            protected_build_receipt=_site_build_receipt(candidate_sha),
         )
 
 
