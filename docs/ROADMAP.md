@@ -284,7 +284,9 @@ status:
    authorization, plus bounded theme history and next-run research nominations.
 5. **Complete locally:** thematic, held-out-sector, adversarial, restart, quota, recovery, capacity,
    and 2026–2028 NYSE calendar acceptance. Exact-code Sol and flagship reviews are CLEAN at
-   `f7e8236`. **Pending:** protected CI.
+   `f7e8236`. PR #35's first protected CI exposed a missing test-only `pglast` lock entry; `b789e0e`
+   corrected the hash-locked requirements and passed a clean-environment reproduction. **Pending:**
+   corrected-head review and protected CI.
 6. **Pending production:** protected backend release/readback, separate exact-candidate native Sites
    publication with fresh direct connector and live-file proof, retained prior-version proof, then normal scheduled operational and capability receipts before V1-C3 and
    the final V1 checklist close.

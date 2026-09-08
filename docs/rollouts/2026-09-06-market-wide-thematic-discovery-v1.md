@@ -12,8 +12,9 @@ production mutation. Production checkpoints remain open until the evidence below
 - Plan base: `17cbe10` on `origin/main`.
 - Locally reviewed Tasks 1–10 boundary: `18386b5c76c7a7aa8b3eeda870b12d3aba2399e1`.
 - Final reviewed executable-code boundary: `f7e823680d406b3bcfd4832352405dd16937005c`.
-- The release-candidate commit adds only the reconciled status records after that boundary. Its exact
-  SHA must be captured in protected CI and release receipts.
+- Release-candidate descendants add reconciled status records and the test-only locked-dependency
+  correction at `b789e0e` after that boundary. Their exact final head must be captured in protected
+  CI and release receipts.
 - Product boundary: owner-only, suggestion-only, brokerage-free, and zero incremental cost.
 - Market claim: bounded cross-sector discovery. `complete_market_coverage` is always `false`.
 - Alert V3 remains disabled and shadow-only.
@@ -58,6 +59,13 @@ That gate contains **2,032 passing checks**. Sol replayed the planned-window, GD
 non-GDELT plan-inflation attacks; all rejected. Sol and the independent flagship review returned
 CLEAN on the exact code boundary, including producer/verifier capacity agreement in all four phases.
 This local evidence does not close protected release, native Site, or scheduled receipt gates.
+
+The first PR #35 workflow run `34267466157` failed before executing the consolidated suite because
+`pglast`, imported by six SQL test modules, was not declared in the committed locked test
+requirements. Commit `b789e0e` adds `pglast==8.4` and its complete universal wheel hash set. A fresh
+Python 3.14 virtual environment installed that lock with hash and binary-only enforcement, then all
+72 tests from the six affected modules and all 96 focused V1 verifier tests passed. This correction
+does not change runtime behavior and still requires a clean final-head review plus protected CI.
 
 ## Additive migration boundary
 

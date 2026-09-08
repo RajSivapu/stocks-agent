@@ -30,9 +30,14 @@ hardening gate then passed Python 1,541 passed/3 skipped/4 credentialed tests de
 Deno 334, package tests 7 + 53, and Playwright 24 passed/1 skipped; typecheck, lint, license,
 production build, and bundle checks also passed. That gate contains **2,030 passing checks** and
 covers optional official-source lineage, honest empty reports, quiet intraday terminal outcomes,
-credential-isolated child processes, pre-mutation recovery state, and exact local Site package/build parity while native deployment, access, live-byte, and retained rollback-target proof stay separate. The final release-candidate
-identity is the commit containing this record. Its independent exact-SHA reviews, protected backend
-CI/release identities, direct native Site observation, and normal scheduled receipts remain open.
+credential-isolated child processes, pre-mutation recovery state, and exact local Site package/build parity while native deployment, access, live-byte, and retained rollback-target proof stay separate.
+PR #35 CI run `34267466157` then exposed one hermetic-packaging omission: the SQL parser used by six
+test modules was present locally but absent from `requirements.lock`. Commit `b789e0e` adds `pglast
+8.4` to the declared test inputs and regenerated hash-locked binary-only requirements. A fresh Python
+3.14 environment installed the lock and passed all 72 tests in the six affected modules; the focused
+V1 verifier passed 96/96. Runtime code is unchanged. The corrected PR head still requires independent
+review and protected CI before merge. Protected backend release, direct native Site observation, and
+normal scheduled receipts remain open.
 
 | Task | Reviewed closing commit | Local result |
 |---|---|---|
