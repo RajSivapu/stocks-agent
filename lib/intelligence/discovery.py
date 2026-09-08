@@ -129,6 +129,7 @@ class ValueChainHypothesis:
 @dataclass(frozen=True, slots=True)
 class ReverseDiscoveryTask:
     task_id: str
+    hypothesis_id: str
     event_id: str
     theme_id: str
     role: str
@@ -440,6 +441,7 @@ def build_reverse_discovery_tasks(
         ))
         tasks.append(ReverseDiscoveryTask(
             task_id=identity,
+            hypothesis_id=row.hypothesis_id,
             event_id=event.event_id,
             theme_id=row.theme_id,
             role=row.role,

@@ -87,6 +87,8 @@ UNTRUSTED_DATA_INSTRUCTION = (
 MAX_OUTPUT_BYTES = 96 * 1024
 _OUTPUT_PACKET_BYTES = 72 * 1024
 _MAX_DISCOVERY_TASKS = 100
+_MAX_DYNAMIC_THEME_EVIDENCE = 64
+_MAX_REVERSE_DISCOVERY_EVIDENCE = 32
 
 
 class _CheckpointFailure(RuntimeError):
@@ -1105,6 +1107,12 @@ class IntelligencePipeline:
                 resolved = True
             if resolved:
                 continue
+            bounded_events = detect_events(
+                tuple(event.evidence[:_MAX_REVERSE_DISCOVERY_EVIDENCE]), taxonomy
+            )
+            if len(bounded_events) != 1:
+                raise ValueError("bounded reverse event is not deterministic")
+            event = bounded_events[0]
             hypotheses = expand_value_chain(event, taxonomy)
             rows = list(build_reverse_discovery_tasks(
                 event, hypotheses, max_tasks=min(12, capacity)
@@ -1151,7 +1159,9 @@ class IntelligencePipeline:
                 query={
                     "event_id": row.event_id,
                     "hypothesis": hypothesis,
+                    "hypothesis_id": row.hypothesis_id,
                     "query": row.query_text,
+                    "selection_task_id": row.task_id,
                     "source_item_ids": list(row.dependency_ids)[:32],
                 },
                 window=dict(request_window),
@@ -1170,11 +1180,7 @@ class IntelligencePipeline:
     ) -> None:
         grouped: dict[str, list[SourceItem]] = {}
         task_ids_by_item: dict[str, set[str]] = {}
-        requested_labels: set[str] = set()
         for task, result in task_results:
-            for value in (task.query.get("query"), task.theme_id):
-                if isinstance(value, str) and value.strip():
-                    requested_labels.add(value)
             if result.receipt.status not in {"succeeded", "cache_hit"}:
                 continue
             for raw in result.items:
@@ -1187,16 +1193,50 @@ class IntelligencePipeline:
                     continue
                 grouped.setdefault(label, []).append(item)
                 task_ids_by_item.setdefault(evidence_key(item), set()).add(task.task_id)
-        labels = sorted(grouped)[:50]
+        selected_dependency_ids = tuple(sorted({
+            task_id
+            for source_id in task_ids_by_item
+            for task_id in task_ids_by_item[source_id]
+        })[:32])
+        selected_dependency_id_set = set(selected_dependency_ids)
+        eligible_source_ids_by_label = {
+            label: sorted({
+                evidence_key(item) for item in items
+                if task_ids_by_item.get(evidence_key(item), set())
+                & selected_dependency_id_set
+            })
+            for label, items in grouped.items()
+        }
+        labels = sorted(
+            label for label, source_ids in eligible_source_ids_by_label.items()
+            if source_ids
+        )[:50]
         if not labels:
             return
+        bounded: dict[str, tuple[SourceItem, ...]] = {}
+        source_ids_truncated = 0
+        for label in labels:
+            distinct = {evidence_key(item): item for item in grouped[label]}
+            eligible_ids = eligible_source_ids_by_label[label]
+            retained_ids = eligible_ids[:_MAX_DYNAMIC_THEME_EVIDENCE]
+            bounded[label] = tuple(distinct[source_id] for source_id in retained_ids)
+            source_ids_truncated += len(distinct) - len(retained_ids)
+        task_by_id = {task.task_id: task for task, _result in task_results}
+        requested_labels = sorted({
+            value
+            for task_id in selected_dependency_ids
+            for value in (
+                task_by_id[task_id].query.get("query"), task_by_id[task_id].theme_id,
+            )
+            if isinstance(value, str) and value.strip()
+        })
         coverage_label = "bounded sources: " + ",".join(sorted({
-            item.provider for label in labels for item in grouped[label]
+            item.provider for label in labels for item in bounded[label]
         }))
         proposals = tuple(
             propose_dynamic_theme(
                 label,
-                grouped[label],
+                bounded[label],
                 coverage_label=coverage_label,
                 requested_labels=requested_labels,
             )
@@ -1209,12 +1249,14 @@ class IntelligencePipeline:
             task_id
             for source_id in source_ids
             for task_id in task_ids_by_item.get(source_id, ())
-        }))[:32]
+            if task_id in selected_dependency_id_set
+        }))
         task = DiscoveryTask(
             task_id=_uuid(
                 "dynamic-theme-evaluation", run_id,
                 hashlib.sha256(_canonical({
-                    "labels": labels, "source_ids": source_ids,
+                    "labels": labels, "requested_labels": requested_labels,
+                    "source_ids": source_ids,
                 }).encode()).hexdigest(),
             ),
             stage="signals",
@@ -1222,7 +1264,10 @@ class IntelligencePipeline:
             capability_id="dynamic_theme_evaluation",
             query_kind="theme_search",
             theme_id=None,
-            query={"query": "dynamic-theme-evaluation", "labels": labels},
+            query={
+                "query": "dynamic-theme-evaluation", "labels": labels,
+                "requested_labels": requested_labels,
+            },
             window={
                 "start": request_window["start"],
                 "end": request_window["end"],
@@ -1288,7 +1333,9 @@ class IntelligencePipeline:
                 "episode_count": len(episode_rows),
                 "labels_truncated": max(0, len(grouped) - len(labels)),
                 "proposals": result_rows,
+                "requested_labels": requested_labels,
                 "research_state": "observed" if episode_rows else "unresolved",
+                "source_ids_truncated": source_ids_truncated,
             },
         )
         persisted[task.task_id] = self._checkpoint_discovery_task(
@@ -1871,6 +1918,7 @@ class IntelligencePipeline:
         hypothesis = task.query.get("hypothesis")
         if task.stage == "resolve" and isinstance(hypothesis, Mapping):
             terminal_result["hypothesis"] = dict(hypothesis)
+            terminal_result["reverse_descriptor"] = dict(task.query)
         terminal = self._task_row(
             task,
             state=terminal_state,

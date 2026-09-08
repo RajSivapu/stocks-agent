@@ -33,7 +33,7 @@ official-source collection and cursors, ticker-free event/entity resolution, bou
 exposure enrichment, explicit screen feasibility, separate research/suitability/action lanes, theme
 memory and research nominations, a release-blocking capability verifier, and one canonical NYSE
 calendar through 2028. The local acceptance gate passed; no protected release or scheduled run was
-triggered. The final corrected release-candidate gate passed 2,028 checks, with only documented skips and
+triggered. The final corrected release-candidate gate passed 2,030 checks, with only documented skips and
 credentialed test deselections. See `docs/rollouts/2026-09-06-market-wide-thematic-discovery-v1.md`
 for the exact boundary.
 

@@ -36,7 +36,7 @@ An owner-only personal stock agent that uses zero-incremental-cost data sources,
   package tests 7 + 53, and Playwright 24; 3 Python and 1 Playwright tests skipped, with 4
   credentialed database tests intentionally deselected; typecheck, lint, license, build, and bundle
   checks also passed
-- [x] September 8 release-hardening gate passed: **2,028 checks** — Python 1,539, Node 71,
+- [x] September 8 release-hardening gate passed: **2,030 checks** — Python 1,541, Node 71,
   Deno 334, package tests 7 + 53, and Playwright 24; 3 Python and 1 Playwright tests skipped, with
   4 credentialed database tests intentionally deselected; typecheck, lint, license, production
   build, and bundle checks also passed

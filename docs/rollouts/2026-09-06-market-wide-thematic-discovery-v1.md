@@ -43,9 +43,9 @@ gate passed Python 1,509 tests with 3 skipped and 4 credentialed tests deselecte
 package tests 7 + 53, and Playwright 24 with 1 skipped; typecheck, lint, license, build, and bundle
 also passed. That final gate contains 1,997 passing checks.
 After the final Sol/Astra findings were corrected, the September 8 release-hardening gate passed
-Python 1,539 tests with 3 skipped and 4 credentialed tests deselected, Node 71, Deno 334, package
+Python 1,541 tests with 3 skipped and 4 credentialed tests deselected, Node 71, Deno 334, package
 tests 7 + 53, and Playwright 24 with 1 skipped. Typecheck, lint, license, production build, and
-bundle checks passed. That gate contains **2,028 passing checks**. It directly covers optional
+bundle checks passed. That gate contains **2,030 passing checks**. It directly covers optional
 official-source research lineage, honest empty reports, quiet intraday terminal outcomes,
 credential-isolated release subprocesses, durable preparation evidence before planning/capture, and
 local Site package/protected-build parity without treating copied JSON as connector proof.

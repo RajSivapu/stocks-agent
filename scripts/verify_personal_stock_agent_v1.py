@@ -20,9 +20,17 @@ from typing import Callable, Mapping, Protocol, runtime_checkable
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 from lib.config import load_settings
+from lib.intelligence.cursors import SourceCursor
+from lib.intelligence.discovery import detect_events, load_theme_taxonomy
+from lib.intelligence.normalize import SourceItem, _claim_polarity
 from lib.intelligence.planner import load_source_capabilities
 from lib.intelligence.policy import load_intelligence_policy
-from lib.intelligence.themes import theme_fingerprint
+from lib.intelligence.themes import (
+    evidence_key,
+    propose_dynamic_theme,
+    source_dynamic_theme_label,
+    theme_fingerprint,
+)
 from scripts.export_recovery_bundle import (
     _ENRICHMENT_PHASE_ENVELOPES,
     _ENRICHMENT_QUERY_CONTRACTS,
@@ -37,6 +45,110 @@ MAX_SCHEDULED_RECEIPT_AGE_SECONDS = 7 * 24 * 60 * 60
 SHA = re.compile(r"[0-9a-f]{40}")
 UUID = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}")
 FUNCTIONS = ("market-briefing-gateway", "owner-dashboard-api", "telegram-portfolio")
+
+
+def _configured_query_label(
+    task: Mapping[str, object], registry: Mapping[str, object]
+) -> str | None:
+    result = task.get("result")
+    reverse = result.get("reverse_descriptor") if isinstance(result, Mapping) else None
+    if isinstance(reverse, Mapping):
+        value = reverse.get("query")
+        return value if isinstance(value, str) and value.strip() else None
+    capability = registry.get(str(task.get("capability_id")))
+    pack = getattr(capability, "query_pack", None)
+    if not isinstance(pack, Mapping):
+        return None
+    if getattr(capability, "query_kind", None) == "theme_search":
+        themes = pack.get("themes")
+        theme_id = task.get("theme_id")
+        if theme_id is None and isinstance(result, Mapping):
+            theme_id = result.get("theme_id")
+        query = themes.get(theme_id) if isinstance(themes, Mapping) else None
+    else:
+        query = pack.get("default")
+    value = query.get("query") if isinstance(query, Mapping) else None
+    return value if isinstance(value, str) and value.strip() else None
+
+
+def _valid_request_cursor(value: object, *, provider: str, capability_id: str) -> bool:
+    try:
+        cursor = SourceCursor.from_mapping(value)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return False
+    return (
+        cursor.provider == provider
+        and cursor.capability_id == capability_id
+        and cursor.to_mapping() == value
+    )
+
+
+def _expected_requested_labels(
+    dependencies: list[str],
+    tasks: Mapping[str, Mapping[str, object]],
+) -> list[str]:
+    registry = load_source_capabilities()
+    values: set[str] = set()
+    for task_id in dependencies:
+        task = tasks[task_id]
+        result = task.get("result")
+        theme_id = task.get("theme_id")
+        if theme_id is None and isinstance(result, Mapping):
+            theme_id = result.get("theme_id")
+        for value in (_configured_query_label(task, registry), theme_id):
+            if isinstance(value, str) and value.strip():
+                values.add(value)
+    return sorted(values)
+
+
+def _expected_reverse_descriptor(
+    task: Mapping[str, object], descriptor: Mapping[str, object]
+) -> tuple[dict[str, object], str]:
+    event_id = descriptor.get("event_id")
+    hypothesis_id = descriptor.get("hypothesis_id")
+    query = descriptor.get("query")
+    result = task.get("result")
+    theme_id = task.get("theme_id")
+    if theme_id is None and isinstance(result, Mapping):
+        theme_id = result.get("theme_id")
+    taxonomy = load_theme_taxonomy()
+    theme = taxonomy.themes.get(str(theme_id))
+    require(
+        isinstance(event_id, str) and UUID.fullmatch(event_id) is not None
+        and isinstance(hypothesis_id, str) and UUID.fullmatch(hypothesis_id) is not None
+        and isinstance(query, str) and 1 <= len(query) <= 2_000
+        and theme is not None,
+        "discovery reverse selection descriptor is invalid",
+    )
+    matching = []
+    for edge in theme.value_chain:
+        expected_hypothesis_id = str(uuid.uuid5(
+            uuid.NAMESPACE_URL,
+            f"value-chain:{event_id}:{theme_id}:{edge.edge_id}",
+        ))
+        terms = tuple(dict.fromkeys((*edge.query_terms[:3], *theme.synonyms[:1])))
+        expected_query = "(" + " OR ".join(
+            f'"{term}"' if " " in term else term for term in terms
+        ) + ")"
+        if hypothesis_id == expected_hypothesis_id and query == expected_query:
+            matching.append({
+                "adverse_path": edge.adverse_path,
+                "direction": edge.direction,
+                "evidence_requirement": edge.evidence_requirement,
+                "exposure_supported": False,
+                "geography": edge.geography,
+                "horizon": edge.horizon,
+                "invalidation_rule": edge.invalidation_rule,
+                "role": edge.role,
+                "status": "hypothesis",
+            })
+    require(len(matching) == 1,
+            "discovery reverse selection descriptor does not match the taxonomy")
+    selection_task_id = str(uuid.uuid5(
+        uuid.NAMESPACE_URL,
+        f"reverse-discovery:{event_id}:{hypothesis_id}:{query}",
+    ))
+    return matching[0], selection_task_id
 
 
 def _authorized_dynamic_task_ids(
@@ -213,11 +325,15 @@ def _authorized_dynamic_task_ids(
             and task.get("theme_id") is None
             and isinstance(result, Mapping) and set(result) == {
                 "episode_count", "labels_truncated", "proposals", "research_state",
+                "requested_labels", "source_ids_truncated",
             }
             and isinstance(proposals, list) and 1 <= len(proposals) <= 50
+            and _sorted_unique_strings(result.get("requested_labels"), maximum=200)
             and type(result.get("episode_count")) is int
             and type(result.get("labels_truncated")) is int
-            and result["labels_truncated"] >= 0,
+            and result["labels_truncated"] >= 0
+            and type(result.get("source_ids_truncated")) is int
+            and 0 <= result["source_ids_truncated"] <= 2_000,
             "discovery dynamic theme task is invalid",
         )
         labels: list[str] = []
@@ -262,7 +378,9 @@ def _authorized_dynamic_task_ids(
         require(labels == sorted(set(labels)),
                 "discovery dynamic theme labels are invalid or duplicated")
         selector_hash = sha256(canonical_json({
-            "labels": labels, "source_ids": sorted(all_source_ids),
+            "labels": labels,
+            "requested_labels": result["requested_labels"],
+            "source_ids": sorted(all_source_ids),
         }).encode())
         expected_id = str(uuid.uuid5(
             uuid.NAMESPACE_URL,
@@ -270,7 +388,10 @@ def _authorized_dynamic_task_ids(
         ))
         query_hash = sha256(canonical_json({
             "capability_id": "dynamic_theme_evaluation",
-            "query": {"query": "dynamic-theme-evaluation", "labels": labels},
+            "query": {
+                "query": "dynamic-theme-evaluation", "labels": labels,
+                "requested_labels": result["requested_labels"],
+            },
             "cursor": None, "requested_window": task.get("requested_window"),
             "theme_id": None,
         }).encode())
@@ -282,6 +403,9 @@ def _authorized_dynamic_task_ids(
             and dependencies == sorted(set(dependencies))
             and set(dependencies) <= (planned_ids | (dynamic_ids - enrichment_ids - dynamic_theme_ids))
             and all(tasks[dependency].get("state") == "succeeded" for dependency in dependencies)
+            and result["requested_labels"] == _expected_requested_labels(
+                dependencies, tasks
+            )
             and result.get("episode_count") == len(eligible_by_theme) == len(task_episodes)
             and result.get("research_state") == (
                 "observed" if task_episodes else "unresolved"
@@ -323,31 +447,209 @@ def _authorized_dynamic_task_ids(
     for task_id in reverse_ids:
         task = tasks[task_id]
         dependencies = task.get("dependency_ids")
-        hypothesis = task.get("result", {}).get("hypothesis") \
-            if isinstance(task.get("result"), Mapping) else None
+        result = task.get("result")
+        hypothesis = result.get("hypothesis") if isinstance(result, Mapping) else None
+        descriptor = result.get("reverse_descriptor") \
+            if isinstance(result, Mapping) else None
+        descriptor_keys = {
+            "event_id", "hypothesis", "hypothesis_id", "query",
+            "selection_task_id", "source_item_ids",
+        }
+        require(
+            isinstance(descriptor, Mapping) and set(descriptor) == descriptor_keys,
+            "discovery reverse selection descriptor is invalid",
+        )
+        expected_hypothesis, expected_selection_task_id = _expected_reverse_descriptor(
+            task, descriptor
+        )
+        source_item_ids = descriptor.get("source_item_ids")
+        request_cursor = result.get("request_cursor") if isinstance(result, Mapping) else None
+        reverse_theme_id = result.get("theme_id") if isinstance(result, Mapping) else None
+        expected_query_hash = sha256(canonical_json({
+            "capability_id": "gdelt_theme_search",
+            "query": dict(descriptor),
+            "cursor": request_cursor,
+            "requested_window": task.get("requested_window"),
+            "theme_id": reverse_theme_id,
+        }).encode())
         require(
             task.get("stage") == "resolve" and task.get("provider") == "gdelt"
             and task.get("capability_id") == "gdelt_theme_search"
             and task.get("query_kind") == "theme_search"
-            and isinstance(task.get("query_hash"), str)
-            and re.fullmatch(r"[0-9a-f]{64}", task["query_hash"]) is not None
+            and task.get("query_hash") == expected_query_hash
+            and _valid_request_cursor(
+                request_cursor, provider="gdelt", capability_id="gdelt_theme_search"
+            )
             and isinstance(dependencies, list) and 1 <= len(dependencies) <= 32
             and dependencies == sorted(set(dependencies))
             and set(dependencies) <= planned_ids
             and all(tasks[dependency].get("state") == "succeeded" for dependency in dependencies)
-            and (
-                task.get("state") == "uncertain" and hypothesis is None
-                or isinstance(hypothesis, Mapping)
-                and set(hypothesis) == {
-                    "adverse_path", "direction", "evidence_requirement", "exposure_supported",
-                    "geography", "horizon", "invalidation_rule", "role", "status",
-                }
-                and hypothesis.get("exposure_supported") is False
-                and hypothesis.get("status") == "hypothesis"
-            ),
+            and _sorted_unique_strings(source_item_ids, maximum=32)
+            and bool(source_item_ids)
+            and all(UUID.fullmatch(source_id) is not None for source_id in source_item_ids)
+            and descriptor.get("selection_task_id") == expected_selection_task_id
+            and task_id == str(uuid.uuid5(
+                uuid.NAMESPACE_URL,
+                f"market-intelligence:reverse-discovery-task:{run_id}:"
+                f"{expected_selection_task_id}",
+            ))
+            and descriptor.get("hypothesis") == expected_hypothesis == hypothesis,
             "discovery reverse task lineage is invalid",
         )
     return dynamic_ids
+
+
+def _verified_source_item(
+    source_id: str,
+    source_items: Mapping[object, Mapping[str, object]],
+    persisted_receipts: Mapping[object, Mapping[str, object]],
+) -> SourceItem:
+    row = source_items.get(source_id)
+    require(isinstance(row, Mapping), "discovery adaptive source item is missing")
+    metadata = row.get("metadata")
+    receipt = persisted_receipts.get(row.get("source_receipt_id"))
+    require(
+        isinstance(metadata, Mapping) and isinstance(receipt, Mapping)
+        and isinstance(row.get("canonical_content"), str)
+        and sha256(row["canonical_content"].encode()) == row.get("content_hash"),
+        "discovery adaptive source metadata or receipt is missing",
+    )
+    published = timestamp(row["published_at"]) if row.get("published_at") is not None else None
+    effective = timestamp(row["effective_at"]) if row.get("effective_at") is not None else None
+    retrieved = timestamp(receipt.get("retrieved_at"))
+    item = SourceItem(
+        provider=str(row.get("provider")),
+        upstream_item_id=(
+            str(row["upstream_item_id"])
+            if row.get("upstream_item_id") is not None else None
+        ),
+        canonical_url=str(row.get("canonical_url") or ""),
+        title=str(row.get("title") or ""),
+        summary=str(row.get("normalized_text") or ""),
+        canonical_content=str(row.get("canonical_content") or ""),
+        content_hash=str(row.get("content_hash") or ""),
+        published_at=published,
+        effective_at=effective,
+        retrieved_at=retrieved,
+        authority="verified_source",
+        metadata=dict(metadata),
+        claim_polarity=_claim_polarity(
+            str(row.get("title") or ""),
+            str(row.get("normalized_text") or ""),
+            metadata,
+        ),
+    )
+    require(evidence_key(item) == source_id,
+            "discovery adaptive source identity is inconsistent")
+    return item
+
+
+def _verify_dynamic_theme_semantics(
+    receipt: Mapping[str, object],
+    *,
+    run_id: str,
+    tasks: Mapping[str, Mapping[str, object]],
+    source_items: Mapping[object, Mapping[str, object]],
+    persisted_receipts: Mapping[object, Mapping[str, object]],
+) -> None:
+    episode_rows = receipt.get("theme_episode_revisions", [])
+    require(isinstance(episode_rows, list),
+            "discovery dynamic theme episode evidence is invalid")
+    for task_id, task in tasks.items():
+        if task.get("capability_id") != "dynamic_theme_evaluation":
+            continue
+        result = task["result"]
+        proposals = result["proposals"]
+        requested_labels = result["requested_labels"]
+        source_ids = sorted({
+            source_id for proposal in proposals for source_id in proposal["source_ids"]
+        })
+        verified = {
+            source_id: _verified_source_item(
+                source_id, source_items, persisted_receipts
+            )
+            for source_id in source_ids
+        }
+        coverage_label = "bounded sources: " + ",".join(sorted({
+            item.provider for item in verified.values()
+        }))
+        expected_proposals = []
+        eligible = {}
+        for proposal in proposals:
+            evidence = tuple(verified[source_id] for source_id in proposal["source_ids"])
+            require(
+                all(source_dynamic_theme_label(item.title) == proposal["label"]
+                    for item in evidence),
+                "discovery dynamic theme label is not source-derived",
+            )
+            expected = propose_dynamic_theme(
+                proposal["label"], evidence,
+                coverage_label=coverage_label,
+                requested_labels=requested_labels,
+            )
+            expected_row = {
+                "eligible": expected.eligible,
+                "fingerprint": expected.fingerprint,
+                "label": expected.label,
+                "missing_reasons": list(expected.missing_reasons),
+                "research_state": "observed" if expected.eligible else "unresolved",
+                "source_ids": sorted(evidence_key(item) for item in expected.evidence),
+                "theme_id": expected.theme_id,
+            }
+            expected_proposals.append(expected_row)
+            if expected.eligible:
+                eligible[expected.theme_id] = (expected, expected_row)
+        require(
+            proposals == expected_proposals
+            and result["episode_count"] == len(eligible)
+            and result["research_state"] == ("observed" if eligible else "unresolved"),
+            "discovery dynamic theme eligibility is not source-derived",
+        )
+        task_episodes = [row for row in episode_rows if row.get("task_id") == task_id]
+        episodes_by_theme = {row.get("theme_id"): row for row in task_episodes}
+        require(len(episodes_by_theme) == len(task_episodes) == len(eligible),
+                "discovery dynamic theme episode coverage is invalid")
+        for theme_id, (proposal, proposal_row) in eligible.items():
+            row = episodes_by_theme.get(theme_id)
+            require(isinstance(row, Mapping),
+                    "discovery dynamic theme episode is missing")
+            observed = min(
+                item.published_at or item.effective_at or item.retrieved_at
+                for item in proposal.evidence
+            )
+            valid_from = observed.astimezone(timezone.utc).isoformat(
+                timespec="milliseconds"
+            ).replace("+00:00", "Z")
+            episode = {
+                "coverage_label": coverage_label,
+                "fingerprint": proposal.fingerprint,
+                "label": proposal.label,
+                "missing_reasons": [],
+                "research_state": "observed",
+            }
+            semantic = {
+                "theme_id": theme_id,
+                "revision": 1,
+                "episode": episode,
+                "source_ids": proposal_row["source_ids"],
+                "valid_from": valid_from,
+                "valid_to": None,
+            }
+            content_hash = sha256(canonical_json(semantic).encode())
+            require(
+                row.get("run_id") == run_id and row.get("task_id") == task_id
+                and row.get("theme_id") == theme_id and row.get("revision") == 1
+                and row.get("episode") == episode
+                and row.get("source_ids") == proposal_row["source_ids"]
+                and timestamp(row.get("valid_from")) == timestamp(valid_from)
+                and row.get("valid_to") is None
+                and row.get("content_hash") == content_hash
+                and row.get("id") == str(uuid.uuid5(
+                    uuid.NAMESPACE_URL,
+                    f"market-intelligence:theme-episode:{content_hash}",
+                )),
+                "discovery dynamic theme episode semantic lineage is invalid",
+            )
 
 
 @dataclass(frozen=True, slots=True)
@@ -856,6 +1158,8 @@ def _verify_discovery_capability(receipt: Mapping[str, object]) -> VerificationR
                     and isinstance(item_id, str) and UUID.fullmatch(item_id)
                     and isinstance(item.get("content_hash"), str)
                     and re.fullmatch(r"[0-9a-f]{64}", item["content_hash"])
+                    and isinstance(item.get("canonical_content"), str)
+                    and sha256(item["canonical_content"].encode()) == item["content_hash"]
                     and item_id == str(uuid.uuid5(
                         uuid.NAMESPACE_URL,
                         f"market-source:{item['content_hash']}",
@@ -919,6 +1223,53 @@ def _verify_discovery_capability(receipt: Mapping[str, object]) -> VerificationR
                 and bool(origin_receipts & dependency_receipts),
                 "discovery dynamic theme source lineage is invalid",
             )
+
+    _verify_dynamic_theme_semantics(
+        receipt,
+        run_id=run_id,
+        tasks=tasks,
+        source_items=source_items,
+        persisted_receipts=persisted_receipts,
+    )
+    for task_id, task in tasks.items():
+        if task_id in planned_id_set or task.get("stage") != "resolve":
+            continue
+        result = task.get("result")
+        descriptor = result.get("reverse_descriptor") if isinstance(result, Mapping) else None
+        if not isinstance(descriptor, Mapping):
+            continue
+        dependencies = task["dependency_ids"]
+        dependency_receipts = {
+            receipt_id_by_task[dependency] for dependency in dependencies
+            if dependency in receipt_id_by_task
+        }
+        reverse_source_ids = descriptor["source_item_ids"]
+        require(len(dependency_receipts) == len(dependencies),
+                "discovery reverse source tasks lack verified receipts")
+        reverse_items = []
+        for source_id in reverse_source_ids:
+            origin_receipts = {
+                str(row.get("source_receipt_id")) for row in run_items
+                if row.get("run_id") == run_id and row.get("source_item_id") == source_id
+                and row.get("disposition") in {"accepted", "near_duplicate"}
+            } | {
+                str(row.get("receipt_id")) for row in duplicate_references
+                if row.get("item_id") == source_id
+            }
+            require(bool(origin_receipts & dependency_receipts),
+                    "discovery reverse source lineage is invalid")
+            reverse_items.append(_verified_source_item(
+                source_id, source_items, persisted_receipts
+            ))
+        events = detect_events(tuple(reverse_items), load_theme_taxonomy())
+        matching_events = [
+            event for event in events
+            if event.event_id == descriptor.get("event_id")
+            and sorted(evidence_key(item) for item in event.evidence)
+                == reverse_source_ids
+        ]
+        require(len(matching_events) == 1,
+                "discovery reverse event is not derived from verified sources")
 
     packet_evidence = packet.get("evidence")
     research = packet.get("research_candidates")

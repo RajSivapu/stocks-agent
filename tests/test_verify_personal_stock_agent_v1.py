@@ -237,6 +237,49 @@ def _rebind_packet_completion(rows):
     )
 
 
+def _reverse_descriptor_for_source(rows, item_id):
+    from lib.intelligence.discovery import (
+        build_reverse_discovery_tasks,
+        detect_events,
+        expand_value_chain,
+        load_theme_taxonomy,
+    )
+
+    source_items = {row["id"]: row for row in rows["source_items"]}
+    source_receipts = {row["id"]: row for row in rows["source_receipts"]}
+    source = release_verifier._verified_source_item(
+        item_id, source_items, source_receipts
+    )
+    taxonomy = load_theme_taxonomy()
+    event = detect_events((source,), taxonomy)[0]
+    selected = build_reverse_discovery_tasks(
+        event, expand_value_chain(event, taxonomy), max_tasks=1,
+    )[0]
+    hypothesis = {
+        "adverse_path": selected.adverse_path,
+        "direction": selected.direction,
+        "evidence_requirement": selected.evidence_requirement,
+        "exposure_supported": False,
+        "geography": selected.geography,
+        "horizon": selected.horizon,
+        "invalidation_rule": selected.invalidation_rule,
+        "role": selected.role,
+        "status": "hypothesis",
+    }
+    descriptor = {
+        "event_id": selected.event_id,
+        "hypothesis": hypothesis,
+        "hypothesis_id": selected.hypothesis_id,
+        "query": selected.query_text,
+        "selection_task_id": selected.task_id,
+        "source_item_ids": list(selected.dependency_ids),
+    }
+    return descriptor, str(uuid.uuid5(
+        uuid.NAMESPACE_URL,
+        f"market-intelligence:reverse-discovery-task:{RUN}:{selected.task_id}",
+    )), selected.theme_id
+
+
 def test_discovery_capability_accepts_receipt_backed_success_empty_for_every_due_task():
     result = _verify_capability(_capability_rows())
 
@@ -486,7 +529,6 @@ def test_discovery_capability_accepts_unresolved_candidate_with_null_reference_l
 
 @pytest.mark.parametrize(("provider", "capability_id", "query_kind", "stage", "lineage", "tamper"), [
     ("white_house", "white_house_fact_sheets", "feed", "signals", "planned", False),
-    ("gdelt", "gdelt_theme_search", "theme_search", "resolve", "reverse", False),
     ("yahoo", "yahoo_security_quote", "quote", "quote", "enrichment", False),
     ("yahoo", "yahoo_security_quote", "quote", "quote", "enrichment", True),
 ])
@@ -519,9 +561,16 @@ def test_discovery_capability_accepts_research_from_authorized_additional_source
         if row["id"] == required_stored["reservation_id"]
     )
 
-    optional_task_id = str(uuid.uuid5(
-        uuid.UUID(RUN), f"additional:{provider}:{capability_id}:{stage}",
-    ))
+    reverse_descriptor = None
+    reverse_theme_id = None
+    if lineage == "reverse":
+        item["metadata"] = {"theme_id": "critical_minerals_magnets"}
+        reverse_descriptor, optional_task_id, reverse_theme_id = \
+            _reverse_descriptor_for_source(rows, item_id)
+    else:
+        optional_task_id = str(uuid.uuid5(
+            uuid.UUID(RUN), f"additional:{provider}:{capability_id}:{stage}",
+        ))
     optional_receipt_id = str(uuid.uuid5(
         uuid.NAMESPACE_URL,
         f"market-intelligence:receipt:{RUN}:{optional_task_id}",
@@ -542,14 +591,22 @@ def test_discovery_capability_accepts_research_from_authorized_additional_source
         source_receipt_id=optional_receipt_id,
     )
     optional_parsed["metadata"]["capability_id"] = capability_id
-    optional_task["result"]["theme_id"] = "macro_and_policy"
+    optional_task["result"]["theme_id"] = reverse_theme_id or "macro_and_policy"
     if lineage == "reverse":
-        optional_task["result"]["hypothesis"] = {
-            "adverse_path": False, "direction": "beneficiary",
-            "evidence_requirement": "named supplier", "exposure_supported": False,
-            "geography": "US", "horizon": "medium", "invalidation_rule": "none",
-            "role": "magnet_supplier", "status": "hypothesis",
-        }
+        from lib.intelligence.cursors import SourceCursor
+
+        optional_task["result"]["hypothesis"] = reverse_descriptor["hypothesis"]
+        optional_task["result"]["reverse_descriptor"] = reverse_descriptor
+        optional_task["result"]["request_cursor"] = SourceCursor(
+            provider="gdelt", capability_id="gdelt_theme_search",
+        ).to_mapping()
+        optional_task["query_hash"] = digest({
+            "capability_id": capability_id,
+            "query": reverse_descriptor,
+            "cursor": optional_task["result"]["request_cursor"],
+            "requested_window": optional_task["requested_window"],
+            "theme_id": reverse_theme_id,
+        })
     optional_stored = copy.deepcopy(required_stored)
     optional_stored.update(
         id=optional_receipt_id, provider=provider,
@@ -683,7 +740,7 @@ def test_discovery_capability_rejects_unplanned_task_without_dynamic_lineage():
     )
     rows["discovery_stage_tasks"].append(forged)
 
-    with pytest.raises(RuntimeError, match="reverse task lineage"):
+    with pytest.raises(RuntimeError, match="reverse (selection descriptor|task lineage)"):
         _verify_capability(rows)
 
 
@@ -697,6 +754,13 @@ def test_discovery_capability_accepts_pipeline_generated_dynamic_theme_task():
     rows = _capability_rows()
     _make_first_required_receipt_nonempty(rows, persist_lineage=True)
     source = rows["source_items"][0]
+    source.update(
+        title="Liquid cooling loop: first deployment",
+        metadata={
+            "item_id": source["id"], "publisher_id": "publisher-a",
+            "upstream_identity": "story-a",
+        },
+    )
     source_task = next(
         row for row in rows["discovery_stage_tasks"]
         if row["result"].get("checkpoint", {}).get("receipt", {}).get(
@@ -705,6 +769,55 @@ def test_discovery_capability_accepts_pipeline_generated_dynamic_theme_task():
     )
     parsed = source_task["result"]["checkpoint"]["receipt"]
     retrieved_at = datetime.fromisoformat(parsed["retrieved_at"].replace("Z", "+00:00"))
+    second_content = "independent liquid cooling evidence"
+    second_hash = hashlib.sha256(second_content.encode()).hexdigest()
+    second_id = str(uuid.uuid5(uuid.NAMESPACE_URL, f"market-source:{second_hash}"))
+    second_run_item_id = str(uuid.uuid5(uuid.UUID(RUN), f"run-item:{second_id}"))
+    second_source = {
+        "id": second_id, "source_receipt_id": source["source_receipt_id"],
+        "provider": "gdelt", "upstream_item_id": "nonempty-2",
+        "canonical_url": "https://second-publisher.example/nonempty-2",
+        "published_at": "2026-09-05T19:36:00Z", "effective_at": None,
+        "title": "Liquid cooling loop: second deployment",
+        "normalized_text": "Independent liquid cooling evidence",
+        "canonical_content": second_content, "content_hash": second_hash,
+        "metadata": {
+            "item_id": second_id, "publisher_id": "publisher-b",
+            "upstream_identity": "story-b",
+        },
+        "created_at": "2026-09-05T19:40:00Z",
+    }
+    rows["source_items"].append(second_source)
+    rows["intelligence_run_items"].append({
+        "id": second_run_item_id, "run_id": RUN, "source_item_id": second_id,
+        "source_receipt_id": source["source_receipt_id"], "disposition": "accepted",
+        "drop_reason": None, "created_at": "2026-09-05T19:40:00Z",
+    })
+    rows["source_item_provenance"].append({
+        "source_item_id": second_id, "provider": "gdelt",
+        "canonical_item_url": second_source["canonical_url"],
+        "request_url": "https://api.gdeltproject.org/api/v2/doc/doc",
+        "retrieved_at": parsed["retrieved_at"], "reporting_at": None,
+        "entity_ids": [], "security_ids": [], "discovery_status": "qualified",
+        "created_at": "2026-09-05T19:40:00Z",
+    })
+    rows["run_source_item_provenance"].append({
+        "run_item_id": second_run_item_id, "run_id": RUN,
+        "source_item_id": second_id, "source_receipt_id": source["source_receipt_id"],
+        "provider": "gdelt",
+        "request_url": "https://api.gdeltproject.org/api/v2/doc/doc",
+        "retrieved_at": parsed["retrieved_at"], "reporting_at": None,
+        "entity_ids": [], "security_ids": [], "discovery_status": "qualified",
+        "created_at": "2026-09-05T19:40:00Z",
+    })
+    for receipt_row in (
+        parsed,
+        next(row for row in rows["source_receipts"]
+             if row["id"] == source["source_receipt_id"]),
+        next(row for row in rows["completions"][0]["payload"]["receipts"]
+             if row["id"] == source["source_receipt_id"]),
+    ):
+        receipt_row.update(returned_count=2, accepted_count=2)
     item = SourceItem(
         provider="gdelt", upstream_item_id=source["upstream_item_id"],
         source_url=source["canonical_url"],
@@ -718,12 +831,21 @@ def test_discovery_capability_accepts_pipeline_generated_dynamic_theme_task():
             "upstream_identity": "story-a",
         }),
     )
+    second_item = SourceItem(
+        provider="gdelt", upstream_item_id=second_source["upstream_item_id"],
+        source_url=second_source["canonical_url"], title=second_source["title"],
+        normalized_text=second_source["normalized_text"],
+        canonical_content=second_content, content_hash=second_hash,
+        published_at=datetime.fromisoformat("2026-09-05T19:36:00+00:00"),
+        effective_at=None, retrieved_at=retrieved_at, authority="radar",
+        metadata=MappingProxyType(second_source["metadata"]),
+    )
     receipt = RequestReceipt(
         provider="gdelt", reservation_id=parsed["reservation_id"], status="succeeded",
         cache_key=parsed["cache_key"], requested_window=parsed["requested_window"],
         requested_limit=20, retrieved_at=retrieved_at, observed_at=retrieved_at,
         expires_at=datetime.fromisoformat(parsed["expires_at"].replace("Z", "+00:00")),
-        request_cost=1, upstream_remaining=None, returned_count=1, accepted_count=1,
+        request_cost=1, upstream_remaining=None, returned_count=2, accepted_count=2,
         duplicate_count=0, dropped_count=0, response_hash=parsed["response_hash"],
         source_receipt_id=parsed["source_receipt_id"],
     )
@@ -731,7 +853,9 @@ def test_discovery_capability_accepts_pipeline_generated_dynamic_theme_task():
         task_id=source_task["id"], stage="signals", provider="gdelt",
         capability_id="gdelt_theme_search", query_kind="theme_search",
         theme_id=source_task["result"]["theme_id"],
-        query=MappingProxyType({"query": "permanent magnets"}),
+        query=MappingProxyType({
+            "query": "economic policy",
+        }),
         window=MappingProxyType(source_task["requested_window"]), dependencies=(),
         max_attempts=1, requires_credential=False,
     )
@@ -750,30 +874,165 @@ def test_discovery_capability_accepts_pipeline_generated_dynamic_theme_task():
     persisted = {}
     recorder._persist_dynamic_theme_evaluation(
         RUN, source_task["requested_window"],
-        [(task, CollectionResult((item,), receipt, 20))], persisted,
+        [(task, CollectionResult((item, second_item), receipt, 20))], persisted,
     )
     rows["discovery_stage_tasks"].extend(persisted.values())
 
     assert _verify_capability(rows).ok is True
+    forged = copy.deepcopy(rows)
+    episode = forged["theme_episode_revisions"][0]
+    episode["valid_from"] = "2099-01-01T00:00:00Z"
+    episode["episode"]["coverage_label"] = "invented coverage"
+    episode["content_hash"] = "f" * 64
+    episode["id"] = str(uuid.uuid5(
+        uuid.NAMESPACE_URL,
+        f"market-intelligence:theme-episode:{episode['content_hash']}",
+    ))
+    with pytest.raises(RuntimeError, match="dynamic theme episode semantic lineage"):
+        _verify_capability(forged)
+
+
+@pytest.mark.parametrize(
+    ("item_count", "batch_size", "truncated", "retained"),
+    [(64, 20, 0, 64), (65, 20, 1, 64), (33, 1, 1, 32)],
+)
+def test_dynamic_theme_generator_and_verifier_share_the_64_source_boundary(
+    item_count, batch_size, truncated, retained,
+):
+    from types import MappingProxyType
+
+    from lib.intelligence.pipeline import IntelligencePipeline
+    from lib.intelligence.providers import CollectionResult, RequestReceipt, SourceItem
+    from lib.intelligence.types import DiscoveryTask
+
+    window = {"start": "2026-09-05T12:00:00Z", "end": "2026-09-05T20:00:00Z"}
+    items = []
+    for index in range(item_count):
+        canonical = json.dumps({"index": index}, separators=(",", ":"))
+        content_hash = hashlib.sha256(canonical.encode()).hexdigest()
+        items.append(SourceItem(
+            provider="gdelt", upstream_item_id=f"cooling-{index:03d}",
+            source_url=f"https://publisher-{index % 2}.example/cooling-{index:03d}",
+            title=f"Liquid cooling loop capacity: report {index:03d}",
+            normalized_text=f"Liquid cooling evidence {index:03d}",
+            canonical_content=canonical, content_hash=content_hash,
+            published_at=NOW, effective_at=None, retrieved_at=NOW, authority="radar",
+            metadata=MappingProxyType({
+                "item_id": str(uuid.uuid5(uuid.NAMESPACE_URL, f"market-source:{content_hash}")),
+                "publisher_id": f"publisher-{index % 2}",
+                "upstream_identity": f"story-{index:03d}",
+            }),
+        ))
+
+    task_results = []
+    source_rows = {}
+    for batch, start in enumerate(range(0, item_count, batch_size)):
+        task_id = str(uuid.uuid5(uuid.UUID(RUN), f"dynamic-boundary-source:{batch}"))
+        task = DiscoveryTask(
+            task_id=task_id, stage="signals", provider="gdelt",
+            capability_id="gdelt_theme_search", query_kind="theme_search",
+            theme_id="critical_minerals_and_magnets",
+            query=MappingProxyType({"query": "critical minerals"}),
+            window=MappingProxyType(window), dependencies=(), max_attempts=1,
+            requires_credential=False,
+        )
+        chunk = tuple(items[start:start + batch_size])
+        receipt = RequestReceipt(
+            provider="gdelt", reservation_id=str(uuid.uuid4()), status="succeeded",
+            cache_key=hashlib.sha256(task_id.encode()).hexdigest(),
+            requested_window=window, requested_limit=20, retrieved_at=NOW,
+            observed_at=NOW, expires_at=None, request_cost=1,
+            upstream_remaining=None, returned_count=len(chunk),
+            accepted_count=len(chunk), duplicate_count=0, dropped_count=0,
+            response_hash=hashlib.sha256(str(batch).encode()).hexdigest(),
+            source_receipt_id=str(uuid.uuid4()),
+        )
+        task_results.append((task, CollectionResult(chunk, receipt, 20)))
+        source_rows[task_id] = {
+            **IntelligencePipeline._task_row(
+                task, state="succeeded", attempt_count=1,
+                result={"theme_id": task.theme_id},
+            ),
+            "run_id": RUN,
+        }
+
+    episode_rows = []
+
+    class Recorder(IntelligencePipeline):
+        def _checkpoint_discovery_task(
+            self, run_id, row, *, theme_episode_revisions=(), exposure_facts=(),
+        ):
+            episode_rows[:] = [
+                {**value, "run_id": run_id, "task_id": row["id"]}
+                for value in theme_episode_revisions
+            ]
+            return {**row, "run_id": run_id}
+
+    recorder = Recorder.__new__(Recorder)
+    recorder._persist_dynamic_theme_evaluation(
+        RUN, window, task_results, source_rows,
+    )
+    dynamic = next(
+        row for row in source_rows.values()
+        if row["capability_id"] == "dynamic_theme_evaluation"
+    )
+    assert dynamic["result"]["source_ids_truncated"] == truncated
+    assert len(dynamic["result"]["proposals"][0]["source_ids"]) == retained
+    assert len(dynamic["dependency_ids"]) <= 32
+    assert release_verifier._authorized_dynamic_task_ids(
+        {
+            "enrichment_selection_manifests": [],
+            "enrichment_request_descriptors": [],
+            "theme_episode_revisions": episode_rows,
+        },
+        run_id=RUN, phase="pre-market", tasks=source_rows,
+        planned_ids=set(source_rows) - {dynamic["id"]},
+    ) == {dynamic["id"]}
 
 
 def test_discovery_capability_accepts_honest_uncertain_reverse_task():
     rows = _capability_rows()
+    _make_first_required_receipt_nonempty(rows, persist_lineage=True)
     dependency = next(
         row for row in rows["discovery_stage_tasks"]
         if row["capability_id"] == "gdelt_theme_search"
     )
+    item_id = rows["source_items"][0]["id"]
+    rows["source_items"][0]["metadata"] = {
+        "theme_id": "critical_minerals_magnets",
+    }
+    descriptor, task_id, theme_id = _reverse_descriptor_for_source(rows, item_id)
     uncertain = copy.deepcopy(dependency)
     uncertain.update(
-        id=str(uuid.uuid4()), stage="resolve", state="uncertain",
-        query_hash="8" * 64, dependency_ids=[dependency["id"]],
+        id=task_id, stage="resolve", state="uncertain",
+        dependency_ids=[dependency["id"]],
     )
-    uncertain["result"].pop("hypothesis", None)
+    uncertain["result"]["theme_id"] = theme_id
+    uncertain["result"]["hypothesis"] = descriptor["hypothesis"]
+    uncertain["result"]["reverse_descriptor"] = descriptor
+    from lib.intelligence.cursors import SourceCursor
+    uncertain["result"]["request_cursor"] = SourceCursor(
+        provider="gdelt", capability_id="gdelt_theme_search",
+    ).to_mapping()
+    uncertain["query_hash"] = digest({
+        "capability_id": "gdelt_theme_search",
+        "query": descriptor,
+        "cursor": uncertain["result"]["request_cursor"],
+        "requested_window": uncertain["requested_window"],
+        "theme_id": theme_id,
+    })
     rows["discovery_stage_tasks"].append(uncertain)
 
     result = _verify_capability(rows)
     assert result.ok is True
     assert "gdelt_theme_search:uncertain" in result.optional_failures
+
+    forged = copy.deepcopy(rows)
+    reverse = next(row for row in forged["discovery_stage_tasks"]
+                   if row["id"] == task_id)
+    reverse["result"]["reverse_descriptor"]["event_id"] = str(uuid.uuid4())
+    with pytest.raises(RuntimeError, match="reverse selection descriptor"):
+        _verify_capability(forged)
 
 
 def test_discovery_capability_accepts_success_empty_when_all_returned_rows_are_dropped():
