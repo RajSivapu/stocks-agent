@@ -1581,11 +1581,13 @@ def release(tmp_path):
         "updated_at": "2026-09-05T18:40:00Z"}
     source.pr_ci_record = {"id": 41, "head_sha": reviewed_sha,
         "head_branch": "candidate", "event": "pull_request",
+        "head_repository": {"full_name": "owner/stocks-agent"},
         "name": "Owner dashboard verification", "repository": {"full_name": "owner/stocks-agent"},
         "conclusion": "success", "status": "completed", "path": ".github/workflows/owner-dashboard-ci.yml",
-        "pull_requests": [{"number": 44}], "updated_at": "2026-09-05T17:50:00Z"}
+        "pull_requests": [], "updated_at": "2026-09-05T17:50:00Z"}
     source.merge_record = {"number": 44, "merged": True, "merge_commit_sha": sha,
-        "merged_at": "2026-09-05T18:00:00Z", "head": {"sha": reviewed_sha},
+        "merged_at": "2026-09-05T18:00:00Z", "head": {"sha": reviewed_sha,
+            "ref": "candidate", "repo": {"full_name": "owner/stocks-agent"}},
         "base": {"ref": "main", "repo": {"full_name": "owner/stocks-agent"}}}
     source.review_records = [{"id": 45, "state": "APPROVED", "commit_id": reviewed_sha, "submitted_at": "2026-09-05T17:45:00Z"}]
     source.owner_id = 7
@@ -1903,6 +1905,47 @@ def test_release_accepts_exact_pr_ci_bound_owner_comment_for_solo_repository(rel
 
     result = verify_release(source, **args)
     assert result["candidate_sha"] == source.record["candidate_sha"]
+
+
+@pytest.mark.parametrize("mutation", [
+    lambda source: source.pr_ci_record.update(head_branch="different-branch"),
+    lambda source: source.pr_ci_record["head_repository"].update(
+        full_name="other/stocks-agent"
+    ),
+    lambda source: source.pr_ci_record.update(pull_requests=[{"number": 99}]),
+    lambda source: source.pr_ci_record.update(
+        pull_requests=[{"number": source.record["pull_request_number"]}, {"number": 1.5}]
+    ),
+    lambda source: source.pr_ci_record.update(pull_requests={}),
+])
+def test_release_rejects_pr_ci_without_durable_merged_pr_binding(release, mutation):
+    source, args = release
+    mutation(source)
+    with pytest.raises(RuntimeError, match="PR CI identity"):
+        verify_release(source, **args)
+
+
+@pytest.mark.parametrize("value", [None, 7, ""])
+def test_release_rejects_malformed_matching_pr_head_coordinates(release, value):
+    source, args = release
+    source.merge_record["head"]["ref"] = value
+    source.merge_record["head"]["repo"]["full_name"] = value
+    source.pr_ci_record["head_branch"] = value
+    source.pr_ci_record["head_repository"]["full_name"] = value
+
+    with pytest.raises(RuntimeError, match="PR CI identity"):
+        verify_release(source, **args)
+
+
+def test_release_rejects_missing_matching_pr_head_coordinates(release):
+    source, args = release
+    source.merge_record["head"].pop("ref")
+    source.merge_record["head"]["repo"].pop("full_name")
+    source.pr_ci_record.pop("head_branch")
+    source.pr_ci_record["head_repository"].pop("full_name")
+
+    with pytest.raises(RuntimeError, match="PR CI identity"):
+        verify_release(source, **args)
 
 
 @pytest.mark.parametrize("field,value", [
