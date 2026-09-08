@@ -2325,7 +2325,8 @@ def verify_release(source: ReleaseDataSource, *, deployment_id: int,
                     and row.get("user", {}).get("id") == owner_id
                     and row.get("author_association") == "OWNER"
                     and row.get("body") == expected_body
-                    and timestamp(pr_ci["updated_at"]) <= timestamp(row.get("created_at")) <= merged
+                    and timestamp(pr_ci["updated_at"]) <= timestamp(row.get("created_at"))
+                    <= timestamp(row.get("updated_at")) <= merged
                     <= candidate_commit_time <= deployed for row in comments),
                     "CI-bound owner release authorization is missing")
         if reviewed_head != candidate:

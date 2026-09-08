@@ -1892,6 +1892,7 @@ def test_release_accepts_exact_pr_ci_bound_owner_comment_for_solo_repository(rel
         "pr_ci_workflow_run_id": 41}
     source.authorization_comment_records = [{"id": 46, "user": {"id": 7},
         "author_association": "OWNER", "created_at": "2026-09-05T17:55:00Z",
+        "updated_at": "2026-09-05T17:55:00Z",
         "body": "OWNER_RELEASE_APPROVAL_V1\n"
             f"reviewed_sha={reviewed}\npr_ci_workflow_run_id=41"}]
 
@@ -1902,6 +1903,7 @@ def test_release_accepts_exact_pr_ci_bound_owner_comment_for_solo_repository(rel
 @pytest.mark.parametrize("field,value", [
     ("author_association", "NONE"),
     ("created_at", "2026-09-05T17:49:59Z"),
+    ("updated_at", "2026-09-05T18:00:01Z"),
     ("body", "OWNER_RELEASE_APPROVAL_V1\nreviewed_sha=wrong\npr_ci_workflow_run_id=41"),
 ])
 def test_release_rejects_invalid_owner_comment_authorization(release, field, value):
@@ -1912,6 +1914,7 @@ def test_release_rejects_invalid_owner_comment_authorization(release, field, val
         "pr_ci_workflow_run_id": 41}
     comment = {"id": 46, "user": {"id": 7}, "author_association": "OWNER",
         "created_at": "2026-09-05T17:55:00Z",
+        "updated_at": "2026-09-05T17:55:00Z",
         "body": "OWNER_RELEASE_APPROVAL_V1\n"
             f"reviewed_sha={reviewed}\npr_ci_workflow_run_id=41"}
     comment[field] = value

@@ -77,6 +77,7 @@ jobs:
           test "$(jq -r .event <<<"$PR_CI")" = pull_request || { echo 'required PR CI was not a pull request run'; exit 1; }
           jq -e --argjson number "$PULL_REQUEST_NUMBER" 'any(.pull_requests[]; .number == $number)' <<<"$PR_CI" >/dev/null || { echo 'required PR CI does not bind reviewed pull request'; exit 1; }
           PR_CI_COMPLETED_AT="$(jq -r .updated_at <<<"$PR_CI")"
+          jq -e --arg head "$HEAD_COMMIT_TIME" --arg merged "$MERGED_AT" '.updated_at >= $head and .updated_at <= $merged' <<<"$PR_CI" >/dev/null || { echo 'required PR CI did not complete between reviewed head and merge'; exit 1; }
           REVIEWS="$(gh api "repos/$GITHUB_REPOSITORY/pulls/$PULL_REQUEST_NUMBER/reviews?per_page=100")"
           test "$(jq 'length' <<<"$REVIEWS")" -lt 100 || { echo 'review evidence exceeds bounded page'; exit 1; }
           # head_commit_time <= latest review.submitted_at <= merged_at <= candidate_commit_time
@@ -84,13 +85,13 @@ jobs:
             '[.[] | select(.state == "APPROVED" or .state == "CHANGES_REQUESTED" or .state == "DISMISSED")] | (all(.[]; (.id | type == "number" and . > 0)) and (group_by(.user.id) | map(max_by([.submitted_at // "", .id])) | (all(.state != "CHANGES_REQUESTED") and any(.state == "APPROVED" and .commit_id == $sha and (.submitted_at >= $head and .submitted_at <= $merged) and ($merged <= $candidate)))))' \
             <<<"$REVIEWS" >/dev/null; then
             AUTHORIZATION_KIND=github_review
-            AUTHORIZATION_ID="$(jq -r --arg sha "$PR_HEAD_SHA" --arg head "$HEAD_COMMIT_TIME" --arg merged "$MERGED_AT" '[.[] | select(.state == "APPROVED" and .commit_id == $sha and .submitted_at >= $head and .submitted_at <= $merged)] | max_by([.submitted_at, .id]) | .id' <<<"$REVIEWS")"
+            AUTHORIZATION_ID="$(jq -r --arg sha "$PR_HEAD_SHA" --arg head "$HEAD_COMMIT_TIME" --arg merged "$MERGED_AT" '[.[] | select(.state == "APPROVED" or .state == "CHANGES_REQUESTED" or .state == "DISMISSED")] | group_by(.user.id) | map(max_by([.submitted_at // "", .id])) | [.[] | select(.state == "APPROVED" and .commit_id == $sha and .submitted_at >= $head and .submitted_at <= $merged)] | max_by([.submitted_at, .id]) | .id' <<<"$REVIEWS")"
           else
             COMMENTS="$(gh api "repos/$GITHUB_REPOSITORY/issues/$PULL_REQUEST_NUMBER/comments?per_page=100")"
             test "$(jq 'length' <<<"$COMMENTS")" -lt 100 || { echo 'owner authorization evidence exceeds bounded page'; exit 1; }
             OWNER_ID="$(gh api "repos/$GITHUB_REPOSITORY" --jq .owner.id)"
             EXPECTED_OWNER_APPROVAL="$(printf 'OWNER_RELEASE_APPROVAL_V1\nreviewed_sha=%s\npr_ci_workflow_run_id=%s' "$PR_HEAD_SHA" "$PR_CI_WORKFLOW_RUN_ID")"
-            OWNER_APPROVAL="$(jq -c --arg body "$EXPECTED_OWNER_APPROVAL" --argjson owner "$OWNER_ID" --arg pr_ci "$PR_CI_COMPLETED_AT" --arg merged "$MERGED_AT" '[.[] | select((.id | type == "number") and .id > 0 and .user.id == $owner and .author_association == "OWNER" and .body == $body and .created_at >= $pr_ci and .created_at <= $merged)] | sort_by([.created_at, .id]) | last // empty' <<<"$COMMENTS")"
+            OWNER_APPROVAL="$(jq -c --arg body "$EXPECTED_OWNER_APPROVAL" --argjson owner "$OWNER_ID" --arg pr_ci "$PR_CI_COMPLETED_AT" --arg merged "$MERGED_AT" '[.[] | select((.id | type == "number") and .id > 0 and .user.id == $owner and .author_association == "OWNER" and .body == $body and .created_at >= $pr_ci and .created_at <= .updated_at and .updated_at <= $merged)] | sort_by([.created_at, .id]) | last // empty' <<<"$COMMENTS")"
             test -n "$OWNER_APPROVAL" || { echo 'latest required review or CI-bound owner approval is missing'; exit 1; }
             jq -e '[.[] | select(.state == "APPROVED" or .state == "CHANGES_REQUESTED" or .state == "DISMISSED")] | group_by(.user.id) | map(max_by([.submitted_at // "", .id])) | all(.state != "CHANGES_REQUESTED")' <<<"$REVIEWS" >/dev/null || { echo 'current changes-requested review blocks owner approval'; exit 1; }
             AUTHORIZATION_KIND=owner_comment

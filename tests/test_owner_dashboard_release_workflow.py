@@ -128,9 +128,79 @@ def test_release_allows_a_pr_ci_bound_owner_authorization_for_a_solo_repository(
     assert "OWNER_RELEASE_APPROVAL_V1" in trust
     assert '.author_association == "OWNER"' in trust
     assert ".user.id == $owner" in trust
-    assert '.created_at >= $pr_ci and .created_at <= $merged' in trust
+    assert '.created_at >= $pr_ci and .created_at <= .updated_at and .updated_at <= $merged' in trust
     assert "authorization_kind" in trust and "authorization_id" in trust
     assert "SUPABASE_ACCESS_TOKEN" not in trust
+
+
+def test_owner_comment_authorization_rejects_a_post_merge_edit():
+    jq = shutil.which("jq")
+    if jq is None:
+        raise AssertionError("jq is required to verify the owner authorization filter")
+    workflow = Path(".github/workflows/owner-dashboard-release.yml").read_text()
+    trust = workflow.split(
+        "- name: Authenticate exact reviewed main candidate without candidate code", 1
+    )[1].split("- uses: actions/checkout", 1)[0]
+    filter_line = next(
+        line.strip() for line in trust.splitlines()
+        if line.strip().startswith('OWNER_APPROVAL="$(jq -c')
+    )
+    owner_filter = filter_line.split(" '[", 1)[1].rsplit("' <<<", 1)[0]
+    owner_filter = "[" + owner_filter
+    body = "OWNER_RELEASE_APPROVAL_V1\nreviewed_sha=" + "a" * 40 + "\npr_ci_workflow_run_id=41"
+
+    def accepted(updated_at):
+        comment = [{"id": 46, "user": {"id": 7}, "author_association": "OWNER",
+            "created_at": "2026-09-05T17:55:00Z", "updated_at": updated_at,
+            "body": body}]
+        result = subprocess.run([
+            jq, "-e", "--arg", "body", body, "--argjson", "owner", "7",
+            "--arg", "pr_ci", "2026-09-05T17:50:00Z",
+            "--arg", "merged", "2026-09-05T18:00:00Z", owner_filter,
+        ], input=json.dumps(comment), text=True, capture_output=True)
+        return result.returncode == 0 and bool(result.stdout.strip())
+
+    assert accepted("2026-09-05T17:55:00Z")
+    assert not accepted("2026-09-05T18:05:00Z")
+
+
+def test_release_requires_pr_ci_to_complete_before_merge():
+    workflow = Path(".github/workflows/owner-dashboard-release.yml").read_text()
+    trust = workflow.split(
+        "- name: Authenticate exact reviewed main candidate without candidate code", 1
+    )[1].split("- uses: actions/checkout", 1)[0]
+    assert '.updated_at >= $head and .updated_at <= $merged' in trust
+
+
+def test_recorded_review_authorization_is_a_current_review_decision():
+    jq = shutil.which("jq")
+    if jq is None:
+        raise AssertionError("jq is required to verify review authorization selection")
+    workflow = Path(".github/workflows/owner-dashboard-release.yml").read_text()
+    trust = workflow.split(
+        "- name: Authenticate exact reviewed main candidate without candidate code", 1
+    )[1].split("- uses: actions/checkout", 1)[0]
+    selection_line = next(
+        line.strip() for line in trust.splitlines()
+        if line.strip().startswith('AUTHORIZATION_ID="$(jq -r --arg sha')
+    )
+    review_filter = selection_line.split(" '[", 1)[1].rsplit("' <<<", 1)[0]
+    review_filter = "[" + review_filter
+    sha = "a" * 40
+    rows = [
+        {"id": 1, "state": "APPROVED", "user": {"id": 11}, "commit_id": sha,
+            "submitted_at": "2026-09-05T17:45:00Z"},
+        {"id": 2, "state": "APPROVED", "user": {"id": 10}, "commit_id": sha,
+            "submitted_at": "2026-09-05T17:46:00Z"},
+        {"id": 3, "state": "DISMISSED", "user": {"id": 10}, "commit_id": sha,
+            "submitted_at": "2026-09-05T17:47:00Z"},
+    ]
+    result = subprocess.run([
+        jq, "-r", "--arg", "sha", sha,
+        "--arg", "head", "2026-09-05T17:40:00Z",
+        "--arg", "merged", "2026-09-05T18:00:00Z", review_filter,
+    ], input=json.dumps(rows), text=True, capture_output=True, check=True)
+    assert result.stdout.strip() == "1"
 
 
 def test_release_executes_exact_review_filter_for_latest_decisions_and_ties():
