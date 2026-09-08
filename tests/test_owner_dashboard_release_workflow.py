@@ -348,6 +348,7 @@ def test_release_record_rejects_a_receipt_from_another_candidate():
 def test_release_record_writer_emits_backend_only_evidence_contract(tmp_path, monkeypatch):
     import json
     import sys
+    from lib.release_baseline import pre_migration_omissions
     from scripts import write_protected_release_record as writer
 
     (tmp_path / "apps/web").mkdir(parents=True)
@@ -368,7 +369,11 @@ def test_release_record_writer_emits_backend_only_evidence_contract(tmp_path, mo
         "canary": {"status": "verified", "source_reconciliation": "verified",
             "financial_write_routes": 0, "brokerage_authority": "none",
             "friend_invitations": "disabled"}}
-    dry = {"table_deltas": {}}
+    dry = {
+        "before": {"pre_migration_omissions": pre_migration_omissions()},
+        "after": {"pre_migration_omissions": pre_migration_omissions()},
+        "table_deltas": {},
+    }
     receipt_path, dry_path, output = (tmp_path / name for name in ("receipt.json", "dry.json", "record.json"))
     receipt_path.write_text(json.dumps(receipt)); dry_path.write_text(json.dumps(dry))
     monkeypatch.chdir(tmp_path)

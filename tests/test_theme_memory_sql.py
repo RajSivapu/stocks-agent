@@ -34,6 +34,9 @@ RUNTIME_COMPLETION_MIGRATION = (
 HONEST_EMPTY_REPORT_MIGRATION = (
     ROOT / "sql/migrations/20261014_honest_empty_report_persistence.sql"
 )
+RELEASE_READER_MIGRATION = (
+    ROOT / "sql/migrations/20261015_release_reader_source_tables.sql"
+)
 SCHEMA = ROOT / "sql/schema.sql"
 
 
@@ -63,9 +66,12 @@ def test_v2_runtime_completion_and_honest_empty_tail_are_parseable_and_ordered()
     assert statements
     honest_empty = parse_sql(HONEST_EMPTY_REPORT_MIGRATION.read_text())
     assert honest_empty
+    release_reader = parse_sql(RELEASE_READER_MIGRATION.read_text())
+    assert release_reader
     schema = SCHEMA.read_bytes()
     assert RUNTIME_COMPLETION_MIGRATION.read_bytes() in schema
-    assert schema.endswith(HONEST_EMPTY_REPORT_MIGRATION.read_bytes())
+    assert HONEST_EMPTY_REPORT_MIGRATION.read_bytes() in schema
+    assert schema.endswith(RELEASE_READER_MIGRATION.read_bytes())
     migration = RUNTIME_COMPLETION_MIGRATION.read_text()
     assert "SECURITY DEFINER SET search_path=pg_catalog" in migration
     assert "record_market_intelligence_v2_completion" in migration

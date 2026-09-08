@@ -398,7 +398,6 @@ def test_protected_reader_rejects_incomplete_policy_table_privileges(monkeypatch
 
 def test_protected_dry_run_reader_records_only_tables_present_before_migration(monkeypatch):
     from scripts import protected_evidence as evidence
-    missing = "market_reference_manifests"
     class Connection:
         closed = False
         def execute(self, _sql): pass
@@ -408,7 +407,7 @@ def test_protected_dry_run_reader_records_only_tables_present_before_migration(m
     monkeypatch.setattr(evidence.psycopg, "connect", lambda *a, **k: connection)
     source = evidence.PostgresReadOnlySource(
         f"postgresql://{evidence.READER}:password@db.{'p' * 20}.supabase.co:5432/postgres",
-        "p" * 20, allow_missing_tables=True,
+        "p" * 20, pre_migration_baseline=True,
     )
     def query(statement, params=()):
         if "current_user AS role" in statement:
@@ -416,7 +415,79 @@ def test_protected_dry_run_reader_records_only_tables_present_before_migration(m
                 "rolbypassrls": False, "server": "127.0.0.1", "port": 5432,
                 "database": "postgres"}]
         if "to_regclass" in statement:
-            return [{"present": params[0] != "public." + missing}]
+            table = params[0].removeprefix("public.")
+            return [{"present": table not in evidence.PRE_MIGRATION_ABSENT_TABLES}]
+        if "has_table_privilege" in statement:
+            table = params[0].removeprefix("public.")
+            return [{"readable": table not in evidence.PRE_MIGRATION_UNREADABLE_TABLES,
+                "writable": False}]
+        if "to_jsonb" in statement:
+            return []
+        raise AssertionError(statement)
+    source.query = query
+    with source:
+        snapshot = source.dry_run_snapshot()
+    deferred = set(evidence.PRE_MIGRATION_ABSENT_TABLES) | set(
+        evidence.PRE_MIGRATION_UNREADABLE_TABLES
+    )
+    assert set(snapshot["tables"]) == set(evidence.READ_TABLES) - deferred
+    assert snapshot["pre_migration_omissions"] == {
+        "reason": "candidate migrations have not been applied",
+        "absent_tables": list(evidence.PRE_MIGRATION_ABSENT_TABLES),
+        "unreadable_tables": list(evidence.PRE_MIGRATION_UNREADABLE_TABLES),
+    }
+
+
+def test_pre_migration_reader_rejects_unexpected_missing_baseline_table(monkeypatch):
+    from scripts import protected_evidence as evidence
+    class Connection:
+        closed = False
+        def execute(self, _sql): pass
+        def close(self): self.closed = True
+    connection = Connection()
+    monkeypatch.setattr(evidence.psycopg, "connect", lambda *a, **k: connection)
+    source = evidence.PostgresReadOnlySource(
+        f"postgresql://{evidence.READER}:password@db.{'p' * 20}.supabase.co:5432/postgres",
+        "p" * 20, pre_migration_baseline=True,
+    )
+    def query(statement, params=()):
+        if "current_user AS role" in statement:
+            return [{"role": evidence.READER, "read_only": "on", "rolsuper": False,
+                "rolbypassrls": False, "server": "127.0.0.1", "port": 5432,
+                "database": "postgres"}]
+        table = params[0].removeprefix("public.")
+        if "to_regclass" in statement:
+            return [{"present": table != "holdings" and table not in evidence.PRE_MIGRATION_ABSENT_TABLES}]
+        if "has_table_privilege" in statement:
+            return [{"readable": table not in evidence.PRE_MIGRATION_UNREADABLE_TABLES,
+                "writable": False}]
+        raise AssertionError(statement)
+    source.query = query
+    with pytest.raises(RuntimeError, match="pre-migration release reader baseline mismatch"):
+        source.__enter__()
+    assert connection.closed
+
+
+def test_pre_migration_reader_accepts_fully_migrated_retry_state(monkeypatch):
+    from scripts import protected_evidence as evidence
+    class Connection:
+        closed = False
+        def execute(self, _sql): pass
+        def rollback(self): pass
+        def close(self): self.closed = True
+    connection = Connection()
+    monkeypatch.setattr(evidence.psycopg, "connect", lambda *a, **k: connection)
+    source = evidence.PostgresReadOnlySource(
+        f"postgresql://{evidence.READER}:password@db.{'p' * 20}.supabase.co:5432/postgres",
+        "p" * 20, pre_migration_baseline=True,
+    )
+    def query(statement, params=()):
+        if "current_user AS role" in statement:
+            return [{"role": evidence.READER, "read_only": "on", "rolsuper": False,
+                "rolbypassrls": False, "server": "127.0.0.1", "port": 5432,
+                "database": "postgres"}]
+        if "to_regclass" in statement:
+            return [{"present": True}]
         if "has_table_privilege" in statement:
             return [{"readable": True, "writable": False}]
         if "to_jsonb" in statement:
@@ -425,8 +496,12 @@ def test_protected_dry_run_reader_records_only_tables_present_before_migration(m
     source.query = query
     with source:
         snapshot = source.dry_run_snapshot()
-    assert missing not in snapshot["tables"]
-    assert set(snapshot["tables"]) == set(evidence.READ_TABLES) - {missing}
+    assert set(snapshot["tables"]) == set(evidence.READ_TABLES)
+    assert snapshot["pre_migration_omissions"] == {
+        "reason": "candidate migrations are already applied",
+        "absent_tables": [],
+        "unreadable_tables": [],
+    }
 
 
 def test_normal_protected_reader_rejects_a_missing_release_table(monkeypatch):
@@ -457,7 +532,7 @@ def test_normal_protected_reader_rejects_a_missing_release_table(monkeypatch):
 
 def test_candidate_dry_run_uses_the_pre_migration_reader_mode():
     script = (release.ROOT / "scripts/collect_protected_dry_run_evidence.py").read_text()
-    assert "PostgresReadOnlySource(url, project_ref, allow_missing_tables=True)" in script
+    assert "PostgresReadOnlySource(url, project_ref, pre_migration_baseline=True)" in script
 
 
 def test_release_reader_scope_includes_existing_market_source_tables():

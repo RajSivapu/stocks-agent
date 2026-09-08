@@ -62,9 +62,10 @@ production-secret exposure; the immutable release record retains the authorizati
 
 The protected migration boundary is the immutable additive chain
 `20261005_market_wide_discovery.sql` through
-`20261014_honest_empty_report_persistence.sql`. The `20261004` artifact is the separate immutable
+`20261015_release_reader_source_tables.sql`. The `20261004` artifact is the separate immutable
 production-schema reconciliation baseline; there is no `20261004_market_wide_discovery.sql` and the
-release must never invent or apply one. The ten discovery/runtime migration file SHA-256 values are
+release must never invent or apply one. The eleven discovery/runtime and release-security migration
+file SHA-256 values are
 recorded in `docs/rollouts/2026-09-06-market-wide-thematic-discovery-v1.md`.
 
 Known V1 limits remain visible: `complete_market_coverage` is always false; free sources and request

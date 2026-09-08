@@ -41,6 +41,7 @@ from lib.intelligence.themes import (
 )
 from lib.intelligence.universe import reference_snapshot_from_rows
 from lib.intelligence.types import DiscoveryTask
+from lib.release_baseline import allowed_pre_migration_omissions
 from scripts.export_recovery_bundle import (
     _ENRICHMENT_PHASE_ENVELOPES,
     _ENRICHMENT_QUERY_CONTRACTS,
@@ -2350,6 +2351,7 @@ def verify_release(source: ReleaseDataSource, *, deployment_id: int,
         script_sha = dry.get("candidate_script_sha256")
         expected_command_hash = hashlib.sha256(json.dumps({"argv": argv, "candidate_sha": candidate,
             "candidate_script_sha256": script_sha}, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+        allowed_omissions = allowed_pre_migration_omissions()
         require(isinstance(before, Mapping) and isinstance(after, Mapping) and before["tables"] == after["tables"]
                 and isinstance(dry["table_deltas"], Mapping) and set(dry["table_deltas"]) == set(before["tables"])
                 and all(type(value) is int and value == 0 for value in dry["table_deltas"].values())
@@ -2358,6 +2360,8 @@ def verify_release(source: ReleaseDataSource, *, deployment_id: int,
                 and isinstance(script_sha, str) and script_sha == sha256(git(repo_root, "show", f"{candidate}:scripts/deploy_owner_dashboard_api.py"))
                 and dry["safe_command_sha256"] == expected_command_hash
                 and before.get("source") == after.get("source")
+                and before.get("pre_migration_omissions") == after.get("pre_migration_omissions")
+                and before.get("pre_migration_omissions") in allowed_omissions
                 and all(isinstance(value, Mapping) and set(value) == {"count", "rows_sha256"} and type(value.get("count")) is int
                         and isinstance(value.get("rows_sha256"), str) and re.fullmatch(r"[0-9a-f]{64}", value["rows_sha256"])
                         for value in before["tables"].values()), "protected dry-run side-effect evidence is incomplete")

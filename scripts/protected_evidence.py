@@ -19,6 +19,11 @@ import psycopg
 from psycopg.rows import dict_row
 
 from lib.intelligence.canonical import EVENT_CANONICAL_SQL, RANKING_CANONICAL_SQL
+from lib.release_baseline import (
+    PRE_MIGRATION_ABSENT_TABLES,
+    PRE_MIGRATION_UNREADABLE_TABLES,
+    pre_migration_omissions,
+)
 from scripts.export_recovery_bundle import MAX_PAYLOAD_BYTES
 from scripts.verify_personal_stock_agent_v1 import path_is_safe, require
 
@@ -231,10 +236,10 @@ READ_TABLES = (
     "stock_agent_release_migration_ledger",
 )
 
-
 class PostgresReadOnlySource:
     def __init__(self, database_url: str, project_ref: str, *, isolated_guard: bool = False,
-                 production_project_ref: str | None = None, allow_missing_tables: bool = False):
+                 production_project_ref: str | None = None,
+                 pre_migration_baseline: bool = False):
         parsed = urlparse(database_url)
         require(bool(re.fullmatch(r"[a-z0-9]{20}", project_ref)), "exact database project identity is required")
         user = unquote(parsed.username or "")
@@ -249,9 +254,10 @@ class PostgresReadOnlySource:
         self._url = database_url
         self.project_ref = project_ref
         self.isolated_guard = isolated_guard
-        self.allow_missing_tables = allow_missing_tables
+        self.pre_migration_baseline = pre_migration_baseline
         self.connection = None
         self._read_tables: tuple[str, ...] = ()
+        self._pre_migration_omissions: dict[str, object] | None = None
 
     def __enter__(self):
         try:
@@ -265,16 +271,37 @@ class PostgresReadOnlySource:
             require(row["role"] == READER and row["read_only"] == "on" and not row["rolsuper"] and not row["rolbypassrls"]
                     and row["server"] and row["database"], "queried database identity is not a restricted read-only source")
             readable_tables = []
+            absent_tables = []
+            unreadable_tables = []
             for table in READ_TABLES:
                 presence = self.query("SELECT to_regclass(%s) IS NOT NULL AS present", (f"public.{table}",))
                 require(len(presence) == 1 and type(presence[0].get("present")) is bool,
                         "release table identity is unavailable")
                 if not presence[0]["present"]:
-                    require(self.allow_missing_tables, "release table is missing")
+                    absent_tables.append(table)
                     continue
-                privileges = self.query("SELECT has_table_privilege(current_user,%s,'SELECT') AS readable,has_table_privilege(current_user,%s,'INSERT,UPDATE,DELETE,TRUNCATE,TRIGGER') AS writable", (f"public.{table}", f"public.{table}"))[0]
-                require(privileges["readable"] is True and privileges["writable"] is False, "read-only database source lacks SELECT or has write authority")
+                privileges = self.query("SELECT has_table_privilege(current_user,%s,'SELECT') AS readable,has_table_privilege(current_user,%s,'INSERT,UPDATE,DELETE,TRUNCATE,TRIGGER') AS writable", (f"public.{table}", f"public.{table}"))
+                require(len(privileges) == 1
+                        and type(privileges[0].get("readable")) is bool
+                        and type(privileges[0].get("writable")) is bool,
+                        "release table privileges are unavailable")
+                require(privileges[0]["writable"] is False,
+                        "read-only database source lacks SELECT or has write authority")
+                if privileges[0]["readable"] is not True:
+                    unreadable_tables.append(table)
+                    continue
                 readable_tables.append(table)
+            if self.pre_migration_baseline:
+                unmigrated = (tuple(absent_tables) == PRE_MIGRATION_ABSENT_TABLES
+                              and tuple(unreadable_tables) == PRE_MIGRATION_UNREADABLE_TABLES)
+                migrated = not absent_tables and not unreadable_tables
+                require(unmigrated or migrated,
+                        "pre-migration release reader baseline mismatch")
+                self._pre_migration_omissions = pre_migration_omissions(migrated=migrated)
+            else:
+                require(not absent_tables, "release table is missing")
+                require(not unreadable_tables,
+                        "read-only database source lacks SELECT or has write authority")
             self._read_tables = tuple(readable_tables)
             self._identity = {"project_ref": self.project_ref, "connection_id": hashlib.sha256(f"{row['server']}:{row['port']}/{row['database']}".encode()).hexdigest(),
                               "read_only": True, "isolated_guard": self.isolated_guard}
@@ -326,7 +353,10 @@ class PostgresReadOnlySource:
                 "count": len(canonical_rows),
                 "rows_sha256": hashlib.sha256("\n".join(canonical_rows).encode()).hexdigest(),
             }
-        return {"source": self.identity(), "tables": tables}
+        snapshot = {"source": self.identity(), "tables": tables}
+        if self._pre_migration_omissions is not None:
+            snapshot["pre_migration_omissions"] = dict(self._pre_migration_omissions)
+        return snapshot
 
     def release_rows(self, run_id: str) -> dict:
         require(bool(re.fullmatch(r"[0-9a-f-]{36}", run_id)), "run UUID is required")

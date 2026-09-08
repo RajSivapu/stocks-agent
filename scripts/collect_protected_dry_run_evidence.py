@@ -16,7 +16,7 @@ from scripts.protected_evidence import PostgresReadOnlySource
 def snapshot(url: str, project_ref: str) -> dict:
     # Separate read-only transactions are essential: a repeatable-read reader
     # cannot prove an after state from its own snapshot.
-    with PostgresReadOnlySource(url, project_ref, allow_missing_tables=True) as source:
+    with PostgresReadOnlySource(url, project_ref, pre_migration_baseline=True) as source:
         return source.dry_run_snapshot()
 
 
@@ -44,7 +44,10 @@ def main() -> int:
         raise SystemExit("safe dry-run command failed")
     after = snapshot(url, args.production_project_ref)
     deltas = {name: after["tables"][name]["count"] - before["tables"][name]["count"] for name in before["tables"]}
-    if before["source"] != after["source"] or any(value != 0 for value in deltas.values()) or before["tables"] != after["tables"]:
+    if (before["source"] != after["source"]
+            or before.get("pre_migration_omissions") != after.get("pre_migration_omissions")
+            or any(value != 0 for value in deltas.values())
+            or before["tables"] != after["tables"]):
         raise SystemExit("safe dry-run changed protected market evidence")
     for table in before["tables"].values():
         if (set(table) != {"count", "rows_sha256"} or type(table["count"]) is not int

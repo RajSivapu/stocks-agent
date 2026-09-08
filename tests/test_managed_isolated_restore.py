@@ -601,6 +601,8 @@ def test_actual_migration_retry_accepts_truthful_baseline_without_writing_histor
                               if item["path"] == "sql/migrations/20261013_v2_runtime_completion.sql")
     honest_empty = next(item for item in deploy.candidate_migration_manifest()
                         if item["path"] == "sql/migrations/20261014_honest_empty_report_persistence.sql")
+    release_reader = next(item for item in deploy.candidate_migration_manifest()
+                          if item["path"] == "sql/migrations/20261015_release_reader_source_tables.sql")
     queries = []
 
     def api(_method, _path, payload=None):
@@ -610,7 +612,7 @@ def test_actual_migration_retry_accepts_truthful_baseline_without_writing_histor
             return [
                 {"path": path, "version": "20261004", "sha256": hashlib.sha256(b'["SELECT 1"]').hexdigest()},
                     discovery, transfer, cursor, official, issuer_names, enrichment,
-                    research_packet, theme_memory, runtime_completion, honest_empty,
+                    research_packet, theme_memory, runtime_completion, honest_empty, release_reader,
             ]
         if query.startswith("SELECT version, statements"):
             return [{"version": "20261004", "statements": ["SELECT 1"]}]
