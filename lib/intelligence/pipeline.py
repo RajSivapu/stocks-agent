@@ -15,10 +15,10 @@ from zoneinfo import ZoneInfo
 
 from lib.intelligence.dedupe import RunItemDisposition, deduplicate
 from lib.intelligence.discovery import (
-    build_reverse_discovery_tasks,
     detect_events,
     expand_value_chain,
     load_theme_taxonomy,
+    select_reverse_discovery_tasks,
 )
 from lib.intelligence.entities import EntityResolution, ReviewedAlias, resolve_entities
 from lib.intelligence.exposure import (
@@ -87,7 +87,6 @@ UNTRUSTED_DATA_INSTRUCTION = (
 MAX_OUTPUT_BYTES = 96 * 1024
 _OUTPUT_PACKET_BYTES = 72 * 1024
 _MAX_DISCOVERY_TASKS = 100
-_MAX_REVERSE_DISCOVERY_EVIDENCE = 32
 
 
 class _CheckpointFailure(RuntimeError):
@@ -542,7 +541,10 @@ class IntelligencePipeline:
         reverse_tasks = self._reverse_discovery_tasks(
             run_id,
             request_window,
-            task_results,
+            tuple(
+                (task, result) for task, result in task_results
+                if persisted.get(task.task_id, {}).get("state") == "succeeded"
+            ),
             min(adaptive_capacity, max(0, _MAX_DISCOVERY_TASKS - 1 - len(plan.tasks))),
         )
         if adaptive_capability is not None and reverse_tasks:
@@ -1074,69 +1076,21 @@ class IntelligencePipeline:
         task_results: Sequence[tuple[DiscoveryTask, CollectionResult]],
         capacity: int,
     ) -> tuple[DiscoveryTask, ...]:
-        if capacity <= 0:
-            return ()
-        items_by_key: dict[str, SourceItem] = {}
-        task_ids_by_item: dict[str, set[str]] = {}
+        observations: list[tuple[str, SourceItem]] = []
         for task, result in task_results:
             if result.receipt.status not in {"succeeded", "cache_hit"}:
                 continue
             for raw in result.items:
                 item = normalize_item(raw)
-                key = evidence_key(item)
-                items_by_key[key] = item
-                task_ids_by_item.setdefault(key, set()).add(task.task_id)
-        if not items_by_key:
-            return ()
-        taxonomy = load_theme_taxonomy()
+                observations.append((task.task_id, item))
         reference = self.context.get("security_reference")
-        aliases_value = self.context.get("reviewed_entity_aliases", ())
-        aliases = tuple(aliases_value) if isinstance(aliases_value, Sequence) \
-            and not isinstance(aliases_value, (str, bytes, bytearray)) else ()
-        per_event: list[list[object]] = []
-        for event in detect_events(tuple(items_by_key.values()), taxonomy):
-            resolved = False
-            if isinstance(reference, ReferenceSnapshot):
-                resolved = any(
-                    row.status == "resolved" and row.eligible
-                    for item in event.evidence
-                    for row in resolve_entities(item, reference, aliases=aliases)
-                )
-            elif event.security_ids:
-                resolved = True
-            if resolved:
-                continue
-            bounded_events = detect_events(
-                tuple(event.evidence[:_MAX_REVERSE_DISCOVERY_EVIDENCE]), taxonomy
-            )
-            if len(bounded_events) != 1:
-                raise ValueError("bounded reverse event is not deterministic")
-            event = bounded_events[0]
-            hypotheses = expand_value_chain(event, taxonomy)
-            rows = list(build_reverse_discovery_tasks(
-                event, hypotheses, max_tasks=min(12, capacity)
-            ))
-            if rows:
-                per_event.append(rows)
-        selected: list[object] = []
-        per_event.sort(key=lambda values: values[0].event_id)
-        while len(selected) < capacity and any(per_event):
-            remaining: list[list[object]] = []
-            for values in per_event:
-                if len(selected) >= capacity:
-                    remaining.append(values)
-                    continue
-                selected.append(values.pop(0))
-                if values:
-                    remaining.append(values)
-            per_event = remaining
         tasks: list[DiscoveryTask] = []
-        for row in selected:
-            dependencies = tuple(sorted({
-                task_id
-                for source_id in row.dependency_ids
-                for task_id in task_ids_by_item.get(source_id, ())
-            }))[:32]
+        for selection in select_reverse_discovery_tasks(
+            tuple(observations),
+            reference if isinstance(reference, ReferenceSnapshot) else None,
+            max_tasks=capacity,
+        ):
+            row = selection.task
             hypothesis = {
                 "adverse_path": row.adverse_path,
                 "direction": row.direction,
@@ -1164,7 +1118,7 @@ class IntelligencePipeline:
                     "source_item_ids": list(row.dependency_ids)[:32],
                 },
                 window=dict(request_window),
-                dependencies=dependencies,
+                dependencies=selection.dependency_task_ids,
                 max_attempts=row.max_attempts,
                 requires_credential=False,
             ))
@@ -1179,6 +1133,10 @@ class IntelligencePipeline:
     ) -> None:
         observations: list[tuple[str, SourceItem]] = []
         for task, result in task_results:
+            persisted_task = persisted.get(task.task_id)
+            if isinstance(persisted_task, Mapping) \
+                    and persisted_task.get("state") != "succeeded":
+                continue
             if result.receipt.status not in {"succeeded", "cache_hit"}:
                 continue
             for raw in result.items:

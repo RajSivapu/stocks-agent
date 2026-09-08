@@ -21,7 +21,11 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 from lib.config import load_settings
 from lib.intelligence.cursors import SourceCursor
-from lib.intelligence.discovery import detect_events, load_theme_taxonomy
+from lib.intelligence.discovery import (
+    detect_events,
+    load_theme_taxonomy,
+    select_reverse_discovery_tasks,
+)
 from lib.intelligence.normalize import SourceItem, _claim_polarity
 from lib.intelligence.planner import load_source_capabilities
 from lib.intelligence.policy import load_intelligence_policy
@@ -31,6 +35,7 @@ from lib.intelligence.themes import (
     select_dynamic_theme_evidence,
     theme_fingerprint,
 )
+from lib.intelligence.universe import reference_snapshot_from_rows
 from scripts.export_recovery_bundle import (
     _ENRICHMENT_PHASE_ENVELOPES,
     _ENRICHMENT_QUERY_CONTRACTS,
@@ -506,6 +511,7 @@ def _verified_source_item(
     *,
     retrieved_at: datetime | None = None,
     source_provenance: Mapping[object, Mapping[str, object]] | None = None,
+    observation_provenance: Mapping[str, object] | None = None,
 ) -> SourceItem:
     row = source_items.get(source_id)
     require(isinstance(row, Mapping), "discovery adaptive source item is missing")
@@ -524,6 +530,8 @@ def _verified_source_item(
         if isinstance(source_provenance, Mapping) else None
     canonical_url = provenance.get("canonical_item_url") \
         if isinstance(provenance, Mapping) else row.get("canonical_url")
+    identifiers = observation_provenance \
+        if isinstance(observation_provenance, Mapping) else provenance
     item = SourceItem(
         provider=str(row.get("provider")),
         upstream_item_id=(
@@ -540,6 +548,18 @@ def _verified_source_item(
         retrieved_at=retrieved,
         authority="verified_source",
         metadata=dict(metadata),
+        entity_ids=tuple(sorted(
+            str(value).casefold()
+            for value in (identifiers.get("entity_ids", [])
+                          if isinstance(identifiers, Mapping) else [])
+            if isinstance(value, str) and value
+        )),
+        security_ids=tuple(sorted(
+            str(value).upper()
+            for value in (identifiers.get("security_ids", [])
+                          if isinstance(identifiers, Mapping) else [])
+            if isinstance(value, str) and value
+        )),
         claim_polarity=_claim_polarity(
             str(row.get("title") or ""),
             str(row.get("normalized_text") or ""),
@@ -551,11 +571,10 @@ def _verified_source_item(
     return item
 
 
-def _verify_dynamic_theme_semantics(
-    receipt: Mapping[str, object],
+def _verified_task_observations(
+    task_ids: list[str],
     *,
     run_id: str,
-    tasks: Mapping[str, Mapping[str, object]],
     source_items: Mapping[object, Mapping[str, object]],
     persisted_receipts: Mapping[object, Mapping[str, object]],
     source_provenance: Mapping[object, Mapping[str, object]],
@@ -563,17 +582,13 @@ def _verify_dynamic_theme_semantics(
     run_provenance: Mapping[object, Mapping[str, object]],
     receipt_id_by_task: Mapping[str, str],
     duplicate_references: list[Mapping[str, object]],
-    candidate_task_ids: set[str],
-) -> None:
-    episode_rows = receipt.get("theme_episode_revisions", [])
-    require(isinstance(episode_rows, list),
-            "discovery dynamic theme episode evidence is invalid")
+) -> list[tuple[str, SourceItem]]:
     observations: list[tuple[str, SourceItem]] = []
-    for source_task_id in sorted(candidate_task_ids):
-        receipt_id = receipt_id_by_task.get(source_task_id)
+    for task_id in task_ids:
+        receipt_id = receipt_id_by_task.get(task_id)
         persisted_receipt = persisted_receipts.get(receipt_id)
         require(isinstance(persisted_receipt, Mapping),
-                "discovery dynamic theme candidate receipt is missing")
+                "discovery adaptive candidate receipt is missing")
         direct = [
             row for row in run_items
             if row.get("run_id") == run_id
@@ -595,11 +610,55 @@ def _verify_dynamic_theme_semantics(
         receipt_retrieved = timestamp(persisted_receipt.get("retrieved_at"))
         retrieved_at = max((*retrieved_candidates, receipt_retrieved))
         for source_id in sorted(source_ids):
-            observations.append((source_task_id, _verified_source_item(
+            canonical_run_item = next((
+                row for row in run_items
+                if row.get("run_id") == run_id
+                and row.get("source_item_id") == source_id
+            ), None)
+            observation_provenance = (
+                run_provenance.get(canonical_run_item.get("id"))
+                if isinstance(canonical_run_item, Mapping) else None
+            )
+            observations.append((task_id, _verified_source_item(
                 source_id, source_items, persisted_receipts,
                 retrieved_at=retrieved_at,
                 source_provenance=source_provenance,
+                observation_provenance=(
+                    observation_provenance
+                    if isinstance(observation_provenance, Mapping) else None
+                ),
             )))
+    return observations
+
+
+def _verify_dynamic_theme_semantics(
+    receipt: Mapping[str, object],
+    *,
+    run_id: str,
+    tasks: Mapping[str, Mapping[str, object]],
+    source_items: Mapping[object, Mapping[str, object]],
+    persisted_receipts: Mapping[object, Mapping[str, object]],
+    source_provenance: Mapping[object, Mapping[str, object]],
+    run_items: list[Mapping[str, object]],
+    run_provenance: Mapping[object, Mapping[str, object]],
+    receipt_id_by_task: Mapping[str, str],
+    duplicate_references: list[Mapping[str, object]],
+    candidate_task_ids: list[str],
+) -> None:
+    episode_rows = receipt.get("theme_episode_revisions", [])
+    require(isinstance(episode_rows, list),
+            "discovery dynamic theme episode evidence is invalid")
+    observations = _verified_task_observations(
+        candidate_task_ids,
+        run_id=run_id,
+        source_items=source_items,
+        persisted_receipts=persisted_receipts,
+        source_provenance=source_provenance,
+        run_items=run_items,
+        run_provenance=run_provenance,
+        receipt_id_by_task=receipt_id_by_task,
+        duplicate_references=duplicate_references,
+    )
     selection = select_dynamic_theme_evidence(observations)
     dynamic_tasks = [
         (task_id, task) for task_id, task in tasks.items()
@@ -989,6 +1048,14 @@ def _verify_discovery_capability(receipt: Mapping[str, object]) -> VerificationR
         )
     except ValueError as error:
         raise RuntimeError("discovery reference semantic lineage is invalid") from error
+    try:
+        reference_snapshot = reference_snapshot_from_rows(
+            manifest,
+            [revisions_by_id[row["security_revision_id"]]
+             for row in sorted(selected_memberships, key=lambda value: value["ordinal"])],
+        )
+    except (TypeError, ValueError) as error:
+        raise RuntimeError("discovery reference hydration is invalid") from error
 
     persisted_receipt_rows = receipt.get("source_receipts", [])
     persisted_receipts = {row.get("id"): row for row in persisted_receipt_rows
@@ -1254,6 +1321,93 @@ def _verify_discovery_capability(receipt: Mapping[str, object]) -> VerificationR
         and len(required_receipt_ids) == len(required_task_ids) - 1,
         "discovery required capability receipt coverage is incomplete",
     )
+
+    initial_task_ids = [
+        task_id for task_id in planned_ids
+        if task_id in receipt_id_by_task and tasks[task_id].get("stage") != "reference"
+    ]
+    initial_observations = _verified_task_observations(
+        initial_task_ids,
+        run_id=run_id,
+        source_items=source_items,
+        persisted_receipts=persisted_receipts,
+        source_provenance=source_provenance,
+        run_items=run_items,
+        run_provenance=run_provenance,
+        receipt_id_by_task=receipt_id_by_task,
+        duplicate_references=duplicate_references,
+    )
+    phase = str(intelligence.get("phase"))
+    request_window = intelligence.get("request_window")
+    adaptive_envelope = _ENRICHMENT_PHASE_ENVELOPES.get(phase)
+    reverse_capability = registry.get("gdelt_theme_search")
+    static_reverse_calls = sum(
+        tasks[task_id].get("capability_id") == "gdelt_theme_search"
+        for task_id in planned_ids
+        if tasks[task_id].get("stage") != "reference"
+    )
+    require(
+        isinstance(request_window, Mapping)
+        and set(request_window) == {"start", "end"}
+        and isinstance(adaptive_envelope, Mapping)
+        and reverse_capability is not None,
+        "discovery reverse selection inputs are invalid",
+    )
+    reverse_capacity = min(
+        int(policy.adaptive_enrichment_budget.get(phase, 0)),
+        int(adaptive_envelope["gdelt_reverse"]),
+        max(0, reverse_capability.max_requests_per_run - static_reverse_calls),
+        max(0, 100 - 1 - len(planned_ids)),
+    )
+    expected_reverse = select_reverse_discovery_tasks(
+        tuple(initial_observations), reference_snapshot, max_tasks=reverse_capacity,
+    )
+    expected_reverse_by_id: dict[str, tuple[object, dict[str, object]]] = {}
+    for selection in expected_reverse:
+        row = selection.task
+        hypothesis = {
+            "adverse_path": row.adverse_path,
+            "direction": row.direction,
+            "evidence_requirement": row.evidence_requirement,
+            "exposure_supported": False,
+            "geography": row.geography,
+            "horizon": row.horizon,
+            "invalidation_rule": row.invalidation_rule,
+            "role": row.role,
+            "status": "hypothesis",
+        }
+        descriptor = {
+            "event_id": row.event_id,
+            "hypothesis": hypothesis,
+            "hypothesis_id": row.hypothesis_id,
+            "query": row.query_text,
+            "selection_task_id": row.task_id,
+            "source_item_ids": list(row.dependency_ids)[:32],
+        }
+        expected_id = str(uuid.uuid5(
+            uuid.NAMESPACE_URL,
+            f"market-intelligence:reverse-discovery-task:{run_id}:{row.task_id}",
+        ))
+        expected_reverse_by_id[expected_id] = (selection, descriptor)
+    actual_reverse_ids = {
+        task_id for task_id in dynamic_task_ids
+        if tasks[task_id].get("stage") == "resolve"
+    }
+    require(
+        actual_reverse_ids == set(expected_reverse_by_id),
+        "discovery reverse evidence selection is incomplete",
+    )
+    for task_id, (selection, descriptor) in expected_reverse_by_id.items():
+        task = tasks[task_id]
+        result = task.get("result")
+        require(
+            task.get("dependency_ids") == list(selection.dependency_task_ids)
+            and task.get("requested_window") == request_window
+            and isinstance(result, Mapping)
+            and result.get("reverse_descriptor") == descriptor,
+            "discovery reverse evidence selection is inconsistent",
+        )
+
     for task_id, task in tasks.items():
         if task.get("capability_id") != "dynamic_theme_evaluation":
             continue
@@ -1295,14 +1449,11 @@ def _verify_discovery_capability(receipt: Mapping[str, object]) -> VerificationR
         run_provenance=run_provenance,
         receipt_id_by_task=receipt_id_by_task,
         duplicate_references=duplicate_references,
-        candidate_task_ids={
-            task_id for task_id in receipt_id_by_task
-            if task_id in planned_id_set
-            or (
-                task_id in dynamic_task_ids
-                and tasks[task_id].get("stage") == "resolve"
-            )
-        },
+        candidate_task_ids=[
+            *initial_task_ids,
+            *(task_id for task_id in expected_reverse_by_id
+              if task_id in receipt_id_by_task),
+        ],
     )
     for task_id, task in tasks.items():
         if task_id in planned_id_set or task.get("stage") != "resolve":

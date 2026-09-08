@@ -14,8 +14,10 @@ from types import MappingProxyType
 import unicodedata
 import uuid
 
+from lib.intelligence.entities import resolve_entities
 from lib.intelligence.normalize import SourceItem
 from lib.intelligence.themes import evidence_key
+from lib.intelligence.universe import ReferenceSnapshot
 
 
 _ROOT = Path(__file__).resolve().parents[2]
@@ -146,6 +148,14 @@ class ReverseDiscoveryTask:
     dependency_ids: tuple[str, ...]
     max_attempts: int = 1
     execution_allowed: bool = False
+
+
+@dataclass(frozen=True, slots=True)
+class ReverseDiscoverySelection:
+    """One bounded reverse task with its source-task dependencies."""
+
+    task: ReverseDiscoveryTask
+    dependency_task_ids: tuple[str, ...]
 
 
 def load_theme_taxonomy(path: str | Path | None = None) -> ThemeTaxonomy:
@@ -460,9 +470,86 @@ def build_reverse_discovery_tasks(
     return tuple(tasks)
 
 
+def select_reverse_discovery_tasks(
+    observations: Sequence[tuple[str, SourceItem]],
+    reference: ReferenceSnapshot | None,
+    *,
+    max_tasks: int,
+) -> tuple[ReverseDiscoverySelection, ...]:
+    """Derive the exact bounded reverse-search selection from source evidence."""
+    if isinstance(max_tasks, bool) or not isinstance(max_tasks, int) \
+            or not 0 <= max_tasks <= 12:
+        raise ValueError("reverse discovery selection bound is invalid")
+    if max_tasks == 0:
+        return ()
+    items_by_key: dict[str, SourceItem] = {}
+    task_ids_by_item: dict[str, set[str]] = {}
+    for task_id, item in observations:
+        if not isinstance(task_id, str) or not task_id:
+            raise ValueError("reverse discovery source task identity is required")
+        if not isinstance(item, SourceItem):
+            raise TypeError("reverse discovery evidence must be canonical SourceItem values")
+        key = evidence_key(item)
+        items_by_key.setdefault(key, item)
+        task_ids_by_item.setdefault(key, set()).add(task_id)
+    if not items_by_key:
+        return ()
+
+    taxonomy = load_theme_taxonomy()
+    per_event: list[list[ReverseDiscoveryTask]] = []
+    for event in detect_events(tuple(items_by_key.values()), taxonomy):
+        resolved = (
+            any(
+                row.status == "resolved" and row.eligible
+                for item in event.evidence
+                for row in resolve_entities(item, reference)
+            )
+            if isinstance(reference, ReferenceSnapshot)
+            else bool(event.security_ids)
+        )
+        if resolved:
+            continue
+        bounded_events = detect_events(tuple(event.evidence[:32]), taxonomy)
+        if len(bounded_events) != 1:
+            raise ValueError("bounded reverse event is not deterministic")
+        bounded_event = bounded_events[0]
+        rows = list(build_reverse_discovery_tasks(
+            bounded_event,
+            expand_value_chain(bounded_event, taxonomy),
+            max_tasks=min(12, max_tasks),
+        ))
+        if rows:
+            per_event.append(rows)
+
+    selected: list[ReverseDiscoveryTask] = []
+    per_event.sort(key=lambda values: values[0].event_id)
+    while len(selected) < max_tasks and any(per_event):
+        remaining: list[list[ReverseDiscoveryTask]] = []
+        for values in per_event:
+            if len(selected) >= max_tasks:
+                remaining.append(values)
+                continue
+            selected.append(values.pop(0))
+            if values:
+                remaining.append(values)
+        per_event = remaining
+
+    return tuple(
+        ReverseDiscoverySelection(
+            task=row,
+            dependency_task_ids=tuple(sorted({
+                task_id
+                for source_id in row.dependency_ids
+                for task_id in task_ids_by_item.get(source_id, ())
+            }))[:32],
+        )
+        for row in selected
+    )
+
+
 __all__ = [
-    "EventDraft", "ReverseDiscoveryTask", "TaxonomyEdge", "ThemeDefinition",
+    "EventDraft", "ReverseDiscoverySelection", "ReverseDiscoveryTask", "TaxonomyEdge", "ThemeDefinition",
     "ThemeMatch", "ThemeTaxonomy", "ValueChainHypothesis",
     "build_reverse_discovery_tasks", "detect_events", "expand_value_chain",
-    "load_theme_taxonomy", "match_themes",
+    "load_theme_taxonomy", "match_themes", "select_reverse_discovery_tasks",
 ]

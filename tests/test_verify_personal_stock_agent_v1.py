@@ -198,7 +198,12 @@ def _capability_rows():
         })
     return {
         "run": [{"id": RUN, "scheduled_phase": "post-market", "scheduled_market_date": "2026-09-05"}],
-        "intelligence_runs": [{"id": RUN, "phase": "post-market", "market_date": "2026-09-05"}],
+        "intelligence_runs": [{
+            "id": RUN, "phase": "post-market", "market_date": "2026-09-05",
+            "request_window": {
+                "start": "2026-09-05T12:00:00Z", "end": "2026-09-05T20:00:00Z",
+            },
+        }],
         "reference_manifests": records["reference_manifests"],
         "security_reference_revisions": records["security_reference_revisions"],
         "reference_chunk_receipts": records["reference_chunk_receipts"],
@@ -237,7 +242,7 @@ def _rebind_packet_completion(rows):
     )
 
 
-def _reverse_descriptor_for_source(rows, item_id):
+def _reverse_descriptors_for_source(rows, item_id, *, max_tasks):
     from lib.intelligence.discovery import (
         build_reverse_discovery_tasks,
         detect_events,
@@ -253,31 +258,38 @@ def _reverse_descriptor_for_source(rows, item_id):
     taxonomy = load_theme_taxonomy()
     event = detect_events((source,), taxonomy)[0]
     selected = build_reverse_discovery_tasks(
-        event, expand_value_chain(event, taxonomy), max_tasks=1,
-    )[0]
-    hypothesis = {
-        "adverse_path": selected.adverse_path,
-        "direction": selected.direction,
-        "evidence_requirement": selected.evidence_requirement,
-        "exposure_supported": False,
-        "geography": selected.geography,
-        "horizon": selected.horizon,
-        "invalidation_rule": selected.invalidation_rule,
-        "role": selected.role,
-        "status": "hypothesis",
-    }
-    descriptor = {
-        "event_id": selected.event_id,
-        "hypothesis": hypothesis,
-        "hypothesis_id": selected.hypothesis_id,
-        "query": selected.query_text,
-        "selection_task_id": selected.task_id,
-        "source_item_ids": list(selected.dependency_ids),
-    }
-    return descriptor, str(uuid.uuid5(
-        uuid.NAMESPACE_URL,
-        f"market-intelligence:reverse-discovery-task:{RUN}:{selected.task_id}",
-    )), selected.theme_id
+        event, expand_value_chain(event, taxonomy), max_tasks=max_tasks,
+    )
+    result = []
+    for row in selected:
+        hypothesis = {
+            "adverse_path": row.adverse_path,
+            "direction": row.direction,
+            "evidence_requirement": row.evidence_requirement,
+            "exposure_supported": False,
+            "geography": row.geography,
+            "horizon": row.horizon,
+            "invalidation_rule": row.invalidation_rule,
+            "role": row.role,
+            "status": "hypothesis",
+        }
+        descriptor = {
+            "event_id": row.event_id,
+            "hypothesis": hypothesis,
+            "hypothesis_id": row.hypothesis_id,
+            "query": row.query_text,
+            "selection_task_id": row.task_id,
+            "source_item_ids": list(row.dependency_ids),
+        }
+        result.append((descriptor, str(uuid.uuid5(
+            uuid.NAMESPACE_URL,
+            f"market-intelligence:reverse-discovery-task:{RUN}:{row.task_id}",
+        )), row.theme_id))
+    return result
+
+
+def _reverse_descriptor_for_source(rows, item_id):
+    return _reverse_descriptors_for_source(rows, item_id, max_tasks=1)[0]
 
 
 def test_discovery_capability_accepts_receipt_backed_success_empty_for_every_due_task():
@@ -760,7 +772,7 @@ def test_discovery_capability_accepts_pipeline_generated_dynamic_theme_task():
         title="Liquid cooling loop: first deployment",
         metadata={
             "item_id": source["id"], "publisher_id": "publisher-a",
-            "upstream_identity": "story-a",
+            "upstream_identity": "story-a", "organization_names": ["Test Corp"],
         },
     )
     source_task = next(
@@ -783,6 +795,8 @@ def test_discovery_capability_accepts_pipeline_generated_dynamic_theme_task():
     rows["source_receipts"].append(prior_receipt)
     source["source_receipt_id"] = prior_receipt_id
     rows["source_item_provenance"][0]["retrieved_at"] = "2026-09-04T19:40:00Z"
+    rows["source_item_provenance"][0]["security_ids"] = ["NASDAQ:TEST"]
+    rows["run_source_item_provenance"][0]["security_ids"] = ["NASDAQ:TEST"]
     second_content = "independent liquid cooling evidence"
     second_hash = hashlib.sha256(second_content.encode()).hexdigest()
     second_id = str(uuid.uuid5(uuid.NAMESPACE_URL, f"market-source:{second_hash}"))
@@ -797,7 +811,7 @@ def test_discovery_capability_accepts_pipeline_generated_dynamic_theme_task():
         "canonical_content": second_content, "content_hash": second_hash,
         "metadata": {
             "item_id": second_id, "publisher_id": "publisher-b",
-            "upstream_identity": "story-b",
+            "upstream_identity": "story-b", "organization_names": ["Test Corp"],
         },
         "created_at": "2026-09-05T19:40:00Z",
     }
@@ -812,7 +826,8 @@ def test_discovery_capability_accepts_pipeline_generated_dynamic_theme_task():
         "canonical_item_url": second_source["canonical_url"],
         "request_url": "https://api.gdeltproject.org/api/v2/doc/doc",
         "retrieved_at": "2026-09-04T19:40:00Z", "reporting_at": None,
-        "entity_ids": [], "security_ids": [], "discovery_status": "qualified",
+        "entity_ids": [], "security_ids": ["NASDAQ:TEST"],
+        "discovery_status": "qualified",
         "created_at": "2026-09-05T19:40:00Z",
     })
     rows["run_source_item_provenance"].append({
@@ -821,7 +836,8 @@ def test_discovery_capability_accepts_pipeline_generated_dynamic_theme_task():
         "provider": "gdelt",
         "request_url": "https://api.gdeltproject.org/api/v2/doc/doc",
         "retrieved_at": parsed["retrieved_at"], "reporting_at": None,
-        "entity_ids": [], "security_ids": [], "discovery_status": "qualified",
+        "entity_ids": [], "security_ids": ["NASDAQ:TEST"],
+        "discovery_status": "qualified",
         "created_at": "2026-09-05T19:40:00Z",
     })
     for receipt_row in (
@@ -842,8 +858,9 @@ def test_discovery_capability_accepts_pipeline_generated_dynamic_theme_task():
         effective_at=None, retrieved_at=retrieved_at, authority="radar",
         metadata=MappingProxyType({
             "item_id": source["id"], "publisher_id": "publisher-a",
-            "upstream_identity": "story-a",
+            "upstream_identity": "story-a", "organization_names": ["Test Corp"],
         }),
+        security_ids=("NASDAQ:TEST",),
     )
     second_item = SourceItem(
         provider="gdelt", upstream_item_id=second_source["upstream_item_id"],
@@ -853,6 +870,7 @@ def test_discovery_capability_accepts_pipeline_generated_dynamic_theme_task():
         published_at=None,
         effective_at=None, retrieved_at=retrieved_at, authority="radar",
         metadata=MappingProxyType(second_source["metadata"]),
+        security_ids=("NASDAQ:TEST",),
     )
     receipt = RequestReceipt(
         provider="gdelt", reservation_id=parsed["reservation_id"], status="succeeded",
@@ -1076,27 +1094,28 @@ def test_discovery_capability_accepts_honest_uncertain_reverse_task():
     rows["source_items"][0]["metadata"] = {
         "theme_id": "critical_minerals_magnets",
     }
-    descriptor, task_id, theme_id = _reverse_descriptor_for_source(rows, item_id)
-    uncertain = copy.deepcopy(dependency)
-    uncertain.update(
-        id=task_id, stage="resolve", state="uncertain",
-        dependency_ids=[dependency["id"]],
-    )
-    uncertain["result"]["theme_id"] = theme_id
-    uncertain["result"]["hypothesis"] = descriptor["hypothesis"]
-    uncertain["result"]["reverse_descriptor"] = descriptor
     from lib.intelligence.cursors import SourceCursor
-    uncertain["result"]["request_cursor"] = SourceCursor(
-        provider="gdelt", capability_id="gdelt_theme_search",
-    ).to_mapping()
-    uncertain["query_hash"] = digest({
-        "capability_id": "gdelt_theme_search",
-        "query": descriptor,
-        "cursor": uncertain["result"]["request_cursor"],
-        "requested_window": uncertain["requested_window"],
-        "theme_id": theme_id,
-    })
-    rows["discovery_stage_tasks"].append(uncertain)
+    selected = _reverse_descriptors_for_source(rows, item_id, max_tasks=2)
+    for descriptor, task_id, theme_id in selected:
+        uncertain = copy.deepcopy(dependency)
+        uncertain.update(
+            id=task_id, stage="resolve", state="uncertain",
+            dependency_ids=[dependency["id"]],
+        )
+        uncertain["result"]["theme_id"] = theme_id
+        uncertain["result"]["hypothesis"] = descriptor["hypothesis"]
+        uncertain["result"]["reverse_descriptor"] = descriptor
+        uncertain["result"]["request_cursor"] = SourceCursor(
+            provider="gdelt", capability_id="gdelt_theme_search",
+        ).to_mapping()
+        uncertain["query_hash"] = digest({
+            "capability_id": "gdelt_theme_search",
+            "query": descriptor,
+            "cursor": uncertain["result"]["request_cursor"],
+            "requested_window": uncertain["requested_window"],
+            "theme_id": theme_id,
+        })
+        rows["discovery_stage_tasks"].append(uncertain)
 
     result = _verify_capability(rows)
     assert result.ok is True
@@ -1104,10 +1123,25 @@ def test_discovery_capability_accepts_honest_uncertain_reverse_task():
 
     forged = copy.deepcopy(rows)
     reverse = next(row for row in forged["discovery_stage_tasks"]
-                   if row["id"] == task_id)
+                   if row["id"] == selected[0][1])
     reverse["result"]["reverse_descriptor"]["event_id"] = str(uuid.uuid4())
     with pytest.raises(RuntimeError, match="reverse selection descriptor"):
         _verify_capability(forged)
+
+    omitted = copy.deepcopy(rows)
+    omitted["discovery_stage_tasks"] = [
+        row for row in omitted["discovery_stage_tasks"] if row["stage"] != "resolve"
+    ]
+    with pytest.raises(RuntimeError, match="reverse evidence selection"):
+        _verify_capability(omitted)
+
+    partial = copy.deepcopy(rows)
+    partial["discovery_stage_tasks"] = [
+        row for row in partial["discovery_stage_tasks"]
+        if row["id"] != selected[0][1]
+    ]
+    with pytest.raises(RuntimeError, match="reverse evidence selection"):
+        _verify_capability(partial)
 
 
 def test_discovery_capability_accepts_success_empty_when_all_returned_rows_are_dropped():
@@ -1451,7 +1485,12 @@ def release(tmp_path):
     recovery = recovery_records(); packet = recovery["packets"][0]; report = recovery["reports"][0]
     source.rows = {
         "run": [{"id": RUN, "kind": "post-market", "scheduled_phase": "post-market", "scheduled_market_date": "2026-09-05", "status": "completed", "started_at": "2026-09-05T19:10:00Z", "finished_at": "2026-09-05T20:00:00Z", "gateway_request_id": START, "telegram_message_ids": [7]}],
-        "intelligence_runs": [{"id": RUN, "phase": "post-market", "market_date": "2026-09-05"}],
+        "intelligence_runs": [{
+            "id": RUN, "phase": "post-market", "market_date": "2026-09-05",
+            "request_window": {
+                "start": "2026-09-05T12:00:00Z", "end": "2026-09-05T20:00:00Z",
+            },
+        }],
         "completions": [{"completion_id": COLLECTION, "run_id": RUN, "receipt": {"packet_id": PACKET, "packet_hash": packet["packet_hash"]}}],
         "run_events": [{"id": COLLECTION, "run_id": RUN, "status": "completed"}],
         "checkpoints": [{"run_id": RUN, "cache_key": "b" * 64}],
