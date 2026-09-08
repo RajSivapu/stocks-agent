@@ -19,6 +19,7 @@ from lib.intelligence.pipeline import (
     _frozen_source_plan,
     _retain_v2_relation_evidence,
     _source_summary,
+    _updated_source_cursor,
     protected_collection_context,
 )
 from lib.intelligence.normalize import normalize_item
@@ -41,7 +42,7 @@ from lib.intelligence.themes import SEED_THEMES, evidence_key
 from tests.test_intelligence_entities import reference as entity_reference
 from lib.intelligence.universe import SecurityIdentity
 from lib.intelligence.types import DiscoveryPlan, DiscoveryTask, PacketLimits, SourceCapability
-from lib.intelligence.cursors import SourceCursor
+from lib.intelligence.cursors import CollectionWindow, SourceCursor
 from lib.intelligence.research_queue import (
     EnrichmentRequest,
     adaptive_provider_reservations,
@@ -164,6 +165,39 @@ def test_pipeline_preserves_truthful_pretransport_source_outcomes(
     assert failed.metadata["backlog_remaining"] is False
     assert summary["coverage_status"] == coverage_status
     assert summary["next_retry_phase"] == "post-market"
+
+
+def test_explicit_unpageable_coverage_gap_advances_without_replaying_the_window():
+    completed = NOW - timedelta(days=1)
+    cursor = SourceCursor(
+        provider="gdelt",
+        capability_id="gdelt_theme_search",
+        completed_through=completed,
+    )
+    window = CollectionWindow(
+        start=completed - timedelta(hours=2),
+        end=NOW,
+        overlap_seconds=7_200,
+    )
+    gap_receipt = replace(receipt("gdelt"), metadata=MappingProxyType({
+        "truncated": True,
+        "backlog_remaining": False,
+        "continuation_unavailable": True,
+        "coverage_gap": True,
+        "next_retry_phase": "post-market",
+    }))
+
+    updated = _updated_source_cursor(
+        cursor,
+        window,
+        CollectionResult((raw_item("saturated"),), gap_receipt, 20),
+    )
+
+    assert updated.completed_through == NOW
+    assert updated.active_window_start is None
+    assert updated.active_window_end is None
+    assert updated.backlog_token is None
+    assert updated.next_retry_phase is None
 
 
 def test_pipeline_rejects_provider_outside_reviewed_registry():

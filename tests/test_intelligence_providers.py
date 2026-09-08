@@ -289,6 +289,57 @@ def test_provider_bounds_drop_extra_and_wrong_host_items():
     assert result.receipt.dropped_count == 2
 
 
+def test_gdelt_maxrecords_saturation_records_an_explicit_coverage_gap_once():
+    payload = {"articles": [{
+        "url": f"https://api.gdeltproject.org/doc/{index}",
+        "title": f"GDELT item {index}",
+        "seendate": "20260904T100000Z",
+    } for index in range(20)]}
+    http = FixtureHttp(payload)
+
+    result = build_adapter(
+        "gdelt", http,
+        QuotaSession({"gdelt": ({"reservation_id": "g-saturated", "reserved_requests": 1},)}),
+        clock=lambda: NOW,
+    ).collect(sample_query(
+        limit=20,
+        capability_id="gdelt_theme_search",
+        next_retry_phase="post-market",
+    ))
+
+    assert len(http.requests) == 1
+    assert result.receipt.returned_count == result.receipt.requested_limit == 20
+    assert result.receipt.accepted_count == 20
+    assert result.receipt.metadata["truncated"] is True
+    assert result.receipt.metadata["backlog_remaining"] is False
+    assert result.receipt.metadata["continuation_unavailable"] is True
+    assert result.receipt.metadata["coverage_gap"] is True
+    assert "backlog_token" not in result.receipt.metadata
+    assert "next_retry_phase" not in result.receipt.metadata
+
+
+def test_gdelt_below_maxrecords_is_exhaustive_without_a_coverage_gap():
+    payload = {"articles": [{
+        "url": f"https://api.gdeltproject.org/doc/{index}",
+        "title": f"GDELT item {index}",
+        "seendate": "20260904T100000Z",
+    } for index in range(19)]}
+
+    result = build_adapter(
+        "gdelt", FixtureHttp(payload),
+        QuotaSession({"gdelt": ({"reservation_id": "g-below-bound", "reserved_requests": 1},)}),
+        clock=lambda: NOW,
+    ).collect(sample_query(limit=20, capability_id="gdelt_theme_search"))
+
+    assert result.receipt.returned_count == 19
+    assert result.receipt.metadata["truncated"] is False
+    assert result.receipt.metadata["backlog_remaining"] is False
+    assert result.receipt.metadata["exhausted"] is True
+    assert "continuation_unavailable" not in result.receipt.metadata
+    assert "coverage_gap" not in result.receipt.metadata
+    assert "backlog_token" not in result.receipt.metadata
+
+
 def test_official_release_and_effective_timestamps_remain_distinct():
     result = build_adapter(
         "federal_register",

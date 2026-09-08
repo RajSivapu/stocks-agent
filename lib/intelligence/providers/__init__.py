@@ -364,6 +364,12 @@ class SourceAdapter(ABC):
         }
         if progress:
             metadata.update(progress)
+        if (
+            metadata.get("coverage_gap") is True
+            and metadata.get("continuation_unavailable") is True
+            and not bool(metadata.get("backlog_remaining"))
+        ):
+            metadata.pop("next_retry_phase", None)
         metadata["exhausted"] = (
             status in {"succeeded", "cache_hit"}
             and not bool(metadata.get("truncated"))

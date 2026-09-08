@@ -1,4 +1,5 @@
 from datetime import timezone
+from types import MappingProxyType
 from urllib.parse import urlencode
 
 from lib.intelligence.http import HttpRequest
@@ -59,3 +60,14 @@ class GdeltAdapter(SourceAdapter):
                 article.get("title")
             )) else {}),
         } for article in articles if isinstance(article, dict)]
+
+    def _progress_metadata(self, payload, query, response, records, bound):
+        saturated = len(records) >= bound
+        return MappingProxyType({
+            "truncated": saturated,
+            "backlog_remaining": False,
+            **({
+                "continuation_unavailable": True,
+                "coverage_gap": True,
+            } if saturated else {}),
+        })

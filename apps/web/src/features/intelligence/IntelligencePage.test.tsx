@@ -30,9 +30,9 @@ it("leads with revisions and outside-watchlist research without qualification la
 it("keeps diagnostics in keyboard-operable native details and exposes textual adverse state", () => {
   render(<IntelligencePage data={fixture} />);
   const summary = screen.getByText("Evidence and diagnostics").closest("summary")!;
-  expect(screen.getByText("All primary passages")).not.toBeVisible();
+  expect(screen.getByRole("heading", { name: "Evidence passages", hidden: true })).not.toBeVisible();
   fireEvent.click(summary);
-  expect(screen.getByText("All primary passages")).toBeVisible();
+  expect(screen.getByRole("heading", { name: "Evidence passages" })).toBeVisible();
   expect(screen.getAllByText(/adverse evidence/i).length).toBeGreaterThan(0);
   expect(screen.getByText(/3 deferred/i)).toBeVisible();
 });

@@ -433,7 +433,7 @@ def build_reverse_discovery_tasks(
         terms = " OR ".join(
             f'"{term}"' if " " in term else term for term in search_terms
         )
-        query = f"{terms} {row.geography} {row.horizon}"[:500]
+        query = f"({terms})"
         identity = str(uuid.uuid5(
             uuid.NAMESPACE_URL,
             f"reverse-discovery:{event.event_id}:{row.hypothesis_id}:{query}",

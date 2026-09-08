@@ -86,7 +86,7 @@ test("intelligence disclosures follow visual keyboard order and respect reduced 
   await diagnostics.focus();
   await expect(diagnostics).toBeFocused();
   await page.keyboard.press("Enter");
-  await expect(page.getByRole("heading", { name: "All primary passages" })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Evidence passages" })).toBeVisible();
   const transitionSeconds = await diagnostics.evaluate((node) =>
     Number.parseFloat(getComputedStyle(node).transitionDuration)
   );

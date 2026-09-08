@@ -2443,15 +2443,22 @@ def _updated_source_cursor(
     truncated = bool(metadata.get("truncated", False)) if successful else False
     backlog = metadata.get("backlog_token")
     token = backlog if isinstance(backlog, str) and backlog else None
+    backlog_remaining = successful and bool(metadata.get("backlog_remaining", False))
+    terminal_gap = (
+        successful
+        and truncated
+        and bool(metadata.get("coverage_gap", False))
+        and bool(metadata.get("continuation_unavailable", False))
+        and not backlog_remaining
+        and token is None
+    )
     page = CollectionPage(
         window=window,
         status=status,
-        exhausted=successful and not truncated and not bool(
-            metadata.get("backlog_remaining", False)
-        ),
-        truncated=truncated or (
-            successful and bool(metadata.get("backlog_remaining", False))
-        ),
+        # The durable receipt preserves an explicit coverage gap. With no
+        # continuation available, replaying the same window cannot close it.
+        exhausted=successful and (terminal_gap or (not truncated and not backlog_remaining)),
+        truncated=False if terminal_gap else truncated or backlog_remaining,
         backlog_token=token,
         accepted_item_ids=tuple(dict.fromkeys(
             (item.upstream_item_id or item.content_hash) for item in result.items

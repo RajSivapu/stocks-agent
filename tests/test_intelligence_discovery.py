@@ -201,6 +201,30 @@ def test_reverse_discovery_is_bounded_fair_keyless_and_contains_no_company_list(
     assert all(task.invalidation_rule for task in tasks)
 
 
+def test_reverse_discovery_uses_exact_parenthesized_gdelt_boolean_blocks():
+    source = item(
+        "DOE awards Niron Magnetics funding",
+        "The award expands rare-earth-free permanent magnet manufacturing.",
+        metadata={"organization_names": ["Niron Magnetics"]},
+    )
+    event = detect_events((source,), load_theme_taxonomy())[0]
+
+    tasks = build_reverse_discovery_tasks(
+        event,
+        expand_value_chain(event, load_theme_taxonomy()),
+        max_tasks=2,
+    )
+
+    assert [task.query_text for task in tasks] == [
+        '("permanent magnet motor" OR "electric motor demand" OR "critical minerals")',
+        '("rare earth free magnet" OR "magnet substitute" OR "critical minerals")',
+    ]
+    assert [(task.geography, task.horizon) for task in tasks] == [
+        ("global markets", "near to long term"),
+        ("global markets", "medium to long term"),
+    ]
+
+
 def test_value_chain_roles_are_hypotheses_and_never_exposure_proof():
     source = item(
         "Robotics production expands",
