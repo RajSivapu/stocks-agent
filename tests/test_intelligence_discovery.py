@@ -86,6 +86,23 @@ def test_event_identity_depends_on_claim_date_publisher_and_evidence_not_ticker(
     assert first.event_id != other_publisher.event_id
 
 
+def test_event_identity_uses_the_millisecond_timestamp_precision_persisted_by_gateway():
+    source = item(
+        "DOE awards magnet manufacturing funding",
+        "The award expands permanent magnet manufacturing.",
+    )
+    precise = replace(source, published_at=NOW.replace(microsecond=123_456))
+    persisted = replace(source, published_at=NOW.replace(microsecond=123_000))
+    next_millisecond = replace(source, published_at=NOW.replace(microsecond=124_000))
+
+    precise_event = detect_events((precise,), load_theme_taxonomy())[0]
+    persisted_event = detect_events((persisted,), load_theme_taxonomy())[0]
+    next_event = detect_events((next_millisecond,), load_theme_taxonomy())[0]
+
+    assert precise_event.event_id == persisted_event.event_id
+    assert precise_event.event_id != next_event.event_id
+
+
 @pytest.mark.parametrize(
     ("title", "summary", "effective_at", "expected"),
     [

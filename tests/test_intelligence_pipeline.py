@@ -1577,6 +1577,16 @@ def test_capability_plan_persists_bounded_reverse_tasks_before_transport_and_res
     assert len(reverse_rows) == 2
     assert all(row["dependency_ids"] == [task_id] for row in reverse_rows)
     assert all(row["result"]["hypothesis"]["exposure_supported"] is False for row in reverse_rows)
+    global_receipt_window = {
+        "start": gateway.payloads[0]["request_window"]["start"],
+        "end": gateway.payloads[0]["request_window"]["end"],
+    }
+    assert all(row["requested_window"] != global_receipt_window for row in reverse_rows)
+    for row in reverse_rows:
+        checkpoint = gateway.collection_checkpoints[row["result"]["checkpoint"]["cache_key"]]
+        assert row["result"]["checkpoint"]["receipt"]["requested_window"] \
+            == row["requested_window"]
+        assert checkpoint["receipt"]["requested_window"] == global_receipt_window
     assert len(adapter.queries) == 3
     assert any(row["target_key"] == "sec:AAA" for row in gateway.payloads[-1]["relationships"])
     assert result.actual_requests == 3

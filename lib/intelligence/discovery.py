@@ -51,7 +51,8 @@ def _timestamp(value: datetime | None) -> datetime | None:
         return None
     if not isinstance(value, datetime) or value.tzinfo is None:
         raise ValueError("event timestamps must be timezone-aware")
-    return value.astimezone(timezone.utc)
+    utc = value.astimezone(timezone.utc)
+    return utc.replace(microsecond=(utc.microsecond // 1_000) * 1_000)
 
 
 @dataclass(frozen=True, slots=True)

@@ -814,7 +814,7 @@ def test_normal_capability_producer_round_trips_through_protected_read_only_veri
                 "sec_edgar": 1,
                 "gdelt": sum(task.provider == "gdelt" for task in tasks),
             }),
-            reserved_adaptive_requests=0,
+            reserved_adaptive_requests=2,
         )
 
     def seed_run(run_id):
@@ -857,7 +857,7 @@ def test_normal_capability_producer_round_trips_through_protected_read_only_veri
     ] == "sec:unresolved"
     assert len(first_rows["packets"][0]["packet"]["coverage"][
         "duplicate_references"
-    ]) == 8
+    ]) == 10
     assert {row["research_state"] for row in first_rows["packets"][0]["packet"][
         "research_candidates"
     ]} == {"unresolved"}

@@ -1065,6 +1065,14 @@ def _verify_discovery_capability(receipt: Mapping[str, object]) -> VerificationR
     persisted_receipt_rows = receipt.get("source_receipts", [])
     persisted_receipts = {row.get("id"): row for row in persisted_receipt_rows
                           if isinstance(row, Mapping)}
+    persisted_request_window = intelligence.get("request_window")
+    global_receipt_window = (
+        {
+            "start": persisted_request_window.get("start"),
+            "end": persisted_request_window.get("end"),
+        }
+        if isinstance(persisted_request_window, Mapping) else None
+    )
     reservations = {row.get("id"): row for row in receipt.get("source_quota_reservations", [])
                     if isinstance(row, Mapping)}
     source_items = {row.get("id"): row for row in receipt.get("source_items", [])
@@ -1177,6 +1185,7 @@ def _verify_discovery_capability(receipt: Mapping[str, object]) -> VerificationR
             and isinstance(completion_by_id.get(receipt_id), Mapping)
             and parsed.get("provider") == task.get("provider") == stored.get("provider")
             and parsed.get("requested_window") == task.get("requested_window")
+            and stored.get("requested_window") == global_receipt_window
             and isinstance(parsed.get("metadata"), Mapping)
             and parsed["metadata"].get("capability_id") == task.get("capability_id")
             and parsed.get("status") in {"succeeded", "cache_hit"}
@@ -1184,7 +1193,7 @@ def _verify_discovery_capability(receipt: Mapping[str, object]) -> VerificationR
             and coverage_status in {"success_empty", "success_nonempty"}
             and all(parsed.get(key) == stored.get(db_key) for key, db_key in (
                 ("provider", "provider"), ("reservation_id", "reservation_id"),
-                ("cache_key", "cache_key"), ("requested_window", "requested_window"),
+                ("cache_key", "cache_key"),
                 ("request_cost", "request_cost"), ("returned_count", "returned_count"),
                 ("accepted_count", "accepted_count"), ("duplicate_count", "duplicate_count"),
                 ("dropped_count", "dropped_count"), ("response_hash", "response_hash"),
@@ -1427,12 +1436,13 @@ def _verify_discovery_capability(receipt: Mapping[str, object]) -> VerificationR
         and isinstance(adaptive_envelope, Mapping)
         and reverse_capability is not None
         and type(gdelt_reserved_requests) is int
-        and gdelt_reserved_requests >= static_gdelt_calls,
+        and gdelt_reserved_requests
+            == static_gdelt_calls + int(adaptive_envelope["gdelt_reverse"])
+        and int(policy.adaptive_enrichment_budget.get(phase, -1))
+            == sum(int(value) for value in adaptive_envelope.values()),
         "discovery reverse selection inputs are invalid",
     )
-    reserved_reverse_capacity = gdelt_reserved_requests - static_gdelt_calls
     reverse_capacity = min(
-        reserved_reverse_capacity,
         int(policy.adaptive_enrichment_budget.get(phase, 0)),
         int(adaptive_envelope["gdelt_reverse"]),
         max(0, reverse_capability.max_requests_per_run - static_reverse_calls),

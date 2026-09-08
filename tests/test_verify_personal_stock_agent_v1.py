@@ -442,16 +442,20 @@ def test_discovery_capability_accepts_distinct_persisted_task_request_windows():
     task["requested_window"] = window
     checkpoint = task["result"]["checkpoint"]["receipt"]
     checkpoint["requested_window"] = window
+
+    assert _verify_capability(rows).ok is True
+
+    forged = copy.deepcopy(rows)
     receipt_id = checkpoint["source_receipt_id"]
-    next(row for row in rows["source_receipts"] if row["id"] == receipt_id)[
+    next(row for row in forged["source_receipts"] if row["id"] == receipt_id)[
         "requested_window"
     ] = window
     next(
-        row for row in rows["completions"][0]["payload"]["receipts"]
+        row for row in forged["completions"][0]["payload"]["receipts"]
         if row["id"] == receipt_id
     )["requested_window"] = window
-
-    assert _verify_capability(rows).ok is True
+    with pytest.raises(RuntimeError, match="receipt-backed success"):
+        _verify_capability(forged)
 
 
 def test_discovery_capability_accepts_cross_run_content_addressed_source_item_reuse():
@@ -1161,6 +1165,13 @@ def test_discovery_capability_accepts_honest_uncertain_reverse_task():
     with pytest.raises(RuntimeError, match="reverse evidence selection"):
         _verify_capability(omitted)
 
+    reduced = copy.deepcopy(omitted)
+    reduced_plan = reduced["intelligence_runs"][0]["reservation_plan"]["reservations"][0]
+    reduced_plan["requests"] -= 2
+    reduced["source_quota_reservations"][0]["reserved_requests"] -= 2
+    with pytest.raises(RuntimeError, match="reverse selection inputs"):
+        _verify_capability(reduced)
+
     partial = copy.deepcopy(rows)
     partial["discovery_stage_tasks"] = [
         row for row in partial["discovery_stage_tasks"]
@@ -1623,8 +1634,12 @@ def test_release_accepts_receipt_backed_quiet_intraday_without_a_report(release)
     )
     source.rows["intelligence_runs"][0]["phase"] = "intraday"
     source.rows["intelligence_runs"][0]["request_window"]["phase"] = "intraday"
+    source.rows["intelligence_runs"][0]["reservation_plan"]["reservations"][0][
+        "requests"
+    ] -= 1
     for reservation in source.rows["source_quota_reservations"]:
         reservation["phase"] = "intraday"
+        reservation["reserved_requests"] -= 1
     source.rows["evaluation_publications"][0]["phase"] = "intraday"
     source.rows["reports"] = []
     source.rows["publications"] = []
