@@ -26,14 +26,13 @@ skipped, with typecheck, lint, license, build, and bundle checks green. The fina
 passed Python 1,509 passed/3 skipped/4 credentialed tests deselected, Node 71, Deno 333, package
 tests 7 + 53, and Playwright 24 passed/1 skipped; typecheck, lint, license, build, and bundle checks
 also passed. That gate contains 1,997 passing checks. The final release-candidate
-hardening gate then passed Python 1,524 passed/3 skipped/4 credentialed tests deselected, Node 71,
+hardening gate then passed Python 1,539 passed/3 skipped/4 credentialed tests deselected, Node 71,
 Deno 334, package tests 7 + 53, and Playwright 24 passed/1 skipped; typecheck, lint, license,
-production build, and bundle checks also passed. That gate contains **2,013 passing checks** and
+production build, and bundle checks also passed. That gate contains **2,028 passing checks** and
 covers optional official-source lineage, honest empty reports, quiet intraday terminal outcomes,
-credential-isolated child processes, pre-mutation recovery state, and exact Site archive/live-byte
-parity with a retained rollback version. The final release-candidate
+credential-isolated child processes, pre-mutation recovery state, and exact local Site package/build parity while native deployment, access, live-byte, and retained rollback-target proof stay separate. The final release-candidate
 identity is the commit containing this record. Its independent exact-SHA reviews, protected backend
-CI/release identities, separate native Site receipt, and normal scheduled receipts remain open.
+CI/release identities, direct native Site observation, and normal scheduled receipts remain open.
 
 | Task | Reviewed closing commit | Local result |
 |---|---|---|
@@ -50,9 +49,9 @@ CI/release identities, separate native Site receipt, and normal scheduled receip
 
 The protected migration boundary is the immutable additive chain
 `20261005_market_wide_discovery.sql` through
-`20261013_v2_runtime_completion.sql`. The `20261004` artifact is the separate immutable
+`20261014_honest_empty_report_persistence.sql`. The `20261004` artifact is the separate immutable
 production-schema reconciliation baseline; there is no `20261004_market_wide_discovery.sql` and the
-release must never invent or apply one. The nine discovery/runtime migration file SHA-256 values are
+release must never invent or apply one. The ten discovery/runtime migration file SHA-256 values are
 recorded in `docs/rollouts/2026-09-06-market-wide-thematic-discovery-v1.md`.
 
 Known V1 limits remain visible: `complete_market_coverage` is always false; free sources and request
@@ -201,8 +200,10 @@ identity and the newly allocated restoration version; the existing function ID m
 It does not resurrect the old version number or accept a foreign ID with matching bytes.
 GitHub Actions has no native Sites connector, so it receives no Sites write credential. The protected
 workflow releases and recovers only the backend. The owner then publishes the exact same candidate
-through the native owner-scoped Sites connector and validates a separate native Sites receipt with
-`scripts/verify_native_site_release.py`. Historical Site v9 and protected run `34055419086` remain
+through the native owner-scoped Sites connector. `scripts/verify_native_site_release.py` compares the
+local package with the protected build but deliberately leaves `owner_site` pending; only fresh direct
+connector access, version, deployment, and retained-prior-version observations plus authenticated live
+asset readback can close it. Historical Site v9 and protected run `34055419086` remain
 evidence for the earlier runtime; they cannot be relabeled as receipts for this market-wide candidate.
 
 The exact Track C range received independent approval after both Important recovery findings were
@@ -380,8 +381,8 @@ V1-C6 is reopened and the release remains no-go for trusted use.
    evidence and the September 11 Friday evidence.
 4. Execute the approved market-wide discovery implementation plan and pass its local capability,
    safety, calendar, recovery, and capacity gates.
-5. Complete exact-candidate Astra review, protected-main CI, protected backend release, separate
-   native Sites receipt, and normal scheduled discovery receipts.
+5. Complete exact-candidate Astra review, protected-main CI, protected backend release, fresh direct
+   native Sites observation with authenticated live-file parity, and normal scheduled discovery receipts.
 6. Close V1-C2 through V1-C6 and the active V1 goal only when their own receipt gates pass.
 
 ## Site-only UI releases — completed 2026-09-06
@@ -445,7 +446,7 @@ its artifact and receipt hashes are recorded in the verified checkpoint above. D
 
 The formal scheduled reader in `scripts/protected_evidence.py` requires the missing restricted
 `RELEASE_READONLY_DATABASE_URL`; `scripts/verify_personal_stock_agent_v1.py` requires the protected
-backend artifact plus the exact-candidate native Sites receipt, then validates the persisted chain,
+backend artifact, then validates the persisted chain,
 original Telegram delivery or explicit suppression, and quota lineage. Never send another
 report to manufacture evidence. The existing one-shot heartbeat will inspect the next normal market
 session after the protected attestation; it must not dispatch a duplicate run.

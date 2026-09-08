@@ -184,7 +184,6 @@ def test_protected_workflows_use_the_same_exact_main_ci_trust_contract():
         ".github/workflows/owner-dashboard-release.yml",
         ".github/workflows/owner-dashboard-release-recovery.yml",
         ".github/workflows/managed-isolated-restore.yml",
-        ".github/workflows/existing-v1-runtime-attestation.yml",
     ):
         workflow = Path(path).read_text()
         assert all(value in workflow for value in required), path
@@ -209,7 +208,7 @@ def test_release_record_keeps_release_and_later_scheduled_receipts_distinct():
         "protected_backend": {"status": "verified", "candidate_sha": "a" * 40},
         "owner_site": {
             "status": "pending",
-            "required_evidence": "exact_candidate_owner_only_native_site_receipt",
+            "required_evidence": "current_authenticated_native_connector_observation",
         },
         "operational_scheduled": {
             "status": "pending",
@@ -346,7 +345,9 @@ def test_backend_release_does_not_claim_or_require_native_site_deployment():
     assert "--check-backend-transport" in workflow
     assert "owner-web-site" not in writer.split("component_readbacks", 1)[1].split("]", 1)[0]
     assert '"owner_site"' in writer
-    assert "native Sites receipt" in Path("docs/rollouts/2026-09-06-market-wide-thematic-discovery-v1.md").read_text()
+    rollout = Path("docs/rollouts/2026-09-06-market-wide-thematic-discovery-v1.md").read_text()
+    assert "Fresh direct connector observations" in rollout
+    assert "saved JSON copy" in rollout
 
 
 def test_independent_recovery_contract_covers_cancelled_and_lost_release_runners():

@@ -1223,7 +1223,10 @@ class IntelligencePipeline:
             query_kind="theme_search",
             theme_id=None,
             query={"query": "dynamic-theme-evaluation", "labels": labels},
-            window=dict(request_window),
+            window={
+                "start": request_window["start"],
+                "end": request_window["end"],
+            },
             dependencies=dependencies,
             max_attempts=1,
             requires_credential=False,

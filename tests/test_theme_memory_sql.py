@@ -31,6 +31,9 @@ MIGRATION = ROOT / "sql/migrations/20261012_theme_memory_research_nominations.sq
 RUNTIME_COMPLETION_MIGRATION = (
     ROOT / "sql/migrations/20261013_v2_runtime_completion.sql"
 )
+HONEST_EMPTY_REPORT_MIGRATION = (
+    ROOT / "sql/migrations/20261014_honest_empty_report_persistence.sql"
+)
 SCHEMA = ROOT / "sql/schema.sql"
 
 
@@ -55,10 +58,14 @@ def test_task9_migration_is_additive_parseable_and_appended_verbatim():
     assert "20261005_market_wide_discovery" not in migration
 
 
-def test_v2_runtime_completion_migration_is_parseable_and_final_schema_tail():
+def test_v2_runtime_completion_and_honest_empty_tail_are_parseable_and_ordered():
     statements = parse_sql(RUNTIME_COMPLETION_MIGRATION.read_text())
     assert statements
-    assert SCHEMA.read_bytes().endswith(RUNTIME_COMPLETION_MIGRATION.read_bytes())
+    honest_empty = parse_sql(HONEST_EMPTY_REPORT_MIGRATION.read_text())
+    assert honest_empty
+    schema = SCHEMA.read_bytes()
+    assert RUNTIME_COMPLETION_MIGRATION.read_bytes() in schema
+    assert schema.endswith(HONEST_EMPTY_REPORT_MIGRATION.read_bytes())
     migration = RUNTIME_COMPLETION_MIGRATION.read_text()
     assert "SECURITY DEFINER SET search_path=pg_catalog" in migration
     assert "record_market_intelligence_v2_completion" in migration

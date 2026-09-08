@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Seal the unchanged production V1 runtime baseline without mutating it.
+"""Retained validator for the completed, unchanged production V1 baseline.
 
 Sites evidence comes from the native Codex Sites connector because GitHub Actions
 has no equivalent Sites transport. Database, Auth, and Edge evidence is read
@@ -8,7 +8,8 @@ identities and digests only. Its native input may contain bounded source and
 live-asset bytes captured by the authenticated Sites connector; it never
 contains portfolio rows or credentials.
 
-This is a one-time bridge for the already-deployed V1 runtime. It intentionally
+This was a one-time bridge for the already-deployed V1 runtime and its workflow
+is now retired. It intentionally
 requires full database inventory equality with the completed reconciliation.
 Routine scheduled data growth invalidates that equality; later code releases use
 the normal protected deployment and recovery workflow.
@@ -181,11 +182,41 @@ def _captured_live_asset(value: object) -> bytes:
     return raw
 
 
+def _validate_restorable_site_archive(files: Mapping[str, bytes], project_id: object) -> None:
+    """Require enough bounded source and the exact manifest to rebuild a prior Site."""
+    required_files = {".openai/hosting.json", "package.json", "package-lock.json"}
+    require(
+        required_files <= set(files)
+        and any(path.startswith("apps/web/") for path in files)
+        and any(path.startswith("packages/dashboard-contracts/") for path in files),
+        "native Site retained prior archive is not restorable",
+    )
+    try:
+        hosting = json.loads(files[".openai/hosting.json"])
+    except (json.JSONDecodeError, UnicodeDecodeError) as error:
+        raise RuntimeError("native Site retained prior archive is not restorable") from error
+    require(
+        hosting == {
+            "project_id": project_id,
+            "static": {
+                "directory": "dist",
+                "not_found_handling": "single-page-application",
+            },
+        },
+        "native Site retained prior archive is not restorable",
+    )
+
+
 def validate_native_site_receipt(receipt: Mapping[str, object], candidate_sha: str, project_ref: str,
                                  repo_root: Path = ROOT, *, now: datetime | None = None,
                                  static_root: Path | None = None,
                                  protected_build_receipt: Mapping[str, object] | None = None) -> dict[str, object]:
-    """Bind authenticated native metadata and independent live bytes to one build."""
+    """Compare copied Site metadata/bytes without treating the copy as provenance.
+
+    This deterministic boundary can reject inconsistent content, but caller-supplied
+    JSON cannot prove that an authenticated Sites connector produced it. Only a
+    current root-agent connector observation may close the owner-Site evidence class.
+    """
     require(isinstance(receipt, Mapping) and set(receipt) == _SITE_RECEIPT_KEYS, "native Site receipt is malformed")
     require(receipt.get("format") == "stocks-native-sites-release-v3"
             and receipt.get("trust_domain") == "codex-native-sites-connector", "native Site receipt provenance is malformed")
@@ -282,8 +313,7 @@ def validate_native_site_receipt(receipt: Mapping[str, object], candidate_sha: s
         captures["prior"], version_id=prior["id"],
         expected_hash=prior["archive_content_hash"],
     )
-    require(".openai/hosting.json" in prior_archive_files,
-            "native Site retained prior archive is not restorable")
+    _validate_restorable_site_archive(prior_archive_files, site.get("project_id"))
     source_files = _git_files_for_paths(repo_root, source_sha, SITE_SOURCE_PATHS)
     candidate_files = _git_files_for_paths(repo_root, candidate_sha, SITE_SOURCE_PATHS)
     require(all(path in source_files for path in (".openai/hosting.json", "package.json", "package-lock.json")),
@@ -346,8 +376,8 @@ def validate_native_site_receipt(receipt: Mapping[str, object], candidate_sha: s
             and expected_api_url.encode() in combined,
             "native Site backend binding differs from protected Supabase")
     return {
-        "status": "verified",
-        "trust_domain": receipt["trust_domain"],
+        "status": "content_consistent",
+        "provenance": "offline_copy_only",
         "captured_at": receipt["captured_at"],
         "project_id": site["project_id"],
         "live_url": live_url,
@@ -828,30 +858,11 @@ def main() -> int:
     parser.add_argument("--reconciliation-artifact-id", type=int, required=True)
     parser.add_argument("--reconciliation-artifact-digest", required=True)
     parser.add_argument("--output", type=Path, required=True)
-    arguments = parser.parse_args()
-    output = arguments.output.resolve()
-    if output.name != "existing-v1-runtime-attestation.json" or not output.parent.is_dir():
-        raise SystemExit("output must be an existing directory ending in existing-v1-runtime-attestation.json")
-    receipt = create_attestation(
-        arguments.candidate_sha,
-        arguments.production_project_ref,
-        _load_json(arguments.native_site_receipt, "native Site receipt"),
-        _load_json(arguments.protected_build_receipt, "protected build receipt"),
-        _load_json(arguments.reconciliation_receipt, "schema reconciliation receipt"),
-        {
-            "workflow_run_id": arguments.reconciliation_workflow_run_id,
-            "artifact_id": arguments.reconciliation_artifact_id,
-            "artifact_digest": arguments.reconciliation_artifact_digest,
-        },
+    parser.parse_args()
+    raise SystemExit(
+        "the one-time existing-runtime attestation is retired; use the current "
+        "protected release and direct native Sites connector sequence"
     )
-    output.write_text(canonical_json(receipt) + "\n", encoding="utf-8")
-    print(canonical_json({
-        "status": "verified",
-        "candidate_sha": arguments.candidate_sha,
-        "receipt_sha256": receipt["receipt_sha256"],
-        "mutation_counts": receipt["mutation_counts"],
-    }))
-    return 0
 
 
 if __name__ == "__main__":

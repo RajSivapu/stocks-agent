@@ -57,7 +57,7 @@ def release_evidence_classes(receipt: dict[str, object]) -> dict[str, object]:
         "protected_backend": {"status": "verified", "candidate_sha": candidate_sha},
         "owner_site": {
             "status": "pending",
-            "required_evidence": "exact_candidate_owner_only_native_site_receipt",
+            "required_evidence": "current_authenticated_native_connector_observation",
         },
         "operational_scheduled": {
             "status": "pending",

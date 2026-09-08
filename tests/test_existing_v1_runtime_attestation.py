@@ -165,7 +165,8 @@ def test_native_site_receipt_accepts_docs_only_descendant_and_rejects_web_drift(
         _site_receipt(source_sha), candidate_sha, PROJECT_REF, repo,
         protected_build_receipt=_site_build_receipt(candidate_sha),
     )
-    assert verified["status"] == "verified"
+    assert verified["status"] == "content_consistent"
+    assert verified["provenance"] == "offline_copy_only"
     assert verified["version_number"] == 5
     assert verified["source_commit_sha"] == source_sha
 
@@ -232,6 +233,35 @@ def test_native_site_receipt_rejects_forged_hashes_and_missing_rollback_version(
     with pytest.raises(RuntimeError, match="prior version"):
         validate_native_site_receipt(
             missing_prior, candidate_sha, PROJECT_REF, repo,
+            protected_build_receipt=_site_build_receipt(candidate_sha),
+        )
+
+
+@pytest.mark.parametrize("prior_files", [
+    {".openai/hosting.json": SITE_SOURCE_FILES[".openai/hosting.json"]},
+    {**SITE_SOURCE_FILES, ".openai/hosting.json": json.dumps({
+        "project_id": "appgprj_other",
+        "static": {"directory": "dist", "not_found_handling": "single-page-application"},
+    }).encode()},
+])
+def test_native_site_receipt_rejects_incomplete_or_wrong_project_prior_archive(
+    tmp_path, prior_files,
+):
+    from scripts.attest_existing_v1_runtime import validate_native_site_receipt
+
+    repo, source_sha, candidate_sha = _site_repo(tmp_path)
+    receipt = _site_receipt(source_sha)
+    archive = _tar(prior_files)
+    receipt["retained_prior_version"]["archive_content_hash"] = (
+        "sha256:" + hashlib.sha256(archive).hexdigest()
+    )
+    receipt["archive_captures"]["prior"]["content_base64"] = (
+        base64.b64encode(archive).decode()
+    )
+
+    with pytest.raises(RuntimeError, match="prior archive is not restorable"):
+        validate_native_site_receipt(
+            receipt, candidate_sha, PROJECT_REF, repo,
             protected_build_receipt=_site_build_receipt(candidate_sha),
         )
 
@@ -571,33 +601,6 @@ def test_authenticated_owner_canary_reads_database_and_always_revokes_session():
     assert calls == ["local"]
 
 
-def test_attestation_workflow_is_manual_exact_main_and_has_no_production_mutation_commands():
+def test_completed_one_time_attestation_workflow_is_not_dispatchable():
     path = Path(".github/workflows/existing-v1-runtime-attestation.yml")
-    workflow = yaml.safe_load(path.read_text())
-    assert workflow["name"] == "One-time existing V1 runtime baseline attestation"
-    triggers = workflow.get("on", workflow.get(True))
-    assert set(triggers) == {"workflow_dispatch"}
-    job = workflow["jobs"]["attest"]
-    assert job["environment"] == "owner-dashboard-production"
-    assert job["permissions"] if "permissions" in job else workflow["permissions"]
-    commands = "\n".join(str(step.get("run", "")) for step in job["steps"])
-    assert "scripts/attest_existing_v1_runtime.py" in commands
-    assert '"${GITHUB_SHA:-}" = "$MAIN_SHA"' in commands
-    assert "actions/runs/$CI_WORKFLOW_RUN_ID" in commands
-    assert "actions/artifacts/$RECONCILIATION_ARTIFACT_ID/zip" in commands
-    assert "sha256sum" in commands
-    assert "/database/query/read-only" not in commands  # implemented inside the tested Python boundary
-    forbidden = (
-        "functions deploy", "functions delete", "db push", "secrets set", "secrets unset",
-        "start_run", "collect_market_intelligence.py", "deploy_site", "save_site_version",
-        "provision_owner_dashboard_auth.py", "generate_link", "ALTER ROLE", "CREATE ROLE",
-    )
-    assert not any(token in commands for token in forbidden)
-    secret_refs = {
-        match for match in __import__("re").findall(r"secrets\.([A-Z0-9_]+)", path.read_text())
-    }
-    assert secret_refs == {
-        "DASHBOARD_OWNER_EMAIL", "SUPABASE_ACCESS_TOKEN", "SUPABASE_PROJECT_REF",
-        "SUPABASE_PUBLISHABLE_KEY", "SUPABASE_SERVICE_ROLE_KEY",
-    }
-    assert any(str(step.get("uses", "")).startswith("actions/upload-artifact@") for step in job["steps"])
+    assert not path.exists()

@@ -687,6 +687,95 @@ def test_discovery_capability_rejects_unplanned_task_without_dynamic_lineage():
         _verify_capability(rows)
 
 
+def test_discovery_capability_accepts_pipeline_generated_dynamic_theme_task():
+    from types import MappingProxyType
+
+    from lib.intelligence.pipeline import IntelligencePipeline
+    from lib.intelligence.providers import CollectionResult, RequestReceipt, SourceItem
+    from lib.intelligence.types import DiscoveryTask
+
+    rows = _capability_rows()
+    _make_first_required_receipt_nonempty(rows, persist_lineage=True)
+    source = rows["source_items"][0]
+    source_task = next(
+        row for row in rows["discovery_stage_tasks"]
+        if row["result"].get("checkpoint", {}).get("receipt", {}).get(
+            "source_receipt_id"
+        ) == source["source_receipt_id"]
+    )
+    parsed = source_task["result"]["checkpoint"]["receipt"]
+    retrieved_at = datetime.fromisoformat(parsed["retrieved_at"].replace("Z", "+00:00"))
+    item = SourceItem(
+        provider="gdelt", upstream_item_id=source["upstream_item_id"],
+        source_url=source["canonical_url"],
+        title="Liquid cooling loop: first deployment",
+        normalized_text=source["normalized_text"],
+        canonical_content=source["canonical_content"], content_hash=source["content_hash"],
+        published_at=datetime.fromisoformat(source["published_at"].replace("Z", "+00:00")),
+        effective_at=None, retrieved_at=retrieved_at, authority="radar",
+        metadata=MappingProxyType({
+            "item_id": source["id"], "publisher_id": "publisher-a",
+            "upstream_identity": "story-a",
+        }),
+    )
+    receipt = RequestReceipt(
+        provider="gdelt", reservation_id=parsed["reservation_id"], status="succeeded",
+        cache_key=parsed["cache_key"], requested_window=parsed["requested_window"],
+        requested_limit=20, retrieved_at=retrieved_at, observed_at=retrieved_at,
+        expires_at=datetime.fromisoformat(parsed["expires_at"].replace("Z", "+00:00")),
+        request_cost=1, upstream_remaining=None, returned_count=1, accepted_count=1,
+        duplicate_count=0, dropped_count=0, response_hash=parsed["response_hash"],
+        source_receipt_id=parsed["source_receipt_id"],
+    )
+    task = DiscoveryTask(
+        task_id=source_task["id"], stage="signals", provider="gdelt",
+        capability_id="gdelt_theme_search", query_kind="theme_search",
+        theme_id=source_task["result"]["theme_id"],
+        query=MappingProxyType({"query": "permanent magnets"}),
+        window=MappingProxyType(source_task["requested_window"]), dependencies=(),
+        max_attempts=1, requires_credential=False,
+    )
+
+    class Recorder(IntelligencePipeline):
+        def _checkpoint_discovery_task(
+            self, run_id, row, *, theme_episode_revisions=(), exposure_facts=(),
+        ):
+            rows["theme_episode_revisions"] = [
+                {**value, "run_id": run_id, "task_id": row["id"]}
+                for value in theme_episode_revisions
+            ]
+            return {**row, "run_id": run_id}
+
+    recorder = Recorder.__new__(Recorder)
+    persisted = {}
+    recorder._persist_dynamic_theme_evaluation(
+        RUN, source_task["requested_window"],
+        [(task, CollectionResult((item,), receipt, 20))], persisted,
+    )
+    rows["discovery_stage_tasks"].extend(persisted.values())
+
+    assert _verify_capability(rows).ok is True
+
+
+def test_discovery_capability_accepts_honest_uncertain_reverse_task():
+    rows = _capability_rows()
+    dependency = next(
+        row for row in rows["discovery_stage_tasks"]
+        if row["capability_id"] == "gdelt_theme_search"
+    )
+    uncertain = copy.deepcopy(dependency)
+    uncertain.update(
+        id=str(uuid.uuid4()), stage="resolve", state="uncertain",
+        query_hash="8" * 64, dependency_ids=[dependency["id"]],
+    )
+    uncertain["result"].pop("hypothesis", None)
+    rows["discovery_stage_tasks"].append(uncertain)
+
+    result = _verify_capability(rows)
+    assert result.ok is True
+    assert "gdelt_theme_search:uncertain" in result.optional_failures
+
+
 def test_discovery_capability_accepts_success_empty_when_all_returned_rows_are_dropped():
     rows = _capability_rows()
     task = next(
@@ -913,6 +1002,7 @@ def release(tmp_path):
            "package.json": b'{"private":true}\n',
            "package-lock.json": b'{"lockfileVersion":3}\n',
            "apps/web/src/main.tsx": b"web source\n",
+           "packages/dashboard-contracts/src/index.ts": b"contract source\n",
            "scripts/deploy_owner_dashboard_api.py": b"deploy verifier\n"}
     for path, content in raw.items():
         destination = repo / path; destination.parent.mkdir(parents=True, exist_ok=True); destination.write_bytes(content)
@@ -981,7 +1071,7 @@ def release(tmp_path):
             "ciphertext_sha256": "d" * 64},
         "evidence_classes": {
             "protected_backend": {"status": "verified", "candidate_sha": sha},
-            "owner_site": {"status": "pending", "required_evidence": "exact_candidate_owner_only_native_site_receipt"},
+            "owner_site": {"status": "pending", "required_evidence": "current_authenticated_native_connector_observation"},
             "operational_scheduled": {"status": "pending", "required_evidence": "normal_post_release_scheduled_receipt"},
             "discovery_capability": {"status": "pending", "checkpoint": "V1-C3",
                 "required_evidence": "normal_post_release_scheduled_capability_receipt"},
@@ -1075,51 +1165,11 @@ def release(tmp_path):
         requested_report_id=report_id, requested_idempotency_key=report_key,
         requested_report_hash=report["report_hash"],
     )
-    site_source_files = {path: content for path, content in raw.items()
-        if path == ".openai/hosting.json"
-        or path in {"package.json", "package-lock.json"}
-        or path.startswith("apps/web/")
-        or path.startswith("packages/dashboard-contracts/")}
-    site_archive = tar_bytes(site_source_files)
-    site_receipt = {
-        "format": "stocks-native-sites-release-v3",
-        "captured_at": "2026-09-05T20:30:00Z",
-        "trust_domain": "codex-native-sites-connector",
-        "site": {"project_id": "appgprj_fixture", "status": "active",
-            "live_url": site_url, "latest_version_number": 10,
-            "current_user_role": "owner", "access_mode": "custom", "allowed_owner_count": 1,
-            "external_visitor_count": 0, "allowed_group_count": 0},
-        "retained_prior_version": {"id": "appgver_prior", "version_number": 9,
-            "deployment_id": "appgdep_prior",
-            "archive_content_hash": "sha256:" + hashlib.sha256(site_archive).hexdigest(),
-            "rollback_eligible": True},
-        "active_version": {"id": "appgver_candidate", "version_number": 10,
-            "source_commit_sha": sha, "archive_format": "tar",
-            "archive_content_hash": "sha256:" + hashlib.sha256(site_archive).hexdigest(),
-            "archive_files": {path: hashlib.sha256(content).hexdigest()
-                for path, content in site_source_files.items()},
-            "archive_tree_sha256": tree_hash(site_source_files),
-            "file_count": len(site_source_files),
-            "size_bytes": sum(len(content) for content in site_source_files.values())},
-        "active_deployment": {"id": "appgdep_candidate", "version_id": "appgver_candidate",
-            "type": "publish", "status": "succeeded", "url": site_url},
-        "candidate_build": {"candidate_sha": sha, "build_sha256": tree_hash(static_files),
-            "files": {path: hashlib.sha256(content).hexdigest()
-                for path, content in static_files.items()}},
-        "archive_captures": {name: {
-            "version_id": "appgver_candidate" if name == "active" else "appgver_prior",
-            "capture_method": "owner_authenticated_native_connector",
-            "content_base64": base64.b64encode(site_archive).decode(),
-        } for name in ("active", "prior")},
-        "live_bundle": {"files": [{"path": path,
-                "url": site_url + ("/" if path == "index.html" else "/" + path),
-                "sha256": hashlib.sha256(content).hexdigest(), "bytes": len(content),
-                "capture_method": "owner_authenticated_native_connector",
-                "content_base64": base64.b64encode(content).decode()}
-                for path, content in static_files.items() if not path.startswith("_")],
-            "supabase_project_ref": "p" * 20, "dashboard_api_url": api_url},
-    }
-    return source, {"deployment_id": 42, "native_site_receipt": site_receipt,
+    site_archive = tar_bytes({
+        "dist/.openai/hosting.json": raw[".openai/hosting.json"],
+        **{f"dist/{path}": content for path, content in static_files.items()},
+    })
+    return source, {"deployment_id": 42, "native_site_archive": site_archive,
         "repo_root": repo, "static_root": static, "clock": lambda: NOW}
 
 
@@ -1147,6 +1197,12 @@ def test_release_queries_sources_and_binds_exact_receipts(release):
         ],
         "optional_failures": [],
     }
+    assert result["evidence_classes"]["owner_site"] == {
+        "status": "pending",
+        "required_evidence": "current_authenticated_native_connector_observation",
+    }
+    assert result["native_site_comparison"]["status"] == "content_consistent"
+    assert "verified" not in str(result["native_site_comparison"])
     source.record.pop("run_id")
     assert verify_release(source, **args)["run_id"] == RUN
 
@@ -1209,10 +1265,13 @@ def test_release_blocks_when_required_discovery_evidence_is_missing(release):
         verify_release(source, **args)
 
 
-def test_release_blocks_without_the_exact_candidate_native_site_receipt(release):
+def test_release_never_promotes_caller_site_json_to_authoritative_evidence(release):
     source, args = release
-    args["native_site_receipt"] = {}
-    with pytest.raises(RuntimeError, match="native Site|exact candidate"):
+    result = verify_release(source, **args)
+    assert result["evidence_classes"]["owner_site"]["status"] == "pending"
+
+    args["native_site_archive"] = {"forged": "json"}
+    with pytest.raises(RuntimeError, match="archive bytes"):
         verify_release(source, **args)
 
 

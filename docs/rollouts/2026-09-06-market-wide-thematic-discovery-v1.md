@@ -43,17 +43,17 @@ gate passed Python 1,509 tests with 3 skipped and 4 credentialed tests deselecte
 package tests 7 + 53, and Playwright 24 with 1 skipped; typecheck, lint, license, build, and bundle
 also passed. That final gate contains 1,997 passing checks.
 After the final Sol/Astra findings were corrected, the September 8 release-hardening gate passed
-Python 1,524 tests with 3 skipped and 4 credentialed tests deselected, Node 71, Deno 334, package
+Python 1,539 tests with 3 skipped and 4 credentialed tests deselected, Node 71, Deno 334, package
 tests 7 + 53, and Playwright 24 with 1 skipped. Typecheck, lint, license, production build, and
-bundle checks passed. That gate contains **2,013 passing checks**. It directly covers optional
+bundle checks passed. That gate contains **2,028 passing checks**. It directly covers optional
 official-source research lineage, honest empty reports, quiet intraday terminal outcomes,
 credential-isolated release subprocesses, durable preparation evidence before planning/capture, and
-native Site downloaded-archive plus live-byte parity with a retained prior version.
+local Site package/protected-build parity without treating copied JSON as connector proof.
 
 ## Additive migration boundary
 
 Market-wide discovery starts at `20261005_market_wide_discovery.sql` and ends at
-`20261013_v2_runtime_completion.sql`. The `20261004` artifact is the separate immutable
+`20261014_honest_empty_report_persistence.sql`. The `20261004` artifact is the separate immutable
 production-schema reconciliation baseline. There is no `20261004_market_wide_discovery.sql`, and the
 release must not invent or apply one.
 
@@ -68,9 +68,10 @@ release must not invent or apply one.
 | `20261011_research_suitability_packet_contract.sql` | `f6e178ef986265d6008dcc381293e05e61802c2f90465b4c69b7410ab668dbe6` |
 | `20261012_theme_memory_research_nominations.sql` | `a7274c8c4af3046cbbf6145e169a79e1852edcd8ccbdfa0b8885a3da8c9c365d` |
 | `20261013_v2_runtime_completion.sql` | `5a5e4138ab3d816df0218d03a00f5e5f49005d1cc65ec9bd5e81500dacac6ea0` |
+| `20261014_honest_empty_report_persistence.sql` | `872400cd1b5a6701056b837a346add08c0785cf782cad2abb6e34e4cc6713a36` |
 
-The reviewed `20261005` through `20261012` migration bytes remain unchanged. The `20261013`
-migration is the additive runtime completion fix, and `sql/schema.sql` ends with its exact bytes.
+The reviewed `20261005` through `20261013` migration bytes remain unchanged. The `20261014`
+migration is the additive honest-empty report persistence fix, and `sql/schema.sql` ends with its exact bytes.
 The protected release uses the repository's complete immutable migration manifest and applies only
 byte-verified pending versions.
 
@@ -79,7 +80,7 @@ byte-verified pending versions.
 The approved candidate changes protected database state, runtime behavior, and the owner audit UI.
 It therefore requires two candidate-bound release steps for the exact reviewed SHA:
 
-- the nine additive discovery/runtime migrations above;
+- the ten additive discovery/runtime migrations above;
 - `market-briefing-gateway`, `owner-dashboard-api`, and `telegram-portfolio` Edge Functions;
 - scheduled-runtime approved-domain and credential-presence configuration, without recording secret
   values;
@@ -91,10 +92,11 @@ backend: it captures encrypted pre-release database/function/runtime state, appl
 candidate, and reads back migration bytes, protected relations and ACLs, runtime configuration, all
 three Edge source trees/configuration, canaries, and recovery identities. GitHub Actions does not
 receive a Sites write credential. After that backend receipt passes, the owner publishes the same
-candidate through the native Sites connector. A separate native Sites receipt must prove the exact
-candidate source, one allowed owner, no groups, zero external visitors, the expected API origin,
-successful deployment, live assets, and a retained prior version. Either missing receipt keeps the
-release open.
+candidate through the native Sites connector. Fresh direct connector observations must prove the
+exact candidate source, one allowed owner, no groups, zero external visitors, the expected API
+origin, successful deployment, and a provider-retained prior successful version. Authenticated live
+reads must match every served build file. The local package comparison and any saved JSON copy are
+audit context only; neither can close `owner_site`. Missing direct evidence keeps the release open.
 
 ## Source capability status and limits
 
@@ -132,11 +134,13 @@ Known limits are part of the release contract:
    exact merged PR, and exact-main CI run. Release the migration manifest, all three Edge Functions,
    and protected runtime configuration. Retain the encrypted backend recovery journal and verify its
    immutable artifact, readbacks, and owner/anonymous/non-owner canaries.
-4. Publish the exact same candidate through the native owner-scoped Sites connector. Preserve the
-   previous active version for rollback, independently read every served file, compare the
-   downloaded source archive and live bytes to the exact candidate/build, and validate the fresh native Sites receipt with
-   `scripts/verify_native_site_release.py`. The backend release record must keep `owner_site` pending;
-   only this separate receipt can verify that evidence class.
+4. Build the native Site package and compare it with the protected build using
+   `scripts/verify_native_site_release.py`; this local result must keep `owner_site` pending. Publish the
+   exact package from the same candidate with the owner-scoped Sites connector, then directly re-read
+   custom owner-only access, the exact version and successful deployment, provider archive metadata,
+   and every served file through an authenticated Site session. Confirm the previous successful version
+   remains in the same project as a provider-retained rollback target; do not claim that rollback was
+   exercised. Only these fresh direct observations close `owner_site`.
 5. Wait for the existing normal schedule. Do not trigger collector, provider, Telegram, or another
    scheduled run to manufacture evidence.
 6. Verify the normal run twice: first as an operational chain, then as the V1-C3 discovery capability
@@ -153,7 +157,7 @@ must record its own exact pre-release component identities and encrypted artifac
 |---|---|---|
 | September 8 current-runtime operational receipt | Historical/current-runtime only; preserve separately | The already deployed chain operated normally. It cannot prove the new source plan or V1-C3 capability. |
 | Candidate protected backend receipt | **Pending** | Exact reviewed SHA, main/PR/CI/workflow/artifact binding, migration/function/runtime readback, owner API canaries, and durable encrypted backend recovery. |
-| Candidate native Sites receipt | **Pending** | Exact candidate source, owner-only access, successful private deployment, live asset/backend binding, and retained prior version. |
+| Candidate direct native Sites observation | **Pending** | Exact candidate source/package hash, owner-only access, successful private deployment, authenticated live asset/backend parity, and provider-retained prior production version. A saved copy is audit context, not fresh proof. |
 | Candidate normal operational receipt | **Pending** | One existing scheduled analysis/intelligence/report/publication or explicit-suppression chain completed without duplicate dispatch. |
 | Candidate V1-C3 capability receipt | **Pending** | Required capability plan, reference/cursor/stage lineage, outside-watchlist discovery semantics, research/action integrity, and every due required baseline source outcome. |
 

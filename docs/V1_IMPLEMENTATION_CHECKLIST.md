@@ -36,7 +36,7 @@ An owner-only personal stock agent that uses zero-incremental-cost data sources,
   package tests 7 + 53, and Playwright 24; 3 Python and 1 Playwright tests skipped, with 4
   credentialed database tests intentionally deselected; typecheck, lint, license, build, and bundle
   checks also passed
-- [x] September 8 release-hardening gate passed: **2,013 checks** — Python 1,524, Node 71,
+- [x] September 8 release-hardening gate passed: **2,028 checks** — Python 1,539, Node 71,
   Deno 334, package tests 7 + 53, and Playwright 24; 3 Python and 1 Playwright tests skipped, with
   4 credentialed database tests intentionally deselected; typecheck, lint, license, production
   build, and bundle checks also passed
@@ -45,9 +45,8 @@ An owner-only personal stock agent that uses zero-incremental-cost data sources,
 - [x] Successful optional official sources can support research candidates while required baseline
   sources still fail closed and optional failures remain visible
 - [x] Static build and Supabase CLI subprocesses receive strict environment allowlists; durable
-  preparation evidence exists before fallible planning/capture; the native Site receipt binds the
-  downloaded source archive, exact candidate build, independently read live bytes, and retained
-  rollback version
+  preparation evidence exists before fallible planning/capture; the local Site package comparator binds the
+  exact candidate package to the protected build without claiming connector provenance
 - [ ] Next existing scheduled-chain receipt
 - [ ] Complete exact-candidate review, protected backend release, separate native Sites publication
   and readback, and normal scheduled V1-C3 capability proof
@@ -61,9 +60,11 @@ order on one exact reviewed candidate:
 2. Push the reviewed head, pass exact-head CI, merge it to protected `main`, and pass exact-main CI.
 3. Run the manual protected backend release and verify the immutable migration, function,
    runtime-role, managed-secret, canary, artifact, and recovery receipts.
-4. Publish the same candidate with the owner-scoped native Sites connector. Keep the previous
-   version rollback-eligible and verify the downloaded source archive plus every served live file
-   against the exact local build.
+4. Compare the packaged Site with the protected build, then publish that package from the same
+   candidate with the owner-scoped native Sites connector. Directly re-read owner-only access, the
+   exact saved version and successful deployment, compare provider archive metadata with the local
+   package, read every served file through the authenticated Site, and confirm the previous successful
+   production version remains a provider-retained rollback target. The rollback is retained, not exercised.
 5. Wait for the next existing normal scheduled run. Do not create another run for evidence. Accept
    either the complete report/publication chain or the exact receipt-backed quiet intraday
    `no_trigger` chain.
@@ -138,10 +139,10 @@ order on one exact reviewed candidate:
 These require the protected production path and must not be replaced by local evidence.
 
 The September 8 currently-deployed operational evidence, the new protected backend receipt, the
-new native Sites receipt, and the new V1-C3 scheduled capability receipt are separate artifacts.
+new direct native Sites observation, and the new V1-C3 scheduled capability receipt are separate artifacts.
 Existing evidence cannot be relabeled as candidate capability proof. Market-wide migrations are the immutable additive chain from
 `20261005_market_wide_discovery.sql` through
-`20261013_v2_runtime_completion.sql`; `20261004` remains the separate reconciliation
+`20261014_honest_empty_report_persistence.sql`; `20261004` remains the separate reconciliation
 baseline.
 
 - [x] Confirm live Auth is signup-disabled with 900-second JWT, six-digit/600-second OTP settings, and `ConfirmationURL` magic-link and recovery templates
@@ -156,7 +157,7 @@ baseline.
 - [x] Publish the link-only owner Auth correction as owner-only Site v8 from exact main `b433a5b`; deployment `appgdep_6a9dff357ee88191bf08d54af6f4240f` succeeded and `docs/receipts/2026-09-06-native-site-v8.json` binds the source, build, live scripts, access, and v7 rollback
 - [x] Publish password-primary owner Auth with signed-link setup/recovery as owner-only Site v9 from exact main `e2f9d74`; deployment `appgdep_6a9e15085f048191a80497d9e75fd253` succeeded and `docs/receipts/2026-09-06-native-site-v9.json` binds the source, build, Auth readback, live assets, Sol review, access, and v8 rollback
 - [ ] Release the exact market-wide candidate backend through the protected GitHub workflow and verify its immutable component/recovery artifact
-- [ ] Publish that same exact candidate as the private owner Site through the native Sites connector and validate its native Sites receipt with `scripts/verify_native_site_release.py`
+- [ ] Compare the exact package with the protected build, publish it as the private owner Site, and close `owner_site` only from fresh direct connector access/version/deployment observations plus authenticated live-file parity; retain the prior successful version as a provider rollback target
 - [x] Complete an owner email sign-in canary on signed-link Site v5 — **owner confirmed the signed email link opened the portfolio dashboard on 2026-09-05; Site v9 preserves the same callback as setup/recovery and fallback**
 - [x] Perform the protected restore drill and retain its receipt — **run `34042155368` restored and
   verified 26 record sets, preserved identical production roots, applied no migrations on retry,
