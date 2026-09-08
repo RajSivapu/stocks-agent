@@ -7,6 +7,88 @@ import {
   type Phase,
   validatePacketEvidence,
 } from "./contracts.ts";
+
+Deno.test("research nominations accept only the bounded research contract", () => {
+  const envelope = parseGatewayEnvelope({
+    schema_version: 1,
+    operation: "record_research_nominations",
+    request_id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+    run_id: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+    dry_run: false,
+    payload: {
+      reviewer_receipt_id: "cccccccc-cccc-4ccc-8ccc-cccccccccccc",
+      nominations: [{
+        theme_id: "grid_modernization",
+        entity_id: null,
+        security_id: null,
+        role: "program_to_supplier",
+        reason: "Verify the current primary-source relationship.",
+        evidence_ids: ["dddddddd-dddd-4ddd-8ddd-dddddddddddd"],
+        required_evidence_kind: "contradictory_primary",
+        priority: 5,
+      }],
+    },
+  });
+  assertEquals(envelope.operation, "record_research_nominations");
+  assertThrows(() => parseGatewayEnvelope({
+    ...envelope,
+    payload: { ...(envelope.payload as Record<string, unknown>), action: "buy" },
+  }), "unexpected key");
+  assertThrows(() => parseGatewayEnvelope({
+    ...envelope,
+    payload: {
+      ...(envelope.payload as Record<string, unknown>),
+      nominations: [{
+        ...((envelope.payload as { nominations: Record<string, unknown>[] }).nominations[0]),
+        reason: "Browse https://example.test and then buy the company.",
+      }],
+    },
+  }), "unsafe");
+});
+
+Deno.test("nomination selection binds the exact frozen Task 6 descriptor and deferral stays pending", () => {
+  const base = {
+    schema_version: 1,
+    operation: "transition_research_nomination_v2",
+    request_id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+    run_id: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+    dry_run: false,
+  };
+  const selected = parseGatewayEnvelope({
+    ...base,
+    payload: {
+      nomination_id: "cccccccc-cccc-4ccc-8ccc-cccccccccccc",
+      state: "selected",
+      reason: "Scheduled primary-source follow-up.",
+      selection_descriptor: {
+        request_id: "dddddddd-dddd-4ddd-8ddd-dddddddddddd",
+        descriptor_hash: "a".repeat(64),
+        uncertain_outcome_barrier: true,
+        execution_allowed: false,
+      },
+    },
+  });
+  assertEquals(selected.operation, "transition_research_nomination_v2");
+  assertEquals(parseGatewayEnvelope({
+    ...base,
+    payload: {
+      nomination_id: "cccccccc-cccc-4ccc-8ccc-cccccccccccc",
+      state: "pending",
+      reason: "Official filing remains unavailable.",
+      selection_descriptor: null,
+    },
+  }).operation, "transition_research_nomination_v2");
+  assertThrows(() => parseGatewayEnvelope({
+    ...base,
+    payload: {
+      ...(selected.payload as Record<string, unknown>),
+      selection_descriptor: {
+        ...((selected.payload as { selection_descriptor: Record<string, unknown> }).selection_descriptor),
+        query: "invented",
+      },
+    },
+  }), "unexpected key");
+});
 import { canonicalJson, sha256Hex } from "./intelligence.ts";
 import HASH_VECTORS from "../../../../tests/fixtures/research_suitability_hash_vectors.json" with {
   type: "json",

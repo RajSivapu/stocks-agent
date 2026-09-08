@@ -5,7 +5,7 @@ from __future__ import annotations
 import argparse
 import base64
 import binascii
-from datetime import datetime
+from datetime import datetime, timedelta
 from decimal import Decimal, InvalidOperation
 import hashlib
 import io
@@ -46,6 +46,9 @@ REQUIRED_RECOVERY_RECORDS = (
     "reference_predecessor_pins", "reference_transfer_requests", "reference_transfer_responses",
     "enrichment_selection_manifests", "enrichment_request_descriptors",
     "theme_episode_revisions", "exposure_facts", "research_nominations",
+    "theme_episode_revisions_v2", "reviewer_identity_receipts_v2",
+    "research_nomination_requests_v2", "research_nominations_v2",
+    "research_nomination_lifecycle_v2", "intelligence_memory_context_bindings_v2",
     "packets", "reports",
     "intelligence_run_events", "source_quota_reservations", "collection_checkpoints",
     "source_receipts", "source_items", "intelligence_run_items",
@@ -168,6 +171,50 @@ DATASET_FIELDS = {
         "id": str, "run_id": str, "task_id": str, "security_revision_id": str,
         "theme_episode_revision_id": NULLABLE_TEXT, "exposure_fact_ids": list,
         "state": str, "rationale": dict, "created_at": str, "updated_at": str,
+    },
+    "theme_episode_revisions_v2": {
+        "revision_id": str, "theme_id": str, "episode_id": str, "revision": int,
+        "identity_version": int, "anchor_hash": str, "origin_run_id": str,
+        "predecessor_revision_id": NULLABLE_TEXT, "predecessor_content_hash": NULLABLE_TEXT,
+        "theme_mechanism": str, "subject_identity": str, "jurisdiction": str,
+        "effective_period_start": str, "effective_period_end": NULLABLE_TEXT,
+        "authoritative_id": NULLABLE_TEXT, "source_membership": list, "source_ids": list,
+        "supporting_source_ids": list, "opposing_source_ids": list, "added_source_ids": list,
+        "investigated_entity_ids": list, "missing_questions": list,
+        "invalidation_conditions": list, "first_seen": str, "last_seen": str,
+        "next_review_at": str, "expires_at": str, "state": str,
+        "closure_reason": NULLABLE_TEXT, "reopen_reason": NULLABLE_TEXT,
+        "content_hash": str, "execution_allowed": bool, "created_at": str,
+    },
+    "reviewer_identity_receipts_v2": {
+        "receipt_id": str, "run_id": str, "packet_id": str, "packet_hash": str,
+        "reference_manifest_id": str, "actor_identity": str, "reviewed_role": str,
+        "predecessor_receipt_id": NULLABLE_TEXT, "review_hash": str,
+        "reviewed_at": str, "execution_allowed": bool,
+    },
+    "research_nomination_requests_v2": {
+        "request_id": str, "run_id": str, "packet_id": str, "reviewer_receipt_id": str,
+        "request_hash": str, "accepted_count": int, "response": dict, "created_at": str,
+    },
+    "research_nominations_v2": {
+        "nomination_id": str, "request_id": str, "origin_run_id": str, "packet_id": str,
+        "packet_hash": str, "reviewer_receipt_id": str, "actor_identity": str,
+        "reviewed_role": str, "reference_manifest_id": str, "theme_id": str,
+        "entity_id": NULLABLE_TEXT, "security_id": NULLABLE_TEXT, "relationship_role": str,
+        "reason": str, "evidence_ids": list, "required_evidence_kind": str, "priority": int,
+        "created_at": str, "expires_at": str, "execution_allowed": bool,
+    },
+    "research_nomination_lifecycle_v2": {
+        "receipt_id": str, "nomination_id": str, "transition_run_id": str,
+        "predecessor_receipt_id": NULLABLE_TEXT, "state": str, "reason": NULLABLE_TEXT,
+        "selection_descriptor": (dict, type(None)), "created_at": str,
+        "receipt_hash": str, "execution_allowed": bool,
+    },
+    "intelligence_memory_context_bindings_v2": {
+        "run_id": str, "as_of": str, "reference_manifest_id": NULLABLE_TEXT,
+        "reference_hash": NULLABLE_TEXT, "selected_revision_ids": list,
+        "selected_nomination_ids": list, "context": dict, "snapshot_hash": str,
+        "created_at": str,
     },
     "intelligence_run_events": {
         "id": str, "run_id": str, "status": str, "detail": dict, "created_at": str,
@@ -1642,6 +1689,157 @@ def _validate_evidence_packet_v2_recovery(
         raise ValueError("packet v2 recovery lineage mismatch") from None
 
 
+def _validate_theme_memory_v2_lineage(result: Mapping[str, list[dict[str, object]]]) -> None:
+    runs = {row["id"] for row in result["intelligence_runs"]}
+    packets = {row["id"]: row for row in result["packets"]}
+    manifests = {row["id"] for row in result["reference_manifests"]}
+    source_items = {row["id"] for row in result["source_items"]}
+    revisions = {row["revision_id"]: row for row in result["theme_episode_revisions_v2"]}
+
+    def aware(value: object) -> datetime:
+        if not isinstance(value, str):
+            raise ValueError
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+        if parsed.tzinfo is None:
+            raise ValueError
+        return parsed
+
+    successors: set[str] = set()
+    try:
+        for row in revisions.values():
+            membership = row["source_membership"]
+            predecessor = revisions.get(row["predecessor_revision_id"])
+            if (
+                not UUID.fullmatch(row["revision_id"])
+                or not UUID.fullmatch(row["episode_id"])
+                or row["origin_run_id"] not in runs
+                or row["identity_version"] != 2
+                or row["execution_allowed"] is not False
+                or not HASH.fullmatch(row["anchor_hash"])
+                or not HASH.fullmatch(row["content_hash"])
+                or not isinstance(membership, list)
+                or not 1 <= len(membership) <= 64
+                or any(
+                    not isinstance(item, Mapping)
+                    or set(item) != {"evidence_id", "story_identity", "polarity"}
+                    or item["evidence_id"] not in source_items
+                    or item["polarity"] not in {"supporting", "opposing"}
+                    for item in membership
+                )
+                or aware(row["last_seen"]) < aware(row["first_seen"])
+                or aware(row["expires_at"]) > aware(row["first_seen"]) + timedelta(days=30)
+            ):
+                raise ValueError
+            if row["revision"] == 1:
+                if predecessor is not None or row["predecessor_content_hash"] is not None:
+                    raise ValueError
+            elif (
+                predecessor is None
+                or predecessor["episode_id"] != row["episode_id"]
+                or predecessor["theme_id"] != row["theme_id"]
+                or predecessor["revision"] + 1 != row["revision"]
+                or predecessor["content_hash"] != row["predecessor_content_hash"]
+                or predecessor["first_seen"] != row["first_seen"]
+                or aware(row["expires_at"]) > aware(predecessor["expires_at"])
+                or row["predecessor_revision_id"] in successors
+            ):
+                raise ValueError
+            else:
+                successors.add(row["predecessor_revision_id"])
+
+        reviewers = {row["receipt_id"]: row for row in result["reviewer_identity_receipts_v2"]}
+        for row in reviewers.values():
+            predecessor = reviewers.get(row["predecessor_receipt_id"])
+            packet = packets.get(row["packet_id"])
+            if (
+                row["run_id"] not in runs or packet is None or packet["run_id"] != row["run_id"]
+                or packet["packet_hash"] != row["packet_hash"]
+                or row["reference_manifest_id"] not in manifests
+                or row["reviewed_role"] not in {"analyst", "checker"}
+                or row["execution_allowed"] is not False
+                or not HASH.fullmatch(row["review_hash"])
+            ):
+                raise ValueError
+            if row["reviewed_role"] == "analyst" and predecessor is not None:
+                raise ValueError
+            if row["reviewed_role"] == "checker" and (
+                predecessor is None or predecessor["packet_id"] != row["packet_id"]
+                or predecessor["reviewed_role"] != "analyst"
+                or predecessor["actor_identity"] == row["actor_identity"]
+            ):
+                raise ValueError
+
+        requests = {row["request_id"]: row for row in result["research_nomination_requests_v2"]}
+        for row in requests.values():
+            reviewer = reviewers.get(row["reviewer_receipt_id"])
+            if (
+                row["run_id"] not in runs or row["packet_id"] not in packets
+                or reviewer is None or reviewer["run_id"] != row["run_id"]
+                or reviewer["packet_id"] != row["packet_id"]
+                or not HASH.fullmatch(row["request_hash"])
+                or not 0 <= row["accepted_count"] <= 3
+            ):
+                raise ValueError
+
+        nominations = {row["nomination_id"]: row for row in result["research_nominations_v2"]}
+        for row in nominations.values():
+            request = requests.get(row["request_id"])
+            reviewer = reviewers.get(row["reviewer_receipt_id"])
+            packet = packets.get(row["packet_id"])
+            if (
+                request is None or reviewer is None or packet is None
+                or row["origin_run_id"] not in runs
+                or request["run_id"] != row["origin_run_id"]
+                or request["packet_id"] != row["packet_id"]
+                or reviewer["packet_id"] != row["packet_id"]
+                or packet["packet_hash"] != row["packet_hash"]
+                or row["reference_manifest_id"] not in manifests
+                or row["actor_identity"] != reviewer["actor_identity"]
+                or row["reviewed_role"] != reviewer["reviewed_role"]
+                or row["execution_allowed"] is not False
+                or not 1 <= len(row["evidence_ids"]) <= 8
+                or len(set(row["evidence_ids"])) != len(row["evidence_ids"])
+                or not 1 <= row["priority"] <= 5
+                or aware(row["expires_at"]) > aware(row["created_at"]) + timedelta(days=7)
+            ):
+                raise ValueError
+
+        lifecycle = {row["receipt_id"]: row for row in result["research_nomination_lifecycle_v2"]}
+        lifecycle_successors: set[str] = set()
+        for row in lifecycle.values():
+            predecessor = lifecycle.get(row["predecessor_receipt_id"])
+            if (
+                row["nomination_id"] not in nominations or row["transition_run_id"] not in runs
+                or row["state"] not in {"pending", "selected", "resolved", "rejected", "expired"}
+                or row["execution_allowed"] is not False or not HASH.fullmatch(row["receipt_hash"])
+            ):
+                raise ValueError
+            if row["state"] == "pending" and predecessor is not None:
+                raise ValueError
+            if predecessor is not None:
+                if predecessor["nomination_id"] != row["nomination_id"] or row["predecessor_receipt_id"] in lifecycle_successors:
+                    raise ValueError
+                lifecycle_successors.add(row["predecessor_receipt_id"])
+
+        for row in result["intelligence_memory_context_bindings_v2"]:
+            context = row["context"]
+            if (
+                row["run_id"] not in runs
+                or (row["reference_manifest_id"] is not None and row["reference_manifest_id"] not in manifests)
+                or (row["reference_hash"] is not None and not HASH.fullmatch(row["reference_hash"]))
+                or any(value not in revisions for value in row["selected_revision_ids"])
+                or any(value not in nominations for value in row["selected_nomination_ids"])
+                or context.get("memory_version") != 2
+                or context.get("research_only") is not True
+                or context.get("execution_allowed") is not False
+                or len(canonical_json(context).encode("utf-8")) > 65_536
+                or not HASH.fullmatch(row["snapshot_hash"])
+            ):
+                raise ValueError
+    except (KeyError, TypeError, ValueError, OverflowError):
+        raise ValueError("theme memory v2 recovery lineage mismatch") from None
+
+
 def _validated_records(records: Mapping[str, object]) -> dict[str, list[dict[str, object]]]:
     if not isinstance(records, Mapping) or set(records) != set(REQUIRED_RECOVERY_RECORDS):
         raise ValueError("recovery records require exact allowlisted datasets")
@@ -1674,6 +1872,12 @@ def _validated_records(records: Mapping[str, object]) -> dict[str, list[dict[str
             "reference_predecessor_pins": ("run_id", "capability_id"),
             "reference_transfer_requests": "request_id",
             "reference_transfer_responses": "request_id",
+            "theme_episode_revisions_v2": "revision_id",
+            "reviewer_identity_receipts_v2": "receipt_id",
+            "research_nomination_requests_v2": "request_id",
+            "research_nominations_v2": "nomination_id",
+            "research_nomination_lifecycle_v2": "receipt_id",
+            "intelligence_memory_context_bindings_v2": "run_id",
         }.get(name, "id")
         if isinstance(identity_fields, str):
             identity_fields = (identity_fields,)
@@ -2375,6 +2579,7 @@ def _validated_records(records: Mapping[str, object]) -> dict[str, list[dict[str
            or row["outcome"] not in {"no_trigger", "not_actionable"}
            for row in result["run_terminal_outcomes"]):
         raise ValueError("terminal outcome relationship mismatch")
+    _validate_theme_memory_v2_lineage(result)
     return result
 
 
@@ -2400,6 +2605,12 @@ def relationships(records: Mapping[str, list]) -> dict[str, list]:
         "discovery_theme_task_run": sorted([[row["id"], row["task_id"], row["run_id"]] for row in records["theme_episode_revisions"]]),
         "discovery_exposure_lineage": sorted([[row["id"], row["task_id"], row["security_revision_id"], row["theme_episode_revision_id"]] for row in records["exposure_facts"]]),
         "discovery_nomination_lineage": sorted([[row["id"], row["task_id"], row["security_revision_id"], row["theme_episode_revision_id"], row["exposure_fact_ids"]] for row in records["research_nominations"]]),
+        "theme_episode_v2_lineage": sorted([[row["revision_id"], row["episode_id"], row["predecessor_revision_id"], row["origin_run_id"], row["content_hash"]] for row in records["theme_episode_revisions_v2"]]),
+        "review_identity_v2_lineage": sorted([[row["receipt_id"], row["packet_id"], row["reviewed_role"], row["predecessor_receipt_id"]] for row in records["reviewer_identity_receipts_v2"]]),
+        "nomination_request_v2_lineage": sorted([[row["request_id"], row["packet_id"], row["reviewer_receipt_id"], row["request_hash"]] for row in records["research_nomination_requests_v2"]]),
+        "nomination_v2_lineage": sorted([[row["nomination_id"], row["request_id"], row["packet_id"], row["reviewer_receipt_id"]] for row in records["research_nominations_v2"]]),
+        "nomination_lifecycle_v2_lineage": sorted([[row["receipt_id"], row["nomination_id"], row["predecessor_receipt_id"], row["state"]] for row in records["research_nomination_lifecycle_v2"]]),
+        "memory_context_v2_binding": sorted([[row["run_id"], row["selected_revision_ids"], row["selected_nomination_ids"], row["snapshot_hash"]] for row in records["intelligence_memory_context_bindings_v2"]]),
         "intelligence_event_run": sorted([[row["id"], row["run_id"], row["status"]] for row in records["intelligence_run_events"]]),
         "quota_reservation_run": sorted([[row["id"], row["run_id"], row["provider"]] for row in records["source_quota_reservations"]]),
         "source_receipt_reservation_run": sorted([

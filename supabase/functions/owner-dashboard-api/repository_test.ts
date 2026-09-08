@@ -79,7 +79,7 @@ Deno.test("intelligence and report repositories select only allowlisted columns"
     assert(!text.includes(forbidden), `selected forbidden column ${forbidden}`);
   }
   assert(text.includes("FROM public.market_reports"));
-  assert(text.includes("FROM public.market_source_receipts"));
+  assert(text.includes("read_owner_intelligence_v2"));
 });
 
 Deno.test("repository applies fixed caps and returns opaque cursors", async () => {

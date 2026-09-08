@@ -5,13 +5,16 @@ from __future__ import annotations
 from collections import defaultdict
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
+from datetime import datetime, timedelta, timezone
 import hashlib
 import json
+import re
 from types import MappingProxyType
 from typing import Literal
 import uuid
 
 from lib.intelligence.discovery import ValueChainHypothesis
+from lib.intelligence.packet import EvidencePacket
 
 
 _PHASE_ENVELOPES: Mapping[str, Mapping[str, int]] = MappingProxyType({
@@ -512,13 +515,205 @@ def selection_manifest_from_payload(payload: Mapping[str, object]) -> SelectionM
     return validate_selection_manifest(result)
 
 
+_NOMINATION_KEYS = frozenset({
+    "theme_id", "entity_id", "security_id", "role", "reason",
+    "evidence_ids", "required_evidence_kind", "priority",
+})
+_NOMINATION_EVIDENCE_KINDS = frozenset({
+    "primary_exposure", "contradictory_primary", "current_filing",
+    "official_program", "entity_identity", "relationship", "current_reference",
+})
+_NOMINATION_ID_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9:._-]{0,255}$")
+_NOMINATION_THEME_PATTERN = re.compile(
+    r"^(?:[a-z][a-z0-9_]{2,79}|[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12})$"
+)
+_UNSAFE_NOMINATION_REASON = re.compile(
+    r"(?:https?://|\b(?:buy|sell|trade|order|price|score|watchlist|holding|portfolio|cash|alert|policy|allocation|browse|search query)\b)",
+    re.IGNORECASE,
+)
+
+
+@dataclass(frozen=True, slots=True)
+class ResearchNomination:
+    nomination_id: str
+    packet_id: str
+    packet_hash: str
+    reference_manifest_id: str
+    theme_id: str
+    entity_id: str | None
+    security_id: str | None
+    role: str
+    reason: str
+    evidence_ids: tuple[str, ...]
+    required_evidence_kind: str
+    priority: int
+    created_at: datetime
+    expires_at: datetime
+    state: Literal["pending", "selected", "resolved", "rejected", "expired"] = "pending"
+    authorizes_action: bool = False
+    may_mutate_watchlist: bool = False
+    execution_allowed: bool = False
+
+    def request_payload(self) -> dict[str, object]:
+        """Return only the reviewed model-write keys; authority stays server-owned."""
+        return {
+            "theme_id": self.theme_id,
+            "entity_id": self.entity_id,
+            "security_id": self.security_id,
+            "role": self.role,
+            "reason": self.reason,
+            "evidence_ids": list(self.evidence_ids),
+            "required_evidence_kind": self.required_evidence_kind,
+            "priority": self.priority,
+        }
+
+
+def _nomination_uuid(value: object, field: str) -> str:
+    if not isinstance(value, str):
+        raise ValueError(f"nomination {field} is invalid")
+    try:
+        parsed = uuid.UUID(value)
+    except (TypeError, ValueError, AttributeError) as exc:
+        raise ValueError(f"nomination {field} is invalid") from exc
+    if str(parsed) != value:
+        raise ValueError(f"nomination {field} is invalid")
+    return value
+
+
+def _packet_document(packet: EvidencePacket | Mapping[str, object]) -> Mapping[str, object]:
+    value: object = packet.to_dict() if isinstance(packet, EvidencePacket) else packet
+    if not isinstance(value, Mapping) or value.get("contract_version") != 2 \
+            or value.get("execution_allowed") is not False:
+        raise ValueError("nomination packet must be protected v2 research")
+    return value
+
+
+def validate_research_nominations(
+    nominations: Sequence[Mapping[str, object]],
+    packet: EvidencePacket | Mapping[str, object],
+    *,
+    now: datetime | None = None,
+) -> tuple[ResearchNomination, ...]:
+    """Validate bounded candidate-linked research follow-ups without action authority."""
+    if isinstance(nominations, (str, bytes, bytearray)) or not isinstance(nominations, Sequence):
+        raise ValueError("research nominations must be a list")
+    if len(nominations) > 3:
+        raise ValueError("research nominations are limited to three per run")
+    packet_row = _packet_document(packet)
+    packet_id = _nomination_uuid(packet_row.get("packet_id"), "packet identity")
+    packet_hash = packet_row.get("packet_hash")
+    reference_id = _nomination_uuid(packet_row.get("reference_manifest_id"), "reference identity")
+    if not isinstance(packet_hash, str) or not re.fullmatch(r"[0-9a-f]{64}", packet_hash):
+        raise ValueError("nomination packet hash is invalid")
+    candidate_rows = packet_row.get("research_candidates")
+    if not isinstance(candidate_rows, Sequence) or isinstance(candidate_rows, (str, bytes, bytearray)) \
+            or len(candidate_rows) > 12:
+        raise ValueError("nomination packet candidates are invalid")
+    current = (now or datetime.now(timezone.utc)).astimezone(timezone.utc)
+    candidates: list[Mapping[str, object]] = [
+        row for row in candidate_rows if isinstance(row, Mapping)
+    ]
+    results: list[ResearchNomination] = []
+    request_hashes: set[str] = set()
+    for raw in nominations:
+        if not isinstance(raw, Mapping) or set(raw) != _NOMINATION_KEYS:
+            raise ValueError("nomination request must use exact reviewed keys")
+        theme_id = raw["theme_id"]
+        entity_id = raw["entity_id"]
+        security_id = raw["security_id"]
+        role = raw["role"]
+        reason = raw["reason"]
+        kind = raw["required_evidence_kind"]
+        priority = raw["priority"]
+        if not isinstance(theme_id, str) or not _NOMINATION_THEME_PATTERN.fullmatch(theme_id):
+            raise ValueError("nomination theme identity is invalid")
+        for value, label in ((entity_id, "entity"), (security_id, "security")):
+            if value is not None and (
+                not isinstance(value, str) or not _NOMINATION_ID_PATTERN.fullmatch(value)
+            ):
+                raise ValueError(f"nomination {label} identity is invalid")
+        if not isinstance(role, str) or not re.fullmatch(r"[a-z][a-z0-9_]{2,79}", role):
+            raise ValueError("nomination role is invalid")
+        if not isinstance(reason, str):
+            raise ValueError("nomination reason is invalid")
+        normalized_reason = " ".join(reason.split())
+        if not 20 <= len(normalized_reason) <= 500 or _UNSAFE_NOMINATION_REASON.search(normalized_reason):
+            raise ValueError("nomination reason contains an unsafe instruction or authority")
+        if kind not in _NOMINATION_EVIDENCE_KINDS:
+            raise ValueError("nomination required evidence kind is invalid")
+        if isinstance(priority, bool) or not isinstance(priority, int) or not 1 <= priority <= 5:
+            raise ValueError("nomination priority is invalid")
+        raw_ids = raw["evidence_ids"]
+        if not isinstance(raw_ids, Sequence) or isinstance(raw_ids, (str, bytes, bytearray)) \
+                or not 1 <= len(raw_ids) <= 8:
+            raise ValueError("nomination evidence is invalid")
+        evidence_ids = tuple(_nomination_uuid(value, "evidence identity") for value in raw_ids)
+        if len(set(evidence_ids)) != len(evidence_ids):
+            raise ValueError("nomination evidence identities are duplicated")
+        matches: list[Mapping[str, object]] = []
+        for candidate in candidates:
+            themes = candidate.get("theme_ids")
+            roles = candidate.get("roles")
+            evidence = candidate.get("evidence")
+            if not isinstance(themes, Sequence) or isinstance(themes, (str, bytes, bytearray)) \
+                    or not isinstance(roles, Sequence) or isinstance(roles, (str, bytes, bytearray)) \
+                    or not isinstance(evidence, Sequence) or isinstance(evidence, (str, bytes, bytearray)):
+                continue
+            allowed_evidence = {
+                str(item.get("item_id")) for item in evidence
+                if isinstance(item, Mapping) and item.get("relationship_eligible") is True
+                and item.get("role") in {"supporting", "opposing"}
+            }
+            if (
+                theme_id in themes and role in roles
+                and candidate.get("entity_id") == entity_id
+                and candidate.get("security_id") == security_id
+                and set(evidence_ids) <= allowed_evidence
+            ):
+                matches.append(candidate)
+        if len(matches) != 1:
+            raise ValueError("nomination evidence is not candidate-bound to the nominated relationship")
+        request = {
+            "entity_id": entity_id,
+            "evidence_ids": sorted(evidence_ids),
+            "packet_hash": packet_hash,
+            "priority": priority,
+            "reason": normalized_reason,
+            "required_evidence_kind": kind,
+            "role": role,
+            "security_id": security_id,
+            "theme_id": theme_id,
+        }
+        request_hash = hashlib.sha256(_canonical(request).encode()).hexdigest()
+        if request_hash in request_hashes:
+            raise ValueError("nomination request is duplicated")
+        request_hashes.add(request_hash)
+        results.append(ResearchNomination(
+            nomination_id=str(uuid.uuid5(
+                uuid.NAMESPACE_URL, f"market-research-nomination-v2:{packet_id}:{request_hash}",
+            )),
+            packet_id=packet_id, packet_hash=packet_hash,
+            reference_manifest_id=reference_id, theme_id=theme_id,
+            entity_id=entity_id if isinstance(entity_id, str) else None,
+            security_id=security_id if isinstance(security_id, str) else None,
+            role=role, reason=normalized_reason, evidence_ids=tuple(sorted(evidence_ids)),
+            required_evidence_kind=str(kind), priority=priority,
+            created_at=current, expires_at=current + timedelta(days=7),
+            state="pending", authorizes_action=False, may_mutate_watchlist=False,
+            execution_allowed=False,
+        ))
+    return tuple(results)
+
+
 __all__ = [
     "EnrichmentCandidate",
     "EnrichmentRequest",
+    "ResearchNomination",
     "SelectionManifest",
     "adaptive_provider_reservations",
     "build_selection_manifest",
     "select_enrichment_queue",
     "selection_manifest_from_payload",
     "validate_selection_manifest",
+    "validate_research_nominations",
 ]

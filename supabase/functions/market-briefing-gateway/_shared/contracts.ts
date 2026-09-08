@@ -52,7 +52,52 @@ export type Operation =
   | "record_discovery_reference_chunk"
   | "finalize_discovery_reference"
   | "pin_discovery_reference"
-  | "read_discovery_reference";
+  | "read_discovery_reference"
+  | "record_theme_episode_revision_v2"
+  | "record_research_review_identity_v2"
+  | "record_research_nominations"
+  | "transition_research_nomination_v2";
+
+export interface ResearchNominationInputV2 {
+  theme_id: string;
+  entity_id: string | null;
+  security_id: string | null;
+  role: string;
+  reason: string;
+  evidence_ids: string[];
+  required_evidence_kind:
+    | "primary_exposure"
+    | "contradictory_primary"
+    | "current_filing"
+    | "official_program"
+    | "entity_identity"
+    | "relationship"
+    | "current_reference";
+  priority: number;
+}
+
+export interface RecordResearchNominationsPayloadV2 {
+  reviewer_receipt_id: string;
+  nominations: ResearchNominationInputV2[];
+}
+
+export interface ReviewIdentityPayloadV2 {
+  actor_identity: string;
+  reviewed_role: "analyst" | "checker";
+  predecessor_receipt_id: string | null;
+}
+
+export interface NominationLifecyclePayloadV2 {
+  nomination_id: string;
+  state: "pending" | "selected" | "resolved" | "rejected" | "expired";
+  reason: string | null;
+  selection_descriptor: {
+    request_id: string;
+    descriptor_hash: string;
+    uncertain_outcome_barrier: true;
+    execution_allowed: false;
+  } | null;
+}
 export type Phase = "pre-market" | "intraday" | "post-market" | "on-demand";
 export type Action =
   | "buy"
@@ -716,6 +761,27 @@ export interface GatewayReadContext extends PolicyContext {
     cash_revision?: string;
     source_cursors?: DiscoverySourceCursor[];
     last_completed_scans?: DiscoveryCompletedScan[];
+    theme_memory?: {
+      memory_version: 2;
+      as_of: string;
+      reference_manifest_id: string | null;
+      reference_hash: string | null;
+      snapshot_hash: string;
+      active_theme_heads: Record<string, unknown>[];
+      due_nominations: Record<string, unknown>[];
+      urgent_events: Record<string, unknown>[];
+      high_materiality_themes: Record<string, unknown>[];
+      radar: Record<string, unknown>[];
+      source_cursors: Record<string, unknown>[];
+      available_counts: Record<string, unknown>;
+      returned_counts: Record<string, unknown>;
+      deferred_counts: Record<string, unknown>;
+      byte_truncated: boolean;
+      research_only: true;
+      execution_allowed: false;
+    };
+    urgent_events?: Record<string, unknown>[];
+    high_materiality_themes?: Record<string, unknown>[];
   };
   recent_suggestions: ContextSuggestion[];
   observations: Array<{
@@ -839,6 +905,10 @@ const OPERATIONS: readonly Operation[] = [
   "finalize_discovery_reference",
   "pin_discovery_reference",
   "read_discovery_reference",
+  "record_theme_episode_revision_v2",
+  "record_research_review_identity_v2",
+  "record_research_nominations",
+  "transition_research_nomination_v2",
 ];
 const PHASES: readonly Phase[] = [
   "pre-market",
@@ -1297,6 +1367,22 @@ export function parseGatewayEnvelope(value: unknown): GatewayEnvelope {
       throw new Error("run_id is required for read_discovery_reference");
     }
     payload = parseReferenceReadPayload(row.payload);
+  } else if (operation === "record_research_nominations") {
+    if (row.run_id === null) {
+      throw new Error("run_id is required for record_research_nominations");
+    }
+    payload = parseResearchNominationsPayloadV2(row.payload);
+  } else if (
+    operation === "record_theme_episode_revision_v2"
+  ) {
+    if (row.run_id === null) throw new Error(`run_id is required for ${operation}`);
+    payload = parseThemeEpisodeRevisionPayloadV2(row.payload);
+  } else if (operation === "record_research_review_identity_v2") {
+    if (row.run_id === null) throw new Error(`run_id is required for ${operation}`);
+    payload = parseReviewIdentityPayloadV2(row.payload);
+  } else if (operation === "transition_research_nomination_v2") {
+    if (row.run_id === null) throw new Error(`run_id is required for ${operation}`);
+    payload = parseNominationLifecyclePayloadV2(row.payload);
   }
   return {
     schema_version: 1,
@@ -1318,6 +1404,135 @@ export function parseGatewayEnvelope(value: unknown): GatewayEnvelope {
       | ReferencePinPayload
       | ReferenceReadPayload
       | { limit: number },
+  };
+}
+
+export function parseReviewIdentityPayloadV2(value: unknown): ReviewIdentityPayloadV2 {
+  const row = objectValue(value, "review identity");
+  exactKeys(row, ["actor_identity", "reviewed_role", "predecessor_receipt_id"], "review identity");
+  const role = enumValue(row.reviewed_role, ["analyst", "checker"] as const, "review identity.reviewed_role");
+  const predecessor = row.predecessor_receipt_id === null ? null : uuidValue(row.predecessor_receipt_id, "review identity.predecessor_receipt_id");
+  if ((role === "analyst") !== (predecessor === null)) throw new Error("review identity role lineage mismatch");
+  const actor = stringValue(row.actor_identity, "review identity.actor_identity", 128);
+  if (!/^[A-Za-z0-9][A-Za-z0-9:._-]{2,127}$/.test(actor)) throw new Error("review identity actor invalid");
+  return { actor_identity: actor, reviewed_role: role, predecessor_receipt_id: predecessor };
+}
+
+export function parseNominationLifecyclePayloadV2(value: unknown): NominationLifecyclePayloadV2 {
+  const row = objectValue(value, "nomination lifecycle");
+  exactKeys(row, ["nomination_id", "state", "reason", "selection_descriptor"], "nomination lifecycle");
+  const state = enumValue(row.state, ["pending", "selected", "resolved", "rejected", "expired"] as const, "nomination lifecycle.state");
+  const reason = row.reason === null ? null : stringValue(row.reason, "nomination lifecycle.reason", 500);
+  if (state === "pending" && (!reason || reason.trim().length < 3)) throw new Error("nomination deferral reason required");
+  const rawDescriptor = row.selection_descriptor === null ? null : objectValue(row.selection_descriptor, "nomination lifecycle.selection_descriptor");
+  if (rawDescriptor) exactKeys(rawDescriptor, ["request_id", "descriptor_hash", "uncertain_outcome_barrier", "execution_allowed"], "nomination lifecycle.selection_descriptor");
+  if (rawDescriptor && (rawDescriptor.execution_allowed !== false || rawDescriptor.uncertain_outcome_barrier !== true)) throw new Error("nomination selection safety mismatch");
+  const descriptor = rawDescriptor === null ? null : {
+    request_id: uuidValue(rawDescriptor.request_id, "nomination lifecycle.selection_descriptor.request_id"),
+    descriptor_hash: hashValue(rawDescriptor.descriptor_hash, "nomination lifecycle.selection_descriptor.descriptor_hash"),
+    uncertain_outcome_barrier: true as const,
+    execution_allowed: false as const,
+  };
+  if ((state === "selected") !== (descriptor !== null)) throw new Error("nomination lifecycle descriptor mismatch");
+  return {
+    nomination_id: uuidValue(row.nomination_id, "nomination lifecycle.nomination_id"),
+    state,
+    reason,
+    selection_descriptor: descriptor,
+  };
+}
+
+export function parseThemeEpisodeRevisionPayloadV2(value: unknown): Record<string, unknown> {
+  const row = objectValue(value, "theme episode revision");
+  const keys = [
+    "revision_id", "theme_id", "episode_id", "revision", "identity_version", "anchor_hash",
+    "predecessor_revision_id", "predecessor_content_hash", "theme_mechanism", "subject_identity",
+    "jurisdiction", "effective_period_start", "effective_period_end", "authoritative_id",
+    "source_membership", "source_ids", "supporting_source_ids", "opposing_source_ids",
+    "added_source_ids", "investigated_entity_ids", "missing_questions", "invalidation_conditions",
+    "first_seen", "last_seen", "next_review_at", "expires_at", "state", "closure_reason",
+    "reopen_reason", "content_hash", "execution_allowed",
+  ];
+  exactKeys(row, keys, "theme episode revision");
+  uuidValue(row.revision_id, "theme episode revision.revision_id");
+  uuidValue(row.episode_id, "theme episode revision.episode_id");
+  if (row.identity_version !== 2 || row.execution_allowed !== false) throw new Error("theme episode revision authority mismatch");
+  for (const hash of ["anchor_hash", "content_hash"]) {
+    if (typeof row[hash] !== "string" || !/^[0-9a-f]{64}$/.test(row[hash] as string)) throw new Error(`theme episode revision.${hash} invalid`);
+  }
+  integerValue(row.revision, "theme episode revision.revision", 1, 10000);
+  return row;
+}
+
+export function parseResearchNominationsPayloadV2(
+  value: unknown,
+): RecordResearchNominationsPayloadV2 {
+  const row = objectValue(value, "research nominations");
+  exactKeys(row, ["reviewer_receipt_id", "nominations"], "research nominations");
+  const nominations = arrayValue(row.nominations, "research nominations.nominations", 3);
+  if (nominations.length === 0) throw new Error("research nominations empty");
+  return {
+    reviewer_receipt_id: uuidValue(row.reviewer_receipt_id, "research nominations.reviewer_receipt_id"),
+    nominations: nominations.map((value, index) => {
+      const path = `research nominations.nominations[${index}]`;
+      const nomination = objectValue(value, path);
+      exactKeys(nomination, [
+        "theme_id",
+        "entity_id",
+        "security_id",
+        "role",
+        "reason",
+        "evidence_ids",
+        "required_evidence_kind",
+        "priority",
+      ], path);
+      const reason = stringValue(nomination.reason, `${path}.reason`, 500);
+      if (
+        reason.length < 20 ||
+        /(https?:\/\/|www\.|\b(?:buy|sell|price|score|watchlist|holding|portfolio|cash|alert|policy|allocation|browse|search|query)\b)/iu.test(reason)
+      ) throw new Error(`${path}.reason is unsafe`);
+      const evidenceIds = arrayValue(nomination.evidence_ids, `${path}.evidence_ids`, 8)
+        .map((id, evidenceIndex) => uuidValue(id, `${path}.evidence_ids[${evidenceIndex}]`));
+      if (evidenceIds.length === 0 || new Set(evidenceIds).size !== evidenceIds.length) {
+        throw new Error(`${path}.evidence_ids invalid`);
+      }
+      const entityId = nomination.entity_id === null ? null : stringValue(
+        nomination.entity_id,
+        `${path}.entity_id`,
+        128,
+      );
+      const securityId = nomination.security_id === null ? null : stringValue(
+        nomination.security_id,
+        `${path}.security_id`,
+        128,
+      );
+      const themeId = stringValue(nomination.theme_id, `${path}.theme_id`, 80);
+      if (!/^(?:[a-z][a-z0-9_]{2,79}|[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12})$/u.test(themeId)) {
+        throw new Error(`${path}.theme_id invalid`);
+      }
+      return {
+        theme_id: themeId,
+        entity_id: entityId,
+        security_id: securityId,
+        role: (() => {
+          const role = stringValue(nomination.role, `${path}.role`, 80);
+          if (!/^[a-z][a-z0-9_]{2,79}$/u.test(role)) throw new Error(`${path}.role invalid`);
+          return role;
+        })(),
+        reason,
+        evidence_ids: evidenceIds,
+        required_evidence_kind: enumValue(nomination.required_evidence_kind, [
+          "primary_exposure",
+          "contradictory_primary",
+          "current_filing",
+          "official_program",
+          "entity_identity",
+          "relationship",
+          "current_reference",
+        ] as const, `${path}.required_evidence_kind`),
+        priority: integerValue(nomination.priority, `${path}.priority`, 1, 5),
+      };
+    }),
   };
 }
 

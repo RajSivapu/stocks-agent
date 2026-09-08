@@ -617,6 +617,12 @@ def recovery_records():
             "rationale": {"summary": "Research candidate only"},
             "created_at": "2026-09-05T19:37:00Z", "updated_at": "2026-09-05T19:37:00Z",
         }],
+        "theme_episode_revisions_v2": [],
+        "reviewer_identity_receipts_v2": [],
+        "research_nomination_requests_v2": [],
+        "research_nominations_v2": [],
+        "research_nomination_lifecycle_v2": [],
+        "intelligence_memory_context_bindings_v2": [],
         "intelligence_run_events": [
             {"id": started_event, "run_id": run, "status": "started", "detail": {},
              "created_at": "2026-09-05T19:30:00Z"},
@@ -1570,6 +1576,39 @@ def test_recovery_contract_includes_frozen_enrichment_selection_and_request_desc
     assert "market_enrichment_request_descriptors" in RECOVERY_SQL["enrichment_request_descriptors"]
     assert ("enrichment_selection_manifests", "market_enrichment_selection_manifests", {}) in _RESTORE_TABLES
     assert ("enrichment_request_descriptors", "market_enrichment_request_descriptors", {}) in _RESTORE_TABLES
+
+
+def test_recovery_contract_includes_theme_memory_v2_parent_first_ledgers():
+    from scripts.protected_evidence import READ_TABLES, RECOVERY_SQL
+    from scripts.verify_recovery_bundle import _RESTORE_TABLES, ordered_restore_rows
+
+    datasets = [dataset for dataset, _table, _renames in _RESTORE_TABLES]
+    expected = {
+        "theme_episode_revisions_v2": "market_theme_episode_revisions_v2",
+        "reviewer_identity_receipts_v2": "market_reviewer_identity_receipts_v2",
+        "research_nomination_requests_v2": "market_research_nomination_requests_v2",
+        "research_nominations_v2": "market_research_nominations_v2",
+        "research_nomination_lifecycle_v2": "market_research_nomination_lifecycle_v2",
+        "intelligence_memory_context_bindings_v2": "market_intelligence_memory_context_bindings_v2",
+    }
+    for dataset, table in expected.items():
+        assert dataset in REQUIRED_RECOVERY_RECORDS
+        assert table in READ_TABLES
+        assert table in RECOVERY_SQL[dataset]
+    assert datasets.index("packets") < datasets.index("reviewer_identity_receipts_v2")
+    assert datasets.index("reviewer_identity_receipts_v2") < datasets.index("research_nomination_requests_v2")
+    assert datasets.index("research_nomination_requests_v2") < datasets.index("research_nominations_v2")
+    assert datasets.index("research_nominations_v2") < datasets.index("research_nomination_lifecycle_v2")
+
+    predecessor = "11111111-1111-4111-8111-111111111111"
+    successor = "22222222-2222-4222-8222-222222222222"
+    rows = [
+        {"receipt_id": successor, "predecessor_receipt_id": predecessor},
+        {"receipt_id": predecessor, "predecessor_receipt_id": None},
+    ]
+    assert [row["receipt_id"] for row in ordered_restore_rows(
+        "research_nomination_lifecycle_v2", rows
+    )] == [predecessor, successor]
 
 
 @pytest.mark.parametrize(("dataset", "field", "replacement"), [

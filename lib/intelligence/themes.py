@@ -9,9 +9,10 @@ import unicodedata
 import uuid
 from urllib.parse import urlsplit
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
-from typing import Iterable, Sequence
+from collections.abc import Mapping
+from typing import Iterable, Literal, Sequence
 
 from lib.intelligence.dedupe import RunItemDisposition
 from lib.intelligence.normalize import SourceItem
@@ -351,14 +352,365 @@ def build_market_event(
     )
 
 
+_EPISODE_THEME_PATTERN = re.compile(
+    r"^(?:[a-z][a-z0-9_]{2,79}|[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12})$"
+)
+_EPISODE_TOKEN_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9:._/-]{0,255}$")
+
+
+def _episode_timestamp(value: object, field: str) -> datetime:
+    if isinstance(value, datetime):
+        parsed = value
+    elif isinstance(value, str):
+        try:
+            parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+        except ValueError as exc:
+            raise ValueError(f"theme episode {field} is invalid") from exc
+    else:
+        raise ValueError(f"theme episode {field} is invalid")
+    if parsed.tzinfo is None:
+        raise ValueError(f"theme episode {field} must be timezone-aware")
+    return parsed.astimezone(timezone.utc)
+
+
+def _episode_day(value: object, field: str) -> str:
+    if not isinstance(value, str):
+        raise ValueError(f"theme episode {field} is invalid")
+    try:
+        parsed = date.fromisoformat(value)
+    except ValueError as exc:
+        raise ValueError(f"theme episode {field} is invalid") from exc
+    return parsed.isoformat()
+
+
+def _episode_strings(value: object, field: str, *, maximum: int, length: int) -> tuple[str, ...]:
+    if not isinstance(value, Sequence) or isinstance(value, (str, bytes, bytearray)) \
+            or len(value) > maximum:
+        raise ValueError(f"theme episode {field} is invalid")
+    result: list[str] = []
+    for raw in value:
+        if not isinstance(raw, str):
+            raise ValueError(f"theme episode {field} is invalid")
+        item = " ".join(raw.split())
+        if not item or len(item) > length:
+            raise ValueError(f"theme episode {field} is invalid")
+        result.append(item)
+    if len(set(result)) != len(result):
+        raise ValueError(f"theme episode {field} is duplicated")
+    return tuple(sorted(result))
+
+
+@dataclass(frozen=True, slots=True)
+class ThemeEpisodeRevision:
+    """One immutable v2 cross-run episode head.
+
+    ``theme_id`` identifies the reviewed theme, ``episode_id`` identifies the
+    real-world episode, and ``revision_id`` identifies this immutable revision.
+    """
+
+    theme_id: str
+    episode_id: str
+    revision_id: str
+    revision: int
+    identity_version: int
+    anchor_hash: str
+    theme_mechanism: str
+    subject_identity: str
+    jurisdiction: str
+    effective_period_start: str
+    effective_period_end: str
+    authoritative_id: str | None
+    origin_run_id: str
+    predecessor_revision_id: str | None
+    predecessor_content_hash: str | None
+    source_membership: tuple[tuple[str, str, str], ...]
+    source_ids: tuple[str, ...]
+    supporting_source_ids: tuple[str, ...]
+    opposing_source_ids: tuple[str, ...]
+    added_source_ids: tuple[str, ...]
+    investigated_entity_ids: tuple[str, ...]
+    missing_questions: tuple[str, ...]
+    invalidation_conditions: tuple[str, ...]
+    first_seen: datetime
+    last_seen: datetime
+    next_review_at: datetime
+    expires_at: datetime
+    state: Literal["open", "closed"]
+    closure_reason: str | None
+    reopen_reason: str | None
+    content_hash: str
+    execution_allowed: bool = False
+
+    def to_persistence_row(self) -> dict[str, object]:
+        return {
+            "theme_id": self.theme_id,
+            "episode_id": self.episode_id,
+            "revision_id": self.revision_id,
+            "revision": self.revision,
+            "identity_version": self.identity_version,
+            "anchor_hash": self.anchor_hash,
+            "theme_mechanism": self.theme_mechanism,
+            "subject_identity": self.subject_identity,
+            "jurisdiction": self.jurisdiction,
+            "effective_period_start": self.effective_period_start,
+            "effective_period_end": self.effective_period_end,
+            "authoritative_id": self.authoritative_id,
+            "origin_run_id": self.origin_run_id,
+            "predecessor_revision_id": self.predecessor_revision_id,
+            "predecessor_content_hash": self.predecessor_content_hash,
+            "source_membership": [
+                {"evidence_id": evidence_id, "story_identity": story_id, "polarity": polarity}
+                for evidence_id, story_id, polarity in self.source_membership
+            ],
+            "source_ids": list(self.source_ids),
+            "supporting_source_ids": list(self.supporting_source_ids),
+            "opposing_source_ids": list(self.opposing_source_ids),
+            "added_source_ids": list(self.added_source_ids),
+            "investigated_entity_ids": list(self.investigated_entity_ids),
+            "missing_questions": list(self.missing_questions),
+            "invalidation_conditions": list(self.invalidation_conditions),
+            "first_seen": _timestamp_value(self.first_seen),
+            "last_seen": _timestamp_value(self.last_seen),
+            "next_review_at": _timestamp_value(self.next_review_at),
+            "expires_at": _timestamp_value(self.expires_at),
+            "state": self.state,
+            "closure_reason": self.closure_reason,
+            "reopen_reason": self.reopen_reason,
+            "content_hash": self.content_hash,
+            "execution_allowed": False,
+        }
+
+
+def _timestamp_value(value: datetime) -> str:
+    return value.astimezone(timezone.utc).isoformat(timespec="milliseconds").replace("+00:00", "Z")
+
+
+def _episode_anchor(event: Mapping[str, object]) -> tuple[dict[str, object], str]:
+    required = {
+        "theme_id", "theme_mechanism", "subject_identity", "jurisdiction",
+        "effective_period", "authoritative_id",
+    }
+    if not required <= set(event):
+        raise ValueError("theme episode identity is incomplete")
+    theme_id = event["theme_id"]
+    if not isinstance(theme_id, str) or not _EPISODE_THEME_PATTERN.fullmatch(theme_id):
+        raise ValueError("theme episode theme identity is invalid")
+    mechanism = event["theme_mechanism"]
+    subject = event["subject_identity"]
+    jurisdiction = event["jurisdiction"]
+    authoritative_id = event["authoritative_id"]
+    for value, label in ((mechanism, "mechanism"), (subject, "subject"), (jurisdiction, "jurisdiction")):
+        if not isinstance(value, str) or not _EPISODE_TOKEN_PATTERN.fullmatch(value):
+            raise ValueError(f"theme episode {label} is invalid")
+    if authoritative_id is not None and (
+        not isinstance(authoritative_id, str) or not _EPISODE_TOKEN_PATTERN.fullmatch(authoritative_id)
+    ):
+        raise ValueError("theme episode authoritative identity is invalid")
+    period = event["effective_period"]
+    if not isinstance(period, Mapping) or set(period) != {"start", "end"}:
+        raise ValueError("theme episode effective period is invalid")
+    start = _episode_day(period["start"], "effective period start")
+    end = _episode_day(period["end"], "effective period end")
+    if end < start:
+        raise ValueError("theme episode effective period is invalid")
+    anchor = {
+        "authoritative_id": authoritative_id,
+        "effective_period": {"end": end, "start": start},
+        "identity_version": 2,
+        "jurisdiction": jurisdiction.upper(),
+        "subject_identity": " ".join(subject.split()).casefold(),
+        "theme_id": theme_id,
+        "theme_mechanism": " ".join(mechanism.split()).casefold(),
+    }
+    digest = hashlib.sha256(json.dumps(
+        anchor, ensure_ascii=False, separators=(",", ":"), sort_keys=True,
+    ).encode("utf-8")).hexdigest()
+    return anchor, digest
+
+
+def _episode_evidence(value: object) -> tuple[tuple[str, str, str], ...]:
+    if not isinstance(value, Sequence) or isinstance(value, (str, bytes, bytearray)) \
+            or not 1 <= len(value) <= 64:
+        raise ValueError("theme episode source evidence is invalid")
+    by_story: dict[str, tuple[str, str, str]] = {}
+    for raw in value:
+        if not isinstance(raw, Mapping) or set(raw) != {
+            "evidence_id", "story_identity", "polarity",
+        }:
+            raise ValueError("theme episode source evidence is invalid")
+        evidence_id = str(raw["evidence_id"])
+        try:
+            parsed = uuid.UUID(evidence_id)
+        except (ValueError, TypeError, AttributeError) as exc:
+            raise ValueError("theme episode evidence identity is invalid") from exc
+        story = raw["story_identity"]
+        polarity = raw["polarity"]
+        if str(parsed) != evidence_id or not isinstance(story, str) or not story or len(story) > 512 \
+                or polarity not in {"supporting", "opposing"}:
+            raise ValueError("theme episode source evidence is invalid")
+        member = (evidence_id, story, str(polarity))
+        current = by_story.get(story)
+        if current is None or member[0] < current[0]:
+            by_story[story] = member
+        elif current[2] != member[2]:
+            raise ValueError("theme episode syndicated evidence contradicts itself")
+    return tuple(sorted(by_story.values(), key=lambda row: (row[1], row[0])))
+
+
+def revise_theme_episode(
+    existing: ThemeEpisodeRevision | None,
+    event: Mapping[str, object],
+    *,
+    origin_run_id: str,
+) -> ThemeEpisodeRevision:
+    """Create one episode head or append one unambiguous evidence revision."""
+    if not isinstance(event, Mapping):
+        raise TypeError("theme episode event must be a mapping")
+    try:
+        parsed_run = uuid.UUID(origin_run_id)
+    except (ValueError, TypeError, AttributeError) as exc:
+        raise ValueError("theme episode origin run is invalid") from exc
+    if str(parsed_run) != origin_run_id:
+        raise ValueError("theme episode origin run is invalid")
+    anchor, anchor_hash = _episode_anchor(event)
+    incoming = _episode_evidence(event.get("source_evidence"))
+    observed_at = _episode_timestamp(event.get("observed_at"), "observed at")
+    investigated = _episode_strings(
+        event.get("investigated_entity_ids", []), "investigated entities", maximum=32, length=256,
+    )
+    questions = _episode_strings(
+        event.get("missing_questions", []), "missing questions", maximum=16, length=500,
+    )
+    invalidation = _episode_strings(
+        event.get("invalidation_conditions", []), "invalidation conditions", maximum=16, length=500,
+    )
+    requested_next_review = _episode_timestamp(event.get("next_review_at"), "next review")
+    requested_expiry = _episode_timestamp(event.get("expires_at"), "expiry")
+    state = event.get("state", "open")
+    if state not in {"open", "closed"}:
+        raise ValueError("theme episode state is invalid")
+    closure_reason = event.get("closure_reason")
+    reopen_reason = event.get("reopen_reason")
+    for value, label in ((closure_reason, "closure reason"), (reopen_reason, "reopen reason")):
+        if value is not None and (not isinstance(value, str) or not 1 <= len(" ".join(value.split())) <= 500):
+            raise ValueError(f"theme episode {label} is invalid")
+    if state == "closed" and closure_reason is None:
+        raise ValueError("theme episode closure requires a reason")
+    if existing is not None:
+        if not isinstance(existing, ThemeEpisodeRevision) or existing.anchor_hash != anchor_hash:
+            raise ValueError("theme episode continuation is ambiguous")
+        if existing.state == "closed" and (state != "open" or reopen_reason is None):
+            raise ValueError("closed theme episode requires an explicit supported successor")
+        existing_by_story = {story: (evidence_id, story, polarity) for evidence_id, story, polarity in existing.source_membership}
+        added = [row for row in incoming if existing_by_story.get(row[1]) != row]
+        if not added and state == existing.state and closure_reason == existing.closure_reason:
+            return existing
+        combined_by_story = dict(existing_by_story)
+        combined_by_story.update({row[1]: row for row in added})
+        membership = tuple(sorted(combined_by_story.values(), key=lambda row: (row[1], row[0])))
+        first_seen = existing.first_seen
+        expiry = existing.expires_at
+        revision = existing.revision + 1
+        predecessor_id = existing.revision_id
+        predecessor_hash = existing.content_hash
+        investigated = tuple(sorted(set(existing.investigated_entity_ids) | set(investigated)))
+        questions = tuple(sorted(set(questions)))
+        invalidation = tuple(sorted(set(existing.invalidation_conditions) | set(invalidation)))
+    else:
+        membership = incoming
+        added = list(incoming)
+        first_seen = observed_at
+        expiry = min(requested_expiry, first_seen + timedelta(days=30))
+        revision = 1
+        predecessor_id = None
+        predecessor_hash = None
+    if requested_next_review < first_seen or expiry <= first_seen:
+        raise ValueError("theme episode review window is invalid")
+    next_review = min(requested_next_review, expiry)
+    last_seen = max(existing.last_seen if existing else first_seen, observed_at)
+    supporting = tuple(sorted(row[0] for row in membership if row[2] == "supporting"))
+    opposing = tuple(sorted(row[0] for row in membership if row[2] == "opposing"))
+    document = {
+        **anchor,
+        "added_source_ids": sorted(row[0] for row in added),
+        "closure_reason": closure_reason,
+        "expires_at": _timestamp_value(expiry),
+        "first_seen": _timestamp_value(first_seen),
+        "investigated_entity_ids": list(investigated),
+        "invalidation_conditions": list(invalidation),
+        "last_seen": _timestamp_value(last_seen),
+        "missing_questions": list(questions),
+        "next_review_at": _timestamp_value(next_review),
+        "opposing_source_ids": list(opposing),
+        "origin_run_id": origin_run_id,
+        "predecessor_content_hash": predecessor_hash,
+        "predecessor_revision_id": predecessor_id,
+        "reopen_reason": reopen_reason,
+        "revision": revision,
+        "source_membership": [list(row) for row in membership],
+        "state": state,
+        "supporting_source_ids": list(supporting),
+    }
+    content_hash = hashlib.sha256(json.dumps(
+        document, ensure_ascii=False, separators=(",", ":"), sort_keys=True,
+    ).encode("utf-8")).hexdigest()
+    episode_id = existing.episode_id if existing else str(
+        uuid.uuid5(uuid.NAMESPACE_URL, f"market-theme-episode-v2:{anchor_hash}")
+    )
+    revision_id = str(uuid.uuid5(
+        uuid.NAMESPACE_URL, f"market-theme-episode-revision-v2:{episode_id}:{revision}:{content_hash}",
+    ))
+    return ThemeEpisodeRevision(
+        theme_id=str(anchor["theme_id"]), episode_id=episode_id, revision_id=revision_id,
+        revision=revision, identity_version=2, anchor_hash=anchor_hash,
+        theme_mechanism=str(anchor["theme_mechanism"]), subject_identity=str(anchor["subject_identity"]),
+        jurisdiction=str(anchor["jurisdiction"]),
+        effective_period_start=str(anchor["effective_period"]["start"]),  # type: ignore[index]
+        effective_period_end=str(anchor["effective_period"]["end"]),  # type: ignore[index]
+        authoritative_id=anchor["authoritative_id"] if isinstance(anchor["authoritative_id"], str) else None,
+        origin_run_id=origin_run_id, predecessor_revision_id=predecessor_id,
+        predecessor_content_hash=predecessor_hash, source_membership=membership,
+        source_ids=tuple(sorted(row[0] for row in membership)),
+        supporting_source_ids=supporting, opposing_source_ids=opposing,
+        added_source_ids=tuple(sorted(row[0] for row in added)),
+        investigated_entity_ids=investigated, missing_questions=questions,
+        invalidation_conditions=invalidation, first_seen=first_seen, last_seen=last_seen,
+        next_review_at=next_review, expires_at=expiry, state=state,
+        closure_reason=" ".join(closure_reason.split()) if isinstance(closure_reason, str) else None,
+        reopen_reason=" ".join(reopen_reason.split()) if isinstance(reopen_reason, str) else None,
+        content_hash=content_hash, execution_allowed=False,
+    )
+
+
+def episode_is_active(
+    revision: ThemeEpisodeRevision,
+    *,
+    as_of: datetime,
+    successful_source_run_ids: set[str] | frozenset[str],
+) -> bool:
+    """Derive active state without treating overdue review as expiry."""
+    if not isinstance(revision, ThemeEpisodeRevision) or as_of.tzinfo is None:
+        raise ValueError("theme episode active-state inputs are invalid")
+    current = as_of.astimezone(timezone.utc)
+    return (
+        revision.state == "open"
+        and revision.closure_reason is None
+        and revision.origin_run_id in successful_source_run_ids
+        and current < revision.expires_at
+    )
+
+
 __all__ = [
     "SEED_THEMES",
     "MarketEvent",
     "ThemeProposal",
+    "ThemeEpisodeRevision",
     "build_market_event",
     "evidence_key",
+    "episode_is_active",
     "publisher_identity",
     "propose_dynamic_theme",
+    "revise_theme_episode",
     "source_dynamic_theme_label",
     "source_syndication_fingerprint",
     "syndication_fingerprint",

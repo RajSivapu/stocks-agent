@@ -315,7 +315,7 @@ def test_gateway_repository_uses_only_fixed_tables_and_named_rpcs():
         "suggestions",
         "transactions",
     }
-    assert set(re.findall(r'\.rpc\(\s*"([a-z_]+)"', source)) == {
+    assert set(re.findall(r'\.rpc\(\s*"([a-z0-9_]+)"', source)) == {
         "apply_market_artifacts",
         "apply_market_decision_bundle_with_cash_snapshot",
             "checkpoint_market_intelligence_collection",
@@ -353,11 +353,15 @@ def test_gateway_repository_uses_only_fixed_tables_and_named_rpcs():
         "record_market_learning",
         "record_market_report",
         "record_market_report_origin",
+        "record_research_nominations",
+        "record_research_review_identity_v2",
+        "record_theme_episode_revision_v2",
         "read_market_evidence_packet",
         "refresh_market_intelligence_context",
         "start_market_analysis_run",
         "start_market_intelligence_run",
         "suppress_market_report_publication",
+        "transition_research_nomination_v2",
         "upsert_market_outcome_grades",
     }
     assert not re.search(r"client\.from\((?!\")[^)]+\)", source)

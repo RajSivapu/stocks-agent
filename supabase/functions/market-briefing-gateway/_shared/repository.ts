@@ -14,6 +14,7 @@ import type {
   NotificationKind,
   Phase,
   PolicyConfig,
+  RecordResearchNominationsPayloadV2,
   TrustedEvidenceFact,
 } from "./contracts.ts";
 import { parseEvidencePacket, parseTrustedEvidenceFacts } from "./contracts.ts";
@@ -120,6 +121,36 @@ export function consecutiveRecommendationLosses(
     losses += 1;
   }
   return losses;
+}
+
+function themeMemoryContext(value: unknown, snapshotHash: unknown): NonNullable<NonNullable<GatewayReadContext["intelligence_collection_context"]>["theme_memory"]> | undefined {
+  if (value === null || value === undefined) return undefined;
+  const row = oneObject({ data: value, error: null });
+  if (row.memory_version !== 2 || row.research_only !== true || row.execution_allowed !== false) throw new GatewayRepositoryError("INVALID_PERSISTED_DATA");
+  const bounded = (candidate: unknown, maximum: number) => {
+    if (!Array.isArray(candidate) || candidate.length > maximum || candidate.some((item) => !item || typeof item !== "object" || Array.isArray(item))) throw new GatewayRepositoryError("INVALID_PERSISTED_DATA");
+    return candidate as Record<string, unknown>[];
+  };
+  if (new TextEncoder().encode(JSON.stringify(row)).byteLength > 65_536) throw new GatewayRepositoryError("CONTEXT_TOO_LARGE");
+  return {
+    memory_version: 2,
+    as_of: text(row.as_of, 40),
+    reference_manifest_id: row.reference_manifest_id === null ? null : text(row.reference_manifest_id, 36),
+    reference_hash: row.reference_hash === null ? null : text(row.reference_hash, 64),
+    snapshot_hash: text(snapshotHash, 64),
+    active_theme_heads: bounded(row.active_theme_heads, 25),
+    due_nominations: bounded(row.due_nominations, 12),
+    urgent_events: bounded(row.urgent_events, 10),
+    high_materiality_themes: bounded(row.high_materiality_themes, 10),
+    radar: bounded(row.radar, 20),
+    source_cursors: bounded(row.source_cursors, 100),
+    available_counts: oneObject({ data: row.available_counts, error: null }),
+    returned_counts: oneObject({ data: row.returned_counts, error: null }),
+    deferred_counts: oneObject({ data: row.deferred_counts, error: null }),
+    byte_truncated: boole(row.byte_truncated),
+    research_only: true,
+    execution_allowed: false,
+  };
 }
 
 export interface PersistedBundle {
@@ -355,6 +386,25 @@ export interface GatewayRepository {
     runId: string,
     payload: DiscoveryStageCheckpointPayload,
   ): Promise<{ task: DiscoveryStageTask; duplicate: boolean }>;
+  recordThemeEpisodeRevisionV2?(
+    runId: string,
+    payload: Record<string, unknown>,
+  ): Promise<Record<string, unknown>>;
+  recordResearchReviewIdentityV2?(
+    runId: string,
+    receiptId: string,
+    payload: Record<string, unknown>,
+  ): Promise<Record<string, unknown>>;
+  recordResearchNominations?(
+    runId: string,
+    requestId: string,
+    payload: RecordResearchNominationsPayloadV2,
+  ): Promise<Record<string, unknown>>;
+  transitionResearchNominationV2?(
+    runId: string,
+    nominationId: string,
+    payload: Record<string, unknown>,
+  ): Promise<Record<string, unknown>>;
   sealEnrichmentSelection?(
     runId: string,
     payload: Record<string, unknown>,
@@ -1343,6 +1393,52 @@ export function createSupabaseGatewayRepository(
       }
     },
 
+    async recordThemeEpisodeRevisionV2(runId, payload) {
+      const result = await client.rpc("record_theme_episode_revision_v2", {
+        p_run_id: runId,
+        p_revision: payload,
+      });
+      if (result.error) throw new GatewayRepositoryError("PERSISTENCE_FAILED");
+      return oneObject(result);
+    },
+
+    async recordResearchReviewIdentityV2(runId, receiptId, payload) {
+      const result = await client.rpc("record_research_review_identity_v2", {
+        p_run_id: runId,
+        p_receipt_id: receiptId,
+        p_review: payload,
+      });
+      if (result.error) throw new GatewayRepositoryError("PERSISTENCE_FAILED");
+      return oneObject(result);
+    },
+
+    async recordResearchNominations(runId, requestId, payload) {
+      const result = await client.rpc("record_research_nominations", {
+        p_run_id: runId,
+        p_request_id: requestId,
+        p_payload: payload,
+      });
+      if (result.error) throw new GatewayRepositoryError("PERSISTENCE_FAILED");
+      const row = oneObject(result);
+      if (
+        typeof row.duplicate !== "boolean" ||
+        !Number.isSafeInteger(row.accepted_count) ||
+        (row.accepted_count as number) < 1 || (row.accepted_count as number) > 3 ||
+        !Array.isArray(row.nominations)
+      ) throw new GatewayRepositoryError("INVALID_PERSISTED_DATA");
+      return row;
+    },
+
+    async transitionResearchNominationV2(runId, nominationId, payload) {
+      const result = await client.rpc("transition_research_nomination_v2", {
+        p_run_id: runId,
+        p_nomination_id: nominationId,
+        p_payload: payload,
+      });
+      if (result.error) throw new GatewayRepositoryError("PERSISTENCE_FAILED");
+      return oneObject(result);
+    },
+
     async sealEnrichmentSelection(runId, payload) {
       const result = await client.rpc("seal_market_enrichment_selection", {
         p_run_id: runId,
@@ -1937,6 +2033,12 @@ export function createSupabaseGatewayRepository(
       const intelligenceInputs = results[12].data === null
         ? []
         : [oneObject(results[12])];
+      const memory = intelligenceInputs.length === 1
+        ? themeMemoryContext(
+          intelligenceInputs[0].theme_memory,
+          intelligenceInputs[0].theme_memory_snapshot_hash,
+        )
+        : undefined;
       if (results[13].error) {
         throw new GatewayRepositoryError("PERSISTENCE_FAILED");
       }
@@ -2037,6 +2139,9 @@ export function createSupabaseGatewayRepository(
             cash_revision: text(intelligenceInputs[0].cash_revision, 256),
             source_cursors: cursorContext.source_cursors,
             last_completed_scans: cursorContext.last_completed_scans,
+            theme_memory: memory,
+            urgent_events: memory?.urgent_events,
+            high_materiality_themes: memory?.high_materiality_themes,
           }
           : _runId
           ? {

@@ -58,6 +58,37 @@ function policy(): PolicyConfig {
   };
 }
 
+Deno.test("theme-memory repository routes only the four reviewed service RPCs", async () => {
+  const calls: unknown[] = [];
+  const repository = createSupabaseGatewayRepository({
+    rpc(name: string, parameters?: Record<string, unknown>) {
+      calls.push({ name, parameters });
+      const data = name === "record_research_nominations"
+        ? { accepted_count: 1, duplicate: false, nominations: [{ nomination_id: "00000000-0000-4000-8000-000000000015" }] }
+        : { receipt_id: "00000000-0000-4000-8000-000000000016" };
+      return Promise.resolve({ data, error: null });
+    },
+  });
+  const runId = "00000000-0000-4000-8000-000000000011";
+  const requestId = "00000000-0000-4000-8000-000000000012";
+  const reviewerId = "00000000-0000-4000-8000-000000000013";
+  const nominationId = "00000000-0000-4000-8000-000000000014";
+  const episode = { revision_id: "00000000-0000-4000-8000-000000000017", execution_allowed: false };
+  const review = { actor_identity: "analyst-fixture", reviewed_role: "analyst", predecessor_receipt_id: null };
+  const nominations = { reviewer_receipt_id: reviewerId, nominations: [{ theme_id: "grid" }] } as never;
+  const lifecycle = { state: "pending", reason: "Await current official filing.", selection_descriptor: null };
+  await repository.recordThemeEpisodeRevisionV2!(runId, episode);
+  await repository.recordResearchReviewIdentityV2!(runId, requestId, review);
+  await repository.recordResearchNominations!(runId, requestId, nominations);
+  await repository.transitionResearchNominationV2!(runId, nominationId, lifecycle);
+  assertEquals(calls, [
+    { name: "record_theme_episode_revision_v2", parameters: { p_run_id: runId, p_revision: episode } },
+    { name: "record_research_review_identity_v2", parameters: { p_run_id: runId, p_receipt_id: requestId, p_review: review } },
+    { name: "record_research_nominations", parameters: { p_run_id: runId, p_request_id: requestId, p_payload: nominations } },
+    { name: "transition_research_nomination_v2", parameters: { p_run_id: runId, p_nomination_id: nominationId, p_payload: lifecycle } },
+  ]);
+});
+
 Deno.test("report suppression RPC persists the typed reason and rejects an error alias", async () => {
   const calls: unknown[] = [];
   let legacy = false;

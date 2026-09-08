@@ -32,7 +32,7 @@ HASH_VECTORS = json.loads(
 
 def test_task8_migration_is_additive_parseable_and_appended_exactly():
     assert len(parse_sql(MIGRATION.read_text())) == 18
-    assert SCHEMA.read_bytes().endswith(MIGRATION.read_bytes())
+    assert SCHEMA.read_bytes().count(MIGRATION.read_bytes()) == 1
     for relative, expected in PROTECTED.items():
         assert hashlib.sha256((ROOT / relative).read_bytes()).hexdigest() == expected
     migration = MIGRATION.read_text()

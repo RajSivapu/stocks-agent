@@ -57,6 +57,7 @@ _RESTORE_TABLES = (
     ("discovery_stage_tasks", "market_discovery_stage_tasks", {}),
     ("enrichment_request_descriptors", "market_enrichment_request_descriptors", {}),
     ("theme_episode_revisions", "market_theme_episode_revisions", {}),
+    ("theme_episode_revisions_v2", "market_theme_episode_revisions_v2", {}),
     ("exposure_facts", "market_exposure_facts", {}),
     ("research_nominations", "market_research_nominations", {}),
     ("intelligence_run_events", "market_intelligence_run_events", {}),
@@ -64,6 +65,11 @@ _RESTORE_TABLES = (
     ("collection_checkpoint_history", "market_collection_checkpoint_history", {}),
     ("collection_completions", "market_intelligence_collection_completions", {}),
     ("packets", "market_evidence_packets", {}),
+    ("reviewer_identity_receipts_v2", "market_reviewer_identity_receipts_v2", {}),
+    ("research_nomination_requests_v2", "market_research_nomination_requests_v2", {}),
+    ("research_nominations_v2", "market_research_nominations_v2", {}),
+    ("research_nomination_lifecycle_v2", "market_research_nomination_lifecycle_v2", {}),
+    ("intelligence_memory_context_bindings_v2", "market_intelligence_memory_context_bindings_v2", {}),
     ("decision_evaluations", "decision_evaluations", {}),
     ("policy_comparisons", "market_policy_comparisons", {}),
     ("reports", "market_reports", {}),
@@ -78,24 +84,31 @@ _RESTORE_TABLES = (
 
 def ordered_restore_rows(dataset: str, rows: list[dict[str, object]]) -> list[dict[str, object]]:
     """Return deterministic parent-first rows for self-referencing ledgers."""
-    if dataset != "reference_finalization_seals":
+    predecessor_fields = {
+        "reference_finalization_seals": ("manifest_id", "predecessor_manifest_id"),
+        "theme_episode_revisions_v2": ("revision_id", "predecessor_revision_id"),
+        "reviewer_identity_receipts_v2": ("receipt_id", "predecessor_receipt_id"),
+        "research_nomination_lifecycle_v2": ("receipt_id", "predecessor_receipt_id"),
+    }
+    if dataset not in predecessor_fields:
         return rows
+    identity_field, predecessor_field = predecessor_fields[dataset]
     pending = list(rows)
     ordered: list[dict[str, object]] = []
     restored: set[object] = set()
     while pending:
         ready = [
             row for row in pending
-            if row.get("predecessor_manifest_id") is None
-            or row.get("predecessor_manifest_id") in restored
+            if row.get(predecessor_field) is None
+            or row.get(predecessor_field) in restored
         ]
         if not ready:
-            raise ValueError("reference finalization predecessor chain is not restorable")
-        ready.sort(key=lambda row: str(row.get("manifest_id")))
+            raise ValueError(f"{dataset} predecessor chain is not restorable")
+        ready.sort(key=lambda row: str(row.get(identity_field)))
         for row in ready:
             pending.remove(row)
             ordered.append(row)
-            restored.add(row.get("manifest_id"))
+            restored.add(row.get(identity_field))
     return ordered
 
 

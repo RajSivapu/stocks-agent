@@ -14,12 +14,16 @@ export function useDashboardResource<T>(
   path: string,
   token: string,
   onError?: (error: Error) => void,
+  exactParser?: (value: unknown) => T,
 ): ResourceState<T> {
   const [state, setState] = useState<ResourceState<T>>({ status: "loading", envelope: null, error: null });
   useEffect(() => {
     let active = true;
     setState({ status: "loading", envelope: null, error: null });
-    void client.get<T>(path, token).then((envelope) => {
+    const pending = exactParser && path === "/v1/intelligence"
+      ? client.getIntelligence("/v1/intelligence", token).then((envelope) => ({ ...envelope, data: exactParser(envelope.data) }))
+      : client.get<T>(path, token);
+    void pending.then((envelope) => {
       if (active) setState({ status: "ready", envelope, error: null });
     }).catch((error: unknown) => {
       if (active) {
@@ -32,6 +36,6 @@ export function useDashboardResource<T>(
       active = false;
       setState({ status: "loading", envelope: null, error: null });
     };
-  }, [client, onError, path, token]);
+  }, [client, exactParser, onError, path, token]);
   return state;
 }

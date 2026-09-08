@@ -33,9 +33,19 @@ it("rejects unknown contracts and non-allowlisted paths", async () => {
 });
 
 it("allows only the Task 11 intelligence and immutable report read paths", async () => {
-  const fetcher = vi.fn().mockImplementation(() => Promise.resolve(Response.json(envelope)));
+  const intelligence = {
+    intelligence_version: 2, run_id: null, data_as_of: null, themes: [], companies: [], evidence: [],
+    source_health: [], coverage: { mode: "bounded", complete_market_coverage: false }, reference: { state: "unavailable" },
+    scope: { research_only: true, market_wide: true },
+    backlog: { available: 0, returned: 0, deferred: 0, byte_truncated: false }, omissions: [],
+    boundaries: { research_only: true, execution_disabled: true, valuation_unavailable: true },
+  };
+  const fetcher = vi.fn().mockImplementation((url: string) => Promise.resolve(Response.json(
+    url.endsWith("/v1/intelligence") ? { ...envelope, data: intelligence } : envelope,
+  )));
   const client = createDashboardClient("https://test-project.supabase.co/functions/v1/owner-dashboard-api", fetcher);
-  for (const path of ["/v1/intelligence", "/v1/reports", "/v1/reports/7d834dbd-75bb-4313-931f-09732f003932"]) {
+  await expect(client.getIntelligence("/v1/intelligence", "owner-token")).resolves.toMatchObject({ data: intelligence });
+  for (const path of ["/v1/reports", "/v1/reports/7d834dbd-75bb-4313-931f-09732f003932"]) {
     await expect(client.get(path, "owner-token")).resolves.toMatchObject(envelope);
   }
   await expect(client.get("/v1/reports/not-a-uuid", "owner-token")).rejects.toThrow(/path/i);

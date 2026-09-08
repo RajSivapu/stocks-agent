@@ -944,6 +944,60 @@ def test_protected_collection_context_retains_quote_receipts_and_revision_lineag
     assert value["portfolio_valuation_complete"] is True
 
 
+def test_protected_collection_context_retains_frozen_theme_memory_priority_surfaces():
+    memory = {
+        "memory_version": 2,
+        "as_of": "2026-09-04T12:00:00.000Z",
+        "active_theme_heads": [{"revision_id": "11111111-1111-4111-8111-111111111111"}],
+        "due_nominations": [{"nomination_id": "22222222-2222-4222-8222-222222222222"}],
+        "urgent_events": [{"id": "urgent-1", "title": "Urgent official event"}],
+        "high_materiality_themes": [{"theme_id": "grid", "mechanism": "Grid buildout"}],
+        "radar": [{"ticker": "TEST", "reason": "Fixture radar"}],
+        "source_cursors": [{"provider": "sec", "cursor": "frozen"}],
+        "available_counts": {"theme_heads": 2, "due_nominations": 1},
+        "returned_counts": {"theme_heads": 1, "due_nominations": 1},
+        "deferred_counts": {"theme_heads": 1, "due_nominations": 0},
+        "byte_truncated": True,
+        "research_only": True,
+        "execution_allowed": False,
+    }
+    value = protected_collection_context({
+        "holdings": [],
+        "owner_plans": [],
+        "radar": [{"ticker": "MUTABLE"}],
+        "intelligence_collection_context": {
+            "holding_market_values": {},
+            "liquidity_by_ticker": {},
+            "overlap_by_ticker": {},
+            "valuation_status": "unavailable",
+            "theme_memory": memory,
+        },
+    })
+
+    assert value["theme_memory"] == memory
+    assert value["radar"] == memory["radar"]
+    assert value["source_cursors"] == memory["source_cursors"]
+    assert value["urgent_events"] == ["Urgent official event"]
+    assert value["high_materiality_themes"] == ["Grid buildout"]
+
+
+def test_protected_collection_context_rejects_oversized_or_authoritative_theme_memory():
+    base = {
+        "memory_version": 2,
+        "as_of": "2026-09-04T12:00:00.000Z",
+        "active_theme_heads": [], "due_nominations": [], "urgent_events": [],
+        "high_materiality_themes": [], "radar": [], "source_cursors": [],
+        "available_counts": {}, "returned_counts": {}, "deferred_counts": {},
+        "byte_truncated": False, "research_only": True, "execution_allowed": False,
+    }
+    for memory in ({**base, "execution_allowed": True}, {**base, "active_theme_heads": [{"x": "€" * 70_000}]}):
+        with pytest.raises(ValueError, match="theme memory"):
+            protected_collection_context({
+                "holdings": [],
+                "intelligence_collection_context": {"theme_memory": memory},
+            })
+
+
 def test_v2_conflicting_claims_are_a_suitability_veto_and_cannot_be_promoted():
     affirmed = replace(
         raw_item("conflict-positive", official=True),

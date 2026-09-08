@@ -193,13 +193,16 @@ function FixtureSurface() {
   const ideas: IdeasView = { ideas: [idea] };
   const runs: RunsView = { runs: [run] };
   const intelligence: IntelligenceView = {
+    intelligence_version: 2,
     run_id: RUN_ID,
     data_as_of: DATA_TIME,
-    themes: [{ key: "grid-modernization", relationship_count: 1, evidence_count: 2 }],
-    events: [{ id: "fixture-event", type: "official-policy", title: "Grid award activity", summary: "A bounded official-source event summary.", occurred_at: DATA_TIME, effective_at: null, materiality: "material", confidence: "medium", sources: [{ label: "Official source", url: "https://example.com/official" }] }],
-    candidates: [{ id: "fixture-relationship", event_id: "fixture-event", candidate_key: "supplier:fixture", ticker: "FIXTURE_ONLY_TICKER", rank: 1, total_score: "0.82", qualified: true, veto_reasons: [], sources: [{ label: "Exposure evidence", url: "https://example.com/exposure" }] }],
-    sources: [{ provider: "sec", status: "complete", retrieved_at: DATA_TIME, accepted_count: 4, dropped_count: 0 }, { provider: "gdelt", status: "partial", retrieved_at: DATA_TIME, accepted_count: 2, dropped_count: 1 }],
-    limitations: ["Coverage is bounded to queried approved sources."],
+    themes: [{ theme_id: "grid_modernization", episode_id: RUN_ID, revision_id: "22222222-2222-4222-8222-222222222222", revision: 2, mechanism: "Grid award activity", subject: "Transmission buildout", jurisdiction: "US", state: "active", first_seen: DATA_TIME, last_seen: DATA_TIME, next_review_at: DATA_TIME, expires_at: DATA_TIME, adverse_evidence_count: 1, missing_questions: ["Current filing"], invalidation_conditions: ["Program cancellation"] }],
+    companies: [{ company_id: "CIK:fixture", name: "Fixture supplier", ticker: "FIXTURE_ONLY_TICKER", outside_watchlist: true, relationship_paths: ["Grid program to supplier"], evidence_ids: ["33333333-3333-4333-8333-333333333333"], missing_inputs: ["Current valuation"] }],
+    evidence: [{ evidence_id: "33333333-3333-4333-8333-333333333333", label: "Official source", url: "https://www.energy.gov/fixture", passage: "A bounded official-source passage.", role: "supporting", retrieved_at: DATA_TIME }],
+    source_health: [{ provider: "sec_edgar", status: "complete", retrieved_at: DATA_TIME, accepted_count: 4, dropped_count: 0 }, { provider: "gdelt", status: "partial", retrieved_at: DATA_TIME, accepted_count: 2, dropped_count: 1 }],
+    coverage: { mode: "bounded", complete_market_coverage: false }, reference: { state: "healthy", manifest_id: "44444444-4444-4444-8444-444444444444" },
+    scope: { research_only: true, market_wide: true }, backlog: { available: 1, returned: 1, deferred: 0, byte_truncated: false },
+    omissions: ["Coverage is bounded to queried approved sources."], boundaries: { research_only: true, execution_disabled: true, valuation_unavailable: true },
   };
   const reportSummary = { id: RUN_ID, market_date: "2026-09-04", kind: "weekly" as const, title: "Weekly owner report", summary: "A bounded receipt-backed weekly summary.", report_hash: "a".repeat(64), created_at: DATA_TIME };
   const reports: ReportsView = { reports: [reportSummary], next_cursor: null };
@@ -225,7 +228,7 @@ function FixtureSurface() {
     latest_by_kind: { intraday: run },
     latest_publication_status: "suppressed",
     boundaries,
-    source_coverage: intelligence.sources,
+    source_coverage: intelligence.source_health,
     latest_report: reportSummary,
     latest_intelligence_run_id: RUN_ID,
   };

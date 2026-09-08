@@ -2484,6 +2484,63 @@ def protected_collection_context(value: object) -> dict[str, object]:
     reference_state = trusted.get("current_reference_state")
     if reference_state not in {"current", "stale", "ambiguous", "unavailable"}:
         reference_state = "unavailable"
+    memory_value = trusted.get("theme_memory")
+    memory: dict[str, object] | None = None
+    if memory_value is not None:
+        if not isinstance(memory_value, Mapping):
+            raise ValueError("invalid protected theme memory")
+        if (
+            memory_value.get("memory_version") != 2
+            or memory_value.get("research_only") is not True
+            or memory_value.get("execution_allowed") is not False
+            or (
+                "snapshot_hash" in memory_value
+                and not re.fullmatch(r"[0-9a-f]{64}", str(memory_value.get("snapshot_hash", "")))
+            )
+        ):
+            raise ValueError("invalid protected theme memory authority")
+        limits = {
+            "active_theme_heads": 25,
+            "due_nominations": 12,
+            "urgent_events": 10,
+            "high_materiality_themes": 10,
+            "radar": 20,
+            "source_cursors": 100,
+        }
+        for key, maximum in limits.items():
+            rows = memory_value.get(key)
+            if (
+                not isinstance(rows, list)
+                or len(rows) > maximum
+                or any(not isinstance(row, Mapping) for row in rows)
+            ):
+                raise ValueError(f"invalid protected theme memory {key}")
+        for key in ("available_counts", "returned_counts", "deferred_counts"):
+            if not isinstance(memory_value.get(key), Mapping):
+                raise ValueError(f"invalid protected theme memory {key}")
+        if len(json.dumps(memory_value, ensure_ascii=False, separators=(",", ":")).encode("utf-8")) > 65_536:
+            raise ValueError("protected theme memory exceeds byte limit")
+        # A JSON round-trip removes caller-owned mapping/list references while
+        # retaining the exact server-frozen context and its ordering.
+        memory = json.loads(json.dumps(memory_value, ensure_ascii=False))
+
+    radar = memory["radar"] if memory is not None else value.get("radar", [])
+    if not isinstance(radar, list):
+        radar = []
+    source_cursors = memory["source_cursors"] if memory is not None else trusted.get("source_cursors", [])
+
+    def priority_labels(key: str, preferred: tuple[str, ...]) -> list[str]:
+        if memory is None:
+            return []
+        labels: list[str] = []
+        for row in memory[key]:
+            for field in preferred:
+                candidate = row.get(field)
+                if isinstance(candidate, str) and candidate.strip():
+                    labels.append(candidate.strip())
+                    break
+        return labels
+
     return {
         "holdings": [{"ticker": row["ticker"], "shares": row.get("shares"),
                       "market_value": valuations.get(row["ticker"])} for row in holdings if isinstance(row, Mapping)],
@@ -2518,7 +2575,13 @@ def protected_collection_context(value: object) -> dict[str, object]:
         "portfolio_revision": trusted.get("portfolio_revision"),
         "cash_revision": cash.get("ledger_watermark"),
         "reference_version": trusted.get("reference_version"),
-        "source_cursors": trusted.get("source_cursors", []),
+        "theme_memory": memory,
+        "radar": radar,
+        "urgent_events": priority_labels("urgent_events", ("title", "event_id", "id")),
+        "high_materiality_themes": priority_labels(
+            "high_materiality_themes", ("mechanism", "title", "theme_id")
+        ),
+        "source_cursors": source_cursors,
         "last_completed_scans": trusted.get("last_completed_scans", []),
     }
 

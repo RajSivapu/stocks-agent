@@ -3463,6 +3463,46 @@ Deno.test("a second scheduled evaluation cannot reuse another request's suppress
   assertEquals(setup.repository.runOutcomes.length, 1);
 });
 
+Deno.test("theme-memory review and nomination writes stay service-authenticated and research-only", async () => {
+  class ThemeMemoryRepository extends FakeRepository {
+    themeMemoryWrites: unknown[] = [];
+    recordResearchReviewIdentityV2(runId: string, receiptId: string, payload: Record<string, unknown>) {
+      this.themeMemoryWrites.push({ kind: "review", runId, receiptId, payload });
+      return Promise.resolve({ receipt_id: receiptId, reviewed_role: payload.reviewed_role });
+    }
+    recordResearchNominations(runId: string, requestId: string, payload: Record<string, unknown>) {
+      this.themeMemoryWrites.push({ kind: "nominations", runId, requestId, payload });
+      return Promise.resolve({ accepted_count: 1, duplicate: false, nominations: [{ nomination_id: "00000000-0000-4000-8000-000000000088" }] });
+    }
+  }
+  const repository = new ThemeMemoryRepository();
+  const setup = makeHandler(repository);
+  const reviewerId = "00000000-0000-4000-8000-000000000087";
+  const review = await setup.handler(request("record_research_review_identity_v2", {
+    actor_identity: "analyst-fixture", reviewed_role: "analyst", predecessor_receipt_id: null,
+  }, { requestId: reviewerId }));
+  assertEquals(review.status, 200);
+  const nomination = await setup.handler(request("record_research_nominations", {
+    reviewer_receipt_id: reviewerId,
+    nominations: [{
+      theme_id: "grid_buildout", entity_id: "CIK:0000000001", security_id: "NASDAQ:ACME",
+      role: "program_to_supplier", reason: "Confirm the current primary source relationship.",
+      evidence_ids: ["00000000-0000-4000-8000-000000000031"],
+      required_evidence_kind: "primary_exposure", priority: 3,
+    }],
+  }));
+  assertEquals(nomination.status, 200);
+  assertEquals(repository.themeMemoryWrites.length, 2);
+  assertEquals((await json(nomination)).telegram_message_ids, []);
+
+  const ownerBrowser = await setup.handler(request("record_research_nominations", {
+    reviewer_receipt_id: reviewerId,
+    nominations: [],
+  }, { secret: "", authorization: "Bearer owner-browser-token" }));
+  assertEquals(ownerBrowser.status, 401);
+  assertEquals(repository.themeMemoryWrites.length, 2);
+});
+
 Deno.test("holiday, bounded grading, and server-derived finish behavior", async () => {
   const holidayNow = () => new Date("2026-09-07T11:00:00.000Z");
   const pre = makeHandler(new FakeRepository(), { now: holidayNow });

@@ -471,7 +471,11 @@ export function createGatewayHandler(dependencies: GatewayDependencies) {
         envelope.operation === "record_discovery_reference_chunk" ||
         envelope.operation === "finalize_discovery_reference" ||
         envelope.operation === "pin_discovery_reference" ||
-        envelope.operation === "read_discovery_reference"
+        envelope.operation === "read_discovery_reference" ||
+        envelope.operation === "record_theme_episode_revision_v2" ||
+        envelope.operation === "record_research_review_identity_v2" ||
+        envelope.operation === "record_research_nominations" ||
+        envelope.operation === "transition_research_nomination_v2"
       ) {
         prepared = envelope.operation === "record_report"
           ? parseRecordReportPayload(envelope.payload)
@@ -739,6 +743,24 @@ export function createGatewayHandler(dependencies: GatewayDependencies) {
             write_counts: {},
             telegram_message_ids: [],
           });
+        }
+        if (envelope.operation === "record_research_nominations") {
+          return response(200, {
+            ok: true,
+            dry_run: true,
+            request_id: envelope.request_id,
+            accepted_count: (prepared as { nominations: unknown[] }).nominations.length,
+            nominations: [],
+            duplicate: false,
+            telegram_message_ids: [],
+          });
+        }
+        if (
+          envelope.operation === "record_theme_episode_revision_v2" ||
+          envelope.operation === "record_research_review_identity_v2" ||
+          envelope.operation === "transition_research_nomination_v2"
+        ) {
+          return response(200, { ok: true, dry_run: true, duplicate: false, telegram_message_ids: [] });
         }
         if (envelope.operation === "read_discovery_context") {
           return response(200, {
@@ -1071,6 +1093,44 @@ export function createGatewayHandler(dependencies: GatewayDependencies) {
         const code = error instanceof GatewayRepositoryError
           ? error.code
           : "PERSISTENCE_FAILED";
+        return response(errorStatus(code), { ok: false, code });
+      }
+    }
+    if (envelope.operation === "record_theme_episode_revision_v2") {
+      try {
+        if (!deps.repository.recordThemeEpisodeRevisionV2) throw new GatewayRepositoryError("PERSISTENCE_FAILED");
+        return response(200, { ok: true, ...await deps.repository.recordThemeEpisodeRevisionV2(requireRun(envelope), prepared as Record<string, unknown>), telegram_message_ids: [] });
+      } catch (error) {
+        const code = error instanceof GatewayRepositoryError ? error.code : "PERSISTENCE_FAILED";
+        return response(errorStatus(code), { ok: false, code });
+      }
+    }
+    if (envelope.operation === "record_research_review_identity_v2") {
+      try {
+        if (!deps.repository.recordResearchReviewIdentityV2) throw new GatewayRepositoryError("PERSISTENCE_FAILED");
+        return response(200, { ok: true, ...await deps.repository.recordResearchReviewIdentityV2(requireRun(envelope), envelope.request_id, prepared as Record<string, unknown>), telegram_message_ids: [] });
+      } catch (error) {
+        const code = error instanceof GatewayRepositoryError ? error.code : "PERSISTENCE_FAILED";
+        return response(errorStatus(code), { ok: false, code });
+      }
+    }
+    if (envelope.operation === "record_research_nominations") {
+      try {
+        if (!deps.repository.recordResearchNominations) throw new GatewayRepositoryError("PERSISTENCE_FAILED");
+        return response(200, { ok: true, ...await deps.repository.recordResearchNominations(requireRun(envelope), envelope.request_id, prepared as import("./contracts.ts").RecordResearchNominationsPayloadV2), telegram_message_ids: [] });
+      } catch (error) {
+        const code = error instanceof GatewayRepositoryError ? error.code : "PERSISTENCE_FAILED";
+        return response(errorStatus(code), { ok: false, code });
+      }
+    }
+    if (envelope.operation === "transition_research_nomination_v2") {
+      try {
+        if (!deps.repository.transitionResearchNominationV2) throw new GatewayRepositoryError("PERSISTENCE_FAILED");
+        const lifecycle = prepared as Record<string, unknown>;
+        const nominationId = String(lifecycle.nomination_id);
+        return response(200, { ok: true, ...await deps.repository.transitionResearchNominationV2(requireRun(envelope), nominationId, { state: lifecycle.state, reason: lifecycle.reason, selection_descriptor: lifecycle.selection_descriptor }), telegram_message_ids: [] });
+      } catch (error) {
+        const code = error instanceof GatewayRepositoryError ? error.code : "PERSISTENCE_FAILED";
         return response(errorStatus(code), { ok: false, code });
       }
     }
