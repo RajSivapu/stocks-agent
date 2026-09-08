@@ -2295,6 +2295,30 @@ def verify_release(source: ReleaseDataSource, *, deployment_id: int,
                 and authorization["pr_ci_workflow_run_id"] > 0,
                 "release authorization identity is incomplete")
         pr_ci = source.ci(authorization["pr_ci_workflow_run_id"])
+        pr_head = merge.get("head")
+        pr_ci_links = pr_ci.get("pull_requests")
+        durable_pr_ci_binding = (
+            isinstance(pr_head, Mapping)
+            and isinstance(pr_head.get("repo"), Mapping)
+            and isinstance(pr_ci.get("head_repository"), Mapping)
+            and pr_ci.get("head_branch") == pr_head.get("ref")
+            and pr_ci["head_repository"].get("full_name")
+                == pr_head["repo"].get("full_name")
+            and isinstance(pr_ci_links, list)
+            and all(
+                isinstance(row, Mapping)
+                and type(row.get("number")) is int
+                and row["number"] > 0
+                for row in pr_ci_links
+            )
+            and (
+                not pr_ci_links
+                or any(
+                    row["number"] == record["pull_request_number"]
+                    for row in pr_ci_links
+                )
+            )
+        )
         require(pr_ci.get("id") == authorization["pr_ci_workflow_run_id"]
                 and pr_ci.get("repository", {}).get("full_name") == record.get("repository")
                 and pr_ci.get("head_sha") == reviewed_head
@@ -2302,8 +2326,7 @@ def verify_release(source: ReleaseDataSource, *, deployment_id: int,
                 and pr_ci.get("name") == "Owner dashboard verification"
                 and pr_ci.get("path") == ".github/workflows/owner-dashboard-ci.yml"
                 and pr_ci.get("event") == "pull_request"
-                and any(row.get("number") == record["pull_request_number"]
-                        for row in pr_ci.get("pull_requests", []))
+                and durable_pr_ci_binding
                 and reviewed_head_time <= timestamp(pr_ci.get("updated_at")) <= merged,
                 "release authorization PR CI identity is incomplete")
         reviews = source.reviews(record["pull_request_number"])

@@ -186,6 +186,45 @@ def test_release_requires_pr_ci_to_complete_before_merge():
     assert '.updated_at >= $head and .updated_at <= $merged' in trust
 
 
+def test_release_uses_durable_pr_head_coordinates_when_github_clears_run_pr_array():
+    jq = shutil.which("jq")
+    if jq is None:
+        raise AssertionError("jq is required to verify the PR CI binding filter")
+    workflow = Path(".github/workflows/owner-dashboard-release.yml").read_text()
+    trust = workflow.split(
+        "- name: Authenticate exact reviewed main candidate without candidate code", 1
+    )[1].split("- uses: actions/checkout", 1)[0]
+    assert 'PR_HEAD_REF="$(jq -r .head.ref <<<"$PR")"' in trust
+    assert 'PR_HEAD_REPO="$(jq -r .head.repo.full_name <<<"$PR")"' in trust
+    assert '.head_branch == $head_ref' in trust
+    assert '.head_repository.full_name == $head_repo' in trust
+    assert 'length == 0 or any(.[]; .number == $number)' in trust
+    filter_line = next(
+        line.strip() for line in trust.splitlines()
+        if line.strip().startswith("PR_CI_BINDING_FILTER='")
+    )
+    binding_filter = filter_line.removeprefix("PR_CI_BINDING_FILTER='").removesuffix("'")
+
+    def accepted(payload):
+        result = subprocess.run([
+            jq, "-e", "--argjson", "number", "35",
+            "--arg", "head_ref", "candidate",
+            "--arg", "head_repo", "owner/stocks-agent", binding_filter,
+        ], input=json.dumps(payload), text=True, capture_output=True)
+        return result.returncode == 0
+
+    base = {"head_branch": "candidate",
+        "head_repository": {"full_name": "owner/stocks-agent"}}
+    assert accepted({**base, "pull_requests": []})
+    assert accepted({**base, "pull_requests": [{"number": 35}]})
+    assert not accepted({**base, "head_branch": "other", "pull_requests": []})
+    assert not accepted({**base,
+        "head_repository": {"full_name": "other/stocks-agent"}, "pull_requests": []})
+    assert not accepted({**base, "pull_requests": [{"number": 36}]})
+    assert not accepted({**base, "pull_requests": [{"number": 35}, {}]})
+    assert not accepted({**base, "pull_requests": {}})
+
+
 def test_recorded_review_authorization_is_a_current_review_decision():
     jq = shutil.which("jq")
     if jq is None:
