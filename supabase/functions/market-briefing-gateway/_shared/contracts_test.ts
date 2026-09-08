@@ -97,6 +97,9 @@ import HASH_VECTORS from "../../../../tests/fixtures/research_suitability_hash_v
 import THEME_EPISODE_VECTOR from "../../../../tests/fixtures/theme_episode_v2_hash_vector.json" with {
   type: "json",
 };
+import OPEN_ENDED_THEME_EPISODE_VECTOR from "../../../../tests/fixtures/theme_episode_v2_open_ended_hash_vector.json" with {
+  type: "json",
+};
 
 function assertEquals<T>(actual: T, expected: T): void {
   if (JSON.stringify(actual) !== JSON.stringify(expected)) {
@@ -408,6 +411,17 @@ Deno.test("theme episode v2 parser verifies the shared canonical persistence vec
     () => parseThemeEpisodeRevisionPayloadV2(noncanonicalStory),
     "not canonical",
   );
+});
+
+Deno.test("theme episode v2 parser preserves the shared open-ended null vector", () => {
+  const parsed = parseThemeEpisodeRevisionPayloadV2(
+    OPEN_ENDED_THEME_EPISODE_VECTOR.persistence_row,
+  );
+  assertEquals(
+    canonicalJson(parsed),
+    canonicalJson(OPEN_ENDED_THEME_EPISODE_VECTOR.persistence_row),
+  );
+  assertEquals(parsed.effective_period_end, null);
 });
 
 Deno.test("persisted facts reject duplicate IDs and missing authority fields", () => {

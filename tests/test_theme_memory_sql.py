@@ -639,6 +639,86 @@ def test_python_gateway_postgres_episode_golden_roundtrip_and_exact_replay(theme
         })
 
 
+def test_open_ended_episode_roundtrips_python_gateway_postgres_read_and_recovery(
+        theme_memory_dsn):
+    with psycopg.connect(theme_memory_dsn, autocommit=True) as db:
+        run_id, evidence_ids = _seed_episode_run(db)
+        event = {
+            "theme_id": "industrial_infrastructure",
+            "theme_mechanism": "grid_capacity_program",
+            "subject_identity": "program:open-ended-grid-award",
+            "jurisdiction": "US",
+            "effective_period": {"start": "2026-09-01", "end": None},
+            "authoritative_id": "award:doe:OPEN-2026-1",
+            "observed_at": "2026-09-07T12:10:00.000Z",
+            "source_evidence": [{
+                "evidence_id": evidence_ids[0],
+                "story_identity": "open-ended-official-program",
+                "polarity": "supporting",
+            }],
+            "investigated_entity_ids": ["program:open-ended-grid-award"],
+            "missing_questions": ["When will the agency publish an end date?"],
+            "invalidation_conditions": ["Official program cancellation"],
+            "next_review_at": "2026-09-10T12:10:00.000Z",
+            "expires_at": "2026-09-27T12:10:00.000Z",
+        }
+        produced = revise_theme_episode(
+            None, event, origin_run_id=run_id,
+        ).to_persistence_row()
+        assert produced["effective_period_end"] is None
+        parsed = _parse_episode_through_gateway(run_id, produced)
+        assert parsed == produced
+
+        db.execute("SET ROLE service_role")
+        inserted = db.execute(
+            "SELECT record_theme_episode_revision_v2(%s,%s)",
+            (run_id, Jsonb(parsed)),
+        ).fetchone()[0]
+        db.execute("RESET ROLE")
+        assert inserted["revision_id"] == produced["revision_id"]
+        assert db.execute(
+            "SELECT effective_period_end,anchor_hash,content_hash "
+            "FROM market_theme_episode_revisions_v2 WHERE revision_id=%s",
+            (produced["revision_id"],),
+        ).fetchone() == (None, produced["anchor_hash"], produced["content_hash"])
+
+        with db.cursor(row_factory=dict_row) as cursor:
+            recovered = cursor.execute(
+                RECOVERY_SQL["theme_episode_revisions_v2"] + " WHERE revision_id=%s",
+                (produced["revision_id"],),
+            ).fetchone()
+            packet = cursor.execute(
+                RECOVERY_SQL["packets"] + " WHERE run_id=%s", (run_id,),
+            ).fetchone()
+            source_items = cursor.execute(
+                RECOVERY_SQL["source_items"] + " WHERE id=%s", (evidence_ids[0],),
+            ).fetchall()
+            source_receipts = cursor.execute(
+                RECOVERY_SQL["source_receipts"] + " WHERE run_id=%s", (run_id,),
+            ).fetchall()
+            run_items = cursor.execute(
+                RECOVERY_SQL["intelligence_run_items"] +
+                " WHERE run_id=%s AND source_item_id=%s",
+                (run_id, evidence_ids[0]),
+            ).fetchall()
+        assert recovered["effective_period_end"] is None
+        assert recovered["content_hash"] == produced["content_hash"]
+        _validate_theme_memory_v2_lineage({
+            "intelligence_runs": [{"id": run_id}],
+            "packets": [dict(packet)],
+            "reference_manifests": [],
+            "source_items": [dict(row) for row in source_items],
+            "source_receipts": [dict(row) for row in source_receipts],
+            "intelligence_run_items": [dict(row) for row in run_items],
+            "theme_episode_revisions_v2": [dict(recovered)],
+            "reviewer_identity_receipts_v2": [],
+            "research_nomination_requests_v2": [],
+            "research_nominations_v2": [],
+            "research_nomination_lifecycle_v2": [],
+            "intelligence_memory_context_bindings_v2": [],
+        })
+
+
 def test_actual_postgres_allows_one_cross_run_successor_for_uuid_theme_identity(theme_memory_dsn):
     with psycopg.connect(theme_memory_dsn, autocommit=True) as db:
         predecessor_run, predecessor_evidence = _seed_episode_run(db)

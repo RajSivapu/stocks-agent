@@ -462,7 +462,7 @@ class ThemeEpisodeRevision:
     subject_identity: str
     jurisdiction: str
     effective_period_start: str
-    effective_period_end: str
+    effective_period_end: str | None
     authoritative_id: str | None
     origin_run_id: str
     predecessor_revision_id: str | None
@@ -732,7 +732,7 @@ def revise_theme_episode(
         theme_mechanism=str(anchor["theme_mechanism"]), subject_identity=str(anchor["subject_identity"]),
         jurisdiction=str(anchor["jurisdiction"]),
         effective_period_start=str(anchor["effective_period"]["start"]),  # type: ignore[index]
-        effective_period_end=str(anchor["effective_period"]["end"]),  # type: ignore[index]
+        effective_period_end=anchor["effective_period"]["end"],  # type: ignore[index,arg-type]
         authoritative_id=anchor["authoritative_id"] if isinstance(anchor["authoritative_id"], str) else None,
         origin_run_id=origin_run_id, predecessor_revision_id=predecessor_id,
         predecessor_content_hash=predecessor_hash, source_membership=membership,

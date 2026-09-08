@@ -23,6 +23,9 @@ NOW = datetime(2026, 9, 12, 14, tzinfo=UTC)
 THEME_EPISODE_VECTOR = json.loads(
     (Path(__file__).parent / "fixtures/theme_episode_v2_hash_vector.json").read_text()
 )
+OPEN_ENDED_THEME_EPISODE_VECTOR = json.loads(
+    (Path(__file__).parent / "fixtures/theme_episode_v2_open_ended_hash_vector.json").read_text()
+)
 
 
 def _event(*, source_id: str, wording: str = "New magnet plant", polarity: str = "supporting"):
@@ -64,6 +67,20 @@ def test_episode_persistence_matches_the_shared_v2_golden_document():
         None, vector["event"], origin_run_id=vector["origin_run_id"],
     )
 
+    assert revision.anchor_hash == vector["anchor_hash"]
+    assert revision.episode_id == vector["episode_id"]
+    assert revision.content_hash == vector["content_hash"]
+    assert revision.revision_id == vector["revision_id"]
+    assert revision.to_persistence_row() == vector["persistence_row"]
+
+
+def test_open_ended_episode_persistence_matches_null_v2_golden_document():
+    vector = OPEN_ENDED_THEME_EPISODE_VECTOR
+    revision = revise_theme_episode(
+        None, vector["event"], origin_run_id=vector["origin_run_id"],
+    )
+
+    assert revision.effective_period_end is None
     assert revision.anchor_hash == vector["anchor_hash"]
     assert revision.episode_id == vector["episode_id"]
     assert revision.content_hash == vector["content_hash"]
