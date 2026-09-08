@@ -271,6 +271,35 @@ class PostgresReadOnlySource:
                 if privileges[0]["readable"] is not True:
                     unreadable_tables.append(table)
                     continue
+                policy = self.query("""SELECT c.relrowsecurity AS rls_enabled,
+                    NOT pg_has_role(current_user,c.relowner,'MEMBER') AS reader_is_not_owner,
+                    EXISTS (
+                        SELECT 1 FROM pg_catalog.pg_policy p
+                        WHERE p.polrelid=c.oid AND p.polcmd IN ('r','*') AND p.polpermissive
+                          AND pg_get_expr(p.polqual,p.polrelid)='true'
+                          AND EXISTS (
+                              SELECT 1 FROM unnest(p.polroles) AS role_oid
+                              WHERE role_oid=0 OR pg_has_role(current_user,role_oid,'MEMBER')
+                          )
+                    ) AS unrestricted_select,
+                    NOT EXISTS (
+                        SELECT 1 FROM pg_catalog.pg_policy p
+                        WHERE p.polrelid=c.oid AND p.polcmd IN ('r','*') AND NOT p.polpermissive
+                          AND pg_get_expr(p.polqual,p.polrelid) IS DISTINCT FROM 'true'
+                          AND EXISTS (
+                              SELECT 1 FROM unnest(p.polroles) AS role_oid
+                              WHERE role_oid=0 OR pg_has_role(current_user,role_oid,'MEMBER')
+                          )
+                    ) AS no_restrictive_filter
+                    FROM pg_catalog.pg_class c
+                    JOIN pg_catalog.pg_namespace n ON n.oid=c.relnamespace
+                    WHERE n.nspname='public' AND c.relname=%s""", (table,))
+                require(len(policy) == 1
+                        and policy[0].get("rls_enabled") is True
+                        and policy[0].get("reader_is_not_owner") is True
+                        and policy[0].get("unrestricted_select") is True
+                        and policy[0].get("no_restrictive_filter") is True,
+                        "read-only database source has incomplete row security coverage")
                 readable_tables.append(table)
             if self.pre_migration_baseline:
                 unmigrated = (tuple(absent_tables) == PRE_MIGRATION_ABSENT_TABLES

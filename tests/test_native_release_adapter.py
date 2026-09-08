@@ -388,6 +388,9 @@ def test_protected_reader_rejects_incomplete_policy_table_privileges(monkeypatch
             "rolbypassrls": False, "server": "127.0.0.1", "port": 5432, "database": "postgres"}]
         if "to_regclass" in sql:
             return [{"present": True}]
+        if "relrowsecurity AS rls_enabled" in sql:
+            return [{"rls_enabled": True, "reader_is_not_owner": True,
+                "unrestricted_select": True, "no_restrictive_filter": True}]
         checked.append(params[0])
         return [{"readable": readable if params[0] == "public." + table else True,
                  "writable": writable if params[0] == "public." + table else False}]
@@ -421,6 +424,9 @@ def test_protected_dry_run_reader_records_only_tables_present_before_migration(m
             table = params[0].removeprefix("public.")
             return [{"readable": table not in evidence.PRE_MIGRATION_UNREADABLE_TABLES,
                 "writable": False}]
+        if "relrowsecurity AS rls_enabled" in statement:
+            return [{"rls_enabled": True, "reader_is_not_owner": True,
+                "unrestricted_select": True, "no_restrictive_filter": True}]
         if "to_jsonb" in statement:
             return []
         raise AssertionError(statement)
@@ -461,6 +467,9 @@ def test_pre_migration_reader_rejects_unexpected_missing_baseline_table(monkeypa
         if "has_table_privilege" in statement:
             return [{"readable": table not in evidence.PRE_MIGRATION_UNREADABLE_TABLES,
                 "writable": False}]
+        if "relrowsecurity AS rls_enabled" in statement:
+            return [{"rls_enabled": True, "reader_is_not_owner": True,
+                "unrestricted_select": True, "no_restrictive_filter": True}]
         raise AssertionError(statement)
     source.query = query
     with pytest.raises(RuntimeError, match="pre-migration release reader baseline mismatch"):
@@ -490,6 +499,9 @@ def test_pre_migration_reader_accepts_fully_migrated_retry_state(monkeypatch):
             return [{"present": True}]
         if "has_table_privilege" in statement:
             return [{"readable": True, "writable": False}]
+        if "relrowsecurity AS rls_enabled" in statement:
+            return [{"rls_enabled": True, "reader_is_not_owner": True,
+                "unrestricted_select": True, "no_restrictive_filter": True}]
         if "to_jsonb" in statement:
             return []
         raise AssertionError(statement)
@@ -502,6 +514,44 @@ def test_pre_migration_reader_accepts_fully_migrated_retry_state(monkeypatch):
         "absent_tables": [],
         "unreadable_tables": [],
     }
+
+
+@pytest.mark.parametrize("policy_field", [
+    "rls_enabled", "reader_is_not_owner", "unrestricted_select",
+    "no_restrictive_filter",
+])
+def test_protected_reader_rejects_incomplete_row_security_coverage(monkeypatch, policy_field):
+    from scripts import protected_evidence as evidence
+    class Connection:
+        closed = False
+        def execute(self, _sql): pass
+        def close(self): self.closed = True
+    connection = Connection()
+    monkeypatch.setattr(evidence.psycopg, "connect", lambda *a, **k: connection)
+    source = evidence.PostgresReadOnlySource(
+        f"postgresql://{evidence.READER}:password@db.{'p' * 20}.supabase.co:5432/postgres",
+        "p" * 20,
+    )
+    def query(statement, params=()):
+        if "current_user AS role" in statement:
+            return [{"role": evidence.READER, "read_only": "on", "rolsuper": False,
+                "rolbypassrls": False, "server": "127.0.0.1", "port": 5432,
+                "database": "postgres"}]
+        if "to_regclass" in statement:
+            return [{"present": True}]
+        if "has_table_privilege" in statement:
+            return [{"readable": True, "writable": False}]
+        if "relrowsecurity AS rls_enabled" in statement:
+            policy = {"rls_enabled": True, "reader_is_not_owner": True,
+                "unrestricted_select": True, "no_restrictive_filter": True}
+            if params[0] == "holdings":
+                policy[policy_field] = False
+            return [policy]
+        raise AssertionError(statement)
+    source.query = query
+    with pytest.raises(RuntimeError, match="incomplete row security coverage"):
+        source.__enter__()
+    assert connection.closed
 
 
 def test_normal_protected_reader_rejects_a_missing_release_table(monkeypatch):
