@@ -17,7 +17,7 @@ import subprocess
 import sys
 import tempfile
 from typing import Callable, Mapping, Sequence
-from urllib.parse import parse_qsl, unquote, urlparse
+from urllib.parse import unquote, urlparse
 
 import psycopg
 
@@ -101,36 +101,6 @@ def _validate_database_url(value: str, project_ref: str) -> None:
         raise ValueError("a project-matched scoped Supavisor session URL on port 5432 is required")
 
 
-def release_admin_database_url(
-    project_ref: str,
-    direct_admin_url: str,
-    session_template: str,
-) -> str:
-    """Return the project-bound administrator session-pooler transport."""
-    if not PROJECT_REF_PATTERN.fullmatch(project_ref):
-        raise ValueError("a canonical Supabase project reference is required")
-    direct = urlparse(direct_admin_url)
-    try:
-        direct_port = direct.port
-    except ValueError:
-        direct_port = -1
-    query = parse_qsl(direct.query, keep_blank_values=True)
-    if (
-        direct.scheme not in {"postgres", "postgresql"}
-        or direct.hostname != f"db.{project_ref}.supabase.co"
-        or direct_port not in {None, 5432}
-        or unquote(direct.username or "") != "postgres"
-        or len(unquote(direct.password or "")) < 24
-        or direct.path != "/postgres"
-        or direct.params
-        or direct.fragment
-        or query not in ([], [("sslmode", "require")])
-    ):
-        raise ValueError("a project-matched administrator database URL is required")
-
-    return validate_release_admin_session_url(project_ref, session_template)
-
-
 def validate_release_admin_session_url(project_ref: str, session_template: str) -> str:
     """Validate the project-bound administrator Supavisor session URL."""
     if not PROJECT_REF_PATTERN.fullmatch(project_ref):
@@ -147,7 +117,7 @@ def validate_release_admin_session_url(project_ref: str, session_template: str) 
         or not session.hostname.endswith(".pooler.supabase.com")
         or session_port != 5432
         or unquote(session.username or "") != f"postgres.{project_ref}"
-        or len(unquote(session.password or "")) < 24
+        or not unquote(session.password or "")
         or session.path != "/postgres"
         or session.params
         or session.query
@@ -161,25 +131,14 @@ def validate_release_admin_session_url(project_ref: str, session_template: str) 
     return session_template
 
 
-def validate_release_database_endpoints(
-    project_ref: str,
-    admin_url: str,
-    session_template: str,
-) -> dict[str, str]:
-    """Bind both privileged database endpoints to the requested project before mutation."""
-    release_admin_database_url(project_ref, admin_url, session_template)
-    return {"admin_database": "verified", "session_pooler": "verified"}
-
-
 def verify_release_database_transport(
     project_ref: str,
-    admin_url: str,
     session_template: str,
     *,
     connector: Callable[..., object] = psycopg.connect,
 ) -> dict[str, str]:
     """Prove the administrator pooler is reachable through a read-only session."""
-    transport_url = release_admin_database_url(project_ref, admin_url, session_template)
+    transport_url = validate_release_admin_session_url(project_ref, session_template)
     try:
         with connector(
             transport_url,
@@ -1347,18 +1306,17 @@ def main() -> int:
     owner_email = os.environ.get("DASHBOARD_OWNER_EMAIL", "").strip()
     service_key = os.environ.get("SUPABASE_SERVICE_ROLE_KEY", "").strip()
     non_owner_access_token = os.environ.get("DASHBOARD_NON_OWNER_ACCESS_TOKEN", "").strip()
-    admin_url = os.environ.get("POSTGRES_URL", "").strip()
     session_template = os.environ.get("SUPAVISOR_SESSION_URL", "").strip()
-    if (not admin_url or not session_template or not owner_email or not service_key
+    if (not session_template or not owner_email or not service_key
             or not publishable_key or not non_owner_access_token):
         raise SystemExit(
-            "POSTGRES_URL, SUPAVISOR_SESSION_URL, DASHBOARD_OWNER_EMAIL, "
+            "SUPAVISOR_SESSION_URL, DASHBOARD_OWNER_EMAIL, "
             "SUPABASE_SERVICE_ROLE_KEY, SUPABASE_PUBLISHABLE_KEY, and "
             "DASHBOARD_NON_OWNER_ACCESS_TOKEN are required"
         )
     if arguments.static_build_receipt is None:
         raise SystemExit("--static-build-receipt is required for protected production mutation")
-    admin_url = release_admin_database_url(arguments.project_ref, admin_url, session_template)
+    admin_url = validate_release_admin_session_url(arguments.project_ref, session_template)
     # The native adapter snapshots its environment when constructed. Point all
     # release and recovery database work at the reachable session pooler.
     os.environ["POSTGRES_URL"] = admin_url
