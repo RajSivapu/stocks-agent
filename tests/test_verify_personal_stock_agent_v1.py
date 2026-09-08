@@ -1913,11 +1913,37 @@ def test_release_accepts_exact_pr_ci_bound_owner_comment_for_solo_repository(rel
         full_name="other/stocks-agent"
     ),
     lambda source: source.pr_ci_record.update(pull_requests=[{"number": 99}]),
+    lambda source: source.pr_ci_record.update(
+        pull_requests=[{"number": source.record["pull_request_number"]}, {"number": 1.5}]
+    ),
     lambda source: source.pr_ci_record.update(pull_requests={}),
 ])
 def test_release_rejects_pr_ci_without_durable_merged_pr_binding(release, mutation):
     source, args = release
     mutation(source)
+    with pytest.raises(RuntimeError, match="PR CI identity"):
+        verify_release(source, **args)
+
+
+@pytest.mark.parametrize("value", [None, 7, ""])
+def test_release_rejects_malformed_matching_pr_head_coordinates(release, value):
+    source, args = release
+    source.merge_record["head"]["ref"] = value
+    source.merge_record["head"]["repo"]["full_name"] = value
+    source.pr_ci_record["head_branch"] = value
+    source.pr_ci_record["head_repository"]["full_name"] = value
+
+    with pytest.raises(RuntimeError, match="PR CI identity"):
+        verify_release(source, **args)
+
+
+def test_release_rejects_missing_matching_pr_head_coordinates(release):
+    source, args = release
+    source.merge_record["head"].pop("ref")
+    source.merge_record["head"]["repo"].pop("full_name")
+    source.pr_ci_record.pop("head_branch")
+    source.pr_ci_record["head_repository"].pop("full_name")
+
     with pytest.raises(RuntimeError, match="PR CI identity"):
         verify_release(source, **args)
 

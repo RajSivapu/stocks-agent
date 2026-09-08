@@ -2297,13 +2297,31 @@ def verify_release(source: ReleaseDataSource, *, deployment_id: int,
         pr_ci = source.ci(authorization["pr_ci_workflow_run_id"])
         pr_head = merge.get("head")
         pr_ci_links = pr_ci.get("pull_requests")
+        pr_head_ref = pr_head.get("ref") if isinstance(pr_head, Mapping) else None
+        pr_head_repo = pr_head.get("repo") if isinstance(pr_head, Mapping) else None
+        pr_head_repo_name = (
+            pr_head_repo.get("full_name") if isinstance(pr_head_repo, Mapping) else None
+        )
+        pr_ci_head_branch = pr_ci.get("head_branch")
+        pr_ci_head_repo = pr_ci.get("head_repository")
+        pr_ci_head_repo_name = (
+            pr_ci_head_repo.get("full_name")
+            if isinstance(pr_ci_head_repo, Mapping) else None
+        )
         durable_pr_ci_binding = (
             isinstance(pr_head, Mapping)
-            and isinstance(pr_head.get("repo"), Mapping)
-            and isinstance(pr_ci.get("head_repository"), Mapping)
-            and pr_ci.get("head_branch") == pr_head.get("ref")
-            and pr_ci["head_repository"].get("full_name")
-                == pr_head["repo"].get("full_name")
+            and isinstance(pr_head_ref, str)
+            and bool(pr_head_ref)
+            and isinstance(pr_head_repo, Mapping)
+            and isinstance(pr_head_repo_name, str)
+            and bool(pr_head_repo_name)
+            and isinstance(pr_ci_head_branch, str)
+            and bool(pr_ci_head_branch)
+            and isinstance(pr_ci_head_repo, Mapping)
+            and isinstance(pr_ci_head_repo_name, str)
+            and bool(pr_ci_head_repo_name)
+            and pr_ci_head_branch == pr_head_ref
+            and pr_ci_head_repo_name == pr_head_repo_name
             and isinstance(pr_ci_links, list)
             and all(
                 isinstance(row, Mapping)

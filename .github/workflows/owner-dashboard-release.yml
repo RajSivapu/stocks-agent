@@ -62,10 +62,10 @@ jobs:
           PR="$(gh api "repos/$GITHUB_REPOSITORY/pulls/$PULL_REQUEST_NUMBER")"
           test "$(jq -r .base.repo.full_name <<<"$PR")" = "$GITHUB_REPOSITORY" || { echo 'reviewed PR belongs to another repository'; exit 1; }
           test "$(jq -r .merged <<<"$PR")" = true && test "$(jq -r .base.ref <<<"$PR")" = main && test "$(jq -r .merge_commit_sha <<<"$PR")" = "$CANDIDATE_SHA" || { echo 'candidate SHA/ref mismatch'; exit 1; }
+          jq -e '(.head.ref | type == "string" and length > 0) and (.head.repo.full_name | type == "string" and length > 0)' <<<"$PR" >/dev/null || { echo 'reviewed PR head coordinates are unavailable'; exit 1; }
           PR_HEAD_SHA="$(jq -r .head.sha <<<"$PR")"
           PR_HEAD_REF="$(jq -r .head.ref <<<"$PR")"
           PR_HEAD_REPO="$(jq -r .head.repo.full_name <<<"$PR")"
-          test -n "$PR_HEAD_REF" && test "$PR_HEAD_REF" != null && test -n "$PR_HEAD_REPO" && test "$PR_HEAD_REPO" != null || { echo 'reviewed PR head coordinates are unavailable'; exit 1; }
           test "$INPUT_REVIEWED_SHA" = "$PR_HEAD_SHA" || { echo 'input reviewed SHA is not the exact PR head'; exit 1; }
           HEAD_COMMIT="$(gh api "repos/$GITHUB_REPOSITORY/git/commits/$PR_HEAD_SHA")"
           CANDIDATE_COMMIT="$(gh api "repos/$GITHUB_REPOSITORY/git/commits/$CANDIDATE_SHA")"
@@ -80,7 +80,7 @@ jobs:
           test "$(jq -r .path <<<"$PR_CI")" = .github/workflows/owner-dashboard-ci.yml || { echo 'wrong required PR CI workflow'; exit 1; }
           test "$(jq -r .name <<<"$PR_CI")" = "Owner dashboard verification" || { echo 'required PR CI workflow name mismatch'; exit 1; }
           test "$(jq -r .event <<<"$PR_CI")" = pull_request || { echo 'required PR CI was not a pull request run'; exit 1; }
-          PR_CI_BINDING_FILTER='.head_branch == $head_ref and .head_repository.full_name == $head_repo and (.pull_requests | type == "array" and all(.[]; (.number | type) == "number" and .number > 0) and (length == 0 or any(.[]; .number == $number)))'
+          PR_CI_BINDING_FILTER='(.head_branch | type == "string" and length > 0) and (.head_repository.full_name | type == "string" and length > 0) and .head_branch == $head_ref and .head_repository.full_name == $head_repo and (.pull_requests | type == "array" and all(.[]; (.number | type) == "number" and .number > 0 and (.number | floor) == .number) and (length == 0 or any(.[]; .number == $number)))'
           jq -e --argjson number "$PULL_REQUEST_NUMBER" --arg head_ref "$PR_HEAD_REF" --arg head_repo "$PR_HEAD_REPO" "$PR_CI_BINDING_FILTER" <<<"$PR_CI" >/dev/null || { echo 'required PR CI does not bind reviewed pull request'; exit 1; }
           PR_CI_COMPLETED_AT="$(jq -r .updated_at <<<"$PR_CI")"
           jq -e --arg head "$HEAD_COMMIT_TIME" --arg merged "$MERGED_AT" '.updated_at >= $head and .updated_at <= $merged' <<<"$PR_CI" >/dev/null || { echo 'required PR CI did not complete between reviewed head and merge'; exit 1; }

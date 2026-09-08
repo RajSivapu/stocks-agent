@@ -196,6 +196,8 @@ def test_release_uses_durable_pr_head_coordinates_when_github_clears_run_pr_arra
     )[1].split("- uses: actions/checkout", 1)[0]
     assert 'PR_HEAD_REF="$(jq -r .head.ref <<<"$PR")"' in trust
     assert 'PR_HEAD_REPO="$(jq -r .head.repo.full_name <<<"$PR")"' in trust
+    assert "(.head.ref | type == \"string\" and length > 0)" in trust
+    assert "(.head.repo.full_name | type == \"string\" and length > 0)" in trust
     assert '.head_branch == $head_ref' in trust
     assert '.head_repository.full_name == $head_repo' in trust
     assert 'length == 0 or any(.[]; .number == $number)' in trust
@@ -222,7 +224,22 @@ def test_release_uses_durable_pr_head_coordinates_when_github_clears_run_pr_arra
         "head_repository": {"full_name": "other/stocks-agent"}, "pull_requests": []})
     assert not accepted({**base, "pull_requests": [{"number": 36}]})
     assert not accepted({**base, "pull_requests": [{"number": 35}, {}]})
+    assert not accepted({**base, "pull_requests": [{"number": 35}, {"number": 1.5}]})
     assert not accepted({**base, "pull_requests": {}})
+
+    coordinate_filter = (
+        '(.head.ref | type == "string" and length > 0) and '
+        '(.head.repo.full_name | type == "string" and length > 0)'
+    )
+    for malformed in ({}, {"head": {}},
+                      {"head": {"ref": None, "repo": {"full_name": None}}},
+                      {"head": {"ref": 7, "repo": {"full_name": 7}}},
+                      {"head": {"ref": "", "repo": {"full_name": ""}}}):
+        result = subprocess.run(
+            [jq, "-e", coordinate_filter], input=json.dumps(malformed),
+            text=True, capture_output=True,
+        )
+        assert result.returncode != 0
 
 
 def test_recorded_review_authorization_is_a_current_review_decision():
