@@ -10,9 +10,20 @@ import tempfile
 import uuid
 
 import psycopg
+from psycopg.rows import dict_row
 from psycopg.types.json import Jsonb
 from pglast import parse_sql
 import pytest
+
+from lib.intelligence.themes import (
+    revise_theme_episode,
+    theme_episode_v2_anchor_document,
+    theme_episode_v2_episode_id,
+    theme_episode_v2_persistence_document,
+    theme_episode_v2_revision_id,
+)
+from scripts.export_recovery_bundle import _validate_theme_memory_v2_lineage
+from scripts.protected_evidence import RECOVERY_SQL
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -412,6 +423,20 @@ def _seed_episode_run(db):
     for index, evidence_id in enumerate(evidence_ids):
         db.execute("INSERT INTO market_source_items(id,source_receipt_id,provider,upstream_item_id,canonical_url,published_at,title,normalized_text,canonical_content,content_hash,metadata) VALUES(%s,%s,'gdelt',%s,%s,%s,%s,%s,%s,%s,'{}')", (evidence_id, receipt_id, f"story-{index}", f"https://api.gdeltproject.org/api/v2/story-{index}", f"2026-09-07T12:0{index}:00Z", f"Episode source {index}", f"Episode source passage {index}", f"Episode source passage {index}", str(index + 1) * 64))
         db.execute("INSERT INTO market_intelligence_run_items(id,run_id,source_item_id,source_receipt_id,disposition) VALUES(%s,%s,%s,%s,'accepted')", (str(uuid.uuid4()), run_id, evidence_id, receipt_id))
+    packet = {
+        "contract_version": 2,
+        "execution_allowed": False,
+        "research_candidates": [],
+        "action_candidates": [],
+        "evidence": [{"item_id": evidence_id} for evidence_id in evidence_ids],
+        "coverage": {"source_scope": "fixture"},
+    }
+    packet_hash = _episode_hash(db, packet)
+    db.execute("INSERT INTO market_policy_config(version,config,active) VALUES(90210,'{}',false) ON CONFLICT DO NOTHING")
+    db.execute(
+        "INSERT INTO market_evidence_packets(id,run_id,policy_version,status,candidate_count,evidence_count,packet,packet_hash) VALUES(%s,%s,90210,'completed',0,%s,%s,%s)",
+        (str(uuid.uuid4()), run_id, len(evidence_ids), Jsonb(packet), packet_hash),
+    )
     db.execute("SET session_replication_role=origin")
     return run_id, evidence_ids
 
@@ -423,55 +448,247 @@ def _episode_hash(db, value):
     ).fetchone()[0]
 
 
+def _rehash_episode_row(value, *, anchor=False):
+    canonical = lambda document: json.dumps(
+        document, ensure_ascii=False, separators=(",", ":"), sort_keys=True,
+    )
+    if anchor:
+        value["anchor_hash"] = hashlib.sha256(canonical(
+            theme_episode_v2_anchor_document(value),
+        ).encode()).hexdigest()
+        value["episode_id"] = theme_episode_v2_episode_id(value["anchor_hash"])
+    value["content_hash"] = hashlib.sha256(canonical(
+        theme_episode_v2_persistence_document(value),
+    ).encode()).hexdigest()
+    value["revision_id"] = theme_episode_v2_revision_id(
+        value["episode_id"], value["revision"], value["content_hash"],
+    )
+    return value
+
+
+def _parse_episode_through_gateway(run_id, row):
+    source = """
+import { canonicalJson } from './supabase/functions/market-briefing-gateway/_shared/intelligence.ts';
+import { parseGatewayEnvelope } from './supabase/functions/market-briefing-gateway/_shared/contracts.ts';
+const raw = await new Response(Deno.stdin.readable).text();
+const value = JSON.parse(raw);
+console.log(canonicalJson(parseGatewayEnvelope(value).payload));
+"""
+    envelope = {
+        "schema_version": 1,
+        "operation": "record_theme_episode_revision_v2",
+        "request_id": str(uuid.uuid4()),
+        "run_id": run_id,
+        "dry_run": False,
+        "payload": row,
+    }
+    result = subprocess.run(
+        ["npx", "--yes", "deno@2.9.6", "eval", source],
+        cwd=ROOT, input=json.dumps(envelope), text=True, capture_output=True, check=True,
+    )
+    return json.loads(result.stdout)
+
+
+def test_python_gateway_postgres_episode_golden_roundtrip_and_exact_replay(theme_memory_dsn):
+    with psycopg.connect(theme_memory_dsn, autocommit=True) as db:
+        run_id, evidence_ids = _seed_episode_run(db)
+        event = {
+            "theme_id": "critical_minerals_magnets",
+            "theme_mechanism": "domestic_magnet_capacity",
+            "subject_identity": "entity:niron-magnetics",
+            "jurisdiction": "US",
+            "effective_period": {"start": "2026-09-01", "end": "2026-12-31"},
+            "authoritative_id": "award:doe:MAGNET-2026-17",
+            "observed_at": "2026-09-07T12:10:00.000Z",
+            "source_evidence": [
+                {
+                    "evidence_id": evidence_ids[0],
+                    "story_identity": "\U00010000-supplementary-story",
+                    "polarity": "supporting",
+                },
+                {
+                    "evidence_id": evidence_ids[1],
+                    "story_identity": "\ue000-private-use-story",
+                    "polarity": "opposing",
+                },
+            ],
+            "investigated_entity_ids": ["entity:niron-magnetics"],
+            "missing_questions": ["Which public suppliers have current primary exposure?"],
+            "invalidation_conditions": ["Program award is rescinded"],
+            "next_review_at": "2026-09-10T12:10:00.000Z",
+            "expires_at": "2026-09-27T12:10:00.000Z",
+        }
+        produced = revise_theme_episode(None, event, origin_run_id=run_id).to_persistence_row()
+        parsed = _parse_episode_through_gateway(run_id, produced)
+        assert parsed == produced
+
+        db.execute("SET ROLE service_role")
+        inserted = db.execute(
+            "SELECT record_theme_episode_revision_v2(%s,%s)", (run_id, Jsonb(parsed)),
+        ).fetchone()[0]
+        replay = db.execute(
+            "SELECT record_theme_episode_revision_v2(%s,%s)", (run_id, Jsonb(parsed)),
+        ).fetchone()[0]
+        db.execute("RESET ROLE")
+        assert inserted == {
+            "revision_id": produced["revision_id"], "episode_id": produced["episode_id"],
+            "revision": 1, "duplicate": False,
+        }
+        assert replay == {**inserted, "duplicate": True}
+        assert db.execute(
+            "SELECT origin_run_id::text,anchor_hash,content_hash FROM market_theme_episode_revisions_v2 WHERE revision_id=%s",
+            (produced["revision_id"],),
+        ).fetchone() == (run_id, produced["anchor_hash"], produced["content_hash"])
+
+        changed_event = {
+            **event,
+            "missing_questions": ["Which public suppliers have verified primary exposure?"],
+        }
+        changed = _parse_episode_through_gateway(
+            run_id,
+            revise_theme_episode(None, changed_event, origin_run_id=run_id).to_persistence_row(),
+        )
+        db.execute("SET ROLE service_role")
+        with pytest.raises(psycopg.Error) as conflict:
+            db.execute(
+                "SELECT record_theme_episode_revision_v2(%s,%s)",
+                (run_id, Jsonb(changed)),
+            )
+        db.execute("RESET ROLE")
+        assert conflict.value.sqlstate == "22023"
+
+        noncanonical_date = dict(produced)
+        noncanonical_date["effective_period_start"] = "2026-9-1"
+        _rehash_episode_row(noncanonical_date, anchor=True)
+        db.execute("SET ROLE service_role")
+        with pytest.raises(psycopg.Error) as invalid_date:
+            db.execute(
+                "SELECT record_theme_episode_revision_v2(%s,%s)",
+                (run_id, Jsonb(noncanonical_date)),
+            )
+        db.execute("RESET ROLE")
+        assert invalid_date.value.sqlstate == "22023"
+
+        target_run, _ = _seed_episode_run(db)
+        db.execute("SET ROLE service_role")
+        with pytest.raises(psycopg.Error) as origin_bypass:
+            db.execute(
+                "SELECT record_theme_episode_revision_v2(%s,%s)",
+                (target_run, Jsonb(parsed)),
+            )
+        db.execute("RESET ROLE")
+        assert origin_bypass.value.sqlstate == "22023"
+
+        db.execute("SET session_replication_role=replica")
+        db.execute(
+            "UPDATE analysis_runs SET status='completed',finished_at=statement_timestamp() WHERE id=%s",
+            (run_id,),
+        )
+        db.execute(
+            "INSERT INTO market_intelligence_run_events(id,run_id,status) VALUES(%s,%s,'completed')",
+            (str(uuid.uuid4()), run_id),
+        )
+        db.execute("SET session_replication_role=origin")
+        db.execute("SET ROLE service_role")
+        context = db.execute(
+            "SELECT read_theme_memory_context(%s,statement_timestamp())", (target_run,),
+        ).fetchone()[0]
+        restarted = db.execute(
+            "SELECT read_theme_memory_context(%s,statement_timestamp()+INTERVAL '1 hour')",
+            (target_run,),
+        ).fetchone()[0]
+        db.execute("RESET ROLE")
+        assert restarted == context
+        assert [row["revision_id"] for row in context["active_theme_heads"]] == [
+            produced["revision_id"],
+        ]
+
+        with db.cursor(row_factory=dict_row) as cursor:
+            recovered = cursor.execute(
+                RECOVERY_SQL["theme_episode_revisions_v2"] + " WHERE revision_id=%s",
+                (produced["revision_id"],),
+            ).fetchone()
+            packet = cursor.execute(
+                RECOVERY_SQL["packets"] + " WHERE run_id=%s", (run_id,),
+            ).fetchone()
+            source_items = cursor.execute(
+                RECOVERY_SQL["source_items"] + " WHERE id=ANY(%s::uuid[])",
+                (evidence_ids,),
+            ).fetchall()
+            source_receipts = cursor.execute(
+                RECOVERY_SQL["source_receipts"] + " WHERE run_id=%s", (run_id,),
+            ).fetchall()
+            run_items = cursor.execute(
+                RECOVERY_SQL["intelligence_run_items"] + " WHERE run_id=%s", (run_id,),
+            ).fetchall()
+        assert recovered["content_hash"] == produced["content_hash"]
+        assert recovered["revision_id"] == produced["revision_id"]
+        _validate_theme_memory_v2_lineage({
+            "intelligence_runs": [{"id": run_id}],
+            "packets": [dict(packet)],
+            "reference_manifests": [],
+            "source_items": [dict(row) for row in source_items],
+            "source_receipts": [dict(row) for row in source_receipts],
+            "intelligence_run_items": [dict(row) for row in run_items],
+            "theme_episode_revisions_v2": [dict(recovered)],
+            "reviewer_identity_receipts_v2": [],
+            "research_nomination_requests_v2": [],
+            "research_nominations_v2": [],
+            "research_nomination_lifecycle_v2": [],
+            "intelligence_memory_context_bindings_v2": [],
+        })
+
+
 def test_actual_postgres_allows_one_cross_run_successor_for_uuid_theme_identity(theme_memory_dsn):
     with psycopg.connect(theme_memory_dsn, autocommit=True) as db:
         predecessor_run, predecessor_evidence = _seed_episode_run(db)
         successor_run, successor_evidence = _seed_episode_run(db)
-        evidence_ids = [predecessor_evidence[0], successor_evidence[0]]
         db.execute("SET session_replication_role=replica")
         db.execute(
             "UPDATE market_source_receipts SET retrieved_at='2026-09-07T12:11:00Z' WHERE run_id=%s",
             (successor_run,),
         )
         db.execute("SET session_replication_role=origin")
-        theme_id, episode_id, predecessor_id = [str(uuid.uuid4()) for _ in range(3)]
-        anchor = {
-            "authoritative_id": None,
-            "effective_period": {"end": None, "start": "2026-09-01"},
-            "identity_version": 2,
-            "jurisdiction": "US",
-            "subject_identity": "united states transmission",
-            "theme_id": theme_id,
-            "theme_mechanism": "grid award program",
+        theme_id = str(uuid.uuid4())
+        base_event = {
+            "theme_id": theme_id, "theme_mechanism": "grid_award_program",
+            "subject_identity": "entity:united-states-transmission", "jurisdiction": "US",
+            "effective_period": {"start": "2026-09-01", "end": "2026-12-31"},
+            "authoritative_id": None, "observed_at": "2026-09-07T12:10:00.000Z",
+            "source_evidence": [{
+                "evidence_id": predecessor_evidence[0], "story_identity": "story-a",
+                "polarity": "supporting",
+            }],
+            "investigated_entity_ids": ["entity:united-states-transmission"],
+            "missing_questions": ["Is funding current?"],
+            "invalidation_conditions": ["Program cancellation"],
+            "next_review_at": "2026-09-10T12:10:00.000Z",
+            "expires_at": "2026-09-27T12:10:00.000Z",
         }
-        anchor_hash = _episode_hash(db, anchor)
+        predecessor = revise_theme_episode(None, base_event, origin_run_id=predecessor_run)
+        db.execute("SET ROLE service_role")
         db.execute(
-            "INSERT INTO market_theme_episode_revisions_v2(revision_id,theme_id,episode_id,revision,anchor_hash,origin_run_id,theme_mechanism,subject_identity,jurisdiction,effective_period_start,source_membership,source_ids,supporting_source_ids,opposing_source_ids,added_source_ids,first_seen,last_seen,next_review_at,expires_at,state,content_hash) VALUES(%s,%s,%s,1,%s,%s,'Grid award program','United States transmission','US','2026-09-01',%s,%s,%s,'[]',%s,'2026-09-07T12:10:00Z','2026-09-07T12:10:00Z','2026-09-10T12:00:00Z','2026-09-27T12:00:00Z','open',%s)",
-            (predecessor_id, theme_id, episode_id, anchor_hash, predecessor_run, Jsonb([{"evidence_id": evidence_ids[0], "story_identity": "story-a", "polarity": "supporting"}]), Jsonb([evidence_ids[0]]), Jsonb([evidence_ids[0]]), Jsonb([evidence_ids[0]]), "d" * 64),
+            "SELECT record_theme_episode_revision_v2(%s,%s)",
+            (predecessor_run, Jsonb(predecessor.to_persistence_row())),
         )
+        db.execute("RESET ROLE")
 
-    def successor(revision_id):
-        with psycopg.connect(theme_memory_dsn, autocommit=True) as db:
-            value = {
-                "revision_id": revision_id, "theme_id": theme_id, "episode_id": episode_id,
-                "revision": 2, "identity_version": 2, "anchor_hash": anchor_hash,
-                "predecessor_revision_id": predecessor_id, "predecessor_content_hash": "d" * 64,
-                "theme_mechanism": "Grid award program", "subject_identity": "United States transmission",
-                "jurisdiction": "US", "effective_period_start": "2026-09-01", "effective_period_end": None,
-                "authoritative_id": None,
-                "source_membership": [
-                    {"evidence_id": evidence_ids[0], "story_identity": "story-a", "polarity": "supporting"},
-                    {"evidence_id": evidence_ids[1], "story_identity": "story-b", "polarity": "opposing"},
-                ],
-                "source_ids": evidence_ids, "supporting_source_ids": [evidence_ids[0]],
-                "opposing_source_ids": [evidence_ids[1]], "added_source_ids": [evidence_ids[1]],
-                "investigated_entity_ids": ["CIK:0000000001"], "missing_questions": ["Is funding current?"],
-                "invalidation_conditions": ["Program cancellation"], "first_seen": "2026-09-07T12:10:00Z",
-                "last_seen": "2026-09-07T12:11:00Z", "next_review_at": "2026-09-10T12:00:00Z",
-                "expires_at": "2026-09-27T12:00:00Z", "state": "open", "closure_reason": None,
-                "reopen_reason": None, "execution_allowed": False,
+        competing = []
+        for index, evidence_id in enumerate(successor_evidence):
+            event = {
+                **base_event,
+                "observed_at": "2026-09-07T12:11:00.000Z",
+                "source_evidence": [{
+                    "evidence_id": evidence_id, "story_identity": f"story-{index + 1}",
+                    "polarity": "opposing",
+                }],
             }
-            value["content_hash"] = _episode_hash(db, value)
+            competing.append(
+                revise_theme_episode(predecessor, event, origin_run_id=successor_run).to_persistence_row()
+            )
+
+    def successor(value):
+        with psycopg.connect(theme_memory_dsn, autocommit=True) as db:
             try:
                 db.execute("SET ROLE service_role")
                 return db.execute("SELECT record_theme_episode_revision_v2(%s,%s)", (successor_run, Jsonb(value))).fetchone()[0]
@@ -479,12 +696,12 @@ def test_actual_postgres_allows_one_cross_run_successor_for_uuid_theme_identity(
                 return exc.sqlstate
 
     with ThreadPoolExecutor(max_workers=2) as pool:
-        outcomes = list(pool.map(successor, (str(uuid.uuid4()), str(uuid.uuid4()))))
+        outcomes = list(pool.map(successor, competing))
     assert sum(isinstance(outcome, dict) for outcome in outcomes) == 1
     assert "22023" in outcomes
     with psycopg.connect(theme_memory_dsn, autocommit=True) as db:
-        assert db.execute("SELECT count(*) FROM market_theme_episode_revisions_v2 WHERE predecessor_revision_id=%s", (predecessor_id,)).fetchone() == (1,)
-        assert db.execute("SELECT theme_id FROM market_theme_episode_revisions_v2 WHERE predecessor_revision_id=%s", (predecessor_id,)).fetchone() == (theme_id,)
+        assert db.execute("SELECT count(*) FROM market_theme_episode_revisions_v2 WHERE predecessor_revision_id=%s", (predecessor.revision_id,)).fetchone() == (1,)
+        assert db.execute("SELECT theme_id FROM market_theme_episode_revisions_v2 WHERE predecessor_revision_id=%s", (predecessor.revision_id,)).fetchone() == (theme_id,)
 
 
 def test_actual_postgres_v2_acl_separates_browser_service_dashboard_and_release_reader(theme_memory_dsn):
@@ -503,6 +720,14 @@ def test_actual_postgres_v2_acl_separates_browser_service_dashboard_and_release_
                 "SELECT has_table_privilege('stock_agent_release_reader_runtime',%s,'SELECT')",
                 (f"public.{table}",),
             ).fetchone() == (True,)
+        for role in (
+            "anon", "authenticated", "service_role", "stock_agent_dashboard",
+            "stock_agent_release_reader", "stock_agent_release_reader_runtime",
+        ):
+            assert db.execute(
+                "SELECT has_function_privilege(%s,'public.market_theme_episode_uuid_v5(uuid,text)','EXECUTE')",
+                (role,),
+            ).fetchone() == (False,)
 
         assert db.execute(
             "SELECT has_function_privilege('service_role','public.record_research_nominations(uuid,uuid,jsonb)','EXECUTE')"

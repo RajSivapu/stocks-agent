@@ -5,7 +5,7 @@ from __future__ import annotations
 import argparse
 import base64
 import binascii
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal, InvalidOperation
 import hashlib
 import io
@@ -32,6 +32,12 @@ from lib.intelligence.cursors import (  # noqa: E402
     update_cursor,
 )
 from lib.intelligence.canonical import canonical_event, canonical_ranking  # noqa: E402
+from lib.intelligence.themes import (  # noqa: E402
+    theme_episode_v2_anchor_document,
+    theme_episode_v2_episode_id,
+    theme_episode_v2_persistence_document,
+    theme_episode_v2_revision_id,
+)
 from lib.intelligence.universe import (  # noqa: E402
     reference_manifest_semantic_document,
     security_revision_semantic_document,
@@ -1693,28 +1699,58 @@ def _validate_theme_memory_v2_lineage(result: Mapping[str, list[dict[str, object
     runs = {row["id"] for row in result["intelligence_runs"]}
     packets = {row["id"]: row for row in result["packets"]}
     manifests = {row["id"] for row in result["reference_manifests"]}
-    source_items = {row["id"] for row in result["source_items"]}
+    source_items = {row["id"]: row for row in result["source_items"]}
+    source_receipts = {row["id"]: row for row in result["source_receipts"]}
+    run_items = result["intelligence_run_items"]
     revisions = {row["revision_id"]: row for row in result["theme_episode_revisions_v2"]}
 
     def aware(value: object) -> datetime:
-        if not isinstance(value, str):
+        if not isinstance(value, str) or not re.fullmatch(
+            r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z", value,
+        ):
             raise ValueError
         parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
-        if parsed.tzinfo is None:
+        if parsed.tzinfo is None or parsed.astimezone(timezone.utc).isoformat(
+            timespec="milliseconds",
+        ).replace("+00:00", "Z") != value:
+            raise ValueError
+        return parsed
+
+    def day(value: object, *, nullable: bool = False) -> date | None:
+        if value is None and nullable:
+            return None
+        if not isinstance(value, str) or not re.fullmatch(r"\d{4}-\d{2}-\d{2}", value):
+            raise ValueError
+        parsed = date.fromisoformat(value)
+        if parsed.isoformat() != value:
             raise ValueError
         return parsed
 
     successors: set[str] = set()
+    anchors: dict[str, str] = {}
     try:
         for row in revisions.values():
             membership = row["source_membership"]
             predecessor = revisions.get(row["predecessor_revision_id"])
+            first_seen = aware(row["first_seen"])
+            last_seen = aware(row["last_seen"])
+            next_review = aware(row["next_review_at"])
+            expires = aware(row["expires_at"])
+            period_start = day(row["effective_period_start"])
+            period_end = day(row["effective_period_end"], nullable=True)
             if (
                 not UUID.fullmatch(row["revision_id"])
                 or not UUID.fullmatch(row["episode_id"])
                 or row["origin_run_id"] not in runs
                 or row["identity_version"] != 2
                 or row["execution_allowed"] is not False
+                or not re.fullmatch(r"(?:[a-z][a-z0-9_]{2,79}|[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12})", row["theme_id"])
+                or not re.fullmatch(r"[a-z0-9][a-z0-9:._/-]{2,239}", row["theme_mechanism"])
+                or not re.fullmatch(r"[a-z0-9][a-z0-9:._/-]{0,239}", row["subject_identity"])
+                or not re.fullmatch(r"[A-Z0-9][A-Z0-9:._/-]{1,79}", row["jurisdiction"])
+                or (row["authoritative_id"] is not None and not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9:._/-]{0,255}", row["authoritative_id"]))
+                or not 1 <= row["revision"] <= 10000
+                or (period_end is not None and period_end < period_start)
                 or not HASH.fullmatch(row["anchor_hash"])
                 or not HASH.fullmatch(row["content_hash"])
                 or not isinstance(membership, list)
@@ -1722,25 +1758,125 @@ def _validate_theme_memory_v2_lineage(result: Mapping[str, list[dict[str, object
                 or any(
                     not isinstance(item, Mapping)
                     or set(item) != {"evidence_id", "story_identity", "polarity"}
+                    or not isinstance(item["evidence_id"], str)
+                    or UUID.fullmatch(item["evidence_id"]) is None
                     or item["evidence_id"] not in source_items
+                    or not isinstance(item["story_identity"], str)
+                    or not 1 <= len(item["story_identity"]) <= 512
+                    or item["story_identity"] != " ".join(item["story_identity"].split())
                     or item["polarity"] not in {"supporting", "opposing"}
                     for item in membership
                 )
-                or aware(row["last_seen"]) < aware(row["first_seen"])
-                or aware(row["expires_at"]) > aware(row["first_seen"]) + timedelta(days=30)
+                or membership != sorted(membership, key=lambda item: (item["story_identity"], item["evidence_id"]))
+                or len({item["evidence_id"] for item in membership}) != len(membership)
+                or len({item["story_identity"] for item in membership}) != len(membership)
+                or row["source_ids"] != sorted(item["evidence_id"] for item in membership)
+                or row["supporting_source_ids"] != sorted(item["evidence_id"] for item in membership if item["polarity"] == "supporting")
+                or row["opposing_source_ids"] != sorted(item["evidence_id"] for item in membership if item["polarity"] == "opposing")
+                or not 1 <= len(row["added_source_ids"]) <= 64
+                or row["added_source_ids"] != sorted(set(row["added_source_ids"]))
+                or not set(row["added_source_ids"]).issubset(row["source_ids"])
+                or any(
+                    not isinstance(values, list) or values != sorted(set(values))
+                    or len(values) > maximum
+                    or any(not isinstance(value, str) or not value or len(value) > length or value != " ".join(value.split()) for value in values)
+                    for values, maximum, length in (
+                        (row["investigated_entity_ids"], 32, 256),
+                        (row["missing_questions"], 16, 500),
+                        (row["invalidation_conditions"], 16, 500),
+                    )
+                )
+                or row["state"] not in {"open", "closed"}
+                or ((row["state"] == "closed") != (row["closure_reason"] is not None))
+                or any(value is not None and (not 3 <= len(value) <= 500 or value != " ".join(value.split())) for value in (row["closure_reason"], row["reopen_reason"]))
+                or first_seen > last_seen or next_review < first_seen or next_review > expires
+                or expires <= first_seen or expires > first_seen + timedelta(days=30)
             ):
                 raise ValueError
+            for member in membership:
+                source_item = source_items[member["evidence_id"]]
+                receipt = source_receipts.get(source_item["source_receipt_id"])
+                if (
+                    receipt is None or receipt["status"] not in {"succeeded", "cache_hit"}
+                    or not any(
+                        used["source_item_id"] == member["evidence_id"]
+                        and used["source_receipt_id"] == receipt["id"]
+                        and used["disposition"] in {"accepted", "duplicate", "near_duplicate"}
+                        for used in run_items
+                    )
+                ):
+                    raise ValueError
+            anchor_hash = hashlib.sha256(canonical_json(
+                theme_episode_v2_anchor_document(row)
+            ).encode()).hexdigest()
+            episode_id = theme_episode_v2_episode_id(anchor_hash)
+            content_hash = hashlib.sha256(canonical_json(
+                theme_episode_v2_persistence_document(row)
+            ).encode()).hexdigest()
+            revision_id = theme_episode_v2_revision_id(
+                episode_id, row["revision"], content_hash,
+            )
+            if (
+                row["anchor_hash"] != anchor_hash or row["episode_id"] != episode_id
+                or row["content_hash"] != content_hash or row["revision_id"] != revision_id
+            ):
+                raise ValueError
+            prior_episode = anchors.setdefault(anchor_hash, episode_id)
+            if prior_episode != episode_id:
+                raise ValueError
+            receipt_times = [
+                aware(source_receipts[source_items[member["evidence_id"]]["source_receipt_id"]]["retrieved_at"])
+                for member in membership
+            ]
+            packet = next((candidate for candidate in result["packets"] if candidate["run_id"] == row["origin_run_id"] and candidate["status"] == "completed" and candidate["packet"].get("contract_version") == 2), None)
+            packet_evidence = {
+                evidence.get("item_id") for evidence in packet["packet"].get("evidence", [])
+                if isinstance(evidence, Mapping)
+            } if packet is not None else set()
+            for added_id in row["added_source_ids"]:
+                source_item = source_items.get(added_id)
+                receipt = source_receipts.get(source_item["source_receipt_id"]) if source_item else None
+                if (
+                    receipt is None or receipt["run_id"] != row["origin_run_id"]
+                    or added_id not in packet_evidence
+                    or not any(
+                        used["run_id"] == row["origin_run_id"]
+                        and used["source_item_id"] == added_id
+                        and used["source_receipt_id"] == receipt["id"]
+                        and used["disposition"] in {"accepted", "duplicate", "near_duplicate"}
+                        for used in run_items
+                    )
+                ):
+                    raise ValueError
             if row["revision"] == 1:
-                if predecessor is not None or row["predecessor_content_hash"] is not None:
+                if (
+                    predecessor is not None or row["predecessor_revision_id"] is not None
+                    or row["predecessor_content_hash"] is not None or row["reopen_reason"] is not None
+                    or row["added_source_ids"] != row["source_ids"]
+                    or first_seen != min(receipt_times) or last_seen != max(receipt_times)
+                ):
                     raise ValueError
             elif (
                 predecessor is None
                 or predecessor["episode_id"] != row["episode_id"]
                 or predecessor["theme_id"] != row["theme_id"]
+                or predecessor["anchor_hash"] != row["anchor_hash"]
                 or predecessor["revision"] + 1 != row["revision"]
                 or predecessor["content_hash"] != row["predecessor_content_hash"]
                 or predecessor["first_seen"] != row["first_seen"]
-                or aware(row["expires_at"]) > aware(predecessor["expires_at"])
+                or predecessor["expires_at"] != row["expires_at"]
+                or predecessor["origin_run_id"] == row["origin_run_id"]
+                or row["added_source_ids"] != sorted(set(row["source_ids"]) - set(predecessor["source_ids"]))
+                or last_seen != max(aware(predecessor["last_seen"]), max(receipt_times))
+                or not {item["story_identity"] for item in predecessor["source_membership"]}.issubset(item["story_identity"] for item in membership)
+                or any(
+                    next((item for item in membership if item["evidence_id"] == prior["evidence_id"]), prior) != prior
+                    for prior in predecessor["source_membership"]
+                )
+                or not set(predecessor["investigated_entity_ids"]).issubset(row["investigated_entity_ids"])
+                or not set(predecessor["invalidation_conditions"]).issubset(row["invalidation_conditions"])
+                or (predecessor["state"] == "closed" and (row["state"] != "open" or row["reopen_reason"] is None))
+                or (predecessor["state"] == "open" and row["reopen_reason"] is not None)
                 or row["predecessor_revision_id"] in successors
             ):
                 raise ValueError

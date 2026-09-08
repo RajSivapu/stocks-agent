@@ -357,6 +357,50 @@ _EPISODE_THEME_PATTERN = re.compile(
 )
 _EPISODE_TOKEN_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9:._/-]{0,255}$")
 
+THEME_EPISODE_V2_PERSISTENCE_FIELDS = (
+    "theme_id", "episode_id", "revision", "identity_version", "anchor_hash",
+    "origin_run_id", "predecessor_revision_id", "predecessor_content_hash",
+    "theme_mechanism", "subject_identity", "jurisdiction", "effective_period_start",
+    "effective_period_end", "authoritative_id", "source_membership", "source_ids",
+    "supporting_source_ids", "opposing_source_ids", "added_source_ids",
+    "investigated_entity_ids", "missing_questions", "invalidation_conditions",
+    "first_seen", "last_seen", "next_review_at", "expires_at", "state",
+    "closure_reason", "reopen_reason", "execution_allowed",
+)
+
+
+def theme_episode_v2_persistence_document(value: Mapping[str, object]) -> dict[str, object]:
+    """Return the single version-two semantic document hashed by every runtime."""
+    return {field: value[field] for field in THEME_EPISODE_V2_PERSISTENCE_FIELDS}
+
+
+def theme_episode_v2_anchor_document(value: Mapping[str, object]) -> dict[str, object]:
+    return {
+        "authoritative_id": value["authoritative_id"],
+        "effective_period": {
+            "end": value["effective_period_end"],
+            "start": value["effective_period_start"],
+        },
+        "identity_version": value["identity_version"],
+        "jurisdiction": value["jurisdiction"],
+        "subject_identity": value["subject_identity"],
+        "theme_id": value["theme_id"],
+        "theme_mechanism": value["theme_mechanism"],
+    }
+
+
+def theme_episode_v2_episode_id(anchor_hash: str) -> str:
+    return str(uuid.uuid5(uuid.NAMESPACE_URL, f"market-theme-episode-v2:{anchor_hash}"))
+
+
+def theme_episode_v2_revision_id(
+    episode_id: str, revision: int, content_hash: str,
+) -> str:
+    return str(uuid.uuid5(
+        uuid.NAMESPACE_URL,
+        f"market-theme-episode-revision-v2:{episode_id}:{revision}:{content_hash}",
+    ))
+
 
 def _episode_timestamp(value: object, field: str) -> datetime:
     if isinstance(value, datetime):
@@ -510,8 +554,10 @@ def _episode_anchor(event: Mapping[str, object]) -> tuple[dict[str, object], str
     if not isinstance(period, Mapping) or set(period) != {"start", "end"}:
         raise ValueError("theme episode effective period is invalid")
     start = _episode_day(period["start"], "effective period start")
-    end = _episode_day(period["end"], "effective period end")
-    if end < start:
+    end = None if period["end"] is None else _episode_day(
+        period["end"], "effective period end",
+    )
+    if end is not None and end < start:
         raise ValueError("theme episode effective period is invalid")
     anchor = {
         "authoritative_id": authoritative_id,
@@ -545,7 +591,10 @@ def _episode_evidence(value: object) -> tuple[tuple[str, str, str], ...]:
             raise ValueError("theme episode evidence identity is invalid") from exc
         story = raw["story_identity"]
         polarity = raw["polarity"]
-        if str(parsed) != evidence_id or not isinstance(story, str) or not story or len(story) > 512 \
+        if not isinstance(story, str):
+            raise ValueError("theme episode source evidence is invalid")
+        story = " ".join(story.split())
+        if str(parsed) != evidence_id or not story or len(story) > 512 \
                 or polarity not in {"supporting", "opposing"}:
             raise ValueError("theme episode source evidence is invalid")
         member = (evidence_id, story, str(polarity))
@@ -592,15 +641,19 @@ def revise_theme_episode(
     closure_reason = event.get("closure_reason")
     reopen_reason = event.get("reopen_reason")
     for value, label in ((closure_reason, "closure reason"), (reopen_reason, "reopen reason")):
-        if value is not None and (not isinstance(value, str) or not 1 <= len(" ".join(value.split())) <= 500):
+        if value is not None and (not isinstance(value, str) or not 3 <= len(" ".join(value.split())) <= 500):
             raise ValueError(f"theme episode {label} is invalid")
-    if state == "closed" and closure_reason is None:
-        raise ValueError("theme episode closure requires a reason")
+    if (state == "closed") != (closure_reason is not None):
+        raise ValueError("theme episode closure state requires an exact reason")
+    if existing is None and reopen_reason is not None:
+        raise ValueError("initial theme episode cannot include a reopen reason")
     if existing is not None:
         if not isinstance(existing, ThemeEpisodeRevision) or existing.anchor_hash != anchor_hash:
             raise ValueError("theme episode continuation is ambiguous")
         if existing.state == "closed" and (state != "open" or reopen_reason is None):
             raise ValueError("closed theme episode requires an explicit supported successor")
+        if existing.state == "open" and reopen_reason is not None:
+            raise ValueError("open theme episode cannot include a reopen reason")
         existing_by_story = {story: (evidence_id, story, polarity) for evidence_id, story, polarity in existing.source_membership}
         added = [row for row in incoming if existing_by_story.get(row[1]) != row]
         if not added and state == existing.state and closure_reason == existing.closure_reason:
@@ -630,14 +683,25 @@ def revise_theme_episode(
     last_seen = max(existing.last_seen if existing else first_seen, observed_at)
     supporting = tuple(sorted(row[0] for row in membership if row[2] == "supporting"))
     opposing = tuple(sorted(row[0] for row in membership if row[2] == "opposing"))
+    closure_reason = " ".join(closure_reason.split()) if isinstance(closure_reason, str) else None
+    reopen_reason = " ".join(reopen_reason.split()) if isinstance(reopen_reason, str) else None
+    episode_id = existing.episode_id if existing else theme_episode_v2_episode_id(anchor_hash)
+    source_ids = tuple(sorted(row[0] for row in membership))
     document = {
-        **anchor,
         "added_source_ids": sorted(row[0] for row in added),
+        "anchor_hash": anchor_hash,
+        "authoritative_id": anchor["authoritative_id"],
         "closure_reason": closure_reason,
+        "effective_period_end": anchor["effective_period"]["end"],
+        "effective_period_start": anchor["effective_period"]["start"],
+        "episode_id": episode_id,
+        "execution_allowed": False,
         "expires_at": _timestamp_value(expiry),
         "first_seen": _timestamp_value(first_seen),
+        "identity_version": 2,
         "investigated_entity_ids": list(investigated),
         "invalidation_conditions": list(invalidation),
+        "jurisdiction": anchor["jurisdiction"],
         "last_seen": _timestamp_value(last_seen),
         "missing_questions": list(questions),
         "next_review_at": _timestamp_value(next_review),
@@ -647,19 +711,21 @@ def revise_theme_episode(
         "predecessor_revision_id": predecessor_id,
         "reopen_reason": reopen_reason,
         "revision": revision,
-        "source_membership": [list(row) for row in membership],
+        "source_ids": list(source_ids),
+        "source_membership": [
+            {"evidence_id": row[0], "story_identity": row[1], "polarity": row[2]}
+            for row in membership
+        ],
         "state": state,
+        "subject_identity": anchor["subject_identity"],
         "supporting_source_ids": list(supporting),
+        "theme_id": anchor["theme_id"],
+        "theme_mechanism": anchor["theme_mechanism"],
     }
     content_hash = hashlib.sha256(json.dumps(
         document, ensure_ascii=False, separators=(",", ":"), sort_keys=True,
     ).encode("utf-8")).hexdigest()
-    episode_id = existing.episode_id if existing else str(
-        uuid.uuid5(uuid.NAMESPACE_URL, f"market-theme-episode-v2:{anchor_hash}")
-    )
-    revision_id = str(uuid.uuid5(
-        uuid.NAMESPACE_URL, f"market-theme-episode-revision-v2:{episode_id}:{revision}:{content_hash}",
-    ))
+    revision_id = theme_episode_v2_revision_id(episode_id, revision, content_hash)
     return ThemeEpisodeRevision(
         theme_id=str(anchor["theme_id"]), episode_id=episode_id, revision_id=revision_id,
         revision=revision, identity_version=2, anchor_hash=anchor_hash,
@@ -670,14 +736,13 @@ def revise_theme_episode(
         authoritative_id=anchor["authoritative_id"] if isinstance(anchor["authoritative_id"], str) else None,
         origin_run_id=origin_run_id, predecessor_revision_id=predecessor_id,
         predecessor_content_hash=predecessor_hash, source_membership=membership,
-        source_ids=tuple(sorted(row[0] for row in membership)),
+        source_ids=source_ids,
         supporting_source_ids=supporting, opposing_source_ids=opposing,
         added_source_ids=tuple(sorted(row[0] for row in added)),
         investigated_entity_ids=investigated, missing_questions=questions,
         invalidation_conditions=invalidation, first_seen=first_seen, last_seen=last_seen,
         next_review_at=next_review, expires_at=expiry, state=state,
-        closure_reason=" ".join(closure_reason.split()) if isinstance(closure_reason, str) else None,
-        reopen_reason=" ".join(reopen_reason.split()) if isinstance(reopen_reason, str) else None,
+        closure_reason=closure_reason, reopen_reason=reopen_reason,
         content_hash=content_hash, execution_allowed=False,
     )
 

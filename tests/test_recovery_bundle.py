@@ -1,5 +1,5 @@
 import copy
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 import hashlib
 import json
 import shlex
@@ -19,6 +19,7 @@ import pytest
 
 from scripts.export_recovery_bundle import (
     REQUIRED_RECOVERY_RECORDS,
+    _validate_theme_memory_v2_lineage,
     _validated_records,
     decrypt_verified,
     export_recovery_bundle,
@@ -34,6 +35,13 @@ from lib.intelligence.universe import (
     reference_manifest_semantic_document,
     security_revision_semantic_document,
 )
+from lib.intelligence.themes import (
+    revise_theme_episode,
+    theme_episode_v2_anchor_document,
+    theme_episode_v2_episode_id,
+    theme_episode_v2_persistence_document,
+    theme_episode_v2_revision_id,
+)
 
 
 EXPOSURE_VECTORS = json.loads(
@@ -43,6 +51,268 @@ EXPOSURE_VECTORS = json.loads(
 
 def digest(value):
     return hashlib.sha256(json.dumps(value, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+
+
+def _theme_v2_recovery_records():
+    records = _research_v2_recovery_records()
+    run_id = records["intelligence_runs"][0]["id"]
+    source = records["source_items"][0]
+    receipt = records["source_receipts"][0]
+    observed_at = receipt["retrieved_at"]
+    observed = datetime.fromisoformat(observed_at.replace("Z", "+00:00"))
+    event = {
+        "theme_id": "critical_minerals_magnets",
+        "theme_mechanism": "domestic_magnet_capacity",
+        "subject_identity": "entity:niron-magnetics",
+        "jurisdiction": "US",
+        "effective_period": {"start": "2026-09-01", "end": "2026-12-31"},
+        "authoritative_id": "award:doe:MAGNET-2026-17",
+        "observed_at": observed_at,
+        "source_evidence": [{
+            "evidence_id": source["id"],
+            "story_identity": source["upstream_item_id"],
+            "polarity": "supporting",
+        }],
+        "investigated_entity_ids": ["entity:niron-magnetics"],
+        "missing_questions": ["Which public suppliers have current primary exposure?"],
+        "invalidation_conditions": ["Program award is rescinded"],
+        "next_review_at": (observed + timedelta(days=3)).isoformat().replace("+00:00", "Z"),
+        "expires_at": (observed + timedelta(days=20)).isoformat().replace("+00:00", "Z"),
+    }
+    row = revise_theme_episode(None, event, origin_run_id=run_id).to_persistence_row()
+    row["created_at"] = observed_at
+    records["theme_episode_revisions_v2"] = [row]
+    return records
+
+
+def _rehash_theme_v2_row(row, *, anchor=False):
+    canonical = lambda value: json.dumps(
+        value, ensure_ascii=False, separators=(",", ":"), sort_keys=True,
+    )
+    if anchor:
+        row["anchor_hash"] = hashlib.sha256(canonical(
+            theme_episode_v2_anchor_document(row),
+        ).encode()).hexdigest()
+        row["episode_id"] = theme_episode_v2_episode_id(row["anchor_hash"])
+    row["content_hash"] = hashlib.sha256(canonical(
+        theme_episode_v2_persistence_document(row),
+    ).encode()).hexdigest()
+    row["revision_id"] = theme_episode_v2_revision_id(
+        row["episode_id"], row["revision"], row["content_hash"],
+    )
+
+
+def _standalone_theme_v2_lineage():
+    run_ids = [
+        "11111111-1111-4111-8111-111111111111",
+        "22222222-2222-4222-8222-222222222222",
+        "33333333-3333-4333-8333-333333333333",
+    ]
+    evidence_ids = [
+        "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+        "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+        "cccccccc-cccc-4ccc-8ccc-cccccccccccc",
+    ]
+    receipt_ids = [
+        "dddddddd-dddd-4ddd-8ddd-dddddddddddd",
+        "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee",
+        "ffffffff-ffff-4fff-8fff-ffffffffffff",
+    ]
+    observed = [
+        "2026-09-05T19:36:00.000Z",
+        "2026-09-06T19:36:00.000Z",
+        "2026-09-07T19:36:00.000Z",
+    ]
+    base = {
+        "theme_id": "critical_minerals_magnets",
+        "theme_mechanism": "domestic_magnet_capacity",
+        "subject_identity": "entity:niron-magnetics",
+        "jurisdiction": "US",
+        "effective_period": {"start": "2026-09-01", "end": "2026-12-31"},
+        "authoritative_id": "award:doe:MAGNET-2026-17",
+        "investigated_entity_ids": ["entity:niron-magnetics"],
+        "missing_questions": ["Which public suppliers have current primary exposure?"],
+        "invalidation_conditions": ["Program award is rescinded"],
+        "next_review_at": "2026-09-08T19:36:00.000Z",
+        "expires_at": "2026-09-25T19:36:00.000Z",
+    }
+
+    def event(index, *, story=None, polarity="supporting"):
+        return {
+            **base,
+            "observed_at": observed[index],
+            "source_evidence": [{
+                "evidence_id": evidence_ids[index],
+                "story_identity": story or f"independent-story-{index}",
+                "polarity": polarity,
+            }],
+        }
+
+    first = revise_theme_episode(None, event(0), origin_run_id=run_ids[0])
+    second = revise_theme_episode(first, event(1), origin_run_id=run_ids[1])
+    result = {
+        "intelligence_runs": [{"id": run_id} for run_id in run_ids],
+        "packets": [{
+            "id": str(uuid.uuid5(uuid.UUID(run_id), "theme-packet")),
+            "run_id": run_id,
+            "status": "completed",
+            "packet": {"contract_version": 2, "evidence": [{"item_id": evidence_id}]},
+        } for run_id, evidence_id in zip(run_ids, evidence_ids)],
+        "reference_manifests": [],
+        "source_items": [{
+            "id": evidence_id, "source_receipt_id": receipt_id,
+        } for evidence_id, receipt_id in zip(evidence_ids, receipt_ids)],
+        "source_receipts": [{
+            "id": receipt_id, "run_id": run_id, "status": "succeeded",
+            "retrieved_at": seen,
+        } for receipt_id, run_id, seen in zip(receipt_ids, run_ids, observed)],
+        "intelligence_run_items": [{
+            "source_item_id": evidence_id, "source_receipt_id": receipt_id,
+            "run_id": run_id, "disposition": "accepted",
+        } for evidence_id, receipt_id, run_id in zip(evidence_ids, receipt_ids, run_ids)],
+        "theme_episode_revisions_v2": [
+            first.to_persistence_row(), second.to_persistence_row(),
+        ],
+        "reviewer_identity_receipts_v2": [],
+        "research_nomination_requests_v2": [],
+        "research_nominations_v2": [],
+        "research_nomination_lifecycle_v2": [],
+        "intelligence_memory_context_bindings_v2": [],
+    }
+    return result, first, second, event
+
+
+@pytest.mark.parametrize(("field", "replacement"), [
+    ("anchor_hash", "0" * 64),
+    ("content_hash", "0" * 64),
+    ("episode_id", "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"),
+    ("revision_id", "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb"),
+    ("supporting_source_ids", []),
+    ("opposing_source_ids", ["cccccccc-cccc-4ccc-8ccc-cccccccccccc"]),
+    ("added_source_ids", ["cccccccc-cccc-4ccc-8ccc-cccccccccccc"]),
+    ("state", "active"),
+])
+def test_recovery_rejects_forged_theme_v2_semantics(field, replacement):
+    records = _theme_v2_recovery_records()
+    records["theme_episode_revisions_v2"][0][field] = replacement
+
+    with pytest.raises(ValueError, match="theme memory v2"):
+        _validated_records(records)
+
+
+@pytest.mark.parametrize(("field", "replacement", "anchor"), [
+    ("first_seen", "2026-09-05T19:36:00+00:00", False),
+    ("effective_period_start", "2026-9-1", True),
+    ("identity_version", 3, True),
+    ("origin_run_id", "99999999-9999-4999-8999-999999999999", False),
+    ("predecessor_revision_id", "99999999-9999-4999-8999-999999999999", False),
+])
+def test_recovery_rejects_rehashed_theme_v2_identity_time_and_lineage_substitutions(
+        field, replacement, anchor):
+    records = _theme_v2_recovery_records()
+    row = records["theme_episode_revisions_v2"][0]
+    row[field] = replacement
+    if field == "predecessor_revision_id":
+        row["revision"] = 2
+        row["predecessor_content_hash"] = "d" * 64
+    _rehash_theme_v2_row(row, anchor=anchor)
+
+    with pytest.raises(ValueError, match="theme memory v2"):
+        _validated_records(records)
+
+
+def test_restore_rejects_forged_theme_v2_before_any_database_mutation():
+    records = _theme_v2_recovery_records()
+    records["theme_episode_revisions_v2"][0]["content_hash"] = "0" * 64
+
+    class UnusedConnection:
+        def transaction(self):
+            raise AssertionError("forged theme memory reached restore mutation")
+
+    with pytest.raises(ValueError, match="theme memory v2"):
+        restore_recovery_records(UnusedConnection(), records, isolated_guard=True)
+
+
+def test_theme_v2_recovery_query_preserves_canonical_hashed_timestamps():
+    query = RECOVERY_SQL["theme_episode_revisions_v2"]
+    for field in ("first_seen", "last_seen", "next_review_at", "expires_at"):
+        assert (
+            f"to_char({field} AT TIME ZONE 'UTC',"
+            "'YYYY-MM-DD\"T\"HH24:MI:SS.MS\"Z\"') "
+            f"AS {field}"
+        ) in query
+    assert (
+        "to_char(retrieved_at AT TIME ZONE 'UTC',"
+        "'YYYY-MM-DD\"T\"HH24:MI:SS.MS\"Z\"') AS retrieved_at"
+    ) in RECOVERY_SQL["source_receipts"]
+
+
+def test_recovery_accepts_valid_cross_run_paraphrase_repeat_and_correction_history():
+    records, first, second, event = _standalone_theme_v2_lineage()
+    _validate_theme_memory_v2_lineage(records)
+    assert second.episode_id == first.episode_id
+    assert second.revision == 2
+    assert revise_theme_episode(
+        first, {**event(0), "wording": "Same evidence, paraphrased"},
+        origin_run_id="22222222-2222-4222-8222-222222222222",
+    ) is first
+
+    correction = revise_theme_episode(
+        first,
+        event(1, story="independent-story-0", polarity="opposing"),
+        origin_run_id="22222222-2222-4222-8222-222222222222",
+    )
+    records["theme_episode_revisions_v2"] = [
+        first.to_persistence_row(), correction.to_persistence_row(),
+    ]
+    _validate_theme_memory_v2_lineage(records)
+    assert correction.opposing_source_ids == (
+        "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+    )
+
+
+@pytest.mark.parametrize(("field", "replacement"), [
+    ("predecessor_content_hash", "d" * 64),
+    ("first_seen", "2026-09-06T19:36:00.000Z"),
+    ("last_seen", "2026-09-05T19:36:00.000Z"),
+    ("added_source_ids", ["aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"]),
+    ("origin_run_id", "33333333-3333-4333-8333-333333333333"),
+])
+def test_recovery_rejects_rehashed_theme_v2_predecessor_source_and_time_substitution(
+        field, replacement):
+    records, _first, _second, _event = _standalone_theme_v2_lineage()
+    successor = records["theme_episode_revisions_v2"][1]
+    successor[field] = replacement
+    _rehash_theme_v2_row(successor)
+
+    with pytest.raises(ValueError, match="theme memory v2"):
+        _validate_theme_memory_v2_lineage(records)
+
+
+def test_recovery_rejects_two_rehashed_successors_for_one_predecessor():
+    records, first, _second, event = _standalone_theme_v2_lineage()
+    competing = revise_theme_episode(
+        first, event(2, polarity="opposing"),
+        origin_run_id="33333333-3333-4333-8333-333333333333",
+    )
+    records["theme_episode_revisions_v2"].append(competing.to_persistence_row())
+
+    with pytest.raises(ValueError, match="theme memory v2"):
+        _validate_theme_memory_v2_lineage(records)
+
+
+def test_recovery_rejects_rehashed_theme_v2_predecessor_cycle():
+    records, _first, second, _event = _standalone_theme_v2_lineage()
+    initial = records["theme_episode_revisions_v2"][0]
+    initial.update(
+        revision=3,
+        predecessor_revision_id=second.revision_id,
+        predecessor_content_hash=second.content_hash,
+    )
+    _rehash_theme_v2_row(initial)
+
+    with pytest.raises(ValueError, match="theme memory v2"):
+        _validate_theme_memory_v2_lineage(records)
 
 
 def _research_v2_recovery_records():

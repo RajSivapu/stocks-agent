@@ -27,6 +27,7 @@ import {
   type RecordReportPayload,
 } from "./reports.ts";
 import type { RecordLearningPayload } from "./outcomes.ts";
+import { createHash } from "node:crypto";
 
 export type Operation =
   | "start_run"
@@ -1446,7 +1447,7 @@ export function parseThemeEpisodeRevisionPayloadV2(value: unknown): Record<strin
   const row = objectValue(value, "theme episode revision");
   const keys = [
     "revision_id", "theme_id", "episode_id", "revision", "identity_version", "anchor_hash",
-    "predecessor_revision_id", "predecessor_content_hash", "theme_mechanism", "subject_identity",
+    "origin_run_id", "predecessor_revision_id", "predecessor_content_hash", "theme_mechanism", "subject_identity",
     "jurisdiction", "effective_period_start", "effective_period_end", "authoritative_id",
     "source_membership", "source_ids", "supporting_source_ids", "opposing_source_ids",
     "added_source_ids", "investigated_entity_ids", "missing_questions", "invalidation_conditions",
@@ -1454,14 +1455,204 @@ export function parseThemeEpisodeRevisionPayloadV2(value: unknown): Record<strin
     "reopen_reason", "content_hash", "execution_allowed",
   ];
   exactKeys(row, keys, "theme episode revision");
-  uuidValue(row.revision_id, "theme episode revision.revision_id");
-  uuidValue(row.episode_id, "theme episode revision.episode_id");
+  const revisionId = canonicalUuid(row.revision_id, "theme episode revision.revision_id");
+  const episodeId = canonicalUuid(row.episode_id, "theme episode revision.episode_id");
+  const originRunId = canonicalUuid(row.origin_run_id, "theme episode revision.origin_run_id");
   if (row.identity_version !== 2 || row.execution_allowed !== false) throw new Error("theme episode revision authority mismatch");
   for (const hash of ["anchor_hash", "content_hash"]) {
     if (typeof row[hash] !== "string" || !/^[0-9a-f]{64}$/.test(row[hash] as string)) throw new Error(`theme episode revision.${hash} invalid`);
   }
-  integerValue(row.revision, "theme episode revision.revision", 1, 10000);
-  return row;
+  const revision = integerValue(row.revision, "theme episode revision.revision", 1, 10000);
+  const themeId = stringValue(row.theme_id, "theme episode revision.theme_id", 80);
+  if (!/^(?:[a-z][a-z0-9_]{2,79}|[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12})$/.test(themeId)) {
+    throw new Error("theme episode revision.theme_id invalid");
+  }
+  const mechanism = canonicalEpisodeToken(row.theme_mechanism, "theme_mechanism", 240, "lower");
+  const subject = canonicalEpisodeToken(row.subject_identity, "subject_identity", 240, "lower");
+  const jurisdiction = canonicalEpisodeToken(row.jurisdiction, "jurisdiction", 80, "upper");
+  const authoritativeId = row.authoritative_id === null
+    ? null
+    : canonicalEpisodeToken(row.authoritative_id, "authoritative_id", 256, "exact");
+  const periodStart = dateValue(row.effective_period_start, "theme episode revision.effective_period_start");
+  const periodEnd = row.effective_period_end === null
+    ? null
+    : dateValue(row.effective_period_end, "theme episode revision.effective_period_end");
+  if (periodEnd !== null && periodEnd < periodStart) throw new Error("theme episode revision effective period invalid");
+  const predecessorId = row.predecessor_revision_id === null
+    ? null
+    : canonicalUuid(row.predecessor_revision_id, "theme episode revision.predecessor_revision_id");
+  const predecessorHash = row.predecessor_content_hash === null
+    ? null
+    : hashValue(row.predecessor_content_hash, "theme episode revision.predecessor_content_hash");
+  if ((revision === 1) !== (predecessorId === null && predecessorHash === null)) {
+    throw new Error("theme episode revision predecessor shape mismatch");
+  }
+  const membership = parseEpisodeMembership(row.source_membership);
+  const sourceIds = canonicalUuidArray(row.source_ids, "source_ids", 64, 1);
+  const supportingIds = canonicalUuidArray(row.supporting_source_ids, "supporting_source_ids", 64);
+  const opposingIds = canonicalUuidArray(row.opposing_source_ids, "opposing_source_ids", 64);
+  const addedIds = canonicalUuidArray(row.added_source_ids, "added_source_ids", 64, 1);
+  const memberIds = membership.map((entry) => entry.evidence_id).sort();
+  const expectedSupporting = membership.filter((entry) => entry.polarity === "supporting").map((entry) => entry.evidence_id).sort();
+  const expectedOpposing = membership.filter((entry) => entry.polarity === "opposing").map((entry) => entry.evidence_id).sort();
+  if (
+    canonicalJson(sourceIds) !== canonicalJson(memberIds) ||
+    canonicalJson(supportingIds) !== canonicalJson(expectedSupporting) ||
+    canonicalJson(opposingIds) !== canonicalJson(expectedOpposing) ||
+    addedIds.some((id) => !sourceIds.includes(id))
+  ) throw new Error("theme episode revision source partition mismatch");
+  const investigated = canonicalEpisodeStrings(row.investigated_entity_ids, "investigated_entity_ids", 32, 256);
+  const questions = canonicalEpisodeStrings(row.missing_questions, "missing_questions", 16, 500);
+  const invalidation = canonicalEpisodeStrings(row.invalidation_conditions, "invalidation_conditions", 16, 500);
+  const firstSeen = canonicalEpisodeTimestamp(row.first_seen, "first_seen");
+  const lastSeen = canonicalEpisodeTimestamp(row.last_seen, "last_seen");
+  const nextReview = canonicalEpisodeTimestamp(row.next_review_at, "next_review_at");
+  const expires = canonicalEpisodeTimestamp(row.expires_at, "expires_at");
+  const firstMillis = Date.parse(firstSeen);
+  if (
+    Date.parse(lastSeen) < firstMillis || Date.parse(nextReview) < firstMillis ||
+    Date.parse(nextReview) > Date.parse(expires) || Date.parse(expires) <= firstMillis ||
+    Date.parse(expires) > firstMillis + 30 * 24 * 60 * 60 * 1000
+  ) throw new Error("theme episode revision time bounds mismatch");
+  const state = enumValue(row.state, ["open", "closed"] as const, "theme episode revision.state");
+  const closureReason = canonicalEpisodeNullableText(row.closure_reason, "closure_reason");
+  const reopenReason = canonicalEpisodeNullableText(row.reopen_reason, "reopen_reason");
+  if ((state === "closed") !== (closureReason !== null) || (revision === 1 && reopenReason !== null)) {
+    throw new Error("theme episode revision state mismatch");
+  }
+  const document: Record<string, unknown> = {
+    theme_id: themeId, episode_id: episodeId, revision, identity_version: 2,
+    anchor_hash: row.anchor_hash, origin_run_id: originRunId,
+    predecessor_revision_id: predecessorId, predecessor_content_hash: predecessorHash,
+    theme_mechanism: mechanism, subject_identity: subject, jurisdiction,
+    effective_period_start: periodStart, effective_period_end: periodEnd,
+    authoritative_id: authoritativeId, source_membership: membership, source_ids: sourceIds,
+    supporting_source_ids: supportingIds, opposing_source_ids: opposingIds,
+    added_source_ids: addedIds, investigated_entity_ids: investigated,
+    missing_questions: questions, invalidation_conditions: invalidation,
+    first_seen: firstSeen, last_seen: lastSeen, next_review_at: nextReview,
+    expires_at: expires, state, closure_reason: closureReason, reopen_reason: reopenReason,
+    execution_allowed: false,
+  };
+  const anchor = {
+    authoritative_id: authoritativeId,
+    effective_period: { end: periodEnd, start: periodStart },
+    identity_version: 2,
+    jurisdiction,
+    subject_identity: subject,
+    theme_id: themeId,
+    theme_mechanism: mechanism,
+  };
+  const expectedAnchorHash = sha256Hex(canonicalJson(anchor));
+  if (row.anchor_hash !== expectedAnchorHash) throw new Error("theme episode revision anchor hash mismatch");
+  const expectedEpisodeId = uuidV5Url(`market-theme-episode-v2:${expectedAnchorHash}`);
+  if (episodeId !== expectedEpisodeId) throw new Error("theme episode revision episode id mismatch");
+  const expectedContentHash = sha256Hex(canonicalJson(document));
+  if (row.content_hash !== expectedContentHash) throw new Error("theme episode revision content hash mismatch");
+  if (revisionId !== uuidV5Url(`market-theme-episode-revision-v2:${episodeId}:${revision}:${expectedContentHash}`)) {
+    throw new Error("theme episode revision revision id mismatch");
+  }
+  return { revision_id: revisionId, ...document, content_hash: expectedContentHash };
+}
+
+function canonicalUuid(value: unknown, path: string): string {
+  const parsed = uuidValue(value, path);
+  if (parsed !== value) throw new Error(`${path} must be a canonical UUID`);
+  return parsed;
+}
+
+function canonicalEpisodeToken(value: unknown, field: string, maximum: number, casing: "lower" | "upper" | "exact"): string {
+  const parsed = stringValue(value, `theme episode revision.${field}`, maximum);
+  if (!/^[A-Za-z0-9][A-Za-z0-9:._/-]*$/.test(parsed)) throw new Error(`theme episode revision.${field} invalid`);
+  const expected = casing === "lower" ? parsed.toLowerCase() : casing === "upper" ? parsed.toUpperCase() : parsed;
+  if (parsed !== expected) throw new Error(`theme episode revision.${field} is not canonical`);
+  return parsed;
+}
+
+function canonicalEpisodeTimestamp(value: unknown, field: string): string {
+  const parsed = timestampValue(value, `theme episode revision.${field}`);
+  if (!/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/.test(parsed) || new Date(parsed).toISOString() !== parsed) {
+    throw new Error(`theme episode revision.${field} is not canonical`);
+  }
+  return parsed;
+}
+
+function canonicalEpisodeNullableText(value: unknown, field: string): string | null {
+  if (value === null) return null;
+  return canonicalEpisodeText(value, field, 500, 3);
+}
+
+function canonicalEpisodeText(value: unknown, field: string, maximum: number, minimum = 1): string {
+  if (typeof value !== "string") throw new Error(`theme episode revision.${field} must be text`);
+  const normalized = value.trim().split(/\s+/u).join(" ");
+  const length = [...value].length;
+  if (value !== normalized || length < minimum || length > maximum) {
+    throw new Error(`theme episode revision.${field} is not canonical`);
+  }
+  return value;
+}
+
+function compareUtf8(left: string, right: string): number {
+  const encoder = new TextEncoder();
+  const leftBytes = encoder.encode(left);
+  const rightBytes = encoder.encode(right);
+  const length = Math.min(leftBytes.length, rightBytes.length);
+  for (let index = 0; index < length; index += 1) {
+    if (leftBytes[index] !== rightBytes[index]) return leftBytes[index] - rightBytes[index];
+  }
+  return leftBytes.length - rightBytes.length;
+}
+
+function canonicalEpisodeStrings(value: unknown, field: string, maximum: number, length: number): string[] {
+  const values = arrayValue(value, `theme episode revision.${field}`, maximum).map((item, index) => {
+    return canonicalEpisodeText(item, `${field}[${index}]`, length);
+  });
+  const sorted = [...values].sort(compareUtf8);
+  if (new Set(values).size !== values.length || canonicalJson(values) !== canonicalJson(sorted)) {
+    throw new Error(`theme episode revision.${field} must be distinct and sorted`);
+  }
+  return values;
+}
+
+function canonicalUuidArray(value: unknown, field: string, maximum: number, minimum = 0): string[] {
+  const values = arrayValue(value, `theme episode revision.${field}`, maximum)
+    .map((item, index) => canonicalUuid(item, `theme episode revision.${field}[${index}]`));
+  if (values.length < minimum || new Set(values).size !== values.length || canonicalJson(values) !== canonicalJson([...values].sort())) {
+    throw new Error(`theme episode revision.${field} must be distinct and sorted`);
+  }
+  return values;
+}
+
+function parseEpisodeMembership(value: unknown): Array<{ evidence_id: string; story_identity: string; polarity: "supporting" | "opposing" }> {
+  const entries = arrayValue(value, "theme episode revision.source_membership", 64);
+  if (entries.length === 0) throw new Error("theme episode revision.source_membership is empty");
+  const result = entries.map((item, index) => {
+    const row = objectValue(item, `theme episode revision.source_membership[${index}]`);
+    exactKeys(row, ["evidence_id", "story_identity", "polarity"], `theme episode revision.source_membership[${index}]`);
+    return {
+      evidence_id: canonicalUuid(row.evidence_id, `theme episode revision.source_membership[${index}].evidence_id`),
+      story_identity: canonicalEpisodeText(row.story_identity, `source_membership[${index}].story_identity`, 512),
+      polarity: enumValue(row.polarity, ["supporting", "opposing"] as const, `theme episode revision.source_membership[${index}].polarity`),
+    };
+  });
+  const sorted = [...result].sort((left, right) =>
+    compareUtf8(left.story_identity, right.story_identity) || compareUtf8(left.evidence_id, right.evidence_id)
+  );
+  if (
+    new Set(result.map((entry) => entry.story_identity)).size !== result.length ||
+    new Set(result.map((entry) => entry.evidence_id)).size !== result.length ||
+    canonicalJson(result) !== canonicalJson(sorted)
+  ) throw new Error("theme episode revision.source_membership must be distinct and sorted");
+  return result;
+}
+
+function uuidV5Url(name: string): string {
+  const namespace = Uint8Array.from("6ba7b8119dad11d180b400c04fd430c8".match(/../g)!.map((part) => Number.parseInt(part, 16)));
+  const digest = createHash("sha1").update(namespace).update(name, "utf8").digest();
+  digest[6] = (digest[6] & 0x0f) | 0x50;
+  digest[8] = (digest[8] & 0x3f) | 0x80;
+  const hex = digest.subarray(0, 16).toString("hex");
+  return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
 }
 
 export function parseResearchNominationsPayloadV2(

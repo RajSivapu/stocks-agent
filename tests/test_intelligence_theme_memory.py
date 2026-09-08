@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
 import json
+from pathlib import Path
 import uuid
 
 import pytest
@@ -19,6 +20,9 @@ UTC = timezone.utc
 RUN_1 = "11111111-1111-4111-8111-111111111111"
 RUN_2 = "22222222-2222-4222-8222-222222222222"
 NOW = datetime(2026, 9, 12, 14, tzinfo=UTC)
+THEME_EPISODE_VECTOR = json.loads(
+    (Path(__file__).parent / "fixtures/theme_episode_v2_hash_vector.json").read_text()
+)
 
 
 def _event(*, source_id: str, wording: str = "New magnet plant", polarity: str = "supporting"):
@@ -52,6 +56,38 @@ def test_episode_identity_ignores_wording_and_repeat_does_not_create_revision():
         origin_run_id=RUN_2,
     )
     assert repeated is first
+
+
+def test_episode_persistence_matches_the_shared_v2_golden_document():
+    vector = THEME_EPISODE_VECTOR
+    revision = revise_theme_episode(
+        None, vector["event"], origin_run_id=vector["origin_run_id"],
+    )
+
+    assert revision.anchor_hash == vector["anchor_hash"]
+    assert revision.episode_id == vector["episode_id"]
+    assert revision.content_hash == vector["content_hash"]
+    assert revision.revision_id == vector["revision_id"]
+    assert revision.to_persistence_row() == vector["persistence_row"]
+
+
+def test_episode_persistence_normalizes_story_identity_and_rejects_short_state_reason():
+    event = _event(source_id="aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa")
+    event["source_evidence"][0]["story_identity"] = "  official\taward   story  "
+    revision = revise_theme_episode(None, event, origin_run_id=RUN_1)
+    assert revision.source_membership[0][1] == "official award story"
+
+    event.update(state="closed", closure_reason="x")
+    with pytest.raises(ValueError, match="closure reason"):
+        revise_theme_episode(None, event, origin_run_id=RUN_1)
+
+    event.update(state="open", closure_reason="Unexpected close", reopen_reason=None)
+    with pytest.raises(ValueError, match="closure"):
+        revise_theme_episode(None, event, origin_run_id=RUN_1)
+
+    event.update(closure_reason=None, reopen_reason="Unexpected reopen")
+    with pytest.raises(ValueError, match="reopen"):
+        revise_theme_episode(None, event, origin_run_id=RUN_1)
 
 
 def test_paraphrase_with_new_evidence_increments_same_episode_and_retains_predecessor():

@@ -26,9 +26,9 @@ CREATE TABLE IF NOT EXISTS public.market_theme_episode_revisions_v2 (
   supporting_source_ids JSONB NOT NULL CHECK (jsonb_typeof(supporting_source_ids)='array' AND jsonb_array_length(supporting_source_ids)<=64 AND octet_length(supporting_source_ids::text)<=8192),
   opposing_source_ids JSONB NOT NULL CHECK (jsonb_typeof(opposing_source_ids)='array' AND jsonb_array_length(opposing_source_ids)<=64 AND octet_length(opposing_source_ids::text)<=8192),
   added_source_ids JSONB NOT NULL CHECK (jsonb_typeof(added_source_ids)='array' AND jsonb_array_length(added_source_ids)<=64 AND octet_length(added_source_ids::text)<=8192),
-  investigated_entity_ids JSONB NOT NULL DEFAULT '[]'::jsonb CHECK (jsonb_typeof(investigated_entity_ids)='array' AND jsonb_array_length(investigated_entity_ids)<=64 AND octet_length(investigated_entity_ids::text)<=8192),
-  missing_questions JSONB NOT NULL DEFAULT '[]'::jsonb CHECK (jsonb_typeof(missing_questions)='array' AND jsonb_array_length(missing_questions)<=24 AND octet_length(missing_questions::text)<=8192),
-  invalidation_conditions JSONB NOT NULL DEFAULT '[]'::jsonb CHECK (jsonb_typeof(invalidation_conditions)='array' AND jsonb_array_length(invalidation_conditions)<=24 AND octet_length(invalidation_conditions::text)<=8192),
+  investigated_entity_ids JSONB NOT NULL DEFAULT '[]'::jsonb CHECK (jsonb_typeof(investigated_entity_ids)='array' AND jsonb_array_length(investigated_entity_ids)<=32 AND octet_length(investigated_entity_ids::text)<=8192),
+  missing_questions JSONB NOT NULL DEFAULT '[]'::jsonb CHECK (jsonb_typeof(missing_questions)='array' AND jsonb_array_length(missing_questions)<=16 AND octet_length(missing_questions::text)<=8192),
+  invalidation_conditions JSONB NOT NULL DEFAULT '[]'::jsonb CHECK (jsonb_typeof(invalidation_conditions)='array' AND jsonb_array_length(invalidation_conditions)<=16 AND octet_length(invalidation_conditions::text)<=8192),
   first_seen TIMESTAMPTZ NOT NULL,
   last_seen TIMESTAMPTZ NOT NULL,
   next_review_at TIMESTAMPTZ NOT NULL,
@@ -43,7 +43,7 @@ CREATE TABLE IF NOT EXISTS public.market_theme_episode_revisions_v2 (
   UNIQUE (predecessor_revision_id),
   UNIQUE (origin_run_id, content_hash),
   CHECK (effective_period_end IS NULL OR effective_period_end>=effective_period_start),
-  CHECK (last_seen>=first_seen AND next_review_at>=first_seen),
+  CHECK (last_seen>=first_seen AND next_review_at>=first_seen AND next_review_at<=expires_at),
   CHECK (expires_at>first_seen AND expires_at<=first_seen+INTERVAL '30 days'),
   CHECK ((revision=1 AND predecessor_revision_id IS NULL AND predecessor_content_hash IS NULL)
       OR (revision>1 AND predecessor_revision_id IS NOT NULL AND predecessor_content_hash IS NOT NULL)),
@@ -156,6 +156,18 @@ CREATE TRIGGER market_research_nomination_lifecycle_v2_append_only BEFORE UPDATE
 DROP TRIGGER IF EXISTS market_intelligence_memory_context_bindings_v2_append_only ON public.market_intelligence_memory_context_bindings_v2;
 CREATE TRIGGER market_intelligence_memory_context_bindings_v2_append_only BEFORE UPDATE OR DELETE ON public.market_intelligence_memory_context_bindings_v2 FOR EACH ROW EXECUTE FUNCTION public.reject_theme_memory_v2_mutation();
 
+CREATE OR REPLACE FUNCTION public.market_theme_episode_uuid_v5(p_namespace UUID,p_name TEXT)
+RETURNS UUID LANGUAGE plpgsql IMMUTABLE STRICT SET search_path=pg_catalog,extensions AS $$
+DECLARE v_digest BYTEA; v_hex TEXT;
+BEGIN
+  v_digest:=extensions.digest(uuid_send(p_namespace)||convert_to(p_name,'UTF8'),'sha1');
+  v_digest:=set_byte(v_digest,6,(get_byte(v_digest,6)&15)|80);
+  v_digest:=set_byte(v_digest,8,(get_byte(v_digest,8)&63)|128);
+  v_hex:=encode(substring(v_digest FROM 1 FOR 16),'hex');
+  RETURN (substring(v_hex,1,8)||'-'||substring(v_hex,9,4)||'-'||substring(v_hex,13,4)||'-'||substring(v_hex,17,4)||'-'||substring(v_hex,21,12))::uuid;
+END;
+$$;
+
 CREATE OR REPLACE FUNCTION public.record_theme_episode_revision_v2(p_run_id UUID,p_revision JSONB)
 RETURNS JSONB LANGUAGE plpgsql SECURITY DEFINER SET search_path=pg_catalog AS $$
 DECLARE
@@ -163,20 +175,76 @@ DECLARE
   v_predecessor public.market_theme_episode_revisions_v2%ROWTYPE;
   v_anchor TEXT;
   v_hash TEXT;
+  v_expected_episode UUID;
+  v_expected_revision UUID;
   v_source JSONB;
   v_first_seen TIMESTAMPTZ;
   v_last_seen TIMESTAMPTZ;
+  v_packet public.market_evidence_packets%ROWTYPE;
 BEGIN
   IF p_run_id IS NULL OR jsonb_typeof(p_revision)<>'object'
-     OR NOT(p_revision ?& ARRAY['revision_id','theme_id','episode_id','revision','identity_version','anchor_hash','predecessor_revision_id','predecessor_content_hash','theme_mechanism','subject_identity','jurisdiction','effective_period_start','effective_period_end','authoritative_id','source_membership','source_ids','supporting_source_ids','opposing_source_ids','added_source_ids','investigated_entity_ids','missing_questions','invalidation_conditions','first_seen','last_seen','next_review_at','expires_at','state','closure_reason','reopen_reason','content_hash','execution_allowed'])
-     OR (p_revision-ARRAY['revision_id','theme_id','episode_id','revision','identity_version','anchor_hash','predecessor_revision_id','predecessor_content_hash','theme_mechanism','subject_identity','jurisdiction','effective_period_start','effective_period_end','authoritative_id','source_membership','source_ids','supporting_source_ids','opposing_source_ids','added_source_ids','investigated_entity_ids','missing_questions','invalidation_conditions','first_seen','last_seen','next_review_at','expires_at','state','closure_reason','reopen_reason','content_hash','execution_allowed'])<>'{}'::jsonb
+     OR NOT(p_revision ?& ARRAY['revision_id','theme_id','episode_id','revision','identity_version','anchor_hash','origin_run_id','predecessor_revision_id','predecessor_content_hash','theme_mechanism','subject_identity','jurisdiction','effective_period_start','effective_period_end','authoritative_id','source_membership','source_ids','supporting_source_ids','opposing_source_ids','added_source_ids','investigated_entity_ids','missing_questions','invalidation_conditions','first_seen','last_seen','next_review_at','expires_at','state','closure_reason','reopen_reason','content_hash','execution_allowed'])
+     OR (p_revision-ARRAY['revision_id','theme_id','episode_id','revision','identity_version','anchor_hash','origin_run_id','predecessor_revision_id','predecessor_content_hash','theme_mechanism','subject_identity','jurisdiction','effective_period_start','effective_period_end','authoritative_id','source_membership','source_ids','supporting_source_ids','opposing_source_ids','added_source_ids','investigated_entity_ids','missing_questions','invalidation_conditions','first_seen','last_seen','next_review_at','expires_at','state','closure_reason','reopen_reason','content_hash','execution_allowed'])<>'{}'::jsonb
      OR (p_revision->>'identity_version')::int<>2 OR (p_revision->>'execution_allowed')::boolean
-     OR jsonb_typeof(p_revision->'source_ids')<>'array'
-     OR jsonb_array_length(p_revision->'source_ids') NOT BETWEEN 1 AND 64 THEN
+     OR (p_revision->>'origin_run_id')::uuid<>p_run_id
+     OR p_revision->>'theme_id' !~ '^(?:[a-z][a-z0-9_]{2,79}|[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12})$'
+     OR p_revision->>'theme_mechanism' !~ '^[a-z0-9][a-z0-9:._/-]{2,239}$'
+     OR p_revision->>'subject_identity' !~ '^[a-z0-9][a-z0-9:._/-]{0,239}$'
+     OR p_revision->>'jurisdiction' !~ '^[A-Z0-9][A-Z0-9:._/-]{1,79}$'
+     OR (p_revision->'authoritative_id'<>'null'::jsonb AND p_revision->>'authoritative_id' !~ '^[A-Za-z0-9][A-Za-z0-9:._/-]{0,255}$')
+     OR p_revision->>'effective_period_start' !~ '^\d{4}-\d{2}-\d{2}$'
+     OR to_char((p_revision->>'effective_period_start')::date,'YYYY-MM-DD')<>p_revision->>'effective_period_start'
+     OR (p_revision->'effective_period_end'<>'null'::jsonb AND (
+       p_revision->>'effective_period_end' !~ '^\d{4}-\d{2}-\d{2}$'
+       OR to_char((p_revision->>'effective_period_end')::date,'YYYY-MM-DD')<>p_revision->>'effective_period_end'
+       OR (p_revision->>'effective_period_end')::date<(p_revision->>'effective_period_start')::date
+     ))
+     OR jsonb_typeof(p_revision->'source_membership')<>'array' OR jsonb_array_length(p_revision->'source_membership') NOT BETWEEN 1 AND 64
+     OR jsonb_typeof(p_revision->'source_ids')<>'array' OR jsonb_array_length(p_revision->'source_ids') NOT BETWEEN 1 AND 64
+     OR jsonb_typeof(p_revision->'supporting_source_ids')<>'array' OR jsonb_array_length(p_revision->'supporting_source_ids')>64
+     OR jsonb_typeof(p_revision->'opposing_source_ids')<>'array' OR jsonb_array_length(p_revision->'opposing_source_ids')>64
+     OR jsonb_typeof(p_revision->'added_source_ids')<>'array' OR jsonb_array_length(p_revision->'added_source_ids') NOT BETWEEN 1 AND 64
+     OR jsonb_typeof(p_revision->'investigated_entity_ids')<>'array' OR jsonb_array_length(p_revision->'investigated_entity_ids')>32
+     OR jsonb_typeof(p_revision->'missing_questions')<>'array' OR jsonb_array_length(p_revision->'missing_questions')>16
+     OR jsonb_typeof(p_revision->'invalidation_conditions')<>'array' OR jsonb_array_length(p_revision->'invalidation_conditions')>16
+     OR p_revision->>'state' NOT IN ('open','closed')
+     OR ((p_revision->>'state'='closed')<>(p_revision->'closure_reason'<>'null'::jsonb))
+     OR ((p_revision->>'revision')::int=1 AND p_revision->'reopen_reason'<>'null'::jsonb)
+     OR (p_revision->'closure_reason'<>'null'::jsonb AND (char_length(p_revision->>'closure_reason') NOT BETWEEN 3 AND 500 OR regexp_replace(trim(p_revision->>'closure_reason'),'\s+',' ','g')<>p_revision->>'closure_reason'))
+     OR (p_revision->'reopen_reason'<>'null'::jsonb AND (char_length(p_revision->>'reopen_reason') NOT BETWEEN 3 AND 500 OR regexp_replace(trim(p_revision->>'reopen_reason'),'\s+',' ','g')<>p_revision->>'reopen_reason'))
+     OR p_revision->>'first_seen' !~ '^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$'
+     OR p_revision->>'last_seen' !~ '^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$'
+     OR p_revision->>'next_review_at' !~ '^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$'
+     OR p_revision->>'expires_at' !~ '^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$'
+     OR p_revision->>'anchor_hash' !~ '^[0-9a-f]{64}$' OR p_revision->>'content_hash' !~ '^[0-9a-f]{64}$'
+     OR (p_revision->>'revision')::int NOT BETWEEN 1 AND 10000 THEN
     RAISE EXCEPTION 'invalid theme episode revision v2' USING ERRCODE='22023';
+  END IF;
+  IF EXISTS(
+       SELECT 1 FROM (
+         VALUES (p_revision->'investigated_entity_ids',256),(p_revision->'missing_questions',500),(p_revision->'invalidation_conditions',500)
+       ) arrays(value,max_length)
+       CROSS JOIN LATERAL jsonb_array_elements_text(arrays.value) entry
+       WHERE entry.value='' OR char_length(entry.value)>arrays.max_length OR regexp_replace(trim(entry.value),'\s+',' ','g')<>entry.value
+     )
+     OR EXISTS(
+       SELECT 1 FROM (
+         VALUES (p_revision->'source_ids'),(p_revision->'supporting_source_ids'),(p_revision->'opposing_source_ids'),(p_revision->'added_source_ids')
+       ) arrays(value) CROSS JOIN LATERAL jsonb_array_elements_text(arrays.value) entry
+       WHERE entry.value !~ '^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$'
+     ) THEN RAISE EXCEPTION 'invalid theme episode revision v2' USING ERRCODE='22023'; END IF;
+  IF p_revision->'source_membership'<>(SELECT jsonb_agg(value ORDER BY convert_to(value->>'story_identity','UTF8'),convert_to(value->>'evidence_id','UTF8')) FROM jsonb_array_elements(p_revision->'source_membership'))
+     OR EXISTS(SELECT 1 FROM jsonb_array_elements(p_revision->'source_membership') member GROUP BY member->>'story_identity' HAVING count(*)>1)
+     OR EXISTS(SELECT 1 FROM jsonb_array_elements(p_revision->'source_membership') member GROUP BY member->>'evidence_id' HAVING count(*)>1)
+     OR EXISTS(SELECT 1 FROM (VALUES(p_revision->'source_ids'),(p_revision->'supporting_source_ids'),(p_revision->'opposing_source_ids'),(p_revision->'added_source_ids'),(p_revision->'investigated_entity_ids'),(p_revision->'missing_questions'),(p_revision->'invalidation_conditions')) arrays(value) WHERE arrays.value<>(SELECT COALESCE(jsonb_agg(to_jsonb(entry.value) ORDER BY convert_to(entry.value,'UTF8')),'[]'::jsonb) FROM jsonb_array_elements_text(arrays.value) entry) OR jsonb_array_length(arrays.value)<>(SELECT count(DISTINCT entry.value) FROM jsonb_array_elements_text(arrays.value) entry)) THEN
+    RAISE EXCEPTION 'theme episode canonical array mismatch' USING ERRCODE='22023';
   END IF;
   IF NOT EXISTS(SELECT 1 FROM public.market_intelligence_runs r JOIN public.market_intelligence_run_events e ON e.run_id=r.id AND e.status IN ('started','completed') WHERE r.id=p_run_id) THEN
     RAISE EXCEPTION 'theme origin run is not valid' USING ERRCODE='22023';
+  END IF;
+  SELECT * INTO v_packet FROM public.market_evidence_packets WHERE run_id=p_run_id AND status='completed' AND packet->>'contract_version'='2';
+  IF NOT FOUND OR v_packet.packet_hash<>encode(extensions.digest(convert_to(public.market_canonical_jsonb(v_packet.packet),'UTF8'),'sha256'),'hex') THEN
+    RAISE EXCEPTION 'theme current packet is not valid' USING ERRCODE='22023';
   END IF;
   v_anchor:=encode(extensions.digest(convert_to(public.market_canonical_jsonb(jsonb_build_object(
     'authoritative_id',p_revision->'authoritative_id',
@@ -188,16 +256,22 @@ BEGIN
   IF v_anchor<>p_revision->>'anchor_hash' THEN
     RAISE EXCEPTION 'theme episode anchor hash mismatch' USING ERRCODE='22023';
   END IF;
+  v_expected_episode:=public.market_theme_episode_uuid_v5('6ba7b811-9dad-11d1-80b4-00c04fd430c8'::uuid,'market-theme-episode-v2:'||v_anchor);
+  IF (p_revision->>'episode_id')::uuid<>v_expected_episode THEN
+    RAISE EXCEPTION 'theme episode derived identity mismatch' USING ERRCODE='22023';
+  END IF;
   FOR v_source IN SELECT value FROM jsonb_array_elements(p_revision->'source_membership') LOOP
     IF jsonb_typeof(v_source)<>'object' OR NOT(v_source ?& ARRAY['evidence_id','story_identity','polarity'])
        OR (v_source-ARRAY['evidence_id','story_identity','polarity'])<>'{}'::jsonb
        OR jsonb_typeof(v_source->'story_identity')<>'string'
-       OR octet_length(v_source->>'story_identity') NOT BETWEEN 1 AND 512
+       OR char_length(v_source->>'story_identity') NOT BETWEEN 1 AND 512
+       OR regexp_replace(trim(v_source->>'story_identity'),'\s+',' ','g')<>v_source->>'story_identity'
        OR v_source->>'polarity' NOT IN ('supporting','opposing')
+       OR v_source->>'evidence_id' !~ '^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$'
        OR NOT EXISTS(
          SELECT 1 FROM public.market_source_items item
          JOIN public.market_source_receipts receipt ON receipt.id=item.source_receipt_id
-         JOIN public.market_intelligence_run_items used ON used.source_item_id=item.id
+         JOIN public.market_intelligence_run_items used ON used.source_item_id=item.id AND used.source_receipt_id=receipt.id
          WHERE item.id=(v_source->>'evidence_id')::uuid
            AND receipt.status IN ('succeeded','cache_hit')
            AND used.disposition IN ('accepted','duplicate','near_duplicate')
@@ -205,8 +279,7 @@ BEGIN
       RAISE EXCEPTION 'theme source membership mismatch' USING ERRCODE='22023';
     END IF;
   END LOOP;
-  IF EXISTS(SELECT 1 FROM jsonb_array_elements(p_revision->'source_membership') member GROUP BY member->>'story_identity' HAVING count(*)>1)
-     OR (SELECT array_agg(value ORDER BY value) FROM jsonb_array_elements_text(p_revision->'source_ids'))
+  IF (SELECT array_agg(value ORDER BY value) FROM jsonb_array_elements_text(p_revision->'source_ids'))
         IS DISTINCT FROM (SELECT array_agg(member->>'evidence_id' ORDER BY member->>'evidence_id') FROM jsonb_array_elements(p_revision->'source_membership') member)
      OR (SELECT array_agg(value ORDER BY value) FROM jsonb_array_elements_text(p_revision->'supporting_source_ids'))
         IS DISTINCT FROM (SELECT array_agg(member->>'evidence_id' ORDER BY member->>'evidence_id') FROM jsonb_array_elements(p_revision->'source_membership') member WHERE member->>'polarity'='supporting')
@@ -217,14 +290,13 @@ BEGIN
   SELECT min(receipt.retrieved_at),max(receipt.retrieved_at) INTO v_first_seen,v_last_seen
   FROM public.market_source_items item JOIN public.market_source_receipts receipt ON receipt.id=item.source_receipt_id
   WHERE item.id IN (SELECT (member->>'evidence_id')::uuid FROM jsonb_array_elements(p_revision->'source_membership') member);
-  IF v_first_seen IS NULL OR v_last_seen IS NULL
-     OR (p_revision->>'first_seen')::timestamptz<>v_first_seen
-     OR (p_revision->>'last_seen')::timestamptz<>v_last_seen THEN
-    RAISE EXCEPTION 'theme source-backed observation mismatch' USING ERRCODE='22023';
-  END IF;
-  v_hash:=encode(extensions.digest(convert_to(public.market_canonical_jsonb(p_revision-'content_hash'),'UTF8'),'sha256'),'hex');
+  v_hash:=encode(extensions.digest(convert_to(public.market_canonical_jsonb(p_revision-ARRAY['revision_id','content_hash']),'UTF8'),'sha256'),'hex');
   IF v_hash<>p_revision->>'content_hash' THEN
     RAISE EXCEPTION 'theme revision content hash mismatch' USING ERRCODE='22023';
+  END IF;
+  v_expected_revision:=public.market_theme_episode_uuid_v5('6ba7b811-9dad-11d1-80b4-00c04fd430c8'::uuid,'market-theme-episode-revision-v2:'||v_expected_episode::text||':'||(p_revision->>'revision')||':'||v_hash);
+  IF (p_revision->>'revision_id')::uuid<>v_expected_revision THEN
+    RAISE EXCEPTION 'theme revision derived identity mismatch' USING ERRCODE='22023';
   END IF;
   SELECT * INTO v_existing FROM public.market_theme_episode_revisions_v2 WHERE revision_id=(p_revision->>'revision_id')::uuid;
   IF FOUND THEN
@@ -241,28 +313,51 @@ BEGIN
        OR v_predecessor.theme_id<>p_revision->>'theme_id'
        OR v_predecessor.anchor_hash<>v_anchor
        OR v_predecessor.first_seen<>(p_revision->>'first_seen')::timestamptz
-       OR v_predecessor.last_seen>(p_revision->>'last_seen')::timestamptz
-       OR (p_revision->>'expires_at')::timestamptz>v_predecessor.expires_at
-       OR jsonb_array_length(p_revision->'added_source_ids')=0
+       OR (p_revision->>'last_seen')::timestamptz<>GREATEST(v_predecessor.last_seen,v_last_seen)
+       OR (p_revision->>'expires_at')::timestamptz<>v_predecessor.expires_at
+       OR v_predecessor.origin_run_id=p_run_id
        OR (SELECT array_agg(value ORDER BY value) FROM jsonb_array_elements_text(p_revision->'added_source_ids'))
           IS DISTINCT FROM (SELECT array_agg(value ORDER BY value) FROM jsonb_array_elements_text(p_revision->'source_ids') current_source(value) WHERE NOT (v_predecessor.source_ids ? current_source.value))
        OR EXISTS(SELECT 1 FROM jsonb_array_elements_text(p_revision->'added_source_ids') added(value) WHERE NOT EXISTS(
          SELECT 1 FROM public.market_intelligence_run_items used
          JOIN public.market_source_items item ON item.id=used.source_item_id
          JOIN public.market_source_receipts receipt ON receipt.id=used.source_receipt_id
-         WHERE used.run_id=p_run_id AND item.id=added.value::uuid
+         WHERE used.run_id=p_run_id AND item.id=added.value::uuid AND item.source_receipt_id=used.source_receipt_id
            AND used.disposition IN ('accepted','duplicate','near_duplicate')
            AND receipt.status IN ('succeeded','cache_hit')
+           AND receipt.run_id=p_run_id
        ))
-       OR (v_predecessor.state='closed' AND NULLIF(p_revision->>'reopen_reason','') IS NULL) THEN
+       OR EXISTS(SELECT 1 FROM jsonb_array_elements_text(p_revision->'added_source_ids') added(value) WHERE NOT EXISTS(SELECT 1 FROM jsonb_array_elements(v_packet.packet->'evidence') evidence WHERE evidence->>'item_id'=added.value))
+       OR EXISTS(SELECT 1 FROM jsonb_array_elements(v_predecessor.source_membership) prior WHERE NOT EXISTS(SELECT 1 FROM jsonb_array_elements(p_revision->'source_membership') current WHERE current->>'story_identity'=prior->>'story_identity'))
+       OR EXISTS(SELECT 1 FROM jsonb_array_elements(v_predecessor.source_membership) prior JOIN LATERAL (SELECT current FROM jsonb_array_elements(p_revision->'source_membership') current WHERE current->>'evidence_id'=prior->>'evidence_id') matched ON true WHERE matched.current<>prior)
+       OR EXISTS(SELECT 1 FROM jsonb_array_elements_text(v_predecessor.investigated_entity_ids) prior WHERE NOT(p_revision->'investigated_entity_ids' ? prior.value))
+       OR EXISTS(SELECT 1 FROM jsonb_array_elements_text(v_predecessor.invalidation_conditions) prior WHERE NOT(p_revision->'invalidation_conditions' ? prior.value))
+       OR (v_predecessor.state='closed' AND (p_revision->>'state'<>'open' OR p_revision->'reopen_reason'='null'::jsonb))
+       OR (v_predecessor.state='open' AND p_revision->'reopen_reason'<>'null'::jsonb) THEN
       RAISE EXCEPTION 'theme predecessor lineage mismatch' USING ERRCODE='22023';
     END IF;
   ELSE
     IF (SELECT array_agg(value ORDER BY value) FROM jsonb_array_elements_text(p_revision->'added_source_ids'))
        IS DISTINCT FROM (SELECT array_agg(value ORDER BY value) FROM jsonb_array_elements_text(p_revision->'source_ids'))
+       OR (p_revision->>'first_seen')::timestamptz<>v_first_seen
+       OR (p_revision->>'last_seen')::timestamptz<>v_last_seen
+       OR EXISTS(SELECT 1 FROM jsonb_array_elements_text(p_revision->'added_source_ids') added(value) WHERE NOT EXISTS(
+         SELECT 1 FROM public.market_intelligence_run_items used
+         JOIN public.market_source_items item ON item.id=used.source_item_id AND item.source_receipt_id=used.source_receipt_id
+         JOIN public.market_source_receipts receipt ON receipt.id=used.source_receipt_id
+         WHERE used.run_id=p_run_id AND item.id=added.value::uuid AND receipt.run_id=p_run_id
+           AND used.disposition IN ('accepted','duplicate','near_duplicate') AND receipt.status IN ('succeeded','cache_hit')
+       ))
+       OR EXISTS(SELECT 1 FROM jsonb_array_elements_text(p_revision->'added_source_ids') added(value) WHERE NOT EXISTS(SELECT 1 FROM jsonb_array_elements(v_packet.packet->'evidence') evidence WHERE evidence->>'item_id'=added.value))
        OR EXISTS(SELECT 1 FROM public.market_theme_episode_revisions_v2 WHERE anchor_hash=v_anchor) THEN
       RAISE EXCEPTION 'theme episode identity or initial evidence mismatch' USING ERRCODE='22023';
     END IF;
+  END IF;
+  IF (p_revision->>'next_review_at')::timestamptz<(p_revision->>'first_seen')::timestamptz
+     OR (p_revision->>'next_review_at')::timestamptz>(p_revision->>'expires_at')::timestamptz
+     OR (p_revision->>'expires_at')::timestamptz<=(p_revision->>'first_seen')::timestamptz
+     OR (p_revision->>'expires_at')::timestamptz>(p_revision->>'first_seen')::timestamptz+INTERVAL '30 days' THEN
+    RAISE EXCEPTION 'theme episode time bounds mismatch' USING ERRCODE='22023';
   END IF;
   INSERT INTO public.market_theme_episode_revisions_v2(
     revision_id,theme_id,episode_id,revision,identity_version,anchor_hash,origin_run_id,
@@ -641,7 +736,7 @@ CREATE POLICY release_nomination_lifecycle_v2_select ON public.market_research_n
 CREATE POLICY release_memory_context_v2_select ON public.market_intelligence_memory_context_bindings_v2 FOR SELECT TO stock_agent_release_reader USING(true);
 
 REVOKE ALL ON FUNCTION public.reject_theme_memory_v2_mutation(),public.refresh_market_intelligence_context_v2_internal(UUID) FROM PUBLIC,anon,authenticated,service_role,stock_agent_dashboard,stock_agent_release_reader,stock_agent_release_reader_runtime;
-REVOKE ALL ON FUNCTION public.record_theme_episode_revision_v2(UUID,JSONB),public.record_research_review_identity_v2(UUID,UUID,JSONB),public.record_research_nominations(UUID,UUID,JSONB),public.transition_research_nomination_v2(UUID,UUID,JSONB),public.read_theme_memory_context(UUID,TIMESTAMPTZ),public.refresh_market_intelligence_context(UUID) FROM PUBLIC,anon,authenticated,stock_agent_dashboard,stock_agent_release_reader,stock_agent_release_reader_runtime;
+REVOKE ALL ON FUNCTION public.market_theme_episode_uuid_v5(UUID,TEXT),public.record_theme_episode_revision_v2(UUID,JSONB),public.record_research_review_identity_v2(UUID,UUID,JSONB),public.record_research_nominations(UUID,UUID,JSONB),public.transition_research_nomination_v2(UUID,UUID,JSONB),public.read_theme_memory_context(UUID,TIMESTAMPTZ),public.refresh_market_intelligence_context(UUID) FROM PUBLIC,anon,authenticated,stock_agent_dashboard,stock_agent_release_reader,stock_agent_release_reader_runtime;
 GRANT EXECUTE ON FUNCTION public.record_theme_episode_revision_v2(UUID,JSONB),public.record_research_review_identity_v2(UUID,UUID,JSONB),public.transition_research_nomination_v2(UUID,UUID,JSONB),public.read_theme_memory_context(UUID,TIMESTAMPTZ),public.refresh_market_intelligence_context(UUID) TO service_role;
 GRANT EXECUTE ON FUNCTION public.record_research_nominations(UUID,UUID,JSONB) TO service_role;
 REVOKE ALL ON FUNCTION public.read_owner_intelligence_v2(INT) FROM PUBLIC,anon,authenticated,service_role,stock_agent_release_reader,stock_agent_release_reader_runtime;

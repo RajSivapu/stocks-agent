@@ -3,6 +3,7 @@ import {
   parseDecisionBundle,
   parseEvidencePacket,
   parseGatewayEnvelope,
+  parseThemeEpisodeRevisionPayloadV2,
   parseTrustedEvidenceFacts,
   type Phase,
   validatePacketEvidence,
@@ -91,6 +92,9 @@ Deno.test("nomination selection binds the exact frozen Task 6 descriptor and def
 });
 import { canonicalJson, sha256Hex } from "./intelligence.ts";
 import HASH_VECTORS from "../../../../tests/fixtures/research_suitability_hash_vectors.json" with {
+  type: "json",
+};
+import THEME_EPISODE_VECTOR from "../../../../tests/fixtures/theme_episode_v2_hash_vector.json" with {
   type: "json",
 };
 
@@ -385,6 +389,25 @@ Deno.test("research suitability canonical hashes match shared golden vectors", (
   if (HASH_VECTORS.vectors[1].sha256 === HASH_VECTORS.vectors[2].sha256) {
     throw new Error("absent and explicit null keys must remain distinct");
   }
+});
+
+Deno.test("theme episode v2 parser verifies the shared canonical persistence vector", () => {
+  assertEquals(
+    canonicalJson(parseThemeEpisodeRevisionPayloadV2(THEME_EPISODE_VECTOR.persistence_row)),
+    canonicalJson(THEME_EPISODE_VECTOR.persistence_row),
+  );
+  const changed = structuredClone(THEME_EPISODE_VECTOR.persistence_row);
+  changed.subject_identity = "entity:substituted";
+  assertThrows(
+    () => parseThemeEpisodeRevisionPayloadV2(changed),
+    "hash mismatch",
+  );
+  const noncanonicalStory = structuredClone(THEME_EPISODE_VECTOR.persistence_row);
+  noncanonicalStory.source_membership[0].story_identity = "  substituted\tstory  ";
+  assertThrows(
+    () => parseThemeEpisodeRevisionPayloadV2(noncanonicalStory),
+    "not canonical",
+  );
 });
 
 Deno.test("persisted facts reject duplicate IDs and missing authority fields", () => {
