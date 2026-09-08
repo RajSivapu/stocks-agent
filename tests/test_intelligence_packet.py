@@ -71,7 +71,7 @@ def test_packet_byte_pressure_drops_lowest_ranked_evidence_then_candidates():
     assert packet.candidates[0].candidate_key == "T00"
 
 
-def test_v2_packet_keeps_research_and_uses_hash_bound_action_subset():
+def test_v2_packet_keeps_research_and_has_no_action_without_protected_valuation():
     ranked = rank_candidates([
         v2_candidate("ACT"),
         v2_candidate(
@@ -92,11 +92,11 @@ def test_v2_packet_keeps_research_and_uses_hash_bound_action_subset():
     assert value["contract_version"] == 2
     assert len(value["research_candidates"]) == 2
     assert [row["ticker"] for row in value["research_candidates"]] == ["ACT", "WAIT"]
-    assert [row["candidate_key"] for row in value["action_candidates"]] == ["sec:ACT"]
-    action = value["action_candidates"][0]
-    research = value["research_candidates"][0]
-    assert action["candidate_hash"] == research["candidate_hash"]
-    assert action["suitability_hash"] == research["suitability"]["evaluation_hash"]
+    assert value["action_candidates"] == []
+    assert all(
+        "valuation_missing" in row["suitability"]["missing_reasons"]
+        for row in value["research_candidates"]
+    )
     assert value["execution_allowed"] is False
     assert "candidates" not in value
 
@@ -225,7 +225,7 @@ def test_v2_packet_retains_decisive_primary_and_opposing_evidence_under_byte_pre
     assert any(row["role"] == "opposing" for row in retained)
 
 
-def test_v2_packet_rehashes_candidate_and_action_reference_after_optional_thinning():
+def test_v2_packet_rehashes_candidate_after_optional_thinning_without_action_promotion():
     base = v2_candidate("HASH")
     optional = tuple(
         replace(
@@ -263,7 +263,7 @@ def test_v2_packet_rehashes_candidate_and_action_reference_after_optional_thinni
         for omission in value["omissions"]
     )
     assert row["candidate_hash"] == expected
-    assert value["action_candidates"][0]["candidate_hash"] == expected
+    assert value["action_candidates"] == []
 
 
 def test_research_suitability_canonical_hash_golden_vectors():

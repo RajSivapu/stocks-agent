@@ -1254,7 +1254,10 @@ def _validate_evidence_packet_v2_recovery(
             or not isinstance(packet["research_candidates"], list)
             or len(packet["research_candidates"]) > 12
             or not isinstance(packet["action_candidates"], list)
-            or len(packet["action_candidates"]) > 12
+            # This schema has no protected issuer-valuation ledger.  V2
+            # action eligibility therefore cannot be reconstructed from
+            # server-owned evidence and the lane must remain empty.
+            or len(packet["action_candidates"]) != 0
             or not isinstance(packet["evidence"], list) or len(packet["evidence"]) > 96
             or row["candidate_count"] != len(packet["research_candidates"])
             or row["evidence_count"] != len(packet["evidence"])
@@ -1465,6 +1468,8 @@ def _validate_evidence_packet_v2_recovery(
                 })
                 or suitability["state"] == "unknown" and not suitability["missing_reasons"]
                 or suitability["state"] == "vetoed" and not suitability["veto_reasons"]
+                or suitability["state"] == "eligible"
+                or "valuation_missing" not in suitability["missing_reasons"]
             ):
                 raise ValueError
             lineage = suitability["lineage"]
@@ -1531,16 +1536,6 @@ def _validate_evidence_packet_v2_recovery(
                        <= datetime.fromisoformat(packet["observed_at"].replace("Z", "+00:00"))
                 ):
                     raise ValueError
-            if suitability["state"] == "eligible" and (
-                candidate["research_state"] != "analysis_ready"
-                or suitability["missing_reasons"] or suitability["veto_reasons"]
-                or lineage is None or any(lineage[name] in {None, ""} for name in (
-                    "cash_revision", "portfolio_revision", "quote_as_of", "quote_expires_at",
-                    "quote_receipt_id", "reference_expires_at", "reference_manifest_id",
-                    "reference_revision", "security_revision_id",
-                ))
-            ):
-                raise ValueError
             candidates[candidate["candidate_key"]] = candidate
 
         seen_actions: set[str] = set()

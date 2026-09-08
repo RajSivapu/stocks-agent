@@ -259,6 +259,7 @@ Deno.test("ordinary research is suppressed for every report kind with canonical 
       "theme",
       "intraday",
       "urgent",
+      "on-demand",
     ] as const
   ) {
     const value = report(kind);
@@ -288,6 +289,38 @@ Deno.test("ordinary research is suppressed for every report kind with canonical 
     parseRecordReportPayload(delivery.payload);
   }
 });
+
+Deno.test("mixed reports keep research in audit but Telegram contains only approved actions and holding-risk alerts", () => {
+  for (const kind of ["morning", "weekly", "monthly", "theme", "on-demand", "intraday", "urgent"] as const) {
+    const buy = decision({ evaluation_id: "00000000-0000-4000-8000-000000000003" });
+    const watch = decision({
+      evaluation_id: "00000000-0000-4000-8000-000000000004",
+      ticker: "WAIT", status: "downgraded", final_action: "watch",
+      approved_terms: null, final_alert_urgency: null,
+    });
+    const insufficient = decision({
+      evaluation_id: "00000000-0000-4000-8000-000000000005",
+      ticker: "MISS", status: "vetoed", final_action: null,
+      approved_terms: null, final_alert_urgency: null,
+    });
+    const risk = decision({
+      evaluation_id: "00000000-0000-4000-8000-000000000006",
+      ticker: "HELD", status: "approved", final_action: "hold",
+      approved_terms: null, final_alert_urgency: "routine",
+    });
+    const value = report(kind);
+    value.report.policy_decision_ids = [buy, watch, insufficient, risk]
+      .map((row) => row.evaluation_id).sort();
+    const delivery = renderReportDelivery(resign(value), [buy, watch, insufficient, risk], OPTIONS);
+    assertEquals(delivery.status, "ready");
+    assert(delivery.body.includes("CENX") && delivery.body.includes("HELD"), "approved rows absent");
+    assert(!delivery.body.includes("WAIT") && !delivery.body.includes("MISS"), "Telegram leaked non-action research");
+    assert(delivery.payload!.report.full_markdown.includes("WAIT: WATCH") &&
+      delivery.payload!.report.full_markdown.includes("MISS: INSUFFICIENT"), "audit report lost decisions");
+    assertEquals(delivery.payload!.report.source_ids, value.report.source_ids);
+    assertEquals(delivery.payload!.report.policy_decision_ids, value.report.policy_decision_ids);
+  }
+});
 Deno.test("missing policy decisions suppress even non-keyword action prose", () => {
   const value = report("morning");
   value.report.summary = "Acquire a million shares before the close";
@@ -305,7 +338,7 @@ Deno.test("v2 research-only report needs no fabricated ticker or policy evaluati
       portfolio_relevance: "0.000000",
     },
     lineage: null,
-    missing_reasons: ["security_identity_unresolved"],
+    missing_reasons: ["security_identity_unresolved", "valuation_missing"],
     state: "unknown" as const,
     veto_reasons: [],
   };

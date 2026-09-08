@@ -186,6 +186,12 @@ def test_protected_context_unwraps_values_and_never_uses_supplied_current_price(
             "overlap_by_ticker": {"TEST": "0.2"}}})
     assert result["holdings"] == [{"ticker": "TEST", "shares": "2", "market_value": "200"}]
     assert result["liquidity_by_ticker"] == {"TEST": "0.5"}
+    assert result["valuation_state_by_ticker"] == {}
+    assert result["valuation_provenance_by_ticker"] == {}
+    assert result["valuation_status"] == "unavailable"
+    assert result["liquidity_state_by_ticker"] == {}
+    assert result["overlap_state_by_ticker"] == {}
+    assert result["current_reference_state"] == "unavailable"
     assert protected_collection_context({"holdings": [{"ticker": "TEST", "current_price": "999"}],
         "liquidity_by_ticker": {"TEST": "1"}})["liquidity_by_ticker"] == {}
 

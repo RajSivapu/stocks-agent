@@ -848,6 +848,44 @@ function decimalMap(value: unknown): Record<string, string> {
   ]));
 }
 
+type GateState = "passed" | "failed" | "missing" | "stale" | "ambiguous" |
+  "unverified" | "unavailable";
+
+function exactEnum<T extends string>(value: unknown, allowed: readonly T[]): T {
+  if (typeof value !== "string" || !allowed.includes(value as T)) {
+    throw new GatewayRepositoryError("INVALID_PERSISTED_DATA");
+  }
+  return value as T;
+}
+
+function gateStateMap(value: unknown): Record<string, GateState> {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) {
+    throw new GatewayRepositoryError("INVALID_PERSISTED_DATA");
+  }
+  const entries = Object.entries(value as Record<string, unknown>);
+  if (entries.length > 100) throw new GatewayRepositoryError("CONTEXT_TOO_LARGE");
+  return Object.fromEntries(entries.map(([ticker, state]) => {
+    if (!["passed", "failed", "missing", "stale", "ambiguous", "unverified", "unavailable"].includes(String(state))) {
+      throw new GatewayRepositoryError("INVALID_PERSISTED_DATA");
+    }
+    return [text(ticker.toUpperCase(), 15), state as GateState];
+  }));
+}
+
+function gateProvenanceMap(value: unknown): Record<string, Record<string, unknown>> {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) {
+    throw new GatewayRepositoryError("INVALID_PERSISTED_DATA");
+  }
+  if (new TextEncoder().encode(JSON.stringify(value)).byteLength > 32_768) {
+    throw new GatewayRepositoryError("CONTEXT_TOO_LARGE");
+  }
+  const entries = Object.entries(value as Record<string, unknown>);
+  if (entries.length > 100) throw new GatewayRepositoryError("CONTEXT_TOO_LARGE");
+  return Object.fromEntries(entries.map(([ticker, provenance]) => [
+    text(ticker.toUpperCase(), 15), oneObject({ data: provenance, error: null }),
+  ]));
+}
+
 function integer(value: unknown): number {
   const parsed = typeof value === "number" ? value : Number(value);
   if (!Number.isSafeInteger(parsed)) {
@@ -1958,6 +1996,15 @@ export function createSupabaseGatewayRepository(
             overlap_by_ticker: decimalMap(
               intelligenceInputs[0].overlap_by_ticker,
             ),
+            valuation_status: exactEnum(intelligenceInputs[0].valuation_status, ["unavailable"] as const),
+            valuation_state_by_ticker: gateStateMap(intelligenceInputs[0].valuation_state_by_ticker),
+            valuation_provenance_by_ticker: gateProvenanceMap(intelligenceInputs[0].valuation_provenance_by_ticker),
+            liquidity_state_by_ticker: gateStateMap(intelligenceInputs[0].liquidity_state_by_ticker),
+            liquidity_provenance_by_ticker: gateProvenanceMap(intelligenceInputs[0].liquidity_provenance_by_ticker),
+            overlap_state_by_ticker: gateStateMap(intelligenceInputs[0].overlap_state_by_ticker),
+            overlap_provenance_by_ticker: gateProvenanceMap(intelligenceInputs[0].overlap_provenance_by_ticker),
+            current_reference_state: exactEnum(intelligenceInputs[0].current_reference_state, ["current", "stale", "ambiguous", "unavailable"] as const),
+            current_reference_provenance: oneObject({ data: intelligenceInputs[0].current_reference_provenance, error: null }),
             current_quotes: Object.fromEntries(
               Object.entries(
                 oneObject({
@@ -1996,6 +2043,15 @@ export function createSupabaseGatewayRepository(
             holding_market_values: {},
             liquidity_by_ticker: {},
             overlap_by_ticker: {},
+            valuation_status: "unavailable",
+            valuation_state_by_ticker: {},
+            valuation_provenance_by_ticker: {},
+            liquidity_state_by_ticker: {},
+            liquidity_provenance_by_ticker: {},
+            overlap_state_by_ticker: {},
+            overlap_provenance_by_ticker: {},
+            current_reference_state: "unavailable",
+            current_reference_provenance: {},
             current_quotes: {},
             quote_receipt_ids: [],
             portfolio_revision: "",

@@ -440,9 +440,13 @@ def _assess_v2_candidate(
     veto: list[str] = []
     if state != "analysis_ready":
         missing.append("analysis_not_ready")
+    # Task 8 has no protected issuer-valuation ledger.  CandidateInput is an
+    # in-process transport shape, so a producer-provided `passed` value cannot
+    # seal this protected gate.  Keep research available and fail closed until
+    # an additive server-owned valuation contract exists.
     state_inputs = {
         "reference": candidate.reference_state,
-        "valuation": candidate.valuation_state,
+        "valuation": "missing",
         "quote": candidate.quote_state,
         "portfolio": candidate.portfolio_state,
         "cash": candidate.cash_state,

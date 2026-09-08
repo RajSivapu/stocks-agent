@@ -2479,6 +2479,11 @@ def protected_collection_context(value: object) -> dict[str, object]:
     if not isinstance(quote_receipt_ids, list):
         raise ValueError("protected quote receipt identities must be rows")
     cash = _mapping(value.get("reconciled_cash_snapshot"))
+    liquidity_states = _mapping(trusted.get("liquidity_state_by_ticker"))
+    overlap_states = _mapping(trusted.get("overlap_state_by_ticker"))
+    reference_state = trusted.get("current_reference_state")
+    if reference_state not in {"current", "stale", "ambiguous", "unavailable"}:
+        reference_state = "unavailable"
     return {
         "holdings": [{"ticker": row["ticker"], "shares": row.get("shares"),
                       "market_value": valuations.get(row["ticker"])} for row in holdings if isinstance(row, Mapping)],
@@ -2486,6 +2491,24 @@ def protected_collection_context(value: object) -> dict[str, object]:
         "qualified_candidates": value.get("qualified_candidates", []),
         "liquidity_by_ticker": dict(_mapping(trusted.get("liquidity_by_ticker"))),
         "overlap_by_ticker": dict(_mapping(trusted.get("overlap_by_ticker"))),
+        # No protected issuer-valuation source exists in the current schema.
+        # An empty map plus explicit unavailable status prevents scratch or
+        # caller values from becoming action authority.
+        "valuation_state_by_ticker": {},
+        "valuation_provenance_by_ticker": {},
+        "valuation_status": "unavailable",
+        "liquidity_state_by_ticker": dict(liquidity_states),
+        "liquidity_provenance_by_ticker": dict(_mapping(
+            trusted.get("liquidity_provenance_by_ticker")
+        )),
+        "overlap_state_by_ticker": dict(overlap_states),
+        "overlap_provenance_by_ticker": dict(_mapping(
+            trusted.get("overlap_provenance_by_ticker")
+        )),
+        "current_reference_state": reference_state,
+        "current_reference_provenance": dict(_mapping(
+            trusted.get("current_reference_provenance")
+        )),
         "current_quotes": {
             str(ticker): dict(raw) for ticker, raw in quotes.items()
             if isinstance(raw, Mapping)

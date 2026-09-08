@@ -695,6 +695,15 @@ export interface GatewayReadContext extends PolicyContext {
     holding_market_values: Record<string, string>;
     liquidity_by_ticker: Record<string, string>;
     overlap_by_ticker: Record<string, string>;
+    valuation_status: "unavailable";
+    valuation_state_by_ticker: Record<string, "passed" | "failed" | "missing" | "stale" | "ambiguous" | "unverified" | "unavailable">;
+    valuation_provenance_by_ticker: Record<string, Record<string, unknown>>;
+    liquidity_state_by_ticker: Record<string, "passed" | "failed" | "missing" | "stale" | "ambiguous" | "unverified" | "unavailable">;
+    liquidity_provenance_by_ticker: Record<string, Record<string, unknown>>;
+    overlap_state_by_ticker: Record<string, "passed" | "failed" | "missing" | "stale" | "ambiguous" | "unverified" | "unavailable">;
+    overlap_provenance_by_ticker: Record<string, Record<string, unknown>>;
+    current_reference_state: "current" | "stale" | "ambiguous" | "unavailable";
+    current_reference_provenance: Record<string, unknown>;
     current_quotes?: Record<string, {
       price: string;
       as_of: string;
@@ -2224,6 +2233,17 @@ function parseEvidencePacketV2(value: unknown): EvidencePacketV2 {
         `${candidatePath}.candidate_hash does not match canonical content`,
       );
     }
+    // No protected issuer-valuation ledger exists in this schema version.
+    // Structural hashes authenticate bytes, not the truth of a caller's gate
+    // claims, so a v2 packet cannot carry eligible suitability yet.
+    if (
+      suitability.state === "eligible" ||
+      !suitability.missing_reasons.includes("valuation_missing")
+    ) {
+      throw new Error(
+        `${suitabilityPath} protected issuer valuation is unavailable`,
+      );
+    }
     if (
       (result.security_id === null || result.ticker === null) &&
       result.research_state !== "unresolved"
@@ -2261,21 +2281,6 @@ function parseEvidencePacketV2(value: unknown): EvidencePacketV2 {
       )
     ) throw new Error(`${candidatePath} analysis_ready evidence is incomplete`);
     if (
-      suitability.state === "eligible" && (
-        result.research_state !== "analysis_ready" ||
-        suitability.missing_reasons.length !== 0 ||
-        suitability.veto_reasons.length !== 0 ||
-        suitability.lineage === null ||
-        Object.values(suitability.lineage).some((value) =>
-          value === null || value === ""
-        )
-      )
-    ) {
-      throw new Error(
-        `${suitabilityPath} eligible protected lineage is incomplete`,
-      );
-    }
-    if (
       suitability.state === "unknown" &&
       suitability.missing_reasons.length === 0
     ) {
@@ -2312,11 +2317,15 @@ function parseEvidencePacketV2(value: unknown): EvidencePacketV2 {
   const researchByKey = new Map(
     research_candidates.map((item) => [item.candidate_key, item]),
   );
-  const action_candidates = arrayValue(
+  const actionValues = arrayValue(
     row.action_candidates,
     `${path}.action_candidates`,
     12,
-  ).map((value, index) => {
+  );
+  if (actionValues.length !== 0) {
+    throw new Error(`${path}.action_candidates requires protected valuation`);
+  }
+  const action_candidates = actionValues.map((value, index) => {
     const actionPath = `${path}.action_candidates[${index}]`;
     const action = objectValue(value, actionPath);
     exactKeys(

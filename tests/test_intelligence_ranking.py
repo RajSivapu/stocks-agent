@@ -200,6 +200,19 @@ def test_v2_research_priority_excludes_portfolio_and_valuation_inputs():
     assert unknown.qualified is False
 
 
+def test_v2_unbacked_caller_valuation_cannot_promote_an_action():
+    """There is no protected issuer-valuation ledger in the current schema."""
+    row = rank_candidates([v2_candidate(
+        valuation_state="passed", quote_state="passed",
+        portfolio_state="passed", cash_state="passed",
+    )], contract_version=2)[0]
+
+    assert row.research.research_state == "analysis_ready"
+    assert row.suitability.state == "unknown"
+    assert "valuation_missing" in row.suitability.missing_reasons
+    assert row.qualified is False
+
+
 def test_v2_known_gate_failure_is_vetoed_and_retains_missing_reasons():
     row = rank_candidates([
         v2_candidate(
@@ -210,7 +223,7 @@ def test_v2_known_gate_failure_is_vetoed_and_retains_missing_reasons():
     ], contract_version=2)[0]
 
     assert row.suitability.state == "vetoed"
-    assert "valuation_failed" in row.suitability.veto_reasons
+    assert "valuation_missing" in row.suitability.missing_reasons
     assert "holding_weight_concentrated" in row.suitability.veto_reasons
     assert "portfolio_overlap_missing" in row.suitability.missing_reasons
 

@@ -1980,7 +1980,7 @@ def test_recovery_validates_v2_research_packet_fact_source_and_completion_lineag
 
 @pytest.mark.parametrize("mutation", (
     "candidate_identity", "event", "fact", "source", "receipt", "suitability",
-    "evidence_omission", "action_promotion", "completion",
+    "evidence_omission", "action_promotion", "rehashed_eligible_action", "completion",
 ))
 def test_recovery_rejects_rehashed_v2_packet_lineage_substitutions(mutation):
     records = _research_v2_recovery_records()
@@ -2004,6 +2004,26 @@ def test_recovery_rejects_rehashed_v2_packet_lineage_substitutions(mutation):
     elif mutation == "evidence_omission":
         candidate["evidence"] = []
     elif mutation == "action_promotion":
+        packet["action_candidates"] = [{
+            "candidate_hash": candidate["candidate_hash"],
+            "candidate_key": candidate["candidate_key"],
+            "suitability_hash": candidate["suitability"]["evaluation_hash"],
+        }]
+    elif mutation == "rehashed_eligible_action":
+        candidate["evidence"][0].update(
+            claim_type="issuer_exposure", relationship_eligible=True,
+            role="opposing",
+        )
+        candidate["roles"] = ["supplier"]
+        candidate["suitability"]["component_scores"] = {
+            "concentration_penalty": "0.000000",
+            "duplication_penalty": "0.000000",
+            "liquidity": "1.000000",
+            "portfolio_relevance": "1.000000",
+        }
+        candidate["suitability"]["state"] = "eligible"
+        candidate["suitability"]["missing_reasons"] = []
+        candidate["suitability"]["veto_reasons"] = []
         packet["action_candidates"] = [{
             "candidate_hash": candidate["candidate_hash"],
             "candidate_key": candidate["candidate_key"],

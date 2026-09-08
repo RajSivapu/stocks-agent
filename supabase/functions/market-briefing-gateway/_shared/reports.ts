@@ -595,6 +595,17 @@ export function renderReportDelivery(
         terms.target ?? "unavailable"
       }; ${terms.urgency}.`;
   });
+  const telegramLines = decisions.filter((row) =>
+    row.approved_terms !== null || row.final_alert_urgency !== null
+  ).map((row) => {
+    if (row.final_alert_urgency !== null) {
+      return `${row.ticker}: POLICY-APPROVED ${row.final_alert_urgency.toUpperCase()} ALERT. Manual review required.`;
+    }
+    const terms = row.approved_terms!;
+    return `${row.ticker}: ${row.final_action!.toUpperCase()} ${terms.quantity} shares; ` +
+      `entry ${terms.entry_low ?? "unavailable"}–${terms.entry_high ?? "unavailable"}; ` +
+      `stop ${terms.stop ?? "unavailable"}; target ${terms.target ?? "unavailable"}; ${terms.urgency}.`;
+  });
   const reportDetail = lines.join("\n\n") +
     (v2ReportPacket
       ? `\n\n## Research catalog\n\n${researchCatalogMarkdown(v2ReportPacket)}`
@@ -611,7 +622,10 @@ export function renderReportDelivery(
   const approvedReport: ReportBody = {
     ...value.report,
     title: `${heading} — ${value.market_date}`,
-    summary: compact(lines.join(" "), 720),
+    summary: compact(
+      (telegramLines.length > 0 ? telegramLines : lines).join(" "),
+      720,
+    ),
     full_markdown: reportDetail,
     actionable_risk: urgent,
     material_thesis_change: urgent,

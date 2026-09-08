@@ -258,6 +258,14 @@ def test_protected_context_producer_uses_persisted_quote_receipts(databases, kin
     assert context["holding_market_values"] == {"TEST": "200"}
     assert context["liquidity_by_ticker"] == {"TEST": "0.500000"}
     assert context["overlap_by_ticker"] == {"TEST": "1.000000"}
+    assert context["valuation_status"] == "unavailable"
+    assert context["valuation_state_by_ticker"] == {}
+    assert context["valuation_provenance_by_ticker"] == {}
+    assert context["liquidity_state_by_ticker"] == {"TEST": "passed"}
+    assert context["liquidity_provenance_by_ticker"]["TEST"]["source"] == "market_intelligence_quote_attempts"
+    assert context["overlap_state_by_ticker"] == {"TEST": "passed"}
+    assert context["overlap_provenance_by_ticker"]["TEST"]["source"] == "holdings_and_verified_quotes"
+    assert context["current_reference_state"] == "unavailable"
     assert context["quote_receipt_ids"] == [checkpoint["receipt"]["source_receipt_id"]]
     db.execute("SET ROLE authenticated")
     try:

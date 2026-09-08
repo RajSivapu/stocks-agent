@@ -110,7 +110,7 @@ function fixturePacket() {
   };
 }
 
-function fixturePacketV2(actionEligible = true) {
+function fixturePacketV2(actionEligible = false) {
   const itemId = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
   const opposingId = "abababab-abab-4bab-8bab-abababababab";
   const suitabilityBody = {
@@ -241,23 +241,26 @@ function fixturePacketV2(actionEligible = true) {
   };
 }
 
-Deno.test("v2 packet parses exact research and action lanes and rejects rehashed substitutions", () => {
+Deno.test("v2 packet keeps research but rejects caller-rehashed action promotion", () => {
   const parsed = parseEvidencePacket(fixturePacketV2());
   if (!("contract_version" in parsed)) throw new Error("v2 packet was not selected");
   assertEquals(parsed.research_candidates.length, 1);
-  assertEquals(parsed.action_candidates.length, 1);
+  assertEquals(parsed.action_candidates.length, 0);
+
+  assertThrows(
+    () => parseEvidencePacket(fixturePacketV2(true)),
+    "protected issuer valuation",
+  );
 
   const forged = structuredClone(fixturePacketV2());
   forged.research_candidates[0].ticker = "SWAP";
   assertThrows(() => parseEvidencePacket(forged), "candidate_hash");
 
-  const identitySwap = structuredClone(fixturePacketV2());
+  const identitySwap = structuredClone(fixturePacketV2(false));
   identitySwap.research_candidates[0].candidate_key = "sec:substituted";
   const identityBody = { ...identitySwap.research_candidates[0] } as Record<string, unknown>;
   delete identityBody.candidate_hash;
   identitySwap.research_candidates[0].candidate_hash = sha256Hex(canonicalJson(identityBody));
-  identitySwap.action_candidates[0].candidate_key = "sec:substituted";
-  identitySwap.action_candidates[0].candidate_hash = identitySwap.research_candidates[0].candidate_hash;
   assertThrows(() => parseEvidencePacket(identitySwap), "resolved security identity");
 
   const insecureUrl = structuredClone(fixturePacketV2());

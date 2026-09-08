@@ -793,7 +793,16 @@ Deno.test("readContext carries protected prior cursor provenance into a new run"
     rpc(name: string, parameters?: Record<string, unknown>) {
       if (name === "refresh_market_intelligence_context") {
         assertEquals(parameters, { p_run_id: runId });
-        return Promise.resolve({ data: null, error: null });
+        return Promise.resolve({ data: {
+          holding_market_values: {}, liquidity_by_ticker: {}, overlap_by_ticker: {},
+          current_quotes: {}, quote_receipt_ids: [], portfolio_revision: "portfolio-1",
+          portfolio_valuation_complete: false, cash_revision: "0",
+          valuation_status: "unavailable", valuation_state_by_ticker: {},
+          valuation_provenance_by_ticker: {}, liquidity_state_by_ticker: {},
+          liquidity_provenance_by_ticker: {}, overlap_state_by_ticker: {},
+          overlap_provenance_by_ticker: {}, current_reference_state: "unavailable",
+          current_reference_provenance: {},
+        }, error: null });
       }
       if (name === "read_market_discovery_cursor_context") {
         assertEquals(parameters, { p_run_id: runId, p_limit: 100 });
@@ -829,6 +838,9 @@ Deno.test("readContext carries protected prior cursor provenance into a new run"
     source_run_id: sourceRunId,
     source_task_id: sourceTaskId,
   }]);
+  assertEquals(context.intelligence_collection_context?.valuation_status, "unavailable");
+  assertEquals(context.intelligence_collection_context?.valuation_state_by_ticker, {});
+  assertEquals(context.intelligence_collection_context?.current_reference_state, "unavailable");
 });
 
 function rejects(value: unknown): boolean {

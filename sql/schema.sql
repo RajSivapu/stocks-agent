@@ -11466,6 +11466,12 @@ RETURNS JSONB LANGUAGE plpgsql SECURITY DEFINER SET search_path=pg_catalog AS $$
 DECLARE
   v_result JSONB;
   v_quotes JSONB;
+  v_liquidity_states JSONB;
+  v_liquidity_provenance JSONB;
+  v_overlap_states JSONB;
+  v_overlap_provenance JSONB;
+  v_reference_state TEXT;
+  v_reference_provenance JSONB;
   v_revision TEXT;
   v_cash BIGINT;
   v_complete BOOLEAN;
@@ -11486,10 +11492,53 @@ BEGIN
       AND NOT (v_result->'holding_market_values' ? h.ticker)
     )
     AND COALESCE(v_result->'overlap_by_ticker','{}'::jsonb)<>'{}'::jsonb;
+  SELECT COALESCE(jsonb_object_agg(key,'passed' ORDER BY key),'{}'::jsonb)
+  INTO v_liquidity_states FROM jsonb_object_keys(
+    COALESCE(v_result->'liquidity_by_ticker','{}'::jsonb)
+  ) key;
+  SELECT COALESCE(jsonb_object_agg(a.ticker,jsonb_build_object(
+    'source','market_intelligence_quote_attempts',
+    'quote_receipt_id',a.source_receipt_id,
+    'retrieved_at',a.checkpoint->'receipt'->'retrieved_at',
+    'expires_at',a.checkpoint->'receipt'->'expires_at'
+  ) ORDER BY a.ticker),'{}'::jsonb)
+  INTO v_liquidity_provenance FROM public.market_intelligence_quote_attempts a
+  WHERE a.run_id=p_run_id AND a.status='succeeded'
+    AND COALESCE(v_result->'liquidity_by_ticker','{}'::jsonb) ? a.ticker;
+  SELECT CASE WHEN v_complete THEN
+    COALESCE(jsonb_object_agg(key,'passed' ORDER BY key),'{}'::jsonb)
+  ELSE '{}'::jsonb END,
+  CASE WHEN v_complete THEN
+    COALESCE(jsonb_object_agg(key,jsonb_build_object(
+      'source','holdings_and_verified_quotes','portfolio_revision',v_revision
+    ) ORDER BY key),'{}'::jsonb)
+  ELSE '{}'::jsonb END
+  INTO v_overlap_states,v_overlap_provenance
+  FROM jsonb_object_keys(COALESCE(v_result->'overlap_by_ticker','{}'::jsonb)) key;
+  SELECT CASE binding.reference_status WHEN 'healthy' THEN 'current'
+      WHEN 'reference_stale' THEN 'stale' ELSE 'unavailable' END,
+    jsonb_build_object(
+      'source','market_reference_run_bindings','manifest_id',binding.manifest_id,
+      'reference_as_of',binding.reference_as_of,
+      'source_retrieved_at',binding.source_retrieved_at,
+      'reference_age_seconds',binding.reference_age_seconds
+    )
+  INTO v_reference_state,v_reference_provenance
+  FROM public.market_reference_run_bindings binding
+  WHERE binding.run_id=p_run_id AND binding.capability_id='sec_company_tickers_universe';
   v_result:=jsonb_set(v_result,'{current_quotes}',v_quotes,true)||jsonb_build_object(
     'portfolio_revision',v_revision,
     'portfolio_valuation_complete',v_complete,
-    'cash_revision',v_cash::text
+    'cash_revision',v_cash::text,
+    'valuation_status','unavailable',
+    'valuation_state_by_ticker','{}'::jsonb,
+    'valuation_provenance_by_ticker','{}'::jsonb,
+    'liquidity_state_by_ticker',v_liquidity_states,
+    'liquidity_provenance_by_ticker',v_liquidity_provenance,
+    'overlap_state_by_ticker',v_overlap_states,
+    'overlap_provenance_by_ticker',v_overlap_provenance,
+    'current_reference_state',COALESCE(v_reference_state,'unavailable'),
+    'current_reference_provenance',COALESCE(v_reference_provenance,'{}'::jsonb)
   );
   UPDATE public.market_intelligence_context_inputs SET
     current_quotes=v_quotes,portfolio_revision=v_revision,
@@ -11550,7 +11599,9 @@ BEGIN
      OR jsonb_typeof(p_packet->'research_candidates')<>'array'
      OR jsonb_array_length(p_packet->'research_candidates')>12
      OR jsonb_typeof(p_packet->'action_candidates')<>'array'
-     OR jsonb_array_length(p_packet->'action_candidates')>12
+     -- No protected issuer-valuation ledger exists in this schema version.
+     -- A caller cannot seal that gate by rehashing a suitability object.
+     OR jsonb_array_length(p_packet->'action_candidates')<>0
      OR jsonb_typeof(p_packet->'evidence')<>'array'
      OR jsonb_array_length(p_packet->'evidence')>96
      OR octet_length(p_packet::text)>98304 THEN
@@ -11810,32 +11861,8 @@ BEGIN
         RAISE EXCEPTION 'analysis-ready lineage mismatch' USING ERRCODE='22023';
       END IF;
     END IF;
-    IF s->>'state'='eligible' THEN
-      IF c->>'research_state'<>'analysis_ready' OR jsonb_array_length(s->'missing_reasons')<>0
-         OR jsonb_array_length(s->'veto_reasons')<>0 OR jsonb_typeof(l)<>'object'
-         OR l->>'portfolio_revision'<>public.market_portfolio_revision_v1()
-         OR (l->>'cash_revision')::bigint IS DISTINCT FROM (
-           SELECT revision FROM public.portfolio_cash_ledger_state WHERE singleton=true
-         ) OR NOT EXISTS(
-           SELECT 1 FROM public.market_intelligence_context_inputs context
-           WHERE context.run_id=p_run_id AND context.portfolio_revision=l->>'portfolio_revision'
-             AND context.cash_revision=(l->>'cash_revision')::bigint
-             AND context.portfolio_valuation_complete
-             AND context.liquidity_by_ticker ? (c->>'ticker')
-             AND context.overlap_by_ticker ? (c->>'ticker')
-         ) OR NOT EXISTS(
-           SELECT 1 FROM public.market_intelligence_quote_attempts quote
-           JOIN public.market_source_receipts receipt
-             ON receipt.id=quote.source_receipt_id AND receipt.run_id=quote.run_id
-           WHERE quote.run_id=p_run_id AND quote.status='succeeded'
-             AND quote.source_receipt_id=(l->>'quote_receipt_id')::uuid
-             AND quote.ticker=c->>'ticker'
-             AND (quote.quote->>'as_of')::timestamptz=(l->>'quote_as_of')::timestamptz
-             AND receipt.expires_at=(l->>'quote_expires_at')::timestamptz
-             AND receipt.expires_at>v_observed
-         ) THEN
-        RAISE EXCEPTION 'eligible suitability protected input mismatch' USING ERRCODE='22023';
-      END IF;
+    IF s->>'state'='eligible' OR NOT(s->'missing_reasons' ? 'valuation_missing') THEN
+      RAISE EXCEPTION 'protected issuer valuation unavailable' USING ERRCODE='22023';
     ELSIF s->>'state'='unknown' AND jsonb_array_length(s->'missing_reasons')=0 THEN
       RAISE EXCEPTION 'unknown suitability requires missing reasons' USING ERRCODE='22023';
     ELSIF s->>'state'='vetoed' AND jsonb_array_length(s->'veto_reasons')=0 THEN
