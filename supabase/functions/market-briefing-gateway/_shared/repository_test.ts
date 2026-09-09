@@ -757,6 +757,79 @@ Deno.test("unresolved suggestion overflow fails closed instead of dropping pendi
   assertEquals((error as GatewayRepositoryError).code, "CONTEXT_TOO_LARGE");
 });
 
+Deno.test("readContext stays within the database pool and refreshes before passive reads", async () => {
+  let active = 0;
+  let maxActive = 0;
+  let refreshCompleted = false;
+  let passiveReadsBeforeRefresh = 0;
+
+  class TrackedQuery {
+    constructor(
+      private readonly label: string,
+      private readonly result: { data: unknown; error: null },
+    ) {}
+
+    select(): TrackedQuery { return this; }
+    eq(): TrackedQuery { return this; }
+    is(): TrackedQuery { return this; }
+    gte(): TrackedQuery { return this; }
+    lt(): TrackedQuery { return this; }
+    or(): TrackedQuery { return this; }
+    in(): TrackedQuery { return this; }
+    order(): TrackedQuery { return this; }
+    limit(): TrackedQuery { return this; }
+    update(): TrackedQuery { return this; }
+    single(): TrackedQuery { return this; }
+
+    then(
+      onfulfilled?: (value: { data: unknown; error: null }) => unknown,
+      onrejected?: (reason: unknown) => unknown,
+    ): Promise<unknown> {
+      if (this.label !== "refresh" && !refreshCompleted) {
+        passiveReadsBeforeRefresh += 1;
+      }
+      active += 1;
+      maxActive = Math.max(maxActive, active);
+      return new Promise<{ data: unknown; error: null }>((resolve) => {
+        setTimeout(() => {
+          active -= 1;
+          if (this.label === "refresh") refreshCompleted = true;
+          resolve(this.result);
+        }, 5);
+      }).then(onfulfilled, onrejected);
+    }
+  }
+
+  const repository = createSupabaseGatewayRepository({
+    from(table: string) {
+      return new TrackedQuery(table, { data: [], error: null });
+    },
+    rpc(name: string) {
+      if (name === "refresh_market_intelligence_context") {
+        return new TrackedQuery("refresh", { data: null, error: null });
+      }
+      if (name === "read_reconciled_cash_snapshot") {
+        return new TrackedQuery("cash", { data: null, error: null });
+      }
+      if (name === "read_market_discovery_cursor_context") {
+        return new TrackedQuery("cursor", {
+          data: { source_cursors: [], last_completed_scans: [] },
+          error: null,
+        });
+      }
+      throw new Error(`unexpected RPC ${name}`);
+    },
+  });
+
+  await repository.readContext("00000000-0000-4000-8000-000000000021");
+
+  assertEquals(passiveReadsBeforeRefresh, 0);
+  assert(
+    maxActive <= 6,
+    `readContext opened ${maxActive} concurrent database operations`,
+  );
+});
+
 Deno.test("readContext carries protected prior cursor provenance into a new run", async () => {
   class EmptyQuery {
     select(): EmptyQuery {
