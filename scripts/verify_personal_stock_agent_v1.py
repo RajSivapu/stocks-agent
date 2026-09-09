@@ -50,6 +50,7 @@ from scripts.export_recovery_bundle import (
     canonical_json,
     sha256,
 )
+from scripts.function_runtime_manifest import configured_function_runtime
 from scripts.verify_owner_dashboard_deployment import migration_statements_sha256, normalize_migration_statements
 
 MAX_SCHEDULED_RECEIPT_AGE_SECONDS = 7 * 24 * 60 * 60
@@ -1913,11 +1914,6 @@ def verify_component_artifacts(repo: Path, candidate: str, record: Mapping, sour
         consumed_paths.update(marker + path for path in files)
         return files
 
-    try:
-        function_config = tomllib.loads(git(repo, "show", f"{candidate}:supabase/config.toml").decode())["functions"]
-    except (UnicodeDecodeError, tomllib.TOMLDecodeError, KeyError, TypeError) as error:
-        raise RuntimeError("candidate function configuration is malformed") from error
-
     for row in rows:
         name = row["component"]
         require(row.get("candidate_sha") == candidate and isinstance(row.get("deployment_id"), str)
@@ -1925,29 +1921,11 @@ def verify_component_artifacts(repo: Path, candidate: str, record: Mapping, sour
                 and row.get("origin") == "management_plane_download"
                 and row.get("artifact_id") == evidence["artifact_id"]
                 and isinstance(row.get("artifact_prefix"), str), "component platform identity is incomplete")
-        expected = git_files(repo, candidate, f"supabase/functions/{name}")
+        expected, expected_configuration = git_function_runtime(repo, candidate, name)
         files = files_at(row["artifact_prefix"])
         digest = tree_sha256(files)
         require(digest == row["deployed_sha256"], "component readback artifact bytes mismatch")
         function = next(item for item in record["functions"] if item["function"] == name)
-        configured = function_config.get(name)
-        prefix = f"./functions/{name}/"
-        require(isinstance(configured, Mapping) and configured.get("enabled") is True
-                and type(configured.get("verify_jwt")) is bool
-                and isinstance(configured.get("entrypoint"), str)
-                and configured["entrypoint"].startswith(prefix)
-                and path_is_safe(configured["entrypoint"][len(prefix):])
-                and configured["entrypoint"][len(prefix):] in expected,
-                "candidate function configuration is incomplete")
-        expected_configuration = {"verify_jwt": configured["verify_jwt"],
-            "entrypoint": configured["entrypoint"][len(prefix):], "import_map": None}
-        if configured.get("import_map") is not None:
-            require(isinstance(configured["import_map"], str)
-                    and configured["import_map"].startswith(prefix)
-                    and path_is_safe(configured["import_map"][len(prefix):])
-                    and configured["import_map"][len(prefix):] in expected,
-                    "candidate function import-map configuration is incomplete")
-            expected_configuration["import_map"] = configured["import_map"][len(prefix):]
         require(files == expected and row["deployment_id"] == function.get("deployment_id")
                 and row["version"] == str(function["function_version"])
                 and row.get("configuration") == expected_configuration,
@@ -2038,6 +2016,26 @@ def git_files(repo: Path, sha: str, prefix: str) -> dict[str, bytes]:
     return files
 
 
+def git_function_runtime(
+    repo: Path,
+    candidate: str,
+    name: str,
+) -> tuple[dict[str, bytes], dict[str, object]]:
+    """Read one exact, self-contained deploy manifest from the candidate Git tree."""
+    require(name in FUNCTIONS, "candidate function is not allowlisted")
+    try:
+        configured = tomllib.loads(
+            git(repo, "show", f"{candidate}:supabase/config.toml").decode()
+        )["functions"].get(name)
+    except (UnicodeDecodeError, tomllib.TOMLDecodeError, KeyError, TypeError) as error:
+        raise RuntimeError("candidate function configuration is malformed") from error
+    return configured_function_runtime(
+        name,
+        git_files(repo, candidate, f"supabase/functions/{name}"),
+        configured,
+    )
+
+
 def verify_artifacts(repo: Path, static_root: Path, candidate: str, record: Mapping, source: ReleaseDataSource, now: datetime, deployed: datetime) -> None:
     verify_component_artifacts(repo, candidate, record, source, deployed_at=deployed)
     migrations = git_files(repo, candidate, "sql/migrations")
@@ -2060,8 +2058,11 @@ def verify_artifacts(repo: Path, static_root: Path, candidate: str, record: Mapp
     functions = record["functions"]
     require(isinstance(functions, list) and [row["function"] for row in functions] == list(FUNCTIONS), "function evidence is incomplete")
     for row in functions:
+        expected_function, _configuration = git_function_runtime(
+            repo, candidate, row["function"]
+        )
         require(row["git_sha"] == candidate and type(row["function_version"]) is int and row["function_version"] > 0
-                and row["source_sha256"] == tree_sha256(git_files(repo, candidate, f"supabase/functions/{row['function']}")), "function byte hash or candidate SHA mismatch")
+                and row["source_sha256"] == tree_sha256(expected_function), "function byte hash or candidate SHA mismatch")
     static = record["static_assets"]
     require(static["candidate_sha"] == candidate and static["source_sha256"] == tree_sha256(git_files(repo, candidate, "apps/web")), "static source candidate hash mismatch")
     require(static_root.is_dir() and not static_root.is_symlink(), "static build is unavailable")

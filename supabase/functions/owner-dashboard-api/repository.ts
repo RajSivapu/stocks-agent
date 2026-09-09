@@ -7,8 +7,8 @@ import type {
   RunsView,
   SystemView,
   TodayView,
-} from "../../../packages/dashboard-contracts/src/index.ts";
-import { parseIntelligenceView } from "../../../packages/dashboard-contracts/src/index.ts";
+} from "./dashboard-contracts.ts";
+import { parseIntelligenceView } from "./dashboard-contracts.ts";
 
 import { createDashboardDatabase, type DashboardDatabaseFactory, validateDashboardDatabaseUrl } from "./database.ts";
 import { DashboardHttpError } from "./errors.ts";

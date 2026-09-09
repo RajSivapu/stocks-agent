@@ -1,7 +1,7 @@
 import { createClient } from "npm:@supabase/supabase-js@2.112.4";
 import { createRemoteJWKSet } from "npm:jose@6.2.2";
 
-import { verifyOwnerRequest } from "../owner-dashboard-api/auth.ts";
+import { verifyOwnerRequest } from "./auth.ts";
 import { createGatewayHandler } from "./_shared/handler.ts";
 import { fetchVerifiedQuote } from "./_shared/market-data.ts";
 import { createSupabaseGatewayRepository } from "./_shared/repository.ts";

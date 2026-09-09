@@ -17,8 +17,8 @@ import type {
   SourceLink,
   ThemeView,
   TransactionView,
-} from "../../../packages/dashboard-contracts/src/index.ts";
-import { safeSourceUrl } from "../../../packages/dashboard-contracts/src/index.ts";
+} from "./dashboard-contracts.ts";
+import { safeSourceUrl } from "./dashboard-contracts.ts";
 
 type Row = Record<string, unknown>;
 

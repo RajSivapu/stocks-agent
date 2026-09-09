@@ -25,12 +25,11 @@ import hashlib
 import io
 import json
 import os
-from pathlib import Path, PurePosixPath
+from pathlib import Path
 import re
 import subprocess
 import sys
 import tarfile
-import tomllib
 
 if __package__ in {None, ""}:
     _REPOSITORY_ROOT = str(Path(__file__).resolve().parents[1])
@@ -52,7 +51,7 @@ from scripts.verify_owner_dashboard_deployment import (
     revoke_ephemeral_owner_session,
 )
 from scripts.verify_personal_stock_agent_v1 import (
-    FUNCTIONS, SHA, git_files, path_is_safe, tree_sha256,
+    FUNCTIONS, SHA, git_function_runtime, git_files, path_is_safe, tree_sha256,
 )
 
 
@@ -73,7 +72,6 @@ SCHEMA_SOURCE_PATHS = (
 )
 _DIGEST = re.compile(r"[0-9a-f]{64}\Z")
 _SITE_HASH = re.compile(r"sha256:([0-9a-f]{64})\Z")
-_TEST_SOURCE = re.compile(r"(?:^|/)(?:[^/]+_test|[^/]+\.test)\.(?:js|mjs|ts|tsx)\Z")
 _SITE_RECEIPT_KEYS = {
     "format", "captured_at", "trust_domain", "site", "retained_prior_version",
     "active_version", "active_deployment", "candidate_build", "archive_captures",
@@ -403,46 +401,12 @@ def validate_native_site_receipt(receipt: Mapping[str, object], candidate_sha: s
     }
 
 
-def _configured_functions(repo: Path, candidate_sha: str) -> Mapping[str, object]:
-    try:
-        document = tomllib.loads(_git(repo, "show", f"{candidate_sha}:supabase/config.toml").decode())
-    except (UnicodeDecodeError, tomllib.TOMLDecodeError) as error:
-        raise RuntimeError("candidate Supabase configuration is malformed") from error
-    functions = document.get("functions")
-    require(isinstance(functions, Mapping), "candidate Supabase function configuration is unavailable")
-    return functions
-
-
-def _relative_function_path(value: object, name: str) -> str | None:
-    if value is None:
-        return None
-    require(isinstance(value, str), "candidate function path is malformed")
-    prefix = f"./functions/{name}/"
-    require(value.startswith(prefix), "candidate function path is outside its source tree")
-    relative = value[len(prefix):]
-    require(relative and "\\" not in relative and not PurePosixPath(relative).is_absolute()
-            and all(part not in {"", ".", ".."} for part in relative.split("/")), "candidate function path is unsafe")
-    return relative
-
-
 def attest_edge_functions(adapter: object, candidate_sha: str, repo_root: Path = ROOT) -> list[dict[str, object]]:
     """Compare active Management API downloads to candidate production files."""
     require(SHA.fullmatch(candidate_sha) is not None, "candidate SHA is malformed")
-    configured = _configured_functions(repo_root, candidate_sha)
     rows: list[dict[str, object]] = []
     for name in FUNCTIONS:
-        row = configured.get(name)
-        require(isinstance(row, Mapping) and row.get("enabled") is True and type(row.get("verify_jwt")) is bool,
-                "candidate function configuration is incomplete")
-        expected_config = {
-            "verify_jwt": row["verify_jwt"],
-            "entrypoint": _relative_function_path(row.get("entrypoint"), name),
-            "import_map": _relative_function_path(row.get("import_map"), name),
-        }
-        expected = {
-            path: raw for path, raw in git_files(repo_root, candidate_sha, f"supabase/functions/{name}").items()
-            if _TEST_SOURCE.search(path) is None
-        }
+        expected, expected_config = git_function_runtime(repo_root, candidate_sha, name)
         require(expected and expected_config["entrypoint"] in expected, "candidate function production bytes are incomplete")
         snapshot = adapter.capture(name)
         require(isinstance(snapshot, Mapping) and snapshot.get("exists") is True
