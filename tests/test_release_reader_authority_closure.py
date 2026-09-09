@@ -90,8 +90,14 @@ def test_diagnostic_validator_accepts_only_the_exact_self_hashed_failure():
 
 def _baseline_rows(*, closed: bool = False):
     manifest = candidate_migration_manifest()
+    closure_entry = closure_migration_manifest(manifest)
+    closure_index = manifest.index(closure_entry)
+    closure_prefix = manifest[:closure_index + 1]
     baseline = reconciliation_baseline_manifest()
-    suffix = [item for item in manifest if item["version"] > baseline["version"]]
+    suffix = [
+        item for item in closure_prefix
+        if item["version"] > baseline["version"]
+    ]
     if not closed:
         suffix = suffix[:-1]
     private = [(baseline["path"], baseline["version"], baseline["sha256"])]
@@ -108,8 +114,8 @@ def _baseline_rows(*, closed: bool = False):
 def _manifest_with_future_migration() -> list[dict[str, str]]:
     manifest = candidate_migration_manifest()
     return [*manifest, {
-        "path": "sql/migrations/20261018_future_release.sql",
-        "version": "20261018",
+        "path": "sql/migrations/20990101_future_release.sql",
+        "version": "20990101",
         "sha256": "f" * 64,
     }]
 
@@ -120,8 +126,8 @@ def test_migration_classifier_accepts_only_the_closure_as_pending():
     receipt = classify_migration_state(private, native, manifest)
 
     assert receipt["state"] == "pending"
-    assert receipt["pending"] == [manifest[-1]]
-    assert receipt["closure"] == manifest[-1]
+    assert receipt["pending"] == [closure_migration_manifest(manifest)]
+    assert receipt["closure"] == closure_migration_manifest(manifest)
 
 
 def test_migration_classifier_accepts_an_exact_already_closed_retry():
@@ -140,11 +146,16 @@ def test_already_closed_retry_uses_pinned_prefix_when_main_has_later_migrations(
     receipt = classify_migration_state(private, native, manifest)
 
     assert receipt["state"] == "already_closed"
-    assert receipt["closure"] == current[-1]
-    assert closure_migration_manifest(manifest) == current[-1]
+    closure_entry = closure_migration_manifest(current)
+    assert receipt["closure"] == closure_entry
+    assert closure_migration_manifest(manifest) == closure_entry
 
+    later = next(
+        item for item in manifest
+        if item["version"] > closure_entry["version"]
+    )
     private_with_later_production_row = [*private, (
-        manifest[-1]["path"], manifest[-1]["version"], manifest[-1]["sha256"],
+        later["path"], later["version"], later["sha256"],
     )]
     with pytest.raises(RuntimeError, match="private migration ledger"):
         classify_migration_state(
@@ -171,15 +182,18 @@ def test_migration_classifier_rejects_gaps_hash_drift_and_extra_native_rows(muta
 
 def test_migration_classifier_accepts_an_exact_normal_private_prefix():
     manifest = candidate_migration_manifest()
+    closure_entry = closure_migration_manifest(manifest)
+    closure_index = manifest.index(closure_entry)
+    closure_prefix = manifest[:closure_index + 1]
     private = [
         (item["path"], item["version"], item["sha256"])
-        for item in manifest[:-1]
+        for item in closure_prefix[:-1]
     ]
 
     receipt = classify_migration_state(private, [], manifest)
 
     assert receipt["state"] == "pending"
-    assert receipt["pending"] == [manifest[-1]]
+    assert receipt["pending"] == [closure_entry]
 
 
 def _inventory_rows(role: str) -> list[dict[str, object]]:
@@ -342,7 +356,7 @@ def test_closure_transaction_executes_only_the_pinned_revoke_and_ledger_insert()
             elif "FROM supabase_migrations.schema_migrations" in text:
                 self.result = native
             elif "closure_exact_ledger" in text:
-                closure = manifest[-1]
+                closure = closure_migration_manifest(manifest)
                 self.result = [(closure["path"], closure["version"], closure["sha256"])]
             elif "closure_extension_counts" in text:
                 self.result = [
@@ -413,7 +427,7 @@ def test_already_closed_transaction_with_later_source_migration_is_read_only():
             elif "FROM supabase_migrations.schema_migrations" in text:
                 self.result = native
             elif "closure_exact_ledger" in text:
-                closure = current[-1]
+                closure = closure_migration_manifest(current)
                 self.result = [(
                     closure["path"], closure["version"], closure["sha256"],
                 )]
@@ -435,7 +449,7 @@ def test_already_closed_transaction_with_later_source_migration_is_read_only():
     )
 
     assert receipt["state"] == "already_closed"
-    assert receipt["closure"] == current[-1]
+    assert receipt["closure"] == closure_migration_manifest(current)
     assert not any(
         statement.startswith("REVOKE USAGE")
         or statement.startswith(

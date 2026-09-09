@@ -27,6 +27,7 @@ RUNTIME_COMPLETION = MIGRATIONS / "20261013_v2_runtime_completion.sql"
 HONEST_EMPTY_REPORT = MIGRATIONS / "20261014_honest_empty_report_persistence.sql"
 RELEASE_READER_SCOPE = MIGRATIONS / "20261015_release_reader_source_tables.sql"
 DASHBOARD_AUTHORITY = MIGRATIONS / "20261016_dashboard_runtime_authority_closure.sql"
+RUN_ORDER = MIGRATIONS / "20261018_analysis_context_binding_lifecycle.sql"
 
 # The original pre-20260901 tables. Historical migrations run only in this
 # disposable fixture, before representative legacy facts are inserted.
@@ -154,6 +155,7 @@ def test_exact_legacy_reconciliation_preserves_facts_matches_fresh_and_refuses_r
             execute("legacy", "BEGIN;" + HONEST_EMPTY_REPORT.read_text() + "COMMIT;")
             execute("legacy", "BEGIN;" + RELEASE_READER_SCOPE.read_text() + "COMMIT;")
             execute("legacy", "BEGIN;" + DASHBOARD_AUTHORITY.read_text() + "COMMIT;")
+            execute("legacy", RUN_ORDER.read_text())
             assert projected_rows("legacy") == before
             after_catalog = catalog("legacy")
             after_tables = {row["name"] for row in after_catalog["relations"] if row["kind"] in {"r", "p"}}
