@@ -100,12 +100,24 @@ def validated_dashboard_origin(context):
         port = parsed.port
     except ValueError:
         port = -1
+    hostname = parsed.hostname or ""
+    labels = hostname.split(".")
+    canonical_hostname = (
+        len(hostname) <= 253
+        and bool(labels)
+        and all(
+            re.fullmatch(r"[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?", label)
+            for label in labels
+        )
+    )
     if (
         parsed.scheme != "https"
         or not parsed.hostname
         or parsed.username
         or parsed.password
-        or port not in (None, 443)
+        or port is not None
+        or not canonical_hostname
+        or parsed.netloc != hostname
         or parsed.path
         or parsed.params
         or parsed.query

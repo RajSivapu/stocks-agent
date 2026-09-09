@@ -266,6 +266,22 @@ def test_backend_plan_rejects_a_noncanonical_or_mismatched_site_origin_before_io
     assert platform.calls == []
 
 
+@pytest.mark.parametrize(
+    "origin",
+    [
+        "https://owner.example:443",
+        "https://OWNER.example",
+        "https://\N{LATIN SMALL LETTER O WITH DIAERESIS}wner.example",
+        "https://%6fwner.example",
+    ],
+)
+def test_adapter_rejects_matching_noncanonical_dashboard_origins(origin):
+    with pytest.raises(RuntimeError, match="matching HTTPS dashboard origin"):
+        adapter_module().validated_dashboard_origin(
+            {"allowed_origin": origin, "site_origin": origin}
+        )
+
+
 def test_upgrade_plan_refuses_to_rotate_a_live_role_when_existing_database_url_is_missing(monkeypatch):
     platform = Supabase()
     del platform.secrets["DASHBOARD_DATABASE_URL"]

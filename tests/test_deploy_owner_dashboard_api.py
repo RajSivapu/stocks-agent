@@ -97,6 +97,10 @@ def test_static_configuration_can_be_validated_before_database_mutation():
         "https://owner.example/path",
         "https://owner.example:8443",
         "https://owner.example:bad",
+        "https://stocks.example.com:443",
+        "https://STOCKS.example.com",
+        "https://st\N{LATIN SMALL LETTER O WITH DIAERESIS}cks.example.com",
+        "https://%73tocks.example.com",
         "",
         None,
     ),
@@ -125,6 +129,20 @@ def test_candidate_dry_run_rejects_an_unsafe_site_origin_before_commands(
             repo_root=tmp_path,
             runner=runner,
         )
+
+
+@pytest.mark.parametrize(
+    "origin",
+    (
+        "https://stocks.example.com:443",
+        "https://STOCKS.example.com",
+        "https://st\N{LATIN SMALL LETTER O WITH DIAERESIS}cks.example.com",
+        "https://%73tocks.example.com",
+    ),
+)
+def test_matching_noncanonical_origins_are_rejected(origin):
+    with pytest.raises(ValueError, match="matching HTTPS dashboard origin"):
+        deploy._validate_dashboard_origins(origin, origin)
 
 
 def test_production_entrypoint_rejects_mismatched_origins_before_provider_or_database_io(
