@@ -1,0 +1,77 @@
+{
+  "format": "stocks-protected-owner-dashboard-release-summary-v1",
+  "captured_at": "2026-09-09T14:52:09Z",
+  "trust_domain": "github-protected-supabase-management",
+  "repository": "RajSivapu/stocks-agent",
+  "pull_request": {
+    "number": 59,
+    "reviewed_head_sha": "e4029bbf4dab36aeb49ea1890f3954de191d8854",
+    "pr_ci_workflow_run_id": 34364309798,
+    "authorization_kind": "owner_comment",
+    "authorization_id": 5603663821
+  },
+  "candidate": {
+    "main_sha": "7408b4f874afeb489ea8cd7cf7e7c487eeea3de1",
+    "exact_main_ci_workflow_run_id": 34364808638,
+    "exact_main_ci_status": "success"
+  },
+  "release": {
+    "workflow_run_id": 34365299574,
+    "workflow_run_attempt": 1,
+    "status": "success",
+    "deployment_id": 6352398867,
+    "deployment_outcome": "succeeded",
+    "release_record_artifact_id": 10109703263,
+    "release_record_artifact_digest": "sha256:2aa05a65622674e0ba22023174308b996b6eeb6993494f1a83fd4addda6819a6",
+    "release_record_sha256": "3a7030974828cbfa1fe156c3c4e0f3b7e760bc0a0b13faedd92eaf9f2724cc5c"
+  },
+  "backend_evidence_artifact": {
+    "artifact_id": 10109701972,
+    "name": "backend-component-evidence-34365299574-1",
+    "digest": "sha256:a1c260fbd79ea92efa9b833fc5bf58b9137bb41433860e70bf3e45a5793ed075",
+    "manifest_sha256": "69f6cf90b3c285140ade48b68b022d3ace4e6b1a407fc49ca17dbc858644d199",
+    "recovery_metadata_sha256": "1488cc32ffc4dc7dd24fe8e798c66380bd8b8674265a7d8f6c1255b807a2d371"
+  },
+  "production_readback": {
+    "canaries": {
+      "anonymous": 401,
+      "non_owner": 403,
+      "owner": 200
+    },
+    "source_reconciliation": {
+      "status": "verified",
+      "canonical_hashes": "verified",
+      "run_relationships": "verified",
+      "claims_checked": 11
+    },
+    "functions": [
+      {
+        "name": "market-briefing-gateway",
+        "version": 58,
+        "candidate_sha": "7408b4f874afeb489ea8cd7cf7e7c487eeea3de1"
+      },
+      {
+        "name": "owner-dashboard-api",
+        "version": 29,
+        "candidate_sha": "7408b4f874afeb489ea8cd7cf7e7c487eeea3de1"
+      },
+      {
+        "name": "telegram-portfolio",
+        "version": 37,
+        "candidate_sha": "7408b4f874afeb489ea8cd7cf7e7c487eeea3de1"
+      }
+    ]
+  },
+  "scheduled_readiness_at_release": {
+    "status": "pending",
+    "overdue_phase_count": 4,
+    "required_evidence": "first_normal_post_release_scheduled_receipt",
+    "manual_market_runs_started": 0,
+    "telegram_test_messages_sent": 0
+  },
+  "recovery": {
+    "journal_sequence": 167,
+    "journal_ciphertext_sha256": "bfb1bb08601d82dcbce7c1ffc22d3b65e7f2157eb8996875ec44129459247fd6",
+    "failure_restore_path_executed": false
+  }
+}

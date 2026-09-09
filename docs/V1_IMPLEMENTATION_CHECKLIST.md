@@ -1,6 +1,6 @@
 # Personal Stock Agent V1 — Implementation Checklist
 
-Last updated: 2026-09-08
+Last updated: 2026-09-09
 
 ## What we are building
 
@@ -19,7 +19,12 @@ An owner-only personal stock agent that uses zero-incremental-cost data sources,
 - [x] Final GPT-6 Astra re-review approved at exact code commit `883d521`
 - [x] Astra remediation merged to protected `main`; exact-main CI passed at `c9e3140`
 - [x] Database ledger read back as current; gateway v33, dashboard API v4, and Telegram v20 deployed with runtime-byte parity
-- [x] Private owner Site v9 published from exact UI `main` merge `e2f9d74`; email-and-password login, signed-link setup/recovery, reviewed live-asset parity, and owner-only access readback passed, while the backend attestation remains bound to `b3f7d70`
+- [x] Complete market-wide candidate released from protected `main` `7408b4f`; exact-main CI
+  `34364808638`, protected release `34365299574`, deployment `6352398867`, and Edge versions
+  58/29/37 passed owner-only canaries and 11-claim source reconciliation
+- [x] Private owner Site v10 published from the same exact main; email-and-password login,
+  signed-link setup/recovery, one-owner access, anonymous 401, authenticated live-file parity, and
+  retained Site v9 rollback all passed
 - [x] Live free-tier Auth read back with signup disabled, exact Site/redirect URLs, and `ConfirmationURL` magic-link and recovery templates; the browser uses email-and-password by default with signed-link setup/recovery and a magic-link fallback
 - [x] Receipt-bound production schema reconciliation completed exactly once in run `34039011879`
 - [x] Protected isolated restore and both cleanup paths completed in run `34042155368`
@@ -61,27 +66,28 @@ An owner-only personal stock agent that uses zero-incremental-cost data sources,
   and otherwise requires an exact-head, successful-PR-CI-bound owner comment after CI and before
   merge; the workflow re-reads and records every authorization identity before secrets or checkout
 - [ ] Next existing scheduled-chain receipt
-- [ ] Complete protected backend release, separate native Sites publication and readback, and normal
-  scheduled V1-C3 capability proof
+- [x] Complete protected backend release and separate native Sites publication/readback
+- [ ] Complete the first normal post-release scheduled V1-C3 capability and Telegram outcome proof
 
 ## September 8 closeout sequence
 
-The implementation is complete locally. The remaining work is operational and must occur in this
-order on one exact reviewed candidate:
+Implementation, protected backend release, and owner-only Site publication are complete. The only
+remaining V1 evidence is the first natural post-release scheduled chain:
 
-1. **Complete locally:** Sol and the independent flagship reviewer returned CLEAN on exact runtime
+1. **Complete:** Sol and the independent flagship reviewer returned CLEAN on exact runtime
    code `f7e8236`; the release-candidate descendants contain status records and the test-only locked
    dependency correction at `b789e0e` and the CI-bound solo-owner release authorization at
-   `248366e`. The corrected final PR head must be reviewed again.
-2. Push the reviewed head, pass exact-head CI, merge it to protected `main`, and pass exact-main CI.
-3. Run the manual protected backend release and verify the immutable migration, function,
-   runtime-role, managed-secret, canary, artifact, and recovery receipts.
-4. Compare the packaged Site with the protected build, then publish that package from the same
+   `248366e`. PR #59 exact-head CI and both final reviews passed.
+2. **Complete:** push the reviewed head, merge it to protected main, and pass exact-main CI.
+3. **Complete:** protected backend release `34365299574` verified immutable migration, function,
+   runtime-role, canary, artifact, source-reconciliation, and recovery receipts.
+4. **Complete:** compare the packaged Site with the protected build, then publish that package from the same
    candidate with the owner-scoped native Sites connector. Directly re-read owner-only access, the
    exact saved version and successful deployment, compare provider archive metadata with the local
    package, read every served file through the authenticated Site, and confirm the previous successful
-   production version remains a provider-retained rollback target. The rollback is retained, not exercised.
-5. Wait for the next existing normal scheduled run. Do not create another run for evidence. Accept
+   production version remains a provider-retained rollback target. Site v10 passed and Site v9 is
+   retained without exercising rollback.
+5. **Pending:** wait for the next existing normal scheduled run. Do not create another run for evidence. Accept
    either the complete report/publication chain or the exact receipt-backed quiet intraday
    `no_trigger` chain.
 6. Close the operational and V1-C3 capability receipts, then close this checklist and the V1 goal.
@@ -126,13 +132,14 @@ order on one exact reviewed candidate:
 - [x] Update this checklist and the formal status/rollout records
 - [x] Publish the signed-link-only login correction as owner-only Site v8 and retain Site v7 as rollback
 - [x] Publish the password-primary login and recovery flow as owner-only Site v9 and retain Site v8 as rollback
+- [x] Release the exact market-wide candidate backend and publish/read back owner-only Site v10
 
 ## Approved work after the September 8 morning evidence
 
-- [ ] Preserve the normal September 8 morning receipt as evidence for the currently deployed chain;
-  do not treat it as proof of market-wide discovery and do not dispatch a duplicate run
-- [ ] Reconcile the later September 8 intraday/post-market receipts and September 11 Friday receipt
-  through the existing verification heartbeat
+- [x] Classify September 8 receipts as historical evidence for the earlier runtime; do not relabel or
+  backfill them as current-candidate proof
+- [ ] Reconcile the first normal post-release phase and later Friday audit evidence through the
+  updated verification heartbeat
 - [x] Implement the approved capability-aware source planner, dated security reference, official
   source cursors, ticker-independent event/entity resolution, bounded role/theme reverse discovery,
   value-chain graph, primary exposure facts, broad screens, theme memory, and bounded next-run
@@ -145,8 +152,10 @@ order on one exact reviewed candidate:
 - [x] Synchronize the official published NYSE 2026–2028 holidays and early closes across Python,
   gateway session logic, and dashboard freshness; fail closed after maintained coverage
 - [x] Complete exact-code Sol and flagship review at `f7e8236`
-- [ ] Complete exact-head and exact-main CI, protected backend release, native Sites
-  publication/readback, backend recovery capture, and normal scheduled capability receipts
+- [x] Complete exact-head and exact-main CI, protected backend release, native Sites
+  publication/readback, and backend recovery capture
+- [ ] Complete a normal post-release scheduled capability receipt with original Telegram delivery or
+  explicit persisted suppression
 - [ ] Close V1-C2 through V1-C6 and the active V1 goal only after each checkpoint has its own evidence
 - [ ] Review Alert V3 separately in shadow/canary mode after V1 closes; do not arm a new schedule as
   part of market-wide discovery
@@ -173,8 +182,8 @@ baseline.
 - [x] Publish the simplified and accessibility-reviewed UI as owner-only Site v7 from exact main `a4c8031`; deployment `appgdep_6a9df7eee2cc819193fefc13aa39d8bb` succeeded and `docs/receipts/2026-09-06-native-site-v7.json` binds the source, build, live scripts, access, and rollback
 - [x] Publish the link-only owner Auth correction as owner-only Site v8 from exact main `b433a5b`; deployment `appgdep_6a9dff357ee88191bf08d54af6f4240f` succeeded and `docs/receipts/2026-09-06-native-site-v8.json` binds the source, build, live scripts, access, and v7 rollback
 - [x] Publish password-primary owner Auth with signed-link setup/recovery as owner-only Site v9 from exact main `e2f9d74`; deployment `appgdep_6a9e15085f048191a80497d9e75fd253` succeeded and `docs/receipts/2026-09-06-native-site-v9.json` binds the source, build, Auth readback, live assets, Sol review, access, and v8 rollback
-- [ ] Release the exact market-wide candidate backend through the protected GitHub workflow and verify its immutable component/recovery artifact
-- [ ] Compare the exact package with the protected build, publish it as the private owner Site, and close `owner_site` only from fresh direct connector access/version/deployment observations plus authenticated live-file parity; retain the prior successful version as a provider rollback target
+- [x] Release the exact market-wide candidate backend through the protected GitHub workflow and verify its immutable component/recovery artifact — **run `34365299574`; deployment `6352398867`; receipt `docs/receipts/2026-09-09-protected-owner-dashboard-release.json`**
+- [x] Compare the exact package with the protected build, publish it as private owner Site v10, and close `owner_site` from fresh direct connector access/version/deployment observations plus authenticated live-file parity; retain Site v9 as the provider rollback target — **receipt `docs/receipts/2026-09-09-native-site-v10.json`**
 - [x] Complete an owner email sign-in canary on signed-link Site v5 — **owner confirmed the signed email link opened the portfolio dashboard on 2026-09-05; Site v9 preserves the same callback as setup/recovery and fallback**
 - [x] Perform the protected restore drill and retain its receipt — **run `34042155368` restored and
   verified 26 record sets, preserved identical production roots, applied no migrations on retry,

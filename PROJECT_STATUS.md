@@ -1,18 +1,25 @@
 # Personal Stock Agent Project Status
 
-Last updated: 2026-09-08
+Last updated: 2026-09-09
 Canonical release: Personal Stock Agent V1 market-wide discovery candidate
 Audit baseline: `432d647ef911ff63da427097f02a852e18038b62` on `origin/main`
 Market-wide implementation boundary: `18386b5c76c7a7aa8b3eeda870b12d3aba2399e1`
-Current state: owner-only Site v9 is live from UI main
-`e2f9d74495fa2ff8ed02e72b12d09755918bb9f9`, with successful exact-main CI `34073314211`.
-Production schema reconciliation, managed isolated recovery, and the protected backend-runtime
-attestation are complete; trusted V1 use remains **no-go** pending the next existing scheduled
-evidence chain plus protected production proof for the locally implemented market-wide discovery
-scope in V1-C3. The unchanged backend remains attested at
-`b3f7d706573224d8edfa88570067dfb1b0900672` by protected run `34055419086`.
+Current state: the market-wide V1 candidate is deployed from protected main
+`7408b4f874afeb489ea8cd7cf7e7c487eeea3de1`. Exact-main CI `34364808638` and protected backend
+release `34365299574` passed. Production deployment `6352398867` read back Edge versions 58/29/37,
+owner-only API canaries 401/403/200, canonical hashes, and 11 reconciled run/report claims. Native
+owner-only Site v10 is live from the same main SHA; all 13 immutable served assets match the protected
+build byte-for-byte and normalized HTML matches after removing one request-specific Cloudflare
+challenge script. Site v9 remains the provider-retained rollback version. The release and Site
+receipts are `docs/receipts/2026-09-09-protected-owner-dashboard-release.json` and
+`docs/receipts/2026-09-09-native-site-v10.json`.
 
-## Local market-wide release candidate — production pending
+Trusted V1 use remains **no-go** only until the first normal post-release scheduled chain proves the
+V1-C2 through V1-C6 operational/capability path and records either the original Telegram delivery
+receipt or an explicit persisted suppression. No duplicate market run or Telegram test may be used
+to close that gate.
+
+## Market-wide V1 candidate — protected production release complete
 
 Tasks 1–10 of the approved market-wide plan are implemented and independently reviewed through
 `18386b5c76c7a7aa8b3eeda870b12d3aba2399e1`. The latest full local gate at that boundary passed
@@ -35,9 +42,10 @@ PR #35 CI run `34267466157` then exposed one hermetic-packaging omission: the SQ
 test modules was present locally but absent from `requirements.lock`. Commit `b789e0e` adds `pglast
 8.4` to the declared test inputs and regenerated hash-locked binary-only requirements. A fresh Python
 3.14 environment installed the lock and passed all 72 tests in the six affected modules; the focused
-V1 verifier passed 96/96. Runtime code is unchanged. The corrected PR head still requires independent
-review and protected CI before merge. Protected backend release, direct native Site observation, and
-normal scheduled receipts remain open.
+V1 verifier passed 96/96. Runtime code is unchanged. That historical gate is now superseded by PR
+#59: exact-head CI `34364309798`, exact-main CI `34364808638`, protected release `34365299574`, and
+native owner-only Site v10 all passed on the exact reviewed tree. Only the first normal post-release
+scheduled receipt remains open.
 
 The protected release workflow also assumed a separate GitHub collaborator could submit an
 `APPROVED` review. This owner-only repository has one collaborator and GitHub forbids a PR author
@@ -74,12 +82,12 @@ offline parser/cluster semantics exist; and the V2 action lane remains empty bec
 issuer-valuation ledger exists. Research candidates remain suggestion-only. The NYSE calendar is
 maintained through 2028 and fails closed outside that reviewed range.
 
-Any September 8 receipt from the already deployed runtime is operational evidence for that earlier
-runtime only. It does not prove this candidate's V1-C3 discovery capability. V1-C3 and all reopened
-production checkpoints stay unchecked until the exact reviewed candidate reaches protected main,
-the protected backend and owner-only Site both pass their separate receipt gates, and a normal
-post-release scheduled run produces separate operational and capability receipts. Alert V3 remains
-disabled and shadow-only.
+Any September 8 receipt from the earlier runtime is historical operational evidence only and cannot
+prove this candidate's V1-C3 discovery capability. The exact reviewed candidate has now reached
+protected main, backend, and owner-only Site. V1-C2 through V1-C6 remain open only for a normal
+post-release scheduled run that produces separate operational and capability receipts, including the
+original Telegram delivery receipt or explicit persisted suppression. Alert V3 remains disabled and
+shadow-only.
 
 This file is the version-controlled source of truth for the Personal Stock Agent V1 rollout.
 `docs/ROADMAP.md` records the implementation sequence and remaining release gates.
@@ -333,11 +341,11 @@ V1-C2 remains reopened until scheduled receipt evidence passes.
   recovery, and held-out-sector acceptance scenarios without hardcoded company lists.
 - [x] Replace the separate 2026-only calendar copies with one reviewed NYSE source synchronized
   through the official published 2028 holiday and early-close schedule; fail closed afterward.
-- [ ] Merge the exact reviewed candidate through protected main, complete the protected backend
-  release, publish and read back the exact candidate through native Sites, and retain normal scheduled
-  capability receipts without a duplicate run.
+- [x] Merge the exact reviewed candidate through protected main, complete protected backend release
+  `34365299574`, and publish/read back owner-only Site v10 from exact main `7408b4f`.
+- [ ] Retain a normal post-release scheduled capability receipt without a duplicate run.
 
-V1-C3 remains open for exact-candidate release and normal scheduled production evidence.
+V1-C3 remains open only for normal scheduled production capability evidence.
 
 ### V1-C4 — Personal comparison brain
 
@@ -362,6 +370,8 @@ V1-C4 is reopened.
   `b433a5b`; retain Site v7 as rollback.
 - [x] Publish password-primary login with signed-link setup/recovery and fallback as owner-only Site
   v9 from exact main `e2f9d74`; retain Site v8 as rollback.
+- [x] Publish the complete market-wide candidate as owner-only Site v10 from exact main `7408b4f`;
+  verify one-owner access, anonymous 401, authenticated live-file parity, and retained Site v9.
 - [ ] Reconcile an original Telegram delivery ID or explicit persisted suppression from the next
   existing scheduled chain.
 
@@ -374,47 +384,48 @@ V1-C5 is reopened.
 - [x] Consolidated local `npm run test:all` gate passed for the final code at `883d521`.
 - [x] GPT-6 Astra approved the final scoped re-review with no unresolved local Critical or Important
   finding; the final split-trust review also returned CLEAN with no Critical/P1/P2 finding.
-- [x] Exact-head CI `34055169909` and exact-main CI `34055295512` passed for attested backend main
-  `b3f7d70`; later UI-only main `e2f9d74` passed exact-main CI `34073314211`.
+- [x] Final PR #59 exact-head CI `34364309798` and exact-main CI `34364808638` passed; both Sol and
+  Astra returned CLEAN on the exact reviewed head `e4029bb`.
 - [x] Historical production runtime readback, three-function parity, private Site publication, and
   owner/anonymous canaries completed; schema reconciliation is now complete above.
 - [x] Approved receipt-bound schema reconciliation completed (`34039011879`); do not rerun.
 - [x] Managed isolated restore and both cleanup paths completed (`34042155368`); do not rerun.
 - [x] Protected one-time existing-runtime attestation `34055419086` verified the unchanged
   reconciled database state before the next routine scheduled write.
+- [x] Protected backend release `34365299574` and deployment `6352398867` succeeded on exact main
+  `7408b4f`; native owner-only Site v10 publication and live-file readback also succeeded.
 - [ ] Next existing post-deployment scheduled intelligence/report/publication receipt chain; never
   trigger a duplicate merely to obtain evidence.
 
-V1-C6 is reopened and the release remains no-go for trusted use.
+V1-C6 remains open for the normal post-release receipt; trusted use stays no-go until it passes.
 
 ## Immediate next gates
 
-1. Preserve the completed schema and isolated recovery gates; do not rerun them.
-2. Observe and preserve the September 8 morning receipt without triggering a duplicate.
-3. Let the existing verification heartbeat reconcile the later September 8 intraday/post-market
-   evidence and the September 11 Friday evidence.
-4. Execute the approved market-wide discovery implementation plan and pass its local capability,
-   safety, calendar, recovery, and capacity gates.
-5. Preserve the CLEAN Sol and flagship reviews at exact executable code `f7e8236`; complete
-   protected-main CI, protected backend release, fresh direct native Sites observation with
-   authenticated live-file parity, and normal scheduled discovery receipts.
-6. Close V1-C2 through V1-C6 and the active V1 goal only when their own receipt gates pass.
+1. Preserve the completed schema, isolated recovery, protected release, and Site v10 gates; do not
+   rerun them.
+2. Wait for the next normal post-release scheduled phase. Do not dispatch a market run or Telegram
+   test for evidence.
+3. Reconcile the analysis, discovery, packet, report, publication, provider/quota, dashboard, and
+   original Telegram delivery or explicit suppression receipts through the active heartbeat.
+4. Close V1-C2 through V1-C6 and the active V1 goal only when that receipt passes.
+5. Review Alert V3 separately in shadow/canary mode after V1 closes.
 
-## Site-only UI releases — completed 2026-09-06
+## Native Site releases
 
 PRs #28 and #29 produced the simplified private Site v7. PR #31 removed the browser's misleading
 numeric-code step and produced Site v8. PR #33 then added password-primary login with signed-link
 setup/recovery and magic-link fallback. Current UI main `e2f9d74` passed exact-main CI `34073314211`,
-and private Site v9 is live. Native readback confirmed custom access with exactly one allowed owner,
-no allowed groups, and zero external visitors. The live application assets match the verified local
-build after excluding Cloudflare's request-specific HTML challenge injection, and Site v8 is retained
-as the immediate rollback. The current bounded receipt is
-`docs/receipts/2026-09-06-native-site-v9.json`; the v7 and v8 receipts remain historical evidence.
+and private Site v9 was published. On 2026-09-09, Site v10 published the complete market-wide
+candidate from exact main `7408b4f`. Native readback confirmed custom access with exactly one
+allowed owner, no allowed groups, and zero external visitors. All 13 immutable application assets
+match the protected build; normalized HTML also matches after excluding Cloudflare's request-specific
+challenge injection. Site v9 is retained as the immediate rollback. The current bounded receipt is
+`docs/receipts/2026-09-09-native-site-v10.json`; the v7 through v9 receipts remain historical evidence.
 
-This release did not mutate the production database, Supabase Auth, any Edge function, managed
-secrets, Telegram, or scheduled workflows. The protected backend attestation at `b3f7d70` remains the
-backend evidence boundary; it does not claim to attest the later UI bytes. The original protected
-multi-component workflow remains required for backend changes. A Site-only UI change may use the
+The Site v10 publication did not mutate the production database, Supabase Auth, any Edge function,
+managed secrets, Telegram, or scheduled workflows. Its backend evidence boundary is protected
+release `34365299574`; it does not claim the Site publication itself attests backend bytes. A later
+Site-only UI change may use the
 owner-scoped native Sites connector when it preserves exact source, verified build, owner-only
 access, deployment, live-bundle, and rollback receipts.
 
