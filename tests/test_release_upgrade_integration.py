@@ -436,6 +436,78 @@ def test_canonical_encrypted_journal_key_order_recovers_complete_backend_state(t
     }
 
 
+def test_recovery_reports_only_bounded_failure_stage():
+    release = module()
+    platform = Platform(absent=("owner-web-site",))
+    name = "owner-dashboard-api"
+    prior = copy.deepcopy(platform.state[name])
+    candidate = {**copy.deepcopy(prior), "files": {"index": "candidate"}}
+    platform.state[name] = copy.deepcopy(candidate)
+    journal = {
+        "format": 1,
+        "status": "recovery_required",
+        "components": {
+            component: {
+                "changed": component == name,
+                "prior": copy.deepcopy(prior if component == name else platform.state[component]),
+                "prior_sha256": hashlib.sha256(
+                    release.canonical(prior if component == name else platform.state[component])
+                ).hexdigest(),
+                **({"candidate": copy.deepcopy(candidate)} if component == name else {}),
+            }
+            for component in release.BACKEND_COMPONENTS
+        },
+    }
+    platform.restore = lambda _name, _prior: (_ for _ in ()).throw(
+        RuntimeError("secret source and credential material must not be logged")
+    )
+
+    with pytest.raises(RuntimeError, match=r"owner-dashboard-api\[restore\]") as raised:
+        release.recover_components(platform, journal, persist=lambda _value: None)
+
+    assert "secret source" not in str(raised.value)
+    assert journal["components"][name]["recovery_failure"] == {"stage": "restore"}
+
+
+def test_recovery_hydrates_every_changed_component_before_any_restore():
+    release = module()
+    platform = Platform(absent=("owner-web-site",))
+    changed = {"market-briefing-gateway", "owner-dashboard-api"}
+    journal = {
+        "format": 1,
+        "status": "recovery_required",
+        "components": {
+            name: {
+                "changed": name in changed,
+                "prior": copy.deepcopy(platform.state[name]),
+                "prior_sha256": hashlib.sha256(
+                    release.canonical(platform.state[name])
+                ).hexdigest(),
+                **(
+                    {"candidate": {**copy.deepcopy(platform.state[name]), "files": {"index": "candidate"}}}
+                    if name in changed
+                    else {}
+                ),
+            }
+            for name in release.BACKEND_COMPONENTS
+        },
+    }
+    for name in changed:
+        platform.state[name]["files"] = {"index": "candidate"}
+
+    def hydrate(name, _prior, _candidate):
+        if name == "market-briefing-gateway":
+            raise RuntimeError("ambiguous support")
+
+    platform.hydrate_recovery = hydrate
+
+    with pytest.raises(RuntimeError, match=r"market-briefing-gateway\[hydrate\]"):
+        release.recover_components(platform, journal, persist=lambda _value: None)
+
+    assert platform.mutations == []
+    assert journal["status"] == "recovery_required"
+
+
 def test_native_release_resolves_exact_lease_when_journal_key_is_invalid(tmp_path):
     release = module(); callbacks = []
     class Adapter:

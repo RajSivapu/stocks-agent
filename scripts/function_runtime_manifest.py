@@ -2,10 +2,13 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
+import hashlib
 import json
 import posixpath
 from pathlib import Path, PurePosixPath
 import re
+import subprocess
+import tomllib
 
 
 _TEST_SOURCE = re.compile(r"(?:^|/)(?:[^/]+_test|[^/]+\.test)\.(?:js|mjs|ts|tsx)\Z")
@@ -15,6 +18,12 @@ _STATIC_IMPORT = re.compile(
     re.MULTILINE,
 )
 _DYNAMIC_IMPORT = re.compile(r"\bimport\s*\(\s*[\"']([^\"']+)[\"']\s*\)")
+_SHA = re.compile(r"[0-9a-f]{40}\Z")
+_RECOVERY_SUPPORT_PREFIXES = {
+    "owner-dashboard-api": ("packages/dashboard-contracts/src/",),
+    "market-briefing-gateway": ("supabase/functions/owner-dashboard-api/",),
+    "telegram-portfolio": (),
+}
 
 
 def _safe_path(path: object) -> bool:
@@ -44,6 +53,210 @@ def _is_filesystem_specifier(specifier: str) -> bool:
         or re.match(r"(?i)^file:", specifier) is not None
         or re.match(r"^[A-Za-z]:/", specifier) is not None
     )
+
+
+def _git(repo: Path, *arguments: str) -> bytes:
+    result = subprocess.run(
+        ["git", *arguments], cwd=repo, capture_output=True, check=False
+    )
+    if result.returncode != 0:
+        raise RuntimeError("trusted recovery Git history is unavailable")
+    return result.stdout
+
+
+def _git_files(repo: Path, commit: str, prefix: str) -> dict[str, bytes]:
+    files: dict[str, bytes] = {}
+    for entry in _git(repo, "ls-tree", "-rz", commit, "--", prefix).split(b"\0"):
+        if not entry:
+            continue
+        metadata, raw_path = entry.split(b"\t", 1)
+        mode, kind, object_id = metadata.decode().split()
+        path = raw_path.decode()
+        if (
+            mode not in {"100644", "100755"}
+            or kind != "blob"
+            or not path.startswith(prefix + "/")
+        ):
+            raise RuntimeError("trusted recovery Git tree contains an unsafe entry")
+        files[path[len(prefix) + 1 :]] = _git(repo, "cat-file", "blob", object_id)
+    return files
+
+
+def _historical_configuration(
+    repo: Path, commit: str, name: str
+) -> dict[str, object]:
+    try:
+        configured = tomllib.loads(
+            _git(repo, "show", f"{commit}:supabase/config.toml").decode()
+        )["functions"][name]
+    except (UnicodeDecodeError, tomllib.TOMLDecodeError, KeyError, TypeError) as error:
+        raise RuntimeError("trusted recovery function configuration is unavailable") from error
+    prefix = f"./functions/{name}/"
+    if (
+        not isinstance(configured, Mapping)
+        or configured.get("enabled") is not True
+        or type(configured.get("verify_jwt")) is not bool
+        or not isinstance(configured.get("entrypoint"), str)
+        or not configured["entrypoint"].startswith(prefix)
+    ):
+        raise RuntimeError("trusted recovery function configuration is unavailable")
+    result: dict[str, object] = {
+        "verify_jwt": configured["verify_jwt"],
+        "entrypoint": configured["entrypoint"][len(prefix) :],
+        "import_map": None,
+    }
+    if configured.get("import_map") is not None:
+        import_map = configured["import_map"]
+        if not isinstance(import_map, str) or not import_map.startswith(prefix):
+            raise RuntimeError("trusted recovery import map is unavailable")
+        result["import_map"] = import_map[len(prefix) :]
+    return result
+
+
+def _historical_runtime(
+    repo: Path, commit: str, name: str, entrypoint: str
+) -> tuple[dict[str, bytes], dict[str, bytes]]:
+    prefix = f"supabase/functions/{name}/"
+    local_tree = _git_files(repo, commit, prefix.removesuffix("/"))
+    support_prefixes = _RECOVERY_SUPPORT_PREFIXES[name]
+    pending = [prefix + entrypoint]
+    observed: dict[str, bytes] = {}
+    while pending:
+        path = pending.pop()
+        if path in observed:
+            continue
+        if path.startswith(prefix):
+            relative = path[len(prefix) :]
+            if relative not in local_tree:
+                raise RuntimeError("trusted recovery function closure is incomplete")
+            raw = local_tree[relative]
+        else:
+            if not any(path.startswith(allowed) for allowed in support_prefixes):
+                raise RuntimeError("trusted recovery import is outside its allowlist")
+            raw = _git(repo, "show", f"{commit}:{path}")
+        observed[path] = raw
+        for specifier in sorted(_import_specifiers(path, raw)):
+            if _is_filesystem_specifier(specifier):
+                raise RuntimeError("trusted recovery import uses a filesystem path")
+            if not specifier.startswith("."):
+                continue
+            resolved = posixpath.normpath(
+                posixpath.join(posixpath.dirname(path), specifier)
+            )
+            if not _safe_path(resolved):
+                raise RuntimeError("trusted recovery import escapes the repository")
+            pending.append(resolved)
+    local = {
+        path[len(prefix) :]: raw
+        for path, raw in observed.items()
+        if path.startswith(prefix)
+    }
+    support = {
+        path: raw for path, raw in observed.items() if not path.startswith(prefix)
+    }
+    return dict(sorted(local.items())), dict(sorted(support.items()))
+
+
+def git_function_recovery_support(
+    repo: Path,
+    candidate_sha: str,
+    name: str,
+    files: Mapping[str, bytes],
+    configuration: Mapping[str, object],
+) -> dict[str, bytes]:
+    """Recover legacy external imports from one unambiguous first-parent Git state.
+
+    The encrypted journal remains authoritative for the function-local bytes and
+    management-plane configuration. Git supplies only dependencies that the old
+    Supabase download omitted, and only when every matching historical state
+    supplies the same exact support bytes.
+    """
+    if (
+        name not in _RECOVERY_SUPPORT_PREFIXES
+        or _SHA.fullmatch(candidate_sha) is None
+        or not repo.is_dir()
+        or repo.is_symlink()
+        or set(configuration) != {"verify_jwt", "entrypoint", "import_map"}
+        or type(configuration.get("verify_jwt")) is not bool
+        or not isinstance(configuration.get("entrypoint"), str)
+        or not _safe_path(configuration["entrypoint"])
+        or any(not _safe_path(path) or not isinstance(raw, bytes) for path, raw in files.items())
+    ):
+        raise RuntimeError("legacy function recovery input is incomplete")
+    reachable: set[str] = set()
+    pending = [str(configuration["entrypoint"])]
+    needs_support = False
+    while pending:
+        path = pending.pop()
+        if path in reachable:
+            continue
+        if path not in files:
+            needs_support = True
+            break
+        reachable.add(path)
+        for specifier in sorted(_import_specifiers(path, files[path])):
+            if _is_filesystem_specifier(specifier):
+                raise RuntimeError("legacy function recovery import uses a filesystem path")
+            if not specifier.startswith("."):
+                continue
+            resolved = posixpath.normpath(
+                posixpath.join(posixpath.dirname(path), specifier)
+            )
+            if resolved == ".." or resolved.startswith("../"):
+                needs_support = True
+                break
+            if not _safe_path(resolved):
+                raise RuntimeError("legacy function recovery import is unsafe")
+            pending.append(resolved)
+        if needs_support:
+            break
+    if not needs_support:
+        return {}
+    if _git(repo, "rev-parse", "--is-shallow-repository").decode().strip() != "false":
+        raise RuntimeError("trusted recovery Git history is shallow")
+    parents = _git(repo, "rev-list", "--parents", "-n", "1", candidate_sha).decode().split()
+    if len(parents) < 2 or parents[0] != candidate_sha:
+        raise RuntimeError("failed release candidate has no trusted prior history")
+    prior_head = parents[1]
+    history_paths = [
+        f"supabase/functions/{name}",
+        "supabase/config.toml",
+        *[prefix.removesuffix("/") for prefix in _RECOVERY_SUPPORT_PREFIXES[name]],
+    ]
+    history = _git(
+        repo,
+        "log",
+        "--first-parent",
+        "--format=%H",
+        prior_head,
+        "--",
+        *history_paths,
+    ).decode().splitlines()
+    commits = list(dict.fromkeys([prior_head, *history]))
+    matches: dict[str, dict[str, bytes]] = {}
+    for commit in commits:
+        try:
+            if _historical_configuration(repo, commit, name) != dict(configuration):
+                continue
+            local, support = _historical_runtime(
+                repo, commit, name, str(configuration["entrypoint"])
+            )
+        except RuntimeError:
+            continue
+        if local != dict(files):
+            continue
+        digest = hashlib.sha256()
+        for path, raw in sorted(support.items()):
+            digest.update(path.encode() + b"\0" + raw + b"\0")
+        matches.setdefault(digest.hexdigest(), support)
+    if not matches:
+        raise RuntimeError("legacy function recovery has no exact historical source")
+    if len(matches) != 1:
+        raise RuntimeError("legacy function recovery support is ambiguous")
+    support = next(iter(matches.values()))
+    if not support:
+        raise RuntimeError("legacy function recovery closure is inconsistent")
+    return support
 
 
 def function_runtime_manifest(

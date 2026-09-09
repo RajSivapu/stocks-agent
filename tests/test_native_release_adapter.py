@@ -107,10 +107,31 @@ def test_supabase_cli_subprocess_receives_only_allowlisted_runtime_and_token_val
 
 def test_backend_receipt_requires_an_explicit_absolute_evidence_directory():
     adapter = native(Supabase())
-    adapter.static_receipt = {}
-    adapter.captured_at = "2026-09-08T12:00:00Z"
     with pytest.raises(RuntimeError, match="evidence directory"):
-        adapter.receipt("a" * 40)
+        adapter._evidence_root()
+
+
+def test_backend_plan_rejects_missing_evidence_parent_before_database_or_platform_io(tmp_path):
+    platform = Supabase()
+    adapter = native(
+        platform,
+        connector=lambda *_args, **_kwargs: pytest.fail(
+            "database access must follow evidence preflight"
+        ),
+    )
+    adapter.context.update(
+        {
+            "evidence_directory": str(tmp_path / "missing"),
+            "allowed_origin": "https://owner.example",
+            "owner_user_id": "owner",
+            "candidate_sha": "a" * 40,
+        }
+    )
+
+    with pytest.raises(RuntimeError, match="evidence directory"):
+        adapter.plan(adapter.context)
+
+    assert platform.calls == []
 
 
 @pytest.mark.parametrize("name", release.FUNCTIONS)
@@ -416,8 +437,11 @@ def test_native_production_engine_failure_boundaries(database, tmp_path, monkeyp
     else:
         with psycopg.connect(database, autocommit=True) as connection:
             connection.execute("CREATE ROLE stock_agent_dashboard_runtime LOGIN PASSWORD 'old-password-at-least-24-characters'")
+    evidence_directory = tmp_path / "capture"
+    evidence_directory.mkdir()
     adapter.context.update({"allowed_origin": "https://owner.example", "site_origin": "https://owner.example",
-        "owner_user_id": "owner", "lease_owner": "release-123"})
+        "owner_user_id": "owner", "lease_owner": "release-123",
+        "evidence_directory": str(evidence_directory)})
     adapter.environment["SUPAVISOR_SESSION_URL"] = "postgresql://postgres.pppppppppppppppppppp:admin-template-password@aws-0-us-east-1.pooler.supabase.com:5432/postgres"
     key = Fernet.generate_key(); adapter.environment["RELEASE_RECOVERY_KEY"] = key.decode()
     original = {name: adapter.capture(name) for name in release.BACKEND_COMPONENTS}
@@ -773,6 +797,106 @@ def test_native_attestation_recovers_exact_candidate_after_lost_function_respons
     else:
         assert restored["identity"] == prior["identity"]
         assert restored["version"] == "5" and restored["files"] == prior["files"]
+
+
+def test_native_recovery_stages_git_bound_external_support_only_for_restore(monkeypatch):
+    module = adapter_module()
+    platform = Supabase()
+    name = "owner-dashboard-api"
+    platform.functions[name]["files"] = {
+        "index.ts": b'import "../../../packages/dashboard-contracts/src/index.ts";\n'
+    }
+    support = {
+        "packages/dashboard-contracts/src/index.ts": b"export const contract = 1;\n"
+    }
+    deploy_support = []
+
+    def runner(command, **options):
+        if command[3:5] == ["functions", "deploy"]:
+            deploy_support.append(
+                (Path(options["cwd"]) / "packages/dashboard-contracts/src/index.ts").is_file()
+            )
+        return platform(command, **options)
+
+    adapter = module.NativeReleaseAdapter(
+        {
+            "project_ref": "p" * 20,
+            "candidate_sha": "a" * 40,
+            "release_run_id": "123",
+            "release_run_attempt": "1",
+        },
+        runner=runner,
+        environment={"DASHBOARD_PRIOR_MANAGED_SECRETS_JSON": json.dumps(platform.secrets)},
+    )
+    prior = adapter.capture(name)
+    candidate = {
+        **copy.deepcopy(prior),
+        "identity": None,
+        "version": None,
+        "files": {"index.ts": base64.b64encode(b"export {};\n").decode()},
+    }
+    adapter.apply(name, candidate)
+    monkeypatch.setattr(
+        "scripts.function_runtime_manifest.git_function_recovery_support",
+        lambda *_args, **_kwargs: support,
+    )
+    journal = single_component_journal(name, prior, candidate)
+
+    release.recover_components(adapter, journal, persist=lambda _value: None)
+
+    assert deploy_support == [False, True]
+    assert journal["status"] == "rolled_back"
+    assert adapter.capture(name)["files"] == prior["files"]
+
+
+def test_native_recovery_replays_support_bearing_restore_after_lost_response(monkeypatch):
+    module = adapter_module()
+    platform = Supabase()
+    name = "owner-dashboard-api"
+    platform.functions[name]["files"] = {
+        "index.ts": b'import "../../../packages/dashboard-contracts/src/index.ts";\n'
+    }
+    support = {
+        "packages/dashboard-contracts/src/index.ts": b"export const contract = 1;\n"
+    }
+    deploys = []
+
+    def runner(command, **options):
+        if command[3:5] == ["functions", "deploy"]:
+            deploys.append(command[5])
+        return platform(command, **options)
+
+    adapter = module.NativeReleaseAdapter(
+        {
+            "project_ref": "p" * 20,
+            "candidate_sha": "a" * 40,
+            "release_run_id": "123",
+            "release_run_attempt": "1",
+        },
+        runner=runner,
+        environment={"DASHBOARD_PRIOR_MANAGED_SECRETS_JSON": json.dumps(platform.secrets)},
+    )
+    prior = adapter.capture(name)
+    candidate = {
+        **copy.deepcopy(prior),
+        "identity": None,
+        "version": None,
+        "files": {"index.ts": base64.b64encode(b"export {};\n").decode()},
+    }
+    adapter.apply(name, candidate)
+    monkeypatch.setattr(
+        "scripts.function_runtime_manifest.git_function_recovery_support",
+        lambda *_args, **_kwargs: support,
+    )
+    adapter.hydrate_recovery(name, prior, candidate)
+    adapter.restore(name, prior)  # remote success whose caller response was lost
+    journal = single_component_journal(name, prior, candidate)
+
+    release.recover_components(adapter, journal, persist=lambda _value: None)
+
+    assert deploys == [name, name, name]
+    assert journal["status"] == "rolled_back"
+    assert journal["components"][name]["restoration"]["version"] == "6"
 
 
 @pytest.mark.parametrize("drift", ["content", "identity", "version"])

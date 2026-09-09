@@ -102,11 +102,29 @@ class NativeReleaseAdapter:
         self.captured_at = None
         self.last_journal = None
         self.static_receipt = None
+        self.recovery_support = {}
 
     def _project(self):
         project = self.context.get("project_ref", "")
         if not re.fullmatch(r"[a-z0-9]{20}", project): raise RuntimeError("exact native project reference is required")
         return project
+
+    def _evidence_root(self, *, create=False):
+        value = self.context.get("evidence_directory")
+        if not isinstance(value, str) or not value:
+            raise RuntimeError("protected backend evidence directory is unavailable or unsafe")
+        parent = Path(value)
+        root = parent / "backend-component-evidence"
+        if (
+            not parent.is_absolute()
+            or not parent.is_dir()
+            or parent.is_symlink()
+            or root.exists()
+        ):
+            raise RuntimeError("protected backend evidence directory is unavailable or reused")
+        if create:
+            root.mkdir(mode=0o700)
+        return root
 
     def _command(self, args, *, cwd=None, json_output=False):
         allowed = ("PATH", "HOME", "TMPDIR", "CI", "NO_COLOR", "NPM_CONFIG_CACHE",
@@ -240,6 +258,17 @@ class NativeReleaseAdapter:
                 for path, encoded in candidate["files"].items()
             }
             stage_function_runtime(root, name, files, config)
+            for path, raw in sorted(self.recovery_support.get(name, {}).items()):
+                if (not isinstance(path, str) or not path or "\\" in path
+                        or PurePosixPath(path).is_absolute()
+                        or any(part in {"", ".", ".."} for part in path.split("/"))
+                        or not isinstance(raw, bytes)):
+                    raise RuntimeError("trusted recovery support contains an unsafe path")
+                target = root / path
+                if target.exists():
+                    raise RuntimeError("trusted recovery support overlaps staged function bytes")
+                target.parent.mkdir(parents=True, exist_ok=True)
+                target.write_bytes(raw)
             self._command(["functions", "deploy", name, "--use-api"], cwd=root)
 
     def _write_secrets(self, candidate):
@@ -397,6 +426,19 @@ class NativeReleaseAdapter:
     def hydrate_recovery(self, name, prior, candidate):
         if name == "dashboard-secrets":
             self._refresh_known_secrets(prior["values"], (candidate or {}).get("values", {}))
+        elif name in FUNCTIONS and prior["exists"]:
+            from scripts.function_runtime_manifest import git_function_recovery_support
+            files = {
+                path: base64.b64decode(encoded, validate=True)
+                for path, encoded in prior["files"].items()
+            }
+            self.recovery_support[name] = git_function_recovery_support(
+                self.root,
+                str(self.context.get("candidate_sha", "")),
+                name,
+                files,
+                prior["configuration"],
+            )
 
     def attest_recovery(self, name, prior, candidate, current):
         """Prove release-owned state; a changed flag alone is not authority.
@@ -443,8 +485,21 @@ class NativeReleaseAdapter:
                     and int(current["version"]) == int(prior["version"]) + 1)
         return current["version"] == "1"
 
+    def replay_restored_content(self, name, prior, current):
+        """Require one exact replay when a legacy bundle used omitted support.
+
+        A prior restore response can be lost after Supabase advances the
+        version. Function-local readback alone cannot prove the hosted bundler
+        used the recovered external dependencies, so recovery repeats the
+        exact, uniquely resolved support-bearing deployment.
+        """
+        return name in FUNCTIONS and bool(self.recovery_support.get(name))
+
     def plan(self, context):
         from scripts.verify_personal_stock_agent_v1 import git_function_runtime
+        # Receipt storage must exist and be unused before the first protected
+        # capture, migration, role/secret mutation, or function deployment.
+        self._evidence_root()
         password = secrets.token_urlsafe(36)
         with self._connection() as connection:
             grantor = connection.execute("SELECT current_user AS name").fetchone()["name"]
@@ -548,9 +603,6 @@ class NativeReleaseAdapter:
         if (candidate_sha != self.context.get("candidate_sha")
                 or not isinstance(self.captured_at, str)):
             raise RuntimeError("protected backend receipt candidate is incomplete")
-        evidence_directory = self.context.get("evidence_directory")
-        if not isinstance(evidence_directory, str) or not evidence_directory:
-            raise RuntimeError("protected backend evidence directory is unavailable or unsafe")
         static_receipt_path = self.context.get("static_build_receipt")
         if not isinstance(static_receipt_path, str):
             raise RuntimeError("candidate static build receipt is unavailable")
@@ -572,12 +624,7 @@ class NativeReleaseAdapter:
             git_files(self.root, candidate_sha, "apps/web")
         )
         self.static_receipt = static_receipt
-        evidence_parent = Path(evidence_directory)
-        evidence_root = evidence_parent / "backend-component-evidence"
-        if (not evidence_parent.is_absolute() or not evidence_parent.is_dir()
-                or evidence_parent.is_symlink() or evidence_root.exists()):
-            raise RuntimeError("protected backend evidence directory is unavailable or reused")
-        evidence_root.mkdir(mode=0o700)
+        evidence_root = self._evidence_root(create=True)
         functions = []
         readbacks = []
         manifest_components = []
