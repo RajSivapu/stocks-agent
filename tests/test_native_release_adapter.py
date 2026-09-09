@@ -486,7 +486,7 @@ def database_adapter(database):
     return platform, adapter
 
 
-def test_dashboard_authority_ignores_superuser_edges_and_unreachable_schema_acls(database):
+def test_dashboard_authority_audits_superuser_edges_and_unreachable_schema_acls(database):
     from scripts.verify_owner_dashboard_role import collect_dashboard_privileges
 
     runtime = "stock_agent_dashboard_runtime"
@@ -534,10 +534,12 @@ def test_dashboard_authority_ignores_superuser_edges_and_unreachable_schema_acls
     try:
         with psycopg.connect(database, autocommit=True) as connection:
             snapshot = collect_dashboard_privileges(connection)
-            assert administrator not in {row["member"] for row in snapshot["privilege_members"]}
-            assert administrator not in snapshot["runtime_members"]
+            privilege_edges = {row["member"]: row for row in snapshot["privilege_members"]}
+            runtime_edges = {row["member"]: row for row in snapshot["runtime_members"]}
+            assert privilege_edges[administrator]["member_superuser"] is True
+            assert runtime_edges[administrator]["member_superuser"] is True
             assert ordinary in {row["member"] for row in snapshot["privilege_members"]}
-            assert ordinary in snapshot["runtime_members"]
+            assert ordinary in {row["member"] for row in snapshot["runtime_members"]}
             assert not any(key.startswith(hidden_schema + ".") for key in snapshot["table_privileges"])
             assert not any(key.startswith(hidden_schema + ".") for key in snapshot["column_privileges"])
             assert not any(key.startswith(hidden_schema + ".") for key in snapshot["sequence_privileges"])
@@ -585,6 +587,77 @@ def test_dashboard_authority_ignores_superuser_edges_and_unreachable_schema_acls
             )
             connection.execute(sql.SQL("DROP ROLE IF EXISTS {}").format(sql.Identifier(ordinary)))
             connection.execute(sql.SQL("DROP ROLE IF EXISTS {}").format(sql.Identifier(runtime)))
+
+
+def test_supabase_project_admin_creator_edges_have_exact_non_runtime_shape(database):
+    from scripts.verify_owner_dashboard_role import (
+        _is_administrative_incoming_edge,
+        collect_dashboard_privileges,
+    )
+
+    runtime = "stock_agent_dashboard_runtime"
+    project_admin = "postgres"
+    other_creator = "other_dashboard_role_creator"
+    with psycopg.connect(database, autocommit=True) as connection:
+        connection.execute(
+            sql.SQL("CREATE ROLE {} LOGIN CREATEROLE").format(sql.Identifier(project_admin))
+        )
+        connection.execute(sql.SQL("CREATE ROLE {} CREATEROLE").format(sql.Identifier(other_creator)))
+        for role in (project_admin, other_creator):
+            connection.execute(
+                sql.SQL(
+                    "GRANT stock_agent_dashboard TO {} "
+                    "WITH ADMIN TRUE, INHERIT FALSE, SET FALSE"
+                ).format(sql.Identifier(role))
+            )
+        connection.execute(sql.SQL("SET ROLE {}").format(sql.Identifier(project_admin)))
+        connection.execute(sql.SQL("CREATE ROLE {} LOGIN INHERIT").format(sql.Identifier(runtime)))
+        connection.execute(
+            sql.SQL(
+                "GRANT stock_agent_dashboard TO {} "
+                "WITH ADMIN FALSE, INHERIT TRUE, SET TRUE"
+            ).format(sql.Identifier(runtime))
+        )
+        connection.execute("RESET ROLE")
+        connection.execute(
+            sql.SQL(
+                "GRANT {} TO {} WITH ADMIN TRUE, INHERIT FALSE, SET FALSE"
+            ).format(sql.Identifier(runtime), sql.Identifier(other_creator))
+        )
+
+    try:
+        with psycopg.connect(database, autocommit=True) as connection:
+            snapshot = collect_dashboard_privileges(connection)
+            privilege_edges = {row["member"]: row for row in snapshot["privilege_members"]}
+            runtime_edges = {row["member"]: row for row in snapshot["runtime_members"]}
+            expected_project_admin_edge = {
+                "member": project_admin,
+                "admin_option": True,
+                "inherit_option": False,
+                "set_option": False,
+                "member_superuser": False,
+                "member_createrole": True,
+            }
+            assert privilege_edges[project_admin] == expected_project_admin_edge
+            assert runtime_edges[project_admin] == expected_project_admin_edge
+            assert _is_administrative_incoming_edge(privilege_edges[project_admin])
+            assert _is_administrative_incoming_edge(runtime_edges[project_admin])
+            assert not _is_administrative_incoming_edge(privilege_edges[other_creator])
+            assert not _is_administrative_incoming_edge(runtime_edges[other_creator])
+
+        with psycopg.connect(database + " user=postgres", autocommit=True) as project_connection:
+            with pytest.raises(psycopg.errors.InsufficientPrivilege):
+                project_connection.execute("SET ROLE stock_agent_dashboard")
+            with pytest.raises(psycopg.errors.InsufficientPrivilege):
+                project_connection.execute(sql.SQL("SET ROLE {}").format(sql.Identifier(runtime)))
+    finally:
+        with psycopg.connect(database, autocommit=True) as connection:
+            connection.execute(sql.SQL("DROP ROLE IF EXISTS {}").format(sql.Identifier(runtime)))
+            for role in (project_admin, other_creator):
+                connection.execute(
+                    sql.SQL("REVOKE stock_agent_dashboard FROM {}").format(sql.Identifier(role))
+                )
+                connection.execute(sql.SQL("DROP ROLE IF EXISTS {}").format(sql.Identifier(role)))
 
 
 def test_runtime_role_exact_attributes_verifier_memberships_and_database_settings(database):

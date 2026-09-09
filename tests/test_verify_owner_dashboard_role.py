@@ -38,6 +38,25 @@ def valid_snapshot():
     }
 
 
+def incoming_member(
+    member="postgres",
+    *,
+    admin_option=True,
+    inherit_option=False,
+    set_option=False,
+    member_superuser=False,
+    member_createrole=True,
+):
+    return {
+        "member": member,
+        "admin_option": admin_option,
+        "inherit_option": inherit_option,
+        "set_option": set_option,
+        "member_superuser": member_superuser,
+        "member_createrole": member_createrole,
+    }
+
+
 def test_valid_dashboard_privileges_return_a_bounded_receipt():
     result = evaluate_dashboard_privileges(valid_snapshot())
     assert result == {
@@ -48,7 +67,59 @@ def test_valid_dashboard_privileges_return_a_bounded_receipt():
         "write_privileges": 0,
         "application_function_execute": 0,
         "owned_objects": 0,
+        "administrative_incoming_edges": 0,
     }
+
+
+def test_exact_supabase_project_admin_creator_edges_are_audited_without_runtime_authority():
+    snapshot = valid_snapshot()
+    snapshot["privilege_members"].append(incoming_member())
+    snapshot["runtime_members"].append(incoming_member())
+
+    result = evaluate_dashboard_privileges(snapshot)
+
+    assert result["administrative_incoming_edges"] == 2
+
+
+def test_true_superuser_incoming_edges_are_audited_without_runtime_authority():
+    snapshot = valid_snapshot()
+    snapshot["privilege_members"].append(incoming_member(
+        member="bootstrap_admin",
+        admin_option=False,
+        inherit_option=True,
+        set_option=True,
+        member_superuser=True,
+        member_createrole=False,
+    ))
+    snapshot["runtime_members"].append({
+        "member": "bootstrap_admin", "member_superuser": True,
+    })
+
+    result = evaluate_dashboard_privileges(snapshot)
+
+    assert result["administrative_incoming_edges"] == 2
+
+
+@pytest.mark.parametrize(
+    "edge",
+    (
+        incoming_member(set_option=True),
+        incoming_member(inherit_option=True),
+        incoming_member(admin_option=False),
+        incoming_member(member_createrole=False),
+        incoming_member(member="other_creator"),
+        {key: value for key, value in incoming_member().items() if key != "set_option"},
+        {**incoming_member(), "member_superuser": "false"},
+        {**incoming_member(), "member_createrole": "true"},
+    ),
+)
+@pytest.mark.parametrize("collection", ("privilege_members", "runtime_members"))
+def test_near_match_project_admin_edges_are_rejected(edge, collection):
+    snapshot = valid_snapshot()
+    snapshot[collection].append(edge)
+
+    with pytest.raises(RuntimeError, match="members|incoming members"):
+        evaluate_dashboard_privileges(snapshot)
 
 
 @pytest.mark.parametrize(
@@ -64,6 +135,8 @@ def test_valid_dashboard_privileges_return_a_bounded_receipt():
                 "admin_option": False,
                 "inherit_option": True,
                 "set_option": True,
+                "member_superuser": False,
+                "member_createrole": False,
             }),
             "privilege role members",
         ),
@@ -71,7 +144,12 @@ def test_valid_dashboard_privileges_return_a_bounded_receipt():
             lambda value: value["privilege_members"][0].update(admin_option=True),
             "privilege role members",
         ),
-        (lambda value: value["runtime_members"].append("rogue_dashboard_reader"), "incoming members"),
+        (
+            lambda value: value["runtime_members"].append(incoming_member(
+                member="rogue_dashboard_reader", member_createrole=False,
+            )),
+            "incoming members",
+        ),
         (lambda value: value["database_privileges"].add("CREATE"), "database privilege"),
         (lambda value: value["schema_privileges"].add("CREATE"), "schema privilege"),
         (
@@ -119,7 +197,7 @@ def test_privilege_collector_executes_static_queries_without_empty_parameter_tup
     assert len(policy_calls[0]) == 1
 
 
-def test_privilege_collector_excludes_only_superuser_incoming_edges_and_unreachable_objects():
+def test_privilege_collector_records_incoming_edge_authority_and_unreachable_objects():
     calls = []
 
     class Cursor:
@@ -146,7 +224,9 @@ def test_privilege_collector_excludes_only_superuser_incoming_edges_and_unreacha
         if "pg_auth_members" in args[0] and "WHERE granted.rolname" in args[0]
     ]
     assert len(incoming_membership_queries) == 2
-    assert all("NOT member.rolsuper" in args[0] for args in incoming_membership_queries)
+    assert all("member.rolsuper" in args[0] for args in incoming_membership_queries)
+    assert all("member.rolcreaterole" in args[0] for args in incoming_membership_queries)
+    assert all("NOT member.rolsuper" not in args[0] for args in incoming_membership_queries)
 
     for privilege_function in (
         "has_table_privilege", "has_column_privilege", "has_sequence_privilege",

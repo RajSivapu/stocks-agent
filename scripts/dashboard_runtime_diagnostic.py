@@ -164,7 +164,11 @@ def _snapshot_summary(snapshot: Mapping[str, Any]) -> dict[str, object]:
     privilege_memberships = {
         value for value in snapshot.get("privilege_memberships", []) if isinstance(value, str)
     }
-    runtime_members = {value for value in snapshot.get("runtime_members", []) if isinstance(value, str)}
+    runtime_members = {
+        canonical_json(value)
+        for value in snapshot.get("runtime_members", [])
+        if isinstance(value, Mapping)
+    }
     privilege_members = {
         canonical_json(value)
         for value in snapshot.get("privilege_members", [])
@@ -383,9 +387,13 @@ def diagnose_dashboard_runtime(
                     "snapshot": _snapshot_summary(snapshot),
                 }
             else:
-                receipt["authority"] = {
+                authority_result: dict[str, object] = {
                     "status": "verified" if result.get("status") == "verified" else "failed"
                 }
+                administrative_edges = result.get("administrative_incoming_edges")
+                if type(administrative_edges) is int and administrative_edges >= 0:
+                    authority_result["administrative_incoming_edges"] = administrative_edges
+                receipt["authority"] = authority_result
 
             try:
                 identity = connection.execute(
