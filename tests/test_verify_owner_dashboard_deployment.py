@@ -116,8 +116,15 @@ def test_api_url_and_origin_must_be_exact_https_boundaries():
 
 def test_owner_payload_requires_immutable_boundaries_and_receipt_fields():
     payloads = {
-        route: envelope({"boundaries": {"owner_only": True, "suggestion_only": True, "friend_invitations": "disabled", "brokerage_authority": "none"}})
+        route: envelope({})
         for route in verify.CANARY_ROUTES
+    }
+    payloads["/v1/today"]["data"]["boundaries"] = dict(verify.BOUNDARIES)
+    payloads["/v1/system"]["data"]["boundaries"] = dict(verify.BOUNDARIES)
+    payloads["/v1/intelligence"]["data"]["boundaries"] = {
+        "research_only": True,
+        "execution_disabled": True,
+        "valuation_unavailable": True,
     }
     payloads["/v1/today"]["data"].update({"portfolio": {"data_as_of": "2026-09-03T20:00:00.000Z", "market_state": "as_of_close", "price_sources": ["yahoo-chart"]}})
     payloads["/v1/runs"]["data"].update({"runs": [{"id": "6903b3cc-05b7-4f90-bbc2-7e80a3a59e22", "status": "completed"}]})
@@ -127,11 +134,107 @@ def test_owner_payload_requires_immutable_boundaries_and_receipt_fields():
     assert result["brokerage_authority"] == "none"
 
 
+def test_owner_payload_requires_each_route_specific_boundary_receipt():
+    payloads = {
+        route: envelope({})
+        for route in verify.CANARY_ROUTES
+    }
+    payloads["/v1/today"]["data"].update({
+        "boundaries": dict(verify.BOUNDARIES),
+        "portfolio": {
+            "data_as_of": None, "market_state": "unknown", "price_sources": [],
+        },
+    })
+    payloads["/v1/system"]["data"]["boundaries"] = dict(verify.BOUNDARIES)
+    payloads["/v1/intelligence"]["data"]["boundaries"] = {
+        "research_only": True,
+        "execution_disabled": True,
+        "valuation_unavailable": True,
+    }
+    payloads["/v1/runs"]["data"]["runs"] = [{"status": "completed"}]
+
+    for route in ("/v1/today", "/v1/system", "/v1/intelligence"):
+        missing = json.loads(json.dumps(payloads))
+        del missing[route]["data"]["boundaries"]
+        with pytest.raises(RuntimeError, match="boundary"):
+            verify.validate_owner_payloads(missing)
+
+
+@pytest.mark.parametrize(
+    ("route", "field", "numeric_value"),
+    tuple(
+        (route, field, numeric_value)
+        for route, expected in verify.ROUTE_BOUNDARIES.items()
+        for field, value in expected.items()
+        if isinstance(value, bool)
+        for numeric_value in (1, 1.0)
+    ),
+)
+def test_owner_payload_boundary_booleans_are_type_exact(
+    route,
+    field,
+    numeric_value,
+):
+    payloads = {
+        route_name: envelope({})
+        for route_name in verify.CANARY_ROUTES
+    }
+    payloads["/v1/today"]["data"].update({
+        "boundaries": dict(verify.BOUNDARIES),
+        "portfolio": {
+            "data_as_of": None, "market_state": "unknown", "price_sources": [],
+        },
+    })
+    payloads["/v1/system"]["data"]["boundaries"] = dict(verify.BOUNDARIES)
+    payloads["/v1/intelligence"]["data"]["boundaries"] = dict(
+        verify.INTELLIGENCE_BOUNDARIES
+    )
+    payloads["/v1/runs"]["data"]["runs"] = [{"status": "completed"}]
+    payloads[route]["data"]["boundaries"][field] = numeric_value
+
+    with pytest.raises(RuntimeError, match="boundary"):
+        verify.validate_owner_payloads(payloads)
+
+
+@pytest.mark.parametrize(
+    "route",
+    tuple(
+        route
+        for route in verify.CANARY_ROUTES
+        if route not in verify.ROUTE_BOUNDARIES
+    ),
+)
+def test_owner_payload_rejects_even_null_boundary_on_an_unrelated_route(route):
+    payloads = {
+        route: envelope({})
+        for route in verify.CANARY_ROUTES
+    }
+    payloads["/v1/today"]["data"].update({
+        "boundaries": dict(verify.BOUNDARIES),
+        "portfolio": {
+            "data_as_of": None, "market_state": "unknown", "price_sources": [],
+        },
+    })
+    payloads["/v1/system"]["data"]["boundaries"] = dict(verify.BOUNDARIES)
+    payloads["/v1/intelligence"]["data"]["boundaries"] = dict(
+        verify.INTELLIGENCE_BOUNDARIES
+    )
+    payloads[route]["data"]["boundaries"] = None
+    payloads["/v1/runs"]["data"]["runs"] = [{"status": "completed"}]
+
+    with pytest.raises(RuntimeError, match="boundary"):
+        verify.validate_owner_payloads(payloads)
+
+
 def test_owner_payload_rejects_an_unsupported_send_claim():
     payloads = {route: envelope({}) for route in verify.CANARY_ROUTES}
     payloads["/v1/today"] = envelope({
         "boundaries": verify.BOUNDARIES,
         "portfolio": {"data_as_of": None, "market_state": "unknown", "price_sources": []},
+    })
+    payloads["/v1/system"] = envelope({"boundaries": verify.BOUNDARIES})
+    payloads["/v1/intelligence"] = envelope({
+        "boundaries": verify.INTELLIGENCE_BOUNDARIES,
     })
     payloads["/v1/runs"] = envelope({"runs": [{"id": "6903b3cc-05b7-4f90-bbc2-7e80a3a59e22", "status": "completed"}]})
     payloads["/v1/alerts"] = envelope({"alerts": [{"state": "delivered", "telegram_message_ids": []}]})
@@ -150,7 +253,11 @@ def test_http_canary_uses_only_get_and_checks_anonymous_and_non_owner_denial():
         if authorization == "Bearer non-owner-token":
             return 403, {"access-control-allow-origin": ORIGIN}, json.dumps({"error": {"code": "owner_only"}}).encode()
         route = url.removeprefix(API_URL)
-        data = {"boundaries": {"owner_only": True, "suggestion_only": True, "friend_invitations": "disabled", "brokerage_authority": "none"}}
+        data = {}
+        if route in {"/v1/today", "/v1/system"}:
+            data["boundaries"] = dict(verify.BOUNDARIES)
+        if route == "/v1/intelligence":
+            data["boundaries"] = dict(verify.INTELLIGENCE_BOUNDARIES)
         if route == "/v1/today": data["portfolio"] = {"data_as_of": None, "market_state": "unknown", "price_sources": [], "holdings": []}
         if route == "/v1/portfolio": data["holdings"] = []
         if route == "/v1/alerts": data["alerts"] = []
