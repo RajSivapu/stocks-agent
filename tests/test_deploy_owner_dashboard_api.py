@@ -13,6 +13,10 @@ DATABASE_URL = (
     "postgresql://stock_agent_dashboard_runtime.hlxpxbxhqctwsqizwjjy:"
     "dashboard-password-longer-than-24@aws-0-us-east-1.pooler.supabase.com:5432/postgres"
 )
+EVIDENCE_DATABASE_URL = (
+    "postgresql://stock_agent_release_reader_runtime.hlxpxbxhqctwsqizwjjy:"
+    "evidence-password-longer-than-24@aws-0-us-east-1.pooler.supabase.com:5432/postgres"
+)
 ADMIN_URL = (
     "postgresql://postgres:admin-password-longer-than-24@"
     "db.hlxpxbxhqctwsqizwjjy.supabase.co:5432/postgres?sslmode=require"
@@ -946,7 +950,8 @@ def test_canary_failure_invokes_rollback_before_propagating():
 
     with pytest.raises(RuntimeError, match="production canary failed"):
         deploy.verify_initial_deployment_or_rollback(
-            PROJECT_REF, ORIGIN, DATABASE_URL, "owner@example.com",
+            PROJECT_REF, ORIGIN, DATABASE_URL, EVIDENCE_DATABASE_URL,
+            "owner@example.com",
             f"release-canary-{'a' * 32}@example.com",
             "sb_secret_" + "s" * 40, "sb_publishable_" + "p" * 32,
             verifier=verifier, rollback=rollback,
@@ -964,8 +969,10 @@ def test_post_deploy_canary_keeps_runtime_database_url_and_auth_token_out_of_rec
             else "non-owner-access-token"
         )
 
-    def source_collector(database_url, api_url, run_id):
-        observed["source"] = (database_url, api_url, run_id)
+    def source_collector(database_url, evidence_database_url, api_url, run_id):
+        observed["source"] = (
+            database_url, evidence_database_url, api_url, run_id,
+        )
         return {"source": "receipt"}
 
     def canary(api_url, origin, token, non_owner_access_token, *, source_reader):
@@ -975,13 +982,16 @@ def test_post_deploy_canary_keeps_runtime_database_url_and_auth_token_out_of_rec
             "status": "verified", "source_reconciliation": "verified",
             "financial_write_routes": 0, "brokerage_authority": "none",
             "friend_invitations": "disabled", "non_owner_status": 403,
+            "source_database_role": "stock_agent_dashboard_runtime",
+            "evidence_database_role": "stock_agent_release_reader_runtime",
         }
 
     def session_revoker(project_url, token, publishable_key):
         observed.setdefault("revoked", []).append(token)
 
     receipt = deploy.run_post_deploy_canary(
-        PROJECT_REF, ORIGIN, DATABASE_URL, OWNER_EMAIL := "owner@example.com",
+        PROJECT_REF, ORIGIN, DATABASE_URL, EVIDENCE_DATABASE_URL,
+        OWNER_EMAIL := "owner@example.com",
         CANARY_EMAIL := f"release-canary-{'a' * 32}@example.com",
         "sb_secret_" + "s" * 40, "sb_publishable_" + "p" * 32,
         token_factory=token_factory, source_collector=source_collector, canary=canary,
@@ -996,6 +1006,7 @@ def test_post_deploy_canary_keeps_runtime_database_url_and_auth_token_out_of_rec
     assert receipt["owner_session"] == "revoked"
     assert receipt["non_owner_session"] == "revoked"
     assert observed["source"][0] == DATABASE_URL
+    assert observed["source"][1] == EVIDENCE_DATABASE_URL
     assert observed["canary"][3] == "non-owner-access-token"
     assert observed["revoked"] == ["non-owner-access-token", "owner-access-token"]
 
@@ -1012,7 +1023,8 @@ def test_post_deploy_canary_revokes_owner_session_when_canary_fails():
 
     with pytest.raises(RuntimeError, match="receipt mismatch"):
         deploy.run_post_deploy_canary(
-            PROJECT_REF, ORIGIN, DATABASE_URL, "owner@example.com",
+            PROJECT_REF, ORIGIN, DATABASE_URL, EVIDENCE_DATABASE_URL,
+            "owner@example.com",
             f"release-canary-{'a' * 32}@example.com",
             "sb_secret_" + "s" * 40, "sb_publishable_" + "p" * 32,
             token_factory=lambda _url, email, *_args: (
@@ -1030,7 +1042,8 @@ def test_post_deploy_canary_revokes_owner_session_when_canary_fails():
 def test_post_deploy_canary_rejects_an_incomplete_receipt():
     with pytest.raises(RuntimeError, match="production canary"):
         deploy.run_post_deploy_canary(
-            PROJECT_REF, ORIGIN, DATABASE_URL, "owner@example.com",
+            PROJECT_REF, ORIGIN, DATABASE_URL, EVIDENCE_DATABASE_URL,
+            "owner@example.com",
             f"release-canary-{'a' * 32}@example.com",
             "sb_secret_" + "s" * 40, "sb_publishable_" + "p" * 32,
             token_factory=lambda _url, email, *_args: (
@@ -1053,7 +1066,8 @@ def test_post_deploy_canary_revokes_owner_if_fresh_non_owner_token_mint_fails():
 
     with pytest.raises(RuntimeError, match="non-owner mint failed"):
         deploy.run_post_deploy_canary(
-            PROJECT_REF, ORIGIN, DATABASE_URL, "owner@example.com",
+            PROJECT_REF, ORIGIN, DATABASE_URL, EVIDENCE_DATABASE_URL,
+            "owner@example.com",
             f"release-canary-{'a' * 32}@example.com",
             "sb_secret_" + "s" * 40, "sb_publishable_" + "p" * 32,
             token_factory=token_factory,
@@ -1068,7 +1082,8 @@ def test_post_deploy_canary_rejects_unbound_non_owner_email_before_token_mint():
     calls = []
     with pytest.raises(ValueError, match="reserved canary"):
         deploy.run_post_deploy_canary(
-            PROJECT_REF, ORIGIN, DATABASE_URL, "owner@example.com", "person@gmail.com",
+            PROJECT_REF, ORIGIN, DATABASE_URL, EVIDENCE_DATABASE_URL,
+            "owner@example.com", "person@gmail.com",
             "sb_secret_" + "s" * 40, "sb_publishable_" + "p" * 32,
             token_factory=lambda *_args: calls.append(True),
             source_collector=lambda *_args: {}, canary=lambda *_args, **_kwargs: {},

@@ -37,6 +37,7 @@ from scripts.verify_owner_dashboard_deployment import (
     obtain_ephemeral_existing_user_access_token,
     revoke_ephemeral_owner_session,
     run_http_canary,
+    validate_evidence_database_url,
     verify_auth_canary_inventory,
     verify_release_artifact_receipts,
 )
@@ -1202,6 +1203,7 @@ def run_post_deploy_canary(
     project_ref: str,
     allowed_origin: str,
     database_url: str,
+    evidence_database_url: str,
     owner_email: str,
     non_owner_email: str,
     service_key: str,
@@ -1232,7 +1234,9 @@ def run_post_deploy_canary(
         tokens.append(non_owner_access_token)
         result = dict(canary(
             api_url, allowed_origin, token, non_owner_access_token,
-            source_reader=lambda run_id: source_collector(database_url, api_url, run_id),
+            source_reader=lambda run_id: source_collector(
+                database_url, evidence_database_url, api_url, run_id,
+            ),
         ))
         expected = {
             "status": "verified",
@@ -1240,6 +1244,8 @@ def run_post_deploy_canary(
             "financial_write_routes": 0,
             "brokerage_authority": "none",
             "friend_invitations": "disabled",
+            "source_database_role": "stock_agent_dashboard_runtime",
+            "evidence_database_role": "stock_agent_release_reader_runtime",
         }
         if any(result.get(key) != value for key, value in expected.items()):
             raise RuntimeError("production canary receipt is incomplete")
@@ -1263,6 +1269,7 @@ def verify_initial_deployment_or_rollback(
     project_ref: str,
     allowed_origin: str,
     database_url: str,
+    evidence_database_url: str,
     owner_email: str,
     non_owner_email: str,
     service_key: str,
@@ -1273,8 +1280,8 @@ def verify_initial_deployment_or_rollback(
 ) -> dict[str, object]:
     try:
         return verifier(
-            project_ref, allowed_origin, database_url, owner_email, non_owner_email,
-            service_key, publishable_key,
+            project_ref, allowed_origin, database_url, evidence_database_url,
+            owner_email, non_owner_email, service_key, publishable_key,
         )
     except Exception as error:
         try:
@@ -1326,16 +1333,23 @@ def main() -> int:
     non_owner_user_id = os.environ.get("DASHBOARD_NON_OWNER_USER_ID", "").strip()
     service_key = os.environ.get("SUPABASE_SERVICE_ROLE_KEY", "").strip()
     session_template = os.environ.get("SUPAVISOR_SESSION_URL", "").strip()
+    evidence_database_url = os.environ.get("RELEASE_READONLY_DATABASE_URL", "").strip()
     if (not session_template or not owner_email or not service_key
-            or not publishable_key or not non_owner_email or not non_owner_user_id):
+            or not publishable_key or not non_owner_email or not non_owner_user_id
+            or not evidence_database_url):
         raise SystemExit(
             "SUPAVISOR_SESSION_URL, DASHBOARD_OWNER_EMAIL, "
             "DASHBOARD_NON_OWNER_EMAIL, DASHBOARD_NON_OWNER_USER_ID, "
-            "SUPABASE_SERVICE_ROLE_KEY, and SUPABASE_PUBLISHABLE_KEY are required"
+            "SUPABASE_SERVICE_ROLE_KEY, SUPABASE_PUBLISHABLE_KEY, and "
+            "RELEASE_READONLY_DATABASE_URL are required"
         )
     if arguments.static_build_receipt is None:
         raise SystemExit("--static-build-receipt is required for protected production mutation")
     admin_url = validate_release_admin_session_url(arguments.project_ref, session_template)
+    evidence_api_url = (
+        f"https://{arguments.project_ref}.supabase.co/functions/v1/{FUNCTION_NAME}"
+    )
+    validate_evidence_database_url(evidence_database_url, evidence_api_url)
     # The native adapter snapshots its environment when constructed. Point all
     # release and recovery database work at the reachable session pooler.
     os.environ["POSTGRES_URL"] = admin_url
@@ -1377,8 +1391,9 @@ def main() -> int:
         captured = adapter.capture("dashboard-secrets")
         database_url = captured["values"]["DASHBOARD_DATABASE_URL"]
         canary_receipt = run_post_deploy_canary(
-            arguments.project_ref, arguments.allowed_origin, database_url, owner_email,
-            non_owner_email, service_key, publishable_key,
+            arguments.project_ref, arguments.allowed_origin, database_url,
+            evidence_database_url, owner_email, non_owner_email, service_key,
+            publishable_key,
         )
         canary_receipt["auth_inventory_preflight"] = auth_inventory_preflight
         canary_receipt["auth_inventory_readback"] = verify_auth_canary_inventory(

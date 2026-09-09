@@ -55,6 +55,7 @@ def protected_canary_evidence(receipt: dict[str, object]) -> dict[str, object]:
         or canary.get("status") != "verified"
         or canary.get("source_reconciliation") != "verified"
         or canary.get("source_database_role") != "stock_agent_dashboard_runtime"
+        or canary.get("evidence_database_role") != "stock_agent_release_reader_runtime"
         or canary.get("financial_write_routes") != 0
         or canary.get("brokerage_authority") != "none"
         or canary.get("friend_invitations") != "disabled"

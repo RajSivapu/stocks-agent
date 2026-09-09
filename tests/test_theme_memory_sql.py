@@ -869,6 +869,24 @@ def test_actual_postgres_v2_acl_separates_browser_service_dashboard_and_release_
         }
 
 
+def test_actual_postgres_release_canary_reader_can_read_hashes_but_cannot_mutate(
+    theme_memory_dsn,
+):
+    with psycopg.connect(theme_memory_dsn, autocommit=True) as db:
+        db.execute("SET ROLE stock_agent_dashboard")
+        with pytest.raises(psycopg.errors.InsufficientPrivilege):
+            db.execute("SELECT content_hash FROM public.market_events LIMIT 1")
+        db.execute("RESET ROLE")
+
+        db.execute("SET ROLE stock_agent_release_reader_runtime")
+        assert db.execute(
+            "SELECT content_hash FROM public.market_events LIMIT 1"
+        ).fetchone() is None
+        with pytest.raises(psycopg.errors.InsufficientPrivilege):
+            db.execute("DELETE FROM public.market_events WHERE false")
+        db.execute("RESET ROLE")
+
+
 def test_actual_postgres_dashboard_authority_verifier_rejects_inherited_insert(theme_memory_dsn):
     from scripts.verify_owner_dashboard_role import verify_dashboard_role
 
