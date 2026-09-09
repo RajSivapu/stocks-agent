@@ -180,10 +180,10 @@ def test_owner_comment_authorization_rejects_a_post_merge_edit():
     owner_filter = "[" + owner_filter
     body = "OWNER_RELEASE_APPROVAL_V1\nreviewed_sha=" + "a" * 40 + "\npr_ci_workflow_run_id=41"
 
-    def accepted(updated_at):
+    def accepted(updated_at, candidate_body=body):
         comment = [{"id": 46, "user": {"id": 7}, "author_association": "OWNER",
             "created_at": "2026-09-05T17:55:00Z", "updated_at": updated_at,
-            "body": body}]
+            "body": candidate_body}]
         result = subprocess.run([
             jq, "-e", "--arg", "body", body, "--argjson", "owner", "7",
             "--arg", "pr_ci", "2026-09-05T17:50:00Z",
@@ -192,6 +192,9 @@ def test_owner_comment_authorization_rejects_a_post_merge_edit():
         return result.returncode == 0 and bool(result.stdout.strip())
 
     assert accepted("2026-09-05T17:55:00Z")
+    assert accepted("2026-09-05T17:55:00Z", body + "\n")
+    assert not accepted("2026-09-05T17:55:00Z", body + "\n\n")
+    assert not accepted("2026-09-05T17:55:00Z", body + " ")
     assert not accepted("2026-09-05T18:05:00Z")
 
 
