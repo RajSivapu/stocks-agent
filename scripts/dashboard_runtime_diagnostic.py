@@ -276,15 +276,20 @@ def _validated_runtime_url(environment: Mapping[str, str], project_ref: str) -> 
     raw = environment.get("DASHBOARD_PRIOR_MANAGED_SECRETS_JSON", "")
     try:
         secrets = json.loads(raw)
-        value = secrets["DASHBOARD_DATABASE_URL"]
+    except (TypeError, json.JSONDecodeError) as error:
+        raise ValueError("credential_source_invalid") from error
+    if not isinstance(secrets, Mapping):
+        raise ValueError("credential_source_invalid")
+    value = secrets.get("DASHBOARD_DATABASE_URL")
+    if not isinstance(value, str):
+        raise ValueError("credential_source_invalid")
+    try:
         parsed = urlparse(value)
         port = parsed.port
-    except (KeyError, TypeError, ValueError, json.JSONDecodeError) as error:
-        raise ValueError("credential_source_invalid") from error
+    except ValueError as error:
+        raise ValueError("credential_url_invalid") from error
     if (
-        not isinstance(secrets, Mapping)
-        or not isinstance(value, str)
-        or parsed.scheme not in {"postgres", "postgresql"}
+        parsed.scheme not in {"postgres", "postgresql"}
         or not parsed.hostname
         or not parsed.hostname.endswith(".pooler.supabase.com")
         or port != 5432

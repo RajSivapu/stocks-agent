@@ -4,6 +4,7 @@ import json
 from pathlib import Path
 
 import psycopg
+import pytest
 
 from scripts.dashboard_runtime_diagnostic import diagnose_dashboard_runtime
 
@@ -103,6 +104,21 @@ def test_diagnostic_suppresses_private_connection_error_and_stops_after_connecti
     assert receipt["identity"] == {"status": "not_run"}
     assert receipt["projection"] == {"status": "not_run"}
     assert PASSWORD not in json.dumps(receipt)
+
+
+@pytest.mark.parametrize("invalid_value", [123, True])
+def test_diagnostic_writes_a_receipt_for_a_non_string_credential_value(invalid_value):
+    invalid_environment = {"DASHBOARD_PRIOR_MANAGED_SECRETS_JSON": json.dumps({
+        "DASHBOARD_DATABASE_URL": invalid_value,
+    })}
+
+    receipt = diagnose_dashboard_runtime(invalid_environment, PROJECT_REF, MAIN_SHA)
+
+    assert receipt["credential"] == {
+        "status": "failed", "error_code": "credential_source_invalid",
+    }
+    assert receipt["connection"] == {"status": "not_run"}
+    assert len(receipt["receipt_sha256"]) == 64
 
 
 def test_diagnostic_records_exact_authority_reason_and_bounded_difference_samples():
