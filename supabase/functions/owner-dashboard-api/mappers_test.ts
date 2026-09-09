@@ -28,6 +28,7 @@ Deno.test("sent requires delivered receipt and Telegram message id", () => {
     created_at: "2026-09-03T20:01:00.000Z",
     delivered_at: "2026-09-03T20:02:00.000Z",
   };
+  assertEquals(mapPublicationReceipt(base).template_version, "3");
   assertEquals(mapPublicationReceipt({ ...base, status: "delivered", telegram_message_ids: [] }).state, "incomplete");
   assertEquals(mapPublicationReceipt({ ...base, status: "delivered", telegram_message_ids: [42] }).state, "delivered");
   const suppressed = mapPublicationReceipt({ ...base, status: "suppressed", telegram_message_ids: [42] });
