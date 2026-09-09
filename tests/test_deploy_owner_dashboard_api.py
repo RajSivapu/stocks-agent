@@ -944,6 +944,8 @@ def test_secret_manifest_uses_a_private_file_and_never_command_arguments(tmp_pat
             "DASHBOARD_DATABASE_URL": DATABASE_URL,
             "DASHBOARD_OWNER_USER_ID": OWNER_ID,
             "DASHBOARD_ALLOWED_ORIGINS": ORIGIN,
+            "OWNER_DASHBOARD_ORIGIN": ORIGIN,
+            "OWNER_DASHBOARD_URL": ORIGIN,
         },
         runner,
     )

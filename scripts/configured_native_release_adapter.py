@@ -240,6 +240,13 @@ class NativeReleaseAdapter:
                 try: self.known_secrets = json.loads(self.environment.get("DASHBOARD_PRIOR_MANAGED_SECRETS_JSON", "{}"))
                 except ValueError as error: raise RuntimeError("protected prior managed secret values are malformed") from error
                 if not isinstance(self.known_secrets, dict): raise RuntimeError("protected prior managed secret values are malformed")
+                derived_public_settings = {
+                    "OWNER_DASHBOARD_ORIGIN": self.context.get("allowed_origin"),
+                    "OWNER_DASHBOARD_URL": self.context.get("site_origin"),
+                }
+                for key, value in derived_public_settings.items():
+                    if key not in self.known_secrets and isinstance(value, str) and value:
+                        self.known_secrets[key] = value
             snapshot = capture_managed_secrets(self._secret_inventory(), self.known_secrets)
             literal_secret_values(snapshot["values"])
         else: raise RuntimeError("native component is not allowlisted")
@@ -636,8 +643,13 @@ class NativeReleaseAdapter:
         role = {"exists": True, "identity": RUNTIME_ROLE,
             "version": hashlib.sha256(canonical([configuration, role_values])).hexdigest(),
             "files": {}, "values": role_values, "configuration": configuration}
-        values = {"DASHBOARD_DATABASE_URL": database_url,
-                  "DASHBOARD_ALLOWED_ORIGINS": context["allowed_origin"], "DASHBOARD_OWNER_USER_ID": context["owner_user_id"]}
+        values = {
+            "DASHBOARD_DATABASE_URL": database_url,
+            "DASHBOARD_ALLOWED_ORIGINS": context["allowed_origin"],
+            "DASHBOARD_OWNER_USER_ID": context["owner_user_id"],
+            "OWNER_DASHBOARD_ORIGIN": context["allowed_origin"],
+            "OWNER_DASHBOARD_URL": context["site_origin"],
+        }
         self.candidate_database_url = database_url
         self._candidate_runtime_ready = False
         secret = capture_managed_secrets([{"name": k, "digest": hashlib.sha256(v.encode()).hexdigest()} for k, v in values.items()], values)

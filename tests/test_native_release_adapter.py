@@ -135,7 +135,7 @@ def test_backend_plan_rejects_missing_evidence_parent_before_database_or_platfor
     assert platform.calls == []
 
 
-def test_upgrade_plan_preserves_existing_runtime_credential_and_database_url(monkeypatch):
+def test_upgrade_plan_preserves_runtime_credential_and_provisions_gateway_settings(monkeypatch):
     platform = Supabase()
     database_url = (
         "postgresql://stock_agent_dashboard_runtime."
@@ -148,7 +148,11 @@ def test_upgrade_plan_preserves_existing_runtime_credential_and_database_url(mon
         "DASHBOARD_OWNER_USER_ID": "owner",
     }
     adapter = native(platform)
-    adapter.context.update({"allowed_origin": "https://owner.example", "owner_user_id": "owner"})
+    adapter.context.update({
+        "allowed_origin": "https://owner.example",
+        "site_origin": "https://stocks.example",
+        "owner_user_id": "owner",
+    })
     prior_role = {
         "exists": True,
         "identity": adapter_module().RUNTIME_ROLE,
@@ -192,8 +196,39 @@ def test_upgrade_plan_preserves_existing_runtime_credential_and_database_url(mon
     candidates = adapter.plan(adapter.context)
 
     assert candidates["runtime-role"] == prior_role
-    assert candidates["dashboard-secrets"] == adapter.original["dashboard-secrets"]
-    assert candidates["dashboard-secrets"]["values"]["DASHBOARD_DATABASE_URL"] == database_url
+    assert candidates["dashboard-secrets"]["values"] == {
+        "DASHBOARD_ALLOWED_ORIGINS": "https://owner.example",
+        "DASHBOARD_DATABASE_URL": database_url,
+        "DASHBOARD_OWNER_USER_ID": "owner",
+        "OWNER_DASHBOARD_ORIGIN": "https://owner.example",
+        "OWNER_DASHBOARD_URL": "https://stocks.example",
+    }
+
+
+def test_capture_derives_public_gateway_settings_when_prior_secret_json_predates_them():
+    platform = Supabase()
+    prior = {
+        "DASHBOARD_ALLOWED_ORIGINS": "https://owner.example",
+        "DASHBOARD_DATABASE_URL": "postgresql://runtime.example",
+        "DASHBOARD_OWNER_USER_ID": "owner",
+    }
+    platform.secrets = {
+        **prior,
+        "OWNER_DASHBOARD_ORIGIN": "https://owner.example",
+        "OWNER_DASHBOARD_URL": "https://stocks.example",
+    }
+    adapter = adapter_module().NativeReleaseAdapter(
+        {
+            "project_ref": "p" * 20,
+            "candidate_sha": "a" * 40,
+            "allowed_origin": "https://owner.example",
+            "site_origin": "https://stocks.example",
+        },
+        runner=platform,
+        environment={"DASHBOARD_PRIOR_MANAGED_SECRETS_JSON": json.dumps(prior)},
+    )
+
+    assert adapter.capture("dashboard-secrets")["values"] == platform.secrets
 
 
 def test_upgrade_plan_refuses_to_rotate_a_live_role_when_existing_database_url_is_missing(monkeypatch):
@@ -1865,7 +1900,7 @@ def test_native_function_attestation_rejects_non_candidate_drift(drift):
 @pytest.mark.parametrize("state", ["partial_set", "partial_unset", "foreign_value", "foreign_absence"])
 def test_native_secret_partial_proof_accepts_only_exact_prior_or_candidate_values_and_presence(state):
     platform = Supabase()
-    first, second, third = release.MANAGED_SECRETS
+    first, second, third = release.MANAGED_SECRETS[:3]
     prior_values = {first: "old-first", second: "old-second"}
     candidate_values = {first: "new-first", third: "new-third"}
     if state == "partial_unset":
