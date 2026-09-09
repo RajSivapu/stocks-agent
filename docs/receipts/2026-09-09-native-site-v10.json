@@ -1,0 +1,321 @@
+{
+  "format": "stocks-native-sites-ui-release-v1",
+  "captured_at": "2026-09-09T14:52:09Z",
+  "trust_domain": "codex-native-sites-connector",
+  "release_scope": {
+    "kind": "owner-site-market-wide-v1-candidate",
+    "changed_components": [
+      "owner_site"
+    ],
+    "unchanged_components": [
+      "production_database",
+      "supabase_auth",
+      "gateway_edge_function",
+      "dashboard_api_edge_function",
+      "telegram_edge_function",
+      "scheduled_workflows"
+    ],
+    "scheduled_runs_started": 0,
+    "telegram_test_messages_sent": 0,
+    "secret_rotations": 0,
+    "backend_release_reference": {
+      "workflow_run_id": 34365299574,
+      "deployment_id": 6352398867,
+      "candidate_sha": "7408b4f874afeb489ea8cd7cf7e7c487eeea3de1"
+    },
+    "pull_requests": [
+      59
+    ],
+    "reviewed_head_sha": "e4029bbf4dab36aeb49ea1890f3954de191d8854",
+    "exact_main_ci_runs": [
+      34364808638
+    ]
+  },
+  "site": {
+    "project_id": "appgprj_6a9a35fb60648191b30e2bb973a2347f",
+    "status": "active",
+    "live_url": "https://personal-stock-agent.rupesh-sivapu.chatgpt.site",
+    "latest_version_number": 10,
+    "current_user_role": "owner",
+    "access_mode": "custom",
+    "allowed_owner_count": 1,
+    "allowed_user_count": 1,
+    "external_visitor_count": 0,
+    "allowed_group_count": 0,
+    "custom_domain_count": 0,
+    "anonymous_http_status": 401
+  },
+  "active_version": {
+    "id": "appgprj_6a9a35fb60648191b30e2bb973a2347f~appgver_af2e3039ff80819183d6ff75905f34e4",
+    "version_number": 10,
+    "source_commit_sha": "7408b4f874afeb489ea8cd7cf7e7c487eeea3de1",
+    "archive_format": "tar",
+    "archive_content_hash": "sha256:bf9026ce4e804e9b74e9b5bea7dc4afbe682dda6cc80e1c3cb5b266ba84c0fe0",
+    "local_archive_sha256": "6e70d5857bace6cb469efa6f5f667052ed74df95ff04faa45517411ec02f53b7",
+    "file_count": 16,
+    "size_bytes": 542720
+  },
+  "active_deployment": {
+    "id": "appgdep_6aa17196c48481918dbc6f7f32ff9ad7",
+    "version_id": "appgprj_6a9a35fb60648191b30e2bb973a2347f~appgver_af2e3039ff80819183d6ff75905f34e4",
+    "type": "publish",
+    "status": "succeeded",
+    "url": "https://personal-stock-agent.rupesh-sivapu.chatgpt.site",
+    "env_set_revision": 0,
+    "updated_at": "2026-09-09T14:48:00.314783+00:00"
+  },
+  "rollback_version": {
+    "id": "appgprj_6a9a35fb60648191b30e2bb973a2347f~appgver_21e646b56cec81918f65833c784e8535",
+    "version_number": 9,
+    "source_commit_sha": "e2f9d74495fa2ff8ed02e72b12d09755918bb9f9"
+  },
+  "build": {
+    "status": "verified",
+    "candidate_sha": "7408b4f874afeb489ea8cd7cf7e7c487eeea3de1",
+    "site_origin": "https://personal-stock-agent.rupesh-sivapu.chatgpt.site",
+    "api_origin": "https://hlxpxbxhqctwsqizwjjy.supabase.co/functions/v1/owner-dashboard-api",
+    "static_directory": "dist",
+    "file_count": 15,
+    "build_sha256": "10c84c2b9aa9927deed8a2b84e9e900bd503c51e91c730123a10404179919ef3",
+    "matches_protected_backend_release_record": true,
+    "asset_hashes": [
+      {
+        "file": "_headers",
+        "sha256": "23024334411c251734b729dc3f3898000b5d9f49a79b9ba75cac61f71e973118"
+      },
+      {
+        "file": "assets/IdeasPage-BgDzfV2F.js",
+        "sha256": "9dfb59532aa955a73cebc7e50defa2bdd64d610f78623d77605fef751d42a17c"
+      },
+      {
+        "file": "assets/IntelligencePage-BrbbW_SV.js",
+        "sha256": "4b07aa97b3c76d103c804e05aae3d16a5a2da470eb0a0e4ee12766f53f0a45bf"
+      },
+      {
+        "file": "assets/PortfolioPage-Ci23k1Qq.js",
+        "sha256": "99c800ab57cfd2259f474dde120762ad3d17c48621a20b75d8d189466be14c3c"
+      },
+      {
+        "file": "assets/ReceiptTimeline-CNJ-_sSk.js",
+        "sha256": "c6e3ffb6e5311c0a18598b0c7acbe1d911f31308488032f21dbf863e65f5b72d"
+      },
+      {
+        "file": "assets/ReportDetailPage-CLzLvi2y.js",
+        "sha256": "6f2be07946d7255bd37d18887bdd02287c76cc21a3d227bcb2b5549b57ad0e14"
+      },
+      {
+        "file": "assets/ReportsPage-Ck5Jtb8f.js",
+        "sha256": "9658d4c87216126967dac7e18b8c3bf77099b0f86cea6d751989bb471cfe102f"
+      },
+      {
+        "file": "assets/RunDetailPage-CLsoT47t.js",
+        "sha256": "d709252141b52b231f1215b107e145923b36fbe98935dfb599e6867020b28581"
+      },
+      {
+        "file": "assets/SafeSourceLink-C9OngXTu.js",
+        "sha256": "d1a660c53ea0b08e3a499343e708525faf119c63cdc8bc7a59f4039b85e7083d"
+      },
+      {
+        "file": "assets/SystemPage-BDMnrhz6.js",
+        "sha256": "057144f31fe8ab66053d44af07cd8dfb736497ec69988d007c6c0a3335583f12"
+      },
+      {
+        "file": "assets/ideaVersions-BkLbKlnd.js",
+        "sha256": "5d38118380b9c56a6ceffef54653d8200d4813160b48c03ebfeb0b2309a76754"
+      },
+      {
+        "file": "assets/index-BFvloUJv.css",
+        "sha256": "5c2556816aaea5fdc76990a32d71b7195cc875b6227544a6b2937aed118c6ea6"
+      },
+      {
+        "file": "assets/index-Bmz6zZv1.js",
+        "sha256": "cb6011ee5bb7273f974665bcd789057eedd6c8155f73848f68ede930987bf8b0"
+      },
+      {
+        "file": "index.html",
+        "sha256": "ac11ea2fb0197aa871827a5bfbe7880e84009148a1a5694d066503fb5bc25273"
+      },
+      {
+        "file": "theme-bootstrap.js",
+        "sha256": "6fa252c83c9f670c11d7cce88dc803ec14f0dd40c12fd4a3e32c96232e0df921"
+      }
+    ]
+  },
+  "live_application_assets_match_built": true,
+  "live_bundle": {
+    "served_file_count": 14,
+    "authenticated_http_200_count": 14,
+    "byte_identical_file_count": 13,
+    "host_transformed_html": {
+      "transform": "cloudflare_request_specific_challenge_script",
+      "local_html_sha256": "ac11ea2fb0197aa871827a5bfbe7880e84009148a1a5694d066503fb5bc25273",
+      "raw_live_html_sha256": "d2453edcebc3318a1f5ca4d2944cab47cc07e39c94f42b8987770bc9238ee17e",
+      "challenge_script_count": 1,
+      "normalized_live_html_sha256": "ac11ea2fb0197aa871827a5bfbe7880e84009148a1a5694d066503fb5bc25273",
+      "normalized_matches_built": true
+    },
+    "project_ref_present": true,
+    "api_url_present": true,
+    "supabase_project_ref": "hlxpxbxhqctwsqizwjjy",
+    "dashboard_api_url": "https://hlxpxbxhqctwsqizwjjy.supabase.co/functions/v1/owner-dashboard-api",
+    "files": [
+      {
+        "file": "assets/IdeasPage-BgDzfV2F.js",
+        "url": "https://personal-stock-agent.rupesh-sivapu.chatgpt.site/assets/IdeasPage-BgDzfV2F.js",
+        "http_status": 200,
+        "bytes": 5252,
+        "live_sha256": "9dfb59532aa955a73cebc7e50defa2bdd64d610f78623d77605fef751d42a17c",
+        "built_sha256": "9dfb59532aa955a73cebc7e50defa2bdd64d610f78623d77605fef751d42a17c",
+        "matches_built": true
+      },
+      {
+        "file": "assets/IntelligencePage-BrbbW_SV.js",
+        "url": "https://personal-stock-agent.rupesh-sivapu.chatgpt.site/assets/IntelligencePage-BrbbW_SV.js",
+        "http_status": 200,
+        "bytes": 6975,
+        "live_sha256": "4b07aa97b3c76d103c804e05aae3d16a5a2da470eb0a0e4ee12766f53f0a45bf",
+        "built_sha256": "4b07aa97b3c76d103c804e05aae3d16a5a2da470eb0a0e4ee12766f53f0a45bf",
+        "matches_built": true
+      },
+      {
+        "file": "assets/PortfolioPage-Ci23k1Qq.js",
+        "url": "https://personal-stock-agent.rupesh-sivapu.chatgpt.site/assets/PortfolioPage-Ci23k1Qq.js",
+        "http_status": 200,
+        "bytes": 9748,
+        "live_sha256": "99c800ab57cfd2259f474dde120762ad3d17c48621a20b75d8d189466be14c3c",
+        "built_sha256": "99c800ab57cfd2259f474dde120762ad3d17c48621a20b75d8d189466be14c3c",
+        "matches_built": true
+      },
+      {
+        "file": "assets/ReceiptTimeline-CNJ-_sSk.js",
+        "url": "https://personal-stock-agent.rupesh-sivapu.chatgpt.site/assets/ReceiptTimeline-CNJ-_sSk.js",
+        "http_status": 200,
+        "bytes": 451,
+        "live_sha256": "c6e3ffb6e5311c0a18598b0c7acbe1d911f31308488032f21dbf863e65f5b72d",
+        "built_sha256": "c6e3ffb6e5311c0a18598b0c7acbe1d911f31308488032f21dbf863e65f5b72d",
+        "matches_built": true
+      },
+      {
+        "file": "assets/ReportDetailPage-CLzLvi2y.js",
+        "url": "https://personal-stock-agent.rupesh-sivapu.chatgpt.site/assets/ReportDetailPage-CLzLvi2y.js",
+        "http_status": 200,
+        "bytes": 2432,
+        "live_sha256": "6f2be07946d7255bd37d18887bdd02287c76cc21a3d227bcb2b5549b57ad0e14",
+        "built_sha256": "6f2be07946d7255bd37d18887bdd02287c76cc21a3d227bcb2b5549b57ad0e14",
+        "matches_built": true
+      },
+      {
+        "file": "assets/ReportsPage-Ck5Jtb8f.js",
+        "url": "https://personal-stock-agent.rupesh-sivapu.chatgpt.site/assets/ReportsPage-Ck5Jtb8f.js",
+        "http_status": 200,
+        "bytes": 2123,
+        "live_sha256": "9658d4c87216126967dac7e18b8c3bf77099b0f86cea6d751989bb471cfe102f",
+        "built_sha256": "9658d4c87216126967dac7e18b8c3bf77099b0f86cea6d751989bb471cfe102f",
+        "matches_built": true
+      },
+      {
+        "file": "assets/RunDetailPage-CLsoT47t.js",
+        "url": "https://personal-stock-agent.rupesh-sivapu.chatgpt.site/assets/RunDetailPage-CLsoT47t.js",
+        "http_status": 200,
+        "bytes": 1386,
+        "live_sha256": "d709252141b52b231f1215b107e145923b36fbe98935dfb599e6867020b28581",
+        "built_sha256": "d709252141b52b231f1215b107e145923b36fbe98935dfb599e6867020b28581",
+        "matches_built": true
+      },
+      {
+        "file": "assets/SafeSourceLink-C9OngXTu.js",
+        "url": "https://personal-stock-agent.rupesh-sivapu.chatgpt.site/assets/SafeSourceLink-C9OngXTu.js",
+        "http_status": 200,
+        "bytes": 272,
+        "live_sha256": "d1a660c53ea0b08e3a499343e708525faf119c63cdc8bc7a59f4039b85e7083d",
+        "built_sha256": "d1a660c53ea0b08e3a499343e708525faf119c63cdc8bc7a59f4039b85e7083d",
+        "matches_built": true
+      },
+      {
+        "file": "assets/SystemPage-BDMnrhz6.js",
+        "url": "https://personal-stock-agent.rupesh-sivapu.chatgpt.site/assets/SystemPage-BDMnrhz6.js",
+        "http_status": 200,
+        "bytes": 9996,
+        "live_sha256": "057144f31fe8ab66053d44af07cd8dfb736497ec69988d007c6c0a3335583f12",
+        "built_sha256": "057144f31fe8ab66053d44af07cd8dfb736497ec69988d007c6c0a3335583f12",
+        "matches_built": true
+      },
+      {
+        "file": "assets/ideaVersions-BkLbKlnd.js",
+        "url": "https://personal-stock-agent.rupesh-sivapu.chatgpt.site/assets/ideaVersions-BkLbKlnd.js",
+        "http_status": 200,
+        "bytes": 318,
+        "live_sha256": "5d38118380b9c56a6ceffef54653d8200d4813160b48c03ebfeb0b2309a76754",
+        "built_sha256": "5d38118380b9c56a6ceffef54653d8200d4813160b48c03ebfeb0b2309a76754",
+        "matches_built": true
+      },
+      {
+        "file": "assets/index-BFvloUJv.css",
+        "url": "https://personal-stock-agent.rupesh-sivapu.chatgpt.site/assets/index-BFvloUJv.css",
+        "http_status": 200,
+        "bytes": 15480,
+        "live_sha256": "5c2556816aaea5fdc76990a32d71b7195cc875b6227544a6b2937aed118c6ea6",
+        "built_sha256": "5c2556816aaea5fdc76990a32d71b7195cc875b6227544a6b2937aed118c6ea6",
+        "matches_built": true
+      },
+      {
+        "file": "assets/index-Bmz6zZv1.js",
+        "url": "https://personal-stock-agent.rupesh-sivapu.chatgpt.site/assets/index-Bmz6zZv1.js",
+        "http_status": 200,
+        "bytes": 472230,
+        "live_sha256": "cb6011ee5bb7273f974665bcd789057eedd6c8155f73848f68ede930987bf8b0",
+        "built_sha256": "cb6011ee5bb7273f974665bcd789057eedd6c8155f73848f68ede930987bf8b0",
+        "matches_built": true
+      },
+      {
+        "file": "index.html",
+        "url": "https://personal-stock-agent.rupesh-sivapu.chatgpt.site/index.html",
+        "http_status": 200,
+        "bytes": 1465,
+        "live_sha256": "d2453edcebc3318a1f5ca4d2944cab47cc07e39c94f42b8987770bc9238ee17e",
+        "built_sha256": "ac11ea2fb0197aa871827a5bfbe7880e84009148a1a5694d066503fb5bc25273",
+        "matches_built_after_host_normalization": true
+      },
+      {
+        "file": "theme-bootstrap.js",
+        "url": "https://personal-stock-agent.rupesh-sivapu.chatgpt.site/theme-bootstrap.js",
+        "http_status": 200,
+        "bytes": 293,
+        "live_sha256": "6fa252c83c9f670c11d7cce88dc803ec14f0dd40c12fd4a3e32c96232e0df921",
+        "built_sha256": "6fa252c83c9f670c11d7cce88dc803ec14f0dd40c12fd4a3e32c96232e0df921",
+        "matches_built": true
+      }
+    ]
+  },
+  "verification": {
+    "exact_main_ci_run": 34364808638,
+    "exact_main_sha": "7408b4f874afeb489ea8cd7cf7e7c487eeea3de1",
+    "exact_main_ci_status": "success",
+    "protected_release_run": 34365299574,
+    "source_reconciliation_status": "verified",
+    "source_reconciliation_claims_checked": 11,
+    "reviews": [
+      {
+        "model": "GPT-5.6 Sol",
+        "reasoning_effort": "xhigh",
+        "decision": "clean"
+      },
+      {
+        "model": "GPT-6 Astra",
+        "decision": "clean"
+      }
+    ],
+    "local_suite": {
+      "python_passed": 1875,
+      "python_skipped": 3,
+      "credentialed_database_tests_deselected": 4,
+      "node_passed": 71,
+      "deno_passed": 337,
+      "dashboard_contract_passed": 7,
+      "web_unit_passed": 53,
+      "playwright_passed": 24,
+      "playwright_skipped": 1,
+      "total_explicit_passes": 2367
+    }
+  }
+}
