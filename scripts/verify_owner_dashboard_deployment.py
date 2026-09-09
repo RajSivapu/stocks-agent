@@ -47,6 +47,16 @@ BOUNDARIES = {
     "friend_invitations": "disabled",
     "brokerage_authority": "none",
 }
+INTELLIGENCE_BOUNDARIES = {
+    "research_only": True,
+    "execution_disabled": True,
+    "valuation_unavailable": True,
+}
+ROUTE_BOUNDARIES = {
+    "/v1/today": BOUNDARIES,
+    "/v1/system": BOUNDARIES,
+    "/v1/intelligence": INTELLIGENCE_BOUNDARIES,
+}
 RELEASE_FUNCTIONS = ("market-briefing-gateway", "owner-dashboard-api", "telegram-portfolio")
 RUNTIME_ROLE = "stock_agent_dashboard_runtime"
 UUID_PATTERN = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$", re.IGNORECASE)
@@ -757,10 +767,20 @@ def validate_api_boundary(api_url: str, origin: str) -> tuple[str, str]:
     return api_url, origin
 
 
+def _boundary_is_exact(actual: object, expected: Mapping[str, object]) -> bool:
+    return (
+        isinstance(actual, dict)
+        and set(actual) == set(expected)
+        and all(
+            type(actual[key]) is type(expected_value) and actual[key] == expected_value
+            for key, expected_value in expected.items()
+        )
+    )
+
+
 def validate_owner_payloads(payloads: Mapping[str, Mapping[str, object]]) -> dict[str, object]:
     if set(payloads) != set(CANARY_ROUTES):
         raise RuntimeError("owner canary route set is incomplete")
-    observed_boundaries = []
     for route, payload in payloads.items():
         if payload.get("contract_version") != 1:
             raise RuntimeError(f"{route} contract receipt is invalid")
@@ -769,13 +789,14 @@ def validate_owner_payloads(payloads: Mapping[str, Mapping[str, object]]) -> dic
         if "data_as_of" not in payload or not isinstance(payload.get("data"), dict):
             raise RuntimeError(f"{route} receipt metadata is incomplete")
         data = payload["data"]
+        boundary_present = "boundaries" in data
         boundaries = data.get("boundaries")
-        if boundaries is not None:
-            if boundaries != BOUNDARIES:
-                raise RuntimeError("immutable product boundaries changed")
-            observed_boundaries.append(boundaries)
-    if not observed_boundaries:
-        raise RuntimeError("immutable product boundary receipt is missing")
+        expected_boundaries = ROUTE_BOUNDARIES.get(route)
+        if expected_boundaries is None:
+            if boundary_present:
+                raise RuntimeError(f"unexpected boundary receipt for {route}")
+        elif not boundary_present or not _boundary_is_exact(boundaries, expected_boundaries):
+            raise RuntimeError(f"immutable route boundary changed for {route}")
 
     today = payloads["/v1/today"]["data"]
     portfolio = today.get("portfolio") if isinstance(today, dict) else None
