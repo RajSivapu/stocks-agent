@@ -899,6 +899,159 @@ def test_native_recovery_replays_support_bearing_restore_after_lost_response(mon
     assert journal["components"][name]["restoration"]["version"] == "6"
 
 
+@pytest.mark.parametrize(
+    ("bound_deployment", "current_advance"),
+    [(True, 0), (True, 2), (False, 0), (False, 2)],
+)
+def test_native_recovery_accepts_gapped_or_advanced_exact_git_bound_candidate_version(
+    monkeypatch, bound_deployment, current_advance
+):
+    platform = Supabase()
+    name = "owner-dashboard-api"
+    platform.functions[name]["files"] = {
+        "index.ts": b'import "../../../packages/dashboard-contracts/src/index.ts";\n'
+    }
+    support = {
+        "packages/dashboard-contracts/src/index.ts": b"export const contract = 1;\n"
+    }
+    deploy_support = []
+
+    def runner(command, **options):
+        if command[3:5] == ["functions", "deploy"]:
+            deploy_support.append(
+                (Path(options["cwd"]) / "packages/dashboard-contracts/src/index.ts").is_file()
+            )
+        return platform(command, **options)
+
+    adapter = adapter_module().NativeReleaseAdapter(
+        {
+            "project_ref": "p" * 20,
+            "candidate_sha": "a" * 40,
+            "release_run_id": "123",
+            "release_run_attempt": "1",
+        },
+        runner=runner,
+        environment={"DASHBOARD_PRIOR_MANAGED_SECRETS_JSON": json.dumps(platform.secrets)},
+    )
+    prior = adapter.capture(name)
+    candidate = {
+        **copy.deepcopy(prior),
+        "identity": None,
+        "version": None,
+        "files": {"index.ts": base64.b64encode(b"candidate\n").decode()},
+    }
+    deployed = adapter.apply(name, candidate)
+    # The successful candidate upload itself may follow a consumed ordinal.
+    deployed["version"] = str(int(prior["version"]) + 2)
+    # Failed server-side recovery uploads may consume versions while leaving
+    # the last active candidate bytes and configuration unchanged.
+    platform.functions[name]["version"] = int(deployed["version"]) + current_advance
+    current = adapter.capture(name)
+    monkeypatch.setattr(
+        "scripts.function_runtime_manifest.git_function_recovery_support",
+        lambda *_args, **_kwargs: support,
+    )
+    monkeypatch.setattr(
+        "scripts.verify_personal_stock_agent_v1.git_function_runtime",
+        lambda *_args, **_kwargs: (
+            {"index.ts": b"candidate\n"},
+            copy.deepcopy(deployed["configuration"]),
+        ),
+    )
+    journal = single_component_journal(name, prior, candidate)
+    if bound_deployment:
+        journal["components"][name]["deployed"] = copy.deepcopy(deployed)
+    attested_candidate = deployed if bound_deployment else candidate
+
+    assert adapter.attest_recovery(name, prior, attested_candidate, current) is True
+    release.recover_components(adapter, journal, persist=lambda _value: None)
+
+    assert journal["status"] == "rolled_back"
+    assert adapter.capture(name)["files"] == prior["files"]
+    assert deploy_support == [False, True]
+
+
+@pytest.mark.parametrize(
+    "drift", [
+        "regressed_version",
+        "non_monotonic_deployed",
+        "git_unavailable",
+        "git_content",
+        "git_config",
+    ]
+)
+def test_native_advanced_function_attestation_requires_monotonic_git_bound_candidate(
+    monkeypatch, drift
+):
+    platform = Supabase()
+    name = "owner-dashboard-api"
+    adapter = native(platform)
+    prior = adapter.capture(name)
+    candidate = {
+        **copy.deepcopy(prior),
+        "identity": None,
+        "version": None,
+        "files": {"index.ts": base64.b64encode(b"candidate\n").decode()},
+    }
+    deployed = adapter.apply(name, candidate)
+    if drift == "non_monotonic_deployed":
+        deployed["version"] = prior["version"]
+    platform.functions[name]["version"] = (
+        int(deployed["version"]) - 1
+        if drift == "regressed_version"
+        else int(deployed["version"]) + (0 if drift == "non_monotonic_deployed" else 2)
+    )
+    current = adapter.capture(name)
+    git_files = {"index.ts": b"different\n" if drift == "git_content" else b"candidate\n"}
+    git_configuration = copy.deepcopy(deployed["configuration"])
+    if drift == "git_config":
+        git_configuration["verify_jwt"] = not git_configuration["verify_jwt"]
+    def git_runtime(*_args, **_kwargs):
+        if drift == "git_unavailable":
+            raise RuntimeError("missing candidate")
+        return git_files, git_configuration
+
+    monkeypatch.setattr(
+        "scripts.verify_personal_stock_agent_v1.git_function_runtime", git_runtime
+    )
+
+    assert adapter.attest_recovery(name, prior, deployed, current) is False
+
+
+@pytest.mark.parametrize("drift", ["git_unavailable", "git_content", "git_config"])
+def test_native_unbound_advanced_function_attestation_requires_exact_git_candidate(
+    monkeypatch, drift
+):
+    platform = Supabase()
+    name = "owner-dashboard-api"
+    adapter = native(platform)
+    prior = adapter.capture(name)
+    candidate = {
+        **copy.deepcopy(prior),
+        "identity": None,
+        "version": None,
+        "files": {"index.ts": base64.b64encode(b"candidate\n").decode()},
+    }
+    adapter.apply(name, candidate)
+    platform.functions[name]["version"] = int(prior["version"]) + 3
+    current = adapter.capture(name)
+    git_files = {"index.ts": b"different\n" if drift == "git_content" else b"candidate\n"}
+    git_configuration = copy.deepcopy(candidate["configuration"])
+    if drift == "git_config":
+        git_configuration["verify_jwt"] = not git_configuration["verify_jwt"]
+
+    def git_runtime(*_args, **_kwargs):
+        if drift == "git_unavailable":
+            raise RuntimeError("missing candidate")
+        return git_files, git_configuration
+
+    monkeypatch.setattr(
+        "scripts.verify_personal_stock_agent_v1.git_function_runtime", git_runtime
+    )
+
+    assert adapter.attest_recovery(name, prior, candidate, current) is False
+
+
 @pytest.mark.parametrize("drift", ["content", "identity", "version"])
 def test_native_function_attestation_rejects_non_candidate_drift(drift):
     platform = Supabase(); adapter = native(platform); name = release.FUNCTIONS[0]
