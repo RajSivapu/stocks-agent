@@ -10,6 +10,9 @@ from pathlib import Path
 import re
 
 from lib.release_baseline import expected_snapshot_tables
+from scripts.verify_owner_dashboard_deployment import (
+    validate_scheduled_readiness_receipt,
+)
 
 
 AUTH_CANARY_INVENTORY = {
@@ -68,6 +71,12 @@ def protected_canary_evidence(receipt: dict[str, object]) -> dict[str, object]:
         "run_relationships": "verified",
         "claims_checked": 11,
     }
+    try:
+        scheduled_readiness = validate_scheduled_readiness_receipt(
+            canary.get("scheduled_readiness") if isinstance(canary, dict) else None,
+        )
+    except RuntimeError as error:
+        raise RuntimeError("protected release canary receipt is incomplete") from error
     if (
         not isinstance(canary, dict)
         or canary.get("status") != "verified"
@@ -107,6 +116,7 @@ def protected_canary_evidence(receipt: dict[str, object]) -> dict[str, object]:
             "inventory_readback": copy.deepcopy(AUTH_CANARY_INVENTORY),
         },
         "source_reconciliation": copy.deepcopy(expected_source_reconciliation),
+        "scheduled_readiness": copy.deepcopy(scheduled_readiness),
     }
 
 
@@ -207,6 +217,7 @@ def main() -> int:
         "canaries": canary_evidence["canaries"],
         "auth_canary": canary_evidence["auth_canary"],
         "source_reconciliation": canary_evidence["source_reconciliation"],
+        "scheduled_readiness_at_release": canary_evidence["scheduled_readiness"],
         "deployment_outcome": "succeeded",
         "component_readbacks": component_readbacks,
         "backend_evidence_artifact": {"artifact_id": artifact_id,

@@ -328,6 +328,15 @@ def test_http_canary_uses_only_get_and_checks_anonymous_and_non_owner_denial():
     assert receipt["source_database_role"] == verify.RUNTIME_ROLE
     assert receipt["evidence_database_role"] == verify.EVIDENCE_ROLE
     assert receipt["evidence_reader_authority"] == EVIDENCE_AUTHORITY
+    assert receipt["scheduled_readiness"] == {
+        "status": "ready",
+        "overdue_phase_count": 0,
+        "oldest_deadline_at": None,
+        "latest_deadline_at": None,
+        "phases": [],
+        "receipt_sha256": verify.canonical_sha256([]),
+        "overdue_scheduled_phases": [],
+    }
     assert {method for method, _url, _headers in calls} == {"GET"}
 
 
@@ -442,6 +451,7 @@ def test_source_reconciliation_rejects_unsupported_run_send_policy_and_price_cla
     assert receipt["claims_checked"] == 11
     assert receipt["relationships_verified"] is True
     assert receipt["scheduled_chain"]["run_id"] == run_id
+    assert receipt["scheduled_readiness"]["status"] == "ready"
 
     for path, value in [
         (("dashboard", "run", "write_counts"), {"suggestions": 2}),
@@ -504,7 +514,7 @@ def test_source_reconciliation_requires_a_scoped_read_only_evidence_role(
         )
 
 
-def test_source_reconciliation_rejects_an_overdue_scheduled_phase():
+def test_source_reconciliation_retains_an_overdue_phase_as_pending_release_evidence():
     run_id = "6903b3cc-05b7-4f90-bbc2-7e80a3a59e22"
     payloads = {route: envelope({}) for route in verify.CANARY_ROUTES}
     payloads["/v1/today"] = envelope({"boundaries": verify.BOUNDARIES, "portfolio": {"data_as_of": None, "market_state": "unknown", "price_sources": [], "holdings": []}})
@@ -524,8 +534,35 @@ def test_source_reconciliation_rejects_an_overdue_scheduled_phase():
         },
         "evidence": v1_chain(run_id),
     }
-    with pytest.raises(RuntimeError, match="overdue scheduled phase"):
-        verify.reconcile_source_receipts(payloads, detail, source, run_id)
+    receipt = verify.reconcile_source_receipts(payloads, detail, source, run_id)
+    overdue = source["dashboard"]["overdue_scheduled_phases"]
+    assert receipt["status"] == "verified"
+    assert receipt["scheduled_readiness"] == {
+        "status": "pending",
+        "overdue_phase_count": 1,
+        "oldest_deadline_at": "2026-09-03T22:00:00.000Z",
+        "latest_deadline_at": "2026-09-03T22:00:00.000Z",
+        "phases": ["post-market"],
+        "receipt_sha256": verify.canonical_sha256(overdue),
+        "overdue_scheduled_phases": overdue,
+    }
+
+
+@pytest.mark.parametrize("overdue", [
+    [{"market_date": "2026-09-03", "phase": "unknown", "deadline_at": "2026-09-03T22:00:00.000Z"}],
+    [{"market_date": "2026-09-31", "phase": "post-market", "deadline_at": "2026-09-03T22:00:00.000Z"}],
+    [{"market_date": "2026-09-03", "phase": "post-market", "deadline_at": "not-a-time"}],
+    [{"market_date": "2026-09-03", "phase": "post-market", "deadline_at": "2026-09-03T22:00:00.000Z"}] * 2,
+    [
+        {"market_date": "2026-09-03", "phase": "post-market", "deadline_at": "2026-09-03T22:00:00.000Z"},
+        {"market_date": "2026-09-03", "phase": "post-market", "deadline_at": "2026-09-03T22:15:00.000Z"},
+    ],
+    [{"market_date": "2026-09-03", "phase": "post-market", "deadline_at": "2026-09-03T22:00:00.000Z"}]
+    * (verify.MAX_SCHEDULED_READINESS_ROWS + 1),
+])
+def test_scheduled_readiness_rejects_malformed_duplicate_or_oversized_rows(overdue):
+    with pytest.raises(RuntimeError, match="source receipt"):
+        verify.scheduled_readiness_receipt(overdue)
 
 
 def test_source_database_url_must_use_the_scoped_session_pooler_login():
@@ -711,6 +748,13 @@ def test_source_collector_keeps_visible_and_protected_queries_on_separate_read_o
     )
     assert all(relation not in dashboard_queries for relation in protected_relations)
     assert all(relation in evidence_queries for relation in protected_relations)
+    overdue_queries = [
+        (query, parameters) for query, parameters in connections[0].queries
+        if "read_overdue_scheduled_market_phases" in query
+    ]
+    assert len(overdue_queries) == 1
+    assert "LIMIT %s" in overdue_queries[0][0]
+    assert overdue_queries[0][1] == (verify.MAX_SCHEDULED_READINESS_ROWS + 1,)
     assert receipt["dashboard"]["database_user"] == verify.RUNTIME_ROLE
     assert receipt["evidence"]["evidence_database_user"] == verify.EVIDENCE_ROLE
     assert receipt["evidence"]["evidence_authority"] == EVIDENCE_AUTHORITY

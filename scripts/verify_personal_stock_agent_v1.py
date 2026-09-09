@@ -51,6 +51,9 @@ from scripts.export_recovery_bundle import (
     sha256,
 )
 from scripts.function_runtime_manifest import configured_function_runtime
+from scripts.verify_owner_dashboard_deployment import (
+    validate_scheduled_readiness_receipt,
+)
 
 MAX_SCHEDULED_RECEIPT_AGE_SECONDS = 7 * 24 * 60 * 60
 SHA = re.compile(r"[0-9a-f]{40}")
@@ -2082,6 +2085,9 @@ def verify_artifacts(repo: Path, static_root: Path, candidate: str, record: Mapp
         "protected recovery journal identity is incomplete")
     outcome = record.get("deployment_outcome")
     if outcome == "succeeded":
+        validate_scheduled_readiness_receipt(
+            record.get("scheduled_readiness_at_release"),
+        )
         require(record.get("evidence_classes", {}).get("protected_backend") == {
             "status": "verified", "candidate_sha": candidate},
             "successful protected backend evidence class is incomplete")

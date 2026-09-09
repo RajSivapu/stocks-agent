@@ -4,7 +4,7 @@
 from __future__ import annotations
 
 import argparse
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 import hashlib
 import json
 import os
@@ -60,6 +60,8 @@ ROUTE_BOUNDARIES = {
 RELEASE_FUNCTIONS = ("market-briefing-gateway", "owner-dashboard-api", "telegram-portfolio")
 RUNTIME_ROLE = "stock_agent_dashboard_runtime"
 EVIDENCE_ROLE = "stock_agent_release_reader_runtime"
+SCHEDULED_PHASES = {"pre-market", "intraday", "post-market"}
+MAX_SCHEDULED_READINESS_ROWS = 128
 UUID_PATTERN = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$", re.IGNORECASE)
 MIGRATION_NAME = re.compile(r"^(?P<version>\d{8}(?:\d{4})?)_[a-z0-9][a-z0-9_]*\.sql$")
 REPORT_PUBLICATION_SQL = """SELECT p.report_id::text AS report_id,r.run_id::text AS run_id,p.idempotency_key,
@@ -105,6 +107,75 @@ def canonical_sha256(value: object) -> str:
     return hashlib.sha256(
         json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode(),
     ).hexdigest()
+
+
+def scheduled_readiness_receipt(overdue: object) -> dict[str, object]:
+    """Bind overdue slot visibility without promoting it to deployment health."""
+    if not isinstance(overdue, list):
+        raise RuntimeError("dashboard claim differs from its source receipt")
+    if len(overdue) > MAX_SCHEDULED_READINESS_ROWS:
+        raise RuntimeError("dashboard claim differs from its source receipt")
+    rows: list[dict[str, str]] = []
+    identities: set[tuple[str, str]] = set()
+    for raw in overdue:
+        if not isinstance(raw, Mapping) or set(raw) != {
+            "market_date", "phase", "deadline_at",
+        }:
+            raise RuntimeError("dashboard claim differs from its source receipt")
+        market_date = raw.get("market_date")
+        phase = raw.get("phase")
+        deadline_at = raw.get("deadline_at")
+        try:
+            parsed_date = date.fromisoformat(market_date) if isinstance(market_date, str) else None
+        except ValueError:
+            parsed_date = None
+        normalized_deadline = normalize_receipt_timestamp(deadline_at)
+        if (
+            parsed_date is None
+            or parsed_date.isoformat() != market_date
+            or phase not in SCHEDULED_PHASES
+            or normalized_deadline != deadline_at
+        ):
+            raise RuntimeError("dashboard claim differs from its source receipt")
+        identity = (market_date, str(phase))
+        if identity in identities:
+            raise RuntimeError("dashboard claim differs from its source receipt")
+        identities.add(identity)
+        rows.append({
+            "market_date": market_date,
+            "phase": str(phase),
+            "deadline_at": str(deadline_at),
+        })
+    rows.sort(key=lambda row: (row["market_date"], row["phase"], row["deadline_at"]))
+    deadlines = sorted(row["deadline_at"] for row in rows)
+    return {
+        "status": "pending" if rows else "ready",
+        "overdue_phase_count": len(rows),
+        "oldest_deadline_at": deadlines[0] if deadlines else None,
+        "latest_deadline_at": deadlines[-1] if deadlines else None,
+        "phases": sorted({row["phase"] for row in rows}),
+        "receipt_sha256": canonical_sha256(rows),
+        "overdue_scheduled_phases": rows,
+    }
+
+
+def validate_scheduled_readiness_receipt(value: object) -> dict[str, object]:
+    """Validate the bounded release-time schedule observation."""
+    if not isinstance(value, Mapping) or set(value) != {
+        "status", "overdue_phase_count", "oldest_deadline_at",
+        "latest_deadline_at", "phases", "receipt_sha256",
+        "overdue_scheduled_phases",
+    }:
+        raise RuntimeError("scheduled readiness receipt is incomplete")
+    try:
+        expected = scheduled_readiness_receipt(
+            value.get("overdue_scheduled_phases"),
+        )
+    except RuntimeError as error:
+        raise RuntimeError("scheduled readiness receipt is incomplete") from error
+    if dict(value) != expected:
+        raise RuntimeError("scheduled readiness receipt is incomplete")
+    return expected
 
 
 def normalize_migration_statements(sql: str) -> list[str]:
@@ -545,7 +616,8 @@ def collect_source_receipts(
         )
         overdue_scheduled_phases = _fetch_all(
             connection,
-            "SELECT market_date::text AS market_date, phase, to_char(deadline_at AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS.MS\"Z\"') AS deadline_at FROM public.read_overdue_scheduled_market_phases()",
+            "SELECT market_date::text AS market_date, phase, to_char(deadline_at AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS.MS\"Z\"') AS deadline_at FROM public.read_overdue_scheduled_market_phases() LIMIT %s",
+            (MAX_SCHEDULED_READINESS_ROWS + 1,),
         )
 
     project_ref = (urlparse(api_url).hostname or "").split(".", 1)[0]
@@ -653,11 +725,9 @@ def reconcile_source_receipts(
     evidence = source.get("evidence")
     if not isinstance(dashboard, Mapping) or not isinstance(evidence, Mapping):
         fail()
-    overdue = dashboard.get("overdue_scheduled_phases")
-    if not isinstance(overdue, list):
-        fail()
-    if overdue:
-        raise RuntimeError("overdue scheduled phase is missing a completed or suppressed receipt")
+    scheduled_readiness = scheduled_readiness_receipt(
+        dashboard.get("overdue_scheduled_phases"),
+    )
 
     if dashboard.get("database_user") != RUNTIME_ROLE or dashboard.get("transaction_read_only") != "on":
         fail()
@@ -837,6 +907,7 @@ def reconcile_source_receipts(
                    "reports": len(chains["reports"]), "report_publications": len(chains["report_publications"])},
         "relationships_verified": True, "hashes_verified": True,
         "canonical_records": evidence.get("canonical_records"),
+        "scheduled_readiness": scheduled_readiness,
         "scheduled_chain": {
             "run_id": run_id,
             "intelligence_run_id": chains["intelligence_runs"][0]["id"],
@@ -1055,6 +1126,7 @@ def run_http_canary(
         "source_reconciliation_receipt": source_receipt[
             "source_reconciliation_receipt"
         ],
+        "scheduled_readiness": source_receipt["scheduled_readiness"],
         "friend_invitations": "disabled",
         "brokerage_authority": "none",
     }

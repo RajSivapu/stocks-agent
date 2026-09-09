@@ -28,6 +28,20 @@ SOURCE_RECONCILIATION = {
     "run_relationships": "verified",
     "claims_checked": 11,
 }
+OVERDUE_SCHEDULED_PHASES = [{
+    "market_date": "2026-09-09", "phase": "pre-market",
+    "deadline_at": "2026-09-09T11:45:00.000Z",
+}]
+SCHEDULED_READINESS = {
+    "status": "pending", "overdue_phase_count": 1,
+    "oldest_deadline_at": "2026-09-09T11:45:00.000Z",
+    "latest_deadline_at": "2026-09-09T11:45:00.000Z",
+    "phases": ["pre-market"],
+    "receipt_sha256": hashlib.sha256(json.dumps(
+        OVERDUE_SCHEDULED_PHASES, sort_keys=True, separators=(",", ":"),
+    ).encode()).hexdigest(),
+    "overdue_scheduled_phases": OVERDUE_SCHEDULED_PHASES,
+}
 
 
 def test_protected_release_and_recovery_are_valid_workflow_yaml():
@@ -417,6 +431,7 @@ def test_release_record_keeps_release_and_later_scheduled_receipts_distinct():
             "evidence_database_role": "stock_agent_release_reader_runtime",
             "evidence_reader_authority": copy.deepcopy(EVIDENCE_AUTHORITY),
             "source_reconciliation_receipt": copy.deepcopy(SOURCE_RECONCILIATION),
+            "scheduled_readiness": copy.deepcopy(SCHEDULED_READINESS),
             "financial_write_routes": 0,
             "brokerage_authority": "none",
             "friend_invitations": "disabled",
@@ -458,6 +473,7 @@ def test_release_record_keeps_release_and_later_scheduled_receipts_distinct():
     "auth_inventory_preflight", "auth_inventory_readback",
     "evidence_database_role", "evidence_reader_authority",
     "source_reconciliation_receipt",
+    "scheduled_readiness",
 ])
 def test_release_record_rejects_missing_owner_only_canary_evidence(missing):
     from scripts import write_protected_release_record as writer
@@ -472,6 +488,7 @@ def test_release_record_rejects_missing_owner_only_canary_evidence(missing):
         "evidence_database_role": "stock_agent_release_reader_runtime",
         "evidence_reader_authority": copy.deepcopy(EVIDENCE_AUTHORITY),
         "source_reconciliation_receipt": copy.deepcopy(SOURCE_RECONCILIATION),
+        "scheduled_readiness": copy.deepcopy(SCHEDULED_READINESS),
         "financial_write_routes": 0, "brokerage_authority": "none",
         "friend_invitations": "disabled", "owner_route_count": 10,
         "unauthenticated_status": 401, "non_owner_status": 403,
@@ -498,6 +515,7 @@ def test_release_record_rejects_the_wrong_evidence_database_role():
         "evidence_database_role": "stock_agent_dashboard_runtime",
         "evidence_reader_authority": copy.deepcopy(EVIDENCE_AUTHORITY),
         "source_reconciliation_receipt": copy.deepcopy(SOURCE_RECONCILIATION),
+        "scheduled_readiness": copy.deepcopy(SCHEDULED_READINESS),
         "financial_write_routes": 0, "brokerage_authority": "none",
         "friend_invitations": "disabled", "owner_route_count": 10,
         "unauthenticated_status": 401, "non_owner_status": 403,
@@ -557,6 +575,7 @@ def test_release_record_writer_emits_backend_only_evidence_contract(tmp_path, mo
             "evidence_database_role": "stock_agent_release_reader_runtime",
             "evidence_reader_authority": copy.deepcopy(EVIDENCE_AUTHORITY),
             "source_reconciliation_receipt": copy.deepcopy(SOURCE_RECONCILIATION),
+            "scheduled_readiness": copy.deepcopy(SCHEDULED_READINESS),
             "financial_write_routes": 0, "brokerage_authority": "none",
             "friend_invitations": "disabled", "owner_route_count": 10,
             "unauthenticated_status": 401, "non_owner_status": 403,
@@ -606,6 +625,7 @@ def test_release_record_writer_emits_backend_only_evidence_contract(tmp_path, mo
             "privileged_owner_count": 1, "denied_canary_count": 1},
     }
     assert record["source_reconciliation"] == SOURCE_RECONCILIATION
+    assert record["scheduled_readiness_at_release"] == SCHEDULED_READINESS
     assert record["evidence_classes"]["owner_site"]["status"] == "pending"
     assert all(row["artifact_id"] == 60 for row in record["component_readbacks"])
 

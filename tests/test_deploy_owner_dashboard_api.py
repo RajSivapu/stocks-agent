@@ -38,6 +38,12 @@ SOURCE_RECONCILIATION = {
     "run_relationships": "verified",
     "claims_checked": 11,
 }
+SCHEDULED_READINESS = {
+    "status": "ready", "overdue_phase_count": 0,
+    "oldest_deadline_at": None, "latest_deadline_at": None,
+    "phases": [], "receipt_sha256": hashlib.sha256(b"[]").hexdigest(),
+    "overdue_scheduled_phases": [],
+}
 ADMIN_URL = (
     "postgresql://postgres:admin-password-longer-than-24@"
     "db.hlxpxbxhqctwsqizwjjy.supabase.co:5432/postgres?sslmode=require"
@@ -1248,6 +1254,7 @@ def test_post_deploy_canary_keeps_runtime_database_url_and_auth_token_out_of_rec
             "evidence_database_role": "stock_agent_release_reader_runtime",
             "evidence_reader_authority": dict(EVIDENCE_AUTHORITY),
             "source_reconciliation_receipt": SOURCE_RECONCILIATION,
+            "scheduled_readiness": SCHEDULED_READINESS,
         }
 
     def session_revoker(project_url, token, publishable_key):
@@ -1269,6 +1276,7 @@ def test_post_deploy_canary_keeps_runtime_database_url_and_auth_token_out_of_rec
     assert "non-owner-access-token" not in str(receipt)
     assert receipt["owner_session"] == "revoked"
     assert receipt["non_owner_session"] == "revoked"
+    assert receipt["scheduled_readiness"] == SCHEDULED_READINESS
     assert observed["source"][0] == DATABASE_URL
     assert observed["source"][1] == EVIDENCE_DATABASE_URL
     assert observed["canary"][3] == "non-owner-access-token"
@@ -1315,6 +1323,30 @@ def test_post_deploy_canary_rejects_an_incomplete_receipt():
             ),
             source_collector=lambda *_args: {},
             canary=lambda *_args, **_kwargs: {"status": "verified", "source_reconciliation": "missing"},
+            session_revoker=lambda *_args: None,
+        )
+
+
+def test_post_deploy_canary_requires_a_bounded_scheduled_readiness_receipt():
+    with pytest.raises(RuntimeError, match="scheduled readiness"):
+        deploy.run_post_deploy_canary(
+            PROJECT_REF, ORIGIN, DATABASE_URL, EVIDENCE_DATABASE_URL,
+            "owner@example.com",
+            f"release-canary-{'a' * 32}@example.com",
+            "sb_secret_" + "s" * 40, "sb_publishable_" + "p" * 32,
+            token_factory=lambda _url, email, *_args: (
+                "owner-token" if email == "owner@example.com" else "non-owner-token"
+            ),
+            source_collector=lambda *_args: {},
+            canary=lambda *_args, **_kwargs: {
+                "status": "verified", "source_reconciliation": "verified",
+                "financial_write_routes": 0, "brokerage_authority": "none",
+                "friend_invitations": "disabled", "non_owner_status": 403,
+                "source_database_role": "stock_agent_dashboard_runtime",
+                "evidence_database_role": "stock_agent_release_reader_runtime",
+                "evidence_reader_authority": dict(EVIDENCE_AUTHORITY),
+                "source_reconciliation_receipt": SOURCE_RECONCILIATION,
+            },
             session_revoker=lambda *_args: None,
         )
 

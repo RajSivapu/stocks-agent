@@ -1631,6 +1631,17 @@ def release(tmp_path):
             "run_relationships": "verified",
             "claims_checked": 11,
         },
+        "scheduled_readiness_at_release": {
+            "status": "pending", "overdue_phase_count": 1,
+            "oldest_deadline_at": "2026-09-05T21:00:00.000Z",
+            "latest_deadline_at": "2026-09-05T21:00:00.000Z",
+            "phases": ["post-market"],
+            "receipt_sha256": "adcb3593915841762712e6801a430a5204bf9990cbc409d85573737bf963ccc8",
+            "overdue_scheduled_phases": [{
+                "market_date": "2026-09-05", "phase": "post-market",
+                "deadline_at": "2026-09-05T21:00:00.000Z",
+            }],
+        },
         "auth_canary": {
             "owner_session": "revoked",
             "non_owner_session": "revoked",
