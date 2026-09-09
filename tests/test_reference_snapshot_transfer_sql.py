@@ -34,6 +34,7 @@ CURSOR_CONTEXT = ROOT / "sql" / "migrations" / "20261007_discovery_cursor_contex
 OFFICIAL_COMPLETION = ROOT / "sql" / "migrations" / "20261008_official_source_completion_contract.sql"
 ISSUER_NAMES = ROOT / "sql" / "migrations" / "20261009_reference_issuer_names.sql"
 ENRICHMENT = ROOT / "sql" / "migrations" / "20261010_bounded_adaptive_enrichment.sql"
+RESTART = ROOT / "sql" / "migrations" / "20261020_reference_transfer_restart.sql"
 
 TABLES = (
     "market_reference_chunk_receipts",
@@ -137,6 +138,7 @@ def test_new_schema_tail_is_additive_and_prior_migrations_are_unchanged():
     assert CURSOR_CONTEXT.read_text() in schema
     assert OFFICIAL_COMPLETION.read_text() in schema
     assert ENRICHMENT.read_text() in schema
+    assert RESTART.read_text() in schema
     import subprocess
 
     prior_at_base = subprocess.run(
@@ -183,6 +185,7 @@ def transfer_db():
             connection.execute(PREVIOUS.read_text())
             connection.execute(MIGRATION.read_text())
             connection.execute(ISSUER_NAMES.read_text())
+            connection.execute(RESTART.read_text())
             yield connection
         finally:
             if connection is not None:
@@ -554,6 +557,112 @@ def test_server_receipts_enforce_exact_retry_and_384_call_transfer_budget(transf
     ).fetchone()
     assert count == 384
     assert total <= 48 * 1024 * 1024
+
+
+def test_reference_transfer_allows_a_bounded_resume_after_the_prior_attempt_window(transfer_db):
+    run_id = _run(transfer_db)
+    capability = "sec_company_tickers_resume"
+    _pin_predecessor(
+        transfer_db, run_id, capability, "2026-09-09T22:44:22.238Z",
+    )
+    transfer_db.execute(
+        "ALTER TABLE public.market_reference_transfer_requests "
+        "DISABLE TRIGGER market_reference_transfer_requests_append_only"
+    )
+    try:
+        transfer_db.execute(
+            "UPDATE public.market_reference_transfer_requests "
+            "SET created_at=clock_timestamp()-interval '10 minutes' "
+            "WHERE run_id=%s", (run_id,),
+        )
+    finally:
+        transfer_db.execute(
+            "ALTER TABLE public.market_reference_transfer_requests "
+            "ENABLE TRIGGER market_reference_transfer_requests_append_only"
+        )
+
+    page = _rpc(transfer_db, "read_market_discovery_reference", run_id, {
+        "capability_id": capability,
+        "binding_role": "predecessor",
+        "after_security_id": None,
+        "limit": 500,
+    })
+
+    assert page["complete"] is True
+    assert page["binding"]["reference_status"] == "reference_unavailable"
+
+
+def test_failed_reference_task_can_only_recover_from_its_exact_durable_current_pin(transfer_db):
+    run_id = _run(transfer_db)
+    capability = "sec_company_tickers_universe"
+    as_of = "2026-09-09T22:44:22.238Z"
+    _pin_predecessor(transfer_db, run_id, capability, as_of)
+    binding = _rpc(transfer_db, "pin_market_discovery_reference", run_id, {
+        "capability_id": capability,
+        "binding_role": "current",
+        "manifest_id": None,
+        "reference_status": "reference_stale",
+        "reference_as_of": as_of,
+    })
+    task_id = str(uuid.uuid4())
+    payload = {
+        "task": {
+            "id": task_id, "stage": "reference", "provider": "sec_edgar",
+            "capability_id": capability, "query_kind": "universe",
+            "query_hash": "a" * 64, "dependency_ids": [],
+            "requested_window": {
+                "start": "2026-09-09T20:00:00Z", "end": "2026-09-09T23:00:00Z",
+            },
+            "state": "planned", "attempt_count": 0, "request_budget": 1,
+            "result": {},
+        },
+        "exposure_facts": [], "theme_episode_revisions": [],
+        "research_nominations": [],
+    }
+    transfer_db.execute(
+        "SELECT public.checkpoint_market_discovery_stage(%s,%s)",
+        (run_id, Jsonb(payload)),
+    )
+    for state, result in (
+        ("attempting", {}),
+        ("failed", {"error_code": "REFERENCE_STAGE_FAILED"}),
+    ):
+        payload["task"].update(
+            state=state, attempt_count=1, result=result,
+        )
+        transfer_db.execute(
+            "SELECT public.checkpoint_market_discovery_stage(%s,%s)",
+            (run_id, Jsonb(payload)),
+        )
+
+    coverage = {
+        "coverage_status": "scope_not_guaranteed",
+        "reference_status": binding["reference_status"],
+        "reference_manifest_id": binding["manifest_id"],
+        "reference_age_seconds": binding["reference_age_seconds"],
+    }
+    payload["task"].update(
+        state="succeeded", result={"reference_coverage": {
+            **coverage, "reference_status": "healthy",
+        }},
+    )
+    with pytest.raises(
+        psycopg.errors.InvalidParameterValue,
+        match="invalid discovery task state transition",
+    ):
+        transfer_db.execute(
+            "SELECT public.checkpoint_market_discovery_stage(%s,%s)",
+            (run_id, Jsonb(payload)),
+        )
+
+    payload["task"]["result"] = {"reference_coverage": coverage}
+    receipt = transfer_db.execute(
+        "SELECT public.checkpoint_market_discovery_stage(%s,%s)",
+        (run_id, Jsonb(payload)),
+    ).fetchone()[0]
+
+    assert receipt["task"]["state"] == "succeeded"
+    assert receipt["task"]["result"]["reference_coverage"] == coverage
 
 
 def test_actual_gateway_repository_and_postgres_transfer_all_15000_members(transfer_db):

@@ -414,6 +414,33 @@ def test_failed_sec_refresh_asks_server_for_last_healthy_and_reports_unavailable
     }
 
 
+def test_reference_transfer_request_id_is_bound_to_the_exact_payload():
+    import scripts.collect_market_intelligence as collector
+
+    run_id = "11111111-1111-4111-8111-111111111111"
+    original = {
+        "capability_id": "sec_company_tickers_universe",
+        "binding_role": "predecessor",
+        "manifest_id": None,
+        "reference_status": "reference_stale",
+        "reference_as_of": "2026-09-09T22:44:22.238Z",
+    }
+    changed = {**original, "reference_as_of": "2026-09-09T22:54:53.000Z"}
+
+    first = collector._reference_request_id(
+        run_id, "pin_discovery_reference", original,
+    )
+    exact_replay = collector._reference_request_id(
+        run_id, "pin_discovery_reference", dict(reversed(list(original.items()))),
+    )
+    changed_retry = collector._reference_request_id(
+        run_id, "pin_discovery_reference", changed,
+    )
+
+    assert first == exact_replay
+    assert first != changed_retry
+
+
 def test_restart_hydrates_the_complete_current_v2_pin_without_contacting_sec():
     import scripts.collect_market_intelligence as collector
     from lib.intelligence.universe import build_reference_transfer, parse_sec_company_tickers
@@ -484,6 +511,43 @@ def test_restart_hydrates_the_complete_current_v2_pin_without_contacting_sec():
         collector._read_current_reference_snapshot(
             gateway_client, run_id, monotonic=lambda: 0.0,
         )
+
+
+def test_restart_recovers_unavailable_reference_coverage_from_the_durable_current_pin():
+    import scripts.collect_market_intelligence as collector
+
+    class Gateway:
+        def call(self, operation, payload, **_kwargs):
+            assert operation == "read_discovery_reference"
+            assert payload == {
+                "capability_id": "sec_company_tickers_universe",
+                "binding_role": "current",
+                "after_security_id": None,
+                "limit": 500,
+            }
+            return {"data": {"reference": {
+                "binding": {
+                    "binding_role": "current", "manifest_id": None,
+                    "reference_status": "reference_unavailable",
+                    "source_retrieved_at": None, "reference_age_seconds": None,
+                },
+                "manifest": None, "securities": [],
+                "next_after_security_id": None, "complete": True,
+            }}}
+
+    coverage, snapshot = collector._read_current_reference_binding(
+        Gateway(), "11111111-1111-4111-8111-111111111111",
+        monotonic=lambda: 0.0,
+    )
+
+    assert coverage == {
+        "coverage_status": "scope_not_guaranteed",
+        "reference_status": "reference_unavailable",
+        "reference_manifest_id": None,
+        "reference_age_seconds": None,
+        "execution_allowed": False,
+    }
+    assert snapshot is None
 
 
 def test_reference_stage_time_ceiling_includes_the_sec_refresh():

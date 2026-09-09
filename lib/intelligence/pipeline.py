@@ -297,6 +297,7 @@ class IntelligencePipeline:
         packet_limits: PacketLimits = PacketLimits(),
         cache: ResumableCollectionCache | None = None,
         reference_stage: object | None = None,
+        reference_recovery_stage: object | None = None,
         reference_snapshot_loader: object | None = None,
         discovery_plan: DiscoveryPlan | None = None,
         source_cursors: Mapping[str, SourceCursor] | None = None,
@@ -317,6 +318,9 @@ class IntelligencePipeline:
         if reference_stage is not None and not callable(reference_stage):
             raise ValueError("reference_stage must be callable")
         self.reference_stage = reference_stage
+        if reference_recovery_stage is not None and not callable(reference_recovery_stage):
+            raise ValueError("reference_recovery_stage must be callable")
+        self.reference_recovery_stage = reference_recovery_stage
         if reference_snapshot_loader is not None and not callable(reference_snapshot_loader):
             raise ValueError("reference_snapshot_loader must be callable")
         self.reference_snapshot_loader = reference_snapshot_loader
@@ -1597,6 +1601,26 @@ class IntelligencePipeline:
                     result={"error_code": "REFERENCE_OUTCOME_UNCERTAIN"},
                 )
                 persisted[task.task_id] = self._checkpoint_discovery_task(run_id, row)
+                self.context["reference_coverage"] = coverage
+                current = persisted[task.task_id]
+                state = "uncertain"
+                if self.reference_recovery_stage is None:
+                    continue
+            if state in {"failed", "uncertain"}:
+                if self.reference_recovery_stage is None:
+                    raise ValueError("failed reference task has no durable recovery reader")
+                coverage = _validated_reference_coverage(
+                    self.reference_recovery_stage(run_id, request)
+                )
+                terminal = self._task_row(
+                    task, state="succeeded",
+                    attempt_count=int(current.get("attempt_count") or 1),
+                    result={"reference_coverage": {
+                        key: value for key, value in coverage.items()
+                        if key != "execution_allowed"
+                    }},
+                )
+                persisted[task.task_id] = self._checkpoint_discovery_task(run_id, terminal)
                 self.context["reference_coverage"] = coverage
                 continue
             attempting = self._task_row(task, state="attempting", attempt_count=1, result={})

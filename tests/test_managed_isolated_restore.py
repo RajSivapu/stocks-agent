@@ -617,6 +617,10 @@ def test_actual_migration_retry_accepts_truthful_baseline_without_writing_histor
         item for item in deploy.candidate_migration_manifest()
         if item["path"] == "sql/migrations/20261019_active_intelligence_policy.sql"
     )
+    reference_transfer_restart = next(
+        item for item in deploy.candidate_migration_manifest()
+        if item["path"] == "sql/migrations/20261020_reference_transfer_restart.sql"
+    )
     queries = []
 
     def api(_method, _path, payload=None):
@@ -628,7 +632,7 @@ def test_actual_migration_retry_accepts_truthful_baseline_without_writing_histor
                     discovery, transfer, cursor, official, issuer_names, enrichment,
                     research_packet, theme_memory, runtime_completion, honest_empty, release_reader,
                     dashboard_authority, release_reader_authority, run_order,
-                    active_intelligence_policy,
+                    active_intelligence_policy, reference_transfer_restart,
             ]
         if query.startswith("SELECT version, statements"):
             return [{"version": "20261004", "statements": ["SELECT 1"]}]

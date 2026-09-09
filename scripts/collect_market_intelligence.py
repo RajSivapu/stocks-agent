@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import re
 import sys
@@ -43,6 +44,25 @@ MAX_REFERENCE_TRANSFER_BYTES = 48 * 1024 * 1024
 MAX_REFERENCE_RESPONSE_BYTES = 64 * 1024 * 1024
 MAX_REFERENCE_TRANSFER_SECONDS = 90.0
 _REFERENCE_CAPABILITY = "sec_company_tickers_universe"
+
+
+def _reference_request_id(
+    run_id: str,
+    operation: str,
+    payload: dict[str, object],
+) -> str:
+    """Bind a restart-safe request id to the exact reference operation payload."""
+    identity = json.dumps(
+        {"operation": operation, "payload": payload},
+        allow_nan=False,
+        ensure_ascii=False,
+        separators=(",", ":"),
+        sort_keys=True,
+    ).encode()
+    return str(uuid.uuid5(
+        uuid.UUID(run_id),
+        f"reference-transfer:{hashlib.sha256(identity).hexdigest()}",
+    ))
 
 
 class _ArgumentParser(argparse.ArgumentParser):
@@ -162,6 +182,12 @@ def main(argv: Sequence[str] | None = None, *, stdout: TextIO | None = None) -> 
                     snapshot_sink=lambda snapshot: installed_reference.__setitem__(run_id, snapshot),
                 )
 
+            def recover_reference(run_id, _pipeline_request):
+                coverage, snapshot = _read_current_reference_binding(gateway, run_id)
+                if snapshot is not None:
+                    installed_reference[run_id] = snapshot
+                return coverage
+
             def hydrate_reference(run_id):
                 return installed_reference.get(run_id) or _read_current_reference_snapshot(
                     gateway, run_id,
@@ -171,6 +197,8 @@ def main(argv: Sequence[str] | None = None, *, stdout: TextIO | None = None) -> 
                 gateway, _adapters(policy, now), context=context, packet_limits=policy.packet,
                 **planned,
                 reference_stage=persist_reference
+                if callable(getattr(gateway, "call", None)) else None,
+                reference_recovery_stage=recover_reference
                 if callable(getattr(gateway, "call", None)) else None,
                 reference_snapshot_loader=hydrate_reference
                 if callable(getattr(gateway, "call", None)) else None,
@@ -381,7 +409,7 @@ def _persist_reference_stage(
 
     def invoke(operation: str, payload: dict[str, object]) -> dict[str, object]:
         nonlocal call_count, byte_count, response_byte_count
-        request_id = str(uuid.uuid5(uuid.UUID(run_id), f"reference-transfer:{call_count}:{operation}"))
+        request_id = _reference_request_id(run_id, operation, payload)
         envelope = {
             "dry_run": False,
             "operation": operation,
@@ -589,30 +617,31 @@ def _persist_reference_stage(
     return coverage
 
 
-def _read_current_reference_snapshot(
+def _read_current_reference_binding(
     gateway_client,
     run_id: str,
     *,
     monotonic=time.monotonic,
-) -> ReferenceSnapshot | None:
-    """Hydrate the already-pinned snapshot on restart without an SEC request."""
+) -> tuple[dict[str, object], ReferenceSnapshot | None]:
+    """Read the durable current pin and its snapshot without contacting SEC."""
     started = monotonic()
     call_count = 0
     request_bytes = 0
     response_bytes = 0
     after = None
     manifest = None
+    pinned_binding = None
     rows: list[dict[str, object]] = []
     while True:
-        request_id = str(uuid.uuid5(
-            uuid.UUID(run_id), f"reference-hydration:{after or 'start'}"
-        ))
         payload = {
             "capability_id": _REFERENCE_CAPABILITY,
             "binding_role": "current",
             "after_security_id": after,
             "limit": 500,
         }
+        request_id = _reference_request_id(
+            run_id, "read_discovery_reference", payload,
+        )
         envelope = {
             "dry_run": False, "operation": "read_discovery_reference",
             "payload": payload, "request_id": request_id, "run_id": run_id,
@@ -650,10 +679,37 @@ def _read_current_reference_snapshot(
         if not isinstance(binding, dict) or binding.get("binding_role") != "current" \
                 or not isinstance(page_rows, list):
             raise ValueError("current reference page is invalid")
-        if binding.get("reference_status") == "reference_unavailable":
+        binding_identity = {
+            key: binding.get(key) for key in (
+                "binding_role", "manifest_id", "reference_status",
+                "source_retrieved_at", "reference_age_seconds",
+            )
+        }
+        if pinned_binding is None:
+            pinned_binding = binding_identity
+        elif pinned_binding != binding_identity:
+            raise ValueError("current reference binding changed while paging")
+        status = binding.get("reference_status")
+        manifest_id = binding.get("manifest_id")
+        age = binding.get("reference_age_seconds")
+        source_retrieved = binding.get("source_retrieved_at")
+        if status == "reference_unavailable":
             if page.get("manifest") is not None or page_rows or page.get("complete") is not True:
                 raise ValueError("current reference page is invalid")
-            return None
+            if manifest_id is not None or age is not None or source_retrieved is not None:
+                raise ValueError("current reference page is invalid")
+            return ({
+                "coverage_status": "scope_not_guaranteed",
+                "reference_status": status,
+                "reference_manifest_id": None,
+                "reference_age_seconds": None,
+                "execution_allowed": False,
+            }, None)
+        if status not in {"healthy", "reference_stale"} \
+                or not isinstance(manifest_id, str) \
+                or isinstance(age, bool) or not isinstance(age, int) or age < 0 \
+                or not isinstance(source_retrieved, str):
+            raise ValueError("current reference page is invalid")
         page_manifest = page.get("manifest")
         if not isinstance(page_manifest, dict):
             raise ValueError("current reference page is invalid")
@@ -674,10 +730,42 @@ def _read_current_reference_snapshot(
         if complete is True:
             if next_after is not None:
                 raise ValueError("current reference page is invalid")
-            return reference_snapshot_from_rows(manifest, rows)
+            try:
+                expires_at = (
+                    datetime.fromisoformat(source_retrieved.replace("Z", "+00:00"))
+                    + timedelta(hours=24)
+                ).astimezone(timezone.utc).isoformat(
+                    timespec="milliseconds"
+                ).replace("+00:00", "Z")
+            except ValueError:
+                raise ValueError("current reference page is invalid") from None
+            revision = manifest.get("revision")
+            if isinstance(revision, bool) or not isinstance(revision, int) or revision < 1:
+                raise ValueError("current reference page is invalid")
+            return ({
+                "coverage_status": "scope_not_guaranteed",
+                "reference_status": status,
+                "reference_manifest_id": manifest_id,
+                "reference_age_seconds": age,
+                "reference_revision": revision,
+                "reference_expires_at": expires_at,
+                "execution_allowed": False,
+            }, reference_snapshot_from_rows(manifest, rows))
         if complete is not False or not isinstance(next_after, str) or next_after == after:
             raise ValueError("current reference page is invalid")
         after = next_after
+
+
+def _read_current_reference_snapshot(
+    gateway_client,
+    run_id: str,
+    *,
+    monotonic=time.monotonic,
+) -> ReferenceSnapshot | None:
+    """Hydrate the already-pinned snapshot on restart without an SEC request."""
+    return _read_current_reference_binding(
+        gateway_client, run_id, monotonic=monotonic,
+    )[1]
 
 
 def _validate_reference_name_availability(
