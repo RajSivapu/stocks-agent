@@ -285,7 +285,7 @@ class NativeReleaseAdapter:
             known[key] = matches[0]
         self.known_secrets = known
 
-    def _write_role(self, candidate):
+    def _write_role(self, candidate, *, restoring=False):
         # Transactional PostgreSQL DDL: a failure before commit leaves role
         # state unchanged, and the shared engine proves that before recovery.
         with self._connection() as connection:
@@ -293,49 +293,93 @@ class NativeReleaseAdapter:
             if not candidate["exists"]:
                 if exists: connection.execute(sql.SQL("DROP ROLE {}").format(sql.Identifier(RUNTIME_ROLE)))
                 return
-            if not exists: connection.execute(sql.SQL("CREATE ROLE {}").format(sql.Identifier(RUNTIME_ROLE)))
             attrs = candidate["configuration"]["attributes"]
             if set(attrs) != set(ROLE_ATTRIBUTES): raise RuntimeError("complete runtime role attributes are required")
-            options = []
-            for key, word in (("rolsuper", "SUPERUSER"), ("rolinherit", "INHERIT"), ("rolcreaterole", "CREATEROLE"),
-                ("rolcreatedb", "CREATEDB"), ("rolcanlogin", "LOGIN"), ("rolreplication", "REPLICATION"), ("rolbypassrls", "BYPASSRLS")):
-                if type(attrs[key]) is not bool: raise RuntimeError("runtime role attribute is malformed")
-                options.append(sql.SQL(word if attrs[key] else "NO" + word))
-            options.extend([sql.SQL("CONNECTION LIMIT {}").format(sql.Literal(attrs["rolconnlimit"])),
-                sql.SQL("PASSWORD {}").format(sql.Literal(candidate["values"]["password_verifier"]))])
-            if attrs["rolvaliduntil"] is not None:
-                options.append(sql.SQL("VALID UNTIL {}").format(sql.Literal(attrs["rolvaliduntil"])))
-            connection.execute(sql.SQL("ALTER ROLE {} WITH {}").format(sql.Identifier(RUNTIME_ROLE), sql.SQL(" ").join(options)))
-            memberships = connection.execute("""SELECT p.rolname AS role,g.rolname AS grantor FROM pg_catalog.pg_auth_members m
+            boolean_attributes = ("rolsuper", "rolinherit", "rolcreaterole", "rolcreatedb", "rolcanlogin",
+                                  "rolreplication", "rolbypassrls")
+            if any(type(attrs[key]) is not bool for key in boolean_attributes):
+                raise RuntimeError("runtime role attribute is malformed")
+            if any(attrs[key] is not False for key in (
+                    "rolsuper", "rolcreaterole", "rolcreatedb", "rolreplication", "rolbypassrls")):
+                raise RuntimeError("runtime role authority is unsafe")
+            verifier = candidate["values"].get("password_verifier")
+            deploy_credential = (attrs["rolcanlogin"] is True and isinstance(verifier, str)
+                                 and verifier.startswith("SCRAM-SHA-256$"))
+            prior_credential = (
+                verifier is None and attrs["rolcanlogin"] is False
+                or isinstance(verifier, str) and (
+                    verifier.startswith("SCRAM-SHA-256$")
+                    or re.fullmatch(r"md5[0-9a-f]{32}", verifier) is not None
+                )
+            )
+            if (type(attrs["rolconnlimit"]) is not int or attrs["rolconnlimit"] < -1
+                    or (attrs["rolvaliduntil"] is not None and not isinstance(attrs["rolvaliduntil"], str))
+                    or set(candidate["values"]) != {"password_verifier"}
+                    or (prior_credential if restoring else deploy_credential) is not True):
+                raise RuntimeError("runtime role credential or limit is malformed")
+            options = [sql.SQL("INHERIT" if attrs["rolinherit"] else "NOINHERIT"),
+                       sql.SQL("LOGIN" if attrs["rolcanlogin"] else "NOLOGIN"),
+                       sql.SQL("CONNECTION LIMIT {}").format(sql.Literal(attrs["rolconnlimit"])),
+                       sql.SQL("PASSWORD {}").format(sql.Literal(candidate["values"]["password_verifier"]))]
+            if not exists:
+                if attrs["rolvaliduntil"] is not None:
+                    options.append(sql.SQL("VALID UNTIL {}").format(sql.Literal(attrs["rolvaliduntil"])))
+                # The hosted administrator is intentionally not a superuser.
+                # Omitted authority attributes use PostgreSQL's safe false
+                # defaults and are proved by the exact post-write snapshot.
+                connection.execute(sql.SQL("CREATE ROLE {} WITH {}").format(
+                    sql.Identifier(RUNTIME_ROLE), sql.SQL(" ").join(options)))
+            else:
+                current = connection.execute(
+                    "SELECT to_jsonb(r) AS role FROM pg_catalog.pg_authid r WHERE rolname=%s",
+                    (RUNTIME_ROLE,),
+                ).fetchone()["role"]
+                immutable = ("rolsuper", "rolcreaterole", "rolcreatedb", "rolreplication",
+                             "rolbypassrls", "rolvaliduntil")
+                if any(current[key] != attrs[key] for key in immutable):
+                    raise RuntimeError("runtime role protected attributes differ from candidate")
+                # Never mention SUPERUSER, REPLICATION, or BYPASSRLS in ALTER
+                # ROLE. Supabase's hosted postgres role cannot alter those
+                # attributes even when the requested value is the safe false.
+                connection.execute(sql.SQL("ALTER ROLE {} WITH {}").format(
+                    sql.Identifier(RUNTIME_ROLE), sql.SQL(" ").join(options)))
+            memberships = connection.execute("""SELECT p.rolname AS role,g.rolname AS grantor,
+                m.admin_option,to_jsonb(m)->'inherit_option' AS inherit_option,
+                to_jsonb(m)->'set_option' AS set_option FROM pg_catalog.pg_auth_members m
                 JOIN pg_catalog.pg_roles p ON p.oid=m.roleid JOIN pg_catalog.pg_roles g ON g.oid=m.grantor
-                JOIN pg_catalog.pg_roles r ON r.oid=m.member WHERE r.rolname=%s""", (RUNTIME_ROLE,)).fetchall()
-            for membership in memberships:
-                connection.execute(sql.SQL("REVOKE {} FROM {} GRANTED BY {}").format(
-                    sql.Identifier(membership["role"]), sql.Identifier(RUNTIME_ROLE), sql.Identifier(membership["grantor"])))
-            for membership in candidate["configuration"]["memberships"]:
-                statement = sql.SQL("GRANT {} TO {} WITH ADMIN {}").format(sql.Identifier(membership["role"]),
-                    sql.Identifier(RUNTIME_ROLE), sql.SQL("TRUE" if membership["admin_option"] else "FALSE"))
-                for field, word in (("inherit_option", "INHERIT"), ("set_option", "SET")):
-                    if membership[field] is not None:
-                        statement += sql.SQL(", {} {}").format(sql.SQL(word), sql.SQL("TRUE" if membership[field] else "FALSE"))
-                statement += sql.SQL(" GRANTED BY {}").format(sql.Identifier(membership["grantor"]))
-                connection.execute(statement)
-            settings = connection.execute("""SELECT COALESCE(d.datname,'') AS database FROM pg_catalog.pg_db_role_setting s
+                JOIN pg_catalog.pg_roles r ON r.oid=m.member WHERE r.rolname=%s
+                ORDER BY p.rolname,g.rolname""", (RUNTIME_ROLE,)).fetchall()
+            desired_memberships = candidate["configuration"]["memberships"]
+            if [dict(row) for row in memberships] != desired_memberships:
+                for membership in memberships:
+                    connection.execute(sql.SQL("REVOKE {} FROM {} GRANTED BY {}").format(
+                        sql.Identifier(membership["role"]), sql.Identifier(RUNTIME_ROLE), sql.Identifier(membership["grantor"])))
+                for membership in desired_memberships:
+                    statement = sql.SQL("GRANT {} TO {} WITH ADMIN {}").format(sql.Identifier(membership["role"]),
+                        sql.Identifier(RUNTIME_ROLE), sql.SQL("TRUE" if membership["admin_option"] else "FALSE"))
+                    for field, word in (("inherit_option", "INHERIT"), ("set_option", "SET")):
+                        if membership[field] is not None:
+                            statement += sql.SQL(", {} {}").format(sql.SQL(word), sql.SQL("TRUE" if membership[field] else "FALSE"))
+                    statement += sql.SQL(" GRANTED BY {}").format(sql.Identifier(membership["grantor"]))
+                    connection.execute(statement)
+            settings = connection.execute("""SELECT COALESCE(d.datname,'') AS database,s.setconfig FROM pg_catalog.pg_db_role_setting s
                 JOIN pg_catalog.pg_roles r ON r.oid=s.setrole LEFT JOIN pg_catalog.pg_database d ON d.oid=s.setdatabase
-                WHERE r.rolname=%s""", (RUNTIME_ROLE,)).fetchall()
-            for setting in settings:
-                statement = sql.SQL("ALTER ROLE {}").format(sql.Identifier(RUNTIME_ROLE))
-                if setting["database"]: statement += sql.SQL(" IN DATABASE {}").format(sql.Identifier(setting["database"]))
-                connection.execute(statement + sql.SQL(" RESET ALL"))
-            for setting in candidate["configuration"]["settings"]:
-                for pair in setting["setconfig"]:
-                    key, value = pair.split("=", 1)
+                WHERE r.rolname=%s ORDER BY database""", (RUNTIME_ROLE,)).fetchall()
+            desired_settings = candidate["configuration"]["settings"]
+            if [dict(row) for row in settings] != desired_settings:
+                for setting in settings:
                     statement = sql.SQL("ALTER ROLE {}").format(sql.Identifier(RUNTIME_ROLE))
                     if setting["database"]: statement += sql.SQL(" IN DATABASE {}").format(sql.Identifier(setting["database"]))
-                    # FROM CURRENT preserves list-valued GUC syntax (including
-                    # quoted search_path identifiers) without SQL interpolation.
-                    connection.execute("SELECT pg_catalog.set_config(%s,%s,true)", (key, value))
-                    connection.execute(statement + sql.SQL(" SET {} FROM CURRENT").format(sql.Identifier(key)))
+                    connection.execute(statement + sql.SQL(" RESET ALL"))
+                for setting in desired_settings:
+                    for pair in setting["setconfig"]:
+                        key, value = pair.split("=", 1)
+                        statement = sql.SQL("ALTER ROLE {}").format(sql.Identifier(RUNTIME_ROLE))
+                        if setting["database"]: statement += sql.SQL(" IN DATABASE {}").format(sql.Identifier(setting["database"]))
+                        # FROM CURRENT preserves list-valued GUC syntax (including
+                        # quoted search_path identifiers) without SQL interpolation.
+                        connection.execute("SELECT pg_catalog.set_config(%s,%s,true)", (key, value))
+                        connection.execute(statement + sql.SQL(" SET {} FROM CURRENT").format(sql.Identifier(key)))
 
     def apply(self, name, candidate):
         candidate = validate_snapshot(name, candidate, candidate=True)
@@ -349,7 +393,12 @@ class NativeReleaseAdapter:
         # Recovery does not depend on a still-current protected secret copy:
         # retained encrypted prior values plus attempted candidate values are
         # installed by hydrate_recovery before any independent recovery read.
-        restored = self.apply(name, prior)
+        prior = validate_snapshot(name, prior)
+        if name == "runtime-role":
+            self._write_role(prior, restoring=True)
+            restored = self.capture(name)
+        else:
+            restored = self.apply(name, prior)
         if name in FUNCTIONS and prior["exists"]: return restored
         if restored != prior: raise RuntimeError("native restoration differs from exact prior state")
         return None

@@ -4,6 +4,20 @@ on:
   workflow_run:
     workflows: ["Protected owner dashboard release"]
     types: [completed]
+  workflow_dispatch:
+    inputs:
+      failed_release_run_id:
+        description: Exact failed protected release run ID
+        required: true
+        type: string
+      failed_release_run_attempt:
+        description: Exact failed protected release run attempt
+        required: true
+        type: string
+      failed_candidate_sha:
+        description: Exact failed protected release candidate SHA
+        required: true
+        type: string
 
 permissions:
   actions: read
@@ -13,19 +27,22 @@ permissions:
 # Keep distinct recovery obligations pending independently. The durable
 # database advisory lock and ordered lease serialize them against releases.
 concurrency:
-  group: protected-owner-dashboard-release-recovery-${{ github.event.workflow_run.id }}-${{ github.event.workflow_run.run_attempt }}
+  group: protected-owner-dashboard-release-recovery-${{ github.event.workflow_run.id || inputs.failed_release_run_id }}-${{ github.event.workflow_run.run_attempt || inputs.failed_release_run_attempt }}
   cancel-in-progress: false
 
 jobs:
   recover:
     # A separate workflow survives cancellation, timeout, and runner loss.
-    if: github.event.workflow_run.conclusion != 'success'
+    if: ${{ github.event_name == 'workflow_dispatch' || github.event.workflow_run.conclusion != 'success' }}
     environment: owner-dashboard-production
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     env:
       PGSSLMODE: verify-full
       PGSSLROOTCERT: ${{ github.workspace }}/config/supabase-prod-ca-2021.crt
+      FAILED_RELEASE_RUN_ID: ${{ github.event.workflow_run.id || inputs.failed_release_run_id }}
+      FAILED_RELEASE_RUN_ATTEMPT: ${{ github.event.workflow_run.run_attempt || inputs.failed_release_run_attempt }}
+      FAILED_HEAD_SHA: ${{ github.event.workflow_run.head_sha || inputs.failed_candidate_sha }}
     steps:
       - name: Verify exact failed-release deployment trust marker
         id: trust
@@ -33,23 +50,35 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          RUN_ID="${{ github.event.workflow_run.id }}"
-          RUN_ATTEMPT="${{ github.event.workflow_run.run_attempt }}"
-          HEAD_SHA="${{ github.event.workflow_run.head_sha }}"
+          RUN_ID="$FAILED_RELEASE_RUN_ID"
+          RUN_ATTEMPT="$FAILED_RELEASE_RUN_ATTEMPT"
+          HEAD_SHA="$FAILED_HEAD_SHA"
+          [[ "$RUN_ID" =~ ^[1-9][0-9]*$ ]]
+          [[ "$RUN_ATTEMPT" =~ ^[1-9][0-9]*$ ]]
+          [[ "$HEAD_SHA" =~ ^[0-9a-f]{40}$ ]]
           export HEAD_SHA
           RUN="$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$RUN_ID")"
-          jq -e --arg repo "$GITHUB_REPOSITORY" --arg sha "$HEAD_SHA" '.repository.full_name == $repo and .head_sha == $sha and .head_branch == "main" and .event == "workflow_dispatch" and .path == ".github/workflows/owner-dashboard-release.yml" and .name == "Protected owner dashboard release"' <<<"$RUN" >/dev/null
+          jq -e --arg repo "$GITHUB_REPOSITORY" --arg sha "$HEAD_SHA" '.repository.full_name == $repo and .head_sha == $sha and .head_branch == "main" and .event == "workflow_dispatch" and .path == ".github/workflows/owner-dashboard-release.yml" and .name == "Protected owner dashboard release" and .status == "completed" and .conclusion != "success"' <<<"$RUN" >/dev/null
           VERIFIED="$(gh api "repos/$GITHUB_REPOSITORY/actions/workflows/owner-dashboard-ci.yml/runs?head_sha=$HEAD_SHA&status=completed&per_page=100" --jq '[.workflow_runs[] | select(.repository.full_name == env.GITHUB_REPOSITORY and .head_sha == env.HEAD_SHA and .conclusion == "success" and .name == "Owner dashboard verification" and .path == ".github/workflows/owner-dashboard-ci.yml" and .event == "push" and .head_branch == "main")] | length')"
           test "$VERIFIED" -ge 1 || { echo 'required CI belongs to another repository, has the wrong workflow, or required CI was not an exact-main push'; exit 1; }
+          RECOVERY_CODE_SHA="$HEAD_SHA"
+          if test "$GITHUB_EVENT_NAME" = workflow_dispatch; then
+            MAIN_SHA="$(gh api "repos/$GITHUB_REPOSITORY/git/ref/heads/main" --jq .object.sha)"
+            test "$GITHUB_SHA" = "$MAIN_SHA" || { echo 'manual recovery code is not current main'; exit 1; }
+            RECOVERY_VERIFIED="$(gh api "repos/$GITHUB_REPOSITORY/actions/workflows/owner-dashboard-ci.yml/runs?head_sha=$GITHUB_SHA&status=completed&per_page=100" --jq '[.workflow_runs[] | select(.repository.full_name == env.GITHUB_REPOSITORY and .head_sha == env.GITHUB_SHA and .conclusion == "success" and .name == "Owner dashboard verification" and .path == ".github/workflows/owner-dashboard-ci.yml" and .event == "push" and .head_branch == "main")] | length')"
+            test "$RECOVERY_VERIFIED" -ge 1 || { echo 'manual recovery code lacks successful exact-main CI'; exit 1; }
+            RECOVERY_CODE_SHA="$GITHUB_SHA"
+          fi
           DEPLOYMENTS="$(gh api "repos/$GITHUB_REPOSITORY/deployments?ref=$HEAD_SHA&environment=production&per_page=100")"
           DEPLOYMENT_ID="$(jq -r --arg sha "$HEAD_SHA" --arg run "$RUN_ID" --arg attempt "$RUN_ATTEMPT" '[.[] | select(.ref == $sha and .environment == "production") | select((.payload | if type == "string" then fromjson? else . end) as $payload | $payload.candidate_sha == $sha and ($payload.release_workflow_run_id | tostring) == $run and ($payload.release_workflow_run_attempt | tostring) == $attempt) | .id] | if length == 1 then .[0] else empty end' <<<"$DEPLOYMENTS")"
           test -n "$DEPLOYMENT_ID"
           STATUSES="$(gh api "repos/$GITHUB_REPOSITORY/deployments/$DEPLOYMENT_ID/statuses?per_page=100")"
           test "$(jq -r --arg marker "component-recovery-run:$RUN_ID:$RUN_ATTEMPT" '[.[] | select(.state == "in_progress" and .description == $marker)] | length' <<<"$STATUSES")" -ge 1
           echo "trusted=true" >> "$GITHUB_OUTPUT"
+          echo "recovery_code_sha=$RECOVERY_CODE_SHA" >> "$GITHUB_OUTPUT"
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
-          ref: ${{ github.event.workflow_run.head_sha }}
+          ref: ${{ steps.trust.outputs.recovery_code_sha }}
       - uses: actions/setup-python@42375524e23c412d93fb67b49958b491fce71c38
         with:
           python-version: "3.14"
@@ -68,4 +97,4 @@ jobs:
           # The native adapter retrieves the latest authenticated encrypted
           # journal by this exact original run identity and attempt. It must reject missing
           # or ambiguous state; terminal GitHub labels cannot bypass recovery.
-          python -m scripts.restore_gateway_after_release_failure --project-ref "$PROJECT_REF" --admin-url "$SUPAVISOR_SESSION_URL" --release-state recovery/release.enc --release-run-id "${{ github.event.workflow_run.id }}" --release-run-attempt "${{ github.event.workflow_run.run_attempt }}" --lease-owner "recovery-${{ github.event.workflow_run.id }}-${{ github.event.workflow_run.run_attempt }}" --retain-recovery-artifact
+          python -m scripts.restore_gateway_after_release_failure --project-ref "$PROJECT_REF" --admin-url "$SUPAVISOR_SESSION_URL" --release-state recovery/release.enc --release-run-id "$FAILED_RELEASE_RUN_ID" --release-run-attempt "$FAILED_RELEASE_RUN_ATTEMPT" --candidate-sha "$FAILED_HEAD_SHA" --lease-owner "recovery-$FAILED_RELEASE_RUN_ID-$FAILED_RELEASE_RUN_ATTEMPT" --retain-recovery-artifact

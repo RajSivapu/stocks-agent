@@ -246,6 +246,82 @@ def test_runtime_role_exact_attributes_verifier_memberships_and_database_setting
             connection.execute("DROP ROLE stock_agent_dashboard_runtime")
 
 
+def test_runtime_role_update_works_through_hosted_non_superuser_without_privileged_alter(database):
+    """Supabase's hosted postgres role cannot ALTER SUPERUSER attributes."""
+    platform = Supabase()
+    with psycopg.connect(database, autocommit=True) as connection:
+        connection.execute("CREATE ROLE hosted_release_admin CREATEROLE")
+        connection.execute("GRANT SELECT ON pg_catalog.pg_authid TO hosted_release_admin")
+        connection.execute(
+            "GRANT stock_agent_dashboard TO hosted_release_admin WITH ADMIN OPTION"
+        )
+        connection.execute("SET ROLE hosted_release_admin")
+        connection.execute(
+            "CREATE ROLE stock_agent_dashboard_runtime LOGIN NOINHERIT "
+            "CONNECTION LIMIT 7 PASSWORD 'prior-long-password-for-test'"
+        )
+        connection.execute("RESET ROLE")
+
+    def hosted_connector(_url, **options):
+        connection = psycopg.connect(database, **options)
+        connection.execute("SET ROLE hosted_release_admin")
+        return connection
+
+    adapter = native(platform, connector=hosted_connector)
+    adapter.environment["POSTGRES_URL"] = "hosted-admin"
+    try:
+        prior = adapter.capture("runtime-role")
+        candidate = copy.deepcopy(prior)
+        candidate["configuration"]["attributes"]["rolinherit"] = True
+        candidate["configuration"]["attributes"]["rolconnlimit"] = -1
+        candidate["values"]["password_verifier"] = adapter_module().scram_verifier(
+            "new-long-password-for-test"
+        )
+
+        deployed = adapter.apply("runtime-role", candidate)
+
+        assert deployed["configuration"]["attributes"]["rolinherit"] is True
+        assert deployed["configuration"]["attributes"]["rolsuper"] is False
+        assert deployed["configuration"]["attributes"]["rolbypassrls"] is False
+    finally:
+        with psycopg.connect(database, autocommit=True) as connection:
+            connection.execute("DROP ROLE IF EXISTS stock_agent_dashboard_runtime")
+            connection.execute("REVOKE SELECT ON pg_catalog.pg_authid FROM hosted_release_admin")
+            connection.execute("DROP ROLE IF EXISTS hosted_release_admin")
+
+
+@pytest.mark.parametrize("prior_password", [None, "md5" + "a" * 32])
+def test_runtime_role_recovery_restores_valid_disabled_or_legacy_prior_credentials(
+    database, prior_password,
+):
+    platform, adapter = database_adapter(database)
+    with psycopg.connect(database, autocommit=True) as connection:
+        password = "NULL" if prior_password is None else "'" + prior_password + "'"
+        connection.execute(
+            "CREATE ROLE stock_agent_dashboard_runtime NOLOGIN NOINHERIT PASSWORD "
+            + password
+        )
+    try:
+        prior = adapter.capture("runtime-role")
+        assert prior["values"]["password_verifier"] == prior_password
+        with pytest.raises(RuntimeError, match="credential or limit"):
+            adapter.apply("runtime-role", prior)
+        candidate = copy.deepcopy(prior)
+        candidate["configuration"]["attributes"]["rolcanlogin"] = True
+        candidate["configuration"]["attributes"]["rolinherit"] = True
+        candidate["values"]["password_verifier"] = adapter_module().scram_verifier(
+            "new-long-password-for-test"
+        )
+
+        adapter.apply("runtime-role", candidate)
+        adapter.restore("runtime-role", prior)
+
+        assert adapter.capture("runtime-role") == prior
+    finally:
+        with psycopg.connect(database, autocommit=True) as connection:
+            connection.execute("DROP ROLE IF EXISTS stock_agent_dashboard_runtime")
+
+
 def test_native_encrypted_retention_is_committed_bound_and_recoverable_in_new_process(database, tmp_path):
     from cryptography.fernet import Fernet
     platform, adapter = database_adapter(database)

@@ -579,8 +579,12 @@ def test_backend_release_does_not_claim_or_require_native_site_deployment():
 def test_independent_recovery_contract_covers_cancelled_and_lost_release_runners():
     recovery = Path(".github/workflows/owner-dashboard-release-recovery.yml").read_text()
     assert "workflow_run:" in recovery
-    assert "conclusion != 'success'" in recovery
-    assert '--release-run-id "${{ github.event.workflow_run.id }}"' in recovery
+    assert "workflow_dispatch:" in recovery
+    assert "failed_release_run_id" in recovery
+    assert "failed_release_run_attempt" in recovery
+    assert "github.event_name == 'workflow_dispatch' || github.event.workflow_run.conclusion != 'success'" in recovery
+    assert '--release-run-id "$FAILED_RELEASE_RUN_ID"' in recovery
+    assert '--candidate-sha "$FAILED_HEAD_SHA"' in recovery
     assert "RELEASE_RECOVERY_KEY" in recovery
     assert "recovery/release.enc" in recovery
     assert "recovery-metadata/recovery-metadata" not in recovery
@@ -588,7 +592,7 @@ def test_independent_recovery_contract_covers_cancelled_and_lost_release_runners
     assert "${{ secrets.SUPABASE_PROJECT_REF }}" in recovery
     assert "Verify exact failed-release deployment trust marker" in recovery
     assert "component-recovery-run:$RUN_ID" in recovery
-    assert "RUN_ATTEMPT=\"${{ github.event.workflow_run.run_attempt }}\"" in recovery
+    assert 'RUN_ATTEMPT="$FAILED_RELEASE_RUN_ATTEMPT"' in recovery
     assert "component-recovery-run:$RUN_ID:$RUN_ATTEMPT" in recovery
     assert "release_workflow_run_attempt" in recovery
     assert "release_workflow_run_id" in recovery and "candidate_sha" in recovery
@@ -616,7 +620,8 @@ def test_recovery_journal_invocation_binds_the_exact_release_run_attempt():
     assert 'parser.add_argument("--release-run-attempt", type=int, required=True)' in restorer
     assert '--release-run-id "$GITHUB_RUN_ID"' in workflow
     assert '--release-run-attempt "$GITHUB_RUN_ATTEMPT"' in workflow
-    assert '--release-run-attempt "${{ github.event.workflow_run.run_attempt }}"' in recovery
+    assert '--release-run-attempt "$FAILED_RELEASE_RUN_ATTEMPT"' in recovery
+    assert 'parser.add_argument("--candidate-sha")' in restorer
 
 
 def test_recovery_trust_rejects_feature_or_unreviewed_run_before_checkout():
@@ -628,6 +633,8 @@ def test_recovery_trust_rejects_feature_or_unreviewed_run_before_checkout():
     assert "Owner dashboard verification" in trust
     assert ".github/workflows/owner-dashboard-ci.yml" in trust
     assert "head_sha=$HEAD_SHA" in trust
+    assert 'test "$GITHUB_SHA" = "$MAIN_SHA"' in trust
+    assert "RECOVERY_VERIFIED" in trust
 
 
 def test_protected_release_and_recovery_install_only_the_complete_hashed_lock():
@@ -655,12 +662,12 @@ def test_release_and_recovery_use_separate_safe_actions_concurrency_boundaries()
     assert "recovery-metadata.json" in Path("scripts/configured_native_release_adapter.py").read_text()
     assert "group: protected-owner-dashboard-release-production" in workflow
     assert "group: protected-owner-dashboard-release-production-${{" not in workflow
-    assert "group: protected-owner-dashboard-release-recovery-${{ github.event.workflow_run.id }}-${{ github.event.workflow_run.run_attempt }}" in recovery
+    assert "group: protected-owner-dashboard-release-recovery-${{ github.event.workflow_run.id || inputs.failed_release_run_id }}-${{ github.event.workflow_run.run_attempt || inputs.failed_release_run_attempt }}" in recovery
     assert "protected-owner-dashboard-release-production-${{" not in recovery
     assert "cancel-in-progress: false" in recovery
     trust = recovery.split("- name: Verify exact failed-release deployment trust marker", 1)[1].split("- name:", 1)[0]
     assert 'jq -r .run_attempt' not in trust
-    assert "ref: ${{ github.event.workflow_run.head_sha }}" in recovery
+    assert "ref: ${{ steps.trust.outputs.recovery_code_sha }}" in recovery
     assert "--release-run-id" in recovery
     assert "--retain-recovery-artifact" in recovery
     assert "conclusion != 'success'" in recovery
