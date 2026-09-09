@@ -460,6 +460,19 @@ queried stage/origin/report/outbox identities. It discovers the next
 existing scheduled postdeployment run without starting one. Suppression requires its dedicated
 reason; old reasonless rows remain unverified rather than receiving an invented historical reason.
 
+## Repository documentation policy
+
+Keep only documentation that operates or verifies the current owner-only app:
+
+- `README.md`, `PROJECT_STATUS.md`, `docs/ROADMAP.md`, and `docs/V1_IMPLEMENTATION_CHECKLIST.md`
+  describe setup, current state, planned work, and acceptance.
+- `routines/README.md` is the runbook for the scheduled Claude routines.
+- `docs/eval/`, `docs/receipts/`, and the retained V1 rollout records are quality and release
+  evidence.
+
+Per-task reports, generated diffs, superseded designs, and implementation scratch belong in Git
+history or ignored local paths. Do not commit `.superpowers/` or `docs/superpowers/` artifacts.
+
 ## Unchanging guardrails
 
 - No brokerage credentials or order endpoints.

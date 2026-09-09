@@ -26,7 +26,8 @@ data/briefings/*.md
 data/*.local
 data/edgar_cik_map.json
 
-# Internal implementation docs (personal paths + context)
+# Internal implementation scratch (personal paths + generated context)
+.superpowers/
 docs/superpowers/
 docs/HANDOFF.md
 

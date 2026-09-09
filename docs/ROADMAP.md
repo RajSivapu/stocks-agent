@@ -266,10 +266,9 @@ backfill them with an extra market or Telegram run. The active verification hear
 the first natural post-release phase and reconciles its original evidence.
 
 Market-wide thematic discovery remains original V1-C3 scope. Two GPT-6 Astra reviews identified the
-gap between configured themes and actual runtime capability. The approved
-`docs/superpowers/specs/2026-09-06-market-wide-thematic-discovery-v1-design.md` and
-`docs/superpowers/plans/2026-09-06-market-wide-thematic-discovery-v1-implementation.md` now have this
-status:
+gap between configured themes and actual runtime capability. The implemented boundary is recorded in
+`docs/rollouts/2026-09-06-market-wide-thematic-discovery-v1.md`; superseded working plans remain in
+Git history. The implementation now has this status:
 
 1. **Complete locally:** versioned capability registry, fair stage planner, durable cursors, and
    dated U.S.-listed security reference.
