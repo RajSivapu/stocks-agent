@@ -47,6 +47,10 @@ from lib.intelligence.themes import (
 EXPOSURE_VECTORS = json.loads(
     (Path(__file__).parent / "fixtures/exposure_fact_hash_vectors.json").read_text()
 )
+PINNED_NATIVE_MIGRATION = (
+    Path(__file__).parents[1]
+    / "sql/migrations/20260901_reliable_stock_agent.sql"
+).read_text(encoding="utf-8")
 
 
 def digest(value):
@@ -994,8 +998,8 @@ def recovery_records():
             {"role": "stock_agent_dashboard_runtime", "login": True, "inherit": True, "superuser": False, "bypass_rls": False,
              "memberships": ["stock_agent_dashboard"], "grants": []},
         ],
-        "schema_version": [{"version": "20260926", "statements": ["SELECT 1"],
-                            "sha256": hashlib.sha256(b"SELECT 1").hexdigest()}],
+        "schema_version": [{"version": "20260901", "statements": [PINNED_NATIVE_MIGRATION],
+                            "sha256": hashlib.sha256(PINNED_NATIVE_MIGRATION.encode()).hexdigest()}],
         "release_migration_ledger": [],
     }
     records["holdings"][0].update(bucket="core", opened_at="2026-09-01", notes=None, stop=None, target=None, high_water_price=None,
@@ -1406,7 +1410,7 @@ def test_recovery_payload_carries_identity_delivery_and_release_state(tmp_path, 
     assert (publication["status"], publication["attempt_count"], publication["lease_token"]) == (
         "sending", 1, "77777777-7777-4777-8777-777777777777",
     )
-    assert records["schema_version"][0]["statements"] == ["SELECT 1"]
+    assert records["schema_version"][0]["statements"] == [PINNED_NATIVE_MIGRATION]
     assert records["release_migration_ledger"] == []
     cursor_result = next(
         row["result"] for row in records["discovery_stage_tasks"]
@@ -1738,24 +1742,96 @@ def test_recovery_rejects_impossible_cursor_checkpoint_transition_before_restore
     lambda row: row.update(password="forbidden"),
 ])
 def test_private_migration_ledger_requires_exact_no_secret_identity(change):
-    from scripts.deploy_owner_dashboard_api import migration_statements_sha256
+    from scripts.deploy_owner_dashboard_api import candidate_migration_manifest
     records = recovery_records()
-    row = {"path": "sql/migrations/20260926_recovery.sql", "version": "20260926",
-           "sha256": migration_statements_sha256(["SELECT 1"]), "applied_at": "2026-09-05T20:00:00Z"}
-    records["release_migration_ledger"] = [row]
-    assert _validated_records(records)["release_migration_ledger"] == [row]
+    records["release_migration_ledger"] = [
+        {**item, "applied_at": "2026-09-05T20:00:00Z"}
+        for item in candidate_migration_manifest()
+    ]
+    row = next(
+        item for item in records["release_migration_ledger"]
+        if item["path"] == "sql/migrations/20261017_release_reader_extension_closure.sql"
+    )
+    assert len(_validated_records(records)["release_migration_ledger"]) == len(
+        records["release_migration_ledger"]
+    )
     change(row)
     with pytest.raises(ValueError):
         _validated_records(records)
 
 
 def test_private_and_native_migration_ledgers_must_agree():
+    from scripts.deploy_owner_dashboard_api import candidate_migration_manifest
     records = recovery_records()
-    records["release_migration_ledger"] = [{
-        "path": "sql/migrations/20260926_recovery.sql", "version": "20260926",
-        "sha256": "a" * 64, "applied_at": "2026-09-05T20:00:00Z",
+    candidate = next(
+        item for item in candidate_migration_manifest()
+        if item["path"] == "sql/migrations/20260926_report_suppression_reasons.sql"
+    )
+    records["release_migration_ledger"] = [
+        {**candidate, "applied_at": "2026-09-05T20:00:00Z"}
+    ]
+    with pytest.raises(ValueError, match="migration"):
+        _validated_records(records)
+
+
+def test_native_migration_requires_pinned_identity_without_private_ledger():
+    records = recovery_records()
+    statements = ["SELECT 'not in candidate';"]
+    records["schema_version"] = [{
+        "version": "20991231",
+        "statements": statements,
+        "sha256": hashlib.sha256("\n".join(statements).encode()).hexdigest(),
     }]
-    with pytest.raises(ValueError, match="migration.*diverge"):
+
+    with pytest.raises(ValueError, match="native migration ledger identity"):
+        _validated_records(records)
+
+
+def test_recovery_rejects_extra_unpinned_native_migration():
+    records = recovery_records()
+    statements = ["SELECT 'extra native row';"]
+    records["schema_version"].append({
+        "version": "20991231",
+        "statements": statements,
+        "sha256": hashlib.sha256("\n".join(statements).encode()).hexdigest(),
+    })
+
+    with pytest.raises(ValueError, match="native migration ledger identity"):
+        _validated_records(records)
+
+
+def test_recovery_rejects_private_suffix_with_missing_candidate_prefix():
+    from scripts.deploy_owner_dashboard_api import candidate_migration_manifest
+
+    records = recovery_records()
+    last = candidate_migration_manifest()[-1]
+    records["release_migration_ledger"] = [{
+        **last, "applied_at": "2026-09-05T20:00:00Z",
+    }]
+
+    with pytest.raises(ValueError, match="exact candidate prefix"):
+        _validated_records(records)
+
+
+def test_recovery_rejects_modified_historical_candidate_before_ledger_trust(monkeypatch):
+    import scripts.deploy_owner_dashboard_api as deploy
+
+    manifest = deploy.candidate_migration_manifest()
+    historical = next(
+        item for item in manifest
+        if item["path"] == "sql/migrations/20261016_dashboard_runtime_authority_closure.sql"
+    )
+    modified = [
+        {**item, "sha256": "f" * 64} if item["path"] == historical["path"] else item
+        for item in manifest
+    ]
+    monkeypatch.setattr(deploy, "candidate_migration_manifest", lambda: modified)
+    records = recovery_records()
+    records["release_migration_ledger"] = [
+        {**historical, "sha256": "f" * 64, "applied_at": "2026-09-05T20:00:00Z"}
+    ]
+
+    with pytest.raises(ValueError, match="cutover receipt"):
         _validated_records(records)
 
 
@@ -1768,8 +1844,16 @@ def reconciled_records(tmp_path, monkeypatch):
     source.parent.mkdir(parents=True)
     source.write_text("-- exact normalized baseline\n SELECT 1;\n")
     monkeypatch.setattr(deploy, "ROOT", tmp_path)
+    monkeypatch.setattr(
+        deploy, "RECONCILIATION_BASELINE_RAW_SHA256",
+        hashlib.sha256(source.read_bytes()).hexdigest(),
+    )
     records = recovery_records()
-    records["schema_version"][0]["version"] = "20261004"
+    records["schema_version"][0] = {
+        "version": "20261004",
+        "statements": ["SELECT 1"],
+        "sha256": hashlib.sha256(b"SELECT 1").hexdigest(),
+    }
     records["release_migration_ledger"] = [{
         "path": path, "version": "20261004", "sha256": hashlib.sha256(b'["SELECT 1"]').hexdigest(),
         "applied_at": "2026-09-06T20:00:00Z",
@@ -2529,7 +2613,8 @@ def test_restore_refreshes_the_isolated_reader_snapshot_before_reconciliation(tm
 
 def test_verifier_applies_actual_isolated_postgres_restore_and_retains_uncertain_delivery(tmp_path, commands):
     from scripts.deploy_owner_dashboard_api import (
-        apply_release_migrations, candidate_migration_manifest, normalize_migration_statements,
+        apply_release_migrations, candidate_migration_manifest,
+        migration_execution_statements,
     )
     from psycopg.rows import tuple_row
     binaries = {name: shutil.which(name) for name in ("initdb", "pg_ctl")}
@@ -2579,8 +2664,18 @@ def test_verifier_applies_actual_isolated_postgres_restore_and_retains_uncertain
                             "read_only": True, "isolated_guard": self.isolated}
 
                 def read_records(self):
-                    return {name: [dict(row) for row in self.connection.execute(sql).fetchall()]
-                            for name, sql in RECOVERY_SQL.items()}
+                    from scripts.protected_evidence import with_schema_version_hashes
+                    records = {
+                        name: [
+                            dict(row)
+                            for row in self.connection.execute(sql).fetchall()
+                        ]
+                        for name, sql in RECOVERY_SQL.items()
+                    }
+                    records["schema_version"] = with_schema_version_hashes(
+                        records["schema_version"]
+                    )
+                    return records
 
                 def counts(self):
                     return {name: self.connection.execute(f"SELECT count(*) FROM ({sql}) records").fetchone()["count"]
@@ -2598,7 +2693,9 @@ def test_verifier_applies_actual_isolated_postgres_restore_and_retains_uncertain
             for item in manifest:
                 if item["path"] in baseline:
                     connections[0].execute("INSERT INTO supabase_migrations.schema_migrations VALUES (%s,%s)",
-                        (item["version"], normalize_migration_statements((repo / item["path"]).read_text())))
+                        (item["version"], migration_execution_statements(
+                            (repo / item["path"]).read_text()
+                        )))
             with connections[0].transaction(), connections[0].cursor(row_factory=tuple_row) as cursor:
                 upgrade = apply_release_migrations(cursor)
             assert upgrade["applied"] == [item for item in manifest if item["path"] not in baseline]

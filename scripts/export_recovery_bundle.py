@@ -2643,19 +2643,41 @@ def _validated_records(records: Mapping[str, object]) -> dict[str, list[dict[str
            for row in result["schema_version"]):
         raise ValueError("schema version hash is invalid")
     from scripts.deploy_owner_dashboard_api import (
+        ROOT as DEPLOY_ROOT,
         RECONCILIATION_BASELINE_PATH, RECONCILIATION_BASELINE_VERSION,
-        migration_statements_sha256, reconciliation_baseline_manifest,
+        candidate_migration_manifest, migration_semantic_sha256,
+        reconciliation_baseline_manifest,
+        validate_candidate_migration_cutover,
     )
+    try:
+        candidate_manifest = candidate_migration_manifest()
+        candidate_receipts = {row["path"]: row for row in candidate_manifest}
+        legacy_receipts = validate_candidate_migration_cutover(candidate_manifest)
+    except (RuntimeError, OSError) as error:
+        raise ValueError("candidate migration cutover receipt is invalid") from error
     private_versions = {}
+    private_candidates = {}
     baseline_row = None
     for row in result["release_migration_ledger"]:
         match = re.fullmatch(r"sql/migrations/(\d{8}(?:\d{4})?)_[a-z0-9][a-z0-9_]*\.sql", row["path"])
         is_baseline = row["path"] == RECONCILIATION_BASELINE_PATH and row["version"] == RECONCILIATION_BASELINE_VERSION
+        candidate = candidate_receipts.get(row["path"])
+        legacy_receipt = legacy_receipts.get(row["path"])
+        allowed_hashes = set()
+        if candidate is not None and candidate["version"] == row["version"]:
+            allowed_hashes.add(candidate["sha256"])
+            if legacy_receipt is not None:
+                allowed_hashes.add(legacy_receipt["legacy_sha256"])
         if ((not is_baseline and (match is None or match.group(1) != row["version"])) or not HASH.fullmatch(row["sha256"])
-                or row["version"] in private_versions):
+                or row["version"] in private_versions
+                or (not is_baseline and row["sha256"] not in allowed_hashes)):
             raise ValueError("release migration ledger identity is invalid")
         if is_baseline:
             baseline_row = row
+        else:
+            private_candidates[row["path"]] = (
+                row["version"], candidate["sha256"],
+            )
         try:
             applied_at = datetime.fromisoformat(row["applied_at"].replace("Z", "+00:00"))
             if applied_at.tzinfo is None:
@@ -2663,8 +2685,9 @@ def _validated_records(records: Mapping[str, object]) -> dict[str, list[dict[str
         except ValueError:
             raise ValueError("release migration ledger applied_at is invalid") from None
         private_versions[row["version"]] = row["sha256"]
-    # The native export hash binds its exact stored statements[], while the
-    # release ledger uses the reconciler's canonical statement-array identity.
+    # Baseline receipts retain their pinned historical statement hash. Normal
+    # private receipts use exact migration bytes, with cutover-pinned legacy
+    # hashes accepted only for rows created before the exact-byte transition.
     native_baseline = [row for row in result["schema_version"] if row["version"] == RECONCILIATION_BASELINE_VERSION]
     if baseline_row is not None or native_baseline:
         try:
@@ -2673,13 +2696,63 @@ def _validated_records(records: Mapping[str, object]) -> dict[str, list[dict[str
             raise ValueError("reconciliation migration baseline source is invalid") from error
         if (baseline_row is None or baseline_row["sha256"] != expected["sha256"]
                 or len(result["schema_version"]) != 1 or len(native_baseline) != 1
-                or migration_statements_sha256(native_baseline[0]["statements"]) != expected["sha256"]
+                or migration_semantic_sha256(native_baseline[0]["statements"])
+                   != migration_semantic_sha256([
+                       (DEPLOY_ROOT / RECONCILIATION_BASELINE_PATH).read_text(encoding="utf-8")
+                   ])
                 or any(row["path"] != RECONCILIATION_BASELINE_PATH
                        and row["version"] <= RECONCILIATION_BASELINE_VERSION
                        for row in result["release_migration_ledger"])):
             raise ValueError("reconciliation migration baseline pair is invalid")
-    if private_versions and any(private_versions.get(row["version"]) != migration_statements_sha256(row["statements"]) for row in result["schema_version"]):
-        raise ValueError("native/private migration ledgers diverge")
+    compatibility = {row["version"]: row for row in legacy_receipts.values()}
+    native_candidates = {}
+    for row in result["schema_version"]:
+        if row["version"] == RECONCILIATION_BASELINE_VERSION:
+            continue
+        expected = compatibility.get(row["version"])
+        try:
+            semantic_sha256 = migration_semantic_sha256(row["statements"])
+        except RuntimeError:
+            raise ValueError("native migration ledger identity is invalid") from None
+        if expected is None or semantic_sha256 != expected["semantic_sha256"]:
+            raise ValueError("native migration ledger identity is invalid")
+        native_candidates[expected["path"]] = (
+            expected["version"], expected["exact_sha256"],
+        )
+        stored = private_versions.get(row["version"])
+        if stored is not None and stored not in {
+            expected["exact_sha256"], expected["legacy_sha256"],
+        }:
+            raise ValueError("native/private migration ledgers diverge")
+    candidate_paths = [row["path"] for row in candidate_manifest]
+    native_paths = [path for path in candidate_paths if path in native_candidates]
+    if native_paths != candidate_paths[:len(native_paths)]:
+        raise ValueError("native migration state is not an exact candidate prefix")
+    if baseline_row is not None:
+        future = [
+            row for row in candidate_manifest
+            if row["version"] > RECONCILIATION_BASELINE_VERSION
+        ]
+        expected_suffix = {
+            row["path"]: (row["version"], row["sha256"])
+            for row in future[:len(private_candidates)]
+        }
+        if private_candidates != expected_suffix:
+            raise ValueError("reconciliation migration suffix is not an exact candidate prefix")
+    else:
+        private_paths = [path for path in candidate_paths if path in private_candidates]
+        if (
+            private_paths != candidate_paths[:len(private_paths)]
+            or len(private_candidates) != len(private_paths)
+            or (
+                private_candidates
+                and any(
+                    private_candidates.get(path) != receipt
+                    for path, receipt in native_candidates.items()
+                )
+            )
+        ):
+            raise ValueError("migration state is not an exact candidate prefix")
     for row in result["evaluation_publications"]:
         if (row["idempotency_key"] not in requests or (row["run_id"] is not None and row["run_id"] not in runs)
                 or not HASH.fullmatch(row["rendered_hash"]) or row["attempt_count"] < 0

@@ -94,7 +94,7 @@ PRE_MIGRATION_ABSENT_TABLES = (
 def pre_migration_omissions(*, migrated: bool = False) -> dict[str, object]:
     if migrated:
         return {
-            "reason": "candidate migrations are already applied",
+            "reason": "candidate read scope is already present",
             "absent_tables": [],
             "unreadable_tables": [],
         }

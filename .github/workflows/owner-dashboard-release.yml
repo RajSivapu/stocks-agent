@@ -204,6 +204,7 @@ jobs:
       - name: Execute protected deployment with encrypted component recovery
         env:
           DASHBOARD_PRIOR_MANAGED_SECRETS_JSON: ${{ secrets.DASHBOARD_PRIOR_MANAGED_SECRETS_JSON }}
+          RELEASE_READONLY_DATABASE_URL: ${{ secrets.RELEASE_READONLY_DATABASE_URL }}
           RELEASE_RECOVERY_KEY: ${{ secrets.RELEASE_RECOVERY_KEY }}
           GH_TOKEN: ${{ github.token }}
           SUPABASE_ACCESS_TOKEN: ${{ secrets.SUPABASE_ACCESS_TOKEN }}

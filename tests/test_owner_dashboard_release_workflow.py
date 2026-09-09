@@ -9,6 +9,26 @@ import subprocess
 import pytest
 import yaml
 
+EVIDENCE_AUTHORITY = {
+    "status": "verified", "connection_id": "a" * 64,
+    "read_only": True, "isolated_guard": False,
+}
+SOURCE_RECONCILIATION = {
+    "status": "verified",
+    "dashboard": {
+        "role": "stock_agent_dashboard_runtime",
+        "transaction_read_only": True,
+    },
+    "evidence": {
+        "role": "stock_agent_release_reader_runtime",
+        "transaction_read_only": True,
+        "authority": EVIDENCE_AUTHORITY,
+    },
+    "canonical_hashes": "verified",
+    "run_relationships": "verified",
+    "claims_checked": 11,
+}
+
 
 def test_protected_release_and_recovery_are_valid_workflow_yaml():
     for name in (
@@ -351,6 +371,20 @@ def test_candidate_dry_run_and_site_build_steps_do_not_receive_privileged_secret
     assert "--static-build-receipt" in steps[
         "Execute protected deployment with encrypted component recovery"
     ]["run"]
+    protected_deploy = steps[
+        "Execute protected deployment with encrypted component recovery"
+    ]
+    assert protected_deploy["env"]["RELEASE_READONLY_DATABASE_URL"] == (
+        "${{ secrets.RELEASE_READONLY_DATABASE_URL }}"
+    )
+    evidence_reader_steps = {
+        name for name, step in steps.items()
+        if "RELEASE_READONLY_DATABASE_URL" in step.get("env", {})
+    }
+    assert evidence_reader_steps == {
+        "Derive protected no-side-effect evidence around the real candidate dry-run",
+        "Execute protected deployment with encrypted component recovery",
+    }
 
 
 def test_protected_workflows_use_the_same_exact_main_ci_trust_contract():
@@ -380,6 +414,9 @@ def test_release_record_keeps_release_and_later_scheduled_receipts_distinct():
             "status": "verified",
             "source_reconciliation": "verified",
             "source_database_role": "stock_agent_dashboard_runtime",
+            "evidence_database_role": "stock_agent_release_reader_runtime",
+            "evidence_reader_authority": copy.deepcopy(EVIDENCE_AUTHORITY),
+            "source_reconciliation_receipt": copy.deepcopy(SOURCE_RECONCILIATION),
             "financial_write_routes": 0,
             "brokerage_authority": "none",
             "friend_invitations": "disabled",
@@ -419,6 +456,8 @@ def test_release_record_keeps_release_and_later_scheduled_receipts_distinct():
 @pytest.mark.parametrize("missing", [
     "unauthenticated_status", "non_owner_status", "owner_session", "non_owner_session",
     "auth_inventory_preflight", "auth_inventory_readback",
+    "evidence_database_role", "evidence_reader_authority",
+    "source_reconciliation_receipt",
 ])
 def test_release_record_rejects_missing_owner_only_canary_evidence(missing):
     from scripts import write_protected_release_record as writer
@@ -430,6 +469,9 @@ def test_release_record_rejects_missing_owner_only_canary_evidence(missing):
     canary = {
         "status": "verified", "source_reconciliation": "verified",
         "source_database_role": "stock_agent_dashboard_runtime",
+        "evidence_database_role": "stock_agent_release_reader_runtime",
+        "evidence_reader_authority": copy.deepcopy(EVIDENCE_AUTHORITY),
+        "source_reconciliation_receipt": copy.deepcopy(SOURCE_RECONCILIATION),
         "financial_write_routes": 0, "brokerage_authority": "none",
         "friend_invitations": "disabled", "owner_route_count": 10,
         "unauthenticated_status": 401, "non_owner_status": 403,
@@ -439,6 +481,30 @@ def test_release_record_rejects_missing_owner_only_canary_evidence(missing):
         "auth_inventory_readback": inventory,
     }
     del canary[missing]
+    with pytest.raises(RuntimeError, match="canary receipt is incomplete"):
+        writer.release_evidence_classes({"candidate_sha": "a" * 40, "canary": canary})
+
+
+def test_release_record_rejects_the_wrong_evidence_database_role():
+    from scripts import write_protected_release_record as writer
+
+    inventory = {
+        "status": "verified", "identity_count": 2,
+        "privileged_owner_count": 1, "denied_canary_count": 1,
+    }
+    canary = {
+        "status": "verified", "source_reconciliation": "verified",
+        "source_database_role": "stock_agent_dashboard_runtime",
+        "evidence_database_role": "stock_agent_dashboard_runtime",
+        "evidence_reader_authority": copy.deepcopy(EVIDENCE_AUTHORITY),
+        "source_reconciliation_receipt": copy.deepcopy(SOURCE_RECONCILIATION),
+        "financial_write_routes": 0, "brokerage_authority": "none",
+        "friend_invitations": "disabled", "owner_route_count": 10,
+        "unauthenticated_status": 401, "non_owner_status": 403,
+        "owner_session": "revoked", "non_owner_session": "revoked",
+        "auth_inventory_preflight": inventory,
+        "auth_inventory_readback": inventory,
+    }
     with pytest.raises(RuntimeError, match="canary receipt is incomplete"):
         writer.release_evidence_classes({"candidate_sha": "a" * 40, "canary": canary})
 
@@ -488,6 +554,9 @@ def test_release_record_writer_emits_backend_only_evidence_contract(tmp_path, mo
         "recovery_journal": recovery,
         "canary": {"status": "verified", "source_reconciliation": "verified",
             "source_database_role": "stock_agent_dashboard_runtime",
+            "evidence_database_role": "stock_agent_release_reader_runtime",
+            "evidence_reader_authority": copy.deepcopy(EVIDENCE_AUTHORITY),
+            "source_reconciliation_receipt": copy.deepcopy(SOURCE_RECONCILIATION),
             "financial_write_routes": 0, "brokerage_authority": "none",
             "friend_invitations": "disabled", "owner_route_count": 10,
             "unauthenticated_status": 401, "non_owner_status": 403,
@@ -536,6 +605,7 @@ def test_release_record_writer_emits_backend_only_evidence_contract(tmp_path, mo
         "inventory_readback": {"status": "verified", "identity_count": 2,
             "privileged_owner_count": 1, "denied_canary_count": 1},
     }
+    assert record["source_reconciliation"] == SOURCE_RECONCILIATION
     assert record["evidence_classes"]["owner_site"]["status"] == "pending"
     assert all(row["artifact_id"] == 60 for row in record["component_readbacks"])
 

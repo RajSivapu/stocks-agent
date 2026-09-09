@@ -51,7 +51,6 @@ from scripts.export_recovery_bundle import (
     sha256,
 )
 from scripts.function_runtime_manifest import configured_function_runtime
-from scripts.verify_owner_dashboard_deployment import migration_statements_sha256, normalize_migration_statements
 
 MAX_SCHEDULED_RECEIPT_AGE_SECONDS = 7 * 24 * 60 * 60
 SHA = re.compile(r"[0-9a-f]{40}")
@@ -2040,7 +2039,7 @@ def verify_artifacts(repo: Path, static_root: Path, candidate: str, record: Mapp
     verify_component_artifacts(repo, candidate, record, source, deployed_at=deployed)
     migrations = git_files(repo, candidate, "sql/migrations")
     expected_migrations = [{"path": f"sql/migrations/{path}", "version": Path(path).name.split("_", 1)[0],
-                            "sha256": migration_statements_sha256(normalize_migration_statements(raw.decode("utf-8")))}
+                            "sha256": hashlib.sha256(raw).hexdigest()}
                            for path, raw in sorted(migrations.items()) if path.endswith(".sql")]
     require(record["migrations"] == expected_migrations, "migration byte hashes or complete version set differ from candidate")
     application = record.get("migration_application")
@@ -2410,6 +2409,49 @@ def verify_release(source: ReleaseDataSource, *, deployment_id: int,
                         and isinstance(value.get("rows_sha256"), str) and re.fullmatch(r"[0-9a-f]{64}", value["rows_sha256"])
                         for value in before["tables"].values()), "protected dry-run side-effect evidence is incomplete")
         require(record["canaries"] == {"owner": 200, "anonymous": 401, "non_owner": 403}, "protected owner/denial canaries are incomplete")
+        source_reconciliation = record.get("source_reconciliation")
+        evidence_reader = (
+            source_reconciliation.get("evidence")
+            if isinstance(source_reconciliation, Mapping)
+            else None
+        )
+        evidence_authority = (
+            evidence_reader.get("authority")
+            if isinstance(evidence_reader, Mapping)
+            else None
+        )
+        require(
+            isinstance(source_reconciliation, Mapping)
+            and set(source_reconciliation) == {
+                "status", "dashboard", "evidence", "canonical_hashes",
+                "run_relationships", "claims_checked",
+            }
+            and source_reconciliation.get("status") == "verified"
+            and source_reconciliation.get("dashboard") == {
+                "role": "stock_agent_dashboard_runtime",
+                "transaction_read_only": True,
+            }
+            and isinstance(evidence_reader, Mapping)
+            and set(evidence_reader) == {
+                "role", "transaction_read_only", "authority",
+            }
+            and evidence_reader.get("role") == "stock_agent_release_reader_runtime"
+            and evidence_reader.get("transaction_read_only") is True
+            and isinstance(evidence_authority, Mapping)
+            and set(evidence_authority) == {
+                "status", "connection_id", "read_only", "isolated_guard",
+            }
+            and evidence_authority.get("status") == "verified"
+            and isinstance(evidence_authority.get("connection_id"), str)
+            and re.fullmatch(r"[0-9a-f]{64}", evidence_authority["connection_id"])
+            is not None
+            and evidence_authority.get("read_only") is True
+            and evidence_authority.get("isolated_guard") is False
+            and source_reconciliation.get("canonical_hashes") == "verified"
+            and source_reconciliation.get("run_relationships") == "verified"
+            and source_reconciliation.get("claims_checked") == 11,
+            "protected source-reconciliation evidence is incomplete",
+        )
         expected_auth_inventory = {
             "status": "verified", "identity_count": 2,
             "privileged_owner_count": 1, "denied_canary_count": 1,

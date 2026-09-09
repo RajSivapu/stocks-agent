@@ -15,7 +15,6 @@ import pytest
 from lib.release_baseline import expected_snapshot_tables, pre_migration_omissions
 from scripts import verify_personal_stock_agent_v1 as release_verifier
 from scripts.verify_personal_stock_agent_v1 import verify_release
-from scripts.verify_owner_dashboard_deployment import migration_statements_sha256, normalize_migration_statements
 from test_recovery_bundle import recovery_records, digest
 
 NOW = datetime(2026, 9, 5, 21, tzinfo=timezone.utc)
@@ -1602,7 +1601,7 @@ def release(tmp_path):
         "run_id": RUN, "candidate_sha": sha, "reviewed_sha": reviewed_sha,
         "release_authorization": {"kind": "github_review", "id": 45,
             "pr_ci_workflow_run_id": 41},
-        "migrations": [{"path": "sql/migrations/20260926_suppression_reasons.sql", "version": "20260926", "sha256": migration_statements_sha256(normalize_migration_statements(raw["sql/migrations/20260926_suppression_reasons.sql"].decode()))}],
+        "migrations": [{"path": "sql/migrations/20260926_suppression_reasons.sql", "version": "20260926", "sha256": hashlib.sha256(raw["sql/migrations/20260926_suppression_reasons.sql"]).hexdigest()}],
         "functions": [{"function": name, "deployment_id": name + "-deployment", "git_sha": sha, "function_version": 5, "source_sha256": tree_hash({"index.ts": raw[f"supabase/functions/{name}/index.ts"]})} for name in ("market-briefing-gateway", "owner-dashboard-api", "telegram-portfolio")],
         "static_assets": {"status": "verified", "candidate_sha": sha,
             "source_sha256": tree_hash({"src/main.tsx": b"web source\n"}),
@@ -1614,6 +1613,24 @@ def release(tmp_path):
         "dry_run": False,
         "dry_run_evidence": {"before": {"source": {"project_ref": "p" * 20}, "tables": copy.deepcopy(snapshot_tables), "pre_migration_omissions": pre_migration_omissions()}, "after": {"source": {"project_ref": "p" * 20}, "tables": copy.deepcopy(snapshot_tables), "pre_migration_omissions": pre_migration_omissions()}, "table_deltas": {name: 0 for name in snapshot_tables}, "safe_command_argv": ["python", "scripts/deploy_owner_dashboard_api.py", "--dry-run", "--candidate-sha", sha], "candidate_script_sha256": hashlib.sha256(raw["scripts/deploy_owner_dashboard_api.py"]).hexdigest(), "safe_command_sha256": hashlib.sha256(json.dumps({"argv": ["python", "scripts/deploy_owner_dashboard_api.py", "--dry-run", "--candidate-sha", sha], "candidate_sha": sha, "candidate_script_sha256": hashlib.sha256(raw["scripts/deploy_owner_dashboard_api.py"]).hexdigest()}, sort_keys=True, separators=(",", ":")).encode()).hexdigest(), "safe_command_exit_code": 0},
         "canaries": {"owner": 200, "anonymous": 401, "non_owner": 403},
+        "source_reconciliation": {
+            "status": "verified",
+            "dashboard": {
+                "role": "stock_agent_dashboard_runtime",
+                "transaction_read_only": True,
+            },
+            "evidence": {
+                "role": "stock_agent_release_reader_runtime",
+                "transaction_read_only": True,
+                "authority": {
+                    "status": "verified", "connection_id": "a" * 64,
+                    "read_only": True, "isolated_guard": False,
+                },
+            },
+            "canonical_hashes": "verified",
+            "run_relationships": "verified",
+            "claims_checked": 11,
+        },
         "auth_canary": {
             "owner_session": "revoked",
             "non_owner_session": "revoked",
@@ -1857,6 +1874,27 @@ def test_release_requires_readback_of_all_three_protected_backend_functions(rele
     source, args = release
     source.record.pop("component_readbacks", None)
     with pytest.raises(RuntimeError, match="component|readback"):
+        verify_release(source, **args)
+
+
+@pytest.mark.parametrize(
+    ("path", "value"),
+    (
+        (("dashboard", "role"), "postgres"),
+        (("evidence", "role"), "stock_agent_dashboard_runtime"),
+        (("evidence", "authority", "status"), "unchecked"),
+        (("evidence", "authority", "connection_id"), "not-a-digest"),
+        (("evidence", "authority", "read_only"), False),
+    ),
+)
+def test_release_rejects_untrusted_source_reader_provenance(release, path, value):
+    source, args = release
+    target = source.record["source_reconciliation"]
+    for key in path[:-1]:
+        target = target[key]
+    target[path[-1]] = value
+
+    with pytest.raises(RuntimeError, match="source-reconciliation"):
         verify_release(source, **args)
 
 

@@ -13,7 +13,7 @@ import re
 import sys
 from typing import Callable, Mapping, Sequence
 from urllib.error import HTTPError
-from urllib.parse import urlparse
+from urllib.parse import unquote, urlparse
 from urllib.request import Request, urlopen
 
 import psycopg
@@ -59,6 +59,7 @@ ROUTE_BOUNDARIES = {
 }
 RELEASE_FUNCTIONS = ("market-briefing-gateway", "owner-dashboard-api", "telegram-portfolio")
 RUNTIME_ROLE = "stock_agent_dashboard_runtime"
+EVIDENCE_ROLE = "stock_agent_release_reader_runtime"
 UUID_PATTERN = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$", re.IGNORECASE)
 MIGRATION_NAME = re.compile(r"^(?P<version>\d{8}(?:\d{4})?)_[a-z0-9][a-z0-9_]*\.sql$")
 REPORT_PUBLICATION_SQL = """SELECT p.report_id::text AS report_id,r.run_id::text AS run_id,p.idempotency_key,
@@ -158,7 +159,7 @@ def candidate_migration_manifest(migrations_directory: Path = ROOT / "sql/migrat
     manifest = [{
         "path": f"sql/migrations/{path.name}",
         "version": MIGRATION_NAME.fullmatch(path.name).group("version"),  # type: ignore[union-attr]
-        "sha256": migration_statements_sha256(normalize_migration_statements(path.read_text(encoding="utf-8"))),
+        "sha256": hashlib.sha256(path.read_bytes()).hexdigest(),
     } for path in paths]
     if len({item["version"] for item in manifest}) != len(manifest):
         raise RuntimeError("candidate migration versions must be globally unique")
@@ -431,6 +432,34 @@ def validate_source_database_url(database_url: str, api_url: str) -> str:
     return database_url
 
 
+def validate_evidence_database_url(database_url: str, api_url: str) -> str:
+    api = urlparse(api_url)
+    project_ref = (api.hostname or "").split(".", 1)[0]
+    parsed = urlparse(database_url)
+    expected_pooler_user = f"{EVIDENCE_ROLE}.{project_ref}"
+    pooler = (
+        bool(re.fullmatch(r"[a-z0-9-]+\.pooler\.supabase\.com", parsed.hostname or ""))
+        and unquote(parsed.username or "") == expected_pooler_user
+        and parsed.port == 5432
+    )
+    direct = (
+        parsed.hostname == f"db.{project_ref}.supabase.co"
+        and unquote(parsed.username or "") == EVIDENCE_ROLE
+        and parsed.port in {None, 5432}
+    )
+    if (
+        parsed.scheme not in {"postgres", "postgresql"}
+        or not (pooler or direct)
+        or len(unquote(parsed.password or "")) < 24
+        or parsed.path != "/postgres"
+        or parsed.params
+        or parsed.query
+        or parsed.fragment
+    ):
+        raise ValueError("evidence database URL must use the scoped release reader login")
+    return database_url
+
+
 def _fetch_one(connection, query: str, parameters: tuple[object, ...] = ()) -> dict[str, object]:
     with connection.cursor() as cursor:
         cursor.execute(query, parameters)
@@ -444,15 +473,27 @@ def _fetch_all(connection, query: str, parameters: tuple[object, ...] = ()) -> l
         return [dict(row) for row in cursor.fetchall()]
 
 
-def collect_source_receipts(database_url: str, api_url: str, run_id: str) -> dict[str, object]:
-    """Read the source rows through the scoped dashboard login in a read-only transaction."""
+def collect_source_receipts(
+    database_url: str,
+    evidence_database_url: str,
+    api_url: str,
+    run_id: str,
+) -> dict[str, object]:
+    """Read visible claims and protected hashes through separate scoped logins."""
     validate_source_database_url(database_url, api_url)
+    validate_evidence_database_url(evidence_database_url, api_url)
     if not UUID_PATTERN.fullmatch(run_id):
         raise ValueError("completed run identifier is malformed")
     timestamp = "to_char({field} AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS.MS\"Z\"')"
-    with psycopg.connect(database_url, row_factory=dict_row) as connection:
+    with psycopg.connect(
+        database_url,
+        row_factory=dict_row,
+        sslmode="verify-full",
+        connect_timeout=15,
+    ) as connection:
         with connection.cursor() as cursor:
-            cursor.execute("SET TRANSACTION READ ONLY")
+            cursor.execute("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY")
+            cursor.execute("SET LOCAL statement_timeout='30s'")
         identity = _fetch_one(
             connection,
             "SELECT current_user AS database_user, current_setting('transaction_read_only') AS transaction_read_only",
@@ -502,25 +543,49 @@ def collect_source_receipts(database_url: str, api_url: str, run_id: str) -> dic
                   ) latest ON true
                  ORDER BY h.ticker LIMIT 100""",
         )
-        intelligence_runs = _fetch_all(connection,
-            "SELECT id::text AS id, phase, market_date::text AS market_date, policy_version FROM public.market_intelligence_runs WHERE id=%s::uuid",
-            (run_id,))
-        intelligence_events = _fetch_all(connection,
-            f"""SELECT id::text AS id, run_id::text AS run_id, content_hash,
-                      {EVENT_CANONICAL_SQL} AS canonical
-                 FROM public.market_events WHERE run_id=%s::uuid ORDER BY id""", (run_id,))
-        intelligence_rankings = _fetch_all(connection,
-            f"""SELECT id::text AS id, run_id::text AS run_id, event_id::text AS event_id, content_hash,
-                      {RANKING_CANONICAL_SQL} AS canonical
-                 FROM public.market_candidate_rankings WHERE run_id=%s::uuid ORDER BY rank""", (run_id,))
-        intelligence_packets = _fetch_all(connection,
-            "SELECT id::text AS id, run_id::text AS run_id, packet_hash, candidate_count, evidence_count, packet AS canonical FROM public.market_evidence_packets WHERE run_id=%s::uuid", (run_id,))
-        reports = _fetch_all(connection,
-            "SELECT id::text AS id, run_id::text AS run_id, packet_id::text AS packet_id, report_hash, rendered_hash, report AS canonical, rendered_text FROM public.market_reports WHERE run_id=%s::uuid ORDER BY created_at", (run_id,))
-        report_publications = _fetch_all(connection, REPORT_PUBLICATION_SQL, (run_id,))
         overdue_scheduled_phases = _fetch_all(
             connection,
             "SELECT market_date::text AS market_date, phase, to_char(deadline_at AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS.MS\"Z\"') AS deadline_at FROM public.read_overdue_scheduled_market_phases()",
+        )
+
+    project_ref = (urlparse(api_url).hostname or "").split(".", 1)[0]
+    # Keep this import at the post-migration boundary. protected_evidence shares
+    # canonical verification helpers with this module's release verifier.
+    from scripts.protected_evidence import PostgresReadOnlySource
+    with PostgresReadOnlySource(
+        evidence_database_url, project_ref,
+    ) as evidence_source:
+        evidence_connection = evidence_source.connection
+        if evidence_connection is None:
+            raise RuntimeError("release evidence reader authority is unavailable")
+        verified_authority = evidence_source.identity()
+        evidence_authority = {
+            "status": "verified",
+            "connection_id": verified_authority.get("connection_id"),
+            "read_only": verified_authority.get("read_only"),
+            "isolated_guard": verified_authority.get("isolated_guard"),
+        }
+        evidence_identity = _fetch_one(
+            evidence_connection,
+            "SELECT current_user AS evidence_database_user, current_setting('transaction_read_only') AS evidence_transaction_read_only",
+        )
+        intelligence_runs = _fetch_all(evidence_connection,
+            "SELECT id::text AS id, phase, market_date::text AS market_date, policy_version FROM public.market_intelligence_runs WHERE id=%s::uuid",
+            (run_id,))
+        intelligence_events = _fetch_all(evidence_connection,
+            f"""SELECT id::text AS id, run_id::text AS run_id, content_hash,
+                      {EVENT_CANONICAL_SQL} AS canonical
+                 FROM public.market_events WHERE run_id=%s::uuid ORDER BY id""", (run_id,))
+        intelligence_rankings = _fetch_all(evidence_connection,
+            f"""SELECT id::text AS id, run_id::text AS run_id, event_id::text AS event_id, content_hash,
+                      {RANKING_CANONICAL_SQL} AS canonical
+                 FROM public.market_candidate_rankings WHERE run_id=%s::uuid ORDER BY rank""", (run_id,))
+        intelligence_packets = _fetch_all(evidence_connection,
+            "SELECT id::text AS id, run_id::text AS run_id, packet_hash, candidate_count, evidence_count, packet AS canonical FROM public.market_evidence_packets WHERE run_id=%s::uuid", (run_id,))
+        reports = _fetch_all(evidence_connection,
+            "SELECT id::text AS id, run_id::text AS run_id, packet_id::text AS packet_id, report_hash, rendered_hash, report AS canonical, rendered_text FROM public.market_reports WHERE run_id=%s::uuid ORDER BY created_at", (run_id,))
+        report_publications = _fetch_all(
+            evidence_connection, REPORT_PUBLICATION_SQL, (run_id,),
         )
     for row in holdings:
         row["price_as_of"] = normalize_receipt_timestamp(row.get("price_as_of"))
@@ -540,21 +605,27 @@ def collect_source_receipts(database_url: str, api_url: str, run_id: str) -> dic
         "kind": "publication", "body": row["canonical"], "sha256": canonical_sha256(row["canonical"]),
     } for row in report_publications)
     return {
-        **identity,
-        "run": run,
-        **{key: int(value) for key, value in counts.items()},
-        "alerts": alerts,
-        "policy_version": policy.get("version"),
-        "holdings": holdings,
-        "portfolio_data_as_of": max(price_times) if price_times else None,
-        "intelligence_runs": intelligence_runs,
-        "intelligence_events": intelligence_events,
-        "intelligence_rankings": intelligence_rankings,
-        "intelligence_packets": intelligence_packets,
-        "reports": reports,
-        "report_publications": report_publications,
-        "canonical_records": canonical_records,
-        "overdue_scheduled_phases": overdue_scheduled_phases,
+        "dashboard": {
+            **identity,
+            "run": run,
+            **{key: int(value) for key, value in counts.items()},
+            "alerts": alerts,
+            "policy_version": policy.get("version"),
+            "holdings": holdings,
+            "portfolio_data_as_of": max(price_times) if price_times else None,
+            "overdue_scheduled_phases": overdue_scheduled_phases,
+        },
+        "evidence": {
+            **evidence_identity,
+            "evidence_authority": evidence_authority,
+            "intelligence_runs": intelligence_runs,
+            "intelligence_events": intelligence_events,
+            "intelligence_rankings": intelligence_rankings,
+            "intelligence_packets": intelligence_packets,
+            "reports": reports,
+            "report_publications": report_publications,
+            "canonical_records": canonical_records,
+        },
     }
 
 
@@ -578,19 +649,41 @@ def reconcile_source_receipts(
     def fail() -> None:
         raise RuntimeError("dashboard claim differs from its source receipt")
 
-    overdue = source.get("overdue_scheduled_phases")
+    dashboard = source.get("dashboard")
+    evidence = source.get("evidence")
+    if not isinstance(dashboard, Mapping) or not isinstance(evidence, Mapping):
+        fail()
+    overdue = dashboard.get("overdue_scheduled_phases")
     if not isinstance(overdue, list):
         fail()
     if overdue:
         raise RuntimeError("overdue scheduled phase is missing a completed or suppressed receipt")
 
-    if source.get("database_user") != RUNTIME_ROLE or source.get("transaction_read_only") != "on":
+    if dashboard.get("database_user") != RUNTIME_ROLE or dashboard.get("transaction_read_only") != "on":
+        fail()
+    if (
+        evidence.get("evidence_database_user") != EVIDENCE_ROLE
+        or evidence.get("evidence_transaction_read_only") != "on"
+    ):
+        fail()
+    evidence_authority = evidence.get("evidence_authority")
+    if (
+        not isinstance(evidence_authority, Mapping)
+        or set(evidence_authority) != {
+            "status", "connection_id", "read_only", "isolated_guard",
+        }
+        or evidence_authority.get("status") != "verified"
+        or not isinstance(evidence_authority.get("connection_id"), str)
+        or re.fullmatch(r"[0-9a-f]{64}", evidence_authority["connection_id"]) is None
+        or evidence_authority.get("read_only") is not True
+        or evidence_authority.get("isolated_guard") is not False
+    ):
         fail()
     detail_data = detail.get("data")
     if not isinstance(detail_data, dict):
         fail()
     visible_run = detail_data.get("run")
-    source_run = source.get("run")
+    source_run = dashboard.get("run")
     if not isinstance(visible_run, dict) or not isinstance(source_run, dict):
         fail()
     for field in ("id", "kind", "status", "finished_at", "data_as_of"):
@@ -604,19 +697,19 @@ def reconcile_source_receipts(
         fail()
     requests = detail_data.get("request_receipts")
     evaluations = detail_data.get("evaluations")
-    if not isinstance(requests, list) or len(requests) != source.get("gateway_request_count"):
+    if not isinstance(requests, list) or len(requests) != dashboard.get("gateway_request_count"):
         fail()
-    if not isinstance(evaluations, list) or len(evaluations) != source.get("evaluation_count"):
+    if not isinstance(evaluations, list) or len(evaluations) != dashboard.get("evaluation_count"):
         fail()
     runs_data = payloads.get("/v1/runs", {}).get("data")
     runs = runs_data.get("runs") if isinstance(runs_data, dict) else None
     visible_summary = next((row for row in runs or [] if isinstance(row, dict) and row.get("id") == run_id), None)
-    if not isinstance(visible_summary, dict) or visible_summary.get("suggestion_count") != source.get("suggestion_count"):
+    if not isinstance(visible_summary, dict) or visible_summary.get("suggestion_count") != dashboard.get("suggestion_count"):
         fail()
 
     alerts_data = payloads.get("/v1/alerts", {}).get("data")
     visible_alerts = alerts_data.get("alerts") if isinstance(alerts_data, dict) else None
-    source_alerts = source.get("alerts")
+    source_alerts = dashboard.get("alerts")
     if not isinstance(visible_alerts, list) or not isinstance(source_alerts, list):
         fail()
     source_by_id = {row.get("id"): row for row in source_alerts if isinstance(row, dict)}
@@ -637,7 +730,7 @@ def reconcile_source_receipts(
             fail()
 
     system_data = payloads.get("/v1/system", {}).get("data")
-    if not isinstance(system_data, dict) or system_data.get("policy_version") != source.get("policy_version"):
+    if not isinstance(system_data, dict) or system_data.get("policy_version") != dashboard.get("policy_version"):
         fail()
 
     portfolio_data = payloads.get("/v1/portfolio", {}).get("data")
@@ -645,7 +738,7 @@ def reconcile_source_receipts(
     today_portfolio = today_data.get("portfolio") if isinstance(today_data, dict) else None
     visible_holdings = portfolio_data.get("holdings") if isinstance(portfolio_data, dict) else None
     today_holdings = today_portfolio.get("holdings") if isinstance(today_portfolio, dict) else None
-    source_holdings = source.get("holdings")
+    source_holdings = dashboard.get("holdings")
     if not isinstance(visible_holdings, list) or not isinstance(today_holdings, list) or not isinstance(source_holdings, list):
         fail()
     source_by_ticker = {row.get("ticker"): row for row in source_holdings if isinstance(row, dict)}
@@ -664,9 +757,9 @@ def reconcile_source_receipts(
                     fail()
             if holding.get("price") is not None and holding.get("price") != row.get("price"):
                 fail()
-    if today_portfolio.get("data_as_of") != source.get("portfolio_data_as_of"):
+    if today_portfolio.get("data_as_of") != dashboard.get("portfolio_data_as_of"):
         fail()
-    chains = {key: source.get(key) for key in (
+    chains = {key: evidence.get(key) for key in (
         "intelligence_runs", "intelligence_events", "intelligence_rankings",
         "intelligence_packets", "reports", "report_publications",
     )}
@@ -721,12 +814,29 @@ def reconcile_source_receipts(
     if not isinstance(visible_reports, list) or not report_ids.issubset({row.get("id") for row in visible_reports if isinstance(row, dict)}):
         fail()
     return {
-        "status": "verified", "database_role": RUNTIME_ROLE, "claims_checked": 11,
+        "status": "verified", "database_role": RUNTIME_ROLE,
+        "evidence_database_role": EVIDENCE_ROLE, "claims_checked": 11,
+        "evidence_reader_authority": dict(evidence_authority),
+        "source_reconciliation_receipt": {
+            "status": "verified",
+            "dashboard": {
+                "role": RUNTIME_ROLE,
+                "transaction_read_only": True,
+            },
+            "evidence": {
+                "role": EVIDENCE_ROLE,
+                "transaction_read_only": True,
+                "authority": dict(evidence_authority),
+            },
+            "canonical_hashes": "verified",
+            "run_relationships": "verified",
+            "claims_checked": 11,
+        },
         "counts": {"runs": len(chains["intelligence_runs"]), "events": len(chains["intelligence_events"]),
                    "rankings": len(chains["intelligence_rankings"]), "packets": len(chains["intelligence_packets"]),
                    "reports": len(chains["reports"]), "report_publications": len(chains["report_publications"])},
         "relationships_verified": True, "hashes_verified": True,
-        "canonical_records": source.get("canonical_records"),
+        "canonical_records": evidence.get("canonical_records"),
         "scheduled_chain": {
             "run_id": run_id,
             "intelligence_run_id": chains["intelligence_runs"][0]["id"],
@@ -940,6 +1050,11 @@ def run_http_canary(
         "financial_write_routes": 0,
         "source_reconciliation": source_receipt["status"],
         "source_database_role": source_receipt["database_role"],
+        "evidence_database_role": source_receipt["evidence_database_role"],
+        "evidence_reader_authority": source_receipt["evidence_reader_authority"],
+        "source_reconciliation_receipt": source_receipt[
+            "source_reconciliation_receipt"
+        ],
         "friend_invitations": "disabled",
         "brokerage_authority": "none",
     }
@@ -957,6 +1072,9 @@ def main() -> int:
     database_url = os.environ.get("DASHBOARD_DATABASE_URL", "").strip()
     if not database_url:
         raise SystemExit("DASHBOARD_DATABASE_URL is required")
+    evidence_database_url = os.environ.get("RELEASE_READONLY_DATABASE_URL", "").strip()
+    if not evidence_database_url:
+        raise SystemExit("RELEASE_READONLY_DATABASE_URL is required")
     owner_email = os.environ.get("DASHBOARD_OWNER_EMAIL", "").strip()
     owner_user_id = os.environ.get("DASHBOARD_OWNER_USER_ID", "").strip()
     non_owner_email = os.environ.get("DASHBOARD_NON_OWNER_EMAIL", "").strip()
@@ -980,7 +1098,9 @@ def main() -> int:
         tokens.append(non_owner_token)
         receipt = run_http_canary(
             arguments.api_url, arguments.origin, token, non_owner_token,
-            source_reader=lambda run_id: collect_source_receipts(database_url, arguments.api_url, run_id),
+            source_reader=lambda run_id: collect_source_receipts(
+                database_url, evidence_database_url, arguments.api_url, run_id,
+            ),
         )
     finally:
         cleanup_error = None

@@ -9,6 +9,12 @@ from scripts import verify_owner_dashboard_deployment as verify
 
 ORIGIN = "https://stocks.example.com"
 API_URL = "https://hlxpxbxhqctwsqizwjjy.supabase.co/functions/v1/owner-dashboard-api"
+EVIDENCE_AUTHORITY = {
+    "status": "verified",
+    "connection_id": "a" * 64,
+    "read_only": True,
+    "isolated_guard": False,
+}
 
 
 def envelope(data, *, freshness="fresh", market_state="regular", data_as_of="2026-09-03T20:00:00.000Z"):
@@ -35,13 +41,16 @@ def v1_chain(run_id):
     publication_canonical = {"report_id": report_id, "status": "delivered", "telegram_message_ids": [7]}
     digest = lambda value: hashlib.sha256(json.dumps(value, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
     return {
-        "overdue_scheduled_phases": [],
+        "evidence_database_user": verify.EVIDENCE_ROLE,
+        "evidence_transaction_read_only": "on",
+        "evidence_authority": dict(EVIDENCE_AUTHORITY),
         "intelligence_runs": [{"id": run_id}],
         "intelligence_events": [{"id": event_id, "run_id": run_id, "canonical": event_canonical, "content_hash": digest(event_canonical)}],
         "intelligence_rankings": [{"id": "55555555-5555-4555-8555-555555555555", "run_id": run_id, "event_id": event_id, "canonical": ranking_canonical, "content_hash": digest(ranking_canonical)}],
         "intelligence_packets": [{"id": packet_id, "run_id": run_id, "canonical": packet_canonical, "packet_hash": digest(packet_canonical), "candidate_count": 1, "evidence_count": 1}],
         "reports": [{"id": report_id, "run_id": run_id, "packet_id": packet_id, "canonical": report_canonical, "report_hash": digest(report_canonical), "rendered_text": rendered_text, "rendered_hash": hashlib.sha256(rendered_text.encode()).hexdigest()}],
         "report_publications": [{"report_id": report_id, "run_id": run_id, "status": "delivered", "telegram_message_ids": [7], "telegram_accepted_at": "2026-09-03T20:00:00.000Z", "canonical": publication_canonical}],
+        "canonical_records": [],
     }
 
 
@@ -285,25 +294,28 @@ def test_http_canary_uses_only_get_and_checks_anonymous_and_non_owner_denial():
 
     def source_reader(run_id):
         return {
-            "database_user": verify.RUNTIME_ROLE,
-            "transaction_read_only": "on",
-            "run": {
-                "id": run_id,
-                "kind": "on-demand",
-                "status": "completed",
-                "finished_at": "2026-09-03T20:00:00.000Z",
-                "data_as_of": None,
-                "write_counts": {"suggestions": 0},
-                "telegram_message_ids": [],
+            "dashboard": {
+                "database_user": verify.RUNTIME_ROLE,
+                "transaction_read_only": "on",
+                "run": {
+                    "id": run_id,
+                    "kind": "on-demand",
+                    "status": "completed",
+                    "finished_at": "2026-09-03T20:00:00.000Z",
+                    "data_as_of": None,
+                    "write_counts": {"suggestions": 0},
+                    "telegram_message_ids": [],
+                },
+                "gateway_request_count": 1,
+                "evaluation_count": 0,
+                "suggestion_count": 0,
+                "alerts": [],
+                "policy_version": None,
+                "holdings": [],
+                "portfolio_data_as_of": None,
+                "overdue_scheduled_phases": [],
             },
-            "gateway_request_count": 1,
-            "evaluation_count": 0,
-            "suggestion_count": 0,
-            "alerts": [],
-            "policy_version": None,
-            "holdings": [],
-            "portfolio_data_as_of": None,
-            **v1_chain(run_id),
+            "evidence": v1_chain(run_id),
         }
 
     receipt = verify.run_http_canary(
@@ -314,6 +326,8 @@ def test_http_canary_uses_only_get_and_checks_anonymous_and_non_owner_denial():
     assert receipt["owner_route_count"] == 10
     assert receipt["source_reconciliation"] == "verified"
     assert receipt["source_database_role"] == verify.RUNTIME_ROLE
+    assert receipt["evidence_database_role"] == verify.EVIDENCE_ROLE
+    assert receipt["evidence_reader_authority"] == EVIDENCE_AUTHORITY
     assert {method for method, _url, _headers in calls} == {"GET"}
 
 
@@ -396,28 +410,31 @@ def test_source_reconciliation_rejects_unsupported_run_send_policy_and_price_cla
         "incomplete_stages": [],
     })
     source = {
-        "database_user": verify.RUNTIME_ROLE,
-        "transaction_read_only": "on",
-        "run": {
-            "id": run_id, "kind": "post-market", "status": "completed",
-            "finished_at": "2026-09-03T20:00:00.000Z", "data_as_of": "2026-09-03T20:00:00.000Z",
-            "write_counts": {"suggestions": 1}, "telegram_message_ids": [123],
+        "dashboard": {
+            "database_user": verify.RUNTIME_ROLE,
+            "transaction_read_only": "on",
+            "run": {
+                "id": run_id, "kind": "post-market", "status": "completed",
+                "finished_at": "2026-09-03T20:00:00.000Z", "data_as_of": "2026-09-03T20:00:00.000Z",
+                "write_counts": {"suggestions": 1}, "telegram_message_ids": [123],
+            },
+            "gateway_request_count": 1,
+            "evaluation_count": 1,
+            "suggestion_count": 1,
+            "alerts": [{
+                "id": "7903b3cc-05b7-4f90-bbc2-7e80a3a59e22", "status": "delivered",
+                "telegram_message_ids": [123], "rendered_hash": "a" * 64,
+                "template_version": "3", "event_status": "triggered",
+            }],
+            "policy_version": 17,
+            "holdings": [{
+                "ticker": "VTI", "shares": "2", "average_cost": "100", "price": "110",
+                "price_as_of": "2026-09-03T20:00:00.000Z", "price_source": "yahoo-chart",
+            }],
+            "portfolio_data_as_of": "2026-09-03T20:00:00.000Z",
+            "overdue_scheduled_phases": [],
         },
-        "gateway_request_count": 1,
-        "evaluation_count": 1,
-        "suggestion_count": 1,
-        "alerts": [{
-            "id": "7903b3cc-05b7-4f90-bbc2-7e80a3a59e22", "status": "delivered",
-            "telegram_message_ids": [123], "rendered_hash": "a" * 64,
-            "template_version": "3", "event_status": "triggered",
-        }],
-        "policy_version": 17,
-        "holdings": [{
-            "ticker": "VTI", "shares": "2", "average_cost": "100", "price": "110",
-            "price_as_of": "2026-09-03T20:00:00.000Z", "price_source": "yahoo-chart",
-        }],
-        "portfolio_data_as_of": "2026-09-03T20:00:00.000Z",
-        **v1_chain(run_id),
+        "evidence": v1_chain(run_id),
     }
 
     receipt = verify.reconcile_source_receipts(payloads, detail, source, run_id)
@@ -427,11 +444,11 @@ def test_source_reconciliation_rejects_unsupported_run_send_policy_and_price_cla
     assert receipt["scheduled_chain"]["run_id"] == run_id
 
     for path, value in [
-        (("run", "write_counts"), {"suggestions": 2}),
-        (("alerts", 0, "telegram_message_ids"), [999]),
-        (("policy_version",), 18),
-        (("holdings", 0, "price"), "109"),
-        (("intelligence_events", 0, "content_hash"), "invalid"),
+        (("dashboard", "run", "write_counts"), {"suggestions": 2}),
+        (("dashboard", "alerts", 0, "telegram_message_ids"), [999]),
+        (("dashboard", "policy_version"), 18),
+        (("dashboard", "holdings", 0, "price"), "109"),
+        (("evidence", "intelligence_events", 0, "content_hash"), "invalid"),
     ]:
         changed = json.loads(json.dumps(source))
         target = changed
@@ -442,19 +459,49 @@ def test_source_reconciliation_rejects_unsupported_run_send_policy_and_price_cla
             verify.reconcile_source_receipts(payloads, detail, changed, run_id)
 
     changed = json.loads(json.dumps(source))
-    changed["intelligence_events"][0]["canonical"]["title"] = "replaced retained source body"
+    changed["evidence"]["intelligence_events"][0]["canonical"]["title"] = "replaced retained source body"
     with pytest.raises(RuntimeError, match="source receipt"):
         verify.reconcile_source_receipts(payloads, detail, changed, run_id)
 
 
 def test_source_reconciliation_requires_scoped_read_only_database_role():
     source = {
-        "database_user": "postgres", "transaction_read_only": "off", "run": {},
-        "gateway_request_count": 0, "evaluation_count": 0, "suggestion_count": 0,
-        "alerts": [], "policy_version": None, "holdings": [], "portfolio_data_as_of": None,
+        "dashboard": {
+            "database_user": "postgres", "transaction_read_only": "off",
+            "overdue_scheduled_phases": [],
+        },
+        "evidence": v1_chain("6903b3cc-05b7-4f90-bbc2-7e80a3a59e22"),
     }
     with pytest.raises(RuntimeError, match="source receipt"):
         verify.reconcile_source_receipts({}, {}, source, "6903b3cc-05b7-4f90-bbc2-7e80a3a59e22")
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    (
+        ("evidence_database_user", "postgres"),
+        ("evidence_transaction_read_only", "off"),
+    ),
+)
+def test_source_reconciliation_requires_a_scoped_read_only_evidence_role(
+    field, value,
+):
+    source = {
+        "dashboard": {
+            "database_user": verify.RUNTIME_ROLE,
+            "transaction_read_only": "on",
+            "overdue_scheduled_phases": [],
+        },
+        "evidence": {
+            "evidence_database_user": verify.EVIDENCE_ROLE,
+            "evidence_transaction_read_only": "on",
+        },
+    }
+    source["evidence"][field] = value
+    with pytest.raises(RuntimeError, match="source receipt"):
+        verify.reconcile_source_receipts(
+            {}, {}, source, "6903b3cc-05b7-4f90-bbc2-7e80a3a59e22",
+        )
 
 
 def test_source_reconciliation_rejects_an_overdue_scheduled_phase():
@@ -468,12 +515,14 @@ def test_source_reconciliation_rejects_an_overdue_scheduled_phase():
     payloads["/v1/reports"] = envelope({"reports": [{"id": "44444444-4444-4444-8444-444444444444"}]})
     detail = envelope({"run": payloads["/v1/runs"]["data"]["runs"][0], "request_receipts": [], "evaluations": [], "write_counts": {}, "telegram_message_ids": [], "incomplete_stages": []})
     source = {
-        "database_user": verify.RUNTIME_ROLE, "transaction_read_only": "on",
-        "run": {"id": run_id, "kind": "post-market", "status": "completed", "finished_at": "2026-09-03T20:00:00.000Z", "data_as_of": None, "write_counts": {}, "telegram_message_ids": []},
-        "gateway_request_count": 0, "evaluation_count": 0, "suggestion_count": 0,
-        "alerts": [], "policy_version": None, "holdings": [], "portfolio_data_as_of": None,
-        **v1_chain(run_id),
-        "overdue_scheduled_phases": [{"market_date": "2026-09-03", "phase": "post-market", "deadline_at": "2026-09-03T22:00:00.000Z"}],
+        "dashboard": {
+            "database_user": verify.RUNTIME_ROLE, "transaction_read_only": "on",
+            "run": {"id": run_id, "kind": "post-market", "status": "completed", "finished_at": "2026-09-03T20:00:00.000Z", "data_as_of": None, "write_counts": {}, "telegram_message_ids": []},
+            "gateway_request_count": 0, "evaluation_count": 0, "suggestion_count": 0,
+            "alerts": [], "policy_version": None, "holdings": [], "portfolio_data_as_of": None,
+            "overdue_scheduled_phases": [{"market_date": "2026-09-03", "phase": "post-market", "deadline_at": "2026-09-03T22:00:00.000Z"}],
+        },
+        "evidence": v1_chain(run_id),
     }
     with pytest.raises(RuntimeError, match="overdue scheduled phase"):
         verify.reconcile_source_receipts(payloads, detail, source, run_id)
@@ -492,6 +541,181 @@ def test_source_database_url_must_use_the_scoped_session_pooler_login():
     ]:
         with pytest.raises(ValueError, match="source database"):
             verify.validate_source_database_url(invalid, API_URL)
+
+
+def test_evidence_database_url_must_use_the_scoped_release_reader_login():
+    valid = (
+        "postgresql://stock_agent_release_reader_runtime.hlxpxbxhqctwsqizwjjy:"
+        "evidence-password-longer-than-24@aws-1-us-west-2.pooler.supabase.com:"
+        "5432/postgres"
+    )
+    assert verify.validate_evidence_database_url(valid, API_URL) == valid
+    for invalid in [
+        valid.replace("stock_agent_release_reader_runtime", "postgres"),
+        valid.replace("stock_agent_release_reader_runtime", verify.RUNTIME_ROLE),
+        valid.replace("evidence-password-longer-than-24", "%41" * 8),
+        valid.replace(":5432/", ":6543/"),
+        valid.replace("pooler.supabase.com", "example.com"),
+    ]:
+        with pytest.raises(ValueError, match="evidence database"):
+            verify.validate_evidence_database_url(invalid, API_URL)
+
+
+def test_source_collector_keeps_visible_and_protected_queries_on_separate_read_only_connections(
+    monkeypatch,
+):
+    dashboard_url = (
+        "postgresql://stock_agent_dashboard_runtime.hlxpxbxhqctwsqizwjjy:"
+        "dashboard-password-longer-than-24@aws-1-us-west-2.pooler.supabase.com:"
+        "5432/postgres"
+    )
+    evidence_url = (
+        "postgresql://stock_agent_release_reader_runtime.hlxpxbxhqctwsqizwjjy:"
+        "evidence-password-longer-than-24@aws-1-us-west-2.pooler.supabase.com:"
+        "5432/postgres"
+    )
+    run_id = "6903b3cc-05b7-4f90-bbc2-7e80a3a59e22"
+    connections = []
+
+    class Cursor:
+        def __init__(self, connection):
+            self.connection = connection
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        def execute(self, query, parameters=()):
+            self.connection.queries.append((query, parameters))
+
+    class Connection:
+        def __init__(self, label, kwargs):
+            self.label = label
+            self.kwargs = kwargs
+            self.queries = []
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        def cursor(self):
+            return Cursor(self)
+
+    def connect(url, **kwargs):
+        assert url == dashboard_url
+        connection = Connection("dashboard", kwargs)
+        connections.append(connection)
+        return connection
+
+    class EvidenceSource:
+        def __init__(self, url, project_ref):
+            assert url == evidence_url
+            assert project_ref == "hlxpxbxhqctwsqizwjjy"
+            self.connection = Connection("evidence", {
+                "row_factory": verify.dict_row,
+                "sslmode": "verify-full",
+                "connect_timeout": 15,
+            })
+
+        def __enter__(self):
+            connections.append(self.connection)
+            self.connection.queries.extend([
+                ("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY", ()),
+                ("SET LOCAL statement_timeout='30s'", ()),
+            ])
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        def identity(self):
+            return {
+                "connection_id": "a" * 64,
+                "read_only": True,
+                "isolated_guard": False,
+            }
+
+    def fetch_one(connection, query, parameters=()):
+        connection.queries.append((query, parameters))
+        if "current_user AS database_user" in query:
+            return {
+                "database_user": verify.RUNTIME_ROLE,
+                "transaction_read_only": "on",
+            }
+        if "current_user AS evidence_database_user" in query:
+            return {
+                "evidence_database_user": verify.EVIDENCE_ROLE,
+                "evidence_transaction_read_only": "on",
+            }
+        if "FROM public.analysis_runs" in query:
+            return {
+                "id": run_id, "kind": "post-market", "status": "completed",
+                "finished_at": "2026-09-03T20:00:00.000Z", "data_as_of": None,
+                "write_counts": {}, "telegram_message_ids": [],
+            }
+        if "gateway_request_count" in query:
+            return {
+                "gateway_request_count": 0,
+                "evaluation_count": 0,
+                "suggestion_count": 0,
+            }
+        return {}
+
+    def fetch_all(connection, query, parameters=()):
+        connection.queries.append((query, parameters))
+        return []
+
+    from scripts import protected_evidence
+
+    monkeypatch.setattr(verify.psycopg, "connect", connect)
+    monkeypatch.setattr(
+        protected_evidence, "PostgresReadOnlySource", EvidenceSource,
+    )
+    monkeypatch.setattr(verify, "_fetch_one", fetch_one)
+    monkeypatch.setattr(verify, "_fetch_all", fetch_all)
+
+    receipt = verify.collect_source_receipts(
+        dashboard_url, evidence_url, API_URL, run_id,
+    )
+
+    assert [connection.label for connection in connections] == [
+        "dashboard", "evidence",
+    ]
+    assert all(connection.kwargs == {
+        "row_factory": verify.dict_row,
+        "sslmode": "verify-full",
+        "connect_timeout": 15,
+    } for connection in connections)
+    for connection in connections:
+        transaction_queries = [query for query, _parameters in connection.queries]
+        assert "SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY" in transaction_queries
+        assert "SET LOCAL statement_timeout='30s'" in transaction_queries
+
+    dashboard_queries = "\n".join(
+        query for query, _parameters in connections[0].queries
+    )
+    evidence_queries = "\n".join(
+        query for query, _parameters in connections[1].queries
+    )
+    protected_relations = (
+        "public.market_intelligence_runs",
+        "public.market_events",
+        "public.market_candidate_rankings",
+        "public.market_evidence_packets",
+        "public.market_reports",
+        "public.market_report_publications",
+    )
+    assert all(relation not in dashboard_queries for relation in protected_relations)
+    assert all(relation in evidence_queries for relation in protected_relations)
+    assert receipt["dashboard"]["database_user"] == verify.RUNTIME_ROLE
+    assert receipt["evidence"]["evidence_database_user"] == verify.EVIDENCE_ROLE
+    assert receipt["evidence"]["evidence_authority"] == EVIDENCE_AUTHORITY
+    assert dashboard_url not in str(receipt)
+    assert evidence_url not in str(receipt)
 
 
 def test_source_timestamp_normalization_fails_closed():

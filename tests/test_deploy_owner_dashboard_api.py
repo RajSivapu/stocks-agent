@@ -1,3 +1,5 @@
+import hashlib
+import shutil
 import stat
 from pathlib import Path
 
@@ -13,6 +15,29 @@ DATABASE_URL = (
     "postgresql://stock_agent_dashboard_runtime.hlxpxbxhqctwsqizwjjy:"
     "dashboard-password-longer-than-24@aws-0-us-east-1.pooler.supabase.com:5432/postgres"
 )
+EVIDENCE_DATABASE_URL = (
+    "postgresql://stock_agent_release_reader_runtime.hlxpxbxhqctwsqizwjjy:"
+    "evidence-password-longer-than-24@aws-0-us-east-1.pooler.supabase.com:5432/postgres"
+)
+EVIDENCE_AUTHORITY = {
+    "status": "verified", "connection_id": "a" * 64,
+    "read_only": True, "isolated_guard": False,
+}
+SOURCE_RECONCILIATION = {
+    "status": "verified",
+    "dashboard": {
+        "role": "stock_agent_dashboard_runtime",
+        "transaction_read_only": True,
+    },
+    "evidence": {
+        "role": "stock_agent_release_reader_runtime",
+        "transaction_read_only": True,
+        "authority": EVIDENCE_AUTHORITY,
+    },
+    "canonical_hashes": "verified",
+    "run_relationships": "verified",
+    "claims_checked": 11,
+}
 ADMIN_URL = (
     "postgresql://postgres:admin-password-longer-than-24@"
     "db.hlxpxbxhqctwsqizwjjy.supabase.co:5432/postgres?sslmode=require"
@@ -249,9 +274,10 @@ def test_release_source_refuses_the_superseded_thin_dashboard(tmp_path):
     }
 
 
-def test_release_migrations_are_applied_in_order_once_with_candidate_hashes(tmp_path):
+def test_release_migrations_are_applied_in_order_once_with_candidate_hashes(tmp_path, monkeypatch):
+    monkeypatch.setattr(deploy, "legacy_migration_receipts", lambda: ())
     migrations = []
-    for name in ("20260926_report_suppression_reasons.sql", "20260927_release_evidence_reader.sql", "20260928_future_addition.sql"):
+    for name in ("20261018_first.sql", "20261019_second.sql", "20261020_future_addition.sql"):
         path = tmp_path / name
         path.write_text(f"-- {name}\nSELECT 1;\n")
         migrations.append(path)
@@ -260,9 +286,12 @@ def test_release_migrations_are_applied_in_order_once_with_candidate_hashes(tmp_
         def __init__(self):
             self.statements = []
             self.rows = []
+            self.prepared = []
 
-        def execute(self, statement, params=None):
+        def execute(self, statement, params=None, **kwargs):
             self.statements.append(statement)
+            if "prepare" in kwargs:
+                self.prepared.append((statement, kwargs["prepare"]))
 
         def fetchall(self):
             return self.rows
@@ -270,17 +299,102 @@ def test_release_migrations_are_applied_in_order_once_with_candidate_hashes(tmp_
     cursor = Cursor()
     manifest = deploy.candidate_migration_manifest(tmp_path)
     receipt = deploy.apply_release_migrations(cursor, manifest, tmp_path)
-    assert [row["version"] for row in receipt["applied"]] == ["20260926", "20260927", "20260928"]
+    assert [row["version"] for row in receipt["applied"]] == ["20261018", "20261019", "20261020"]
     assert receipt["skipped"] == []
-    assert [path.read_text() for path in migrations] == [s for s in cursor.statements if s.startswith("--")]
+    assert [s for s in cursor.statements if s == "SELECT 1"] == ["SELECT 1"] * 3
+    assert cursor.prepared == [("SELECT 1", True)] * 3
     assert all(len(row["sha256"]) == 64 for row in receipt["candidate"])
     manifest[0]["sha256"] = "0" * 64
     with pytest.raises(RuntimeError, match="hash"):
         deploy.apply_release_migrations(Cursor(), manifest, tmp_path)
 
 
-def test_migration_ledger_skips_verified_rows_and_refuses_hash_drift(tmp_path):
-    path = tmp_path / "20260926_report_suppression_reasons.sql"
+def test_wrapped_migration_executes_inside_the_callers_transaction(tmp_path, monkeypatch):
+    monkeypatch.setattr(deploy, "legacy_migration_receipts", lambda: ())
+    path = tmp_path / "20261017_authority.sql"
+    path.write_text("BEGIN;\nREVOKE USAGE ON SCHEMA extensions FROM reader_role;\nCOMMIT;\n")
+
+    class Cursor:
+        def __init__(self):
+            self.statements = []
+            self.reads = 0
+
+        def execute(self, statement, params=None, **kwargs):
+            self.statements.append((statement, params))
+            if "prepare" in kwargs:
+                assert kwargs == {"prepare": True}
+
+        def fetchall(self):
+            self.reads += 1
+            return []
+
+    cursor = Cursor()
+    manifest = deploy.candidate_migration_manifest(tmp_path)
+    receipt = deploy.apply_release_migrations(cursor, manifest, tmp_path)
+
+    executed = [statement for statement, _params in cursor.statements]
+    assert "BEGIN" not in executed and "COMMIT" not in executed
+    assert "REVOKE USAGE ON SCHEMA extensions FROM reader_role" in executed
+    assert receipt["applied"] == manifest
+
+
+@pytest.mark.parametrize("sql", (
+    "BEGIN; SELECT 1; ROLLBACK;",
+    "BEGIN; COMMIT; SELECT 1;",
+    "SELECT 1; COMMIT;",
+    "BEGIN WORK; SELECT 1; COMMIT WORK;",
+    "BEGIN; SAVEPOINT nested; SELECT 1; COMMIT;",
+    "BEGIN; RELEASE SAVEPOINT nested; COMMIT;",
+    "BEGIN; SET TRANSACTION READ ONLY; COMMIT;",
+    "BEGIN; SET TRANSACTION SNAPSHOT '00000003-0000001B-1'; COMMIT;",
+    "END;",
+    "ABORT;",
+    "PREPARE TRANSACTION 'release';",
+    "SELECT 1; COMMIT/**/AND CHAIN; SELECT 2;",
+    "SELECT 1; -- comment\rCOMMIT;",
+    "SELECT 1 AS before$tag$; COMMIT; SELECT 1 AS after$tag$;",
+    "SET/**/TRANSACTION READ ONLY;",
+    "START/**/TRANSACTION;",
+    "END/**/WORK;",
+))
+def test_migration_executor_rejects_unsafe_transaction_control(sql):
+    with pytest.raises(RuntimeError, match="transaction control"):
+        deploy.migration_execution_statements(sql)
+
+
+@pytest.mark.parametrize("sql", (
+    "SELECT 'BEGIN; COMMIT';",
+    'SELECT "COMMIT" FROM example;',
+    "-- BEGIN;\nSELECT 1; /* COMMIT; */",
+    "CREATE FUNCTION example() RETURNS void LANGUAGE plpgsql AS $$ BEGIN RETURN; END $$;",
+))
+def test_migration_executor_ignores_non_top_level_transaction_words(sql):
+    statements = deploy.migration_execution_statements(sql)
+    assert len(statements) == 1
+    assert len(deploy.parse_sql(statements[0])) == 1
+
+
+@pytest.mark.parametrize(("sql", "expected"), (
+    ("-- é\nSELECT 1;", ["SELECT 1"]),
+    ("SELECT 'é'; SELECT 2;", ["SELECT 'é'", "SELECT 2"]),
+    ("SELECT 'é' AS café; SELECT '東京';", ["SELECT 'é' AS café", "SELECT '東京'"]),
+))
+def test_migration_executor_preserves_multibyte_statement_boundaries(sql, expected):
+    statements = deploy.migration_execution_statements(sql)
+    assert statements == expected
+    assert all(len(deploy.parse_sql(statement)) == 1 for statement in statements)
+
+
+def test_every_candidate_migration_parses_to_single_statement_executes():
+    for path in sorted((deploy.ROOT / "sql/migrations").glob("*.sql")):
+        statements = deploy.migration_execution_statements(path.read_text())
+        assert statements, path
+        assert all(len(deploy.parse_sql(statement)) == 1 for statement in statements), path
+
+
+def test_migration_ledger_skips_verified_rows_and_refuses_hash_drift(tmp_path, monkeypatch):
+    monkeypatch.setattr(deploy, "legacy_migration_receipts", lambda: ())
+    path = tmp_path / "20261018_report_suppression_reasons.sql"
     path.write_text("SELECT 26;\n")
     manifest = deploy.candidate_migration_manifest(tmp_path)
 
@@ -289,14 +403,12 @@ def test_migration_ledger_skips_verified_rows_and_refuses_hash_drift(tmp_path):
             self.rows, self.calls = rows, 0
             self.statements = []
 
-        def execute(self, statement, params=None):
+        def execute(self, statement, params=None, **_kwargs):
             self.statements.append((statement, params))
 
         def fetchall(self):
             self.calls += 1
-            return self.rows if self.calls == 1 else [
-                (row[1], [path.read_text()]) for row in self.rows
-            ]
+            return self.rows if self.calls == 1 else []
 
     existing = [(manifest[0]["path"], manifest[0]["version"], manifest[0]["sha256"])]
     receipt = deploy.apply_release_migrations(Cursor(existing), manifest, tmp_path)
@@ -308,9 +420,14 @@ def test_migration_ledger_skips_verified_rows_and_refuses_hash_drift(tmp_path):
         deploy.apply_release_migrations(Cursor(drifted), manifest, tmp_path)
 
 
-def test_migration_ledger_bootstraps_only_matching_native_statement_receipts(tmp_path):
-    path = tmp_path / "20260928_native.sql"; path.write_text("SELECT 28;\n")
-    manifest = deploy.candidate_migration_manifest(tmp_path)
+def test_migration_ledger_bootstraps_only_matching_pinned_native_statement_receipts(monkeypatch):
+    compatibility = deploy.legacy_migration_receipts()[0]
+    monkeypatch.setattr(deploy, "legacy_migration_receipts", lambda: (compatibility,))
+    path = deploy.ROOT / compatibility["path"]
+    manifest = [
+        item for item in deploy.candidate_migration_manifest(path.parent)
+        if item["path"] == compatibility["path"]
+    ]
 
     class Cursor:
         def __init__(self, native): self.native, self.calls = native, 0
@@ -319,10 +436,16 @@ def test_migration_ledger_bootstraps_only_matching_native_statement_receipts(tmp
             self.calls += 1
             return [] if self.calls == 1 else self.native
 
-    receipt = deploy.apply_release_migrations(Cursor([("20260928", [path.read_text()])]), manifest, tmp_path)
+    receipt = deploy.apply_release_migrations(
+        Cursor([(compatibility["version"], [path.read_text()])]),
+        manifest, path.parent,
+    )
     assert receipt["applied"] == [] and receipt["skipped"] == manifest
     with pytest.raises(RuntimeError, match="native migration hash"):
-        deploy.apply_release_migrations(Cursor([("20260928", ["SELECT changed;"]) ]), manifest, tmp_path)
+        deploy.apply_release_migrations(
+            Cursor([(compatibility["version"], ["SELECT changed;"])]),
+            manifest, path.parent,
+        )
 
 
 @pytest.fixture
@@ -338,6 +461,11 @@ def reconciliation_ledger(tmp_path, monkeypatch):
     for version in ("20260926", "20261005", "20261006"):
         (migrations / f"{version}_change.sql").write_text(f"SELECT {version};\n")
     monkeypatch.setattr(deploy, "ROOT", tmp_path)
+    monkeypatch.setattr(deploy, "legacy_migration_receipts", lambda: ())
+    monkeypatch.setattr(
+        deploy, "RECONCILIATION_BASELINE_RAW_SHA256",
+        hashlib.sha256(baseline.read_bytes()).hexdigest(),
+    )
     manifest = deploy.candidate_migration_manifest(migrations)
     baseline_row = (baseline_path, "20261004", hashlib.sha256(b'["SELECT 1"]').hexdigest())
 
@@ -348,7 +476,7 @@ def reconciliation_ledger(tmp_path, monkeypatch):
             self.statements = []
             self.reads = 0
 
-        def execute(self, statement, params=None):
+        def execute(self, statement, params=None, **_kwargs):
             self.statements.append((statement, params))
 
         def fetchall(self):
@@ -464,7 +592,7 @@ def test_migration_statement_hash_handles_multiple_ordered_statements_and_duplic
     first = tmp_path / "202609120001_first.sql"; first.write_text("SELECT 'a;';\nSELECT 2;\n")
     second = tmp_path / "202609120002_second.sql"; second.write_text("-- comment\nSELECT 3;\n")
     manifest = deploy.candidate_migration_manifest(tmp_path)
-    assert len(manifest) == 2 and manifest[0]["sha256"] == deploy.migration_statements_sha256(["SELECT 'a;';", "SELECT 2;"])
+    assert len(manifest) == 2 and manifest[0]["sha256"] == hashlib.sha256(first.read_bytes()).hexdigest()
     duplicate = tmp_path / "202609120001_duplicate.sql"; duplicate.write_text("SELECT 4;")
     with pytest.raises(RuntimeError, match="globally unique"):
         deploy.candidate_migration_manifest(tmp_path)
@@ -482,6 +610,83 @@ def test_native_supabase_statement_receipts_are_compared_without_joining_or_repa
         deploy.normalize_migration_statements("SELECT 1; SELECT 2;")
     ) == deploy.migration_statements_sha256(["SELECT 1", "SELECT 2"])
     assert verifier.migration_statements_sha256(["SELECT 1", "SELECT 2"]) == deploy.migration_statements_sha256(candidate)
+
+
+@pytest.mark.parametrize(("left", "right"), (
+    ("SELECT 1; -- comment\rDROP TABLE secret;", "SELECT 1;"),
+    ("SELECT foo/**/bar;", "SELECT foobar;"),
+    ("SELECT 'a  b';", "SELECT 'a b';"),
+))
+def test_exact_candidate_hash_distinguishes_legacy_normalizer_collisions(
+    tmp_path, left, right,
+):
+    path = tmp_path / "20260928_collision.sql"
+    path.write_text(left)
+    left_manifest = deploy.candidate_migration_manifest(tmp_path)
+    path.write_text(right)
+    right_manifest = deploy.candidate_migration_manifest(tmp_path)
+    assert left_manifest[0]["sha256"] != right_manifest[0]["sha256"]
+    assert deploy.migration_semantic_sha256([left]) != deploy.migration_semantic_sha256([right])
+
+
+def test_historical_compatibility_is_pinned_to_exact_cutover_bytes(tmp_path, monkeypatch):
+    compatibility = deploy.legacy_migration_receipts()[0]
+    monkeypatch.setattr(deploy, "legacy_migration_receipts", lambda: (compatibility,))
+    path = tmp_path / Path(compatibility["path"]).name
+    path.write_text("SELECT 'semantically different';")
+    manifest = deploy.candidate_migration_manifest(tmp_path)
+
+    class Cursor:
+        def execute(self, *_args, **_kwargs): pass
+        def fetchall(self): return []
+
+    with pytest.raises(RuntimeError, match="cutover.*bytes"):
+        deploy.apply_release_migrations(Cursor(), manifest, tmp_path)
+
+
+@pytest.mark.parametrize("mutation", ("delete", "backdated_addition"))
+def test_complete_cutover_rejects_missing_or_backdated_candidate_migrations(
+    tmp_path, mutation,
+):
+    migrations = tmp_path / "migrations"
+    shutil.copytree(deploy.ROOT / "sql/migrations", migrations)
+    if mutation == "delete":
+        (migrations / Path(deploy.legacy_migration_receipts()[0]["path"]).name).unlink()
+    else:
+        (migrations / "20260831_post_cutover_old.sql").write_text("SELECT 'must execute';")
+    manifest = deploy.candidate_migration_manifest(migrations)
+
+    class Cursor:
+        def execute(self, *_args, **_kwargs):
+            raise AssertionError("incomplete cutover reached database access")
+
+    with pytest.raises(RuntimeError, match="cutover.*incomplete"):
+        deploy.apply_release_migrations(Cursor(), manifest, migrations)
+
+
+def test_exact_cutover_accepts_one_legacy_private_receipt_without_weakening_identity(monkeypatch):
+    compatibility = deploy.legacy_migration_receipts()[0]
+    monkeypatch.setattr(deploy, "legacy_migration_receipts", lambda: (compatibility,))
+    path = deploy.ROOT / compatibility["path"]
+    manifest = [
+        item for item in deploy.candidate_migration_manifest(path.parent)
+        if item["path"] == compatibility["path"]
+    ]
+
+    class Cursor:
+        def __init__(self): self.reads = 0
+        def execute(self, *_args, **_kwargs): pass
+        def fetchall(self):
+            self.reads += 1
+            if self.reads == 1:
+                return [(
+                    compatibility["path"], compatibility["version"],
+                    compatibility["legacy_sha256"],
+                )]
+            return []
+
+    receipt = deploy.apply_release_migrations(Cursor(), manifest, path.parent)
+    assert receipt == {"candidate": manifest, "applied": [], "skipped": manifest}
 
 
 def test_shared_durable_lease_blocks_new_release_and_allows_recovery_takeover_after_lock():
@@ -584,7 +789,8 @@ def test_candidate_dry_run_installs_dependencies_and_uses_only_protected_vite_va
     assert receipt["request_plan"]["telegram_mutations"] == 0
 
 
-def test_migration_ledger_accepts_the_contiguous_private_suffix_created_after_migration(tmp_path):
+def test_migration_ledger_accepts_the_contiguous_private_suffix_created_after_migration(tmp_path, monkeypatch):
+    monkeypatch.setattr(deploy, "legacy_migration_receipts", lambda: ())
     path = tmp_path / "20260928_native.sql"; path.write_text("SELECT 28;\n")
     manifest = deploy.candidate_migration_manifest(tmp_path)
 
@@ -946,7 +1152,8 @@ def test_canary_failure_invokes_rollback_before_propagating():
 
     with pytest.raises(RuntimeError, match="production canary failed"):
         deploy.verify_initial_deployment_or_rollback(
-            PROJECT_REF, ORIGIN, DATABASE_URL, "owner@example.com",
+            PROJECT_REF, ORIGIN, DATABASE_URL, EVIDENCE_DATABASE_URL,
+            "owner@example.com",
             f"release-canary-{'a' * 32}@example.com",
             "sb_secret_" + "s" * 40, "sb_publishable_" + "p" * 32,
             verifier=verifier, rollback=rollback,
@@ -964,8 +1171,10 @@ def test_post_deploy_canary_keeps_runtime_database_url_and_auth_token_out_of_rec
             else "non-owner-access-token"
         )
 
-    def source_collector(database_url, api_url, run_id):
-        observed["source"] = (database_url, api_url, run_id)
+    def source_collector(database_url, evidence_database_url, api_url, run_id):
+        observed["source"] = (
+            database_url, evidence_database_url, api_url, run_id,
+        )
         return {"source": "receipt"}
 
     def canary(api_url, origin, token, non_owner_access_token, *, source_reader):
@@ -975,13 +1184,18 @@ def test_post_deploy_canary_keeps_runtime_database_url_and_auth_token_out_of_rec
             "status": "verified", "source_reconciliation": "verified",
             "financial_write_routes": 0, "brokerage_authority": "none",
             "friend_invitations": "disabled", "non_owner_status": 403,
+            "source_database_role": "stock_agent_dashboard_runtime",
+            "evidence_database_role": "stock_agent_release_reader_runtime",
+            "evidence_reader_authority": dict(EVIDENCE_AUTHORITY),
+            "source_reconciliation_receipt": SOURCE_RECONCILIATION,
         }
 
     def session_revoker(project_url, token, publishable_key):
         observed.setdefault("revoked", []).append(token)
 
     receipt = deploy.run_post_deploy_canary(
-        PROJECT_REF, ORIGIN, DATABASE_URL, OWNER_EMAIL := "owner@example.com",
+        PROJECT_REF, ORIGIN, DATABASE_URL, EVIDENCE_DATABASE_URL,
+        OWNER_EMAIL := "owner@example.com",
         CANARY_EMAIL := f"release-canary-{'a' * 32}@example.com",
         "sb_secret_" + "s" * 40, "sb_publishable_" + "p" * 32,
         token_factory=token_factory, source_collector=source_collector, canary=canary,
@@ -996,6 +1210,7 @@ def test_post_deploy_canary_keeps_runtime_database_url_and_auth_token_out_of_rec
     assert receipt["owner_session"] == "revoked"
     assert receipt["non_owner_session"] == "revoked"
     assert observed["source"][0] == DATABASE_URL
+    assert observed["source"][1] == EVIDENCE_DATABASE_URL
     assert observed["canary"][3] == "non-owner-access-token"
     assert observed["revoked"] == ["non-owner-access-token", "owner-access-token"]
 
@@ -1012,7 +1227,8 @@ def test_post_deploy_canary_revokes_owner_session_when_canary_fails():
 
     with pytest.raises(RuntimeError, match="receipt mismatch"):
         deploy.run_post_deploy_canary(
-            PROJECT_REF, ORIGIN, DATABASE_URL, "owner@example.com",
+            PROJECT_REF, ORIGIN, DATABASE_URL, EVIDENCE_DATABASE_URL,
+            "owner@example.com",
             f"release-canary-{'a' * 32}@example.com",
             "sb_secret_" + "s" * 40, "sb_publishable_" + "p" * 32,
             token_factory=lambda _url, email, *_args: (
@@ -1030,7 +1246,8 @@ def test_post_deploy_canary_revokes_owner_session_when_canary_fails():
 def test_post_deploy_canary_rejects_an_incomplete_receipt():
     with pytest.raises(RuntimeError, match="production canary"):
         deploy.run_post_deploy_canary(
-            PROJECT_REF, ORIGIN, DATABASE_URL, "owner@example.com",
+            PROJECT_REF, ORIGIN, DATABASE_URL, EVIDENCE_DATABASE_URL,
+            "owner@example.com",
             f"release-canary-{'a' * 32}@example.com",
             "sb_secret_" + "s" * 40, "sb_publishable_" + "p" * 32,
             token_factory=lambda _url, email, *_args: (
@@ -1053,7 +1270,8 @@ def test_post_deploy_canary_revokes_owner_if_fresh_non_owner_token_mint_fails():
 
     with pytest.raises(RuntimeError, match="non-owner mint failed"):
         deploy.run_post_deploy_canary(
-            PROJECT_REF, ORIGIN, DATABASE_URL, "owner@example.com",
+            PROJECT_REF, ORIGIN, DATABASE_URL, EVIDENCE_DATABASE_URL,
+            "owner@example.com",
             f"release-canary-{'a' * 32}@example.com",
             "sb_secret_" + "s" * 40, "sb_publishable_" + "p" * 32,
             token_factory=token_factory,
@@ -1068,7 +1286,8 @@ def test_post_deploy_canary_rejects_unbound_non_owner_email_before_token_mint():
     calls = []
     with pytest.raises(ValueError, match="reserved canary"):
         deploy.run_post_deploy_canary(
-            PROJECT_REF, ORIGIN, DATABASE_URL, "owner@example.com", "person@gmail.com",
+            PROJECT_REF, ORIGIN, DATABASE_URL, EVIDENCE_DATABASE_URL,
+            "owner@example.com", "person@gmail.com",
             "sb_secret_" + "s" * 40, "sb_publishable_" + "p" * 32,
             token_factory=lambda *_args: calls.append(True),
             source_collector=lambda *_args: {}, canary=lambda *_args, **_kwargs: {},
