@@ -19,6 +19,27 @@ V1-C2 through V1-C6 operational/capability path and records either the original 
 receipt or an explicit persisted suppression. No duplicate market run or Telegram test may be used
 to close that gate.
 
+## Post-September 8 runtime closure
+
+The September 9 post-market slot created run
+`6b5b2efb-0f53-47c3-bba8-8bf24802884f`, but the collector stopped at the reference stage before
+Analyst, Checker, report persistence, or Telegram publication. The durable current pin truthfully
+records `reference_unavailable`; therefore the missing Telegram message is an upstream collection
+failure and is not evidence of a Telegram transport failure.
+
+PR #68 merged the restart correction to main `71986d709e3c861ae76ddeffd12d11836da54e6b`
+after exact-head CI `34417486938` passed. Transfer request IDs now bind the exact canonical payload,
+restarts retain the server count and byte ceilings without a permanent first-request wall-clock
+lockout, and a failed reference task can recover only from an exact durable current-pin request and
+response receipt. Recovery does not repeat the SEC request.
+
+The remaining ordered work is to release migration `20261020_reference_transfer_restart.sql` and
+the collector change through the protected path, resume the same September 9 run from its durable
+pin, and reconcile its terminal receipt. Because that pin is `reference_unavailable`, this run may
+close as an honest failed or suppressed chain but cannot prove V1-C3 source capability. If it cannot,
+the next normal scheduled run must provide the required healthy SEC reference, market-wide source
+lineage, and original Telegram delivery or persisted suppression before V1 is closed.
+
 ## Market-wide V1 candidate — protected production release complete
 
 Tasks 1–10 of the approved market-wide plan are implemented and independently reviewed through
@@ -70,11 +91,12 @@ production-secret exposure; the immutable release record retains the authorizati
 
 The protected migration boundary is the immutable additive chain
 `20261005_market_wide_discovery.sql` through
-`20261015_release_reader_source_tables.sql`. The `20261004` artifact is the separate immutable
+`20261020_reference_transfer_restart.sql`. The `20261004` artifact is the separate immutable
 production-schema reconciliation baseline; there is no `20261004_market_wide_discovery.sql` and the
-release must never invent or apply one. The eleven discovery/runtime and release-security migration
-file SHA-256 values are
-recorded in `docs/rollouts/2026-09-06-market-wide-thematic-discovery-v1.md`.
+release must never invent or apply one. The original discovery/runtime and release-security
+migration SHA-256 values are recorded in
+`docs/rollouts/2026-09-06-market-wide-thematic-discovery-v1.md`; later additive migrations remain
+individually hash-bound by the protected release ledger.
 
 Known V1 limits remain visible: `complete_market_coverage` is always false; free sources and request
 budgets are bounded; six Yahoo screens are disabled; SEC Form 4 transport is unsupported and only
