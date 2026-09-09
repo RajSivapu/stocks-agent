@@ -1,4 +1,4 @@
-import type { Freshness, MarketState } from "../../../packages/dashboard-contracts/src/index.ts";
+import type { Freshness, MarketState } from "./dashboard-contracts.ts";
 
 import { corsHeaders, preflightResponse, requireAllowedOrigin } from "./cors.ts";
 import { DashboardHttpError, errorEnvelope } from "./errors.ts";

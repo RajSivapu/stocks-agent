@@ -423,6 +423,14 @@ def test_native_production_engine_failure_boundaries(database, tmp_path, monkeyp
     original = {name: adapter.capture(name) for name in release.BACKEND_COMPONENTS}
     monkeypatch.setattr(build_owner_dashboard_static, "build_static_release", lambda *a, **k: {"status": "verified"})
     monkeypatch.setattr(verify_personal_stock_agent_v1, "git_files", lambda *a: {"index.ts": b"candidate"})
+    monkeypatch.setattr(
+        verify_personal_stock_agent_v1,
+        "git_function_runtime",
+        lambda *a: (
+            {"index.ts": b"candidate"},
+            {"verify_jwt": False, "entrypoint": "index.ts", "import_map": None},
+        ),
+    )
     def checkpoint(name):
         if name == boundary: raise RuntimeError("injected native boundary " + name)
     try:

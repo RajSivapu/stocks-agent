@@ -6,17 +6,27 @@ cd "$repo_root"
 
 python_bin="${PYTHON_BIN:-${VENV_PYTHON:-$repo_root/.venv/bin/python}}"
 test -x "$python_bin" || { echo "trusted PYTHON_BIN/VENV_PYTHON is required" >&2; exit 1; }
+deno_bin="$("$python_bin" -c 'from scripts.check_function_runtime_manifest import _deno_binary; print(_deno_binary())')"
+deno_env=(env -i "HOME=${HOME:?}" "PATH=${PATH:?}" NO_COLOR=1)
+[[ -z "${DENO_DIR:-}" ]] || deno_env+=("DENO_DIR=$DENO_DIR")
+[[ -z "${SYSTEMROOT:-}" ]] || deno_env+=("SYSTEMROOT=$SYSTEMROOT")
+[[ -z "${TMPDIR:-}" ]] || deno_env+=("TMPDIR=$TMPDIR")
+[[ -z "${XDG_CACHE_HOME:-}" ]] || deno_env+=("XDG_CACHE_HOME=$XDG_CACHE_HOME")
 "$python_bin" -m py_compile scripts/verify_personal_stock_agent_v1.py
 "$python_bin" scripts/sync_market_calendar.py --check
 env -u RUN_DB_INTEGRATION_TESTS "$python_bin" -m pytest -q -m "not db_integration"
 node --test tests/*.mjs
-npx --yes deno@2.9.6 test --config supabase/functions/deno.json \
-  supabase/functions/market-briefing-gateway/_shared \
-  supabase/functions/owner-dashboard-api
-npx --yes deno@2.9.6 check --config supabase/functions/deno.json \
+"${deno_env[@]}" "$deno_bin" cache \
+  --config supabase/functions/deno.json \
+  --lock supabase/functions/deno.lock \
+  --frozen-lockfile \
   supabase/functions/telegram-portfolio/index.ts \
   supabase/functions/market-briefing-gateway/index.ts \
   supabase/functions/owner-dashboard-api/index.ts
+"${deno_env[@]}" "$deno_bin" test --cached-only --config supabase/functions/deno.json \
+  supabase/functions/market-briefing-gateway/_shared \
+  supabase/functions/owner-dashboard-api
+"$python_bin" scripts/check_function_runtime_manifest.py
 npm test --workspace @stocks-agent/dashboard-contracts -- --run
 npm test --workspace @stocks-agent/web -- --run
 npm run typecheck --workspace @stocks-agent/dashboard-contracts

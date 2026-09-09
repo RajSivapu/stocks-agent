@@ -24,7 +24,6 @@ import re
 import secrets
 import subprocess
 import tempfile
-import tomllib
 
 import psycopg
 from psycopg import sql
@@ -229,26 +228,18 @@ class NativeReleaseAdapter:
         return snapshot
 
     def _write_function(self, name, candidate):
+        from scripts.function_runtime_manifest import stage_function_runtime
         if not candidate["exists"]:
             self._command(["functions", "delete", name, "--yes"])
             return
         config = candidate["configuration"]
-        if set(config) != {"verify_jwt", "entrypoint", "import_map"} or type(config["verify_jwt"]) is not bool:
-            raise RuntimeError("complete native function configuration is required")
         with tempfile.TemporaryDirectory(prefix="native-function-deploy-") as directory:
-            root = Path(directory); source = root / "supabase/functions" / name
-            source.mkdir(parents=True)
-            for path, encoded in candidate["files"].items():
-                target = source / path; target.parent.mkdir(parents=True, exist_ok=True)
-                target.write_bytes(base64.b64decode(encoded, validate=True))
-            settings = [f'[functions.{json.dumps(name)}]', 'enabled = true',
-                f'verify_jwt = {str(config["verify_jwt"]).lower()}']
-            for key in ("entrypoint", "import_map"):
-                if config[key] is not None:
-                    path = function_path(config[key], name)
-                    if path not in candidate["files"]: raise RuntimeError("configured native function file is absent")
-                    settings.append(f'{key} = {json.dumps("./functions/" + name + "/" + path)}')
-            (root / "supabase/config.toml").write_text("\n".join(settings) + "\n")
+            root = Path(directory)
+            files = {
+                path: base64.b64decode(encoded, validate=True)
+                for path, encoded in candidate["files"].items()
+            }
+            stage_function_runtime(root, name, files, config)
             self._command(["functions", "deploy", name, "--use-api"], cwd=root)
 
     def _write_secrets(self, candidate):
@@ -453,7 +444,7 @@ class NativeReleaseAdapter:
         return current["version"] == "1"
 
     def plan(self, context):
-        from scripts.verify_personal_stock_agent_v1 import git_files
+        from scripts.verify_personal_stock_agent_v1 import git_function_runtime
         password = secrets.token_urlsafe(36)
         with self._connection() as connection:
             grantor = connection.execute("SELECT current_user AS name").fetchone()["name"]
@@ -470,13 +461,13 @@ class NativeReleaseAdapter:
                   "DASHBOARD_ALLOWED_ORIGINS": context["allowed_origin"], "DASHBOARD_OWNER_USER_ID": context["owner_user_id"]}
         secret = capture_managed_secrets([{"name": k, "digest": hashlib.sha256(v.encode()).hexdigest()} for k, v in values.items()], values)
         candidates = {"runtime-role": role, "dashboard-secrets": secret}
-        config = tomllib.loads((self.root / "supabase/config.toml").read_text())["functions"]
         for name in FUNCTIONS:
-            cfg = config[name]
+            files, configuration = git_function_runtime(
+                self.root, context["candidate_sha"], name
+            )
             candidates[name] = {"exists": True, "identity": None, "version": None, "values": {},
-                "files": {path: base64.b64encode(raw).decode() for path, raw in git_files(self.root, context["candidate_sha"], f"supabase/functions/{name}").items()},
-                "configuration": {"verify_jwt": cfg["verify_jwt"], "entrypoint": function_path(cfg["entrypoint"], name),
-                    "import_map": function_path(cfg["import_map"], name) if cfg.get("import_map") else None}}
+                "files": {path: base64.b64encode(raw).decode() for path, raw in files.items()},
+                "configuration": configuration}
         if tuple(candidates) != BACKEND_COMPONENTS:
             raise RuntimeError("complete protected backend candidate is required")
         return candidates
@@ -553,7 +544,7 @@ class NativeReleaseAdapter:
         return digest.hexdigest()
 
     def receipt(self, candidate_sha):
-        from scripts.verify_personal_stock_agent_v1 import git_files
+        from scripts.verify_personal_stock_agent_v1 import git_files, git_function_runtime
         if (candidate_sha != self.context.get("candidate_sha")
                 or not isinstance(self.captured_at, str)):
             raise RuntimeError("protected backend receipt candidate is incomplete")
@@ -592,7 +583,7 @@ class NativeReleaseAdapter:
         manifest_components = []
         for name in FUNCTIONS:
             current = validate_snapshot(name, self.readbacks.get(name) or self.capture(name))
-            expected = git_files(self.root, candidate_sha, f"supabase/functions/{name}")
+            expected, _configuration = git_function_runtime(self.root, candidate_sha, name)
             files = self._decoded_files(current)
             if files != expected:
                 raise RuntimeError("protected backend readback differs from candidate bytes")
