@@ -1,6 +1,7 @@
 import hashlib
 import shutil
 import stat
+import sys
 from pathlib import Path
 
 import pytest
@@ -86,6 +87,91 @@ def test_static_configuration_can_be_validated_before_database_mutation():
     assert result["allowed_origin"] == ORIGIN
     with pytest.raises(ValueError, match="owner UUID"):
         deploy.validate_static_configuration(PROJECT_REF, "", ORIGIN, deploy.DASHBOARD_SECRET_NAMES)
+
+
+@pytest.mark.parametrize(
+    "site_origin",
+    (
+        "https://different.example",
+        "http://owner.example",
+        "https://owner.example/path",
+        "https://owner.example:8443",
+        "https://owner.example:bad",
+        "https://stocks.example.com:443",
+        "https://STOCKS.example.com",
+        "https://st\N{LATIN SMALL LETTER O WITH DIAERESIS}cks.example.com",
+        "https://%73tocks.example.com",
+        "",
+        None,
+    ),
+)
+def test_candidate_dry_run_rejects_an_unsafe_site_origin_before_commands(
+    tmp_path, monkeypatch, site_origin
+):
+    monkeypatch.setattr(
+        deploy,
+        "verify_git_release",
+        lambda *_args, **_kwargs: pytest.fail("git verification must follow origin preflight"),
+    )
+    runner = lambda *_args, **_kwargs: pytest.fail(
+        "subprocess work must follow origin preflight"
+    )
+
+    with pytest.raises(ValueError, match="matching HTTPS dashboard origin"):
+        deploy.run_protected_candidate_dry_run(
+            project_ref=PROJECT_REF,
+            owner_user_id=OWNER_ID,
+            allowed_origin=ORIGIN,
+            site_origin=site_origin,
+            candidate_sha="a" * 40,
+            reviewed_sha="a" * 40,
+            publishable_key="sb_publishable_abcdefghijklmnopqrstuvwx",
+            repo_root=tmp_path,
+            runner=runner,
+        )
+
+
+@pytest.mark.parametrize(
+    "origin",
+    (
+        "https://stocks.example.com:443",
+        "https://STOCKS.example.com",
+        "https://st\N{LATIN SMALL LETTER O WITH DIAERESIS}cks.example.com",
+        "https://%73tocks.example.com",
+    ),
+)
+def test_matching_noncanonical_origins_are_rejected(origin):
+    with pytest.raises(ValueError, match="matching HTTPS dashboard origin"):
+        deploy._validate_dashboard_origins(origin, origin)
+
+
+def test_production_entrypoint_rejects_mismatched_origins_before_provider_or_database_io(
+    tmp_path, monkeypatch
+):
+    monkeypatch.setattr(
+        deploy,
+        "verify_auth_canary_inventory",
+        lambda *_args, **_kwargs: pytest.fail("provider I/O must follow origin preflight"),
+    )
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "deploy_owner_dashboard_api.py",
+            "--project-ref", PROJECT_REF,
+            "--allowed-origin", ORIGIN,
+            "--site-origin", "https://different.example",
+            "--reviewed-sha", "a" * 40,
+            "--gateway-rollback-ref", "unused",
+            "--gateway-rollback-source-sha256", "0" * 64,
+            "--gateway-current-version", "1",
+            "--evidence-directory", str(tmp_path / "capture"),
+            "--release-state", str(tmp_path / "release-state.json"),
+        ],
+    )
+
+    with pytest.raises(SystemExit, match="matching HTTPS dashboard origin"):
+        deploy.main()
 
 
 def test_admin_session_pooler_is_bound_to_the_exact_project_before_mutation():
@@ -944,6 +1030,8 @@ def test_secret_manifest_uses_a_private_file_and_never_command_arguments(tmp_pat
             "DASHBOARD_DATABASE_URL": DATABASE_URL,
             "DASHBOARD_OWNER_USER_ID": OWNER_ID,
             "DASHBOARD_ALLOWED_ORIGINS": ORIGIN,
+            "OWNER_DASHBOARD_ORIGIN": ORIGIN,
+            "OWNER_DASHBOARD_URL": ORIGIN,
         },
         runner,
     )

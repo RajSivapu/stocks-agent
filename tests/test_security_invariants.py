@@ -297,6 +297,25 @@ def test_gateway_entrypoint_uses_only_pinned_dependencies_and_scoped_secrets():
     assert 'verify_jwt = false' in config
 
 
+def test_protected_release_manages_gateway_dashboard_runtime_settings():
+    from scripts import deploy_owner_dashboard_api as deploy
+    from scripts import release_components as release
+
+    gateway = (
+        ROOT / "supabase" / "functions" / "market-briefing-gateway" / "index.ts"
+    ).read_text()
+    required = set(re.findall(r'requiredEnvironment\("([A-Z0-9_]+)"\)', gateway))
+    dashboard_runtime_settings = {
+        "DASHBOARD_OWNER_USER_ID",
+        "OWNER_DASHBOARD_ORIGIN",
+        "OWNER_DASHBOARD_URL",
+    }
+
+    assert dashboard_runtime_settings <= required
+    assert dashboard_runtime_settings <= set(release.MANAGED_SECRETS)
+    assert set(release.MANAGED_SECRETS) == set(deploy.DASHBOARD_SECRET_NAMES)
+
+
 def test_gateway_repository_uses_only_fixed_tables_and_named_rpcs():
     source = (
         ROOT / "supabase" / "functions" / "market-briefing-gateway" / "_shared" / "repository.ts"

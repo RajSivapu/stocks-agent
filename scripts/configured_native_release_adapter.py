@@ -90,6 +90,45 @@ def literal_secret_values(values):
         raise RuntimeError("managed secret cannot be restored with literal env-file semantics")
 
 
+def validated_dashboard_origin(context):
+    allowed_origin = context.get("allowed_origin")
+    site_origin = context.get("site_origin")
+    if not isinstance(site_origin, str):
+        raise RuntimeError("an exact matching HTTPS dashboard origin is required")
+    parsed = urlparse(site_origin)
+    try:
+        port = parsed.port
+    except ValueError:
+        port = -1
+    hostname = parsed.hostname or ""
+    labels = hostname.split(".")
+    canonical_hostname = (
+        len(hostname) <= 253
+        and bool(labels)
+        and all(
+            re.fullmatch(r"[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?", label)
+            for label in labels
+        )
+    )
+    if (
+        parsed.scheme != "https"
+        or not parsed.hostname
+        or parsed.username
+        or parsed.password
+        or port is not None
+        or not canonical_hostname
+        or parsed.netloc != hostname
+        or parsed.path
+        or parsed.params
+        or parsed.query
+        or parsed.fragment
+        or site_origin != f"https://{parsed.netloc}"
+        or allowed_origin != site_origin
+    ):
+        raise RuntimeError("an exact matching HTTPS dashboard origin is required")
+    return site_origin
+
+
 class NativeReleaseAdapter:
     def __init__(self, context, *, runner=None, connector=None, environment=None, repo_root=ROOT):
         self.context = dict(context)
@@ -240,6 +279,12 @@ class NativeReleaseAdapter:
                 try: self.known_secrets = json.loads(self.environment.get("DASHBOARD_PRIOR_MANAGED_SECRETS_JSON", "{}"))
                 except ValueError as error: raise RuntimeError("protected prior managed secret values are malformed") from error
                 if not isinstance(self.known_secrets, dict): raise RuntimeError("protected prior managed secret values are malformed")
+                if any(key not in self.known_secrets for key in (
+                    "OWNER_DASHBOARD_ORIGIN", "OWNER_DASHBOARD_URL"
+                )):
+                    dashboard_origin = validated_dashboard_origin(self.context)
+                    self.known_secrets.setdefault("OWNER_DASHBOARD_ORIGIN", dashboard_origin)
+                    self.known_secrets.setdefault("OWNER_DASHBOARD_URL", dashboard_origin)
             snapshot = capture_managed_secrets(self._secret_inventory(), self.known_secrets)
             literal_secret_values(snapshot["values"])
         else: raise RuntimeError("native component is not allowlisted")
@@ -603,6 +648,7 @@ class NativeReleaseAdapter:
 
     def plan(self, context):
         from scripts.verify_personal_stock_agent_v1 import git_function_runtime
+        dashboard_origin = validated_dashboard_origin(context)
         # Receipt storage must exist and be unused before the first protected
         # capture, migration, role/secret mutation, or function deployment.
         self._evidence_root()
@@ -636,8 +682,13 @@ class NativeReleaseAdapter:
         role = {"exists": True, "identity": RUNTIME_ROLE,
             "version": hashlib.sha256(canonical([configuration, role_values])).hexdigest(),
             "files": {}, "values": role_values, "configuration": configuration}
-        values = {"DASHBOARD_DATABASE_URL": database_url,
-                  "DASHBOARD_ALLOWED_ORIGINS": context["allowed_origin"], "DASHBOARD_OWNER_USER_ID": context["owner_user_id"]}
+        values = {
+            "DASHBOARD_DATABASE_URL": database_url,
+            "DASHBOARD_ALLOWED_ORIGINS": dashboard_origin,
+            "DASHBOARD_OWNER_USER_ID": context["owner_user_id"],
+            "OWNER_DASHBOARD_ORIGIN": dashboard_origin,
+            "OWNER_DASHBOARD_URL": dashboard_origin,
+        }
         self.candidate_database_url = database_url
         self._candidate_runtime_ready = False
         secret = capture_managed_secrets([{"name": k, "digest": hashlib.sha256(v.encode()).hexdigest()} for k, v in values.items()], values)

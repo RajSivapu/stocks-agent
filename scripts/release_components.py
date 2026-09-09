@@ -27,7 +27,13 @@ FUNCTIONS = ("market-briefing-gateway", "owner-dashboard-api", "telegram-portfol
 ARTIFACTS = (*FUNCTIONS, "owner-web-site")
 COMPONENTS = ("runtime-role", "dashboard-secrets", *ARTIFACTS)
 BACKEND_COMPONENTS = ("runtime-role", "dashboard-secrets", *FUNCTIONS)
-MANAGED_SECRETS = ("DASHBOARD_ALLOWED_ORIGINS", "DASHBOARD_DATABASE_URL", "DASHBOARD_OWNER_USER_ID")
+MANAGED_SECRETS = (
+    "DASHBOARD_ALLOWED_ORIGINS",
+    "DASHBOARD_DATABASE_URL",
+    "DASHBOARD_OWNER_USER_ID",
+    "OWNER_DASHBOARD_ORIGIN",
+    "OWNER_DASHBOARD_URL",
+)
 CONTENT_KEYS = ("exists", "configuration", "files", "values")
 
 
