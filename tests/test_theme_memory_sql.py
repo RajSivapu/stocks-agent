@@ -1155,6 +1155,64 @@ def test_actual_postgres_complete_read_scope_without_closure_ledger_accepts_lega
             admin.execute("ALTER ROLE stock_agent_release_reader_runtime NOLOGIN")
 
 
+def test_actual_postgres_authority_migration_and_ledger_insert_roll_back_together(
+    theme_memory_dsn, tmp_path,
+):
+    from scripts.deploy_owner_dashboard_api import (
+        apply_release_migrations, candidate_migration_manifest,
+    )
+
+    migration = tmp_path / RELEASE_READER_AUTHORITY_MIGRATION.name
+    migration.write_bytes(RELEASE_READER_AUTHORITY_MIGRATION.read_bytes())
+    manifest = candidate_migration_manifest(tmp_path)
+
+    with psycopg.connect(theme_memory_dsn, autocommit=True) as admin:
+        admin.execute("GRANT USAGE ON SCHEMA extensions TO stock_agent_release_reader")
+        assert admin.execute(
+            "SELECT has_schema_privilege("
+            "'stock_agent_release_reader_runtime','extensions','USAGE')"
+        ).fetchone() == (True,)
+
+    class FailingLedgerCursor:
+        def __init__(self, cursor):
+            self.cursor = cursor
+
+        def execute(self, statement, params=None):
+            if (
+                str(statement).startswith(
+                    "INSERT INTO public.stock_agent_release_migration_ledger"
+                )
+                and params
+                and params[0] == manifest[0]["path"]
+            ):
+                raise RuntimeError("injected ledger insert failure")
+            return self.cursor.execute(statement, params)
+
+        def fetchall(self):
+            return self.cursor.fetchall()
+
+    try:
+        with psycopg.connect(theme_memory_dsn) as connection:
+            with pytest.raises(RuntimeError, match="injected ledger insert failure"):
+                with connection.transaction(), connection.cursor() as cursor:
+                    apply_release_migrations(
+                        FailingLedgerCursor(cursor), manifest, tmp_path,
+                    )
+        with psycopg.connect(theme_memory_dsn, autocommit=True) as admin:
+            assert admin.execute(
+                "SELECT has_schema_privilege("
+                "'stock_agent_release_reader_runtime','extensions','USAGE')"
+            ).fetchone() == (True,)
+            assert admin.execute(
+                "SELECT count(*) FROM public.stock_agent_release_migration_ledger "
+                "WHERE path=%s",
+                (manifest[0]["path"],),
+            ).fetchone() == (0,)
+    finally:
+        with psycopg.connect(theme_memory_dsn, autocommit=True) as admin:
+            admin.execute("REVOKE USAGE ON SCHEMA extensions FROM stock_agent_release_reader")
+
+
 def test_actual_postgres_reader_attestation_rejects_large_object_access(
     theme_memory_dsn,
 ):

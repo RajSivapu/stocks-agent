@@ -502,6 +502,44 @@ def migration_statements_sha256(statements: Sequence[str]) -> str:
     return hashlib.sha256(json.dumps(canonical, ensure_ascii=False, separators=(",", ":")).encode()).hexdigest()
 
 
+def migration_transaction_control(statement: str) -> str | None:
+    """Classify top-level PostgreSQL transaction control conservatively."""
+    words = statement.upper().split()
+    if not words:
+        return None
+    if words[0] in {"BEGIN", "COMMIT", "END", "ROLLBACK", "ABORT", "SAVEPOINT"}:
+        return words[0]
+    if len(words) >= 2 and (words[0], words[1]) in {
+        ("START", "TRANSACTION"),
+        ("SET", "TRANSACTION"),
+        ("PREPARE", "TRANSACTION"),
+        ("RELEASE", "SAVEPOINT"),
+    }:
+        return f"{words[0]} {words[1]}"
+    return None
+
+
+def migration_execution_statements(sql: str) -> list[str]:
+    """Keep transaction control outside migration files during protected apply."""
+    statements = normalize_migration_statements(sql)
+    controls = [
+        (index, control)
+        for index, statement in enumerate(statements)
+        if (control := migration_transaction_control(statement)) is not None
+    ]
+    if not controls:
+        return [sql]
+    if (
+        controls != [(0, "BEGIN"), (len(statements) - 1, "COMMIT")]
+        or statements[0].upper() != "BEGIN"
+        or statements[-1].upper() != "COMMIT"
+    ):
+        raise RuntimeError("migration transaction control is unsafe")
+    if len(statements) <= 2:
+        raise RuntimeError("candidate migration is empty")
+    return statements[1:-1]
+
+
 def prepare_gateway_rollback_artifact(
     rollback_ref: str,
     expected_source_sha256: str,
@@ -824,7 +862,8 @@ def apply_release_migrations(
         # DDL and its immutable hash receipt are deliberately issued in the
         # same transaction.  psycopg's surrounding connection context rolls
         # both back if either statement fails.
-        cursor.execute(sql)
+        for statement in migration_execution_statements(sql):
+            cursor.execute(statement)
         cursor.execute(
             f"INSERT INTO {MIGRATION_LEDGER} (path, version, sha256) VALUES (%s, %s, %s)",
             (item["path"], item["version"], item["sha256"]),

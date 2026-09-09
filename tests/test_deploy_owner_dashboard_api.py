@@ -302,6 +302,59 @@ def test_release_migrations_are_applied_in_order_once_with_candidate_hashes(tmp_
         deploy.apply_release_migrations(Cursor(), manifest, tmp_path)
 
 
+def test_wrapped_migration_executes_inside_the_callers_transaction(tmp_path):
+    path = tmp_path / "20261017_authority.sql"
+    path.write_text("BEGIN;\nREVOKE USAGE ON SCHEMA extensions FROM reader_role;\nCOMMIT;\n")
+
+    class Cursor:
+        def __init__(self):
+            self.statements = []
+            self.reads = 0
+
+        def execute(self, statement, params=None):
+            self.statements.append((statement, params))
+
+        def fetchall(self):
+            self.reads += 1
+            return []
+
+    cursor = Cursor()
+    manifest = deploy.candidate_migration_manifest(tmp_path)
+    receipt = deploy.apply_release_migrations(cursor, manifest, tmp_path)
+
+    executed = [statement for statement, _params in cursor.statements]
+    assert "BEGIN" not in executed and "COMMIT" not in executed
+    assert "REVOKE USAGE ON SCHEMA extensions FROM reader_role" in executed
+    assert receipt["applied"] == manifest
+
+
+@pytest.mark.parametrize("sql", (
+    "BEGIN; SELECT 1; ROLLBACK;",
+    "BEGIN; COMMIT; SELECT 1;",
+    "SELECT 1; COMMIT;",
+    "BEGIN WORK; SELECT 1; COMMIT WORK;",
+    "BEGIN; SAVEPOINT nested; SELECT 1; COMMIT;",
+    "BEGIN; RELEASE SAVEPOINT nested; COMMIT;",
+    "BEGIN; SET TRANSACTION READ ONLY; COMMIT;",
+    "END;",
+    "ABORT;",
+    "PREPARE TRANSACTION 'release';",
+))
+def test_migration_executor_rejects_unsafe_transaction_control(sql):
+    with pytest.raises(RuntimeError, match="transaction control"):
+        deploy.migration_execution_statements(sql)
+
+
+@pytest.mark.parametrize("sql", (
+    "SELECT 'BEGIN; COMMIT';",
+    'SELECT "COMMIT" FROM example;',
+    "-- BEGIN;\nSELECT 1; /* COMMIT; */",
+    "CREATE FUNCTION example() RETURNS void LANGUAGE plpgsql AS $$ BEGIN RETURN; END $$;",
+))
+def test_migration_executor_ignores_non_top_level_transaction_words(sql):
+    assert deploy.migration_execution_statements(sql) == [sql]
+
+
 def test_migration_ledger_skips_verified_rows_and_refuses_hash_drift(tmp_path):
     path = tmp_path / "20260926_report_suppression_reasons.sql"
     path.write_text("SELECT 26;\n")
