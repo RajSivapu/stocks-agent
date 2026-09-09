@@ -176,10 +176,10 @@ dropped, unsupported provider/theme pairs can silently narrow the plan, filing m
 prove business exposure, and missing portfolio suitability can remove otherwise valid research
 candidates.
 
-The approved design is
-`docs/superpowers/specs/2026-09-06-market-wide-thematic-discovery-v1-design.md`; the task-by-task plan
-is `docs/superpowers/plans/2026-09-06-market-wide-thematic-discovery-v1-implementation.md`. The work
-adds capability-aware source planning, a dated U.S.-listed security reference, ticker-independent
+The implemented design and its protected-release boundary are summarized in
+`docs/rollouts/2026-09-06-market-wide-thematic-discovery-v1.md`; Git history retains the superseded
+task-by-task working documents. The work adds capability-aware source planning, a dated U.S.-listed
+security reference, ticker-independent
 event and entity resolution, bounded official-source enrichment, bounded role/theme reverse
 discovery for previously unseen issuers, primary exposure facts, broad
 screens with explicit feasibility states, durable theme memory, and separate research, portfolio

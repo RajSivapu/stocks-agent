@@ -2,10 +2,10 @@
 
 Unauthenticated (SEC requires only a descriptive User-Agent, no API key). Uses 13D/13G
 beneficial-ownership disclosures (filed against the target company when a holder crosses
-5% ownership) rather than literal 13F fund-holdings data — see
-docs/superpowers/specs/2026-07-02-sec-edgar-equity-research-design.md for why. Only reads
-each company's `filings.recent` page (no pagination to older filings) — fine for "recent"
-lookups, not a full filing-history archive. All HTTP uses stdlib urllib (no requests).
+5% ownership) rather than manager-centric 13F holdings. This keeps a recent company lookup
+bounded to filings against that issuer. Only reads each company's `filings.recent` page (no
+pagination to older filings), so it supports recent lookups rather than a full filing-history
+archive. All HTTP uses stdlib urllib (no requests).
 """
 import datetime
 import json
