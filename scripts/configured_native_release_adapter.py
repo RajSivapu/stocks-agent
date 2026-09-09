@@ -24,6 +24,7 @@ import re
 import secrets
 import subprocess
 import tempfile
+from urllib.parse import unquote, urlparse
 
 import psycopg
 from psycopg import sql
@@ -103,6 +104,8 @@ class NativeReleaseAdapter:
         self.last_journal = None
         self.static_receipt = None
         self.recovery_support = {}
+        self.candidate_database_url = None
+        self._candidate_runtime_ready = False
 
     def _project(self):
         project = self.context.get("project_ref", "")
@@ -401,9 +404,69 @@ class NativeReleaseAdapter:
                         connection.execute("SELECT pg_catalog.set_config(%s,%s,true)", (key, value))
                         connection.execute(statement + sql.SQL(" SET {} FROM CURRENT").format(sql.Identifier(key)))
 
+    def _validated_runtime_url(self, value):
+        try:
+            parsed = urlparse(value)
+            port = parsed.port
+        except (TypeError, ValueError):
+            parsed, port = None, None
+        project = self._project()
+        if (
+            parsed is None
+            or parsed.scheme not in {"postgres", "postgresql"}
+            or not parsed.hostname
+            or not parsed.hostname.endswith(".pooler.supabase.com")
+            or port != 5432
+            or unquote(parsed.username or "") != f"{RUNTIME_ROLE}.{project}"
+            or len(unquote(parsed.password or "")) < 24
+            or parsed.path != "/postgres"
+            or parsed.params
+            or parsed.query
+            or parsed.fragment
+        ):
+            raise RuntimeError("existing dashboard database credential is unavailable or unsafe")
+        return value
+
+    def _verify_candidate_runtime(self, database_url):
+        """Authenticate the exact candidate before the first Edge function write."""
+        from scripts.owner_intelligence_contract import validate_owner_intelligence_v2
+        from scripts.verify_owner_dashboard_role import verify_dashboard_role
+        try:
+            database_url = self._validated_runtime_url(database_url)
+            with self.connector(database_url, row_factory=dict_row, connect_timeout=15) as connection:
+                connection.execute("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY")
+                connection.execute("SET LOCAL statement_timeout = '5s'")
+                connection.execute("SET LOCAL lock_timeout = '2s'")
+                role_receipt = verify_dashboard_role(connection)
+                identity = connection.execute(
+                    """SELECT current_user AS database_user,
+                              current_setting('transaction_read_only') AS transaction_read_only""",
+                ).fetchone()
+                projection_row = connection.execute(
+                    "SELECT public.read_owner_intelligence_v2(1) AS projection"
+                ).fetchone()
+                validate_owner_intelligence_v2(projection_row.get("projection"))
+        except Exception:
+            raise RuntimeError("candidate dashboard database credential is not ready") from None
+        if (
+            not isinstance(identity, dict)
+            or identity.get("database_user") != RUNTIME_ROLE
+            or identity.get("transaction_read_only") != "on"
+            or role_receipt.get("status") != "verified"
+            or role_receipt.get("write_privileges") != 0
+            or role_receipt.get("application_function_execute") != 0
+            or role_receipt.get("owned_objects") != 0
+            or not isinstance(projection_row, dict)
+        ):
+            raise RuntimeError("candidate dashboard database credential is not ready")
+
     def apply(self, name, candidate):
         candidate = validate_snapshot(name, candidate, candidate=True)
-        if name in FUNCTIONS: self._write_function(name, candidate)
+        if name in FUNCTIONS:
+            if self.candidate_database_url is not None and not self._candidate_runtime_ready:
+                self._verify_candidate_runtime(self.candidate_database_url)
+                self._candidate_runtime_ready = True
+            self._write_function(name, candidate)
         elif name == "dashboard-secrets": self._write_secrets(candidate)
         elif name == "runtime-role": self._write_role(candidate)
         else: raise RuntimeError("native component mutation is not allowlisted")
@@ -543,20 +606,40 @@ class NativeReleaseAdapter:
         # Receipt storage must exist and be unused before the first protected
         # capture, migration, role/secret mutation, or function deployment.
         self._evidence_root()
-        password = secrets.token_urlsafe(36)
         with self._connection() as connection:
             grantor = connection.execute("SELECT current_user AS name").fetchone()["name"]
         previous_role = validate_snapshot("runtime-role", self._capture_role())
-        role = {"exists": True, "identity": RUNTIME_ROLE, "version": None, "files": {},
-            "values": {"password_verifier": scram_verifier(password)}, "configuration": {
+        if previous_role["exists"] and previous_role["configuration"]["attributes"]["rolcanlogin"]:
+            # A normal code release cannot atomically stop old Edge isolates while
+            # changing the PostgreSQL role and the platform secret. Preserve the
+            # verified credential so old-password attempts cannot trip Supavisor's
+            # circuit breaker during that cross-plane window.
+            verifier = previous_role["values"].get("password_verifier")
+            if not isinstance(verifier, str) or not verifier.startswith("SCRAM-SHA-256$"):
+                raise RuntimeError("existing dashboard runtime credential is unavailable or unsafe")
+            existing_secrets = self.capture("dashboard-secrets")["values"]
+            database_url = self._validated_runtime_url(existing_secrets.get("DASHBOARD_DATABASE_URL"))
+        else:
+            password = secrets.token_urlsafe(36)
+            verifier = scram_verifier(password)
+            database_url = runtime_url(
+                self.environment["SUPAVISOR_SESSION_URL"], RUNTIME_ROLE, password
+            )
+        configuration = {
                 "attributes": {"rolsuper": False, "rolinherit": True, "rolcreaterole": False, "rolcreatedb": False,
                     "rolcanlogin": True, "rolreplication": False, "rolbypassrls": False, "rolconnlimit": -1,
                     "rolvaliduntil": previous_role["configuration"]["attributes"]["rolvaliduntil"] if previous_role["exists"] else None},
                 "memberships": [{"role": PRIVILEGE_ROLE, "grantor": grantor, "admin_option": False,
                                   "inherit_option": True, "set_option": True}],
-                "settings": [{"database": "", "setconfig": ["search_path=pg_catalog, public"]}]}}
-        values = {"DASHBOARD_DATABASE_URL": runtime_url(self.environment["SUPAVISOR_SESSION_URL"], RUNTIME_ROLE, password),
+                "settings": [{"database": "", "setconfig": ["search_path=pg_catalog, public"]}]}
+        role_values = {"password_verifier": verifier}
+        role = {"exists": True, "identity": RUNTIME_ROLE,
+            "version": hashlib.sha256(canonical([configuration, role_values])).hexdigest(),
+            "files": {}, "values": role_values, "configuration": configuration}
+        values = {"DASHBOARD_DATABASE_URL": database_url,
                   "DASHBOARD_ALLOWED_ORIGINS": context["allowed_origin"], "DASHBOARD_OWNER_USER_ID": context["owner_user_id"]}
+        self.candidate_database_url = database_url
+        self._candidate_runtime_ready = False
         secret = capture_managed_secrets([{"name": k, "digest": hashlib.sha256(v.encode()).hexdigest()} for k, v in values.items()], values)
         candidates = {"runtime-role": role, "dashboard-secrets": secret}
         for name in FUNCTIONS:

@@ -8,6 +8,7 @@ import os
 from typing import Any
 
 import psycopg
+from psycopg.rows import tuple_row
 
 
 PRIVILEGE_ROLE = "stock_agent_dashboard"
@@ -49,23 +50,79 @@ EXPECTED_COLUMNS: dict[str, set[str]] = {
     "market_event_relationships": {"id", "run_id", "source_key", "target_kind", "target_key", "relationship_type", "evidence_item_ids"},
     "market_candidate_rankings": {"id", "run_id", "event_id", "candidate_key", "ticker", "rank", "total_score", "qualified", "veto_reasons", "exposure_item_ids"},
     "market_reports": {"id", "run_id", "market_date", "kind", "report", "report_hash", "created_at"},
+    "market_report_publications": {"report_id", "idempotency_key", "status", "telegram_message_ids", "telegram_accepted_at", "suppression_reason"},
+    "market_reference_manifests": {"id", "reference_version", "revision", "capability_version", "taxonomy_version", "source_hash", "valid_from", "valid_to", "manifest", "content_hash", "created_at"},
+    "market_security_reference_revisions": {"id", "security_id", "entity_id", "ticker", "exchange", "instrument_type", "eligible", "exclusion_reasons", "aliases", "valid_from", "valid_to", "content_hash", "created_at"},
+    "market_discovery_stage_tasks": {"id", "stage", "capability_id", "provider", "query_kind", "query_hash", "state", "attempt_count", "request_budget", "created_at", "updated_at"},
+    "market_exposure_facts": {"id", "security_revision_id", "theme_episode_revision_id", "exposure_kind", "fact", "source_ids", "valid_from", "valid_to", "content_hash", "created_at"},
+    "market_theme_episode_revisions": {"id", "theme_id", "revision", "episode", "source_ids", "valid_from", "valid_to", "content_hash", "created_at"},
+    "market_research_nominations": {"id", "security_revision_id", "theme_episode_revision_id", "exposure_fact_ids", "state", "rationale", "created_at", "updated_at"},
 }
+
+EXPECTED_FUNCTIONS = {
+    "read_overdue_scheduled_market_phases(timestamp with time zone)",
+    "read_owner_intelligence_v2(integer)",
+}
+
+EXPECTED_RUNTIME_ATTRIBUTES = {
+    "rolname": RUNTIME_ROLE,
+    "rolcanlogin": True,
+    "rolinherit": True,
+    "rolsuper": False,
+    "rolcreatedb": False,
+    "rolcreaterole": False,
+    "rolreplication": False,
+    "rolbypassrls": False,
+}
+
+EXPECTED_PRIVILEGE_ATTRIBUTES = {
+    "rolname": PRIVILEGE_ROLE,
+    "rolcanlogin": False,
+    "rolinherit": False,
+    "rolsuper": False,
+    "rolcreatedb": False,
+    "rolcreaterole": False,
+    "rolreplication": False,
+    "rolbypassrls": False,
+}
+
+EXPECTED_PRIVILEGE_MEMBERS = [{
+    "member": RUNTIME_ROLE,
+    "admin_option": False,
+    "inherit_option": True,
+    "set_option": True,
+}]
 
 
 def evaluate_dashboard_privileges(snapshot: dict[str, Any]) -> dict[str, object]:
     role = snapshot.get("role") or {}
-    if role.get("rolname") != RUNTIME_ROLE or not role.get("rolcanlogin"):
+    privilege_role = snapshot.get("privilege_role_state") or {}
+    if role.get("rolname") != RUNTIME_ROLE or role.get("rolcanlogin") is not True:
         raise RuntimeError("dashboard runtime role is missing or cannot login")
-    if role.get("rolbypassrls"):
+    if role.get("rolbypassrls") is True:
         raise RuntimeError("dashboard runtime role may bypass RLS")
-    if any(role.get(name) for name in ("rolsuper", "rolcreatedb", "rolcreaterole")):
+    if role != EXPECTED_RUNTIME_ATTRIBUTES:
         raise RuntimeError("dashboard runtime role has unsafe role authority")
+    if privilege_role != EXPECTED_PRIVILEGE_ATTRIBUTES:
+        raise RuntimeError("dashboard privilege role has unsafe role authority")
     if snapshot.get("memberships") != [PRIVILEGE_ROLE]:
         raise RuntimeError("dashboard runtime membership is not exact")
+    if snapshot.get("privilege_memberships"):
+        raise RuntimeError("dashboard privilege role membership is not exact")
+    if snapshot.get("privilege_members") != EXPECTED_PRIVILEGE_MEMBERS:
+        raise RuntimeError("dashboard privilege role members are not exact")
+    if snapshot.get("runtime_members"):
+        raise RuntimeError("dashboard runtime role has incoming members")
+    if set(snapshot.get("database_privileges", set())) != {"CONNECT", "TEMPORARY"}:
+        raise RuntimeError("unexpected dashboard database privilege")
     if set(snapshot.get("schema_privileges", set())) != {"USAGE"}:
         raise RuntimeError("unexpected dashboard schema privilege")
+    if snapshot.get("other_schema_privileges"):
+        raise RuntimeError("unexpected dashboard schema privilege outside public")
     if snapshot.get("table_privileges"):
         raise RuntimeError("unexpected dashboard table privilege")
+    if snapshot.get("sequence_privileges"):
+        raise RuntimeError("unexpected dashboard sequence privilege")
 
     actual_columns = {
         table: set(columns)
@@ -73,8 +130,8 @@ def evaluate_dashboard_privileges(snapshot: dict[str, Any]) -> dict[str, object]
     }
     if actual_columns != EXPECTED_COLUMNS:
         raise RuntimeError("dashboard column privileges differ from the allowlist")
-    if snapshot.get("application_function_execute"):
-        raise RuntimeError("dashboard role can execute an application function")
+    if set(snapshot.get("application_function_execute") or []) != EXPECTED_FUNCTIONS:
+        raise RuntimeError("dashboard executable function allowlist differs")
     if snapshot.get("owned_objects"):
         raise RuntimeError("dashboard role has object ownership")
 
@@ -97,7 +154,7 @@ def evaluate_dashboard_privileges(snapshot: dict[str, Any]) -> dict[str, object]
 
 
 def _fetch_all(connection, query: str, parameters: tuple[object, ...] = ()):
-    with connection.cursor() as cursor:
+    with connection.cursor(row_factory=tuple_row) as cursor:
         if parameters:
             cursor.execute(query, parameters)
         else:
@@ -108,14 +165,18 @@ def _fetch_all(connection, query: str, parameters: tuple[object, ...] = ()):
 def collect_dashboard_privileges(connection) -> dict[str, Any]:
     role_rows = _fetch_all(
         connection,
-        """SELECT rolname, rolcanlogin, rolsuper, rolcreatedb, rolcreaterole, rolbypassrls
-             FROM pg_catalog.pg_roles WHERE rolname = %s""",
-        (RUNTIME_ROLE,),
+        """SELECT rolname, rolcanlogin, rolinherit, rolsuper, rolcreatedb, rolcreaterole,
+                  rolreplication, rolbypassrls
+             FROM pg_catalog.pg_roles WHERE rolname IN (%s, %s) ORDER BY rolname""",
+        (PRIVILEGE_ROLE, RUNTIME_ROLE),
     )
-    role = {}
-    if role_rows:
-        names = ("rolname", "rolcanlogin", "rolsuper", "rolcreatedb", "rolcreaterole", "rolbypassrls")
-        role = dict(zip(names, role_rows[0], strict=True))
+    names = (
+        "rolname", "rolcanlogin", "rolinherit", "rolsuper", "rolcreatedb", "rolcreaterole",
+        "rolreplication", "rolbypassrls",
+    )
+    roles = {row[0]: dict(zip(names, row, strict=True)) for row in role_rows}
+    role = roles.get(RUNTIME_ROLE, {})
+    privilege_role_state = roles.get(PRIVILEGE_ROLE, {})
 
     memberships = [
         row[0]
@@ -129,57 +190,147 @@ def collect_dashboard_privileges(connection) -> dict[str, Any]:
             (RUNTIME_ROLE,),
         )
     ]
-    schema_privileges = {
+    privilege_memberships = [
+        row[0]
+        for row in _fetch_all(
+            connection,
+            """SELECT granted.rolname
+                 FROM pg_catalog.pg_auth_members membership
+                 JOIN pg_catalog.pg_roles member ON member.oid = membership.member
+                 JOIN pg_catalog.pg_roles granted ON granted.oid = membership.roleid
+                WHERE member.rolname = %s ORDER BY granted.rolname""",
+            (PRIVILEGE_ROLE,),
+        )
+    ]
+    privilege_members = [
+        {
+            "member": row[0],
+            "admin_option": row[1],
+            "inherit_option": row[2],
+            "set_option": row[3],
+        }
+        for row in _fetch_all(
+            connection,
+            """SELECT member.rolname, membership.admin_option,
+                      COALESCE((to_jsonb(membership)->>'inherit_option')::boolean, true),
+                      COALESCE((to_jsonb(membership)->>'set_option')::boolean, true)
+                 FROM pg_catalog.pg_auth_members membership
+                 JOIN pg_catalog.pg_roles member ON member.oid = membership.member
+                 JOIN pg_catalog.pg_roles granted ON granted.oid = membership.roleid
+                WHERE granted.rolname = %s
+                ORDER BY member.rolname""",
+            (PRIVILEGE_ROLE,),
+        )
+    ]
+    runtime_members = [
+        row[0]
+        for row in _fetch_all(
+            connection,
+            """SELECT member.rolname
+                 FROM pg_catalog.pg_auth_members membership
+                 JOIN pg_catalog.pg_roles member ON member.oid = membership.member
+                 JOIN pg_catalog.pg_roles granted ON granted.oid = membership.roleid
+                WHERE granted.rolname = %s
+                ORDER BY member.rolname""",
+            (RUNTIME_ROLE,),
+        )
+    ]
+    database_privileges = {
         row[0]
         for row in _fetch_all(
             connection,
             """SELECT privilege
-                 FROM unnest(ARRAY['USAGE','CREATE']) privilege
-                WHERE pg_catalog.has_schema_privilege(%s, 'public', privilege)""",
+                 FROM unnest(ARRAY['CONNECT','CREATE','TEMPORARY']) privilege
+                WHERE pg_catalog.has_database_privilege(
+                    %s, pg_catalog.current_database(), privilege
+                )
+                ORDER BY privilege""",
             (RUNTIME_ROLE,),
         )
     }
-    table_privileges: dict[str, set[str]] = {}
-    for table, privilege in _fetch_all(
+    schema_privileges: set[str] = set()
+    other_schema_privileges: dict[str, set[str]] = {}
+    for schema, privilege in _fetch_all(
         connection,
-            """SELECT class.relname, privilege
+        """SELECT namespace.nspname, privilege
+             FROM pg_catalog.pg_namespace namespace
+             CROSS JOIN unnest(ARRAY['USAGE','CREATE']) privilege
+            WHERE namespace.nspname NOT IN ('pg_catalog','information_schema')
+              AND namespace.nspname !~ '^pg_(toast|temp)(_|$)'
+              AND pg_catalog.has_schema_privilege(%s, namespace.oid, privilege)
+            ORDER BY namespace.nspname, privilege""",
+        (RUNTIME_ROLE,),
+    ):
+        if schema == "public":
+            schema_privileges.add(privilege)
+        else:
+            other_schema_privileges.setdefault(schema, set()).add(privilege)
+    table_privileges: dict[str, set[str]] = {}
+    for schema, table, privilege in _fetch_all(
+        connection,
+            """SELECT namespace.nspname, class.relname, privilege
                  FROM pg_catalog.pg_class class
                  JOIN pg_catalog.pg_namespace namespace ON namespace.oid = class.relnamespace
                  CROSS JOIN unnest(ARRAY['SELECT','INSERT','UPDATE','DELETE','TRUNCATE','REFERENCES','TRIGGER']) privilege
-                WHERE namespace.nspname = 'public' AND class.relkind IN ('r','p','v','m')
+                WHERE namespace.nspname NOT IN ('pg_catalog','information_schema')
+                  AND namespace.nspname !~ '^pg_(toast|temp)(_|$)'
+                  AND class.relkind IN ('r','p','v','m','f')
                   AND pg_catalog.has_table_privilege(%s, class.oid, privilege)""",
         (RUNTIME_ROLE,),
     ):
-        table_privileges.setdefault(table, set()).add(privilege)
+        key = table if schema == "public" else f"{schema}.{table}"
+        table_privileges.setdefault(key, set()).add(privilege)
     column_privileges: dict[str, set[str]] = {}
-    for table, column, privilege in _fetch_all(
+    for schema, table, column, privilege in _fetch_all(
         connection,
-            """SELECT class.relname, attribute.attname, privilege
+            """SELECT namespace.nspname, class.relname, attribute.attname, privilege
                  FROM pg_catalog.pg_class class
                  JOIN pg_catalog.pg_namespace namespace ON namespace.oid = class.relnamespace
                  JOIN pg_catalog.pg_attribute attribute ON attribute.attrelid = class.oid
                  CROSS JOIN unnest(ARRAY['SELECT','INSERT','UPDATE','REFERENCES']) privilege
-                WHERE namespace.nspname = 'public' AND class.relkind IN ('r','p','v','m')
+                WHERE namespace.nspname NOT IN ('pg_catalog','information_schema')
+                  AND namespace.nspname !~ '^pg_(toast|temp)(_|$)'
+                  AND class.relkind IN ('r','p','v','m','f')
                   AND attribute.attnum > 0 AND NOT attribute.attisdropped
                   AND pg_catalog.has_column_privilege(%s, class.oid, attribute.attnum, privilege)""",
         (RUNTIME_ROLE,),
     ):
+        key = table if schema == "public" else f"{schema}.{table}"
         if privilege != "SELECT":
-            table_privileges.setdefault(table, set()).add(privilege)
-        column_privileges.setdefault(table, set()).add(column)
+            table_privileges.setdefault(key, set()).add(privilege)
+        column_privileges.setdefault(key, set()).add(column)
 
-    application_function_execute = [
-        row[0]
-        for row in _fetch_all(
+    sequence_privileges: dict[str, set[str]] = {}
+    for schema, sequence, privilege in _fetch_all(
+        connection,
+        """SELECT namespace.nspname, class.relname, privilege
+             FROM pg_catalog.pg_class class
+             JOIN pg_catalog.pg_namespace namespace ON namespace.oid = class.relnamespace
+             CROSS JOIN unnest(ARRAY['USAGE','SELECT','UPDATE']) privilege
+            WHERE namespace.nspname NOT IN ('pg_catalog','information_schema')
+              AND namespace.nspname !~ '^pg_(toast|temp)(_|$)'
+              AND class.relkind = 'S'
+              AND pg_catalog.has_sequence_privilege(%s, class.oid, privilege)""",
+        (RUNTIME_ROLE,),
+    ):
+        key = sequence if schema == "public" else f"{schema}.{sequence}"
+        sequence_privileges.setdefault(key, set()).add(privilege)
+
+    application_function_execute = _fetch_all(
             connection,
-            """SELECT procedure.oid::regprocedure::text
+            """SELECT namespace.nspname, procedure.oid::regprocedure::text
                  FROM pg_catalog.pg_proc procedure
                  JOIN pg_catalog.pg_namespace namespace ON namespace.oid = procedure.pronamespace
-                WHERE namespace.nspname = 'public'
+                WHERE namespace.nspname NOT IN ('pg_catalog','information_schema')
+                  AND namespace.nspname !~ '^pg_(toast|temp)(_|$)'
+                  AND pg_catalog.has_schema_privilege(%s, namespace.oid, 'USAGE')
                   AND pg_catalog.has_function_privilege(%s, procedure.oid, 'EXECUTE')
                 ORDER BY procedure.oid::regprocedure::text""",
-            (RUNTIME_ROLE,),
+            (RUNTIME_ROLE, RUNTIME_ROLE),
         )
+    application_function_execute = [
+        procedure if schema == "public" else f"{schema}.{procedure}"
+        for schema, procedure in application_function_execute
     ]
     owned_objects = [
         f"{row[0]}.{row[1]}"
@@ -194,6 +345,43 @@ def collect_dashboard_privileges(connection) -> dict[str, Any]:
             (PRIVILEGE_ROLE, RUNTIME_ROLE),
         )
     ]
+    owned_objects.extend(
+        f"database:{row[0]}"
+        for row in _fetch_all(
+            connection,
+            """SELECT database.datname
+                 FROM pg_catalog.pg_database database
+                 JOIN pg_catalog.pg_roles owner ON owner.oid = database.datdba
+                WHERE owner.rolname IN (%s, %s)
+                ORDER BY database.datname""",
+            (PRIVILEGE_ROLE, RUNTIME_ROLE),
+        )
+    )
+    owned_objects.extend(
+        f"schema:{row[0]}"
+        for row in _fetch_all(
+            connection,
+            """SELECT namespace.nspname
+                 FROM pg_catalog.pg_namespace namespace
+                 JOIN pg_catalog.pg_roles owner ON owner.oid = namespace.nspowner
+                WHERE owner.rolname IN (%s, %s)
+                ORDER BY namespace.nspname""",
+            (PRIVILEGE_ROLE, RUNTIME_ROLE),
+        )
+    )
+    owned_objects.extend(
+        f"{row[0]}.{row[1]}"
+        for row in _fetch_all(
+            connection,
+            """SELECT namespace.nspname, procedure.oid::regprocedure::text
+                 FROM pg_catalog.pg_proc procedure
+                 JOIN pg_catalog.pg_namespace namespace ON namespace.oid = procedure.pronamespace
+                 JOIN pg_catalog.pg_roles owner ON owner.oid = procedure.proowner
+                WHERE owner.rolname IN (%s, %s)
+                ORDER BY namespace.nspname, procedure.oid::regprocedure::text""",
+            (PRIVILEGE_ROLE, RUNTIME_ROLE),
+        )
+    )
     policies: dict[str, dict[str, object]] = {}
     for table, command, roles in _fetch_all(
         connection,
@@ -204,9 +392,16 @@ def collect_dashboard_privileges(connection) -> dict[str, Any]:
 
     return {
         "role": role,
+        "privilege_role_state": privilege_role_state,
         "memberships": memberships,
+        "privilege_memberships": privilege_memberships,
+        "privilege_members": privilege_members,
+        "runtime_members": runtime_members,
+        "database_privileges": database_privileges,
         "schema_privileges": schema_privileges,
+        "other_schema_privileges": other_schema_privileges,
         "table_privileges": table_privileges,
+        "sequence_privileges": sequence_privileges,
         "column_privileges": column_privileges,
         "application_function_execute": application_function_execute,
         "owned_objects": owned_objects,

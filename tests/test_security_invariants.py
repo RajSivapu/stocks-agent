@@ -5,6 +5,10 @@ import re
 
 from scripts.verify_owner_dashboard_role import (
     EXPECTED_COLUMNS,
+    EXPECTED_PRIVILEGE_MEMBERS,
+    EXPECTED_FUNCTIONS,
+    EXPECTED_PRIVILEGE_ATTRIBUTES,
+    EXPECTED_RUNTIME_ATTRIBUTES,
     evaluate_dashboard_privileges,
 )
 
@@ -550,18 +554,20 @@ def test_weekly_audit_columns_are_exactly_admitted_by_the_dashboard_verifier():
 
     def snapshot():
         return {
-            "role": {
-                "rolname": "stock_agent_dashboard_runtime", "rolcanlogin": True,
-                "rolsuper": False, "rolcreatedb": False, "rolcreaterole": False,
-                "rolbypassrls": False,
-            },
+            "role": dict(EXPECTED_RUNTIME_ATTRIBUTES),
+            "privilege_role_state": dict(EXPECTED_PRIVILEGE_ATTRIBUTES),
             "memberships": ["stock_agent_dashboard"],
+            "privilege_memberships": [],
+            "privilege_members": [dict(member) for member in EXPECTED_PRIVILEGE_MEMBERS],
+            "runtime_members": [],
+            "database_privileges": {"CONNECT", "TEMPORARY"},
             "schema_privileges": {"USAGE"},
             "table_privileges": {},
+            "sequence_privileges": {},
             "column_privileges": {
                 table: set(columns) for table, columns in EXPECTED_COLUMNS.items()
             },
-            "application_function_execute": [],
+            "application_function_execute": sorted(EXPECTED_FUNCTIONS),
             "owned_objects": [],
             "policies": {
                 table: {"cmd": "SELECT", "roles": ["stock_agent_dashboard"]}

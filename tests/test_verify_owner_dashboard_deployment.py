@@ -210,6 +210,48 @@ def test_http_canary_uses_only_get_and_checks_anonymous_and_non_owner_denial():
     assert {method for method, _url, _headers in calls} == {"GET"}
 
 
+def test_http_canary_reports_only_bounded_owner_failure_status_and_code():
+    def requester(_method, _url, headers):
+        authorization = headers.get("authorization", "")
+        if not authorization:
+            return 401, {"access-control-allow-origin": ORIGIN}, json.dumps({"error": {"code": "unauthorized"}}).encode()
+        if authorization == "Bearer non-owner-token":
+            return 403, {"access-control-allow-origin": ORIGIN}, json.dumps({"error": {"code": "owner_only"}}).encode()
+        return 503, {"access-control-allow-origin": ORIGIN}, json.dumps({
+            "error": {"code": "database_unavailable", "message": "private database detail"},
+        }).encode()
+
+    with pytest.raises(
+        RuntimeError,
+        match=r"^owner GET failed for /v1/today \(status 503, code database_unavailable\)$",
+    ) as failure:
+        verify.run_http_canary(
+            API_URL, ORIGIN, "owner-token", "non-owner-token",
+            requester=requester, source_reader=lambda _run_id: {},
+        )
+
+    assert "private database detail" not in str(failure.value)
+
+
+@pytest.mark.parametrize("body", [b"not-json-private-sentinel", b"x" * 4097])
+def test_http_canary_does_not_echo_untrusted_or_oversized_owner_failure_body(body):
+    def requester(_method, _url, headers):
+        authorization = headers.get("authorization", "")
+        if not authorization:
+            return 401, {"access-control-allow-origin": ORIGIN}, json.dumps({"error": {"code": "unauthorized"}}).encode()
+        if authorization == "Bearer non-owner-token":
+            return 403, {"access-control-allow-origin": ORIGIN}, json.dumps({"error": {"code": "owner_only"}}).encode()
+        return 503, {"access-control-allow-origin": ORIGIN}, body
+
+    with pytest.raises(RuntimeError, match=r"status 503, code unknown") as failure:
+        verify.run_http_canary(
+            API_URL, ORIGIN, "owner-token", "non-owner-token",
+            requester=requester, source_reader=lambda _run_id: {},
+        )
+
+    assert "sentinel" not in str(failure.value)
+
+
 def test_source_reconciliation_rejects_unsupported_run_send_policy_and_price_claims():
     run_id = "6903b3cc-05b7-4f90-bbc2-7e80a3a59e22"
     payloads = {route: envelope({}) for route in verify.CANARY_ROUTES}

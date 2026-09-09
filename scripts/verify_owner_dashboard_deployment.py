@@ -856,7 +856,16 @@ def run_http_canary(
         )
         headers = {key.lower(): value for key, value in headers.items()}
         if status != 200:
-            raise RuntimeError(f"owner GET failed for {route}")
+            code = "unknown"
+            if len(body) <= 4096:
+                try:
+                    error = json.loads(body).get("error", {})
+                    candidate = error.get("code") if isinstance(error, dict) else None
+                    if isinstance(candidate, str) and re.fullmatch(r"[a-z][a-z0-9_]{0,63}", candidate):
+                        code = candidate
+                except (json.JSONDecodeError, UnicodeDecodeError, AttributeError):
+                    pass
+            raise RuntimeError(f"owner GET failed for {route} (status {status}, code {code})")
         if headers.get("access-control-allow-origin") != origin or headers.get("cache-control") != "no-store":
             raise RuntimeError(f"owner headers are unsafe for {route}")
         try:

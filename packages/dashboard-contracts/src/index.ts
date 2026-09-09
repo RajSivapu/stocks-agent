@@ -449,6 +449,7 @@ export interface SystemView {
 
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const ISO_PATTERN = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{3})?Z$/;
+const BOUNDED_TIMESTAMP_PATTERN = /^([0-9]{4})-([0-9]{2})-([0-9]{2})T([0-9]{2}):([0-9]{2}):([0-9]{2})(?:\.([0-9]{1,6}))?(Z|[+-][0-9]{2}:[0-9]{2})$/;
 const FRESHNESS = new Set<Freshness>(["fresh", "stale", "partial", "unavailable"]);
 const MARKET_STATES = new Set<MarketState>([
   "regular", "pre_market", "post_market", "closed", "holiday", "as_of_close", "unknown",
@@ -627,7 +628,31 @@ function boundedEnum<T extends string>(value: unknown, allowed: readonly T[], na
 
 function boundedTimestamp(value: unknown, name: string, nullable = false): string | null {
   if (nullable && value === null) return null;
-  if (typeof value !== "string" || value.length > 40 || Number.isNaN(Date.parse(value))) throw new Error(`${name} must be an ISO timestamp`);
+  if (typeof value !== "string" || value.length > 40) throw new Error(`${name} must be an ISO timestamp`);
+  const match = BOUNDED_TIMESTAMP_PATTERN.exec(value);
+  if (!match) throw new Error(`${name} must be an ISO timestamp`);
+  const yearText = match[1]!;
+  const monthText = match[2]!;
+  const dayText = match[3]!;
+  const hourText = match[4]!;
+  const minuteText = match[5]!;
+  const secondText = match[6]!;
+  const offset = match[8]!;
+  const year = Number(yearText);
+  const month = Number(monthText);
+  const day = Number(dayText);
+  const hour = Number(hourText);
+  const minute = Number(minuteText);
+  const second = Number(secondText);
+  const leap = year % 4 === 0 && (year % 100 !== 0 || year % 400 === 0);
+  const monthDays = [31, leap ? 29 : 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
+  const offsetHour = offset === "Z" ? 0 : Number(offset.slice(1, 3));
+  const offsetMinute = offset === "Z" ? 0 : Number(offset.slice(4, 6));
+  const maximumDay = monthDays[month - 1] ?? 0;
+  if (year === 0 || month < 1 || month > 12 || day < 1 || day > maximumDay ||
+      hour > 23 || minute > 59 || second > 59 || offsetHour > 23 || offsetMinute > 59) {
+    throw new Error(`${name} must be an ISO timestamp`);
+  }
   return value;
 }
 

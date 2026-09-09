@@ -4,6 +4,10 @@ import pytest
 
 from scripts.verify_owner_dashboard_role import (
     EXPECTED_COLUMNS,
+    EXPECTED_FUNCTIONS,
+    EXPECTED_PRIVILEGE_MEMBERS,
+    EXPECTED_PRIVILEGE_ATTRIBUTES,
+    EXPECTED_RUNTIME_ATTRIBUTES,
     collect_dashboard_privileges,
     evaluate_dashboard_privileges,
 )
@@ -11,21 +15,20 @@ from scripts.verify_owner_dashboard_role import (
 
 def valid_snapshot():
     return {
-        "role": {
-            "rolname": "stock_agent_dashboard_runtime",
-            "rolcanlogin": True,
-            "rolsuper": False,
-            "rolcreatedb": False,
-            "rolcreaterole": False,
-            "rolbypassrls": False,
-        },
+        "role": dict(EXPECTED_RUNTIME_ATTRIBUTES),
+        "privilege_role_state": dict(EXPECTED_PRIVILEGE_ATTRIBUTES),
         "memberships": ["stock_agent_dashboard"],
+        "privilege_memberships": [],
+        "privilege_members": [dict(member) for member in EXPECTED_PRIVILEGE_MEMBERS],
+        "runtime_members": [],
+        "database_privileges": {"CONNECT", "TEMPORARY"},
         "schema_privileges": {"USAGE"},
         "table_privileges": {},
+        "sequence_privileges": {},
         "column_privileges": {
             table: set(columns) for table, columns in EXPECTED_COLUMNS.items()
         },
-        "application_function_execute": [],
+        "application_function_execute": sorted(EXPECTED_FUNCTIONS),
         "owned_objects": [],
         "policies": {
             table: {"cmd": "SELECT", "roles": ["stock_agent_dashboard"]}
@@ -51,9 +54,27 @@ def test_valid_dashboard_privileges_return_a_bounded_receipt():
     ("mutation", "message"),
     (
         (lambda value: value["role"].update(rolbypassrls=True), "bypass RLS"),
+        (lambda value: value["privilege_role_state"].update(rolcanlogin=True), "privilege role"),
         (lambda value: value["memberships"].append("service_role"), "membership"),
+        (lambda value: value["privilege_memberships"].append("service_role"), "privilege role membership"),
+        (
+            lambda value: value["privilege_members"].append({
+                "member": "rogue_dashboard_reader",
+                "admin_option": False,
+                "inherit_option": True,
+                "set_option": True,
+            }),
+            "privilege role members",
+        ),
+        (
+            lambda value: value["privilege_members"][0].update(admin_option=True),
+            "privilege role members",
+        ),
+        (lambda value: value["runtime_members"].append("rogue_dashboard_reader"), "incoming members"),
+        (lambda value: value["database_privileges"].add("CREATE"), "database privilege"),
         (lambda value: value["schema_privileges"].add("CREATE"), "schema privilege"),
         (lambda value: value["table_privileges"].update({"holdings": {"UPDATE"}}), "table privilege"),
+        (lambda value: value["sequence_privileges"].update({"holdings_id_seq": {"USAGE"}}), "sequence privilege"),
         (lambda value: value["application_function_execute"].append("apply_portfolio_command"), "function"),
         (lambda value: value["owned_objects"].append("public.holdings"), "ownership"),
         (lambda value: value["column_privileges"]["holdings"].add("notes"), "column"),
@@ -84,7 +105,7 @@ def test_privilege_collector_executes_static_queries_without_empty_parameter_tup
             return []
 
     class Connection:
-        def cursor(self):
+        def cursor(self, **_kwargs):
             return Cursor()
 
     collect_dashboard_privileges(Connection())
@@ -109,6 +130,20 @@ def test_dashboard_role_has_exact_intelligence_select_columns():
     assert "market_source_items" in EXPECTED_COLUMNS
     assert "raw_payload" not in EXPECTED_COLUMNS["market_source_items"]
     assert "normalized_text" not in EXPECTED_COLUMNS["market_source_items"]
+
+
+def test_dashboard_authority_closure_revokes_public_trigger_helpers_and_is_consolidated():
+    root = Path(__file__).parents[1]
+    migration = (root / "sql/migrations/20261016_dashboard_runtime_authority_closure.sql").read_text()
+    schema = (root / "sql/schema.sql").read_text()
+    assert "initialize_market_intelligence_window()" in migration
+    assert "reuse_market_source_item_if_immutable()" in migration
+    assert migration.count("FROM PUBLIC, stock_agent_dashboard") == 2
+    assert (
+        "-- Consolidated from sql/migrations/20261016_dashboard_runtime_authority_closure.sql\n"
+        + migration.rstrip()
+        + "\n"
+    ) in schema
 
 
 def test_intelligence_dashboard_migration_is_exact_schema_mirror_and_revokes_first():
