@@ -16,6 +16,7 @@ from lib.release_reader_closure_contract import (
 )
 from scripts.deploy_owner_dashboard_api import (
     candidate_migration_manifest,
+    normalize_migration_statements,
     reconciliation_baseline_manifest,
 )
 from scripts.managed_isolated_restore import canonical_json
@@ -97,7 +98,9 @@ def _baseline_rows(*, closed: bool = False):
     private.extend((item["path"], item["version"], item["sha256"]) for item in suffix)
     native = [(
         baseline["version"],
-        [Path(baseline["path"]).read_text(encoding="utf-8")],
+        normalize_migration_statements(
+            Path(baseline["path"]).read_text(encoding="utf-8")
+        ),
     )]
     return manifest, private, native
 

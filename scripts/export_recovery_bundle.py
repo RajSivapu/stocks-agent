@@ -2643,10 +2643,9 @@ def _validated_records(records: Mapping[str, object]) -> dict[str, list[dict[str
            for row in result["schema_version"]):
         raise ValueError("schema version hash is invalid")
     from scripts.deploy_owner_dashboard_api import (
-        ROOT as DEPLOY_ROOT,
         RECONCILIATION_BASELINE_PATH, RECONCILIATION_BASELINE_VERSION,
         candidate_migration_manifest, migration_semantic_sha256,
-        reconciliation_baseline_manifest,
+        reconciliation_baseline_manifest, reconciliation_baseline_statements,
         validate_candidate_migration_cutover,
     )
     try:
@@ -2697,9 +2696,7 @@ def _validated_records(records: Mapping[str, object]) -> dict[str, list[dict[str
         if (baseline_row is None or baseline_row["sha256"] != expected["sha256"]
                 or len(result["schema_version"]) != 1 or len(native_baseline) != 1
                 or migration_semantic_sha256(native_baseline[0]["statements"])
-                   != migration_semantic_sha256([
-                       (DEPLOY_ROOT / RECONCILIATION_BASELINE_PATH).read_text(encoding="utf-8")
-                   ])
+                   != migration_semantic_sha256(reconciliation_baseline_statements())
                 or any(row["path"] != RECONCILIATION_BASELINE_PATH
                        and row["version"] <= RECONCILIATION_BASELINE_VERSION
                        for row in result["release_migration_ledger"])):
