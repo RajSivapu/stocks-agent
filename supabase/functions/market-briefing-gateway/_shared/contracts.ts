@@ -850,7 +850,7 @@ export interface DiscoveryCompletedScan {
 }
 
 export interface PolicyConfig {
-  version: 1 | 2 | 3;
+  version: 1 | 2 | 3 | 4;
   allocation_bps: Record<Bucket, number>;
   max_position_bps_of_bucket: Record<Bucket, number>;
   max_trade_risk_bps: Record<Bucket, number>;
@@ -879,6 +879,7 @@ export interface PolicyConfig {
     draft_ttl_hours: 24;
     drafts_per_hour: 5;
   };
+  intelligence?: Record<string, unknown>;
 }
 
 const OPERATIONS: readonly Operation[] = [

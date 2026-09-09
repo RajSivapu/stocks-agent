@@ -285,6 +285,20 @@ def test_pre_market_runs_all_seed_domains_and_persists_once():
     assert result.packet_hash == result.packet.packet_hash
 
 
+def test_active_policy_version_drives_start_and_packet_lineage():
+    gateway = FakeGateway()
+
+    result = IntelligencePipeline(
+        gateway,
+        [FakeAdapter()],
+        context={"policy_version": 4},
+    ).run(request("post-market"))
+
+    assert gateway.payloads[0]["policy_version"] == 4
+    assert result.packet.to_dict()["policy_version"] == 4
+    assert gateway.payloads[-1]["packet"]["packet"]["policy_version"] == 4
+
+
 def test_reference_stage_runs_once_after_durable_start_and_enters_persisted_coverage():
     gateway = FakeGateway()
     calls = []
@@ -340,7 +354,7 @@ def test_production_collection_routes_quotes_through_protected_producer_and_unwr
             if operation == "checkpoint_intelligence_collection":
                 return {"run_id": run_id, "cache_key": payload["cache_key"]}
             if operation == "read_intelligence_context":
-                return {"context": {"holdings": [{"ticker": "TEST", "shares": "2", "current_price": "999999"}],
+                return {"context": {"policy_version": 4, "holdings": [{"ticker": "TEST", "shares": "2", "current_price": "999999"}],
                     "liquidity_by_ticker": {"TEST": "1"}, "intelligence_collection_context": {
                         "holding_market_values": {"TEST": "200"}, "liquidity_by_ticker": {"TEST": "0.5"},
                         "overlap_by_ticker": {"TEST": "1"}}}}
@@ -367,7 +381,7 @@ def test_protected_context_refresh_preserves_hydrated_reference_for_entity_resol
             if operation == "checkpoint_intelligence_collection":
                 return {"run_id": run_id, "cache_key": payload["cache_key"]}
             if operation == "read_intelligence_context":
-                return {"context": {"holdings": [], "liquidity_by_ticker": {},
+                return {"context": {"policy_version": 4, "holdings": [], "liquidity_by_ticker": {},
                     "intelligence_collection_context": {"holding_market_values": {},
                         "liquidity_by_ticker": {}, "overlap_by_ticker": {}}}}
             raise AssertionError(operation)
@@ -963,6 +977,7 @@ def test_pipeline_rejects_untyped_comparison_and_learning_coverage_inputs():
 
 def test_protected_collection_context_retains_quote_receipts_and_revision_lineage():
     value = protected_collection_context({
+        "policy_version": 4,
         "holdings": [{"ticker": "AAA", "shares": "2"}],
         "owner_plans": [],
         "reconciled_cash_snapshot": {"ledger_watermark": "9"},
@@ -982,6 +997,19 @@ def test_protected_collection_context_retains_quote_receipts_and_revision_lineag
     assert value["portfolio_revision"] == "portfolio:7"
     assert value["cash_revision"] == "9"
     assert value["portfolio_valuation_complete"] is True
+    assert value["policy_version"] == 4
+
+
+@pytest.mark.parametrize("value", [None, True, 0, -1, "4"])
+def test_protected_collection_context_rejects_missing_or_invalid_policy_version(value):
+    context = {
+        "holdings": [],
+        "intelligence_collection_context": {},
+    }
+    if value is not None:
+        context["policy_version"] = value
+    with pytest.raises(ValueError, match="policy version"):
+        protected_collection_context(context)
 
 
 def test_protected_collection_context_retains_frozen_theme_memory_priority_surfaces():
@@ -1002,6 +1030,7 @@ def test_protected_collection_context_retains_frozen_theme_memory_priority_surfa
         "execution_allowed": False,
     }
     value = protected_collection_context({
+        "policy_version": 4,
         "holdings": [],
         "owner_plans": [],
         "radar": [{"ticker": "MUTABLE"}],
@@ -1033,6 +1062,7 @@ def test_protected_collection_context_rejects_oversized_or_authoritative_theme_m
     for memory in ({**base, "execution_allowed": True}, {**base, "active_theme_heads": [{"x": "€" * 70_000}]}):
         with pytest.raises(ValueError, match="theme memory"):
             protected_collection_context({
+                "policy_version": 4,
                 "holdings": [],
                 "intelligence_collection_context": {"theme_memory": memory},
             })

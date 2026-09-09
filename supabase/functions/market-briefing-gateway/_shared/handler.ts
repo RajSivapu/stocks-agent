@@ -6,6 +6,7 @@ import {
   type ArtifactMutation,
   type EvidencePacket,
   type GatewayEnvelope,
+  type GatewayReadContext,
   isEvidencePacketV2,
   packetEvidenceIds,
   parseArtifactMutationBatch,
@@ -135,6 +136,17 @@ export interface GatewayDependencies {
   dashboardAllowedOrigins?: string[];
   ownerUserId?: string;
   verifyOwner?: (request: Request) => Promise<{ subject: string }>;
+}
+
+async function readPolicyBoundContext(
+  runId: string,
+  deps: GatewayDependencies,
+): Promise<GatewayReadContext & { policy_version: number }> {
+  const [context, policy] = await Promise.all([
+    deps.repository.readContext(runId),
+    deps.repository.activePolicy(),
+  ]);
+  return { ...context, policy_version: policy.version };
 }
 
 const MAX_BODY_BYTES = 262_144;
@@ -827,7 +839,7 @@ export function createGatewayHandler(dependencies: GatewayDependencies) {
           return response(200, {
             ok: true,
             dry_run: true,
-            context: await deps.repository.readContext(envelope.run_id),
+            context: await readPolicyBoundContext(requireRun(envelope), deps),
           });
         }
         if (envelope.operation === "record_artifacts") {
@@ -1142,7 +1154,7 @@ export function createGatewayHandler(dependencies: GatewayDependencies) {
         if (envelope.operation === "read_intelligence_context") {
           return response(200, {
             ok: true,
-            context: await deps.repository.readContext(requireRun(envelope)),
+            context: await readPolicyBoundContext(requireRun(envelope), deps),
             telegram_message_ids: [],
           });
         }
@@ -1515,7 +1527,7 @@ export function createGatewayHandler(dependencies: GatewayDependencies) {
       if (envelope.operation === "read_context") {
         const result = {
           ok: true,
-          context: await deps.repository.readContext(envelope.run_id),
+          context: await readPolicyBoundContext(requireRun(envelope), deps),
         };
         await deps.repository.completeRequest(
           envelope.request_id,

@@ -29,6 +29,8 @@ from scripts.verify_owner_dashboard_deployment import (
     DASHBOARD_REPORT_SOURCE_SQL,
     EVIDENCE_REPORT_SOURCE_SQL,
 )
+from lib.config import load_settings
+from lib.policy_config import build_policy_config
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -50,6 +52,9 @@ RELEASE_READER_AUTHORITY_MIGRATION = (
 )
 RUN_ORDER_MIGRATION = (
     ROOT / "sql/migrations/20261018_analysis_context_binding_lifecycle.sql"
+)
+ACTIVE_INTELLIGENCE_POLICY_MIGRATION = (
+    ROOT / "sql/migrations/20261019_active_intelligence_policy.sql"
 )
 SCHEMA = ROOT / "sql/schema.sql"
 
@@ -96,7 +101,9 @@ def test_v2_runtime_completion_and_honest_empty_tail_are_parseable_and_ordered()
     assert RELEASE_READER_MIGRATION.read_bytes() in schema
     assert DASHBOARD_AUTHORITY_MIGRATION.read_bytes() in schema
     assert RELEASE_READER_AUTHORITY_MIGRATION.read_bytes() in schema
-    assert schema.endswith(RUN_ORDER_MIGRATION.read_bytes())
+    active_policy = parse_sql(ACTIVE_INTELLIGENCE_POLICY_MIGRATION.read_text())
+    assert active_policy
+    assert schema.endswith(ACTIVE_INTELLIGENCE_POLICY_MIGRATION.read_bytes())
     migration = RUNTIME_COMPLETION_MIGRATION.read_text()
     assert "SECURITY DEFINER SET search_path=pg_catalog" in migration
     assert "record_market_intelligence_v2_completion" in migration
@@ -274,6 +281,72 @@ def theme_memory_dsn():
                 check=True,
                 capture_output=True,
             )
+
+
+def test_active_v3_is_promoted_to_exact_v4_and_missing_intelligence_fails_closed(
+    theme_memory_dsn,
+):
+    with psycopg.connect(theme_memory_dsn, autocommit=True) as db:
+        reviewed_v4 = build_policy_config(load_settings(), today=date(2026, 9, 8))
+        historical = {}
+        for version in (1, 2, 3):
+            config = json.loads(json.dumps(reviewed_v4))
+            config["version"] = version
+            config.pop("intelligence")
+            historical[version] = config
+            db.execute(
+                "INSERT INTO market_policy_config(version,config,active,activated_at) "
+                "VALUES(%s,%s,%s,CASE WHEN %s THEN statement_timestamp() END)",
+                (version, Jsonb(config), version == 3, version == 3),
+            )
+
+        db.execute(ACTIVE_INTELLIGENCE_POLICY_MIGRATION.read_text())
+        rows = db.execute(
+            "SELECT version,config,active FROM market_policy_config "
+            "WHERE version BETWEEN 1 AND 4 ORDER BY version"
+        ).fetchall()
+        assert [row[0] for row in rows] == [1, 2, 3, 4]
+        assert {row[0]: row[1] for row in rows[:3]} == historical
+        assert [row[0] for row in rows if row[2]] == [4]
+        assert rows[3][1] == reviewed_v4
+
+        before_retry = db.execute(
+            "SELECT version,config,active,created_at,activated_at "
+            "FROM market_policy_config WHERE version BETWEEN 1 AND 4 ORDER BY version"
+        ).fetchall()
+        db.execute(ACTIVE_INTELLIGENCE_POLICY_MIGRATION.read_text())
+        assert db.execute(
+            "SELECT version,config,active,created_at,activated_at "
+            "FROM market_policy_config WHERE version BETWEEN 1 AND 4 ORDER BY version"
+        ).fetchall() == before_retry
+
+        market_date = date(2099, 10, 19)
+        good_run = str(uuid.uuid4())
+        db.execute(
+            "INSERT INTO analysis_runs(id,kind,status,scheduled_market_date,scheduled_phase) "
+            "VALUES(%s,'post-market','running',%s,'post-market')",
+            (good_run, market_date),
+        )
+        plan = {"reservations": [{
+            "id": str(uuid.uuid4()),
+            "provider": "gdelt",
+            "requests": 1,
+            "cache_keys": [],
+        }]}
+        receipt = db.execute(
+            "SELECT public.start_market_intelligence_run(%s,'post-market',%s,4,%s)",
+            (good_run, market_date, Jsonb(plan)),
+        ).fetchone()[0]
+        assert receipt["run_id"] == good_run
+
+        old_plan = json.loads(json.dumps(plan))
+        old_plan["reservations"][0]["id"] = str(uuid.uuid4())
+        with pytest.raises(psycopg.Error, match="intelligence policy unavailable") as error:
+            db.execute(
+                "SELECT public.start_market_intelligence_run(%s,'post-market',%s,3,%s)",
+                (good_run, market_date, Jsonb(old_plan)),
+            )
+        assert error.value.sqlstate == "22023"
 
 
 def _seed_protected_nomination_packet(db):

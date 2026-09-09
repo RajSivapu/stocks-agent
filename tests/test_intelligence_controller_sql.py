@@ -416,7 +416,7 @@ def _independent_worker(dsn, run_id, timestamp, crash, output, provider="gdelt",
                         os._exit(74)
                     return checkpoint
                 if operation == "read_intelligence_context":
-                    return {"context": {"holdings": [], "intelligence_collection_context": db.execute("SELECT public.refresh_market_intelligence_context(%s)", (run_id,)).fetchone()[0]}}
+                    return {"context": {"policy_version": 1, "holdings": [], "intelligence_collection_context": db.execute("SELECT public.refresh_market_intelligence_context(%s)", (run_id,)).fetchone()[0]}}
                 if operation == "record_intelligence":
                     receipt = db.execute("SELECT public.record_market_intelligence(%s,%s,%s)", (run_id, request_id, Jsonb(payload))).fetchone()[0]
                     if crash is True:
@@ -750,6 +750,7 @@ def test_normal_capability_producer_round_trips_through_protected_read_only_veri
                 ).fetchone()[0]
             if operation == "read_intelligence_context":
                 return {"context": {
+                    "policy_version": 1,
                     "holdings": [],
                     "intelligence_collection_context": db.execute(
                         "SELECT public.refresh_market_intelligence_context(%s)",

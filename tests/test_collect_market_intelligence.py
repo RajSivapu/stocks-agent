@@ -93,7 +93,7 @@ def test_scheduled_collector_consumes_protected_context_and_ignores_scratch_auth
     gateway = FakeGateway()
     adapter = FakeAdapter()
     reads = []
-    trusted = {"holdings": [{"ticker": "TEST", "shares": "4"}, {"ticker": "OTHER", "shares": "6"}],
+    trusted = {"policy_version": 4, "holdings": [{"ticker": "TEST", "shares": "4"}, {"ticker": "OTHER", "shares": "6"}],
         "owner_plans": [], "intelligence_collection_context": {
             "holding_market_values": {"TEST": "400", "OTHER": "600"},
             "liquidity_by_ticker": {"TEST": "0.75"}, "overlap_by_ticker": {"TEST": "0.4"}}}
@@ -119,6 +119,7 @@ def test_scheduled_collector_passes_one_persisted_capability_plan_and_source_cur
     plan = object()
     captured = {}
     protected = {
+        "policy_version": 4,
         "holdings": [], "owner_plans": [],
         "intelligence_collection_context": {
             "holding_market_values": {}, "liquidity_by_ticker": {},
@@ -180,7 +181,7 @@ def test_scheduled_collector_passes_one_persisted_capability_plan_and_source_cur
 
 def test_protected_context_unwraps_values_and_never_uses_supplied_current_price():
     from lib.intelligence.pipeline import protected_collection_context
-    result = protected_collection_context({"holdings": [{"ticker": "TEST", "shares": "2", "current_price": "999"}],
+    result = protected_collection_context({"policy_version": 4, "holdings": [{"ticker": "TEST", "shares": "2", "current_price": "999"}],
         "liquidity_by_ticker": {"TEST": "1"}, "intelligence_collection_context": {
             "holding_market_values": {"TEST": "200"}, "liquidity_by_ticker": {"TEST": "0.5"},
             "overlap_by_ticker": {"TEST": "0.2"}}})
@@ -192,7 +193,7 @@ def test_protected_context_unwraps_values_and_never_uses_supplied_current_price(
     assert result["liquidity_state_by_ticker"] == {}
     assert result["overlap_state_by_ticker"] == {}
     assert result["current_reference_state"] == "unavailable"
-    assert protected_collection_context({"holdings": [{"ticker": "TEST", "current_price": "999"}],
+    assert protected_collection_context({"policy_version": 4, "holdings": [{"ticker": "TEST", "current_price": "999"}],
         "liquidity_by_ticker": {"TEST": "1"}})["liquidity_by_ticker"] == {}
 
 

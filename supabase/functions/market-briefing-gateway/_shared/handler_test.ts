@@ -1534,6 +1534,15 @@ Deno.test("protected completion recovery bypasses new request claims and refuses
   });
   assertEquals(repo.claims.size, 0);
   assertEquals(setup.sent, []);
+  (repo.policyValue as unknown as Record<string, unknown>).version = 4;
+  const context = await setup.handler(
+    request("read_intelligence_context", {}),
+  );
+  assertEquals(context.status, 200);
+  assertEquals((await json(context)).context, {
+    ...readContext(),
+    policy_version: 4,
+  });
   const invented = await setup.handler(
     request("read_intelligence_context", {
       liquidity_by_ticker: { TEST: "1" },
@@ -1544,6 +1553,18 @@ Deno.test("protected completion recovery bypasses new request claims and refuses
     request("read_intelligence_context", {}, { secret: "wrong" }),
   );
   assertEquals(unauthorized.status, 401);
+});
+
+Deno.test("decision context exposes the active policy version", async () => {
+  const repository = new FakeRepository();
+  (repository.policyValue as unknown as Record<string, unknown>).version = 4;
+  const setup = makeHandler(repository);
+  const result = await setup.handler(request("read_context", {}));
+  assertEquals(result.status, 200);
+  assertEquals((await json(result)).context, {
+    ...readContext(),
+    policy_version: 4,
+  });
 });
 
 Deno.test("protected quote producer reserves before fetching and resumes without another call", async () => {
