@@ -216,7 +216,8 @@ def test_workflow_uploads_primary_before_finalization_and_final_receipt():
         "Finalize closure after immutable artifact upload"
     ) < workflow.index("Upload closure finalization receipt")
     assert "steps.closure_artifact.outputs.artifact-id" in workflow
-    assert "steps.closure_artifact.outputs.artifact-digest" in workflow
+    assert "steps.closure_artifact.outputs.artifact-digest" not in workflow
+    assert 'ARTIFACT_DIGEST="$(jq -r .digest <<<"$ARTIFACT")"' in workflow
     assert "finalize_release_reader_authority_closure" in workflow
     assert "extract_release_reader_authority_closure_artifact" in workflow
     assert "immutable-primary/release-reader-authority-closure.json" in workflow

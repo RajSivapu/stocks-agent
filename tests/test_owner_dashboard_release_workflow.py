@@ -622,6 +622,71 @@ def test_release_workflow_retains_and_restores_encrypted_backend_state_until_evi
     assert "dry-run-evidence.json" in workflow
 
 
+def test_release_workflow_binds_backend_evidence_digest_from_github_metadata():
+    workflow = Path(".github/workflows/owner-dashboard-release.yml").read_text()
+
+    assert "steps.backend_evidence.outputs.artifact-id" in workflow
+    assert "steps.backend_evidence.outputs.artifact-digest" not in workflow
+    assert "id: backend_evidence_binding" in workflow
+    assert 'ARTIFACT_DIGEST="$(jq -r .digest <<<"$ARTIFACT")"' in workflow
+    assert "steps.backend_evidence_binding.outputs.artifact_digest" in workflow
+
+
+def _artifact_binding_filter(workflow_name):
+    workflow = Path(".github/workflows", workflow_name).read_text()
+    matches = re.findall(r"ARTIFACT_BINDING_FILTER='([^']+)'", workflow)
+    assert len(matches) == 1
+    return matches[0]
+
+
+def _metadata_filter_accepts(expression, payload):
+    result = subprocess.run(
+        [
+            "jq", "-e",
+            "--argjson", "artifact_id", "17",
+            "--arg", "name", "expected-artifact",
+            "--arg", "digest", "sha256:" + "d" * 64,
+            "--argjson", "run", "123",
+            "--arg", "sha", "a" * 40,
+            expression,
+        ],
+        input=json.dumps(payload),
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    return result.returncode == 0
+
+
+@pytest.mark.parametrize("workflow_name", (
+    "release-reader-authority-closure.yml",
+    "owner-dashboard-release.yml",
+))
+def test_artifact_metadata_binding_predicates_execute_fail_closed(workflow_name):
+    expression = _artifact_binding_filter(workflow_name)
+    valid = {
+        "id": 17,
+        "name": "expected-artifact",
+        "digest": "sha256:" + "d" * 64,
+        "expired": False,
+        "workflow_run": {"id": 123, "head_sha": "a" * 40},
+        "size_in_bytes": 1024,
+    }
+    assert _metadata_filter_accepts(expression, valid)
+    for mutation in (
+        {"id": 18},
+        {"id": 17.5},
+        {"id": "17"},
+        {"size_in_bytes": 1.5},
+        {"size_in_bytes": "1024"},
+        {"size_in_bytes": 0},
+        {"size_in_bytes": 1_000_000_000},
+        {"expired": True},
+        {"workflow_run": {"id": 124, "head_sha": "a" * 40}},
+    ):
+        assert not _metadata_filter_accepts(expression, {**valid, **mutation})
+
+
 def test_release_failure_recovery_is_safe_when_preflight_never_created_state_directory():
     workflow = Path(".github/workflows/owner-dashboard-release.yml").read_text()
     recovery_step = workflow.split(

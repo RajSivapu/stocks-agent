@@ -245,17 +245,19 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           ARTIFACT_ID: ${{ steps.closure_artifact.outputs.artifact-id }}
-          ARTIFACT_DIGEST: ${{ steps.closure_artifact.outputs.artifact-digest }}
           CANDIDATE_SHA: ${{ steps.candidate.outputs.candidate_sha }}
         run: |
           set -euo pipefail
           [[ "$ARTIFACT_ID" =~ ^[1-9][0-9]*$ ]] || { echo 'closure artifact ID is malformed'; exit 1; }
-          [[ "$ARTIFACT_DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]] || { echo 'closure artifact digest is malformed'; exit 1; }
           EXPECTED_NAME="release-reader-authority-closure-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
           ARTIFACT="$(gh api "repos/$GITHUB_REPOSITORY/actions/artifacts/$ARTIFACT_ID")"
-          jq -e --arg name "$EXPECTED_NAME" --arg digest "$ARTIFACT_DIGEST" \
+          ARTIFACT_DIGEST="$(jq -r .digest <<<"$ARTIFACT")"
+          [[ "$ARTIFACT_DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]] || { echo 'closure artifact digest is malformed'; exit 1; }
+          ARTIFACT_BINDING_FILTER='(.id | type) == "number" and .id > 0 and (.id | floor) == .id and .id == $artifact_id and .name == $name and .digest == $digest and .expired == false and .workflow_run.id == $run and .workflow_run.head_sha == $sha and (.size_in_bytes | type) == "number" and .size_in_bytes > 0 and (.size_in_bytes | floor) == .size_in_bytes and .size_in_bytes <= 131072'
+          jq -e --argjson artifact_id "$ARTIFACT_ID" \
+            --arg name "$EXPECTED_NAME" --arg digest "$ARTIFACT_DIGEST" \
             --argjson run "$GITHUB_RUN_ID" --arg sha "$CANDIDATE_SHA" \
-            '.id > 0 and .name == $name and .digest == $digest and .expired == false and .workflow_run.id == $run and .workflow_run.head_sha == $sha and .size_in_bytes > 0 and .size_in_bytes <= 131072' \
+            "$ARTIFACT_BINDING_FILTER" \
             <<<"$ARTIFACT" >/dev/null || { echo 'closure artifact binding is not exact'; exit 1; }
           PRIMARY_ARCHIVE="$CLOSURE_DIR/primary-closure-artifact.zip"
           gh api "repos/$GITHUB_REPOSITORY/actions/artifacts/$ARTIFACT_ID/zip" > "$PRIMARY_ARCHIVE"
