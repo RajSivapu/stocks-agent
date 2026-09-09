@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import subprocess
 import sys
 from pathlib import Path
@@ -30,6 +31,7 @@ def main() -> int:
     parser.add_argument("--lease-owner", required=True)
     parser.add_argument("--release-run-id", type=int)
     parser.add_argument("--release-run-attempt", type=int, required=True)
+    parser.add_argument("--candidate-sha")
     args = parser.parse_args()
     admin_url = validate_release_admin_session_url(args.project_ref, args.admin_url)
     # Recovery adapters snapshot the process environment before retrieving the
@@ -39,7 +41,12 @@ def main() -> int:
     if args.release_run_id is not None or raw is None or not raw.startswith(b"{"):
         from cryptography.fernet import Fernet
         from scripts.release_components import EncryptedJournal, load_native_release_adapter, recover_components
-        candidate = subprocess.check_output(["git", "rev-parse", "HEAD"], text=True).strip()
+        checkout = subprocess.check_output(["git", "rev-parse", "HEAD"], text=True).strip()
+        candidate = args.candidate_sha or checkout
+        if not re.fullmatch(r"[0-9a-f]{40}", candidate):
+            raise RuntimeError("component recovery candidate SHA is malformed")
+        if args.candidate_sha is not None and args.release_run_id is None:
+            raise RuntimeError("an explicit recovery candidate requires an exact release run")
         adapter = load_native_release_adapter({"project_ref": args.project_ref, "candidate_sha": candidate,
                                                "lease_owner": args.lease_owner,
                                                "release_run_id": args.release_run_id,

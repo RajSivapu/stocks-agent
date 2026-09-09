@@ -399,6 +399,43 @@ def test_native_release_resolves_exact_lease_when_initial_journal_cannot_be_reta
     assert callbacks == ["resolved"]
 
 
+def test_canonical_encrypted_journal_key_order_recovers_complete_backend_state(tmp_path):
+    """Canonical JSON sorts component keys; recovery must restore canonical order."""
+    from cryptography.fernet import Fernet
+
+    release = module()
+    platform = Platform(absent=("owner-web-site",))
+    journal = {
+        "format": 1,
+        "status": "recovery_required",
+        "components": {
+            name: {
+                "changed": False,
+                "prior": copy.deepcopy(platform.state[name]),
+                "prior_sha256": hashlib.sha256(
+                    release.canonical(platform.state[name])
+                ).hexdigest(),
+            }
+            for name in release.BACKEND_COMPONENTS
+        },
+    }
+    key = Fernet.generate_key()
+    path = tmp_path / "release.enc"
+    sink = release.EncryptedJournal(path, key, retain=lambda _raw: None)
+    sink(journal)
+
+    recovered = sink.read()
+    assert tuple(recovered["components"]) != release.BACKEND_COMPONENTS
+    result = release.recover_components(
+        platform, recovered, persist=lambda _value: None,
+    )
+
+    assert result == {
+        "status": "rolled_back",
+        "components": list(release.BACKEND_COMPONENTS),
+    }
+
+
 def test_native_release_resolves_exact_lease_when_journal_key_is_invalid(tmp_path):
     release = module(); callbacks = []
     class Adapter:

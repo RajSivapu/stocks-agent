@@ -111,10 +111,15 @@ def verify_component_readback(name: str, expected: Mapping, observed: Mapping) -
 
 
 def _journal_components(journal: Mapping) -> tuple[str, ...]:
-    names = tuple(journal.get("components", {}))
-    if names not in (COMPONENTS, BACKEND_COMPONENTS):
+    components = journal.get("components")
+    if not isinstance(components, Mapping):
         raise RuntimeError("complete release recovery journal is required")
-    return names
+    names = set(components)
+    if names == set(COMPONENTS):
+        return COMPONENTS
+    if names == set(BACKEND_COMPONENTS):
+        return BACKEND_COMPONENTS
+    raise RuntimeError("complete release recovery journal is required")
 
 
 def recover_components(transport: ComponentTransport, journal: dict, *, persist: Callable[[dict], None]) -> dict:
