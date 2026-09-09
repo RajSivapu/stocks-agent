@@ -12,6 +12,7 @@ import tempfile
 from types import SimpleNamespace
 
 import psycopg
+from psycopg import sql
 import pytest
 
 from scripts import release_components as release
@@ -483,6 +484,107 @@ def database_adapter(database):
     with psycopg.connect(database, autocommit=True) as connection:
         connection.execute("UPDATE public.stock_agent_release_mutation_lease SET owner='release-123', state='recovery_required'")
     return platform, adapter
+
+
+def test_dashboard_authority_ignores_superuser_edges_and_unreachable_schema_acls(database):
+    from scripts.verify_owner_dashboard_role import collect_dashboard_privileges
+
+    runtime = "stock_agent_dashboard_runtime"
+    ordinary = "ordinary_incoming_dashboard_member"
+    hidden_schema = "unreachable_dashboard_authority"
+    with psycopg.connect(database, autocommit=True) as connection:
+        administrator = connection.execute("SELECT current_user").fetchone()[0]
+        assert connection.execute(
+            "SELECT rolsuper FROM pg_catalog.pg_roles WHERE rolname = current_user"
+        ).fetchone() == (True,)
+        connection.execute(sql.SQL("CREATE ROLE {} LOGIN INHERIT").format(sql.Identifier(runtime)))
+        connection.execute(sql.SQL("CREATE ROLE {}").format(sql.Identifier(ordinary)))
+        assert connection.execute(
+            "SELECT rolsuper FROM pg_catalog.pg_roles WHERE rolname = %s", (ordinary,)
+        ).fetchone() == (False,)
+        connection.execute(
+            sql.SQL("GRANT stock_agent_dashboard TO {} WITH ADMIN FALSE, INHERIT TRUE, SET TRUE")
+            .format(sql.Identifier(runtime))
+        )
+        for role in (administrator, ordinary):
+            connection.execute(
+                sql.SQL("GRANT stock_agent_dashboard TO {} WITH ADMIN TRUE, INHERIT FALSE, SET FALSE")
+                .format(sql.Identifier(role))
+            )
+            connection.execute(
+                sql.SQL("GRANT {} TO {} WITH ADMIN TRUE, INHERIT FALSE, SET FALSE")
+                .format(sql.Identifier(runtime), sql.Identifier(role))
+            )
+        connection.execute(sql.SQL("CREATE SCHEMA {}").format(sql.Identifier(hidden_schema)))
+        connection.execute(
+            sql.SQL("CREATE TABLE {}.hidden_table(id integer, note text)")
+            .format(sql.Identifier(hidden_schema))
+        )
+        connection.execute(
+            sql.SQL("CREATE SEQUENCE {}.hidden_sequence").format(sql.Identifier(hidden_schema))
+        )
+        connection.execute(
+            sql.SQL("GRANT SELECT ON {}.hidden_table TO stock_agent_dashboard")
+            .format(sql.Identifier(hidden_schema))
+        )
+        connection.execute(
+            sql.SQL("GRANT USAGE, SELECT ON SEQUENCE {}.hidden_sequence TO stock_agent_dashboard")
+            .format(sql.Identifier(hidden_schema))
+        )
+    try:
+        with psycopg.connect(database, autocommit=True) as connection:
+            snapshot = collect_dashboard_privileges(connection)
+            assert administrator not in {row["member"] for row in snapshot["privilege_members"]}
+            assert administrator not in snapshot["runtime_members"]
+            assert ordinary in {row["member"] for row in snapshot["privilege_members"]}
+            assert ordinary in snapshot["runtime_members"]
+            assert not any(key.startswith(hidden_schema + ".") for key in snapshot["table_privileges"])
+            assert not any(key.startswith(hidden_schema + ".") for key in snapshot["column_privileges"])
+            assert not any(key.startswith(hidden_schema + ".") for key in snapshot["sequence_privileges"])
+
+            connection.execute(sql.SQL("SET ROLE {}").format(sql.Identifier(runtime)))
+            with pytest.raises(psycopg.errors.InsufficientPrivilege):
+                connection.execute(
+                    sql.SQL("SELECT id FROM {}.hidden_table").format(sql.Identifier(hidden_schema))
+                )
+            connection.execute("RESET ROLE")
+            connection.execute(
+                sql.SQL("GRANT USAGE ON SCHEMA {} TO stock_agent_dashboard")
+                .format(sql.Identifier(hidden_schema))
+            )
+
+            reachable = collect_dashboard_privileges(connection)
+            assert reachable["other_schema_privileges"] == {hidden_schema: {"USAGE"}}
+            assert reachable["table_privileges"][hidden_schema + ".hidden_table"] == {"SELECT"}
+            assert reachable["column_privileges"][hidden_schema + ".hidden_table"] == {"id", "note"}
+            assert reachable["sequence_privileges"][hidden_schema + ".hidden_sequence"] == {
+                "SELECT", "USAGE",
+            }
+            connection.execute(sql.SQL("SET ROLE {}").format(sql.Identifier(runtime)))
+            assert connection.execute(
+                sql.SQL("SELECT id FROM {}.hidden_table").format(sql.Identifier(hidden_schema))
+            ).fetchall() == []
+            connection.execute("RESET ROLE")
+    finally:
+        with psycopg.connect(database, autocommit=True) as connection:
+            connection.execute(sql.SQL("DROP SCHEMA IF EXISTS {} CASCADE").format(sql.Identifier(hidden_schema)))
+            for role in (ordinary, runtime):
+                connection.execute(
+                    sql.SQL("REVOKE stock_agent_dashboard FROM {}").format(sql.Identifier(role))
+                )
+            for role in (ordinary, administrator):
+                connection.execute(
+                    sql.SQL("REVOKE {} FROM {}").format(
+                        sql.Identifier(runtime), sql.Identifier(role)
+                    )
+                )
+            connection.execute(
+                sql.SQL("REVOKE stock_agent_dashboard FROM {}").format(
+                    sql.Identifier(administrator)
+                )
+            )
+            connection.execute(sql.SQL("DROP ROLE IF EXISTS {}").format(sql.Identifier(ordinary)))
+            connection.execute(sql.SQL("DROP ROLE IF EXISTS {}").format(sql.Identifier(runtime)))
 
 
 def test_runtime_role_exact_attributes_verifier_memberships_and_database_settings(database):

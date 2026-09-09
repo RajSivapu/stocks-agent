@@ -23,6 +23,7 @@ def valid_snapshot():
         "runtime_members": [],
         "database_privileges": {"CONNECT", "TEMPORARY"},
         "schema_privileges": {"USAGE"},
+        "other_schema_privileges": {},
         "table_privileges": {},
         "sequence_privileges": {},
         "column_privileges": {
@@ -73,6 +74,10 @@ def test_valid_dashboard_privileges_return_a_bounded_receipt():
         (lambda value: value["runtime_members"].append("rogue_dashboard_reader"), "incoming members"),
         (lambda value: value["database_privileges"].add("CREATE"), "database privilege"),
         (lambda value: value["schema_privileges"].add("CREATE"), "schema privilege"),
+        (
+            lambda value: value["other_schema_privileges"].update(extensions={"USAGE"}),
+            "schema privilege outside public",
+        ),
         (lambda value: value["table_privileges"].update({"holdings": {"UPDATE"}}), "table privilege"),
         (lambda value: value["sequence_privileges"].update({"holdings_id_seq": {"USAGE"}}), "sequence privilege"),
         (lambda value: value["application_function_execute"].append("apply_portfolio_command"), "function"),
@@ -112,6 +117,47 @@ def test_privilege_collector_executes_static_queries_without_empty_parameter_tup
     policy_calls = [args for args in calls if "pg_policies" in args[0]]
     assert len(policy_calls) == 1
     assert len(policy_calls[0]) == 1
+
+
+def test_privilege_collector_excludes_only_superuser_incoming_edges_and_unreachable_objects():
+    calls = []
+
+    class Cursor:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        def execute(self, *args):
+            calls.append(args)
+
+        def fetchall(self):
+            return []
+
+    class Connection:
+        def cursor(self, **_kwargs):
+            return Cursor()
+
+    collect_dashboard_privileges(Connection())
+
+    incoming_membership_queries = [
+        args for args in calls
+        if "pg_auth_members" in args[0] and "WHERE granted.rolname" in args[0]
+    ]
+    assert len(incoming_membership_queries) == 2
+    assert all("NOT member.rolsuper" in args[0] for args in incoming_membership_queries)
+
+    for privilege_function in (
+        "has_table_privilege", "has_column_privilege", "has_sequence_privilege",
+    ):
+        query_calls = [args for args in calls if privilege_function in args[0]]
+        assert len(query_calls) == 1
+        query, parameters = query_calls[0]
+        assert "has_schema_privilege" in query
+        assert parameters == (
+            "stock_agent_dashboard_runtime", "stock_agent_dashboard_runtime",
+        )
 
 
 def test_dashboard_migration_revokes_trigger_function_execution_and_future_public_defaults():

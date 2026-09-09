@@ -218,6 +218,7 @@ def collect_dashboard_privileges(connection) -> dict[str, Any]:
                  JOIN pg_catalog.pg_roles member ON member.oid = membership.member
                  JOIN pg_catalog.pg_roles granted ON granted.oid = membership.roleid
                 WHERE granted.rolname = %s
+                  AND NOT member.rolsuper
                 ORDER BY member.rolname""",
             (PRIVILEGE_ROLE,),
         )
@@ -231,6 +232,7 @@ def collect_dashboard_privileges(connection) -> dict[str, Any]:
                  JOIN pg_catalog.pg_roles member ON member.oid = membership.member
                  JOIN pg_catalog.pg_roles granted ON granted.oid = membership.roleid
                 WHERE granted.rolname = %s
+                  AND NOT member.rolsuper
                 ORDER BY member.rolname""",
             (RUNTIME_ROLE,),
         )
@@ -275,8 +277,9 @@ def collect_dashboard_privileges(connection) -> dict[str, Any]:
                 WHERE namespace.nspname NOT IN ('pg_catalog','information_schema')
                   AND namespace.nspname !~ '^pg_(toast|temp)(_|$)'
                   AND class.relkind IN ('r','p','v','m','f')
+                  AND pg_catalog.has_schema_privilege(%s, namespace.oid, 'USAGE')
                   AND pg_catalog.has_table_privilege(%s, class.oid, privilege)""",
-        (RUNTIME_ROLE,),
+        (RUNTIME_ROLE, RUNTIME_ROLE),
     ):
         key = table if schema == "public" else f"{schema}.{table}"
         table_privileges.setdefault(key, set()).add(privilege)
@@ -292,8 +295,9 @@ def collect_dashboard_privileges(connection) -> dict[str, Any]:
                   AND namespace.nspname !~ '^pg_(toast|temp)(_|$)'
                   AND class.relkind IN ('r','p','v','m','f')
                   AND attribute.attnum > 0 AND NOT attribute.attisdropped
+                  AND pg_catalog.has_schema_privilege(%s, namespace.oid, 'USAGE')
                   AND pg_catalog.has_column_privilege(%s, class.oid, attribute.attnum, privilege)""",
-        (RUNTIME_ROLE,),
+        (RUNTIME_ROLE, RUNTIME_ROLE),
     ):
         key = table if schema == "public" else f"{schema}.{table}"
         if privilege != "SELECT":
@@ -310,8 +314,9 @@ def collect_dashboard_privileges(connection) -> dict[str, Any]:
             WHERE namespace.nspname NOT IN ('pg_catalog','information_schema')
               AND namespace.nspname !~ '^pg_(toast|temp)(_|$)'
               AND class.relkind = 'S'
+              AND pg_catalog.has_schema_privilege(%s, namespace.oid, 'USAGE')
               AND pg_catalog.has_sequence_privilege(%s, class.oid, privilege)""",
-        (RUNTIME_ROLE,),
+        (RUNTIME_ROLE, RUNTIME_ROLE),
     ):
         key = sequence if schema == "public" else f"{schema}.{sequence}"
         sequence_privileges.setdefault(key, set()).add(privilege)
