@@ -12,6 +12,14 @@ import re
 from lib.release_baseline import expected_snapshot_tables
 
 
+AUTH_CANARY_INVENTORY = {
+    "status": "verified",
+    "identity_count": 2,
+    "privileged_owner_count": 1,
+    "denied_canary_count": 1,
+}
+
+
 def tree(root: Path) -> str:
     digest = hashlib.sha256()
     for path in sorted(item for item in root.rglob("*") if item.is_file()):
@@ -39,22 +47,47 @@ def validate_release_identity(
     return candidate_sha, reviewed_sha
 
 
+def protected_canary_evidence(receipt: dict[str, object]) -> dict[str, object]:
+    """Require and retain the exact owner, anonymous, and denied-canary proof."""
+    canary = receipt.get("canary")
+    if (
+        not isinstance(canary, dict)
+        or canary.get("status") != "verified"
+        or canary.get("source_reconciliation") != "verified"
+        or canary.get("source_database_role") != "stock_agent_dashboard_runtime"
+        or canary.get("financial_write_routes") != 0
+        or canary.get("brokerage_authority") != "none"
+        or canary.get("friend_invitations") != "disabled"
+        or canary.get("owner_route_count") != 10
+        or canary.get("unauthenticated_status") != 401
+        or canary.get("non_owner_status") != 403
+        or canary.get("owner_session") != "revoked"
+        or canary.get("non_owner_session") != "revoked"
+        or canary.get("auth_inventory_preflight") != AUTH_CANARY_INVENTORY
+        or canary.get("auth_inventory_readback") != AUTH_CANARY_INVENTORY
+    ):
+        raise RuntimeError("protected release canary receipt is incomplete")
+    return {
+        "canaries": {"owner": 200, "anonymous": 401, "non_owner": 403},
+        "auth_canary": {
+            "owner_session": "revoked",
+            "non_owner_session": "revoked",
+            "inventory_preflight": copy.deepcopy(AUTH_CANARY_INVENTORY),
+            "inventory_readback": copy.deepcopy(AUTH_CANARY_INVENTORY),
+        },
+    }
+
+
 def release_evidence_classes(receipt: dict[str, object]) -> dict[str, object]:
     """Classify immediate release proof without promoting it to scheduled proof."""
     candidate_sha = receipt.get("candidate_sha")
-    canary = receipt.get("canary")
     if (
         not isinstance(candidate_sha, str)
         or len(candidate_sha) != 40
         or any(character not in "0123456789abcdef" for character in candidate_sha)
-        or not isinstance(canary, dict)
-        or canary.get("status") != "verified"
-        or canary.get("source_reconciliation") != "verified"
-        or canary.get("financial_write_routes") != 0
-        or canary.get("brokerage_authority") != "none"
-        or canary.get("friend_invitations") != "disabled"
     ):
         raise RuntimeError("protected release canary receipt is incomplete")
+    protected_canary_evidence(receipt)
     return {
         "protected_backend": {"status": "verified", "candidate_sha": candidate_sha},
         "owner_site": {
@@ -116,6 +149,7 @@ def main() -> int:
     run_attempt = integer(args.release_workflow_run_attempt)
     if args.backend_evidence_artifact_name != f"backend-component-evidence-{run_id}-{run_attempt}":
         raise SystemExit("protected backend artifact identity is mismatched")
+    canary_evidence = protected_canary_evidence(receipt)
     component_readbacks = copy.deepcopy(receipt["component_readbacks"])
     for row in component_readbacks:
         row["artifact_id"] = artifact_id
@@ -137,7 +171,9 @@ def main() -> int:
             "pr_ci_workflow_run_id": integer(args.pr_ci_workflow_run_id)},
         "migrations": receipt["migrations"], "migration_application": receipt["migration_application"], "functions": receipt["functions"],
         "static_assets": copy.deepcopy(static),
-        "dry_run": False, "dry_run_evidence": dry, "canaries": {"owner": 200, "anonymous": 401, "non_owner": 403},
+        "dry_run": False, "dry_run_evidence": dry,
+        "canaries": canary_evidence["canaries"],
+        "auth_canary": canary_evidence["auth_canary"],
         "deployment_outcome": "succeeded",
         "component_readbacks": component_readbacks,
         "backend_evidence_artifact": {"artifact_id": artifact_id,

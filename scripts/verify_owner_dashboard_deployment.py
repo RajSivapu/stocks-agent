@@ -229,6 +229,7 @@ def obtain_ephemeral_owner_access_token(
     service_key: str,
     publishable_key: str,
     *,
+    verification_type: str = "magiclink",
     requester: Callable[[str, str, Mapping[str, str], bytes | None], tuple[int, bytes]] = _auth_request,
 ) -> str:
     """Generate and directly verify an owner link without sending an email or logging the token."""
@@ -238,13 +239,15 @@ def obtain_ephemeral_owner_access_token(
     validate_api_boundary(f"{project_url}/functions/v1/owner-dashboard-api", redirect_origin)
     if not re.fullmatch(r"sb_publishable_[A-Za-z0-9_-]{24,128}", publishable_key):
         raise ValueError("Supabase publishable key is invalid")
+    if verification_type not in {"magiclink", "recovery"}:
+        raise ValueError("ephemeral Auth verification type is invalid")
     admin_headers = {
         "apikey": service_key,
         "authorization": f"Bearer {service_key}",
         "content-type": "application/json",
     }
     link_body = json.dumps({
-        "type": "magiclink",
+        "type": verification_type,
         "email": owner_email,
         "options": {"redirect_to": redirect_origin},
     }, separators=(",", ":")).encode()
@@ -264,7 +267,7 @@ def obtain_ephemeral_owner_access_token(
         "authorization": f"Bearer {publishable_key}",
         "content-type": "application/json",
     }
-    verify_body = json.dumps({"type": "magiclink", "token_hash": token_hash}, separators=(",", ":")).encode()
+    verify_body = json.dumps({"type": verification_type, "token_hash": token_hash}, separators=(",", ":")).encode()
     verify_status, verify_response = requester(
         "POST", f"{project_url}/auth/v1/verify", public_headers, verify_body,
     )
@@ -278,6 +281,22 @@ def obtain_ephemeral_owner_access_token(
     ):
         raise RuntimeError("ephemeral owner session receipt is malformed")
     return access_token
+
+
+def obtain_ephemeral_existing_user_access_token(
+    project_url: str,
+    email: str,
+    redirect_origin: str,
+    service_key: str,
+    publishable_key: str,
+    *,
+    requester: Callable[[str, str, Mapping[str, str], bytes | None], tuple[int, bytes]] = _auth_request,
+) -> str:
+    """Mint a recovery session that fails if the already-bound Auth identity disappeared."""
+    return obtain_ephemeral_owner_access_token(
+        project_url, email, redirect_origin, service_key, publishable_key,
+        verification_type="recovery", requester=requester,
+    )
 
 
 def revoke_ephemeral_owner_session(
@@ -316,6 +335,69 @@ def revoke_ephemeral_owner_session(
     if status < 200 or status >= 300:
         raise RuntimeError("ephemeral owner session revocation failed")
     return {"status": "revoked", "scope": scope}
+
+
+def verify_auth_canary_inventory(
+    project_url: str,
+    owner_email: str,
+    owner_user_id: str,
+    canary_email: str,
+    canary_user_id: str,
+    service_key: str,
+    *,
+    requester: Callable[[str, str, Mapping[str, str], bytes | None], tuple[int, bytes]] = _auth_request,
+) -> dict[str, object]:
+    """Require exactly one privileged owner and one permanently denied canary identity."""
+    project_url, owner_email, service_key = validate_auth_admin_configuration(
+        project_url, owner_email, service_key,
+    )
+    project_url, canary_email, service_key = validate_auth_admin_configuration(
+        project_url, canary_email, service_key,
+    )
+    if not re.fullmatch(r"release-canary-[0-9a-f]{32}@example\.com", canary_email):
+        raise ValueError("denied Auth identity must use the exact reserved canary address")
+    if not UUID_PATTERN.fullmatch(owner_user_id) or not UUID_PATTERN.fullmatch(canary_user_id):
+        raise ValueError("owner and canary user identifiers must be UUIDs")
+    owner_user_id = owner_user_id.lower()
+    canary_user_id = canary_user_id.lower()
+    if owner_user_id == canary_user_id or owner_email == canary_email:
+        raise ValueError("owner and denied canary identities must be distinct")
+    headers = {"apikey": service_key, "authorization": f"Bearer {service_key}"}
+    users = []
+    for page in (1, 2):
+        status, body = requester(
+            "GET", f"{project_url}/auth/v1/admin/users?page={page}&per_page=1000",
+            headers, None,
+        )
+        if status < 200 or status >= 300:
+            raise RuntimeError("Auth canary inventory request failed")
+        try:
+            payload = json.loads(body)
+        except (json.JSONDecodeError, UnicodeDecodeError) as error:
+            raise RuntimeError("Auth canary inventory response is malformed") from error
+        page_users = payload.get("users") if isinstance(payload, dict) else None
+        if not isinstance(page_users, list) or any(not isinstance(row, dict) for row in page_users):
+            raise RuntimeError("Auth canary inventory response is malformed")
+        if page == 2 and page_users:
+            raise RuntimeError("Auth inventory must contain exactly the owner and denied canary")
+        users.extend(page_users)
+    observed = []
+    for row in users:
+        user_id = str(row.get("id", ""))
+        email = str(row.get("email", "")).strip().lower()
+        confirmed = row.get("email_confirmed_at") or row.get("confirmed_at")
+        if not UUID_PATTERN.fullmatch(user_id) or not email or not isinstance(confirmed, str) or not confirmed:
+            raise RuntimeError("Auth inventory must contain exactly the owner and denied canary")
+        observed.append((user_id.lower(), email))
+    expected = {(owner_user_id, owner_email), (canary_user_id, canary_email)}
+    if len(observed) != 2 or len(set(observed)) != 2 or set(observed) != expected:
+        raise RuntimeError("Auth inventory must contain exactly the owner and denied canary")
+    return {
+        "status": "verified",
+        "identity_count": 2,
+        "privileged_owner_count": 1,
+        "denied_canary_count": 1,
+    }
 
 
 def validate_source_database_url(database_url: str, api_url: str) -> str:
@@ -842,27 +924,46 @@ def main() -> int:
     parser.add_argument("--auth-config-receipt", type=Path, required=True)
     arguments = parser.parse_args()
     auth_configuration = load_deployment_auth_configuration_receipt(arguments.auth_config_receipt)
-    token = os.environ.get("DASHBOARD_OWNER_ACCESS_TOKEN", "").strip()
-    if not token:
-        parsed_api = urlparse(arguments.api_url)
-        project_url = f"{parsed_api.scheme}://{parsed_api.netloc}"
-        token = obtain_ephemeral_owner_access_token(
-            project_url,
-            os.environ.get("DASHBOARD_OWNER_EMAIL", ""),
-            arguments.origin,
-            os.environ.get("SUPABASE_SERVICE_ROLE_KEY", ""),
-            os.environ.get("SUPABASE_PUBLISHABLE_KEY", ""),
-        )
     database_url = os.environ.get("DASHBOARD_DATABASE_URL", "").strip()
     if not database_url:
         raise SystemExit("DASHBOARD_DATABASE_URL is required")
-    non_owner_token = os.environ.get("DASHBOARD_NON_OWNER_ACCESS_TOKEN", "").strip()
-    if not non_owner_token:
-        raise SystemExit("DASHBOARD_NON_OWNER_ACCESS_TOKEN is required")
-    receipt = run_http_canary(
-        arguments.api_url, arguments.origin, token, non_owner_token,
-        source_reader=lambda run_id: collect_source_receipts(database_url, arguments.api_url, run_id),
+    owner_email = os.environ.get("DASHBOARD_OWNER_EMAIL", "").strip()
+    owner_user_id = os.environ.get("DASHBOARD_OWNER_USER_ID", "").strip()
+    non_owner_email = os.environ.get("DASHBOARD_NON_OWNER_EMAIL", "").strip()
+    non_owner_user_id = os.environ.get("DASHBOARD_NON_OWNER_USER_ID", "").strip()
+    service_key = os.environ.get("SUPABASE_SERVICE_ROLE_KEY", "").strip()
+    publishable_key = os.environ.get("SUPABASE_PUBLISHABLE_KEY", "").strip()
+    parsed_api = urlparse(arguments.api_url)
+    project_url = f"{parsed_api.scheme}://{parsed_api.netloc}"
+    auth_inventory = verify_auth_canary_inventory(
+        project_url, owner_email, owner_user_id, non_owner_email, non_owner_user_id, service_key,
     )
+    tokens = []
+    try:
+        token = obtain_ephemeral_existing_user_access_token(
+            project_url, owner_email, arguments.origin, service_key, publishable_key,
+        )
+        tokens.append(token)
+        non_owner_token = obtain_ephemeral_existing_user_access_token(
+            project_url, non_owner_email, arguments.origin, service_key, publishable_key,
+        )
+        tokens.append(non_owner_token)
+        receipt = run_http_canary(
+            arguments.api_url, arguments.origin, token, non_owner_token,
+            source_reader=lambda run_id: collect_source_receipts(database_url, arguments.api_url, run_id),
+        )
+    finally:
+        cleanup_error = None
+        for access_token in reversed(tokens):
+            try:
+                revoke_ephemeral_owner_session(project_url, access_token, publishable_key)
+            except Exception as error:
+                cleanup_error = cleanup_error or error
+        if cleanup_error is not None:
+            raise RuntimeError("ephemeral deployment canary session revocation failed") from cleanup_error
+    receipt["auth_inventory"] = auth_inventory
+    receipt["owner_session"] = "revoked"
+    receipt["non_owner_session"] = "revoked"
     receipt["auth_configuration"] = auth_configuration
     if bool(arguments.candidate_sha) != bool(arguments.deployment_receipt):
         raise SystemExit("candidate SHA and deployment receipt must be supplied together")

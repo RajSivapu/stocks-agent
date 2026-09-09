@@ -2410,6 +2410,16 @@ def verify_release(source: ReleaseDataSource, *, deployment_id: int,
                         and isinstance(value.get("rows_sha256"), str) and re.fullmatch(r"[0-9a-f]{64}", value["rows_sha256"])
                         for value in before["tables"].values()), "protected dry-run side-effect evidence is incomplete")
         require(record["canaries"] == {"owner": 200, "anonymous": 401, "non_owner": 403}, "protected owner/denial canaries are incomplete")
+        expected_auth_inventory = {
+            "status": "verified", "identity_count": 2,
+            "privileged_owner_count": 1, "denied_canary_count": 1,
+        }
+        require(record.get("auth_canary") == {
+            "owner_session": "revoked",
+            "non_owner_session": "revoked",
+            "inventory_preflight": expected_auth_inventory,
+            "inventory_readback": expected_auth_inventory,
+        }, "protected Auth canary lifecycle evidence is incomplete")
         run_id = source.scheduled_run(record["deployed_at"])
         chain = verify_scheduled(source.release_rows(run_id), run_id, deployed, now)
         result = {

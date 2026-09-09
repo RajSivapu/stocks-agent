@@ -393,6 +393,44 @@ def test_ephemeral_owner_session_errors_are_bounded():
     assert "private auth detail" not in str(error.value)
 
 
+def test_ephemeral_existing_user_session_uses_non_creating_recovery_link():
+    calls = []
+
+    def requester(method, url, _headers, body):
+        calls.append((method, url, json.loads(body)))
+        if url.endswith("/auth/v1/admin/generate_link"):
+            return 200, json.dumps({"hashed_token": "existing-user-token-hash"}).encode()
+        return 200, json.dumps({"access_token": "existing-user-access-token-" + "x" * 40}).encode()
+
+    token = verify.obtain_ephemeral_existing_user_access_token(
+        "https://hlxpxbxhqctwsqizwjjy.supabase.co", "owner@example.com", ORIGIN,
+        "sb_secret_" + "s" * 40, "sb_publishable_" + "p" * 32,
+        requester=requester,
+    )
+
+    assert token.startswith("existing-user-access-token-")
+    assert calls[0][2]["type"] == "recovery"
+    assert calls[1][2] == {"type": "recovery", "token_hash": "existing-user-token-hash"}
+
+
+def test_ephemeral_existing_user_session_cannot_create_a_missing_identity():
+    calls = []
+
+    def requester(method, url, _headers, body):
+        calls.append((method, url, json.loads(body)))
+        return 404, b'{"code":"user_not_found"}'
+
+    with pytest.raises(RuntimeError, match="ephemeral owner session"):
+        verify.obtain_ephemeral_existing_user_access_token(
+            "https://hlxpxbxhqctwsqizwjjy.supabase.co", "missing@example.com", ORIGIN,
+            "sb_secret_" + "s" * 40, "sb_publishable_" + "p" * 32,
+            requester=requester,
+        )
+
+    assert len(calls) == 1
+    assert calls[0][2]["type"] == "recovery"
+
+
 def test_ephemeral_owner_session_revocation_uses_global_logout_without_leaking_token():
     observed = {}
 
@@ -431,3 +469,72 @@ def test_ephemeral_owner_session_revocation_can_target_only_current_session():
 
     assert receipt == {"status": "revoked", "scope": "local"}
     assert observed["url"].endswith("/auth/v1/logout?scope=local")
+
+
+def test_auth_inventory_is_exactly_one_owner_and_one_bound_denied_canary():
+    owner_id = "6903b3cc-05b7-4f90-bbc2-7e80a3a59e22"
+    canary_id = "7903b3cc-05b7-4f90-bbc2-7e80a3a59e22"
+    canary_email = f"release-canary-{'a' * 32}@example.com"
+    calls = []
+
+    def requester(method, url, _headers, body):
+        calls.append((method, url, body))
+        if "?page=1&" in url:
+            return 200, json.dumps({"users": [
+                {"id": owner_id.upper(), "email": "OWNER@example.com", "email_confirmed_at": "2026-09-01T00:00:00Z"},
+                {"id": canary_id.upper(), "email": canary_email.upper(), "confirmed_at": "2026-09-01T00:00:00Z"},
+            ]}).encode()
+        return 200, json.dumps({"users": []}).encode()
+
+    receipt = verify.verify_auth_canary_inventory(
+        "https://hlxpxbxhqctwsqizwjjy.supabase.co",
+        "owner@example.com", owner_id, canary_email, canary_id,
+        "sb_secret_" + "s" * 40, requester=requester,
+    )
+
+    assert receipt == {
+        "status": "verified", "identity_count": 2,
+        "privileged_owner_count": 1, "denied_canary_count": 1,
+    }
+    assert [call[0] for call in calls] == ["GET", "GET"]
+    assert all(call[2] is None for call in calls)
+    assert "owner@example.com" not in str(receipt)
+    assert canary_id not in str(receipt)
+
+
+@pytest.mark.parametrize("extra_users", [
+    [{"id": "8903b3cc-05b7-4f90-bbc2-7e80a3a59e22", "email": "extra@example.com", "confirmed_at": "x"}],
+    [{"id": "6903b3cc-05b7-4f90-bbc2-7e80a3a59e22", "email": "owner@example.com", "confirmed_at": "x"}],
+])
+def test_auth_inventory_rejects_extra_or_duplicate_identities(extra_users):
+    owner_id = "6903b3cc-05b7-4f90-bbc2-7e80a3a59e22"
+    canary_id = "7903b3cc-05b7-4f90-bbc2-7e80a3a59e22"
+    canary_email = f"release-canary-{'a' * 32}@example.com"
+
+    def requester(_method, url, _headers, _body):
+        users = [
+            {"id": owner_id, "email": "owner@example.com", "confirmed_at": "x"},
+            {"id": canary_id, "email": canary_email, "confirmed_at": "x"},
+            *extra_users,
+        ] if "?page=1&" in url else []
+        return 200, json.dumps({"users": users}).encode()
+
+    with pytest.raises(RuntimeError, match="exactly the owner and denied canary"):
+        verify.verify_auth_canary_inventory(
+            "https://hlxpxbxhqctwsqizwjjy.supabase.co",
+            "owner@example.com", owner_id, canary_email, canary_id,
+            "sb_secret_" + "s" * 40, requester=requester,
+        )
+
+
+def test_auth_inventory_rejects_an_unbound_canary_address_before_network():
+    calls = []
+    with pytest.raises(ValueError, match="reserved canary"):
+        verify.verify_auth_canary_inventory(
+            "https://hlxpxbxhqctwsqizwjjy.supabase.co",
+            "owner@example.com", "6903b3cc-05b7-4f90-bbc2-7e80a3a59e22",
+            "someone@gmail.com", "7903b3cc-05b7-4f90-bbc2-7e80a3a59e22",
+            "sb_secret_" + "s" * 40,
+            requester=lambda *_args: calls.append(True),
+        )
+    assert calls == []

@@ -489,20 +489,31 @@ def test_auth_attestation_is_read_only_and_redacts_owner_identity():
 
     def read_owner(url, headers):
         calls.append((url, headers))
-        return 200, json.dumps({"users": [{
-            "id": "12345678-1234-4123-8123-123456789abc",
-            "email": "owner@example.com",
-            "email_confirmed_at": "2026-09-01T00:00:00Z",
-        }]}).encode()
+        return 200, json.dumps({"users": [
+            {
+                "id": "12345678-1234-4123-8123-123456789abc",
+                "email": "owner@example.com",
+                "email_confirmed_at": "2026-09-01T00:00:00Z",
+            },
+            {
+                "id": "22345678-1234-4123-8123-123456789abc",
+                "email": f"release-canary-{'a' * 32}@example.com",
+                "email_confirmed_at": "2026-09-01T00:00:00Z",
+            },
+        ]}).encode()
 
     receipt = inspect_single_owner(
         "https://pppppppppppppppppppp.supabase.co",
         "OWNER@example.com",
+        f"release-canary-{'a' * 32}@example.com",
+        "22345678-1234-4123-8123-123456789abc",
         "sb_secret_" + "s" * 40,
         requester=read_owner,
     )
-    assert len(calls) == 1 and "/admin/users?page=1&per_page=2" in calls[0][0]
-    assert receipt["auth_user_count"] == 1
+    assert len(calls) == 1 and "/admin/users?page=1&per_page=3" in calls[0][0]
+    assert receipt["auth_user_count"] == 2
+    assert receipt["privileged_owner_count"] == 1
+    assert receipt["denied_canary_count"] == 1
     assert "email" not in receipt and "id" not in receipt
     assert len(receipt["owner_secret_sha256"]) == 64
 

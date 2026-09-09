@@ -5,6 +5,8 @@ import json
 import re
 import shutil
 import subprocess
+
+import pytest
 import yaml
 
 
@@ -377,9 +379,23 @@ def test_release_record_keeps_release_and_later_scheduled_receipts_distinct():
         "canary": {
             "status": "verified",
             "source_reconciliation": "verified",
+            "source_database_role": "stock_agent_dashboard_runtime",
             "financial_write_routes": 0,
             "brokerage_authority": "none",
             "friend_invitations": "disabled",
+            "owner_route_count": 10,
+            "unauthenticated_status": 401,
+            "non_owner_status": 403,
+            "owner_session": "revoked",
+            "non_owner_session": "revoked",
+            "auth_inventory_preflight": {
+                "status": "verified", "identity_count": 2,
+                "privileged_owner_count": 1, "denied_canary_count": 1,
+            },
+            "auth_inventory_readback": {
+                "status": "verified", "identity_count": 2,
+                "privileged_owner_count": 1, "denied_canary_count": 1,
+            },
         },
     })
     assert result == {
@@ -398,6 +414,33 @@ def test_release_record_keeps_release_and_later_scheduled_receipts_distinct():
             "required_evidence": "normal_post_release_scheduled_capability_receipt",
         },
     }
+
+
+@pytest.mark.parametrize("missing", [
+    "unauthenticated_status", "non_owner_status", "owner_session", "non_owner_session",
+    "auth_inventory_preflight", "auth_inventory_readback",
+])
+def test_release_record_rejects_missing_owner_only_canary_evidence(missing):
+    from scripts import write_protected_release_record as writer
+
+    inventory = {
+        "status": "verified", "identity_count": 2,
+        "privileged_owner_count": 1, "denied_canary_count": 1,
+    }
+    canary = {
+        "status": "verified", "source_reconciliation": "verified",
+        "source_database_role": "stock_agent_dashboard_runtime",
+        "financial_write_routes": 0, "brokerage_authority": "none",
+        "friend_invitations": "disabled", "owner_route_count": 10,
+        "unauthenticated_status": 401, "non_owner_status": 403,
+        "owner_session": "revoked",
+        "non_owner_session": "revoked",
+        "auth_inventory_preflight": inventory,
+        "auth_inventory_readback": inventory,
+    }
+    del canary[missing]
+    with pytest.raises(RuntimeError, match="canary receipt is incomplete"):
+        writer.release_evidence_classes({"candidate_sha": "a" * 40, "canary": canary})
 
 
 def test_release_record_rejects_a_receipt_from_another_candidate():
@@ -444,8 +487,16 @@ def test_release_record_writer_emits_backend_only_evidence_contract(tmp_path, mo
             "recovery_metadata_sha256": "c" * 64},
         "recovery_journal": recovery,
         "canary": {"status": "verified", "source_reconciliation": "verified",
+            "source_database_role": "stock_agent_dashboard_runtime",
             "financial_write_routes": 0, "brokerage_authority": "none",
-            "friend_invitations": "disabled"}}
+            "friend_invitations": "disabled", "owner_route_count": 10,
+            "unauthenticated_status": 401, "non_owner_status": 403,
+            "owner_session": "revoked",
+            "non_owner_session": "revoked",
+            "auth_inventory_preflight": {"status": "verified", "identity_count": 2,
+                "privileged_owner_count": 1, "denied_canary_count": 1},
+            "auth_inventory_readback": {"status": "verified", "identity_count": 2,
+                "privileged_owner_count": 1, "denied_canary_count": 1}}}
     names = expected_snapshot_tables(pre_migration_omissions()) or ()
     tables = {name: {"count": 0, "rows_sha256": "0" * 64} for name in names}
     dry = {
@@ -477,6 +528,14 @@ def test_release_record_writer_emits_backend_only_evidence_contract(tmp_path, mo
     assert record["recovery_journal"] == recovery
     assert record["release_authorization"] == {"kind": "owner_comment", "id": 38,
         "pr_ci_workflow_run_id": 39}
+    assert record["auth_canary"] == {
+        "owner_session": "revoked",
+        "non_owner_session": "revoked",
+        "inventory_preflight": {"status": "verified", "identity_count": 2,
+            "privileged_owner_count": 1, "denied_canary_count": 1},
+        "inventory_readback": {"status": "verified", "identity_count": 2,
+            "privileged_owner_count": 1, "denied_canary_count": 1},
+    }
     assert record["evidence_classes"]["owner_site"]["status"] == "pending"
     assert all(row["artifact_id"] == 60 for row in record["component_readbacks"])
 
@@ -549,6 +608,12 @@ def test_release_preflights_and_uses_the_project_bound_admin_pooler_everywhere()
     assert release_env["PGSSLMODE"] == "verify-full"
     assert release_env["PGSSLROOTCERT"] == "${{ github.workspace }}/config/supabase-prod-ca-2021.crt"
     steps = {row.get("name"): row for row in workflow["jobs"]["release"]["steps"]}
+    secret_presence = steps["Fail closed when protected backend secrets are absent"]
+    assert set(secret_presence["env"]) >= {
+        "DASHBOARD_NON_OWNER_EMAIL", "DASHBOARD_NON_OWNER_USER_ID",
+    }
+    assert 'test -n "$DASHBOARD_NON_OWNER_EMAIL"' in secret_presence["run"]
+    assert 'test -n "$DASHBOARD_NON_OWNER_USER_ID"' in secret_presence["run"]
     preflight = steps[
         "Require configured protected backend capture deployment readback and recovery transport"
     ]
@@ -568,6 +633,8 @@ def test_release_preflights_and_uses_the_project_bound_admin_pooler_everywhere()
     assert "--admin-url \"$SUPAVISOR_SESSION_URL\"" in inline["run"]
     execute = steps["Execute protected deployment with encrypted component recovery"]
     assert "POSTGRES_URL" not in execute["env"]
+    assert "DASHBOARD_NON_OWNER_ACCESS_TOKEN" not in execute["env"]
+    assert set(execute["env"]) >= {"DASHBOARD_NON_OWNER_EMAIL", "DASHBOARD_NON_OWNER_USER_ID"}
 
     recovery = yaml.safe_load(
         Path(".github/workflows/owner-dashboard-release-recovery.yml").read_text()

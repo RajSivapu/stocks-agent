@@ -147,10 +147,14 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           SUPABASE_ACCESS_TOKEN: ${{ secrets.SUPABASE_ACCESS_TOKEN }}
+          DASHBOARD_NON_OWNER_EMAIL: ${{ secrets.DASHBOARD_NON_OWNER_EMAIL }}
+          DASHBOARD_NON_OWNER_USER_ID: ${{ secrets.DASHBOARD_NON_OWNER_USER_ID }}
         run: |
           set -euo pipefail
           test -n "$GH_TOKEN" || { echo 'GitHub token is required'; exit 1; }
           test -n "$SUPABASE_ACCESS_TOKEN" || { echo 'SUPABASE_ACCESS_TOKEN is required'; exit 1; }
+          test -n "$DASHBOARD_NON_OWNER_EMAIL" || { echo 'DASHBOARD_NON_OWNER_EMAIL is required'; exit 1; }
+          test -n "$DASHBOARD_NON_OWNER_USER_ID" || { echo 'DASHBOARD_NON_OWNER_USER_ID is required'; exit 1; }
       - name: Require configured protected backend capture deployment readback and recovery transport
         env:
           GH_TOKEN: ${{ github.token }}
@@ -205,7 +209,8 @@ jobs:
           SUPABASE_ACCESS_TOKEN: ${{ secrets.SUPABASE_ACCESS_TOKEN }}
           DASHBOARD_OWNER_USER_ID: ${{ secrets.DASHBOARD_OWNER_USER_ID }}
           DASHBOARD_OWNER_EMAIL: ${{ secrets.DASHBOARD_OWNER_EMAIL }}
-          DASHBOARD_NON_OWNER_ACCESS_TOKEN: ${{ secrets.DASHBOARD_NON_OWNER_ACCESS_TOKEN }}
+          DASHBOARD_NON_OWNER_USER_ID: ${{ secrets.DASHBOARD_NON_OWNER_USER_ID }}
+          DASHBOARD_NON_OWNER_EMAIL: ${{ secrets.DASHBOARD_NON_OWNER_EMAIL }}
           SUPAVISOR_SESSION_URL: ${{ secrets.SUPAVISOR_SESSION_URL }}
           SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
           SUPABASE_PUBLISHABLE_KEY: ${{ secrets.SUPABASE_PUBLISHABLE_KEY }}
