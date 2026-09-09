@@ -109,6 +109,33 @@ def canonical_sha256(value: object) -> str:
     ).hexdigest()
 
 
+def validate_intelligence_projection_receipt(value: object) -> str | None:
+    """Validate bounded metadata for the owner intelligence projection."""
+    if not isinstance(value, Mapping) or set(value) != {
+        "projection_present", "projection_type", "run_id_present",
+        "run_id_type", "intelligence_run_id",
+    }:
+        raise RuntimeError("dashboard intelligence projection receipt is unavailable")
+    run_id_type = value.get("run_id_type")
+    run_id = value.get("intelligence_run_id")
+    if (
+        value.get("projection_present") is not True
+        or value.get("projection_type") != "object"
+        or value.get("run_id_present") is not True
+        or run_id_type not in {"null", "string"}
+        or (run_id_type == "null" and run_id is not None)
+        or (
+            run_id_type == "string"
+            and (
+                not isinstance(run_id, str)
+                or UUID_PATTERN.fullmatch(run_id) is None
+            )
+        )
+    ):
+        raise RuntimeError("dashboard intelligence projection receipt is unavailable")
+    return run_id if isinstance(run_id, str) else None
+
+
 def scheduled_readiness_receipt(overdue: object) -> dict[str, object]:
     """Bind overdue slot visibility without promoting it to deployment health."""
     if not isinstance(overdue, list):
@@ -599,6 +626,21 @@ def collect_source_receipts(
             connection,
             "SELECT version FROM public.market_policy_config WHERE active = true ORDER BY version DESC LIMIT 1",
         )
+        intelligence_projection = _fetch_one(
+            connection,
+            """WITH value AS (
+                 SELECT public.read_owner_intelligence_v2(25) AS projection
+               )
+               SELECT projection IS NOT NULL AS projection_present,
+                      jsonb_typeof(projection) AS projection_type,
+                      COALESCE(projection ? 'run_id', false) AS run_id_present,
+                      jsonb_typeof(projection->'run_id') AS run_id_type,
+                      projection->>'run_id' AS intelligence_run_id
+                 FROM value""",
+        )
+        intelligence_run_id = validate_intelligence_projection_receipt(
+            intelligence_projection,
+        )
         holdings = _fetch_all(
             connection,
             f"""SELECT h.ticker, h.shares::text AS shares, h.avg_cost::text AS average_cost,
@@ -683,6 +725,7 @@ def collect_source_receipts(
             **{key: int(value) for key, value in counts.items()},
             "alerts": alerts,
             "policy_version": policy.get("version"),
+            "intelligence_run_id": intelligence_run_id,
             "holdings": holdings,
             "portfolio_data_as_of": max(price_times) if price_times else None,
             "overdue_scheduled_phases": overdue_scheduled_phases,
@@ -788,13 +831,16 @@ def reconcile_source_receipts(
             fail()
         row = source_by_id[alert["id"]]
         source_ids = row.get("telegram_message_ids") or []
+        source_template_version = row.get("template_version")
+        if type(source_template_version) is not int or source_template_version <= 0:
+            fail()
         if row.get("status") == "suppressed" and source_ids:
             fail()
         if (
             alert.get("state") != _publication_state(row)
             or alert.get("telegram_message_ids") != source_ids
             or alert.get("rendered_hash") != row.get("rendered_hash")
-            or alert.get("template_version") != row.get("template_version")
+            or alert.get("template_version") != str(source_template_version)
             or alert.get("event_status") != row.get("event_status")
         ):
             fail()
@@ -833,16 +879,37 @@ def reconcile_source_receipts(
         "intelligence_runs", "intelligence_events", "intelligence_rankings",
         "intelligence_packets", "reports", "report_publications",
     )}
-    if any(not isinstance(rows, list) or not rows for rows in chains.values()):
+    if any(not isinstance(rows, list) for rows in chains.values()):
+        fail()
+    if any(not chains[key] for key in (
+        "intelligence_runs", "intelligence_packets", "reports",
+        "report_publications",
+    )):
         fail()
     if len(chains["intelligence_runs"]) != 1 or chains["intelligence_runs"][0].get("id") != run_id:
         fail()
-    if any(row.get("run_id") != run_id or not isinstance(row.get("canonical"), Mapping)
-           or canonical_sha256(row["canonical"]) != row.get("content_hash") for row in chains["intelligence_events"]):
+    if len(chains["intelligence_packets"]) != 1:
         fail()
     packet = chains["intelligence_packets"][0]
     if (packet.get("run_id") != run_id or not isinstance(packet.get("canonical"), Mapping)
             or canonical_sha256(packet["canonical"]) != packet.get("packet_hash")):
+        fail()
+    packet_body = packet["canonical"]
+    if (
+        (not chains["intelligence_events"] or not chains["intelligence_rankings"])
+        and not (
+            packet.get("candidate_count") == 0
+            and packet.get("evidence_count") == 0
+            and packet_body.get("contract_version") == 2
+            and packet_body.get("execution_allowed") is False
+            and packet_body.get("research_candidates") == []
+            and packet_body.get("action_candidates") == []
+            and packet_body.get("evidence") == []
+        )
+    ):
+        fail()
+    if any(row.get("run_id") != run_id or not isinstance(row.get("canonical"), Mapping)
+           or canonical_sha256(row["canonical"]) != row.get("content_hash") for row in chains["intelligence_events"]):
         fail()
     event_ids = {row.get("id") for row in chains["intelligence_events"]}
     if any(row.get("run_id") != run_id or row.get("event_id") not in event_ids
@@ -878,7 +945,21 @@ def reconcile_source_receipts(
         fail()
     intelligence = payloads.get("/v1/intelligence", {}).get("data")
     reports_view = payloads.get("/v1/reports", {}).get("data")
-    if not isinstance(intelligence, dict) or intelligence.get("run_id") != run_id or not isinstance(reports_view, dict):
+    intelligence_run_id = dashboard.get("intelligence_run_id")
+    if (
+        "intelligence_run_id" not in dashboard
+        or (
+            intelligence_run_id is not None
+            and (
+                not isinstance(intelligence_run_id, str)
+                or UUID_PATTERN.fullmatch(intelligence_run_id) is None
+            )
+        )
+        or not isinstance(intelligence, dict)
+        or "run_id" not in intelligence
+        or intelligence.get("run_id") != intelligence_run_id
+        or not isinstance(reports_view, dict)
+    ):
         fail()
     visible_reports = reports_view.get("reports")
     if not isinstance(visible_reports, list) or not report_ids.issubset({row.get("id") for row in visible_reports if isinstance(row, dict)}):

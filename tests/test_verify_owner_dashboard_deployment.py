@@ -62,6 +62,34 @@ def test_canary_routes_are_get_only_and_bounded():
     assert verify.CANARY_METHOD == "GET"
 
 
+def test_intelligence_projection_receipt_distinguishes_a_real_null_identity():
+    base = {
+        "projection_present": True,
+        "projection_type": "object",
+        "run_id_present": True,
+        "run_id_type": "null",
+        "intelligence_run_id": None,
+    }
+    assert verify.validate_intelligence_projection_receipt(base) is None
+
+    run_id = "6903b3cc-05b7-4f90-bbc2-7e80a3a59e22"
+    available = dict(base, run_id_type="string", intelligence_run_id=run_id)
+    assert verify.validate_intelligence_projection_receipt(available) == run_id
+
+    for changed in (
+        dict(base, projection_present=False, projection_type=None),
+        dict(base, projection_type="array"),
+        dict(base, run_id_present=False),
+        dict(base, run_id_type="number", intelligence_run_id="1"),
+        dict(base, run_id_type="null", intelligence_run_id=run_id),
+        dict(base, run_id_type="string", intelligence_run_id=None),
+        dict(base, run_id_type="string", intelligence_run_id="not-a-uuid"),
+        {**base, "unexpected": True},
+    ):
+        with pytest.raises(RuntimeError, match="projection receipt"):
+            verify.validate_intelligence_projection_receipt(changed)
+
+
 def test_deployment_auth_configuration_requires_link_templates():
     assert verify.validate_deployment_auth_configuration({
         "mailer_otp_length": 6,
@@ -313,6 +341,7 @@ def test_http_canary_uses_only_get_and_checks_anonymous_and_non_owner_denial():
                 "policy_version": None,
                 "holdings": [],
                 "portfolio_data_as_of": None,
+                "intelligence_run_id": run_id,
                 "overdue_scheduled_phases": [],
             },
             "evidence": v1_chain(run_id),
@@ -433,7 +462,7 @@ def test_source_reconciliation_rejects_unsupported_run_send_policy_and_price_cla
             "alerts": [{
                 "id": "7903b3cc-05b7-4f90-bbc2-7e80a3a59e22", "status": "delivered",
                 "telegram_message_ids": [123], "rendered_hash": "a" * 64,
-                "template_version": "3", "event_status": "triggered",
+                "template_version": 3, "event_status": "triggered",
             }],
             "policy_version": 17,
             "holdings": [{
@@ -441,6 +470,7 @@ def test_source_reconciliation_rejects_unsupported_run_send_policy_and_price_cla
                 "price_as_of": "2026-09-03T20:00:00.000Z", "price_source": "yahoo-chart",
             }],
             "portfolio_data_as_of": "2026-09-03T20:00:00.000Z",
+            "intelligence_run_id": run_id,
             "overdue_scheduled_phases": [],
         },
         "evidence": v1_chain(run_id),
@@ -453,9 +483,50 @@ def test_source_reconciliation_rejects_unsupported_run_send_policy_and_price_cla
     assert receipt["scheduled_chain"]["run_id"] == run_id
     assert receipt["scheduled_readiness"]["status"] == "ready"
 
+    pre_v2_payloads = json.loads(json.dumps(payloads))
+    pre_v2_payloads["/v1/intelligence"]["data"]["run_id"] = None
+    pre_v2_source = json.loads(json.dumps(source))
+    pre_v2_source["dashboard"]["intelligence_run_id"] = None
+    assert verify.reconcile_source_receipts(
+        pre_v2_payloads, detail, pre_v2_source, run_id,
+    )["status"] == "verified"
+
+    truncated_research_source = json.loads(json.dumps(source))
+    truncated_research_source["evidence"]["intelligence_events"] = []
+    truncated_research_source["evidence"]["intelligence_rankings"] = []
+    with pytest.raises(RuntimeError, match="source receipt"):
+        verify.reconcile_source_receipts(
+            payloads, detail, truncated_research_source, run_id,
+        )
+
+    empty_research_source = json.loads(json.dumps(truncated_research_source))
+    empty_packet = {
+        "contract_version": 2,
+        "execution_allowed": False,
+        "research_candidates": [],
+        "action_candidates": [],
+        "evidence": [],
+    }
+    packet = empty_research_source["evidence"]["intelligence_packets"][0]
+    packet.update({
+        "candidate_count": 0,
+        "evidence_count": 0,
+        "canonical": empty_packet,
+        "packet_hash": verify.canonical_sha256(empty_packet),
+    })
+    assert verify.reconcile_source_receipts(
+        payloads, detail, empty_research_source, run_id,
+    )["status"] == "verified"
+
     for path, value in [
         (("dashboard", "run", "write_counts"), {"suggestions": 2}),
         (("dashboard", "alerts", 0, "telegram_message_ids"), [999]),
+        (("dashboard", "alerts", 0, "template_version"), "3"),
+        (("dashboard", "alerts", 0, "template_version"), True),
+        (("dashboard", "alerts", 0, "template_version"), 0),
+        (("dashboard", "alerts", 0, "template_version"), -1),
+        (("dashboard", "intelligence_run_id"), "22222222-2222-4222-8222-222222222222"),
+        (("dashboard", "intelligence_run_id"), "not-a-uuid"),
         (("dashboard", "policy_version"), 18),
         (("dashboard", "holdings", 0, "price"), "109"),
         (("evidence", "intelligence_events", 0, "content_hash"), "invalid"),
@@ -467,6 +538,26 @@ def test_source_reconciliation_rejects_unsupported_run_send_policy_and_price_cla
         target[path[-1]] = value
         with pytest.raises(RuntimeError, match="source receipt"):
             verify.reconcile_source_receipts(payloads, detail, changed, run_id)
+
+    missing_projection_identity = json.loads(json.dumps(source))
+    del missing_projection_identity["dashboard"]["intelligence_run_id"]
+    with pytest.raises(RuntimeError, match="source receipt"):
+        verify.reconcile_source_receipts(
+            payloads, detail, missing_projection_identity, run_id,
+        )
+
+    missing_visible_projection = json.loads(json.dumps(pre_v2_payloads))
+    del missing_visible_projection["/v1/intelligence"]["data"]["run_id"]
+    with pytest.raises(RuntimeError, match="source receipt"):
+        verify.reconcile_source_receipts(
+            missing_visible_projection, detail, pre_v2_source, run_id,
+        )
+
+    for invalid_visible_version in (3, "03"):
+        changed_payloads = json.loads(json.dumps(payloads))
+        changed_payloads["/v1/alerts"]["data"]["alerts"][0]["template_version"] = invalid_visible_version
+        with pytest.raises(RuntimeError, match="source receipt"):
+            verify.reconcile_source_receipts(changed_payloads, detail, source, run_id)
 
     changed = json.loads(json.dumps(source))
     changed["evidence"]["intelligence_events"][0]["canonical"]["title"] = "replaced retained source body"
@@ -530,6 +621,7 @@ def test_source_reconciliation_retains_an_overdue_phase_as_pending_release_evide
             "run": {"id": run_id, "kind": "post-market", "status": "completed", "finished_at": "2026-09-03T20:00:00.000Z", "data_as_of": None, "write_counts": {}, "telegram_message_ids": []},
             "gateway_request_count": 0, "evaluation_count": 0, "suggestion_count": 0,
             "alerts": [], "policy_version": None, "holdings": [], "portfolio_data_as_of": None,
+            "intelligence_run_id": run_id,
             "overdue_scheduled_phases": [{"market_date": "2026-09-03", "phase": "post-market", "deadline_at": "2026-09-03T22:00:00.000Z"}],
         },
         "evidence": v1_chain(run_id),
@@ -700,6 +792,14 @@ def test_source_collector_keeps_visible_and_protected_queries_on_separate_read_o
                 "evaluation_count": 0,
                 "suggestion_count": 0,
             }
+        if "read_owner_intelligence_v2" in query:
+            return {
+                "projection_present": True,
+                "projection_type": "object",
+                "run_id_present": True,
+                "run_id_type": "null",
+                "intelligence_run_id": None,
+            }
         return {}
 
     def fetch_all(connection, query, parameters=()):
@@ -748,6 +848,8 @@ def test_source_collector_keeps_visible_and_protected_queries_on_separate_read_o
     )
     assert all(relation not in dashboard_queries for relation in protected_relations)
     assert all(relation in evidence_queries for relation in protected_relations)
+    assert "public.read_owner_intelligence_v2(25) AS projection" in dashboard_queries
+    assert "jsonb_typeof(projection->'run_id') AS run_id_type" in dashboard_queries
     overdue_queries = [
         (query, parameters) for query, parameters in connections[0].queries
         if "read_overdue_scheduled_market_phases" in query
@@ -756,6 +858,7 @@ def test_source_collector_keeps_visible_and_protected_queries_on_separate_read_o
     assert "LIMIT %s" in overdue_queries[0][0]
     assert overdue_queries[0][1] == (verify.MAX_SCHEDULED_READINESS_ROWS + 1,)
     assert receipt["dashboard"]["database_user"] == verify.RUNTIME_ROLE
+    assert receipt["dashboard"]["intelligence_run_id"] is None
     assert receipt["evidence"]["evidence_database_user"] == verify.EVIDENCE_ROLE
     assert receipt["evidence"]["evidence_authority"] == EVIDENCE_AUTHORITY
     assert dashboard_url not in str(receipt)
