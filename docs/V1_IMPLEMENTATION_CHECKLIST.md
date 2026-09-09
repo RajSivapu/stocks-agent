@@ -65,6 +65,13 @@ An owner-only personal stock agent that uses zero-incremental-cost data sources,
 - [x] Solo-owner release authorization at `248366e` keeps independent GitHub approvals when present
   and otherwise requires an exact-head, successful-PR-CI-bound owner comment after CI and before
   merge; the workflow re-reads and records every authorization identity before secrets or checkout
+- [x] September 9 post-market run `6b5b2efb-0f53-47c3-bba8-8bf24802884f` exposed a reference
+  restart defect before Analyst, Checker, report, or Telegram; the absence of a Telegram message is
+  an upstream collection failure, not proof that Telegram transport failed
+- [x] PR #68 fixed payload-bound reference request identity and receipt-bound failed-task recovery;
+  exact-head CI `34417486938` passed and main is `71986d7`
+- [ ] Release migration `20261020_reference_transfer_restart.sql` and the collector recovery path
+  through protected main, then resume the same September 9 run without another SEC request
 - [ ] Next existing scheduled-chain receipt
 - [x] Complete protected backend release and separate native Sites publication/readback
 - [ ] Complete the first normal post-release scheduled V1-C3 capability and Telegram outcome proof
@@ -87,10 +94,13 @@ remaining V1 evidence is the first natural post-release scheduled chain:
    package, read every served file through the authenticated Site, and confirm the previous successful
    production version remains a provider-retained rollback target. Site v10 passed and Site v9 is
    retained without exercising rollback.
-5. **Pending:** wait for the next existing normal scheduled run. Do not create another run for evidence. Accept
-   either the complete report/publication chain or the exact receipt-backed quiet intraday
-   `no_trigger` chain.
-6. Close the operational and V1-C3 capability receipts, then close this checklist and the V1 goal.
+5. **In progress:** release the September 9 reference-restart correction, then resume the existing
+   post-market run from its durable current pin. Do not create a replacement run or repeat the SEC
+   request. Reconcile its exact terminal report/publication or suppression/failure receipt.
+6. **Pending if the current pin remains unavailable:** wait for the next existing normal scheduled
+   run. Accept either the complete report/publication chain or the exact receipt-backed quiet
+   intraday `no_trigger` chain.
+7. Close the operational and V1-C3 capability receipts, then close this checklist and the V1 goal.
 
 ## Completed implementation areas
 
@@ -164,11 +174,11 @@ remaining V1 evidence is the first natural post-release scheduled chain:
 
 These require the protected production path and must not be replaced by local evidence.
 
-The September 8 currently-deployed operational evidence, the new protected backend receipt, the
-new direct native Sites observation, and the new V1-C3 scheduled capability receipt are separate artifacts.
+The September 8 operational evidence, the September 9 failed run, the protected backend receipt, the
+direct native Sites observation, and the future V1-C3 scheduled capability receipt are separate artifacts.
 Existing evidence cannot be relabeled as candidate capability proof. Market-wide migrations are the immutable additive chain from
 `20261005_market_wide_discovery.sql` through
-`20261014_honest_empty_report_persistence.sql`; `20261004` remains the separate reconciliation
+`20261020_reference_transfer_restart.sql`; `20261004` remains the separate reconciliation
 baseline.
 
 - [x] Confirm live Auth is signup-disabled with 900-second JWT, six-digit/600-second OTP settings, and `ConfirmationURL` magic-link and recovery templates
