@@ -220,8 +220,12 @@ class _TracingCursor:
     def __exit__(self, *args):
         return self._cursor.__exit__(*args)
 
-    def execute(self, statement, parameters=()):
+    _PARAMETERS_OMITTED = object()
+
+    def execute(self, statement, parameters=_PARAMETERS_OMITTED):
         self._connection.query_stage = _query_stage(statement)
+        if parameters is self._PARAMETERS_OMITTED:
+            return self._cursor.execute(statement)
         return self._cursor.execute(statement, parameters)
 
     def fetchall(self):

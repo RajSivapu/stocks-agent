@@ -175,6 +175,48 @@ def test_diagnostic_identifies_the_catalog_query_that_timed_out_without_error_te
     assert PASSWORD not in json.dumps(receipt)
 
 
+def test_diagnostic_preserves_one_argument_policy_query_with_a_literal_percent():
+    calls = []
+
+    class Cursor:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return None
+
+        def execute(self, *args):
+            calls.append(args)
+
+        def fetchall(self):
+            return []
+
+    class PolicyConnection(Connection):
+        def cursor(self, **_kwargs):
+            return Cursor()
+
+    def collector(connection):
+        with connection.cursor() as cursor:
+            cursor.execute(
+                "SELECT tablename FROM pg_catalog.pg_policies "
+                "WHERE policyname LIKE 'owner_dashboard_select_%'"
+            )
+            cursor.fetchall()
+        return {"application_function_execute": []}
+
+    receipt = diagnose_dashboard_runtime(
+        environment(), PROJECT_REF, MAIN_SHA,
+        connector=lambda *_args, **_kwargs: PolicyConnection(),
+        collector=collector,
+        evaluator=lambda _snapshot: {"status": "verified"},
+        projection_validator=lambda projection: projection,
+    )
+
+    assert receipt["authority"] == {"status": "verified"}
+    assert len(calls) == 1 and len(calls[0]) == 1
+    assert calls[0][0].endswith("LIKE 'owner_dashboard_select_%'")
+
+
 def test_runtime_diagnostic_workflow_is_manual_protected_and_never_prints_the_secret():
     workflow = Path(".github/workflows/production-dashboard-runtime-diagnostic.yml").read_text()
 
