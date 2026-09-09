@@ -91,7 +91,35 @@ EXPECTED_PRIVILEGE_MEMBERS = [{
     "admin_option": False,
     "inherit_option": True,
     "set_option": True,
+    "member_superuser": False,
+    "member_createrole": False,
 }]
+
+
+def _is_administrative_incoming_edge(value: object) -> bool:
+    if not isinstance(value, dict):
+        return False
+    if value.get("member_superuser") is True:
+        return True
+    return (
+        value.get("member_superuser") is False
+        and value.get("member") == "postgres"
+        and value.get("member_createrole") is True
+        and value.get("admin_option") is True
+        and value.get("inherit_option") is False
+        and value.get("set_option") is False
+    )
+
+
+def _partition_incoming_edges(values: object) -> tuple[list[object], list[object]]:
+    if not isinstance(values, list):
+        return [], [values]
+    administrative = []
+    unauthorized = []
+    for value in values:
+        target = administrative if _is_administrative_incoming_edge(value) else unauthorized
+        target.append(value)
+    return administrative, unauthorized
 
 
 def evaluate_dashboard_privileges(snapshot: dict[str, Any]) -> dict[str, object]:
@@ -109,9 +137,15 @@ def evaluate_dashboard_privileges(snapshot: dict[str, Any]) -> dict[str, object]
         raise RuntimeError("dashboard runtime membership is not exact")
     if snapshot.get("privilege_memberships"):
         raise RuntimeError("dashboard privilege role membership is not exact")
-    if snapshot.get("privilege_members") != EXPECTED_PRIVILEGE_MEMBERS:
+    privilege_administrators, privilege_members = _partition_incoming_edges(
+        snapshot.get("privilege_members")
+    )
+    runtime_administrators, runtime_members = _partition_incoming_edges(
+        snapshot.get("runtime_members")
+    )
+    if privilege_members != EXPECTED_PRIVILEGE_MEMBERS:
         raise RuntimeError("dashboard privilege role members are not exact")
-    if snapshot.get("runtime_members"):
+    if runtime_members:
         raise RuntimeError("dashboard runtime role has incoming members")
     if set(snapshot.get("database_privileges", set())) != {"CONNECT", "TEMPORARY"}:
         raise RuntimeError("unexpected dashboard database privilege")
@@ -150,6 +184,7 @@ def evaluate_dashboard_privileges(snapshot: dict[str, Any]) -> dict[str, object]
         "write_privileges": 0,
         "application_function_execute": 0,
         "owned_objects": 0,
+        "administrative_incoming_edges": len(privilege_administrators) + len(runtime_administrators),
     }
 
 
@@ -208,31 +243,42 @@ def collect_dashboard_privileges(connection) -> dict[str, Any]:
             "admin_option": row[1],
             "inherit_option": row[2],
             "set_option": row[3],
+            "member_superuser": row[4],
+            "member_createrole": row[5],
         }
         for row in _fetch_all(
             connection,
             """SELECT member.rolname, membership.admin_option,
                       COALESCE((to_jsonb(membership)->>'inherit_option')::boolean, true),
-                      COALESCE((to_jsonb(membership)->>'set_option')::boolean, true)
+                      COALESCE((to_jsonb(membership)->>'set_option')::boolean, true),
+                      member.rolsuper, member.rolcreaterole
                  FROM pg_catalog.pg_auth_members membership
                  JOIN pg_catalog.pg_roles member ON member.oid = membership.member
                  JOIN pg_catalog.pg_roles granted ON granted.oid = membership.roleid
                 WHERE granted.rolname = %s
-                  AND NOT member.rolsuper
                 ORDER BY member.rolname""",
             (PRIVILEGE_ROLE,),
         )
     ]
     runtime_members = [
-        row[0]
+        {
+            "member": row[0],
+            "admin_option": row[1],
+            "inherit_option": row[2],
+            "set_option": row[3],
+            "member_superuser": row[4],
+            "member_createrole": row[5],
+        }
         for row in _fetch_all(
             connection,
-            """SELECT member.rolname
+            """SELECT member.rolname, membership.admin_option,
+                      COALESCE((to_jsonb(membership)->>'inherit_option')::boolean, true),
+                      COALESCE((to_jsonb(membership)->>'set_option')::boolean, true),
+                      member.rolsuper, member.rolcreaterole
                  FROM pg_catalog.pg_auth_members membership
                  JOIN pg_catalog.pg_roles member ON member.oid = membership.member
                  JOIN pg_catalog.pg_roles granted ON granted.oid = membership.roleid
                 WHERE granted.rolname = %s
-                  AND NOT member.rolsuper
                 ORDER BY member.rolname""",
             (RUNTIME_ROLE,),
         )

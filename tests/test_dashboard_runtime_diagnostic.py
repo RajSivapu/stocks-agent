@@ -73,6 +73,7 @@ def test_diagnostic_authenticates_exact_candidate_and_emits_only_bounded_stage_e
         evaluator=lambda _snapshot: {
             "status": "verified", "write_privileges": 0,
             "application_function_execute": 0, "owned_objects": 0,
+            "administrative_incoming_edges": 2,
         },
         projection_validator=lambda projection: projection,
     )
@@ -81,7 +82,9 @@ def test_diagnostic_authenticates_exact_candidate_and_emits_only_bounded_stage_e
     assert receipt["main_sha"] == MAIN_SHA
     assert receipt["credential"] == {"status": "valid"}
     assert receipt["connection"] == {"status": "connected"}
-    assert receipt["authority"]["status"] == "verified"
+    assert receipt["authority"] == {
+        "status": "verified", "administrative_incoming_edges": 2,
+    }
     assert receipt["identity"] == {"status": "verified"}
     assert receipt["projection"] == {"status": "verified"}
     assert len(receipt["receipt_sha256"]) == 64
@@ -152,6 +155,39 @@ def test_diagnostic_records_exact_authority_reason_and_bounded_difference_sample
     assert len(summary["other_schema_privileges"]["sample"]) == 32
     assert len(summary["other_schema_privileges"]["sha256"]) == 64
     assert len(json.dumps(receipt).encode()) < 32_768
+
+
+def test_diagnostic_failure_preserves_detailed_runtime_incoming_edge_evidence():
+    edge = {
+        "member": "rogue_creator",
+        "admin_option": True,
+        "inherit_option": False,
+        "set_option": False,
+        "member_superuser": False,
+        "member_createrole": True,
+    }
+    snapshot = {
+        "role": {}, "privilege_role_state": {}, "memberships": [],
+        "privilege_memberships": [], "privilege_members": [], "runtime_members": [edge],
+        "database_privileges": set(), "schema_privileges": set(),
+        "other_schema_privileges": {}, "table_privileges": {},
+        "sequence_privileges": {}, "column_privileges": {},
+        "application_function_execute": [], "owned_objects": [], "policies": {},
+    }
+
+    receipt = diagnose_dashboard_runtime(
+        environment(), PROJECT_REF, MAIN_SHA,
+        connector=lambda *_args, **_kwargs: Connection(),
+        collector=lambda _connection: snapshot,
+        evaluator=lambda _snapshot: (_ for _ in ()).throw(
+            RuntimeError("dashboard runtime role has incoming members")
+        ),
+        projection_validator=lambda projection: projection,
+    )
+
+    summary = receipt["authority"]["snapshot"]["runtime_members"]
+    assert summary["count"] == 1
+    assert summary["sample"] == [json.dumps(edge, sort_keys=True, separators=(",", ":"))]
 
 
 def test_diagnostic_identifies_the_catalog_query_that_timed_out_without_error_text():
