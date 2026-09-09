@@ -24,6 +24,10 @@ from lib.intelligence.themes import (
 )
 from scripts.export_recovery_bundle import _validate_theme_memory_v2_lineage
 from scripts.protected_evidence import RECOVERY_SQL
+from scripts.verify_owner_dashboard_deployment import (
+    DASHBOARD_REPORT_SOURCE_SQL,
+    EVIDENCE_REPORT_SOURCE_SQL,
+)
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -897,6 +901,21 @@ def test_actual_postgres_release_canary_reader_can_read_hashes_but_cannot_mutate
         ).fetchone() is None
         with pytest.raises(psycopg.errors.InsufficientPrivilege):
             db.execute("DELETE FROM public.market_events WHERE false")
+        db.execute("RESET ROLE")
+
+
+def test_actual_postgres_release_canary_report_queries_match_role_grants(
+    theme_memory_dsn,
+):
+    with psycopg.connect(theme_memory_dsn, autocommit=True) as db:
+        db.execute("SET ROLE stock_agent_dashboard")
+        assert db.execute(DASHBOARD_REPORT_SOURCE_SQL, ([],)).fetchall() == []
+        with pytest.raises(psycopg.errors.InsufficientPrivilege):
+            db.execute(EVIDENCE_REPORT_SOURCE_SQL).fetchall()
+        db.execute("RESET ROLE")
+
+        db.execute("SET ROLE stock_agent_release_reader_runtime")
+        assert db.execute(EVIDENCE_REPORT_SOURCE_SQL).fetchall() == []
         db.execute("RESET ROLE")
 
 
