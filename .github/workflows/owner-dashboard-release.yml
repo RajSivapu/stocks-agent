@@ -237,6 +237,28 @@ jobs:
           path: ${{ env.RELEASE_STATE_DIR }}/capture/backend-component-evidence
           if-no-files-found: error
           retention-days: 90
+      - name: Bind immutable backend component evidence to this exact run
+        id: backend_evidence_binding
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ARTIFACT_ID: ${{ steps.backend_evidence.outputs.artifact-id }}
+          CANDIDATE_SHA: ${{ steps.candidate.outputs.candidate_sha }}
+        run: |
+          set -euo pipefail
+          [[ "$ARTIFACT_ID" =~ ^[1-9][0-9]*$ ]] || { echo 'backend evidence artifact ID is malformed'; exit 1; }
+          EXPECTED_NAME="backend-component-evidence-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
+          ARTIFACT="$(gh api "repos/$GITHUB_REPOSITORY/actions/artifacts/$ARTIFACT_ID")"
+          ARTIFACT_DIGEST="$(jq -r .digest <<<"$ARTIFACT")"
+          [[ "$ARTIFACT_DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]] || { echo 'backend evidence artifact digest is malformed'; exit 1; }
+          ARTIFACT_BINDING_FILTER='(.id | type) == "number" and .id > 0 and (.id | floor) == .id and .id == $artifact_id and .name == $name and .digest == $digest and .expired == false and .workflow_run.id == $run and .workflow_run.head_sha == $sha and (.size_in_bytes | type) == "number" and .size_in_bytes > 0 and (.size_in_bytes | floor) == .size_in_bytes and .size_in_bytes <= 16777216'
+          jq -e --argjson artifact_id "$ARTIFACT_ID" \
+            --arg name "$EXPECTED_NAME" --arg digest "$ARTIFACT_DIGEST" \
+            --argjson run "$GITHUB_RUN_ID" --arg sha "$CANDIDATE_SHA" \
+            "$ARTIFACT_BINDING_FILTER" \
+            <<<"$ARTIFACT" >/dev/null || { echo 'backend evidence artifact binding is not exact'; exit 1; }
+          echo "artifact_id=$ARTIFACT_ID" >> "$GITHUB_OUTPUT"
+          echo "artifact_name=$EXPECTED_NAME" >> "$GITHUB_OUTPUT"
+          echo "artifact_digest=$ARTIFACT_DIGEST" >> "$GITHUB_OUTPUT"
       - name: Generate canonical release record
         env:
           CANDIDATE_SHA: ${{ steps.candidate.outputs.candidate_sha }}
@@ -245,7 +267,7 @@ jobs:
           DEPLOYMENT_ID: ${{ steps.deployment.outputs.deployment_id }}
           PROJECT_REF: ${{ secrets.SUPABASE_PROJECT_REF }}
         run: |
-          "$RELEASE_VENV/bin/python" -m scripts.write_protected_release_record --receipt "$RELEASE_STATE_DIR/deploy-receipt.json" --dry-run-evidence "$RELEASE_STATE_DIR/dry-run-evidence.json" --output "$RELEASE_STATE_DIR/release-record.json" --repository "$GITHUB_REPOSITORY" --candidate-sha "$CANDIDATE_SHA" --reviewed-sha "${{ steps.candidate.outputs.reviewed_sha }}" --pr-ci-workflow-run-id "${{ steps.candidate.outputs.pr_ci_workflow_run_id }}" --ci-workflow-run-id "$CI_WORKFLOW_RUN_ID" --authorization-kind "${{ steps.candidate.outputs.authorization_kind }}" --authorization-id "${{ steps.candidate.outputs.authorization_id }}" --release-workflow-run-id "$GITHUB_RUN_ID" --release-workflow-run-attempt "$GITHUB_RUN_ATTEMPT" --pull-request-number "$PULL_REQUEST_NUMBER" --deployment-id "$DEPLOYMENT_ID" --backend-evidence-artifact-id "${{ steps.backend_evidence.outputs.artifact-id }}" --backend-evidence-artifact-name "backend-component-evidence-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT" --backend-evidence-artifact-digest "${{ steps.backend_evidence.outputs.artifact-digest }}" --project-ref "$PROJECT_REF"
+          "$RELEASE_VENV/bin/python" -m scripts.write_protected_release_record --receipt "$RELEASE_STATE_DIR/deploy-receipt.json" --dry-run-evidence "$RELEASE_STATE_DIR/dry-run-evidence.json" --output "$RELEASE_STATE_DIR/release-record.json" --repository "$GITHUB_REPOSITORY" --candidate-sha "$CANDIDATE_SHA" --reviewed-sha "${{ steps.candidate.outputs.reviewed_sha }}" --pr-ci-workflow-run-id "${{ steps.candidate.outputs.pr_ci_workflow_run_id }}" --ci-workflow-run-id "$CI_WORKFLOW_RUN_ID" --authorization-kind "${{ steps.candidate.outputs.authorization_kind }}" --authorization-id "${{ steps.candidate.outputs.authorization_id }}" --release-workflow-run-id "$GITHUB_RUN_ID" --release-workflow-run-attempt "$GITHUB_RUN_ATTEMPT" --pull-request-number "$PULL_REQUEST_NUMBER" --deployment-id "$DEPLOYMENT_ID" --backend-evidence-artifact-id "${{ steps.backend_evidence_binding.outputs.artifact_id }}" --backend-evidence-artifact-name "${{ steps.backend_evidence_binding.outputs.artifact_name }}" --backend-evidence-artifact-digest "${{ steps.backend_evidence_binding.outputs.artifact_digest }}" --project-ref "$PROJECT_REF"
       - name: Upload immutable release record
         id: release_artifact
         uses: actions/upload-artifact@65462800fd760344b1a7b4382951275a0abb4808
