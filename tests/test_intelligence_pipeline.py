@@ -1489,6 +1489,80 @@ def test_capability_plan_executes_exact_task_cursor_and_persists_each_transition
     assert uncertain_receipt["requested_window"] == uncertain["requested_window"]
 
 
+def test_failed_reference_task_recovers_from_durable_binding_without_a_new_source_attempt():
+    task = DiscoveryTask(
+        task_id="44444444-4444-4444-8444-444444444443",
+        stage="reference", provider="sec_edgar",
+        capability_id="sec_company_tickers_universe", query_kind="universe",
+        theme_id=None, query=MappingProxyType({"universe": "eligible_us_listed"}),
+        window=MappingProxyType({
+            "start": "2026-09-03T12:00:00Z", "end": NOW.isoformat(),
+        }), dependencies=(), max_attempts=1, requires_credential=False,
+    )
+    capability = SourceCapability(
+        capability_id=task.capability_id, provider="sec_edgar", query_kind="universe",
+        themes=frozenset(), phases=frozenset({"pre-market"}),
+        allowed_hosts=frozenset({"www.sec.gov"}),
+        allowed_path_patterns=("/files/company_tickers.json",), required_credential=None,
+        authority="reference", retention_class="reference", max_requests_per_run=1,
+        max_items_per_request=15_000, requirement_tier="required_baseline",
+        health="enabled", enabled=True, provider_priority=1,
+        query_pack=MappingProxyType({}),
+    )
+    plan = DiscoveryPlan(
+        run_id=RUN_ID, phase="pre-market", reference_version="sec:unresolved",
+        capability_version=1, tasks=(task,),
+        capabilities=MappingProxyType({capability.capability_id: capability}),
+        coverage=MappingProxyType({}), provider_request_totals=MappingProxyType({}),
+        reserved_holding_quote_requests=0, reserved_adaptive_requests=0,
+    )
+
+    class Gateway:
+        def __init__(self):
+            self.rows = []
+
+        def checkpoint_discovery_stage(self, run_id, payload):
+            assert run_id == RUN_ID
+            self.rows.append(payload["task"])
+            return {"task": payload["task"], "duplicate": False}
+
+    recovered = {
+        "coverage_status": "scope_not_guaranteed",
+        "reference_status": "reference_unavailable",
+        "reference_manifest_id": None,
+        "reference_age_seconds": None,
+        "execution_allowed": False,
+    }
+    recovery_calls = []
+
+    def recovery_stage(run_id, request_value):
+        recovery_calls.append((run_id, request_value.request_id))
+        return recovered
+
+    pipeline = IntelligencePipeline(
+        Gateway(), (), discovery_plan=plan,
+        reference_stage=lambda *_args: (_ for _ in ()).throw(
+            AssertionError("a recovered reference must not contact SEC")
+        ),
+        reference_recovery_stage=recovery_stage,
+    )
+    persisted = {task.task_id: {
+        "id": task.task_id, "stage": task.stage, "provider": task.provider,
+        "capability_id": task.capability_id, "query_kind": task.query_kind,
+        "query_hash": "a" * 64, "dependency_ids": [],
+        "requested_window": dict(task.window), "state": "failed",
+        "attempt_count": 1, "request_budget": 1,
+        "result": {"error_code": "REFERENCE_STAGE_FAILED"},
+    }}
+
+    pipeline._run_planned_reference(RUN_ID, request("pre-market"), persisted)
+
+    assert recovery_calls == [(RUN_ID, RUN_ID)]
+    assert [row["state"] for row in pipeline.gateway.rows] == ["succeeded"]
+    assert persisted[task.task_id]["state"] == "succeeded"
+    assert pipeline.context["reference_coverage"] == recovered
+
+
 @pytest.mark.parametrize("reference_status", ["reference_stale", "reference_unavailable"])
 def test_capability_verifier_rejects_succeeded_pipeline_task_with_reference_fallback(
     reference_status,
