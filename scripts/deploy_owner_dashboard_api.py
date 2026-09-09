@@ -43,6 +43,7 @@ from scripts.verify_owner_dashboard_deployment import (
     obtain_ephemeral_existing_user_access_token,
     revoke_ephemeral_owner_session,
     run_http_canary,
+    validate_scheduled_readiness_receipt,
     validate_evidence_database_url,
     verify_auth_canary_inventory,
     verify_release_artifact_receipts,
@@ -1481,6 +1482,9 @@ def run_post_deploy_canary(
             raise RuntimeError("production source reconciliation is incomplete")
         if result.get("non_owner_status") != 403:
             raise RuntimeError("production non-owner denial receipt is incomplete")
+        result["scheduled_readiness"] = validate_scheduled_readiness_receipt(
+            result.get("scheduled_readiness"),
+        )
     finally:
         cleanup_error = None
         for access_token in reversed(tokens):
