@@ -440,6 +440,28 @@ class NativeReleaseAdapter:
                 prior["configuration"],
             )
 
+    def _matches_git_function_candidate(self, name, candidate):
+        """Bind an advanced hosted version to the failed release's exact Git bytes."""
+        from scripts.verify_personal_stock_agent_v1 import git_function_runtime
+        try:
+            files, configuration = git_function_runtime(
+                self.root,
+                str(self.context.get("candidate_sha", "")),
+                name,
+            )
+        except RuntimeError:
+            return False
+        expected_files = {
+            path: base64.b64encode(raw).decode()
+            for path, raw in files.items()
+        }
+        return (
+            candidate["exists"] is True
+            and candidate["values"] == {}
+            and candidate["files"] == expected_files
+            and candidate["configuration"] == configuration
+        )
+
     def attest_recovery(self, name, prior, candidate, current):
         """Prove release-owned state; a changed flag alone is not authority.
 
@@ -477,12 +499,33 @@ class NativeReleaseAdapter:
             return False
         if candidate["identity"] is not None and current["identity"] != candidate["identity"]:
             return False
+        if prior["exists"]:
+            if (current["identity"] != prior["identity"]
+                    or re.fullmatch(r"[1-9][0-9]*", str(prior["version"])) is None):
+                return False
+            prior_version = int(prior["version"])
+            current_version = int(current["version"])
+            if candidate["version"] is None:
+                if current_version <= prior_version:
+                    return False
+                if current_version == prior_version + 1:
+                    return True
+                return self._matches_git_function_candidate(name, candidate)
+            if (candidate["identity"] is None
+                    or re.fullmatch(r"[1-9][0-9]*", str(candidate["version"])) is None):
+                return False
+            candidate_version = int(candidate["version"])
+            if candidate_version <= prior_version or current_version < candidate_version:
+                return False
+            if current_version == candidate_version:
+                return True
+            # A failed Supabase deployment may consume a later version while
+            # retaining the active candidate. Accept that ordinal-only drift
+            # only when the encrypted deployed snapshot is independently bound
+            # to this failed candidate's complete, self-contained Git runtime.
+            return self._matches_git_function_candidate(name, candidate)
         if candidate["version"] is not None and current["version"] != candidate["version"]:
             return False
-        if prior["exists"]:
-            return (current["identity"] == prior["identity"]
-                    and re.fullmatch(r"[1-9][0-9]*", str(prior["version"])) is not None
-                    and int(current["version"]) == int(prior["version"]) + 1)
         return current["version"] == "1"
 
     def replay_restored_content(self, name, prior, current):
