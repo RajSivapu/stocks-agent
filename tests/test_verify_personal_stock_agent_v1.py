@@ -15,7 +15,6 @@ import pytest
 from lib.release_baseline import expected_snapshot_tables, pre_migration_omissions
 from scripts import verify_personal_stock_agent_v1 as release_verifier
 from scripts.verify_personal_stock_agent_v1 import verify_release
-from scripts.verify_owner_dashboard_deployment import migration_statements_sha256, normalize_migration_statements
 from test_recovery_bundle import recovery_records, digest
 
 NOW = datetime(2026, 9, 5, 21, tzinfo=timezone.utc)
@@ -1602,7 +1601,7 @@ def release(tmp_path):
         "run_id": RUN, "candidate_sha": sha, "reviewed_sha": reviewed_sha,
         "release_authorization": {"kind": "github_review", "id": 45,
             "pr_ci_workflow_run_id": 41},
-        "migrations": [{"path": "sql/migrations/20260926_suppression_reasons.sql", "version": "20260926", "sha256": migration_statements_sha256(normalize_migration_statements(raw["sql/migrations/20260926_suppression_reasons.sql"].decode()))}],
+        "migrations": [{"path": "sql/migrations/20260926_suppression_reasons.sql", "version": "20260926", "sha256": hashlib.sha256(raw["sql/migrations/20260926_suppression_reasons.sql"]).hexdigest()}],
         "functions": [{"function": name, "deployment_id": name + "-deployment", "git_sha": sha, "function_version": 5, "source_sha256": tree_hash({"index.ts": raw[f"supabase/functions/{name}/index.ts"]})} for name in ("market-briefing-gateway", "owner-dashboard-api", "telegram-portfolio")],
         "static_assets": {"status": "verified", "candidate_sha": sha,
             "source_sha256": tree_hash({"src/main.tsx": b"web source\n"}),

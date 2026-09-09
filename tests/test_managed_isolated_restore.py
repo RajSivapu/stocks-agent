@@ -581,6 +581,10 @@ def test_actual_migration_retry_accepts_truthful_baseline_without_writing_histor
     source.parent.mkdir(parents=True)
     source.write_text("SELECT 1;")
     monkeypatch.setattr(deploy, "ROOT", tmp_path)
+    monkeypatch.setattr(
+        deploy, "RECONCILIATION_BASELINE_RAW_SHA256",
+        hashlib.sha256(source.read_bytes()).hexdigest(),
+    )
     discovery = next(item for item in deploy.candidate_migration_manifest()
                      if item["path"] == "sql/migrations/20261005_market_wide_discovery.sql")
     transfer = next(item for item in deploy.candidate_migration_manifest()

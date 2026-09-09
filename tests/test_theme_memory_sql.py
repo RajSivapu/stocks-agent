@@ -1156,7 +1156,7 @@ def test_actual_postgres_complete_read_scope_without_closure_ledger_accepts_lega
 
 
 def test_actual_postgres_authority_migration_and_ledger_insert_roll_back_together(
-    theme_memory_dsn, tmp_path,
+    theme_memory_dsn, tmp_path, monkeypatch,
 ):
     from scripts.deploy_owner_dashboard_api import (
         apply_release_migrations, candidate_migration_manifest,
@@ -1165,6 +1165,9 @@ def test_actual_postgres_authority_migration_and_ledger_insert_roll_back_togethe
     migration = tmp_path / RELEASE_READER_AUTHORITY_MIGRATION.name
     migration.write_bytes(RELEASE_READER_AUTHORITY_MIGRATION.read_bytes())
     manifest = candidate_migration_manifest(tmp_path)
+    monkeypatch.setattr(
+        "scripts.deploy_owner_dashboard_api.legacy_migration_receipts", lambda: (),
+    )
 
     with psycopg.connect(theme_memory_dsn, autocommit=True) as admin:
         admin.execute("GRANT USAGE ON SCHEMA extensions TO stock_agent_release_reader")
@@ -1177,7 +1180,7 @@ def test_actual_postgres_authority_migration_and_ledger_insert_roll_back_togethe
         def __init__(self, cursor):
             self.cursor = cursor
 
-        def execute(self, statement, params=None):
+        def execute(self, statement, params=None, **kwargs):
             if (
                 str(statement).startswith(
                     "INSERT INTO public.stock_agent_release_migration_ledger"
@@ -1186,7 +1189,7 @@ def test_actual_postgres_authority_migration_and_ledger_insert_roll_back_togethe
                 and params[0] == manifest[0]["path"]
             ):
                 raise RuntimeError("injected ledger insert failure")
-            return self.cursor.execute(statement, params)
+            return self.cursor.execute(statement, params, **kwargs)
 
         def fetchall(self):
             return self.cursor.fetchall()
@@ -1211,6 +1214,45 @@ def test_actual_postgres_authority_migration_and_ledger_insert_roll_back_togethe
     finally:
         with psycopg.connect(theme_memory_dsn, autocommit=True) as admin:
             admin.execute("REVOKE USAGE ON SCHEMA extensions FROM stock_agent_release_reader")
+
+
+@pytest.mark.parametrize("sql", (
+    "INSERT INTO migration_atomicity_probe VALUES (1); "
+    "COMMIT/**/AND CHAIN; SELECT 1;",
+    "INSERT INTO migration_atomicity_probe VALUES (1); -- hidden\rCOMMIT;",
+    "INSERT INTO migration_atomicity_probe VALUES (1); "
+    "SELECT 1 AS before$tag$; COMMIT; SELECT 1 AS after$tag$;",
+))
+def test_actual_postgres_adversarial_transaction_syntax_cannot_escape_rollback(
+    theme_memory_dsn, sql,
+):
+    from scripts.deploy_owner_dashboard_api import migration_execution_statements
+
+    with psycopg.connect(theme_memory_dsn, autocommit=True) as connection:
+        connection.execute("CREATE TEMP TABLE migration_atomicity_probe (value INTEGER)")
+        with pytest.raises(RuntimeError, match="transaction control"):
+            statements = migration_execution_statements(sql)
+            with connection.transaction():
+                for statement in statements:
+                    connection.execute(statement, prepare=True)
+                raise RuntimeError("injected post-migration failure")
+        assert connection.execute(
+            "SELECT count(*) FROM migration_atomicity_probe"
+        ).fetchone() == (0,)
+
+
+def test_actual_postgres_multibyte_migration_statements_execute_prepared(
+    theme_memory_dsn,
+):
+    from scripts.deploy_owner_dashboard_api import migration_execution_statements
+
+    sql = "SELECT 'é' AS café; SELECT '東京' AS city;"
+    with psycopg.connect(theme_memory_dsn, autocommit=True) as connection:
+        values = [
+            connection.execute(statement, prepare=True).fetchone()[0]
+            for statement in migration_execution_statements(sql)
+        ]
+    assert values == ["é", "東京"]
 
 
 def test_actual_postgres_reader_attestation_rejects_large_object_access(

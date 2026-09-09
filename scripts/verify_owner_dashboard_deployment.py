@@ -159,7 +159,7 @@ def candidate_migration_manifest(migrations_directory: Path = ROOT / "sql/migrat
     manifest = [{
         "path": f"sql/migrations/{path.name}",
         "version": MIGRATION_NAME.fullmatch(path.name).group("version"),  # type: ignore[union-attr]
-        "sha256": migration_statements_sha256(normalize_migration_statements(path.read_text(encoding="utf-8"))),
+        "sha256": hashlib.sha256(path.read_bytes()).hexdigest(),
     } for path in paths]
     if len({item["version"] for item in manifest}) != len(manifest):
         raise RuntimeError("candidate migration versions must be globally unique")

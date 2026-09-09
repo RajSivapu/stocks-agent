@@ -51,7 +51,6 @@ from scripts.export_recovery_bundle import (
     sha256,
 )
 from scripts.function_runtime_manifest import configured_function_runtime
-from scripts.verify_owner_dashboard_deployment import migration_statements_sha256, normalize_migration_statements
 
 MAX_SCHEDULED_RECEIPT_AGE_SECONDS = 7 * 24 * 60 * 60
 SHA = re.compile(r"[0-9a-f]{40}")
@@ -2040,7 +2039,7 @@ def verify_artifacts(repo: Path, static_root: Path, candidate: str, record: Mapp
     verify_component_artifacts(repo, candidate, record, source, deployed_at=deployed)
     migrations = git_files(repo, candidate, "sql/migrations")
     expected_migrations = [{"path": f"sql/migrations/{path}", "version": Path(path).name.split("_", 1)[0],
-                            "sha256": migration_statements_sha256(normalize_migration_statements(raw.decode("utf-8")))}
+                            "sha256": hashlib.sha256(raw).hexdigest()}
                            for path, raw in sorted(migrations.items()) if path.endswith(".sql")]
     require(record["migrations"] == expected_migrations, "migration byte hashes or complete version set differ from candidate")
     application = record.get("migration_application")

@@ -46,10 +46,10 @@ def test_documented_native_baseline_reconciles_and_applies_additive_suffix():
         if version == "20260907":
             assert hashlib.sha256(raw).hexdigest() == fixture["file_sha256"]
             assert deploy.migration_statements_sha256(deploy.normalize_migration_statements(raw.decode())) == fixture["native_statements_sha256"]
-        native.append((version, deploy.normalize_migration_statements(raw.decode())))
+        native.append((version, deploy.migration_execution_statements(raw.decode())))
     class Cursor:
         def __init__(self): self.reads = 0; self.applied = []
-        def execute(self, sql, params=None): self.applied.append((sql, params))
+        def execute(self, sql, params=None, **_kwargs): self.applied.append((sql, params))
         def fetchall(self):
             self.reads += 1
             return [] if self.reads == 1 else native
@@ -541,7 +541,11 @@ def test_actual_postgres_additive_upgrade_from_native_baseline():
                 connection.execute(baseline)
                 names = subprocess.check_output(["git", "ls-tree", "--name-only", BASE, "sql/migrations/"], cwd=ROOT, text=True).splitlines()
                 for name in names:
-                    statements = deploy.normalize_migration_statements(subprocess.check_output(["git", "show", f"{BASE}:{name}"], cwd=ROOT).decode())
+                    statements = deploy.migration_execution_statements(
+                        subprocess.check_output(
+                            ["git", "show", f"{BASE}:{name}"], cwd=ROOT,
+                        ).decode()
+                    )
                     connection.execute("INSERT INTO supabase_migrations.schema_migrations VALUES (%s,%s)", (Path(name).name.split("_",1)[0], statements))
                 with connection.cursor() as cursor:
                     receipt = deploy.apply_release_migrations(cursor)

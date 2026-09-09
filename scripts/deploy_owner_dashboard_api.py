@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 from contextlib import AbstractContextManager
 from datetime import datetime, timezone
+from functools import lru_cache
 import hashlib
 import json
 import os
@@ -20,8 +21,13 @@ from typing import Callable, Mapping, Sequence
 from urllib.parse import unquote, urlparse
 
 import psycopg
+from pglast import ast, parse_sql
+from pglast.enums import TransactionStmtKind
+from pglast.parser import ParseError
+from pglast.stream import RawStream
 
-ROOT = Path(__file__).resolve().parents[1]
+REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
+ROOT = REPOSITORY_ROOT
 sys.path.insert(0, str(ROOT))
 
 from scripts.provision_dashboard_runtime_role import (
@@ -48,6 +54,8 @@ SUPABASE_CLI_VERSION = "2.116.0"
 MIGRATION_LEDGER = "public.stock_agent_release_migration_ledger"
 RECONCILIATION_BASELINE_PATH = "sql/reconciliation/20261004_production_schema_reconciliation.sql"
 RECONCILIATION_BASELINE_VERSION = "20261004"
+RECONCILIATION_BASELINE_RAW_SHA256 = "db8486083b6c36a7d574a6135e432f01fa0d1602a3ca560b57743949c6fedc87"
+LEGACY_MIGRATION_CUTOVER_SHA = "59b01733b4c784bc2a65544a0f59598784e13fe8"
 RELEASE_LEASE = "public.stock_agent_release_mutation_lease"
 RELEASE_LEASE_SECONDS = 900
 CANONICAL_ATTEMPT_LEASE_OWNER = re.compile(r"^(release|recovery)-([1-9][0-9]*)-([1-9][0-9]*)$")
@@ -496,41 +504,149 @@ def normalize_migration_statements(sql: str) -> list[str]:
 
 
 def migration_statements_sha256(statements: Sequence[str]) -> str:
+    """Return the historical Supabase/private-ledger compatibility hash only."""
     # Native schema_migrations.statements[] elements are already split: never
     # join and reparse them, since that can change a statement boundary.
     canonical = [item for statement in statements for item in normalize_migration_statements(statement)]
     return hashlib.sha256(json.dumps(canonical, ensure_ascii=False, separators=(",", ":")).encode()).hexdigest()
 
 
-def migration_transaction_control(statement: str) -> str | None:
-    """Classify top-level PostgreSQL transaction control conservatively."""
-    words = statement.upper().split()
-    if not words:
-        return None
-    if words[0] in {"BEGIN", "COMMIT", "END", "ROLLBACK", "ABORT", "SAVEPOINT"}:
-        return words[0]
-    if len(words) >= 2 and (words[0], words[1]) in {
-        ("START", "TRANSACTION"),
-        ("SET", "TRANSACTION"),
-        ("PREPARE", "TRANSACTION"),
-        ("RELEASE", "SAVEPOINT"),
-    }:
-        return f"{words[0]} {words[1]}"
-    return None
+def migration_semantic_sha256(statements: Sequence[str]) -> str:
+    """Hash PostgreSQL-parsed statement semantics for native-ledger comparison."""
+    canonical: list[str] = []
+    try:
+        for statement in statements:
+            if not isinstance(statement, str) or not statement.strip():
+                raise RuntimeError("native migration statement is invalid")
+            canonical.extend(RawStream()(raw.stmt) for raw in parse_sql(statement))
+    except ParseError as error:
+        raise RuntimeError("native migration statement is not valid PostgreSQL") from error
+    if not canonical:
+        raise RuntimeError("native migration statement is empty")
+    return hashlib.sha256(
+        json.dumps(canonical, ensure_ascii=False, separators=(",", ":")).encode(),
+    ).hexdigest()
+
+
+@lru_cache(maxsize=1)
+def legacy_migration_receipts() -> tuple[dict[str, str], ...]:
+    """Load the immutable pre-cutover migrations from the reviewed Git commit."""
+    ancestor = subprocess.run(
+        ["git", "merge-base", "--is-ancestor", LEGACY_MIGRATION_CUTOVER_SHA, "HEAD"],
+        cwd=REPOSITORY_ROOT, capture_output=True, check=False,
+    )
+    listing = subprocess.run(
+        ["git", "ls-tree", "-r", "--name-only", LEGACY_MIGRATION_CUTOVER_SHA,
+         "--", "sql/migrations"],
+        cwd=REPOSITORY_ROOT, capture_output=True, check=False,
+    )
+    try:
+        paths = listing.stdout.decode("utf-8").splitlines()
+    except UnicodeDecodeError as error:
+        raise RuntimeError("legacy migration cutover tree is malformed") from error
+    if (
+        ancestor.returncode != 0 or listing.returncode != 0 or len(paths) != 46
+        or paths != sorted(paths) or len(paths) != len(set(paths))
+        or any(
+            Path(path).parent.as_posix() != "sql/migrations"
+            or MIGRATION_NAME.fullmatch(Path(path).name) is None
+            for path in paths
+        )
+    ):
+        raise RuntimeError("legacy migration cutover tree is malformed")
+    receipts: list[dict[str, str]] = []
+    for path in paths:
+        result = subprocess.run(
+            ["git", "show", f"{LEGACY_MIGRATION_CUTOVER_SHA}:{path}"],
+            cwd=REPOSITORY_ROOT, capture_output=True, check=False,
+        )
+        if result.returncode != 0:
+            raise RuntimeError("legacy migration cutover source is unavailable")
+        raw = result.stdout
+        try:
+            sql = raw.decode("utf-8")
+        except UnicodeDecodeError as error:
+            raise RuntimeError("legacy migration cutover source is not UTF-8") from error
+        receipts.append({
+            "path": path,
+            "version": Path(path).name.split("_", 1)[0],
+            "exact_sha256": hashlib.sha256(raw).hexdigest(),
+            "legacy_sha256": migration_statements_sha256(normalize_migration_statements(sql)),
+            "semantic_sha256": migration_semantic_sha256([sql]),
+        })
+    return tuple(receipts)
+
+
+def validate_candidate_migration_cutover(
+    manifest: Sequence[Mapping[str, str]],
+) -> dict[str, dict[str, str]]:
+    """Require an exact append-only candidate after the immutable cutover."""
+    candidate_by_path = {item["path"]: item for item in manifest}
+    cutover = list(legacy_migration_receipts())
+    legacy_receipts = {item["path"]: item for item in cutover}
+    cutover_version = max((item["version"] for item in cutover), default=None)
+    if (
+        len(candidate_by_path) != len(manifest)
+        or len(legacy_receipts) != len(cutover)
+        or any(
+            set(item) != {
+                "path", "version", "exact_sha256", "legacy_sha256", "semantic_sha256",
+            }
+            for item in cutover
+        )
+        or any(
+            path not in candidate_by_path
+            or candidate_by_path[path]["version"] != receipt["version"]
+            or candidate_by_path[path]["sha256"] != receipt["exact_sha256"]
+            for path, receipt in legacy_receipts.items()
+        )
+        or (
+            cutover_version is not None
+            and any(
+                item["path"] not in legacy_receipts
+                and item["version"] <= cutover_version
+                for item in manifest
+            )
+        )
+    ):
+        raise RuntimeError("candidate migration cutover is incomplete or bytes differ")
+    return legacy_receipts
 
 
 def migration_execution_statements(sql: str) -> list[str]:
-    """Keep transaction control outside migration files during protected apply."""
-    statements = normalize_migration_statements(sql)
+    """Parse one PostgreSQL statement per execute and keep transaction control outside."""
+    try:
+        parsed = list(parse_sql(sql))
+    except ParseError as error:
+        raise RuntimeError("candidate migration is not valid PostgreSQL") from error
+    if not parsed:
+        raise RuntimeError("candidate migration is empty")
+    statements = []
+    for raw in parsed:
+        start = raw.stmt_location
+        end = start + raw.stmt_len if raw.stmt_len else len(sql)
+        statement = sql[start:end].strip()
+        if not statement:
+            raise RuntimeError("candidate migration statement is empty")
+        statements.append(statement)
     controls = [
-        (index, control)
-        for index, statement in enumerate(statements)
-        if (control := migration_transaction_control(statement)) is not None
+        index for index, raw in enumerate(parsed)
+        if isinstance(raw.stmt, ast.TransactionStmt)
+        or (isinstance(raw.stmt, ast.VariableSetStmt)
+            and raw.stmt.name in {
+                "TRANSACTION", "TRANSACTION SNAPSHOT", "SESSION CHARACTERISTICS",
+            })
     ]
     if not controls:
-        return [sql]
+        return statements
     if (
-        controls != [(0, "BEGIN"), (len(statements) - 1, "COMMIT")]
+        controls != [0, len(statements) - 1]
+        or not isinstance(parsed[0].stmt, ast.TransactionStmt)
+        or parsed[0].stmt.kind != TransactionStmtKind.TRANS_STMT_BEGIN
+        or parsed[0].stmt.chain
+        or not isinstance(parsed[-1].stmt, ast.TransactionStmt)
+        or parsed[-1].stmt.kind != TransactionStmtKind.TRANS_STMT_COMMIT
+        or parsed[-1].stmt.chain
         or statements[0].upper() != "BEGIN"
         or statements[-1].upper() != "COMMIT"
     ):
@@ -703,12 +819,12 @@ def candidate_migration_manifest(migrations_directory: Path = ROOT / "sql/migrat
     manifest = []
     for path in paths:
         raw = path.read_bytes()
-        try: statements = normalize_migration_statements(raw.decode("utf-8"))
+        try: raw.decode("utf-8")
         except UnicodeDecodeError as error: raise RuntimeError("candidate migration is not UTF-8") from error
         manifest.append({
             "path": f"sql/migrations/{path.name}",
             "version": MIGRATION_NAME.fullmatch(path.name).group("version"),  # type: ignore[union-attr]
-            "sha256": migration_statements_sha256(statements),
+            "sha256": hashlib.sha256(raw).hexdigest(),
         })
     if len({item["version"] for item in manifest}) != len(manifest):
         raise RuntimeError("candidate migration versions must be globally unique")
@@ -720,8 +836,11 @@ def reconciliation_baseline_manifest() -> dict[str, str]:
     path = ROOT / RECONCILIATION_BASELINE_PATH
     if not path.is_file() or path.is_symlink() or path.parent.is_symlink() or path.parent.parent.is_symlink():
         raise RuntimeError("reconciliation baseline source is unavailable or unsafe")
+    raw = path.read_bytes()
+    if hashlib.sha256(raw).hexdigest() != RECONCILIATION_BASELINE_RAW_SHA256:
+        raise RuntimeError("reconciliation baseline source bytes differ from the reviewed file")
     try:
-        statements = normalize_migration_statements(path.read_bytes().decode("utf-8"))
+        statements = normalize_migration_statements(raw.decode("utf-8"))
     except UnicodeDecodeError as error:
         raise RuntimeError("reconciliation baseline source is not UTF-8") from error
     return {"path": RECONCILIATION_BASELINE_PATH, "version": RECONCILIATION_BASELINE_VERSION,
@@ -755,6 +874,8 @@ def apply_release_migrations(
     if (expected_paths != sorted(expected_paths) or len(expected_paths) != len(set(expected_paths))
             or len({item["version"] for item in manifest}) != len(manifest)):
         raise RuntimeError("candidate migration manifest is incomplete or unordered")
+    candidate_by_path = {item["path"]: item for item in manifest}
+    legacy_receipts = validate_candidate_migration_cutover(manifest)
     cursor.execute(
         f"CREATE TABLE IF NOT EXISTS {MIGRATION_LEDGER} ("
         "path TEXT PRIMARY KEY, version TEXT NOT NULL, sha256 TEXT NOT NULL, "
@@ -771,12 +892,18 @@ def apply_release_migrations(
         if not isinstance(row, Sequence) or len(row) != 3 or not all(isinstance(value, str) for value in row):
             raise RuntimeError("migration ledger receipt is malformed")
         path, version, digest = row
-        item = {"path": path, "version": version, "sha256": digest}
         is_baseline = path == RECONCILIATION_BASELINE_PATH and version == RECONCILIATION_BASELINE_VERSION
+        candidate = candidate_by_path.get(path)
+        legacy_receipt = legacy_receipts.get(path)
+        allowed = set()
+        if candidate is not None and candidate["version"] == version:
+            allowed.add(candidate["sha256"])
+            if legacy_receipt is not None:
+                allowed.add(legacy_receipt["legacy_sha256"])
         if (path in known or version in private_versions or not re.fullmatch(r"[0-9a-f]{64}", digest)
-                or not (is_baseline or valid_item(item))):
+                or not (is_baseline or digest in allowed)):
             raise RuntimeError("migration ledger receipt is malformed")
-        known[path] = (version, digest)
+        known[path] = (version, digest if is_baseline else candidate["sha256"])
         private_versions.add(version)
     # Native Supabase is an immutable prefix; this transaction records a
     # contiguous private suffix for DDL it applies directly. This permits a
@@ -796,7 +923,10 @@ def apply_release_migrations(
         baseline = reconciliation_baseline_manifest()
         if (known.get(baseline["path"]) != (baseline["version"], baseline["sha256"])
                 or len(legacy) != 1 or legacy[0][0] != baseline["version"]
-                or migration_statements_sha256(legacy[0][1]) != baseline["sha256"]
+                or migration_semantic_sha256(legacy[0][1])
+                   != migration_semantic_sha256([
+                       (ROOT / RECONCILIATION_BASELINE_PATH).read_text(encoding="utf-8")
+                   ])
                 or any(item["version"] == baseline["version"] for item in manifest)):
             raise RuntimeError("reconciliation migration baseline pair is invalid")
         subsumed = {item["path"] for item in manifest if item["version"] < baseline["version"]}
@@ -820,7 +950,13 @@ def apply_release_migrations(
         candidates = by_version.get(version, [])
         if not candidates or not all(isinstance(part, str) for part in statements):
             raise RuntimeError("native migration version is not an exact candidate")
-        matching = [item for item in candidates if migration_statements_sha256(statements) == item["sha256"]]
+        semantic_digest = migration_semantic_sha256(statements)
+        matching = [
+            item for item in candidates
+            if item["path"] in legacy_receipts
+            and item["sha256"] == legacy_receipts[item["path"]]["exact_sha256"]
+            and semantic_digest == legacy_receipts[item["path"]]["semantic_sha256"]
+        ]
         if len(matching) != 1 or matching[0]["path"] in native:
             raise RuntimeError("native migration hash mismatch")
         item = matching[0]
@@ -845,7 +981,7 @@ def apply_release_migrations(
         if path.is_symlink() or not path.is_file() or not MIGRATION_NAME.fullmatch(path.name):
             raise RuntimeError("candidate migration path is unsafe")
         raw = path.read_bytes()
-        actual = migration_statements_sha256(normalize_migration_statements(raw.decode("utf-8")))
+        actual = hashlib.sha256(raw).hexdigest()
         if item["sha256"] != actual:
             raise RuntimeError("candidate migration hash mismatch")
         if item["path"] in subsumed:
@@ -863,7 +999,7 @@ def apply_release_migrations(
         # same transaction.  psycopg's surrounding connection context rolls
         # both back if either statement fails.
         for statement in migration_execution_statements(sql):
-            cursor.execute(statement)
+            cursor.execute(statement, prepare=True)
         cursor.execute(
             f"INSERT INTO {MIGRATION_LEDGER} (path, version, sha256) VALUES (%s, %s, %s)",
             (item["path"], item["version"], item["sha256"]),
