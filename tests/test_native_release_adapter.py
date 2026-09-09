@@ -74,7 +74,9 @@ class Supabase:
 
 def native(platform, **kwargs):
     return adapter_module().NativeReleaseAdapter({"project_ref": "p" * 20, "candidate_sha": "a" * 40,
-        "release_run_id": "123", "release_run_attempt": "1"}, runner=platform, environment={
+        "release_run_id": "123", "release_run_attempt": "1",
+        "allowed_origin": "https://owner.example", "site_origin": "https://owner.example"},
+        runner=platform, environment={
             "DASHBOARD_PRIOR_MANAGED_SECRETS_JSON": json.dumps(platform.secrets)}, **kwargs)
 
 
@@ -150,7 +152,7 @@ def test_upgrade_plan_preserves_runtime_credential_and_provisions_gateway_settin
     adapter = native(platform)
     adapter.context.update({
         "allowed_origin": "https://owner.example",
-        "site_origin": "https://stocks.example",
+        "site_origin": "https://owner.example",
         "owner_user_id": "owner",
     })
     prior_role = {
@@ -201,7 +203,7 @@ def test_upgrade_plan_preserves_runtime_credential_and_provisions_gateway_settin
         "DASHBOARD_DATABASE_URL": database_url,
         "DASHBOARD_OWNER_USER_ID": "owner",
         "OWNER_DASHBOARD_ORIGIN": "https://owner.example",
-        "OWNER_DASHBOARD_URL": "https://stocks.example",
+        "OWNER_DASHBOARD_URL": "https://owner.example",
     }
 
 
@@ -215,20 +217,53 @@ def test_capture_derives_public_gateway_settings_when_prior_secret_json_predates
     platform.secrets = {
         **prior,
         "OWNER_DASHBOARD_ORIGIN": "https://owner.example",
-        "OWNER_DASHBOARD_URL": "https://stocks.example",
+        "OWNER_DASHBOARD_URL": "https://owner.example",
     }
     adapter = adapter_module().NativeReleaseAdapter(
         {
             "project_ref": "p" * 20,
             "candidate_sha": "a" * 40,
             "allowed_origin": "https://owner.example",
-            "site_origin": "https://stocks.example",
+            "site_origin": "https://owner.example",
         },
         runner=platform,
         environment={"DASHBOARD_PRIOR_MANAGED_SECRETS_JSON": json.dumps(prior)},
     )
 
     assert adapter.capture("dashboard-secrets")["values"] == platform.secrets
+
+
+@pytest.mark.parametrize(
+    "site_origin",
+    [
+        "https://stocks.example",
+        "http://owner.example",
+        "https://owner.example/path",
+    ],
+)
+def test_backend_plan_rejects_a_noncanonical_or_mismatched_site_origin_before_io(
+    tmp_path, site_origin
+):
+    platform = Supabase()
+    adapter = native(
+        platform,
+        connector=lambda *_args, **_kwargs: pytest.fail(
+            "database access must follow origin preflight"
+        ),
+    )
+    adapter.context.update(
+        {
+            "evidence_directory": str(tmp_path),
+            "allowed_origin": "https://owner.example",
+            "site_origin": site_origin,
+            "owner_user_id": "owner",
+        }
+    )
+
+    with pytest.raises(RuntimeError, match="dashboard origin"):
+        adapter.plan(adapter.context)
+
+    assert platform.calls == []
 
 
 def test_upgrade_plan_refuses_to_rotate_a_live_role_when_existing_database_url_is_missing(monkeypatch):
