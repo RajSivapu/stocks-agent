@@ -138,25 +138,34 @@ def recover_components(transport: ComponentTransport, journal: dict, *, persist:
         persist(copy.deepcopy(journal))
         return {"status": "rolled_back", "components": []}
     components = _journal_components(journal)
+    prepared = {}
     errors = []
+    # Resolve every journal payload, dependency, current readback, and ownership
+    # attestation before the first restoration write. One ambiguous component
+    # must not leave a different component partially rolled back.
     for name in reversed(components):
         entry = journal["components"][name]
         if type(entry.get("changed")) is not bool:
             raise RuntimeError("component mutation boundary is unknown")
         if entry["changed"] is False:
             continue
+        stage = "journal"
         try:
             prior = validate_snapshot(name, entry["prior"])
             if hashlib.sha256(canonical(prior)).hexdigest() != entry["prior_sha256"]:
                 raise RuntimeError("prior recovery bytes changed")
+            stage = "hydrate"
             hydrate = getattr(transport, "hydrate_recovery", None)
             if callable(hydrate): hydrate(name, prior, entry.get("candidate"))
+            stage = "capture"
             current = validate_snapshot(name, transport.capture(name))
             restored_content = name in FUNCTIONS and restored_function_snapshot(prior, current)
+            action = "none"
             if current != prior and restored_content:
-                entry["restoration"] = {"original_identity": prior["identity"],
-                    "original_version": prior["version"], "identity": current["identity"], "version": current["version"]}
+                replay = getattr(transport, "replay_restored_content", None)
+                action = "restore" if callable(replay) and replay(name, prior, current) is True else "restored"
             elif current != prior:
+                stage = "journal"
                 candidate = validate_snapshot(name, entry["candidate"], candidate=True)
                 bound = entry.get("deployed")
                 if bound is not None:
@@ -166,10 +175,31 @@ def recover_components(transport: ComponentTransport, journal: dict, *, persist:
                     candidate = bound
                 if name in FUNCTIONS and prior["exists"] and current["identity"] != prior["identity"]:
                     raise RuntimeError("existing function identity drift is not owned by this release")
+                stage = "attest"
                 attest = getattr(transport, "attest_recovery", None)
                 owned = (attest(name, prior, candidate, current) is True if callable(attest) else current == candidate)
                 if not owned:
                     raise RuntimeError("current component is not proven to belong to this release")
+                action = "restore"
+            entry.pop("recovery_failure", None)
+            prepared[name] = (prior, current, action)
+        except Exception:
+            entry["recovery_failure"] = {"stage": stage}
+            errors.append(f"{name}[{stage}]")
+    if errors:
+        journal["status"] = "recovery_required"
+        persist(copy.deepcopy(journal))
+        raise RuntimeError("component recovery remains incomplete: " + ", ".join(errors))
+
+    for name in reversed(components):
+        entry = journal["components"][name]
+        if entry["changed"] is False:
+            continue
+        prior, current, action = prepared[name]
+        stage = "restore"
+        try:
+            expected = current
+            if action == "restore":
                 restored = transport.restore(name, prior)
                 expected = prior
                 if restored is not None:
@@ -180,14 +210,19 @@ def recover_components(transport: ComponentTransport, journal: dict, *, persist:
                     if name not in FUNCTIONS or not restored_function_snapshot(prior, restored):
                         raise RuntimeError("restoration changed prior component content")
                     expected = restored
-                    entry["restoration"] = {"original_identity": prior["identity"],
-                        "original_version": prior["version"], "identity": restored["identity"],
-                        "version": restored["version"]}
-                verify_component_readback(name, expected, transport.capture(name))
+            stage = "verify"
+            verify_component_readback(name, expected, transport.capture(name))
+            if name in FUNCTIONS and expected != prior:
+                entry["restoration"] = {"original_identity": prior["identity"],
+                    "original_version": prior["version"], "identity": expected["identity"],
+                    "version": expected["version"]}
+            entry.pop("recovery_failure", None)
             entry["changed"] = False
+            stage = "persist"
             persist(copy.deepcopy(journal))
         except Exception:
-            errors.append(name)
+            entry["recovery_failure"] = {"stage": stage}
+            errors.append(f"{name}[{stage}]")
     journal["status"] = "recovery_required" if errors else "rolled_back"
     persist(copy.deepcopy(journal))
     if errors:

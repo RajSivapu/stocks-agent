@@ -515,6 +515,13 @@ def test_final_release_workflow_keeps_all_ephemera_outside_the_checkout_and_uses
     assert "cryptography==" in Path("requirements.lock").read_text()
     assert '"$PR_HEAD_SHA"' in workflow
     assert "reviewed and candidate Git trees differ" in workflow
+    deployment = workflow.split(
+        "- name: Execute protected deployment with encrypted component recovery", maxsplit=1
+    )[1].split("- name:", maxsplit=1)[0]
+    assert 'install -d -m 700 "$RELEASE_STATE_DIR/capture"' in deployment
+    assert deployment.index('install -d -m 700 "$RELEASE_STATE_DIR/capture"') < deployment.index(
+        "-m scripts.deploy_owner_dashboard_api"
+    )
 
 
 def test_release_workflow_binds_review_times_and_durable_pre_mutation_recovery():
@@ -524,6 +531,15 @@ def test_release_workflow_binds_review_times_and_durable_pre_mutation_recovery()
     assert "component-recovery-run:$GITHUB_RUN_ID" in workflow
     assert "scripts.release_components --check-backend-transport" in workflow
     assert Path(".github/workflows/owner-dashboard-release-recovery.yml").is_file()
+    recovery = yaml.safe_load(
+        Path(".github/workflows/owner-dashboard-release-recovery.yml").read_text()
+    )
+    checkout = next(
+        step
+        for step in recovery["jobs"]["recover"]["steps"]
+        if str(step.get("uses", "")).startswith("actions/checkout@")
+    )
+    assert checkout["with"]["fetch-depth"] == 0
     assert workflow.index("scripts.release_components --check-backend-transport") < workflow.index("Create the candidate-bound GitHub Deployment")
 
 

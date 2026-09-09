@@ -221,6 +221,7 @@ jobs:
           set -euo pipefail; umask 077
           PYTHON_BIN="$RELEASE_VENV/bin/python"
           export PYTHON_BIN
+          install -d -m 700 "$RELEASE_STATE_DIR/capture"
           "$RELEASE_VENV/bin/python" -m scripts.deploy_owner_dashboard_api --project-ref "$PROJECT_REF" --allowed-origin "$ALLOWED_ORIGIN" --site-origin "$SITE_ORIGIN" --reviewed-sha "$REVIEWED_SHA" --candidate-sha "$CANDIDATE_SHA" --gateway-rollback-ref "$GATEWAY_ROLLBACK_REF" --gateway-rollback-source-sha256 "$GATEWAY_ROLLBACK_SOURCE_SHA256" --gateway-current-version "$GATEWAY_CURRENT_VERSION" --evidence-directory "$RELEASE_STATE_DIR/capture" --rollback-worktree "$RELEASE_STATE_DIR/rollback-worktree" --release-state "$RELEASE_STATE_DIR/release-state.json" --static-build-receipt "$RELEASE_STATE_DIR/static-build-receipt.json" --lease-owner "$RELEASE_LEASE_OWNER" --deployment-id "$DEPLOYMENT_ID" > "$RELEASE_STATE_DIR/deploy-receipt.json"
       - name: Upload immutable backend component evidence
         id: backend_evidence
