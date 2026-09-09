@@ -1986,7 +1986,7 @@ function discoveryOwnerVerifier(
   return Promise.reject(new Error("missing owner authentication"));
 }
 
-Deno.test("discovery reads require the owner while writes require the collection secret", async () => {
+Deno.test("discovery reads accept the owner or scoped collection secret while writes stay service-only", async () => {
   const repository = Object.assign(new FakeRepository(), {
     readDiscoveryContext: () =>
       Promise.resolve({
@@ -2024,7 +2024,7 @@ Deno.test("discovery reads require the owner while writes require the collection
     "read_discovery_context",
     { limit: 100 },
   ));
-  assertEquals(serviceRead.status, 403);
+  assertEquals(serviceRead.status, 200);
   const owner = await setup.handler(request(
     "read_discovery_context",
     { limit: 100 },
@@ -2080,7 +2080,7 @@ Deno.test("discovery read preserves an authenticated non-owner rejection", async
   assertEquals((await json(response)).code, "OWNER_ONLY");
 });
 
-Deno.test("pinned reference read is service-only while owner discovery read stays owner-only", async () => {
+Deno.test("pinned reference read remains service-only for an owner session", async () => {
   const calls: string[] = [];
   const repository = Object.assign(new FakeRepository(), {
     pinDiscoveryReference: () => {
