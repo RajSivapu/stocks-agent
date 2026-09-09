@@ -42,6 +42,7 @@ from scripts.verify_owner_dashboard_role import (  # noqa: E402
 
 FORMAT: Final = "stocks-dashboard-runtime-diagnostic-v1"
 MAX_SAMPLE_ITEMS = 32
+MAX_SAMPLE_ITEM_BYTES = 256
 MAX_RECEIPT_BYTES = 32_768
 _MAIN_SHA = re.compile(r"[0-9a-f]{40}\Z")
 _PROJECT_REF = re.compile(r"[a-z0-9]{20}\Z")
@@ -71,21 +72,39 @@ def _sha256(items: list[str]) -> str:
     return hashlib.sha256("\0".join(items).encode()).hexdigest()
 
 
+def _bounded_sample_item(value: str) -> str:
+    encoded = value.encode()
+    if len(encoded) <= MAX_SAMPLE_ITEM_BYTES:
+        return value
+    digest = hashlib.sha256(encoded).hexdigest()
+    marker = f"...#sha256={digest}"
+    prefix_bytes = encoded[: MAX_SAMPLE_ITEM_BYTES - len(marker.encode())]
+    prefix = prefix_bytes.decode(errors="ignore")
+    result = prefix + marker
+    if len(result.encode()) > MAX_SAMPLE_ITEM_BYTES:
+        raise RuntimeError("bounded diagnostic sample is oversized")
+    return result
+
+
 def _set_summary(actual: set[str], expected: set[str] | None = None) -> dict[str, object]:
     ordered = sorted(actual)
     result: dict[str, object] = {
         "count": len(ordered),
         "sha256": _sha256(ordered),
-        "sample": ordered[:MAX_SAMPLE_ITEMS],
+        "sample": [_bounded_sample_item(value) for value in ordered[:MAX_SAMPLE_ITEMS]],
     }
     if expected is not None:
         missing = sorted(expected - actual)
         unexpected = sorted(actual - expected)
         result.update({
             "missing_count": len(missing),
-            "missing_sample": missing[:MAX_SAMPLE_ITEMS],
+            "missing_sample": [
+                _bounded_sample_item(value) for value in missing[:MAX_SAMPLE_ITEMS]
+            ],
             "unexpected_count": len(unexpected),
-            "unexpected_sample": unexpected[:MAX_SAMPLE_ITEMS],
+            "unexpected_sample": [
+                _bounded_sample_item(value) for value in unexpected[:MAX_SAMPLE_ITEMS]
+            ],
         })
     return result
 
@@ -127,7 +146,9 @@ def _policy_summary(value: object) -> dict[str, object]:
     }
     summary = _set_summary(actual_tables, expected_tables)
     summary["unsafe_count"] = len(unsafe)
-    summary["unsafe_sample"] = sorted(unsafe)[:MAX_SAMPLE_ITEMS]
+    summary["unsafe_sample"] = [
+        _bounded_sample_item(value) for value in sorted(unsafe)[:MAX_SAMPLE_ITEMS]
+    ]
     return summary
 
 
@@ -279,6 +300,20 @@ def _validated_runtime_url(environment: Mapping[str, str], project_ref: str) -> 
 
 
 def _finalize(receipt: dict[str, object]) -> dict[str, object]:
+    if len(canonical_json(receipt).encode()) > MAX_RECEIPT_BYTES - 128:
+        def remove_samples(value: object) -> None:
+            if isinstance(value, dict):
+                for key, child in value.items():
+                    if key.endswith("sample") and isinstance(child, list):
+                        value[key] = []
+                    else:
+                        remove_samples(child)
+            elif isinstance(value, list):
+                for child in value:
+                    remove_samples(child)
+
+        remove_samples(receipt)
+        receipt["samples_omitted"] = True
     receipt["receipt_sha256"] = hashlib.sha256(canonical_json(receipt).encode()).hexdigest()
     if len(canonical_json(receipt).encode()) > MAX_RECEIPT_BYTES:
         raise RuntimeError("diagnostic receipt exceeds bound")

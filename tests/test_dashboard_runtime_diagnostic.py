@@ -217,6 +217,38 @@ def test_diagnostic_preserves_one_argument_policy_query_with_a_literal_percent()
     assert calls[0][0].endswith("LIKE 'owner_dashboard_select_%'")
 
 
+def test_authority_mismatch_with_oversized_function_signatures_always_writes_a_bounded_receipt():
+    long_functions = [
+        f"extensions.function_{index:02d}(" + ",".join(["very_long_type_name"] * 1000) + ")"
+        for index in range(32)
+    ]
+    snapshot = {
+        "role": {}, "privilege_role_state": {}, "memberships": [],
+        "privilege_memberships": [], "privilege_members": [], "runtime_members": [],
+        "database_privileges": {"CONNECT", "TEMPORARY"},
+        "schema_privileges": {"USAGE"}, "other_schema_privileges": {},
+        "table_privileges": {}, "sequence_privileges": {}, "column_privileges": {},
+        "application_function_execute": long_functions, "owned_objects": [], "policies": {},
+    }
+
+    receipt = diagnose_dashboard_runtime(
+        environment(), PROJECT_REF, MAIN_SHA,
+        connector=lambda *_args, **_kwargs: Connection(),
+        collector=lambda _connection: snapshot,
+        evaluator=lambda _snapshot: (_ for _ in ()).throw(
+            RuntimeError("dashboard executable function allowlist differs")
+        ),
+        projection_validator=lambda projection: projection,
+    )
+
+    rendered = json.dumps(receipt, sort_keys=True).encode()
+    assert len(rendered) < 32_768
+    function_summary = receipt["authority"]["snapshot"]["function_execute"]
+    assert function_summary["unexpected_count"] == 32
+    assert all(len(value.encode()) <= 256 for value in function_summary["unexpected_sample"])
+    assert PASSWORD.encode() not in rendered
+
+
 def test_runtime_diagnostic_workflow_is_manual_protected_and_never_prints_the_secret():
     workflow = Path(".github/workflows/production-dashboard-runtime-diagnostic.yml").read_text()
 
