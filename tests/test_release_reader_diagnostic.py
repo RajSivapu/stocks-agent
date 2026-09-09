@@ -4,6 +4,7 @@ import json
 from pathlib import Path
 
 from scripts.release_reader_diagnostic import diagnose_release_reader
+from scripts.protected_evidence import ReleaseReaderFunctionAuthorityError
 
 
 PROJECT_REF = "p" * 20
@@ -84,6 +85,33 @@ def test_diagnostic_suppresses_private_authority_error_and_keeps_reason_code():
     assert receipt["credential"] == {"status": "valid"}
     assert receipt["preflight"] == {
         "status": "failed", "error_code": "function_authority_mismatch",
+    }
+    assert PASSWORD not in json.dumps(receipt)
+
+
+def test_diagnostic_reports_only_bounded_safe_function_authority_identity():
+    class UnsafeSource(Source):
+        def __enter__(self):
+            raise ReleaseReaderFunctionAuthorityError([{
+                "function": "extensions.pg_stat_statements_reset(oid,oid,bigint)",
+                "reason": "function_not_allowlisted",
+            }], 1)
+
+    receipt = diagnose_release_reader(
+        environment(), PROJECT_REF, MAIN_SHA, source_factory=UnsafeSource,
+    )
+
+    assert receipt["preflight"] == {
+        "status": "failed",
+        "error_code": "function_authority_mismatch",
+        "function_authority": {
+            "issue_count": 1,
+            "issues": [{
+                "function": "extensions.pg_stat_statements_reset(oid,oid,bigint)",
+                "reason": "function_not_allowlisted",
+            }],
+            "truncated": False,
+        },
     }
     assert PASSWORD not in json.dumps(receipt)
 

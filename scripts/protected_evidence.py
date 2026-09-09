@@ -282,6 +282,26 @@ LEGACY_EXTENSION_FUNCTIONS = {
     "extensions.pg_stat_statements_info()": "pg_stat_statements",
 }
 
+_SAFE_FUNCTION_SIGNATURE = re.compile(r"[A-Za-z0-9_., ()\[\]]{1,192}\Z")
+_MAX_FUNCTION_AUTHORITY_ISSUES = 16
+
+
+class ReleaseReaderFunctionAuthorityError(RuntimeError):
+    """Carry only bounded catalog identity needed for a read-only diagnostic."""
+
+    def __init__(self, issues: list[dict[str, str]], total: int):
+        super().__init__("release reader function authority is unsafe")
+        self.issues = issues[:_MAX_FUNCTION_AUTHORITY_ISSUES]
+        self.issue_count = total
+        self.truncated = total > len(self.issues)
+
+
+def _safe_function_identity(value: object) -> str:
+    if isinstance(value, str) and _SAFE_FUNCTION_SIGNATURE.fullmatch(value):
+        return value
+    encoded = repr(value).encode("utf-8", errors="replace")
+    return f"unreportable:{hashlib.sha256(encoded).hexdigest()}"
+
 
 def with_schema_version_hashes(rows: object) -> list[dict[str, object]]:
     """Hash migration statements without granting the reader extension access."""
@@ -509,31 +529,48 @@ def verify_release_reader_authority(
     require(isinstance(function_privileges, list),
             "release reader function authority is unavailable")
     actual_functions = set()
+    function_issues = []
     for row in function_privileges:
-        require(
-            isinstance(row, Mapping)
-            and allow_legacy_extension_authority
-            and row.get("schema") == "extensions"
-            and isinstance(row.get("function"), str)
-            and row.get("function") in LEGACY_EXTENSION_FUNCTIONS
-            and row.get("extension") == LEGACY_EXTENSION_FUNCTIONS[
-                row.get("function")
-            ]
-            and row.get("security_definer") is False
-            and row.get("grantable") is False
-            and row.get("language") == "c"
-            and row.get("owner") not in {READER, READER_PRIVILEGE_ROLE},
-            "release reader function authority is unsafe",
+        function = row.get("function") if isinstance(row, Mapping) else None
+        reason = None
+        if not isinstance(row, Mapping):
+            reason = "malformed"
+        elif not allow_legacy_extension_authority:
+            reason = "unexpected_post_closure"
+        elif row.get("schema") != "extensions":
+            reason = "schema_not_allowed"
+        elif not isinstance(function, str) or function not in LEGACY_EXTENSION_FUNCTIONS:
+            reason = "function_not_allowlisted"
+        elif row.get("extension") != LEGACY_EXTENSION_FUNCTIONS[function]:
+            reason = "extension_identity_mismatch"
+        elif row.get("security_definer") is not False:
+            reason = "security_definer"
+        elif row.get("grantable") is not False:
+            reason = "grantable"
+        elif row.get("language") != "c":
+            reason = "language_mismatch"
+        elif row.get("owner") in {READER, READER_PRIVILEGE_ROLE}:
+            reason = "reader_owned"
+        if reason is not None:
+            function_issues.append({
+                "function": _safe_function_identity(function),
+                "reason": reason,
+            })
+        else:
+            actual_functions.add(function)
+    if (
+        allow_legacy_extension_authority
+        and "extensions.digest(bytea,text)" not in actual_functions
+    ):
+        function_issues.append({
+            "function": "extensions.digest(bytea,text)",
+            "reason": "required_function_missing",
+        })
+    if function_issues:
+        function_issues.sort(key=lambda item: (item["function"], item["reason"]))
+        raise ReleaseReaderFunctionAuthorityError(
+            function_issues, len(function_issues),
         )
-        actual_functions.add(row.get("function"))
-    require(
-        (not allow_legacy_extension_authority and not actual_functions)
-        or (
-            allow_legacy_extension_authority
-            and "extensions.digest(bytea,text)" in actual_functions
-        ),
-        "release reader function authority is unsafe",
-    )
     require(snapshot.get("owned_objects") == [],
             "release reader may not own database objects")
     return {

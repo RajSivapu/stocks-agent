@@ -21,7 +21,10 @@ if __package__ in {None, ""}:
         sys.path.insert(0, _REPOSITORY_ROOT)
 
 from scripts.managed_isolated_restore import canonical_json  # noqa: E402
-from scripts.protected_evidence import PostgresReadOnlySource  # noqa: E402
+from scripts.protected_evidence import (  # noqa: E402
+    PostgresReadOnlySource,
+    ReleaseReaderFunctionAuthorityError,
+)
 from scripts.verify_owner_dashboard_deployment import (  # noqa: E402
     validate_evidence_database_url,
 )
@@ -140,6 +143,16 @@ def diagnose_release_reader(
                 "absent_table_count": len(absent),
                 "unreadable_table_count": len(unreadable),
             }
+    except ReleaseReaderFunctionAuthorityError as error:
+        receipt["preflight"] = {
+            "status": "failed",
+            "error_code": "function_authority_mismatch",
+            "function_authority": {
+                "issue_count": error.issue_count,
+                "issues": error.issues,
+                "truncated": error.truncated,
+            },
+        }
     except Exception as error:
         receipt["preflight"] = {
             "status": "failed", "error_code": _error_code(error),

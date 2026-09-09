@@ -1029,6 +1029,37 @@ def test_release_reader_rejects_unknown_legacy_extension_function():
         )
 
 
+def test_release_reader_function_failure_carries_only_bounded_safe_identity():
+    from scripts import protected_evidence as evidence
+
+    snapshot = _safe_release_reader_authority(
+        evidence, ("holdings",), legacy_extensions=True,
+    )
+    snapshot["function_privileges"].extend({
+        "schema": "extensions",
+        "function": f"extensions.unsafe_{index}(text)",
+        "extension": "unsafe",
+        "security_definer": False,
+        "language": "c",
+        "owner": "postgres",
+        "grantable": False,
+    } for index in range(20))
+
+    with pytest.raises(evidence.ReleaseReaderFunctionAuthorityError) as caught:
+        evidence.verify_release_reader_authority(
+            snapshot, ("holdings",), allow_legacy_extension_authority=True,
+        )
+
+    assert caught.value.issue_count == 20
+    assert len(caught.value.issues) == 16
+    assert caught.value.truncated is True
+    assert all(
+        issue["reason"] == "function_not_allowlisted"
+        and issue["function"].startswith("extensions.unsafe_")
+        for issue in caught.value.issues
+    )
+
+
 @pytest.mark.parametrize(
     ("mutation", "message"),
     (
