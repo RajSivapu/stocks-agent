@@ -4,11 +4,13 @@ The model never supplies this object.  It is projected from checked-in settings,
 validated without coercion, and activated explicitly by an owner-run script.
 """
 
+from copy import deepcopy
 from decimal import Decimal, InvalidOperation
 from datetime import date
 import re
 
 from lib.marketdata import nyse_holidays
+from lib.intelligence.policy import load_intelligence_policy
 
 
 _BUCKETS = ("core", "growth", "speculative")
@@ -33,6 +35,7 @@ _POLICY_KEYS = frozenset({
     "nyse_holidays",
     "request_limits",
     "alerts_v3",
+    "intelligence",
 })
 
 
@@ -115,6 +118,7 @@ def build_policy_config(settings: dict, *, today: date | None = None) -> dict:
     alerts = _mapping(settings, "alerts_v3")
     access = _mapping(settings, "access")
     guardrails = _mapping(settings, "guardrails")
+    load_intelligence_policy(settings)
 
     if access != {"mode": "owner_only", "friend_invitations_enabled": False}:
         raise ValueError("access must remain owner-only with friend invitations disabled")
@@ -142,7 +146,7 @@ def build_policy_config(settings: dict, *, today: date | None = None) -> dict:
 
     calendar_year = (today or date.today()).year
     policy = {
-        "version": 3,
+        "version": 4,
         "allocation_bps": allocation,
         "max_position_bps_of_bucket": _bucket_projection(
             _required(risk, "max_position_pct_of_bucket"),
@@ -208,13 +212,14 @@ def build_policy_config(settings: dict, *, today: date | None = None) -> dict:
             "draft_ttl_hours": _required(alerts, "draft_ttl_hours"),
             "drafts_per_hour": _required(alerts, "drafts_per_hour"),
         },
+        "intelligence": deepcopy(_mapping(settings, "intelligence")),
     }
     validate_policy_config(policy)
     return policy
 
 
 def validate_policy_config(policy: dict) -> None:
-    """Reject any policy that is not the exact immutable v3 contract."""
+    """Reject any policy that is not the exact immutable v4 contract."""
     if not isinstance(policy, dict):
         raise ValueError("policy must be an object")
     unexpected = set(policy) - _POLICY_KEYS
@@ -223,8 +228,12 @@ def validate_policy_config(policy: dict) -> None:
         raise ValueError(f"policy has unexpected keys: {sorted(unexpected)}")
     if missing:
         raise ValueError(f"policy is missing keys: {sorted(missing)}")
-    if policy["version"] != 3 or isinstance(policy["version"], bool):
-        raise ValueError("version must be integer 3")
+    if policy["version"] != 4 or isinstance(policy["version"], bool):
+        raise ValueError("version must be integer 4")
+    load_intelligence_policy({
+        "intelligence": policy["intelligence"],
+        "guardrails": {"execution_allowed": False},
+    })
 
     for key in (
         "allocation_bps",

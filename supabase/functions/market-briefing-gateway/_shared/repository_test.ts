@@ -89,6 +89,23 @@ Deno.test("theme-memory repository routes only the four reviewed service RPCs", 
   ]);
 });
 
+Deno.test("reviewed v4 policy retains the v3 alert contract and requires intelligence", () => {
+  const reviewed = policy() as unknown as Record<string, unknown>;
+  reviewed.version = 4;
+  reviewed.intelligence = { suggestion_only: true, execution_allowed: false };
+  assertEquals(validatePolicy(reviewed).version, 4);
+
+  delete reviewed.intelligence;
+  let rejected = false;
+  try {
+    validatePolicy(reviewed);
+  } catch (error) {
+    rejected = error instanceof GatewayRepositoryError &&
+      error.code === "POLICY_REJECTED";
+  }
+  assert(rejected, "v4 without intelligence must be rejected");
+});
+
 Deno.test("report suppression RPC persists the typed reason and rejects an error alias", async () => {
   const calls: unknown[] = [];
   let legacy = false;

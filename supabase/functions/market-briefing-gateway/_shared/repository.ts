@@ -1080,12 +1080,20 @@ export function validatePolicy(value: unknown): PolicyConfig {
   }
   const policy = value as Partial<PolicyConfig>;
   if (
-    (policy.version !== 1 && policy.version !== 2 && policy.version !== 3) ||
+    (policy.version !== 1 && policy.version !== 2 && policy.version !== 3 &&
+      policy.version !== 4) ||
     policy.self_tuning_enabled !== false ||
     !policy.allocation_bps || !policy.max_position_bps_of_bucket ||
     !policy.max_trade_risk_bps || !policy.request_limits ||
     !Array.isArray(policy.nyse_holidays) ||
     !Array.isArray(policy.broad_core_etfs)
+  ) {
+    throw new GatewayRepositoryError("POLICY_REJECTED");
+  }
+  if (
+    policy.version === 4 &&
+    (typeof policy.intelligence !== "object" || policy.intelligence === null ||
+      Array.isArray(policy.intelligence))
   ) {
     throw new GatewayRepositoryError("POLICY_REJECTED");
   }
@@ -1104,10 +1112,12 @@ export function validatePolicy(value: unknown): PolicyConfig {
       "draft_ttl_hours",
       "drafts_per_hour",
     ];
-    const expected = policy.version === 3
+    const expected = policy.version === 3 || policy.version === 4
       ? [...legacyExpected, "enabled_classes"]
       : legacyExpected;
-    const enabledClasses = policy.version === 3 ? row.enabled_classes : [];
+    const enabledClasses = policy.version === 3 || policy.version === 4
+      ? row.enabled_classes
+      : [];
     const supportedClasses = new Set([
       "entry_trigger",
       "stop_breach",

@@ -196,6 +196,7 @@ class PipelineRequest:
         *,
         cache_keys: Mapping[str, Sequence[str]] | None = None,
         request_window: Mapping[str, str] | None = None,
+        policy_version: int = 1,
     ) -> dict[str, object]:
         request_counts = {provider: 0 for provider in providers}
         count = max(len(providers), len(targets)) if providers and targets else 0
@@ -214,7 +215,7 @@ class PipelineRequest:
         return {
             "phase": self.phase,
             "market_date": self.market_date.isoformat(),
-            "policy_version": 1,
+            "policy_version": _policy_version(policy_version),
             "request_window": dict(request_window or _initial_request_window(self)),
             "reservation_plan": {"reservations": reservations},
         }
@@ -356,7 +357,11 @@ class IntelligencePipeline:
         # Durable checkpoints, not speculative wall-clock cache keys, are the reservation authority.
         planned_cache_keys: dict[str, tuple[str, ...]] = {}
         start_payload = request.collection_plan(
-            providers, targets, cache_keys=planned_cache_keys, request_window=initial_window
+            providers,
+            targets,
+            cache_keys=planned_cache_keys,
+            request_window=initial_window,
+            policy_version=_policy_version(self.context.get("policy_version", 1)),
         )
         jobs = self._jobs(request, targets)
         counts = {provider: sum(str(adapter.provider) == provider for adapter, _ in jobs) for provider in providers}
@@ -472,7 +477,7 @@ class IntelligencePipeline:
         start_payload = {
             "phase": request.phase,
             "market_date": request.market_date.isoformat(),
-            "policy_version": 1,
+            "policy_version": _policy_version(self.context.get("policy_version", 1)),
             "request_window": global_window,
             "reservation_plan": {"reservations": plan_rows},
         }
@@ -2227,6 +2232,7 @@ class IntelligencePipeline:
         )
         evidence_packet = build_evidence_packet(
             ranked, limits, coverage=coverage,
+            policy_version=_policy_version(self.context.get("policy_version", 1)),
             contract_version=2 if self.discovery_plan is not None else 1,
             run_id=run_id if self.discovery_plan is not None else None,
             observed_at=_timestamp(request.now) if self.discovery_plan is not None else None,
@@ -2301,7 +2307,12 @@ class IntelligencePipeline:
             "phase": request.phase,
             "source_request_count": 0,
         })
-        packet = build_evidence_packet((), self.packet_limits, coverage=coverage)
+        packet = build_evidence_packet(
+            (),
+            self.packet_limits,
+            coverage=coverage,
+            policy_version=_policy_version(self.context.get("policy_version", 1)),
+        )
         packet_dict = packet.to_dict()
         packet_hash = hashlib.sha256(_canonical(packet_dict).encode()).hexdigest()
         run_id = _uuid("fixture-run", request.phase, request.market_date, _timestamp(request.now))
@@ -2637,6 +2648,7 @@ def protected_collection_context(value: object) -> dict[str, object]:
     """Unwrap only the protected read shape; source prose and scratch scores have no authority."""
     if not isinstance(value, Mapping):
         raise ValueError("invalid protected collection context")
+    policy_version = _policy_version(value.get("policy_version"))
     trusted = _mapping(value.get("intelligence_collection_context"))
     valuations = _mapping(trusted.get("holding_market_values"))
     holdings = value.get("holdings", [])
@@ -2710,6 +2722,7 @@ def protected_collection_context(value: object) -> dict[str, object]:
         return labels
 
     return {
+        "policy_version": policy_version,
         "holdings": [{"ticker": row["ticker"], "shares": row.get("shares"),
                       "market_value": valuations.get(row["ticker"])} for row in holdings if isinstance(row, Mapping)],
         "owner_plans": value.get("owner_plans", []),
@@ -2752,6 +2765,12 @@ def protected_collection_context(value: object) -> dict[str, object]:
         "source_cursors": source_cursors,
         "last_completed_scans": trusted.get("last_completed_scans", []),
     }
+
+
+def _policy_version(value: object) -> int:
+    if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+        raise ValueError("protected policy version must be a positive integer")
+    return value
 
 
 def _mapping(value: object) -> Mapping[object, object]:

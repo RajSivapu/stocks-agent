@@ -613,6 +613,10 @@ def test_actual_migration_retry_accepts_truthful_baseline_without_writing_histor
                                    if item["path"] == "sql/migrations/20261017_release_reader_extension_closure.sql")
     run_order = next(item for item in deploy.candidate_migration_manifest()
                      if item["path"] == "sql/migrations/20261018_analysis_context_binding_lifecycle.sql")
+    active_intelligence_policy = next(
+        item for item in deploy.candidate_migration_manifest()
+        if item["path"] == "sql/migrations/20261019_active_intelligence_policy.sql"
+    )
     queries = []
 
     def api(_method, _path, payload=None):
@@ -624,6 +628,7 @@ def test_actual_migration_retry_accepts_truthful_baseline_without_writing_histor
                     discovery, transfer, cursor, official, issuer_names, enrichment,
                     research_packet, theme_memory, runtime_completion, honest_empty, release_reader,
                     dashboard_authority, release_reader_authority, run_order,
+                    active_intelligence_policy,
             ]
         if query.startswith("SELECT version, statements"):
             return [{"version": "20261004", "statements": ["SELECT 1"]}]

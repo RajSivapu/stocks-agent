@@ -12,7 +12,8 @@ from lib.policy_config import build_policy_config, validate_policy_config
 def test_build_policy_config_uses_reviewed_safety_values():
     policy = build_policy_config(load_settings())
 
-    assert policy["version"] == 3
+    assert policy["version"] == 4
+    assert policy["intelligence"] == load_settings()["intelligence"]
     assert policy["allocation_bps"] == {
         "core": 7000,
         "growth": 2000,
