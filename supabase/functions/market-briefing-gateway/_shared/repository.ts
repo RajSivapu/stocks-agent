@@ -582,6 +582,21 @@ interface SupabaseLike {
 }
 
 const CONTEXT_LIMIT_BYTES = 524_288;
+const CONTEXT_QUERY_BATCH_SIZE = 6;
+
+async function runContextQueries(
+  queries: Array<() => PromiseLike<DbResult>>,
+): Promise<DbResult[]> {
+  const results: DbResult[] = [];
+  for (let offset = 0; offset < queries.length; offset += CONTEXT_QUERY_BATCH_SIZE) {
+    results.push(...await Promise.all(
+      queries.slice(offset, offset + CONTEXT_QUERY_BATCH_SIZE).map((query) =>
+        query()
+      ),
+    ));
+  }
+  return results;
+}
 
 function rows(
   result: DbResult,
@@ -1950,62 +1965,62 @@ export function createSupabaseGatewayRepository(
     async readContext(_runId) {
       const current = now();
       const today = ownerDate(current);
-      const results = await Promise.all([
-        client.from("holdings").select(
+      const intelligenceResult = _runId
+        ? await client.rpc("refresh_market_intelligence_context", {
+          p_run_id: _runId,
+        })
+        : { data: null, error: null };
+      const passiveResults = await runContextQueries([
+        () => client.from("holdings").select(
           "ticker,shares,avg_cost,bucket,stop,target,high_water_price,hold_override_until,stop_alert_active,stop_near_alert_active,target_near_alert_active,target_alert_active",
         ).order("ticker").limit(101),
-        client.from("suggestions").select(
+        () => client.from("suggestions").select(
           "id,date,ticker,action,bucket,confidence,score,stop,target,invalidation_price,valid_until,evidence_as_of",
         ).eq("decision_source", "gateway")
           .or(`valid_until.is.null,valid_until.gte.${today}`)
           .order("date", { ascending: false }).order("id", { ascending: false })
           .limit(101),
-        client.from("suggestions").select(
+        () => client.from("suggestions").select(
           "id,date,ticker,action,bucket,confidence,score,stop,target,invalidation_price,valid_until,evidence_as_of",
         ).eq("decision_source", "gateway").lt("valid_until", today)
           .order("date", { ascending: false }).order("id", { ascending: false })
           .limit(100),
-        client.from("stock_observations").select(
+        () => client.from("stock_observations").select(
           "id,ticker,obs_date,event_type,summary,price_reaction,confidence,source",
         ).order("obs_date", { ascending: false }).limit(100),
-        client.from("lessons").select("id,entry_date,category,content").order(
+        () => client.from("lessons").select("id,entry_date,category,content").order(
           "entry_date",
           { ascending: false },
         ).limit(40),
-        client.from("radar").select(
+        () => client.from("radar").select(
           "ticker,added,last_seen,days_relevant,reason,bucket_guess,promoted,promoted_on",
         ).order("last_seen", { ascending: false }).limit(20),
-        recentRecommendationGrades(client),
-        client.from("owner_investment_plans").select(
+        () => recentRecommendationGrades(client),
+        () => client.from("owner_investment_plans").select(
           "id,ticker,bucket,amount,cadence,next_due_on,active,updated_at",
         ).eq("active", true).limit(21),
-        client.from("paper_watches").select(
+        () => client.from("paper_watches").select(
           "id,ticker,created,entry_ref_price,target_price,hypothetical_amount,thesis,horizon,agent_view_at_open,agent_score_at_open",
         ).eq("status", "active").order("created", { ascending: false }).limit(
           51,
         ),
-        client.from("dry_powder").select(
+        () => client.from("dry_powder").select(
           "month,growth_available,spec_available,rolled_months",
         ).order("month", { ascending: false }).limit(12),
-        client.from("transactions").select("id,side,source,executed_on").eq(
+        () => client.from("transactions").select("id,side,source,executed_on").eq(
           "executed_on",
           today,
         ).eq("side", "sell").limit(501),
-        client.from("portfolio_commands").select(
+        () => client.from("portfolio_commands").select(
           "id,operation,status,executed_on,realized_pnl",
         ).eq("executed_on", today).eq("operation", "sell").eq(
           "status",
           "applied",
         ).limit(501),
-        _runId
-          ? client.rpc("refresh_market_intelligence_context", {
-            p_run_id: _runId,
-          })
-          : Promise.resolve({ data: null, error: null }),
-        client.rpc("read_reconciled_cash_snapshot", {
+        () => client.rpc("read_reconciled_cash_snapshot", {
           p_now: current.toISOString(),
         }),
-        _runId
+        () => _runId
           ? client.rpc("read_market_discovery_cursor_context", {
             p_run_id: _runId,
             p_limit: 100,
@@ -2015,6 +2030,11 @@ export function createSupabaseGatewayRepository(
             error: null,
           }),
       ]);
+      const results = [
+        ...passiveResults.slice(0, 12),
+        intelligenceResult,
+        ...passiveResults.slice(12),
+      ];
       const holdings = rows(results[0], "CONTEXT_TOO_LARGE");
       const unresolvedSuggestions = rows(results[1], "CONTEXT_TOO_LARGE");
       const completedSuggestions = rows(results[2], "CONTEXT_TOO_LARGE");
