@@ -84,12 +84,19 @@ def _project_digest(project_ref: str) -> str:
 
 
 def _validate_origin(value: str) -> str:
+    if not isinstance(value, str):
+        raise ValueError("an exact HTTPS origin without a path is required")
     parsed = urlparse(value)
+    try:
+        port = parsed.port
+    except ValueError:
+        port = -1
     if (
         parsed.scheme != "https"
         or not parsed.hostname
         or parsed.username
         or parsed.password
+        or port not in (None, 443)
         or parsed.path
         or parsed.params
         or parsed.query
@@ -98,6 +105,17 @@ def _validate_origin(value: str) -> str:
     ):
         raise ValueError("an exact HTTPS origin without a path is required")
     return value
+
+
+def _validate_dashboard_origins(allowed_origin: str, site_origin: str) -> str:
+    try:
+        allowed = _validate_origin(allowed_origin)
+        site = _validate_origin(site_origin)
+    except ValueError as error:
+        raise ValueError("an exact matching HTTPS dashboard origin is required") from error
+    if site != allowed:
+        raise ValueError("an exact matching HTTPS dashboard origin is required")
+    return site
 
 
 def _validate_database_url(value: str, project_ref: str) -> None:
@@ -449,7 +467,8 @@ def run_protected_candidate_dry_run(
     repo_root: Path = ROOT, runner: Callable[..., object] = subprocess.run,
 ) -> dict[str, object]:
     """Build and validate a candidate in a disposable checkout without remote mutation."""
-    validate_static_configuration(project_ref, owner_user_id, allowed_origin, DASHBOARD_SECRET_NAMES)
+    dashboard_origin = _validate_dashboard_origins(allowed_origin, site_origin)
+    validate_static_configuration(project_ref, owner_user_id, dashboard_origin, DASHBOARD_SECRET_NAMES)
     git_sha = verify_git_release(repo_root, runner, candidate_sha)
     verify_reviewed_sha(git_sha, reviewed_sha)
     source = verify_v1_dashboard_source(repo_root)
@@ -1547,14 +1566,20 @@ def main() -> int:
     parser.add_argument("--deployment-id", type=int)
     parser.add_argument("--lease-owner")
     arguments = parser.parse_args()
+    try:
+        dashboard_origin = _validate_dashboard_origins(
+            arguments.allowed_origin, arguments.site_origin
+        )
+    except ValueError as error:
+        raise SystemExit(str(error)) from error
     owner_user_id = os.environ.get("DASHBOARD_OWNER_USER_ID", "").strip()
     publishable_key = os.environ.get("SUPABASE_PUBLISHABLE_KEY", "").strip()
     if arguments.dry_run:
         if not owner_user_id or not publishable_key:
             raise SystemExit("DASHBOARD_OWNER_USER_ID and SUPABASE_PUBLISHABLE_KEY are required")
         receipt = run_protected_candidate_dry_run(
-            project_ref=arguments.project_ref, owner_user_id=owner_user_id, allowed_origin=arguments.allowed_origin,
-            site_origin=arguments.site_origin, candidate_sha=arguments.candidate_sha or "", reviewed_sha=arguments.reviewed_sha,
+            project_ref=arguments.project_ref, owner_user_id=owner_user_id, allowed_origin=dashboard_origin,
+            site_origin=dashboard_origin, candidate_sha=arguments.candidate_sha or "", reviewed_sha=arguments.reviewed_sha,
             publishable_key=publishable_key,
         )
         print(json.dumps(receipt, sort_keys=True, separators=(",", ":")))
@@ -1589,7 +1614,7 @@ def main() -> int:
     # The native adapter snapshots its environment when constructed. Point all
     # release and recovery database work at the reachable session pooler.
     os.environ["POSTGRES_URL"] = admin_url
-    validate_static_configuration(arguments.project_ref, owner_user_id, arguments.allowed_origin, DASHBOARD_SECRET_NAMES)
+    validate_static_configuration(arguments.project_ref, owner_user_id, dashboard_origin, DASHBOARD_SECRET_NAMES)
     if not arguments.lease_owner:
         raise SystemExit("--lease-owner is required for protected production mutation")
     git_sha = verify_git_release(expected_sha=arguments.candidate_sha)
@@ -1607,8 +1632,8 @@ def main() -> int:
                "release_run_id": os.environ.get("GITHUB_RUN_ID"),
                "release_run_attempt": os.environ.get("GITHUB_RUN_ATTEMPT"),
                "deployment_id": arguments.deployment_id, "evidence_directory": str(arguments.evidence_directory),
-               "allowed_origin": arguments.allowed_origin,
-               "site_origin": arguments.site_origin, "owner_user_id": owner_user_id,
+               "allowed_origin": dashboard_origin,
+               "site_origin": dashboard_origin, "owner_user_id": owner_user_id,
                "static_build_receipt": str(arguments.static_build_receipt)}
     adapter = load_native_release_adapter(context)
     manifest = candidate_migration_manifest()
