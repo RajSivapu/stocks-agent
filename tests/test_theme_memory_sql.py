@@ -37,6 +37,9 @@ HONEST_EMPTY_REPORT_MIGRATION = (
 RELEASE_READER_MIGRATION = (
     ROOT / "sql/migrations/20261015_release_reader_source_tables.sql"
 )
+DASHBOARD_AUTHORITY_MIGRATION = (
+    ROOT / "sql/migrations/20261016_dashboard_runtime_authority_closure.sql"
+)
 SCHEMA = ROOT / "sql/schema.sql"
 
 
@@ -68,10 +71,13 @@ def test_v2_runtime_completion_and_honest_empty_tail_are_parseable_and_ordered()
     assert honest_empty
     release_reader = parse_sql(RELEASE_READER_MIGRATION.read_text())
     assert release_reader
+    dashboard_authority = parse_sql(DASHBOARD_AUTHORITY_MIGRATION.read_text())
+    assert dashboard_authority
     schema = SCHEMA.read_bytes()
     assert RUNTIME_COMPLETION_MIGRATION.read_bytes() in schema
     assert HONEST_EMPTY_REPORT_MIGRATION.read_bytes() in schema
-    assert schema.endswith(RELEASE_READER_MIGRATION.read_bytes())
+    assert RELEASE_READER_MIGRATION.read_bytes() in schema
+    assert schema.endswith(DASHBOARD_AUTHORITY_MIGRATION.read_bytes())
     migration = RUNTIME_COMPLETION_MIGRATION.read_text()
     assert "SECURITY DEFINER SET search_path=pg_catalog" in migration
     assert "record_market_intelligence_v2_completion" in migration
@@ -861,6 +867,166 @@ def test_actual_postgres_v2_acl_separates_browser_service_dashboard_and_release_
         assert projection["boundaries"] == {
             "research_only": True, "execution_disabled": True, "valuation_unavailable": True,
         }
+
+
+def test_actual_postgres_dashboard_authority_verifier_rejects_inherited_insert(theme_memory_dsn):
+    from scripts.verify_owner_dashboard_role import verify_dashboard_role
+
+    with psycopg.connect(theme_memory_dsn, autocommit=True) as db:
+        db.execute(
+            "CREATE ROLE stock_agent_dashboard_runtime LOGIN INHERIT "
+            "NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS"
+        )
+        db.execute("GRANT stock_agent_dashboard TO stock_agent_dashboard_runtime")
+        try:
+            receipt = verify_dashboard_role(db)
+            assert receipt["write_privileges"] == 0
+            db.execute("GRANT INSERT ON public.holdings TO stock_agent_dashboard")
+            with pytest.raises(RuntimeError, match="table privilege"):
+                verify_dashboard_role(db)
+        finally:
+            db.execute("REVOKE INSERT ON public.holdings FROM stock_agent_dashboard")
+            db.execute("DROP ROLE stock_agent_dashboard_runtime")
+
+
+def test_actual_postgres_dashboard_authority_verifier_rejects_auth_schema_access(theme_memory_dsn):
+    from scripts.verify_owner_dashboard_role import verify_dashboard_role
+
+    with psycopg.connect(theme_memory_dsn, autocommit=True) as db:
+        db.execute(
+            "CREATE ROLE stock_agent_dashboard_runtime LOGIN INHERIT "
+            "NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS"
+        )
+        db.execute("GRANT stock_agent_dashboard TO stock_agent_dashboard_runtime")
+        db.execute("CREATE SCHEMA auth")
+        db.execute("CREATE TABLE auth.secret_tokens(token text)")
+        db.execute("GRANT USAGE ON SCHEMA auth TO stock_agent_dashboard")
+        db.execute("GRANT SELECT, INSERT ON auth.secret_tokens TO stock_agent_dashboard")
+        try:
+            assert db.execute(
+                "SELECT has_schema_privilege('stock_agent_dashboard_runtime','auth','USAGE'), "
+                "has_table_privilege('stock_agent_dashboard_runtime','auth.secret_tokens','SELECT,INSERT')"
+            ).fetchone() == (True, True)
+            with pytest.raises(RuntimeError, match="outside public"):
+                verify_dashboard_role(db)
+        finally:
+            db.execute("REVOKE SELECT, INSERT ON auth.secret_tokens FROM stock_agent_dashboard")
+            db.execute("REVOKE USAGE ON SCHEMA auth FROM stock_agent_dashboard")
+            db.execute("DROP TABLE auth.secret_tokens")
+            db.execute("DROP SCHEMA auth")
+            db.execute("DROP ROLE stock_agent_dashboard_runtime")
+
+
+def test_actual_postgres_dashboard_authority_verifier_rejects_foreign_table_access(theme_memory_dsn):
+    from scripts.verify_owner_dashboard_role import verify_dashboard_role
+
+    with psycopg.connect(theme_memory_dsn, autocommit=True) as db:
+        db.execute(
+            "CREATE ROLE stock_agent_dashboard_runtime LOGIN INHERIT "
+            "NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS"
+        )
+        db.execute("GRANT stock_agent_dashboard TO stock_agent_dashboard_runtime")
+        db.execute("CREATE FOREIGN DATA WRAPPER dashboard_test_fdw")
+        db.execute("CREATE SERVER dashboard_test_server FOREIGN DATA WRAPPER dashboard_test_fdw")
+        db.execute(
+            "CREATE FOREIGN TABLE public.remote_secrets(token text) "
+            "SERVER dashboard_test_server"
+        )
+        db.execute("GRANT SELECT, INSERT ON public.remote_secrets TO stock_agent_dashboard")
+        try:
+            assert db.execute(
+                "SELECT has_table_privilege("
+                "'stock_agent_dashboard_runtime','public.remote_secrets','SELECT,INSERT')"
+            ).fetchone() == (True,)
+            with pytest.raises(RuntimeError, match="table privilege"):
+                verify_dashboard_role(db)
+        finally:
+            db.execute("REVOKE SELECT, INSERT ON public.remote_secrets FROM stock_agent_dashboard")
+            db.execute("DROP FOREIGN TABLE public.remote_secrets")
+            db.execute("DROP SERVER dashboard_test_server")
+            db.execute("DROP FOREIGN DATA WRAPPER dashboard_test_fdw")
+            db.execute("DROP ROLE stock_agent_dashboard_runtime")
+
+
+def test_actual_postgres_dashboard_authority_verifier_rejects_database_create(theme_memory_dsn):
+    from scripts.verify_owner_dashboard_role import verify_dashboard_role
+
+    with psycopg.connect(theme_memory_dsn, autocommit=True) as db:
+        database = db.info.dbname
+        db.execute(
+            "CREATE ROLE stock_agent_dashboard_runtime LOGIN INHERIT "
+            "NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS"
+        )
+        db.execute("GRANT stock_agent_dashboard TO stock_agent_dashboard_runtime")
+        db.execute(
+            psycopg.sql.SQL("GRANT CREATE ON DATABASE {} TO stock_agent_dashboard").format(
+                psycopg.sql.Identifier(database)
+            )
+        )
+        try:
+            assert db.execute(
+                "SELECT has_database_privilege("
+                "'stock_agent_dashboard_runtime',current_database(),'CREATE')"
+            ).fetchone() == (True,)
+            with pytest.raises(RuntimeError, match="database privilege"):
+                verify_dashboard_role(db)
+        finally:
+            db.execute(
+                psycopg.sql.SQL("REVOKE CREATE ON DATABASE {} FROM stock_agent_dashboard").format(
+                    psycopg.sql.Identifier(database)
+                )
+            )
+            db.execute("DROP ROLE stock_agent_dashboard_runtime")
+
+
+def test_actual_postgres_dashboard_authority_verifier_rejects_second_incoming_member(theme_memory_dsn):
+    from scripts.verify_owner_dashboard_role import verify_dashboard_role
+
+    with psycopg.connect(theme_memory_dsn, autocommit=True) as db:
+        db.execute(
+            "CREATE ROLE stock_agent_dashboard_runtime LOGIN INHERIT "
+            "NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS"
+        )
+        db.execute("CREATE ROLE rogue_dashboard_reader LOGIN INHERIT")
+        db.execute("GRANT stock_agent_dashboard TO stock_agent_dashboard_runtime")
+        db.execute("GRANT stock_agent_dashboard TO rogue_dashboard_reader")
+        try:
+            db.execute("SET ROLE rogue_dashboard_reader")
+            db.execute("SELECT ticker FROM public.holdings LIMIT 1").fetchall()
+            db.execute("RESET ROLE")
+            with pytest.raises(RuntimeError, match="privilege role members"):
+                verify_dashboard_role(db)
+        finally:
+            db.execute("RESET ROLE")
+            db.execute("REVOKE stock_agent_dashboard FROM rogue_dashboard_reader")
+            db.execute("REVOKE stock_agent_dashboard FROM stock_agent_dashboard_runtime")
+            db.execute("DROP ROLE rogue_dashboard_reader")
+            db.execute("DROP ROLE stock_agent_dashboard_runtime")
+
+
+def test_actual_postgres_dashboard_authority_verifier_rejects_runtime_role_member(theme_memory_dsn):
+    from scripts.verify_owner_dashboard_role import verify_dashboard_role
+
+    with psycopg.connect(theme_memory_dsn, autocommit=True) as db:
+        db.execute(
+            "CREATE ROLE stock_agent_dashboard_runtime LOGIN INHERIT "
+            "NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS"
+        )
+        db.execute("CREATE ROLE rogue_dashboard_reader LOGIN INHERIT")
+        db.execute("GRANT stock_agent_dashboard TO stock_agent_dashboard_runtime")
+        db.execute("GRANT stock_agent_dashboard_runtime TO rogue_dashboard_reader")
+        try:
+            db.execute("SET ROLE rogue_dashboard_reader")
+            db.execute("SELECT ticker FROM public.holdings LIMIT 1").fetchall()
+            db.execute("RESET ROLE")
+            with pytest.raises(RuntimeError, match="runtime role has incoming members"):
+                verify_dashboard_role(db)
+        finally:
+            db.execute("RESET ROLE")
+            db.execute("REVOKE stock_agent_dashboard_runtime FROM rogue_dashboard_reader")
+            db.execute("REVOKE stock_agent_dashboard FROM stock_agent_dashboard_runtime")
+            db.execute("DROP ROLE rogue_dashboard_reader")
+            db.execute("DROP ROLE stock_agent_dashboard_runtime")
 
 
 def test_actual_postgres_freezes_unicode_bounded_memory_without_dropping_priority_surfaces(theme_memory_dsn):

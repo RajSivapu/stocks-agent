@@ -134,6 +134,249 @@ def test_backend_plan_rejects_missing_evidence_parent_before_database_or_platfor
     assert platform.calls == []
 
 
+def test_upgrade_plan_preserves_existing_runtime_credential_and_database_url(monkeypatch):
+    platform = Supabase()
+    database_url = (
+        "postgresql://stock_agent_dashboard_runtime."
+        + "p" * 20
+        + ":existing-password-longer-than-24@aws-0-us-east-1.pooler.supabase.com:5432/postgres"
+    )
+    platform.secrets = {
+        "DASHBOARD_ALLOWED_ORIGINS": "https://owner.example",
+        "DASHBOARD_DATABASE_URL": database_url,
+        "DASHBOARD_OWNER_USER_ID": "owner",
+    }
+    adapter = native(platform)
+    adapter.context.update({"allowed_origin": "https://owner.example", "owner_user_id": "owner"})
+    prior_role = {
+        "exists": True,
+        "identity": adapter_module().RUNTIME_ROLE,
+        "version": "role-version",
+        "configuration": {
+            "attributes": {
+                "rolsuper": False, "rolinherit": True, "rolcreaterole": False,
+                "rolcreatedb": False, "rolcanlogin": True, "rolreplication": False,
+                "rolbypassrls": False, "rolconnlimit": -1, "rolvaliduntil": None,
+            },
+            "memberships": [{
+                "role": adapter_module().PRIVILEGE_ROLE, "grantor": "postgres",
+                "admin_option": False, "inherit_option": True, "set_option": True,
+            }],
+            "settings": [{"database": "", "setconfig": ["search_path=pg_catalog, public"]}],
+        },
+        "files": {},
+        "values": {"password_verifier": "SCRAM-SHA-256$4096:existing$stored:server"},
+    }
+    prior_role["version"] = hashlib.sha256(release.canonical([
+        prior_role["configuration"], prior_role["values"],
+    ])).hexdigest()
+
+    class Connection:
+        def __enter__(self): return self
+        def __exit__(self, *_args): return None
+        def execute(self, *_args): return self
+        def fetchone(self): return {"name": "postgres"}
+
+    monkeypatch.setattr(adapter, "_evidence_root", lambda: None)
+    monkeypatch.setattr(adapter, "_connection", lambda: Connection())
+    monkeypatch.setattr(adapter, "_capture_role", lambda: copy.deepcopy(prior_role))
+    monkeypatch.setattr(
+        "scripts.verify_personal_stock_agent_v1.git_function_runtime",
+        lambda _root, _sha, name: (
+            {"index.ts": f"export const name = '{name}';\n".encode()},
+            {"verify_jwt": False, "entrypoint": "index.ts", "import_map": None},
+        ),
+    )
+
+    candidates = adapter.plan(adapter.context)
+
+    assert candidates["runtime-role"] == prior_role
+    assert candidates["dashboard-secrets"] == adapter.original["dashboard-secrets"]
+    assert candidates["dashboard-secrets"]["values"]["DASHBOARD_DATABASE_URL"] == database_url
+
+
+def test_upgrade_plan_refuses_to_rotate_a_live_role_when_existing_database_url_is_missing(monkeypatch):
+    platform = Supabase()
+    del platform.secrets["DASHBOARD_DATABASE_URL"]
+    adapter = native(platform)
+    adapter.context.update({"allowed_origin": "https://owner.example", "owner_user_id": "owner"})
+    prior_role = {
+        "exists": True, "identity": adapter_module().RUNTIME_ROLE, "version": "role-version",
+        "configuration": {
+            "attributes": {
+                "rolsuper": False, "rolinherit": True, "rolcreaterole": False,
+                "rolcreatedb": False, "rolcanlogin": True, "rolreplication": False,
+                "rolbypassrls": False, "rolconnlimit": -1, "rolvaliduntil": None,
+            },
+            "memberships": [], "settings": [],
+        },
+        "files": {},
+        "values": {"password_verifier": "SCRAM-SHA-256$4096:existing$stored:server"},
+    }
+
+    class Connection:
+        def __enter__(self): return self
+        def __exit__(self, *_args): return None
+        def execute(self, *_args): return self
+        def fetchone(self): return {"name": "postgres"}
+
+    monkeypatch.setattr(adapter, "_evidence_root", lambda: None)
+    monkeypatch.setattr(adapter, "_connection", lambda: Connection())
+    monkeypatch.setattr(adapter, "_capture_role", lambda: copy.deepcopy(prior_role))
+
+    with pytest.raises(RuntimeError, match="existing dashboard database credential"):
+        adapter.plan(adapter.context)
+
+
+def test_first_function_apply_probes_candidate_runtime_before_remote_write(monkeypatch):
+    platform = Supabase()
+    adapter = native(platform)
+    database_url = (
+        "postgresql://stock_agent_dashboard_runtime."
+        + "p" * 20
+        + ":existing-password-longer-than-24@aws-0-us-east-1.pooler.supabase.com:5432/postgres"
+    )
+    adapter.candidate_database_url = database_url
+    events = []
+    monkeypatch.setattr(adapter, "_verify_candidate_runtime", lambda value: events.append(("ready", value)))
+    monkeypatch.setattr(adapter, "_write_function", lambda name, _candidate: events.append(("write", name)))
+    monkeypatch.setattr(adapter, "capture", lambda name: {
+        "exists": True, "identity": name + "-id", "version": "4", "configuration": {
+            "verify_jwt": False, "entrypoint": "index.ts", "import_map": None,
+        }, "files": {"index.ts": base64.b64encode(b"candidate").decode()}, "values": {},
+    })
+    candidate = {
+        "exists": True, "identity": None, "version": None, "configuration": {
+            "verify_jwt": False, "entrypoint": "index.ts", "import_map": None,
+        }, "files": {"index.ts": base64.b64encode(b"candidate").decode()}, "values": {},
+    }
+
+    adapter.apply("market-briefing-gateway", candidate)
+    adapter.apply("owner-dashboard-api", candidate)
+
+    assert events == [
+        ("ready", database_url),
+        ("write", "market-briefing-gateway"),
+        ("write", "owner-dashboard-api"),
+    ]
+
+
+def test_candidate_runtime_probe_rejects_private_database_errors_without_leaking_url():
+    database_url = (
+        "postgresql://stock_agent_dashboard_runtime."
+        + "p" * 20
+        + ":do-not-leak-this-password-12345@aws-0-us-east-1.pooler.supabase.com:5432/postgres"
+    )
+
+    def connector(*_args, **_kwargs):
+        raise psycopg.OperationalError("private pooler response do-not-leak-this-password-12345")
+
+    adapter = native(Supabase(), connector=connector)
+
+    with pytest.raises(RuntimeError, match="candidate dashboard database credential is not ready") as failure:
+        adapter._verify_candidate_runtime(database_url)
+
+    assert "do-not-leak" not in str(failure.value)
+
+
+def test_candidate_runtime_probe_authenticates_read_only_identity_and_projection(monkeypatch):
+    database_url = (
+        "postgresql://stock_agent_dashboard_runtime."
+        + "p" * 20
+        + ":existing-password-longer-than-24@aws-0-us-east-1.pooler.supabase.com:5432/postgres"
+    )
+    projection = {
+        "intelligence_version": 2, "run_id": None, "data_as_of": None,
+        "themes": [], "companies": [], "evidence": [], "source_health": [],
+        "coverage": {"mode": "bounded", "complete_market_coverage": False},
+        "reference": {"state": "unavailable"},
+        "scope": {"research_only": True, "market_wide": True},
+        "backlog": {"available": 0, "returned": 0, "deferred": 0, "byte_truncated": False},
+        "omissions": [],
+        "boundaries": {
+            "research_only": True, "execution_disabled": True, "valuation_unavailable": True,
+        },
+    }
+    rows = iter([
+        {
+            "database_user": adapter_module().RUNTIME_ROLE,
+            "transaction_read_only": "on",
+        },
+        {"projection": projection},
+    ])
+    statements = []
+
+    class Result:
+        def fetchone(self): return next(rows)
+
+    class Connection:
+        def __enter__(self): return self
+        def __exit__(self, *_args): return None
+        def execute(self, statement, *_args):
+            statements.append(statement)
+            return None if statement.startswith("SET ") else Result()
+
+    def connector(value, **options):
+        assert value == database_url
+        assert options["connect_timeout"] == 15
+        return Connection()
+
+    adapter = native(Supabase(), connector=connector)
+    monkeypatch.setattr(
+        "scripts.verify_owner_dashboard_role.verify_dashboard_role",
+        lambda _connection: {
+            "status": "verified", "write_privileges": 0,
+            "application_function_execute": 0, "owned_objects": 0,
+        },
+    )
+
+    adapter._verify_candidate_runtime(database_url)
+
+    assert statements[0].startswith("SET TRANSACTION")
+    assert "statement_timeout" in statements[1]
+    assert "lock_timeout" in statements[2]
+    assert "current_user" in statements[3]
+    assert "read_owner_intelligence_v2(1)" in statements[4]
+
+
+def test_candidate_runtime_probe_bounds_a_blocking_projection_and_suppresses_error(monkeypatch):
+    database_url = (
+        "postgresql://stock_agent_dashboard_runtime."
+        + "p" * 20
+        + ":existing-password-longer-than-24@aws-0-us-east-1.pooler.supabase.com:5432/postgres"
+    )
+    statements = []
+
+    class Result:
+        def fetchone(self):
+            return {"database_user": adapter_module().RUNTIME_ROLE, "transaction_read_only": "on"}
+
+    class Connection:
+        def __enter__(self): return self
+        def __exit__(self, *_args): return None
+        def execute(self, statement, *_args):
+            statements.append(statement)
+            if "read_owner_intelligence_v2" in statement:
+                raise psycopg.errors.QueryCanceled("private blocking query detail")
+            return None if statement.startswith("SET ") else Result()
+
+    monkeypatch.setattr(
+        "scripts.verify_owner_dashboard_role.verify_dashboard_role",
+        lambda _connection: {
+            "status": "verified", "write_privileges": 0,
+            "application_function_execute": 0, "owned_objects": 0,
+        },
+    )
+    adapter = native(Supabase(), connector=lambda *_args, **_kwargs: Connection())
+
+    with pytest.raises(RuntimeError, match="candidate dashboard database credential is not ready") as failure:
+        adapter._verify_candidate_runtime(database_url)
+
+    assert "private blocking" not in str(failure.value)
+    assert any("statement_timeout" in statement for statement in statements)
+    assert any("lock_timeout" in statement for statement in statements)
+
+
 @pytest.mark.parametrize("name", release.FUNCTIONS)
 def test_native_function_download_apply_restore_preserves_bytes_config_and_records_new_version(name):
     platform = Supabase(); adapter = native(platform)
@@ -437,6 +680,12 @@ def test_native_production_engine_failure_boundaries(database, tmp_path, monkeyp
     else:
         with psycopg.connect(database, autocommit=True) as connection:
             connection.execute("CREATE ROLE stock_agent_dashboard_runtime LOGIN PASSWORD 'old-password-at-least-24-characters'")
+        platform.secrets["DASHBOARD_DATABASE_URL"] = (
+            "postgresql://stock_agent_dashboard_runtime."
+            + "p" * 20
+            + ":old-password-at-least-24-characters@aws-0-us-east-1.pooler.supabase.com:5432/postgres"
+        )
+        adapter.environment["DASHBOARD_PRIOR_MANAGED_SECRETS_JSON"] = json.dumps(platform.secrets)
     evidence_directory = tmp_path / "capture"
     evidence_directory.mkdir()
     adapter.context.update({"allowed_origin": "https://owner.example", "site_origin": "https://owner.example",
@@ -446,6 +695,7 @@ def test_native_production_engine_failure_boundaries(database, tmp_path, monkeyp
     key = Fernet.generate_key(); adapter.environment["RELEASE_RECOVERY_KEY"] = key.decode()
     original = {name: adapter.capture(name) for name in release.BACKEND_COMPONENTS}
     monkeypatch.setattr(build_owner_dashboard_static, "build_static_release", lambda *a, **k: {"status": "verified"})
+    monkeypatch.setattr(adapter, "_verify_candidate_runtime", lambda _database_url: None)
     monkeypatch.setattr(verify_personal_stock_agent_v1, "git_files", lambda *a: {"index.ts": b"candidate"})
     monkeypatch.setattr(
         verify_personal_stock_agent_v1,
