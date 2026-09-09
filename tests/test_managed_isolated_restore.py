@@ -605,6 +605,8 @@ def test_actual_migration_retry_accepts_truthful_baseline_without_writing_histor
                           if item["path"] == "sql/migrations/20261015_release_reader_source_tables.sql")
     dashboard_authority = next(item for item in deploy.candidate_migration_manifest()
                                if item["path"] == "sql/migrations/20261016_dashboard_runtime_authority_closure.sql")
+    release_reader_authority = next(item for item in deploy.candidate_migration_manifest()
+                                   if item["path"] == "sql/migrations/20261017_release_reader_extension_closure.sql")
     queries = []
 
     def api(_method, _path, payload=None):
@@ -615,7 +617,7 @@ def test_actual_migration_retry_accepts_truthful_baseline_without_writing_histor
                 {"path": path, "version": "20261004", "sha256": hashlib.sha256(b'["SELECT 1"]').hexdigest()},
                     discovery, transfer, cursor, official, issuer_names, enrichment,
                     research_packet, theme_memory, runtime_completion, honest_empty, release_reader,
-                    dashboard_authority,
+                    dashboard_authority, release_reader_authority,
             ]
         if query.startswith("SELECT version, statements"):
             return [{"version": "20261004", "statements": ["SELECT 1"]}]

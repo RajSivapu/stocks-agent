@@ -2579,8 +2579,18 @@ def test_verifier_applies_actual_isolated_postgres_restore_and_retains_uncertain
                             "read_only": True, "isolated_guard": self.isolated}
 
                 def read_records(self):
-                    return {name: [dict(row) for row in self.connection.execute(sql).fetchall()]
-                            for name, sql in RECOVERY_SQL.items()}
+                    from scripts.protected_evidence import with_schema_version_hashes
+                    records = {
+                        name: [
+                            dict(row)
+                            for row in self.connection.execute(sql).fetchall()
+                        ]
+                        for name, sql in RECOVERY_SQL.items()
+                    }
+                    records["schema_version"] = with_schema_version_hashes(
+                        records["schema_version"]
+                    )
+                    return records
 
                 def counts(self):
                     return {name: self.connection.execute(f"SELECT count(*) FROM ({sql}) records").fetchone()["count"]

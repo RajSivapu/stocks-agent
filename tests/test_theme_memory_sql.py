@@ -40,6 +40,9 @@ RELEASE_READER_MIGRATION = (
 DASHBOARD_AUTHORITY_MIGRATION = (
     ROOT / "sql/migrations/20261016_dashboard_runtime_authority_closure.sql"
 )
+RELEASE_READER_AUTHORITY_MIGRATION = (
+    ROOT / "sql/migrations/20261017_release_reader_extension_closure.sql"
+)
 SCHEMA = ROOT / "sql/schema.sql"
 
 
@@ -73,11 +76,16 @@ def test_v2_runtime_completion_and_honest_empty_tail_are_parseable_and_ordered()
     assert release_reader
     dashboard_authority = parse_sql(DASHBOARD_AUTHORITY_MIGRATION.read_text())
     assert dashboard_authority
+    release_reader_authority = parse_sql(
+        RELEASE_READER_AUTHORITY_MIGRATION.read_text()
+    )
+    assert release_reader_authority
     schema = SCHEMA.read_bytes()
     assert RUNTIME_COMPLETION_MIGRATION.read_bytes() in schema
     assert HONEST_EMPTY_REPORT_MIGRATION.read_bytes() in schema
     assert RELEASE_READER_MIGRATION.read_bytes() in schema
-    assert schema.endswith(DASHBOARD_AUTHORITY_MIGRATION.read_bytes())
+    assert DASHBOARD_AUTHORITY_MIGRATION.read_bytes() in schema
+    assert schema.endswith(RELEASE_READER_AUTHORITY_MIGRATION.read_bytes())
     migration = RUNTIME_COMPLETION_MIGRATION.read_text()
     assert "SECURITY DEFINER SET search_path=pg_catalog" in migration
     assert "record_market_intelligence_v2_completion" in migration
@@ -1004,6 +1012,172 @@ def test_actual_postgres_post_migration_reader_attestation_rejects_rogue_members
             )
             admin.execute("DROP SCHEMA IF EXISTS private_release_data CASCADE")
             admin.execute("DROP ROLE IF EXISTS rogue_release_reader")
+            admin.execute("ALTER ROLE stock_agent_release_reader_runtime NOLOGIN")
+
+
+def _release_reader_authority_snapshot(theme_memory_dsn):
+    from scripts.protected_evidence import (
+        PostgresReadOnlySource, RELEASE_READER_AUTHORITY_SQL,
+    )
+
+    source = object.__new__(PostgresReadOnlySource)
+    with psycopg.connect(
+        f"{theme_memory_dsn} user=stock_agent_release_reader_runtime",
+        row_factory=dict_row,
+    ) as connection:
+        connection.execute("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY")
+        source.connection = connection
+        return source.query(RELEASE_READER_AUTHORITY_SQL)[0]
+
+
+def test_actual_postgres_legacy_extension_surface_is_exact_and_unknown_extension_fails(
+    theme_memory_dsn,
+):
+    from scripts.protected_evidence import (
+        READ_TABLES, verify_release_reader_authority,
+    )
+
+    with psycopg.connect(theme_memory_dsn, autocommit=True) as admin:
+        admin.execute("ALTER ROLE stock_agent_release_reader_runtime LOGIN")
+        admin.execute("CREATE EXTENSION pg_stat_statements WITH SCHEMA extensions")
+        admin.execute("GRANT USAGE ON SCHEMA extensions TO stock_agent_release_reader")
+    try:
+        snapshot = _release_reader_authority_snapshot(theme_memory_dsn)
+        receipt = verify_release_reader_authority(
+            snapshot, READ_TABLES, allow_legacy_extension_authority=True,
+        )
+        assert receipt["status"] == "verified"
+        with psycopg.connect(theme_memory_dsn, autocommit=True) as admin:
+            admin.execute("CREATE EXTENSION dblink WITH SCHEMA extensions")
+        snapshot = _release_reader_authority_snapshot(theme_memory_dsn)
+        with pytest.raises(RuntimeError, match="function authority"):
+            verify_release_reader_authority(
+                snapshot, READ_TABLES, allow_legacy_extension_authority=True,
+            )
+    finally:
+        with psycopg.connect(theme_memory_dsn, autocommit=True) as admin:
+            admin.execute("DROP EXTENSION IF EXISTS dblink")
+            admin.execute("DROP EXTENSION IF EXISTS pg_stat_statements")
+            admin.execute("REVOKE USAGE ON SCHEMA extensions FROM stock_agent_release_reader")
+            admin.execute("ALTER ROLE stock_agent_release_reader_runtime NOLOGIN")
+
+
+def test_actual_postgres_release_reader_extension_closure_revokes_both_grant_paths(
+    theme_memory_dsn,
+):
+    with psycopg.connect(theme_memory_dsn, autocommit=True) as admin:
+        admin.execute(
+            "GRANT USAGE ON SCHEMA extensions TO "
+            "stock_agent_release_reader,stock_agent_release_reader_runtime"
+        )
+        assert admin.execute(
+            "SELECT has_schema_privilege("
+            "'stock_agent_release_reader_runtime','extensions','USAGE')"
+        ).fetchone() == (True,)
+
+        admin.execute(RELEASE_READER_AUTHORITY_MIGRATION.read_text())
+
+        assert admin.execute(
+            "SELECT has_schema_privilege("
+            "'stock_agent_release_reader','extensions','USAGE'),"
+            "has_schema_privilege("
+            "'stock_agent_release_reader_runtime','extensions','USAGE')"
+        ).fetchone() == (False, False)
+
+
+def test_actual_postgres_reader_attestation_rejects_large_object_access(
+    theme_memory_dsn,
+):
+    from scripts.protected_evidence import PostgresReadOnlySource
+
+    def local_source():
+        source = object.__new__(PostgresReadOnlySource)
+        source._url = f"{theme_memory_dsn} user=stock_agent_release_reader_runtime"
+        source.project_ref = "local-release-reader"
+        source.isolated_guard = False
+        source.pre_migration_baseline = False
+        source.connection = None
+        source._read_tables = ()
+        source._pre_migration_omissions = None
+        original_query = source.query
+
+        def query(statement, parameters=()):
+            rows = original_query(statement, parameters)
+            if "current_user AS role" in statement and rows:
+                rows[0]["server"] = rows[0].get("server") or "local-socket"
+            return rows
+
+        source.query = query
+        return source
+
+    large_object_oid = None
+    with psycopg.connect(theme_memory_dsn, autocommit=True) as admin:
+        admin.execute("ALTER ROLE stock_agent_release_reader_runtime LOGIN")
+        large_object_oid = admin.execute("SELECT lo_create(0)").fetchone()[0]
+        admin.execute(
+            "SELECT lo_put(%s,0,convert_to('private-large-object','UTF8'))",
+            (large_object_oid,),
+        )
+        admin.execute(
+            psycopg.sql.SQL("GRANT SELECT ON LARGE OBJECT {} TO stock_agent_release_reader_runtime").format(
+                psycopg.sql.SQL(str(large_object_oid))
+            )
+        )
+    try:
+        with psycopg.connect(
+            f"{theme_memory_dsn} user=stock_agent_release_reader_runtime"
+        ) as reader:
+            assert reader.execute(
+                "SELECT convert_from(lo_get(%s),'UTF8')", (large_object_oid,)
+            ).fetchone()[0] == "private-large-object"
+        with pytest.raises(RuntimeError, match="large-object authority"):
+            with local_source():
+                pass
+    finally:
+        with psycopg.connect(theme_memory_dsn, autocommit=True) as admin:
+            if large_object_oid is not None:
+                admin.execute("SELECT lo_unlink(%s)", (large_object_oid,))
+            admin.execute("ALTER ROLE stock_agent_release_reader_runtime NOLOGIN")
+
+
+def test_actual_postgres_reader_attestation_rejects_standalone_type_ownership(
+    theme_memory_dsn,
+):
+    from scripts.protected_evidence import PostgresReadOnlySource
+
+    def local_source():
+        source = object.__new__(PostgresReadOnlySource)
+        source._url = f"{theme_memory_dsn} user=stock_agent_release_reader_runtime"
+        source.project_ref = "local-release-reader"
+        source.isolated_guard = False
+        source.pre_migration_baseline = False
+        source.connection = None
+        source._read_tables = ()
+        source._pre_migration_omissions = None
+        original_query = source.query
+
+        def query(statement, parameters=()):
+            rows = original_query(statement, parameters)
+            if "current_user AS role" in statement and rows:
+                rows[0]["server"] = rows[0].get("server") or "local-socket"
+            return rows
+
+        source.query = query
+        return source
+
+    with psycopg.connect(theme_memory_dsn, autocommit=True) as admin:
+        admin.execute("ALTER ROLE stock_agent_release_reader_runtime LOGIN")
+        admin.execute("CREATE TYPE public.release_reader_owned_enum AS ENUM ('unsafe')")
+        admin.execute(
+            "ALTER TYPE public.release_reader_owned_enum OWNER TO stock_agent_release_reader_runtime"
+        )
+    try:
+        with pytest.raises(RuntimeError, match="own database objects"):
+            with local_source():
+                pass
+    finally:
+        with psycopg.connect(theme_memory_dsn, autocommit=True) as admin:
+            admin.execute("DROP TYPE IF EXISTS public.release_reader_owned_enum")
             admin.execute("ALTER ROLE stock_agent_release_reader_runtime NOLOGIN")
 
 

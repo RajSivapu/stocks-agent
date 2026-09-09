@@ -904,7 +904,24 @@ def test_native_production_engine_failure_boundaries(database, tmp_path, monkeyp
             connection.execute("DROP ROLE IF EXISTS stock_agent_dashboard_runtime")
 
 
-def _safe_release_reader_authority(evidence, read_tables):
+def _safe_release_reader_authority(evidence, read_tables, *, legacy_extensions=False):
+    schema_privileges = [
+        {"schema": "public", "privilege": "USAGE", "grantable": False},
+    ]
+    function_privileges = []
+    if legacy_extensions:
+        schema_privileges.append(
+            {"schema": "extensions", "privilege": "USAGE", "grantable": False}
+        )
+        function_privileges.append({
+            "schema": "extensions",
+            "function": "extensions.digest(bytea,text)",
+            "extension": "pgcrypto",
+            "security_definer": False,
+            "language": "c",
+            "owner": "postgres",
+            "grantable": False,
+        })
     return {
         "roles": [
             {
@@ -929,18 +946,16 @@ def _safe_release_reader_authority(evidence, read_tables):
             {"privilege": "CONNECT", "grantable": False},
             {"privilege": "TEMPORARY", "grantable": False},
         ],
-        "schema_privileges": [
-            {"schema": "extensions", "privilege": "USAGE", "grantable": False},
-            {"schema": "public", "privilege": "USAGE", "grantable": False},
-        ],
+        "schema_privileges": schema_privileges,
         "relation_privileges": [
             {"schema": "public", "relation": table, "privilege": "SELECT",
-             "grantable": False}
+             "grantable": False, "kind": "r", "extension": None}
             for table in read_tables
         ],
         "column_privileges": [],
         "sequence_privileges": [],
-        "function_privileges": [],
+        "large_object_privileges": [],
+        "function_privileges": function_privileges,
         "owned_objects": [],
     }
 
@@ -961,6 +976,44 @@ def test_release_reader_global_authority_accepts_only_the_bounded_role_graph():
         "write_privileges": 0,
         "owned_objects": 0,
     }
+
+
+def test_release_reader_hashes_migration_statements_without_extension_authority():
+    from scripts import protected_evidence as evidence
+
+    rows = evidence.with_schema_version_hashes([{
+        "version": "20261017",
+        "statements": ["SELECT 1", "SELECT 2"],
+    }])
+
+    assert rows == [{
+        "version": "20261017",
+        "statements": ["SELECT 1", "SELECT 2"],
+        "sha256": hashlib.sha256(b"SELECT 1\nSELECT 2").hexdigest(),
+    }]
+    assert "extensions.digest" not in evidence.RECOVERY_SQL["schema_version"]
+
+
+def test_release_reader_rejects_unknown_legacy_extension_function():
+    from scripts import protected_evidence as evidence
+
+    snapshot = _safe_release_reader_authority(
+        evidence, ("holdings",), legacy_extensions=True,
+    )
+    snapshot["function_privileges"].append({
+        "schema": "extensions",
+        "function": "extensions.http_get(text)",
+        "extension": "http",
+        "security_definer": False,
+        "language": "c",
+        "owner": "postgres",
+        "grantable": False,
+    })
+
+    with pytest.raises(RuntimeError, match="function authority"):
+        evidence.verify_release_reader_authority(
+            snapshot, ("holdings",), allow_legacy_extension_authority=True,
+        )
 
 
 @pytest.mark.parametrize(
@@ -1012,6 +1065,12 @@ def test_release_reader_global_authority_accepts_only_the_bounded_role_graph():
                 "privilege": "UPDATE", "grantable": False,
             }),
             "sequence authority",
+        ),
+        (
+            lambda value: value["large_object_privileges"].append({
+                "oid": "42", "privilege": "SELECT", "grantable": False,
+            }),
+            "large-object authority",
         ),
         (
             lambda value: value["function_privileges"].append({
@@ -1081,7 +1140,9 @@ def test_protected_dry_run_reader_records_only_tables_present_before_migration(m
     )
     def query(statement, params=()):
         if "release_reader_global_authority" in statement:
-            return [_safe_release_reader_authority(evidence, source._read_tables)]
+            return [_safe_release_reader_authority(
+                evidence, source._read_tables, legacy_extensions=True,
+            )]
         if "current_user AS role" in statement:
             return [{"role": evidence.READER, "read_only": "on", "rolsuper": False,
                 "rolbypassrls": False, "server": "127.0.0.1", "port": 5432,

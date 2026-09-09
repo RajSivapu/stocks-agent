@@ -211,12 +211,97 @@ RECOVERY_SQL = {
               CROSS JOIN LATERAL aclexplode(col.attacl) a WHERE a.grantee=r.oid
         ) g),'[]'::jsonb) AS grants
         FROM pg_catalog.pg_roles r WHERE r.rolname IN ('stock_agent_dashboard','stock_agent_dashboard_runtime')""",
-    "schema_version": """SELECT version,statements,encode(extensions.digest(convert_to(array_to_string(statements,E'\\n'),'UTF8'),'sha256'),'hex') AS sha256
+    "schema_version": """SELECT version,statements
                          FROM supabase_migrations.schema_migrations""",
     "release_migration_ledger": """SELECT path,version,sha256,applied_at::text
                                   FROM public.stock_agent_release_migration_ledger""",
 }
 READ_TABLES = PROTECTED_RELEASE_READ_TABLES
+
+LEGACY_EXTENSION_RELATION_COLUMNS = {
+    "pg_stat_statements": {
+        "userid", "dbid", "toplevel", "queryid", "query", "plans",
+        "total_plan_time", "min_plan_time", "max_plan_time", "mean_plan_time",
+        "stddev_plan_time", "calls", "total_exec_time", "min_exec_time",
+        "max_exec_time", "mean_exec_time", "stddev_exec_time", "rows",
+        "shared_blks_hit", "shared_blks_read", "shared_blks_dirtied",
+        "shared_blks_written", "local_blks_hit", "local_blks_read",
+        "local_blks_dirtied", "local_blks_written", "temp_blks_read",
+        "temp_blks_written", "shared_blk_read_time", "shared_blk_write_time",
+        "local_blk_read_time", "local_blk_write_time", "temp_blk_read_time",
+        "temp_blk_write_time", "wal_records", "wal_fpi", "wal_bytes",
+        "jit_functions", "jit_generation_time", "jit_inlining_count",
+        "jit_inlining_time", "jit_optimization_count", "jit_optimization_time",
+        "jit_emission_count", "jit_emission_time", "jit_deform_count",
+        "jit_deform_time", "stats_since", "minmax_stats_since",
+    },
+    "pg_stat_statements_info": {"dealloc", "stats_reset"},
+}
+
+LEGACY_EXTENSION_FUNCTIONS = {
+    "extensions.armor(bytea)": "pgcrypto",
+    "extensions.armor(bytea,text[],text[])": "pgcrypto",
+    "extensions.crypt(text,text)": "pgcrypto",
+    "extensions.dearmor(text)": "pgcrypto",
+    "extensions.decrypt(bytea,bytea,text)": "pgcrypto",
+    "extensions.decrypt_iv(bytea,bytea,bytea,text)": "pgcrypto",
+    "extensions.digest(bytea,text)": "pgcrypto",
+    "extensions.digest(text,text)": "pgcrypto",
+    "extensions.encrypt(bytea,bytea,text)": "pgcrypto",
+    "extensions.encrypt_iv(bytea,bytea,bytea,text)": "pgcrypto",
+    "extensions.gen_random_bytes(integer)": "pgcrypto",
+    "extensions.gen_random_uuid()": "pgcrypto",
+    "extensions.gen_salt(text)": "pgcrypto",
+    "extensions.gen_salt(text,integer)": "pgcrypto",
+    "extensions.hmac(bytea,bytea,text)": "pgcrypto",
+    "extensions.hmac(text,text,text)": "pgcrypto",
+    "extensions.pgp_armor_headers(text)": "pgcrypto",
+    "extensions.pgp_key_id(bytea)": "pgcrypto",
+    "extensions.pgp_pub_decrypt(bytea,bytea)": "pgcrypto",
+    "extensions.pgp_pub_decrypt(bytea,bytea,text)": "pgcrypto",
+    "extensions.pgp_pub_decrypt(bytea,bytea,text,text)": "pgcrypto",
+    "extensions.pgp_pub_decrypt_bytea(bytea,bytea)": "pgcrypto",
+    "extensions.pgp_pub_decrypt_bytea(bytea,bytea,text)": "pgcrypto",
+    "extensions.pgp_pub_decrypt_bytea(bytea,bytea,text,text)": "pgcrypto",
+    "extensions.pgp_pub_encrypt(text,bytea)": "pgcrypto",
+    "extensions.pgp_pub_encrypt(text,bytea,text)": "pgcrypto",
+    "extensions.pgp_pub_encrypt_bytea(bytea,bytea)": "pgcrypto",
+    "extensions.pgp_pub_encrypt_bytea(bytea,bytea,text)": "pgcrypto",
+    "extensions.pgp_sym_decrypt(bytea,text)": "pgcrypto",
+    "extensions.pgp_sym_decrypt(bytea,text,text)": "pgcrypto",
+    "extensions.pgp_sym_decrypt_bytea(bytea,text)": "pgcrypto",
+    "extensions.pgp_sym_decrypt_bytea(bytea,text,text)": "pgcrypto",
+    "extensions.pgp_sym_encrypt(text,text)": "pgcrypto",
+    "extensions.pgp_sym_encrypt(text,text,text)": "pgcrypto",
+    "extensions.pgp_sym_encrypt_bytea(bytea,text)": "pgcrypto",
+    "extensions.pgp_sym_encrypt_bytea(bytea,text,text)": "pgcrypto",
+    "extensions.pg_stat_statements(boolean)": "pg_stat_statements",
+    "extensions.pg_stat_statements_info()": "pg_stat_statements",
+}
+
+
+def with_schema_version_hashes(rows: object) -> list[dict[str, object]]:
+    """Hash migration statements without granting the reader extension access."""
+    require(
+        isinstance(rows, list)
+        and all(
+            isinstance(row, Mapping)
+            and isinstance(row.get("version"), str)
+            and isinstance(row.get("statements"), list)
+            and all(isinstance(statement, str) for statement in row["statements"])
+            for row in rows
+        ),
+        "migration ledger rows are malformed",
+    )
+    return [
+        {
+            **dict(row),
+            "sha256": hashlib.sha256(
+                "\n".join(row["statements"]).encode()
+            ).hexdigest(),
+        }
+        for row in rows
+    ]
 
 
 def _administrative_reader_edge(edge: object) -> bool:
@@ -235,7 +320,8 @@ def _administrative_reader_edge(edge: object) -> bool:
 
 
 def verify_release_reader_authority(
-    snapshot: Mapping[str, object], readable_tables: tuple[str, ...],
+    snapshot: Mapping[str, object], readable_tables: tuple[str, ...], *,
+    allow_legacy_extension_authority: bool = False,
 ) -> dict[str, object]:
     """Require an exact role graph and global read-only authority closure."""
     expected_roles = [
@@ -289,37 +375,59 @@ def verify_release_reader_authority(
         (row.get("schema"), row.get("privilege"), row.get("grantable"))
         for row in schema_privileges if isinstance(row, Mapping)
     }
-    require(
-        schemas.issubset({
-            ("public", "USAGE", False),
-            ("extensions", "USAGE", False),
-            ("supabase_migrations", "USAGE", False),
-        })
-        and {("public", "USAGE", False), ("extensions", "USAGE", False)}
-        .issubset(schemas),
-        "release reader schema authority is unsafe",
-    )
+    allowed_schemas = {
+        ("public", "USAGE", False),
+        ("supabase_migrations", "USAGE", False),
+    }
+    required_schemas = {("public", "USAGE", False)}
+    if allow_legacy_extension_authority:
+        allowed_schemas.add(("extensions", "USAGE", False))
+        required_schemas.add(("extensions", "USAGE", False))
+    require(schemas.issubset(allowed_schemas) and required_schemas.issubset(schemas),
+            "release reader schema authority is unsafe")
 
     relation_privileges = snapshot.get("relation_privileges")
     require(isinstance(relation_privileges, list),
             "release reader relation authority is unavailable")
     require(all(isinstance(row, Mapping) for row in relation_privileges),
             "release reader relation authority is unavailable")
-    actual_relations = {
-        (row.get("schema"), row.get("relation"), row.get("privilege"),
-         row.get("grantable"))
-        for row in relation_privileges if isinstance(row, Mapping)
-    }
-    expected_relations = {
-        ("public", table, "SELECT", False) for table in readable_tables
-    }
-    require(actual_relations == expected_relations,
+    public_relations = set()
+    legacy_extension_relations = set()
+    for row in relation_privileges:
+        relation = (row.get("schema"), row.get("relation"))
+        common_safe = (
+            row.get("privilege") == "SELECT"
+            and row.get("grantable") is False
+        )
+        if relation[0] == "public":
+            require(
+                common_safe
+                and relation[1] in readable_tables
+                and row.get("kind") in {"r", "p"}
+                and row.get("extension") is None,
+                "release reader relation authority is unsafe",
+            )
+            public_relations.add(relation[1])
+        elif relation[0] == "extensions":
+            require(
+                allow_legacy_extension_authority
+                and common_safe
+                and relation[1] in LEGACY_EXTENSION_RELATION_COLUMNS
+                and row.get("kind") == "v"
+                and row.get("extension") == "pg_stat_statements",
+                "release reader relation authority is unsafe",
+            )
+            legacy_extension_relations.add(relation[1])
+        else:
+            require(False, "release reader relation authority is unsafe")
+    require(public_relations == set(readable_tables),
             "release reader relation authority is unsafe")
 
     column_privileges = snapshot.get("column_privileges")
     require(isinstance(column_privileges, list),
             "release reader column authority is unavailable")
     migration_columns = set()
+    legacy_extension_columns: dict[str, set[str]] = {}
     for row in column_privileges:
         require(isinstance(row, Mapping),
                 "release reader column authority is unavailable")
@@ -332,6 +440,21 @@ def verify_release_reader_authority(
                 and row.get("column") in {"version", "statements"},
                 "release reader column authority is unsafe",
             )
+        elif relation[0] == "extensions":
+            require(
+                allow_legacy_extension_authority
+                and relation[1] in legacy_extension_relations
+                and row.get("column")
+                    in LEGACY_EXTENSION_RELATION_COLUMNS[relation[1]]
+                and row.get("privilege") == "SELECT"
+                and row.get("grantable") is False
+                and row.get("kind") == "v"
+                and row.get("extension") == "pg_stat_statements",
+                "release reader column authority is unsafe",
+            )
+            legacy_extension_columns.setdefault(relation[1], set()).add(
+                row.get("column")
+            )
         else:
             require(
                 relation[0] == "public"
@@ -342,23 +465,48 @@ def verify_release_reader_authority(
             )
     require(migration_columns in (set(), {"version", "statements"}),
             "release reader migration-ledger authority is incomplete")
+    require(
+        all(
+            legacy_extension_columns.get(relation) ==
+                LEGACY_EXTENSION_RELATION_COLUMNS[relation]
+            for relation in legacy_extension_relations
+        ),
+        "release reader extension relation columns are unsafe",
+    )
 
     require(snapshot.get("sequence_privileges") == [],
             "release reader sequence authority is unsafe")
+    require(snapshot.get("large_object_privileges") == [],
+            "release reader large-object authority is unsafe")
     function_privileges = snapshot.get("function_privileges")
     require(isinstance(function_privileges, list),
             "release reader function authority is unavailable")
+    actual_functions = set()
     for row in function_privileges:
         require(
             isinstance(row, Mapping)
+            and allow_legacy_extension_authority
             and row.get("schema") == "extensions"
-            and isinstance(row.get("extension"), str)
-            and row.get("extension")
+            and isinstance(row.get("function"), str)
+            and row.get("function") in LEGACY_EXTENSION_FUNCTIONS
+            and row.get("extension") == LEGACY_EXTENSION_FUNCTIONS[
+                row.get("function")
+            ]
             and row.get("security_definer") is False
             and row.get("grantable") is False
+            and row.get("language") == "c"
             and row.get("owner") not in {READER, READER_PRIVILEGE_ROLE},
             "release reader function authority is unsafe",
         )
+        actual_functions.add(row.get("function"))
+    require(
+        (not allow_legacy_extension_authority and not actual_functions)
+        or (
+            allow_legacy_extension_authority
+            and "extensions.digest(bytea,text)" in actual_functions
+        ),
+        "release reader function authority is unsafe",
+    )
     require(snapshot.get("owned_objects") == [],
             "release reader may not own database objects")
     return {
@@ -407,10 +555,14 @@ RELEASE_READER_AUTHORITY_SQL = """SELECT /* release_reader_global_authority */
      AND pg_catalog.has_schema_privilege(current_user,namespace.oid,privilege)),'[]'::jsonb) AS schema_privileges,
   COALESCE((SELECT jsonb_agg(jsonb_build_object(
       'schema',namespace.nspname,'relation',class.relname,'privilege',privilege,
+      'kind',class.relkind,'extension',extension.extname,
       'grantable',pg_catalog.has_table_privilege(current_user,class.oid,privilege||' WITH GRANT OPTION'))
       ORDER BY namespace.nspname,class.relname,privilege)
     FROM pg_catalog.pg_class class
     JOIN pg_catalog.pg_namespace namespace ON namespace.oid=class.relnamespace
+    LEFT JOIN pg_catalog.pg_depend dependency ON dependency.classid='pg_class'::regclass
+      AND dependency.objid=class.oid AND dependency.deptype='e'
+    LEFT JOIN pg_catalog.pg_extension extension ON extension.oid=dependency.refobjid
     CROSS JOIN unnest(ARRAY['SELECT','INSERT','UPDATE','DELETE','TRUNCATE','REFERENCES','TRIGGER']) privilege
    WHERE namespace.nspname NOT IN ('pg_catalog','information_schema')
      AND namespace.nspname !~ '^pg_(toast|temp)(_|$)'
@@ -419,12 +571,16 @@ RELEASE_READER_AUTHORITY_SQL = """SELECT /* release_reader_global_authority */
      AND pg_catalog.has_table_privilege(current_user,class.oid,privilege)),'[]'::jsonb) AS relation_privileges,
   COALESCE((SELECT jsonb_agg(jsonb_build_object(
       'schema',namespace.nspname,'relation',class.relname,'column',attribute.attname,
-      'privilege',privilege,'grantable',pg_catalog.has_column_privilege(
+      'kind',class.relkind,'extension',extension.extname,'privilege',privilege,
+      'grantable',pg_catalog.has_column_privilege(
         current_user,class.oid,attribute.attnum,privilege||' WITH GRANT OPTION'))
       ORDER BY namespace.nspname,class.relname,attribute.attnum,privilege)
     FROM pg_catalog.pg_class class
     JOIN pg_catalog.pg_namespace namespace ON namespace.oid=class.relnamespace
     JOIN pg_catalog.pg_attribute attribute ON attribute.attrelid=class.oid
+    LEFT JOIN pg_catalog.pg_depend dependency ON dependency.classid='pg_class'::regclass
+      AND dependency.objid=class.oid AND dependency.deptype='e'
+    LEFT JOIN pg_catalog.pg_extension extension ON extension.oid=dependency.refobjid
     CROSS JOIN unnest(ARRAY['SELECT','INSERT','UPDATE','REFERENCES']) privilege
    WHERE namespace.nspname NOT IN ('pg_catalog','information_schema')
      AND namespace.nspname !~ '^pg_(toast|temp)(_|$)'
@@ -445,14 +601,28 @@ RELEASE_READER_AUTHORITY_SQL = """SELECT /* release_reader_global_authority */
      AND pg_catalog.has_schema_privilege(current_user,namespace.oid,'USAGE')
      AND pg_catalog.has_sequence_privilege(current_user,class.oid,privilege)),'[]'::jsonb) AS sequence_privileges,
   COALESCE((SELECT jsonb_agg(jsonb_build_object(
-      'schema',namespace.nspname,'function',procedure.oid::regprocedure::text,
+      'oid',large_object.oid::text,'privilege',acl.privilege_type,
+      'grantable',acl.is_grantable)
+      ORDER BY large_object.oid,acl.privilege_type,acl.is_grantable)
+    FROM pg_catalog.pg_largeobject_metadata large_object
+    CROSS JOIN LATERAL pg_catalog.aclexplode(COALESCE(
+      large_object.lomacl,pg_catalog.acldefault('L',large_object.lomowner))) acl
+   WHERE acl.privilege_type IN ('SELECT','UPDATE')
+     AND (acl.grantee=0 OR pg_catalog.pg_has_role(
+       current_user,acl.grantee,'USAGE'))),'[]'::jsonb) AS large_object_privileges,
+  COALESCE((SELECT jsonb_agg(jsonb_build_object(
+      'schema',namespace.nspname,'function',namespace.nspname||'.'||procedure.proname||
+        '('||replace(pg_catalog.oidvectortypes(procedure.proargtypes),', ',',')||')',
       'security_definer',procedure.prosecdef,'extension',extension.extname,
-      'owner',owner.rolname,'grantable',pg_catalog.has_function_privilege(
+      'language',language.lanname,'owner',owner.rolname,
+      'grantable',pg_catalog.has_function_privilege(
         current_user,procedure.oid,'EXECUTE WITH GRANT OPTION'))
-      ORDER BY namespace.nspname,procedure.oid::regprocedure::text)
+      ORDER BY namespace.nspname,procedure.proname,
+        pg_catalog.oidvectortypes(procedure.proargtypes))
     FROM pg_catalog.pg_proc procedure
     JOIN pg_catalog.pg_namespace namespace ON namespace.oid=procedure.pronamespace
     JOIN pg_catalog.pg_roles owner ON owner.oid=procedure.proowner
+    JOIN pg_catalog.pg_language language ON language.oid=procedure.prolang
     LEFT JOIN pg_catalog.pg_depend dependency ON dependency.classid='pg_proc'::regclass
       AND dependency.objid=procedure.oid AND dependency.deptype='e'
     LEFT JOIN pg_catalog.pg_extension extension ON extension.oid=dependency.refobjid
@@ -460,22 +630,20 @@ RELEASE_READER_AUTHORITY_SQL = """SELECT /* release_reader_global_authority */
      AND namespace.nspname !~ '^pg_(toast|temp)(_|$)'
      AND pg_catalog.has_schema_privilege(current_user,namespace.oid,'USAGE')
      AND pg_catalog.has_function_privilege(current_user,procedure.oid,'EXECUTE')),'[]'::jsonb) AS function_privileges,
-  COALESCE((SELECT jsonb_agg(object_name ORDER BY object_name) FROM (
-    SELECT 'relation:'||namespace.nspname||'.'||class.relname AS object_name
-      FROM pg_catalog.pg_class class JOIN pg_catalog.pg_namespace namespace ON namespace.oid=class.relnamespace
-      JOIN pg_catalog.pg_roles owner ON owner.oid=class.relowner
-     WHERE owner.rolname IN ('stock_agent_release_reader','stock_agent_release_reader_runtime')
-    UNION ALL SELECT 'schema:'||namespace.nspname
-      FROM pg_catalog.pg_namespace namespace JOIN pg_catalog.pg_roles owner ON owner.oid=namespace.nspowner
-     WHERE owner.rolname IN ('stock_agent_release_reader','stock_agent_release_reader_runtime')
-    UNION ALL SELECT 'function:'||namespace.nspname||'.'||procedure.oid::regprocedure::text
-      FROM pg_catalog.pg_proc procedure JOIN pg_catalog.pg_namespace namespace ON namespace.oid=procedure.pronamespace
-      JOIN pg_catalog.pg_roles owner ON owner.oid=procedure.proowner
-     WHERE owner.rolname IN ('stock_agent_release_reader','stock_agent_release_reader_runtime')
-    UNION ALL SELECT 'database:'||database.datname
-      FROM pg_catalog.pg_database database JOIN pg_catalog.pg_roles owner ON owner.oid=database.datdba
-     WHERE owner.rolname IN ('stock_agent_release_reader','stock_agent_release_reader_runtime')
-  ) owned),'[]'::jsonb) AS owned_objects"""
+  COALESCE((SELECT jsonb_agg(jsonb_build_object(
+      'catalog',dependency.classid::regclass::text,
+      'object_id',dependency.objid::text,
+      'description',pg_catalog.pg_describe_object(
+        dependency.classid,dependency.objid,dependency.objsubid))
+      ORDER BY dependency.classid::regclass::text,dependency.objid,dependency.objsubid)
+    FROM pg_catalog.pg_shdepend dependency
+    JOIN pg_catalog.pg_roles owner ON owner.oid=dependency.refobjid
+    JOIN pg_catalog.pg_database database
+      ON database.datname=pg_catalog.current_database()
+   WHERE dependency.refclassid='pg_authid'::regclass
+     AND dependency.deptype='o'
+     AND owner.rolname IN ('stock_agent_release_reader','stock_agent_release_reader_runtime')
+     AND dependency.dbid IN (0,database.oid)),'[]'::jsonb) AS owned_objects"""
 
 class PostgresReadOnlySource:
     def __init__(self, database_url: str, project_ref: str, *, isolated_guard: bool = False,
@@ -561,6 +729,7 @@ class PostgresReadOnlySource:
                         and policy[0].get("no_restrictive_filter") is True,
                         "read-only database source has incomplete row security coverage")
                 readable_tables.append(table)
+            legacy_extension_authority = False
             if self.pre_migration_baseline:
                 unmigrated = (tuple(absent_tables) == PRE_MIGRATION_ABSENT_TABLES
                               and tuple(unreadable_tables) == PRE_MIGRATION_UNREADABLE_TABLES)
@@ -568,6 +737,7 @@ class PostgresReadOnlySource:
                 require(unmigrated or migrated,
                         "pre-migration release reader baseline mismatch")
                 self._pre_migration_omissions = pre_migration_omissions(migrated=migrated)
+                legacy_extension_authority = unmigrated
             else:
                 require(not absent_tables, "release table is missing")
                 require(not unreadable_tables,
@@ -578,6 +748,7 @@ class PostgresReadOnlySource:
                     "release reader authority snapshot is unavailable")
             self._authority = verify_release_reader_authority(
                 authority[0], self._read_tables,
+                allow_legacy_extension_authority=legacy_extension_authority,
             )
             self._identity = {"project_ref": self.project_ref, "connection_id": hashlib.sha256(f"{row['server']}:{row['port']}/{row['database']}".encode()).hexdigest(),
                               "read_only": True, "isolated_guard": self.isolated_guard}
@@ -596,6 +767,21 @@ class PostgresReadOnlySource:
         require(self.connection is not None and not self.connection.closed, "read-only source is not connected")
         return dict(self._identity)
 
+    def authority_receipt(self) -> dict[str, object]:
+        require(self.connection is not None and not self.connection.closed,
+                "read-only source is not connected")
+        return dict(self._authority)
+
+    def pre_migration_scope(self) -> dict[str, object]:
+        require(
+            self.connection is not None
+            and not self.connection.closed
+            and self.pre_migration_baseline
+            and self._pre_migration_omissions is not None,
+            "pre-migration source scope is unavailable",
+        )
+        return dict(self._pre_migration_omissions)
+
     def query(self, sql: str, parameters: tuple = ()) -> list[dict]:
         require(self.connection is not None and sql.lstrip().upper().startswith("SELECT "), "only fixed SELECT evidence queries are permitted")
         with self.connection.cursor(row_factory=dict_row) as cursor:
@@ -604,7 +790,11 @@ class PostgresReadOnlySource:
 
     def read_records(self):
         self.identity()
-        return {name: self.query(sql) for name, sql in RECOVERY_SQL.items()}
+        records = {name: self.query(sql) for name, sql in RECOVERY_SQL.items()}
+        records["schema_version"] = with_schema_version_hashes(
+            records["schema_version"]
+        )
+        return records
 
     def counts(self):
         self.identity()

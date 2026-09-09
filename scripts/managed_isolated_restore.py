@@ -138,6 +138,10 @@ class ManagedReadOnlyRecoverySource:
             if not all(isinstance(rows, list) and all(isinstance(row, Mapping) for row in rows) for rows in datasets.values()):
                 raise RuntimeError("read-only recovery snapshot is malformed")
             self._records = {name: [dict(row) for row in datasets[name]] for name in REQUIRED_RECOVERY_RECORDS}
+            from scripts.protected_evidence import with_schema_version_hashes
+            self._records["schema_version"] = with_schema_version_hashes(
+                self._records["schema_version"]
+            )
         return self._records
 
     def read_records(self) -> dict[str, list[dict[str, object]]]:

@@ -14352,3 +14352,13 @@ GRANT EXECUTE ON FUNCTION public.read_overdue_scheduled_market_phases(TIMESTAMPT
   TO stock_agent_dashboard;
 GRANT EXECUTE ON FUNCTION public.read_owner_intelligence_v2(INT)
   TO stock_agent_dashboard;
+
+-- Consolidated from sql/migrations/20261017_release_reader_extension_closure.sql
+BEGIN;
+
+-- Migration statement hashes are computed by the protected Python reader.
+-- The evidence login no longer needs to reach extension functions or views.
+REVOKE USAGE ON SCHEMA extensions
+  FROM stock_agent_release_reader, stock_agent_release_reader_runtime;
+
+COMMIT;
