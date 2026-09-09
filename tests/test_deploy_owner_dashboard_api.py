@@ -719,6 +719,49 @@ def test_durable_lease_allows_matching_recovery_when_a_rerun_has_not_taken_owner
     assert cursor.calls[-1][1] == ("recovery-123456789-1", "recovery")
 
 
+@pytest.mark.parametrize(("current_owner", "requested_owner"), (
+    ("release-123456789-1", "reader-closure-20261017-" + "a" * 64),
+    ("recovery-123456789-1", "reader-closure-20261017-" + "a" * 64),
+    ("reader-closure-20261017-" + "a" * 64, "recovery-123456789-1"),
+    ("reader-closure-20261017-" + "a" * 64, "reader-closure-20261017-" + "b" * 64),
+))
+def test_closure_lease_and_unrelated_recovery_cannot_take_over_each_other(
+    current_owner, requested_owner,
+):
+    class Cursor:
+        def __init__(self):
+            self.calls, self.rowcount = [], 1
+
+        def execute(self, statement, params=None):
+            self.calls.append((statement, params))
+
+        def fetchall(self):
+            return [(current_owner, "recovery", "recovery_required", True)]
+
+    cursor = Cursor()
+    with pytest.raises(RuntimeError, match="remains unresolved"):
+        deploy.acquire_durable_release_lease(cursor, requested_owner, "recovery")
+    assert len(cursor.calls) == 2
+
+
+def test_same_exact_main_closure_retry_can_resume_its_unresolved_lease():
+    owner = "reader-closure-20261017-" + "a" * 64
+
+    class Cursor:
+        def __init__(self):
+            self.calls, self.rowcount = [], 1
+
+        def execute(self, statement, params=None):
+            self.calls.append((statement, params))
+
+        def fetchall(self):
+            return [(owner, "recovery", "recovery_required", True)]
+
+    cursor = Cursor()
+    deploy.acquire_durable_release_lease(cursor, owner, "recovery")
+    assert cursor.calls[-1][1] == (owner, "recovery")
+
+
 @pytest.mark.parametrize(
     ("current_owner", "current_state", "requested_owner"),
     (

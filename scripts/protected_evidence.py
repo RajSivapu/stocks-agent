@@ -20,10 +20,17 @@ from psycopg.rows import dict_row
 
 from lib.intelligence.canonical import EVENT_CANONICAL_SQL, RANKING_CANONICAL_SQL
 from lib.release_baseline import (
+    PRE_MIGRATION_OMISSION_REASON,
     PROTECTED_RELEASE_READ_TABLES,
     PRE_MIGRATION_ABSENT_TABLES,
     PRE_MIGRATION_UNREADABLE_TABLES,
     pre_migration_omissions,
+)
+from lib.release_reader_closure_contract import (
+    CLOSURE_PRE_MIGRATION_ABSENT_TABLES,
+    CLOSURE_PRE_MIGRATION_UNREADABLE_TABLES,
+    CLOSURE_READ_TABLES,
+    CLOSURE_READER_CONTRACT,
 )
 from scripts.export_recovery_bundle import MAX_PAYLOAD_BYTES
 from scripts.verify_personal_stock_agent_v1 import path_is_safe, require
@@ -525,6 +532,8 @@ def verify_release_reader_authority(
             "release reader sequence authority is unsafe")
     require(snapshot.get("large_object_privileges") == [],
             "release reader large-object authority is unsafe")
+    require(snapshot.get("owned_objects") == [],
+            "release reader may not own database objects")
     function_privileges = snapshot.get("function_privileges")
     require(isinstance(function_privileges, list),
             "release reader function authority is unavailable")
@@ -571,8 +580,6 @@ def verify_release_reader_authority(
         raise ReleaseReaderFunctionAuthorityError(
             function_issues, len(function_issues),
         )
-    require(snapshot.get("owned_objects") == [],
-            "release reader may not own database objects")
     return {
         "status": "verified",
         "runtime_role": READER,
@@ -712,7 +719,8 @@ RELEASE_READER_AUTHORITY_SQL = """SELECT /* release_reader_global_authority */
 class PostgresReadOnlySource:
     def __init__(self, database_url: str, project_ref: str, *, isolated_guard: bool = False,
                  production_project_ref: str | None = None,
-                 pre_migration_baseline: bool = False):
+                 pre_migration_baseline: bool = False,
+                 reader_contract: str = "current"):
         parsed = urlparse(database_url)
         require(bool(re.fullmatch(r"[a-z0-9]{20}", project_ref)), "exact database project identity is required")
         user = unquote(parsed.username or "")
@@ -724,10 +732,25 @@ class PostgresReadOnlySource:
         if isolated_guard:
             require(bool(re.fullmatch(r"[a-z0-9]{20}", production_project_ref or "")) and project_ref != production_project_ref,
                     "guarded restore project must differ from production")
+        require(
+            reader_contract in {"current", CLOSURE_READER_CONTRACT},
+            "release reader contract is unavailable",
+        )
         self._url = database_url
         self.project_ref = project_ref
         self.isolated_guard = isolated_guard
         self.pre_migration_baseline = pre_migration_baseline
+        self.reader_contract = reader_contract
+        if reader_contract == CLOSURE_READER_CONTRACT:
+            self._contract_read_tables = CLOSURE_READ_TABLES
+            self._contract_absent_tables = CLOSURE_PRE_MIGRATION_ABSENT_TABLES
+            self._contract_unreadable_tables = (
+                CLOSURE_PRE_MIGRATION_UNREADABLE_TABLES
+            )
+        else:
+            self._contract_read_tables = READ_TABLES
+            self._contract_absent_tables = PRE_MIGRATION_ABSENT_TABLES
+            self._contract_unreadable_tables = PRE_MIGRATION_UNREADABLE_TABLES
         self.connection = None
         self._read_tables: tuple[str, ...] = ()
         self._pre_migration_omissions: dict[str, object] | None = None
@@ -746,7 +769,17 @@ class PostgresReadOnlySource:
             readable_tables = []
             absent_tables = []
             unreadable_tables = []
-            for table in READ_TABLES:
+            contract_read_tables = getattr(
+                self, "_contract_read_tables", READ_TABLES,
+            )
+            contract_absent_tables = getattr(
+                self, "_contract_absent_tables", PRE_MIGRATION_ABSENT_TABLES,
+            )
+            contract_unreadable_tables = getattr(
+                self, "_contract_unreadable_tables",
+                PRE_MIGRATION_UNREADABLE_TABLES,
+            )
+            for table in contract_read_tables:
                 presence = self.query("SELECT to_regclass(%s) IS NOT NULL AS present", (f"public.{table}",))
                 require(len(presence) == 1 and type(presence[0].get("present")) is bool,
                         "release table identity is unavailable")
@@ -795,12 +828,22 @@ class PostgresReadOnlySource:
                 readable_tables.append(table)
             legacy_extension_authority = False
             if self.pre_migration_baseline:
-                unmigrated = (tuple(absent_tables) == PRE_MIGRATION_ABSENT_TABLES
-                              and tuple(unreadable_tables) == PRE_MIGRATION_UNREADABLE_TABLES)
+                unmigrated = (
+                    tuple(absent_tables) == contract_absent_tables
+                    and tuple(unreadable_tables) == contract_unreadable_tables
+                )
                 migrated = not absent_tables and not unreadable_tables
                 require(unmigrated or migrated,
                         "pre-migration release reader baseline mismatch")
-                self._pre_migration_omissions = pre_migration_omissions(migrated=migrated)
+                self._pre_migration_omissions = (
+                    pre_migration_omissions(migrated=True)
+                    if migrated
+                    else {
+                        "reason": PRE_MIGRATION_OMISSION_REASON,
+                        "absent_tables": list(contract_absent_tables),
+                        "unreadable_tables": list(contract_unreadable_tables),
+                    }
+                )
                 closure = release_reader_authority_closure_manifest()
                 closure_rows = self.query(
                     """SELECT path,version,sha256
