@@ -374,21 +374,27 @@ def classify_migration_state(
         baseline = reconciliation_baseline_manifest()
         _require(
             known.get(baseline["path"])
-                == (baseline["version"], baseline["sha256"])
-            and isinstance(native_rows, list)
+                == (baseline["version"], baseline["sha256"]),
+            "reconciliation migration private baseline is invalid",
+        )
+        _require(
+            isinstance(native_rows, list)
             and len(native_rows) == 1
             and isinstance(native_rows[0], Sequence)
             and len(native_rows[0]) == 2
             and native_rows[0][0] == baseline["version"]
             and isinstance(native_rows[0][1], Sequence)
-            and not isinstance(native_rows[0][1], (str, bytes))
-            and migration_semantic_sha256(native_rows[0][1])
-                == migration_semantic_sha256([
-                    (ROOT / RECONCILIATION_BASELINE_PATH).read_text(
-                        encoding="utf-8"
-                    )
-                ]),
-            "reconciliation migration baseline pair is invalid",
+            and not isinstance(native_rows[0][1], (str, bytes)),
+            "reconciliation migration native baseline shape is invalid",
+        )
+        _require(
+            migration_semantic_sha256(native_rows[0][1])
+            == migration_semantic_sha256([
+                (ROOT / RECONCILIATION_BASELINE_PATH).read_text(
+                    encoding="utf-8"
+                )
+            ]),
+            "reconciliation migration native baseline identity is invalid",
         )
         subsumed = {
             item["path"] for item in candidate
