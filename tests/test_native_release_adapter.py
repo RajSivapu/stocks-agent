@@ -904,6 +904,140 @@ def test_native_production_engine_failure_boundaries(database, tmp_path, monkeyp
             connection.execute("DROP ROLE IF EXISTS stock_agent_dashboard_runtime")
 
 
+def _safe_release_reader_authority(evidence, read_tables):
+    return {
+        "roles": [
+            {
+                "role": evidence.READER_PRIVILEGE_ROLE, "login": False,
+                "inherit": True, "superuser": False, "createdb": False,
+                "createrole": False, "replication": False,
+                "bypass_rls": False,
+            },
+            {
+                "role": evidence.READER, "login": True, "inherit": True,
+                "superuser": False, "createdb": False, "createrole": False,
+                "replication": False, "bypass_rls": False,
+            },
+        ],
+        "memberships": [{
+            "member": evidence.READER,
+            "granted": evidence.READER_PRIVILEGE_ROLE,
+            "admin_option": False, "inherit_option": True, "set_option": True,
+            "member_superuser": False, "member_createrole": False,
+        }],
+        "database_privileges": [
+            {"privilege": "CONNECT", "grantable": False},
+            {"privilege": "TEMPORARY", "grantable": False},
+        ],
+        "schema_privileges": [
+            {"schema": "extensions", "privilege": "USAGE", "grantable": False},
+            {"schema": "public", "privilege": "USAGE", "grantable": False},
+        ],
+        "relation_privileges": [
+            {"schema": "public", "relation": table, "privilege": "SELECT",
+             "grantable": False}
+            for table in read_tables
+        ],
+        "column_privileges": [],
+        "sequence_privileges": [],
+        "function_privileges": [],
+        "owned_objects": [],
+    }
+
+
+def test_release_reader_global_authority_accepts_only_the_bounded_role_graph():
+    from scripts import protected_evidence as evidence
+
+    snapshot = _safe_release_reader_authority(evidence, ("holdings", "transactions"))
+    result = evidence.verify_release_reader_authority(
+        snapshot, ("holdings", "transactions"),
+    )
+
+    assert result == {
+        "status": "verified",
+        "runtime_role": evidence.READER,
+        "privilege_role": evidence.READER_PRIVILEGE_ROLE,
+        "read_table_count": 2,
+        "write_privileges": 0,
+        "owned_objects": 0,
+    }
+
+
+@pytest.mark.parametrize(
+    ("mutation", "message"),
+    (
+        (lambda value: value["roles"][1].update(createdb=True), "role"),
+        (lambda value: value["roles"][0].update(createrole=True), "role"),
+        (
+            lambda value: value["memberships"].append({
+                "member": "stock_agent_release_reader_runtime",
+                "granted": "rogue_reader",
+                "admin_option": False,
+                "inherit_option": True,
+                "set_option": True,
+                "member_superuser": False,
+                "member_createrole": False,
+            }),
+            "membership",
+        ),
+        (
+            lambda value: value["database_privileges"].append({
+                "privilege": "CREATE", "grantable": False,
+            }),
+            "database authority",
+        ),
+        (
+            lambda value: value["schema_privileges"].append({
+                "schema": "private", "privilege": "USAGE", "grantable": False,
+            }),
+            "schema authority",
+        ),
+        (
+            lambda value: value["relation_privileges"].append({
+                "schema": "private", "relation": "secrets",
+                "privilege": "SELECT", "grantable": False,
+            }),
+            "relation authority",
+        ),
+        (
+            lambda value: value["column_privileges"].append({
+                "schema": "public", "relation": "holdings", "column": "ticker",
+                "privilege": "UPDATE", "grantable": False,
+            }),
+            "column authority",
+        ),
+        (
+            lambda value: value["sequence_privileges"].append({
+                "schema": "public", "sequence": "rogue_id_seq",
+                "privilege": "UPDATE", "grantable": False,
+            }),
+            "sequence authority",
+        ),
+        (
+            lambda value: value["function_privileges"].append({
+                "schema": "public", "function": "mutate()",
+                "extension": None, "security_definer": True,
+                "owner": "postgres", "grantable": False,
+            }),
+            "function authority",
+        ),
+        (
+            lambda value: value["owned_objects"].append("relation:public.holdings"),
+            "own database objects",
+        ),
+    ),
+)
+def test_release_reader_global_authority_rejects_every_expansion(mutation, message):
+    from scripts import protected_evidence as evidence
+
+    snapshot = _safe_release_reader_authority(evidence, ("holdings", "transactions"))
+    mutation(snapshot)
+    with pytest.raises(RuntimeError, match=message):
+        evidence.verify_release_reader_authority(
+            snapshot, ("holdings", "transactions"),
+        )
+
+
 @pytest.mark.parametrize("table", ["decision_evaluations", "market_policy_comparisons"])
 @pytest.mark.parametrize("readable,writable", [(False, False), (True, True)])
 def test_protected_reader_rejects_incomplete_policy_table_privileges(monkeypatch, table, readable, writable):
@@ -946,6 +1080,8 @@ def test_protected_dry_run_reader_records_only_tables_present_before_migration(m
         "p" * 20, pre_migration_baseline=True,
     )
     def query(statement, params=()):
+        if "release_reader_global_authority" in statement:
+            return [_safe_release_reader_authority(evidence, source._read_tables)]
         if "current_user AS role" in statement:
             return [{"role": evidence.READER, "read_only": "on", "rolsuper": False,
                 "rolbypassrls": False, "server": "127.0.0.1", "port": 5432,
@@ -990,6 +1126,8 @@ def test_pre_migration_reader_rejects_unexpected_missing_baseline_table(monkeypa
         "p" * 20, pre_migration_baseline=True,
     )
     def query(statement, params=()):
+        if "release_reader_global_authority" in statement:
+            return [_safe_release_reader_authority(evidence, source._read_tables)]
         if "current_user AS role" in statement:
             return [{"role": evidence.READER, "read_only": "on", "rolsuper": False,
                 "rolbypassrls": False, "server": "127.0.0.1", "port": 5432,
@@ -1024,6 +1162,8 @@ def test_pre_migration_reader_accepts_fully_migrated_retry_state(monkeypatch):
         "p" * 20, pre_migration_baseline=True,
     )
     def query(statement, params=()):
+        if "release_reader_global_authority" in statement:
+            return [_safe_release_reader_authority(evidence, source._read_tables)]
         if "current_user AS role" in statement:
             return [{"role": evidence.READER, "read_only": "on", "rolsuper": False,
                 "rolbypassrls": False, "server": "127.0.0.1", "port": 5432,

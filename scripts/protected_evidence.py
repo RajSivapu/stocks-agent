@@ -29,6 +29,7 @@ from scripts.export_recovery_bundle import MAX_PAYLOAD_BYTES
 from scripts.verify_personal_stock_agent_v1 import path_is_safe, require
 
 READER = "stock_agent_release_reader_runtime"
+READER_PRIVILEGE_ROLE = "stock_agent_release_reader"
 RECOVERY_SQL = {
     "decision_evaluations": "SELECT id::text,request_id::text,run_id::text,candidate_id::text,policy_version,input_digest,raw_action,final_action,policy_status,reason_codes,explanations,normalized,evidence,analyst,checker,created_at::text FROM public.decision_evaluations",
     "policy_comparisons": "SELECT id::text,run_id::text,packet_id::text,evaluation_id::text,comparison,created_at::text FROM public.market_policy_comparisons",
@@ -217,6 +218,265 @@ RECOVERY_SQL = {
 }
 READ_TABLES = PROTECTED_RELEASE_READ_TABLES
 
+
+def _administrative_reader_edge(edge: object) -> bool:
+    if not isinstance(edge, Mapping):
+        return False
+    if edge.get("member_superuser") is True:
+        return True
+    return (
+        edge.get("member") == "postgres"
+        and edge.get("member_superuser") is False
+        and edge.get("member_createrole") is True
+        and edge.get("admin_option") is True
+        and edge.get("inherit_option") is False
+        and edge.get("set_option") is False
+    )
+
+
+def verify_release_reader_authority(
+    snapshot: Mapping[str, object], readable_tables: tuple[str, ...],
+) -> dict[str, object]:
+    """Require an exact role graph and global read-only authority closure."""
+    expected_roles = [
+        {
+            "role": READER_PRIVILEGE_ROLE, "login": False, "inherit": True,
+            "superuser": False, "createdb": False, "createrole": False,
+            "replication": False, "bypass_rls": False,
+        },
+        {
+            "role": READER, "login": True, "inherit": True,
+            "superuser": False, "createdb": False, "createrole": False,
+            "replication": False, "bypass_rls": False,
+        },
+    ]
+    require(snapshot.get("roles") == expected_roles,
+            "release reader role has unsafe role authority")
+    memberships = snapshot.get("memberships")
+    require(isinstance(memberships, list),
+            "release reader membership authority is unavailable")
+    non_administrative = [
+        edge for edge in memberships if not _administrative_reader_edge(edge)
+    ]
+    require(non_administrative == [{
+        "member": READER,
+        "granted": READER_PRIVILEGE_ROLE,
+        "admin_option": False,
+        "inherit_option": True,
+        "set_option": True,
+        "member_superuser": False,
+        "member_createrole": False,
+    }], "release reader membership is not exact")
+
+    database_privileges = snapshot.get("database_privileges")
+    require(isinstance(database_privileges, list),
+            "release reader database authority is unavailable")
+    require(all(isinstance(row, Mapping) for row in database_privileges),
+            "release reader database authority is unavailable")
+    require(
+        {(row.get("privilege"), row.get("grantable"))
+         for row in database_privileges if isinstance(row, Mapping)}
+        == {("CONNECT", False), ("TEMPORARY", False)},
+        "release reader database authority is unsafe",
+    )
+
+    schema_privileges = snapshot.get("schema_privileges")
+    require(isinstance(schema_privileges, list),
+            "release reader schema authority is unavailable")
+    require(all(isinstance(row, Mapping) for row in schema_privileges),
+            "release reader schema authority is unavailable")
+    schemas = {
+        (row.get("schema"), row.get("privilege"), row.get("grantable"))
+        for row in schema_privileges if isinstance(row, Mapping)
+    }
+    require(
+        schemas.issubset({
+            ("public", "USAGE", False),
+            ("extensions", "USAGE", False),
+            ("supabase_migrations", "USAGE", False),
+        })
+        and {("public", "USAGE", False), ("extensions", "USAGE", False)}
+        .issubset(schemas),
+        "release reader schema authority is unsafe",
+    )
+
+    relation_privileges = snapshot.get("relation_privileges")
+    require(isinstance(relation_privileges, list),
+            "release reader relation authority is unavailable")
+    require(all(isinstance(row, Mapping) for row in relation_privileges),
+            "release reader relation authority is unavailable")
+    actual_relations = {
+        (row.get("schema"), row.get("relation"), row.get("privilege"),
+         row.get("grantable"))
+        for row in relation_privileges if isinstance(row, Mapping)
+    }
+    expected_relations = {
+        ("public", table, "SELECT", False) for table in readable_tables
+    }
+    require(actual_relations == expected_relations,
+            "release reader relation authority is unsafe")
+
+    column_privileges = snapshot.get("column_privileges")
+    require(isinstance(column_privileges, list),
+            "release reader column authority is unavailable")
+    migration_columns = set()
+    for row in column_privileges:
+        require(isinstance(row, Mapping),
+                "release reader column authority is unavailable")
+        relation = (row.get("schema"), row.get("relation"))
+        if relation == ("supabase_migrations", "schema_migrations"):
+            migration_columns.add(row.get("column"))
+            require(
+                row.get("privilege") == "SELECT"
+                and row.get("grantable") is False
+                and row.get("column") in {"version", "statements"},
+                "release reader column authority is unsafe",
+            )
+        else:
+            require(
+                relation[0] == "public"
+                and relation[1] in readable_tables
+                and row.get("privilege") == "SELECT"
+                and row.get("grantable") is False,
+                "release reader column authority is unsafe",
+            )
+    require(migration_columns in (set(), {"version", "statements"}),
+            "release reader migration-ledger authority is incomplete")
+
+    require(snapshot.get("sequence_privileges") == [],
+            "release reader sequence authority is unsafe")
+    function_privileges = snapshot.get("function_privileges")
+    require(isinstance(function_privileges, list),
+            "release reader function authority is unavailable")
+    for row in function_privileges:
+        require(
+            isinstance(row, Mapping)
+            and row.get("schema") == "extensions"
+            and isinstance(row.get("extension"), str)
+            and row.get("extension")
+            and row.get("security_definer") is False
+            and row.get("grantable") is False
+            and row.get("owner") not in {READER, READER_PRIVILEGE_ROLE},
+            "release reader function authority is unsafe",
+        )
+    require(snapshot.get("owned_objects") == [],
+            "release reader may not own database objects")
+    return {
+        "status": "verified",
+        "runtime_role": READER,
+        "privilege_role": READER_PRIVILEGE_ROLE,
+        "read_table_count": len(readable_tables),
+        "write_privileges": 0,
+        "owned_objects": 0,
+    }
+
+
+RELEASE_READER_AUTHORITY_SQL = """SELECT /* release_reader_global_authority */
+  COALESCE((SELECT jsonb_agg(jsonb_build_object(
+      'role',r.rolname,'login',r.rolcanlogin,'inherit',r.rolinherit,
+      'superuser',r.rolsuper,'createdb',r.rolcreatedb,
+      'createrole',r.rolcreaterole,'replication',r.rolreplication,
+      'bypass_rls',r.rolbypassrls) ORDER BY r.rolname)
+    FROM pg_catalog.pg_roles r
+   WHERE r.rolname IN ('stock_agent_release_reader','stock_agent_release_reader_runtime')),'[]'::jsonb) AS roles,
+  COALESCE((SELECT jsonb_agg(jsonb_build_object(
+      'member',member.rolname,'granted',granted.rolname,
+      'admin_option',membership.admin_option,
+      'inherit_option',COALESCE((to_jsonb(membership)->>'inherit_option')::boolean,true),
+      'set_option',COALESCE((to_jsonb(membership)->>'set_option')::boolean,true),
+      'member_superuser',member.rolsuper,'member_createrole',member.rolcreaterole)
+      ORDER BY granted.rolname,member.rolname)
+    FROM pg_catalog.pg_auth_members membership
+    JOIN pg_catalog.pg_roles member ON member.oid=membership.member
+    JOIN pg_catalog.pg_roles granted ON granted.oid=membership.roleid
+   WHERE member.rolname IN ('stock_agent_release_reader','stock_agent_release_reader_runtime')
+      OR granted.rolname IN ('stock_agent_release_reader','stock_agent_release_reader_runtime')),'[]'::jsonb) AS memberships,
+  COALESCE((SELECT jsonb_agg(jsonb_build_object(
+      'privilege',privilege,'grantable',pg_catalog.has_database_privilege(
+        current_user,pg_catalog.current_database(),privilege||' WITH GRANT OPTION')) ORDER BY privilege)
+    FROM unnest(ARRAY['CONNECT','CREATE','TEMPORARY']) privilege
+   WHERE pg_catalog.has_database_privilege(current_user,pg_catalog.current_database(),privilege)),'[]'::jsonb) AS database_privileges,
+  COALESCE((SELECT jsonb_agg(jsonb_build_object(
+      'schema',namespace.nspname,'privilege',privilege,
+      'grantable',pg_catalog.has_schema_privilege(current_user,namespace.oid,privilege||' WITH GRANT OPTION'))
+      ORDER BY namespace.nspname,privilege)
+    FROM pg_catalog.pg_namespace namespace
+    CROSS JOIN unnest(ARRAY['USAGE','CREATE']) privilege
+   WHERE namespace.nspname NOT IN ('pg_catalog','information_schema')
+     AND namespace.nspname !~ '^pg_(toast|temp)(_|$)'
+     AND pg_catalog.has_schema_privilege(current_user,namespace.oid,privilege)),'[]'::jsonb) AS schema_privileges,
+  COALESCE((SELECT jsonb_agg(jsonb_build_object(
+      'schema',namespace.nspname,'relation',class.relname,'privilege',privilege,
+      'grantable',pg_catalog.has_table_privilege(current_user,class.oid,privilege||' WITH GRANT OPTION'))
+      ORDER BY namespace.nspname,class.relname,privilege)
+    FROM pg_catalog.pg_class class
+    JOIN pg_catalog.pg_namespace namespace ON namespace.oid=class.relnamespace
+    CROSS JOIN unnest(ARRAY['SELECT','INSERT','UPDATE','DELETE','TRUNCATE','REFERENCES','TRIGGER']) privilege
+   WHERE namespace.nspname NOT IN ('pg_catalog','information_schema')
+     AND namespace.nspname !~ '^pg_(toast|temp)(_|$)'
+     AND class.relkind IN ('r','p','v','m','f')
+     AND pg_catalog.has_schema_privilege(current_user,namespace.oid,'USAGE')
+     AND pg_catalog.has_table_privilege(current_user,class.oid,privilege)),'[]'::jsonb) AS relation_privileges,
+  COALESCE((SELECT jsonb_agg(jsonb_build_object(
+      'schema',namespace.nspname,'relation',class.relname,'column',attribute.attname,
+      'privilege',privilege,'grantable',pg_catalog.has_column_privilege(
+        current_user,class.oid,attribute.attnum,privilege||' WITH GRANT OPTION'))
+      ORDER BY namespace.nspname,class.relname,attribute.attnum,privilege)
+    FROM pg_catalog.pg_class class
+    JOIN pg_catalog.pg_namespace namespace ON namespace.oid=class.relnamespace
+    JOIN pg_catalog.pg_attribute attribute ON attribute.attrelid=class.oid
+    CROSS JOIN unnest(ARRAY['SELECT','INSERT','UPDATE','REFERENCES']) privilege
+   WHERE namespace.nspname NOT IN ('pg_catalog','information_schema')
+     AND namespace.nspname !~ '^pg_(toast|temp)(_|$)'
+     AND class.relkind IN ('r','p','v','m','f')
+     AND attribute.attnum>0 AND NOT attribute.attisdropped
+     AND pg_catalog.has_schema_privilege(current_user,namespace.oid,'USAGE')
+     AND pg_catalog.has_column_privilege(current_user,class.oid,attribute.attnum,privilege)),'[]'::jsonb) AS column_privileges,
+  COALESCE((SELECT jsonb_agg(jsonb_build_object(
+      'schema',namespace.nspname,'sequence',class.relname,'privilege',privilege,
+      'grantable',pg_catalog.has_sequence_privilege(current_user,class.oid,privilege||' WITH GRANT OPTION'))
+      ORDER BY namespace.nspname,class.relname,privilege)
+    FROM pg_catalog.pg_class class
+    JOIN pg_catalog.pg_namespace namespace ON namespace.oid=class.relnamespace
+    CROSS JOIN unnest(ARRAY['USAGE','SELECT','UPDATE']) privilege
+   WHERE namespace.nspname NOT IN ('pg_catalog','information_schema')
+     AND namespace.nspname !~ '^pg_(toast|temp)(_|$)'
+     AND class.relkind='S'
+     AND pg_catalog.has_schema_privilege(current_user,namespace.oid,'USAGE')
+     AND pg_catalog.has_sequence_privilege(current_user,class.oid,privilege)),'[]'::jsonb) AS sequence_privileges,
+  COALESCE((SELECT jsonb_agg(jsonb_build_object(
+      'schema',namespace.nspname,'function',procedure.oid::regprocedure::text,
+      'security_definer',procedure.prosecdef,'extension',extension.extname,
+      'owner',owner.rolname,'grantable',pg_catalog.has_function_privilege(
+        current_user,procedure.oid,'EXECUTE WITH GRANT OPTION'))
+      ORDER BY namespace.nspname,procedure.oid::regprocedure::text)
+    FROM pg_catalog.pg_proc procedure
+    JOIN pg_catalog.pg_namespace namespace ON namespace.oid=procedure.pronamespace
+    JOIN pg_catalog.pg_roles owner ON owner.oid=procedure.proowner
+    LEFT JOIN pg_catalog.pg_depend dependency ON dependency.classid='pg_proc'::regclass
+      AND dependency.objid=procedure.oid AND dependency.deptype='e'
+    LEFT JOIN pg_catalog.pg_extension extension ON extension.oid=dependency.refobjid
+   WHERE namespace.nspname NOT IN ('pg_catalog','information_schema')
+     AND namespace.nspname !~ '^pg_(toast|temp)(_|$)'
+     AND pg_catalog.has_schema_privilege(current_user,namespace.oid,'USAGE')
+     AND pg_catalog.has_function_privilege(current_user,procedure.oid,'EXECUTE')),'[]'::jsonb) AS function_privileges,
+  COALESCE((SELECT jsonb_agg(object_name ORDER BY object_name) FROM (
+    SELECT 'relation:'||namespace.nspname||'.'||class.relname AS object_name
+      FROM pg_catalog.pg_class class JOIN pg_catalog.pg_namespace namespace ON namespace.oid=class.relnamespace
+      JOIN pg_catalog.pg_roles owner ON owner.oid=class.relowner
+     WHERE owner.rolname IN ('stock_agent_release_reader','stock_agent_release_reader_runtime')
+    UNION ALL SELECT 'schema:'||namespace.nspname
+      FROM pg_catalog.pg_namespace namespace JOIN pg_catalog.pg_roles owner ON owner.oid=namespace.nspowner
+     WHERE owner.rolname IN ('stock_agent_release_reader','stock_agent_release_reader_runtime')
+    UNION ALL SELECT 'function:'||namespace.nspname||'.'||procedure.oid::regprocedure::text
+      FROM pg_catalog.pg_proc procedure JOIN pg_catalog.pg_namespace namespace ON namespace.oid=procedure.pronamespace
+      JOIN pg_catalog.pg_roles owner ON owner.oid=procedure.proowner
+     WHERE owner.rolname IN ('stock_agent_release_reader','stock_agent_release_reader_runtime')
+    UNION ALL SELECT 'database:'||database.datname
+      FROM pg_catalog.pg_database database JOIN pg_catalog.pg_roles owner ON owner.oid=database.datdba
+     WHERE owner.rolname IN ('stock_agent_release_reader','stock_agent_release_reader_runtime')
+  ) owned),'[]'::jsonb) AS owned_objects"""
+
 class PostgresReadOnlySource:
     def __init__(self, database_url: str, project_ref: str, *, isolated_guard: bool = False,
                  production_project_ref: str | None = None,
@@ -313,6 +573,12 @@ class PostgresReadOnlySource:
                 require(not unreadable_tables,
                         "read-only database source lacks SELECT or has write authority")
             self._read_tables = tuple(readable_tables)
+            authority = self.query(RELEASE_READER_AUTHORITY_SQL)
+            require(len(authority) == 1,
+                    "release reader authority snapshot is unavailable")
+            self._authority = verify_release_reader_authority(
+                authority[0], self._read_tables,
+            )
             self._identity = {"project_ref": self.project_ref, "connection_id": hashlib.sha256(f"{row['server']}:{row['port']}/{row['database']}".encode()).hexdigest(),
                               "read_only": True, "isolated_guard": self.isolated_guard}
             return self
