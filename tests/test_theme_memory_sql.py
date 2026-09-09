@@ -1,4 +1,5 @@
 from concurrent.futures import ThreadPoolExecutor
+from datetime import date, timedelta
 import hashlib
 import json
 import os
@@ -47,6 +48,9 @@ DASHBOARD_AUTHORITY_MIGRATION = (
 RELEASE_READER_AUTHORITY_MIGRATION = (
     ROOT / "sql/migrations/20261017_release_reader_extension_closure.sql"
 )
+RUN_ORDER_MIGRATION = (
+    ROOT / "sql/migrations/20261018_analysis_context_binding_lifecycle.sql"
+)
 SCHEMA = ROOT / "sql/schema.sql"
 
 
@@ -84,12 +88,15 @@ def test_v2_runtime_completion_and_honest_empty_tail_are_parseable_and_ordered()
         RELEASE_READER_AUTHORITY_MIGRATION.read_text()
     )
     assert release_reader_authority
+    run_order = parse_sql(RUN_ORDER_MIGRATION.read_text())
+    assert run_order
     schema = SCHEMA.read_bytes()
     assert RUNTIME_COMPLETION_MIGRATION.read_bytes() in schema
     assert HONEST_EMPTY_REPORT_MIGRATION.read_bytes() in schema
     assert RELEASE_READER_MIGRATION.read_bytes() in schema
     assert DASHBOARD_AUTHORITY_MIGRATION.read_bytes() in schema
-    assert schema.endswith(RELEASE_READER_AUTHORITY_MIGRATION.read_bytes())
+    assert RELEASE_READER_AUTHORITY_MIGRATION.read_bytes() in schema
+    assert schema.endswith(RUN_ORDER_MIGRATION.read_bytes())
     migration = RUNTIME_COMPLETION_MIGRATION.read_text()
     assert "SECURITY DEFINER SET search_path=pg_catalog" in migration
     assert "record_market_intelligence_v2_completion" in migration
@@ -139,6 +146,79 @@ def test_memory_context_is_frozen_bounded_and_preserves_priority_surfaces():
         assert f"LIMIT {cap}" in migration
     assert "ON CONFLICT (run_id) DO NOTHING" in migration
     assert "memory context hash mismatch" in migration
+
+
+def test_memory_context_freezes_after_analysis_start_before_intelligence_start(
+    theme_memory_dsn,
+):
+    with psycopg.connect(theme_memory_dsn, autocommit=True) as db:
+        run_id = str(uuid.uuid4())
+        reservation_id = str(uuid.uuid4())
+        market_date = date(2099, 10, 18)
+        now = db.execute("SELECT statement_timestamp()").fetchone()[0]
+        db.execute(
+            "INSERT INTO analysis_runs(id,kind,status,scheduled_market_date,scheduled_phase) "
+            "VALUES(%s,'post-market','running',%s,'post-market')",
+            (run_id, market_date),
+        )
+
+        db.execute("SET ROLE service_role")
+        first = db.execute(
+            "SELECT public.refresh_market_intelligence_context(%s)",
+            (run_id,),
+        ).fetchone()[0]
+        db.execute("RESET ROLE")
+
+        assert first["theme_memory"]["research_only"] is True
+        assert first["theme_memory"]["execution_allowed"] is False
+        frozen = db.execute(
+            "SELECT context,snapshot_hash FROM market_intelligence_memory_context_bindings_v2 "
+            "WHERE run_id=%s",
+            (run_id,),
+        ).fetchone()
+        assert frozen is not None
+
+        intelligence = json.loads((ROOT / "config/settings.json").read_text())[
+            "intelligence"
+        ]
+        db.execute(
+            "INSERT INTO market_policy_config(version,config) VALUES(91018,%s)",
+            (Jsonb({"intelligence": intelligence}),),
+        )
+        window = {
+            "start": (now - timedelta(hours=1)).isoformat(),
+            "end": now.isoformat(),
+            "timezone": "America/Chicago",
+            "market_date": market_date.isoformat(),
+            "phase": "post-market",
+        }
+        plan = {
+            "reservations": [{
+                "id": reservation_id,
+                "provider": "gdelt",
+                "requests": 1,
+                "cache_keys": [],
+            }]
+        }
+        db.execute(
+            "SELECT public.start_market_intelligence_run(%s,'post-market',%s,91018,%s,%s)",
+            (run_id, market_date, Jsonb(plan), Jsonb(window)),
+        )
+        db.execute("SET ROLE service_role")
+        second = db.execute(
+            "SELECT public.refresh_market_intelligence_context(%s)",
+            (run_id,),
+        ).fetchone()[0]
+        db.execute("RESET ROLE")
+
+        assert second["theme_memory_snapshot_hash"] == first[
+            "theme_memory_snapshot_hash"
+        ]
+        assert db.execute(
+            "SELECT context,snapshot_hash FROM market_intelligence_memory_context_bindings_v2 "
+            "WHERE run_id=%s",
+            (run_id,),
+        ).fetchone() == frozen
 
 
 def test_v2_tables_are_append_only_rls_protected_and_dashboard_is_bounded():

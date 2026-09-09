@@ -12,11 +12,11 @@ import scripts.finalize_release_reader_authority_closure as finalizer
 from scripts.extract_release_reader_authority_closure_artifact import (
     extract_closure_artifact,
 )
-from scripts.deploy_owner_dashboard_api import candidate_migration_manifest
 from scripts.managed_isolated_restore import canonical_json
 from scripts.release_reader_authority_closure import (
     CLOSURE_LEASE_OWNER,
     FORMAT as CLOSURE_FORMAT,
+    closure_migration_manifest,
 )
 
 
@@ -28,7 +28,7 @@ LEASE_OWNER = CLOSURE_LEASE_OWNER
 
 
 def _closure_receipt() -> dict[str, object]:
-    closure = candidate_migration_manifest()[-1]
+    closure = closure_migration_manifest()
     receipt: dict[str, object] = {
         "format": CLOSURE_FORMAT,
         "repository": "owner/repository",
@@ -140,7 +140,7 @@ def test_finalizer_resolves_only_after_exact_closed_readback(tmp_path, monkeypat
         assert verify_only is True
         return {
             "state": "already_closed",
-            "closure": candidate_migration_manifest()[-1],
+            "closure": closure_migration_manifest(),
             "post_extension_function_count": 0,
             "post_extension_relation_count": 0,
             "post_extension_authority_sha256": "6" * 64,
