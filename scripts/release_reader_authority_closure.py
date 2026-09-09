@@ -35,6 +35,7 @@ from scripts.deploy_owner_dashboard_api import (  # noqa: E402
     migration_execution_statements,
     migration_semantic_sha256,
     reconciliation_baseline_manifest,
+    reconciliation_baseline_statements,
     validate_candidate_migration_cutover,
     validate_release_admin_session_url,
 )
@@ -389,11 +390,7 @@ def classify_migration_state(
         )
         _require(
             migration_semantic_sha256(native_rows[0][1])
-            == migration_semantic_sha256([
-                (ROOT / RECONCILIATION_BASELINE_PATH).read_text(
-                    encoding="utf-8"
-                )
-            ]),
+            == migration_semantic_sha256(reconciliation_baseline_statements()),
             "reconciliation migration native baseline identity is invalid",
         )
         subsumed = {

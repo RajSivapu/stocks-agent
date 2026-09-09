@@ -851,8 +851,8 @@ def candidate_migration_manifest(migrations_directory: Path = ROOT / "sql/migrat
     return manifest
 
 
-def reconciliation_baseline_manifest() -> dict[str, str]:
-    """Bind the one permitted baseline receipt to its reviewed SQL bytes."""
+def reconciliation_baseline_statements() -> list[str]:
+    """Return the exact native statement-array form of the reviewed baseline."""
     path = ROOT / RECONCILIATION_BASELINE_PATH
     if not path.is_file() or path.is_symlink() or path.parent.is_symlink() or path.parent.parent.is_symlink():
         raise RuntimeError("reconciliation baseline source is unavailable or unsafe")
@@ -863,6 +863,12 @@ def reconciliation_baseline_manifest() -> dict[str, str]:
         statements = normalize_migration_statements(raw.decode("utf-8"))
     except UnicodeDecodeError as error:
         raise RuntimeError("reconciliation baseline source is not UTF-8") from error
+    return statements
+
+
+def reconciliation_baseline_manifest() -> dict[str, str]:
+    """Bind the one permitted baseline receipt to its reviewed SQL bytes."""
+    statements = reconciliation_baseline_statements()
     return {"path": RECONCILIATION_BASELINE_PATH, "version": RECONCILIATION_BASELINE_VERSION,
             "sha256": migration_statements_sha256(statements)}
 
@@ -944,9 +950,7 @@ def apply_release_migrations(
         if (known.get(baseline["path"]) != (baseline["version"], baseline["sha256"])
                 or len(legacy) != 1 or legacy[0][0] != baseline["version"]
                 or migration_semantic_sha256(legacy[0][1])
-                   != migration_semantic_sha256([
-                       (ROOT / RECONCILIATION_BASELINE_PATH).read_text(encoding="utf-8")
-                   ])
+                   != migration_semantic_sha256(reconciliation_baseline_statements())
                 or any(item["version"] == baseline["version"] for item in manifest)):
             raise RuntimeError("reconciliation migration baseline pair is invalid")
         subsumed = {item["path"] for item in manifest if item["version"] < baseline["version"]}

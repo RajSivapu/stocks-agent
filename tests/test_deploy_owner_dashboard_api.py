@@ -612,6 +612,23 @@ def test_native_supabase_statement_receipts_are_compared_without_joining_or_repa
     assert verifier.migration_statements_sha256(["SELECT 1", "SELECT 2"]) == deploy.migration_statements_sha256(candidate)
 
 
+def test_reconciliation_baseline_identity_uses_its_native_statement_array():
+    source = (
+        deploy.ROOT / deploy.RECONCILIATION_BASELINE_PATH
+    ).read_text(encoding="utf-8")
+    statements = deploy.reconciliation_baseline_statements()
+
+    assert statements == deploy.normalize_migration_statements(source)
+    assert deploy.reconciliation_baseline_manifest()["sha256"] == (
+        deploy.migration_statements_sha256(statements)
+    )
+    # The production reconciler wrote this ordered array. Parsing the full
+    # multi-statement file as one input produces a different receipt.
+    assert deploy.migration_semantic_sha256(statements) != (
+        deploy.migration_semantic_sha256([source])
+    )
+
+
 @pytest.mark.parametrize(("left", "right"), (
     ("SELECT 1; -- comment\rDROP TABLE secret;", "SELECT 1;"),
     ("SELECT foo/**/bar;", "SELECT foobar;"),
