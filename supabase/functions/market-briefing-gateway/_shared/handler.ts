@@ -642,7 +642,11 @@ export function createGatewayHandler(dependencies: GatewayDependencies) {
       return response(400, { ok: false, code: "INVALID_REQUEST" });
     }
 
-    if (envelope.operation === "read_discovery_context" && !ownerAuthorized) {
+    if (
+      envelope.operation === "read_discovery_context" &&
+      !ownerAuthorized &&
+      !serviceAuthorized
+    ) {
       return response(403, { ok: false, code: "OWNER_ONLY" });
     }
     if (!serviceAuthorized && envelope.operation !== "read_discovery_context") {
