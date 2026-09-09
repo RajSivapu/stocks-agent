@@ -907,6 +907,8 @@ def test_native_production_engine_failure_boundaries(database, tmp_path, monkeyp
 def _safe_release_reader_authority(evidence, read_tables, *, legacy_extensions=False):
     schema_privileges = [
         {"schema": "public", "privilege": "USAGE", "grantable": False},
+        {"schema": "supabase_migrations", "privilege": "USAGE",
+         "grantable": False},
     ]
     function_privileges = []
     if legacy_extensions:
@@ -952,7 +954,18 @@ def _safe_release_reader_authority(evidence, read_tables, *, legacy_extensions=F
              "grantable": False, "kind": "r", "extension": None}
             for table in read_tables
         ],
-        "column_privileges": [],
+        "column_privileges": [
+            {
+                "schema": "supabase_migrations",
+                "relation": "schema_migrations",
+                "column": column,
+                "privilege": "SELECT",
+                "grantable": False,
+                "kind": "r",
+                "extension": None,
+            }
+            for column in ("version", "statements")
+        ],
         "sequence_privileges": [],
         "large_object_privileges": [],
         "function_privileges": function_privileges,
@@ -1067,6 +1080,14 @@ def test_release_reader_rejects_unknown_legacy_extension_function():
             "sequence authority",
         ),
         (
+            lambda value: value["schema_privileges"].pop(1),
+            "schema authority",
+        ),
+        (
+            lambda value: value["column_privileges"].pop(),
+            "migration-ledger authority",
+        ),
+        (
             lambda value: value["large_object_privileges"].append({
                 "oid": "42", "privilege": "SELECT", "grantable": False,
             }),
@@ -1143,6 +1164,8 @@ def test_protected_dry_run_reader_records_only_tables_present_before_migration(m
             return [_safe_release_reader_authority(
                 evidence, source._read_tables, legacy_extensions=True,
             )]
+        if "WHERE path=%s OR version=%s" in statement:
+            return []
         if "current_user AS role" in statement:
             return [{"role": evidence.READER, "read_only": "on", "rolsuper": False,
                 "rolbypassrls": False, "server": "127.0.0.1", "port": 5432,
@@ -1172,6 +1195,114 @@ def test_protected_dry_run_reader_records_only_tables_present_before_migration(m
         "absent_tables": list(evidence.PRE_MIGRATION_ABSENT_TABLES),
         "unreadable_tables": list(evidence.PRE_MIGRATION_UNREADABLE_TABLES),
     }
+
+
+def test_pre_migration_reader_uses_exact_closure_ledger_for_strict_authority(monkeypatch):
+    from scripts import protected_evidence as evidence
+
+    closure = {
+        "path": evidence.READER_AUTHORITY_CLOSURE_PATH,
+        "version": "20261017",
+        "sha256": "a" * 64,
+    }
+    monkeypatch.setattr(
+        evidence, "release_reader_authority_closure_manifest", lambda: closure,
+    )
+
+    class Connection:
+        closed = False
+        def execute(self, _sql): pass
+        def rollback(self): pass
+        def close(self): self.closed = True
+
+    connection = Connection()
+    monkeypatch.setattr(evidence.psycopg, "connect", lambda *a, **k: connection)
+    source = evidence.PostgresReadOnlySource(
+        f"postgresql://{evidence.READER}:password@db.{'p' * 20}.supabase.co:5432/postgres",
+        "p" * 20, pre_migration_baseline=True,
+    )
+
+    def query(statement, params=()):
+        if "release_reader_global_authority" in statement:
+            return [_safe_release_reader_authority(evidence, source._read_tables)]
+        if "current_user AS role" in statement:
+            return [{
+                "role": evidence.READER, "read_only": "on", "rolsuper": False,
+                "rolbypassrls": False, "server": "127.0.0.1", "port": 5432,
+                "database": "postgres",
+            }]
+        if "to_regclass" in statement:
+            return [{"present": True}]
+        if "has_table_privilege" in statement:
+            return [{"readable": True, "writable": False}]
+        if "relrowsecurity AS rls_enabled" in statement:
+            return [{
+                "rls_enabled": True, "reader_is_not_owner": True,
+                "unrestricted_select": True, "no_restrictive_filter": True,
+            }]
+        if "WHERE path=%s OR version=%s" in statement:
+            assert params == (closure["path"], closure["version"])
+            return [closure]
+        raise AssertionError(statement)
+
+    source.query = query
+    with source:
+        assert source.authority_receipt()["status"] == "verified"
+        assert source.pre_migration_scope() == {
+            "reason": "candidate read scope is already present",
+            "absent_tables": [],
+            "unreadable_tables": [],
+        }
+
+
+def test_pre_migration_reader_rejects_closure_ledger_hash_drift(monkeypatch):
+    from scripts import protected_evidence as evidence
+
+    closure = {
+        "path": evidence.READER_AUTHORITY_CLOSURE_PATH,
+        "version": "20261017",
+        "sha256": "a" * 64,
+    }
+    monkeypatch.setattr(
+        evidence, "release_reader_authority_closure_manifest", lambda: closure,
+    )
+
+    class Connection:
+        closed = False
+        def execute(self, _sql): pass
+        def close(self): self.closed = True
+
+    connection = Connection()
+    monkeypatch.setattr(evidence.psycopg, "connect", lambda *a, **k: connection)
+    source = evidence.PostgresReadOnlySource(
+        f"postgresql://{evidence.READER}:password@db.{'p' * 20}.supabase.co:5432/postgres",
+        "p" * 20, pre_migration_baseline=True,
+    )
+
+    def query(statement, params=()):
+        if "current_user AS role" in statement:
+            return [{
+                "role": evidence.READER, "read_only": "on", "rolsuper": False,
+                "rolbypassrls": False, "server": "127.0.0.1", "port": 5432,
+                "database": "postgres",
+            }]
+        if "to_regclass" in statement:
+            return [{"present": True}]
+        if "has_table_privilege" in statement:
+            return [{"readable": True, "writable": False}]
+        if "relrowsecurity AS rls_enabled" in statement:
+            return [{
+                "rls_enabled": True, "reader_is_not_owner": True,
+                "unrestricted_select": True, "no_restrictive_filter": True,
+            }]
+        if "WHERE path=%s OR version=%s" in statement:
+            return [{**closure, "sha256": "b" * 64}]
+        raise AssertionError(statement)
+
+    source.query = query
+    with pytest.raises(RuntimeError, match="closure ledger mismatch"):
+        source.__enter__()
+    assert connection.closed
 
 
 def test_pre_migration_reader_rejects_unexpected_missing_baseline_table(monkeypatch):
@@ -1236,6 +1367,8 @@ def test_pre_migration_reader_accepts_fully_migrated_retry_state(monkeypatch):
         if "relrowsecurity AS rls_enabled" in statement:
             return [{"rls_enabled": True, "reader_is_not_owner": True,
                 "unrestricted_select": True, "no_restrictive_filter": True}]
+        if "WHERE path=%s OR version=%s" in statement:
+            return [evidence.release_reader_authority_closure_manifest()]
         if "to_jsonb" in statement:
             return []
         raise AssertionError(statement)
@@ -1244,7 +1377,7 @@ def test_pre_migration_reader_accepts_fully_migrated_retry_state(monkeypatch):
         snapshot = source.dry_run_snapshot()
     assert set(snapshot["tables"]) == set(evidence.READ_TABLES)
     assert snapshot["pre_migration_omissions"] == {
-        "reason": "candidate migrations are already applied",
+        "reason": "candidate read scope is already present",
         "absent_tables": [],
         "unreadable_tables": [],
     }

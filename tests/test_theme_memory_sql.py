@@ -177,6 +177,11 @@ def theme_memory_dsn():
             with psycopg.connect(dsn, autocommit=True) as db:
                 db.execute("CREATE ROLE anon; CREATE ROLE authenticated; CREATE ROLE service_role")
                 db.execute("CREATE ROLE stock_agent_dashboard; CREATE ROLE stock_agent_release_reader; CREATE ROLE stock_agent_release_reader_runtime")
+                db.execute(
+                    "CREATE SCHEMA supabase_migrations; "
+                    "CREATE TABLE supabase_migrations.schema_migrations("
+                    "version text PRIMARY KEY,statements text[])"
+                )
                 db.execute(SCHEMA.read_text())
             yield dsn
         finally:
@@ -1083,6 +1088,71 @@ def test_actual_postgres_release_reader_extension_closure_revokes_both_grant_pat
             "has_schema_privilege("
             "'stock_agent_release_reader_runtime','extensions','USAGE')"
         ).fetchone() == (False, False)
+
+
+def test_actual_postgres_complete_read_scope_without_closure_ledger_accepts_legacy_extension(
+    theme_memory_dsn,
+):
+    from scripts.protected_evidence import (
+        PostgresReadOnlySource, release_reader_authority_closure_manifest,
+    )
+
+    def local_source():
+        source = object.__new__(PostgresReadOnlySource)
+        source._url = f"{theme_memory_dsn} user=stock_agent_release_reader_runtime"
+        source.project_ref = "local-release-reader"
+        source.isolated_guard = False
+        source.pre_migration_baseline = True
+        source.connection = None
+        source._read_tables = ()
+        source._pre_migration_omissions = None
+        original_query = source.query
+
+        def query(statement, parameters=()):
+            rows = original_query(statement, parameters)
+            if "current_user AS role" in statement and rows:
+                rows[0]["server"] = rows[0].get("server") or "local-socket"
+            return rows
+
+        source.query = query
+        return source
+
+    closure = release_reader_authority_closure_manifest()
+    with psycopg.connect(theme_memory_dsn, autocommit=True) as admin:
+        assert admin.execute(
+            "SELECT count(*) FROM public.stock_agent_release_migration_ledger "
+            "WHERE path=%s OR version=%s",
+            (closure["path"], closure["version"]),
+        ).fetchone() == (0,)
+        admin.execute("ALTER ROLE stock_agent_release_reader_runtime LOGIN")
+        admin.execute("GRANT USAGE ON SCHEMA extensions TO stock_agent_release_reader")
+    try:
+        with local_source() as source:
+            assert source.authority_receipt()["status"] == "verified"
+            assert source.pre_migration_scope() == {
+                "reason": "candidate read scope is already present",
+                "absent_tables": [],
+                "unreadable_tables": [],
+            }
+        with psycopg.connect(theme_memory_dsn, autocommit=True) as admin:
+            admin.execute(RELEASE_READER_AUTHORITY_MIGRATION.read_text())
+            admin.execute(
+                "INSERT INTO public.stock_agent_release_migration_ledger "
+                "(path,version,sha256) VALUES(%s,%s,%s)",
+                (closure["path"], closure["version"], closure["sha256"]),
+            )
+        with local_source() as source:
+            assert source.authority_receipt()["status"] == "verified"
+            assert source.pre_migration_scope()["absent_tables"] == []
+    finally:
+        with psycopg.connect(theme_memory_dsn, autocommit=True) as admin:
+            admin.execute(
+                "DELETE FROM public.stock_agent_release_migration_ledger "
+                "WHERE path=%s AND version=%s AND sha256=%s",
+                (closure["path"], closure["version"], closure["sha256"]),
+            )
+            admin.execute("REVOKE USAGE ON SCHEMA extensions FROM stock_agent_release_reader")
+            admin.execute("ALTER ROLE stock_agent_release_reader_runtime NOLOGIN")
 
 
 def test_actual_postgres_reader_attestation_rejects_large_object_access(

@@ -44,6 +44,7 @@ _AUTHORITY_ERROR_CODES: Final = {
     "release reader large-object authority is unsafe": "large_object_authority_mismatch",
     "release reader function authority is unsafe": "function_authority_mismatch",
     "release reader may not own database objects": "ownership_mismatch",
+    "release reader authority closure ledger mismatch": "closure_ledger_mismatch",
 }
 
 
@@ -132,7 +133,7 @@ def diagnose_release_reader(
                 "authority": "verified",
                 "read_table_count": authority["read_table_count"],
                 "baseline_state": (
-                    "candidate_already_applied"
+                    "complete_read_scope"
                     if not absent and not unreadable
                     else "exact_pre_migration"
                 ),

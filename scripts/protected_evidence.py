@@ -30,6 +30,9 @@ from scripts.verify_personal_stock_agent_v1 import path_is_safe, require
 
 READER = "stock_agent_release_reader_runtime"
 READER_PRIVILEGE_ROLE = "stock_agent_release_reader"
+READER_AUTHORITY_CLOSURE_PATH = (
+    "sql/migrations/20261017_release_reader_extension_closure.sql"
+)
 RECOVERY_SQL = {
     "decision_evaluations": "SELECT id::text,request_id::text,run_id::text,candidate_id::text,policy_version,input_digest,raw_action,final_action,policy_status,reason_codes,explanations,normalized,evidence,analyst,checker,created_at::text FROM public.decision_evaluations",
     "policy_comparisons": "SELECT id::text,run_id::text,packet_id::text,evaluation_id::text,comparison,created_at::text FROM public.market_policy_comparisons",
@@ -304,6 +307,25 @@ def with_schema_version_hashes(rows: object) -> list[dict[str, object]]:
     ]
 
 
+def release_reader_authority_closure_manifest() -> dict[str, str]:
+    """Resolve the authority closure from the candidate's canonical manifest."""
+    from scripts.deploy_owner_dashboard_api import candidate_migration_manifest
+
+    matches = [
+        item for item in candidate_migration_manifest()
+        if item.get("path") == READER_AUTHORITY_CLOSURE_PATH
+    ]
+    require(
+        len(matches) == 1
+        and set(matches[0]) == {"path", "version", "sha256"}
+        and matches[0].get("version") == "20261017"
+        and re.fullmatch(r"[0-9a-f]{64}", matches[0].get("sha256", ""))
+        is not None,
+        "release reader authority closure manifest is unavailable",
+    )
+    return dict(matches[0])
+
+
 def _administrative_reader_edge(edge: object) -> bool:
     if not isinstance(edge, Mapping):
         return False
@@ -379,7 +401,10 @@ def verify_release_reader_authority(
         ("public", "USAGE", False),
         ("supabase_migrations", "USAGE", False),
     }
-    required_schemas = {("public", "USAGE", False)}
+    required_schemas = {
+        ("public", "USAGE", False),
+        ("supabase_migrations", "USAGE", False),
+    }
     if allow_legacy_extension_authority:
         allowed_schemas.add(("extensions", "USAGE", False))
         required_schemas.add(("extensions", "USAGE", False))
@@ -437,7 +462,9 @@ def verify_release_reader_authority(
             require(
                 row.get("privilege") == "SELECT"
                 and row.get("grantable") is False
-                and row.get("column") in {"version", "statements"},
+                and row.get("column") in {"version", "statements"}
+                and row.get("kind") == "r"
+                and row.get("extension") is None,
                 "release reader column authority is unsafe",
             )
         elif relation[0] == "extensions":
@@ -463,7 +490,7 @@ def verify_release_reader_authority(
                 and row.get("grantable") is False,
                 "release reader column authority is unsafe",
             )
-    require(migration_columns in (set(), {"version", "statements"}),
+    require(migration_columns == {"version", "statements"},
             "release reader migration-ledger authority is incomplete")
     require(
         all(
@@ -737,7 +764,19 @@ class PostgresReadOnlySource:
                 require(unmigrated or migrated,
                         "pre-migration release reader baseline mismatch")
                 self._pre_migration_omissions = pre_migration_omissions(migrated=migrated)
-                legacy_extension_authority = unmigrated
+                closure = release_reader_authority_closure_manifest()
+                closure_rows = self.query(
+                    """SELECT path,version,sha256
+                         FROM public.stock_agent_release_migration_ledger
+                        WHERE path=%s OR version=%s""",
+                    (closure["path"], closure["version"]),
+                )
+                require(
+                    closure_rows in ([], [closure])
+                    and (not closure_rows or migrated),
+                    "release reader authority closure ledger mismatch",
+                )
+                legacy_extension_authority = not closure_rows
             else:
                 require(not absent_tables, "release table is missing")
                 require(not unreadable_tables,
