@@ -34,9 +34,10 @@ from scripts.build_owner_dashboard_static import build_static_release, _child_en
 from scripts.verify_owner_dashboard_role import verify_dashboard_role
 from scripts.verify_owner_dashboard_deployment import (
     collect_source_receipts,
-    obtain_ephemeral_owner_access_token,
+    obtain_ephemeral_existing_user_access_token,
     revoke_ephemeral_owner_session,
     run_http_canary,
+    verify_auth_canary_inventory,
     verify_release_artifact_receipts,
 )
 
@@ -1202,11 +1203,11 @@ def run_post_deploy_canary(
     allowed_origin: str,
     database_url: str,
     owner_email: str,
+    non_owner_email: str,
     service_key: str,
     publishable_key: str,
-    non_owner_access_token: str | None = None,
     *,
-    token_factory: Callable[..., str] = obtain_ephemeral_owner_access_token,
+    token_factory: Callable[..., str] = obtain_ephemeral_existing_user_access_token,
     source_collector: Callable[..., Mapping[str, object]] = collect_source_receipts,
     canary: Callable[..., Mapping[str, object]] = run_http_canary,
     session_revoker: Callable[..., Mapping[str, str] | None] = revoke_ephemeral_owner_session,
@@ -1215,15 +1216,23 @@ def run_post_deploy_canary(
     api_url = f"{project_url}/functions/v1/{FUNCTION_NAME}"
     _validate_origin(allowed_origin)
     _validate_database_url(database_url, project_ref)
-    token = token_factory(project_url, owner_email, allowed_origin, service_key, publishable_key)
+    non_owner_email = non_owner_email.strip().lower()
+    if (
+        not re.fullmatch(r"release-canary-[0-9a-f]{32}@example\.com", non_owner_email)
+        or non_owner_email == owner_email.strip().lower()
+    ):
+        raise ValueError("non-owner session must use the exact reserved canary address")
+    tokens: list[str] = []
     try:
-        canary_arguments = {}
-        if non_owner_access_token is not None:
-            canary_arguments["non_owner_access_token"] = non_owner_access_token
+        token = token_factory(project_url, owner_email, allowed_origin, service_key, publishable_key)
+        tokens.append(token)
+        non_owner_access_token = token_factory(
+            project_url, non_owner_email, allowed_origin, service_key, publishable_key,
+        )
+        tokens.append(non_owner_access_token)
         result = dict(canary(
-            api_url, allowed_origin, token,
+            api_url, allowed_origin, token, non_owner_access_token,
             source_reader=lambda run_id: source_collector(database_url, api_url, run_id),
-            **canary_arguments,
         ))
         expected = {
             "status": "verified",
@@ -1234,11 +1243,20 @@ def run_post_deploy_canary(
         }
         if any(result.get(key) != value for key, value in expected.items()):
             raise RuntimeError("production canary receipt is incomplete")
-        if non_owner_access_token is not None and result.get("non_owner_status") != 403:
+        if result.get("non_owner_status") != 403:
             raise RuntimeError("production non-owner denial receipt is incomplete")
-        return result
     finally:
-        session_revoker(project_url, token, publishable_key)
+        cleanup_error = None
+        for access_token in reversed(tokens):
+            try:
+                session_revoker(project_url, access_token, publishable_key)
+            except Exception as error:
+                cleanup_error = cleanup_error or error
+        if cleanup_error is not None:
+            raise RuntimeError("ephemeral production canary session revocation failed") from cleanup_error
+    result["owner_session"] = "revoked"
+    result["non_owner_session"] = "revoked"
+    return result
 
 
 def verify_initial_deployment_or_rollback(
@@ -1246,17 +1264,17 @@ def verify_initial_deployment_or_rollback(
     allowed_origin: str,
     database_url: str,
     owner_email: str,
+    non_owner_email: str,
     service_key: str,
     publishable_key: str,
-    non_owner_access_token: str | None = None,
     *,
     verifier: Callable[..., dict[str, object]] = run_post_deploy_canary,
     rollback: Callable[..., dict[str, object]] = rollback_initial_function,
 ) -> dict[str, object]:
     try:
         return verifier(
-            project_ref, allowed_origin, database_url, owner_email, service_key, publishable_key,
-            non_owner_access_token,
+            project_ref, allowed_origin, database_url, owner_email, non_owner_email,
+            service_key, publishable_key,
         )
     except Exception as error:
         try:
@@ -1304,15 +1322,16 @@ def main() -> int:
     if not os.environ.get("SUPABASE_ACCESS_TOKEN", "").strip():
         raise SystemExit("SUPABASE_ACCESS_TOKEN is required for protected Supabase mutation")
     owner_email = os.environ.get("DASHBOARD_OWNER_EMAIL", "").strip()
+    non_owner_email = os.environ.get("DASHBOARD_NON_OWNER_EMAIL", "").strip()
+    non_owner_user_id = os.environ.get("DASHBOARD_NON_OWNER_USER_ID", "").strip()
     service_key = os.environ.get("SUPABASE_SERVICE_ROLE_KEY", "").strip()
-    non_owner_access_token = os.environ.get("DASHBOARD_NON_OWNER_ACCESS_TOKEN", "").strip()
     session_template = os.environ.get("SUPAVISOR_SESSION_URL", "").strip()
     if (not session_template or not owner_email or not service_key
-            or not publishable_key or not non_owner_access_token):
+            or not publishable_key or not non_owner_email or not non_owner_user_id):
         raise SystemExit(
             "SUPAVISOR_SESSION_URL, DASHBOARD_OWNER_EMAIL, "
-            "SUPABASE_SERVICE_ROLE_KEY, SUPABASE_PUBLISHABLE_KEY, and "
-            "DASHBOARD_NON_OWNER_ACCESS_TOKEN are required"
+            "DASHBOARD_NON_OWNER_EMAIL, DASHBOARD_NON_OWNER_USER_ID, "
+            "SUPABASE_SERVICE_ROLE_KEY, and SUPABASE_PUBLISHABLE_KEY are required"
         )
     if arguments.static_build_receipt is None:
         raise SystemExit("--static-build-receipt is required for protected production mutation")
@@ -1328,6 +1347,10 @@ def main() -> int:
     key = os.environ.get("RELEASE_RECOVERY_KEY", "").encode()
     if not key:
         raise SystemExit("RELEASE_RECOVERY_KEY is required for authenticated encrypted component recovery")
+    project_url = f"https://{arguments.project_ref}.supabase.co"
+    auth_inventory_preflight = verify_auth_canary_inventory(
+        project_url, owner_email, owner_user_id, non_owner_email, non_owner_user_id, service_key,
+    )
     from scripts.release_components import load_native_release_adapter, run_native_release
     context = {"candidate_sha": git_sha, "project_ref": arguments.project_ref,
                "lease_owner": arguments.lease_owner,
@@ -1353,10 +1376,15 @@ def main() -> int:
             raise RuntimeError("protected backend readback receipt is incomplete")
         captured = adapter.capture("dashboard-secrets")
         database_url = captured["values"]["DASHBOARD_DATABASE_URL"]
-        receipt["canary"] = run_post_deploy_canary(
+        canary_receipt = run_post_deploy_canary(
             arguments.project_ref, arguments.allowed_origin, database_url, owner_email,
-            service_key, publishable_key, non_owner_access_token,
+            non_owner_email, service_key, publishable_key,
         )
+        canary_receipt["auth_inventory_preflight"] = auth_inventory_preflight
+        canary_receipt["auth_inventory_readback"] = verify_auth_canary_inventory(
+            project_url, owner_email, owner_user_id, non_owner_email, non_owner_user_id, service_key,
+        )
+        receipt["canary"] = canary_receipt
     # There is one protected backend mutation path. Capture and encrypted
     # retention occur before migrate(), role/secret changes, or Edge writes.
     # Owner-only Sites publication is a separate native operation and receipt.

@@ -47,7 +47,7 @@ from scripts.provision_owner_dashboard_auth import (
 from scripts.verify_owner_dashboard_deployment import (
     migration_statements_sha256,
     normalize_migration_statements,
-    obtain_ephemeral_owner_access_token,
+    obtain_ephemeral_existing_user_access_token,
     revoke_ephemeral_owner_session,
 )
 from scripts.verify_personal_stock_agent_v1 import (
@@ -578,12 +578,18 @@ def _auth_get(url: str, headers: Mapping[str, str]) -> tuple[int, bytes]:
         raise RuntimeError("Supabase Auth inventory request failed") from error
 
 
-def inspect_single_owner(project_url: str, owner_email: str, service_key: str,
+def inspect_single_owner(project_url: str, owner_email: str, canary_email: str,
+                         canary_user_id: str, service_key: str,
                          *, requester: AuthRequester = _auth_get) -> dict[str, object]:
-    """Read and verify the single confirmed owner; never create or update a user."""
+    """Read one confirmed owner plus the exact denied canary; never mutate Auth."""
     project_url, normalized_email, service_key = validate_auth_admin_configuration(project_url, owner_email, service_key)
+    _, normalized_canary_email, _ = validate_auth_admin_configuration(project_url, canary_email, service_key)
+    require(re.fullmatch(r"release-canary-[0-9a-f]{32}@example\.com", normalized_canary_email) is not None
+            and AUTH_UUID.fullmatch(canary_user_id) is not None,
+            "protected denied-canary configuration is invalid")
+    canonical_canary_id = canary_user_id.lower()
     status, body = requester(
-        f"{project_url}/auth/v1/admin/users?page=1&per_page=2",
+        f"{project_url}/auth/v1/admin/users?page=1&per_page=3",
         {"apikey": service_key, "authorization": f"Bearer {service_key}"},
     )
     require(200 <= status < 300, "Supabase Auth owner inventory request failed")
@@ -592,17 +598,28 @@ def inspect_single_owner(project_url: str, owner_email: str, service_key: str,
     except (json.JSONDecodeError, UnicodeDecodeError) as error:
         raise RuntimeError("Supabase Auth owner inventory is malformed") from error
     users = payload.get("users") if isinstance(payload, Mapping) else None
-    require(isinstance(users, list) and len(users) == 1 and isinstance(users[0], Mapping),
-            "Auth must contain exactly one owner")
-    user = users[0]
+    require(isinstance(users, list) and len(users) == 2 and all(isinstance(row, Mapping) for row in users),
+            "Auth must contain exactly one owner and one denied canary")
+    by_email = {str(row.get("email", "")).strip().lower(): row for row in users}
+    require(set(by_email) == {normalized_email, normalized_canary_email},
+            "Auth must contain exactly one owner and one denied canary")
+    user = by_email[normalized_email]
+    canary = by_email[normalized_canary_email]
     identity = user.get("id")
-    confirmed = user.get("email_confirmed_at") or user.get("confirmed_at")
-    require(str(user.get("email", "")).strip().lower() == normalized_email
-            and isinstance(identity, str) and AUTH_UUID.fullmatch(identity) is not None
-            and isinstance(confirmed, str) and bool(confirmed), "Auth must contain exactly one confirmed owner")
+    canary_identity = canary.get("id")
+    owner_confirmed = user.get("email_confirmed_at") or user.get("confirmed_at")
+    canary_confirmed = canary.get("email_confirmed_at") or canary.get("confirmed_at")
+    require(isinstance(identity, str) and AUTH_UUID.fullmatch(identity) is not None
+            and identity.lower() != canonical_canary_id
+            and isinstance(canary_identity, str) and canary_identity.lower() == canonical_canary_id
+            and isinstance(owner_confirmed, str) and bool(owner_confirmed)
+            and isinstance(canary_confirmed, str) and bool(canary_confirmed),
+            "Auth must contain exactly one confirmed owner and one confirmed denied canary")
     return {
         "status": "verified",
-        "auth_user_count": 1,
+        "auth_user_count": 2,
+        "privileged_owner_count": 1,
+        "denied_canary_count": 1,
         "owner_id_digest": hashlib.sha256(identity.encode()).hexdigest()[:16],
         "owner_secret_sha256": hashlib.sha256(identity.encode()).hexdigest(),
         "owner_email_digest": hashlib.sha256(normalized_email.encode()).hexdigest()[:16],
@@ -670,7 +687,7 @@ def verify_authenticated_owner_read(
     service_key: str,
     publishable_key: str,
     *,
-    obtain_token=obtain_ephemeral_owner_access_token,
+    obtain_token=obtain_ephemeral_existing_user_access_token,
     revoke_token=revoke_ephemeral_owner_session,
     requester: HttpRequester = _http_get,
 ) -> dict[str, object]:
@@ -735,8 +752,11 @@ def create_attestation(candidate_sha: str, project_ref: str, native_site_receipt
     service_key = os.environ.get("SUPABASE_SERVICE_ROLE_KEY", "")
     publishable_key = os.environ.get("SUPABASE_PUBLISHABLE_KEY", "")
     owner_email = os.environ.get("DASHBOARD_OWNER_EMAIL", "")
+    canary_email = os.environ.get("DASHBOARD_NON_OWNER_EMAIL", "")
+    canary_user_id = os.environ.get("DASHBOARD_NON_OWNER_USER_ID", "")
     database_url_sha256 = os.environ.get("DASHBOARD_DATABASE_URL_SHA256", "")
-    require(access_token and service_key and publishable_key and owner_email and database_url_sha256,
+    require(access_token and service_key and publishable_key and owner_email
+            and canary_email and canary_user_id and database_url_sha256,
             "protected attestation configuration is incomplete")
     management = SupabaseManagementApi(access_token, request=management_request)
     site = validate_native_site_receipt(
@@ -767,7 +787,7 @@ def create_attestation(candidate_sha: str, project_ref: str, native_site_receipt
     require(isinstance(auth_raw, Mapping), "hosted Auth configuration is unavailable")
     auth = validate_auth_configuration(auth_raw, str(site["live_url"]))
     project_url = f"https://{project_ref}.supabase.co"
-    owner = inspect_single_owner(project_url, owner_email, service_key)
+    owner = inspect_single_owner(project_url, owner_email, canary_email, canary_user_id, service_key)
     secret_bindings = attest_managed_secret_bindings(
         function_adapter, str(site["live_url"]), str(owner["owner_secret_sha256"]), database_url_sha256,
     )

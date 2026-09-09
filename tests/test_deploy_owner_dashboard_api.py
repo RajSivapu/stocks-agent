@@ -947,6 +947,7 @@ def test_canary_failure_invokes_rollback_before_propagating():
     with pytest.raises(RuntimeError, match="production canary failed"):
         deploy.verify_initial_deployment_or_rollback(
             PROJECT_REF, ORIGIN, DATABASE_URL, "owner@example.com",
+            f"release-canary-{'a' * 32}@example.com",
             "sb_secret_" + "s" * 40, "sb_publishable_" + "p" * 32,
             verifier=verifier, rollback=rollback,
         )
@@ -958,26 +959,30 @@ def test_post_deploy_canary_keeps_runtime_database_url_and_auth_token_out_of_rec
 
     def token_factory(project_url, owner_email, redirect_origin, service_key, publishable_key):
         observed["auth"] = (project_url, owner_email, redirect_origin, service_key, publishable_key)
-        return "owner-access-token"
+        return (
+            "owner-access-token" if owner_email == "owner@example.com"
+            else "non-owner-access-token"
+        )
 
     def source_collector(database_url, api_url, run_id):
         observed["source"] = (database_url, api_url, run_id)
         return {"source": "receipt"}
 
-    def canary(api_url, origin, token, *, source_reader):
-        observed["canary"] = (api_url, origin, token)
+    def canary(api_url, origin, token, non_owner_access_token, *, source_reader):
+        observed["canary"] = (api_url, origin, token, non_owner_access_token)
         assert source_reader(OWNER_ID) == {"source": "receipt"}
         return {
             "status": "verified", "source_reconciliation": "verified",
             "financial_write_routes": 0, "brokerage_authority": "none",
-            "friend_invitations": "disabled",
+            "friend_invitations": "disabled", "non_owner_status": 403,
         }
 
     def session_revoker(project_url, token, publishable_key):
-        observed["revoked"] = (project_url, token, publishable_key)
+        observed.setdefault("revoked", []).append(token)
 
     receipt = deploy.run_post_deploy_canary(
         PROJECT_REF, ORIGIN, DATABASE_URL, OWNER_EMAIL := "owner@example.com",
+        CANARY_EMAIL := f"release-canary-{'a' * 32}@example.com",
         "sb_secret_" + "s" * 40, "sb_publishable_" + "p" * 32,
         token_factory=token_factory, source_collector=source_collector, canary=canary,
         session_revoker=session_revoker,
@@ -985,9 +990,14 @@ def test_post_deploy_canary_keeps_runtime_database_url_and_auth_token_out_of_rec
     assert receipt["status"] == "verified"
     assert DATABASE_URL not in str(receipt)
     assert OWNER_EMAIL not in str(receipt)
+    assert CANARY_EMAIL not in str(receipt)
     assert "owner-access-token" not in str(receipt)
+    assert "non-owner-access-token" not in str(receipt)
+    assert receipt["owner_session"] == "revoked"
+    assert receipt["non_owner_session"] == "revoked"
     assert observed["source"][0] == DATABASE_URL
-    assert observed["revoked"][1] == "owner-access-token"
+    assert observed["canary"][3] == "non-owner-access-token"
+    assert observed["revoked"] == ["non-owner-access-token", "owner-access-token"]
 
 
 def test_post_deploy_canary_revokes_owner_session_when_canary_fails():
@@ -998,27 +1008,70 @@ def test_post_deploy_canary_revokes_owner_session_when_canary_fails():
         raise RuntimeError("receipt mismatch")
 
     def session_revoker(*_args):
-        events.append("revoke")
+        events.append(("revoke", _args[1]))
 
     with pytest.raises(RuntimeError, match="receipt mismatch"):
         deploy.run_post_deploy_canary(
             PROJECT_REF, ORIGIN, DATABASE_URL, "owner@example.com",
+            f"release-canary-{'a' * 32}@example.com",
             "sb_secret_" + "s" * 40, "sb_publishable_" + "p" * 32,
-            token_factory=lambda *_args: "owner-access-token",
+            token_factory=lambda _url, email, *_args: (
+                "owner-access-token" if email == "owner@example.com" else "non-owner-access-token"
+            ),
             source_collector=lambda *_args: {},
             canary=canary,
             session_revoker=session_revoker,
         )
-    assert events == ["canary", "revoke"]
+    assert events == [
+        "canary", ("revoke", "non-owner-access-token"), ("revoke", "owner-access-token"),
+    ]
 
 
 def test_post_deploy_canary_rejects_an_incomplete_receipt():
     with pytest.raises(RuntimeError, match="production canary"):
         deploy.run_post_deploy_canary(
             PROJECT_REF, ORIGIN, DATABASE_URL, "owner@example.com",
+            f"release-canary-{'a' * 32}@example.com",
             "sb_secret_" + "s" * 40, "sb_publishable_" + "p" * 32,
-            token_factory=lambda *_args: "owner-token",
+            token_factory=lambda _url, email, *_args: (
+                "owner-token" if email == "owner@example.com" else "non-owner-token"
+            ),
             source_collector=lambda *_args: {},
             canary=lambda *_args, **_kwargs: {"status": "verified", "source_reconciliation": "missing"},
             session_revoker=lambda *_args: None,
         )
+
+
+def test_post_deploy_canary_revokes_owner_if_fresh_non_owner_token_mint_fails():
+    events = []
+
+    def token_factory(_url, email, *_args):
+        events.append(("mint", email))
+        if email.startswith("release-canary-"):
+            raise RuntimeError("non-owner mint failed")
+        return "owner-access-token"
+
+    with pytest.raises(RuntimeError, match="non-owner mint failed"):
+        deploy.run_post_deploy_canary(
+            PROJECT_REF, ORIGIN, DATABASE_URL, "owner@example.com",
+            f"release-canary-{'a' * 32}@example.com",
+            "sb_secret_" + "s" * 40, "sb_publishable_" + "p" * 32,
+            token_factory=token_factory,
+            source_collector=lambda *_args: {}, canary=lambda *_args, **_kwargs: {},
+            session_revoker=lambda _url, token, _key: events.append(("revoke", token)),
+        )
+
+    assert events[-1] == ("revoke", "owner-access-token")
+
+
+def test_post_deploy_canary_rejects_unbound_non_owner_email_before_token_mint():
+    calls = []
+    with pytest.raises(ValueError, match="reserved canary"):
+        deploy.run_post_deploy_canary(
+            PROJECT_REF, ORIGIN, DATABASE_URL, "owner@example.com", "person@gmail.com",
+            "sb_secret_" + "s" * 40, "sb_publishable_" + "p" * 32,
+            token_factory=lambda *_args: calls.append(True),
+            source_collector=lambda *_args: {}, canary=lambda *_args, **_kwargs: {},
+            session_revoker=lambda *_args: None,
+        )
+    assert calls == []
