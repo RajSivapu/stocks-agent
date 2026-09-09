@@ -7,6 +7,7 @@ import argparse
 from datetime import date, datetime, timezone
 import hashlib
 import json
+import math
 import os
 from pathlib import Path
 import re
@@ -26,9 +27,6 @@ from scripts.provision_owner_dashboard_auth import (
     validate_configuration as validate_auth_admin_configuration,
     validate_email_otp_configuration,
 )
-from lib.intelligence.canonical import EVENT_CANONICAL_SQL, RANKING_CANONICAL_SQL
-
-
 CANARY_METHOD = "GET"
 CANARY_ROUTES = (
     "/v1/today",
@@ -62,6 +60,14 @@ RUNTIME_ROLE = "stock_agent_dashboard_runtime"
 EVIDENCE_ROLE = "stock_agent_release_reader_runtime"
 SCHEDULED_PHASES = {"pre-market", "intraday", "post-market"}
 MAX_SCHEDULED_READINESS_ROWS = 128
+REPORT_KINDS = {
+    "morning", "urgent", "weekly", "monthly", "theme", "on-demand",
+    "intraday",
+}
+REPORT_PUBLIC_SOURCE_FIELDS = (
+    "id", "run_id", "market_date", "kind", "canonical", "report_hash",
+    "created_at",
+)
 UUID_PATTERN = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$", re.IGNORECASE)
 MIGRATION_NAME = re.compile(r"^(?P<version>\d{8}(?:\d{4})?)_[a-z0-9][a-z0-9_]*\.sql$")
 REPORT_PUBLICATION_SQL = """SELECT p.report_id::text AS report_id,r.run_id::text AS run_id,p.idempotency_key,
@@ -72,6 +78,23 @@ REPORT_PUBLICATION_SQL = """SELECT p.report_id::text AS report_id,r.run_id::text
       'suppression_reason',p.suppression_reason) AS canonical
     FROM public.market_report_publications p JOIN public.market_reports r ON r.id=p.report_id
     WHERE r.run_id=%s::uuid ORDER BY p.report_id"""
+DASHBOARD_REPORT_SOURCE_SQL = """SELECT r.id::text AS id,
+       r.run_id::text AS run_id, r.market_date::text AS market_date, r.kind,
+       r.report AS canonical, r.report_hash,
+       to_char(r.created_at AT TIME ZONE 'UTC','YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') AS created_at
+  FROM unnest(%s::uuid[]) WITH ORDINALITY AS requested(id, position)
+  JOIN public.market_reports r ON r.id = requested.id
+ ORDER BY requested.position"""
+EVIDENCE_REPORT_SOURCE_SQL = """SELECT r.id::text AS id,
+       r.run_id::text AS run_id, r.packet_id::text AS packet_id,
+       r.market_date::text AS market_date, r.kind, r.report AS canonical,
+       r.report_hash, r.rendered_text, r.rendered_hash,
+       to_char(r.created_at AT TIME ZONE 'UTC','YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') AS created_at
+  FROM public.market_reports r
+  JOIN public.market_intelligence_runs i ON i.id = r.run_id
+  JOIN public.market_evidence_packets p
+    ON p.id = r.packet_id AND p.run_id = r.run_id
+ ORDER BY r.created_at DESC, r.id DESC LIMIT 50"""
 
 
 def validate_deployment_auth_configuration(config: Mapping[str, object]) -> dict[str, object]:
@@ -107,6 +130,35 @@ def canonical_sha256(value: object) -> str:
     return hashlib.sha256(
         json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode(),
     ).hexdigest()
+
+
+def _dashboard_text(value: object, maximum: int) -> str | None:
+    """Mirror the bounded scalar conversion used by the dashboard mapper."""
+    if isinstance(value, str) and value:
+        return value[:maximum]
+    if isinstance(value, int) and not isinstance(value, bool):
+        return str(value)[:maximum]
+    if isinstance(value, float) and math.isfinite(value):
+        rendered = str(int(value)) if value.is_integer() else str(value)
+        return rendered[:maximum]
+    return None
+
+
+def report_summary_source_view(row: Mapping[str, object]) -> dict[str, object]:
+    """Map a protected report row to the public report-summary contract."""
+    report = row.get("canonical")
+    if not isinstance(report, Mapping):
+        report = {}
+    kind = row.get("kind")
+    return {
+        "id": _dashboard_text(row.get("id"), 64) or "unknown",
+        "market_date": _dashboard_text(row.get("market_date"), 40) or "",
+        "kind": kind if kind in REPORT_KINDS else "unknown",
+        "title": _dashboard_text(report.get("title"), 200) or "Untitled report",
+        "summary": _dashboard_text(report.get("summary"), 1_000) or "",
+        "report_hash": _dashboard_text(row.get("report_hash"), 64) or "",
+        "created_at": _dashboard_text(row.get("created_at"), 40) or "",
+    }
 
 
 def validate_intelligence_projection_receipt(value: object) -> str | None:
@@ -583,6 +635,44 @@ def collect_source_receipts(
     if not UUID_PATTERN.fullmatch(run_id):
         raise ValueError("completed run identifier is malformed")
     timestamp = "to_char({field} AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS.MS\"Z\"')"
+
+    project_ref = (urlparse(api_url).hostname or "").split(".", 1)[0]
+    # Keep this import at the post-migration boundary. protected_evidence shares
+    # canonical verification helpers with this module's release verifier.
+    from scripts.protected_evidence import PostgresReadOnlySource
+    with PostgresReadOnlySource(
+        evidence_database_url, project_ref,
+    ) as evidence_source:
+        evidence_connection = evidence_source.connection
+        if evidence_connection is None:
+            raise RuntimeError("release evidence reader authority is unavailable")
+        verified_authority = evidence_source.identity()
+        evidence_authority = {
+            "status": "verified",
+            "connection_id": verified_authority.get("connection_id"),
+            "read_only": verified_authority.get("read_only"),
+            "isolated_guard": verified_authority.get("isolated_guard"),
+        }
+        evidence_identity = _fetch_one(
+            evidence_connection,
+            "SELECT current_user AS evidence_database_user, current_setting('transaction_read_only') AS evidence_transaction_read_only",
+        )
+        reports = _fetch_all(
+            evidence_connection, EVIDENCE_REPORT_SOURCE_SQL,
+        )
+    report_ids = [row.get("id") for row in reports if isinstance(row, Mapping)]
+    if (
+        len(report_ids) != len(reports)
+        or len(report_ids) > 50
+        or any(
+            not isinstance(report_id, str)
+            or UUID_PATTERN.fullmatch(report_id) is None
+            for report_id in report_ids
+        )
+        or len(set(report_ids)) != len(report_ids)
+    ):
+        raise RuntimeError("protected report identifiers are malformed")
+
     with psycopg.connect(
         database_url,
         row_factory=dict_row,
@@ -661,46 +751,12 @@ def collect_source_receipts(
             "SELECT market_date::text AS market_date, phase, to_char(deadline_at AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS.MS\"Z\"') AS deadline_at FROM public.read_overdue_scheduled_market_phases() LIMIT %s",
             (MAX_SCHEDULED_READINESS_ROWS + 1,),
         )
+        dashboard_reports = _fetch_all(
+            connection,
+            DASHBOARD_REPORT_SOURCE_SQL,
+            (list(report_ids),),
+        )
 
-    project_ref = (urlparse(api_url).hostname or "").split(".", 1)[0]
-    # Keep this import at the post-migration boundary. protected_evidence shares
-    # canonical verification helpers with this module's release verifier.
-    from scripts.protected_evidence import PostgresReadOnlySource
-    with PostgresReadOnlySource(
-        evidence_database_url, project_ref,
-    ) as evidence_source:
-        evidence_connection = evidence_source.connection
-        if evidence_connection is None:
-            raise RuntimeError("release evidence reader authority is unavailable")
-        verified_authority = evidence_source.identity()
-        evidence_authority = {
-            "status": "verified",
-            "connection_id": verified_authority.get("connection_id"),
-            "read_only": verified_authority.get("read_only"),
-            "isolated_guard": verified_authority.get("isolated_guard"),
-        }
-        evidence_identity = _fetch_one(
-            evidence_connection,
-            "SELECT current_user AS evidence_database_user, current_setting('transaction_read_only') AS evidence_transaction_read_only",
-        )
-        intelligence_runs = _fetch_all(evidence_connection,
-            "SELECT id::text AS id, phase, market_date::text AS market_date, policy_version FROM public.market_intelligence_runs WHERE id=%s::uuid",
-            (run_id,))
-        intelligence_events = _fetch_all(evidence_connection,
-            f"""SELECT id::text AS id, run_id::text AS run_id, content_hash,
-                      {EVENT_CANONICAL_SQL} AS canonical
-                 FROM public.market_events WHERE run_id=%s::uuid ORDER BY id""", (run_id,))
-        intelligence_rankings = _fetch_all(evidence_connection,
-            f"""SELECT id::text AS id, run_id::text AS run_id, event_id::text AS event_id, content_hash,
-                      {RANKING_CANONICAL_SQL} AS canonical
-                 FROM public.market_candidate_rankings WHERE run_id=%s::uuid ORDER BY rank""", (run_id,))
-        intelligence_packets = _fetch_all(evidence_connection,
-            "SELECT id::text AS id, run_id::text AS run_id, packet_hash, candidate_count, evidence_count, packet AS canonical FROM public.market_evidence_packets WHERE run_id=%s::uuid", (run_id,))
-        reports = _fetch_all(evidence_connection,
-            "SELECT id::text AS id, run_id::text AS run_id, packet_id::text AS packet_id, report_hash, rendered_hash, report AS canonical, rendered_text FROM public.market_reports WHERE run_id=%s::uuid ORDER BY created_at", (run_id,))
-        report_publications = _fetch_all(
-            evidence_connection, REPORT_PUBLICATION_SQL, (run_id,),
-        )
     for row in holdings:
         row["price_as_of"] = normalize_receipt_timestamp(row.get("price_as_of"))
         for field in ("shares", "average_cost", "price", "price_source"):
@@ -708,16 +764,10 @@ def collect_source_receipts(
                 row[field] = str(row[field])
     price_times = [row.get("price_as_of") for row in holdings if row.get("price_as_of")]
     canonical_records = []
-    for kind, rows, field in (
-        ("event", intelligence_events, "content_hash"),
-        ("ranking", intelligence_rankings, "content_hash"),
-        ("packet", intelligence_packets, "packet_hash"),
-        ("report", reports, "report_hash"),
-    ):
-        canonical_records.extend({"kind": kind, "body": row["canonical"], "sha256": row[field]} for row in rows)
     canonical_records.extend({
-        "kind": "publication", "body": row["canonical"], "sha256": canonical_sha256(row["canonical"]),
-    } for row in report_publications)
+        "kind": "report", "body": row["canonical"],
+        "sha256": row["report_hash"],
+    } for row in reports)
     return {
         "dashboard": {
             **identity,
@@ -729,16 +779,12 @@ def collect_source_receipts(
             "holdings": holdings,
             "portfolio_data_as_of": max(price_times) if price_times else None,
             "overdue_scheduled_phases": overdue_scheduled_phases,
+            "reports": dashboard_reports,
         },
         "evidence": {
             **evidence_identity,
             "evidence_authority": evidence_authority,
-            "intelligence_runs": intelligence_runs,
-            "intelligence_events": intelligence_events,
-            "intelligence_rankings": intelligence_rankings,
-            "intelligence_packets": intelligence_packets,
             "reports": reports,
-            "report_publications": report_publications,
             "canonical_records": canonical_records,
         },
     }
@@ -875,74 +921,6 @@ def reconcile_source_receipts(
                 fail()
     if today_portfolio.get("data_as_of") != dashboard.get("portfolio_data_as_of"):
         fail()
-    chains = {key: evidence.get(key) for key in (
-        "intelligence_runs", "intelligence_events", "intelligence_rankings",
-        "intelligence_packets", "reports", "report_publications",
-    )}
-    if any(not isinstance(rows, list) for rows in chains.values()):
-        fail()
-    if any(not chains[key] for key in (
-        "intelligence_runs", "intelligence_packets", "reports",
-        "report_publications",
-    )):
-        fail()
-    if len(chains["intelligence_runs"]) != 1 or chains["intelligence_runs"][0].get("id") != run_id:
-        fail()
-    if len(chains["intelligence_packets"]) != 1:
-        fail()
-    packet = chains["intelligence_packets"][0]
-    if (packet.get("run_id") != run_id or not isinstance(packet.get("canonical"), Mapping)
-            or canonical_sha256(packet["canonical"]) != packet.get("packet_hash")):
-        fail()
-    packet_body = packet["canonical"]
-    if (
-        (not chains["intelligence_events"] or not chains["intelligence_rankings"])
-        and not (
-            packet.get("candidate_count") == 0
-            and packet.get("evidence_count") == 0
-            and packet_body.get("contract_version") == 2
-            and packet_body.get("execution_allowed") is False
-            and packet_body.get("research_candidates") == []
-            and packet_body.get("action_candidates") == []
-            and packet_body.get("evidence") == []
-        )
-    ):
-        fail()
-    if any(row.get("run_id") != run_id or not isinstance(row.get("canonical"), Mapping)
-           or canonical_sha256(row["canonical"]) != row.get("content_hash") for row in chains["intelligence_events"]):
-        fail()
-    event_ids = {row.get("id") for row in chains["intelligence_events"]}
-    if any(row.get("run_id") != run_id or row.get("event_id") not in event_ids
-           or not isinstance(row.get("canonical"), Mapping)
-           or canonical_sha256(row["canonical"]) != row.get("content_hash")
-           for row in chains["intelligence_rankings"]):
-        fail()
-    report_ids = set()
-    for row in chains["reports"]:
-        if (row.get("run_id") != run_id or row.get("packet_id") != packet.get("id")
-                or not isinstance(row.get("canonical"), Mapping)
-                or canonical_sha256(row["canonical"]) != row.get("report_hash")
-                or not isinstance(row.get("rendered_text"), str)
-                or hashlib.sha256(row["rendered_text"].encode()).hexdigest() != row.get("rendered_hash")):
-            fail()
-        report_ids.add(row.get("id"))
-    for row in chains["report_publications"]:
-        if (row.get("run_id") != run_id or row.get("report_id") not in report_ids
-                or row.get("status") not in {"delivered", "suppressed"}
-                or not isinstance(row.get("canonical"), Mapping)):
-            fail()
-        ids = row.get("telegram_message_ids")
-        if row.get("status") == "delivered" and (not isinstance(ids, list) or not ids
-                or any(isinstance(value, bool) or not isinstance(value, int) or value <= 0 for value in ids)):
-            fail()
-        if row.get("status") == "suppressed" and ids != []:
-            fail()
-        if row.get("status") == "suppressed" and (not isinstance(row.get("suppression_reason"), str) or not row["suppression_reason"].strip()):
-            fail()
-    report = chains["reports"][-1]
-    publication = next((row for row in chains["report_publications"] if row.get("report_id") == report.get("id")), None)
-    if not isinstance(publication, Mapping):
-        fail()
     intelligence = payloads.get("/v1/intelligence", {}).get("data")
     reports_view = payloads.get("/v1/reports", {}).get("data")
     intelligence_run_id = dashboard.get("intelligence_run_id")
@@ -962,8 +940,44 @@ def reconcile_source_receipts(
     ):
         fail()
     visible_reports = reports_view.get("reports")
-    if not isinstance(visible_reports, list) or not report_ids.issubset({row.get("id") for row in visible_reports if isinstance(row, dict)}):
+    dashboard_reports = dashboard.get("reports")
+    evidence_reports = evidence.get("reports")
+    if (
+        not isinstance(visible_reports, list)
+        or not isinstance(dashboard_reports, list)
+        or not isinstance(evidence_reports, list)
+        or len(dashboard_reports) > 50
+        or len(dashboard_reports) != len(evidence_reports)
+        or dashboard_reports != [
+            {field: row.get(field) for field in REPORT_PUBLIC_SOURCE_FIELDS}
+            for row in evidence_reports if isinstance(row, Mapping)
+        ]
+        or visible_reports != [
+            report_summary_source_view(row)
+            for row in dashboard_reports if isinstance(row, Mapping)
+        ]
+        or len(visible_reports) != len(dashboard_reports)
+    ):
         fail()
+    report_ids: set[object] = set()
+    for row in evidence_reports:
+        if (
+            not isinstance(row, Mapping)
+            or not isinstance(row.get("id"), str)
+            or UUID_PATTERN.fullmatch(row["id"]) is None
+            or row.get("id") in report_ids
+            or not isinstance(row.get("run_id"), str)
+            or UUID_PATTERN.fullmatch(row["run_id"]) is None
+            or not isinstance(row.get("packet_id"), str)
+            or UUID_PATTERN.fullmatch(row["packet_id"]) is None
+            or not isinstance(row.get("canonical"), Mapping)
+            or canonical_sha256(row["canonical"]) != row.get("report_hash")
+            or not isinstance(row.get("rendered_text"), str)
+            or hashlib.sha256(row["rendered_text"].encode()).hexdigest()
+            != row.get("rendered_hash")
+        ):
+            fail()
+        report_ids.add(row["id"])
     return {
         "status": "verified", "database_role": RUNTIME_ROLE,
         "evidence_database_role": EVIDENCE_ROLE, "claims_checked": 11,
@@ -983,23 +997,10 @@ def reconcile_source_receipts(
             "run_relationships": "verified",
             "claims_checked": 11,
         },
-        "counts": {"runs": len(chains["intelligence_runs"]), "events": len(chains["intelligence_events"]),
-                   "rankings": len(chains["intelligence_rankings"]), "packets": len(chains["intelligence_packets"]),
-                   "reports": len(chains["reports"]), "report_publications": len(chains["report_publications"])},
+        "counts": {"reports": len(evidence_reports)},
         "relationships_verified": True, "hashes_verified": True,
         "canonical_records": evidence.get("canonical_records"),
         "scheduled_readiness": scheduled_readiness,
-        "scheduled_chain": {
-            "run_id": run_id,
-            "intelligence_run_id": chains["intelligence_runs"][0]["id"],
-            "packet_id": packet["id"], "packet_hash": packet["packet_hash"],
-            "report_id": report["id"], "report_hash": report["report_hash"],
-            "publication_receipt": {
-                "status": "accepted_by_telegram" if publication["status"] == "delivered" else "suppressed",
-                "telegram_message_ids": publication["telegram_message_ids"],
-                **({"original_delivery_receipt": {"telegram_message_ids": publication["telegram_message_ids"], "telegram_accepted_at": publication["telegram_accepted_at"]}} if publication["status"] == "delivered" else {"suppression_reason": publication["suppression_reason"]}),
-            },
-        },
     }
 
 
@@ -1130,68 +1131,100 @@ def run_http_canary(
         if non_owner_headers.get("access-control-allow-origin") != origin:
             raise RuntimeError("non-owner response CORS is not exact")
 
-    payloads = {}
-    for route in CANARY_ROUTES:
-        status, headers, body = requester(
-            CANARY_METHOD,
-            f"{api_url}{route}",
-            {"origin": origin, "authorization": f"Bearer {owner_access_token}"},
-        )
-        headers = {key.lower(): value for key, value in headers.items()}
-        if status != 200:
-            code = "unknown"
-            if len(body) <= 4096:
-                try:
-                    error = json.loads(body).get("error", {})
-                    candidate = error.get("code") if isinstance(error, dict) else None
-                    if isinstance(candidate, str) and re.fullmatch(r"[a-z][a-z0-9_]{0,63}", candidate):
-                        code = candidate
-                except (json.JSONDecodeError, UnicodeDecodeError, AttributeError):
-                    pass
-            raise RuntimeError(f"owner GET failed for {route} (status {status}, code {code})")
-        if headers.get("access-control-allow-origin") != origin or headers.get("cache-control") != "no-store":
-            raise RuntimeError(f"owner headers are unsafe for {route}")
-        try:
-            payloads[route] = json.loads(body)
-        except json.JSONDecodeError as error:
-            raise RuntimeError(f"owner payload is malformed for {route}") from error
-    validated = validate_owner_payloads(payloads)
-    runs = payloads["/v1/runs"]["data"]["runs"]
-    completed = next(run for run in runs if isinstance(run, dict) and run.get("status") == "completed")
-    run_id = completed.get("id")
-    if not isinstance(run_id, str) or len(run_id) > 64:
-        raise RuntimeError("completed run identifier is malformed")
-    detail_status, detail_headers, detail_body = requester(
-        CANARY_METHOD,
-        f"{api_url}/v1/runs/{run_id}",
-        {"origin": origin, "authorization": f"Bearer {owner_access_token}"},
-    )
-    detail_headers = {key.lower(): value for key, value in detail_headers.items()}
-    if (
-        detail_status != 200
-        or detail_headers.get("access-control-allow-origin") != origin
-        or detail_headers.get("cache-control") != "no-store"
-    ):
-        raise RuntimeError("completed run detail GET failed")
-    try:
-        detail = json.loads(detail_body)
-    except json.JSONDecodeError as error:
-        raise RuntimeError("completed run detail is malformed") from error
-    detail_data = detail.get("data") if isinstance(detail, dict) else None
-    if (
-        detail.get("contract_version") != 1
-        or not isinstance(detail_data, dict)
-        or not isinstance(detail_data.get("write_counts"), dict)
-        or detail_data.get("incomplete_stages")
-        or not isinstance(detail_data.get("run"), dict)
-        or detail_data["run"].get("id") != run_id
-        or detail_data["run"].get("status") != "completed"
-        or not detail_data["run"].get("finished_at")
-    ):
-        raise RuntimeError("completed run detail lacks a complete receipt chain")
     if source_reader is None:
         raise RuntimeError("independent source receipt reader is required")
-    source_receipt = reconcile_source_receipts(payloads, detail, source_reader(run_id), run_id)
+
+    for source_attempt in range(2):
+        payloads = {}
+        for route in CANARY_ROUTES:
+            status, headers, body = requester(
+                CANARY_METHOD,
+                f"{api_url}{route}",
+                {"origin": origin, "authorization": f"Bearer {owner_access_token}"},
+            )
+            headers = {key.lower(): value for key, value in headers.items()}
+            if status != 200:
+                code = "unknown"
+                if len(body) <= 4096:
+                    try:
+                        error = json.loads(body).get("error", {})
+                        candidate = error.get("code") if isinstance(error, dict) else None
+                        if isinstance(candidate, str) and re.fullmatch(r"[a-z][a-z0-9_]{0,63}", candidate):
+                            code = candidate
+                    except (json.JSONDecodeError, UnicodeDecodeError, AttributeError):
+                        pass
+                raise RuntimeError(f"owner GET failed for {route} (status {status}, code {code})")
+            if headers.get("access-control-allow-origin") != origin or headers.get("cache-control") != "no-store":
+                raise RuntimeError(f"owner headers are unsafe for {route}")
+            try:
+                payloads[route] = json.loads(body)
+            except json.JSONDecodeError as error:
+                raise RuntimeError(f"owner payload is malformed for {route}") from error
+        validated = validate_owner_payloads(payloads)
+        runs = payloads["/v1/runs"]["data"]["runs"]
+        completed = next(run for run in runs if isinstance(run, dict) and run.get("status") == "completed")
+        run_id = completed.get("id")
+        if not isinstance(run_id, str) or len(run_id) > 64:
+            raise RuntimeError("completed run identifier is malformed")
+        detail_status, detail_headers, detail_body = requester(
+            CANARY_METHOD,
+            f"{api_url}/v1/runs/{run_id}",
+            {"origin": origin, "authorization": f"Bearer {owner_access_token}"},
+        )
+        detail_headers = {key.lower(): value for key, value in detail_headers.items()}
+        if (
+            detail_status != 200
+            or detail_headers.get("access-control-allow-origin") != origin
+            or detail_headers.get("cache-control") != "no-store"
+        ):
+            raise RuntimeError("completed run detail GET failed")
+        try:
+            detail = json.loads(detail_body)
+        except json.JSONDecodeError as error:
+            raise RuntimeError("completed run detail is malformed") from error
+        detail_data = detail.get("data") if isinstance(detail, dict) else None
+        if (
+            detail.get("contract_version") != 1
+            or not isinstance(detail_data, dict)
+            or not isinstance(detail_data.get("write_counts"), dict)
+            or detail_data.get("incomplete_stages")
+            or not isinstance(detail_data.get("run"), dict)
+            or detail_data["run"].get("id") != run_id
+            or detail_data["run"].get("status") != "completed"
+            or not detail_data["run"].get("finished_at")
+        ):
+            raise RuntimeError("completed run detail lacks a complete receipt chain")
+        reports_data = payloads["/v1/reports"].get("data")
+        visible_reports = (
+            reports_data.get("reports") if isinstance(reports_data, dict) else None
+        )
+        report_ids = [
+            row.get("id") for row in visible_reports or [] if isinstance(row, dict)
+        ]
+        if (
+            not isinstance(visible_reports, list)
+            or len(report_ids) != len(visible_reports)
+            or len(report_ids) > 50
+            or any(
+                not isinstance(report_id, str)
+                or UUID_PATTERN.fullmatch(report_id) is None
+                for report_id in report_ids
+            )
+            or len(set(report_ids)) != len(report_ids)
+        ):
+            raise RuntimeError("visible report identifiers are malformed")
+        try:
+            source_receipt = reconcile_source_receipts(
+                payloads, detail, source_reader(run_id), run_id,
+            )
+            break
+        except RuntimeError as error:
+            if (
+                source_attempt == 0
+                and str(error) == "dashboard claim differs from its source receipt"
+            ):
+                continue
+            raise
     return {
         "status": "verified",
         "unauthenticated_status": denied_status,

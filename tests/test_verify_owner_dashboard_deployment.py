@@ -36,7 +36,7 @@ def v1_chain(run_id):
     event_canonical = {"title": "event"}
     ranking_canonical = {"event_id": event_id, "rank": 1}
     packet_canonical = {"packet": "evidence"}
-    report_canonical = {"summary": "research"}
+    report_canonical = {"title": "Market research", "summary": "research"}
     rendered_text = "Suggestion only."
     publication_canonical = {"report_id": report_id, "status": "delivered", "telegram_message_ids": [7]}
     digest = lambda value: hashlib.sha256(json.dumps(value, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
@@ -48,10 +48,26 @@ def v1_chain(run_id):
         "intelligence_events": [{"id": event_id, "run_id": run_id, "canonical": event_canonical, "content_hash": digest(event_canonical)}],
         "intelligence_rankings": [{"id": "55555555-5555-4555-8555-555555555555", "run_id": run_id, "event_id": event_id, "canonical": ranking_canonical, "content_hash": digest(ranking_canonical)}],
         "intelligence_packets": [{"id": packet_id, "run_id": run_id, "canonical": packet_canonical, "packet_hash": digest(packet_canonical), "candidate_count": 1, "evidence_count": 1}],
-        "reports": [{"id": report_id, "run_id": run_id, "packet_id": packet_id, "canonical": report_canonical, "report_hash": digest(report_canonical), "rendered_text": rendered_text, "rendered_hash": hashlib.sha256(rendered_text.encode()).hexdigest()}],
+        "reports": [{
+            "id": report_id, "run_id": run_id, "packet_id": packet_id,
+            "market_date": "2026-09-03", "kind": "morning",
+            "canonical": report_canonical, "report_hash": digest(report_canonical),
+            "rendered_text": rendered_text,
+            "rendered_hash": hashlib.sha256(rendered_text.encode()).hexdigest(),
+            "created_at": "2026-09-03T20:00:00.000Z",
+        }],
         "report_publications": [{"report_id": report_id, "run_id": run_id, "status": "delivered", "telegram_message_ids": [7], "telegram_accepted_at": "2026-09-03T20:00:00.000Z", "canonical": publication_canonical}],
         "canonical_records": [],
     }
+
+
+def v1_report_view(run_id):
+    return verify.report_summary_source_view(v1_chain(run_id)["reports"][0])
+
+
+def v1_public_report_source(run_id):
+    row = v1_chain(run_id)["reports"][0]
+    return {field: row[field] for field in verify.REPORT_PUBLIC_SOURCE_FIELDS}
 
 
 def test_canary_routes_are_get_only_and_bounded():
@@ -299,7 +315,7 @@ def test_http_canary_uses_only_get_and_checks_anonymous_and_non_owner_denial():
         if route == "/v1/portfolio": data["holdings"] = []
         if route == "/v1/alerts": data["alerts"] = []
         if route == "/v1/intelligence": data["run_id"] = "6903b3cc-05b7-4f90-bbc2-7e80a3a59e22"
-        if route == "/v1/reports": data["reports"] = [{"id": "44444444-4444-4444-8444-444444444444"}]
+        if route == "/v1/reports": data["reports"] = [v1_report_view("6903b3cc-05b7-4f90-bbc2-7e80a3a59e22")]
         if route == "/v1/runs": data["runs"] = [{
             "id": "6903b3cc-05b7-4f90-bbc2-7e80a3a59e22", "kind": "on-demand",
             "status": "completed", "finished_at": "2026-09-03T20:00:00.000Z",
@@ -343,6 +359,7 @@ def test_http_canary_uses_only_get_and_checks_anonymous_and_non_owner_denial():
                 "portfolio_data_as_of": None,
                 "intelligence_run_id": run_id,
                 "overdue_scheduled_phases": [],
+                "reports": [v1_public_report_source(run_id)],
             },
             "evidence": v1_chain(run_id),
         }
@@ -367,6 +384,91 @@ def test_http_canary_uses_only_get_and_checks_anonymous_and_non_owner_denial():
         "overdue_scheduled_phases": [],
     }
     assert {method for method, _url, _headers in calls} == {"GET"}
+
+    def duplicate_report_requester(method, url, headers):
+        status, response_headers, body = requester(method, url, headers)
+        if url.endswith("/v1/reports") and headers.get("authorization") == "Bearer owner-token":
+            payload = json.loads(body)
+            payload["data"]["reports"].append(dict(payload["data"]["reports"][0]))
+            body = json.dumps(payload).encode()
+        return status, response_headers, body
+
+    with pytest.raises(RuntimeError, match="visible report identifiers"):
+        verify.run_http_canary(
+            API_URL, ORIGIN, "owner-token", "non-owner-token",
+            requester=duplicate_report_requester,
+            source_reader=lambda *_args: pytest.fail(
+                "malformed report IDs must fail before source reads"
+            ),
+        )
+
+    run_id = "6903b3cc-05b7-4f90-bbc2-7e80a3a59e22"
+    newer_report = json.loads(json.dumps(v1_chain(run_id)["reports"][0]))
+    newer_report["id"] = "66666666-6666-4666-8666-666666666666"
+    newer_report["canonical"] = {
+        "title": "New scheduled report", "summary": "new research",
+    }
+    newer_report["report_hash"] = verify.canonical_sha256(
+        newer_report["canonical"]
+    )
+    newer_report["created_at"] = "2026-09-03T20:01:00.000Z"
+    report_reads = 0
+
+    def raced_requester(method, url, headers):
+        nonlocal report_reads
+        status, response_headers, body = requester(method, url, headers)
+        if url.endswith("/v1/reports") and headers.get("authorization") == "Bearer owner-token":
+            report_reads += 1
+            if report_reads > 1:
+                payload = json.loads(body)
+                payload["data"]["reports"] = [
+                    verify.report_summary_source_view(newer_report),
+                    v1_report_view(run_id),
+                ]
+                body = json.dumps(payload).encode()
+        return status, response_headers, body
+
+    def source_after_concurrent_insert(selected_run_id):
+        source = source_reader(selected_run_id)
+        source["dashboard"]["reports"] = [
+            {field: newer_report[field] for field in verify.REPORT_PUBLIC_SOURCE_FIELDS},
+            v1_public_report_source(run_id),
+        ]
+        source["evidence"]["reports"] = [
+            newer_report, v1_chain(run_id)["reports"][0],
+        ]
+        return source
+
+    raced_receipt = verify.run_http_canary(
+        API_URL, ORIGIN, "owner-token", "non-owner-token",
+        requester=raced_requester,
+        source_reader=source_after_concurrent_insert,
+    )
+    assert raced_receipt["status"] == "verified"
+    assert report_reads == 2
+
+    source_reads = 0
+
+    def omitting_requester(method, url, headers):
+        status, response_headers, body = requester(method, url, headers)
+        if url.endswith("/v1/reports") and headers.get("authorization") == "Bearer owner-token":
+            payload = json.loads(body)
+            payload["data"]["reports"] = []
+            body = json.dumps(payload).encode()
+        return status, response_headers, body
+
+    def authoritative_source(selected_run_id):
+        nonlocal source_reads
+        source_reads += 1
+        return source_reader(selected_run_id)
+
+    with pytest.raises(RuntimeError, match="source receipt"):
+        verify.run_http_canary(
+            API_URL, ORIGIN, "owner-token", "non-owner-token",
+            requester=omitting_requester,
+            source_reader=authoritative_source,
+        )
+    assert source_reads == 2
 
 
 def test_http_canary_reports_only_bounded_owner_failure_status_and_code():
@@ -438,7 +540,7 @@ def test_source_reconciliation_rejects_unsupported_run_send_policy_and_price_cla
     }]})
     payloads["/v1/system"] = envelope({"policy_version": 17})
     payloads["/v1/intelligence"] = envelope({"run_id": run_id})
-    payloads["/v1/reports"] = envelope({"reports": [{"id": "44444444-4444-4444-8444-444444444444"}]})
+    payloads["/v1/reports"] = envelope({"reports": [v1_report_view(run_id)]})
     detail = envelope({
         "run": payloads["/v1/runs"]["data"]["runs"][0],
         "request_receipts": [{"request_id": "one"}],
@@ -472,6 +574,7 @@ def test_source_reconciliation_rejects_unsupported_run_send_policy_and_price_cla
             "portfolio_data_as_of": "2026-09-03T20:00:00.000Z",
             "intelligence_run_id": run_id,
             "overdue_scheduled_phases": [],
+            "reports": [v1_public_report_source(run_id)],
         },
         "evidence": v1_chain(run_id),
     }
@@ -480,8 +583,24 @@ def test_source_reconciliation_rejects_unsupported_run_send_policy_and_price_cla
     assert receipt["status"] == "verified"
     assert receipt["claims_checked"] == 11
     assert receipt["relationships_verified"] is True
-    assert receipt["scheduled_chain"]["run_id"] == run_id
+    assert "scheduled_chain" not in receipt
     assert receipt["scheduled_readiness"]["status"] == "ready"
+
+    # The dashboard run audit feed and the protected intelligence/report
+    # history are separate timelines.  A newer completed generic run must not
+    # be required to own the retained report chain.
+    generic_run_id = "11111111-1111-4111-8111-111111111111"
+    generic_payloads = json.loads(json.dumps(payloads))
+    generic_payloads["/v1/runs"]["data"]["runs"][0]["id"] = generic_run_id
+    generic_detail = json.loads(json.dumps(detail))
+    generic_detail["data"]["run"]["id"] = generic_run_id
+    generic_source = json.loads(json.dumps(source))
+    generic_source["dashboard"]["run"]["id"] = generic_run_id
+    distinct_receipt = verify.reconcile_source_receipts(
+        generic_payloads, generic_detail, generic_source, generic_run_id,
+    )
+    assert distinct_receipt["status"] == "verified"
+    assert "scheduled_chain" not in distinct_receipt
 
     pre_v2_payloads = json.loads(json.dumps(payloads))
     pre_v2_payloads["/v1/intelligence"]["data"]["run_id"] = None
@@ -491,32 +610,30 @@ def test_source_reconciliation_rejects_unsupported_run_send_policy_and_price_cla
         pre_v2_payloads, detail, pre_v2_source, run_id,
     )["status"] == "verified"
 
-    truncated_research_source = json.loads(json.dumps(source))
-    truncated_research_source["evidence"]["intelligence_events"] = []
-    truncated_research_source["evidence"]["intelligence_rankings"] = []
+    empty_report_payloads = json.loads(json.dumps(payloads))
+    empty_report_payloads["/v1/reports"]["data"]["reports"] = []
+    empty_report_source = json.loads(json.dumps(source))
+    empty_report_source["dashboard"]["reports"] = []
+    empty_report_source["evidence"]["reports"] = []
+    empty_receipt = verify.reconcile_source_receipts(
+        empty_report_payloads, detail, empty_report_source, run_id,
+    )
+    assert empty_receipt["counts"] == {"reports": 0}
+
+    changed_payloads = json.loads(json.dumps(payloads))
+    changed_payloads["/v1/reports"]["data"]["reports"][0]["title"] = "altered"
     with pytest.raises(RuntimeError, match="source receipt"):
         verify.reconcile_source_receipts(
-            payloads, detail, truncated_research_source, run_id,
+            changed_payloads, detail, source, run_id,
         )
 
-    empty_research_source = json.loads(json.dumps(truncated_research_source))
-    empty_packet = {
-        "contract_version": 2,
-        "execution_allowed": False,
-        "research_candidates": [],
-        "action_candidates": [],
-        "evidence": [],
-    }
-    packet = empty_research_source["evidence"]["intelligence_packets"][0]
-    packet.update({
-        "candidate_count": 0,
-        "evidence_count": 0,
-        "canonical": empty_packet,
-        "packet_hash": verify.canonical_sha256(empty_packet),
-    })
-    assert verify.reconcile_source_receipts(
-        payloads, detail, empty_research_source, run_id,
-    )["status"] == "verified"
+    invalid_relationship_source = json.loads(json.dumps(source))
+    invalid_relationship_source["dashboard"]["reports"][0]["run_id"] = "not-a-uuid"
+    invalid_relationship_source["evidence"]["reports"][0]["run_id"] = "not-a-uuid"
+    with pytest.raises(RuntimeError, match="source receipt"):
+        verify.reconcile_source_receipts(
+            payloads, detail, invalid_relationship_source, run_id,
+        )
 
     for path, value in [
         (("dashboard", "run", "write_counts"), {"suggestions": 2}),
@@ -529,7 +646,7 @@ def test_source_reconciliation_rejects_unsupported_run_send_policy_and_price_cla
         (("dashboard", "intelligence_run_id"), "not-a-uuid"),
         (("dashboard", "policy_version"), 18),
         (("dashboard", "holdings", 0, "price"), "109"),
-        (("evidence", "intelligence_events", 0, "content_hash"), "invalid"),
+        (("evidence", "reports", 0, "report_hash"), "invalid"),
     ]:
         changed = json.loads(json.dumps(source))
         target = changed
@@ -560,7 +677,7 @@ def test_source_reconciliation_rejects_unsupported_run_send_policy_and_price_cla
             verify.reconcile_source_receipts(changed_payloads, detail, source, run_id)
 
     changed = json.loads(json.dumps(source))
-    changed["evidence"]["intelligence_events"][0]["canonical"]["title"] = "replaced retained source body"
+    changed["evidence"]["reports"][0]["canonical"]["title"] = "replaced retained source body"
     with pytest.raises(RuntimeError, match="source receipt"):
         verify.reconcile_source_receipts(payloads, detail, changed, run_id)
 
@@ -613,7 +730,7 @@ def test_source_reconciliation_retains_an_overdue_phase_as_pending_release_evide
     payloads["/v1/runs"] = envelope({"runs": [{"id": run_id, "kind": "post-market", "status": "completed", "finished_at": "2026-09-03T20:00:00.000Z", "data_as_of": None, "evaluation_count": 0, "suggestion_count": 0, "publication_status": None}]})
     payloads["/v1/alerts"] = envelope({"alerts": []})
     payloads["/v1/intelligence"] = envelope({"run_id": run_id})
-    payloads["/v1/reports"] = envelope({"reports": [{"id": "44444444-4444-4444-8444-444444444444"}]})
+    payloads["/v1/reports"] = envelope({"reports": [v1_report_view(run_id)]})
     detail = envelope({"run": payloads["/v1/runs"]["data"]["runs"][0], "request_receipts": [], "evaluations": [], "write_counts": {}, "telegram_message_ids": [], "incomplete_stages": []})
     source = {
         "dashboard": {
@@ -623,6 +740,7 @@ def test_source_reconciliation_retains_an_overdue_phase_as_pending_release_evide
             "alerts": [], "policy_version": None, "holdings": [], "portfolio_data_as_of": None,
             "intelligence_run_id": run_id,
             "overdue_scheduled_phases": [{"market_date": "2026-09-03", "phase": "post-market", "deadline_at": "2026-09-03T22:00:00.000Z"}],
+            "reports": [v1_public_report_source(run_id)],
         },
         "evidence": v1_chain(run_id),
     }
@@ -820,7 +938,7 @@ def test_source_collector_keeps_visible_and_protected_queries_on_separate_read_o
     )
 
     assert [connection.label for connection in connections] == [
-        "dashboard", "evidence",
+        "evidence", "dashboard",
     ]
     assert all(connection.kwargs == {
         "row_factory": verify.dict_row,
@@ -833,25 +951,49 @@ def test_source_collector_keeps_visible_and_protected_queries_on_separate_read_o
         assert "SET LOCAL statement_timeout='30s'" in transaction_queries
 
     dashboard_queries = "\n".join(
-        query for query, _parameters in connections[0].queries
+        query for connection in connections if connection.label == "dashboard"
+        for query, _parameters in connection.queries
     )
     evidence_queries = "\n".join(
-        query for query, _parameters in connections[1].queries
+        query for connection in connections if connection.label == "evidence"
+        for query, _parameters in connection.queries
     )
-    protected_relations = (
-        "public.market_intelligence_runs",
-        "public.market_events",
-        "public.market_candidate_rankings",
-        "public.market_evidence_packets",
-        "public.market_reports",
-        "public.market_report_publications",
+    assert "public.market_reports" in dashboard_queries
+    assert "public.market_reports" in evidence_queries
+    assert "JOIN public.market_intelligence_runs" in evidence_queries
+    assert "JOIN public.market_evidence_packets" in evidence_queries
+    assert "JOIN public.market_intelligence_runs" not in dashboard_queries
+    assert "JOIN public.market_evidence_packets" not in dashboard_queries
+    report_queries = [
+        (connection.label, query, parameters)
+        for connection in connections
+        for query, parameters in connection.queries
+        if "public.market_reports" in query
+    ]
+    dashboard_report_query = next(
+        query for label, query, _parameters in report_queries
+        if label == "dashboard"
     )
-    assert all(relation not in dashboard_queries for relation in protected_relations)
-    assert all(relation in evidence_queries for relation in protected_relations)
+    assert "packet_id" not in dashboard_report_query
+    assert "rendered_text" not in dashboard_report_query
+    assert "rendered_hash" not in dashboard_report_query
+    assert [parameters for _label, _query, parameters in report_queries] == [
+        (), ([],),
+    ]
+    evidence_report_query = next(
+        query for label, query, _parameters in report_queries
+        if label == "evidence"
+    )
+    assert "ORDER BY r.created_at DESC, r.id DESC LIMIT 50" in evidence_report_query
+    assert "unnest(%s::uuid[]) WITH ORDINALITY" in dashboard_report_query
+    assert receipt["dashboard"]["reports"] == []
+    assert receipt["evidence"]["reports"] == []
     assert "public.read_owner_intelligence_v2(25) AS projection" in dashboard_queries
     assert "jsonb_typeof(projection->'run_id') AS run_id_type" in dashboard_queries
     overdue_queries = [
-        (query, parameters) for query, parameters in connections[0].queries
+        (query, parameters)
+        for connection in connections if connection.label == "dashboard"
+        for query, parameters in connection.queries
         if "read_overdue_scheduled_market_phases" in query
     ]
     assert len(overdue_queries) == 1
