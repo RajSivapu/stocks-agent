@@ -98,7 +98,7 @@ jobs:
             test "$(jq 'length' <<<"$COMMENTS")" -lt 100 || { echo 'owner authorization evidence exceeds bounded page'; exit 1; }
             OWNER_ID="$(gh api "repos/$GITHUB_REPOSITORY" --jq .owner.id)"
             EXPECTED_OWNER_APPROVAL="$(printf 'OWNER_RELEASE_APPROVAL_V1\nreviewed_sha=%s\npr_ci_workflow_run_id=%s' "$PR_HEAD_SHA" "$PR_CI_WORKFLOW_RUN_ID")"
-            OWNER_APPROVAL="$(jq -c --arg body "$EXPECTED_OWNER_APPROVAL" --argjson owner "$OWNER_ID" --arg pr_ci "$PR_CI_COMPLETED_AT" --arg merged "$MERGED_AT" '[.[] | select((.id | type == "number") and .id > 0 and .user.id == $owner and .author_association == "OWNER" and .body == $body and .created_at >= $pr_ci and .created_at <= .updated_at and .updated_at <= $merged)] | sort_by([.created_at, .id]) | last // empty' <<<"$COMMENTS")"
+            OWNER_APPROVAL="$(jq -c --arg body "$EXPECTED_OWNER_APPROVAL" --argjson owner "$OWNER_ID" --arg pr_ci "$PR_CI_COMPLETED_AT" --arg merged "$MERGED_AT" '[.[] | select((.id | type == "number") and .id > 0 and .user.id == $owner and .author_association == "OWNER" and (.body == $body or .body == ($body + "\n")) and .created_at >= $pr_ci and .created_at <= .updated_at and .updated_at <= $merged)] | sort_by([.created_at, .id]) | last // empty' <<<"$COMMENTS")"
             test -n "$OWNER_APPROVAL" || { echo 'latest required review or CI-bound owner approval is missing'; exit 1; }
             jq -e '[.[] | select(.state == "APPROVED" or .state == "CHANGES_REQUESTED" or .state == "DISMISSED")] | group_by(.user.id) | map(max_by([.submitted_at // "", .id])) | all(.state != "CHANGES_REQUESTED")' <<<"$REVIEWS" >/dev/null || { echo 'current changes-requested review blocks owner approval'; exit 1; }
             AUTHORIZATION_KIND=owner_comment

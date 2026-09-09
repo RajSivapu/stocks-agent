@@ -1891,7 +1891,10 @@ def test_release_rejects_a_current_changes_requested_review(release):
         verify_release(source, **args)
 
 
-def test_release_accepts_exact_pr_ci_bound_owner_comment_for_solo_repository(release):
+@pytest.mark.parametrize("terminal_newline", ["", "\n"])
+def test_release_accepts_exact_pr_ci_bound_owner_comment_for_solo_repository(
+    release, terminal_newline
+):
     source, args = release
     reviewed = source.record["reviewed_sha"]
     source.review_records = []
@@ -1901,10 +1904,26 @@ def test_release_accepts_exact_pr_ci_bound_owner_comment_for_solo_repository(rel
         "author_association": "OWNER", "created_at": "2026-09-05T17:55:00Z",
         "updated_at": "2026-09-05T17:55:00Z",
         "body": "OWNER_RELEASE_APPROVAL_V1\n"
-            f"reviewed_sha={reviewed}\npr_ci_workflow_run_id=41"}]
+            f"reviewed_sha={reviewed}\npr_ci_workflow_run_id=41{terminal_newline}"}]
 
     result = verify_release(source, **args)
     assert result["candidate_sha"] == source.record["candidate_sha"]
+
+
+def test_release_rejects_owner_comment_with_two_terminal_newlines(release):
+    source, args = release
+    reviewed = source.record["reviewed_sha"]
+    source.review_records = []
+    source.record["release_authorization"] = {"kind": "owner_comment", "id": 46,
+        "pr_ci_workflow_run_id": 41}
+    source.authorization_comment_records = [{"id": 46, "user": {"id": 7},
+        "author_association": "OWNER", "created_at": "2026-09-05T17:55:00Z",
+        "updated_at": "2026-09-05T17:55:00Z",
+        "body": "OWNER_RELEASE_APPROVAL_V1\n"
+            f"reviewed_sha={reviewed}\npr_ci_workflow_run_id=41\n\n"}]
+
+    with pytest.raises(RuntimeError, match="authorization"):
+        verify_release(source, **args)
 
 
 @pytest.mark.parametrize("mutation", [
