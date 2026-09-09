@@ -1249,6 +1249,37 @@ def run_post_deploy_canary(
         }
         if any(result.get(key) != value for key, value in expected.items()):
             raise RuntimeError("production canary receipt is incomplete")
+        evidence_authority = result.get("evidence_reader_authority")
+        if (
+            not isinstance(evidence_authority, Mapping)
+            or set(evidence_authority) != {
+                "status", "connection_id", "read_only", "isolated_guard",
+            }
+            or evidence_authority.get("status") != "verified"
+            or not isinstance(evidence_authority.get("connection_id"), str)
+            or re.fullmatch(r"[0-9a-f]{64}", evidence_authority["connection_id"])
+            is None
+            or evidence_authority.get("read_only") is not True
+            or evidence_authority.get("isolated_guard") is not False
+        ):
+            raise RuntimeError("production evidence reader authority is incomplete")
+        source_reconciliation = result.get("source_reconciliation_receipt")
+        if source_reconciliation != {
+            "status": "verified",
+            "dashboard": {
+                "role": "stock_agent_dashboard_runtime",
+                "transaction_read_only": True,
+            },
+            "evidence": {
+                "role": "stock_agent_release_reader_runtime",
+                "transaction_read_only": True,
+                "authority": evidence_authority,
+            },
+            "canonical_hashes": "verified",
+            "run_relationships": "verified",
+            "claims_checked": 11,
+        }:
+            raise RuntimeError("production source reconciliation is incomplete")
         if result.get("non_owner_status") != 403:
             raise RuntimeError("production non-owner denial receipt is incomplete")
     finally:

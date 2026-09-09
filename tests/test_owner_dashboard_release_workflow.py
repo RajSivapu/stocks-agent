@@ -9,6 +9,26 @@ import subprocess
 import pytest
 import yaml
 
+EVIDENCE_AUTHORITY = {
+    "status": "verified", "connection_id": "a" * 64,
+    "read_only": True, "isolated_guard": False,
+}
+SOURCE_RECONCILIATION = {
+    "status": "verified",
+    "dashboard": {
+        "role": "stock_agent_dashboard_runtime",
+        "transaction_read_only": True,
+    },
+    "evidence": {
+        "role": "stock_agent_release_reader_runtime",
+        "transaction_read_only": True,
+        "authority": EVIDENCE_AUTHORITY,
+    },
+    "canonical_hashes": "verified",
+    "run_relationships": "verified",
+    "claims_checked": 11,
+}
+
 
 def test_protected_release_and_recovery_are_valid_workflow_yaml():
     for name in (
@@ -395,6 +415,8 @@ def test_release_record_keeps_release_and_later_scheduled_receipts_distinct():
             "source_reconciliation": "verified",
             "source_database_role": "stock_agent_dashboard_runtime",
             "evidence_database_role": "stock_agent_release_reader_runtime",
+            "evidence_reader_authority": copy.deepcopy(EVIDENCE_AUTHORITY),
+            "source_reconciliation_receipt": copy.deepcopy(SOURCE_RECONCILIATION),
             "financial_write_routes": 0,
             "brokerage_authority": "none",
             "friend_invitations": "disabled",
@@ -434,7 +456,8 @@ def test_release_record_keeps_release_and_later_scheduled_receipts_distinct():
 @pytest.mark.parametrize("missing", [
     "unauthenticated_status", "non_owner_status", "owner_session", "non_owner_session",
     "auth_inventory_preflight", "auth_inventory_readback",
-    "evidence_database_role",
+    "evidence_database_role", "evidence_reader_authority",
+    "source_reconciliation_receipt",
 ])
 def test_release_record_rejects_missing_owner_only_canary_evidence(missing):
     from scripts import write_protected_release_record as writer
@@ -447,6 +470,8 @@ def test_release_record_rejects_missing_owner_only_canary_evidence(missing):
         "status": "verified", "source_reconciliation": "verified",
         "source_database_role": "stock_agent_dashboard_runtime",
         "evidence_database_role": "stock_agent_release_reader_runtime",
+        "evidence_reader_authority": copy.deepcopy(EVIDENCE_AUTHORITY),
+        "source_reconciliation_receipt": copy.deepcopy(SOURCE_RECONCILIATION),
         "financial_write_routes": 0, "brokerage_authority": "none",
         "friend_invitations": "disabled", "owner_route_count": 10,
         "unauthenticated_status": 401, "non_owner_status": 403,
@@ -471,6 +496,8 @@ def test_release_record_rejects_the_wrong_evidence_database_role():
         "status": "verified", "source_reconciliation": "verified",
         "source_database_role": "stock_agent_dashboard_runtime",
         "evidence_database_role": "stock_agent_dashboard_runtime",
+        "evidence_reader_authority": copy.deepcopy(EVIDENCE_AUTHORITY),
+        "source_reconciliation_receipt": copy.deepcopy(SOURCE_RECONCILIATION),
         "financial_write_routes": 0, "brokerage_authority": "none",
         "friend_invitations": "disabled", "owner_route_count": 10,
         "unauthenticated_status": 401, "non_owner_status": 403,
@@ -528,6 +555,8 @@ def test_release_record_writer_emits_backend_only_evidence_contract(tmp_path, mo
         "canary": {"status": "verified", "source_reconciliation": "verified",
             "source_database_role": "stock_agent_dashboard_runtime",
             "evidence_database_role": "stock_agent_release_reader_runtime",
+            "evidence_reader_authority": copy.deepcopy(EVIDENCE_AUTHORITY),
+            "source_reconciliation_receipt": copy.deepcopy(SOURCE_RECONCILIATION),
             "financial_write_routes": 0, "brokerage_authority": "none",
             "friend_invitations": "disabled", "owner_route_count": 10,
             "unauthenticated_status": 401, "non_owner_status": 403,
@@ -576,6 +605,7 @@ def test_release_record_writer_emits_backend_only_evidence_contract(tmp_path, mo
         "inventory_readback": {"status": "verified", "identity_count": 2,
             "privileged_owner_count": 1, "denied_canary_count": 1},
     }
+    assert record["source_reconciliation"] == SOURCE_RECONCILIATION
     assert record["evidence_classes"]["owner_site"]["status"] == "pending"
     assert all(row["artifact_id"] == 60 for row in record["component_readbacks"])
 

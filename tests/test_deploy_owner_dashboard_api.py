@@ -17,6 +17,25 @@ EVIDENCE_DATABASE_URL = (
     "postgresql://stock_agent_release_reader_runtime.hlxpxbxhqctwsqizwjjy:"
     "evidence-password-longer-than-24@aws-0-us-east-1.pooler.supabase.com:5432/postgres"
 )
+EVIDENCE_AUTHORITY = {
+    "status": "verified", "connection_id": "a" * 64,
+    "read_only": True, "isolated_guard": False,
+}
+SOURCE_RECONCILIATION = {
+    "status": "verified",
+    "dashboard": {
+        "role": "stock_agent_dashboard_runtime",
+        "transaction_read_only": True,
+    },
+    "evidence": {
+        "role": "stock_agent_release_reader_runtime",
+        "transaction_read_only": True,
+        "authority": EVIDENCE_AUTHORITY,
+    },
+    "canonical_hashes": "verified",
+    "run_relationships": "verified",
+    "claims_checked": 11,
+}
 ADMIN_URL = (
     "postgresql://postgres:admin-password-longer-than-24@"
     "db.hlxpxbxhqctwsqizwjjy.supabase.co:5432/postgres?sslmode=require"
@@ -984,6 +1003,8 @@ def test_post_deploy_canary_keeps_runtime_database_url_and_auth_token_out_of_rec
             "friend_invitations": "disabled", "non_owner_status": 403,
             "source_database_role": "stock_agent_dashboard_runtime",
             "evidence_database_role": "stock_agent_release_reader_runtime",
+            "evidence_reader_authority": dict(EVIDENCE_AUTHORITY),
+            "source_reconciliation_receipt": SOURCE_RECONCILIATION,
         }
 
     def session_revoker(project_url, token, publishable_key):

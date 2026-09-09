@@ -50,6 +50,24 @@ def validate_release_identity(
 def protected_canary_evidence(receipt: dict[str, object]) -> dict[str, object]:
     """Require and retain the exact owner, anonymous, and denied-canary proof."""
     canary = receipt.get("canary")
+    evidence_authority = (
+        canary.get("evidence_reader_authority") if isinstance(canary, dict) else None
+    )
+    expected_source_reconciliation = {
+        "status": "verified",
+        "dashboard": {
+            "role": "stock_agent_dashboard_runtime",
+            "transaction_read_only": True,
+        },
+        "evidence": {
+            "role": "stock_agent_release_reader_runtime",
+            "transaction_read_only": True,
+            "authority": evidence_authority,
+        },
+        "canonical_hashes": "verified",
+        "run_relationships": "verified",
+        "claims_checked": 11,
+    }
     if (
         not isinstance(canary, dict)
         or canary.get("status") != "verified"
@@ -66,6 +84,18 @@ def protected_canary_evidence(receipt: dict[str, object]) -> dict[str, object]:
         or canary.get("non_owner_session") != "revoked"
         or canary.get("auth_inventory_preflight") != AUTH_CANARY_INVENTORY
         or canary.get("auth_inventory_readback") != AUTH_CANARY_INVENTORY
+        or not isinstance(evidence_authority, dict)
+        or set(evidence_authority) != {
+            "status", "connection_id", "read_only", "isolated_guard",
+        }
+        or evidence_authority.get("status") != "verified"
+        or not isinstance(evidence_authority.get("connection_id"), str)
+        or re.fullmatch(r"[0-9a-f]{64}", evidence_authority["connection_id"])
+        is None
+        or evidence_authority.get("read_only") is not True
+        or evidence_authority.get("isolated_guard") is not False
+        or canary.get("source_reconciliation_receipt")
+        != expected_source_reconciliation
     ):
         raise RuntimeError("protected release canary receipt is incomplete")
     return {
@@ -76,6 +106,7 @@ def protected_canary_evidence(receipt: dict[str, object]) -> dict[str, object]:
             "inventory_preflight": copy.deepcopy(AUTH_CANARY_INVENTORY),
             "inventory_readback": copy.deepcopy(AUTH_CANARY_INVENTORY),
         },
+        "source_reconciliation": copy.deepcopy(expected_source_reconciliation),
     }
 
 
@@ -175,6 +206,7 @@ def main() -> int:
         "dry_run": False, "dry_run_evidence": dry,
         "canaries": canary_evidence["canaries"],
         "auth_canary": canary_evidence["auth_canary"],
+        "source_reconciliation": canary_evidence["source_reconciliation"],
         "deployment_outcome": "succeeded",
         "component_readbacks": component_readbacks,
         "backend_evidence_artifact": {"artifact_id": artifact_id,

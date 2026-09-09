@@ -9,6 +9,12 @@ from scripts import verify_owner_dashboard_deployment as verify
 
 ORIGIN = "https://stocks.example.com"
 API_URL = "https://hlxpxbxhqctwsqizwjjy.supabase.co/functions/v1/owner-dashboard-api"
+EVIDENCE_AUTHORITY = {
+    "status": "verified",
+    "connection_id": "a" * 64,
+    "read_only": True,
+    "isolated_guard": False,
+}
 
 
 def envelope(data, *, freshness="fresh", market_state="regular", data_as_of="2026-09-03T20:00:00.000Z"):
@@ -37,6 +43,7 @@ def v1_chain(run_id):
     return {
         "evidence_database_user": verify.EVIDENCE_ROLE,
         "evidence_transaction_read_only": "on",
+        "evidence_authority": dict(EVIDENCE_AUTHORITY),
         "intelligence_runs": [{"id": run_id}],
         "intelligence_events": [{"id": event_id, "run_id": run_id, "canonical": event_canonical, "content_hash": digest(event_canonical)}],
         "intelligence_rankings": [{"id": "55555555-5555-4555-8555-555555555555", "run_id": run_id, "event_id": event_id, "canonical": ranking_canonical, "content_hash": digest(ranking_canonical)}],
@@ -320,6 +327,7 @@ def test_http_canary_uses_only_get_and_checks_anonymous_and_non_owner_denial():
     assert receipt["source_reconciliation"] == "verified"
     assert receipt["source_database_role"] == verify.RUNTIME_ROLE
     assert receipt["evidence_database_role"] == verify.EVIDENCE_ROLE
+    assert receipt["evidence_reader_authority"] == EVIDENCE_AUTHORITY
     assert {method for method, _url, _headers in calls} == {"GET"}
 
 
@@ -545,6 +553,7 @@ def test_evidence_database_url_must_use_the_scoped_release_reader_login():
     for invalid in [
         valid.replace("stock_agent_release_reader_runtime", "postgres"),
         valid.replace("stock_agent_release_reader_runtime", verify.RUNTIME_ROLE),
+        valid.replace("evidence-password-longer-than-24", "%41" * 8),
         valid.replace(":5432/", ":6543/"),
         valid.replace("pooler.supabase.com", "example.com"),
     ]:
@@ -597,11 +606,38 @@ def test_source_collector_keeps_visible_and_protected_queries_on_separate_read_o
             return Cursor(self)
 
     def connect(url, **kwargs):
-        connection = Connection(
-            "dashboard" if url == dashboard_url else "evidence", kwargs,
-        )
+        assert url == dashboard_url
+        connection = Connection("dashboard", kwargs)
         connections.append(connection)
         return connection
+
+    class EvidenceSource:
+        def __init__(self, url, project_ref):
+            assert url == evidence_url
+            assert project_ref == "hlxpxbxhqctwsqizwjjy"
+            self.connection = Connection("evidence", {
+                "row_factory": verify.dict_row,
+                "sslmode": "verify-full",
+                "connect_timeout": 15,
+            })
+
+        def __enter__(self):
+            connections.append(self.connection)
+            self.connection.queries.extend([
+                ("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY", ()),
+                ("SET LOCAL statement_timeout='30s'", ()),
+            ])
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        def identity(self):
+            return {
+                "connection_id": "a" * 64,
+                "read_only": True,
+                "isolated_guard": False,
+            }
 
     def fetch_one(connection, query, parameters=()):
         connection.queries.append((query, parameters))
@@ -633,7 +669,12 @@ def test_source_collector_keeps_visible_and_protected_queries_on_separate_read_o
         connection.queries.append((query, parameters))
         return []
 
+    from scripts import protected_evidence
+
     monkeypatch.setattr(verify.psycopg, "connect", connect)
+    monkeypatch.setattr(
+        protected_evidence, "PostgresReadOnlySource", EvidenceSource,
+    )
     monkeypatch.setattr(verify, "_fetch_one", fetch_one)
     monkeypatch.setattr(verify, "_fetch_all", fetch_all)
 
@@ -672,6 +713,7 @@ def test_source_collector_keeps_visible_and_protected_queries_on_separate_read_o
     assert all(relation in evidence_queries for relation in protected_relations)
     assert receipt["dashboard"]["database_user"] == verify.RUNTIME_ROLE
     assert receipt["evidence"]["evidence_database_user"] == verify.EVIDENCE_ROLE
+    assert receipt["evidence"]["evidence_authority"] == EVIDENCE_AUTHORITY
     assert dashboard_url not in str(receipt)
     assert evidence_url not in str(receipt)
 

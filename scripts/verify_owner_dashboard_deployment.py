@@ -13,7 +13,7 @@ import re
 import sys
 from typing import Callable, Mapping, Sequence
 from urllib.error import HTTPError
-from urllib.parse import urlparse
+from urllib.parse import unquote, urlparse
 from urllib.request import Request, urlopen
 
 import psycopg
@@ -439,19 +439,18 @@ def validate_evidence_database_url(database_url: str, api_url: str) -> str:
     expected_pooler_user = f"{EVIDENCE_ROLE}.{project_ref}"
     pooler = (
         bool(re.fullmatch(r"[a-z0-9-]+\.pooler\.supabase\.com", parsed.hostname or ""))
-        and parsed.username == expected_pooler_user
+        and unquote(parsed.username or "") == expected_pooler_user
         and parsed.port == 5432
     )
     direct = (
         parsed.hostname == f"db.{project_ref}.supabase.co"
-        and parsed.username == EVIDENCE_ROLE
+        and unquote(parsed.username or "") == EVIDENCE_ROLE
         and parsed.port in {None, 5432}
     )
     if (
         parsed.scheme not in {"postgres", "postgresql"}
         or not (pooler or direct)
-        or not parsed.password
-        or len(parsed.password) < 24
+        or len(unquote(parsed.password or "")) < 24
         or parsed.path != "/postgres"
         or parsed.params
         or parsed.query
@@ -549,15 +548,23 @@ def collect_source_receipts(
             "SELECT market_date::text AS market_date, phase, to_char(deadline_at AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS.MS\"Z\"') AS deadline_at FROM public.read_overdue_scheduled_market_phases()",
         )
 
-    with psycopg.connect(
-        evidence_database_url,
-        row_factory=dict_row,
-        sslmode="verify-full",
-        connect_timeout=15,
-    ) as evidence_connection:
-        with evidence_connection.cursor() as cursor:
-            cursor.execute("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY")
-            cursor.execute("SET LOCAL statement_timeout='30s'")
+    project_ref = (urlparse(api_url).hostname or "").split(".", 1)[0]
+    # Keep this import at the post-migration boundary. protected_evidence shares
+    # canonical verification helpers with this module's release verifier.
+    from scripts.protected_evidence import PostgresReadOnlySource
+    with PostgresReadOnlySource(
+        evidence_database_url, project_ref,
+    ) as evidence_source:
+        evidence_connection = evidence_source.connection
+        if evidence_connection is None:
+            raise RuntimeError("release evidence reader authority is unavailable")
+        verified_authority = evidence_source.identity()
+        evidence_authority = {
+            "status": "verified",
+            "connection_id": verified_authority.get("connection_id"),
+            "read_only": verified_authority.get("read_only"),
+            "isolated_guard": verified_authority.get("isolated_guard"),
+        }
         evidence_identity = _fetch_one(
             evidence_connection,
             "SELECT current_user AS evidence_database_user, current_setting('transaction_read_only') AS evidence_transaction_read_only",
@@ -610,6 +617,7 @@ def collect_source_receipts(
         },
         "evidence": {
             **evidence_identity,
+            "evidence_authority": evidence_authority,
             "intelligence_runs": intelligence_runs,
             "intelligence_events": intelligence_events,
             "intelligence_rankings": intelligence_rankings,
@@ -656,6 +664,19 @@ def reconcile_source_receipts(
     if (
         evidence.get("evidence_database_user") != EVIDENCE_ROLE
         or evidence.get("evidence_transaction_read_only") != "on"
+    ):
+        fail()
+    evidence_authority = evidence.get("evidence_authority")
+    if (
+        not isinstance(evidence_authority, Mapping)
+        or set(evidence_authority) != {
+            "status", "connection_id", "read_only", "isolated_guard",
+        }
+        or evidence_authority.get("status") != "verified"
+        or not isinstance(evidence_authority.get("connection_id"), str)
+        or re.fullmatch(r"[0-9a-f]{64}", evidence_authority["connection_id"]) is None
+        or evidence_authority.get("read_only") is not True
+        or evidence_authority.get("isolated_guard") is not False
     ):
         fail()
     detail_data = detail.get("data")
@@ -795,6 +816,22 @@ def reconcile_source_receipts(
     return {
         "status": "verified", "database_role": RUNTIME_ROLE,
         "evidence_database_role": EVIDENCE_ROLE, "claims_checked": 11,
+        "evidence_reader_authority": dict(evidence_authority),
+        "source_reconciliation_receipt": {
+            "status": "verified",
+            "dashboard": {
+                "role": RUNTIME_ROLE,
+                "transaction_read_only": True,
+            },
+            "evidence": {
+                "role": EVIDENCE_ROLE,
+                "transaction_read_only": True,
+                "authority": dict(evidence_authority),
+            },
+            "canonical_hashes": "verified",
+            "run_relationships": "verified",
+            "claims_checked": 11,
+        },
         "counts": {"runs": len(chains["intelligence_runs"]), "events": len(chains["intelligence_events"]),
                    "rankings": len(chains["intelligence_rankings"]), "packets": len(chains["intelligence_packets"]),
                    "reports": len(chains["reports"]), "report_publications": len(chains["report_publications"])},
@@ -1014,6 +1051,10 @@ def run_http_canary(
         "source_reconciliation": source_receipt["status"],
         "source_database_role": source_receipt["database_role"],
         "evidence_database_role": source_receipt["evidence_database_role"],
+        "evidence_reader_authority": source_receipt["evidence_reader_authority"],
+        "source_reconciliation_receipt": source_receipt[
+            "source_reconciliation_receipt"
+        ],
         "friend_invitations": "disabled",
         "brokerage_authority": "none",
     }
