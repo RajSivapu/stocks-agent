@@ -1091,10 +1091,22 @@ def test_actual_postgres_release_reader_extension_closure_revokes_both_grant_pat
 
 
 def test_actual_postgres_complete_read_scope_without_closure_ledger_accepts_legacy_extension(
-    theme_memory_dsn,
+    theme_memory_dsn, monkeypatch,
 ):
-    from scripts.protected_evidence import (
-        PostgresReadOnlySource, release_reader_authority_closure_manifest,
+    import scripts.protected_evidence as evidence
+    from lib.release_reader_closure_contract import (
+        CLOSURE_PRE_MIGRATION_ABSENT_TABLES,
+        CLOSURE_PRE_MIGRATION_UNREADABLE_TABLES,
+        CLOSURE_READ_TABLES,
+        CLOSURE_READER_CONTRACT,
+    )
+
+    PostgresReadOnlySource = evidence.PostgresReadOnlySource
+    release_reader_authority_closure_manifest = (
+        evidence.release_reader_authority_closure_manifest
+    )
+    monkeypatch.setattr(
+        evidence, "READ_TABLES", (*evidence.READ_TABLES, "future_table"),
     )
 
     def local_source():
@@ -1103,6 +1115,12 @@ def test_actual_postgres_complete_read_scope_without_closure_ledger_accepts_lega
         source.project_ref = "local-release-reader"
         source.isolated_guard = False
         source.pre_migration_baseline = True
+        source.reader_contract = CLOSURE_READER_CONTRACT
+        source._contract_read_tables = CLOSURE_READ_TABLES
+        source._contract_absent_tables = CLOSURE_PRE_MIGRATION_ABSENT_TABLES
+        source._contract_unreadable_tables = (
+            CLOSURE_PRE_MIGRATION_UNREADABLE_TABLES
+        )
         source.connection = None
         source._read_tables = ()
         source._pre_migration_omissions = None
@@ -1214,6 +1232,36 @@ def test_actual_postgres_authority_migration_and_ledger_insert_roll_back_togethe
     finally:
         with psycopg.connect(theme_memory_dsn, autocommit=True) as admin:
             admin.execute("REVOKE USAGE ON SCHEMA extensions FROM stock_agent_release_reader")
+
+
+def test_actual_closure_lease_blocks_unrelated_recovery_until_finalized(
+    theme_memory_dsn,
+):
+    from scripts.deploy_owner_dashboard_api import DurableMutationLease
+
+    owner = "reader-closure-20261017-" + "a" * 64
+    with DurableMutationLease(theme_memory_dsn, owner, "recovery"):
+        pass
+
+    with psycopg.connect(theme_memory_dsn, autocommit=True) as connection:
+        assert connection.execute(
+            "SELECT owner,state FROM public.stock_agent_release_mutation_lease "
+            "WHERE singleton"
+        ).fetchone() == (owner, "recovery_required")
+
+    with pytest.raises(RuntimeError, match="remains unresolved"):
+        with DurableMutationLease(
+            theme_memory_dsn, "recovery-999999999-1", "recovery"
+        ):
+            pass
+
+    with DurableMutationLease(theme_memory_dsn, owner, "recovery") as lease:
+        lease.resolve()
+    with psycopg.connect(theme_memory_dsn, autocommit=True) as connection:
+        assert connection.execute(
+            "SELECT owner,state FROM public.stock_agent_release_mutation_lease "
+            "WHERE singleton"
+        ).fetchone() == (owner, "resolved")
 
 
 @pytest.mark.parametrize("sql", (

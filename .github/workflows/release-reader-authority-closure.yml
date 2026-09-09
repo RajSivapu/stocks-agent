@@ -1,0 +1,297 @@
+name: Release reader authority closure
+
+on:
+  workflow_dispatch:
+    inputs:
+      candidate_sha: {description: Reviewed main SHA (hint only), required: true, type: string}
+      reviewed_sha: {description: Exact approved PR head SHA (hint only), required: true, type: string}
+      pr_ci_workflow_run_id: {description: Successful exact-head PR CI run (hint only), required: true, type: string}
+      ci_workflow_run_id: {description: Successful exact-main CI run (hint only), required: true, type: string}
+      pull_request_number: {description: Reviewed merged PR (hint only), required: true, type: string}
+      diagnostic_workflow_run_id: {description: Exact failed production release-reader diagnostic run, required: true, type: string}
+
+permissions:
+  actions: read
+  contents: read
+  issues: read
+  pull-requests: read
+
+concurrency:
+  group: protected-owner-dashboard-release-production
+  cancel-in-progress: false
+
+jobs:
+  close:
+    environment: owner-dashboard-production
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    env:
+      PGSSLMODE: verify-full
+      PGSSLROOTCERT: ${{ github.workspace }}/config/supabase-prod-ca-2021.crt
+    steps:
+      - name: Authenticate exact reviewed main candidate without candidate code
+        id: candidate
+        env:
+          GH_TOKEN: ${{ github.token }}
+          INPUT_SHA: ${{ inputs.candidate_sha }}
+          INPUT_REVIEWED_SHA: ${{ inputs.reviewed_sha }}
+          INPUT_PR_CI_RUN_ID: ${{ inputs.pr_ci_workflow_run_id }}
+          INPUT_CI_RUN_ID: ${{ inputs.ci_workflow_run_id }}
+          INPUT_PR: ${{ inputs.pull_request_number }}
+        run: |
+          set -euo pipefail
+          test -n "$GH_TOKEN" || { echo 'GitHub token is required'; exit 1; }
+          [[ "$INPUT_SHA" =~ ^[0-9a-f]{40}$ ]] || { echo 'candidate SHA is malformed'; exit 1; }
+          [[ "$INPUT_REVIEWED_SHA" =~ ^[0-9a-f]{40}$ ]] || { echo 'reviewed SHA is malformed'; exit 1; }
+          [[ "$INPUT_PR_CI_RUN_ID" =~ ^[1-9][0-9]*$ ]] || { echo 'numeric PR CI workflow run ID is required'; exit 1; }
+          [[ "$INPUT_CI_RUN_ID" =~ ^[1-9][0-9]*$ ]] || { echo 'numeric CI workflow run ID is required'; exit 1; }
+          [[ "$INPUT_PR" =~ ^[1-9][0-9]*$ ]] || { echo 'numeric pull request number is required'; exit 1; }
+          MAIN_SHA="$(gh api "repos/$GITHUB_REPOSITORY/git/ref/heads/main" --jq .object.sha)"
+          CANDIDATE_SHA="$INPUT_SHA"; PR_CI_WORKFLOW_RUN_ID="$INPUT_PR_CI_RUN_ID"; CI_WORKFLOW_RUN_ID="$INPUT_CI_RUN_ID"; PULL_REQUEST_NUMBER="$INPUT_PR"
+          export CANDIDATE_SHA
+          test "${GITHUB_REF:-}" = "refs/heads/main" || { echo 'manual release ref is not main'; exit 1; }
+          test "${GITHUB_SHA:-}" = "$CANDIDATE_SHA" || { echo 'manual release SHA does not bind candidate'; exit 1; }
+          test "$CANDIDATE_SHA" = "$MAIN_SHA" || { echo 'candidate SHA/ref mismatch'; exit 1; }
+          CI="$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$CI_WORKFLOW_RUN_ID")"
+          test "$(jq -r .repository.full_name <<<"$CI")" = "$GITHUB_REPOSITORY" || { echo 'required CI belongs to another repository'; exit 1; }
+          test "$(jq -r .head_sha <<<"$CI")" = "$CANDIDATE_SHA" || { echo 'candidate SHA/ref mismatch'; exit 1; }
+          test "$(jq -r .status <<<"$CI")" = completed && test "$(jq -r .conclusion <<<"$CI")" = success || { echo 'required CI was not successful'; exit 1; }
+          test "$(jq -r .path <<<"$CI")" = .github/workflows/owner-dashboard-ci.yml || { echo 'wrong required CI workflow'; exit 1; }
+          test "$(jq -r .name <<<"$CI")" = "Owner dashboard verification" || { echo 'required CI workflow name mismatch'; exit 1; }
+          test "$(jq -r .event <<<"$CI")" = push && test "$(jq -r .head_branch <<<"$CI")" = main || { echo 'required CI was not an exact-main push'; exit 1; }
+          PR="$(gh api "repos/$GITHUB_REPOSITORY/pulls/$PULL_REQUEST_NUMBER")"
+          test "$(jq -r .base.repo.full_name <<<"$PR")" = "$GITHUB_REPOSITORY" || { echo 'reviewed PR belongs to another repository'; exit 1; }
+          test "$(jq -r .merged <<<"$PR")" = true && test "$(jq -r .base.ref <<<"$PR")" = main && test "$(jq -r .merge_commit_sha <<<"$PR")" = "$CANDIDATE_SHA" || { echo 'candidate SHA/ref mismatch'; exit 1; }
+          jq -e '(.head.ref | type == "string" and length > 0) and (.head.repo.full_name | type == "string" and length > 0)' <<<"$PR" >/dev/null || { echo 'reviewed PR head coordinates are unavailable'; exit 1; }
+          PR_HEAD_SHA="$(jq -r .head.sha <<<"$PR")"
+          PR_HEAD_REF="$(jq -r .head.ref <<<"$PR")"
+          PR_HEAD_REPO="$(jq -r .head.repo.full_name <<<"$PR")"
+          test "$INPUT_REVIEWED_SHA" = "$PR_HEAD_SHA" || { echo 'input reviewed SHA is not the exact PR head'; exit 1; }
+          HEAD_COMMIT="$(gh api "repos/$GITHUB_REPOSITORY/git/commits/$PR_HEAD_SHA")"
+          CANDIDATE_COMMIT="$(gh api "repos/$GITHUB_REPOSITORY/git/commits/$CANDIDATE_SHA")"
+          test "$(jq -r .tree.sha <<<"$HEAD_COMMIT")" = "$(jq -r .tree.sha <<<"$CANDIDATE_COMMIT")" || { echo 'reviewed and candidate Git trees differ'; exit 1; }
+          HEAD_COMMIT_TIME="$(jq -r .committer.date <<<"$HEAD_COMMIT")"
+          CANDIDATE_COMMIT_TIME="$(jq -r .committer.date <<<"$CANDIDATE_COMMIT")"
+          MERGED_AT="$(jq -r .merged_at <<<"$PR")"
+          PR_CI="$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$PR_CI_WORKFLOW_RUN_ID")"
+          test "$(jq -r .repository.full_name <<<"$PR_CI")" = "$GITHUB_REPOSITORY" || { echo 'required PR CI belongs to another repository'; exit 1; }
+          test "$(jq -r .head_sha <<<"$PR_CI")" = "$PR_HEAD_SHA" || { echo 'required PR CI does not bind reviewed head'; exit 1; }
+          test "$(jq -r .status <<<"$PR_CI")" = completed && test "$(jq -r .conclusion <<<"$PR_CI")" = success || { echo 'required PR CI was not successful'; exit 1; }
+          test "$(jq -r .path <<<"$PR_CI")" = .github/workflows/owner-dashboard-ci.yml || { echo 'wrong required PR CI workflow'; exit 1; }
+          test "$(jq -r .name <<<"$PR_CI")" = "Owner dashboard verification" || { echo 'required PR CI workflow name mismatch'; exit 1; }
+          test "$(jq -r .event <<<"$PR_CI")" = pull_request || { echo 'required PR CI was not a pull request run'; exit 1; }
+          PR_CI_BINDING_FILTER='(.head_branch | type == "string" and length > 0) and (.head_repository.full_name | type == "string" and length > 0) and .head_branch == $head_ref and .head_repository.full_name == $head_repo and (.pull_requests | type == "array" and all(.[]; (.number | type) == "number" and .number > 0 and (.number | floor) == .number) and (length == 0 or any(.[]; .number == $number)))'
+          jq -e --argjson number "$PULL_REQUEST_NUMBER" --arg head_ref "$PR_HEAD_REF" --arg head_repo "$PR_HEAD_REPO" "$PR_CI_BINDING_FILTER" <<<"$PR_CI" >/dev/null || { echo 'required PR CI does not bind reviewed pull request'; exit 1; }
+          PR_CI_COMPLETED_AT="$(jq -r .updated_at <<<"$PR_CI")"
+          jq -e --arg head "$HEAD_COMMIT_TIME" --arg merged "$MERGED_AT" '.updated_at >= $head and .updated_at <= $merged' <<<"$PR_CI" >/dev/null || { echo 'required PR CI did not complete between reviewed head and merge'; exit 1; }
+          REVIEWS="$(gh api "repos/$GITHUB_REPOSITORY/pulls/$PULL_REQUEST_NUMBER/reviews?per_page=100")"
+          test "$(jq 'length' <<<"$REVIEWS")" -lt 100 || { echo 'review evidence exceeds bounded page'; exit 1; }
+          # head_commit_time <= latest review.submitted_at <= merged_at <= candidate_commit_time
+          if jq -e --arg sha "$PR_HEAD_SHA" --arg head "$HEAD_COMMIT_TIME" --arg merged "$MERGED_AT" --arg candidate "$CANDIDATE_COMMIT_TIME" \
+            '[.[] | select(.state == "APPROVED" or .state == "CHANGES_REQUESTED" or .state == "DISMISSED")] | (all(.[]; (.id | type == "number" and . > 0)) and (group_by(.user.id) | map(max_by([.submitted_at // "", .id])) | (all(.state != "CHANGES_REQUESTED") and any(.state == "APPROVED" and .commit_id == $sha and (.submitted_at >= $head and .submitted_at <= $merged) and ($merged <= $candidate)))))' \
+            <<<"$REVIEWS" >/dev/null; then
+            AUTHORIZATION_KIND=github_review
+            AUTHORIZATION_ID="$(jq -r --arg sha "$PR_HEAD_SHA" --arg head "$HEAD_COMMIT_TIME" --arg merged "$MERGED_AT" '[.[] | select(.state == "APPROVED" or .state == "CHANGES_REQUESTED" or .state == "DISMISSED")] | group_by(.user.id) | map(max_by([.submitted_at // "", .id])) | [.[] | select(.state == "APPROVED" and .commit_id == $sha and .submitted_at >= $head and .submitted_at <= $merged)] | max_by([.submitted_at, .id]) | .id' <<<"$REVIEWS")"
+          else
+            COMMENTS="$(gh api "repos/$GITHUB_REPOSITORY/issues/$PULL_REQUEST_NUMBER/comments?per_page=100")"
+            test "$(jq 'length' <<<"$COMMENTS")" -lt 100 || { echo 'owner authorization evidence exceeds bounded page'; exit 1; }
+            OWNER_ID="$(gh api "repos/$GITHUB_REPOSITORY" --jq .owner.id)"
+            EXPECTED_OWNER_APPROVAL="$(printf 'OWNER_RELEASE_APPROVAL_V1\nreviewed_sha=%s\npr_ci_workflow_run_id=%s' "$PR_HEAD_SHA" "$PR_CI_WORKFLOW_RUN_ID")"
+            OWNER_APPROVAL="$(jq -c --arg body "$EXPECTED_OWNER_APPROVAL" --argjson owner "$OWNER_ID" --arg pr_ci "$PR_CI_COMPLETED_AT" --arg merged "$MERGED_AT" '[.[] | select((.id | type == "number") and .id > 0 and .user.id == $owner and .author_association == "OWNER" and (.body == $body or .body == ($body + "\n")) and .created_at >= $pr_ci and .created_at <= .updated_at and .updated_at <= $merged)] | sort_by([.created_at, .id]) | last // empty' <<<"$COMMENTS")"
+            test -n "$OWNER_APPROVAL" || { echo 'latest required review or CI-bound owner approval is missing'; exit 1; }
+            jq -e '[.[] | select(.state == "APPROVED" or .state == "CHANGES_REQUESTED" or .state == "DISMISSED")] | group_by(.user.id) | map(max_by([.submitted_at // "", .id])) | all(.state != "CHANGES_REQUESTED")' <<<"$REVIEWS" >/dev/null || { echo 'current changes-requested review blocks owner approval'; exit 1; }
+            AUTHORIZATION_KIND=owner_comment
+            AUTHORIZATION_ID="$(jq -r .id <<<"$OWNER_APPROVAL")"
+          fi
+          [[ "$AUTHORIZATION_ID" =~ ^[1-9][0-9]*$ ]] || { echo 'release authorization identity is malformed'; exit 1; }
+          echo "candidate_sha=$CANDIDATE_SHA" >> "$GITHUB_OUTPUT"
+          echo "reviewed_sha=$PR_HEAD_SHA" >> "$GITHUB_OUTPUT"
+          echo "pr_ci_workflow_run_id=$PR_CI_WORKFLOW_RUN_ID" >> "$GITHUB_OUTPUT"
+          echo "ci_workflow_run_id=$CI_WORKFLOW_RUN_ID" >> "$GITHUB_OUTPUT"
+          echo "pull_request_number=$PULL_REQUEST_NUMBER" >> "$GITHUB_OUTPUT"
+          echo "authorization_kind=$AUTHORIZATION_KIND" >> "$GITHUB_OUTPUT"
+          echo "authorization_id=$AUTHORIZATION_ID" >> "$GITHUB_OUTPUT"
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: ${{ steps.candidate.outputs.candidate_sha }}
+          fetch-depth: 0
+      - uses: actions/setup-python@42375524e23c412d93fb67b49958b491fce71c38
+        with:
+          python-version: "3.14"
+      - name: Install the exact reviewed closure dependencies
+        run: |
+          set -euo pipefail; umask 077
+          test "$(git rev-parse HEAD)" = "${{ steps.candidate.outputs.candidate_sha }}" || { echo 'candidate SHA/ref mismatch'; exit 1; }
+          git fetch --no-tags origin main
+          test "$(git rev-parse origin/main)" = "${{ steps.candidate.outputs.candidate_sha }}" || { echo 'candidate is no longer current main'; exit 1; }
+          CLOSURE_DIR="$RUNNER_TEMP/release-reader-authority-closure-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
+          CLOSURE_VENV="$RUNNER_TEMP/release-reader-authority-closure-venv-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
+          CLOSURE_SHA="$(sha256sum sql/migrations/20261017_release_reader_extension_closure.sql | cut -d' ' -f1)"
+          test "$CLOSURE_SHA" = 0eb1b8245cde4b10a29c6a78c23610ccf705e9480f45aa80eedfdd1a7127f906 || { echo 'closure migration hash mismatch'; exit 1; }
+          install -d -m 700 "$CLOSURE_DIR"
+          python -m venv "$CLOSURE_VENV"
+          "$CLOSURE_VENV/bin/python" -m pip install --require-hashes --only-binary=:all: -r requirements.lock
+          echo "CLOSURE_DIR=$CLOSURE_DIR" >> "$GITHUB_ENV"
+          echo "CLOSURE_VENV=$CLOSURE_VENV" >> "$GITHUB_ENV"
+          echo "CLOSURE_LEASE_OWNER=reader-closure-20261017-$CLOSURE_SHA" >> "$GITHUB_ENV"
+      - name: Bind and extract the exact failed release-reader diagnostic
+        id: diagnostic
+        env:
+          GH_TOKEN: ${{ github.token }}
+          DIAGNOSTIC_RUN_ID: ${{ inputs.diagnostic_workflow_run_id }}
+          CANDIDATE_SHA: ${{ steps.candidate.outputs.candidate_sha }}
+        run: |
+          set -euo pipefail; umask 077
+          [[ "$DIAGNOSTIC_RUN_ID" =~ ^[1-9][0-9]*$ ]] || { echo 'numeric diagnostic workflow run ID is required'; exit 1; }
+          DIAGNOSTIC_RUN="$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$DIAGNOSTIC_RUN_ID")"
+          test "$(jq -r .repository.full_name <<<"$DIAGNOSTIC_RUN")" = "$GITHUB_REPOSITORY" || { echo 'diagnostic belongs to another repository'; exit 1; }
+          test "$(jq -r .path <<<"$DIAGNOSTIC_RUN")" = .github/workflows/production-release-reader-diagnostic.yml || { echo 'wrong diagnostic workflow'; exit 1; }
+          test "$(jq -r .name <<<"$DIAGNOSTIC_RUN")" = "Production release reader diagnostic" || { echo 'diagnostic workflow name mismatch'; exit 1; }
+          test "$(jq -r .event <<<"$DIAGNOSTIC_RUN")" = workflow_dispatch && test "$(jq -r .head_branch <<<"$DIAGNOSTIC_RUN")" = main || { echo 'diagnostic was not manually run on main'; exit 1; }
+          DIAGNOSTIC_SHA="$(jq -r .head_sha <<<"$DIAGNOSTIC_RUN")"
+          [[ "$DIAGNOSTIC_SHA" =~ ^[0-9a-f]{40}$ ]] || { echo 'diagnostic main SHA is malformed'; exit 1; }
+          git merge-base --is-ancestor "$DIAGNOSTIC_SHA" "$CANDIDATE_SHA" || { echo 'diagnostic main is not an ancestor of current main'; exit 1; }
+          test "$(jq -r .status <<<"$DIAGNOSTIC_RUN")" = completed && test "$(jq -r .conclusion <<<"$DIAGNOSTIC_RUN")" = failure || { echo 'diagnostic is not the expected completed failure'; exit 1; }
+          DIAGNOSTIC_ATTEMPT="$(jq -r .run_attempt <<<"$DIAGNOSTIC_RUN")"
+          [[ "$DIAGNOSTIC_ATTEMPT" =~ ^[1-9][0-9]*$ ]] || { echo 'diagnostic run attempt is malformed'; exit 1; }
+          DIAGNOSTIC_CI_RUNS="$(gh api -X GET "repos/$GITHUB_REPOSITORY/actions/workflows/owner-dashboard-ci.yml/runs" -f branch=main -f event=push -f status=success -f head_sha="$DIAGNOSTIC_SHA" -f per_page=100)"
+          jq -e '.total_count > 0 and .total_count <= 100 and (.workflow_runs | length) == .total_count' <<<"$DIAGNOSTIC_CI_RUNS" >/dev/null || { echo 'diagnostic exact-main CI set is missing or unbounded'; exit 1; }
+          DIAGNOSTIC_CREATED_AT="$(jq -r .created_at <<<"$DIAGNOSTIC_RUN")"
+          DIAGNOSTIC_CI="$(jq -c --arg sha "$DIAGNOSTIC_SHA" --arg created "$DIAGNOSTIC_CREATED_AT" '[.workflow_runs[] | select(.repository.full_name == env.GITHUB_REPOSITORY and .path == ".github/workflows/owner-dashboard-ci.yml" and .name == "Owner dashboard verification" and .event == "push" and .head_branch == "main" and .head_sha == $sha and .status == "completed" and .conclusion == "success" and .updated_at <= $created)] | sort_by([.updated_at, .id]) | last // empty' <<<"$DIAGNOSTIC_CI_RUNS")"
+          test -n "$DIAGNOSTIC_CI" || { echo 'diagnostic lacks prior successful exact-main CI'; exit 1; }
+          jq -e --arg created "$DIAGNOSTIC_CREATED_AT" '.updated_at <= $created' <<<"$DIAGNOSTIC_CI" >/dev/null || { echo 'diagnostic predates exact-main CI'; exit 1; }
+          ARTIFACTS="$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$DIAGNOSTIC_RUN_ID/artifacts?per_page=100")"
+          jq -e '.total_count == 1 and (.artifacts | length == 1)' <<<"$ARTIFACTS" >/dev/null || { echo 'diagnostic artifact set is not exact'; exit 1; }
+          ARTIFACT="$(jq -c '.artifacts[0]' <<<"$ARTIFACTS")"
+          EXPECTED_NAME="production-release-reader-diagnostic-$DIAGNOSTIC_RUN_ID-$DIAGNOSTIC_ATTEMPT"
+          test "$(jq -r .name <<<"$ARTIFACT")" = "$EXPECTED_NAME" || { echo 'diagnostic artifact name mismatch'; exit 1; }
+          test "$(jq -r .expired <<<"$ARTIFACT")" = false || { echo 'diagnostic artifact expired'; exit 1; }
+          ARTIFACT_ID="$(jq -r .id <<<"$ARTIFACT")"; ARTIFACT_DIGEST="$(jq -r .digest <<<"$ARTIFACT")"
+          [[ "$ARTIFACT_ID" =~ ^[1-9][0-9]*$ ]] || { echo 'diagnostic artifact ID is malformed'; exit 1; }
+          [[ "$ARTIFACT_DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]] || { echo 'diagnostic artifact digest is unavailable'; exit 1; }
+          jq -e --argjson run "$DIAGNOSTIC_RUN_ID" --arg sha "$DIAGNOSTIC_SHA" '.workflow_run.id == $run and .workflow_run.head_sha == $sha and .size_in_bytes > 0 and .size_in_bytes <= 131072' <<<"$ARTIFACT" >/dev/null || { echo 'diagnostic artifact binding is malformed'; exit 1; }
+          DIAGNOSTIC_ARCHIVE="$CLOSURE_DIR/diagnostic.zip"
+          gh api "repos/$GITHUB_REPOSITORY/actions/artifacts/$ARTIFACT_ID/zip" > "$DIAGNOSTIC_ARCHIVE"
+          test "$(sha256sum "$DIAGNOSTIC_ARCHIVE" | cut -d' ' -f1)" = "${ARTIFACT_DIGEST#sha256:}" || { echo 'diagnostic artifact digest mismatch'; exit 1; }
+          export DIAGNOSTIC_ARCHIVE CLOSURE_DIR
+          "$CLOSURE_VENV/bin/python" - <<'PY'
+          import os
+          from pathlib import Path
+          import stat
+          import zipfile
+          archive = Path(os.environ["DIAGNOSTIC_ARCHIVE"])
+          output = Path(os.environ["CLOSURE_DIR"]) / "release-reader-diagnostic.json"
+          with zipfile.ZipFile(archive) as bundle:
+              infos = bundle.infolist()
+              if len(infos) != 1 or infos[0].filename != output.name:
+                  raise RuntimeError("diagnostic archive members are not exact")
+              info = infos[0]
+              mode = info.external_attr >> 16
+              if info.is_dir() or stat.S_ISLNK(mode) or info.file_size > 8192:
+                  raise RuntimeError("diagnostic archive member is unsafe")
+              payload = bundle.read(info)
+          output.write_bytes(payload)
+          output.chmod(0o600)
+          PY
+          rm -f "$DIAGNOSTIC_ARCHIVE"
+          jq -e '.preflight.status == "failed" and .preflight.error_code == "function_authority_mismatch"' \
+            "$CLOSURE_DIR/release-reader-diagnostic.json" >/dev/null || { echo 'diagnostic failure class is not the reviewed authority mismatch'; exit 1; }
+          echo "workflow_run_id=$DIAGNOSTIC_RUN_ID" >> "$GITHUB_OUTPUT"
+          echo "workflow_run_attempt=$DIAGNOSTIC_ATTEMPT" >> "$GITHUB_OUTPUT"
+          echo "main_sha=$DIAGNOSTIC_SHA" >> "$GITHUB_OUTPUT"
+          echo "artifact_id=$ARTIFACT_ID" >> "$GITHUB_OUTPUT"
+          echo "artifact_name=$EXPECTED_NAME" >> "$GITHUB_OUTPUT"
+          echo "artifact_digest=$ARTIFACT_DIGEST" >> "$GITHUB_OUTPUT"
+      - name: Execute the one-time atomic reader authority closure
+        env:
+          SUPAVISOR_SESSION_URL: ${{ secrets.SUPAVISOR_SESSION_URL }}
+          RELEASE_READONLY_DATABASE_URL: ${{ secrets.RELEASE_READONLY_DATABASE_URL }}
+          SUPABASE_PROJECT_REF: ${{ secrets.SUPABASE_PROJECT_REF }}
+        run: |
+          set -euo pipefail; umask 077
+          test -n "$SUPAVISOR_SESSION_URL" && test -n "$RELEASE_READONLY_DATABASE_URL" && test -n "$SUPABASE_PROJECT_REF"
+          "$CLOSURE_VENV/bin/python" -m scripts.release_reader_authority_closure \
+            --project-ref "$SUPABASE_PROJECT_REF" \
+            --main-sha "${{ steps.candidate.outputs.candidate_sha }}" \
+            --reviewed-sha "${{ steps.candidate.outputs.reviewed_sha }}" \
+            --repository "$GITHUB_REPOSITORY" \
+            --workflow-run-id "$GITHUB_RUN_ID" \
+            --workflow-run-attempt "$GITHUB_RUN_ATTEMPT" \
+            --pr-ci-workflow-run-id "${{ steps.candidate.outputs.pr_ci_workflow_run_id }}" \
+            --ci-workflow-run-id "${{ steps.candidate.outputs.ci_workflow_run_id }}" \
+            --pull-request-number "${{ steps.candidate.outputs.pull_request_number }}" \
+            --authorization-kind "${{ steps.candidate.outputs.authorization_kind }}" \
+            --authorization-id "${{ steps.candidate.outputs.authorization_id }}" \
+            --diagnostic-workflow-run-id "${{ steps.diagnostic.outputs.workflow_run_id }}" \
+            --diagnostic-workflow-run-attempt "${{ steps.diagnostic.outputs.workflow_run_attempt }}" \
+            --diagnostic-main-sha "${{ steps.diagnostic.outputs.main_sha }}" \
+            --diagnostic-artifact-id "${{ steps.diagnostic.outputs.artifact_id }}" \
+            --diagnostic-artifact-name "${{ steps.diagnostic.outputs.artifact_name }}" \
+            --diagnostic-artifact-digest "${{ steps.diagnostic.outputs.artifact_digest }}" \
+            --diagnostic "$CLOSURE_DIR/release-reader-diagnostic.json" \
+            --output "$CLOSURE_DIR/release-reader-authority-closure.json" \
+            --lease-owner "$CLOSURE_LEASE_OWNER"
+      - name: Upload immutable release-reader authority closure receipt
+        id: closure_artifact
+        if: ${{ always() }}
+        uses: actions/upload-artifact@65462800fd760344b1a7b4382951275a0abb4808
+        with:
+          name: release-reader-authority-closure-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ env.CLOSURE_DIR }}/release-reader-authority-closure.json
+          if-no-files-found: error
+          retention-days: 90
+      - name: Bind the immutable closure artifact to this exact run
+        id: closure_artifact_binding
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ARTIFACT_ID: ${{ steps.closure_artifact.outputs.artifact-id }}
+          ARTIFACT_DIGEST: ${{ steps.closure_artifact.outputs.artifact-digest }}
+          CANDIDATE_SHA: ${{ steps.candidate.outputs.candidate_sha }}
+        run: |
+          set -euo pipefail
+          [[ "$ARTIFACT_ID" =~ ^[1-9][0-9]*$ ]] || { echo 'closure artifact ID is malformed'; exit 1; }
+          [[ "$ARTIFACT_DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]] || { echo 'closure artifact digest is malformed'; exit 1; }
+          EXPECTED_NAME="release-reader-authority-closure-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
+          ARTIFACT="$(gh api "repos/$GITHUB_REPOSITORY/actions/artifacts/$ARTIFACT_ID")"
+          jq -e --arg name "$EXPECTED_NAME" --arg digest "$ARTIFACT_DIGEST" \
+            --argjson run "$GITHUB_RUN_ID" --arg sha "$CANDIDATE_SHA" \
+            '.id > 0 and .name == $name and .digest == $digest and .expired == false and .workflow_run.id == $run and .workflow_run.head_sha == $sha and .size_in_bytes > 0 and .size_in_bytes <= 131072' \
+            <<<"$ARTIFACT" >/dev/null || { echo 'closure artifact binding is not exact'; exit 1; }
+          PRIMARY_ARCHIVE="$CLOSURE_DIR/primary-closure-artifact.zip"
+          gh api "repos/$GITHUB_REPOSITORY/actions/artifacts/$ARTIFACT_ID/zip" > "$PRIMARY_ARCHIVE"
+          "$CLOSURE_VENV/bin/python" -m scripts.extract_release_reader_authority_closure_artifact \
+            --archive "$PRIMARY_ARCHIVE" \
+            --digest "$ARTIFACT_DIGEST" \
+            --expected-local "$CLOSURE_DIR/release-reader-authority-closure.json" \
+            --output "$CLOSURE_DIR/immutable-primary/release-reader-authority-closure.json"
+          rm -f "$PRIMARY_ARCHIVE"
+          echo "artifact_id=$ARTIFACT_ID" >> "$GITHUB_OUTPUT"
+          echo "artifact_name=$EXPECTED_NAME" >> "$GITHUB_OUTPUT"
+          echo "artifact_digest=$ARTIFACT_DIGEST" >> "$GITHUB_OUTPUT"
+      - name: Finalize closure after immutable artifact upload
+        env:
+          SUPAVISOR_SESSION_URL: ${{ secrets.SUPAVISOR_SESSION_URL }}
+          RELEASE_READONLY_DATABASE_URL: ${{ secrets.RELEASE_READONLY_DATABASE_URL }}
+          SUPABASE_PROJECT_REF: ${{ secrets.SUPABASE_PROJECT_REF }}
+        run: |
+          set -euo pipefail; umask 077
+          "$CLOSURE_VENV/bin/python" -m scripts.finalize_release_reader_authority_closure \
+            --project-ref "$SUPABASE_PROJECT_REF" \
+            --main-sha "${{ steps.candidate.outputs.candidate_sha }}" \
+            --repository "$GITHUB_REPOSITORY" \
+            --workflow-run-id "$GITHUB_RUN_ID" \
+            --workflow-run-attempt "$GITHUB_RUN_ATTEMPT" \
+            --closure-artifact-id "${{ steps.closure_artifact_binding.outputs.artifact_id }}" \
+            --closure-artifact-name "${{ steps.closure_artifact_binding.outputs.artifact_name }}" \
+            --closure-artifact-digest "${{ steps.closure_artifact_binding.outputs.artifact_digest }}" \
+            --closure-receipt "$CLOSURE_DIR/immutable-primary/release-reader-authority-closure.json" \
+            --output "$CLOSURE_DIR/release-reader-authority-closure-finalization.json" \
+            --lease-owner "$CLOSURE_LEASE_OWNER"
+      - name: Upload closure finalization receipt
+        if: ${{ always() }}
+        uses: actions/upload-artifact@65462800fd760344b1a7b4382951275a0abb4808
+        with:
+          name: release-reader-authority-closure-finalization-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ env.CLOSURE_DIR }}/release-reader-authority-closure-finalization.json
+          if-no-files-found: error
+          retention-days: 90

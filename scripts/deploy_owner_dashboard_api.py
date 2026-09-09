@@ -59,6 +59,9 @@ LEGACY_MIGRATION_CUTOVER_SHA = "59b01733b4c784bc2a65544a0f59598784e13fe8"
 RELEASE_LEASE = "public.stock_agent_release_mutation_lease"
 RELEASE_LEASE_SECONDS = 900
 CANONICAL_ATTEMPT_LEASE_OWNER = re.compile(r"^(release|recovery)-([1-9][0-9]*)-([1-9][0-9]*)$")
+READER_CLOSURE_LEASE_OWNER = re.compile(
+    r"^reader-closure-20261017-[0-9a-f]{64}$"
+)
 FUNCTION_NAME = "owner-dashboard-api"
 CHANGED_FUNCTIONS = ("market-briefing-gateway", FUNCTION_NAME, "telegram-portfolio")
 V1_SURFACES = ("portfolio", "ideas", "intelligence", "reports", "system")
@@ -199,6 +202,8 @@ def acquire_durable_release_lease(cursor, owner: str, kind: str) -> None:
     """
     if not re.fullmatch(r"[a-z0-9-]{16,128}", owner):
         raise ValueError("canonical release lease owner is required")
+    if owner.startswith("reader-closure-") and not READER_CLOSURE_LEASE_OWNER.fullmatch(owner):
+        raise ValueError("canonical release reader closure lease owner is required")
     if kind not in {"release", "recovery"}:
         raise ValueError("canonical release lease kind is required")
     cursor.execute(
@@ -210,15 +215,30 @@ def acquire_durable_release_lease(cursor, owner: str, kind: str) -> None:
         if len(rows) != 1 or len(rows[0]) != 4:
             raise RuntimeError("protected release lease receipt is malformed")
         current_owner, current_kind, current_state, _active = rows[0]
+        if (
+            isinstance(current_owner, str)
+            and current_owner.startswith("reader-closure-")
+            and not READER_CLOSURE_LEASE_OWNER.fullmatch(current_owner)
+        ):
+            raise RuntimeError("protected release lease receipt is malformed")
         same_owner = current_owner == owner and current_kind == kind
         requested_identity = canonical_attempt_lease_identity(owner)
         current_identity = canonical_attempt_lease_identity(current_owner)
         if requested_identity and current_identity and current_identity > requested_identity:
             raise RuntimeError("a newer protected release attempt already owns the durable lease")
-        # A recovery is idempotent and may take over either a lost release or
-        # an earlier local recovery.  The session advisory lock above proves
-        # none of those owners is in a protected mutation at this instant.
-        recovery_takeover = kind == "recovery"
+        # Ordinary recovery may take over a lost release/recovery after the
+        # session lock proves it is inactive. The reader-closure namespace is
+        # isolated so only the same exact migration closure can resume it.
+        requested_is_closure = READER_CLOSURE_LEASE_OWNER.fullmatch(owner) is not None
+        current_is_closure = (
+            isinstance(current_owner, str)
+            and READER_CLOSURE_LEASE_OWNER.fullmatch(current_owner) is not None
+        )
+        recovery_takeover = (
+            kind == "recovery"
+            and not requested_is_closure
+            and not current_is_closure
+        )
         if not same_owner and current_state != "resolved" and not recovery_takeover:
             raise RuntimeError("a protected release or recovery lease remains unresolved")
     cursor.execute(
