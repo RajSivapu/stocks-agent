@@ -6,6 +6,7 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from email.utils import parsedate_to_datetime
+import hashlib
 import re
 from types import MappingProxyType
 from urllib.parse import urlsplit
@@ -157,9 +158,11 @@ def parse_bounded_feed(
         raise SourceFailure("INVALID_FEED")
     items: list[FeedItem] = []
     for node in nodes[:max_items]:
-        identity = _first_text(node, "guid", "id")
         title = _first_text(node, "title")[:500]
         url = _link(node)
+        identity = _first_text(node, "guid", "id") or (
+            f"url-sha256:{hashlib.sha256(url.encode()).hexdigest()}" if url else ""
+        )
         summary = _first_text(node, "description", "summary", "content")
         raw_date = _first_text(node, "pubdate", "published", "updated")
         published_at = _timestamp(raw_date)

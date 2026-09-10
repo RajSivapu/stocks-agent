@@ -20,7 +20,11 @@ class YahooAdapter(SourceAdapter):
         symbol = symbols[0]
         return HttpRequest(
             "https://query1.finance.yahoo.com/v8/finance/chart/"
-            f"{quote(symbol, safe='')}?range=5d&interval=1d"
+            f"{quote(symbol, safe='')}?range=5d&interval=1d",
+            headers={
+                "Accept": "application/json",
+                "User-Agent": "stocks-agent owner research",
+            },
         )
 
     def _records(self, payload, query, response):

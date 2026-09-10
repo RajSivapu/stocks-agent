@@ -622,7 +622,10 @@ def test_source_reconciliation_rejects_unsupported_run_send_policy_and_price_cla
 
     changed_payloads = json.loads(json.dumps(payloads))
     changed_payloads["/v1/reports"]["data"]["reports"][0]["title"] = "altered"
-    with pytest.raises(RuntimeError, match="source receipt"):
+    with pytest.raises(
+        verify.DashboardClaimMismatch,
+        match="reports_visible_projection",
+    ):
         verify.reconcile_source_receipts(
             changed_payloads, detail, source, run_id,
         )

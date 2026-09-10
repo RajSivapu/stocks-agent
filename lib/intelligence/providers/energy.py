@@ -87,7 +87,18 @@ class EiaAdapter(OfficialFeedAdapter):
 
     def _request(self, query: CollectionQuery) -> HttpRequest:
         if query.capability_id != "eia_statistics_v2":
-            return super()._request(query)
+            request = super()._request(query)
+            return HttpRequest(
+                request.url,
+                headers={
+                    "User-Agent": "Mozilla/5.0 (compatible; PersonalStockAgent/1.0)",
+                },
+                timeout_seconds=20.0,
+                max_bytes=request.max_bytes,
+                expected_document=request.expected_document,
+                allow_mislabeled_xml=request.allow_mislabeled_xml,
+                allowed_redirect_urls=request.allowed_redirect_urls,
+            )
         path = self._statistics_path(query)
         key = self._statistics_key()
         params = urlencode({

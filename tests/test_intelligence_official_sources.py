@@ -280,8 +280,29 @@ def test_eia_rss_routes_are_keyless_and_exact(capability_id, expected_url):
     ).collect(query(capability_id))
 
     assert http.requests[0].url == expected_url
+    assert http.requests[0].headers == {
+        "User-Agent": "Mozilla/5.0 (compatible; PersonalStockAgent/1.0)",
+    }
+    assert http.requests[0].timeout_seconds == 20.0
     assert result.items[0].provider == "eia"
     assert result.items[0].security_ids == ()
+
+
+def test_eia_feed_without_guid_uses_a_bounded_url_identity():
+    source_url = "https://www.eia.gov/rss/todayinenergy.xml"
+    raw = b"""<rss><channel><item><title>Grid demand rises</title>
+      <link>https://www.eia.gov/todayinenergy/detail.php?id=123</link>
+      <description>Official energy context.</description>
+      <pubDate>Mon, 07 Sep 2026 14:00:00 GMT</pubDate></item></channel></rss>"""
+
+    result = adapter(
+        "eia", FixtureHttp(raw, url=source_url, content_type="text/xml")
+    ).collect(query("eia_today_in_energy_rss"))
+
+    assert result.receipt.status == "succeeded"
+    assert len(result.items) == 1
+    assert result.items[0].upstream_item_id.startswith("url-sha256:")
+    assert len(result.items[0].upstream_item_id) == len("url-sha256:") + 64
 
 
 def test_eia_statistics_without_free_key_is_configuration_missing_before_transport():
@@ -550,6 +571,84 @@ def test_federal_register_continuation_uses_validated_search_after_cursor():
     ))
     params = parse_qs(urlsplit(continued_http.requests[0].url).query)
     assert params["search_after"] == ["cursor-2"]
+
+
+def test_federal_register_continuation_accepts_documented_page_cursor():
+    payload = {
+        "count": 2,
+        "next_page_url": (
+            "https://www.federalregister.gov/api/v1/documents"
+            "?conditions%5Bterm%5D=energy&format=json&order=newest&page=2&per_page=2"
+        ),
+        "results": [{
+            "document_number": "2026-12345",
+            "type": "Rule",
+            "title": "Grid rule",
+            "abstract": "Rule summary",
+            "html_url": "https://www.federalregister.gov/documents/2026/09/07/2026-12345/grid-rule",
+            "publication_date": "2026-09-07",
+        }],
+    }
+    first = adapter(
+        "federal_register",
+        FixtureHttp(
+            payload,
+            url="https://www.federalregister.gov/api/v1/documents.json",
+            content_type="application/json",
+        ),
+    ).collect(query("federal_register_document_search", page=1))
+
+    assert first.receipt.status == "succeeded"
+    assert first.receipt.metadata["backlog_token"] == "page:2"
+
+    continued_http = FixtureHttp(
+        {"count": 0, "next_page_url": None, "results": []},
+        url="https://www.federalregister.gov/api/v1/documents.json",
+        content_type="application/json",
+    )
+    adapter("federal_register", continued_http).collect(query(
+        "federal_register_document_search", cursor_token="page:2", page=2,
+    ))
+    params = parse_qs(urlsplit(continued_http.requests[0].url).query)
+    assert params["page"] == ["2"]
+    assert "search_after" not in params
+
+
+def test_federal_register_maximum_page_retains_items_and_records_terminal_gap():
+    payload = {
+        "count": 500,
+        "next_page_url": (
+            "https://www.federalregister.gov/api/v1/documents"
+            "?conditions%5Bterm%5D=energy&format=json&order=newest&page=11&per_page=50"
+        ),
+        "results": [{
+            "document_number": "2026-12345",
+            "type": "Rule",
+            "title": "Grid rule",
+            "abstract": "Rule summary",
+            "html_url": "https://www.federalregister.gov/documents/2026/09/07/2026-12345/grid-rule",
+            "publication_date": "2026-09-07",
+        }],
+    }
+
+    result = adapter(
+        "federal_register",
+        FixtureHttp(
+            payload,
+            url="https://www.federalregister.gov/api/v1/documents.json",
+            content_type="application/json",
+        ),
+    ).collect(query(
+        "federal_register_document_search", cursor_token="page:10", page=10,
+    ))
+
+    assert result.receipt.status == "succeeded"
+    assert len(result.items) == 1
+    assert result.receipt.metadata["truncated"] is True
+    assert result.receipt.metadata["backlog_remaining"] is False
+    assert result.receipt.metadata["continuation_unavailable"] is True
+    assert result.receipt.metadata["coverage_gap"] is True
+    assert "backlog_token" not in result.receipt.metadata
 
 
 def test_federal_register_rejects_a_repeated_search_after_cursor():
