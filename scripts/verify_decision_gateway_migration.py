@@ -510,10 +510,8 @@ def _verify_rate_limits(cur):
         """,
         (run_id,),
     )
-    _expect_db_error(
-        cur,
-        lambda: _call(cur, "claim_market_gateway_request", uuid4(), "read_context", run_id),
-    )
+    resumed = _call(cur, "claim_market_gateway_request", uuid4(), "read_context", run_id)
+    _require(resumed["claimed"] is True, "durable run was permanently rate-limited")
     cur.execute("SELECT count(*) FROM public.market_gateway_requests WHERE created_at>=now()-interval '1 hour'")
     needed = max(0, 100 - cur.fetchone()[0])
     if needed:

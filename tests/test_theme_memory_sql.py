@@ -62,6 +62,9 @@ REFERENCE_TRANSFER_RESTART_MIGRATION = (
 RETRY_TASK_CAPACITY_RECOVERY_MIGRATION = (
     ROOT / "sql/migrations/20261021_retry_task_capacity_recovery.sql"
 )
+DURABLE_RUN_GATEWAY_RECOVERY_MIGRATION = (
+    ROOT / "sql/migrations/20261022_durable_run_gateway_recovery.sql"
+)
 SCHEMA = ROOT / "sql/schema.sql"
 
 
@@ -113,9 +116,12 @@ def test_v2_runtime_completion_and_honest_empty_tail_are_parseable_and_ordered()
     assert reference_restart
     retry_capacity = parse_sql(RETRY_TASK_CAPACITY_RECOVERY_MIGRATION.read_text())
     assert retry_capacity
+    durable_run_recovery = parse_sql(DURABLE_RUN_GATEWAY_RECOVERY_MIGRATION.read_text())
+    assert durable_run_recovery
     assert ACTIVE_INTELLIGENCE_POLICY_MIGRATION.read_bytes() in schema
     assert REFERENCE_TRANSFER_RESTART_MIGRATION.read_bytes() in schema
-    assert schema.endswith(RETRY_TASK_CAPACITY_RECOVERY_MIGRATION.read_bytes())
+    assert RETRY_TASK_CAPACITY_RECOVERY_MIGRATION.read_bytes() in schema
+    assert schema.endswith(DURABLE_RUN_GATEWAY_RECOVERY_MIGRATION.read_bytes())
     migration = RUNTIME_COMPLETION_MIGRATION.read_text()
     assert "SECURITY DEFINER SET search_path=pg_catalog" in migration
     assert "record_market_intelligence_v2_completion" in migration
