@@ -55,12 +55,13 @@ class OfficialJsonAdapter(SourceAdapter):
 
     def _request_reference(self, query: CollectionQuery) -> str:
         if self.provider == "fred":
-            return f"{self.endpoint}?{urlencode({
+            params = urlencode({
                 'series_id': query.series_id, 'file_type': 'json',
                 'observation_start': query.start.date().isoformat(),
                 'observation_end': query.end.date().isoformat(),
                 'limit': min(query.limit, self.max_items_per_request),
-            })}"
+            })
+            return f"{self.endpoint}?{params}"
         if self.provider == "federal_register":
             params = {
                 "conditions[term]": " ".join((query.text, *query.symbols)).strip(),
@@ -78,12 +79,13 @@ class OfficialJsonAdapter(SourceAdapter):
             else:
                 endpoint = self.endpoint
             return f"{endpoint}?{urlencode(params)}"
-        return f"{self.endpoint}?{urlencode({
+        params = urlencode({
             'query': query.text,
             'limit': min(query.limit, self.max_items_per_request),
             'from': query.start.date().isoformat(),
             'to': query.end.date().isoformat(),
-        })}"
+        })
+        return f"{self.endpoint}?{params}"
 
     def _request(self, query: CollectionQuery) -> HttpRequest:
         if self.provider == "fred":
