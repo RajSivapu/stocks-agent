@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from decimal import Decimal, ROUND_HALF_UP
 from types import MappingProxyType
 from typing import Literal, Mapping, Sequence
@@ -27,7 +27,9 @@ class LearningObservation:
     status: ObservationStatus
     horizon_days: Literal[0, 5, 21, 63] = 0
     benchmark: str | None = None
-    metrics: Mapping[str, object] = MappingProxyType({})
+    metrics: Mapping[str, object] = field(
+        default_factory=lambda: MappingProxyType({})
+    )
 
 
 def _value(row: object, key: str) -> object:
