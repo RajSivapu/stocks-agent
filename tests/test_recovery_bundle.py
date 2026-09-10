@@ -1015,6 +1015,7 @@ def recovery_records():
         started_at="2026-09-05T19:30:00Z", finished_at=None, data_as_of="2026-09-05T19:30:00Z",
         source_status={}, symbols=[], write_counts={}, telegram_message_ids=[], summary=None, error=None,
         scheduled_phase="post-market", scheduled_market_date="2026-09-05",
+        scheduled_attempt=1,
         gateway_request_id="55555555-5555-4555-8555-555555555555",
     )
     records = _seal_reference_lineage(records)
@@ -1449,7 +1450,10 @@ def _with_reused_v2_snapshot(records):
     manifest_id = "20000000-0000-4000-8000-000000000002"
     revision_id = "20000000-0000-4000-8000-000000000003"
     run = copy.deepcopy(records["runs"][0])
-    run.update(id=run_id, gateway_request_id=None)
+    run.update(
+        id=run_id, gateway_request_id=None,
+        scheduled_phase=None, scheduled_market_date=None, scheduled_attempt=1,
+    )
     records["runs"].append(run)
     intelligence_run = copy.deepcopy(records["intelligence_runs"][0])
     intelligence_run["id"] = run_id

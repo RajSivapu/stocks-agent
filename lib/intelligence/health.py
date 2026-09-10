@@ -68,9 +68,11 @@ def _static_probe(
         "gdelt_theme_search": _request(
             capability_id,
             "gdelt",
-            "https://api.gdeltproject.org/api/v2/doc/doc",
-            query=(("query", "economic policy"), ("mode", "ArtList"),
-                   ("format", "json"), ("maxrecords", "1")),
+            "https://data.gdeltproject.org/gdeltv3/gal/feed.rss",
+            headers={
+                "Accept": "application/rss+xml, application/xml;q=0.9",
+                "User-Agent": "stocks-agent owner research",
+            },
         ),
         "federal_register_document_search": _request(
             capability_id,

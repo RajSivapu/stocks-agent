@@ -629,6 +629,14 @@ def test_actual_migration_retry_accepts_truthful_baseline_without_writing_histor
         item for item in deploy.candidate_migration_manifest()
         if item["path"] == "sql/migrations/20261022_durable_run_gateway_recovery.sql"
     )
+    gdelt_article_feed = next(
+        item for item in deploy.candidate_migration_manifest()
+        if item["path"] == "sql/migrations/20261023_gdelt_article_feed.sql"
+    )
+    scheduled_same_day_retry = next(
+        item for item in deploy.candidate_migration_manifest()
+        if item["path"] == "sql/migrations/20261024_scheduled_same_day_retry.sql"
+    )
     queries = []
 
     def api(_method, _path, payload=None):
@@ -642,6 +650,7 @@ def test_actual_migration_retry_accepts_truthful_baseline_without_writing_histor
                     dashboard_authority, release_reader_authority, run_order,
                     active_intelligence_policy, reference_transfer_restart,
                     retry_task_capacity_recovery, durable_run_gateway_recovery,
+                    gdelt_article_feed, scheduled_same_day_retry,
                 ]
         if query.startswith("SELECT version, statements"):
             return [{"version": "20261004", "statements": ["SELECT 1"]}]

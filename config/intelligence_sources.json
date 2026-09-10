@@ -49,8 +49,8 @@
         "earnings_and_mergers_and_acquisitions"
       ],
       "phases": ["pre-market", "intraday", "post-market", "on-demand"],
-      "allowed_hosts": ["api.gdeltproject.org"],
-      "allowed_path_patterns": ["/api/v2/doc/doc"],
+      "allowed_hosts": ["data.gdeltproject.org"],
+      "allowed_path_patterns": ["/gdeltv3/gal/feed.rss"],
       "required_credential": null,
       "authority": "broad_event_lead",
       "retention_class": "bounded_derived_lead",
@@ -62,20 +62,20 @@
       "provider_priority": 10,
       "query_pack": {
         "themes": {
-          "macro_and_policy": {"host": "api.gdeltproject.org", "path": "/api/v2/doc/doc", "query": "economic policy"},
-          "technology_ai_and_semiconductors": {"host": "api.gdeltproject.org", "path": "/api/v2/doc/doc", "query": "semiconductor industry"},
-          "energy_nuclear_and_grid_infrastructure": {"host": "api.gdeltproject.org", "path": "/api/v2/doc/doc", "query": "nuclear energy grid"},
-          "industrial_infrastructure": {"host": "api.gdeltproject.org", "path": "/api/v2/doc/doc", "query": "industrial infrastructure"},
-          "critical_minerals_and_magnets": {"host": "api.gdeltproject.org", "path": "/api/v2/doc/doc", "query": "critical minerals"},
-          "healthcare": {"host": "api.gdeltproject.org", "path": "/api/v2/doc/doc", "query": "healthcare industry"},
-          "consumer": {"host": "api.gdeltproject.org", "path": "/api/v2/doc/doc", "query": "consumer spending"},
-          "defense_trade_and_geopolitics": {"host": "api.gdeltproject.org", "path": "/api/v2/doc/doc", "query": "defense trade geopolitics"},
-          "earnings_and_mergers_and_acquisitions": {"host": "api.gdeltproject.org", "path": "/api/v2/doc/doc", "query": "earnings mergers acquisitions"}
+          "macro_and_policy": {"host": "data.gdeltproject.org", "path": "/gdeltv3/gal/feed.rss", "query": "economic policy"},
+          "technology_ai_and_semiconductors": {"host": "data.gdeltproject.org", "path": "/gdeltv3/gal/feed.rss", "query": "semiconductor industry"},
+          "energy_nuclear_and_grid_infrastructure": {"host": "data.gdeltproject.org", "path": "/gdeltv3/gal/feed.rss", "query": "nuclear energy grid"},
+          "industrial_infrastructure": {"host": "data.gdeltproject.org", "path": "/gdeltv3/gal/feed.rss", "query": "industrial infrastructure"},
+          "critical_minerals_and_magnets": {"host": "data.gdeltproject.org", "path": "/gdeltv3/gal/feed.rss", "query": "critical minerals"},
+          "healthcare": {"host": "data.gdeltproject.org", "path": "/gdeltv3/gal/feed.rss", "query": "healthcare industry"},
+          "consumer": {"host": "data.gdeltproject.org", "path": "/gdeltv3/gal/feed.rss", "query": "consumer spending"},
+          "defense_trade_and_geopolitics": {"host": "data.gdeltproject.org", "path": "/gdeltv3/gal/feed.rss", "query": "defense trade geopolitics"},
+          "earnings_and_mergers_and_acquisitions": {"host": "data.gdeltproject.org", "path": "/gdeltv3/gal/feed.rss", "query": "earnings mergers acquisitions"}
         },
         "targets": {
-          "intraday_delta": {"host": "api.gdeltproject.org", "path": "/api/v2/doc/doc", "query": "market developments"},
-          "day_reconciliation": {"host": "api.gdeltproject.org", "path": "/api/v2/doc/doc", "query": "market close"},
-          "on_demand_request": {"host": "api.gdeltproject.org", "path": "/api/v2/doc/doc", "query": "market news"}
+          "intraday_delta": {"host": "data.gdeltproject.org", "path": "/gdeltv3/gal/feed.rss", "query": "market developments"},
+          "day_reconciliation": {"host": "data.gdeltproject.org", "path": "/gdeltv3/gal/feed.rss", "query": "market close"},
+          "on_demand_request": {"host": "data.gdeltproject.org", "path": "/gdeltv3/gal/feed.rss", "query": "market news"}
         }
       }
     },

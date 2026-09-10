@@ -56,7 +56,8 @@ RECOVERY_SQL = {
         created_at::text AS created_at,updated_at::text AS updated_at FROM public.portfolio_command_acknowledgements""",
     "runs": """SELECT id::text AS id,status,kind AS phase,started_at::text AS started_at,finished_at::text AS finished_at,
         data_as_of::text AS data_as_of,source_status,symbols,write_counts,telegram_message_ids,summary,error,
-        scheduled_phase,scheduled_market_date::text AS scheduled_market_date,gateway_request_id::text AS gateway_request_id
+        scheduled_phase,scheduled_market_date::text AS scheduled_market_date,scheduled_attempt,
+        gateway_request_id::text AS gateway_request_id
         FROM public.analysis_runs""",
     "gateway_requests": """SELECT request_id::text AS request_id,operation,run_id::text AS run_id,status,lease_token::text AS lease_token,
         attempt_count,response,response_digest,created_at::text AS created_at,claimed_at::text AS claimed_at,finished_at::text AS finished_at
@@ -950,7 +951,7 @@ class PostgresReadOnlySource:
             "WHERE run_id=%s::uuid AND manifest_id IS NOT NULL"
         )
         queries = {
-            "run": "SELECT id::text AS id,kind,scheduled_phase,scheduled_market_date::text AS scheduled_market_date,status,started_at::text AS started_at,finished_at::text AS finished_at,gateway_request_id::text AS gateway_request_id,telegram_message_ids FROM public.analysis_runs WHERE id=%s::uuid",
+            "run": "SELECT id::text AS id,kind,scheduled_phase,scheduled_market_date::text AS scheduled_market_date,scheduled_attempt,status,started_at::text AS started_at,finished_at::text AS finished_at,gateway_request_id::text AS gateway_request_id,telegram_message_ids FROM public.analysis_runs WHERE id=%s::uuid",
             "intelligence_runs": "SELECT id::text AS id,phase,market_date::text AS market_date,reservation_plan,request_window FROM public.market_intelligence_runs WHERE id=%s::uuid",
             "reference_manifests": RECOVERY_SQL["reference_manifests"] + f" WHERE id IN ({selected_manifests})",
             "security_reference_revisions": RECOVERY_SQL["security_reference_revisions"] + f" WHERE id IN (SELECT security_revision_id FROM public.market_reference_snapshot_memberships WHERE manifest_id IN ({selected_manifests}))",

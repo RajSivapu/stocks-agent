@@ -222,6 +222,59 @@ def _official_completion_item(payload, *, request_url, canonical_url):
     }
 
 
+def _gdelt_feed_completion_item(payload, *, request_url):
+    canonical_content = json.dumps(
+        {"title": "Grid investment accelerates power demand"}, separators=(",", ":")
+    )
+    return {
+        "id": str(uuid.uuid4()), "run_item_id": str(uuid.uuid4()),
+        "receipt_id": payload["receipts"][0]["id"], "provider": "gdelt",
+        "upstream_item_id": "gdelt-feed-1",
+        "canonical_url": "https://publisher.example/grid-investment",
+        "request_url": request_url, "published_at": None,
+        "retrieved_at": payload["receipts"][0]["retrieved_at"],
+        "effective_at": None, "reporting_at": None,
+        "entity_ids": [], "security_ids": [], "discovery_status": "no_event",
+        "title": "Grid investment accelerates power demand",
+        "normalized_text": "Rolling market-news signal.",
+        "canonical_content": canonical_content,
+        "content_hash": hashlib.sha256(canonical_content.encode()).hexdigest(),
+        "metadata": {"coverage_gap": "bounded rolling feed"},
+        "disposition": "accepted", "drop_reason": None,
+    }
+
+
+@pytest.mark.parametrize("kind", ["fresh", "ordered"])
+def test_protected_completion_accepts_only_exact_gdelt_article_feed_path(databases, kind):
+    db = databases[kind]
+    run, completion, _original, payload = prepared_run(
+        db, provider="gdelt", phase="pre-market", returned_count=1, accepted_count=1,
+    )
+    payload["items"] = [_gdelt_feed_completion_item(
+        payload, request_url="https://data.gdeltproject.org/gdeltv3/gal/feed.rss",
+    )]
+    result = db.execute(
+        "SELECT public.record_market_intelligence(%s,%s,%s)",
+        (run, completion, Jsonb(payload)),
+    ).fetchone()[0]
+    assert result["counts"]["source_items"] == 1
+
+
+def test_protected_completion_rejects_unreviewed_gdelt_data_path(databases):
+    db = databases["fresh"]
+    run, completion, _original, payload = prepared_run(
+        db, provider="gdelt", phase="pre-market", returned_count=1, accepted_count=1,
+    )
+    payload["items"] = [_gdelt_feed_completion_item(
+        payload, request_url="https://data.gdeltproject.org/gdeltv3/gal/other.rss",
+    )]
+    with pytest.raises(psycopg.errors.InvalidParameterValue):
+        db.execute(
+            "SELECT public.record_market_intelligence(%s,%s,%s)",
+            (run, completion, Jsonb(payload)),
+        )
+
+
 @pytest.mark.parametrize("kind", ["fresh", "ordered"])
 @pytest.mark.parametrize(("host", "content_type", "item_path"), [
     ("www.war.gov", 9, "/News/Releases/Release/Article/1/award/"),
@@ -430,8 +483,13 @@ def _independent_worker(dsn, run_id, timestamp, crash, output, provider="gdelt",
                         transport_count.value += 1
                 if crash == "inside_transport":
                     os._exit(76)
-                payload = b'{"articles":[]}' if provider == "gdelt" else b'{"feed":[]}' if provider == "alpha_vantage" else b'[]'
-                return HttpResult(request.url, 200, {}, payload, now, now)
+                if provider == "gdelt":
+                    payload = b'<rss version="2.0"><channel><title>GDELT</title></channel></rss>'
+                    headers = {"content-type": "application/rss+xml"}
+                else:
+                    payload = b'{"feed":[]}' if provider == "alpha_vantage" else b'[]'
+                    headers = {"content-type": "application/json"}
+                return HttpResult(request.url, 200, headers, payload, now, now)
         adapter = build_adapter(provider, Source(), QuotaSession({provider: ()}),
                                 secret_getter=lambda _name: "existing-free-key", clock=lambda: now)
         if registry_fixture and provider not in {"gdelt", "alpha_vantage", "finnhub"}:
@@ -1014,6 +1072,46 @@ def test_scheduled_lifecycle_uses_one_slot_run_binds_retries_and_keeps_prior_ove
         "SELECT count(DISTINCT run_id), count(*) FROM market_gateway_requests WHERE request_id IN (%s,%s)",
         (first_request, second_request),
     ).fetchone() == (1, 2)
+
+    db.execute(
+        "UPDATE analysis_runs SET status='partial',finished_at=statement_timestamp() WHERE id=%s",
+        (first["run_id"],),
+    )
+    retry_request, retry_lease = uuid.uuid4(), uuid.uuid4()
+    db.execute(
+        "INSERT INTO market_gateway_requests(request_id,operation,status,lease_token) "
+        "VALUES(%s,'start_run','claimed',%s)",
+        (retry_request, retry_lease),
+    )
+    retry = db.execute(
+        "SELECT public.start_market_analysis_run(%s,%s,'intraday',%s)",
+        (retry_request, retry_lease, market_date),
+    ).fetchone()[0]
+    assert retry["duplicate"] is False
+    assert retry["run_id"] != first["run_id"]
+    assert db.execute(
+        "SELECT scheduled_attempt FROM analysis_runs WHERE id=%s", (retry["run_id"],)
+    ).fetchone()[0] == 2
+
+    capped_request, capped_lease = uuid.uuid4(), uuid.uuid4()
+    db.execute(
+        "UPDATE analysis_runs SET status='partial',finished_at=statement_timestamp() WHERE id=%s",
+        (retry["run_id"],),
+    )
+    db.execute(
+        "INSERT INTO market_gateway_requests(request_id,operation,status,lease_token) "
+        "VALUES(%s,'start_run','claimed',%s)",
+        (capped_request, capped_lease),
+    )
+    capped = db.execute(
+        "SELECT public.start_market_analysis_run(%s,%s,'intraday',%s)",
+        (capped_request, capped_lease, market_date),
+    ).fetchone()[0]
+    assert capped == {"run_id": retry["run_id"], "duplicate": True}
+    assert db.execute(
+        "SELECT count(*) FROM analysis_runs WHERE scheduled_market_date=%s AND scheduled_phase='intraday'",
+        (market_date,),
+    ).fetchone()[0] == 2
     assert db.execute(
         "SELECT to_regprocedure('public.start_market_analysis_run(uuid,uuid,text)')"
     ).fetchone()[0] is None

@@ -83,6 +83,7 @@ DATASET_FIELDS = {
              "data_as_of": NULLABLE_TEXT, "source_status": dict, "symbols": list, "write_counts": dict,
              "telegram_message_ids": list, "summary": NULLABLE_TEXT, "error": NULLABLE_TEXT,
              "scheduled_phase": NULLABLE_TEXT, "scheduled_market_date": NULLABLE_TEXT,
+             "scheduled_attempt": int,
              "gateway_request_id": NULLABLE_TEXT},
     "gateway_requests": {
         "request_id": str, "operation": str, "run_id": NULLABLE_TEXT, "status": str,
@@ -2062,6 +2063,16 @@ def _validated_records(records: Mapping[str, object]) -> dict[str, list[dict[str
     if any(row["gateway_request_id"] is not None and row["gateway_request_id"] not in requests
            for row in result["runs"]):
         raise ValueError("analysis run gateway relationship mismatch")
+    if any(row["scheduled_attempt"] not in (1, 2) for row in result["runs"]):
+        raise ValueError("analysis run scheduled attempt is invalid")
+    scheduled_slots = [
+        (row["scheduled_market_date"], row["scheduled_phase"], row["scheduled_attempt"])
+        for row in result["runs"] if row["scheduled_market_date"] is not None
+    ]
+    if (any((row["scheduled_market_date"] is None) != (row["scheduled_phase"] is None)
+            for row in result["runs"])
+            or len(scheduled_slots) != len(set(scheduled_slots))):
+        raise ValueError("analysis run scheduled identity is invalid")
     if any(row["command_id"] not in commands or row["attempt_count"] < 0
            or ((row["lease_token"] is None) != (row["lease_expires_at"] is None))
            for row in result["command_acknowledgements"]):
