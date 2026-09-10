@@ -847,10 +847,15 @@ class IntelligencePipeline:
         plan = self.discovery_plan
         if plan is None:
             raise ValueError("enrichment requests require a discovery plan")
+        selection_window = {
+            key: request_window[key]
+            for key in ("start", "end")
+            if key in request_window
+        }
         manifest = frozen_manifest if frozen_manifest is not None else build_selection_manifest(
             run_id=run_id, phase=request.phase, requests=selected,
             deferred_reasons=deferred_reasons, provider_reservations=envelope,
-            request_window=request_window, selection_stage=selection_stage,  # type: ignore[arg-type]
+            request_window=selection_window, selection_stage=selection_stage,  # type: ignore[arg-type]
         )
         if not hasattr(manifest, "persistence_payload") \
                 or getattr(manifest, "run_id", None) != run_id \
