@@ -512,6 +512,7 @@ class IntelligencePipeline:
         persisted = self._read_discovery_tasks(run_id)
         if start.get("duplicate") is True:
             plan = bind_persisted_reference_task(plan, persisted)
+            plan = self._bind_persisted_task_identities(plan, persisted)
             self.discovery_plan = plan
             collection_tasks = tuple(task for task in plan.tasks if task.stage != "reference")
         for task in plan.tasks:
@@ -1370,6 +1371,61 @@ class IntelligencePipeline:
         self.context["_persisted_discovery_tasks"] = MappingProxyType(result)
         self._hydrate_persisted_exposure_facts(run_id)
         return result
+
+    def _bind_persisted_task_identities(
+        self,
+        plan: DiscoveryPlan,
+        persisted: Mapping[str, Mapping[str, object]],
+    ) -> DiscoveryPlan:
+        """Reuse the gateway's unique stage/query identity for a duplicate run."""
+        rebound_ids: dict[str, str] = {}
+        tasks: list[DiscoveryTask] = []
+        for task in plan.tasks:
+            dependencies = tuple(rebound_ids.get(value, value) for value in task.dependencies)
+            candidate = replace(task, dependencies=dependencies)
+            if candidate.task_id in persisted:
+                rebound_ids[task.task_id] = candidate.task_id
+                tasks.append(candidate)
+                continue
+
+            _cursor_key, cursor = self._cursor_for_task(candidate)
+            window = None if candidate.stage == "reference" else _collection_window_for_task(
+                candidate, cursor
+            )
+            probe = self._task_row(
+                candidate,
+                state="planned",
+                attempt_count=0,
+                result={},
+                window=window,
+                cursor=None if candidate.stage == "reference" else cursor,
+            )
+            matches = [
+                row for row in persisted.values()
+                if row.get("stage") == probe["stage"]
+                and row.get("query_hash") == probe["query_hash"]
+            ]
+            if len(matches) > 1:
+                raise ValueError("persisted discovery task identity is ambiguous")
+            if not matches:
+                tasks.append(candidate)
+                continue
+
+            match = matches[0]
+            task_id = match.get("id")
+            if (
+                not isinstance(task_id, str)
+                or not task_id
+                or match.get("provider") != candidate.provider
+                or match.get("capability_id") != candidate.capability_id
+                or match.get("query_kind") != candidate.query_kind
+                or match.get("dependency_ids") != list(dependencies)
+                or match.get("requested_window") != probe["requested_window"]
+            ):
+                raise ValueError("persisted discovery task identity does not match its plan")
+            rebound_ids[task.task_id] = task_id
+            tasks.append(replace(candidate, task_id=task_id))
+        return replace(plan, tasks=tuple(tasks))
 
     def _hydrate_persisted_exposure_facts(self, run_id: str) -> None:
         raw_rows = self.context.get("_persisted_exposure_fact_rows", ())
