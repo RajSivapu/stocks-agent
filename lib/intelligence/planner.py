@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Iterator, Mapping
 from dataclasses import replace
-from datetime import datetime
+from datetime import datetime, timezone
 from fnmatch import fnmatchcase
 import json
 from pathlib import Path
@@ -737,6 +737,70 @@ def rebind_discovery_plan_window(
             task_id=task_id,
             window=window,
             dependencies=dependencies,
+        ))
+    return replace(plan, tasks=tuple(tasks))
+
+
+def _millisecond_window_key(window: Mapping[str, str]) -> tuple[datetime, datetime]:
+    """Return the UTC millisecond identity used by the gateway run boundary."""
+    validated = _validate_window(window)
+    values: list[datetime] = []
+    for key in ("start", "end"):
+        value = datetime.fromisoformat(validated[key].replace("Z", "+00:00"))
+        utc = value.astimezone(timezone.utc)
+        values.append(utc.replace(microsecond=(utc.microsecond // 1_000) * 1_000))
+    return values[0], values[1]
+
+
+def bind_persisted_reference_task(
+    plan: DiscoveryPlan,
+    persisted_tasks: Mapping[str, Mapping[str, object]],
+) -> DiscoveryPlan:
+    """Reuse a duplicate run's original reference task across timestamp precision."""
+    if not isinstance(plan, DiscoveryPlan):
+        raise TypeError("discovery plan must be typed")
+    if not isinstance(persisted_tasks, Mapping):
+        raise TypeError("persisted discovery tasks must be a mapping")
+
+    tasks: list[DiscoveryTask] = []
+    for task in plan.tasks:
+        if task.task_id in persisted_tasks or task.stage != "reference":
+            tasks.append(task)
+            continue
+
+        matches: list[Mapping[str, object]] = []
+        task_window_key = _millisecond_window_key(task.window)
+        for row in persisted_tasks.values():
+            if not isinstance(row, Mapping):
+                raise ValueError("persisted discovery task is invalid")
+            if (
+                row.get("stage") != "reference"
+                or row.get("provider") != task.provider
+                or row.get("capability_id") != task.capability_id
+                or row.get("query_kind") != task.query_kind
+            ):
+                continue
+            requested_window = row.get("requested_window")
+            if not isinstance(requested_window, Mapping):
+                raise ValueError("persisted reference task window is invalid")
+            if _millisecond_window_key(requested_window) == task_window_key:
+                matches.append(row)
+
+        if len(matches) > 1:
+            raise ValueError("persisted reference task identity is ambiguous")
+        if not matches:
+            tasks.append(task)
+            continue
+
+        match = matches[0]
+        task_id = match.get("id")
+        requested_window = match.get("requested_window")
+        if not isinstance(task_id, str) or not task_id or not isinstance(requested_window, Mapping):
+            raise ValueError("persisted reference task identity is invalid")
+        tasks.append(replace(
+            task,
+            task_id=task_id,
+            window=_validate_window(requested_window),
         ))
     return replace(plan, tasks=tuple(tasks))
 

@@ -41,7 +41,10 @@ from lib.intelligence.cursors import (
 from lib.intelligence.http import SourceFailure, cache_key
 from lib.intelligence.normalize import SourceItem, normalize_item
 from lib.intelligence.packet import EvidencePacket, build_evidence_packet
-from lib.intelligence.planner import rebind_discovery_plan_window
+from lib.intelligence.planner import (
+    bind_persisted_reference_task,
+    rebind_discovery_plan_window,
+)
 from lib.intelligence.providers import (
     CollectionQuery,
     CollectionResult,
@@ -507,6 +510,10 @@ class IntelligencePipeline:
         self._install_quota(plan_rows, start.get("reservation_usage", {}))
 
         persisted = self._read_discovery_tasks(run_id)
+        if start.get("duplicate") is True:
+            plan = bind_persisted_reference_task(plan, persisted)
+            self.discovery_plan = plan
+            collection_tasks = tuple(task for task in plan.tasks if task.stage != "reference")
         for task in plan.tasks:
             if task.task_id not in persisted:
                 if task.stage == "reference":

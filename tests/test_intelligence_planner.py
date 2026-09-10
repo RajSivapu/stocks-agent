@@ -9,6 +9,7 @@ import pytest
 
 from lib.config import load_settings
 from lib.intelligence.planner import (
+    bind_persisted_reference_task,
     build_discovery_plan,
     load_source_capabilities,
     rebind_discovery_plan_window,
@@ -147,6 +148,58 @@ def test_plan_can_be_rebound_to_the_durable_run_window_after_start():
     assert rebound == expected
     assert rebound.tasks != first.tasks
     assert all(task.max_attempts == 1 for task in first.tasks)
+
+
+def test_duplicate_run_reuses_the_original_reference_task_across_timestamp_precision():
+    durable = rebind_discovery_plan_window(_plan(), {
+        "start": "2026-09-05T11:30:00.123Z",
+        "end": "2026-09-06T11:30:00.456Z",
+    })
+    reference = next(task for task in durable.tasks if task.stage == "reference")
+    original_id = "22222222-2222-4222-8222-222222222222"
+    persisted = {
+        original_id: {
+            "id": original_id,
+            "stage": "reference",
+            "provider": reference.provider,
+            "capability_id": reference.capability_id,
+            "query_kind": "universe",
+            "requested_window": {
+                "start": "2026-09-05T11:30:00.123987+00:00",
+                "end": "2026-09-06T11:30:00.456789+00:00",
+            },
+        },
+    }
+
+    bound = bind_persisted_reference_task(durable, persisted)
+    bound_reference = next(task for task in bound.tasks if task.stage == "reference")
+
+    assert bound_reference.task_id == original_id
+    assert bound_reference.task_id != reference.task_id
+    assert bound_reference.window == persisted[original_id]["requested_window"]
+
+
+def test_duplicate_run_never_reuses_a_reference_task_from_another_window():
+    durable = rebind_discovery_plan_window(_plan(), {
+        "start": "2026-09-05T11:30:00.123Z",
+        "end": "2026-09-06T11:30:00.456Z",
+    })
+    reference = next(task for task in durable.tasks if task.stage == "reference")
+    persisted = {
+        "22222222-2222-4222-8222-222222222222": {
+            "id": "22222222-2222-4222-8222-222222222222",
+            "stage": "reference",
+            "provider": reference.provider,
+            "capability_id": reference.capability_id,
+            "query_kind": "universe",
+            "requested_window": {
+                "start": "2026-09-05T11:31:00.123987+00:00",
+                "end": "2026-09-06T11:31:00.456789+00:00",
+            },
+        },
+    }
+
+    assert bind_persisted_reference_task(durable, persisted) == durable
 
 
 def test_alpha_vantage_uses_only_fixed_topics_when_credential_is_present():
