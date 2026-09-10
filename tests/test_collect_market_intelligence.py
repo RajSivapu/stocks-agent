@@ -252,6 +252,57 @@ def test_one_reference_stage_call_persists_all_chunks_then_pins_finalized_snapsh
     assert len(json.dumps(gateway_client.calls, default=str).encode()) <= collector.MAX_REFERENCE_TRANSFER_BYTES
 
 
+def test_reference_stage_recovers_current_pin_after_predecessor_replay_mismatch(
+    monkeypatch,
+):
+    import scripts.collect_market_intelligence as collector
+    from lib.gateway import GatewayError
+
+    now = datetime(2026, 9, 7, 12, tzinfo=timezone.utc)
+    source = (Path(__file__).parent / "fixtures" / "intelligence" /
+              "sec_company_tickers.json").read_bytes()
+    recovered_snapshot = object()
+    recovered_coverage = {
+        "coverage_status": "scope_not_guaranteed",
+        "reference_status": "healthy",
+        "reference_manifest_id": "22222222-2222-4222-8222-222222222222",
+        "reference_age_seconds": 0,
+        "execution_allowed": False,
+    }
+    recovery_calls = []
+
+    class Http:
+        def get(self, _request):
+            return SimpleNamespace(body=source, retrieved_at=now, observed_at=now)
+
+    class Gateway:
+        def call(self, operation, payload, **_kwargs):
+            assert operation == "pin_discovery_reference"
+            assert payload["binding_role"] == "predecessor"
+            raise GatewayError("PERSISTENCE_FAILED")
+
+    def recover(gateway_client, run_id, *, monotonic):
+        recovery_calls.append((gateway_client, run_id, monotonic))
+        return recovered_coverage, recovered_snapshot
+
+    monkeypatch.setattr(collector, "_read_current_reference_binding", recover)
+    installed = []
+
+    coverage = collector._persist_reference_stage(
+        Gateway(),
+        RUN_ID := "11111111-1111-4111-8111-111111111111",
+        now,
+        client=Http(),
+        monotonic=lambda: 0.0,
+        sec_contact="owner@example.com",
+        snapshot_sink=installed.append,
+    )
+
+    assert coverage == recovered_coverage
+    assert installed == [recovered_snapshot]
+    assert recovery_calls and recovery_calls[0][1] == RUN_ID
+
+
 def test_reference_stage_pages_predecessor_before_assigning_renamed_security_identity():
     import scripts.collect_market_intelligence as collector
     run_id = "11111111-1111-4111-8111-111111111111"

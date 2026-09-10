@@ -463,13 +463,25 @@ def _persist_reference_stage(
     reference_as_of = now.astimezone(timezone.utc).isoformat(
         timespec="milliseconds"
     ).replace("+00:00", "Z")
-    predecessor_pin = invoke("pin_discovery_reference", {
-        "capability_id": _REFERENCE_CAPABILITY,
-        "binding_role": "predecessor",
-        "manifest_id": None,
-        "reference_status": "reference_stale",
-        "reference_as_of": reference_as_of,
-    })
+    try:
+        predecessor_pin = invoke("pin_discovery_reference", {
+            "capability_id": _REFERENCE_CAPABILITY,
+            "binding_role": "predecessor",
+            "manifest_id": None,
+            "reference_status": "reference_stale",
+            "reference_as_of": reference_as_of,
+        })
+    except gateway.GatewayError as error:
+        if error.code != "PERSISTENCE_FAILED":
+            raise
+        coverage, recovered_snapshot = _read_current_reference_binding(
+            gateway_client,
+            run_id,
+            monotonic=monotonic,
+        )
+        if recovered_snapshot is not None and snapshot_sink is not None:
+            snapshot_sink(recovered_snapshot)
+        return coverage
     if predecessor_pin.get("binding_role") != "predecessor":
         raise ValueError("reference predecessor pin receipt is invalid")
     predecessor_manifest_id = predecessor_pin.get("manifest_id")

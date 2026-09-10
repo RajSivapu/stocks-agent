@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import re
 import ssl
+import urllib.error
 import urllib.parse
 import urllib.request
 import uuid
@@ -179,6 +180,8 @@ def call(
             opened = opener(request, timeout=timeout)
         with opened as response:
             raw = _read_response(response)
+    except urllib.error.HTTPError as error:
+        raw = _read_response(error)
     except GatewayError:
         raise
     except Exception:
