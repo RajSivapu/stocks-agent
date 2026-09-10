@@ -28,6 +28,7 @@ OPERATIONS = (
     "read_intelligence_completion",
     "read_intelligence_context",
     "collect_intelligence_quote",
+    "seal_enrichment_selection",
     "record_report",
     "record_learning",
     "record_discovery_reference",
@@ -38,6 +39,10 @@ OPERATIONS = (
     "finalize_discovery_reference",
     "pin_discovery_reference",
     "read_discovery_reference",
+    "record_theme_episode_revision_v2",
+    "record_research_review_identity_v2",
+    "record_research_nominations",
+    "transition_research_nomination_v2",
 )
 MAX_REQUEST_BYTES = 262_144
 MAX_RESPONSE_BYTES = 1_048_576
