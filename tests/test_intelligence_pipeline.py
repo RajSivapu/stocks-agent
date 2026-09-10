@@ -2114,7 +2114,7 @@ def test_restart_loads_and_executes_frozen_selection_without_reselecting():
     assert frozen_manifest == frozen
 
 
-def test_empty_enrichment_selection_and_document_stage_are_sealed_with_stable_deferrals():
+def test_empty_enrichment_selection_projects_full_run_window_and_seals_stable_deferrals():
     plan = DiscoveryPlan(
         run_id=RUN_ID, phase="on-demand", reference_version="fixture:v2",
         capability_version=1, tasks=(), capabilities=MappingProxyType({}),
@@ -2137,7 +2137,13 @@ def test_empty_enrichment_selection_and_document_stage_are_sealed_with_stable_de
     pipeline = IntelligencePipeline(gateway, [FakeAdapter()], discovery_plan=plan)
     results = pipeline._seal_and_run_enrichment_requests(
         RUN_ID, request("on-demand"),
-        {"start": "2026-09-04T10:00:00Z", "end": NOW.isoformat()},
+        {
+            "start": "2026-09-04T10:00:00Z",
+            "end": NOW.isoformat(),
+            "timezone": "America/Chicago",
+            "market_date": "2026-09-04",
+            "phase": "on-demand",
+        },
         (), {}, {}, adaptive_provider_reservations("on-demand"),
         selection_stage="initial",
         deferred_reasons={"adaptive_enrichment": "no_currently_bound_candidates"},
