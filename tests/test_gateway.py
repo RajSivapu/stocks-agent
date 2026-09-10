@@ -366,6 +366,29 @@ def test_call_surfaces_bounded_gateway_error_code(monkeypatch):
         )
 
 
+def test_call_preserves_stable_gateway_error_code_from_http_error(monkeypatch):
+    configured(monkeypatch)
+    body = json.dumps({"ok": False, "code": "PERSISTENCE_FAILED"}).encode()
+
+    def opener(request, **_kwargs):
+        raise urllib.error.HTTPError(
+            request.full_url,
+            500,
+            "Internal Server Error",
+            {},
+            io.BytesIO(body),
+        )
+
+    with pytest.raises(gateway.GatewayError, match="PERSISTENCE_FAILED"):
+        gateway.call(
+            "pin_discovery_reference",
+            {},
+            run_id=RUN_ID,
+            request_id=REQUEST_ID,
+            _opener=opener,
+        )
+
+
 def test_cli_is_bounded_and_never_prints_raw_errors(monkeypatch, capsys):
     from scripts import market_gateway
 
