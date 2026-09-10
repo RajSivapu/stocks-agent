@@ -54,6 +54,7 @@ _APPROVED_HOSTS = frozenset({
     "api.gdeltproject.org",
     "api.stlouisfed.org",
     "apps.bea.gov",
+    "data.gdeltproject.org",
     "data.sec.gov",
     "finnhub.io",
     "query1.finance.yahoo.com",

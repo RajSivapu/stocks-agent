@@ -45,6 +45,12 @@ def test_healthcheck_reports_exact_routes_without_credential_values():
     assert requested["federal_register_document_search"].startswith(
         "https://www.federalregister.gov/api/v1/documents.json?"
     )
+    gdelt = next(request for request in probes if request.capability_id == "gdelt_theme_search")
+    assert gdelt.resolved_url() == "https://data.gdeltproject.org/gdeltv3/gal/feed.rss"
+    assert gdelt.headers == {
+        "Accept": "application/rss+xml, application/xml;q=0.9",
+        "User-Agent": "stocks-agent owner research",
+    }
 
     encoded = json.dumps(result, sort_keys=True)
     assert "owner@example.com" not in encoded

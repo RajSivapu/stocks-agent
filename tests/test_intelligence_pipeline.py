@@ -1327,8 +1327,8 @@ def test_capability_plan_executes_exact_task_cursor_and_persists_each_transition
         capability_id="gdelt_theme_search", provider="gdelt",
         query_kind="theme_search", themes=frozenset({"macro_and_policy"}),
         phases=frozenset({"pre-market"}),
-        allowed_hosts=frozenset({"api.gdeltproject.org"}),
-        allowed_path_patterns=("/api/v2/doc/doc",), required_credential=None,
+        allowed_hosts=frozenset({"data.gdeltproject.org"}),
+        allowed_path_patterns=("/gdeltv3/gal/feed.rss",), required_credential=None,
         authority="radar", retention_class="metadata", max_requests_per_run=9,
         max_items_per_request=20, requirement_tier="required_baseline",
         health="enabled", enabled=True, provider_priority=1,
@@ -2742,7 +2742,7 @@ def test_production_gdelt_content_proposes_dynamic_themes_without_injected_label
         {
             "url": "https://mirror-b.example/news/heat?copy=77",
             "domain": "mirror-b.example",
-            "title": "Shared wire heat recovery: altered mirror wording",
+            "title": "Shared wire heat recovery: original wording",
             "syndication_id": "wire-story-77",
             "seendate": "20260904T113000Z",
         },
@@ -2765,11 +2765,19 @@ def test_production_gdelt_content_proposes_dynamic_themes_without_injected_label
             self.rows = rows
 
         def get(self, request):
+            items = "".join(
+                "<item>"
+                f"<title>{row['title']}</title>"
+                f"<link>{row['url'].replace('&', '&amp;')}</link>"
+                f"<pubDate>{datetime.strptime(row['seendate'], '%Y%m%dT%H%M%SZ').strftime('%d %b %Y %H:%M:%S +0000')}</pubDate>"
+                "</item>"
+                for row in self.rows
+            )
             return HttpResult(
                 url=request.url,
                 status=200,
-                headers={"content-type": "application/json"},
-                body=json.dumps({"articles": self.rows}).encode(),
+                headers={"content-type": "application/rss+xml"},
+                body=(f'<rss version="2.0"><channel>{items}</channel></rss>').encode(),
                 retrieved_at=NOW,
                 observed_at=NOW,
                 cache_hit=False,

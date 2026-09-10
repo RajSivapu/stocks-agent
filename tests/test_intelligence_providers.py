@@ -23,11 +23,13 @@ class FixtureHttp:
 
     def get(self, request):
         self.requests.append(request)
+        body = self.payload if isinstance(self.payload, bytes) else json.dumps(self.payload).encode()
+        content_type = "application/rss+xml" if isinstance(self.payload, bytes) else "application/json"
         return HttpResult(
             url=self.url or request.url,
             status=200,
-            headers={"content-type": "application/json"},
-            body=json.dumps(self.payload).encode(),
+            headers={"content-type": content_type},
+            body=body,
             retrieved_at=NOW,
             observed_at=NOW,
             cache_hit=self.cache_hit,
@@ -127,14 +129,22 @@ def test_secondary_adapters_normalize_independent_claims_and_syndication():
     assert all(not item.qualified and "CONFLICTING_CLAIM_POLARITY" in item.veto_reasons for item in ranked)
 
 
+def gdelt_feed(*titles):
+    items = "".join(
+        "<item><title>" + title + "</title>"
+        f"<link>https://publisher.example/{index}</link>"
+        "<pubDate>04 Sep 2026 10:00:00 +0000</pubDate></item>"
+        for index, title in enumerate(titles, start=1)
+    )
+    return (
+        '<?xml version="1.0" encoding="UTF-8"?>'
+        '<rss version="2.0"><channel><title>GDELT Article List RSS Feed</title>'
+        f"{items}</channel></rss>"
+    ).encode()
+
+
 FIXTURES = {
-    "gdelt": {
-        "articles": [{
-            "url": "https://api.gdeltproject.org/doc/1",
-            "title": "Grid investment",
-            "seendate": "20260904T100000Z",
-        }],
-    },
+    "gdelt": gdelt_feed("Nuclear grid investment accelerates"),
     "alpha_vantage": {
         "feed": [{
             "title": "Energy earnings",
@@ -271,11 +281,9 @@ def test_adapter_returns_bounded_items_and_one_request_receipt(adapter_name):
 
 
 def test_provider_bounds_drop_extra_and_wrong_host_items():
-    payload = {"articles": [
-        {"url": "https://api.gdeltproject.org/doc/1", "title": "One", "seendate": "20260904T100000Z"},
-        {"url": "https://evil.example/doc/2", "title": "Wrong host", "seendate": "20260904T100000Z"},
-        {"url": "https://api.gdeltproject.org/doc/3", "title": "Three", "seendate": "20260904T100000Z"},
-    ]}
+    payload = gdelt_feed(
+        "Nuclear energy one", "Nuclear energy two", "Nuclear energy three",
+    )
     result = build_adapter(
         "gdelt",
         FixtureHttp(payload),
@@ -283,18 +291,14 @@ def test_provider_bounds_drop_extra_and_wrong_host_items():
         clock=lambda: NOW,
     ).collect(sample_query(limit=1))
 
-    assert [item.title for item in result.items] == ["One"]
+    assert [item.title for item in result.items] == ["Nuclear energy one"]
     assert result.receipt.returned_count == 3
     assert result.receipt.accepted_count == 1
     assert result.receipt.dropped_count == 2
 
 
 def test_gdelt_maxrecords_saturation_records_an_explicit_coverage_gap_once():
-    payload = {"articles": [{
-        "url": f"https://api.gdeltproject.org/doc/{index}",
-        "title": f"GDELT item {index}",
-        "seendate": "20260904T100000Z",
-    } for index in range(20)]}
+    payload = gdelt_feed(*(f"Nuclear grid item {index}" for index in range(21)))
     http = FixtureHttp(payload)
 
     result = build_adapter(
@@ -308,7 +312,8 @@ def test_gdelt_maxrecords_saturation_records_an_explicit_coverage_gap_once():
     ))
 
     assert len(http.requests) == 1
-    assert result.receipt.returned_count == result.receipt.requested_limit == 20
+    assert result.receipt.returned_count == 21
+    assert result.receipt.requested_limit == 20
     assert result.receipt.accepted_count == 20
     assert result.receipt.metadata["truncated"] is True
     assert result.receipt.metadata["backlog_remaining"] is False
@@ -318,12 +323,8 @@ def test_gdelt_maxrecords_saturation_records_an_explicit_coverage_gap_once():
     assert "next_retry_phase" not in result.receipt.metadata
 
 
-def test_gdelt_below_maxrecords_is_exhaustive_without_a_coverage_gap():
-    payload = {"articles": [{
-        "url": f"https://api.gdeltproject.org/doc/{index}",
-        "title": f"GDELT item {index}",
-        "seendate": "20260904T100000Z",
-    } for index in range(19)]}
+def test_gdelt_feed_is_always_an_explicit_sampled_coverage_gap():
+    payload = gdelt_feed(*(f"Nuclear grid item {index}" for index in range(19)))
 
     result = build_adapter(
         "gdelt", FixtureHttp(payload),
@@ -335,9 +336,38 @@ def test_gdelt_below_maxrecords_is_exhaustive_without_a_coverage_gap():
     assert result.receipt.metadata["truncated"] is False
     assert result.receipt.metadata["backlog_remaining"] is False
     assert result.receipt.metadata["exhausted"] is True
-    assert "continuation_unavailable" not in result.receipt.metadata
-    assert "coverage_gap" not in result.receipt.metadata
+    assert result.receipt.metadata["continuation_unavailable"] is True
+    assert result.receipt.metadata["coverage_gap"] is True
+    assert result.receipt.metadata["sampled_output"] is True
+    assert result.receipt.metadata["source_window"] == "rolling_15_minutes"
     assert "backlog_token" not in result.receipt.metadata
+
+
+def test_gdelt_uses_the_official_article_feed_as_a_bounded_market_wide_sample():
+    http = FixtureHttp(gdelt_feed(
+        "Nuclear grid investment accelerates",
+        "Unrelated sports result",
+        "Rare earth magnet supply expands",
+    ))
+    result = build_adapter(
+        "gdelt", http,
+        QuotaSession({"gdelt": ({"reservation_id": "g-feed", "reserved_requests": 1},)}),
+        clock=lambda: NOW,
+    ).collect(sample_query(limit=20, capability_id="gdelt_theme_search"))
+
+    assert [item.title for item in result.items] == [
+        "Nuclear grid investment accelerates",
+        "Rare earth magnet supply expands",
+    ]
+    assert len(http.requests) == 1
+    request = http.requests[0]
+    assert request.url == "https://data.gdeltproject.org/gdeltv3/gal/feed.rss"
+    assert request.expected_document == "xml"
+    assert request.max_bytes == 5_000_000
+    assert request.headers == {
+        "Accept": "application/rss+xml, application/xml;q=0.9",
+        "User-Agent": "stocks-agent owner research",
+    }
 
 
 def test_official_release_and_effective_timestamps_remain_distinct():
@@ -460,10 +490,10 @@ def test_cache_hit_receipt_keeps_original_transport_timestamps():
     original_retrieval = datetime(2026, 9, 4, 10, 0, tzinfo=timezone.utc)
     http = FixtureHttp(FIXTURES["gdelt"], cache_hit=True)
     http.get = lambda request: HttpResult(
-        url="https://api.gdeltproject.org/feed",
+        url="https://data.gdeltproject.org/gdeltv3/gal/feed.rss",
         status=200,
-        headers={"content-type": "application/json"},
-        body=json.dumps(FIXTURES["gdelt"]).encode(),
+        headers={"content-type": "application/rss+xml"},
+        body=FIXTURES["gdelt"],
         retrieved_at=original_retrieval,
         observed_at=datetime(2026, 9, 4, 9, 59, tzinfo=timezone.utc),
         cache_hit=True,
@@ -508,10 +538,10 @@ def test_yahoo_adapter_preserves_exchange_timestamp_and_market_state():
 def test_malformed_response_returns_a_bounded_failed_receipt():
     http = FixtureHttp({})
     http.get = lambda request: HttpResult(
-        url="https://api.gdeltproject.org/feed",
+        url="https://data.gdeltproject.org/gdeltv3/gal/feed.rss",
         status=200,
-        headers={"content-type": "application/json"},
-        body=b"not-json",
+        headers={"content-type": "application/rss+xml"},
+        body=b"not-xml",
         retrieved_at=NOW,
         observed_at=None,
     )
@@ -524,7 +554,7 @@ def test_malformed_response_returns_a_bounded_failed_receipt():
 
     assert result.items == ()
     assert result.receipt.status == "failed"
-    assert result.receipt.error_code == "INVALID_RESPONSE"
+    assert result.receipt.error_code == "INVALID_FEED"
     assert result.receipt.reservation_id == "g1"
 
 
@@ -545,11 +575,9 @@ def test_transport_failure_keeps_bounded_error_code_and_request_receipt():
 
 
 def test_item_without_a_parseable_provider_timestamp_is_dropped():
-    payload = {"articles": [{
-        "url": "https://api.gdeltproject.org/doc/1",
-        "title": "Undated item",
-        "seendate": "not-a-date",
-    }]}
+    payload = gdelt_feed("Nuclear undated item").replace(
+        b"04 Sep 2026 10:00:00 +0000", b"not-a-date",
+    )
     result = build_adapter(
         "gdelt",
         FixtureHttp(payload),
@@ -558,16 +586,14 @@ def test_item_without_a_parseable_provider_timestamp_is_dropped():
     ).collect(sample_query())
 
     assert result.items == ()
-    assert result.receipt.returned_count == 1
-    assert result.receipt.dropped_count == 1
+    assert result.receipt.returned_count == 0
+    assert result.receipt.dropped_count == 0
 
 
 @pytest.mark.parametrize("adapter_name,payload,secret_name,expected_host,reference_key", [
-    ("gdelt", {"articles": [{
-        "url": "https://publisher.example/gdelt-story",
-        "title": "Publisher story",
-        "seendate": "20260904T100000Z",
-    }]}, None, "api.gdeltproject.org", "query"),
+    ("gdelt", gdelt_feed("Nuclear publisher story").replace(
+        b"https://publisher.example/1", b"https://publisher.example/gdelt-story",
+    ), None, "data.gdeltproject.org", None),
     ("alpha_vantage", {"feed": [{
         "url": "https://publisher.example/alpha-story",
         "title": "Publisher story",
@@ -598,24 +624,23 @@ def test_external_publisher_links_use_secret_free_provider_evidence_url(
     item = result.items[0]
     assert urlsplit(item.source_url).hostname == "publisher.example"
     assert urlsplit(item.request_url).hostname == expected_host
-    assert reference_key in parse_qs(urlsplit(item.request_url).query)
+    if reference_key is not None:
+        assert reference_key in parse_qs(urlsplit(item.request_url).query)
     assert secret not in item.request_url
     assert item.metadata["publisher_url"].startswith("https://publisher.example/")
     assert item.metadata["publisher_url_authority"] == "untrusted_reference"
 
 
 @pytest.mark.parametrize("timestamp,accepted", [
-    ("20260831T235959Z", False),
-    ("20260901T000000Z", True),
-    ("20260904T120000Z", True),
-    ("20260904T120001Z", False),
+    ("31 Aug 2026 23:59:59 +0000", False),
+    ("01 Sep 2026 00:00:00 +0000", True),
+    ("04 Sep 2026 12:00:00 +0000", True),
+    ("04 Sep 2026 12:00:01 +0000", False),
 ])
 def test_collection_window_is_inclusive_and_rejects_stale_or_future_items(timestamp, accepted):
-    payload = {"articles": [{
-        "url": "https://publisher.example/story",
-        "title": "Windowed story",
-        "seendate": timestamp,
-    }]}
+    payload = gdelt_feed("Nuclear windowed story").replace(
+        b"04 Sep 2026 10:00:00 +0000", timestamp.encode(),
+    )
     result = build_adapter(
         "gdelt",
         FixtureHttp(payload),
@@ -624,7 +649,7 @@ def test_collection_window_is_inclusive_and_rejects_stale_or_future_items(timest
     ).collect(sample_query())
 
     assert (len(result.items) == 1) is accepted
-    assert result.receipt.dropped_count == (0 if accepted else 1)
+    assert result.receipt.dropped_count == 0
 
 
 def test_future_effective_timestamp_does_not_drop_newly_published_fact():
@@ -653,10 +678,10 @@ def test_cached_schema_failure_uses_original_timestamps_and_zero_request_cost():
     observed_at = datetime(2026, 9, 4, 8, 59, tzinfo=timezone.utc)
     http = FixtureHttp({})
     http.get = lambda request: HttpResult(
-        url="https://api.gdeltproject.org/feed",
+        url="https://data.gdeltproject.org/gdeltv3/gal/feed.rss",
         status=200,
-        headers={"content-type": "application/json"},
-        body=b"not-json",
+        headers={"content-type": "application/rss+xml"},
+        body=b"not-xml",
         retrieved_at=retrieved_at,
         observed_at=observed_at,
         cache_hit=True,
@@ -710,11 +735,7 @@ def test_sec_rejects_invalid_cik_before_quota_or_http(cik):
 
 
 def test_more_than_gateway_count_limit_returns_bounded_failure_receipt():
-    payload = {"articles": [{
-        "url": "https://publisher.example/story",
-        "title": "Story",
-        "seendate": "20260904T100000Z",
-    }] * 10_001}
+    payload = gdelt_feed(*(f"Nuclear story {index}" for index in range(10_001)))
     result = build_adapter(
         "gdelt",
         FixtureHttp(payload),
@@ -724,18 +745,13 @@ def test_more_than_gateway_count_limit_returns_bounded_failure_receipt():
 
     assert result.items == ()
     assert result.receipt.status == "failed"
-    assert result.receipt.error_code == "INVALID_RESPONSE"
+    assert result.receipt.error_code == "INVALID_FEED"
     assert result.receipt.returned_count == 0
     assert result.receipt.dropped_count == 0
 
 
 def test_oversized_nested_metadata_is_deterministically_bounded():
-    payload = {"articles": [{
-        "url": "https://publisher.example/story",
-        "title": "Story",
-        "seendate": "20260904T100000Z",
-        "domain": "x" * 9_000,
-    }]}
+    payload = gdelt_feed("Nuclear " + "x" * 9_000)
     result = build_adapter(
         "gdelt",
         FixtureHttp(payload),
@@ -746,4 +762,4 @@ def test_oversized_nested_metadata_is_deterministically_bounded():
     assert len(result.items) == 1
     encoded = json.dumps(dict(result.items[0].metadata), separators=(",", ":"))
     assert len(encoded.encode()) <= 8_192
-    assert len(result.items[0].metadata["domain"]) <= 500
+    assert len(result.items[0].title) <= 500

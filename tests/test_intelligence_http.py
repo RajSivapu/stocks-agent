@@ -1,5 +1,6 @@
 import gzip
 import json
+from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from email.utils import format_datetime
 from io import BytesIO
@@ -77,9 +78,14 @@ def client(*responses):
 def test_redirect_exhaustion_retains_quota_classification_and_every_real_open():
     from lib.intelligence.providers import build_adapter, CollectionQuery
     from lib.intelligence.quota import QuotaSession
-    opener = FakeOpener(FakeResponse(status=302, headers={"Location": "https://api.gdeltproject.org/next"}))
-    adapter = build_adapter("gdelt", BoundedHttpClient(allowed_hosts={"api.gdeltproject.org"}, opener=opener, clock=lambda: NOW),
+    redirected = "https://data.gdeltproject.org/next"
+    opener = FakeOpener(FakeResponse(status=302, headers={"Location": redirected}))
+    adapter = build_adapter("gdelt", BoundedHttpClient(allowed_hosts={"data.gdeltproject.org"}, opener=opener, clock=lambda: NOW),
         QuotaSession({"gdelt": ({"reservation_id": "quota-one", "reserved_requests": 1},)}), clock=lambda: NOW)
+    original_request = adapter._request
+    adapter._request = lambda query: replace(
+        original_request(query), allowed_redirect_urls=frozenset({redirected}),
+    )
     query = CollectionQuery("energy", (), NOW-timedelta(hours=1), NOW)
     first = adapter.collect(query)
     second = adapter.collect(query)
