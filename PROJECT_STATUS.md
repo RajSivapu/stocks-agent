@@ -1,44 +1,56 @@
 # Personal Stock Agent Project Status
 
-Last updated: 2026-09-09
+Last updated: 2026-09-10
 Canonical release: Personal Stock Agent V1 market-wide discovery candidate
 Audit baseline: `432d647ef911ff63da427097f02a852e18038b62` on `origin/main`
 Market-wide implementation boundary: `18386b5c76c7a7aa8b3eeda870b12d3aba2399e1`
-Current state: the market-wide V1 candidate is deployed from protected main
-`7408b4f874afeb489ea8cd7cf7e7c487eeea3de1`. Exact-main CI `34364808638` and protected backend
-release `34365299574` passed. Production deployment `6352398867` read back Edge versions 58/29/37,
-owner-only API canaries 401/403/200, canonical hashes, and 11 reconciled run/report claims. Native
-owner-only Site v10 is live from the same main SHA; all 13 immutable served assets match the protected
-build byte-for-byte and normalized HTML matches after removing one request-specific Cloudflare
-challenge script. Site v9 remains the provider-retained rollback version. The release and Site
-receipts are `docs/receipts/2026-09-09-protected-owner-dashboard-release.json` and
-`docs/receipts/2026-09-09-native-site-v10.json`.
+Current state: provider/runtime reliability corrections are deployed from protected main
+`df58d2b3ff2403704b48e92e00cab403e48eb756`. PR #80 exact-head CI `34527241925`, exact-main CI
+`34528322660`, and protected release `34528678500` passed. Production deployment `6380879827`
+verified the migration ledger, three Edge functions, owner/anonymous/non-owner canaries, canonical
+hashes, 11 reconciled run/report claims, and the encrypted recovery journal. Its immutable receipt is
+`docs/receipts/2026-09-10-protected-provider-reliability-release.json`.
 
-Trusted V1 use remains **no-go** only until the first normal post-release scheduled chain proves the
-V1-C2 through V1-C6 operational/capability path and records either the original Telegram delivery
-receipt or an explicit persisted suppression. No duplicate market run or Telegram test may be used
-to close that gate.
+Owner-only Site v10 remains live and did not require republication. The September 10 protected build
+has the same build hash and the same 15 asset hashes as the existing Site v10 receipt at
+`docs/receipts/2026-09-09-native-site-v10.json`; the release changed provider and dashboard-server
+runtime code, not frontend bytes. Site v9 remains the provider-retained rollback version.
+
+Trusted V1 use remains **no-go** until a normal post-release scheduled chain proves the V1-C2
+through V1-C6 operational/capability path and records either the original Telegram delivery receipt
+or an explicit persisted suppression. The exposed Finnhub key must also be rotated before final
+security closeout. No duplicate market run or Telegram test may be used to close either gate.
 
 ## Post-September 8 runtime closure
 
 The September 9 post-market slot created run
 `6b5b2efb-0f53-47c3-bba8-8bf24802884f`, but the collector stopped at the reference stage before
-Analyst, Checker, report persistence, or Telegram publication. The durable current pin truthfully
-records `reference_unavailable`; therefore the missing Telegram message is an upstream collection
-failure and is not evidence of a Telegram transport failure.
+Analyst, Checker, report persistence, or Telegram publication. PR #68 released the receipt-bound
+reference restart correction. That historical failed chain remains evidence of an upstream
+collection failure and is not evidence of a Telegram transport failure.
 
-PR #68 merged the restart correction to main `71986d709e3c861ae76ddeffd12d11836da54e6b`
-after exact-head CI `34417486938` passed. Transfer request IDs now bind the exact canonical payload,
-restarts retain the server count and byte ceilings without a permanent first-request wall-clock
-lockout, and a failed reference task can recover only from an exact durable current-pin request and
-response receipt. Recovery does not repeat the SEC request.
+At the owner's request, the 2026-09-10 06:30 pre-market slot was manually invoked once as scheduled
+attempt 2. Run `69fa3ce6-b25b-4857-b1f6-1196901f2c32` finalized as `suppressed` with publication
+`f5c71a0f-323c-4662-a6a9-9dc538a06b32`, suppression reason `not_actionable`, and no Telegram message
+ID. The run persisted one report and one publication, with zero evaluations, suggestions, or
+outcomes. Discovery recorded 22 failed, one deferred, and one succeeded reference task, but accepted
+zero usable items. Telegram was correctly not called because the policy had no evidence-backed alert
+to publish.
 
-The remaining ordered work is to release migration `20261020_reference_transfer_restart.sql` and
-the collector change through the protected path, resume the same September 9 run from its durable
-pin, and reconcile its terminal receipt. Because that pin is `reference_unavailable`, this run may
-close as an honest failed or suppressed chain but cannot prove V1-C3 source capability. If it cannot,
-the next normal scheduled run must provide the required healthy SEC reference, market-wide source
-lineage, and original Telegram delivery or persisted suppression before V1 is closed.
+That attempt exposed the real operational fault: the Claude cloud environment omitted the approved
+free-provider hosts, and several adapters needed production compatibility corrections. The cloud
+allowlist now includes the approved source hosts and `SEC_USER_AGENT_CONTACT` is configured. PR #80
+fixed Federal Register pagination and terminal page-cap handling, Yahoo request headers, EIA RSS
+request headers and GUID-less identity, and dashboard timestamp/readback behavior. Read-only live
+probes then accepted GDELT, DOE, Finnhub, Federal Register, Yahoo, Defense, and EIA RSS evidence.
+FRED and EIA statistics remain unavailable until free API keys are supplied; BLS and BEA queries are
+currently unsupported. These are visible bounded gaps and do not justify a claim of complete-market
+coverage.
+
+The September 10 attempt happened before PR #80 reached production, so it cannot prove the corrected
+runtime. Attempt 2 is terminal and the same-day retry cap makes another pre-market attempt a
+duplicate. The next normal scheduled phase must provide post-release source lineage and an original
+Telegram delivery or explicit persisted suppression before V1 is closed.
 
 ## Market-wide V1 candidate — protected production release complete
 
@@ -65,8 +77,9 @@ test modules was present locally but absent from `requirements.lock`. Commit `b7
 3.14 environment installed the lock and passed all 72 tests in the six affected modules; the focused
 V1 verifier passed 96/96. Runtime code is unchanged. That historical gate is now superseded by PR
 #59: exact-head CI `34364309798`, exact-main CI `34364808638`, protected release `34365299574`, and
-native owner-only Site v10 all passed on the exact reviewed tree. Only the first normal post-release
-scheduled receipt remains open.
+native owner-only Site v10 all passed on the exact reviewed tree. PR #80 later closed the diagnosed
+provider/runtime faults through protected release `34528678500`. Finnhub rotation and the first
+normal post-release scheduled receipt remain open.
 
 The protected release workflow also assumed a separate GitHub collaborator could submit an
 `APPROVED` review. This owner-only repository has one collaborator and GitHub forbids a PR author
@@ -91,7 +104,7 @@ production-secret exposure; the immutable release record retains the authorizati
 
 The protected migration boundary is the immutable additive chain
 `20261005_market_wide_discovery.sql` through
-`20261020_reference_transfer_restart.sql`. The `20261004` artifact is the separate immutable
+`20261024_scheduled_same_day_retry.sql`. The `20261004` artifact is the separate immutable
 production-schema reconciliation baseline; there is no `20261004_market_wide_discovery.sql` and the
 release must never invent or apply one. The original discovery/runtime and release-security
 migration SHA-256 values are recorded in
@@ -106,7 +119,8 @@ maintained through 2028 and fails closed outside that reviewed range.
 
 Any September 8 receipt from the earlier runtime is historical operational evidence only and cannot
 prove this candidate's V1-C3 discovery capability. The exact reviewed candidate has now reached
-protected main, backend, and owner-only Site. V1-C2 through V1-C6 remain open only for a normal
+protected main, backend, and owner-only Site. PR #80's provider/runtime correction is also protected
+and deployed. V1-C2 through V1-C6 remain open for Finnhub credential rotation and a normal
 post-release scheduled run that produces separate operational and capability receipts, including the
 original Telegram delivery receipt or explicit persisted suppression. Alert V3 remains disabled and
 shadow-only.
@@ -192,8 +206,8 @@ absence of continuous live data is surfaced rather than hidden.
 ## Approved V1-C3 market-wide discovery scope and local implementation — 2026-09-06
 
 The owner approved keeping cross-sector thematic discovery inside V1-C3. Two GPT-6 Astra reviews
-confirmed that the current runtime can preserve and rank known security evidence but does not yet
-prove broad discovery beyond the portfolio and watchlist. In particular, ticker-free stories can be
+confirmed that the runtime at that design boundary could preserve and rank known security evidence
+but had not proved broad discovery beyond the portfolio and watchlist. In particular, ticker-free stories can be
 dropped, unsupported provider/theme pairs can silently narrow the plan, filing metadata does not
 prove business exposure, and missing portfolio suitability can remove otherwise valid research
 candidates.
@@ -214,12 +228,12 @@ overlapping-query duplicate, restart, and cross-run item-reuse shapes through a 
 PostgreSQL database and the read-only capability verifier. The action lane remains empty while the
 protected issuer-valuation ledger is unavailable.
 
-The September 8 morning receipt remains necessary operational evidence for the currently deployed
-chain. It cannot close V1-C3 by itself. Local implementation and acceptance are complete through
-Task 10; final exact-candidate review, protected backend release, native Sites publication, and normal scheduled
-production receipts for the new discovery capability remain. A valid quiet run may contain no
-positive suggestion, but it must prove the complete planned source/task lineage and distinguish no
-event from failure, truncation, quota exhaustion, and unsupported capability.
+The September 8 morning receipt is historical operational evidence for an earlier runtime. It cannot
+close V1-C3 by itself. Implementation, exact-candidate review, protected backend releases, and native
+Site publication are complete. Finnhub key rotation and a normal scheduled production receipt for the
+corrected discovery capability remain. A valid quiet run may contain no positive suggestion, but it
+must prove the complete planned source/task lineage and distinguish no event from failure,
+truncation, quota exhaustion, and unsupported capability.
 
 ## Release boundary
 
@@ -286,7 +300,7 @@ separately; deployment never substitutes for the protected attestation, restore,
 | F3 — caller-labelled or unrelated evidence | Implemented | Tasks 4 and 7 bind timestamps, categories, relationships, membership, conflicts, and report provenance to persisted records. Closed through `4504044` and `84f0839`; scheduled receipt proof pending. |
 | F4 — individually valid but unfunded portfolio plan | Implemented | Task 3 reserves reconciled cash, allocation, risk, holdings, existing stop exposure, alternatives, and available shares across the complete proposal set. Closed through `01374a9`; deployed, scheduled evidence pending. |
 | F5 — decimal parse becomes zero basis | Implemented | Task 5 preserves fixed-point values and makes invalid basis/profit visibly unavailable instead of zero. Closed through `c5de624`; deployed, production observation pending. |
-| F6 — adapters cannot reach discovery | Implemented | Task 7 implements provider-native queries, normalized identifiers/timestamps, discoverable securities, and attributable failures. Closed through `84f0839`; live free-provider health remains a protected gate. |
+| F6 — adapters cannot reach discovery | Implemented and released | Task 7 implements provider-native queries, normalized identifiers/timestamps, discoverable securities, and attributable failures. PR #80 read-only probes accepted GDELT, DOE, Finnhub, Federal Register, Yahoo, Defense, and EIA RSS evidence; a normal scheduled receipt remains. |
 | F7 — dedupe/timestamps discard corrections or conflict | Implemented | Task 7 separates request provenance from item identity and retains corrections, distinct claims, contradictions, and publication/retrieval/effective/reporting times. Closed through `84f0839`; scheduled evidence pending. |
 | F8 — ordinary tests can mutate production | Implemented | Task 1 deselects credentialed tests by default and requires explicit opt-in plus an exact allowlisted non-production project before credentials are loaded. Closed through `d798129`. |
 | F9 — history growth and incomplete scheduled success | Implemented; schema gate complete | Task 9 bounds relevant history without losing pending state, enforces one slot per market date/phase, required terminal stages, suppression, and overdue detection. Required recovery schema is reconciled; scheduled proof remains pending. |
@@ -365,9 +379,12 @@ V1-C2 remains reopened until scheduled receipt evidence passes.
   through the official published 2028 holiday and early-close schedule; fail closed afterward.
 - [x] Merge the exact reviewed candidate through protected main, complete protected backend release
   `34365299574`, and publish/read back owner-only Site v10 from exact main `7408b4f`.
+- [x] Release the PR #80 provider/runtime correction from exact main `df58d2b` through protected run
+  `34528678500`; retain Site v10 after exact protected-build asset parity.
 - [ ] Retain a normal post-release scheduled capability receipt without a duplicate run.
 
-V1-C3 remains open only for normal scheduled production capability evidence.
+V1-C3 remains open for Finnhub credential rotation and normal scheduled production capability
+evidence.
 
 ### V1-C4 — Personal comparison brain
 
@@ -416,6 +433,9 @@ V1-C5 is reopened.
   reconciled database state before the next routine scheduled write.
 - [x] Protected backend release `34365299574` and deployment `6352398867` succeeded on exact main
   `7408b4f`; native owner-only Site v10 publication and live-file readback also succeeded.
+- [x] PR #80 exact-head CI `34527241925`, exact-main CI `34528322660`, protected release
+  `34528678500`, and deployment `6380879827` succeeded on corrected main `df58d2b`; its protected
+  build is byte-identical to Site v10.
 - [ ] Next existing post-deployment scheduled intelligence/report/publication receipt chain; never
   trigger a duplicate merely to obtain evidence.
 
@@ -423,14 +443,16 @@ V1-C6 remains open for the normal post-release receipt; trusted use stays no-go 
 
 ## Immediate next gates
 
-1. Preserve the completed schema, isolated recovery, protected release, and Site v10 gates; do not
+1. Preserve the completed schema, isolated recovery, protected releases, and Site v10 gates; do not
    rerun them.
-2. Wait for the next normal post-release scheduled phase. Do not dispatch a market run or Telegram
-   test for evidence.
-3. Reconcile the analysis, discovery, packet, report, publication, provider/quota, dashboard, and
-   original Telegram delivery or explicit suppression receipts through the active heartbeat.
-4. Close V1-C2 through V1-C6 and the active V1 goal only when that receipt passes.
-5. Review Alert V3 separately in shadow/canary mode after V1 closes.
+2. Rotate the exposed Finnhub API key and update the Claude stocks-agent environment.
+3. Wait for the next normal post-release scheduled phase. Attempt 2 for the September 10 pre-market
+   slot is terminal; do not dispatch same-day attempt 3 or a standalone Telegram test.
+4. Reconcile the analysis, discovery, packet, report, publication, provider/quota, dashboard, and
+   original Telegram delivery or explicit suppression receipts.
+5. Close V1-C2 through V1-C6 and the active V1 goal only when the security and scheduled receipts
+   pass.
+6. Review Alert V3 separately in shadow/canary mode after V1 closes.
 
 ## Native Site releases
 
@@ -445,8 +467,10 @@ challenge injection. Site v9 is retained as the immediate rollback. The current 
 `docs/receipts/2026-09-09-native-site-v10.json`; the v7 through v9 receipts remain historical evidence.
 
 The Site v10 publication did not mutate the production database, Supabase Auth, any Edge function,
-managed secrets, Telegram, or scheduled workflows. Its backend evidence boundary is protected
-release `34365299574`; it does not claim the Site publication itself attests backend bytes. A later
+managed secrets, Telegram, or scheduled workflows. Its original backend evidence boundary is
+protected release `34365299574`; the later PR #80 backend correction is attested separately by
+protected release `34528678500`. The Site receipt does not claim that its publication attests backend
+bytes. A later
 Site-only UI change may use the
 owner-scoped native Sites connector when it preserves exact source, verified build, owner-only
 access, deployment, live-bundle, and rollback receipts.
@@ -492,12 +516,11 @@ is intentionally a one-time pre-schedule baseline; normal later market-data grow
 the scheduled-chain receipt instead of rerunning this bridge. Protected run `34055419086` passed and
 its artifact and receipt hashes are recorded in the verified checkpoint above. Do not rerun it.
 
-The formal scheduled reader in `scripts/protected_evidence.py` requires the missing restricted
+The formal scheduled reader in `scripts/protected_evidence.py` requires the restricted
 `RELEASE_READONLY_DATABASE_URL`; `scripts/verify_personal_stock_agent_v1.py` requires the protected
-backend artifact, then validates the persisted chain,
-original Telegram delivery or explicit suppression, and quota lineage. Never send another
-report to manufacture evidence. The existing one-shot heartbeat will inspect the next normal market
-session after the protected attestation; it must not dispatch a duplicate run.
+backend artifact, then validates the persisted chain, original Telegram delivery or explicit
+suppression, and quota lineage. Never send another report to manufacture evidence. Inspect the next
+normal market session without dispatching a duplicate run.
 
 ## Consolidated local evidence
 
@@ -529,12 +552,13 @@ sync, focused PostgreSQL restore/retry evidence, and `git diff --check` also pas
 
 ## Production truth
 
-Production contains owner-only Site v9 and the reviewed backend runtime. Approved schema reconciliation
-`34039011879`, isolated live restore `34042155368`, and protected existing-runtime attestation
-`34055419086` passed. These do not substitute for a post-remediation scheduled receipt chain. The owner email-click and
-formal non-owner denial canaries remain complete. Native Site v9 readback confirms one allowed owner,
-no groups, and zero external visitors. Its receipt explicitly separates the UI-only publication from
-the unchanged backend and the still-pending scheduled chain.
+Production contains owner-only Site v10 and the PR #80 corrected backend runtime at `df58d2b`.
+Approved schema reconciliation `34039011879`, isolated live restore `34042155368`, protected
+existing-runtime attestation `34055419086`, and protected release `34528678500` passed. These do not
+substitute for a post-release scheduled receipt chain. The owner email-click and formal non-owner
+denial canaries remain complete. Native Site v10 readback confirms one allowed owner, no groups, and
+zero external visitors. Its receipt and the September 10 backend receipt keep Site and backend trust
+separate while proving unchanged frontend asset parity.
 
 ## Decisions and guardrails
 

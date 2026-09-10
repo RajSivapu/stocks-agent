@@ -1,6 +1,6 @@
 # Stocks Agent — Roadmap and Deployment Status
 
-Last updated: 2026-09-09.
+Last updated: 2026-09-10.
 
 This repository is owner-only, suggestion-only decision support plus portfolio recordkeeping. It
 has no brokerage credentials or order endpoints and never places, modifies, or cancels a trade.
@@ -12,16 +12,19 @@ and rollout order. `docs/HANDOFF.md` is ignored and is not a source of truth.
 
 ## Current release status
 
-The complete market-wide candidate is deployed from protected main `7408b4f`. Exact-main CI
-`34364808638`, protected backend release `34365299574`, production deployment `6352398867`, and
-owner-only Site v10 publication/readback all passed. V1 trusted use remains **no-go** only pending the
-first normal post-release scheduled operational and V1-C3 capability receipt, including the original
-Telegram delivery receipt or explicit persisted suppression.
+The provider/runtime-corrected market-wide candidate is deployed from protected main `df58d2b`.
+PR #80 exact-head CI `34527241925`, exact-main CI `34528322660`, protected backend release
+`34528678500`, and production deployment `6380879827` passed. Owner-only Site v10 remains current:
+the protected September 10 build has the same build hash and all 15 asset hashes as the published
+Site receipt, so no duplicate Site publication was needed. V1 trusted use remains **no-go** pending
+the Finnhub key rotation and the first normal post-release scheduled operational and V1-C3
+capability receipt, including the original Telegram delivery receipt or explicit persisted
+suppression.
 Approved production schema reconciliation
 `34039011879` succeeded exactly once. Managed isolated restore `34042155368` succeeded on main
 `bd1cee2317a8689b8ac5a55fb38b853e7320bbfb`. The unchanged backend remains attested at main
 `b3f7d70` by protected one-time existing-runtime attestation `34055419086`; that historical boundary
-is superseded for current code by the protected release receipt at `7408b4f`.
+is superseded for current code by the protected release receipt at `df58d2b`.
 Restore artifacts were downloaded and validated once against GitHub archive digests and all four
 embedded hashes: 26 verified record sets, identical production roots, no migrations applied on
 retry, temporary project deleted, and both cleanup receipts successful with no retained project.
@@ -43,7 +46,7 @@ the September 9 receipts for production proof.
 The protected GitHub path released the database and all three Edge functions, followed by native
 owner-scoped Sites publication of the exact same candidate. Its immutable discovery migration tail
 starts at `20261005_market_wide_discovery.sql` and ends at
-`20261014_honest_empty_report_persistence.sql`; `20261004` remains the separate historical
+`20261024_scheduled_same_day_retry.sql`; `20261004` remains the separate historical
 reconciliation baseline. Protected backend proof and native Sites proof now exist as separate
 September 9 receipts. Normal scheduled operational proof and V1-C3 capability proof remain distinct
 and pending.
@@ -76,7 +79,13 @@ and pending.
 - [x] PR #59 exact-head CI `34364309798` and exact-main CI `34364808638` passed. Protected backend
   release `34365299574` and deployment `6352398867` succeeded; owner-only Site v10 then published
   the same main SHA with live-file parity and Site v9 retained as rollback.
-- [ ] Next existing scheduled receipt, without a duplicate run.
+- [x] The owner-requested September 10 pre-market attempt 2 finalized as a persisted
+  `not_actionable` suppression. Zero usable evidence meant Telegram was correctly not called; this
+  pre-fix run does not prove the corrected runtime.
+- [x] PR #80 corrected the Claude source allowlist/SEC contact and Federal Register, Yahoo, EIA RSS,
+  and dashboard runtime behavior. Protected release `34528678500` passed from main `df58d2b`.
+- [ ] Rotate the exposed Finnhub API key, then retain the next normal post-release scheduled receipt
+  without a duplicate run.
 
 Final fix wave Track C: immutable audited migrations are restored and the additive tail is now
 `20261001_immutable_history_closure.sql`. Local upgrade, encrypted recovery, backend-component
@@ -107,7 +116,7 @@ not establish the current recovery schema.
 | Test and owner-auth containment | Implemented and task-reviewed | Live Auth read back, owner-only Site v9 deployed with password-primary login and signed-link recovery, owner email-click confirmed, and formal non-owner denial passed |
 | Decision, evidence, and publication authority | Implemented and task-reviewed | Function deployment, schema, and protected runtime attestation complete; scheduled receipts pending |
 | Portfolio accounting and delivery integrity | Implemented and task-reviewed | Owner/anonymous/non-owner API canaries passed; original delivery receipt pending |
-| Provider, cache, quota, ranking, and lifecycle | Implemented and task-reviewed | Live free-provider health and one existing scheduled chain pending |
+| Provider, cache, quota, ranking, and lifecycle | Implemented and task-reviewed | Corrected provider probes accepted GDELT, DOE, Finnhub, Federal Register, Yahoo, Defense, and EIA RSS evidence; Finnhub rotation and one normal scheduled chain remain |
 | Outcomes, read privilege, dependency lock, and market sessions | Implemented and task-reviewed | Runtime is live; production observation pending |
 | Candidate-bound release and recovery | Implemented and GPT-6 Astra review-clean; local disposable restore path covered | Schema reconciliation, isolated restore, and protected runtime attestation complete |
 
@@ -229,19 +238,20 @@ Still required:
 ## Ordered gates to trusted owner use
 
 1. Independent whole-branch review with no unresolved Critical or Important finding. **Complete.**
-2. Exact-main CI and current-main/merged-review binding. **Complete** for market-wide main `7408b4f`
-   (`34364808638`) and PR #59 exact-head CI `34364309798`.
+2. Exact-main CI and current-main/merged-review binding. **Complete** for corrected main `df58d2b`
+   (`34528322660`) and PR #80 exact-head CI `34527241925`.
 3. Owner-operated gateway/API/Site deployment, runtime parity, and owner/anonymous canaries.
-   **Complete for current main through protected release `34365299574` and owner-only Site v10.**
+   **Complete for current main through protected release `34528678500`; owner-only Site v10 remains
+   current because the protected frontend package is byte-identical.**
 4. Live Auth configuration and owner email-link canary. **Complete; the owner confirmed the signed
    email link opened the live portfolio dashboard, and Site v9 adds password-primary login with the
    same signed-link callback reserved for setup, recovery, and fallback.**
 5. Approved schema reconciliation and protected isolated restore with recovery receipts.
    **Complete** (`34039011879`, `34042155368`); do not rerun.
-6. Protected existing-runtime attestation receipt **complete** (`34055419086`); current market-wide
-   backend and Site release receipts are also complete. The next normal post-release
-   intelligence/report/publication chain remains, without a duplicate run, and must supply both
-   operational and V1-C3 capability evidence.
+6. Protected existing-runtime attestation receipt **complete** (`34055419086`); current corrected
+   backend and unchanged Site release receipts are also complete. Finnhub credential rotation and the
+   next normal post-release intelligence/report/publication chain remain. The scheduled chain must
+   run without a duplicate and supply both operational and V1-C3 capability evidence.
 
 Until the six current-runtime gates and the approved V1-C3 market-wide discovery gates pass, V1-C2
 through V1-C6 remain reopened and the system stays in limited owner-only research/shadow use.
@@ -249,21 +259,22 @@ Positions, cash, prices, and calculations must be independently verified before 
 
 ## Exact remaining handoff boundary
 
-The Edge functions, database migration ledger, and frontend now share current main `7408b4f` as the
-protected release boundary. Retain Site v10 owner-only access and Site v9 as rollback. Receipts
-`docs/receipts/2026-09-09-protected-owner-dashboard-release.json` and
-`docs/receipts/2026-09-09-native-site-v10.json` bind the backend and Site publications separately.
-No credential rotation or scheduled run occurred during release. The one-time historical
-reconciliation, restore, and existing-runtime attestation must not be rerun. Observe the next
-persisted normal chain and never dispatch a duplicate. The live app remains limited owner
-research/shadow use until that chain supplies the current operational, discovery-capability, and
-Telegram delivery-or-suppression receipts.
+The Edge functions and database migration ledger now use corrected main `df58d2b` as the protected
+backend boundary. Retain Site v10 owner-only access and Site v9 as rollback. Receipts
+`docs/receipts/2026-09-10-protected-provider-reliability-release.json` and
+`docs/receipts/2026-09-09-native-site-v10.json` bind the backend and unchanged Site separately.
+The September 10 pre-market attempt ran before this correction and cannot prove it. Rotate the
+exposed Finnhub key, then observe the next persisted normal chain and never dispatch attempt 3 or a
+standalone Telegram test. The live app remains limited owner research/shadow use until that chain
+supplies the current operational, discovery-capability, and Telegram delivery-or-suppression
+receipts.
 
 ## Final V1 closeout after protected release
 
-September 8 receipts belong to the earlier runtime and cannot prove the current candidate. Do not
-backfill them with an extra market or Telegram run. The active verification heartbeat now waits for
-the first natural post-release phase and reconciles its original evidence.
+September 8 receipts belong to the earlier runtime and cannot prove the current candidate. The
+September 10 pre-market attempt 2 is a valid terminal suppression for the pre-fix runtime, but cannot
+prove PR #80. Do not backfill either boundary with attempt 3 or a standalone Telegram run. The next
+normal post-release phase must retain and reconcile its original evidence.
 
 Market-wide thematic discovery remains original V1-C3 scope. Two GPT-6 Astra reviews identified the
 gap between configured themes and actual runtime capability. The implemented boundary is recorded in
@@ -286,10 +297,11 @@ Git history. The implementation now has this status:
    adds the exact-head, successful-PR-CI-bound owner authorization required by this single-owner
    repository while retaining separate GitHub review support. PR #59 exact-head CI `34364309798`,
    exact-main CI `34364808638`, and independent Sol/Astra review all passed.
-6. **Complete production release:** protected backend release/readback `34365299574` and separate
-   exact-candidate native Site v10 publication passed. Fresh owner-only access, deployment, provider
-   rollback, and authenticated live-file proof are recorded in the September 9 receipts.
-7. **Pending natural schedule:** reconcile one normal post-release operational and capability chain,
+6. **Complete production release:** the original backend/Site release and the later PR #80 protected
+   backend release/readback `34528678500` passed. Site v10 remains current because the September 10
+   protected build hash and all asset hashes match its September 9 receipt.
+7. **Pending security closeout:** rotate the exposed Finnhub API key and update the Claude routine.
+8. **Pending natural schedule:** reconcile one normal post-release operational and capability chain,
    including its original Telegram delivery or explicit suppression, before V1-C2 through V1-C6 and
    the final checklist close.
 

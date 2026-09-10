@@ -1,6 +1,6 @@
 # Personal Stock Agent V1 — Implementation Checklist
 
-Last updated: 2026-09-09
+Last updated: 2026-09-10
 
 ## What we are building
 
@@ -22,6 +22,12 @@ An owner-only personal stock agent that uses zero-incremental-cost data sources,
 - [x] Complete market-wide candidate released from protected `main` `7408b4f`; exact-main CI
   `34364808638`, protected release `34365299574`, deployment `6352398867`, and Edge versions
   58/29/37 passed owner-only canaries and 11-claim source reconciliation
+- [x] Provider/runtime reliability correction merged through PR #80 to protected `main`
+  `df58d2b`; exact-head CI `34527241925`, exact-main CI `34528322660`, protected release
+  `34528678500`, and deployment `6380879827` passed
+- [x] Final PR #80 local gate passed Python 1,937, Node 71, Deno 341, dashboard contracts 7,
+  web unit tests 53, and Playwright 24; typecheck, lint, license, production build, and bundle audit
+  passed, with 3 Python and 1 Playwright skips and 4 credentialed database tests deselected
 - [x] Private owner Site v10 published from the same exact main; email-and-password login,
   signed-link setup/recovery, one-owner access, anonymous 401, authenticated live-file parity, and
   retained Site v9 rollback all passed
@@ -70,16 +76,22 @@ An owner-only personal stock agent that uses zero-incremental-cost data sources,
   an upstream collection failure, not proof that Telegram transport failed
 - [x] PR #68 fixed payload-bound reference request identity and receipt-bound failed-task recovery;
   exact-head CI `34417486938` passed and main is `71986d7`
-- [ ] Release migration `20261020_reference_transfer_restart.sql` and the collector recovery path
-  through protected main, then resume the same September 9 run without another SEC request
+- [x] Release migration `20261020_reference_transfer_restart.sql` and the collector recovery path
+  through protected main
+- [x] Manually invoke the September 10 06:30 pre-market slot once as scheduled attempt 2; run
+  `69fa3ce6-b25b-4857-b1f6-1196901f2c32` persisted an honest `not_actionable` suppression and no
+  Telegram message because zero usable evidence was accepted
+- [x] Correct the Claude outbound allowlist and SEC contact, then release Federal Register, Yahoo,
+  EIA RSS, and dashboard readback fixes through PR #80
+- [ ] Rotate the Finnhub API key exposed during environment diagnosis and update the Claude routine
 - [ ] Next existing scheduled-chain receipt
 - [x] Complete protected backend release and separate native Sites publication/readback
 - [ ] Complete the first normal post-release scheduled V1-C3 capability and Telegram outcome proof
 
 ## September 8 closeout sequence
 
-Implementation, protected backend release, and owner-only Site publication are complete. The only
-remaining V1 evidence is the first natural post-release scheduled chain:
+Implementation, protected backend release, and owner-only Site publication are complete. Security
+credential rotation and the first natural post-release scheduled chain remain:
 
 1. **Complete:** Sol and the independent flagship reviewer returned CLEAN on exact runtime
    code `f7e8236`; the release-candidate descendants contain status records and the test-only locked
@@ -94,13 +106,17 @@ remaining V1 evidence is the first natural post-release scheduled chain:
    package, read every served file through the authenticated Site, and confirm the previous successful
    production version remains a provider-retained rollback target. Site v10 passed and Site v9 is
    retained without exercising rollback.
-5. **In progress:** release the September 9 reference-restart correction, then resume the existing
-   post-market run from its durable current pin. Do not create a replacement run or repeat the SEC
-   request. Reconcile its exact terminal report/publication or suppression/failure receipt.
-6. **Pending if the current pin remains unavailable:** wait for the next existing normal scheduled
-   run. Accept either the complete report/publication chain or the exact receipt-backed quiet
-   intraday `no_trigger` chain.
-7. Close the operational and V1-C3 capability receipts, then close this checklist and the V1 goal.
+5. **Complete:** release the reference-restart correction, invoke the September 10 pre-market slot
+   once as attempt 2, and retain its exact terminal suppression. The run accepted zero usable source
+   items, so policy correctly skipped Telegram; it does not prove the corrected runtime.
+6. **Complete:** correct the provider environment and adapters, pass independent review and the full
+   local gate, merge PR #80, pass exact-main CI, and complete protected release `34528678500`.
+   Site v10 remains current because its build and all 15 protected asset hashes are unchanged.
+7. **Pending security closeout:** rotate the exposed Finnhub key and update the Claude routine.
+8. **Pending natural schedule:** retain the next normal post-release run. Accept either a complete
+   report/publication chain or an exact receipt-backed suppression/quiet intraday chain, provided it
+   also proves the required source-capability lineage.
+9. Close the operational and V1-C3 capability receipts, then close this checklist and the V1 goal.
 
 ## Completed implementation areas
 
@@ -143,6 +159,9 @@ remaining V1 evidence is the first natural post-release scheduled chain:
 - [x] Publish the signed-link-only login correction as owner-only Site v8 and retain Site v7 as rollback
 - [x] Publish the password-primary login and recovery flow as owner-only Site v9 and retain Site v8 as rollback
 - [x] Release the exact market-wide candidate backend and publish/read back owner-only Site v10
+- [x] Release PR #80 provider/runtime corrections and retain Site v10 after exact asset-hash parity
+- [ ] Rotate the exposed Finnhub key, then retain one normal post-release scheduled capability and
+  Telegram delivery-or-suppression receipt
 
 ## Approved work after the September 8 morning evidence
 
@@ -164,6 +183,12 @@ remaining V1 evidence is the first natural post-release scheduled chain:
 - [x] Complete exact-code Sol and flagship review at `f7e8236`
 - [x] Complete exact-head and exact-main CI, protected backend release, native Sites
   publication/readback, and backend recovery capture
+- [x] Diagnose the September 10 pre-market attempt without inventing Telegram evidence: zero accepted
+  evidence produced a persisted `not_actionable` suppression, so Telegram was never called
+- [x] Repair and release the provider environment/runtime path through PR #80 and protected release
+  `34528678500`; read-only probes accepted GDELT, DOE, Finnhub, Federal Register, Yahoo, Defense,
+  and EIA RSS evidence
+- [ ] Rotate the Finnhub credential exposed during diagnosis
 - [ ] Complete a normal post-release scheduled capability receipt with original Telegram delivery or
   explicit persisted suppression
 - [ ] Close V1-C2 through V1-C6 and the active V1 goal only after each checkpoint has its own evidence
@@ -178,7 +203,7 @@ The September 8 operational evidence, the September 9 failed run, the protected 
 direct native Sites observation, and the future V1-C3 scheduled capability receipt are separate artifacts.
 Existing evidence cannot be relabeled as candidate capability proof. Market-wide migrations are the immutable additive chain from
 `20261005_market_wide_discovery.sql` through
-`20261020_reference_transfer_restart.sql`; `20261004` remains the separate reconciliation
+`20261024_scheduled_same_day_retry.sql`; `20261004` remains the separate reconciliation
 baseline.
 
 - [x] Confirm live Auth is signup-disabled with 900-second JWT, six-digit/600-second OTP settings, and `ConfirmationURL` magic-link and recovery templates
@@ -193,13 +218,19 @@ baseline.
 - [x] Publish the link-only owner Auth correction as owner-only Site v8 from exact main `b433a5b`; deployment `appgdep_6a9dff357ee88191bf08d54af6f4240f` succeeded and `docs/receipts/2026-09-06-native-site-v8.json` binds the source, build, live scripts, access, and v7 rollback
 - [x] Publish password-primary owner Auth with signed-link setup/recovery as owner-only Site v9 from exact main `e2f9d74`; deployment `appgdep_6a9e15085f048191a80497d9e75fd253` succeeded and `docs/receipts/2026-09-06-native-site-v9.json` binds the source, build, Auth readback, live assets, Sol review, access, and v8 rollback
 - [x] Release the exact market-wide candidate backend through the protected GitHub workflow and verify its immutable component/recovery artifact — **run `34365299574`; deployment `6352398867`; receipt `docs/receipts/2026-09-09-protected-owner-dashboard-release.json`**
+- [x] Release the provider/runtime reliability correction through protected main — **PR #80; exact-head CI `34527241925`; exact-main CI `34528322660`; protected run `34528678500`; deployment `6380879827`; receipt `docs/receipts/2026-09-10-protected-provider-reliability-release.json`**
 - [x] Compare the exact package with the protected build, publish it as private owner Site v10, and close `owner_site` from fresh direct connector access/version/deployment observations plus authenticated live-file parity; retain Site v9 as the provider rollback target — **receipt `docs/receipts/2026-09-09-native-site-v10.json`**
+- [x] Confirm the September 10 protected build matches Site v10's build hash and all 15 asset hashes;
+  no duplicate Site publication is required
 - [x] Complete an owner email sign-in canary on signed-link Site v5 — **owner confirmed the signed email link opened the portfolio dashboard on 2026-09-05; Site v9 preserves the same callback as setup/recovery and fallback**
 - [x] Perform the protected restore drill and retain its receipt — **run `34042155368` restored and
   verified 26 record sets, preserved identical production roots, applied no migrations on retry,
   deleted the temporary project, and passed both cleanup receipts**
 - [x] Retain a formal non-owner login denial receipt — **temporary confirmed non-owner received HTTP 403 `owner_only`, no portfolio data was returned, the temporary user was deleted, and Auth inventory returned to exactly one owner**
-- [ ] Observe fresh scheduled morning/intraday/weekly receipts without triggering duplicate live runs
+- [x] Invoke the September 10 pre-market slot once at the owner's request; retain its terminal
+  suppression receipt and do not create same-day attempt 3
+- [ ] Observe the next normal post-release scheduled receipt without triggering a duplicate live run
+- [ ] Rotate the exposed Finnhub API key and update the Claude environment
 - [ ] Complete and prove the approved V1-C3 market-wide discovery capability on the protected path
 - [ ] Close V1-C2 through V1-C6 only when both their capability gates and production receipts exist
 
