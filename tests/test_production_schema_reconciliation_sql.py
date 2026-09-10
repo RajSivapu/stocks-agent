@@ -30,6 +30,7 @@ DASHBOARD_AUTHORITY = MIGRATIONS / "20261016_dashboard_runtime_authority_closure
 RUN_ORDER = MIGRATIONS / "20261018_analysis_context_binding_lifecycle.sql"
 ACTIVE_INTELLIGENCE_POLICY = MIGRATIONS / "20261019_active_intelligence_policy.sql"
 REFERENCE_TRANSFER_RESTART = MIGRATIONS / "20261020_reference_transfer_restart.sql"
+RETRY_TASK_CAPACITY_RECOVERY = MIGRATIONS / "20261021_retry_task_capacity_recovery.sql"
 
 # The original pre-20260901 tables. Historical migrations run only in this
 # disposable fixture, before representative legacy facts are inserted.
@@ -160,6 +161,7 @@ def test_exact_legacy_reconciliation_preserves_facts_matches_fresh_and_refuses_r
             execute("legacy", RUN_ORDER.read_text())
             execute("legacy", ACTIVE_INTELLIGENCE_POLICY.read_text())
             execute("legacy", REFERENCE_TRANSFER_RESTART.read_text())
+            execute("legacy", RETRY_TASK_CAPACITY_RECOVERY.read_text())
             assert projected_rows("legacy") == before
             after_catalog = catalog("legacy")
             after_tables = {row["name"] for row in after_catalog["relations"] if row["kind"] in {"r", "p"}}

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Iterator, Mapping
+from dataclasses import replace
 from datetime import datetime
 from fnmatch import fnmatchcase
 import json
@@ -703,6 +704,41 @@ def _task_id(
         separators=(",", ":"),
     )
     return str(uuid5(UUID(run_id), canonical))
+
+
+def rebind_discovery_plan_window(
+    plan: DiscoveryPlan,
+    requested_window: Mapping[str, str],
+) -> DiscoveryPlan:
+    """Bind a provisional plan to the immutable window returned by run start."""
+    if not isinstance(plan, DiscoveryPlan):
+        raise TypeError("discovery plan must be typed")
+    window = _validate_window(requested_window)
+    rebound_ids: dict[str, str] = {}
+    tasks: list[DiscoveryTask] = []
+    for task in plan.tasks:
+        capability = plan.capabilities.get(task.capability_id)
+        if capability is None:
+            raise ValueError("discovery plan capability is unavailable")
+        dependencies = tuple(rebound_ids.get(value, value) for value in task.dependencies)
+        task_id = _task_id(
+            plan.run_id,
+            stage=task.stage,
+            capability=capability,
+            theme_id=task.theme_id,
+            query=task.query,
+            window=window,
+            dependencies=dependencies,
+            reference_version=plan.reference_version,
+        )
+        rebound_ids[task.task_id] = task_id
+        tasks.append(replace(
+            task,
+            task_id=task_id,
+            window=window,
+            dependencies=dependencies,
+        ))
+    return replace(plan, tasks=tuple(tasks))
 
 
 def build_discovery_plan(

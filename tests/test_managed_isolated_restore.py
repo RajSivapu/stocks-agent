@@ -621,6 +621,10 @@ def test_actual_migration_retry_accepts_truthful_baseline_without_writing_histor
         item for item in deploy.candidate_migration_manifest()
         if item["path"] == "sql/migrations/20261020_reference_transfer_restart.sql"
     )
+    retry_task_capacity_recovery = next(
+        item for item in deploy.candidate_migration_manifest()
+        if item["path"] == "sql/migrations/20261021_retry_task_capacity_recovery.sql"
+    )
     queries = []
 
     def api(_method, _path, payload=None):
@@ -633,6 +637,7 @@ def test_actual_migration_retry_accepts_truthful_baseline_without_writing_histor
                     research_packet, theme_memory, runtime_completion, honest_empty, release_reader,
                     dashboard_authority, release_reader_authority, run_order,
                     active_intelligence_policy, reference_transfer_restart,
+                    retry_task_capacity_recovery,
             ]
         if query.startswith("SELECT version, statements"):
             return [{"version": "20261004", "statements": ["SELECT 1"]}]

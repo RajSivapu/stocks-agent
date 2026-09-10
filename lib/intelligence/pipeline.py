@@ -41,6 +41,7 @@ from lib.intelligence.cursors import (
 from lib.intelligence.http import SourceFailure, cache_key
 from lib.intelligence.normalize import SourceItem, normalize_item
 from lib.intelligence.packet import EvidencePacket, build_evidence_packet
+from lib.intelligence.planner import rebind_discovery_plan_window
 from lib.intelligence.providers import (
     CollectionQuery,
     CollectionResult,
@@ -490,6 +491,13 @@ class IntelligencePipeline:
         if run_id != request.request_id:
             raise ValueError("gateway start receipt run_id does not match request_id")
         request_window = _request_window(start.get("request_window"), request)
+        if start.get("duplicate") is True:
+            plan = rebind_discovery_plan_window(
+                plan,
+                {key: request_window[key] for key in ("start", "end")},
+            )
+            self.discovery_plan = plan
+            collection_tasks = tuple(task for task in plan.tasks if task.stage != "reference")
         checkpoint_entries = start.get("cache_entries")
         if not isinstance(checkpoint_entries, Sequence) or isinstance(
             checkpoint_entries, (str, bytes, bytearray)
@@ -631,10 +639,14 @@ class IntelligencePipeline:
         candidates = _prioritize_due_nomination_candidates(
             candidates, self.context.get("theme_memory"), run_id=run_id, now=request.now,
         )
+        remaining_task_capacity = max(0, _MAX_DISCOVERY_TASKS - len(persisted))
         selected = select_enrichment_queue(
             candidates,
             max_entities=4,
-            max_requests=plan.reserved_adaptive_requests + plan.reserved_holding_quote_requests,
+            max_requests=min(
+                plan.reserved_adaptive_requests,
+                remaining_task_capacity,
+            ) + plan.reserved_holding_quote_requests,
             required_holding_quote_requests=plan.reserved_holding_quote_requests,
             provider_limits={
                 "sec_edgar": envelope["sec_issuer_submissions"],
@@ -645,7 +657,11 @@ class IntelligencePipeline:
             hypothesis_id for row in selected for hypothesis_id in row.hypothesis_ids
         }
         deferred = {
-            row.hypothesis.hypothesis_id: "not_selected_within_phase_capacity"
+            row.hypothesis.hypothesis_id: (
+                "run_task_capacity_exhausted"
+                if remaining_task_capacity == 0
+                else "not_selected_within_phase_capacity"
+            )
             for row in sorted(candidates, key=lambda value: value.hypothesis.hypothesis_id)
             if row.hypothesis.hypothesis_id not in selected_hypotheses
         }

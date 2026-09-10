@@ -8,7 +8,11 @@ from pathlib import Path
 import pytest
 
 from lib.config import load_settings
-from lib.intelligence.planner import build_discovery_plan, load_source_capabilities
+from lib.intelligence.planner import (
+    build_discovery_plan,
+    load_source_capabilities,
+    rebind_discovery_plan_window,
+)
 from lib.intelligence.policy import load_intelligence_policy
 from lib.intelligence.research_queue import adaptive_provider_reservations
 
@@ -118,6 +122,30 @@ def test_task_identity_is_stable_across_retry_and_mapping_order():
     )
 
     assert [task.task_id for task in first.tasks] == [task.task_id for task in second.tasks]
+
+
+def test_plan_can_be_rebound_to_the_durable_run_window_after_start():
+    first = _plan()
+    durable_window = {
+        "start": "2026-09-04T14:30:00+00:00",
+        "end": "2026-09-05T14:30:00+00:00",
+    }
+    expected = build_discovery_plan(
+        load_intelligence_policy(load_settings()),
+        load_source_capabilities(),
+        phase="pre-market",
+        run_id=RUN_ID,
+        reference_version="sec:fixture-v1",
+        requested_window=durable_window,
+        available_credentials=frozenset(),
+        required_holding_quote_requests=0,
+        last_completed_scans={},
+    )
+
+    rebound = rebind_discovery_plan_window(first, durable_window)
+
+    assert rebound == expected
+    assert rebound.tasks != first.tasks
     assert all(task.max_attempts == 1 for task in first.tasks)
 
 
