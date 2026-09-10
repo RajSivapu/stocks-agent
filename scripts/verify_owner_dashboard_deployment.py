@@ -800,6 +800,15 @@ def _publication_state(row: Mapping[str, object]) -> str:
     return "incomplete"
 
 
+class DashboardClaimMismatch(RuntimeError):
+    """A safe, static checkpoint for source-reconciliation failures."""
+
+    def __init__(self, checkpoint: str = "unspecified") -> None:
+        super().__init__(
+            f"dashboard claim differs from its source receipt [{checkpoint}]"
+        )
+
+
 def reconcile_source_receipts(
     payloads: Mapping[str, Mapping[str, object]],
     detail: Mapping[str, object],
@@ -807,8 +816,8 @@ def reconcile_source_receipts(
     run_id: str,
 ) -> dict[str, object]:
     """Fail closed unless all visible production claims agree with independent source reads."""
-    def fail() -> None:
-        raise RuntimeError("dashboard claim differs from its source receipt")
+    def fail(checkpoint: str = "unspecified") -> None:
+        raise DashboardClaimMismatch(checkpoint)
 
     dashboard = source.get("dashboard")
     evidence = source.get("evidence")
@@ -946,19 +955,24 @@ def reconcile_source_receipts(
         not isinstance(visible_reports, list)
         or not isinstance(dashboard_reports, list)
         or not isinstance(evidence_reports, list)
-        or len(dashboard_reports) > 50
-        or len(dashboard_reports) != len(evidence_reports)
-        or dashboard_reports != [
-            {field: row.get(field) for field in REPORT_PUBLIC_SOURCE_FIELDS}
-            for row in evidence_reports if isinstance(row, Mapping)
-        ]
-        or visible_reports != [
-            report_summary_source_view(row)
-            for row in dashboard_reports if isinstance(row, Mapping)
-        ]
-        or len(visible_reports) != len(dashboard_reports)
     ):
-        fail()
+        fail("reports_shape")
+    if len(dashboard_reports) > 50:
+        fail("reports_bound")
+    if len(dashboard_reports) != len(evidence_reports):
+        fail("reports_source_count")
+    if dashboard_reports != [
+        {field: row.get(field) for field in REPORT_PUBLIC_SOURCE_FIELDS}
+        for row in evidence_reports if isinstance(row, Mapping)
+    ]:
+        fail("reports_source_projection")
+    if len(visible_reports) != len(dashboard_reports):
+        fail("reports_visible_count")
+    if visible_reports != [
+        report_summary_source_view(row)
+        for row in dashboard_reports if isinstance(row, Mapping)
+    ]:
+        fail("reports_visible_projection")
     report_ids: set[object] = set()
     for row in evidence_reports:
         if (
@@ -1221,7 +1235,7 @@ def run_http_canary(
         except RuntimeError as error:
             if (
                 source_attempt == 0
-                and str(error) == "dashboard claim differs from its source receipt"
+                and isinstance(error, DashboardClaimMismatch)
             ):
                 continue
             raise

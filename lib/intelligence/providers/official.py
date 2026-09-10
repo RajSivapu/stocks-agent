@@ -7,6 +7,7 @@ from types import MappingProxyType
 from urllib.parse import parse_qs, quote, urlencode, urlsplit
 
 from lib.intelligence.http import HttpRequest, SourceFailure
+from lib.intelligence.limits import maximum_collection_page
 
 from . import CollectionQuery, SourceAdapter
 from .energy import DoeAdapter, EiaAdapter
@@ -69,12 +70,21 @@ class OfficialJsonAdapter(SourceAdapter):
                 "conditions[publication_date][lte]": query.end.date().isoformat(),
                 "per_page": min(query.limit, self.max_items_per_request),
                 "order": "newest",
-                "format": "json",
             }
             if query.cursor_token is not None:
-                if re.fullmatch(r"[A-Za-z0-9._~:-]{1,512}", query.cursor_token) is None:
+                page_match = re.fullmatch(r"page:([0-9]{1,3})", query.cursor_token)
+                if page_match is not None:
+                    page = int(page_match.group(1))
+                    if (
+                        page != query.page
+                        or not 2 <= page <= maximum_collection_page(query.capability_id)
+                    ):
+                        raise SourceFailure("INVALID_QUERY")
+                    params["page"] = page
+                elif re.fullmatch(r"[A-Za-z0-9._~:-]{1,512}", query.cursor_token) is None:
                     raise SourceFailure("INVALID_QUERY")
-                params["search_after"] = query.cursor_token
+                else:
+                    params["search_after"] = query.cursor_token
                 endpoint = "https://www.federalregister.gov/api/v1/documents"
             else:
                 endpoint = self.endpoint
@@ -175,10 +185,10 @@ class OfficialJsonAdapter(SourceAdapter):
         return records
 
     @staticmethod
-    def _next_cursor(payload) -> str | None:
+    def _next_cursor(payload, query) -> tuple[str | None, bool]:
         next_page_url = payload.get("next_page_url") if isinstance(payload, dict) else None
         if next_page_url in (None, ""):
-            return None
+            return None, False
         if not isinstance(next_page_url, str) or len(next_page_url) > 2_048:
             raise SourceFailure("INVALID_RESPONSE")
         try:
@@ -193,24 +203,41 @@ class OfficialJsonAdapter(SourceAdapter):
             or parsed.password is not None
             or parsed.port not in (None, 443)
             or parsed.path not in {"/api/v1/documents", "/api/v1/documents.json"}
-            or len(params.get("search_after", ())) != 1
         ):
             raise SourceFailure("INVALID_RESPONSE")
-        cursor = params["search_after"][0]
+        search_after = params.get("search_after", ())
+        pages = params.get("page", ())
+        maximum_page = maximum_collection_page(query.capability_id)
+        if len(search_after) == 1 and not pages:
+            cursor = search_after[0]
+            continuation_beyond_cap = query.page == maximum_page
+        elif len(pages) == 1 and not search_after and re.fullmatch(r"[0-9]{1,3}", pages[0]):
+            page = int(pages[0])
+            if page != query.page + 1 or page > maximum_page + 1:
+                raise SourceFailure("INVALID_RESPONSE")
+            cursor = f"page:{page}"
+            continuation_beyond_cap = page > maximum_page
+        else:
+            raise SourceFailure("INVALID_RESPONSE")
         if re.fullmatch(r"[A-Za-z0-9._~:-]{1,512}", cursor) is None:
             raise SourceFailure("INVALID_RESPONSE")
-        return cursor
+        return cursor, continuation_beyond_cap
 
     def _progress_metadata(self, payload, query, response, records, bound):
         if self.provider != "federal_register":
             return super()._progress_metadata(payload, query, response, records, bound)
-        cursor = self._next_cursor(payload)
+        cursor, continuation_beyond_cap = self._next_cursor(payload, query)
         if cursor is not None and cursor == query.cursor_token:
             raise SourceFailure("INVALID_RESPONSE")
+        backlog_token = None if continuation_beyond_cap else cursor
         return MappingProxyType({
             "truncated": cursor is not None,
-            "backlog_remaining": cursor is not None,
-            **({"backlog_token": cursor} if cursor else {}),
+            "backlog_remaining": backlog_token is not None,
+            **({"backlog_token": backlog_token} if backlog_token else {}),
+            **({
+                "continuation_unavailable": True,
+                "coverage_gap": True,
+            } if continuation_beyond_cap else {}),
         })
 
     @staticmethod

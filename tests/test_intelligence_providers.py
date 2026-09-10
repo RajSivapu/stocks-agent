@@ -397,6 +397,7 @@ def test_federal_register_uses_documented_conditions_and_per_page_shape():
     assert "conditions[publication_date][lte]" in params
     assert params["per_page"] == ["2"]
     assert "query" not in params and "limit" not in params
+    assert "format" not in params
 
 
 def test_newly_published_prior_period_filing_is_retained_with_distinct_times():
@@ -522,9 +523,10 @@ def test_yahoo_adapter_preserves_exchange_timestamp_and_market_state():
         "timestamp": [1788210000],
         "indicators": {"quote": [{"close": [100.0]}]},
     }]}}
+    http = FixtureHttp(payload, url="https://query1.finance.yahoo.com/v8/finance/chart/TEST")
     result = build_adapter(
         "yahoo",
-        FixtureHttp(payload, url="https://query1.finance.yahoo.com/v8/finance/chart/TEST"),
+        http,
         QuotaSession({"yahoo": ({"reservation_id": "y1", "reserved_requests": 1},)}),
         clock=lambda: NOW,
     ).collect(sample_query())
@@ -533,6 +535,10 @@ def test_yahoo_adapter_preserves_exchange_timestamp_and_market_state():
     assert item.published_at.isoformat() == "2026-09-01T21:00:00+00:00"
     assert item.metadata["market_state"] == "REGULAR"
     assert item.metadata["source"] == "yahoo-chart"
+    assert http.requests[0].headers == {
+        "Accept": "application/json",
+        "User-Agent": "stocks-agent owner research",
+    }
 
 
 def test_malformed_response_returns_a_bounded_failed_receipt():

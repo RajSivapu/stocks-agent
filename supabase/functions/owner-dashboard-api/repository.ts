@@ -145,12 +145,14 @@ const EMPTY_INTELLIGENCE_V2 = {
   boundaries: { research_only: true, execution_disabled: true, valuation_unavailable: true },
 };
 
-const REPORTS = `SELECT id, run_id, market_date, kind, report, report_hash, created_at
-  FROM public.market_reports
- WHERE ($1::timestamptz IS NULL OR (created_at, id) < ($1::timestamptz, $2::uuid))
- ORDER BY created_at DESC, id DESC LIMIT 51`;
+const REPORTS = `SELECT id, run_id, market_date::text AS market_date, kind, report, report_hash,
+       to_char(created_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') AS created_at
+  FROM public.market_reports r
+ WHERE ($1::timestamptz IS NULL OR (r.created_at, r.id) < ($1::timestamptz, $2::uuid))
+ ORDER BY r.created_at DESC, r.id DESC LIMIT 51`;
 
-const REPORT_DETAIL = `SELECT id, run_id, market_date, kind, report, report_hash, created_at
+const REPORT_DETAIL = `SELECT id, run_id, market_date::text AS market_date, kind, report, report_hash,
+       to_char(created_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') AS created_at
   FROM public.market_reports WHERE id = $1::uuid LIMIT 1`;
 
 const REPORT_SOURCES = `SELECT id, title, canonical_url

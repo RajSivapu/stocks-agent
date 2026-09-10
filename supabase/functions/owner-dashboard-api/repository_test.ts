@@ -79,6 +79,9 @@ Deno.test("intelligence and report repositories select only allowlisted columns"
     assert(!text.includes(forbidden), `selected forbidden column ${forbidden}`);
   }
   assert(text.includes("FROM public.market_reports"));
+  assert(text.includes("market_date::text AS market_date"));
+  assert(text.includes("to_char(created_at AT TIME ZONE 'UTC'"));
+  assert(text.includes("ORDER BY r.created_at DESC, r.id DESC"));
   assert(text.includes("read_owner_intelligence_v2"));
 });
 
