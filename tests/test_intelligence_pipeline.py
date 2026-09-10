@@ -14,6 +14,7 @@ from lib.intelligence.pipeline import (
     IntelligencePipeline,
     PipelineRequest,
     _discover,
+    _collection_window_for_task,
     _enrichment_candidates,
     _failed_receipt,
     _frozen_source_plan,
@@ -1509,7 +1510,8 @@ def test_duplicate_capability_run_reuses_task_identity_from_durable_start_window
         query_kind="theme_search", theme_id="macro_and_policy",
         query=MappingProxyType({"query": "economic policy"}),
         window=MappingProxyType({
-            "start": "2026-09-03T20:00:00+00:00", "end": NOW.isoformat(),
+            "start": "2026-09-03T12:00:00.000789+00:00",
+            "end": "2026-09-04T04:00:00.000789+00:00",
         }), dependencies=(), max_attempts=1, requires_credential=False,
     )
     plan = DiscoveryPlan(
@@ -1556,6 +1558,29 @@ def test_duplicate_capability_run_reuses_task_identity_from_durable_start_window
     assert set(gateway.discovery_tasks) == {expected_task.task_id}
     assert provisional.task_id not in gateway.discovery_tasks
     assert result.coverage["source_plan"]["planned_task_ids"] == [expected_task.task_id]
+
+    cursor = SourceCursor(provider=expected_task.provider, capability_id=expected_task.capability_id)
+    persisted = IntelligencePipeline._task_row(
+        expected_task,
+        state="failed",
+        attempt_count=1,
+        result={"error_code": "EVIDENCE_UNAVAILABLE"},
+        window=_collection_window_for_task(expected_task, cursor),
+        cursor=cursor,
+    )
+    persisted["id"] = provisional.task_id
+    resumed_gateway = DuplicateGateway()
+    resumed_gateway.discovery_tasks[provisional.task_id] = persisted
+    resumed_adapter = FakeAdapter()
+
+    resumed = IntelligencePipeline(
+        resumed_gateway, [resumed_adapter], discovery_plan=plan,
+    ).run(request("pre-market"))
+
+    assert set(resumed_gateway.discovery_tasks) == {provisional.task_id}
+    assert expected_task.task_id not in resumed_gateway.discovery_tasks
+    assert resumed_adapter.queries == []
+    assert resumed.coverage["source_plan"]["planned_task_ids"] == [provisional.task_id]
 
 
 def test_failed_reference_task_recovers_from_durable_binding_without_a_new_source_attempt():
