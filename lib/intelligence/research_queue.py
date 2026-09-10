@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from collections import defaultdict
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 import hashlib
 import json
@@ -124,7 +124,9 @@ class EnrichmentRequest:
     descriptor: Mapping[str, object]
     adverse_path: bool
     priority: int
-    requested_window: Mapping[str, str] = MappingProxyType({})
+    requested_window: Mapping[str, str] = field(
+        default_factory=lambda: MappingProxyType({})
+    )
     execution_allowed: bool = False
 
     @property
