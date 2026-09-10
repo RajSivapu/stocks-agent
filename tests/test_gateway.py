@@ -2,6 +2,7 @@ import io
 import json
 from datetime import datetime
 from pathlib import Path
+import re
 import runpy
 import urllib.error
 from zoneinfo import ZoneInfo
@@ -31,6 +32,20 @@ class FakeResponse:
 
     def __exit__(self, *_args):
         return False
+
+
+def test_python_gateway_allowlist_matches_deployed_contract():
+    contracts = (
+        ROOT / "supabase/functions/market-briefing-gateway/_shared/contracts.ts"
+    ).read_text()
+    block = re.search(
+        r"const OPERATIONS: readonly Operation\[\] = \[(.*?)\];",
+        contracts,
+        re.DOTALL,
+    )
+
+    assert block is not None
+    assert gateway.OPERATIONS == tuple(re.findall(r'"([a-z0-9_]+)"', block.group(1)))
 
 
 def test_healthcheck_supplies_owner_market_date_to_gateway(monkeypatch, capsys):
@@ -203,6 +218,7 @@ def test_alert_evaluation_is_allowlisted_and_standalone(monkeypatch):
     [
         ("start_intelligence_run", None),
         ("record_intelligence", RUN_ID),
+        ("seal_enrichment_selection", RUN_ID),
         ("record_report", RUN_ID),
         ("record_learning", RUN_ID),
         ("record_discovery_reference", RUN_ID),
@@ -213,6 +229,10 @@ def test_alert_evaluation_is_allowlisted_and_standalone(monkeypatch):
         ("finalize_discovery_reference", RUN_ID),
         ("pin_discovery_reference", RUN_ID),
         ("read_discovery_reference", RUN_ID),
+        ("record_theme_episode_revision_v2", RUN_ID),
+        ("record_research_review_identity_v2", RUN_ID),
+        ("record_research_nominations", RUN_ID),
+        ("transition_research_nomination_v2", RUN_ID),
     ],
 )
 def test_intelligence_persistence_operations_are_allowlisted(monkeypatch, operation, run_id):
