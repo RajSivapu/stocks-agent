@@ -24,6 +24,7 @@ jobs:
       - run: python -m venv .venv
       - run: >-
           .venv/bin/pip install --require-hashes --only-binary=:all: -r requirements.lock
+      - run: .venv/bin/python -m compileall -q lib scripts
       - run: >-
           .venv/bin/python -m pytest tests/test_python_runtime_compatibility.py -q
       - run: >-
