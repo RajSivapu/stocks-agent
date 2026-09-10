@@ -625,6 +625,10 @@ def test_actual_migration_retry_accepts_truthful_baseline_without_writing_histor
         item for item in deploy.candidate_migration_manifest()
         if item["path"] == "sql/migrations/20261021_retry_task_capacity_recovery.sql"
     )
+    durable_run_gateway_recovery = next(
+        item for item in deploy.candidate_migration_manifest()
+        if item["path"] == "sql/migrations/20261022_durable_run_gateway_recovery.sql"
+    )
     queries = []
 
     def api(_method, _path, payload=None):
@@ -637,8 +641,8 @@ def test_actual_migration_retry_accepts_truthful_baseline_without_writing_histor
                     research_packet, theme_memory, runtime_completion, honest_empty, release_reader,
                     dashboard_authority, release_reader_authority, run_order,
                     active_intelligence_policy, reference_transfer_restart,
-                    retry_task_capacity_recovery,
-            ]
+                    retry_task_capacity_recovery, durable_run_gateway_recovery,
+                ]
         if query.startswith("SELECT version, statements"):
             return [{"version": "20261004", "statements": ["SELECT 1"]}]
         if query.startswith("CREATE TABLE IF NOT EXISTS public.stock_agent_release_migration_ledger"):
