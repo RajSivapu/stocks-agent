@@ -23,6 +23,7 @@ from lib.intelligence.research_queue import (
 
 ROOT = Path(__file__).resolve().parents[1]
 MIGRATION = ROOT / "sql/migrations/20261010_bounded_adaptive_enrichment.sql"
+RETRY_RECOVERY_MIGRATION = ROOT / "sql/migrations/20261021_retry_task_capacity_recovery.sql"
 SCHEMA = ROOT / "sql/schema.sql"
 EXPOSURE_VECTORS = json.loads(
     (ROOT / "tests/fixtures/exposure_fact_hash_vectors.json").read_text()
@@ -61,6 +62,19 @@ def test_enrichment_migration_is_additive_and_protected_migrations_are_immutable
 
 def test_schema_appends_enrichment_migration_verbatim():
     assert MIGRATION.read_text() in SCHEMA.read_text()
+
+
+def test_retry_recovery_preserves_capacity_and_allows_an_empty_terminal_selection():
+    assert RETRY_RECOVERY_MIGRATION.is_file()
+    normalized = "\n".join(
+        RawStream()(item) for item in parse_sql(RETRY_RECOVERY_MIGRATION.read_text())
+    )
+
+    assert "CREATE OR REPLACE FUNCTION public.seal_market_enrichment_selection" in normalized
+    assert "jsonb_array_length(p_payload->'requests') > 0" in normalized
+    assert "SELECT count(*) FROM public.market_discovery_stage_tasks" in normalized
+    assert "enrichment task capacity exceeded" in normalized
+    assert RETRY_RECOVERY_MIGRATION.read_text() in SCHEMA.read_text()
 
 
 def test_protected_enrichment_accepts_prior_run_pin_and_rejects_replay_or_lineage_tampering():

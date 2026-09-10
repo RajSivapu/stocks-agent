@@ -25,6 +25,7 @@ from lib.intelligence.pipeline import (
     protected_collection_context,
 )
 from lib.intelligence.normalize import normalize_item
+from lib.intelligence.planner import rebind_discovery_plan_window
 from lib.intelligence.providers import (
     CollectionQuery,
     CollectionResult,
@@ -1438,6 +1439,7 @@ def test_capability_plan_executes_exact_task_cursor_and_persists_each_transition
         "cache_keys": [],
     }]
 
+
     replay_adapter = FakeAdapter()
     replay = IntelligencePipeline(
         gateway, [replay_adapter], discovery_plan=plan,
@@ -1487,6 +1489,73 @@ def test_capability_plan_executes_exact_task_cursor_and_persists_each_transition
     assert uncertain_receipt["cache_key"] == uncertain_checkpoint["cache_key"]
     assert uncertain_receipt["source_receipt_id"]
     assert uncertain_receipt["requested_window"] == uncertain["requested_window"]
+
+
+def test_duplicate_capability_run_reuses_task_identity_from_durable_start_window():
+    capability = SourceCapability(
+        capability_id="gdelt_theme_search", provider="gdelt",
+        query_kind="theme_search", themes=frozenset({"macro_and_policy"}),
+        phases=frozenset({"pre-market"}),
+        allowed_hosts=frozenset({"api.gdeltproject.org"}),
+        allowed_path_patterns=("/api/v2/doc/doc",), required_credential=None,
+        authority="radar", retention_class="metadata", max_requests_per_run=9,
+        max_items_per_request=20, requirement_tier="required_baseline",
+        health="enabled", enabled=True, provider_priority=1,
+        query_pack=MappingProxyType({}),
+    )
+    provisional = DiscoveryTask(
+        task_id="44444444-4444-4444-8444-444444444440", stage="signals",
+        provider="gdelt", capability_id=capability.capability_id,
+        query_kind="theme_search", theme_id="macro_and_policy",
+        query=MappingProxyType({"query": "economic policy"}),
+        window=MappingProxyType({
+            "start": "2026-09-03T20:00:00+00:00", "end": NOW.isoformat(),
+        }), dependencies=(), max_attempts=1, requires_credential=False,
+    )
+    plan = DiscoveryPlan(
+        run_id=RUN_ID, phase="pre-market", reference_version="sec:fixture-v1",
+        capability_version=1, tasks=(provisional,),
+        capabilities=MappingProxyType({capability.capability_id: capability}),
+        coverage=MappingProxyType({}), provider_request_totals=MappingProxyType({"gdelt": 1}),
+        reserved_holding_quote_requests=0, reserved_adaptive_requests=0,
+    )
+    durable_window = {
+        "start": "2026-09-03T12:00:00+00:00", "end": "2026-09-04T04:00:00+00:00",
+    }
+    expected_task = rebind_discovery_plan_window(plan, durable_window).tasks[0]
+
+    class DuplicateGateway(FakeGateway):
+        def __init__(self):
+            super().__init__()
+            self.discovery_tasks = {}
+
+        def start_intelligence_run(self, payload):
+            result = super().start_intelligence_run(payload)
+            result.update({
+                "duplicate": True,
+                "request_window": {
+                    **durable_window, "timezone": "America/Chicago",
+                    "market_date": "2026-09-04", "phase": "pre-market",
+                },
+            })
+            return result
+
+        def read_discovery_context(self, _run):
+            return {"tasks": list(self.discovery_tasks.values())}
+
+        def checkpoint_discovery_stage(self, _run, payload):
+            row = payload["task"]
+            self.discovery_tasks[row["id"]] = row
+            return {"task": row, "duplicate": False}
+
+    gateway = DuplicateGateway()
+    result = IntelligencePipeline(
+        gateway, [FakeAdapter()], discovery_plan=plan,
+    ).run(request("pre-market"))
+
+    assert set(gateway.discovery_tasks) == {expected_task.task_id}
+    assert provisional.task_id not in gateway.discovery_tasks
+    assert result.coverage["source_plan"]["planned_task_ids"] == [expected_task.task_id]
 
 
 def test_failed_reference_task_recovers_from_durable_binding_without_a_new_source_attempt():
@@ -2157,6 +2226,53 @@ def test_empty_enrichment_selection_projects_full_run_window_and_seals_stable_de
         "adaptive_enrichment": "no_currently_bound_candidates",
     }
     assert gateway.selections[1]["requests"] == []
+
+
+def test_adaptive_enrichment_seals_empty_when_retry_has_exhausted_task_capacity(monkeypatch):
+    hypothesis = ValueChainHypothesis(
+        hypothesis_id="capacity-hypothesis", event_id="capacity-event",
+        theme_id="critical_minerals_magnets", direction="downstream", role="mining",
+        query_terms=("mining",), theme_terms=("magnets",), geography="US",
+        horizon="near", evidence_requirement="issuer_filing", adverse_path=False,
+        invalidation_rule="Current filing denies the relationship.",
+    )
+    candidate = EnrichmentCandidate(
+        hypothesis=hypothesis, entity_id="sec-cik:0000000001", security_id="sec:AAA",
+        security_revision_id="revision:AAA", reference_manifest_id="manifest:current",
+        cik="0000000001", ticker="AAA", instrument_type="COMMON_STOCK",
+        source_item_ids=("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",),
+        dependency_task_ids=("task:capacity",), official_support=False, novelty=1,
+    )
+    plan = DiscoveryPlan(
+        run_id=RUN_ID, phase="on-demand", reference_version="fixture:v2",
+        capability_version=1, tasks=(), capabilities=MappingProxyType({}),
+        coverage=MappingProxyType({}), provider_request_totals=MappingProxyType({}),
+        reserved_holding_quote_requests=0, reserved_adaptive_requests=4,
+    )
+
+    class CapturingPipeline(IntelligencePipeline):
+        def _seal_and_run_enrichment_requests(self, *args, **kwargs):
+            self.captured = (args[3], kwargs["deferred_reasons"])
+            return []
+
+    monkeypatch.setattr(
+        "lib.intelligence.pipeline._enrichment_candidates",
+        lambda _results, _context: (candidate,),
+    )
+    pipeline = CapturingPipeline(object(), [FakeAdapter()], discovery_plan=plan)
+    persisted = {
+        str(uuid.uuid5(uuid.UUID(RUN_ID), f"persisted:{index}")): {}
+        for index in range(100)
+    }
+
+    assert pipeline._run_adaptive_enrichment(
+        RUN_ID, request("on-demand"),
+        {"start": "2026-09-04T10:00:00Z", "end": NOW.isoformat()},
+        (), {}, persisted, adaptive_provider_reservations("on-demand"),
+    ) == []
+    selected, deferred = pipeline.captured
+    assert selected == ()
+    assert deferred == {"capacity-hypothesis": "run_task_capacity_exhausted"}
 
 
 def test_crash_after_durable_fact_checkpoint_hydrates_exact_fact_without_second_transport():
