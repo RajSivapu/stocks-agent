@@ -713,6 +713,7 @@ export function createGatewayHandler(dependencies: GatewayDependencies) {
                 "https://invalid.local",
               allowedDashboardOrigins: dependencies.dashboardAllowedOrigins ??
                 [],
+              scheduled: false,
             },
             evidence.researchPacket,
           );
@@ -1291,7 +1292,7 @@ export function createGatewayHandler(dependencies: GatewayDependencies) {
         // This write intentionally precedes rendering: delivery can convert a
         // scheduled routine report into intraday or urgent, but finish_run must
         // attest to the original scheduled report identity and phase.
-        await deps.repository.recordReportOrigin(
+        const origin = await deps.repository.recordReportOrigin(
           envelope.request_id,
           leaseToken,
           requireRun(envelope),
@@ -1309,6 +1310,7 @@ export function createGatewayHandler(dependencies: GatewayDependencies) {
             dashboardBaseUrl: dependencies.dashboardBaseUrl ??
               "https://invalid.local",
             allowedDashboardOrigins: dependencies.dashboardAllowedOrigins ?? [],
+            scheduled: origin.scheduled,
           },
           evidence.researchPacket,
         );

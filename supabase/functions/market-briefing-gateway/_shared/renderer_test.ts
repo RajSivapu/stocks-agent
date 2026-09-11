@@ -55,6 +55,7 @@ Deno.test("renderer report delivery surface excludes full private content", () =
   }], {
     dashboardBaseUrl: "https://stocks.example.test",
     allowedDashboardOrigins: ["https://stocks.example.test"],
+    scheduled: true,
   });
   assert(rendered.body.includes("/reports/"), "private link absent");
   assert(

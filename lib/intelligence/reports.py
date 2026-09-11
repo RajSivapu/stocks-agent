@@ -12,6 +12,14 @@ from typing import Literal, Mapping
 
 ReportKind = Literal["morning", "urgent", "weekly", "monthly", "theme", "on-demand", "intraday"]
 _HASH = frozenset("0123456789abcdef")
+_COVERAGE_SUMMARY_KEYS = (
+    "accepted_item_count",
+    "complete_market_coverage",
+    "coverage_status",
+    "mode",
+    "reference_status",
+    "source_request_count",
+)
 
 
 def _sha256(value: bytes) -> str:
@@ -118,6 +126,47 @@ def report_id_from_key(key: str) -> str:
     return str(uuid.UUID("".join(value)))
 
 
+def _compact_text(value: str, max_bytes: int) -> str:
+    text = " ".join(value.split())
+    if len(text.encode()) <= max_bytes:
+        return text
+    suffix = "…"
+    budget = max_bytes - len(suffix.encode())
+    encoded = text.encode()[:budget]
+    while encoded:
+        try:
+            return encoded.decode().rstrip() + suffix
+        except UnicodeDecodeError:
+            encoded = encoded[:-1]
+    return suffix
+
+
+def _compact_values(values: list[object], empty: str) -> str:
+    if not all(isinstance(value, str) for value in values):
+        raise ValueError("v2 research report detail is invalid")
+    unique = list(dict.fromkeys(value for value in values if value.strip()))
+    visible = [_compact_text(value, 48) for value in unique[:1]]
+    if len(unique) > len(visible):
+        visible.append(f"+{len(unique) - len(visible)} more")
+    return ", ".join(visible) or empty
+
+
+def _coverage_summary(coverage: Mapping[str, object]) -> str:
+    fields: list[str] = []
+    for key in _COVERAGE_SUMMARY_KEYS:
+        value = coverage.get(key)
+        if isinstance(value, bool):
+            rendered = str(value).lower()
+        elif isinstance(value, int):
+            rendered = str(value)
+        elif isinstance(value, str) and value.strip():
+            rendered = _compact_text(value, 64)
+        else:
+            continue
+        fields.append(f"{key}={rendered}")
+    return "; ".join(fields) or "bounded authenticated packet"
+
+
 def _research_catalog_markdown(packet: Mapping[str, object] | None) -> str:
     if packet is None:
         return ""
@@ -135,15 +184,15 @@ def _research_catalog_markdown(packet: Mapping[str, object] | None) -> str:
     action_keys = {
         value.get("candidate_key") for value in actions if isinstance(value, Mapping)
     }
-    coverage_text = json.dumps(
-        coverage, ensure_ascii=False, separators=(",", ":"), sort_keys=True,
-    )
-    if len(coverage_text.encode()) > 32_768:
-        raise ValueError("v2 research report coverage is too large")
     next_review = coverage.get("next_review_at")
     if not isinstance(next_review, str) or not next_review.strip():
         next_review = "unavailable"
-    lines = ["## Research catalog", "", f"Coverage: {coverage_text}"]
+    else:
+        next_review = _compact_text(next_review, 64)
+    lines = [
+        "## Research catalog", "", f"Coverage: {_coverage_summary(coverage)}",
+        f"Next review: {next_review}",
+    ]
     for candidate in candidates:
         if not isinstance(candidate, Mapping):
             raise ValueError("v2 research report candidate is invalid")
@@ -180,18 +229,20 @@ def _research_catalog_markdown(packet: Mapping[str, object] | None) -> str:
                     raise ValueError("v2 research report evidence is invalid")
                 opposing.append(item_id)
         label = "ACTION LANE" if candidate_key in action_keys else "RESEARCH ONLY"
-        identity = ticker or candidate_key
-        missing_text = ", ".join(str(value) for value in missing) or "none"
-        opposing_text = ", ".join(opposing) or "none retained"
-        invalidation = sorted({
-            str(value) for values in (adverse, limitations, vetoes) for value in values
-        })
+        identity = _compact_text(ticker or candidate_key, 80)
+        state = _compact_text(state, 32)
+        missing_text = _compact_values(missing, "none")
+        opposing_text = _compact_values(opposing, "none retained")
+        invalidation_values = [value for values in (adverse, limitations, vetoes)
+                               for value in values]
+        if not all(isinstance(value, str) for value in invalidation_values):
+            raise ValueError("v2 research report detail is invalid")
+        invalidation = sorted(set(invalidation_values))
         lines.extend([
             "", f"### {identity} — {label}", f"Research state: {state}",
             f"Suitability: {suitability_state} ({missing_text})",
             f"Opposing evidence: {opposing_text}",
-            f"Invalidation: {', '.join(invalidation) or 'none recorded'}",
-            f"Next review: {next_review}",
+            f"Invalidation: {_compact_values(invalidation, 'none recorded')}",
         ])
     rendered = "\n".join(lines)
     if len(rendered.encode()) > 14_000:

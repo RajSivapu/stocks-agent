@@ -102,8 +102,8 @@ def test_v2_research_report_stores_distinct_suitability_opposition_and_review_st
     assert "RESEARCH ONLY" in report.full_markdown
     assert "Suitability: unknown (valuation_missing)" in report.full_markdown
     assert "Opposing evidence: 00000000-0000-4000-8000-000000000002" in report.full_markdown
-    assert "Invalidation: demand-downside, portfolio_overlap_missing" in report.full_markdown
-    assert 'Coverage: {"complete_market_coverage":false,"mode":"bounded"}' in report.full_markdown
+    assert "Invalidation: demand-downside, +1 more" in report.full_markdown
+    assert "Coverage: complete_market_coverage=false; mode=bounded" in report.full_markdown
     assert "Next review: unavailable" in report.full_markdown
 
 
@@ -122,7 +122,10 @@ def test_v2_research_only_report_requires_real_sources_but_no_fake_policy_decisi
             },
             "adverse_paths": [],
             "limitations": ["security_identity_unresolved"],
-            "evidence": [{"item_id": SOURCE_A, "role": "supporting"}],
+            "evidence": [
+                {"item_id": SOURCE_A, "role": "supporting"},
+                {"item_id": SOURCE_B, "role": "opposing"},
+            ],
         }],
     }
 
@@ -142,6 +145,49 @@ def test_v2_research_only_report_requires_real_sources_but_no_fake_policy_decisi
         build_report(report_input(
             source_ids=(SOURCE_A,), policy_decision_ids=(), research_packet=action_packet,
         ))
+
+
+def test_v2_verbose_research_packet_renders_a_bounded_catalog():
+    candidates = []
+    for index in range(12):
+        candidates.append({
+            "candidate_key": f"unresolved:verbose-supplier-{index}-" + "磁" * 40,
+            "ticker": None,
+            "research_state": "unresolved",
+            "suitability": {
+                "state": "unknown",
+                "missing_reasons": [f"missing-{item}-" + "磁" * 100 for item in range(8)],
+                "veto_reasons": [],
+            },
+            "adverse_paths": [f"adverse-{item}-" + "逆" * 100 for item in range(8)],
+            "limitations": [f"limit-{item}-" + "限" * 100 for item in range(8)],
+            "evidence": [{"item_id": SOURCE_A, "role": "supporting"}],
+        })
+    packet = {
+        "contract_version": 2,
+        "action_candidates": [],
+        "coverage": {
+            "accepted_item_count": 12,
+            "complete_market_coverage": False,
+            "coverage_status": "scope_not_guaranteed",
+            "mode": "bounded",
+            "source_request_count": 25,
+            "next_review_at": "審" * 40,
+            "verbose_internal_receipts": "r" * 8_815,
+        },
+        "research_candidates": candidates,
+    }
+
+    report = build_report(report_input(
+        kind="morning", source_ids=(SOURCE_A, SOURCE_B), policy_decision_ids=(),
+        research_packet=packet, full_markdown="# Morning research\n\n" + "x" * 8_790,
+    ))
+
+    assert len(report.full_markdown.encode()) <= 14_000
+    assert "accepted_item_count=12" in report.full_markdown
+    assert "coverage_status=scope_not_guaranteed" in report.full_markdown
+    assert "verbose_internal_receipts" not in report.full_markdown
+    assert "unresolved:verbose-supplier-11-" in report.full_markdown
 
 
 @pytest.mark.parametrize("kind", ["morning", "weekly", "intraday"])
