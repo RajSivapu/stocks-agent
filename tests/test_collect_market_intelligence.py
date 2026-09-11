@@ -316,6 +316,107 @@ def test_reference_stage_recovers_current_pin_after_predecessor_replay_mismatch(
     assert recovery_calls and recovery_calls[0][1] == RUN_ID
 
 
+def test_reference_stage_reuses_predecessor_pin_when_interrupted_before_current_pin():
+    import scripts.collect_market_intelligence as collector
+    from lib.gateway import GatewayError
+
+    now = datetime(2026, 9, 11, 14, tzinfo=timezone.utc)
+    source = (Path(__file__).parent / "fixtures" / "intelligence" /
+              "sec_company_tickers.json").read_bytes()
+
+    class Http:
+        def get(self, _request):
+            return SimpleNamespace(body=source, retrieved_at=now, observed_at=now)
+
+    class Gateway:
+        def __init__(self):
+            self.calls = []
+
+        def call(self, operation, payload, **kwargs):
+            self.calls.append((operation, payload, kwargs))
+            if operation == "pin_discovery_reference" \
+                    and payload["binding_role"] == "predecessor":
+                raise GatewayError("PERSISTENCE_FAILED")
+            if operation == "read_discovery_reference" \
+                    and payload["binding_role"] == "current":
+                raise GatewayError("PERSISTENCE_FAILED")
+            if operation == "read_discovery_reference":
+                return {"data": {"reference": {
+                    "binding": {
+                        "binding_role": "predecessor",
+                        "manifest_id": None,
+                        "reference_status": "reference_unavailable",
+                        "source_retrieved_at": None,
+                        "reference_age_seconds": None,
+                        "issuer_names_status": "issuer_names_unavailable",
+                    },
+                    "manifest": None,
+                    "securities": [],
+                    "next_after_security_id": None,
+                    "complete": True,
+                }}}
+            manifest_id = (
+                payload.get("manifest_id")
+                or payload.get("manifest", {}).get("id")
+            )
+            if operation == "begin_discovery_reference":
+                return {"data": {
+                    "manifest_id": manifest_id,
+                    "predecessor_manifest_id": None,
+                    "duplicate": False,
+                }}
+            if operation == "record_discovery_reference_chunk":
+                return {"data": {
+                    "manifest_id": manifest_id,
+                    "chunk_index": payload["chunk_index"],
+                    "duplicate": False,
+                }}
+            if operation == "finalize_discovery_reference":
+                return {"data": {
+                    "manifest_id": manifest_id,
+                    "security_count": 5,
+                    "duplicate": False,
+                }}
+            if operation == "pin_discovery_reference":
+                return {"data": {
+                    "binding_role": "current",
+                    "manifest_id": manifest_id,
+                    "reference_status": "healthy",
+                    "source_retrieved_at": now.isoformat(),
+                    "reference_age_seconds": 0,
+                    "duplicate": False,
+                }}
+            raise AssertionError(operation)
+
+    gateway_client = Gateway()
+    coverage = collector._persist_reference_stage(
+        gateway_client,
+        RUN_ID := "11111111-1111-4111-8111-111111111111",
+        now,
+        client=Http(),
+        monotonic=lambda: 0.0,
+        sec_contact="owner@example.com",
+    )
+
+    assert [call[0] for call in gateway_client.calls[:3]] == [
+        "pin_discovery_reference",
+        "read_discovery_reference",
+        "read_discovery_reference",
+    ]
+    assert [call[1]["binding_role"] for call in gateway_client.calls[:3]] == [
+        "predecessor", "current", "predecessor",
+    ]
+    assert sum(
+        call[0] == "pin_discovery_reference"
+        and call[1]["binding_role"] == "predecessor"
+        for call in gateway_client.calls
+    ) == 1
+    assert gateway_client.calls[-1][0] == "pin_discovery_reference"
+    assert gateway_client.calls[-1][1]["binding_role"] == "current"
+    assert gateway_client.calls[-1][2]["run_id"] == RUN_ID
+    assert coverage["reference_status"] == "healthy"
+
+
 def test_reference_stage_pages_predecessor_before_assigning_renamed_security_identity():
     import scripts.collect_market_intelligence as collector
     run_id = "11111111-1111-4111-8111-111111111111"
