@@ -266,14 +266,14 @@ def test_one_reference_stage_call_persists_all_chunks_then_pins_finalized_snapsh
     operations = [call[0] for call in gateway_client.calls]
     assert operations == ["pin_discovery_reference", "begin_discovery_reference"] + [
         "record_discovery_reference_chunk"
-    ] * 6 + ["finalize_discovery_reference", "pin_discovery_reference"]
+    ] * 7 + ["finalize_discovery_reference", "pin_discovery_reference"]
     chunk_payloads = [
         call[1]
         for call in gateway_client.calls
         if call[0] == "record_discovery_reference_chunk"
     ]
     assert [len(payload["entries"]) for payload in chunk_payloads] == [
-        200, 200, 200, 200, 200, 5
+        160, 160, 160, 160, 160, 160, 45
     ]
     assert all(
         len(json.dumps(payload, separators=(",", ":"), sort_keys=True).encode())
@@ -286,6 +286,114 @@ def test_one_reference_stage_call_persists_all_chunks_then_pins_finalized_snapsh
     assert len(installed) == 1 and len(installed[0].issuers) == 1005
     assert gateway_client.calls[1][1]["manifest"]["manifest"]["format_version"] == 2
     assert len(json.dumps(gateway_client.calls, default=str).encode()) <= collector.MAX_REFERENCE_TRANSFER_BYTES
+
+
+def test_reference_stage_replays_one_transient_chunk_failure_with_exact_identity():
+    import scripts.collect_market_intelligence as collector
+    from lib.gateway import GatewayError
+
+    now = datetime(2026, 9, 11, 23, tzinfo=timezone.utc)
+    source = (Path(__file__).parent / "fixtures" / "intelligence" /
+              "sec_company_tickers.json").read_bytes()
+    security_count = len(json.loads(source))
+
+    class Http:
+        def get(self, _request):
+            return SimpleNamespace(body=source, retrieved_at=now, observed_at=now)
+
+    class Gateway:
+        def __init__(self):
+            self.calls = []
+            self.chunk_attempts = 0
+
+        def call(self, operation, payload, **kwargs):
+            self.calls.append((operation, payload, kwargs))
+            manifest_id = payload.get("manifest_id") or payload.get("manifest", {}).get("id")
+            if operation == "pin_discovery_reference" and payload["binding_role"] == "predecessor":
+                data = {
+                    "binding_role": "predecessor", "manifest_id": None,
+                    "reference_status": "reference_unavailable",
+                    "source_retrieved_at": None, "reference_age_seconds": None,
+                    "duplicate": False,
+                }
+            elif operation == "begin_discovery_reference":
+                data = {"manifest_id": manifest_id, "predecessor_manifest_id": None,
+                        "duplicate": False}
+            elif operation == "record_discovery_reference_chunk":
+                self.chunk_attempts += 1
+                if self.chunk_attempts == 1:
+                    raise GatewayError("PERSISTENCE_FAILED")
+                data = {"manifest_id": manifest_id, "chunk_index": payload["chunk_index"],
+                        "duplicate": True}
+            elif operation == "finalize_discovery_reference":
+                data = {"manifest_id": manifest_id, "security_count": security_count,
+                        "duplicate": False}
+            else:
+                data = {
+                    "binding_role": "current", "manifest_id": manifest_id,
+                    "reference_status": "healthy", "source_retrieved_at": now.isoformat(),
+                    "reference_age_seconds": 0, "duplicate": False,
+                }
+            return {"ok": True, "data": data}
+
+    gateway_client = Gateway()
+    coverage = collector._persist_reference_stage(
+        gateway_client, "11111111-1111-4111-8111-111111111111", now,
+        client=Http(), monotonic=lambda: 0.0, sec_contact="owner@example.com",
+    )
+
+    chunk_calls = [call for call in gateway_client.calls
+                   if call[0] == "record_discovery_reference_chunk"]
+    assert len(chunk_calls) == 2
+    assert chunk_calls[0][1] == chunk_calls[1][1]
+    assert chunk_calls[0][2]["request_id"] == chunk_calls[1][2]["request_id"]
+    assert chunk_calls[0][2]["run_id"] == chunk_calls[1][2]["run_id"]
+    assert coverage["reference_status"] == "healthy"
+
+
+def test_reference_stage_stops_after_one_chunk_replay_when_failure_persists():
+    import scripts.collect_market_intelligence as collector
+    from lib.gateway import GatewayError
+
+    now = datetime(2026, 9, 11, 23, tzinfo=timezone.utc)
+    source = (Path(__file__).parent / "fixtures" / "intelligence" /
+              "sec_company_tickers.json").read_bytes()
+
+    class Http:
+        def get(self, _request):
+            return SimpleNamespace(body=source, retrieved_at=now, observed_at=now)
+
+    class Gateway:
+        def __init__(self):
+            self.chunk_calls = []
+
+        def call(self, operation, payload, **kwargs):
+            manifest_id = payload.get("manifest_id") or payload.get("manifest", {}).get("id")
+            if operation == "pin_discovery_reference":
+                return {"data": {
+                    "binding_role": "predecessor", "manifest_id": None,
+                    "reference_status": "reference_unavailable",
+                    "source_retrieved_at": None, "reference_age_seconds": None,
+                    "duplicate": False,
+                }}
+            if operation == "begin_discovery_reference":
+                return {"data": {"manifest_id": manifest_id,
+                                  "predecessor_manifest_id": None, "duplicate": False}}
+            if operation == "record_discovery_reference_chunk":
+                self.chunk_calls.append((payload, kwargs))
+                raise GatewayError("PERSISTENCE_FAILED")
+            raise AssertionError(f"unexpected operation after persistent chunk failure: {operation}")
+
+    gateway_client = Gateway()
+    with pytest.raises(GatewayError) as error:
+        collector._persist_reference_stage(
+            gateway_client, "11111111-1111-4111-8111-111111111111", now,
+            client=Http(), monotonic=lambda: 0.0, sec_contact="owner@example.com",
+        )
+
+    assert error.value.code == "PERSISTENCE_FAILED"
+    assert len(gateway_client.chunk_calls) == 2
+    assert gateway_client.chunk_calls[0] == gateway_client.chunk_calls[1]
 
 
 def test_reference_stage_recovers_current_pin_after_predecessor_replay_mismatch(

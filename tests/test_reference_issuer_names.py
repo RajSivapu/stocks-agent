@@ -159,7 +159,7 @@ def test_v2_hash_vector_matches_typescript_and_sql_protocol():
     assert digest == "6ed1594329bb40358f01357932fbae01bf5d241336d6f2989634a6f2ba630759"
 
 
-def test_v2_transfer_embeds_names_and_uses_the_safe_200_row_capacity():
+def test_v2_transfer_embeds_names_and_uses_the_safe_160_row_capacity():
     snapshot = _snapshot()
     many = tuple(
         replace(
@@ -184,7 +184,7 @@ def test_v2_transfer_embeds_names_and_uses_the_safe_200_row_capacity():
     assert {json.dumps(entry["issuer_names"], sort_keys=True) for entry in entries} == {
         json.dumps(entries[0]["issuer_names"], sort_keys=True)
     }
-    assert [len(chunk["entries"]) for chunk in transfer.chunks] == [200, 200, 1]
+    assert [len(chunk["entries"]) for chunk in transfer.chunks] == [160, 160, 81]
     assert all(
         len(json.dumps(chunk, separators=(",", ":"), sort_keys=True).encode())
         <= 192 * 1024

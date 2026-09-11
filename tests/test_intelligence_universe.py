@@ -560,7 +560,7 @@ def test_reference_transfer_chunks_the_full_supported_snapshot_without_raising_l
         taxonomy_version=1,
     )
 
-    assert len(transfer.chunks) == 75
+    assert len(transfer.chunks) == 94
     assert sum(len(chunk["entries"]) for chunk in transfer.chunks) == 15_000
     assert len(transfer.chunks) + 4 <= 160  # predecessor pin, begin, finalize, current pin
     encoded_total = 0
