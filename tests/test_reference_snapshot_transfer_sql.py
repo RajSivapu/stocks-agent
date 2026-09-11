@@ -36,6 +36,10 @@ ISSUER_NAMES = ROOT / "sql" / "migrations" / "20261009_reference_issuer_names.sq
 ENRICHMENT = ROOT / "sql" / "migrations" / "20261010_bounded_adaptive_enrichment.sql"
 RESTART = ROOT / "sql" / "migrations" / "20261020_reference_transfer_restart.sql"
 TRANSFER_CAPACITY = ROOT / "sql" / "migrations" / "20261025_reference_transfer_capacity.sql"
+SET_BASED_FINALIZATION = (
+    ROOT / "sql" / "migrations" /
+    "20261026_reference_finalization_set_based.sql"
+)
 
 TABLES = (
     "market_reference_chunk_receipts",
@@ -133,6 +137,20 @@ def test_transfer_finalization_verifies_root_contiguity_and_unique_membership_se
     assert "ORDER BY m.security_id" in sql
 
 
+def test_latest_v2_finalization_is_set_based_and_keeps_receipt_completion():
+    sql = SET_BASED_FINALIZATION.read_text()
+    normalized = "\n".join(
+        RawStream()(statement) for statement in parse_sql(sql)
+    )
+
+    assert "FOR v_entry IN" not in sql
+    assert "WITH entries AS MATERIALIZED" in normalized
+    assert "INSERT INTO public.market_security_reference_revisions" in normalized
+    assert "INSERT INTO public.market_reference_snapshot_memberships" in normalized
+    assert "row_number() OVER (ORDER BY c.chunk_index,e.item_ordinal)" in normalized
+    assert "PERFORM public.finish_market_reference_transfer_request" in normalized
+
+
 def test_new_schema_tail_is_additive_and_prior_migrations_are_unchanged():
     schema = SCHEMA.read_text()
     assert MIGRATION.read_text() in schema
@@ -140,6 +158,7 @@ def test_new_schema_tail_is_additive_and_prior_migrations_are_unchanged():
     assert OFFICIAL_COMPLETION.read_text() in schema
     assert ENRICHMENT.read_text() in schema
     assert RESTART.read_text() in schema
+    assert SET_BASED_FINALIZATION.read_text() in schema
     import subprocess
 
     prior_at_base = subprocess.run(
@@ -188,6 +207,7 @@ def transfer_db():
             connection.execute(ISSUER_NAMES.read_text())
             connection.execute(RESTART.read_text())
             connection.execute(TRANSFER_CAPACITY.read_text())
+            connection.execute(SET_BASED_FINALIZATION.read_text())
             yield connection
         finally:
             if connection is not None:

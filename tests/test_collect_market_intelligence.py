@@ -829,6 +829,83 @@ def test_reference_stage_time_ceiling_includes_the_sec_refresh():
     assert gateway_client.calls == []
 
 
+def test_reference_stage_allows_a_complete_bounded_transfer_past_90_seconds():
+    import scripts.collect_market_intelligence as collector
+    now = datetime(2026, 9, 7, 12, tzinfo=timezone.utc)
+    elapsed = [0.0]
+    source = (Path(__file__).parent / "fixtures" / "intelligence" /
+              "sec_company_tickers.json").read_bytes()
+
+    class Http:
+        def get(self, _request):
+            return SimpleNamespace(
+                body=source,
+                retrieved_at=now,
+                observed_at=now,
+            )
+
+    class Gateway:
+        def __init__(self):
+            self.operations = []
+
+        def call(self, operation, payload, **_kwargs):
+            self.operations.append(operation)
+            elapsed[0] += 25.0
+            if operation == "pin_discovery_reference" \
+                    and payload["binding_role"] == "predecessor":
+                return {"data": {
+                    "binding_role": "predecessor", "manifest_id": None,
+                    "reference_status": "reference_unavailable",
+                    "source_retrieved_at": None, "reference_age_seconds": None,
+                    "duplicate": False,
+                }}
+            manifest_id = (
+                payload.get("manifest_id")
+                or payload.get("manifest", {}).get("id")
+            )
+            if operation == "begin_discovery_reference":
+                return {"data": {
+                    "manifest_id": manifest_id,
+                    "predecessor_manifest_id": None,
+                    "duplicate": False,
+                }}
+            if operation == "record_discovery_reference_chunk":
+                return {"data": {
+                    "manifest_id": manifest_id,
+                    "chunk_index": payload["chunk_index"],
+                    "duplicate": False,
+                }}
+            if operation == "finalize_discovery_reference":
+                return {"data": {
+                    "manifest_id": manifest_id,
+                    "security_count": 5,
+                    "duplicate": False,
+                }}
+            return {"data": {
+                "binding_role": "current", "manifest_id": manifest_id,
+                "reference_status": "healthy",
+                "source_retrieved_at": now.isoformat(),
+                "reference_age_seconds": 0,
+                "duplicate": False,
+            }}
+
+    gateway_client = Gateway()
+    coverage = collector._persist_reference_stage(
+        gateway_client,
+        "11111111-1111-4111-8111-111111111111",
+        now,
+        client=Http(),
+        monotonic=lambda: elapsed[0],
+        sec_contact="owner@example.com",
+    )
+
+    assert elapsed[0] > 90.0
+    assert gateway_client.operations[-2:] == [
+        "finalize_discovery_reference", "pin_discovery_reference",
+    ]
+    assert coverage["reference_status"] == "healthy"
+
+
 def test_reference_stage_caps_each_gateway_timeout_by_remaining_deadline():
     import scripts.collect_market_intelligence as collector
     now = datetime(2026, 9, 7, 12, tzinfo=timezone.utc)
@@ -845,7 +922,7 @@ def test_reference_stage_caps_each_gateway_timeout_by_remaining_deadline():
         def __init__(self): self.timeouts = []
 
         def call(self, operation, payload, **kwargs):
-            self.timeouts.append(kwargs.get("timeout"))
+            self.timeouts.append((operation, kwargs.get("timeout")))
             if operation == "pin_discovery_reference" and payload["binding_role"] == "predecessor":
                 return {"data": {
                     "binding_role": "predecessor", "manifest_id": None,
@@ -874,7 +951,7 @@ def test_reference_stage_caps_each_gateway_timeout_by_remaining_deadline():
 
     assert gateway_client.timeouts
     assert all(isinstance(value, float) and 0 < value <= 30.0
-               for value in gateway_client.timeouts)
+               for _, value in gateway_client.timeouts)
     assert collector.MAX_REFERENCE_TRANSFER_CALLS == 384
     assert collector.MAX_REFERENCE_TRANSFER_BYTES == 48 * 1024 * 1024
     assert collector.MAX_REFERENCE_RESPONSE_BYTES == 64 * 1024 * 1024
