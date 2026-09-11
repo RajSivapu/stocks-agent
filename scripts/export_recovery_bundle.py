@@ -451,7 +451,7 @@ def _validate_reference_semantic_lineage(
                 raise ValueError("reference chunk payload lineage is invalid")
             entries = payload["entries"]
             if not isinstance(entries, list) or len(entries) != chunk["entry_count"] \
-                    or not 1 <= len(entries) <= (88 if version == 2 else 200):
+                    or not 1 <= len(entries) <= 200:
                 raise ValueError("reference chunk entry count is invalid")
             for entry in entries:
                 if not isinstance(entry, Mapping) or set(entry) != security_fields \
@@ -2187,8 +2187,6 @@ def _validated_records(records: Mapping[str, object]) -> dict[str, list[dict[str
                 or not -1 <= row["chunk_index"] <= 511
                 or not 1 <= row["chunk_count"] <= 512
                 or not 0 <= row["entry_count"] <= 200
-                or (manifests.get(row["manifest_id"], {}).get("manifest", {}).get("format_version", 1) == 2
-                    and row["chunk_index"] >= 0 and row["entry_count"] > 88)
                 or not HASH.fullmatch(row["chunk_hash"])
                 or not valid_discovery_json(row["payload"], max_bytes=196608)):
             raise ValueError("discovery reference transfer dependency mismatch")
