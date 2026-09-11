@@ -581,7 +581,16 @@ interface SupabaseLike {
   rpc(name: string, parameters?: Record<string, unknown>): QueryBuilder;
 }
 
-const CONTEXT_LIMIT_BYTES = 524_288;
+const CONTEXT_LIMIT_BYTES = 900_000;
+
+export function assertContextFitsTransport(value: unknown): void {
+  if (
+    new TextEncoder().encode(JSON.stringify(value)).byteLength >
+      CONTEXT_LIMIT_BYTES
+  ) {
+    throw new GatewayRepositoryError("CONTEXT_TOO_LARGE");
+  }
+}
 const CONTEXT_QUERY_BATCH_SIZE = 6;
 
 async function runContextQueries(
@@ -2322,12 +2331,7 @@ export function createSupabaseGatewayRepository(
             : integer(row.agent_score_at_open),
         })),
       };
-      if (
-        new TextEncoder().encode(JSON.stringify(context)).byteLength >
-          CONTEXT_LIMIT_BYTES
-      ) {
-        throw new GatewayRepositoryError("CONTEXT_TOO_LARGE");
-      }
+      assertContextFitsTransport(context);
       return context;
     },
 
