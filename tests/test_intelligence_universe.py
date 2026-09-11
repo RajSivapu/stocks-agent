@@ -404,6 +404,42 @@ def test_reference_transfer_matches_protected_ledger_and_stays_inside_every_call
     assert manifest_hash == expected
 
 
+def test_reference_transfer_attempt_identity_is_deterministic_and_distinguishes_restarts():
+    snapshot = parse_sec_company_tickers(SEC_FIXTURE, retrieved_at=NOW)
+    first_attempt = "22222222-2222-4222-8222-222222222222"
+    second_attempt = "33333333-3333-4333-8333-333333333333"
+
+    first = build_reference_transfer(
+        snapshot,
+        run_id=RUN_ID,
+        capability_version=1,
+        taxonomy_version=1,
+        transfer_attempt_id=first_attempt,
+    )
+    replay = build_reference_transfer(
+        snapshot,
+        run_id=RUN_ID,
+        capability_version=1,
+        taxonomy_version=1,
+        transfer_attempt_id=first_attempt,
+    )
+    restarted = build_reference_transfer(
+        snapshot,
+        run_id=RUN_ID,
+        capability_version=1,
+        taxonomy_version=1,
+        transfer_attempt_id=second_attempt,
+    )
+
+    assert first.begin == replay.begin
+    assert first.chunks == replay.chunks
+    assert first.begin["manifest"]["id"] != restarted.begin["manifest"]["id"]
+    assert (
+        first.begin["manifest"]["reference_version"]
+        == restarted.begin["manifest"]["reference_version"]
+    )
+
+
 def test_reference_semantic_encoding_normalizes_timestamps_to_milliseconds():
     manifest = {
         "id": "22222222-2222-4222-8222-222222222222",

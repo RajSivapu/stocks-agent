@@ -588,6 +588,13 @@ def _persist_reference_stage(
             capability_version=1,
             taxonomy_version=1,
             predecessor_manifest_id=predecessor_manifest_id,
+            transfer_attempt_id=(
+                str(uuid.uuid5(
+                    UUID(run_id),
+                    f"reference-recovery:{reference_as_of}",
+                ))
+                if reuse_predecessor_pin else None
+            ),
             capability_id=_REFERENCE_CAPABILITY,
             semantic_encoding_version=2,
         )
