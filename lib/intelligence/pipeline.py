@@ -2385,7 +2385,12 @@ class IntelligencePipeline:
         coverage["collector_drops"] = list(collection_drops + relation_drops + packet_drops)
         final = self._record(run_id, payload, _uuid("completion-request", request.request_id))
         if self.discovery_plan is not None:
-            self._persist_theme_episode_revisions(run_id, payload, request.now)
+            self._persist_theme_episode_revisions(
+                run_id,
+                payload,
+                request.now,
+                final.get("canonical_evidence_retrieved_at"),
+            )
         limitations = tuple(failure_codes) + tuple(packet_dict["limitations"])
         counts = final.get("counts") if isinstance(final.get("counts"), Mapping) else {}
         return PipelineReceipt(
@@ -2457,10 +2462,18 @@ class IntelligencePipeline:
         return _gateway_data(result)
 
     def _persist_theme_episode_revisions(
-        self, run_id: str, payload: Mapping[str, object], observed_at: datetime,
+        self,
+        run_id: str,
+        payload: Mapping[str, object],
+        observed_at: datetime,
+        canonical_retrieved_at: object = None,
     ) -> None:
         rows = _theme_episode_revision_rows(
-            run_id, payload, self.context.get("theme_memory"), observed_at,
+            run_id,
+            payload,
+            self.context.get("theme_memory"),
+            observed_at,
+            canonical_retrieved_at=canonical_retrieved_at,
         )
         if not callable(getattr(self.gateway, "record_theme_episode_revision_v2", None)) \
                 and not callable(getattr(self.gateway, "call", None)):
@@ -2515,7 +2528,12 @@ class IntelligencePipeline:
             observed_at = datetime.fromisoformat(
                 str(packet["packet"]["observed_at"]).replace("Z", "+00:00")
             )
-            self._persist_theme_episode_revisions(run_id, payload, observed_at)
+            self._persist_theme_episode_revisions(
+                run_id,
+                payload,
+                observed_at,
+                final.get("canonical_evidence_retrieved_at"),
+            )
         return PipelineReceipt(run_id=run_id,
             packet=PersistedPacket(packet["id"], packet["packet_hash"], packet["packet"]),
             sources=sources, drops=tuple(coverage.get("collector_drops", [])), coverage=coverage,
@@ -3045,6 +3063,8 @@ def _theme_episode_revision_rows(
     payload: Mapping[str, object],
     theme_memory: object,
     observed_at: datetime,
+    *,
+    canonical_retrieved_at: object = None,
 ) -> tuple[dict[str, object], ...]:
     """Derive exact v2 memory rows from the just-persisted evidence packet."""
     packet_row = payload.get("packet")
@@ -3066,6 +3086,10 @@ def _theme_episode_revision_rows(
     item_by_id = {str(row["id"]): row for row in items}  # type: ignore[union-attr]
     if len(item_by_id) != len(items):
         raise ValueError("theme memory evidence identities are duplicated")
+    if canonical_retrieved_at is not None and not isinstance(
+        canonical_retrieved_at, Mapping
+    ):
+        raise ValueError("theme memory canonical evidence times are invalid")
     existing_by_anchor: dict[str, object] = {}
     existing_by_subject: dict[tuple[str, str, str, str, object], list[object]] = {}
     if theme_memory is not None:
@@ -3128,6 +3152,7 @@ def _theme_episode_revision_rows(
             except ValueError as exc:
                 raise ValueError("theme memory event period is invalid") from exc
             source_evidence = []
+            retrieved_by_evidence: dict[str, datetime] = {}
             for ref in refs:
                 if not isinstance(ref, Mapping):
                     raise ValueError("theme memory candidate evidence is invalid")
@@ -3145,6 +3170,22 @@ def _theme_episode_revision_rows(
                     or item.get("canonical_url")
                     or item.get("content_hash")
                 )
+                timestamp_value = (
+                    canonical_retrieved_at.get(item_id)
+                    if isinstance(canonical_retrieved_at, Mapping)
+                    else item.get("retrieved_at")
+                )
+                try:
+                    retrieved_at = datetime.fromisoformat(
+                        str(timestamp_value).replace("Z", "+00:00")
+                    )
+                    if retrieved_at.tzinfo is None:
+                        raise ValueError
+                except (TypeError, ValueError) as exc:
+                    raise ValueError(
+                        "theme memory evidence retrieval time is invalid"
+                    ) from exc
+                retrieved_by_evidence[item_id] = retrieved_at.astimezone(timezone.utc)
                 source_evidence.append({
                     "evidence_id": item_id,
                     "story_identity": str(story)[:512],
@@ -3186,6 +3227,13 @@ def _theme_episode_revision_rows(
                         "start": continuation.effective_period_start,  # type: ignore[union-attr]
                         "end": continuation.effective_period_end,  # type: ignore[union-attr]
                     }
+                initial = revise_theme_episode(None, episode_event, origin_run_id=run_id)
+                selected_retrievals = [
+                    retrieved_by_evidence[evidence_id]
+                    for evidence_id in initial.source_ids
+                ]
+                episode_event["first_seen"] = _timestamp(min(selected_retrievals))
+                episode_event["last_seen"] = _timestamp(max(selected_retrievals))
                 initial = revise_theme_episode(None, episode_event, origin_run_id=run_id)
                 existing = existing_by_anchor.get(initial.anchor_hash)
                 revision = revise_theme_episode(

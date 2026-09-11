@@ -977,6 +977,20 @@ def test_normal_capability_producer_round_trips_through_protected_read_only_veri
     ).fetchone()[0]
     assert replay["duplicate"] is True
     assert replay["packet_hash"] == first.packet_hash
+    assert replay["canonical_evidence_retrieved_at"] == {
+        item["id"]: item["retrieved_at"]
+        for item in completion["payload"]["items"]
+        if any(
+            evidence["item_id"] == item["id"]
+            for evidence in completion["payload"]["packet"]["packet"]["evidence"]
+        )
+    }
+    readback = db.execute(
+        "SELECT public.read_market_intelligence_completion(%s,%s)",
+        (first_run, completion["completion_id"]),
+    ).fetchone()[0]
+    assert readback["receipt"]["canonical_evidence_retrieved_at"] \
+        == replay["canonical_evidence_retrieved_at"]
     conflicting = copy.deepcopy(completion["payload"])
     conflicting["coverage"]["mode"] = "forged"
     with pytest.raises(

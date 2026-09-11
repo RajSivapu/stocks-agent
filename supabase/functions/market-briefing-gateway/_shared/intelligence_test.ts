@@ -6,6 +6,7 @@ import {
   parseDiscoveryContextRequest,
   parseDiscoveryReferencePayload,
   parseDiscoveryStageCheckpointPayload,
+  parseIntelligenceRecordReceipt,
   parseReferenceBeginPayload,
   parseReferenceChunkPayload,
   parseReferenceFinalizePayload,
@@ -851,5 +852,63 @@ Deno.test("reference and context parsers are exact, bounded, and research-only",
         enrichment_selections: [],
       }),
     "unexpected key",
+  );
+});
+
+Deno.test("intelligence record receipt accepts only bounded canonical evidence times", () => {
+  const evidenceId = "00000000-0000-4000-8000-000000000001";
+  const receipt = {
+    run_id: "00000000-0000-4000-8000-000000000002",
+    completion_id: "00000000-0000-4000-8000-000000000003",
+    status: "completed",
+    counts: {
+      source_receipts: 1,
+      source_items: 1,
+      events: 1,
+      relationships: 0,
+      rankings: 1,
+      packets: 1,
+    },
+    packet_id: "00000000-0000-4000-8000-000000000004",
+    packet_hash: "a".repeat(64),
+    canonical_evidence_retrieved_at: {
+      [evidenceId]: "2026-09-11T16:26:44.025Z",
+    },
+    duplicate: false,
+  };
+
+  assertEquals(
+    parseIntelligenceRecordReceipt(receipt)
+      .canonical_evidence_retrieved_at,
+    receipt.canonical_evidence_retrieved_at,
+  );
+  assertThrows(
+    () =>
+      parseIntelligenceRecordReceipt({
+        ...receipt,
+        canonical_evidence_retrieved_at: { bad: "2026-09-11T16:26:44.025Z" },
+      }),
+    "UUID",
+  );
+  assertThrows(
+    () =>
+      parseIntelligenceRecordReceipt({
+        ...receipt,
+        canonical_evidence_retrieved_at: { [evidenceId]: "not-a-time" },
+      }),
+    "ISO timestamp",
+  );
+  assertThrows(
+    () =>
+      parseIntelligenceRecordReceipt({
+        ...receipt,
+        canonical_evidence_retrieved_at: Object.fromEntries(
+          Array.from({ length: 97 }, (_, index) => [
+            `00000000-0000-4000-8000-${String(index + 10).padStart(12, "0")}`,
+            "2026-09-11T16:26:44.025Z",
+          ]),
+        ),
+      }),
+    "at most 96",
   );
 });

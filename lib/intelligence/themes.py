@@ -802,6 +802,14 @@ def revise_theme_episode(
     anchor, anchor_hash = _episode_anchor(event)
     incoming = _episode_evidence(event.get("source_evidence"))
     observed_at = _episode_timestamp(event.get("observed_at"), "observed at")
+    first_observed_at = _episode_timestamp(
+        event.get("first_seen", observed_at), "first seen",
+    )
+    last_observed_at = _episode_timestamp(
+        event.get("last_seen", observed_at), "last seen",
+    )
+    if last_observed_at < first_observed_at:
+        raise ValueError("theme episode observation bounds are invalid")
     investigated = _episode_strings(
         event.get("investigated_entity_ids", []), "investigated entities", maximum=32, length=256,
     )
@@ -850,7 +858,7 @@ def revise_theme_episode(
     else:
         membership = incoming
         added = list(incoming)
-        first_seen = observed_at
+        first_seen = first_observed_at
         expiry = min(requested_expiry, first_seen + timedelta(days=30))
         revision = 1
         predecessor_id = None
@@ -858,7 +866,7 @@ def revise_theme_episode(
     if requested_next_review < first_seen or expiry <= first_seen:
         raise ValueError("theme episode review window is invalid")
     next_review = min(requested_next_review, expiry)
-    last_seen = max(existing.last_seen if existing else first_seen, observed_at)
+    last_seen = max(existing.last_seen if existing else first_seen, last_observed_at)
     supporting = tuple(sorted(row[0] for row in membership if row[2] == "supporting"))
     opposing = tuple(sorted(row[0] for row in membership if row[2] == "opposing"))
     closure_reason = " ".join(closure_reason.split()) if isinstance(closure_reason, str) else None

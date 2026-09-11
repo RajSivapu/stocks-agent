@@ -2115,7 +2115,7 @@ def test_consecutive_normal_payloads_append_exact_theme_head_across_observation_
             "items": [{
                 "id": item_id, "provider": "gdelt", "upstream_item_id": f"story-{day}",
                 "canonical_url": f"https://example.com/story-{day}", "content_hash": "a" * 64,
-                "metadata": {},
+                "metadata": {}, "retrieved_at": f"2026-09-{day:02d}T12:00:00.000Z",
             }],
             "events": [{
                 "event_type": "awarded_funding", "occurred_at": f"2026-09-{day:02d}T12:00:00Z",
@@ -2154,6 +2154,139 @@ def test_consecutive_normal_payloads_append_exact_theme_head_across_observation_
         "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
         "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
     ]
+
+
+def test_theme_episode_rows_use_evidence_retrieval_bounds_after_packet_observation():
+    run_id = "11111111-1111-4111-8111-111111111111"
+    first_item = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
+    second_item = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb"
+    payload = {
+        "items": [
+            {
+                "id": first_item,
+                "provider": "gdelt",
+                "upstream_item_id": "story-a",
+                "canonical_url": "https://example.com/story-a",
+                "content_hash": "a" * 64,
+                "metadata": {},
+                "retrieved_at": "2026-09-11T16:26:44.025Z",
+            },
+            {
+                "id": second_item,
+                "provider": "gdelt",
+                "upstream_item_id": "story-b",
+                "canonical_url": "https://example.com/story-b",
+                "content_hash": "b" * 64,
+                "metadata": {},
+                "retrieved_at": "2026-09-11T16:26:54.742Z",
+            },
+        ],
+        "events": [{
+            "event_type": "awarded_funding",
+            "occurred_at": "2026-09-11T00:00:00Z",
+            "effective_at": None,
+            "evidence_item_ids": [first_item, second_item],
+        }],
+        "packet": {"packet": {
+            "contract_version": 2,
+            "run_id": run_id,
+            "execution_allowed": False,
+            "observed_at": "2026-09-11T16:23:24.000Z",
+            "research_candidates": [{
+                "candidate_key": "sec:AAA",
+                "entity_id": "sec-cik:0000000001",
+                "theme_ids": ["critical_minerals_magnets"],
+                "limitations": ["typed_primary_exposure_missing"],
+                "evidence": [
+                    {"item_id": first_item, "role": "supporting"},
+                    {"item_id": second_item, "role": "supporting"},
+                ],
+            }],
+        }},
+    }
+
+    row = _theme_episode_revision_rows(
+        run_id,
+        payload,
+        None,
+        datetime(2026, 9, 11, 16, 23, 24, tzinfo=timezone.utc),
+    )[0]
+
+    assert row["first_seen"] == "2026-09-11T16:26:44.025Z"
+    assert row["last_seen"] == "2026-09-11T16:26:54.742Z"
+
+
+def test_theme_episode_continuation_uses_canonical_time_for_refetched_evidence():
+    first_run = "11111111-1111-4111-8111-111111111111"
+    second_run = "22222222-2222-4222-8222-222222222222"
+    old_item = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
+    new_item = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb"
+
+    def payload(run_id, items, observed_at):
+        return {
+            "items": items,
+            "events": [{
+                "event_type": "awarded_funding",
+                "occurred_at": "2026-09-07T00:00:00Z",
+                "effective_at": None,
+                "evidence_item_ids": [item["id"] for item in items],
+            }],
+            "packet": {"packet": {
+                "contract_version": 2,
+                "run_id": run_id,
+                "execution_allowed": False,
+                "observed_at": observed_at,
+                "research_candidates": [{
+                    "candidate_key": "sec:AAA",
+                    "entity_id": "sec-cik:0000000001",
+                    "theme_ids": ["critical_minerals_magnets"],
+                    "limitations": ["typed_primary_exposure_missing"],
+                    "evidence": [
+                        {"item_id": item["id"], "role": "supporting"}
+                        for item in items
+                    ],
+                }],
+            }},
+        }
+
+    old = {
+        "id": old_item,
+        "provider": "gdelt",
+        "upstream_item_id": "story-a",
+        "canonical_url": "https://example.com/story-a",
+        "content_hash": "a" * 64,
+        "metadata": {},
+        "retrieved_at": "2026-09-07T12:10:00.000Z",
+    }
+    first = _theme_episode_revision_rows(
+        first_run,
+        payload(first_run, [old], "2026-09-07T12:00:00.000Z"),
+        None,
+        datetime(2026, 9, 7, 12, tzinfo=timezone.utc),
+    )[0]
+    refreshed = {**old, "retrieved_at": "2026-09-08T12:30:00.000Z"}
+    added = {
+        "id": new_item,
+        "provider": "gdelt",
+        "upstream_item_id": "story-b",
+        "canonical_url": "https://example.com/story-b",
+        "content_hash": "b" * 64,
+        "metadata": {},
+        "retrieved_at": "2026-09-08T12:20:00.000Z",
+    }
+
+    second = _theme_episode_revision_rows(
+        second_run,
+        payload(second_run, [refreshed, added], "2026-09-08T12:00:00.000Z"),
+        {"active_theme_heads": [first]},
+        datetime(2026, 9, 8, 12, tzinfo=timezone.utc),
+        canonical_retrieved_at={
+            old_item: "2026-09-07T12:10:00.000Z",
+            new_item: "2026-09-08T12:20:00.000Z",
+        },
+    )[0]
+
+    assert second["last_seen"] == "2026-09-08T12:20:00.000Z"
 
 
 def test_restart_loads_and_executes_frozen_selection_without_reselecting():

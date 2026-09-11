@@ -1,5 +1,5 @@
 from concurrent.futures import ThreadPoolExecutor
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta, timezone
 import hashlib
 import json
 import os
@@ -23,6 +23,7 @@ from lib.intelligence.themes import (
     theme_episode_v2_persistence_document,
     theme_episode_v2_revision_id,
 )
+from lib.intelligence.pipeline import _theme_episode_revision_rows
 from scripts.export_recovery_bundle import _validate_theme_memory_v2_lineage
 from scripts.protected_evidence import RECOVERY_SQL
 from scripts.verify_owner_dashboard_deployment import (
@@ -76,6 +77,9 @@ REFERENCE_TRANSFER_CAPACITY_MIGRATION = (
 )
 REFERENCE_FINALIZATION_SET_BASED_MIGRATION = (
     ROOT / "sql/migrations/20261026_reference_finalization_set_based.sql"
+)
+THEME_EVIDENCE_RETRIEVAL_TIMES_MIGRATION = (
+    ROOT / "sql/migrations/20261027_theme_evidence_retrieval_times.sql"
 )
 SCHEMA = ROOT / "sql/schema.sql"
 
@@ -134,11 +138,12 @@ def test_v2_runtime_completion_and_honest_empty_tail_are_parseable_and_ordered()
     assert parse_sql(SCHEDULED_SAME_DAY_RETRY_MIGRATION.read_text())
     assert parse_sql(REFERENCE_TRANSFER_CAPACITY_MIGRATION.read_text())
     assert parse_sql(REFERENCE_FINALIZATION_SET_BASED_MIGRATION.read_text())
+    assert parse_sql(THEME_EVIDENCE_RETRIEVAL_TIMES_MIGRATION.read_text())
     assert ACTIVE_INTELLIGENCE_POLICY_MIGRATION.read_bytes() in schema
     assert REFERENCE_TRANSFER_RESTART_MIGRATION.read_bytes() in schema
     assert RETRY_TASK_CAPACITY_RECOVERY_MIGRATION.read_bytes() in schema
     assert GDELT_ARTICLE_FEED_MIGRATION.read_bytes() in schema
-    assert schema.endswith(REFERENCE_FINALIZATION_SET_BASED_MIGRATION.read_bytes())
+    assert schema.endswith(THEME_EVIDENCE_RETRIEVAL_TIMES_MIGRATION.read_bytes())
     migration = RUNTIME_COMPLETION_MIGRATION.read_text()
     assert "SECURITY DEFINER SET search_path=pg_catalog" in migration
     assert "record_market_intelligence_v2_completion" in migration
@@ -875,6 +880,67 @@ def test_python_gateway_postgres_episode_golden_roundtrip_and_exact_replay(theme
             "research_nomination_lifecycle_v2": [],
             "intelligence_memory_context_bindings_v2": [],
         })
+
+
+def test_pipeline_episode_uses_receipt_time_when_packet_observation_is_earlier(
+        theme_memory_dsn):
+    with psycopg.connect(theme_memory_dsn, autocommit=True) as db:
+        run_id, evidence_ids = _seed_episode_run(db)
+        payload = {
+            "items": [
+                {
+                    "id": evidence_id,
+                    "provider": "gdelt",
+                    "upstream_item_id": f"story-{index}",
+                    "canonical_url": f"https://api.gdeltproject.org/api/v2/story-{index}",
+                    "content_hash": str(index + 1) * 64,
+                    "metadata": {},
+                    "retrieved_at": "2026-09-07T12:10:00.000Z",
+                }
+                for index, evidence_id in enumerate(evidence_ids)
+            ],
+            "events": [{
+                "event_type": "awarded_funding",
+                "occurred_at": "2026-09-07T00:00:00Z",
+                "effective_at": None,
+                "evidence_item_ids": evidence_ids,
+            }],
+            "packet": {"packet": {
+                "contract_version": 2,
+                "run_id": run_id,
+                "execution_allowed": False,
+                "observed_at": "2026-09-07T12:00:00.000Z",
+                "research_candidates": [{
+                    "candidate_key": "sec:AAA",
+                    "entity_id": "sec-cik:0000000001",
+                    "theme_ids": ["critical_minerals_magnets"],
+                    "limitations": ["typed_primary_exposure_missing"],
+                    "evidence": [
+                        {"item_id": evidence_id, "role": "supporting"}
+                        for evidence_id in evidence_ids
+                    ],
+                }],
+            }},
+        }
+        produced = _theme_episode_revision_rows(
+            run_id,
+            payload,
+            None,
+            datetime(2026, 9, 7, 12, tzinfo=timezone.utc),
+        )[0]
+        assert produced["first_seen"] == "2026-09-07T12:10:00.000Z"
+        assert produced["last_seen"] == "2026-09-07T12:10:00.000Z"
+
+        parsed = _parse_episode_through_gateway(run_id, produced)
+        db.execute("SET ROLE service_role")
+        inserted = db.execute(
+            "SELECT record_theme_episode_revision_v2(%s,%s)",
+            (run_id, Jsonb(parsed)),
+        ).fetchone()[0]
+        db.execute("RESET ROLE")
+
+        assert inserted["revision_id"] == produced["revision_id"]
+        assert inserted["duplicate"] is False
 
 
 def test_open_ended_episode_roundtrips_python_gateway_postgres_read_and_recovery(
