@@ -182,11 +182,15 @@ def main(argv: Sequence[str] | None = None, *, stdout: TextIO | None = None) -> 
                     snapshot_sink=lambda snapshot: installed_reference.__setitem__(run_id, snapshot),
                 )
 
-            def recover_reference(run_id, _pipeline_request):
-                coverage, snapshot = _read_current_reference_binding(gateway, run_id)
-                if snapshot is not None:
-                    installed_reference[run_id] = snapshot
-                return coverage
+            def recover_reference(run_id, pipeline_request):
+                return _recover_reference_stage(
+                    gateway,
+                    run_id,
+                    pipeline_request.now,
+                    snapshot_sink=lambda snapshot: installed_reference.__setitem__(
+                        run_id, snapshot
+                    ),
+                )
 
             def hydrate_reference(run_id):
                 return installed_reference.get(run_id) or _read_current_reference_snapshot(
@@ -778,6 +782,38 @@ def _read_current_reference_snapshot(
     return _read_current_reference_binding(
         gateway_client, run_id, monotonic=monotonic,
     )[1]
+
+
+def _recover_reference_stage(
+    gateway_client,
+    run_id: str,
+    now: datetime,
+    *,
+    client=None,
+    monotonic=time.monotonic,
+    sec_contact=None,
+    snapshot_sink=None,
+) -> dict[str, object]:
+    """Recover a current pin or rebuild once when no current pin was created."""
+    try:
+        coverage, snapshot = _read_current_reference_binding(
+            gateway_client, run_id, monotonic=monotonic,
+        )
+    except gateway.GatewayError as error:
+        if error.code != "PERSISTENCE_FAILED":
+            raise
+        return _persist_reference_stage(
+            gateway_client,
+            run_id,
+            now,
+            client=client,
+            monotonic=monotonic,
+            sec_contact=sec_contact,
+            snapshot_sink=snapshot_sink,
+        )
+    if snapshot is not None and callable(snapshot_sink):
+        snapshot_sink(snapshot)
+    return coverage
 
 
 def _validate_reference_name_availability(
