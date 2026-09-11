@@ -467,6 +467,7 @@ def _persist_reference_stage(
     reference_as_of = now.astimezone(timezone.utc).isoformat(
         timespec="milliseconds"
     ).replace("+00:00", "Z")
+    reuse_predecessor_pin = False
     try:
         predecessor_pin = invoke("pin_discovery_reference", {
             "capability_id": _REFERENCE_CAPABILITY,
@@ -478,22 +479,37 @@ def _persist_reference_stage(
     except gateway.GatewayError as error:
         if error.code != "PERSISTENCE_FAILED":
             raise
-        coverage, recovered_snapshot = _read_current_reference_binding(
-            gateway_client,
-            run_id,
-            monotonic=monotonic,
-        )
-        if recovered_snapshot is not None and snapshot_sink is not None:
-            snapshot_sink(recovered_snapshot)
-        return coverage
-    if predecessor_pin.get("binding_role") != "predecessor":
+        try:
+            coverage, recovered_snapshot = _read_current_reference_binding(
+                gateway_client,
+                run_id,
+                monotonic=monotonic,
+            )
+        except gateway.GatewayError as current_error:
+            if current_error.code != "PERSISTENCE_FAILED":
+                raise
+            # The interrupted run may have persisted only its predecessor pin.
+            # Reuse that immutable server-side pin instead of trying to replace
+            # it with a later reference_as_of value.
+            reuse_predecessor_pin = True
+            predecessor_pin = None
+        else:
+            if recovered_snapshot is not None and snapshot_sink is not None:
+                snapshot_sink(recovered_snapshot)
+            return coverage
+    if predecessor_pin is not None \
+            and predecessor_pin.get("binding_role") != "predecessor":
         raise ValueError("reference predecessor pin receipt is invalid")
-    predecessor_manifest_id = predecessor_pin.get("manifest_id")
+    predecessor_manifest_id = (
+        predecessor_pin.get("manifest_id")
+        if predecessor_pin is not None else None
+    )
     predecessor_snapshot: ReferenceSnapshot | None = None
     predecessor_manifest: dict[str, object] | None = None
-    if predecessor_manifest_id is not None:
+    if reuse_predecessor_pin or predecessor_manifest_id is not None:
         if not isinstance(predecessor_manifest_id, str):
-            raise ValueError("reference predecessor pin receipt is invalid")
+            if not reuse_predecessor_pin:
+                raise ValueError("reference predecessor pin receipt is invalid")
         after = None
         predecessor_rows: list[dict[str, object]] = []
         while True:
@@ -511,9 +527,24 @@ def _persist_reference_stage(
             if (
                 not isinstance(binding, dict)
                 or binding.get("binding_role") != "predecessor"
-                or binding.get("manifest_id") != predecessor_manifest_id
                 or not isinstance(rows, list)
             ):
+                raise ValueError("reference predecessor page is invalid")
+            if reuse_predecessor_pin and after is None:
+                predecessor_manifest_id = binding.get("manifest_id")
+                if predecessor_manifest_id is None:
+                    if (
+                        binding.get("reference_status") != "reference_unavailable"
+                        or reference.get("manifest") is not None
+                        or rows
+                        or reference.get("complete") is not True
+                        or reference.get("next_after_security_id") is not None
+                    ):
+                        raise ValueError("reference predecessor page is invalid")
+                    break
+                if not isinstance(predecessor_manifest_id, str):
+                    raise ValueError("reference predecessor page is invalid")
+            if binding.get("manifest_id") != predecessor_manifest_id:
                 raise ValueError("reference predecessor page is invalid")
             manifest = reference.get("manifest")
             if not isinstance(manifest, dict):
@@ -539,9 +570,10 @@ def _persist_reference_stage(
             if complete is not False or not isinstance(next_after, str) or next_after == after:
                 raise ValueError("reference predecessor page is invalid")
             after = next_after
-        predecessor_snapshot = reference_snapshot_from_rows(
-            predecessor_manifest, predecessor_rows
-        )
+        if predecessor_manifest_id is not None:
+            predecessor_snapshot = reference_snapshot_from_rows(
+                predecessor_manifest, predecessor_rows
+            )
 
     manifest_id = None
     selected_manifest_record: dict[str, object] | None = None
