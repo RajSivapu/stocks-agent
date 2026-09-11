@@ -165,7 +165,7 @@ Deno.test("report handler loads exact persisted decisions before generating deli
   );
 });
 
-Deno.test("scheduled v2 research persists a real report and suppression receipt without a fake evaluation", async () => {
+Deno.test("scheduled Friday research persists a report and delivers an owner status without a fake evaluation", async () => {
   const packet = researchOnlyPacket();
   class ResearchOnlyRepository extends FakeRepository {
     override loadIntelligencePacket() {
@@ -182,22 +182,32 @@ Deno.test("scheduled v2 research persists a real report and suppression receipt 
   }
   const repo = new ResearchOnlyRepository();
   repo.scheduledReportPhase = "post-market";
-  const payload = researchOnlyReportFixture(packet);
-  const setup = makeHandler(repo);
+  const payload = researchOnlyReportFixture(packet, "weekly", "2026-09-04");
+  const setup = makeHandler(repo, {
+    dashboardBaseUrl: "https://stocks.example.test",
+    dashboardAllowedOrigins: ["https://stocks.example.test"],
+  });
 
   const response = await setup.handler(request("record_report", payload));
 
   assertEquals(response.status, 200);
   const result = await json(response);
   assertEquals(result.publication_receipt, {
-    status: "suppressed",
-    suppression_reason: "not_actionable",
-    telegram_message_ids: [],
+    status: "delivered",
+    telegram_message_ids: [77],
     retry_allowed: false,
   });
   assertEquals(repo.reportDecisionReads, []);
   assertEquals(repo.packetReadCalls, 1);
-  assertEquals(setup.sent, []);
+  assertEquals(setup.sent.length, 1);
+  assert(
+    setup.sent[0][0].includes("FRIDAY POST-MARKET RESEARCH") &&
+      setup.sent[0][0].includes("1 research candidate(s) reviewed") &&
+      setup.sent[0][0].includes("no policy-approved action") &&
+      !setup.sent[0][0].includes("unresolved:magnet-supplier") &&
+      !setup.sent[0][0].includes("fabricated ticker"),
+    "Friday Telegram status leaked unresolved research or omitted the no-action result",
+  );
   assertEquals(repo.reportOrigins.length, 1);
   assert(
     JSON.stringify(repo.storedReport).includes("unresolved:magnet-supplier") &&
@@ -845,6 +855,7 @@ function researchOnlyPacket(): EvidencePacket {
 function researchOnlyReportFixture(
   packet: EvidencePacket,
   kind: ReportKind = "weekly",
+  marketDate = "2026-09-02",
 ) {
   const body = {
     title: "Caller title",
@@ -861,13 +872,13 @@ function researchOnlyReportFixture(
   const reportHash = sha256Hex(canonicalJson(body));
   const packetHash = sha256Hex(canonicalJson(packet));
   const key = sha256Hex(
-    `v2:${kind}:2026-09-02:${packetHash}:${reportHash}`,
+    `v2:${kind}:${marketDate}:${packetHash}:${reportHash}`,
   );
   return {
     id: reportIdFromKey(key),
     idempotency_key: key,
     packet_id: PACKET_ID,
-    market_date: "2026-09-02",
+    market_date: marketDate,
     kind,
     report: body,
     report_hash: reportHash,

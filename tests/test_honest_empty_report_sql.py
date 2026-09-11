@@ -44,14 +44,17 @@ def test_honest_empty_report_migration_is_additive_and_preserves_prior_contract_
     assert "market_v2_sorted_unique_text_array(p_report->'report'->'source_ids',96,false)" in sql
 
 
-def render_with_gateway(payload, packet):
+def render_with_gateway(payload, packet, *, scheduled=False):
     command = [
         "npx", "--yes", "deno@2.9.6", "run", "--quiet", "--cached-only",
         "--config", "supabase/functions/deno.json",
         "tests/helpers/render_report_payload.ts",
     ]
     result = subprocess.run(
-        command, cwd=ROOT, input=json.dumps({"input": payload, "packet": packet}),
+        command, cwd=ROOT,
+        input=json.dumps({
+            "input": payload, "packet": packet, "scheduled": scheduled,
+        }),
         text=True, capture_output=True,
     )
     assert result.returncode == 0, result.stderr

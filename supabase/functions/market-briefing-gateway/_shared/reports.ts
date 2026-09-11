@@ -190,6 +190,10 @@ export interface ReportDeliveryOptions {
   scheduled: boolean;
 }
 
+function isFriday(marketDate: string): boolean {
+  return new Date(`${marketDate}T12:00:00.000Z`).getUTCDay() === 5;
+}
+
 function object(value: unknown, path: string): Record<string, unknown> {
   if (typeof value !== "object" || value === null || Array.isArray(value)) {
     throw new Error(`${path} must be an object`);
@@ -549,6 +553,8 @@ export function renderReportDelivery(
     };
   }
   if (researchOnlyPacket) {
+    const scheduledFridayStatus = value.kind === "weekly" &&
+      options.scheduled && isFriday(value.market_date);
     const lines = [
       `# ${value.kind.toUpperCase()} RESEARCH — ${value.market_date}`,
       "",
@@ -567,8 +573,9 @@ export function renderReportDelivery(
     const canonicalReport: ReportBody = {
       ...value.report,
       title: `${value.kind.toUpperCase()} RESEARCH — ${value.market_date}`,
-      summary:
-        `${researchOnlyPacket.research_candidates.length} research candidate(s); no action is eligible.`,
+      summary: scheduledFridayStatus
+        ? `${researchOnlyPacket.research_candidates.length} research candidate(s) reviewed; no policy-approved action today.`
+        : `${researchOnlyPacket.research_candidates.length} research candidate(s); no action is eligible.`,
       full_markdown: fullMarkdown,
       actionable_risk: false,
       material_thesis_change: false,
@@ -587,12 +594,33 @@ export function renderReportDelivery(
       rendered_text: fullMarkdown,
       rendered_hash: sha256Hex(fullMarkdown),
     };
-    if (value.kind === "morning" && options.scheduled) {
+    if (
+      options.scheduled &&
+      (value.kind === "morning" || scheduledFridayStatus)
+    ) {
+      const heading = value.kind === "weekly"
+        ? "FRIDAY POST-MARKET RESEARCH"
+        : "MORNING RESEARCH";
+      const coverage = scheduledFridayStatus &&
+          !researchOnlyPacket.coverage.complete_market_coverage
+        ? "\nMarket data coverage was incomplete."
+        : "";
+      const auditLink = scheduledFridayStatus
+        ? `\n${
+          reportUrl(
+            payload.id,
+            options.dashboardBaseUrl,
+            options.allowedDashboardOrigins,
+          )
+        }`
+        : "";
       const body = compact(
-        `<b>MORNING RESEARCH — ${value.market_date}</b>\n${
+        `<b>${heading} — ${value.market_date}</b>\n${
           researchOnlyPacket.research_candidates.length
         } research candidate(s) reviewed; no policy-approved action today.` +
-          "\n\nSuggestion only; review manually. No order was placed.",
+          coverage +
+          "\n\nSuggestion only; review manually. No order was placed." +
+          auditLink,
         1_200,
       );
       return {
@@ -639,13 +667,20 @@ export function renderReportDelivery(
     ? "urgent"
     : (effectiveUrgency === "routine" ? "intraday" : value.kind);
   const urgent = effectiveUrgency === "urgent";
-  const heading = effectiveUrgency === "urgent"
+  const scheduledFridayNoAction = options.scheduled &&
+    finalKind === "weekly" &&
+    isFriday(value.market_date) &&
+    !finalAlertTriggered &&
+    decisions.every((row) => row.approved_terms === null);
+  const heading = scheduledFridayNoAction
+    ? "FRIDAY POST-MARKET RESEARCH"
+    : (effectiveUrgency === "urgent"
     ? "URGENT RESEARCH REVIEW"
     : (effectiveUrgency === "routine"
       ? "INTRADAY RESEARCH"
       : (urgent
         ? "URGENT RESEARCH REVIEW"
-        : `${finalKind.toUpperCase()} RESEARCH`));
+        : `${finalKind.toUpperCase()} RESEARCH`)));
   const lines = decisions.map((row) => {
     if (row.final_alert_urgency !== null) {
       return `${row.ticker}: POLICY-APPROVED ${row.final_alert_urgency.toUpperCase()} ALERT. Manual review required.`;
@@ -696,7 +731,10 @@ export function renderReportDelivery(
     ...value.report,
     title: `${heading} — ${value.market_date}`,
     summary: compact(
-      (telegramLines.length > 0 ? telegramLines : lines).join(" "),
+      (telegramLines.length > 0 ? telegramLines : lines).join(" ") +
+        (scheduledFridayNoAction
+          ? " No policy-approved action today."
+          : ""),
       720,
     ),
     full_markdown: reportDetail,
@@ -709,9 +747,13 @@ export function renderReportDelivery(
     `v2:${finalKind}:${value.market_date}:${packetHash}:${approvedHash}`,
   );
   const approvedId = reportIdFromKey(approvedKey);
+  const coverageDisclosure = scheduledFridayNoAction && v2ReportPacket &&
+      !v2ReportPacket.coverage.complete_market_coverage
+    ? "\nMarket data coverage was incomplete."
+    : "";
   let body = `<b>${heading} — ${value.market_date}</b>\n${
     escaped(approvedReport.summary)
-  }\n\nSuggestion only; review manually. No order was placed.`;
+  }${coverageDisclosure}\n\nSuggestion only; review manually. No order was placed.`;
   if (["weekly", "monthly", "theme"].includes(finalKind)) {
     body += `\n${
       reportUrl(
@@ -734,7 +776,8 @@ export function renderReportDelivery(
   };
   if (
     actionableFields.length === 0 && !finalAlertTriggered &&
-    (finalKind !== "morning" || !options.scheduled)
+    (finalKind !== "morning" || !options.scheduled) &&
+    !scheduledFridayNoAction
   ) {
     return {
       status: "suppressed",

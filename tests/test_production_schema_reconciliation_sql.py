@@ -44,6 +44,9 @@ THEME_EVIDENCE_RETRIEVAL_TIMES = (
 UNRESOLVED_PACKET_READBACK = (
     MIGRATIONS / "20261028_unresolved_packet_readback.sql"
 )
+FRIDAY_STATUS_REVISION = (
+    MIGRATIONS / "20261029_scheduled_friday_status_revision.sql"
+)
 
 # The original pre-20260901 tables. Historical migrations run only in this
 # disposable fixture, before representative legacy facts are inserted.
@@ -182,6 +185,7 @@ def test_exact_legacy_reconciliation_preserves_facts_matches_fresh_and_refuses_r
             execute("legacy", REFERENCE_FINALIZATION_SET_BASED.read_text())
             execute("legacy", THEME_EVIDENCE_RETRIEVAL_TIMES.read_text())
             execute("legacy", UNRESOLVED_PACKET_READBACK.read_text())
+            execute("legacy", FRIDAY_STATUS_REVISION.read_text())
             assert projected_rows("legacy") == before
             after_catalog = catalog("legacy")
             after_tables = {row["name"] for row in after_catalog["relations"] if row["kind"] in {"r", "p"}}

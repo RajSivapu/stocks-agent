@@ -108,7 +108,7 @@ Deno.test("report payload verifies canonical hashes and derived UUID", () => {
   );
 });
 
-Deno.test("receipt-backed empty V2 packet produces a canonical suppressed report", () => {
+Deno.test("scheduled Friday empty V2 packet produces a canonical owner status", () => {
   const packet = {
     action_candidates: [],
     contract_version: 2,
@@ -132,12 +132,34 @@ Deno.test("receipt-backed empty V2 packet produces a canonical suppressed report
   );
   value.id = reportIdFromKey(value.idempotency_key);
 
+  const priorSuppressed = renderReportDelivery(
+    value,
+    [],
+    { ...OPTIONS, scheduled: false },
+    packet,
+  );
   const delivery = renderReportDelivery(value, [], OPTIONS, packet);
 
-  assertEquals(delivery.status, "suppressed");
-  assertEquals(delivery.reason, "not_actionable");
+  assertEquals(delivery.status, "ready");
+  assertEquals(delivery.reason, undefined);
+  assert(
+    delivery.body.includes("FRIDAY POST-MARKET RESEARCH") &&
+      delivery.body.includes("0 research candidate(s) reviewed") &&
+      delivery.body.includes("Market data coverage was incomplete") &&
+      delivery.body.includes(`/reports/${delivery.payload!.id}`),
+    "scheduled Friday owner status omitted completion, coverage, or audit link",
+  );
   assertEquals(delivery.payload?.report.source_ids, []);
   assertEquals(delivery.payload?.report.policy_decision_ids, []);
+  assert(
+    delivery.payload?.id !== priorSuppressed.payload?.id &&
+      delivery.payload?.report_hash !== priorSuppressed.payload?.report_hash,
+    "Friday status must be a new immutable report revision",
+  );
+  assert(
+    delivery.payload?.rendered_hash !== priorSuppressed.payload?.rendered_hash,
+    "Friday recovery did not revise the previously unsent delivery surface",
+  );
   assert(
     delivery.payload?.report.full_markdown.includes("0 research candidate(s)") ===
       false,
@@ -292,10 +314,9 @@ Deno.test("raw prose cannot smuggle quantity or urgency through an approved buy 
     "approved terms absent",
   );
 });
-Deno.test("ordinary research stays suppressed outside the scheduled morning brief", () => {
+Deno.test("ordinary research stays suppressed outside scheduled status briefs", () => {
   for (
     const kind of [
-      "weekly",
       "monthly",
       "theme",
       "intraday",
@@ -329,6 +350,74 @@ Deno.test("ordinary research stays suppressed outside the scheduled morning brie
     );
     parseRecordReportPayload(delivery.payload);
   }
+});
+
+Deno.test("unscheduled weekly research remains suppressed", () => {
+  const value = report("weekly");
+  const delivery = renderReportDelivery(resign(value), [
+    decision({
+      final_action: "watch",
+      status: "downgraded",
+      final_alert_urgency: null,
+      approved_terms: null,
+    }),
+  ], { ...OPTIONS, scheduled: false });
+
+  assertEquals(delivery.status, "suppressed");
+  assertEquals(delivery.reason, "not_actionable");
+});
+
+Deno.test("scheduled Friday ordinary research delivers a bounded no-action status", () => {
+  const value = report("weekly");
+  value.report.summary = "BUY CENX immediately";
+  const storedValue = resign(value);
+  const reviewed = [
+    decision({
+      final_action: "watch",
+      status: "downgraded",
+      final_alert_urgency: null,
+      approved_terms: null,
+    }),
+  ];
+  const priorSuppressed = renderReportDelivery(
+    storedValue,
+    reviewed,
+    { ...OPTIONS, scheduled: false },
+  );
+  const delivery = renderReportDelivery(storedValue, reviewed, OPTIONS);
+
+  assertEquals(delivery.status, "ready");
+  assertEquals(delivery.reason, undefined);
+  assert(
+    delivery.payload?.id !== priorSuppressed.payload?.id &&
+      delivery.payload?.report_hash !== priorSuppressed.payload?.report_hash,
+    "Friday status must be a new immutable report revision",
+  );
+  assert(
+    delivery.body.startsWith("<b>FRIDAY POST-MARKET RESEARCH") &&
+      delivery.body.includes("CENX: WATCH") &&
+      delivery.body.includes("No policy-approved action today") &&
+      delivery.body.includes(`/reports/${delivery.payload!.id}`) &&
+      !delivery.body.includes("BUY CENX immediately"),
+    "scheduled Friday status omitted the reviewed result or retained caller prose",
+  );
+});
+
+Deno.test("scheduled weekly research outside Friday remains suppressed", () => {
+  const value = report("weekly");
+  value.market_date = "2026-09-02";
+  const delivery = renderReportDelivery(resign(value), [
+    decision({
+      final_action: "watch",
+      status: "downgraded",
+      final_alert_urgency: null,
+      approved_terms: null,
+    }),
+  ], OPTIONS);
+
+  assertEquals(delivery.status, "suppressed");
+  assertEquals(delivery.reason, "not_actionable");
+  assertEquals(delivery.body, "");
 });
 
 Deno.test("morning ordinary research delivers a bounded no-action receipt", () => {
@@ -428,6 +517,10 @@ Deno.test("verbose research-only morning packet delivers a bounded status brief"
   assert(delivery.body.includes("12 research candidate(s)"), "candidate count absent");
   assert(delivery.body.includes("no policy-approved action"), "no-action result absent");
   assert(
+    !delivery.body.includes("Market data coverage was incomplete"),
+    "morning copy changed when Friday coverage disclosure was added",
+  );
+  assert(
     new TextEncoder().encode(delivery.payload!.report.full_markdown).byteLength <= 14_000,
     "canonical research report exceeded the durable bound",
   );
@@ -485,7 +578,7 @@ Deno.test("missing policy decisions suppress even non-keyword action prose", () 
     "REPORT_POLICY_MISMATCH",
   );
 });
-Deno.test("v2 research-only report needs no fabricated ticker or policy evaluation", () => {
+Deno.test("scheduled Friday research-only report sends status without fabricated authority", () => {
   const suitabilityBody = {
     component_scores: {
       concentration_penalty: "0.000000",
@@ -571,10 +664,15 @@ Deno.test("v2 research-only report needs no fabricated ticker or policy evaluati
   value.id = reportIdFromKey(value.idempotency_key);
   const delivery = renderReportDelivery(value, [], OPTIONS, packet);
 
-  assertEquals(delivery.status, "suppressed");
-  assertEquals(delivery.reason, "not_actionable");
-  assertEquals(delivery.body, "");
-  assertEquals(delivery.parts, []);
+  assertEquals(delivery.status, "ready");
+  assertEquals(delivery.reason, undefined);
+  assertEquals(delivery.parts, [delivery.body]);
+  assert(
+    delivery.body.includes("1 research candidate(s) reviewed") &&
+      delivery.body.includes("no policy-approved action") &&
+      !delivery.body.includes("unresolved:magnet-supplier"),
+    "scheduled Friday status leaked unresolved research or omitted no-action result",
+  );
   assert(
     delivery.payload?.report.full_markdown.includes(
       "unresolved:magnet-supplier — RESEARCH ONLY",
@@ -639,7 +737,12 @@ Deno.test("v2 research-only report needs no fabricated ticker or policy evaluati
   actionReport.id = reportIdFromKey(actionReport.idempotency_key);
   const mixedDelivery = renderReportDelivery(
     actionReport,
-    [decision({ packet_hash: mixedHash })],
+    [decision({
+      packet_hash: mixedHash,
+      final_action: "watch",
+      status: "downgraded",
+      approved_terms: null,
+    })],
     OPTIONS,
     mixed,
   );
@@ -653,6 +756,10 @@ Deno.test("v2 research-only report needs no fabricated ticker or policy evaluati
     `action report dropped the packet research catalog: ${
       JSON.stringify(mixedDelivery)
     }`,
+  );
+  assert(
+    mixedDelivery.body.includes("Market data coverage was incomplete"),
+    "Friday no-action status hid incomplete coverage",
   );
 });
 Deno.test("reports reject wrong IDs, duplicate decisions, wrong packets and arbitrary semantic keys", () => {

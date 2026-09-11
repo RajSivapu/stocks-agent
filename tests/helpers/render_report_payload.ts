@@ -7,6 +7,7 @@ const delivery = renderReportDelivery(
   {
     dashboardBaseUrl: "https://stocks.example.test",
     allowedDashboardOrigins: ["https://stocks.example.test"],
+    scheduled: request.scheduled === true,
   },
   request.packet,
 );
