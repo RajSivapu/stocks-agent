@@ -649,6 +649,10 @@ def test_actual_migration_retry_accepts_truthful_baseline_without_writing_histor
         item for item in deploy.candidate_migration_manifest()
         if item["path"] == "sql/migrations/20261027_theme_evidence_retrieval_times.sql"
     )
+    unresolved_packet_readback = next(
+        item for item in deploy.candidate_migration_manifest()
+        if item["path"] == "sql/migrations/20261028_unresolved_packet_readback.sql"
+    )
     queries = []
 
     def api(_method, _path, payload=None):
@@ -666,6 +670,7 @@ def test_actual_migration_retry_accepts_truthful_baseline_without_writing_histor
                     reference_transfer_capacity,
                     reference_finalization_set_based,
                     theme_evidence_retrieval_times,
+                    unresolved_packet_readback,
                 ]
         if query.startswith("SELECT version, statements"):
             return [{"version": "20261004", "statements": ["SELECT 1"]}]

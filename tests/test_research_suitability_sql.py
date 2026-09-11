@@ -126,9 +126,10 @@ def test_v2_guard_v1_read_and_actual_writer_privileges_in_disposable_postgres():
                     "INSERT INTO market_events(id,run_id,event_type,title,summary,materiality,confidence,evidence_item_ids,content_hash) VALUES(%s,%s,'thematic_event','Event','Source-backed event',0.5,0.5,%s,%s)",
                     (event_id, run2, Jsonb([item_id]), "c" * 64),
                 )
+                unresolved_key = f"unresolved:{event_id}"
                 db.execute(
-                    "INSERT INTO market_candidate_rankings(id,run_id,event_id,candidate_key,ticker,rank,component_scores,total_score,qualified,veto_reasons,exposure_item_ids,content_hash) VALUES(%s,%s,%s,'sec:TEST','TEST',1,'{}',1,false,'[]','[]',%s)",
-                    (ranking_id, run2, event_id, "d" * 64),
+                    "INSERT INTO market_candidate_rankings(id,run_id,event_id,candidate_key,ticker,rank,component_scores,total_score,qualified,veto_reasons,exposure_item_ids,content_hash) VALUES(%s,%s,%s,%s,NULL,1,'{}',1,false,'[]','[]',%s)",
+                    (ranking_id, run2, event_id, unresolved_key, "d" * 64),
                 )
                 suitability_body = {
                     "component_scores": {"concentration_penalty": "0.000000", "duplication_penalty": "0.000000", "liquidity": "0.000000", "portfolio_relevance": "0.000000"},
@@ -137,12 +138,12 @@ def test_v2_guard_v1_read_and_actual_writer_privileges_in_disposable_postgres():
                 }
                 suitability = {**suitability_body, "evaluation_hash": hashlib.sha256(json.dumps(suitability_body, separators=(",", ":"), sort_keys=True).encode()).hexdigest()}
                 candidate_body = {
-                    "adverse_paths": [], "candidate_key": "sec:TEST", "entity_id": "issuer:TEST",
+                    "adverse_paths": [], "candidate_key": unresolved_key, "entity_id": unresolved_key,
                     "event_ids": [event_id], "evidence": [{"claim_type": "event", "item_id": item_id, "relationship_eligible": False, "role": "supporting"}],
                     "exposure_fact_ids": [], "limitations": ["valuation_missing"],
                     "priority_components": {"authority_corroboration": "1.000000", "exposure": "0.000000", "materiality": "0.500000", "recency": "1.000000"},
-                    "priority_score": "2.500000", "research_state": "resolved", "roles": [],
-                    "security_id": "sec:TEST", "suitability": suitability, "theme_ids": ["test"], "ticker": "TEST",
+                    "priority_score": "2.500000", "research_state": "unresolved", "roles": [],
+                    "security_id": None, "suitability": suitability, "theme_ids": ["test"], "ticker": None,
                 }
                 candidate = {**candidate_body, "candidate_hash": hashlib.sha256(json.dumps(candidate_body, separators=(",", ":"), sort_keys=True).encode()).hexdigest()}
                 v2 = {
@@ -157,10 +158,18 @@ def test_v2_guard_v1_read_and_actual_writer_privileges_in_disposable_postgres():
                     "observed_at": "2026-09-07T12:00:00.000Z", "omissions": [],
                     "policy_version": 1, "research_candidates": [candidate], "run_id": run2,
                 }
+                packet_id = str(uuid.uuid4())
                 db.execute(
                     "INSERT INTO market_evidence_packets(id,run_id,policy_version,status,candidate_count,evidence_count,packet,packet_hash) VALUES(%s,%s,1,'completed',1,1,%s,%s)",
-                    (str(uuid.uuid4()), run2, Jsonb(v2), hashlib.sha256(json.dumps(v2, separators=(",", ":"), sort_keys=True).encode()).hexdigest()),
+                    (packet_id, run2, Jsonb(v2), hashlib.sha256(json.dumps(v2, separators=(",", ":"), sort_keys=True).encode()).hexdigest()),
                 )
+                packet_read = db.execute(
+                    "SELECT read_market_evidence_packet(%s,%s)",
+                    (packet_id, run2),
+                ).fetchone()[0]
+                assert packet_read["packet"] == v2
+                assert packet_read["evidence_facts"] == []
+                assert packet_read["exposure_facts"] == []
                 forged = {**v2, "execution_allowed": True}
                 with pytest.raises(psycopg.Error):
                     db.execute("SELECT validate_market_evidence_packet_v2(%s,1,%s)", (run2, Jsonb(forged)))
