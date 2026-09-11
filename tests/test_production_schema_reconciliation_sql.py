@@ -38,6 +38,9 @@ REFERENCE_TRANSFER_CAPACITY = MIGRATIONS / "20261025_reference_transfer_capacity
 REFERENCE_FINALIZATION_SET_BASED = (
     MIGRATIONS / "20261026_reference_finalization_set_based.sql"
 )
+THEME_EVIDENCE_RETRIEVAL_TIMES = (
+    MIGRATIONS / "20261027_theme_evidence_retrieval_times.sql"
+)
 
 # The original pre-20260901 tables. Historical migrations run only in this
 # disposable fixture, before representative legacy facts are inserted.
@@ -174,6 +177,7 @@ def test_exact_legacy_reconciliation_preserves_facts_matches_fresh_and_refuses_r
             execute("legacy", SCHEDULED_SAME_DAY_RETRY.read_text())
             execute("legacy", REFERENCE_TRANSFER_CAPACITY.read_text())
             execute("legacy", REFERENCE_FINALIZATION_SET_BASED.read_text())
+            execute("legacy", THEME_EVIDENCE_RETRIEVAL_TIMES.read_text())
             assert projected_rows("legacy") == before
             after_catalog = catalog("legacy")
             after_tables = {row["name"] for row in after_catalog["relations"] if row["kind"] in {"r", "p"}}

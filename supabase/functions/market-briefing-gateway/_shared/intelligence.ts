@@ -102,6 +102,7 @@ export interface IntelligenceRecordReceipt {
   counts: Record<string, number>;
   packet_id: string | null;
   packet_hash: string | null;
+  canonical_evidence_retrieved_at?: Record<string, string>;
   duplicate: boolean;
 }
 
@@ -2672,6 +2673,9 @@ export function parseIntelligenceRecordReceipt(
     "counts",
     "packet_id",
     "packet_hash",
+    ...("canonical_evidence_retrieved_at" in row
+      ? ["canonical_evidence_retrieved_at"]
+      : []),
     "duplicate",
   ], "record intelligence receipt");
   const countRow = objectValue(
@@ -2699,6 +2703,36 @@ export function parseIntelligenceRecordReceipt(
   if (typeof row.duplicate !== "boolean") {
     throw new Error("record intelligence receipt.duplicate must be boolean");
   }
+  let canonicalEvidenceRetrievedAt: Record<string, string> | undefined;
+  if ("canonical_evidence_retrieved_at" in row) {
+    const values = boundedObject(
+      row.canonical_evidence_retrieved_at,
+      "record intelligence receipt.canonical_evidence_retrieved_at",
+      8_192,
+    );
+    const entries = Object.entries(values);
+    if (entries.length > 96) {
+      throw new Error(
+        "record intelligence receipt.canonical_evidence_retrieved_at must contain at most 96 items",
+      );
+    }
+    canonicalEvidenceRetrievedAt = Object.fromEntries(entries.map(
+      ([key, value]) => {
+        const evidenceId = uuidValue(
+          key,
+          "record intelligence receipt canonical evidence id",
+        );
+        const retrievedAt = timestamp(
+          value,
+          `record intelligence receipt.canonical_evidence_retrieved_at.${evidenceId}`,
+        );
+        if (retrievedAt === null) {
+          throw new Error("canonical evidence retrieval time cannot be null");
+        }
+        return [evidenceId, retrievedAt];
+      },
+    ));
+  }
   return {
     run_id: uuidValue(row.run_id, "record intelligence receipt.run_id"),
     completion_id: uuidValue(
@@ -2717,6 +2751,9 @@ export function parseIntelligenceRecordReceipt(
     packet_hash: row.packet_hash === null
       ? null
       : hashValue(row.packet_hash, "record intelligence receipt.packet_hash"),
+    ...(canonicalEvidenceRetrievedAt === undefined
+      ? {}
+      : { canonical_evidence_retrieved_at: canonicalEvidenceRetrievedAt }),
     duplicate: row.duplicate,
   };
 }
