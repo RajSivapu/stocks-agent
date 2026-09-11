@@ -42,6 +42,7 @@ from lib.intelligence.universe import (  # noqa: E402
 MAX_REFERENCE_TRANSFER_CALLS = 384
 MAX_REFERENCE_TRANSFER_BYTES = 48 * 1024 * 1024
 MAX_REFERENCE_RESPONSE_BYTES = 64 * 1024 * 1024
+MAX_DIAGNOSTIC_BYTES = 512
 # The SEC universe currently needs roughly 55 sequential gateway calls. Cloud
 # round trips can exceed 90 seconds even when every bounded request succeeds.
 MAX_REFERENCE_TRANSFER_SECONDS = 300.0
@@ -70,6 +71,24 @@ def _reference_request_id(
 class _ArgumentParser(argparse.ArgumentParser):
     def error(self, _message: str) -> None:
         raise ValueError("invalid argument")
+
+
+def _diagnostic(error: BaseException) -> str:
+    detail = f"{type(error).__name__}: {error}"
+    detail = re.sub(r"https?://\S+", "[redacted-url]", detail, flags=re.IGNORECASE)
+    detail = re.sub(
+        r"\b(api[_-]?key|token|secret|password)\s*[:=]\s*\S+",
+        r"\1=[redacted]",
+        detail,
+        flags=re.IGNORECASE,
+    )
+    detail = re.sub(r"\s+", " ", detail).strip()
+    encoded = detail.encode("utf-8")
+    if len(encoded) <= MAX_DIAGNOSTIC_BYTES:
+        return detail
+    return encoded[: MAX_DIAGNOSTIC_BYTES - 3].decode(
+        "utf-8", errors="ignore"
+    ).rstrip() + "..."
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -147,8 +166,14 @@ def _context(path: str | None) -> dict[str, object]:
     return {key: value[key] for key in sorted(value) if key in allowed}
 
 
-def main(argv: Sequence[str] | None = None, *, stdout: TextIO | None = None) -> int:
+def main(
+    argv: Sequence[str] | None = None,
+    *,
+    stdout: TextIO | None = None,
+    stderr: TextIO | None = None,
+) -> int:
     output = stdout or sys.stdout
+    errors = stderr or sys.stderr
     try:
         args = _parser().parse_args(argv)
         if not args.dry_run and not args.run_id:
@@ -212,10 +237,12 @@ def main(argv: Sequence[str] | None = None, *, stdout: TextIO | None = None) -> 
         result = pipeline.run(request)
         output.write(result.to_json_bytes().decode("utf-8") + "\n")
         return 0
-    except (SystemExit, TypeError, ValueError):
+    except (SystemExit, TypeError, ValueError) as error:
+        errors.write(_diagnostic(error) + "\n")
         output.write(json.dumps({"error": "INVALID_ARGUMENT", "ok": False}, separators=(",", ":"), sort_keys=True) + "\n")
         return 2
-    except Exception:
+    except Exception as error:
+        errors.write(_diagnostic(error) + "\n")
         output.write(json.dumps({"error": "COLLECTION_FAILED", "ok": False}, separators=(",", ":"), sort_keys=True) + "\n")
         return 1
 
