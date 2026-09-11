@@ -316,13 +316,21 @@ def test_reference_stage_recovers_current_pin_after_predecessor_replay_mismatch(
     assert recovery_calls and recovery_calls[0][1] == RUN_ID
 
 
-def test_reference_stage_reuses_predecessor_pin_when_interrupted_before_current_pin():
+def test_reference_stage_reuses_predecessor_pin_and_starts_new_transfer_identity():
     import scripts.collect_market_intelligence as collector
     from lib.gateway import GatewayError
+    from lib.intelligence.universe import build_reference_transfer, parse_sec_company_tickers
 
     now = datetime(2026, 9, 11, 14, tzinfo=timezone.utc)
     source = (Path(__file__).parent / "fixtures" / "intelligence" /
               "sec_company_tickers.json").read_bytes()
+    legacy_manifest_id = build_reference_transfer(
+        parse_sec_company_tickers(source, retrieved_at=now),
+        run_id="11111111-1111-4111-8111-111111111111",
+        capability_version=1,
+        taxonomy_version=1,
+        semantic_encoding_version=2,
+    ).begin["manifest"]["id"]
 
     class Http:
         def get(self, _request):
@@ -360,6 +368,7 @@ def test_reference_stage_reuses_predecessor_pin_when_interrupted_before_current_
                 or payload.get("manifest", {}).get("id")
             )
             if operation == "begin_discovery_reference":
+                assert manifest_id != legacy_manifest_id
                 return {"data": {
                     "manifest_id": manifest_id,
                     "predecessor_manifest_id": None,

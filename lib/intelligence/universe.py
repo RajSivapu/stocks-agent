@@ -935,6 +935,7 @@ def build_reference_transfer(
     capability_version: int,
     taxonomy_version: int,
     predecessor_manifest_id: str | None = None,
+    transfer_attempt_id: str | None = None,
     capability_id: str = "sec_company_tickers_universe",
     reference_status: Literal["healthy", "reference_stale"] = "healthy",
     semantic_encoding_version: int = 1,
@@ -953,6 +954,13 @@ def build_reference_transfer(
             raise ValueError("predecessor_manifest_id must be a UUID") from None
         if str(predecessor_uuid) != predecessor_manifest_id:
             raise ValueError("predecessor_manifest_id must be a canonical UUID")
+    if transfer_attempt_id is not None:
+        try:
+            transfer_attempt_uuid = UUID(transfer_attempt_id)
+        except (TypeError, ValueError, AttributeError):
+            raise ValueError("transfer_attempt_id must be a UUID") from None
+        if str(transfer_attempt_uuid) != transfer_attempt_id:
+            raise ValueError("transfer_attempt_id must be a canonical UUID")
     if (
         isinstance(capability_version, bool)
         or not isinstance(capability_version, int)
@@ -980,7 +988,10 @@ def build_reference_transfer(
         f"sec:{snapshot.manifest.retrieved_at.date().isoformat()}:"
         f"{snapshot.manifest.source_hash[:16]}:{run_id.split('-', 1)[0]}"
     )
-    manifest_id = str(uuid5(run_uuid, f"reference-manifest:{version}"))
+    manifest_identity = f"reference-manifest:{version}"
+    if transfer_attempt_id is not None:
+        manifest_identity = f"{manifest_identity}:{transfer_attempt_id}"
+    manifest_id = str(uuid5(run_uuid, manifest_identity))
     entries = tuple(
         _security_transfer_row(
             row,
