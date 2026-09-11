@@ -1,5 +1,6 @@
 import type { PolicyConfig } from "./contracts.ts";
 import {
+  assertContextFitsTransport,
   consecutiveRecommendationLosses,
   createSupabaseGatewayRepository,
   GatewayRepositoryError,
@@ -770,6 +771,22 @@ Deno.test("unresolved suggestion overflow fails closed instead of dropping pendi
   assert(
     error instanceof GatewayRepositoryError,
     "overflow must reject context",
+  );
+  assertEquals((error as GatewayRepositoryError).code, "CONTEXT_TOO_LARGE");
+});
+
+Deno.test("read context transport accepts the bounded expanded owner payload", () => {
+  assertContextFitsTransport({ payload: "x".repeat(700_000) });
+
+  let error: unknown = null;
+  try {
+    assertContextFitsTransport({ payload: "x".repeat(900_001) });
+  } catch (caught) {
+    error = caught;
+  }
+  assert(
+    error instanceof GatewayRepositoryError,
+    "oversized context must fail closed",
   );
   assertEquals((error as GatewayRepositoryError).code, "CONTEXT_TOO_LARGE");
 });
