@@ -641,6 +641,10 @@ def test_actual_migration_retry_accepts_truthful_baseline_without_writing_histor
         item for item in deploy.candidate_migration_manifest()
         if item["path"] == "sql/migrations/20261025_reference_transfer_capacity.sql"
     )
+    reference_finalization_set_based = next(
+        item for item in deploy.candidate_migration_manifest()
+        if item["path"] == "sql/migrations/20261026_reference_finalization_set_based.sql"
+    )
     queries = []
 
     def api(_method, _path, payload=None):
@@ -656,6 +660,7 @@ def test_actual_migration_retry_accepts_truthful_baseline_without_writing_histor
                     retry_task_capacity_recovery, durable_run_gateway_recovery,
                     gdelt_article_feed, scheduled_same_day_retry,
                     reference_transfer_capacity,
+                    reference_finalization_set_based,
                 ]
         if query.startswith("SELECT version, statements"):
             return [{"version": "20261004", "statements": ["SELECT 1"]}]

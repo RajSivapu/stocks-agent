@@ -74,6 +74,9 @@ SCHEDULED_SAME_DAY_RETRY_MIGRATION = (
 REFERENCE_TRANSFER_CAPACITY_MIGRATION = (
     ROOT / "sql/migrations/20261025_reference_transfer_capacity.sql"
 )
+REFERENCE_FINALIZATION_SET_BASED_MIGRATION = (
+    ROOT / "sql/migrations/20261026_reference_finalization_set_based.sql"
+)
 SCHEMA = ROOT / "sql/schema.sql"
 
 
@@ -130,11 +133,12 @@ def test_v2_runtime_completion_and_honest_empty_tail_are_parseable_and_ordered()
     assert parse_sql(GDELT_ARTICLE_FEED_MIGRATION.read_text())
     assert parse_sql(SCHEDULED_SAME_DAY_RETRY_MIGRATION.read_text())
     assert parse_sql(REFERENCE_TRANSFER_CAPACITY_MIGRATION.read_text())
+    assert parse_sql(REFERENCE_FINALIZATION_SET_BASED_MIGRATION.read_text())
     assert ACTIVE_INTELLIGENCE_POLICY_MIGRATION.read_bytes() in schema
     assert REFERENCE_TRANSFER_RESTART_MIGRATION.read_bytes() in schema
     assert RETRY_TASK_CAPACITY_RECOVERY_MIGRATION.read_bytes() in schema
     assert GDELT_ARTICLE_FEED_MIGRATION.read_bytes() in schema
-    assert schema.endswith(REFERENCE_TRANSFER_CAPACITY_MIGRATION.read_bytes())
+    assert schema.endswith(REFERENCE_FINALIZATION_SET_BASED_MIGRATION.read_bytes())
     migration = RUNTIME_COMPLETION_MIGRATION.read_text()
     assert "SECURITY DEFINER SET search_path=pg_catalog" in migration
     assert "record_market_intelligence_v2_completion" in migration

@@ -922,7 +922,7 @@ def test_reference_stage_caps_each_gateway_timeout_by_remaining_deadline():
         def __init__(self): self.timeouts = []
 
         def call(self, operation, payload, **kwargs):
-            self.timeouts.append(kwargs.get("timeout"))
+            self.timeouts.append((operation, kwargs.get("timeout")))
             if operation == "pin_discovery_reference" and payload["binding_role"] == "predecessor":
                 return {"data": {
                     "binding_role": "predecessor", "manifest_id": None,
@@ -951,7 +951,7 @@ def test_reference_stage_caps_each_gateway_timeout_by_remaining_deadline():
 
     assert gateway_client.timeouts
     assert all(isinstance(value, float) and 0 < value <= 30.0
-               for value in gateway_client.timeouts)
+               for _, value in gateway_client.timeouts)
     assert collector.MAX_REFERENCE_TRANSFER_CALLS == 384
     assert collector.MAX_REFERENCE_TRANSFER_BYTES == 48 * 1024 * 1024
     assert collector.MAX_REFERENCE_RESPONSE_BYTES == 64 * 1024 * 1024
