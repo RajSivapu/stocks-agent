@@ -12,10 +12,12 @@ import pytest
 
 from lib.intelligence.http import BoundedHttpClient
 from lib.intelligence.universe import (
+    IssuerIdentity,
     SEC_COMPANY_TICKERS_URL,
     SecurityIdentity,
     build_reference_transfer,
     eligible_for_research,
+    merge_reference_snapshot,
     merge_reference_sources,
     parse_sec_company_tickers,
     parse_symbol_directory,
@@ -263,6 +265,45 @@ def test_merge_closes_a_same_day_missing_listing_without_rejecting_the_interval(
     assert closed.valid_to == date(2026, 9, 4)
     assert closed.eligible is False
     assert closed.exclusion_reasons == ("delisted",)
+
+
+def test_v2_merge_retains_the_issuer_for_a_closed_predecessor_listing():
+    current = parse_sec_company_tickers(SEC_FIXTURE, retrieved_at=NOW)
+    gone = replace(
+        security("COMMON_STOCK", ticker="GONE"),
+        security_id="11111111-1111-4111-8111-111111111114",
+        entity_id="sec-cik:0000000099",
+        aliases=("GONE",),
+        source_ids=("sec-company-tickers:0000000099",),
+        valid_from=NOW.date(),
+    )
+    gone_issuer = IssuerIdentity(
+        entity_id=gone.entity_id,
+        cik="0000000099",
+        canonical_name="Gone Corporation",
+        former_names=(),
+        valid_from=gone.valid_from,
+        valid_to=None,
+        source_ids=gone.source_ids,
+        observed_names=("Gone Corporation",),
+    )
+    predecessor = replace(
+        current,
+        securities=(*current.securities, gone),
+        issuers=(*current.issuers, gone_issuer),
+    )
+
+    merged = merge_reference_snapshot(current, predecessor)
+
+    assert merged.by_ticker["GONE"].valid_to == NOW.date()
+    assert merged.issuers_by_id[gone.entity_id] == gone_issuer
+    build_reference_transfer(
+        merged,
+        run_id=RUN_ID,
+        capability_version=1,
+        taxonomy_version=1,
+        semantic_encoding_version=2,
+    )
 
 
 class _Response:
