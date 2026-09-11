@@ -20,6 +20,8 @@ export const INTELLIGENCE_PROVIDERS = [
 const UUID =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const HASH = /^[0-9a-f]{64}$/;
+// Keep this aligned with the SQL transfer RPC and the collector's 192 KiB bound.
+const REFERENCE_CHUNK_MAX_ENTRIES = 200;
 const PHASES = ["pre-market", "intraday", "post-market", "on-demand"] as const;
 const RECEIPT_STATUSES = [
   "succeeded",
@@ -1009,7 +1011,11 @@ export function parseReferenceChunkPayload(
     "entries",
     "chunk_hash",
   ], "reference chunk");
-  const rawEntries = arrayValue(row.entries, "reference chunk.entries", 200);
+  const rawEntries = arrayValue(
+    row.entries,
+    "reference chunk.entries",
+    REFERENCE_CHUNK_MAX_ENTRIES,
+  );
   const entries = rawEntries.map(parseSecurityRevision);
   if (entries.length === 0) {
     throw new Error("reference chunk.entries must not be empty");
