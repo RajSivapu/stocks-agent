@@ -207,6 +207,80 @@ Deno.test("scheduled v2 research persists a real report and suppression receipt 
   );
 });
 
+Deno.test("scheduled pre-market research sends a morning no-action Telegram receipt", async () => {
+  const packet = researchOnlyPacket();
+  class ResearchOnlyRepository extends FakeRepository {
+    override loadIntelligencePacket() {
+      this.packetReadCalls += 1;
+      return Promise.resolve({
+        id: PACKET_ID,
+        run_id: RUN_ID,
+        content_hash: sha256Hex(canonicalJson(packet)),
+        packet,
+        evidence_facts: [],
+        exposure_facts: [],
+      });
+    }
+  }
+  const repo = new ResearchOnlyRepository();
+  repo.scheduledReportPhase = "pre-market";
+  const payload = researchOnlyReportFixture(packet, "morning");
+  const setup = makeHandler(repo);
+
+  const response = await setup.handler(request("record_report", payload));
+
+  assertEquals(response.status, 200);
+  const result = await json(response);
+  assertEquals(result.publication_receipt, {
+    status: "delivered",
+    telegram_message_ids: [77],
+    retry_allowed: false,
+  });
+  assertEquals(result.telegram_message_ids, [77]);
+  assertEquals(setup.sent.length, 1);
+  assert(
+    setup.sent[0][0].includes("no policy-approved action") &&
+      setup.sent[0][0].includes("Suggestion only") &&
+      !setup.sent[0][0].includes("fabricated ticker"),
+    "morning Telegram did not use the canonical no-action copy",
+  );
+  const stored = repo.storedReport as {
+    rendered_text: string;
+    rendered_hash: string;
+  };
+  assertEquals(stored.rendered_text, setup.sent[0][0]);
+  assertEquals(stored.rendered_hash, sha256Hex(setup.sent[0][0]));
+});
+
+Deno.test("unscheduled pre-market-shaped research cannot send a morning status", async () => {
+  const packet = researchOnlyPacket();
+  class ResearchOnlyRepository extends FakeRepository {
+    override loadIntelligencePacket() {
+      this.packetReadCalls += 1;
+      return Promise.resolve({
+        id: PACKET_ID,
+        run_id: RUN_ID,
+        content_hash: sha256Hex(canonicalJson(packet)),
+        packet,
+        evidence_facts: [],
+        exposure_facts: [],
+      });
+    }
+  }
+  const repo = new ResearchOnlyRepository();
+  const payload = researchOnlyReportFixture(packet, "morning");
+  const setup = makeHandler(repo);
+
+  const response = await setup.handler(request("record_report", payload));
+
+  assertEquals(response.status, 200);
+  const result = await json(response);
+  const publication = result.publication_receipt as Record<string, unknown>;
+  assertEquals(publication.status, "suppressed");
+  assertEquals(publication.suppression_reason, "not_actionable");
+  assertEquals(setup.sent, []);
+});
+
 Deno.test("v2 research evaluation receipt returns packet sources without manufacturing decisions", async () => {
   const packet = researchOnlyPacket();
   const packetHash = sha256Hex(canonicalJson(packet));
@@ -768,7 +842,10 @@ function researchOnlyPacket(): EvidencePacket {
   };
 }
 
-function researchOnlyReportFixture(packet: EvidencePacket) {
+function researchOnlyReportFixture(
+  packet: EvidencePacket,
+  kind: ReportKind = "weekly",
+) {
   const body = {
     title: "Caller title",
     summary: "BUY a fabricated ticker",
@@ -784,14 +861,14 @@ function researchOnlyReportFixture(packet: EvidencePacket) {
   const reportHash = sha256Hex(canonicalJson(body));
   const packetHash = sha256Hex(canonicalJson(packet));
   const key = sha256Hex(
-    `v2:weekly:2026-09-02:${packetHash}:${reportHash}`,
+    `v2:${kind}:2026-09-02:${packetHash}:${reportHash}`,
   );
   return {
     id: reportIdFromKey(key),
     idempotency_key: key,
     packet_id: PACKET_ID,
     market_date: "2026-09-02",
-    kind: "weekly" as const,
+    kind,
     report: body,
     report_hash: reportHash,
     rendered_text: body.full_markdown,

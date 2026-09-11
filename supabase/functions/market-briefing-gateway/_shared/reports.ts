@@ -187,6 +187,7 @@ export function parseReportDecisions(
 export interface ReportDeliveryOptions {
   dashboardBaseUrl: string;
   allowedDashboardOrigins: readonly string[];
+  scheduled: boolean;
 }
 
 function object(value: unknown, path: string): Record<string, unknown> {
@@ -347,6 +348,49 @@ function compact(value: string, max: number): string {
   return text.length <= max ? text : `${text.slice(0, max - 1).trimEnd()}…`;
 }
 
+function compactUtf8(value: string, maxBytes: number): string {
+  const text = value.replace(/\s+/g, " ").trim();
+  const encoder = new TextEncoder();
+  if (encoder.encode(text).byteLength <= maxBytes) return text;
+  let result = "";
+  for (const character of text) {
+    if (encoder.encode(`${result}${character}…`).byteLength > maxBytes) break;
+    result += character;
+  }
+  return `${result.trimEnd()}…`;
+}
+
+function compactValues(values: readonly string[], empty: string): string {
+  const unique = [...new Set(values.filter((value) => value.trim()))];
+  const visible = unique.slice(0, 1).map((value) => compactUtf8(value, 48));
+  if (unique.length > visible.length) {
+    visible.push(`+${unique.length - visible.length} more`);
+  }
+  return visible.join(", ") || empty;
+}
+
+function coverageSummary(coverage: Record<string, unknown>): string {
+  const fields: string[] = [];
+  for (
+    const key of [
+      "accepted_item_count",
+      "complete_market_coverage",
+      "coverage_status",
+      "mode",
+      "reference_status",
+      "source_request_count",
+    ]
+  ) {
+    const value = coverage[key];
+    if (typeof value === "boolean" || Number.isSafeInteger(value)) {
+      fields.push(`${key}=${String(value)}`);
+    } else if (typeof value === "string" && value.trim()) {
+      fields.push(`${key}=${compactUtf8(value, 64)}`);
+    }
+  }
+  return fields.join("; ") || "bounded authenticated packet";
+}
+
 function reportUrl(
   id: string,
   dashboardBaseUrl: string,
@@ -384,20 +428,26 @@ function researchCatalogMarkdown(packet: EvidencePacketV2): string {
   const actionKeys = new Set(
     packet.action_candidates.map((candidate) => candidate.candidate_key),
   );
-  const lines = [`Coverage: ${canonicalJson(packet.coverage)}`];
+  const lines = [
+    `Coverage: ${coverageSummary(packet.coverage)}`,
+    `Next review: ${compactUtf8(nextReview, 64)}`,
+  ];
   for (const candidate of packet.research_candidates) {
-    const identity = candidate.ticker ?? candidate.candidate_key;
-    const missing = candidate.suitability.missing_reasons.join(", ") || "none";
+    const identity = compactUtf8(candidate.ticker ?? candidate.candidate_key, 80);
+    const missing = compactValues(
+      candidate.suitability.missing_reasons,
+      "none",
+    );
     const opposing = candidate.evidence.filter((evidence) =>
       evidence.role === "opposing"
-    ).map((evidence) => evidence.item_id).join(", ") || "none retained";
-    const invalidation = [
+    ).map((evidence) => evidence.item_id);
+    const invalidation = compactValues([
       ...new Set([
         ...candidate.adverse_paths,
         ...candidate.limitations,
         ...candidate.suitability.veto_reasons,
       ]),
-    ].sort().join(", ") || "none recorded";
+    ].sort(), "none recorded");
     lines.push(
       "",
       `## ${identity} — ${
@@ -405,11 +455,10 @@ function researchCatalogMarkdown(packet: EvidencePacketV2): string {
           ? "ACTION LANE"
           : "RESEARCH ONLY"
       }`,
-      `Research state: ${candidate.research_state}`,
+      `Research state: ${compactUtf8(candidate.research_state, 32)}`,
       `Suitability: ${candidate.suitability.state} (${missing})`,
-      `Opposing evidence: ${opposing}`,
+      `Opposing evidence: ${compactValues(opposing, "none retained")}`,
       `Invalidation: ${invalidation}`,
-      `Next review: ${nextReview}`,
     );
   }
   return lines.join("\n");
@@ -538,6 +587,25 @@ export function renderReportDelivery(
       rendered_text: fullMarkdown,
       rendered_hash: sha256Hex(fullMarkdown),
     };
+    if (value.kind === "morning" && options.scheduled) {
+      const body = compact(
+        `<b>MORNING RESEARCH — ${value.market_date}</b>\n${
+          researchOnlyPacket.research_candidates.length
+        } research candidate(s) reviewed; no policy-approved action today.` +
+          "\n\nSuggestion only; review manually. No order was placed.",
+        1_200,
+      );
+      return {
+        status: "ready",
+        body,
+        parts: [body],
+        payload: {
+          ...payload,
+          rendered_text: body,
+          rendered_hash: sha256Hex(body),
+        },
+      };
+    }
     return {
       status: "suppressed",
       body: "",
@@ -664,7 +732,10 @@ export function renderReportDelivery(
     rendered_text: body,
     rendered_hash: sha256Hex(body),
   };
-  if (actionableFields.length === 0 && !finalAlertTriggered) {
+  if (
+    actionableFields.length === 0 && !finalAlertTriggered &&
+    (finalKind !== "morning" || !options.scheduled)
+  ) {
     return {
       status: "suppressed",
       body: "",

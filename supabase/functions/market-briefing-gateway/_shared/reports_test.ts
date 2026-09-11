@@ -30,6 +30,7 @@ function assertThrows(callback: () => unknown): void {
 const OPTIONS = {
   dashboardBaseUrl: "https://stocks.example.test/app?owner=secret#data",
   allowedDashboardOrigins: ["https://stocks.example.test"],
+  scheduled: true,
 };
 const PACKET_HASH = "b".repeat(64);
 function resign(value: RecordReportPayload): RecordReportPayload {
@@ -291,10 +292,9 @@ Deno.test("raw prose cannot smuggle quantity or urgency through an approved buy 
     "approved terms absent",
   );
 });
-Deno.test("ordinary research is suppressed for every report kind with canonical receipts", () => {
+Deno.test("ordinary research stays suppressed outside the scheduled morning brief", () => {
   for (
     const kind of [
-      "morning",
       "weekly",
       "monthly",
       "theme",
@@ -329,6 +329,121 @@ Deno.test("ordinary research is suppressed for every report kind with canonical 
     );
     parseRecordReportPayload(delivery.payload);
   }
+});
+
+Deno.test("morning ordinary research delivers a bounded no-action receipt", () => {
+  const value = report("morning");
+  value.report.summary = "BUY CENX immediately";
+  const delivery = renderReportDelivery(resign(value), [
+    decision({
+      final_action: "watch",
+      status: "downgraded",
+      final_alert_urgency: null,
+      approved_terms: null,
+    }),
+  ], OPTIONS);
+
+  assertEquals(delivery.status, "ready");
+  assertEquals(delivery.reason, undefined);
+  assertEquals(delivery.parts, [delivery.body]);
+  assert(delivery.body.includes("CENX: WATCH"), "morning result omitted the final watch state");
+  assert(!delivery.body.includes("BUY CENX immediately"), "caller prose reached Telegram");
+  assert(delivery.body.includes("Suggestion only"), "authority label absent");
+});
+
+Deno.test("unscheduled morning research remains suppressed", () => {
+  const value = report("morning");
+  const delivery = renderReportDelivery(resign(value), [
+    decision({
+      final_action: "watch",
+      status: "downgraded",
+      final_alert_urgency: null,
+      approved_terms: null,
+    }),
+  ], { ...OPTIONS, scheduled: false });
+
+  assertEquals(delivery.status, "suppressed");
+  assertEquals(delivery.reason, "not_actionable");
+});
+
+Deno.test("verbose research-only morning packet delivers a bounded status brief", () => {
+  const candidates = Array.from({ length: 12 }, (_, index) => ({
+    candidate_key: `unresolved:verbose-supplier-${index}-` + "磁".repeat(40),
+    ticker: null,
+    research_state: "unresolved",
+    suitability: {
+      state: "unknown",
+      missing_reasons: Array.from({ length: 8 }, (__, item) =>
+        `missing-${item}-${"磁".repeat(100)}`
+      ),
+      veto_reasons: [],
+    },
+    adverse_paths: Array.from({ length: 8 }, (__, item) =>
+      `adverse-${item}-${"逆".repeat(100)}`
+    ),
+    limitations: Array.from({ length: 8 }, (__, item) =>
+      `limit-${item}-${"限".repeat(100)}`
+    ),
+    evidence: [{
+      item_id: `00000000-0000-4000-8000-${String(index + 1).padStart(12, "0")}`,
+      role: "supporting",
+    }, {
+      item_id: `00000000-0000-4000-8000-${String(index + 101).padStart(12, "0")}`,
+      role: "opposing",
+    }],
+  }));
+  const packet = {
+    contract_version: 2,
+    action_candidates: [],
+    coverage: {
+      accepted_item_count: 12,
+      complete_market_coverage: false,
+      coverage_status: "scope_not_guaranteed",
+      mode: "bounded",
+      source_request_count: 25,
+      next_review_at: "審".repeat(40),
+      verbose_internal_receipts: "r".repeat(8_815),
+    },
+    evidence: candidates.flatMap((candidate) =>
+      candidate.evidence.map((reference) => ({ item_id: reference.item_id }))
+    ),
+    research_candidates: candidates,
+  } as unknown as EvidencePacketV2;
+  const value = report("morning");
+  value.report.policy_decision_ids = [];
+  value.report.source_ids = candidates.flatMap((candidate) =>
+    candidate.evidence.map((reference) => reference.item_id)
+  ).sort();
+  value.report_hash = sha256Hex(canonicalJson(value.report));
+  const packetHash = sha256Hex(canonicalJson(packet));
+  value.idempotency_key = sha256Hex(
+    `v2:${value.kind}:${value.market_date}:${packetHash}:${value.report_hash}`,
+  );
+  value.id = reportIdFromKey(value.idempotency_key);
+
+  const delivery = renderReportDelivery(value, [], OPTIONS, packet);
+
+  assertEquals(delivery.status, "ready");
+  assertEquals(delivery.parts, [delivery.body]);
+  assert(delivery.body.includes("12 research candidate(s)"), "candidate count absent");
+  assert(delivery.body.includes("no policy-approved action"), "no-action result absent");
+  assert(
+    new TextEncoder().encode(delivery.payload!.report.full_markdown).byteLength <= 14_000,
+    "canonical research report exceeded the durable bound",
+  );
+  assert(
+    delivery.payload!.report.full_markdown.includes("accepted_item_count=12") &&
+      !delivery.payload!.report.full_markdown.includes("verbose_internal_receipts"),
+    "coverage summary was not bounded",
+  );
+  assert(
+    delivery.payload!.report.full_markdown.includes(
+      "unresolved:verbose-supplier-11-",
+    ),
+    "bounded catalog dropped a research candidate",
+  );
+  assertEquals(delivery.payload!.rendered_text, delivery.body);
+  assertEquals(delivery.payload!.rendered_hash, sha256Hex(delivery.body));
 });
 
 Deno.test("mixed reports keep research in audit but Telegram contains only approved actions and holding-risk alerts", () => {
