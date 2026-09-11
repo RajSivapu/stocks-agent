@@ -1021,11 +1021,10 @@ def build_reference_transfer(
             "chunk_hash": _chunk_hash(candidate),
         }
         # The encoded-byte check below is the authoritative transport bound.
-        # Keeping v2 at the former 88-row ceiling made the live SEC universe
-        # require 119 sequential gateway calls even though each request used
-        # only about one third of the permitted payload. That exceeded the
-        # collector's 90-second aggregate deadline before finalization.
-        maximum_rows = 200
+        # Keep each live Edge Function call comfortably below the payload size
+        # that showed unstable latency while retaining enough headroom to move
+        # the full supported universe inside the aggregate call deadline.
+        maximum_rows = 160
         if len(candidate) > maximum_rows or len(_canonical_json(probe)) > 192 * 1024:
             if not current:
                 raise ValueError("one reference entry exceeds the chunk byte bound")

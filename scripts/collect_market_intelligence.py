@@ -47,6 +47,11 @@ MAX_DIAGNOSTIC_BYTES = 512
 # round trips can exceed 90 seconds even when every bounded request succeeds.
 MAX_REFERENCE_TRANSFER_SECONDS = 300.0
 _REFERENCE_CAPABILITY = "sec_company_tickers_universe"
+_REFERENCE_CHUNK_REPLAYABLE_CODES = frozenset({
+    "GATEWAY_UNAVAILABLE",
+    "INVALID_GATEWAY_RESPONSE",
+    "PERSISTENCE_FAILED",
+})
 
 
 def _reference_request_id(
@@ -457,20 +462,31 @@ def _persist_reference_stage(
         ).encode()
         if len(encoded) > gateway.MAX_REQUEST_BYTES:
             raise ValueError("reference transfer call exceeds gateway bound")
-        elapsed = monotonic() - started
-        if (
-            call_count + 1 > MAX_REFERENCE_TRANSFER_CALLS
-            or byte_count + len(encoded) > MAX_REFERENCE_TRANSFER_BYTES
-            or elapsed >= MAX_REFERENCE_TRANSFER_SECONDS
-        ):
-            raise ValueError("reference transfer exceeds aggregate bound")
-        remaining = MAX_REFERENCE_TRANSFER_SECONDS - elapsed
-        result = gateway_client.call(
-            operation, payload, run_id=run_id, request_id=request_id,
-            timeout=float(min(30.0, remaining)),
-        )
-        call_count += 1
-        byte_count += len(encoded)
+        maximum_attempts = 2 if operation == "record_discovery_reference_chunk" else 1
+        for attempt in range(maximum_attempts):
+            elapsed = monotonic() - started
+            if (
+                call_count + 1 > MAX_REFERENCE_TRANSFER_CALLS
+                or byte_count + len(encoded) > MAX_REFERENCE_TRANSFER_BYTES
+                or elapsed >= MAX_REFERENCE_TRANSFER_SECONDS
+            ):
+                raise ValueError("reference transfer exceeds aggregate bound")
+            remaining = MAX_REFERENCE_TRANSFER_SECONDS - elapsed
+            call_count += 1
+            byte_count += len(encoded)
+            try:
+                result = gateway_client.call(
+                    operation, payload, run_id=run_id, request_id=request_id,
+                    timeout=float(min(30.0, remaining)),
+                )
+            except gateway.GatewayError as error:
+                if (
+                    attempt + 1 >= maximum_attempts
+                    or error.code not in _REFERENCE_CHUNK_REPLAYABLE_CODES
+                ):
+                    raise
+            else:
+                break
         response_bytes = len(json.dumps(
             result, allow_nan=False, ensure_ascii=False,
             separators=(",", ":"), sort_keys=True,
