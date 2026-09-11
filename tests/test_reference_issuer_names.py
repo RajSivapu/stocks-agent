@@ -22,6 +22,9 @@ from lib.intelligence.universe import (
 
 ROOT = Path(__file__).resolve().parents[1]
 MIGRATION = ROOT / "sql" / "migrations" / "20261009_reference_issuer_names.sql"
+TRANSFER_CAPACITY = (
+    ROOT / "sql" / "migrations" / "20261025_reference_transfer_capacity.sql"
+)
 NOW = datetime(2026, 9, 6, 15, tzinfo=timezone.utc)
 RUN_ID = "11111111-1111-4111-8111-111111111111"
 
@@ -156,7 +159,7 @@ def test_v2_hash_vector_matches_typescript_and_sql_protocol():
     assert digest == "6ed1594329bb40358f01357932fbae01bf5d241336d6f2989634a6f2ba630759"
 
 
-def test_v2_transfer_embeds_identical_issuer_names_and_caps_chunks_at_88_rows():
+def test_v2_transfer_embeds_names_and_uses_the_safe_200_row_capacity():
     snapshot = _snapshot()
     many = tuple(
         replace(
@@ -165,7 +168,7 @@ def test_v2_transfer_embeds_identical_issuer_names_and_caps_chunks_at_88_rows():
             ticker=f"T{index:05d}",
             aliases=(f"T{index:05d}",),
         )
-        for index in range(177)
+        for index in range(401)
     )
     transfer = build_reference_transfer(
         replace(snapshot, securities=many),
@@ -181,8 +184,13 @@ def test_v2_transfer_embeds_identical_issuer_names_and_caps_chunks_at_88_rows():
     assert {json.dumps(entry["issuer_names"], sort_keys=True) for entry in entries} == {
         json.dumps(entries[0]["issuer_names"], sort_keys=True)
     }
-    assert all(len(chunk["entries"]) <= 88 for chunk in transfer.chunks)
-    assert sum(len(chunk["entries"]) for chunk in transfer.chunks) == 177
+    assert [len(chunk["entries"]) for chunk in transfer.chunks] == [200, 200, 1]
+    assert all(
+        len(json.dumps(chunk, separators=(",", ":"), sort_keys=True).encode())
+        <= 192 * 1024
+        for chunk in transfer.chunks
+    )
+    assert sum(len(chunk["entries"]) for chunk in transfer.chunks) == 401
 
 
 def test_v2_read_rows_hydrate_complete_snapshot_and_legacy_rows_are_explicitly_limited():
@@ -248,3 +256,12 @@ def test_additive_migration_preserves_prior_files_and_redefines_existing_protoco
         text=True,
     )
     assert changed_prior.stdout == ""
+
+
+def test_transfer_capacity_migration_matches_client_and_preserves_payload_bound():
+    sql = TRANSFER_CAPACITY.read_text()
+
+    assert "CREATE OR REPLACE FUNCTION public.record_market_discovery_reference_chunk" in sql
+    assert "jsonb_array_length(p_payload->'entries') NOT BETWEEN 1 AND 200" in sql
+    assert "octet_length(p_payload::text)>196608" in sql
+    assert "GRANT EXECUTE ON FUNCTION public.record_market_discovery_reference_chunk" in sql

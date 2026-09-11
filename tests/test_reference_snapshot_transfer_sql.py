@@ -35,6 +35,7 @@ OFFICIAL_COMPLETION = ROOT / "sql" / "migrations" / "20261008_official_source_co
 ISSUER_NAMES = ROOT / "sql" / "migrations" / "20261009_reference_issuer_names.sql"
 ENRICHMENT = ROOT / "sql" / "migrations" / "20261010_bounded_adaptive_enrichment.sql"
 RESTART = ROOT / "sql" / "migrations" / "20261020_reference_transfer_restart.sql"
+TRANSFER_CAPACITY = ROOT / "sql" / "migrations" / "20261025_reference_transfer_capacity.sql"
 
 TABLES = (
     "market_reference_chunk_receipts",
@@ -186,6 +187,7 @@ def transfer_db():
             connection.execute(MIGRATION.read_text())
             connection.execute(ISSUER_NAMES.read_text())
             connection.execute(RESTART.read_text())
+            connection.execute(TRANSFER_CAPACITY.read_text())
             yield connection
         finally:
             if connection is not None:
@@ -393,7 +395,7 @@ def test_v2_finalization_rejects_different_names_for_same_entity_across_chunks(t
     capability = "sec_company_tickers_cross_chunk_names"
     transfer = _transfer(
         run_id,
-        89,
+        201,
         "2026-09-06T12:00:00Z",
         capability,
         semantic_encoding_version=2,
