@@ -158,19 +158,38 @@ Deno.test("v2 reference rows bind bounded issuer names while v1 remains readable
     }).securities[0].issuer_names,
     entry.issuer_names,
   );
+  const expanded = Array(200).fill(entry).map((row, index) => {
+    const { content_hash: _oldHash, ...semantic } = {
+      ...row,
+      id: `00000000-0000-4000-8000-${String(index + 200).padStart(12, "0")}`,
+      security_id: `sec:${index}`,
+    };
+    return {
+      ...semantic,
+      content_hash: sha256Hex(
+        canonicalJson(securityRevisionSemanticDocument(semantic)),
+      ),
+    };
+  });
+  assertEquals(
+    parseReferenceChunkPayload({
+      manifest_id: manifest.id,
+      chunk_index: 0,
+      chunk_count: 1,
+      entries: expanded,
+      chunk_hash: "e".repeat(64),
+    }).entries.length,
+    200,
+  );
   assertThrows(
     () => parseReferenceChunkPayload({
       manifest_id: manifest.id,
       chunk_index: 0,
       chunk_count: 1,
-      entries: Array(89).fill(entry).map((row, index) => ({
-        ...row,
-        id: `00000000-0000-4000-8000-${String(index + 200).padStart(12, "0")}`,
-        security_id: `sec:${index}`,
-      })),
+      entries: [...expanded, expanded[0]],
       chunk_hash: "e".repeat(64),
     }),
-    "at most 88 items",
+    "at most 200 items",
   );
 });
 

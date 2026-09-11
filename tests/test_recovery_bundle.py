@@ -1441,6 +1441,24 @@ def _v2_recovery_records():
     return _seal_reference_lineage(records, format_version=2)
 
 
+def _expanded_v2_recovery_records(entry_count=89):
+    records = recovery_records()
+    base = records["security_reference_revisions"][0]
+    for index in range(2, entry_count + 1):
+        row = copy.deepcopy(base)
+        ticker = f"T{index:05d}"
+        row.update(
+            id=f"10000000-0000-4000-8000-{index + 1000:012d}",
+            security_id=f"sec-cik:{index:010d}:listing-origin:{ticker}",
+            entity_id=f"sec-cik:{index:010d}",
+            ticker=ticker,
+            aliases=[ticker],
+            source_ids=[f"sec-company-tickers:{index:010d}"],
+        )
+        records["security_reference_revisions"].append(row)
+    return _seal_reference_lineage(records, format_version=2)
+
+
 def _with_reused_v2_snapshot(records):
     predecessor_manifest = records["reference_manifests"][0]
     predecessor_seal = records["reference_finalization_seals"][0]
@@ -1590,6 +1608,16 @@ def test_recovery_accepts_valid_sealed_v1_and_v2_reference_lineage():
     assert _validated_records(_v2_recovery_records())["security_reference_revisions"][0][
         "semantic_encoding_version"
     ] == 2
+
+
+def test_recovery_accepts_v2_reference_chunks_above_the_retired_88_row_limit():
+    validated = _validated_records(_expanded_v2_recovery_records())
+
+    chunk = next(
+        row for row in validated["reference_chunk_receipts"]
+        if row["chunk_index"] == 0
+    )
+    assert chunk["entry_count"] == 89
 
 
 def test_recovery_accepts_v2_snapshot_membership_reusing_predecessor_revision():

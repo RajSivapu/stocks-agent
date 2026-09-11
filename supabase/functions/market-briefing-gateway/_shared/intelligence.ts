@@ -1010,14 +1010,6 @@ export function parseReferenceChunkPayload(
     "chunk_hash",
   ], "reference chunk");
   const rawEntries = arrayValue(row.entries, "reference chunk.entries", 200);
-  if (
-    rawEntries.some((entry) =>
-      typeof entry === "object" && entry !== null && !Array.isArray(entry) &&
-      (entry as JsonObject).semantic_encoding_version === 2
-    ) && rawEntries.length > 88
-  ) {
-    throw new Error("reference chunk.entries must contain at most 88 items");
-  }
   const entries = rawEntries.map(parseSecurityRevision);
   if (entries.length === 0) {
     throw new Error("reference chunk.entries must not be empty");
