@@ -143,11 +143,19 @@ Deno.test("scheduled Friday empty V2 packet produces a canonical owner status", 
   assertEquals(delivery.status, "ready");
   assertEquals(delivery.reason, undefined);
   assert(
-    delivery.body.includes("FRIDAY POST-MARKET RESEARCH") &&
-      delivery.body.includes("0 research candidate(s) reviewed") &&
-      delivery.body.includes("Market data coverage was incomplete") &&
-      delivery.body.includes(`/reports/${delivery.payload!.id}`),
-    "scheduled Friday owner status omitted completion, coverage, or audit link",
+    delivery.body.startsWith("🌙 <b>FRIDAY EOD — Sep 4</b>") &&
+      delivery.body.includes("⚠️ <b>Data check incomplete</b>") &&
+      delivery.body.includes("<b>Portfolio</b>\nCouldn’t safely refresh holdings, prices, stop gaps, or P&amp;L during this run.") &&
+      delivery.body.includes("<b>Market</b>\nThe scheduled scan completed, but the configured sources returned no usable market evidence.") &&
+      delivery.body.includes("<b>New ideas</b>\nNo candidate was verified. This means the data was unavailable; it is not an “all clear” market signal.") &&
+      delivery.body.includes("<b>Next review</b>\nThe next scheduled run will retry the normal scan. Any verified portfolio risk or approved setup will appear here.") &&
+      delivery.body.includes(`href="https://stocks.example.test/reports/${delivery.payload!.id}">View full audit</a>`) &&
+      !delivery.body.includes(`\nhttps://stocks.example.test/reports/${delivery.payload!.id}`),
+    "scheduled Friday owner status did not use the clean incomplete-data layout",
+  );
+  assert(
+    delivery.body.split("\n\n").length >= 7,
+    "scheduled Friday owner status collapsed its sections",
   );
   assertEquals(delivery.payload?.report.source_ids, []);
   assertEquals(delivery.payload?.report.policy_decision_ids, []);
@@ -394,10 +402,10 @@ Deno.test("scheduled Friday ordinary research delivers a bounded no-action statu
     "Friday status must be a new immutable report revision",
   );
   assert(
-    delivery.body.startsWith("<b>FRIDAY POST-MARKET RESEARCH") &&
+    delivery.body.startsWith("🌙 <b>FRIDAY EOD — Sep 4</b>") &&
       delivery.body.includes("CENX: WATCH") &&
       delivery.body.includes("No policy-approved action today") &&
-      delivery.body.includes(`/reports/${delivery.payload!.id}`) &&
+      delivery.body.includes(`href="https://stocks.example.test/reports/${delivery.payload!.id}">View full audit</a>`) &&
       !delivery.body.includes("BUY CENX immediately"),
     "scheduled Friday status omitted the reviewed result or retained caller prose",
   );
@@ -435,7 +443,16 @@ Deno.test("morning ordinary research delivers a bounded no-action receipt", () =
   assertEquals(delivery.status, "ready");
   assertEquals(delivery.reason, undefined);
   assertEquals(delivery.parts, [delivery.body]);
-  assert(delivery.body.includes("CENX: WATCH"), "morning result omitted the final watch state");
+  assert(
+    delivery.body.startsWith("🌅 <b>MORNING CHECK — Sep 4</b>") &&
+      delivery.body.includes("<b>Research</b>\nCENX: WATCH") &&
+      delivery.body.includes("<b>Action</b>\nNo policy-approved action today."),
+    "morning result omitted the clean research or action sections",
+  );
+  assert(
+    delivery.body.split("\n\n").length >= 5,
+    "morning no-action receipt collapsed its sections",
+  );
   assert(!delivery.body.includes("BUY CENX immediately"), "caller prose reached Telegram");
   assert(delivery.body.includes("Suggestion only"), "authority label absent");
 });
@@ -515,7 +532,7 @@ Deno.test("verbose research-only morning packet delivers a bounded status brief"
   assertEquals(delivery.status, "ready");
   assertEquals(delivery.parts, [delivery.body]);
   assert(delivery.body.includes("12 research candidate(s)"), "candidate count absent");
-  assert(delivery.body.includes("no policy-approved action"), "no-action result absent");
+  assert(delivery.body.includes("No policy-approved action"), "no-action result absent");
   assert(
     !delivery.body.includes("Market data coverage was incomplete"),
     "morning copy changed when Friday coverage disclosure was added",
@@ -669,7 +686,7 @@ Deno.test("scheduled Friday research-only report sends status without fabricated
   assertEquals(delivery.parts, [delivery.body]);
   assert(
     delivery.body.includes("1 research candidate(s) reviewed") &&
-      delivery.body.includes("no policy-approved action") &&
+      delivery.body.includes("No policy-approved action") &&
       !delivery.body.includes("unresolved:magnet-supplier"),
     "scheduled Friday status leaked unresolved research or omitted no-action result",
   );
@@ -758,7 +775,10 @@ Deno.test("scheduled Friday research-only report sends status without fabricated
     }`,
   );
   assert(
-    mixedDelivery.body.includes("Market data coverage was incomplete"),
+    mixedDelivery.body.includes("⚠️ <b>Partial market check</b>") &&
+      mixedDelivery.body.includes(
+        "Some configured sources were unavailable, so treat this as a partial review.",
+      ),
     "Friday no-action status hid incomplete coverage",
   );
 });

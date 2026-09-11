@@ -201,9 +201,10 @@ Deno.test("scheduled Friday research persists a report and delivers an owner sta
   assertEquals(repo.packetReadCalls, 1);
   assertEquals(setup.sent.length, 1);
   assert(
-    setup.sent[0][0].includes("FRIDAY POST-MARKET RESEARCH") &&
+    setup.sent[0][0].includes("🌙 <b>FRIDAY EOD — Sep 4</b>") &&
       setup.sent[0][0].includes("1 research candidate(s) reviewed") &&
-      setup.sent[0][0].includes("no policy-approved action") &&
+      setup.sent[0][0].includes("No policy-approved action") &&
+      setup.sent[0][0].includes(">View full audit</a>") &&
       !setup.sent[0][0].includes("unresolved:magnet-supplier") &&
       !setup.sent[0][0].includes("fabricated ticker"),
     "Friday Telegram status leaked unresolved research or omitted the no-action result",
@@ -249,7 +250,8 @@ Deno.test("scheduled pre-market research sends a morning no-action Telegram rece
   assertEquals(result.telegram_message_ids, [77]);
   assertEquals(setup.sent.length, 1);
   assert(
-    setup.sent[0][0].includes("no policy-approved action") &&
+    setup.sent[0][0].includes("🌅 <b>MORNING CHECK — Sep 2</b>") &&
+      setup.sent[0][0].includes("No policy-approved action") &&
       setup.sent[0][0].includes("Suggestion only") &&
       !setup.sent[0][0].includes("fabricated ticker"),
     "morning Telegram did not use the canonical no-action copy",
