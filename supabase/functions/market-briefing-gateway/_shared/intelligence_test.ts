@@ -855,6 +855,52 @@ Deno.test("reference and context parsers are exact, bounded, and research-only",
   );
 });
 
+Deno.test("discovery context accepts a persisted disabled execution marker", () => {
+  const selection = {
+    manifest: {
+      phase: "post-market",
+      run_id: "00000000-0000-4000-8000-000000000002",
+      manifest_id: "00000000-0000-4000-8000-000000000003",
+      semantic_hash: "a".repeat(64),
+      schema_version: 1,
+      selection_stage: "initial",
+      deferred_reasons: {
+        adaptive_enrichment: "no_currently_bound_candidates",
+      },
+      execution_allowed: false,
+      request_descriptors: [],
+      provider_reservations: {
+        gdelt_reverse: 2,
+        sec_filing_document: 2,
+        yahoo_security_quote: 2,
+        sec_issuer_submissions: 2,
+      },
+    },
+    requests: [],
+  };
+  const context = {
+    manifests: [],
+    security_revisions: [],
+    tasks: [],
+    theme_episodes: [],
+    exposure_facts: [],
+    research_nominations: [],
+    enrichment_selections: [selection],
+  };
+
+  assertEquals(
+    parseDiscoveryContext(context).enrichment_selections,
+    [selection],
+  );
+
+  const enabled = structuredClone(context);
+  const enabledSelection = enabled.enrichment_selections[0] as {
+    manifest: { execution_allowed: boolean };
+  };
+  enabledSelection.manifest.execution_allowed = true;
+  assertThrows(() => parseDiscoveryContext(enabled), "forbidden field");
+});
+
 Deno.test("intelligence record receipt accepts only bounded canonical evidence times", () => {
   const evidenceId = "00000000-0000-4000-8000-000000000001";
   const receipt = {

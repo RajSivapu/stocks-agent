@@ -461,17 +461,36 @@ function discoveryFieldSemantic(key: string): string {
   return key.toLowerCase().replace(/[^a-z0-9]/g, "");
 }
 
-function rejectDiscoveryAuthority(value: unknown, path: string): void {
+function rejectDiscoveryAuthority(
+  value: unknown,
+  path: string,
+  allowDisabledExecutionMarker = false,
+): void {
   if (Array.isArray(value)) {
     value.forEach((item, index) =>
-      rejectDiscoveryAuthority(item, `${path}[${index}]`)
+      rejectDiscoveryAuthority(
+        item,
+        `${path}[${index}]`,
+        allowDisabledExecutionMarker,
+      )
     );
   } else if (typeof value === "object" && value !== null) {
     for (const [key, child] of Object.entries(value as JsonObject)) {
-      if (DISCOVERY_FORBIDDEN_FIELDS.has(discoveryFieldSemantic(key))) {
+      const semanticKey = discoveryFieldSemantic(key);
+      if (
+        semanticKey === "executionallowed" &&
+        allowDisabledExecutionMarker && child === false
+      ) {
+        continue;
+      }
+      if (DISCOVERY_FORBIDDEN_FIELDS.has(semanticKey)) {
         throw new Error(`${path} has forbidden field: ${key}`);
       }
-      rejectDiscoveryAuthority(child, `${path}.${key}`);
+      rejectDiscoveryAuthority(
+        child,
+        `${path}.${key}`,
+        allowDisabledExecutionMarker,
+      );
     }
   }
 }
@@ -1613,7 +1632,11 @@ export function parseDiscoveryContext(value: unknown): DiscoveryContext {
   if (byteLength(row) > 1_048_576) {
     throw new Error("discovery context exceeds byte limit");
   }
-  const opaque = (key: string, keys: readonly string[]) =>
+  const opaque = (
+    key: string,
+    keys: readonly string[],
+    allowDisabledExecutionMarker = false,
+  ) =>
     arrayValue(row[key], `discovery context.${key}`, 100).map((item, index) => {
       const parsed = boundedObject(
         item,
@@ -1621,7 +1644,11 @@ export function parseDiscoveryContext(value: unknown): DiscoveryContext {
         65_536,
       );
       exactKeys(parsed, keys, `discovery context.${key}[${index}]`);
-      rejectDiscoveryAuthority(parsed, `discovery context.${key}[${index}]`);
+      rejectDiscoveryAuthority(
+        parsed,
+        `discovery context.${key}[${index}]`,
+        allowDisabledExecutionMarker,
+      );
       return parsed;
     });
   const exposureFacts = arrayValue(
@@ -1703,7 +1730,7 @@ export function parseDiscoveryContext(value: unknown): DiscoveryContext {
     enrichment_selections: opaque("enrichment_selections", [
       "manifest",
       "requests",
-    ]),
+    ], true),
   };
 }
 
