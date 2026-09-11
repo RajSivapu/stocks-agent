@@ -243,7 +243,20 @@ def test_one_reference_stage_call_persists_all_chunks_then_pins_finalized_snapsh
     operations = [call[0] for call in gateway_client.calls]
     assert operations == ["pin_discovery_reference", "begin_discovery_reference"] + [
         "record_discovery_reference_chunk"
-    ] * 12 + ["finalize_discovery_reference", "pin_discovery_reference"]
+    ] * 6 + ["finalize_discovery_reference", "pin_discovery_reference"]
+    chunk_payloads = [
+        call[1]
+        for call in gateway_client.calls
+        if call[0] == "record_discovery_reference_chunk"
+    ]
+    assert [len(payload["entries"]) for payload in chunk_payloads] == [
+        200, 200, 200, 200, 200, 5
+    ]
+    assert all(
+        len(json.dumps(payload, separators=(",", ":"), sort_keys=True).encode())
+        <= 192 * 1024
+        for payload in chunk_payloads
+    )
     assert all(call[2]["run_id"] == RUN_ID for call in gateway_client.calls)
     assert coverage["reference_status"] == "healthy"
     assert coverage["execution_allowed"] is False

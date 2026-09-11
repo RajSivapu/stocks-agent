@@ -1003,7 +1003,12 @@ def build_reference_transfer(
             "entries": candidate,
             "chunk_hash": _chunk_hash(candidate),
         }
-        maximum_rows = 88 if semantic_encoding_version == 2 else 200
+        # The encoded-byte check below is the authoritative transport bound.
+        # Keeping v2 at the former 88-row ceiling made the live SEC universe
+        # require 119 sequential gateway calls even though each request used
+        # only about one third of the permitted payload. That exceeded the
+        # collector's 90-second aggregate deadline before finalization.
+        maximum_rows = 200
         if len(candidate) > maximum_rows or len(_canonical_json(probe)) > 192 * 1024:
             if not current:
                 raise ValueError("one reference entry exceeds the chunk byte bound")
