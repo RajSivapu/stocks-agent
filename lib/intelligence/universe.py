@@ -579,8 +579,8 @@ def merge_reference_sources(
         for prior in prior_rows:
             if prior.valid_to is not None:
                 continue
-            if as_of <= prior.valid_from:
-                raise ValueError("delisting date must follow listing date")
+            if as_of < prior.valid_from:
+                raise ValueError("delisting date cannot precede listing date")
             merged.append(replace(
                 prior,
                 valid_to=as_of,

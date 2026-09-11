@@ -247,6 +247,24 @@ def test_merge_closes_a_missing_prior_listing_at_the_new_snapshot_date():
     assert closed.exclusion_reasons == ("delisted",)
 
 
+def test_merge_closes_a_same_day_missing_listing_without_rejecting_the_interval():
+    prior = replace(
+        security("COMMON_STOCK", ticker="GONE"),
+        security_id="11111111-1111-4111-8111-111111111113",
+        aliases=("GONE",),
+        source_ids=("prior-manifest:fixture",),
+        valid_from=date(2026, 9, 4),
+    )
+
+    merged = merge_reference_sources((), (prior,), as_of=date(2026, 9, 4))
+
+    closed = merged.by_ticker["GONE"]
+    assert closed.valid_from == date(2026, 9, 4)
+    assert closed.valid_to == date(2026, 9, 4)
+    assert closed.eligible is False
+    assert closed.exclusion_reasons == ("delisted",)
+
+
 class _Response:
     def __init__(self, body: bytes) -> None:
         self.status = 200
