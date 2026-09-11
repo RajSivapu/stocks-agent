@@ -51,12 +51,35 @@ def test_cli_emits_one_bounded_deterministic_json_document():
 
 def test_cli_rejects_unknown_phase_as_one_secret_free_json_error():
     output = io.StringIO()
+    errors = io.StringIO()
 
-    assert main(["--phase", "weekly", "--dry-run"], stdout=output) == 2
+    assert main(
+        ["--phase", "weekly", "--dry-run"],
+        stdout=output,
+        stderr=errors,
+    ) == 2
 
     document = json.loads(output.getvalue())
     assert document == {"error": "INVALID_ARGUMENT", "ok": False}
     assert output.getvalue().count("\n") == 1
+    assert errors.getvalue() == "ValueError: invalid argument\n"
+
+
+def test_collector_diagnostic_is_bounded_and_redacts_urls_and_secrets():
+    import scripts.collect_market_intelligence as collector
+
+    detail = collector._diagnostic(
+        ValueError(
+            "bad https://api.example.test/path?token=owner-secret "
+            "api_key=another-secret " + "x" * 1_000
+        )
+    )
+
+    assert len(detail.encode()) <= 512
+    assert "https://" not in detail
+    assert "owner-secret" not in detail
+    assert "another-secret" not in detail
+    assert detail.startswith("ValueError: bad [redacted-url]")
 
 
 def test_cli_requires_exact_run_id_for_scheduled_collection_but_allows_explicit_dry_run_fixture():
