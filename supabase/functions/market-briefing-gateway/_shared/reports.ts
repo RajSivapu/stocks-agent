@@ -424,6 +424,71 @@ function reportUrl(
   return `${base.origin}/reports/${id}`;
 }
 
+function marketDateLabel(value: string): string {
+  const match = /^(\d{4})-(\d{2})-(\d{2})$/.exec(value);
+  if (!match) throw new Error("market date is invalid");
+  const month = [
+    "Jan", "Feb", "Mar", "Apr", "May", "Jun",
+    "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
+  ][Number(match[2]) - 1];
+  if (!month) throw new Error("market date is invalid");
+  return `${month} ${Number(match[3])}`;
+}
+
+function scheduledNoActionBody(input: {
+  kind: "morning" | "weekly";
+  marketDate: string;
+  researchText: string;
+  incompleteCoverage: boolean;
+  noUsableEvidence: boolean;
+  auditUrl?: string;
+}): string {
+  const friday = input.kind === "weekly";
+  const sections = [
+    `${friday ? "🌙" : "🌅"} <b>${
+      friday ? "FRIDAY EOD" : "MORNING CHECK"
+    } — ${marketDateLabel(input.marketDate)}</b>`,
+  ];
+  if (input.noUsableEvidence) {
+    sections.push(
+      "⚠️ <b>Data check incomplete</b>",
+      "<b>Portfolio</b>\nCouldn’t safely refresh holdings, prices, stop gaps, or P&amp;L during this run.",
+      "<b>Market</b>\nThe scheduled scan completed, but the configured sources returned no usable market evidence.",
+      "<b>New ideas</b>\nNo candidate was verified. This means the data was unavailable; it is not an “all clear” market signal.",
+      "<b>Next review</b>\nThe next scheduled run will retry the normal scan. Any verified portfolio risk or approved setup will appear here.",
+    );
+  } else {
+    sections.push(
+      input.incompleteCoverage
+        ? "⚠️ <b>Partial market check</b>"
+        : "🔎 <b>Research review</b>",
+      `<b>Research</b>\n${escaped(compact(input.researchText, 360))}`,
+      "<b>Action</b>\nNo policy-approved action today.",
+    );
+    if (input.incompleteCoverage) {
+      sections.push(
+        "<b>Coverage</b>\nSome configured sources were unavailable, so treat this as a partial review.",
+      );
+    }
+    sections.push(
+      "<b>Next review</b>\nThe next scheduled run will refresh the evidence and surface any verified portfolio risk or approved setup.",
+    );
+  }
+  if (input.auditUrl) {
+    sections.push(
+      `🔎 <a href="${escaped(input.auditUrl)}">View full audit</a>`,
+    );
+  }
+  sections.push(
+    "<i>Suggestion only — you decide and place every trade.</i>",
+  );
+  const body = sections.join("\n\n");
+  if (new TextEncoder().encode(body).byteLength > 1_200) {
+    throw new Error("scheduled status exceeds Telegram limit");
+  }
+  return body;
+}
+
 function researchCatalogMarkdown(packet: EvidencePacketV2): string {
   const nextReview = typeof packet.coverage.next_review_at === "string" &&
       packet.coverage.next_review_at.trim()
@@ -598,31 +663,25 @@ export function renderReportDelivery(
       options.scheduled &&
       (value.kind === "morning" || scheduledFridayStatus)
     ) {
-      const heading = value.kind === "weekly"
-        ? "FRIDAY POST-MARKET RESEARCH"
-        : "MORNING RESEARCH";
-      const coverage = scheduledFridayStatus &&
-          !researchOnlyPacket.coverage.complete_market_coverage
-        ? "\nMarket data coverage was incomplete."
-        : "";
-      const auditLink = scheduledFridayStatus
-        ? `\n${
-          reportUrl(
+      const candidateCount = researchOnlyPacket.research_candidates.length;
+      const noUsableEvidence = candidateCount === 0 &&
+        researchOnlyPacket.evidence.length === 0;
+      const body = scheduledNoActionBody({
+        kind: value.kind === "weekly" ? "weekly" : "morning",
+        marketDate: value.market_date,
+        researchText:
+          `${candidateCount} research candidate(s) reviewed; none cleared policy for action.`,
+        incompleteCoverage:
+          !researchOnlyPacket.coverage.complete_market_coverage,
+        noUsableEvidence,
+        auditUrl: scheduledFridayStatus
+          ? reportUrl(
             payload.id,
             options.dashboardBaseUrl,
             options.allowedDashboardOrigins,
           )
-        }`
-        : "";
-      const body = compact(
-        `<b>${heading} — ${value.market_date}</b>\n${
-          researchOnlyPacket.research_candidates.length
-        } research candidate(s) reviewed; no policy-approved action today.` +
-          coverage +
-          "\n\nSuggestion only; review manually. No order was placed." +
-          auditLink,
-        1_200,
-      );
+          : undefined,
+      });
       return {
         status: "ready",
         body,
@@ -747,14 +806,33 @@ export function renderReportDelivery(
     `v2:${finalKind}:${value.market_date}:${packetHash}:${approvedHash}`,
   );
   const approvedId = reportIdFromKey(approvedKey);
-  const coverageDisclosure = scheduledFridayNoAction && v2ReportPacket &&
-      !v2ReportPacket.coverage.complete_market_coverage
-    ? "\nMarket data coverage was incomplete."
-    : "";
-  let body = `<b>${heading} — ${value.market_date}</b>\n${
-    escaped(approvedReport.summary)
-  }${coverageDisclosure}\n\nSuggestion only; review manually. No order was placed.`;
-  if (["weekly", "monthly", "theme"].includes(finalKind)) {
+  const scheduledNoAction = options.scheduled &&
+    (finalKind === "morning" || scheduledFridayNoAction) &&
+    actionableFields.length === 0 && !finalAlertTriggered;
+  let body = scheduledNoAction
+    ? scheduledNoActionBody({
+      kind: finalKind === "weekly" ? "weekly" : "morning",
+      marketDate: value.market_date,
+      researchText: (telegramLines.length > 0 ? telegramLines : lines).join(" "),
+      incompleteCoverage: Boolean(
+        v2ReportPacket && !v2ReportPacket.coverage.complete_market_coverage,
+      ),
+      noUsableEvidence: false,
+      auditUrl: finalKind === "weekly"
+        ? reportUrl(
+          approvedId,
+          options.dashboardBaseUrl,
+          options.allowedDashboardOrigins,
+        )
+        : undefined,
+    })
+    : `<b>${heading} — ${value.market_date}</b>\n${
+      escaped(approvedReport.summary)
+    }\n\nSuggestion only; review manually. No order was placed.`;
+  if (
+    !scheduledFridayNoAction && finalKind !== "morning" &&
+    ["weekly", "monthly", "theme"].includes(finalKind)
+  ) {
     body += `\n${
       reportUrl(
         approvedId,
@@ -763,7 +841,7 @@ export function renderReportDelivery(
       )
     }`;
   }
-  body = compact(body, 1_200);
+  if (!scheduledNoAction) body = compact(body, 1_200);
   const canonicalPayload: RecordReportPayload = {
     ...value,
     kind: finalKind,
