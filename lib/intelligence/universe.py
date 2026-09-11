@@ -684,6 +684,12 @@ def merge_reference_snapshot(
                 key=lambda row: (row.name, row.valid_from, row.valid_to),
             )),
         ))
+    merged_issuer_ids = {issuer.entity_id for issuer in issuers}
+    for entity_id in sorted({row.entity_id for row in cleaned} - merged_issuer_ids):
+        prior = previous.get(entity_id)
+        if prior is None:
+            raise ValueError("merged reference is missing an issuer identity")
+        issuers.append(prior)
     return replace(
         current,
         issuers=tuple(sorted(issuers, key=lambda row: row.entity_id)),
