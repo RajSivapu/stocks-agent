@@ -614,6 +614,76 @@ def test_restart_recovers_unavailable_reference_coverage_from_the_durable_curren
     assert snapshot is None
 
 
+def test_failed_reference_without_current_pin_rebuilds_once_and_installs_snapshot(
+    monkeypatch,
+):
+    import scripts.collect_market_intelligence as collector
+    from lib.gateway import GatewayError
+
+    now = datetime(2026, 9, 11, 14, tzinfo=timezone.utc)
+    rebuilt_snapshot = object()
+    rebuilt_coverage = {
+        "coverage_status": "scope_not_guaranteed",
+        "reference_status": "healthy",
+        "reference_manifest_id": "22222222-2222-4222-8222-222222222222",
+        "reference_age_seconds": 0,
+        "execution_allowed": False,
+    }
+    rebuild_calls = []
+    installed = []
+
+    def missing_current(*_args, **_kwargs):
+        raise GatewayError("PERSISTENCE_FAILED")
+
+    def rebuild(gateway_client, run_id, observed_at, **kwargs):
+        rebuild_calls.append((gateway_client, run_id, observed_at))
+        kwargs["snapshot_sink"](rebuilt_snapshot)
+        return rebuilt_coverage
+
+    monkeypatch.setattr(collector, "_read_current_reference_binding", missing_current)
+    monkeypatch.setattr(collector, "_persist_reference_stage", rebuild)
+    gateway_client = object()
+
+    coverage = collector._recover_reference_stage(
+        gateway_client,
+        "11111111-1111-4111-8111-111111111111",
+        now,
+        snapshot_sink=installed.append,
+    )
+
+    assert coverage == rebuilt_coverage
+    assert rebuild_calls == [(
+        gateway_client, "11111111-1111-4111-8111-111111111111", now,
+    )]
+    assert installed == [rebuilt_snapshot]
+
+
+def test_failed_reference_recovery_does_not_rebuild_for_other_gateway_errors(
+    monkeypatch,
+):
+    import scripts.collect_market_intelligence as collector
+    from lib.gateway import GatewayError
+
+    def unavailable(*_args, **_kwargs):
+        raise GatewayError("RATE_LIMITED")
+
+    monkeypatch.setattr(collector, "_read_current_reference_binding", unavailable)
+    monkeypatch.setattr(
+        collector,
+        "_persist_reference_stage",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("non-persistence errors must not trigger a source request")
+        ),
+    )
+
+    with pytest.raises(GatewayError, match="RATE_LIMITED"):
+        collector._recover_reference_stage(
+            object(),
+            "11111111-1111-4111-8111-111111111111",
+            datetime(2026, 9, 11, 14, tzinfo=timezone.utc),
+        )
+
+
 def test_reference_stage_time_ceiling_includes_the_sec_refresh():
     import scripts.collect_market_intelligence as collector
     now = datetime(2026, 9, 7, 12, tzinfo=timezone.utc)
