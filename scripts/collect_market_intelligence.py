@@ -42,7 +42,9 @@ from lib.intelligence.universe import (  # noqa: E402
 MAX_REFERENCE_TRANSFER_CALLS = 384
 MAX_REFERENCE_TRANSFER_BYTES = 48 * 1024 * 1024
 MAX_REFERENCE_RESPONSE_BYTES = 64 * 1024 * 1024
-MAX_REFERENCE_TRANSFER_SECONDS = 90.0
+# The SEC universe currently needs roughly 55 sequential gateway calls. Cloud
+# round trips can exceed 90 seconds even when every bounded request succeeds.
+MAX_REFERENCE_TRANSFER_SECONDS = 300.0
 _REFERENCE_CAPABILITY = "sec_company_tickers_universe"
 
 
