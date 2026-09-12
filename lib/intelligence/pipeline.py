@@ -13,6 +13,7 @@ from decimal import Decimal
 from types import MappingProxyType
 from zoneinfo import ZoneInfo
 
+from lib.gateway import GatewayError
 from lib.intelligence.dedupe import RunItemDisposition, deduplicate
 from lib.intelligence.discovery import (
     detect_events,
@@ -91,6 +92,11 @@ UNTRUSTED_DATA_INSTRUCTION = (
 MAX_OUTPUT_BYTES = 96 * 1024
 _OUTPUT_PACKET_BYTES = 72 * 1024
 _MAX_DISCOVERY_TASKS = 100
+_DISCOVERY_CHECKPOINT_REPLAYABLE_CODES = frozenset({
+    "GATEWAY_UNAVAILABLE",
+    "INVALID_GATEWAY_RESPONSE",
+    "PERSISTENCE_FAILED",
+})
 
 
 class _CheckpointFailure(RuntimeError):
@@ -1599,12 +1605,22 @@ class IntelligencePipeline:
         if callable(method):
             response = method(run_id, payload)
         elif callable(getattr(self.gateway, "call", None)):
-            response = self.gateway.call(
-                "checkpoint_discovery_stage", payload, run_id=run_id,
-                request_id=_uuid(
-                    "discovery-stage", run_id, row["id"], row["state"], row["attempt_count"]
-                ),
+            request_id = _uuid(
+                "discovery-stage", run_id, row["id"], row["state"],
+                row["attempt_count"],
             )
+            try:
+                response = self.gateway.call(
+                    "checkpoint_discovery_stage", payload, run_id=run_id,
+                    request_id=request_id,
+                )
+            except GatewayError as error:
+                if error.code not in _DISCOVERY_CHECKPOINT_REPLAYABLE_CODES:
+                    raise
+                response = self.gateway.call(
+                    "checkpoint_discovery_stage", payload, run_id=run_id,
+                    request_id=request_id,
+                )
         else:
             raise ValueError("planned collection requires discovery checkpoint support")
         returned = _gateway_data(response).get("task")
