@@ -249,7 +249,7 @@ def test_merge_closes_a_missing_prior_listing_at_the_new_snapshot_date():
     assert closed.exclusion_reasons == ("delisted",)
 
 
-def test_merge_closes_a_same_day_missing_listing_without_rejecting_the_interval():
+def test_merge_drops_a_same_day_missing_listing_instead_of_creating_zero_length_history():
     prior = replace(
         security("COMMON_STOCK", ticker="GONE"),
         security_id="11111111-1111-4111-8111-111111111113",
@@ -260,11 +260,8 @@ def test_merge_closes_a_same_day_missing_listing_without_rejecting_the_interval(
 
     merged = merge_reference_sources((), (prior,), as_of=date(2026, 9, 4))
 
-    closed = merged.by_ticker["GONE"]
-    assert closed.valid_from == date(2026, 9, 4)
-    assert closed.valid_to == date(2026, 9, 4)
-    assert closed.eligible is False
-    assert closed.exclusion_reasons == ("delisted",)
+    assert "GONE" not in merged.by_ticker
+    assert merged.securities == ()
 
 
 def test_v2_merge_retains_the_issuer_for_a_closed_predecessor_listing():
@@ -275,7 +272,7 @@ def test_v2_merge_retains_the_issuer_for_a_closed_predecessor_listing():
         entity_id="sec-cik:0000000099",
         aliases=("GONE",),
         source_ids=("sec-company-tickers:0000000099",),
-        valid_from=NOW.date(),
+        valid_from=date(2026, 9, 3),
     )
     gone_issuer = IssuerIdentity(
         entity_id=gone.entity_id,
@@ -304,6 +301,63 @@ def test_v2_merge_retains_the_issuer_for_a_closed_predecessor_listing():
         taxonomy_version=1,
         semantic_encoding_version=2,
     )
+
+
+def test_v2_merge_drops_same_day_missing_listing_and_its_unused_issuer():
+    current = parse_sec_company_tickers(SEC_FIXTURE, retrieved_at=NOW)
+    gone = replace(
+        security("COMMON_STOCK", ticker="GONE"),
+        security_id="11111111-1111-4111-8111-111111111115",
+        entity_id="sec-cik:0000000098",
+        aliases=("GONE",),
+        source_ids=("sec-company-tickers:0000000098",),
+        valid_from=NOW.date(),
+    )
+    gone_issuer = IssuerIdentity(
+        entity_id=gone.entity_id,
+        cik="0000000098",
+        canonical_name="Ephemeral Corporation",
+        former_names=(),
+        valid_from=gone.valid_from,
+        valid_to=None,
+        source_ids=gone.source_ids,
+        observed_names=("Ephemeral Corporation",),
+    )
+    predecessor = replace(
+        current,
+        securities=(*current.securities, gone),
+        issuers=(*current.issuers, gone_issuer),
+    )
+
+    merged = merge_reference_snapshot(current, predecessor)
+
+    assert "GONE" not in merged.by_ticker
+    assert gone.entity_id not in merged.issuers_by_id
+    build_reference_transfer(
+        merged,
+        run_id=RUN_ID,
+        capability_version=1,
+        taxonomy_version=1,
+        semantic_encoding_version=2,
+    )
+
+
+def test_reference_transfer_rejects_a_zero_length_security_interval():
+    snapshot = parse_sec_company_tickers(SEC_FIXTURE, retrieved_at=NOW)
+    invalid = replace(
+        snapshot.securities[0],
+        valid_from=NOW.date(),
+        valid_to=NOW.date(),
+    )
+
+    with pytest.raises(ValueError, match="security validity interval"):
+        build_reference_transfer(
+            replace(snapshot, securities=(invalid, *snapshot.securities[1:])),
+            run_id=RUN_ID,
+            capability_version=1,
+            taxonomy_version=1,
+            semantic_encoding_version=2,
+        )
 
 
 class _Response:

@@ -581,6 +581,13 @@ def merge_reference_sources(
                 continue
             if as_of < prior.valid_from:
                 raise ValueError("delisting date cannot precede listing date")
+            if as_of == prior.valid_from:
+                # Date-granular history cannot represent a listing that both
+                # appeared and disappeared within the same UTC day. The
+                # predecessor manifest remains immutable evidence of the
+                # earlier observation; omit it from the later snapshot rather
+                # than creating the database-forbidden [date, date) interval.
+                continue
             merged.append(replace(
                 prior,
                 valid_to=as_of,
@@ -983,6 +990,11 @@ def build_reference_transfer(
     if not 1 <= len(snapshot.securities) <= MAX_REFERENCE_SECURITIES:
         raise ValueError("reference snapshot exceeds item bound")
     ordered = tuple(sorted(snapshot.securities, key=lambda row: row.security_id))
+    if any(
+        row.valid_to is not None and row.valid_to <= row.valid_from
+        for row in ordered
+    ):
+        raise ValueError("reference security validity interval is invalid")
     if len({row.security_id for row in ordered}) != len(ordered):
         raise ValueError("reference snapshot has duplicate security identities")
     issuer_by_id = {row.entity_id: row for row in snapshot.issuers}
