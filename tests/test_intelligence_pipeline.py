@@ -2978,3 +2978,57 @@ def test_production_gdelt_content_proposes_dynamic_themes_without_injected_label
     ]
     assert terminal["task"]["id"] == reversed_terminal["task"]["id"]
     assert proposals == reversed_terminal["task"]["result"]["proposals"]
+
+
+def test_discovery_checkpoint_replays_one_transient_failure_with_exact_identity():
+    from lib.gateway import GatewayError
+
+    row = {
+        "id": "22222222-2222-4222-8222-222222222222",
+        "state": "attempting",
+        "attempt_count": 1,
+    }
+
+    class Gateway:
+        def __init__(self):
+            self.calls = []
+
+        def call(self, operation, payload, **kwargs):
+            self.calls.append((operation, payload, kwargs))
+            if len(self.calls) == 1:
+                raise GatewayError("PERSISTENCE_FAILED")
+            return {"data": {"task": payload["task"], "duplicate": True}}
+
+    gateway = Gateway()
+    saved = IntelligencePipeline(gateway, [])._checkpoint_discovery_task(
+        RUN_ID, row
+    )
+
+    assert saved == row
+    assert len(gateway.calls) == 2
+    assert gateway.calls[0] == gateway.calls[1]
+
+
+def test_discovery_checkpoint_stops_after_one_transient_replay():
+    from lib.gateway import GatewayError
+
+    row = {
+        "id": "22222222-2222-4222-8222-222222222222",
+        "state": "attempting",
+        "attempt_count": 1,
+    }
+
+    class Gateway:
+        def __init__(self):
+            self.calls = []
+
+        def call(self, operation, payload, **kwargs):
+            self.calls.append((operation, payload, kwargs))
+            raise GatewayError("PERSISTENCE_FAILED")
+
+    gateway = Gateway()
+    with pytest.raises(GatewayError, match="PERSISTENCE_FAILED"):
+        IntelligencePipeline(gateway, [])._checkpoint_discovery_task(RUN_ID, row)
+
+    assert len(gateway.calls) == 2
+    assert gateway.calls[0] == gateway.calls[1]
