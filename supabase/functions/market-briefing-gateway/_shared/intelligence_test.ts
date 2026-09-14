@@ -512,6 +512,21 @@ Deno.test("record_intelligence accepts persisted provider provenance but rejects
     "https://api.gdeltproject.org/api/v2/doc/doc?query=grid",
   );
 
+  const articleFeed = validRecordIntelligenceEnvelope();
+  articleFeed.payload.items[0].request_url =
+    "https://data.gdeltproject.org/gdeltv3/gal/feed.rss";
+  assertEquals(
+    (parseGatewayEnvelope(articleFeed).payload as {
+      items: Array<Record<string, unknown>>;
+    }).items[0].request_url,
+    "https://data.gdeltproject.org/gdeltv3/gal/feed.rss",
+  );
+
+  const unreviewedDataPath = validRecordIntelligenceEnvelope();
+  unreviewedDataPath.payload.items[0].request_url =
+    "https://data.gdeltproject.org/gdeltv3/gal/other.rss";
+  assertThrows(() => parseGatewayEnvelope(unreviewedDataPath), "request_url");
+
   const invalid = validRecordIntelligenceEnvelope();
   Object.assign(invalid.payload.items[0], {
     request_url: "https://www.sec.gov/submissions/CIK0000000001.json",

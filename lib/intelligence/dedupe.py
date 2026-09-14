@@ -60,7 +60,10 @@ def deduplicate(items: Iterable[SourceItem]) -> list[RunItemDisposition]:
                 if not _contradicts(item, canonical) and _near_duplicate(item, canonical):
                     disposition, reason = "near_duplicate", "similar_normalized_content"
                     break
-        if disposition == "accepted":
+        # A retained near-duplicate is still a canonical upstream observation.
+        # Track it so an exact replay later in the same run is collapsed rather
+        # than persisted repeatedly as corroboration.
+        if disposition != "duplicate":
             accepted.append(item)
         output.append(RunItemDisposition(item=item, disposition=disposition, reason=reason))
     return output

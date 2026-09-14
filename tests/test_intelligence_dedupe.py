@@ -107,3 +107,22 @@ def test_near_duplicate_is_retained_as_corroborating_evidence():
     assert [row.disposition for row in deduplicate([first, corroborating])] == [
         "accepted", "near_duplicate",
     ]
+
+
+def test_exact_replay_of_retained_near_duplicate_is_collapsed():
+    first = normalize_item(raw_item(
+        upstream_item_id="wire-a", source_url="https://publisher-a.example/item",
+        normalized_text="Issuer announces a grid contract.",
+    ))
+    corroborating = normalize_item(raw_item(
+        provider="finnhub", upstream_item_id="wire-b",
+        source_url="https://publisher-b.example/item",
+        normalized_text="Issuer announces a grid contract!",
+    ))
+
+    dispositions = deduplicate([first, corroborating, corroborating])
+
+    assert [row.disposition for row in dispositions] == [
+        "accepted", "near_duplicate", "duplicate",
+    ]
+    assert dispositions[-1].reason == "same_upstream_item_id"
