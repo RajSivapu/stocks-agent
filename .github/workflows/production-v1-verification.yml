@@ -11,6 +11,10 @@ on:
         description: Successful protected production deployment ID
         required: true
         type: string
+      pull_request_number:
+        description: Pull request bound by the protected release receipt
+        required: true
+        type: string
 
 permissions:
   actions: read
@@ -34,6 +38,13 @@ jobs:
         with:
           ref: main
           fetch-depth: 0
+      - name: Fetch protected release PR head for immutable receipt verification
+        env:
+          PULL_REQUEST_NUMBER: ${{ inputs.pull_request_number }}
+        run: |
+          set -euo pipefail
+          [[ "$PULL_REQUEST_NUMBER" =~ ^[1-9][0-9]*$ ]] || { echo 'numeric pull request number is required'; exit 1; }
+          git fetch --no-tags --depth=1 origin "refs/pull/${PULL_REQUEST_NUMBER}/head"
       - uses: actions/setup-python@42375524e23c412d93fb67b49958b491fce71c38
         with:
           python-version: "3.14"
@@ -115,4 +126,3 @@ jobs:
           path: ${{ runner.temp }}/production-v1-verification.json
           if-no-files-found: error
           retention-days: 90
-
