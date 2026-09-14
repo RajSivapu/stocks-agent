@@ -38,3 +38,16 @@ def test_production_v1_verification_is_manual_exact_main_and_read_only():
         pinned = [line for line in raw.splitlines() if action in line]
         assert pinned and all(len(line.rsplit("@", 1)[1].strip()) == 40 for line in pinned)
 
+
+def test_production_v1_verification_fetches_its_release_pr_head_without_executing_it():
+    raw = Path(".github/workflows/production-v1-verification.yml").read_text()
+
+    fetch = raw.index("Fetch protected release PR head for immutable receipt verification")
+    verify = raw.index("Verify protected release and next normal scheduled receipt")
+    assert fetch < verify
+    assert "pull_request_number:" in raw
+    assert 'PULL_REQUEST_NUMBER: ${{ inputs.pull_request_number }}' in raw
+    assert '[[ "$PULL_REQUEST_NUMBER" =~ ^[1-9][0-9]*$ ]]' in raw
+    assert 'refs/pull/${PULL_REQUEST_NUMBER}/head' in raw
+    fetch_step = raw[fetch:verify]
+    assert "git checkout" not in fetch_step
