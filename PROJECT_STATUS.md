@@ -32,6 +32,11 @@ Protected release attempt `34884520634` then failed closed in candidate authenti
 reviewed-head hint did not match PR #107 exactly. Recovery `34884545570` also failed closed before
 deployment; neither run changed production. The corrected candidate must retain this audit history
 and pass the same exact-head, exact-main, owner-authorization, and protected-release checks.
+PR #108 supplied the corrected authorization binding, but release `34885356253` found that the
+deployment script could not resolve a deleted squash-merged PR head from the main-only checkout.
+Recovery `34885641923` failed closed after restoration; production stayed on its prior component
+versions. The release workflow now fetches the immutable GitHub pull-request head ref explicitly and
+checks it against the authorized SHA before any protected mutation.
 
 Owner-only Site v10 remains live and did not require republication. The September 10 protected build
 has the same build hash and the same 15 asset hashes as the existing Site v10 receipt at

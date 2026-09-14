@@ -154,6 +154,17 @@ def test_release_binds_the_approved_pr_head_and_exact_main_ci_metadata():
     assert "reviewed_sha=$PR_HEAD_SHA" in workflow
 
 
+def test_release_fetches_the_deleted_pr_head_for_local_tree_reverification():
+    workflow = Path(".github/workflows/owner-dashboard-release.yml").read_text()
+    fetch = workflow.index("Fetch exact reviewed PR head for local tree verification")
+    deploy = workflow.index("Execute protected deployment with encrypted component recovery")
+
+    assert fetch < deploy
+    assert 'refs/pull/${PULL_REQUEST_NUMBER}/head' in workflow
+    assert 'test "$FETCHED_REVIEWED_SHA" = "$REVIEWED_SHA"' in workflow
+    assert 'PULL_REQUEST_NUMBER: ${{ steps.candidate.outputs.pull_request_number }}' in workflow
+
+
 def test_release_authenticates_candidate_before_checkout_dependencies_or_production_secrets():
     workflow = Path(".github/workflows/owner-dashboard-release.yml").read_text()
     trust = workflow.index("Authenticate exact reviewed main candidate without candidate code")
