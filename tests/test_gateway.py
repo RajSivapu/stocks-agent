@@ -53,7 +53,9 @@ def test_healthcheck_supplies_owner_market_date_to_gateway(monkeypatch, capsys):
 
     def fake_gateway_call(operation, payload, **kwargs):
         calls.append((operation, payload, kwargs))
-        return {"data": {"run_id": RUN_ID}}
+        if operation == "read_context":
+            raise AssertionError("healthcheck must not read an ephemeral dry-run run")
+        return {"data": {"run_id": RUN_ID, "status": "ephemeral"}}
 
     monkeypatch.setattr(gateway, "call", fake_gateway_call)
     monkeypatch.setattr(config, "secret", lambda _name: "test-value")
@@ -62,13 +64,14 @@ def test_healthcheck_supplies_owner_market_date_to_gateway(monkeypatch, capsys):
     before = datetime.now(ZoneInfo("America/Chicago")).date().isoformat()
     runpy.run_path(str(ROOT / "scripts" / "healthcheck.py"), run_name="__main__")
     after = datetime.now(ZoneInfo("America/Chicago")).date().isoformat()
-    capsys.readouterr()
+    result = json.loads(capsys.readouterr().out)
 
     assert calls[0][0] == "start_run"
     assert calls[0][1]["phase"] == "on-demand"
     assert calls[0][1]["market_date"] in {before, after}
     assert calls[0][2]["dry_run"] is True
-    assert calls[2] == ("evaluate_alert_rules", {}, {"dry_run": True})
+    assert calls[1] == ("evaluate_alert_rules", {}, {"dry_run": True})
+    assert result["gateway"] == result["alerts"] == "ok"
 
 
 def configured(monkeypatch):
@@ -404,7 +407,7 @@ def test_healthcheck_reports_missing_source_configuration_without_secret_values(
     requests = []
 
     def fake_gateway_call(_operation, _payload, **_kwargs):
-        return {"data": {"run_id": RUN_ID}}
+        return {"data": {"run_id": RUN_ID, "status": "ephemeral"}}
 
     def missing_secret(name):
         raise KeyError(name)

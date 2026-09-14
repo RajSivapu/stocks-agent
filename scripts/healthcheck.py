@@ -79,7 +79,8 @@ def _gateway_health() -> dict[str, str]:
         started = gateway.call(
             "start_run", {"phase": "on-demand", "market_date": market_date}, dry_run=True
         )
-        gateway.call("read_context", {}, run_id=started["data"]["run_id"], dry_run=True)
+        if started.get("data", {}).get("status") != "ephemeral":
+            raise gateway.GatewayError("INVALID_GATEWAY_RESPONSE")
         results["gateway"] = "ok"
     except Exception as exc:
         results["gateway"] = f"FAIL {type(exc).__name__}"
