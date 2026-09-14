@@ -87,6 +87,9 @@ UNRESOLVED_PACKET_READBACK_MIGRATION = (
 FRIDAY_STATUS_REVISION_MIGRATION = (
     ROOT / "sql/migrations/20261029_scheduled_friday_status_revision.sql"
 )
+SAME_RUN_TERMINAL_CHECKPOINT_REPLAY_MIGRATION = (
+    ROOT / "sql/migrations/20261030_same_run_terminal_checkpoint_replay.sql"
+)
 SCHEMA = ROOT / "sql/schema.sql"
 
 
@@ -147,12 +150,14 @@ def test_v2_runtime_completion_and_honest_empty_tail_are_parseable_and_ordered()
     assert parse_sql(THEME_EVIDENCE_RETRIEVAL_TIMES_MIGRATION.read_text())
     assert parse_sql(UNRESOLVED_PACKET_READBACK_MIGRATION.read_text())
     assert parse_sql(FRIDAY_STATUS_REVISION_MIGRATION.read_text())
+    assert parse_sql(SAME_RUN_TERMINAL_CHECKPOINT_REPLAY_MIGRATION.read_text())
     assert ACTIVE_INTELLIGENCE_POLICY_MIGRATION.read_bytes() in schema
     assert REFERENCE_TRANSFER_RESTART_MIGRATION.read_bytes() in schema
     assert RETRY_TASK_CAPACITY_RECOVERY_MIGRATION.read_bytes() in schema
     assert GDELT_ARTICLE_FEED_MIGRATION.read_bytes() in schema
     assert THEME_EVIDENCE_RETRIEVAL_TIMES_MIGRATION.read_bytes() in schema
-    assert schema.endswith(FRIDAY_STATUS_REVISION_MIGRATION.read_bytes())
+    assert FRIDAY_STATUS_REVISION_MIGRATION.read_bytes() in schema
+    assert schema.endswith(SAME_RUN_TERMINAL_CHECKPOINT_REPLAY_MIGRATION.read_bytes())
     migration = RUNTIME_COMPLETION_MIGRATION.read_text()
     assert "SECURITY DEFINER SET search_path=pg_catalog" in migration
     assert "record_market_intelligence_v2_completion" in migration

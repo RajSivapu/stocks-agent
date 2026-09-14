@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from email.utils import parsedate_to_datetime
@@ -121,6 +121,7 @@ def parse_bounded_feed(
     max_items: int,
     allowed_hosts: frozenset[str] | None = None,
     allowed_path_patterns: tuple[re.Pattern[str], ...] = (),
+    item_link_normalizer: Callable[[str], str] | None = None,
 ) -> tuple[FeedItem, ...]:
     """Parse RSS/Atom bytes without DTDs, entities, active HTML, or unsafe links."""
     if (
@@ -160,6 +161,8 @@ def parse_bounded_feed(
     for node in nodes[:max_items]:
         title = _first_text(node, "title")[:500]
         url = _link(node)
+        if item_link_normalizer is not None:
+            url = item_link_normalizer(url)
         identity = _first_text(node, "guid", "id") or (
             f"url-sha256:{hashlib.sha256(url.encode()).hexdigest()}" if url else ""
         )
@@ -188,8 +191,12 @@ class OfficialFeedAdapter(SourceAdapter):
     feed_routes: Mapping[str, str] = MappingProxyType({})
     response_routes: Mapping[str, frozenset[str]] = MappingProxyType({})
     item_path_patterns: Mapping[str, tuple[re.Pattern[str], ...]] = MappingProxyType({})
+    item_allowed_hosts: frozenset[str] | None = None
     allow_text_html_xml = False
     max_source_bytes = 1_000_000
+
+    def _normalize_item_link(self, value: str) -> str:
+        return value
 
     def _route(self, query: CollectionQuery) -> str:
         capability_id = query.capability_id
@@ -240,8 +247,9 @@ class OfficialFeedAdapter(SourceAdapter):
             # Retain enough bounded records for the adapter layer to detect an
             # unpageable rolling-feed overflow before applying the item bound.
             max_items=_MAX_FEED_ITEMS,
-            allowed_hosts=self.allowed_hosts,
+            allowed_hosts=self.item_allowed_hosts or self.allowed_hosts,
             allowed_path_patterns=self.item_path_patterns.get(query.capability_id or "", ()),
+            item_link_normalizer=self._normalize_item_link,
         )
         request_url = self._route(query)
         return tuple({

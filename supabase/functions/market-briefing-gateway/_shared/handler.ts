@@ -90,6 +90,7 @@ import {
   summarizeIntelligencePayload,
 } from "./intelligence.ts";
 import {
+  canonicalPeriodicPhase,
   parseRecordReportPayload,
   parseReportDecisions,
   type RecordReportPayload,
@@ -1303,6 +1304,25 @@ export function createGatewayHandler(dependencies: GatewayDependencies) {
           payload,
           deps.repository,
         );
+        const periodicPhase = origin.scheduled
+          ? canonicalPeriodicPhase(payload.kind, payload.market_date)
+          : null;
+        let canonicalPeriodicBody: string | undefined;
+        if (periodicPhase !== null) {
+          if (!deps.repository.loadCanonicalPeriodicPublication) {
+            throw new GatewayRepositoryError("PERSISTENCE_FAILED");
+          }
+          const canonical = await deps.repository
+            .loadCanonicalPeriodicPublication(
+              requireRun(envelope),
+              periodicPhase,
+              payload.market_date,
+            );
+          if (!canonical) {
+            throw new GatewayRepositoryError("PERSISTENCE_FAILED");
+          }
+          canonicalPeriodicBody = canonical.rendered_body;
+        }
         const delivery = renderReportDelivery(
           payload,
           evidence.decisions,
@@ -1311,6 +1331,7 @@ export function createGatewayHandler(dependencies: GatewayDependencies) {
               "https://invalid.local",
             allowedDashboardOrigins: dependencies.dashboardAllowedOrigins ?? [],
             scheduled: origin.scheduled,
+            canonicalPeriodicBody,
           },
           evidence.researchPacket,
         );

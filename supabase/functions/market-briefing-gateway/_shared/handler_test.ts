@@ -100,6 +100,23 @@ function approvedReportDecision(
   };
 }
 
+function canonicalPeriodicPublication(
+  phase: "pre-market" | "post-market",
+  marketDate: string,
+) {
+  const heading = phase === "pre-market"
+    ? `<b>🌅 MORNING BRIEF — ${marketDate}</b>`
+    : `<b>🌙 EOD — Sep ${marketDate.slice(-2)}</b>`;
+  const rendered_body = [
+    heading,
+    "<b>📊 YOUR PORTFOLIO</b>\nNo verified holding changes.",
+    "<b>🌎 MARKET</b>\nNo policy-approved action.",
+    "<b>🎯 OPEN ENTRY ZONES</b>\nNo open entries.",
+    "<i>Suggestion only — no order was placed.</i>",
+  ].join("\n\n");
+  return { rendered_body, rendered_hash: sha256Hex(rendered_body) };
+}
+
 Deno.test("suppressed report retains the typed policy reason without a Telegram send", async () => {
   const repo = new FakeRepository();
   const payload = reportFixture("intraday");
@@ -182,6 +199,10 @@ Deno.test("scheduled Friday research persists a report and delivers an owner sta
   }
   const repo = new ResearchOnlyRepository();
   repo.scheduledReportPhase = "post-market";
+  repo.canonicalPeriodicPublication = canonicalPeriodicPublication(
+    "post-market",
+    "2026-09-04",
+  );
   const payload = researchOnlyReportFixture(packet, "weekly", "2026-09-04");
   const setup = makeHandler(repo, {
     dashboardBaseUrl: "https://stocks.example.test",
@@ -199,15 +220,23 @@ Deno.test("scheduled Friday research persists a report and delivers an owner sta
   });
   assertEquals(repo.reportDecisionReads, []);
   assertEquals(repo.packetReadCalls, 1);
+  assertEquals(repo.canonicalPeriodicReads, [{
+    runId: RUN_ID,
+    phase: "post-market",
+    marketDate: "2026-09-04",
+  }]);
   assertEquals(setup.sent.length, 1);
+  assertEquals(
+    setup.sent[0].join("\n\n"),
+    repo.canonicalPeriodicPublication.rendered_body,
+  );
   assert(
-    setup.sent[0][0].includes("🌙 <b>FRIDAY EOD — Sep 4</b>") &&
-      setup.sent[0][0].includes("1 research candidate(s) reviewed") &&
-      setup.sent[0][0].includes("No policy-approved action") &&
-      setup.sent[0][0].includes(">View full audit</a>") &&
-      !setup.sent[0][0].includes("unresolved:magnet-supplier") &&
-      !setup.sent[0][0].includes("fabricated ticker"),
-    "Friday Telegram status leaked unresolved research or omitted the no-action result",
+    !setup.sent[0][0].includes("unresolved:magnet-supplier"),
+    "canonical Friday body leaked unresolved research",
+  );
+  assert(
+    !setup.sent[0][0].includes("fabricated ticker"),
+    "canonical Friday body leaked caller prose",
   );
   assertEquals(repo.reportOrigins.length, 1);
   assert(
@@ -235,6 +264,10 @@ Deno.test("scheduled pre-market research sends a morning no-action Telegram rece
   }
   const repo = new ResearchOnlyRepository();
   repo.scheduledReportPhase = "pre-market";
+  repo.canonicalPeriodicPublication = canonicalPeriodicPublication(
+    "pre-market",
+    "2026-09-02",
+  );
   const payload = researchOnlyReportFixture(packet, "morning");
   const setup = makeHandler(repo);
 
@@ -249,12 +282,18 @@ Deno.test("scheduled pre-market research sends a morning no-action Telegram rece
   });
   assertEquals(result.telegram_message_ids, [77]);
   assertEquals(setup.sent.length, 1);
+  assertEquals(repo.canonicalPeriodicReads, [{
+    runId: RUN_ID,
+    phase: "pre-market",
+    marketDate: "2026-09-02",
+  }]);
+  assertEquals(
+    setup.sent[0].join("\n\n"),
+    repo.canonicalPeriodicPublication.rendered_body,
+  );
   assert(
-    setup.sent[0][0].includes("🌅 <b>MORNING CHECK — Sep 2</b>") &&
-      setup.sent[0][0].includes("No policy-approved action") &&
-      setup.sent[0][0].includes("Suggestion only") &&
-      !setup.sent[0][0].includes("fabricated ticker"),
-    "morning Telegram did not use the canonical no-action copy",
+    !setup.sent[0][0].includes("fabricated ticker"),
+    "canonical morning body leaked caller prose",
   );
   const stored = repo.storedReport as {
     rendered_text: string;
@@ -262,6 +301,103 @@ Deno.test("scheduled pre-market research sends a morning no-action Telegram rece
   };
   assertEquals(stored.rendered_text, setup.sent[0][0]);
   assertEquals(stored.rendered_hash, sha256Hex(setup.sent[0][0]));
+});
+
+Deno.test("scheduled morning and Friday reports deliver the exact same-run periodic body", async () => {
+  const cases = [
+    {
+      kind: "morning" as const,
+      phase: "pre-market" as const,
+      marketDate: "2026-09-02",
+      heading: "<b>🌅 MORNING BRIEF — 2026-09-02</b>",
+    },
+    {
+      kind: "weekly" as const,
+      phase: "post-market" as const,
+      marketDate: "2026-09-04",
+      heading: "<b>🌙 EOD — Sep 04</b>",
+    },
+  ];
+  for (const item of cases) {
+    const repo = new FakeRepository();
+    repo.scheduledReportPhase = item.phase;
+    const payload = reportFixture(item.kind);
+    payload.market_date = item.marketDate;
+    payload.idempotency_key = sha256Hex(
+      `v2:${item.kind}:${item.marketDate}:${PACKET_HASH}:${payload.report_hash}`,
+    );
+    payload.id = reportIdFromKey(payload.idempotency_key);
+    repo.reportDecisions = [approvedReportDecision(payload)];
+    const canonicalBody = [
+      item.heading,
+      "<b>📊 YOUR PORTFOLIO</b>\nCENX · $47.02 · verified holding state",
+      "<b>🌎 MARKET</b>\nVerified broad-market context",
+      "<b>🎯 OPEN ENTRY ZONES</b>\nCENX · policy-reviewed zone",
+      "<i>Suggestion only — no order was placed.</i>",
+    ].join("\n\n");
+    repo.canonicalPeriodicPublication = {
+      rendered_body: canonicalBody,
+      rendered_hash: sha256Hex(canonicalBody),
+    };
+    const setup = makeHandler(repo, {
+      dashboardBaseUrl: "https://stocks.example.test",
+      dashboardAllowedOrigins: ["https://stocks.example.test"],
+    });
+
+    const response = await setup.handler(request("record_report", payload));
+
+    if (response.status !== 200) {
+      throw new Error(JSON.stringify({
+        response: await json(response),
+        reads: repo.canonicalPeriodicReads,
+        events: repo.events,
+      }));
+    }
+    assertEquals(setup.sent.length, 1);
+    assertEquals(setup.sent[0].join("\n\n"), canonicalBody);
+    assertEquals(repo.canonicalPeriodicReads, [{
+      runId: RUN_ID,
+      phase: item.phase,
+      marketDate: item.marketDate,
+    }]);
+    const stored = repo.storedReport as Record<string, unknown> & {
+      report: Record<string, unknown>;
+    };
+    assertEquals(stored.rendered_text, canonicalBody);
+    assertEquals(stored.rendered_hash, sha256Hex(canonicalBody));
+    assertEquals(stored.report_hash, sha256Hex(canonicalJson(stored.report)));
+    assertEquals(stored.id, reportIdFromKey(String(stored.idempotency_key)));
+    assertEquals(
+      stored.idempotency_key,
+      sha256Hex(
+        `v2:${stored.kind}:${item.marketDate}:${PACKET_HASH}:${stored.report_hash}`,
+      ),
+    );
+    assert(
+      !JSON.stringify(stored).includes("999999"),
+      "caller prose entered the periodic report audit record",
+    );
+  }
+});
+
+Deno.test("scheduled periodic report fails closed when its canonical publication is absent", async () => {
+  const repo = new FakeRepository();
+  repo.scheduledReportPhase = "pre-market";
+  const payload = reportFixture("morning");
+  repo.reportDecisions = [approvedReportDecision(payload)];
+  const setup = makeHandler(repo);
+
+  const response = await setup.handler(request("record_report", payload));
+
+  assertEquals(response.status, 500);
+  assertEquals(await json(response), { ok: false, code: "PERSISTENCE_FAILED" });
+  assertEquals(repo.canonicalPeriodicReads, [{
+    runId: RUN_ID,
+    phase: "pre-market",
+    marketDate: "2026-09-02",
+  }]);
+  assertEquals(setup.sent, []);
+  assertEquals(repo.storedReport, null);
 });
 
 Deno.test("unscheduled pre-market-shaped research cannot send a morning status", async () => {
@@ -484,6 +620,10 @@ Deno.test("scheduled report origins retain requested kind before pre-market deli
   for (const expected of cases) {
     const repo = new FakeRepository();
     repo.scheduledReportPhase = "pre-market";
+    repo.canonicalPeriodicPublication = canonicalPeriodicPublication(
+      "pre-market",
+      "2026-09-02",
+    );
     const payload = reportFixture("morning");
     repo.reportDecisions = [{
       evaluation_id: payload.report.policy_decision_ids[0],
@@ -1021,6 +1161,15 @@ class FakeRepository implements GatewayRepository {
   reportPublication: PublicationReceipt | null = null;
   reportPublicationClaimable = true;
   reportPublicationLeaseExpired = false;
+  canonicalPeriodicPublication: {
+    rendered_body: string;
+    rendered_hash: string;
+  } | null = null;
+  canonicalPeriodicReads: Array<{
+    runId: string;
+    phase: "pre-market" | "post-market";
+    marketDate: string;
+  }> = [];
   loadReportDecisions(
     runId: string,
     packetId: string,
@@ -1043,6 +1192,14 @@ class FakeRepository implements GatewayRepository {
       phase: this.scheduledReportPhase,
     });
     return Promise.resolve({ scheduled: this.scheduledReportPhase !== null });
+  }
+  loadCanonicalPeriodicPublication(
+    runId: string,
+    phase: "pre-market" | "post-market",
+    marketDate: string,
+  ) {
+    this.canonicalPeriodicReads.push({ runId, phase, marketDate });
+    return Promise.resolve(structuredClone(this.canonicalPeriodicPublication));
   }
   recordReport(
     _runId: string,

@@ -425,6 +425,12 @@ class IntelligencePipeline:
         )
         if len(checkpoint_entries) != sum(isinstance(entry, Mapping) for entry in checkpoint_entries):
             raise ValueError("gateway start receipt checkpoints are invalid")
+        terminal_entries = start.get("terminal_checkpoint_entries", ())
+        if not isinstance(terminal_entries, Sequence) or isinstance(
+            terminal_entries, (str, bytes, bytearray)
+        ) or any(not isinstance(entry, Mapping) for entry in terminal_entries):
+            raise ValueError("gateway start receipt terminal checkpoints are invalid")
+        self.cache.hydrate_terminal_collections(run_id, terminal_entries)
         plan_rows = start_payload["reservation_plan"]["reservations"]
         self._install_quota(plan_rows, start.get("reservation_usage", {}))
 
@@ -513,6 +519,12 @@ class IntelligencePipeline:
         ) or any(not isinstance(entry, Mapping) for entry in checkpoint_entries):
             raise ValueError("gateway start receipt checkpoints are invalid")
         self.cache.hydrate_collections(checkpoint_entries, now=_utc(request.now))
+        terminal_entries = start.get("terminal_checkpoint_entries", ())
+        if not isinstance(terminal_entries, Sequence) or isinstance(
+            terminal_entries, (str, bytes, bytearray)
+        ) or any(not isinstance(entry, Mapping) for entry in terminal_entries):
+            raise ValueError("gateway start receipt terminal checkpoints are invalid")
+        self.cache.hydrate_terminal_collections(run_id, terminal_entries)
         self._install_quota(plan_rows, start.get("reservation_usage", {}))
 
         persisted = self._read_discovery_tasks(run_id)
@@ -538,9 +550,25 @@ class IntelligencePipeline:
                     )
                 persisted[task.task_id] = self._checkpoint_discovery_task(run_id, row)
 
+        plan_by_provider = {str(row["provider"]): row for row in plan_rows}
+        precollected_results = {
+            task.task_id: self._run_planned_collection_task(
+                run_id,
+                request,
+                request_window,
+                task,
+                plan.capabilities[task.capability_id],
+                adapters[task.provider],
+                plan_by_provider[task.provider],
+                persisted,
+            )
+            for task in collection_tasks
+            if task.provider == "gdelt"
+            and task.capability_id == "gdelt_theme_search"
+            and not task.dependencies
+        }
         self._run_planned_reference(run_id, request, persisted)
         self._hydrate_reference_snapshot(run_id)
-        plan_by_provider = {str(row["provider"]): row for row in plan_rows}
         results: list[CollectionResult] = []
         collection_results: list[CollectionResult] = []
         frozen_holding = self._frozen_enrichment_selection(run_id, request.phase, "holding_quotes")
@@ -553,16 +581,18 @@ class IntelligencePipeline:
                 frozen_manifest=frozen_holding,
             ))
         for task in collection_tasks:
-            result = self._run_planned_collection_task(
-                run_id,
-                request,
-                request_window,
-                task,
-                plan.capabilities[task.capability_id],
-                adapters[task.provider],
-                plan_by_provider[task.provider],
-                persisted,
-            )
+            result = precollected_results.get(task.task_id)
+            if result is None:
+                result = self._run_planned_collection_task(
+                    run_id,
+                    request,
+                    request_window,
+                    task,
+                    plan.capabilities[task.capability_id],
+                    adapters[task.provider],
+                    plan_by_provider[task.provider],
+                    persisted,
+                )
             collection_results.append(result)
             results.append(result)
 
@@ -1801,12 +1831,14 @@ class IntelligencePipeline:
             receipt_row = saved_checkpoint.get("receipt")
             if isinstance(receipt_row, Mapping) and isinstance(receipt_row.get("metadata"), Mapping):
                 self.cache.attach_collection_metadata(key, receipt_row["metadata"])
-        cached = self.cache.get_collection(
-            key,
-            reservation_id=str(reservation["id"]),
-            source_receipt_id=source_receipt_id,
-            now=_utc(request.now),
-        )
+        cached = self.cache.get_terminal_collection(run_id, key)
+        if cached is None:
+            cached = self.cache.get_collection(
+                key,
+                reservation_id=str(reservation["id"]),
+                source_receipt_id=source_receipt_id,
+                now=_utc(request.now),
+            )
         if state in {"succeeded", "failed", "deferred", "uncertain"}:
             saved_source_cursor = saved.get("source_cursor") if isinstance(saved, Mapping) else None
             if isinstance(saved_source_cursor, Mapping):
@@ -2095,10 +2127,13 @@ class IntelligencePipeline:
             )
             try:
                 query = self._query_for(adapter, target, request, request_window)
-                cached = self.cache.get_collection(
-                    _collection_cache_key(adapter, query), reservation_id=str(row["id"]),
-                    source_receipt_id=source_receipt_id, now=_utc(request.now),
-                )
+                collection_key = _collection_cache_key(adapter, query)
+                cached = self.cache.get_terminal_collection(request.request_id, collection_key)
+                if cached is None:
+                    cached = self.cache.get_collection(
+                        collection_key, reservation_id=str(row["id"]),
+                        source_receipt_id=source_receipt_id, now=_utc(request.now),
+                    )
                 if cached is not None:
                     results.append(cached)
                     continue

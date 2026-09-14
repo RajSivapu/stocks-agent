@@ -38,6 +38,7 @@ import {
   parseIntelligenceRecordReceipt,
   parseIntelligenceStartReceipt,
   parseReferencePage,
+  sha256Hex,
   type RecordIntelligencePayload,
   type ReferenceBeginPayload,
   type ReferenceChunkPayload,
@@ -59,6 +60,11 @@ export interface ReportRecordReceipt {
   report_hash: string;
   rendered_hash: string;
   duplicate: boolean;
+}
+
+export interface CanonicalPeriodicPublication {
+  rendered_body: string;
+  rendered_hash: string;
 }
 
 export interface LearningRecordReceipt {
@@ -348,6 +354,11 @@ export interface GatewayRepository {
       | "report_hash"
     >,
   ): Promise<{ scheduled: boolean }>;
+  loadCanonicalPeriodicPublication?(
+    runId: string,
+    phase: "pre-market" | "post-market",
+    marketDate: string,
+  ): Promise<CanonicalPeriodicPublication | null>;
   createReportPublication?(
     runId: string,
     payload: RecordReportPayload,
@@ -1262,6 +1273,62 @@ export function createSupabaseGatewayRepository(
       });
       const row = oneObject(result);
       return { scheduled: boole(row.scheduled) };
+    },
+
+    async loadCanonicalPeriodicPublication(runId, phase, marketDate) {
+      if (
+        !UUID_PATTERN.test(runId) ||
+        (phase !== "pre-market" && phase !== "post-market") ||
+        !/^\d{4}-\d{2}-\d{2}$/.test(marketDate) ||
+        new Date(`${marketDate}T00:00:00.000Z`).toISOString().slice(0, 10) !==
+          marketDate
+      ) throw new GatewayRepositoryError("INVALID_PERSISTED_DATA");
+      const result = rows(
+        await client.from("market_publications")
+          .select(
+            "run_id,market_date,phase,kind,template_version,rendered_body,rendered_hash,status,telegram_message_ids",
+          )
+          .eq("run_id", runId)
+          .eq("market_date", marketDate)
+          .eq("phase", phase)
+          .eq("kind", "brief")
+          .eq("template_version", 2)
+          .eq("status", "suppressed")
+          .limit(2),
+      );
+      if (result.length === 0) return null;
+      if (result.length !== 1) {
+        throw new GatewayRepositoryError("INVALID_PERSISTED_DATA");
+      }
+      const row = result[0];
+      if (
+        !exactKeys(row, [
+          "run_id",
+          "market_date",
+          "phase",
+          "kind",
+          "template_version",
+          "rendered_body",
+          "rendered_hash",
+          "status",
+          "telegram_message_ids",
+        ]) ||
+        row.run_id !== runId || row.market_date !== marketDate ||
+        row.phase !== phase || row.kind !== "brief" ||
+        row.template_version !== 2 || row.status !== "suppressed" ||
+        !Array.isArray(row.telegram_message_ids) ||
+        row.telegram_message_ids.length !== 0 ||
+        typeof row.rendered_body !== "string" ||
+        row.rendered_body.trim().length === 0 ||
+        new TextEncoder().encode(row.rendered_body).byteLength > 14_000 ||
+        typeof row.rendered_hash !== "string" ||
+        !/^[0-9a-f]{64}$/.test(row.rendered_hash) ||
+        sha256Hex(row.rendered_body) !== row.rendered_hash
+      ) throw new GatewayRepositoryError("INVALID_PERSISTED_DATA");
+      return {
+        rendered_body: row.rendered_body,
+        rendered_hash: row.rendered_hash,
+      };
     },
 
     async createReportPublication(runId, payload) {

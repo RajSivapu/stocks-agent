@@ -411,6 +411,51 @@ Deno.test("scheduled Friday ordinary research delivers a bounded no-action statu
   );
 });
 
+Deno.test("scheduled morning reuses the exact canonical periodic body with deterministic parts", () => {
+  const value = report("morning");
+  value.market_date = "2026-09-02";
+  const canonicalBody = [
+    "<b>🌅 MORNING BRIEF — 2026-09-02</b>\n<i>Data through 2026-09-02T16:55:00.000Z</i>",
+    `<b>📊 YOUR PORTFOLIO</b>\n${"CENX holding context. ".repeat(70)}`,
+    `<b>🌎 MARKET</b>\n${"Verified market context. ".repeat(70)}`,
+    `<b>🎯 OPEN ENTRY ZONES</b>\n${"No unverified order instruction. ".repeat(45)}`,
+    "<i>Suggestion only — no order was placed.</i>",
+  ].join("\n\n");
+
+  const canonicalOptions = {
+    ...OPTIONS,
+    canonicalPeriodicBody: canonicalBody,
+  };
+  const first = renderReportDelivery(
+    resign(value),
+    [decision()],
+    canonicalOptions,
+  );
+  const second = renderReportDelivery(
+    resign(value),
+    [decision()],
+    canonicalOptions,
+  );
+
+  assertEquals(first.status, "ready");
+  assertEquals(first.body, canonicalBody);
+  assertEquals(first.parts, second.parts);
+  assertEquals(first.parts.join("\n\n"), canonicalBody);
+  assert(first.parts.length > 1, "canonical periodic body was not split");
+  assert(
+    first.parts.every((part) => part.length <= 3_498),
+    "canonical periodic part exceeded the Telegram bound",
+  );
+  assertEquals(first.payload?.rendered_text, canonicalBody);
+  assertEquals(first.payload?.rendered_hash, sha256Hex(canonicalBody));
+  assertEquals(first.payload?.id, second.payload?.id);
+  assertEquals(first.payload?.report_hash, second.payload?.report_hash);
+  assert(
+    !first.body.includes("Caller") && !first.body.includes("999999"),
+    "caller prose displaced the canonical periodic body",
+  );
+});
+
 Deno.test("scheduled weekly research outside Friday remains suppressed", () => {
   const value = report("weekly");
   value.market_date = "2026-09-02";

@@ -305,6 +305,45 @@ def test_eia_feed_without_guid_uses_a_bounded_url_identity():
     assert len(result.items[0].upstream_item_id) == len("url-sha256:") + 64
 
 
+def test_eia_feed_normalizes_single_leading_slash_item_link_to_reviewed_origin():
+    source_url = "https://www.eia.gov/rss/todayinenergy.xml"
+    raw = b"""<rss><channel><item><guid>eia-relative-1</guid><title>Grid demand rises</title>
+      <link>/todayinenergy/detail.php?id=123</link>
+      <description>Official energy context.</description>
+      <pubDate>Mon, 07 Sep 2026 14:00:00 GMT</pubDate></item></channel></rss>"""
+
+    result = adapter(
+        "eia", FixtureHttp(raw, url=source_url, content_type="text/xml")
+    ).collect(query("eia_today_in_energy_rss"))
+
+    assert result.receipt.status == "succeeded"
+    assert result.items[0].source_url == (
+        "https://www.eia.gov/todayinenergy/detail.php?id=123"
+    )
+
+
+@pytest.mark.parametrize("item_url", [
+    "//attacker.example/todayinenergy/detail.php?id=123",
+    r"/todayinenergy\\detail.php?id=123",
+    "https://www.eia.gov/todayinenergy/detail.php?id=123\x7f",
+    "https://api.eia.gov/todayinenergy/detail.php?id=123",
+    "https://attacker.example/todayinenergy/detail.php?id=123",
+])
+def test_eia_feed_rejects_ambiguous_or_untrusted_item_links(item_url):
+    source_url = "https://www.eia.gov/rss/todayinenergy.xml"
+    raw = f"""<rss><channel><item><guid>eia-unsafe-1</guid><title>Grid demand rises</title>
+      <link>{item_url}</link><description>Official energy context.</description>
+      <pubDate>Mon, 07 Sep 2026 14:00:00 GMT</pubDate></item></channel></rss>""".encode()
+
+    result = adapter(
+        "eia", FixtureHttp(raw, url=source_url, content_type="text/xml")
+    ).collect(query("eia_today_in_energy_rss"))
+
+    assert result.receipt.status == "failed"
+    assert result.receipt.error_code == "INVALID_FEED"
+    assert result.items == ()
+
+
 def test_eia_statistics_without_free_key_is_configuration_missing_before_transport():
     http = FixtureHttp({}, url="https://api.eia.gov/v2/", content_type="application/json")
     with pytest.raises(SourceFailure) as failure:
