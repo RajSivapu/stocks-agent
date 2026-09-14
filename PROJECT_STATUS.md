@@ -21,6 +21,14 @@ status. PR #104 added a protected read-only scheduled V1 verifier; exact-head CI
 exact-main CI `34858714524` passed on current main
 `e6ee2edaeb4ea6520edc2d10d99bb3c62a04dc84`.
 
+The September 14 normal intraday chain reached collection completion but the gateway rejected its
+final intelligence payload before Analyst, Checker, report, or Telegram stages. Read-only recovery
+proved three bounded serialization defects: the reviewed GDELT article-feed host was absent from the
+Edge parser, completion coverage exceeded its size limit, and replayed retained near-duplicates
+could reuse evidence IDs. PR #106 corrected all three while preserving full audit counts, and its
+exact-head CI `34882841078` plus exact-main CI `34883177507` passed. This failed intraday chain must
+not be retried; the next normal post-market slot is the production proof for the corrected runtime.
+
 Owner-only Site v10 remains live and did not require republication. The September 10 protected build
 has the same build hash and the same 15 asset hashes as the existing Site v10 receipt at
 `docs/receipts/2026-09-09-native-site-v10.json`; the release changed provider and dashboard-server
