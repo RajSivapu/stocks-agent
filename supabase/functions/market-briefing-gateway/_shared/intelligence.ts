@@ -42,7 +42,7 @@ const DISCOVERY_STATUSES = [
   "insufficient_coverage",
 ] as const;
 const PROVIDER_HOSTS: Readonly<Record<string, readonly string[]>> = {
-  gdelt: ["api.gdeltproject.org"],
+  gdelt: ["api.gdeltproject.org", "data.gdeltproject.org"],
   alpha_vantage: ["www.alphavantage.co"],
   finnhub: ["finnhub.io"],
   yahoo: ["query1.finance.yahoo.com"],
@@ -424,6 +424,12 @@ function providerRequestUrl(
   const host = parsed.hostname;
   if (!PROVIDER_HOSTS[String(provider)]?.includes(host)) {
     throw new Error(`${path} host is not approved for provider`);
+  }
+  if (
+    provider === "gdelt" && host === "data.gdeltproject.org" &&
+    url !== "https://data.gdeltproject.org/gdeltv3/gal/feed.rss"
+  ) {
+    throw new Error(`${path} path is not approved for provider`);
   }
   return url;
 }

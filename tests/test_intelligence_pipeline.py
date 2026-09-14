@@ -534,6 +534,41 @@ def test_exact_duplicate_persists_once_but_retains_receipt_accounting():
     assert [drop["reason"] for drop in result.drops if drop["kind"] == "source_item"] == ["same_upstream_item_id"]
 
 
+def test_completion_bounds_duplicate_audit_coverage_for_gateway_contract():
+    gateway = FakeGateway()
+    source = raw_item("holding:TEST", official=True)
+    duplicates = tuple(source for _ in range(400))
+    collection = CollectionResult(
+        duplicates,
+        receipt("gdelt"),
+        20,
+    )
+    pipeline = IntelligencePipeline(gateway, ())
+
+    result = pipeline._complete(
+        request("intraday"), RUN_ID, ("holding:TEST",), (collection,),
+    )
+
+    payload = gateway.payloads[-1]
+    coverage = payload["coverage"]
+    encoded_coverage = json.dumps(
+        coverage, ensure_ascii=False, separators=(",", ":"), sort_keys=True,
+    ).encode("utf-8")
+    packet = payload["packet"]["packet"]
+    packet_hash = hashlib.sha256(json.dumps(
+        packet, ensure_ascii=False, separators=(",", ":"), sort_keys=True,
+    ).encode("utf-8")).hexdigest()
+
+    assert len(encoded_coverage) <= 28 * 1024
+    assert result.coverage["duplicate_count"] == 399
+    assert coverage["duplicate_reference_count"] == 399
+    assert coverage["duplicate_references_truncated_count"] > 0
+    assert len(coverage["duplicate_references"]) < 399
+    assert coverage["collector_drop_count"] >= 399
+    assert coverage["collector_drops_truncated_count"] > 0
+    assert packet_hash == payload["packet"]["packet_hash"]
+
+
 def test_near_corroboration_reaches_discovery_and_packet_evidence():
     gateway = FakeGateway()
     adapter = FakeAdapter()

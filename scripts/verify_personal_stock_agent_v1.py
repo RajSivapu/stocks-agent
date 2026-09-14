@@ -863,16 +863,39 @@ def _verify_discovery_capability(receipt: Mapping[str, object]) -> VerificationR
         payload_coverage.get("collector_drops", [])
         if isinstance(payload_coverage, Mapping) else None
     )
+    collector_drop_count = (
+        payload_coverage.get("collector_drop_count")
+        if isinstance(payload_coverage, Mapping) else None
+    )
+    collector_drops_truncated_count = (
+        payload_coverage.get("collector_drops_truncated_count")
+        if isinstance(payload_coverage, Mapping) else None
+    )
     persisted_coverage = (
         {key: value for key, value in payload_coverage.items()
-         if key != "collector_drops"}
+         if key not in {
+             "collector_drops", "collector_drop_count",
+             "collector_drops_truncated_count",
+         }}
         if isinstance(payload_coverage, Mapping) else None
+    )
+    collector_summary_valid = (
+        collector_drop_count is None and collector_drops_truncated_count is None
+    ) or (
+        isinstance(collector_drop_count, int)
+        and not isinstance(collector_drop_count, bool)
+        and isinstance(collector_drops_truncated_count, int)
+        and not isinstance(collector_drops_truncated_count, bool)
+        and collector_drop_count >= len(collector_drops or [])
+        and collector_drops_truncated_count
+            == collector_drop_count - len(collector_drops or [])
     )
     require(
         isinstance(coverage, Mapping) and coverage.get("complete_market_coverage") is False
         and isinstance(payload_coverage, Mapping)
         and (payload_coverage == coverage or persisted_coverage == coverage)
         and isinstance(collector_drops, list) and len(collector_drops) <= 3000
+        and collector_summary_valid
         and all(
             isinstance(row, Mapping)
             and set(row) in ({"candidate_key", "item_id", "kind", "reason", "stage"},

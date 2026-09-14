@@ -91,6 +91,8 @@ UNTRUSTED_DATA_INSTRUCTION = (
 )
 MAX_OUTPUT_BYTES = 96 * 1024
 _OUTPUT_PACKET_BYTES = 72 * 1024
+_OUTPUT_PACKET_COVERAGE_BYTES = 20 * 1024
+_OUTPUT_COMPLETION_COVERAGE_BYTES = 28 * 1024
 _MAX_DISCOVERY_TASKS = 100
 _DISCOVERY_CHECKPOINT_REPLAYABLE_CODES = frozenset({
     "GATEWAY_UNAVAILABLE",
@@ -136,6 +138,29 @@ def _canonical(value: object) -> str:
         separators=(",", ":"),
         sort_keys=True,
     )
+
+
+def _add_bounded_coverage_rows(
+    coverage: dict[str, object],
+    key: str,
+    rows: Sequence[dict[str, object]],
+    *,
+    max_serialized_bytes: int,
+) -> None:
+    """Retain a deterministic audit sample without exceeding the gateway contract."""
+    retained: list[dict[str, object]] = []
+    total_key = f"{key[:-1] if key.endswith('s') else key}_count"
+    truncated_key = f"{key}_truncated_count"
+    coverage[total_key] = len(rows)
+    coverage[key] = retained
+    coverage[truncated_key] = len(rows)
+    for row in rows:
+        retained.append(row)
+        coverage[truncated_key] = len(rows) - len(retained)
+        if len(_canonical(coverage).encode("utf-8")) > max_serialized_bytes:
+            retained.pop()
+            coverage[truncated_key] = len(rows) - len(retained)
+            break
 
 
 def _frozen_source_plan(plan: DiscoveryPlan) -> dict[str, object]:
@@ -2312,6 +2337,12 @@ class IntelligencePipeline:
             for result in results
             if result.receipt.status not in {"succeeded", "cache_hit"}
         )
+        duplicate_references = [
+            {"item_id": evidence_key(value.item), "receipt_id": receipt_ids[index],
+             "reason": value.reason}
+            for index, value in enumerate(dispositions)
+            if value.disposition == "duplicate"
+        ]
         coverage = Coverage({
             "accepted_item_count": len(discovery_items),
             "complete_market_coverage": False,
@@ -2336,13 +2367,13 @@ class IntelligencePipeline:
                  ) else "insufficient_coverage"}
                 for index, result in enumerate(results)
             ],
-            "duplicate_references": [
-                {"item_id": evidence_key(value.item), "receipt_id": receipt_ids[index],
-                 "reason": value.reason}
-                for index, value in enumerate(dispositions)
-                if value.disposition == "duplicate"
-            ],
         })
+        _add_bounded_coverage_rows(
+            coverage,
+            "duplicate_references",
+            duplicate_references,
+            max_serialized_bytes=_OUTPUT_PACKET_COVERAGE_BYTES,
+        )
         reference_coverage = self.context.get("reference_coverage")
         if isinstance(reference_coverage, Mapping):
             coverage.update(reference_coverage)
@@ -2417,9 +2448,22 @@ class IntelligencePipeline:
                 continue
             persisted_candidate_keys.add(candidate.candidate_key)
             persisted_rankings.append(_ranking_row(run_id, candidate))
+        packet_drops = tuple(
+            {"candidate_key": drop.candidate_key, "item_id": drop.item_id,
+             "kind": drop.kind, "reason": drop.reason}
+            for drop in evidence_packet.drops
+        )
+        collector_drops = collection_drops + relation_drops + packet_drops
+        completion_coverage = Coverage(coverage)
+        _add_bounded_coverage_rows(
+            completion_coverage,
+            "collector_drops",
+            collector_drops,
+            max_serialized_bytes=_OUTPUT_COMPLETION_COVERAGE_BYTES,
+        )
         payload = {
             "status": "completed",
-            "coverage": coverage,
+            "coverage": completion_coverage,
             "receipts": receipt_rows,
             "items": item_rows,
             "events": [_event_row(run_id, event) for event in events],
@@ -2428,12 +2472,6 @@ class IntelligencePipeline:
             "packet": packet_row,
             "error": None,
         }
-        packet_drops = tuple(
-            {"candidate_key": drop.candidate_key, "item_id": drop.item_id,
-             "kind": drop.kind, "reason": drop.reason}
-            for drop in evidence_packet.drops
-        )
-        coverage["collector_drops"] = list(collection_drops + relation_drops + packet_drops)
         final = self._record(run_id, payload, _uuid("completion-request", request.request_id))
         if self.discovery_plan is not None:
             self._persist_theme_episode_revisions(
@@ -2449,7 +2487,7 @@ class IntelligencePipeline:
             packet=persisted_packet,
             sources=tuple(sources),
             drops=collection_drops + relation_drops + packet_drops,
-            coverage=coverage,
+            coverage=completion_coverage,
             write_counts={str(key): int(value) for key, value in counts.items()},
             domains_checked=targets,
             limitations=limitations,
