@@ -116,6 +116,15 @@ jobs:
         with:
           ref: ${{ steps.candidate.outputs.candidate_sha }}
           fetch-depth: 0
+      - name: Fetch exact reviewed PR head for local tree verification
+        env:
+          PULL_REQUEST_NUMBER: ${{ steps.candidate.outputs.pull_request_number }}
+          REVIEWED_SHA: ${{ steps.candidate.outputs.reviewed_sha }}
+        run: |
+          set -euo pipefail
+          git fetch --no-tags --depth=1 origin "refs/pull/${PULL_REQUEST_NUMBER}/head"
+          FETCHED_REVIEWED_SHA="$(git rev-parse FETCH_HEAD)"
+          test "$FETCHED_REVIEWED_SHA" = "$REVIEWED_SHA" || { echo 'fetched PR head does not match reviewed SHA'; exit 1; }
       - uses: actions/setup-python@42375524e23c412d93fb67b49958b491fce71c38
         with:
           python-version: "3.14"
