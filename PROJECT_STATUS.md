@@ -28,6 +28,10 @@ Edge parser, completion coverage exceeded its size limit, and replayed retained 
 could reuse evidence IDs. PR #106 corrected all three while preserving full audit counts, and its
 exact-head CI `34882841078` plus exact-main CI `34883177507` passed. This failed intraday chain must
 not be retried; the next normal post-market slot is the production proof for the corrected runtime.
+Protected release attempt `34884520634` then failed closed in candidate authentication because its
+reviewed-head hint did not match PR #107 exactly. Recovery `34884545570` also failed closed before
+deployment; neither run changed production. The corrected candidate must retain this audit history
+and pass the same exact-head, exact-main, owner-authorization, and protected-release checks.
 
 Owner-only Site v10 remains live and did not require republication. The September 10 protected build
 has the same build hash and the same 15 asset hashes as the existing Site v10 receipt at
