@@ -1,25 +1,35 @@
 # Personal Stock Agent Project Status
 
-Last updated: 2026-09-10
+Last updated: 2026-09-14
 Canonical release: Personal Stock Agent V1 market-wide discovery candidate
 Audit baseline: `432d647ef911ff63da427097f02a852e18038b62` on `origin/main`
 Market-wide implementation boundary: `18386b5c76c7a7aa8b3eeda870b12d3aba2399e1`
-Current state: provider/runtime reliability corrections are deployed from protected main
-`df58d2b3ff2403704b48e92e00cab403e48eb756`. PR #80 exact-head CI `34527241925`, exact-main CI
-`34528322660`, and protected release `34528678500` passed. Production deployment `6380879827`
-verified the migration ledger, three Edge functions, owner/anonymous/non-owner canaries, canonical
-hashes, 11 reconciled run/report claims, and the encrypted recovery journal. Its immutable receipt is
-`docs/receipts/2026-09-10-protected-provider-reliability-release.json`.
+Current state: the scheduled-source recovery and detailed Telegram renderer are deployed from
+protected main `ce73a5c05f6a2d55b12cff1a7e2d692607450db5`. PR #102 exact-head CI
+`34852461483`, exact-main CI `34852964601`, protected release `34853467013`, and production
+deployment `6438843003` passed. The release verified the full migration ledger through
+`20261030_same_run_terminal_checkpoint_replay.sql`, Edge versions 91/62/70, owner/anonymous/
+non-owner canaries, 11 reconciled run/report claims, and the encrypted recovery journal. Its exact
+immutable receipt is `docs/receipts/2026-09-14-protected-scheduled-recovery-release.json`.
+
+PR #103 corrected the non-notifying healthcheck so an intentionally ephemeral dry-run validates its
+start receipt without requesting nonexistent persisted context. Exact-head CI `34856305676` and
+exact-main CI `34856760662` passed. A fresh cloud healthcheck then reported gateway, alerts, the
+zero-key baseline, GDELT, SEC reference, and EIA RSS healthy; Finnhub was securely configured and
+ready for identifier-bound use. Federal Register alone returned a bounded optional `source_failed`
+status. PR #104 added a protected read-only scheduled V1 verifier; exact-head CI `34858307900` and
+exact-main CI `34858714524` passed on current main
+`e6ee2edaeb4ea6520edc2d10d99bb3c62a04dc84`.
 
 Owner-only Site v10 remains live and did not require republication. The September 10 protected build
 has the same build hash and the same 15 asset hashes as the existing Site v10 receipt at
 `docs/receipts/2026-09-09-native-site-v10.json`; the release changed provider and dashboard-server
 runtime code, not frontend bytes. Site v9 remains the provider-retained rollback version.
 
-Trusted V1 use remains **no-go** until a normal post-release scheduled chain proves the V1-C2
-through V1-C6 operational/capability path and records either the original Telegram delivery receipt
-or an explicit persisted suppression. The exposed Finnhub key must also be rotated before final
-security closeout. No duplicate market run or Telegram test may be used to close either gate.
+Trusted V1 use remains **no-go** until the first normal post-release scheduled chain proves the
+V1-C2 through V1-C6 operational/capability path and records either the original Telegram delivery
+receipt or an explicit persisted suppression/no-trigger outcome. Finnhub rotation is complete. No
+duplicate market run or Telegram test may be used to close the remaining gate.
 
 ## Post-September 8 runtime closure
 

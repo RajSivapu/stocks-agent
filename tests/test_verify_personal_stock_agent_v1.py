@@ -2213,6 +2213,24 @@ def test_production_source_reads_deployment_and_protected_artifact_instead_of_ca
     assert len(calls) == 8
 
 
+def test_production_source_reads_exact_repository_root_for_owner_identity(monkeypatch):
+    from scripts.protected_evidence import GitHubProductionDataSource
+
+    source = GitHubProductionDataSource("owner/stocks-agent", "p" * 20, object())
+    calls = []
+
+    def run(command, **kwargs):
+        calls.append((command, kwargs))
+        return subprocess.CompletedProcess(
+            command, 0, stdout=b'{"owner":{"id":73}}', stderr=b""
+        )
+
+    monkeypatch.setattr(subprocess, "run", run)
+
+    assert source.repository_owner_id() == 73
+    assert calls[0][0][-1] == "repos/owner/stocks-agent"
+
+
 def test_production_source_keeps_only_each_reviewers_latest_decision(monkeypatch):
     from scripts.protected_evidence import GitHubProductionDataSource
 

@@ -75,9 +75,10 @@ baseline has this shape (capability entries abbreviated here):
 {"alerts":"ok","gateway":"ok","zero_key_baseline":"ok","capabilities":{"gdelt_theme_search":{"status":"ok"},"sec_company_tickers_universe":{"status":"ok"}}}
 ```
 
-It performs dry-run gateway start/context and owner-alert evaluation calls, then probes only
-reviewed static source routes. It validates the exact Defense.gov-to-war.gov redirect for each
-separate feed. Dynamic issuer, filing, and quote routes are reported as
+It validates an ephemeral dry-run gateway start receipt and an owner-alert evaluation, then probes
+only reviewed static source routes. Ephemeral healthcheck runs are deliberately not persisted, so
+the healthcheck does not request stored run context. It validates the exact Defense.gov-to-war.gov
+redirect for each separate feed. Dynamic issuer, filing, and quote routes are reported as
 `ready_requires_identifier`. It writes nothing and never prints credential values. It sends no Telegram healthcheck or alert.
 
 ## Schedule

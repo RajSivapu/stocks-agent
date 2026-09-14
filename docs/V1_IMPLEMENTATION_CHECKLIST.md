@@ -1,6 +1,6 @@
 # Personal Stock Agent V1 — Implementation Checklist
 
-Last updated: 2026-09-10
+Last updated: 2026-09-14
 
 ## What we are building
 
@@ -83,7 +83,8 @@ An owner-only personal stock agent that uses zero-incremental-cost data sources,
   Telegram message because zero usable evidence was accepted
 - [x] Correct the Claude outbound allowlist and SEC contact, then release Federal Register, Yahoo,
   EIA RSS, and dashboard readback fixes through PR #80
-- [ ] Rotate the Finnhub API key exposed during environment diagnosis and update the Claude routine
+- [x] Rotate the Finnhub API key exposed during environment diagnosis and update the Claude routine;
+  validate only non-secret metadata and a fresh non-notifying provider healthcheck
 - [ ] Next existing scheduled-chain receipt
 - [x] Complete protected backend release and separate native Sites publication/readback
 - [ ] Complete the first normal post-release scheduled V1-C3 capability and Telegram outcome proof

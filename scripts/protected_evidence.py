@@ -1023,7 +1023,9 @@ class GitHubProductionDataSource:
         self._artifact_identities = {}
 
     def _get(self, path: str, *, binary: bool = False):
-        require(path.startswith(self.prefix + "/") and ".." not in path and not path.startswith("-"), "unsafe protected record path")
+        require((path == self.prefix or path.startswith(self.prefix + "/"))
+                and ".." not in path and not path.startswith("-"),
+                "unsafe protected record path")
         result = subprocess.run(["gh", "api", "--method", "GET", path], capture_output=True, check=False, timeout=60)
         require(result.returncode == 0 and len(result.stdout) <= MAX_PAYLOAD_BYTES, "protected GitHub evidence is unavailable")
         return result.stdout if binary else json.loads(result.stdout)
