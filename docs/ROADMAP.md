@@ -1,6 +1,6 @@
 # Stocks Agent — Roadmap and Deployment Status
 
-Last updated: 2026-09-10.
+Last updated: 2026-09-14.
 
 This repository is owner-only, suggestion-only decision support plus portfolio recordkeeping. It
 has no brokerage credentials or order endpoints and never places, modifies, or cancels a trade.
@@ -12,14 +12,17 @@ and rollout order. `docs/HANDOFF.md` is ignored and is not a source of truth.
 
 ## Current release status
 
-The provider/runtime-corrected market-wide candidate is deployed from protected main `df58d2b`.
-PR #80 exact-head CI `34527241925`, exact-main CI `34528322660`, protected backend release
-`34528678500`, and production deployment `6380879827` passed. Owner-only Site v10 remains current:
-the protected September 10 build has the same build hash and all 15 asset hashes as the published
-Site receipt, so no duplicate Site publication was needed. V1 trusted use remains **no-go** pending
-the Finnhub key rotation and the first normal post-release scheduled operational and V1-C3
-capability receipt, including the original Telegram delivery receipt or explicit persisted
-suppression.
+The scheduled-source recovery and detailed Telegram renderer are deployed from protected main
+`ce73a5c`. PR #102 exact-head CI `34852461483`, exact-main CI `34852964601`, protected backend
+release `34853467013`, and production deployment `6438843003` passed. Edge versions 91/62/70 and
+the migration ledger through `20261030_same_run_terminal_checkpoint_replay.sql` read back exactly.
+Owner-only Site v10 remains current: the protected build has the same build hash and all 15 asset
+hashes as the published Site receipt, so no duplicate Site publication was needed. PR #103 then
+corrected the ephemeral-run healthcheck and passed main CI `34856760662`; Finnhub rotation and the
+fresh cloud healthcheck are complete. PR #104 added the read-only final scheduled verifier and passed
+main CI `34858714524` on `e6ee2ed`. V1 trusted use remains **no-go** pending the first normal
+post-release scheduled operational and V1-C3 capability receipt, including the original Telegram
+delivery receipt or explicit persisted suppression/no-trigger outcome.
 Approved production schema reconciliation
 `34039011879` succeeded exactly once. Managed isolated restore `34042155368` succeeded on main
 `bd1cee2317a8689b8ac5a55fb38b853e7320bbfb`. The unchanged backend remains attested at main
