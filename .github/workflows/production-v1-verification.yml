@@ -1,0 +1,118 @@
+name: Production V1 scheduled verification
+
+on:
+  workflow_dispatch:
+    inputs:
+      ci_workflow_run_id:
+        description: Successful exact-main owner CI workflow run ID
+        required: true
+        type: string
+      deployment_id:
+        description: Successful protected production deployment ID
+        required: true
+        type: string
+
+permissions:
+  actions: read
+  contents: read
+  deployments: read
+
+concurrency:
+  group: production-v1-scheduled-verification
+  cancel-in-progress: false
+
+jobs:
+  verify:
+    environment: owner-dashboard-production
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    env:
+      PGSSLMODE: verify-full
+      PGSSLROOTCERT: ${{ github.workspace }}/config/supabase-prod-ca-2021.crt
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: main
+          fetch-depth: 0
+      - uses: actions/setup-python@42375524e23c412d93fb67b49958b491fce71c38
+        with:
+          python-version: "3.14"
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with:
+          node-version: "24"
+          cache: npm
+      - name: Bind verification to current main, exact CI, and protected deployment
+        env:
+          GH_TOKEN: ${{ github.token }}
+          CI_WORKFLOW_RUN_ID: ${{ inputs.ci_workflow_run_id }}
+          DEPLOYMENT_ID: ${{ inputs.deployment_id }}
+        run: |
+          set -euo pipefail
+          test "${GITHUB_REF:-}" = "refs/heads/main" || { echo 'workflow ref is not main'; exit 1; }
+          git fetch --no-tags origin main
+          MAIN_SHA="$(gh api "repos/$GITHUB_REPOSITORY/git/ref/heads/main" --jq .object.sha)"
+          test "${GITHUB_SHA:-}" = "$MAIN_SHA" || { echo 'workflow SHA is not current main'; exit 1; }
+          test "$(git rev-parse HEAD)" = "$MAIN_SHA" || { echo 'checkout is not current main'; exit 1; }
+          [[ "$CI_WORKFLOW_RUN_ID" =~ ^[1-9][0-9]*$ ]] || { echo 'numeric CI workflow run ID is required'; exit 1; }
+          [[ "$DEPLOYMENT_ID" =~ ^[1-9][0-9]*$ ]] || { echo 'numeric deployment ID is required'; exit 1; }
+          CI="$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$CI_WORKFLOW_RUN_ID")"
+          test "$(jq -r .repository.full_name <<<"$CI")" = "$GITHUB_REPOSITORY" || { echo 'required CI belongs to another repository'; exit 1; }
+          test "$(jq -r .head_sha <<<"$CI")" = "$MAIN_SHA" || { echo 'required CI is not for current main'; exit 1; }
+          test "$(jq -r .status <<<"$CI")" = completed && test "$(jq -r .conclusion <<<"$CI")" = success || { echo 'required CI was not successful'; exit 1; }
+          test "$(jq -r .path <<<"$CI")" = .github/workflows/owner-dashboard-ci.yml || { echo 'wrong required CI workflow'; exit 1; }
+          test "$(jq -r .name <<<"$CI")" = "Owner dashboard verification" || { echo 'wrong required CI workflow name'; exit 1; }
+          test "$(jq -r .event <<<"$CI")" = push && test "$(jq -r .head_branch <<<"$CI")" = main || { echo 'required CI was not for main'; exit 1; }
+          DEPLOYMENT="$(gh api "repos/$GITHUB_REPOSITORY/deployments/$DEPLOYMENT_ID")"
+          DEPLOYMENT_SHA="$(jq -r .sha <<<"$DEPLOYMENT")"
+          test "$(jq -r .environment <<<"$DEPLOYMENT")" = production || { echo 'deployment is not production'; exit 1; }
+          test "$(jq -r .production_environment <<<"$DEPLOYMENT")" = true || { echo 'deployment is not marked production'; exit 1; }
+          git merge-base --is-ancestor "$DEPLOYMENT_SHA" "$MAIN_SHA" || { echo 'deployment is not an ancestor of current main'; exit 1; }
+          STATUS="$(gh api "repos/$GITHUB_REPOSITORY/deployments/$DEPLOYMENT_ID/statuses?per_page=1")"
+          test "$(jq -r '.[0].state' <<<"$STATUS")" = success || { echo 'deployment is not successful'; exit 1; }
+          echo "MAIN_SHA=$MAIN_SHA" >> "$GITHUB_ENV"
+          echo "DEPLOYMENT_ID=$DEPLOYMENT_ID" >> "$GITHUB_ENV"
+          echo "DEPLOYMENT_SHA=$DEPLOYMENT_SHA" >> "$GITHUB_ENV"
+      - name: Install locked verification dependencies
+        run: |
+          python -m pip install --require-hashes --only-binary=:all: -r requirements.lock
+          npm ci --ignore-scripts
+      - name: Rebuild the protected static package
+        env:
+          SUPABASE_PUBLISHABLE_KEY: ${{ secrets.SUPABASE_PUBLISHABLE_KEY }}
+          SUPABASE_PROJECT_REF: ${{ secrets.SUPABASE_PROJECT_REF }}
+          SITE_ORIGIN: ${{ vars.DASHBOARD_SITE_ORIGIN }}
+        run: |
+          set -euo pipefail; umask 077
+          test -n "$SUPABASE_PUBLISHABLE_KEY" && test -n "$SUPABASE_PROJECT_REF" && test -n "$SITE_ORIGIN"
+          python -m scripts.build_owner_dashboard_static \
+            --project-ref "$SUPABASE_PROJECT_REF" \
+            --site-origin "$SITE_ORIGIN" \
+            --publishable-key "$SUPABASE_PUBLISHABLE_KEY" \
+            --candidate-sha "$DEPLOYMENT_SHA" \
+            --output "$RUNNER_TEMP/static-build-receipt.json"
+      - name: Verify protected release and next normal scheduled receipt
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_READONLY_DATABASE_URL: ${{ secrets.RELEASE_READONLY_DATABASE_URL }}
+          SUPABASE_PROJECT_REF: ${{ secrets.SUPABASE_PROJECT_REF }}
+        run: |
+          set -euo pipefail; umask 077
+          test -n "$RELEASE_READONLY_DATABASE_URL" && test -n "$SUPABASE_PROJECT_REF"
+          python scripts/verify_personal_stock_agent_v1.py \
+            --repository "$GITHUB_REPOSITORY" \
+            --deployment-id "$DEPLOYMENT_ID" \
+            --production-project-ref "$SUPABASE_PROJECT_REF" \
+            --static-root dist > "$RUNNER_TEMP/verification-raw.json"
+          jq -e '.status == "protected_backend_and_scheduled_verified" and .evidence_classes.operational_scheduled.status == "verified" and .evidence_classes.discovery_capability.status == "verified"' \
+            "$RUNNER_TEMP/verification-raw.json" >/dev/null
+          jq -cS --arg main_sha "$MAIN_SHA" --argjson workflow_run_id "$GITHUB_RUN_ID" \
+            '. + {verification_main_sha:$main_sha,verification_workflow_run_id:$workflow_run_id}' \
+            "$RUNNER_TEMP/verification-raw.json" > "$RUNNER_TEMP/production-v1-verification.json"
+      - name: Upload immutable V1 verification receipt
+        uses: actions/upload-artifact@65462800fd760344b1a7b4382951275a0abb4808
+        with:
+          name: production-v1-verification-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/production-v1-verification.json
+          if-no-files-found: error
+          retention-days: 90
+
