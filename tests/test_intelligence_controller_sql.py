@@ -623,6 +623,57 @@ def test_paid_provider_attempt_barrier_transitions_to_one_terminal_receipt(datab
     ).fetchone() == (1, 1)
 
 
+@pytest.mark.parametrize("kind", ["fresh", "ordered"])
+@pytest.mark.parametrize("expired", [False, True])
+def test_start_returns_same_run_terminal_checkpoint_once_and_paid_usage(
+    databases, kind, expired,
+):
+    db = databases[kind]
+    run, _completion, _original, _payload = prepared_run(db, checkpoint=False)
+    reservation_id = db.execute(
+        "SELECT id::text FROM market_source_quota_reservations WHERE run_id=%s", (run,)
+    ).fetchone()[0]
+    request_window = db.execute(
+        "SELECT request_window FROM market_intelligence_runs WHERE id=%s", (run,)
+    ).fetchone()[0]
+    now = db.execute("SELECT statement_timestamp()").fetchone()[0]
+    retrieved_at = now - timedelta(hours=2) if expired else now
+    expires_at = now - timedelta(hours=1) if expired else now + timedelta(hours=1)
+    receipt_id = str(uuid.uuid4())
+    checkpoint = {
+        "cache_key": "c" * 64,
+        "receipt": {
+            "provider": "gdelt", "reservation_id": reservation_id,
+            "status": "succeeded", "cache_key": "c" * 64,
+            "requested_window": {
+                "start": request_window["start"], "end": request_window["end"],
+            },
+            "requested_limit": 20, "retrieved_at": retrieved_at.isoformat(),
+            "observed_at": retrieved_at.isoformat(), "expires_at": expires_at.isoformat(),
+            "request_cost": 1, "upstream_remaining": None, "returned_count": 0,
+            "accepted_count": 0, "duplicate_count": 0, "dropped_count": 0,
+            "response_hash": "d" * 64, "error_code": None,
+            "source_receipt_id": receipt_id, "cache_predecessor_receipt_id": None,
+        },
+        "items": [],
+    }
+    db.execute(
+        "SELECT public.checkpoint_market_intelligence_collection(%s,%s)",
+        (run, Jsonb(checkpoint)),
+    )
+    plan = db.execute(
+        "SELECT reservation_plan FROM market_intelligence_runs WHERE id=%s", (run,)
+    ).fetchone()[0]
+    result = db.execute(
+        "SELECT public.start_market_intelligence_run(%s,'intraday',%s,1,%s,%s)",
+        (run, request_window["market_date"], Jsonb(plan), Jsonb(request_window)),
+    ).fetchone()[0]
+
+    assert result["cache_entries"] == []
+    assert result["terminal_checkpoint_entries"] == [checkpoint]
+    assert result["reservation_usage"] == {reservation_id: 1}
+
+
 def test_event_and_ranking_hashes_survive_typed_postgres_readback_losslessly(databases):
     from decimal import Decimal
     from types import MappingProxyType
@@ -700,7 +751,7 @@ def test_actual_terminal_commit_survives_lost_response_and_independent_process_r
     assert db.execute("SELECT count(*) FROM market_intelligence_run_events WHERE run_id=%s AND status='completed'", (run_id,)).fetchone()[0] == 1
 
 
-def test_independent_worker_hydrates_successful_checkpoint_with_distinct_receipt_and_actual_ledger(databases):
+def test_independent_worker_replays_successful_checkpoint_with_exact_receipt_and_actual_ledger(databases):
     import multiprocessing
     from datetime import timedelta
     db = databases["ordered"]
@@ -717,10 +768,11 @@ def test_independent_worker_hydrates_successful_checkpoint_with_distinct_receipt
     second.start(); second.join(20)
     assert second.exitcode == 0
     result = output.get(timeout=2)
-    assert result["actual_requests"] == 0 and result["cache_hits"] == 1
-    hit = result["receipts"][0]["receipt_id"]
-    assert hit != original
-    assert db.execute("SELECT cache_receipt_id::text,cache_predecessor_receipt_id::text FROM market_checkpoint_receipt_lineage WHERE run_id=%s", (run_id,)).fetchone() == (hit, original)
+    assert result["actual_requests"] == 1 and result["cache_hits"] == 0
+    assert result["receipts"][0]["receipt_id"] == original
+    assert db.execute(
+        "SELECT count(*) FROM market_checkpoint_receipt_lineage WHERE run_id=%s", (run_id,)
+    ).fetchone() == (0,)
     assert db.execute("SELECT status,request_cost FROM market_source_receipts WHERE id=%s", (original,)).fetchone() == ("succeeded", 1)
     assert db.execute("SELECT sum(request_cost) FROM market_source_receipts WHERE run_id=%s", (run_id,)).fetchone()[0] == 1
 

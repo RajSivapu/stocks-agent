@@ -39,6 +39,7 @@ class EiaAdapter(OfficialFeedAdapter):
     provider = "eia"
     authority = "official_energy_context"
     allowed_hosts = frozenset({"www.eia.gov", "api.eia.gov"})
+    item_allowed_hosts = frozenset({"www.eia.gov"})
     feed_routes = MappingProxyType({
         "eia_today_in_energy_rss": EIA_TODAY_IN_ENERGY_URL,
         "eia_press_releases_rss": EIA_PRESS_RELEASES_URL,
@@ -60,6 +61,15 @@ class EiaAdapter(OfficialFeedAdapter):
             re.compile(r"/pressroom/[A-Za-z0-9._~!$&'()*+,;=:@%/-]+"),
         ),
     })
+
+    def _normalize_item_link(self, value: str) -> str:
+        if "\\" in value or any(
+            ord(character) < 32 or ord(character) == 127 for character in value
+        ):
+            raise SourceFailure("INVALID_FEED")
+        if value.startswith("/") and not value.startswith("//"):
+            return f"https://www.eia.gov{value}"
+        return value
 
     def _authority(self, query: CollectionQuery) -> str:
         if query.capability_id == "eia_statistics_v2":

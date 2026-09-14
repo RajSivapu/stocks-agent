@@ -1193,6 +1193,48 @@ class PersistedCheckpointGateway(FakeGateway):
         return super().record_intelligence(run_id, payload)
 
 
+def test_expired_same_run_terminal_checkpoint_replays_exact_paid_result():
+    state = {}
+
+    class TerminalCheckpointGateway(PersistedCheckpointGateway):
+        def start_intelligence_run(self, payload):
+            result = super().start_intelligence_run(payload)
+            checkpoints = list(self.state.get("checkpoints", []))
+            result["cache_entries"] = []
+            result["terminal_checkpoint_entries"] = checkpoints
+            result["reservation_usage"] = {
+                self.reservation_id: sum(
+                    entry["receipt"]["request_cost"] for entry in checkpoints
+                ),
+            }
+            return result
+
+    first_gateway = TerminalCheckpointGateway(state, fail_final=True)
+    with pytest.raises(RuntimeError, match="interrupted"):
+        IntelligencePipeline(first_gateway, [FakeAdapter()]).run(request("pre-market"))
+
+    original = json.loads(json.dumps(state["checkpoints"]))
+    original_final = json.loads(json.dumps(first_gateway.payloads[-1]))
+    assert all(
+        datetime.fromisoformat(entry["receipt"]["expires_at"]) < NOW + timedelta(days=2)
+        for entry in original
+    )
+
+    resumed_request = PipelineRequest(
+        "pre-market", date(2026, 9, 4), NOW + timedelta(days=2), request_id=RUN_ID,
+    )
+    resumed_adapter = FakeAdapter()
+    resumed_gateway = TerminalCheckpointGateway(state)
+    result = IntelligencePipeline(resumed_gateway, [resumed_adapter]).run(resumed_request)
+
+    assert resumed_adapter.queries == []
+    assert result.actual_requests == len(SEED_THEMES)
+    assert result.cache_hits == 0
+    final = resumed_gateway.payloads[-1]
+    assert final["receipts"] == original_final["receipts"]
+    assert final["items"] == original_final["items"]
+
+
 def test_restart_hydrates_durable_checkpoints_after_final_packet_failure():
     state = {}
     first_adapter = FakeAdapter()
@@ -1319,6 +1361,136 @@ def test_frozen_source_plan_preserves_required_capability_and_task_order():
     assert source_plan["required_baseline_capability_ids"] == list(capability_ids)
     assert source_plan["planned_task_ids"] == [task.task_id for task in tasks]
     assert [row["capability_id"] for row in source_plan["required_tasks"]] == list(capability_ids)
+
+
+def test_static_dependency_free_gdelt_runs_before_reference_without_reordering_results():
+    events = []
+    window = MappingProxyType({
+        "start": "2026-09-03T12:00:00Z", "end": NOW.isoformat(),
+    })
+
+    def capability(capability_id, provider, query_kind):
+        return SourceCapability(
+            capability_id=capability_id, provider=provider, query_kind=query_kind,
+            themes=frozenset({"macro_and_policy"}) if query_kind != "universe" else frozenset(),
+            phases=frozenset({"pre-market"}), allowed_hosts=frozenset({"fixture.invalid"}),
+            allowed_path_patterns=("/fixture",), required_credential=None,
+            authority="reference" if query_kind == "universe" else "radar",
+            retention_class="reference" if query_kind == "universe" else "metadata",
+            max_requests_per_run=3, max_items_per_request=20,
+            requirement_tier="required_baseline", health="enabled", enabled=True,
+            provider_priority=1, query_pack=MappingProxyType({}),
+        )
+
+    doe_task = DiscoveryTask(
+        task_id="44444444-4444-4444-8444-444444444450", stage="signals",
+        provider="doe", capability_id="doe_energy_news_rss", query_kind="theme_search",
+        theme_id="macro_and_policy", query=MappingProxyType({"query": "doe-static"}),
+        window=window, dependencies=(), max_attempts=1, requires_credential=False,
+    )
+    gdelt_task = DiscoveryTask(
+        task_id="44444444-4444-4444-8444-444444444451", stage="signals",
+        provider="gdelt", capability_id="gdelt_theme_search", query_kind="theme_search",
+        theme_id="macro_and_policy", query=MappingProxyType({"query": "gdelt-static"}),
+        window=window, dependencies=(), max_attempts=1, requires_credential=False,
+    )
+    dependent_gdelt_task = DiscoveryTask(
+        task_id="44444444-4444-4444-8444-444444444452", stage="signals",
+        provider="gdelt", capability_id="gdelt_theme_search", query_kind="theme_search",
+        theme_id="macro_and_policy", query=MappingProxyType({"query": "gdelt-dependent"}),
+        window=window, dependencies=(doe_task.task_id,), max_attempts=1,
+        requires_credential=False,
+    )
+    reference_task = DiscoveryTask(
+        task_id="44444444-4444-4444-8444-444444444453", stage="reference",
+        provider="sec_edgar", capability_id="sec_company_tickers_universe",
+        query_kind="universe", theme_id=None,
+        query=MappingProxyType({"universe": "eligible_us_listed"}), window=window,
+        dependencies=(), max_attempts=1, requires_credential=False,
+    )
+    tasks = (doe_task, gdelt_task, dependent_gdelt_task, reference_task)
+    capabilities = {
+        "doe_energy_news_rss": capability("doe_energy_news_rss", "doe", "theme_search"),
+        "gdelt_theme_search": capability("gdelt_theme_search", "gdelt", "theme_search"),
+        "sec_company_tickers_universe": capability(
+            "sec_company_tickers_universe", "sec_edgar", "universe"
+        ),
+    }
+    plan = DiscoveryPlan(
+        run_id=RUN_ID, phase="pre-market", reference_version="sec:fixture-v1",
+        capability_version=1, tasks=tasks, capabilities=MappingProxyType(capabilities),
+        coverage=MappingProxyType({}),
+        provider_request_totals=MappingProxyType({"doe": 1, "gdelt": 2}),
+        reserved_holding_quote_requests=0, reserved_adaptive_requests=0,
+    )
+
+    class Gateway(FakeGateway):
+        def __init__(self):
+            super().__init__()
+            self.discovery_tasks = {}
+
+        def read_discovery_context(self, _run):
+            return {"tasks": list(self.discovery_tasks.values())}
+
+        def checkpoint_discovery_stage(self, _run, payload):
+            row = payload["task"]
+            self.discovery_tasks[row["id"]] = row
+            events.append(f"task:{row['id']}:{row['state']}")
+            return {"task": row, "duplicate": False}
+
+        def checkpoint_intelligence_collection(self, run_id, payload):
+            return {"run_id": run_id, "cache_key": payload["cache_key"]}
+
+    class Adapter(FakeAdapter):
+        def __init__(self, provider):
+            super().__init__()
+            self.provider = provider
+
+        def collect(self, query, **_kwargs):
+            self.queries.append(query)
+            events.append(f"collect:{query.text}")
+            return CollectionResult(
+                (raw_item(query.text, provider=self.provider),),
+                receipt(self.provider), query.limit,
+            )
+
+    def reference_stage(_run, _request):
+        events.append("reference")
+        return {
+            "coverage_status": "scope_not_guaranteed",
+            "reference_status": "reference_unavailable",
+            "reference_manifest_id": None,
+            "reference_age_seconds": None,
+            "execution_allowed": False,
+        }
+
+    gateway = Gateway()
+    result = IntelligencePipeline(
+        gateway, [Adapter("doe"), Adapter("gdelt")], discovery_plan=plan,
+        reference_stage=reference_stage,
+    ).run(request("pre-market"))
+
+    planned_positions = [events.index(f"task:{task.task_id}:planned") for task in tasks]
+    static_position = events.index("collect:gdelt-static")
+    assert max(planned_positions) < static_position < events.index("reference")
+    assert events.index("reference") < events.index("collect:doe-static")
+    assert events.index("reference") < events.index("collect:gdelt-dependent")
+    assert [source["provider"] for source in result.sources] == ["doe", "gdelt", "gdelt"]
+    assert [item["provider"] for item in gateway.payloads[-1]["items"]] == [
+        "doe", "gdelt", "gdelt",
+    ]
+    assert [item["disposition"] for item in gateway.payloads[-1]["items"]] == [
+        "accepted", "near_duplicate", "near_duplicate",
+    ]
+    expected_receipts = [
+        gateway.discovery_tasks[task.task_id]["result"]["checkpoint"]["receipt"][
+            "source_receipt_id"
+        ]
+        for task in (doe_task, gdelt_task, dependent_gdelt_task)
+    ]
+    assert [row["id"] for row in gateway.payloads[-1]["receipts"]] == expected_receipts
+    assert result.actual_requests == 3
+    assert result.cache_hits == 0
 
 
 def test_capability_plan_executes_exact_task_cursor_and_persists_each_transition():

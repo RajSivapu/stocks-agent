@@ -433,3 +433,22 @@ def test_failed_checkpoint_hydration_keeps_the_original_paid_receipt():
     assert resumed.receipt.status == "failed"
     assert resumed.receipt.source_receipt_id == "original-receipt"
     assert resumed.receipt.request_cost == 1
+
+
+def test_cross_run_collection_cache_still_rejects_expired_success():
+    cache = ResumableCollectionCache()
+    original = RequestReceipt(
+        provider="gdelt", reservation_id="original-reservation", status="succeeded",
+        cache_key="key", requested_window={"start": NOW.isoformat(), "end": NOW.isoformat()},
+        requested_limit=1, retrieved_at=NOW - timedelta(hours=2), observed_at=None,
+        expires_at=NOW - timedelta(hours=1), request_cost=1, upstream_remaining=None,
+        returned_count=0, accepted_count=0, duplicate_count=0, dropped_count=0,
+        response_hash="a" * 64, error_code=None, source_receipt_id="original-receipt",
+    )
+    cache.put_collection("key", CollectionResult((), original, 1))
+
+    resumed = cache.get_collection(
+        "key", reservation_id="new-reservation", source_receipt_id="new-receipt", now=NOW,
+    )
+
+    assert resumed is None

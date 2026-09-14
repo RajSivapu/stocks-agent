@@ -6,6 +6,7 @@ import {
   parseDiscoveryContextRequest,
   parseDiscoveryReferencePayload,
   parseDiscoveryStageCheckpointPayload,
+  parseIntelligenceStartReceipt,
   parseIntelligenceRecordReceipt,
   parseReferenceBeginPayload,
   parseReferenceChunkPayload,
@@ -35,6 +36,84 @@ function assertThrows(fn: () => unknown, message: string): void {
   }
   throw new Error(`expected error containing ${message}`);
 }
+
+interface TerminalCheckpointFixture {
+  cache_key: string;
+  receipt: Record<string, unknown>;
+  items: Record<string, unknown>[];
+}
+
+function terminalCheckpoint(): TerminalCheckpointFixture {
+  return {
+    cache_key: "c".repeat(64),
+    receipt: {
+      provider: "gdelt",
+      source_receipt_id: "00000000-0000-4000-8000-000000000004",
+    },
+    items: [],
+  };
+}
+
+function intelligenceStartReceipt() {
+  return {
+    run_id: "00000000-0000-4000-8000-000000000001",
+    reservation_ids: ["00000000-0000-4000-8000-000000000002"],
+    cache_entries: [],
+    terminal_checkpoint_entries: [terminalCheckpoint()],
+    request_window: {
+      start: "2026-09-02T12:00:00.000Z",
+      end: "2026-09-02T13:00:00.000Z",
+      timezone: "America/Chicago",
+      market_date: "2026-09-02",
+      phase: "pre-market",
+    },
+    reservation_usage: {
+      "00000000-0000-4000-8000-000000000002": 1,
+    },
+    duplicate: true,
+  };
+}
+
+Deno.test("intelligence start receipt accepts bounded terminal checkpoints exactly once", () => {
+  const receipt = intelligenceStartReceipt();
+
+  assertEquals(
+    parseIntelligenceStartReceipt(receipt).terminal_checkpoint_entries,
+    receipt.terminal_checkpoint_entries,
+  );
+  assertEquals(parseIntelligenceStartReceipt(receipt).cache_entries, []);
+});
+
+Deno.test("intelligence start receipt rejects malformed or unbounded terminal checkpoints", () => {
+  const extra = intelligenceStartReceipt();
+  extra.terminal_checkpoint_entries = [{
+    ...terminalCheckpoint(),
+    caller_prose: "untrusted",
+  } as unknown as TerminalCheckpointFixture];
+  assertThrows(
+    () => parseIntelligenceStartReceipt(extra),
+    "unexpected key",
+  );
+
+  const tooMany = intelligenceStartReceipt();
+  tooMany.terminal_checkpoint_entries = Array.from(
+    { length: 101 },
+    terminalCheckpoint,
+  );
+  assertThrows(
+    () => parseIntelligenceStartReceipt(tooMany),
+    "at most 100",
+  );
+
+  const oversizedItem = intelligenceStartReceipt();
+  oversizedItem.terminal_checkpoint_entries[0].items = [{
+    text: "x".repeat(16_385),
+  }];
+  assertThrows(
+    () => parseIntelligenceStartReceipt(oversizedItem),
+    "exceeds byte limit",
+  );
+});
 
 function referenceManifest() {
   const row = {

@@ -1,4 +1,5 @@
 import type { PolicyConfig } from "./contracts.ts";
+import { sha256Hex } from "./intelligence.ts";
 import {
   assertContextFitsTransport,
   consecutiveRecommendationLosses,
@@ -1100,4 +1101,100 @@ Deno.test("report delivery outbox is created from the deterministic report recei
       p_rendered_hash: "c".repeat(64),
     },
   }]);
+});
+
+Deno.test("repository loads only the exact suppressed periodic publication and rejects cross-run or cross-phase rows", async () => {
+  const runId = "00000000-0000-4000-8000-000000000002";
+  const body = [
+    "<b>🌅 MORNING BRIEF — 2026-09-02</b>",
+    "<b>📊 YOUR PORTFOLIO</b>\nCENX · verified",
+    "<b>🌎 MARKET</b>\nVerified context",
+    "<b>🎯 OPEN ENTRY ZONES</b>\nNone open",
+  ].join("\n\n");
+  let returnedRunId = runId;
+  let returnedPhase = "pre-market";
+  const calls: Array<{ selected: string; equals: Array<[string, unknown]>; limit: number | null }> = [];
+  class PeriodicQuery {
+    private selected = "";
+    private equals: Array<[string, unknown]> = [];
+    private rowLimit: number | null = null;
+    select(columns: string): PeriodicQuery {
+      this.selected = columns;
+      return this;
+    }
+    eq(column: string, value: unknown): PeriodicQuery {
+      this.equals.push([column, value]);
+      return this;
+    }
+    limit(count: number): PeriodicQuery {
+      this.rowLimit = count;
+      return this;
+    }
+    then(resolve?: (value: { data: unknown[]; error: null }) => unknown) {
+      calls.push({
+        selected: this.selected,
+        equals: [...this.equals],
+        limit: this.rowLimit,
+      });
+      return Promise.resolve({
+        data: [{
+          run_id: returnedRunId,
+          market_date: "2026-09-02",
+          phase: returnedPhase,
+          kind: "brief",
+          template_version: 2,
+          rendered_body: body,
+          rendered_hash: sha256Hex(body),
+          status: "suppressed",
+          telegram_message_ids: [],
+        }],
+        error: null,
+      }).then(resolve);
+    }
+  }
+  const repository = createSupabaseGatewayRepository({
+    from(table: string) {
+      assertEquals(table, "market_publications");
+      return new PeriodicQuery();
+    },
+  });
+  const load = (repository as unknown as {
+    loadCanonicalPeriodicPublication(
+      runId: string,
+      phase: "pre-market" | "post-market",
+      marketDate: string,
+    ): Promise<{ rendered_body: string; rendered_hash: string } | null>;
+  }).loadCanonicalPeriodicPublication;
+
+  assertEquals(
+    await load(runId, "pre-market", "2026-09-02"),
+    { rendered_body: body, rendered_hash: sha256Hex(body) },
+  );
+  assertEquals(calls, [{
+    selected:
+      "run_id,market_date,phase,kind,template_version,rendered_body,rendered_hash,status,telegram_message_ids",
+    equals: [
+      ["run_id", runId],
+      ["market_date", "2026-09-02"],
+      ["phase", "pre-market"],
+      ["kind", "brief"],
+      ["template_version", 2],
+      ["status", "suppressed"],
+    ],
+    limit: 2,
+  }]);
+
+  returnedPhase = "post-market";
+  for (const mismatch of ["phase", "run"] as const) {
+    let rejected = false;
+    try {
+      await load(runId, "pre-market", "2026-09-02");
+    } catch (error) {
+      rejected = error instanceof GatewayRepositoryError &&
+        error.code === "INVALID_PERSISTED_DATA";
+    }
+    assert(rejected, `cross-${mismatch} periodic publication was accepted`);
+    returnedPhase = "pre-market";
+    returnedRunId = "00000000-0000-4000-8000-000000000099";
+  }
 });

@@ -90,6 +90,7 @@ export interface IntelligenceStartReceipt {
   run_id: string;
   reservation_ids: string[];
   cache_entries: JsonObject[];
+  terminal_checkpoint_entries: CheckpointIntelligencePayload[];
   request_window: JsonObject;
   duplicate: boolean;
   reservation_usage?: Record<string, number>;
@@ -2639,6 +2640,7 @@ export function parseIntelligenceStartReceipt(
       "run_id",
       "reservation_ids",
       "cache_entries",
+      "terminal_checkpoint_entries",
       "request_window",
       "duplicate",
       ...("reservation_usage" in row ? ["reservation_usage"] : []),
@@ -2657,6 +2659,11 @@ export function parseIntelligenceStartReceipt(
         65_536,
       )
     );
+  const terminalCheckpointEntries = arrayValue(
+    row.terminal_checkpoint_entries,
+    "start intelligence receipt.terminal_checkpoint_entries",
+    100,
+  ).map((entry) => parseCheckpointIntelligencePayload(entry));
   return {
     run_id: uuidValue(row.run_id, "start intelligence receipt.run_id"),
     reservation_ids: arrayValue(
@@ -2668,6 +2675,7 @@ export function parseIntelligenceStartReceipt(
         uuidValue(id, `start intelligence receipt.reservation_ids[${index}]`)
       ),
     cache_entries: cacheEntries,
+    terminal_checkpoint_entries: terminalCheckpointEntries,
     request_window: parseRequestWindow(row.request_window),
     ...("reservation_usage" in row
       ? {

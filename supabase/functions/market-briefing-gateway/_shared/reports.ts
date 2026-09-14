@@ -188,10 +188,84 @@ export interface ReportDeliveryOptions {
   dashboardBaseUrl: string;
   allowedDashboardOrigins: readonly string[];
   scheduled: boolean;
+  canonicalPeriodicBody?: string;
 }
 
 function isFriday(marketDate: string): boolean {
   return new Date(`${marketDate}T12:00:00.000Z`).getUTCDay() === 5;
+}
+
+export function canonicalPeriodicPhase(
+  kind: ReportKind,
+  marketDate: string,
+): "pre-market" | "post-market" | null {
+  if (kind === "morning") return "pre-market";
+  return kind === "weekly" && isFriday(marketDate) ? "post-market" : null;
+}
+
+const PERIODIC_PART_LIMIT = 3_498;
+const PERIODIC_PARTS_LIMIT = 4;
+
+function canonicalPeriodicParts(
+  body: string,
+  kind: ReportKind,
+  marketDate: string,
+): string[] {
+  const expectedHeading = kind === "morning"
+    ? `<b>🌅 MORNING BRIEF — ${marketDate}</b>`
+    : `<b>🌙 EOD — ${marketDateLabel(marketDate, true)}</b>`;
+  if (
+    canonicalPeriodicPhase(kind, marketDate) === null ||
+    !body.startsWith(expectedHeading) ||
+    !body.includes("<b>📊 YOUR PORTFOLIO</b>") ||
+    !body.includes("<b>🌎 MARKET</b>") ||
+    !body.includes("<b>🎯 OPEN ENTRY ZONES</b>") ||
+    new TextEncoder().encode(body).byteLength > 14_000
+  ) throw new Error("canonical periodic body is invalid");
+  const blocks = body.split("\n\n");
+  if (
+    blocks.some((block) =>
+      block.length === 0 || block.length > PERIODIC_PART_LIMIT
+    )
+  ) throw new Error("canonical periodic body cannot be split safely");
+  const parts: string[] = [];
+  let current = blocks[0];
+  for (const block of blocks.slice(1)) {
+    const combined = `${current}\n\n${block}`;
+    if (combined.length <= PERIODIC_PART_LIMIT) {
+      current = combined;
+    } else {
+      parts.push(current);
+      current = block;
+    }
+  }
+  parts.push(current);
+  if (
+    parts.length > PERIODIC_PARTS_LIMIT || parts.join("\n\n") !== body
+  ) throw new Error("canonical periodic body cannot be split safely");
+  return parts;
+}
+
+function withCanonicalPeriodicBody(
+  delivery: RenderedReportDelivery,
+  requested: RecordReportPayload,
+  options: ReportDeliveryOptions,
+): RenderedReportDelivery {
+  if (!options.canonicalPeriodicBody) return delivery;
+  if (!options.scheduled || delivery.status !== "ready" || !delivery.payload) {
+    throw new Error("canonical periodic body is not eligible for this report");
+  }
+  const body = options.canonicalPeriodicBody;
+  return {
+    ...delivery,
+    body,
+    parts: canonicalPeriodicParts(body, requested.kind, requested.market_date),
+    payload: {
+      ...delivery.payload,
+      rendered_text: body,
+      rendered_hash: sha256Hex(body),
+    },
+  };
 }
 
 function object(value: unknown, path: string): Record<string, unknown> {
@@ -424,7 +498,7 @@ function reportUrl(
   return `${base.origin}/reports/${id}`;
 }
 
-function marketDateLabel(value: string): string {
+function marketDateLabel(value: string, zeroPadDay = false): string {
   const match = /^(\d{4})-(\d{2})-(\d{2})$/.exec(value);
   if (!match) throw new Error("market date is invalid");
   const month = [
@@ -432,7 +506,7 @@ function marketDateLabel(value: string): string {
     "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
   ][Number(match[2]) - 1];
   if (!month) throw new Error("market date is invalid");
-  return `${month} ${Number(match[3])}`;
+  return `${month} ${zeroPadDay ? match[3] : Number(match[3])}`;
 }
 
 function scheduledNoActionBody(input: {
@@ -682,7 +756,7 @@ export function renderReportDelivery(
           )
           : undefined,
       });
-      return {
+      return withCanonicalPeriodicBody({
         status: "ready",
         body,
         parts: [body],
@@ -691,7 +765,7 @@ export function renderReportDelivery(
           rendered_text: body,
           rendered_hash: sha256Hex(body),
         },
-      };
+      }, value, options);
     }
     return {
       status: "suppressed",
@@ -874,7 +948,7 @@ export function renderReportDelivery(
       payload: canonicalPayload,
     };
   }
-  return {
+  return withCanonicalPeriodicBody({
     status: "ready",
     body,
     parts: [body],
@@ -882,5 +956,5 @@ export function renderReportDelivery(
     ...(actionableFields.length > 0
       ? { actionable_fields: actionableFields }
       : {}),
-  };
+  }, value, options);
 }

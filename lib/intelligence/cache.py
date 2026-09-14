@@ -31,6 +31,7 @@ class ResumableCollectionCache:
     def __init__(self) -> None:
         self._entries: dict[str, Mapping[str, Any]] = {}
         self._collections: dict[str, CollectionResult] = {}
+        self._terminal_collections: dict[tuple[str, str], CollectionResult] = {}
         self._runs: dict[str, object] = {}
 
     @staticmethod
@@ -76,6 +77,22 @@ class ResumableCollectionCache:
                 continue
             items = tuple(_item_from_checkpoint(value) for value in items_row)
             self._collections[key] = CollectionResult(items, receipt, receipt.requested_limit)
+
+    def hydrate_terminal_collections(
+        self, run_id: str, entries: Iterable[Mapping[str, object]]
+    ) -> None:
+        """Restore exact paid outcomes for one interrupted run, regardless of cache TTL."""
+        if not isinstance(run_id, str) or not run_id:
+            raise ValueError("invalid terminal collection run")
+        for entry in entries:
+            key = entry.get("cache_key")
+            if not isinstance(key, str) or not key:
+                raise ValueError("invalid persisted collection checkpoint")
+            self._terminal_collections[(run_id, key)] = collection_from_checkpoint(entry)
+
+    def get_terminal_collection(self, run_id: str, key: str) -> CollectionResult | None:
+        """Return an exact same-run terminal outcome without cache-hit rewriting."""
+        return self._terminal_collections.get((run_id, key))
 
     def get_collection(
         self, key: str, *, reservation_id: str, source_receipt_id: str, now: datetime
