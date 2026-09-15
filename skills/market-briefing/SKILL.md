@@ -28,9 +28,13 @@ The evidence-only collection interface is `python scripts/collect_market_intelli
 once per run as specified below. It cannot replace any Analyst, Checker, policy, Telegram, or
 `finish_run` step and is not an alternate state or notification path.
 If the command execution tool returns or times out before it provides a valid terminal receipt, use
-`python scripts/wait_market_intelligence.py --run-id RUN_ID --timeout-seconds 900` to read the
+`python scripts/wait_market_intelligence.py --run-id RUN_ID --timeout-seconds 360` to read the
 already-running collection's deterministic durable completion. This helper performs no provider
-request and no write. Never rerun the collector for that run.
+request and no write. If it returns `COLLECTION_PENDING`, invoke the collector one final time with
+the identical command, scratch context, and same exact run ID. Its protected checkpoints prevent a
+completed or uncertain source attempt from being repeated. If that final invocation also returns or
+times out without a receipt, run the wait helper once more; stop if it remains pending. This permits
+at most two collector invocations for one run and never starts a second analysis run.
 
 If scratch files are necessary, create a directory with `mktemp -d`, keep every temporary JSON file
 there, and remove it when done. Do not edit the checkout, watchlist, or data files during a run.
@@ -63,9 +67,12 @@ not JSON numbers or exponent notation. Follow the exact structures and bounds in
    market coverage. A source supports a claim only through the current receipt-backed packet. Do not
    continue until the command exits successfully with non-null `completion_id`, `packet_id`, and
    `packet_hash` for the exact run. If command execution returns early or times out, invoke the wait
-   helper once and use its validated bounded receipt. `COLLECTION_PENDING` means stop safely: do not
-   evaluate, record artifacts, grade decisions, finish, or claim delivery. Never call `evaluate_and_publish` before
-   the durable collection completion is validated.
+   helper and use its validated bounded receipt. On `COLLECTION_PENDING`, repeat the identical
+   collector command once for the same run, then use the wait helper once more if command execution
+   again returns without a receipt. Never make a third collector invocation. A second
+   `COLLECTION_PENDING` means stop safely: do not evaluate, record artifacts, grade decisions,
+   finish, or claim delivery. Never call `evaluate_and_publish` before the durable collection
+   completion is validated.
 5. Build separate Analyst and Checker records, then submit one complete bound bundle once via
    `evaluate_and_publish` with the same run ID. Every scheduled bundle must include exactly an
    `intelligence_packet` reference by mapping the collector's `packet_id` to `id` and `packet_hash`
