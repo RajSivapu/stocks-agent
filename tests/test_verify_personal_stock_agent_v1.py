@@ -46,6 +46,67 @@ def test_release_exposes_a_separate_discovery_capability_verifier():
     assert callable(getattr(release_verifier, "verify_discovery_capability", None))
 
 
+def test_scheduled_run_diagnostic_exposes_only_safe_nonterminal_stage_metadata():
+    rows = {
+        "run": [{
+            "id": RUN, "kind": "post-market", "scheduled_phase": "post-market",
+            "scheduled_market_date": "2026-09-14", "scheduled_attempt": 1,
+            "status": "running", "started_at": "2026-09-14T20:05:00+00:00",
+            "finished_at": None, "gateway_request_id": START,
+            "telegram_message_ids": [],
+        }],
+        "run_events": [{"id": COLLECTION, "run_id": RUN, "status": "started"}],
+        "checkpoints": [{"run_id": RUN, "cache_key": "private-collection-key"}],
+        "completions": [], "packets": [], "reports": [], "publications": [],
+        "evaluation_publications": [], "run_outcomes": [],
+        "discovery_stage_tasks": [{
+            "id": REQUEST, "run_id": RUN, "stage": "primary",
+            "capability_id": "gdelt_theme_search", "provider": "gdelt",
+            "query_kind": "theme_search", "state": "running", "attempt_count": 1,
+            "result": {"never_expose": "task result"},
+        }],
+        "enrichment_selection_manifests": [],
+        "enrichment_request_descriptors": [],
+        "source_quota_reservations": [{"id": REQUEST}],
+        "source_receipts": [{"id": REQUEST}],
+        "source_items": [{"id": REQUEST}],
+        "intelligence_run_items": [{"id": REQUEST}],
+        "requests": [{
+            "request_id": START, "run_id": RUN, "operation": "start_run",
+            "status": "completed", "response": {"never_expose": "gateway response"},
+        }],
+    }
+
+    diagnostic = release_verifier.scheduled_run_diagnostic(rows, RUN)
+
+    assert diagnostic["status"] == "nonterminal"
+    assert diagnostic["run"] == {
+        "id": RUN, "kind": "post-market", "phase": "post-market",
+        "market_date": "2026-09-14", "attempt": 1, "status": "running",
+        "started_at": "2026-09-14T20:05:00+00:00", "finished_at": None,
+        "has_gateway_request_id": True, "telegram_message_count": 0,
+    }
+    assert diagnostic["last_persisted_stage"] == "collection_checkpoints"
+    assert diagnostic["stage_counts"]["collection_checkpoints"] == 1
+    assert diagnostic["stage_counts"]["reports"] == 0
+    assert diagnostic["run_event_statuses"] == {"started": 1}
+    assert diagnostic["request_statuses"] == [{
+        "operation": "start_run", "status": "completed", "count": 1,
+    }]
+    assert diagnostic["discovery_tasks"] == [{
+        "stage": "primary", "capability_id": "gdelt_theme_search",
+        "provider": "gdelt", "query_kind": "theme_search",
+        "state": "running", "attempt_count": 1,
+    }]
+    serialized = json.dumps(diagnostic, sort_keys=True)
+    assert "private-collection-key" not in serialized
+    assert "task result" not in serialized
+    assert "gateway response" not in serialized
+    assert diagnostic["checkpoint_key_hashes"] == [
+        hashlib.sha256(b"private-collection-key").hexdigest()
+    ]
+
+
 def _capability_rows():
     from lib.intelligence.cursors import SourceCursor
     from lib.intelligence.planner import _query_for, load_source_capabilities

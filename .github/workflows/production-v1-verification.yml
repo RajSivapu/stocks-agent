@@ -101,6 +101,20 @@ jobs:
             --publishable-key "$SUPABASE_PUBLISHABLE_KEY" \
             --candidate-sha "$DEPLOYMENT_SHA" \
             --output "$RUNNER_TEMP/static-build-receipt.json"
+      - name: Capture sanitized scheduled-run diagnostic
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_READONLY_DATABASE_URL: ${{ secrets.RELEASE_READONLY_DATABASE_URL }}
+          SUPABASE_PROJECT_REF: ${{ secrets.SUPABASE_PROJECT_REF }}
+        run: |
+          set -euo pipefail; umask 077
+          test -n "$RELEASE_READONLY_DATABASE_URL" && test -n "$SUPABASE_PROJECT_REF"
+          python scripts/verify_personal_stock_agent_v1.py \
+            --repository "$GITHUB_REPOSITORY" \
+            --deployment-id "$DEPLOYMENT_ID" \
+            --production-project-ref "$SUPABASE_PROJECT_REF" \
+            --static-root dist \
+            --diagnose-scheduled-run > "$RUNNER_TEMP/scheduled-run-diagnostic.json"
       - name: Verify protected release and next normal scheduled receipt
         env:
           GH_TOKEN: ${{ github.token }}
@@ -119,6 +133,14 @@ jobs:
           jq -cS --arg main_sha "$MAIN_SHA" --argjson workflow_run_id "$GITHUB_RUN_ID" \
             '. + {verification_main_sha:$main_sha,verification_workflow_run_id:$workflow_run_id}' \
             "$RUNNER_TEMP/verification-raw.json" > "$RUNNER_TEMP/production-v1-verification.json"
+      - name: Upload sanitized scheduled-run diagnostic
+        if: always()
+        uses: actions/upload-artifact@65462800fd760344b1a7b4382951275a0abb4808
+        with:
+          name: production-scheduled-diagnostic-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/scheduled-run-diagnostic.json
+          if-no-files-found: error
+          retention-days: 30
       - name: Upload immutable V1 verification receipt
         uses: actions/upload-artifact@65462800fd760344b1a7b4382951275a0abb4808
         with:
