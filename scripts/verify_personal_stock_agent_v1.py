@@ -2693,7 +2693,7 @@ def main() -> int:
         source = GitHubProductionDataSource(args.repository, args.production_project_ref, database)
         if args.diagnose_scheduled_run:
             release = source.deployment(args.deployment_id)
-            run_id = source.scheduled_run(release["deployed_at"])
+            run_id = source.latest_scheduled_run(release["deployed_at"])
             diagnostic = scheduled_run_diagnostic(source.release_rows(run_id), run_id)
             diagnostic.update({
                 "candidate_sha": release["candidate_sha"],
