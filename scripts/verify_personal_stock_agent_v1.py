@@ -2131,6 +2131,9 @@ def scheduled_run_diagnostic(rows: Mapping, run_id: str) -> dict:
     require(UUID.fullmatch(run_id) is not None, "scheduled diagnostic run UUID is invalid")
     run = one(rows.get("run"), "run")
     require(run.get("id") == run_id, "scheduled diagnostic run identity mismatch")
+    intelligence = one(rows.get("intelligence_runs"), "intelligence run")
+    require(intelligence.get("id") == run_id,
+            "scheduled diagnostic intelligence run identity mismatch")
 
     count_keys = {
         "gateway_requests": "requests",
@@ -2174,6 +2177,7 @@ def scheduled_run_diagnostic(rows: Mapping, run_id: str) -> dict:
         event_statuses[status] = event_statuses.get(status, 0) + 1
 
     request_status_counts: dict[tuple[str, str, str | None], int] = {}
+    request_timeline = []
     for row in rows.get("requests", []):
         require(isinstance(row, Mapping), "scheduled diagnostic request is malformed")
         response = row.get("response")
@@ -2187,6 +2191,15 @@ def scheduled_run_diagnostic(rows: Mapping, run_id: str) -> dict:
             str(row.get("status") or "unknown"), code,
         )
         request_status_counts[key] = request_status_counts.get(key, 0) + 1
+        request_timeline.append({
+            "operation": key[0], "status": key[1], "code": code,
+            "attempt_count": row.get("attempt_count"),
+            "created_at": row.get("created_at"),
+            "finished_at": row.get("finished_at"),
+        })
+    request_timeline.sort(key=lambda row: (
+        str(row["created_at"] or ""), str(row["operation"]),
+    ))
 
     discovery_tasks = []
     for row in rows.get("discovery_stage_tasks", []):
@@ -2215,6 +2228,21 @@ def scheduled_run_diagnostic(rows: Mapping, run_id: str) -> dict:
     require(isinstance(telegram_message_ids, list),
             "scheduled diagnostic Telegram receipt is malformed")
     terminal = run.get("status") in {"completed", "suppressed", "failed"}
+    packet_receipts = []
+    for row in rows.get("packets", []):
+        require(isinstance(row, Mapping) and row.get("run_id") == run_id,
+                "scheduled diagnostic packet is malformed")
+        packet_receipts.append({
+            "status": row.get("status"),
+            "candidate_count": row.get("candidate_count"),
+            "evidence_count": row.get("evidence_count"),
+            "created_at": row.get("created_at"),
+        })
+    completion_created_at = []
+    for row in rows.get("completions", []):
+        require(isinstance(row, Mapping) and row.get("run_id") == run_id,
+                "scheduled diagnostic completion is malformed")
+        completion_created_at.append(row.get("created_at"))
     return {
         "status": "terminal" if terminal else "nonterminal",
         "run": {
@@ -2229,6 +2257,11 @@ def scheduled_run_diagnostic(rows: Mapping, run_id: str) -> dict:
             "has_gateway_request_id": bool(run.get("gateway_request_id")),
             "telegram_message_count": len(telegram_message_ids),
         },
+        "intelligence_run": {
+            "id": intelligence.get("id"),
+            "phase": intelligence.get("phase"),
+            "market_date": intelligence.get("market_date"),
+        },
         "last_persisted_stage": last_persisted_stage,
         "stage_counts": stage_counts,
         "run_event_statuses": dict(sorted(event_statuses.items())),
@@ -2239,6 +2272,13 @@ def scheduled_run_diagnostic(rows: Mapping, run_id: str) -> dict:
                 key=lambda item: tuple(str(value) for value in item[0]),
             )
         ],
+        "request_timeline": request_timeline,
+        "completion_created_at": sorted(
+            completion_created_at, key=lambda value: str(value or ""),
+        ),
+        "packet_receipts": sorted(
+            packet_receipts, key=lambda row: str(row["created_at"] or ""),
+        ),
         "discovery_tasks": discovery_tasks,
         "checkpoint_key_hashes": sorted(checkpoint_hashes),
     }

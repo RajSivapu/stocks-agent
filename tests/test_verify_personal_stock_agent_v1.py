@@ -55,9 +55,21 @@ def test_scheduled_run_diagnostic_exposes_only_safe_nonterminal_stage_metadata()
             "finished_at": None, "gateway_request_id": START,
             "telegram_message_ids": [],
         }],
+        "intelligence_runs": [{
+            "id": RUN, "phase": "post-market", "market_date": "2026-09-14",
+        }],
         "run_events": [{"id": COLLECTION, "run_id": RUN, "status": "started"}],
         "checkpoints": [{"run_id": RUN, "cache_key": "private-collection-key"}],
-        "completions": [], "packets": [], "reports": [], "publications": [],
+        "completions": [{
+            "completion_id": COLLECTION, "run_id": RUN,
+            "created_at": "2026-09-14T20:09:00+00:00",
+        }],
+        "packets": [{
+            "id": PACKET, "run_id": RUN, "status": "completed",
+            "candidate_count": 13, "evidence_count": 22,
+            "created_at": "2026-09-14T20:09:00+00:00",
+        }],
+        "reports": [], "publications": [],
         "evaluation_publications": [], "run_outcomes": [],
         "discovery_stage_tasks": [{
             "id": REQUEST, "run_id": RUN, "stage": "primary",
@@ -74,10 +86,14 @@ def test_scheduled_run_diagnostic_exposes_only_safe_nonterminal_stage_metadata()
         "requests": [{
             "request_id": START, "run_id": RUN, "operation": "start_run",
             "status": "completed", "response": {"never_expose": "gateway response"},
+            "attempt_count": 1, "created_at": "2026-09-14T20:05:00+00:00",
+            "finished_at": "2026-09-14T20:05:01+00:00",
         }, {
             "request_id": EVALUATION, "run_id": RUN,
             "operation": "evaluate_and_publish", "status": "failed",
             "response": {"ok": False, "code": "PERSISTENCE_FAILED"},
+            "attempt_count": 1, "created_at": "2026-09-14T20:10:00+00:00",
+            "finished_at": "2026-09-14T20:10:01+00:00",
         }],
     }
 
@@ -90,7 +106,7 @@ def test_scheduled_run_diagnostic_exposes_only_safe_nonterminal_stage_metadata()
         "started_at": "2026-09-14T20:05:00+00:00", "finished_at": None,
         "has_gateway_request_id": True, "telegram_message_count": 0,
     }
-    assert diagnostic["last_persisted_stage"] == "collection_checkpoints"
+    assert diagnostic["last_persisted_stage"] == "evidence_packets"
     assert diagnostic["stage_counts"]["collection_checkpoints"] == 1
     assert diagnostic["stage_counts"]["reports"] == 0
     assert diagnostic["run_event_statuses"] == {"started": 1}
@@ -116,6 +132,19 @@ def test_scheduled_run_diagnostic_exposes_only_safe_nonterminal_stage_metadata()
     assert diagnostic["checkpoint_key_hashes"] == [
         hashlib.sha256(b"private-collection-key").hexdigest()
     ]
+    assert diagnostic["intelligence_run"] == {
+        "id": RUN, "phase": "post-market", "market_date": "2026-09-14",
+    }
+    assert diagnostic["packet_receipts"] == [{
+        "status": "completed", "candidate_count": 13, "evidence_count": 22,
+        "created_at": "2026-09-14T20:09:00+00:00",
+    }]
+    assert diagnostic["completion_created_at"] == ["2026-09-14T20:09:00+00:00"]
+    assert diagnostic["request_timeline"][0] == {
+        "operation": "start_run", "status": "completed", "code": None,
+        "attempt_count": 1, "created_at": "2026-09-14T20:05:00+00:00",
+        "finished_at": "2026-09-14T20:05:01+00:00",
+    }
 
 
 def _capability_rows():
