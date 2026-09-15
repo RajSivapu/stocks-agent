@@ -1172,3 +1172,12 @@ class GitHubProductionDataSource:
             ORDER BY started_at,id LIMIT 1""", (deployed_at,))
         require(len(rows) == 1, "next existing scheduled production run is unavailable")
         return rows[0]["id"]
+
+    def latest_scheduled_run(self, deployed_at: str) -> str:
+        """Select the latest run for diagnosis without changing release-proof ordering."""
+        require(self.database.identity()["project_ref"] == self.project_ref, "queried production database identity mismatch")
+        rows = self.database.query("""SELECT id::text AS id FROM public.analysis_runs
+            WHERE started_at>%s::timestamptz AND scheduled_phase IN ('pre-market','intraday','post-market')
+            ORDER BY started_at DESC,id DESC LIMIT 1""", (deployed_at,))
+        require(len(rows) == 1, "latest existing scheduled production run is unavailable")
+        return rows[0]["id"]

@@ -2401,3 +2401,37 @@ def test_production_source_refuses_unprotected_deployment(monkeypatch):
     monkeypatch.setattr(source, "_get", lambda path: {"id": 42, "environment": "staging", "production_environment": False})
     with pytest.raises(RuntimeError, match="production"):
         source.deployment(42)
+
+
+def test_production_source_can_select_latest_postdeployment_scheduled_run():
+    from scripts.protected_evidence import GitHubProductionDataSource
+
+    class Database:
+        def __init__(self):
+            self.calls = []
+
+        def identity(self):
+            return {"project_ref": "p" * 20}
+
+        def query(self, sql, parameters=()):
+            self.calls.append((sql, parameters))
+            return [{"id": RUN}]
+
+    database = Database()
+    source = GitHubProductionDataSource("owner/stocks-agent", "p" * 20, database)
+
+    assert source.latest_scheduled_run("2026-09-14T19:24:09Z") == RUN
+    assert len(database.calls) == 1
+    sql, parameters = database.calls[0]
+    assert "ORDER BY started_at DESC,id DESC LIMIT 1" in " ".join(sql.split())
+    assert parameters == ("2026-09-14T19:24:09Z",)
+
+
+def test_scheduled_diagnostic_selects_latest_run_while_release_verification_keeps_first():
+    source = Path("scripts/verify_personal_stock_agent_v1.py").read_text()
+    start = source.index("if args.diagnose_scheduled_run:")
+    diagnostic = source[start:source.index("from scripts.verify_native_site_release", start)]
+
+    assert "source.latest_scheduled_run" in diagnostic
+    assert "source.scheduled_run" not in diagnostic
+    assert "run_id = source.scheduled_run" in source[:source.index("def main()")]
