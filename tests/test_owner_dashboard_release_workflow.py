@@ -54,6 +54,55 @@ def test_protected_release_and_recovery_are_valid_workflow_yaml():
         assert workflow["jobs"]
 
 
+def test_recovery_journal_compaction_workflow_is_exact_review_bound_and_trigger_free():
+    path = Path(".github/workflows/recovery-journal-compaction.yml")
+    assert path.is_file(), "protected recovery-journal compaction workflow is missing"
+    source = path.read_text()
+    workflow = yaml.safe_load(source)
+    job = workflow["jobs"]["compact"]
+    steps = {step.get("name"): step for step in job["steps"]}
+
+    assert job["environment"] == "owner-dashboard-production"
+    assert workflow["concurrency"] == {
+        "group": "protected-owner-dashboard-release-production",
+        "cancel-in-progress": False,
+    }
+    assert "workflow_dispatch:" in source and "workflow_run:" not in source
+    trust = steps["Authenticate exact reviewed main candidate without candidate code"]["run"]
+    assert '"$CANDIDATE_SHA" = "$MAIN_SHA"' in trust
+    assert "required CI was not an exact-main push" in trust
+    assert "required PR CI does not bind reviewed head" in trust
+    assert "OWNER_RECOVERY_JOURNAL_COMPACTION_APPROVAL_V1" in trust
+    assert "OWNER_RELEASE_APPROVAL_V1" not in trust
+    assert ".author_association == \"OWNER\"" in trust
+    cleanup = steps["Compact authenticated terminal recovery journals"]
+    assert cleanup["env"] == {
+        "RELEASE_RECOVERY_KEY": "${{ secrets.RELEASE_RECOVERY_KEY }}",
+        "SUPABASE_PROJECT_REF": "${{ secrets.SUPABASE_PROJECT_REF }}",
+        "SUPAVISOR_SESSION_URL": "${{ secrets.SUPAVISOR_SESSION_URL }}",
+        "MAIN_SHA": "${{ steps.candidate.outputs.candidate_sha }}",
+    }
+    assert "-m scripts.compact_recovery_journals" in cleanup["run"]
+    assert "--expected-rows 467" in cleanup["run"]
+    assert "--expected-groups 45" in cleanup["run"]
+    upload = steps["Upload bounded recovery-journal compaction receipt"]
+    assert upload["with"]["retention-days"] == 90
+    assert re.fullmatch(r"actions/upload-artifact@[0-9a-f]{40}", upload["uses"])
+    binding = steps["Bind compaction receipt to this exact main run"]
+    assert binding["env"] == {
+        "GH_TOKEN": "${{ github.token }}",
+        "ARTIFACT_ID": "${{ steps.compaction_receipt.outputs.artifact-id }}",
+        "MAIN_SHA": "${{ steps.candidate.outputs.candidate_sha }}",
+    }
+    assert "repos/$GITHUB_REPOSITORY/actions/artifacts/$ARTIFACT_ID" in binding["run"]
+    assert ".workflow_run.id == $run" in binding["run"]
+    assert ".workflow_run.head_sha == $sha" in binding["run"]
+    assert ".size_in_bytes <= 65536" in binding["run"]
+    assert "collect_market_intelligence" not in source
+    assert "start_run" not in source
+    assert "telegram-portfolio" not in source
+
+
 def test_protected_release_python_entrypoints_preserve_repository_package_imports():
     release = Path(".github/workflows/owner-dashboard-release.yml").read_text()
     recovery = Path(".github/workflows/owner-dashboard-release-recovery.yml").read_text()
