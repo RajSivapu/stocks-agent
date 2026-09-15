@@ -1006,7 +1006,7 @@ class PostgresReadOnlySource:
             name: self.query(sql, (run_id,) * sql.count("%s"))
             for name, sql in queries.items()
         }
-        result["requests"] = self.query("""SELECT request_id::text AS request_id,run_id::text AS run_id,operation,status,response FROM public.market_gateway_requests
+        result["requests"] = self.query("""SELECT request_id::text AS request_id,run_id::text AS run_id,operation,status,response,attempt_count,created_at::text AS created_at,finished_at::text AS finished_at FROM public.market_gateway_requests
             WHERE run_id=%s::uuid OR request_id IN (SELECT request_id FROM public.market_report_request_origins WHERE run_id=%s::uuid)""", (run_id, run_id))
         return result
 
