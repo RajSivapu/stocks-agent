@@ -233,35 +233,35 @@ git commit -m "feat: enforce gateway lane authority"
 - Produces: `IntelligencePipeline.run_slice(request, budget) -> PipelineReceipt | PausedPipelineReceipt`.
 - Consumes: `CollectionBudget`, `build_alert_discovery_plan`, gateway lane contract, persisted discovery task checkpoints, protected holdings/plans/themes/reference context.
 
-- [ ] **Step 1: Write failing CLI and interruption tests**
+- [x] **Step 1: Write failing CLI and interruption tests**
 
 Use fake clocks/adapters to prove a 24-task research plan pauses before the deadline, leaves unstarted tasks planned, never repeats completed or uncertain attempts on resume, and does not call `record_intelligence` until completion rules pass. Prove alert mode builds no SEC reference transfer, starts at most eight requests, persists a partial completed packet when optional GDELT is slow, and returns before the four-minute budget.
 
-- [ ] **Step 2: Run focused Python tests**
+- [x] **Step 2: Run focused Python tests**
 
 Run: `.venv/bin/python -m pytest tests/test_collect_market_intelligence.py tests/test_gateway.py tests/test_intelligence_pipeline.py -q`
 
 Expected: FAIL because the CLI lane/budget arguments and paused receipt do not exist.
 
-- [ ] **Step 3: Add CLI validation and shared deadline construction**
+- [x] **Step 3: Add CLI validation and shared deadline construction**
 
 Require `--lane`; default `--budget-seconds` to `240` for alert and research. Reject alert budgets above 240 and research budgets above 240. Construct one monotonic deadline and pass it through reference, provider, checkpoint, and completion paths; cap every outbound HTTP timeout by remaining time.
 
-- [ ] **Step 4: Implement alert collection**
+- [x] **Step 4: Implement alert collection**
 
 Read protected quote targets and due priority themes from context, build the alert plan, skip SEC refresh, attach the latest eligible research packet metadata, and complete a packet from terminal tasks when optional tasks are unavailable or the stop margin is reached. Set `coverage.actionable_data_complete` only when every ticker used in a new action has a fresh, USD, symbol-bound quote.
 
-- [ ] **Step 5: Implement research slicing**
+- [x] **Step 5: Implement research slicing**
 
 Execute persisted tasks in deterministic `(stage priority, provider priority, task_id)` order. Check `CollectionBudget.can_start()` before every provider attempt and multi-call reference chunk. On budget exhaustion, write no fabricated terminal task, return the paused receipt, and leave the analysis/intelligence run running for the next normal phase. Existing completed and `attempting` task states remain authoritative on resume.
 
-- [ ] **Step 6: Run focused Python tests**
+- [x] **Step 6: Run focused Python tests**
 
 Run: `.venv/bin/python -m pytest tests/test_collect_market_intelligence.py tests/test_gateway.py tests/test_intelligence_pipeline.py -q`
 
 Expected: PASS.
 
-- [ ] **Step 7: Commit collector changes**
+- [x] **Step 7: Commit collector changes**
 
 ```bash
 git add scripts/collect_market_intelligence.py scripts/market_gateway.py lib/intelligence/pipeline.py tests/test_collect_market_intelligence.py tests/test_gateway.py tests/test_intelligence_pipeline.py

@@ -136,6 +136,35 @@ def test_call_accepts_fractional_timeout_for_a_shared_deadline(monkeypatch):
     assert captured["timeout"] == 0.125
 
 
+def test_deadline_gateway_caps_each_call_to_the_one_shared_deadline():
+    from lib.intelligence.pipeline import CollectionBudget
+    from scripts.market_gateway import DeadlineGateway
+
+    captured = []
+
+    class Client:
+        @staticmethod
+        def call(operation, payload, **kwargs):
+            captured.append((operation, payload, kwargs))
+            return {"ok": True, "data": {}}
+
+    clock = [70.0]
+    budget = CollectionBudget(
+        deadline=100.0,
+        request_limit=None,
+        stop_margin_seconds=0.0,
+        monotonic=lambda: clock[0],
+    )
+    client = DeadlineGateway(Client(), budget)
+
+    client.call("read_context", {}, run_id=RUN_ID, timeout=60.0)
+
+    assert captured[0][2]["timeout"] == 30.0
+    clock[0] = 100.0
+    with pytest.raises(TimeoutError, match="deadline"):
+        client.call("read_context", {}, run_id=RUN_ID)
+
+
 def test_call_allows_credential_proxy_to_inject_scoped_header(monkeypatch):
     def proxy_configuration(name):
         if name == "supabase_url":

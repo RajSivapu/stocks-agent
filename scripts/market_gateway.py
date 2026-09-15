@@ -13,6 +13,26 @@ sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))
 from lib import gateway
 
 
+class DeadlineGateway:
+    """Proxy gateway calls through the collector's single monotonic deadline."""
+
+    def __init__(self, client, budget) -> None:
+        if not callable(getattr(client, "call", None)):
+            raise TypeError("deadline gateway requires a callable client")
+        if not callable(getattr(budget, "remaining_seconds", None)):
+            raise TypeError("deadline gateway requires a collection budget")
+        self._client = client
+        self._budget = budget
+
+    def call(self, operation, payload, **kwargs):
+        maximum = kwargs.pop("timeout", 30.0)
+        kwargs["timeout"] = self._budget.remaining_seconds(maximum)
+        return self._client.call(operation, payload, **kwargs)
+
+    def __getattr__(self, name):
+        return getattr(self._client, name)
+
+
 def _print(value: dict) -> None:
     print(json.dumps(value, separators=(",", ":"), sort_keys=True))
 

@@ -83,6 +83,8 @@ from lib.intelligence.themes import (
     select_dynamic_theme_evidence,
     theme_episode_revision_from_persistence,
 )
+from lib.intelligence.types import DiscoveryPlan, DiscoveryTask, PacketLimits, SourceCapability
+from lib.intelligence.universe import ReferenceSnapshot, SecurityIdentity
 
 
 Lane = Literal["alert", "research"]
@@ -123,8 +125,16 @@ class CollectionBudget:
         if self.request_limit is not None and self.requests_started + requests > self.request_limit:
             raise ValueError("request limit exceeded")
         self.requests_started += requests
-from lib.intelligence.types import DiscoveryPlan, DiscoveryTask, PacketLimits, SourceCapability
-from lib.intelligence.universe import ReferenceSnapshot, SecurityIdentity
+
+    def remaining_seconds(self, maximum: float = 60.0) -> float:
+        if not isinstance(maximum, (int, float)) or isinstance(maximum, bool) or maximum <= 0:
+            raise ValueError("maximum timeout must be positive")
+        if self.deadline is None:
+            return float(maximum)
+        remaining = self.deadline - self.monotonic()
+        if remaining <= 0:
+            raise TimeoutError("collection deadline reached")
+        return min(float(maximum), remaining)
 
 
 PHASES = ("pre-market", "intraday", "post-market", "on-demand")
@@ -366,6 +376,31 @@ class PipelineReceipt:
         return encoded
 
 
+@dataclass(frozen=True, slots=True)
+class PausedPipelineReceipt:
+    run_id: str
+    lane: Literal["research"]
+    planned_remaining: int
+    deadline_reached: Literal[True] = True
+    status: Literal["paused"] = "paused"
+
+    def __post_init__(self) -> None:
+        if self.planned_remaining < 0:
+            raise ValueError("paused receipt planned count must be nonnegative")
+
+    def to_dict(self) -> dict[str, object]:
+        return {
+            "deadline_reached": self.deadline_reached,
+            "lane": self.lane,
+            "planned_remaining": self.planned_remaining,
+            "run_id": self.run_id,
+            "status": self.status,
+        }
+
+    def to_json_bytes(self) -> bytes:
+        return _canonical(self.to_dict()).encode("utf-8")
+
+
 class IntelligencePipeline:
     """Collect once per bounded target and persist the full run atomically."""
 
@@ -380,6 +415,7 @@ class IntelligencePipeline:
         reference_stage: object | None = None,
         reference_recovery_stage: object | None = None,
         reference_snapshot_loader: object | None = None,
+        protected_reference_stage: object | None = None,
         discovery_plan: DiscoveryPlan | None = None,
         source_cursors: Mapping[str, SourceCursor] | None = None,
     ) -> None:
@@ -405,6 +441,9 @@ class IntelligencePipeline:
         if reference_snapshot_loader is not None and not callable(reference_snapshot_loader):
             raise ValueError("reference_snapshot_loader must be callable")
         self.reference_snapshot_loader = reference_snapshot_loader
+        if protected_reference_stage is not None and not callable(protected_reference_stage):
+            raise ValueError("protected_reference_stage must be callable")
+        self.protected_reference_stage = protected_reference_stage
         if discovery_plan is not None and not isinstance(discovery_plan, DiscoveryPlan):
             raise ValueError("discovery_plan must be a DiscoveryPlan")
         self.discovery_plan = discovery_plan
@@ -510,13 +549,45 @@ class IntelligencePipeline:
         self.cache.put_run(request.request_id, receipt)
         return receipt
 
-    def _run_capability_plan(self, request: PipelineRequest) -> PipelineReceipt:
+    def run_slice(
+        self,
+        request: PipelineRequest,
+        budget: CollectionBudget,
+    ) -> PipelineReceipt | PausedPipelineReceipt:
+        if not isinstance(budget, CollectionBudget):
+            raise TypeError("budget must be a CollectionBudget")
+        if request.dry_run or self.discovery_plan is None:
+            return self.run(request)
+        completed = self.cache.get_run(request.request_id)
+        if isinstance(completed, PipelineReceipt):
+            return replace(completed, actual_requests=0, cache_hits=completed.actual_requests)
+        recovered = self._read_completion(request.request_id)
+        if recovered is not None:
+            return recovered
+        return self._run_capability_plan(request, budget=budget)
+
+    def _run_capability_plan(
+        self,
+        request: PipelineRequest,
+        *,
+        budget: CollectionBudget | None = None,
+    ) -> PipelineReceipt | PausedPipelineReceipt:
         """Execute the persisted Task 1 plan through the existing collection path."""
         plan = self.discovery_plan
         if plan is None or plan.run_id != request.request_id or plan.phase != request.phase:
             raise ValueError("discovery plan does not match the collection request")
         adapters = {str(adapter.provider): adapter for adapter in self.adapters}
-        collection_tasks = tuple(task for task in plan.tasks if task.stage != "reference")
+        ordered_tasks = tuple(sorted(
+            plan.tasks,
+            key=lambda task: (
+                {"signals": 0, "reference": 1, "resolve": 2, "quote": 3, "enrich": 4}.get(
+                    task.stage, 99
+                ),
+                plan.capabilities[task.capability_id].provider_priority,
+                task.task_id,
+            ),
+        ))
+        collection_tasks = tuple(task for task in ordered_tasks if task.stage != "reference")
         missing = sorted({task.provider for task in collection_tasks} - set(adapters))
         if missing:
             raise ValueError("discovery plan has no adapter for a planned provider")
@@ -566,6 +637,7 @@ class IntelligencePipeline:
             "cache_keys": [],
         } for provider in providers]
         start_payload = {
+            "lane": request.lane,
             "phase": request.phase,
             "market_date": request.market_date.isoformat(),
             "policy_version": _policy_version(self.context.get("policy_version", 1)),
@@ -576,6 +648,21 @@ class IntelligencePipeline:
         run_id = str(start.get("run_id") or "")
         if run_id != request.request_id:
             raise ValueError("gateway start receipt run_id does not match request_id")
+        if request.lane == "alert" and self.protected_reference_stage is not None:
+            protected_reference = self.protected_reference_stage(run_id, request)
+            if (
+                not isinstance(protected_reference, tuple)
+                or len(protected_reference) != 2
+            ):
+                raise ValueError("protected reference stage result is invalid")
+            reference_coverage, reference_snapshot = protected_reference
+            self.context["reference_coverage"] = _validated_reference_coverage(
+                reference_coverage
+            )
+            if reference_snapshot is not None:
+                if not isinstance(reference_snapshot, ReferenceSnapshot):
+                    raise ValueError("protected reference stage result is invalid")
+                self.context["security_reference"] = reference_snapshot
         request_window = _request_window(start.get("request_window"), request)
         if start.get("duplicate") is True:
             plan = rebind_discovery_plan_window(
@@ -583,7 +670,19 @@ class IntelligencePipeline:
                 {key: request_window[key] for key in ("start", "end")},
             )
             self.discovery_plan = plan
-            collection_tasks = tuple(task for task in plan.tasks if task.stage != "reference")
+            ordered_tasks = tuple(sorted(
+                plan.tasks,
+                key=lambda task: (
+                    {"signals": 0, "reference": 1, "resolve": 2, "quote": 3, "enrich": 4}.get(
+                        task.stage, 99
+                    ),
+                    plan.capabilities[task.capability_id].provider_priority,
+                    task.task_id,
+                ),
+            ))
+            collection_tasks = tuple(
+                task for task in ordered_tasks if task.stage != "reference"
+            )
         checkpoint_entries = start.get("cache_entries")
         if not isinstance(checkpoint_entries, Sequence) or isinstance(
             checkpoint_entries, (str, bytes, bytearray)
@@ -603,8 +702,20 @@ class IntelligencePipeline:
             plan = bind_persisted_reference_task(plan, persisted)
             plan = self._bind_persisted_task_identities(plan, persisted)
             self.discovery_plan = plan
-            collection_tasks = tuple(task for task in plan.tasks if task.stage != "reference")
-        for task in plan.tasks:
+            ordered_tasks = tuple(sorted(
+                plan.tasks,
+                key=lambda task: (
+                    {"signals": 0, "reference": 1, "resolve": 2, "quote": 3, "enrich": 4}.get(
+                        task.stage, 99
+                    ),
+                    plan.capabilities[task.capability_id].provider_priority,
+                    task.task_id,
+                ),
+            ))
+            collection_tasks = tuple(
+                task for task in ordered_tasks if task.stage != "reference"
+            )
+        for task in ordered_tasks:
             if task.task_id not in persisted:
                 if task.stage == "reference":
                     row = self._task_row(task, state="planned", attempt_count=0, result={})
@@ -622,8 +733,15 @@ class IntelligencePipeline:
                 persisted[task.task_id] = self._checkpoint_discovery_task(run_id, row)
 
         plan_by_provider = {str(row["provider"]): row for row in plan_rows}
-        precollected_results = {
-            task.task_id: self._run_planned_collection_task(
+        precollected_results: dict[str, CollectionResult] = {}
+        for task in collection_tasks:
+            if request.lane != "research" or not (
+                task.provider == "gdelt"
+                and task.capability_id == "gdelt_theme_search"
+                and not task.dependencies
+            ):
+                continue
+            result = self._run_planned_collection_task(
                 run_id,
                 request,
                 request_window,
@@ -632,24 +750,24 @@ class IntelligencePipeline:
                 adapters[task.provider],
                 plan_by_provider[task.provider],
                 persisted,
+                budget=budget,
             )
-            for task in collection_tasks
-            if task.provider == "gdelt"
-            and task.capability_id == "gdelt_theme_search"
-            and not task.dependencies
-        }
-        self._run_planned_reference(run_id, request, persisted)
+            if result is not None:
+                precollected_results[task.task_id] = result
+        self._run_planned_reference(run_id, request, persisted, budget=budget)
         self._hydrate_reference_snapshot(run_id)
         results: list[CollectionResult] = []
-        collection_results: list[CollectionResult] = []
+        task_results: list[tuple[DiscoveryTask, CollectionResult]] = []
         frozen_holding = self._frozen_enrichment_selection(run_id, request.phase, "holding_quotes")
         holding_requests = frozen_holding.requests if frozen_holding is not None else \
             self._holding_quote_requests(run_id, plan.reserved_holding_quote_requests)
-        if holding_requests or frozen_holding is not None:
+        if (holding_requests or frozen_holding is not None) \
+                and (budget is None or budget.can_start()):
             results.extend(self._seal_and_run_enrichment_requests(
                 run_id, request, request_window, holding_requests, plan_by_provider,
                 persisted, envelope, selection_stage="holding_quotes",
                 frozen_manifest=frozen_holding,
+                budget=budget,
             ))
         for task in collection_tasks:
             result = precollected_results.get(task.task_id)
@@ -663,13 +781,27 @@ class IntelligencePipeline:
                     adapters[task.provider],
                     plan_by_provider[task.provider],
                     persisted,
+                    budget=budget,
                 )
-            collection_results.append(result)
-            results.append(result)
+            if result is not None:
+                task_results.append((task, result))
+                results.append(result)
 
-        task_results: list[tuple[DiscoveryTask, CollectionResult]] = list(
-            zip(collection_tasks, collection_results, strict=True)
+        planned_remaining = sum(
+            row.get("state") == "planned" for row in persisted.values()
         )
+        nonterminal_remaining = sum(
+            row.get("state") in {"planned", "attempting"}
+            for row in persisted.values()
+        )
+        if nonterminal_remaining and request.lane == "research" and budget is not None:
+            return PausedPipelineReceipt(
+                run_id=run_id,
+                lane="research",
+                planned_remaining=planned_remaining,
+            )
+        if planned_remaining and request.lane == "alert":
+            self.context["_slice_planned_remaining"] = planned_remaining
         reverse_tasks = self._reverse_discovery_tasks(
             run_id,
             request_window,
@@ -679,7 +811,8 @@ class IntelligencePipeline:
             ),
             min(adaptive_capacity, max(0, _MAX_DISCOVERY_TASKS - 1 - len(plan.tasks))),
         )
-        if adaptive_capability is not None and reverse_tasks:
+        if adaptive_capability is not None and reverse_tasks \
+                and (budget is None or budget.can_start()):
             reservation = plan_by_provider[adaptive_capability.provider]
             for task in reverse_tasks:
                 if task.task_id not in persisted:
@@ -701,9 +834,11 @@ class IntelligencePipeline:
                     adapters[adaptive_capability.provider],
                     reservation,
                     persisted,
+                    budget=budget,
                 )
-                results.append(result)
-                task_results.append((task, result))
+                if result is not None:
+                    results.append(result)
+                    task_results.append((task, result))
 
         self._persist_dynamic_theme_evaluation(
             run_id, request_window, task_results, persisted
@@ -711,13 +846,29 @@ class IntelligencePipeline:
 
         enrichment_results = self._run_adaptive_enrichment(
             run_id, request, request_window, task_results, plan_by_provider,
-            persisted, envelope,
-        )
+            persisted, envelope, budget=budget,
+        ) if budget is None or budget.can_start() else []
         results.extend(enrichment_results)
+
+        planned_remaining = sum(
+            row.get("state") == "planned" for row in persisted.values()
+        )
+        nonterminal_remaining = sum(
+            row.get("state") in {"planned", "attempting"}
+            for row in persisted.values()
+        )
+        if nonterminal_remaining and request.lane == "research" and budget is not None:
+            return PausedPipelineReceipt(
+                run_id=run_id,
+                lane="research",
+                planned_remaining=planned_remaining,
+            )
+        if planned_remaining and request.lane == "alert":
+            self.context["_slice_planned_remaining"] = planned_remaining
 
         targets = tuple(
             task.theme_id or task.capability_id
-            for task in (*collection_tasks, *reverse_tasks)
+            for task, _result in task_results
         )
         receipt = self._complete(request, run_id, targets, results)
         self.cache.put_run(request.request_id, receipt)
@@ -732,6 +883,8 @@ class IntelligencePipeline:
         reservations: Mapping[str, Mapping[str, object]],
         persisted: dict[str, Mapping[str, object]],
         envelope: Mapping[str, int],
+        *,
+        budget: CollectionBudget | None = None,
     ) -> list[CollectionResult]:
         plan = self.discovery_plan
         if plan is None or plan.reserved_adaptive_requests != sum(envelope.values()):
@@ -743,6 +896,7 @@ class IntelligencePipeline:
                 run_id, request, request_window, frozen.requests, reservations, persisted,
                 envelope, selection_stage="initial",
                 deferred_reasons=frozen.deferred_reasons, frozen_manifest=frozen,
+                budget=budget,
             )
         candidates = _enrichment_candidates(task_results, self.context)
         if not candidates:
@@ -750,6 +904,7 @@ class IntelligencePipeline:
                 run_id, request, request_window, (), reservations, persisted,
                 envelope, selection_stage="initial",
                 deferred_reasons={"adaptive_enrichment": "no_currently_bound_candidates"},
+                budget=budget,
             )
         candidates = _prioritize_due_nomination_candidates(
             candidates, self.context.get("theme_memory"), run_id=run_id, now=request.now,
@@ -783,6 +938,7 @@ class IntelligencePipeline:
         return self._seal_and_run_enrichment_requests(
             run_id, request, request_window, selected, reservations, persisted,
             envelope, selection_stage="initial", deferred_reasons=deferred,
+            budget=budget,
         )
 
     def _holding_quote_requests(
@@ -797,8 +953,14 @@ class IntelligencePipeline:
         if not isinstance(manifest_id, str):
             return ()
         output: list[EnrichmentRequest] = []
-        for ticker in sorted(_holding_tickers(self.context.get("holdings"))
-                             | _active_plan_tickers(self.context.get("owner_plans"))):
+        alert_targets = self.context.get("alert_quote_targets")
+        targets = (
+            set(_strings(alert_targets))
+            if isinstance(alert_targets, (list, tuple))
+            else _holding_tickers(self.context.get("holdings"))
+            | _active_plan_tickers(self.context.get("owner_plans"))
+        )
+        for ticker in sorted(targets):
             security = reference.by_ticker.get(ticker)
             if security is None or not security.eligible or security.revision_id is None \
                     or security.reference_manifest_id != manifest_id or security.cik is None:
@@ -974,6 +1136,7 @@ class IntelligencePipeline:
         selection_stage: str,
         deferred_reasons: Mapping[str, str] = MappingProxyType({}),
         frozen_manifest: SelectionManifest | None = None,
+        budget: CollectionBudget | None = None,
     ) -> list[CollectionResult]:
         plan = self.discovery_plan
         if plan is None:
@@ -1045,12 +1208,15 @@ class IntelligencePipeline:
                 max_attempts=1,
                 requires_credential=False,
             )
-            output.append(self._run_planned_collection_task(
+            result = self._run_planned_collection_task(
                 run_id, request, request_window, task, capability,
                 next(adapter for adapter in self.adapters if str(adapter.provider) == request_row.provider),
                 reservation, persisted,
                 exposure_request=request_row if request_row.query_kind == "filing_document" else None,
-            ))
+                budget=budget,
+            )
+            if result is not None:
+                output.append(result)
         if selection_stage == "initial":
             frozen_documents = self._frozen_enrichment_selection(
                 run_id, request.phase, "filing_documents"
@@ -1075,6 +1241,7 @@ class IntelligencePipeline:
                 envelope, selection_stage="filing_documents",
                 deferred_reasons=document_deferrals,
                 frozen_manifest=frozen_documents,
+                budget=budget,
             ))
         return output
 
@@ -1774,6 +1941,8 @@ class IntelligencePipeline:
         run_id: str,
         request: PipelineRequest,
         persisted: dict[str, Mapping[str, object]],
+        *,
+        budget: CollectionBudget | None = None,
     ) -> None:
         plan = self.discovery_plan
         if plan is None:
@@ -1788,6 +1957,8 @@ class IntelligencePipeline:
                     self.context["reference_coverage"] = {
                         **dict(coverage), "execution_allowed": False,
                     }
+                continue
+            if budget is not None and not budget.can_start():
                 continue
             if state == "attempting":
                 coverage = {
@@ -1810,9 +1981,14 @@ class IntelligencePipeline:
             if state in {"failed", "uncertain"}:
                 if self.reference_recovery_stage is None:
                     raise ValueError("failed reference task has no durable recovery reader")
-                coverage = _validated_reference_coverage(
-                    self.reference_recovery_stage(run_id, request)
-                )
+                if budget is not None:
+                    budget.record(1)
+                try:
+                    coverage = _validated_reference_coverage(
+                        self.reference_recovery_stage(run_id, request)
+                    )
+                except TimeoutError:
+                    return
                 terminal = self._task_row(
                     task, state="succeeded",
                     attempt_count=int(current.get("attempt_count") or 1),
@@ -1843,9 +2019,13 @@ class IntelligencePipeline:
                 )
             else:
                 try:
+                    if budget is not None:
+                        budget.record(1)
                     coverage = _validated_reference_coverage(
                         self.reference_stage(run_id, request)
                     )
+                except TimeoutError:
+                    return
                 except Exception:
                     terminal = self._task_row(
                         task, state="failed", attempt_count=1,
@@ -1874,7 +2054,9 @@ class IntelligencePipeline:
         reservation: Mapping[str, object],
         persisted: dict[str, Mapping[str, object]],
         exposure_request: EnrichmentRequest | None = None,
-    ) -> CollectionResult:
+        *,
+        budget: CollectionBudget | None = None,
+    ) -> CollectionResult | None:
         current = persisted[task.task_id]
         state = str(current.get("state") or "")
         saved = current.get("result")
@@ -1971,6 +2153,8 @@ class IntelligencePipeline:
         if state not in {"planned", "attempting"}:
             raise ValueError("persisted discovery task state is invalid")
         if state == "planned":
+            if budget is not None and not budget.can_start():
+                return None
             attempting = self._task_row(
                 task,
                 state="attempting",
@@ -1995,6 +2179,8 @@ class IntelligencePipeline:
                 raise _CheckpointFailure("durable provider attempt barrier failed") from exc
 
         try:
+            if budget is not None:
+                budget.record(1)
             if task.provider == "yahoo" and callable(getattr(self.gateway, "call", None)):
                 selected_manifest = task.query.get("_selection_manifest_id")
                 required_quote = {
@@ -2319,6 +2505,7 @@ class IntelligencePipeline:
             reviewed_aliases = self.context.get("reviewed_entity_aliases")
             exposure_facts = self.context.get("exposure_facts")
             primary_exposure_required = self.context.get("primary_exposure_required")
+            slice_planned_remaining = self.context.get("_slice_planned_remaining")
             context_response = self.gateway.call("read_intelligence_context", {}, run_id=run_id)
             self.context = protected_collection_context(_gateway_data(context_response)["context"])
             if isinstance(reference_coverage, Mapping):
@@ -2333,6 +2520,8 @@ class IntelligencePipeline:
                 self.context["exposure_facts"] = exposure_facts
             if primary_exposure_required is True:
                 self.context["primary_exposure_required"] = True
+            if isinstance(slice_planned_remaining, int) and slice_planned_remaining > 0:
+                self.context["_slice_planned_remaining"] = slice_planned_remaining
         if self.discovery_plan is not None:
             reference_coverage = self.context.get("reference_coverage")
             reference = self.context.get("security_reference")
@@ -2414,6 +2603,20 @@ class IntelligencePipeline:
                 for index, result in enumerate(results)
             ],
         })
+        coverage["lane"] = request.lane
+        if request.lane == "alert":
+            prior_research = self.context.get("latest_research_packet")
+            if isinstance(prior_research, Mapping):
+                coverage["prior_research_packet"] = dict(prior_research)
+            coverage["actionable_data_complete"] = _actionable_data_complete(
+                results,
+                self.context,
+                request.now,
+            )
+            planned_remaining = self.context.get("_slice_planned_remaining")
+            if isinstance(planned_remaining, int) and planned_remaining > 0:
+                coverage["planned_remaining"] = planned_remaining
+                coverage["deadline_reached"] = True
         _add_bounded_coverage_rows(
             coverage,
             "duplicate_references",
@@ -2905,6 +3108,90 @@ def _gateway_data(result: object) -> Mapping[str, object]:
     return nested if isinstance(nested, Mapping) else result
 
 
+def _protected_research_packet(value: object) -> dict[str, object] | None:
+    if value is None:
+        return None
+    if not isinstance(value, Mapping) or set(value) != {
+        "packet_id", "packet_hash", "market_date", "created_at", "age_days",
+    }:
+        raise ValueError("invalid protected research packet")
+    try:
+        packet_id = str(value["packet_id"])
+        packet_hash = str(value["packet_hash"])
+        market_date = date.fromisoformat(str(value["market_date"]))
+        created_at = datetime.fromisoformat(str(value["created_at"]).replace("Z", "+00:00"))
+        age_days = value["age_days"]
+        if (
+            str(uuid.UUID(packet_id)) != packet_id
+            or re.fullmatch(r"[0-9a-f]{64}", packet_hash) is None
+            or created_at.tzinfo is None
+            or isinstance(age_days, bool)
+            or not isinstance(age_days, int)
+            or not 0 <= age_days <= 5
+        ):
+            raise ValueError
+    except (KeyError, TypeError, ValueError, AttributeError):
+        raise ValueError("invalid protected research packet") from None
+    return {
+        "packet_id": packet_id,
+        "packet_hash": packet_hash,
+        "market_date": market_date.isoformat(),
+        "created_at": _timestamp(created_at),
+        "age_days": age_days,
+    }
+
+
+def _actionable_data_complete(
+    results: Sequence[CollectionResult],
+    context: Mapping[str, object],
+    now: datetime,
+) -> bool:
+    required = (
+        _holding_tickers(context.get("holdings"))
+        | _active_plan_tickers(context.get("owner_plans"))
+        | _holding_tickers(context.get("recent_suggestions"))
+        | _holding_tickers(context.get("qualified_candidates"))
+    )
+    if not required:
+        return True
+    valid: set[str] = set()
+    current = _utc(now)
+    for result in results:
+        receipt = result.receipt
+        if (
+            receipt.provider != "yahoo"
+            or receipt.status not in {"succeeded", "cache_hit"}
+            or receipt.observed_at is None
+            or receipt.expires_at is None
+            or not receipt.observed_at <= current < receipt.expires_at
+        ):
+            continue
+        for raw in result.items:
+            item = normalize_item(raw)
+            body = None
+            for candidate in (getattr(raw, "normalized_text", None), item.normalized_text):
+                try:
+                    parsed = json.loads(candidate) if isinstance(candidate, str) else None
+                except json.JSONDecodeError:
+                    continue
+                if isinstance(parsed, Mapping):
+                    body = parsed
+                    break
+            if body is None:
+                continue
+            quote = body.get("quote") if isinstance(body, Mapping) else None
+            ticker = body.get("ticker") if isinstance(body, Mapping) else None
+            if (
+                isinstance(quote, Mapping)
+                and quote.get("currency") == "USD"
+                and isinstance(ticker, str)
+                and tuple(item.security_ids) == (ticker,)
+                and quote.get("ticker") == ticker
+            ):
+                valid.add(ticker)
+    return required <= valid
+
+
 def protected_collection_context(value: object) -> dict[str, object]:
     """Unwrap only the protected read shape; source prose and scratch scores have no authority."""
     if not isinstance(value, Mapping):
@@ -2984,9 +3271,13 @@ def protected_collection_context(value: object) -> dict[str, object]:
 
     return {
         "policy_version": policy_version,
+        "latest_research_packet": _protected_research_packet(
+            value.get("latest_research_packet")
+        ),
         "holdings": [{"ticker": row["ticker"], "shares": row.get("shares"),
                       "market_value": valuations.get(row["ticker"])} for row in holdings if isinstance(row, Mapping)],
         "owner_plans": value.get("owner_plans", []),
+        "recent_suggestions": value.get("recent_suggestions", []),
         "qualified_candidates": value.get("qualified_candidates", []),
         "liquidity_by_ticker": dict(_mapping(trusted.get("liquidity_by_ticker"))),
         "overlap_by_ticker": dict(_mapping(trusted.get("overlap_by_ticker"))),
