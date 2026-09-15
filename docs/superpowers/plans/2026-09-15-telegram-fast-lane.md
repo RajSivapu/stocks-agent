@@ -432,7 +432,7 @@ Run: `git diff --check && git diff --stat origin/main...HEAD && git log --onelin
 
 Expected: no whitespace errors; only the planned lane, collector, routine, verifier, tests, spec, plan, and status changes.
 
-- [ ] **Step 3: Push the feature branch and open the protected PR**
+- [x] **Step 3: Push the feature branch and open the protected PR**
 
 Push `codex/telegram-fast-lane`. Create a PR whose description leads with the scheduled full-collector blockage and the alert-first behavior, then includes migration, idempotency, and validation evidence.
 
