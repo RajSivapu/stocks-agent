@@ -4,13 +4,28 @@ Last updated: 2026-09-14
 Canonical release: Personal Stock Agent V1 market-wide discovery candidate
 Audit baseline: `432d647ef911ff63da427097f02a852e18038b62` on `origin/main`
 Market-wide implementation boundary: `18386b5c76c7a7aa8b3eeda870b12d3aba2399e1`
-Current state: the scheduled-source recovery and detailed Telegram renderer are deployed from
-protected main `ce73a5c05f6a2d55b12cff1a7e2d692607450db5`. PR #102 exact-head CI
-`34852461483`, exact-main CI `34852964601`, protected release `34853467013`, and production
-deployment `6438843003` passed. The release verified the full migration ledger through
-`20261030_same_run_terminal_checkpoint_replay.sql`, Edge versions 91/62/70, owner/anonymous/
-non-owner canaries, 11 reconciled run/report claims, and the encrypted recovery journal. Its exact
-immutable receipt is `docs/receipts/2026-09-14-protected-scheduled-recovery-release.json`.
+Current protected backend deployment `6444684791` is release `34886538457` from exact main
+`0ddbdc9995c2dec514541bd010e933008b17818c`. Current repository main
+`ea021f3b5b89bcee2a82cf76a5b55502fef86d2b` adds only read-only production diagnostics after that
+runtime release; exact-main CI `34920214874` passed. PRs #111 through #113 expose bounded stage,
+stable-code, and timeline evidence for a nonterminal scheduled run without reading source prose,
+credentials, or Telegram content.
+
+The September 14 post-market run `a19ac8a2-50c4-43f9-b1b1-36af89f8cb89` proves the current
+Telegram silence is an orchestration race before delivery. Collection started at 20:11:30 UTC and
+eventually persisted a completed packet with seven candidates and seven evidence items at 20:26:56.
+The routine called `evaluate_and_publish` at 20:22:31, which failed with
+`INTELLIGENCE_PACKET_INVALID`, and called `finish_run` at 20:23:43, which failed with
+`MISSING_COLLECTION_RECEIPT`. No report or publication existed, so Telegram was never invoked. The
+run remains nonterminal and must not be duplicated merely to manufacture a receipt.
+
+The current source candidate adds a read-only deterministic completion wait and makes it a mandatory
+gate in the market-briefing skill and all three Routine prompts. If collector command execution
+returns before its terminal output, the routine reads the already-running completion and resumes
+from the validated bounded packet; it never starts the providers again. Evaluation, artifact writes,
+grading, finalization, and delivery are forbidden until `completion_id`, `packet_id`, and
+`packet_hash` match the exact run. A bounded `COLLECTION_PENDING` result stops safely and leaves the
+run recoverable.
 
 PR #103 corrected the non-notifying healthcheck so an intentionally ephemeral dry-run validates its
 start receipt without requesting nonexistent persisted context. Exact-head CI `34856305676` and
