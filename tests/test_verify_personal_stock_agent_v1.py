@@ -74,6 +74,10 @@ def test_scheduled_run_diagnostic_exposes_only_safe_nonterminal_stage_metadata()
         "requests": [{
             "request_id": START, "run_id": RUN, "operation": "start_run",
             "status": "completed", "response": {"never_expose": "gateway response"},
+        }, {
+            "request_id": EVALUATION, "run_id": RUN,
+            "operation": "evaluate_and_publish", "status": "failed",
+            "response": {"ok": False, "code": "PERSISTENCE_FAILED"},
         }],
     }
 
@@ -90,9 +94,16 @@ def test_scheduled_run_diagnostic_exposes_only_safe_nonterminal_stage_metadata()
     assert diagnostic["stage_counts"]["collection_checkpoints"] == 1
     assert diagnostic["stage_counts"]["reports"] == 0
     assert diagnostic["run_event_statuses"] == {"started": 1}
-    assert diagnostic["request_statuses"] == [{
-        "operation": "start_run", "status": "completed", "count": 1,
-    }]
+    assert diagnostic["request_statuses"] == [
+        {
+            "operation": "evaluate_and_publish", "status": "failed",
+            "code": "PERSISTENCE_FAILED", "count": 1,
+        },
+        {
+            "operation": "start_run", "status": "completed", "code": None,
+            "count": 1,
+        },
+    ]
     assert diagnostic["discovery_tasks"] == [{
         "stage": "primary", "capability_id": "gdelt_theme_search",
         "provider": "gdelt", "query_kind": "theme_search",

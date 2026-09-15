@@ -2173,10 +2173,19 @@ def scheduled_run_diagnostic(rows: Mapping, run_id: str) -> dict:
         status = str(row.get("status") or "unknown")
         event_statuses[status] = event_statuses.get(status, 0) + 1
 
-    request_status_counts: dict[tuple[str, str], int] = {}
+    request_status_counts: dict[tuple[str, str, str | None], int] = {}
     for row in rows.get("requests", []):
         require(isinstance(row, Mapping), "scheduled diagnostic request is malformed")
-        key = (str(row.get("operation") or "unknown"), str(row.get("status") or "unknown"))
+        response = row.get("response")
+        raw_code = response.get("code") if isinstance(response, Mapping) else None
+        code = (
+            raw_code if isinstance(raw_code, str)
+            and re.fullmatch(r"[A-Z][A-Z0-9_]{0,63}", raw_code) else None
+        )
+        key = (
+            str(row.get("operation") or "unknown"),
+            str(row.get("status") or "unknown"), code,
+        )
         request_status_counts[key] = request_status_counts.get(key, 0) + 1
 
     discovery_tasks = []
@@ -2224,8 +2233,11 @@ def scheduled_run_diagnostic(rows: Mapping, run_id: str) -> dict:
         "stage_counts": stage_counts,
         "run_event_statuses": dict(sorted(event_statuses.items())),
         "request_statuses": [
-            {"operation": operation, "status": status, "count": count}
-            for (operation, status), count in sorted(request_status_counts.items())
+            {"operation": operation, "status": status, "code": code, "count": count}
+            for (operation, status, code), count in sorted(
+                request_status_counts.items(),
+                key=lambda item: tuple(str(value) for value in item[0]),
+            )
         ],
         "discovery_tasks": discovery_tasks,
         "checkpoint_key_hashes": sorted(checkpoint_hashes),
