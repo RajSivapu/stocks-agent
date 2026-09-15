@@ -32,11 +32,14 @@ import {
   type DiscoveryStageCheckpointPayload,
   type DiscoveryStageTask,
   type IntelligenceRecordReceipt,
+  type IntelligenceLane,
   type IntelligenceStartReceipt,
+  type LatestTerminalResearchPacket,
   parseDiscoveryContext,
   parseDiscoveryStageTask,
   parseIntelligenceRecordReceipt,
   parseIntelligenceStartReceipt,
+  parseLatestTerminalResearchPacket,
   parseReferencePage,
   sha256Hex,
   type RecordIntelligencePayload,
@@ -379,6 +382,12 @@ export interface GatewayRepository {
     runId: string,
     payload: StartIntelligencePayload,
   ): Promise<IntelligenceStartReceipt>;
+  intelligenceLane(runId: string): Promise<IntelligenceLane>;
+  latestTerminalResearchPacket(
+    alertRunId: string,
+    marketDate: string,
+    now: Date,
+  ): Promise<LatestTerminalResearchPacket | null>;
   checkpointIntelligenceCollection?(
     runId: string,
     payload: {
@@ -1435,10 +1444,40 @@ export function createSupabaseGatewayRepository(
         p_policy_version: payload.policy_version,
         p_reservation_plan: payload.reservation_plan,
         p_request_window: payload.request_window,
+        p_lane: payload.lane,
       });
       if (result.error) throw new GatewayRepositoryError("PERSISTENCE_FAILED");
       try {
         return parseIntelligenceStartReceipt(result.data);
+      } catch {
+        throw new GatewayRepositoryError("INVALID_PERSISTED_DATA");
+      }
+    },
+
+    async intelligenceLane(runId) {
+      const result = await client.from("market_intelligence_runs")
+        .select("lane").eq("id", runId).limit(2);
+      if (result.error) throw new GatewayRepositoryError("PERSISTENCE_FAILED");
+      const persisted = rows(result);
+      if (persisted.length !== 1) {
+        throw new GatewayRepositoryError("INVALID_PERSISTED_DATA");
+      }
+      const lane = persisted[0].lane;
+      if (lane !== "alert" && lane !== "research") {
+        throw new GatewayRepositoryError("INVALID_PERSISTED_DATA");
+      }
+      return lane;
+    },
+
+    async latestTerminalResearchPacket(alertRunId, marketDate, asOf) {
+      const result = await client.rpc("read_latest_terminal_research_packet", {
+        p_alert_run_id: alertRunId,
+        p_market_date: marketDate,
+        p_now: asOf.toISOString(),
+      });
+      if (result.error) throw new GatewayRepositoryError("PERSISTENCE_FAILED");
+      try {
+        return parseLatestTerminalResearchPacket(result.data);
       } catch {
         throw new GatewayRepositoryError("INVALID_PERSISTED_DATA");
       }
@@ -2173,6 +2212,7 @@ export function createSupabaseGatewayRepository(
       const gradeRows = rows(results[6], "CONTEXT_TOO_LARGE");
       const consecutiveLosses = consecutiveRecommendationLosses(gradeRows);
       const context: GatewayReadContext = {
+        latest_research_packet: null,
         holdings: holdings.map((row) => ({
           ticker: text(row.ticker, 15),
           shares: decimal(row.shares),

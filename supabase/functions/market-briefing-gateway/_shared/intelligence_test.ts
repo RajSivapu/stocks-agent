@@ -8,12 +8,14 @@ import {
   parseDiscoveryStageCheckpointPayload,
   parseIntelligenceStartReceipt,
   parseIntelligenceRecordReceipt,
+  parseLatestTerminalResearchPacket,
   parseReferenceBeginPayload,
   parseReferenceChunkPayload,
   parseReferenceFinalizePayload,
   parseReferencePage,
   parseReferencePinPayload,
   parseReferenceReadPayload,
+  parseStartIntelligencePayload,
   referenceManifestSemanticDocument,
   securityRevisionSemanticDocument,
   sha256Hex,
@@ -57,6 +59,7 @@ function terminalCheckpoint(): TerminalCheckpointFixture {
 function intelligenceStartReceipt() {
   return {
     run_id: "00000000-0000-4000-8000-000000000001",
+    lane: "alert",
     reservation_ids: ["00000000-0000-4000-8000-000000000002"],
     cache_entries: [],
     terminal_checkpoint_entries: [terminalCheckpoint()],
@@ -73,6 +76,63 @@ function intelligenceStartReceipt() {
     duplicate: true,
   };
 }
+
+Deno.test("intelligence lane contracts accept exact valid lanes and reject mismatches", () => {
+  const payload = {
+    phase: "pre-market",
+    lane: "alert",
+    market_date: "2026-09-02",
+    policy_version: 1,
+    reservation_plan: { reservations: [] },
+    request_window: {
+      start: "2026-09-02T12:00:00.000Z",
+      end: "2026-09-02T13:00:00.000Z",
+      timezone: "America/Chicago",
+      market_date: "2026-09-02",
+      phase: "pre-market",
+    },
+  };
+  assertEquals(parseStartIntelligencePayload(payload).lane, "alert");
+  assertEquals(
+    parseStartIntelligencePayload({
+      ...payload,
+      phase: "on-demand",
+      lane: "research",
+    }).lane,
+    "research",
+  );
+  assertThrows(
+    () => parseStartIntelligencePayload({ ...payload, lane: "research" }),
+    "lane",
+  );
+  assertThrows(
+    () => parseIntelligenceStartReceipt({
+      ...intelligenceStartReceipt(),
+      lane: "batch",
+    }),
+    "lane",
+  );
+});
+
+Deno.test("latest terminal research packet is an exact bounded receipt", () => {
+  const packet = {
+    packet_id: "00000000-0000-4000-8000-000000000091",
+    packet_hash: "a".repeat(64),
+    market_date: "2026-09-01",
+    created_at: "2026-09-01T21:00:00.000Z",
+    age_days: 1,
+  };
+  assertEquals(parseLatestTerminalResearchPacket(packet), packet);
+  assertEquals(parseLatestTerminalResearchPacket(null), null);
+  assertThrows(
+    () => parseLatestTerminalResearchPacket({ ...packet, age_days: 6 }),
+    "age_days",
+  );
+  assertThrows(
+    () => parseLatestTerminalResearchPacket({ ...packet, extra: true }),
+    "unexpected key",
+  );
+});
 
 Deno.test("intelligence start receipt accepts bounded terminal checkpoints exactly once", () => {
   const receipt = intelligenceStartReceipt();

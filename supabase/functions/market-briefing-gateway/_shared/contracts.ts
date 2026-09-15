@@ -14,6 +14,7 @@ import {
   parseReferenceReadPayload,
   parseStartIntelligencePayload,
   type RecordIntelligencePayload,
+  type LatestTerminalResearchPacket,
   type ReferenceBeginPayload,
   type ReferenceChunkPayload,
   type ReferenceFinalizePayload,
@@ -737,6 +738,7 @@ export interface PolicyContext {
 }
 
 export interface GatewayReadContext extends PolicyContext {
+  latest_research_packet: LatestTerminalResearchPacket | null;
   intelligence_collection_context?: {
     holding_market_values: Record<string, string>;
     liquidity_by_ticker: Record<string, string>;

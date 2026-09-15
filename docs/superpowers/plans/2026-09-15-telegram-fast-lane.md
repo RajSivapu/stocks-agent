@@ -182,35 +182,35 @@ git commit -m "feat: persist protected intelligence lanes"
 - Produces: `GatewayRepository.intelligenceLane(runId: string) -> Promise<IntelligenceLane>` and `latestTerminalResearchPacket(runId: string, marketDate: string, now: Date) -> Promise<...>`.
 - Consumes: the SQL interfaces from Task 2 and existing exact-key parsers.
 
-- [ ] **Step 1: Write failing contract and handler tests**
+- [x] **Step 1: Write failing contract and handler tests**
 
 Add exact-key parser cases for both valid lanes and an invalid lane. Add handler tests proving `start_intelligence_run` forwards lane, `read_context` returns a validated terminal research packet, `evaluate_and_publish` and `record_report` reject a research run with `INTELLIGENCE_LANE_REJECTED`, and an alert packet cannot claim a mismatched research packet hash.
 
-- [ ] **Step 2: Run the focused Deno tests**
+- [x] **Step 2: Run the focused Deno tests**
 
 Run: `deno test --allow-env supabase/functions/market-briefing-gateway/_shared/intelligence_test.ts supabase/functions/market-briefing-gateway/_shared/repository_test.ts supabase/functions/market-briefing-gateway/_shared/handler_test.ts`
 
 Expected: FAIL because lane fields and repository methods are absent.
 
-- [ ] **Step 3: Extend exact request and receipt contracts**
+- [x] **Step 3: Extend exact request and receipt contracts**
 
 Add `lane` to the exact key set for start payloads and start receipts. Validate `latest_research_packet` as an exact bounded object, lowercase SHA-256 hash, UUID packet ID, ISO date/timestamp, and integer age from zero through five.
 
-- [ ] **Step 4: Wire repository RPCs**
+- [x] **Step 4: Wire repository RPCs**
 
 Pass `p_lane` to `start_market_intelligence_run`. Parse the returned lane and implement the lane/read methods using the Task 2 SQL functions. Translate malformed persisted values to `INVALID_PERSISTED_DATA` and database failures to `PERSISTENCE_FAILED`.
 
-- [ ] **Step 5: Add handler fail-closed checks**
+- [x] **Step 5: Add handler fail-closed checks**
 
 Before packet evaluation, report recording, report publication creation, or run finishing, load lane authority. Permit those operations only for `alert`. Keep research collection start/checkpoint/record operations available and prohibit any Telegram call on the rejected path. Validate a prior research packet reference by ID and hash before exposing it to alert context.
 
-- [ ] **Step 6: Run focused Deno tests**
+- [x] **Step 6: Run focused Deno tests**
 
 Run: `deno test --allow-env supabase/functions/market-briefing-gateway/_shared/intelligence_test.ts supabase/functions/market-briefing-gateway/_shared/repository_test.ts supabase/functions/market-briefing-gateway/_shared/handler_test.ts`
 
 Expected: PASS.
 
-- [ ] **Step 7: Commit gateway enforcement**
+- [x] **Step 7: Commit gateway enforcement**
 
 ```bash
 git add supabase/functions/market-briefing-gateway/_shared/intelligence.ts supabase/functions/market-briefing-gateway/_shared/contracts.ts supabase/functions/market-briefing-gateway/_shared/repository.ts supabase/functions/market-briefing-gateway/_shared/handler.ts supabase/functions/market-briefing-gateway/_shared/intelligence_test.ts supabase/functions/market-briefing-gateway/_shared/repository_test.ts supabase/functions/market-briefing-gateway/_shared/handler_test.ts

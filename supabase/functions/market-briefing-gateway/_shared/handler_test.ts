@@ -800,6 +800,7 @@ function longTermHistory(ticker: string): AdjustedBar[] {
 
 function readContext(): GatewayReadContext {
   return {
+    latest_research_packet: null,
     holdings: [{
       ticker: "VTI",
       shares: "100",
@@ -1317,6 +1318,20 @@ class FakeRepository implements GatewayRepository {
   failCode: string | null = null;
   publicationStatus: PublicationReceipt["status"] = "ready";
   context = readContext();
+  laneValue: "alert" | "research" = "alert";
+  latestResearchPacket: {
+    packet_id: string;
+    packet_hash: string;
+    market_date: string;
+    created_at: string;
+    age_days: number;
+  } | null = {
+    packet_id: "00000000-0000-4000-8000-000000000091",
+    packet_hash: "a".repeat(64),
+    market_date: "2026-09-01",
+    created_at: "2026-09-01T21:00:00.000Z",
+    age_days: 1,
+  };
   lastArtifacts: PersistableArtifactMutationBatch | null = null;
   lastBundle: PersistedBundle | null = null;
   lastDrafts: unknown[] = [];
@@ -1400,6 +1415,12 @@ class FakeRepository implements GatewayRepository {
   readContext(): Promise<GatewayReadContext> {
     this.readCalls += 1;
     return Promise.resolve(structuredClone(this.context));
+  }
+  intelligenceLane(): Promise<"alert" | "research"> {
+    return Promise.resolve(this.laneValue);
+  }
+  latestTerminalResearchPacket(): Promise<typeof this.latestResearchPacket> {
+    return Promise.resolve(structuredClone(this.latestResearchPacket));
   }
   loadIntelligencePacket(): Promise<
     {
@@ -1788,6 +1809,7 @@ Deno.test("protected completion recovery bypasses new request claims and refuses
   assertEquals(context.status, 200);
   assertEquals((await json(context)).context, {
     ...readContext(),
+    latest_research_packet: repo.latestResearchPacket,
     policy_version: 4,
   });
   const invented = await setup.handler(
@@ -1810,8 +1832,116 @@ Deno.test("decision context exposes the active policy version", async () => {
   assertEquals(result.status, 200);
   assertEquals((await json(result)).context, {
     ...readContext(),
+    latest_research_packet: repository.latestResearchPacket,
     policy_version: 4,
   });
+});
+
+Deno.test("gateway forwards lane identity and exposes the validated prior research receipt", async () => {
+  const repository = new FakeRepository();
+  let received: unknown = null;
+  Object.assign(repository, {
+    startIntelligenceRun: (_runId: string, payload: unknown) => {
+      received = structuredClone(payload);
+      const requestWindow = (payload as { request_window: unknown }).request_window;
+      return Promise.resolve({
+        run_id: "00000000-0000-4000-8000-000000000090",
+        lane: "alert",
+        reservation_ids: [],
+        cache_entries: [],
+        terminal_checkpoint_entries: [],
+        request_window: requestWindow,
+        duplicate: false,
+      });
+    },
+  });
+  const setup = makeHandler(repository);
+  const start = await setup.handler(request("start_intelligence_run", {
+    phase: "pre-market",
+    lane: "alert",
+    market_date: "2026-09-02",
+    policy_version: 1,
+    reservation_plan: { reservations: [] },
+    request_window: {
+      start: "2026-09-02T12:00:00.000Z",
+      end: "2026-09-02T13:00:00.000Z",
+      timezone: "America/Chicago",
+      market_date: "2026-09-02",
+      phase: "pre-market",
+    },
+  }, { runId: null }));
+  assertEquals(start.status, 200);
+  assertEquals((received as { lane: string }).lane, "alert");
+
+  const context = await json(await setup.handler(request("read_context", {})));
+  assertEquals(
+    (context.context as { latest_research_packet: unknown }).latest_research_packet,
+    repository.latestResearchPacket,
+  );
+});
+
+Deno.test("research lane fails closed before evaluation report or run finalization", async () => {
+  const repository = new FakeRepository();
+  repository.laneValue = "research";
+  const setup = makeHandler(repository);
+  const bundle = {
+    phase: "intraday",
+    market_date: "2026-09-02",
+    title: "research must not publish",
+    candidates: [candidate()],
+  };
+  for (const [operation, payload] of [
+    ["evaluate_and_publish", bundle],
+    ["record_report", reportFixture("intraday")],
+    ["finish_run", {}],
+  ] as const) {
+    const result = await setup.handler(request(operation, payload));
+    assertEquals(result.status, 409);
+    assertEquals((await json(result)).code, "INTELLIGENCE_LANE_REJECTED");
+  }
+  assertEquals(setup.sent, []);
+  assertEquals(repository.lastBundle, null);
+  assertEquals(repository.storedReport, null);
+  assertEquals(repository.finishRunCalls, 0);
+});
+
+Deno.test("alert packet cannot claim a mismatched prior research packet hash", async () => {
+  class MismatchedResearchRepository extends FakeRepository {
+    override async loadIntelligencePacket() {
+      const persisted = await super.loadIntelligencePacket();
+      persisted.packet.coverage = {
+        ...persisted.packet.coverage,
+        prior_research_packet: {
+          packet_id: this.latestResearchPacket!.packet_id,
+          packet_hash: "b".repeat(64),
+          market_date: this.latestResearchPacket!.market_date,
+          created_at: this.latestResearchPacket!.created_at,
+          age_days: this.latestResearchPacket!.age_days,
+        },
+      };
+      persisted.content_hash = sha256Hex(canonicalJson(persisted.packet));
+      return persisted;
+    }
+  }
+  const repository = new MismatchedResearchRepository();
+  const persisted = await repository.loadIntelligencePacket();
+  repository.packetReadCalls = 0;
+  const setup = makeHandler(repository);
+  const result = await setup.handler(request("evaluate_and_publish", {
+    phase: "intraday",
+    market_date: "2026-09-02",
+    title: "mismatched research reference",
+    candidates: [candidate()],
+    intelligence_packet: {
+      id: persisted.id,
+      content_hash: persisted.content_hash,
+      coverage: "complete_for_plan",
+    },
+  }));
+  assertEquals(result.status, 409);
+  assertEquals((await json(result)).code, "INTELLIGENCE_PACKET_MISMATCH");
+  assertEquals(setup.fetched, []);
+  assertEquals(setup.sent, []);
 });
 
 Deno.test("protected quote producer reserves before fetching and resumes without another call", async () => {

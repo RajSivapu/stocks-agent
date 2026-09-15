@@ -80,6 +80,7 @@ import {
   type DiscoveryReferencePayload,
   type DiscoveryStageCheckpointPayload,
   type RecordIntelligencePayload,
+  parseLatestTerminalResearchPacket,
   type ReferenceBeginPayload,
   type ReferenceChunkPayload,
   type ReferenceFinalizePayload,
@@ -141,13 +142,26 @@ export interface GatewayDependencies {
 
 async function readPolicyBoundContext(
   runId: string,
-  deps: GatewayDependencies,
+  deps: GatewayDependencies & { now: () => Date },
 ): Promise<GatewayReadContext & { policy_version: number }> {
-  const [context, policy] = await Promise.all([
+  const lane = await deps.repository.intelligenceLane(runId);
+  const current = deps.now();
+  const [context, policy, latestResearchPacket] = await Promise.all([
     deps.repository.readContext(runId),
     deps.repository.activePolicy(),
+    lane === "alert"
+      ? deps.repository.latestTerminalResearchPacket(
+        runId,
+        chicagoDate(current),
+        current,
+      )
+      : Promise.resolve(null),
   ]);
-  return { ...context, policy_version: policy.version };
+  return {
+    ...context,
+    latest_research_packet: latestResearchPacket,
+    policy_version: policy.version,
+  };
 }
 
 const MAX_BODY_BYTES = 262_144;
@@ -330,6 +344,7 @@ function errorStatus(code: string): number {
   if (
     code === "INTELLIGENCE_PACKET_MISMATCH" ||
     code === "INTELLIGENCE_PACKET_INVALID" ||
+    code === "INTELLIGENCE_LANE_REJECTED" ||
     code === "EVIDENCE_NOT_IN_PACKET"
   ) return 409;
   return 500;
@@ -654,6 +669,25 @@ export function createGatewayHandler(dependencies: GatewayDependencies) {
       return response(403, { ok: false, code: "SERVICE_ONLY" });
     }
 
+    if (
+      !envelope.dry_run &&
+      ["evaluate_and_publish", "record_report", "finish_run"].includes(
+        envelope.operation,
+      )
+    ) {
+      try {
+        if (
+          await deps.repository.intelligenceLane(requireRun(envelope)) !==
+            "alert"
+        ) throw new GatewayRepositoryError("INTELLIGENCE_LANE_REJECTED");
+      } catch (error) {
+        const code = error instanceof GatewayRepositoryError
+          ? error.code
+          : "PERSISTENCE_FAILED";
+        return response(errorStatus(code), { ok: false, code });
+      }
+    }
+
     if (envelope.dry_run) {
       try {
         if (
@@ -675,8 +709,10 @@ export function createGatewayHandler(dependencies: GatewayDependencies) {
             ok: true,
             dry_run: true,
             run_id: envelope.request_id,
+            lane: (prepared as StartIntelligencePayload).lane,
             reservation_ids: [],
             cache_entries: [],
+            terminal_checkpoint_entries: [],
             request_window:
               (prepared as StartIntelligencePayload).request_window,
             duplicate: false,
@@ -2277,6 +2313,26 @@ async function evaluateAndPublish(
   deps: ResolvedDependencies,
 ): Promise<Response> {
   const packet = await resolveIntelligencePacket(envelope, bundle, deps);
+  let priorResearchPacket = null;
+  try {
+    priorResearchPacket = packet === null
+      ? null
+      : parseLatestTerminalResearchPacket(
+        packet.packet.coverage.prior_research_packet ?? null,
+      );
+  } catch {
+    throw new GatewayRepositoryError("INTELLIGENCE_PACKET_MISMATCH");
+  }
+  if (priorResearchPacket !== null) {
+    const latest = await deps.repository.latestTerminalResearchPacket(
+      requireRun(envelope),
+      bundle.market_date,
+      deps.now(),
+    );
+    if (
+      latest === null || canonicalJson(latest) !== canonicalJson(priorResearchPacket)
+    ) throw new GatewayRepositoryError("INTELLIGENCE_PACKET_MISMATCH");
+  }
   const [context, activePolicy] = await Promise.all([
     deps.repository.readContext(envelope.run_id),
     deps.repository.activePolicy(),
