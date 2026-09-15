@@ -38,6 +38,7 @@ CLI = ["npx", "--yes", "supabase@2.116.0"]
 ROLE_ATTRIBUTES = ("rolsuper", "rolinherit", "rolcreaterole", "rolcreatedb", "rolcanlogin",
                    "rolreplication", "rolbypassrls", "rolconnlimit", "rolvaliduntil")
 JOURNALS = "public.stock_agent_component_recovery_journals"
+JOURNAL_IDENTITY_INDEX = "stock_agent_component_recovery_journals_run_identity"
 
 
 def absent(configuration=None):
@@ -728,6 +729,10 @@ class NativeReleaseAdapter:
                 raise RuntimeError("encrypted journal retention requires the held protected lease")
             connection.execute(f"CREATE TABLE IF NOT EXISTS {JOURNALS} (sequence bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY, project_ref text NOT NULL, candidate_sha text NOT NULL, run_id text NOT NULL, run_attempt text NOT NULL, ciphertext bytea NOT NULL, captured_at timestamptz NOT NULL DEFAULT clock_timestamp())")
             connection.execute(f"ALTER TABLE {JOURNALS} ADD COLUMN IF NOT EXISTS run_attempt text")
+            connection.execute(
+                f"CREATE UNIQUE INDEX IF NOT EXISTS {JOURNAL_IDENTITY_INDEX} "
+                f"ON {JOURNALS}(project_ref,candidate_sha,run_id,run_attempt)"
+            )
             connection.execute(f"REVOKE ALL ON {JOURNALS} FROM PUBLIC")
             # Supabase default privileges can grant directly to these roles;
             # revoking PUBLIC alone does not remove those direct grants.
@@ -736,7 +741,7 @@ class NativeReleaseAdapter:
                     connection.execute(sql.SQL("REVOKE ALL ON {}.{} FROM {}").format(
                         sql.Identifier("public"), sql.Identifier(JOURNALS.split(".")[1]), sql.Identifier(role)))
             connection.execute(f"ALTER TABLE {JOURNALS} ENABLE ROW LEVEL SECURITY")
-            row = connection.execute(f"INSERT INTO {JOURNALS}(project_ref,candidate_sha,run_id,run_attempt,ciphertext) VALUES(%s,%s,%s,%s,%s) RETURNING sequence,captured_at",
+            row = connection.execute(f"INSERT INTO {JOURNALS}(project_ref,candidate_sha,run_id,run_attempt,ciphertext) VALUES(%s,%s,%s,%s,%s) ON CONFLICT(project_ref,candidate_sha,run_id,run_attempt) DO UPDATE SET ciphertext=EXCLUDED.ciphertext,captured_at=EXCLUDED.captured_at RETURNING sequence,captured_at",
                                (self._project(), self.context["candidate_sha"], run_id, run_attempt, encrypted)).fetchone()
             self.last_journal = {"sequence": int(row["sequence"]), "run_id": int(run_id),
                 "run_attempt": int(run_attempt), "captured_at": row["captured_at"].isoformat(),

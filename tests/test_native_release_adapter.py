@@ -863,6 +863,44 @@ def test_native_encrypted_retention_is_committed_bound_and_recoverable_in_new_pr
     with pytest.raises(RuntimeError, match="held protected lease"): sink(journal)
 
 
+def test_native_encrypted_retention_replaces_the_same_run_checkpoint(database, tmp_path, monkeypatch):
+    """One release run must retain only its newest authenticated checkpoint."""
+    from cryptography.fernet import Fernet
+
+    module = adapter_module()
+    table = "public.test_stock_agent_component_recovery_journals"
+    index = "test_stock_agent_component_recovery_journals_run_identity"
+    monkeypatch.setattr(module, "JOURNALS", table)
+    monkeypatch.setattr(module, "JOURNAL_IDENTITY_INDEX", index, raising=False)
+    platform, adapter = database_adapter(database)
+    adapter.context["lease_owner"] = "release-123"
+    key = Fernet.generate_key()
+    adapter.environment["RELEASE_RECOVERY_KEY"] = key.decode()
+    sink = release.EncryptedJournal(tmp_path / "state.enc", key, retain=adapter.retain)
+    first = {"release_context": dict(adapter.context), "checkpoint": "prepared"}
+    latest = {"release_context": dict(adapter.context), "checkpoint": "verified"}
+
+    try:
+        sink(first)
+        first_sequence = adapter.last_journal["sequence"]
+        sink(latest)
+
+        with psycopg.connect(database, autocommit=True) as connection:
+            rows = connection.execute(
+                f"SELECT sequence FROM {table} WHERE project_ref=%s AND candidate_sha=%s "
+                "AND run_id=%s AND run_attempt=%s",
+                ("p" * 20, "a" * 40, "123", "1"),
+            ).fetchall()
+        recovered = adapter.recover_retained(123, 1)
+
+        assert rows == [(first_sequence,)]
+        assert adapter.last_journal["sequence"] == first_sequence
+        assert json.loads(Fernet(key).decrypt(recovered)) == latest
+    finally:
+        with psycopg.connect(database, autocommit=True) as connection:
+            connection.execute(f"DROP TABLE IF EXISTS {table}")
+
+
 def test_retained_encrypted_journal_is_selected_and_authenticated_by_run_attempt(database, tmp_path):
     """A delayed recovery for attempt 1 must never load attempt 2's journal."""
     from cryptography.fernet import Fernet
@@ -890,10 +928,14 @@ def test_retained_encrypted_journal_is_selected_and_authenticated_by_run_attempt
     )
     with pytest.raises(RuntimeError, match="unavailable"):
         missing_attempt.recover_retained(123, 3)
-    # Even a corrupted row that claims to be attempt 1 must be rejected when
-    # its authenticated journal says attempt 2.
+    # Even a corrupted attempt-1 row must be rejected when its authenticated
+    # ciphertext belongs to attempt 2.
     with psycopg.connect(database, autocommit=True) as connection:
-        connection.execute("UPDATE public.stock_agent_component_recovery_journals SET run_attempt='1' WHERE run_attempt='2'")
+        connection.execute(
+            "UPDATE public.stock_agent_component_recovery_journals "
+            "SET ciphertext=(SELECT ciphertext FROM public.stock_agent_component_recovery_journals "
+            "WHERE run_attempt='2') WHERE run_attempt='1'"
+        )
     with pytest.raises(RuntimeError, match="identity mismatch"):
         delayed_first.recover_retained(123, 1)
 
