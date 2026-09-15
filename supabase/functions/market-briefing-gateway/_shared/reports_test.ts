@@ -145,6 +145,7 @@ Deno.test("scheduled Friday empty V2 packet produces a canonical owner status", 
   assert(
     delivery.body.startsWith("🌙 <b>FRIDAY EOD — Sep 4</b>") &&
       delivery.body.includes("⚠️ <b>Data check incomplete</b>") &&
+      delivery.body.split("\n").includes("No new action — data check incomplete") &&
       delivery.body.includes("<b>Portfolio</b>\nCouldn’t safely refresh holdings, prices, stop gaps, or P&amp;L during this run.") &&
       delivery.body.includes("<b>Market</b>\nThe scheduled scan completed, but the configured sources returned no usable market evidence.") &&
       delivery.body.includes("<b>New ideas</b>\nNo candidate was verified. This means the data was unavailable; it is not an “all clear” market signal.") &&
@@ -578,6 +579,10 @@ Deno.test("verbose research-only morning packet delivers a bounded status brief"
   assertEquals(delivery.parts, [delivery.body]);
   assert(delivery.body.includes("12 research candidate(s)"), "candidate count absent");
   assert(delivery.body.includes("No policy-approved action"), "no-action result absent");
+  assert(
+    delivery.body.split("\n").includes("No new action — data check incomplete"),
+    "incomplete morning report omitted the exact status-only line",
+  );
   assert(
     !delivery.body.includes("Market data coverage was incomplete"),
     "morning copy changed when Friday coverage disclosure was added",

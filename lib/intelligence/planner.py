@@ -1079,3 +1079,120 @@ def build_discovery_plan(
         reserved_holding_quote_requests=holding_reserve,
         reserved_adaptive_requests=adaptive_reserve,
     )
+
+
+def build_alert_discovery_plan(
+    policy: IntelligencePolicy,
+    capabilities: Mapping[str, SourceCapability],
+    *,
+    phase: str,
+    run_id: str,
+    reference_version: str,
+    requested_window: Mapping[str, str],
+    priority_theme_ids: list[str] | tuple[str, ...],
+    required_quote_requests: int,
+) -> DiscoveryPlan:
+    """Build the small, deterministic source plan allowed to block a daily alert."""
+    if phase not in _PHASES:
+        raise ValueError("phase is not approved")
+    try:
+        parsed_run_id = UUID(run_id)
+    except (ValueError, AttributeError) as exc:
+        raise ValueError("run ID must be a UUID") from exc
+    if parsed_run_id.version != 4:
+        raise ValueError("run ID must be a version-4 UUID")
+    _bounded_string(reference_version, "reference version")
+    window = _validate_window(requested_window)
+    quote_requests = _bounded_integer(
+        required_quote_requests,
+        "required quote requests",
+        minimum=0,
+        maximum=8,
+    )
+    if not isinstance(priority_theme_ids, (list, tuple)) or any(
+        not isinstance(value, str) or value not in policy.seed_domains
+        for value in priority_theme_ids
+    ):
+        raise ValueError("priority themes must use the approved taxonomy")
+    capability = capabilities.get("gdelt_theme_search")
+    if (
+        capability is None
+        or not capability.enabled
+        or capability.health not in {"enabled", "degraded"}
+        or phase not in capability.phases
+        or capability.required_credential is not None
+    ):
+        raise ValueError("alert discovery capability is unavailable")
+
+    targets = capability.query_pack.get("targets")
+    target_key = {
+        "pre-market": "on_demand_request",
+        "intraday": "intraday_delta",
+        "post-market": "day_reconciliation",
+        "on-demand": "on_demand_request",
+    }[phase]
+    general_query = targets.get(target_key) if isinstance(targets, Mapping) else None
+    if not isinstance(general_query, Mapping):
+        raise ValueError("alert general market query is unavailable")
+
+    task_inputs: list[tuple[str | None, Mapping[str, object]]] = [
+        (None, _deep_freeze(general_query)),  # type: ignore[arg-type]
+    ]
+    for theme_id in sorted(set(priority_theme_ids))[:2]:
+        query = _query_for(capability, theme_id)
+        if query is None:
+            raise ValueError("alert priority theme query is unavailable")
+        task_inputs.append((theme_id, query))
+    if quote_requests + len(task_inputs) > 8:
+        raise ValueError("alert plan exceeds eight live requests")
+    if len(task_inputs) > policy.budget_for("gdelt", phase):
+        raise ValueError("alert plan exceeds provider phase budget")
+
+    tasks = tuple(
+        DiscoveryTask(
+            task_id=_task_id(
+                run_id,
+                stage="signals",
+                capability=capability,
+                theme_id=theme_id,
+                query=query,
+                window=window,
+                dependencies=(),
+                reference_version=reference_version,
+            ),
+            stage="signals",
+            provider="gdelt",
+            capability_id=capability.capability_id,
+            query_kind="theme_search",
+            theme_id=theme_id,
+            query=query,
+            window=window,
+            dependencies=(),
+            max_attempts=1,
+            requires_credential=False,
+        )
+        for theme_id, query in task_inputs
+    )
+    registry: Mapping[str, SourceCapability] = capabilities if isinstance(
+        capabilities, _CapabilityRegistry
+    ) else MappingProxyType(dict(capabilities))
+    planned_themes = tuple(task.theme_id for task in tasks if task.theme_id is not None)
+    return DiscoveryPlan(
+        run_id=run_id,
+        phase=phase,
+        reference_version=reference_version,
+        capability_version=policy.source_capability_version,
+        tasks=tasks,
+        capabilities=registry,
+        coverage=MappingProxyType({
+            "unsupported_pairs": _FrozenList(),
+            "missing_credentials": _FrozenList(),
+            "deferred_capability_ids": _FrozenList(),
+            "planned_theme_ids": _FrozenList(planned_themes),
+            "unplanned_theme_ids": _FrozenList(sorted(set(policy.seed_domains) - set(planned_themes))),
+            "lane": "alert",
+        }),
+        provider_request_totals=MappingProxyType({"gdelt": len(tasks)}),
+        reserved_holding_quote_requests=quote_requests,
+        reserved_adaptive_requests=0,
+    )

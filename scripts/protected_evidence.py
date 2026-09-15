@@ -63,7 +63,7 @@ RECOVERY_SQL = {
         attempt_count,response,response_digest,created_at::text AS created_at,claimed_at::text AS claimed_at,finished_at::text AS finished_at
         FROM public.market_gateway_requests""",
     "policies": "SELECT version,config,active,created_at::text AS created_at,activated_at::text AS activated_at FROM public.market_policy_config",
-    "intelligence_runs": """SELECT id::text AS id,phase,market_date::text AS market_date,policy_version,reservation_plan,request_window,
+    "intelligence_runs": """SELECT id::text AS id,phase,lane,market_date::text AS market_date,policy_version,reservation_plan,request_window,
         created_at::text AS created_at FROM public.market_intelligence_runs""",
     "reference_manifests": """SELECT id::text AS id,run_id::text AS run_id,reference_version,revision,capability_version,
         taxonomy_version,source_hash,valid_from::text AS valid_from,valid_to::text AS valid_to,manifest,content_hash,
@@ -950,9 +950,16 @@ class PostgresReadOnlySource:
             "SELECT manifest_id FROM public.market_reference_run_bindings "
             "WHERE run_id=%s::uuid AND manifest_id IS NOT NULL"
         )
+        selected_research = (
+            "SELECT research.id FROM public.analysis_runs alert "
+            "JOIN public.analysis_runs research ON research.started_at>alert.finished_at "
+            "JOIN public.market_intelligence_runs intelligence ON intelligence.id=research.id "
+            "WHERE alert.id=%s::uuid AND intelligence.lane='research' "
+            "ORDER BY research.started_at,research.id LIMIT 1"
+        )
         queries = {
             "run": "SELECT id::text AS id,kind,scheduled_phase,scheduled_market_date::text AS scheduled_market_date,scheduled_attempt,status,started_at::text AS started_at,finished_at::text AS finished_at,gateway_request_id::text AS gateway_request_id,telegram_message_ids FROM public.analysis_runs WHERE id=%s::uuid",
-            "intelligence_runs": "SELECT id::text AS id,phase,market_date::text AS market_date,reservation_plan,request_window FROM public.market_intelligence_runs WHERE id=%s::uuid",
+            "intelligence_runs": "SELECT id::text AS id,phase,lane,market_date::text AS market_date,reservation_plan,request_window FROM public.market_intelligence_runs WHERE id=%s::uuid",
             "reference_manifests": RECOVERY_SQL["reference_manifests"] + f" WHERE id IN ({selected_manifests})",
             "security_reference_revisions": RECOVERY_SQL["security_reference_revisions"] + f" WHERE id IN (SELECT security_revision_id FROM public.market_reference_snapshot_memberships WHERE manifest_id IN ({selected_manifests}))",
             "reference_chunk_receipts": RECOVERY_SQL["reference_chunk_receipts"] + f" WHERE manifest_id IN ({selected_manifests})",
@@ -1001,6 +1008,14 @@ class PostgresReadOnlySource:
             "run_outcomes": RECOVERY_SQL["run_terminal_outcomes"] + " WHERE run_id=%s::uuid",
             "origins": "SELECT request_id::text AS request_id,run_id::text AS run_id,requested_packet_id::text AS requested_packet_id,scheduled_phase,market_date::text AS market_date,requested_kind,requested_report_id::text AS requested_report_id,requested_idempotency_key,requested_report_hash FROM public.market_report_request_origins WHERE run_id=%s::uuid",
             "quota": "SELECT q.id::text AS id,q.run_id::text AS run_id,q.provider,q.reserved_requests,COALESCE((SELECT sum(r.request_cost) FROM public.market_source_receipts r WHERE r.reservation_id=q.id),0)::int AS actual_requests FROM public.market_source_quota_reservations q WHERE q.run_id=%s::uuid",
+            "research_runs": "SELECT analysis.id::text AS id,analysis.kind,analysis.status,analysis.started_at::text AS started_at,analysis.finished_at::text AS finished_at,intelligence.phase,intelligence.lane,intelligence.market_date::text AS market_date FROM public.analysis_runs analysis JOIN public.market_intelligence_runs intelligence ON intelligence.id=analysis.id WHERE analysis.id IN (" + selected_research + ")",
+            "research_tasks": "SELECT id::text AS id,run_id::text AS run_id,state,attempt_count FROM public.market_discovery_stage_tasks WHERE run_id IN (" + selected_research + ") ORDER BY created_at,id",
+            "research_events": "SELECT id::text AS id,run_id::text AS run_id,status FROM public.market_intelligence_run_events WHERE run_id IN (" + selected_research + ") ORDER BY created_at,id",
+            "research_completions": RECOVERY_SQL["collection_completions"] + " WHERE run_id IN (" + selected_research + ")",
+            "research_packets": RECOVERY_SQL["packets"] + " WHERE run_id IN (" + selected_research + ")",
+            "research_reports": "SELECT id::text AS id,run_id::text AS run_id FROM public.market_reports WHERE run_id IN (" + selected_research + ")",
+            "research_publications": "SELECT publication.report_id::text AS report_id,publication.status,publication.attempt_count,publication.telegram_message_ids FROM public.market_report_publications publication JOIN public.market_reports report ON report.id=publication.report_id WHERE report.run_id IN (" + selected_research + ")",
+            "research_evaluation_publications": "SELECT id::text AS id,run_id::text AS run_id,status,attempt_count,telegram_message_ids FROM public.market_publications WHERE run_id IN (" + selected_research + ")",
         }
         result = {
             name: self.query(sql, (run_id,) * sql.count("%s"))
@@ -1008,6 +1023,12 @@ class PostgresReadOnlySource:
         }
         result["requests"] = self.query("""SELECT request_id::text AS request_id,run_id::text AS run_id,operation,status,response,attempt_count,created_at::text AS created_at,finished_at::text AS finished_at FROM public.market_gateway_requests
             WHERE run_id=%s::uuid OR request_id IN (SELECT request_id FROM public.market_report_request_origins WHERE run_id=%s::uuid)""", (run_id, run_id))
+        result["research_requests"] = self.query(
+            "SELECT request_id::text AS request_id,run_id::text AS run_id,operation,status,attempt_count "
+            "FROM public.market_gateway_requests WHERE run_id IN (" + selected_research + ") "
+            "ORDER BY created_at,request_id",
+            (run_id,),
+        )
         return result
 
 

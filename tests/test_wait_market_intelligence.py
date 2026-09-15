@@ -216,24 +216,23 @@ def test_cli_reports_pending_with_a_distinct_nonzero_status(monkeypatch):
     }
 
 
-def test_market_briefing_requires_durable_completion_before_evaluation_or_finish():
+def test_normal_market_briefing_never_uses_the_old_blocking_wait_or_same_run_restart():
     skill = open("skills/market-briefing/SKILL.md").read()
     routines = open("routines/README.md").read()
 
     for document in (skill, routines):
-        assert "python scripts/wait_market_intelligence.py" in document
-        assert "Never call `evaluate_and_publish` before" in document
-        assert "Never call `finish_run` before" in document
-        assert "COLLECTION_PENDING" in document
+        assert "--timeout-seconds 360" not in document
+        assert "at most two collector invocations" not in document
+        assert "invoke the identical collector command once more" not in document
 
 
-def test_routine_recovery_is_bounded_and_resumes_only_the_exact_run():
+def test_wait_helper_is_documented_only_as_a_nonmutating_manual_diagnostic():
     skill = open("skills/market-briefing/SKILL.md").read()
     routines = open("routines/README.md").read()
 
     assert waiter.DEFAULT_TIMEOUT_SECONDS == 360
     for document in (skill, routines):
-        assert "--timeout-seconds 360" in document
-        assert "at most two collector invocations" in document
-        assert "same exact run ID" in document
-        assert "completed or uncertain source attempt" in document
+        assert "python scripts/wait_market_intelligence.py --run-id RUN_ID --timeout-seconds 0" in document
+        assert "manual diagnostic" in document.lower()
+        assert "no provider request" in document.lower()
+        assert "no write" in document.lower()

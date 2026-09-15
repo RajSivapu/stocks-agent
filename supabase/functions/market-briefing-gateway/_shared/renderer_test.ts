@@ -369,6 +369,61 @@ Deno.test("brief explicitly says when no policy-approved entry zone exists", asy
   );
 });
 
+Deno.test("incomplete action data produces factual ready pre-market and post-market status briefs", async () => {
+  const incomplete = evaluation("CRWD", {
+    status: "vetoed",
+    final_action: null,
+    reason_codes: ["ACTION_DATA_INCOMPLETE", "QUOTE_MISSING"],
+    normalized: {
+      ...evaluation("CRWD").normalized,
+      verified_price: "0",
+      quote_as_of: "",
+      quote_source: "",
+      quote_market_state: "",
+      approved_terms: null,
+    },
+  });
+  const missingQuotes = context({ holding_quotes: {} });
+
+  for (const phase of ["pre-market", "post-market"] as const) {
+    incomplete.candidate.phase = phase;
+    const rendered = await renderPublication({
+      phase,
+      market_date: "2026-09-03",
+      evaluations: [incomplete],
+      context: missingQuotes,
+      actionable_data_complete: false,
+    });
+    assertEquals(rendered.status, "ready");
+    assert(
+      rendered.body.split("\n").includes(
+        "No new action — data check incomplete",
+      ),
+      `${phase} omitted the exact incomplete-data line`,
+    );
+    assert(
+      rendered.body.includes("verified price unavailable") &&
+        !rendered.body.includes("$0.00") &&
+        !rendered.body.includes("since avg"),
+      `${phase} invented a price or return`,
+    );
+    assert(
+      rendered.body.includes("Coverage gap: required action data, verified quote."),
+      `${phase} omitted concise coverage categories`,
+    );
+    for (
+      const section of [
+        "📊 YOUR PORTFOLIO",
+        "🌎 MARKET",
+        "🎯 OPEN ENTRY ZONES",
+        "➡️ NEXT REVIEW",
+      ]
+    ) {
+      assert(rendered.body.includes(section), `${phase} omitted ${section}`);
+    }
+  }
+});
+
 Deno.test("renderer is deterministic, sorts names, and hashes the exact body", async () => {
   const input = {
     phase: "pre-market" as const,

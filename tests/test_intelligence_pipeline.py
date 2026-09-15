@@ -11,10 +11,13 @@ from datetime import date, datetime, timedelta, timezone
 from types import MappingProxyType
 
 from lib.intelligence.pipeline import (
+    CollectionBudget,
     IntelligencePipeline,
+    PipelineReceipt,
     PipelineRequest,
     _discover,
     _collection_window_for_task,
+    _actionable_data_complete,
     _enrichment_candidates,
     _failed_receipt,
     _frozen_source_plan,
@@ -67,6 +70,317 @@ def request(phase: str, *, dry_run: bool = False) -> PipelineRequest:
         phase=phase, market_date=date(2026, 9, 4), now=NOW,
         dry_run=dry_run, request_id=RUN_ID,
     )
+
+
+def test_pipeline_request_binds_lane_into_the_durable_start_payload():
+    alert = replace(request("pre-market"), lane="alert")
+    research = request("on-demand")
+
+    assert alert.collection_plan(["gdelt"], ["macro_policy"])["lane"] == "alert"
+    assert research.lane == "research"
+    with pytest.raises(ValueError, match="lane"):
+        replace(alert, lane="other")
+
+
+def test_collection_budget_stops_before_margin_and_at_request_ceiling():
+    elapsed = [0.0]
+    budget = CollectionBudget(
+        deadline=210.0,
+        request_limit=8,
+        monotonic=lambda: elapsed[0],
+    )
+
+    assert budget.can_start()
+    budget.record(8)
+    assert not budget.can_start()
+    with pytest.raises(ValueError, match="request limit"):
+        budget.record(1)
+
+    timed = CollectionBudget(
+        deadline=210.0,
+        request_limit=8,
+        monotonic=lambda: elapsed[0],
+    )
+    elapsed[0] = 180.0
+    assert not timed.can_start()
+
+
+def test_actionable_data_requires_fresh_usd_symbol_bound_quote_for_each_target():
+    canonical = json.dumps({
+        "quote": {"currency": "USD", "ticker": "TEST"},
+        "ticker": "TEST",
+    }, separators=(",", ":"), sort_keys=True)
+    item = replace(
+        raw_item("TEST", provider="yahoo"),
+        authority="market_data",
+        canonical_content=canonical,
+        normalized_text=canonical,
+        content_hash=hashlib.sha256(canonical.encode()).hexdigest(),
+        security_ids=("TEST",),
+    )
+    valid = CollectionResult((item,), receipt("yahoo"), 1)
+    context = {"holdings": [{"ticker": "TEST"}], "owner_plans": []}
+
+    assert _actionable_data_complete((valid,), context, NOW)
+    wrong_currency = replace(
+        item,
+        canonical_content=canonical.replace('"USD"', '"EUR"'),
+        normalized_text=canonical.replace('"USD"', '"EUR"'),
+    )
+    assert not _actionable_data_complete(
+        (CollectionResult((wrong_currency,), receipt("yahoo"), 1),), context, NOW
+    )
+    assert not _actionable_data_complete((), context, NOW)
+
+
+def _slice_plan(task_count: int, *, lane: str = "research") -> DiscoveryPlan:
+    capability = SourceCapability(
+        capability_id="gdelt_theme_search", provider="gdelt",
+        query_kind="theme_search", themes=frozenset({"macro_and_policy"}),
+        phases=frozenset({"pre-market", "on-demand"}),
+        allowed_hosts=frozenset({"api.gdeltproject.org"}),
+        allowed_path_patterns=("/api/v2/doc/doc",), required_credential=None,
+        authority="radar", retention_class="metadata",
+        max_requests_per_run=task_count, max_items_per_request=20,
+        requirement_tier="required_baseline", health="enabled", enabled=True,
+        provider_priority=1, query_pack=MappingProxyType({}),
+    )
+    phase = "pre-market" if lane == "alert" else "on-demand"
+    tasks = tuple(reversed(tuple(
+        DiscoveryTask(
+            task_id=f"44444444-4444-4444-8444-{index:012d}",
+            stage="signals", provider="gdelt",
+            capability_id=capability.capability_id, query_kind="theme_search",
+            theme_id="macro_and_policy",
+            query=MappingProxyType({"query": f"task-{index:02d}"}),
+            window=MappingProxyType({
+                "start": "2026-09-03T12:00:00Z", "end": NOW.isoformat(),
+            }),
+            dependencies=(), max_attempts=1, requires_credential=False,
+        )
+        for index in range(task_count)
+    )))
+    return DiscoveryPlan(
+        run_id=RUN_ID, phase=phase, reference_version="sec:fixture-v1",
+        capability_version=1, tasks=tasks,
+        capabilities=MappingProxyType({capability.capability_id: capability}),
+        coverage=MappingProxyType({"lane": lane}),
+        provider_request_totals=MappingProxyType({"gdelt": task_count}),
+        reserved_holding_quote_requests=0, reserved_adaptive_requests=0,
+    )
+
+
+class SliceGateway:
+    def __init__(self):
+        self.operations = []
+        self.payloads = []
+        self.run_id = RUN_ID
+        self.reservation_id = RESERVATION_ID
+        self.discovery_tasks = {}
+        self.collection_checkpoints = {}
+
+    def start_intelligence_run(self, payload):
+        self.operations.append("start_intelligence_run")
+        self.payloads.append(payload)
+        return {
+            "run_id": self.run_id,
+            "reservation_ids": [self.reservation_id],
+            "cache_entries": list(self.collection_checkpoints.values()),
+            "request_window": payload["request_window"],
+            "duplicate": False,
+            "telegram_message_ids": [],
+        }
+
+    def read_discovery_context(self, _run_id):
+        return {"tasks": list(self.discovery_tasks.values())}
+
+    def checkpoint_discovery_stage(self, _run_id, payload):
+        row = payload["task"]
+        self.discovery_tasks[row["id"]] = row
+        return {"task": row, "duplicate": False}
+
+    def checkpoint_intelligence_collection(self, run_id, payload):
+        self.collection_checkpoints[payload["cache_key"]] = payload
+        return {"run_id": run_id, "cache_key": payload["cache_key"]}
+
+    def record_intelligence(self, run_id, payload):
+        self.operations.append("record_intelligence")
+        self.payloads.append(payload)
+        return {
+            "run_id": run_id,
+            "completion_id": "33333333-3333-4333-8333-333333333333",
+            "status": payload["status"],
+            "counts": {"source_receipts": len(payload["receipts"])},
+            "packet_id": payload["packet"]["id"],
+            "packet_hash": payload["packet"]["packet_hash"],
+            "duplicate": False,
+            "telegram_message_ids": [],
+        }
+
+
+def test_research_slice_pauses_24_tasks_and_resume_never_repeats_terminal_or_uncertain_attempts():
+    plan = _slice_plan(24)
+    gateway = SliceGateway()
+    clock = [0.0]
+
+    class SlowAdapter(FakeAdapter):
+        def collect(self, query, **_kwargs):
+            self.queries.append(query)
+            clock[0] += 20.0
+            return CollectionResult(
+                (raw_item(query.text),), receipt(self.provider), query.limit,
+            )
+
+    first_adapter = SlowAdapter()
+    first = IntelligencePipeline(
+        gateway, [first_adapter], discovery_plan=plan,
+    ).run_slice(
+        replace(request("on-demand"), lane="research"),
+        CollectionBudget(
+            deadline=240.0, request_limit=None, monotonic=lambda: clock[0],
+        ),
+    )
+
+    assert first.to_dict() == {
+        "deadline_reached": True,
+        "lane": "research",
+        "planned_remaining": 13,
+        "run_id": RUN_ID,
+        "status": "paused",
+    }
+    assert [query.text for query in first_adapter.queries] == [
+        f"task-{index:02d}" for index in range(11)
+    ]
+    assert "record_intelligence" not in gateway.operations
+    assert sum(row["state"] == "planned" for row in gateway.discovery_tasks.values()) == 13
+
+    uncertain_id = "44444444-4444-4444-8444-000000000011"
+    gateway.discovery_tasks[uncertain_id] = {
+        **gateway.discovery_tasks[uncertain_id], "state": "attempting", "attempt_count": 1,
+    }
+    second_adapter = SlowAdapter()
+    second = IntelligencePipeline(
+        gateway, [second_adapter], discovery_plan=plan,
+    ).run_slice(
+        replace(request("on-demand"), lane="research"),
+        CollectionBudget(
+            deadline=460.0, request_limit=None, monotonic=lambda: clock[0],
+        ),
+    )
+
+    assert second.status == "paused"
+    assert gateway.discovery_tasks[uncertain_id]["state"] == "uncertain"
+    assert all(query.text not in {f"task-{index:02d}" for index in range(12)}
+               for query in second_adapter.queries)
+    assert "record_intelligence" not in gateway.operations
+
+    final_adapter = SlowAdapter()
+    final = IntelligencePipeline(
+        gateway, [final_adapter], discovery_plan=plan,
+    ).run_slice(
+        replace(request("on-demand"), lane="research"),
+        CollectionBudget(deadline=None, request_limit=None, monotonic=lambda: clock[0]),
+    )
+
+    assert isinstance(final, PipelineReceipt)
+    assert gateway.operations.count("record_intelligence") == 1
+    assert sum(row["state"] == "planned" for row in gateway.discovery_tasks.values()) == 0
+
+
+def test_research_reference_deadline_leaves_attempting_authority_and_does_not_complete():
+    capability = SourceCapability(
+        capability_id="sec_company_tickers_universe", provider="sec_edgar",
+        query_kind="universe", themes=frozenset(), phases=frozenset({"on-demand"}),
+        allowed_hosts=frozenset({"www.sec.gov"}), allowed_path_patterns=("/files/",),
+        required_credential=None, authority="reference", retention_class="reference",
+        max_requests_per_run=1, max_items_per_request=1,
+        requirement_tier="required_baseline", health="enabled", enabled=True,
+        provider_priority=1, query_pack=MappingProxyType({}),
+    )
+    task = DiscoveryTask(
+        task_id="44444444-4444-4444-8444-000000000099",
+        stage="reference", provider="sec_edgar",
+        capability_id=capability.capability_id, query_kind="universe",
+        theme_id=None, query=MappingProxyType({"universe": "eligible_us_listed"}),
+        window=MappingProxyType({
+            "start": "2026-09-03T12:00:00Z", "end": NOW.isoformat(),
+        }),
+        dependencies=(), max_attempts=1, requires_credential=False,
+    )
+    plan = DiscoveryPlan(
+        run_id=RUN_ID, phase="on-demand", reference_version="sec:fixture-v1",
+        capability_version=1, tasks=(task,),
+        capabilities=MappingProxyType({capability.capability_id: capability}),
+        coverage=MappingProxyType({"lane": "research"}),
+        provider_request_totals=MappingProxyType({}),
+        reserved_holding_quote_requests=0, reserved_adaptive_requests=0,
+    )
+    gateway = SliceGateway()
+
+    result = IntelligencePipeline(
+        gateway,
+        (),
+        discovery_plan=plan,
+        reference_stage=lambda *_args: (_ for _ in ()).throw(
+            TimeoutError("collection deadline reached")
+        ),
+    ).run_slice(
+        replace(request("on-demand"), lane="research"),
+        CollectionBudget(deadline=100.0, request_limit=None, monotonic=lambda: 0.0),
+    )
+
+    assert result.status == "paused"
+    assert result.planned_remaining == 0
+    assert gateway.discovery_tasks[task.task_id]["state"] == "attempting"
+    assert "record_intelligence" not in gateway.operations
+
+
+def test_alert_slice_skips_reference_and_completes_partial_packet_at_stop_margin():
+    plan = _slice_plan(3, lane="alert")
+    gateway = SliceGateway()
+    clock = [0.0]
+    reference_calls = []
+
+    class SlowAdapter(FakeAdapter):
+        def collect(self, query, **_kwargs):
+            self.queries.append(query)
+            clock[0] += 70.0
+            return CollectionResult(
+                (raw_item(query.text),), receipt(self.provider), query.limit,
+            )
+
+    prior = {
+        "packet_id": "22222222-2222-4222-8222-222222222222",
+        "packet_hash": "a" * 64,
+        "market_date": "2026-09-03",
+        "created_at": "2026-09-03T21:00:00Z",
+        "age_days": 1,
+    }
+    adapter = SlowAdapter()
+    result = IntelligencePipeline(
+        gateway, [adapter], discovery_plan=plan,
+        context={
+            "policy_version": 1,
+            "holdings": [{"ticker": "TEST"}],
+            "latest_research_packet": prior,
+        },
+        reference_stage=lambda *_args: reference_calls.append(True),
+    ).run_slice(
+        replace(request("pre-market"), lane="alert"),
+        CollectionBudget(
+            deadline=90.0, request_limit=8, monotonic=lambda: clock[0],
+        ),
+    )
+
+    assert isinstance(result, PipelineReceipt)
+    assert len(adapter.queries) == 1
+    assert reference_calls == []
+    assert result.coverage["lane"] == "alert"
+    assert result.coverage["prior_research_packet"] == prior
+    assert result.coverage["actionable_data_complete"] is False
+    assert result.coverage["planned_remaining"] == 2
+    assert result.coverage["deadline_reached"] is True
+    assert gateway.operations.count("record_intelligence") == 1
 
 
 def raw_item(domain: str, *, provider: str = "gdelt", official: bool = False) -> SourceItem:

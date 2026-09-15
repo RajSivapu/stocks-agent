@@ -93,7 +93,7 @@ DATASET_FIELDS = {
     },
     "policies": {"version": int, "config": dict, "active": bool, "created_at": str, "activated_at": NULLABLE_TEXT},
     "intelligence_runs": {
-        "id": str, "phase": str, "market_date": str, "policy_version": int,
+        "id": str, "phase": str, "lane": str, "market_date": str, "policy_version": int,
         "reservation_plan": dict, "request_window": (dict, type(None)), "created_at": str,
     },
     "reference_manifests": {
@@ -2078,8 +2078,10 @@ def _validated_records(records: Mapping[str, object]) -> dict[str, list[dict[str
            for row in result["command_acknowledgements"]):
         raise ValueError("command acknowledgement relationship mismatch")
     if any(row["id"] not in runs or row["policy_version"] not in policies
+           or row["lane"] not in {"alert", "research"}
+           or (row["phase"] == "on-demand") != (row["lane"] == "research")
            for row in result["intelligence_runs"]):
-        raise ValueError("intelligence run dependency mismatch")
+        raise ValueError("intelligence run lane or dependency mismatch")
     intelligence_runs = {row["id"] for row in result["intelligence_runs"]}
     discovery_providers = {
         "gdelt", "alpha_vantage", "finnhub", "yahoo", "sec_edgar", "federal_register",

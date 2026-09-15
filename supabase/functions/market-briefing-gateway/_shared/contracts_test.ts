@@ -560,6 +560,7 @@ Deno.test("gateway envelope accepts scoped intelligence controller operations", 
     run_id: null,
     payload: {
       phase: "on-demand",
+      lane: "research",
       market_date: "2026-09-02",
       policy_version: 1,
       reservation_plan: { reservations: [] },

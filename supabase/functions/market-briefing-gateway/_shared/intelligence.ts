@@ -23,6 +23,8 @@ const HASH = /^[0-9a-f]{64}$/;
 // Keep this aligned with the SQL transfer RPC and the collector's 192 KiB bound.
 const REFERENCE_CHUNK_MAX_ENTRIES = 200;
 const PHASES = ["pre-market", "intraday", "post-market", "on-demand"] as const;
+export const INTELLIGENCE_LANES = ["alert", "research"] as const;
+export type IntelligenceLane = typeof INTELLIGENCE_LANES[number];
 const RECEIPT_STATUSES = [
   "succeeded",
   "failed",
@@ -62,6 +64,7 @@ type JsonObject = Record<string, unknown>;
 
 export interface StartIntelligencePayload {
   phase: typeof PHASES[number];
+  lane: IntelligenceLane;
   market_date: string;
   policy_version: number;
   reservation_plan: { reservations: JsonObject[] };
@@ -88,12 +91,21 @@ export interface RecordIntelligencePayload {
 
 export interface IntelligenceStartReceipt {
   run_id: string;
+  lane: IntelligenceLane;
   reservation_ids: string[];
   cache_entries: JsonObject[];
   terminal_checkpoint_entries: CheckpointIntelligencePayload[];
   request_window: JsonObject;
   duplicate: boolean;
   reservation_usage?: Record<string, number>;
+}
+
+export interface LatestTerminalResearchPacket {
+  packet_id: string;
+  packet_hash: string;
+  market_date: string;
+  created_at: string;
+  age_days: number;
 }
 
 export interface IntelligenceRecordReceipt {
@@ -1794,6 +1806,7 @@ export function parseStartIntelligencePayload(
     row,
     [
       "phase",
+      "lane",
       "market_date",
       "policy_version",
       "reservation_plan",
@@ -1839,8 +1852,14 @@ export function parseStartIntelligencePayload(
       cache_keys: cacheKeys,
     };
   });
+  const phase = enumValue(row.phase, PHASES, "payload.phase");
+  const lane = enumValue(row.lane, INTELLIGENCE_LANES, "payload.lane");
+  if ((phase === "on-demand") !== (lane === "research")) {
+    throw new Error("payload.lane does not match payload.phase");
+  }
   return {
-    phase: enumValue(row.phase, PHASES, "payload.phase"),
+    phase,
+    lane,
     market_date: dateValue(row.market_date, "payload.market_date"),
     policy_version: integer(
       row.policy_version,
@@ -1850,6 +1869,36 @@ export function parseStartIntelligencePayload(
     ),
     reservation_plan: { reservations: parsedReservations },
     request_window: parseRequestWindow(row.request_window),
+  };
+}
+
+export function parseLatestTerminalResearchPacket(
+  value: unknown,
+): LatestTerminalResearchPacket | null {
+  if (value === null) return null;
+  const row = objectValue(value, "latest research packet");
+  exactKeys(row, [
+    "packet_id",
+    "packet_hash",
+    "market_date",
+    "created_at",
+    "age_days",
+  ], "latest research packet");
+  return {
+    packet_id: uuidValue(row.packet_id, "latest research packet.packet_id"),
+    packet_hash: hashValue(
+      row.packet_hash,
+      "latest research packet.packet_hash",
+    ),
+    market_date: dateValue(
+      row.market_date,
+      "latest research packet.market_date",
+    ),
+    created_at: timestamp(
+      row.created_at,
+      "latest research packet.created_at",
+    )!,
+    age_days: integer(row.age_days, "latest research packet.age_days", 0, 5),
   };
 }
 
@@ -2644,6 +2693,7 @@ export function parseIntelligenceStartReceipt(
     row,
     [
       "run_id",
+      "lane",
       "reservation_ids",
       "cache_entries",
       "terminal_checkpoint_entries",
@@ -2672,6 +2722,11 @@ export function parseIntelligenceStartReceipt(
   ).map((entry) => parseCheckpointIntelligencePayload(entry));
   return {
     run_id: uuidValue(row.run_id, "start intelligence receipt.run_id"),
+    lane: enumValue(
+      row.lane,
+      INTELLIGENCE_LANES,
+      "start intelligence receipt.lane",
+    ),
     reservation_ids: arrayValue(
       row.reservation_ids,
       "start intelligence receipt.reservation_ids",

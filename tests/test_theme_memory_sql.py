@@ -90,6 +90,9 @@ FRIDAY_STATUS_REVISION_MIGRATION = (
 SAME_RUN_TERMINAL_CHECKPOINT_REPLAY_MIGRATION = (
     ROOT / "sql/migrations/20261030_same_run_terminal_checkpoint_replay.sql"
 )
+TELEGRAM_FAST_LANE_MIGRATION = (
+    ROOT / "sql/migrations/20261031_telegram_fast_lane.sql"
+)
 SCHEMA = ROOT / "sql/schema.sql"
 
 
@@ -151,13 +154,14 @@ def test_v2_runtime_completion_and_honest_empty_tail_are_parseable_and_ordered()
     assert parse_sql(UNRESOLVED_PACKET_READBACK_MIGRATION.read_text())
     assert parse_sql(FRIDAY_STATUS_REVISION_MIGRATION.read_text())
     assert parse_sql(SAME_RUN_TERMINAL_CHECKPOINT_REPLAY_MIGRATION.read_text())
+    assert parse_sql(TELEGRAM_FAST_LANE_MIGRATION.read_text())
     assert ACTIVE_INTELLIGENCE_POLICY_MIGRATION.read_bytes() in schema
     assert REFERENCE_TRANSFER_RESTART_MIGRATION.read_bytes() in schema
     assert RETRY_TASK_CAPACITY_RECOVERY_MIGRATION.read_bytes() in schema
     assert GDELT_ARTICLE_FEED_MIGRATION.read_bytes() in schema
     assert THEME_EVIDENCE_RETRIEVAL_TIMES_MIGRATION.read_bytes() in schema
     assert FRIDAY_STATUS_REVISION_MIGRATION.read_bytes() in schema
-    assert schema.endswith(SAME_RUN_TERMINAL_CHECKPOINT_REPLAY_MIGRATION.read_bytes())
+    assert schema.endswith(TELEGRAM_FAST_LANE_MIGRATION.read_bytes())
     migration = RUNTIME_COMPLETION_MIGRATION.read_text()
     assert "SECURITY DEFINER SET search_path=pg_catalog" in migration
     assert "record_market_intelligence_v2_completion" in migration
@@ -438,7 +442,7 @@ def _seed_protected_nomination_packet(db):
         "INSERT INTO analysis_runs(id,kind,status,finished_at) VALUES(%s,'market-intelligence','completed',statement_timestamp())",
         (run_id,),
     )
-    db.execute("INSERT INTO market_intelligence_runs(id,phase,market_date,policy_version,reservation_plan) VALUES(%s,'on-demand',CURRENT_DATE,90210,'{}')", (run_id,))
+    db.execute("INSERT INTO market_intelligence_runs(id,phase,lane,market_date,policy_version,reservation_plan) VALUES(%s,'on-demand','research',CURRENT_DATE,90210,'{}')", (run_id,))
     db.execute("INSERT INTO market_intelligence_run_events(id,run_id,status) VALUES(%s,%s,'completed')", (str(uuid.uuid4()), run_id))
     db.execute(
         "INSERT INTO market_reference_manifests(id,run_id,reference_version,revision,capability_version,taxonomy_version,source_hash,valid_from,manifest,content_hash) VALUES(%s,%s,%s,1,1,1,%s,statement_timestamp(),'{}',%s)",
@@ -624,7 +628,7 @@ def test_actual_postgres_nomination_deferral_and_later_frozen_selection_barrier(
             (later_run,),
         )
         db.execute(
-            "INSERT INTO market_intelligence_runs(id,phase,market_date,policy_version,reservation_plan) VALUES(%s,'post-market',CURRENT_DATE,90210,'{}')",
+            "INSERT INTO market_intelligence_runs(id,phase,lane,market_date,policy_version,reservation_plan) VALUES(%s,'post-market','alert',CURRENT_DATE,90210,'{}')",
             (later_run,),
         )
         db.execute(
@@ -673,7 +677,7 @@ def _seed_episode_run(db):
     evidence_ids = [str(uuid.uuid4()), str(uuid.uuid4())]
     db.execute("SET session_replication_role=replica")
     db.execute("INSERT INTO analysis_runs(id,kind,status) VALUES(%s,'market-intelligence','running')", (run_id,))
-    db.execute("INSERT INTO market_intelligence_runs(id,phase,market_date,policy_version,reservation_plan) VALUES(%s,'on-demand',CURRENT_DATE,90210,'{}')", (run_id,))
+    db.execute("INSERT INTO market_intelligence_runs(id,phase,lane,market_date,policy_version,reservation_plan) VALUES(%s,'on-demand','research',CURRENT_DATE,90210,'{}')", (run_id,))
     db.execute("INSERT INTO market_intelligence_run_events(id,run_id,status) VALUES(%s,%s,'started')", (str(uuid.uuid4()), run_id))
     db.execute("INSERT INTO market_source_quota_reservations(id,run_id,provider,market_date,phase,reserved_requests,cache_keys) VALUES(%s,%s,'gdelt',CURRENT_DATE,'on-demand',1,'[]')", (reservation_id, run_id))
     db.execute("INSERT INTO market_source_receipts(id,run_id,reservation_id,provider,status,cache_key,requested_window,retrieved_at,expires_at,request_cost,returned_count,accepted_count,duplicate_count,dropped_count,response_hash) VALUES(%s,%s,%s,'gdelt','succeeded','episode-fixture','{}','2026-09-07T12:10:00Z','2026-09-08T12:10:00Z',1,2,2,0,0,%s)", (receipt_id, run_id, reservation_id, "e" * 64))
@@ -1864,7 +1868,7 @@ def test_actual_postgres_freezes_unicode_bounded_memory_without_dropping_priorit
             (target_run,),
         )
         db.execute(
-            "INSERT INTO market_intelligence_runs(id,phase,market_date,policy_version,reservation_plan) VALUES(%s,'on-demand','2026-09-08',90210,'{}')",
+            "INSERT INTO market_intelligence_runs(id,phase,lane,market_date,policy_version,reservation_plan) VALUES(%s,'on-demand','research','2026-09-08',90210,'{}')",
             (target_run,),
         )
         db.execute(

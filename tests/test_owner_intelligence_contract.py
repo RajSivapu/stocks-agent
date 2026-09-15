@@ -154,3 +154,48 @@ def test_owner_intelligence_projection_rejects_values_the_typescript_parser_reje
     mutation(value)
     with pytest.raises(ValueError):
         validate_owner_intelligence_v2(value)
+
+
+def _routine_prompt(document: str, heading: str, next_heading: str | None) -> str:
+    start = document.index(heading)
+    end = document.index(next_heading, start) if next_heading else len(document)
+    return document[start:end]
+
+
+def test_every_scheduled_prompt_finishes_alert_authority_before_best_effort_research():
+    routines = Path("routines/README.md").read_text()
+    sections = (
+        ("### Pre-market prompt", "### Intraday prompt", "pre-market"),
+        ("### Intraday prompt", "### Post-market prompt", "intraday"),
+        ("### Post-market prompt", "## Receipt rules", "post-market"),
+    )
+    for heading, next_heading, phase in sections:
+        prompt = _routine_prompt(routines, heading, next_heading)
+        alert = f"--phase {phase} --lane alert --budget-seconds 240"
+        research = "--phase on-demand --lane research --budget-seconds 240"
+        assert alert in prompt
+        assert research in prompt
+        assert prompt.index(alert) < prompt.index("`evaluate_and_publish`")
+        assert prompt.index("`evaluate_and_publish`") < prompt.index("`finish_run`")
+        assert prompt.index("`finish_run`") < prompt.index(research)
+        assert "do not start research" in prompt.lower()
+        assert 'research `status: paused` is a clean bounded result' in prompt.lower()
+
+
+def test_market_briefing_skill_defines_alert_first_lane_and_nonblocking_research_contract():
+    skill = Path("skills/market-briefing/SKILL.md").read_text()
+    lifecycle = _routine_prompt(
+        skill,
+        "## Run lifecycle",
+        "## Theme-memory follow-up boundary",
+    )
+
+    alert = "--lane alert --budget-seconds 240"
+    research = "--lane research --budget-seconds 240"
+    assert alert in lifecycle
+    assert research in lifecycle
+    assert lifecycle.index(alert) < lifecycle.index("evaluate_and_publish")
+    assert lifecycle.index("Call `finish_run`") < lifecycle.index(research)
+    assert 'research `status: paused` is a clean bounded result' in lifecycle.lower()
+    assert "planned research work is resumable backlog" in lifecycle.lower()
+    assert "cannot change the completed alert outcome" in lifecycle

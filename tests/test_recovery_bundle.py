@@ -714,7 +714,8 @@ def recovery_records():
         "policies": [{"version": 1, "config": {"intelligence": {}}, "active": True,
                       "created_at": "2026-09-01T00:00:00Z", "activated_at": "2026-09-01T00:00:00Z"}],
         "intelligence_runs": [{
-            "id": run, "phase": "post-market", "market_date": "2026-09-05", "policy_version": 1,
+            "id": run, "phase": "post-market", "lane": "alert",
+            "market_date": "2026-09-05", "policy_version": 1,
             "reservation_plan": {"reservations": []}, "request_window": {
                 "start": "2026-09-05T12:00:00Z", "end": "2026-09-05T20:00:00Z",
                 "timezone": "America/Chicago", "market_date": "2026-09-05", "phase": "post-market",
@@ -1405,6 +1406,7 @@ def test_recovery_payload_carries_identity_delivery_and_release_state(tmp_path, 
             artifact, commands["decrypt_command"], Path(temporary).resolve(),
         )
     assert records["intelligence_runs"][0]["id"] == records["runs"][0]["id"]
+    assert records["intelligence_runs"][0]["lane"] == "alert"
     assert {"idempotency_key", "market_date", "kind"}.issubset(records["reports"][0])
     assert records["command_acknowledgements"][0]["attempt_count"] == 1
     publication = records["evaluation_publications"][0]
@@ -1424,6 +1426,20 @@ def test_recovery_payload_carries_identity_delivery_and_release_state(tmp_path, 
         "collection_checkpoint_history", "collection_completions", "report_origins",
         "cash_ledger_state", "cash_snapshots", "run_terminal_outcomes",
     }
+
+
+def test_recovery_contract_preserves_exact_intelligence_lane_authority():
+    from scripts.export_recovery_bundle import DATASET_FIELDS, _validated_records
+    from scripts.protected_evidence import RECOVERY_SQL
+
+    records = recovery_records()
+    assert _validated_records(records)["intelligence_runs"][0]["lane"] == "alert"
+    assert DATASET_FIELDS["intelligence_runs"]["lane"] is str
+    assert "phase,lane,market_date" in RECOVERY_SQL["intelligence_runs"]
+
+    records["intelligence_runs"][0]["lane"] = "research"
+    with pytest.raises(ValueError, match="intelligence run lane"):
+        _validated_records(records)
 
 
 def _v2_recovery_records():

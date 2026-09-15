@@ -128,7 +128,17 @@ jobs:
             --deployment-id "$DEPLOYMENT_ID" \
             --production-project-ref "$SUPABASE_PROJECT_REF" \
             --static-root dist > "$RUNNER_TEMP/verification-raw.json"
-          jq -e '.status == "protected_backend_and_scheduled_verified" and .evidence_classes.operational_scheduled.status == "verified" and .evidence_classes.discovery_capability.status == "verified"' \
+          jq -e '.status == "protected_backend_and_scheduled_verified"
+            and .evidence_classes.operational_scheduled.status == "verified"
+            and .evidence_classes.discovery_capability.status == "verified"
+            and .alert_lane_terminal == true
+            and (.alert_publication_status == "accepted_by_telegram" or .alert_publication_status == "suppressed" or .alert_publication_status == "no_trigger")
+            and (.telegram_message_ids | type == "array")
+            and (.telegram_attempt_count | type == "number")
+            and .telegram_attempt_count >= 0 and .telegram_attempt_count <= 1
+            and .research_lane_progressed_after_alert == true
+            and (.research_remaining_tasks | type == "number")
+            and .research_remaining_tasks >= 0' \
             "$RUNNER_TEMP/verification-raw.json" >/dev/null
           jq -cS --arg main_sha "$MAIN_SHA" --argjson workflow_run_id "$GITHUB_RUN_ID" \
             '. + {verification_main_sha:$main_sha,verification_workflow_run_id:$workflow_run_id}' \

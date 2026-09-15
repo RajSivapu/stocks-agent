@@ -1,6 +1,6 @@
 # Personal Stock Agent Project Status
 
-Last updated: 2026-09-14
+Last updated: 2026-09-15
 Canonical release: Personal Stock Agent V1 market-wide discovery candidate
 Audit baseline: `432d647ef911ff63da427097f02a852e18038b62` on `origin/main`
 Market-wide implementation boundary: `18386b5c76c7a7aa8b3eeda870b12d3aba2399e1`
@@ -11,6 +11,32 @@ runtime release; exact-main CI `34920214874` passed. PRs #111 through #113 expos
 stable-code, and timeline evidence for a nonterminal scheduled run without reading source prose,
 credentials, or Telegram content.
 
+## September 15 Telegram fast-lane candidate — local verification complete
+
+Branch `codex/telegram-fast-lane` now separates every normal scheduled run into a bounded alert lane
+followed by one best-effort research slice. Alert collection has a 240-second/8-request ceiling,
+reuses only a recent hash-validated terminal research packet, and reaches Analyst, Checker, canonical
+report persistence, Telegram delivery/suppression, and `finish_run` before research starts. Missing
+action data produces a factual canonical status brief with the exact line `No new action — data check
+incomplete`; it cannot produce Buy/Add/Reduce/Sell authority. Research is owner-only,
+suggestion-only, publication-ineligible, resumes the oldest eligible five-day run, closes its
+analysis row automatically when its protected packet completes, and may return `paused` with durable
+planned backlog without changing the alert receipt.
+
+Focused local proof is green: 38 routine-contract tests, 132 release-verifier/workflow tests, 13
+fresh/ordered PostgreSQL lane tests, and 70 gateway handler tests. The verifier now fails closed on a
+non-alert scheduled lane, absent or mismatched packet/report hashes, more than one Telegram attempt,
+any research publication/finalization attempt, missing later research progress, or malformed paused
+or completed research state. Release fields remain pending until the protected path runs:
+`reviewed_head_sha=pending`, `exact_main_sha=pending`, `exact_main_ci=pending`,
+`protected_deployment_id=pending`.
+
+Trusted V1 use remains **no-go** until this exact candidate passes protected PR/CI/merge/deployment
+and the next normal scheduled pre-market or post-market chain proves a terminal alert receipt with
+its original Telegram message IDs (or explicit persisted suppression/no-trigger) followed by later
+research progress. Do not use “Run now,” a second live routine, a manual collector, or a standalone
+Telegram test to manufacture that receipt.
+
 The September 14 post-market run `a19ac8a2-50c4-43f9-b1b1-36af89f8cb89` proves the current
 Telegram silence is an orchestration race before delivery. Collection started at 20:11:30 UTC and
 eventually persisted a completed packet with seven candidates and seven evidence items at 20:26:56.
@@ -19,13 +45,11 @@ The routine called `evaluate_and_publish` at 20:22:31, which failed with
 `MISSING_COLLECTION_RECEIPT`. No report or publication existed, so Telegram was never invoked. The
 run remains nonterminal and must not be duplicated merely to manufacture a receipt.
 
-The current source candidate adds a read-only deterministic completion wait and makes it a mandatory
-gate in the market-briefing skill and all three Routine prompts. If collector command execution
-returns before its terminal output, the routine reads the already-running completion and resumes
-from the validated bounded packet; it never starts the providers again. Evaluation, artifact writes,
-grading, finalization, and delivery are forbidden until `completion_id`, `packet_id`, and
-`packet_hash` match the exact run. A bounded `COLLECTION_PENDING` result stops safely and leaves the
-run recoverable.
+The superseded September 14 recovery candidate added a read-only deterministic completion wait after
+the orchestration race. The September 15 fast-lane candidate keeps that helper only as a
+nonmutating, zero-timeout manual diagnostic. Normal routines never wait for or restart collection;
+they run one bounded alert collector and stop safely if its exact completion/packet/hash receipt is
+not available.
 
 PR #103 corrected the non-notifying healthcheck so an intentionally ephemeral dry-run validates its
 start receipt without requesting nonexistent persisted context. Exact-head CI `34856305676` and

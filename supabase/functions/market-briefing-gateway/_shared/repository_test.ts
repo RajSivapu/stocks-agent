@@ -202,6 +202,110 @@ Deno.test("completion recovery reads the immutable completion by run and stable 
   }]);
 });
 
+Deno.test("intelligence lane repository routes and validates protected lane RPCs", async () => {
+  const calls: unknown[] = [];
+  const packet = {
+    packet_id: "00000000-0000-4000-8000-000000000092",
+    packet_hash: "b".repeat(64),
+    market_date: "2026-09-01",
+    created_at: "2026-09-01T21:00:00.000Z",
+    age_days: 1,
+  };
+  const client = {
+    rpc(name: string, parameters?: Record<string, unknown>) {
+      calls.push({ name, parameters });
+      if (name === "start_market_intelligence_run") {
+        return Promise.resolve({
+          data: {
+            run_id: "00000000-0000-4000-8000-000000000090",
+            lane: "alert",
+            reservation_ids: [],
+            cache_entries: [],
+            terminal_checkpoint_entries: [],
+            request_window: {
+              start: "2026-09-02T12:00:00.000Z",
+              end: "2026-09-02T13:00:00.000Z",
+              timezone: "America/Chicago",
+              market_date: "2026-09-02",
+              phase: "pre-market",
+            },
+            duplicate: false,
+          },
+          error: null,
+        });
+      }
+      return Promise.resolve({ data: packet, error: null });
+    },
+    from(name: string) {
+      assertEquals(name, "market_intelligence_runs");
+      return {
+        select(columns: string) {
+          assertEquals(columns, "lane");
+          return {
+            eq(column: string, value: string) {
+              assertEquals({ column, value }, {
+                column: "id",
+                value: "00000000-0000-4000-8000-000000000090",
+              });
+              return {
+                limit(limit: number) {
+                  assertEquals(limit, 2);
+                  return Promise.resolve({ data: [{ lane: "alert" }], error: null });
+                },
+              };
+            },
+          };
+        },
+      };
+    },
+  };
+  const repository = createSupabaseGatewayRepository(client as never);
+  const runId = "00000000-0000-4000-8000-000000000090";
+  const payload = {
+    phase: "pre-market" as const,
+    lane: "alert" as const,
+    market_date: "2026-09-02",
+    policy_version: 1,
+    reservation_plan: { reservations: [] },
+    request_window: {
+      start: "2026-09-02T12:00:00.000Z",
+      end: "2026-09-02T13:00:00.000Z",
+      timezone: "America/Chicago",
+      market_date: "2026-09-02",
+      phase: "pre-market",
+    },
+  };
+  assertEquals((await repository.startIntelligenceRun!(runId, payload)).lane, "alert");
+  assertEquals(await repository.intelligenceLane(runId), "alert");
+  assertEquals(
+    await repository.latestTerminalResearchPacket(
+      runId,
+      "2026-09-02",
+      new Date("2026-09-02T12:00:00.000Z"),
+    ),
+    packet,
+  );
+  assertEquals(calls, [{
+    name: "start_market_intelligence_run",
+    parameters: {
+      p_run_id: runId,
+      p_phase: "pre-market",
+      p_market_date: "2026-09-02",
+      p_policy_version: 1,
+      p_reservation_plan: { reservations: [] },
+      p_request_window: payload.request_window,
+      p_lane: "alert",
+    },
+  }, {
+    name: "read_latest_terminal_research_packet",
+    parameters: {
+      p_alert_run_id: runId,
+      p_market_date: "2026-09-02",
+      p_now: "2026-09-02T12:00:00.000Z",
+    },
+  }]);
+});
+
 Deno.test("discovery persistence routes exact run-scoped payloads through protected RPCs", async () => {
   const calls: unknown[] = [];
   const task = {

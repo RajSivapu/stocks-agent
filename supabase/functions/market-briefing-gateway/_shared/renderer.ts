@@ -31,6 +31,7 @@ export interface RenderPublicationInput {
   comparisons?: PortfolioAlternativeComparison[];
   companion?: LongTermCompanionAnalysis;
   holiday?: boolean;
+  actionable_data_complete?: boolean;
 }
 
 export interface RenderedPublication {
@@ -85,6 +86,7 @@ const REASON_LABELS: Record<PolicyReasonCode, string> = {
   CHECKER_DOWNGRADE: "Checker downgraded the proposal",
   CHECKER_VETO: "Checker vetoed the proposal",
   LOW_CONFIDENCE: "Confidence is below the action threshold",
+  ACTION_DATA_INCOMPLETE: "Required action data is incomplete",
   ACTION_HOLDING_MISMATCH: "Action does not match recorded ownership",
   SELL_EXCEEDS_HOLDING: "Sell quantity exceeds recorded shares",
   POSITION_CAP_EXCEEDED: "Position cap would be exceeded",
@@ -837,6 +839,44 @@ function section(
   return `<b>${title}</b>\n${rows.join(separator)}`;
 }
 
+function actionDataIncomplete(
+  evaluations: readonly PolicyEvaluation[],
+): boolean {
+  return evaluations.some((evaluation) =>
+    evaluation.reason_codes.includes("ACTION_DATA_INCOMPLETE")
+  );
+}
+
+function incompleteCoverageRows(
+  evaluations: readonly PolicyEvaluation[],
+): string[] {
+  const codes = new Set(evaluations.flatMap((item) => item.reason_codes));
+  const categories = [
+    codes.has("ACTION_DATA_INCOMPLETE") ? "required action data" : null,
+    [...codes].some((code) =>
+        code === "QUOTE_MISSING" || code === "QUOTE_STALE" ||
+        code === "QUOTE_SESSION_MISMATCH"
+      )
+      ? "verified quote"
+      : null,
+    [...codes].some((code) =>
+        code === "CURRENT_EVIDENCE_MISSING" || code === "EVIDENCE_STALE" ||
+        code === "EVIDENCE_FUTURE" || code === "EVIDENCE_UNVERIFIED" ||
+        code === "EVIDENCE_CATEGORY_MISSING" || code === "EVIDENCE_CONFLICT"
+      )
+      ? "current evidence"
+      : null,
+    [...codes].some((code) =>
+        code === "ANALYST_INCOMPLETE" || code === "CHECKER_INCOMPLETE" ||
+        code === "CHECKER_DOWNGRADE" || code === "CHECKER_VETO" ||
+        code === "CHECKER_COPIED" || code === "ANALYSIS_CHAIN_INVALID"
+      )
+      ? "independent review"
+      : null,
+  ].filter((value): value is string => value !== null);
+  return [`Coverage gap: ${categories.join(", ") || "required action data"}.`];
+}
+
 function shortMarketDate(value: string): string {
   const match = /^(\d{4})-(\d{2})-(\d{2})$/.exec(value);
   if (!match) return escapeHtml(value);
@@ -914,9 +954,18 @@ function renderFullBrief(
         : `Data through ${escapeHtml(timestamp)}`
       : "Data timestamp unavailable"
   }</i>`;
+  const statusOnly = input.actionable_data_complete === false ||
+    actionDataIncomplete(input.evaluations);
+  const statusBlocks = statusOnly
+    ? [
+      section("⚪ STATUS", ["No new action — data check incomplete"]),
+      section("🧾 COVERAGE NOTE", incompleteCoverageRows(input.evaluations)),
+    ]
+    : [];
   if (input.phase === "post-market") {
     const watching = watchingRows(context, input.evaluations, false);
     return splitBlocks(heading, [
+      ...statusBlocks,
       section(
         "📊 YOUR PORTFOLIO",
         portfolioRows(context, input.evaluations, true),
@@ -930,6 +979,7 @@ function renderFullBrief(
     ]);
   }
   return splitBlocks(heading, [
+    ...statusBlocks,
     section("📊 YOUR PORTFOLIO", portfolioRows(context, input.evaluations)),
     section("🌎 MARKET", marketRows(input.evaluations)),
     section("🎯 OPEN ENTRY ZONES", entryZoneRows(input.evaluations)),
@@ -947,6 +997,9 @@ function renderFullBrief(
       ]
       : []),
     section("⚠️ PORTFOLIO RISKS", riskRows(context, input.evaluations)),
+    ...(statusOnly
+      ? [section("➡️ NEXT REVIEW", nextCheckRows(context, input.evaluations))]
+      : []),
     section("👀 WATCHING", watchingRows(context, input.evaluations)),
     section("📚 READ MORE", readMoreRows(context, input.evaluations)),
   ]);

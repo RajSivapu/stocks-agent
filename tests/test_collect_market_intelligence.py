@@ -18,6 +18,8 @@ from scripts.collect_market_intelligence import main
 ARGS = [
     "--phase",
     "pre-market",
+    "--lane",
+    "alert",
     "--market-date",
     "2026-09-04",
     "--now",
@@ -86,8 +88,8 @@ def test_cli_requires_exact_run_id_for_scheduled_collection_but_allows_explicit_
     scheduled = io.StringIO()
     fixture = io.StringIO()
 
-    assert main(["--phase", "pre-market"], stdout=scheduled) == 2
-    assert main(["--phase", "pre-market", "--dry-run"], stdout=fixture) == 0
+    assert main(["--phase", "pre-market", "--lane", "alert"], stdout=scheduled) == 2
+    assert main(["--phase", "pre-market", "--lane", "alert", "--dry-run"], stdout=fixture) == 0
 
     assert json.loads(scheduled.getvalue()) == {"error": "INVALID_ARGUMENT", "ok": False}
     assert json.loads(fixture.getvalue())["coverage"]["mode"] == "fixture_dry_run"
@@ -96,7 +98,7 @@ def test_cli_requires_exact_run_id_for_scheduled_collection_but_allows_explicit_
 def test_cli_rejects_ambiguous_legacy_request_id_flag():
     output = io.StringIO()
 
-    assert main(["--phase", "pre-market", "--request-id", "11111111-1111-4111-8111-111111111111"], stdout=output) == 2
+    assert main(["--phase", "pre-market", "--lane", "alert", "--request-id", "11111111-1111-4111-8111-111111111111"], stdout=output) == 2
 
     assert json.loads(output.getvalue()) == {"error": "INVALID_ARGUMENT", "ok": False}
 
@@ -106,7 +108,7 @@ def test_cli_rejects_untyped_comparison_and_learning_context():
         context = Path(directory) / "context.json"
         context.write_text(json.dumps({"comparison_ids": ["11111111-1111-4111-8111-111111111111"]}))
         output = io.StringIO()
-        assert main(["--phase", "pre-market", "--run-id", "11111111-1111-4111-8111-111111111111", "--context-file", str(context), "--dry-run"], stdout=output) == 2
+        assert main(["--phase", "pre-market", "--lane", "alert", "--run-id", "11111111-1111-4111-8111-111111111111", "--context-file", str(context), "--dry-run"], stdout=output) == 2
     assert json.loads(output.getvalue()) == {"error": "INVALID_ARGUMENT", "ok": False}
 
 
@@ -129,7 +131,7 @@ def test_scheduled_collector_consumes_protected_context_and_ignores_scratch_auth
     scratch = tmp_path / "scratch.json"
     scratch.write_text(json.dumps({"holdings": {"FAKE": "0"}, "liquidity_by_ticker": {"FAKE": "1"}}))
     output = io.StringIO()
-    assert collector.main(["--phase", "intraday", "--run-id", RUN_ID,
+    assert collector.main(["--phase", "intraday", "--lane", "alert", "--run-id", RUN_ID,
         "--now", NOW.isoformat(), "--context-file", str(scratch)], stdout=output) == 0
     assert reads == [RUN_ID]
     assert json.loads(output.getvalue())["domains_checked"] == ["holding:OTHER", "holding:TEST"]
@@ -178,8 +180,9 @@ def test_scheduled_collector_passes_one_persisted_capability_plan_and_source_cur
             captured["plan"] = discovery_plan
             captured["source_cursors"] = source_cursors
 
-        def run(self, request):
+        def run_slice(self, request, budget):
             captured["run_count"] = captured.get("run_count", 0) + 1
+            captured["budget"] = budget
             return Result()
 
     monkeypatch.setattr(collector, "_read_context", lambda _run_id: {"data": {"context": protected}})
@@ -195,11 +198,61 @@ def test_scheduled_collector_passes_one_persisted_capability_plan_and_source_cur
     output = io.StringIO()
 
     assert collector.main([
-        "--phase", "pre-market", "--run-id", RUN_ID, "--now", NOW.isoformat(),
+        "--phase", "pre-market", "--lane", "alert", "--run-id", RUN_ID,
+        "--now", NOW.isoformat(),
     ], stdout=output) == 0
     assert captured["plan"] is plan
     assert captured["run_count"] == 1
     assert set(captured["source_cursors"]) == {"gdelt_theme_search:macro_and_policy"}
+
+
+def test_cli_requires_lane_rejects_oversized_budget_and_passes_one_shared_budget(monkeypatch):
+    import scripts.collect_market_intelligence as collector
+
+    missing = io.StringIO()
+    oversized = io.StringIO()
+    assert collector.main(
+        ["--phase", "pre-market", "--dry-run"], stdout=missing
+    ) == 2
+    assert collector.main(
+        [
+            "--phase", "pre-market", "--lane", "alert",
+            "--budget-seconds", "241", "--dry-run",
+        ],
+        stdout=oversized,
+    ) == 2
+    assert json.loads(missing.getvalue()) == {"error": "INVALID_ARGUMENT", "ok": False}
+    assert json.loads(oversized.getvalue()) == {"error": "INVALID_ARGUMENT", "ok": False}
+
+    captured = {}
+
+    class Result:
+        def to_json_bytes(self):
+            return b'{"status":"completed"}'
+
+    class Pipeline:
+        def __init__(self, *_args, **_kwargs):
+            pass
+
+        def run_slice(self, request, budget):
+            captured["request"] = request
+            captured["budget"] = budget
+            return Result()
+
+    monkeypatch.setattr(collector, "IntelligencePipeline", Pipeline)
+    monotonic_values = iter((100.0,))
+    monkeypatch.setattr(collector.time, "monotonic", lambda: next(monotonic_values))
+    output = io.StringIO()
+    assert collector.main(
+        [
+            "--phase", "pre-market", "--lane", "alert",
+            "--budget-seconds", "180", "--dry-run",
+        ],
+        stdout=output,
+    ) == 0
+    assert captured["request"].lane == "alert"
+    assert captured["budget"].deadline == 280.0
+    assert captured["budget"].request_limit == 8
 
 
 def test_protected_context_unwraps_values_and_never_uses_supplied_current_price():
@@ -744,6 +797,46 @@ def test_reference_transfer_request_id_is_bound_to_the_exact_payload():
 
     assert first == exact_replay
     assert first != changed_retry
+
+
+def test_alert_reference_reuse_only_pins_and_reads_protected_predecessor():
+    import scripts.collect_market_intelligence as collector
+
+    calls = []
+
+    class Gateway:
+        @staticmethod
+        def call(operation, payload, **kwargs):
+            calls.append((operation, payload, kwargs))
+            if operation == "pin_discovery_reference":
+                return {"data": {
+                    "binding_role": "predecessor",
+                    "manifest_id": None,
+                    "reference_status": "reference_unavailable",
+                }}
+            assert operation == "read_discovery_reference"
+            return {"data": {"reference": {
+                "binding": {
+                    "binding_role": "predecessor", "manifest_id": None,
+                    "reference_status": "reference_unavailable",
+                    "source_retrieved_at": None, "reference_age_seconds": None,
+                },
+                "manifest": None, "securities": [],
+                "next_after_security_id": None, "complete": True,
+            }}}
+
+    coverage, snapshot = collector._reuse_protected_reference_stage(
+        Gateway(),
+        "11111111-1111-4111-8111-111111111111",
+        datetime(2026, 9, 15, 12, tzinfo=timezone.utc),
+    )
+
+    assert [call[0] for call in calls] == [
+        "pin_discovery_reference", "read_discovery_reference",
+    ]
+    assert all(call[1]["binding_role"] == "predecessor" for call in calls)
+    assert coverage["reference_status"] == "reference_unavailable"
+    assert snapshot is None
 
 
 def test_restart_hydrates_the_complete_current_v2_pin_without_contacting_sec():

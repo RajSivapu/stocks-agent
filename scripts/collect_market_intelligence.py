@@ -8,6 +8,7 @@ import hashlib
 import json
 import re
 import sys
+from dataclasses import replace
 from uuid import UUID
 import time
 import uuid
@@ -23,8 +24,18 @@ from lib import config, gateway  # noqa: E402
 from lib.config import load_settings  # noqa: E402
 from lib.intelligence.cursors import SourceCursor, parse_time  # noqa: E402
 from lib.intelligence.http import BoundedHttpClient  # noqa: E402
-from lib.intelligence.pipeline import IntelligencePipeline, PHASES, PipelineRequest, protected_collection_context  # noqa: E402
-from lib.intelligence.planner import build_discovery_plan, load_source_capabilities  # noqa: E402
+from lib.intelligence.pipeline import (  # noqa: E402
+    CollectionBudget,
+    IntelligencePipeline,
+    PHASES,
+    PipelineRequest,
+    protected_collection_context,
+)
+from lib.intelligence.planner import (  # noqa: E402
+    build_alert_discovery_plan,
+    build_discovery_plan,
+    load_source_capabilities,
+)
 from lib.intelligence.policy import load_intelligence_policy  # noqa: E402
 from lib.intelligence.providers import build_adapter  # noqa: E402
 from lib.intelligence.quota import QuotaSession  # noqa: E402
@@ -37,6 +48,7 @@ from lib.intelligence.universe import (  # noqa: E402
     reference_snapshot_from_rows,
     refresh_sec_reference,
 )
+from scripts.market_gateway import DeadlineGateway  # noqa: E402
 
 
 MAX_REFERENCE_TRANSFER_CALLS = 384
@@ -99,6 +111,8 @@ def _diagnostic(error: BaseException) -> str:
 def _parser() -> argparse.ArgumentParser:
     parser = _ArgumentParser(add_help=False)
     parser.add_argument("--phase", required=True, choices=PHASES)
+    parser.add_argument("--lane", required=True, choices=("alert", "research"))
+    parser.add_argument("--budget-seconds", type=int, default=240)
     parser.add_argument("--market-date")
     parser.add_argument("--now")
     parser.add_argument("--context-file")
@@ -120,13 +134,33 @@ def _market_date(value: str | None, now: datetime) -> date:
     return date.fromisoformat(value) if value else now.date()
 
 
-def _adapters(policy, now: datetime):
+class _DeadlineHttpClient:
+    def __init__(self, client: BoundedHttpClient, budget: CollectionBudget) -> None:
+        self._client = client
+        self._budget = budget
+
+    def get(self, request, **kwargs):
+        timeout = self._budget.remaining_seconds(request.timeout_seconds)
+        return self._client.get(replace(request, timeout_seconds=timeout), **kwargs)
+
+    def __getattr__(self, name):
+        return getattr(self._client, name)
+
+
+def _adapters(
+    policy,
+    now: datetime,
+    budget: CollectionBudget | None = None,
+):
     adapters = []
     empty_quota = QuotaSession({provider: () for provider in policy.providers})
     for provider in policy.providers:
+        client = BoundedHttpClient(
+            allowed_hosts=_provider_hosts(provider), clock=lambda: now,
+        )
         adapter = build_adapter(
             provider,
-            BoundedHttpClient(allowed_hosts=_provider_hosts(provider)),
+            _DeadlineHttpClient(client, budget) if budget is not None else client,
             empty_quota,
             clock=lambda: now,
         )
@@ -181,12 +215,26 @@ def main(
     errors = stderr or sys.stderr
     try:
         args = _parser().parse_args(argv)
+        if not 1 <= args.budget_seconds <= 240:
+            raise ValueError("budget seconds must be between 1 and 240")
+        expected_lane = "research" if args.phase == "on-demand" else "alert"
+        if args.lane != expected_lane:
+            raise ValueError("lane does not match phase")
         if not args.dry_run and not args.run_id:
             raise ValueError("scheduled collection requires run id")
+        budget = CollectionBudget(
+            deadline=time.monotonic() + args.budget_seconds,
+            request_limit=8 if args.lane == "alert" else None,
+            monotonic=time.monotonic,
+        )
         now = _now(args.now)
         request = PipelineRequest(
-            args.phase, _market_date(args.market_date, now), now, args.dry_run,
-            args.run_id or "00000000-0000-4000-8000-000000000000",
+            phase=args.phase,
+            market_date=_market_date(args.market_date, now),
+            now=now,
+            dry_run=args.dry_run,
+            request_id=args.run_id or "00000000-0000-4000-8000-000000000000",
+            lane=args.lane,
         )
         context = _context(args.context_file)
         if args.dry_run:
@@ -198,9 +246,11 @@ def main(
             # obtains holdings and every ranking value from the protected reader.
             context = protected_collection_context(data["context"])
             policy = load_intelligence_policy(load_settings())
-            discovery_supported = callable(getattr(gateway, "call", None)) or (
-                callable(getattr(gateway, "read_discovery_context", None))
-                and callable(getattr(gateway, "checkpoint_discovery_stage", None))
+            gateway_client = DeadlineGateway(gateway, budget) \
+                if callable(getattr(gateway, "call", None)) else gateway
+            discovery_supported = callable(getattr(gateway_client, "call", None)) or (
+                callable(getattr(gateway_client, "read_discovery_context", None))
+                and callable(getattr(gateway_client, "checkpoint_discovery_stage", None))
             )
             planned = {
                 "discovery_plan": _build_capability_plan(policy, context, request),
@@ -208,17 +258,39 @@ def main(
             } if discovery_supported else {}
             installed_reference: dict[str, ReferenceSnapshot] = {}
 
+            def reuse_protected_reference(run_id, pipeline_request):
+                try:
+                    reference_coverage, reference_snapshot = _reuse_protected_reference_stage(
+                        gateway_client,
+                        run_id,
+                        pipeline_request.now,
+                        budget=budget,
+                    )
+                except (gateway.GatewayError, TimeoutError):
+                    reference_coverage, reference_snapshot = ({
+                        "coverage_status": "scope_not_guaranteed",
+                        "reference_status": "reference_unavailable",
+                        "reference_manifest_id": None,
+                        "reference_age_seconds": None,
+                        "execution_allowed": False,
+                    }, None)
+                if reference_snapshot is not None:
+                    installed_reference[run_id] = reference_snapshot
+                return reference_coverage, reference_snapshot
+
             def persist_reference(run_id, pipeline_request):
                 return _persist_reference_stage(
-                    gateway, run_id, pipeline_request.now,
+                    gateway_client, run_id, pipeline_request.now,
+                    budget=budget,
                     snapshot_sink=lambda snapshot: installed_reference.__setitem__(run_id, snapshot),
                 )
 
             def recover_reference(run_id, pipeline_request):
                 return _recover_reference_stage(
-                    gateway,
+                    gateway_client,
                     run_id,
                     pipeline_request.now,
+                    budget=budget,
                     snapshot_sink=lambda snapshot: installed_reference.__setitem__(
                         run_id, snapshot
                     ),
@@ -226,20 +298,23 @@ def main(
 
             def hydrate_reference(run_id):
                 return installed_reference.get(run_id) or _read_current_reference_snapshot(
-                    gateway, run_id,
+                    gateway_client, run_id, budget=budget,
                 )
 
             pipeline = IntelligencePipeline(
-                gateway, _adapters(policy, now), context=context, packet_limits=policy.packet,
+                gateway_client, _adapters(policy, now, budget), context=context,
+                packet_limits=policy.packet,
                 **planned,
                 reference_stage=persist_reference
-                if callable(getattr(gateway, "call", None)) else None,
+                if request.lane == "research" and callable(getattr(gateway_client, "call", None)) else None,
                 reference_recovery_stage=recover_reference
-                if callable(getattr(gateway, "call", None)) else None,
+                if request.lane == "research" and callable(getattr(gateway_client, "call", None)) else None,
                 reference_snapshot_loader=hydrate_reference
-                if callable(getattr(gateway, "call", None)) else None,
+                if callable(getattr(gateway_client, "call", None)) else None,
+                protected_reference_stage=reuse_protected_reference
+                if request.lane == "alert" and callable(getattr(gateway_client, "call", None)) else None,
             )
-        result = pipeline.run(request)
+        result = pipeline.run_slice(request, budget)
         output.write(result.to_json_bytes().decode("utf-8") + "\n")
         return 0
     except (SystemExit, TypeError, ValueError) as error:
@@ -374,20 +449,113 @@ def _build_capability_plan(policy, context: dict[str, object], request: Pipeline
         "post-market": timedelta(hours=12),
         "on-demand": timedelta(days=2),
     }[request.phase]
+    requested_window = {
+        "start": (request.now - duration).astimezone(timezone.utc).isoformat(),
+        "end": request.now.astimezone(timezone.utc).isoformat(),
+    }
+    if request.lane == "alert":
+        priority_themes = _alert_priority_themes(context, policy.seed_domains)
+        targets = _alert_quote_targets(context)
+        quote_capacity = max(0, 8 - 1 - len(priority_themes))
+        context["alert_quote_targets"] = targets[:quote_capacity]
+        context["action_quote_tickers"] = tuple(sorted(
+            set(_holding_symbols(context))
+            | set(_plan_symbols(context))
+            | set(_candidate_symbols(context))
+        ))
+        return build_alert_discovery_plan(
+            policy,
+            capabilities,
+            phase=request.phase,
+            run_id=request.request_id,
+            reference_version=reference_version,
+            requested_window=requested_window,
+            priority_theme_ids=priority_themes,
+            required_quote_requests=len(context["alert_quote_targets"]),
+        )
     return build_discovery_plan(
         policy,
         capabilities,
         phase=request.phase,
         run_id=request.request_id,
         reference_version=reference_version,
-        requested_window={
-            "start": (request.now - duration).astimezone(timezone.utc).isoformat(),
-            "end": request.now.astimezone(timezone.utc).isoformat(),
-        },
+        requested_window=requested_window,
         available_credentials=available_credentials,
         required_holding_quote_requests=0,
         last_completed_scans=_last_completed_scans(context, cursors),
     )
+
+
+def _holding_symbols(context: dict[str, object]) -> tuple[str, ...]:
+    rows = context.get("holdings", [])
+    if not isinstance(rows, list):
+        return ()
+    return tuple(sorted({
+        str(row["ticker"]).upper()
+        for row in rows
+        if isinstance(row, dict)
+        and isinstance(row.get("ticker"), str)
+        and re.fullmatch(r"[A-Z][A-Z0-9.-]{0,14}", str(row["ticker"]).upper())
+    }))
+
+
+def _plan_symbols(context: dict[str, object]) -> tuple[str, ...]:
+    rows = context.get("owner_plans", [])
+    if not isinstance(rows, list):
+        return ()
+    return tuple(sorted({
+        str(row["ticker"]).upper()
+        for row in rows
+        if isinstance(row, dict)
+        and isinstance(row.get("ticker"), str)
+        and re.fullmatch(r"[A-Z][A-Z0-9.-]{0,14}", str(row["ticker"]).upper())
+    }))
+
+
+def _alert_quote_targets(context: dict[str, object]) -> tuple[str, ...]:
+    prioritized = (
+        *_holding_symbols(context),
+        *_plan_symbols(context),
+        *_candidate_symbols(context),
+        "SPY", "QQQ", "IWM",
+    )
+    return tuple(dict.fromkeys(prioritized))
+
+
+def _candidate_symbols(context: dict[str, object]) -> tuple[str, ...]:
+    output: set[str] = set()
+    for key in ("recent_suggestions", "qualified_candidates"):
+        rows = context.get(key, [])
+        if not isinstance(rows, list):
+            continue
+        for row in rows:
+            value = row.get("ticker") if isinstance(row, dict) else row
+            if isinstance(value, str) and re.fullmatch(
+                r"[A-Z][A-Z0-9.-]{0,14}", value.upper()
+            ):
+                output.add(value.upper())
+    return tuple(sorted(output))
+
+
+def _alert_priority_themes(
+    context: dict[str, object],
+    approved: Sequence[str],
+) -> tuple[str, ...]:
+    allowed = set(approved)
+    memory = context.get("theme_memory")
+    if not isinstance(memory, dict):
+        return ()
+    values: list[str] = []
+    for key in ("due_nominations", "high_materiality_themes"):
+        rows = memory.get(key, [])
+        if not isinstance(rows, list):
+            continue
+        values.extend(
+            str(row["theme_id"])
+            for row in rows
+            if isinstance(row, dict) and row.get("theme_id") in allowed
+        )
+    return tuple(sorted(dict.fromkeys(values)))[:2]
 
 
 def _security_from_reference_row(value: object) -> SecurityIdentity:
@@ -437,9 +605,12 @@ def _persist_reference_stage(
     monotonic=time.monotonic,
     sec_contact=None,
     snapshot_sink=None,
+    budget: CollectionBudget | None = None,
 ) -> dict[str, object]:
     """Refresh and bind one complete SEC snapshot inside explicit aggregate bounds."""
     http = client or BoundedHttpClient(allowed_hosts={"www.sec.gov"}, clock=lambda: now)
+    if budget is not None:
+        http = _DeadlineHttpClient(http, budget)
     started = monotonic()
     call_count = 0
     byte_count = 0
@@ -464,6 +635,8 @@ def _persist_reference_stage(
             raise ValueError("reference transfer call exceeds gateway bound")
         maximum_attempts = 2 if operation == "record_discovery_reference_chunk" else 1
         for attempt in range(maximum_attempts):
+            if budget is not None and not budget.can_start():
+                raise TimeoutError("collection deadline reached")
             elapsed = monotonic() - started
             if (
                 call_count + 1 > MAX_REFERENCE_TRANSFER_CALLS
@@ -501,6 +674,8 @@ def _persist_reference_stage(
             raise ValueError("reference gateway receipt is invalid")
         return data
 
+    if budget is not None and not budget.can_start():
+        raise TimeoutError("collection deadline reached")
     refreshed = refresh_sec_reference(
         http,
         contact=(
@@ -525,10 +700,13 @@ def _persist_reference_stage(
         if error.code != "PERSISTENCE_FAILED":
             raise
         try:
+            recovery_options = {"monotonic": monotonic}
+            if budget is not None:
+                recovery_options["budget"] = budget
             coverage, recovered_snapshot = _read_current_reference_binding(
                 gateway_client,
                 run_id,
-                monotonic=monotonic,
+                **recovery_options,
             )
         except gateway.GatewayError as current_error:
             if current_error.code != "PERSISTENCE_FAILED":
@@ -717,13 +895,55 @@ def _persist_reference_stage(
     return coverage
 
 
+def _reuse_protected_reference_stage(
+    gateway_client,
+    run_id: str,
+    now: datetime,
+    *,
+    budget: CollectionBudget | None = None,
+) -> tuple[dict[str, object], ReferenceSnapshot | None]:
+    """Pin and hydrate a prior protected snapshot without contacting SEC."""
+    if budget is not None and not budget.can_start():
+        raise TimeoutError("collection deadline reached")
+    reference_as_of = now.astimezone(timezone.utc).isoformat(
+        timespec="milliseconds"
+    ).replace("+00:00", "Z")
+    payload = {
+        "capability_id": _REFERENCE_CAPABILITY,
+        "binding_role": "predecessor",
+        "manifest_id": None,
+        "reference_status": "reference_stale",
+        "reference_as_of": reference_as_of,
+    }
+    request_id = _reference_request_id(run_id, "pin_discovery_reference", payload)
+    result = gateway_client.call(
+        "pin_discovery_reference",
+        payload,
+        run_id=run_id,
+        request_id=request_id,
+    )
+    data = result.get("data", result) if isinstance(result, dict) else None
+    if not isinstance(data, dict) or data.get("binding_role") != "predecessor":
+        raise ValueError("reference predecessor pin receipt is invalid")
+    return _read_current_reference_binding(
+        gateway_client,
+        run_id,
+        binding_role="predecessor",
+        budget=budget,
+    )
+
+
 def _read_current_reference_binding(
     gateway_client,
     run_id: str,
     *,
     monotonic=time.monotonic,
+    budget: CollectionBudget | None = None,
+    binding_role: str = "current",
 ) -> tuple[dict[str, object], ReferenceSnapshot | None]:
     """Read the durable current pin and its snapshot without contacting SEC."""
+    if binding_role not in {"current", "predecessor"}:
+        raise ValueError("reference binding role is invalid")
     started = monotonic()
     call_count = 0
     request_bytes = 0
@@ -733,9 +953,11 @@ def _read_current_reference_binding(
     pinned_binding = None
     rows: list[dict[str, object]] = []
     while True:
+        if budget is not None and not budget.can_start():
+            raise TimeoutError("collection deadline reached")
         payload = {
             "capability_id": _REFERENCE_CAPABILITY,
-            "binding_role": "current",
+            "binding_role": binding_role,
             "after_security_id": after,
             "limit": 500,
         }
@@ -776,7 +998,7 @@ def _read_current_reference_binding(
             raise ValueError("current reference page is invalid")
         binding = page.get("binding")
         page_rows = page.get("securities")
-        if not isinstance(binding, dict) or binding.get("binding_role") != "current" \
+        if not isinstance(binding, dict) or binding.get("binding_role") != binding_role \
                 or not isinstance(page_rows, list):
             raise ValueError("current reference page is invalid")
         binding_identity = {
@@ -861,10 +1083,11 @@ def _read_current_reference_snapshot(
     run_id: str,
     *,
     monotonic=time.monotonic,
+    budget: CollectionBudget | None = None,
 ) -> ReferenceSnapshot | None:
     """Hydrate the already-pinned snapshot on restart without an SEC request."""
     return _read_current_reference_binding(
-        gateway_client, run_id, monotonic=monotonic,
+        gateway_client, run_id, monotonic=monotonic, budget=budget,
     )[1]
 
 
@@ -877,11 +1100,12 @@ def _recover_reference_stage(
     monotonic=time.monotonic,
     sec_contact=None,
     snapshot_sink=None,
+    budget: CollectionBudget | None = None,
 ) -> dict[str, object]:
     """Recover a current pin or rebuild once when no current pin was created."""
     try:
         coverage, snapshot = _read_current_reference_binding(
-            gateway_client, run_id, monotonic=monotonic,
+            gateway_client, run_id, monotonic=monotonic, budget=budget,
         )
     except gateway.GatewayError as error:
         if error.code != "PERSISTENCE_FAILED":
@@ -894,6 +1118,7 @@ def _recover_reference_stage(
             monotonic=monotonic,
             sec_contact=sec_contact,
             snapshot_sink=snapshot_sink,
+            budget=budget,
         )
     if snapshot is not None and callable(snapshot_sink):
         snapshot_sink(snapshot)

@@ -63,3 +63,17 @@ def test_production_v1_verification_uploads_safe_diagnostic_when_run_is_nontermi
     final_upload = raw.index("Upload immutable V1 verification receipt")
     assert diagnostic_upload < final_upload
     assert "if: always()" in raw[diagnostic_upload:final_upload]
+
+
+def test_production_v1_verification_requires_alert_and_later_research_receipts():
+    raw = Path(".github/workflows/production-v1-verification.yml").read_text()
+
+    for field in (
+        ".alert_lane_terminal",
+        ".alert_publication_status",
+        ".telegram_message_ids",
+        ".telegram_attempt_count",
+        ".research_lane_progressed_after_alert",
+        ".research_remaining_tasks",
+    ):
+        assert field in raw
