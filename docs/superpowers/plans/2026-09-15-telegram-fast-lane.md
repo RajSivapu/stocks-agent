@@ -420,13 +420,13 @@ git commit -m "docs: close telegram fast-lane implementation checklist"
 - Produces: protected main commit, exact-main green CI, deployed backend runtime SHA, read-only attestation, and a later normal scheduled receipt.
 - Consumes: all commits from Tasks 1-7 and the repository's existing protected release process.
 
-- [ ] **Step 1: Rebase on current origin/main and rerun full verification**
+- [x] **Step 1: Rebase on current origin/main and rerun full verification**
 
 Run: `git fetch origin && git rebase origin/main && npm run test:all`
 
 Expected: clean rebase and full PASS.
 
-- [ ] **Step 2: Review the complete branch diff**
+- [x] **Step 2: Review the complete branch diff**
 
 Run: `git diff --check && git diff --stat origin/main...HEAD && git log --oneline origin/main..HEAD`
 

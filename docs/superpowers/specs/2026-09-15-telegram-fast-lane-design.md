@@ -1,7 +1,7 @@
 # Reliable Telegram Alert and Resumable Research Design
 
-**Date:** 2026-09-15  
-**Status:** Approved for implementation  
+**Date:** 2026-09-15
+**Status:** Approved for implementation
 **Product boundary:** Owner-only, suggestion-only, zero incremental cost
 
 ## Problem
