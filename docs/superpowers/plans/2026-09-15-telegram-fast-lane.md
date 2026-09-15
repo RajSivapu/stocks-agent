@@ -326,25 +326,25 @@ git commit -m "fix: publish useful status-only daily briefs"
 - Produces routine sequence: reconcile/start scheduled alert run; collect alert lane; evaluate; record canonical report; deliver/reconcile; finish alert run; start/resume one on-demand research slice; exit.
 - Consumes: collector CLI from Task 4, current gateway operations, publication receipt states, and scheduled run IDs.
 
-- [ ] **Step 1: Write failing routine contract tests**
+- [x] **Step 1: Write failing routine contract tests**
 
 Assert each normal phase prompt places alert collection and its terminal publication before research, never calls the old full-collector wait/restart path, uses `--lane alert --budget-seconds 240`, uses `--lane research --budget-seconds 240` only after alert terminal state, skips research on holidays, and treats research `paused` as a clean bounded result.
 
-- [ ] **Step 2: Run the focused routine tests**
+- [x] **Step 2: Run the focused routine tests**
 
 Run: `.venv/bin/python -m pytest tests/test_owner_intelligence_contract.py tests/test_wait_market_intelligence.py -q`
 
 Expected: FAIL because the current routine still starts/waits/restarts the full collector before Telegram.
 
-- [ ] **Step 3: Rewrite the routine contract**
+- [x] **Step 3: Rewrite the routine contract**
 
 Remove the six-minute blocking wait and same-run full-collector restart from normal execution. Specify exact receipt checks for each alert step, explicit terminal transport handling, no duplicate resend, and a best-effort research slice that cannot change the completed alert outcome.
 
-- [ ] **Step 4: Update operator documentation**
+- [x] **Step 4: Update operator documentation**
 
 Document the two lanes, budgets, pause semantics, manual diagnostic procedure, and normal-schedule-only production acceptance. State that `planned` research work is resumable backlog and is not an alert-delivery failure.
 
-- [ ] **Step 5: Run the focused routine tests**
+- [x] **Step 5: Run the focused routine tests**
 
 Run: `.venv/bin/python -m pytest tests/test_owner_intelligence_contract.py tests/test_wait_market_intelligence.py -q`
 
