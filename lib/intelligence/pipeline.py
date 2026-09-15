@@ -10,7 +10,9 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from datetime import date, datetime, time, timedelta, timezone
 from decimal import Decimal
+from time import monotonic as default_monotonic
 from types import MappingProxyType
+from typing import Callable, Literal
 from zoneinfo import ZoneInfo
 
 from lib.gateway import GatewayError
@@ -81,6 +83,46 @@ from lib.intelligence.themes import (
     select_dynamic_theme_evidence,
     theme_episode_revision_from_persistence,
 )
+
+
+Lane = Literal["alert", "research"]
+
+
+@dataclass(slots=True)
+class CollectionBudget:
+    deadline: float | None
+    request_limit: int | None
+    stop_margin_seconds: float = 30.0
+    monotonic: Callable[[], float] = default_monotonic
+    requests_started: int = 0
+
+    def __post_init__(self) -> None:
+        if self.deadline is not None and self.deadline < 0:
+            raise ValueError("deadline must be nonnegative")
+        if self.request_limit is not None and self.request_limit < 0:
+            raise ValueError("request limit must be nonnegative")
+        if self.stop_margin_seconds < 0:
+            raise ValueError("stop margin must be nonnegative")
+        if self.requests_started < 0:
+            raise ValueError("requests started must be nonnegative")
+
+    def can_start(self, required_requests: int = 1) -> bool:
+        if required_requests < 1:
+            raise ValueError("required requests must be positive")
+        within_requests = self.request_limit is None or (
+            self.requests_started + required_requests <= self.request_limit
+        )
+        within_time = self.deadline is None or (
+            self.monotonic() < self.deadline - self.stop_margin_seconds
+        )
+        return within_requests and within_time
+
+    def record(self, requests: int) -> None:
+        if requests < 1:
+            raise ValueError("requests must be positive")
+        if self.request_limit is not None and self.requests_started + requests > self.request_limit:
+            raise ValueError("request limit exceeded")
+        self.requests_started += requests
 from lib.intelligence.types import DiscoveryPlan, DiscoveryTask, PacketLimits, SourceCapability
 from lib.intelligence.universe import ReferenceSnapshot, SecurityIdentity
 
@@ -209,6 +251,7 @@ class PipelineRequest:
     now: datetime
     dry_run: bool = False
     request_id: str = field(default_factory=lambda: str(uuid.uuid4()))
+    lane: Lane = "research"
 
     def __post_init__(self) -> None:
         if self.phase not in PHASES:
@@ -218,6 +261,8 @@ class PipelineRequest:
         _utc(self.now)
         if not isinstance(self.dry_run, bool):
             raise ValueError("dry_run must be boolean")
+        if self.lane not in {"alert", "research"}:
+            raise ValueError("lane must be alert or research")
         try:
             if str(uuid.UUID(self.request_id)) != self.request_id:
                 raise ValueError
@@ -248,6 +293,7 @@ class PipelineRequest:
             if request_counts[provider]
         ]
         return {
+            "lane": self.lane,
             "phase": self.phase,
             "market_date": self.market_date.isoformat(),
             "policy_version": _policy_version(policy_version),

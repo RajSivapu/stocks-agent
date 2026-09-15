@@ -42,7 +42,7 @@
 - Produces: `build_alert_discovery_plan(..., priority_theme_ids: Sequence[str]) -> DiscoveryPlan`, containing only Yahoo quote work, one general GDELT task, and at most two deterministic priority-theme GDELT tasks, with no SEC reference task and at most eight requests.
 - Consumes: existing `DiscoveryPlan`, `DiscoveryTask`, capability registry, policy budgets, source cursors, and protected reference version.
 
-- [ ] **Step 1: Write failing request and budget tests**
+- [x] **Step 1: Write failing request and budget tests**
 
 Add tests that construct both valid lanes, reject any other lane, advance a fake monotonic clock into the 30-second stop margin, and prove `can_start()` becomes false before an optional request begins. Add a test proving the counter rejects a ninth alert request.
 
@@ -56,13 +56,13 @@ budget = CollectionBudget(deadline=210.0, request_limit=8, monotonic=lambda: 181
 assert budget.can_start() is False
 ```
 
-- [ ] **Step 2: Run the focused tests and confirm the new types are absent**
+- [x] **Step 2: Run the focused tests and confirm the new types are absent**
 
 Run: `.venv/bin/python -m pytest tests/test_intelligence_pipeline.py tests/test_intelligence_planner.py -q`
 
 Expected: FAIL because `PipelineRequest` has no `lane`, `CollectionBudget` is missing, and `build_alert_discovery_plan` is missing.
 
-- [ ] **Step 3: Add the lane and budget types**
+- [x] **Step 3: Add the lane and budget types**
 
 Add a validated `lane` field defaulting to `research` for backward-compatible direct callers. Implement `CollectionBudget` with an injected monotonic clock, nonnegative counters, exact request ceilings, and the 30-second stop margin. Thread the lane through `PipelineRequest.collection_plan()` as a top-level `lane` field.
 
@@ -83,17 +83,17 @@ class CollectionBudget:
         return within_requests and within_time
 ```
 
-- [ ] **Step 4: Add the bounded alert planner**
+- [x] **Step 4: Add the bounded alert planner**
 
 Build the alert plan from enabled Yahoo and GDELT capabilities only. Sort priority themes by normalized theme ID, take two, reserve no adaptive enrichment, reserve only the quote count needed by the protected context, and raise if the resulting request count exceeds eight. The research planner remains `build_discovery_plan()` with its existing behavior.
 
-- [ ] **Step 5: Run focused tests**
+- [x] **Step 5: Run focused tests**
 
 Run: `.venv/bin/python -m pytest tests/test_intelligence_pipeline.py tests/test_intelligence_planner.py -q`
 
 Expected: PASS.
 
-- [ ] **Step 6: Commit the domain boundary**
+- [x] **Step 6: Commit the domain boundary**
 
 ```bash
 git add lib/intelligence/pipeline.py lib/intelligence/planner.py tests/test_intelligence_pipeline.py tests/test_intelligence_planner.py

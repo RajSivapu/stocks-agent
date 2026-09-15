@@ -10,6 +10,7 @@ import pytest
 from lib.config import load_settings
 from lib.intelligence.planner import (
     bind_persisted_reference_task,
+    build_alert_discovery_plan,
     build_discovery_plan,
     load_source_capabilities,
     rebind_discovery_plan_window,
@@ -39,6 +40,53 @@ def _plan(*, credentials=frozenset(), holding_quotes=0, scans=None):
         required_holding_quote_requests=holding_quotes,
         last_completed_scans=scans or {},
     )
+
+
+def test_alert_plan_is_small_deterministic_and_never_refreshes_reference():
+    policy = load_intelligence_policy(load_settings())
+    capabilities = load_source_capabilities()
+    kwargs = {
+        "phase": "pre-market",
+        "run_id": RUN_ID,
+        "reference_version": "sec:fixture-v1",
+        "requested_window": WINDOW,
+        "priority_theme_ids": [
+            "energy_nuclear_and_grid_infrastructure",
+            "critical_minerals_and_magnets",
+            "technology_ai_and_semiconductors",
+        ],
+        "required_quote_requests": 5,
+    }
+
+    first = build_alert_discovery_plan(policy, capabilities, **kwargs)
+    second = build_alert_discovery_plan(policy, capabilities, **kwargs)
+
+    assert first == second
+    assert first.reserved_holding_quote_requests == 5
+    assert first.reserved_adaptive_requests == 0
+    assert len(first.tasks) == 3
+    assert sum(first.provider_request_totals.values()) + first.reserved_holding_quote_requests == 8
+    assert all(task.provider == "gdelt" and task.stage == "signals" for task in first.tasks)
+    assert all(task.capability_id != "sec_company_tickers_universe" for task in first.tasks)
+    assert [task.theme_id for task in first.tasks] == [
+        None,
+        "critical_minerals_and_magnets",
+        "energy_nuclear_and_grid_infrastructure",
+    ]
+
+
+def test_alert_plan_rejects_more_than_eight_live_requests():
+    with pytest.raises(ValueError, match="eight"):
+        build_alert_discovery_plan(
+            load_intelligence_policy(load_settings()),
+            load_source_capabilities(),
+            phase="pre-market",
+            run_id=RUN_ID,
+            reference_version="sec:fixture-v1",
+            requested_window=WINDOW,
+            priority_theme_ids=["energy_nuclear_and_grid_infrastructure"],
+            required_quote_requests=7,
+        )
 
 
 def _write_source_config(tmp_path, mutate):

@@ -11,6 +11,7 @@ from datetime import date, datetime, timedelta, timezone
 from types import MappingProxyType
 
 from lib.intelligence.pipeline import (
+    CollectionBudget,
     IntelligencePipeline,
     PipelineRequest,
     _discover,
@@ -67,6 +68,39 @@ def request(phase: str, *, dry_run: bool = False) -> PipelineRequest:
         phase=phase, market_date=date(2026, 9, 4), now=NOW,
         dry_run=dry_run, request_id=RUN_ID,
     )
+
+
+def test_pipeline_request_binds_lane_into_the_durable_start_payload():
+    alert = replace(request("pre-market"), lane="alert")
+    research = request("on-demand")
+
+    assert alert.collection_plan(["gdelt"], ["macro_policy"])["lane"] == "alert"
+    assert research.lane == "research"
+    with pytest.raises(ValueError, match="lane"):
+        replace(alert, lane="other")
+
+
+def test_collection_budget_stops_before_margin_and_at_request_ceiling():
+    elapsed = [0.0]
+    budget = CollectionBudget(
+        deadline=210.0,
+        request_limit=8,
+        monotonic=lambda: elapsed[0],
+    )
+
+    assert budget.can_start()
+    budget.record(8)
+    assert not budget.can_start()
+    with pytest.raises(ValueError, match="request limit"):
+        budget.record(1)
+
+    timed = CollectionBudget(
+        deadline=210.0,
+        request_limit=8,
+        monotonic=lambda: elapsed[0],
+    )
+    elapsed[0] = 180.0
+    assert not timed.can_start()
 
 
 def raw_item(domain: str, *, provider: str = "gdelt", official: bool = False) -> SourceItem:
