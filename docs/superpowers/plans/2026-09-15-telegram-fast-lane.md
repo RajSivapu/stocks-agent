@@ -350,7 +350,7 @@ Run: `.venv/bin/python -m pytest tests/test_owner_intelligence_contract.py tests
 
 Expected: PASS.
 
-- [ ] **Step 6: Commit the routine switch**
+- [x] **Step 6: Commit the routine switch**
 
 ```bash
 git add skills/market-briefing/SKILL.md routines/README.md tests/test_owner_intelligence_contract.py tests/test_wait_market_intelligence.py
@@ -371,37 +371,37 @@ git commit -m "fix: run scheduled alerts before research"
 - Produces canonical V1 checklist language that remains pending until a normal scheduled receipt proves the deployed behavior.
 - Consumes: protected release manifest, live read-only gateway, exact-main workflow SHA, report/publication chain, and research task checkpoints.
 
-- [ ] **Step 1: Write failing verifier tests**
+- [x] **Step 1: Write failing verifier tests**
 
 Add fixtures for: a delivered alert with one original Telegram message ID and later research progress; a status-only delivered alert; a research run that attempts publication; a duplicate Telegram attempt; an alert with no packet; and a completed alert followed by paused research. Assert only the first, second, and last shapes pass their applicable checks.
 
-- [ ] **Step 2: Run focused verifier tests**
+- [x] **Step 2: Run focused verifier tests**
 
 Run: `.venv/bin/python -m pytest tests/test_verify_personal_stock_agent_v1.py tests/test_production_v1_verification_workflow.py -q`
 
 Expected: FAIL because verifier output does not yet expose lane and nonblocking research evidence.
 
-- [ ] **Step 3: Add verifier checks and compact diagnostics**
+- [x] **Step 3: Add verifier checks and compact diagnostics**
 
 Report `alert_lane_terminal`, `alert_publication_status`, `telegram_message_ids`, `telegram_attempt_count`, `research_lane_progressed_after_alert`, and `research_remaining_tasks`. Fail closed on lane mismatch, publication from research, duplicate attempts, packet/report hash mismatch, or an absent expected-publication outcome.
 
-- [ ] **Step 4: Update status and roadmap**
+- [x] **Step 4: Update status and roadmap**
 
 Record the final architecture, completed local checks, release SHA fields, and the one remaining production acceptance item: a normal scheduled pre-market/post-market receipt plus later research progress. Do not mark V1 complete in the document until those receipts exist.
 
-- [ ] **Step 5: Run focused verifier tests**
+- [x] **Step 5: Run focused verifier tests**
 
 Run: `.venv/bin/python -m pytest tests/test_verify_personal_stock_agent_v1.py tests/test_production_v1_verification_workflow.py -q`
 
 Expected: PASS.
 
-- [ ] **Step 6: Run complete local verification**
+- [x] **Step 6: Run complete local verification**
 
 Run: `npm run test:all`
 
 Expected: every Python, Deno, Node, Playwright, typecheck, lint, license, runtime-bundle, and build check passes.
 
-- [ ] **Step 7: Commit release verification**
+- [x] **Step 7: Commit release verification**
 
 ```bash
 git add scripts/verify_personal_stock_agent_v1.py tests/test_verify_personal_stock_agent_v1.py tests/test_production_v1_verification_workflow.py PROJECT_STATUS.md docs/ROADMAP.md

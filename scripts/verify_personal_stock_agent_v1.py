@@ -2289,6 +2289,124 @@ def report_identity(kind: str, market_date: str, packet_hash: str, report_hash: 
     return key, f"{key[:8]}-{key[8:12]}-5{key[13:16]}-8{key[17:20]}-{key[20:32]}"
 
 
+def verify_later_research(
+    rows: Mapping,
+    *,
+    alert_finished_at: datetime,
+    now: datetime,
+) -> dict[str, object]:
+    """Verify one bounded research slice that started after the alert became terminal."""
+    research = one(rows.get("research_runs"), "later research run")
+    run_id = str(research.get("id") or "")
+    started = timestamp(research.get("started_at"))
+    require(
+        UUID.fullmatch(run_id) is not None
+        and research.get("kind") == "on-demand"
+        and research.get("phase") == "on-demand"
+        and research.get("lane") == "research"
+        and research.get("status") in {"running", "completed"}
+        and alert_finished_at < started <= now,
+        "later research lane identity or ordering mismatch",
+    )
+
+    requests = rows.get("research_requests")
+    require(isinstance(requests, list), "later research requests are malformed")
+    forbidden = {"evaluate_and_publish", "record_report", "finish_run"}
+    for request in requests:
+        require(
+            isinstance(request, Mapping)
+            and request.get("run_id") == run_id
+            and UUID.fullmatch(str(request.get("request_id") or "")) is not None
+            and isinstance(request.get("operation"), str)
+            and type(request.get("attempt_count")) is int
+            and request["attempt_count"] >= 1,
+            "later research request evidence is malformed",
+        )
+        require(
+            request["operation"] not in forbidden,
+            "research lane attempted to publish or finish",
+        )
+    for key in (
+        "research_reports",
+        "research_publications",
+        "research_evaluation_publications",
+    ):
+        require(rows.get(key) == [], "research lane attempted to publish")
+
+    tasks = rows.get("research_tasks")
+    require(isinstance(tasks, list) and tasks, "later research task evidence is missing")
+    allowed_states = {"planned", "attempting", "succeeded", "failed", "deferred", "uncertain"}
+    task_ids: set[str] = set()
+    progressed = 0
+    remaining = 0
+    for task in tasks:
+        task_id = str(task.get("id") or "") if isinstance(task, Mapping) else ""
+        state = task.get("state") if isinstance(task, Mapping) else None
+        attempt_count = task.get("attempt_count") if isinstance(task, Mapping) else None
+        require(
+            isinstance(task, Mapping)
+            and UUID.fullmatch(task_id) is not None
+            and task_id not in task_ids
+            and task.get("run_id") == run_id
+            and state in allowed_states
+            and type(attempt_count) is int
+            and attempt_count >= 0,
+            "later research task evidence is malformed",
+        )
+        task_ids.add(task_id)
+        progressed += int(state != "planned")
+        remaining += int(state in {"planned", "attempting"})
+    require(progressed > 0, "later research lane has not progressed after alert")
+
+    events = rows.get("research_events")
+    completions = rows.get("research_completions")
+    packets = rows.get("research_packets")
+    require(
+        isinstance(events, list) and isinstance(completions, list)
+        and isinstance(packets, list),
+        "later research terminal evidence is malformed",
+    )
+    if research["status"] == "completed":
+        finished = timestamp(research.get("finished_at"))
+        completion = one(completions, "later research collection")
+        packet = one(packets, "later research packet")
+        require(
+            started <= finished <= now and remaining == 0
+            and completion.get("run_id") == run_id
+            and UUID.fullmatch(str(completion.get("completion_id") or "")) is not None
+            and any(
+                isinstance(event, Mapping)
+                and event.get("id") == completion["completion_id"]
+                and event.get("run_id") == run_id
+                and event.get("status") == "completed"
+                for event in events
+            )
+            and packet.get("run_id") == run_id
+            and UUID.fullmatch(str(packet.get("id") or "")) is not None
+            and sha256(canonical_json(packet.get("packet")).encode())
+                == packet.get("packet_hash")
+            and isinstance(completion.get("receipt"), Mapping)
+            and completion["receipt"].get("packet_id") == packet["id"]
+            and completion["receipt"].get("packet_hash") == packet["packet_hash"],
+            "completed research packet receipt is incomplete or mismatched",
+        )
+    else:
+        require(
+            research.get("finished_at") is None and remaining > 0
+            and completions == [] and packets == []
+            and not any(
+                isinstance(event, Mapping) and event.get("status") == "completed"
+                for event in events
+            ),
+            "paused research state is not cleanly resumable",
+        )
+
+    return {
+        "research_lane_progressed_after_alert": True,
+        "research_remaining_tasks": remaining,
+    }
+
+
 def verify_scheduled(rows: Mapping, run_id: str, deployed: datetime, now: datetime) -> dict:
     run = one(rows["run"], "run")
     intelligence = one(rows["intelligence_runs"], "intelligence run")
@@ -2296,6 +2414,7 @@ def verify_scheduled(rows: Mapping, run_id: str, deployed: datetime, now: dateti
     phase, market_date = run["scheduled_phase"], run["scheduled_market_date"]
     start, end = timestamp(run["started_at"]), timestamp(run["finished_at"])
     require(phase in {"pre-market", "intraday", "post-market"} and run["kind"] == intelligence["phase"] == phase
+            and intelligence.get("lane") == "alert"
             and intelligence["market_date"] == market_date and run["status"] in {"completed", "suppressed"}
             and deployed < start <= end <= now and (now - end).total_seconds() <= MAX_SCHEDULED_RECEIPT_AGE_SECONDS, "scheduled receipt is stale, future, or not postdeployment")
     requests = rows["requests"]
@@ -2364,6 +2483,9 @@ def verify_scheduled(rows: Mapping, run_id: str, deployed: datetime, now: dateti
             for row in rows["quota"]
         ), "scheduled quota receipts are incomplete")
         capability = verify_discovery_capability(rows)
+        research_receipt = verify_later_research(
+            rows, alert_finished_at=end, now=now,
+        )
         return {
             "run_id": run_id, "packet_id": packet["id"],
             "packet_hash": packet["packet_hash"], "report_id": None,
@@ -2373,6 +2495,11 @@ def verify_scheduled(rows: Mapping, run_id: str, deployed: datetime, now: dateti
                 "report": None, "publication": evaluation_publication["id"]},
             "publication_key": None,
             "publication_receipt": {"status": "no_trigger", "telegram_message_ids": []},
+            "alert_lane_terminal": True,
+            "alert_publication_status": "no_trigger",
+            "telegram_message_ids": [],
+            "telegram_attempt_count": 0,
+            **research_receipt,
             "discovery_capability": {"ok": capability.ok,
                 "required_capability_ids": list(capability.required_capability_ids),
                 "optional_failures": list(capability.optional_failures)},
@@ -2399,23 +2526,35 @@ def verify_scheduled(rows: Mapping, run_id: str, deployed: datetime, now: dateti
             and sha256(report["rendered_text"].encode()) == report["rendered_hash"] == report_request["response"]["rendered_hash"], "scheduled report origin, relationship, or hash mismatch")
     publication = one([row for row in rows["publications"] if row["report_id"] == report["id"]], "publication")
     require(publication["idempotency_key"] == report["idempotency_key"] and re.fullmatch(r"[0-9a-f]{64}", publication["idempotency_key"]), "scheduled outbox identity mismatch")
+    attempt_count = publication.get("attempt_count")
+    require(type(attempt_count) is int, "scheduled Telegram attempt count is missing")
     ids = publication["telegram_message_ids"]
     if publication["status"] == "delivered":
+        require(attempt_count == 1, "scheduled Telegram attempt count is not exactly one")
         accepted = timestamp(publication["telegram_accepted_at"])
         require(isinstance(ids, list) and ids and all(type(value) is int and value > 0 for value in ids)
                 and start <= accepted <= end and publication.get("suppression_reason") is None and run["telegram_message_ids"] == ids, "original Telegram delivery receipt is incomplete")
         delivery = {"status": "accepted_by_telegram", "telegram_message_ids": ids, "telegram_accepted_at": publication["telegram_accepted_at"]}
     else:
         reason = publication.get("suppression_reason")
+        require(attempt_count == 0, "scheduled Telegram attempt count is not zero for suppression")
         require(publication["status"] == "suppressed" and ids == [] and publication["telegram_accepted_at"] is None
                 and isinstance(reason, str) and reason.strip() and run["telegram_message_ids"] == [], "explicit scheduled suppression reason is missing")
         delivery = {"status": "suppressed", "telegram_message_ids": [], "suppression_reason": reason}
     require(rows["quota"] and all(row["run_id"] == run_id and UUID.fullmatch(row["id"]) and type(row["actual_requests"]) is int
             and type(row["reserved_requests"]) is int and 0 <= row["actual_requests"] <= row["reserved_requests"] for row in rows["quota"]), "scheduled quota receipts are incomplete")
     capability = verify_discovery_capability(rows)
+    research_receipt = verify_later_research(
+        rows, alert_finished_at=end, now=now,
+    )
     return {"run_id": run_id, "packet_id": packet["id"], "packet_hash": packet["packet_hash"], "report_id": report["id"], "report_hash": report["report_hash"],
             "stage_ids": {"collection": completion["completion_id"], "packet": packet["id"], "evaluation": evaluation["request_id"], "report": report_request["request_id"], "publication": publication["report_id"]},
             "publication_key": publication["idempotency_key"], "publication_receipt": delivery,
+            "alert_lane_terminal": True,
+            "alert_publication_status": delivery["status"],
+            "telegram_message_ids": list(ids),
+            "telegram_attempt_count": attempt_count,
+            **research_receipt,
             "discovery_capability": {"ok": capability.ok,
                                      "required_capability_ids": list(capability.required_capability_ids),
                                      "optional_failures": list(capability.optional_failures)},

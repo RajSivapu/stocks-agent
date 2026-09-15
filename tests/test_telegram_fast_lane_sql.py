@@ -8,7 +8,7 @@ import psycopg
 from psycopg.types.json import Jsonb
 import pytest
 
-from tests.test_intelligence_controller_sql import databases
+from tests.test_intelligence_controller_sql import databases, prepared_run
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -176,3 +176,60 @@ def test_recovered_research_packet_retains_lane_and_publication_guard(databases,
             "VALUES(%s,%s,%s,%s,'2026-11-24','on-demand','{}',%s,'research',%s)",
             (str(uuid.uuid4()), "1" * 64, research_run, packet_id, "2" * 64, "3" * 64),
         )
+
+
+@pytest.mark.parametrize("kind", ["fresh", "ordered"])
+def test_completed_research_collection_closes_analysis_for_later_alert_reuse(databases, kind):
+    db = databases[kind]
+    run_id, completion_id, _receipt_id, payload = prepared_run(
+        db, phase="on-demand", market_date="2026-11-25",
+    )
+
+    db.execute(
+        "SELECT public.record_market_intelligence(%s,%s,%s)",
+        (run_id, completion_id, Jsonb(payload)),
+    )
+
+    assert db.execute(
+        "SELECT status,finished_at IS NOT NULL,telegram_message_ids "
+        "FROM analysis_runs WHERE id=%s",
+        (run_id,),
+    ).fetchone() == ("completed", True, [])
+
+
+@pytest.mark.parametrize("kind", ["fresh", "ordered"])
+def test_next_on_demand_start_resumes_oldest_eligible_research_run(databases, kind):
+    db = databases[kind]
+    db.execute(
+        "UPDATE analysis_runs SET status='completed',finished_at=now() "
+        "WHERE kind='on-demand' AND status='running'"
+    )
+    first_request, first_lease = uuid.uuid4(), uuid.uuid4()
+    db.execute(
+        "INSERT INTO market_gateway_requests(request_id,operation,status,lease_token) "
+        "VALUES(%s,'start_run','claimed',%s)",
+        (first_request, first_lease),
+    )
+    first = db.execute(
+        "SELECT public.start_market_analysis_run(%s,%s,'on-demand','2026-11-26')",
+        (first_request, first_lease),
+    ).fetchone()[0]
+    prepared_run(
+        db, run_id=first["run_id"], phase="on-demand", market_date="2026-11-26",
+    )
+
+    second_request, second_lease = uuid.uuid4(), uuid.uuid4()
+    db.execute(
+        "INSERT INTO market_gateway_requests(request_id,operation,status,lease_token) "
+        "VALUES(%s,'start_run','claimed',%s)",
+        (second_request, second_lease),
+    )
+    resumed = db.execute(
+        "SELECT public.start_market_analysis_run(%s,%s,'on-demand','2026-11-27')",
+        (second_request, second_lease),
+    ).fetchone()[0]
+
+    assert resumed == {
+        "run_id": first["run_id"], "duplicate": True,
+        "market_date": "2026-11-26",
+    }

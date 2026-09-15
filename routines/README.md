@@ -190,6 +190,8 @@ update daylight-saving offsets in March and November.
 - A research `paused` receipt is successful bounded progress. Its `planned` count is resumable
   backlog and never changes an already terminal alert publication.
 - Research runs cannot call `evaluate_and_publish`, `record_report`, `finish_run`, or Telegram.
+- `status: suppressed` is a terminal alert receipt only when the matching persisted suppression or
+  no-trigger chain exists; it is never inferred from silence.
 
 ## Manual verification and dry runs
 

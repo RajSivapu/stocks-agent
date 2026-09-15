@@ -501,7 +501,7 @@ export interface GatewayRepository {
     leaseToken: string,
     phase: Phase,
     marketDate: string,
-  ): Promise<{ run_id: string; duplicate: boolean }>;
+  ): Promise<{ run_id: string; duplicate: boolean; market_date?: string }>;
   recordRunOutcome(
     requestId: string,
     leaseToken: string,
@@ -1879,6 +1879,9 @@ export function createSupabaseGatewayRepository(
       return {
         run_id: text(row.run_id, 36),
         duplicate: boole(row.duplicate),
+        ...(typeof row.market_date === "string"
+          ? { market_date: text(row.market_date, 10) }
+          : {}),
       };
     },
 

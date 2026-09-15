@@ -1578,7 +1578,7 @@ export function createGatewayHandler(dependencies: GatewayDependencies) {
           run_id: run.run_id,
           duplicate: run.duplicate,
           phase: start.phase,
-          market_date: currentDate,
+          market_date: run.market_date ?? currentDate,
         };
         await deps.repository.completeRequest(
           envelope.request_id,

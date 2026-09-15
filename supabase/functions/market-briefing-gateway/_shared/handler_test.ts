@@ -1394,14 +1394,14 @@ class FakeRepository implements GatewayRepository {
     _leaseToken: string,
     phase: Phase,
     marketDate?: string,
-  ): Promise<{ run_id: string; duplicate: boolean }> {
+  ): Promise<{ run_id: string; duplicate: boolean; market_date: string }> {
     this.mutationCalls += 1;
     this.startCalls += 1;
     const slot = `${marketDate ?? "missing"}:${phase}`;
     const duplicate = phase !== "on-demand" &&
       this.scheduledSlots.includes(slot);
     this.scheduledSlots.push(slot);
-    return Promise.resolve({ run_id: RUN_ID, duplicate });
+    return Promise.resolve({ run_id: RUN_ID, duplicate, market_date: marketDate! });
   }
   recordRunOutcome(
     _requestId: string,
@@ -3679,6 +3679,29 @@ Deno.test("different request ids for one scheduled market slot return the same r
     "2026-09-02:intraday",
     "2026-09-02:intraday",
   ]);
+});
+
+Deno.test("resumed research start preserves its original market date", async () => {
+  class ResumedResearchRepository extends FakeRepository {
+    override startRun() {
+      return Promise.resolve({
+        run_id: RUN_ID,
+        duplicate: true,
+        market_date: "2026-09-01",
+      });
+    }
+  }
+  const { handler } = makeHandler(new ResumedResearchRepository());
+
+  const result = await json(await handler(request(
+    "start_run",
+    { phase: "on-demand", market_date: "2026-09-02" },
+    { requestId: nextRequestId() },
+  )));
+
+  assertEquals(result.run_id, RUN_ID);
+  assertEquals(result.duplicate, true);
+  assertEquals(result.market_date, "2026-09-01");
 });
 
 Deno.test("finish_run returns the specific missing lifecycle stage", async () => {

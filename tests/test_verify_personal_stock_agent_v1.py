@@ -19,6 +19,8 @@ from test_recovery_bundle import recovery_records, digest
 
 NOW = datetime(2026, 9, 5, 21, tzinfo=timezone.utc)
 RUN, PACKET, REPORT, START, COLLECTION, EVALUATION, PUBLICATION, REQUEST = [f"{n:08d}-1111-4111-8111-111111111111" for n in range(1, 9)]
+RESEARCH_RUN = "00000009-1111-4111-8111-111111111111"
+RESEARCH_START = "00000010-1111-4111-8111-111111111111"
 _ledger = recovery_records()
 REPORT_KEY = hashlib.sha256(f"v2:weekly:2026-09-05:{_ledger['packets'][0]['packet_hash']}:{_ledger['reports'][0]['report_hash']}".encode()).hexdigest()
 REPORT = f"{REPORT_KEY[:8]}-{REPORT_KEY[8:12]}-5{REPORT_KEY[13:16]}-8{REPORT_KEY[17:20]}-{REPORT_KEY[20:32]}"
@@ -322,7 +324,8 @@ def _capability_rows():
     return {
         "run": [{"id": RUN, "scheduled_phase": "post-market", "scheduled_market_date": "2026-09-05"}],
         "intelligence_runs": [{
-            "id": RUN, "phase": "post-market", "market_date": "2026-09-05",
+            "id": RUN, "phase": "post-market", "lane": "alert",
+            "market_date": "2026-09-05",
             "reservation_plan": {"reservations": [{
                 "id": reservation_id, "provider": "gdelt",
                 "requests": len(themes) + 2, "cache_keys": [],
@@ -1832,6 +1835,29 @@ def release(tmp_path):
         ],
         "origins": [{"request_id": REQUEST, "run_id": RUN, "requested_packet_id": PACKET, "scheduled_phase": "post-market", "market_date": "2026-09-05", "requested_kind": "weekly", "requested_report_id": REPORT, "requested_idempotency_key": REPORT_KEY, "requested_report_hash": report["report_hash"]}],
         "quota": [{"id": "99999999-1111-4111-8111-111111111111", "run_id": RUN, "provider": "gdelt", "reserved_requests": 2, "actual_requests": 1}],
+        "research_runs": [{
+            "id": RESEARCH_RUN, "kind": "on-demand", "status": "running",
+            "started_at": "2026-09-05T20:05:00Z", "finished_at": None,
+            "phase": "on-demand", "lane": "research", "market_date": "2026-09-05",
+        }],
+        "research_tasks": [{
+            "id": "00000011-1111-4111-8111-111111111111",
+            "run_id": RESEARCH_RUN, "state": "succeeded", "attempt_count": 1,
+        }, {
+            "id": "00000012-1111-4111-8111-111111111111",
+            "run_id": RESEARCH_RUN, "state": "planned", "attempt_count": 0,
+        }],
+        "research_events": [],
+        "research_completions": [],
+        "research_packets": [],
+        "research_reports": [],
+        "research_publications": [],
+        "research_evaluation_publications": [],
+        "research_requests": [{
+            "request_id": RESEARCH_START, "run_id": RESEARCH_RUN,
+            "operation": "start_run", "status": "completed",
+            "attempt_count": 1,
+        }],
     }
     capability = _capability_rows()
     for key in (
@@ -1881,6 +1907,12 @@ def test_release_queries_sources_and_binds_exact_receipts(release):
     assert result["publication_key"] == source.expected_report_key
     assert result["discovery_capability"]["ok"] is True
     assert result["publication_receipt"]["telegram_message_ids"] == [7]
+    assert result["alert_lane_terminal"] is True
+    assert result["alert_publication_status"] == "accepted_by_telegram"
+    assert result["telegram_message_ids"] == [7]
+    assert result["telegram_attempt_count"] == 1
+    assert result["research_lane_progressed_after_alert"] is True
+    assert result["research_remaining_tasks"] == 1
     assert result["operational_receipt"] == {
         "status": "verified",
         "run_id": RUN,
@@ -1905,6 +1937,58 @@ def test_release_queries_sources_and_binds_exact_receipts(release):
     assert "verified" not in str(result["native_site_comparison"])
     source.record.pop("run_id")
     assert verify_release(source, **args)["run_id"] == RUN
+
+
+def test_release_accepts_status_only_delivered_alert_with_later_research_progress(release):
+    source, args = release
+    report = source.rows["reports"][0]
+    report["rendered_text"] = "No new action — data check incomplete"
+    report["rendered_hash"] = hashlib.sha256(report["rendered_text"].encode()).hexdigest()
+    source.rows["requests"][2]["response"]["rendered_hash"] = report["rendered_hash"]
+
+    result = verify_release(source, **args)
+
+    assert result["alert_publication_status"] == "accepted_by_telegram"
+    assert result["telegram_attempt_count"] == 1
+    assert result["research_lane_progressed_after_alert"] is True
+
+
+def test_release_rejects_research_lane_publication_attempt(release):
+    source, args = release
+    source.rows["research_requests"].append({
+        "request_id": "00000013-1111-4111-8111-111111111111",
+        "run_id": RESEARCH_RUN, "operation": "evaluate_and_publish",
+        "status": "failed", "attempt_count": 1,
+    })
+
+    with pytest.raises(RuntimeError, match="research.*publish"):
+        verify_release(source, **args)
+
+
+def test_release_rejects_duplicate_telegram_attempt(release):
+    source, args = release
+    source.rows["publications"][0]["attempt_count"] = 2
+
+    with pytest.raises(RuntimeError, match="Telegram attempt"):
+        verify_release(source, **args)
+
+
+def test_release_rejects_alert_without_packet(release):
+    source, args = release
+    source.rows["packets"] = []
+
+    with pytest.raises(RuntimeError, match="packet"):
+        verify_release(source, **args)
+
+
+def test_release_accepts_completed_alert_followed_by_paused_research(release):
+    source, args = release
+
+    result = verify_release(source, **args)
+
+    assert result["alert_lane_terminal"] is True
+    assert result["research_lane_progressed_after_alert"] is True
+    assert result["research_remaining_tasks"] == 1
 
 
 def test_release_accepts_receipt_backed_quiet_intraday_without_a_report(release):
@@ -2234,7 +2318,10 @@ def test_release_rejects_ancient_records_even_when_every_claimed_time_is_relabel
 
 def test_release_requires_a_real_nonempty_suppression_reason(release):
     source, args = release
-    source.rows["publications"][0].update(status="suppressed", telegram_message_ids=[], telegram_accepted_at=None, suppression_reason="NO_TRIGGER")
+    source.rows["publications"][0].update(
+        status="suppressed", telegram_message_ids=[], telegram_accepted_at=None,
+        suppression_reason="NO_TRIGGER", attempt_count=0,
+    )
     source.rows["run"][0].update(status="suppressed", telegram_message_ids=[])
     assert verify_release(source, **args)["publication_receipt"]["suppression_reason"] == "NO_TRIGGER"
 

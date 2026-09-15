@@ -61,13 +61,13 @@ def render_with_gateway(payload, packet, *, scheduled=False):
     return json.loads(result.stdout)
 
 
-def insert_packet(db, run_id, packet, *, create_run=True):
+def insert_packet(db, run_id, packet, *, create_run=True, phase="post-market"):
     packet_id = str(uuid.uuid4())
     packet_hash = canonical_hash(packet)
     if create_run:
         db.execute(
             "INSERT INTO market_intelligence_runs(id,phase,market_date,policy_version,reservation_plan) "
-            "VALUES(%s,'on-demand','2026-09-08',1,'{}')", (run_id,),
+            "VALUES(%s,%s,'2026-09-08',1,'{}')", (run_id, phase),
         )
         db.execute(
             "INSERT INTO market_intelligence_run_events(id,run_id,status) VALUES(%s,%s,'completed')",
@@ -119,14 +119,14 @@ def test_actual_gateway_rendered_empty_report_and_near_duplicate_persist_in_post
                 empty_packet_id, empty_packet_hash = insert_packet(db, empty_run, empty_packet)
                 produced = build_report(ReportInput(
                     packet_id=empty_packet_id, packet_hash=empty_packet_hash,
-                    market_date=date(2026, 9, 8), kind="on-demand",
-                    title="MARKET RESEARCH", summary="No bounded candidate qualified.",
+                    market_date=date(2026, 9, 8), kind="weekly",
+                    title="WEEKLY REVIEW", summary="No bounded candidate qualified.",
                     full_markdown="No bounded candidate qualified. Suggestion only; no order was placed.",
                     source_ids=(), policy_decision_ids=(), comparison_ids=(),
                     actionable_risk=False, material_thesis_change=False,
                     intraday_triggered=False, research_packet=empty_packet,
                 )).to_gateway_payload()
-                rendered = render_with_gateway(produced, empty_packet)
+                rendered = render_with_gateway(produced, empty_packet, scheduled=True)
                 db.execute("SET ROLE service_role")
                 receipt = db.execute(
                     "SELECT record_market_report(%s,%s,%s)->>'report_id'",

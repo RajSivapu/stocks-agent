@@ -1,6 +1,6 @@
 # Stocks Agent — Roadmap and Deployment Status
 
-Last updated: 2026-09-14.
+Last updated: 2026-09-15.
 
 This repository is owner-only, suggestion-only decision support plus portfolio recordkeeping. It
 has no brokerage credentials or order endpoints and never places, modifies, or cancels a trade.
@@ -11,6 +11,23 @@ metered runtime model API.
 and rollout order. `docs/HANDOFF.md` is ignored and is not a source of truth.
 
 ## Current release status
+
+The September 15 candidate on `codex/telegram-fast-lane` is locally complete and not yet trusted in
+production. It puts one 240-second alert lane ahead of all best-effort research, caps the alert at
+eight source requests, supports a useful status-only daily brief when action data is incomplete, and
+then resumes one publication-ineligible research run for up to 240 seconds. Completed research is
+made eligible for a later alert; paused research keeps durable planned backlog. The protected V1
+verifier now requires `alert_lane_terminal`, `alert_publication_status`, original
+`telegram_message_ids`, `telegram_attempt_count` no greater than one,
+`research_lane_progressed_after_alert`, and `research_remaining_tasks` before accepting production
+evidence. Focused local gates passed 38 routine, 132 verifier/workflow, 13 PostgreSQL, and 70 gateway
+handler tests.
+
+Release identity is deliberately pending until the immutable path supplies it:
+`reviewed_head_sha=pending`, `exact_main_sha=pending`, `exact_main_ci=pending`, and
+`protected_deployment_id=pending`. The only remaining V1 acceptance item after release is the next
+normal pre-market or post-market terminal alert receipt plus later research progress. No “Run now,”
+duplicate live routine, manual collector, or standalone Telegram test may close it.
 
 The scheduled-source recovery and detailed Telegram renderer are deployed from protected main
 `ce73a5c`. PR #102 exact-head CI `34852461483`, exact-main CI `34852964601`, protected backend
