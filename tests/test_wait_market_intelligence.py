@@ -225,3 +225,15 @@ def test_market_briefing_requires_durable_completion_before_evaluation_or_finish
         assert "Never call `evaluate_and_publish` before" in document
         assert "Never call `finish_run` before" in document
         assert "COLLECTION_PENDING" in document
+
+
+def test_routine_recovery_is_bounded_and_resumes_only_the_exact_run():
+    skill = open("skills/market-briefing/SKILL.md").read()
+    routines = open("routines/README.md").read()
+
+    assert waiter.DEFAULT_TIMEOUT_SECONDS == 360
+    for document in (skill, routines):
+        assert "--timeout-seconds 360" in document
+        assert "at most two collector invocations" in document
+        assert "same exact run ID" in document
+        assert "completed or uncertain source attempt" in document

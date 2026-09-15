@@ -18,12 +18,15 @@ unchanged with the collector receipt by `build_market_report.py`; the routine ne
 
 Every Routine has a mandatory durable-completion gate. When command execution returns or times out
 without a valid terminal collector receipt, run
-`python scripts/wait_market_intelligence.py --run-id RUN_ID --timeout-seconds 900` once. It only
+`python scripts/wait_market_intelligence.py --run-id RUN_ID --timeout-seconds 360` once. It only
 polls the protected deterministic completion reader; it makes no provider request and performs no
-write. Use its validated bounded receipt and never rerun the collector. `COLLECTION_PENDING` means
-stop and leave the run recoverable. Never call `evaluate_and_publish` before the exact run's durable
-collection completion is validated. Never call `finish_run` before the exact run's durable
-collection completion is validated.
+write. If it returns `COLLECTION_PENDING`, invoke the collector one final time with the identical
+command, scratch context, and same exact run ID. Protected checkpoints ensure no completed or uncertain source attempt
+is repeated. If the final invocation returns or times out without a valid
+receipt, run the wait helper once more and stop if it remains pending. This allows at most two collector invocations
+for one run and never starts another analysis run. Never call `evaluate_and_publish` before the exact
+run's durable collection completion is validated. Never call `finish_run` before the exact run's
+durable collection completion is validated.
 
 ## One-time environment
 
@@ -107,9 +110,10 @@ update daylight-saving offsets in March and November.
 > `python scripts/market_gateway.py` for context, persistence, rendering, and delivery. Call
 > `start_run`, then `read_context`; invoke `python scripts/collect_market_intelligence.py` exactly
 > once. If command execution returns or times out without its terminal receipt, run
-> `python scripts/wait_market_intelligence.py --run-id RUN_ID --timeout-seconds 900` once and use
-> only that validated bounded receipt-backed packet. On `COLLECTION_PENDING`, stop with no later
-> lifecycle call. Never call `evaluate_and_publish` or `finish_run` before durable completion. Produce separate
+> `python scripts/wait_market_intelligence.py --run-id RUN_ID --timeout-seconds 360`. On
+> `COLLECTION_PENDING`, invoke the identical collector command once more for the same run; wait once
+> more if needed, then stop if still pending. Use only the validated bounded receipt-backed packet.
+> Never call `evaluate_and_publish` or `finish_run` before durable completion. Produce separate
 > structured Analyst and Checker records; submit one complete bundle through
 > `evaluate_and_publish`; after acceptance, build and record the deterministic morning (or first-of-month
 > monthly) report through `build_market_report.py` and `record_report`; submit only permitted artifacts;
@@ -133,8 +137,9 @@ update daylight-saving offsets in March and November.
 > context, but treat the morning plan only as a historical candidate. Invoke
 > `python scripts/collect_market_intelligence.py`
 > exactly once. If command execution returns or times out without its terminal receipt, run
-> `python scripts/wait_market_intelligence.py --run-id RUN_ID --timeout-seconds 900` once. On
-> `COLLECTION_PENDING`, stop with no later lifecycle call. Never call `evaluate_and_publish` or
+> `python scripts/wait_market_intelligence.py --run-id RUN_ID --timeout-seconds 360`. On
+> `COLLECTION_PENDING`, invoke the identical collector command once more for the same run; wait once
+> more if needed, then stop if still pending. Never call `evaluate_and_publish` or
 > `finish_run` before durable completion. Use only the validated bounded packet. Independently refresh market/sector state, quote
 > provider timestamps, relevant news/events, and technical context. Rebuild Analyst and Checker
 > records and
@@ -153,8 +158,9 @@ update daylight-saving offsets in March and November.
 > `python scripts/market_gateway.py` for state and delivery. Start and read context, invoke
 > `python scripts/collect_market_intelligence.py` exactly once. If command execution returns or
 > times out without its terminal receipt, run
-> `python scripts/wait_market_intelligence.py --run-id RUN_ID --timeout-seconds 900` once. On
-> `COLLECTION_PENDING`, stop with no later lifecycle call. Never call `evaluate_and_publish` or
+> `python scripts/wait_market_intelligence.py --run-id RUN_ID --timeout-seconds 360`. On
+> `COLLECTION_PENDING`, invoke the identical collector command once more for the same run; wait once
+> more if needed, then stop if still pending. Never call `evaluate_and_publish` or
 > `finish_run` before durable completion. Use only its validated bounded packet and
 > verified current close evidence, rebuild Analyst and Checker records, and submit one decision
 > bundle through
