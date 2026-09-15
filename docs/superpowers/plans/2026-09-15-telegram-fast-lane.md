@@ -283,31 +283,31 @@ git commit -m "feat: collect alerts before resumable research"
 - Produces: expected-publication status-only body for pre-market and post-market with the approved portfolio, market, open-zone/risk, next-session, and optional coverage-note sections.
 - Consumes: alert packet coverage, current protected holdings/plans, server-side quote fetches, canonical periodic renderer, and existing report idempotency.
 
-- [ ] **Step 1: Write failing policy and renderer tests**
+- [x] **Step 1: Write failing policy and renderer tests**
 
 Add tests with missing/stale actionable quotes that assert zero approved new actionable suggestions, a ready pre-market/post-market report, the exact line `No new action — data check incomplete`, no invented price/return values, and concise coverage categories. Keep the existing intraday no-trigger suppression assertion and source-link safety cases.
 
-- [ ] **Step 2: Run focused Deno tests**
+- [x] **Step 2: Run focused Deno tests**
 
 Run: `deno test --allow-env supabase/functions/market-briefing-gateway/_shared/policy_test.ts supabase/functions/market-briefing-gateway/_shared/reports_test.ts supabase/functions/market-briefing-gateway/_shared/renderer_test.ts`
 
 Expected: FAIL because incomplete alert coverage does not yet veto action or force a useful periodic status report.
 
-- [ ] **Step 3: Add the deterministic policy veto**
+- [x] **Step 3: Add the deterministic policy veto**
 
 Read the packet coverage flag only from the validated persisted packet. Downgrade all affected actionable decisions with `ACTION_DATA_INCOMPLETE`; retain safe `hold`, `watch`, `avoid`, portfolio-status, and risk-monitoring conclusions that have their required evidence.
 
-- [ ] **Step 4: Add the status-only periodic rendering path**
+- [x] **Step 4: Add the status-only periodic rendering path**
 
 Render factual protected state and available fresh quotes. Include the incomplete-data line and bounded coverage note; omit any unavailable number instead of rendering a zero, placeholder, or estimate. Keep the canonical periodic heading and section contract so Telegram splitting/idempotency remain unchanged.
 
-- [ ] **Step 5: Run focused Deno tests**
+- [x] **Step 5: Run focused Deno tests**
 
 Run: `deno test --allow-env supabase/functions/market-briefing-gateway/_shared/policy_test.ts supabase/functions/market-briefing-gateway/_shared/reports_test.ts supabase/functions/market-briefing-gateway/_shared/renderer_test.ts`
 
 Expected: PASS.
 
-- [ ] **Step 6: Commit report behavior**
+- [x] **Step 6: Commit report behavior**
 
 ```bash
 git add supabase/functions/market-briefing-gateway/_shared/policy.ts supabase/functions/market-briefing-gateway/_shared/reports.ts supabase/functions/market-briefing-gateway/_shared/renderer.ts supabase/functions/market-briefing-gateway/_shared/policy_test.ts supabase/functions/market-briefing-gateway/_shared/reports_test.ts supabase/functions/market-briefing-gateway/_shared/renderer_test.ts

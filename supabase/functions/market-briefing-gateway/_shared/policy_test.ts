@@ -329,6 +329,78 @@ Deno.test("non-actionable actions are never upgraded", () => {
   }
 });
 
+Deno.test("incomplete alert action data vetoes every new trade action but preserves safe conclusions", () => {
+  for (const action of ["buy", "add", "reduce", "sell"] as Action[]) {
+    const c = candidate({
+      action,
+      analyst: {
+        id: "00000000-0000-4000-8000-000000000020",
+        packet_id: "00000000-0000-4000-8000-000000000030",
+        completed: true,
+        action,
+        confidence: "medium",
+        reason: "Analyst pass.",
+      },
+      proposed_amount: action === "buy" || action === "add" ? "470.20" : null,
+      proposed_shares: "10",
+    });
+    const result = Reflect.apply(evaluateCandidate, null, [
+      c,
+      context(),
+      config(),
+      quote(),
+      NOW,
+      NEW_ID,
+      null,
+      new Set(),
+      trustedFacts(),
+      false,
+    ]);
+    assertEquals(result.final_action, null);
+    assertEquals(result.status, "vetoed");
+    assert(
+      result.reason_codes.includes("ACTION_DATA_INCOMPLETE"),
+      `${action} omitted the alert coverage veto`,
+    );
+  }
+
+  const watch = candidate({
+    action: "watch",
+    analyst: {
+      id: "00000000-0000-4000-8000-000000000020",
+      packet_id: "00000000-0000-4000-8000-000000000030",
+      completed: true,
+      action: "watch",
+      confidence: "medium",
+      reason: "Analyst pass.",
+    },
+    proposed_amount: null,
+    proposed_shares: null,
+    entry_zone_low: null,
+    entry_zone_high: null,
+    stop: null,
+    target: null,
+    invalidation_price: null,
+  });
+  const safe = Reflect.apply(evaluateCandidate, null, [
+    watch,
+    context(),
+    config(),
+    quote(),
+    NOW,
+    NEW_ID,
+    null,
+    new Set(),
+    trustedFacts(),
+    false,
+  ]);
+  assertEquals(safe.final_action, "watch");
+  assert(
+    !safe.reason_codes.includes("ACTION_DATA_INCOMPLETE"),
+    "safe non-trade conclusion inherited the action-data veto",
+  );
+});
+
 Deno.test("only approved fresh policy evaluations project inert alert drafts", () => {
   const enabled = config();
   enabled.alerts_v3 = {

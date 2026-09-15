@@ -2342,6 +2342,9 @@ async function evaluateAndPublish(
   ) {
     throw new GatewayRepositoryError("INTELLIGENCE_PACKET_MISMATCH");
   }
+  const actionableDataComplete = packet === null ||
+    packet.packet.coverage.lane !== "alert" ||
+    packet.packet.coverage.actionable_data_complete === true;
   if (
     bundle.companion_proposal && bundle.phase === "pre-market" &&
     !isFirstNyseSessionOfMonth(
@@ -2382,6 +2385,7 @@ async function evaluateAndPublish(
       bundle.intelligence_packet?.id ?? null,
       packet?.qualifiedExposureIds.get(candidate.ticker) ?? new Set(),
       packet?.facts ?? [],
+      actionableDataComplete,
     )
   );
   const reservation = reservePortfolioPlan(
@@ -2470,6 +2474,7 @@ async function evaluateAndPublish(
       context,
       comparisons,
       companion,
+      actionable_data_complete: actionableDataComplete,
     });
   } catch {
     throw new GatewayRepositoryError("POLICY_REJECTED");

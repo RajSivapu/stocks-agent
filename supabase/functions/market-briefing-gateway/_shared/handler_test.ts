@@ -2175,6 +2175,53 @@ Deno.test("gateway binds current caller evidence to stale persisted packet facts
   );
 });
 
+Deno.test("gateway reads incomplete action authority only from the persisted alert packet", async () => {
+  const packet: EvidencePacket = {
+    ...evidencePacket(),
+    coverage: {
+      ...evidencePacket().coverage,
+      lane: "alert",
+      actionable_data_complete: false,
+    },
+  };
+  const packetHash = sha256Hex(canonicalJson(packet));
+  class IncompleteActionPacketRepository extends FakeRepository {
+    override loadIntelligencePacket() {
+      this.packetReadCalls += 1;
+      return Promise.resolve({
+        id: PACKET_ID,
+        run_id: RUN_ID,
+        content_hash: packetHash,
+        packet,
+        evidence_facts: [storedFact()],
+        exposure_facts: [],
+      });
+    }
+  }
+  const setup = makeHandler(new IncompleteActionPacketRepository());
+  const response = await setup.handler(request("evaluate_and_publish", {
+    phase: "intraday",
+    market_date: "2026-09-02",
+    title: "Persisted alert coverage",
+    candidates: [candidate("intraday", "brief")],
+    intelligence_packet: {
+      id: PACKET_ID,
+      content_hash: packetHash,
+      coverage: "partial",
+    },
+  }));
+
+  assertEquals(response.status, 200);
+  const evaluation = setup.repository.lastBundle!.evaluations[0];
+  assertEquals(evaluation.status, "vetoed");
+  assertEquals(evaluation.final_action, null);
+  assert(
+    evaluation.reason_codes.includes("ACTION_DATA_INCOMPLETE"),
+    "persisted alert coverage did not veto the new action",
+  );
+  assertEquals(setup.repository.lastBundle!.suggestions, []);
+});
+
 Deno.test("record_learning persists only the immutable observation RPC payload", async () => {
   const fixture = makeHandler();
   const observation = {

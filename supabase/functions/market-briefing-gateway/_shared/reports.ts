@@ -454,6 +454,8 @@ function coverageSummary(coverage: Record<string, unknown>): string {
       "accepted_item_count",
       "complete_market_coverage",
       "coverage_status",
+      "actionable_data_complete",
+      "lane",
       "mode",
       "reference_status",
       "source_request_count",
@@ -526,6 +528,7 @@ function scheduledNoActionBody(input: {
   if (input.noUsableEvidence) {
     sections.push(
       "⚠️ <b>Data check incomplete</b>",
+      "No new action — data check incomplete",
       "<b>Portfolio</b>\nCouldn’t safely refresh holdings, prices, stop gaps, or P&amp;L during this run.",
       "<b>Market</b>\nThe scheduled scan completed, but the configured sources returned no usable market evidence.",
       "<b>New ideas</b>\nNo candidate was verified. This means the data was unavailable; it is not an “all clear” market signal.",
@@ -537,7 +540,11 @@ function scheduledNoActionBody(input: {
         ? "⚠️ <b>Partial market check</b>"
         : "🔎 <b>Research review</b>",
       `<b>Research</b>\n${escaped(compact(input.researchText, 360))}`,
-      "<b>Action</b>\nNo policy-approved action today.",
+      `<b>Action</b>\n${
+        input.incompleteCoverage
+          ? "No new action — data check incomplete\nNo policy-approved action today."
+          : "No policy-approved action today."
+      }`,
     );
     if (input.incompleteCoverage) {
       sections.push(
@@ -746,7 +753,8 @@ export function renderReportDelivery(
         researchText:
           `${candidateCount} research candidate(s) reviewed; none cleared policy for action.`,
         incompleteCoverage:
-          !researchOnlyPacket.coverage.complete_market_coverage,
+          !researchOnlyPacket.coverage.complete_market_coverage ||
+          researchOnlyPacket.coverage.actionable_data_complete === false,
         noUsableEvidence,
         auditUrl: scheduledFridayStatus
           ? reportUrl(
@@ -889,7 +897,9 @@ export function renderReportDelivery(
       marketDate: value.market_date,
       researchText: (telegramLines.length > 0 ? telegramLines : lines).join(" "),
       incompleteCoverage: Boolean(
-        v2ReportPacket && !v2ReportPacket.coverage.complete_market_coverage,
+        v2ReportPacket &&
+          (!v2ReportPacket.coverage.complete_market_coverage ||
+            v2ReportPacket.coverage.actionable_data_complete === false),
       ),
       noUsableEvidence: false,
       auditUrl: finalKind === "weekly"

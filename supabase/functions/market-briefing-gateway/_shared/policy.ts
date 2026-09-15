@@ -39,6 +39,7 @@ export type PolicyReasonCode =
   | "CHECKER_DOWNGRADE"
   | "CHECKER_VETO"
   | "LOW_CONFIDENCE"
+  | "ACTION_DATA_INCOMPLETE"
   | "ACTION_HOLDING_MISMATCH"
   | "SELL_EXCEEDS_HOLDING"
   | "POSITION_CAP_EXCEEDED"
@@ -131,6 +132,7 @@ const PURE_ALERTS = new Set([
 const VETO_CODES = new Set<PolicyReasonCode>([
   "INVALID_SCHEMA",
   "PRICE_RELATION_INVALID",
+  "ACTION_DATA_INCOMPLETE",
   "ACTION_HOLDING_MISMATCH",
   "SELL_EXCEEDS_HOLDING",
   "CHECKER_INCOMPLETE",
@@ -323,6 +325,7 @@ export function evaluateCandidate(
   packetId: string | null = null,
   _qualifyingExposureEvidenceIds: ReadonlySet<string> = new Set(),
   trustedEvidenceFacts: readonly TrustedEvidenceFact[] = [],
+  actionableDataComplete = true,
 ): PolicyEvaluation {
   const reasons: PolicyReasonCode[] = [];
   const explanations: string[] = [];
@@ -332,6 +335,12 @@ export function evaluateCandidate(
       explanations.push(explanation);
     }
   };
+  if (ACTIONABLE.has(candidate.action) && !actionableDataComplete) {
+    add(
+      "ACTION_DATA_INCOMPLETE",
+      "The persisted alert packet did not complete every data check required for a new action.",
+    );
+  }
   const facts = trustedEvidenceFacts.filter((fact) =>
     fact.candidate_key === candidate.ticker
   );
