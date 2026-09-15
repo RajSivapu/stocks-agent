@@ -8,6 +8,7 @@ on:
       pr_ci_workflow_run_id: {description: Successful exact-head PR CI run (hint only), required: true, type: string}
       ci_workflow_run_id: {description: Successful exact-main CI run (hint only), required: true, type: string}
       pull_request_number: {description: Reviewed merged PR (hint only), required: true, type: string}
+      resume_backup_artifact_id: {description: Prior failed-run backup artifact ID (optional), required: false, default: "", type: string}
 
 permissions:
   actions: read
@@ -37,6 +38,7 @@ jobs:
           INPUT_PR_CI_RUN_ID: ${{ inputs.pr_ci_workflow_run_id }}
           INPUT_CI_RUN_ID: ${{ inputs.ci_workflow_run_id }}
           INPUT_PR: ${{ inputs.pull_request_number }}
+          INPUT_RESUME_BACKUP_ARTIFACT_ID: ${{ inputs.resume_backup_artifact_id }}
         run: |
           set -euo pipefail
           test -n "$GH_TOKEN" || { echo 'GitHub token is required'; exit 1; }
@@ -45,6 +47,7 @@ jobs:
           [[ "$INPUT_PR_CI_RUN_ID" =~ ^[1-9][0-9]*$ ]] || { echo 'numeric PR CI workflow run ID is required'; exit 1; }
           [[ "$INPUT_CI_RUN_ID" =~ ^[1-9][0-9]*$ ]] || { echo 'numeric CI workflow run ID is required'; exit 1; }
           [[ "$INPUT_PR" =~ ^[1-9][0-9]*$ ]] || { echo 'numeric pull request number is required'; exit 1; }
+          test -z "$INPUT_RESUME_BACKUP_ARTIFACT_ID" || [[ "$INPUT_RESUME_BACKUP_ARTIFACT_ID" =~ ^[1-9][0-9]*$ ]] || { echo 'resume backup artifact ID is malformed'; exit 1; }
           MAIN_SHA="$(gh api "repos/$GITHUB_REPOSITORY/git/ref/heads/main" --jq .object.sha)"
           CANDIDATE_SHA="$INPUT_SHA"; PR_CI_WORKFLOW_RUN_ID="$INPUT_PR_CI_RUN_ID"; CI_WORKFLOW_RUN_ID="$INPUT_CI_RUN_ID"; PULL_REQUEST_NUMBER="$INPUT_PR"
           export CANDIDATE_SHA
@@ -109,6 +112,7 @@ jobs:
           echo "pull_request_number=$PULL_REQUEST_NUMBER" >> "$GITHUB_OUTPUT"
           echo "authorization_kind=$AUTHORIZATION_KIND" >> "$GITHUB_OUTPUT"
           echo "authorization_id=$AUTHORIZATION_ID" >> "$GITHUB_OUTPUT"
+          echo "resume_backup_artifact_id=$INPUT_RESUME_BACKUP_ARTIFACT_ID" >> "$GITHUB_OUTPUT"
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
           ref: ${{ steps.candidate.outputs.candidate_sha }}
@@ -129,21 +133,124 @@ jobs:
           set -euo pipefail
           python -m venv "$RUNNER_TEMP/recovery-journal-compaction-venv"
           "$RUNNER_TEMP/recovery-journal-compaction-venv/bin/python" -m pip install --require-hashes --only-binary=:all: -r requirements.lock
-      - name: Compact authenticated terminal recovery journals
+      - name: Prepare or download authenticated recovery-journal backup
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_RECOVERY_KEY: ${{ secrets.RELEASE_RECOVERY_KEY }}
+          SUPABASE_PROJECT_REF: ${{ secrets.SUPABASE_PROJECT_REF }}
+          SUPAVISOR_SESSION_URL: ${{ secrets.SUPAVISOR_SESSION_URL }}
+          MAIN_SHA: ${{ steps.candidate.outputs.candidate_sha }}
+          RESUME_BACKUP_ARTIFACT_ID: ${{ steps.candidate.outputs.resume_backup_artifact_id }}
+        run: |
+          set -euo pipefail; umask 077
+          test -n "$GH_TOKEN" && test -n "$RELEASE_RECOVERY_KEY" && test -n "$SUPABASE_PROJECT_REF"
+          BACKUP_DIR="$RUNNER_TEMP/recovery-journal-backup"
+          mkdir -m 700 "$BACKUP_DIR"
+          if test -z "$RESUME_BACKUP_ARTIFACT_ID"; then
+            test -n "$SUPAVISOR_SESSION_URL"
+            "$RUNNER_TEMP/recovery-journal-compaction-venv/bin/python" -m scripts.compact_recovery_journals prepare \
+              --project-ref "$SUPABASE_PROJECT_REF" \
+              --admin-url "$SUPAVISOR_SESSION_URL" \
+              --main-sha "$MAIN_SHA" \
+              --expected-rows 467 \
+              --expected-groups 45 \
+              --backup "$BACKUP_DIR/recovery-journal-backup.json" \
+              --manifest "$BACKUP_DIR/recovery-journal-backup-manifest.json"
+          else
+            SOURCE_ARTIFACT="$(gh api "repos/$GITHUB_REPOSITORY/actions/artifacts/$RESUME_BACKUP_ARTIFACT_ID")"
+            SOURCE_RUN_ID="$(jq -r .workflow_run.id <<<"$SOURCE_ARTIFACT")"
+            SOURCE_NAME="$(jq -r .name <<<"$SOURCE_ARTIFACT")"
+            SOURCE_DIGEST="$(jq -r .digest <<<"$SOURCE_ARTIFACT")"
+            [[ "$SOURCE_RUN_ID" =~ ^[1-9][0-9]*$ ]] || { echo 'resume backup workflow run ID is malformed'; exit 1; }
+            [[ "$SOURCE_NAME" =~ ^recovery-journal-backup-${SOURCE_RUN_ID}-[1-9][0-9]*$ ]] || { echo 'resume backup artifact name is malformed'; exit 1; }
+            [[ "$SOURCE_DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]] || { echo 'resume backup artifact digest is malformed'; exit 1; }
+            SOURCE_ARTIFACT_FILTER='(.id | type) == "number" and .id > 0 and (.id | floor) == .id and .id == $artifact_id and .name == $name and .digest == $digest and .expired == false and .workflow_run.id == $run and .workflow_run.head_sha == $sha and (.size_in_bytes | type) == "number" and .size_in_bytes > 0 and (.size_in_bytes | floor) == .size_in_bytes and .size_in_bytes <= 201326592'
+            jq -e --argjson artifact_id "$RESUME_BACKUP_ARTIFACT_ID" \
+              --arg name "$SOURCE_NAME" --arg digest "$SOURCE_DIGEST" \
+              --argjson run "$SOURCE_RUN_ID" --arg sha "$MAIN_SHA" \
+              "$SOURCE_ARTIFACT_FILTER" <<<"$SOURCE_ARTIFACT" >/dev/null || { echo 'resume backup artifact binding is not exact'; exit 1; }
+            SOURCE_RUN="$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$SOURCE_RUN_ID")"
+            jq -e --arg repo "$GITHUB_REPOSITORY" --arg sha "$MAIN_SHA" \
+              '.repository.full_name == $repo and .head_sha == $sha and .path == ".github/workflows/recovery-journal-compaction.yml" and .event == "workflow_dispatch" and .status == "completed" and (.conclusion == "failure" or .conclusion == "cancelled" or .conclusion == "success")' \
+              <<<"$SOURCE_RUN" >/dev/null || { echo 'resume backup source workflow is not exact'; exit 1; }
+            gh api "repos/$GITHUB_REPOSITORY/actions/artifacts/$RESUME_BACKUP_ARTIFACT_ID/zip" > "$RUNNER_TEMP/recovery-journal-backup.zip"
+            mapfile -t MEMBERS < <(unzip -Z1 "$RUNNER_TEMP/recovery-journal-backup.zip" | LC_ALL=C sort)
+            test "${#MEMBERS[@]}" -eq 2 || { echo 'resume backup archive member count is invalid'; exit 1; }
+            test "${MEMBERS[0]}" = recovery-journal-backup-manifest.json && test "${MEMBERS[1]}" = recovery-journal-backup.json || { echo 'resume backup archive members are invalid'; exit 1; }
+            unzip -q "$RUNNER_TEMP/recovery-journal-backup.zip" -d "$BACKUP_DIR"
+          fi
+      - name: Authenticate the staged recovery-journal backup
+        env:
+          RELEASE_RECOVERY_KEY: ${{ secrets.RELEASE_RECOVERY_KEY }}
+          SUPABASE_PROJECT_REF: ${{ secrets.SUPABASE_PROJECT_REF }}
+          MAIN_SHA: ${{ steps.candidate.outputs.candidate_sha }}
+        run: |
+          set -euo pipefail; umask 077
+          "$RUNNER_TEMP/recovery-journal-compaction-venv/bin/python" -m scripts.compact_recovery_journals verify \
+            --project-ref "$SUPABASE_PROJECT_REF" \
+            --main-sha "$MAIN_SHA" \
+            --expected-rows 467 \
+            --expected-groups 45 \
+            --backup "$RUNNER_TEMP/recovery-journal-backup/recovery-journal-backup.json" \
+            --manifest "$RUNNER_TEMP/recovery-journal-backup/recovery-journal-backup-manifest.json"
+      - name: Upload encrypted recovery-journal backup before mutation
+        id: backup_artifact
+        uses: actions/upload-artifact@65462800fd760344b1a7b4382951275a0abb4808
+        with:
+          name: recovery-journal-backup-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            ${{ runner.temp }}/recovery-journal-backup/recovery-journal-backup.json
+            ${{ runner.temp }}/recovery-journal-backup/recovery-journal-backup-manifest.json
+          if-no-files-found: error
+          retention-days: 1
+          compression-level: 0
+      - name: Bind backup artifact to this exact main run
+        id: backup_binding
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ARTIFACT_ID: ${{ steps.backup_artifact.outputs.artifact-id }}
+          ACTION_ARTIFACT_DIGEST: ${{ steps.backup_artifact.outputs.artifact-digest }}
+          MAIN_SHA: ${{ steps.candidate.outputs.candidate_sha }}
+        run: |
+          set -euo pipefail
+          [[ "$ARTIFACT_ID" =~ ^[1-9][0-9]*$ ]] || { echo 'backup artifact ID is malformed'; exit 1; }
+          [[ "$ACTION_ARTIFACT_DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]] || { echo 'backup action digest is malformed'; exit 1; }
+          EXPECTED_NAME="recovery-journal-backup-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
+          ARTIFACT="$(gh api "repos/$GITHUB_REPOSITORY/actions/artifacts/$ARTIFACT_ID")"
+          ARTIFACT_DIGEST="$(jq -r .digest <<<"$ARTIFACT")"
+          test "$ARTIFACT_DIGEST" = "$ACTION_ARTIFACT_DIGEST" || { echo 'backup artifact digest disagrees with upload receipt'; exit 1; }
+          ARTIFACT_BINDING_FILTER='(.id | type) == "number" and .id > 0 and (.id | floor) == .id and .id == $artifact_id and .name == $name and .digest == $digest and .expired == false and .workflow_run.id == $run and .workflow_run.head_sha == $sha and (.size_in_bytes | type) == "number" and .size_in_bytes > 0 and (.size_in_bytes | floor) == .size_in_bytes and .size_in_bytes <= 201326592'
+          jq -e --argjson artifact_id "$ARTIFACT_ID" \
+            --arg name "$EXPECTED_NAME" --arg digest "$ARTIFACT_DIGEST" \
+            --argjson run "$GITHUB_RUN_ID" --arg sha "$MAIN_SHA" \
+            "$ARTIFACT_BINDING_FILTER" <<<"$ARTIFACT" >/dev/null || { echo 'backup artifact binding is not exact'; exit 1; }
+          echo "artifact_id=$ARTIFACT_ID" >> "$GITHUB_OUTPUT"
+          echo "artifact_name=$EXPECTED_NAME" >> "$GITHUB_OUTPUT"
+          echo "artifact_digest=$ARTIFACT_DIGEST" >> "$GITHUB_OUTPUT"
+      - name: Apply WAL-light recovery-journal backup
         env:
           RELEASE_RECOVERY_KEY: ${{ secrets.RELEASE_RECOVERY_KEY }}
           SUPABASE_PROJECT_REF: ${{ secrets.SUPABASE_PROJECT_REF }}
           SUPAVISOR_SESSION_URL: ${{ secrets.SUPAVISOR_SESSION_URL }}
           MAIN_SHA: ${{ steps.candidate.outputs.candidate_sha }}
+          BACKUP_ARTIFACT_ID: ${{ steps.backup_binding.outputs.artifact_id }}
+          BACKUP_ARTIFACT_NAME: ${{ steps.backup_binding.outputs.artifact_name }}
+          BACKUP_ARTIFACT_DIGEST: ${{ steps.backup_binding.outputs.artifact_digest }}
+          BACKUP_ARTIFACT_RUN_ID: ${{ github.run_id }}
         run: |
           set -euo pipefail; umask 077
-          test -n "$RELEASE_RECOVERY_KEY" && test -n "$SUPABASE_PROJECT_REF" && test -n "$SUPAVISOR_SESSION_URL"
-          "$RUNNER_TEMP/recovery-journal-compaction-venv/bin/python" -m scripts.compact_recovery_journals \
+          "$RUNNER_TEMP/recovery-journal-compaction-venv/bin/python" -m scripts.compact_recovery_journals apply \
             --project-ref "$SUPABASE_PROJECT_REF" \
             --admin-url "$SUPAVISOR_SESSION_URL" \
             --main-sha "$MAIN_SHA" \
             --expected-rows 467 \
             --expected-groups 45 \
+            --backup "$RUNNER_TEMP/recovery-journal-backup/recovery-journal-backup.json" \
+            --manifest "$RUNNER_TEMP/recovery-journal-backup/recovery-journal-backup-manifest.json" \
+            --backup-artifact-id "$BACKUP_ARTIFACT_ID" \
+            --backup-artifact-name "$BACKUP_ARTIFACT_NAME" \
+            --backup-artifact-digest "$BACKUP_ARTIFACT_DIGEST" \
+            --backup-artifact-run-id "$BACKUP_ARTIFACT_RUN_ID" \
             --output "$RUNNER_TEMP/recovery-journal-compaction.json"
       - name: Upload bounded recovery-journal compaction receipt
         id: compaction_receipt

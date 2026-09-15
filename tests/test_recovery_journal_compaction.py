@@ -8,6 +8,7 @@ from pathlib import Path
 import shutil
 import socket
 import subprocess
+import sys
 import tempfile
 
 from cryptography.fernet import Fernet
@@ -186,68 +187,7 @@ def _insert(
     ).fetchone()[0]
 
 
-def test_compaction_keeps_only_latest_authenticated_terminal_checkpoint_per_run(database):
-    module = _module()
-    key = Fernet.generate_key()
-    cipher = Fernet(key)
-    with psycopg.connect(database, autocommit=True) as connection:
-        _insert(
-            connection,
-            cipher,
-            run_id="350",
-            payload={**_terminal_payload(run_id="350"), "status": "preparing"},
-        )
-        kept_rolled_back = _insert(
-            connection,
-            cipher,
-            run_id="350",
-            payload=_terminal_payload(run_id="350"),
-        )
-        _insert(
-            connection,
-            cipher,
-            run_id="351",
-            payload={**_terminal_payload(run_id="351", status="verified"), "status": "recovery_required"},
-        )
-        kept_verified = _insert(
-            connection,
-            cipher,
-            run_id="351",
-            payload=_terminal_payload(run_id="351", status="verified"),
-        )
-
-    receipt = module.compact_recovery_journals(
-        admin_url=database,
-        project_ref=PROJECT_REF,
-        main_sha=MAIN_SHA,
-        recovery_key=key,
-    )
-
-    with psycopg.connect(database, autocommit=True) as connection:
-        rows = connection.execute(
-            "SELECT sequence,run_id FROM public.stock_agent_component_recovery_journals "
-            "ORDER BY sequence"
-        ).fetchall()
-        unique_indexes = connection.execute(
-            "SELECT indexdef FROM pg_indexes WHERE schemaname='public' "
-            "AND tablename='stock_agent_component_recovery_journals' "
-            "AND indexname='stock_agent_component_recovery_journals_run_identity'"
-        ).fetchall()
-
-    assert rows == [(kept_rolled_back, "350"), (kept_verified, "351")]
-    assert len(unique_indexes) == 1
-    assert receipt["format"] == "stocks-recovery-journal-compaction-v1"
-    assert receipt["main_sha"] == MAIN_SHA
-    assert receipt["before"] == {"groups": 2, "rows": 4}
-    assert receipt["after"] == {"groups": 2, "rows": 2}
-    assert receipt["deleted_rows"] == 2
-    assert receipt["terminal_statuses"] == {"rolled_back": 1, "verified": 1}
-    assert receipt["unique_identity"] is True
-    assert receipt["vacuum_full"] is True
-    assert len(receipt["retained_identity_sha256"]) == 64
-
-
-def test_compaction_rejects_an_unresolved_release_lease_without_deleting(database):
+def test_prepare_rejects_an_unresolved_release_lease_without_exporting(database, tmp_path):
     module = _module()
     key = Fernet.generate_key()
     cipher = Fernet(key)
@@ -260,11 +200,13 @@ def test_compaction_rejects_an_unresolved_release_lease_without_deleting(databas
         )
 
     with pytest.raises(RuntimeError, match="lease remains unresolved"):
-        module.compact_recovery_journals(
+        module.prepare_recovery_journal_backup(
             admin_url=database,
             project_ref=PROJECT_REF,
             main_sha=MAIN_SHA,
             recovery_key=key,
+            backup_path=tmp_path / "backup.json",
+            manifest_path=tmp_path / "manifest.json",
         )
 
     with psycopg.connect(database, autocommit=True) as connection:
@@ -273,7 +215,7 @@ def test_compaction_rejects_an_unresolved_release_lease_without_deleting(databas
         ).fetchone() == (2,)
 
 
-def test_compaction_rejects_a_nonterminal_latest_journal_atomically(database):
+def test_prepare_rejects_a_nonterminal_latest_journal_atomically(database, tmp_path):
     module = _module()
     key = Fernet.generate_key()
     cipher = Fernet(key)
@@ -287,11 +229,13 @@ def test_compaction_rejects_a_nonterminal_latest_journal_atomically(database):
         )
 
     with pytest.raises(RuntimeError, match="not terminal"):
-        module.compact_recovery_journals(
+        module.prepare_recovery_journal_backup(
             admin_url=database,
             project_ref=PROJECT_REF,
             main_sha=MAIN_SHA,
             recovery_key=key,
+            backup_path=tmp_path / "backup.json",
+            manifest_path=tmp_path / "manifest.json",
         )
 
     with psycopg.connect(database, autocommit=True) as connection:
@@ -304,7 +248,9 @@ def test_compaction_rejects_a_nonterminal_latest_journal_atomically(database):
         ).fetchone() == (0,)
 
 
-def test_compaction_rejects_a_retained_row_with_mismatched_authenticated_identity(database):
+def test_prepare_rejects_a_retained_row_with_mismatched_authenticated_identity(
+    database, tmp_path
+):
     module = _module()
     key = Fernet.generate_key()
     cipher = Fernet(key)
@@ -317,11 +263,13 @@ def test_compaction_rejects_a_retained_row_with_mismatched_authenticated_identit
         )
 
     with pytest.raises(RuntimeError, match="identity mismatch"):
-        module.compact_recovery_journals(
+        module.prepare_recovery_journal_backup(
             admin_url=database,
             project_ref=PROJECT_REF,
             main_sha=MAIN_SHA,
             recovery_key=key,
+            backup_path=tmp_path / "backup.json",
+            manifest_path=tmp_path / "manifest.json",
         )
 
     with psycopg.connect(database, autocommit=True) as connection:
@@ -330,34 +278,7 @@ def test_compaction_rejects_a_retained_row_with_mismatched_authenticated_identit
         ).fetchone() == (1,)
 
 
-def test_compaction_is_idempotent_after_the_unique_terminal_set_is_retained(database):
-    module = _module()
-    key = Fernet.generate_key()
-    cipher = Fernet(key)
-    with psycopg.connect(database, autocommit=True) as connection:
-        _insert(connection, cipher, run_id="350", payload=_terminal_payload(run_id="350"))
-        _insert(connection, cipher, run_id="350", payload=_terminal_payload(run_id="350"))
-
-    first = module.compact_recovery_journals(
-        admin_url=database,
-        project_ref=PROJECT_REF,
-        main_sha=MAIN_SHA,
-        recovery_key=key,
-    )
-    second = module.compact_recovery_journals(
-        admin_url=database,
-        project_ref=PROJECT_REF,
-        main_sha=MAIN_SHA,
-        recovery_key=key,
-    )
-
-    assert first["deleted_rows"] == 1
-    assert second["deleted_rows"] == 0
-    assert second["before"] == second["after"] == {"groups": 1, "rows": 1}
-    assert second["retained_identity_sha256"] == first["retained_identity_sha256"]
-
-
-def test_compaction_rejects_inventory_outside_the_approved_destructive_scope(database):
+def test_prepare_rejects_inventory_outside_the_approved_scope(database, tmp_path):
     module = _module()
     key = Fernet.generate_key()
     cipher = Fernet(key)
@@ -366,11 +287,13 @@ def test_compaction_rejects_inventory_outside_the_approved_destructive_scope(dat
         _insert(connection, cipher, run_id="350", payload=_terminal_payload(run_id="350"))
 
     with pytest.raises(RuntimeError, match="approved inventory changed"):
-        module.compact_recovery_journals(
+        module.prepare_recovery_journal_backup(
             admin_url=database,
             project_ref=PROJECT_REF,
             main_sha=MAIN_SHA,
             recovery_key=key,
+            backup_path=tmp_path / "backup.json",
+            manifest_path=tmp_path / "manifest.json",
             expected_rows=467,
             expected_groups=45,
         )
@@ -640,6 +563,54 @@ def test_apply_uses_truncate_restore_without_delete_or_vacuum_full(database, tmp
     assert "statement: VACUUM (FULL" not in statements
 
 
+def test_apply_does_not_load_obsolete_ciphertext_when_latest_is_authenticated(
+    database, tmp_path
+):
+    module = _module()
+    key = Fernet.generate_key()
+    cipher = Fernet(key)
+    with psycopg.connect(database, autocommit=True) as connection:
+        connection.execute(
+            "INSERT INTO public.stock_agent_component_recovery_journals("
+            "project_ref,candidate_sha,run_id,run_attempt,ciphertext) "
+            "VALUES(%s,%s,'350','1',%s)",
+            (PROJECT_REF, MAIN_SHA, b"\xff" * 1024),
+        )
+        kept = _insert(
+            connection,
+            cipher,
+            run_id="350",
+            payload=_terminal_payload(run_id="350"),
+        )
+    backup_path = tmp_path / "backup.json"
+    manifest_path = tmp_path / "manifest.json"
+    module.prepare_recovery_journal_backup(
+        admin_url=database,
+        project_ref=PROJECT_REF,
+        main_sha=MAIN_SHA,
+        recovery_key=key,
+        backup_path=backup_path,
+        manifest_path=manifest_path,
+        expected_rows=2,
+        expected_groups=1,
+    )
+
+    receipt = module.apply_recovery_journal_backup(
+        admin_url=database,
+        project_ref=PROJECT_REF,
+        main_sha=MAIN_SHA,
+        recovery_key=key,
+        backup_path=backup_path,
+        manifest_path=manifest_path,
+        backup_artifact=_artifact_binding(),
+        expected_rows=2,
+        expected_groups=1,
+    )
+
+    assert [row[0] for row in _journal_rows(database)] == [kept]
+    assert receipt["removed_redundant_rows"] == 1
+
+
 def test_apply_rejects_an_unbound_backup_without_mutating(database, tmp_path):
     module, key, backup_path, manifest_path, _ = _prepare_two_identity_backup(
         database, tmp_path
@@ -744,3 +715,122 @@ def test_apply_is_idempotent_after_exact_restore(database, tmp_path):
     assert second["before"] == second["after"] == {"groups": 2, "rows": 2}
     assert second["retained_identity_sha256"] == first["retained_identity_sha256"]
     assert [row[0] for row in _journal_rows(database)] == kept
+
+
+def test_explicit_cli_commands_round_trip_the_verified_backup(
+    database, tmp_path, monkeypatch, capsys
+):
+    module = _module()
+    key = Fernet.generate_key()
+    cipher = Fernet(key)
+    with psycopg.connect(database, autocommit=True) as connection:
+        _insert(connection, cipher, run_id="350", payload=_terminal_payload(run_id="350"))
+        _insert(connection, cipher, run_id="350", payload=_terminal_payload(run_id="350"))
+    backup_path = tmp_path / "recovery-journal-backup.json"
+    manifest_path = tmp_path / "recovery-journal-backup-manifest.json"
+    receipt_path = tmp_path / "recovery-journal-compaction.json"
+    common = [
+        "--project-ref",
+        PROJECT_REF,
+        "--main-sha",
+        MAIN_SHA,
+        "--expected-rows",
+        "2",
+        "--expected-groups",
+        "1",
+    ]
+    monkeypatch.setenv("RELEASE_RECOVERY_KEY", key.decode("ascii"))
+    from scripts import deploy_owner_dashboard_api
+
+    monkeypatch.setattr(
+        deploy_owner_dashboard_api,
+        "validate_release_admin_session_url",
+        lambda project_ref, admin_url: admin_url,
+    )
+
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "compact_recovery_journals.py",
+            "prepare",
+            *common,
+            "--admin-url",
+            database,
+            "--backup",
+            str(backup_path),
+            "--manifest",
+            str(manifest_path),
+        ],
+    )
+    assert module.main() == 0
+    prepare_stdout = capsys.readouterr().out
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "compact_recovery_journals.py",
+            "verify",
+            *common,
+            "--backup",
+            str(backup_path),
+            "--manifest",
+            str(manifest_path),
+        ],
+    )
+    assert module.main() == 0
+    verify_stdout = capsys.readouterr().out
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "compact_recovery_journals.py",
+            "apply",
+            *common,
+            "--admin-url",
+            database,
+            "--backup",
+            str(backup_path),
+            "--manifest",
+            str(manifest_path),
+            "--backup-artifact-id",
+            "42",
+            "--backup-artifact-name",
+            "recovery-journal-backup-123-1",
+            "--backup-artifact-digest",
+            "sha256:" + "b" * 64,
+            "--backup-artifact-run-id",
+            "123",
+            "--output",
+            str(receipt_path),
+        ],
+    )
+    assert module.main() == 0
+    apply_stdout = capsys.readouterr().out
+    assert json.loads(prepare_stdout)["format"] == (
+        "stocks-recovery-journal-backup-manifest-v1"
+    )
+    assert json.loads(verify_stdout)["format"] == (
+        "stocks-recovery-journal-backup-manifest-v1"
+    )
+    assert json.loads(apply_stdout)["format"] == "stocks-recovery-journal-compaction-v2"
+    assert json.loads(receipt_path.read_bytes()) == json.loads(apply_stdout)
+
+
+def test_legacy_direct_compaction_entrypoint_fails_closed(database):
+    module = _module()
+    key = Fernet.generate_key()
+    cipher = Fernet(key)
+    with psycopg.connect(database, autocommit=True) as connection:
+        _insert(connection, cipher, run_id="350", payload=_terminal_payload(run_id="350"))
+        _insert(connection, cipher, run_id="350", payload=_terminal_payload(run_id="350"))
+
+    with pytest.raises(RuntimeError, match="artifact-bound backup is required"):
+        module.compact_recovery_journals(
+            admin_url=database,
+            project_ref=PROJECT_REF,
+            main_sha=MAIN_SHA,
+            recovery_key=key,
+        )
+
+    assert len(_journal_rows(database)) == 2

@@ -696,28 +696,34 @@ def apply_recovery_journal_backup(
             try:
                 connection.execute(f"LOCK TABLE {JOURNALS} IN ACCESS EXCLUSIVE MODE")
                 before_rows, before_groups = _inventory(connection)
-                current_records = _all_records(connection)
-                latest_records = _latest_records(connection)
-                source_matches = (
-                    (before_rows, before_groups) == (source["rows"], source["groups"])
-                    and latest_records == records
-                )
-                complete_matches = (
-                    before_rows == before_groups == len(records)
-                    and current_records == records
-                )
-                current_by_identity = {
-                    _record_identity(record): record for record in current_records
-                }
-                subset_matches = (
-                    before_rows == before_groups
-                    and before_rows < len(records)
-                    and len(current_by_identity) == before_rows
-                    and all(
-                        retained_by_identity.get(identity) == record
-                        for identity, record in current_by_identity.items()
+                source_matches = False
+                complete_matches = False
+                subset_matches = False
+                current_by_identity: dict[
+                    tuple[object, object, object, object], Mapping[str, object]
+                ] = {}
+                if (before_rows, before_groups) == (
+                    source["rows"],
+                    source["groups"],
+                ):
+                    source_matches = _latest_records(connection) == records
+                    if source_matches and before_rows == len(records):
+                        complete_matches = True
+                        current_by_identity = dict(retained_by_identity)
+                elif before_rows == before_groups and before_rows <= len(records):
+                    current_records = _all_records(connection)
+                    current_by_identity = {
+                        _record_identity(record): record for record in current_records
+                    }
+                    complete_matches = before_rows == len(records) and current_records == records
+                    subset_matches = (
+                        before_rows < len(records)
+                        and len(current_by_identity) == before_rows
+                        and all(
+                            retained_by_identity.get(identity) == record
+                            for identity, record in current_by_identity.items()
+                        )
                     )
-                )
                 _require(
                     source_matches or complete_matches or subset_matches,
                     "recovery journal state does not match the verified backup",
@@ -832,162 +838,8 @@ def compact_recovery_journals(
     expected_rows: int | None = None,
     expected_groups: int | None = None,
 ) -> dict[str, object]:
-    """Keep one authenticated terminal checkpoint per run under the release lock."""
-    _require(bool(PROJECT_REF.fullmatch(project_ref)), "exact project reference is required")
-    _require(bool(SHA.fullmatch(main_sha)), "exact main SHA is required")
-    _require(
-        (expected_rows is None and expected_groups is None)
-        or (
-            type(expected_rows) is int
-            and type(expected_groups) is int
-            and 0 < expected_groups <= expected_rows <= MAX_JOURNAL_ROWS
-        ),
-        "approved recovery journal inventory is invalid",
-    )
-    try:
-        cipher = Fernet(recovery_key)
-    except (TypeError, ValueError) as error:
-        raise RuntimeError("valid release recovery key is required") from error
-
-    started_at = datetime.now(timezone.utc).isoformat()
-    with psycopg.connect(admin_url, autocommit=True, row_factory=dict_row) as connection:
-        connection.execute("SET statement_timeout='300s'")
-        connection.execute("SET lock_timeout='15s'")
-        locked = connection.execute(
-            "SELECT pg_try_advisory_lock(hashtextextended('stock_agent_protected_release',0)) AS locked"
-        ).fetchone()["locked"]
-        _require(locked is True, "another protected release or recovery holds the mutation lock")
-        try:
-            leases = connection.execute(
-                f"SELECT owner,kind,state,expires_at>statement_timestamp() AS live "
-                f"FROM {LEASE} WHERE singleton"
-            ).fetchall()
-            _require(len(leases) == 1, "protected release lease receipt is unavailable")
-            _require(
-                leases[0]["state"] == "resolved" and leases[0]["live"] is False,
-                "protected release or recovery lease remains unresolved",
-            )
-            before_relation_bytes = _relation_size(connection)
-            before_database_bytes = _database_size(connection)
-            before_rows, before_groups = _inventory(connection)
-            _require(
-                before_rows <= MAX_JOURNAL_ROWS,
-                "recovery journal inventory exceeds the bounded maintenance limit",
-            )
-            if expected_rows is not None and expected_groups is not None:
-                _require(
-                    (before_rows, before_groups) == (expected_rows, expected_groups)
-                    or (before_rows, before_groups) == (expected_groups, expected_groups),
-                    "approved inventory changed before recovery journal compaction",
-                )
-
-            connection.execute("BEGIN")
-            try:
-                connection.execute(f"LOCK TABLE {JOURNALS} IN ACCESS EXCLUSIVE MODE")
-                latest = connection.execute(
-                    f"SELECT DISTINCT ON (project_ref,candidate_sha,run_id,run_attempt) "
-                    f"sequence,project_ref,candidate_sha,run_id,run_attempt,ciphertext "
-                    f"FROM {JOURNALS} ORDER BY project_ref,candidate_sha,run_id,run_attempt,sequence DESC"
-                ).fetchall()
-                _require(len(latest) == before_groups, "latest recovery journal inventory is incomplete")
-                retained = []
-                statuses: Counter[str] = Counter()
-                for row in latest:
-                    _require(
-                        isinstance(row["project_ref"], str)
-                        and row["project_ref"] == project_ref
-                        and isinstance(row["candidate_sha"], str)
-                        and bool(SHA.fullmatch(row["candidate_sha"]))
-                        and isinstance(row["run_id"], str)
-                        and bool(RUN_ID.fullmatch(row["run_id"]))
-                        and isinstance(row["run_attempt"], str)
-                        and bool(RUN_ID.fullmatch(row["run_attempt"])),
-                        "recovery journal row identity is malformed",
-                    )
-                    status, ciphertext_sha256 = _authenticate_terminal_journal(
-                        row, cipher, project_ref
-                    )
-                    statuses[status] += 1
-                    retained.append(
-                        {
-                            "sequence": int(row["sequence"]),
-                            "candidate_sha": row["candidate_sha"],
-                            "run_id": int(row["run_id"]),
-                            "run_attempt": int(row["run_attempt"]),
-                            "status": status,
-                            "ciphertext_sha256": ciphertext_sha256,
-                        }
-                    )
-                deleted = connection.execute(
-                    f"DELETE FROM {JOURNALS} WHERE sequence NOT IN "
-                    f"(SELECT max(sequence) FROM {JOURNALS} "
-                    f"GROUP BY project_ref,candidate_sha,run_id,run_attempt)"
-                ).rowcount
-                _require(
-                    deleted == before_rows - before_groups,
-                    "recovery journal deletion count is inconsistent",
-                )
-                connection.execute(
-                    f"CREATE UNIQUE INDEX IF NOT EXISTS {JOURNAL_IDENTITY_INDEX} "
-                    f"ON {JOURNALS}(project_ref,candidate_sha,run_id,run_attempt)"
-                )
-                _require(
-                    _unique_identity_is_exact(connection),
-                    "recovery journal unique identity is unavailable",
-                )
-                connection.execute("COMMIT")
-            except BaseException:
-                connection.execute("ROLLBACK")
-                raise
-
-            connection.execute(f"VACUUM (FULL,ANALYZE) {JOURNALS}")
-            after_rows, after_groups = _inventory(connection)
-            _require(
-                (after_rows, after_groups) == (before_groups, before_groups),
-                "recovery journal compaction readback is inconsistent",
-            )
-            _require(
-                _unique_identity_is_exact(connection),
-                "recovery journal unique identity readback failed",
-            )
-            receipt = {
-                "format": "stocks-recovery-journal-compaction-v1",
-                "project_ref": project_ref,
-                "main_sha": main_sha,
-                "started_at": started_at,
-                "completed_at": datetime.now(timezone.utc).isoformat(),
-                "lease": {
-                    "owner": leases[0]["owner"],
-                    "kind": leases[0]["kind"],
-                    "state": "resolved",
-                    "live": False,
-                },
-                "before": {"groups": before_groups, "rows": before_rows},
-                "after": {"groups": after_groups, "rows": after_rows},
-                "approved_inventory": (
-                    None
-                    if expected_rows is None
-                    else {"groups": expected_groups, "rows": expected_rows}
-                ),
-                "deleted_rows": deleted,
-                "terminal_statuses": dict(sorted(statuses.items())),
-                "retained_identity_sha256": hashlib.sha256(canonical(retained)).hexdigest(),
-                "relation_bytes_before": before_relation_bytes,
-                "relation_bytes_after": _relation_size(connection),
-                "database_bytes_before": before_database_bytes,
-                "database_bytes_after": _database_size(connection),
-                "unique_identity": True,
-                "vacuum_full": True,
-            }
-            _require(
-                len(_canonical_json(receipt).encode()) <= MAX_RECEIPT_BYTES,
-                "recovery journal compaction receipt exceeds its bound",
-            )
-            return receipt
-        finally:
-            connection.execute(
-                "SELECT pg_advisory_unlock(hashtextextended('stock_agent_protected_release',0))"
-            )
+    """Reject the obsolete mutation path, which has no durable artifact boundary."""
+    raise RuntimeError("artifact-bound backup is required for recovery journal compaction")
 
 
 def _write_receipt(path: Path, receipt: Mapping[str, object]) -> None:
@@ -1009,27 +861,65 @@ def _write_receipt(path: Path, receipt: Mapping[str, object]) -> None:
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--project-ref", required=True)
-    parser.add_argument("--admin-url", required=True)
-    parser.add_argument("--main-sha", required=True)
-    parser.add_argument("--expected-rows", required=True, type=int)
-    parser.add_argument("--expected-groups", required=True, type=int)
-    parser.add_argument("--output", required=True, type=Path)
-    arguments = parser.parse_args()
-    from scripts.deploy_owner_dashboard_api import validate_release_admin_session_url
+    commands = parser.add_subparsers(dest="command", required=True)
 
-    admin_url = validate_release_admin_session_url(arguments.project_ref, arguments.admin_url)
+    def add_common(command: argparse.ArgumentParser) -> None:
+        command.add_argument("--project-ref", required=True)
+        command.add_argument("--main-sha", required=True)
+        command.add_argument("--expected-rows", required=True, type=int)
+        command.add_argument("--expected-groups", required=True, type=int)
+        command.add_argument("--backup", required=True, type=Path)
+        command.add_argument("--manifest", required=True, type=Path)
+
+    prepare = commands.add_parser("prepare", help="export the authenticated retained set")
+    add_common(prepare)
+    prepare.add_argument("--admin-url", required=True)
+
+    verify = commands.add_parser("verify", help="authenticate an exported retained set")
+    add_common(verify)
+
+    apply = commands.add_parser("apply", help="apply an artifact-bound retained set")
+    add_common(apply)
+    apply.add_argument("--admin-url", required=True)
+    apply.add_argument("--backup-artifact-id", required=True, type=int)
+    apply.add_argument("--backup-artifact-name", required=True)
+    apply.add_argument("--backup-artifact-digest", required=True)
+    apply.add_argument("--backup-artifact-run-id", required=True, type=int)
+    apply.add_argument("--output", required=True, type=Path)
+
+    arguments = parser.parse_args()
     key = os.environ.get("RELEASE_RECOVERY_KEY", "").encode()
-    receipt = compact_recovery_journals(
-        admin_url=admin_url,
-        project_ref=arguments.project_ref,
-        main_sha=arguments.main_sha,
-        recovery_key=key,
-        expected_rows=arguments.expected_rows,
-        expected_groups=arguments.expected_groups,
-    )
-    _write_receipt(arguments.output, receipt)
-    print(_canonical_json(receipt))
+    common = {
+        "project_ref": arguments.project_ref,
+        "main_sha": arguments.main_sha,
+        "recovery_key": key,
+        "backup_path": arguments.backup,
+        "manifest_path": arguments.manifest,
+        "expected_rows": arguments.expected_rows,
+        "expected_groups": arguments.expected_groups,
+    }
+    if arguments.command in {"prepare", "apply"}:
+        from scripts.deploy_owner_dashboard_api import validate_release_admin_session_url
+
+        common["admin_url"] = validate_release_admin_session_url(
+            arguments.project_ref, arguments.admin_url
+        )
+    if arguments.command == "prepare":
+        result = prepare_recovery_journal_backup(**common)
+    elif arguments.command == "verify":
+        result = verify_recovery_journal_backup(**common)
+    else:
+        result = apply_recovery_journal_backup(
+            **common,
+            backup_artifact={
+                "id": arguments.backup_artifact_id,
+                "name": arguments.backup_artifact_name,
+                "digest": arguments.backup_artifact_digest,
+                "workflow_run_id": arguments.backup_artifact_run_id,
+            },
+        )
+        _write_receipt(arguments.output, result)
+    print(_canonical_json(result))
     return 0
 
 

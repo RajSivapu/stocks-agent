@@ -75,16 +75,54 @@ def test_recovery_journal_compaction_workflow_is_exact_review_bound_and_trigger_
     assert "OWNER_RECOVERY_JOURNAL_COMPACTION_APPROVAL_V1" in trust
     assert "OWNER_RELEASE_APPROVAL_V1" not in trust
     assert ".author_association == \"OWNER\"" in trust
-    cleanup = steps["Compact authenticated terminal recovery journals"]
-    assert cleanup["env"] == {
+    assert "INPUT_RESUME_BACKUP_ARTIFACT_ID" in trust
+    assert "resume_backup_artifact_id" in workflow[True]["workflow_dispatch"]["inputs"]
+    stage = steps["Prepare or download authenticated recovery-journal backup"]
+    assert stage["env"] == {
+        "GH_TOKEN": "${{ github.token }}",
         "RELEASE_RECOVERY_KEY": "${{ secrets.RELEASE_RECOVERY_KEY }}",
         "SUPABASE_PROJECT_REF": "${{ secrets.SUPABASE_PROJECT_REF }}",
         "SUPAVISOR_SESSION_URL": "${{ secrets.SUPAVISOR_SESSION_URL }}",
         "MAIN_SHA": "${{ steps.candidate.outputs.candidate_sha }}",
+        "RESUME_BACKUP_ARTIFACT_ID": (
+            "${{ steps.candidate.outputs.resume_backup_artifact_id }}"
+        ),
     }
-    assert "-m scripts.compact_recovery_journals" in cleanup["run"]
-    assert "--expected-rows 467" in cleanup["run"]
-    assert "--expected-groups 45" in cleanup["run"]
+    assert "-m scripts.compact_recovery_journals prepare" in stage["run"]
+    assert "actions/artifacts/$RESUME_BACKUP_ARTIFACT_ID" in stage["run"]
+    assert ".workflow_run.head_sha == $sha" in stage["run"]
+    assert ".size_in_bytes <= 201326592" in stage["run"]
+    assert ".path == \".github/workflows/recovery-journal-compaction.yml\"" in stage["run"]
+    verify = steps["Authenticate the staged recovery-journal backup"]
+    assert "-m scripts.compact_recovery_journals verify" in verify["run"]
+    backup_upload = steps["Upload encrypted recovery-journal backup before mutation"]
+    assert backup_upload["with"]["retention-days"] == 1
+    assert backup_upload["with"]["compression-level"] == 0
+    assert re.fullmatch(r"actions/upload-artifact@[0-9a-f]{40}", backup_upload["uses"])
+    backup_binding = steps["Bind backup artifact to this exact main run"]
+    assert backup_binding["env"] == {
+        "GH_TOKEN": "${{ github.token }}",
+        "ARTIFACT_ID": "${{ steps.backup_artifact.outputs.artifact-id }}",
+        "ACTION_ARTIFACT_DIGEST": "${{ steps.backup_artifact.outputs.artifact-digest }}",
+        "MAIN_SHA": "${{ steps.candidate.outputs.candidate_sha }}",
+    }
+    assert ".workflow_run.id == $run" in backup_binding["run"]
+    assert ".workflow_run.head_sha == $sha" in backup_binding["run"]
+    assert ".size_in_bytes <= 201326592" in backup_binding["run"]
+    apply = steps["Apply WAL-light recovery-journal backup"]
+    assert apply["env"] == {
+        "RELEASE_RECOVERY_KEY": "${{ secrets.RELEASE_RECOVERY_KEY }}",
+        "SUPABASE_PROJECT_REF": "${{ secrets.SUPABASE_PROJECT_REF }}",
+        "SUPAVISOR_SESSION_URL": "${{ secrets.SUPAVISOR_SESSION_URL }}",
+        "MAIN_SHA": "${{ steps.candidate.outputs.candidate_sha }}",
+        "BACKUP_ARTIFACT_ID": "${{ steps.backup_binding.outputs.artifact_id }}",
+        "BACKUP_ARTIFACT_NAME": "${{ steps.backup_binding.outputs.artifact_name }}",
+        "BACKUP_ARTIFACT_DIGEST": "${{ steps.backup_binding.outputs.artifact_digest }}",
+        "BACKUP_ARTIFACT_RUN_ID": "${{ github.run_id }}",
+    }
+    assert "-m scripts.compact_recovery_journals apply" in apply["run"]
+    assert "--expected-rows 467" in apply["run"]
+    assert "--expected-groups 45" in apply["run"]
     upload = steps["Upload bounded recovery-journal compaction receipt"]
     assert upload["with"]["retention-days"] == 90
     assert re.fullmatch(r"actions/upload-artifact@[0-9a-f]{40}", upload["uses"])
@@ -98,6 +136,13 @@ def test_recovery_journal_compaction_workflow_is_exact_review_bound_and_trigger_
     assert ".workflow_run.id == $run" in binding["run"]
     assert ".workflow_run.head_sha == $sha" in binding["run"]
     assert ".size_in_bytes <= 65536" in binding["run"]
+    names = [step.get("name") for step in job["steps"]]
+    assert names.index("Upload encrypted recovery-journal backup before mutation") < names.index(
+        "Apply WAL-light recovery-journal backup"
+    )
+    assert names.index("Bind backup artifact to this exact main run") < names.index(
+        "Apply WAL-light recovery-journal backup"
+    )
     assert "collect_market_intelligence" not in source
     assert "start_run" not in source
     assert "telegram-portfolio" not in source

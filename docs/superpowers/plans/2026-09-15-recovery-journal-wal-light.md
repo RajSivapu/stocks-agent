@@ -157,7 +157,7 @@ git commit -m "fix: compact journals with resumable truncate restore"
 - Produces: one-day artifact `recovery-journal-backup-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}` containing only the encrypted bundle and manifest.
 - Consumes: Task 1 `prepare`/`verify` and Task 2 `apply` CLI commands.
 
-- [ ] **Step 1: Write the failing workflow behavior test**
+- [x] **Step 1: Write the failing workflow behavior test**
 
 Parse the workflow and assert step order is authenticate, checkout, prepare-or-
 download, offline verify, upload backup, bind backup, apply, upload receipt, bind
@@ -166,13 +166,13 @@ path validates the source artifact repository, workflow path, exact current main
 SHA, digest, expiry, and 192 MiB size; backup retention is one day; the receipt
 retention remains 90 days; and no collector/Telegram entrypoint exists.
 
-- [ ] **Step 2: Run the workflow test and verify RED**
+- [x] **Step 2: Run the workflow test and verify RED**
 
 Run: `.venv/bin/python -m pytest tests/test_owner_dashboard_release_workflow.py::test_recovery_journal_compaction_workflow_is_exact_review_bound_and_trigger_free -q`
 
 Expected: FAIL because the current workflow mutates before uploading any backup.
 
-- [ ] **Step 3: Implement the backup-first and resume orchestration**
+- [x] **Step 3: Implement the backup-first and resume orchestration**
 
 Add the optional numeric input. A fresh run calls `prepare`; a resume run downloads
 and validates its exact artifact. Both call `verify`, upload a fresh one-day copy,
@@ -180,13 +180,13 @@ bind its API metadata to this exact run/main SHA, and only then call `apply` wit
 the artifact ID/name/digest/workflow-run ID. Keep pinned action SHAs, environment,
 permissions, and shared production concurrency.
 
-- [ ] **Step 4: Run focused compaction/workflow tests and verify GREEN**
+- [x] **Step 4: Run focused compaction/workflow tests and verify GREEN**
 
 Run: `.venv/bin/python -m pytest tests/test_recovery_journal_compaction.py tests/test_owner_dashboard_release_workflow.py -q`
 
 Expected: PASS.
 
-- [ ] **Step 5: Commit workflow orchestration**
+- [x] **Step 5: Commit workflow orchestration**
 
 ```bash
 git add .github/workflows/recovery-journal-compaction.yml tests/test_owner_dashboard_release_workflow.py
