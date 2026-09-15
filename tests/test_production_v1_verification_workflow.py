@@ -51,3 +51,15 @@ def test_production_v1_verification_fetches_its_release_pr_head_without_executin
     assert 'refs/pull/${PULL_REQUEST_NUMBER}/head' in raw
     fetch_step = raw[fetch:verify]
     assert "git checkout" not in fetch_step
+
+
+def test_production_v1_verification_uploads_safe_diagnostic_when_run_is_nonterminal():
+    raw = Path(".github/workflows/production-v1-verification.yml").read_text()
+
+    assert "--diagnose-scheduled-run" in raw
+    assert "scheduled-run-diagnostic.json" in raw
+    assert "production-scheduled-diagnostic-${{ github.run_id }}-${{ github.run_attempt }}" in raw
+    diagnostic_upload = raw.index("Upload sanitized scheduled-run diagnostic")
+    final_upload = raw.index("Upload immutable V1 verification receipt")
+    assert diagnostic_upload < final_upload
+    assert "if: always()" in raw[diagnostic_upload:final_upload]

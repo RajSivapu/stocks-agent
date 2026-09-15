@@ -2126,6 +2126,112 @@ def one(rows: object, label: str) -> Mapping:
     return rows[0]
 
 
+def scheduled_run_diagnostic(rows: Mapping, run_id: str) -> dict:
+    """Return bounded stage metadata for a scheduled run without report content."""
+    require(UUID.fullmatch(run_id) is not None, "scheduled diagnostic run UUID is invalid")
+    run = one(rows.get("run"), "run")
+    require(run.get("id") == run_id, "scheduled diagnostic run identity mismatch")
+
+    count_keys = {
+        "gateway_requests": "requests",
+        "discovery_tasks": "discovery_stage_tasks",
+        "source_quota_reservations": "source_quota_reservations",
+        "source_receipts": "source_receipts",
+        "source_items": "source_items",
+        "intelligence_run_items": "intelligence_run_items",
+        "collection_checkpoints": "checkpoints",
+        "collection_completions": "completions",
+        "evidence_packets": "packets",
+        "evaluation_publications": "evaluation_publications",
+        "reports": "reports",
+        "report_publications": "publications",
+        "terminal_outcomes": "run_outcomes",
+        "enrichment_selection_manifests": "enrichment_selection_manifests",
+        "enrichment_request_descriptors": "enrichment_request_descriptors",
+    }
+    stage_counts = {}
+    for label, key in count_keys.items():
+        value = rows.get(key, [])
+        require(isinstance(value, list), f"scheduled diagnostic {key} rows are malformed")
+        stage_counts[label] = len(value)
+
+    stage_order = (
+        "gateway_requests", "discovery_tasks", "source_receipts",
+        "collection_checkpoints", "collection_completions", "evidence_packets",
+        "evaluation_publications", "reports", "report_publications",
+        "terminal_outcomes",
+    )
+    last_persisted_stage = next(
+        (label for label in reversed(stage_order) if stage_counts[label]),
+        "run_started",
+    )
+
+    event_statuses: dict[str, int] = {}
+    for row in rows.get("run_events", []):
+        require(isinstance(row, Mapping) and row.get("run_id") == run_id,
+                "scheduled diagnostic run event is malformed")
+        status = str(row.get("status") or "unknown")
+        event_statuses[status] = event_statuses.get(status, 0) + 1
+
+    request_status_counts: dict[tuple[str, str], int] = {}
+    for row in rows.get("requests", []):
+        require(isinstance(row, Mapping), "scheduled diagnostic request is malformed")
+        key = (str(row.get("operation") or "unknown"), str(row.get("status") or "unknown"))
+        request_status_counts[key] = request_status_counts.get(key, 0) + 1
+
+    discovery_tasks = []
+    for row in rows.get("discovery_stage_tasks", []):
+        require(isinstance(row, Mapping) and row.get("run_id") == run_id,
+                "scheduled diagnostic discovery task is malformed")
+        discovery_tasks.append({
+            "stage": row.get("stage"),
+            "capability_id": row.get("capability_id"),
+            "provider": row.get("provider"),
+            "query_kind": row.get("query_kind"),
+            "state": row.get("state"),
+            "attempt_count": row.get("attempt_count"),
+        })
+    discovery_tasks.sort(key=lambda row: tuple(str(row[key]) for key in (
+        "stage", "capability_id", "provider", "query_kind", "state",
+    )))
+
+    checkpoint_hashes = []
+    for row in rows.get("checkpoints", []):
+        require(isinstance(row, Mapping) and row.get("run_id") == run_id
+                and isinstance(row.get("cache_key"), str),
+                "scheduled diagnostic checkpoint is malformed")
+        checkpoint_hashes.append(hashlib.sha256(row["cache_key"].encode()).hexdigest())
+
+    telegram_message_ids = run.get("telegram_message_ids")
+    require(isinstance(telegram_message_ids, list),
+            "scheduled diagnostic Telegram receipt is malformed")
+    terminal = run.get("status") in {"completed", "suppressed", "failed"}
+    return {
+        "status": "terminal" if terminal else "nonterminal",
+        "run": {
+            "id": run_id,
+            "kind": run.get("kind"),
+            "phase": run.get("scheduled_phase"),
+            "market_date": run.get("scheduled_market_date"),
+            "attempt": run.get("scheduled_attempt"),
+            "status": run.get("status"),
+            "started_at": run.get("started_at"),
+            "finished_at": run.get("finished_at"),
+            "has_gateway_request_id": bool(run.get("gateway_request_id")),
+            "telegram_message_count": len(telegram_message_ids),
+        },
+        "last_persisted_stage": last_persisted_stage,
+        "stage_counts": stage_counts,
+        "run_event_statuses": dict(sorted(event_statuses.items())),
+        "request_statuses": [
+            {"operation": operation, "status": status, "count": count}
+            for (operation, status), count in sorted(request_status_counts.items())
+        ],
+        "discovery_tasks": discovery_tasks,
+        "checkpoint_key_hashes": sorted(checkpoint_hashes),
+    }
+
+
 def report_identity(kind: str, market_date: str, packet_hash: str, report_hash: str) -> tuple[str, str]:
     key = sha256(f"v2:{kind}:{market_date}:{packet_hash}:{report_hash}".encode())
     return key, f"{key[:8]}-{key[8:12]}-5{key[13:16]}-8{key[17:20]}-{key[20:32]}"
@@ -2526,9 +2632,23 @@ def main() -> int:
         "--native-site-archive", type=Path,
         help="optional local package bytes; never closes owner-Site provenance",
     )
+    parser.add_argument(
+        "--diagnose-scheduled-run", action="store_true",
+        help="emit sanitized stage metadata for the next postdeployment scheduled run",
+    )
     args = parser.parse_args()
     with PostgresReadOnlySource(os.environ.get("RELEASE_READONLY_DATABASE_URL", ""), args.production_project_ref) as database:
         source = GitHubProductionDataSource(args.repository, args.production_project_ref, database)
+        if args.diagnose_scheduled_run:
+            release = source.deployment(args.deployment_id)
+            run_id = source.scheduled_run(release["deployed_at"])
+            diagnostic = scheduled_run_diagnostic(source.release_rows(run_id), run_id)
+            diagnostic.update({
+                "candidate_sha": release["candidate_sha"],
+                "deployment_id": args.deployment_id,
+            })
+            print(json.dumps(diagnostic, sort_keys=True))
+            return 0
         from scripts.verify_native_site_release import _load_bytes
         print(json.dumps(verify_release(source, deployment_id=args.deployment_id,
             native_site_archive=(
