@@ -116,7 +116,7 @@ git commit -m "feat: model bounded intelligence lanes"
 - Produces: SQL guards that require scheduled analysis runs to use `alert`, require research to use an `on-demand` analysis run, and prevent research runs from recording reports or report publications.
 - Consumes: the current six-argument `start_market_intelligence_run`, packet hash contract, NYSE session table, report functions, and additive migration/restore conventions.
 
-- [ ] **Step 1: Write the failing SQL integration tests**
+- [x] **Step 1: Write the failing SQL integration tests**
 
 Create PostgreSQL-backed tests that apply the full schema and assert:
 
@@ -133,31 +133,31 @@ SELECT start_market_intelligence_run(
 
 The tests must reject a scheduled `research` lane, reject an `on-demand` `alert` lane, reject a duplicate with a different lane, reject `record_market_report` for research, return only a completed prior-session research packet, omit packets older than five calendar days, and preserve the same lane and packet after a recovery export/import.
 
-- [ ] **Step 2: Run the SQL test and confirm the seven-argument function is absent**
+- [x] **Step 2: Run the SQL test and confirm the seven-argument function is absent**
 
 Run: `.venv/bin/python -m pytest tests/test_telegram_fast_lane_sql.py -q`
 
 Expected: FAIL because the lane column, overload, reader, and guards do not exist.
 
-- [ ] **Step 3: Implement the additive migration**
+- [x] **Step 3: Implement the additive migration**
 
 Add the lane column with an explicit backfill: existing scheduled runs become `alert`; existing on-demand runs become `research`. Replace the current authoritative start function with a seven-argument function and retain a six-argument compatibility wrapper that derives the same lane rule. Add the read function as `SECURITY DEFINER SET search_path=pg_catalog`, revoke it from public/dashboard roles, and grant only `service_role`. Replace the authoritative report mutation functions with early lane checks.
 
-- [ ] **Step 4: Mirror the migration exactly into the consolidated schema**
+- [x] **Step 4: Mirror the migration exactly into the consolidated schema**
 
 Append the migration under a `-- Consolidated from sql/migrations/20261031_telegram_fast_lane.sql` marker. Keep the standalone migration byte-for-byte represented after that marker so fresh installs and upgrades expose the same functions and grants.
 
-- [ ] **Step 5: Extend recovery coverage**
+- [x] **Step 5: Extend recovery coverage**
 
 Add `lane` to the protected data export/import column allowlists and assertions. Verify a restored research packet remains linked to its research lane and does not gain publication authority.
 
-- [ ] **Step 6: Run SQL and recovery tests**
+- [x] **Step 6: Run SQL and recovery tests**
 
 Run: `.venv/bin/python -m pytest tests/test_telegram_fast_lane_sql.py tests/test_managed_isolated_restore.py tests/test_recovery_bundle.py -q`
 
 Expected: PASS.
 
-- [ ] **Step 7: Commit persistence changes**
+- [x] **Step 7: Commit persistence changes**
 
 ```bash
 git add sql/migrations/20261031_telegram_fast_lane.sql sql/schema.sql tests/test_telegram_fast_lane_sql.py tests/test_managed_isolated_restore.py tests/test_recovery_bundle.py

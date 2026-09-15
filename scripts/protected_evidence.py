@@ -63,7 +63,7 @@ RECOVERY_SQL = {
         attempt_count,response,response_digest,created_at::text AS created_at,claimed_at::text AS claimed_at,finished_at::text AS finished_at
         FROM public.market_gateway_requests""",
     "policies": "SELECT version,config,active,created_at::text AS created_at,activated_at::text AS activated_at FROM public.market_policy_config",
-    "intelligence_runs": """SELECT id::text AS id,phase,market_date::text AS market_date,policy_version,reservation_plan,request_window,
+    "intelligence_runs": """SELECT id::text AS id,phase,lane,market_date::text AS market_date,policy_version,reservation_plan,request_window,
         created_at::text AS created_at FROM public.market_intelligence_runs""",
     "reference_manifests": """SELECT id::text AS id,run_id::text AS run_id,reference_version,revision,capability_version,
         taxonomy_version,source_hash,valid_from::text AS valid_from,valid_to::text AS valid_to,manifest,content_hash,
@@ -952,7 +952,7 @@ class PostgresReadOnlySource:
         )
         queries = {
             "run": "SELECT id::text AS id,kind,scheduled_phase,scheduled_market_date::text AS scheduled_market_date,scheduled_attempt,status,started_at::text AS started_at,finished_at::text AS finished_at,gateway_request_id::text AS gateway_request_id,telegram_message_ids FROM public.analysis_runs WHERE id=%s::uuid",
-            "intelligence_runs": "SELECT id::text AS id,phase,market_date::text AS market_date,reservation_plan,request_window FROM public.market_intelligence_runs WHERE id=%s::uuid",
+            "intelligence_runs": "SELECT id::text AS id,phase,lane,market_date::text AS market_date,reservation_plan,request_window FROM public.market_intelligence_runs WHERE id=%s::uuid",
             "reference_manifests": RECOVERY_SQL["reference_manifests"] + f" WHERE id IN ({selected_manifests})",
             "security_reference_revisions": RECOVERY_SQL["security_reference_revisions"] + f" WHERE id IN (SELECT security_revision_id FROM public.market_reference_snapshot_memberships WHERE manifest_id IN ({selected_manifests}))",
             "reference_chunk_receipts": RECOVERY_SQL["reference_chunk_receipts"] + f" WHERE manifest_id IN ({selected_manifests})",

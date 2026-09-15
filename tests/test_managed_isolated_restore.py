@@ -125,6 +125,13 @@ def test_snapshot_sql_uses_postgres_text_literals_for_dataset_keys():
     assert '"holdings",COALESCE' not in query
 
 
+def test_managed_snapshot_carries_intelligence_lane_authority():
+    from scripts.managed_isolated_restore import _snapshot_sql
+
+    query = _snapshot_sql()
+    assert "phase,lane,market_date" in query
+
+
 def test_managed_snapshot_contains_every_discovery_dataset_and_exact_source_table():
     from scripts.managed_isolated_restore import _snapshot_sql
 
@@ -661,6 +668,10 @@ def test_actual_migration_retry_accepts_truthful_baseline_without_writing_histor
         item for item in deploy.candidate_migration_manifest()
         if item["path"] == "sql/migrations/20261030_same_run_terminal_checkpoint_replay.sql"
     )
+    telegram_fast_lane = next(
+        item for item in deploy.candidate_migration_manifest()
+        if item["path"] == "sql/migrations/20261031_telegram_fast_lane.sql"
+    )
     queries = []
 
     def api(_method, _path, payload=None):
@@ -681,6 +692,7 @@ def test_actual_migration_retry_accepts_truthful_baseline_without_writing_histor
                     unresolved_packet_readback,
                     friday_status_revision,
                     same_run_terminal_checkpoint_replay,
+                    telegram_fast_lane,
                 ]
         if query.startswith("SELECT version, statements"):
             return [{"version": "20261004", "statements": ["SELECT 1"]}]
