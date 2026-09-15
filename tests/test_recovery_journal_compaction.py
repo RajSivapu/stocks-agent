@@ -163,12 +163,26 @@ def _insert(
     *,
     run_id: str,
     payload: dict[str, object],
+    captured_at: str | None = None,
 ) -> int:
+    if captured_at is None:
+        return connection.execute(
+            "INSERT INTO public.stock_agent_component_recovery_journals("
+            "project_ref,candidate_sha,run_id,run_attempt,ciphertext) "
+            "VALUES(%s,%s,%s,'1',%s) RETURNING sequence",
+            (PROJECT_REF, MAIN_SHA, run_id, cipher.encrypt(_canonical(payload))),
+        ).fetchone()[0]
     return connection.execute(
         "INSERT INTO public.stock_agent_component_recovery_journals("
-        "project_ref,candidate_sha,run_id,run_attempt,ciphertext) "
-        "VALUES(%s,%s,%s,'1',%s) RETURNING sequence",
-        (PROJECT_REF, MAIN_SHA, run_id, cipher.encrypt(_canonical(payload))),
+        "project_ref,candidate_sha,run_id,run_attempt,ciphertext,captured_at) "
+        "VALUES(%s,%s,%s,'1',%s,%s) RETURNING sequence",
+        (
+            PROJECT_REF,
+            MAIN_SHA,
+            run_id,
+            cipher.encrypt(_canonical(payload)),
+            captured_at,
+        ),
     ).fetchone()[0]
 
 
@@ -365,3 +379,141 @@ def test_compaction_rejects_inventory_outside_the_approved_destructive_scope(dat
         assert connection.execute(
             "SELECT count(*) FROM public.stock_agent_component_recovery_journals"
         ).fetchone() == (2,)
+
+
+def test_prepare_backup_preserves_exact_latest_authenticated_rows(database, tmp_path):
+    module = _module()
+    key = Fernet.generate_key()
+    cipher = Fernet(key)
+    with psycopg.connect(database, autocommit=True) as connection:
+        _insert(
+            connection,
+            cipher,
+            run_id="350",
+            payload={**_terminal_payload(run_id="350"), "status": "preparing"},
+            captured_at="2026-09-15T16:00:00+00:00",
+        )
+        kept_rolled_back = _insert(
+            connection,
+            cipher,
+            run_id="350",
+            payload=_terminal_payload(run_id="350"),
+            captured_at="2026-09-15T17:00:00.123456+00:00",
+        )
+        _insert(
+            connection,
+            cipher,
+            run_id="351",
+            payload={
+                **_terminal_payload(run_id="351", status="verified"),
+                "status": "recovery_required",
+            },
+            captured_at="2026-09-15T17:30:00+00:00",
+        )
+        kept_verified = _insert(
+            connection,
+            cipher,
+            run_id="351",
+            payload=_terminal_payload(run_id="351", status="verified"),
+            captured_at="2026-09-15T18:00:00.654321+00:00",
+        )
+        expected = connection.execute(
+            "SELECT sequence,project_ref,candidate_sha,run_id,run_attempt,"
+            "ciphertext,captured_at FROM public.stock_agent_component_recovery_journals "
+            "WHERE sequence=ANY(%s) ORDER BY sequence",
+            ([kept_rolled_back, kept_verified],),
+        ).fetchall()
+
+    backup_path = tmp_path / "recovery-journal-backup.json"
+    manifest_path = tmp_path / "recovery-journal-backup-manifest.json"
+    manifest = module.prepare_recovery_journal_backup(
+        admin_url=database,
+        project_ref=PROJECT_REF,
+        main_sha=MAIN_SHA,
+        recovery_key=key,
+        backup_path=backup_path,
+        manifest_path=manifest_path,
+        expected_rows=4,
+        expected_groups=2,
+    )
+
+    bundle_bytes = backup_path.read_bytes()
+    bundle = json.loads(bundle_bytes)
+    records = bundle["records"]
+    assert bundle["format"] == "stocks-recovery-journal-backup-v1"
+    assert bundle["project_ref"] == PROJECT_REF
+    assert bundle["main_sha"] == MAIN_SHA
+    assert [record["sequence"] for record in records] == [
+        kept_rolled_back,
+        kept_verified,
+    ]
+    assert [record["run_id"] for record in records] == ["350", "351"]
+    assert [record["captured_at"] for record in records] == [
+        "2026-09-15T17:00:00.123456+00:00",
+        "2026-09-15T18:00:00.654321+00:00",
+    ]
+    assert [record["ciphertext"].encode("ascii") for record in records] == [
+        row[5] for row in expected
+    ]
+    assert manifest["format"] == "stocks-recovery-journal-backup-manifest-v1"
+    assert manifest["source"]["rows"] == 4
+    assert manifest["source"]["groups"] == 2
+    assert manifest["retained"]["rows"] == 2
+    assert manifest["retained"]["terminal_statuses"] == {
+        "rolled_back": 1,
+        "verified": 1,
+    }
+    assert manifest["bundle"]["bytes"] == len(bundle_bytes)
+    assert manifest["bundle"]["sha256"] == hashlib.sha256(bundle_bytes).hexdigest()
+    assert json.loads(manifest_path.read_bytes()) == manifest
+    assert module.verify_recovery_journal_backup(
+        backup_path=backup_path,
+        manifest_path=manifest_path,
+        project_ref=PROJECT_REF,
+        main_sha=MAIN_SHA,
+        recovery_key=key,
+        expected_rows=4,
+        expected_groups=2,
+    ) == manifest
+    with psycopg.connect(database, autocommit=True) as connection:
+        assert connection.execute(
+            "SELECT count(*) FROM public.stock_agent_component_recovery_journals"
+        ).fetchone() == (4,)
+
+
+def test_verify_backup_rejects_ciphertext_tampering_before_database_access(database, tmp_path):
+    module = _module()
+    key = Fernet.generate_key()
+    cipher = Fernet(key)
+    with psycopg.connect(database, autocommit=True) as connection:
+        _insert(connection, cipher, run_id="350", payload=_terminal_payload(run_id="350"))
+
+    backup_path = tmp_path / "recovery-journal-backup.json"
+    manifest_path = tmp_path / "recovery-journal-backup-manifest.json"
+    module.prepare_recovery_journal_backup(
+        admin_url=database,
+        project_ref=PROJECT_REF,
+        main_sha=MAIN_SHA,
+        recovery_key=key,
+        backup_path=backup_path,
+        manifest_path=manifest_path,
+        expected_rows=1,
+        expected_groups=1,
+    )
+    bundle = json.loads(backup_path.read_bytes())
+    ciphertext = bundle["records"][0]["ciphertext"]
+    bundle["records"][0]["ciphertext"] = (
+        ("A" if ciphertext[0] != "A" else "B") + ciphertext[1:]
+    )
+    backup_path.write_bytes(_canonical(bundle) + b"\n")
+
+    with pytest.raises(RuntimeError, match="backup digest mismatch"):
+        module.verify_recovery_journal_backup(
+            backup_path=backup_path,
+            manifest_path=manifest_path,
+            project_ref=PROJECT_REF,
+            main_sha=MAIN_SHA,
+            recovery_key=key,
+            expected_rows=1,
+            expected_groups=1,
+        )
