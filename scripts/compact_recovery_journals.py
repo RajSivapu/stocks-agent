@@ -41,6 +41,8 @@ BACKUP_MANIFEST_FORMAT = "stocks-recovery-journal-backup-manifest-v1"
 PROJECT_REF = re.compile(r"[a-z0-9]{20}\Z")
 SHA = re.compile(r"[0-9a-f]{40}\Z")
 RUN_ID = re.compile(r"[1-9][0-9]*\Z")
+ARTIFACT_DIGEST = re.compile(r"sha256:[0-9a-f]{64}\Z")
+ARTIFACT_NAME = re.compile(r"recovery-journal-backup-([1-9][0-9]*)-([1-9][0-9]*)\Z")
 
 
 def _require(condition: object, message: str) -> None:
@@ -500,6 +502,7 @@ def prepare_recovery_journal_backup(
                             "captured_at": row["captured_at"].isoformat(),
                         }
                     )
+                records.sort(key=lambda record: int(record["sequence"]))
                 retained, statuses, ciphertext_bytes = _retained_identity(
                     records, cipher, project_ref
                 )
@@ -563,6 +566,261 @@ def prepare_recovery_journal_backup(
         expected_rows=expected_rows,
         expected_groups=expected_groups,
     )
+
+
+def _validate_backup_artifact(binding: Mapping[str, object]) -> dict[str, object]:
+    _require(
+        isinstance(binding, Mapping)
+        and set(binding) == {"id", "name", "digest", "workflow_run_id"}
+        and type(binding["id"]) is int
+        and binding["id"] > 0
+        and isinstance(binding["name"], str)
+        and isinstance(binding["digest"], str)
+        and bool(ARTIFACT_DIGEST.fullmatch(binding["digest"]))
+        and type(binding["workflow_run_id"]) is int
+        and binding["workflow_run_id"] > 0,
+        "backup artifact binding is malformed",
+    )
+    match = ARTIFACT_NAME.fullmatch(binding["name"])
+    _require(
+        match is not None and int(match.group(1)) == binding["workflow_run_id"],
+        "backup artifact binding is malformed",
+    )
+    return {
+        "id": binding["id"],
+        "name": binding["name"],
+        "digest": binding["digest"],
+        "workflow_run_id": binding["workflow_run_id"],
+    }
+
+
+def _record_from_row(row: Mapping[str, object]) -> dict[str, object]:
+    encrypted = bytes(row["ciphertext"])
+    try:
+        ciphertext = encrypted.decode("ascii")
+    except UnicodeDecodeError as error:
+        raise RuntimeError("recovery journal backup ciphertext is malformed") from error
+    captured_at = row["captured_at"]
+    _require(
+        isinstance(captured_at, datetime) and captured_at.tzinfo is not None,
+        "recovery journal backup timestamp is malformed",
+    )
+    return {
+        "sequence": int(row["sequence"]),
+        "project_ref": row["project_ref"],
+        "candidate_sha": row["candidate_sha"],
+        "run_id": row["run_id"],
+        "run_attempt": row["run_attempt"],
+        "ciphertext": ciphertext,
+        "captured_at": captured_at.isoformat(),
+    }
+
+
+def _all_records(connection: psycopg.Connection) -> list[dict[str, object]]:
+    rows = connection.execute(
+        f"SELECT sequence,project_ref,candidate_sha,run_id,run_attempt,ciphertext,captured_at "
+        f"FROM {JOURNALS} ORDER BY sequence"
+    ).fetchall()
+    return [_record_from_row(row) for row in rows]
+
+
+def _latest_records(connection: psycopg.Connection) -> list[dict[str, object]]:
+    rows = connection.execute(
+        f"SELECT DISTINCT ON (project_ref,candidate_sha,run_id,run_attempt) "
+        f"sequence,project_ref,candidate_sha,run_id,run_attempt,ciphertext,captured_at "
+        f"FROM {JOURNALS} ORDER BY project_ref,candidate_sha,run_id,run_attempt,sequence DESC"
+    ).fetchall()
+    records = [_record_from_row(row) for row in rows]
+    records.sort(key=lambda record: int(record["sequence"]))
+    return records
+
+
+def _record_identity(record: Mapping[str, object]) -> tuple[object, object, object, object]:
+    return (
+        record["project_ref"],
+        record["candidate_sha"],
+        record["run_id"],
+        record["run_attempt"],
+    )
+
+
+def apply_recovery_journal_backup(
+    *,
+    admin_url: str,
+    project_ref: str,
+    main_sha: str,
+    recovery_key: bytes,
+    backup_path: Path,
+    manifest_path: Path,
+    backup_artifact: Mapping[str, object],
+    expected_rows: int | None = None,
+    expected_groups: int | None = None,
+) -> dict[str, object]:
+    """Apply an artifact-bound backup using resumable WAL-light table replacement."""
+    artifact = _validate_backup_artifact(backup_artifact)
+    manifest = verify_recovery_journal_backup(
+        backup_path=backup_path,
+        manifest_path=manifest_path,
+        project_ref=project_ref,
+        main_sha=main_sha,
+        recovery_key=recovery_key,
+        expected_rows=expected_rows,
+        expected_groups=expected_groups,
+    )
+    backup, _ = _read_canonical_json(
+        backup_path, maximum=MAX_BACKUP_BYTES, label="recovery journal backup"
+    )
+    records = backup["records"]
+    _require(isinstance(records, list), "recovery journal backup is malformed")
+    source = manifest["source"]
+    retained_manifest = manifest["retained"]
+    _require(
+        isinstance(source, Mapping) and isinstance(retained_manifest, Mapping),
+        "recovery journal backup manifest is malformed",
+    )
+    retained_by_identity = {_record_identity(record): record for record in records}
+    started_at = datetime.now(timezone.utc).isoformat()
+    with psycopg.connect(admin_url, autocommit=True, row_factory=dict_row) as connection:
+        connection.execute("SET TIME ZONE 'UTC'")
+        connection.execute("SET statement_timeout='300s'")
+        connection.execute("SET lock_timeout='15s'")
+        locked = connection.execute(
+            "SELECT pg_try_advisory_lock(hashtextextended('stock_agent_protected_release',0)) AS locked"
+        ).fetchone()["locked"]
+        _require(locked is True, "another protected release or recovery holds the mutation lock")
+        try:
+            lease = _resolved_lease(connection)
+            before_relation_bytes = _relation_size(connection)
+            before_database_bytes = _database_size(connection)
+            connection.execute("BEGIN")
+            try:
+                connection.execute(f"LOCK TABLE {JOURNALS} IN ACCESS EXCLUSIVE MODE")
+                before_rows, before_groups = _inventory(connection)
+                current_records = _all_records(connection)
+                latest_records = _latest_records(connection)
+                source_matches = (
+                    (before_rows, before_groups) == (source["rows"], source["groups"])
+                    and latest_records == records
+                )
+                complete_matches = (
+                    before_rows == before_groups == len(records)
+                    and current_records == records
+                )
+                current_by_identity = {
+                    _record_identity(record): record for record in current_records
+                }
+                subset_matches = (
+                    before_rows == before_groups
+                    and before_rows < len(records)
+                    and len(current_by_identity) == before_rows
+                    and all(
+                        retained_by_identity.get(identity) == record
+                        for identity, record in current_by_identity.items()
+                    )
+                )
+                _require(
+                    source_matches or complete_matches or subset_matches,
+                    "recovery journal state does not match the verified backup",
+                )
+                connection.execute("COMMIT")
+            except BaseException:
+                connection.execute("ROLLBACK")
+                raise
+
+            truncated = bool(source_matches and before_rows > len(records))
+            resumed = bool(subset_matches)
+            if truncated:
+                connection.execute(f"TRUNCATE TABLE {JOURNALS} CONTINUE IDENTITY")
+                current_by_identity = {}
+
+            connection.execute(
+                f"CREATE UNIQUE INDEX IF NOT EXISTS {JOURNAL_IDENTITY_INDEX} "
+                f"ON {JOURNALS}(project_ref,candidate_sha,run_id,run_attempt)"
+            )
+            _require(
+                _unique_identity_is_exact(connection),
+                "recovery journal unique identity is unavailable",
+            )
+            for record in records:
+                if _record_identity(record) in current_by_identity:
+                    continue
+                connection.execute(
+                    f"INSERT INTO {JOURNALS} AS journal("
+                    f"sequence,project_ref,candidate_sha,run_id,run_attempt,ciphertext,captured_at) "
+                    f"OVERRIDING SYSTEM VALUE VALUES(%s,%s,%s,%s,%s,%s,%s) "
+                    f"ON CONFLICT (project_ref,candidate_sha,run_id,run_attempt) DO UPDATE SET "
+                    f"ciphertext=EXCLUDED.ciphertext,captured_at=EXCLUDED.captured_at",
+                    (
+                        record["sequence"],
+                        record["project_ref"],
+                        record["candidate_sha"],
+                        record["run_id"],
+                        record["run_attempt"],
+                        record["ciphertext"].encode("ascii"),
+                        record["captured_at"],
+                    ),
+                )
+            maximum_sequence = max(int(record["sequence"]) for record in records)
+            connection.execute(
+                "SELECT setval(pg_get_serial_sequence(%s,'sequence'),%s,true)",
+                (JOURNALS, maximum_sequence),
+            )
+            connection.execute(f"ANALYZE {JOURNALS}")
+            after_rows, after_groups = _inventory(connection)
+            _require(
+                (after_rows, after_groups) == (len(records), len(records))
+                and _all_records(connection) == records,
+                "recovery journal restore readback is inconsistent",
+            )
+            _require(
+                _unique_identity_is_exact(connection),
+                "recovery journal unique identity readback failed",
+            )
+            receipt = {
+                "format": "stocks-recovery-journal-compaction-v2",
+                "project_ref": project_ref,
+                "main_sha": main_sha,
+                "started_at": started_at,
+                "completed_at": datetime.now(timezone.utc).isoformat(),
+                "method": "truncate_restore",
+                "lease": {
+                    "owner": lease["owner"],
+                    "kind": lease["kind"],
+                    "state": "resolved",
+                    "live": False,
+                },
+                "source": dict(source),
+                "before": {"groups": before_groups, "rows": before_rows},
+                "after": {"groups": after_groups, "rows": after_rows},
+                "approved_inventory": (
+                    None
+                    if expected_rows is None
+                    else {"groups": expected_groups, "rows": expected_rows}
+                ),
+                "truncated": truncated,
+                "resumed": resumed,
+                "removed_redundant_rows": int(source["rows"]) - len(records),
+                "terminal_statuses": retained_manifest["terminal_statuses"],
+                "retained_identity_sha256": retained_manifest["identity_sha256"],
+                "backup_artifact": artifact,
+                "relation_bytes_source": source["relation_bytes"],
+                "relation_bytes_before": before_relation_bytes,
+                "relation_bytes_after": _relation_size(connection),
+                "database_bytes_source": source["database_bytes"],
+                "database_bytes_before": before_database_bytes,
+                "database_bytes_after": _database_size(connection),
+                "unique_identity": True,
+                "vacuum_full": False,
+            }
+            _require(
+                len(_canonical_json(receipt).encode()) <= MAX_RECEIPT_BYTES,
+                "recovery journal compaction receipt exceeds its bound",
+            )
+            return receipt
+        finally:
+            connection.execute(
+                "SELECT pg_advisory_unlock(hashtextextended('stock_agent_protected_release',0))"
+            )
 
 
 def compact_recovery_journals(

@@ -94,7 +94,7 @@ git commit -m "feat: stage authenticated recovery journal backup"
 - Produces: `apply_recovery_journal_backup(*, admin_url: str, project_ref: str, main_sha: str, recovery_key: bytes, backup_path: Path, manifest_path: Path, backup_artifact: Mapping[str, object], expected_rows: int | None, expected_groups: int | None) -> dict[str, object]`.
 - Consumes: Task 1's verified bundle/manifest and mandatory artifact binding `{id,name,digest,workflow_run_id}`.
 
-- [ ] **Step 1: Write failing mutation and recovery tests**
+- [x] **Step 1: Write failing mutation and recovery tests**
 
 Add integration tests that install a statement-level delete trigger which raises,
 then prepare and apply a backup successfully. Record PostgreSQL statements and
@@ -102,14 +102,14 @@ assert a journal `TRUNCATE` occurred while journal `DELETE` and `VACUUM FULL` di
 not. Add cases for malformed artifact binding, zero rows after manual TRUNCATE,
 one exact restored row, one unexpected row, and a second idempotent apply.
 
-- [ ] **Step 2: Run the focused tests and verify RED**
+- [x] **Step 2: Run the focused tests and verify RED**
 
 Run: `.venv/bin/python -m pytest tests/test_recovery_journal_compaction.py -q`
 
 Expected: FAIL because `apply_recovery_journal_backup` is absent and the existing
 implementation invokes the delete trigger.
 
-- [ ] **Step 3: Implement minimal TRUNCATE-and-restore behavior**
+- [x] **Step 3: Implement minimal TRUNCATE-and-restore behavior**
 
 Under the advisory lock, accept only one of these literal states:
 
@@ -126,20 +126,20 @@ per record; set the identity sequence to the retained maximum; run `ANALYZE`; an
 compare the full readback to the bundle. A complete exact retained set skips
 TRUNCATE. Any other state raises without further mutation.
 
-- [ ] **Step 4: Emit the bounded V2 receipt**
+- [x] **Step 4: Emit the bounded V2 receipt**
 
 Record the required artifact binding, source and final inventories/sizes,
 `method="truncate_restore"`, `truncated`, `resumed`, removed redundant count,
 terminal statuses, retained digest, exact unique-index result, and
 `vacuum_full=False`.
 
-- [ ] **Step 5: Run the focused tests and verify GREEN**
+- [x] **Step 5: Run the focused tests and verify GREEN**
 
 Run: `.venv/bin/python -m pytest tests/test_recovery_journal_compaction.py -q`
 
 Expected: PASS with real disposable PostgreSQL behavior.
 
-- [ ] **Step 6: Commit the WAL-light mutation**
+- [x] **Step 6: Commit the WAL-light mutation**
 
 ```bash
 git add scripts/compact_recovery_journals.py tests/test_recovery_journal_compaction.py

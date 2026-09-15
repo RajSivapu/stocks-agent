@@ -110,7 +110,7 @@ def database():
                 "-l",
                 str(root / "log"),
                 "-o",
-                f"-k {root} -h '' -p {port}",
+                f"-k {root} -h '' -p {port} -c log_statement=all",
                 "-w",
                 "start",
             ],
@@ -517,3 +517,230 @@ def test_verify_backup_rejects_ciphertext_tampering_before_database_access(datab
             expected_rows=1,
             expected_groups=1,
         )
+
+
+def _artifact_binding() -> dict[str, object]:
+    return {
+        "id": 42,
+        "name": "recovery-journal-backup-123-1",
+        "digest": "sha256:" + "b" * 64,
+        "workflow_run_id": 123,
+    }
+
+
+def _prepare_two_identity_backup(database: str, tmp_path: Path):
+    module = _module()
+    key = Fernet.generate_key()
+    cipher = Fernet(key)
+    with psycopg.connect(database, autocommit=True) as connection:
+        _insert(
+            connection,
+            cipher,
+            run_id="350",
+            payload={**_terminal_payload(run_id="350"), "status": "preparing"},
+        )
+        kept_rolled_back = _insert(
+            connection,
+            cipher,
+            run_id="350",
+            payload=_terminal_payload(run_id="350"),
+            captured_at="2026-09-15T17:00:00.123456+00:00",
+        )
+        _insert(
+            connection,
+            cipher,
+            run_id="351",
+            payload={
+                **_terminal_payload(run_id="351", status="verified"),
+                "status": "recovery_required",
+            },
+        )
+        kept_verified = _insert(
+            connection,
+            cipher,
+            run_id="351",
+            payload=_terminal_payload(run_id="351", status="verified"),
+            captured_at="2026-09-15T18:00:00.654321+00:00",
+        )
+    backup_path = tmp_path / "recovery-journal-backup.json"
+    manifest_path = tmp_path / "recovery-journal-backup-manifest.json"
+    module.prepare_recovery_journal_backup(
+        admin_url=database,
+        project_ref=PROJECT_REF,
+        main_sha=MAIN_SHA,
+        recovery_key=key,
+        backup_path=backup_path,
+        manifest_path=manifest_path,
+        expected_rows=4,
+        expected_groups=2,
+    )
+    return module, key, backup_path, manifest_path, [kept_rolled_back, kept_verified]
+
+
+def _apply_backup(module, database, key, backup_path, manifest_path):
+    return module.apply_recovery_journal_backup(
+        admin_url=database,
+        project_ref=PROJECT_REF,
+        main_sha=MAIN_SHA,
+        recovery_key=key,
+        backup_path=backup_path,
+        manifest_path=manifest_path,
+        backup_artifact=_artifact_binding(),
+        expected_rows=4,
+        expected_groups=2,
+    )
+
+
+def _journal_rows(database: str):
+    with psycopg.connect(database, autocommit=True) as connection:
+        return connection.execute(
+            "SELECT sequence,project_ref,candidate_sha,run_id,run_attempt,"
+            "ciphertext,captured_at AT TIME ZONE 'UTC' "
+            "FROM public.stock_agent_component_recovery_journals ORDER BY sequence"
+        ).fetchall()
+
+
+def test_apply_uses_truncate_restore_without_delete_or_vacuum_full(database, tmp_path):
+    module, key, backup_path, manifest_path, kept = _prepare_two_identity_backup(
+        database, tmp_path
+    )
+    with psycopg.connect(database, autocommit=True) as connection:
+        connection.execute(
+            "CREATE FUNCTION public.reject_journal_delete() RETURNS trigger "
+            "LANGUAGE plpgsql AS $$BEGIN RAISE EXCEPTION 'journal delete forbidden'; END$$"
+        )
+        connection.execute(
+            "CREATE TRIGGER reject_journal_delete BEFORE DELETE ON "
+            "public.stock_agent_component_recovery_journals FOR EACH STATEMENT "
+            "EXECUTE FUNCTION public.reject_journal_delete()"
+        )
+
+    receipt = _apply_backup(module, database, key, backup_path, manifest_path)
+
+    assert [row[0] for row in _journal_rows(database)] == kept
+    assert receipt["format"] == "stocks-recovery-journal-compaction-v2"
+    assert receipt["method"] == "truncate_restore"
+    assert receipt["truncated"] is True
+    assert receipt["resumed"] is False
+    assert receipt["removed_redundant_rows"] == 2
+    assert receipt["after"] == {"groups": 2, "rows": 2}
+    assert receipt["unique_identity"] is True
+    assert receipt["vacuum_full"] is False
+    assert receipt["backup_artifact"] == _artifact_binding()
+    log_path = Path(database.split()[0].split("=", 1)[1]) / "log"
+    statements = log_path.read_text()
+    assert (
+        "statement: TRUNCATE TABLE public.stock_agent_component_recovery_journals "
+        "CONTINUE IDENTITY" in statements
+    )
+    assert (
+        "statement: DELETE FROM public.stock_agent_component_recovery_journals"
+        not in statements
+    )
+    assert "statement: VACUUM (FULL" not in statements
+
+
+def test_apply_rejects_an_unbound_backup_without_mutating(database, tmp_path):
+    module, key, backup_path, manifest_path, _ = _prepare_two_identity_backup(
+        database, tmp_path
+    )
+
+    with pytest.raises(RuntimeError, match="backup artifact binding is malformed"):
+        module.apply_recovery_journal_backup(
+            admin_url=database,
+            project_ref=PROJECT_REF,
+            main_sha=MAIN_SHA,
+            recovery_key=key,
+            backup_path=backup_path,
+            manifest_path=manifest_path,
+            backup_artifact={**_artifact_binding(), "digest": "sha256:bad"},
+            expected_rows=4,
+            expected_groups=2,
+        )
+
+    assert len(_journal_rows(database)) == 4
+
+
+def test_apply_resumes_from_an_empty_post_truncate_table(database, tmp_path):
+    module, key, backup_path, manifest_path, kept = _prepare_two_identity_backup(
+        database, tmp_path
+    )
+    with psycopg.connect(database, autocommit=True) as connection:
+        connection.execute(
+            "TRUNCATE TABLE public.stock_agent_component_recovery_journals CONTINUE IDENTITY"
+        )
+
+    receipt = _apply_backup(module, database, key, backup_path, manifest_path)
+
+    assert [row[0] for row in _journal_rows(database)] == kept
+    assert receipt["truncated"] is False
+    assert receipt["resumed"] is True
+
+
+def test_apply_resumes_from_an_exact_partial_retained_set(database, tmp_path):
+    module, key, backup_path, manifest_path, kept = _prepare_two_identity_backup(
+        database, tmp_path
+    )
+    record = json.loads(backup_path.read_bytes())["records"][0]
+    with psycopg.connect(database, autocommit=True) as connection:
+        connection.execute(
+            "TRUNCATE TABLE public.stock_agent_component_recovery_journals CONTINUE IDENTITY"
+        )
+        connection.execute(
+            "INSERT INTO public.stock_agent_component_recovery_journals("
+            "sequence,project_ref,candidate_sha,run_id,run_attempt,ciphertext,captured_at) "
+            "OVERRIDING SYSTEM VALUE VALUES(%s,%s,%s,%s,%s,%s,%s)",
+            (
+                record["sequence"],
+                record["project_ref"],
+                record["candidate_sha"],
+                record["run_id"],
+                record["run_attempt"],
+                record["ciphertext"].encode("ascii"),
+                record["captured_at"],
+            ),
+        )
+
+    receipt = _apply_backup(module, database, key, backup_path, manifest_path)
+
+    assert [row[0] for row in _journal_rows(database)] == kept
+    assert receipt["truncated"] is False
+    assert receipt["resumed"] is True
+
+
+def test_apply_rejects_an_unexpected_partial_row_without_replacing_it(database, tmp_path):
+    module, key, backup_path, manifest_path, _ = _prepare_two_identity_backup(
+        database, tmp_path
+    )
+    cipher = Fernet(key)
+    with psycopg.connect(database, autocommit=True) as connection:
+        connection.execute(
+            "TRUNCATE TABLE public.stock_agent_component_recovery_journals CONTINUE IDENTITY"
+        )
+        unexpected = _insert(
+            connection,
+            cipher,
+            run_id="999",
+            payload=_terminal_payload(run_id="999"),
+        )
+
+    with pytest.raises(RuntimeError, match="does not match the verified backup"):
+        _apply_backup(module, database, key, backup_path, manifest_path)
+
+    assert [row[0] for row in _journal_rows(database)] == [unexpected]
+
+
+def test_apply_is_idempotent_after_exact_restore(database, tmp_path):
+    module, key, backup_path, manifest_path, kept = _prepare_two_identity_backup(
+        database, tmp_path
+    )
+
+    first = _apply_backup(module, database, key, backup_path, manifest_path)
+    second = _apply_backup(module, database, key, backup_path, manifest_path)
+
+    assert first["truncated"] is True
+    assert second["truncated"] is False
+    assert second["resumed"] is False
+    assert second["before"] == second["after"] == {"groups": 2, "rows": 2}
+    assert second["retained_identity_sha256"] == first["retained_identity_sha256"]
+    assert [row[0] for row in _journal_rows(database)] == kept
