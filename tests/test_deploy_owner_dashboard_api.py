@@ -850,7 +850,8 @@ def test_closure_lease_and_unrelated_recovery_cannot_take_over_each_other(
     cursor = Cursor()
     with pytest.raises(RuntimeError, match="remains unresolved"):
         deploy.acquire_durable_release_lease(cursor, requested_owner, "recovery")
-    assert len(cursor.calls) == 2
+    assert cursor.calls[-1][0].startswith("SELECT owner")
+    assert not any(statement.startswith("INSERT INTO") for statement, _ in cursor.calls)
 
 
 def test_same_exact_main_closure_retry_can_resume_its_unresolved_lease():
@@ -888,7 +889,8 @@ def test_durable_lease_rejects_recovery_older_than_the_current_canonical_attempt
     cursor = Cursor()
     with pytest.raises(RuntimeError, match="newer protected release attempt"):
         deploy.acquire_durable_release_lease(cursor, requested_owner, "recovery")
-    assert len(cursor.calls) == 2
+    assert cursor.calls[-1][0].startswith("SELECT owner")
+    assert not any(statement.startswith("INSERT INTO") for statement, _ in cursor.calls)
 
 
 def test_durable_lease_allows_recovery_for_the_current_canonical_attempt():
@@ -911,7 +913,8 @@ def test_durable_lease_rejects_an_older_release_after_a_newer_resolved_attempt()
     cursor = Cursor()
     with pytest.raises(RuntimeError, match="newer protected release attempt"):
         deploy.acquire_durable_release_lease(cursor, "release-123456789-9", "release")
-    assert len(cursor.calls) == 2
+    assert cursor.calls[-1][0].startswith("SELECT owner")
+    assert not any(statement.startswith("INSERT INTO") for statement, _ in cursor.calls)
 
 
 def test_candidate_dry_run_installs_dependencies_and_uses_only_protected_vite_values(tmp_path, monkeypatch):

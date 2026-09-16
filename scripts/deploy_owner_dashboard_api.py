@@ -59,6 +59,8 @@ RECONCILIATION_BASELINE_RAW_SHA256 = "db8486083b6c36a7d574a6135e432f01fa0d1602a3
 LEGACY_MIGRATION_CUTOVER_SHA = "59b01733b4c784bc2a65544a0f59598784e13fe8"
 RELEASE_LEASE = "public.stock_agent_release_mutation_lease"
 RELEASE_LEASE_SECONDS = 900
+PRIVATE_RELEASE_METADATA_TABLES = frozenset({MIGRATION_LEDGER, RELEASE_LEASE})
+UNTRUSTED_RELEASE_METADATA_ROLES = ("anon", "authenticated", "service_role")
 CANONICAL_ATTEMPT_LEASE_OWNER = re.compile(r"^(release|recovery)-([1-9][0-9]*)-([1-9][0-9]*)$")
 READER_CLOSURE_LEASE_OWNER = re.compile(
     r"^reader-closure-20261017-[0-9a-f]{64}$"
@@ -226,6 +228,25 @@ def canonical_attempt_lease_identity(owner: str) -> tuple[int, int] | None:
     return (int(match.group(2)), int(match.group(3))) if match else None
 
 
+def harden_private_release_metadata_table(cursor, table: str) -> None:
+    """Deny API roles immediately when a release metadata table is created."""
+    if table not in PRIVATE_RELEASE_METADATA_TABLES:
+        raise ValueError("a private release metadata table is required")
+    cursor.execute(f"ALTER TABLE {table} ENABLE ROW LEVEL SECURITY")
+    cursor.execute(f"REVOKE ALL ON TABLE {table} FROM PUBLIC")
+    cursor.execute(
+        "DO $stock_agent_release_metadata$ "
+        "DECLARE role_name text; "
+        "BEGIN "
+        f"FOREACH role_name IN ARRAY ARRAY{list(UNTRUSTED_RELEASE_METADATA_ROLES)!r} LOOP "
+        "IF EXISTS (SELECT 1 FROM pg_catalog.pg_roles WHERE rolname=role_name) THEN "
+        f"EXECUTE format('REVOKE ALL ON TABLE {table} FROM %I', role_name); "
+        "END IF; "
+        "END LOOP; "
+        "END $stock_agent_release_metadata$"
+    )
+
+
 def acquire_durable_release_lease(cursor, owner: str, kind: str) -> None:
     """Record the holder after the shared session lock has been acquired.
 
@@ -242,6 +263,7 @@ def acquire_durable_release_lease(cursor, owner: str, kind: str) -> None:
     cursor.execute(
         f"CREATE TABLE IF NOT EXISTS {RELEASE_LEASE} (singleton BOOLEAN PRIMARY KEY DEFAULT true CHECK (singleton), owner TEXT NOT NULL, kind TEXT NOT NULL CHECK (kind IN ('release','recovery')), state TEXT NOT NULL CHECK (state IN ('recovery_required','resolved')), expires_at TIMESTAMPTZ NOT NULL, heartbeat_at TIMESTAMPTZ NOT NULL)"
     )
+    harden_private_release_metadata_table(cursor, RELEASE_LEASE)
     cursor.execute(f"SELECT owner, kind, state, expires_at > statement_timestamp() FROM {RELEASE_LEASE} WHERE singleton FOR UPDATE")
     rows = cursor.fetchall()
     if rows:
@@ -942,6 +964,7 @@ def apply_release_migrations(
         "applied_at TIMESTAMPTZ NOT NULL DEFAULT transaction_timestamp(), "
         "UNIQUE (version, path))"
     )
+    harden_private_release_metadata_table(cursor, MIGRATION_LEDGER)
     cursor.execute(f"SELECT path, version, sha256 FROM {MIGRATION_LEDGER} FOR UPDATE")
     prior = cursor.fetchall()
     if not isinstance(prior, list):

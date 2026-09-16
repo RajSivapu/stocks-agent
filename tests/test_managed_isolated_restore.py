@@ -698,6 +698,18 @@ def test_actual_migration_retry_accepts_truthful_baseline_without_writing_histor
             return [{"version": "20261004", "statements": ["SELECT 1"]}]
         if query.startswith("CREATE TABLE IF NOT EXISTS public.stock_agent_release_migration_ledger"):
             return []
+        if query == (
+            "ALTER TABLE public.stock_agent_release_migration_ledger "
+            "ENABLE ROW LEVEL SECURITY"
+        ):
+            return []
+        if query == (
+            "REVOKE ALL ON TABLE public.stock_agent_release_migration_ledger "
+            "FROM PUBLIC"
+        ):
+            return []
+        if query.startswith("DO $stock_agent_release_metadata$"):
+            return []
         raise AssertionError("baseline retry attempted unexpected SQL")
 
     target = ManagedRestoreTarget(api, "r" * 20, "p" * 20, created_project_ref="r" * 20)
@@ -705,7 +717,8 @@ def test_actual_migration_retry_accepts_truthful_baseline_without_writing_histor
 
     assert receipt["applied"] == []
     assert receipt["skipped"] == [item["version"] for item in deploy.candidate_migration_manifest()]
-    assert len(queries) == 3
+    assert len(queries) == 6
+    assert "anon" in queries[3] and "authenticated" in queries[3] and "service_role" in queries[3]
 
 
 def test_management_restore_resets_transaction_sequence_like_the_existing_postgres_target():
